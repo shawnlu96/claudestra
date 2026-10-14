@@ -150,10 +150,15 @@ test("[验收线 3] 团队顶栏没有「暂无」「—」「协作消息」；
   expect(m.host.querySelector("[data-metric=quota]")).toBeNull();
   expect(text(m.host, "[data-metrics]")).not.toContain("周额度");
   await m.unmount();
-  // 本机：已知指标照旧出，没人在等审查是「—」
+  // 本机：已知指标照旧出，没人在等审查是「—」；没载完时每一格（含额度、今日完成等已知指标）都是骨架，不出数字
   const { metricCells } = mods.bar as { metricCells: (...a: unknown[]) => { key: string; value: string | null }[] };
-  const local = metricCells({ present: 3, todayDone: 1, reviewRounds: 2, fixed: 0, avgReviewWaitMs: null }, { status: "loading" }, false, [{ family: "Claude", pct: 75 }], tr);
-  expect(local.map((c) => [c.key, c.value])).toEqual([["working", null], ["waiting", null], ["notStarted", null], ["todayDone", "1"], ["present", "3"],
+  const m0 = { present: 3, todayDone: 1, reviewRounds: 2, fixed: 0, avgReviewWaitMs: null };
+  const keys = ["working", "waiting", "notStarted", "todayDone", "present", "reviewRounds", "fixed", "reviewWait", "quota"];
+  const loading = metricCells(m0, { status: "loading" }, false, [{ family: "Claude", pct: 75 }], tr);
+  expect(loading.map((c) => [c.key, c.value])).toEqual(keys.map((k) => [k, null]));
+  const snap = { words: { working: 1, waiting: 2, notStarted: 3, done: 0 }, active: new Set(), stages: [], byFeature: new Map() };
+  const ready = metricCells(m0, { status: "ready", snap, missing: 0 }, false, [{ family: "Claude", pct: 75 }], tr);
+  expect(ready.map((c) => [c.key, c.value])).toEqual([["working", "1"], ["waiting", "2"], ["notStarted", "3"], ["todayDone", "1"], ["present", "3"],
     ["reviewRounds", "2"], ["fixed", "0"], ["reviewWait", "—"], ["quota", "Claude 75%"]]);
 });
 
@@ -171,5 +176,59 @@ test("[验收线 4] 谁在干活每个数只出现一次：摘要行不报数，
   expect(workCss).toMatch(/\.segment \{ display: none; \}/);
   const frame = text(m.host, "[data-place=frame] [data-feature-words]").split("\n")[0]!;
   expect(frame).toMatch(/^在干活 \d+ · 在等 \d+ · 没开工 \d+$/);
+  await m.unmount();
+});
+
+test("[验收线 2] 没载完时额度、已知指标、小片完成数、待做分组数、机器数也是骨架；载完一起出", async () => {
+  const partial = round(FEATURES.slice(0, 9)), full = round(FEATURES);
+  const twoMachines = (r: ReturnType<typeof round>) => ({ ...r, team: { ...r.team, machines: { local: 5, peer: 3 } } });
+  const quota = [{ family: "Claude", pct: 75 }];
+  const m = await mount(h(Page, { r: twoMachines(partial), quota }));
+  expect(text(m.host, "[data-metrics]")).not.toMatch(/\d/);
+  expect(m.host.querySelector("[data-metric=quota]")).not.toBeNull();
+  // 子 DAG 小片：去掉标题（Feature F01）后不剩数字
+  const chips = () => Array.from(m.host.querySelectorAll("[data-place=frame] button"), (b) => (b.textContent ?? "").replace(b.getAttribute("title") ?? "", ""));
+  expect(chips().join("|")).not.toMatch(/\d/);
+  expect(text(m.host, "[data-place=work]")).not.toMatch(/(就绪可开|被挡) · \d|(本机|peer) \d/);
+  await m.render(h(Page, { r: twoMachines(full), quota }));
+  expect(text(m.host, "[data-metric=quota]")).toBe("Claude 75%周额度");
+  expect(chips().every((c) => /^\d+在干活/.test(c))).toBe(true);
+  expect(text(m.host, "[data-place=work]")).toMatch(/就绪可开 · \d+/);
+  expect(text(m.host, "[data-place=work]")).toMatch(/peer 3/);
+  await m.unmount();
+});
+
+test("[验收线 2] 按轮重拉的快照：rev 变后旧快照不算这一轮，新结果到了才算（团队首次出数要总览与快照同一轮）", async () => {
+  const { useRoundFresh } = mods.src as { useRoundFresh: (v: object, settled: boolean, rev: number) => boolean };
+  const seen: boolean[] = [];
+  const Probe = (p: { v: object; settled: boolean; rev: number }) => { seen.push(useRoundFresh(p.v, p.settled, p.rev)); return null; };
+  const loading = { status: "loading" }, a = { status: "ok" }, b = { status: "ok" };
+  const m = await mount(h(Probe, { v: loading, settled: false, rev: 0 }));
+  const last = () => seen[seen.length - 1];
+  expect(last()).toBe(false);
+  await m.render(h(Probe, { v: a, settled: true, rev: 1 }));
+  expect(last()).toBe(true);
+  // 详情补齐、rev 变了，快照还在途：调用方留着旧对象
+  await m.render(h(Probe, { v: a, settled: true, rev: 2 }));
+  expect(last()).toBe(false);
+  await m.render(h(Probe, { v: b, settled: true, rev: 2 }));
+  expect(last()).toBe(true);
+  await m.unmount();
+});
+
+test("[验收线 2] 看板读失败（老 bridge 没有 /work）：不等 20 秒，状态词整格不出、已知指标照常出；之后读到了再出数", async () => {
+  const { useCountState } = mods.src as { useCountState: (a: unknown) => CountState };
+  const full = round(FEATURES);
+  const seen: string[] = [];
+  const Probe = (p: { board: CountBoard | null; failed: boolean }) => {
+    seen.push(useCountState({ project: "local", ov: full.ov, board: p.board, boardPending: false, boardFailed: p.failed, source: {} }).status);
+    return null;
+  };
+  const m = await mount(h(Probe, { board: null, failed: false }));
+  expect(seen[seen.length - 1]).toBe("loading");
+  await m.render(h(Probe, { board: null, failed: true }));
+  expect(seen[seen.length - 1]).toBe("none");
+  await m.render(h(Probe, { board: full.board, failed: false }));
+  expect(seen[seen.length - 1]).toBe("ready");
   await m.unmount();
 });

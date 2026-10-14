@@ -20,6 +20,8 @@ export interface CountInput {
   board: CountBoard | null;
   /** 看板还在等（本机 /work 没回、团队合并要的本机看板没回） */
   boardPending: boolean;
+  /** 看板读失败、手上也没有上一份（老 bridge 没有 /work、读不到）：不再等它，状态词整格不出，已知指标照常出；之后读到了再出数 */
+  boardFailed?: boolean;
   /** 协作源（useCollabSource）：团队源带 last() */
   source: object;
   /** 测试用：缺省 LATE_MS */
@@ -40,9 +42,21 @@ export function useCountState(a: CountInput): CountState {
   if (complete && shown !== a.project) setShown(a.project);
   const open = complete || shown === a.project || isLate;
   return useMemo((): CountState => {
-    if (!a.ov || !a.board || !open) return isLate && a.ov && !a.board ? { status: "none" } : { status: "loading" };
+    if (a.ov && !a.board && (isLate || a.boardFailed)) return { status: "none" };
+    if (!a.ov || !a.board || !open) return { status: "loading" };
     return { status: "ready", snap: countSnap(a.board, a.ov), missing: missing ?? 0 };
-  }, [a.ov, a.board, open, isLate, missing]);
+  }, [a.ov, a.board, a.boardFailed, open, isLate, missing]);
+}
+
+/**
+ * 一份按轮（rev）重拉的结果是不是这一轮的：重拉期间调用方还留着上一轮的结果（同一个对象），每个新结果（对象换了）记下当时的 rev。
+ * rev 变后旧请求已中止，下一个结果就是这一轮的。settled = 这份结果已经是最终态（不是 loading）
+ */
+export function useRoundFresh(value: object, settled: boolean, rev: number): boolean {
+  const [seen, setSeen] = useState<{ value: object; rev: number } | null>(null);
+  // 渲染期调整状态（同上 useCountState）
+  if (settled && seen?.value !== value) setSeen({ value, rev });
+  return settled && (seen?.value !== value || seen.rev === rev);
 }
 
 /** 产品卡、子 DAG 框头（含手机 MobileDag 节头）读同一份计数；没给 = 老调用方（单测直接挂组件），照旧显示 feature 自带的计数 */

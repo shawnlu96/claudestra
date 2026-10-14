@@ -25,7 +25,7 @@ import { ownerOf, progressRows, type AgentLite } from "./dag-progress";
 import { WorkBoardContent } from "../work/work-board-view";
 import { useTeamWorkBoard, useWorkBoard } from "../work/use-work-board";
 import { countBoardOf } from "../count-words";
-import { CountContext, useCountState, type CountInput } from "../use-count-source";
+import { CountContext, useCountState, useRoundFresh, type CountInput } from "../use-count-source";
 import { teamWorkBoard } from "../team-work-model";
 import type { LedgerOverview } from "../collab-model";
 import { DiffPage, NodePage, VersionsPage } from "./dag-props";
@@ -61,14 +61,17 @@ export interface DagPanesArgs {
 }
 
 /** 看板（谁在干活）读一份：本机 = /work；团队 = 团队数据转出的看板，主场本机的行换本机事实（只在有这种行时读本机 /work） */
-function useBoard(a: DagPanesArgs, board: DagBoard | null, dagLoading: boolean) {
+function useBoard(a: DagPanesArgs, board: DagBoard | null, dagLoading: boolean, dagFresh: boolean) {
   // 用走表的 a.now，主场停推时新鲜度照样随时间重判
   const teamRaw = useMemo(() => (a.noWorkBoard && a.ov && !dagLoading ? teamWorkBoard(board, a.ov, a.now) : null), [a.noWorkBoard, a.ov, a.now, board, dagLoading]);
   const team = useTeamWorkBoard(a.project, teamRaw);
   const local = useWorkBoard(a.noWorkBoard ? null : a.project);
   const shown = a.noWorkBoard ? team : { ...local, pending: false };
   const counted = useMemo(() => (shown.board ? countBoardOf(shown.board, !!a.noWorkBoard) : null), [shown.board, a.noWorkBoard]);
-  const counts = useCountState({ project: a.project, ov: a.ov ?? null, board: counted, boardPending: shown.pending, source: a.source ?? {} });
+  // 团队：快照还是上一轮的就算看板没到齐（首次出数要总览、详情、快照同一轮，之后补拉不再跳）
+  const pending = shown.pending || (!!a.noWorkBoard && !dagFresh);
+  const counts = useCountState({ project: a.project, ov: a.ov ?? null, board: counted, boardPending: pending, boardFailed: !a.noWorkBoard && local.retrying && !local.board,
+    source: a.source ?? {} });
   return { work: shown, counts };
 }
 
@@ -126,7 +129,9 @@ export function useDagPanes(a: DagPanesArgs) {
       a.select({ kind: "ddiff", f: c.featureId });
     }} />
   )) || (!a.narrow && diffPage) || null;
-  const { work, counts } = useBoard(a, board, load.status === "loading");
+  // useDagBoard 在 rev 变后重拉期间留着上一轮的快照：团队看板由总览 + 快照合成，不同轮就先按旧快照出数、新快照到了再跳
+  const dagFresh = useRoundFresh(load, load.status !== "loading", a.rev);
+  const { work, counts } = useBoard(a, board, load.status === "loading", dagFresh);
   const progress = <WorkBoardContent team={a.noWorkBoard} board={work.board} retrying={work.retrying} loading={counts.status === "loading"}
     onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));

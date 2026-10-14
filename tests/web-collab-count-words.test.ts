@@ -70,7 +70,7 @@ describe("本机 /work 看板", () => {
   const row = (taskId: string | null, over: Partial<WorkRow> = {}): WorkRow => ({ taskId, featureId: "F01", nodeKey: taskId ?? "n", title: "", who: "dev", machine: "local",
     step: "write", round: 1, since: 0, normalMinutes: 0, remainingMinutes: 0, overMinutes: 0, reason: null, code: null, estimate: "", ...over });
   const work: WorkBoard = { now: NOW, asOfSeq: 1, machines: { local: 2 }, completionHours: 3, availableSlots: 1,
-    working: [row("A"), row("B", { step: "merge" })], waiting: [row("C", { code: "ci", reason: "等 CI" }), row("D", { reason: "等 owner" })],
+    working: [row("A"), row("B", { step: "merge" })], waiting: [row("C", { step: "merge", code: "ci", reason: "等 CI" }), row("D", { step: "review", reason: "等 owner" })],
     todo: { ready: [row(null)], blocked: [row(null, { nodeKey: "m" }), row(null, { nodeKey: "k", featureId: "F02" })] }, legacy: [{ taskId: "OLD", title: "", stage: "build" }] };
   const ov = { tasks: (["A", "B", "C", "D"] as const).map((id, i) => ({ id, title: id, kind: "code", stage: (["build", "merge", "merge", "review"] as const)[i]!,
     round: 0, updatedAt: 0, metrics: {} })), items: [] };
@@ -83,6 +83,17 @@ describe("本机 /work 看板", () => {
     expect(featureWords(snap, "F01")).toEqual({ working: 1, waiting: 3, notStarted: 2 });
     expect(featureWords(snap, "F02")).toEqual({ working: 0, waiting: 0, notStarted: 1 });
     expect(stageCounts(snap)).toEqual([{ label: "开发", n: 1 }, { label: "审查 ⇄ 返工", n: 1 }, { label: "合并", n: 2 }]);
+  });
+
+  test("各阶段按看板有效步骤归列：总览还是规格、看板已在复述的行进「复述」列；团队规格卡有阻塞提问进在等也一样，不出规格列", () => {
+    const restating: WorkBoard = { ...work, working: [row("S", { step: "restate" })], waiting: [], todo: { ready: [], blocked: [] } };
+    const spec = { tasks: [{ ...ov.tasks[0]!, id: "S", stage: "spec" as const }], items: [] };
+    const local = countSnap(countBoardOf(restating, false), spec);
+    expect(stageCounts(local)).toEqual([{ label: "复述", n: 1 }]);
+    const teamRow = { taskId: "S", featureId: "F01", nodeKey: "s", title: "", who: null, instance: null, machine: null, stage: "spec" as const, reason: "等 owner", team: null };
+    const team = countSnap({ working: [], merging: [], waiting: [teamRow], todo: { ready: [], blocked: [] } }, spec);
+    expect(stageCounts(team)).toEqual([{ label: "复述", n: 1 }]);
+    expect(team.stages.reduce((n, c) => n + c.n, 0)).toBe(team.words.working + team.words.waiting);
   });
 
   test("已完成含窗口外的 doneRest", () => {

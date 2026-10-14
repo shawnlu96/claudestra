@@ -38,13 +38,16 @@ export interface CountSnap {
   byFeature: ReadonlyMap<string, FeatureWords>;
 }
 
-/** 行没对上总览里的卡时按看板自己的阶段 / 步骤归列（团队行带 stage，本机行带 step） */
+/**
+ * 各阶段按看板事实归列：本机行的有效步骤（step）优先，其次团队行的 stage，都没有才看总览里卡的阶段。
+ * 进了在干活 / 在等的规格卡（本机已在复述、团队规格卡有阻塞提问）归「复述」列：右栏不再有规格列，各列之和仍 = 在干活 + 在等
+ */
 const STEP_STAGE: Record<string, Stage> = { restate: "restate", write: "build", review: "review", fix: "fix", merge: "merge", deploy: "live", publishing: "build" };
+const SPEC_COLUMN = 0;
 function rowColumn(r: Row, merging: boolean, tasks: ReadonlyMap<string, LedgerTaskView>): number {
   const t = r.taskId ? tasks.get(r.taskId) : undefined;
-  if (t) return columnOf(t.stage, t.stageBefore ?? null);
-  const stage = r.stage ?? (r.step ? STEP_STAGE[r.step] : undefined) ?? (merging ? "merge" : "build");
-  return columnOf(stage);
+  const stage = (r.step ? STEP_STAGE[r.step] : undefined) ?? r.stage ?? t?.stage ?? (merging ? "merge" : "build");
+  return Math.max(SPEC_COLUMN + 1, columnOf(stage, t?.stageBefore ?? null));
 }
 
 export function countSnap(board: CountBoard, ov: Pick<LedgerOverview, "tasks" | "doneRest">): CountSnap {
@@ -86,7 +89,7 @@ export function attentionOf(snap: CountSnap, lines: readonly Pick<LineView, "id"
 
 /**
  * 计数源的状态：loading = 还没载完（显示骨架，不出任何数字）；ready = 出数，missing = 20 秒后仍没读到详情的 feature 数（> 0 时出提示）。
- * none = 这个源读不到看板（老 bridge 没有 /work 等）且已超时：不出数字也不出骨架
+ * none = 这个源读不到看板（老 bridge 没有 /work、读失败且手上没有上一份，或已超时）：状态词不出数字也不出骨架，已知指标照常出
  */
 export type CountState = { status: "loading" } | { status: "none" } | { status: "ready"; snap: CountSnap; missing: number };
 export const snapOf = (c: CountState | null | undefined): CountSnap | null => (c?.status === "ready" ? c.snap : null);

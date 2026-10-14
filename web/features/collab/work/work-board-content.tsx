@@ -95,15 +95,15 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, lo
       {!team && <span>{t('全部做完预计')} <strong>{local ? local.completionHours === null ? t('名额不可用') : `${local.completionHours}h` : '—'}</strong></span>}
       {retrying && <span role="status" aria-label={tr('没取到，正在重试')} title={tr('没取到，正在重试')}><Icon kind="retry" className={s.retry} /></span>}
     </div>
-    {/* 按机器分的在干活数只在多台机器时给：一台时它就是栏标题那个数，不重复报 */}
-    <div className={s.basis}>{[board && Object.keys(board.machines).length > 1 ? Object.entries(board.machines).map(([m, count]) => `${machine(m)} ${count}`).join(' / ') : '',
+    {/* 按机器分的在干活数只在多台机器时给：一台时它就是栏标题那个数，不重复报；没载完不给（和栏数一起出） */}
+    <div className={s.basis}>{[board && !loading && Object.keys(board.machines).length > 1 ? Object.entries(board.machines).map(([m, count]) => `${machine(m)} ${count}`).join(' / ') : '',
       local ? t('按近 7 天每步中位数 + 关键路径') : ''].filter(Boolean).join(' · ')}</div>
     <div className={s.segment} role="tablist">{Object.entries(LABELS).map(([key, label]) => <button type="button" role="tab"
       aria-selected={tab === key} key={key} onClick={() => setTab(key)}>{t(label)} {num(key)}</button>)}</div>
     <div className={s.columns}>{Object.entries(LABELS).map(([key, label]) => <section key={key} className={s.column} data-active={tab === key}>
       <h3 className={s.heading}><Icon kind={key} />{t(label)}<span className={`${s.count} ${v.wideOnly}`} data-wide-only>{num(key)}</span></h3>
       {!board ? <div className={s.loading} /> : key === 'todo' ? <>{(['ready', 'blocked'] as const).map(group => <div key={group}>
-        <div className={s.group}>{t(group === 'ready' ? '就绪可开' : '被挡')} · {board.todo[group].length}</div>
+        <div className={s.group}>{t(group === 'ready' ? '就绪可开' : '被挡')} · {loading ? <span className={v.skel} aria-hidden /> : board.todo[group].length}</div>
         {board.todo[group].map((row: Row) => rowView(row, key))}</div>)}</> : cols![key as Col].length ?
         cols![key as Col].map((row: Row) => rowView(row, key)) : <div className={s.empty}>{t('暂无')}</div>}
     </section>)}</div>
