@@ -156,6 +156,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   webLoader("web-dom-bg-shell-state"),
   webLoader("web-dom-collab-count"),
   webLoader("web-dom-collab-detail-now"),
+  webLoader("web-dom-collab-detail-pause"),
   webLoader("web-dom-collab-edge-meta"),
   webLoader("web-dom-collab-mirror-clock"),
   webLoader("web-dom-collab-team-body"),
