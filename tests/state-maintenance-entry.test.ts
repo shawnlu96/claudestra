@@ -12,7 +12,7 @@ import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.ts"
 import { createTask, setMeta } from "../src/lib/ledger-write.ts";
 import { openMaintenance, type MaintContext } from "../src/lib/state-maintenance/context.ts";
 import { consumeGrant, issueGrant, type GrantAction } from "../src/lib/state-maintenance/grant.ts";
-import { maintenanceRoleRefusal } from "../src/lib/state-maintenance/ledger-access.ts";
+import { maintenanceRoleRefusal, recordPointer } from "../src/lib/state-maintenance/ledger-access.ts";
 import { maintenanceRoot } from "../src/lib/state-maintenance/paths.ts";
 import { loadState, runPaths } from "../src/lib/state-maintenance/run-store.ts";
 import { stateMaintenance, type CmdDeps } from "../src/manager/state-maintenance.ts";
@@ -171,6 +171,19 @@ describe("[验收线 1] 档位:off 零副作用,observe 状态根零写入", () 
     expect(retry).toMatchObject({ ok: true, done: 1 });
     expect(notes(fx)).toHaveLength(1);
     expect((await stateMaintenance(["note-retry", "--grant", grant(fx, "note")], deps(fx)))).toMatchObject({ ok: true, done: 0 });
+  });
+
+  test("同一 run 的新结果(seq 2)另记一条指针,旧指针不被去重吞掉或覆盖;同版重写幂等", () => {
+    const fx = fixture();
+    const base = { op: "state_maintenance_run" as const, version: "test", runId: "run-1", mode: "on", actor: "owner" };
+    const v1 = { ...base, seq: 1, result: "failed", reportRel: "reports/run-1/run.json", reportSha256: "a".repeat(64) };
+    const v2 = { ...base, seq: 2, result: "rolled-back", reportRel: "reports/run-1/run-2.json", reportSha256: "b".repeat(64) };
+    expect(recordPointer(fx.ctx.maintRoot, v1, fx.ledger).ok).toBe(true);
+    expect(recordPointer(fx.ctx.maintRoot, v2, fx.ledger).ok).toBe(true);
+    expect(recordPointer(fx.ctx.maintRoot, v2, fx.ledger).ok).toBe(true);
+    expect(notes(fx).map((n) => [(n.data as { result: string }).result, (n.data as { reportSha256: string }).reportSha256])).toEqual([
+      ["failed", v1.reportSha256], ["rolled-back", v2.reportSha256],
+    ]);
   });
 
   test("切档与执行分开:切到 on 不触发任何迁移;on 也要另经批准报告才发起执行", async () => {

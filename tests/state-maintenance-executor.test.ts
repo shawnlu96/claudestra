@@ -183,6 +183,40 @@ describe("[验收线 4] 迁移、校验与回滚", () => {
     await expect(executeRun(deps(fx), runId)).rejects.toThrow("拒绝重复执行");
   });
 
+  test("failed-holding 后再恢复成功:新结果另存一版报告与指针,旧失败报告字节不变,回滚证据真实留存", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    const crash = (p: string) => { if (p === "applied:state-move") throw new Crash(p); };
+    await expect(executeRun(deps(fx, { crashAt: crash }), runId)).rejects.toThrow(Crash);
+    const ledger = new Map<string, string>();
+    const writeNote: ExecDeps["writeNote"] = async (n) => {
+      const key = `${n.runId}:${n.op}:${n.seq ?? 1}`;
+      if (!ledger.has(key)) ledger.set(key, n.reportSha256);
+      return ledger.get(key) === n.reportSha256 ? { ok: true } : { ok: false, error: "指针写入后复核不到,按未落库处理" };
+    };
+    const d = deps(fx, { writeNote });
+    const inner = d.probe.run;
+    let lsofDown = true;
+    d.probe.run = async (cmd) => (cmd[0] === "lsof" && lsofDown ? { code: null, stdout: "", stderr: "", spawnError: "ENOENT" } : inner(cmd));
+    const first = await recoverRun(d, runId);
+    expect([first.outcome, first.phase]).toEqual(["failed", "failed-holding"]);
+    const failedRel = first.report!.rel;
+    const failedBytes = readFileSync(join(fx.maint, failedRel), "utf8");
+    lsofDown = false;
+    const s = await recoverRun(d, runId);
+    expect([s.outcome, s.phase]).toEqual(["rolled-back", "done"]);
+    expect(s.report!.rel).not.toBe(failedRel);
+    expect(readFileSync(join(fx.maint, failedRel), "utf8")).toBe(failedBytes);
+    const rep = JSON.parse(readFileSync(join(fx.maint, s.report!.rel), "utf8"));
+    expect(rep.outcome).toBe("rolled-back");
+    expect(rep.supersedes).toEqual({ rel: failedRel, sha256: first.report!.sha256 });
+    expect(Object.fromEntries(rep.comparisons.map((c: { stage: string; executed: boolean }) => [c.stage, c.executed]))).toMatchObject({ 迁移前: true, 迁移后: true, 回滚后: true });
+    expect(s.note).toEqual({ ok: true });
+    expect(ledger.get(`${runId}:state_maintenance_run:1`)).toBe(first.report!.sha256);
+    expect(ledger.get(`${runId}:state_maintenance_run:2`)).toBe(s.report!.sha256);
+    expect(barrierActive(fx.maint)).toBe(false);
+  });
+
   test("回滚失败:不解除屏障、不重启任何写者,停在 failed-holding,留存失败原因", async () => {
     const fx = fixture();
     const runId = await prepare(fx);

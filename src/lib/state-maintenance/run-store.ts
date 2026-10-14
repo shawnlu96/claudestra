@@ -42,8 +42,10 @@ export interface RunState {
   /** recording / restoring 之后要落到的终态(崩溃后恢复按它续做) */
   final?: Phase;
   note?: { ok: boolean; error?: string };
-  /** 首次写成的结果报告(相对路径 + 哈希):指针绑定它,恢复时不再重写 */
-  report?: { rel: string; sha256: string };
+  /** 当前结果的报告(相对路径 + 哈希 + 版本号):首次写成即固定,指针绑定它,续做留存时不再重写 */
+  report?: { rel: string; sha256: string; seq?: number };
+  /** 被后来的新结果(恢复后的回滚等)取代的旧版报告与其指针状态;字节不动 */
+  priorReports?: { rel: string; sha256: string; seq?: number; note?: { ok: boolean; error?: string } }[];
   rollbackAttempt: number;
   history: { phase: Phase; at: number; note?: string }[];
 }

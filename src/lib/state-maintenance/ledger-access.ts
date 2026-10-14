@@ -1,6 +1,6 @@
 /**
  * 维护对台账的两处读写:核点击者角色(只认本卡项目的真实 PM 与 owner,复用 ledger roleOf),写结果指针 note。
- * note 只带 op、版本、runId、mode、结果、报告相对路径与哈希;dedupKey 按 runId+op,补记幂等。
+ * note 只带 op、版本、runId、mode、结果、报告相对路径与哈希;dedupKey 按 runId+op(+ 结果版本 seq>1),补记幂等。
  * 打开即关:执行器的子进程用完马上 closeLedger,迁移期间不留台账句柄。执行器主进程不 import 本模块(它的依赖图带身份模块)。
  * tests/state-maintenance-entry.test.ts。
  */
@@ -19,6 +19,8 @@ export interface PointerNote {
   op: "state_maintenance_observe" | "state_maintenance_run" | "state_maintenance_recover";
   version: string;
   runId: string;
+  /** 同一 run 的第几版结果(恢复后的新结果另记一条,不覆盖旧指针);缺省即 1 */
+  seq?: number;
   mode: string;
   result: string;
   reportRel: string;
@@ -47,11 +49,13 @@ export function maintenanceRoleRefusal(actor: string, ledgerPath: string = LEDGE
 
 /** 写完关掉台账,再重新打开核一次指针确实落库(关了再核,不在同一个句柄里自证) */
 function writePointerNote(n: PointerNote, ledgerPath: string = LEDGER_PATH): void {
-  const dedupKey = `state-maint:${n.runId}:${n.op}`;
+  const dedupKey = `state-maint:${n.runId}:${n.op}${seqSuffix(n)}`;
   appendPointer(n, dedupKey, ledgerPath);
   const back = withLedger(ledgerPath, (db) => getEventByDedup(db, dedupKey));
   if (!back || (back.data as { reportSha256?: unknown }).reportSha256 !== n.reportSha256) throw new Error("指针写入后复核不到,按未落库处理");
 }
+
+const seqSuffix = (n: PointerNote): string => (Number.isInteger(n.seq) && n.seq! > 1 ? `:${n.seq}` : "");
 
 function appendPointer(n: PointerNote, dedupKey: string, ledgerPath: string): void {
   withLedger(ledgerPath, (db) => {
@@ -71,7 +75,7 @@ const pendingDir = (root: string): string => join(maintPaths(root).control, "pen
 function savePendingNote(root: string, n: PointerNote): void {
   if (!validRunId(n.runId)) throw new Error("runId 不合法");
   ensureDir(pendingDir(root));
-  writeFileSync(join(pendingDir(root), `${n.runId}.${n.op}.json`), JSON.stringify(n), { mode: FILE_MODE });
+  writeFileSync(join(pendingDir(root), `${n.runId}.${n.op}${seqSuffix(n)}.json`), JSON.stringify(n), { mode: FILE_MODE });
 }
 
 /** 补记全部待补指针;成功的删掉待补记录。返回仍未补上的条数与原因 */
