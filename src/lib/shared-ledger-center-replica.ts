@@ -8,13 +8,21 @@
  * - Write order: mirror entry → mode {planning, centerPlanned} → ledger (replica-write.ts) → replica state. A crash
  *   leaves the gate closed (mode first) and a pusher entry that fails closed on a missing feature.
  * - Anything over the local limits is refused before any write, with a fixed reason in `center-replica status`.
+ * - REPLPULL1: a skipped feature (other project / not planning / other home) and a first detail read that fails keep their fixed
+ *   reason in the state file (`skipped`). One sync run at a time (sync lock); dryRun reads the center, takes no lock, writes
+ *   nothing (pass it a read-only ledger connection; the instance key is only read, never generated) and runs land()'s checks up to the first write, then predicts the writer's
+ *   answer (the background pull's observe mode, shared-ledger-center-replica-pull.ts).
  */
 import type { Database } from "bun:sqlite";
+import { createPrivateKey, createPublicKey } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { STATE_DIR } from "./paths.js";
 import { instanceKeySync, type InstanceKey } from "./instance-key.js";
-import { getFeature } from "./ledger-feature.js";
-import { resourceKey } from "./ledger-scheduler.js";
-import { LedgerError } from "./ledger-store.js";
+import { effectiveNodes, getDagVersion, getFeature, type DagNode, type Feature } from "./ledger-feature.js";
+import { resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
+import { cardFileLocks, globKeys, isFileResource, openDispatch, syncedLocks } from "./ledger-scheduler-lease-sync.js";
+import { getTask, LedgerError } from "./ledger-store.js";
 import { SharedLedgerClient, SharedLedgerRemoteError } from "./shared-ledger-client.js";
 import { featureBaseDigest } from "./shared-ledger-contract-v2-feature-proposals.js";
 import type { SharedLedgerFeatureDetail } from "./shared-ledger-contract.js";
@@ -23,9 +31,9 @@ import type { MirrorEntry } from "./shared-ledger-projector.js";
 import { readSharedLedgerBindings } from "./shared-ledger-gate-bindings.js";
 import { resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
 import { readSharedLedgerMode, writeSharedLedgerMode, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
-import { checkReplicaNodes, REPLICA_ACTOR, REPLICA_ID_CLAIMED, replicaBoundNodes, writeCenterReplica, type CenterNode } from "./shared-ledger-center-replica-write.js";
+import { checkReplicaNodes, REPLICA_ACTOR, REPLICA_ID_CLAIMED, replicaBoundNodes, writeCenterReplica, type CenterNode, type ReplicaWrite } from "./shared-ledger-center-replica-write.js";
 import { readCenterClaims } from "./shared-ledger-center-claims.js";
-import { readCenterReplicas, scopeKey, updateCenterReplicas, withCenterReplicaLock, type ReplicaScope } from "./shared-ledger-center-replica-state.js";
+import { readCenterReplicas, scopeKey, updateCenterReplicas, withCenterReplicaLock, withCenterReplicaSyncLock, type ReplicaScope } from "./shared-ledger-center-replica-state.js";
 
 const CENTER_TIMEOUT_MS = 5000;
 /** Fixed texts only: center bodies and exception messages never reach state files or CLI output. */
@@ -33,9 +41,11 @@ export const REPLICA_REASONS = Object.freeze({
   noCredential: "本机没有可用的 service 凭据（owner:self、kind=service、带 project 权限）",
   noKey: "本机实例密钥不可用，无法签名读中心",
   credentialRejected: "凭据无效：中心拒绝了本机 service 凭据",
+  rateLimited: "中心限流，稍后自动重试",
   unreachable: "中心不可达或回包无效（5 秒超时）",
   notHome: "主场不是本实例，不落副本",
   notPlanned: "不是中心规划（N7 新建发布）的 feature，不落副本",
+  otherProject: "中心 feature 不属于这个绑定的中心项目，不落副本",
   title: "超出本机限制：标题超过 60 字或不是单行",
   oneLine: "超出本机限制：节点一句话超过 60 字或不是单行",
   key: "超出本机限制：节点代号超过 40 位或含本机不收的字符（如冒号）",
@@ -90,6 +100,11 @@ export interface CenterReplicaSyncOptions {
   /** Transport for the real clients (tests: a fake center). Never a snapshot. */
   fetch?: typeof fetch;
   key?: () => InstanceKey | null;
+  /** REPLPULL1 observe: read the center and answer the would-be results; no write to mirror, mode, ledger or replica state. */
+  dryRun?: boolean;
+  /** REPLPULL1: "skip" (background pull) = another sync holds the sync lock → return `busy` at once. Default (CLI): run anyway,
+   * holding the sync lock when free so a pull round skips meanwhile; the per-id lock keeps the writes single either way. */
+  syncLock?: "skip";
 }
 export type ReplicaResult =
   | { centerFeatureId: string; result: "created" | "replayed" | "unchanged"; localFeatureId: string; version: number }
@@ -97,10 +112,22 @@ export type ReplicaResult =
 interface ScopeResult extends ReplicaScope { localProject: string; error: string | null }
 
 const errorText = (e: unknown) => e instanceof SharedLedgerRemoteError && [401, 403].includes(e.status)
-  ? REPLICA_REASONS.credentialRejected : REPLICA_REASONS.unreachable;
+  ? REPLICA_REASONS.credentialRejected : e instanceof SharedLedgerRemoteError && e.status === 429
+    ? REPLICA_REASONS.rateLimited : REPLICA_REASONS.unreachable;
 
 export async function syncCenterReplicas(db: Database, opts: CenterReplicaSyncOptions = {}) {
-  const dir = opts.stateDir ?? STATE_DIR, now = opts.now ?? Date.now;
+  const dir = opts.stateDir ?? STATE_DIR;
+  const skip = opts.syncLock === "skip";
+  // dryRun takes no lock: the lock file is a write, and a dry run has nothing to keep single.
+  if (opts.dryRun === true) return syncAll(db, opts);
+  const out = await withCenterReplicaSyncLock(dir, 0, () => syncAll(db, opts));
+  if (out) return out;
+  if (skip) return { ok: true, busy: true, scopes: [] as ScopeResult[], features: [] as ReplicaResult[] };
+  return syncAll(db, opts);
+}
+
+async function syncAll(db: Database, opts: CenterReplicaSyncOptions) {
+  const dir = opts.stateDir ?? STATE_DIR, now = opts.now ?? Date.now, dryRun = opts.dryRun === true;
   const scopes: ScopeResult[] = [], features: ReplicaResult[] = [];
   const bindings = readSharedLedgerBindings(dir).map((b) => ({ centerId: b.centerId, teamId: b.teamId, projectId: b.projectId,
     localProject: b.localProjectId ?? b.projectId })).filter((b) => !opts.localProject || b.localProject === opts.localProject);
@@ -108,48 +135,148 @@ export async function syncCenterReplicas(db: Database, opts: CenterReplicaSyncOp
     const scope = { centerId: b.centerId, teamId: b.teamId, projectId: b.projectId };
     const fail = async (error: string) => {
       scopes.push({ ...scope, localProject: b.localProject, error });
-      await updateCenterReplicas(dir, (s) => { s.scopes[scopeKey(scope)] = { ...(s.scopes[scopeKey(scope)] ?? { syncedAt: null }), lastError: error, lastErrorAt: now() }; });
+      if (!dryRun) await updateCenterReplicas(dir, (s) => { s.scopes[scopeKey(scope)] = { ...(s.scopes[scopeKey(scope)] ?? { syncedAt: null }), lastError: error, lastErrorAt: now() }; });
     };
     const credential = resolveMirrorCredential(scope, dir);
     if (!credential) { await fail(REPLICA_REASONS.noCredential); continue; }
-    const key = (opts.key ?? (() => instanceKeySync(dir)))();
+    const key = (opts.key ?? (() => (dryRun ? readInstanceKey(dir) : instanceKeySync(dir))))();
     if (!key) { await fail(REPLICA_REASONS.noKey); continue; }
-    const transport = { timeoutMs: CENTER_TIMEOUT_MS, ...(opts.fetch ? { fetch: opts.fetch } : {}) };
+    const transport = { stateDir: dir, now, timeoutMs: CENTER_TIMEOUT_MS, ...(opts.fetch ? { fetch: opts.fetch } : {}) };
     let ids: string[];
     try {
       const list = await new SharedLedgerFeatureProposalClient(credential, key, transport).listProject(scope);
       ids = [...new Set(list.proposals.flatMap((r) => r.proposal.kind === "new" && r.operation.state === "published" && r.operation.featureId
         ? [r.operation.featureId] : []))].filter((id) => !opts.centerFeatureId || id === opts.centerFeatureId);
-    } catch (e) { await fail(errorText(e)); continue; }
+    } catch (e) { await fail(errorText(e)); if (errorText(e) === REPLICA_REASONS.rateLimited) break; continue; }
     const client = new SharedLedgerClient(credential, key, transport);
-    for (const id of ids) features.push(await syncOne(db, dir, now, client, credential, { ...scope, localProject: b.localProject }, id));
+    let limited = false;
+    for (const id of ids) {
+      const result: ReplicaResult = limited ? { centerFeatureId: id, result: "skipped", reason: REPLICA_REASONS.rateLimited }
+        : await syncOne(db, dir, now, client, credential, { ...scope, localProject: b.localProject }, id, dryRun);
+      features.push(result);
+      if ("reason" in result && result.reason === REPLICA_REASONS.rateLimited) limited = true;
+      if (limited && result.result === "skipped" && !dryRun) await noteSkip(dir, now, scope, id, REPLICA_REASONS.rateLimited, null);
+    }
+    if (limited) { await fail(REPLICA_REASONS.rateLimited); break; }
     scopes.push({ ...scope, localProject: b.localProject, error: null });
-    await updateCenterReplicas(dir, (s) => { s.scopes[scopeKey(scope)] = { syncedAt: now(), lastError: null, lastErrorAt: null }; });
+    if (!dryRun) await updateCenterReplicas(dir, (s) => { s.scopes[scopeKey(scope)] = { syncedAt: now(), lastError: null, lastErrorAt: null }; });
   }
   return { ok: true, scopes, features };
 }
 
+/**
+ * dryRun's instance key: read the existing key file only. instanceKeySync generates and writes a missing key, which a dry run
+ * must not do; a missing / unreadable key is this scope's fixed noKey error (the real sync creates it on its first run).
+ */
+function readInstanceKey(dir: string): InstanceKey | null {
+  try {
+    const privateKey = createPrivateKey(readFileSync(join(dir, "instance-key.pem"), "utf8"));
+    return { publicKey: String(createPublicKey(privateKey).export({ format: "jwk" }).x), privateKey };
+  } catch { return null; } // missing or unreadable: the caller records REPLICA_REASONS.noKey for the scope
+}
+
+/** REPLPULL1: keep why a center feature has no replica; rewritten only when the reason changes (the pull runs every 5 minutes). */
+async function noteSkip(dir: string, now: () => number, where: ReplicaScope, centerFeatureId: string, lastSkip: string | null, lastError: string | null) {
+  const had = readCenterReplicas(dir).skipped?.[centerFeatureId];
+  if (had && had.lastSkip === lastSkip && had.lastError === lastError && scopeKey(had) === scopeKey(where)) return;
+  await updateCenterReplicas(dir, (s) => { (s.skipped ??= {})[centerFeatureId] = { ...where, lastSkip, lastError, at: now() }; });
+}
+
+/** Same lookup as the writer's replicaCenterId (shared-ledger-center-replica-write.ts): last replica event's center feature id. */
+function replicaCenterIdOf(db: Database, featureId: string): string | null {
+  const r = db.prepare(`SELECT json_extract(data, '$.centerFeatureId') AS c FROM events WHERE target = ? AND kind = 'feature' AND actor = ?
+    AND json_extract(data, '$.op') = 'center-replica' ORDER BY seq DESC LIMIT 1`).get(featureId, REPLICA_ACTOR) as { c: string | null } | null;
+  return r?.c ?? null;
+}
+const nodeShape = (n: DagNode) => ({ key: n.key, taskId: n.taskId, oneLine: n.oneLine, deps: n.deps, estimate: n.estimate, fileGlobs: n.fileGlobs ?? [] });
+const titleTaken = (db: Database, project: string, title: string, except: string) =>
+  !!db.prepare("SELECT id FROM features WHERE project = ? AND title = ? AND id != ?").get(project, title, except);
+
+/**
+ * dryRun: what writeCenterReplica would answer, read only — the same checks in the same order (an error the writer would throw
+ * maps the way land() maps it). Kept next to land() so a change to the writer's checks shows up here; the pull's observe mode
+ * relies on it matching a real run.
+ */
+function predictReplicaWrite(db: Database, w: ReplicaWrite, existing: Feature | null): ReplicaResult {
+  const failedWith = (reason: string): ReplicaResult => ({ centerFeatureId: w.centerFeatureId, result: "failed", reason, localFeatureId: w.localFeatureId });
+  const done = (result: "created" | "replayed" | "unchanged", version: number): ReplicaResult => ({ centerFeatureId: w.centerFeatureId, result, localFeatureId: w.localFeatureId, version });
+  if (!existing) return titleTaken(db, w.localProject, w.title, w.localFeatureId) ? failedWith("本机项目里已有同名 feature") : done("created", w.version);
+  if (replicaCenterIdOf(db, existing.id) !== w.centerFeatureId) return { centerFeatureId: w.centerFeatureId, result: "refused", reason: REPLICA_REASONS.idTaken };
+  if (existing.project !== w.localProject) return failedWith("副本所在的本机项目变了");
+  if (w.version < existing.currentVersion) return failedWith("中心版本比本机副本旧");
+  const bound = replicaBoundNodes(db, existing);
+  if ([...bound.keys()].some((k) => !w.nodes.some((n) => n.key === k))) return failedWith("中心新版本移出了本机已绑卡的节点");
+  let nodes: DagNode[];
+  try { nodes = checkReplicaNodes(db, w, bound); } catch { return failedWith(REPLICA_REASONS.ledger); } // land(): not an own conflict → ledger
+  if (w.version === existing.currentVersion) {
+    const cur = getDagVersion(db, existing.id, existing.currentVersion);
+    const same = !!cur && JSON.stringify(effectiveNodes(db, cur).map(nodeShape)) === JSON.stringify(nodes.map(nodeShape)) && existing.title === w.title;
+    return same ? done("unchanged", existing.currentVersion) : failedWith("中心同一版本的内容与本机副本不一致");
+  }
+  if (boundScopesRefused(db, existing, nodes)) return failedWith(REPLICA_REASONS.ledger); // applyVersion's LedgerError → land(): ledger
+  if (existing.title !== w.title && titleTaken(db, existing.project, w.title, existing.id)) return failedWith("本机项目里已有同名 feature");
+  return done("replayed", w.version);
+}
+
+/**
+ * Read-only mirror of applyVersion's syncBoundScopes / syncCardFileScope (ledger-dag-write.ts): would a kept bound card's
+ * scope change be refused — an emptied scope, a narrowing that drops a lock under an open dispatch, or a new lock overlapping
+ * another card's resource. Cards are taken in node order and each one's new locks count for the next, as in the writer.
+ */
+function boundScopesRefused(db: Database, f: Feature, next: readonly DagNode[]): boolean {
+  const curVersion = getDagVersion(db, f.id, f.currentVersion);
+  const cur = curVersion ? effectiveNodes(db, curVersion) : [];
+  const sorted = (g: readonly string[] | undefined) => [...(g ?? [])].sort().join("\n");
+  const rows = new Map<string, { resource: string; taskId: string }[]>(); // project → resources, with earlier cards' predicted moves
+  const resources = (project: string) => rows.get(project) ?? rows.set(project,
+    db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(project) as { resource: string; taskId: string }[]).get(project)!;
+  for (const n of next) {
+    const was = n.taskId ? cur.find((o) => o.taskId === n.taskId) : undefined;
+    const task = was && n.taskId ? getTask(db, n.taskId) : null;
+    if (!task || sorted(was!.fileGlobs) === sorted(n.fileGlobs)) continue;
+    if (!n.fileGlobs?.length) return true;
+    const oldGlobs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
+    if (globKeys(oldGlobs).join("\n") === globKeys(n.fileGlobs).join("\n")) continue;
+    const held = cardFileLocks(db, task.id), locks = syncedLocks(held, oldGlobs, n.fileGlobs);
+    if (held.some((h) => !locks.includes(h.resource)) && openDispatch(db, task.id)) return true;
+    if (!held.length) continue;
+    const all = resources(task.project), add = locks.filter((r) => !held.some((h) => h.resource === r));
+    if (add.some((r) => all.some((o) => o.taskId !== task.id && isFileResource(o.resource) && resourcesOverlap(r, o.resource)))) return true;
+    const dropped = new Set(held.map((h) => h.resource).filter((r) => !locks.includes(r)));
+    rows.set(task.project, all.filter((o) => o.taskId !== task.id || !dropped.has(o.resource)).concat(add.map((resource) => ({ resource, taskId: task.id }))));
+  }
+  return false;
+}
+
 async function syncOne(db: Database, dir: string, now: () => number, client: SharedLedgerClient, credential: SharedLedgerLocalCredential,
-  scope: ReplicaScope & { localProject: string }, centerFeatureId: string): Promise<ReplicaResult> {
+  scope: ReplicaScope & { localProject: string }, centerFeatureId: string, dryRun: boolean): Promise<ReplicaResult> {
   const { localProject, ...where } = scope;
   const prior = readCenterReplicas(dir).replicas[centerFeatureId];
+  const skipped = async (reason: string): Promise<ReplicaResult> => {
+    if (!dryRun) await noteSkip(dir, now, where, centerFeatureId, reason, null);
+    return { centerFeatureId, result: "skipped", reason };
+  };
   const failed = async (reason: string, localFeatureId?: string): Promise<ReplicaResult> => {
+    if (dryRun) return { centerFeatureId, result: "failed", reason, ...(localFeatureId ? { localFeatureId } : {}) };
+    if (!prior && !localFeatureId) await noteSkip(dir, now, where, centerFeatureId, null, reason); // first read failed: nothing else keeps it
     if (prior) await updateCenterReplicas(dir, (s) => { const e = s.replicas[centerFeatureId]; if (e) s.replicas[centerFeatureId] = { ...e, lastError: reason, lastErrorAt: now() }; });
     return { centerFeatureId, result: "failed", reason, ...(localFeatureId ? { localFeatureId } : {}) };
   };
   const refused = async (reason: string): Promise<ReplicaResult> => {
-    await updateCenterReplicas(dir, (s) => { s.refused[centerFeatureId] = { ...where, reason, at: now() }; });
+    if (!dryRun) await updateCenterReplicas(dir, (s) => { s.refused[centerFeatureId] = { ...where, reason, at: now() }; delete s.skipped?.[centerFeatureId]; });
     return { centerFeatureId, result: "refused", reason };
   };
   let detail: SharedLedgerFeatureDetail;
   try { detail = await client.feature(centerFeatureId); }
   catch (e) { return failed(errorText(e)); }
-  if (detail.feature.projectId !== scope.projectId || detail.feature.authorityMode !== "planning") return { centerFeatureId, result: "skipped", reason: REPLICA_REASONS.notPlanned };
-  if (detail.feature.homeInstanceId !== credential.instanceId) return { centerFeatureId, result: "skipped", reason: REPLICA_REASONS.notHome };
+  if (detail.feature.projectId !== scope.projectId) return skipped(REPLICA_REASONS.otherProject);
+  if (detail.feature.authorityMode !== "planning") return skipped(REPLICA_REASONS.notPlanned);
+  if (detail.feature.homeInstanceId !== credential.instanceId) return skipped(REPLICA_REASONS.notHome);
   const localFeatureId = centerReplicaLocalId(centerFeatureId);
   if (!localFeatureId) return refused(REPLICA_REASONS.badId);
   const limit = centerReplicaLimitReason(detail);
   if (limit) return refused(limit);
+  if (dryRun) return land(db, dir, now, credential, scope, detail, centerFeatureId, localFeatureId, failed, refused, true);
   // Identity check through state update run under the per-id lock: a colliding center feature syncing concurrently waits,
   // then sees this replica's mode / rows and is refused.
   const landed = await withCenterReplicaLock(dir, localFeatureId, () => land(db, dir, now, credential, scope, detail, centerFeatureId, localFeatureId, failed, refused));
@@ -158,7 +285,7 @@ async function syncOne(db: Database, dir: string, now: () => number, client: Sha
 
 async function land(db: Database, dir: string, now: () => number, credential: SharedLedgerLocalCredential, scope: ReplicaScope & { localProject: string },
   detail: SharedLedgerFeatureDetail, centerFeatureId: string, localFeatureId: string, failed: (reason: string, localFeatureId?: string) => Promise<ReplicaResult>,
-  refused: (reason: string) => Promise<ReplicaResult>): Promise<ReplicaResult> {
+  refused: (reason: string) => Promise<ReplicaResult>, dryRun = false): Promise<ReplicaResult> {
   const { localProject, ...where } = scope;
   let mode;
   try { mode = readSharedLedgerMode(localFeatureId, dir); } catch { return failed(REPLICA_REASONS.ledger, localFeatureId); }
@@ -178,6 +305,8 @@ async function land(db: Database, dir: string, now: () => number, credential: Sh
       if (source !== undefined && source !== taskId) return failed(BIND_MISMATCH, localFeatureId);
     }
   }
+  // dryRun stops here, before the first write: every check above ran, the writer's own checks are predicted read only.
+  if (dryRun) return predictReplicaWrite(db, write, existing);
   // Pusher entry first (inert until the mode says pushable), then the gate closes, then the ledger rows appear.
   const prior: { wrote: boolean; entry?: MirrorEntry } = { wrote: false };
   await updateSharedLedgerMirrors(dir, (m) => {
@@ -204,6 +333,7 @@ async function land(db: Database, dir: string, now: () => number, credential: Sh
   const elsewhere = boundElsewhere(db, dir, detail, localFeatureId), at = now();
   await updateCenterReplicas(dir, (s) => {
     delete s.refused[centerFeatureId];
+    delete s.skipped?.[centerFeatureId];
     s.replicas[centerFeatureId] = { ...where, centerFeatureId, localFeatureId, localProject, version: detail.dag.version, rev: detail.feature.rev,
       baseDigest: centerReplicaBaseDigest(detail), syncedAt: at, lastError: elsewhere.length ? boundElsewhereText(elsewhere) : null,
       lastErrorAt: elsewhere.length ? at : null, boundElsewhere: elsewhere };
@@ -226,7 +356,7 @@ function boundElsewhere(db: Database, dir: string, detail: SharedLedgerFeatureDe
   return [...new Set(detail.dag.bindings.map((b) => b.nodeKey))].filter((k) => !bound.has(k) && !claimed.has(k));
 }
 
-/** `center-replica status`: replicas with their local mode and claims summary, refusals with fixed reasons, scope errors. */
+/** `center-replica status`: replicas with their local mode and claims summary, refusals with fixed reasons, scope errors, skips. */
 export function centerReplicaStatus(dir = STATE_DIR) {
   const state = readCenterReplicas(dir), at = (t: number | null) => (t ? new Date(t).toISOString() : null);
   return {
@@ -239,5 +369,6 @@ export function centerReplicaStatus(dir = STATE_DIR) {
     }),
     refused: Object.entries(state.refused).map(([centerFeatureId, r]) => ({ centerFeatureId, ...r, at: at(r.at) })),
     scopes: Object.entries(state.scopes).map(([scope, s]) => ({ scope, ...s, syncedAt: at(s.syncedAt), lastErrorAt: at(s.lastErrorAt) })),
+    skipped: Object.entries(state.skipped ?? {}).map(([centerFeatureId, k]) => ({ centerFeatureId, ...k, at: at(k.at) })),
   };
 }

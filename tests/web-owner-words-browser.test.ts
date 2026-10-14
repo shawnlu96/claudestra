@@ -133,3 +133,243 @@ test.skipIf(!out)("UXTERM1 A 段：侧栏 low-priority 徽章与借出页，1280
     for (const [name, list] of Object.entries(issues).filter(([n]) => n.startsWith("after-"))) expect({ name, list }).toEqual({ name, list: [] });
   } finally { await browser.close(); }
 }, 600_000);
+
+import { serve as serveCollab } from './helpers/collab-fixture-serve';
+import { generateHomeFixture } from '@/features/collab/shared/home-fixture-gen';
+import { generateTeamFixture } from '@/features/collab/shared/team-fixture-gen';
+import type { Page } from 'playwright-core';
+
+const COLLAB_VIEWS = ['outline', 'overview', 'work', 'detail', 'planning'] as const;
+/** 步骤线与详情占位已统一词表，完整标签豁免清单保持为空。 */
+const PENDING_WORDS: { file: string; text: string; position: string }[] = [];
+const remainingBanned = (text: string) => {
+  // 只剥掉占完整一行的已登记标签 / 句子，不替换长句里的同一子串。
+  for (const { text: word } of PENDING_WORDS) text = text.replaceAll(new RegExp(`^${word}$`, 'gm'), '');
+  return BANNED_OWNER_WORDS.filter(w => text.includes(w));
+};
+
+/** 合成标题不含 UI 的内部词；三模块分别过期 25 分钟 / 最新 / 尚无进度，详情有两个等回答的问题。 */
+function collabFixture() {
+  const home = generateHomeFixture();
+  // 数据标题去掉生成器讲架构的内部名，保留真实长标题形状；UI 文案必须靠产品代码换词。
+  const clean = (s: string) => s.replaceAll('执行镜像', '任务进度').replaceAll('feature', 'module');
+  for (const i of home.overview.items) { i.title = clean(i.title); i.oneLine = clean(i.oneLine); }
+  for (const f of home.features) { f.title = clean(f.title); for (const v of f.versions) for (const n of v.nodes) n.oneLine = clean(n.oneLine); }
+  for (const t of home.overview.tasks) t.title = clean(t.title);
+  for (const d of Object.values(home.details)) d.task.title = clean(d.task.title);
+  for (const [id, stage] of [['i28-A1', 'spec'], ['i28-A2', 'blocked'], ['i28-B3', 'restate']] as const) {
+    const task = home.overview.tasks.find(t => t.id === id)!;
+    Object.assign(task, { stage, stageBefore: stage === 'blocked' ? 'build' : null, metrics: {}, stageSince: home.now, updatedAt: home.now });
+    home.details[id] = { ...home.details[id]!, task, events: [], timeline: [{ stage, from: home.now, to: home.now }], stepLine: null };
+    home.rows[id]!.steps = []; home.rows[id]!.asks = [];
+  }
+  const parked = home.overview.tasks.at(-1)!;
+  Object.assign(parked, { stage: 'parked', itemId: home.features[0]!.id, title: '等待分类的任务' });
+  home.details[parked.id]!.task = parked;
+  for (const version of home.features[0]!.versions) version.nodes.push({ key: parked.id, oneLine: parked.title, deps: [],
+    fileGlobs: ['web/tests/**'], estimate: '1h', taskId: parked.id });
+  const fx = generateTeamFixture({ features: 3, nodes: 10, now: home.now });
+  for (const [i, d] of fx.details.entries()) {
+    d.feature.title = `模块 ${i + 1}：同步不同机器上的任务进度`;
+    d.feature.homeInstanceId = i === 2 ? home.sourceInstanceId : `peer-machine-${i + 1}`;
+    d.feature.projection = i === 2 ? null : { ...d.feature.projection!, observedAt: home.now - (i === 0 ? 25 * 60_000 : 0) };
+    for (const n of d.dag.nodes) n.oneLine = clean(n.oneLine);
+    for (const t of d.tasks) {
+      t.executorInstanceId = d.feature.homeInstanceId;
+      t.specSummary = clean(t.specSummary ?? '');
+      if (t.stage === 'review' || t.stage === 'fix') t.asks = [{ kind: 'question', state: 'open', blocking: true }, { kind: 'question', state: 'open', blocking: true }];
+    }
+  }
+  fx.list.features = fx.details.map(d => d.feature);
+  return { home, team: { list: fx.list, details: fx.details, localFeature: {} } };
+}
+
+async function collabBundle(repo: string, dir: string) {
+  mkdirSync(dir, { recursive: true });
+  const entry = resolve(dir, 'collab-entry.ts');
+  await Bun.write(entry, `import { setLang } from ${JSON.stringify(resolve(repo, 'web/lib/i18n.tsx'))};
+import ${JSON.stringify(resolve(repo, 'web/features/collab/shared/fixture-harness.tsx'))};
+setLang(new URLSearchParams(location.search).get('lang') === 'en' ? 'en' : 'zh');`);
+  const p = Bun.spawn([process.execPath, 'build', entry, '--target', 'browser', '--outdir', resolve(dir, 'dist'),
+    '--tsconfig-override', 'web/tsconfig.json'], { cwd: repo, stdout: 'pipe', stderr: 'pipe' });
+  if (await p.exited) throw new Error(await new Response(p.stderr).text());
+  return resolve(dir, 'dist');
+}
+
+async function collabNavigate(page: Page, view: typeof COLLAB_VIEWS[number], lang: 'zh' | 'en', narrow: boolean) {
+  const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
+  if (view === 'planning') {
+    const name = tr('规划与提案', 'Plans & proposals');
+    await (narrow ? page.getByRole('button', { name, exact: true }) : page.getByRole('tab', { name, exact: true })).click();
+    await page.getByText(tr('团队规划', 'Team planning'), { exact: true }).waitFor();
+  } else if (view === 'work') {
+    await page.getByRole('tab', { name: tr('谁在干活', 'Who is working'), exact: true }).click();
+    await page.locator('[data-work-board="team"]').waitFor();
+    if (narrow) await page.getByRole('tab', { name: /^(待做|To do)/ }).click();
+  } else if (view === 'outline') {
+    await page.getByRole('button').filter({ has: page.getByText(collabFixture().home.features[0]!.title, { exact: true }) }).first().click();
+    if (!narrow) await page.getByRole('tab', { name: /^全部|^All/ }).first().click();
+    await page.getByText('等待分类的任务', { exact: true }).first().waitFor();
+  } else if (view === 'detail') {
+    const title = collabFixture().team.details[0]!.dag.nodes.find(n => n.key === 'i28-A5')!.oneLine;
+    if (narrow) await page.getByRole('button').filter({ has: page.getByText('模块 1：同步不同机器上的任务进度', { exact: true }) }).first().click();
+    await page.getByText(title, { exact: true }).first().click();
+    await page.locator('[data-team-fact]').first().waitFor();
+  }
+  await page.evaluate('document.fonts.ready');
+  await page.evaluate('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))');
+}
+
+test.skipIf(!out)('UXTERM2 B 段：同一协作视图的中英、1280 / 390、改前改后与精确残留清单', async () => {
+  if (!out) return;
+  const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' }) });
+  const sides = [...(baseRepo ? [{ phase: 'before' as const, repo: resolve(baseRepo) }] : []), { phase: 'after' as const, repo: resolve(import.meta.dir, '..') }];
+  const texts: Record<string, string> = {}, issues: Record<string, ShotIssue[]> = {}, requests: Record<string, unknown> = {};
+  try {
+    for (const { phase, repo } of sides) {
+      const { home, team } = collabFixture();
+      expect([...new Set(home.overview.tasks.map(t => t.stage))]).toEqual(expect.arrayContaining([
+        'spec', 'restate', 'build', 'review', 'fix', 'merge', 'blocked', 'parked',
+      ]));
+      const dist = await collabBundle(repo, resolve(out, `collab-${phase}`));
+      // helper 的 HTML 自动取唯一 js；Bun 入口名不影响产品 harness。
+      const { server } = serveCollab(home, team, dist);
+      try {
+        for (const width of [1280, 390]) for (const view of COLLAB_VIEWS) for (const lang of ['zh', 'en'] as const) {
+          const g = await guardedPage(browser, String(server.url), { width });
+          await g.page.route('**/api/v1/shared-ledger/context', r => r.fulfill({ json: { identities: [{ center: 'center-fixture',
+            team: home.team, person: 'person-fixture', project: home.project, homeInstanceId: home.sourceInstanceId }] } }));
+          await g.page.route('**/api/v1/shared-projects/snapshot', r => r.fulfill({ json: { v: 1, identity: { subject: 'owner:self', kind: 'person',
+            centerId: 'center-fixture', teamId: home.team, personId: 'person-fixture', instanceId: home.sourceInstanceId },
+            teamRole: { available: true, value: 'member' }, capabilities: { invite: { available: false }, leave: { available: false } }, projects: [], localProjects: [], peers: [
+              { name: '研发机', instanceId: 'peer-machine-1', enabled: true, invitable: true },
+              { name: '开发', instanceId: 'peer-machine-2', enabled: true, invitable: true }] } }));
+          await g.page.clock.install({ time: home.now });
+          const side = view === 'outline' ? 'local' : 'team';
+          await g.page.goto(`${server.url}?side=${side}&project=${home.project}&team=${home.team}&lang=${lang}&homeInstanceId=${home.sourceInstanceId}`);
+          await g.page.getByRole('progressbar').first().waitFor();
+          await collabNavigate(g.page, view, lang, width === 390);
+          if (phase === 'after' && (view === 'detail' || view === 'planning')) await g.page.getByText(/研发机/).first().waitFor();
+          if (view === 'detail') await g.page.locator('[data-team-fact]').last().scrollIntoViewIfNeeded();
+          const name = `${phase}-collab-${view}-${width}${lang === 'en' ? '-en' : ''}`;
+          const text = await g.page.locator('body').innerText();
+          texts[name] = text;
+          if (lang === 'zh') {
+            await g.page.screenshot({ path: resolve(out, `${name}.png`), fullPage: true });
+            issues[name] = await shotIssues(g.page);
+          }
+          requests[name] = { external: [...g.external], errors: [...g.errors] };
+          expect({ name, external: g.external, errors: g.errors }).toEqual({ name, external: [], errors: [] });
+          if (phase === 'after') {
+            expect({ name, banned: remainingBanned(text) }).toEqual({ name, banned: [] });
+            if (view === 'outline' && width === 1280) expect(text).toContain(lang === 'zh' ? '其他' : 'Other');
+            expect(text).not.toMatch(/\bparked\b/);
+            if (view === 'detail') expect(text).toContain(lang === 'zh' ? '任务所在的机器：研发机' : 'The machine running the task: 研发机');
+            if (view === 'planning') expect(text).toContain(lang === 'zh' ? '任务所在的机器 开发' : 'The machine running the task 开发');
+            if (view === 'work') expect(text).toContain(lang === 'zh' ? '可以开工' : 'Ready to start');
+            if (view === 'planning') for (const word of (lang === 'zh'
+              ? ['25 分钟没收到任务所在机器的更新', '进度是最新的', '还没收到任务所在机器的进度']
+              : ["No update from the task's machine for 25 min", 'Progress is up to date', "No progress received from the task's machine yet"])) expect(text).toContain(word);
+            if (lang === 'en') expect(text).not.toMatch(/\bLP\b|feature/i);
+          }
+          await g.ctx.close();
+        }
+      } finally { server.stop(true); }
+    }
+  } finally {
+    await browser.close();
+    await Bun.write(resolve(out, 'collab-inner-text.json'), JSON.stringify(texts, null, 2));
+    await Bun.write(resolve(out, 'collab-shot-issues.json'), JSON.stringify(issues, null, 2));
+    await Bun.write(resolve(out, 'collab-requests.json'), JSON.stringify(requests, null, 2));
+    await Bun.write(resolve(out, 'pending-words.json'), JSON.stringify(PENDING_WORDS, null, 2));
+  }
+  for (const [name, list] of Object.entries(issues).filter(([n]) => n.startsWith('after-'))) expect({ name, list }).toEqual({ name, list: [] });
+}, 600_000);
+
+/** UXTERM4：团队源声明的仅在任务所在机器能看的六项（含 replay），和生产团队源 HOME_ONLY 同一组 */
+const TEAM_HOME_ONLY = ['events.text', 'review.text', 'sessions', 'say', 'spec.full', 'replay'];
+
+/** 缺正文的团队卡：同一份本机夹具的一张卡，事件全是脱敏的（只有类型和时间），没有阶段证据，回放给占位 */
+function redactedCard() {
+  const { home } = collabFixture();
+  const task = home.overview.tasks.find(t => t.stage === 'review' && t.agent)!;
+  const red = (kind: string, i: number) => ({ seq: 900 + i, ts: home.now - (5 - i) * 60_000, actor: 'agent-bait', target: task.id, kind, text: '', data: { redacted: true } });
+  const detail = { ...home.details[task.id]!, events: ['stage', 'deliver', 'review', 'verify'].map(red), timeline: [] };
+  return { home, project: home.project, id: task.id, overview: home.overview, detail };
+}
+
+/** 入口在截图目录：CollabView 外面包一个注入源（homeOnly 六项、task 给脱敏详情），改前 / 改后同一份入口，只换仓库 */
+async function redactedBundle(repo: string, dir: string, card: ReturnType<typeof redactedCard>) {
+  mkdirSync(dir, { recursive: true });
+  const entry = resolve(dir, 'redacted-entry.ts'), from = (f: string) => JSON.stringify(resolve(repo, f));
+  await Bun.write(entry, `import { createElement as h } from ${from('web/node_modules/react/index.js')};
+import { createRoot } from ${from('web/node_modules/react-dom/client.js')};
+import { setLang } from ${from('web/lib/i18n.tsx')};
+import { ChatStoreProvider } from ${from('web/features/chat/chat-store.ts')};
+import { CollabView } from ${from('web/features/collab/collab-view.tsx')};
+import { CollabSourceContext } from ${from('web/features/collab/team-source-context.ts')};
+import { openCollab, openCollabTask } from ${from('web/features/collab/collab-nav.ts')};
+setLang(new URLSearchParams(location.search).get('lang') === 'en' ? 'en' : 'zh');
+const card = ${JSON.stringify({ project: card.project, id: card.id, overview: card.overview, detail: card.detail })};
+const source = { homeOnly: new Set(${JSON.stringify(TEAM_HOME_ONLY)}), overview: async () => card.overview, task: async () => card.detail,
+  follow: ({ signal }) => new Promise((r) => signal.addEventListener('abort', () => r())) };
+openCollab(card.project);
+openCollabTask(card.id);
+createRoot(document.getElementById('root')).render(h(ChatStoreProvider, null, h(CollabSourceContext.Provider, { value: source }, h(CollabView, { project: card.project }))));
+`);
+  const p = Bun.spawn([process.execPath, 'build', entry, '--target', 'browser', '--outdir', resolve(dir, 'dist'),
+    '--tsconfig-override', 'web/tsconfig.json'], { cwd: repo, stdout: 'pipe', stderr: 'pipe' });
+  if (await p.exited) throw new Error(await new Response(p.stderr).text());
+  return resolve(dir, 'dist');
+}
+
+/** 每页必须出现的句子：改前是「仅主场」旧句，改后是任务所在机器的新句 */
+const REDACTED_WANT = {
+  before: { zh: ['回放仅主场', '审查（结论仅主场）'], en: ['Replay at home only', 'Review (verdict at home only)'] },
+  after: { zh: ['回放要在任务所在的机器上看', '审查（结论在任务所在的机器上）', '线上验证（结果在任务所在的机器上）', '交付（详情在任务所在的机器上）'],
+    en: ['Replay on the machine running this task', 'Review (verdict on the machine running this task)', 'Delivered (details on the machine running this task)'] },
+};
+
+test.skipIf(!out)('UXTERM4：缺正文团队卡详情的回放占位与脱敏事件句，1280 / 390 改前改后，改后不含禁用词', async () => {
+  if (!out) return;
+  const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' }) });
+  const sides = [...(baseRepo ? [{ phase: 'before' as const, repo: resolve(baseRepo) }] : []), { phase: 'after' as const, repo: resolve(import.meta.dir, '..') }];
+  const texts: Record<string, string> = {}, issues: Record<string, ShotIssue[]> = {};
+  const card = redactedCard();
+  try {
+    for (const { phase, repo } of sides) {
+      const { server } = serveCollab(card.home, collabFixture().team, await redactedBundle(repo, resolve(out, `redacted-${phase}`), card));
+      try {
+        for (const width of [1280, 390]) for (const lang of ['zh', 'en'] as const) {
+          const g = await guardedPage(browser, String(server.url), { width });
+          await g.page.clock.install({ time: card.home.now });
+          await g.page.goto(`${server.url}?lang=${lang}`);
+          await g.page.locator('[data-home-only="replay"]').waitFor();
+          // 截图要拍到「最近 3 件事」和回放占位：回放占位滚到视口中间（手机底部有「对它说」条会挡住贴底的占位），上面的事件区跟着露出来
+          await g.page.evaluate(`document.querySelector('[data-home-only="replay"]').scrollIntoView({ block: 'center' })`);
+          await g.page.evaluate('document.fonts.ready');
+          await g.page.evaluate('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))');
+          const name = `${phase}-redacted-detail-${width}${lang === 'en' ? '-en' : ''}`, text = await g.page.locator('body').innerText();
+          texts[name] = text;
+          if (lang === 'zh') {
+            await g.page.screenshot({ path: resolve(out, `${name}.png`) });
+            issues[name] = await shotIssues(g.page);
+          }
+          expect({ name, external: g.external, errors: g.errors }).toEqual({ name, external: [], errors: [] });
+          expect({ name, missing: REDACTED_WANT[phase][lang].filter(w => !text.includes(w)) }).toEqual({ name, missing: [] });
+          if (phase === 'after') {
+            expect({ name, banned: remainingBanned(text) }).toEqual({ name, banned: [] });
+            expect({ name, hit: text.match(/at home only|\bhome\b/i)?.[0] ?? null }).toEqual({ name, hit: null });
+          }
+          await g.ctx.close();
+        }
+      } finally { server.stop(true); }
+    }
+  } finally {
+    await browser.close();
+    await Bun.write(resolve(out, 'redacted-inner-text.json'), JSON.stringify(texts, null, 2));
+    await Bun.write(resolve(out, 'redacted-shot-issues.json'), JSON.stringify(issues, null, 2));
+  }
+  expect(PENDING_WORDS).toEqual([]);
+  for (const [name, list] of Object.entries(issues).filter(([n]) => n.startsWith('after-'))) expect({ name, list }).toEqual({ name, list: [] });
+}, 600_000);

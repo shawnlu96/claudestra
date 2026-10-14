@@ -143,21 +143,23 @@ const DECISIONS: [string, string][] = [
   ["Do I rename the column in asks?", "schema"], ["Where do I find the api key?", "凭据 / 安全"],
   ["Can I put the helper in src/lib/thing.ts?", "请求批准 / 决策"], ["Is it ok to skip the second test in src/lib/thing.ts?", "请求批准 / 决策"],
   ["验收线 1 我想按 1000 行算，行吗？", "请求批准 / 决策"], ["Ｃａｎ　Ｉ ｃｈａｎｇｅ ｔｈｅ ｓｃｏｐｅ?", "改范围"], ["Can I change the sc​ope?", "改范围"],
-  ["Thanks, carrying on.", "不像白名单内的查证问题"], ["帮我看看这个", "不像白名单内的查证问题"], ["", "不像白名单内的查证问题"],
 ];
 
 // [验收线 2]
 test("decision questions in English, obfuscated spellings and anything that is not a lookup are not direct candidates; plain lookups still are", () => {
   for (const [q, label] of DECISIONS) expect([q, forbiddenOf(q)]).toEqual([q, label]);
   for (const q of ["验收线 1 的行数上限是多少？", "src/lib/thing.ts 里 b 在哪一行？", "验收线 1 具体指什么？", "What does acceptance line 1 say?",
-    "Where is b defined in src/lib/thing.ts?", "Which file implements the lease?", "标准答复里环境那条是怎么说的，指的是哪个命令？"]) expect([q, forbiddenOf(q)]).toEqual([q, null]);
+    "Where is b defined in src/lib/thing.ts?", "Which file implements the lease?", "标准答复里环境那条是怎么说的，指的是哪个命令？",
+    // agents-PMJOB2 去掉了「像查证」门：不像查证、但一道门都不中的不再挡在接单时，交给输出核对
+    "Thanks, carrying on.", "帮我看看这个", ""]) expect([q, forbiddenOf(q)]).toEqual([q, null]);
 });
 
 // [验收线 2]
-test("on: an English scope / delete decision goes to the PM at once and is never answered, whatever the model claims", async () => {
+test("on: an English hard-gate decision goes to the PM at once and is never answered, whatever the model claims", async () => {
   w = await jobWorld("on");
   const asked: [string, string][] = [];
-  for (const q of ["Can I change the scope to include another module?", "Can I delete the database records?", "Thanks, carrying on with src/lib/thing.ts."]) {
+  // agents-PMJOB2：改范围是软门（直回候选，只能按 specDecided 答），不像查证的不再挡；这里只留硬门
+  for (const q of ["Could you grant me write access to the ledger?", "Can I delete the database records?", "Where do I find the api key?"]) {
     const before = w.pm.length, { askId } = await w.ask(q);
     asked.push([askId, q]);
     expect(w.store.get(askId)).toMatchObject({ direct: false, forbidden: expect.any(String) });
@@ -172,6 +174,19 @@ test("on: an English scope / delete decision goes to the PM at once and is never
     expect(w.store.get(askId)).toMatchObject({ state: "observed", result: { verdict: "escalate" } });
     expect(getAsk(w.f.db, askId)?.state).toBe("open");
   }
+});
+
+// [验收线 3]
+test("on: an English scope decision is a direct candidate but escalates unless answered as specDecided", async () => {
+  w = await jobWorld("on");
+  const q = "Can I change the scope to include another module?", { askId } = await w.ask(q);
+  expect(w.store.get(askId)).toMatchObject({ direct: true, hard: false, forbidden: "改范围", forbiddenAll: ["改范围", "请求批准 / 决策"] });
+  expect(w.pm).toEqual([]);
+  expect(await w.work(() => ok(goodAnswer({ specPath: w!.specPath })))).toBe(1);
+  await pmJob.sweep();
+  expect(w.asker).toEqual([]);
+  expect(w.store.get(askId)).toMatchObject({ state: "escalated", note: expect.stringContaining("specDecided") });
+  expect(w.pm[0]!.content.startsWith(original(askId, q))).toBe(true);
 });
 
 // [验收线 2]

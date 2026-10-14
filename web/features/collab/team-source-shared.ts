@@ -1,6 +1,6 @@
 /**
  * 团队视图的数据源：中心共享台账经 SharedLedgerSession（身份校验、迟到响应作废）读，交给 team-source-adapter.ts 转形状。
- * 中心没有事件流：每 5 秒读一次 feature 列表，serverSeq 变了（或回退）才发一条 ledger 事件让 use-collab 重拉；
+ * 中心没有事件流：每 15 秒读一次 feature 列表（页面在后台时不读，回到前台立刻读一次；CBUDGET2），serverSeq 变了（或回退）才发一条 ledger 事件让 use-collab 重拉；
  * 重拉时 feature 详情按 rev / version / counts 复用，没变的不再读；只有执行镜像水位（sourceSeq / observedAt 是本机全局事件号，
  * 台账任一事件都会让所有 feature 一起变）变时同一 feature 至多每 60 秒重拉一次，到期时列表没再变也补拉一轮。中心按 IP 限流（2r/s、burst 20）：
  * 详情同时最多 2 个在途、每轮到期重拉有上限；回 429 本轮剩下的不再发、按 Retry-After 推迟，已缓存的照用。
@@ -21,7 +21,7 @@ import { sharedIdentity } from "./team-source-key";
 import { teamBodyReader } from "./team-body/team-body-source";
 import type { CollabHomeOnly, CollabSource, CollabUnavailable, FollowOpts } from "./team-source";
 
-export const POLL_MS = 5_000;
+export const POLL_MS = 15_000;
 /** 详情请求同时在途上限 */
 export const DETAIL_CONCURRENCY = 2;
 /** 只有执行镜像水位变时，同一 feature 的最短重拉间隔（打开的那个不受限） */
@@ -32,7 +32,7 @@ export const DETAIL_REFRESH_MS = 60_000;
  * adapter 顶层引用这里的常量会在加载顺序反过来时撞 TDZ；adapter 只在调用时读它。
  */
 export const DETAIL_BEHIND_MS = DETAIL_REFRESH_MS + POLL_MS;
-/** 每轮因水位到期重拉的 feature 上限：5 秒一轮 ≈ 1.6r/s，低于中心 2r/s，到期的不会在同一轮挤爆 burst */
+/** 每轮因水位到期重拉的 feature 上限：一轮最多 8 个，低于中心 2r/s 的 burst，到期的不会在同一轮挤爆 */
 export const DETAIL_REFRESH_PER_ROUND = 8;
 /** 429 没带 Retry-After 时推迟多久；带了也不超过上限 */
 export const BACKOFF_DEFAULT_MS = 5_000;
@@ -59,11 +59,12 @@ const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", 
 export interface SharedSource extends CollabSource {
   /**
    * 最近一次转好的总览与原始数据（团队操作按卡号找回 feature）；fetchedAt = 各详情最近一次成功取回的时刻（读失败、429 停发不更新）；
-   * behindSince = 页面第一次观察到列表投影比显示详情新的时刻（列表与显示详情一致、或读成功追上时清掉），概览「落后列表」从它起算
+   * behindSince = 页面第一次观察到列表投影比显示详情新的时刻（列表与显示详情一致、或读成功追上时清掉），概览「落后列表」从它起算；
+   * failed = 这一轮结束时进过队列却没拉到（读失败、429 停发）、之后还没读成功的 feature（只读快照；排队的 waiting 不在里面，TEAMCNT1）
    */
   last(): {
     team: TeamOverview; list: FeatureList; details: ReadonlyMap<string, FeatureDetail>; waiting: ReadonlySet<string>;
-    fetchedAt: ReadonlyMap<string, number>; behindSince: ReadonlyMap<string, number>;
+    fetchedAt: ReadonlyMap<string, number>; behindSince: ReadonlyMap<string, number>; failed: ReadonlySet<string>;
   } | null;
   /** 提交成功 / 重读后立刻重拉 */
   poke(): void;
@@ -85,10 +86,35 @@ export function detailBackoffMs(e: unknown): number | null {
   return Math.min(BACKOFF_MAX_MS, Number.isFinite(s) && s >= 0 ? s * 1000 : BACKOFF_DEFAULT_MS);
 }
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
+/** 页面可见性只用到这几样；根目录 tsc 不带 dom lib，经 globalThis 取 */
+interface VisibilityDoc {
+  readonly hidden: boolean;
+  addEventListener(type: "visibilitychange", cb: () => void): void;
+  removeEventListener(type: "visibilitychange", cb: () => void): void;
+}
+const pageDoc = (): VisibilityDoc | null => (globalThis as { document?: VisibilityDoc }).document ?? null;
+/** 页面在后台（document.hidden）：列表轮询停下，不占中心限流；没有 document（非浏览器）按前台算 */
+const hidden = () => pageDoc()?.hidden === true;
+
+/**
+ * 等下一轮列表轮询（CBUDGET2）：满 ms 且页面在前台才返回；后台期间一直等，期间进过后台的回到前台立刻返回（不等满 ms）。
+ * 中止立刻返回
+ */
+function pollWait(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+    const doc = pageDoc();
+    let due = false, wasHidden = hidden();
+    const finish = () => {
+      clearTimeout(t);
+      doc?.removeEventListener("visibilitychange", onVisibility);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const onVisibility = () => { if (hidden()) wasHidden = true; else if (due || wasHidden) finish(); };
+    const t = setTimeout(() => { due = true; if (!hidden()) finish(); }, ms);
+    doc?.addEventListener("visibilitychange", onVisibility);
+    if (signal.aborted) finish();
+    else signal.addEventListener("abort", finish, { once: true });
   });
 }
 
@@ -205,7 +231,7 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     const at = now(), prev = st.last?.behindSince;
     const behindSince = new Map(list.features.filter((f) => details.has(f.id) && listAhead(f, details.get(f.id)))
       .map((f) => [f.id, prev?.get(f.id) ?? at]));
-    return (st.last = { team: teamOverview(list, details, at, waiting, fetchedAt, behindSince), list, details, waiting, fetchedAt, behindSince });
+    return (st.last = { team: teamOverview(list, details, at, waiting, fetchedAt, behindSince), list, details, waiting, fetchedAt, behindSince, failed: new Set(failed) });
   };
   let rerun: Promise<Got> | null = null;
   const read = (): Promise<Got> => {
@@ -374,7 +400,8 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       try {
         while (!signal.aborted) {
           local.start();
-          await sleep(pollMs, signal);
+          // 后台不轮询：回到前台立刻读一次，之后照常按 pollMs（打开的 feature 详情走 focus / poke，不受影响）
+          await pollWait(pollMs, signal);
           if (signal.aborted) return;
           const got = await r.lists.read().catch((e: Error) => void console.warn(`[team] 轮询失败：${e.message}`)); // 下一轮再试，视图保留上一份
           const list = got?.list;

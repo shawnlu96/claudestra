@@ -9,7 +9,7 @@
  * 修完这些请求为 0，指标显示「暂无」（带原因 title）。本机同数据的数字与请求路径保持不变。
  * happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { setAppConfigForTest } from "../web/lib/app-config";
@@ -20,7 +20,7 @@ type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
 const webRequire = createRequire(new URL("../web/package.json", import.meta.url));
 interface El {
-  textContent: string | null; title: string; getAttribute(n: string): string | null;
+  textContent: string | null; title: string; getAttribute(n: string): string | null; hasAttribute(n: string): boolean;
   querySelector(s: string): El | null; querySelectorAll(s: string): ArrayLike<El>; click(): void; remove(): void;
 }
 interface Doc { createElement(tag: string): El; body: El & { appendChild(c: El): void } }
@@ -79,6 +79,8 @@ function project(home: LedgerOverview): { list: FeatureList; detail: FeatureDeta
 
 const calls: string[] = [];
 const realFetch = globalThis.fetch;
+/** 团队那一份夹具（UXHOME1 的页头用例要改它的镜像观测时刻；list 与 detail 里是同一个 feature 对象） */
+let fixture: ReturnType<typeof project>;
 
 beforeAll(async () => {
   GlobalRegistrator.register({ url: "http://localhost/", width: 1200, height: 900 });
@@ -87,6 +89,7 @@ beforeAll(async () => {
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
   doc = (globalThis as unknown as { document: Doc }).document;
   const home = homeLedger(), team = project(home);
+  fixture = team;
   // 只回环夹具：拦下全部请求，记下解码后的路径；夹具之外一律 404，不出网
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
@@ -105,6 +108,12 @@ beforeAll(async () => {
   const ops = await import(mod("collab/shared/team-ops.tsx"));
   const nav = await import(mod("collab/dag/shared-navigation.tsx"));
   ui = { CollabView: view.CollabView, ChatStoreProvider: store.ChatStoreProvider, TeamSource: ops.TeamSource, sharedCollabProject: nav.sharedCollabProject };
+});
+
+/** 本文件挂上的根：用例中途失败（含 mount 里等不到首屏）也在 afterEach 卸掉，先卸根、afterAll 再注销 happy-dom */
+const live = new Set<() => Promise<void>>();
+afterEach(async () => {
+  for (const off of [...live]) await off();
 });
 
 afterAll(async () => {
@@ -126,6 +135,12 @@ async function mount(side: "local" | "team", width: number) {
   const host = doc.createElement("div");
   doc.body.appendChild(host);
   const root = createRoot(host as never);
+  const unmount = async () => {
+    if (!live.delete(unmount)) return;
+    await React.act(async () => root.unmount());
+    host.remove();
+  };
+  live.add(unmount);
   const h = React.createElement as (...a: unknown[]) => unknown;
   const collab = side === "team"
     ? h(ui.TeamSource, { identity: IDENTITY }, h(ui.CollabView, { project: ui.sharedCollabProject(IDENTITY) }))
@@ -149,7 +164,7 @@ async function mount(side: "local" | "team", width: number) {
       return cell ? { value: cell.querySelector("b")!.textContent, title: cell.getAttribute("title") } : null;
     },
     button: (label: string) => buttons().find((x) => (x.textContent ?? "").trim().startsWith(label)) ?? null,
-    unmount: async () => { await React.act(async () => root.unmount()); host.remove(); },
+    unmount,
   };
 }
 
@@ -160,6 +175,7 @@ test("复现测试:团队 CollabView 不再请求本机 last-seen / 谁在干活
   const v = await mount("team", 1200);
   await v.click("谁在干活");
   await v.click("团队");
+  await v.click("规划与提案");
   await tick(300);
   const hits = calls.filter((c) => LOCAL_ONLY.some((re) => re.test(c)));
   expect(hits).toEqual([]);
@@ -231,7 +247,7 @@ test("防回归:本机手机今日完成分组照旧列 3 张", async () => {
 test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英文词条（在场原因 / 桌面待你处理）；谁在干活是只读列表、手机待你处理不再说 V1", async () => {
   i18n.setLang("en");
   try {
-    const EXEC = "V1 shares planning; execution stays at home";
+    const EXEC = "View and plan only here; start and merge on the machine running the task";
     const v = await mount("team", 1200);
     const desk = { presence: v.metric("Agents present")?.title, waits: v.button("For you")?.title };
     await v.click("Who is working");
@@ -239,7 +255,7 @@ test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英�
     const el = v.host.querySelector("[data-work-board=team]");
     const chrome = el ? Array.from(el.querySelectorAll("h3, [role=tab]")).map((x) => x.textContent ?? "").join("|") : "";
     const board = el?.textContent ?? "";
-    const work = { board: ["Working", "Waiting", "To do", "Mirror ·", "Ready ·"].every((w) => board.includes(w)), zhUi: /[\u4e00-\u9fff]/.test(chrome),
+    const work = { board: ["Working", "Waiting", "To do", "Sync ·", "Ready to start ·"].every((w) => board.includes(w)), zhUi: /[\u4e00-\u9fff]/.test(chrome),
       hint: (v.host.querySelector("[role=status] p")?.textContent ?? "").includes(EXEC) };
     const zhLeft = (v.host.textContent ?? "").includes("执行操作仍在主场");
     await v.unmount();
@@ -280,4 +296,80 @@ test("复现测试:英文模式团队未知数值不回落中文「暂无」（�
   } finally {
     i18n.setLang("zh");
   }
+});
+
+/** 页头那一行（collab-page-head.tsx）；本机源没有 */
+const headLine = (host: El) => host.querySelector("[data-collab-head]");
+const tabs = (host: El) => Array.from(host.querySelectorAll("[role=tab]")).map((x) => (x.textContent ?? "").trim());
+const mirrorSec = (host: El) => Array.from(host.querySelectorAll("section")).find((x) => x.querySelector("h5")?.textContent === "镜像");
+
+test("[验收线 5] 团队视图页头写『团队版 · N 分钟前同步』，右栏没有『镜像』节；标签叫『团队』，规划在子标签、不读本机往来", async () => {
+  const v = await mount("team", 1200);
+  await until(() => headLine(v.host) !== null, "page head line");
+  expect([headLine(v.host)!.getAttribute("data-collab-head"), headLine(v.host)!.textContent]).toEqual(["fresh", "团队版 · 刚刚同步"]);
+  expect(mirrorSec(v.host)).toBeUndefined();
+  expect(v.host.textContent).not.toMatch(/主场镜像/);
+  expect(tabs(v.host)).toContain("团队");
+  expect(tabs(v.host)).not.toContain("规划与提案");
+  await v.click("团队");
+  await v.click("规划与提案");
+  expect(v.host.textContent).toContain("团队规划");
+  expect(v.host.textContent).not.toMatch(/最近 10 分钟|加载团队|peer-mac/);
+  await v.unmount();
+});
+
+test("[验收线 5] 有过期：页头写过期个数（按钮），点开原地列出过期的那几个，再点收起；一份都没收到写还没收到", async () => {
+  const feature = fixture.list.features[0]!, was = feature.projection;
+  try {
+    feature.projection = { ...was!, observedAt: NOW - 30 * 60_000, receivedAt: NOW - 30 * 60_000 };
+    const v = await mount("team", 1200);
+    await until(() => headLine(v.host)?.getAttribute("data-collab-head") === "stale", "stale head line");
+    const line = headLine(v.host)!, list = v.host.querySelector("[data-collab-head-stale]")!;
+    expect([line.textContent, line.getAttribute("aria-expanded"), list.hasAttribute("inert")]).toEqual(["团队版 · 1 个模块的进度可能不是最新的", "false", true]);
+    await React.act(async () => line.click());
+    expect([line.getAttribute("aria-expanded"), list.hasAttribute("inert"), list.textContent]).toEqual(["true", false, "对照事项 parity"]);
+    await React.act(async () => line.click());
+    expect([line.getAttribute("aria-expanded"), list.hasAttribute("inert")]).toEqual(["false", true]);
+    expect(mirrorSec(v.host)).toBeUndefined();
+    await v.unmount();
+
+    feature.projection = null as never;
+    const n = await mount("team", 1200);
+    await until(() => headLine(n.host) !== null, "empty head line");
+    expect([headLine(n.host)!.getAttribute("data-collab-head"), headLine(n.host)!.textContent]).toEqual(["none", "团队版 · 还没收到任务所在机器的进度"]);
+    await n.unmount();
+  } finally {
+    feature.projection = was;
+  }
+});
+
+test("[验收线 5] 手机：团队源顶栏按钮与整屏页标题是『团队』、副标题『成员与位子』，页头同样写团队版", async () => {
+  const v = await mount("team", 390);
+  await until(() => headLine(v.host) !== null, "page head line");
+  expect(headLine(v.host)!.textContent).toBe("团队版 · 刚刚同步");
+  expect(v.button("团队")).not.toBeNull();
+  expect(v.button("规划与提案")).toBeNull();
+  await v.click("团队");
+  const sheet = (doc.body.textContent ?? "");
+  expect(sheet).toContain("团队成员与位子");
+  expect(sheet).not.toContain("最近 10 分钟的真实往来");
+  await v.unmount();
+});
+
+test("[验收线 5] 本机源请求不变：页头只有项目名，标签 / 手机按钮叫『团队』，副标题『成员与位子』，成员面板照常读本机接口", async () => {
+  const v = await mount("local", 1200);
+  expect(headLine(v.host)).toBeNull();
+  expect(v.host.textContent).not.toMatch(/团队版|规划与提案/);
+  expect(tabs(v.host)).toContain("团队");
+  await v.click("团队");
+  await tick(300);
+  expect(calls).toContain("GET /api/v1/peers/contacts"); // 成员面板在
+  await v.unmount();
+  const m = await mount("local", 390);
+  expect(headLine(m.host)).toBeNull();
+  expect(m.button("规划与提案")).toBeNull();
+  await m.click("团队");
+  expect(doc.body.textContent ?? "").toContain("团队成员与位子");
+  expect(doc.body.textContent ?? "").not.toContain("规划与提案");
+  await m.unmount();
 });

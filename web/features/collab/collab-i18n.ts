@@ -4,6 +4,7 @@
  * 短词做全局 key 会改掉别处同字不同义的译文（tests/web-ledger-stage.test.ts 守着「开发」「验证」这几个）。
  * 整句模板照常在 lib/i18n-dict-collab.ts（经 DICT 全局可用）。组件一律用 useCollabT()。
  */
+import { MACHINE_WORDS, READY_WORD, STAGE_WORD, ownerWordEn } from "@/lib/owner-words";
 import { useMemo } from "react";
 import { useLang } from "@/lib/i18n";
 import { DICT } from "@/lib/i18n-dict";
@@ -11,6 +12,10 @@ import { fillParams } from "@/lib/i18n-fill";
 import type { Tr } from "./collab-model";
 
 const COLLAB_WORDS: Record<string, string> = {
+  "其他成员的机器": "Another member's machine",
+  "新建模块": "New module", "暂无模块": "No modules yet",
+  "团队绑定暂时读不到，稍后自动重试": "Team bindings unavailable; retrying automatically",
+  "团队权限已失效": "Team permission has expired",
   "产品 DAG": "Product DAG",
   "预计": "Expected",
   "还没有子 DAG": "No sub-DAG yet",
@@ -23,16 +28,16 @@ const COLLAB_WORDS: Record<string, string> = {
   "暂无": "Unknown",
   "没取到，正在重试": "Could not load, retrying",
   // 团队数据的执行镜像新鲜度（team-parity P1-B）
-  "主场镜像过期": "Home mirror is stale",
-  "主场镜像最新": "Home mirror is fresh",
+  [MACHINE_WORDS.stale]: ownerWordEn(MACHINE_WORDS.stale)!,
+  [MACHINE_WORDS.fresh]: ownerWordEn(MACHINE_WORDS.fresh)!,
   // 过期时带多久前同步（mirror-fresh.ts mirrorAgo）
-  "主场 {n} 分钟前同步": "Home synced {n} min ago",
-  "主场 {n} 小时前同步": "Home synced {n} h ago",
-  "镜像": "Mirror",
+  [MACHINE_WORDS.staleMinutes]: ownerWordEn(MACHINE_WORDS.staleMinutes)!,
+  [MACHINE_WORDS.staleHours]: ownerWordEn(MACHINE_WORDS.staleHours)!,
+  [MACHINE_WORDS.syncSection]: ownerWordEn(MACHINE_WORDS.syncSection)!,
   // 任务详情「团队」段（v4-props.tsx TeamFactsSec）
   "成员代号": "Member code",
   "执行实例": "Executor instance",
-  "主场实例": "Home instance",
+  [MACHINE_WORDS.machine]: ownerWordEn(MACHINE_WORDS.machine)!,
   "阻塞提问": "Blocking questions",
   // 拼句用的标点与日期词：英文用半角；today / yesterday 在时间前面，一律小写
   "：": ": ",
@@ -51,6 +56,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "在审": "in review",
   "在管": "managing",
   "复述": "Restate",
+  [STAGE_WORD.restate]: ownerWordEn(STAGE_WORD.restate)!,
   "实时": "live",
   "审查": "Review",
   "审查员": "Reviewer",
@@ -87,21 +93,21 @@ const COLLAB_WORDS: Record<string, string> = {
   "收起回放": "Close replay",
   "回放进度": "Replay position",
   "回放": "Replay",
-  // 团队视图「仅主场」占位与脱敏 / 缺字段事件（team-parity-I）：只在协作视图用，留在本表不进全局字典
-  "仅主场可见": "Home only",
-  "原文仅主场可见": "Original text at home only",
-  "打开会话仅主场": "Open session at home only",
-  "回放仅主场": "Replay at home only",
+  // 团队视图「在任务所在的机器上」占位与脱敏 / 缺字段事件（team-parity-I）：只在协作视图用，留在本表不进全局字典
+  [MACHINE_WORDS.visibleThere]: ownerWordEn(MACHINE_WORDS.visibleThere)!,
+  [MACHINE_WORDS.originalThere]: ownerWordEn(MACHINE_WORDS.originalThere)!,
+  [MACHINE_WORDS.openSessionThere]: ownerWordEn(MACHINE_WORDS.openSessionThere)!,
+  [MACHINE_WORDS.replayThere]: ownerWordEn(MACHINE_WORDS.replayThere)!,
   "阶段未知": "Stage unknown",
   "受阻前阶段未知": "Stage before blocked unknown",
-  "推进阶段（目标阶段仅主场）": "Stage changed (target at home only)",
-  "审查（结论仅主场）": "Review (verdict at home only)",
-  "线上验证（结果仅主场）": "Live verification (result at home only)",
-  "交付（详情仅主场）": "Delivered (details at home only)",
-  "上线（详情仅主场）": "Deployed (details at home only)",
-  "回滚（详情仅主场）": "Rolled back (details at home only)",
-  "拍板（详情仅主场）": "Decision (details at home only)",
-  "备注（详情仅主场）": "Note (details at home only)",
+  "推进阶段（目标阶段在任务所在的机器上）": "Stage changed (target on the machine running this task)",
+  "审查（结论在任务所在的机器上）": "Review (verdict on the machine running this task)",
+  "线上验证（结果在任务所在的机器上）": "Live verification (result on the machine running this task)",
+  "交付（详情在任务所在的机器上）": "Delivered (details on the machine running this task)",
+  "上线（详情在任务所在的机器上）": "Deployed (details on the machine running this task)",
+  "回滚（详情在任务所在的机器上）": "Rolled back (details on the machine running this task)",
+  "拍板（详情在任务所在的机器上）": "Decision (details on the machine running this task)",
+  "备注（详情在任务所在的机器上）": "Note (details on the machine running this task)",
   "{who} 推进阶段": "{who} changed stage",
   "审查 · 第 {n} 轮": "Review · round {n}",
   "线上验证（结果未记录）": "Live verification (result not recorded)",
@@ -129,7 +135,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "进行中": "Active",
   "全部": "All",
   "未完成": "Not done",
-  "可执行": "Ready",
+  [READY_WORD]: ownerWordEn(READY_WORD)!,
   "团队": "Team",
   "没有": "None",
   "大纲": "Outline",
@@ -166,5 +172,5 @@ const COLLAB_WORDS: Record<string, string> = {
 
 export function useCollabT(): Tr {
   const lang = useLang();
-  return useMemo<Tr>(() => (s, p) => fillParams(lang === "zh" ? s : (COLLAB_WORDS[s] ?? DICT[s] ?? s), p), [lang]);
+  return useMemo<Tr>(() => (s, p) => fillParams(lang === "zh" ? s : (ownerWordEn(s) ?? COLLAB_WORDS[s] ?? DICT[s] ?? s), p), [lang]);
 }

@@ -26,6 +26,7 @@ const RETRY_MS = 5_000;
 const EMPTY: ContactsSnap = { fp: null, allowed: null, fullScope: null, contacts: [] };
 let snap: ContactsSnap = EMPTY;
 const subs = new Set<() => void>();
+const passive = new Set<() => void>();
 /** 正在拉哪台机器（undefined = 没有在途请求）：切机器后旧请求还挂着也要立刻拉新机器的 */
 let inflightFp: string | null | undefined;
 let stop: (() => void) | null = null;
@@ -34,6 +35,7 @@ let retry: ReturnType<typeof setTimeout> | undefined;
 function emit(next: ContactsSnap): void {
   snap = next;
   subs.forEach((f) => f());
+  passive.forEach((f) => f());
 }
 
 async function load(): Promise<void> {
@@ -96,8 +98,14 @@ export function useContacts(): ContactsSnap {
  * 这台设备是不是全权凭据（null = 还没问到）。宿主级入口（未纳管会话、归档、Agent 管理 / 新建）只在 true 时出现：
  * guest、部分 scope、manage 关掉的设备点进去只会 403，不如不给入口。不另起探测，与联系人共用一次请求。
  */
-export function useFullScope(): boolean | null {
-  return useSyncExternalStore(subscribe, () => snap.fullScope, () => null);
+/** Passive readers receive shell updates without starting local contact queries (shared team views). */
+function passiveSubscribe(cb: () => void): () => void {
+  passive.add(cb);
+  return () => { passive.delete(cb); };
+}
+export function useFullScope(probe = true): boolean | null {
+  return useSyncExternalStore(probe ? subscribe : passiveSubscribe,
+    () => snap.fp === machines.currentFp() ? snap.fullScope : null, () => null);
 }
 
 /** 非 React 处（chat-store 的后台请求，见 scoped-requests.ts）读当前判定；没有订阅者时不会自己去问，只读已有结果 */

@@ -24,7 +24,7 @@ import type { EnsureResult } from "./worker-session.js";
 
 type Plan = { repo: string; worktree: string; branch: string; base: string };
 export interface Rebuild {
-  replaces: string; family: "claude" | "codex"; name: string;
+  replaces?: string; family: "claude" | "codex"; name: string;
   allowed(created?: Created): string | null;
   target(git: Git, p: Plan): Promise<string | null>;
   add(git: Git, p: Plan, existing: boolean): Promise<string | EnsureResult | { code: number; out: string }>;

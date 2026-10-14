@@ -59,12 +59,13 @@ async function capture(page: Page, name: string) {
   expect(issues).toEqual([]);
   return { file: name + '.png', shotIssues: issues };
 }
+// UXHOME1：团队源下「团队」标签改名「规划与提案」；改前基线上仍叫「团队」，两种都认
 async function scenario(page: Page, f: ReturnType<typeof syntheticServer>, width: number, theme: string) {
   f.state.fail = true;
   const start = f.state.reads;
   await page.goto(`${f.server.url}?mode=on&theme=${theme}`);
   await page.getByText(f.title, { exact: true }).first().waitFor();
-  await page.getByRole(width < 700 ? 'button' : 'tab', { name: '团队', exact: true }).first().click();
+  await page.getByRole(width < 700 ? 'button' : 'tab', { name: /^(规划与提案|团队)$/ }).first().click();
   await page.getByRole('status').filter({ hasText: '执行数据暂不可用' }).waitFor();
   const prefix = `${width}-${theme}`, shots = [await capture(page, `${prefix}-failed`)];
   expect(f.state.reads - start).toBe(1);
@@ -75,7 +76,7 @@ async function scenario(page: Page, f: ReturnType<typeof syntheticServer>, width
     // Baseline has no retry; re-enter the same S2W fixture to capture the normal structural reference.
     await page.reload();
     await page.getByText(f.title, { exact: true }).first().waitFor();
-    await page.getByRole(width < 700 ? 'button' : 'tab', { name: '团队', exact: true }).first().click();
+    await page.getByRole(width < 700 ? 'button' : 'tab', { name: /^(规划与提案|团队)$/ }).first().click();
   } else await retry.click();
   await page.getByText('共享执行', { exact: true }).waitFor();
   await page.getByRole('button', { name: '开卡', exact: true }).last().click();

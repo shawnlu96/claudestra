@@ -4,7 +4,7 @@
  * 团队看板走真的 teamWorkBoard（UXWHO1 四栏），本机看板走 /work 形状经 localColumns。纯函数，不挂 React。
  */
 import { describe, expect, test } from "bun:test";
-import { attentionOf, countBoardOf, countSnap, doneCount, featureWords, missingFeatures, quotaPcts } from "../web/features/collab/count-words";
+import { attentionOf, countBoardOf, countSnap, doneCount, featureWords, missingFeatures, quotaPcts, unreadFeatures } from "../web/features/collab/count-words";
 import { homeView } from "../web/features/collab/collab-model";
 import { teamWorkBoard } from "../web/features/collab/team-work-model";
 import { filterCount, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
@@ -64,6 +64,23 @@ describe("团队合成数据（12 feature）", () => {
     expect(missingFeatures({ last: () => null })).toBeNull();
     expect(missingFeatures({})).toBe(0);
   });
+
+  test("TEAMCNT1 还要等的 feature 数：没详情且不在 failed 里；排队（waiting）的照旧要等；不是团队源 = 0；列表还没读到 = null", () => {
+    const list = { features: FEATURES.map((id) => ({ id })) };
+    const details = new Map(FEATURES.slice(0, 9).map((id) => [id, {}]));
+    const at = (failed: string[], waiting: string[] = []) => ({ last: () => ({ list, details, failed: new Set(failed), waiting: new Set(waiting) }) });
+    expect(unreadFeatures(at([]))).toBe(3);
+    expect(unreadFeatures(at(["F10", "F11"]))).toBe(1);
+    expect(unreadFeatures(at(["F10", "F11", "F12"]))).toBe(0);
+    // 有详情的 feature 这一轮重拉失败也不影响；排队的不当失败
+    expect(unreadFeatures(at(["F01", "F10", "F11", "F12"], ["F12"]))).toBe(1);
+    // 放行时 missing 仍是没详情的个数
+    expect(missingFeatures(at(["F10", "F11", "F12"]))).toBe(3);
+    // 老形状（没有 failed）：照旧要全部到齐
+    expect(unreadFeatures({ last: () => ({ list, details }) })).toBe(3);
+    expect(unreadFeatures({ last: () => null })).toBeNull();
+    expect(unreadFeatures({})).toBe(0);
+  });
 });
 
 describe("本机 /work 看板", () => {
@@ -89,10 +106,10 @@ describe("本机 /work 看板", () => {
     const restating: WorkBoard = { ...work, working: [row("S", { step: "restate" })], waiting: [], todo: { ready: [], blocked: [] } };
     const spec = { tasks: [{ ...ov.tasks[0]!, id: "S", stage: "spec" as const }], items: [] };
     const local = countSnap(countBoardOf(restating, false), spec);
-    expect(stageCounts(local)).toEqual([{ label: "复述", n: 1 }]);
+    expect(stageCounts(local)).toEqual([{ label: "确认需求", n: 1 }]);
     const teamRow = { taskId: "S", featureId: "F01", nodeKey: "s", title: "", who: null, instance: null, machine: null, stage: "spec" as const, reason: "等 owner", team: null };
     const team = countSnap({ working: [], merging: [], waiting: [teamRow], todo: { ready: [], blocked: [] } }, spec);
-    expect(stageCounts(team)).toEqual([{ label: "复述", n: 1 }]);
+    expect(stageCounts(team)).toEqual([{ label: "确认需求", n: 1 }]);
     expect(team.stages.reduce((n, c) => n + c.n, 0)).toBe(team.words.working + team.words.waiting);
   });
 

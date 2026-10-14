@@ -1,3 +1,4 @@
+import { STAGE_WORD } from "@/lib/owner-words";
 /**
  * 协作视图详情面板（第二层）的纯逻辑：阶段用时条、最近 3 件事、审查摘要、参与者。
  * 输入是 GET /api/v1/ledger/:project/tasks/:id 的 {task, events, timeline}；单测 tests/web-collab-detail.test.ts。
@@ -59,13 +60,10 @@ export interface TeamBodyView {
   people: TeamPerson[];
 }
 
-export const STAGE_NAME: Record<Stage, string> = {
-  spec: "规格", restate: "复述", build: "开发", review: "审查", fix: "返工", merge: "合并",
-  live: "上线", verified: "验证", done: "完成", blocked: "受阻", cancelled: "取消",
-};
+export const STAGE_NAME = STAGE_WORD;
 
 /** 用时条的 7 段与首页 7 列对齐：审查与返工合在一段计时；面板窄，段名用短的 */
-const SEGMENT_LABELS = ["规格", "复述", "开发", "审查", "合并", "上线", "验证"] as const;
+const SEGMENT_LABELS = ["规格", STAGE_WORD.restate, "开发", "审查", "合并", "上线", "验证"] as const;
 const SEGMENTS: Stage[][] = [["spec"], ["restate"], ["build"], ["review", "fix"], ["merge"], ["live"], ["verified", "done"]];
 
 export interface Segment {
@@ -110,8 +108,9 @@ export const isRedacted = (e: LedgerEventView): boolean => e.data.redacted === t
 
 /** 脱敏事件只说类型：会上「最近 3 件事」/ 回放的那几类；其余（建任务、改字段、调度等）脱敏后不说 */
 const REDACTED_LINE: Record<string, string> = {
-  stage: "推进阶段（目标阶段仅主场）", review: "审查（结论仅主场）", verify: "线上验证（结果仅主场）", deliver: "交付（详情仅主场）",
-  deploy: "上线（详情仅主场）", rollback: "回滚（详情仅主场）", decision: "拍板（详情仅主场）", note: "备注（详情仅主场）",
+  stage: "推进阶段（目标阶段在任务所在的机器上）", review: "审查（结论在任务所在的机器上）", verify: "线上验证（结果在任务所在的机器上）",
+  deliver: "交付（详情在任务所在的机器上）", deploy: "上线（详情在任务所在的机器上）", rollback: "回滚（详情在任务所在的机器上）",
+  decision: "拍板（详情在任务所在的机器上）", note: "备注（详情在任务所在的机器上）",
 };
 
 /** 一条事件的一句话；返回 null = 这类事件不上「最近 3 件事」（建任务 / 改字段 / 事项 / meta） */

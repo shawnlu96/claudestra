@@ -80,7 +80,8 @@ import { restartAllLabel } from "../lib/restart-all-caller.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleAgentInfoRoutes } from "./agent-info-routes.js";
-import { handleAgentsList } from "./agents-list-route.js";
+import { handleAgentsList, type AgentsListIo } from "./agents-list-route.js";
+import { createListCache } from "../lib/agent-lookup-cache.js";
 import { findListedAgent } from "./agent-lookup.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
@@ -223,6 +224,11 @@ const slashDeps = (d: ApiDeps): SlashDeps => ({
 /** Bearer 或设备 cookie 鉴权 + 限流，逻辑在 api-auth.ts（web-terminal 也用它，只是不限流） */
 const authApi = (req: Request, url: URL): Promise<Principal | Response> => authenticateApi(req, url, { rateLimit: true });
 
+/** 按名找人与 GET /agents 共用的 manager list 短缓存（≤3s、并发合并、registry 变即作废，lib/agent-lookup-cache.ts） */
+const agentListCache = createListCache({ list: () => runManager("list") });
+/** GET /agents 的 io.runManager：只有裸 `list` 走缓存，别的命令照旧现起 manager（不会拿 list 的缓存冒充） */
+const agentsListRunManager: AgentsListIo["runManager"] = (...args) => (args.length === 1 && args[0] === "list" ? agentListCache.result() : runManager(...args));
+
 /** registry 名双向兼容（"worker" ↔ "agent-worker"），返回 manager list 里的条目 */
 async function findApiAgent(name: string): Promise<{ name: string; channelId: string; idle?: boolean; status?: string; purpose?: string; cwd?: string; sessionId?: string } | null> {
   // master 特判：master 不在 registry。channelId = CONTROL_CHANNEL_ID，
@@ -242,7 +248,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       sessionId: latestSessionIdForCwd(cwd, "claude-code"),
     };
   }
-  return findListedAgent(() => runManager("list"), name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
+  return findListedAgent(agentListCache.result, name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
 }
 
 /**
@@ -302,7 +308,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const path = url.pathname.slice("/api/v1".length);
 
   // GET /api/v1/agents —— scope 内的 agent 快照（热点逻辑在 bridge/agents-list-route.ts：先 scope 后尾读、已停 worker 不读尾、有界并发 + 短缓存）
-  if (path === "/agents" && req.method === "GET") return handleAgentsList(url, principal, { runManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID });
+  if (path === "/agents" && req.method === "GET") return handleAgentsList(url, principal, { runManager: agentsListRunManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID });
 
   // v2.7+ GET /api/v1/sessions —— 全机器 Claude 会话清单（agents 模式适配，
   // 中性 NeutralSessionInfo；Discord 面板与 web 前端共用同一数据源）。

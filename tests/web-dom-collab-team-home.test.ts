@@ -287,7 +287,7 @@ for (const width of [1280, 390]) {
       expect(c.recent).toBeNull();
       expect(c.people).toContain("中心暂未开放");
       expect(c.say).toContain("这张卡在 其他成员的机器 上执行");
-      expect(JSON.stringify(c)).not.toContain("仅主场可见");
+      expect(JSON.stringify(c)).not.toContain("只在任务所在的机器上能看");
       expect(c.buttons).toEqual([]);
       expect(c.input).toBe(false);
     }

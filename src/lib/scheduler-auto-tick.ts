@@ -1,4 +1,5 @@
 import { staleReplacementObservation } from "./scheduler-review-stale.js";
+import { lendAuthorBudget, type LendAuthorBudget, type LendAuthorPreparation } from "./lend-author-retire-tick.js";
 import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence, resumeStallFallback } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
@@ -52,6 +53,7 @@ export interface AutoTickDeps {
   /** The ledger CLI under the scheduler identity. */
   manager: Manager;
   /** The adapter for this bound session's route, or why it cannot be driven automatically. */
+  prepareAuthor?(task: LedgerTask, budget?: LendAuthorBudget): Promise<LendAuthorPreparation>;
   worker(ref: SessionRef): WorkerSession | { manual: string };
   /** Find or create this card's session for the role. It never binds: binding is a ledger write through the CLI. */
   ensure(task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult>;
@@ -428,6 +430,8 @@ class Card {
     await (await import("./lend-fix-reassign-tick.js")).trackLeaseWait(this.db, this.task, plan, this.deps.manager); // i28-RA1：等租约方计时
     const back = await (await import("./recovery-fix-local-swap-tick.js")).trackLocalSwap(this.db, this.task, snap, plan, this.deps); // GATESWAP1
     if (back) return this.out("manual", back);
+    await (await import("./scheduler-merge-handoff-private.js")).narrowPrivateMerge(this, plan); // PRIVLOCK2：私仓卡退回人工前收窄锁
+    await (await import("./scheduler-review-seat-wait.js")).trackReviewSeatWait(this.db, this.task, snap, plan, this.deps);
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
@@ -447,7 +451,7 @@ const reportsBudgetEnd = (pace?: TickPace): pace is TickPace & { budgetEnded(): 
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
   pace?: TickPace, afterMerges?: () => Promise<void>): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
-  const poolIdleObservation = { candidates: 0, idle: 0, mismatches: 0 };
+  const poolIdleObservation = { candidates: 0, idle: 0, mismatches: 0 }, authorBudget = lendAuthorBudget();
   deps = { ...deps, poolIdleObservation };
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
@@ -502,7 +506,9 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     }
     try {
       const pool = await poolOf(policy.remote);
-      out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
+      const prepared = await deps.prepareAuthor?.(task, authorBudget) ?? task;
+      if ("deferred" in prepared) { out.cards.push({ taskId, step: "held", detail: prepared.reason }); continue; }
+      out.cards.push(await new Card(db, prepared, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });

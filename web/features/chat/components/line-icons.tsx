@@ -128,6 +128,32 @@ export const TriangleAlertIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** lucide info：侧栏「会话」旁的芯片图例入口（chip-legend.tsx） */
+export const InfoIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 16v-4" />
+    <path d="M12 8h.01" />
+  </Svg>
+);
+
+/** lucide settings 齿轮外圈（按命令拆行：单行 ≤200 字符） */
+const SETTINGS_D = [
+  "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1",
+  "a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20",
+  "a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08",
+  "a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25",
+  "a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z",
+].join("");
+
+/** lucide settings：侧栏顶栏的设置按钮（线宽 1.8 与同排按钮一致） */
+export const SettingsIcon = ({ size = 16, className }: IconProps) => (
+  <svg width={size} height={size} className={className} aria-hidden {...svgProps} strokeWidth={1.8}>
+    <path d={SETTINGS_D} />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
 /** 菜单里按名字取的图标（名字由 ../agent-menu.ts 的纯函数给出，它不能依赖 React） */
 const MENU_ICONS: Record<LineIconName, (p: IconProps) => ReactNode> = {
   "folder-open": FolderOpenIcon,

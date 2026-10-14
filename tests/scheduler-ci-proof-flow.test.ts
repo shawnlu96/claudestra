@@ -126,7 +126,7 @@ describe("[验收线 1][验收线 3] merge driver: a green PR without the full p
     gh.prove("pull_request", HEAD, TEST_MERGE, [MAIN, HEAD]);
     await driveMerge(d.row, d.gated(), d.advance);
     expect(d.row.phase).toBe("merged");
-    expect(d.calls.slice(-4)).toEqual(["journal:merging", "merge:cccc", "inspect", "journal:merged"]);
+    expect(d.calls.slice(-5)).toEqual(["journal:merging", "freshness", "merge:cccc", "inspect", "journal:merged"]);
   });
 
   test("on: a run still in progress, a proof for the old main and an unreadable GitHub all only wait", async () => {

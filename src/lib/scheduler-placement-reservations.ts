@@ -120,7 +120,7 @@ const liveOrdersAt = (db: Database, peer: string): number =>
   (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN (${LEND_LIVE.map(() => "?").join(",")})`).get(peer, ...LEND_LIVE) as { n: number }).n;
 
 /** A family paused for its own quota stops only that family; any other pause stops the peer. */
-const pausedFamily = (p: Paused | null, f: LendFamily, now: number): boolean => !!p && p.until > now && (p.reason === `${f}_quota` || !p.reason.endsWith("_quota"));
+export const pausedFamily = (p: Paused | null, f: LendFamily, now: number): boolean => !!p && p.until > now && (p.reason === `${f}_quota` || !p.reason.endsWith("_quota"));
 
 /**
  * What the scheduler may place on this peer per family now. Zero when there is no hello (proto 1), the hello is older than

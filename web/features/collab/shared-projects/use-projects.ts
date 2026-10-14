@@ -5,18 +5,20 @@ import { ProjectFailure, projectErrorText, type ProjectSnapshot, type SharedProj
 export function useProjects(port: SharedProjectsPort) {
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [error, setError] = useState("");
+  /** Status code of the latest failed read (0 = network / unknown, also 0 after a success); the sidebar hides on 403 / 404 / 501 by it. */
+  const [status, setStatus] = useState(0);
   const sequence = useRef(0);
   const refresh = useCallback(async (signal: AbortSignal) => {
     const seq = ++sequence.current;
     try {
       const next = await port.list(signal);
-      if (!signal.aborted && seq === sequence.current) { setSnapshot(next); setError(""); }
+      if (!signal.aborted && seq === sequence.current) { setSnapshot(next); setError(""); setStatus(0); }
     } catch (e) {
       if (!signal.aborted && seq === sequence.current) {
         const status = e instanceof ProjectFailure ? e.status : 0;
         // Keep the last verified display through transient reads; revoked or malformed authority removes all controls.
         if ([401, 403, 404, 409, 502].includes(status)) setSnapshot(null);
-        setError(projectErrorText(status));
+        setError(projectErrorText(status)); setStatus(status);
       }
     }
   }, [port]);
@@ -28,7 +30,7 @@ export function useProjects(port: SharedProjectsPort) {
     window.addEventListener("focus", load);
     return () => { ctrl.abort(); clearInterval(timer); window.removeEventListener("focus", load); };
   }, [refresh]);
-  return { snapshot, error, refresh };
+  return { snapshot, error, status, refresh };
 }
 
 export function useProjectAction(after: (signal: AbortSignal) => Promise<void>) {

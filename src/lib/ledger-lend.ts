@@ -1,3 +1,6 @@
+import { retireAfterLeaseEnd } from "./lend-author-retire-write.js"; import { lendAuthorBasis, type LendAuthorSample } from "./lend-author-retire-proof.js";
+import { recoveryPolicy, recordObserved } from "./recovery-policy.js"; import { appendEvent } from "./ledger-write.js";
+import { updateTask } from "./fix-strategy-task-write.js";
 import { readReborrowBasis, type ReborrowBasis } from "./lend-reborrow-basis.js";
 import { reborrowBindingOf } from "./lend-reborrow-context.js";
 import { poolExemptionLine } from "./ledger-pool-refusal-gate.js";
@@ -27,6 +30,7 @@ import { claimAuthorFamily } from "./lend-author-family.js";
 import { fixStartRetry } from "./lend-fix-start.js";
 import { setTask } from "./ledger-write.js";
 import { leaseRestore } from "./lend-send-back-restore.js";
+import { settleReclaimIntent, type ReclaimIntentOutcome, type ReclaimIntentPrep } from "./lend-reclaim-intent.js";
 import { getLendPeer } from "./scheduler-placement-reservations.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
@@ -60,6 +64,7 @@ export interface LendOrder {
 /** Told to the card's PM after the transaction commits (the CLI sends it; a lost notice never undoes the state change). */
 export interface LendNotice { project: string; taskId: string; text: string }
 
+const LEND_AUTHOR_PORTS = { transaction: tx, manager: isManager, policy: recoveryPolicy, observe: recordObserved, append: appendEvent, update: updateTask };
 const LEDGER_CODE: Record<LendRefusal, LedgerErrorCode> = {
   unauthorized: "forbidden", not_borrowed: "forbidden", not_found: "not_found", taken: "conflict", cancelled: "conflict", lease_expired: "conflict",
   stale_gen: "conflict", conflict: "conflict", max_open: "conflict", invalid: "invalid", unavailable: "conflict",
@@ -314,7 +319,8 @@ export function reofferLend(db: Database, ctx: WriteCtx, input: OfferInput & { r
 }
 
 /** A write order that cannot reach its peer: cancelled, the write lease ended, and PM told the card is back to local work. */
-function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: number): LendNotice {
+function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: number, sample?: LendAuthorSample): LendNotice {
+  const beforeBasis = lendAuthorBasis(db, o.taskId);
   if (LEND_LIVE.includes(o.status)) setStatus(db, o, "cancelled", now, why);
   unbindStep(db, o);
   // 钉位只在台账记着该 peer 的授权已失效（lend_peers.grant 被收回置空 / 到期 / 不再含 write 或本仓库）时解除；授权仍在或没有 hello 记录就保留，照旧再挂给它
@@ -322,13 +328,14 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
   const task = mustTask(db, o.taskId), r = leaseRestore(task, endWriteLease(db, o.taskId, why, now), unpin ? o.peer : undefined);
   if (r) setTask(db, ctx, { id: task.id, rev: task.rev, patch: r.patch as never });
   note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status, ...(r ? { restored: r.restored, unpinned: r.unpinned } : {}) });
+  retireAfterLeaseEnd(db, ctx, task, !!r, beforeBasis, LEND_AUTHOR_PORTS, sample);
   return { project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId} ${LABEL[o.step]}）派不回 ${o.peer}：${why}。写租约已结束，这张卡退回本机做` };
 }
 /**
  * Leases past their deadline become `unknown` for PM, in their own transaction so a refusal that follows keeps them.
  * Write orders nobody claimed within WRITE_POOL_TTL_MS go back to local work (the peer is offline or out of slots).
  */
-export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
+export function sweepLend(db: Database, ctx: WriteCtx, samples?: Map<string, LendAuthorSample>): LendNotice[] {
   const now = ctx.now ?? Date.now();
   const legacy = legacyLendRoute(db), local = (orderId: string) => legacy(getLendOrder(db, orderId)?.taskId ?? "") === "local";
   return tx(db, () => { // S2F6: central / skip-routed orders are the center's lifecycle (an execution card's events are refused here)
@@ -341,7 +348,7 @@ export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
     });
     const stale = legacyLendOrders((db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder), legacy);
     const why = `挂出或对方看到后 ${WRITE_POOL_TTL_MS / 60_000} 分钟没人领（对方离线、名额满或没批）`;
-    return [...expired, ...stale.filter((o) => queueTimeoutDue(db, o.orderId, now - WRITE_POOL_TTL_MS)).map((o) => sendBack(db, ctx, o, why, now)),
+    return [...expired, ...stale.filter((o) => queueTimeoutDue(db, o.orderId, now - WRITE_POOL_TTL_MS)).map((o) => sendBack(db, ctx, o, why, now, samples?.get(o.taskId))),
       ...sweepPushTtl(db, now, (orderId, reason) => local(orderId) && withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
   });
 }
@@ -350,9 +357,10 @@ export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
  * PM takes a card's write work back: the live order (if any) is cancelled, the write lease ends, and the card's assignee goes back to
  * what it was before lending when it still names the peer's worker. A later deliver for the old order is refused (`cancelled`).
  */
-export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string; reason: string }): { lease: WriteLeaseRow | null; cancelled: string | null } {
+export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string; reason: string; retire?: LendAuthorSample; intent?: ReclaimIntentPrep; unpin?: boolean }):
+  { lease: WriteLeaseRow | null; cancelled: string | null; intent: ReclaimIntentOutcome | null; unpinned: boolean } {
   return tx(db, () => {
-    const task = mustTask(db, input.taskId);
+    const task = mustTask(db, input.taskId), beforeBasis = lendAuthorBasis(db, input.taskId);
     if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `收回要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
     const now = ctx.now ?? Date.now();
     const o = listLendOrders(db, task.id).find((x) => LEND_LIVE.includes(x.status) && isWriteStep(x.step));
@@ -362,11 +370,13 @@ export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string
     }
     const lease = endWriteLease(db, task.id, `PM 收回：${input.reason}`, now);
     if (!lease && !o) throw new LedgerError("not_found", `任务 ${task.id} 没有写租约，也没有未结的写单`);
-    const back = leaseRestore(task, lease);
+    const back = leaseRestore(task, lease, input.unpin ? lease?.peer ?? o?.peer : undefined); // --unpin: only a placement pinned on this peer
     if (back) setTask(db, ctx, { id: task.id, rev: task.rev, patch: back.patch as never });
     note(db, ctx, { project: task.project, taskId: task.id, orderId: o?.orderId ?? "", peer: lease?.peer ?? o?.peer ?? "" },
       `出借：PM 收回写代码（${input.reason}）`, { op: "reclaim", ...(o ? { cancelled: o.orderId } : {}) });
-    return { lease, cancelled: o?.orderId ?? null };
+    retireAfterLeaseEnd(db, ctx, task, !!back, beforeBasis, LEND_AUTHOR_PORTS, input.retire);
+    const intent = settleReclaimIntent(db, ctx, { task, order: o ?? null, lease, prep: input.intent }); // RECLAIMINT1: same transaction
+    return { lease, cancelled: o?.orderId ?? null, intent, unpinned: !!back?.unpinned };
   });
 }
 

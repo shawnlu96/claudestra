@@ -2623,6 +2623,7 @@ switch (cmd) {
     break;
   }
 
+  case "sentinel-pilot": await (await import("./manager/sentinel-pilot-cmds.js")).cmdSentinelPilot(args); break; // 哨兵试点日报（lib/sentinel-pilot.ts）
   case "cron-history":
     await cmdCronHistory(args[0] || undefined);
     break;
@@ -2644,6 +2645,7 @@ switch (cmd) {
 
   case "cost": await cmdCost(args); break;
   case "wake-cost": await (await import("./manager/wake-cost.js")).cmdWakeCost(args); break; // 按每次叫醒计量请求 / 上下文成本（只读，PMCOST1）
+  case "peer-info": await (await import("./manager/peer-info-cmds.js")).cmdPeerInfo(args); break; // 各 peer 的版本 / 提交 / 开关档位，--has <sha> 判包含（只读，PEERINFO1）
   case "usage": await (await import("./manager/usage.js")).cmdUsage(args); break; // token 账：按轮落库 ingest|turns|summary（T83）
   case "quota-wall": await (await import("./manager/quota-wall.js")).cmdQuotaWall(args); break; // 额度闸 status|clear（T24）
   case "ai-inventory": await (await import("./manager/ai-inventory.js")).cmdAiInventory(args); break; // 本机 AI 能力清单（只读，T91）

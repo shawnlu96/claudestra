@@ -1,16 +1,40 @@
 // 实测读取图汇总（merge-arch-SELECT2，ci.yml check 作业里只在 push main 时跑）。用法：
 //   bun scripts/ci-io-map.ts <分片工件目录> <输出 io-map.json> <sha> [片数]
 // 各片测试步骤带 CI_IO_TRACE 跑（src/lib/ci-io-trace.ts），工件 ci-io-trace-shard-<k> 里是一份 JSONL；这里把它们合成
-// {version:1, sha, generatedAt, entries:[{module, reads[], walks[], spawns[]}]}，模块与路径都排序去重。给了片数时缺任何一片就不出图
+// {version:1, sha, generatedAt, entries:[{module, reads[], walks[], spawns[]}], untracked}，模块与路径都排序去重。给了片数时缺任何一片就不出图
 // （缺一片的图会漏读取，SELECT3 拿它选测试不安全）。读不懂的行跳过并在日志里记条数。失败只写原因、退出码非 0，
 // ci.yml 那一步 continue-on-error，不影响 main 判绿。只用系统库：check 作业不 bun install。tests/ci-io-map.test.ts。
+// untracked（SELECT5）：起过的仓库模块自己一条记录都没有——子进程没装记录器（最小 env、--config=/dev/null）或真的不碰文件，
+// 图里它的依赖是盲区而不是「没有」。只如实列出、不算失败；SELECT3 不读这个字段（parseIoMap 忽略多余字段）。
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const KINDS = { read: "reads", walk: "walks", spawn: "spawns" } as const;
 type Kind = keyof typeof KINDS;
 export interface IoMapEntry { module: string; reads: string[]; walks: string[]; spawns: string[] }
-export interface IoMap { version: 1; sha: string; generatedAt: string; entries: IoMapEntry[] }
+export interface UntrackedSpawn { module: string; spawnedBy: string[] }
+export interface IoMap { version: 1; sha: string; generatedAt: string; entries: IoMapEntry[]; untracked: UntrackedSpawn[] }
+
+/** 透传给最小 env 子进程的 `--preload` 记录器本身（argv 里的仓库文件都记成 spawn）：它不读仓库，列进来只是噪音 */
+const RECORDER_PRELOAD = "src/lib/sync-fs-trace.ts";
+/** 仓库模块的扩展名（同选择器里的 MODULE_FILE）；选择器只许 CI plan 脚本 import（SELECT1 守着），这里不引它 */
+const MODULE_FILE = /\.(?:[cm]?[jt]sx?)$/;
+
+/**
+ * Repo modules some entry spawned that have no entry of their own (the child left no record at all). A module that spawns itself
+ * (a worker mode) already has an entry from the parent, so an untraced self-spawn cannot show up here.
+ */
+export function untrackedSpawns(entries: readonly IoMapEntry[]): UntrackedSpawn[] {
+  const seen = new Set([...entries.map((e) => e.module), RECORDER_PRELOAD]), by = new Map<string, Set<string>>();
+  for (const e of entries) {
+    for (const p of e.spawns.filter((x) => MODULE_FILE.test(x) && !seen.has(x))) {
+      let s = by.get(p);
+      if (!s) by.set(p, (s = new Set()));
+      s.add(e.module);
+    }
+  }
+  return [...by.keys()].sort().map((module) => ({ module, spawnedBy: [...by.get(module)!].sort() }));
+}
 
 /** JSONL texts → the map; bad counts the lines that are not a {module, kind, path} record. */
 export function buildIoMap(texts: readonly string[], sha: string, now: Date): { map: IoMap; bad: number; lines: number } {
@@ -33,7 +57,7 @@ export function buildIoMap(texts: readonly string[], sha: string, now: Date): { 
     const e = by.get(module)!;
     return { module, reads: sorted(e.read), walks: sorted(e.walk), spawns: sorted(e.spawn) };
   });
-  return { map: { version: 1, sha, generatedAt: now.toISOString(), entries }, bad, lines };
+  return { map: { version: 1, sha, generatedAt: now.toISOString(), entries, untracked: untrackedSpawns(entries) }, bad, lines };
 }
 
 /** Every *.jsonl under dir (download-artifact puts each artifact in its own subdirectory). */
@@ -73,6 +97,8 @@ function main(args: string[]): void {
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, `${JSON.stringify(map, null, 1)}\n`);
   console.log(`io-map：${files.length} 份记录 · ${lines} 行 · ${map.entries.length} 个模块${bad ? ` · 跳过读不懂的 ${bad} 行` : ""} → ${out}`);
+  const u = map.untracked;
+  if (u.length) console.log(`未追踪子进程 ${u.length} 个（起过但没留下任何记录，图里是盲区）：${u.map((x) => `${x.module} ← ${x.spawnedBy.join(", ")}`).join("；")}`);
 }
 
 if (import.meta.main) {

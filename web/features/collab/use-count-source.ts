@@ -1,16 +1,17 @@
 "use client";
 /**
  * 计数源（UXNUM1）：什么时候算载完、20 秒后还缺几个 feature、看者本机的周额度；以及把同一份计数递给产品卡 / 子 DAG 框头的 context。
- * 团队版「载完」= 列表里每个 feature 都拉到了详情（读团队源已有的 last()，不改 team-source-shared.ts），且看板模型到了；
- * 本机项目总览一到、看板到了就算载完。没载完时各处显示骨架；20 秒后仍缺 feature 照常出数，并给出缺几个。
+ * 团队版「载完」= 列表里每个 feature 要么拉到了详情、要么本轮试过没拉到（last().failed：读失败、429 停发；TEAMCNT1），且看板模型到了；
+ * 还在排队（没发过请求）的照旧要等。本机项目总览一到、看板到了就算载完。没载完时状态词显示骨架；
+ * 出数时仍缺详情的 feature 给出缺几个（试过没拉到的、或 20 秒兜底时还没到的）。
  * 一旦出过数就不再退回骨架：之后的补拉 / 轮询只换数字，不闪。
  */
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { fetchQuotaLines } from "../lend/lend-quota-api";
-import { countSnap, missingFeatures, quotaPcts, type CountBoard, type CountState, type QuotaFamilyPct } from "./count-words";
+import { countSnap, missingFeatures, quotaPcts, unreadFeatures, type CountBoard, type CountState, type QuotaFamilyPct } from "./count-words";
 import type { LedgerOverview } from "./collab-model";
 
-/** 20 秒后照常出数（429 退避、读失败的 feature 不再挡着整页） */
+/** 20 秒兜底照常出数（还在排队、或首轮本身慢的 feature 不再挡着整页） */
 export const LATE_MS = 20_000;
 
 export interface CountInput {
@@ -37,7 +38,7 @@ export function useCountState(a: CountInput): CountState {
   }, [a.project, a.lateMs]);
   const missing = missingFeatures(a.source);
   const isLate = late === a.project;
-  const complete = a.ov !== null && missing === 0 && a.board !== null && !a.boardPending;
+  const complete = a.ov !== null && unreadFeatures(a.source) === 0 && a.board !== null && !a.boardPending;
   // 渲染期调整状态（React「根据 props 调整 state」的写法）：到齐那一刻记下，之后补拉不再退回骨架
   if (complete && shown !== a.project) setShown(a.project);
   const open = complete || shown === a.project || isLate;

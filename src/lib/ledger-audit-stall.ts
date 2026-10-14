@@ -2,6 +2,7 @@
 import type { AuditFinding, AuditRule, AuditSnapshot } from "./ledger-audit.js";
 import type { IdleFactInputs } from "./ledger-audit-idle.js";
 import { isAskEvent, type LedgerEvent } from "./ledger-stages.js";
+import { manualCaseSlaCovers } from "./manual-case-sla-compat.js";
 import type { RecoveryMode, RecoveryPolicyPort } from "./recovery-policy.js";
 
 export const STALL_RULES = ["manual_stalled", "lock_blocker_stalled"] as const;
@@ -75,6 +76,7 @@ function manualAudit(s: Snapshot, now: number, mode: RecoveryMode, out: Out): vo
     if (t.blockedBy?.length) continue;
     const p = lastProgress(s, t);
     if (!p || now - p.at < MANUAL_STALL_AUDIT_MS) continue;
+    if (manualCaseSlaCovers(s.project, t.events)) continue; // SLA1: this episode is in a batched overdue reminder
     const stable = `${t.task.id} ${t.task.stage} seq=${p.seq ?? "无"} ${p.kind} 指纹=${p.mark}`;
     report(mode, out, { rule: "manual_stalled", taskId: t.task.id, since: p.at, keyParts: [t.task.id, p.mark],
       detail: `${t.task.id} ${t.task.stage} 最后动静 ${progressText(p)}，已停 ${((now - p.at) / 3_600_000).toFixed(1)} 小时`,

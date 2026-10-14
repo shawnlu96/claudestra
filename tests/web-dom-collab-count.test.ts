@@ -1,6 +1,7 @@
 /**
  * UXNUM1 真 React DOM（happy-dom）：同一份 useCountState + CountContext 挂顶栏、大纲芯片、右栏概览、产品卡、子 DAG 小片（Counts）、谁在干活六处。
- * [验收线 2] 团队列表有 feature 没拿到详情时六处只有骨架、没有数字；全部到齐后数字一次出现、之后补拉不跳回骨架；20 秒（这里注入 lateMs）仍缺时出数字和提示。
+ * [验收线 2] 团队列表有 feature 没拿到详情时六处的状态词只有骨架、没有数字；全部到齐后数字一次出现、之后补拉不跳回骨架；20 秒（这里注入 lateMs）仍缺时出数字和提示。
+ * TEAMCNT1：本轮试过没拉到（last().failed：读失败 / 429 停发）的 feature 不挡放行；排队（waiting）的照旧等；loading 时顶栏只遮三个状态格、大纲只遮「进行中」。
  * [验收线 3] 团队顶栏没有「暂无」「—」；额度有数时出「周额度 Claude 75%」，null（403 / 404 / 全空）时整格不出；没有「协作消息」。
  * [验收线 4] 谁在干活每个数只出现一次（摘要行不报数；栏标题的数带 wideOnly、手机藏；分段控件桌面藏）；子 DAG 小片有文字标签。
  * 不出网：fetch 一律拒绝并记账。happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
@@ -13,7 +14,7 @@ import { homeView, type LedgerOverview } from "../web/features/collab/collab-mod
 import { countBoardOf, type CountBoard, type CountState } from "../web/features/collab/count-words";
 import type { DagBoard } from "../web/features/collab/dag/dag-types";
 import { teamWorkBoard } from "../web/features/collab/team-work-model";
-import { metricsOf } from "../web/features/collab/v4/v4-model";
+import { filterCount, metricsOf } from "../web/features/collab/v4/v4-model";
 import type { ProductBoard } from "../web/lib/api/product-board-types";
 import { FEATURES, LATE, NOW, synthTeam } from "./web-collab-count-words-fixture.test";
 
@@ -58,11 +59,12 @@ const tr = (s: string, p?: Record<string, unknown>) => s.replace(/\{(\w+)\}/g, (
 const noop = () => {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** 一轮团队数据：have = 已拉到详情的 feature */
-function round(have: readonly string[]) {
+/** 一轮团队数据：have = 已拉到详情的 feature；failed / waiting = 团队源 last() 的本轮没拉到 / 还在排队（TEAMCNT1） */
+function round(have: readonly string[], more: { failed?: readonly string[]; waiting?: readonly string[] } = {}) {
   const { ov, dag } = synthTeam(have);
   const team = teamWorkBoard(dag, ov, NOW);
-  const last = { list: { features: FEATURES.map((id) => ({ id })) }, details: new Map(have.map((id) => [id, {}])) };
+  const last = { list: { features: FEATURES.map((id) => ({ id })) }, details: new Map(have.map((id) => [id, {}])),
+    failed: new Set(more.failed ?? []), waiting: new Set(more.waiting ?? []) };
   return { ov, dag, team, board: countBoardOf(team, true), source: { last: () => last } };
 }
 const product = (dag: DagBoard): ProductBoard => ({ deps: [], features: dag.features.map((f) => ({ id: f.id, title: f.title, status: "active", hasDag: true, version: 1,
@@ -105,9 +107,11 @@ test("[验收线 2] 3 个 feature 详情没到：六处只有骨架；到齐后�
   const partial = round(FEATURES.slice(0, 9)), full = round(FEATURES);
   const m = await mount(h(Page, { r: partial, onState: (s: CountState) => states.push(s.status) }));
   for (const place of Object.keys(NUM_SEL) as (keyof typeof NUM_SEL)[]) {
-    expect({ place, numbers: numbers(m.host, place) }).toEqual({ place, numbers: [] });
+    // 大纲芯片：已完成 / 全部 / P0 从总览出数（TEAMCNT1），只有「进行中」是骨架
+    if (place !== "chips") expect({ place, numbers: numbers(m.host, place) }).toEqual({ place, numbers: [] });
     expect({ place, skeleton: skeletons(m.host, place) > 0 }).toEqual({ place, skeleton: true });
   }
+  expect(skeletons(m.host, "chips")).toBe(1);
   expect(text(m.host, "[data-place]")).not.toContain("加载中");
   await m.render(h(Page, { r: full, onState: (s: CountState) => states.push(s.status) }));
   const words = (place: keyof typeof NUM_SEL) => numbers(m.host, place).map(Number);
@@ -156,12 +160,13 @@ test("[验收线 3] 团队顶栏没有「暂无」「—」「协作消息」；
   expect(m.host.querySelector("[data-metric=quota]")).toBeNull();
   expect(text(m.host, "[data-metrics]")).not.toContain("周额度");
   await m.unmount();
-  // 本机：已知指标照旧出，没人在等审查是「—」；没载完时每一格（含额度、今日完成等已知指标）都是骨架，不出数字
+  // 本机：已知指标照旧出，没人在等审查是「—」；没载完时只有三个状态格是骨架，额度、今日完成等已知指标照常有值（TEAMCNT1）
   const { metricCells } = mods.bar as { metricCells: (...a: unknown[]) => { key: string; value: string | null }[] };
   const m0 = { present: 3, todayDone: 1, reviewRounds: 2, fixed: 0, avgReviewWaitMs: null };
   const keys = ["working", "waiting", "notStarted", "todayDone", "present", "reviewRounds", "fixed", "reviewWait", "quota"];
   const loading = metricCells(m0, { status: "loading" }, false, [{ family: "Claude", pct: 75 }], tr);
-  expect(loading.map((c) => [c.key, c.value])).toEqual(keys.map((k) => [k, null]));
+  expect(loading.map((c) => c.key)).toEqual(keys);
+  expect(loading.filter((c) => c.value === null).map((c) => c.key)).toEqual(["working", "waiting", "notStarted"]);
   const snap = { words: { working: 1, waiting: 2, notStarted: 3, done: 0 }, active: new Set(), stages: [], byFeature: new Map() };
   const ready = metricCells(m0, { status: "ready", snap, missing: 0 }, false, [{ family: "Claude", pct: 75 }], tr);
   expect(ready.map((c) => [c.key, c.value])).toEqual([["working", "1"], ["waiting", "2"], ["notStarted", "3"], ["todayDone", "1"], ["present", "3"],
@@ -185,21 +190,22 @@ test("[验收线 4] 谁在干活每个数只出现一次：摘要行不报数，
   await m.unmount();
 });
 
-test("[验收线 2] 没载完时额度、已知指标、小片完成数、待做分组数、机器数也是骨架；载完一起出", async () => {
+test("[验收线 3] 没载完时额度照常出、顶栏只有三个状态格是骨架；小片完成数、待做分组数、机器数仍是骨架；载完一起出", async () => {
   const partial = round(FEATURES.slice(0, 9)), full = round(FEATURES);
   const twoMachines = (r: ReturnType<typeof round>) => ({ ...r, team: { ...r.team, machines: { local: 5, peer: 3 } } });
   const quota = [{ family: "Claude", pct: 75 }];
   const m = await mount(h(Page, { r: twoMachines(partial), quota }));
-  expect(text(m.host, "[data-metrics]")).not.toMatch(/\d/);
-  expect(m.host.querySelector("[data-metric=quota]")).not.toBeNull();
+  expect(text(m.host, "[data-metric=quota]")).toBe("Claude 75%周额度");
+  for (const k of ["working", "waiting", "notStarted"]) expect(text(m.host, `[data-metric=${k}]`)).not.toMatch(/\d/);
+  expect(skeletons(m.host, "top")).toBe(3);
   // 子 DAG 小片：去掉标题（Feature F01）后不剩数字
   const chips = () => Array.from(m.host.querySelectorAll("[data-place=frame] button"), (b) => (b.textContent ?? "").replace(b.getAttribute("title") ?? "", ""));
   expect(chips().join("|")).not.toMatch(/\d/);
-  expect(text(m.host, "[data-place=work]")).not.toMatch(/(就绪可开|被挡) · \d|(本机|peer) \d/);
+  expect(text(m.host, "[data-place=work]")).not.toMatch(/(可以开工|受阻) · \d|(本机|peer) \d/);
   await m.render(h(Page, { r: twoMachines(full), quota }));
   expect(text(m.host, "[data-metric=quota]")).toBe("Claude 75%周额度");
   expect(chips().every((c) => /^\d+在干活/.test(c))).toBe(true);
-  expect(text(m.host, "[data-place=work]")).toMatch(/就绪可开 · \d+/);
+  expect(text(m.host, "[data-place=work]")).toMatch(/可以开工 · \d+/);
   expect(text(m.host, "[data-place=work]")).toMatch(/peer 3/);
   await m.unmount();
 });
@@ -235,6 +241,69 @@ test("[验收线 2] 看板读失败（老 bridge 没有 /work）：不等 20 秒
   await m.render(h(Probe, { board: null, failed: true }));
   expect(seen[seen.length - 1]).toBe("none");
   await m.render(h(Probe, { board: full.board, failed: false }));
+  expect(seen[seen.length - 1]).toBe("ready");
+  await m.unmount();
+});
+
+test("[验收线 1] 本轮 1 个 feature 详情吃到 429（last().failed）：不等下一轮 / 20 秒，立即出数并提示「另有 1 个」", async () => {
+  const states: string[] = [];
+  const r = round(FEATURES.slice(0, 11), { failed: FEATURES.slice(11) });
+  const m = await mount(h(Page, { r, onState: (s: CountState) => states.push(s.status) }));
+  expect(states[states.length - 1]).toBe("ready");
+  expect(states).not.toContain("loading");
+  expect(numbers(m.host, "top").length).toBe(3);
+  const hint = "另有 1 个 feature 还没读到，数字不含它们";
+  expect(m.host.querySelector("[data-metrics] [role=img]")?.getAttribute("title")).toBe(hint);
+  expect(text(m.host, "[data-place=now]")).toContain(hint);
+  for (const place of Object.keys(NUM_SEL) as (keyof typeof NUM_SEL)[]) expect({ place, skeleton: skeletons(m.host, place) }).toEqual({ place, skeleton: 0 });
+  // 之后补拉到了：只换数字、提示消失，不闪回骨架
+  await m.render(h(Page, { r: round(FEATURES), onState: (s: CountState) => states.push(s.status) }));
+  expect(numbers(m.host, "top").map(Number)).toEqual([8, 6, 12]);
+  expect(m.host.querySelector("[data-metrics] [role=img]")).toBeNull();
+  expect(states).not.toContain("loading");
+  await m.unmount();
+});
+
+test("[验收线 2] 还在排队（waiting，没发过请求）或还没试过的 feature 不提前放行；20 秒兜底（注入 lateMs）仍生效", async () => {
+  // 列表里的 F12 在排队；即使同一 id 误进了 failed，排队优先，照旧要等
+  for (const more of [{ waiting: ["F12"] }, { waiting: ["F12"], failed: ["F12"] }, {}]) {
+    const states: string[] = [];
+    const r = round(FEATURES.slice(0, 11), more);
+    const m = await mount(h(Page, { r, lateMs: 40, onState: (s: CountState) => states.push(s.status) }));
+    expect({ more, status: states[states.length - 1] }).toEqual({ more, status: "loading" });
+    expect(numbers(m.host, "top")).toEqual([]);
+    await React.act(async () => { await sleep(80); });
+    expect({ more, status: states[states.length - 1] }).toEqual({ more, status: "ready" });
+    expect(m.host.querySelector("[data-metrics] [role=img]")?.getAttribute("title")).toBe("另有 1 个 feature 还没读到，数字不含它们");
+    await m.unmount();
+  }
+});
+
+test("[验收线 4] loading 时左栏「已完成 / 全部 / P0」照 filterCount 出数，只有「进行中」是骨架", async () => {
+  const partial = round(FEATURES.slice(0, 9));
+  const m = await mount(h(Page, { r: partial }));
+  const chips = Array.from(m.host.querySelectorAll("[data-place=chips] [role=tab]"));
+  const ov = partial.ov as LedgerOverview;
+  expect(chips.map((c) => [c.querySelector("[aria-hidden]") !== null, c.textContent])).toEqual([
+    [true, "进行中 "],
+    [false, `已完成 ${filterCount(ov, "done", null)}`],
+    [false, `全部 ${filterCount(ov, "all", null)}`],
+    [false, `P0 ${filterCount(ov, "p0", null)}`],
+  ]);
+  await m.unmount();
+});
+
+test("[验收线 5] 本机项目视图（没有 last()）放行照旧：总览 + 看板到了就出数，failed 概念不参与", async () => {
+  const { useCountState } = mods.src as { useCountState: (a: unknown) => CountState };
+  const full = round(FEATURES);
+  const seen: string[] = [];
+  const Probe = (p: { pending: boolean }) => {
+    seen.push(useCountState({ project: "local", ov: full.ov, board: full.board, boardPending: p.pending, source: {} }).status);
+    return null;
+  };
+  const m = await mount(h(Probe, { pending: true }));
+  expect(seen[seen.length - 1]).toBe("loading");
+  await m.render(h(Probe, { pending: false }));
   expect(seen[seen.length - 1]).toBe("ready");
   await m.unmount();
 });

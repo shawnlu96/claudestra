@@ -100,6 +100,10 @@ export const V2_ASK_KIND_FIXTURES = ["decide", "authorize", "owner_action", "acc
   const valid = { ...ask, kind, bind: kind === "authorize" ? bind : null };
   return { kind, valid, invalid: { ...valid, bind: kind === "authorize" ? null : bind } };
 });
+/** One approval for a multi-feature migration batch; featureIds must include the ask's own feature. */
+const migrationAsk = { ...ask, title: "合成迁移授权", bind: { ...bind, actions: ["migration"], featureIds: ["feature", "feature-two"] } };
+export const V2_MIGRATION_ASK_FIXTURE = { valid: migrationAsk,
+  invalid: { ...migrationAsk, bind: { ...migrationAsk.bind, actions: ["migration", "merge"] } } };
 const taskVersion = { taskId: "task", expectedRev: 1, expectedSpecRev: 1 };
 const execution = { ...taskVersion, expectedWorkflowRev: 1 };
 const featureVersion = { featureId: "feature", expectedRev: 1 };

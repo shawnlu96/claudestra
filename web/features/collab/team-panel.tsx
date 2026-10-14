@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useChatStoreApi } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { useMachineFp } from "../talk/use-talk";
@@ -15,25 +15,32 @@ import { useTeamWidth } from "./use-team-width";
 import { useTeamT } from "./team-panel-i18n";
 import { nodePositions, teamNodes, TEAM_ROW_HEIGHT, visibleInteractions, type TeamNode } from "./team-graph-model";
 import { TeamGraphNode, TeamGraphEdges, TeamActivityList } from "./team-graph-parts";
+import { TeamRoster } from "./team/team-roster";
+import { TeamTabs } from "./team/team-tabs";
 import s from "./team-graph.module.css";
 
 export interface TeamPanelProps {
   ov: LedgerOverview | null; project: string; agents: readonly TeamAgent[];
   /** Server epoch milliseconds, never the browser's wall clock. */
   now: number; embedded?: boolean; selected?: string | null; onSelect?: (node: TeamNode) => void;
-  /** The source has no local members (team view): render nothing, so /peers/contacts, /team/quota and /team/activity are never read. */
-  unavailable?: boolean;
+  /** Shared sources have no local interaction read ports; the roster still renders. */
+  unavailable?: boolean; ops?: ReactNode;
 }
 
 export function TeamPanel({ unavailable, ...props }: TeamPanelProps) {
-  return unavailable ? null : <LocalTeamPanel {...props} />;
+  return unavailable ? <TeamTabs key={props.project} members={<TeamRoster {...props} />} flow={null} ops={props.ops ?? null} />
+    : <LocalTeamContainer key={props.project} {...props} />;
+}
+function LocalTeamContainer(props: TeamPanelProps) {
+  const data = useTeamPanel(), activity = useTeamActivity(props.project);
+  return <TeamTabs members={<TeamRoster {...props} />} ops={null} flow={<LocalTeamPanel {...props} data={data} activity={activity} />} />;
 }
 
 /** Embedded selection belongs to the host's inspector; standalone keeps its own task section. */
-function LocalTeamPanel({ ov, project, agents, now, embedded = false, selected, onSelect }: Omit<TeamPanelProps, "unavailable">) {
+function LocalTeamPanel({ ov, project, agents, now, embedded = false, selected, onSelect, data, activity }: TeamPanelProps & {
+  data: ReturnType<typeof useTeamPanel>; activity: ReturnType<typeof useTeamActivity>;
+}) {
   const t = useTeamT();
-  const data = useTeamPanel();
-  const activity = useTeamActivity(project);
   const fp = useMachineFp();
   const scope = JSON.stringify([fp, project]);
   const serverNow = activity?.now ?? now;

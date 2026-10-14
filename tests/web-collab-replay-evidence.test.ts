@@ -18,9 +18,9 @@ describe("没有阶段证据不回放", () => {
     const events = [red("stage", { to: "build" }), red("review"), red("verify")];
     const frames = replayFrames(events);
     expect(frames.map((f) => [f.text, f.stage, f.stageBefore])).toEqual([
-      ["推进阶段（目标阶段仅主场）", null, null],
-      ["审查（结论仅主场）", null, null],
-      ["线上验证（结果仅主场）", null, null],
+      ["推进阶段（目标阶段在任务所在的机器上）", null, null],
+      ["审查（结论在任务所在的机器上）", null, null],
+      ["线上验证（结果在任务所在的机器上）", null, null],
     ]);
     expect(hasStageEvidence(events)).toBe(false);
     expect(hasReplay(events)).toBe(false);
@@ -79,7 +79,7 @@ describe("合法阶段证据出现后才开始有阶段", () => {
     ];
     expect(replayFrames(events).map((f) => [f.text, f.stage])).toEqual([
       ["建任务", "spec"],
-      ["claudestra 推到「复述」", "restate"],
+      ["claudestra 推到「确认需求」", "restate"],
       ["claudestra 推到「开发」", "build"],
       ["task-t5 交付 · 0b7b79c", "build"],
       ["审查 · 第 1 轮：通过 · P0 0 · P1 0 · P2 0", "build"],
@@ -105,7 +105,7 @@ describe("受阻：受阻前阶段没有证据就不套开发默认值（审查 
     expect(frames.map((f) => [f.stage, f.stageBefore])).toEqual([["review", null], ["blocked", "review"]]);
     const segs = segmentsAt(frames[1]!, []);
     expect(segs.filter((s) => s.state === "current").map((s) => s.label)).toEqual(["审查"]);
-    expect(segs.filter((s) => s.state === "past").map((s) => s.label)).toEqual(["规格", "复述", "开发"]);
+    expect(segs.filter((s) => s.state === "past").map((s) => s.label)).toEqual(["规格", "确认需求", "开发"]);
     expect(frames.map(stageUnknownAt)).toEqual([null, null]);
   });
 

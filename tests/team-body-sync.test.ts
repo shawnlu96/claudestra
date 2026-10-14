@@ -210,28 +210,34 @@ test("a failing body upload leaves the planning watermark and the projection req
   } finally { await w.f.close(); }
 });
 
-test("a body 429 backs off the body upload alone: the next pass still sends its projection", async () => {
-  // The same event sequence twice, body off then body on with the upload answering 429 / Retry-After 60.
+test("a body 429 holds projections globally until Retry-After, then projection resumes", async () => {
   const run = async (mode: "on" | "off") => {
     const w = await world(mode);
     try {
       for (let i = 0; i < 3; i++) w.note(`进展 ${i}`);
       w.failing(() => new Response("slow down", { status: 429, headers: { "retry-after": "60" } }));
       await w.pass();
-      const first = w.projections.length;
+      const first = w.projections.length, before = readSharedLedgerMirrors(w.dir)[w.f.id]!.watermark;
       const seq = w.note("下一条");
       w.advance(10_000);
       await w.pass();
-      return { added: w.projections.length - first, mark: readSharedLedgerMirrors(w.dir)[w.f.id]!.watermark, seq, posts: w.uploads().length };
+      const paused = { added: w.projections.length - first, mark: readSharedLedgerMirrors(w.dir)[w.f.id]!.watermark, posts: w.uploads().length };
+      w.failing(false);
+      w.advance(60_000);
+      await w.pass();
+      return { ...paused, before, seq, resumed: w.projections.length - first - paused.added, final: readSharedLedgerMirrors(w.dir)[w.f.id]!.watermark };
     } finally { await w.f.close(); }
   };
   const off = await run("off"), on = await run("on");
   expect(off.posts).toBe(0);
-  expect(on.posts).toBe(1); // The body waits out its own cooldown: no second POST 10 s on.
-  expect(on.added).toBe(off.added);
-  expect(on.added).toBeGreaterThan(0);
-  expect(on.mark).toBe(on.seq);
-  expect(on.mark).toBe(off.mark);
+  expect(on.posts).toBe(1);
+  expect(off.added).toBe(1);
+  expect(on.added).toBe(0);
+  expect(on.mark).toBe(on.before);
+  expect(on.mark).toBeLessThan(on.seq);
+  expect(on.resumed).toBe(1);
+  expect(on.final).toBe(on.seq);
+  expect(off.final).toBe(off.seq);
 });
 
 test("backlog: 300 records go up over two passes, 200 then 100, none twice; a newer scrub version sends them again", async () => {

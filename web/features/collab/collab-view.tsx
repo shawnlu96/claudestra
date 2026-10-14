@@ -11,15 +11,13 @@ import { createPortal } from "react-dom";
 import { useDagPanes } from "./dag/use-dag-panes";
 import { useCollabT } from "./collab-i18n";
 import { useChatStore } from "../chat/chat-store";
-import { useChatNav } from "../chat/components/nav-context";
 import { actionLine } from "./collab-action";
 import { CollabDetail, useNarrow } from "./collab-detail";
 import { useSheetHistory } from "./v4/sheet-history";
 import { browserHistory } from "@/lib/hash-nav-browser";
-import { Icon } from "./collab-icons";
 import type { WebAsk } from "../asks/asks-model";
 import { useAsks } from "../asks/asks-store";
-import { homeView, type LineView, type Tr } from "./collab-model";
+import { homeView, type LineView } from "./collab-model";
 import { openCollabTask, useCollabNav } from "./collab-nav";
 import { useCollab } from "./use-collab";
 import { ownerWaits, subscribeViewBinding, viewLocalProject } from "./owner-waits";
@@ -39,6 +37,8 @@ import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamP
 import { TeamPanel } from "./team-panel";
 import { DEFAULT_FILTER, metricsOf, type Filter } from "./v4/v4-model";
 import { MetricsBar } from "./metrics-bar";
+import { CollabPageHead, HEAD_WRAP } from "./collab-page-head";
+import { CollabTitle, LoadState } from "./collab-load-state";
 import { useWeekQuota } from "./use-count-source";
 import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
@@ -47,39 +47,6 @@ import v from "./v4/v4.module.css";
 /** 模块级稳定引用：详情里的 effect 依赖它，每次渲染换新函数会白跑 */
 const closeTask = () => openCollabTask(null);
 const NO_REVIEWERS: readonly RunningReviewer[] = [];
-
-function Empty({ icon, title, children }: { icon: "listTree" | "clock" | "circleCheck"; title: string; children?: React.ReactNode }) {
-  return (
-    <div className={s.empty}>
-      <span className={s.emptyIc}>
-        <Icon name={icon} size={28} />
-      </span>
-      <h3>{title}</h3>
-      {children}
-    </div>
-  );
-}
-
-/** 台账没读到 / 没权限 / 读失败 / 还没有任务时整页一个空状态 */
-function LoadState({ load, refetch, tr }: { load: ReturnType<typeof useCollab>["load"]; refetch: () => void | Promise<void>; tr: Tr }) {
-  let body: React.ReactNode;
-  if (load.status === "loading") body = <Empty icon="clock" title={tr("正在读取台账…")} />;
-  else if (load.status === "error" || (load.status === "ok" && load.error))
-    body = (
-      <Empty icon="listTree" title={tr("没取到，正在重试")}>
-        <div role="status">{load.status === "error" ? load.message : load.error}</div>
-        <button type="button" className={s.ib} style={{ marginTop: 12 }} onClick={() => void refetch()}>{tr("重试")}</button>
-      </Empty>
-    );
-  else
-    body = (
-      <Empty icon="listTree" title={tr("这个项目还没有台账")}>
-        {tr("PM 派发任务后，这里会按关注度列出每条任务线。已有旧台账可以导入：")}
-        <div style={{ marginTop: 8 }}><code>bun src/manager.ts ledger import &lt;ledger.json&gt; --map &lt;map.json&gt;</code></div>
-      </Empty>
-    );
-  return <div className={`${s.tokens} ${s.root}`}><div className={s.home}>{body}</div></div>;
-}
 
 /**
  * 选中与居中：任务走 openCollabTask（右侧 / 全屏详情），其余存稳定键（v4-selection.ts）；只有明确点了任务才发 Focus 让画布居中。
@@ -133,7 +100,6 @@ function useOwnerWaits(asks: readonly WebAsk[], project: string) {
 
 export function CollabView({ project }: { project: string }) {
   const tr = useCollabT();
-  const nav = useChatNav();
   const narrow = useNarrow();
   const { task: openTask } = useCollabNav();
   const agents = useChatStore((st) => st.state.agents);
@@ -175,19 +141,19 @@ export function CollabView({ project }: { project: string }) {
     return l ? lineAction(l).text : "";
   };
 
-  if (load.status !== "ok" || !ov!.exists || ((ov?.tasks?.length ?? 0) === 0 && !source.ops)) return <LoadState load={load} refetch={refetch} tr={tr} />;
+  if (load.status !== "ok" || !ov!.exists || ((ov?.tasks?.length ?? 0) === 0 && !source.ops)) return <LoadState load={load} projectName={projectName} refetch={refetch} tr={tr} />;
 
   const o = ov!, hv = view!;
   const m = metricsOf(o, hv.todayDone.length, off?.has("presence") ? null : agents.filter((a) => members.has(a.name) && a.status === "active").length);
   const resolved = resolveSelection(sel, o, canvas);
   if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，属性页回概览
   const pane = narrowPane(openTask, resolved);
-  const team = <>{source.ops?.(null, now)}<TeamPanel embedded unavailable={off?.has("teamPanel")} ov={o} project={project} agents={agents} now={o.now} selected={sel?.kind === "member" ? sel.id : null}
-    onSelect={(n) => select(memberSel(n))} /></>;
+  const team = <TeamPanel embedded unavailable={off?.has("teamPanel")} ov={o} project={project} agents={agents} now={now}
+    ops={source.ops?.(null, now)} selected={sel?.kind === "member" ? sel.id : null} onSelect={(n) => select(memberSel(n))} />;
   const detail = openTask && (
     <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null} onClose={closeTask}
       action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} extra={<>{dag.nodeSec(openTask)}{source.ops?.(openTask, now)}
-        <TeamFactsSec id={openTask} ov={o} now={now} tr={tr} /><CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} /></>} />
+        <TeamFactsSec project={project} id={openTask} ov={o} now={now} tr={tr} /><CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} /></>} />
   );
   const page = dag.page || (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
@@ -200,12 +166,8 @@ export function CollabView({ project }: { project: string }) {
 
   return (
     <div className={`${s.tokens} ${s.root} ${v.v4}`}>
-      <div className={v.top}>
-        <button type="button" className={`${s.ib} ${v.back}`} aria-label={tr("返回")} onClick={nav.toList}>
-          <Icon name="arrowLeft" size={16} />
-        </button>
-        <span className={v.ttl}>{projectName}</span>
-        {narrow && <button type="button" className={v.teamM} onClick={() => select({ kind: "team" })}>{tr("团队")}</button>}
+      <div className={v.top} style={narrow ? HEAD_WRAP : undefined}>
+        <CollabTitle tr={tr}><CollabPageHead name={projectName} ov={o} now={now} tr={tr} onTeam={narrow ? () => select({ kind: "team" }) : undefined} /></CollabTitle>
         {narrow && <button type="button" className={v.waitsM} title={waitsUnknown ? tr("暂无数据来源") : undefined} onClick={() => select({ kind: "waits" })}>
           {tr("待你处理")} <b>{waitsUnknown ? tr("暂无") : waits.length}</b></button>}
         {!narrow && <MetricsBar m={m} counts={dag.counts} quota={quota} waitUnknown={!!o.unknownMetrics?.includes("reviewWait")} connected={connected} tr={tr} />}

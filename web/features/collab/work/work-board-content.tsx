@@ -7,6 +7,7 @@
  * 每个栏数只出现一次（UXNUM1）：桌面在栏标题、手机在分段控件（另一处由 v4.module.css 按宽度藏起）；摘要行不再重复报数。
  * loading = 全站计数还没载完（use-count-source.ts）：栏数显示骨架，和顶栏同时出数。
  */
+import { MACHINE_WORDS, READY_WORD, STEP_WORD, STAGE_WORD, stageWord } from '@/lib/owner-words';
 import { useState } from 'react';
 import { mirrorCounts, teamNote, type Tr } from '../collab-model';
 import { localColumns, localMachine } from './team-work-merge';
@@ -15,11 +16,6 @@ import s from './work-board.module.css';
 import v from '../v4/v4.module.css';
 import { workText } from './work-i18n';
 
-const STAGES: Record<string, string> = { spec: '规格', restate: '复述', build: '写', review: '审', fix: '修',
-  merge: '合并', blocked: '被挡' };
-/** 团队行的阶段词：上线只有团队镜像会出现在栏里（本机老卡的 stage 照旧原样） */
-const teamStage = (stage: string) => stage === 'live' ? '上线' : STAGES[stage] ?? stage;
-const STEPS = { restate: '复述', write: '写', review: '审', fix: '修', merge: '合并', deploy: '部署', publishing: '交付中' };
 const minutes = (value: number) => value >= 60 ? `${Math.floor(value / 60)}h ${Math.floor(value % 60)}m` : `${Math.floor(value)}m`;
 /** Lucide activity / clock / git-merge / list-todo / refresh-cw paths; no emoji or external icon dependency. */
 function Icon({ kind, className }: { kind: string; className?: string }) {
@@ -40,8 +36,8 @@ type Col = keyof WorkColumns<Row>;
 /** 团队概览行：各 feature 的镜像新鲜度（同 v4-props.tsx MirrorSec 的口径：有过期报过期数，全有镜像且新鲜才说最新） */
 function mirrorText(board: TeamWorkBoard, tr: Tr) {
   const m = mirrorCounts(board.mirror, board.now);
-  return m.stale > 0 ? tr('{n} 个 feature 主场镜像过期', { n: m.stale })
-    : m.none === 0 && m.fresh > 0 ? tr('主场镜像最新') : tr('暂无');
+  return m.stale > 0 ? tr(MACHINE_WORDS.staleModules, { n: m.stale })
+    : m.none === 0 && m.fresh > 0 ? tr(MACHINE_WORDS.fresh) : tr('暂无');
 }
 
 interface Props {
@@ -72,7 +68,7 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, lo
     {who(row) && <div className={s.who} title={!timed(row) && row.instance ? row.instance : undefined}>{who(row)}</div>}
     <div className={s.title}><span className={s.key}>{row.taskId ?? row.nodeKey}</span>{row.title}</div>
     {timed(row) ? <>
-      {mode === 'working' && <div className={s.meta}><span>{row.step ? t(STEPS[row.step]) : ''}
+      {mode === 'working' && <div className={s.meta}><span>{row.step ? t(STEP_WORD[row.step]) : ''}
         {row.step === 'review' || row.step === 'fix' ? (zh ? `第 ${row.round} 轮` : ` · Round ${row.round}`) : ''}</span>
         <span>{since(row)}</span>
         <span>{row.overMinutes > 0 ? `${zh ? '超出常规' : 'Over usual'} ${minutes(row.overMinutes)}` :
@@ -81,7 +77,7 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, lo
       {(mode === 'waiting' || mode === 'merging') && <div className={s.meta}>{since(row)}</div>}
       {mode === 'todo' && <div className={s.meta}>{row.estimate || minutes(row.remainingMinutes)}</div>}
     </> : <>
-      {row.stage && mode !== 'merging' && <div className={s.meta}><span>{t(teamStage(row.stage))}</span></div>}
+      {row.stage && mode !== 'merging' && <div className={s.meta}><span>{t(stageWord(row.stage))}</span></div>}
       {note(row) && <div className={s.reason}>{note(row)}</div>}
     </>}
   </button>;
@@ -91,7 +87,7 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, lo
   const num = (key: string) => !board || loading ? <span className={v.skel} aria-hidden /> : counts[key as keyof typeof counts];
   return <div className={s.board} data-work-board={team ? 'team' : 'local'}>
     <div className={s.summary}>
-      {shared && <span>{tr('镜像')} · {mirrorText(shared, tr)}</span>}
+      {shared && <span>{tr(MACHINE_WORDS.syncSection)} · {mirrorText(shared, tr)}</span>}
       {!team && <span>{t('全部做完预计')} <strong>{local ? local.completionHours === null ? t('名额不可用') : `${local.completionHours}h` : '—'}</strong></span>}
       {retrying && <span role="status" aria-label={tr('没取到，正在重试')} title={tr('没取到，正在重试')}><Icon kind="retry" className={s.retry} /></span>}
     </div>
@@ -103,7 +99,7 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, lo
     <div className={s.columns}>{Object.entries(LABELS).map(([key, label]) => <section key={key} className={s.column} data-active={tab === key}>
       <h3 className={s.heading}><Icon kind={key} />{t(label)}<span className={`${s.count} ${v.wideOnly}`} data-wide-only>{num(key)}</span></h3>
       {!board ? <div className={s.loading} /> : key === 'todo' ? <>{(['ready', 'blocked'] as const).map(group => <div key={group}>
-        <div className={s.group}>{t(group === 'ready' ? '就绪可开' : '被挡')} · {loading ? <span className={v.skel} aria-hidden /> : board.todo[group].length}</div>
+        <div className={s.group}>{t(group === 'ready' ? READY_WORD : STAGE_WORD.blocked)} · {loading ? <span className={v.skel} aria-hidden /> : board.todo[group].length}</div>
         {board.todo[group].map((row: Row) => rowView(row, key))}</div>)}</> : cols![key as Col].length ?
         cols![key as Col].map((row: Row) => rowView(row, key)) : <div className={s.empty}>{t('暂无')}</div>}
     </section>)}</div>
@@ -111,7 +107,7 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, lo
       <summary className={s.group}><Icon kind="chevron" />{t('老卡')} · {local.legacyTotal ?? local.legacy.length}</summary>
       {local.legacy.map(row => <button type="button" className={s.row} key={row.taskId} onClick={() => onTask(row.taskId)}>
         <div className={s.title}><span className={s.key}>{row.taskId}</span>{row.title}</div>
-        <div className={s.meta}>{t(STAGES[row.stage] ?? row.stage)}</div>
+        <div className={s.meta}>{t(stageWord(row.stage))}</div>
       </button>)}
     </details>}
   </div>;
