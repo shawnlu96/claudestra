@@ -27,7 +27,7 @@ function focus(home: HomeFixture): HomeFixture {
   Object.assign(rv.task, { round: 2, stageSince: now - 40 * MIN, extra: { goal: "合并闸 merge gate：手机端列表与全屏详情对齐 — 本卡目标" } });
   rv.sessions = { author: { agent: "agent-dev-1" }, reviewer: { agent: "agent-rv-1", state: "active" } };
   rv.events = [...rv.events, { seq: home.seq + 1, ts: now - 23 * MIN, actor: "scheduler", target: REVIEW, kind: "scheduler", text: "派 review 给 agent-rv-1",
-    data: { op: "plan", node: "review", action: "dispatch", recipient: "agent-rv-1" } }];
+    data: { op: "plan", node: "adversarial_review", action: "review", recipient: "agent-rv-1" } }];
   Object.assign(home.details[BUILD]!.task, { stageSince: now - 12 * MIN });
   const node = home.features[0]!.versions.at(-1)!.nodes.find((n) => n.key === BUILD)!;
   node.fileGlobs = Array.from({ length: 19 }, (_, i) => `web/features/collab/detail-part-${String(i + 1).padStart(2, "0")}.tsx`);

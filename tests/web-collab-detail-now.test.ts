@@ -82,13 +82,23 @@ test("在跑的审查员：PM 子 agent 优先；否则要有进入审查之后�
   const since = NOW - 40 * MIN;
   expect(runningReviewerOf("build", [rr(NOW)], null, [], since)).toBeNull();
   expect(runningReviewerOf("review", [rr(NOW - 9 * MIN), rr(NOW - 3 * MIN)], { agent: "agent-rv-a" }, [], since)).toEqual({ name: null, startedAt: NOW - 9 * MIN });
-  const dispatch = ev(1, NOW - 23 * MIN, { op: "plan", action: "dispatch", node: "review", recipient: "agent-rv-a" });
+  const dispatch = ev(1, NOW - 23 * MIN, { op: "plan", action: "review", node: "adversarial_review", recipient: "agent-rv-a" });
   const bind = ev(2, NOW - 30 * MIN, { op: "session_bind", role: "reviewer", agent: "agent-rv-a" });
   expect(runningReviewerOf("review", [], { agent: "agent-rv-a", state: "active" }, [bind, dispatch], since)).toEqual({ name: "rv-a", startedAt: NOW - 23 * MIN });
-  const old = ev(3, NOW - 90 * MIN, { op: "plan", action: "dispatch", recipient: "agent-rv-a" });
+  const old = ev(3, NOW - 90 * MIN, { op: "plan", action: "review", recipient: "agent-rv-a" });
   expect(runningReviewerOf("review", [], { agent: "agent-rv-a" }, [old], since)).toBeNull();
   expect(runningReviewerOf("review", [], { agent: "agent-rv-a", state: "retired" }, [dispatch], since)).toBeNull();
-  expect(runningReviewerOf("review", [], { agent: "agent-rv-a" }, [ev(4, NOW, { op: "plan", action: "dispatch", recipient: "agent-other" })], since)).toBeNull();
+  expect(runningReviewerOf("review", [], { agent: "agent-rv-a" }, [ev(4, NOW, { op: "plan", action: "review", recipient: "agent-other" })], since)).toBeNull();
+});
+
+test("复现测试：复用审查员会话，上一轮绑定早于本阶段，本轮派审是调度器真实的 plan action=review → 算在审，从派审时刻算", () => {
+  const since = NOW - 40 * MIN;
+  const bind = ev(1, NOW - 90 * MIN, { op: "session_bind", role: "reviewer", agent: "agent-rv" });
+  const review = ev(2, NOW - 23 * MIN, { op: "plan", action: "review", node: "adversarial_review", recipient: "agent-rv" });
+  expect(runningReviewerOf("review", [], { agent: "agent-rv", state: "active" }, [bind, review], since)).toEqual({ name: "rv", startedAt: NOW - 23 * MIN });
+  // 写 / 修单的派单（action=dispatch）发给执行者，不是派审
+  const write = ev(3, NOW - 10 * MIN, { op: "plan", action: "dispatch", node: "fix", recipient: "agent-rv" });
+  expect(runningReviewerOf("review", [], { agent: "agent-rv" }, [write], since)).toBeNull();
 });
 
 const task = (p: Partial<LedgerTaskView>): LedgerTaskView => ({ id: "T", title: "标题", kind: "code", stage: "review", round: 1, updatedAt: NOW, metrics: {}, ...p });

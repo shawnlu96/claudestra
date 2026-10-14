@@ -60,7 +60,7 @@ function detail(home: LedgerOverview, id: string) {
   if (id === "RV1") {
     return { ok: true, task, now: NOW, events: [
       ev(id, "stage", { from: "build", to: "review" }, NOW - 40 * MIN),
-      ev(id, "scheduler", { op: "plan", action: "dispatch", node: "review", recipient: "agent-rv-x" }, NOW - 23 * MIN),
+      ev(id, "scheduler", { op: "plan", action: "review", node: "adversarial_review", recipient: "agent-rv-x" }, NOW - 23 * MIN),
     ], timeline: [{ stage: "build", from: NOW - 90 * MIN, to: NOW - 40 * MIN }, { stage: "review", from: NOW - 40 * MIN, to: NOW }],
     sessions: { author: { agent: "agent-dev" }, reviewer: { agent: "agent-rv-x", state: "active" } } };
   }

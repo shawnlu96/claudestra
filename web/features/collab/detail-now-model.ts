@@ -101,7 +101,8 @@ export function nowSentence(f: NowFacts, tr: Tr = zh): NowSentence {
 
 /**
  * 审查阶段在跑的审查员：PM 的后台子 agent（collab-reviewers.ts，有开始时刻、没名字）优先；
- * 否则看本卡审查员会话（详情 sessions.reviewer，未退役）——要有进入本阶段之后派给它 / 绑定它的调度事件才算在审，开始时刻取那条事件。
+ * 否则看本卡审查员会话（详情 sessions.reviewer，未退役）——要有进入本阶段之后派审给它（scheduler-plan.ts 的 plan action=review）/ 绑定它的
+ * 调度事件才算在审，开始时刻取最晚那条。action=dispatch 是写 / 修单发给执行者的，不算。
  * 上一轮留下的审查员会话没有新派单，算「等审查员领单」。
  */
 export function runningReviewerOf(
@@ -115,7 +116,7 @@ export function runningReviewerOf(
   const hits = events.filter((e) => {
     if (stageSince !== null && e.ts < stageSince) return false;
     const d = e.data;
-    if (d.op === "plan" && d.action === "dispatch") return bareAgent(String(d.recipient ?? "")) === agent;
+    if (d.op === "plan" && d.action === "review") return bareAgent(String(d.recipient ?? "")) === agent;
     return d.op === "session_bind" && d.role === "reviewer" && bareAgent(String(d.agent ?? "")) === agent;
   });
   if (!hits.length) return null;
