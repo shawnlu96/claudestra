@@ -37,7 +37,8 @@ const HOME = "9f3c2a7b5d1e4f6a8b0c2d4e";
 const FEATURE_LINE = "这是事项很长的一句描述：owner 当初的原话抱怨，不是这张卡要做的事";
 const GOAL = "审查卡自己的目标句：详情一眼看出谁在审";
 const GLOBS = Array.from({ length: 19 }, (_, i) => `web/features/collab/file-${i}.tsx`);
-const IDENTITY: Identity = { center: "center", team: "team-a", person: "person-a", project: PROJECT, machine: "local", homeInstanceId: "mine-1" };
+// machine 用本文件独有的名字：peer 名表按 machine 缓存在模块里（work/use-work-board.ts readNames），和别的测试文件共进程时不串
+const IDENTITY: Identity = { center: "center", team: "team-a", person: "person-a", project: PROJECT, machine: "now-machine", homeInstanceId: "mine-1" };
 
 function ledger(): LedgerOverview {
   const t = (p: Partial<LedgerTaskView>): LedgerTaskView => ({ itemId: "F1", kind: "code", round: 0, pm: "agent-pm", updatedAt: NOW, metrics: {}, ...p } as LedgerTaskView);
