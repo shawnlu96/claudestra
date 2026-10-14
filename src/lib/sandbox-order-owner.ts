@@ -16,7 +16,7 @@ import { canonicalPath, denyDirs, pathsOverlap, SANDBOX_MARKER } from "./sandbox
 import { dirIdentity, dirVerdict, type OwnedDir, validDir } from "./sandbox-dir-identity.js";
 import { parseState, writeJsonAtomic } from "./state-file.js";
 
-export { dirIdentity, dirVerdict, type OwnedDir } from "./sandbox-dir-identity.js";
+export { dirIdentity, dirRetainReason, dirVerdict, forDelete, type OwnedDir } from "./sandbox-dir-identity.js";
 
 type OwnedKind = "tmux" | "bridge" | "child";
 

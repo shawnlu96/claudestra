@@ -4,6 +4,7 @@
  * - 路径 / dev / ino 任一不同，或双方都有 birth 而不等：不是同一个（birth 不等 = 同路径重建，文字里说清）。
  * - 三项相同、有一方没有 birth（旧登记 / 文件系统给不出）：重启与占用检查（use "keep"）沿用现状当同一个；
  *   要删根外目录（use "delete"）认不出，不删、保留（fail-closed）。
+ * - 根外目录被替换 / 认不出：回收保留，只在记 done 时报一次（dirRetainReason）；交执行器删的用 forDelete 副本，rmSync 前的复核也按 delete。
  * 调用方只传用途，不各写一套。tests/sandbox-dir-identity.test.ts
  */
 import { type BigIntStats, lstatSync } from "node:fs";
@@ -29,20 +30,54 @@ export function dirIdentity(path: string): OwnedDir | null {
   return id;
 }
 
-/** 登记身份 vs 此刻身份；null = 同一个 */
-export function dirMismatch(d: OwnedDir, now: OwnedDir, use: DirUse = "keep"): string | null {
-  if (now.path !== d.path || now.dev !== d.dev || now.ino !== d.ino) return `目录 ${d.path} 已不是登记的那个`;
-  if (d.birth !== undefined && now.birth !== undefined) return d.birth === now.birth ? null : `目录 ${d.path} 已被替换（同路径重建，inode 被复用）`;
-  return use === "delete" ? `目录 ${d.path} 缺出生时间，认不出是不是登记的那个，保留不删` : null;
+type Compare = "same" | "differs" | "replaced" | "unproven";
+
+function compare(d: OwnedDir, now: OwnedDir): Compare {
+  if (now.path !== d.path || now.dev !== d.dev || now.ino !== d.ino) return "differs";
+  if (d.birth !== undefined && now.birth !== undefined) return d.birth === now.birth ? "same" : "replaced";
+  return "unproven";
 }
 
-/** 目录此刻还是不是登记的那个：不在 = gone；软链 / 换了目录 / 读不了 = 说不清 */
-export function dirVerdict(d: OwnedDir, use: DirUse = "keep"): "same" | "gone" | string {
+const TEXT: Record<Exclude<Compare, "same">, (p: string) => string> = {
+  differs: (p) => `目录 ${p} 已不是登记的那个`,
+  replaced: (p) => `目录 ${p} 已被替换（同路径重建，inode 被复用）`,
+  unproven: (p) => `目录 ${p} 缺出生时间，认不出是不是登记的那个，保留不删`,
+};
+
+/** 登记身份 vs 此刻身份；null = 同一个 */
+export function dirMismatch(d: OwnedDir, now: OwnedDir, use: DirUse = "keep"): string | null {
+  const c = compare(d, now);
+  return c === "same" || (c === "unproven" && use === "keep") ? null : TEXT[c](d.path);
+}
+
+/** forDelete 交出的副本：执行器删前复核（dirVerdict 不传用途）即按 delete 判，不改执行器、不落盘 */
+const deleting = new WeakSet<OwnedDir>();
+
+/** 交给删除执行器的根外目录：此后对它的每次身份核对（含 rmSync 前同步的那次）都按 delete 判，缺出生时间就不删 */
+export function forDelete(d: OwnedDir): OwnedDir {
+  const copy = { ...d };
+  deleting.add(copy);
+  return copy;
+}
+
+/** 目录此刻还是不是登记的那个：不在 = gone；软链 / 换了目录 / 读不了 = 说不清。不传用途时 forDelete 副本按 delete，其余按 keep */
+export function dirVerdict(d: OwnedDir, use: DirUse = deleting.has(d) ? "delete" : "keep"): "same" | "gone" | string {
   try {
     const now = dirIdentity(d.path);
     return now ? dirMismatch(d, now, use) ?? "same" : "gone";
   } catch (e) {
     return (e as Error).message;
+  }
+}
+
+/** 根外目录该不该保留、只报一次：同路径重建（birth 不等）或缺出生时间 = 理由；同一个 / 不在 / 换了目录 / 读不了 = null（照原规则走） */
+export function dirRetainReason(d: OwnedDir): string | null {
+  try {
+    const now = dirIdentity(d.path);
+    const c = now && compare(d, now);
+    return c === "replaced" || c === "unproven" ? TEXT[c](d.path) : null;
+  } catch {
+    return null;
   }
 }
 

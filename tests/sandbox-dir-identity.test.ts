@@ -1,6 +1,6 @@
 /**
  * LIFESBX2：目录身份补出生时间（src/lib/sandbox-dir-identity.ts）。同路径重建复用 inode 由注入 stat 构造：
- * 回收不删被替换 / 认不出的根外目录，重启认出复用 inode 的重建根，旧登记（没有 birth）重启照旧。
+ * 回收不删被替换 / 认不出的根外目录（保留、只报一次；执行器删前复核也按 delete），重启认出复用 inode 的重建根，旧登记（没有 birth）重启照旧。
  */
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -62,7 +62,7 @@ test("比对规则：三项任一不同 / birth 不等不是同一个；一方�
   expect([{ ...reg, birth: 100 }, { ...reg, birth: "0" }, { ...reg, birth: "1e9" }].some(validDir)).toBe(false);
 });
 
-test("[验收线 1] 根外登记目录同路径重建、dev/ino 相同而 birth 不同：回收不删，按不是登记的那个整单拒绝", async () => {
+test("[验收线 1] 根外登记目录同路径重建、dev/ino 相同而 birth 不同：回收不删、保留，只报一次", async () => {
   injectStat();
   const f = await setup();
   fake.set(f.external, { birth: 1_000n });
@@ -70,10 +70,38 @@ test("[验收线 1] 根外登记目录同路径重建、dev/ino 相同而 birth 
   expect(rec.dirs[1]!.birth).toBe("1000");
   rebuildReusingInode(f.external, rec.dirs[1]!, 2_000n);
   writeFileSync(join(f.external, "unrelated-data.txt"), "not ours");
-  const report = await ownership(f.owners).cleanup(key);
-  expect(report.status).toBe("refused");
-  expect(report.reason).toContain("同路径重建");
+  const own = ownership(f.owners);
+  const first = await own.cleanup(key);
+  expect(first.status).toBe("done");
+  expect(first.reason).toContain("同路径重建");
+  expect(first.resources.find((r) => r.path === f.external)).toEqual({ kind: "dir", path: f.external, outcome: "retained", detail: expect.stringContaining("同路径重建") });
+  const second = await own.cleanup(key);
+  expect(second.status).toBe("done");
+  expect(second.reason).toBeUndefined();
+  expect(second.resources.find((r) => r.path === f.external)?.outcome).toBe("retained");
   expect(readFileSync(join(f.external, "unrelated-data.txt"), "utf8")).toBe("not ours");
+});
+
+test("交执行器后出生时间才变得拿不到：rmSync 前那次复核按 delete 判，不删", async () => {
+  injectStat();
+  const f = await setup();
+  fake.set(f.external, { birth: 1_000n });
+  await registerSandboxOwner(f.owners, { key, root: f.root, resources: [], dirs: [f.root, f.external] });
+  // 第二次 lsof = 执行器的占用检查；它之后只剩删前最后一次同步复核：从这里起文件系统给不出出生时间
+  const realSpawn = Bun.spawn;
+  let lsof = 0;
+  (Bun as { spawn: unknown }).spawn = ((cmd: string[], opts: unknown) => {
+    if (cmd[0] === "lsof" && cmd.includes(f.external) && ++lsof === 2) fake.set(f.external, { birth: 0n });
+    return realSpawn(cmd, opts as never);
+  }) as never;
+  let report;
+  try { report = await ownership(f.owners).cleanup(key); } finally { (Bun as { spawn: unknown }).spawn = realSpawn; }
+  expect(report.status).toBe("partial");
+  expect(report.resources.find((r) => r.path === f.external)).toMatchObject({ outcome: "stop_failed", detail: expect.stringContaining("缺出生时间") });
+  expect(existsSync(f.external)).toBe(true);
+  const next = await ownership(f.owners).cleanup(key); // 下一轮在执行器之前就认出，保留并报一次
+  expect(next).toMatchObject({ status: "done", reason: expect.stringContaining("缺出生时间") });
+  expect(existsSync(f.external)).toBe(true);
 });
 
 test("[验收线 2] 登记了根内子目录、根 clean 后重建复用 inode：birth 不等进重建检查，正常重启并去掉旧子目录登记", async () => {
