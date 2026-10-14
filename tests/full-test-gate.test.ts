@@ -10,6 +10,7 @@ import {
   approvalVerifier, fullTestGateDir, permitConfig, policyPath, readGatePolicy, writeGatePolicy, type GatePolicy,
 } from "../src/lib/full-test-gate-policy.ts";
 import { observeTree, readPermitEntries, runLogPath } from "../src/lib/full-test-gate.ts";
+import { identify, liveTree, scanProcesses, type Proc, type TreeRoot } from "../src/lib/full-test-gate-tree.ts";
 import { lendCheckPermit } from "../src/lib/lend-check-permit.ts";
 
 const ROOT = join(import.meta.dir, "..");
@@ -83,34 +84,74 @@ describe("宿主策略", () => {
   });
 });
 
-describe("进程树观察（bun test 的进程组）", () => {
+describe("进程树观察（进程组 + 脱组后代）", () => {
   const writeTree = (id: string, body: unknown) => {
     mkdirSync(join(root, "trees"), { recursive: true });
     writeFileSync(join(root, "trees", `${id}.json`), JSON.stringify(body));
   };
+  const running = (t: TreeRoot) => ({ state: "running", ...t });
+  const proc = (pid: number, extra: Partial<Proc> = {}): Proc => ({ pid, ppid: 1, pgid: pid, start: `s${pid}`, uniq: null, puniq: null, ...extra });
 
-  test("没记录 = absent（获准后没起进程）；spawning / 坏记录 = unknown（保留名额）", () => {
+  test("没记录 = absent；spawning = absent（放行行没发出，测试没开始也不会开始）；坏记录 / 读不出进程表 = unknown", () => {
     expect(observeTree(root, "none")).toBe("absent");
     writeTree("s", { state: "spawning" });
-    expect(observeTree(root, "s")).toBe("unknown");
-    writeTree("bad", { state: "running" });
+    expect(observeTree(root, "s", () => { throw new Error("spawning 不该扫进程表"); })).toBe("absent");
+    writeTree("bad", { state: "running", pgid: 5 });
     expect(observeTree(root, "bad")).toBe("unknown");
+    writeTree("t", running({ pgid: 100, start: "s100", uniq: null, members: [] }));
+    expect(observeTree(root, "t", () => null)).toBe("unknown");
+    expect(observeTree(root, "t", () => [proc(7)])).toBe("absent");
+    expect(observeTree(root, "t", () => [proc(7), proc(101, { pgid: 100 })])).toBe("present");
   });
 
-  test("组里还有后代就 present，整组没了才 absent；组长 PID 换了人 = 原来的组已没了", async () => {
-    // 组长马上退出、后代 sleep 留在组里：只看组长会误判成已退出
-    const child = spawn("/bin/sh", ["-c", "sleep 30 & exit 0"], { detached: true, stdio: "ignore" });
-    const pgid = child.pid!;
-    await new Promise((r) => child.once("exit", r));
-    writeTree("t", { state: "running", pgid, start: "old-start" });
-    const alive = { kind: "present" as const, process: { pid: pgid, start: "old-start" } };
-    expect(observeTree(root, "t", () => ({ kind: "absent" }))).toBe("present");
-    expect(observeTree(root, "t", () => alive)).toBe("present");
-    expect(observeTree(root, "t", () => ({ kind: "present", process: { pid: pgid, start: "new-start" } }))).toBe("absent");
-    process.kill(-pgid, "SIGKILL");
+  test("成员：根、登记过的成员、根的进程组；组长 PID 换了人 = 原来的组已没了", () => {
+    const tree: TreeRoot = { pgid: 100, start: "s100", uniq: null, members: [{ pid: 300, start: "s300", uniq: null }] };
+    const pids = (procs: Proc[]) => liveTree(tree, "id", procs, () => null).map((p) => p.pid).sort();
+    expect(pids([proc(100), proc(101, { pgid: 100 }), proc(300), proc(400)])).toEqual([100, 101, 300]);
+    expect(pids([proc(300, { start: "reused" })])).toEqual([]); // 登记过的 PID 换了人
+    expect(pids([proc(100, { start: "other" }), proc(101, { pgid: 100 })])).toEqual([]);
+  });
+
+  test("脱组后代：macOS 按原始父进程唯一 ID（过继给 launchd 后不变）、Linux 按父 PID、两边都认环境标记", () => {
+    const tree: TreeRoot = { pgid: 100, start: "s100", uniq: "1000", members: [{ pid: 200, start: "s200", uniq: "2000" }] };
+    const marker = (pids: number[]) => (pid: number) => (pids.includes(pid) ? ["A=1", "CLAUDESTRA_FULL_TEST_PERMIT=id"] : ["A=1"]);
+    const pids = (procs: Proc[], env = marker([])) => liveTree(tree, "id", procs, env).map((p) => p.pid).sort();
+    // 根和登记过的 200 都已退出：200 的孩子（ppid=1，另一组）和孙子照样认得出
+    expect(pids([proc(201, { uniq: "2001", puniq: "2000" }), proc(202, { uniq: "2002", puniq: "2001" }), proc(9, { uniq: "2003", puniq: "5" })]))
+      .toEqual([201, 202]);
+    // Linux：父 PID 是活成员
+    expect(pids([proc(200), proc(210, { ppid: 200 }), proc(211, { ppid: 210 })])).toEqual([200, 210, 211]);
+    // 环境标记：认不出父进程的孤儿；macOS 只看根之后出生的
+    expect(pids([proc(500, { uniq: "1500", puniq: "7" }), proc(501, { uniq: "1501", puniq: "1500" })], marker([500]))).toEqual([500, 501]);
+    expect(pids([proc(600, { uniq: "900", puniq: "7" })], marker([600]))).toEqual([]);
+    expect(pids([proc(700)], marker([700]))).toEqual([700]);
+    expect(pids([proc(700)], marker([]))).toEqual([]);
+  });
+
+  test("真实进程：bun test 换组生出的后代在根退出、被过继之后仍算在树里，退出后才 absent", async () => {
+    const id = `full-test-${process.pid}-${Date.now()}`;
+    // 根（独立进程组）生一个 detached 的系统程序 sleep 后马上退出：sleep 另起一组、被过继给 init / launchd
+    const rootChild = spawn(process.execPath, ["-e", `
+      const { spawn } = require("node:child_process");
+      const c = spawn("/bin/sleep", ["30"], { detached: true, stdio: "ignore" }); c.unref(); console.log(c.pid);`],
+    { detached: true, stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, CLAUDESTRA_FULL_TEST_PERMIT: id } });
+    let self = identify(rootChild.pid!);
+    while (!self) { await Bun.sleep(5); self = identify(rootChild.pid!); } // 刚 spawn、还在 exec 的那一下读不到
+    let out = "";
+    rootChild.stdout!.on("data", (d) => { out += d; });
+    await new Promise((r) => rootChild.once("close", r)); // close：stdout 读完了（exit 可能先到）
+    const sleeper = Number(out.trim());
+    expect(sleeper).toBeGreaterThan(1); // 0 会让下面的 kill 打到整个进程组
+    try {
+      writeTree(id, running({ pgid: rootChild.pid!, start: self.start, uniq: self.uniq, members: [] }));
+      expect(scanProcesses()!.find((p) => p.pid === sleeper)!.pgid).not.toBe(rootChild.pid);
+      expect(observeTree(root, id)).toBe("present");
+    } finally {
+      process.kill(sleeper, "SIGKILL");
+    }
     const deadline = Date.now() + 5000;
-    while (observeTree(root, "t", () => ({ kind: "absent" })) !== "absent" && Date.now() < deadline) await Bun.sleep(20);
-    expect(observeTree(root, "t", () => ({ kind: "absent" }))).toBe("absent");
+    while (observeTree(root, id) !== "absent" && Date.now() < deadline) await Bun.sleep(20);
+    expect(observeTree(root, id)).toBe("absent");
   });
 });
 

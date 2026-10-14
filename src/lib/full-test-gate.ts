@@ -1,17 +1,19 @@
 /**
  * 本机全量 bun test 的准入（docs/architecture/full-test-gate.md）：scripts/test.ts 是执行者，先经 lend-check-permit 拿名额，
- * 再把 bun test 起在自己的进程组里、等整组退出后释放。名额判定全在 lend-check-permit（排队、进程身份、批准核验），这里只接线：
- * 宿主策略 → 配置，进程组 → 进程树观察，排队提示 / 超时 / 信号 / 登记。
+ * 再把 bun test 起在自己的进程组里（经 GO_GATE 放行）、等整棵进程树（含脱组后代，full-test-gate-tree.ts）退出后释放。名额判定全在 lend-check-permit（排队、进程身份、批准核验），这里只接线：
+ * 宿主策略 → 配置，进程表 → 进程树观察，排队提示 / 超时 / 信号 / 登记。
  * 排队超时或闸拒绝时返回 NOT_STARTED_EXIT，bun test 一律不启动——绝不退回裸跑，也不冒充测试结果。tests/full-test-gate-run.test.ts。
  */
 import { Database } from "bun:sqlite";
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Writable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { classifyTestArgs, FULL_TEST_PERMIT_ENV, isCiEnv } from "./full-test-gate-args.js";
 import { approvalVerifier, permitConfig, readGatePolicy, type GatePolicy } from "./full-test-gate-policy.js";
+import { identify, liveTree, scanProcesses, type Proc, type Scan, type TreeRoot } from "./full-test-gate-tree.js";
 import { observeLendCheckProcess } from "./lend-check-observation.js";
 import { lendCheckPermit, type LendCheckResult } from "./lend-check-permit.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
@@ -36,50 +38,60 @@ export type GateRunOptions = {
   cwd?: string;
   pollMs?: number;
   noticeMs?: number;
-  /** bun test 退出后等整组后代退出的上限；超时不释放，进程退出后由下一个申请者经进程树确认回收 */
+  /** bun test 退出后等整树后代退出的上限；超时不释放，进程退出后由下一个申请者经进程树确认回收 */
   drainMs?: number;
+  /** 运行期间扫进程表、把活成员落盘的间隔 */
+  scanMs?: number;
   /** maxWaitMin 的一分钟有多长；只给测试缩短用 */
   minuteMs?: number;
   stderr?: (line: string) => void;
   probe?: Probe;
+  /** 进程表；只给测试注入（如在登记窗口里杀掉自己） */
+  scan?: Scan;
 };
 
-// ── 进程树：bun test 起在独立进程组（pgid = 它的 pid），整组没了才算 absent ──
+// ── 进程树（src/lib/full-test-gate-tree.ts）：bun test 起在独立进程组，脱组的后代按原始父进程 / 环境标记认，整树没了才算 absent ──
+const memberSchema = z.object({ pid: z.number().int().positive(), start: z.string().nullable(), uniq: z.string().nullable() }).strict();
 const treeSchema = z.union([
   z.object({ state: z.literal("spawning") }).strict(),
-  z.object({ state: z.literal("running"), pgid: z.number().int().positive(), start: z.string().nullable() }).strict(),
+  z.object({ state: z.literal("running"), pgid: z.number().int().positive(), start: z.string().nullable(), uniq: z.string().nullable(),
+    members: z.array(memberSchema) }).strict(),
 ]);
+
+/**
+ * bun test 经这层 sh 启动：先从 fd 3 读到监管进程的放行行才 exec，读到 EOF（监管进程在登记完进程树之前就没了）直接退出、
+ * 测试不启动。所以「spawning」记录 = 测试从没开始过，也再不会开始。
+ */
+const GO_GATE = 'IFS= read -r _ <&3 || exit 125; exec 3<&-; exec "$@"';
 
 function treePath(dir: string, id: string): string {
   return join(dir, "trees", `${id}.json`);
 }
 
-/**
- * 某个名额的检查树还在不在。没有记录 = 获准后还没走到起进程就没了，什么都没起；spawning = 正在起、拿不准，保留名额。
- * 组还在但组长 PID 已换成别的进程：POSIX 不会把仍是活进程组号的 PID 分给新进程，所以原来的组已经没了。
- */
-export function observeTree(dir: string, id: string, probe: Probe = observeLendCheckProcess): Tree {
+function readTree(dir: string, id: string): z.infer<typeof treeSchema> | "missing" | null {
   const read = readJsonStateSync(treePath(dir, id));
-  if (read.status === "missing") return "absent";
-  if (read.status === "corrupt") return "unknown";
+  if (read.status === "missing") return "missing";
+  if (read.status === "corrupt") return null;
   const tree = treeSchema.safeParse(read.data);
-  if (!tree.success || tree.data.state === "spawning") return "unknown";
-  const { pgid, start } = tree.data;
-  try { process.kill(-pgid, 0); } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ESRCH") return "absent";
-    if (code !== "EPERM") return "unknown"; // EPERM：组里有进程，只是不归我们管
-  }
-  const leader = probe(pgid);
-  return leader.kind === "present" && start !== null && leader.process.start !== start ? "absent" : "present";
+  return tree.success ? tree.data : null;
 }
 
-function groupGone(pgid: number): boolean {
-  try { process.kill(-pgid, 0); return false; } catch (e) { return (e as NodeJS.ErrnoException).code === "ESRCH"; }
+/**
+ * 某个名额的检查树还在不在。没有记录 = 获准后还没走到起进程就没了；spawning = 放行行还没发出，测试没开始也不会再开始
+ * （见 GO_GATE；名额只在持有者已死时才被回收，所以这时子进程只可能读到 EOF 退出）；坏记录、读不出进程表 = unknown（保留名额）。
+ */
+export function observeTree(dir: string, id: string, scan: Scan = scanProcesses): Tree {
+  const tree = readTree(dir, id);
+  if (tree === "missing") return "absent";
+  if (tree === null) return "unknown";
+  if (tree.state === "spawning") return "absent";
+  const procs = scan();
+  if (!procs) return "unknown";
+  return liveTree(tree, id, procs).length ? "present" : "absent";
 }
 
-function signalGroup(pgid: number, sig: NodeJS.Signals): void {
-  try { process.kill(-pgid, sig); } catch (e) {
+function signalPid(pid: number, sig: NodeJS.Signals): void {
+  try { process.kill(pid, sig); } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ESRCH") console.error(`[full-test-gate] 转发 ${sig} 失败：${String(e)}`);
   }
 }
@@ -169,19 +181,47 @@ class GateRun {
   private readonly probe: Probe;
   private signal: NodeJS.Signals | null = null;
   private wake: () => void = () => {};
-  private pgid: number | null = null;
+  private readonly scan: Scan;
+  /** 起了 bun test 之后：根 + 上次扫到的活成员（登记了的同时落盘在 trees/<id>.json） */
+  private tree: TreeRoot | null = null;
+  /** 已 spawn、还没认出身份放行的那一小段：信号直接打给它（sh 还停在读放行行，测试不会启动） */
+  private spawnedPgid: number | null = null;
+  private registered = false;
 
   constructor(private readonly o: GateRunOptions, private readonly err: (line: string) => void) {
     this.worktree = o.cwd ?? process.cwd();
     this.probe = o.probe ?? observeLendCheckProcess;
+    this.scan = o.scan ?? scanProcesses;
   }
 
-  // 排队中：记下信号、叫醒排队循环去撤销；运行中：转发给整组（bun test 在独立进程组，终端的 Ctrl-C 到不了它）
+  // 排队中：记下信号、叫醒排队循环去撤销；运行中：转发给整组和脱了组的后代（bun test 在独立进程组，终端的 Ctrl-C 到不了它）
   readonly onSignal = (sig: NodeJS.Signals): void => {
-    if (this.pgid !== null) return signalGroup(this.pgid, sig);
-    this.signal ??= sig;
-    this.wake();
+    const tree = this.tree;
+    if (tree === null && this.spawnedPgid !== null) return signalPid(-this.spawnedPgid, sig);
+    if (tree === null) {
+      this.signal ??= sig;
+      return this.wake();
+    }
+    signalPid(-tree.pgid, sig);
+    for (const p of this.track() ?? []) if (p.pgid !== tree.pgid) signalPid(p.pid, sig);
   };
+
+  /** 扫一遍进程表，更新（登记了的同时落盘）活成员；读不出进程表返回 null */
+  private track(): Proc[] | null {
+    const tree = this.tree;
+    const procs = tree && this.scan();
+    if (!tree || !procs) return null;
+    const live = liveTree(tree, this.id, procs);
+    const members = live.filter((p) => p.pid !== tree.pgid).map((p) => ({ pid: p.pid, start: p.start, uniq: p.uniq }));
+    if (JSON.stringify(members) !== JSON.stringify(tree.members)) {
+      tree.members = members;
+      if (this.registered) {
+        try { writeJsonAtomicSync(treePath(this.o.dir, this.id), { state: "running", ...tree }); }
+        catch (e) { this.err(`[full-test-gate] 写进程树记录失败：${String(e)}`); }
+      }
+    }
+    return live;
+  }
 
   private permit(action: "acquire" | "release" | "cancel", policy: GatePolicy): LendCheckResult {
     const request = {
@@ -189,7 +229,7 @@ class GateRun {
       orderId: this.worktree.slice(-1024) || "unknown",
       workerId: (this.o.env.CLAUDESTRA_AGENT || this.o.env.USER || "unknown").slice(0, 1024),
     };
-    const deps = { verifyOwnerApproval: approvalVerifier(policy), observeCheckTree: (e: { id: string }) => observeTree(this.o.dir, e.id, this.probe) };
+    const deps = { verifyOwnerApproval: approvalVerifier(policy), observeCheckTree: (e: { id: string }) => observeTree(this.o.dir, e.id, this.scan) };
     return lendCheckPermit({ directory: this.o.dir, config: permitConfig(policy), action, request }, this.probe, deps);
   }
 
@@ -297,31 +337,49 @@ class GateRun {
     }
   }
 
-  /** 起 bun test（独立进程组）并等它退出 */
+  /**
+   * 起 bun test（独立进程组）并等它退出。顺序：落盘 spawning → 起 GO_GATE 包着的 bun test（停在读放行行）→ 认出根的身份、
+   * 落盘 running → 放行。中间任何一步本进程被 SIGKILL，子进程都读到 EOF、测试不启动。运行期间定时扫进程表、把活成员落盘
+   */
   private async supervise(registered: boolean): Promise<number> {
     const path = treePath(this.o.dir, this.id);
+    this.registered = registered;
     if (registered) writeJsonAtomicSync(path, { state: "spawning" });
-    const child = spawn(this.o.command[0]!, this.o.command.slice(1), {
-      stdio: "inherit", detached: true, cwd: this.o.cwd, env: { ...this.o.env, [FULL_TEST_PERMIT_ENV]: registered ? this.id : "unregistered" },
+    const child = spawn("/bin/sh", ["-c", GO_GATE, "full-test-gate", ...this.o.command], {
+      stdio: ["inherit", "inherit", "inherit", "pipe"], detached: true, cwd: this.o.cwd,
+      env: { ...this.o.env, [FULL_TEST_PERMIT_ENV]: registered ? this.id : "unregistered" },
     });
     const exited = waitChild(child);
-    if (child.pid !== undefined) {
-      this.pgid = child.pid;
-      if (registered) {
-        const seen = this.probe(child.pid);
-        writeJsonAtomicSync(path, { state: "running", pgid: child.pid, start: seen.kind === "present" ? seen.process.start : null });
-      }
-    } else if (registered) unlinkSync(path); // 没起来：不留 spawning，名额照常释放
-    return exited;
+    if (child.pid === undefined) {
+      if (registered) unlinkSync(path); // 没起来：不留 spawning，名额照常释放
+      return exited;
+    }
+    // exec 不改 PID、启动时刻和（macOS 的）唯一 ID，所以 sh 的身份就是 bun test 的。sh 停在读放行行，刚 spawn 还在 exec 的那一下读不到就再读；
+    // 一直读不到只记 PID（成员按 PID 认，偏保守）
+    this.spawnedPgid = child.pid;
+    let self = identify(child.pid, this.scan);
+    for (let i = 0; !self && i < 100; i++) { await sleep(10); self = identify(child.pid, this.scan); }
+    const tree: TreeRoot = { pgid: child.pid, start: self?.start ?? null, uniq: self?.uniq ?? null, members: [] };
+    if (registered) writeJsonAtomicSync(path, { state: "running", ...tree });
+    this.tree = tree;
+    const gate = child.stdio[3] as Writable;
+    gate.on("error", () => {}); // sh 已经没了（被信号杀掉）：exited 会报它的退出码
+    gate.end("go\n");
+    const timer = setInterval(() => this.track(), this.o.scanMs ?? 500);
+    try { return await exited; } finally { clearInterval(timer); }
   }
 
-  /** bun test 退出后等整组后代退出再释放；等不到就不释放，本进程退出后由下一个申请者经进程树确认回收 */
+  /** bun test 退出后等整树（含脱组后代）退出再释放；等不到就不释放，本进程退出后由下一个申请者经进程树确认回收 */
   private async finish(policy: GatePolicy): Promise<boolean> {
-    const pgid = this.pgid;
     const deadline = Date.now() + (this.o.drainMs ?? 10_000);
-    while (pgid !== null && !groupGone(pgid) && Date.now() < deadline) await sleep(100);
-    if (pgid !== null && !groupGone(pgid)) {
-      this.err(`[full-test-gate] bun test 已退出，但进程组 ${pgid} 里还有后代进程；名额保留到它们退出后回收`);
+    let live = this.track();
+    while ((live === null || live.length > 0) && Date.now() < deadline) {
+      await sleep(100);
+      live = this.track();
+    }
+    if (live === null || live.length > 0) {
+      const which = live === null ? "读不出进程表" : `还有后代进程 ${live.map((p) => p.pid).join(",")}`;
+      this.err(`[full-test-gate] bun test 已退出，但${which}；名额保留到进程树确认退出后回收`);
       return false;
     }
     const r = await this.settle("release", policy);
