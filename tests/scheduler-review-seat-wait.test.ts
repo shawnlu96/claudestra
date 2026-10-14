@@ -173,3 +173,23 @@ test("[验收线 4] an in-flight review prevents a placement note even when an o
     expect(listEvents(f.db, { target: "T1" }).filter((e) => e.data.mechanism === "reviewSeatIdle")).toHaveLength(0);
   } finally { f.close(); }
 });
+
+test("[验收线 4] private local-only security review explains the policy conflict even when a peer has room", async () => {
+  const f = setup();
+  try {
+    const run = async () => {
+      const s = f.snapshot();
+      s.workflow!.template = "security";
+      s.projectRepo = "other/repo";
+      s.pool!.peers = [{ peer: "available", open: 0, maxOpen: 1,
+        v2: { why: null, roles: [], repos: ["o/r"], slots: { claude: 0, codex: 1 } } }];
+      const plan = planScheduler(s);
+      expect(plan).toMatchObject({ kind: "wait", code: "placement" });
+      await trackReviewSeatWait(f.reader.get()!, f.task(), s, plan, f.tickDeps);
+    };
+    await run(); f.advance(21 * 60_000); await run();
+    const text = f.notes("wait-note:r0")[0].text;
+    expect(text).toContain("private_local_review_conflict");
+    expect(text).not.toContain("peer_available");
+  } finally { f.close(); }
+});

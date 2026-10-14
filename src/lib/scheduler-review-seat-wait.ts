@@ -53,6 +53,7 @@ function counts(seats: Map<string, WorkingSeat>, family: AuthorFamily, creating 
 /** Codes alone leave raw hello diagnostics, repository coordinates and machine identifiers out of the durable note. */
 function peerCodes(s: PlannerSnapshot, family: AuthorFamily): string[] {
   const p = s.pool;
+  if (privateRepoOf(s) && securityReviewLocalOnly(s.workflow, s.securityPool)) return ["private_local_review_conflict"];
   if (!p?.peers.length) return ["no_peers"];
   const since = s.events.findLast((e) => e.kind === "stage" && e.data.to === "review")?.seq ?? 0;
   const history = placementHistory(s, since);
