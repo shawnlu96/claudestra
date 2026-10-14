@@ -21,36 +21,24 @@ interface BgTasks {
 
 const enc = new TextEncoder();
 /**
- * 连流补拉的快照（/pending、/bg-tasks）晚于实时事件到达时的合流：实时事件说过的就以它为准，快照只补没说过的。
- * 否则慢链路上快照后到会把状态往回拨——已结束的回合重新「思考中」、已收尾的后台任务复活、已答的问题再弹。
+ * 连流补拉的快照（/pending、/bg-tasks）晚于实时事件到达时的合流。挂起态（status / ask）是覆盖语义：实时已说过就以实时为准，
+ * 快照不往回拨（已结束的回合重新「思考中」、已答的问题再弹）。后台任务是「快照 + 增量」：store 的 bg-update 追加行、
+ * bg-start 不改已有卡的类型，所以实时 bg 事件得排在快照后面放（isBgEvent，由 openAgentEventStream 排队），这里不动它们。
  */
 export class ReplayMerge {
   private status = false;
   private ask = false;
-  private bgSync = false;
-  private readonly bgSeen = new Set<string>();
-  private readonly bgLive = new Set<string>();
   see(e: WebStreamEvent): void {
     if (e.t === "status" || e.t === "done") this.status = true;
     else if (e.t === "ask" || e.t === "ask-cleared") this.ask = true;
-    else if (e.t === "bg-sync") this.bgSync = true;
-    else if (e.t === "bg-start" || e.t === "bg-update" || e.t === "bg-done") {
-      this.bgSeen.add(e.id);
-      if (e.t === "bg-done") this.bgLive.delete(e.id);
-      else if (e.t === "bg-start") this.bgLive.add(e.id);
-    }
   }
   merge(snapshot: WebStreamEvent[]): WebStreamEvent[] {
-    return snapshot.flatMap((e): WebStreamEvent[] => {
-      if (e.t === "status") return this.status ? [] : [e];
-      if (e.t === "ask") return this.ask ? [] : [e];
-      if (e.t === "bg-start" || e.t === "bg-update" || e.t === "bg-done") return this.bgSeen.has(e.id) ? [] : [e];
-      // 全集快照之后才起的任务也在跑：并进去，否则 bg-sync 会把它标成已完成
-      if (e.t === "bg-sync") return this.bgSync ? [] : [{ ...e, ids: [...new Set([...e.ids, ...this.bgLive])] }];
-      return [e];
-    });
+    return snapshot.filter((e) => !(e.t === "status" && this.status) && !(e.t === "ask" && this.ask));
   }
 }
+
+/** 后台任务事件是快照之上的增量：快照到达前先排队（快照请求 5s 超时，最多压这么久），聊天类事件不等 */
+export const isBgEvent = (e: WebStreamEvent): boolean => e.t.startsWith("bg-");
 
 const frame = (evt: AnchoredStreamEvent | typeof SSE_DONE) => enc.encode(`data: ${evt === SSE_DONE ? SSE_DONE : JSON.stringify(evt)}\n\n`);
 
@@ -76,11 +64,16 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
   let buffer = "";
   let closed = false;
   const seen = new ReplayMerge();
+  let heldBg: Uint8Array[] | null = []; // 快照到达前的实时 bg 帧；null = 快照已放完，直接放
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(frame(SSE_DONE)); // 连上先给一个字节：看门狗与「stream connected」计时从现在起
       void replay.then((lists) => {
-        if (!closed) for (const e of seen.merge(lists.flat())) controller.enqueue(frame(e));
+        const held = heldBg ?? [];
+        heldBg = null;
+        if (closed) return;
+        for (const e of seen.merge(lists.flat())) controller.enqueue(frame(e));
+        for (const f of held) controller.enqueue(f);
       }).catch(() => undefined); // 上游读错时流已 errored、enqueue 会抛：读端那边已按断流重连，快照不要了
     },
     async pull(controller) {
@@ -97,8 +90,12 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
         const mapped = translate(evt, opts.lang, ids);
         if (!mapped) continue;
         seen.see(mapped);
-        controller.enqueue(frame({ ...mapped, eid: evt.seq })); // eid = bridge seq：下次重连 ?since=<eid>
-        emitted++;
+        const f = frame({ ...mapped, eid: evt.seq }); // eid = bridge seq：下次重连 ?since=<eid>
+        if (heldBg && isBgEvent(mapped)) heldBg.push(f);
+        else {
+          controller.enqueue(f);
+          emitted++;
+        }
       }
       // 这一块全是心跳 / 注释 / 别的 agent 的帧：补一个 [DONE] 让读端知道流活着
       if (!emitted) controller.enqueue(frame(SSE_DONE));
