@@ -163,6 +163,12 @@ function collabFixture() {
   for (const f of home.features) { f.title = clean(f.title); for (const v of f.versions) for (const n of v.nodes) n.oneLine = clean(n.oneLine); }
   for (const t of home.overview.tasks) t.title = clean(t.title);
   for (const d of Object.values(home.details)) d.task.title = clean(d.task.title);
+  for (const [id, stage] of [['i28-A1', 'spec'], ['i28-A2', 'blocked'], ['i28-B3', 'restate']] as const) {
+    const task = home.overview.tasks.find(t => t.id === id)!;
+    Object.assign(task, { stage, stageBefore: stage === 'blocked' ? 'build' : null, metrics: {}, stageSince: home.now, updatedAt: home.now });
+    home.details[id] = { ...home.details[id]!, task, events: [], timeline: [{ stage, from: home.now, to: home.now }], stepLine: null };
+    home.rows[id]!.steps = []; home.rows[id]!.asks = [];
+  }
   const parked = home.overview.tasks.at(-1)!;
   Object.assign(parked, { stage: 'parked', itemId: home.features[0]!.id, title: '等待分类的任务' });
   home.details[parked.id]!.task = parked;
@@ -228,6 +234,9 @@ test.skipIf(!out)('UXTERM2 B 段：同一协作视图的中英、1280 / 390、�
   try {
     for (const { phase, repo } of sides) {
       const { home, team } = collabFixture();
+      expect([...new Set(home.overview.tasks.map(t => t.stage))]).toEqual(expect.arrayContaining([
+        'spec', 'restate', 'build', 'review', 'fix', 'merge', 'blocked', 'parked',
+      ]));
       const dist = await collabBundle(repo, resolve(out, `collab-${phase}`));
       // helper 的 HTML 自动取唯一 js；Bun 入口名不影响产品 harness。
       const { server } = serveCollab(home, team, dist);

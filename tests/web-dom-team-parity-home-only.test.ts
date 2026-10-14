@@ -275,7 +275,7 @@ for (const width of [1200, 390]) {
     expect(v.sec("对它说")).toContain("这张卡在 其他成员的机器 上执行");
     expect(v.text()).not.toContain("仅主场可见");
     // 规格全文：团队操作段既有的「全文仅在主场」
-    expect(v.text()).toContain("全文仅在主场");
+    expect(v.text()).toContain("全文只在任务所在的机器上");
     expect(v.text()).not.toContain("回放仅主场");
     expect(v.text()).not.toContain("回放这条任务");
     expect(v.text()).not.toContain("打开会话 →");
@@ -361,7 +361,7 @@ test("复现测试:英文模式团队占位走协作视图本地词表，不回�
     expect(team.text).toContain("This card runs on Another member's machine");
     expect(team.text).not.toMatch(/中心暂未开放|对它说只在/);
     expect(team.replay).toBe(false);
-    expect(team.text).toContain("Full text at home only");
+    expect(team.text).toContain("Full text is only on the machine running the task");
     expect(team.text).not.toMatch(/仅主场/);
     expect(red).toContain("Live verification (result at home only)");
     expect(red).toContain("Open session at home only");

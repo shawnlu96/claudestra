@@ -246,7 +246,7 @@ test("防回归:本机手机今日完成分组照旧列 3 张", async () => {
 test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英文词条（在场原因 / 桌面待你处理）；谁在干活是只读列表、手机待你处理不再说 V1", async () => {
   i18n.setLang("en");
   try {
-    const EXEC = "V1 shares planning; execution stays at home";
+    const EXEC = "View and plan only here; start and merge on the machine running the task";
     const v = await mount("team", 1200);
     const desk = { presence: v.metric("Agents present")?.title, waits: v.button("For you")?.title };
     await v.click("Who is working");
@@ -254,7 +254,7 @@ test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英�
     const el = v.host.querySelector("[data-work-board=team]");
     const chrome = el ? Array.from(el.querySelectorAll("h3, [role=tab]")).map((x) => x.textContent ?? "").join("|") : "";
     const board = el?.textContent ?? "";
-    const work = { board: ["Working", "Waiting", "To do", "Mirror ·", "Ready ·"].every((w) => board.includes(w)), zhUi: /[\u4e00-\u9fff]/.test(chrome),
+    const work = { board: ["Working", "Waiting", "To do", "Sync ·", "Ready to start ·"].every((w) => board.includes(w)), zhUi: /[\u4e00-\u9fff]/.test(chrome),
       hint: (v.host.querySelector("[role=status] p")?.textContent ?? "").includes(EXEC) };
     const zhLeft = (v.host.textContent ?? "").includes("执行操作仍在主场");
     await v.unmount();
