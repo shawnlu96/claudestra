@@ -9,7 +9,8 @@ import { mirrorBackoffMs } from "./shared-ledger-projector.js";
 import { parseFeatureDepsUpload } from "./shared-ledger-contract-feature-deps.js";
 import { array, digest, integer, literal, nullable, object, optional, record, text } from "./shared-ledger-contract-schema.js";
 
-export const COMPUTE_MS = 300_000, RESEND_MS = 6 * 3600_000, DAY_MS = 86400_000;
+const DAY_MS = 86400_000;
+export const COMPUTE_MS = 300_000, RESEND_MS = 6 * 3600_000;
 export const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const names = array(text(256, 1), 1000);
 const groupSchema = object({ hash: nullable(digest), scopeHash: nullable(digest), lastSentAt: nullable(integer), lastComputedAt: nullable(integer),

@@ -6,7 +6,7 @@
 import type { FeatureDep } from "./shared-ledger-contract-feature-deps.js";
 import { noteOncePerDay, type GroupState, type SyncFile } from "./feature-deps-sync-state.js";
 
-export const FEATURE_DEPS_LIMIT = 2000;
+const FEATURE_DEPS_LIMIT = 2000;
 export class TooManyFeatureDeps extends Error {
   constructor(readonly count: number) { super("too many feature deps"); }
 }
