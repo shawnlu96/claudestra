@@ -64,8 +64,11 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src
   push writes no review_carry and never carries. Asking the owner only after catching up with main is UIOWNCARRY2.
 - Before the owner screenshot ask the scheduler catches the PR up with main (`src/lib/scheduler-ui-owner-fresh.ts`, switch
   `uiOwnerAskFresh`, default observe). The snapshot carries, for a review-stage ownerVisual UI card only, whether the head contains
-  the remote's current main (`git ls-remote origin refs/heads/main` in the project's repoDir, cached 20s; missing objects fetched
-  with the merge driver's `+refs/heads/main:refs/remotes/origin/main` refspec; any failure = unknown), never just the last local fetch.
+  the remote's current main (`git ls-remote origin refs/heads/main` in the project's repoDir; missing objects fetched with the merge
+  driver's `+refs/heads/main:refs/remotes/origin/main` refspec), never just the last local fetch. No network on that path: snapshots
+  run inside ledger write transactions, so the fact only reads a state-dir file per repoDir (served 5 min) plus local ancestry; a
+  missing / older-than-60s read kicks one detached child (`scheduler-ui-owner-fresh-remote.ts`) that does the remote read and writes
+  the file. Never read, stale, failed or objects missing = unknown, and the ask goes out as before.
   Under `on`, a head behind main gets a `merge` intent at node `ui_owner_fresh` in place of the ask (the plan write admits that node
   only in review, ownerVisual, `on`, with the head's passing review; never while the queue is frozen, when the ask goes out as
   before). The merge tick begins it like a merge run, but in review, without the owner's approval and without the merge slot; it is

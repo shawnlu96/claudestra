@@ -25,7 +25,8 @@ import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/sche
 import { advanceMergeRun, beginMergeRun, carryReceipt, getMergeRun, mergeRunDrift, type CarryEvidence, type MergeRun } from "../src/lib/scheduler-merge.js";
 import { planScheduler, type PlannerDecision } from "../src/lib/scheduler-plan.js";
 import { currentReviewFacts } from "../src/lib/scheduler-review.js";
-import type { MainContains } from "../src/lib/scheduler-ui-owner-fresh.js";
+import { cachedMainContains, type MainContains } from "../src/lib/scheduler-ui-owner-fresh.js";
+import { kickRemoteMain, readRemoteMain, refreshRemoteMain, REMOTE_REFRESH_MS } from "../src/lib/scheduler-ui-owner-fresh-remote.js";
 import { OWNER_FRESH_DONE, OWNER_FRESH_NODE, ownerFreshStep, uiOwnerAskFreshMode } from "../src/lib/scheduler-ui-owner-fresh.js";
 
 const DIGEST = "d".repeat(64), PR = "https://github.com/example/repo/pull/5", SCHED = { actor: "scheduler" }, OWNER = { actor: "owner" };
@@ -204,7 +205,7 @@ describe("[验收线 1] round 1: mergeDirect never skips the chase; the default 
     const end = await driveMerge(run(w, r.intentId), direct, advance(w, r.intentId));
     expect([updates, merges, end.phase, task(w).stage]).toEqual([[PR], [], "updating", "review"]);
   });
-  test("production default: origin/main fetched before main moved still reads behind (ls-remote), never the stale cache", async () => {
+  test("production default: origin/main fetched before main moved still reads behind (remote read), never the stale local ref", async () => {
     const w = world();
     const bare = join(root, `origin-${Date.now()}.git`), clone = join(root, `clone-${Date.now()}`);
     await sh("init", "-q", "--bare", bare);
@@ -213,9 +214,60 @@ describe("[验收线 1] round 1: mergeDirect never skips the chase; the default 
     await sh("push", "-q", bare, `${heads.lib!.main}:refs/heads/main`); // main moves after the clone fetched: origin/main is stale
     expect(execFileSync("git", ["rev-parse", "refs/remotes/origin/main"], { cwd: clone, encoding: "utf8" }).trim()).toBe(base);
     writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: clone } } }));
-    const d = planScheduler(autoSnapshot(w.db, task(w), { registry: [], maxWorkers: 2 }));
+    const kicks: string[] = [];
+    const contains = cachedMainContains({ spawner: (repo) => { kicks.push(repo); } });
+    const snap = () => planScheduler(autoSnapshot(w.db, task(w), opts(contains)));
+    expect([snap(), kicks]).toMatchObject([{ kind: "intent", action: "ask" }, [clone]]); // never read: unknown, one background kick
+    refreshRemoteMain(clone); // what the kicked child runs: ls-remote + fetch the missing main
+    const d = snap();
     expect(d).toMatchObject({ kind: "intent", action: "merge", node: OWNER_FRESH_NODE });
     expect((d as Planned).reason).toContain(heads.lib!.main.slice(0, 12));
+    expect(readRemoteMain(clone)?.head).toBe(heads.lib!.main);
+  });
+});
+
+describe("[回归] round 2: no network under the ledger write lock", () => {
+  /** A clone whose origin answers ls-remote only after 6 s and then fails (slow network / rate limit). */
+  const slowRepo = async () => {
+    const bare = join(root, `slow-${Date.now()}.git`), clone = join(root, `slowclone-${Date.now()}`);
+    await sh("init", "-q", "--bare", bare);
+    await sh("push", "-q", bare, `${base}:refs/heads/main`);
+    await sh("clone", "-q", bare, clone);
+    execFileSync("git", ["config", "remote.origin.uploadpack", "sleep 6; false"], { cwd: clone });
+    writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: clone } } }));
+    return clone;
+  };
+  test("default fact, cold cache: openSchedulerUiAsk opens the ask at once and another process writes the ledger meanwhile", async () => {
+    const w = world();
+    const clone = await slowRepo();
+    const p = planScheduler(autoSnapshot(w.db, task(w), { registry: [], maxWorkers: 2 })) as Planned;
+    expect(p).toMatchObject({ kind: "intent", action: "ask", askBind: { head: reviewed } }); // unknown: as before
+    write(w, p);
+    const t0 = Date.now();
+    const { ask } = openSchedulerUiAsk(w.db, SCHED, { intentId: p.id }, { registry: [], maxWorkers: 2 });
+    expect(Date.now() - t0).toBeLessThan(3_000); // the ls-remote alone would hold the write lock 6 s
+    expect(ask.bind?.params).toMatchObject({ head: reviewed });
+    expect(readRemoteMain(clone)).toBeNull(); // the detached child is still waiting on the remote; nobody waited for it
+  }, 20_000);
+  test("a write from another process during the snapshot is never locked out", async () => {
+    const w = world();
+    await slowRepo();
+    const path = (w.db as unknown as { filename: string }).filename;
+    w.db.exec("BEGIN IMMEDIATE");
+    const child = Bun.spawn([process.execPath, "-e", `const { Database } = require("bun:sqlite"); const d = new Database(${JSON.stringify(path)});
+      d.exec("PRAGMA busy_timeout = 5000"); try { d.exec("INSERT INTO meta (project,key,value) VALUES ('q','x','1')"); console.log("written"); }
+      catch (e) { console.log(String(e).includes("locked") ? "locked" : String(e)); }`], { stdout: "pipe" });
+    autoSnapshot(w.db, task(w), { registry: [], maxWorkers: 2 }); // inside the write lock, as replanned() is
+    w.db.exec("COMMIT");
+    expect((await new Response(child.stdout).text()).trim()).toBe("written");
+  }, 20_000);
+  test("the background refresh records a failed remote read as unknown, and kicks at most once per refresh window", () => {
+    const repo = join(root, "nowhere"), kicks: number[] = [];
+    for (const at of [1_000, 2_000, 1_000 + REMOTE_REFRESH_MS]) kickRemoteMain(repo, [], at, () => { kicks.push(at); });
+    expect(kicks).toEqual([1_000, 1_000 + REMOTE_REFRESH_MS]);
+    mkdirSync(repo, { recursive: true });
+    refreshRemoteMain(repo, [], () => 5);
+    expect(readRemoteMain(repo)).toEqual({ at: 5, head: null });
   });
 });
 

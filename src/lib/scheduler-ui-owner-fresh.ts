@@ -2,7 +2,8 @@
  * UIOWNCARRY2: before the scheduler opens an owner screenshot ask on an ownerVisual card it first brings the PR up to the current main,
  * so the owner's approval does not have to be re-shot at merge time. Pieces:
  * - fact (scheduler-snapshot.ts): for a review-stage ownerVisual UI card, whether the PR head contains the remote's current main
- *   (git ls-remote in the project's repoDir, missing objects fetched); unreadable = unknown, which asks as before.
+ *   (as a detached background refresh last read it, scheduler-ui-owner-fresh-remote.ts: no network under the ledger write lock);
+ *   unread / stale / unreadable = unknown, which asks as before.
  * - plan (scheduler-plan.ts reviewPass → ownerFreshStep): under `on` a behind head gets a `merge` intent at node OWNER_FRESH_NODE in
  *   place of the ask. The merge tick begins it through beginMergeRun (stage review, no owner approval yet: ownerFreshRefusal) and drives
  *   it with the merge driver's own update-branch and review_carry proof (carryReview: the same review_carry + merge_phase pair that
@@ -26,6 +27,7 @@ import { LedgerError, listEvents } from "./ledger-store.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { gitIn, type GitRead } from "./scheduler-ui-carry-proof.js";
+import { kickRemoteMain, readRemoteMain, REMOTE_REFRESH_MS, REMOTE_SERVE_MS, type Spawner } from "./scheduler-ui-owner-fresh-remote.js";
 import { ownerVisualOf } from "./scheduler-ui-merge-refusal.js";
 import { renderInputs } from "./scheduler-ui-review-carry.js";
 import { bounceReceipt, cancelMergeRun, manualCancel, MAX_MERGE_BOUNCES, parseBounceReceipt } from "./scheduler-merge-conflict.js";
@@ -42,7 +44,6 @@ const KEY = "uiOwnerAskFresh";
 /** The plan node of a "bring the PR up to main, do not merge" run; part of its intent key (`…:ui_owner_fresh:a<n>`). */
 export const OWNER_FRESH_NODE = "ui_owner_fresh";
 const FRESH_OP = "ui_owner_fresh";
-const MAIN_REF = "refs/remotes/origin/main";
 /** The driver's receipt for a finished run (scheduler-merge-driver.ts claimAndMerge, before any claim). */
 export const OWNER_FRESH_DONE = "只追 main 完成：PR 已含 main 且 CI 全绿，不合并，回 review 发 owner 截图 ask";
 const OWNER_FRESH_RESHOOT = "main 改了界面输入，要在新 head 重拍截图";
@@ -69,38 +70,30 @@ export interface OwnerFreshFact { mode: RecoveryMode; contains: boolean | null; 
 export interface OwnerFreshSnapshot { ownerFresh?: OwnerFreshFact }
 export type MainContains = (project: string, head: string) => { contains: boolean | null; mainHead: string | null };
 
-/** How long one remote read of main serves (per repoDir): snapshots are taken many times a tick, the remote moves on a minutes scale. */
-const REMOTE_TTL_MS = 20_000;
-const remoteMain = new Map<string, { at: number; head: string | null }>();
-
 /**
- * The current main, not whatever this machine fetched last: the remote's refs/heads/main (git ls-remote, cached REMOTE_TTL_MS), its
- * commit and the PR head fetched into the repoDir when missing (the same `+refs/heads/main:refs/remotes/origin/main` refspec the
- * merge driver's carryReview fetches), then ancestry. Any failure (network, rate limit, no repoDir, objects missing) is null.
+ * The current main, not whatever this machine fetched last, and no network here (round 2: snapshots run under the ledger write lock):
+ * the remote's refs/heads/main as the background refresh last read it (scheduler-ui-owner-fresh-remote.ts, served REMOTE_SERVE_MS,
+ * refreshed past REMOTE_REFRESH_MS), then local ancestry. A missing / stale / failed read or a commit not here yet is null (unknown:
+ * the ask goes out as before) and kicks one detached refresh that also fetches the missing objects.
  */
-const remoteMainContains: MainContains = (project, head) => {
-  let repo: string | undefined;
-  try { repo = readSchedulerConfig().projects[project]?.repoDir; } catch { repo = undefined; }
-  if (!repo) return { contains: null, mainHead: null };
-  const git = (timeout: number, ...args: string[]) =>
-    spawnSync("git", args, { cwd: repo, encoding: "utf8", timeout, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
-  const now = Date.now();
-  let cached = remoteMain.get(repo);
-  if (!cached || now - cached.at > REMOTE_TTL_MS) {
-    const r = git(15_000, "ls-remote", "--quiet", "origin", "refs/heads/main");
-    const sha = r.status === 0 ? r.stdout.split(/\s+/)[0]?.trim().toLowerCase() ?? "" : "";
-    cached = { at: now, head: SHA.test(sha) ? sha : null };
-    remoteMain.set(repo, cached);
-  }
-  const mainHead = cached.head;
-  if (!mainHead) return { contains: null, mainHead: null };
-  const has = (sha: string) => git(10_000, "cat-file", "-e", `${sha}^{commit}`).status === 0;
-  const want = [...(has(mainHead) ? [] : [`+refs/heads/main:${MAIN_REF}`]), ...(has(head) ? [] : [head])];
-  if (want.length && git(60_000, "fetch", "--no-tags", "--quiet", "origin", ...want).status !== 0) return { contains: null, mainHead };
-  if (!has(mainHead) || !has(head)) return { contains: null, mainHead };
-  const r = git(10_000, "merge-base", "--is-ancestor", mainHead, head);
-  return { contains: r.status === 0 ? true : r.status === 1 ? false : null, mainHead };
-};
+export function cachedMainContains(deps: { now?: () => number; spawner?: Spawner } = {}): MainContains {
+  return (project, head) => {
+    let repo: string | undefined;
+    try { repo = readSchedulerConfig().projects[project]?.repoDir; } catch { repo = undefined; }
+    if (!repo) return { contains: null, mainHead: null };
+    const now = (deps.now ?? Date.now)(), cached = readRemoteMain(repo), age = cached ? now - cached.at : Infinity;
+    const kick = () => kickRemoteMain(repo, [head], now, deps.spawner);
+    if (!(age < REMOTE_REFRESH_MS)) kick();
+    const mainHead = age < REMOTE_SERVE_MS ? cached?.head ?? null : null;
+    if (!mainHead) return { contains: null, mainHead: null };
+    const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf8", timeout: 5_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+    const has = (sha: string) => git("cat-file", "-e", `${sha}^{commit}`).status === 0;
+    if (!has(mainHead) || !has(head)) { kick(); return { contains: null, mainHead }; }
+    const r = git("merge-base", "--is-ancestor", mainHead, head);
+    return { contains: r.status === 0 ? true : r.status === 1 ? false : null, mainHead };
+  };
+}
+const remoteMainContains = cachedMainContains();
 
 /** Only for a review-stage ownerVisual UI card with a head, and only while the switch is not off. */
 export function ownerFreshFact(task: LedgerTask, template: string | undefined, ownerVisual: boolean, deps: { policy?: RecoveryPolicyPort;
