@@ -346,7 +346,7 @@ test.skipIf(!out)('UXTERM4：缺正文团队卡详情的回放占位与脱敏事
           await g.page.goto(`${server.url}?lang=${lang}`);
           await g.page.locator('[data-home-only="replay"]').waitFor();
           // 截图要拍到「最近 3 件事」和回放占位：回放占位滚到视口中间（手机底部有「对它说」条会挡住贴底的占位），上面的事件区跟着露出来
-          await g.page.locator('[data-home-only="replay"]').evaluate(el => el.scrollIntoView({ block: 'center' }));
+          await g.page.evaluate(`document.querySelector('[data-home-only="replay"]').scrollIntoView({ block: 'center' })`);
           await g.page.evaluate('document.fonts.ready');
           await g.page.evaluate('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))');
           const name = `${phase}-redacted-detail-${width}${lang === 'en' ? '-en' : ''}`, text = await g.page.locator('body').innerText();
