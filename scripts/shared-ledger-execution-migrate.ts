@@ -7,8 +7,9 @@
  * plan.json lists the whole group (本机 / peer A / peer B), each member an isolated state dir under the drill root.
  * Exit codes: 0 done (dry-run / switched / exported), 2 refused (itemized list on stderr), 3 frozen pending PM, 1 usage / error.
  */
-import { readFileSync } from "node:fs";
-import { instanceKeySync } from "../src/lib/instance-key.js";
+import { closeSync, constants, existsSync, openSync, readFileSync, writeSync } from "node:fs";
+import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
+import type { InstanceKey } from "../src/lib/instance-key.js";
 import { createStage2Transport } from "../src/lib/shared-ledger-v2-transport.js";
 import { assertDrillRoot, MigrationRefused, underRoot } from "../src/lib/shared-ledger-v2-migration-local.js";
 import {
@@ -21,10 +22,29 @@ function arg(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : undefined;
 }
+/** The drill root's own signing key. Not `instanceKeySync`: its fixed temp name would follow a planted link out of the root.
+ * The key file is checked under the root by its real landing place, then created O_EXCL | O_NOFOLLOW (an existing link refuses)
+ * or read O_NOFOLLOW, so nothing outside the drill root is ever written or read through a link. */
+function drillKey(root: string): InstanceKey {
+  const path = underRoot(root, "instance-key.pem"), NOFOLLOW = constants.O_NOFOLLOW;
+  let pem: string;
+  if (existsSync(path)) {
+    const fd = openSync(path, constants.O_RDONLY | NOFOLLOW);
+    try { pem = readFileSync(fd, "utf8"); } finally { closeSync(fd); }
+  } else {
+    pem = String(generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }));
+    const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | NOFOLLOW, 0o600);
+    try { writeSync(fd, pem); } finally { closeSync(fd); }
+  }
+  const privateKey = createPrivateKey(pem);
+  return { privateKey, publicKey: String(createPublicKey(privateKey).export({ format: "jwk" }).x) };
+}
 function liveCenter(root: string, file: string, env: NodeJS.ProcessEnv): MigrationCenter {
   const c = JSON.parse(readFileSync(underRoot(root, file), "utf8")) as Record<string, string>;
-  const bearer = env.SHARED_LEDGER_V2_DRILL_BEARER, key = instanceKeySync(root);
-  if (!bearer || !key) throw new Error("drill bearer (SHARED_LEDGER_V2_DRILL_BEARER) and drill instance key required");
+  // Credentials first: a run without a bearer writes nothing into the drill root (not even a key).
+  const bearer = env.SHARED_LEDGER_V2_DRILL_BEARER;
+  if (!bearer) throw new Error("drill bearer (SHARED_LEDGER_V2_DRILL_BEARER) required");
+  const key = drillKey(root);
   return migrationCenter(createStage2Transport({ key, projectId: c.projectId, connection: {
     centerId: c.centerId, baseUrl: c.baseUrl, teamId: c.teamId, personId: c.personId, instanceId: c.instanceId, bearer } }));
 }
@@ -43,7 +63,9 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   }
   const plan = JSON.parse(readFileSync(underRoot(root, planArg), "utf8")) as MigrationPlan;
   const centerFile = arg(argv, "--center");
-  const center = deps.center?.(root) ?? (centerFile ? liveCenter(root, centerFile, deps.env ?? process.env) : null);
+  let center: MigrationCenter | null;
+  try { center = deps.center?.(root) ?? (centerFile ? liveCenter(root, centerFile, deps.env ?? process.env) : null); }
+  catch (e) { print(`✗ ${e instanceof MigrationRefused ? e.message : (e as Error).message}`); return e instanceof MigrationRefused ? 2 : 1; }
   if (!center) { print("缺 --center"); return 1; }
   if (action === "reverse") {
     const out = await exportForReverse({ root, batchId: plan.batchId, featureIds: plan.featureIds, center, members: plan.members ?? [] });

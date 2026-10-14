@@ -254,20 +254,38 @@ async function confirmEach(group: MemberState[], acks: MemberAck[], key: "gate" 
   return null;
 }
 
+/** A partial failure freezes every member, not only the report: each gets the batch's `migrating` gate on top of whatever mode it
+ * reached (center authority kept, the old one never restored), read back — scheduler routing, lend, merge and deploy all hold a
+ * migrating feature. A member whose mode cannot be written gets the durable maintenance marker, so its scheduler takes no lease. */
+async function freezeGroup(group: MemberState[], featureIds: string[], gate: { batchId: string; kind: "execute" }, why: object) {
+  return Promise.all(group.map(async ({ port }) => {
+    try {
+      const cur = port.modes(featureIds);
+      await port.writeModes(Object.fromEntries(featureIds.map(f => [f, { ...cur[f]!, migrating: gate }])));
+      const back = port.modes(featureIds);
+      if (featureIds.every(f => back[f]!.migrating?.batchId === gate.batchId)) return { instanceId: port.instanceId, hold: "migrating" };
+      throw new Error("回读未见 migrating");
+    } catch (e) {
+      try { return { instanceId: port.instanceId, hold: "maintenance_marker", marker: port.hold(why), error: errCode(e) }; }
+      catch (e2) { return { instanceId: port.instanceId, hold: "failed", error: `${errCode(e)}; ${errCode(e2)}` }; }
+    }
+  }));
+}
+
 async function commit(root: string, plan: MigrationPlan, manifest: V2MigrationManifest, center: MigrationCenter, group: MemberState[],
   report: Record<string, unknown>, done: Done): Promise<MigrationOutcome> {
   const acks: MemberAck[] = group.map(g => ({ label: g.port.label, instanceId: g.port.instanceId, gate: null, execution: null }));
   report.acks = acks;
-  const freeze = (step: Step, batch: unknown, receipts: unknown[], reason: string) => {
-    writeRootJson(root, join(batchDir(root, plan.batchId), "frozen.json"), {
-      batchId: plan.batchId, state: "frozen_pending_pm", step, reason, batch, receipts, members: acks,
-      note: "全组写门保持关闭，不恢复旧权威；PM 按 batch / 回执与成员确认核对后另行处理",
-    });
+  const gate = { batchId: plan.batchId, kind: "execute" as const };
+  const freeze = async (step: Step, batch: unknown, receipts: unknown[], reason: string) => {
+    const why = { batchId: plan.batchId, state: "frozen_pending_pm", step, reason };
+    const holds = await freezeGroup(group, plan.featureIds, gate, why);
+    writeRootJson(root, join(batchDir(root, plan.batchId), "frozen.json"), { ...why, batch, receipts, members: acks, holds,
+      note: "全组冻结：每个成员 migrating 写门（写不进的成员留维护标记），不恢复旧权威；PM 按 batch / 回执与成员确认核对后另行处理" });
     return done({ status: "frozen", step, batch, receipts, members: acks });
   };
   // 1. Durable write gate on every member: from here on local writes to the group's cards are refused (X7), and nothing reopens
   // them. The center batch is sent only after every member confirmed its gate.
-  const gate = { batchId: plan.batchId, kind: "execute" as const };
   const gateFail = await confirmEach(group, acks, "gate", plan.featureIds, m => ({ ...m, migrating: gate }),
     m => m.migrating?.batchId === gate.batchId && m.migrating.kind === gate.kind);
   if (gateFail) return freeze("write_gate", await lookupBatch(center, plan.batchId), [], gateFail);

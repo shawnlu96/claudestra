@@ -222,6 +222,16 @@ describe("X13 验收线 2：映射 / 规格副本 / 审查证据缺一项拒绝�
   });
 });
 
+/** 每个成员实际都停住：本组 feature 挂着 migrating（调度路由 / 出借 / 合并 / 部署都 skip），或调度维护锁拿不到。 */
+async function expectGroupHeld(w: Awaited<ReturnType<typeof world>>) {
+  for (const m of MEMBERS) {
+    if (w.mode(m.dir).migrating?.batchId === "batch-x13") continue;
+    const lease = await acquireMaintenance("scheduler", lockAt(join(w.root, m.dir)));
+    lease?.release();
+    expect(`${m.instanceId}:${lease ? "may-resume" : "held"}`).toBe(`${m.instanceId}:held`);
+  }
+}
+
 describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → 全组 execution 确认；失败按 batch 回执定位并全组冻结", () => {
   test("三步都过：中心 execution + 新 epoch + 主场租约，三个成员都回读确认 execution 绑中心 epoch", async () => {
     const w = await world();
@@ -238,16 +248,18 @@ describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → �
     expect(report(out).notMigrated).toEqual(["scheduler_sessions", "process locks"]);
     expect(report(out).versions).toBe("verified");
   });
-  test("peer B 写门失败：中心批次不发（回执 unknown），本机 / peer A 写门保持关闭，全组冻结", async () => {
+  test("peer A 写门失败：中心批次不发（回执 unknown）；全组冻结——未处理的 peer B 也上写门，写不进的 peer A 留维护标记", async () => {
     const w = await world();
-    const members = failing(w.root, "peer-b", m => !!m.feature?.migrating);
+    const members = failing(w.root, "peer-a", m => !!m.feature?.migrating);
     const out = await runExecutionMigration({ root: w.root, plan: plan(), center: w.center, mode: "commit", members });
     expect(out).toMatchObject({ status: "frozen", step: "write_gate", batch: { status: "unknown" } });
     expect(w.k.center.log.map(e => e.route)).toEqual(["migration"]);
     expect(w.k.center.feature("feature")).toMatchObject({ authorityMode: "planning", epoch: 1 });
-    for (const who of ["local", "peer-a"]) expect(w.mode(who).migrating).toEqual({ batchId: "batch-x13", kind: "execute" });
+    for (const who of ["local", "peer-b"]) expect(w.mode(who).migrating).toEqual({ batchId: "batch-x13", kind: "execute" });
     const frozen = JSON.parse(readFileSync(join(w.root, "shared-ledger-v2-migration", "batch-x13", "frozen.json"), "utf8"));
-    expect(frozen.members.map((m: any) => m.gate)).toEqual(["confirmed", "confirmed", "failed"]);
+    expect(frozen.members.map((m: any) => m.gate)).toEqual(["confirmed", "failed", null]);
+    expect(frozen.holds.map((h: any) => h.hold)).toEqual(["migrating", "maintenance_marker", "migrating"]);
+    await expectGroupHeld(w);
   });
   test("切换响应丢失（中心已提交）：batch 回执 committed，冻结，全组写门保持关闭不回 planning", async () => {
     const w = await world();
@@ -285,6 +297,9 @@ describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → �
     expect(out.status === "frozen" && out.members.map(m => m.execution)).toEqual(["confirmed", "failed", null]);
     expect(w.mode("peer-a")).toMatchObject({ authorityMode: "planning", migrating: { batchId: "batch-x13", kind: "execute" } });
     expect(w.mode("peer-b").migrating).toEqual({ batchId: "batch-x13", kind: "execute" });
+    // 已切 execution 的本机不回旧权威，但重新挂上写门：调度路由 skip，不会再走 central
+    expect(w.mode("local")).toMatchObject({ authorityMode: "execution", migrating: { batchId: "batch-x13", kind: "execute" } });
+    await expectGroupHeld(w);
   });
 });
 
@@ -336,6 +351,26 @@ describe("X13 验收线 5：测试与脚本不写生产目录", () => {
     expect(readdirSync(outside).sort()).toEqual(["modes.json", "peer-x"]);
     expect(readdirSync(join(outside, "peer-x"))).toEqual([]);
     expect(JSON.parse(readFileSync(join(outside, "modes.json"), "utf8"))).toEqual({ features: {} });
+    expect(w.k.center.log).toHaveLength(0);
+  });
+  test("真实 CLI 中心入口：先核凭据、钥匙不跟随符号链接，根外文件不被覆盖", async () => {
+    const w = await world(), outside = mkdtempSync(join(tmpdir(), "x13-cli-outside-"));
+    roots.push(outside);
+    writeFileSync(join(outside, "sentinel"), "unchanged");
+    writeFileSync(join(w.root, "plan.json"), JSON.stringify(plan()));
+    writeFileSync(join(w.root, "center.json"), JSON.stringify({ centerId: "center", baseUrl: "https://center.invalid", teamId: "team",
+      personId: "person", instanceId: "local", projectId: "project" }));
+    symlinkSync(join(outside, "sentinel"), join(w.root, `instance-key.pem.${process.pid}.tmp`));
+    const run = (env: NodeJS.ProcessEnv) => main(["--root", w.root, "--plan", "plan.json", "--center", "center.json", "dry-run"], { env, print: () => {} });
+    expect(await run({})).toBe(1);
+    expect(existsSync(join(w.root, "instance-key.pem"))).toBe(false);
+    symlinkSync(join(outside, "sentinel"), join(w.root, "instance-key.pem"));
+    expect(await run({ SHARED_LEDGER_V2_DRILL_BEARER: "drill-bearer-0123456789" })).toBe(2);
+    rmSync(join(w.root, "instance-key.pem"));
+    symlinkSync(join(outside, "absent.pem"), join(w.root, "instance-key.pem"));
+    expect(await run({ SHARED_LEDGER_V2_DRILL_BEARER: "drill-bearer-0123456789" })).toBe(2);
+    expect(readdirSync(outside)).toEqual(["sentinel"]);
+    expect(readFileSync(join(outside, "sentinel"), "utf8")).toBe("unchanged");
     expect(w.k.center.log).toHaveLength(0);
   });
   test("整条演练（dry-run → commit → reverse）写下的每个文件都在临时根下", async () => {

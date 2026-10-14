@@ -154,6 +154,8 @@ export interface MemberPort {
   inventory(featureIds: readonly string[], relatedTaskIds?: readonly string[]): LocalInventory;
   modes(featureIds: readonly string[]): Record<string, SharedLedgerMode>;
   writeModes(modes: Record<string, SharedLedgerMode>): Promise<void>;
+  /** Durable whole-scheduler hold (the maintenance marker the scheduler lease refuses under) for a member whose mode is unwritable. */
+  hold(why: object): string;
 }
 export function fileMember(root: string, m: MigrationMemberSpec): MemberPort {
   const dir = relative(root, underRoot(root, m.dir)) || ".", at = () => underRoot(root, dir);
@@ -171,5 +173,6 @@ export function fileMember(root: string, m: MigrationMemberSpec): MemberPort {
       underRoot(root, dir, "shared-ledger-modes.json"); underRoot(root, dir, "shared-ledger-modes.json.lock");
       await writeSharedLedgerModes(modes, at(), ledger());
     },
+    hold: why => writeRootJson(root, join(dir, "update-inflight.json"), { ...why, holder: "x13-migration" }),
   };
 }
