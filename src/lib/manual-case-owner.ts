@@ -7,9 +7,9 @@
  */
 import { endStages, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import type { LedgerMeta } from "./ledger-store.js";
-import { defaultOwner, manualCaseDefaults, REAL_CONFLICT_SUB, type ManualCaseDefaults, type ManualCaseRole } from "./manual-case-defaults.js";
+import { defaultOwner, manualCaseDefaults, REAL_CONFLICT_SUB, type ManualCaseDefaults, type ManualCaseRole, type SlaBasis } from "./manual-case-defaults.js";
 import { filePolicyPort, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
-import { manualEntry, type ManualEntry, type ManualReasonCode } from "./manual-reason.js";
+import { manualEntry, parseManualReason, type ManualEntry, type ManualReasonCode } from "./manual-reason.js";
 import type { RecoveryKey } from "./recovery-policy.js";
 
 export const MANUAL_CASE_OP = "manual_case_set";
@@ -64,6 +64,39 @@ function slaSub(entry: ManualEntry, events: readonly LedgerEvent[]): string | nu
   return esc && esc.data.cause === "conflict" ? REAL_CONFLICT_SUB : "merge_bounce_limit";
 }
 
+/**
+ * A non-entry event inside a manual run that names its blocking reason in structured form: an escalated merge bounce (cause decides
+ * real conflict vs the raw limit, as slaSub does), or an escalation whose reason carries a code head (parseManualReason's explicit codes;
+ * a code-less sentence is never guessed at).
+ */
+function evidenceBasis(e: LedgerEvent): SlaBasis | null {
+  if (e.kind === "scheduler" && e.data.op === "merge_conflict" && e.data.escalated === true)
+    return { code: "merge_unknown", sub: e.data.cause === "conflict" ? REAL_CONFLICT_SUB : "merge_bounce_limit" };
+  const p = e.kind === "escalate" ? parseManualReason(typeof e.data.reason === "string" ? e.data.reason : e.text) : null;
+  return p?.explicit ? { code: p.code, sub: null } : null;
+}
+
+/**
+ * The reason a pm_takeover took over: the latest classifiable one earlier in the same manual run (an evidence event, else the previous
+ * entry's own code, walking back over nested takeovers / unknown entries), never past where the run began. A run that begins at the
+ * takeover itself (auto → manual) has none, and the table's 4h stands. tests/manual-case-owner-takeover.test.ts.
+ */
+function takeoverBasis(entry: ManualEntry, events: readonly LedgerEvent[]): SlaBasis | null {
+  for (let cut = entry.event.seq; ;) {
+    const before = events.filter((e) => e.seq < cut);
+    const prev = manualEntry(before);
+    if (!prev) return null;
+    const hit = before.findLast((e) => e.seq > prev.event.seq && evidenceBasis(e) !== null);
+    if (hit) return evidenceBasis(hit);
+    if (prev.code && prev.code !== "pm_takeover") return { code: prev.code, sub: slaSub(prev, events) };
+    cut = prev.event.seq;
+  }
+}
+
+/** The episode's defaults from its structured evidence; the view, the observe note and the backfill all read this one. */
+const entryDefaults = (entry: ManualEntry, events: readonly LedgerEvent[], task: Pick<LedgerTask, "agent" | "pm">, meta: MetaPart) =>
+  manualCaseDefaults(entry.code, entry.event.ts, task, meta, slaSub(entry, events), entry.code === "pm_takeover" ? takeoverBasis(entry, events) : null);
+
 function asRecord(e: LedgerEvent): ManualCaseRecord | null {
   const d = e.data;
   if (e.kind !== "decision" || d.op !== MANUAL_CASE_OP || typeof d.entrySeq !== "number" || typeof d.responsible !== "string"
@@ -92,11 +125,11 @@ const iso = (ms: number) => new Date(ms).toISOString();
 
 /**
  * The view's override: explicit / backfilled record over the derived defaults, with authority and gaps. With an entry the defaults are
- * re-derived from the episode's structured evidence (slaSub), the same classification the backfill records.
+ * re-derived from the episode's structured evidence (slaSub / takeoverBasis), the same classification the backfill records.
  */
 export function manualCaseOwnership(viewDefaults: ManualCaseDefaults, task: Pick<LedgerTask, "agent" | "pm">, events: readonly LedgerEvent[],
   entry: ManualEntry | null, meta: MetaPart): { owner: ManualCaseOwner; due: ManualCaseDefaults["due"] } {
-  const d = entry ? manualCaseDefaults(entry.code, entry.event.ts, task, meta, slaSub(entry, events)) : viewDefaults;
+  const d = entry ? entryDefaults(entry, events, task, meta) : viewDefaults;
   const auth = entry?.code ? AUTHORITY[entry.code] ?? null : UNKNOWN_AUTHORITY;
   const base = { authorizer: auth?.by ?? null, check: auth?.check ?? null, waitingOn: null, next: null, setSeq: null };
   if (!entry) return { owner: { ...d.owner, ...base, origin: "derived", gap: null, source: `${d.owner.source}；进入点未知，只读推导，PM 核对` }, due: d.due };
@@ -140,7 +173,7 @@ export function pendingDefault(task: LedgerTask, mode: string, events: readonly 
   const entry = manualEntry(events);
   if (!entry) return { ok: false, why: "没有进入 manual 的正式事件：只读推导，不补记" };
   if (manualCaseRecords(events, entry.event.seq).length) return { ok: false, why: `段 #${entry.event.seq} 已有处置记录` };
-  const d = manualCaseDefaults(entry.code, entry.event.ts, task, meta, slaSub(entry, events));
+  const d = entryDefaults(entry, events, task, meta);
   return { ok: true, value: { entrySeq: entry.event.seq, since: entry.event.ts, code: entry.code, role: d.owner.role, who: d.owner.who!,
     dueAt: d.due.at!, slaHours: d.due.slaHours, source: `${d.owner.source}；${d.due.source}` } };
 }
