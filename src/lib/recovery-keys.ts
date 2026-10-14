@@ -25,6 +25,7 @@ export const RECOVERY_KEYS = [
   "ciProofReuse",
   "ciTrainFailureClass",
   "ciWebBuild",
+  "convIgnoredBuildArtifacts",
   "convergenceStall",
   "dagWriteScrub",
   "deployFirst",

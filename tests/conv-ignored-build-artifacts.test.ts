@@ -26,6 +26,9 @@ export function artifactFixture() {
   }
   writeFileSync(join(main, ".gitignore"), "/node_modules\n.env*\n.review-tmp/\n.review-env/\n");
   writeFileSync(join(main, "source.txt"), "reviewed source\n"); command(main, "add", "."); command(main, "commit", "-qm", "fixture");
+  const first = command(main, "rev-parse", "HEAD");
+  writeFileSync(join(main, "source.txt"), "reviewed source revision two\n");
+  command(main, "add", "source.txt"); command(main, "commit", "-qm", "reviewed revision two");
   const head = command(main, "rev-parse", "HEAD"); command(main, "branch", "feat/T1");
   command(main, "update-ref", "refs/remotes/origin/feat/T1", head);
   const dir = fixTreePath(trees, "T1")!; command(main, "worktree", "add", "-q", dir, "feat/T1");
@@ -44,11 +47,11 @@ export function artifactFixture() {
     observe: (a: ObservedAction) => { if (!observed.some((x) => x.actionKey === a.actionKey)) observed.push(a); }, gate: () => null });
   const target = (mode: RecoveryMode): FixTreeTarget => ({ taskId: "T1", branch: "feat/T1", head, root: trees, artifacts: context(mode) } as FixTreeTarget);
   const open = (mode: RecoveryMode) => openFixWorktree(git, dir, target(mode), dir, async () => ({ ok: true, head }));
-  return { root, main, dir, head, trees, bytes, observed, quarantineRoot, context, target, open,
+  return { root, main, dir, head, heads: [first, head], trees, bytes, observed, quarantineRoot, context, target, open,
     close: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-test.failing("[验收线 1] on reuses a linked fix tree containing only the six ignored build artifacts", async () => {
+test("[验收线 1] on reuses a linked fix tree containing only the six ignored build artifacts", async () => {
   const f = artifactFixture();
   try {
     expect(await f.open("on")).toEqual({ dir: f.dir });

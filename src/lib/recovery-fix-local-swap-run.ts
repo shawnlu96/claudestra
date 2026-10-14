@@ -8,8 +8,8 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, readlinkSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { WriteCtx } from "./ledger-checks.js";
 import { mustTask } from "./ledger-checks.js";
 import { getWorkflow, resourceKey, resourcesOverlap, type SchedulerIntent } from "./ledger-scheduler.js";
@@ -29,7 +29,10 @@ import { isLocalSwapIntent, localQuotaRefusal, localSwapMode, localSwapPorts, pr
 import { statePath } from "./paths.js";
 import { git, type Git } from "./scheduler-review-worktree.js";
 import { fixTreePath } from "./fix-strategy-worktree.js";
-import { retryWorktreeDirty, retryWorktreeDirtySync } from "./scheduler-create-retry-worktree.js";
+import { retryWorktreeDirtySync } from "./scheduler-create-retry-worktree.js";
+
+import { buildArtifactOwner, type ConvArtifactContext } from "./conv-ignored-build-artifacts.js";
+import { convArtifactContext, convArtifactProof, convArtifactProofSync } from "./conv-ignored-build-artifacts-quarantine.js";
 
 export const localSwapEvidenceOf = (db: Database, intentId: string): LocalSwapEvidence | null =>
   (getEventByDedup(db, `scheduler:${intentId}:materials`)?.data.localSwap as LocalSwapEvidence | undefined) ?? null;
@@ -99,6 +102,7 @@ export function localSwapCreate(db: Database, intent: SchedulerIntent, ev: Local
   base: SwapGate | undefined, now: () => number, source: string | null): { lifecycle: ConvergenceLifecycle; gate: SwapGate } {
   let quota: string | null = "本机额度尚未在作者工作树之后复核";
   const lifecycle: ConvergenceLifecycle = { ...deps,
+    artifacts: { ...deps.artifacts, policy: deps.artifacts?.policy ?? localSwapPorts(db).policy },
     localFamilyWait: (task, family) => localSwapAuthority(db, mustTask(db, task.id), ev) ?? deps.localFamilyWait?.(task, family) ?? null,
     authorTree: deps.authorTree && (async (source, target, recorded) => {
       const tree = await deps.authorTree!(source, target, recorded);
@@ -106,49 +110,27 @@ export function localSwapCreate(db: Database, intent: SchedulerIntent, ev: Local
       return tree;
     }) };
   const gate = localSwapGate(db, intent, ev, base, () => {
-    const why = quota ?? treeProofSync(db, mustTask(db, intent.taskId), source, deps);
+    const why = quota ?? treeProofSync(db, mustTask(db, intent.taskId), source, deps, false);
     return why && `本机接手等待（不外派）：${why}`;
   });
   return { lifecycle, gate };
 }
 
-/**
- * Read-only, before any reclaim or retirement (review r1 dirty-preflight): the canonical author tree, if present, has no edits and sits
- * at the reviewed head, and the source has no local card branch elsewhere — uncommitted or unpushed work is never taken over. The
- * tree step (fix-strategy-worktree.ts) re-checks at create; this only keeps a refusal from costing the peer its lease first.
- */
-const real = (p: string): string => { try { return realpathSync.native(p); } catch { return p; } };
-
-/**
- * The project main tree that owns `dir`, spelled the way the scheduler's dependency links name it (same reading as
- * fix-strategy-worktree.ts ownerRepo, which the adopt path passes): retryWorktreeDirty then exempts exactly those two links and
- * nothing else (review r2 dependency-links). No main tree = no exemption.
- */
+/** Pre-reclaim probes may prove on candidates without moving them; stopped-author reuse performs the isolation later. */
 async function treeOwner(g: Git, dir: string): Promise<string | undefined> {
-  return ownerOf(dir, await g(["-C", dir, "worktree", "list", "--porcelain"]));
+  return buildArtifactOwner(dir, await g(["-C", dir, "worktree", "list", "--porcelain"]));
 }
 
-function ownerOf(dir: string, list: { code: number; out: string }): string | undefined {
-  const first = list.code === 0 ? list.out.trim().split("\n\n")[0].split("\n") : [];
-  const main = first[0]?.startsWith("worktree ") && !first.includes("bare") ? first[0].slice(9) : undefined;
-  if (!main) return undefined;
-  for (const [sub, up] of [["node_modules", 1], [join("web", "node_modules"), 2]] as const) {
-    const dest = join(dir, sub);
-    let to: string;
-    try { to = resolve(dirname(dest), readlinkSync(dest)); } catch { continue; }
-    let repo = to;
-    for (let i = 0; i < up; i++) repo = dirname(repo);
-    if (resolve(repo, sub) === to && real(repo) === real(main)) return repo;
-  }
-  return main;
-}
+const preflightContext = (db: Database, task: LedgerTask, deps: ConvergenceLifecycle, intentId: string): ConvArtifactContext =>
+  convArtifactContext(db, task, intentId, Date.now(), () => { deps.active(); return null; },
+    { ...deps.artifacts, policy: deps.artifacts?.policy ?? localSwapPorts(db).policy });
 
-async function treeRefusal(db: Database, task: LedgerTask, source: string | null, deps: ConvergenceLifecycle): Promise<string | null> {
+async function treeRefusal(db: Database, task: LedgerTask, source: string | null, deps: ConvergenceLifecycle, intentId: string): Promise<string | null> {
   const g = localSwapPorts(db).git ?? git;
   const dir = fixTreePath(deps.worktreeRoot ?? statePath("worktrees"), task.id);
   if (!dir) return "卡号不能安全映射到作者工作树目录";
   if (existsSync(dir)) {
-    const dirty = await retryWorktreeDirty(g, dir, await treeOwner(g, dir));
+    const dirty = (await convArtifactProof(g, dir, await treeOwner(g, dir), preflightContext(db, task, deps, intentId))).reason;
     if (dirty) return dirty;
     const sha = await g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
     if (sha.code !== 0) return `作者工作树 ${dir} 读不了 HEAD，保留等待核对`;
@@ -173,16 +155,14 @@ const spawnGit: GitSync = (args) => {
  * create gate read it at the very point they act, after the quota proof's await. The canonical complete dirty proof runs
  * synchronously here as well: ignored files, disk/blob changes, hidden index flags and submodules cannot bypass the edge.
  */
-export function treeProofSync(db: Database, task: LedgerTask, source: string | null, deps: ConvergenceLifecycle): string | null {
+export function treeProofSync(db: Database, task: LedgerTask, source: string | null, deps: ConvergenceLifecycle, allowArtifacts = true): string | null {
   const g = localSwapPorts(db).gitSync ?? spawnGit;
   const dir = fixTreePath(deps.worktreeRoot ?? statePath("worktrees"), task.id);
   if (!dir) return "卡号不能安全映射到作者工作树目录";
   if (existsSync(dir)) {
-    const owner = ownerOf(dir, g(["-C", dir, "worktree", "list", "--porcelain"]));
-    const dirty = retryWorktreeDirtySync((args) => {
-      const r = g(args);
-      return { ...r, out: r.out.endsWith("\0") ? r.out : r.out.trim() };
-    }, dir, owner);
+    const owner = buildArtifactOwner(dir, g(["-C", dir, "worktree", "list", "--porcelain"]));
+    const port = (args: string[]) => { const r = g(args); return { ...r, out: r.out.endsWith("\0") ? r.out : r.out.trim() }; };
+    const dirty = allowArtifacts ? convArtifactProofSync(port, dir, owner, preflightContext(db, task, deps, "preflight")) : retryWorktreeDirtySync(port, dir, owner);
     if (dirty) return dirty;
     const sha = g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
     if (sha.code !== 0) return `作者工作树 ${dir} 读不了 HEAD，保留等待核对`;
@@ -249,7 +229,7 @@ export async function localSwapReady(db: Database, ctx: WriteCtx, intent: Schedu
   const why = localSwapAuthority(db, task, ev) ?? deps.localFamilyWait?.(task, ev.family) ??
     (localWriterCount(db, task.project, task.id) >= context.maxWorkers ? "本机写槽已满或不接新写者" : null) ??
     (locksBusy(db, task) ? "文件锁被别的卡占着" : null) ?? await localQuotaRefusal(db, task.project, ev.family, ctx.now ?? Date.now()) ??
-    (getEventByDedup(db, `scheduler:${intent.id}:creating`) ? null : await treeRefusal(db, task, context.source, deps));
+    (getEventByDedup(db, `scheduler:${intent.id}:creating`) ? null : await treeRefusal(db, task, context.source, deps, intent.id));
   deps.active();
   return why ? waitOnce(db, ctx, intent, `本机接手等待（不外派）：${why}`) : null;
 }
@@ -264,7 +244,7 @@ export async function localSwapReclaimEdge(db: Database, ctx: WriteCtx, intent: 
   context: RemoteConvergenceContext, deps: ConvergenceLifecycle): Promise<string | (() => string | null)> {
   const task = mustTask(db, intent.taskId);
   const wait = (why: string) => waitOnce(db, ctx, intent, `本机接手等待（不外派）：${why}`).detail;
-  const why = await treeRefusal(db, task, context.source, deps) ?? await localQuotaRefusal(db, task.project, ev.family, ctx.now ?? Date.now());
+  const why = await treeRefusal(db, task, context.source, deps, intent.id) ?? await localQuotaRefusal(db, task.project, ev.family, ctx.now ?? Date.now());
   deps.active();
   if (why) return wait(why);
   return () => {

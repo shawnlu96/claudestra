@@ -12,6 +12,7 @@ export type SkipEffectGate = "pace" | "manager" | "hook" | "s2v" | "featureless"
 export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<string, string>>>> = {
   /** card work run from a candidate loop that asks pace.skipTask (S2D) first */
   pace: {
+    "conv-ignored-build-artifacts-quarantine.ts": "proc=1 fs=4 vcs=1",
     "effect-count-refresh-git.ts": "fs=2 vcs=1", // EFFAUTO1: the merge driver's scratch-worktree count refresh + push, under the merge tick's skipTask
     "fix-strategy-lifecycle.ts": "proc=1",
     "fix-strategy-remote-branch.ts": "vcs=1",

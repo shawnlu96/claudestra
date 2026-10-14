@@ -21,6 +21,8 @@ import { reviewSwapManagerEnv } from "./scheduler-review-swap-runtime.js";
 import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./scheduler-retire.js";
 import { git, openReviewWorktree, type Git, type Pinned } from "./scheduler-review-worktree.js";
 import { fixTreePath, lsRemoteHead, openFixWorktree, type FixTree, type FixTreeTarget, type OriginHead } from "./fix-strategy-worktree.js";
+import { convArtifactContext, convTreeCreateEdge } from "./conv-ignored-build-artifacts-quarantine.js";
+import type { ConvArtifactContext } from "./conv-ignored-build-artifacts.js";
 import { heldLease } from "./ledger-lend-lease.js";
 import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
 import type { SessionRef } from "./worker-session.js";
@@ -32,14 +34,13 @@ export interface ConvergenceLifecycle {
   agents: RetireDeps["agents"];
   active(): void;
   /**
-   * The final stop of one named session, used by the gated fix swap. It must itself refuse when the agent no longer runs
-   * `sessionId` or the gate's admitted ownership pins: the child rechecks them after its own awaits. The production factory sets it; an in-memory
-   * facade leaves it out, and then the swap falls back to its `manager("kill", agent)`.
+   * The stop child must re-read session identity and ownership after its awaits; facades can use manager("kill", agent).
    */
   stop?(old: { agent: string; sessionId: string }, gate?: SwapGate): Promise<Record<string, unknown>>;
   open(source: string, dir: string, head: string | null): Promise<{ dir: string } | { manual: string }>;
   /** The replacement author's own card-branch tree; `source` is read-only (fix-strategy-worktree.ts). */
   authorTree?(source: string, target: FixTreeTarget, recorded: string | null): Promise<FixTree | Pinned>;
+  artifacts?: Pick<ConvArtifactContext, "policy" | "repository" | "quarantineRoot">;
   registryPath?: string;
   slotLockPath?: string;
   worktreeRoot?: string;
@@ -165,7 +166,7 @@ function treeManual(db: Database, ctx: WriteCtx, intent: SchedulerIntent, reason
  * and the intent goes to PM; neither is placed elsewhere (`tree: true`). A stale tracking ref the port fast-forwarded is journaled.
  */
 async function authorTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, source: string,
-  deps: ConvergenceLifecycle): Promise<{ dir: string } | { wait: string; tree: true; manual?: true }> {
+  deps: ConvergenceLifecycle, edge?: SwapGate): Promise<{ dir: string } | { wait: string; tree: true; manual?: true }> {
   const stop = (wait: string) => ({ wait: waitOnce(db, ctx, intent, wait), tree: true as const });
   const manual = (reason: string) => treeManual(db, ctx, intent, reason);
   const gate = authorGate(db, intent);
@@ -176,7 +177,9 @@ async function authorTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, 
   if (prior && (prior.data.dir !== dir || prior.data.head !== intent.head || prior.data.branch !== task.branch)) return manual("本意图记录的作者工作树与当前目标不符，等待核对");
   if (!prior) convergenceEvent(db, ctx, intent, "worktree", { dir, head: intent.head, branch: task.branch });
   deps.active();
-  const target = { taskId: task.id, branch: task.branch, head: intent.head, root };
+  const artifacts = intent.action === "fix_swap" ? convArtifactContext(db, task, intent.id, ctx.now ?? Date.now(),
+    () => { deps.active(); return authorGate(db, intent) ?? edge?.("stopped")?.reason ?? (!edge ? "缺旧作者停止执行门，不隔离" : null); }, deps.artifacts) : undefined;
+  const target = { taskId: task.id, branch: task.branch, head: intent.head, root, artifacts };
   const opened: FixTree = deps.authorTree ? await deps.authorTree(source, target, dir) : { manual: "缺作者工作树端口" };
   deps.active();
   const fresh = opened.refreshed;
@@ -197,7 +200,7 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
   let row = deps.registry().find((r) => r.name === name);
   if (!started && row) throw new LedgerError("conflict", "收敛会话名已被其他会话占用");
   if (!started) {
-    const dir = role === "author" ? await authorTree(db, ctx, intent, task, source, deps)
+    const dir = role === "author" ? await authorTree(db, ctx, intent, task, source, deps, gate)
       : await deps.open(source, join(deps.worktreeRoot ?? statePath("worktrees"), `arb-${task.id}-${intent.eventSeq}`), intent.head);
     deps.active();
     if ("wait" in dir) return dir;
@@ -206,7 +209,7 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
     let refused: string | null = null; // the gate again at the effect edge: a codex slot wait or the tree may have taken a while
     const create = async () => {
       deps.active();
-      if (role === "author" && (refused = authorGate(db, intent) ?? gate?.("stopped")?.reason ?? null)) return { kind: "wait", reason: refused };
+      if (role === "author" && (refused = authorGate(db, intent) ?? gate?.("stopped")?.reason ?? convTreeCreateEdge(dir.dir, task.branch, intent.head))) return { kind: "wait", reason: refused };
       convergenceEvent(db, ctx, intent, "creating", { agent: name, family, dir: dir.dir });
       const result = await deps.manager("create", name, dir.dir, "--project", task.project, "--task", `${task.id} 收敛`,
         "--card", task.id, "--card-role", role === "author" ? "author" : "other", ...runtime);
