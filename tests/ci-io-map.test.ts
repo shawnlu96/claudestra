@@ -3,12 +3,14 @@
  * plan.json 的 picked 统计口径（scripts/ci-related-plan.ts）。记录器本身见 tests/ci-io-trace.test.ts。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildIoMap, type IoMap, missingShards, traceFiles } from "../scripts/ci-io-map.ts";
 import { buildPlan, planDigest, planLine, type PlanFacts } from "../scripts/ci-related-plan.ts";
+import { parseIoMap } from "../src/lib/ci-impact-io-map.ts";
 import type { ImpactSelection } from "../src/lib/ci-impact-select.ts";
+import { ciIoTraceChild, testChildEnv } from "./test-env.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const rec = (module: string, kind: string, path: string) => JSON.stringify({ module, kind, path });
@@ -23,7 +25,7 @@ describe("汇总", () => {
     expect(map).toEqual({ version: 1, sha: "abc", generatedAt: "2026-10-13T00:00:00.000Z", entries: [
       { module: "src/a.ts", reads: [], walks: ["tests"], spawns: [] },
       { module: "src/b.ts", reads: ["a.json", "z.json"], walks: [], spawns: ["scripts/x.ts"] },
-    ] } satisfies IoMap);
+    ], untracked: [{ module: "scripts/x.ts", spawnedBy: ["src/b.ts"] }] } satisfies IoMap);
   });
 
   test("给了片数时缺任何一片就不出图；脚本失败只写原因、退出码非 0（ci.yml 那一步容错）", () => {
@@ -44,6 +46,54 @@ describe("汇总", () => {
       expect(ok.exitCode).toBe(0);
       const map = JSON.parse(readFileSync(join(dir, "out", "io-map.json"), "utf8")) as IoMap;
       expect(map.entries.map((e) => e.module)).toEqual(["src/m1.ts", "src/m2.ts"]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("[先红后绿] 未追踪子进程（SELECT5）", () => {
+  test("起过的仓库模块自己没留下记录就列出（带上谁起的）；有记录的、非模块文件、透传的记录器 preload 不列；清单非空也照常出图、退出码 0", () => {
+    const traced = [rec("tests/a.test.ts", "spawn", "scripts/probe.ts"), rec("tests/b.test.ts", "spawn", "scripts/probe.ts"),
+      rec("tests/a.test.ts", "spawn", "src/lib/acp/codex-adapter/main.ts"), rec("src/lib/acp/codex-adapter/main.ts", "read", "src/lib/acp/codex-adapter/x.ts"),
+      rec("tests/c.test.ts", "spawn", "scripts/run.sh"), rec("tests/c.test.ts", "spawn", "src/lib/sync-fs-trace.ts")].join("\n");
+    const { map } = buildIoMap([traced], "s", new Date(0));
+    expect(map.untracked).toEqual([{ module: "scripts/probe.ts", spawnedBy: ["tests/a.test.ts", "tests/b.test.ts"] }]);
+    expect(buildIoMap([rec("src/a.ts", "read", "x.json")], "s", new Date(0)).map.untracked).toEqual([]);
+    const dir = mkdtempSync(join(tmpdir(), "io-map-untracked-"));
+    try {
+      writeFileSync(join(dir, "t.jsonl"), `${traced}\n`);
+      const r = Bun.spawnSync([process.execPath, join(ROOT, "scripts/ci-io-map.ts"), dir, join(dir, "io-map.json"), "s"], { stdout: "pipe", stderr: "pipe" });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.toString()).toContain("未追踪子进程 1 个（起过但没留下任何记录，图里是盲区）：scripts/probe.ts ← tests/a.test.ts, tests/b.test.ts");
+      expect((JSON.parse(readFileSync(join(dir, "io-map.json"), "utf8")) as IoMap).untracked).toEqual(map.untracked);
+      // SELECT3 读图不受新字段影响
+      expect(parseIoMap(JSON.stringify({ ...map, sha: "a".repeat(40), generatedAt: new Date().toISOString() })).entries).toEqual(map.entries);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("最小 env 子进程透传 CI_IO_TRACE（SELECT5，tests/test-env.ts 的 ciIoTraceChild）", () => {
+  test("父进程没设：argv / env 都是空，子进程和改前一样；设了：原样透传并 preload bunfig 的同一入口", () => {
+    expect(ciIoTraceChild({})).toEqual({ argv: [], env: {} });
+    expect(ciIoTraceChild({ CI_IO_TRACE: "" })).toEqual({ argv: [], env: {} });
+    const on = ciIoTraceChild({ CI_IO_TRACE: "/t/io.jsonl" });
+    expect(on.env).toEqual({ CI_IO_TRACE: "/t/io.jsonl" });
+    expect(on.argv[0]).toBe("--preload");
+    expect(resolve(on.argv[1]!)).toBe(join(ROOT, "src/lib/sync-fs-trace.ts"));
+    expect(Bun.TOML.parse(readFileSync(join(ROOT, "bunfig.toml"), "utf8"))).toMatchObject({ preload: ["./src/lib/sync-fs-trace.ts"] });
+  });
+
+  test("--config=/dev/null 的子进程：不带就没有记录，带上就记下它自己的读取", () => {
+    const dir = mkdtempSync(join(tmpdir(), "io-trace-child-"));
+    try {
+      const run = (trace: ReturnType<typeof ciIoTraceChild>) => Bun.spawnSync(
+        [process.execPath, ...trace.argv, "--no-env-file", "--config=/dev/null", join(ROOT, "scripts/ci-io-map.ts"), join(ROOT, "scripts/guard"), join(dir, "o.json"), "s"],
+        { cwd: dir, env: testChildEnv(trace.env), stdout: "pipe", stderr: "pipe" });
+      const out = join(dir, "io.jsonl");
+      expect(run({ argv: [], env: {} }).exitCode).toBe(1); // scripts/guard 下没有 .jsonl：扫一遍目录后失败退出
+      expect(existsSync(out)).toBe(false);
+      expect(run(ciIoTraceChild({ CI_IO_TRACE: out })).exitCode).toBe(1);
+      const recs = readFileSync(out, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+      expect(recs).toContainEqual({ module: "scripts/ci-io-map.ts", kind: "walk", path: "scripts/guard" });
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
