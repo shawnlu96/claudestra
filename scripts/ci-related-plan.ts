@@ -111,6 +111,7 @@ function ioMapPart(f: PlanFacts, mode: unknown, cur: ImpactSelection): { ioMap?:
 }
 
 /** The decision plus, for a pull_request with a known PR head, that head: bound into the plan and so into its digest. */
+// 回退所需：关闭 CI_QUEUE_LIGHT 后的整次补跑仍须全量，否则排队卡会一直等待全量。
 export function buildPlan(f: PlanFacts): CiPlan {
   const force = (f.runAttempt ?? 1) > 1 || f.labels?.includes("ci-full");
   const ordinary = f.event === "pull_request" && !f.headRef.startsWith("train/");

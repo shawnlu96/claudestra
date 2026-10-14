@@ -59,10 +59,10 @@ function parsePr(url: string): { repo: string; number: string } {
 }
 
 function ciVerdict(states: Record<string, CheckState>): Verdict {
-  if (lightOnly(Object.entries(states).map(([name, bucket]) => ({ name, bucket })))) return wait("只有轻量 CI，等全量");
   const list = Object.entries(states), by = (s: CheckState) => list.filter(([, v]) => v === s).map(([k]) => k);
   for (const s of ["fail", "cancelled", "skipped", "unknown"] as const) if (by(s).length) return refuse(`CI ${s}：${by(s).join(", ")}`);
   if (by("missing").length) return refuse(`当前 head 缺 CI run：${by("missing").join(", ")}`);
+  if (lightOnly(Object.entries(states).map(([name, bucket]) => ({ name, bucket })))) return wait("只有轻量 CI，等全量");
   if (by("pending").length) return wait(`CI 未完成：${by("pending").join(", ")}`);
   return { ok: true, detail: `CI 全绿：${list.map(([k]) => k).join(", ")}` };
 }
