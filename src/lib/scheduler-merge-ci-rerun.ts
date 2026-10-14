@@ -10,6 +10,7 @@ import { knownFlakyBase, knownFlakyClaim, knownFlakyRerun, type KnownFlakyRed } 
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
 import type { EventKind } from "./ledger-stages.js";
+import { rethrowCiLogStop, checkedFailedLog, judgeCiLog, readPerJobLog, type PerJobLog } from "./scheduler-merge-ci-log-read.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 import { currentCountFailures, effCountRefreshStep } from "./effect-count-refresh.js";
@@ -25,6 +26,7 @@ export interface CiRerunGh {
   /** `attempt` > 1 means the run was already re-run; `status` is "completed" once that attempt ended, with its `conclusion`. */
   runAttempt(repo: string, runId: string): Promise<{ attempt: number; status: string; conclusion: string }>;
   failedLog(repo: string, runId: string): Promise<string>;
+  perJobLog?(repo: string, runId: string, attempt: number): Promise<PerJobLog>;
   prFiles(prRef: string): Promise<string[]>;
   rerunFailed(repo: string, runId: string): Promise<void>;
 }
@@ -32,8 +34,6 @@ type FailedCheck = MergeBounce["checks"][number];
 type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
 type ToReceipt = (b: MergeBounce) => string;
 
-/** runBounded stops reading at 1 MiB: a log near that may be cut, and the cut part could hold a non-timeout failure. */
-const LOG_LIMIT = 900 * 1024;
 /** gh pr view lists at most 100 files; a list that long may be cut, and a cut list could miss the timed-out file. */
 const FILES_LIMIT = 100;
 const oneLine = (s: string) => s.trim().split("\n")[0]?.slice(0, 300) ?? "";
@@ -55,9 +55,9 @@ export function ciRerunGh(command: typeof runBounded = runBounded): CiRerunGh {
     },
     async failedLog(repo, runId) {
       const log = await gh("run", "view", runId, "--repo", repo, "--log-failed");
-      if (Buffer.byteLength(log) >= LOG_LIMIT) throw new Error("失败日志太长，可能被截断");
-      return log;
+      return checkedFailedLog(log);
     },
+    perJobLog: (repo, runId, attempt) => readPerJobLog(command, repo, runId, attempt),
     async prFiles(prRef) {
       const raw = JSON.parse(await gh("pr", "view", prRef, "--json", "files")) as { files?: { path?: unknown }[] };
       if (!Array.isArray(raw.files) || raw.files.some((f) => typeof f?.path !== "string")) throw new Error("gh pr view 没给出改动文件");
@@ -91,7 +91,14 @@ async function decide(run: MergeRun, checks: FailedCheck[], gh: CiRerunGh): Prom
   if (conclusion === "success") return { kind: "wait" };
   // A re-run that ended red is the second red.
   if (attempt > 1) return { kind: "bounce", why: `run 已重跑过（第 ${attempt} 次仍红）` };
-  const failures = parseFailedLog(await gh.failedLog(repo, runId));
+  return judgeCiLog(run, repo, runId, attempt, gh, "cif1", (log) => judgeRerunLog(log, run, checks, gh, repo, runId),
+    (d) => d.kind === "rerun" ? { wouldKind: "rerun", why: "只因本卡没碰的测试超时", cases: d.plan.cases } :
+      { wouldKind: d.kind === "bounce" && d.flaky ? "flaky" : "bounce", why: d.kind === "bounce" ? d.why : "等待",
+        files: d.kind === "bounce" ? [...new Set(d.flaky?.failures.map((f) => f.file))] : undefined });
+}
+
+async function judgeRerunLog(log: string, run: MergeRun, checks: FailedCheck[], gh: CiRerunGh, repo: string, runId: string): Promise<Decision> {
+  const failures = parseFailedLog(log);
   if (!failures) return { kind: "bounce", why: "失败日志解析不出 bun test 的失败用例" };
   const asserted = firstAsserted(failures);
   if (asserted) return { kind: "bounce", why: `有非超时失败：${asserted.name}`, flaky: { repo, runId, failures } }; // CIF8
@@ -126,6 +133,7 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
   try {
     decision = await decide(run, checks, gh);
   } catch (e) {
+    rethrowCiLogStop(e);
     decision = { kind: "bounce", why: `读 CI 失败：${oneLine((e as Error).message)}` };
   }
   if (decision.kind === "wait") return run;
