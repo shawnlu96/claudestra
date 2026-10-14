@@ -55,7 +55,7 @@ export function manualMergeGate(db: Database, store: TrainStore | null | undefin
     async claim(manager: Manager, config: SchedulerConfig): Promise<{ claimed: string[]; failed: { taskId: string; error: string }[] }> {
       const out = { claimed: [] as string[], failed: [] as { taskId: string; error: string }[] };
       for (const [project, cfg] of Object.entries(config.projects)) {
-        if (!cfg.mergeHandoff) out.failed.push(...await observeUnifiedCandidates(db, manager, project, trains, policy)); // CAND1 observe: record only
+        if (!cfg.mergeHandoff) await observeUnifiedCandidates(db, manager, project, trains, policy); // CAND1 observe: record only, never a failure
         // the repository owner merges: never a claim here; requestRefusal shows such a request void with the handoff reason
         if (cfg.mergeHandoff || !listOpenRequests(db, project).length) continue;
         const mode = manualQueueMode(project, policy);

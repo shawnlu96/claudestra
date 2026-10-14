@@ -140,12 +140,12 @@ async function batchNote(db: Database, project: string, pick: UnifiedPick, train
 
 /**
  * observe's record, after the pass's manual claim step (the ledger child is the pass manager: lease-guarded, skip cards held).
- * Returns the notes it could not write; nothing here changes what the pass does.
+ * Nothing here changes what the pass does or reports: a note the ledger refuses (a project without auto dispatch) or a
+ * prediction that could not be computed is logged once and not asked again by this process.
  */
 export async function observeUnifiedCandidates(db: Database, manager: Manager, project: string, trains: TrainStore | null,
-  policy: RecoveryPolicyPort = recoveryPolicy, now: number = Date.now()): Promise<{ taskId: string; error: string }[]> {
-  if (unifiedCandidatesMode(project, policy) !== "observe") return [];
-  const failed: { taskId: string; error: string }[] = [];
+  policy: RecoveryPolicyPort = recoveryPolicy, now: number = Date.now()): Promise<void> {
+  if (unifiedCandidatesMode(project, policy) !== "observe") return;
   try {
     const pick = db.transaction(() => unifiedPick(db, project, now, mergeCandidates(db, project, null), unifiedCaps(policy)))();
     const batch = await batchNote(db, project, pick, trains, policy, now);
@@ -155,13 +155,12 @@ export async function observeUnifiedCandidates(db: Database, manager: Manager, p
       const r = await manager("ledger", "scheduler-recovery-observe", n.taskId, "--mechanism", UNIFIED_CANDIDATES_KEY, "--action-key", n.key,
         "--action", n.action, "--data", JSON.stringify(n.data));
       if (r.held === true) continue; // a skip / paused card: nothing written, asked again next pass
-      if (r.ok !== true) { failed.push({ taskId: n.taskId, error: `统一候选观察：${String(r.error ?? "manager failed")}` }); continue; }
+      if (r.ok !== true) console.error(`⚠️ [merge-candidates] ${project} ${n.taskId} 的观察记录没写上（不再重试，不影响本轮）：${String(r.error ?? "manager failed")}`);
       if (noted.size >= 2000) noted.clear();
       noted.add(seen);
     }
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // a lost lease ends the pass
-    failed.push({ taskId: `merge-candidates ${project}`, error: `统一候选观察没算完（不影响本轮合并）：${(e as Error).message}` });
+    console.error(`⚠️ [merge-candidates] ${project} 统一候选观察没算完（不影响本轮合并）：${(e as Error).message}`);
   }
-  return failed;
 }
