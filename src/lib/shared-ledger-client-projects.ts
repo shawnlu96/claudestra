@@ -175,6 +175,8 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
     return this.projectRequest("creatorCredential", "POST", `/v1/projects/${projectId}/creator-credential`, { projectId }, input, signal);
   }
   team(signal?: AbortSignal) { return this.teamRequest("team", "GET", "/v1/team", undefined, signal); }
+  /** ROSTER2a: instance → person bindings of this team's active directory; an old center answers 403, not 404. */
+  teamInstances(signal?: AbortSignal) { return this.teamRequest("teamInstances", "GET", "/v1/team/instances", undefined, signal); }
   updateTeam(input: TeamInput<"teamUpdate">, signal?: AbortSignal) {
     return this.teamRequest("teamUpdate", "PATCH", "/v1/team", input, signal);
   }

@@ -75,6 +75,7 @@ export function sharedProjectsClientPorts(principal: Principal, requested: strin
     patch: (who, id, input) => checked(async () => (await client(who, "project").updateProject(id, input)).project),
     members: (who, id) => checked(async () => (await client(who, "read").projectMembers(id)).members),
     team: who => checked(() => client(who, "read").team()),
+    teamInstances: who => checked(() => client(who, "read").teamInstances()),
     updateTeam: (who, input) => checked(async () => (await client(who, "project").updateTeam(input)).team),
     remove: (who, id, personId) => checked(async () => { await client(who, "project").removeProjectMember(id, personId); }),
     authorizeAnswer: async ask => !!await sharedProjectAnswerPrincipal(ask, stateDir),

@@ -21,12 +21,13 @@ const person: ProjectPerson = { subject: "owner:self", kind: "person", ...t.team
 const local = { projects: [{ id: "local-a", name: "A", dirs: ["/synthetic/a"], personal: false }], peers: [] };
 const BEARER = "S".repeat(43);
 
-function fake(team?: SharedProjectsPorts["team"]) {
+function fake(team?: SharedProjectsPorts["team"], teamInstances?: SharedProjectsPorts["teamInstances"]) {
   const calls: string[] = [];
   const d = {
     person: async () => person, list: async () => [p.project], bindings: () => [{ ...t.team, projectId: p.project.projectId, localProjectId: "local-a" }],
     members: async () => [{ ...p.member, role: "owner" as const }],
     ...(team ? { team: async (who: ProjectPerson) => { calls.push("team"); return team(who); } } : {}),
+    ...(teamInstances ? { teamInstances: async (who: ProjectPerson) => { calls.push("teamInstances"); return teamInstances(who); } } : {}),
   } as unknown as SharedProjectsPorts;
   const request = (method: string, path: string, body?: unknown) => {
     const url = new URL(`http://fixture/api/v1/shared-projects${path}`);
@@ -265,5 +266,79 @@ describe("N9B bearer-display regression over real adapter", () => {
         expect(await res.json()).toEqual({ ok: false, code: status === 200 ? "project_request_failed" : "project_conflict" });
       }
     }
+  });
+});
+
+describe("ROSTER2a snapshot teamInstances", () => {
+  const stranger = { personId: "person-stranger", instanceId: "instance-stranger" };
+  const instancesRead = async () => ({ ...t.responses.teamInstances, instances: [t.ownerInstance, stranger, t.selfInstance] });
+  const teamFields = (s: Record<string, unknown>) => ({ team: s.team, teamDirectory: s.teamDirectory, teamRole: s.teamRole });
+  test("[验收线 4] both reads ok: available, only people in this snapshot's directory", async () => {
+    const s = await sharedProjectsSnapshot(fake(async () => t.responses.team, instancesRead).d, local);
+    expect(s.teamInstances).toEqual({ available: true, instances: [t.ownerInstance, t.selfInstance] });
+    expect(teamFields(s)).toEqual(teamFields(await sharedProjectsSnapshot(fake(async () => t.responses.team).d, local)));
+  });
+  test("[验收线 4] the instances read runs alongside the team read, not after it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const w = fake(async () => { await gate; return t.responses.team; }, instancesRead);
+    const pending = sharedProjectsSnapshot(w.d, local);
+    for (let i = 0; i < 20 && !w.calls.includes("teamInstances"); i++) await Promise.resolve();
+    expect(w.calls).toEqual(["team", "teamInstances"]);
+    release();
+    expect((await pending).teamInstances.available).toBe(true);
+  });
+  test("[验收线 4] old center 403 / 404 / 503 / transport: unavailable; team, directory and teamRole equal the pre-ROSTER2a values", async () => {
+    const before = teamFields(await sharedProjectsSnapshot(fake(async () => t.responses.team).d, local));
+    for (const instances of [rejecting(403), rejecting(404), rejecting(503), async () => { throw new Error("SECRET_RESPONSE"); }]) {
+      const s = await sharedProjectsSnapshot(fake(async () => t.responses.team, instances).d, local);
+      expect(s.teamInstances).toEqual({ available: false, reason: "center_team_instances_unavailable" });
+      expect(teamFields(s)).toEqual(before);
+      expect(JSON.stringify(s)).not.toContain("SECRET_RESPONSE");
+    }
+  });
+  test("[验收线 4] team read failure makes both unavailable", async () => {
+    for (const team of [rejecting(403), async () => ({ ...t.responses.team, self: t.owner })]) {
+      const s = await sharedProjectsSnapshot(fake(team as SharedProjectsPorts["team"], instancesRead).d, local);
+      expect(s.teamDirectory.available).toBe(false);
+      expect(s.teamInstances).toEqual({ available: false, reason: "center_team_directory_unavailable" });
+    }
+  });
+  test("[验收线 4] malformed bodies or a join-code-looking id: center_team_instances_invalid; team fields untouched", async () => {
+    const JOIN = p.creatorInvite.code;
+    const before = teamFields(await sharedProjectsSnapshot(fake(async () => t.responses.team).d, local));
+    const bodies = [
+      { ...t.responses.teamInstances, instances: [{ ...t.selfInstance, instanceId: JOIN }] },
+      { ...t.responses.teamInstances, instances: [{ ...t.ownerInstance, personId: JOIN }, t.selfInstance] },
+      { ...t.responses.teamInstances, note: "SECRET_RESPONSE" },
+      ...t.invalidResponses.filter(r => r.endpoint === "teamInstances" && r.status === 200).map(r => r.body),
+    ];
+    for (const body of bodies) {
+      const s = await sharedProjectsSnapshot(fake(async () => t.responses.team, async () => body as typeof t.responses.teamInstances).d, local);
+      expect(s.teamInstances).toEqual({ available: false, reason: "center_team_instances_invalid" });
+      expect(teamFields(s)).toEqual(before);
+      expect(JSON.stringify(s)).not.toContain(JOIN);
+      expect(JSON.stringify(s)).not.toContain("SECRET_RESPONSE");
+    }
+  });
+  test("[验收线 4] an adapter without the port sends no request", async () => {
+    const w = fake(async () => t.responses.team);
+    const s = await sharedProjectsSnapshot(w.d, local);
+    expect(s.teamInstances).toEqual({ available: false, reason: "center_team_instances_contract_unavailable" });
+    expect(w.calls).toEqual(["team"]);
+    const none = await sharedProjectsSnapshot(fake().d, local);
+    expect(none.teamInstances).toEqual({ available: false, reason: "center_team_instances_contract_unavailable" });
+  });
+  test("[验收线 4] real adapter: GET /v1/team/instances; an old center's 403 keeps the team read intact", async () => {
+    const ok = await center((_m, path) => Response.json(path === "/v1/team/instances" ? t.responses.teamInstances : t.responses.team));
+    const s = await (await ok.request("GET", "/snapshot"))!.json() as Record<string, unknown>;
+    expect(s.teamInstances).toEqual({ available: true, instances: [t.ownerInstance, t.selfInstance] });
+    expect(ok.calls).toContain("GET /v1/team/instances");
+    const old = await center((_m, path) => path === "/v1/team/instances"
+      ? Response.json({ ok: false, v: 2, error: "forbidden", message: "forbidden" }, { status: 403 }) : Response.json(t.responses.team));
+    const o = await (await old.request("GET", "/snapshot"))!.json() as Record<string, unknown>;
+    expect(o.teamInstances).toEqual({ available: false, reason: "center_team_instances_unavailable" });
+    expect(teamFields(o)).toEqual(teamFields(s));
+    expect(o.teamRole).toEqual({ available: true, value: "member" });
   });
 });

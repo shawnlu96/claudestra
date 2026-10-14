@@ -86,3 +86,44 @@ describe("N9B N3 team read and rename", () => {
     expect((await failure(bare.team())).message).toBe("shared ledger projects contract unavailable");
   });
 });
+
+describe("ROSTER2a N3 teamInstances read", () => {
+  test("[验收线 3] teamInstances() is a signed GET /v1/team/instances with no body, signed like team()", async () => {
+    const seen: { url: URL; init: RequestInit }[] = [];
+    const signingKey = key();
+    const fetcher = (async (url: URL, init: RequestInit) => {
+      seen.push({ url, init }); return Response.json(t.responses.teamInstances);
+    }) as unknown as typeof fetch;
+    const c = new SharedLedgerClient(owner, signingKey, { fetch: fetcher, projectsProtocol: protocol });
+    expect(await c.teamInstances()).toEqual(t.responses.teamInstances);
+    const { url, init } = seen[0]!;
+    const headers = new Headers(init.headers), h = SHARED_LEDGER_AUTH_HEADERS;
+    expect([url.origin, url.pathname, url.search, init.method, init.body]).toEqual([owner.baseUrl, "/v1/team/instances", "", "GET", undefined]);
+    expect(verifyPurpose(signingKey.publicKey, "claudestra-shared-ledger-v1", ["GET", "/v1/team/instances", headers.get(h.ts)!,
+      sharedLedgerCredentialHash(""), headers.get(h.nonce)!, owner.instanceId, sharedLedgerCredentialHash(owner.bearer)], headers.get(h.sig)!)).toBe(true);
+  });
+  test("[验收线 3] 403 / 404 / 503 / malformed bodies throw without center text", async () => {
+    for (const [status, body] of [[404, { error: "not found", message: "SECRET_RESPONSE" }], [403, t.errors.forbidden],
+      [403, { error: "forbidden", message: "SECRET_RESPONSE" }]] as const) {
+      const error = await failure(client(body, status).teamInstances());
+      expect(error).toBeInstanceOf(SharedLedgerRemoteError);
+      expect((error as SharedLedgerRemoteError).status).toBe(status);
+      expect(JSON.stringify((error as SharedLedgerRemoteError).response)).not.toContain("SECRET_RESPONSE");
+      expect(String(error)).not.toContain("SECRET_RESPONSE");
+    }
+    expect(await failure(client({ message: "SECRET_RESPONSE" }, 503).teamInstances())).toBeInstanceOf(SharedLedgerUnavailable);
+    const bodies = [
+      { ...t.responses.teamInstances, note: "SECRET_RESPONSE" },
+      { ...t.responses.teamInstances, instances: [{ ...t.selfInstance, instanceId: `x-${owner.bearer}` }] },
+      ...t.invalidResponses.filter(r => r.endpoint === "teamInstances" && r.status === 200).map(r => r.body),
+    ];
+    for (const body of bodies) {
+      const error = await failure(client(body).teamInstances());
+      expect(error).toBeInstanceOf(SharedLedgerUnavailable);
+      expect(String(error)).not.toContain("SECRET_RESPONSE");
+      expect(String(error)).not.toContain(owner.bearer);
+    }
+    const conflict = await failure(client(t.errors.teamConflict, 409).teamInstances());
+    expect(conflict).not.toBeInstanceOf(SharedLedgerProjectConflict);
+  });
+});
