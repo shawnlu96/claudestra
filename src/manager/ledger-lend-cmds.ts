@@ -32,6 +32,8 @@ import { cancelLend, claimLend, leaseLend, listLendOrders, pollLend, reclaimLend
   type OfferInput } from "../lib/ledger-lend.js";
 
 import { heldLease } from "../lib/ledger-lend-lease.js";
+import { prepareReclaimIntent, type ReclaimIntentProbe } from "../lib/lend-reclaim-intent.js";
+import { reclaimIntentProbe } from "../lib/lend-reclaim-intent-probe.js";
 import { cliOfferFamily, offerWithAuthorFamily, refreshCliOffer } from "../lib/lend-cli-author-family.js";
 import { placementOf } from "../lib/lend-placement-view.js";
 import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
@@ -64,6 +66,8 @@ export interface LendCliDeps {
   result: LendResultDeps & Partial<Pick<LendDeliverDeps, "remoteHead" | "peerFp">>;
   /** v2 收回核对（i28-W2）：订单分支在远端的状态；不给 = 真 git ls-remote */
   branchState?: (repo: string, branch: string) => Promise<BranchState>;
+  /** lend-reclaim 结清未知意图前的远端核对（RECLAIMINT1）；不给 = 真 git ls-remote / gh pr list */
+  reclaimProbe?: ReclaimIntentProbe;
   /** 槽池放置要的项目调度策略（i28-W5）；不给 = 读真 scheduler.json */
   schedulerPolicy?: (project: string) => { remote?: RemotePolicy; maxActiveWorkers: number } | null;
   /** lend-relay（i28-RS1）：经 send_to_agent 通道发一段（本机 agent 名或 `<worker>@<peer>`）；不给 = 真 bridge route_to_agent 单发 */
@@ -241,8 +245,9 @@ async function reclaim(c: LedgerCli): Promise<Result> {
   // Same gate as the lease-end writer's identity check: an actor it refuses gets the existing blocked note, so skip the remote sample.
   const actor = c.ctx().actor, mayRetire = actor === "scheduler" || (actor !== getMeta(c.db, task.project).team?.dispatcher && isManager(c.db, actor, task));
   const retire = mayRetire ? await sampleLendAuthor(c.db, task.id, lendDeps(c).result?.remoteHead) : undefined;
-  const r = reclaimLend(c.db, c.ctx(), { taskId: task.id, reason, retire });
-  return { ok: true, task: task.id, peer: r.lease?.peer ?? null, cancelled: r.cancelled };
+  const unpin = c.p.bools.has("unpin"), intent = await prepareReclaimIntent(c.db, task, { probe: lendDeps(c).reclaimProbe ?? reclaimIntentProbe() });
+  const r = reclaimLend(c.db, c.ctx(), { taskId: task.id, reason, retire, intent, unpin });
+  return { ok: true, task: task.id, peer: r.lease?.peer ?? null, cancelled: r.cancelled, ...(r.intent ? { intent: r.intent } : {}), ...(unpin ? { unpinned: r.unpinned } : {}) };
 }
 
 function cancel(c: LedgerCli): Result {
@@ -373,7 +378,7 @@ export const LEND_CMDS: Record<string, CommandSpec> = {
   },
   "lend-cancel": { valued: ["reason", "project"], usage: "lend-cancel <task> --reason <原因>（撤掉未结的出借单，之后到的结论一律不入账）", run: cancel },
   "lend-orders": { valued: ["project"], usage: "lend-orders <task>（这张卡的出借单）", run: orders },
-  "lend-reclaim": { valued: ["reason", "project"], usage: "lend-reclaim <task> --reason <原因>（收回写代码：撤掉未结的写单、结束写租约，卡退回本机）", run: reclaim },
+  "lend-reclaim": { valued: ["reason", "project"], bools: ["unpin"], usage: "lend-reclaim <task> --reason <原因> [--unpin]（收回写代码：撤掉未结的写单、结束写租约，卡退回本机；--unpin 去掉钉在该 peer 的放置）", run: reclaim },
   "lend-poll": bridgeSpec("poll", "对方拉挂给它的单"),
   "lend-claim": bridgeSpec("claim", "对方领单，拿到完整派单和租约"),
   "lend-lease": bridgeSpec("lease", "续租 / 释放"),
