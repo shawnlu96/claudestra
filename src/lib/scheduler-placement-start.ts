@@ -59,12 +59,18 @@ export function privateStartMode(project: string, globs: readonly string[], poli
 
 /** Queued would-be records by dedup key; `true` = already written by this process. Bounded, so an undrained queue stays small. */
 const observed = new Map<string, ObservedAction | true>();
+/** The ledger each pending record was noted against (the scheduler's own connection), read again at drain for its card. */
+const notedIn = new Map<string, Database>();
+/** Drains that found the record's card missing; the second miss drops it (a refused or rolled-back start never creates the card). */
+const misses = new Map<string, number>();
 const QUEUE_MAX = 500;
 
 /**
  * Queue observe's would-be record (`wouldBe` = peer:<name> or 等) for the card; absent card = nothing (a capacity simulation).
- * The scheduler's ledger connection is query_only, so records wait here for a writer (drainPrivateStartObserved); the ledger's
- * dedup key and this process's map keep one record per card and spec revision.
+ * The scheduler's ledger connection is query_only, so records wait here for the scheduler's lease-bound writer
+ * (scheduler-autostart-deps.ts flushReviewLocal -> drainPrivateStartObserved -> `ledger scheduler-recovery-observe`); the ledger's
+ * dedup key and this process's map keep one record per card and spec revision. Only the scheduler process drains: a bridge
+ * start_node has no scheduler identity, so what it queues is never written (bounded by QUEUE_MAX).
  */
 export function notePrivateStart(db: Database, project: string, card: string | undefined, actual: string, wouldBe: string, reason: string): void {
   if (!card) return;
@@ -77,18 +83,33 @@ export function notePrivateStart(db: Database, project: string, card: string | u
   if (privateStartPending().length >= QUEUE_MAX) return; // nobody is draining: drop it unmarked
   observed.set(key, { project, mechanism: PRIVATE_KEY, target: card, actionKey,
     action: `私仓卡只放 peer 时放到 ${wouldBe}（现在放 ${actual}）：${reason}`.slice(0, 400), data: { actual, wouldBe, specRev } });
+  notedIn.set(key, db);
 }
 
 export const privateStartPending = (): ObservedAction[] => [...observed.values()].filter((v): v is ObservedAction => v !== true);
 
-/** Writes each queued record once; one that throws stays queued for the next drain. Returns how many were written. */
+/**
+ * Writes each queued record once; one that throws stays queued for the next drain. The observe write scopes the note by the card
+ * (scheduler-recovery-write.ts writeRecoveryObserve: no card = not_found), so a record whose card is not in its ledger yet waits one drain
+ * (autostart creates the card later in the tick that queued it) and is dropped on the second miss; a card of another project is
+ * dropped at once. Returns how many were written.
+ */
 export async function drainPrivateStartObserved(write: (a: ObservedAction) => void | Promise<void>): Promise<number> {
   let written = 0;
   for (const [key, a] of [...observed]) {
     if (a === true) continue;
+    let task: { project: string } | null;
+    try { task = getTask(notedIn.get(key)!, a.target); } catch { task = null; /* unreadable (a closed ledger) counts as a miss */ }
+    if (!task || task.project !== a.project) {
+      const n = (misses.get(key) ?? 0) + 1;
+      if (task || n >= 2) { observed.delete(key); misses.delete(key); notedIn.delete(key); } else misses.set(key, n);
+      continue;
+    }
     try {
       await write(a);
       observed.set(key, true);
+      misses.delete(key);
+      notedIn.delete(key);
       written++;
     } catch { /* stays queued */ }
   }
@@ -96,7 +117,7 @@ export async function drainPrivateStartObserved(write: (a: ObservedAction) => vo
 }
 
 /** Tests only. */
-export function resetPrivateStartObserved(): void { observed.clear(); }
+export function resetPrivateStartObserved(): void { observed.clear(); misses.clear(); notedIn.clear(); }
 
 const PEER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 

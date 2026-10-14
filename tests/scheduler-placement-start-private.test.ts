@@ -106,6 +106,9 @@ describe("startPlacement：私仓卡 observe 只记不改", () => {
     expect(privateStartPending()).toMatchObject([{ project: "p", mechanism: "privateStartPlacement", target: "p-c1", actionKey: "private-start:s1",
       data: { actual: "local", wouldBe: "peer:mate", specRev: 1 } }]);
     const written: string[] = [];
+    expect(await drainPrivateStartObserved((a) => { written.push(a.action); })).toBe(0); // 卡还没建：等一轮
+    expect(privateStartPending()).toHaveLength(1);
+    createTask(db, { actor: "agent-pm", now }, { id: "p-c1", project: "p", title: "t", pm: "agent-pm", kind: "code" } as never);
     expect(await drainPrivateStartObserved((a) => { written.push(a.action); })).toBe(1);
     expect(written[0]).toContain("私仓卡只放 peer 时放到 peer:mate（现在放 local）");
     await place(PRIV);
@@ -124,9 +127,23 @@ describe("startPlacement：私仓卡 observe 只记不改", () => {
 
   test("写失败的观察留在队里下一轮再写", async () => {
     mode = "observe";
+    createTask(db, { actor: "agent-pm", now }, { id: "p-c1", project: "p", title: "t", pm: "agent-pm", kind: "code" } as never);
     await place(PRIV);
-    expect(await drainPrivateStartObserved(() => { throw new Error("query_only"); })).toBe(0);
+    for (let i = 0; i < 3; i++) expect(await drainPrivateStartObserved(() => { throw new Error("query_only"); })).toBe(0);
     expect(privateStartPending()).toHaveLength(1);
+  });
+
+  test("卡两轮都不在 / 是别的项目的卡：观察丢掉，不写", async () => {
+    mode = "observe";
+    createTask(db, { actor: "agent-pm", now }, { id: "q-c1", project: "q", title: "t", pm: "agent-pm", kind: "code" } as never);
+    await place(PRIV, {}, "q-c1");
+    await place(PRIV, {}, "p-gone");
+    const written: string[] = [];
+    expect(await drainPrivateStartObserved((a) => { written.push(a.target); })).toBe(0);
+    expect(privateStartPending()).toMatchObject([{ target: "p-gone" }]);
+    expect(await drainPrivateStartObserved((a) => { written.push(a.target); })).toBe(0);
+    expect(privateStartPending()).toEqual([]);
+    expect(written).toEqual([]);
   });
 });
 
