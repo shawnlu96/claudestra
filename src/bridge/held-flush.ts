@@ -202,13 +202,13 @@ const idleCarrier = (d: FlushDeps, channelId: string, b: HeldIdleBatch<HeldItem>
 });
 
 /**
- * 这个边界要合批送出的 agent 消息（目标空闲才调）：到期、不是交给当班 PM 的、没进内部通知批次的本机 agent 消息。
+ * 这个边界要合批送出的 agent 消息（目标空闲才调）：到期、不是交给当班 PM 的、没进内部通知批次的本机 agent 消息里，按投递顺序连续的一段。
  * 最后一查只看开关、还在队里、没被 check_inbox 领走——会话 / 额度闸 / 撤下守卫在投递层对载体再核一遍（同内部通知批次）
  */
 function agentCarrier(d: FlushDeps, channelId: string, due: readonly HeldItem[], taken: ReadonlySet<HeldItem>): CarrierBatch | undefined {
   const on = d.agentBatch ?? (() => heldAgentBatchOn());
   if (!on()) return undefined;
-  const m = agentBatchMembers(due.filter((i) => !taken.has(i) && heldKindOf(i.env) === "agent" && isAgentBatchable(i)));
+  const m = agentBatchMembers(due, (i) => !taken.has(i) && heldKindOf(i.env) === "agent" && isAgentBatchable(i));
   if (!m.items.length) return undefined;
   return {
     items: m.items, expectSession: m.expectSession, title: HELD_AGENT_BATCH_TITLE, hint: HELD_AGENT_BATCH_HINT, mirror: true,
@@ -351,7 +351,8 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       .map((b) => ({ ...b, items: b.items.filter((i) => mine.includes(i) && !unresolved.has(i)) })).filter((b) => b.items.length > 1);
     if (mode === "observe") for (const g of groups) console.log(`👀 押后批次（只观察，${reason}）: ${evAgent} 有 ${g.items.length} 条内部通知本可一次送出（${g.items.map((i) => i.env.meta.messageId).join("、")}）`);
     const carriers = mode === "on" ? groups.map((g) => idleCarrier(d, channelId, g)) : [];
-    const agents = working ? undefined : agentCarrier(d, channelId, mine.filter((i) => !unresolved.has(i)), new Set(carriers.flatMap((c) => c.items)));
+    // 按下面逐条投的顺序给（押满时限的 owner 答复排最前、它们本来就先投），合批只取连续的一段
+    const agents = working ? undefined : agentCarrier(d, channelId, mine.filter((i) => !unresolved.has(i) && !late.has(i)), new Set(carriers.flatMap((c) => c.items)));
     const batchOf = new Map([...carriers, ...(agents ? [agents] : [])].flatMap((c) => c.items.map((i) => [i, c] as const)));
     const batched = new Set<HeldItem>();
     for (const item of [...due.filter((i) => away.has(i)), ...mine.filter((i) => late.has(i)), ...mine.filter((i) => !late.has(i))]) {

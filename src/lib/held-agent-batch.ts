@@ -35,11 +35,19 @@ export function isAgentBatchable(item: AgentHeldLike): boolean {
 }
 
 /**
- * 一批的成员（按到达顺序，最早一条决定会话）：调度派单带 expectSession，只投给仍跑那个会话的目标——载体只能带一个，
- * 和最早那条不一样的留到下一个边界，不带的随便进。少于两条 = 不合批（照旧逐条）
+ * 一批的成员：从第一条能进的起，按到达顺序连续取，碰到进不了的（外人、owner、带附件的、额度闸押的……）就停——
+ * 不越过夹在中间的别人的消息，顺序和逐条投递一样（审查 agent-batch-overtakes-peer）。调度派单带 expectSession，
+ * 载体只能核一个会话，和这一段第一个带会话的不同也停。少于两条 = 不合批（照旧逐条）
  */
-export function agentBatchMembers<T extends AgentHeldLike>(items: readonly T[]): { items: T[]; expectSession?: string } {
-  const expectSession = items.find((i) => i.env.meta.expectSession)?.env.meta.expectSession;
-  const picked = items.filter((i) => !i.env.meta.expectSession || i.env.meta.expectSession === expectSession);
-  return picked.length > 1 ? { items: picked, expectSession } : { items: [] };
+export function agentBatchMembers<T extends AgentHeldLike>(ordered: readonly T[], joinable: (item: T) => boolean): { items: T[]; expectSession?: string } {
+  const start = ordered.findIndex(joinable);
+  const items: T[] = [];
+  let expectSession: string | undefined;
+  for (const i of start < 0 ? [] : ordered.slice(start)) {
+    const s = i.env.meta.expectSession;
+    if (!joinable(i) || (s && expectSession && s !== expectSession)) break;
+    expectSession ??= s;
+    items.push(i);
+  }
+  return items.length > 1 ? { items, expectSession } : { items: [] };
 }
