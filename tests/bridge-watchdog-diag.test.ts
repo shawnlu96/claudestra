@@ -106,10 +106,17 @@ describe("抓现场：on", () => {
     expect(calls.log[0]).toContain("跳过（总时限已到）");
   });
 
-  test("exec 抛错 / 目录建不出来：记一行日志，返回 null，不抛", async () => {
-    const a = fakeIo({ exec: async () => { throw new Error("spawn boom"); } });
-    expect(await captureBridgeDiag(4242, a.io)).toBeNull();
-    expect(a.calls.log[0]).toContain("spawn boom");
+  test("exec 抛错：收成摘要里的失败，不抛，照常返回", async () => {
+    const { io, calls, baseDir } = fakeIo({ exec: async () => { throw new Error("spawn boom"); } });
+    const name = await captureBridgeDiag(4242, io);
+    expect(name).not.toBeNull();
+    expect(readdirSync(join(baseDir, name!))).toEqual(["summary.txt"]);
+    expect(calls.exec.length).toBe(6);
+    expect(calls.log.length).toBe(1);
+    expect(calls.log[0]).toContain("ps: 失败（spawn boom）");
+  });
+
+  test("目录建不出来：记一行日志，返回 null，不抛", async () => {
     const b = fakeIo();
     writeFileSync(join(b.baseDir, "blocker"), "");
     b.io.baseDir = join(b.baseDir, "blocker"); // 父路径是普通文件
@@ -160,6 +167,70 @@ describe("现场目录保留 5 份", () => {
     expect(left.filter((n) => /^bridge-stuck-\d{8}T\d{6}Z$/.test(n) && n !== "bridge-stuck-20200101T000000Z")).toEqual([...old.slice(3), name!]);
     for (const n of [...bystanders, "bridge-stuck-20200101T000000Z", "bridge.out"]) expect(left).toContain(n);
     expect(readFileSync(join(baseDir, "launcher-archive", "f"), "utf8")).toBe("x");
+  });
+
+  const stuckDirs = (baseDir: string) => readdirSync(baseDir).filter((n) => /^bridge-stuck-\d{8}T\d{6}Z$/.test(n)).sort();
+  function seedFive(baseDir: string): string[] {
+    const old = [1, 2, 3, 4, 5].map((d) => diagDirName(Date.UTC(2026, 8, d)));
+    for (const n of old) { mkdirSync(join(baseDir, n)); writeFileSync(join(baseDir, n, "ps.txt"), "x"); }
+    mkdirSync(join(baseDir, "bridge-stuck-notes"));
+    return old;
+  }
+
+  test("某条落盘失败（ps.txt 被占成目录）：其余照抓，仍只留 5 份", async () => {
+    const name = diagDirName(T0);
+    const f = fakeIo({
+      exec: async (cmd) => {
+        if (cmd[0] === "ps") mkdirSync(join(f.baseDir, name, "ps.txt")); // 真 writeFileSync 报 EISDIR
+        return { ok: true, out: "x\n" };
+      },
+    });
+    const old = seedFive(f.baseDir);
+    expect(await captureBridgeDiag(4242, f.io)).toBe(name);
+    expect(stuckDirs(f.baseDir)).toEqual([...old.slice(1), name]);
+    expect(existsSync(join(f.baseDir, "bridge-stuck-notes"))).toBe(true);
+    expect(existsSync(join(f.baseDir, name, "swap.txt"))).toBe(true);
+    expect(f.calls.log.length).toBe(1);
+    expect(f.calls.log[0]).toContain("ps: 失败（");
+    expect(f.calls.log[0]).toContain("清掉旧现场 1 份");
+  });
+
+  test("摘要落盘失败（summary.txt 被占成目录）：不抛，仍只留 5 份", async () => {
+    const name = diagDirName(T0);
+    const f = fakeIo({
+      exec: async (cmd) => {
+        if (cmd[0] === "uptime") mkdirSync(join(f.baseDir, name, "summary.txt"));
+        return { ok: true, out: "x\n" };
+      },
+    });
+    const old = seedFive(f.baseDir);
+    expect(await captureBridgeDiag(4242, f.io)).toBe(name);
+    expect(stuckDirs(f.baseDir)).toEqual([...old.slice(1), name]);
+    expect(f.calls.log.length).toBe(1);
+    expect(f.calls.log[0]).toContain("摘要落盘失败");
+  });
+
+  test("连续几次落盘失败的不同事件：份数不累积", async () => {
+    let base = "";
+    for (let i = 0; i < 4; i++) {
+      const f = fakeIo({ exec: async () => { throw new Error("ENOSPC"); } });
+      if (i === 0) { base = f.baseDir; seedFive(base); }
+      f.io.baseDir = base;
+      f.io.now = () => T0 + i * 60_000;
+      await captureBridgeDiag(4242, f.io);
+      expect(stuckDirs(base).length).toBe(5);
+    }
+    expect(stuckDirs(base).at(-1)).toBe(diagDirName(T0 + 3 * 60_000));
+  });
+
+  test("清理本身抛错：记进日志，不抛，照常返回目录名", async () => {
+    const f = fakeIo();
+    const real = f.io.baseDir;
+    let reads = 0;
+    Object.defineProperty(f.io, "baseDir", { get: () => (++reads > 1 ? join(real, "gone") : real) }); // 第二次读（清理）指向不存在的目录
+    expect(await captureBridgeDiag(4242, f.io)).toBe(diagDirName(T0));
+    expect(f.calls.log.length).toBe(1);
+    expect(f.calls.log[0]).toContain("清理旧现场失败");
   });
 
   test("pruneDiagDirs：不足 5 份不删", () => {

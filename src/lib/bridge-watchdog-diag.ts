@@ -115,20 +115,26 @@ export function pruneDiagDirs(baseDir: string, keep: number = DIAG_LIMITS.keep):
   return gone;
 }
 
+/** 跑一条并落盘，返回摘要里的一行。exec 抛错、落盘失败（磁盘满、权限、路径冲突）都收成「失败」一行，不往外抛：一条坏了不连累其余几条 */
 async function runItem(item: DiagItem, dir: string, deadline: number, io: DiagIo): Promise<string> {
   const left = deadline - io.now();
   if (left <= 0) return `${item.name}: 跳过（总时限已到）`;
-  const r = await io.exec(item.cmd, Math.min(item.timeoutMs, left));
-  if (!r.ok) return `${item.name}: 失败（${r.error}）`;
-  const path = join(dir, item.file);
-  if (!item.selfWrites) writeFileSync(path, item.render ? item.render(r.out) : r.out, { mode: 0o600 });
-  else if (existsSync(path)) chmodSync(path, 0o600); // sample 自己建的文件是 0644，收成和其余几份一样
-  return `${item.name}: ok`;
+  try {
+    const r = await io.exec(item.cmd, Math.min(item.timeoutMs, left));
+    if (!r.ok) return `${item.name}: 失败（${r.error}）`;
+    const path = join(dir, item.file);
+    if (!item.selfWrites) writeFileSync(path, item.render ? item.render(r.out) : r.out, { mode: 0o600 });
+    else if (existsSync(path)) chmodSync(path, 0o600); // sample 自己建的文件是 0644，收成和其余几份一样
+    return `${item.name}: ok`;
+  } catch (e) {
+    return `${item.name}: 失败（${(e as Error).message}）`;
+  }
 }
 
 /**
  * 抓一次现场，返回现场目录名；off / observe / 建不出目录 = null。从不抛。
  * sample 与其余几条并行（sample 自己要采 3 秒），其余几条按顺序跑；全部受同一个总时限约束。
+ * 目录一建出来就一定走到保留清理：某条命令或摘要落盘失败，留下的是一份不全的现场（仍返回目录名），份数照样不超过上限。
  */
 export async function captureBridgeDiag(pid: number, io: DiagIo): Promise<string | null> {
   const mode = io.mode();
@@ -144,22 +150,32 @@ export async function captureBridgeDiag(pid: number, io: DiagIo): Promise<string
   }
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const deadline = startedAt + DIAG_LIMITS.totalMs;
-    const chain = async () => {
-      const lines: string[] = [];
-      for (const item of rest) lines.push(await runItem(item, dir, deadline, io));
-      return lines;
-    };
-    const [sampleLine, restLines] = await Promise.all([sample ? runItem(sample, dir, deadline, io) : "sample: 跳过（非 darwin）", chain()]);
-    const summary = [sampleLine, ...restLines];
-    writeFileSync(join(dir, "summary.txt"), [`pid ${pid}`, `at ${new Date(startedAt).toISOString()}`, ...summary].join("\n") + "\n", { mode: 0o600 });
-    const gone = pruneDiagDirs(io.baseDir);
-    io.log(`🩺 现场已抓 → ${name}/（${io.now() - startedAt}ms；${summary.join("；")}）${gone.length ? `；清掉旧现场 ${gone.length} 份` : ""}`);
-    return name;
   } catch (e) {
     io.log(`🩺 抓现场失败（不影响重启）: ${(e as Error).message}`);
     return null;
   }
+  const deadline = startedAt + DIAG_LIMITS.totalMs;
+  const chain = async () => {
+    const lines: string[] = [];
+    for (const item of rest) lines.push(await runItem(item, dir, deadline, io));
+    return lines;
+  };
+  const [sampleLine, restLines] = await Promise.all([sample ? runItem(sample, dir, deadline, io) : "sample: 跳过（非 darwin）", chain()]);
+  const summary = [sampleLine, ...restLines];
+  const notes: string[] = [];
+  try {
+    writeFileSync(join(dir, "summary.txt"), [`pid ${pid}`, `at ${new Date(startedAt).toISOString()}`, ...summary].join("\n") + "\n", { mode: 0o600 });
+  } catch (e) {
+    notes.push(`摘要落盘失败（${(e as Error).message}）`);
+  }
+  try {
+    const gone = pruneDiagDirs(io.baseDir);
+    if (gone.length) notes.push(`清掉旧现场 ${gone.length} 份`);
+  } catch (e) {
+    notes.push(`清理旧现场失败（${(e as Error).message}）`);
+  }
+  io.log(`🩺 现场已抓 → ${name}/（${io.now() - startedAt}ms；${summary.join("；")}）${notes.map((n) => `；${n}`).join("")}`);
+  return name;
 }
 
 /** 真跑一条命令：到时限就 kill，不等它的输出收尾 */
