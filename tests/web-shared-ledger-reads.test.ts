@@ -3,7 +3,7 @@ import { READS_OFF, SharedLedgerReads } from '../web/lib/api/shared-ledger-reads
 import type { ExtCapabilities, FeatureActivity, FeatureVersions, ReadsTransport, TaskFacts } from '../web/lib/api/shared-ledger-reads';
 import { ApiError } from '../web/lib/api/client';
 import { TASK_FACTS_FIXTURE } from '../src/lib/shared-ledger-contract-task-facts-fixtures';
-import type { SharedLedgerTaskFacts } from '../src/lib/shared-ledger-contract-task-facts';
+import { parseSharedLedgerTaskFacts, type SharedLedgerTaskFacts } from '../src/lib/shared-ledger-contract-task-facts';
 import {
   SHARED_LEDGER_ACTIVITY_FIXTURE, SHARED_LEDGER_EXT_CAPABILITIES_NEW_FIXTURE, SHARED_LEDGER_EXT_CAPABILITIES_READONLY_FIXTURE,
   SHARED_LEDGER_VERSIONS_FIXTURE,
@@ -124,6 +124,25 @@ test('[验收线 4] 429 / 503 / offline / bad shape / other team-project-feature
   const leaky = { ...facts, actor: 'x', tasks: facts.tasks.map(t => ({ ...t, text: '原文', lastEvent: t.lastEvent && { ...t.lastEvent, summary: 's' } })) };
   const { reads } = factsTransport(async () => leaky);
   expect(await reads.taskFacts('feature-a', signal)).toEqual(facts);
+});
+
+test('[验收线 4] contract-invalid shapes the contract rejects → null (seq, id shape, duplicates, cap, done exclusivity)', async () => {
+  const live = facts.tasks.find(t => t.stageSince !== null && t.lastEvent !== null)!;
+  const variants: unknown[] = [
+    { ...facts, serverSeq: -1 },
+    { ...facts, tasks: [{ ...live, taskId: '' }] },
+    { ...facts, tasks: [live, live] },
+    { ...facts, tasks: Array.from({ length: 1001 }, (_, i) => ({ ...live, taskId: `task-${i}` })) },
+    { ...facts, tasks: [{ ...live, doneAt: 1790000000600 }] },
+  ];
+  for (const variant of variants) {
+    expect(() => parseSharedLedgerTaskFacts(variant)).toThrow('invalid_field');
+    const { reads } = factsTransport(async () => variant);
+    expect((await quiet(() => reads.taskFacts('feature-a', signal))).value).toBeNull();
+  }
+  const full = { ...facts, tasks: Array.from({ length: 1000 }, (_, i) => ({ ...live, taskId: `task-${i}` })) };
+  const { reads } = factsTransport(async () => full);
+  expect((await reads.taskFacts('feature-a', signal))?.tasks).toHaveLength(1000);
 });
 
 test('[验收线 4] no backoff or cache: a call right after 429 goes out again; aborted signal throws', async () => {

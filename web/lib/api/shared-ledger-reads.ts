@@ -22,6 +22,9 @@ export interface FeatureActivity { schemaVersion: 1; teamId: string; projectId: 
 /** Hand copy of src/lib/shared-ledger-contract-task-facts.ts (no twin; tests assign both ways). Ids, kinds and times only. */
 const TASK_FACT_KINDS = ["stage", "deliver", "review", "verify", "deploy", "ask", "ask_cancel", "decision", "dispatch"] as const;
 type TaskFactKind = typeof TASK_FACT_KINDS[number];
+/** Same limits as the contract: `id` shape (shared-ledger-contract-schema.ts) and the detail tasks cap. */
+const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const MAX_TASK_FACTS = 1000;
 export interface TaskFact { taskId: string; stageSince: number | null; doneAt: number | null; lastEvent: { at: number; kind: TaskFactKind } | null }
 export interface TaskFacts { schemaVersion: 1; teamId: string; projectId: string; featureId: string; serverSeq: number; tasks: TaskFact[] }
 export type ReadCapabilities = Pick<ExtCapabilities, "reads" | "uploads">;
@@ -86,20 +89,26 @@ export class SharedLedgerReads {
       return null;
     }
   }
-  /** Rebuilt field by field: extra keys never reach the caller, a wrong shape or identity counts as a failure. */
+  /** Rebuilt field by field with the contract's rules: extra keys never reach the caller, a wrong shape or identity counts as a failure. */
   private ownFacts(id: string, raw: TaskFacts): TaskFacts | null {
     const r = raw as unknown as Record<string, unknown>;
     if (r.teamId !== this.identity.team || r.projectId !== this.identity.project || r.featureId !== id) return null;
-    if (r.schemaVersion !== 1 || !Number.isSafeInteger(r.serverSeq) || !Array.isArray(r.tasks)) bad();
+    const seq = r.serverSeq;
+    if (r.schemaVersion !== 1 || !Number.isSafeInteger(seq) || (seq as number) < 0 || !Array.isArray(r.tasks) || r.tasks.length > MAX_TASK_FACTS) bad();
     const time = (v: unknown) => v === null || (Number.isSafeInteger(v) && (v as number) > 0) ? v as number | null : bad();
+    const seen = new Set<string>();
     const tasks = r.tasks.map((row: unknown): TaskFact => {
       const t = (row && typeof row === "object" ? row : bad()) as Record<string, unknown>;
       const e = t.lastEvent as Record<string, unknown> | null;
-      if (typeof t.taskId !== "string" || (e !== null && (typeof e !== "object" || !TASK_FACT_KINDS.includes(e.kind as TaskFactKind)))) bad();
-      return { taskId: t.taskId as string, stageSince: time(t.stageSince), doneAt: time(t.doneAt),
+      if (typeof t.taskId !== "string" || !TASK_ID.test(t.taskId) || seen.has(t.taskId)) bad();
+      if (e !== null && (typeof e !== "object" || !TASK_FACT_KINDS.includes(e.kind as TaskFactKind))) bad();
+      seen.add(t.taskId as string);
+      const fact: TaskFact = { taskId: t.taskId as string, stageSince: time(t.stageSince), doneAt: time(t.doneAt),
         lastEvent: e === null ? null : { at: time(e.at) ?? bad(), kind: e.kind as TaskFactKind } };
+      if (fact.doneAt !== null && (fact.stageSince !== null || fact.lastEvent !== null)) bad();
+      return fact;
     });
-    return { schemaVersion: 1, teamId: this.identity.team, projectId: this.identity.project, featureId: id, serverSeq: r.serverSeq as number, tasks };
+    return { schemaVersion: 1, teamId: this.identity.team, projectId: this.identity.project, featureId: id, serverSeq: seq as number, tasks };
   }
   private own<T extends { teamId: string; projectId: string }>(result: T): T {
     if (result.teamId !== this.identity.team || result.projectId !== this.identity.project) throw new Error("invalid_snapshot");
