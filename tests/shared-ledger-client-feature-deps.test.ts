@@ -23,12 +23,12 @@ test("[验收线 2] upload uses standalone signed POST, canonical payload and a 
       sharedLedgerCredentialHash(encoded), wire.attemptNonce, connection.instanceId, sharedLedgerCredentialHash(connection.bearer)], headers.get(h.sig)!)).toBe(true);
     return Response.json({ schemaVersion: 1, accepted: wire.payload.edges.length });
   }) as unknown as typeof fetch;
-  const client = new SharedLedgerClient(connection, key, { fetch: fetcher, scrub });
+  const client = new SharedLedgerClient({ ...connection, baseUrl: `https://${crypto.randomUUID()}.invalid` }, key, { fetch: fetcher, scrub });
   expect(await client.uploadFeatureDeps(body())).toEqual({ schemaVersion: 1, accepted: 3 }); expect(calls).toBe(1);
 });
 test("[验收线 2] wrong team/instance, extra fields and secret values are refused before network", async () => {
   let calls = 0;
-  const client = new SharedLedgerClient(connection, fakeKey(), { scrub,
+  const client = new SharedLedgerClient({ ...connection, baseUrl: `https://${crypto.randomUUID()}.invalid` }, fakeKey(), { scrub,
     fetch: (async () => { calls++; return Response.json({ schemaVersion: 1, accepted: 3 }); }) as unknown as typeof fetch });
   for (const patch of [{ teamId: "other-team" }, { sourceInstanceId: "other-instance" }]) {
     await expect(client.uploadFeatureDeps({ ...body(), ...patch })).rejects.toBeInstanceOf(SharedLedgerUnavailable);
@@ -43,12 +43,12 @@ test("[验收线 2] wrong team/instance, extra fields and secret values are refu
 });
 test("[验收线 2] rejects partial/malformed receipts; 403/404/429 remain typed remote errors", async () => {
   for (const answer of [{ schemaVersion: 1, accepted: 2 }, { schemaVersion: 1, accepted: 3, note: "private" }]) {
-    const client = new SharedLedgerClient(connection, fakeKey(), { scrub, fetch: (async () => Response.json(answer)) as unknown as typeof fetch });
+    const client = new SharedLedgerClient({ ...connection, baseUrl: `https://${crypto.randomUUID()}.invalid` }, fakeKey(), { scrub, fetch: (async () => Response.json(answer)) as unknown as typeof fetch });
     await expect(client.uploadFeatureDeps(body())).rejects.toThrow();
   }
   for (const status of [403, 404, 429]) {
     let calls = 0;
-    const client = new SharedLedgerClient(connection, fakeKey(), { scrub, fetch: (async () => {
+    const client = new SharedLedgerClient({ ...connection, baseUrl: `https://${crypto.randomUUID()}.invalid` }, fakeKey(), { scrub, fetch: (async () => {
       calls++; return new Response("forbidden", { status, headers: { "retry-after": "5" } });
     }) as unknown as typeof fetch });
     try { await client.uploadFeatureDeps(body()); throw new Error("unexpected success"); }

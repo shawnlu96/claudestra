@@ -20,26 +20,26 @@ export function registryVersion(path = REGISTRY_PATH): string {
   }
 }
 
-export interface ListCacheOpts {
+export interface ListCacheOpts<T> {
   /** 原始 list 调用（生产 = runManager("list")），返回 manager 的 {ok, agents} */
-  list: () => Promise<unknown>;
+  list: () => Promise<T>;
   /** 外部状态版本（生产 = registryVersion），变了就不用旧结果 */
   version?: () => string;
   ttlMs?: number;
   now?: () => number;
 }
 
-export interface ListCache {
+export interface ListCache<T> {
   /** manager list 的原始输出（形如 {ok, agents}；抛错原样抛）。成功的结果在调用方之间共享，只读 */
-  result(): Promise<unknown>;
+  result(): Promise<T>;
 }
 
-export function createListCache(opts: ListCacheOpts): ListCache {
+export function createListCache<T>(opts: ListCacheOpts<T>): ListCache<T> {
   const ttl = Math.min(opts.ttlMs ?? LIST_CACHE_TTL_MS, LIST_CACHE_TTL_MS);
   const now = opts.now ?? Date.now;
   const version = opts.version ?? (() => registryVersion());
-  let entry: { at: number; version: string; result: unknown } | null = null;
-  let inflight: { version: string; p: Promise<unknown> } | null = null;
+  let entry: { at: number; version: string; result: T } | null = null;
+  let inflight: { version: string; p: Promise<T> } | null = null;
 
   return {
     result() {
