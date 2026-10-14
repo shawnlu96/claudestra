@@ -1,18 +1,28 @@
 import {
-  array, boolean, choice, digest, distinct, head, id, integer, literal, nullable, object, positive,
+  array, boolean, choice, digest, distinct, head, id, integer, literal, nullable, object, optional, positive,
   refine, scope, text, timestamp, union, type Infer,
 } from "./shared-ledger-contract-v2-validation.js";
 import { v2ContentDigest } from "./shared-ledger-contract-v2-integrity.js";
 
+/** Feature cap of one migration authorization; the migration manifest itself declares no explicit cap. */
+export const V2_MIGRATION_FEATURE_IDS_MAX = 64;
 /** Approval binds the content actually used, separately from the approved shared copy. */
 const authorizationFields = {
   taskId: nullable(id), featureId: id, taskRev: nullable(positive), specRev: nullable(positive), workflowRev: nullable(positive),
   baseVersion: integer, proposalDigest: nullable(digest), head: nullable(head),
   originalDigest: digest, sharedDigest: digest, actionDigest: digest, redactionVersion: positive,
-  actions: array(choice(["scope.change", "home.change", "task.cancel", "merge", "deploy", "release", "artifact.share", "workflow.auto"]), 8),
+  actions: array(choice(["scope.change", "home.change", "task.cancel", "merge", "deploy", "release", "artifact.share", "workflow.auto", "migration"]), 9),
+  featureIds: optional(array(id, V2_MIGRATION_FEATURE_IDS_MAX)),
   homeInstanceId: id, expiresAt: timestamp,
 };
-export const parseAuthorizationBind = refine(object(authorizationFields), b => b.actions.length > 0 && distinct(b.actions));
+/** Migration is exclusive and may widen to a batch; without featureIds it covers bind.featureId only. */
+export const parseAuthorizationBind = refine(object(authorizationFields), b => {
+  if (b.actions.length === 0 || !distinct(b.actions)) return false;
+  const migration = b.actions.includes("migration");
+  if (migration && b.actions.length !== 1) return false;
+  if (b.featureIds === undefined) return true;
+  return migration && b.featureIds.length > 0 && distinct(b.featureIds) && b.featureIds.includes(b.featureId);
+});
 export type V2AuthorizationBind = Infer<typeof parseAuthorizationBind>;
 const askOption = object({ id, label: text(200, 1) });
 export const askContentFields = {
