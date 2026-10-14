@@ -1,6 +1,6 @@
 /**
  * 推给 PM 的系统通知由发送方在代码里标级别（docs/architecture/pm-digest.md「通知级别」）：action = 要 PM 当场动手，立即叫醒；
- * info = 常规，只进摘要、不单独叫醒。分流只认这个结构化字段，不看正文文字，换语言、改文案都不影响。没标的按旧规则走（宁可多叫醒）。
+ * info = 常规，只记卡片、不送 PM（PM 用 `ledger pm-todo` 按需拉）。分流只认这个结构化字段，不看正文文字，换语言、改文案都不影响。没标的按旧规则走（宁可多叫醒）。
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 
