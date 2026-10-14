@@ -104,19 +104,34 @@ function useSectionAnchor(root: RefObject<HTMLDivElement | null>, narrow: boolea
     const el = root.current;
     if (!narrow || !el) return;
     const sections = [...el.querySelectorAll<HTMLElement>("[data-section]")];
-    const size = new ResizeObserver(() => el.style.setProperty("--focus-scroll-height", `${el.clientHeight}px`));
-    el.style.setProperty("--focus-scroll-height", `${el.clientHeight}px`);
-    size.observe(el);
-    const visible = new Set<Element>();
-    const observer = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting && entry.intersectionRect.height > 1) visible.add(entry.target); else visible.delete(entry.target);
+    const nav = el.querySelector<HTMLElement>("[data-focus-anchors]");
+    let observer: IntersectionObserver | null = null;
+    const measure = () => {
+      el.style.setProperty("--focus-scroll-height", `${el.clientHeight}px`);
+      observer?.disconnect();
+      const navHeight = nav?.offsetHeight ?? 53;
+      observer = new IntersectionObserver(() => {
+        const edge = nav?.getBoundingClientRect().bottom ?? el.getBoundingClientRect().top + navHeight;
+        const nearTitle = sections.find((section) => {
+          const r = section.querySelector("h3")?.getBoundingClientRect();
+          return r && r.top >= edge - 1 && r.top < edge + 44 && r.bottom > edge;
+        });
+        const current = nearTitle ?? sections.find((section) => {
+          const r = section.getBoundingClientRect();
+          return r.top <= edge + 1 && r.bottom > edge + 1;
+        }) ?? sections[0];
+        if (current) setActive(current.dataset.section as Section);
+      }, { root: el, rootMargin: `-${navHeight}px 0px -${Math.max(0, el.clientHeight - navHeight - 44)}px 0px`, threshold: [0, 0.1, 0.5, 1] });
+      for (const section of sections) {
+        observer.observe(section);
+        const title = section.querySelector("h3");
+        if (title) observer.observe(title);
       }
-      const first = sections.find((section) => visible.has(section) && section.getBoundingClientRect().bottom > el.getBoundingClientRect().top + 54);
-      if (first) setActive(first.dataset.section as Section);
-    }, { root: el, rootMargin: "-53px 0px -65% 0px", threshold: [0, 0.01] });
-    sections.forEach((section) => observer.observe(section));
-    return () => { observer.disconnect(); size.disconnect(); };
+    };
+    const size = new ResizeObserver(measure);
+    measure();
+    size.observe(el);
+    return () => { observer?.disconnect(); size.disconnect(); };
   }, [root, narrow, counts]);
   return active;
 }

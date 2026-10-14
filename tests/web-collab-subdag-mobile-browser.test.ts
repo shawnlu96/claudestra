@@ -70,6 +70,14 @@ async function mobileChecks(page: Page) {
   await page.waitForFunction(doneVisible);
   await paint(page);
   await page.waitForFunction(`${anchors}.querySelector('button:last-child').getAttribute('aria-pressed') === 'true'`);
+  // Both smooth and immediate jumps must change the highlight, including the last collapsed section.
+  for (const motion of ["reduce", "no-preference"] as const) {
+    await page.emulateMedia({ reducedMotion: motion });
+    for (const label of ["进行中 8", "接下来 16", "已完成 30", "接下来 16", "已完成 30"]) {
+      await page.locator("[data-focus-anchors]").getByRole("button", { name: label, exact: true }).click();
+      await page.waitForFunction(`!![...${anchors}.querySelectorAll('button')].find(e => e.innerText === ${JSON.stringify(label)} && e.ariaPressed === 'true')`);
+    }
+  }
   return { initial, sizes, sticky };
 }
 
