@@ -11,7 +11,7 @@ import { barrierActive } from "../src/lib/state-maintenance/barrier.ts";
 import { executeRun, recoverRun, rootsDigest, type ExecDeps } from "../src/lib/state-maintenance/executor.ts";
 import { maintPaths, prepareMaintenanceRoot } from "../src/lib/state-maintenance/paths.ts";
 import type { Run } from "../src/lib/state-maintenance/probe.ts";
-import { buildObserveReport, writeReport } from "../src/lib/state-maintenance/report.ts";
+import { buildObserveReport, sha256Hex, writeReport } from "../src/lib/state-maintenance/report.ts";
 import { createRequest, loadState, newState, saveState } from "../src/lib/state-maintenance/run-store.ts";
 import { SERVICE_LABELS } from "../src/lib/state-maintenance/services.ts";
 
@@ -386,6 +386,57 @@ describe("[验收线 5] 停 / 恢复写者途中崩溃可幂等恢复", () => {
     expect([s.outcome, s.phase]).toEqual(["migrated", "done"]);
     expect(fx.sim.notes).toHaveLength(1);
     expect(barrierActive(fx.maint)).toBe(false);
+  });
+
+  /** 模拟台账:dedupKey 按 runId+op 只认第一条;重写同 key 时复核哈希(与 ledger-access.writePointerNote 一致) */
+  function dedupLedger(crash: { once: boolean }) {
+    const committed = new Map<string, string>();
+    const writeNote: ExecDeps["writeNote"] = async (n) => {
+      const key = `${n.runId}:${n.op}`;
+      if (!committed.has(key)) committed.set(key, n.reportSha256);
+      if (crash.once) { crash.once = false; throw new Crash("after-commit"); } // note 已落库、s.note 还没落盘
+      return committed.get(key) === n.reportSha256 ? { ok: true } : { ok: false, error: "指针写入后复核不到,按未落库处理" };
+    };
+    return { committed, writeNote };
+  }
+  const reportSha = (fx: Fx, runId: string) => sha256Hex(readFileSync(join(fx.maint, "reports", runId, "run.json"), "utf8"));
+
+  test("recording recovery preserves report pointer hash:note 已落库、返回前崩溃,恢复不重写报告,指针仍指向当前报告", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    const { committed, writeNote } = dedupLedger({ once: true });
+    await expect(executeRun(deps(fx, { writeNote }), runId)).rejects.toThrow(Crash);
+    expect(loadState(fx.maint, runId)!.phase).toBe("recording");
+    const first = reportSha(fx, runId);
+    const s = await recoverRun(deps(fx, { writeNote }), runId);
+    expect([s.outcome, s.phase]).toEqual(["migrated", "done"]);
+    expect(s.note).toEqual({ ok: true });
+    expect(reportSha(fx, runId)).toBe(first);
+    expect(committed.get(`${runId}:state_maintenance_run`)).toBe(first);
+  });
+
+  test("note 已记成功后崩溃:恢复不覆盖报告,指针与报告一致", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    const { committed, writeNote } = dedupLedger({ once: false });
+    const crashAt = (p: string) => { if (p === "recording:after-note") throw new Crash(p); };
+    await expect(executeRun(deps(fx, { writeNote, crashAt }), runId)).rejects.toThrow(Crash);
+    const first = reportSha(fx, runId);
+    const s = await recoverRun(deps(fx, { writeNote }), runId);
+    expect([s.phase, s.note?.ok]).toEqual(["done", true]);
+    expect(reportSha(fx, runId)).toBe(first);
+    expect(committed.get(`${runId}:state_maintenance_run`)).toBe(first);
+  });
+
+  test("固定的报告被改动:恢复不重写、不虚报留存成功", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    const { writeNote } = dedupLedger({ once: true });
+    await expect(executeRun(deps(fx, { writeNote }), runId)).rejects.toThrow(Crash);
+    writeFileSync(join(fx.maint, "reports", runId, "run.json"), "{}");
+    const s = await recoverRun(deps(fx, { writeNote }), runId);
+    expect(s.note?.ok).toBe(false);
+    expect(readFileSync(join(fx.maint, "reports", runId, "run.json"), "utf8")).toBe("{}");
   });
 });
 

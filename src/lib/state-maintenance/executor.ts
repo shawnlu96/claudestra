@@ -143,15 +143,23 @@ async function finish(r: Run, phase: RunState["phase"]): Promise<RunState> {
   const { d, s } = r;
   s.final = phase;
   save(r, "recording");
-  const seen = new Set(s.comparisons.map((c) => c.stage));
-  for (const stage of STAGES) if (!seen.has(stage)) s.comparisons.push({ stage, executed: false, note: "未执行" });
-  const rep = writeReport(d.maintRoot, s.runId, "run", {
-    format: REPORT_FORMAT, kind: "run", version: d.version, baseline: r.req.baseline, runId: s.runId, reportRunId: r.req.reportRunId,
-    outcome: s.outcome, error: s.error ?? null, comparisons: s.comparisons, phases: s.history,
-  });
-  if (!s.note) {
+  if (!s.report) {
+    // 报告只写一次:落盘的 rel + 哈希先记进状态再写指针;此前崩溃还没写过指针,重写无妨
+    const seen = new Set(s.comparisons.map((c) => c.stage));
+    for (const stage of STAGES) if (!seen.has(stage)) s.comparisons.push({ stage, executed: false, note: "未执行" });
+    s.report = writeReport(d.maintRoot, s.runId, "run", {
+      format: REPORT_FORMAT, kind: "run", version: d.version, baseline: r.req.baseline, runId: s.runId, reportRunId: r.req.reportRunId,
+      outcome: s.outcome, error: s.error ?? null, comparisons: s.comparisons, phases: s.history,
+    });
+    save(r);
+  }
+  const rep = s.report;
+  if (!reportIntact(d, rep)) s.note = { ok: false, error: "留存未完成:结果报告和首次落盘的哈希对不上,不重写、不补指针,需人工核查" };
+  else if (!s.note) {
+    // 指针可能已在崩溃前落库:同一 dedupKey、同一报告哈希,重写即幂等复核
     s.note = await d.writeNote({ op: "state_maintenance_run", runId: s.runId, result: s.outcome ?? "unknown", reportRel: rep.rel, reportSha256: rep.sha256, actor: r.req.actor });
     save(r);
+    d.crashAt?.("recording:after-note");
   } else if (!s.note.ok) s.note = await d.flushNotes(); // 崩溃前已写过(或留了待补):补记,不再写第二条
   if (s.outcome === "failed") return save(r, "failed-holding", "屏障保持、写者保持停止,等恢复按钮");
   save(r, "restoring");
@@ -159,6 +167,14 @@ async function finish(r: Run, phase: RunState["phase"]): Promise<RunState> {
   liftBarrier(d.maintRoot, s.runId);
   return restoreWriters(r);
 }
+
+const reportIntact = (d: ExecDeps, rep: { rel: string; sha256: string }): boolean => {
+  try {
+    return sha256Hex(readFileSync(join(d.maintRoot, rep.rel), "utf8")) === rep.sha256;
+  } catch {
+    return false; // 读不到就当对不上
+  }
+};
 
 /** 屏障已解除(或正要解除)后按原清单恢复写者;幂等(services.restoreAll 对照实际状态),异常记为恢复失败而不是卡住 */
 async function restoreWriters(r: Run): Promise<RunState> {
