@@ -45,7 +45,7 @@ function card(over: Over = {}) {
   };
   const gh = { attempt: 1, status: "completed", conclusion: "failure", calls: [] as string[] };
   const ciRerun: CiRerunGh = {
-    runAttempt: async () => ({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion }),
+    runAttempt: async () => ({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion, headSha: HEAD }),
     failedLog: async () => { gh.calls.push("log"); if (over.log instanceof Error) throw over.log; return over.log ?? logOf(FLAKY); },
     prFiles: async () => { gh.calls.push("files"); if (over.files instanceof Error) throw over.files; return over.files ?? ["src/lib/x.ts"]; },
     rerunFailed: async () => { gh.calls.push("rerun"); if (over.rerun) throw over.rerun; gh.attempt++; gh.status = "queued"; gh.conclusion = ""; },

@@ -30,7 +30,7 @@ const WITH_ASSERT = ciLog([at(`##[group]${SLOW}:`), at("(fail) 本机 API last-s
   at("(fail) b > 断言 [0.40ms]"), at("##[endgroup]")], 2);
 
 /** `lag`: the rerun call succeeds but run view keeps showing the old attempt (GitHub's eventual consistency). */
-interface Gh { attempt: number; status: string; conclusion: string; log: string | Error; files: string[]; rerun: Error | null; lag: boolean;
+interface Gh { attempt: number; status: string; conclusion: string; headSha: string; log: string | Error; files: string[]; rerun: Error | null; lag: boolean;
   argv: string[][] }
 const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 const no = (stderr: string): BoundedResult => ({ code: 1, stdout: "", stderr, timedOut: false });
@@ -38,8 +38,8 @@ const no = (stderr: string): BoundedResult => ({ code: 1, stdout: "", stderr, ti
 const fakeGh = (gh: Gh) => async (argv: string[]): Promise<BoundedResult> => {
   gh.argv.push(argv);
   const cmd = argv.slice(1).join(" ");
-  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion") {
-    return ok(JSON.stringify({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion }));
+  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion,headSha") {
+    return ok(JSON.stringify({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion, headSha: gh.headSha }));
   }
   if (cmd === "run view 77 --repo example/repo --log-failed") return gh.log instanceof Error ? no(gh.log.message) : ok(gh.log);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: gh.files.map((path) => ({ path, additions: 1, deletions: 0 })) }));
@@ -61,7 +61,7 @@ const red = (): PrSnapshot => ({ state: "OPEN", head: HEAD, branch: "feat/t9", b
 function card(over: Partial<Gh> = {}) {
   const c = mergedCard();
   c.db.query("UPDATE scheduler_merges SET phase='await_ci', mergeSha=NULL WHERE intentId=?").run(c.intent);
-  const gh: Gh = { attempt: 1, status: "completed", conclusion: "failure", log: TIMEOUT_ONLY, files: ["src/lib/x.ts", "tests/x.test.ts"],
+  const gh: Gh = { attempt: 1, status: "completed", conclusion: "failure", headSha: HEAD, log: TIMEOUT_ONLY, files: ["src/lib/x.ts", "tests/x.test.ts"],
     rerun: null, lag: false, argv: [], ...over };
   let snap = red();
   const external = { inspect: async () => snap, freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }),

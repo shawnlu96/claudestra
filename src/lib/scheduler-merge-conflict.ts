@@ -12,6 +12,8 @@ import { canTransition, nextTaskState, type LedgerEvent } from "./ledger-stages.
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent } from "./ledger-tx.js";
 import { ciBehindClaim, ciBehindOrRerun } from "./scheduler-merge-ci-behind.js";
+import { ciCancelGate, ciCancelStep } from "./scheduler-merge-ci-cancel.js";
+import { redCheck } from "./scheduler-merge-ci-cancel-judge.js";
 import { gateReceipt, RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
@@ -36,10 +38,13 @@ function untouched(run: MergeRun, pr: PrSnapshot): boolean {
     !pr.crossRepository && !pr.draft && sameSha(pr.head, run.reviewedHead);
 }
 
-/** Required checks that failed or were cancelled on the reviewed head; other checks keep their old (unknown) handling. */
+/**
+ * Required checks that failed or were cancelled on the reviewed head; other checks keep their old (unknown) handling. A cancel-only
+ * set still counts here (ci_fail): ciCancelStep takes it first when its switch is on (scheduler-merge-ci-cancel.ts).
+ */
 function failedRequired(run: MergeRun, checks: PrSnapshot["checks"]): FailedCheck[] {
   const names = required(run);
-  return checks.filter((c) => names.includes(c.name) && (c.bucket === "fail" || c.bucket === "cancel"))
+  return checks.filter((c) => names.includes(c.name) && redCheck(c))
     .map((c) => ({ name: c.name, link: typeof c.link === "string" && /^https:\/\/\S+$/.test(c.link) ? c.link : "" }));
 }
 
@@ -107,7 +112,10 @@ type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
 export async function bounceStep(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, only?: BounceCause): Promise<MergeRun | null> {
   const cause = bounceOf(run, pr, only);
   if (!cause) return null;
-  if (cause === "ci_fail") return ciBehindOrRerun(run, pr, external, step, failedRequired(run, pr.checks), bounceReceipt); // i28-CIF1 → CIF2
+  if (cause === "ci_fail") { // CICANCEL1 (only cancelled) → i28-CIF1 → CIF2
+    const checks = failedRequired(run, pr.checks);
+    return (await ciCancelStep(run, pr, external, step, checks)) ?? ciBehindOrRerun(run, pr, external, step, checks, bounceReceipt);
+  }
   const { mainHead } = await external.freshness(run.prRef, pr.head);
   return step("resolved", bounceReceipt({ cause, prHead: pr.head, mainHead, checks: [] }));
 }
@@ -178,7 +186,7 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
   const now = ctx.now ?? Date.now();
   const receipt = gateReceipt(rawReceipt);
   // null: a CI re-run was claimed (the run keeps its phase, i28-CIF1) or update-branch was claimed (→ updating, i28-CIF2)
-  const own = ciBehindClaim(db, ctx, row, receipt, drift, bounceReceipt, insertEvent);
+  const own = ciCancelGate(db, ctx, row, receipt, drift, (r) => ciBehindClaim(db, ctx, row, r, drift, bounceReceipt, insertEvent), cancelMergeRun);
   if (own === null) return;
   const b = parseBounceReceipt(own);
   if (!b) {
