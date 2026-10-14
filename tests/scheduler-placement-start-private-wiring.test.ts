@@ -2,7 +2,7 @@
  * dispatch-recovery-PRIVSTART1 wiring (验收线 5): privateStartPlacement observe's record goes out through the scheduler's start hook
  * (scheduler-autostart-deps.ts flushReviewLocal), as the scheduler identity's `ledger scheduler-recovery-observe` on a real temp ledger.
  * The production policy reader (no recovery-policy entry = observe) and the real startPlacement queue it; one note per card and spec
- * revision; a record whose card never appears (a refused start) is dropped, not retried forever.
+ * revision; a refused start (等 either way, PM 10:5x) queues and writes nothing; a record whose card never appears is dropped, not retried forever.
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
@@ -75,5 +75,23 @@ test("台账写口拒（busy）：观察留在队里，下一轮再写", async (
     await hooks.start(config, pace);
     expect(privateStartPending()).toEqual([]);
     expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "recovery_observe")).toHaveLength(1);
+  } finally { f.close(); }
+});
+
+test("observe：实际放置为「等」（refused、没建卡）时不排、不写任何观察，也不报错", async () => {
+  const f = autoFixture();
+  try {
+    const off: RemotePolicy = { ...remote, localPriority: "off" };
+    const placed = await startPlacement(f.db, { policy: () => ({ remote: off, maxWorkers: 0 }), borrow: async (): Promise<BorrowEntry[]> => [],
+      originRepo: async () => "o/priv", now: () => 1000 }, { project: "p", repoDir: "/r", fileGlobs: PRIV, want: "auto", card: "future-private-card" }, true);
+    expect(placed).toMatchObject({ where: "refused" });
+    expect(privateStartPending()).toEqual([]);
+    const calls: string[][] = [];
+    const ledger = async (...args: string[]) => { calls.push(args); return f.cli("scheduler", ...args.slice(1)); };
+    const hooks = autostartHooks({ db: f.db, ledger, active: () => {}, lease: undefined });
+    await hooks.start(config, pace);
+    await hooks.start(config, pace);
+    expect(calls).toEqual([]);
+    expect(listEvents(f.db, { project: "p", target: "future-private-card" })).toEqual([]);
   } finally { f.close(); }
 });

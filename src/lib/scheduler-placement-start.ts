@@ -41,8 +41,9 @@ export interface StartPlacementIO {
 /**
  * dispatch-recovery-PRIVSTART1: a private card (a `repo:` fileGlob, the autostart private gate's test) has no checkout the planner
  * accepts here, so its start goes to a peer or waits. Recovery key privateStartPlacement: off = unchanged; observe = unchanged, plus one
- * would-be record per card and spec revision; on = placement over peersOnly(facts), and no peer room / no placement / a failed
- * read is refused, never this machine. A public card never reads the key. tests/scheduler-placement-start-private*.test.ts.
+ * would-be record per card and spec revision for a start that goes ahead (a refused one is 等 either way: not recorded);
+ * on = placement over peersOnly(facts), and no peer room / no placement / a failed read is refused, never this machine.
+ * A public card never reads the key. tests/scheduler-placement-start-private*.test.ts.
  */
 const PRIVATE_KEY = "privateStartPlacement";
 export const PRIVATE_ONLY_PEER = "私仓卡只放 peer";
@@ -61,7 +62,7 @@ export function privateStartMode(project: string, globs: readonly string[], poli
 const observed = new Map<string, ObservedAction | true>();
 /** The ledger each pending record was noted against (the scheduler's own connection), read again at drain for its card. */
 const notedIn = new Map<string, Database>();
-/** Drains that found the record's card missing; the second miss drops it (a refused or rolled-back start never creates the card). */
+/** Drains that found the record's card missing; the second miss drops it (a start rolled back after placement never creates the card). */
 const misses = new Map<string, number>();
 const QUEUE_MAX = 500;
 
@@ -158,11 +159,11 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
   } catch (e) {
     if (pin) return { where: "refused", reason: `读借入名单 / 仓库地址失败：${(e as Error).message}` };
     if (priv === "on") return { where: "refused", reason: `${PRIVATE_ONLY_PEER}：读借入名单 / 仓库地址失败：${(e as Error).message}` };
-    if (priv === "observe") notePrivateStart(db, q.project, card, "local", "等", `读借入名单 / 仓库地址失败：${(e as Error).message}`);
     const refusal = localFamilyRefusal({ remote: policy?.remote ?? null }, "write", "claude");
     if (refusal && !policy?.remote?.agents) return { where: "refused", reason: refusal };
     if ((!policy?.remote?.agents && policy?.remote?.localPriority === "off")) return { where: "refused", reason: `本机不写代码，读借入名单失败：${(e as Error).message}` };
     if (!localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null).room) return { where: "refused", reason: "本机写槽已满，且无法确认 peer 空位" };
+    if (priv === "observe") notePrivateStart(db, q.project, card, "local", "等", `读借入名单 / 仓库地址失败：${(e as Error).message}`);
     return { where: "local", reason: `读借入名单 / 仓库地址失败，放本机：${(e as Error).message}` };
   }
   const all: PlacementFacts = {
@@ -183,20 +184,22 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     reservations?.observe?.({ actual: placed.kind === "peer" ? `peer:${placed.peer}` : placed.kind,
       proposed: proposed.kind === "peer" ? `peer:${proposed.peer}` : proposed.kind });
   }
-  if (priv === "observe" && !pin) {
+  // observe: only a start that goes ahead is recorded (PM 10:5x); a refused one waits on peers only too, so there is nothing to compare.
+  const observeStart = (r: StartPlacement): StartPlacement => {
+    if (priv !== "observe" || pin || r.where === "refused") return r;
     const only = peersOnly(all);
     const would = finishFirst && policy?.remote?.agents ? reservedStartPlacement(only, reserveFinishing(db, q.project, only, q.taskId)) : placeFor(only, "write", "claude");
-    notePrivateStart(db, q.project, card, placed.kind === "peer" ? `peer:${placed.peer}` : placed.kind === "wait" ? "等" : "local",
-      would.kind === "peer" && repo ? `peer:${would.peer}` : "等", would.reason);
-  }
+    notePrivateStart(db, q.project, card, r.where === "peer" ? `peer:${r.peer}` : "local", would.kind === "peer" && repo ? `peer:${would.peer}` : "等", would.reason);
+    return r;
+  };
   if (peersFirst && !(placed.kind === "peer" && repo)) {
     return { where: "refused", reason: `${PRIVATE_ONLY_PEER}：${placed.kind === "peer" ? "项目目录 origin 不是 GitHub 仓库" : placed.reason}` };
   }
-  if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason,
-    ...(mode === "off" ? {} : { reservation: { mode, family: placed.family, maxOpen: policy?.remote?.agents ? null : borrow.find((b) => b.peer === placed.peer)!.maxOpen } }) };
+  if (placed.kind === "peer" && repo) return observeStart({ where: "peer", peer: placed.peer, repo, reason: placed.reason,
+    ...(mode === "off" ? {} : { reservation: { mode, family: placed.family, maxOpen: policy?.remote?.agents ? null : borrow.find((b) => b.peer === placed.peer)!.maxOpen } }) });
   if (placed.kind === "wait") return { where: "refused", reason: placed.reason };
   if ((!policy?.remote?.agents && policy?.remote?.localPriority === "off") || !localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null).room) {
     return { where: "refused", reason: "本机不写代码或写槽已满，peer 写单名额已满或不可用" };
   }
-  return { where: "local", reason: placed.reason };
+  return observeStart({ where: "local", reason: placed.reason });
 }
