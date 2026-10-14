@@ -59,7 +59,8 @@ describe("KEYUNION1 local union merge (real git)", () => {
     preAttrs = await commit("before the union line");
     file(".gitattributes", ATTRS);
     base = await commit("base");
-    file(KEYS, table("mainKey")); file("src/main-only.ts", "export const m = 1;\n");
+    // KEYSORT1: main's key sorts after every PR key below, so their same-gap union result stays in order
+    file(KEYS, table("zMainKey")); file("src/main-only.ts", "export const m = 1;\n");
     mainHead = await commit("main adds a key");
     await sh(work, "push", "-q", bare, "main:refs/heads/main");
   });
@@ -76,7 +77,7 @@ describe("KEYUNION1 local union merge (real git)", () => {
     if (!r.ok) throw new Error(r.reason);
     expect(r.proof).toContain("干净合并");
     expect(await git("rev-list", "--parents", "-n", "1", r.mergeSha)).toBe(`${r.mergeSha} ${head} ${mainHead}`);
-    expect(await git("show", `${r.mergeSha}:${KEYS}`)).toBe(table("prKey", "mainKey").trim());
+    expect(await git("show", `${r.mergeSha}:${KEYS}`)).toBe(table("prKey", "zMainKey").trim());
     expect((await git("worktree", "list")).split("\n")).toHaveLength(1); // the scratch worktree is gone
     expect(await remoteHead("keys-only")).toBe(head); // trying pushes nothing
     expect(await pushUnionMerge({ repoDir: work, branch: "keys-only", reviewedHead: head, mergeSha: r.mergeSha }, command)).toEqual({ ok: true });

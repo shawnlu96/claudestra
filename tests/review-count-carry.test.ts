@@ -198,7 +198,7 @@ describe("CARRYCNT1 count carry (real merge tick, real git)", () => {
     const cases: [string, () => Promise<{ h0?: string; h1: string; proof?: ProofOver }>][] = [
       ["a non-count line in the inventory", async () => ({ h1: await commitOn(H0, () => { bump(); edit(INVENTORY, (t) => t.replace("S2D2 · every file", "S2D2 · each file")); }) })],
       ["a new entry", async () => ({ h1: await commitOn(H0, () => { bump(); edit(INVENTORY, (t) => t.replace('"lend-git.ts": "vcs=1",', '"lend-git.ts": "vcs=1", "zz-new.ts": "fs=1",')); }) })],
-      ["an entry deleted", async () => ({ h1: await commitOn(H0, () => { bump(); edit(INVENTORY, (t) => t.replace('"lend-git.ts": "vcs=1", ', "")); }) })],
+      ["an entry deleted", async () => ({ h1: await commitOn(H0, () => { bump(); edit(INVENTORY, (t) => t.replace('    "lend-git.ts": "vcs=1",\n', "")); }) })],
       ["a value with a backslash", async () => ({ h1: await commitOn(H0, () => edit(INVENTORY, bumpText("\\\\"))) })],
       ["a value that is no number", async () => ({ h1: await commitOn(H0, () => edit(INVENTORY, (t) => t.replace(/("scheduler-merge-conflict\.ts": ")[^"]+(")/, "$1sql=3 stmt=x$2"))) })],
       ["one more file", async () => ({ h1: await commitOn(H0, () => { bump(); other(TARGET); }) })],
@@ -237,7 +237,7 @@ describe("CARRYCNT1 count carry (real merge tick, real git)", () => {
       entries: [{ file: "scheduler-merge-conflict.ts", gate: expect.any(String), from: expect.any(String), to: expect.any(String) }] }]);
     const notes = async (h1: string) => (await drive({ mode: "observe", h1 })).notes.map((n) => n.actionKey.split(".")[0]);
     expect(await notes(await commitOn(H0, () => { bump(); edit(TARGET, (t) => `${t}// more\n`); }))).toEqual(["wouldnot"]); // c
-    expect(await notes(await commitOn(H0, () => { bump(); edit(INVENTORY, (t) => t.replace('"lend-git.ts": "vcs=1", ', "")); }))).toEqual(["wouldnot"]); // d
+    expect(await notes(await commitOn(H0, () => { bump(); edit(INVENTORY, (t) => t.replace('    "lend-git.ts": "vcs=1",\n', "")); }))).toEqual(["wouldnot"]); // d
     expect(await notes(await commitOn(H0, () => edit(INVENTORY, bumpText("\\\\"))))).toEqual(["wouldnot"]); // e (d refuses it first)
     expect(await notes(await commitOn(H0, bump, "chore: counts"))).toEqual([]); // b
     expect(await notes(await commitOn(await commitOn(H0, () => {}, "wip"), bump))).toEqual([]); // a
