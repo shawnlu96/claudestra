@@ -65,8 +65,8 @@ test.skipIf(!out)("mirror freshness: team planning panel at 390 / 1280, fresh / 
       page.on("pageerror", (e) => errors.push(e.message));
       await page.goto(`${server.url}?side=team&theme=light&project=${fx.project}&team=${fx.team}`);
       await page.getByText(fx.list.features[0]!.title, { exact: false }).first().waitFor({ timeout: 15_000 });
-      await (width < 700 ? page.getByRole("button", { name: "团队", exact: true }).first()
-        : page.getByRole("tab", { name: "团队" }).or(page.getByRole("button", { name: "团队", exact: true })).first()).click();
+      await (width < 700 ? page.getByRole("button", { name: /^(规划与提案|团队)$/ }).first()
+        : page.getByRole("tab", { name: /^(规划与提案|团队)$/ }).or(page.getByRole("button", { name: /^(规划与提案|团队)$/ })).first()).click();
       await page.getByText("团队规划", { exact: true }).waitFor();
       await page.evaluate("document.fonts.ready");
       await page.evaluate("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))");

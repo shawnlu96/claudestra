@@ -3,8 +3,10 @@
  * 真的 chat store / 待办 store / 团队绑定 store。全部 fetch 在这里拦下按合成数据答，夹具之外一律 404，不连任何 bridge。
  * 数据照规格「对照基准」：4 个 agent 其中 2 个忙；3 件等 owner 的 asks（1 件团队提案卡）；4 个项目（两个绑定团队：一个成组一个单成员；
  * 一个本机成组；一个本机单成员）。happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
+ * 项目组里的「协作视图」行（collab-entry.tsx）在这里换成探针，只记它被要了哪个键、带不带「团队」小标：别的 dom 测试文件在同一进程里
+ * 把它 mock 成空（mock.module 进程级生效），不换就看不到；它本身画小标的样子在 tests/web-now-home-browser.test.ts 的真页面里断言。afterAll 换回原样。
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { setAppConfigForTest } from "../web/lib/app-config";
@@ -73,6 +75,10 @@ const SNAPSHOT = { v: 1, identity: { subject: "owner:self", kind: "person", cent
 const LEDGER = { ok: true, exists: true, now: NOW, meta: { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } }, items: [], tasks: [], deps: [] };
 
 const world = { identities: IDENTITIES as object[] | "fail" };
+const ENTRY = "@/features/collab/collab-entry";
+let entryBefore: Record<string, unknown>;
+/** 本文件挂上的根：用例中途失败也在 afterEach 卸掉，别把侧栏（带全局菜单）留给后面的测试文件 */
+const live = new Set<() => Promise<void>>();
 const calls: string[] = [];
 const realFetch = globalThis.fetch, realFp = machines.currentFp;
 
@@ -84,6 +90,10 @@ beforeAll(async () => {
   doc = (globalThis as unknown as { document: Doc }).document;
   win = (globalThis as unknown as { window: Win }).window;
   machines.currentFp = () => FP;
+  entryBefore = { ...(await import(ENTRY)) };
+  const h = (webRequire("react") as ReactNS).createElement as (...a: unknown[]) => unknown;
+  mock.module(ENTRY, () => ({ ...entryBefore, CollabEntry: ({ projectId, team }: { projectId: string; team?: boolean }) =>
+    h("li", { "data-entry": projectId }, h("span", null, "协作视图"), team ? h("span", { "data-collab-team-badge": "" }, "团队") : null) }));
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
     const path = url.pathname.replace(/^\/m\/[^/]+/, "");
@@ -105,7 +115,12 @@ beforeAll(async () => {
     ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore, useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab };
 });
 
+afterEach(async () => {
+  for (const off of [...live]) await off();
+});
+
 afterAll(async () => {
+  mock.module(ENTRY, () => entryBefore);
   globalThis.fetch = realFetch;
   machines.currentFp = realFp;
   setContextRequestForTest(null);
@@ -148,8 +163,13 @@ async function mount(part: "main" | "sidebar" | "strip", width = 1280, bindingsD
   };
   const all = (sel: string) => Array.from(host.querySelectorAll(sel));
   const texts = (sel: string) => all(sel).map((e) => (e.textContent ?? "").replace(/\s+/g, " ").trim());
-  return { host, seen, click, all, texts, text: () => (host.textContent ?? "").replace(/\s+/g, " "),
-    unmount: async () => { await React.act(async () => root.unmount()); host.remove(); } };
+  const unmount = async () => {
+    if (!live.delete(unmount)) return;
+    await React.act(async () => root.unmount());
+    host.remove();
+  };
+  live.add(unmount);
+  return { host, seen, click, all, texts, text: () => (host.textContent ?? "").replace(/\s+/g, " "), unmount };
 }
 
 test("[验收线 2] 桌面没选会话时主区是『现在』页，三块齐全；DOM 里不再有『选择左侧一个会话开始』", async () => {
@@ -273,7 +293,7 @@ test("[验收线 4] 侧栏：区头是『团队』；已成组的绑定项目不
   win.localStorage.clear();
   const v = await mount("sidebar");
   const area = () => v.host.querySelector("section[aria-label='团队项目']");
-  await until(() => !!area() && area()!.querySelectorAll("button[aria-label]").length > 0 && v.all("[data-collab-team-badge]").length === 1, "sidebar team area");
+  await until(() => !!area() && area()!.querySelectorAll("button[aria-label]").length > 0, "sidebar team area");
   expect(area()!.querySelector("h2")?.textContent).toBe("团队");
   expect(v.text()).not.toContain("全部 feature");
   expect(Array.from(area()!.querySelectorAll("button[aria-label]")).map((b) => b.getAttribute("aria-label"))).toEqual(["团队单成员"]);
@@ -281,17 +301,15 @@ test("[验收线 4] 侧栏：区头是『团队』；已成组的绑定项目不
   // 侧栏条在团队区之上
   const order = v.all("[data-now=strip], section[aria-label='团队项目']").map((e) => e.getAttribute("data-now") ?? "team");
   expect(order).toEqual(["strip", "team"]);
-  // 项目组里的「协作视图」行：绑定团队的带小标，本机的不带
-  await until(() => v.all("button").filter((b) => (b.textContent ?? "").startsWith("协作视图")).length === 2, "collab entries");
-  const entries = v.all("button").filter((b) => (b.textContent ?? "").startsWith("协作视图"));
-  expect(entries.map((b) => b.querySelector("[data-collab-team-badge]")?.textContent ?? null).sort()).toEqual([null, "团队"].sort() as never);
-  // 团队区保留行与项目组入口：同一个选源函数，各开各的中心键
+  // 项目组里的「协作视图」行：绑定团队的要中心键、带小标；本机的要本机项目 id、不带（探针记下的就是真入口拿到的参数）
+  await until(() => v.all("[data-entry]").length === 2, "collab entries");
+  const entries = Object.fromEntries(v.all("[data-entry]").map((e) => [e.getAttribute("data-entry"), e.querySelector("[data-collab-team-badge]")?.textContent ?? null]));
+  expect(entries).toEqual({ [keyOf("center-group")]: "团队", "local-group": null });
+  // 团队区保留行与项目组入口：同一个选源函数，开的是同一个拼法的中心键
   await v.click(area()!.querySelector("button[aria-label='团队单成员']"), "team row");
   const solo = resolveCollabSource(IDENTITIES, "team-solo", FP);
   expect(v.seen.open).toBe(solo.kind === "center" ? solo.key : "");
   expect(v.seen.open).toBe(keyOf("center-solo"));
-  await v.click(entries.find((b) => b.querySelector("[data-collab-team-badge]")), "group entry");
-  expect(v.seen.open).toBe(keyOf("center-group"));
   await v.unmount();
 });
 

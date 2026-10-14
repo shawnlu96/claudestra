@@ -25,7 +25,9 @@ export function useTeamTab(tr: Tr): { label: string; sub: string } {
   }, [team, lang, tr]);
 }
 
-const COL: CSSProperties = { display: "flex", flexDirection: "column", minWidth: 0, gap: 1 };
+/** 竖排小块先让：手机顶栏放不下时项目名和那行小字省略，按钮不折行 */
+const COL: CSSProperties = { display: "flex", flexDirection: "column", flex: "1 1 0", minWidth: 0, gap: 1 };
+const KEEP: CSSProperties = { whiteSpace: "nowrap", flex: "none" };
 const NAME: CSSProperties = { overflow: "hidden", textOverflow: "ellipsis" };
 const LINE: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 4, minWidth: 0, padding: 0, textAlign: "left", fontSize: "var(--fs-3)", color: "var(--muted)",
   whiteSpace: "nowrap" };
@@ -38,7 +40,8 @@ function MirrorLine({ ov, now }: { ov: Pick<LedgerOverview, "mirror" | "items">;
   const [open, setOpen] = useState(false);
   const m = headMirror(ov, now);
   const text = `${h(HEAD_WORDS.team)} · ${headMirrorText(m, now, h)}`;
-  if (m.state !== "stale") return <span style={LINE} data-collab-head={m.state}><span style={CLIP}>{text}</span></span>;
+  // 窄屏省略时整句在 title 里
+  if (m.state !== "stale") return <span style={LINE} data-collab-head={m.state} title={text}><span style={CLIP}>{text}</span></span>;
   return (
     <>
       <button type="button" style={{ ...LINE, color: "var(--warn)" }} data-collab-head="stale" aria-expanded={open} title={h(HEAD_WORDS.showStale)} onClick={() => setOpen((x) => !x)}>
@@ -64,7 +67,7 @@ export function CollabPageHead({ name, ov, now, tr, onTeam }: { name: string; ov
         <span className={v.ttl} style={NAME}>{name}</span>
         {team && <MirrorLine ov={ov} now={now} />}
       </div>
-      {onTeam && <button type="button" className={v.teamM} onClick={onTeam}>{tab.label}</button>}
+      {onTeam && <button type="button" className={v.teamM} style={KEEP} onClick={onTeam}>{tab.label}</button>}
     </>
   );
 }
