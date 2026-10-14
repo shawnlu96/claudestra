@@ -1,5 +1,6 @@
 'use client';
 import { useState, type FormEvent } from 'react';
+import { MACHINE_WORDS } from '@/lib/owner-words';
 import { Icon } from '../../collab-icons';
 import shared from '../shared.module.css';
 import c from '../../collab.module.css';
@@ -112,7 +113,7 @@ export function TaskEditor(p: TaskEditorProps) {
       <h2 className={c.a}>{tr(draft.kind === 'create' ? '新建 spec 卡' : '编辑 spec 卡')}</h2></div>
       <button className={c.btn} type="button" onClick={p.onClose}><Icon name="x" /> {tr('关闭')}</button></div>
     <div className={`${c.s2} ${shared.line}`}>
-      <span>{tr('主场')} · {instanceLabel(home, p.instanceNames)}</span>
+      <span>{tr(MACHINE_WORDS.machine)} · {instanceLabel(home, p.instanceNames)}</span>
       <span>{tr('执行地')} · {instanceLabel(executor, p.instanceNames)}</span>
       <span className={isDataStale(p.observedAt, p.now) ? s.expired : undefined}>
         {tr('数据过期时间')} · {expiry === null ? '—' : new Date(expiry).toLocaleString()}</span>
@@ -129,7 +130,7 @@ export function TaskEditor(p: TaskEditorProps) {
       <Icon name="circleAlert" /> {tr(errorLabels[error] ?? '提交失败')}</div>}
     {state.phase === 'saved' && <div role="status" className={s.feedback}><Icon name="circleCheck" /> {tr('已保存')}</div>}
     <form className={shared.form} onSubmit={send}>
-      {draft.kind === 'create' && <small>{tr('所属 feature')} · {draft.feature.id} · rev {draft.feature.rev}</small>}
+      {draft.kind === 'create' && <small>{tr('所属模块')} · {draft.feature.id} · rev {draft.feature.rev}</small>}
       {draft.kind === 'edit' && <small>{tr('卡')} rev {draft.base.rev} · specRev {draft.base.specRev}</small>}
       <label>{tr('标题')}<input required maxLength={300} value={draft.title} disabled={inFlight || state.phase === 'submitting'}
         onChange={e => update('title', e.target.value)} /></label>

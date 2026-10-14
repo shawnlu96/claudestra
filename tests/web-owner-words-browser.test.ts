@@ -373,3 +373,138 @@ test.skipIf(!out)('UXTERM4：缺正文团队卡详情的回放占位与脱敏事
   expect(PENDING_WORDS).toEqual([]);
   for (const [name, list] of Object.entries(issues).filter(([n]) => n.startsWith('after-'))) expect({ name, list }).toEqual({ name, list: [] });
 }, 600_000);
+
+import { execFixtureView } from '@/features/collab/shared/exec/exec-fixture';
+
+/** UXTERM5：团队卡的团队操作区（执行面板 / 开卡表单 / 审批面板 / 提案页），生产 CollabView + TeamSource + 合成执行接线 */
+const OPS_VIEWS = ['exec', 'task', 'approve', 'proposal'] as const;
+type OpsView = (typeof OPS_VIEWS)[number];
+/** 改后每页必须出现的新句（中文 / 英文）；改前只拍不断言新句 */
+const OPS_WANT: Record<OpsView, { zh: string[]; en: string[] }> = {
+  exec: { zh: ['任务所在的机器 · 本机'], en: ['The machine running the task · 本机'] },
+  task: { zh: ['任务所在的机器 · 本机'], en: ['The machine running the task · 本机'] },
+  approve: { zh: ['任务所在的机器 · 本机', '原文只在任务所在的机器上能看'],
+    en: ['The machine running the task · 本机', 'Original text is only visible on the machine running this task'] },
+  proposal: { zh: ['项目和任务所在的机器由本机绑定决定，不可改'], en: ["Project and the machine running this task come from this machine's binding; not editable"] },
+};
+
+function opsFixture() {
+  const fx = generateTeamFixture({ features: 1, now: NOW });
+  const clean = (s: string) => s.replaceAll('执行镜像', '任务进度').replaceAll('feature', 'module');
+  const f = fx.details[0]!;
+  f.feature.title = '模块 1：同步不同机器上的任务进度';
+  f.feature.authorityMode = 'execution' as typeof f.feature.authorityMode; // 执行面板只在执行权模式下出现（同 stage2 截图夹具）
+  for (const n of f.dag.nodes) n.oneLine = clean(n.oneLine);
+  for (const t of f.tasks) t.specSummary = clean(t.specSummary ?? '');
+  // 开卡表单原样显示所属模块的 id：夹具给一个可读 id，不让截图检查把 uuid 当标题
+  const detail = JSON.parse(JSON.stringify(f).replaceAll(f.feature.id, 'module-sync')) as typeof f;
+  fx.list.features = [detail.feature];
+  const view = execFixtureView(detail.feature.id, detail.tasks[0]?.taskId ?? 'task');
+  view.pendingAsks = view.pendingAsks.map(a => ({ ...a, expiresAt: NOW + 600_000, bind: { ...a.bind!, expiresAt: NOW + 600_000 } }));
+  return { list: fx.list, detail, view };
+}
+
+async function opsBundle(repo: string, dir: string) {
+  mkdirSync(dir, { recursive: true });
+  const entry = resolve(dir, 'ops-entry.ts');
+  await Bun.write(entry, `import { setLang } from ${JSON.stringify(resolve(repo, 'web/lib/i18n.tsx'))};
+setLang(new URLSearchParams(location.search).get('lang') === 'en' ? 'en' : 'zh');
+await import(${JSON.stringify(resolve(repo, 'web/features/collab/shared/exec/fixture-harness.tsx'))});`);
+  const p = Bun.spawn([process.execPath, 'build', entry, '--target', 'browser', '--outdir', resolve(dir, 'dist'),
+    '--tsconfig-override', 'web/tsconfig.json'], { cwd: repo, stdout: 'pipe', stderr: 'pipe' });
+  if (await p.exited) throw new Error(await new Response(p.stderr).text());
+  return resolve(dir, 'dist');
+}
+
+function opsServe(dist: string, fx: ReturnType<typeof opsFixture>) {
+  const files = readdirSync(dist);
+  return Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === '/app-config.json') return Response.json({ mode: 'direct', fp: 'local', machineName: 'fixture', version: '' });
+    if (path === '/api/v1/shared-ledger/features') return Response.json(fx.list);
+    if (path.startsWith('/api/v1/shared-ledger/features/')) return Response.json(fx.detail);
+    if (path === '/api/v1/shared-projects/snapshot') return Response.json({ v: 1,
+      identity: { subject: 'owner:self', kind: 'person', centerId: 'center', teamId: 'team-a', personId: 'person-a', instanceId: 'local' },
+      teamRole: { available: true, value: 'owner' }, capabilities: { invite: { available: false }, leave: { available: false } }, peers: [],
+      localProjects: [{ id: 'fixture-local', name: '合成项目', dirs: [], personal: false, eligible: false }],
+      projects: [{ centerId: 'center', teamId: 'team-a', projectId: 'claude-orchestrator', name: '合成项目', rev: 1,
+        status: 'active', projectRole: { available: true, value: 'owner' }, localProjectIds: ['fixture-local'] }] });
+    if (path === '/api/v1/shared-feature-proposals') return Response.json({ ok: true, operations: [] });
+    if (path.startsWith('/api/v1/shared-feature-proposals/projects/')) return Response.json({ ok: true, proposals: [] });
+    if (path.startsWith('/api/v1/shared-exec/features/')) return Response.json(fx.view);
+    if (path.startsWith('/api/v1/shared-exec/asks/')) return Response.json(fx.view.pendingAsks[0]);
+    if (path.startsWith('/api/')) return Response.json({ ok: false, error: 'outside synthetic fixture' }, { status: 404 });
+    if (path !== '/') return files.includes(path.slice(1)) ? new Response(Bun.file(resolve(dist, path.slice(1)))) : new Response(null, { status: 404 });
+    return new Response(`<!doctype html><html data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+      ${files.filter(f => f.endsWith('.css')).map(f => `<link rel="stylesheet" href="/${f}">`).join('')}
+      <style>*{box-sizing:border-box}body{margin:0;font:14px system-ui}button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}h2,h5{margin:0}</style></head>
+      <body><div id="root"></div><script type="module" src="/${files.find(f => f.endsWith('.js'))}"></script></body></html>`,
+    { headers: { 'content-type': 'text/html; charset=utf-8' } });
+  } });
+}
+
+/** 打开团队规划页，再按 view 展开团队操作区；返回要拍到的那块 */
+async function opsNavigate(page: Page, view: OpsView, lang: 'zh' | 'en', narrow: boolean, title: string) {
+  const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
+  await page.getByText(title, { exact: true }).first().waitFor();
+  // 「团队」（桌面是中区标签，手机是顶栏按钮）→ 子标签「规划与提案」
+  await page.getByRole(narrow ? 'button' : 'tab', { name: tr('团队', 'Team'), exact: true }).click();
+  await page.getByRole('tab', { name: tr('规划与提案', 'Planning and proposals'), exact: true }).click();
+  const exec = page.getByRole('region', { name: tr('共享执行', 'Shared execution'), exact: true });
+  await exec.waitFor();
+  let target = exec;
+  if (view === 'task') {
+    await exec.getByRole('button', { name: tr('开卡', 'Create task'), exact: true }).last().click();
+    target = page.getByText(tr('新建 spec 卡', 'New spec task'), { exact: true }).locator('xpath=ancestor::*[self::section or self::form][1]');
+  } else if (view === 'approve') {
+    await exec.getByRole('button', { name: tr('审批', 'Approval'), exact: true }).last().click();
+    target = page.getByRole('button', { name: tr('批准', 'Approve'), exact: true }).locator('xpath=ancestor::section[1]');
+  } else if (view === 'proposal') {
+    await page.getByRole('button', { name: tr('新建模块', 'New module'), exact: true }).first().click();
+    target = page.locator('form').filter({ hasText: tr('项目', 'Project') }).first();
+  }
+  await target.first().waitFor();
+  await target.first().evaluate('el => el.scrollIntoView({ block: "center" })');
+  await page.evaluate('document.fonts.ready');
+  await page.evaluate('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))');
+}
+
+test.skipIf(!out)('UXTERM5：团队操作区（执行面板 / 开卡 / 审批 / 提案页）1280 / 390 改前改后，改后不含禁用词与 home', async () => {
+  if (!out) return;
+  const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' }) });
+  const sides = [...(baseRepo ? [{ phase: 'before' as const, repo: resolve(baseRepo) }] : []), { phase: 'after' as const, repo: resolve(import.meta.dir, '..') }];
+  const texts: Record<string, string> = {}, issues: Record<string, ShotIssue[]> = {};
+  const fx = opsFixture();
+  try {
+    for (const { phase, repo } of sides) {
+      const server = opsServe(await opsBundle(repo, resolve(out, `ops-${phase}`)), fx);
+      try {
+        for (const width of [1280, 390]) for (const view of OPS_VIEWS) for (const lang of ['zh', 'en'] as const) {
+          const g = await guardedPage(browser, String(server.url), { width });
+          await g.page.clock.install({ time: NOW });
+          await g.page.goto(`${server.url}?mode=on&lang=${lang}`);
+          await opsNavigate(g.page, view, lang, width === 390, fx.detail.feature.title);
+          const name = `${phase}-ops-${view}-${width}${lang === 'en' ? '-en' : ''}`, text = await g.page.locator('body').innerText();
+          texts[name] = text;
+          if (lang === 'zh') {
+            await g.page.screenshot({ path: resolve(out, `${name}.png`) });
+            issues[name] = await shotIssues(g.page);
+          }
+          expect({ name, external: g.external, errors: g.errors }).toEqual({ name, external: [], errors: [] });
+          if (phase === 'after') {
+            expect({ name, missing: OPS_WANT[view][lang].filter(w => !text.includes(w)) }).toEqual({ name, missing: [] });
+            expect({ name, banned: remainingBanned(text) }).toEqual({ name, banned: [] });
+            expect({ name, hit: text.match(/\bhome\b/i)?.[0] ?? null }).toEqual({ name, hit: null });
+          }
+          await g.ctx.close();
+        }
+      } finally { server.stop(true); }
+    }
+  } finally {
+    await browser.close();
+    await Bun.write(resolve(out, 'ops-inner-text.json'), JSON.stringify(texts, null, 2));
+    await Bun.write(resolve(out, 'ops-shot-issues.json'), JSON.stringify(issues, null, 2));
+  }
+  expect(PENDING_WORDS).toEqual([]);
+  for (const [name, list] of Object.entries(issues).filter(([n]) => n.startsWith('after-'))) expect({ name, list }).toEqual({ name, list: [] });
+}, 600_000);
