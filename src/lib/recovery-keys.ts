@@ -65,6 +65,7 @@ export const RECOVERY_KEYS = [
   "mergeUnifiedCandidates",
   "mergeUnion",
   "mergeUnsentCancel",
+  "mirrorSkipBlockedId",
   "modelOutcome",
   "nearMarker",
   "peerInstanceInfo",
