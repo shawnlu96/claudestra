@@ -144,7 +144,7 @@ test.skipIf(!out)("UXPROB1：概览「出问题 / 卡住」的数能点开，列
           // 卡住：三行，停得久的在前
           await stuck.click();
           await g.page.getByText("点一个任务看详情").waitFor();
-          expect(await rows(g.page).evaluateAll((els) => els.map((e) => e.getAttribute("data-attention-row")))).toEqual(["i28-A3", "i28-B2", "i28-A4"]);
+          expect(await Promise.all((await rows(g.page).all()).map((r) => r.getAttribute("data-attention-row")))).toEqual(["i28-A3", "i28-B2", "i28-A4"]);
           await shot("stuck");
           // 数据刷新：出问题清零，页面写「现在没有」，不报错、不关页
           await g.page.getByRole("button", { name: "关闭", exact: true }).last().click();
