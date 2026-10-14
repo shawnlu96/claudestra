@@ -1,11 +1,8 @@
 /**
- * 切换 agent 走增量（SYN-1）。切走时把「最新视图」的同步锚（差量游标 + 翻页状态）和消息快照一起存下；
- * 切回时恢复锚、只拉游标之后的差量，同时立刻开推送流。
- *
- * 流和历史并行时的竞态：历史落地会按 composeView 重组视图，重组前到达的已定稿直播气泡会被洗掉
- * （reconnect-policy 的 delta 路径因此一直是「先差量后开流」）。所以流先连上、事件先进 EventGate
- * 排队，历史落地后按到达顺序放行——放行时游标已推进，已入历史的事件由 coveredByCursor /
- * historyHasReply / findEchoTarget 这几道既有去重拦下，不重复也不丢。tests/web-switch-sync.test.ts 锁住。
+ * 切换 agent 走增量（SYN-1）：切走时快照与同步锚一起存，切回只拉游标后的差量，推送流同时开。历史落地会按 composeView 重组视图、
+ * 洗掉重组前到的已定稿直播气泡，所以流事件先进 EventGate 排队，落地后按序放行；游标已推进，已入历史的由 coveredByCursor /
+ * historyHasReply / findEchoTarget 拦下（tests/web-switch-sync.test.ts）。不补 since 重放：历史要先拿会话清单再拉页（≥2 个来回），
+ * 流 1 个来回就订阅上了，读盘总在订阅之后，两者之间没有空窗。
  */
 import type { ChatState } from "./chat-store";
 import type { HistoryCursor } from "./live-merge";
