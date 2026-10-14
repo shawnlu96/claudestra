@@ -35,6 +35,8 @@ export interface TtyInput {
   feed(data: string): void;
   /** 底栏输入行的内容（已按宽度截好） */
   line(cols: number): string;
+  /** 新视图的多行输入框要的原文（tui/footer.ts）：permission = 有审批在等且还没打字时的作答提示 */
+  draft(): { text: string; permission: string | null };
 }
 
 const EXIT_WINDOW_MS = 2_000;
@@ -164,6 +166,10 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     if (ch < " ") return; // 其它控制键不认
     buf += ch;
   };
+  const permissionHint = (): string | null => {
+    const pending = deps.permission();
+    return pending && !buf ? `审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/序号 + 回车）` : null;
+  };
   const decode = createKeyDecoder({
     key,
     paste: (ch) => void (buf += ch),
@@ -176,10 +182,10 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
       deps.redraw();
     },
     line(cols) {
-      const pending = deps.permission();
-      if (pending && !buf) return fitTail(`审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/序号 + 回车）❯ `, cols);
-      return fitTail(`❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`, cols);
+      const hint = permissionHint();
+      return fitTail(hint ? `${hint}❯ ` : `❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`, cols);
     },
+    draft: () => ({ text: buf, permission: permissionHint() }),
   };
 }
 

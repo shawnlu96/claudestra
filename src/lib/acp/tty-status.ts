@@ -31,11 +31,25 @@ export function fitWidth(text: string, cols: number): string {
   return out;
 }
 
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 /**
- * 窗口变窄后旧状态行被 tmux 折成几行再减一（tmux 把光标留在原来那行 = 最后一折，前面几折往上推，要往上擦这么多行）。
- * tmux 3.6a 重排时宽字按 UTF-8 字节数占格（直接打印才按 2 格；实测「等」×20 在 22 列折成 3 行），这里照它算。
+ * 窗口变窄后旧的一行被 tmux 折成几行再减一（tmux 把光标留在原来那行 = 最后一折，前面几折往上推，要往上擦这么多行）。
+ * 照 tmux 3.6a 重排的折法算：宽字（两格）在格子里是「字 + 一个占位格」，占位格按一格算、可以单独折到下一行，
+ * 所以一行放的宽字比按显示宽度算的少（实测 22 列：「等」×19 折成 7/7/5，「─」×39 折成 22/17，a等b等… 第二行首个宽字只占两格）。
  * 两个入口（tmux attach、网页终端连 tmux）都经过 tmux；ponytail: 不经 tmux 的真终端按显示宽度折，会多擦一两行旧内容
  */
 export function foldsOf(text: string, cols: number): number {
-  return Math.max(0, Math.ceil(Buffer.byteLength(text) / Math.max(1, cols)) - 1);
+  const max = Math.max(1, cols);
+  let rows = 1, w = 0;
+  const put = (c: number) => {
+    if (w + c > max) (rows++, (w = 0));
+    w += c;
+  };
+  for (const { segment } of GRAPHEMES.segment(text)) {
+    const cw = Bun.stringWidth(segment);
+    if (cw >= 2) put(2), put(1);
+    else if (cw === 1) put(1);
+  }
+  return rows - 1;
 }
