@@ -42,7 +42,10 @@ function world(names: { current?: string; alias?: string } = {}): World {
     w.fsLog.push(`${k} ${a.join(" -> ")}`);
     return (nodeAliasFs[k] as (...x: string[]) => unknown)(...a);
   }) as AliasFs[K];
-  w.fs = { kind: logged("kind"), resolve: logged("resolve"), fileId: logged("fileId"), entryId: logged("entryId"), symlink: logged("symlink"), unlink: logged("unlink") };
+  w.fs = {
+    kind: logged("kind"), resolve: logged("resolve"), fileId: logged("fileId"), entryId: logged("entryId"), readlink: logged("readlink"),
+    symlink: logged("symlink"), unlink: logged("unlink"), rename: logged("rename"), link: logged("link"),
+  };
   w.probe = {
     identify: async (socketPath) => {
       w.probeLog.push(`identify ${socketPath}`);
@@ -55,7 +58,16 @@ function world(names: { current?: string; alias?: string } = {}): World {
 const input = (w: World, mode: unknown = "on", over: Partial<RuntimeAliasInput> = {}): RuntimeAliasInput =>
   ({ mode, currentDir: w.current, aliasDir: w.alias, socketName: SOCK, fs: w.fs, probe: w.probe, ...over });
 
-const writes = (w: World) => w.fsLog.filter((l) => /^(symlink|unlink) /.test(l));
+const writes = (w: World) => w.fsLog.filter((l) => /^(symlink|unlink|rename|link) /.test(l));
+/** 删别名的写序列:先原子挪到同目录的暂存名,核对后删暂存名 */
+const removed = (w: World) => {
+  const moved = writes(w).find((l) => l.startsWith(`rename ${w.alias} -> `));
+  expect(moved).toBeDefined();
+  const parked = moved!.split(" -> ")[1]!;
+  return [moved!, `unlink ${parked}`];
+};
+/** 临时根下所有内容为 text 的普通文件(找外来文件被挪去了哪) */
+const filesWith = (w: World, text: string) => tree(w.root).filter((l) => l.includes(" #")).map((l) => l.split(" #")[0]!).filter((rel) => readFileSync(join(w.root, rel), "utf8") === text);
 
 /** 临时根下每一项的形态(软链带目标、文件带 inode),用来证明「没动」 */
 function tree(dir: string, base = dir): string[] {
@@ -96,7 +108,7 @@ describe("[验收线 1] 迁移前后是同一个 server", () => {
     await rollbackRuntimeAlias(input(w));
     expect(w.probeLog.length).toBeGreaterThan(0);
     expect(new Set(w.probeLog)).toEqual(new Set([`identify ${join(w.current, SOCK)}`, `identify ${join(w.alias, SOCK)}`]));
-    expect(new Set(w.fsLog.map((l) => l.split(" ")[0]))).toEqual(new Set(["kind", "resolve", "fileId", "entryId", "symlink", "unlink"]));
+    expect(new Set(w.fsLog.map((l) => l.split(" ")[0]))).toEqual(new Set(["kind", "resolve", "fileId", "entryId", "symlink", "rename", "unlink"]));
   });
 
   test("[验收线 1] 经别名看到的是另一个 server:拒绝并撤掉刚建的别名", async () => {
@@ -108,7 +120,8 @@ describe("[验收线 1] 迁移前后是同一个 server", () => {
     expect(codes(r)).toEqual(["identity-mismatch"]);
     expect(r.identityAfter).not.toBe(r.identityBefore);
     expect(kindOf(w.alias)).toBe("missing");
-    expect(writes(w)).toEqual([`symlink ${w.current} -> ${w.alias}`, `unlink ${w.alias}`]);
+    expect(writes(w)).toEqual([`symlink ${w.current} -> ${w.alias}`, ...removed(w)]);
+    expect(tree(w.root).filter((l) => !l.startsWith("claude-runtime"))).toEqual([]); // 暂存名也删干净了
   });
 
   test("[验收线 1] 已有别名但 server 身份对不上:拒绝,别名不是这次建的所以不删", async () => {
@@ -229,10 +242,10 @@ describe("[验收线 2] off / observe / on、冲突与回滚", () => {
     expect(back.identityAfter).toBe(up.identityBefore!);
     expect(await w.probe.identify(join(w.current, SOCK))).toBe(SERVER);
     expect(tree(w.root)).toEqual(before); // 别名没了,现存目录与 socket 逐项如初
-    expect(writes(w)).toEqual([`symlink ${w.current} -> ${w.alias}`, `unlink ${w.alias}`]);
+    expect(writes(w)).toEqual([`symlink ${w.current} -> ${w.alias}`, ...removed(w)]);
     const again = await rollbackRuntimeAlias(input(w));
     expect([again.status, again.changed]).toEqual(["absent", false]);
-    expect(writes(w)).toHaveLength(2);
+    expect(writes(w)).toHaveLength(3);
   });
 
   test("[验收线 2] 回滚期间别名被换成外来文件:拒绝,不删替代项", async () => {
@@ -283,6 +296,120 @@ describe("[验收线 2] off / observe / on、冲突与回滚", () => {
     expect([r.status, r.changed, codes(r)]).toEqual(["refused", true, ["identity-mismatch", "conflict-entry"]]);
     expect(realpathSync(w.alias)).toBe(w.current);
     expect(writes(w)).toEqual([`symlink ${w.current} -> ${w.alias}`]);
+  });
+
+  /** 在动别名的那一次写调用(rename / unlink 以别名为源)之前一刻,把别名换成外来文件 */
+  const swapRightBeforeWrite = (w: World) => {
+    let fired = false;
+    const swap = () => { if (!fired && kindOf(w.alias) === "symlink") { fired = true; rmSync(w.alias); writeFileSync(w.alias, "foreign important"); } };
+    const base = w.fs;
+    w.fs = {
+      ...base,
+      rename: async (from, to) => { if (from === w.alias) swap(); return base.rename(from, to); },
+      unlink: async (p) => { if (p === w.alias) swap(); return base.unlink(p); },
+    };
+    return () => fired;
+  };
+
+  test("[验收线 2] 回滚:核对已过、删之前一刻别名被换成外来文件:拒绝,替代项原样留在别名位置", async () => {
+    const w = world();
+    await applyRuntimeAlias(input(w));
+    const fired = swapRightBeforeWrite(w);
+    const r = await rollbackRuntimeAlias(input(w));
+    expect(fired()).toBe(true);
+    expect([r.status, r.changed, codes(r)]).toEqual(["refused", false, ["conflict-entry"]]);
+    expect(readFileSync(w.alias, "utf8")).toBe("foreign important");
+    expect(filesWith(w, "foreign important")).toEqual(["floka"]); // 没有被留在暂存名
+  });
+
+  test("[验收线 2] apply 失败清理:删之前一刻别名被换成外来文件:拒绝,如实报告已建过别名,替代项原样保留", async () => {
+    const w = world();
+    const real = w.probe;
+    w.probe = { identify: async (p) => (p.startsWith(w.alias) ? null : real.identify(p)) };
+    const fired = swapRightBeforeWrite(w);
+    const r = await applyRuntimeAlias(input(w));
+    expect(fired()).toBe(true);
+    expect([r.status, r.changed, codes(r)]).toEqual(["refused", true, ["identity-mismatch", "conflict-entry"]]);
+    expect(readFileSync(w.alias, "utf8")).toBe("foreign important");
+    expect(filesWith(w, "foreign important")).toEqual(["floka"]);
+  });
+
+  test("[验收线 2] 删前最后一次解析读到正确目标后、返回前别名被换成外来文件(r2 探针时序):外来文件不丢", async () => {
+    for (const op of ["rollback", "apply"] as const) {
+      const w = world();
+      if (op === "rollback") await applyRuntimeAlias(input(w));
+      const real = w.probe;
+      let probed = false;
+      w.probe = { identify: async (p) => { probed = true; return op === "apply" && p.startsWith(w.alias) ? null : real.identify(p); } };
+      const base = w.fs;
+      w.fs = {
+        ...base,
+        resolve: async (p) => {
+          const got = await base.resolve(p);
+          // 删前那次解析:旧实现解析别名本身,新实现解析暂存名(此时别名位置已空,外来文件落在空位上)
+          if (probed && !fired && (p === w.alias || p.includes("floka-unlink"))) {
+            fired = true;
+            rmSync(w.alias, { force: true });
+            writeFileSync(w.alias, "foreign important");
+          }
+          return got;
+        },
+      };
+      let fired = false;
+      const r = await (op === "rollback" ? rollbackRuntimeAlias(input(w)) : applyRuntimeAlias(input(w)));
+      expect([op, fired]).toEqual([op, true]);
+      // 换在取走之前 → 拒绝;换在取走之后 → 本库那条已删,外来文件在空位上。两种都不能丢外来文件、不能留暂存名
+      expect([op, readFileSync(w.alias, "utf8")]).toEqual([op, "foreign important"]);
+      expect([op, tree(w.root).filter((l) => l.includes("floka-unlink") || l.includes("->"))]).toEqual([op, []]);
+      if (op === "apply") expect(r.status).toBe("refused");
+    }
+  });
+
+  test("[验收线 2] 暂存后别名位置又被别人占了:不覆盖对方,外来项留在暂存名并在拒绝里写明", async () => {
+    const w = world();
+    await applyRuntimeAlias(input(w));
+    const base = w.fs;
+    w.fs = {
+      ...base,
+      rename: async (from, to) => {
+        if (from !== w.alias) return base.rename(from, to);
+        rmSync(w.alias);
+        writeFileSync(w.alias, "foreign important");
+        await base.rename(from, to);
+        writeFileSync(w.alias, "second comer");
+      },
+    };
+    const r = await rollbackRuntimeAlias(input(w));
+    expect([r.status, r.changed, codes(r)]).toEqual(["refused", true, ["conflict-entry"]]); // 外来项被挪过,如实报告
+    expect(readFileSync(w.alias, "utf8")).toBe("second comer");
+    const [parked] = filesWith(w, "foreign important");
+    expect(parked).toBeDefined();
+    expect(r.refusals![0]!.detail).toContain(join(w.root, parked!));
+  });
+
+  test("[验收线 2] 暂存后核出是外来目录 / 外来软链:同样原样放回", async () => {
+    for (const kind of ["dir", "symlink"] as const) {
+      const w = world();
+      await applyRuntimeAlias(input(w));
+      const other = join(w.root, "elsewhere");
+      mkdirSync(other);
+      const base = w.fs;
+      w.fs = {
+        ...base,
+        rename: async (from, to) => {
+          if (from === w.alias) {
+            rmSync(w.alias);
+            if (kind === "dir") { mkdirSync(w.alias); writeFileSync(join(w.alias, "keep"), "k"); } else symlinkSync(other, w.alias);
+          }
+          return base.rename(from, to);
+        },
+      };
+      const r = await rollbackRuntimeAlias(input(w));
+      expect([kind, r.status, codes(r)]).toEqual([kind, "refused", ["conflict-entry"]]);
+      if (kind === "dir") expect(readFileSync(join(w.alias, "keep"), "utf8")).toBe("k");
+      else expect(readlinkSync(w.alias)).toBe(other);
+      expect(tree(w.root).filter((l) => l.includes("floka-unlink"))).toEqual([]);
+    }
   });
 
   test("[验收线 2] 开关不是 on 不回滚;server 掉了不拦回滚", async () => {
