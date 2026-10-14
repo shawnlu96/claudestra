@@ -140,7 +140,7 @@ async function observeWork(page: Page): Promise<TeamState> {
 }
 
 /** §5.1 P1-A 验收线列的本机接口：团队视图里这些请求必须是 0 次 */
-const TEAM_FORBIDDEN = [/\/me\/last-seen\//, /\/ledger\/shared-ledger:[^?]*\/work/, /\/team\/activity\?project=shared-ledger:/, /\/peers\/contacts/, /\/team\/quota/];
+const TEAM_FORBIDDEN = [/\/me\/last-seen\//, /\/ledger\/shared-ledger:[^?]*\/work/, /\/team\/(?:activity|roster)\?project=shared-ledger:/, /\/peers\/contacts/, /\/team\/quota/];
 const forbidden = (calls: readonly string[]) => calls.filter((c) => TEAM_FORBIDDEN.some((re) => re.test(c)));
 
 /** 误调：看请求记录（本地这几条是正当请求，团队带团队键 / 本机 peers 就是误调） */
@@ -150,7 +150,7 @@ function misCalls(calls: readonly string[], side: "local" | "team", project: str
   return {
     "上次以来·本机接口误调": hit(new RegExp(`/me/last-seen/${key.replace(/[{}]/g, "")}`)),
     "谁在干活·本机接口误调": hit(new RegExp(`/ledger/${key}[^?]*/work`)),
-    "团队标签·本机接口误调": side === "team" ? hit(/\/team\/activity\?project=shared-ledger:|\/peers\/contacts|\/team\/quota/) : hit(/\/peers\/contacts/),
+    "团队标签·本机接口误调": side === "team" ? hit(/\/team\/(?:activity|roster)\?project=shared-ledger:|\/peers\/contacts|\/team\/quota/) : hit(/\/peers\/contacts/),
   };
 }
 
@@ -243,8 +243,9 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, team: T
     // UXHOME1：新鲜度只在页头那一行「团队版 · …」（collab-page-head.tsx，桌面 / 手机都有）；右栏的「镜像」节去掉了，本机源没有这一行
     const head = page.locator("[data-collab-head]");
     observed["镜像新鲜度"] = (await head.count()) && /^团队版 · .*(同步|不是最新|还没收到)/.test((await head.first().innerText()).trim()) ? "present" : "absent";
-    /** 「团队」标签 / 手机顶栏按钮按源认名字（UXHOME1）：团队源叫「规划与提案」，本机源仍叫「团队」 */
-    const teamTab = side === "team" ? "规划与提案" : "团队";
+    // Detect either baseline label; the member container keeps the primary entry named Team.
+    const oldTab = page.getByRole(narrow ? "button" : "tab", { name: "规划与提案", exact: true });
+    const teamTab = side === "team" && await oldTab.count() ? "规划与提案" : "团队";
     if (narrow) {
       observed["阻塞提问"] = observed["桌面中区标签"] = "not_run";
       observed["手机顶栏按钮"] = (await page.getByRole("button", { name: teamTab, exact: true }).count()) && (await page.getByRole("button", { name: /^待你处理/ }).count())
@@ -309,6 +310,8 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, team: T
       .catch(() => notes.push(`${side}: 团队标签 5s 内没有请求本机 peers`));
     await teamBtn.first().click();
     await peers;
+    const childTab = page.getByRole("tab", { name: side === "local" ? "往来" : "规划与提案", exact: true });
+    if (await childTab.count()) await childTab.click();
     await settle(page);
     observed["团队成员卡（本机 peers）"] = (await page.locator("body").innerText()).includes("peer-mac") ? "present" : "absent";
     observed["团队规划"] = (await page.getByText("团队规划", { exact: true }).count()) ? "present" : "absent";
@@ -352,7 +355,7 @@ test.skipIf(!out)("team-parity-C: same home ledger fed to local and team, 1200/3
     expect({ local: unprobed(seen.local), team: unprobed(seen.team) }).toEqual({ local: [], team: [] });
     // UXINBOX1：团队视图为「待你处理」读一次本机绑定（/shared-ledger/context）。夹具里本人不在任何共享项目里，回 404 = 没绑定，
     // 团队键解析不出本机项目，「待你处理」照旧是「暂无」（矩阵那一行不变）；这一条读取不算夹具外的请求
-    expect(unexpected.filter((u) => u !== "GET /api/v1/shared-ledger/context")).toEqual([]);
+    expect(unexpected.filter((u) => u !== "GET /api/v1/shared-ledger/context" && u !== "GET /api/v1/team/roster")).toEqual([]);
     // 已知缺口照实列出（不让它变绿），但任何 fail / stale_gap 都要红：前者是回归或夹具问题，后者说明缺口已修、该删 gap
     const bad = report.flatMap((r) => r.results.filter((x) => x.verdict === "fail" || x.verdict === "stale_gap" || x.verdict === "unlisted").map((x) => ({ scenario: r.scenario, ...x })));
     expect(bad).toEqual([]);

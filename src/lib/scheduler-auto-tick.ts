@@ -431,6 +431,7 @@ class Card {
     const back = await (await import("./recovery-fix-local-swap-tick.js")).trackLocalSwap(this.db, this.task, snap, plan, this.deps); // GATESWAP1
     if (back) return this.out("manual", back);
     await (await import("./scheduler-merge-handoff-private.js")).narrowPrivateMerge(this, plan); // PRIVLOCK2：私仓卡退回人工前收窄锁
+    await (await import("./scheduler-review-seat-wait.js")).trackReviewSeatWait(this.db, this.task, snap, plan, this.deps);
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);

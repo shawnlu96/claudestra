@@ -12,6 +12,7 @@ export type SkipEffectGate = "pace" | "manager" | "hook" | "s2v" | "featureless"
 export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<string, string>>>> = {
   /** card work run from a candidate loop that asks pace.skipTask (S2D) first */
   pace: {
+    "conv-ignored-build-artifacts-quarantine.ts": "proc=1 fs=4 vcs=1",
     "effect-count-refresh-git.ts": "fs=2 vcs=1", // EFFAUTO1: the merge driver's scratch-worktree count refresh + push, under the merge tick's skipTask
     "fix-strategy-lifecycle.ts": "proc=1",
     "fix-strategy-remote-branch.ts": "vcs=1",
@@ -89,6 +90,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-post-verify.ts": "ledger=2",
     "scheduler-recovery-ports.ts": "ledger=5",
     "scheduler-review-pm-tick.ts": "ledger=1",
+    "scheduler-review-seat-wait.ts": "ledger=1",
     "scheduler-review-swap-runtime.ts": "ledger=1 proc=1",
     "scheduler-sec-review.ts": "ledger=1",
     "scheduler-service.ts": "ledger=6 proc=1",
@@ -261,6 +263,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     // card-repo: gitOriginRepo reads the local origin (callers: autostart privateGate after the S2D2 feature hook, spec-resume / local-author
     // under pace)
     "card-repo.ts": "proc=1 vcs=1",
+    "center-request-budget.ts": "fs=1",
     // Project CI reads have no card; response writes use the guarded scheduler CLI, never the pass read connection.
     "ci-main-failure-response-runtime.ts": "ledger=1 fs=1 vcs=2",
     "dag-tools-steps.ts": "stmt=1",
@@ -308,14 +311,14 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-yield.ts": "fs=2",
     "shared-ledger-center-claims.ts": "fs=1",
     // N8B8: reachable through dag-write-scrub's read of the mirror state (readSharedLedgerMirrors); their writes belong to `shared-mirror` and the cron mirror loop
-    "shared-ledger-client-transport.ts": "fs=1",
+    "shared-ledger-client-transport.ts": "fs=2",
     "shared-ledger-contract-v2-transaction.ts": "stmt=2",
     "shared-ledger-mirror.ts": "fs=2",
     "shared-ledger-mode.ts": "stmt=1 fs=2",
     "sqlite-migrate.ts": "stmt=2",
     "state-file.ts": "fs=7",
     "sys-memory.ts": "proc=1",
-    "tmux-helper.ts": "stmt=3 proc=24 fs=1",
+    "tmux-helper.ts": "stmt=3 proc=23 fs=1",
     "unmanaged-archive.ts": "fs=4",
     "update-inflight.ts": "proc=2 fs=2",
     "usage-store.ts": "sql=32 stmt=44 fs=1",

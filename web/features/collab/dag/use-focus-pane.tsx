@@ -1,14 +1,17 @@
 "use client";
 /**
- * 子 DAG 标签在分区列表（focus-board.tsx）和现有画布之间二选一（team-project-SUBDAG4），use-dag-panes.tsx 只在 center 的 subdag 那一处调它。
+ * 子 DAG 复用 FocusBoard：桌面在分区列表和现有画布间切换，手机始终单列；use-dag-panes.tsx 的 center / mobile 共用同一模型。
  * 列表的条件：有产品 DAG、选中了一个 feature、它有快照、不在对比这个 feature、视图选的是列表。图视图 = 头部 + 原样的画布；其余情况（老 bridge 的
- * 多 feature 画布、版本对比）原样返回画布。看板与 SUBDAG3 共用同一份（use-dag-panes.tsx useBoard），这里不另发请求。
+ * 多 feature 画布、版本对比）原样返回画布。手机缺产品 DAG / feature 快照时返回 MobileDag；与 useBoard 共用看板，不另发请求。
+ * SUBDAG7：「图」= 聚焦图（dag-focus-layout.ts layoutFocus，不画 shelf），点它的小片进完整画布（view = full，头部「图」仍按下）；
+ * 聚焦图画不出（没有进行中）就直接是完整画布、已完成开到第 1 页。画布由 use-dag-panes.tsx 的 drawCanvas 画，这里只决定画哪张、点小片做什么。
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Tr } from "../collab-model";
 import type { TeamWorkBoard, WorkBoard } from "../work/work-types";
-import type { DagBoard } from "./dag-types";
-import { nodeId } from "./dag-layout";
+import type { DagBoard, FeatureCard } from "./dag-types";
+import { nodeId, type DagCanvas, type FoldKind } from "./dag-layout";
+import { layoutFocus } from "./dag-focus-layout";
 import { FocusBoard, FocusHead } from "./focus-board";
 import { focusT } from "./focus-i18n";
 import { subdagFocus, type FocusWork } from "./subdag-focus";
@@ -17,7 +20,7 @@ import s from "./focus-board.module.css";
 
 interface FocusPaneArgs {
   now: number;
-  /** 手机：子 DAG 仍是 MobileDag（use-dag-panes.tsx 的 mobile），列表不渲染，跳转要照画布的跳法展开 feature / ✓N */
+  /** 手机仍报告画布跳法，确保没有产品快照时 MobileDag 兜底也能展开跳转目标；FocusBoard 消费同一份 flash */
   narrow: boolean;
   hot: string | null;
   tr: Tr;
@@ -29,6 +32,9 @@ interface FocusPaneArgs {
   onVersions: (featureId: string) => void;
   onOwner: (agent: string, taskId: string | null) => void;
 }
+
+/** use-dag-panes.tsx 给的画法：shelf 缺省 = 收起着的 feature，聚焦图传空数组 */
+export type DrawCanvas = (canvas: DagCanvas, onFold: (featureId: string, kind?: FoldKind) => void, shelf?: readonly FeatureCard[]) => ReactNode;
 
 /** 团队看板的「在等合并」一栏并进在等：subdagFocus 按 working / waiting / todo 三栏找行，合并中的卡要算在等 */
 function focusWork(kind: "local" | "team", board: WorkBoard | TeamWorkBoard | null): FocusWork | null {
@@ -52,11 +58,28 @@ export function useFocusPane(p: FocusPaneArgs) {
   const onFlashed = useCallback((seq: number) => setSeen((x) => Math.max(x, seq)), []);
   const prefix = feature ? nodeId(feature.id, "") : null;
   const flash = prefix && ui.flash && ui.flash.seq > seen && ui.flash.id.startsWith(prefix) ? { key: ui.flash.id.slice(prefix.length), seq: ui.flash.seq } : null;
-  return function focusPane(canvas: ReactNode): ReactNode {
-    if (!feature || !model || ui.compare?.featureId === feature.id) return canvas;
-    const shared = { feature, view: ui.view, setView: ui.setView, onVersions: p.onVersions, ft, tr: p.tr };
-    if (ui.view === "graph") return <div className={s.pane}><FocusHead {...shared} model={model} />{canvas}</div>;
-    return <FocusBoard key={feature.id} {...shared} model={model} now={p.now} hot={p.hot} flash={flash} onFlashed={onFlashed}
+  const focusCanvas = useMemo(() => (feature ? layoutFocus(feature) : null), [feature]);
+  // 聚焦图画不出：每个 feature 只把已完成开到第 1 页一次，之后用户收起就算数
+  const fallback = listable && ui.view === "graph" && feature && !focusCanvas && ui.compare?.featureId !== feature.id ? feature.id : null;
+  const seeded = useRef<string | null>(null);
+  const { openDone } = ui;
+  useEffect(() => {
+    if (!fallback || seeded.current === fallback) return;
+    seeded.current = fallback;
+    openDone(fallback);
+  }, [fallback, openDone]);
+  const onFull = (id: string, kind?: FoldKind) => (kind === "more" ? ui.moreDone(id) : ui.toggleDone(id));
+  // 聚焦图和完整画布各挂一份视口（key 不同）：切换时按各自的画布重新摆放
+  const graph = (canvas: DagCanvas, draw: DrawCanvas) => (ui.view === "graph" && focusCanvas
+    ? <Fragment key="focus">{draw(focusCanvas, (id, kind) => ui.enterFull(id, kind === "rest"), [])}</Fragment>
+    : <Fragment key="full">{draw(canvas, onFull)}</Fragment>);
+  function render(full: () => ReactNode, narrow: boolean, drawGraph: () => ReactNode = full): ReactNode {
+    if (!feature || !model || (!narrow && ui.compare?.featureId === feature.id)) return full();
+    const shared = { feature, view: ui.view === "full" ? "graph" as const : ui.view, setView: ui.setView, onVersions: p.onVersions, ft, tr: p.tr };
+    if (!narrow && ui.view !== "list") return <div className={s.pane}><FocusHead {...shared} model={model} />{drawGraph()}</div>;
+    return <FocusBoard key={feature.id} {...shared} narrow={narrow} model={model} now={p.now} hot={p.hot} flash={flash} onFlashed={onFlashed}
       onNode={(key) => p.onNode(feature.id, key)} onOwner={p.onOwner} />;
-  };
+  }
+  return Object.assign((canvas: DagCanvas, draw: DrawCanvas) => render(() => draw(canvas, onFull), false, () => graph(canvas, draw)),
+    { narrow: (fallback: ReactNode) => render(() => fallback, true) });
 }

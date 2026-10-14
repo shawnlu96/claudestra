@@ -18,9 +18,9 @@ describe("没有阶段证据不回放", () => {
     const events = [red("stage", { to: "build" }), red("review"), red("verify")];
     const frames = replayFrames(events);
     expect(frames.map((f) => [f.text, f.stage, f.stageBefore])).toEqual([
-      ["推进阶段（目标阶段仅主场）", null, null],
-      ["审查（结论仅主场）", null, null],
-      ["线上验证（结果仅主场）", null, null],
+      ["推进阶段（目标阶段在任务所在的机器上）", null, null],
+      ["审查（结论在任务所在的机器上）", null, null],
+      ["线上验证（结果在任务所在的机器上）", null, null],
     ]);
     expect(hasStageEvidence(events)).toBe(false);
     expect(hasReplay(events)).toBe(false);

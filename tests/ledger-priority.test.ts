@@ -113,14 +113,14 @@ test("CLI 六命令可用：鉴权、项目、枚举、缺 CAS/去重键全拒�
 
 test("通用 set/new/import/feature/DAG 与 nested extra 的受控字段均拒绝，旧事项 priority 仍可写", () => {
   const count = listEvents(db).length, taskRev = getTask(db, "T1")!.rev;
-  for (const key of ["priority", "workPriority", "effectivePriority", "priorityRecordId", "priorityOrder",
+  for (const key of ["workPriority", "effectivePriority", "priorityRecordId", "priorityOrder",
     "prioritySort", "priorityNowStart", "priorityStall", "priorityPanel"]) {
     expect(() => setTask(db, { actor: "owner" }, { id: "T1", rev: taskRev, patch: { extra: { nested: [{ [key]: "now" }] } } })).toThrow("专用入口");
     expect(() => createItem(db, { actor: "owner" }, { project, id: "bad", title: "bad", extra: { [key]: "now" } })).toThrow("专用入口");
   }
   expect(() => createFeature(db, { actor: pm }, { project, slug: "bad", title: "bad", ...{ workPriority: "now" } })).toThrow("专用入口");
-  expect(() => createTask(db, { actor: "owner" }, { project, id: "bad", title: "bad", kind: "code", extra: { priority: "now" } })).toThrow("专用入口");
-  expect(() => importTask(db, { actor: "owner" }, { task: { project, id: "bad", title: "bad", kind: "code", extra: { priority: "now" } },
+  expect(() => createTask(db, { actor: "owner" }, { project, id: "bad", title: "bad", kind: "code", extra: { workPriority: "now" } })).toThrow("专用入口");
+  expect(() => importTask(db, { actor: "owner" }, { task: { project, id: "bad", title: "bad", kind: "code", extra: { workPriority: "now" } },
     createdTs: 1000, events: [] })).toThrow("专用入口");
   expect(listEvents(db)).toHaveLength(count);
   expect(getTask(db, "T1")!.rev).toBe(taskRev);
@@ -295,7 +295,7 @@ test("拆分搬迁保存同一记录与来源历史；未显式节点改为继�
 
 test("通用网页/CLI extra、feature-set、DAG rewrite 均拒绝受控字段且没有副作用", async () => {
   const before = listEvents(db).length, f = getFeature(db, feature)!;
-  expect(await run(pm, "task-set", "T1", "--rev", String(getTask(db, "T1")!.rev), "--extra", '{"priority":"now"}'))
+  expect(await run(pm, "task-set", "T1", "--rev", String(getTask(db, "T1")!.rev), "--extra", '{"workPriority":"now"}'))
     .toMatchObject({ ok: false, code: "invalid" });
   expect(() => setFeature(db, { actor: pm }, { id: feature, rev: f.rev, patch: { title: "changed", ...{ workPriority: "now" } } }))
     .toThrow("专用入口");

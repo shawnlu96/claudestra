@@ -9,6 +9,7 @@ import { pinNodes, type CardContext } from "./ledger-card-names.js";
 import type { DagReasonKind } from "./ledger-feature-schema.js";
 import type { DagNode } from "./ledger-feature.js";
 import { LedgerError } from "./ledger-store.js";
+import { rejectBlockedNodeIds } from "./shared-ledger-mirror-skip-id.js";
 import type { Stage } from "./ledger-stages.js";
 
 export type NodePhase = "idle" | "active" | "done";
@@ -76,7 +77,7 @@ export function planRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase, n
     return { ...n, ...(old?.cardSlug !== undefined ? { cardSlug: old.cardSlug } : {}),
       inheritedFrom: old && sameNode(old, n) ? cur.version : null };
   });
-  const nodes = cards ? pinNodes(cards, carried, (n) => !inherit.has(n.key)) : carried;
+  const nodes = cards ? rejectBlockedNodeIds(pinNodes(cards, carried, (n) => !inherit.has(n.key)), (n) => !inherit.has(n.key)) : carried;
   if (nodes.length === cur.nodes.length && nodes.every((n) => n.inheritedFrom !== null)) throw new LedgerError("invalid", "新版本和当前版本一模一样，不用重写");
   return { nodes, cancels, needsOwner: scopeChange ? ["声明改 feature 范围或大改机制（--scope-change）"] : [] };
 }

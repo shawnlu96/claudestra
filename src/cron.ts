@@ -24,6 +24,8 @@ import { sessionGuardArgs } from "./lib/agent-lifecycle-run.js";
 import { CRON_PROMPT_REFUSED, hasControlChar } from "./lib/flag-like.js";
 import { readJsonLenient, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
+import { noteDispatch } from "./lib/sentinel-pilot.js";
+import { sentinelPilotTick } from "./lib/sentinel-pilot-tick.js";
 import {
   tmuxSendLine,
   tmuxCapture,
@@ -252,7 +254,8 @@ async function executeOnExistingAgent(
 
   // 通知开始：**只在** reportChannel 跟 agent 自己 channel 不同的时候发，
   // 否则就是 agent 自己频道刷屏（agent 待会儿会自己回复，重复噪音）
-  const targetChannelId = await lookupAgentChannelId(tmuxName);
+  const target = await lookupAgent(tmuxName); // 同一次 list 里顺带拿会话 id（哨兵试点日报按它找会话记录）
+  const targetChannelId = target?.channelId;
   const notifyChannel = reportChannel !== targetChannelId ? reportChannel : undefined;
   await notifyTo(notifyChannel, `⏰ **定时任务开始**: ${job.name} → ${tmuxName}\n-# 💬 ${job.prompt.slice(0, 100)}`);
 
@@ -260,7 +263,7 @@ async function executeOnExistingAgent(
   const wall = await windowWallWait(tmuxTarget);
   if (wall) throw new Error(`${tmuxName} ${wallWaitRefusal(wall)}，这次没发`);
   // 先在台账里记「要发了」再发：重启后看到它就知道 prompt 可能已出去，不重发；记不上就不发
-  const noted = await runStore.update(run.key, (r) => { r.dispatchAttemptedAt = new Date().toISOString(); });
+  const noted = await runStore.update(run.key, (r) => noteDispatch(r, target, new Date().toISOString()));
   if (!noted) throw new Error("运行台账里没有这次认领，这次没发");
   await tmuxSendLine(tmuxTarget, job.prompt);
 
@@ -280,11 +283,10 @@ async function executeOnExistingAgent(
   return completed ? { status: "success" } : { status: "timeout", error: `超时 (${job.maxRuntime || 30} 分钟)` };
 }
 
-/** 从 registry 里根据 tmux 名（含 "agent-" 前缀）查该 agent 的 Discord channelId。 */
-async function lookupAgentChannelId(tmuxName: string): Promise<string | undefined> {
+/** 从 registry 里根据 tmux 名（含 "agent-" 前缀）查该 agent 的条目（channelId / sessionId）。 */
+async function lookupAgent(tmuxName: string): Promise<{ channelId?: string; sessionId?: string } | undefined> {
   try {
-    const agent = agentsFromList(await runManager("list")).find((a: any) => a.name === tmuxName);
-    return agent?.channelId;
+    return agentsFromList(await runManager("list")).find((a: any) => a.name === tmuxName);
   } catch (e) {
     // manager 坏了 ≠ agent 没有频道：说清楚，别让通知静默少一半
     console.error(`⚠️ cron 查 ${tmuxName} 的频道失败: ${(e as Error).message}`);
@@ -465,6 +467,9 @@ async function main() {
     kickRecovery(); // 启动后第一轮就是重启恢复扫描；之后每轮重试上一轮没收完的
     try {
       await tick();
+      // 哨兵试点日报（lib/sentinel-pilot-tick.ts）：同一分钟只跑一次，自己读开关，off 直接返回，不抛。
+      // 跟在 tick() 后面而不写进 tick 体内：tests/cron-audit-expression.test.ts 抠 tick 源码单独跑
+      void sentinelPilotTick(new Date());
     } catch (err) {
       console.error("Tick 错误:", err);
     }

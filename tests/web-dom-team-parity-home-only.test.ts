@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { setAppConfigForTest } from "../web/lib/app-config";
 import type { FeatureDetail, FeatureList } from "../web/lib/api/shared-ledger";
-import type { LedgerEventView, LedgerOverview, LedgerTaskView } from "../web/features/collab/collab-model";
+import type { LedgerEventView, LedgerOverview, LedgerTaskView, Tr } from "../web/features/collab/collab-model";
 import type { TaskDetail } from "../web/features/collab/collab-detail-model";
 import type { CollabHomeOnly, CollabSource } from "../web/features/collab/team-source";
 
@@ -273,10 +273,10 @@ for (const width of [1200, 390]) {
     expect(v.text()).toContain("中心暂未开放");
     expect(v.sec("参与者")).toContain("中心暂未开放");
     expect(v.sec("对它说")).toContain("这张卡在 其他成员的机器 上执行");
-    expect(v.text()).not.toContain("仅主场可见");
+    expect(v.text()).not.toContain("只在任务所在的机器上能看");
     // 规格全文：团队操作段既有的「全文仅在主场」
     expect(v.text()).toContain("全文只在任务所在的机器上");
-    expect(v.text()).not.toContain("回放仅主场");
+    expect(v.text()).not.toContain("回放要在任务所在的机器上看");
     expect(v.text()).not.toContain("回放这条任务");
     expect(v.text()).not.toContain("打开会话 →");
     expect(v.hasInput()).toBe(false);
@@ -288,22 +288,22 @@ for (const width of [1200, 390]) {
   test(`复现测试:脱敏事件 ${width} 宽只说类型 + 仅主场，同名成员代号不挂本机打开会话 / 对它说`, async () => {
     const v = await mount("redacted", width);
     const recent = v.sec("最近 3 件事") ?? "";
-    expect(recent).toContain("线上验证（结果仅主场）");
-    expect(recent).toContain("审查（结论仅主场）");
-    expect(recent).toContain("推进阶段（目标阶段仅主场）");
-    expect(recent).toContain("原文仅主场可见");
+    expect(recent).toContain("线上验证（结果在任务所在的机器上）");
+    expect(recent).toContain("审查（结论在任务所在的机器上）");
+    expect(recent).toContain("推进阶段（目标阶段在任务所在的机器上）");
+    expect(recent).toContain("原文只在任务所在的机器上能看");
     expect(recent).not.toContain("线上验证失败");
     expect(recent).not.toContain("线上验证通过");
     expect(v.text()).not.toContain("bait");
     expect(v.text()).not.toContain("undefined");
     // 脱敏审查不出空行：审查区块只有占位
-    expect(v.sec("审查")).toContain("仅主场可见");
+    expect(v.sec("审查")).toContain("只在任务所在的机器上能看");
     expect(v.sec("审查")).not.toMatch(/R\?|R\d/);
     // 三条脱敏事件没有阶段证据：不可回放
-    expect(v.buttons().find((b) => (b.textContent ?? "").includes("回放仅主场"))?.disabled).toBe(true);
+    expect(v.buttons().find((b) => (b.textContent ?? "").includes("回放要在任务所在的机器上看"))?.disabled).toBe(true);
     // 执行者代号照常展示，但不是本机打开会话凭据
     expect(v.sec("参与者")).toContain("dev");
-    expect(v.sec("参与者")).toContain("打开会话仅主场");
+    expect(v.sec("参与者")).toContain("会话要在任务所在的机器上打开");
     // 同名本机 agent 的模型不挂到团队执行者上
     expect(v.sec("参与者")).not.toContain("fixture-model");
     expect(v.text()).not.toContain("打开会话 →");
@@ -352,7 +352,7 @@ test("复现测试:英文模式团队占位走协作视图本地词表，不回�
   i18n.setLang("en");
   try {
     const t = await mount("team", 1200);
-    const team = { replay: t.buttons().some((b) => (b.textContent ?? "").includes("Replay at home only")), text: t.text() };
+    const team = { replay: t.buttons().some((b) => (b.textContent ?? "").includes("Replay on the machine running this task")), text: t.text() };
     await t.unmount();
     const r = await mount("redacted", 390);
     const red = r.text();
@@ -363,8 +363,8 @@ test("复现测试:英文模式团队占位走协作视图本地词表，不回�
     expect(team.replay).toBe(false);
     expect(team.text).toContain("Full text is only on the machine running the task");
     expect(team.text).not.toMatch(/仅主场/);
-    expect(red).toContain("Live verification (result at home only)");
-    expect(red).toContain("Open session at home only");
+    expect(red).toContain("Live verification (result on the machine running this task)");
+    expect(red).toContain("Open sessions on the machine running this task");
     expect(red).not.toMatch(/仅主场|线上验证/);
   } finally {
     i18n.setLang("zh");
@@ -455,4 +455,55 @@ test("ordinary history retains its default cross-session pagination", async () =
     expect(calls.slice(start).some((c) => c.includes("/history/older-session"))).toBe(true);
     expect(chatApi.state.messages.some((m) => m.content === "new transcript")).toBe(true);
   } finally { await v.unmount(); retiredFixture = false; archiveFailure = null; }
+});
+
+/** UXTERM4：脱敏事件八句与回放占位换成「任务所在的机器」的说法（kind、中文、英文） */
+const REDACTED_SENTENCES: [string, string, string][] = [
+  ["stage", "推进阶段（目标阶段在任务所在的机器上）", "Stage changed (target on the machine running this task)"],
+  ["review", "审查（结论在任务所在的机器上）", "Review (verdict on the machine running this task)"],
+  ["verify", "线上验证（结果在任务所在的机器上）", "Live verification (result on the machine running this task)"],
+  ["deliver", "交付（详情在任务所在的机器上）", "Delivered (details on the machine running this task)"],
+  ["deploy", "上线（详情在任务所在的机器上）", "Deployed (details on the machine running this task)"],
+  ["rollback", "回滚（详情在任务所在的机器上）", "Rolled back (details on the machine running this task)"],
+  ["decision", "拍板（详情在任务所在的机器上）", "Decision (details on the machine running this task)"],
+  ["note", "备注（详情在任务所在的机器上）", "Note (details on the machine running this task)"],
+];
+
+test("复现测试:八类脱敏事件中英文都说任务所在的机器，不说主场 / home", async () => {
+  const { eventLine } = await import(mod("collab/collab-detail-model.ts"));
+  const { useCollabT } = await import(mod("collab/collab-i18n.ts"));
+  i18n.setLang("en");
+  const host = doc.createElement("div");
+  doc.body.appendChild(host);
+  const root = createRoot(host as never);
+  try {
+    // 英文 tr 取协作视图组件实际用的那个（useCollabT），不另拼词表
+    let en: Tr | null = null;
+    const Grab = () => { en = useCollabT(); return null; };
+    await React.act(async () => root.render(React.createElement(Grab) as never));
+    const got = REDACTED_SENTENCES.map(([kind]) => [kind, eventLine(ev(kind, { redacted: true })), eventLine(ev(kind, { redacted: true }), en!)]);
+    expect(got).toEqual(REDACTED_SENTENCES);
+    expect(got.flat().join("\n")).not.toMatch(/主场|home/i);
+  } finally {
+    await React.act(async () => root.unmount());
+    host.remove();
+    i18n.setLang("zh");
+  }
+});
+
+test("复现测试:homeOnly 含 replay 且回放不了时，占位中英文说任务所在的机器，不说主场 / home", async () => {
+  const shown: string[] = [];
+  for (const lang of ["zh", "en"] as const) {
+    i18n.setLang(lang);
+    try {
+      const v = await mount("redacted", 390);
+      const b = v.panel()!.querySelector('[data-home-only="replay"]');
+      shown.push(`${b?.textContent ?? ""}|${b?.disabled}`);
+      await v.unmount();
+    } finally {
+      i18n.setLang("zh");
+    }
+  }
+  expect(shown).toEqual(["回放要在任务所在的机器上看|true", "Replay on the machine running this task|true"]);
+  expect(shown.join("\n")).not.toMatch(/主场|home/i);
 });

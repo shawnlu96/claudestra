@@ -1,4 +1,5 @@
 /** Untouched checkouts left by clean create failures can be reused; every uncertain case is preserved for PM. */
+import { CONV_BUILD_PATHS, coversBuildPath } from "./conv-ignored-build-artifacts.js";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -171,7 +172,7 @@ function diskChanges(worktree: string, files: Map<string, TreeFile>, allowed: Se
 }
 
 /** Status checks staged edits; the independent disk/object comparison catches ignored and index-hidden edits. */
-function* dirtyCheck(worktree: string, repo?: string): DirtyCheck<string | null> {
+function* dirtyCheck(worktree: string, repo?: string, buildPaths: readonly string[] = []): DirtyCheck<string | null> {
   try {
     const st = (yield ["-C", worktree, "status", "--porcelain", "-z", "--untracked-files=all"]);
     if (st.code !== 0) return `worktree ${worktree} 读不了工作区状态：${st.out}`.slice(0, 400);
@@ -182,10 +183,10 @@ function* dirtyCheck(worktree: string, repo?: string): DirtyCheck<string | null>
     if (changed.length) return dirty();
     const tree = (yield ["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
     if (tree.code !== 0) return `worktree ${worktree} 读不了 Git tree：${tree.out}`.slice(0, 400);
-    // Generated caches and .review-tmp/.review-env have no content provenance guarantee, even in review worktrees.
-    // Their contents deliberately hold retries for inspection; exempt are only the two exact dependency links and each
-    // submodule directory, which is not this checkout's blobs and is checked as a whole by its own Git below.
-    const files = treeFiles(tree.out), skip = new Set(allowed);
+    // Only a convergence candidate proof supplies buildPaths; generic callers retain the full disk walk.
+    const files = treeFiles(tree.out), skip = new Set([...allowed, ...buildPaths]);
+    if (buildPaths.some((p) => !CONV_BUILD_PATHS.some((b) => b.path === p))
+      || [...files.keys()].some((p) => coversBuildPath(buildPaths, p))) throw new Error("不能豁免未证明或 tracked 的构建路径");
     for (const [path, file] of files) {
       if (file.mode !== "160000") continue;
       files.delete(path); skip.add(path);
@@ -199,8 +200,8 @@ function* dirtyCheck(worktree: string, repo?: string): DirtyCheck<string | null>
 }
 
 /** Both callers execute the same disk, index and submodule proof; the sync driver keeps effect edges free of awaits. */
-export async function retryWorktreeDirty(git: Git, worktree: string, repo?: string): Promise<string | null> {
-  const check = dirtyCheck(worktree, repo);
+export async function retryWorktreeDirty(git: Git, worktree: string, repo?: string, buildPaths: readonly string[] = []): Promise<string | null> {
+  const check = dirtyCheck(worktree, repo, buildPaths);
   let step = check.next();
   while (!step.done) {
     try { step = check.next(await git([...step.value])); }
@@ -209,8 +210,8 @@ export async function retryWorktreeDirty(git: Git, worktree: string, repo?: stri
   return step.value;
 }
 
-export function retryWorktreeDirtySync(git: (args: string[]) => GitResult, worktree: string, repo?: string): string | null {
-  const check = dirtyCheck(worktree, repo);
+export function retryWorktreeDirtySync(git: (args: string[]) => GitResult, worktree: string, repo?: string, buildPaths: readonly string[] = []): string | null {
+  const check = dirtyCheck(worktree, repo, buildPaths);
   let step = check.next();
   while (!step.done) {
     try { step = check.next(git([...step.value])); }
@@ -220,7 +221,7 @@ export function retryWorktreeDirtySync(git: (args: string[]) => GitResult, workt
 }
 
 /** Same branch, exact initial SHA, no edits: a clean create failure may retry without deleting its prepared worktree. */
-export async function reusableAuthorWorktree(git: Git, p: Plan): Promise<string | null> {
+export async function reusableAuthorWorktree(git: Git, p: Plan, dirty?: () => Promise<string | null>): Promise<string | null> {
   const at = (args: string[]) => git(["-C", p.worktree, ...args]);
   const kept = `worktree ${p.worktree} 已存在`;
   const branch = await at(["symbolic-ref", "--quiet", "--short", "HEAD"]);
@@ -229,5 +230,5 @@ export async function reusableAuthorWorktree(git: Git, p: Plan): Promise<string 
   if ("reason" in start) return `${kept}，${start.reason}，保留并等待核对`;
   const head = await at(["rev-parse", "--verify", "HEAD"]);
   if (head.code !== 0 || head.out !== start.sha) return `${kept}，HEAD 不在本卡起点 ${start.sha} 上（有自己的提交或起点错误），保留并等待核对`;
-  return retryWorktreeDirty(git, p.worktree, p.repo);
+  return dirty ? dirty() : retryWorktreeDirty(git, p.worktree, p.repo);
 }

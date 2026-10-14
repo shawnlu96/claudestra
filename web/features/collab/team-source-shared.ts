@@ -59,11 +59,12 @@ const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", 
 export interface SharedSource extends CollabSource {
   /**
    * 最近一次转好的总览与原始数据（团队操作按卡号找回 feature）；fetchedAt = 各详情最近一次成功取回的时刻（读失败、429 停发不更新）；
-   * behindSince = 页面第一次观察到列表投影比显示详情新的时刻（列表与显示详情一致、或读成功追上时清掉），概览「落后列表」从它起算
+   * behindSince = 页面第一次观察到列表投影比显示详情新的时刻（列表与显示详情一致、或读成功追上时清掉），概览「落后列表」从它起算；
+   * failed = 这一轮结束时进过队列却没拉到（读失败、429 停发）、之后还没读成功的 feature（只读快照；排队的 waiting 不在里面，TEAMCNT1）
    */
   last(): {
     team: TeamOverview; list: FeatureList; details: ReadonlyMap<string, FeatureDetail>; waiting: ReadonlySet<string>;
-    fetchedAt: ReadonlyMap<string, number>; behindSince: ReadonlyMap<string, number>;
+    fetchedAt: ReadonlyMap<string, number>; behindSince: ReadonlyMap<string, number>; failed: ReadonlySet<string>;
   } | null;
   /** 提交成功 / 重读后立刻重拉 */
   poke(): void;
@@ -230,7 +231,7 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     const at = now(), prev = st.last?.behindSince;
     const behindSince = new Map(list.features.filter((f) => details.has(f.id) && listAhead(f, details.get(f.id)))
       .map((f) => [f.id, prev?.get(f.id) ?? at]));
-    return (st.last = { team: teamOverview(list, details, at, waiting, fetchedAt, behindSince), list, details, waiting, fetchedAt, behindSince });
+    return (st.last = { team: teamOverview(list, details, at, waiting, fetchedAt, behindSince), list, details, waiting, fetchedAt, behindSince, failed: new Set(failed) });
   };
   let rerun: Promise<Got> | null = null;
   const read = (): Promise<Got> => {
