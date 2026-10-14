@@ -45,10 +45,11 @@ function freshWorld() {
   for (const ov of Object.values(w.ledgers) as { tasks: { stage: string; metrics: { endTs?: number } }[] }[]) {
     for (const t of ov.tasks) if (t.metrics.endTs && NOW - t.metrics.endTs < 10 * H) t.metrics.endTs = NOW - 1000;
   }
-  return { ...w, agents: [...w.agents, { name: "master", displayName: "大总管", status: "active", cwd: "/repo", purpose: "", busy: false }] as object[], slow: false };
+  return { ...w, agents: [...w.agents, { name: "master", displayName: "大总管", status: "active", cwd: "/repo", purpose: "", busy: false }] as object[], slow: false, fp: FP, openC: "" };
 }
 let world = freshWorld();
 const calls: string[] = [];
+const fpCalls: string[] = [];
 const aborted: string[] = [];
 const live = new Set<() => Promise<void>>();
 const realFetch = globalThis.fetch, realFp = machines.currentFp;
@@ -60,7 +61,7 @@ beforeAll(async () => {
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
   doc = (globalThis as unknown as { document: Doc }).document;
   win = (globalThis as unknown as { window: Win }).window;
-  machines.currentFp = () => FP;
+  machines.currentFp = () => world.fp;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
     const path = url.pathname.replace(/^\/m\/[^/]+/, "");
@@ -69,6 +70,9 @@ beforeAll(async () => {
     if (path === "/app-config.json") return json({ mode: "direct", fp: FP, machineName: "fixture", version: "" });
     if (path === "/api/v1/shared-ledger/context") return json({ identities: [] });
     const api = path.startsWith("/api/v1/") ? path.slice("/api/v1".length) : null;
+    fpCalls.push(`@${world.fp} ${path}`);
+    // 换机器：openC 那台上 proj-c 的台账读得到（同一个项目 id）
+    if (api === "/ledger/proj-c" && world.fp === world.openC) return json(world.ledgers["proj-b"]);
     // 慢台账：在途时收起侧栏条，看请求有没有被中止
     if (api && world.slow && /^\/ledger\//.test(api)) {
       const signal = init?.signal;
@@ -95,6 +99,7 @@ afterEach(async () => {
   await React.act(async () => ui.resetLedgers());
   world = freshWorld();
   calls.length = 0;
+  fpCalls.length = 0;
   aborted.length = 0;
 });
 
@@ -284,3 +289,21 @@ test("[回归] 页面版、整页、展开的侧栏条同时挂着也只跑一�
   expect(ledgerCalls().sort()).toEqual(once);
   await v.unmount();
 });
+
+test("[回归] 换机器：台账读取按机器隔离——机器 A 上 proj-c 拒绝访问不挡机器 B 同名项目，A 的数据也不当 B 的初值", async () => {
+  const a = await mount("main");
+  await until(() => v_stuck(a) === 3 && fpCalls.includes("@mac-a /api/v1/ledger/proj-c"), "machine A reads");
+  await tick(50);
+  await a.unmount();
+  world.fp = "mac-b";
+  world.openC = "mac-b";
+  world.slow = true;
+  const b = await mount("main");
+  // 机器 B 的读还在途：不出机器 A 的卡住行
+  expect(v_stuck(b)).toBe(0);
+  await until(() => fpCalls.includes("@mac-b /api/v1/ledger/proj-c"), "machine B reads proj-c");
+  await until(() => b.all("[data-now-stuck-row^='proj-c/']").length > 0, "proj-c readable on machine B");
+  await b.unmount();
+});
+
+function v_stuck(v: { all(s: string): El[] }) { return v.all("[data-now-stuck-row]").length; }

@@ -8,6 +8,7 @@
  */
 import { useEffect, useSyncExternalStore } from "react";
 import { ApiError } from "@/lib/api/client";
+import { machines } from "@/lib/machines";
 import { fetchLedger, followCollabEvents } from "@/lib/api/ledger";
 import { fetchProductBoard, type ProductBoard } from "@/lib/api/product-board";
 import { setLedgerAccess } from "../collab/collab-cache";
@@ -64,44 +65,58 @@ async function follow(signal: AbortSignal, onLedger: (project: string) => void):
  * 一份读取，大家共用：页面版（空状态主区、「整页」盖出来的那层）和展开的侧栏条可能同时挂着，
  * 各自起轮询就成了每项目每分钟读好几遍。这里按「谁在看」登记，所有在看的合起来只跑一套轮询 + 事件流，
  * 拒绝访问的记录也只有一份；最后一个不看了（收起 / 卸载）才中止。
+ * 数据与拒绝访问的记录按机器分开放（键 = 机器指纹，同 collab-cache）：同名项目在别的机器上是另一份台账，
+ * 换机器时重起读取，旧机器在途的回包只落回旧机器那份，不当新机器的数据。
  */
+interface Slot { data: TodayLedgers; denied: Set<string> }
 const shared = {
-  data: EMPTY,
-  denied: new Set<string>(),
+  slots: new Map<string, Slot>(),
   listeners: new Set<() => void>(),
   users: new Map<object, readonly string[]>(),
   run: null as { key: string; stop: () => void } | null,
 };
+const machineOf = () => machines.currentFp() ?? "local";
 
-function update(fn: (d: TodayLedgers) => TodayLedgers) {
-  shared.data = fn(shared.data);
+function slotOf(fp: string): Slot {
+  let s = shared.slots.get(fp);
+  if (!s) shared.slots.set(fp, (s = { data: EMPTY, denied: new Set() }));
+  return s;
+}
+
+const snapshot = () => shared.slots.get(machineOf())?.data ?? EMPTY;
+
+function update(fp: string, fn: (d: TodayLedgers) => TodayLedgers) {
+  const s = slotOf(fp);
+  s.data = fn(s.data);
   for (const l of shared.listeners) l();
 }
 
 function subscribe(l: () => void): () => void {
   shared.listeners.add(l);
-  return () => { shared.listeners.delete(l); };
+  const offMachines = machines.subscribe(() => { sync(); l(); });
+  return () => { shared.listeners.delete(l); offMachines(); };
 }
 
-/** 跑一套：立即读一轮，可见时 60 秒一轮，ledger 事件防抖只重读那一个项目；返回中止 */
-function start(ids: readonly string[]): () => void {
+/** 跑一套（只对 fp 这台机器）：立即读一轮，可见时 60 秒一轮，ledger 事件防抖只重读那一个项目；返回中止 */
+function start(fp: string, ids: readonly string[]): () => void {
   const ctl = new AbortController(), signal = ctl.signal;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const denied = slotOf(fp).denied;
   const read = async (id: string) => {
-    if (shared.denied.has(id) || signal.aborted) return;
+    if (denied.has(id) || signal.aborted) return;
     const got = await readOne(id, signal);
-    if (signal.aborted) return;
+    if (signal.aborted || machineOf() !== fp) return;
     if (got.denied) {
-      shared.denied.add(id);
+      denied.add(id);
       setLedgerAccess(id, "no");
     }
-    update((d) => {
+    update(fp, (d) => {
       const overviews = new Map(d.overviews), boards = new Map(d.boards);
       if (got.ov) overviews.set(id, got.ov);
       if (got.denied) overviews.delete(id);
       if (got.board) boards.set(id, got.board);
       else if (got.board === null || got.denied) boards.delete(id);
-      return { overviews, boards, denied: new Set(shared.denied) };
+      return { overviews, boards, denied: new Set(denied) };
     });
   };
   let last = 0;
@@ -115,7 +130,7 @@ function start(ids: readonly string[]): () => void {
   // 从后台回来：上一轮已经超过一分钟才补一轮，不在来回切标签时多读
   const offShow = pageVisibility.onShow(() => { if (Date.now() - last >= LEDGER_POLL_MS) all(); });
   void follow(signal, (project) => {
-    if (!ids.includes(project) || shared.denied.has(project)) return;
+    if (!ids.includes(project) || denied.has(project)) return;
     clearTimeout(timers.get(project));
     timers.set(project, setTimeout(() => void read(project), LEDGER_EVENT_DEBOUNCE_MS));
   });
@@ -127,26 +142,27 @@ function start(ids: readonly string[]): () => void {
   };
 }
 
-/** 按在看的人合起来的项目集重排：集合没变就不动（第二个人来看不会多读一轮），变了才重起，没人看就中止 */
+/** 按在看的人合起来的项目集 + 当前机器重排：都没变就不动（第二个人来看不会多读一轮），变了才重起，没人看就中止 */
 function sync() {
   const ids = [...new Set([...shared.users.values()].flat())];
-  const key = ids.join("\n");
+  const fp = machineOf();
+  const key = `${fp}\n${ids.join("\n")}`;
   if (shared.run?.key === key) return;
   shared.run?.stop();
-  shared.run = ids.length ? { key, stop: start(ids) } : null;
+  shared.run = ids.length ? { key, stop: start(fp, ids) } : null;
 }
 
-/** 测试用：中止并清空共用的读取（拒绝访问的记录也清掉） */
+/** 测试用：中止并清空共用的读取（各机器的数据与拒绝访问的记录都清掉） */
 export function resetTodayLedgersForTest() {
   shared.users.clear();
   shared.run?.stop();
   shared.run = null;
-  shared.denied.clear();
-  update(() => EMPTY);
+  shared.slots.clear();
+  for (const l of shared.listeners) l();
 }
 
 export function useTodayLedgers(projectIds: readonly string[], on: boolean): TodayLedgers {
-  const data = useSyncExternalStore(subscribe, () => shared.data, () => EMPTY);
+  const data = useSyncExternalStore(subscribe, snapshot, () => EMPTY);
   const key = projectIds.join("\n");
   useEffect(() => {
     if (!on) return;
