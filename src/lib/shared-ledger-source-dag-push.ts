@@ -20,6 +20,7 @@ import { scrubSharedLedger, SharedLedgerScrubError, type SharedLedgerScrubContex
 import { parseSourceDagUpload, type SourceDagUpload, type SourceDagUploadOutcome } from "./shared-ledger-contract-source-dag.js";
 import { sharedLedgerDagVersion, sourceDagScrubView } from "./shared-ledger-source-dag-push-version.js";
 import { readSharedLedgerMirrors } from "./shared-ledger-mirror.js";
+import { mirrorSkipBinding } from "./shared-ledger-mirror-skip.js";
 
 declare module "./shared-ledger-projector.js" {
   interface MirrorEntry {
@@ -51,10 +52,10 @@ const bindingsDigest = (bindings: readonly { nodeKey: string; taskId: string }[]
   .update(canonicalJson([...bindings].sort((a, b) => a.nodeKey.localeCompare(b.nodeKey)).map((b) => [b.nodeKey, b.taskId]))).digest("hex");
 
 /** Bindings digest of the local version `version`; null when it cannot be read (nothing to compare, nothing is sent). */
-function localBindingsDigest(db: Database, featureId: string, entry: MirrorEntry, version: number): string | null {
+function localBindingsDigest(db: Database, featureId: string, entry: MirrorEntry, version: number, scrub: SharedLedgerScrubContext): string | null {
   const feature = getFeature(db, featureId);
   const dag = feature && feature.project === entry.localProject ? getDagVersion(db, featureId, version) : null;
-  return dag ? bindingsDigest(sharedLedgerDagVersion(dag, effectiveNodes(db, dag)).bindings) : null;
+  return dag ? bindingsDigest(sharedLedgerDagVersion(dag, effectiveNodes(db, dag), {}, mirrorSkipBinding(entry.localProject, scrub)).bindings) : null;
 }
 
 /** The current local version as an upload; bindings carry local task ids (= sourceTaskId). Throws SharedLedgerScrubError when blocked. */
@@ -63,7 +64,7 @@ function buildSourceDagUpload(db: Database, featureId: string, entry: MirrorEntr
   const dag = feature && feature.project === entry.localProject ? getDagVersion(db, featureId, feature.currentVersion) : null;
   if (!dag) throw new Error("source dag unavailable");
   const original: SourceDagUpload = { schemaVersion: 1, projectId: entry.projectId, featureId: entry.centerFeatureId,
-    sourceInstanceId: entry.sourceInstanceId, dag: sharedLedgerDagVersion(dag, effectiveNodes(db, dag)) };
+    sourceInstanceId: entry.sourceInstanceId, dag: sharedLedgerDagVersion(dag, effectiveNodes(db, dag), {}, mirrorSkipBinding(entry.localProject, scrub)) };
   // Scrub the untruncated text first (as the export does): a cut could leave a secret fragment below every detector.
   scrubSharedLedger(sourceDagScrubView(original), (value) => value, scrub);
   const limit = sharedLedgerExportLimits();
@@ -88,7 +89,7 @@ export async function pushSourceDagMirror(db: Database, featureId: string, entry
   const known = entry.dagVersion ?? 0, rebind = local === known;
   if (local === 0 || local < known) return entry;
   if (rebind) {
-    const digest = localBindingsDigest(db, featureId, entry, local);
+    const digest = localBindingsDigest(db, featureId, entry, local, deps.scrub);
     const retryDropped = (entry.dagDroppedBindings ?? 0) > 0 && now - (entry.dagUploadedAt ?? 0) >= SOURCE_DAG_DROPPED_RETRY_MS;
     if (digest === null || (digest === entry.dagBindings && !retryDropped)) return entry;
   }

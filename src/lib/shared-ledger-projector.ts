@@ -4,7 +4,7 @@
  * so a failed push never moves the watermark (docs/design/shared-ledger.md §3.2).
  */
 import { budgetWouldSkip, centerRequestBudgetMode } from "./center-request-budget.js";
-import type { RecoveryMode } from "./recovery-policy.js";
+import type { RecoveryMode, RecoveryPolicyPort } from "./recovery-policy.js";
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./ask-bind.js";
@@ -17,6 +17,7 @@ import { parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.j
 import { record } from "./shared-ledger-contract-schema.js";
 import type { SourceDagClient } from "./shared-ledger-source-dag-push.js";
 import { sharedLedgerTaskProjection } from "./shared-ledger-task-projection.js";
+import { mirrorSkipIds } from "./shared-ledger-mirror-skip.js";
 
 /** Summary / member code reviewed at import time; never re-derived from local spec files or nicknames. */
 export interface MirrorTaskMeta { specSummary: string; specDigest: string | null; assigneeCode: string | null }
@@ -38,6 +39,8 @@ export interface MirrorEntry {
   /** N8M source-DAG upload, kept apart from the projection fields above (absent in older files = 0 / null). */
   dagVersion?: number; dagUnsupportedUntil?: number | null;
   dagError?: { reason: string; at: number; failures: number; nextAttemptAt: number } | null;
+  /** mirrorSkipBlockedId on: cards the last confirmed push left out because their id is blocked (shared-ledger-mirror-skip.ts). */
+  skippedTasks?: string[];
 }
 export interface MirrorClient { projection(input: SharedLedgerProjection): Promise<SharedLedgerProjectionResult>; sourceDag?: SourceDagClient["sourceDag"] }
 export type PushOutcome =
@@ -67,10 +70,10 @@ function ownTasks(db: Database, featureId: string, localProject: string) {
 export const mirrorTaskHeads = (db: Database, featureId: string, localProject: string) =>
   ownTasks(db, featureId, localProject).flatMap((t) => t.headSHA ? [t.headSHA.toLowerCase()] : []);
 
-/** Builds the full current task set at `seq`; field rules in shared-ledger-task-projection.ts. */
+/** Builds the full current task set at `seq` without `skip` (their edges go too); field rules in shared-ledger-task-projection.ts. */
 function mirrorTaskProjections(db: Database, featureId: string, entry: Pick<MirrorEntry, "localProject" | "sourceInstanceId" | "taskMeta">,
-  seq: number, commits: ReadonlySet<string>): SharedLedgerTaskProjection[] {
-  const tasks = ownTasks(db, featureId, entry.localProject), ids = new Set(tasks.map((t) => t.id));
+  seq: number, commits: ReadonlySet<string>, skip: ReadonlySet<string>): SharedLedgerTaskProjection[] {
+  const tasks = ownTasks(db, featureId, entry.localProject).filter((t) => !skip.has(t.id)), ids = new Set(tasks.map((t) => t.id));
   const lastSeq = new Map((db.prepare("SELECT target, MAX(seq) AS seq FROM events WHERE project = ? GROUP BY target")
     .all(entry.localProject) as { target: string; seq: number }[]).map((r) => [r.target, r.seq]));
   const deps = listDeps(db, entry.localProject);
@@ -98,7 +101,11 @@ export function mirrorErrorSummary(error: unknown): string {
   return "center unavailable; outcome unconfirmed";
 }
 
-export interface PushDeps { client: MirrorClient; scrub: SharedLedgerScrubContext; now: number; budgetMode?: RecoveryMode; stateDir?: string }
+export interface PushDeps {
+  client: MirrorClient; scrub: SharedLedgerScrubContext; now: number; budgetMode?: RecoveryMode; stateDir?: string;
+  /** mirrorSkipBlockedId's policy (real: the file-backed recoveryPolicy). */
+  skipPolicy?: RecoveryPolicyPort;
+}
 function featureSeq(db: Database, featureId: string, project: string): number {
   const ids = ownTasks(db, featureId, project).map(t => t.id);
   return (db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ? AND target IN (SELECT value FROM json_each(?))")
@@ -113,7 +120,7 @@ export async function pushSharedLedgerMirror(db: Database, featureId: string, en
       outcome: { kind: "failed" as const, error: text } };
   };
   let ownSeq = 0;
-  let seq: number, current: SharedLedgerTaskProjection[];
+  let seq: number, current: SharedLedgerTaskProjection[], skip: ReadonlySet<string>;
   try {
     const global = (db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq;
     if (global < entry.watermark) throw new Error("local ledger behind center watermark");
@@ -128,7 +135,9 @@ export async function pushSharedLedgerMirror(db: Database, featureId: string, en
     }
     seq = mode === "on" && !heartbeat ? Math.max(entry.watermark, ownSeq) : global;
     if (seq === entry.watermark) return { entry, outcome: { kind: "idle", seq } };
-    current = mirrorTaskProjections(db, featureId, entry, seq, deps.scrub.commits ?? new Set());
+    skip = mirrorSkipIds(db, entry.localProject, featureId, ownTasks(db, featureId, entry.localProject).map((t) => t.id), deps.scrub,
+      { now: deps.now, policy: deps.skipPolicy });
+    current = mirrorTaskProjections(db, featureId, entry, seq, deps.scrub.commits ?? new Set(), skip);
   } catch (error) { return fail(error, entry.snapshot); }
   const ids = new Set(current.map((t) => t.sourceTaskId));
   const build = (mode: "snapshot" | "delta", previousSourceSeq: number): SharedLedgerProjection => ({
@@ -157,6 +166,6 @@ export async function pushSharedLedgerMirror(db: Database, featureId: string, en
   }
   const fingerprints = Object.fromEntries(current.map((t) => [t.sourceTaskId, fingerprint(t)]));
   return { entry: { ...entry, watermark: seq, featureWatermark: ownSeq, budgetIdleAt: deps.now, snapshot: false, fingerprints: { ...entry.fingerprints, ...fingerprints },
-    lastPushAt: deps.now, lastPushSeq: seq, lastError: null, lastErrorAt: null, failures: 0, nextAttemptAt: 0 },
+    lastPushAt: deps.now, lastPushSeq: seq, lastError: null, lastErrorAt: null, failures: 0, nextAttemptAt: 0, skippedTasks: skip.size ? [...skip] : undefined },
   outcome: { kind: "pushed", mode: sent.mode, seq, tasks: sent.tasks.length, events: sent.events.length } };
 }
