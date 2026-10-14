@@ -49,7 +49,7 @@ import { collectSessions, visibleSessions } from "./sessions-inventory.js";
 import { archivedOnlyAgent, locateSessionFile, masterSessionHidden } from "./session-file.js";
 import { inboundFor } from "./inbound-event.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
-import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus, lastEventSeq } from "./event-bus.js";
+import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
 import { ARCHIVE_ROOT, realpathWithin } from "../lib/session-archive.js";
 import { formatTool, formatToolDetail, agentNameForChannel } from "./jsonl-watcher.js";
@@ -680,9 +680,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
     const { activeBgTasksFor } = await import("./bg-activity-watcher.js");
     const name = agentParam.startsWith("agent-") ? agentParam : `agent-${agentParam}`;
-    // 两种名字形态都试（master/裸名兼容）；seq 与快照同步取（flush 写 recent 与发 bg 增量也同步）：seq ≤ 它的增量已在 lines 里，web 据此判重
+    // 两种名字形态都试（master/裸名兼容）
     const tasks = [...activeBgTasksFor(name), ...(name !== agentParam ? activeBgTasksFor(agentParam) : [])];
-    return apiJson(200, { ok: true, tasks, seq: lastEventSeq() });
+    return apiJson(200, { ok: true, tasks });
   }
   // GET /api/v1/history/search —— 跨 agent 跨 session 聊天记录全文搜索。
   //   ?q=<词，≥2 字符>&limit=<1..100，默认 30>&agent=<可选，只搜这个 agent>

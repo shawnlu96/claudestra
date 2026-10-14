@@ -1,7 +1,6 @@
 /**
  * SYN-1 验收 4：连流补拉（/pending、/bg-tasks）不再挡实时事件——聊天类实时事件先放，快照到了再按 ReplayMerge 合入，
- * 实时已说过的挂起态不拿快照往回拨；后台任务的实时增量排在快照后面放（PR1485-r1 P1：update 先到会丢 shell 的类型 / 标题 / 旧输出），
- * 已含在快照里的（seq ≤ 快照 seq）不再放（PR1485-r2 P1：否则同一行出现两次）。
+ * 实时已说过的挂起态不拿快照往回拨；后台任务的实时增量排在快照后面放（PR1485-r1 P1：update 先到会丢 shell 的类型 / 标题 / 旧输出）。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { setAppConfigForTest } from "../web/lib/app-config";
@@ -72,18 +71,19 @@ test("快照没回来，实时事件照样先到；快照回来后只补实时�
 });
 
 /** 实时 bg-update 先于 /bg-tasks 快照到：store 里的卡要是快照给的类型 / 标题，旧输出在前、实时增量在后 */
-async function updateBeforeSnapshot(items: string[]) {
+async function updateBeforeSnapshot(items: string[], snapLines = ["old 1", "old 2"], coverSeq = false) {
   const store = new ChatStore();
   const stream = await openAgentEventStream("a", { lang: "zh" });
   const reader = stream.getReader();
   const progress = { startedTs: 1, lastTs: 2 };
-  push(ev("bg_task_update", { id: "sh1", kind: "shell", items, progress }));
+  const up = ev("bg_task_update", { id: "sh1", kind: "shell", items, progress });
+  push(up);
   push(ev("assistant_text", { text: "live chat" })); // 聊天事件不等快照
   const first = await next(reader);
   expect(first).toMatchObject({ t: "text", text: "live chat" });
   processStreamEvent(store, first);
   answerPending({});
-  answerBg({ tasks: [{ id: "sh1", kind: "shell", title: "npm run build", lines: ["old 1", "old 2"] }] });
+  answerBg({ tasks: [{ id: "sh1", kind: "shell", title: "npm run build", lines: snapLines }], ...(coverSeq ? { seq: up.seq } : {}) });
   const got: WebStreamEvent[] = [];
   while (got.length < 4) got.push(await next(reader));
   expect(got.map((e) => e.t)).toEqual(["bg-start", "bg-update", "bg-sync", "bg-update"]); // 快照在前，实时增量在后
@@ -106,46 +106,13 @@ test("bg-update 先于快照（items 为空，只带进度）：任务不丢", a
   expect(cards[0].lines).toEqual(["old 1", "old 2"]);
 });
 
-/** 快照与在途 bg 增量重叠（PR1485-r2 P1）：bridge 先写 recent 再发 update，快照可能已含这条——按快照带的 seq 判，不按文本 */
-test("已含在快照里的 bg-update 先到被扣：不重复；快照之后同文本的新行照常追加", async () => {
-  const store = new ChatStore();
-  const reader = (await openAgentEventStream("a", { lang: "zh" })).getReader();
-  const covered = ev("bg_task_update", { id: "sh1", kind: "shell", items: ["new"] });
-  push(covered);
-  push(ev("assistant_text", { text: "live chat" }));
-  processStreamEvent(store, await next(reader)); // 聊天先到，bg 被扣
-  answerPending({});
-  answerBg({ tasks: [{ id: "sh1", kind: "shell", title: "build", lines: ["old", "new"] }], seq: covered.seq });
-  const got: WebStreamEvent[] = [];
-  while (got.at(-1)?.t !== "bg-sync") got.push(await next(reader));
-  push(ev("bg_task_update", { id: "sh1", kind: "shell", items: ["new"] })); // 快照之后真的又输出了一行 new
-  push(ev("assistant_text", { text: "end" }));
-  while (got.at(-1)?.t !== "text") got.push(await next(reader));
-  expect(got.map((e) => e.t)).toEqual(["bg-start", "bg-update", "bg-sync", "bg-update", "text"]);
-  for (const e of got) processStreamEvent(store, e);
-  expect(store.state.bgTasks[0].lines).toEqual(["old", "new", "new"]);
-  await reader.cancel();
-});
-
-test("快照先到、已含在快照里的 bg 帧后到：照样丢；不在快照里的任务（快照前已收尾）照放", async () => {
-  const store = new ChatStore();
-  const reader = (await openAgentEventStream("a", { lang: "zh" })).getReader();
-  const late = ev("bg_task_update", { id: "sh1", kind: "shell", items: ["new"] }); // bridge 已写进 recent，帧还在路上
-  const gone = ev("bg_task_completed", { id: "sa9", kind: "subagent", status: "done", durationMs: 5 });
-  push(ev("assistant_text", { text: "live chat" }));
-  processStreamEvent(store, await next(reader)); // 等补拉请求真正发出去
-  answerPending({});
-  answerBg({ tasks: [{ id: "sh1", kind: "shell", title: "build", lines: ["old", "new"] }], seq: gone.seq });
-  const got = [await next(reader), await next(reader), await next(reader)];
-  expect(got.map((e) => e.t)).toEqual(["bg-start", "bg-update", "bg-sync"]);
-  push(late);
-  push(gone);
-  push(ev("assistant_text", { text: "end" }));
-  got.push(await next(reader)); got.push(await next(reader));
-  expect(got.slice(3)).toMatchObject([{ t: "bg-done", id: "sa9" }, { t: "text", text: "end" }]);
-  for (const e of got) processStreamEvent(store, e);
-  expect(store.state.bgTasks.find((t) => t.id === "sh1")?.lines).toEqual(["old", "new"]);
-  await reader.cancel();
+/** 超过 100 行的一次增量先到被扣：快照只留最近 100 行，增量照原样接在快照后面，开头的行不能被丢（r3 bg-cover-tail-loss）。
+ *  验收修订 A：bg 不做并发合并，先快照后增量；与快照重叠的行可能出现两次，但不丢 */
+test("超过 100 行的 bg-update 先于快照：整条增量都接在快照后，开头不丢", async () => {
+  const items = Array.from({ length: 120 }, (_, i) => `line-${i + 1}`);
+  const cards = await updateBeforeSnapshot(items, items.slice(20), true); // 快照带 seq 也不能拿它整条丢增量
+  expect(cards[0]).toMatchObject({ kind: "shell", title: "npm run build" });
+  expect(cards[0].lines.slice(-120)).toEqual(items);
 });
 
 test("ReplayMerge：实时已有 ask / ask-cleared 时快照里的 ask 丢弃；bg 快照原样放行（顺序由流排队保证）", () => {

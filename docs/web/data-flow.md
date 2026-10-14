@@ -56,7 +56,7 @@
   `: connected`，之后 5s 一 ping）。本地按 `agent ∈ {name, agent-name}` 过滤、翻译成协议 v1（`agent_status → status/done`、`tool_start → tool`、
   `assistant_text → text`、`chat_message(out) → reply`、`chat_message(in) → user-in`、`question → ask`、`bg_task_* → bg-*`、
   `chat_held → user-in + held`：本人的发言被押在对方这一轮之后 / 押后作罢，气泡下标「排队中」，送达的回声摘掉，`features/chat/held-echo.ts`），每条带 `eid = bridge seq`
-  供断点重放；连流即补拉 `/agents/:name/pending`（thinking / compacting / 未答 AUQ）与 `/bg-tasks`——不挡聊天类实时事件，快照到了按 `ReplayMerge` 合入（实时已说过的挂起态不往回拨）；实时 bg-* 是快照之上的增量，排在快照后放，快照带的总线 `seq` 之前（含）且任务在快照里的已含在快照中、丢弃不放（老 bridge 不带 seq 时不判）；心跳转 `[DONE]`。`openStream` 有 10s 握手超时、
+  供断点重放；连流即补拉 `/agents/:name/pending`（thinking / compacting / 未答 AUQ）与 `/bg-tasks`——不挡聊天类实时事件，快照到了按 `ReplayMerge` 合入（实时已说过的挂起态不往回拨）；实时 bg-* 是快照之上的增量，排在快照后放；心跳转 `[DONE]`。`openStream` 有 10s 握手超时、
   25s 无字节看门狗；`reader.cancel()` 不关 iOS 底层连接，一律 `AbortController.abort()`；自然断流按 1s→10s 退避走 `maybeReconnect({fast:true})`。
 - **重连决策**（`reconnect-policy.ts` 纯函数）：900ms 风暴地板（force 300ms）→ 同 agent 历史在飞 <25s 让路 → 历史浏览模式不动 → 流 30s 内有字节视为
   健康只布 12s 探针 → 短暂离开 <5min 且有 eid 走 `fast`（只重连流带 ?since）→ 有游标走 `delta`（**先差量后开流，串行；流不带 since**，否则重放与
