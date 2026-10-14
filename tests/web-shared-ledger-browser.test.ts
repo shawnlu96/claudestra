@@ -85,7 +85,7 @@ async function taskDetail(page: Page, fx: TeamFixture, side: "local" | "team", n
   if (side === "team") {
     await panel.getByText("团队操作", { exact: true }).waitFor();
     for (const label of ["开卡", "绑卡", "阶段", "审批"]) expect(await panel.getByRole("button", { name: label, exact: true }).isDisabled()).toBe(true);
-    expect(await panel.innerText()).toContain("全文仅在主场");
+    expect(await panel.innerText()).toContain("全文只在任务所在的机器上");
   } else expect(await panel.getByText("团队操作", { exact: true }).count()).toBe(0);
   return id;
 }

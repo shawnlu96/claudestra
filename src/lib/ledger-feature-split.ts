@@ -1,3 +1,4 @@
+import { splitPriorityDag } from "./ledger-priority-lifecycle.js";
 import { requireLocalSharedLedgerSplit } from "./shared-ledger-gate-split.js";
 import type { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
@@ -82,6 +83,7 @@ export function applyFeatureSplit(db: Database, ctx: WriteCtx, sourceId: string,
     }
     // N8B8 observe: one line per version the source-mirror push would refuse, on the final event and the command result.
     const hints = plan.groups.flatMap((g) => appendVersion(db, secondary, g, reason) ?? []);
+    splitPriorityDag(db, secondary, plan);
     for (const d of plan.deps) changeFeatureDep(db, secondary, d.from, d.to, false, d.note);
     const event = insertEvent(db, ctx, { project: source.project, target: sourceId, kind: "feature", text: reason,
       data: { op: "feature-split", hash, sourceVersion: plan.source.currentVersion, targets: plan.groups.slice(1).map((g) => g.id), backup: saved,

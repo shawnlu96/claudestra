@@ -180,8 +180,9 @@ describe("[验收线 4] beside the existing paths: required names, CIF1 wording,
   });
 
   test("web, desktop, typecheck, guard and the entry build never depend on the selection", () => {
-    for (const id of ["web", "web-build", "desktop-scope"]) expect(ci.jobs[id]!.needs).toBeUndefined();
-    expect(ci.jobs.desktop!.needs).toBe("desktop-scope"); // CIDESK1: its own scope job, never the test plan
+    for (const id of ["web", "web-build"]) expect(ci.jobs[id]!.needs).toBeUndefined();
+    expect(ci.jobs.desktop!.needs).toBe("desktop-scope");
+    expect(ci.jobs["desktop-scope"]!.needs).toBe("plan"); // Its own scope job consumes the frozen plan before deciding desktop inputs.
     for (const name of ["Typecheck (tsc --noEmit)", "Guard (ratchets)", "Build entrypoints", "Install web dependencies"]) {
       expect(step("tests", name).if ?? "matrix.shard == 1").toBe("matrix.shard == 1");
     }

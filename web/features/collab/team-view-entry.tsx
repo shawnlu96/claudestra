@@ -6,6 +6,9 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { ambiguous } from "@/lib/shared-projects-bindings";
+import { sharedProjectsTr } from "@/lib/i18n-dict-shared-projects";
+import { useLang } from "@/lib/i18n";
 import { machines } from "@/lib/machines";
 import { bindingState, lostCenterKey, machineCenterKey, resolveCollabSource, invalidCenterKey, subscribeBindings, type BindingState,
   type BlockedReason, type CollabSourceChoice } from "@/lib/collab-source-binding";
@@ -18,9 +21,8 @@ const subscribeMachines = (cb: () => void) => machines.subscribe(cb);
 const currentFp = () => machines.currentFp();
 const noFp = () => null;
 
-/** 选不出源的三种原因（项目组入口、「现在」各项目、侧栏团队区的保留行共用这一张表） */
 export const BLOCKED_REASON: Record<BlockedReason, string> = {
-  ambiguous: "绑定无法区分（同一中心项目在多个团队），已停用",
+  ambiguous: ambiguous,
   checking: "团队绑定暂时读不到，稍后自动重试",
   revoked: "团队权限已失效",
 };
@@ -86,7 +88,7 @@ export function useCollabChoice(fp: string, projectId: string): { choice: Collab
 }
 
 function MachineEntry({ fp, projectId }: { fp: string; projectId: string }) {
-  const t = useCollabT();
+  const t = useCollabT(), projectTr = sharedProjectsTr(useLang());
   const { choice, key, access, settled } = useCollabChoice(fp, projectId);
   // context 已证明有读凭据：预置可读，CollabEntry 就不会去探 `/ledger/<中心 key>`
   useLayoutEffect(() => {
@@ -96,7 +98,7 @@ function MachineEntry({ fp, projectId }: { fp: string; projectId: string }) {
   if (choice.kind === "blocked") {
     if (!settled) return null;
     return <li><p role="status" data-collab-blocked={choice.reason} className="px-2 text-xs opacity-60">
-      {t("协作视图")} · {BLOCKED_REASON[choice.reason]}</p></li>;
+      {t("协作视图")} · {choice.reason === "ambiguous" ? projectTr(BLOCKED_REASON[choice.reason]) : t(BLOCKED_REASON[choice.reason])}</p></li>;
   }
   return access === "yes" ? <CollabEntry projectId={choice.key} team /> : null;
 }

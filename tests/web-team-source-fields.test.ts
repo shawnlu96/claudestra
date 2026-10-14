@@ -5,7 +5,7 @@
  */
 import { expect, test } from "bun:test";
 import { teamOverview, teamTaskDetail } from "@/features/collab/team-source-adapter";
-import { sharedCollabSource } from "@/features/collab/team-source-shared";
+import { DETAIL_BEHIND_MS, POLL_MS, sharedCollabSource } from "@/features/collab/team-source-shared";
 import { parseStepId, teamStepLine, UNKNOWN_EXECUTOR } from "@/features/collab/team-source-steps";
 import { stepLineView } from "@/features/collab/collab-step-line-model";
 import { homeView, lineOf, teamNote } from "@/features/collab/collab-model";
@@ -88,7 +88,7 @@ test("复现测试：镜像越过 10 分钟过期阈值但 serverSeq 不变：fo
     const src = memSource(() => list, () => d);
     const ov = await src.overview(signal);
     const key = d.tasks[0]!.sourceTaskId;
-    expect(lineOf((await src.task(key, signal)).task, ov, new Map(), fx.now).reason).not.toContain("主场镜像过期");
+    expect(lineOf((await src.task(key, signal)).task, ov, new Map(), fx.now).reason).not.toContain("进度可能不是最新的");
     const now = tick(11 * 60_000);
     const ctrl = new AbortController(), events: unknown[] = [];
     const done = src.follow({ signal: ctrl.signal, onOpen: () => {}, onEvent: (e) => events.push(e) });
@@ -97,8 +97,8 @@ test("复现测试：镜像越过 10 分钟过期阈值但 serverSeq 不变：fo
     await done;
     expect(events).toEqual([]); // 主场停了：没有新水位，不重拉
     const t = (await src.task(key, signal)).task;
-    expect(lineOf(t, ov, new Map(), now).reason).toContain("主场 11 分钟前同步");
-    expect(teamNote(t, now)).toContain("主场 11 分钟前同步");
+    expect(lineOf(t, ov, new Map(), now).reason).toContain("11 分钟没收到任务所在机器的更新");
+    expect(teamNote(t, now)).toContain("11 分钟没收到任务所在机器的更新");
   });
 });
 
@@ -122,7 +122,7 @@ test("复现测试：新列表加旧详情缓存：读新详情失败回退旧�
       let ov = await src.overview(signal);
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("stale");
       expect(ov.mirror).toEqual([{ mirror: "stale", freshUntil: null, observedAt: p.observedAt }]);
-      expect(lineOf(ov.tasks.find((t) => t.id === key)!, ov, new Map(), now).reason).toContain("主场 11 分钟前同步");
+      expect(lineOf(ov.tasks.find((t) => t.id === key)!, ov, new Map(), now).reason).toContain("11 分钟没收到任务所在机器的更新");
       // ② 旧详情还在 10 分钟内，但中心列表的水位比它新超过「详情应当已重拉」的时限（N8A8B：60 秒 + 一轮）：显示的不是中心现在的，也算过期
       fail = false;
       list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, observedAt: now } }] };
@@ -130,30 +130,30 @@ test("复现测试：新列表加旧详情缓存：读新详情失败回退旧�
       fresh.feature.projection = { ...p, observedAt: now };
       const src2 = memSource(() => list, () => { if (fail) throw new Error("synthetic detail failure"); return fresh; });
       await src2.overview(signal);
-      tick(5_000);
+      tick(POLL_MS);
       fail = true;
-      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 1, observedAt: now + 5_000 } }] };
+      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 1, observedAt: now + POLL_MS } }] };
       ov = await src2.overview(signal);
-      // 落后 5 秒是有意的重拉间隔，不算过期（N8A8B）
+      // 落后一轮轮询是有意的重拉间隔，不算过期（N8A8B）
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("fresh");
-      // 落后从第一次看到列表领先（+5 秒那轮）算起，超过 65 秒才算（N8A8G）
-      tick(65_001);
-      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 2, observedAt: now + 70_001 } }] };
+      // 落后从第一次看到列表领先（+POLL_MS 那轮）算起，超过 DETAIL_BEHIND_MS 才算（N8A8G）
+      tick(DETAIL_BEHIND_MS + 1);
+      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 2, observedAt: now + POLL_MS + DETAIL_BEHIND_MS + 1 } }] };
       ov = await src2.overview(signal);
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("stale");
     } finally { console.warn = warn; }
   });
 });
 
-test("复现测试：reason 追加主场镜像过期 / 阻塞提问，不丢原来的出问题理由；本机卡 reason 不变", () => {
+test("复现测试：reason 追加进度可能不是最新的 / 阻塞提问，不丢原来的出问题理由；本机卡 reason 不变", () => {
   const { d, key } = withTask({ stage: "fix", asks: [{ kind: "question", state: "open", blocking: true }] });
   const ov = one(d, fx.now + 11 * 60_000).ov;
   const t = ov.tasks.find((x) => x.id === key)!;
   // 读到时新鲜、显示时已过 10 分钟：同样报过期（走表的 now，不是读到时的判定）
-  expect(teamNote(one(d).ov.tasks.find((x) => x.id === key)!, fx.now + 11 * 60_000)).toBe("主场 11 分钟前同步 · 主场有 1 个阻塞提问");
-  expect(teamNote(t, fx.now + 11 * 60_000)).toBe("主场 11 分钟前同步 · 主场有 1 个阻塞提问");
+  expect(teamNote(one(d).ov.tasks.find((x) => x.id === key)!, fx.now + 11 * 60_000)).toBe("11 分钟没收到任务所在机器的更新 · 任务所在的机器上有 1 个问题在等回答");
+  expect(teamNote(t, fx.now + 11 * 60_000)).toBe("11 分钟没收到任务所在机器的更新 · 任务所在的机器上有 1 个问题在等回答");
   const withReview = { ...t, lastReview: { round: 1, verdict: "changes", p0: 0, p1: 1, p2: 0, text: "P1：边页出 1970", ts: fx.now } };
-  expect(lineOf(withReview, ov, new Map(), fx.now + 11 * 60_000).reason).toBe("P1：边页出 1970 · 主场 11 分钟前同步 · 主场有 1 个阻塞提问");
+  expect(lineOf(withReview, ov, new Map(), fx.now + 11 * 60_000).reason).toBe("P1：边页出 1970 · 11 分钟没收到任务所在机器的更新 · 任务所在的机器上有 1 个问题在等回答");
   const local = fx.local.tasks.find((x) => x.stage === "fix")!;
   expect(local.team).toBeUndefined();
   expect(lineOf({ ...local, lastReview: withReview.lastReview }, fx.local, new Map(), fx.now).reason).toBe("P1：边页出 1970");

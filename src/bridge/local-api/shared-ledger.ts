@@ -8,6 +8,7 @@ import { parseSharedLedgerImport, parseSharedLedgerProjection } from "../../lib/
 import { sharedLedgerBodyLimit } from "../../lib/shared-ledger-contract.js";
 import { parseActivityCursor } from "../../lib/shared-ledger-contract-reads.js";
 import { TASK_FACTS_RESOURCE } from "../../lib/shared-ledger-contract-task-facts.js";
+import { cachedSharedLedgerRead } from "./shared-ledger-read-cache.js";
 
 export interface SharedLedgerProxyDeps {
   stateDir: string;
@@ -78,7 +79,9 @@ export async function handleSharedLedgerApi(req: Request, path: string, principa
         const read = await client.taskFacts(facts[1]!);
         return read.projectId === deps.projectId ? json(200, read) : json(403, { error: "project unavailable" });
       }
-      const result = resource === "features" ? await client.features() : await client.feature(resource.slice("features/".length));
+      const slot = { get: () => retryAfter, set: (v: string) => { retryAfter = v; } };
+      const result = resource === "features" ? await cachedSharedLedgerRead(deps.stateDir, credential, resource, () => client.features(), slot)
+        : await cachedSharedLedgerRead(deps.stateDir, credential, resource, () => client.feature(resource.slice("features/".length)), slot);
       if ("features" in result) return json(200, { ...result, features: result.features.filter((f) => f.projectId === deps.projectId) });
       if (result.feature.projectId !== deps.projectId) return json(403, { error: "project unavailable" });
       return json(200, result);

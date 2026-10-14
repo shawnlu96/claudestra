@@ -3,8 +3,11 @@
  * 两张图的界面状态：中区标签、展开了哪些 feature（没动过就跟默认规则走，动过就按用户的）、哪些点开了「✓N」、正在看的对比、
  * 跳转要居中的 Focus 和闪一次的目标。标签状态放在中区组件外面，跳转才能切标签。
  * seq 单调递增：同一个节点再跳一次也会再居中、再闪。手动切标签清掉 Focus，免得画布重新挂载时又跳回旧的跳转目标。
+ * view = 子 DAG 用分区列表还是画布（SUBDAG4）：本页会话内记住、换 feature 保留；listable 由 use-focus-pane.tsx 报，
+ * 列表真的在显示时跳转只闪不动 compare / open（列表自己滚到那张卡，已完成的先展开），否则照画布的跳法。
+ * 所以切到「图」时要补展开选中的 feature：不然列表里跨 feature 跳过来再切图，画布只剩折叠 shelf（tests/web-dom-subdag-focus-jump.test.ts）。
  */
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { Focus } from "../v4/canvas-view";
 import { compareAfterJump, type Compare } from "./dag-diff";
 import { defaultOpen, drawable, openWith } from "./dag-layout";
@@ -12,6 +15,7 @@ import { jumpToNode } from "./dag-progress";
 import type { FeatureCard } from "./dag-types";
 
 export type DagTab = "product" | "dag" | "progress" | "team";
+export type DagView = "list" | "graph";
 
 export function useDagUi(features: readonly FeatureCard[]) {
   const [tab, setTabRaw] = useState<DagTab>("product");
@@ -22,6 +26,9 @@ export function useDagUi(features: readonly FeatureCard[]) {
   const [focus, setFocus] = useState<Focus | null>(null);
   const [flash, setFlash] = useState<{ id: string; seq: number } | null>(null);
   const [evicted, setEvicted] = useState<string | null>(null);
+  const [view, setViewRaw] = useState<DagView>("list");
+  const listable = useRef(false);
+  const setListable = useCallback((on: boolean) => { listable.current = on; }, []);
   const counter = useRef(0);
   const open = useMemo(() => {
     const ids = new Set(drawable(features).map((f) => f.id));
@@ -34,7 +41,13 @@ export function useDagUi(features: readonly FeatureCard[]) {
     setEvicted(o.evicted);
   };
   return {
-    tab, featureId, open, doneOpen, compare, focus, flash, evicted, ensureOpen,
+    tab, featureId, open, doneOpen, compare, focus, flash, evicted, ensureOpen, view,
+    setView: (v: DagView) => {
+      setViewRaw(v);
+      if (v === "graph" && featureId && !open.includes(featureId)) ensureOpen(featureId);
+    },
+    /** use-focus-pane.tsx 在 effect 里报告列表此刻能不能显示（桌面且有产品 DAG）；只给 jumpNode 读 */
+    setListable,
     selectFeature: (id: string) => {
       setFeatureId(id); setManual([id]);
       setCompare(null); setFocus(null);
@@ -59,14 +72,15 @@ export function useDagUi(features: readonly FeatureCard[]) {
       const j = jumpToNode(features, open, featureId, key);
       if (!j) return;
       const seq = ++counter.current;
-      setCompare((c) => compareAfterJump(c, features, featureId));
       setFeatureId(featureId);
+      setTabRaw("dag");
+      setFlash({ id: j.id, seq });
+      if (view === "list" && listable.current && compare?.featureId !== featureId) return;
+      setCompare((c) => compareAfterJump(c, features, featureId));
       setManual([featureId]);
       setEvicted(j.evicted);
       if (j.expandDone) setDoneOpen((s) => new Set([...s, featureId]));
-      setTabRaw("dag");
       setFocus({ id: j.id, seq });
-      setFlash({ id: j.id, seq });
     },
     /** DAG → 进度：切标签、滚到那一行并闪一次 */
     jumpRow: (agent: string) => {

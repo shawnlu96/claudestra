@@ -33,6 +33,7 @@ import { DiffPage, NodePage, VersionsPage } from "./dag-props";
 import type { BoardNode, DagBoard, FeatureCard } from "./dag-types";
 import { useDagBoard, useDagCompare, useDagVersions } from "./use-dag-board";
 import { useDagUi } from "./use-dag-ui";
+import { useFocusPane } from "./use-focus-pane";
 import { useFocusFeature } from "../team-source-context";
 import d from "./dag.module.css";
 
@@ -143,11 +144,12 @@ export function useDagPanes(a: DagPanesArgs) {
     <DagCanvasView canvas={canvas} shelf={shelf} evicted={ui.evicted} look={(n: DNode) => lookOf(n.featureId, n.node)} compare={ui.compare} focus={ui.focus}
       onNode={onNode} onOwner={ui.jumpRow} onFold={ui.toggleDone} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
   );
+  const focusPane = useFocusPane({ now: a.now, narrow: a.narrow, hot: a.hot, tr, ui, board, hasProduct, work, onNode, onVersions, onOwner: jumpRowFromPage });
   const paneProps = { board: hasProduct ? product.board : null, loading: product.status === "loading", featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
     onTask: a.pickTask, graph, dagBoard: board, now: a.now, tr, progress };
   const center = (causal: React.ReactNode, team: React.ReactNode) => (
     <CountContext.Provider value={counts}>
-      <ProductPanes {...paneProps} narrow={false} team={team} subdag={dagCanvas} fallback={<div className={v.center}>{causal}</div>} />
+      <ProductPanes {...paneProps} narrow={false} team={team} subdag={focusPane(dagCanvas)} fallback={<div className={v.center}>{causal}</div>} />
     </CountContext.Provider>
   );
   const mobile = (fallback: React.ReactNode) => (
