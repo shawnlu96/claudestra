@@ -8,7 +8,7 @@ import type { CronJob } from "../lib/cron-job.js";
 import {
   localDate, nextReportDeadline, parseLocalDate, renderReport, SENTINEL_RESULT_HINT, sentinelPilotMode, setSentinelPilotMode,
 } from "../lib/sentinel-pilot.js";
-import { buildDayReport, defaultSentinelDeps, markPilotSince, type SentinelTickDeps } from "../lib/sentinel-pilot-tick.js";
+import { buildDayReport, defaultSentinelDeps, markPilotSince, mirrorRuns, type SentinelTickDeps } from "../lib/sentinel-pilot-tick.js";
 
 const USAGE = "usage: sentinel-pilot set <任务名|id> off|observe|on | sentinel-pilot show | sentinel-pilot report <任务名|id> [--date YYYY-MM-DD] --dry-run";
 
@@ -47,6 +47,7 @@ async function cmdReport(c: SentinelCmdDeps, args: string[]): Promise<void> {
   if (!parseLocalDate(date)) return c.out({ ok: false, error: `--date 要是 YYYY-MM-DD（不是 ${date}）` });
   let runs;
   try { runs = await c.deps.listRuns(); } catch (e) { return c.out({ ok: false, error: `运行台账读不出，不出报告: ${(e as Error).message}` }); }
+  runs = mirrorRuns(c.deps.reportsDir, job, runs, c.now(), c.deps.error, false); // 台账裁掉的从镜像补；只读不写
   const input = await buildDayReport(job, date, runs, c.deps.readSession, c.mode(job.id), c.now(), true);
   c.out(renderReport(input));
 }

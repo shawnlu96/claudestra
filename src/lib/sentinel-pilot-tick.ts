@@ -3,18 +3,19 @@
  * off（缺省）：不读会话记录、不写报告、不发送；observe：写报告文件 + 一行日志；on：再认领 `.sent`、经 notify 发到任务的报告频道。
  * 报告文件已在就不再生成（排他创建，重启 / 两个实例都安全）；`.sent` 先写再发，认领后发送失败只记日志、不重发——宁可少发一次。
  * 运行台账读不出（CronRunStore.list 抛）就本轮不生成、下一分钟再试：不能把「读不出」当成「没有记录」判没检查。
+ * 开着时每分钟把本任务的运行记录镜像一份（mirrorRuns），台账按条数裁掉的记录照样判得出。
  * tests/sentinel-pilot.test.ts。
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CronJob } from "./cron-job.js";
-import { createCronRunStore, isUnfinishedCronRun, type CronRunRecord } from "./cron-run-state.js";
+import { createCronRunStore, type CronRunRecord } from "./cron-run-state.js";
 import { findJsonlBySessionId } from "./jsonl-cost.js";
 import { notify } from "./notify.js";
 import { statePath } from "./paths.js";
 import { runtimeForSessionPath } from "./session-source.js";
-import { readJsonLenient } from "./state-file.js";
+import { readJsonLenient, readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { collectRunEvidence } from "./sentinel-pilot-evidence.js";
 import {
   classifySlot, dueSlots, localDate, parseLocalDate, recordForSlot, renderNotice, renderReport, reportFileName, reportReadyAt, runWindow, sentinelPilotMode,
@@ -127,10 +128,10 @@ function pilotSince(reportsDir: string, job: CronJob, now: number): string {
   return today;
 }
 
-/** `sentinel-pilot set`：开（observe / on）时记启用起点（已有不动），关时删掉——关过的那段以后再开也不补 */
+/** `sentinel-pilot set`：开（observe / on）时记启用起点（已有不动），关时连同运行记录镜像删掉——关过的那段以后再开也不补 */
 export function markPilotSince(reportsDir: string, job: CronJob, mode: SentinelPilotMode, now: number): void {
   const path = sincePath(reportsDir, job);
-  if (mode === "off") { rmSync(path, { force: true }); return; }
+  if (mode === "off") { rmSync(path, { force: true }); rmSync(mirrorPath(reportsDir, job), { force: true }); return; }
   mkdirSync(reportsDir, { recursive: true });
   try { writeFileSync(path, localDate(new Date(now)), { flag: "wx" }); } catch (e) { if (!isEexist(e)) throw e; }
 }
@@ -160,23 +161,36 @@ function dueReports(jobs: CronJob[], now: number, deps: SentinelTickDeps): Due[]
   return out;
 }
 
-/**
- * cron-runs.json 结束记录的保留条数（cron-run-state.ts 的 KEEP_FINISHED，那边不导出；tests 用真实 store 钉住这个值）。
- * 台账只有裁剪会删记录，而裁剪只在结束记录超过这个数时发生、裁完至少留这么多条：不到这个数就一定没裁过。
- */
-export const LEDGER_KEEP_FINISHED = 300;
+/** 本任务运行记录的镜像：`<reportsDir>/.sentinel-<任务名>.runs.json`（只留 CATCHUP_DAYS 天内这个任务的记录） */
+export const mirrorPath = (reportsDir: string, job: CronJob): string => sincePath(reportsDir, job).replace(/\.since$/, ".runs.json");
+
+const isMirror = (d: unknown): boolean => !!d && typeof d === "object" && Array.isArray((d as { runs?: unknown }).runs);
 
 /**
- * 这天的「没有记录」可不可信：结束记录不到 LEDGER_KEEP_FINISHED 条 → 从没裁过，可信（缺就是没检查）；
- * 到了这个数、且台账里最早的一条晚于这天第一个应检时刻 → 这天的记录可能已被裁掉，不出报告（不判没检查）。
- * 不能只凭「有一条较晚的记录」推断裁过：首次启用、真实漏检都是这个样子（审查 ledger-coverage-suppresses-missed-run）。
+ * 把台账里这个任务的记录并进镜像，返回合并后的记录（台账里有的以台账为准）。
+ * cron-runs.json 按条数裁老记录、又不留裁剪水位，「台账里没有」分不清是没跑还是被裁了（审查 ledger-coverage-suppresses-missed-run）。
+ * 试点开着时每分钟都镜像一次：记录在认领那一分钟就进镜像，远早于被裁（要再攒满几百条结束记录）。
+ * 于是镜像和台账都没有 = 真没有记录，照规格判没检查；台账裁掉了、镜像里有，照样按那条判，不用再按条数猜。
+ * write=false（`report --dry-run`）只合并不落盘。
  */
-function ledgerCovers(runs: readonly CronRunRecord[], job: CronJob, day: string): boolean {
-  const first = dueSlots(job.schedule, day)[0];
-  if (first === undefined || runs.filter((r) => !isUnfinishedCronRun(r)).length < LEDGER_KEEP_FINISHED) return true;
-  return runs.reduce((m, r) => Math.min(m, r.epochMinute), Infinity) <= Math.floor(first / 60_000);
+export function mirrorRuns(
+  reportsDir: string, job: CronJob, runs: readonly CronRunRecord[], now: number, onError: (msg: string) => void, write = true,
+): CronRunRecord[] {
+  const path = mirrorPath(reportsDir, job);
+  const st = readJsonStateSync(path, isMirror);
+  if (st.status === "corrupt") onError(`⚠️ 哨兵运行记录镜像损坏，按台账重建: ${path}: ${st.error}`);
+  const kept = st.status === "ok" ? (st.data as { runs: CronRunRecord[] }).runs : [];
+  const floor = Math.floor(now / 60_000) - (CATCHUP_DAYS + 1) * 24 * 60;
+  const byKey = new Map<string, CronRunRecord>();
+  for (const r of [...kept, ...runs.filter((x) => x.jobId === job.id)]) byKey.set(r.key, r);
+  const merged = [...byKey.values()];
+  const keep = merged.filter((r) => r.epochMinute >= floor); // 镜像只留补生成窗口内的；返回的不截，dry-run 查老日子照样看得到台账
+  if (write && JSON.stringify(keep) !== JSON.stringify(kept)) {
+    mkdirSync(reportsDir, { recursive: true });
+    writeJsonAtomicSync(path, { version: 1, runs: keep });
+  }
+  return merged;
 }
-const uncovered = new Set<string>();
 
 let busy = false;
 let lastMinute = -1;
@@ -188,20 +202,17 @@ export async function sentinelPilotTick(now: Date = new Date(), deps: SentinelTi
   busy = true;
   lastMinute = minute;
   try {
-    const due = dueReports(await deps.loadJobs(), now.getTime(), deps);
-    if (!due.length) return;
+    const jobs = (await deps.loadJobs()).filter((j) => j.targetAgent && deps.mode(j.id) !== "off");
+    if (!jobs.length) return;
+    const due = dueReports(jobs, now.getTime(), deps);
     let runs: CronRunRecord[];
     try { runs = await deps.listRuns(); } catch (e) {
-      deps.error(`⚠️ 哨兵日报这轮没生成：运行台账读不出（下一分钟再试）: ${(e as Error).message}`);
+      if (due.length) deps.error(`⚠️ 哨兵日报这轮没生成：运行台账读不出（下一分钟再试）: ${(e as Error).message}`);
       return;
     }
+    const mirrored = new Map(jobs.map((j) => [j.id, mirrorRuns(deps.reportsDir, j, runs, now.getTime(), deps.error)]));
     for (const d of due) {
-      if (!ledgerCovers(runs, d.job, d.day)) {
-        const k = `${d.job.id}@${d.day}`;
-        if (!uncovered.has(k)) { uncovered.add(k); deps.error(`⚠️ 哨兵日报 ${d.job.name} ${d.day} 不补：运行台账已裁到这天之后，没有记录不等于没检查`); }
-        continue;
-      }
-      try { await generate(d.job, d.day, d.mode, runs, now.getTime(), deps); } catch (e) { deps.error(`⚠️ 哨兵日报 ${d.job.name} ${d.day} 生成失败: ${(e as Error).message}`); }
+      try { await generate(d.job, d.day, d.mode, mirrored.get(d.job.id) ?? [], now.getTime(), deps); } catch (e) { deps.error(`⚠️ 哨兵日报 ${d.job.name} ${d.day} 生成失败: ${(e as Error).message}`); }
     }
   } catch (e) {
     deps.error(`⚠️ 哨兵试点 tick 异常: ${(e as Error).message}`);
