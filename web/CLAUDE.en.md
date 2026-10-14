@@ -41,7 +41,7 @@ Anti-rot rules are the repo root's (root CLAUDE.md); `web/` and `src/` never imp
 
 Opening an agent: `fetchHistory` (bridge `/agents/:name/history[/:sid]`) → `openAgentEventStream` (subscribe to `/events`, filter by agent locally, translate, back-fill `/pending` and `/bg-tasks` on connect); `send` is fire-and-forget and the output comes back over the stream. Full description in [docs/web/data-flow.md](../docs/web/data-flow.md). Invariants:
 
-- **Wake-up alignment = cursor delta**: cursor `{sessionId, lastSeq}`, delta first then stream (serial), the stream carries no `since`; rotation / more than a page / repeated failure fall back to a full reload.
+- **Wake-up alignment = cursor delta**: cursor `{sessionId, lastSeq}`, stream opens first, events queue until history lands, no `since`; rotation / over a page / repeated failure fall back to a full reload.
 - **Live ↔ history dedupe by seq** (`features/chat/live-merge.ts`) — never guess by timestamp.
 - **Duplicate-send gate** (`send-dedupe.ts`): same agent + same payload within 1.5s is sent once.
 - Interrupt / permission card / AskUserQuestion: event down → card → `POST /agents/:name/{interrupt,answer}` → tmux keystrokes. The permission card's downstream event is still missing (permission-watcher targets Discord only).

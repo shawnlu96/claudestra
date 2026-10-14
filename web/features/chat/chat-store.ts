@@ -28,6 +28,7 @@ import { composeView, droppedBlobUrls, revokeBlobUrls, sendCursor } from "./view
 import { claimEcho, findEchoTarget, type HeldState } from "./held-echo";
 import { markHeldSend } from "../quota-wall/held-send";
 import { decideReconnect } from "./reconnect-policy";
+import { EventGate, resetForAgent, type SyncAnchor } from "./switch-sync";
 import { applySnapshotMissing, bgSweepable, markBgDone, reviveUnknownShell, shellExited } from "./bg-shell-state";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
@@ -57,7 +58,7 @@ export function noteSidebarInteraction() {
 
 // 视图合流（入站头剥离 / 乐观消息保全 / 按 ts 插回 / 直播保全）在 view-compose.ts
 
-interface ChatState {
+export interface ChatState {
   agents: AgentSession[];
   /** v2.21+ project 元数据（侧栏分组组头 + 管理弹窗数据源），随 agents 一起拉。 */
   projects: ProjectMeta[];
@@ -164,6 +165,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * jsonl seq，追加只影响尾部），缓存降级为防白屏的过渡帧。
    */
   private messageCache = new Map<string, ChatMessage[]>();
+  private syncAnchors = new Map<string, SyncAnchor>(); // 与 messageCache 同时写（cacheLatestView）
+  private streamGate: EventGate<WebStreamEvent> | null = null; // 历史落地前排队的流事件（switch-sync.ts）
   private readonly retiredAcpStreams = new RetiredAcpStreams();
   /** 全量对齐重拉的滚动交接（锚点快照 / 保留更早前缀），见 reload-scroll.ts */
   public readonly reloadScroll = new ReloadScroll();
@@ -549,57 +552,41 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // v2.21.1+ 打开会话 = 已读:联动清掉其他设备/平台上该 agent 的通知
     // (owner 2026-08-30「一处点完,他处取消」)。fire-and-forget,失败无感。
     if (name !== MASTER_AGENT_NAME) void markRead(name).catch(() => {}); // 失败无感：下次打开 / 收到回复再补
-    // 切走前把当前会话快照进缓存，回来时原样恢复（见 messageCache 注释）。
-    // ⚠ 只存非空快照:加载中/加载失败时切走会把 [] 存进去,下次打开命中
-    // 空缓存(truthy!)→ 跳过 loading 态直接渲染「发送第一条消息」空态,
-    // 再叠加 stale 的 historyHasMore 就是「空屏+加载更早卡死」(2026-07-24
-    // 用户截图)。空的宁可保留上一份旧快照/走 loading。
+    // 切走前存最新视图快照 + 同步锚（见 cacheLatestView）
     const prev = this.state.activeAgent;
-    // 历史现场的窗口不能当「最新视图」快照存——切回会闪出一段旧历史
-    if (prev && this.state.messages.length && !this.state.browsing)
-      this.messageCache.set(prev, this.state.messages);
+    if (prev) this.cacheLatestView(prev);
     this.detachActiveStream();
     const gen = ++this.openGen;
     const cached0 = this.messageCache.get(name);
     const cached = cached0?.length ? cached0 : undefined; // 历史遗留的空快照当无缓存
-    this.produce((s) => {
-      s.activeAgent = name;
-      // 有缓存=先秒开上次那份（无 loading 闪烁），拉回最新后整体替换
-      s.messages = cached ?? [];
-      s.loadingHistory = !cached;
-      s.syncState = null; // per-agent,loadMessages 会立即重置为 syncing
-      s.streamDown = false; // 新会话的流状态从零开始,连上/断开由 openStream 说话
-      // 翻页态是 per-agent 的:不重置的话上一会话的「还有更早」残留到新会话
-      // (loadOlder 有 historySessionId 钉住不会误翻,但按钮/哨兵会鬼影)
-      s.historyHasMore = false;
-      s.historyNewerHasMore = false;
-      s.loadingNewer = false;
-      s.loadingOlder = false;
-      s.historyError = false;
-      s.streaming = false;
-      s.awaitingChunk = false;
-      s.compacting = false;
-      // 交互卡是 per-session 的：切走先清空，新流连上后 bridge 会 replay 当前 pending。
-      s.pendingPermission = null;
-      s.pendingAsk = null;
-      // bg 任务面板 per-session：切走清空（新流只带连上后的新任务，watcher 不 replay 旧的）
-      s.bgTasks = [];
-      // CC 任务清单 per-session:切走清空,下面异步拉当前 agent 的
-      s.ccTasks = [];
-      s.telemetry = null;
-      s.browsing = null; // 切 agent 退出历史现场
-    });
-    // 翻页锚也是 per-agent 的,跟着上面的 historyHasMore 一起清,loadMessages 会重设
-    this.historySessionId = null;
-    this.historyCursor = null; // 游标同理——旧 agent 的游标拉新 agent 的差量是灾难
-    this.olderCursor = null; // 跨 session 翻页游标 per-agent,同清
+    const anchor = cached && this.syncAnchors.get(name); // 锚与快照同一刻存下才能只补差量（switch-sync.ts）
+    this.produce((s) => resetForAgent(s, name, cached, anchor || undefined));
+    // 翻页锚 / 差量游标 per-agent：旧 agent 的游标拉新 agent 的差量是灾难，没锚就清空等 loadMessages 重锚
+    this.historySessionId = anchor ? anchor.historySessionId : null;
+    this.historyCursor = anchor ? anchor.cursor : null;
+    this.olderCursor = anchor ? anchor.olderCursor : null;
     void this.refreshCcTasks(name);
-    // 无论有无缓存都重拉历史（stale-while-revalidate）——离开期间 agent 的产出
-    // 只存在于 jsonl，不重拉就永远看不到。历史解析已稳定，重拉不再"漂"。
-    await this.loadMessages(name, gen);
-    if (gen !== this.openGen) return; // 已切走
-    // 持久流 fire-and-forget（不 await，否则会一直阻塞到流关闭）
+    // 离开期间的产出只在 jsonl 里：有锚补差量，没有就拉最新一页；推送流不等它，事件先排队（loadWithLiveStream）
+    await this.loadWithLiveStream(name, () => (anchor ? this.syncDelta(name, gen) : this.loadMessages(name, gen)));
+  }
+
+  /** 最新视图快照与同步锚一起存。历史现场的窗口不是最新视图；空快照不存（切回会跳过 loading 直接渲染空态） */
+  private cacheLatestView(name: string) {
+    if (!this.state.messages.length || this.state.browsing) return;
+    this.messageCache.set(name, this.state.messages);
+    const c = this.historyCursor;
+    if (!c) return void this.syncAnchors.delete(name);
+    this.syncAnchors.set(name, { cursor: c, historySessionId: this.historySessionId, olderCursor: this.olderCursor, hasMore: this.state.historyHasMore });
+  }
+
+  /** 推送流立刻开、事件先进闸排队，历史（差量 / 全量）落地后按到达顺序放行；流已换代则闸已被 detach 清掉 */
+  private async loadWithLiveStream(name: string, load: () => Promise<void>) {
+    const gate = (this.streamGate = new EventGate<WebStreamEvent>());
     void this.openStream(name);
+    await load();
+    if (this.streamGate !== gate) return; // 闸还在 = 期间没换流，排队的就是本 agent 这条流的事件
+    this.streamGate = null;
+    for (const e of gate.release()) this.onStreamEvent(name, e);
   }
 
   /** 当前历史所属 sessionId(向上分页要钉在同一 session——seq 空间 per-session)。 */
@@ -677,9 +664,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public async jumpToContext(sessionId: string, seq: number, strictSession = false) {
     const name = this.state.activeAgent;
     if (!name) return;
-    // 进历史现场前把最新视图快照进缓存——returnToLatest 先秒显快照再后台对齐
-    if (this.state.messages.length && !this.state.browsing)
-      this.messageCache.set(name, this.state.messages);
+    this.cacheLatestView(name); // 进历史现场前存最新视图——returnToLatest 先秒显快照再后台对齐
     this.detachActiveStream();
     const gen = ++this.openGen;
     this.historySessionId = sessionId;
@@ -1215,7 +1200,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 全量/差量路径的 syncState 在 load 完成时已清,这里对快路径生效。
       this.produce((s) => {
         s.streamDown = false;
-        if (s.syncState === "syncing") s.syncState = null;
+        if (s.syncState === "syncing" && !this.streamGate) s.syncState = null; // 有闸 = 历史还在补，横幅归它收
       });
       this.clientLog(`stream connected agent=${name}${since ? ` since=${since}` : ""}`);
       // 带 since 的重连会把环形缓冲里错过的事件整段回放；若期间 7s 对账已把其中一部分以
@@ -1247,19 +1232,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
           }),
       } as ReadableStreamDefaultReader<Uint8Array>;
       await consumeSSEStream(reader, (evt) => {
-        if (gen !== this.streamGen) return;
-        const eid = (evt as { eid?: number }).eid;
-        if (typeof eid === "number" && eid > 0) {
-          // seq 倒退 = bridge 重启过(seq 清零 + 环形缓冲清空,重启窗口内的
-          // 事件永久丢失)→ 全量重拉历史补缺口,一次即可(之后 seq 恢复单调)
-          if (this.lastEventAgent === name && eid < this.lastEventSeq) {
-            const g = ++this.openGen;
-            void this.loadMessages(name, g, 0, "align");
-          }
-          this.lastEventSeq = eid;
-          this.lastEventAgent = name;
-        }
-        processStreamEvent(this, evt);
+        if (gen === this.streamGen && !this.streamGate?.hold(evt)) this.onStreamEvent(name, evt);
       });
     } catch (e) {
       // 断流：保持静默，由下面的自动重连续。凭据失效除外——重连只会再吃一个 401，横幅（MachineGate）已在提示重新配对
@@ -1326,6 +1299,19 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     }
   }
 
+  /** 处理一条流事件（排队的事件放行时也走这里，断点锚只跟已处理的走——没处理的由 since 重放补回） */
+  private onStreamEvent(name: string, evt: WebStreamEvent) {
+    const eid = (evt as { eid?: number }).eid;
+    if (typeof eid === "number" && eid > 0) {
+      // seq 倒退 = bridge 重启过(seq 清零 + 环形缓冲清空,重启窗口内的
+      // 事件永久丢失)→ 全量重拉历史补缺口,一次即可(之后 seq 恢复单调)
+      if (this.lastEventAgent === name && eid < this.lastEventSeq) void this.loadMessages(name, ++this.openGen, 0, "align");
+      this.lastEventSeq = eid;
+      this.lastEventAgent = name;
+    }
+    processStreamEvent(this, evt);
+  }
+
   /** 当前机器的凭据被拒（401）：停止自动重连，等用户重新配对（MachineGate 横幅）；切机器时复位 */
   private deviceInvalid = false;
 
@@ -1369,6 +1355,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   private detachActiveStream() {
     this.discardPendingText(); // 旧会话的残字不写进新视图
     this.streamGen++;
+    this.streamGate = null; // 排队的旧流事件作废：同 agent 重连由 since 重放 / 对齐补回
     const reader = this.streamReader;
     const abort = this.streamAbort;
     this.streamReader = null;
