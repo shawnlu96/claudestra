@@ -193,9 +193,15 @@ export function parseV2ProjectJoinGrant(value: unknown, expected: V2ProjectsExpe
  */
 export const parseV2TeamRecord = object({ ...teamFields, code: id, name: nullable(name), rev: positive });
 export const parseV2TeamDirectoryMember = object({ ...teamFields, personId: id, code: id, teamRole: role });
+/** Team instances (ROSTER2a): GET /v1/team/instances, a separate read so /v1/team stays byte-for-byte unchanged.
+ * The center returns only bindings of active members in this team's directory; an instance bound to more than one
+ * active member is omitted entirely (same rule as TEAMVIS11B memberCodeOf). No publicKey, credential, time or state.
+ */
+export const parseV2TeamInstance = object({ personId: id, instanceId: id });
 export const V2_PROJECTS_TEAM_REQUEST_SCHEMAS = {
   team: object(teamFields),
   teamUpdate: object({ ...teamFields, rev: positive, name }),
+  teamInstances: object(teamFields),
 } as const;
 export function parseV2ProjectsTeamRequest<E extends V2ProjectsTeamEndpoint>(endpoint: E, value: unknown): V2ProjectsTeamRequests[E] {
   if (!Object.hasOwn(V2_PROJECTS_TEAM_REQUEST_SCHEMAS, endpoint)) return fail();
@@ -211,11 +217,14 @@ export const V2_PROJECTS_TEAM_SUCCESS_SCHEMAS = {
   }), r => distinct(r.members, m => m.personId) && r.members.every(m => sameTeam(r.team, m))
     && r.members.some(m => sameDirectoryMember(m, r.self))),
   teamUpdate: object({ ...success, team: parseV2TeamRecord }),
+  teamInstances: refine(object({ ...success, ...teamFields, instances: array(parseV2TeamInstance) }),
+    r => distinct(r.instances, i => i.instanceId)),
 } as const;
-export const V2_PROJECTS_TEAM_SUCCESS_STATUS = { team: 200, teamUpdate: 200 } as const;
+export const V2_PROJECTS_TEAM_SUCCESS_STATUS = { team: 200, teamUpdate: 200, teamInstances: 200 } as const;
 const teamConflict = object({ ...error, error: literal("conflict"), message: literal("conflict"), current: parseV2TeamRecord });
 export type V2ProjectsTeamConflict = Infer<typeof teamConflict>;
-/** expectedScope is the caller's own team; `team` also needs the signed caller's personId to bind `self`. */
+/** expectedScope is the caller's own team (teamUpdate / teamInstances take nothing more);
+ * `team` also needs the signed caller's personId to bind `self`. */
 export function parseV2ProjectsTeamResponse<E extends V2ProjectsTeamEndpoint>(
   endpoint: E, status: number, value: unknown, expected: V2ProjectsExpectedScope,
 ): V2ProjectsTeamResponses[E] {
@@ -226,7 +235,8 @@ export function parseV2ProjectsTeamResponse<E extends V2ProjectsTeamEndpoint>(
   if (raw.ok === true) {
     if (status !== V2_PROJECTS_TEAM_SUCCESS_STATUS[endpoint]) return fail();
     const parsed = V2_PROJECTS_TEAM_SUCCESS_SCHEMAS[endpoint](value);
-    if (!sameTeam(identity, parsed.team)) fail();
+    // teamInstances has no team record: its scope is the top-level centerId/teamId.
+    if (!sameTeam(identity, "team" in parsed ? parsed.team : parsed)) fail();
     if (endpoint === "team" && (parsed as V2ProjectsTeamSuccesses["team"]).self.personId !== identity.personId) fail();
     return parsed as V2ProjectsTeamResponses[E];
   }
