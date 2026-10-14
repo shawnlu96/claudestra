@@ -80,6 +80,7 @@ export const RECOVERY_KEYS = [
   "specObservationHours",
   "staleReplacement",
   "teamBody",
+  "tmuxSockHeal",
   "trainCiTimeout",
   "uiCarry",
   "uiCarryOwnGlobs",

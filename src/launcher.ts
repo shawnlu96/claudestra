@@ -28,7 +28,6 @@ import {
   tmuxRaw,
   tmuxRawStrict,
   sessionTarget,
-  masterSessionExists,
   masterWindowExists,
   windowHasChildProcess,
   ensureSocketDir,
@@ -89,7 +88,7 @@ initDaemonLogs("launcher");
 // v2.19.0 认主守卫（见 lib/owner-guard.ts）——launcher 尤其危险:它会照着 rsync
 // 过来的 registry 把别人的 agent 全拉起来（2026-08-15 实测一口气 14 个）。
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
-import { busyAgentWindows } from "./lib/busy-windows.js";
+import { sockGuard } from "./lib/launcher-sock-guard.js"; // tmux 三态探测 / 新建前查同路径服务 / 冻结 / 大量 dead
 import { healSelfDirty } from "./lib/self-dirty.js";
 import { discardOneShotAfterReady, issueLaunchCred, sweepStaleOneShots, withOneShot } from "./lib/caller-cred-launch.js";
 import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
@@ -117,10 +116,6 @@ if (!CONTROL_CHANNEL_ID) {
 }
 
 const MASTER_WINDOW = `${SESSION_NAME}:0`;
-
-async function sessionExists(): Promise<boolean> {
-  return masterSessionExists();
-}
 
 async function isIdle(): Promise<boolean> {
   return tmuxIsIdle(MASTER_WINDOW);
@@ -187,6 +182,7 @@ async function startMaster() {
 
   // 确保 socket 目录存在
   await ensureSocketDir();
+  if (!(await sockGuard.claimCreate())) return false; // new-session 会 unlink 老服务的套接字（tmux client.c），同路径服务还在就不建
 
   // 创建 tmux session；base-index=0 显式设一下，防止私有 socket 的 tmux
   // server 意外继承到非 0 的 base-index（-f /dev/null 在 tmuxRaw 已经处理，
@@ -352,7 +348,7 @@ async function checkBetaUpdates(autoOn: boolean) {
   }
   if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   const gapT = { channel: "beta", ref: remote, label: remote.slice(0, 7) } as const; // 出借更新空档（lib/lend-update-gap.ts）
-  const gate = await gapHost().then((m) => busyAgentWindows(MASTER_WINDOW, remote.slice(0, 7)).then((busy) => m.launcherUpdateGate(gapT, busy)));
+  const gate = await gapHost().then((m) => sockGuard.busy(MASTER_WINDOW, remote.slice(0, 7)).then((busy) => m.launcherUpdateGate(gapT, busy)));
   if (!gate.go) {
     console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),${gate.why},下次再试`);
     return;
@@ -450,7 +446,7 @@ async function checkForUpdates() {
 
   if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
   const gapT = { channel: "release", ref: release.version, label: release.tag } as const; // 出借更新空档（lib/lend-update-gap.ts）
-  const gate = await gapHost().then((m) => busyAgentWindows(MASTER_WINDOW, release.tag).then((busy) => m.launcherUpdateGate(gapT, busy)));
+  const gate = await gapHost().then((m) => sockGuard.busy(MASTER_WINDOW, release.tag).then((busy) => m.launcherUpdateGate(gapT, busy)));
   if (!gate.go) {
     console.log(`🆙 Claudestra ${release.tag} 有新版本，但${gate.why}，下次再试`);
     return;
@@ -677,6 +673,7 @@ let listFailStreak = 0;
 const LIST_FAIL_ALERT_AFTER = 5;
 
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
+  if (sockGuard.skipRestore(source)) return; // 窗口列表不可信（探测不是 exists / 刚新建过 master）
   try {
     const list = parseManagerList(await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 60_000));
     if (!list.ok) {
@@ -706,6 +703,7 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
       if (source === "boot") console.log("🔁 开机自检：没有需要恢复的 dead agent");
       return;
     }
+    if (await sockGuard.massDead(reallyDead.map((a: any) => a.name))) return;
     // 持租约压住 periodic 巡检——不论 boot 还是 periodic 先到,先到者拿租约,
     // 后到者被 685 的 `>= restartWaveUntil` 门槛挡住,不再撞车重启同一批(P1)
     restartWaveUntil = Date.now() + 10 * 60_000;
@@ -840,7 +838,7 @@ function claudeWavePorts(install: () => Promise<string | null>): WavePorts {
     masterMark: (run) => transcriptMark(sessionJsonlPath(undefined, MASTER_DIR, run.split("@")[0] ?? "")),
     masterLive: (run) => ccRunLive(run), // 发 /exit 前同步核这一代 Claude 还在、还是那个会话（最后一次 masterRun 可能是过时快照）
     registry: () => readRegistryAgents(),
-    busy: () => busyAgentWindows(MASTER_WINDOW),
+    busy: () => sockGuard.busy(MASTER_WINDOW), // tmux 探测不可信时答「有人在忙」
     install,
     ...pendingStore(statePath("claude-update-wave.json")),
     notify: (zh, en) => notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text: t(zh, en) }).then(() => {}),
@@ -1033,10 +1031,10 @@ async function main() {
   console.log(`   检查间隔: ${CHECK_INTERVAL_MS / 1000}s`);
 
   // 首次检查
-  const masterWasAlreadyUp = await sessionExists();
-  if (masterWasAlreadyUp) {
+  const first = await sockGuard.check();
+  if (first === "exists") {
     console.log("✅ 大总管 session 已存在，进入监控模式");
-  } else {
+  } else if (first === "start") {
     await startMaster();
   }
   // v1.9.13+: 无论 master 之前在不在，都跑一次开机自检。之前只在 "master 不在"
@@ -1050,9 +1048,9 @@ async function main() {
     sweepStaleOneShots(); // T85：启动半路被 kill -9 留下的一次性凭据文件，没人再启动也按时清掉
     await Bun.sleep(CHECK_INTERVAL_MS);
 
-    if (!(await sessionExists())) {
-      console.log("💀 大总管 tmux session 不存在，正在重启...");
-      await startMaster();
+    const master = await sockGuard.check(); // 连续 3 次确认 absent 才 start；unknown 本轮不动
+    if (master !== "exists") {
+      if (master === "start") { console.log("💀 大总管 tmux session 不存在，正在重启..."); await startMaster(); }
       continue;
     }
 
