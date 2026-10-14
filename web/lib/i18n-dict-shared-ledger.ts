@@ -1,3 +1,4 @@
+import { ownerWordEn } from "./owner-words";
 /** Shared planning copy. Unknown project titles and machine codes are data, never translation keys. */
 const words: Record<string, string> = {
   '团队规划': 'Team planning', '全部 feature': 'All features', '新建 feature': 'New feature', '项目': 'Project',
@@ -27,7 +28,7 @@ const words: Record<string, string> = {
 };
 export function sharedLedgerTr(language: 'zh' | 'en') {
   return (key: string, params?: Record<string, string | number>): string => {
-    let value = language === 'en' ? words[key] ?? key : key;
+    let value = language === 'en' ? words[key] ?? ownerWordEn(key) ?? key : key;
     for (const [k, v] of Object.entries(params ?? {})) value = value.replaceAll(`{${k}}`, String(v));
     return value;
   };

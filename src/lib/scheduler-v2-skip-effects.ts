@@ -12,6 +12,7 @@ export type SkipEffectGate = "pace" | "manager" | "hook" | "s2v" | "featureless"
 export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<string, string>>>> = {
   /** card work run from a candidate loop that asks pace.skipTask (S2D) first */
   pace: {
+    "conv-ignored-build-artifacts-quarantine.ts": "proc=1 fs=4 vcs=1",
     "effect-count-refresh-git.ts": "fs=2 vcs=1", // EFFAUTO1: the merge driver's scratch-worktree count refresh + push, under the merge tick's skipTask
     "fix-strategy-lifecycle.ts": "proc=1",
     "fix-strategy-remote-branch.ts": "vcs=1",
@@ -29,6 +30,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-author-rebuild.ts": "vcs=2",
     "scheduler-auto-deps.ts": "proc=1 notice=1",
     "scheduler-auto-ports.ts": "notice=1",
+    "scheduler-ci-queue-full.ts": "ledger=1 vcs=1", // per-card skipTask; ledger uses the pass manager
     "scheduler-create-retry-worktree.ts": "vcs=8",
     "scheduler-create-retry.ts": "vcs=2",
     "scheduler-deploy-job.ts": "fs=3",
@@ -53,6 +55,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-author-retire-tick.ts": "ledger=2",
     "lend-fix-reassign-tick.ts": "ledger=2",
     "lend-pr-takeover-refusal-request.ts": "ledger=1",
+    // merge-arch-SLA1: the one PM message of a batch, sent only for episodes whose `ledger scheduler-manual-case-sla <task> --phase claim` passed the manager gate
+    "manual-case-sla-tick.ts": "notice=3",
     "manual-merge-queue-pass.ts": "ledger=1",
     "memory-auto-tick.ts": "ledger=1",
     "merge-content-review-sink.ts": "ledger=1", // merge-arch-REVIEW1: `ledger scheduler-content-review` from the merge driver's carry, through the pass manager
@@ -61,6 +65,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
     "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
+    "recovery-peer-lease-tick.ts": "ledger=3", // PEERLEASE1: observe / fix-relay calls through the pass manager
     "review-converge-notice.ts": "ledger=4",
     "review-count-carry.ts": "ledger=1", // CARRYCNT1: `ledger scheduler-recovery-observe` for effCountCarry notes, through the pass manager
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes
@@ -83,7 +88,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1",
     "scheduler-post-verify.ts": "ledger=2",
-    "scheduler-recovery-ports.ts": "ledger=4",
+    "scheduler-recovery-ports.ts": "ledger=5",
     "scheduler-review-pm-tick.ts": "ledger=1",
     "scheduler-review-swap-runtime.ts": "ledger=1 proc=1",
     "scheduler-sec-review.ts": "ledger=1",
@@ -193,6 +198,9 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-memory.ts": "sql=3 stmt=2",
     "ledger-origin.ts": "sql=1 stmt=1",
     "ledger-pool-refusal.ts": "sql=2 stmt=2",
+    "ledger-priority-lifecycle.ts": "sql=8 stmt=8",
+    "ledger-priority-schema.ts": "sql=1 stmt=2",
+    "ledger-priority-write.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3",
@@ -208,12 +216,13 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-fix-start.ts": "sql=1 stmt=1 proc=1 vcs=3",
     "lend-peer-cooldown.ts": "sql=7 stmt=7",
     "lend-pr-takeover-ledger.ts": "sql=1 stmt=1",
-    "lend-reclaim-scheduler.ts": "sql=4 stmt=4 notice=1",
+    "lend-reclaim-scheduler.ts": "sql=5 stmt=5 notice=1",
     "manual-merge-queue.ts": "sql=3 stmt=3",
     // CIRES1: the GitHub read of the leased `ledger scheduler-manual-resume --mechanism ci-manual-resume` (a skip card never reaches that call)
     "manual-recovery-ci-read.ts": "vcs=1",
     // PMAUTO1 observation-plan: mkdir of the plans file's directory, only inside withPlans (the `ledger observation-*` writers); the tick imports its read side
     "observation-plan.ts": "fs=1",
+    "recovery-peer-lease-handover.ts": "sql=3 stmt=3", // PEERLEASE1: peer-handover / peer-head-block UPDATEs inside the ledger scheduler-fix-relay transaction
     "review-count-carry-ledger.ts": "sql=2 stmt=2", // CARRYCNT1: the count carry's writes inside the `ledger scheduler-merge-step` transaction
     "scheduler-deploy.ts": "sql=6 stmt=6",
     "scheduler-merge-ci-behind.ts": "sql=1 stmt=1 vcs=1",

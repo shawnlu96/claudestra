@@ -1,3 +1,4 @@
+import { MACHINE_WORDS, STAGE_WORD, stageWord } from "@/lib/owner-words";
 /**
  * 协作视图首页的纯逻辑：台账总览（GET /api/v1/ledger/:project）→ 按关注度排好的任务线、一句话状态、今日完成、PM 调度条。
  * 分档与文案的取舍见台账 mockups/T12/ux.md；单测 tests/web-collab-model.test.ts。
@@ -144,8 +145,7 @@ export interface LedgerOverview {
   mirror?: readonly MirrorFact[];
 }
 
-/** 首页 7 列；审查与返工同一列（⇄） */
-export const COLUMNS = ["规格", "复述", "开发", "审查 ⇄ 返工", "合并", "上线", "验证"] as const;
+export const COLUMNS = [STAGE_WORD.spec, STAGE_WORD.restate, STAGE_WORD.build, "审查 ⇄ 返工", STAGE_WORD.merge, STAGE_WORD.live, STAGE_WORD.verified] as const;
 const COLUMN_OF: Record<Stage, number> = { spec: 0, restate: 1, build: 2, review: 3, fix: 3, merge: 4, live: 5, verified: 6, done: 6, blocked: 2, cancelled: 0 };
 export const columnOf = (stage: Stage, before: Stage | null = null): number => COLUMN_OF[stage === "blocked" ? before ?? "build" : stage];
 
@@ -331,6 +331,7 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
       return tr("已完成");
     case "cancelled":
       return tr("已取消");
+    default: return tr(stageWord(t.stage));
   }
 }
 
@@ -351,8 +352,8 @@ function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, froze
 /** 团队卡多带的一句：主场镜像过期（「主场 N 分钟前同步」，数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
 export function teamNote(t: Pick<LedgerTaskView, "team">, now: number, tr: Tr = zh): string {
   const bits: string[] = [];
-  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(t.team.observedAt == null ? tr("主场镜像过期") : mirrorAgo(t.team.observedAt, now, tr));
-  if (t.team?.blockingAsks) bits.push(tr("主场有 {n} 个阻塞提问", { n: t.team.blockingAsks }));
+  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(t.team.observedAt == null ? tr(MACHINE_WORDS.stale) : mirrorAgo(t.team.observedAt, now, tr));
+  if (t.team?.blockingAsks) bits.push(tr(MACHINE_WORDS.openQuestions, { n: t.team.blockingAsks }));
   return bits.join(" · ");
 }
 

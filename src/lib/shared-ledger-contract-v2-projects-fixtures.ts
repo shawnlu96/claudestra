@@ -5,7 +5,7 @@ import type {
   V2ProjectsExpectedScope, V2ProjectsRequests, V2ProjectsSuccesses, V2ProjectsEndpoint,
 } from "./shared-ledger-contract-v2-projects-types.js";
 import type {
-  V2TeamRecord, V2TeamDirectoryMember, V2ProjectsTeamEndpoint, V2ProjectsTeamRequests, V2ProjectsTeamSuccesses,
+  V2TeamRecord, V2TeamDirectoryMember, V2TeamInstance, V2ProjectsTeamEndpoint, V2ProjectsTeamRequests, V2ProjectsTeamSuccesses,
 } from "./shared-ledger-contract-v2-projects-types.js";
 
 /** Fresh synthetic JSON for public consumers. No state, network, real invitations, keys or bearer issuance.
@@ -101,14 +101,17 @@ export function createV2ProjectsTeamFixtures() {
   const unnamed: V2TeamRecord = { ...record, name: null };
   const self: V2TeamDirectoryMember = { ...team, personId: "person-demo", code: "demo-person", teamRole: "member" };
   const owner: V2TeamDirectoryMember = { ...team, personId: "person-owner", code: "demo-owner", teamRole: "owner" };
-  const requests: V2ProjectsTeamRequests = { team, teamUpdate: { ...team, rev: 1, name: "合成团队改名" } };
+  const selfInstance: V2TeamInstance = { personId: self.personId, instanceId: "instance-demo" };
+  const ownerInstance: V2TeamInstance = { personId: owner.personId, instanceId: "instance-owner" };
+  const requests: V2ProjectsTeamRequests = { team, teamUpdate: { ...team, rev: 1, name: "合成团队改名" }, teamInstances: team };
   const success = { ok: true, v: 2 } as const;
   const responses: V2ProjectsTeamSuccesses = {
     team: { ...success, team: record, self, members: [owner, self] },
     teamUpdate: { ...success, team: { ...record, name: requests.teamUpdate.name, rev: 2 } },
+    teamInstances: { ...success, ...team, instances: [ownerInstance, selfInstance] },
   };
   const scopes: Record<V2ProjectsTeamEndpoint, V2ProjectsExpectedScope> = {
-    team: { ...team, personId: self.personId }, teamUpdate: team,
+    team: { ...team, personId: self.personId }, teamUpdate: team, teamInstances: team,
   };
   const errors = {
     forbidden: { ok: false, v: 2, error: "forbidden", message: "forbidden" },
@@ -151,6 +154,22 @@ export function createV2ProjectsTeamFixtures() {
     { label: "read conflict", endpoint: "team", status: 409, body: errors.teamConflict },
     { label: "invalid conflict current", endpoint: "teamUpdate", status: 409, body: { ...errors.teamConflict, current: "untyped" } },
     { label: "wrong error status", endpoint: "teamUpdate", status: 404, body: errors.forbidden },
+    { label: "instances extra key", endpoint: "teamInstances", status: 200, body: { ...responses.teamInstances, path: "/not/a/real/path" } },
+    { label: "instances row extra key", endpoint: "teamInstances", status: 200,
+      body: { ...responses.teamInstances, instances: [ownerInstance, { ...selfInstance, status: "active" }] } },
+    { label: "instances row publicKey", endpoint: "teamInstances", status: 200,
+      body: { ...responses.teamInstances, instances: [ownerInstance, { ...selfInstance, publicKey: "F".repeat(43) }] } },
+    { label: "instances other team", endpoint: "teamInstances", status: 200, body: { ...responses.teamInstances, teamId: "other-team" } },
+    { label: "instances other center", endpoint: "teamInstances", status: 200,
+      body: { ...responses.teamInstances, centerId: `center-${"2".repeat(32)}` } },
+    { label: "duplicate instanceId", endpoint: "teamInstances", status: 200,
+      body: { ...responses.teamInstances, instances: [ownerInstance, { ...selfInstance, instanceId: ownerInstance.instanceId }] } },
+    { label: "instanceId not an id", endpoint: "teamInstances", status: 200,
+      body: { ...responses.teamInstances, instances: [ownerInstance, { ...selfInstance, instanceId: "../instance demo" }] } },
+    { label: "personId not an id", endpoint: "teamInstances", status: 200,
+      body: { ...responses.teamInstances, instances: [ownerInstance, { ...selfInstance, personId: "" }] } },
+    { label: "instances status 201", endpoint: "teamInstances", status: 201, body: responses.teamInstances },
+    { label: "instances conflict", endpoint: "teamInstances", status: 409, body: errors.teamConflict },
   ];
   const invalidScopes: { label: string; scope: V2ProjectsExpectedScope }[] = [
     { label: "missing personId", scope: team },
@@ -158,5 +177,5 @@ export function createV2ProjectsTeamFixtures() {
     { label: "other team", scope: { ...team, teamId: "other-team", personId: self.personId } },
     { label: "project scope", scope: { ...team, projectId: "demo-b", personId: self.personId } },
   ];
-  return { team, record, unnamed, self, owner, requests, responses, scopes, errors, invalidRequests, invalidResponses, invalidScopes };
+  return { team, record, unnamed, self, owner, selfInstance, ownerInstance, requests, responses, scopes, errors, invalidRequests, invalidResponses, invalidScopes };
 }

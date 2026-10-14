@@ -20,7 +20,10 @@ import type { CFold } from "./causal-model";
 import { causeOf, edgeBasis, STATE_WORD, stageCounts } from "./v4-model";
 import { attentionOf, type CountState } from "../count-words";
 import { countText } from "../count-words-i18n";
-import { looksLikeId } from "../team-source-adapter";
+import { MACHINE_WORDS } from "@/lib/owner-words";
+import { instanceName } from "../team-instance-names";
+import { sharedIdentity } from "../team-source-key";
+import { useInstanceNames } from "../work/use-work-board";
 import { useTeamTab } from "../collab-page-head";
 import v from "./v4.module.css";
 
@@ -212,21 +215,20 @@ export function CauseSec({ id, deps, onEdge, tr }: { id: string; deps: readonly 
 /** head 只显示短 SHA（8 位，和步骤线 collab-step-line-model.ts 同口径）；不像 commit 的不显示原文 */
 const shortHead = (h: string | null) => (h && /^[0-9a-f]{7,64}$/i.test(h.trim()) ? h.trim().slice(0, 8) : null);
 
-/**
- * 任务详情里团队卡多挂的一段：执行镜像带来的成员代号（不是本机 agent，不给打开会话）、执行实例（像 id 的不显示原文）、
- * head（只显示短 SHA）、主场开着的阻塞提问数、镜像新鲜度（按 now 随时间重判）。不知道的写「暂无」（镜像没有证据也是暂无，不说最新）；本机卡没有 team，整段不显示。
- */
-export function TeamFactsSec({ id, ov, now, tr }: { id: string; ov: Pick<LedgerOverview, "tasks">; now: number; tr: Tr }) {
-  const f = ov.tasks.find((t) => t.id === id)?.team;
+/** 团队卡的执行证据；实例 id 按本机快照换成机器显示名。 */
+export function TeamFactsSec({ id, ov, now, tr, project = "" }: { project?: string; id: string; ov: Pick<LedgerOverview, "tasks">; now: number; tr: Tr }) {
+  const f = ov.tasks.find((t) => t.id === id)?.team, identity = sharedIdentity(project);
+  const names = useInstanceNames(identity && f?.executorInstanceId !== identity.homeInstanceId ? identity.machine : null);
   if (!f) return null;
   const mirror = mirrorAt(f, now);
-  const inst = f.executorInstanceId ? (looksLikeId(f.executorInstanceId) ? tr("主场实例") : f.executorInstanceId) : tr("暂无");
+  const machine = instanceName(f.executorInstanceId, names, identity?.homeInstanceId ?? null);
+  const inst = machine === "本机" || machine === "其他成员的机器" || !machine ? tr(machine ?? "暂无") : machine;
   const rows: [string, React.ReactNode][] = [
     ["成员代号", f.assigneeCode || tr("暂无")],
-    ["执行实例", inst],
+    [MACHINE_WORDS.machine, inst],
     ["head", shortHead(f.head) ?? tr("暂无")],
     ["阻塞提问", f.blockingAsks],
-    ["镜像", mirror === "stale" ? <span className={v.warn}>{tr("主场镜像过期")}</span> : tr(mirror === "fresh" ? "主场镜像最新" : "暂无")],
+    [MACHINE_WORDS.syncSection, mirror === "stale" ? <span className={v.warn}>{tr(MACHINE_WORDS.stale)}</span> : tr(mirror === "fresh" ? MACHINE_WORDS.fresh : "暂无")],
   ];
   return (
     <Sec title={tr("团队")}>
@@ -246,7 +248,7 @@ export function MemberPage({ m, project, onClose, tr }: { m: Member; project: st
     nav.toContent();
   };
   return (
-    <Shell title={m.peer ? `${m.name}@${m.peer}` : m.name} sub={tr(m.peer ? "外部实例成员" : "本机成员")} onClose={onClose} tr={tr}>
+    <Shell title={m.peer ? `${m.name}@${m.peer}` : m.name} sub={tr(m.peer ? MACHINE_WORDS.otherMembers : "本机成员")} onClose={onClose} tr={tr}>
       {m.agent && <button type="button" className={v.link} onClick={open}>{tr("打开会话")} →</button>}
       <TeamPanelCards key={m.id} project={project} peer={m.peer ?? ""} agent={m.name} />
     </Shell>

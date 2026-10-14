@@ -54,6 +54,4 @@ export const FLEET_DICT: Record<string, string> = {
   "已跳过": "Skipped",
   "low-priority 开着，到 {time}{pct}": "Low priority on until {time}{pct}",
   "本周 low-priority 额度已用完": "This week's low-priority allowance is used up",
-  "撞墙等待中，到 {time} 自动继续": "At the usage limit, continuing automatically at {time}",
-  "LP 已用完": "LP used up",
 };

@@ -30,7 +30,7 @@ import { MasterIcon } from "./master-icon";
 import { AgentListNotice } from "./agent-list-status";
 import { SidebarMediaButton } from "../../media/media-button";
 import { SidebarShellButton } from "../../terminal/shell-button";
-import { WorkbenchTitle } from "@/features/talk/workspace-switch";
+import { WorkbenchTitle } from "@/features/talk/workspace-switch"; import { ChipLegend } from "./chip-legend"; import { SettingsIcon } from "./line-icons";
 import { SharedProjectsEntry } from "../../collab/shared-projects/projects-entry"; import { NowStrip } from "../../now/now-home";
 
 /**
@@ -217,8 +217,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       />
       {/* 安全区由通知插槽或面板顶栏择一垫（bg=base-200，条带与列表同色无缝）；列表靠轮询 + 回前台重连自动刷新 */}
       <div className="px-4 pb-2" style={{ paddingTop: "calc(var(--cstra-quota-pane-safe-top, env(safe-area-inset-top)) + 0.75rem)" }}>
-        <div className="flex items-center pb-2.5">
-          <WorkbenchTitle />
+        <div className="relative flex items-center pb-2.5">
+          <WorkbenchTitle /><ChipLegend />
           {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
           <span className="ml-auto"><MachineSwitcher onSwitched={() => store.resetForMachine()} /></span>
           {/* 项目管理 / 多选删除 / Peer / 用量看板：只给全权设备（sidebar-admin-buttons.tsx） */}
@@ -235,10 +235,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             title={t("设置")} aria-label={t("设置")}
             onClick={() => setSettingsPage("general")}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-              <circle cx="12" cy="12" r="3" />
-            </svg>
+            <SettingsIcon />
           </button>
         </div>
         <label className="flex items-center gap-2 rounded-lg bg-base-300/60 px-2.5 py-1.5">

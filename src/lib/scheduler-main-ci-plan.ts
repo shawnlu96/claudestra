@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mainCiSha, mainCiTargetValid, type MainCiHealth, type MainCiTarget } from "./scheduler-main-ci.js";
 
 interface MainCiCandidate { project: string; repo: string; taskId: string; head: string }
@@ -25,12 +26,17 @@ export interface MainCiPlanInput {
   approvals: readonly MainCiPmApproval[];
   /** Durable notification claims reloaded from storage each tick; not a process-local cache. */
   notificationClaims: readonly string[];
+  /**
+   * MAINCIW2: "legacy" (default) = the original reading, every non-green pauses; "run" (mainCiPause=on) = health.ci decides: a still
+   * running push run with nothing failed is main_ci_pending (no pause, no notice), an evidence gap is main_ci_evidence_missing (pause).
+   */
+  rule?: "legacy" | "run";
 }
 type Disposition = "normal-gates" | "pause";
 export interface MainCiPlan {
   mode: "plan-only";
   scope: { project: string; repo: string };
-  reason: "healthy" | "main_unhealthy" | "scope_mismatch" | "stale_health" | "pm_repair_candidate";
+  reason: "healthy" | "main_unhealthy" | "scope_mismatch" | "stale_health" | "pm_repair_candidate" | "main_ci_pending" | "main_ci_evidence_missing";
   actions: Record<"formTrain" | "updateBranch" | "rerun" | "merge" | "bounce", Disposition>;
   continue: readonly ["write", "independent-review"];
   preserve: readonly ["reviews", "rounds", "resources", "unknown-side-effects"];
@@ -41,6 +47,40 @@ export interface MainCiPlan {
   /** Integration must atomically persist this claim before sending to this project's PM; a lost claim means no send. */
   notification: { recipient: "project-pm"; project: string; key: string; mainSha: string | null; state: "red" | "unknown";
     kind: "main_red" | "read_unavailable" | "checks_unavailable"; faultKey: string | null } | null;
+  /** The run evidence behind this plan (health.ci), only when the health carried it; kept per run id / attempt for later checking. */
+  ci?: { rule: "legacy" | "run"; verdict: NonNullable<MainCiHealth["ci"]>["verdict"]; why: NonNullable<MainCiHealth["ci"]>["why"];
+    runs: { id: number; attempt: number; status: string; conclusion: string | null }[] };
+}
+
+const PLAN_REASONS = ["healthy", "main_unhealthy", "scope_mismatch", "stale_health", "pm_repair_candidate", "main_ci_pending", "main_ci_evidence_missing"];
+const RUN_STATUSES = ["queued", "in_progress", "completed", "waiting", "pending", "requested"];
+const RUN_CONCLUSIONS = ["success", "failure", "neutral", "cancelled", "skipped", "timed_out", "action_required", "stale", "startup_failure"];
+export interface MainCiEvidence { rule: "run"; newReason: MainCiPlan["reason"]; runs: { id: number; attempt: number; status: string; conclusion: string | null }[] }
+/** The observe sample's data.evidence (`scheduler-main-ci --op observe --evidence`): exactly this shape, else null (the CLI refuses it whole). */
+export function mainCiEvidence(raw: string): MainCiEvidence | null {
+  if (typeof raw !== "string" || Buffer.byteLength(raw) > 2048) return null;
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { return null; }
+  const o = v as Record<string, unknown>, pos = (n: unknown) => Number.isSafeInteger(n) && (n as number) > 0;
+  if (!o || typeof o !== "object" || Array.isArray(o) || Object.keys(o).sort().join() !== "newReason,rule,runs" || o.rule !== "run" ||
+    !PLAN_REASONS.includes(o.newReason as string) || !Array.isArray(o.runs) || o.runs.length > 10) return null;
+  const runs: MainCiEvidence["runs"] = [];
+  for (const r of o.runs as Record<string, unknown>[]) {
+    if (!r || typeof r !== "object" || Array.isArray(r) || Object.keys(r).sort().join() !== "attempt,conclusion,id,status" || !pos(r.id) ||
+      !pos(r.attempt) || !RUN_STATUSES.includes(r.status as string) ||
+      (r.conclusion !== null && !RUN_CONCLUSIONS.includes(r.conclusion as string))) return null;
+    runs.push({ id: r.id as number, attempt: r.attempt as number, status: r.status as string, conclusion: r.conclusion as string | null });
+  }
+  return { rule: "run", newReason: o.newReason as MainCiPlan["reason"], runs };
+}
+
+/**
+ * The observe actionKey suffix: newReason and each run's `id@attempt` ('#' and ',' are outside recovery-policy's actionKey charset),
+ * so each attempt of one SHA keeps its own sample; a run list too long for the 120-character key is replaced by its digest.
+ */
+export function mainCiEvidenceKey(ev: MainCiEvidence): string {
+  const runs = ev.runs.map((r) => `${r.id}@${r.attempt}`).join("/");
+  return `${ev.newReason}:${runs.length <= 32 ? runs : `h${createHash("sha256").update(runs).digest("hex").slice(0, 16)}`}`;
 }
 
 /** Exact repair identity; notification dedup deliberately excludes volatile check progress. */
@@ -116,18 +156,25 @@ export function planMainCi(input: MainCiPlanInput): MainCiPlan {
   const recent = recentObservation(input);
   const current = recent && mainCiSha(input.currentMainSha) && mainCiSha(h.mainSha) && input.currentMainSha.toLowerCase() === h.mainSha.toLowerCase();
   const repair = scopeOk && current ? repairApproval(input, fault) : undefined;
-  const green = scopeOk && current && h.state === "green";
-  const normal: Disposition = green ? "normal-gates" : "pause";
+  const rule = input.rule === "run" ? "run" : "legacy";
+  // Under "run" the run verdict must agree: green checks on a cancelled sole push run are evidence_missing, not admission.
+  const green = scopeOk && current && h.state === "green" && (rule === "legacy" || !h.ci || h.ci.verdict === "green");
+  // Waiting is judged only for this exact, fresh, in-scope SHA; stale / drifted / unreadable evidence never reaches it.
+  const waiting = rule === "run" && scopeOk && current && !green && h.ci?.verdict === "pending";
+  const evidence = rule === "run" && scopeOk && current && h.ci?.verdict === "evidence_missing";
+  const normal: Disposition = green || waiting ? "normal-gates" : "pause";
   // Repairs take a serial path through unchanged gates; main CI alone never authorizes merge or a red-train bypass.
   const serial: Disposition = repair ? "normal-gates" : normal;
   return {
     mode: "plan-only", scope: { project: target.project, repo: target.repo },
     reason: !scopeOk ? "scope_mismatch" : !recent || (!current && h.state !== "unknown") ? "stale_health" :
-      green ? "healthy" : repair ? "pm_repair_candidate" : "main_unhealthy",
+      green ? "healthy" : waiting ? "main_ci_pending" : repair ? "pm_repair_candidate" : evidence ? "main_ci_evidence_missing" : "main_unhealthy",
     actions: { formTrain: normal, updateBranch: serial, rerun: serial, merge: serial, bounce: normal },
     continue: ["write", "independent-review"], preserve: ["reviews", "rounds", "resources", "unknown-side-effects"], cancelExistingCi: false,
     faultKey: current ? fault : null,
     repair: repair ? { requestId: repair.requestId, taskId: c.taskId, head: c.head, requires: ["review", "ui", "ci", "authorization"] } : null,
-    notification: scopeOk && recent ? notification(input, current, current ? fault : null) : null,
+    notification: scopeOk && recent && !waiting ? notification(input, current, current ? fault : null) : null,
+    ...h.ci ? { ci: { rule, verdict: h.ci.verdict, why: h.ci.why,
+      runs: h.ci.runs.map((r) => ({ id: r.id, attempt: r.attempt, status: r.status, conclusion: r.conclusion })) } } : {},
   };
 }

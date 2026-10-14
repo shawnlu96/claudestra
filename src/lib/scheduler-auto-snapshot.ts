@@ -22,6 +22,9 @@ import { fixDiffOf } from "./review-converge-scope.js";
 import { securityPoolMode } from "./security-pool.js";
 import { snapshotProjectRepo } from "./scheduler-foreign-repo.js";
 import { adoptedFact, adoptionCheck } from "./scheduler-manual-review-source.js";
+import { peerLeaseMode, type PeerLeaseSnapshot } from "./recovery-peer-lease.js";
+import { handoverAuthorFamily } from "./recovery-peer-lease-family.js";
+import { handoverDue } from "./recovery-peer-lease-handover.js";
 
 type ReviewProof = PlannerSnapshot["reviewDispatches"][number];
 
@@ -44,18 +47,20 @@ function reviewProofs(db: Database, events: readonly LedgerEvent[], intents: rea
   return out;
 }
 
-export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts, exclude?: string): SwapSnapshot {
+export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts, exclude?: string): SwapSnapshot & PeerLeaseSnapshot {
   const policy = opts.pool?.remote.agents ? opts.pool.remote : projectAgentPolicy(task.project);
   if (policy) opts = { ...opts, maxWorkers: policy.agents!.claude + policy.agents!.codex,
     pool: { remote: policy, borrow: opts.pool?.borrow ?? [] } };
   const base = observeSnapshot(db, task, opts);
   const bound = taskWorkerRefs(db, task.id);
+  if (bound.author?.source === "peer_claim" && handoverDue(db, task)) bound.author = null; // PEERLEASE1: the binding this tick hands over
   const intents = base.intents.filter((i) => !i.id.startsWith("pm-dispatch:") && i.id !== exclude);
   // The current round's verdict came from the pool: that order's peer worker is the reviewer the verdict is checked against.
   const reviewer = currentPooledReviewer(db, task) ?? bound.reviewer;
   // A head a peer delivered was written in that order's family: review placement, reviewer session and gates go across from it.
   const wrote = remoteHeadFamily(db, task);
-  const workflow = wrote && base.workflow ? { ...base.workflow, authorFamily: wrote } : base.workflow;
+  const handed = handoverAuthorFamily(db, task, bound.author); // PEERLEASE1: a handed-over local fix author keeps its own family
+  const workflow = (handed ?? wrote) && base.workflow ? { ...base.workflow, authorFamily: (handed ?? wrote)! } : base.workflow;
   const stale = staleReplacementFact(db, task);
   const snap = convergenceSnapshot({ ...base, workflow, remoteAuthorFamily: wrote, author: bound.author, reviewer, intents,
     reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
@@ -66,5 +71,6 @@ export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts,
     ...snapshotProjectRepo(task), // PLANSNAP1: 只有 merge 阶段的卡读项目仓库（scheduler-foreign-repo.ts），规划器只看这个字段
     ...(workflow?.template === "security" ? { securityPool: securityPoolMode(task.project) } : {}) }); // 只有 security 卡读开关（security-pool.ts）
   // GATESWAP1: only fix cards read the fixLocalSwap switch; the fact is pure over this snapshot (recovery-fix-local-swap.ts).
-  return task.stage === "fix" ? { ...snap, localSwap: localSwapFact(snap, localSwapMode(db, task.project), opts.now ?? Date.now(), remoteHeadPeer(db, task)) } : snap;
+  return task.stage === "fix" ? { ...snap, localSwap: localSwapFact(snap, localSwapMode(db, task.project), opts.now ?? Date.now(), remoteHeadPeer(db, task)),
+    peerLease: { mode: peerLeaseMode(db, task.project) } } : snap;
 }

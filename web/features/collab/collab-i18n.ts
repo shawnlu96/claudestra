@@ -4,6 +4,7 @@
  * 短词做全局 key 会改掉别处同字不同义的译文（tests/web-ledger-stage.test.ts 守着「开发」「验证」这几个）。
  * 整句模板照常在 lib/i18n-dict-collab.ts（经 DICT 全局可用）。组件一律用 useCollabT()。
  */
+import { MACHINE_WORDS, READY_WORD, STAGE_WORD, ownerWordEn } from "@/lib/owner-words";
 import { useMemo } from "react";
 import { useLang } from "@/lib/i18n";
 import { DICT } from "@/lib/i18n-dict";
@@ -11,6 +12,10 @@ import { fillParams } from "@/lib/i18n-fill";
 import type { Tr } from "./collab-model";
 
 const COLLAB_WORDS: Record<string, string> = {
+  "其他成员的机器": "Another member's machine",
+  "新建模块": "New module", "暂无模块": "No modules yet",
+  "团队绑定暂时读不到，稍后自动重试": "Team bindings unavailable; retrying automatically",
+  "团队权限已失效": "Team permission has expired",
   "产品 DAG": "Product DAG",
   "预计": "Expected",
   "还没有子 DAG": "No sub-DAG yet",
@@ -23,16 +28,16 @@ const COLLAB_WORDS: Record<string, string> = {
   "暂无": "Unknown",
   "没取到，正在重试": "Could not load, retrying",
   // 团队数据的执行镜像新鲜度（team-parity P1-B）
-  "主场镜像过期": "Home mirror is stale",
-  "主场镜像最新": "Home mirror is fresh",
+  [MACHINE_WORDS.stale]: ownerWordEn(MACHINE_WORDS.stale)!,
+  [MACHINE_WORDS.fresh]: ownerWordEn(MACHINE_WORDS.fresh)!,
   // 过期时带多久前同步（mirror-fresh.ts mirrorAgo）
-  "主场 {n} 分钟前同步": "Home synced {n} min ago",
-  "主场 {n} 小时前同步": "Home synced {n} h ago",
-  "镜像": "Mirror",
+  [MACHINE_WORDS.staleMinutes]: ownerWordEn(MACHINE_WORDS.staleMinutes)!,
+  [MACHINE_WORDS.staleHours]: ownerWordEn(MACHINE_WORDS.staleHours)!,
+  [MACHINE_WORDS.syncSection]: ownerWordEn(MACHINE_WORDS.syncSection)!,
   // 任务详情「团队」段（v4-props.tsx TeamFactsSec）
   "成员代号": "Member code",
   "执行实例": "Executor instance",
-  "主场实例": "Home instance",
+  [MACHINE_WORDS.machine]: ownerWordEn(MACHINE_WORDS.machine)!,
   "阻塞提问": "Blocking questions",
   // 拼句用的标点与日期词：英文用半角；today / yesterday 在时间前面，一律小写
   "：": ": ",
@@ -51,6 +56,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "在审": "in review",
   "在管": "managing",
   "复述": "Restate",
+  [STAGE_WORD.restate]: ownerWordEn(STAGE_WORD.restate)!,
   "实时": "live",
   "审查": "Review",
   "审查员": "Reviewer",
@@ -129,7 +135,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "进行中": "Active",
   "全部": "All",
   "未完成": "Not done",
-  "可执行": "Ready",
+  [READY_WORD]: ownerWordEn(READY_WORD)!,
   "团队": "Team",
   "没有": "None",
   "大纲": "Outline",
@@ -166,5 +172,5 @@ const COLLAB_WORDS: Record<string, string> = {
 
 export function useCollabT(): Tr {
   const lang = useLang();
-  return useMemo<Tr>(() => (s, p) => fillParams(lang === "zh" ? s : (COLLAB_WORDS[s] ?? DICT[s] ?? s), p), [lang]);
+  return useMemo<Tr>(() => (s, p) => fillParams(lang === "zh" ? s : (ownerWordEn(s) ?? COLLAB_WORDS[s] ?? DICT[s] ?? s), p), [lang]);
 }
