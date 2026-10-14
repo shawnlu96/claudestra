@@ -135,7 +135,9 @@ for (const lang of ["zh", "en"] as const) for (const width of [1200, 390]) {
       const failed = cards.get(dag.features[0]!.title)!;
       expect(failed).toContain("3 / 9"); expect(failed).toContain(`1 ${blocked}`); expect(failed).not.toContain(active);
       expect(cards.get("Failed empty")).toContain("0 / 0"); expect(cards.get("Failed empty")).not.toContain(active);
-      expect(cards.get("Known zero")).toContain(`0 ${active}`);
+      // 桌面是项目地图（PDLAYOUT1）：全部完成的按回退规则进「已收尾」，不占卡位；手机列表照旧
+      if (width === 390) expect(cards.get("Known zero")).toContain(`0 ${active}`);
+      else expect(cards.has("Known zero")).toBe(false);
       expect(cards.get("Known busy")).toContain(`2 ${active}`);
       expect(cards.get("Known empty")).toContain(`0 ${active}`);
     });

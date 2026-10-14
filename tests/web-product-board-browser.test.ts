@@ -158,10 +158,14 @@ test.skipIf(!enabled)('product and sub-DAG before/after light/dark at 390/1400, 
           await page.screenshot({ path: resolve(out, `${version}-${theme}-${width}-product.png`) });
           if (version === 'after') {
             if (width === 1400) expect(await page.getByRole('tab', { name: '子 DAG', exact: true }).isDisabled()).toBe(true);
-            expect(await page.getByRole('progressbar').count()).toBe(3);
-            await page.getByRole('button', { name: /1 已完成/ }).click();
-            expect(await page.getByRole('progressbar').count()).toBe(4);
-            await page.getByRole('button', { name: /1 已完成/ }).click();
+            // 桌面是项目地图（PDLAYOUT1）：暂停的进「已暂停」，已收尾的是小标签（没有进度条）；手机列表不变
+            const wide = width === 1400;
+            const fold = page.getByRole('button', { name: wide ? '已收尾 1' : /1 已完成/ });
+            expect(await page.getByRole('progressbar').count()).toBe(wide ? 2 : 3);
+            await fold.click();
+            expect(await page.getByRole('progressbar').count()).toBe(wide ? 2 : 4);
+            if (wide) expect(await page.locator("[data-pd-chip='done:base']").count()).toBe(1);
+            await fold.click();
             expect(await page.getByRole('tab', { name: '谁在干活' }).count()).toBe(1);
             await page.getByRole('button', { name: /调度与自动派单/ }).click();
             await page.getByRole('navigation').getByRole('button', { name: '产品 DAG' }).waitFor();
