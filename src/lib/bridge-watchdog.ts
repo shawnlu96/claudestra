@@ -14,7 +14,7 @@ import { t } from "./i18n.js";
 import { captureBridgeDiag, realDiagIo } from "./bridge-watchdog-diag.js";
 import { realOobIo, sendBridgeOob, type OobEvent } from "./bridge-watchdog-oob.js";
 
-/** config.json 的键；缺省 / 坏值 = observe */
+/** config.json 的键；缺省 / 坏值 / config.json 读不出 = on（observe / off 要显式设置） */
 const WATCHDOG_CONFIG_KEY = "bridgeWatchdog";
 export type WatchdogMode = "on" | "observe" | "off";
 type StuckReason = "api" | "relay";
@@ -38,7 +38,7 @@ export const WATCHDOG_LIMITS = {
 } as const;
 
 export function parseWatchdogMode(raw: unknown): WatchdogMode {
-  return raw === "on" || raw === "off" || raw === "observe" ? raw : "observe";
+  return raw === "on" || raw === "off" || raw === "observe" ? raw : "on";
 }
 
 /** 每轮现读 config.json 的开关（config-store 的 merge 白名单保留它，网页设置等 set* 不会抹掉） */
