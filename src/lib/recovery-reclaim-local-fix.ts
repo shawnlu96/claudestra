@@ -13,6 +13,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { LedgerError, listEvents } from "./ledger-store.js";
 import { heldLease } from "./ledger-lend-lease.js";
 import { tx } from "./ledger-tx.js";
+import type { SwapGate } from "./fix-strategy-guard.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 
 const RECLAIM_LOCAL_FIX_KEY = "reclaimLocalFix" as const;
@@ -61,4 +62,18 @@ export function retireReclaimedPeerAuthor(db: Database, ctx: WriteCtx, intentId:
     db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE taskId = ? AND role = 'author' AND transport = 'peer' AND state != 'retired'")
       .run(intentId, ctx.now ?? Date.now(), taskId);
   });
+}
+
+/**
+ * The gate the local build re-reads at its create and bind edges (after the tree / Codex slot awaits): the switch is still on, no lease
+ * was taken again, and the same reclaim is still the current head's. Without it a switch to observe / off mid-build would still bind.
+ */
+export function reclaimLocalFixEdge(db: Database, taskId: string, reclaimSeq: number): SwapGate {
+  return () => {
+    const task = mustTask(db, taskId), mode = modeOf(db, task.project);
+    const why = mode !== "on" ? `reclaimLocalFix 已切到 ${mode}，停在下一副作用前`
+      : heldLease(db, task) ? "写租约又被持有，不在本机另建作者"
+      : reclaimOfCurrentHead(db, task)?.seq !== reclaimSeq ? "收回事件已不是当前 head 的，旧接修计划失效" : null;
+    return why ? { halted: "drift", reason: why } : null;
+  };
 }

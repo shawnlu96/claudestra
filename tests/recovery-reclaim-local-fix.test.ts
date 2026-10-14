@@ -96,3 +96,20 @@ test("on: a card the scheduler already reclaimed this round is not reclaimed a s
     expect(getIntent(f.db, intent.id)?.status).toBe("done"); expect(p.effects.filter((e) => e.startsWith("create:")).length).toBe(1);
   } finally { f.close(); }
 });
+
+for (const edge of ["tree", "create"] as const) {
+  test(`on → observe while the ${edge} await runs: no further create / bind / fix dispatch`, async () => {
+    const { f, p, intent } = await reclaimedFix("on");
+    try {
+      const flip = () => setReclaimLocalFixPolicy(f.db, () => ({ mode: "observe", manualAfterMs: null, source: "config" }));
+      if (edge === "tree") { const tree = p.deps.authorTree!; p.deps.authorTree = async (...a) => { const r = await tree(...a); flip(); return r; }; }
+      else { const manager = p.deps.manager; p.deps.manager = async (...a) => { const r = await manager(...a); if (a[0] === "create") flip(); return r; }; }
+      const result = await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
+      expect(result).toMatchObject({ step: "waiting" }); expect(result.detail).toContain("reclaimLocalFix 已切到 observe");
+      expect(p.effects.filter((e) => e.startsWith("create:")).length).toBe(edge === "tree" ? 0 : 1);
+      expect(getIntent(f.db, intent.id)?.status).not.toBe("done");
+      expect(getSchedulerSession(f.db, "T1", "author")?.transport).toBe("peer"); // still the retired peer row: nothing new bound
+      expect(f.db.query("SELECT 1 FROM task_steps WHERE taskId = 'T1' AND step = 'fix' AND round = ? AND state = 'assigned'").get(f.task().round)).toBeNull();
+    } finally { f.close(); }
+  });
+}
