@@ -29,6 +29,15 @@ export const nodeAliasFs: AliasFs = {
       throw e;
     }
   },
+  async entryId(path) {
+    try {
+      const s = await lstat(path);
+      return `${s.dev}:${s.ino}`;
+    } catch (e) {
+      if (missing(e)) return null;
+      throw e;
+    }
+  },
   symlink: (target, path) => symlink(target, path, "dir"),
   unlink: (path) => unlink(path),
 };

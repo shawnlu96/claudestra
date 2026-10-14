@@ -19,6 +19,8 @@ export interface AliasFs {
   resolve(path: string): Promise<string>;
   /** 跟随软链后的文件标识(dev:ino);不存在返回 null */
   fileId(path: string): Promise<string | null>;
+  /** 不跟随软链的这一项自身标识(dev:ino):认「还是不是本次建的那条软链」;不存在返回 null */
+  entryId(path: string): Promise<string | null>;
   symlink(target: string, path: string): Promise<void>;
   unlink(path: string): Promise<void>;
 }
