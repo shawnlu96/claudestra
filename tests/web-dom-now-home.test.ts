@@ -1,5 +1,5 @@
 /**
- * UXHOME1：「现在」总览真挂到 happy-dom（React 19）——真的 MessageList（没选会话时的主区）、真的 Sidebar（侧栏条 + 项目组 + 团队区）、
+ * UXHOME1：「今天」总览（TODAY1 改名）真挂到 happy-dom（React 19）——真的 MessageList（没选会话时的主区）、真的 Sidebar（侧栏条 + 项目组 + 团队区）、
  * 真的 chat store / 待办 store / 团队绑定 store。全部 fetch 在这里拦下按合成数据答，夹具之外一律 404，不连任何 bridge。
  * 数据照规格「对照基准」：4 个 agent 其中 2 个忙；3 件等 owner 的 asks（1 件团队提案卡）；4 个项目（两个绑定团队：一个成组一个单成员；
  * 一个本机成组；一个本机单成员）。happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
@@ -177,26 +177,26 @@ async function mount(part: "main" | "sidebar" | "strip", width = 1280, bindingsD
   return { host, seen, click, all, texts, text: () => (host.textContent ?? "").replace(/\s+/g, " "), unmount };
 }
 
-test("[验收线 2] 桌面没选会话时主区是『现在』页，三块齐全；DOM 里不再有『选择左侧一个会话开始』", async () => {
+test("[验收线 2] 桌面没选会话时主区是『今天』页，三块齐全；DOM 里不再有『选择左侧一个会话开始』", async () => {
   const v = await mount("main");
   await until(() => v.all("[data-now-worker]").length === 2 && v.all("[data-now-project]").length === 4 && v.all("[data-now-wait]").length === 3, "now page");
   expect(v.host.querySelector("[data-now=page]")).not.toBeNull();
   expect(v.text()).not.toContain("选择左侧一个会话开始");
-  expect(v.host.querySelector("[data-now-summary]")?.textContent).toBe("2 个 agent 在干活 · 3 件等你");
-  expect(v.texts("section h3")).toEqual(["等你的事3 件", "在干活2 个 agent", "各项目"]);
-  // 在干活：名字（显示名优先）· 在做什么 · 最近动静；没有 lastActivityTs 的不写时间
-  expect(v.texts("[data-now-worker] [data-now-doing]")).toEqual(["UXHOME1 开发中", "审 UXNUM1 第 2 轮"]);
-  expect(v.texts("[data-now-worker]")[0]).toContain("开发一号");
-  expect(v.all("[data-now-worker]").map((e) => e.querySelector("[data-now-ago]")?.textContent ?? null)).toEqual(["3分钟前", null]);
+  expect(v.host.querySelector("[data-now-summary]")?.textContent).toBe("3 件要你处理 · 2 个 agent 在干活");
+  expect(v.texts("section h3")).toEqual(["要你处理3 件", "正在做2 个 agent 在干活", "团队与额度"]);
+  // 在干活：名字（显示名优先）· 在做什么 · 最近动静；没有 lastActivityTs 的不写时间（TODAY1 起按项目分组：本机成组在团队成组之前）
+  expect(v.texts("[data-now-worker] [data-now-doing]")).toEqual(["审 UXNUM1 第 2 轮", "UXHOME1 开发中"]);
+  expect(v.texts("[data-now-worker]")[1]).toContain("开发一号");
+  expect(v.all("[data-now-worker]").map((e) => e.querySelector("[data-now-ago]")?.textContent ?? null)).toEqual([null, "3分钟前"]);
   // 等你的事：按时间倒序，带来自哪个项目
   expect(v.all("[data-now-wait]").map((e) => e.getAttribute("data-now-wait"))).toEqual(["ask-proposal", "ask-mid", "ask-old"]);
-  expect(v.texts("[data-now-wait]")[0]).toBe("提案待你批准：卡片工作优先级来自 团队单成员");
+  expect(v.texts("[data-now-wait]")[0]).toBe("提案待你批准：卡片工作优先级团队单成员去处理");
   // 各项目：有等你的在前；单成员项目也在；数字带单位
   expect(v.all("[data-now-project]").map((e) => e.getAttribute("data-now-project"))).toEqual(["local-group", "team-solo", "team-group", "local-solo"]);
   expect(v.texts("[data-now-project=team-group]")[0]).toBe("团队成组团队在干活 1 个 agent待你处理 1 件");
   expect(v.texts("[data-now-project=local-solo]")[0]).toBe("本机单成员");
   // 不新增请求：除了外壳本来就读的会话 / 未读 / 项目 / 待办，只有团队绑定那一份（项目组入口读的同一个 store）
-  expect(calls.filter((c) => !/^GET \/(app-config\.json|api\/v1\/(agents|unread|projects|asks|shared-ledger\/context))$/.test(c))).toEqual([]);
+  expect(calls.filter((c) => !/^GET \/(app-config\.json|api\/v1\/(agents|unread|projects|asks|shared-ledger\/context|ledger\/[\w-]+(\/product)?|events|lend\/quota-lines))$/.test(c))).toEqual([]);
   await v.unmount();
 });
 
@@ -230,18 +230,18 @@ test("[验收线 3] 点『等你的事』一条打开收件箱并定位；点『
   await a.unmount();
 });
 
-test("[验收线 2] 侧栏条：收起时一行『现在 · 2 个 agent 在干活 · 3 件等你』，点开展开三块，再点收起；展开状态记在本机", async () => {
+test("[验收线 2] 侧栏条：收起时一行『今天 · 3 件要你处理 · 2 个 agent 在干活』，点开展开三块，再点收起；展开状态记在本机", async () => {
   win.localStorage.clear();
   const v = await mount("strip", 390);
   await until(() => v.all("[data-now-worker]").length === 2, "strip data");
   const strip = () => v.host.querySelector("[data-now=strip]")!;
   const toggle = () => strip().querySelector("button[aria-expanded]")!;
   const fold = () => strip().querySelector("[data-now-blocks]")!.closest("[inert]");
-  expect(toggle().textContent).toBe("现在· 2 个 agent 在干活 · 3 件等你");
+  expect(toggle().textContent).toBe("今天· 3 件要你处理 · 2 个 agent 在干活");
   expect([strip().getAttribute("data-now-open"), toggle().getAttribute("aria-expanded"), fold() !== null]).toEqual(["0", "false", true]);
   await v.click(toggle(), "strip toggle");
   expect([strip().getAttribute("data-now-open"), toggle().getAttribute("aria-expanded"), fold() !== null]).toEqual(["1", "true", false]);
-  expect(v.texts("[data-now=strip] section h3")).toEqual(["等你的事3 件", "在干活2 个 agent", "各项目"]);
+  expect(v.texts("[data-now=strip] section h3")).toEqual(["要你处理3 件", "正在做2 个 agent 在干活", "团队与额度"]);
   await v.unmount();
   // 记住了：重新挂载直接是展开的
   const again = await mount("strip", 390);
@@ -272,7 +272,7 @@ test("[验收线 2] localStorage 读写都抛错：页面照常，侧栏条是�
   }
 });
 
-test("[验收线 2] 绑定读不到时团队项目也不乱开本机：各项目行不可点、title 写原因；超过 6 个项目折叠成『展开全部』", async () => {
+test("[验收线 2] 绑定读不到时团队项目也不乱开本机：各项目行不可点、title 写原因；超过 6 个项目折叠成『其余 K 个项目』", async () => {
   world.identities = "fail";
   const extra = Array.from({ length: 5 }, (_, i) => ({ id: `more-${i}`, name: `更多 ${i}`, emoji: null, dirs: [] }));
   PROJECTS.push(...extra);
@@ -284,7 +284,7 @@ test("[验收线 2] 绑定读不到时团队项目也不乱开本机：各项目
     await v.click(blocked, "blocked row");
     expect([v.seen.open, v.seen.toContent]).toEqual([null, 0]);
     const more = v.host.querySelector("[data-now-project-all]")!;
-    expect(more.textContent).toBe("展开全部（共 9 个）");
+    expect(more.textContent).toBe("其余 3 个项目");
     await v.click(more, "show all");
     expect(v.all("[data-now-project]")).toHaveLength(9);
     await v.unmount();
