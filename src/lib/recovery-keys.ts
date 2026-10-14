@@ -77,4 +77,5 @@ export const RECOVERY_KEYS = [
   "effCountCarry",
   "ciLogPerJob",
   "privateStartPlacement",
+  "centerReplicaPull",
 ] as const;
