@@ -17,26 +17,36 @@ import { isWriteInvocation } from "./write-commands.js";
 
 const PM_RAILS_STATE_PATH = statePath("pm-rails.json");
 
-/** start_node 开 auto 之后的几步（lib/dag-tools-steps.ts）各自用哪条命令、目标卡在第几个位置参数：绑节点、peer 卡的跳过复述 */
-const START_STEPS_AFTER_AUTO: Record<string, { cmd: string; taskArg: number }> = {
-  bind: { cmd: "dag-bind", taskArg: 3 }, placement: { cmd: "decision", taskArg: 1 }, restate: { cmd: "stage", taskArg: 1 },
+/**
+ * start_node 开 auto 之后的几步（lib/dag-tools-steps.ts）各自的确切动作：命令、目标卡在第几个位置参数、必带的旗标、当时卡在哪个阶段。
+ * 绑节点（卡在 spec，peer 卡已跳过复述则在 restate）、peer 卡记放置说明、peer 卡跳过复述（只许 spec→restate）。
+ */
+const START_STEPS_AFTER_AUTO: Record<string, { cmd: string; taskArg: number; flags?: Record<string, string>; stages: readonly string[] }> = {
+  bind: { cmd: "dag-bind", taskArg: 3, stages: ["spec", "restate"] },
+  placement: { cmd: "decision", taskArg: 1, stages: ["spec"] },
+  restate: { cmd: "stage", taskArg: 1, flags: { from: "spec", to: "restate" }, stages: ["spec"] },
 };
 
-/**
- * 认 start_node 自己的步骤，不认调用方随手填的 dedup 文本：键是 `dag-start:<卡>:<attempt>:<步>`，步对得上命令、命令改的就是这张卡，
- * 同一 attempt 的建卡事件在库里（kind=task、target=这张卡、op=new），且卡还在 spec / restate（开卡没走完；peer 卡先跳过复述再绑节点）。拿别的卡的建卡前缀改在跑的卡、
- * 拿本卡旧 attempt 改已开工的卡都豁免不了（tests/pm-rails.test.ts「验收线 12」）；dedup 键一次一用，重放写不出新事件。
- */
-const OPENING_STAGES = new Set(["spec", "restate"]);
+/** --name value / --name=value 两种写法都认 */
+function flag(args: readonly string[], name: string): string | undefined {
+  const i = args.findIndex((a) => a === `--${name}` || a.startsWith(`--${name}=`));
+  if (i < 0) return undefined;
+  return args[i].includes("=") ? args[i].slice(args[i].indexOf("=") + 1) : args[i + 1];
+}
 
+/**
+ * 认 start_node 自己的步骤，不认调用方随手填的 dedup 文本：键是 `dag-start:<卡>:<attempt>:<步>`，命令、目标卡、旗标、卡当前阶段都得是
+ * start_node 那一步的确切动作，且同一 attempt 的建卡事件在库里（kind=task、target=这张卡、op=new）。
+ * 别的卡的前缀、本卡已开工、拿复述键做别的阶段跳转都豁免不了；能豁免的只剩「原样做 start_node 那一步」，不算干预
+ * （tests/pm-rails.test.ts「验收线 12」）。dedup 键一次一用，重放写不出新事件。
+ */
 function startNodeStep(db: Database, args: readonly string[]): boolean {
-  const i = args.findIndex((a) => a === "--dedup" || a.startsWith("--dedup="));
-  const key = i < 0 ? "" : args[i].startsWith("--dedup=") ? args[i].slice(8) : args[i + 1] ?? "";
-  const m = /^dag-start:([^:]+):([^:]+):([^:]+)$/.exec(key);
+  const m = /^dag-start:([^:]+):([^:]+):([^:]+)$/.exec(flag(args, "dedup") ?? "");
   const step = m ? START_STEPS_AFTER_AUTO[m[3]] : undefined;
   if (!m || !step || args[0] !== step.cmd || args[step.taskArg] !== m[1]) return false;
+  if (Object.entries(step.flags ?? {}).some(([k, v]) => flag(args, k) !== v)) return false;
   const born = getEventByDedup(db, `dag-start:${m[1]}:${m[2]}:task-new`);
-  return !!born && born.kind === "task" && born.target === m[1] && born.data.op === "new" && OPENING_STAGES.has(getTask(db, m[1])?.stage ?? "");
+  return !!born && born.kind === "task" && born.target === m[1] && born.data.op === "new" && step.stages.includes(getTask(db, m[1])?.stage ?? "");
 }
 
 /** 读命令、调度服务、owner、start_node 开卡步骤不开作用域：读不写事件，调度 / owner 从来不是 PM 角色（也省下调度 tick 每条命令的快照查询） */

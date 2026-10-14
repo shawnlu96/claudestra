@@ -316,3 +316,16 @@ test("[验收线 2] r2 lookback-drops-unsent：通知通道断了 49 小时，�
   expect(t.sent[0]).toContain("pm：restate-approve×1、task-set×1");
   expect(await t.run()).toMatchObject({ sent: 0 });
 });
+
+test("[验收线 12] r3 start-node-same-task-spoof：给自己建的卡伪造建卡键，拿复述键做别的阶段跳转照标；原样 spec→restate 才豁免", async () => {
+  const f = fixture("observe");
+  await toBuild(f);
+  expect(await f.cli("pm", "task-new", "T2", "--title", "探针", "--kind", "code", "--project", "p", "--agent", "agent-task-one",
+    "--dedup", "dag-start:T2:x:task-new")).toMatchObject({ ok: true });
+  expect(await f.cli("pm", "workflow-set", "T2", "--rev", "1", "--template", "code", "--version", "2", "--mode", "auto", "--author-family", "claude",
+    "--fallback", "x")).toMatchObject({ ok: true });
+  expect(await f.cli("pm", "stage", "T2", "--from", "spec", "--to", "blocked", "--dedup", "dag-start:T2:x:restate")).toMatchObject({ ok: true });
+  expect(cmds(marked(f, "T2"))).toEqual(["stage"]);
+  expect(await f.cli("pm", "decision", "T2", "原话", "--dedup", "dag-start:T2:x:placement")).toMatchObject({ ok: true }); // 卡已不在 spec
+  expect(cmds(marked(f, "T2"))).toEqual(["stage", "decision"]);
+});
