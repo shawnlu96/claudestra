@@ -16,7 +16,7 @@ export interface AutoResult { recorded: number; rejected: { seq: number; code: s
 const receiptKey = (e: LedgerEvent) => `memory-auto:${e.project}:${sourceKey(autoSource(e))}`;
 
 function indexDecision(db: Database, e: LedgerEvent): void {
-  if (!autoDecisionAllowed(db, e)) return;
+  if (e.data.namespace === "priority" || !autoDecisionAllowed(db, e)) return;
   if ((e.origin != null || e.originSeq != null) &&
     (!e.origin || !/^[0-9a-z]{4}$/.test(e.origin) || !Number.isInteger(e.originSeq) || (e.originSeq ?? 0) < 1)) {
     throw new LedgerError("invalid", "决定来源身份不完整或序号非法，拒绝索引");

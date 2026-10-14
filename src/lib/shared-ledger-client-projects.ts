@@ -15,6 +15,8 @@ import {
  * DTO do not authenticate a person; the center verifies bearer and signature.
  */
 export interface SharedLedgerProjectOwner extends SharedLedgerConnection { localSubject: "owner:self"; kind: "person" }
+/** A 2xx body that failed the endpoint parser. Still Unavailable for every existing caller; it only lets a read tell "invalid" apart. */
+export class SharedLedgerInvalidResponse extends SharedLedgerUnavailable {}
 export type SharedLedgerProjectsProtocol = Pick<typeof import("./shared-ledger-contract-v2-projects.js"),
   "parseV2ProjectsRequest" | "parseV2ProjectsResponse">;
 type Endpoint = Exclude<V2ProjectsEndpoint, "teamOwners">;
@@ -142,13 +144,22 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
       }
       return { error: "shared ledger rejected" };
     };
-    return await requestSharedLedger(connection, this.projectKey, options, method, path,
-      method === "GET" ? undefined : request, signal, reject, undefined,
-      (status, raw) => {
-        const parsed = parseV2ProjectsTeamResponse(endpoint, status, raw, expected);
-        rejectTeamBearer(parsed, owner.bearer!);
-        return parsed;
-      }) as V2ProjectsTeamSuccesses[E];
+    let invalid = false;
+    try {
+      return await requestSharedLedger(connection, this.projectKey, options, method, path,
+        method === "GET" ? undefined : request, signal, reject, undefined,
+        (status, raw) => {
+          try {
+            const parsed = parseV2ProjectsTeamResponse(endpoint, status, raw, expected);
+            rejectTeamBearer(parsed, owner.bearer!);
+            return parsed;
+          } catch (error) { invalid = true; throw error; }
+        }) as V2ProjectsTeamSuccesses[E];
+    } catch (error) {
+      // ROSTER2a: only teamInstances surfaces a bad 200 body as its own (text-free) class; team / teamUpdate keep their errors.
+      if (invalid && endpoint === "teamInstances" && error instanceof SharedLedgerUnavailable) throw new SharedLedgerInvalidResponse();
+      throw error;
+    }
   }
 
   projects(signal?: AbortSignal) { return this.projectRequest("list", "GET", "/v1/projects", {}, undefined, signal); }
@@ -175,6 +186,8 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
     return this.projectRequest("creatorCredential", "POST", `/v1/projects/${projectId}/creator-credential`, { projectId }, input, signal);
   }
   team(signal?: AbortSignal) { return this.teamRequest("team", "GET", "/v1/team", undefined, signal); }
+  /** ROSTER2a: instance → person bindings of this team's active directory; an old center answers 403, not 404. */
+  teamInstances(signal?: AbortSignal) { return this.teamRequest("teamInstances", "GET", "/v1/team/instances", undefined, signal); }
   updateTeam(input: TeamInput<"teamUpdate">, signal?: AbortSignal) {
     return this.teamRequest("teamUpdate", "PATCH", "/v1/team", input, signal);
   }

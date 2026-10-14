@@ -245,7 +245,9 @@ describe("off / observe / 坏配置", () => {
     expect(await ledger(DEV, "deliver", TASK, "--head", SHA)).toMatchObject({ ok: true });
     expect(await ledger(DEV, "deliver", TASK, "--from", "build", "--head", SHA, "--ui-evidence", JSON.stringify(shots()))).toMatchObject({ ok: true });
     const ev = listEvents(db, { project: PROJ, target: TASK });
-    expect(ev.filter((x) => x.data.op === "recovery_observe")).toHaveLength(1);
+    const observed = ev.filter((x) => x.data.op === "recovery_observe");
+    expect(observed).toHaveLength(2);
+    expect(observed.map((x) => x.data.code)).toEqual(["missing", "ok"]);
     expect(card().extra.screenshots).toBeUndefined();
     expect(card().stage).toBe("review");
   });

@@ -21,9 +21,10 @@ export function SidebarAdminButtons({ manage, onProjects, onToggleManage, onPeer
   return (
     <>
       <SidebarReadAll />
-      {/* v2.21+ 项目管理入口 */}
+      {/* v2.21+ 项目管理入口。图标按钮用 size-7 不用 px-1.5：侧栏拖窄时 size-7 能收到图标宽，padding 收不动，
+          「会话」标题不折行以后最窄 200px 会把设置按钮挤出侧栏（tests/web-sidebar-polish-browser.test.ts） */}
       <button
-        className="flex h-7 items-center justify-center rounded-lg px-1.5 text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
+        className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
         title={t("项目管理")}
         aria-label={t("项目管理")}
         onClick={onProjects}
@@ -33,7 +34,7 @@ export function SidebarAdminButtons({ manage, onProjects, onToggleManage, onPeer
         </svg>
       </button>
       <button
-        className={`flex h-7 items-center justify-center rounded-lg px-1.5 transition-colors ${
+        className={`flex h-7 items-center justify-center rounded-lg transition-colors ${manage ? "px-1.5" : "w-7"} ${
           manage
             ? "text-primary"
             : "text-base-content/50 hover:bg-base-300 hover:text-base-content"

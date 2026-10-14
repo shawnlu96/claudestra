@@ -49,6 +49,8 @@ export interface SharedProjectsPorts {
   members: (who: ProjectPerson, projectId: string) => Promise<V2ProjectMember[]>;
   /** N9B: the center's team record, active directory and its `self` row for the signed caller; absent means no team read. */
   team?: (who: ProjectPerson) => Promise<V2ProjectsTeamSuccesses["team"]>;
+  /** ROSTER2a: the center's instance → person bindings for this team; absent means no instances read (no request is sent). */
+  teamInstances?: (who: ProjectPerson) => Promise<V2ProjectsTeamSuccesses["teamInstances"]>;
   /** N9B: CAS rename with project-level owner authority; a 409 surfaces as SharedTeamConflict. */
   updateTeam?: (who: ProjectPerson, input: { rev: number; name: string }) => Promise<V2TeamRecord>;
   remove: (who: ProjectPerson, projectId: string, personId: string) => Promise<void>;
