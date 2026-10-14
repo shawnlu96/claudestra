@@ -1,5 +1,9 @@
 "use client";
+import { useState } from "react";
+import { Icon } from "../collab-icons";
 import type { Tr } from "../collab-model";
+import { detailNowTr } from "../detail-now-i18n";
+import { useLang } from "@/lib/i18n";
 import { Sec } from "../v4/v4-props";
 import v from "../v4/v4.module.css";
 import d from "./dag.module.css";
@@ -23,7 +27,7 @@ export function NodeCardSection({ card, owner, onOwner, onNode, tr }: {
           </button>)}
         </div>}
         {n.estimate && <div className={v.kv}>{tr("粗估")} · {n.estimate}</div>}
-        <div><span className={v.muted}>{tr("文件范围")}</span><NodeFiles node={n} /></div>
+        <FoldedFiles node={n} tr={tr} />
         {n.branch && <div className={v.kv}>{tr("分支")} · {n.branch}</div>}
         {pr && <div className={v.muted}>{pr}</div>}
       </div>
@@ -34,6 +38,20 @@ export function NodeCardSection({ card, owner, onOwner, onNode, tr }: {
 function NodeFiles({ node }: { node: BoardNode }) {
   return <div className={d.nodeFiles}>
     {node.fileGlobs?.length ? node.fileGlobs.map(file => <div key={file} className={v.kv}>{file}</div>) : <div className={v.muted}>—</div>}
+  </div>;
+}
+
+/** 卡片详情里文件范围不是主角：默认折成「文件范围 · N 个」，点开再列全（计划节点页里它是主内容，照旧展开） */
+function FoldedFiles({ node, tr: base }: { node: BoardNode; tr: Tr }) {
+  const [open, setOpen] = useState(false);
+  const tr = detailNowTr(base, useLang());
+  const n = node.fileGlobs?.length ?? 0;
+  if (!n) return <div><span className={v.muted}>{tr("文件范围")}</span><NodeFiles node={node} /></div>;
+  return <div>
+    <button type="button" className={v.link} aria-expanded={open} data-node-files={open ? "open" : "folded"} onClick={() => setOpen(!open)}>
+      <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />{tr("文件范围 · {n} 个", { n })}
+    </button>
+    {open && <NodeFiles node={node} />}
   </div>;
 }
 
