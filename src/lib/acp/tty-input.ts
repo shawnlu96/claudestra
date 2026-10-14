@@ -5,6 +5,7 @@
  * Ctrl-C：raw 模式下不再变成 SIGINT——回合中 = 打断，空闲时 2 秒内连按两次才退出（manager 收宿主改发 SIGTERM，runtimes/acp-control.ts）。
  * tests/acp-tty-input.test.ts。
  */
+import { redactSecrets } from "../redact-secrets.js";
 import type { PermissionCard } from "./permissions.js";
 
 export type TerminalOp =
@@ -181,9 +182,9 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
       decode(data);
       deps.redraw();
     },
-    line(cols) {
+    line(cols) { // 只改显示：整段先打码再截尾巴（逐行视图也是显示内容），发出去的还是原文
       const hint = permissionHint();
-      return fitTail(hint ? `${hint}❯ ` : `❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`, cols);
+      return fitTail(redactSecrets(hint ? `${hint}❯ ` : `❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`), cols);
     },
     draft: () => ({ text: buf, permission: permissionHint() }),
   };

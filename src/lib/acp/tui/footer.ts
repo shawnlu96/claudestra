@@ -3,6 +3,7 @@
  * 每行只占一行（不折），放不下就截；状态栏按重要性丢：先丢按键提示，再丢 effort、模型、上下文，忙闲和排队最后丢。
  * 输入框最多 INPUT_ROWS 行，超出的显示末尾（光标在最后，正在打的字要看得见），上面注明还有几行。tests/acp-tui-footer.test.ts。
  */
+import { redactSecrets } from "../../redact-secrets.js";
 import type { TurnState } from "../tty-status.js";
 import { elapsed } from "../tty-status.js";
 import type { SessionInfo } from "./live.js";
@@ -50,11 +51,14 @@ export function statusLine(s: TurnState, info: SessionInfo, busyMs: number, cols
   return fitLine(join(short.length > full.length ? short : full), cols);
 }
 
-/** 输入框：线 / 内容（❯ 起头，续行缩进两格）/ 线；内容按宽度折，最多 INPUT_ROWS 行 */
+/**
+ * 输入框：线 / 内容（❯ 起头，续行缩进两格）/ 线；内容按宽度折，最多 INPUT_ROWS 行。
+ * 草稿也是显示内容：整段先打码再分行、折行、裁行数（先裁会把 password= 这类标签切掉，值原样露出来）；只改显示，发出去的还是原文
+ */
 export function inputBox(d: InputDraft, cols: number): string[] {
   const rule = sgr("2", "─".repeat(Math.max(1, cols - 1)));
-  if (d.permission && !d.text) return [rule, ...renderPara({ lead: [span("❯ ", "1;33")], body: [span(d.permission, "33")] }, cols).slice(0, 2), rule];
-  const lines = d.text.replace(/\r\n?/g, "\n").split("\n");
+  if (d.permission && !d.text) return [rule, ...renderPara({ lead: [span("❯ ", "1;33")], body: [span(redactSecrets(d.permission), "33")] }, cols).slice(0, 2), rule];
+  const lines = redactSecrets(d.text.replace(/\r\n?/g, "\n")).split("\n");
   const rows = lines.flatMap((l, i) => renderPara({ lead: [span(i ? "  " : "❯ ", i ? undefined : "1")], body: [span(l)] }, cols - 1));
   rows[rows.length - 1] += CURSOR; // 折行按 cols - 1 排，给假光标留一格
   const shown = rows.length > INPUT_ROWS ? [sgr("2", `  … 上面还有 ${rows.length - INPUT_ROWS + 1} 行`), ...rows.slice(-(INPUT_ROWS - 1))] : rows;
