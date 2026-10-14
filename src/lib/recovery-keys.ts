@@ -64,6 +64,7 @@ export const RECOVERY_KEYS = [
   "placementReservations",
   "planGap",
   "poolIdleSkip",
+  "privateMergeNarrow",
   "privateStartPlacement",
   "reviewLocalFirst",
   "roleModel",
