@@ -1,13 +1,6 @@
 'use client';
-import type { Tr } from '../collab-model';
-import { useWorkBoard } from './use-work-board';
-import { WorkBoardContent } from './work-board-content';
-
+/**
+ * 「谁在干活」= 纯展示 work-board-content.tsx。取数（本机 useWorkBoard / 团队 useTeamWorkBoard，use-work-board.ts）提到了
+ * dag/use-dag-panes.tsx：标签与全站计数（count-words.ts）共用同一份看板，不重复请求。这里只留老入口的导出。
+ */
 export { WorkBoardContent } from './work-board-content';
-
-/** 本机「谁在干活」= 取数（use-work-board.ts，请求 / 重试 / 刷新节奏）+ 纯展示（work-board-content.tsx，团队视图也用它） */
-interface Props { project: string; tr: Tr; onNode: (featureId: string, nodeKey: string) => void; onTask: (taskId: string) => void }
-export function WorkBoardView(props: Props) {
-  const load = useWorkBoard(props.project);
-  return <WorkBoardContent {...props} board={load.board} retrying={load.retrying} />;
-}

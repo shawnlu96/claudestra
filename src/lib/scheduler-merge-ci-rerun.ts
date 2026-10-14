@@ -10,8 +10,10 @@ import { knownFlakyBase, knownFlakyClaim, knownFlakyRerun, type KnownFlakyRed } 
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
 import type { EventKind } from "./ledger-stages.js";
+import { rethrowCiLogStop, checkedFailedLog, judgeCiLog, readPerJobLog, type PerJobLog } from "./scheduler-merge-ci-log-read.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
+import { currentCountFailures, effCountRefreshStep } from "./effect-count-refresh.js";
 import { ciClaimJournal, settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
 import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
 import { RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
@@ -24,6 +26,7 @@ export interface CiRerunGh {
   /** `attempt` > 1 means the run was already re-run; `status` is "completed" once that attempt ended, with its `conclusion`. */
   runAttempt(repo: string, runId: string): Promise<{ attempt: number; status: string; conclusion: string }>;
   failedLog(repo: string, runId: string): Promise<string>;
+  perJobLog?(repo: string, runId: string, attempt: number): Promise<PerJobLog>;
   prFiles(prRef: string): Promise<string[]>;
   rerunFailed(repo: string, runId: string): Promise<void>;
 }
@@ -31,8 +34,6 @@ type FailedCheck = MergeBounce["checks"][number];
 type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
 type ToReceipt = (b: MergeBounce) => string;
 
-/** runBounded stops reading at 1 MiB: a log near that may be cut, and the cut part could hold a non-timeout failure. */
-const LOG_LIMIT = 900 * 1024;
 /** gh pr view lists at most 100 files; a list that long may be cut, and a cut list could miss the timed-out file. */
 const FILES_LIMIT = 100;
 const oneLine = (s: string) => s.trim().split("\n")[0]?.slice(0, 300) ?? "";
@@ -54,9 +55,9 @@ export function ciRerunGh(command: typeof runBounded = runBounded): CiRerunGh {
     },
     async failedLog(repo, runId) {
       const log = await gh("run", "view", runId, "--repo", repo, "--log-failed");
-      if (Buffer.byteLength(log) >= LOG_LIMIT) throw new Error("失败日志太长，可能被截断");
-      return log;
+      return checkedFailedLog(log);
     },
+    perJobLog: (repo, runId, attempt) => readPerJobLog(command, repo, runId, attempt),
     async prFiles(prRef) {
       const raw = JSON.parse(await gh("pr", "view", prRef, "--json", "files")) as { files?: { path?: unknown }[] };
       if (!Array.isArray(raw.files) || raw.files.some((f) => typeof f?.path !== "string")) throw new Error("gh pr view 没给出改动文件");
@@ -83,11 +84,21 @@ async function decide(run: MergeRun, checks: FailedCheck[], gh: CiRerunGh): Prom
   if (ids.size !== 1) return { kind: "bounce", why: "失败检查分属多个 run" };
   const [repo, runId] = [runs[0]![1]!, runs[0]![2]!];
   const { attempt, status, conclusion } = await gh.runAttempt(repo, runId);
+  // CIWAIT1: a required check can turn red while other jobs of the run are still going, and gh refuses the failed log until the
+  // run ends. Nothing is read, re-run or bounced before that, whatever the attempt: the next tick reads the run again.
+  if (status !== "completed") return { kind: "wait" };
   // The run went green but the PR checks still show the old red for a moment: wait for them to catch up.
-  if (status === "completed" && conclusion === "success") return { kind: "wait" };
-  // A re-run that is still going can leave the old red on the PR for a moment; once it ends red, that is the second red.
-  if (attempt > 1) return status === "completed" ? { kind: "bounce", why: `run 已重跑过（第 ${attempt} 次仍红）` } : { kind: "wait" };
-  const failures = parseFailedLog(await gh.failedLog(repo, runId));
+  if (conclusion === "success") return { kind: "wait" };
+  // A re-run that ended red is the second red.
+  if (attempt > 1) return { kind: "bounce", why: `run 已重跑过（第 ${attempt} 次仍红）` };
+  return judgeCiLog(run, repo, runId, attempt, gh, "cif1", (log) => judgeRerunLog(log, run, checks, gh, repo, runId),
+    (d) => d.kind === "rerun" ? { wouldKind: "rerun", why: "只因本卡没碰的测试超时", cases: d.plan.cases } :
+      { wouldKind: d.kind === "bounce" && d.flaky ? "flaky" : "bounce", why: d.kind === "bounce" ? d.why : "等待",
+        files: d.kind === "bounce" ? [...new Set(d.flaky?.failures.map((f) => f.file))] : undefined });
+}
+
+async function judgeRerunLog(log: string, run: MergeRun, checks: FailedCheck[], gh: CiRerunGh, repo: string, runId: string): Promise<Decision> {
+  const failures = parseFailedLog(log);
   if (!failures) return { kind: "bounce", why: "失败日志解析不出 bun test 的失败用例" };
   const asserted = firstAsserted(failures);
   if (asserted) return { kind: "bounce", why: `有非超时失败：${asserted.name}`, flaky: { repo, runId, failures } }; // CIF8
@@ -117,15 +128,17 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
     }
   }
   const pending = pendingRerun(run, pr, checks);
-  if (pending) return awaitRerun(run, pending, gh, step, bounce);
+  if (pending) return awaitRerun(run, pending, gh, step, bounce, async () => await effCountRefreshStep(run, pr, step, currentCountFailures(checks, gh), bounce) ?? bounce());
   let decision: Decision;
   try {
     decision = await decide(run, checks, gh);
   } catch (e) {
+    rethrowCiLogStop(e);
     decision = { kind: "bounce", why: `读 CI 失败：${oneLine((e as Error).message)}` };
   }
   if (decision.kind === "wait") return run;
   if (decision.kind === "bounce") {
+    const refreshed = await effCountRefreshStep(run, pr, step, decision.flaky?.failures ?? currentCountFailures(checks, gh), bounce); if (refreshed) return refreshed; // EFFAUTO1: count-only red
     const flaky = decision.flaky && await knownFlakyRerun({ run, prHead: pr.head, checks: checks.map((c) => c.name), gh, step, receiptOf: rerunReceipt }, decision.flaky);
     if (flaky) return flaky;
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：${decision.why}`);
@@ -167,7 +180,7 @@ function pendingRerun(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[]): { r
  * ledger leaves the run waiting (reason 等 CI 重跑开始), past it the ledger bounces (重跑没有开始). Never a second rerun.
  */
 async function awaitRerun(run: MergeRun, pending: { receipt: string; repo: string; runId: string }, gh: CiRerunGh, step: Step,
-  bounce: () => Promise<MergeRun>): Promise<MergeRun> {
+  bounce: () => Promise<MergeRun>, redBounce: () => Promise<MergeRun>): Promise<MergeRun> {
   let latest: Awaited<ReturnType<CiRerunGh["runAttempt"]>>;
   try {
     latest = await gh.runAttempt(pending.repo, pending.runId);
@@ -178,7 +191,7 @@ async function awaitRerun(run: MergeRun, pending: { receipt: string; repo: strin
   if (latest.attempt > 1) {
     if (latest.status !== "completed" || latest.conclusion === "success") return run; // still running, or green while the PR checks catch up
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：run 已重跑过（第 ${latest.attempt} 次仍红）`);
-    return bounce();
+    return redBounce(); // EFFAUTO1: the rerun's red is classified by its log too (count-only → refresh), else the same bounce
   }
   const claimed = await step("resolved", pending.receipt);
   if (claimed.phase === "resolved") console.error(`⚠️ [merge] ${run.taskId} CI 红，退回 fix：重跑没有开始（${RERUN_SETTLE_MS / 60_000} 分钟后仍是旧 attempt）`);

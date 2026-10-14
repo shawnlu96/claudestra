@@ -142,3 +142,12 @@
 @media (prefers-reduced-motion: reduce) { .eFlow .eLine { animation: none; } .paneBody { transition: none; } .glide { transition: none; } .bump, .beckon { animation: none; } }
 .depItem + .depItem { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .depHead { color: var(--text); font-size: var(--fs-2); font-weight: 600; font-family: var(--mono, ui-monospace, monospace); }
+
+/* 计数骨架（UXNUM1）：没载完时每个数的位置一条轻微闪动的灰条，不写「加载中」；产品卡 / 子 DAG 框头 / 谁在干活也借这一个类 */
+.skel { display: inline-block; width: 1.6em; height: .9em; border-radius: 4px; background: var(--line-2, var(--line)); vertical-align: middle;
+  animation: skelPulse 1.4s ease-in-out infinite; }
+@keyframes skelPulse { 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
+.lateHint { display: inline-flex; align-items: center; color: var(--warn); }
+/* 谁在干活的栏数只出现一次：桌面在栏标题，手机在分段控件（work-board-content.tsx） */
+@media (max-width: 700px) { .wideOnly { display: none; } }

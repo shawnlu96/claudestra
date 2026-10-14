@@ -1,3 +1,4 @@
+import { MACHINE_WORDS, READY_WORD, ownerWordEn } from "./owner-words";
 /** 协作视图（web/features/collab）的字典条目，规则同 lib/i18n-dict.ts；单独成文件是因为主字典顶在行数上限 */
 export const COLLAB_DICT: Record<string, string> = {
   "为什么还没开卡": "Why no card yet",
@@ -188,7 +189,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "团队": "Team",
   "打开会话": "Open chat",
   "本机成员": "Member on this machine",
-  "外部实例成员": "Member on a peer instance",
+  [MACHINE_WORDS.otherMembers]: ownerWordEn(MACHINE_WORDS.otherMembers)!,
   "最近 10 分钟的真实往来": "Recorded interactions, last 10 minutes",
   "{n} 条依赖": "{n} dependencies",
   "画布上合成一根线": "Drawn as one line on the canvas",
@@ -210,7 +211,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "这个项目上开着、等你的": "Open items in this project waiting on you",
   "它的因果线": "Its dependencies",
   "谁在等它": "Waiting on it",
-  "可执行 / 在跑": "Ready / running",
+  [`${READY_WORD} / 在跑`]: "Ready to start / running",
   "在场 agent": "Agents present",
   "审查轮次": "Review rounds",
   "P0/P1 修掉": "P0/P1 fixed",
@@ -226,6 +227,6 @@ export const COLLAB_DICT: Record<string, string> = {
   "已完成被改写": "Done node rewritten",
   // 团队数据（team-parity P1-B）：边没有建立者 / 时间、主场的阻塞提问、执行镜像过期
   "建立者 / 时间未记录（团队数据没有边级元数据）": "Creator / time not recorded (team data has no edge-level metadata)",
-  "主场有 {n} 个阻塞提问": "{n} blocking question(s) at home",
-  "{n} 个 feature 主场镜像过期": "Home mirror stale for {n} feature(s)",
+  [MACHINE_WORDS.openQuestions]: ownerWordEn(MACHINE_WORDS.openQuestions)!,
+  [MACHINE_WORDS.staleModules]: ownerWordEn(MACHINE_WORDS.staleModules)!,
 };

@@ -224,6 +224,7 @@ describe("pass manager wiring", () => {
     const log: string[] = [], ledger = ledgerAs(f.db, "scheduler");
     configureSchedulerV2Pass({ mode: () => "on", wrapManager: (m) => async (...args) => { log.push(args[1]); return m(...args); } });
     await schedulerPass(f.db, config(f.dir), { ...passOpts(f.dir), manager: ledger,
+      recoveryPolicy: (_project, key) => ({ mode: key === "ciQueueFull" ? "off" : "observe", source: "config", manualAfterMs: null }),
       external: () => { log.push("external"); return {
         inspect: async () => ({ state: "OPEN", head: "c".repeat(40), branch: "feat/t9", crossRepository: false, base: "main",
           draft: true, mergeState: "UNKNOWN", mergeSha: null, checks: [] }),

@@ -6,11 +6,12 @@ import {
   analyzeMemory, memoryCounters, memoryValues, parseMemoryPoint, probeMode, type MemoryPoint,
 } from "../src/lib/bridge-memory-metrics.ts";
 import { memoryProbeMain } from "../scripts/bridge-memory-probe.ts";
-import { testChildEnv } from "./test-env.ts";
+import { ciIoTraceChild, testChildEnv } from "./test-env.ts";
 
 const SCRIPT = resolve(import.meta.dir, "../scripts/bridge-memory-probe.ts");
 const ROOT = resolve(import.meta.dir, "..");
 const TOKEN = "a".repeat(64);
+const TRACE = ciIoTraceChild();
 
 function series(kind: "plateau" | "growth" | "rss" = "plateau", length = 10): MemoryPoint[] {
   return Array.from({ length }, (_, i) => ({
@@ -29,13 +30,13 @@ function sandbox() {
   for (const part of ["home", "state", "runtime", "tmp"]) mkdirSync(join(dir, part));
   const env = testChildEnv({
     HOME: join(dir, "home"), TMPDIR: join(dir, "tmp"), TMP: join(dir, "tmp"), TEMP: join(dir, "tmp"),
-    CLAUDESTRA_STATE_DIR: join(dir, "state"), CLAUDESTRA_RUNTIME_DIR: join(dir, "runtime"),
+    CLAUDESTRA_STATE_DIR: join(dir, "state"), CLAUDESTRA_RUNTIME_DIR: join(dir, "runtime"), ...TRACE.env,
   });
   return { dir, env, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 async function cli(args: string[], box: ReturnType<typeof sandbox>) {
-  const child = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", SCRIPT, ...args], {
+  const child = Bun.spawn([process.execPath, ...TRACE.argv, "--no-env-file", "--config=/dev/null", SCRIPT, ...args], {
     cwd: box.dir, env: box.env, stdout: "pipe", stderr: "pipe",
   });
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);

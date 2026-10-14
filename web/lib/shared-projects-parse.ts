@@ -56,6 +56,10 @@ export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
       directory: t.directory == null ? null : list(t.directory, v => {
         const m = object(v);
         return { personId: text(m.personId), code: text(m.code, 128), teamRole: choice(m.teamRole, ["owner", "member"]) };
+      }),
+      instances: t.instances == null ? null : list(t.instances, v => {
+        const i = object(v);
+        return { instanceId: text(i.instanceId, 128), personId: text(i.personId) };
       }) };
   });
   const projects = list(data.projects, parseSharedProject);
@@ -73,7 +77,11 @@ export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
       const p = object(v);
       return { id: text(p.id, 32), name: text(p.name, 128), personal: boolean(p.personal), bound: boolean(p.bound) };
     }),
-    peers: list(data.peers, v => { const p = object(v); return { id: text(p.id), name: text(p.name, 128) }; }),
+    // instanceId 可选（老 bridge 没有）：只给协作视图认执行实例的机器名，形状不对按坏快照拒
+    peers: list(data.peers, v => {
+      const p = object(v);
+      return { id: text(p.id), name: text(p.name, 128), ...(p.instanceId === undefined ? {} : { instanceId: text(p.instanceId, 64) }) };
+    }),
   };
 }
 

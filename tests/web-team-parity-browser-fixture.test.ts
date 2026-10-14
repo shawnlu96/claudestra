@@ -89,7 +89,8 @@ test("matrix comparator: expectation hit, known gap, fixed gap and regressions a
   expect(compareMatrix("team", { ...team, "版本历史": "unknown" }).find((r) => r.section === "版本历史")!.verdict).toBe("stale_gap");
   // 受控变异 2：A 类区块在团队里没了 → fail；假 0 换成另一种错误（absent）→ fail，不算已知缺口
   expect(compareMatrix("team", { ...team, "因果线": "absent" }).find((r) => r.section === "因果线")!.verdict).toBe("fail");
-  expect(compareMatrix("team", { ...team, "在场 agent": "absent" }).find((r) => r.section === "在场 agent")!.verdict).toBe("fail");
+  // UXNUM1 起团队的在场 agent 期望整格不出（absent）：退回「暂无」占位也是 fail
+  expect(compareMatrix("team", { ...team, "在场 agent": "unknown" }).find((r) => r.section === "在场 agent")!.verdict).toBe("fail");
   // 本机期望没有缺口可言：少了就是 fail
   const local: Observed = Object.fromEntries(MATRIX.map((r) => [r.section, r.local]));
   expect(compareMatrix("local", { ...local, "最近 3 件事": "absent" }).find((r) => r.section === "最近 3 件事")!.verdict).toBe("fail");
@@ -116,16 +117,21 @@ test("team-parity-Cf1: only the P1-A gaps are dropped; a restored A fake value f
   expect(Object.keys(PRE_CF1_A_GAPS).filter((k) => !MATRIX.some((r) => r.section === k))).toEqual([]);
   expect(ratchetViolations(pre, MATRIX)).toEqual([]);
   expect(Object.fromEntries(MATRIX.filter((r) => PRE_CF1_A_GAPS[r.section]).map((r) => [r.section, r.team]))).toEqual({
-    "在场 agent": "unknown", "今日完成": "unknown", "平均等复核": "unknown", "待你处理": "unknown", "上次以来·本机接口误调": "absent",
+    // UXNUM1（PM 10-13 放行）：三项指标由「暂无」改为整格不出
+    "在场 agent": "absent", "今日完成": "absent", "平均等复核": "absent", "待你处理": "unknown", "上次以来·本机接口误调": "absent",
     // 谁在干活：N8B5 之后团队侧是只读列表，期望往 present 走（ratchet 允许）
     "谁在干活": "present", "谁在干活·本机接口误调": "absent", "团队成员卡（本机 peers）": "absent", "团队标签·本机接口误调": "absent",
   });
   // 旧红：P1-A 之后的真实团队实测喂给旧矩阵 = 9 行 stale_gap；新绿：同一份实测对新矩阵全 pass
   const now: Observed = Object.fromEntries(MATRIX.map((r) => [r.section, r.gap?.team ?? r.team]));
-  expect(compareMatrix("team", now, pre).filter((r) => r.verdict === "stale_gap").map((r) => r.section).sort()).toEqual(Object.keys(PRE_CF1_A_GAPS).sort());
+  // UXNUM1 起「平均等复核」团队期望就是 absent（整格不出），和 P1-A 前的实测值重合：它不再算缺口，其余照旧
+  const gone = Object.keys(PRE_CF1_A_GAPS).filter((k) => MATRIX.find((r) => r.section === k)!.team === PRE_CF1_A_GAPS[k]);
+  expect(gone).toEqual(["平均等复核"]);
+  const stale = Object.entries(PRE_CF1_A_GAPS).filter(([k]) => !gone.includes(k));
+  expect(compareMatrix("team", now, pre).filter((r) => r.verdict === "stale_gap").map((r) => r.section).sort()).toEqual(stale.map(([k]) => k).sort());
   expect(compareMatrix("team", now).filter((r) => r.verdict !== "pass" && r.verdict !== "known_gap")).toEqual([]);
   // 受控变异：恢复任何一个 A 之前的假值 / 误请求 → fail（不再是 known_gap）
-  for (const [sec, old] of Object.entries(PRE_CF1_A_GAPS)) expect([sec, compareMatrix("team", { ...now, [sec]: old }).find((r) => r.section === sec)!.verdict]).toEqual([sec, "fail"]);
+  for (const [sec, old] of stale) expect([sec, compareMatrix("team", { ...now, [sec]: old }).find((r) => r.section === sec)!.verdict]).toEqual([sec, "fail"]);
   // 剩下没修的 gap 照实列出；每一个在真修好时都还能判 stale_gap，没修时还是 known_gap
   expect(MATRIX.filter((r) => r.gap).map((r) => `${r.ref} ${r.section} → ${r.gap!.node}`)).toEqual([
     "T8 参与者 → P1-B", "G5 版本历史 → P1-F", "G8 两版对比 → P1-F", "G6 版本元数据（提出人/时间） → P1-F",
@@ -188,6 +194,6 @@ test("team-project-N8B4: home product card counts equal src nodeCounts on the sa
         ? ({ id: n.taskId, stage: tasks.get(n.taskId)!.stage, project: home.project, kind: "code", updatedAt: 1 } as LedgerTask) : null }));
     expect([f.id, board.features.find((x) => x.id === f.id)!.counts]).toEqual([f.id, nodeCounts(eta)]);
   }
-  // 计数口径：进行中节点即使依赖没满足也只算进行中、不计入受阻，所以 feat-a 是 5 进行中 · 1 受阻
-  expect(board.features[0]!.counts).toMatchObject({ total: 8, completed: 2, active: 5, blocked: 1, ready: 0 });
+  // 计数口径：进行中节点即使依赖没满足也只算进行中；没开工、依赖没完成的节点算「在等」不算受阻，所以 feat-a 是 5 进行中 · 1 在等
+  expect(board.features[0]!.counts).toMatchObject({ total: 8, completed: 2, active: 5, blocked: 0, waiting: 1, ready: 0 });
 });

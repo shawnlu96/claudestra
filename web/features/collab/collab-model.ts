@@ -1,3 +1,4 @@
+import { MACHINE_WORDS, STAGE_WORD, stageWord } from "@/lib/owner-words";
 /**
  * 协作视图首页的纯逻辑：台账总览（GET /api/v1/ledger/:project）→ 按关注度排好的任务线、一句话状态、今日完成、PM 调度条。
  * 分档与文案的取舍见台账 mockups/T12/ux.md；单测 tests/web-collab-model.test.ts。
@@ -8,6 +9,7 @@ import { fillParams, type I18nParams } from "@/lib/i18n-fill";
 import { metaOf } from "@/lib/ledger-meta-guard";
 import type { DoneRest } from "@/lib/api/ledger-done";
 import { mirrorAgo } from "./mirror-fresh";
+import { workText } from "./work/work-i18n";
 
 export type Tr = (s: string, p?: I18nParams) => string;
 const zh: Tr = fillParams;
@@ -143,8 +145,7 @@ export interface LedgerOverview {
   mirror?: readonly MirrorFact[];
 }
 
-/** 首页 7 列；审查与返工同一列（⇄） */
-export const COLUMNS = ["规格", "复述", "开发", "审查 ⇄ 返工", "合并", "上线", "验证"] as const;
+export const COLUMNS = [STAGE_WORD.spec, STAGE_WORD.restate, STAGE_WORD.build, "审查 ⇄ 返工", STAGE_WORD.merge, STAGE_WORD.live, STAGE_WORD.verified] as const;
 const COLUMN_OF: Record<Stage, number> = { spec: 0, restate: 1, build: 2, review: 3, fix: 3, merge: 4, live: 5, verified: 6, done: 6, blocked: 2, cancelled: 0 };
 export const columnOf = (stage: Stage, before: Stage | null = null): number => COLUMN_OF[stage === "blocked" ? before ?? "build" : stage];
 
@@ -275,9 +276,13 @@ export function attentionOf(t: LedgerTaskView, now: number): Attention {
   return t.stage === "build" ? "progress" : "waiting";
 }
 
-/** 同处 merge 的任务按进入合并的先后排队：第几位 */
-export function mergeQueuePos(t: LedgerTaskView, all: readonly LedgerTaskView[]): number {
-  const mine = stageSince(t) ?? Infinity;
+/**
+ * 同处 merge 的任务按进入合并的先后排队：第几位。没有进入合并的时刻（团队卡的 stageSince 为空）排不出位次，返回 null——
+ * 不然所有这样的卡都算第 1 位（体检报告第 3 条）；没有时刻的别的卡也不算排在前面
+ */
+export function mergeQueuePos(t: LedgerTaskView, all: readonly LedgerTaskView[]): number | null {
+  const mine = stageSince(t);
+  if (mine === null) return null;
   return all.filter((o) => o.stage === "merge" && o.id !== t.id && (stageSince(o) ?? Infinity) < mine).length + 1;
 }
 
@@ -312,8 +317,10 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
       return t.roundUnknown ? tr("等审查") : tr("等审查 · 第 {n} 轮", { n: Math.max(1, t.round) });
     case "fix":
       return t.roundUnknown ? tr("返工中") : tr("返工中 · 第 {n} 轮意见", { n: reviewRound(t) });
-    case "merge":
-      return frozen ? tr("合并队列冻结") : tr("等合并 · 队列第 {n} 位", { n: mergeQueuePos(t, all) });
+    case "merge": {
+      const n = mergeQueuePos(t, all);
+      return frozen ? tr("合并队列冻结") : n === null ? workText(tr, "等合并") : tr("等合并 · 队列第 {n} 位", { n });
+    }
     case "live":
       if (t.lastEvent?.kind !== "verify" || t.lastEvent.data.result === "pass") return tr("已上线 · 等验证");
       return tr(t.lastEvent.data.result === "unknown" ? "线上验证查不到结果" : "线上验证失败");
@@ -324,6 +331,7 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
       return tr("已完成");
     case "cancelled":
       return tr("已取消");
+    default: return tr(stageWord(t.stage));
   }
 }
 
@@ -344,8 +352,8 @@ function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, froze
 /** 团队卡多带的一句：主场镜像过期（「主场 N 分钟前同步」，数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
 export function teamNote(t: Pick<LedgerTaskView, "team">, now: number, tr: Tr = zh): string {
   const bits: string[] = [];
-  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(t.team.observedAt == null ? tr("主场镜像过期") : mirrorAgo(t.team.observedAt, now, tr));
-  if (t.team?.blockingAsks) bits.push(tr("主场有 {n} 个阻塞提问", { n: t.team.blockingAsks }));
+  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(t.team.observedAt == null ? tr(MACHINE_WORDS.stale) : mirrorAgo(t.team.observedAt, now, tr));
+  if (t.team?.blockingAsks) bits.push(tr(MACHINE_WORDS.openQuestions, { n: t.team.blockingAsks }));
   return bits.join(" · ");
 }
 

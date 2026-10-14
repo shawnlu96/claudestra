@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { advance, getOrder, openLendJournal, patchOrder } from "../src/lib/lend-journal.ts";
 import { sandboxOwnersDir, type SandboxRetireRequest } from "../src/lib/lend-sandbox.ts";
 import { identityVerdict, listSandboxOwners, probeProcess } from "../src/lib/sandbox-order-owner.ts";
@@ -372,21 +372,34 @@ test("on clean 后结单向端口交缺根事实，retained 保留收尾，done 
 for (const mode of ["on", "observe"] as const) test(`${mode} catalog 写失败回滚已写属主登记`, async () => {
   const w = await world(mode);
   const file = join(w.owners, "bindings", readdirSync(join(w.owners, "bindings"))[0]!);
-  const original = readFileSync(file);
+  const original = readFileSync(file), records = join(w.owners, "records");
+  rmdirSync(records); // Still empty here; only registerSandboxOwner recreates it, which makes it the sync point below.
   mkdirSync(join(w.owners, "locks"));
   const lock = await acquireLock(join(w.owners, "locks", "ownership.lock"), 0);
   if (!lock) throw new Error("fixture owner lock unavailable");
   try {
     const running = fleet.start(w.spec("catalog-write-failure")).then(() => "started", (e: Error) => e.message);
     const deadline = Date.now() + 5000;
-    while (!existsSync(`${file}.lock`)) {
-      if (Date.now() > deadline) throw new Error("catalog lock not reached");
+    while (!existsSync(records)) {
+      if (Date.now() > deadline) throw new Error("owner registration not reached");
       await Bun.sleep(10);
     }
-    rmSync(file); mkdirSync(file); // Force the catalog rename to fail after the owner write, without mocking production wiring.
+    // Swap only once records/ is back: the child is then inside registerSandboxOwner, i.e. past readCatalog and parked
+    // on the owner lock held above. Syncing on `${file}.lock` was too early: that directory appears before the catalog
+    // is read, so under load the swap failed the read and nothing was written to roll back. With the read done, the
+    // directory can only break the final catalog rename, after the owner write, without mocking production wiring.
+    rmSync(file); mkdirSync(file);
     lock.release();
     const result = await running;
     expect(mode === "observe" ? result === "started" : result.includes("EISDIR")).toBe(true);
+    if (mode === "observe") {
+      // Pin the write-failure path: a read failure would also "start", but with a different reason and no rollback.
+      const deferred = join(w.owners, "deferred"), prefix = `launch-${basename(file, ".json")}-`;
+      const reasons = readdirSync(deferred).filter((f) => f.startsWith(prefix))
+        .map((f) => JSON.parse(readFileSync(join(deferred, f), "utf8")).reason as string);
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).toContain("EISDIR"); expect(reasons[0]).toContain("rename");
+    }
     expect(readdirSync(join(w.owners, "records"))).toEqual([]);
     expect(readdirSync(join(w.owners, "archive"))).toHaveLength(1);
     rmSync(file, { recursive: true }); writeFileSync(file, original);

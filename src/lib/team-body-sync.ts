@@ -14,7 +14,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { STATE_DIR } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { instanceKeySync } from "./instance-key.js";
@@ -36,7 +36,11 @@ import {
 } from "./shared-ledger-contract-team-body.js";
 import { scrubTeamBody, TEAM_BODY_MASK, TEAM_BODY_SCRUB_VERSION, type TeamBodyScrub } from "./team-body-scrub.js";
 import { teamBodyMode } from "./team-body-switch.js";
+import { teamBodyReviewText, teamBodyScrubHeads, teamBodySourceText } from "./team-body-text.js";
 import { eventMetaOf, eventSelection, outgoing, passEvent, refuseMeta, takesMeta } from "./team-body-sync-meta.js";
+import { identityKey, rolePeers, uploadWithRoles, withRoles, type RolePeers, type RoleSend, type RoleSource } from "./team-body-roles.js";
+import type { TeamBodySpecMeta } from "./team-body-roles-contract.js";
+import { storedOrigin } from "./ledger-origin.js";
 
 /** Records (uploaded or refused) handled in one pass, over all features. */
 const TEAM_BODY_SYNC_PER_PASS = 200;
@@ -58,6 +62,8 @@ export interface TeamBodySyncDeps {
   sleep?: (ms: number) => Promise<void>;
   requestGapMs?: number;
   scrub?: (heads: readonly string[]) => Promise<SharedLedgerScrubContext>;
+  /** peers.json's peers, for reviewer / PM identity (team-body-roles.ts); default readPeers. */
+  peers?: RolePeers;
 }
 
 /** by: scrub = the gate refused the text; invalid = the contract would not carry the record (e.g. a NUL); center = the center refused it. */
@@ -83,7 +89,7 @@ interface CenterState { supported: boolean; checkedAt: number; notedDay: number 
  */
 interface SyncFile {
   schemaVersion: 1; features: Record<string, FeatureState>; centers: Record<string, CenterState>; cooldowns?: Record<string, number>;
-  /** center origin hash → epoch ms until which records go up without meta (team-body-sync-meta.ts). */
+  /** center origin hash → epoch ms until which records go up without meta (team-body-sync-meta.ts); `identity:` + hash: without reviewer / PM identity (team-body-roles.ts). */
   metaRefused?: Record<string, number>;
 }
 const originKey = (baseUrl: string): string => createHash("sha256").update(sharedLedgerCenterUrl(baseUrl).origin).digest("hex");
@@ -117,27 +123,8 @@ function featureTasks(db: Database, featureId: string, localProject: string) {
 }
 
 /** One source text before scrubbing; seq for event / review, specRev for spec. */
-interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number; meta?: TeamBodyEventMeta }
-
-/**
- * A review event as people read it. A verdict submitted through submit_verdict carries no text: verdict, counts and
- * findings (each with its description and probe) sit in data, so they are written out here. The report is named, not read: its path is the reviewer's.
- */
-function reviewText(text: string, data: string): string {
-  let d: Record<string, unknown> = {};
-  try { const parsed = JSON.parse(data); if (parsed && typeof parsed === "object") d = parsed; } catch { /* text alone */ }
-  const lines: string[] = [];
-  if (typeof d.verdict === "string") lines.push(`审查结论 ${d.verdict} · P0 ${Number(d.p0) || 0} / P1 ${Number(d.p1) || 0} / P2 ${Number(d.p2) || 0}`);
-  if (Array.isArray(d.findings)) for (const f of d.findings as Record<string, unknown>[]) {
-    if (!f || typeof f !== "object") continue;
-    const desc = typeof f.description === "string" && f.description ? `：${f.description}` : "";
-    lines.push(`- [${String(f.severity ?? "?")}] ${String(f.findingId ?? "")}${desc}`);
-    // probe is required and, for older / CLI records without a description, the finding's only text.
-    if (typeof f.probe === "string" && f.probe) lines.push(`  复现：${f.probe}`);
-  }
-  if (typeof d.path === "string" && d.path) lines.push(`报告：${basename(d.path)}（全文在主场）`);
-  if (text) lines.push(lines.length ? `\n${text}` : text);
-  return lines.join("\n");
+interface Pending {
+  taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number; meta?: TeamBodyEventMeta | TeamBodySpecMeta; who?: RoleSource;
 }
 
 /**
@@ -149,20 +136,21 @@ function pendingOf(db: Database, featureId: string, entry: MirrorEntry, st: Feat
   const tasks = featureTasks(db, featureId, entry.localProject);
   if (!tasks.length) return [];
   const { after, stageClause } = eventSelection(st, withMeta);
-  const rows = db.prepare(`SELECT seq, ts, target, kind, text, data FROM events WHERE project = ? AND seq > ? AND (text != '' OR kind = 'review'${stageClause})
+  const rows = db.prepare(`SELECT seq, ts, actor, origin, target, kind, text, data FROM events WHERE project = ? AND seq > ? AND (text != '' OR kind = 'review'${stageClause})
     AND target IN (${tasks.map(() => "?").join(",")}) ORDER BY seq LIMIT ?`)
-    .all(entry.localProject, after, ...tasks.map((t) => t.id), limit) as { seq: number; ts: number; target: string; kind: string; text: string; data: string }[];
+    .all(entry.localProject, after, ...tasks.map((t) => t.id), limit) as { seq: number; ts: number; actor: string; origin: string | null; target: string; kind: string; text: string; data: string }[];
   const out: Pending[] = rows.map((r) => {
     const meta = withMeta ? eventMetaOf(r) : undefined;
-    return { taskId: r.target, kind: r.kind === "review" ? "review" as const : "event" as const, sourceKey: String(r.seq),
-      raw: r.kind === "review" ? reviewText(r.text, r.data) : r.text, seq: r.seq, ...(meta ? { meta } : {}) };
+    const kind = r.kind === "review" ? "review" as const : "event" as const;
+    return { taskId: r.target, kind, sourceKey: String(r.seq), raw: teamBodySourceText(kind, kind === "review" ? teamBodyReviewText(r.text, r.data) : r.text),
+      seq: r.seq, ...(meta ? { meta } : {}), ...(kind === "review" ? { who: { actor: r.actor, origin: r.origin, data: r.data } } : {}) };
   });
   const docsDir = tasks.some((t) => st.specs[t.id] !== t.specRev) ? getMeta(db, entry.localProject).docsDir : null;
   for (const task of tasks) {
     if (out.length >= limit) break;
     if (st.specs[task.id] === task.specRev) continue;
     const raw = readTextSoft(specPathFor(task, docsDir));
-    if (raw !== null) out.push({ taskId: task.id, kind: "spec", sourceKey: String(task.specRev), raw, specRev: task.specRev });
+    if (raw !== null) out.push({ taskId: task.id, kind: "spec", sourceKey: String(task.specRev), raw: teamBodySourceText("spec", raw), specRev: task.specRev, who: { pm: task.pm } });
   }
   return out;
 }
@@ -260,6 +248,7 @@ interface Pass {
   dir: string; now: () => number; deps: TeamBodySyncDeps; file: SyncFile; budget: { left: number };
   send: <T>(baseUrl: string, action: () => Promise<T>) => Promise<T>;
   ledger: () => Database;
+  peers: RolePeers;
 }
 
 const teamPath = (template: string, teamId: string): string => {
@@ -319,7 +308,8 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     if (st.observedHour === hour) return;
     const items = pendingOf(db, featureId, entry, st, TEAM_BODY_SYNC_PER_PASS);
     if (!items.length) return;
-    const prepared = prepare(items, entry, await (p.deps.scrub ?? realScrub)(mirrorTaskHeads(db, featureId, entry.localProject)));
+    const heads = teamBodyScrubHeads(mirrorTaskHeads(db, featureId, entry.localProject), items.map((x) => x.raw));
+    const prepared = prepare(items, entry, await (p.deps.scrub ?? realScrub)(heads));
     if (modeNow() !== "observe") return; // Switched while the scrub ran: the note is observe's alone.
     const n = prepared.filter((x) => x.record).length, k = prepared.length - n, m = prepared.reduce((sum, x) => sum + (x.record ? x.maskedSegments : 0), 0);
     recordObserved(p.ledger(), { project: entry.localProject, mechanism: "teamBody", target: "", actionKey: `team-body:${featureId}:${hour}`,
@@ -346,27 +336,25 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     if (modeNow() === "on") noteUnsupported(p, entry, credential.teamId);
     return;
   }
-  const scrub = await (p.deps.scrub ?? realScrub)(mirrorTaskHeads(db, featureId, entry.localProject));
+  const scrub = await (p.deps.scrub ?? realScrub)(teamBodyScrubHeads(mirrorTaskHeads(db, featureId, entry.localProject), items.map((x) => x.raw)));
   // The bearer is a secret wherever it turns up in body text, as in the ledger client's own scrub.
-  const prepared = prepare(items, entry, { ...scrub, knownSecrets: [...(scrub.knownSecrets ?? []), credential.bearer] });
+  // Identity rides with meta, unless this center refused it lately (team-body-roles.ts).
+  const origin = originKey(credential.baseUrl), withIdentity = withMeta && takesMeta(p.file, identityKey(origin), now);
+  const ready = withIdentity ? await withRoles(items, { localInstance: credential.instanceId, storedOrigin: storedOrigin(db), peers: p.peers }) : items;
+  const prepared = prepare(ready, entry, { ...scrub, knownSecrets: [...(scrub.knownSecrets ?? []), credential.bearer] });
   p.budget.left -= prepared.length;
   const upload = (slice: readonly Prepared[], strip: boolean) => uploadRun(p, entry, credential, key, slice, strip);
-  let strip = !withMeta, from = 0;
+  const s: RoleSend = { strip: !withMeta, bare: !withIdentity };
+  let from = 0;
   for (const upto of batchesOf(entry, prepared)) {
     const slice = prepared.slice(from, upto);
-    let refusedAt: Set<number>;
-    try { refusedAt = await upload(slice, strip); }
-    catch (error) {
-      // A center that predates meta refuses the whole batch: the same batch once more without it, then none for a day.
-      if (strip || !(error instanceof SharedLedgerRemoteError && error.status === 400) || !slice.some((x) => x.record?.meta)) throw error;
-      strip = true;
-      refusedAt = await upload(slice, true);
-      refuseMeta(p.file, originKey(credential.baseUrl), p.now());
-    }
-    handled(st, slice, p.now(), !strip, refusedAt);
+    // A center that refuses identity, or predates meta, refuses the whole batch: the same batch once more without it, then none for a day.
+    const refusedAt = await uploadWithRoles(slice, s, upload, {
+      identity: () => refuseMeta(p.file, identityKey(origin), p.now()), meta: () => refuseMeta(p.file, origin, p.now()) });
+    handled(st, slice, p.now(), !s.strip, refusedAt);
     from = upto;
   }
-  handled(st, prepared.slice(from), p.now(), !strip); // Trailing records the scrub refused.
+  handled(st, prepared.slice(from), p.now(), !s.strip); // Trailing records the scrub refused.
   Object.assign(st, { failures: 0, nextAttemptAt: 0, lastError: null });
 }
 
@@ -405,7 +393,7 @@ export async function syncTeamBodies(db: Database, features: readonly (readonly 
         lastSent = now();
         return action();
       },
-      ledger: () => ledger ??= openLedger(deps.ledgerPath ?? join(dir, "ledger.sqlite")) };
+      ledger: () => ledger ??= openLedger(deps.ledgerPath ?? join(dir, "ledger.sqlite")), peers: rolePeers(deps.peers) };
     try {
       for (const [featureId, entry] of features) {
         try { await syncFeature(p, featureId, entry, db); }

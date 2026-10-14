@@ -50,11 +50,26 @@ describe("runBounded", () => {
     expect(rest.match(/h/g)?.length).toBe(1);
   });
   test("正常退出：退出码、stdout、stderr 原样", async () => {
-    expect(await runBounded(["sh", "-c", "echo hi; echo e >&2; exit 3"], { timeoutMs: 5000 })).toEqual({ code: 3, stdout: "hi\n", stderr: "e\n", timedOut: false });
+    expect(await runBounded(["sh", "-c", "echo hi; echo e >&2; exit 3"], { timeoutMs: 5000 })).toEqual({ code: 3, stdout: "hi\n", stderr: "e\n", timedOut: false, truncated: false });
   });
   test("命令不存在：code null，原因进 stderr", async () => {
     const r = await runBounded(["definitely-not-a-cmd-xyz"], { timeoutMs: 1000 });
     expect(r).toMatchObject({ code: null, timedOut: false });
     expect(r.stderr).not.toBe("");
   });
+});
+
+
+test("[验收线 7] optional maxBytes reads beyond 1 MiB, exact/full buffers report truncated", async () => {
+  const size = 1200000;
+  const argv = [process.execPath, "-e", `process.stdout.write('x'.repeat(${size}))`];
+  const usual = await runBounded(argv, { timeoutMs: 5000 });
+  expect(usual.stdout.length).toBe(1024 * 1024);
+  expect(usual.truncated).toBe(true);
+  const larger = await runBounded(argv, { timeoutMs: 5000, maxBytes: 2 * 1024 * 1024 });
+  expect(larger.stdout.length).toBe(size);
+  expect(larger.truncated).toBe(false);
+  const exact = await runBounded(argv, { timeoutMs: 5000, maxBytes: size });
+  expect(exact.stdout.length).toBe(size);
+  expect(exact.truncated).toBe(true);
 });

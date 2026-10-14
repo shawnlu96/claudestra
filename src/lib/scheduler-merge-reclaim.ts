@@ -20,7 +20,7 @@ type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface ReclaimResult { reclaimed: string[]; failed: { taskId: string; error: string }[] }
 
 /** Runs that lent their slot and sent no merge yet, oldest merge intent first (mergeTick's order). */
-function lenders(db: Database, project: string): MergeRun[] {
+export function lenders(db: Database, project: string): MergeRun[] {
   return db.query(`SELECT m.* FROM scheduler_merges m JOIN scheduler_intents i ON i.id = m.intentId WHERE m.project = ? AND i.action = 'merge'
     AND i.status = 'submitted' AND m.phase IN ('ready','await_ci') AND (SELECT json_extract(e.data, '$.turn') FROM events e WHERE e.target = m.taskId
     AND e.kind = 'scheduler' AND json_extract(e.data, '$.op') = 'merge_slot' AND json_extract(e.data, '$.intentId') = m.intentId
@@ -48,14 +48,15 @@ export async function reclaimLentSlots(db: Database, projects: readonly string[]
 }
 
 /**
- * MERGEFAST2/3: with mergeDirect on, a run that got the slot after this pass's mergeTick (taken back above, a manual request
- * claimed, or a merge the auto tick just planned, still pending) is driven by one more mergeTick in the same pass instead of
- * waiting a whole pass. The extra tick is the one the next pass would run, so every check stays as it is.
+ * MERGEFAST2/3: with mergeDirect on, a run that got the slot after this pass's mergeTick is driven by one more mergeTick in the
+ * same pass instead of waiting a whole pass. `late` lists the cards the pass saw get the slot (taken back above, or a manual
+ * request claimed: the claim begins its run at once, so the query below cannot see it); a merge the auto tick just planned has
+ * no run yet and is found by the query. The extra tick is the one the next pass would run, so every check stays as it is.
  */
-export function mergeAgain(db: Database, projects: readonly string[], reclaimed: readonly string[], policy: RecoveryPolicyPort): boolean {
+export function mergeAgain(db: Database, projects: readonly string[], late: readonly string[], policy: RecoveryPolicyPort): boolean {
   const direct = projects.filter((p) => policy(p, "mergeDirect").mode === "on");
   if (!direct.length) return false;
-  if (reclaimed.length) return true;
+  if (late.length) return true;
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return false;
   return direct.some((p) => db.query(`SELECT 1 FROM scheduler_intents i WHERE i.project = ? AND i.action = 'merge' AND i.status IN ('pending','submitted')
     AND NOT EXISTS (SELECT 1 FROM scheduler_merges m WHERE m.intentId = i.id)`).get(p) !== null);

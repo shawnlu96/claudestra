@@ -8,6 +8,7 @@
  * off、自己正占着列车、没带列车事实、策略读不了 = 原规则。
  * tests/ledger-audit-merge-ready*.test.ts。
  */
+import { CI_SCOPE_LIGHT, CI_SCOPE_FULL, lightOnly } from "./ci-queue-full.js";
 import type { Database } from "bun:sqlite";
 import type { AuditFinding, AuditRule, AuditSnapshot } from "./ledger-audit.js";
 import { trainSlots, type MergeTrainInputs } from "./ledger-audit-train.js";
@@ -131,10 +132,13 @@ export async function collectMergeCi(project: string, tasks: AuditSnapshot["task
     if (!checks) return null;
     const out: Record<string, MergeCiFact> = {};
     for (const { task } of want) {
-      const head = task.headSHA!, states = await headChecks(deps.run, PR.exec(task.pr!)![1]!, head, checks);
+      const head = task.headSHA!, states = await headChecks(deps.run, PR.exec(task.pr!)![1]!, head, [...new Set([...checks, CI_SCOPE_LIGHT, CI_SCOPE_FULL])]);
+      for (const name of [CI_SCOPE_LIGHT, CI_SCOPE_FULL]) if (states[name] === "missing" && !checks.includes(name)) delete states[name];
+      const light = lightOnly(Object.entries(states).map(([name, bucket]) => ({ name, bucket })));
       let blockers: readonly string[] | null | undefined;
       try { blockers = deps.blockersOf?.(task); } catch { blockers = null; }
       const bad = Object.entries(states).filter(([, v]) => v !== "pass").map(([k]) => k);
+      if (light && !bad.includes(CI_SCOPE_FULL)) bad.push(CI_SCOPE_FULL);
       const vals = Object.values(states);
       out[task.id] = { head, source: "live", checkedAt: now, missing: bad, ...(blockers !== undefined ? { blockers } : {}),
         state: !bad.length ? "green" : vals.some((v) => ["fail", "cancelled", "skipped"].includes(v)) ? "red"

@@ -15,7 +15,7 @@ export type TeamBodyKind = "event" | "review" | "spec" | "session-page";
 export interface TeamBodyRecordWire {
   featureId: string; taskId: string; kind: TeamBodyKind; sourceKey: string; text: string;
   scrubVersion: number; maskedSegments: number; digest: string;
-  meta?: { kind?: unknown; ts?: unknown; stageTo?: unknown };
+  meta?: { kind?: unknown; ts?: unknown; stageTo?: unknown; reviewer?: unknown; pm?: unknown };
 }
 export interface TeamBodyReadWire {
   schemaVersion: 1; teamId: string; projectId: string; featureId: string; taskId: string;

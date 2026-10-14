@@ -8,7 +8,7 @@
  * (scheduler-merge-reclaim.test.ts runs this file as that child) — and the tick gets that same state-dir file.
  */
 import "./runner-guard-entry.ts"; // 直接跑时先于下面的依赖过闸（paths.ts 加载就建运行目录）
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
@@ -16,7 +16,8 @@ import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { insertEvent, type EventDraft } from "../src/lib/ledger-tx.js";
-import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
+import { recoveryPolicy } from "../src/lib/recovery-policy.js";
+import { parseSchedulerConfig, SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
 import type { DeployJobs } from "../src/lib/scheduler-deploy-job.js";
 import { DEPLOY_LABEL_PREFIX } from "../src/lib/scheduler-deploy.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
@@ -33,19 +34,26 @@ import { guardRunner } from "./runner-guard.ts";
 
 let worlds = 0; // a repo per world: the train tick caches PR file lists by PR URL and head for the whole process
 
-/** handoff: scheduler.json mergeHandoff on (MHO1): the auto tick reads PRs from the same fake GitHub and hands them over. */
-export interface WorldOpts { store: "memory" | "file" | "default"; deploy?: boolean; files?: (n: number) => string; handoff?: boolean }
+/**
+ * handoff: scheduler.json mergeHandoff on (MHO1): the auto tick reads PRs from the same fake GitHub and hands them over.
+ * live: the switches claude-orchestrator runs with (MQ1P2): p's config says mergeTrain "off" and the same config is written as the
+ * state dir's scheduler.json (trainMode reads that file), and the merge driver gets `direct` by the mergeDirect recovery key, as
+ * scheduler-merge-external.ts wires it. The test writes recovery-policy.json itself. Absent: the world is what it always was.
+ */
+export interface WorldOpts { store: "memory" | "file" | "default"; deploy?: boolean; files?: (n: number) => string | string[]; handoff?: boolean; live?: boolean }
 
 /**
  * GitHub as the train and the merge driver see it (shared with scheduler-merge-train-hold.test.ts): one main that moves on each
  * merge, PR heads, a record of every update-branch / merge in order (`calls`, labelled by `name`). update-branch keeps the head.
+ * Optional (MRGPIPE1): `ci` by card name, pending / fail = the inspect reads UNSTABLE with that check bucket; `dirty` by card name
+ * = DIRTY; `files` may list several paths (old rename paths included). Left empty, every PR reads CLEAN and green as before.
  */
-export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef: string) => string; files: (prRef: string) => string;
-  newSha?: () => string }) {
+export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef: string) => string; files: (prRef: string) => string | string[];
+  newSha?: () => string; direct?: MergeExternal["direct"] }) {
   let shaSeq = 0;
   const newSha = o.newSha ?? (() => (++shaSeq).toString(16).padStart(40, "0")); // one counter with the caller's card heads
   const hub = { main: newSha(), parents: new Map<string, string[]>(), heads: new Map<string, string>(), merged: new Map<string, string>(),
-    synced: new Map<string, string>(), pending: false, calls: [] as string[],
+    synced: new Map<string, string>(), pending: false, calls: [] as string[], ci: new Map<string, "pending" | "fail">(), dirty: new Set<string>(),
     /** The service stops while this card's merge call is out (GitHub merged it or not): the journal stays at `merging`. */
     stopIn: null as { name: string; merged: boolean } | null };
   const mergeInto = (prRef: string, head: string, call: string) => {
@@ -60,7 +68,7 @@ export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef:
   };
   const gh: TrainGh = {
     mainHead: async () => hub.main,
-    prFiles: async (pr) => [o.files(pr)],
+    prFiles: async (pr) => [o.files(pr)].flat(),
     prHead: async (pr) => hub.heads.get(pr)!,
     createBranch: async () => {},
     mergeInto: async () => "merged",
@@ -74,8 +82,10 @@ export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef:
   };
   const pr = (prRef: string): PrSnapshot => {
     const merged = hub.merged.get(prRef) ?? null;
+    const name = hub.ci.size || hub.dirty.size ? o.name(prRef) : null, ci = name ? hub.ci.get(name) : undefined;
     return { state: merged ? "MERGED" : "OPEN", head: hub.heads.get(prRef)!, branch: o.branch(prRef), base: "main", draft: false,
-      crossRepository: false, mergeState: "CLEAN", mergeSha: merged, checks: [{ name: "check", bucket: "pass" }] };
+      crossRepository: false, mergeState: name && hub.dirty.has(name) ? "DIRTY" : ci ? "UNSTABLE" : "CLEAN", mergeSha: merged,
+      checks: [{ name: "check", bucket: ci ?? "pass" }] };
   };
   const base: MergeExternal = {
     inspect: async (prRef) => pr(prRef),
@@ -83,6 +93,7 @@ export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef:
     carryReview: async () => ({ ok: false, reason: "不沿用" }),
     updateBranch: async (prRef) => { hub.synced.set(prRef, hub.main); hub.calls.push(`update:${o.name(prRef)}`); }, // head kept: a no-op merge of main
     merge: async (prRef, head) => mergeInto(prRef, head, "serial-merge"),
+    ...(o.direct ? { direct: o.direct } : {}),
   };
   return { hub, gh, base, newSha };
 }
@@ -100,12 +111,25 @@ export function reclaimWorld(opts: WorldOpts) {
   const dir = mkdtempSync(join(tmpdir(), "mtr1-")), path = join(dir, "ledger.sqlite");
   let db = openLedger(path);
   const reader = new LedgerReader(path);
-  const config = parseSchedulerConfig({ enabled: true, autoDispatch: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
-    repoDir: "/tmp/p", ...(opts.deploy ? { deploy: { restartLabels: ["x.fake"], timeoutMs: 60_000 } } : {}), ...(opts.handoff ? { mergeHandoff: true } : {}) } } });
+  const project = { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: "/tmp/p",
+    ...(opts.deploy ? { deploy: { restartLabels: ["x.fake"], timeoutMs: 60_000 } } : {}), ...(opts.handoff ? { mergeHandoff: true } : {}),
+    ...(opts.live ? { mergeTrain: "off" } : {}) };
+  const config = parseSchedulerConfig({ enabled: true, autoDispatch: true, projects: { p: project } });
+  /** scheduler.json as the ledger CLI and trainMode read it: the pass's own project config, with `mergeHandoff` as it is now. */
+  let wroteConfig = false;
+  const writeConfig = () => {
+    writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, autoDispatch: true,
+      projects: { p: { ...project, mergeHandoff: config.projects.p!.mergeHandoff === true } } }));
+    wroteConfig = true;
+  };
+  if (opts.live) writeConfig();
+  /** The project switches to / from the repository owner merging, mid-run: the pass's config and scheduler.json together. */
+  const setHandoff = (on: boolean) => { config.projects.p!.mergeHandoff = on; writeConfig(); };
   const prNum = (prRef: string) => prRef.split("/").pop()!;
   const idOf = (prRef: string) => cards.find((c) => c.prRef === prRef)!.taskId;
   const { hub, gh, base, newSha } = fakeGitHub({ name: idOf, branch: (pr) => `task/${idOf(pr)}`,
-    files: (pr) => opts.files?.(Number(prNum(pr))) ?? `src/${prNum(pr)}.ts` });
+    files: (pr) => opts.files?.(Number(prNum(pr))) ?? `src/${prNum(pr)}.ts`,
+    ...(opts.live ? { direct: (r) => recoveryPolicy(r.project, "mergeDirect").mode === "on" } : {}) });
   let num = 0;
   const cards: { taskId: string; prRef: string; head: string }[] = [];
   /** An auto code card in `merge` at a fresh head with a passing cross-family review: the planner may plan its merge. */
@@ -203,9 +227,12 @@ export function reclaimWorld(opts: WorldOpts) {
     if (r.ok !== true) throw new Error(String(r.error));
     return intent;
   };
-  const close = () => { reader.close(); closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(mstr, { recursive: true, force: true }); };
+  const close = () => {
+    reader.close(); closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(mstr, { recursive: true, force: true });
+    if (wroteConfig) rmSync(SCHEDULER_CONFIG_PATH, { force: true });
+  };
   return { get db() { return db; }, hub, store, events, notices, manager, config, external, deployJobs, trainTick: () => stepTrain(db),
-    card, pass, restart, phase, slot, turns, begin, intentOf, close };
+    card, pass, restart, phase, slot, turns, begin, intentOf, setHandoff, close };
 }
 export type ReclaimWorld = ReturnType<typeof reclaimWorld>;
 

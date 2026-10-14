@@ -183,7 +183,8 @@ const LOCAL_ONLY = [/\/me\/last-seen\/shared-ledger:/, /\/ledger\/shared-ledger:
 
 test("复现测试：团队总览显示镜像状态；本机总览没有", async () => {
   const team = await mountView("team", 1200);
-  await until(() => team.text().includes("主场镜像最新"), "mirror section");
+  // UXHOME1：右栏「镜像」节去掉了，新鲜度只在页头那一行「团队版 · …」
+  await until(() => /团队版 · (刚刚|\d+ 分钟前)同步/.test(team.text()), "mirror line in page head");
   await team.unmount();
   const local = await mountView("local", 1200);
   expect(local.text()).not.toMatch(/主场镜像/);
@@ -195,15 +196,15 @@ test("复现测试：团队详情显示成员代号 / 主场实例 / 8 位 head 
   await React.act(async () => ui.openCollabTask("R1"));
   await until(() => v.text().includes("成员代号"), "team facts");
   const facts = Object.fromEntries(Array.from(v.host.querySelectorAll("[data-team-fact]")).map((e) => [e.getAttribute("data-team-fact"), e.textContent]));
-  expect(facts).toEqual({ 成员代号: "成员代号：worker-a", 执行实例: "执行实例：主场实例", head: "head：89abcdef", 阻塞提问: "阻塞提问：1", 镜像: "镜像：主场镜像最新" });
+  expect(facts).toEqual({ 成员代号: "成员代号：worker-a", 任务所在的机器: "任务所在的机器：其他成员的机器", head: "head：89abcdef", 阻塞提问: "阻塞提问：1", 同步: "同步：进度是最新的" });
   expect(v.text()).not.toContain(HOME);
   expect(v.text()).not.toContain(HEAD);
-  expect(v.text()).toContain("主场有 1 个阻塞提问");
+  expect(v.text()).toContain("任务所在的机器上有 1 个问题在等回答");
   // 步骤线：审查第 2 轮是当前步，执行者不知道显示「—」，没有编出来的结论
   expect(v.host.querySelector('[data-step="review"][aria-current="step"]')?.textContent).toContain("R2");
   expect(v.host.querySelector('[data-step="fix"]')?.textContent).toContain("已完成");
-  // 主线详情现在明确显示「对它说只在主场机器上可用」（TEAMVIS7 换占位文案）；限制针对可操作入口，不能把主场提示当成按钮。
-  expect(v.text()).toContain("对它说只在主场机器上可用");
+  // 主线详情明确写对它说在哪台机器、为什么不行（UXCARD1 换占位文案）；限制针对可操作入口，不能把主场提示当成按钮。
+  expect(v.text()).toContain("这张卡在 其他成员的机器 上执行");
   expect(v.text()).not.toMatch(/打开会话|要改|拦下/);
   expect(Array.from(v.host.querySelectorAll("button, a, input, textarea"), e => e.textContent ?? "").join(" ")).not.toMatch(/打开会话|对它说/);
   expect(calls.filter((c) => LOCAL_ONLY.some((re) => re.test(c)))).toEqual([]);
@@ -215,17 +216,18 @@ test("复现测试：缺字段 / 没有镜像证据显示暂无，不补成最�
   const task = { ...homeLedger().tasks[1]!, team: { assigneeCode: null, executorInstanceId: null, head: null, blockingAsks: 0, mirror: null, freshUntil: null } };
   const v = await render(h(ui.TeamFactsSec, { id: task.id, ov: { tasks: [task] }, now: NOW, tr: ui.zh }));
   const facts = Object.fromEntries(Array.from(v.host.querySelectorAll("[data-team-fact]")).map((e) => [e.getAttribute("data-team-fact"), e.textContent]));
-  expect(facts).toEqual({ 成员代号: "成员代号：暂无", 执行实例: "执行实例：暂无", head: "head：暂无", 阻塞提问: "阻塞提问：0", 镜像: "镜像：暂无" });
+  expect(facts).toEqual({ 成员代号: "成员代号：暂无", 任务所在的机器: "任务所在的机器：暂无", head: "head：暂无", 阻塞提问: "阻塞提问：0", 同步: "同步：暂无" });
   await v.unmount();
   // 总览：有 feature 还没有镜像 → 暂无；有过期 → 报过期数
   const fresh = { mirror: "fresh", freshUntil: NOW + 30_000 } as const, stale = { mirror: "stale", freshUntil: null } as const;
   const none = { mirror: null, freshUntil: null } as const;
-  for (const [mirror, want, not] of [[[fresh, none], "暂无", "主场镜像最新"], [[stale, stale, fresh], "2 个 feature 主场镜像过期", "主场镜像最新"]] as const) {
+  // UXHOME1：总览右栏不再有「镜像」节（暂无 / 过期数改在页头，tests/web-collab-page-head.test.ts）
+  for (const mirror of [[fresh, none], [stale, stale, fresh]] as const) {
     const ov = { ...homeLedger(), mirror };
     const o = await render(h(ui.Overview, { ov, view: ui.homeView(ov, NOW), waits: [], projectName: "p", onPick: () => {}, now: NOW, tr: ui.zh }));
     const sec = Array.from(o.host.querySelectorAll("section")).find((x) => x.querySelector("h5")?.textContent === "镜像");
-    expect(sec?.textContent).toContain(want);
-    expect(sec?.textContent).not.toContain(not);
+    expect(sec).toBeUndefined();
+    expect(o.host.textContent).not.toMatch(/主场镜像/);
     await o.unmount();
   }
 });
@@ -233,18 +235,19 @@ test("复现测试：缺字段 / 没有镜像证据显示暂无，不补成最�
 test("复现测试：读到时新鲜、走表越过 30 秒：详情团队段和总览镜像段改报过期（主场停了也不会有新水位来重拉）", async () => {
   const facts = { assigneeCode: "worker-a", executorInstanceId: null, head: null, blockingAsks: 0, mirror: "fresh", freshUntil: NOW + 30_000 } as const;
   const task = { ...homeLedger().tasks[1]!, team: facts };
-  const cases = [[NOW, "主场镜像最新", "主场镜像过期"], [NOW + 60_000, "主场镜像过期", "主场镜像最新"]] as const;
+  const cases = [[NOW, "进度是最新的", "进度可能不是最新的"], [NOW + 60_000, "进度可能不是最新的", "进度是最新的"]] as const;
   for (const [now, want, not] of cases) {
     const v = await render(h(ui.TeamFactsSec, { id: task.id, ov: { tasks: [task] }, now, tr: ui.zh }));
-    expect(v.host.querySelector('[data-team-fact="镜像"]')?.textContent).toContain(want);
+    expect(v.host.querySelector('[data-team-fact="同步"]')?.textContent).toContain(want);
     expect(v.host.textContent).not.toContain(not);
     await v.unmount();
   }
-  for (const [now, want] of [[NOW, "主场镜像最新"], [NOW + 60_000, "1 个 feature 主场镜像过期"]] as const) {
+  // UXHOME1：总览右栏不再有「镜像」节（走表改报过期在页头，tests/web-collab-page-head.test.ts）
+  for (const now of [NOW, NOW + 60_000]) {
     const ov = { ...homeLedger(), mirror: [{ mirror: "fresh", freshUntil: NOW + 30_000 }] as const };
     const o = await render(h(ui.Overview, { ov, view: ui.homeView(ov, now), waits: [], projectName: "p", onPick: () => {}, now, tr: ui.zh }));
     const sec = Array.from(o.host.querySelectorAll("section")).find((x) => x.querySelector("h5")?.textContent === "镜像");
-    expect(sec?.textContent).toContain(want);
+    expect(sec).toBeUndefined();
     await o.unmount();
   }
 });
@@ -254,7 +257,8 @@ test("复现测试：英文界面团队段与边页文案有译文", async () =>
   const v = await mountView("team", 390);
   await React.act(async () => ui.openCollabTask("R1"));
   await until(() => v.text().includes("Member code"), "team facts en");
-  for (const s of ["Executor instance", "Home instance", "Blocking questions", "Home mirror is fresh", "1 blocking question(s) at home"]) expect(v.text()).toContain(s);
+  for (const s of ["The machine running the task", "Another member's machine",
+    "Blocking questions", "Progress is up to date", "1 questions are waiting for an answer on the task's machine"]) expect(v.text()).toContain(s);
   await v.unmount();
   const { tIn } = await import(new URL("../web/lib/i18n.tsx", import.meta.url).href);
   expect(tIn("en", "建立者 / 时间未记录（团队数据没有边级元数据）")).toBe("Creator / time not recorded (team data has no edge-level metadata)");

@@ -1,3 +1,8 @@
+import { LP_WORDS as L, ownerWordEn } from "./owner-words";
+
+/** 词表里的词（lib/owner-words）：键和 en 值都从那里取 */
+const en = (zh: string) => ownerWordEn(zh) ?? zh;
+
 /** 批量管理面板与 low-priority 徽章（web/features/fleet）的字典条目，规则同 lib/i18n-dict.ts */
 export const FLEET_DICT: Record<string, string> = {
   "批量管理": "Batch ops",
@@ -15,16 +20,16 @@ export const FLEET_DICT: Record<string, string> = {
   "快捷筛选包括大总管": "Quick picks include the orchestrator",
   "已选 {n} / {total}": "{n} / {total} selected",
   "没有 agent": "No agents",
-  "开 LP 再压缩": "LP + compact",
-  "关 LP": "LP off",
+  [L.compactLabel]: en(L.compactLabel),
+  [L.offLabel]: en(L.offLabel),
   "压缩": "Compact",
-  "开 LP": "LP on",
+  [L.onLabel]: en(L.onLabel),
   "存记忆再压缩": "Save memory + compact",
   "发一段话": "Send a message",
-  "撞墙中的会话：开 LP → 打断自动续跑 → 带保留清单压缩。": "Sessions at the limit: LP on → interrupt the auto-continue → compact with the keep list.",
-  "只对开着 LP 的会话发；关着的跳过。": "Only sessions with LP on; ones already off are skipped.",
-  "带保留清单发 /compact；忙的排队，撞墙没开 LP 的不发。": "Sends /compact with the keep list; busy ones queue it, ones at the limit without LP are skipped.",
-  "只对撞墙中的会话；开着的跳过，忙的不发。": "Sessions at the limit only; ones already on are skipped, busy ones are left alone.",
+  [L.compactLpHint]: en(L.compactLpHint),
+  [L.offHint]: en(L.offHint),
+  [L.compactHint]: en(L.compactHint),
+  [L.onHint]: en(L.onHint),
   "先存记忆再压缩；worktree 里的执行者改发 /compact。": "Saves memory, then compacts; executors in a worktree get a plain /compact.",
   "逐个投递，开头带「批量指令」来源头。": "Delivered one by one with a “batch” source header.",
   "要发给它们的话（会带「批量指令」来源头）": "What to tell them (sent with a “batch” source header)",
@@ -49,6 +54,4 @@ export const FLEET_DICT: Record<string, string> = {
   "已跳过": "Skipped",
   "low-priority 开着，到 {time}{pct}": "Low priority on until {time}{pct}",
   "本周 low-priority 额度已用完": "This week's low-priority allowance is used up",
-  "撞墙等待中，到 {time} 自动继续": "At the usage limit, continuing automatically at {time}",
-  "LP 已用完": "LP used up",
 };

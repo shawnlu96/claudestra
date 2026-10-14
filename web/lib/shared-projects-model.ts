@@ -15,9 +15,13 @@ export interface SharedProject extends ProjectRef {
 /** Center team record without its code; `name` null means the center has no display name yet. */
 export interface TeamRecord { name: string | null; rev: number }
 export interface TeamDirectoryMember { personId: string; code: string; teamRole: "owner" | "member" }
-/** `team` / `directory` null: the center team read is unavailable (old bridge or degraded read); never inferred from projects. */
+/** One machine of a directory member, from the center's instance bindings only. */
+export interface TeamInstance { instanceId: string; personId: string }
+/** `team` / `directory` null: the center team read is unavailable (old bridge or degraded read); never inferred from projects.
+ * `instances` missing or null: the center instances read is unavailable; never inferred from peer names. */
 export interface ProjectTeam extends ProjectScope {
   personId: string; teamRole: "owner" | "member" | null; team: TeamRecord | null; directory: TeamDirectoryMember[] | null;
+  instances?: TeamInstance[] | null;
 }
 export interface ProjectMember { personId: string; code: string; role: "owner" | "member"; status: "invited" | "active" | "removed" }
 export interface ProjectSnapshot {
@@ -25,7 +29,8 @@ export interface ProjectSnapshot {
   teams: ProjectTeam[];
   projects: SharedProject[];
   localProjects: { id: string; name: string; personal: boolean; bound: boolean }[];
-  peers: { id: string; name: string }[];
+  /** instanceId = 该 peer 已记的实例 id（老 bridge / 老 peer 记录没有） */
+  peers: { id: string; name: string; instanceId?: string }[];
   capabilities?: { invite: boolean; leave: boolean };
 }
 export interface CreateProject extends ProjectScope { name: string; id?: string; localProjectId?: string; operationId: string }

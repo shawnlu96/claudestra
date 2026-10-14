@@ -4,8 +4,9 @@
  * 「开发」「验证」这类短词不进全局 i18n 字典（撞键就会改掉别处的译文），中英文都放在 STAGE_DEFS 里按语言取；整句模板在 lib/i18n-dict-ledger.ts。
  */
 import type { LedgerReviewRef, LedgerTaskRef } from "@/lib/chat/agents";
+import { STAGE_WORD } from "@/lib/owner-words";
 
-/** 返工 / 卡住 = 红；等别人（复述确认、审查、合并、上线后待验证）= 黄；开发 = 主色；验证完 = 绿 */
+/** 返工 / 卡住 = 红；等别人（确认需求、审查、合并、上线后待验证）= 黄；开发 = 主色；验证完 = 绿 */
 export type StageTone = "error" | "warning" | "primary" | "success" | "neutral";
 export type StageIcon = "spec" | "wait" | "build" | "fix" | "blocked" | "done" | "cancel" | "review";
 
@@ -24,7 +25,7 @@ interface StageDef {
 const w = (zh: string, en: string): Words => ({ zh, en });
 const STAGE_DEFS: Record<string, StageDef> = {
   spec: { short: w("规格", "Spec"), state: w("写规格中", "writing spec"), tone: "neutral", icon: "spec" },
-  restate: { short: w("复述", "Restate"), state: w("等复述确认", "restate awaiting sign-off"), tone: "warning", icon: "wait" },
+  restate: { short: w(STAGE_WORD.restate, "Confirm"), state: w(`等${STAGE_WORD.restate}`, "awaiting requirement sign-off"), tone: "warning", icon: "wait" },
   build: { short: w("开发", "Build"), state: w("开发中", "building"), tone: "primary", icon: "build" },
   review: { short: w("审查", "Review"), state: w("审查中", "in review"), tone: "warning", icon: "wait" },
   fix: { short: w("返工", "Fix"), state: w("返工中", "fixing"), tone: "error", icon: "fix" },

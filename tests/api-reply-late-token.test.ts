@@ -21,7 +21,6 @@ const SECRET = "s3cr3t-never-in-reasons";
 const CID = "chan-worker";
 const AGENT = "agent-worker";
 const TEXT = "这一轮的答复正文";
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const tok = (id: string, extra: Partial<Principal> = {}): Principal =>
   ({ id: `token:${id}`, role: "external", name: `n-${id}`, agents: ["*"], secret: SECRET, createdAt: "2026-10-01T00:00:00Z", ...extra });
 
@@ -73,16 +72,21 @@ function bridge(...principals: Principal[]) {
     revoke: (id: string) => write(current().filter((p) => p.id !== `token:${id}`)),
     disable: (id: string) => write(current().map((p) => (p.id === `token:${id}` ? { ...p, disabled: true } : p))),
     corrupt: () => writeFileSync(path, `{"principals":[{"secret":"${SECRET}"`),
-    /** 对方发来一条请求；wait = 同步等待开着（api-routes 的写法：到点 resolve(null)，条目留在队里） */
-    hang(tokenId: string, n: number, ts = n): { w: Waiter; got: Promise<Result | null> } {
+    /**
+     * 对方发来一条请求；wait = 同步等待开着（api-routes 的写法：到点 resolve(null)，条目留在队里）。
+     * 「到点」由用例调 expire() 触发，不挂真实计时器：登记附件要拷文件、算 sha256，CI 慢机上一次就超过原来的 60ms，
+     * 别的请求会在轮到它之前先超时。expire() 做的事和 api-routes 的到点回调一样；已经交过结果的请求再到点不改结果。
+     */
+    hang(tokenId: string, n: number, ts = n): { w: Waiter; got: Promise<Result | null>; expire: () => Promise<Result | null> } {
       const w: Waiter = { tokenId, agentChannelId: CID, threadId: `thr_${tokenId}_${n}`, messageId: `m_${tokenId}_${n}`, ts };
+      let expire!: () => Promise<Result | null>;
       const got = new Promise<Result | null>((resolve) => {
         w.resolve = resolve;
-        setTimeout(() => (w.resolve = undefined, resolve(null)), 60);
+        expire = () => (w.resolve = undefined, resolve(null), got);
       });
       const key = `${tokenId}|${CID}`;
       h.queues.set(key, [...(h.queues.get(key) ?? []), w]);
-      return { w, got };
+      return { w, got, expire };
     },
   };
   return h;
@@ -119,7 +123,7 @@ describe("登记附件期间 token 被撤销：回复不送达", () => {
   for (const [how, principal, revoke, reason] of cases) {
     test(`${how}：报错，没有结果、没有事件，等待方拿到超时，请求还在队里`, async () => {
       const h = bridge(principal);
-      const { w, got } = h.hang("tok_a", 1);
+      const { w, expire } = h.hang("tok_a", 1);
       const r = await reply(h, "tok_a", { files: [attachment], during: () => revoke(h) });
       expect(r.at).toBe("settle"); // 开头那次核对是通过的，拦在交结果这一步
       for (const s of reason) expect(r.error).toContain(s);
@@ -130,18 +134,19 @@ describe("登记附件期间 token 被撤销：回复不送达", () => {
       expect(h.events).toEqual([]);
       expect(h.queues.get(`tok_a|${CID}`)).toEqual([w]);
       expect(h.queues.get(`tok_a|${CID}`)![0]).toBe(w); // 同一个对象：HTTP 那头的等待还挂在它上面
-      expect(await got).toBeNull();
+      expect(w.resolve).toBeFunction(); // 等待还开着：没人替它交过结果
+      expect(await expire()).toBeNull();
     });
   }
 
   test("没带附件也一样：开头核过之后才撤销，不交", async () => {
     const h = bridge(tok("tok_a"));
-    const { w, got } = h.hang("tok_a", 1);
+    const { w, expire } = h.hang("tok_a", 1);
     const r = await reply(h, "tok_a", { during: () => h.revoke("tok_a") });
     expect(r.at).toBe("settle");
     expect([h.results.size, h.events.length]).toEqual([0, 0]);
     expect(h.queues.get(`tok_a|${CID}`)).toEqual([w]);
-    expect(await got).toBeNull();
+    expect(await expire()).toBeNull();
   });
 
   test("对照：token 一直有效 → 带着附件送达，结果记在这条请求名下，请求出队", async () => {
@@ -166,7 +171,7 @@ describe("登记附件期间 token 被撤销：回复不送达", () => {
     expect((await reply(h, "tok_a", { files: [attachment], during: () => h.revoke("tok_a") })).at).toBe("settle");
     expect((await reply(h, "tok_b")).sent).toBe(true);
     expect((await b.got)?.reply).toBe(TEXT);
-    expect(await a.got).toBeNull();
+    expect(await a.expire()).toBeNull();
     expect(h.events).toEqual([{ chatId: "api:tok_b", text: TEXT }]);
   });
 });
@@ -205,10 +210,10 @@ describe("核不过时请求放回原位", () => {
 describe("settleApiReply：核对和交结果在同一段同步代码里", () => {
   test("读盘前一刻才撤销也拦得住；核对到 resolve 之间插不进别的任务", async () => {
     const h = bridge(tok("tok_a"));
-    const { got } = h.hang("tok_a", 1);
+    const { expire } = h.hang("tok_a", 1);
     h.onRead = () => h.revoke("tok_a");
     expect((await reply(h, "tok_a")).at).toBe("settle");
-    expect(await got).toBeNull();
+    expect(await expire()).toBeNull();
 
     const ok = bridge(tok("tok_b"));
     const order: string[] = [];
@@ -217,14 +222,14 @@ describe("settleApiReply：核对和交结果在同一段同步代码里", () =>
     const inner = pending!.resolve!;
     pending!.resolve = (r) => (order.push("resolved"), inner(r));
     queueMicrotask(() => order.push("microtask"));
-    setTimeout(() => order.push("timer"), 0);
+    const timer = new Promise<void>((done) => setTimeout(() => (order.push("timer"), done()), 0));
     const result: Result = { reply: TEXT, threadId: pending!.threadId, agent: AGENT };
     const late = settleApiReply({ tokenId: "tok_b", threadId: pending!.threadId, result, pending, results: ok.results, queues: ok.queues, key: `tok_b|${CID}` },
       () => (order.push("check"), readPrincipalsStrictSync(ok.path)));
     order.push("returned");
     expect(late).toBeNull();
     expect((await waiting.got)?.reply).toBe(TEXT);
-    await sleep(5);
+    await timer;
     expect(order).toEqual(["check", "resolved", "returned", "microtask", "timer"]);
   });
 

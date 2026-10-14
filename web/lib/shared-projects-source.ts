@@ -20,27 +20,38 @@ export function projectSourceSnapshot(value: unknown): ProjectSnapshot {
   const role = object(data.teamRole), capabilities = object(data.capabilities);
   // Bridges before N9B have no team / teamDirectory keys: treat them as unavailable rather than malformed.
   const team = data.team === undefined ? null : object(data.team), directory = data.teamDirectory === undefined ? null : object(data.teamDirectory);
+  // Bridges before ROSTER2a have no teamInstances key: unavailable, never inferred from peers.
+  const instances = data.teamInstances === undefined ? null : object(data.teamInstances);
+  // A present key is a ROSTER2a bridge: its discriminator must be a boolean, else the snapshot is malformed (not "unavailable").
+  if (instances && typeof instances.available !== "boolean") throw new ProjectFailure(502);
   const snapshot = parseProjectSnapshot({ teams: [{ centerId, teamId, personId, teamRole: role.available === true ? role.value : null,
     team: team?.available === true ? object(team.value) : null,
-    directory: directory?.available === true ? list(directory.members, v => object(v)) : null }], projects,
+    directory: directory?.available === true ? list(directory.members, v => object(v)) : null,
+    instances: instances?.available === true ? list(instances.instances, v => object(v)) : null }], projects,
     localProjects: locals.map(p => {
       if (typeof p.eligible !== "boolean") throw new ProjectFailure(502);
       return { id: p.id, name: p.name, personal: p.personal, bound: !p.eligible };
     }),
-    peers: list(data.peers, v => object(v)).filter(p => p.enabled === true && p.invitable === true).map(p => ({ id: p.name, name: p.name })),
+    peers: list(data.peers, v => object(v)).filter(p => p.enabled === true && p.invitable === true)
+      .map(p => ({ id: p.name, name: p.name, ...(p.instanceId === undefined ? {} : { instanceId: p.instanceId }) })),
   });
   return { ...snapshot,
     projects: snapshot.projects.map(p => ({ ...p, personId, instanceId })),
     capabilities: { invite: object(capabilities.invite).available === true, leave: object(capabilities.leave).available === true } };
 }
 
+/** Team-project confirmation cards: createdBy → [accept, decline] button ids (asks-model agentLabel reuses the keys). */
+export const TEAM_PROJECT_CARD_BUTTONS: Readonly<Record<string, readonly [string, string]>> = {
+  "system:shared-projects": ["shared_project_confirm", "shared_project_cancel"],
+  "system:shared-ledger-join-offer": ["sl_join_accept", "sl_join_decline"],
+};
+
 /** Read only N4/N3's public card surface. Never carry bind.params, body, invitation codes or arbitrary response extras into React. */
 export function projectSourceCards(value: unknown, now = Date.now()): ProjectCard[] {
   return list(object(value).asks, v => {
     const a = object(v);
     if (a.state !== "open" || !Number.isSafeInteger(a.expiresAt) || Number(a.expiresAt) <= now) return null;
-    const ids = a.createdBy === "system:shared-projects" ? ["shared_project_confirm", "shared_project_cancel"]
-      : a.createdBy === "system:shared-ledger-join-offer" ? ["sl_join_accept", "sl_join_decline"] : null;
+    const ids = typeof a.createdBy === "string" && Object.hasOwn(TEAM_PROJECT_CARD_BUTTONS, a.createdBy) ? TEAM_PROJECT_CARD_BUTTONS[a.createdBy]! : null;
     if (!ids || a.source !== "system" || a.kind !== "authorize") return null;
     const rows = list(a.options, v => object(v));
     const buttons = rows.filter(r => r.type === "buttons").flatMap(r => list(r.buttons, v => object(v)));

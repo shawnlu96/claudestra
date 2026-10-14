@@ -3,7 +3,8 @@
  * 拼回 ReadableStream 的小闸门，服务端 front 与 bridge 侧的隧道 / peer 转发共用，两边分块大小与头规则才一致。
  * 不依赖 WebSocket、不知道帧要发给谁；发送由调用方注入的 emit 完成。
  */
-import { gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gzip } from "node:zlib";
 import { LIMITS, type Headers } from "./relay-protocol.js";
 
 /** hop-by-hop 与由传输层重算的头，任何方向都不透传 */
@@ -208,17 +209,39 @@ export const NULL_BODY_STATUS: ReadonlySet<number> = new Set([101, 204, 205, 304
 
 /** 小于这个就不压：省下的字节抵不过 gzip 头尾 */
 const GZIP_MIN_BYTES = 1024;
+/** 一次性正文的文本类型才压：SSE（text/event-stream）、text/plain 这类可能是长流的不碰，图片 / 字体 / 压缩包本来就压过 */
+const COMPRESSIBLE = /^(?:application\/(?:json|javascript|xml|manifest\+json|[\w.-]+\+json)|text\/(?:html|css|javascript|xml)|image\/svg\+xml)\s*(?:;|$)/i;
+const gzipAsync = promisify(gzip);
 
 /**
- * 路径模式的 JSON 响应在本机 gzip 后再上中继（隧道模式靠 decompress:false 原样转本机 Web 的压缩正文，早就是压过的）。
- * 上行慢时 JSON 原文再经 base64 是大头，历史 / agent 列表压完约剩两成；浏览器按 content-encoding 自己解。
- * 只碰 application/json：SSE 等流式正文不能整读，图片等本来就压过。整读可以——JSON 响应本来就是一次性的。
+ * Accept-Encoding 是否接受 gzip（RFC 9110 §12.5.3）：按编码名 + q 值判断，`gzip;q=0` 是明确拒收。
+ * 显式写了 gzip 就以它为准，没写才看 `*`；只认 gzip 这个词会把拒收当成接受。
  */
-export async function gzipJson(headers: Headers, body: ReadableStream<Uint8Array> | null, acceptEncoding = ""): Promise<{ headers: Headers; body: Uint8Array | ReadableStream<Uint8Array> | null }> {
-  if (!body || headers["content-encoding"] || !/\bgzip\b/i.test(acceptEncoding) || !/^application\/json\b/i.test(headers["content-type"] ?? "")) return { headers, body };
-  const raw = new Uint8Array(await new Response(body).arrayBuffer());
+function acceptsGzip(acceptEncoding: string): boolean {
+  let star: boolean | null = null;
+  for (const part of acceptEncoding.split(",")) {
+    const [name, ...params] = part.split(";").map((x) => x.trim().toLowerCase());
+    const q = params.find((p) => p.startsWith("q="));
+    const ok = !q || Number(q.slice(2)) > 0; // q 写坏（NaN）当拒收：NaN > 0 为 false
+    if (name === "gzip" || name === "x-gzip") return ok;
+    if (name === "*") star = ok;
+  }
+  return star === true;
+}
+
+/**
+ * 浏览器经中继拿的响应（隧道与路径模式）在本机 gzip 后再上中继：上行慢时 JSON / JS 原文再经 base64 是大头，
+ * 历史 / agent 列表压完约剩两成；front 原样转 content-encoding，浏览器按头自己解。本机 Web 已压过的（带 content-encoding）、
+ * 没声明 gzip 的、分段（206 / content-range）的原样过。整读可以——只压一次性正文；gzip 走线程池，不卡事件循环。
+ */
+export async function gzipBody(
+  status: number, headers: Headers, body: Uint8Array | ReadableStream<Uint8Array> | null, acceptEncoding = "",
+): Promise<{ headers: Headers; body: Uint8Array | ReadableStream<Uint8Array> | null }> {
+  if (!body || status === 206 || headers["content-range"] || headers["content-encoding"]) return { headers, body };
+  if (!acceptsGzip(acceptEncoding) || !COMPRESSIBLE.test(headers["content-type"] ?? "")) return { headers, body };
+  const raw = body instanceof Uint8Array ? body : new Uint8Array(await new Response(body).arrayBuffer());
   if (raw.length < GZIP_MIN_BYTES) return { headers, body: raw };
   const { "content-length": _len, ...rest } = headers;
   const vary = rest.vary ? `${rest.vary}, Accept-Encoding` : "Accept-Encoding";
-  return { headers: { ...rest, "content-encoding": "gzip", vary }, body: new Uint8Array(gzipSync(raw)) };
+  return { headers: { ...rest, "content-encoding": "gzip", vary }, body: new Uint8Array(await gzipAsync(raw)) };
 }

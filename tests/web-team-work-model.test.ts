@@ -1,15 +1,20 @@
 /**
  * team-project-N8B5：团队数据源的「谁在干活」由已加载的团队总览 + 团队子 DAG 转出（team-work-model.ts），不调本机 /work。
  * 夹具一张卡一个阶段：写、审、修、合并、上线、被挡、有开着的阻塞提问、done、verified、cancelled，外加未绑卡节点（就绪 / 被挡）
- * 和一张没挂在节点上的卡；断言三栏归属、每行字段、成员名对不上时显示实例代号原样。走真实的 teamOverview / teamDagBoard。
+ * 和一张没挂在节点上的卡；断言四栏归属（UXWHO1：合并进「在等合并」，上线进「在等」）、每行字段、成员名对不上时写「其他成员的机器」
+ * （实例代号只留在 instance，team-work-merge.ts 命名）。走真实的 teamOverview / teamDagBoard。
  */
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { MIRROR_FRESH_MS } from "@/features/collab/mirror-fresh";
 import { teamOverview } from "@/features/collab/team-source-adapter";
 import { teamDagBoard } from "@/features/collab/team-source-dag";
-import { machineName, teamWorkBoard } from "@/features/collab/team-work-model";
-import type { TeamWorkRow } from "@/features/collab/work/work-types";
+import { instanceName } from "@/features/collab/team-instance-names";
+import { teamWorkBoard as rawBoard } from "@/features/collab/team-work-model";
+import { mergeTeamWork } from "@/features/collab/work/team-work-merge";
+import type { DagBoard } from "@/features/collab/dag/dag-types";
+import type { LedgerOverview } from "@/features/collab/collab-model";
+import type { TeamBoardRow } from "@/features/collab/work/work-types";
 import type { FeatureDetail, FeatureList, PlanNode, TaskProjection } from "@/lib/api/shared-ledger";
 import { testChildEnv } from "./test-env";
 
@@ -44,34 +49,41 @@ function fixture() {
   return { team, dag: teamDagBoard("p", list, details, team) };
 }
 
-const keys = (rows: readonly TeamWorkRow[]) => rows.map((r) => r.taskId ?? r.nodeKey);
+const keys = (rows: readonly TeamBoardRow[]) => rows.map((r) => r.taskId ?? r.nodeKey);
+/** 团队看板 + 命名（没有本机实例、没有本机看板：全是团队行） */
+const teamWorkBoard = (dag: DagBoard | null, ov: LedgerOverview, at: number, names: ReadonlyMap<string, string>) =>
+  mergeTeamWork(rawBoard(dag, ov, at), null, null, names);
 
-test("三栏归属：在干活 = 有执行者且写 / 审 / 修 / 合并 / 上线；在等 = 被挡或开着阻塞提问；待做 = 未绑卡节点按依赖分组；收尾的不进", () => {
+test("四栏归属：在干活 = 有执行者且写 / 审 / 修；在等合并 = 合并阶段；在等 = 被挡 / 开着阻塞提问 / 已上线等验证；待做 = 未绑卡节点按依赖分组；收尾的不进", () => {
   const { team, dag } = fixture();
   const b = teamWorkBoard(dag, team.ov, now, NAMES);
-  expect(keys(b.working).sort()).toEqual(["N-fix", "N-live", "N-merge", "N-review", "N-write", "OFF-1"]);
-  expect(keys(b.waiting).sort()).toEqual(["N-ask", "N-blocked"]);
+  expect(keys(b.working).sort()).toEqual(["N-fix", "N-review", "N-write", "OFF-1"]);
+  expect(keys(b.merging)).toEqual(["N-merge"]);
+  expect(b.merging[0]!.reason).toBe("等合并");
+  expect(keys(b.waiting).sort()).toEqual(["N-ask", "N-blocked", "N-live"]);
+  expect(b.waiting.find((r) => r.taskId === "N-live")!.reason).toBe("已上线 · 等验证");
   expect(keys(b.todo.ready)).toEqual(["N-ready"]);
   expect(keys(b.todo.blocked)).toEqual(["N-wait"]);
   expect(b.todo.blocked[0]!.reason).toBe("被 N-write 挡住");
-  const all = keys([...b.working, ...b.waiting, ...b.todo.ready, ...b.todo.blocked]);
+  const all = keys([...b.working, ...b.merging, ...b.waiting, ...b.todo.ready, ...b.todo.blocked]);
   for (const closed of ["N-done", "N-verified", "N-cancel"]) expect(all).not.toContain(closed);
 });
 
-test("每行字段：卡号、节点一句话、阶段、执行者代号、机器（成员名；对不上显示实例代号原样）；不带计时 / 估时 / 轮次", () => {
+test("每行字段：卡号、节点一句话、阶段、执行者代号、机器（成员名；对不上写「其他成员的机器」，实例代号留在 instance）；不带计时 / 估时 / 轮次", () => {
   const { team, dag } = fixture();
   const b = teamWorkBoard(dag, team.ov, now, NAMES);
-  const row = (k: string) => [...b.working, ...b.waiting].find((r) => r.taskId === k)!;
+  const row = (k: string) => [...b.working, ...b.merging, ...b.waiting].find((r) => r.taskId === k)! as TeamBoardRow & { team: { blockingAsks: number } };
   expect(row("N-review")).toMatchObject({ taskId: "N-review", featureId: "f1", nodeKey: "N-review", title: "N-review 一句话", stage: "review",
-    who: "code-N-review", machine: "He 的 MacBook" });
-  expect(row("N-merge").machine).toBe(M_B);
+    who: "code-N-review", machine: "He 的 MacBook", instance: M_A });
+  expect(row("N-merge")).toMatchObject({ machine: "其他成员的机器", instance: M_B });
   // 没挂节点的卡：标题用卡自己的，点开走任务详情（没有 nodeKey）
   expect(row("OFF-1")).toMatchObject({ featureId: null, nodeKey: null, stage: "fix", title: "OFF-1 规格摘要" });
   expect(row("N-ask").team!.blockingAsks).toBe(1);
   expect(row("N-blocked").team!.blockingAsks).toBe(0);
-  for (const r of [...b.working, ...b.waiting, ...b.todo.ready, ...b.todo.blocked])
+  for (const r of [...b.working, ...b.merging, ...b.waiting, ...b.todo.ready, ...b.todo.blocked])
     for (const k of ["since", "round", "remainingMinutes", "overMinutes", "estimate", "normalMinutes"]) expect(k in r).toBe(false);
-  expect(b.machines).toEqual({ "He 的 MacBook": 5, [M_B]: 1 });
+  // 机器计数只算在干活（写 / 审 / 修）
+  expect(b.machines).toEqual({ "He 的 MacBook": 4 });
   expect(b.mirror).toEqual(team.ov.mirror!);
   // 未绑卡节点：没有执行者 / 机器 / 镜像事实
   expect(b.todo.ready[0]).toMatchObject({ taskId: null, who: null, machine: null, stage: null, team: null, title: "N-ready 一句话" });
@@ -81,15 +93,16 @@ test("执行者：没有代号也没有执行实例的不算在干活；成员�
   const { team, dag } = fixture();
   const ov = { ...team.ov, tasks: team.ov.tasks.map((t) => (t.id === "N-write" ? { ...t, team: { ...t.team!, assigneeCode: null, executorInstanceId: null } } : t)) };
   expect(keys(teamWorkBoard(dag, ov, now, NAMES).working)).not.toContain("N-write");
-  expect(machineName(M_A, new Map([[M_A, "  "]]))).toBe(M_A);
-  expect(machineName(M_A, new Map())).toBe(M_A);
-  expect(machineName(null, NAMES)).toBeNull();
+  expect(instanceName(M_A, new Map([[M_A, "  "]]), null)).toBe("其他成员的机器");
+  expect(instanceName(M_A, new Map(), null)).toBe("其他成员的机器");
+  expect(instanceName(M_A, NAMES, M_A)).toBe("本机");
+  expect(instanceName(null, NAMES, null)).toBeNull();
 });
 
 test("子 DAG 没读到：在干活 / 在等照样从总览出，待做为空（不凭空造节点）", () => {
   const { team } = fixture();
   const b = teamWorkBoard(null, team.ov, now, NAMES);
-  expect(b.working.length).toBe(6);
+  expect(b.working.length).toBe(4);
   expect(b.todo).toEqual({ ready: [], blocked: [] });
   expect(b.working.find((r) => r.taskId === "N-write")).toMatchObject({ nodeKey: null, title: "N-write 一句话" });
 });
@@ -115,14 +128,14 @@ test("新鲜度随当前时钟重判：主场停推、没有新快照，时间�
   expect(team.ov.mirror![0]!.freshUntil).toBe(observedAt + MIRROR_FRESH_MS);
   // 同一份快照（team.ov.now = now），只有显示时钟往前走
   const fresh = renderTeam(teamWorkBoard(dag, team.ov, now, NAMES));
-  expect(fresh).toContain("主场镜像最新");
+  expect(fresh).toContain("进度是最新的");
   expect(fresh).not.toContain("分钟前同步");
   const later = now + MIRROR_FRESH_MS;
   const b = teamWorkBoard(dag, team.ov, later, NAMES);
   expect(b.now).toBe(later);
   const stale = renderTeam(b);
-  expect(stale).not.toContain("主场镜像最新");
-  expect(stale).toContain("1 个 feature 主场镜像过期");
-  expect(stale).toContain("主场 11 分钟前同步");
-  expect(renderTeam(teamWorkBoard(dag, team.ov, later + 30 * 60_000, NAMES))).toContain("主场 41 分钟前同步");
+  expect(stale).not.toContain("进度是最新的");
+  expect(stale).toContain("1 个模块的进度可能不是最新的");
+  expect(stale).toContain("11 分钟没收到任务所在机器的更新");
+  expect(renderTeam(teamWorkBoard(dag, team.ov, later + 30 * 60_000, NAMES))).toContain("41 分钟没收到任务所在机器的更新");
 });

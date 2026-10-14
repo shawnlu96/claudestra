@@ -2,10 +2,13 @@
  * 人工合并排队（dispatch-recovery-MQ1）的 CLI，逻辑全在 lib/manual-merge-queue.ts：
  * - `manual-merge-request <task> --head --spec-rev --round --review-seq [--ui-digest] --reason`：PM（调度助理除外）/ master / owner 显式排队；
  * - `manual-merge-revoke <task> --request <seq> --reason`：撤销；已发出的合并撤不回；
- * - `manual-merge-claim <project> --mode on|observe --train … --required-checks …`：只给调度服务身份（同 SCHEDULER_SERVICE_COMMANDS 一样把关）。
+ * - `manual-merge-claim <project> --mode on|observe --train … --required-checks …`：只给调度服务身份（同 SCHEDULER_SERVICE_COMMANDS 一样把关）；
+ * - `manual-merge-record <task> --head --merge-sha --pr --base main --main-head --receipt`：真实 PM 登记已在仓库外 / 私仓发生的合入（AUDTRAIN4，
+ *   lib/ledger-manual-merge-record.ts）：不合并、不查网络、不推阶段。
  * 只读视图在 `merge-queue`（ledger-merge-queue-cmds.ts）。
  */
 import { LedgerError } from "../lib/ledger-store.js";
+import { recordManualMerge } from "../lib/ledger-manual-merge-record.js";
 import { claimManualMerge, recordRequest, revokeRequest, TRAIN_SIGNALS, type TrainSignal } from "../lib/manual-merge-queue.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -27,6 +30,7 @@ const task = (c: LedgerCli, usage: string): string => {
 
 const REQUEST_USAGE = "manual-merge-request <task> --head <完整 sha> --spec-rev <n> --round <n> --review-seq <审查事件 seq> [--ui-digest <截图摘要>] --reason <为什么>";
 const REVOKE_USAGE = "manual-merge-revoke <task> --request <请求 seq> --reason <为什么>";
+const RECORD_USAGE = "manual-merge-record <task> --head <完整 sha> --merge-sha <合并提交> --pr <完整 PR 链接> --base main --main-head <含合并提交的 main> --receipt <证据路径或链接>";
 const CLAIM_USAGE = "manual-merge-claim <project> --mode on|observe --train none|holds|cleanup|corrupt --required-checks <a,b>（调度服务专用）";
 
 export const MANUAL_MERGE_CMDS: Record<string, CommandSpec> = {
@@ -45,6 +49,17 @@ export const MANUAL_MERGE_CMDS: Record<string, CommandSpec> = {
     run(c) {
       const r = revokeRequest(c.db, c.ctx(), { taskId: task(c, REVOKE_USAGE), seq: int(c, "request"), reason: c.need("reason") });
       return { ok: true, duplicate: r.duplicate, state: r.status.state, why: r.status.why };
+    },
+  },
+  "manual-merge-record": {
+    valued: ["head", "merge-sha", "pr", "base", "main-head", "receipt"],
+    usage: `${RECORD_USAGE}（PM 先核过 PR、合并时 head、合并提交与 main 包含关系再登记；卡留在 merge 等部署）`,
+    run(c) {
+      const id = task(c, RECORD_USAGE);
+      c.requireRealPm(c.task(id).project, "登记人工合入");
+      const r = recordManualMerge(c.db, c.ctx(), { taskId: id, head: c.need("head"), mergeSha: c.need("merge-sha"), pr: c.need("pr"), base: c.need("base"),
+        mainHead: c.need("main-head"), receipt: c.need("receipt") });
+      return { ok: true, task: id, event: r.event.seq, duplicate: r.duplicate };
     },
   },
   "manual-merge-claim": {

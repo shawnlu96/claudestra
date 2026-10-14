@@ -5,7 +5,7 @@
  * 隧道请求（from = "relay"）的回帖不带 to；peer 请求的 to = 发起方指纹。
  */
 import { LIMITS, RELAY_FROM, type DataFrame, type EndFrame, type ReqFrame } from "./relay-protocol.js";
-import { b64, pumpBody, streamSink, type StreamSink } from "./relay-stream.js";
+import { b64, gzipBody, pumpBody, streamSink, type StreamSink } from "./relay-stream.js";
 import { RelayError, type InboundHandler, type InboundResponse } from "./relay-client-types.js";
 import type { SendFrame } from "./relay-client-outbound.js";
 import { RelayTraffic, type TrafficRecord } from "./relay-traffic.js";
@@ -67,6 +67,8 @@ export class InboundRouter {
     try {
       if (!this.handler) throw new RelayError("local_unreachable", "peer", "no inbound handler");
       res = await this.handler({ method: f.method, path: f.path, headers: f.headers, body: entry.body.stream }, { from, signal: ctrl.signal });
+      // 只压回浏览器的（隧道 / 路径模式）：peer 的调用方拿到正文直接用，不会按 content-encoding 解
+      if (!to) res = { status: res.status, ...(await gzipBody(res.status, res.headers, res.body ?? null, f.headers["accept-encoding"])) };
     } catch (e) {
       if (ctrl.signal.aborted) return; // 发起方已经不要了：回什么都没人收
       const err = e instanceof RelayError ? e : new RelayError("local_unreachable", "peer", (e as Error).message);

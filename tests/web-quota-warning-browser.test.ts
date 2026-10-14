@@ -98,13 +98,13 @@ test.skipIf(!enabled)("停接 + 提醒两族同时、只读、移动端不遮输
   const p = await d.open();
   await bar(p, "codex").waitFor();
   const codex = await bar(p, "codex").innerText();
-  expect(codex).toContain("Codex 本周已用 82%，达到停接线");
-  expect(codex).toContain("已停止接新单，在跑的单照常做完");
+  expect(codex).toContain("Codex 本周已用 82%，到了不再接新活的线");
+  expect(codex).toContain("已不再接新活，在跑的活照常做完");
   expect(codex).toContain("重置 10/9 09:41"); // Asia/Shanghai 本地时区
   expect(await bar(p, "codex").getAttribute("data-level")).toBe("stop");
   const claude = await bar(p, "claude").innerText();
   expect(claude).toContain("Claude 本周已用 74%，达到提醒线");
-  expect(claude).toContain("未停接，新单名额已减半");
+  expect(claude).toContain("仍在接新活，能同时跑的数量已减半");
   const banner = (await p.getByTestId("quota-warning").boundingBox())!;
   const input = (await p.getByTestId("input").boundingBox())!;
   expect(banner.y).toBeGreaterThanOrEqual(56); // 顶栏下方
@@ -155,7 +155,7 @@ test.skipIf(!enabled)("关掉：刷新后同一条线不再出；跨新线（提
   d.reply = { status: 200, json: view({}, { ...STOP, weekUsedPct: 81 }) }; // 跨过停接线
   await a.reload();
   await bar(a, "claude").waitFor();
-  expect(await bar(a, "claude").innerText()).toContain("已停止接新单");
+  expect(await bar(a, "claude").innerText()).toContain("已不再接新活");
   await a.screenshot({ path: resolve(out, "qwarn1-390-dismiss-then-stop.png") });
   expect(d.writes).toEqual([]);
   await d.ctx.close();
@@ -171,10 +171,10 @@ test.skipIf(!enabled)("桌面 + 英文 + 只观察 + 上次读数", async () => 
   await p.waitForFunction(`document.querySelector('[data-quota-warning="codex"]')?.textContent?.includes("this week")`);
   const codex = await bar(p, "codex").innerText();
   expect(codex).toContain("Codex used 82% this week — stop line reached");
-  expect(codex).toContain("Observe only: still accepting new orders");
+  expect(codex).toContain("Observe only: still accepting new work");
   expect(codex).toContain("Last known reading");
   expect(codex).toMatch(/Resets 10\/8,? 21:41/); // America/New_York 本地时区
-  expect(await bar(p, "claude").innerText()).toContain("Observe only: still accepting, slots unchanged");
+  expect(await bar(p, "claude").innerText()).toContain("Observe only: still accepting, concurrent runs unchanged");
   await p.screenshot({ path: resolve(out, "qwarn1-desktop-en-observe.png") });
   await d.ctx.close();
 }, 30_000);
@@ -235,7 +235,7 @@ test.skipIf(!enabled)("回包乱序：慢的旧 GET（提醒）晚到，不覆�
   await p.waitForFunction(`document.querySelector('[data-quota-warning="claude"]')?.dataset.level === "stop"`);
   release(); await settle(p);
   expect(await bar(p, "claude").getAttribute("data-level")).toBe("stop");
-  expect(await bar(p, "claude").innerText()).toContain("已停止接新单");
+  expect(await bar(p, "claude").innerText()).toContain("已不再接新活");
   await d.ctx.close();
 }, 30_000);
 

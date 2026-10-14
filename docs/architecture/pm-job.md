@@ -1,4 +1,4 @@
-# PM 处理员：规格内的问题不叫醒 PM（agents-PMJOB1）
+# PM 处理员：规格内的问题不叫醒 PM（agents-PMJOB1，PMJOB2 放宽白名单）
 
 执行者的 blocker 提问每条都会让当班 PM 带着几十万 token 的上下文跑一轮。处理员是一次性的本机 Codex 会话：只带这张卡的规格、问题原文、批准路径和固定权限说明，回答规格里已经写明的问题；答不了的连同草稿交回 PM。它没有消息发送、规格修改、台账或配置权限，答复由代码核对后投递。
 
@@ -7,8 +7,8 @@
 - `ledger pm-job-mode off|observe|on --project <id>`：项目真 PM / master / owner 才能切，缺省 `observe`。
 - 开关和模式世代放在 PMDIG 的 `pm-digest-mode.json`（`jobProjects` / `jobGens`），PMDIG、PMROUTE 的键原样保留，没有新增恢复键。每切一次世代加一。
 - `off`：不读不写任何处理员状态，信封路径和顺序与改前逐字相同。
-- `observe`：原通知立刻照常送给 PM，末尾附一行草稿路径（待生成）；草稿写好后覆盖同一个文件，再补一条带 ask 编号和草稿路径的提示。不发给执行者。
-- `on`：白名单内、有依据、各项重核都过的才直接回给提问者，PM 不被叫醒，只在 PM 摘要队列里多一行（卡号、问题类型、结论、草稿路径）；其余把原问题和草稿交给 PM。
+- `observe`：原通知立刻照常送给 PM，末尾附一行草稿路径（待生成，完成后进摘要）；草稿写好后覆盖同一个文件，再往 PM 摘要队列里记一行（id `pm-job-draft:<askId>`，带 ask 编号、结论和草稿路径），不单独叫醒 PM（agents-PMJOB2 改了 PMJOB1 PM 定 4 的「补一条关联提示」）。不发给执行者。
+- `on`：没命中硬门、白名单内、有依据、各项重核都过的才直接回给提问者，PM 不被叫醒，只在 PM 摘要队列里多一行（卡号、问题类型、结论、草稿路径）；其余把原问题和草稿交给 PM。
 - `ledger pm-job --project <id>`：只读，最近 24 小时的单数、各状态、直回 / 升级 / 失败、处理员的 Codex 请求数 / 用时 / 字符量、队列等待。对照 PMCOST1 同窗口的 PM 叫醒成本时，这部分 Codex 成本要一起算。
 
 ## 接哪些
@@ -24,22 +24,25 @@
 
 ## 白名单与升级（`src/lib/pm-job-rules.ts`）
 
-可直回的只有三类，模型不能自己加：规格已明定的验收编号 / 范围解释、已有标准答复的查证、相关文件实现位置的查证。
+可直回的有四类，模型不能自己加：规格已明定的验收编号 / 范围解释（`acceptance`）、已有标准答复的查证（`standard`）、相关文件实现位置的查证（`location`）、规格已定（`specDecided`，agents-PMJOB2：当前规格含「PM 补」已经写明了答案）。
 
-接单时代码按问题原文和候选项判（`forbiddenOf`），不靠模型自报。匹配前先做 NFKC 归一并去掉零宽字符。三道门，命中任何一道就不是直回候选，只出草稿（含待批项），原通知立刻送 PM：
+接单时代码按问题原文和候选项判（`gatesOf`），不靠模型自报。匹配前先做 NFKC 归一并去掉零宽字符。门分两种，中文和英文问法都认：
 
-1. 必须升级的类别：改规格、改范围、权限、删数据、release、tag、中心限流、schema、改额度线、owner 决策、凭据安全，中文和英文问法都认。
-2. 要人点头的问法（「可以…吗」「能不能」「要不要」「can I」「should we」「is it ok to」之类），不管问的是什么。
-3. 保守白名单：问题本身要像查证，即同时有问的对象（规格、验收线、范围、标准答复、实现、某个文件）和问事实的问法（是什么、多少、哪、where / what / which）。不像的一律不当直回候选。
+- 硬门：权限、删数据、release、tag、中心限流、schema、改额度线、owner 决策、凭据安全。命中就永远升级，任何类型都越不过。
+- 软门：改规格、改范围、要人点头的问法（「可以…吗」「能不能」「要不要」「can I」「should we」「is it ok to」之类）。只命中软门的单子，只能按 `specDecided` 答。
 
-这三道门是关键词规则，会把一部分本可直回的问题也交给 PM（例如「验收线 1 可以理解为 800 行吗」）；漏判方向只剩「像查证、又不含上述任何词」的决策问，靠下面的输出核对和 PM 的 24 小时观察期兜。
+问题正文过全部门；候选项只过硬门（「批准 / 不批准」「扩围」这类候选不挡单，「删掉台账记录」照样挡）。单子记 `forbiddenAll`（全部命中）和 `hard`；`forbidden` 仍是第一个命中，旧单子照常读（没有 `forbiddenAll` 的旧单子，`forbidden` 一律按硬门算）。接单时 `direct = on && !hard`。
 
-- 模型输出要是约定的 JSON、类型是白名单自有的三类之一（`toString` 这类继承键不算）、自称有把握、答复里没有批准口吻（approved / go ahead / 已批准 / 你可以…）、每条依据都是批准路径里真实存在的 `文件:行`（规格文件本身，或卡的 fileGlobs / 规格和问题里提到的仓库相对路径；越出仓库、软链到仓库外、行号不存在都不算）。任何一条不满足就升级。
+PMJOB1 的第三道门「问题要像查证」（问的对象 + 问事实的问法）已去掉：执行者的提问多是「情况说明 + 请定」，这道门几乎挡下所有单子。把关交给下面的输出核对。
+
+- 模型输出要是约定的 JSON、类型在白名单（`toString` 这类继承键不算）、自称有把握、模型自己的答复里没有批准口吻（approved / go ahead / 已批准 / 你可以…）、每条依据都是批准路径里真实存在的 `文件:行`（规格文件本身，或卡的 fileGlobs / 规格和问题里提到的仓库相对路径；越出仓库、软链到仓库外、行号不存在都不算）。任何一条不满足就升级。
+- 按接单时的命中分三种：命中硬门，升级；只命中软门，类型必须是 `specDecided`；一道门都没命中，四类都行。
+- `specDecided` 的依据只能是规格文件本身（`job.specPath`）的行。答复由代码拼：每条依据一行「规格第 N 行：『<该行原文，截 200 字>』」，后面接模型的一句说明。批准口吻只查模型那句说明，不查代码引用的规格原文，所以「PM 补 已批准」这类原话能原样转给提问方。
 - 文件读取范围靠三层：只读沙箱、prompt 只列批准路径、代码拒收批准路径外的依据。Codex 的只读沙箱本身不限制读哪些文件，所以前两层挡不住模型去读别的文件，只有第三层是硬约束。
 
 ## 落盘与状态（`src/lib/pm-job-store.ts`）
 
-每单一个文件 `statePath("pm-job/<askId>.json")`，原子写；草稿是同目录的 `drafts/<askId>.md`。字段含项目、卡、ask 编号、原 messageId、规格版本和哈希、提问者、接单时的当班 PM、模式和模式世代、状态、租约、结果、用量。
+每单一个文件 `statePath("pm-job/<askId>.json")`，原子写；草稿是同目录的 `drafts/<askId>.md`。字段含项目、卡、ask 编号、原 messageId、规格版本和哈希、规格原文快照 `spec`（≤ 64KB，超过不存）、命中的门（`forbidden` / `forbiddenAll` / `hard`）、提问者、接单时的当班 PM、模式和模式世代、状态、租约、结果、用量。
 
 状态：`queued → running → drafted → sending → sent`；另有 `unknown`（发了但结果不明）、`escalated`、`observed`、`dropped`（提问已不在等回答）。所有迁移在目录锁里读-核-写，bridge 和 worker 谁先迁走谁算。
 
@@ -52,8 +55,9 @@
 1. 认领最早一单并发租约。已有一单在跑且租约没过期就不领，所以并发上限是 1，第二个 worker 领不到同一单。
 2. 额度门（`pm-job-quota.ts`）：有效线是 `min(70, 项目既有线)`，已用达到线不启动；读不到、未知、过期、应已重置未确认的读数都不算有预算。不改项目额度线，不换 Claude，不借额度。
 3. 共享 Codex 槽位（`pm-job-slots.ts`）：`ask_codex`（`src/bridge.ts` 的入口经 `withCodexSlot("ask_codex", …)`，原来的进程内计数已删）和处理员合计不超过 3。槽位文件记 pid 和到期时间，持有者死了或过期就回收。槽位满时把单放回队列。
-4. 一次全新的 `runCodex`：不带 thread（不 resume）、只读沙箱、`isolateMcp`（`-c mcp_servers={}`，不加载全局 MCP）。
-5. 代码核对输出，草稿和结果原子落盘为 `drafted`。超时、失败、额度异常不重试，写成要升级的草稿。worker 中途死掉的单在下次认领时记成中断，也不重跑。
+4. 有规格快照就用快照跑（PM 答问时在规格末尾追加「PM 补」不再让草稿落空）；没有快照的旧单子照旧读文件，哈希对不上就按「规格在提问之后改过」升级。`on` 档投递前的重核不变：提问之后规格变了照样升级。
+5. 一次全新的 `runCodex`：不带 thread（不 resume）、只读沙箱、`isolateMcp`（`-c mcp_servers={}`，不加载全局 MCP）。
+6. 代码核对输出，草稿和结果原子落盘为 `drafted`。超时、失败、额度异常不重试，写成要升级的草稿。worker 中途死掉的单在下次认领时记成中断，也不重跑。
 
 ## 投递与重启（`src/bridge/pm-job.ts` 的 `sweep`）
 
@@ -76,4 +80,4 @@ bridge 启动时扫一次，之后每 30 秒扫一次，不靠新流量。它只
 
 ## 测试
 
-`tests/pm-job-direct.test.ts`（验收线 1–3）、`tests/pm-job-recovery.test.ts`（4–5）、`tests/pm-job-limits.test.ts`（6）、`tests/pm-job-wiring.test.ts`（起真实的调度服务子进程验证 worker 接线；`ask_codex` 入口与处理员共用槽位；继承键与英文决策问），共用 `tests/pm-job-world.test.ts`：真实台账、真实 `openOrderAsk` 和 `deliverPmLocal`，模型、额度和远端发送是可控桩，状态都在临时目录。
+`tests/pm-job-direct.test.ts`（验收线 1–3）、`tests/pm-job-recovery.test.ts`（4–5）、`tests/pm-job-limits.test.ts`（6）、`tests/pm-job-wiring.test.ts`（起真实的调度服务子进程验证 worker 接线；`ask_codex` 入口与处理员共用槽位；继承键与英文决策问），`tests/pm-job-widen.test.ts`（agents-PMJOB2 验收线 1–4：硬软门、specDecided、规格快照、草稿进摘要），共用 `tests/pm-job-world.test.ts`：真实台账、真实 `openOrderAsk` 和 `deliverPmLocal`，模型、额度和远端发送是可控桩，状态都在临时目录。

@@ -30,8 +30,8 @@ test("复现测试:团队总览带 unknownMetrics 四项，done 卡镜像刚刷�
   const hv = homeView(ov, NOW);
   expect(hv.todayDone).toEqual([]);
   const m = metricsOf(ov, hv.todayDone.length, null);
-  expect(m).toEqual({ present: null, active: m.active, todayDone: null, reviewRounds: null, fixed: null, avgReviewWaitMs: null });
-  expect(m.active).toBeGreaterThan(0); // 进行中只看阶段，团队数据有
+  // 进行中（在干活 / 在等）不在 metricsOf 里，由看板数（count-words.ts，tests/web-collab-count-words.test.ts）
+  expect(m).toEqual({ present: null, todayDone: null, reviewRounds: null, fixed: null, avgReviewWaitMs: null });
 });
 
 test("防回归:本机总览不带 unknownMetrics，数字照旧（缺省 = 全部已知）", () => {

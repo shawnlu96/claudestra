@@ -11,7 +11,7 @@ import { bindFixReplacement } from "./scheduler-sessions.js";
 import { remoteContext, convergencePlacement, type RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { placeFor } from "./scheduler-family-pick.js";
 import { heldLease, writeOrderWire, lastReviewOf } from "./ledger-lend-lease.js";
-import { reclaimForFamilySwap } from "./lend-reclaim-scheduler.js";
+import { reclaimForFamilySwap, retireReclaimedPeerAuthor } from "./lend-reclaim-scheduler.js";
 import { remoteOrder, offerConvergence } from "./fix-strategy-remote-order.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { getLendPeer } from "./ledger-lend-peers.js";
@@ -22,6 +22,8 @@ import { localWriterCount } from "./scheduler-pool-facts.js";
 import { explicitLocal } from "./scheduler-local-pin.js";
 import { localSwapAuthority, localSwapCreate, localSwapOf, localSwapReady, localSwapReclaimEdge, localSwapWait, reclaimedBefore, retireLocalAuthor } from "./recovery-fix-local-swap-run.js";
 import { getIntent } from "./ledger-scheduler.js";
+import type { LocalSwapEvidence } from "./recovery-fix-local-swap.js";
+import { reclaimLocalFixEdge, reclaimLocalFixGate } from "./recovery-reclaim-local-fix.js";
 import type { SwapGate } from "./fix-strategy-guard.js";
 
 type Material = { path: string; family: AuthorFamily };
@@ -114,6 +116,41 @@ export async function remoteFixFallback(db: Database, ctx: WriteCtx, intent: Sch
 
 export const hasRemoteFix = (db: Database, id: string): boolean => !!remoteOrder(db, id);
 
+type AfterReclaim = { claim: string; bound: string; gate?: SwapGate };
+const OTHER_FAMILY: AfterReclaim = { claim: "peer family swap", bound: "收回后新家族本机会话已绑定" };
+
+/**
+ * After the write lease is gone (one reclaim, never two): claim, build the local author with the material's family and bind it.
+ * label.gate (no swap) is re-read at the create, bind and remote-fallback edges, the way a swap's localSwapGate / localSwapAuthority are.
+ */
+async function localAfterReclaim(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, material: Material, source: string,
+  context: RemoteConvergenceContext, deps: ConvergenceLifecycle, swap: LocalSwapEvidence | null, label: AfterReclaim) {
+  if (intent.status === "pending") settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: `claimed; ${label.claim}` });
+  const late = swap && await localSwapReady(db, ctx, intent, swap, context, deps);
+  if (late) return late;
+  // every archive / kill / tree / create edge re-reads the switch and pins itself (localSwapGate / localSwapCreate)
+  const retired: { wait: string } | { gate?: SwapGate } = swap ? await retireLocalAuthor(db, ctx, intent.id, swap, deps) : {};
+  if ("wait" in retired) return { ok: true, step: "waiting", detail: retired.wait };
+  const edge = swap && localSwapCreate(db, intent, swap, deps, retired.gate, () => ctx.now ?? Date.now(), source);
+  const local = localWriterCount(db, task.project, task.id) >= context.maxWorkers ? { wait: "本机写槽已满或不接新写者" }
+    : edge ? await createConvergenceWorker(db, ctx, getIntent(db, intent.id)!, mustTask(db, task.id), material.family, source, "author",
+      edge.lifecycle, edge.gate)
+    : await createConvergenceWorker(db, ctx, intent, mustTask(db, task.id), material.family, source, "author", deps, label.gate);
+  if ("tree" in local) return { ok: true, step: "manual" in local ? "manual" : "waiting", detail: local.wait };
+  if (swap && "wait" in local) return localSwapWait(db, ctx, intent, local.wait);
+  const halt = swap && !("wait" in local) ? localSwapAuthority(db, mustTask(db, task.id), swap) : null;
+  if (halt) return localSwapWait(db, ctx, intent, halt);
+  // also before a refused local build falls back remote: a fresh peer order would take a held lease the switch no longer allows
+  const drift = label.gate?.("stopped");
+  if (drift) return { ok: true, step: "waiting", detail: drift.reason };
+  if (!("wait" in local)) {
+    bindFixReplacement(db, ctx, intent.id, local, material.path, deps.registryPath);
+    settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "done", receipt: label.bound });
+    return { ok: true, step: "session", detail: label.bound };
+  }
+  return remoteFixFallback(db, ctx, intent, material, deps, local.wait, context);
+}
+
 export async function remoteAuthorFix(db: Database, ctx: WriteCtx, intent: SchedulerIntent, deps: ConvergenceLifecycle, read: MaterialReader) {
   if (remoteOrder(db, intent.id)) return syncFix(db, ctx, intent, deps);
   const task = mustTask(db, intent.taskId), context = await remoteContext(db, task, deps); deps.active();
@@ -128,28 +165,14 @@ export async function remoteAuthorFix(db: Database, ctx: WriteCtx, intent: Sched
     const wait = swap && reclaimedBefore(db, task) ? null : await reclaimForFamilySwap(db, ctx, intent.id, context, deps.active,
       swap ? () => localSwapReclaimEdge(db, ctx, intent, swap, context, deps) : undefined);
     if (wait) return { ok: true, step: "waiting", detail: wait };
-    if (intent.status === "pending") settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; peer family swap" });
-    const late = swap && await localSwapReady(db, ctx, intent, swap, context, deps);
-    if (late) return late;
-    // every archive / kill / tree / create edge re-reads the switch and pins itself (localSwapGate / localSwapCreate)
-    const retired: { wait: string } | { gate?: SwapGate } = swap ? await retireLocalAuthor(db, ctx, intent.id, swap, deps) : {};
-    if ("wait" in retired) return { ok: true, step: "waiting", detail: retired.wait };
-    const edge = swap && localSwapCreate(db, intent, swap, deps, retired.gate, () => ctx.now ?? Date.now(), context.source);
-    const local = localWriterCount(db, task.project, task.id) >= context.maxWorkers ? { wait: "本机写槽已满或不接新写者" }
-      : edge ? await createConvergenceWorker(db, ctx, getIntent(db, intent.id)!, mustTask(db, task.id), material.family, context.source, "author",
-        edge.lifecycle, edge.gate)
-      : await createConvergenceWorker(db, ctx, intent, mustTask(db, task.id), material.family, context.source, "author", deps);
-    if ("tree" in local) return { ok: true, step: "manual" in local ? "manual" : "waiting", detail: local.wait };
-    if (swap && "wait" in local) return localSwapWait(db, ctx, intent, local.wait);
-    const halt = swap && !("wait" in local) ? localSwapAuthority(db, mustTask(db, task.id), swap) : null;
-    if (halt) return localSwapWait(db, ctx, intent, halt);
-    if (!("wait" in local)) {
-      bindFixReplacement(db, ctx, intent.id, local, material.path, deps.registryPath);
-      settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "done", receipt: "收回后新家族本机会话已绑定" });
-      return { ok: true, step: "session", detail: "收回后新家族本机会话已绑定" };
-    }
-    return remoteFixFallback(db, ctx, intent, material, deps, local.wait, context);
+    return localAfterReclaim(db, ctx, intent, task, material, context.source, context, deps, swap, OTHER_FAMILY);
   }
-  if (!heldLease(db, task)) throw new LedgerError("conflict", "原作者在peer但缺held写租约，不另派写者");
+  if (!heldLease(db, task)) {
+    const gate = reclaimLocalFixGate(db, ctx, intent, task, material.family);
+    if (!gate.act) throw new LedgerError("conflict", `原作者在peer但缺held写租约，不另派写者${gate.why}`);
+    retireReclaimedPeerAuthor(db, ctx, intent.id, task.id); // the lease is already gone: never reclaim a second time
+    return localAfterReclaim(db, ctx, intent, task, material, context.source, context, deps, null,
+      { claim: "reclaimed same-family fix", bound: "收回后同家族本机会话已绑定", gate: reclaimLocalFixEdge(db, task.id, gate.reclaim.seq) });
+  }
   return remoteFixFallback(db, ctx, intent, material, deps, "原作者在peer，同家族换新单派回租约方", context);
 }

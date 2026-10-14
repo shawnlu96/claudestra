@@ -1,15 +1,18 @@
 import { SHARED_PROJECTS_CAPABILITIES } from "./shared-projects-client.js";
 import { readProjects } from "../../lib/projects.js";
 import { readPeers } from "../../lib/peers.js";
+import { isInstanceId } from "../../lib/instance-id.js";
 import { isPersonalProject } from "../../lib/lend-policy.js";
 import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
 import { looksLikeSharedLedgerJoinCode } from "../../lib/shared-ledger-join.js";
 import { parseV2ProjectsResponse, parseV2ProjectsTeamResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
+import { teamInstancesSnapshot } from "./shared-projects-team-instances.js";
 import { requireProjectPerson, SharedProjectsError, type ProjectPerson, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 export interface SharedProjectsLocalSnapshot {
   projects: { id: string; name: string; dirs: string[]; personal: boolean }[];
-  peers: { name: string; enabled: boolean; invitable: boolean }[];
+  /** instanceId = peers.json 里已记的对方实例 id（老记录没有就不带）：协作视图把执行实例换成成员机器名用，不是凭据 */
+  peers: { name: string; enabled: boolean; invitable: boolean; instanceId?: string }[];
 }
 /** Local configuration is the source; directory contents, git metadata and inferred person mappings are never consulted. */
 export async function readSharedProjectsLocalSnapshot(): Promise<SharedProjectsLocalSnapshot> {
@@ -17,7 +20,8 @@ export async function readSharedProjectsLocalSnapshot(): Promise<SharedProjectsL
   return {
     projects: local.projects.map(p => ({ id: p.id, name: p.name, dirs: [...p.dirs], personal: isPersonalProject(p) })),
     peers: (peerState.httpPeers ?? []).map(p => ({ name: p.name, enabled: !p.disabled,
-      invitable: !p.disabled && !!p.baseUrl && !!p.outToken && (!!p.e2e || p.baseUrl.startsWith("https://")) })),
+      invitable: !p.disabled && !!p.baseUrl && !!p.outToken && (!!p.e2e || p.baseUrl.startsWith("https://")),
+      ...(isInstanceId(p.instanceId) ? { instanceId: p.instanceId } : {}) })),
   };
 }
 
@@ -80,13 +84,15 @@ export async function sharedProjectsSnapshot(d: SharedProjectsPorts, local: Shar
     return { ...project, projectRole, localProjectIds: bindings.filter(b => b.centerId === project.centerId
       && b.teamId === project.teamId && b.projectId === project.projectId).map(b => b.localProjectId ?? b.projectId) };
   }));
-  const { team: teamRecord, teamDirectory, teamRole } = await teamSnapshot(d, who);
+  const teamRead = teamSnapshot(d, who);
+  const [{ team: teamRecord, teamDirectory, teamRole }, teamInstances] = await Promise.all([teamRead,
+    teamInstancesSnapshot(d, who, teamRead.then(t => t.teamDirectory))]);
   return {
     v: 1 as const, identity: { ...who }, capabilities: SHARED_PROJECTS_CAPABILITIES,
-    teamRole, team: teamRecord, teamDirectory, projects,
+    teamRole, team: teamRecord, teamDirectory, teamInstances, projects,
     localProjects: local.projects.map(p => ({ id: p.id, name: p.name, dirs: [...p.dirs], personal: p.personal,
       eligible: !p.personal && !bindings.some(b => (b.localProjectId ?? b.projectId) === p.id) })),
-    peers: local.peers.map(p => ({ name: p.name, enabled: p.enabled, invitable: p.invitable })),
+    peers: local.peers.map(p => ({ name: p.name, enabled: p.enabled, invitable: p.invitable, ...(p.instanceId ? { instanceId: p.instanceId } : {}) })),
   };
 }
 export type SharedProjectsSnapshot = Awaited<ReturnType<typeof sharedProjectsSnapshot>>;

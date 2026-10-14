@@ -45,7 +45,7 @@ for (const mode of ["on", "observe"] as const) {
 
 test("[验收线 4] PM revoke after initial go: fullRecheck is not called, next pass cancels", async () => {
   const w = world();
-  writePolicy({ mainCiPause: "on" });
+  writePolicy({ mainCiPause: "on", ciQueueFull: "off" });
   const c = w.card("C");
   w.ci.defaultCi = "failure";
   await w.ledger("agent-pm", ["main-ci-repair", "C", "--head", c.head, "--main", w.hub.main, "--reason", "修 main"]);

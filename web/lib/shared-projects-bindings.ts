@@ -6,7 +6,8 @@ import { list, object, text } from "./shared-projects-parse";
 
 type Source = { centerId: string; teamId: string; projectId: string; personId: string; instanceId: string };
 type Binding = { source: Source; port: SharedProjectsPort; snapshot: ProjectSnapshot | null };
-const ambiguous = "绑定无法区分：需要 N4 选择头带 center/team；相关来源已禁用。";
+// Owner-facing: shown in the sidebar as is (and translated there via sharedProjectsTr), so it names no protocol or header.
+export const ambiguous = "这个团队项目在本机对应了多个绑定，已暂停显示；请到项目设置里核对。";
 
 /** These are N4's original binding hints, not credentials and not a second center protocol validator. */
 function sources(value: unknown): Source[] {

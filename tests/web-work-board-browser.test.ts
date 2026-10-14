@@ -9,9 +9,9 @@ const enabled = process.env.WORK_BOARD_BROWSER === '1' && !!out;
 const row = (id: string, patch: Partial<WorkRow> = {}): WorkRow => ({ taskId: id, featureId: 'f', nodeKey: id, title: '协作视图：看清谁在干活与剩余时间',
   who: `agent-${id}`, machine: 'local', step: 'write', round: 1, since: 85 * 60000, normalMinutes: 60, remainingMinutes: 115, overMinutes: 0,
   reason: null, code: null, estimate: '半天', ...patch });
-const board: WorkBoard = { now: 90 * 60000, asOfSeq: 1, machines: { local: 2, Sekai: 1, 'HedeMacBook-Pro': 1 }, availableSlots: 3, completionHours: 8,
-  working: [row('WB1', { since: 0, overMinutes: 30, remainingMinutes: 60 }), row('R9', { who: 'peer:Sekai · codex', machine: 'Sekai', step: 'review', normalMinutes: 30, remainingMinutes: 55 }),
-    row('W2', { who: 'peer:HedeMacBook-Pro · claude', machine: 'HedeMacBook-Pro', step: 'publishing' }), row('M1', { who: 'agent-manual-writer', title: 'PM 人工推进 · 执行者正在写代码' })],
+const board: WorkBoard = { now: 90 * 60000, asOfSeq: 1, machines: { local: 2, 'peer-a': 1, 'peer-b': 1 }, availableSlots: 3, completionHours: 8,
+  working: [row('WB1', { since: 0, overMinutes: 30, remainingMinutes: 60 }), row('R9', { who: 'peer:peer-a · codex', machine: 'peer-a', step: 'review', normalMinutes: 30, remainingMinutes: 55 }),
+    row('W2', { who: 'peer:peer-b · claude', machine: 'peer-b', step: 'publishing' }), row('M1', { who: 'agent-manual-writer', title: 'PM 人工推进 · 执行者正在写代码' })],
   waiting: [row('C5', { reason: '等审查员领单', code: 'pooled' }), row('PD2', { reason: '合并排队：前面是 W3', code: 'merge_queue' }),
     row('V2', { reason: '等 CI', code: 'ci' }), row('Q1', { reason: '等 owner', code: 'owner' })],
   todo: { ready: [row('A1')], blocked: [row('A2', { reason: '被 A1 挡住' }), row('A3', { reason: '缺规格' })] } };
@@ -52,8 +52,12 @@ test.skipIf(!enabled)('390/1400 board, segmented navigation, node/task clicks an
       await page.getByRole('button', { name: /WB1/ }).click();
       expect(await page.evaluate<string>('window.clicked')).toBe('f/WB1');
       if (width === 390) {
-        await page.getByRole('tab', { name: '在等 4' }).click();
+        // UXWHO1：合并排队 / 等 CI 在「在等合并」，「在等」只剩等审查员领单 / 等 owner
+        await page.getByRole('tab', { name: '在等合并 2' }).click();
         await page.getByText('等 CI', { exact: true }).waitFor();
+        await page.screenshot({ path: resolve(out, `after-${width}-merging.png`) });
+        await page.getByRole('tab', { name: '在等 2' }).click();
+        await page.getByText('等 owner', { exact: true }).waitFor();
         await page.screenshot({ path: resolve(out, `after-${width}-waiting.png`) });
         await page.getByRole('tab', { name: '待做 3' }).click();
         await page.getByText('缺规格', { exact: true }).waitFor();

@@ -209,7 +209,7 @@ describe("i28-M9 await_ci: main moving while CI ran is never merged", () => {
     const f = fixture("await_ci", { snaps: [pr()] });
     await f.drive();
     expect(f.row.phase).toBe("merged");
-    expect(f.calls).toEqual(["inspect", "fresh:a", "inspect", "journal:merging", "merge:a", "inspect", "journal:merged"]);
+    expect(f.calls).toEqual(["inspect", "fresh:a", "inspect", "journal:merging", "fresh:a", "merge:a", "inspect", "journal:merged"]);
   });
 });
 
