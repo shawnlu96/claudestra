@@ -66,6 +66,7 @@ export const RECOVERY_KEYS = [
   "poolIdleSkip",
   "privateMergeNarrow",
   "privateStartPlacement",
+  "reclaimLocalFix",
   "reviewLocalFirst",
   "roleModel",
   "skipEffectsAutoScope",
