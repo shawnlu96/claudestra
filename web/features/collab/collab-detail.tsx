@@ -40,6 +40,10 @@ import type { RunningReviewer } from "./collab-reviewers";
 import { CollabSay } from "./collab-say";
 import { NowSec, StopRound } from "./detail-now";
 import { detailNowTr } from "./detail-now-i18n";
+import { detailPauseTr } from "./detail-pause-i18n";
+import { PauseCard, useCardPause } from "./detail-pause";
+import { detailTarget } from "./detail-pause-target";
+import { DetailUsage } from "./detail-usage";
 import { awaySayText, canStopRound, detailGoal, nowFactsOf, nowSentence, stageTimes } from "./detail-now-model";
 import { instanceName, NO_NAMES, OTHER_MACHINE, type InstanceNames } from "./team-instance-names";
 import { sharedIdentity } from "./team-source-key";
@@ -337,8 +341,9 @@ function PeopleSec(props: {
 }
 
 /** 对它说：主场本机挂输入框（执行者在线时旁边是「叫停这一轮」）；别的机器为主场写在哪台机器、为什么不行 */
-function SaySec({ d, line, exec, working, away, tr }: {
+function SaySec({ d, line, exec, working, away, tr, pause }: {
   d: TaskDetail; line: LineView; exec: AgentSession | undefined; working: boolean; away: { machine: string } | null; tr: Tr;
+  pause: React.ReactNode;
 }) {
   const stage = d.task.stage;
   if (stage === "done" || stage === "cancelled") return null;
@@ -351,14 +356,16 @@ function SaySec({ d, line, exec, working, away, tr }: {
       </div>
     );
   }
-  if (!line.agent) return null;
+  if (!line.agent) return pause ? <div className={s.sec}>{pause}</div> : null;
   const stop = canStopRound({ homeLocal: true, executorOnline: exec?.status === "active", stage });
   return (
     <div className={s.sayDock}>
       <div className={s.sec}>
         <h5>
           {`${tr("对它说")} · ${line.agent}`}
-          {stop && <StopRound agent={line.agent} tr={tr} />}
+          <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {stop && <StopRound agent={line.agent} tr={tr} />}{pause}
+          </span>
         </h5>
         <CollabSay agent={line.agent} working={working} tr={tr} />
       </div>
@@ -393,11 +400,14 @@ function Body(props: {
   const pr = d.task.pr && /^https:\/\//.test(d.task.pr) ? d.task.pr : null;
   // 别的机器为主场（对它说不在本机）：一句话里写「在 <机器名>」，对它说写原因
   const away = home("say") ? { machine: tr(props.machineOf(d.task.team?.executorInstanceId ?? null) ?? OTHER_MACHINE) } : null;
-  const sentence = nowSentence(nowFactsOf(d, line, running, now, away?.machine ?? null), tr);
+  const target = detailTarget(d, props.project, away !== null);
+  const pause = useCardPause(target, d);
+  const sentence = nowSentence({ ...nowFactsOf(d, line, running, now, away?.machine ?? null), pause: pause.view }, tr);
   return (
     <div className={s.pb}>
       <NowSec line={line} total={d.task.metrics.totalMs} now={sentence} action={working && !home("sessions") && action.text ? action.text : null} tr={tr} />
       <StagesSec d={d} line={line} tr={tr} />
+      <DetailUsage id={target?.id ?? null} awayMachine={away?.machine ?? null} tr={tr} />
       {props.extra}
       {d.team && <BodySec t={d.team} now={d.now} tr={tr} />}
       <ChecklistSec d={d} tr={tr} />
@@ -425,7 +435,9 @@ function Body(props: {
           </a>
         </div>
       )}
-      <SaySec d={d} line={line} exec={exec} working={working} away={away} tr={tr} />
+      <SaySec d={d} line={line} exec={exec} working={working} away={away} tr={tr}
+        pause={target && <PauseCard key={`${target.project}:${target.id}`} target={target} view={pause.view}
+          stage={d.task.stage} onChange={pause.update} tr={tr} />} />
     </div>
   );
 }
@@ -460,7 +472,7 @@ export function CollabDetail(props: {
   const { project, id, rev, now, ov, onClose } = props;
   const collabTr = useCollabT();
   const lang = useLang();
-  const tr = useMemo(() => detailNowTr(teamBodyTr(collabTr, lang), lang), [collabTr, lang]);
+  const tr = useMemo(() => detailPauseTr(detailNowTr(teamBodyTr(collabTr, lang), lang), lang), [collabTr, lang]);
   const source = useCollabSource(project);
   const narrow = useNarrow();
   const load = useTaskDetail(project, id, rev);
@@ -509,7 +521,7 @@ export function CollabDetail(props: {
         </button>
       </div>
       {d && line ? (
-        <Body d={d} line={line} action={action(line)} stream={stream} project={project}
+        <Body key={`${project}:${id}`} d={d} line={line} action={action(line)} stream={stream} project={project}
           running={props.reviewers} now={now} tr={tr} extra={props.extra} homeOnly={homeOnly} machineOf={machineOf} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>

@@ -9,6 +9,7 @@ import type { TaskDetail } from "./collab-detail-model";
 import { bareAgent, fmtDuration, stageSince, type LedgerEventView, type LedgerTaskView, type LineView, type Stage, type Tr } from "./collab-model";
 import type { RunningReviewer } from "./collab-reviewers";
 import { hexFree } from "./team-instance-names";
+import type { CardPauseView } from "@/lib/api/card-pause";
 
 const zh: Tr = fillParams;
 
@@ -30,6 +31,7 @@ export interface NowFacts {
   now: number;
   /** 别的机器为主场的卡：主场机器的名字（已经换成人看的名字）；主场本机为 null */
   awayMachine: string | null;
+  pause?: CardPauseView | null;
 }
 
 export interface NowSentence {
@@ -92,6 +94,13 @@ function mainOf(f: NowFacts, tr: Tr): { text: string; ms: number | null; waiting
 }
 
 export function nowSentence(f: NowFacts, tr: Tr = zh): NowSentence {
+  if (f.awayMachine === null && f.pause?.mode === "on" && f.pause.paused) {
+    const p = f.pause;
+    const time = p.at === null ? "" : Math.max(0, f.now - p.at) < 60_000 ? tr("刚刚")
+      : tr("{d}前", { d: fmtDuration(Math.max(0, f.now - p.at), tr) });
+    const who = tr("{who} {time} 暂停", { who: hexFree(p.actor) ?? "owner", time });
+    return { who: [tr("已暂停"), who, p.reason?.trim()].filter(Boolean).join(" · "), next: tr("你点继续后，调度器接着派"), usedReason: true };
+  }
   const m = mainOf(f, tr);
   const where = f.awayMachine ? tr("在 {m}", { m: hexFree(f.awayMachine) ?? tr("其他成员的机器") }) : "";
   const long = since(m.ms, f.dwellApprox === true && m.ms === f.dwellMs, m.waiting, tr);

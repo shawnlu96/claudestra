@@ -77,4 +77,5 @@ export const RECOVERY_KEYS = [
   "effCountCarry",
   "ciLogPerJob",
   "mergeUnifiedCandidates",
+  "privateStartPlacement",
 ] as const;

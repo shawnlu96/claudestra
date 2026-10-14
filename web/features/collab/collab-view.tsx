@@ -4,14 +4,12 @@
  * 「子 DAG」「谁在干活」（接线在 dag/use-dag-panes.tsx；没有图时第一个标签退回 v4 因果线画布）和「团队」（T55）；
  * 右属性（没选中 = 项目概览，任务 = 任务详情 + 它的因果线，边 / 折叠组 / 待你处理 / DAG 节点 / 版本 / 差异各一页）。
  * 手机没有画布：分段「子 DAG / 谁在干活」列表，点开是全屏详情。
- * 底部时间轴放第二期。数据只用总览（tasks / items / deps）和任务详情，没有来源的指标标「暂无」。
+ * 底部时间轴放第二期。计数口径在 count-words.ts（看板模型），顶栏在 metrics-bar.tsx；没数据的指标整格不出。
  */
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useDagPanes } from "./dag/use-dag-panes";
 import { useCollabT } from "./collab-i18n";
-import { useLang } from "@/lib/i18n";
-import { sharedLedgerTr } from "@/lib/i18n-dict-shared-ledger";
 import { useChatStore } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { actionLine } from "./collab-action";
@@ -21,7 +19,7 @@ import { browserHistory } from "@/lib/hash-nav-browser";
 import { Icon } from "./collab-icons";
 import type { WebAsk } from "../asks/asks-model";
 import { useAsks } from "../asks/asks-store";
-import { fmtDuration, homeView, type LineView, type Tr } from "./collab-model";
+import { homeView, type LineView, type Tr } from "./collab-model";
 import { openCollabTask, useCollabNav } from "./collab-nav";
 import { useCollab } from "./use-collab";
 import { ownerWaits, subscribeViewBinding, viewLocalProject } from "./owner-waits";
@@ -39,7 +37,9 @@ import { PaneLayout } from "./v4/side-pane";
 import { Outline } from "./v4/v4-outline";
 import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamPage, WaitsPage } from "./v4/v4-props";
 import { TeamPanel } from "./team-panel";
-import { DEFAULT_FILTER, metricsOf, type Filter, type Metrics } from "./v4/v4-model";
+import { DEFAULT_FILTER, metricsOf, type Filter } from "./v4/v4-model";
+import { MetricsBar } from "./metrics-bar";
+import { useWeekQuota } from "./use-count-source";
 import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
 import v from "./v4/v4.module.css";
@@ -56,30 +56,6 @@ function Empty({ icon, title, children }: { icon: "listTree" | "clock" | "circle
       </span>
       <h3>{title}</h3>
       {children}
-    </div>
-  );
-}
-
-/** 不知道的指标显示「暂无」并在 title 里给原因；本机「没人在等审查」照旧是「—」 */
-function MetricsBar({ m, waitUnknown, connected, tr }: { m: Metrics; waitUnknown: boolean; connected: boolean; tr: Tr }) {
-  // 主场相关的原因复用团队规划（shared-ledger）的既有词条，那份字典不在 DICT 里
-  const homeTr = sharedLedgerTr(useLang());
-  const noSource = tr("暂无数据来源");
-  const known = (n: number | null, why = noSource): [string, string?] => n === null ? [tr("暂无"), why] : [String(n)];
-  const cells: [string, string, string?][] = [
-    ["在场 agent", ...known(m.present, homeTr("主场在线状态未知"))], ["进行中", String(m.active)], ["今日完成", ...known(m.todayDone)], ["审查轮次", ...known(m.reviewRounds)],
-    ["P0/P1 修掉", ...known(m.fixed)], waitUnknown ? ["平均等复核", tr("暂无"), noSource] : ["平均等复核", m.avgReviewWaitMs === null ? "—" : fmtDuration(m.avgReviewWaitMs, tr)],
-    ["周额度", "—", noSource], ["协作消息", "—", noSource],
-  ];
-  return (
-    <div className={v.metrics}>
-      {cells.map(([k, val, hint]) => (
-        <span key={k} className={v.metric} title={hint}>
-          <b>{val}</b>
-          <span>{tr(k)}</span>
-        </span>
-      ))}
-      <span className={`${s.live} ${connected ? "" : s.off}`} title={tr(connected ? "实时" : "重连中")} />
     </div>
   );
 }
@@ -186,7 +162,8 @@ export function CollabView({ project }: { project: string }) {
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
   const [filter, setFilter] = useState<Filter>(DEFAULT_FILTER);
   const { sel, setSel, focus, pickTask, select, close } = useSheetSelection(openTask, narrow);
-  const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr, noWorkBoard: off?.has("workBoard"), ov });
+  const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr, noWorkBoard: off?.has("workBoard"), ov, source });
+  const quota = useWeekQuota();
   const projectName = source.label ?? (projects.find((p) => p.id === project)?.name || project);
 
   const lineAction = (l: LineView) => {
@@ -217,7 +194,7 @@ export function CollabView({ project }: { project: string }) {
     || (resolved?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "member" && <MemberPage m={resolved} project={project} onClose={close} tr={tr} />)
     || (resolved?.kind === "team" && <TeamPage onClose={close} tr={tr}>{team}</TeamPage>);
-  const right = detail || page || <Overview ov={o} view={hv} waits={waits} projectName={projectName} onPick={pickTask} now={now} tr={tr} since={lastSeen.state.since !== null && (
+  const right = detail || page || <Overview ov={o} view={hv} counts={dag.counts} waits={waits} projectName={projectName} onPick={pickTask} now={now} tr={tr} since={lastSeen.state.since !== null && (
     <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={pickTask} onDismiss={lastSeen.dismiss} />
   )} />;
 
@@ -231,7 +208,7 @@ export function CollabView({ project }: { project: string }) {
         {narrow && <button type="button" className={v.teamM} onClick={() => select({ kind: "team" })}>{tr("团队")}</button>}
         {narrow && <button type="button" className={v.waitsM} title={waitsUnknown ? tr("暂无数据来源") : undefined} onClick={() => select({ kind: "waits" })}>
           {tr("待你处理")} <b>{waitsUnknown ? tr("暂无") : waits.length}</b></button>}
-        {!narrow && <MetricsBar m={m} waitUnknown={!!o.unknownMetrics?.includes("reviewWait")} connected={connected} tr={tr} />}
+        {!narrow && <MetricsBar m={m} counts={dag.counts} quota={quota} waitUnknown={!!o.unknownMetrics?.includes("reviewWait")} connected={connected} tr={tr} />}
       </div>
       {load.error && <div role="status" className={s.retry}><span>{tr("没取到，正在重试")}</span>
         <button type="button" className={s.ib} onClick={() => void refetch()}>{tr("重试")}</button>
@@ -245,7 +222,7 @@ export function CollabView({ project }: { project: string }) {
         </>
       ) : (
         <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline project={project} ov={o} lines={lines} filter={filter}
-          onFilter={setFilter} waits={waits} waitsUnknown={waitsUnknown} onWaits={() => select({ kind: "waits" })} selected={openTask} onPick={pickTask} tr={tr} />}>
+          onFilter={setFilter} waits={waits} waitsUnknown={waitsUnknown} onWaits={() => select({ kind: "waits" })} selected={openTask} onPick={pickTask} counts={dag.counts} tr={tr} />}>
           {dag.center(<CausalCanvas canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
             selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />, team)}
         </PaneLayout>

@@ -22,6 +22,7 @@ import { homeView, type LedgerOverview, type LedgerTaskView } from "../web/featu
 import { stepLineView } from "../web/features/collab/collab-step-line-model";
 import { causalCanvas } from "../web/features/collab/v4/causal-model";
 import { filterCount, FILTERS, metricsOf, stageCounts } from "../web/features/collab/v4/v4-model";
+import { countSnap, type CountBoard } from "../web/features/collab/count-words";
 import { chainLoadMore, chainOnOverview, chainOnPage, newChain, type DoneChain } from "../web/lib/api/ledger-done";
 import { seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -309,9 +310,13 @@ describe("网页：窗口 + doneRest 和全量一致", () => {
     const full = asWire({ ...old, tasks: [...view.tasks, ...rest] });
     const slim = asWire(view);
     expect(slim.tasks.length).toBeLessThan(full.tasks.length / 4);
-    for (const f of FILTERS) expect([f, filterCount(slim, f)]).toEqual([f, filterCount(full, f)]);
+    // 同一份看板（没结束的卡都在「在干活」）：各阶段 / 进行中 / 已完成按卡阶段与窗口外 doneRest 数，窗口与全量必须一样
+    const board: CountBoard = { working: full.tasks.filter((t) => !["done", "verified", "cancelled"].includes(t.stage)).map((t) => ({ taskId: t.id, featureId: null })),
+      merging: [], waiting: [], todo: { ready: [], blocked: [] } };
+    for (const f of FILTERS) expect([f, filterCount(slim, f, countSnap(board, slim))]).toEqual([f, filterCount(full, f, countSnap(board, full))]);
     expect(metricsOf(slim, 0, 1)).toEqual(metricsOf(full, 0, 1));
-    expect(stageCounts(slim)).toEqual(stageCounts(full));
+    expect(stageCounts(countSnap(board, slim))).toEqual(stageCounts(countSnap(board, full)));
+    expect(countSnap(board, slim).words).toEqual(countSnap(board, full).words);
     const ticks = (ov: LedgerOverview) => causalCanvas(ov).groups.map((g) => [g.id, g.done]);
     expect(ticks(slim)).toEqual(ticks(full));
   });

@@ -14,6 +14,7 @@ import { TeamSource } from './team-ops';
 const params = new URLSearchParams(location.search);
 const project = params.get('project') ?? 'claude-orchestrator';
 const identity = { center: 'center', team: params.get('team') ?? 'team-a', person: 'person-a', project, machine: 'local' };
+Object.assign(identity, params.get('homeInstanceId') ? { homeInstanceId: params.get('homeInstanceId')! } : {});
 
 /** 会话列表照生产外壳（chat.tsx）挂载时读一次：详情里执行者在线 / 忙闲、「叫停这一轮」都看它。
  *  ?loadAgents=1 才开，缺省关：其他用这个 harness 的测试不多出 /agents 请求，行为不变 */

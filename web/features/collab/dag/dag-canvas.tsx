@@ -16,6 +16,9 @@ import type { DagCanvas, DGroup, DNode } from "./dag-layout";
 import { NodeBody, nodeClass, type NodeLook } from "./dag-node";
 import type { FeatureCard } from "./dag-types";
 import d from "./dag.module.css";
+import { featureWords } from "../count-words";
+import { countText } from "../count-words-i18n";
+import { useCountContext } from "../use-count-source";
 
 export type Look = (n: DNode) => Omit<NodeLook, "node" | "kind" | "mark">;
 
@@ -37,9 +40,35 @@ export interface DagCanvasProps {
   tr: Tr;
 }
 
-/** activeUnknown：active / idle 显示「暂无」而不是占位的 0（桌面 Shelf 与手机列表共用）；done 照常是已知数 */
+/**
+ * 框头的状态词（UXNUM1）：「在干活 a · 在等 b · 没开工 c」写字，数从 CountContext（count-words.ts，和顶栏同一份看板）；
+ * 没载完是骨架。没有 context（老调用方 / 单测直接挂）返回 null，由调用方退回 feature 自带的计数
+ */
+export function FeatureWordsLine({ featureId }: { featureId: string }) {
+  const tr = useCollabT();
+  const counts = useCountContext();
+  if (!counts || counts.status === "none") return null;
+  const w = counts.status === "ready" ? featureWords(counts.snap, featureId) : null;
+  const n = (x: number | undefined) => (x === undefined ? <span className={v.skel} aria-hidden /> : x);
+  return (
+    <span className={d.words} data-feature-words={featureId}>
+      {countText(tr, "在干活")} {n(w?.working)} · {countText(tr, "在等")} {n(w?.waiting)} · {countText(tr, "没开工")} {n(w?.notStarted)}
+    </span>
+  );
+}
+
+/** 框头 / 小片的完成数：全站计数没载完时同样是骨架（和状态词一起出数）；没有 context 照旧直接出 */
+function DoneNum({ f }: { f: FeatureCard }) {
+  return useCountContext()?.status === "loading" ? <span className={v.skel} aria-hidden /> : <>{f.counts.done}</>;
+}
+
+/** activeUnknown：active / idle 显示「暂无」而不是占位的 0（桌面 Shelf 与手机列表共用）；done 照常是已知数。有计数 context 时 active / idle 换成写字的状态词 */
 export function Counts({ f }: { f: FeatureCard }) {
   const tr = useCollabT();
+  const counts = useCountContext();
+  if (counts && counts.status !== "none") {
+    return <><span className={`${d.cnum} ${d.ok}`}><Icon name="check" size={11} /><DoneNum f={f} /></span><FeatureWordsLine featureId={f.id} /></>;
+  }
   const unknown = f.counts.activeUnknown === true;
   return (
     <>
@@ -85,8 +114,9 @@ function GroupFrame({ g, p }: { g: DGroup; p: DagCanvasProps }) {
       <div className={d.gh}>
         <span className={d.gt} title={f.title}>{f.title || f.id}</span>
         <VersionBar g={g} compare={p.compare} onVersions={p.onVersions} tr={p.tr} />
+        <FeatureWordsLine featureId={f.id} />
         <span className={d.gsp} />
-        {doneShown && <button type="button" className={d.doneBtn} onClick={() => p.onFold(f.id)}><Icon name="check" size={11} />{f.counts.done}<Icon name="chevronUp" size={11} /></button>}
+        {doneShown && <button type="button" className={d.doneBtn} onClick={() => p.onFold(f.id)}><Icon name="check" size={11} /><DoneNum f={f} /><Icon name="chevronUp" size={11} /></button>}
         <button type="button" className={d.gbtn} aria-label={p.tr("收起")} onClick={() => p.onFeature(f.id)}><Icon name="chevronUp" size={14} /></button>
       </div>
     </div>

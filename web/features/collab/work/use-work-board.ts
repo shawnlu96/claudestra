@@ -69,13 +69,15 @@ export function useInstanceNames(machine: string | null): InstanceNames {
 }
 
 /**
- * 团队视图的「谁在干活」：team = 团队数据转出的看板（team-work-model.ts）。至少一行主场是本机（团队键 homeInstanceId）才读本机 /work
+ * 团队视图的看板（use-dag-panes.tsx 读一份，谁在干活标签与全站计数共用）：team = 团队数据转出的看板（team-work-model.ts）。至少一行主场是本机（团队键 homeInstanceId）才读本机 /work
  * （项目 id 用 localProjectOf），有别的成员机器上的行才读快照拿 peer 名；然后 team-work-merge.ts 合并命名
  */
-export function useTeamWorkBoard(project: string, team: TeamWorkBoard | null): { board: TeamWorkBoard | null; retrying: boolean } {
+export function useTeamWorkBoard(project: string, team: TeamWorkBoard | null): { board: TeamWorkBoard | null; retrying: boolean; pending: boolean } {
   const id = sharedIdentity(project), localInstance = id?.homeInstanceId ?? null;
-  const local = useWorkBoard(needsLocalBoard(team, localInstance) ? localProjectOf(project) : null);
+  const needLocal = needsLocalBoard(team, localInstance);
+  const local = useWorkBoard(needLocal ? localProjectOf(project) : null);
   const peerNames = useInstanceNames(id && needsNames(team, localInstance) ? id.machine : null);
   const board = useMemo(() => (team ? mergeTeamWork(team, local.board, localInstance, peerNames) : null), [team, local.board, localInstance, peerNames]);
-  return { board, retrying: local.retrying };
+  // pending = 要本机看板、它还没回也没失败：计数等它一次到齐（use-count-source.ts），免得主场本机行换栏时数字跳一下
+  return { board, retrying: local.retrying, pending: needLocal && local.board === null && !local.retrying };
 }
