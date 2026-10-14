@@ -57,6 +57,7 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   borrow: new Set(["set", "off"]),
   "state-backup": new Set(["restore"]), // 改写 principals / registry 等；list / now 只读状态文件
   "codex-adapter": new Set(["use", "clear", "rollback"]), // 写 codex-adapter.json 并重启；status 是读
+  "sentinel-pilot": new Set(["set"]), // 写 sentinel-pilot.json（lib/sentinel-pilot.ts）；show / report --dry-run 是读
 };
 
 /** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms（写提案）/ --docs-dir 才写，--team / --dispatcher 会被拒，也按写算 */
