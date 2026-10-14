@@ -194,6 +194,8 @@ describe("ROSTER2a teamInstances consumption", () => {
       { available: true, instances: [{ instanceId: "instance-owner" }] },
       { available: true, instances: [null] },
       "x",
+      // A present key must carry a boolean discriminator; only a missing key means an old bridge.
+      {}, { available: "true", instances: [] }, { available: 123 }, { available: null }, { instances: [] },
     ];
     for (const teamInstances of bads) {
       expect(() => projectSourceSnapshot({ ...raw, teamInstances })).toThrow(ProjectFailure);

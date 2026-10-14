@@ -341,4 +341,17 @@ describe("ROSTER2a snapshot teamInstances", () => {
     expect(teamFields(o)).toEqual(teamFields(s));
     expect(o.teamRole).toEqual({ available: true, value: "member" });
   });
+  test("[验收线 4] real adapter: a malformed 200 instances body is invalid, not unavailable; team read intact", async () => {
+    const ok = await center((_m, path) => Response.json(path === "/v1/team/instances" ? t.responses.teamInstances : t.responses.team));
+    const s = await (await ok.request("GET", "/snapshot"))!.json() as Record<string, unknown>;
+    for (const body of [{ ...t.responses.teamInstances, extra: "SECRET_RESPONSE" },
+      ...t.invalidResponses.filter(r => r.endpoint === "teamInstances" && r.status === 200).map(r => r.body)]) {
+      const bad = await center((_m, path) => Response.json(path === "/v1/team/instances" ? body : t.responses.team));
+      const text = await (await bad.request("GET", "/snapshot"))!.text();
+      expect(text).not.toContain("SECRET_RESPONSE");
+      const b = JSON.parse(text) as Record<string, unknown>;
+      expect(b.teamInstances).toEqual({ available: false, reason: "center_team_instances_invalid" });
+      expect(teamFields(b)).toEqual(teamFields(s));
+    }
+  });
 });

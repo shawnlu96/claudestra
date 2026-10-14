@@ -22,6 +22,8 @@ export function projectSourceSnapshot(value: unknown): ProjectSnapshot {
   const team = data.team === undefined ? null : object(data.team), directory = data.teamDirectory === undefined ? null : object(data.teamDirectory);
   // Bridges before ROSTER2a have no teamInstances key: unavailable, never inferred from peers.
   const instances = data.teamInstances === undefined ? null : object(data.teamInstances);
+  // A present key is a ROSTER2a bridge: its discriminator must be a boolean, else the snapshot is malformed (not "unavailable").
+  if (instances && typeof instances.available !== "boolean") throw new ProjectFailure(502);
   const snapshot = parseProjectSnapshot({ teams: [{ centerId, teamId, personId, teamRole: role.available === true ? role.value : null,
     team: team?.available === true ? object(team.value) : null,
     directory: directory?.available === true ? list(directory.members, v => object(v)) : null,

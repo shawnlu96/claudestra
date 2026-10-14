@@ -1,6 +1,6 @@
 import { looksLikeSharedLedgerJoinCode } from "../../lib/shared-ledger-join.js";
 import { parseV2ProjectsTeamResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
-import type { ProjectPerson, SharedProjectsPorts } from "./shared-projects-ports.js";
+import { SharedProjectsError, type ProjectPerson, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 type Unavailable = { available: false; reason: string };
 export type TeamInstancesSnapshot = { available: true; instances: { personId: string; instanceId: string }[] } | Unavailable;
@@ -15,10 +15,13 @@ export async function teamInstancesSnapshot(d: SharedProjectsPorts, who: Project
   const unavailable = (reason: string): Unavailable => ({ available: false, reason });
   // An adapter without the instances read sends no request.
   if (!d.teamInstances) return unavailable("center_team_instances_contract_unavailable");
-  const read = d.teamInstances(who).then(raw => ({ ok: true as const, raw }), () => ({ ok: false as const }));
+  const read = d.teamInstances(who).then(raw => ({ ok: true as const, raw }),
+    (error: unknown) => ({ ok: false as const, invalid: error instanceof SharedProjectsError && error.code === "center_invalid_response" }));
   const [members, result] = await Promise.all([directory, read]);
   if (!members.available) return unavailable("center_team_directory_unavailable");
-  // Any non-200 (an old center answers 403), transport failure or 5xx.
+  // The real adapter rejects a bad 200 body in the client parser; it arrives here as a text-free invalid marker.
+  if (!result.ok && result.invalid) return unavailable("center_team_instances_invalid");
+  // Any other non-200 (an old center answers 403), transport failure or 5xx.
   if (!result.ok) return unavailable("center_team_instances_unavailable");
   let parsed;
   try { parsed = parseV2ProjectsTeamResponse("teamInstances", 200, result.raw, { centerId: who.centerId, teamId: who.teamId }); }

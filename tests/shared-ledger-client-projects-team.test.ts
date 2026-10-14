@@ -1,7 +1,7 @@
 /** N9B: N3 team()/updateTeam() over the N9K fixtures with an injected signed transport; no deployed center. */
 import { describe, expect, test } from "bun:test";
 import { SharedLedgerClient, SharedLedgerRemoteError, SharedLedgerUnavailable } from "../src/lib/shared-ledger-client.js";
-import { SharedLedgerProjectConflict } from "../src/lib/shared-ledger-client-projects.js";
+import { SharedLedgerInvalidResponse, SharedLedgerProjectConflict } from "../src/lib/shared-ledger-client-projects.js";
 import { SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCredentialHash } from "../src/lib/shared-ledger-auth.js";
 import { verifyPurpose } from "../src/lib/instance-signature.js";
 import { createV2ProjectsTeamFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures.js";
@@ -111,7 +111,9 @@ describe("ROSTER2a N3 teamInstances read", () => {
       expect(JSON.stringify((error as SharedLedgerRemoteError).response)).not.toContain("SECRET_RESPONSE");
       expect(String(error)).not.toContain("SECRET_RESPONSE");
     }
-    expect(await failure(client({ message: "SECRET_RESPONSE" }, 503).teamInstances())).toBeInstanceOf(SharedLedgerUnavailable);
+    const down = await failure(client({ message: "SECRET_RESPONSE" }, 503).teamInstances());
+    expect(down).toBeInstanceOf(SharedLedgerUnavailable);
+    expect(down).not.toBeInstanceOf(SharedLedgerInvalidResponse);
     const bodies = [
       { ...t.responses.teamInstances, note: "SECRET_RESPONSE" },
       { ...t.responses.teamInstances, instances: [{ ...t.selfInstance, instanceId: `x-${owner.bearer}` }] },
@@ -119,6 +121,7 @@ describe("ROSTER2a N3 teamInstances read", () => {
     ];
     for (const body of bodies) {
       const error = await failure(client(body).teamInstances());
+      expect(error).toBeInstanceOf(SharedLedgerInvalidResponse);
       expect(error).toBeInstanceOf(SharedLedgerUnavailable);
       expect(String(error)).not.toContain("SECRET_RESPONSE");
       expect(String(error)).not.toContain(owner.bearer);
