@@ -10,9 +10,16 @@ import type { WebAsk } from "./asks-model";
 export const isTeamProjectAsk = (a: Pick<WebAsk, "createdBy">): boolean =>
   typeof a.createdBy === "string" && Object.hasOwn(TEAM_PROJECT_CARD_BUTTONS, a.createdBy);
 
-/** 规则认的卡 → 公开卡面（按钮 id / 文案、选择行）；规则不认的（按钮被改过、选择行不合法、已过期）→ null */
+/**
+ * 规则认的卡 → 公开卡面（按钮 id / 文案、选择行）；规则不认的（按钮被改过、选择行不合法、已过期）→ null。
+ * 字段本身不合规（如标题 / 说明为空）时 projectSourceCards 抛 ProjectFailure：也当规则不认，别让一张坏卡把整个抽屉渲染打崩。
+ */
 export function teamProjectCardOf(ask: WebAsk, now: number): ProjectCard | null {
-  return projectSourceCards({ asks: [ask] }, now)[0] ?? null;
+  try {
+    return projectSourceCards({ asks: [ask] }, now)[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** 「等你处理」分两组：team = 所有团队项目确认卡（含规则不认的，单列后不出作答控件），rest = 其余，顺序都不变 */

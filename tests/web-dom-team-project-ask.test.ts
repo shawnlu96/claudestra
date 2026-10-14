@@ -57,6 +57,9 @@ function asks(canAnswer = true): WebAsk[] {
 
 let current: WebAsk[] = [];
 const posts: { path: string; body: { choices?: string[] } }[] = [];
+/** 这些卡的作答 bridge 回 409 ask_closed（到点还没扫成 expired 的卡，ledger-asks 当场记过期再拒）；hold 在时先等它放行 */
+const refused = new Set<string>();
+let hold: Promise<void> | null = null;
 const realFetch = globalThis.fetch;
 beforeAll(async () => {
   GlobalRegistrator.register({ url: "http://localhost/", width: 1280, height: 900 });
@@ -68,6 +71,8 @@ beforeAll(async () => {
     if (url.pathname === "/api/v1/asks") return json({ ok: true, asks: current, full: true, now: Date.now() });
     if (url.pathname.endsWith("/answer")) {
       posts.push({ path: url.pathname, body: JSON.parse(String(init?.body ?? "{}")) });
+      if (hold) await hold;
+      if (refused.has(url.pathname.split("/").at(-2)!)) return json({ ok: false, code: "ask_closed", error: "ask closed" }, 409);
       return json({ ok: true });
     }
     return json({ ok: false, error: "not in fixture" }, 404);
@@ -89,9 +94,9 @@ afterAll(async () => {
 const tick = (ms = 20) => React.act(() => new Promise<void>((r) => setTimeout(r, ms)));
 let machine = 0;
 /** 每次换一个机器 key：asks store 整份重来；上一张答完的淡出 / 冷却先等它过去 */
-async function mount(canAnswer = true) {
+async function mount(canAnswer = true, extra: WebAsk[] = []) {
   for (let i = 0; i < 100 && activeAnswered(); i++) await tick(50);
-  current = asks(canAnswer);
+  current = [...asks(canAnswer), ...extra];
   posts.length = 0;
   const host = doc.createElement("div");
   doc.body.appendChild(host);
@@ -202,4 +207,28 @@ test("DOM 里没有 bind.params 的任何键值；拍板卡照旧用通用控件
     await click(m.button("decide", "用 A"));
     expect(posts.map((p) => p.body.choices)).toEqual([["[button:opt_a]"]]);
   } finally { await m.unmount(); }
+});
+
+test("过期卡（bridge 还没扫成 expired）：照常出专用按钮；bridge 409 拒 → 乐观淡出撤回，回到『团队项目确认』并说明，可再点", async () => {
+  const stale = ask({ id: "stale", createdBy: "system:shared-projects", title: "已过期的合成卡", context: "合成", expiresAt: NOW - 1,
+    options: [buttons("shared_project_confirm", "shared_project_cancel", "确认创建", "取消创建")] });
+  const m = await mount(true, [stale]);
+  refused.add("stale");
+  let release = () => {};
+  hold = new Promise<void>((r) => { release = r; });
+  try {
+    const accept = m.button("stale", "确认创建")!;
+    expect(accept.disabled).toBe(false);
+    await React.act(async () => accept.click());
+    expect(m.button("stale", "确认创建")!.disabled).toBe(true); // 在飞：淡出中、按钮忙
+    expect(activeAnswered()).toBeTruthy();
+    release();
+    for (let i = 0; i < 100 && !(m.card("stale")?.textContent ?? "").includes("或已过期"); i++) await tick();
+    expect(posts).toEqual([{ path: "/api/v1/ledger/master/asks/stale/answer", body: { choices: ["[button:shared_project_confirm]"] } }]);
+    expect(m.card("stale").textContent).toContain("这件已经处理过了（或已过期）");
+    expect(activeAnswered()).toBeFalsy();
+    const sections = Array.from(doc.body.querySelectorAll("[role=dialog] section")).map((s) => Array.from(s.querySelectorAll("article")).map((a) => a.id));
+    expect(sections[0]).toEqual(["ask-join", "ask-create", "ask-tampered", "ask-stale"]);
+    expect(m.button("stale", "确认创建")!.disabled).toBe(false);
+  } finally { hold = null; refused.clear(); await m.unmount(); }
 });

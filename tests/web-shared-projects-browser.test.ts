@@ -52,7 +52,7 @@ function n4UiFixture() {
     if (url.pathname === "/api/v1/asks") return Response.json({ asks: asks.map(a => ({ ...a, canAnswer: true })) });
     if (url.pathname.endsWith("/answer")) {
       const a = asks.find(a => url.pathname === `/api/v1/ledger/master/asks/${a.id}/answer`);
-      if (!a || a.state !== "open") return Response.json({ ok: false }, { status: 409 });
+      if (!a || a.state !== "open" || a.expiresAt <= Date.now()) return Response.json({ ok: false, code: "ask_closed" }, { status: 409 });
       const b = await req.json() as { choices: string[] };
       a.state = "answered"; a.answer = { choices: b.choices, labels: [], text: "", via: "web_card", owner: true,
         principal: "owner:self", at: Date.now() };
@@ -63,7 +63,7 @@ function n4UiFixture() {
       localSnapshot: async () => ({ projects: [{ id: "local-app", name: "不同本机名称", dirs: ["/synthetic/n4"], personal: false }],
         peers: [{ name: "synthetic-transport", enabled: true, invitable: true }] }) });
   };
-  return { handle, sent, reset: () => { asks.length = 0; sent.length = 0; } };
+  return { handle, sent, asks, reset: () => { asks.length = 0; sent.length = 0; } };
 }
 async function git(...args: string[]) {
   const p = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -144,16 +144,21 @@ async function openSettings(page: Page) {
   await page.getByRole("button", { name: "项目设置", exact: true }).click();
   await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
 }
-browserTest("project dialog no longer polls or answers cards: one entry row, cards are answered in the inbox (UXASK2)", async () => {
-  const now = new Date("2026-10-07T12:00:00Z");
-  const { page, errors } = await newPage(390, `?fixture=expiry&expiresAt=${now.getTime() + 60_000}`, now);
-  try {
-    await page.getByText("暂无待确认的项目操作。", { exact: true }).waitFor();
-    await page.clock.fastForward(10_000);
-    expect(await page.locator("body").getAttribute("data-card-reads")).toBeNull();
-    expect(await page.getByRole("button").count()).toBe(0);
-    expect(errors).toEqual([]);
-  } finally { await page.close(); }
+for (const [name, offset] of [["expired card: inbox refuses (409), rolls back", -1], ["unexpired card: inbox answers on click", 60_000],
+  ["card expiring while open: inbox refuses (409), rolls back", 1500]] as const) browserTest(`entry row only; ${name}`, async () => {
+  const now = new Date(), btn = { type: "buttons", buttons: [{ id: "shared_project_confirm", label: "确认合成操作" }, { id: "shared_project_cancel", label: "取消合成操作" }] };
+  n4.asks.push({ id: "expiry-card", project: "master", source: "system", createdBy: "system:shared-projects", kind: "authorize", title: "合成过期卡", context: "合成", options: [btn],
+    state: "open", answer: null, fromAgent: null, extra: {}, createdAt: +now, expiresAt: +now + offset } as unknown as Ask);
+  const { page, errors } = await newPage(390, `?fixture=expiry&expiresAt=${+now + offset}`, now);
+  try { // Asks-store data drives the entry row; the dialog never polls (cardReads unset) nor answers. A refused answer undoes the optimistic fade.
+    await page.getByText("有 1 张团队项目确认待你处理", { exact: true }).waitFor(); await page.clock.fastForward(10_000);
+    expect([await page.locator("body").getAttribute("data-card-reads"), await page.getByRole("button").count()]).toEqual([null, 1]);
+    await page.getByRole("button", { name: "去处理", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "待你处理" });
+    const accept = drawer.getByRole("button", { name: "确认合成操作", exact: true }); await accept.waitFor(); expect(n4.asks[0]!.state).toBe("open");
+    if (offset === 1500) await new Promise(r => setTimeout(r, 1600)); await accept.click(); // 1500: real bridge time passes expiresAt first.
+    await drawer.getByText(offset > 1500 ? "已记下" : "这件已经处理过了（或已过期）", { exact: true }).waitFor();
+    expect([n4.asks[0]!.state, await drawer.getByText("团队项目确认 · 1").count()]).toEqual(offset > 1500 ? ["answered", 0] : ["open", 1]); expect(errors).toEqual([]);
+  } finally { await page.close(); n4.reset(); }
 }, TEST_TIMEOUT_MS);
 browserTest("actual N4 source renders binding and invitation approval without claiming unavailable creation or exit", async () => {
   const { page, errors } = await newPage(390, "?fixture=n4-source");
@@ -176,10 +181,8 @@ browserTest("actual N4 source renders binding and invitation approval without cl
     await page.getByRole("button", { name: "邀请成员", exact: true }).click();
     await page.getByText("邀请确认卡已生成，请由本人核对后发送。", { exact: true }).waitFor();
     await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))"); // The inbox store re-reads; the dialog itself never polls.
-    await page.getByText("有 1 张团队项目确认待你处理", { exact: true }).waitFor();
-    await page.getByRole("button", { name: "去处理", exact: true }).click();
-    const drawer = page.getByRole("dialog", { name: "待你处理" });
-    await drawer.getByText("团队项目确认 · 1").waitFor();
+    await page.getByText("有 1 张团队项目确认待你处理", { exact: true }).waitFor(); await page.getByRole("button", { name: "去处理", exact: true }).click();
+    const drawer = page.getByRole("dialog", { name: "待你处理" }); await drawer.getByText("团队项目确认 · 1").waitFor();
     await drawer.getByText("邀请加入团队项目 合成项目 B", { exact: true }).waitFor();
     expect(n4.sent).toEqual([]);
     expect(await page.locator("body").innerText()).not.toContain(createV2ProjectsFixtures().invite.code);

@@ -39,6 +39,9 @@ describe("teamProjectCardOf", () => {
     expect(teamProjectCardOf(badSelect, NOW)).toBeNull();
     expect(teamProjectCardOf(create, create.expiresAt)).toBeNull();
     expect(teamProjectCardOf({ ...create, source: "reply" }, NOW)).toBeNull();
+    // 字段不合规（说明为空、标题超长）projectSourceCards 会抛：这里接住当规则不认，不让一张坏卡打崩抽屉渲染
+    expect(() => projectSourceCards({ asks: [{ ...create, context: "" }] }, NOW)).toThrow();
+    expect([teamProjectCardOf({ ...create, context: "" }, NOW), teamProjectCardOf({ ...join, title: "x".repeat(300) }, NOW)]).toEqual([null, null]);
   });
 });
 
