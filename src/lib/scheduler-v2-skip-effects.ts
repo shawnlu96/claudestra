@@ -29,6 +29,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   /** `ledger <sub>` calls through the pass manager, held by schedulerV2SkipManager */
   manager: {
     "fix-strategy-tick.ts": "ledger=10", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
+    "recovery-peer-lease-tick.ts": "ledger=3", // PEERLEASE1: observe / fix-relay calls through the pass manager
     "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
@@ -109,6 +110,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3", "scheduler-merge.ts": "sql=11 stmt=11", "scheduler-review-swap.ts": "sql=3 stmt=3",
     "scheduler-sessions.ts": "sql=7 stmt=10", "scheduler-ui-review-carry.ts": "sql=2 stmt=2", "shared-ledger-v2-write-gate-state.ts": "sql=8 stmt=13",
     "review-count-carry-ledger.ts": "sql=2 stmt=2", // CARRYCNT1: the count carry's writes inside the `ledger scheduler-merge-step` transaction
+    "recovery-peer-lease-handover.ts": "sql=3 stmt=3", // PEERLEASE1: peer-handover / peer-head-block UPDATEs inside the ledger scheduler-fix-relay transaction
   },
   /** bridge / MCP order tools and owner CLI switches: reachable by import, run for a worker's or the owner's own call, never by the pass */
   outside: {
