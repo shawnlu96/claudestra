@@ -10,6 +10,8 @@
 import type { Database } from "bun:sqlite";
 import { blocksTrain, listOpenRequests, manualTurn, trainSignal } from "./manual-merge-queue.js";
 import { manualQueueMode } from "./manual-merge-queue-facts.js";
+import { boardingRefusal, headMayRide, observeUnifiedCandidates, openUnifiedCandidates } from "./merge-queue-candidates.js";
+import { formingCarries } from "./merge-queue-candidates-member.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
@@ -22,12 +24,16 @@ class TrainFormFenced extends Error {}
 
 export function manualMergeGate(db: Database, store: TrainStore | null | undefined, policy: RecoveryPolicyPort = recoveryPolicy) {
   const trains = store === undefined ? defaultTrainStore() : store;
+  openUnifiedCandidates(db, trains, policy); // CAND1: this pass's candidates for the train tick, the train store for the claim
   return {
     /** Whether the queue head (due) or its run (active) keeps a new train from forming in this project this pass. */
     blocks(project: string): boolean {
       if (manualQueueMode(project, policy) !== "on") return false;
       // one read transaction: manualTurn's several reads see one ledger state
-      return db.transaction(() => blocksTrain(manualTurn(db, project, trainSignal(trains, project, Date.now()), Date.now())))();
+      return db.transaction(() => {
+        const turn = manualTurn(db, project, trainSignal(trains, project, Date.now()), Date.now());
+        return blocksTrain(turn) && !headMayRide(db, project, turn, Date.now(), policy); // CAND1 on: a head that is a candidate may ride
+      })();
     },
     /**
      * Saves a newly formed train only if the queue still lets it form, decided in one ledger snapshot right before the save.
@@ -37,7 +43,11 @@ export function manualMergeGate(db: Database, store: TrainStore | null | undefin
      */
     formFence(project: string, save: () => void): void {
       db.transaction(() => {
-        if (manualQueueMode(project, policy) === "on" && blocksTrain(manualTurn(db, project, "none", Date.now()))) {
+        const stale = boardingRefusal(db, project, save, Date.now(), policy); // CAND1: members bound before formTrain's awaits, judged again here
+        if (stale) throw new TrainFormFenced(`${project} ${stale}，本轮不组新车`);
+        const turn = manualQueueMode(project, policy) === "on" ? manualTurn(db, project, "none", Date.now()) : null;
+        // CAND1: a due head riding this very train does not stop it; one left out keeps the old fairness (no train, it is claimed first)
+        if (turn && blocksTrain(turn) && !(turn.kind === "due" && formingCarries(save, turn.req.seq))) {
           throw new TrainFormFenced(`${project} 人工合并队首已到期，本轮不组新车`);
         }
         save();
@@ -47,6 +57,7 @@ export function manualMergeGate(db: Database, store: TrainStore | null | undefin
     async claim(manager: Manager, config: SchedulerConfig): Promise<{ claimed: string[]; failed: { taskId: string; error: string }[] }> {
       const out = { claimed: [] as string[], failed: [] as { taskId: string; error: string }[] };
       for (const [project, cfg] of Object.entries(config.projects)) {
+        if (!cfg.mergeHandoff) await observeUnifiedCandidates(db, manager, project, trains, policy); // CAND1 observe: record only, never a failure
         // the repository owner merges: never a claim here; requestRefusal shows such a request void with the handoff reason
         if (cfg.mergeHandoff || !listOpenRequests(db, project).length) continue;
         const mode = manualQueueMode(project, policy);
