@@ -1,15 +1,15 @@
 /**
- * UIASK1: an ownerVisual card whose newest scheduler screenshot ask the owner approved, but on an older head / specRev / digest.
- * Switch `uiOwnerReask` (recovery-keys.ts, default observe): off = escalate ui_stale as before; observe = the same escalation plus
- * one would-reopen record per card and binding; on = plan a new owner ask bound to the card's current values (scheduler-apply.ts
- * opens it under the same askKey). A rejected or unverified answer is never reopened; once the scheduler's ask for the current
- * values exists it is the newest and bound, so the planner never gets here again for that binding.
- * The planner reads through the scheduler's query_only connection: the would-be record waits in this process's outbox until a
- * caller with a ledger write drains it (drainUiOwnerReaskObserved; recordObserved dedups, so a replay never records twice).
- * Docs: docs/architecture/scheduler-ui-gate.md. Tests: tests/scheduler-ui-reask.test.ts.
+ * UIASK1: an ownerVisual card whose newest scheduler screenshot ask the owner approved on an older head / specRev / digest;
+ * `uiOwnerReask` (recovery-keys.ts) decides whether the scheduler reopens it for the current values. A binding that already has
+ * a scheduler ask keeps that ask's branch (currentBindingGate). The planner cannot write: observe records wait in this process's
+ * outbox until drainUiOwnerReaskObserved. Docs: docs/architecture/scheduler-ui-gate.md. Tests: tests/scheduler-ui-reask.test.ts.
  */
+import type { Database } from "bun:sqlite";
+import type { LedgerTask } from "./ledger-stages.js";
+import { listEvents } from "./ledger-store.js";
 import { recoveryPolicy, type ObservedAction, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
+import { ownerVisualOf } from "./scheduler-ui-merge-refusal.js";
 
 const KEY = "uiOwnerReask";
 const OUTBOX_MAX = 500;
@@ -17,6 +17,22 @@ const outbox = new Map<string, ObservedAction>();
 
 type UiGate = PlannerSnapshot["uiGate"];
 type Card = Pick<PlannerSnapshot, "task" | "screenshotsDigest">;
+
+type Bound = { head?: string; specRev?: number; screenshotsDigest?: string };
+
+/**
+ * The newest scheduler ask is bound to other values but an older one (open, answered or expired) to the card's current ones, on
+ * an ownerVisual card: that older ask decides, so a binding that went A → B → A never gets a second ask. Null = the newest decides.
+ */
+export function currentBindingGate(db: Database, task: LedgerTask, newest: UiGate,
+  older: readonly { bound: Bound; gate: () => UiGate }[]): UiGate | null {
+  const digest = task.extra.screenshotsDigest;
+  const current = (b: Bound) => b.head === task.headSHA && b.specRev === task.specRev && b.screenshotsDigest === digest;
+  if (newest.state === "none" || typeof digest !== "string" || !task.headSHA || current(newest)) return null;
+  const hit = older.find((o) => current(o.bound));
+  if (!hit || !ownerVisualOf(db, task, listEvents(db, { project: task.project, target: task.id }))) return null;
+  return hit.gate();
+}
 
 /** Read every time; an unreadable file / unknown key is off (the escalation as before). */
 export function uiOwnerReaskMode(project: string, policy: RecoveryPolicyPort = recoveryPolicy): RecoveryMode {

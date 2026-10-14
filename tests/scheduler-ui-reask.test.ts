@@ -33,8 +33,8 @@ async function passed(ownerVisual: boolean): Promise<F> {
 
 /** A screenshot ask from `from`, bound to `head`, answered by `answer` (owner approve by default). One bound to OLD is opened
  * before the fixture's clock reaches the review, so it is never newer than an ask the tick opens. */
-function ownerAsk(f: F, o: { from?: string; head?: string; answer?: "approve" | "reject" | "guest" | null; expiresAt?: number } = {}) {
-  const from = o.from ?? "scheduler", at = o.head === OLD ? 500 : 9_000;
+function ownerAsk(f: F, o: { from?: string; head?: string; answer?: "approve" | "reject" | "guest" | null; expiresAt?: number; at?: number } = {}) {
+  const from = o.from ?? "scheduler", at = o.at ?? (o.head === OLD ? 500 : 9_000);
   const binding = { action: "scheduler_ui_screenshot", params: { task: "T1", specRev: 1, head: o.head ?? H2, screenshotsDigest: DIGEST }, approve: ["scheduler_ui_approve"] };
   const ask = openAsk(f.db, { project: "p", taskId: "T1", fromAgent: from, source: from === "scheduler" ? "system" : "reply", kind: "authorize",
     title: "看前后截图", askKey: `scheduler_ui_screenshot:T1`, expiresAt: o.expiresAt ?? 1e12, bind: { ...binding, paramsHash: bindHash(binding, from) } }, at);
@@ -199,6 +199,22 @@ describe("[验收线 3] never reopened after a rejection or an unverified answer
     } finally { g.close(); }
   });
 
+  // Binding A → B → A: the newest (B) approval is stale, but A already has the scheduler's ask, so A's own answer decides.
+  for (const [answer, step] of [["approve", { kind: "intent", targetStage: "merge" }], ["reject", { kind: "escalate", code: "ui_rejected" }]] as const) {
+    test(`after A → B → A, the current values' earlier ask (${answer}) decides; no second ask`, async () => {
+      policy("on");
+      const f = await passed(true);
+      try {
+        ownerAsk(f, { at: 400, answer });
+        ownerAsk(f, { head: OLD, at: 600 });
+        expect(plan(f)).toMatchObject(step);
+        if (answer === "reject") expect(await f.tick()).toMatchObject({ step: "manual" });
+        expect(asks(f)).toBe(2);
+        expect(uiOwnerReaskPending()).toEqual([]);
+      } finally { f.close(); }
+    });
+  }
+
   test("a manager-opened ask on top of a stale scheduler approval does not count: the scheduler reopens instead", async () => {
     policy("on");
     const f = await passed(true);
@@ -220,6 +236,15 @@ describe("[验收线 4] a default (PM-accepted) card is untouched", () => {
       expect(await f.tick()).toMatchObject({ step: "ask", detail: expect.stringContaining("pm_notice") });
       expect(asks(f)).toBe(1);
       expect(uiOwnerReaskPending()).toEqual([]);
+    } finally { f.close(); }
+  });
+
+  test("an older owner rejection bound to the current values does not count on a default card: PM still accepts", async () => {
+    const f = await passed(false);
+    try {
+      ownerAsk(f, { at: 400, answer: "reject" });
+      ownerAsk(f, { head: OLD, at: 600 });
+      expect(plan(f)).toMatchObject({ kind: "intent", action: "ask", pmNotice: { head: H2 } });
     } finally { f.close(); }
   });
 });

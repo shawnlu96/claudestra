@@ -7,14 +7,14 @@
  */
 import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
-import { getAsk, ownerAnswered } from "./ledger-asks.js";
+import { getAsk, ownerAnswered, type Ask } from "./ledger-asks.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { rejectFix, type PmUiGate, type UiFix } from "./ledger-ui-approve-verdict.js";
 import { SRC_DIR } from "./repo-root.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { DIGEST_RE, UI_ASK_ACTION } from "./scheduler-ui-merge-refusal.js";
-import { ownerReask } from "./scheduler-ui-reask.js";
+import { currentBindingGate, ownerReask } from "./scheduler-ui-reask.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 
@@ -40,19 +40,17 @@ function boundTo(params: unknown): { task: unknown; head?: string; specRev?: num
 export function projectUiGate(db: Database, task: LedgerTask, now: number): UiGate {
   const rows = db.query(`SELECT id FROM asks WHERE taskId = ? AND kind = 'authorize' ORDER BY createdAt DESC, id DESC LIMIT 20`)
     .all(task.id) as { id: string }[];
-  for (const { id } of rows) {
-    const ask = getAsk(db, id);
-    const from = ask?.fromAgent;
-    if (!ask?.bind || ask.bind.action !== UI_ASK_ACTION || !from || ask.state === "superseded") continue;
-    if (from !== "scheduler") continue;
-    const { task: boundTask, ...bound } = boundTo(ask.bind.params);
-    if (boundTask !== task.id) continue;
+  const mine = rows.map(({ id }) => getAsk(db, id)).filter((ask): ask is Ask => !!ask?.bind && ask.bind.action === UI_ASK_ACTION &&
+    ask.fromAgent === "scheduler" && ask.state !== "superseded" && boundTo(ask.bind.params).task === task.id);
+  const gateOf = (ask: Ask): UiGate => {
+    const { task: _t, ...bound } = boundTo(ask.bind?.params);
     if (ask.expiresAt <= now || (ask.state !== "open" && ask.state !== "answered")) return { state: "none" };
     if (ask.state === "open") return { state: "open", ...bound };
-    const check = checkAsk(ask, bindHash(ask.bind, from), from, now);
+    const check = checkAsk(ask, bindHash(ask.bind!, "scheduler"), "scheduler", now);
     return check.ok ? { state: "approved", ...bound, ownerVerified: ownerAnswered(ask.answer) } : { state: "rejected", ...bound };
-  }
-  return { state: "none" };
+  };
+  const newest = mine[0] ? gateOf(mine[0]) : { state: "none" as const };
+  return currentBindingGate(db, task, newest, mine.slice(1).map((a) => ({ bound: boundTo(a.bind?.params), gate: () => gateOf(a) }))) ?? newest;
 }
 
 type Card = Pick<PlannerSnapshot, "task" | "screenshotsDigest">;

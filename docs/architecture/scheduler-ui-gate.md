@@ -48,7 +48,8 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src
   `uiOwnerReask`, default observe): when its newest ask was approved by the authenticated owner on older values, `on` plans a new
   ask bound to the card's current values (same askKey); `observe` escalates `ui_stale` as before and records one would-reopen
   observation with the old and new binding; `off` escalates `ui_stale` as before. A rejected or unverified answer is never
-  reopened, and once a scheduler ask for the current values exists (open, answered or expired) the existing branch decides.
+  reopened, and once a scheduler ask for the current values exists (open, answered or expired) the existing branch decides —
+  even when a newer ask for other values came after it (A → B → A, `currentBindingGate`; ownerVisual cards only).
 
 ## Compatibility
 
