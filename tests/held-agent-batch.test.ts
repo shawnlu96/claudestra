@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
 import { clearOpenedBy, flushHeld, onHeldDelivered, type FlushDeps } from "../src/bridge/held-flush.js";
 import { HeldQueue, onHeldSettled, unseenFrom, type HeldItem } from "../src/bridge/held-queue.js";
+import { setPmRoleRoute } from "../src/bridge/pm-held-transfer.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { answerableUnmixed, noteDelivered, settleStopTurn, type CallerSettleDeps } from "../src/bridge/stop-settle.js";
 import { agentBatchMembers, HELD_AGENT_BATCH_ENV, heldAgentBatchOn } from "../src/lib/held-agent-batch.js";
@@ -282,6 +283,28 @@ describe("回复不认错人：同一批里 A、B 各一条请求", () => {
     await q.stop();
     expect(q.sends.map((x) => x.env.meta.messageId)).toEqual([a2.env.meta.messageId]);
     expect(q.ids()).toEqual([o, b2].map((i) => i.env.meta.messageId));
+  });
+
+  test("agent-batch-overtakes-peer（渲染失败）：[A, B(渲染出错), C]——C 不越过 B：A、B、C 依次各一个边界（r2 P1）", async () => {
+    const a = msg("A"), b = msg("B"), c = msg("C");
+    const r = rig([a, b, c]);
+    r.deps.render = async (e) => { if (e === b.env) throw new Error("render"); return String(e.content); };
+    const order: string[] = [];
+    for (let k = 0; k < 3; k++) {
+      await r.stop();
+      order.push(...r.sends.splice(0).map((x) => x.env.meta.messageId));
+    }
+    expect(order).toEqual([a, b, c].map((i) => i.env.meta.messageId));
+  });
+
+  test("retired-pm-carrier-fallback：载体会被 PM 角色规则转走、成员留在原收件人——不组载体，逐条走原路径（r2 P2）", async () => {
+    const a = msg("A"), b = msg("A");
+    const r = rig([a, b]);
+    const prev = setPmRoleRoute(() => (e) => (e.from.kind === "bridge" ? { agentName: "pm-now", channelId: "c-pm-now" } : null));
+    offs.push(() => setPmRoleRoute(prev));
+    await r.stop();
+    expect(r.sends.map((x) => x.env.meta.messageId)).toEqual([a.env.meta.messageId]);
+    expect(r.ids()).toEqual([b.env.meta.messageId]);
   });
 
   test("外人（peer）不进合批：它先到就单独开一轮，agent 们等下一个边界一起送", async () => {
