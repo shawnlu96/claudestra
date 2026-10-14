@@ -27,7 +27,6 @@ interface Win { happyDOM: { setViewport(v: { width: number; height: number }): v
   HTMLInputElement: { prototype: object }; Storage: { prototype: { getItem(k: string): string | null; setItem(k: string, v: string): void } }; localStorage: { clear(): void } }
 
 // 根 tsc 没有 --jsx：组件在运行时由 bun 转译加载
-const mod = (p: string) => new URL(`../web/features/${p}`, import.meta.url).href;
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let doc: Doc;
@@ -90,7 +89,7 @@ beforeAll(async () => {
   doc = (globalThis as unknown as { document: Doc }).document;
   win = (globalThis as unknown as { window: Win }).window;
   machines.currentFp = () => FP;
-  entryBefore = { ...(await import(ENTRY)) };
+  entryBefore = { ...require("../web/features/collab/collab-entry.tsx") };
   const h = (webRequire("react") as ReactNS).createElement as (...a: unknown[]) => unknown;
   mock.module(ENTRY, () => ({ ...entryBefore, CollabEntry: ({ projectId, team }: { projectId: string; team?: boolean }) =>
     h("li", { "data-entry": projectId }, h("span", null, "协作视图"), team ? h("span", { "data-collab-team-badge": "" }, "团队") : null) }));
@@ -108,9 +107,9 @@ beforeAll(async () => {
     if (/^\/api\/v1\/ledger\/local-(group|solo)$/.test(path)) return json(LEDGER);
     return json({ ok: false, error: "not in fixture" }, 404);
   }) as typeof fetch;
-  const [list, side, now, store, nav, asks, collabNav] = await Promise.all([import(mod("chat/components/message-list.tsx")), import(mod("chat/components/sidebar.tsx")),
-    import(mod("now/now-home.tsx")), import(mod("chat/chat-store.ts")), import(mod("chat/components/nav-context.tsx")), import(mod("asks/asks-store.ts")),
-    import(mod("collab/collab-nav.ts"))]);
+  const [list, side, now, store, nav, asks, collabNav] = [require("../web/features/chat/components/message-list.tsx"), require("../web/features/chat/components/sidebar.tsx"),
+    require("../web/features/now/now-home.tsx"), require("../web/features/chat/chat-store.ts"), require("../web/features/chat/components/nav-context.tsx"), require("../web/features/asks/asks-store.ts"),
+    require("../web/features/collab/collab-nav.ts")];
   ui = { MessageList: list.MessageList, Sidebar: side.Sidebar, NowStrip: now.NowStrip, ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi,
     ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore, useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab };
 });
