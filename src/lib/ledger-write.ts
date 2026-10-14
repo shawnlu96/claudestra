@@ -1,3 +1,4 @@
+import { rejectPriorityFields } from "./ledger-priority-guard.js";
 import { checkPreparedPeerPlacement } from "./scheduler-placement-reservations.js";
 /**
  * 内置台账的写入（docs 10-ledger §3）：每个导出函数一个 BEGIN IMMEDIATE 事务，改行与追加事件同进同出。
@@ -56,6 +57,7 @@ export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, St
 // ── 事项 ──
 
 export function createItem(db: Database, ctx: WriteCtx, input: NewItem): WriteResult<LedgerItem> {
+  rejectPriorityFields(input, true);
   return tx(db, () => {
     const key = { project: input.project, target: input.id, kind: "item" as const };
     const dup = replay(db, ctx, key, () => getItem(db, input.project, input.id) as LedgerItem);

@@ -121,6 +121,7 @@ export const HINTS: Record<string, string> = {
   deps: "依赖方向违规：纯函数下沉到 src/lib，运行时状态查询改用注入",
   dead: "未使用的导出：删掉，或者真的用上它",
   twins: "twin 文件不一致：两份同步修改（去注释后逐行比对）",
+  mockleak: "mock.module 对整个进程生效、不会撤：工厂里展开真实模块的快照（const real = { ...await import(同一路径) }），只换要假的那几个；要调真函数，先在工厂外取出来；只想本文件用假实现就加开关、关掉时转调快照",
 };
 
 /** 某个 baseline key 在没有 baseline 条目时的默认上限。 */

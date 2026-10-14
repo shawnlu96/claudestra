@@ -347,6 +347,7 @@ describe("写事件的底座只给写入模块", () => {
   // card-pause-write.ts：卡级暂停 / 继续（UXPAUSE1）在自己的事务里核权限、撤未领池单、取消 pending 意图，只写 card_pause / card_resume decision，不推阶段
   // ledger-manual-merge-record.ts：人工合入登记（AUDTRAIN4）在自己的 immediate 事务里核权限 / 阶段 / head / PR，只写一条去重的 manual_merge_record 调度事件，不推阶段
   // scheduler-spec-wait-ledger.ts：缺规格提醒（PMWAKE）只经 ledger CLI 调度身份写 spec_wait 事件，事务内重算门与 feature PM、按次去重，不推阶段
+  // recovery-peer-lease-handover.ts：本卡（PEERLEASE1）的专用写入模块，peer-handover / peer-head-block 在自己的事务里按 rev / session 做 CAS 复核后写一条 scheduler 事件，不推阶段
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
     const tx: string[] = [];
@@ -370,13 +371,13 @@ describe("写事件的底座只给写入模块", () => {
       "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
       "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts", "lib/ledger-lend-relay.ts",
-      "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-manual-merge-record.ts", "lib/ledger-scheduler-lease-finished.ts", "lib/ledger-scheduler-pool.ts",
+      "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-manual-merge-record.ts", "lib/ledger-priority-write.ts", "lib/ledger-scheduler-lease-finished.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/lend-arbiter-result.ts", "lib/lend-ask-auth.ts", "lib/lend-author-retire-cmds.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts",
       "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts",
       "lib/lend-pr-takeover-refusal-diagnostic.ts", "lib/lend-reclaim-scheduler.ts",
       "lib/manual-merge-queue.ts", "lib/memory-retrieve-order.ts", "lib/merge-content-review.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
-      "lib/recovery-machine-policy.ts", "lib/recovery-policy.ts",
+      "lib/recovery-machine-policy.ts", "lib/recovery-peer-lease-handover.ts", "lib/recovery-policy.ts",
       "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy-reconcile-write.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts",
       "lib/scheduler-merge-handoff.ts",

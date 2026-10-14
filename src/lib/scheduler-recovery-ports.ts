@@ -5,6 +5,7 @@ import { getTask, LedgerError } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { ExplicitPolicyPort } from "./manual-recovery-policy.js";
 import { manualCaseOwnerTick } from "./manual-case-owner-tick.js";
+import { manualCaseSlaTick } from "./manual-case-sla-tick.js";
 import { manualRecoveryTick } from "./manual-recovery-release.js";
 import { manualResumeTick, type ManualResumeDeps } from "./manual-resume.js";
 import type { ObservedAction } from "./recovery-policy.js";
@@ -63,5 +64,7 @@ export async function manualResumeManagerTick(db: Database, projects: Record<str
     write: (task, mechanism, mode) => write(task.id, mode, ["--mechanism", mechanism], projects[task.project]!.maxActiveWorkers) });
   await manualCaseOwnerTick(db, Object.keys(projects), { yieldNow, // OWN1: responsible / deadline backfill on the same leased writer; not a resume outcome
     write: (args) => recoveryWrite(deps.manager, "scheduler-manual-case-default", args, true) });
+  await manualCaseSlaTick(db, Object.keys(projects), { yieldNow, now: deps.now, // SLA1: after every recovery above, one batched overdue reminder per PM
+    write: (args) => recoveryWrite(deps.manager, "scheduler-manual-case-sla", args, true) });
   return [...man2, ...extension];
 }
