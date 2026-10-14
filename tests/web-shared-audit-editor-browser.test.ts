@@ -41,12 +41,13 @@ setLang('en');\n`);
   const [exit, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
   if (exit) throw Error(stderr);
 }
-const zhNames = { team: '团队', exec: '共享执行', edit: '编辑', title: '标题', plan: '规划说明' };
-const enNames = { team: 'Team', exec: 'Shared execution', edit: 'Edit', title: 'Title', plan: 'Plan' };
+// UXHOME1：团队源下「团队」标签改名「规划与提案」；改前基线上仍叫「团队」，两种都认
+const zhNames = { team: /^(规划与提案|团队)$/, exec: '共享执行', edit: '编辑', title: '标题', plan: '规划说明' };
+const enNames = { team: /^(Plans & proposals|Team)$/, exec: 'Shared execution', edit: 'Edit', title: 'Title', plan: 'Plan' };
 async function openEditor(page: Page, url: string, width: number, title: string, names = zhNames) {
   await page.goto(url);
   await page.getByText(title, { exact: true }).first().waitFor();
-  await page.getByRole(width < 700 ? 'button' : 'tab', { name: names.team, exact: true }).first().click();
+  await page.getByRole(width < 700 ? 'button' : 'tab', { name: names.team }).first().click();
   await page.getByRole('region', { name: names.exec, exact: true }).getByRole('button', { name: names.edit, exact: true }).click();
   await page.getByLabel(names.title, { exact: true }).fill(mineTitle);
   // In English 'Plan' is also a substring of the planning panel's Edit plan button label.

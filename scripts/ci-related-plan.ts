@@ -15,7 +15,8 @@ import { join } from "node:path";
 import { parseSync } from "oxc-parser";
 import { buildGraph, oxcScanner, type OxcParseSync, tsconfigAliases } from "../src/lib/ci-impact-graph.js";
 import { ciIoMapMode, type IoMapResult, resolveIoMap, unionChanges } from "../src/lib/ci-impact-io-map.js";
-import { type ImpactSelection, parseNameStatus, type SelectInput, selectImpactedTests } from "../src/lib/ci-impact-select.js";
+import { type ImpactSelection, ciRelatedChecksMode, parseNameStatus, type SelectInput, selectImpactedTests } from "../src/lib/ci-impact-select.js";
+import { selectLightTests, type LightSelection } from "../src/lib/ci-light-select.js";
 import { fullRequestId } from "../src/lib/scheduler-ci-full-request.js";
 import { loadDurations, parseSlowList, planShards, testFiles, withoutSlow } from "./ci-test-shard.ts";
 
@@ -40,7 +41,9 @@ export interface CiPlan {
   sha: string;
   /** the raw CI_RELATED_CHECKS value as read once ("" = unset) */
   mode: string;
-  scope: "full" | "related";
+  scope: "full" | "related" | "light";
+  light?: LightSelection & { mode: string };
+  queueMode?: string;
   /** why this run is full (empty for related) */
   reasons: string[];
   /** related: the selected tests minus the slow list; full: [] (the shard script's own full list applies) */
@@ -77,6 +80,10 @@ export interface PlanFacts {
   ioSelect?: (mode: unknown) => IoMapSelect;
   /** the PR's own head when the checkout is its merge commit (absent = unknown: the plan carries no binding) */
   prHead?: string;
+  queueMode?: string;
+  runAttempt?: number;
+  labels?: readonly string[];
+  lightSelect?: () => LightSelection;
 }
 /** The selection over the read map; sel null = no usable map (reasons say why). */
 export interface IoMapSelect { sel: ImpactSelection | null; sha: string | null; generatedAt: string | null; reasons: string[] }
@@ -105,7 +112,20 @@ function ioMapPart(f: PlanFacts, mode: unknown, cur: ImpactSelection): { ioMap?:
 
 /** The decision plus, for a pull_request with a known PR head, that head: bound into the plan and so into its digest. */
 export function buildPlan(f: PlanFacts): CiPlan {
-  const plan = decide(f);
+  const force = (f.runAttempt ?? 1) > 1 || f.labels?.includes("ci-full");
+  const ordinary = f.event === "pull_request" && !f.headRef.startsWith("train/");
+  const mode = ciRelatedChecksMode(f.queueMode || undefined);
+  let light: CiPlan["light"], lightError: string | undefined;
+  if (ordinary && !force && mode !== "off" && mode !== null && f.lightSelect) {
+    try { light = { ...f.lightSelect(), mode: f.queueMode ?? "" }; }
+    catch (e) { lightError = `light 图构建失败：${String(e)}`; console.warn(lightError); } // a failed optional proposal keeps observe behavior unchanged
+  }
+  const plan = ordinary && force ? full(f, ["整次重跑或 ci-full 标签始终全量"])
+    : ordinary && mode === "on" ? light ? { version: 1 as const, event: f.event, sha: f.sha, mode: f.mode, scope: "light" as const,
+      reasons: light.reasons, tests: light.tests, shards: [light.tests], proposed: light.tests.length, picked: light.tests.length, universe: f.allTests.length }
+      : full(f, [lightError ?? "light 图不可用，实际全量"]) : decide(f);
+  if (light) plan.light = light;
+  if (f.queueMode !== undefined) plan.queueMode = f.queueMode;
   return f.event === "pull_request" && f.prHead ? { ...plan, prHead: f.prHead } : plan;
 }
 
@@ -139,8 +159,9 @@ function ioMapLine(n: IoMapNote | null | undefined, universe: number): string {
 export function planLine(p: CiPlan, digest: string): string {
   const would = p.picked === null ? "无拟选集" : `拟选 ${p.picked} / ${p.universe}`;
   const why = p.reasons.length ? `；全量原因：${p.reasons.slice(0, 8).join("；")}` : "";
-  const ran = p.scope === "related" ? p.tests.length : "全量";
-  return `CI 选择 mode=${p.mode || "(缺省 observe)"} event=${p.event} scope=${p.scope} · ${would} · 实跑 ${ran}${why}${ioMapLine(p.ioMap, p.universe)} · ${digest}`;
+  const ran = p.scope !== "full" ? p.tests.length : "全量";
+  const light = p.light ? ` · light 会选 ${p.light.tests.length}（改动测试 ${p.light.changed} + 直接引用 ${p.light.direct}）${p.light.reasons.join("；")}` : "";
+  return `CI 选择 mode=${p.mode || "(缺省 observe)"} event=${p.event} scope=${p.scope} · ${would} · 实跑 ${ran}${why}${ioMapLine(p.ioMap, p.universe)}${light} · ${digest}`;
 }
 
 /** workflow_dispatch: the checkout must be exactly the request's merge commit of base + head, with its tree and id. */
@@ -186,7 +207,7 @@ function fetchIoMap(root: string, tmp: string, env: Record<string, string | unde
  * The selectors over the PR's merge commit: changes = first parent → HEAD, base side read from a worktree of the first parent.
  * ioSelect is the same selection with the read map: its entries as edges, and the changes widened by diff(map sha, HEAD).
  */
-function prSelect(root: string, tmp: string, headPaths: string[], env: Record<string, string | undefined>): Pick<PlanFacts, "select" | "ioSelect"> {
+function prSelect(root: string, tmp: string, headPaths: string[], env: Record<string, string | undefined>): Pick<PlanFacts, "select" | "ioSelect" | "lightSelect"> {
   const git = run(root), scan = oxcScanner(parseSync as unknown as OxcParseSync);
   const diff = (from: string): ReturnType<typeof parseNameStatus> => {
     try { return parseNameStatus(git("diff", "-z", "--name-status", "-M", from, "HEAD")); }
@@ -205,6 +226,13 @@ function prSelect(root: string, tmp: string, headPaths: string[], env: Record<st
     return { base: side(baseDir, basePaths), head: side(root, headPaths) };
   })());
   return {
+    lightSelect: () => {
+      const d = diff("HEAD^1");
+      if (d.bad.length) throw new Error(d.bad.join("；"));
+      const { base, head } = load();
+      const slowFile = join(root, "tests", "slow-tests.txt");
+      return selectLightTests(d.changes, base, head, existsSync(slowFile) ? parseSlowList(readFileSync(slowFile, "utf8")) : []);
+    },
     select: (mode) => { const d = diff("HEAD^1"); return selectImpactedTests({ mode, changes: d.changes, badChanges: d.bad, headPaths, load }); },
     ioSelect: (mode) => {
       const got = fetchIoMap(root, tmp, env);
@@ -230,6 +258,7 @@ function planMain(outDir: string | undefined): void {
   const parents = git("rev-list", "--parents", "-n", "1", "HEAD").trim().split(" ");
   const plan = buildPlan({ event, sha: parents[0]!, mode: env.CI_RELATED_CHECKS ?? "", headRef: env.GITHUB_HEAD_REF ?? "",
     ...(event === "pull_request" && parents.length === 3 ? { prHead: parents[2]! } : {}),
+    queueMode: env.CI_QUEUE_LIGHT ?? "", runAttempt: Number(env.GITHUB_RUN_ATTEMPT || "1"), labels: JSON.parse(env.CI_PR_LABELS || "[]"),
     allTests: testFiles(headPaths.join("\n")), slow: existsSync(slowFile) ? parseSlowList(readFileSync(slowFile, "utf8")) : [],
     ...prSelect(root, env.RUNNER_TEMP ?? outDir, headPaths, env), ioMode: env.CI_IO_MAP ?? "", seconds: loadDurations().seconds });
   const digest = planDigest(plan);
@@ -245,7 +274,7 @@ function planMain(outDir: string | undefined): void {
 export function shardFiles(text: string, digest: string, k: number): string[] {
   const plan = JSON.parse(text) as CiPlan;
   if (planDigest(plan) !== digest) throw new Error(`plan.json 的 digest ${planDigest(plan)} 不是本次运行冻结的 ${digest}`);
-  if (plan.scope !== "related") throw new Error("plan 不是 related，分片走全量清单");
+  if (plan.scope !== "related" && plan.scope !== "light") throw new Error("plan 不是 related，分片走全量清单");
   if (!Number.isSafeInteger(k) || k < 1 || k > plan.shards.length) throw new Error(`片号 ${k} 不合法`);
   return plan.shards[k - 1]!;
 }

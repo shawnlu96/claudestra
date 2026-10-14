@@ -181,8 +181,9 @@ async function submitPlan(page: Page, status: number) {
   return command;
 }
 
+// UXHOME1：团队源下「团队」标签改名「规划与提案」；改前基线上仍叫「团队」，两种都认
 async function teamActions(page: Page, narrow: boolean, tag: string) {
-  await (narrow ? page.getByRole("button", { name: "团队", exact: true }).first() : page.getByRole("tab", { name: "团队" }).or(page.getByRole("button", { name: "团队", exact: true })).first()).click();
+  await (narrow ? page.getByRole("button", { name: /^(规划与提案|团队)$/ }).first() : page.getByRole("tab", { name: /^(规划与提案|团队)$/ }).or(page.getByRole("button", { name: /^(规划与提案|团队)$/ })).first()).click();
   await page.getByText("团队规划", { exact: true }).waitFor();
   const edit = page.getByRole("button", { name: /^编辑规划 / }).last();
   await edit.click();
@@ -317,7 +318,7 @@ async function regression(run: (page: Page, url: string) => Promise<void>, empty
 (regressions ? browserTest : test.skip)("empty-ops: new feature from an empty team goes to the N7W proposal API, never V1 feature.new", async () => {
   await regression(async (page) => {
     const posts: string[] = []; page.on("request", r => void (r.method() === "POST" && /\/shared-/.test(r.url()) && posts.push(new URL(r.url()).pathname)));
-    await page.getByRole("tab", { name: "团队", exact: true }).click();
+    await page.getByRole("tab", { name: /^(规划与提案|团队)$/ }).click();
     await page.getByRole("button", { name: "新建 feature", exact: true }).click();
     await page.getByRole("textbox", { name: "标题", exact: true }).fill("FIRST FEATURE");
     for (const [name, value] of [["一句话描述 1", "FIRST NODE"], ["文件范围 1", "web/**"]]) await page.getByRole("textbox", { name }).fill(value!);

@@ -62,7 +62,7 @@ test.skipIf(!out)('stage2 full TV1 desktop/mobile light/dark screenshots and non
           console.error('S2W page errors', errors, await page.locator('body').innerText()); throw error;
         });
         // The team tab and its execution panel are production TV1 rendering, including the narrow sheet.
-        const team = page.getByRole(width < 700 ? 'button' : 'tab', { name: '团队', exact: true }).first();
+        const team = page.getByRole(width < 700 ? 'button' : 'tab', { name: /^(规划与提案|团队)$/ }).first();
         await team.click();
         if (mode !== 'on') {
           await page.waitForTimeout(150);
@@ -92,7 +92,7 @@ test.skipIf(!out)('stage2 full TV1 desktop/mobile light/dark screenshots and non
       for (const mode of ['absent', 'on']) {
         await page.goto(`${server.url}?mode=${mode}&theme=${theme}`);
         await page.getByText(f.feature.title, { exact: true }).first().waitFor();
-        await page.getByRole(width < 700 ? 'button' : 'tab', { name: '团队', exact: true }).first().click();
+        await page.getByRole(width < 700 ? 'button' : 'tab', { name: /^(规划与提案|团队)$/ }).first().click();
         await page.waitForTimeout(150);
         planning.push(await page.locator('body').innerHTML());
         await page.screenshot({ path: resolve(out!, `${width}-${theme}-planning-${mode}.png`), fullPage: true });

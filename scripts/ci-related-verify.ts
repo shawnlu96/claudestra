@@ -39,12 +39,13 @@ export function verifyRelated(planText: string, digest: string, logs: Map<string
   let plan: CiPlan;
   try { plan = JSON.parse(planText) as CiPlan; } catch { return ["plan.json 读不懂"]; }
   if (planDigest(plan) !== digest) return [`plan.json 的 digest 不是本次运行冻结的 ${digest}`];
-  if (plan.scope !== "related") return [`plan scope=${plan.scope}，不该走 related 核对`];
+  if (plan.scope !== "related" && plan.scope !== "light") return [`plan scope=${plan.scope}，不该走 related 核对`];
   const errs: string[] = [];
   if (plan.shards.length !== want.n) errs.push(`计划分 ${plan.shards.length} 片，运行是 ${want.n} 片`);
   if (plan.sha.toLowerCase() !== want.head.toLowerCase()) errs.push(`计划算在 ${plan.sha}，运行检出 ${want.head}`);
   const union = plan.shards.flat(), uniq = new Set(union);
-  if (!plan.tests.length) errs.push("related 选集为空（不能拿空清单判绿）");
+  if (plan.scope === "light" && want.n !== 1) errs.push("light 只能分 1 片");
+  if (plan.scope === "related" && !plan.tests.length) errs.push("related 选集为空（不能拿空清单判绿）");
   if (uniq.size !== union.length) errs.push("计划里同一文件分到了多片");
   if ([...uniq].sort().join("\n") !== [...plan.tests].sort().join("\n")) errs.push("各片合起来不等于计划选集");
   const names = Array.from({ length: want.n }, (_, i) => `test-shard-${i + 1}`);
@@ -73,7 +74,7 @@ function main(args: string[]): void {
   errs.forEach((e) => console.log(`::error::${e}`));
   if (errs.length) process.exit(1);
   const plan = JSON.parse(planText) as CiPlan;
-  console.log(`related：${n} 片按计划跑 ${plan.shards.map((s) => s.length).join(" / ")}，合计 ${plan.tests.length} / 全集 ${plan.universe}，不漏不重 · ${digest}` +
+  console.log(`${plan.scope}：${n} 片按计划跑 ${plan.shards.map((s) => s.length).join(" / ")}，合计 ${plan.tests.length} / 全集 ${plan.universe}，不漏不重 · ${digest}` +
     " · 这是相关测试覆盖，不是全仓覆盖：串行 / 人工合入前另做 full 补验");
 }
 

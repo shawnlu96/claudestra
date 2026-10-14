@@ -117,7 +117,7 @@ test.skipIf(!out)('UIEXEC1 formal team entry: execution panel on / observe / off
       const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
       await page.goto(`${server.url}?theme=${theme}`);
       await page.getByText(title, { exact: true }).first().waitFor();
-      await page.getByRole(width < 700 ? 'button' : 'tab', { name: '团队', exact: true }).first().click();
+      await page.getByRole(width < 700 ? 'button' : 'tab', { name: /^(规划与提案|团队)$/ }).first().click();
       await assertMode(page, mode);
       if (mode === 'off') expect(state.snapshots.length).toBe(reads);
       expect(Boolean(await page.evaluate('document.documentElement.scrollWidth <= innerWidth'))).toBe(true);

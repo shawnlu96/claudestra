@@ -29,6 +29,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-author-rebuild.ts": "vcs=2",
     "scheduler-auto-deps.ts": "proc=1 notice=1",
     "scheduler-auto-ports.ts": "notice=1",
+    "scheduler-ci-queue-full.ts": "ledger=1 vcs=1", // per-card skipTask; ledger uses the pass manager
     "scheduler-create-retry-worktree.ts": "vcs=8",
     "scheduler-create-retry.ts": "vcs=2",
     "scheduler-deploy-job.ts": "fs=3",
@@ -210,7 +211,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-fix-start.ts": "sql=1 stmt=1 proc=1 vcs=3",
     "lend-peer-cooldown.ts": "sql=7 stmt=7",
     "lend-pr-takeover-ledger.ts": "sql=1 stmt=1",
-    "lend-reclaim-scheduler.ts": "sql=4 stmt=4 notice=1",
+    "lend-reclaim-scheduler.ts": "sql=5 stmt=5 notice=1",
     "manual-merge-queue.ts": "sql=3 stmt=3",
     // CIRES1: the GitHub read of the leased `ledger scheduler-manual-resume --mechanism ci-manual-resume` (a skip card never reaches that call)
     "manual-recovery-ci-read.ts": "vcs=1",
