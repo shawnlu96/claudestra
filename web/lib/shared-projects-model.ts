@@ -15,9 +15,13 @@ export interface SharedProject extends ProjectRef {
 /** Center team record without its code; `name` null means the center has no display name yet. */
 export interface TeamRecord { name: string | null; rev: number }
 export interface TeamDirectoryMember { personId: string; code: string; teamRole: "owner" | "member" }
-/** `team` / `directory` null: the center team read is unavailable (old bridge or degraded read); never inferred from projects. */
+/** One machine of a directory member, from the center's instance bindings only. */
+export interface TeamInstance { instanceId: string; personId: string }
+/** `team` / `directory` null: the center team read is unavailable (old bridge or degraded read); never inferred from projects.
+ * `instances` missing or null: the center instances read is unavailable; never inferred from peer names. */
 export interface ProjectTeam extends ProjectScope {
   personId: string; teamRole: "owner" | "member" | null; team: TeamRecord | null; directory: TeamDirectoryMember[] | null;
+  instances?: TeamInstance[] | null;
 }
 export interface ProjectMember { personId: string; code: string; role: "owner" | "member"; status: "invited" | "active" | "removed" }
 export interface ProjectSnapshot {

@@ -95,7 +95,7 @@ function promptOf(task: LedgerTask, events: readonly LedgerEvent[], body: string
 export async function prepareSummary(db: Database, event: LedgerEvent, deps: SummaryDeps): Promise<MemoryInput | null> {
   const task = getTask(db, event.target);
   if (!task || task.project !== event.project) return null;
-  const events = taskEvents(db, task).filter((e) => e.seq <= event.seq && (e.kind !== "decision" || autoDecisionAllowed(db, e)));
+  const events = taskEvents(db, task).filter((e) => e.seq <= event.seq && (e.kind !== "decision" || e.data.namespace !== "priority" && autoDecisionAllowed(db, e)));
   const lastDeliver = events.findLast((e) => e.kind === "deliver");
   const rawFacts = [task.title, String(lastDeliver?.data.summary ?? lastDeliver?.text ?? ""),
     ...events.filter((e) => e.kind === "decision").map((e) => e.text)].join("\n");

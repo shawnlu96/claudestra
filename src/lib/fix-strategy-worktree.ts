@@ -1,27 +1,19 @@
-/**
- * The replacement fix author's own checkout: the canonical author path (<root>/<task>) on the card branch at the reviewed head.
- * The source checkout (old author tree or, after a peer reclaim, the project main tree) is only read for git objects; it is
- * never checked out, reset or cleaned (fetched only as below). A head origin does not have, origin drift, a local branch elsewhere, a dirty or foreign
- * occupant and an unreadable source all hand to PM with zero effect. The old author's tree is adopted only when it already
- * is that canonical linked tree, clean at the head (git refuses a second checkout of the branch). Origin is the real remote
- * (ls-remote, read-only), checked before the tree and again right before handing it out; anything the git port throws (a
- * lease loss or stop) propagates even through helpers that turn errors into a dirty-tree note. The one write into the source is
- * a stale tracking ref for this card's branch, or a reviewed head whose objects the source does not have yet: when origin
- * really is at the reviewed head that one branch is fetched (fast-forward only, no `+`) and reported as `refreshed`; origin
- * elsewhere, a failed fetch or a head still missing afterwards is a refusal. tests/fix-strategy-worktree*.test.ts,
- * tests/fix-strategy-swap-wait*.test.ts.
+/** The replacement author gets only its pinned linked checkout; source trees and uncertain WIP are preserved.
+ * Identity, the real origin and dirty content are re-proved on reuse. tests/fix-strategy-worktree*.test.ts.
  */
-import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { remoteBranchHead, type RemoteHead } from "./order-deliver.js";
 import { runBounded } from "./run-bounded.js";
 import { rebuildPrHead, refreshTrackingRef } from "./scheduler-author-rebuild-checkout.js";
-import { addAuthorWorktree, retryWorktreeDirty, reusableAuthorWorktree } from "./scheduler-create-retry-worktree.js";
+import { addAuthorWorktree, reusableAuthorWorktree } from "./scheduler-create-retry-worktree.js";
+import { buildArtifactOwner, type ConvArtifactContext } from "./conv-ignored-build-artifacts.js";
+import { convArtifactMode, convArtifactProof, quarantineConvArtifacts } from "./conv-ignored-build-artifacts-quarantine.js";
 import type { Git, Pinned } from "./scheduler-review-worktree.js";
 
 const START_FILE = "scheduler-author-start.json"; // addAuthorWorktree's saved start (scheduler-create-retry-worktree.ts)
 
-export interface FixTreeTarget { taskId: string; branch: string | null; head: string | null; root: string }
+export interface FixTreeTarget { taskId: string; branch: string | null; head: string | null; root: string; artifacts?: ConvArtifactContext }
 /** The branch head on the real origin as seen from `cwd`; never fetches into it. */
 export type OriginHead = (cwd: string, branch: string) => Promise<RemoteHead>;
 /** The tracking ref this open fast-forwarded (from = before, null when there was none; to = the reviewed head). */
@@ -43,28 +35,12 @@ async function createdHere(g: Git, dir: string): Promise<boolean> {
   return own.code === 0 && existsSync(join(own.out, START_FILE));
 }
 
-/**
- * The project main tree that owns `dir` (git's first worktree entry, never a bare repo), spelled the way the scheduler's
- * dependency links name it, so retryWorktreeDirty exempts exactly those links (scheduler-local-author.ts) and nothing else.
- */
 async function ownerRepo(g: Git, dir: string): Promise<string | undefined> {
-  const list = await g(["-C", dir, "worktree", "list", "--porcelain"]);
-  const first = list.code === 0 ? list.out.split("\n\n")[0].split("\n") : [];
-  const main = first[0]?.startsWith("worktree ") && !first.includes("bare") ? first[0].slice(9) : undefined;
-  if (!main) return undefined;
-  for (const [sub, up] of [["node_modules", 1], [join("web", "node_modules"), 2]] as const) {
-    const dest = join(dir, sub);
-    let to: string;
-    try { to = resolve(dirname(dest), readlinkSync(dest)); } catch { continue; }
-    let repo = to;
-    for (let i = 0; i < up; i++) repo = dirname(repo);
-    if (resolve(repo, sub) === to && real(repo) === real(main)) return repo;
-  }
-  return main;
+  return buildArtifactOwner(dir, await g(["-C", dir, "worktree", "list", "--porcelain"]));
 }
 
 /** The old author's own linked checkout at the target: registered there, on the branch, at the head, no edits. */
-async function adoptable(g: Git, source: string, dir: string, branch: string, head: string): Promise<string | null> {
+async function adoptable(g: Git, source: string, dir: string, branch: string, head: string, artifacts?: ConvArtifactContext): Promise<string | null> {
   if (real(source) !== real(dir)) return `目标 ${dir} 已被占用（不是本意图建的、也不是原作者的独立工作树），保留并等待核对`;
   const kept = `原作者工作树 ${dir}`;
   if (lstatSync(dir).isSymbolicLink()) return `${kept} 是软链，保留并等待核对`;
@@ -75,7 +51,7 @@ async function adoptable(g: Git, source: string, dir: string, branch: string, he
   if (at.code !== 0 || at.out !== branch) return `${kept} 不在本卡分支 ${branch} 上（${at.out || "detached"}），保留并等待核对`;
   const sha = await g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
   if (sha.code !== 0 || sha.out !== head) return `${kept} HEAD ${sha.out || "（无）"} 不是已审修复 head ${head}，保留旧 WIP 等待核对`;
-  return retryWorktreeDirty(g, dir, await ownerRepo(g, dir));
+  return (await convArtifactProof(g, dir, await ownerRepo(g, dir), artifacts, true)).reason;
 }
 
 /** Run with a port that remembers the first error the git port threw and rethrows it after `run`, whatever `run` caught. */
@@ -135,27 +111,38 @@ async function openTree(g: Git, source: string, t: FixTreeTarget, recorded: stri
     if (absent && !(await present())) return { manual: `单分支抓取后来源仓库里仍没有已审修复 head ${head}，不建作者工作树` };
     refreshed = fresh;
   }
-  const tree = await buildTree(g, at, source, { dir, branch: t.branch, head: t.head, repo: top.out }, recorded, origin);
+  const tree = await buildTree(g, at, source, { dir, branch: t.branch, head: t.head, repo: top.out }, recorded, origin, t.artifacts);
   return refreshed ? { ...tree, refreshed } : tree;
 }
 
 async function buildTree(g: Git, at: Git, source: string, { dir, branch, head, repo }: { dir: string; branch: string; head: string; repo: string },
-  recorded: string | null, origin: OriginHead): Promise<Pinned> {
+  recorded: string | null, origin: OriginHead, artifacts?: ConvArtifactContext): Promise<Pinned> {
+  artifacts = artifacts && convArtifactMode(artifacts) !== "off" ? artifacts : undefined;
   const actual = () => originDrift(origin, repo, branch, head);
   const early = await actual();
   if (early) return { manual: early };
-  const ready = async (): Promise<Pinned> => { const late = await actual(); return late ? { manual: late } : { dir }; };
+  const ready = async (verify: () => Promise<string | null>): Promise<Pinned> => {
+    const late = await actual();
+    if (late) return { manual: late };
+    const owner = artifacts && await ownerRepo(g, dir);
+    const refused = artifacts ? owner ? await quarantineConvArtifacts(g, dir, owner, artifacts, { branch, head }, async () => await actual() ?? await verify()) : "缺主仓库归属，不隔离" : null;
+    const final = artifacts && !refused ? await actual() : null;
+    return refused || final ? { manual: refused ?? final! } : { dir };
+  };
   const plan = { repo, worktree: dir, branch, base: head };
+  const dirty = async () => (await convArtifactProof(g, dir, await ownerRepo(g, dir), artifacts, true)).reason;
+  const ownCheck = () => reusableAuthorWorktree(at, plan, artifacts ? dirty : undefined);
+  const adoptCheck = () => adoptable(g, source, dir, branch, head, artifacts);
   if (existsSync(dir)) {
-    const own = recorded && await createdHere(g, dir) ? await reusableAuthorWorktree(at, plan) : "不是本意图建的";
-    if (!own) return ready();
-    const adopted = await adoptable(g, source, dir, branch, head);
-    return adopted ? { manual: adopted.slice(0, 400) } : ready();
+    const own = recorded && await createdHere(g, dir) ? await ownCheck() : "不是本意图建的";
+    if (!own) return ready(ownCheck);
+    const adopted = await adoptCheck();
+    return adopted ? { manual: adopted.slice(0, 400) } : ready(adoptCheck);
   }
   const local = await at(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
   if (local.code === 0 && local.out !== head) return { manual: `本地分支 ${branch} 在 ${local.out}，不是已审修复 head（可能有旧 WIP），保留等待核对` };
   const add = await addAuthorWorktree(at, plan, local.code === 0);
   if (add.code !== 0) return { manual: `建作者工作树失败：${add.out}`.slice(0, 400) };
   const check = await reusableAuthorWorktree(at, plan);
-  return check ? { manual: check } : ready();
+  return check ? { manual: check } : ready(ownCheck);
 }

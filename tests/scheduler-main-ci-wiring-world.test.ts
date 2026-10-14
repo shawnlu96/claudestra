@@ -49,7 +49,7 @@ export function mainCiWorld() {
   /** main's CI per sha (default `defaultCi`), the PR-head check bucket per card, and every main CI read `gh api` saw. */
   const ci = { bySha: new Map<string, Ci>(), defaultCi: "success" as Ci, reads: [] as string[], fail: false, mainOverride: null as (() => string) | null,
     ports: {} as { ciBehind?: CiBehindGh; ciRerun?: CiRerunGh }, prChecks: new Map<string, PrSnapshot["checks"][number]["bucket"]>(), onInspect: null as ((prRef: string) => Promise<void>) | null,
-    actionsFail: false, extraMainRuns: [] as Record<string, unknown>[], workflowRuns: [] as Record<string, unknown>[],
+    actionsFail: false, commitAgeMs: 60_000, extraMainRuns: [] as Record<string, unknown>[], workflowRuns: [] as Record<string, unknown>[],
     extraPrChecks: [] as PrSnapshot["checks"], fullRecheck: undefined as MergeExternal["fullRecheck"],
     beforeWrite: null as ((args: string[]) => Promise<void>) | null,
     onReceipt: null as ((args: string[]) => Promise<void>) | null }; // runs after the ledger wrote, before the receipt reaches the caller
@@ -61,6 +61,8 @@ export function mainCiWorld() {
     if (p.endsWith("/git/ref/heads/main")) return json({ ref: "refs/heads/main", object: { type: "commit", sha: ci.mainOverride?.() ?? hub.main } });
     if (p.includes("/actions/runs?") && ci.actionsFail) return { code: 1, stdout: "", stderr: "HTTP 502", timedOut: false };
     if (p.includes("/actions/runs?")) return json({ total_count: ci.workflowRuns.length, workflow_runs: ci.workflowRuns });
+    // MAINCIW2: the commit read for a SHA with no push run yet; by default made a minute ago, inside the 15-minute creation window.
+    if (/\/commits\/[a-f0-9]{40}$/.test(p)) return json({ commit: { committer: { date: new Date(clock.now - ci.commitAgeMs).toISOString() } } });
     const sha = /commits\/([a-f0-9]{40})\//.exec(p)![1]!, state = ci.bySha.get(sha) ?? ci.defaultCi;
     if (p.includes("/check-runs")) {
       const runs = state === "missing" ? [] : [{ id: 1, name: "check", head_sha: sha, status: state === "pending" ? "in_progress" : "completed",

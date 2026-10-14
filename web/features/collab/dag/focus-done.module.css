@@ -1,0 +1,39 @@
+/* 子 DAG 已完成区（focus-done.tsx，team-project-SUBDAG5）：搜索框、分段标题、段的高度过渡、新完成的淡入和计数滚动。
+   行本身沿用 focus-board.module.css 的 .row（那个文件 SUBDAG8 在改，这里只加不动它）；reduced-motion 下动效全关。 */
+.body { display: flex; flex-direction: column; gap: 2px; }
+
+.search { position: relative; display: flex; align-items: center; margin: 0 0 6px; max-width: 360px; }
+.search input {
+  width: 100%; min-width: 0; padding: 4px 26px 4px 8px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--panel);
+  color: var(--text); font: inherit; font-size: var(--fs-3);
+}
+.search input::placeholder { color: var(--muted); }
+.search input:focus-visible { outline: none; border-color: var(--text-2); }
+.clear { position: absolute; right: 4px; display: inline-flex; padding: 3px; border-radius: 4px; color: var(--muted); }
+.clear:hover { color: var(--text); background: var(--panel-2); }
+
+.none { margin: 2px 8px; color: var(--muted); font-size: var(--fs-3); }
+
+.head { margin: 4px 0 2px; font-size: var(--fs-3); font-weight: 600; color: var(--text-2); }
+.head button { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px 1px 0; color: inherit; font-weight: inherit; }
+.head button:hover { color: var(--text); }
+.chev { transition: transform 180ms ease; }
+.chevOpen { transform: rotate(90deg); }
+.count { display: inline-block; color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.roll { animation: roll 320ms ease; }
+@keyframes roll { from { transform: translateY(60%); opacity: 0; } }
+
+/* 段的展开 / 收起：0fr ↔ 1fr 的高度过渡；收着的段还挂着（不卸载），但看不见、点不到 */
+.fold { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows 220ms ease, visibility 0s linear 220ms; }
+.fold.open { grid-template-rows: 1fr; visibility: visible; transition: grid-template-rows 220ms ease, visibility 0s; }
+.fold.instant { transition: none; }
+/* clip 而不是 hidden：留出 flash 的 5px 光圈 */
+.inner { min-height: 0; overflow: clip; overflow-clip-margin: 6px; }
+
+.enter { animation: enter 420ms ease; }
+@keyframes enter { from { opacity: 0; transform: translateY(-4px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .fold, .fold.open, .chev { transition: none; }
+  .roll, .enter { animation: none; }
+}
