@@ -4,6 +4,7 @@ import { EXT_CAPABILITIES_OFF } from "../src/lib/shared-ledger-contract-reads.js
 import {
   SHARED_LEDGER_ACTIVITY_FIXTURE, SHARED_LEDGER_EXT_CAPABILITIES_NEW_FIXTURE, SHARED_LEDGER_VERSIONS_FIXTURE,
 } from "../src/lib/shared-ledger-contract-fixtures.js";
+import { TASK_FACTS_FIXTURE } from "../src/lib/shared-ledger-contract-task-facts-fixtures.js";
 import { fakeConnection, fakeKey } from "./shared-ledger-client.test.js";
 
 const connection = { ...fakeConnection, teamId: "team-a" };
@@ -50,6 +51,29 @@ describe("SharedLedgerClient add-only reads", () => {
     for (const after of [-1, 1.5, Number.NaN, 2 ** 53]) await expect(c.activity("feature-a", after)).rejects.toThrow("invalid activity cursor");
     await expect(c.versions("../x")).rejects.toThrow("invalid feature id");
     await expect(c.activity("a/b", 0)).rejects.toThrow("invalid feature id");
+    expect(paths).toEqual([]);
+  });
+
+  test("[验收线 2] taskFacts: signed GET without body; 403/404/429 RemoteError, 5xx/bad body/other team or feature Unavailable", async () => {
+    const seen: { path: string; method: string; body: string; signed: boolean }[] = [];
+    const fetcher = (async (url: URL, init: RequestInit) => {
+      const headers = new Headers(init.headers);
+      seen.push({ path: url.pathname, method: init.method ?? "GET", body: String(init.body ?? ""), signed: headers.has("authorization") && [...headers.keys()].some((k) => /sig/i.test(k)) });
+      return Response.json(TASK_FACTS_FIXTURE);
+    }) as unknown as typeof fetch;
+    expect(await new SharedLedgerClient(connection, fakeKey(), { fetch: fetcher }).taskFacts("feature-a")).toEqual(TASK_FACTS_FIXTURE);
+    expect(seen).toEqual([{ path: "/v1/teams/team-a/features/feature-a/task-facts", method: "GET", body: "", signed: true }]);
+    for (const status of [403, 404, 429]) {
+      await expect(client(status, { code: "forbidden", status, message: "x" }).taskFacts("feature-a")).rejects.toBeInstanceOf(SharedLedgerRemoteError);
+    }
+    for (const status of [500, 503]) await expect(client(status, {}).taskFacts("feature-a")).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+    await expect(client(200, { ...TASK_FACTS_FIXTURE, extra: 1 }).taskFacts("feature-a")).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+    const text = (async () => new Response("<html>", { status: 200 })) as unknown as typeof fetch;
+    await expect(new SharedLedgerClient(connection, fakeKey(), { fetch: text }).taskFacts("feature-a")).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+    await expect(client(200, { ...TASK_FACTS_FIXTURE, teamId: "team-b" }).taskFacts("feature-a")).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+    await expect(client(200, TASK_FACTS_FIXTURE).taskFacts("feature-b")).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+    const paths: string[] = [];
+    for (const bad of ["../x", "a/b", "a?b", ""]) await expect(client(200, TASK_FACTS_FIXTURE, paths).taskFacts(bad)).rejects.toThrow("invalid feature id");
     expect(paths).toEqual([]);
   });
 });

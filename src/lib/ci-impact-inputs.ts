@@ -173,6 +173,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   webLoader("web-dom-shared-ledger-v2-approve-ui"),
   webLoader("web-dom-shared-ledger-v2-stage2"),
   webLoader("web-dom-sidebar-history-folds"),
+  webLoader("web-dom-subdag-work-share"),
   webLoader("web-dom-team-counts-unknown"),
   webLoader("web-dom-team-parity-calls"),
   webLoader("web-dom-team-parity-home-only"),

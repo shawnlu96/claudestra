@@ -76,4 +76,7 @@ export const RECOVERY_KEYS = [
   "mergePipe",
   "effCountCarry",
   "ciLogPerJob",
+  "mergeUnifiedCandidates",
+  "privateStartPlacement",
+  "lendAuthorRebuild",
 ] as const;

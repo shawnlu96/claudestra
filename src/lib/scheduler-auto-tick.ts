@@ -52,6 +52,7 @@ export interface AutoTickDeps {
   /** The ledger CLI under the scheduler identity. */
   manager: Manager;
   /** The adapter for this bound session's route, or why it cannot be driven automatically. */
+  prepareAuthor?(task: LedgerTask): Promise<LedgerTask>;
   worker(ref: SessionRef): WorkerSession | { manual: string };
   /** Find or create this card's session for the role. It never binds: binding is a ledger write through the CLI. */
   ensure(task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult>;
@@ -502,7 +503,8 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     }
     try {
       const pool = await poolOf(policy.remote);
-      out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
+      const prepared = await deps.prepareAuthor?.(task) ?? task;
+      out.cards.push(await new Card(db, prepared, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });

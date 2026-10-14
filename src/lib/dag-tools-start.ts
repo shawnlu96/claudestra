@@ -15,7 +15,7 @@ import { storedOrigin } from "./ledger-origin.js";
 import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from "./ledger-scheduler.js";
 import { getItem, getTask } from "./ledger-store.js";
 import { canonicalTwinError } from "./registry.js";
-import { parseStartPlacement, type StartPlacement } from "./scheduler-placement-start.js";
+import { notePrivateStart, parseStartPlacement, PRIVATE_ONLY_PEER, privateStartMode, type StartPlacement } from "./scheduler-placement-start.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { uiSpecGate } from "./spec-lint.js";
 import { observationGate } from "./spec-lint-observation.js";
@@ -57,7 +57,7 @@ export interface StartEnv {
   /** ledger/prompts/exec-template.md 的内容；没有为 null */
   template(): string | null;
   /** 槽池放置（lib/scheduler-placement-start.ts）；不注入 = 只能放本机，auto 即 local，peer:<名> 一律拒 */
-  placement?(db: Database, q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}` }): Promise<StartPlacement>;
+  placement?(db: Database, q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}`; card?: string }): Promise<StartPlacement>;
   /** 私仓进池开关（card-repo.ts）；不注入 = 读 statePath("private-pool.json") */
   privatePool?(project: string): PrivatePoolMode;
   /** 目录 origin 的 GitHub owner/name（私仓找 clone 用）；不注入 = 本地 `git remote get-url origin` */
@@ -123,14 +123,24 @@ function nodeReady(env: StartEnv, f: Feature, key: string) {
   return { node, wait: lanes.waiting.find((w) => w.key === key && w.why === "deps") ?? null } as const;
 }
 
-/** auto 算出本机（或没注入放置）= 本机；peer:<名> 没注入放置 = 拒（不能核对硬约束就不放出去） */
-async function placeStart(env: StartEnv, want: "auto" | `peer:${string}`, project: string, repoDir: string, fileGlobs: readonly string[]): Promise<StartPlacement> {
-  if (!env.placement) return want === "auto" ? { where: "local", reason: "没有放置信息，放本机" } : { where: "refused", reason: "这台 bridge 没接槽池放置" };
+/**
+ * auto 算出本机（或没注入放置）= 本机；peer:<名> 没注入放置 = 拒（不能核对硬约束就不放出去）。
+ * 私仓卡（PRIVSTART1，privateStartPlacement）：on 下没注入放置 / 算放置抛错一律拒，不回落本机；observe 照旧落本机，记一条「本会等」。
+ */
+async function placeStart(env: StartEnv, want: "auto" | `peer:${string}`, project: string, repoDir: string, fileGlobs: readonly string[],
+  card: string): Promise<StartPlacement> {
+  const local = (reason: string): StartPlacement => {
+    const priv = privateStartMode(project, fileGlobs, env.recoveryPolicy);
+    if (priv === "on") return { where: "refused", reason: `${PRIVATE_ONLY_PEER}：${reason}` };
+    if (priv === "observe") notePrivateStart(env.db, project, card, "local", "等", reason);
+    return { where: "local", reason: `${reason}，放本机` };
+  };
+  if (!env.placement) return want === "auto" ? local("没有放置信息") : { where: "refused", reason: "这台 bridge 没接槽池放置" };
   try {
-    return await env.placement(env.db, { project, repoDir, fileGlobs, want });
+    return await env.placement(env.db, { project, repoDir, fileGlobs, want, card });
   } catch (e) {
     const why = `算放置出错：${(e as Error).message}`;
-    return want === "auto" ? { where: "local", reason: `${why}，放本机` } : { where: "refused", reason: why };
+    return want === "auto" ? local(why) : { where: "refused", reason: why };
   }
 }
 
@@ -200,7 +210,10 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (hasSpec && args.spec !== undefined) return no("conflict", `规格卡 ${specPath} 已存在：不覆盖，去掉 spec 参数`);
   const auto = env.autoReady(f.project);
   if (auto) return no("auto_off", auto);
-  const placed = want === "local" ? null : await placeStart(env, want, f.project, repo, node.fileGlobs);
+  if (want === "local" && privateStartMode(f.project, node.fileGlobs, env.recoveryPolicy) === "on") {
+    return no("placement", `${PRIVATE_ONLY_PEER}：privateStartPlacement 是 on，显式 placement=local 的私仓卡不放本机（本机作者会被规划器退回人工）；改用 auto 或 peer:<名>`);
+  }
+  const placed = want === "local" ? null : await placeStart(env, want, f.project, repo, node.fileGlobs, taskId);
   if (placed?.where === "refused") return no("placement", `不能放到 ${want}：${placed.reason}`);
   const title = args.title ?? node.oneLine;
   const item = args.item ?? (getItem(env.db, f.project, featureSlug(f, storedOrigin(env.db))) ? featureSlug(f, storedOrigin(env.db)) : null);
