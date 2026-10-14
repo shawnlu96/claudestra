@@ -23,6 +23,12 @@ test("the sender's level decides, not the wording: info never wakes the PM, acti
   expect(rule(sched("[engine] 2 leftover processes under the card worktree, please have a look", "info"))).toBe("level.info");
 });
 
+test("a level is only trusted from the scheduler and bridge ledger notices, not from an ordinary agent frame", () => {
+  expect(rule({ ...sched("P0 事故，请 PM 立即处理", "info"), sender: "agent-x" })).toBe("protect.action");
+  expect(rule({ ...sched("x", "info"), oneShot: false })).not.toBe("level.info");
+  expect(rule({ fromKind: "bridge", sender: "ledger", intent: "notification", triggerKind: "bridge_synth", oneShot: true, body: "question, default applies", level: "info" })).toBe("level.info");
+});
+
 test("owner, human and card answers are never demoted by a level", () => {
   expect(rule({ ...sched("x", "info"), fromKind: "api" })).toBe("protect.owner");
   expect(rule({ ...sched("x", "info"), triggerKind: "ask_answer" })).toBe("protect.answer");
