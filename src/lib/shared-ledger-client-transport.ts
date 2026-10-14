@@ -20,7 +20,7 @@ export class SharedLedgerUnavailable extends Error {
   constructor() { super("shared ledger unavailable; outcome unconfirmed"); }
 }
 export interface SharedLedgerTransportOptions {
-  fetch?: typeof fetch; now?: () => number; timeoutMs?: number; stateDir?: string;
+  fetch?: typeof fetch; now?: () => number; timeoutMs?: number; stateDir?: string; random?: () => number;
 }
 /** Only the center origin's hash is stored: different credentials/processes share its IP limit without retaining URLs. */
 function cooldownPath(baseUrl: string, dir: string): string {
@@ -37,12 +37,48 @@ export function sharedLedgerNotBefore(baseUrl: string, dir = STATE_DIR): number 
   if (!warnedCorrupt.has(path)) { warnedCorrupt.add(path); console.warn("shared ledger cooldown file unreadable; treated as no cooldown"); }
   return 0;
 }
-/** Retry-After accepts seconds or HTTP-date; malformed/missing values use five seconds, never more than a minute. */
-function retryDelay(raw: string | null, now: number): number {
-  if (!raw?.trim()) return 5_000;
-  const seconds = Number(raw), date = Date.parse(raw);
-  const ms = Number.isFinite(seconds) ? (seconds >= 0 ? seconds * 1000 : 5_000) : Number.isFinite(date) ? Math.max(0, date - now) : 5_000;
-  return Math.min(60_000, ms);
+/** Missing Retry-After uses a cross-process exponential streak; explicit seconds/date honor the center's deadline. */
+function retryDelay(raw: string | null, now: number, failures: number, random = Math.random): number {
+  if (raw?.trim()) {
+    const seconds = Number(raw), date = Date.parse(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    if (!Number.isFinite(seconds) && Number.isFinite(date)) return Math.max(0, date - now);
+  }
+  return Math.min(120_000, 5_000 * 2 ** Math.min(5, Math.max(0, failures - 1)) * (1 + random() * 0.2));
+}
+interface LimitStreak { failures: number; at: number }
+function limitStreak(path: string): LimitStreak {
+  const state = readJsonStateSync(`${path}.streak`, (v) => !!v && typeof v === "object"
+    && Number.isSafeInteger((v as LimitStreak).failures) && (v as LimitStreak).failures >= 0 && Number.isFinite((v as LimitStreak).at));
+  return state.status === "ok" ? state.data as LimitStreak : { failures: 0, at: 0 };
+}
+export async function sharedLedgerRateLimited(baseUrl: string, raw: string | null, now: number, dir = STATE_DIR, random = Math.random): Promise<number> {
+  const path = cooldownPath(baseUrl, dir);
+  let delay = retryDelay(raw, now, 1, random);
+  try {
+    mkdirSync(join(dir, "shared-ledger-cooldowns"), { recursive: true, mode: 0o700 });
+    const lock = await acquireLock(`${path}.lock`);
+    if (!lock) throw new SharedLedgerUnavailable();
+    try {
+      const failures = limitStreak(path).failures + 1;
+      delay = retryDelay(raw, now, failures, random);
+      writeJsonAtomicSync(`${path}.streak`, { failures, at: now }, { mode: 0o600, commitIf: lock.held });
+      writeJsonAtomicSync(path, Math.max(sharedLedgerNotBefore(baseUrl, dir), Math.ceil(now + delay)), { mode: 0o600, commitIf: lock.held });
+    } finally { lock.release(); }
+  } catch { console.warn("shared ledger cooldown not recorded"); } // Still report 429 even when its shared state cannot be written.
+  return delay;
+}
+export async function sharedLedgerSucceeded(baseUrl: string, startedAt: number, dir = STATE_DIR): Promise<void> {
+  const path = cooldownPath(baseUrl, dir);
+  if (!limitStreak(path).failures) return;
+  try {
+    const lock = await acquireLock(`${path}.lock`);
+    if (!lock) return;
+    try {
+      // A success from an older in-flight request must not erase a newer rejection's streak or deadline.
+      if (limitStreak(path).at <= startedAt) writeJsonAtomicSync(`${path}.streak`, { failures: 0, at: startedAt }, { mode: 0o600, commitIf: lock.held });
+    } finally { lock.release(); }
+  } catch { console.warn("shared ledger cooldown streak not reset"); } // A successful response remains usable; only the next fallback delay stays conservative.
 }
 export async function deferSharedLedger(baseUrl: string, until: number, dir = STATE_DIR): Promise<void> {
   const path = cooldownPath(baseUrl, dir);
@@ -86,9 +122,8 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     const { fetch: fetcher = fetch, now = Date.now } = options;
     const signingKey = { ...key };
     const base = sharedLedgerCenterUrl(baseUrl);
-    // Uploads and import receipt/recovery share the push gate. Web reads have their own list/detail backoff.
-    const pushRequest = /^\/v1\/teams\/[^/]+\/(?:projections|source-dags|imports(?:\/[^/]+)?)$/.test(path);
-    const blocked = pushRequest ? sharedLedgerNotBefore(baseUrl, options.stateDir) - now() : 0;
+    const startedAt = now();
+    const blocked = sharedLedgerNotBefore(baseUrl, options.stateDir) - startedAt;
     if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked);
     const url = new URL(path, base);
     if (url.origin !== base.origin || url.pathname !== path || url.search || url.hash) throw new SharedLedgerUnavailable();
@@ -105,9 +140,7 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
         ...(method === "GET" ? {} : { body }) });
     } catch { throw new SharedLedgerUnavailable(); } // Fetch implementations may throw errors carrying response bodies or credentials.
     if (response.status === 429) {
-      const delay = retryDelay(response.headers.get("retry-after"), now());
-      // A cooldown that cannot be recorded (lock held, write failed) must not turn the center's 429 into Unavailable.
-      if (pushRequest) await deferSharedLedger(baseUrl, now() + delay, options.stateDir).catch(() => console.warn("shared ledger cooldown not recorded"));
+      const delay = await sharedLedgerRateLimited(baseUrl, response.headers.get("retry-after"), now(), options.stateDir, options.random);
       // nginx may return HTML; retain only its safe timing header, not a rejection body or source-DAG outcome.
       throw new SharedLedgerRemoteError(429, null, delay);
     }
@@ -115,6 +148,7 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     if (!response.ok) throw new SharedLedgerRemoteError(response.status, await rejection(response.status, response));
     try {
       const raw = await response.json();
+      await sharedLedgerSucceeded(baseUrl, startedAt, options.stateDir);
       return success ? success(response.status, raw) : raw;
     }
     catch { throw new SharedLedgerUnavailable(); } // Body decoders can throw RemoteError too; only actual rejection handling may retain one.

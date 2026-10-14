@@ -2,6 +2,7 @@
  * PJ1 pusher, hosted by the cron daemon (src/cron.ts) on its own timer: a push failure or exception never reaches the
  * cron tick. Each pass reads the ledger read-only, pushes every due mirrored feature and persists only confirmed watermarks.
  */
+import { centerRequestBudgetMode } from "./center-request-budget.js";
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -76,8 +77,11 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
   try {
     // Re-read under the push lock: an `off` that disabled the feature before we got here must win.
     const fresh = readSharedLedgerMirrors(dir);
+    const modes = new Map(due.map(([, e]) => [e.localProject, centerRequestBudgetMode(e.localProject, dir)]));
+    const checkedAt = (e: MirrorEntry) => modes.get(e.localProject) === "on"
+      ? e.budgetCheckedAt ?? e.lastPushAt ?? 0 : e.lastPushAt ?? 0;
     const live = due.flatMap(([id]) => fresh[id]?.enabled ? [[id, fresh[id]] as const] : [])
-      .sort(([a, x], [b, y]) => (x.lastPushAt ?? 0) - (y.lastPushAt ?? 0) || a.localeCompare(b))
+      .sort(([a, x], [b, y]) => checkedAt(x) - checkedAt(y) || a.localeCompare(b))
       .slice(0, deps.maxFeatures ?? MIRROR_FEATURES_PER_PASS);
     if (!live.length) return out;
     db = new Database(ledgerPath, { readonly: true });
@@ -95,7 +99,8 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
         const raw = (deps.client ?? realClient(dir, deps))(credential, scrub);
         if (!raw) throw new Error("credential unavailable");
         const client = pace(raw, baseUrl);
-        ({ entry: next, outcome } = await pushSharedLedgerMirror(db, featureId, entry, { client, scrub, now: now() }));
+        ({ entry: next, outcome } = await pushSharedLedgerMirror(db, featureId, entry, { client, scrub, now: now(), stateDir: dir }));
+        if (centerRequestBudgetMode(entry.localProject, dir) === "on") next = { ...next, budgetCheckedAt: now() };
         // DAG errors stay in dag* fields; 429 escapes to end the pass without counting a failure.
         if (outcome.kind !== "failed") next = await pushSourceDagMirror(db, featureId, next, { client, scrub, now: now(), stateDir: dir });
       } catch (error) {

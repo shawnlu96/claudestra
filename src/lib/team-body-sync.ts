@@ -84,8 +84,7 @@ interface FeatureState {
 interface CenterState { supported: boolean; checkedAt: number; notedDay: number | null }
 /**
  * cooldowns: center origin hash → epoch ms before which no body request goes there, from a 429 on a body request. Kept
- * here, not in the origin cooldown the projections share (shared-ledger-client-transport.ts), so a body 429 never holds
- * back a projection; the body pass still honours that shared one.
+ * here for the body pass's existing pacing; transport 429s also hold all traffic to the origin globally.
  */
 interface SyncFile {
   schemaVersion: 1; features: Record<string, FeatureState>; centers: Record<string, CenterState>; cooldowns?: Record<string, number>;

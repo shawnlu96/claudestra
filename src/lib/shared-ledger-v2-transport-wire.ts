@@ -1,13 +1,13 @@
 /** S2T wire: one signed attempt against a frozen S2K `V2_ROUTES` entry, with V1 SharedLedgerClient signing and credentials.
  * Signing reuses `signSharedLedgerRequest` / `SHARED_LEDGER_AUTH_HEADERS` / `sharedLedgerCenterUrl` unchanged; the V1
  * `requestSharedLedger` itself cannot carry the receipts query string, so this module performs the same single attempt.
- * Errors: network reject / timeout / 5xx / 429 → unavailable; any other non-2xx keeps the center's code (4xx 原样);
+ * Errors: network reject / timeout / 5xx → unavailable; 429 keeps its status; any other non-2xx keeps the center's code (4xx 原样);
  * a 2xx body that is not JSON or fails the S2K parser → invalid_field. No retry, no cache, no authorization memory.
  */
 import { randomBytes } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
 import { signSharedLedgerRequest, SHARED_LEDGER_AUTH_HEADERS } from "./shared-ledger-auth.js";
-import { sharedLedgerCenterUrl } from "./shared-ledger-client-transport.js";
+import { sharedLedgerCenterUrl, sharedLedgerNotBefore, sharedLedgerRateLimited, sharedLedgerSucceeded, SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
 import type { SharedLedgerConnection } from "./shared-ledger-client.js";
 import type { InstanceKey } from "./instance-key.js";
 import { fail, parseError, V2_ERROR_STATUS, V2ContractError, type V2ErrorCode } from "./shared-ledger-contract-v2.js";
@@ -22,6 +22,8 @@ export interface Stage2Connection {
   fetch?: typeof fetch;
   now?: () => number;
   timeoutMs?: number;
+  stateDir?: string;
+  random?: () => number;
 }
 type Params<N extends V2RouteName> = Parameters<(typeof V2_ROUTES)[N]["path"]>[0];
 export type Stage2RouteParams<N extends V2RouteName> = Omit<Params<N>, "teamId" | "projectId">;
@@ -42,18 +44,20 @@ async function rejection(response: Response): Promise<never> {
   return fail(code !== null && V2_ERROR_STATUS[code] === response.status ? code : STATUS_CODE[response.status] ?? "invalid_field");
 }
 
-/** One signed attempt; returns the raw JSON success body. Throws only V2ContractError. */
+/** One signed attempt; returns the raw JSON success body. Throws V2ContractError or a status-preserving SharedLedgerRemoteError for 429. */
 async function signedAttempt(conn: Stage2Connection, method: "GET" | "POST", path: string, body: string): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), conn.timeoutMs ?? 5000);
   try {
     const { baseUrl, bearer, instanceId } = conn.connection, now = conn.now ?? Date.now;
+    const startedAt = now(), blocked = sharedLedgerNotBefore(baseUrl, conn.stateDir) - startedAt;
+    if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked);
     let url: URL;
     try {
       const base = sharedLedgerCenterUrl(baseUrl);
       url = new URL(path, base);
       if (url.origin !== base.origin || url.pathname + url.search !== path || url.hash) return fail("unavailable");
-    } catch (e) { if (e instanceof V2ContractError) throw e; return fail("unavailable"); } // never echo a URL with secrets
+    } catch (e) { if (e instanceof V2ContractError || e instanceof SharedLedgerRemoteError) throw e; return fail("unavailable"); } // never echo a URL with secrets
     const attemptNonce = randomBytes(24).toString("hex");
     const signed = signSharedLedgerRequest({ method, path, body, bearer, instanceId, ts: String(Math.floor(now() / 1000)), attemptNonce },
       { ...conn.key });
@@ -65,13 +69,18 @@ async function signedAttempt(conn: Stage2Connection, method: "GET" | "POST", pat
           [h.ts]: signed.ts, [h.sig]: signed.signature, [h.instance]: instanceId, [h.nonce]: attemptNonce },
         ...(method === "GET" ? {} : { body }) });
     } catch { return fail("unavailable"); } // fetch errors may carry bodies or credentials; keep none of it
-    if (response.status === 429 || response.status >= 500) return fail("unavailable");
+    if (response.status === 429) {
+      const delay = await sharedLedgerRateLimited(baseUrl, response.headers.get("retry-after"), now(), conn.stateDir, conn.random);
+      throw new SharedLedgerRemoteError(429, null, delay);
+    }
+    if (response.status >= 500) return fail("unavailable");
     if (!response.ok) return await rejection(response);
     let text: string;
     try { text = await response.text(); } catch { return fail("unavailable"); } // body lost mid-read: outcome unconfirmed
+    await sharedLedgerSucceeded(baseUrl, startedAt, conn.stateDir);
     try { return JSON.parse(text); } catch { return fail("invalid_field"); }
   } catch (e) {
-    if (e instanceof V2ContractError) throw e;
+    if (e instanceof V2ContractError || e instanceof SharedLedgerRemoteError) throw e;
     return fail("unavailable");
   } finally { clearTimeout(timer); }
 }

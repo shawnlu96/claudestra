@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 /** S2T 验收线 1–3：签名传输对 S2K `V2_ROUTES` 每项的线形状、错误映射，以及 X7 / X9 / X8 三个适配器对 S2C fake center 的往返。
  * 只用合成夹具（fake fetch、tests/helpers/shared-ledger-v2-fake-center*），不读生产、不连网络。
  */
@@ -22,7 +25,7 @@ const KEY = key();
 type Fetch = NonNullable<Stage2Connection["fetch"]>;
 function conn(actor: V2Actor, fetch: Fetch, extra: Partial<Stage2Connection> = {}): Stage2Connection {
   return { connection: { centerId: "center", baseUrl: "https://center.invalid", teamId: "team", personId: actor.personId,
-    instanceId: actor.instanceId, bearer: BEARER }, key: KEY, projectId: "project", fetch, ...extra };
+    instanceId: actor.instanceId, bearer: BEARER }, key: KEY, projectId: "project", stateDir: mkdtempSync(join(tmpdir(), "v2-transport-")), fetch, ...extra };
 }
 interface Sent { method: string; path: string; body: string; headers: Headers }
 /** Fake fetch: records each request and answers with `reply`. */
@@ -93,7 +96,7 @@ describe("S2T 验收线 2：unavailable / 4xx 原样 / receipts 的 null", () =>
   const fx = V2_ROUTE_FIXTURES.features;
   const snapshot = (reply: (s: Sent) => Response | Promise<Response>, extra: Partial<Stage2Connection> = {}) =>
     code(createStage2Transport(conn(ACTORS.owner, recorder(reply).fetch, extra)).snapshot("feature"));
-  test("fetch reject、超时、5xx、429 → unavailable；错误里不留凭据", async () => {
+  test("fetch reject、超时、5xx → unavailable；429 保留状态；错误里不留凭据", async () => {
     const leaky = createStage2Transport(conn(ACTORS.owner, (async () => { throw new Error(`boom ${BEARER}`); }) as unknown as Fetch));
     const error = await leaky.snapshot("feature").catch(e => e);
     expect(error).toBeInstanceOf(V2ContractError);
@@ -103,7 +106,7 @@ describe("S2T 验收线 2：unavailable / 4xx 原样 / receipts 的 null", () =>
     expect(await code(createStage2Transport(conn(ACTORS.owner, hang, { timeoutMs: 10 })).snapshot("feature"))).toBe("unavailable");
     expect(await snapshot(() => Response.json({ code: "unavailable", message: "", requestId: null }, { status: 503 }))).toBe("unavailable");
     expect(await snapshot(() => new Response("bad gateway", { status: 502 }))).toBe("unavailable");
-    expect(await snapshot(() => new Response("", { status: 429, headers: { "retry-after": "1" } }))).toBe("unavailable");
+    await expect(snapshot(() => new Response("", { status: 429, headers: { "retry-after": "1" } }))).rejects.toMatchObject({ status: 429, retryAfterMs: 1000 });
     const torn = () => new Response(new ReadableStream({ start(c) { c.error(new Error(BEARER)); } }), { status: 200 });
     expect(await snapshot(torn)).toBe("unavailable");
     const tornReject = () => new Response(new ReadableStream({ start(c) { c.error(new Error(BEARER)); } }), { status: 409 });
