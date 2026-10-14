@@ -32,7 +32,7 @@ describe("CIWAIT1 red required check on a run that is still in progress", () => 
       await withWaitCard({}, async (c) => {
         c.db.query("UPDATE scheduler_merges SET phase=? WHERE intentId=?").run(phase, c.intent);
         await waits(c, phase);
-        expect(c.gh.argv.every((a) => a.join(" ") === "gh run view 77 --repo example/repo --json attempt,status,conclusion")).toBe(true);
+        expect(c.gh.argv.every((a) => a.join(" ") === "gh run view 77 --repo example/repo --json attempt,status,conclusion,headSha")).toBe(true);
       });
     });
   }

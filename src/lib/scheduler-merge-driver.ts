@@ -4,6 +4,8 @@ import { carryReceipt, MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR, type MergeRun, t
 import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { behindUpdating } from "./scheduler-merge-ci-behind.js";
 import { ciRed } from "./scheduler-merge-ci-carried.js";
+import { redCheck } from "./scheduler-merge-ci-cancel-judge.js";
+import { withCancelHandoff } from "./scheduler-merge-ci-cancel.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
@@ -57,12 +59,12 @@ const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" &
 const authorPush = (run: MergeRun, pr: PrSnapshot): boolean => !sameHead(run, pr) && samePr({ ...run, reviewedHead: pr.head }, pr);
 export const green = (run: Pick<MergeRun, "requiredChecks">, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
-  checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending") && !lightOnly(checks);
+  checks.every((c) => !redCheck(c) && c.bucket !== "pending") && !lightOnly(checks);
 const short = (s: string) => s.slice(0, 12);
 /** BEHIND only says main moved on; under mergeDirect that is not a reason to wait (GitHub still refuses a real conflict as DIRTY). */
 const mergeable = (state: string, direct: boolean): boolean => state === "CLEAN" || (direct && state === "BEHIND");
 const stopped = (e: unknown): boolean => e instanceof SchedulerStopped;
-const failed = (checks: PrSnapshot["checks"]): boolean => checks.some((c) => c.bucket === "fail" || c.bucket === "cancel");
+const failed = (checks: PrSnapshot["checks"]): boolean => checks.some(redCheck);
 /** UNSTABLE = mergeable but some check isn't green yet (CI still running); a failed/cancelled check is a real anomaly. */
 const unstableWait = (pr: PrSnapshot): "wait" | "failed" | null => pr.mergeState !== "UNSTABLE" ? null : failed(pr.checks) ? "failed" : "wait";
 /** Re-reads the ledger for a reason the run may no longer merge (lib/scheduler-merge.ts mergeRunDrift); null = still valid. */
@@ -243,7 +245,8 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     return run;
   };
   const direct = source.direct?.(run) === true;
-  const external = watchUnknown(() => run, direct ? rereadUnknown(source, assertActive) : source, step, (pr) => { noChecks = pr.noChecks === true; });
+  const external = withCancelHandoff(watchUnknown(() => run, direct ? rereadUnknown(source, assertActive) : source, step, (pr) => { noChecks = pr.noChecks === true; }),
+    foreign, MERGE_NOT_SENT, stopped); // CICANCEL1: a twice-cancelled CI goes to the PM through the same hook
   if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
     if (run.phase === "ready") {

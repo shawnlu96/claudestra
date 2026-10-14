@@ -70,7 +70,7 @@ function github(first: string) {
     attempt: 1, status: "completed", conclusion: "failure", firstLog: first, files: ["src/lib/x.ts"], broken: null as Error | null, mergeSha: null as string | null, calls: [] as string[] };
   const snap = (): PrSnapshot => ({ state: gh.state, head: gh.head, branch: BRANCH, base: "main", draft: false, crossRepository: false, mergeState: gh.mergeState,
     mergeSha: gh.mergeSha, checks: gh.checks as PrSnapshot["checks"] });
-  const attempt = async () => ({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion });
+  const attempt = async () => ({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion, headSha: gh.head });
   const ciRerun: CiRerunGh = { runAttempt: attempt, failedLog: async () => gh.firstLog, prFiles: async () => gh.files, rerunFailed: async () => { gh.calls.push("rerun"); } };
   const external = { inspect: async () => { gh.calls.push("inspect"); return snap(); }, freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }),
     carryReview: async () => ({ ok: false, reason: "不沿用" }), updateBranch: async () => { gh.calls.push("update"); },

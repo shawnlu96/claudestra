@@ -171,7 +171,7 @@ async function setup(log: string | null = TIMEOUT_ONLY, files = ["src/x.ts"]) {
     if (a.startsWith("pr checks") && p) return { code: p.checks === passing ? 0 : 8, stdout: p.checks, stderr: "", timedOut: false };
     if (a.startsWith("api repos/example/repo/compare/main...")) return ok({ behind: a.includes(reviewed) ? 1 : 0, main });
     if (a.startsWith("api repos/example/repo/compare/")) return ok({ base: main, commits: [] }); // CIF2: the carried head is not behind main
-    if (a === "run view 54368 --repo example/repo --json attempt,status,conclusion") return ok(gh.run);
+    if (a === "run view 54368 --repo example/repo --json attempt,status,conclusion,headSha") return ok({ ...gh.run, headSha: gh.prs[42]!.head });
     if (a === "run view 54368 --repo example/repo --log-failed") return gh.log === null ? { code: 1, stdout: "", stderr: "HTTP 404", timedOut: false } : ok(gh.log);
     if (a === "run rerun 54368 --failed --repo example/repo") { gh.run = { attempt: 2, status: "queued", conclusion: "" }; return ok(""); }
     if (a === `pr update-branch ${PRS[A]}`) { Object.assign(gh.prs[42]!, { head: merged, checks: checks("pending", null), mergeState: "UNSTABLE" }); return ok(""); }
