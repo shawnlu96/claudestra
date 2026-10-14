@@ -1,8 +1,8 @@
 "use client";
 /**
- * 子 DAG 标签在分区列表（focus-board.tsx）和现有画布之间二选一（team-project-SUBDAG4），use-dag-panes.tsx 只在 center 的 subdag 那一处调它。
+ * 子 DAG 复用 FocusBoard：桌面在分区列表和现有画布间切换，手机始终单列；use-dag-panes.tsx 的 center / mobile 共用同一模型。
  * 列表的条件：有产品 DAG、选中了一个 feature、它有快照、不在对比这个 feature、视图选的是列表。图视图 = 头部 + 原样的画布；其余情况（老 bridge 的
- * 多 feature 画布、版本对比）原样返回画布。看板与 SUBDAG3 共用同一份（use-dag-panes.tsx useBoard），这里不另发请求。
+ * 多 feature 画布、版本对比）原样返回画布。手机缺产品 DAG / feature 快照时返回 MobileDag；与 useBoard 共用看板，不另发请求。
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Tr } from "../collab-model";
@@ -17,7 +17,7 @@ import s from "./focus-board.module.css";
 
 interface FocusPaneArgs {
   now: number;
-  /** 手机：子 DAG 仍是 MobileDag（use-dag-panes.tsx 的 mobile），列表不渲染，跳转要照画布的跳法展开 feature / ✓N */
+  /** 手机仍报告画布跳法，确保没有产品快照时 MobileDag 兜底也能展开跳转目标；FocusBoard 消费同一份 flash */
   narrow: boolean;
   hot: string | null;
   tr: Tr;
@@ -52,11 +52,12 @@ export function useFocusPane(p: FocusPaneArgs) {
   const onFlashed = useCallback((seq: number) => setSeen((x) => Math.max(x, seq)), []);
   const prefix = feature ? nodeId(feature.id, "") : null;
   const flash = prefix && ui.flash && ui.flash.seq > seen && ui.flash.id.startsWith(prefix) ? { key: ui.flash.id.slice(prefix.length), seq: ui.flash.seq } : null;
-  return function focusPane(canvas: ReactNode): ReactNode {
-    if (!feature || !model || ui.compare?.featureId === feature.id) return canvas;
+  function render(canvas: ReactNode, narrow = false): ReactNode {
+    if (!feature || !model || (!narrow && ui.compare?.featureId === feature.id)) return canvas;
     const shared = { feature, view: ui.view, setView: ui.setView, onVersions: p.onVersions, ft, tr: p.tr };
-    if (ui.view === "graph") return <div className={s.pane}><FocusHead {...shared} model={model} />{canvas}</div>;
-    return <FocusBoard key={feature.id} {...shared} model={model} now={p.now} hot={p.hot} flash={flash} onFlashed={onFlashed}
+    if (!narrow && ui.view === "graph") return <div className={s.pane}><FocusHead {...shared} model={model} />{canvas}</div>;
+    return <FocusBoard key={feature.id} {...shared} narrow={narrow} model={model} now={p.now} hot={p.hot} flash={flash} onFlashed={onFlashed}
       onNode={(key) => p.onNode(feature.id, key)} onOwner={p.onOwner} />;
-  };
+  }
+  return Object.assign((canvas: ReactNode) => render(canvas), { narrow: (fallback: ReactNode) => render(fallback, true) });
 }
