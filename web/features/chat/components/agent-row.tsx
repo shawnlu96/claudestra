@@ -349,8 +349,8 @@ export function AgentRow({
             <RowStateChip state="busy" dense={dense} />
           ) : (
             lastAt && (
-              // 行 <22rem 写短（「12分」），给名字让位；万一还挤，时间最后才省略（名字有 8 字下限）
-              <span className="-ml-1 min-w-0 shrink-[0.01] truncate font-mono text-[11px] tabular-nums text-base-content/35 @[22rem]:ml-0 @[22rem]:pl-1">
+              // 行 <22rem 写短（「12分」），给名字让位。不收缩：flex 按比例分摊，哪怕 0.01 也会差零点几像素、被 truncate 截成「12…」
+              <span className="-ml-1 shrink-0 font-mono text-[11px] tabular-nums text-base-content/35 @[22rem]:ml-0 @[22rem]:pl-1">
                 <span className="hidden @[22rem]:inline">{lastAt}</span>
                 <span className="@[22rem]:hidden">{lastShort}</span>
               </span>

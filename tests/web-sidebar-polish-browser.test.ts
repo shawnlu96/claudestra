@@ -219,13 +219,17 @@ const MEASURE = `(({ names }) => {
     .map((b) => b.getBoundingClientRect().right)) - aside.right : 0;
   const rowOverflow = Math.max(0, ...[...document.querySelectorAll("aside li button")].map((b) =>
     Math.max(...[...b.children].map((c) => c.getBoundingClientRect().right)) - b.getBoundingClientRect().right));
-  return { titleLines: lines(title), visible, named, termTitles, headerOverflow, rowOverflow, rowTitle, buttons,
+  // 行尾（时间 / 工作中）被自己的盒子截住（出省略号或半个字）的行数
+  // （scrollWidth 取整，差零点几像素的截断看不出来：比内容的 Range 宽和盒子宽）
+  const clipped = (el) => { const r = document.createRange(); r.selectNodeContents(el); return r.getBoundingClientRect().width > el.getBoundingClientRect().width + 0.05; };
+  const tailClipped = [...document.querySelectorAll("aside li button")].filter((b) => b.lastElementChild && clipped(b.lastElementChild)).length;
+  return { titleLines: lines(title), visible, named, termTitles, headerOverflow, rowOverflow, tailClipped, rowTitle, buttons,
     stage: chips("[data-ledger-stage]"), ctx: chips("[data-chip=ctx]"), busy: chips("[data-chip=busy]"), compacting: chips("[data-chip=compacting]") };
 })`;
 interface Chip { text: string; title: string | null; aria: string | null }
 interface Measure {
   titleLines: number; visible: number; named: Record<string, { visible: number; rowTitle: string | null }>; termTitles: number;
-  headerOverflow: number; rowOverflow: number; rowTitle: string | null; buttons: string[];
+  headerOverflow: number; rowOverflow: number; tailClipped: number; rowTitle: string | null; buttons: string[];
   stage: Chip[]; ctx: Chip[]; busy: Chip[]; compacting: Chip[];
 }
 const NAMES = [LONG, LONG_ZH, LABEL_ZH];
@@ -276,7 +280,7 @@ test.skipIf(!enabled)("after: 标题一行、长名字 ≥ 8 个字、窄时芯�
     expect(r[k].m.rowTitle).toBe(LONG);
     expect(r[k].m.termTitles).toBe(0);
     // 顶栏按钮不伸出侧栏、行尾（时间）不被挤出行外
-    expect([k, r[k].m.headerOverflow <= 0.5, r[k].m.rowOverflow <= 0.5]).toEqual([k, true, true]);
+    expect([k, r[k].m.headerOverflow <= 0.5, r[k].m.rowOverflow <= 0.5, r[k].m.tailClipped]).toEqual([k, true, true, 0]);
   }
   const d = r["1280-default"].m;
   // ASCII 长名字、中文长名字、中文显示名（后跟「| 原名」）都至少露 8 个字：1280 默认侧栏和 390 手机
