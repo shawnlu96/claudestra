@@ -267,7 +267,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "center-request-budget.ts": "fs=1",
     // Project CI reads have no card; response writes use the guarded scheduler CLI, never the pass read connection.
     "ci-main-failure-response-runtime.ts": "ledger=1 fs=1 vcs=2",
-    "ci-selected-receipt.ts": "fs=1 vcs=3", // CISEL2: GET-only gh reads of runs / artifacts / commits / the variable; fs = private temp dir for the artifact
+    "ci-selected-receipt.ts": "fs=1 vcs=4", // CISEL2: GET-only gh reads of runs / artifacts / commits / the variable; fs = private temp dir for the artifact
     "dag-tools-steps.ts": "stmt=1",
     "file-lock.ts": "fs=7",
     "github-release.ts": "proc=1 vcs=1",

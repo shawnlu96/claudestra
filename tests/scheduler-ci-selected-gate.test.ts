@@ -8,8 +8,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { CiSelectedPort, CiSelectedRun } from "../src/lib/ci-selected-receipt.js";
 import type { ObservedAction, RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { fullRecheck, type FullRequestPort, fullRunTitle, fullRequestId, resetFullDispatches, CI_SCOPE_RELATED } from "../src/lib/scheduler-ci-full-request.js";
-import { bindCiSelectedSink, CI_SELECTED_OBSERVE, CI_SELECTED_REPAIR, ciSelectedPreflight, type CiSelectedSink, effectiveSelectedMode, REPAIR_NOTIFY_MS,
-  selectedDecision, useCiSelectedPorts, withCiSelectedGate } from "../src/lib/scheduler-ci-selected-gate.js";
+import { bindCiSelectedSink, CI_SELECTED_OBSERVE, CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED, ciSelectedPreflight, type CiSelectedSink, effectiveSelectedMode, REPAIR_NOTIFY_MS,
+  pendingRepairsIn, selectedDecision, useCiSelectedPorts, withCiSelectedGate } from "../src/lib/scheduler-ci-selected-gate.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openLedger } from "../src/lib/ledger-store.js";
 import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
@@ -42,17 +46,25 @@ function world(w: World = {}) {
   };
   const policy: RecoveryPolicyPort = () => ({ mode: w.key ?? "on", manualAfterMs: null, source: "config" });
   let now = 1_000_000;
-  const notified: { key: string; at: number }[] = [];
+  const at = new Map<ObservedAction, number>(), fail = { observe: 0, notify: 0 }, tries = { observe: 0, notify: 0 };
   const sink: CiSelectedSink = {
     observe: async (a) => {
-      if (!notes.some((n) => n.actionKey === a.actionKey && n.target === a.target)) notes.push(a); // the ledger's dedup key
-      if (a.data?.notified === true) notified.push({ key: String(a.data.key), at: now });
+      tries.observe++;
+      if (fail.observe > 0) { fail.observe--; throw new Error("ledger busy"); }
+      if (!notes.some((n) => n.actionKey === a.actionKey && n.target === a.target)) { notes.push(a); at.set(a, now); } // the ledger's dedup key
     },
-    notifiedSince: (_p, key, since) => notified.some((n) => n.key === key && n.at >= since),
-    notify: async (_p, text) => { notices.push(text); },
+    pendingRepairs: (_p, since) => notes.filter((e) => e.data?.kind === CI_SELECTED_REPAIR && at.get(e)! >= since
+      && !notes.some((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED && n.data.key === e.data!.key && at.get(n)! >= at.get(e)! - REPAIR_NOTIFY_MS))
+      .map((e) => ({ target: e.target, key: String(e.data!.key), file: String(e.data!.file), name: String(e.data!.name), runId: Number(e.data!.runId),
+        attempt: Number(e.data!.attempt), runUrl: String(e.data!.runUrl) })),
+    notify: async (_p, text) => {
+      tries.notify++;
+      if (fail.notify > 0) { fail.notify--; throw new Error("bridge down"); }
+      notices.push(text);
+    },
   };
   const ports = useCiSelectedPorts({ port, policy, sink, now: () => now });
-  return { calls, notes, notices, ports, w, tick(ms: number) { now += ms; } };
+  return { calls, notes, notices, ports, w, fail, tries, tick(ms: number) { now += ms; } };
 }
 
 function fixture(initial: MergeRun = base, snapshot = pr()) {
@@ -186,22 +198,99 @@ describe("[验收线 4] on registers out-of-scope failures for repair, telling P
     const x = use();
     await fixture().drive();
     await fixture().drive(); // the same run planned again: nothing new
-    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR]);
-    expect(x.notes[0]!.data).toMatchObject({ file: "tests/x.test.ts", name: "x > flaky", runUrl: RUN_URL, notified: true });
+    const facts = () => x.notes.filter((n) => n.data?.kind === CI_SELECTED_REPAIR);
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
+    expect(x.notes[0]!.data).toMatchObject({ file: "tests/x.test.ts", name: "x > flaky", runUrl: RUN_URL });
+    expect(x.notes[1]).toMatchObject({ target: "T1", actionKey: expect.stringMatching(/^notified\.[0-9a-f]{16}\.11\.1$/) });
     expect(x.notices).toHaveLength(1);
     expect(x.notices[0]).toContain(RUN_URL);
     expect(x.notices[0]).toContain("tests/x.test.ts > x > flaky");
-    // another card's release of the same flaky test within 24 hours: a new fact, no new notice
+    // another card's release of the same flaky test within 24 hours: a new fact, no new notice, and never re-sent later
     x.tick(REPAIR_NOTIFY_MS - 1);
     await fixture({ ...base, taskId: "T2" }).drive();
-    expect(x.notes).toHaveLength(2);
-    expect(x.notes[1]!.data).toMatchObject({ notified: false });
+    expect(facts()).toHaveLength(2);
     expect(x.notices).toHaveLength(1);
     // past 24 hours: told again
     x.tick(2);
     await fixture({ ...base, taskId: "T3" }).drive();
     expect(x.notices).toHaveLength(2);
+    expect(x.notices[1]).toContain("T3");
+    expect(x.notices[1]).not.toContain("T2");
     expect(x.notes.every((n) => n.mechanism === "ciSelectedGate")).toBe(true);
+  });
+
+  /** One merge-tick inspect of card `taskId` through the gh-marked external (driveMerge inspects more than once per drive). */
+  const inspect = (taskId = "T1") => withCiSelectedGate(fixture().ops, { ...base, taskId }).inspect(base.prRef);
+
+  test("a failed fact write is not deduplicated: the next inspect of the same release writes it and tells PM", async () => {
+    const x = use();
+    x.fail.observe = 1;
+    expect((await inspect()).checks).toEqual(green); // a failed write never changes the answer
+    expect(x.notes).toEqual([]);
+    expect(x.notices).toEqual([]);
+    await inspect(); // the same release seen again
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
+    expect(x.notices).toHaveLength(1);
+    await inspect();
+    expect(x.tries.observe).toBe(3);
+  });
+
+  test("a failed notice is not marked notified: it stays pending and the next release sends it, then once only", async () => {
+    const x = use();
+    x.fail.notify = 1;
+    await inspect();
+    expect(x.tries.notify).toBe(1);
+    expect(x.notices).toEqual([]);
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR]);
+    // another card's release of the same test within 24 hours does not count as told: the notice goes out
+    await inspect("T2");
+    expect(x.notices).toHaveLength(1);
+    expect(x.notices[0]).toContain("T1、T2");
+    expect(x.notes.filter((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED).map((n) => n.target)).toEqual(["T1", "T2"]);
+    await inspect("T3");
+    expect(x.notices).toHaveLength(1);
+  });
+
+  test("a merge tick re-sends a pending notice with no new release (at most every 10 minutes; plain greens unchanged)", async () => {
+    const x = use();
+    x.fail.notify = 1;
+    await inspect();
+    expect(x.notices).toEqual([]);
+    x.w.art = { present: false, text: null }; // later cards are plain greens
+    expect((await inspect("T5")).checks).toEqual(green);
+    expect(x.notices).toEqual([]); // within the throttle window
+    x.tick(10 * 60_000);
+    expect((await inspect("T6")).checks).toEqual(green);
+    expect(x.notices).toHaveLength(1);
+    expect(x.notices[0]).toContain("tests/x.test.ts > x > flaky");
+    x.tick(10 * 60_000);
+    await inspect("T7");
+    expect(x.notices).toHaveLength(1);
+    const plain = fixture({ ...base, taskId: "T8" });
+    await plain.drive();
+    expect(plain.row.phase).toBe("merged");
+  });
+});
+
+describe("[验收线 4] the bound sink's pending query on a real ledger", () => {
+  test("a fact is pending until a notified record for its key lands within 24 hours of it; window and project respected", () => {
+    const db = openLedger(join(mkdtempSync(join(tmpdir(), "cisel2-pending-")), "ledger.sqlite"));
+    /** the row recordObserved appends (raw: no cards needed for a query test) */
+    const note = (target: string, kind: string, key: string, run: number, at: number, project = "p") => db.query(
+      "INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'scheduler', ?, ?, 'note', 'x', ?)").run(at, project, target, JSON.stringify(
+      { kind, key, file: `tests/${key}.test.ts`, name: key, runId: run, attempt: 1, runUrl: `u${run}`, op: "recovery_observe", mechanism: "ciSelectedGate", actionKey: `${kind}.${run}` }));
+    const day = REPAIR_NOTIFY_MS, t0 = 10 * day;
+    note("T1", CI_SELECTED_REPAIR, "k1", 1, t0);
+    note("T9", CI_SELECTED_REPAIR, "k1", 9, t0, "other");
+    expect(pendingRepairsIn(db, "p", t0 - day).map((r) => [r.target, r.key, r.runUrl])).toEqual([["T1", "k1", "u1"]]);
+    note("T1", CI_SELECTED_REPAIR_NOTIFIED, "k1", 1, t0 + 5);
+    expect(pendingRepairsIn(db, "p", t0 - day)).toEqual([]);
+    note("T2", CI_SELECTED_REPAIR, "k1", 2, t0 + day - 1); // told within the 24 hours before it: covered
+    note("T3", CI_SELECTED_REPAIR, "k2", 3, t0 + day - 1);
+    expect(pendingRepairsIn(db, "p", t0).map((r) => r.target)).toEqual(["T3"]);
+    note("T4", CI_SELECTED_REPAIR, "k1", 4, t0 + day + 10); // the last notice is more than 24 hours older: pending again
+    expect(pendingRepairsIn(db, "p", t0 + 1).map((r) => r.target)).toEqual(["T3", "T4"]);
+    expect(pendingRepairsIn(db, "p", t0 + day + 5).map((r) => r.target)).toEqual(["T4"]); // older facts drop out of the window
   });
 });
 
@@ -262,7 +351,7 @@ describe("ci-full re-check: a released full run counts only under on", () => {
     open![Symbol.dispose]();
     use({ key: "off" });
     expect(await fullRecheck(base, prRelated, fullPort())).toMatch(/run_failed/);
-    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR]);
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
   });
 });
 

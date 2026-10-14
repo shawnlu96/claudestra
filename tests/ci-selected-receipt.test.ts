@@ -98,6 +98,51 @@ describe("gh port", () => {
     expect(await port.variable("o/r")).toBeNull();
     expect(argv.every((a) => a[0] === "gh" && a[1] === "api" && !a.includes("-X"))).toBe(true);
     expect(argv[0]).toEqual(["gh", "api", `repos/o/r/actions/runs?head_sha=${HEAD}&event=pull_request&per_page=100`]);
-    expect(argv[1]).toEqual(["gh", "api", "repos/o/r/actions/runs/9/artifacts?name=ci-selected-verdict&per_page=100"]);
+    expect(argv[1]).toEqual(["gh", "api", "repos/o/r/actions/runs/9/artifacts?per_page=100"]);
+  });
+
+  /** gh faked at the command boundary: the run's artifact list, its latest jobs, the check job's log. */
+  function ghArtifacts(artifacts: Record<string, unknown>[], log: { code: number; stdout?: string; stderr?: string } | null = null) {
+    const argv: string[][] = [];
+    const command = (async (a: string[]) => {
+      argv.push(a);
+      const path = a[2] ?? "";
+      const ok = (v: unknown) => ({ code: 0, stdout: JSON.stringify(v), stderr: "", timedOut: false });
+      if (path.includes("/artifacts")) return ok({ artifacts });
+      if (path.includes("/jobs?")) return ok({ jobs: [{ id: 3, name: "test shard 1 of 8" }, { id: 4, name: "typecheck + test + guard" }] });
+      if (path.endsWith("/jobs/4/logs") && log) return { stdout: "", stderr: "", ...log, timedOut: false };
+      if (a[1] === "run" && a[2] === "download") return { code: 1, stdout: "", stderr: "gone", timedOut: false };
+      throw new Error(`unexpected ${a.join(" ")}`);
+    }) as unknown as Parameters<typeof ghCiSelectedPort>[0];
+    return { port: ghCiSelectedPort(command), argv };
+  }
+  const shardLog = (expired = false) => ({ name: "test-shard-1", expired });
+
+  test("[验收线 3] an expired ci-selected-verdict still marks the run: no receipt, never plain", async () => {
+    const g = ghArtifacts([{ name: "ci-selected-verdict", expired: true }, shardLog(true)]);
+    expect(await g.port.verdict("o/r", 9)).toEqual({ present: true, text: null, problem: expect.stringMatching(/已过期/) });
+    expect(g.argv.some((a) => a[1] === "run")).toBe(false); // nothing to download
+    const r = await readCiSelectedReceipt({ ...fakeSelectedPort().port, verdict: (repo, id) => g.port.verdict(repo, id) }, "o/r", HEAD);
+    expect(r).toMatchObject({ marked: true, receipt: null, problem: expect.stringMatching(/已过期/) });
+  });
+
+  test("no verdict artifact beside unexpired shard logs = no release (one listing, no log read)", async () => {
+    const g = ghArtifacts([shardLog(), { name: "ci-related-plan", expired: false }]);
+    expect(await g.port.verdict("o/r", 9)).toEqual({ present: false, text: null });
+    expect(g.argv).toHaveLength(1);
+  });
+
+  test("[验收线 3] the artifacts are gone: the check job's log decides; a log that is gone too cannot prove no release", async () => {
+    const released = ghArtifacts([], { code: 0, stdout: "2026-10-14T00:00:00Z ci-selected: allow=1 out_of_scope=2\n" });
+    expect(await released.port.verdict("o/r", 9)).toEqual({ present: true, text: null, problem: expect.stringMatching(/日志显示放行/) });
+    expect(released.argv.map((a) => a[2])).toEqual(["repos/o/r/actions/runs/9/artifacts?per_page=100", "repos/o/r/actions/runs/9/jobs?filter=latest&per_page=100",
+      "repos/o/r/actions/jobs/4/logs"]);
+    const quiet = ghArtifacts([shardLog(true)], { code: 0, stdout: "2026-10-14T00:00:00Z ci-selected: allow=0 out_of_scope=0\nok\n" });
+    expect(await quiet.port.verdict("o/r", 9)).toEqual({ present: false, text: null });
+    const lost = ghArtifacts([], { code: 1, stderr: "gh: Gone (HTTP 410)" });
+    expect(await lost.port.verdict("o/r", 9)).toEqual({ present: true, text: null, problem: expect.stringMatching(/证不了没放行/) });
+    const flaky = ghArtifacts([], { code: 1, stderr: "gh: Server Error (HTTP 502)" });
+    await expect(flaky.port.verdict("o/r", 9)).rejects.toThrow(/日志读不出/); // a transient read waits, it is not a verdict
+    expect(lost.argv.concat(released.argv).every((a) => a[0] === "gh" && a[1] === "api" && !a.includes("-X"))).toBe(true);
   });
 });

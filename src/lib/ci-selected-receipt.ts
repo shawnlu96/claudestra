@@ -1,8 +1,8 @@
 /**
  * 责任选集放行回执的统一读口（merge-arch-CISEL2）：调度器合并路径（串行、mergeDirect、ci-full 补验）和 PM 预检只经这里读
  * CISEL1 的 `ci-selected-verdict` 工件，不各写一套。读到的回执要和这次 run 的最新 attempt、检出、PR head 都对得上，
- * 字段与 digest 形状都要对；任何一处对不上都读作 null（不放行）。`marked` = 这次 run 带放行标记（有 ci-selected-verdict 工件）：
- * 带标记却读不出回执，调用方一律当红。只读 GitHub，不写任何东西。docs/architecture/ci-selected-gate.md，tests/ci-selected-receipt.test.ts。
+ * 字段与 digest 形状都要对；任何一处对不上都读作 null（不放行）。`marked` = 这次 run 带放行标记（列出了 ci-selected-verdict 工件，
+ * 过期的也算；工件没了、同批证据也没了时看汇总作业日志里的 `ci-selected: allow=1`）：带标记却读不出回执，调用方一律当红。只读 GitHub，不写任何东西。docs/architecture/ci-selected-gate.md，tests/ci-selected-receipt.test.ts。
  */
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -10,10 +10,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CiSelectedMode } from "./ci-selected-verdict.js";
 import type { runBounded } from "./run-bounded.js";
+import { GATE } from "./scheduler-merge-ci-rerun-log.js";
 
 const CI_SELECTED_VERDICT_ARTIFACT = "ci-selected-verdict";
 const CI_SELECTED_VARIABLE = "CI_SELECTED_GATE";
 const CI_WORKFLOW = ".github/workflows/ci.yml";
+/** 与 ci-selected-verdict 同批上传、同样留 14 天的分片日志工件：还在 = 这次 run 的工件没过期，没有 verdict 工件就是真没放行 */
+const SHARD_LOG = /^test-shard-\d+$/;
+const RELEASE_LINE = /^(?:.*\s)?ci-selected: allow=1\b/m;
 const SHA = /^[0-9a-f]{40}$/i;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const REPO = /^[\w.-]+\/[\w.-]+$/;
@@ -32,8 +36,11 @@ export interface CiSelectedPort {
   /** CI 工作流给这个 head 跑的 pull_request run 里最新的一个；没有 = null */
   prRun(repo: string, head: string): Promise<CiSelectedRun | null>;
   runById(repo: string, runId: number): Promise<CiSelectedRun>;
-  /** present = 工件列表里有未过期的 ci-selected-verdict；text = 下载出的 verdict.json（下载不下来 = null） */
-  verdict(repo: string, runId: number): Promise<{ present: boolean; text: string | null }>;
+  /**
+   * present = 这次 run 放行过：列出了 ci-selected-verdict 工件（过期的也算），或工件与同批分片日志都不在了、汇总作业日志里有放行行
+   * （日志也读不到 = 证据没了，同样算）。text = 下载出的 verdict.json（过期 / 下载不下来 = null，problem 说为什么）
+   */
+  verdict(repo: string, runId: number): Promise<{ present: boolean; text: string | null; problem?: string }>;
   commitParents(repo: string, sha: string): Promise<string[]>;
   /** 仓库变量 CI_SELECTED_GATE 的原值；没设 = null，读不出抛错 */
   variable(repo: string): Promise<string | null>;
@@ -65,7 +72,7 @@ async function bind(port: CiSelectedPort, repo: string, run: CiSelectedRun, chec
   const art = await port.verdict(repo, run.id);
   if (!art.present) return { marked: false, receipt: null, ...at };
   const no = (problem: string): CiSelectedRead => ({ marked: true, receipt: null, problem, ...at });
-  if (art.text === null) return no(`${CI_SELECTED_VERDICT_ARTIFACT} 下载不下来`);
+  if (art.text === null) return no(art.problem ?? `${CI_SELECTED_VERDICT_ARTIFACT} 下载不下来`);
   const v = parseVerdict(art.text);
   if (!v) return no(`${CI_SELECTED_VERDICT_ARTIFACT} 不是合法回执`);
   if (v.runId !== run.id) return no(`回执来自 run ${String(v.runId)}，不是 run ${run.id}`);
@@ -106,6 +113,16 @@ export function ghCiSelectedPort(command: Command, cwd?: string): CiSelectedPort
     return JSON.parse(r.stdout) as unknown;
   };
   const slug = (repo: string) => { if (!REPO.test(repo)) throw new Error(`仓库名不合法：${repo.slice(0, 80)}`); return repo; };
+  /** verdict 工件和同批分片日志都不在了（过期清掉 / 被删）：看汇总作业日志有没有放行行；日志也没了 = 证不了没放行。null = 没放行 */
+  const releasedByLog = async (repo: string, runId: number): Promise<string | null> => {
+    const page = await api(`repos/${slug(repo)}/actions/runs/${runId}/jobs?filter=latest&per_page=100`);
+    const job = (isObj(page) && Array.isArray(page.jobs) ? page.jobs.filter(isObj) : []).find((j) => j.name === GATE.job && posInt(j.id));
+    if (!job) return null; // 没有汇总作业就没有放行（放行只在它里面成立）
+    const r = await exec(["gh", "api", `repos/${slug(repo)}/actions/jobs/${Number(job.id)}/logs`], 60_000);
+    if (r.code !== 0 && !r.timedOut && /HTTP 4(04|10)/.test(r.stderr)) return `${CI_SELECTED_VERDICT_ARTIFACT} 工件和汇总作业日志都没了，证不了没放行`;
+    if (r.code !== 0 || r.timedOut) throw new Error(`汇总作业日志读不出：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}`);
+    return RELEASE_LINE.test(r.stdout) ? `${CI_SELECTED_VERDICT_ARTIFACT} 工件没了，汇总作业日志显示放行过` : null;
+  };
   return {
     async prRun(repo, head) {
       if (!SHA.test(head)) throw new Error("head 不是完整 SHA");
@@ -121,9 +138,15 @@ export function ghCiSelectedPort(command: Command, cwd?: string): CiSelectedPort
       return runRow(r);
     },
     async verdict(repo, runId) {
-      const page = await api(`repos/${slug(repo)}/actions/runs/${runId}/artifacts?name=${CI_SELECTED_VERDICT_ARTIFACT}&per_page=100`);
+      const page = await api(`repos/${slug(repo)}/actions/runs/${runId}/artifacts?per_page=100`);
       const rows = isObj(page) && Array.isArray(page.artifacts) ? page.artifacts.filter(isObj) : [];
-      if (!rows.some((a) => a.name === CI_SELECTED_VERDICT_ARTIFACT && a.expired !== true)) return { present: false, text: null };
+      const mine = rows.filter((a) => a.name === CI_SELECTED_VERDICT_ARTIFACT);
+      if (!mine.length) {
+        if (rows.some((a) => SHARD_LOG.test(text(a.name)) && a.expired !== true)) return { present: false, text: null };
+        const problem = await releasedByLog(repo, runId);
+        return problem ? { present: true, text: null, problem } : { present: false, text: null };
+      }
+      if (!mine.some((a) => a.expired !== true)) return { present: true, text: null, problem: `${CI_SELECTED_VERDICT_ARTIFACT} 已过期，回执读不到` };
       const dir = mkdtempSync(join(tmpdir(), "ci-selected-"));
       try {
         const r = await exec(["gh", "run", "download", String(runId), "-R", repo, "-n", CI_SELECTED_VERDICT_ARTIFACT, "-D", dir], 60_000);

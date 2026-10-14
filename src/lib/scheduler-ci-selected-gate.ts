@@ -2,9 +2,11 @@
  * 台账侧的责任选集放行闸（merge-arch-CISEL2）。CISEL1 在 CI_SELECTED_GATE=on 时让范围外红的片以成功结束；合并前判绿时，
  * 只有回执核得上、有效档是 on 才接受这次绿。有效档 = 仓库变量 CI_SELECTED_GATE 与恢复键 ciSelectedGate 中更严的一个
  * （off 比 observe 严，observe 比 on 严）。observe：当红走现有 ci_fail，另记一条 ci_selected_gate_observe 观察（run + attempt + head 去重）；
- * off：当红、不记；带放行标记却读不出回执：当红。on 接受时，每个范围外失败登记一条待修事实，同文件同用例 24 小时内只通知 PM 一次。
+ * off：当红、不记；带放行标记却读不出回执：当红。on 接受时，每个范围外失败登记一条待修事实，同文件同用例 24 小时内只通知 PM 一次；
+ * 去重只在写成功后确认，通知发出后才另记「已通知」，没发出去的待修留在台账里，之后的合并 tick 补送。
  * 没有放行标记的绿 / 红原样返回。docs/architecture/ci-selected-gate.md，tests/scheduler-ci-selected-gate.test.ts。
  */
+import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { type CiSelectedMode, ciSelectedMode } from "./ci-selected-verdict.js";
 import { type CiSelectedPort, type CiSelectedRead, type CiSelectedReceipt, ghCiSelectedPort, readCiSelectedReceipt,
@@ -20,6 +22,7 @@ import { isTestProcess } from "./test-guard.js";
 const CI_SELECTED_KEY = "ciSelectedGate" as const;
 export const CI_SELECTED_OBSERVE = "ci_selected_gate_observe";
 export const CI_SELECTED_REPAIR = "ci_selected_repair";
+export const CI_SELECTED_REPAIR_NOTIFIED = "ci_selected_repair_notified";
 export const REPAIR_NOTIFY_MS = 24 * 3600_000;
 
 const RANK: Record<CiSelectedMode, number> = { off: 0, observe: 1, on: 2 };
@@ -44,10 +47,11 @@ export function selectedDecision(read: CiSelectedRead, mode: CiSelectedMode): Se
 /** 观察与待修的台账写口；合并 tick 绑定（bindCiSelectedSink），没绑定时只打日志。 */
 export interface CiSelectedSink {
   observe(a: ObservedAction): Promise<void>;
-  /** 这条待修（key = 文件 + 用例名）从 since 起是否已经通知过 PM */
-  notifiedSince(project: string, key: string, since: number): boolean;
+  /** since 起登记、还没被「已通知」盖住的待修事实（同 key 的已通知记录在事实前 24 小时内或之后就算盖住） */
+  pendingRepairs(project: string, since: number): PendingRepair[];
   notify(project: string, text: string): Promise<void>;
 }
+export interface PendingRepair { target: string; key: string; file: string; name: string; runId: number; attempt: number; runUrl: string }
 interface Ports { port: CiSelectedPort | null; policy: RecoveryPolicyPort; now: () => number; sink: CiSelectedSink | null }
 let ghPort: CiSelectedPort | null = null;
 const defaults = (): Ports => ({ port: isTestProcess() ? null : (ghPort ??= ghCiSelectedPort(runBounded)), policy: recoveryPolicy, now: Date.now, sink });
@@ -55,19 +59,33 @@ let sink: CiSelectedSink | null = null;
 let over: Partial<Ports> = {};
 const ports = (): Ports => ({ ...defaults(), ...over });
 const said = new Set<string>();
+const flushed = new Map<string, number>();
 /** Tests: replace some ports until disposed. */
 export function useCiSelectedPorts(next: Partial<Ports>): Disposable {
   const before = over;
   over = { ...before, ...next };
-  said.clear();
-  return { [Symbol.dispose]: () => { over = before; said.clear(); } };
+  said.clear(); flushed.clear();
+  return { [Symbol.dispose]: () => { over = before; said.clear(); flushed.clear(); } };
 }
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
-/** 待修事实与 PM 通知（info 级：PM 按需拉，不叫醒）；同一条从 since 起已通知过就不再通知。 */
-const REPAIR_SQL = `SELECT 1 FROM events WHERE project=? AND kind='note' AND ts>=? AND json_extract(data,'$.op')='recovery_observe'
-  AND json_extract(data,'$.mechanism')='${CI_SELECTED_KEY}' AND json_extract(data,'$.kind')='${CI_SELECTED_REPAIR}'
-  AND json_extract(data,'$.key')=? AND json_extract(data,'$.notified')=1 LIMIT 1`;
+const OBSERVED = (e: string, kind: string) => `${e}.kind='note' AND json_extract(${e}.data,'$.op')='recovery_observe'
+  AND json_extract(${e}.data,'$.mechanism')='${CI_SELECTED_KEY}' AND json_extract(${e}.data,'$.kind')='${kind}'`;
+/** 待发送的待修：since 起的事实里，同 key 没有「事实前 24 小时内或之后」的已通知记录的（已通知 = 通知真发出去后另记的一条）。 */
+const PENDING_SQL = `SELECT e.target, e.data FROM events e WHERE e.project=? AND e.ts>=? AND ${OBSERVED("e", CI_SELECTED_REPAIR)}
+  AND NOT EXISTS (SELECT 1 FROM events n WHERE n.project=e.project AND n.ts>=e.ts-${REPAIR_NOTIFY_MS} AND ${OBSERVED("n", CI_SELECTED_REPAIR_NOTIFIED)}
+    AND json_extract(n.data,'$.key')=json_extract(e.data,'$.key')) ORDER BY e.seq LIMIT 200`;
+const pendingRow = (target: string, raw: string): PendingRepair | null => {
+  try {
+    const d = JSON.parse(raw) as Record<string, unknown>;
+    return typeof d.key === "string" && typeof d.file === "string" && typeof d.name === "string" ? { target, key: d.key, file: d.file, name: d.name,
+      runId: Number(d.runId), attempt: Number(d.attempt), runUrl: typeof d.runUrl === "string" ? d.runUrl : "" } : null;
+  } catch { return null; } // 读不懂的事实不补送（只是台账里的一行，不影响合并）
+};
+/** 绑定写口的 pendingRepairs（只读查询；tests 直接对台账跑）。 */
+export const pendingRepairsIn = (db: Database, project: string, since: number): PendingRepair[] =>
+  (db.query(PENDING_SQL).all(project, since) as { target: string; data: string }[]).map((r) => pendingRow(r.target, r.data))
+    .filter((r): r is PendingRepair => r !== null);
 let reader: LedgerReader | null = null;
 /** The pass's ledger connection is not handed here: reads (dedup, the PM's name) use the read-only reader, writes the leased manager. */
 const readDb = () => {
@@ -84,7 +102,7 @@ export function bindCiSelectedSink(manager: Manager, assertActive: () => void): 
         "--action", a.action, "--data", JSON.stringify(a.data ?? {}));
       if (r.ok !== true) throw new Error(String(r.error ?? "scheduler-recovery-observe 失败"));
     },
-    notifiedSince: (project, key, since) => readDb().query(REPAIR_SQL).get(project, since, key) !== null,
+    pendingRepairs: (project, since) => pendingRepairsIn(readDb(), project, since),
     // pm-notify pulls the bridge client in, which resolves the bridge URL at load: loaded on first notice, not with the merge driver
     notify: async (project, text) => (await import("./pm-notify.js")).notifyProjectPm(readDb(), project, text, { fromName: "scheduler", level: "info",
       stillActive: () => { try { assertActive(); return true; } catch { return false; } } }), // a lost lease only means this notice is not sent
@@ -103,45 +121,70 @@ const remember = (key: string): boolean => {
   return true;
 };
 
-/** 一次写失败不改变合并路径的回答：打日志；只有停手（租约丢了）才往外抛。 */
-async function write(what: string, who: Who, f: (s: CiSelectedSink) => Promise<void>): Promise<void> {
+/** 一次写失败不改变合并路径的回答：打日志、答 false（调用方不确认去重，下次重试）；只有停手（租约丢了）才往外抛。没绑写口只记日志、答 true。 */
+async function write(what: string, who: Who, f: (s: CiSelectedSink) => Promise<void>): Promise<boolean> {
   const s = ports().sink;
-  if (!s) return void console.log(`🧾 [ci-selected] ${who.taskId} ${what}（合并 tick 没有绑定台账写口，只记日志）`);
-  try { await f(s); } catch (e) {
+  if (!s) return console.log(`🧾 [ci-selected] ${who.taskId} ${what}（合并 tick 没有绑定台账写口，只记日志）`), true;
+  try { await f(s); return true; } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
-    console.error(`⚠️ [ci-selected] ${who.taskId} ${what}没写下（不影响合并判定）：${failText(e)}`);
+    console.error(`⚠️ [ci-selected] ${who.taskId} ${what}没写下（不影响合并判定，下次重试）：${failText(e)}`);
+    return false;
   }
 }
+const once = async (key: string, f: () => Promise<boolean>): Promise<void> => {
+  if (said.has(key)) return;
+  if (await f()) remember(key);
+};
 
 const failures = (r: CiSelectedReceipt) => r.outOfScope.map((f) => `${f.file} > ${f.name}`).join("；").slice(0, 300);
 
 /** observe：一条恢复观察，按 run + attempt + head 去重（进程内先挡一次，台账 dedup 再挡）。 */
 async function noteObserve(who: Who, r: CiSelectedReceipt): Promise<void> {
   const actionKey = `observe.${r.runId}.${r.attempt}.${short(r.head)}`;
-  if (!remember(`${who.project} ${who.taskId} ${actionKey}`)) return;
-  await write("放行观察", who, (s) => s.observe({ project: who.project, mechanism: CI_SELECTED_KEY, target: who.taskId, actionKey,
+  await once(`${who.project} ${who.taskId} ${actionKey}`, () => write("放行观察", who, (s) => s.observe({ project: who.project, mechanism: CI_SELECTED_KEY, target: who.taskId, actionKey,
     action: `放行合并（run ${r.runId} attempt ${r.attempt}，head ${short(r.head)}，范围外失败：${failures(r)}）`,
-    data: { kind: CI_SELECTED_OBSERVE, head: r.head, runId: r.runId, attempt: r.attempt, runUrl: r.runUrl, outOfScope: r.outOfScope, wouldAllow: true } }));
+    data: { kind: CI_SELECTED_OBSERVE, head: r.head, runId: r.runId, attempt: r.attempt, runUrl: r.runUrl, outOfScope: r.outOfScope, wouldAllow: true } })));
 }
 
 const repairKey = (file: string, name: string): string => createHash("sha256").update(`${file}\0${name}`).digest("hex").slice(0, 16);
-/** on 接受放行：每个范围外失败一条待修事实；24 小时内没通知过的合成一条 info 通知给 PM。不碰 CIF8 已知偶发清单、不开修复节点。 */
+/** on 接受放行：每个范围外失败一条待修事实（全部写下才确认本次放行已登记），再补送待发送的待修。不碰 CIF8 已知偶发清单、不开修复节点。 */
 async function registerRepairs(who: Who, r: CiSelectedReceipt): Promise<void> {
-  if (!remember(`${who.project} ${who.taskId} repair.${r.runId}.${r.attempt}`)) return;
-  const fresh: string[] = [], since = ports().now() - REPAIR_NOTIFY_MS;
-  await write("待修登记", who, async (s) => {
+  await once(`${who.project} ${who.taskId} repair.${r.runId}.${r.attempt}`, () => write("待修登记", who, async (s) => {
     for (const f of r.outOfScope) {
-      const key = repairKey(f.file, f.name), notified = !s.notifiedSince(who.project, key, since);
+      const key = repairKey(f.file, f.name);
       await s.observe({ project: who.project, mechanism: CI_SELECTED_KEY, target: who.taskId, actionKey: `repair.${key}.${r.runId}.${r.attempt}`,
         action: `登记待修：${f.file} > ${f.name}（run ${r.runId}）`.slice(0, 300),
-        data: { kind: CI_SELECTED_REPAIR, key, file: f.file, name: f.name, runId: r.runId, attempt: r.attempt, runUrl: r.runUrl, head: r.head, notified } });
-      if (notified) fresh.push(`- ${f.file} > ${f.name}`);
+        data: { kind: CI_SELECTED_REPAIR, key, file: f.file, name: f.name, runId: r.runId, attempt: r.attempt, runUrl: r.runUrl, head: r.head } });
     }
-    if (fresh.length) {
-      await s.notify(who.project, [`[CI 放行待修] ${who.taskId} 按责任选集放行合并，范围外失败 ${fresh.length} 条待修（${r.runUrl}）：`, ...fresh,
-        "已登记为待修事实；是否加进已知偶发清单或开修复节点由你判断。"].join("\n"));
+  }));
+  await flushRepairs(who);
+}
+
+const FLUSH_MS = 10 * 60_000;
+/**
+ * 给 PM 发待发送的待修（info 级：PM 按需拉，不叫醒），同 key 合成一行；通知发出去后才逐条记「已通知」。发不出去什么都不记，
+ * 待修留在台账里，下次登记或合并 tick 的补送再发（重启也一样，读的是台账）；「已通知」没记下最多重发一次。
+ */
+async function flushRepairs(who: Who): Promise<void> {
+  flushed.set(who.project, ports().now());
+  await write("待修通知", who, async (s) => {
+    const byKey = new Map<string, PendingRepair[]>();
+    for (const p of s.pendingRepairs(who.project, ports().now() - REPAIR_NOTIFY_MS)) byKey.set(p.key, [...byKey.get(p.key) ?? [], p]);
+    if (!byKey.size) return;
+    const lines = [...byKey.values()].map((ps) => `- ${ps[0]!.file} > ${ps[0]!.name}（${[...new Set(ps.map((p) => p.target))].join("、")}；${ps.at(-1)!.runUrl}）`);
+    await s.notify(who.project, [`[CI 放行待修] 按责任选集放行合并，范围外失败 ${byKey.size} 条待修：`, ...lines,
+      "已登记为待修事实；是否加进已知偶发清单或开修复节点由你判断。"].join("\n"));
+    for (const p of [...byKey.values()].flat()) {
+      await s.observe({ project: who.project, mechanism: CI_SELECTED_KEY, target: p.target, actionKey: `notified.${p.key}.${p.runId}.${p.attempt}`,
+        action: `待修已通知 PM：${p.file} > ${p.name}（run ${p.runId}）`.slice(0, 300),
+        data: { kind: CI_SELECTED_REPAIR_NOTIFIED, key: p.key, file: p.file, name: p.name, runId: p.runId, attempt: p.attempt, runUrl: p.runUrl } });
     }
   });
+}
+/** 合并 tick 里顺带补送：绑了写口才做，每个项目最多 10 分钟一次；补送失败只打日志，不影响这次 inspect 的回答。 */
+async function maybeFlush(who: Who): Promise<void> {
+  if (!ports().sink || ports().now() - (flushed.get(who.project) ?? -Infinity) < FLUSH_MS) return;
+  await flushRepairs(who);
 }
 
 /** 有效档：仓库变量读不出时按 off（最严）；恢复键读不出时 recoveryPolicy 自己答 off。 */
@@ -190,6 +233,7 @@ export function withCiSelectedGate(base: MergeExternal, run: Pick<MergeRun, "pro
   const inspect = base.inspect.bind(base);
   return { ...base, async inspect(prRef) {
     const pr = await inspect(prRef), repo = repoOf(prRef), port = ports().port;
+    await maybeFlush(run);
     if (!repo || !port || pr.state !== "OPEN" || !allGreen(pr.checks)) return pr;
     let runId: number | undefined;
     const d = await decide(run, repo, async () => { const r = await readCiSelectedReceipt(port, repo, pr.head); runId = r.runId; return r; });
