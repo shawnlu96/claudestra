@@ -154,3 +154,25 @@ describe("[验收线 2] 只认工厂自己那层的 return（r1 审查 nested-re
     expect(measure(nested, mod).partial).toBe(1);
   });
 });
+
+describe("[验收线 2] 嵌套函数带内联对象 / 泛型返回类型也跳过（r2 审查 nested-return-object）", () => {
+  const mod = { "src/lib/m.ts": "export const a = 1;\nexport const b = 2;\n" };
+  const factory = (...lines: string[]) => [`mock.module("../src/lib/m.ts", () => {`, ...lines, `});`].join("\n");
+  test("helper(): {} 返回空对象，工厂列全 → 0", () => {
+    expect(measure(factory(`  function helper(): {} { return {}; }`, `  return { a, b };`), mod)).toMatchObject({ partial: 0, live: 0 });
+  });
+  test("helper(): { a: number; b: number } 列全，工厂只给 a → 1", () => {
+    const r = measure(factory(`  function helper(): { a: number; b: number } {`, `    return { a, b };`, `  }`, `  return { a };`), mod);
+    expect(r).toMatchObject({ partial: 1, live: 0, detail: ['mockleak tests/x.test.ts:1 "../src/lib/m.ts" 缺 1 个导出:b'] });
+  });
+  test("泛型 / 函数类型 / 方法的返回类型，以及 else / try 块里的 return", () => {
+    const cases = [
+      `  function h(): Promise<{ a: number }> { return { a, b }; }`,
+      `  function h(): () => { a: 1 } { return { a, b }; }`,
+      `  const o = { m(x: { k: 1 }): Array<{ a: 1 }> { return { a, b }; } };`,
+      `  if (x) { y(); } else { return { a }; }`,
+      `  try { return { a }; } finally { z(); }`,
+    ];
+    for (const c of cases) expect(measure(factory(c, `  return { a };`), mod).partial).toBe(1);
+  });
+});

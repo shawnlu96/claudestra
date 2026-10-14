@@ -111,7 +111,7 @@ function returnedObject(src: string, from: number, to: number): number {
   return fn ? returnIn(src, from + fn[0].length - 1, closeOf(src, from + fn[0].length - 1)) : -1;
 }
 
-const BLOCK_KW = /(?:^|[^\w$.])(?:if|for|while|switch|catch|with)\s*$/;
+const BLOCK_KW = /(?:^|[^\w$.])(?:if|for|while|switch|catch|with|case)\s*$/;
 
 /** close 位置的 `)` 往回配对的 `(` 下标（字符串已遮罩） */
 function openOf(src: string, close: number): number {
@@ -123,14 +123,32 @@ function openOf(src: string, close: number): number {
   return -1;
 }
 
-/** at 位置的 `{` 是函数体吗：`=> {`、`function f(…) {`、方法 `name(…) {`（可带返回类型）；`if (…) {` 之类不算 */
+/** at 位置的 `{` 是函数体吗：`=> {`、`function f(…) {`、方法 `name(…) {`（可带返回类型，含 `{…}` / `<…>` / `=>`）；`if (…) {` 之类不算 */
 function isFnBody(src: string, at: number): boolean {
   const before = src.slice(Math.max(0, at - 400), at);
   if (/=>\s*$/.test(before)) return true;
-  const sig = /\)\s*(?::\s*[^{}()=;]+)?$/.exec(before);
-  if (!sig) return false;
-  const paren = openOf(src, at - before.length + sig.index);
+  const close = /\)\s*$/.test(before) ? at - before.length + before.trimEnd().length - 1 : returnTypeParen(src, at);
+  if (close < 0) return false;
+  const paren = openOf(src, close);
   return paren >= 0 && !BLOCK_KW.test(src.slice(Math.max(0, paren - 20), paren));
+}
+
+/** at 位置的 `{` 前面是 `) : 返回类型` 吗：往回跳过配平的括号到顶层 `:`，返回它前面 `)` 的下标，不是返回 -1 */
+function returnTypeParen(src: string, at: number): number {
+  let depth = 0;
+  for (let i = at - 1; i >= Math.max(0, at - 400); i--) {
+    const c = src[i]!;
+    if (c === ">" && src[i - 1] === "=") i--;
+    else if (c === ")" || c === "}" || c === "]" || c === ">") depth++;
+    else if (c === "(" || c === "{" || c === "[" || c === "<") {
+      if (--depth < 0) return -1;
+    } else if (depth === 0 && (c === ";" || c === "," || c === "=")) return -1;
+    else if (depth === 0 && c === ":") {
+      const j = src.slice(0, i).trimEnd().length - 1;
+      return src[j] === ")" ? j : -1;
+    }
+  }
+  return -1;
 }
 
 /** 块 [open, close] 里属于本函数（跳过嵌套函数体）的第一个 `return {…}` / `return ({…})` 的 `{` 下标 */
