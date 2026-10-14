@@ -5,53 +5,74 @@
  */
 import type { Database } from "bun:sqlite";
 import { isOwnerLike } from "../lib/ledger-checks.js";
+import { DAG_START_DEDUP_PREFIX } from "../lib/ledger-autostart-grant.js";
+import { cardNames } from "../lib/ledger-card-names.js";
+import { effectiveNodes, getDagVersion, getFeature } from "../lib/ledger-feature.js";
+import type { LedgerTask } from "../lib/ledger-stages.js";
 import { getEventByDedup, getTask, LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { pmRailsScope, workflowModes } from "../lib/pm-rails.js";
 import { advanceLowWater, cardPushes, digestText, digestWindow, interventionEvents, stalledIntents, type PmRailsProjectState, type PmRailsState } from "../lib/pm-rails-notice.js";
 import { cachedPmRailsMode, pmRailsMode } from "../lib/pm-rails-policy.js";
+import { peerRestateSkip, startNodePeerWhy } from "../lib/scheduler-spec-resume-text.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
 import type { LedgerCli, LedgerDeps, Result } from "./ledger-context.js";
+import type { ParsedArgs } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { isWriteInvocation } from "./write-commands.js";
 
 const PM_RAILS_STATE_PATH = statePath("pm-rails.json");
 
-/**
- * start_node 开 auto 之后的几步（lib/dag-tools-steps.ts）各自的确切动作：命令、目标卡在第几个位置参数、必带的旗标、当时卡在哪个阶段。
- * 绑节点（卡在 spec，peer 卡已跳过复述则在 restate）、peer 卡记放置说明、peer 卡跳过复述（只许 spec→restate）。
- */
-const START_STEPS_AFTER_AUTO: Record<string, { cmd: string; taskArg: number; flags?: Record<string, string>; stages: readonly string[] }> = {
-  bind: { cmd: "dag-bind", taskArg: 3, stages: ["spec", "restate"] },
-  placement: { cmd: "decision", taskArg: 1, stages: ["spec"] },
-  restate: { cmd: "stage", taskArg: 1, flags: { from: "spec", to: "restate" }, stages: ["spec"] },
-};
+/** 位置参数、旗标（含 --dedup）、开关都和那一步逐项相等：多一个旗标、少一个、值不同都不算 */
+function exactly(p: ParsedArgs, pos: readonly string[], flags: Record<string, string>): boolean {
+  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+  return p.bools.size === 0 && same(p.pos, pos) && same(Object.keys(p.flags).sort(), Object.keys(flags).sort())
+    && Object.entries(flags).every(([k, v]) => p.flags[k] === v);
+}
 
-/** --name value / --name=value 两种写法都认 */
-function flag(args: readonly string[], name: string): string | undefined {
-  const i = args.findIndex((a) => a === `--${name}` || a.startsWith(`--${name}=`));
-  if (i < 0) return undefined;
-  return args[i].includes("=") ? args[i].slice(args[i].indexOf("=") + 1) : args[i + 1];
+/** 正文是 startNodePeerWhy(peer, 某个理由)：理由是放置模块给的自由文字，只核模板的头尾 */
+function peerWhy(text: string | null | undefined, peer: string): text is string {
+  const [head, tail] = startNodePeerWhy(peer, "\u0000").split("\u0000");
+  return !!text && text.length > head.length + tail.length && text.startsWith(head) && text.endsWith(tail);
+}
+
+/** dag-bind <feature> <key> <卡> --rev <当前 rev>：feature 是建卡时记的那个，节点还没绑卡，卡号就是这个节点的缺省卡号（dag-tools-start.ts） */
+function bindStep(db: Database, p: ParsedArgs, task: LedgerTask, dedup: string): boolean {
+  const [, featureId, key] = p.pos;
+  const f = featureId === task.extra.sharedFeatureId ? getFeature(db, featureId) : null;
+  const v = f?.currentVersion ? getDagVersion(db, f.id, f.currentVersion) : null;
+  const node = v ? effectiveNodes(db, v).find((n) => n.key === key) : undefined;
+  if (!f || !node || node.taskId || cardNames(db, f, node.key).taskId !== task.id) return false;
+  return exactly(p, ["dag-bind", f.id, node.key, task.id], { rev: String(f.rev), dedup });
 }
 
 /**
- * 认 start_node 自己的步骤，不认调用方随手填的 dedup 文本：键是 `dag-start:<卡>:<attempt>:<步>`，命令、目标卡、旗标、卡当前阶段都得是
- * start_node 那一步的确切动作，且同一 attempt 的建卡事件在库里（kind=task、target=这张卡、op=new）。
- * 别的卡的前缀、本卡已开工、拿复述键做别的阶段跳转都豁免不了；能豁免的只剩「原样做 start_node 那一步」，不算干预
- * （tests/pm-rails.test.ts「验收线 12」）。dedup 键一次一用，重放写不出新事件。
+ * 认 start_node 开 auto 之后自己发的那几步（lib/dag-tools-steps.ts），用和执行同一份 CLI 解析结果（重复旗标按最后一份）：
+ * dedup 键 `dag-start:<卡>:<attempt>:<步>`，同一 attempt 的建卡事件在库里，命令的每个参数都和 start_node 那一步一致——
+ * peer 卡的放置说明（startNodePeerWhy 模板）、引用这条说明的 spec→restate、绑本卡的节点。tests/pm-rails.test.ts「验收线 12 / 14」。
+ * 上限：PM 和 start_node 是同一个系统用户，这是防手误的护栏、不是安全边界；能骗过它的只剩故意照 start_node 的参数伪造
+ * （例如编一条放置理由），那本来就等于开卡，不算干预。
  */
-function startNodeStep(db: Database, args: readonly string[]): boolean {
-  const m = /^dag-start:([^:]+):([^:]+):([^:]+)$/.exec(flag(args, "dedup") ?? "");
-  const step = m ? START_STEPS_AFTER_AUTO[m[3]] : undefined;
-  if (!m || !step || args[0] !== step.cmd || args[step.taskArg] !== m[1]) return false;
-  if (Object.entries(step.flags ?? {}).some(([k, v]) => flag(args, k) !== v)) return false;
-  const born = getEventByDedup(db, `dag-start:${m[1]}:${m[2]}:task-new`);
-  return !!born && born.kind === "task" && born.target === m[1] && born.data.op === "new" && step.stages.includes(getTask(db, m[1])?.stage ?? "");
+function startNodeStep(db: Database, p: ParsedArgs): boolean {
+  const dedup = p.flags.dedup ?? "";
+  if (!dedup.startsWith(DAG_START_DEDUP_PREFIX)) return false;
+  const [taskId, attempt, step, ...rest] = dedup.slice(DAG_START_DEDUP_PREFIX.length).split(":");
+  const key = (s: string) => `${DAG_START_DEDUP_PREFIX}${taskId}:${attempt}:${s}`;
+  const born = getEventByDedup(db, key("task-new"));
+  const task = getTask(db, taskId);
+  if (rest.length || !task || !born || born.kind !== "task" || born.target !== taskId || born.data.op !== "new") return false;
+  const peer = /^peer:(.+)$/.exec(String(task.extra.placement ?? ""))?.[1];
+  if (step === "bind") return task.stage === (peer ? "restate" : "spec") && bindStep(db, p, task, dedup);
+  if (!peer || task.stage !== "spec") return false;
+  if (step === "placement") return peerWhy(p.pos[2], peer) && exactly(p, ["decision", taskId, p.pos[2]], { dedup });
+  const placed = getEventByDedup(db, key("placement"));
+  if (step !== "restate" || placed?.kind !== "decision" || placed.target !== taskId || !peerWhy(placed.text, peer)) return false;
+  return exactly(p, ["stage", taskId], { ...peerRestateSkip(placed.text).stage, dedup });
 }
 
 /** 读命令、调度服务、owner、start_node 开卡步骤不开作用域：读不写事件，调度 / owner 从来不是 PM 角色（也省下调度 tick 每条命令的快照查询） */
-export function withPmRails<T>(deps: LedgerDeps, args: string[], run: () => Promise<T>): Promise<T> {
-  if (!isWriteInvocation("ledger", args) || deps.actor === "scheduler" || isOwnerLike(deps.actor) || startNodeStep(deps.db, args)) return run();
+export function withPmRails<T>(deps: LedgerDeps, args: string[], p: ParsedArgs, run: () => Promise<T>): Promise<T> {
+  if (!isWriteInvocation("ledger", args) || deps.actor === "scheduler" || isOwnerLike(deps.actor) || startNodeStep(deps.db, p)) return run();
   const scope = { cmd: args[0] ?? "", mode: cachedPmRailsMode(deps.pmRails?.mode ?? pmRailsMode), modesAtStart: workflowModes(deps.db) };
   return pmRailsScope.run(scope, run);
 }

@@ -18,7 +18,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { ledgerArgs } from "./order-ledger-exit.js";
-import { peerRestateSkip } from "./scheduler-spec-resume-text.js";
+import { peerRestateSkip, startNodePeerWhy } from "./scheduler-spec-resume-text.js";
 
 interface GitResult {
   ok: boolean;
@@ -269,7 +269,7 @@ function cardSteps(io: StepIO, p: StartPlan): Step[] {
  * 或起本机 agent（scheduler-placement-plan.ts pinnedWork）。失败时 workflow / task-new 的 undo 把卡退成人工并取消。
  */
 function restateStep(io: StepIO, p: StartPlan, peer: NonNullable<StartPlan["peer"]>): Step {
-  const why = `start_node 放到 peer:${peer.name}（${peer.reason}）；复述环节跳过，start_node 即 PM 放行，开工单由放置结果派给它`;
+  const why = startNodePeerWhy(peer.name, peer.reason);
   return {
     name: "restate",
     run: async () => failed(await ledger(io, p, "decision", p.taskId, {}, "placement", [peerRestateSkip(why).decision])) ??

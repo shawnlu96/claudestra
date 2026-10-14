@@ -134,6 +134,7 @@ describe("start_node without placement: steps, rollback and products are the pre
     expect((await plan()).ok).toBe(true);
     calls = [];
     const p = product(await start());
+    expect(listEvents(db, { project: P }).filter((e) => e.data.intervention)).toEqual([]);
     expect(digest(p)).toBe(START_GOLDEN.normal);
   });
 
@@ -198,6 +199,7 @@ describe("placement peer:<name>", () => {
     expect(restate!.seq).toBeGreaterThan(decision!.seq);
     expect(restate!.seq).toBeGreaterThan(events.find((e) => e.kind === "scheduler" && e.data.op === "workflow")!.seq);
     expect(getWorkflow(db, "i28-a")).toMatchObject({ mode: "auto", templateVersion: 3 });
+    expect(listEvents(db, { project: P }).filter((e) => e.data.intervention)).toEqual([]);
     expect((await call(deps(), "show_dag", { featureId: "i28" })).version.nodes[0]).toMatchObject({ key: "a", taskId: "i28-a" });
     // The scheduler takes it from there: the skipped restate releases build, and build waits on the pin instead of a local author.
     const snap = autoSnapshot(db, t, { registry: [], maxWorkers: 2, now });

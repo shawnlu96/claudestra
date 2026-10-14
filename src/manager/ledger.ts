@@ -150,7 +150,7 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
   if ("error" in p) return { ok: false, code: "invalid", error: p.error, usage: `ledger ${spec.usage}` };
   try {
     deps.assertLease?.(); // 写锁、registry / projects 这些 await 都过了：台账事务是同步的，核完直接跑
-    return await withPmRails(deps, args, async () => spec.run(new LedgerCli(deps, p)));
+    return await withPmRails(deps, args, p, async () => spec.run(new LedgerCli(deps, p)));
   } catch (e) {
     if (e instanceof SchedulerLeaseLost) return { ok: false, code: "lease-lost", error: e.message };
     if (e instanceof LedgerError) return { ok: false, code: e.code, error: e.message, ...(e.current ? { current: e.current } : {}), usage: `ledger ${spec.usage}` };

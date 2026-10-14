@@ -9,9 +9,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createTask } from "../src/lib/ledger-write.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { getFeature } from "../src/lib/ledger-feature.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import type { LedgerEvent } from "../src/lib/ledger-stages.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
+import { peerRestateSkip, startNodePeerWhy } from "../src/lib/scheduler-spec-resume-text.js";
 import { autoFixture, H2, toBuild } from "./scheduler-auto-helpers.js";
 
 type F = ReturnType<typeof autoFixture>;
@@ -328,4 +330,41 @@ test("[验收线 12] r3 start-node-same-task-spoof：给自己建的卡伪造建
   expect(cmds(marked(f, "T2"))).toEqual(["stage"]);
   expect(await f.cli("pm", "decision", "T2", "原话", "--dedup", "dag-start:T2:x:placement")).toMatchObject({ ok: true }); // 卡已不在 spec
   expect(cmds(marked(f, "T2"))).toEqual(["stage", "decision"]);
+});
+
+test("[验收线 14] r4 start-node-same-task-spoof：按执行用的解析结果逐项核对——重复旗标、同卡任意 decision、绑错节点照标；原样照 start_node 做才豁免", async () => {
+  const f = fixture("observe");
+  expect(await f.cli("pm", "feature-new", "fx", "--title", "探针", "--project", "p")).toMatchObject({ ok: true });
+  const nodes = JSON.stringify(["a", "b", "c", "d"].map((key) => ({ key, oneLine: key, fileGlobs: [`src/${key}.ts`] })));
+  expect(await f.cli("pm", "dag-init", "fx", "--rev", "1", "--nodes", nodes)).toMatchObject({ ok: true });
+  const { id: fx } = f.db.query("SELECT id FROM features").get() as { id: string }; // 带本机 origin 前缀；卡号前缀仍是 fx
+  const key = (id: string, step: string) => `--dedup=dag-start:${id}:x:${step}`;
+  const open = async (id: string, peer: boolean) => {
+    const extra = JSON.stringify({ sharedFeatureId: fx, ...(peer ? { placement: "peer:mate" } : {}) });
+    expect(await f.cli("pm", "task-new", id, "--title", "探针", "--kind", "code", "--project", "p", "--extra", extra, key(id, "task-new"))).toMatchObject({ ok: true });
+    expect(await f.cli("pm", "workflow-set", id, "--rev", "1", "--template", "code", "--version", "2", "--mode", "auto", "--author-family", "claude",
+      "--fallback", "x")).toMatchObject({ ok: true });
+  };
+  const why = startNodePeerWhy("mate", "选最少"), skip = peerRestateSkip(why).stage;
+  const place = (id: string, text = why) => f.cli("pm", "decision", id, text, key(id, "placement"));
+  const restate = (id: string, ...more: string[]) => f.cli("pm", "stage", id, "--from", "spec", "--to", "restate", ...more, "--text", skip.text, key(id, "restate"));
+  const bind = (node: string, id: string) => f.cli("pm", "dag-bind", fx, node, id, "--rev", String(getFeature(f.db, fx)!.rev), key(id, "bind"));
+  // 原样照 start_node 的 peer 路径：放置说明 → spec→restate → 绑本卡的节点
+  await open("fx-a", true);
+  for (const r of [await place("fx-a"), await restate("fx-a"), await bind("a", "fx-a")]) expect(r).toMatchObject({ ok: true });
+  expect(marked(f, "fx-a")).toEqual([]);
+  // 重复旗标：执行取最后一份 --to，豁免也按它判
+  await open("fx-b", true);
+  expect(await place("fx-b")).toMatchObject({ ok: true });
+  expect(await restate("fx-b", "--to", "blocked")).toMatchObject({ ok: true });
+  expect(getTask(f.db, "fx-b")?.stage).toBe("blocked");
+  expect(cmds(marked(f, "fx-b"))).toEqual(["stage"]);
+  // 同一张卡、同一 attempt 任意写的 decision
+  await open("fx-c", true);
+  expect(await place("fx-c", "手工批准部署")).toMatchObject({ ok: true });
+  expect(cmds(marked(f, "fx-c"))).toEqual(["decision"]);
+  // 本机卡绑到别的节点（c 的缺省卡号是 fx-c）
+  await open("fx-d", false);
+  expect(await bind("c", "fx-d")).toMatchObject({ ok: true });
+  expect(cmds(marked(f, "fx-d"))).toEqual(["dag-bind"]);
 });
