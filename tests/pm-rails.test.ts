@@ -283,3 +283,15 @@ test("[验收线 6] r1 observe-digest-leak：observe 期的干预切 on 后不�
   expect(await t.run(digestAfter(f.task().updatedAt))).toMatchObject({ ok: true, sent: 0, projects: ["p"] });
   expect(t.sent).toEqual([]);
 });
+
+test("[验收线 12] 拿不相干卡的 start_node 建卡前缀豁免不了对在跑自动卡的 task-set / stage", async () => {
+  const f = fixture("observe");
+  await toBuild(f);
+  expect(await f.cli("pm", "task-new", "T2", "--title", "探针", "--kind", "code", "--project", "p", "--dedup", "dag-start:T2:probe:task-new")).toMatchObject({ ok: true });
+  expect(await f.cli("pm", "task-set", "T1", "--rev", rev(f), "--model", "z", "--dedup", "dag-start:T2:probe:bind")).toMatchObject({ ok: true });
+  expect(await f.cli("pm", "stage", "T1", "--from", "build", "--to", "blocked", "--dedup", "dag-start:T2:probe:restate")).toMatchObject({ ok: true });
+  // 指向本卡、但本卡没有这个 attempt 的建卡事件，也不在 spec
+  expect(await f.cli("pm", "stage", "T1", "--from", "blocked", "--to", "build", "--dedup", "dag-start:T1:probe:restate")).toMatchObject({ ok: true });
+  expect(cmds(marked(f))).toEqual(["restate-approve", "task-set", "stage"]);
+  expect(marked(f).filter((e) => e.kind === "stage").length).toBe(2);
+});
