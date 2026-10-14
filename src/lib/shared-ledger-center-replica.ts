@@ -10,15 +10,19 @@
  * - Anything over the local limits is refused before any write, with a fixed reason in `center-replica status`.
  * - REPLPULL1: a skipped feature (other project / not planning / other home) and a first detail read that fails keep their fixed
  *   reason in the state file (`skipped`). One sync run at a time (sync lock); dryRun reads the center, takes no lock, writes
- *   nothing (pass it a read-only ledger connection) and runs land()'s checks up to the first write, then predicts the writer's
+ *   nothing (pass it a read-only ledger connection; the instance key is only read, never generated) and runs land()'s checks up to the first write, then predicts the writer's
  *   answer (the background pull's observe mode, shared-ledger-center-replica-pull.ts).
  */
 import type { Database } from "bun:sqlite";
+import { createPrivateKey, createPublicKey } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { STATE_DIR } from "./paths.js";
 import { instanceKeySync, type InstanceKey } from "./instance-key.js";
 import { effectiveNodes, getDagVersion, getFeature, type DagNode, type Feature } from "./ledger-feature.js";
-import { resourceKey } from "./ledger-scheduler.js";
-import { LedgerError } from "./ledger-store.js";
+import { resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
+import { cardFileLocks, globKeys, isFileResource, openDispatch, syncedLocks } from "./ledger-scheduler-lease-sync.js";
+import { getTask, LedgerError } from "./ledger-store.js";
 import { SharedLedgerClient, SharedLedgerRemoteError } from "./shared-ledger-client.js";
 import { featureBaseDigest } from "./shared-ledger-contract-v2-feature-proposals.js";
 import type { SharedLedgerFeatureDetail } from "./shared-ledger-contract.js";
@@ -133,7 +137,7 @@ async function syncAll(db: Database, opts: CenterReplicaSyncOptions) {
     };
     const credential = resolveMirrorCredential(scope, dir);
     if (!credential) { await fail(REPLICA_REASONS.noCredential); continue; }
-    const key = (opts.key ?? (() => instanceKeySync(dir)))();
+    const key = (opts.key ?? (() => (dryRun ? readInstanceKey(dir) : instanceKeySync(dir))))();
     if (!key) { await fail(REPLICA_REASONS.noKey); continue; }
     const transport = { timeoutMs: CENTER_TIMEOUT_MS, ...(opts.fetch ? { fetch: opts.fetch } : {}) };
     let ids: string[];
@@ -148,6 +152,17 @@ async function syncAll(db: Database, opts: CenterReplicaSyncOptions) {
     if (!dryRun) await updateCenterReplicas(dir, (s) => { s.scopes[scopeKey(scope)] = { syncedAt: now(), lastError: null, lastErrorAt: null }; });
   }
   return { ok: true, scopes, features };
+}
+
+/**
+ * dryRun's instance key: read the existing key file only. instanceKeySync generates and writes a missing key, which a dry run
+ * must not do; a missing / unreadable key is this scope's fixed noKey error (the real sync creates it on its first run).
+ */
+function readInstanceKey(dir: string): InstanceKey | null {
+  try {
+    const privateKey = createPrivateKey(readFileSync(join(dir, "instance-key.pem"), "utf8"));
+    return { publicKey: String(createPublicKey(privateKey).export({ format: "jwk" }).x), privateKey };
+  } catch { return null; } // missing or unreadable: the caller records REPLICA_REASONS.noKey for the scope
 }
 
 /** REPLPULL1: keep why a center feature has no replica; rewritten only when the reason changes (the pull runs every 5 minutes). */
@@ -188,8 +203,39 @@ function predictReplicaWrite(db: Database, w: ReplicaWrite, existing: Feature | 
     const same = !!cur && JSON.stringify(effectiveNodes(db, cur).map(nodeShape)) === JSON.stringify(nodes.map(nodeShape)) && existing.title === w.title;
     return same ? done("unchanged", existing.currentVersion) : failedWith("中心同一版本的内容与本机副本不一致");
   }
+  if (boundScopesRefused(db, existing, nodes)) return failedWith(REPLICA_REASONS.ledger); // applyVersion's LedgerError → land(): ledger
   if (existing.title !== w.title && titleTaken(db, existing.project, w.title, existing.id)) return failedWith("本机项目里已有同名 feature");
   return done("replayed", w.version);
+}
+
+/**
+ * Read-only mirror of applyVersion's syncBoundScopes / syncCardFileScope (ledger-dag-write.ts): would a kept bound card's
+ * scope change be refused — an emptied scope, a narrowing that drops a lock under an open dispatch, or a new lock overlapping
+ * another card's resource. Cards are taken in node order and each one's new locks count for the next, as in the writer.
+ */
+function boundScopesRefused(db: Database, f: Feature, next: readonly DagNode[]): boolean {
+  const curVersion = getDagVersion(db, f.id, f.currentVersion);
+  const cur = curVersion ? effectiveNodes(db, curVersion) : [];
+  const sorted = (g: readonly string[] | undefined) => [...(g ?? [])].sort().join("\n");
+  const rows = new Map<string, { resource: string; taskId: string }[]>(); // project → resources, with earlier cards' predicted moves
+  const resources = (project: string) => rows.get(project) ?? rows.set(project,
+    db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(project) as { resource: string; taskId: string }[]).get(project)!;
+  for (const n of next) {
+    const was = n.taskId ? cur.find((o) => o.taskId === n.taskId) : undefined;
+    const task = was && n.taskId ? getTask(db, n.taskId) : null;
+    if (!task || sorted(was!.fileGlobs) === sorted(n.fileGlobs)) continue;
+    if (!n.fileGlobs?.length) return true;
+    const oldGlobs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
+    if (globKeys(oldGlobs).join("\n") === globKeys(n.fileGlobs).join("\n")) continue;
+    const held = cardFileLocks(db, task.id), locks = syncedLocks(held, oldGlobs, n.fileGlobs);
+    if (held.some((h) => !locks.includes(h.resource)) && openDispatch(db, task.id)) return true;
+    if (!held.length) continue;
+    const all = resources(task.project), add = locks.filter((r) => !held.some((h) => h.resource === r));
+    if (add.some((r) => all.some((o) => o.taskId !== task.id && isFileResource(o.resource) && resourcesOverlap(r, o.resource)))) return true;
+    const dropped = new Set(held.map((h) => h.resource).filter((r) => !locks.includes(r)));
+    rows.set(task.project, all.filter((o) => o.taskId !== task.id || !dropped.has(o.resource)).concat(add.map((resource) => ({ resource, taskId: task.id }))));
+  }
+  return false;
 }
 
 async function syncOne(db: Database, dir: string, now: () => number, client: SharedLedgerClient, credential: SharedLedgerLocalCredential,

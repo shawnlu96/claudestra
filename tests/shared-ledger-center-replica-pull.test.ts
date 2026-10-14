@@ -1,6 +1,6 @@
 /** REPLPULL1 background center-replica pull: on lands / replays (AC1 / AC2), observe logs only (AC3), skip reasons kept (AC4), no double write with the CLI (AC5). */
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { v2ObjectDigest } from "../src/lib/shared-ledger-contract-v2-integrity.js";
 import { effectiveNodes, getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
@@ -339,4 +339,74 @@ test("review r1: a failing detail read logs one round error line (observe and on
   expect(rounds).toEqual([{ project: k.f.project, mode: "off", features: [] }]);
   expect(lines).toEqual([`[center-replica-pull] ${k.f.project} 读档位失败: SyntaxError，本轮按 off 处理`]);
   expect(k.center.requests.length).toBe(requests);
+});
+
+test("AC3 observe (review r2): a missing instance key is a fixed round error, never generated (no file appears)", async () => {
+  const k = await kit();
+  k.center.publish(fakeFeature());
+  // The state dir is shared by the tests (and instanceKeySync caches per dir): the key file is put back afterwards.
+  const pem = join(k.dir, "instance-key.pem"), saved = existsSync(pem) ? readFileSync(pem) : null;
+  rmSync(pem, { force: true });
+  try {
+    const before = tree(k.dir);
+    const p = pull(k, "observe");
+    expect((await p.run())[0]).toMatchObject({ mode: "observe", error: REPLICA_REASONS.noKey, features: [] });
+    expect(p.lines).toEqual([`[center-replica-pull] ${k.f.project} 本轮失败: ${REPLICA_REASONS.noKey}`]);
+    expect(tree(k.dir)).toEqual(before);
+    expect(existsSync(pem)).toBe(false);
+    expect(k.center.requests).toEqual([]);
+  } finally { if (saved) writeFileSync(pem, saved, { mode: 0o600 }); }
+});
+
+/** A dispatch intent for `taskId` (status decides whether it is still open) holding `resources` as card locks. */
+function holdLocks(k: Kit, intentId: string, taskId: string, status: string, resources: string[]) {
+  k.f.db.prepare(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
+    VALUES (?, ?, ?, 'code', 'dispatch', 0, 1, 1, 1, ?, 'test', 0, 0)`).run(intentId, taskId, k.f.project, status);
+  for (const r of resources) k.f.db.prepare("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES (?, ?, ?, ?, 0, 'card')")
+    .run(k.f.project, r, taskId, intentId);
+}
+
+const SCOPE_CASES: { name: string; globs: string[]; setup: (k: Kit) => void; expected: "failed" | "replayed" }[] = [
+  { name: "bound node scope emptied", globs: [], setup: () => {}, expected: "failed" },
+  { name: "narrowed under an open dispatch", globs: ["src/n7x/alpha2.ts"], expected: "failed",
+    setup: (k) => holdLocks(k, "i-alpha", "n7x-alpha", "submitted", ["src/n7x/alpha.ts"]) },
+  { name: "widened onto another card's lock", globs: ["src/n7x/alpha.ts", "src/n7x/shared.ts"], expected: "failed",
+    setup: (k) => {
+      holdLocks(k, "i-alpha", "n7x-alpha", "done", ["src/n7x/alpha.ts"]);
+      createTask(k.f.db, { actor: k.f.actor }, { project: k.f.project, id: "n7x-other", title: "别的卡", kind: "code", extra: { fileGlobs: ["src/n7x/shared.ts"] } });
+      holdLocks(k, "i-other", "n7x-other", "submitted", ["src/n7x/shared.ts"]);
+    } },
+  { name: "widened with no clash", globs: ["src/n7x/alpha.ts", "src/n7x/free.ts"], expected: "replayed",
+    setup: (k) => holdLocks(k, "i-alpha", "n7x-alpha", "done", ["src/n7x/alpha.ts"]) },
+];
+for (const c of SCOPE_CASES) {
+  test(`AC3 observe (review r2): a bound node's scope change predicts the real sync — ${c.name}`, async () => {
+    const k = await kit();
+    k.center.publish(fakeFeature());
+    expect(await k.sync()).toMatchObject({ features: [{ result: "created", version: 2 }] });
+    await claimAndBind(k, "alpha", "n7x-alpha", ["src/n7x/alpha.ts"]);
+    c.setup(k);
+    k.center.publish(fakeFeature({ version: 3, rev: 7, bindings: [{ nodeKey: "alpha", taskId: "center-task-1" }],
+      nodes: [node("alpha", { fileGlobs: c.globs }), node("beta", { deps: ["alpha"] })] }), "revise");
+    const before = ledgerSnapshot(k.f.db);
+    const p = pull(k, "observe");
+    const predicted = (await p.run())[0]!.features;
+    expect(ledgerSnapshot(k.f.db)).toEqual(before);
+    const real = ((await k.sync()) as { features: typeof predicted }).features;
+    expect(predicted).toEqual(real);
+    expect(real).toMatchObject([{ result: c.expected }]);
+    expect(p.lines.some((l) => l.includes("本会更新"))).toBe(c.expected === "replayed");
+    expect(getFeature(k.f.db, LOCAL_ID)!.currentVersion).toBe(c.expected === "replayed" ? 3 : 2);
+  });
+}
+
+test("review r2: a policy read error (source:error, mode off) logs one fixed line without its diagnostic and stays off", async () => {
+  const k = await kit();
+  k.center.publish(fakeFeature());
+  const lines: string[] = [];
+  const rounds = await runCenterReplicaPull({ db: () => k.f.db, readDb: () => openLedgerReadOnly(k.f.db.filename), stateDir: k.dir, log: (l) => lines.push(l),
+    policy: () => ({ mode: "off", source: "error", diagnostic: "/Users/someone/.claude-orchestrator/recovery-policy.json 读不了" }) });
+  expect(rounds).toEqual([{ project: k.f.project, mode: "off", features: [] }]);
+  expect(lines).toEqual([`[center-replica-pull] ${k.f.project} 读档位失败: 恢复策略不可用，本轮按 off 处理`]);
+  expect(k.center.requests).toEqual([]);
 });
