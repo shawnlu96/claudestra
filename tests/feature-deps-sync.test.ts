@@ -237,3 +237,28 @@ test("[验收线 4] observe compute errors keep failures and backoff untouched; 
     expect(w.group().failures).toBe(1); expect(w.group().nextAttemptAt).toBeGreaterThan(0); expect(w.uploads).toHaveLength(0);
   } finally { w.close(); }
 });
+// Exact pre-TEAMDEPS1c serialized group: coverage must come from the (disabled) registry entries.
+const legacy = { hash: null, scopeHash: null, lastSentAt: 123, lastComputedAt: 123, unsupportedUntil: 0, cooldown: 0, failures: 0, nextAttemptAt: 0, wouldSend: null };
+test("[验收线 1] state written before this change (no projects / centerProjects) still clears from the complete registry", async () => {
+  for (const mode of ["on", "observe"] as const) {
+    const w = await world(mode);
+    try {
+      writeFileSync(join(w.dir, "feature-deps-sync.json"), JSON.stringify({ schemaVersion: 1,
+        groups: { [JSON.stringify(["center-a", "team-a", "home-a"])]: legacy }, notedDays: {}, cooldowns: {} }));
+      for (const [, e] of w.entries) e.enabled = false;
+      await w.pass([]);
+      if (mode === "on") { expect(w.uploads).toEqual([{ schemaVersion: 1, teamId: "team-a", sourceInstanceId: "home-a", edges: [] }]); expect(w.state().groups).toEqual({}); }
+      else { expect(w.uploads).toHaveLength(0); expect(w.group().clearObservedAt).toBeGreaterThan(0); }
+    } finally { w.close(); }
+  }
+});
+test("[验收线 1] legacy state with no registry entry left for the team stays put (coverage unknown, fail closed)", async () => {
+  const w = await world("on");
+  try {
+    writeFileSync(join(w.dir, "feature-deps-sync.json"), JSON.stringify({ schemaVersion: 1,
+      groups: { [JSON.stringify(["center-a", "team-gone", "home-a"])]: legacy }, notedDays: {}, cooldowns: {} }));
+    await w.pass(); w.uploads.length = 0;
+    w.advance(1000); await w.pass([]);
+    expect(w.uploads).toHaveLength(0); expect(w.state().groups[JSON.stringify(["center-a", "team-gone", "home-a"])].failures).toBe(0);
+  } finally { w.close(); }
+});

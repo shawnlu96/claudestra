@@ -1,7 +1,7 @@
 /** Edge aggregation and computation-error handling for feature-deps-sync.ts. Several local features (or projects) may map
  * to one center feature, so duplicates are merged before the contract's uniqueness check instead of failing the team.
  * Over the contract cap nothing is sent: a truncated full replacement would silently delete edges at the center.
- * tests/feature-deps-sync-edges.test.ts.
+ * tests/feature-deps-sync.test.ts.
  */
 import type { FeatureDep } from "./shared-ledger-contract-feature-deps.js";
 import { noteOncePerDay, type GroupState, type SyncFile } from "./feature-deps-sync-state.js";
