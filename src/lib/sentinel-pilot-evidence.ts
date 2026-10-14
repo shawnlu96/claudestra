@@ -48,7 +48,11 @@ function isHumanText(text: string, prompt: { text: string; seen: boolean }): boo
   return !t.startsWith("<");
 }
 
-interface Acc { out: RunSessionEvidence; openQuestions: Set<string>; prompt: { text: string; seen: boolean } }
+/** reply：时间窗内最后一条有文字的回复（同一条 API 消息拆成的多行按 message.id 合在一起）；纯工具调用的行不算回复、不清它 */
+interface Acc {
+  out: RunSessionEvidence; openQuestions: Set<string>; prompt: { text: string; seen: boolean };
+  reply: { id: unknown; texts: string[] } | null;
+}
 
 function onAssistant(rec: AnyRecord, acc: Acc): void {
   const ev = acc.out.evidence;
@@ -71,9 +75,10 @@ function onAssistant(rec: AnyRecord, acc: Acc): void {
   const all = texts.join("\n");
   if (rec.isApiErrorMessage === true ? /rate.?limit|usage.?limit/i.test(String(rec.error ?? "")) || isLimitHitText(all) : isLimitHitText(all)) {
     ev.rateLimitText ??= all.trim() || "rate_limit（没有原文）";
-  } else {
-    const r = parseResultLine(all);
-    if (r) acc.out.result = r;
+  } else if (all.trim()) {
+    const id = rec.message?.id;
+    if (acc.reply && id !== undefined && acc.reply.id === id) acc.reply.texts.push(all);
+    else acc.reply = { id, texts: [all] };
   }
 }
 
@@ -87,12 +92,12 @@ function onUser(rec: AnyRecord, acc: Acc): void {
 
 /**
  * 时间窗内的行 → 证据。`prompt` 是 cron 任务发出去的原文（不算人工消息）；`runtime` 交给 translateSessionLine 认行格式。
- * 结果行取时间窗内最后出现的那条（assistant 文字或 reply 正文）；撞额度那句不当结果行。
+ * 结果行只从时间窗内最后一条回复（assistant 文字或 reply 正文）里取：最后一条回复没有结果行就是没有，不沿用更早回复里的结论；撞额度那句不当回复。
  */
 export function collectRunEvidence(
   lines: readonly string[], window: { from: number; to: number }, opts: { runtime?: string; prompt?: string } = {},
 ): RunSessionEvidence {
-  const acc: Acc = { out: { evidence: emptyEvidence(), result: null }, openQuestions: new Set(), prompt: { text: norm(opts.prompt ?? ""), seen: false } };
+  const acc: Acc = { out: { evidence: emptyEvidence(), result: null }, openQuestions: new Set(), prompt: { text: norm(opts.prompt ?? ""), seen: false }, reply: null };
   const scope = {};
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -103,5 +108,6 @@ export function collectRunEvidence(
     else if (rec.type === "user") onUser(rec, acc);
   }
   acc.out.evidence.questionOpen = acc.openQuestions.size > 0;
+  acc.out.result = acc.reply ? parseResultLine(acc.reply.texts.join("\n")) : null;
   return acc.out;
 }

@@ -5,7 +5,7 @@
  * 运行台账读不出（CronRunStore.list 抛）就本轮不生成、下一分钟再试：不能把「读不出」当成「没有记录」判没检查。
  * tests/sentinel-pilot.test.ts。
  */
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CronJob } from "./cron-job.js";
@@ -17,7 +17,7 @@ import { runtimeForSessionPath } from "./session-source.js";
 import { readJsonLenient } from "./state-file.js";
 import { collectRunEvidence } from "./sentinel-pilot-evidence.js";
 import {
-  classifySlot, dueSlots, localDate, recordForSlot, renderNotice, renderReport, reportFileName, reportReadyAt, runWindow, sentinelPilotMode,
+  classifySlot, dueSlots, localDate, parseLocalDate, recordForSlot, renderNotice, renderReport, reportFileName, reportReadyAt, runWindow, sentinelPilotMode,
   type ReportInput, type SentinelPilotMode, type SessionRead, type SlotVerdict,
 } from "./sentinel-pilot.js";
 
@@ -67,7 +67,8 @@ export function defaultSentinelDeps(): SentinelTickDeps {
 
 async function sessionFor(r: CronRunRecord, job: CronJob, readSession: SentinelTickDeps["readSession"]): Promise<SessionRead | undefined> {
   const w = runWindow(r);
-  if (r.status !== "success" || !w) return undefined; // classifySlot 不看会话：失败 / 没收尾 / 定不出时间窗
+  if (!w) return undefined; // 定不出时间窗（没发出去 / 台账缺字段）：没有可审的会话段
+  // 失败 / 没收尾的也读：classifySlot 照样判失败，但越界、人工回合要从这里审（审查 failed-run-audit-loss）
   if (!r.targetSessionId) return { kind: "no_session_id" };
   const s = await readSession(r.targetSessionId);
   if ("error" in s) return { kind: "unreadable", why: s.error };
@@ -106,22 +107,69 @@ async function generate(job: CronJob, day: string, mode: SentinelPilotMode, runs
   if (!ok) deps.error(`⚠️ 哨兵日报 ${job.name} ${day} 已认领但没发出去（不重发）: ${file}`);
 }
 
-/** 哪些（任务，日子）到了截止点、报告还没生成：只看昨天和今天（机器睡过 / daemon 停过醒来补一次） */
-function dueReports(jobs: CronJob[], now: number, deps: SentinelTickDeps): { job: CronJob; day: string; mode: SentinelPilotMode }[] {
-  const out: { job: CronJob; day: string; mode: SentinelPilotMode }[] = [];
+/** 补生成最多往回看这么多天（含今天）：再早的运行记录可能已被 cron-runs.json 按条数裁掉 */
+export const CATCHUP_DAYS = 7;
+
+/** 启用起点标记：`<reportsDir>/.sentinel-<任务名>.since`，内容是本地日期。补生成不早于这一天（没开之前的日子不出报告） */
+export const sincePath = (reportsDir: string, job: CronJob): string =>
+  join(reportsDir, `.${reportFileName(job, "since").replace(/-since\.md$/, "")}.since`);
+
+/** 读启用起点；缺就以今天为起点排他补写（set 走的是别的路径、或老版本开的） */
+function pilotSince(reportsDir: string, job: CronJob, now: number): string {
+  const path = sincePath(reportsDir, job);
+  try {
+    const d = readFileSync(path, "utf8").trim();
+    if (parseLocalDate(d)) return d;
+  } catch { /* 缺：下面补写 */ }
+  const today = localDate(new Date(now));
+  mkdirSync(reportsDir, { recursive: true });
+  writeFileSync(path, today);
+  return today;
+}
+
+/** `sentinel-pilot set`：开（observe / on）时记启用起点（已有不动），关时删掉——关过的那段以后再开也不补 */
+export function markPilotSince(reportsDir: string, job: CronJob, mode: SentinelPilotMode, now: number): void {
+  const path = sincePath(reportsDir, job);
+  if (mode === "off") { rmSync(path, { force: true }); return; }
+  mkdirSync(reportsDir, { recursive: true });
+  try { writeFileSync(path, localDate(new Date(now)), { flag: "wx" }); } catch (e) { if (!isEexist(e)) throw e; }
+}
+
+interface Due { job: CronJob; day: string; mode: SentinelPilotMode }
+
+/**
+ * 哪些（任务，日子）到了截止点、报告还没生成：从启用起点和「今天往前 CATCHUP_DAYS 天」里较晚的那天起，到今天。
+ * 机器睡过 / daemon 停过多天，醒来把这段里缺的日报都补上（审查 catchup-limited-to-yesterday）。
+ */
+function dueReports(jobs: CronJob[], now: number, deps: SentinelTickDeps): Due[] {
+  const out: Due[] = [];
   for (const job of jobs) {
     if (!job.targetAgent) continue;
     const mode = deps.mode(job.id);
     if (mode === "off") continue;
-    const today = new Date(now), yesterday = new Date(now);
-    yesterday.setDate(yesterday.getDate() - 1);
-    for (const day of [localDate(yesterday), localDate(today)]) {
+    const since = pilotSince(deps.reportsDir, job, now);
+    for (let i = CATCHUP_DAYS - 1; i >= 0; i--) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      const day = localDate(d);
+      if (day < since) continue;
       const at = reportReadyAt(job, day);
       if (at !== null && now >= at && !existsSync(join(deps.reportsDir, reportFileName(job, day)))) out.push({ job, day, mode });
     }
   }
   return out;
 }
+
+/**
+ * 台账里最早的一条都晚于这天的第一个应检时刻：这天的记录可能已被按条数裁掉，「没有记录」不可信，不出报告（不判没检查）。
+ * 台账为空不算（新装、从没跑过）。
+ */
+function ledgerCovers(runs: readonly CronRunRecord[], job: CronJob, day: string): boolean {
+  const first = dueSlots(job.schedule, day)[0];
+  if (first === undefined || !runs.length) return true;
+  return runs.reduce((m, r) => Math.min(m, r.epochMinute), Infinity) <= Math.floor(first / 60_000);
+}
+const uncovered = new Set<string>();
 
 let busy = false;
 let lastMinute = -1;
@@ -141,6 +189,11 @@ export async function sentinelPilotTick(now: Date = new Date(), deps: SentinelTi
       return;
     }
     for (const d of due) {
+      if (!ledgerCovers(runs, d.job, d.day)) {
+        const k = `${d.job.id}@${d.day}`;
+        if (!uncovered.has(k)) { uncovered.add(k); deps.error(`⚠️ 哨兵日报 ${d.job.name} ${d.day} 不补：运行台账已裁到这天之后，没有记录不等于没检查`); }
+        continue;
+      }
       try { await generate(d.job, d.day, d.mode, runs, now.getTime(), deps); } catch (e) { deps.error(`⚠️ 哨兵日报 ${d.job.name} ${d.day} 生成失败: ${(e as Error).message}`); }
     }
   } catch (e) {

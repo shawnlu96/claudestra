@@ -118,14 +118,19 @@ export interface SlotVerdict {
 
 const FAILED_RUN = new Set(["error", "timeout", "unknown"]);
 
-/** 按规格表的顺序取第一条符合的；session 只在有运行记录、且记录不是失败时才看 */
+/**
+ * 按规格表的顺序取第一条符合的。失败 / 没收尾的记录照样判失败 / 未验证，但读得到会话就把证据带上：
+ * 越界、混有人工回合是独立审计，不因为判了失败就丢（审查 failed-run-audit-loss）。
+ */
 export function classifySlot(slot: number, record: CronRunRecord | undefined, session: SessionRead | undefined): SlotVerdict {
   const v = (status: SlotStatus, reason: string, ev?: RunSessionEvidence): SlotVerdict => ({ slot, status, reason, record, ev });
   if (!record) return v("not_checked", "运行台账里没有这个时刻的记录");
+  const ev = session?.kind === "ok" ? session.ev : undefined;
+  const unaudited = record.dispatchAttemptedAt && !ev ? "；会话记录没读到，越界和人工回合没核" : "";
   if (FAILED_RUN.has(record.status)) {
-    return v("failed", `运行记录是 ${record.status}${record.error ? `，error 原文：${quoteExternal(record.error, 200)}` : ""}`);
+    return v("failed", `运行记录是 ${record.status}${record.error ? `，error 原文：${quoteExternal(record.error, 200)}` : ""}${unaudited}`, ev);
   }
-  if (record.status !== "success") return v("unverified", `运行记录还是 ${record.status}，没收尾`);
+  if (record.status !== "success") return v("unverified", `运行记录还是 ${record.status}，没收尾${unaudited}`, ev);
   if (!record.dispatchAttemptedAt) return v("unverified", "运行记录没有 dispatchAttemptedAt，定不出时间窗");
   if (!session || session.kind === "no_session_id") return v("unverified", "缺会话 id");
   if (session.kind === "unreadable") return v("unverified", `读不到会话记录（${session.why}）`);

@@ -3,7 +3,7 @@
  * 全部注入时钟、内存运行记录、固定会话行；不连 bridge、tmux、cron daemon。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CronJob } from "../src/lib/cron-job.js";
@@ -12,7 +12,9 @@ import { collectRunEvidence, parseResultLine } from "../src/lib/sentinel-pilot-e
 import {
   noteDispatch, REPORT_FOOTER, renderReport, reportFileName, reportReadyAt, sentinelPilotMode, setSentinelPilotMode, type SlotStatus,
 } from "../src/lib/sentinel-pilot.js";
-import { buildDayReport, sentinelPilotTick, type SentinelTickDeps, type SessionLines } from "../src/lib/sentinel-pilot-tick.js";
+import {
+  buildDayReport, CATCHUP_DAYS, sentinelPilotTick, sincePath, type SentinelTickDeps, type SessionLines,
+} from "../src/lib/sentinel-pilot-tick.js";
 import { cmdSentinelPilot } from "../src/manager/sentinel-pilot-cmds.js";
 
 const DAY = "2026-10-13";
@@ -154,7 +156,14 @@ let dir = "";
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "sentinel-")); });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-function tickDeps(mode: "off" | "observe" | "on", over: Partial<SentinelTickDeps> = {}) {
+/** 启用起点标记（set 写的那个）；缺省 = DAY，只有专门测补生成的用例往前放 */
+function enableSince(day: string): void {
+  mkdirSync(join(dir, "reports"), { recursive: true });
+  writeFileSync(sincePath(join(dir, "reports"), job), day);
+}
+
+function tickDeps(mode: "off" | "observe" | "on", over: Partial<SentinelTickDeps> = {}, since: string | null = DAY) {
+  if (mode !== "off" && since) enableSince(since);
   const calls = { list: 0, read: 0, sent: [] as string[], errors: [] as string[] };
   const deps: SentinelTickDeps = {
     loadJobs: async () => [job, tempJob],
@@ -197,7 +206,7 @@ describe("sentinelPilotTick（验收 4、5）", () => {
     const { deps, calls } = tickDeps("on");
     await sentinelPilotTick(new Date(SLOT + 59 * MIN), deps);
     expect(existsSync(reportPath())).toBe(false);
-    expect(calls.sent.filter((t) => t.includes(DAY))).toHaveLength(0); // 前一天的截止点早过了，那份照常补（见下）
+    expect(calls.sent).toHaveLength(0); // 启用起点是当天：前一天（开之前）不补
   });
   test("observe：只写文件，不发", async () => {
     const { deps, calls } = tickDeps("observe");
@@ -210,11 +219,11 @@ describe("sentinelPilotTick（验收 4、5）", () => {
     const { deps, calls } = tickDeps("on");
     await sentinelPilotTick(after(), deps);
     await sentinelPilotTick(after(), deps);
-    expect(calls.sent.filter((t) => t.includes(DAY))).toHaveLength(1);
-    expect(calls.sent).toHaveLength(2); // 另一份是前一天（没有运行记录 → 没检查）的补生成
+    expect(calls.sent).toHaveLength(1);
+    expect(calls.sent[0]).toContain(DAY);
     expect(existsSync(`${reportPath()}.sent`)).toBe(true);
     // 重启：新的 deps（内存状态全丢），报告文件已在
-    const again = tickDeps("on");
+    const again = tickDeps("on", {}, null);
     await sentinelPilotTick(after(), again.deps);
     expect([again.calls.list, again.calls.sent.length]).toEqual([0, 0]);
     expect(readdirSync(join(dir, "reports")).filter((f) => f.includes(DAY)).sort()).toEqual([reportFileName(job, DAY), `${reportFileName(job, DAY)}.sent`]);
@@ -266,7 +275,7 @@ describe("CLI（验收 7）", () => {
     expect(outs[0]).toMatchObject({ ok: false });
   });
   test("report --dry-run 只印不写；不带 --dry-run 拒绝", async () => {
-    const { deps } = tickDeps("on");
+    const { deps } = tickDeps("on", {}, null);
     const outs: unknown[] = [];
     await cmdSentinelPilot(["report", "terrarium-health", "--date", DAY, "--dry-run"], { deps, out: (d) => outs.push(d), mode: () => "on", now: () => AFTER.getTime() });
     expect(String(outs[0])).toContain("## 15:30 · 正常");
@@ -280,5 +289,81 @@ describe("CLI（验收 7）", () => {
     await cmdSentinelPilot(["show"], { deps: tickDeps("off").deps, out: (d) => outs.push(d), mode: () => "observe", now: () => SLOT });
     expect(outs[0].jobs).toEqual([expect.objectContaining({ name: "terrarium-health", mode: "observe", nextDeadline: iso(SLOT + 60 * MIN) })]);
     expect(outs[0].resultHint).toContain("哨兵结果:");
+  });
+});
+
+describe("第 1 轮审查回归", () => {
+  test("failed-run-audit-loss：timeout 也读会话，判失败但列越界和人工回合", async () => {
+    const lines = [PROMPT, tool(1, "Edit", { file_path: "/x", old_string: "a", new_string: "b" }), user(2, "<channel source=\"claudestra\" user=\"alex\">先别查了</channel>")];
+    const r = await statusFor([run({ status: "timeout", error: "超时" })], lines);
+    expect(r.status).toBe("failed");
+    expect(r.reads).toBe(1);
+    expect(r.text).toContain("越界：试点只读，本次有 1 个可能改了东西的调用");
+    expect(r.text).toContain("混有人工回合");
+    expect(r.text).not.toContain("越界：无");
+  });
+  test("failed-run-audit-loss：失败且读不到会话，判定里写明越界没核", async () => {
+    const r = await statusFor([run({ status: "error", error: "tmux 发送失败" })], null);
+    expect(r.status).toBe("failed");
+    expect(r.text).toContain("越界和人工回合没核");
+  });
+  test("stale-result-survives-final-reply：最后一条回复没有结果行就是没有", async () => {
+    const ev = collectRunEvidence([PROMPT, say(1, "哨兵结果:正常 — ok"), say(2, "撤回,没查成")], WINDOW, { prompt: job.prompt });
+    expect(ev.result).toBeNull();
+    expect((await statusFor([run()], [PROMPT, say(1, "哨兵结果:正常 — ok"), say(2, "撤回,没查成")])).status).toBe("unverified");
+  });
+  test("stale-result-survives-final-reply：结果行之后的纯工具调用不清它；同一条消息拆成多行合在一起看", () => {
+    const after = collectRunEvidence([PROMPT, say(1, "哨兵结果:异常 — 偏冷"), tool(2, "Read", { file_path: "/x" })], WINDOW, { prompt: job.prompt });
+    expect(after.result).toEqual({ verdict: "异常", note: "偏冷" });
+    const part = (m: number, text: string) => line({ type: "assistant", timestamp: at(m), message: { id: "msg1", content: [{ type: "text", text }] } });
+    const split = collectRunEvidence([PROMPT, part(1, "哨兵结果:正常 — 好"), part(1.5, "以上")], WINDOW, { prompt: job.prompt });
+    expect(split.result).toEqual({ verdict: "正常", note: "好" });
+  });
+});
+
+describe("补生成范围（审查 catchup-limited-to-yesterday）", () => {
+  const days = ["2026-10-10", "2026-10-11", "2026-10-12", DAY, "2026-10-14", "2026-10-15"];
+  const old = run({ key: "other@1", jobId: "other", epochMinute: new Date(2026, 9, 1).getTime() / MIN });
+  const late = (d: number) => new Date(new Date(2026, 9, 15, 20, 0).getTime() + d * MIN);
+
+  test("停了多天醒来：启用起点到今天缺的日报都补上，标补生成", async () => {
+    const { deps } = tickDeps("observe", { listRuns: async () => [old, run()] }, "2026-10-10");
+    await sentinelPilotTick(late(0), deps);
+    const files = readdirSync(join(dir, "reports")).filter((f) => f.endsWith(".md")).sort();
+    expect(files).toEqual(days.map((d) => reportFileName(job, d)));
+    expect(readFileSync(join(dir, "reports", reportFileName(job, "2026-10-11")), "utf8")).toContain("## 15:30 · 没检查");
+    expect(readFileSync(reportPath(), "utf8")).toContain("补生成");
+  });
+  test("不早于启用起点，也不早于 CATCHUP_DAYS 天前", async () => {
+    const { deps } = tickDeps("observe", { listRuns: async () => [old, run()] }, "2026-09-01");
+    await sentinelPilotTick(late(1), deps);
+    expect(readdirSync(join(dir, "reports")).filter((f) => f.endsWith(".md"))).toHaveLength(CATCHUP_DAYS);
+  });
+  test("没有启用起点：以今天为起点写下，不补更早", async () => {
+    const { deps } = tickDeps("observe", { listRuns: async () => [old, run()] }, null);
+    await sentinelPilotTick(late(2), deps);
+    expect(readdirSync(join(dir, "reports")).filter((f) => f.endsWith(".md"))).toEqual([reportFileName(job, "2026-10-15")]);
+    expect(readFileSync(sincePath(join(dir, "reports"), job), "utf8")).toBe("2026-10-15");
+  });
+  test("台账已裁到某天之后：那几天不补（不判没检查），只报一次", async () => {
+    const { deps, calls } = tickDeps("observe", {}, "2026-10-10");
+    await sentinelPilotTick(late(3), deps);
+    await sentinelPilotTick(late(4), deps);
+    const files = readdirSync(join(dir, "reports")).filter((f) => f.endsWith(".md")).sort();
+    expect(files).toEqual([DAY, "2026-10-14", "2026-10-15"].map((d) => reportFileName(job, d)));
+    expect(calls.errors.filter((e) => e.includes("不补"))).toHaveLength(3);
+  });
+  test("set 开时记启用起点（已有不动），关时删掉", async () => {
+    const path = join(dir, "sentinel-pilot.json");
+    const deps = tickDeps("off").deps;
+    const set = (mode: string, now: number) =>
+      cmdSentinelPilot(["set", job.name, mode], { deps, out: () => {}, now: () => now, setMode: (j, m) => setSentinelPilotMode(j, m, path) });
+    const marker = sincePath(deps.reportsDir, job);
+    await set("observe", SLOT);
+    expect(readFileSync(marker, "utf8")).toBe(DAY);
+    await set("on", SLOT + 48 * 3_600_000);
+    expect(readFileSync(marker, "utf8")).toBe(DAY);
+    await set("off", SLOT + 72 * 3_600_000);
+    expect(existsSync(marker)).toBe(false);
   });
 });

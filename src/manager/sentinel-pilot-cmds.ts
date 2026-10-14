@@ -8,7 +8,7 @@ import type { CronJob } from "../lib/cron-job.js";
 import {
   localDate, nextReportDeadline, parseLocalDate, renderReport, SENTINEL_RESULT_HINT, sentinelPilotMode, setSentinelPilotMode,
 } from "../lib/sentinel-pilot.js";
-import { buildDayReport, defaultSentinelDeps, type SentinelTickDeps } from "../lib/sentinel-pilot-tick.js";
+import { buildDayReport, defaultSentinelDeps, markPilotSince, type SentinelTickDeps } from "../lib/sentinel-pilot-tick.js";
 
 const USAGE = "usage: sentinel-pilot set <任务名|id> off|observe|on | sentinel-pilot show | sentinel-pilot report <任务名|id> [--date YYYY-MM-DD] --dry-run";
 
@@ -66,7 +66,9 @@ export async function cmdSentinelPilot(args: string[], c?: Partial<SentinelCmdDe
   const job = findJob(await ctx.deps.loadJobs(), rest[0]);
   if (!job) return ctx.out({ ok: false, error: `没有这个 cron 任务: ${rest[0]}` });
   try {
-    ctx.out({ ok: true, id: job.id, name: job.name, ...(await ctx.setMode(job, rest[1]) as object) });
+    const r = await ctx.setMode(job, rest[1]) as { mode: Parameters<typeof markPilotSince>[2] };
+    markPilotSince(ctx.deps.reportsDir, job, r.mode, ctx.now()); // 启用起点：补生成不早于这天
+    ctx.out({ ok: true, id: job.id, name: job.name, ...r });
   } catch (e) {
     ctx.out({ ok: false, error: (e as Error).message });
   }
