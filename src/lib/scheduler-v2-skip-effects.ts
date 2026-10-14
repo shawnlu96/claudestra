@@ -29,6 +29,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-author-rebuild.ts": "vcs=2",
     "scheduler-auto-deps.ts": "proc=1 notice=1",
     "scheduler-auto-ports.ts": "notice=1",
+    "scheduler-ci-queue-full.ts": "ledger=1 vcs=1", // per-card skipTask; ledger uses the pass manager
     "scheduler-create-retry-worktree.ts": "vcs=8",
     "scheduler-create-retry.ts": "vcs=2",
     "scheduler-deploy-job.ts": "fs=3",

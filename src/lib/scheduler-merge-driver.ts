@@ -11,6 +11,7 @@ import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.
 import { noteContentCarry } from "./merge-content-review-sink.js";
 import { mergeUnionStep } from "./scheduler-merge-union.js";
 import { countCarryStep } from "./review-count-carry.js";
+import { lightOnly } from "./ci-queue-full.js";
 import { mainMovedSinceCi } from "./scheduler-merge-freshness.js";
 
 export interface PrSnapshot {
@@ -56,7 +57,7 @@ const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" &
 const authorPush = (run: MergeRun, pr: PrSnapshot): boolean => !sameHead(run, pr) && samePr({ ...run, reviewedHead: pr.head }, pr);
 export const green = (run: Pick<MergeRun, "requiredChecks">, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
-  checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
+  checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending") && !lightOnly(checks);
 const short = (s: string) => s.slice(0, 12);
 /** BEHIND only says main moved on; under mergeDirect that is not a reason to wait (GitHub still refuses a real conflict as DIRTY). */
 const mergeable = (state: string, direct: boolean): boolean => state === "CLEAN" || (direct && state === "BEHIND");
