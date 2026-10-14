@@ -20,6 +20,8 @@ import { isProposalWait } from "../owner-waits";
 import s from "../collab.module.css";
 import type { CFold } from "./causal-model";
 import { causeOf, edgeBasis, STATE_WORD, stageCounts } from "./v4-model";
+import { attentionOf, type CountState } from "../count-words";
+import { countText } from "../count-words-i18n";
 import { looksLikeId } from "../team-source-adapter";
 import v from "./v4.module.css";
 
@@ -74,25 +76,24 @@ function WaitGo({ w }: { w: OwnerWait & { extra?: WebAsk["extra"] } }) {
   );
 }
 
+const NO_COUNTS: CountState = { status: "none" };
+
 export function Overview(props: {
   ov: LedgerOverview; view: HomeView; waits: readonly OwnerWait[]; projectName: string; onPick: (id: string) => void; tr: Tr;
+  /** 在干活 / 在等与各阶段（count-words.ts，顶栏同一份）；没载完时两段都是骨架；不给（单独挂概览）= 两段不出数 */
+  counts?: CountState;
   /** 「上次来之后」（collab-since-card.tsx），没有上次记录时不给 */
   since?: React.ReactNode;
   /** 走表的现在（use-collab）：镜像新鲜度随它重判；不给按 ov.now */
   now?: number;
 }) {
   const { ov, view, waits, projectName, onPick, tr } = props;
-  const h = view.headline;
+  const counts = props.counts ?? NO_COUNTS;
   return (
     <Shell title={projectName} sub={tr("项目概览")} tr={tr}>
       {props.since}
       <Sec title={tr("现在")}>
-        <div className={v.kv}>
-          {tr("{n} 条在推进", { n: h.advancing })}
-          {h.problem > 0 && <span className={v.bad}> · {tr("{n} 条出问题", { n: h.problem })}</span>}
-          {h.stuck > 0 && <span className={v.warn}> · {tr("{n} 条卡住", { n: h.stuck })}</span>}
-          {view.pm.frozen && <span className={v.warn}> · {tr("合并队列冻结：{r}", { r: view.pm.frozen })}</span>}
-        </div>
+        <NowLine counts={counts} view={view} tr={tr} />
       </Sec>
       <Sec title={tr("要你定的")}>
         {waits.length ? waits.map((w) => (
@@ -100,15 +101,34 @@ export function Overview(props: {
         )) : <div className={v.muted}>{tr("没有")}</div>}
       </Sec>
       <Sec title={tr("各阶段")}>
-        <div className={v.counts}>
-          {stageCounts(ov).map((c) => (
-            <span key={c.label} className={v.count}><b>{c.n}</b> {tr(c.label)}</span>
-          ))}
+        <div className={v.counts} data-stage-counts>
+          {counts.status === "loading" ? <span className={v.count}><b className={v.skel} aria-hidden /></span>
+            : counts.status === "ready" && stageCounts(counts.snap).map((c) => (
+              <span key={c.label} className={v.count}><b>{c.n}</b> {tr(c.label)}</span>
+            ))}
         </div>
       </Sec>
       {ov.mirror && <MirrorSec m={mirrorCounts(ov.mirror, props.now ?? ov.now)} tr={tr} />}
       {view.pm.pm && <Sec title="PM"><div className={v.kv}>{view.pm.pm} · {tr("在管")} {view.pm.managing} · {tr("排队")} {view.pm.queued.length}</div></Sec>}
     </Shell>
+  );
+}
+
+/** 右栏「现在」：在干活 a · 在等 b，其中 N 条出问题 / 卡住（attention 只是标注）；20 秒后仍缺 feature 时下面一句提示 */
+function NowLine({ counts, view, tr }: { counts: CountState; view: HomeView; tr: Tr }) {
+  const frozen = view.pm.frozen && <span className={v.warn}> · {tr("合并队列冻结：{r}", { r: view.pm.frozen })}</span>;
+  if (counts.status !== "ready") return <div className={v.kv} data-now>{counts.status === "loading" && <b className={v.skel} aria-hidden />}{frozen}</div>;
+  const { words } = counts.snap, a = attentionOf(counts.snap, view.lines);
+  const flags = [a.problem > 0 && <span key="p" className={v.bad}>{countText(tr, "其中 {n} 条出问题", { n: a.problem })}</span>,
+    a.stuck > 0 && <span key="s" className={v.warn}>{countText(tr, "{n} 条卡住", { n: a.stuck })}</span>].filter(Boolean);
+  return (
+    <>
+      <div className={v.kv} data-now>
+        {countText(tr, "在干活")} <b>{words.working}</b> · {countText(tr, "在等")} <b>{words.waiting}</b>
+        {flags.length > 0 && <> · {flags.flatMap((f, i) => (i ? [" / ", f] : [f]))}</>}{frozen}
+      </div>
+      {counts.missing > 0 && <div className={v.warn}>{countText(tr, "另有 {k} 个 feature 还没读到，数字不含它们", { k: counts.missing })}</div>}
+    </>
   );
 }
 

@@ -8,7 +8,7 @@ import { tempLedgerPath } from "./ledger-test-helpers.js";
 import { SharedLedgerUnavailable } from "../src/lib/shared-ledger-client-transport.js";
 import { FeatureProposalRejected, type ProposalList, type ProposalRecord } from "../src/lib/shared-ledger-feature-proposals.js";
 import { featureProposalError, type ProposalDecision } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
-import { APPROVE_BUTTON, inboxCard, PROPOSAL_INBOX_CREATOR, REJECT_BUTTON } from "../src/lib/center-proposal-inbox.js";
+import { APPROVE_BUTTON, inboxCard, PROPOSAL_INBOX_CREATOR, REJECT_BUTTON, RESULT_ACK_BUTTON, RESULT_MASTER_BUTTON } from "../src/lib/center-proposal-inbox.js";
 import { informOwner, onCenterProposalAnswered, pollCenterProposals, type ProposalInboxDeps } from "../src/bridge/center-proposal-inbox.js";
 
 const NOW = 1_790_000_000_000;
@@ -52,6 +52,7 @@ function harness(initial: ProposalRecord[]) {
       if (snap instanceof Error) throw snap;
       return listOf(snap);
     },
+    members: async () => [{ personId: SELF, role: "owner", status: "active" }], // PROPRESULT1：本人是项目 owner，原有用例照旧开卡
     decide: async (_s, proposalId, d) => { decided.push({ proposalId, decision: d }); return decideImpl(proposalId, d); },
     openAsk: (input: CreateAskInput) => {
       const hit = asks.find(a => a.dedupKey === input.dedupKey);
@@ -66,6 +67,7 @@ function harness(initial: ProposalRecord[]) {
     openCards: () => asks.filter(a => a.state === "open" && a.createdBy === PROPOSAL_INBOX_CREATOR),
     closeAsk: (id) => { const a = asks.find(x => x.id === id)!; a.state = "cancelled"; },
     inform: async (t, card) => { informed.push(t); resultCards.push(card.resultCard); },
+    handoff: async () => {},
     log: l => { logs.push(l); },
   };
   const answer = (a: Ask, button: string, who: { owner?: boolean; external?: boolean } = { owner: true }): Ask => {
@@ -423,7 +425,7 @@ describe("PROPINBOX1 结果给网页 owner（真实 SQLite + 事件总线）", (
     expect(o.sent[0]).toContain("已驳回");
   });
 
-  test("[PROPRES1 验收 1] 中心报错 / conflict / invalid：照旧开结果卡（无按钮、发 SSE），原卡有结果，控制频道照发", async () => {
+  test("[PROPRES1 验收 1] 中心报错 / conflict / invalid：照旧开结果卡（PROPRESULT1 起带「知道了」「交给大总管」、发 SSE），原卡有结果，控制频道照发", async () => {
     const cases: [string, Parameters<typeof live>[1], boolean][] = [
       ["错误码 forbidden", () => new FeatureProposalRejected(403, featureProposalError("forbidden")), false],
       ["中心回 conflict", () => new FeatureProposalRejected(409, featureProposalError("conflict")), false],
@@ -435,7 +437,8 @@ describe("PROPINBOX1 结果给网页 owner（真实 SQLite + 事件总线）", (
       expect(o.results[0]!.state).toBe("open");
       expect(o.results[0]!.kind).toBe("owner_action");
       expect(o.results[0]!.context).toContain(words);
-      expect(o.results[0]!.options).toEqual([]);
+      expect(JSON.stringify(o.results[0]!.options)).toContain(RESULT_ACK_BUTTON);
+      expect(JSON.stringify(o.results[0]!.options)).toContain(RESULT_MASTER_BUTTON);
       expect(o.result).toContain(words);
       expect(o.eventIds).toContain(o.card.id);
       expect(o.eventIds).toContain(o.results[0]!.id);

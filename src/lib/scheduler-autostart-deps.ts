@@ -8,6 +8,7 @@ import { startPlacement } from "./scheduler-placement-start.js";
 import { placementReservationPort } from "./scheduler-placement-reservations.js";
 import { drainReviewLocalObserved } from "./scheduler-agent-pool-review-local.js";
 import { drainWriteLocalObserved } from "./scheduler-agent-pool-write-local.js";
+import { drainPrivateStartObserved } from "./scheduler-placement-start.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import type { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
@@ -150,6 +151,7 @@ async function flushReviewLocal(o: Pick<WireOpts, "ledger">): Promise<Failed> {
   };
   await drainReviewLocalObserved(write);
   await drainWriteLocalObserved(write); // WRITELOCAL1：同一出口写「本会派本机」写单观察
+  await drainPrivateStartObserved(write); // PRIVSTART1：同一出口写「私仓卡只放 peer 会放到哪」观察（卡还没建的等一轮）
   return [];
 }
 
