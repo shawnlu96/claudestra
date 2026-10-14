@@ -30,7 +30,7 @@ import { DAG_CMDS } from "./ledger-dag-cmds.js";
 import { FEATURE_SPLIT_CMDS } from "./ledger-feature-split-cmds.js";
 import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
 import { FEATURE_MIGRATE_CMDS } from "./ledger-feature-migrate-cmd.js";
-import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
+import { parseLedgerArgs, resolveActor, type ParsedArgs } from "./ledger-identity.js";
 import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
 import { DISPATCH_CMDS } from "./ledger-dispatch-cmds.js";
@@ -82,7 +82,7 @@ import { MAIN_CI_CMDS } from "./ledger-main-ci-cmds.js";
 import { LEND_AUTHOR_RETIRE_CMDS } from "../lib/lend-author-retire-cmds.js";
 import { AUTHOR_REBUILD_CMDS } from "../lib/scheduler-author-rebuild-cmds.js";
 import { PMAUTO_CMDS, PMAUTO_SERVICE } from "./ledger-observation-wiring.js";
-import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
+import { DRY_RUN_READS, isLedgerWrite, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
@@ -162,7 +162,7 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
  * 真实依赖：registry、projects.json、环境里的频道号 → actor。认不出的频道只许读（actor 记 "unknown"，没有任何角色）；
  * 读写的划分与 manager 的认主守卫同一张表（write-commands.ts），不另列一份。
  */
-async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }> {
+async function realDeps(args: string[], p: ParsedArgs | null): Promise<LedgerDeps | { error: string }> {
   const fileScope = args[0] === "scheduler-file-scope", reg = fileScope ? fileScopeRegistry() : await loadRegistry();
   const service = process.env.CLAUDESTRA_SCHEDULER_SERVICE === "1";
   if (service && (process.env.DISCORD_CHANNEL_ID || process.env[LEND_WORKER_MARK])) return { error: "agent 频道 / 出借 worker 不能冒用调度服务身份" };
@@ -171,11 +171,11 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   }
   const who = service ? { ok: true as const, actor: "scheduler" }
     : resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, reg.agents);
-  if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
+  if (!who.ok && isLedgerWrite(args, p)) return { error: who.error };
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
   // audit / feature-migrate 的 --dry-run、pm-status 与 merge-queue 只读：不走 openLedger（它会建表 / 迁移 / 修负责人列，分支代码对线上库跑一次就把版本号抬上去）
-  const readInvocation = args[0] === "pm-status" || READER_ONLY_SUBS.has(args[0] ?? "") || (DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run"));
+  const readInvocation = args[0] === "pm-status" || READER_ONLY_SUBS.has(args[0] ?? "") || (DRY_RUN_READS.has(args[0] ?? "") && !isLedgerWrite(args, p));
   const readOnly = readInvocation ? new LedgerReader().get() : undefined;
   if (readOnly === null) return { error: "台账库还不存在（或正在建），只读命令没东西可看" };
   return {
@@ -196,7 +196,8 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   };
 }
 export async function cmdLedger(args: string[]): Promise<void> {
-  const deps = await withFileScopeErrors(args, () => realDeps(args));
+  const spec = COMMANDS[args[0] ?? ""], p = spec ? parseLedgerArgs(args, spec.valued, spec.bools) : null;
+  const deps = await withFileScopeErrors(args, () => realDeps(args, p && !("error" in p) ? p : null));
   if ("error" in deps) return output({ ok: false, code: "code" in deps ? deps.code : "forbidden", error: deps.error });
   const r = await runLedger(args, deps);
   output(r);

@@ -19,7 +19,7 @@ import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
 import type { LedgerCli, LedgerDeps, Result } from "./ledger-context.js";
 import type { ParsedArgs } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
-import { isWriteInvocation } from "./write-commands.js";
+import { isLedgerWrite } from "./write-commands.js";
 
 const PM_RAILS_STATE_PATH = statePath("pm-rails.json");
 
@@ -50,8 +50,8 @@ function bindStep(db: Database, p: ParsedArgs, task: LedgerTask, dedup: string):
  * 认 start_node 开 auto 之后自己发的那几步（lib/dag-tools-steps.ts），用和执行同一份 CLI 解析结果（重复旗标按最后一份）：
  * dedup 键 `dag-start:<卡>:<attempt>:<步>`，同一 attempt 的建卡事件在库里，命令的每个参数都和 start_node 那一步一致——
  * peer 卡的放置说明（startNodePeerWhy 模板）、引用这条说明的 spec→restate、绑本卡的节点。tests/pm-rails.test.ts「验收线 12 / 14」。
- * 上限：PM 和 start_node 是同一个系统用户，这是防手误的护栏、不是安全边界；能骗过它的只剩故意照 start_node 的参数伪造
- * （例如编一条放置理由），那本来就等于开卡，不算干预。
+ * 上限：PM 和 start_node 是同一个系统用户，豁免是防手误的护栏、不是安全边界；刻意伪造步骤的 dedup、照 start_node 的参数伪造
+ * （例如编一条放置理由）不修，见 docs/architecture/pm-rails.md。
  */
 function startNodeStep(db: Database, p: ParsedArgs): boolean {
   const dedup = p.flags.dedup ?? "";
@@ -61,9 +61,12 @@ function startNodeStep(db: Database, p: ParsedArgs): boolean {
   const born = getEventByDedup(db, key("task-new"));
   const task = getTask(db, taskId);
   if (rest.length || !task || !born || born.kind !== "task" || born.target !== taskId || born.data.op !== "new") return false;
-  const peer = /^peer:(.+)$/.exec(String(task.extra.placement ?? ""))?.[1];
-  if (step === "bind") return task.stage === (peer ? "restate" : "spec") && bindStep(db, p, task, dedup);
-  if (!peer || task.stage !== "spec") return false;
+  if (step === "bind") return task.stage !== "cancelled" && bindStep(db, p, task, dedup);
+  // peer 卡只认建卡时就定下的放置（建卡事件里的 extra.placement，且没改过），建卡后没推过阶段：本机卡后改成 peer 不能复用这两个键
+  const placed0 = (born.data.patch as { extra?: { placement?: unknown } } | undefined)?.extra?.placement;
+  const peer = placed0 === task.extra.placement ? /^peer:(.+)$/.exec(String(placed0 ?? ""))?.[1] : undefined;
+  const staged = db.query("SELECT 1 FROM events WHERE project = ? AND target = ? AND kind = 'stage' AND seq > ? LIMIT 1").get(task.project, taskId, born.seq);
+  if (!peer || staged || task.stage !== "spec") return false;
   if (step === "placement") return peerWhy(p.pos[2], peer) && exactly(p, ["decision", taskId, p.pos[2]], { dedup });
   const placed = getEventByDedup(db, key("placement"));
   if (step !== "restate" || placed?.kind !== "decision" || placed.target !== taskId || !peerWhy(placed.text, peer)) return false;
@@ -72,14 +75,19 @@ function startNodeStep(db: Database, p: ParsedArgs): boolean {
 
 /** 读命令、调度服务、owner、start_node 开卡步骤不开作用域：读不写事件，调度 / owner 从来不是 PM 角色（也省下调度 tick 每条命令的快照查询） */
 export function withPmRails<T>(deps: LedgerDeps, args: string[], p: ParsedArgs, run: () => Promise<T>): Promise<T> {
-  if (!isWriteInvocation("ledger", args) || deps.actor === "scheduler" || isOwnerLike(deps.actor) || startNodeStep(deps.db, p)) return run();
+  if (!isLedgerWrite(args, p) || deps.actor === "scheduler" || isOwnerLike(deps.actor) || startNodeStep(deps.db, p)) return run();
   const scope = { cmd: args[0] ?? "", mode: cachedPmRailsMode(deps.pmRails?.mode ?? pmRailsMode), modesAtStart: workflowModes(deps.db) };
   return pmRailsScope.run(scope, run);
 }
 
-function readState(path: string): PmRailsState {
+/** 文件坏了不猜：报错里给出按当前最大事件号重建的内容（直接删掉会把 on 期间的历史干预重推一遍） */
+function readState(db: Database, path: string, projects: readonly string[]): PmRailsState {
   const r = readJsonStateSync(path, (v) => !!v && typeof v === "object" && typeof (v as PmRailsState).projects === "object");
-  if (r.status === "corrupt") throw new LedgerError("invalid", `${path} 坏了（${r.error}），修好或删掉再跑`);
+  if (r.status === "corrupt") {
+    const after = (db.query("SELECT MAX(seq) AS n FROM events").get() as { n: number | null }).n ?? 0;
+    const rebuilt = { projects: Object.fromEntries(projects.map((p) => [p, { after, cards: {}, stalls: [] }])) };
+    throw new LedgerError("invalid", `${path} 坏了（${r.error}）。别直接删（会把历史干预重推一遍），修好或按当前低水位重建：${JSON.stringify(rebuilt)}`);
+  }
   return r.status === "ok" ? (r.data as PmRailsState) : { projects: {} };
 }
 
@@ -112,9 +120,9 @@ async function tick(c: LedgerCli): Promise<Result> {
   if (actor !== "owner" && actor !== "master") throw new LedgerError("forbidden", "pm-rails-tick 只给 bridge 定时器（owner 身份）/ master 跑");
   const send = c.deps.notifyOwner;
   if (!send) return { ok: true, sent: 0, why: "这个进程没有 owner 通知通道" };
-  const path = c.deps.pmRails?.statePath ?? PM_RAILS_STATE_PATH, now = c.deps.now(), state = readState(path);
   const modeOf = c.deps.pmRails?.mode ?? pmRailsMode;
   const on = c.deps.projectIds.filter((p) => modeOf(p) === "on");
+  const path = c.deps.pmRails?.statePath ?? PM_RAILS_STATE_PATH, now = c.deps.now(), state = readState(c.db, path, on);
   let sent = 0;
   try {
     for (const p of on) sent += await projectTick(c.db, p, state, now, send);
