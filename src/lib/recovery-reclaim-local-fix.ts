@@ -9,13 +9,13 @@ import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
 import { mustTask } from "./ledger-checks.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
-import type { LedgerTask } from "./ledger-stages.js";
-import { LedgerError, listEvents, type LedgerEvent } from "./ledger-store.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
+import { LedgerError, listEvents } from "./ledger-store.js";
 import { heldLease } from "./ledger-lend-lease.js";
 import { tx } from "./ledger-tx.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 
-export const RECLAIM_LOCAL_FIX_KEY = "reclaimLocalFix" as const;
+const RECLAIM_LOCAL_FIX_KEY = "reclaimLocalFix" as const;
 
 const policies = new WeakMap<Database, RecoveryPolicyPort>();
 /** Same wiring pattern as setLocalSwapPorts: tests inject a policy per ledger, the service reads recovery-policy.json. */
@@ -27,7 +27,7 @@ const isSchedulerReclaim = (e: LedgerEvent, t: LedgerTask) => e.kind === "schedu
   e.data.round === t.round && e.data.specRev === t.specRev && e.data.head === t.headSHA;
 
 /** The reclaim that ended the lease which wrote the current head: any reclaim recorded after that head's delivery; null = none. */
-export function reclaimOfCurrentHead(db: Database, task: LedgerTask): LedgerEvent | null {
+function reclaimOfCurrentHead(db: Database, task: LedgerTask): LedgerEvent | null {
   if (!task.headSHA) return null;
   const events = listEvents(db, { project: task.project, target: task.id });
   const delivered = events.findLast((e) => e.kind === "deliver" && e.data.headSHA === task.headSHA)?.seq;

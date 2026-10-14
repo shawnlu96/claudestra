@@ -65,6 +65,7 @@ export const RECOVERY_KEYS = [
   "planGap",
   "poolIdleSkip",
   "privateStartPlacement",
+  "reclaimLocalFix",
   "reviewLocalFirst",
   "roleModel",
   "skipEffectsAutoScope",
