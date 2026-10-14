@@ -17,7 +17,7 @@ import type { RemoteHead } from "../src/lib/order-deliver.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
-import { PEER_LEASE_KEY, setPeerLeasePorts } from "../src/lib/recovery-peer-lease.js";
+import { PEER_LEASE_KEY, peerLeasePorts, setPeerLeasePorts } from "../src/lib/recovery-peer-lease.js";
 import { applyPeerHandover } from "../src/lib/recovery-peer-lease-handover.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { remoteHeadFamily } from "../src/lib/scheduler-head-family.js";
@@ -366,11 +366,12 @@ describe("peerLeaseRecovery · preserved head before the handover", () => {
       p.heads[BRANCH] = { ok: true, head: H3 }; // mate's worker pushed H3, never delivered it
       await reclaim(p);
       expect(p.f.task().headSHA).toBe(H2);
-      expect(await relayCli(p)).toMatchObject({ ok: false, error: expect.stringContaining("未交付成果") });
       const ctx = { actor: "scheduler", now: p.f.tickDeps.now() };
       expect(() => applyPeerHandover(p.f.db, ctx, { ...proofArgs(p), remoteHead: { ok: true, head: H3 } })).toThrow("未保全");
       expect(() => applyPeerHandover(p.f.db, ctx, { ...proofArgs(p), remoteHead: null })).toThrow("核不了");
       const rev = p.f.task().rev;
+      // The command's own refusal records the block (and moves the rev) before it refuses.
+      expect(await relayCli(p)).toMatchObject({ ok: false, error: expect.stringContaining("未交付成果") });
       await p.tick();
       // The block is recorded once and moves the rev: the plan made on the snapshot that dropped the old row is refused.
       expect(headBlocks(p)).toEqual([expect.objectContaining({ data: expect.objectContaining({ head: H2, remoteHead: H3, branch: BRANCH }) })]);
@@ -425,6 +426,60 @@ describe("peerLeaseRecovery · preserved head before the handover", () => {
       expect(headBlocks(p)).toEqual([]);
       expect(handovers(p)).toHaveLength(1);
       expect(handovers(p)[0].data).toMatchObject({ remoteHead: H2, head: H2, branch: BRANCH });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+});
+
+const ensureIntents = (p: P) => p.f.intents().filter((x) => x.action === "ensure_session").map((x) => x.id);
+/** The tick's probe reads `first`, every later read (the command's own re-read) `then`. */
+const headThen = (p: P, first: RemoteHead, then: RemoteHead) => {
+  let reads = 0;
+  Object.defineProperty(p.heads, BRANCH, { configurable: true, enumerable: true, get: () => (reads++ ? then : first) });
+};
+
+describe("peerLeaseRecovery · a failed handover re-check stops this tick's plan", () => {
+  for (const [name, then] of [["drifted to H3", { ok: true, head: H3 }], ["unreadable", { ok: false, error: "网络断了" }]] as [string, RemoteHead][]) {
+    test(`[验收线 4] tick reads H2, the command's re-read is ${name}: block recorded, rev moved, no author ensure, old binding active`, async () => {
+      const p = await ready();
+      try {
+        await stoppedThenReclaimed(p);
+        await reclaim(p);
+        headThen(p, AT_H2, then);
+        const rev = p.f.task().rev, ensures = ensureIntents(p);
+        await p.tick();
+        expect(handovers(p)).toEqual([]);
+        expect(headBlocks(p)).toEqual([expect.objectContaining({ data: expect.objectContaining({ head: H2, remoteHead: then.ok ? H3 : null }) })]);
+        expect(p.f.task().rev).toBeGreaterThan(rev);
+        expect(p.created).toEqual([]);
+        expect(p.author()).toEqual([expect.objectContaining({ agent: PEER_AUTHOR.agent, transport: "peer", state: "active" })]);
+        expect(ensureIntents(p)).toEqual(ensures);
+        await p.tick();
+        await p.tick();
+        expect(headBlocks(p)).toHaveLength(1); // the reason replays: handoverCheck refuses on the recorded block
+        expect(handovers(p)).toEqual([]);
+        expect(p.created).toEqual([]);
+      } finally { p.f.close(); }
+    }, E2E_MS);
+  }
+
+  test("[验收线 4] the handover never reached (runtime unread): the fence stops the plan, nothing created, rev untouched", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      await reclaim(p);
+      const ports = peerLeasePorts(p.f.db);
+      setPeerLeasePorts(p.f.db, { ...ports, authorRuntime: () => { throw new Error("读不到运行时"); } });
+      const rev = p.f.task().rev, ensures = ensureIntents(p);
+      await expect(p.tick()).rejects.toThrow("未交接"); // the card's step lands in the pass's failed list
+      expect(p.f.task().rev).toBe(rev);
+      expect(handovers(p)).toEqual([]);
+      expect(p.created).toEqual([]);
+      expect(ensureIntents(p)).toEqual(ensures);
+      expect(p.author()).toEqual([expect.objectContaining({ agent: PEER_AUTHOR.agent, transport: "peer", state: "active" })]);
+      setPeerLeasePorts(p.f.db, ports); // runtime readable again: the next tick hands over, then creates
+      for (let i = 0; i < 4 && !p.created.length; i++) await p.tick();
+      expect(handovers(p)).toHaveLength(1);
+      expect(p.created).toEqual(["codex"]);
     } finally { p.f.close(); }
   }, E2E_MS);
 });

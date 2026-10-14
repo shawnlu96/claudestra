@@ -16,7 +16,7 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getTask, listEvents } from "./ledger-store.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 import { observeDedupKey } from "./recovery-policy.js";
 import { heldLease } from "./ledger-lend-lease.js";
@@ -25,7 +25,7 @@ import { observedTag, PEER_LEASE_KEY, peerLeaseMode, peerLeasePorts, relayObserv
 import { handoverCheck, handoverObserveKey } from "./recovery-peer-lease-handover.js";
 import { handoverRuntimeDrift } from "./recovery-peer-lease-family.js";
 import { probeHandoverHead } from "./recovery-peer-lease-head.js";
-import { taskWorkerRefs } from "./scheduler-sessions.js";
+import { getSchedulerSession, taskWorkerRefs } from "./scheduler-sessions.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -103,10 +103,29 @@ async function observeDrift(db: Database, task: LedgerTask, manager: Manager): P
     { kind: "runtime_drift", ...drift, agent: author.agent, sessionId: author.sessionId });
 }
 
-/** After the card's plan, before the clock: the halves are independent and each is idempotent. */
+/** Thrown out of the card's step (scheduler-auto-tick.ts records it in failed): this tick's plan must not run. */
+export class PeerHandoverHalt extends Error {}
+
+/**
+ * The fence after the handover: a plan to create the card's author while a peer author binding is still active was made on the
+ * snapshot that dropped that row (handoverDue) — the planner never asks for a new author next to a bound one. If the handover did
+ * not land (refused re-check, unread runtime, failed manager call, switch flipped) and nothing moved the rev (a head block does), the
+ * plan's own rev CAS would accept it: the card's step stops here instead, before any creation. Reads only; the next snapshot re-plans.
+ */
+function staleAuthorPlan(db: Database, task: LedgerTask, plan: PlannerDecision): string | null {
+  if (plan.kind !== "intent" || plan.action !== "ensure_session" || (plan.sessionRole ?? "author") !== "author") return null;
+  if (getTask(db, task.id)?.rev !== task.rev) return null; // the plan's rev CAS refuses it
+  const row = getSchedulerSession(db, task.id, "author");
+  return row?.state === "active" && row.transport === "peer"
+    ? `${task.id} peer 作者 ${row.agent} 的绑定未交接，本轮建作者的计划作废（不建本机作者），下轮重算` : null;
+}
+
+/** After the card's plan, before the clock: the halves are independent and each is idempotent; the fence runs last. */
 export async function peerLeaseTick(db: Database, task: LedgerTask, plan: PlannerDecision, manager: Manager): Promise<void> {
   if (task.stage !== "fix") return;
   await observeRelay(db, task, plan, manager);
   await handover(db, task, manager);
   await observeDrift(db, task, manager);
+  const stale = staleAuthorPlan(db, task, plan);
+  if (stale) throw new PeerHandoverHalt(stale);
 }

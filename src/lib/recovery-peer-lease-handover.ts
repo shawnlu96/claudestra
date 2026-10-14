@@ -121,13 +121,20 @@ export function applyPeerHandover(db: Database, ctx: WriteCtx, input: HandoverIn
 
 /**
  * The CLI half of `scheduler-fix-relay --op peer-handover` (lend-fix-reassign-tick.ts): flags in, the transaction's answer out. The
- * remote head is read here, by the command itself (never taken from a flag), right before the transaction re-checks it.
+ * remote head is read here, by the command itself (never taken from a flag), right before the transaction re-checks it. A re-read
+ * that no longer proves the ledger's head preserved (unreadable now, or drifted since the tick's read) is recorded as the head block
+ * first (applyHeadBlock: the rev moves, so the plan made on the snapshot that dropped the old row is refused, and the reason replays
+ * through recordedHeadBlock), then refused — never only refused, which would leave that plan free to create a local author.
  */
 export async function peerHandoverCommand(c: { db: Database; ctx(): WriteCtx; need(flag: string): string; task(id: string | undefined): LedgerTask; p: { pos: string[] } }) {
   const task = c.task(c.p.pos[1]), check = handoverCheck(c.db, task);
-  const remote = "evidence" in check ? (await probeHandoverHead(c.db, check.evidence)).remote : null;
-  return applyPeerHandover(c.db, c.ctx(), { taskId: task.id, rev: Number(c.need("rev")), sessionId: c.need("session"),
-    leaseAt: Number(c.need("lease-at")), runtime: c.need("runtime"), remoteHead: remote });
+  const probe = "evidence" in check ? await probeHandoverHead(c.db, check.evidence) : null;
+  const input = { taskId: task.id, rev: Number(c.need("rev")), sessionId: c.need("session"), leaseAt: Number(c.need("lease-at")), remoteHead: probe?.remote ?? null };
+  if (probe?.why && !getEventByDedup(c.db, handoverKey(task.id, input.sessionId))) { // a recorded handover replays as before
+    const block = applyHeadBlock(c.db, c.ctx(), input);
+    throw new LedgerError("conflict", `交接证据不全：${block.why}（已记交接阻断）`);
+  }
+  return applyPeerHandover(c.db, c.ctx(), { ...input, runtime: c.need("runtime") });
 }
 
 /**
