@@ -3,7 +3,7 @@
  * 查询函数(tmuxRaw)传进来,这里只发一条只读的 display-message,所以不会手写 socket 目标,也不会拉起 server。
  */
 
-import { lstat, realpath, stat, symlink, unlink } from "fs/promises";
+import { link, lstat, readlink, realpath, rename, stat, symlink, unlink } from "fs/promises";
 import { basename, dirname, join } from "path";
 import type { AliasFs, EntryKind, ServerProbe } from "./types.ts";
 
@@ -38,8 +38,11 @@ export const nodeAliasFs: AliasFs = {
       throw e;
     }
   },
+  readlink: (path) => readlink(path),
   symlink: (target, path) => symlink(target, path, "dir"),
   unlink: (path) => unlink(path),
+  rename: (from, to) => rename(from, to),
+  link: (existing, path) => link(existing, path),
 };
 
 /** tmux-helper 的 tmuxRaw 形状:给参数,回 stdout(失败回空串) */

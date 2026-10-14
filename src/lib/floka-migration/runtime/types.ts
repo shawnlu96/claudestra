@@ -11,7 +11,7 @@ type RuntimeMode = TxMode;
 
 export type EntryKind = "missing" | "symlink" | "dir" | "other";
 
-/** 别名用到的全部文件系统操作;写只有 symlink / unlink 两种 */
+/** 别名用到的全部文件系统操作;写只有 symlink / unlink / rename / link(硬链,不复制内容),都不跨目录 */
 export interface AliasFs {
   /** 不跟随软链看这一项是什么 */
   kind(path: string): Promise<EntryKind>;
@@ -21,8 +21,14 @@ export interface AliasFs {
   fileId(path: string): Promise<string | null>;
   /** 不跟随软链的这一项自身标识(dev:ino):认「还是不是本次建的那条软链」;不存在返回 null */
   entryId(path: string): Promise<string | null>;
+  /** 软链自身的目标原文(不解析) */
+  readlink(path: string): Promise<string>;
   symlink(target: string, path: string): Promise<void>;
   unlink(path: string): Promise<void>;
+  /** 原子改名;删别名时用来先取走再核对 */
+  rename(from: string, to: string): Promise<void>;
+  /** 硬链接;目标已存在时失败,用来不覆盖地放回 */
+  link(existing: string, path: string): Promise<void>;
 }
 
 /** 只读查询:这个 socket 路径后面是哪个 server(连不上返回 null)。生产实现包 tmux-helper 的查询,见 adapters.ts */
