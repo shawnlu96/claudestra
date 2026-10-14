@@ -13,13 +13,15 @@ describe("renderExecPrompt 按模板", () => {
     expect(plain).not.toContain("screenshots");
   });
 
-  test("ui = 原说明 + 截图交付一节：≥ 2 张绝对路径、摘要、task-set 整份替换、headless 不用 Playwright MCP", () => {
+  test("ui = 原说明 + 每轮正规清单交付、重拍和 headless 截图要求", () => {
     const ui = renderExecPrompt({ ...V, template: "ui" });
     expect(ui.startsWith(plain)).toBe(true);
     const extra = ui.slice(plain.length);
     expect(extra.startsWith("\n## ui 卡：合并前要过前后截图验收\n")).toBe(true);
-    for (const s of ["extra.screenshots", "至少 2 个图片的绝对路径", "改前 / 改后", "extra.screenshotsDigest", "64 位十六进制",
-      "`ledger task-set T1 --rev <rev> --extra '<json>'`", "原有字段", "headless", "不用 Playwright MCP"]) expect(extra).toContain(s);
+    for (const s of ["每轮交付", "首次 build", "普通 fix", "fix-swap", "uiEvidence", "--ui-evidence", "重拍 after",
+      "uiEvidenceDigest", "相对 ref", "headless", "不用 Playwright MCP", "ui-approve"]) expect(extra).toContain(s);
+    expect(extra).not.toContain("task-set");
+    expect(extra).not.toContain("extra.screenshots");
     expect(extra).not.toContain("{TASK}");
   });
 

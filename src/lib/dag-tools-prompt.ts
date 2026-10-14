@@ -7,6 +7,7 @@
  */
 import type { WorkflowTemplate } from "./ledger-scheduler.js";
 import { ASK_DEFAULT_GUIDANCE } from "./order-standard-answers.js";
+import { UI_DELIVERY_SECTION as UI_SECTION } from "./ui-delivery-guidance.js";
 
 export interface PromptVars {
   task: string;
@@ -44,14 +45,6 @@ const AUTO_SECTION = `
 - ${ASK_DEFAULT_GUIDANCE}
 - 规格外文件交付时自动登记，审查员判断理由是否充分（不充分记 P2）；与其他在跑卡共改时冲突两边保留。
 - 交付前必须完成的检查（全量 check、CI 等待、monitor）不放后台（run_in_background），前台跑完再交付。放了后台的，交付前先确认它仍在且已结束（看进程和输出里的退出行）；确认不了就重跑——会话一重启后台任务就被杀，完成信号不会再来。
-`;
-
-const UI_SECTION = `
-## ui 卡：合并前要过前后截图验收
-- 审查通过后调度器把截图发给 PM 验收（改整体观感的卡由 owner 看）；PM 不通过时卡退回 fix，意见在修复单里。
-- 交付前登记截图：\`extra.screenshots\` 至少 2 个图片的绝对路径（改前 / 改后；深浅色或桌面 / 手机按规格），\`extra.screenshotsDigest\` 写这组图片的 sha256（64 位十六进制）。
-- 用 \`ledger task-set {TASK} --rev <rev> --extra '<json>'\` 写，它整份替换 extra，原有字段（fileGlobs、ownerVisual 等）要带上；截图用 headless 脚本拍，不用 Playwright MCP 工具。
-- 缺截图或摘要，审查通过了也合不了，调度器会把卡交回 PM；代码再改过就重拍、重算摘要。
 `;
 
 export function renderExecPrompt(v: PromptVars, template: string = DEFAULT_TEMPLATE): string {

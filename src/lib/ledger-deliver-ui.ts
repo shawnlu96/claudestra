@@ -3,7 +3,7 @@
  * transaction before anything is written (MCP → CLI, CLI, peer writeLendDeliver all reach it with the same rules). It only records
  * evidence: never an approval, never an owner / PM answer; PM / owner still look at the actual files (scheduler-ui-gate.ts).
  * Policy: recovery-policy key uiDelivery through an injected port. off (or no port: callers not wired) = the old path, nothing read;
- * observe = check, record one deduplicated note per problem, never block, never write screenshots; on = refuse a missing / wrong
+ * observe = check, record deduplicated local success / problem notes, never block or write screenshots; on = refuse a missing / wrong
  * manifest, else register extra.screenshots (real paths) + screenshotsDigest and the manifest on the deliver event, same tx.
  * Bytes are hashed from files under this machine's artifact root only: `local` = <root>/<taskId>/<ref>; `imported` = files a peer
  * order already had imported to <imported>/<peer>/<order>/<ref> with a provenance.json naming that peer / worker / order / head and
@@ -23,13 +23,14 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { isUiEvidenceError, readUiEvidence, type UiEvidence } from "./order-deliver-ui.js";
+import { localUiSuccessPlan, uiSuccessNote, type UiSuccessObservation } from "./ui-delivery-observation.js";
 
 type UiDeliveryMode = "on" | "observe" | "off";
 export interface UiDeliverPeer { peer: string; worker: string; orderId: string }
 export interface UiDeliverPort {
   /** recovery-policy uiDelivery, read at the write boundary (inside the deliver transaction) */
   mode(project: string): { mode: UiDeliveryMode; diagnostic?: string };
-  /** observe: one deduplicated note per problem (recovery-policy recordObserved) */
+  /** observe: deduplicated problems / local successes (recovery-policy recordObserved) */
   observe(db: Database, a: { project: string; target: string; actionKey: string; action: string; data: Record<string, unknown> }): void;
   roots: { local: string; imported: string };
   /** set = a peer's write order (writeLendDeliver): only `imported` artifacts of exactly this peer / worker / order count */
@@ -38,7 +39,7 @@ export interface UiDeliverPort {
 export interface UiDeliverPlan {
   extra?: { screenshots: string[]; screenshotsDigest: string };
   data?: { uiEvidence: Record<string, unknown> };
-  observed?: { code: string; why: string };
+  observed?: { code: string; why: string } | UiSuccessObservation;
 }
 
 const FILE_MAX = 10 * 1024 * 1024;
@@ -216,7 +217,7 @@ export function planUiDelivery(db: Database, task: LedgerTask, input: { headSHA?
   if (!ui && input.uiEvidence === undefined) return {};
   try {
     const e = check(task, input, port, ui);
-    if (mode !== "on") return {};
+    if (mode !== "on") return localUiSuccessPlan(e, !!port.peer);
     const shots = e.shots.map((s, i) => ({ ...s, path: e.files[i].path, bytes: e.files[i].bytes }));
     const { files: _f, shots: _s, ...rest } = e;
     return { extra: { screenshots: shots.map((s) => s.path), screenshotsDigest: e.digest },
@@ -228,13 +229,14 @@ export function planUiDelivery(db: Database, task: LedgerTask, input: { headSHA?
   }
 }
 
-/** Observe note for one problem; dedup per card + target round + code, so the same gap is one note. */
+/** Problems keep their existing keys; local success dedups the complete head / target round / digest tuple. */
 export function observeUiDelivery(db: Database, task: LedgerTask, plan: UiDeliverPlan, port: UiDeliverPort | undefined, head: string | undefined): void {
   if (!plan.observed || !port) return;
   const round = task.stage === "review" ? task.round : task.round + 1;
   const why = plan.observed.why.replace(/[\p{Cc}\u2028\u2029]/gu, " ").slice(0, 300);
   // observe never blocks the delivery: a note that cannot be written is logged and dropped (its savepoint rolls back alone)
   try {
+    if ("digest" in plan.observed) { port.observe(db, uiSuccessNote(task, plan.observed)); return; }
     port.observe(db, { project: task.project, target: task.id, actionKey: `ui-delivery:r${round}:${plan.observed.code}:${(head ?? "nohead").slice(0, 12)}`,
       action: `拒收 ui 卡交付（截图证据 ${plan.observed.code}：${why}）`, data: { code: plan.observed.code, head: head ?? null } });
   } catch (e) { console.error(`⚠️ ${task.id} ui 交付观察没记上：${(e as Error).message}`); }
