@@ -226,7 +226,8 @@ const authApi = (req: Request, url: URL): Promise<Principal | Response> => authe
 
 /** 按名找人与 GET /agents 共用的 manager list 短缓存（≤3s、并发合并、registry 变即作废，lib/agent-lookup-cache.ts） */
 const agentListCache = createListCache({ list: () => runManager("list") });
-const cachedListForAgents = agentListCache.result as AgentsListIo["runManager"];
+/** GET /agents 的 io.runManager：只有裸 `list` 走缓存，别的命令照旧现起 manager（不会拿 list 的缓存冒充） */
+const agentsListRunManager: AgentsListIo["runManager"] = (...args) => (args.length === 1 && args[0] === "list" ? agentListCache.result() : runManager(...args));
 
 /** registry 名双向兼容（"worker" ↔ "agent-worker"），返回 manager list 里的条目 */
 async function findApiAgent(name: string): Promise<{ name: string; channelId: string; idle?: boolean; status?: string; purpose?: string; cwd?: string; sessionId?: string } | null> {
@@ -307,7 +308,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const path = url.pathname.slice("/api/v1".length);
 
   // GET /api/v1/agents —— scope 内的 agent 快照（热点逻辑在 bridge/agents-list-route.ts：先 scope 后尾读、已停 worker 不读尾、有界并发 + 短缓存）
-  if (path === "/agents" && req.method === "GET") return handleAgentsList(url, principal, { runManager: cachedListForAgents, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID });
+  if (path === "/agents" && req.method === "GET") return handleAgentsList(url, principal, { runManager: agentsListRunManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID });
 
   // v2.7+ GET /api/v1/sessions —— 全机器 Claude 会话清单（agents 模式适配，
   // 中性 NeutralSessionInfo；Discord 面板与 web 前端共用同一数据源）。
