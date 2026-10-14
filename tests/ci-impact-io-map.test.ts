@@ -51,12 +51,17 @@ const A = (path: string): ChangedFile => ({ status: "A", path });
 const ALWAYS = "tests/always.test.ts", VIA_M = ["tests/m.test.ts", "tests/via-m.test.ts"];
 const ALL = repo().paths.filter(isTestFile);
 const propose = (changes: ChangedFile[], map: IoMapEntry[] | undefined, h = repo(), b = repo()) => proposeTests(changes, b, h, INPUTS, map);
+let real: ReturnType<typeof side> | null = null;
+/** 真实仓库的 import 图（建一次约十几秒，两条用例共用） */
+const realRepo = () => real ??= (() => {
+  const paths = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "-z"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\0").filter(Boolean);
+  const aliases = tsconfigAliases(readFileSync(join(ROOT, "tsconfig.json"), "utf8"));
+  return { paths, graph: buildGraph({ paths, read: (p) => readFileSync(join(ROOT, p), "utf8") }, scan, aliases) };
+})();
 
 describe("[先红后绿] 读取图代替两条一刀切的 io 规则", () => {
   test("红测1：真实仓库 + 夹具读取图，只改 src/lib/agent-name.ts → 不是全量，只有反向闭包加 ALWAYS_RUN", () => {
-    const paths = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "-z"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\0").filter(Boolean);
-    const aliases = tsconfigAliases(readFileSync(join(ROOT, "tsconfig.json"), "utf8"));
-    const real = { paths, graph: buildGraph({ paths, read: (p) => readFileSync(join(ROOT, p), "utf8") }, scan, aliases) };
+    const real = realRepo(), paths = real.paths;
     // 用的就是 plan 用的那份登记表：非字面量动态加载照旧要登记，真实仓库里测试走得到的都已登记（含 4 个 web-shared-audit-* 的 webLoader）
     const inputs = DEFAULT_IMPACT_INPUTS, registered = new Set(inputs.implicit.map((i) => i.module));
     const tests = paths.filter(isTestFile);
@@ -72,6 +77,21 @@ describe("[先红后绿] 读取图代替两条一刀切的 io 规则", () => {
     expect(p.tests.length).toBeLessThan(tests.length);
     // 纯 import 的反向闭包只有个位数；多出来的都来自登记表里「子进程跑 src/manager.ts」这类边，登记照旧有效
     expect([...reverseClosure(real.graph, [changed])].filter(isTestFile).length).toBeLessThan(10);
+  }, 60_000);
+
+  test("SELECT5 红测：只改 src/channel-server.ts → 按登记选的测试含 tests/acp-compact-stub.test.ts（测试把它的路径当配置传给 stub 子进程）", () => {
+    const r = realRepo(), stub = "tests/acp-compact-stub.test.ts", changed = "src/channel-server.ts";
+    expect(DEFAULT_IMPACT_INPUTS.implicit.find((i) => i.module === stub)?.deps).toEqual([changed]);
+    expect(reverseClosure(r.graph, [changed]).has(stub)).toBe(false); // 纯 import 走不到：这条边只能靠登记
+    // 现在另有 lend-claude-worker.ts 登记了 channel-server、本测试碰巧经 import 走得到它；去掉别的行的这条依赖，证明本行自己就够
+    const own: ImpactInputs = { ...DEFAULT_IMPACT_INPUTS,
+      implicit: DEFAULT_IMPACT_INPUTS.implicit.map((i) => (i.module === stub ? i : { ...i, deps: i.deps.filter((d) => d !== changed) })) };
+    const map = [entry("src/lib/team-roles.ts", { reads: ["roles/pm.md"] })];
+    for (const inputs of [DEFAULT_IMPACT_INPUTS, own]) {
+      const p = proposeTests([M(changed)], r, r, inputs, map);
+      expect(p.reasons).toEqual([]);
+      expect(p.tests).toContain(stub);
+    }
   }, 60_000);
 
   test("红测2：读取图里 M 读过 docs/x.json，PR 只改它 → 走得到 M 的测试都选上，走不到的不选", () => {

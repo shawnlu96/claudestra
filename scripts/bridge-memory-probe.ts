@@ -205,8 +205,11 @@ function isolatedEnv(root: string): Record<string, string> {
 async function isolatedChild(args: string[], timeoutMs: number): Promise<unknown> {
   const dir = mkdtempSync(join(tmpdir(), "bridge-memory-"));
   try {
-    const child = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", import.meta.path, ...args], {
-      cwd: dir, env: isolatedEnv(dir), stdin: "ignore", stdout: "pipe", stderr: "ignore",
+    // CI_IO_TRACE（merge-arch-SELECT5）：worker 才 import 被测源码，不透传 + preload 记录器的话读取图里它是盲区；没设时 argv / env 不变
+    const trace = process.env.CI_IO_TRACE;
+    const preload = trace ? ["--preload", join(import.meta.dir, "../src/lib/sync-fs-trace.ts")] : [];
+    const child = Bun.spawn([process.execPath, ...preload, "--no-env-file", "--config=/dev/null", import.meta.path, ...args], {
+      cwd: dir, env: { ...isolatedEnv(dir), ...(trace ? { CI_IO_TRACE: trace } : {}) }, stdin: "ignore", stdout: "pipe", stderr: "ignore",
     });
     // Only our newly spawned child can be terminated; no supplied or discovered PID is signalled.
     const timeout = setTimeout(() => child.kill(), timeoutMs);
