@@ -48,9 +48,10 @@ const rev = (f: F) => String(f.task().rev);
 function ticker(f: F) {
   const sent: string[] = [];
   const statePath = join(f.dir, "pm-rails.json");
-  const run = (now?: number) => f.cliWith({ notifyOwner: async (t) => { sent.push(t); return true; }, pmRails: { statePath },
+  let up = true;
+  const run = (now?: number) => f.cliWith({ notifyOwner: async (t) => { if (up) sent.push(t); return up; }, pmRails: { statePath },
     ...(now !== undefined ? { now: () => now } : {}) }, "owner", "pm-rails-tick");
-  return { sent, run };
+  return { sent, run, down: (v: boolean) => { up = !v; } };
 }
 
 /** 真实 tick 把 T1 带到合并队列，调度身份 claim + 开合并 run；返回合并意图 id */
@@ -192,12 +193,17 @@ test("[验收线 3] T2：自动卡的意图停在 unknown 满 30 分钟推一次
   const { id } = f.db.query("SELECT id FROM scheduler_intents WHERE taskId = 'T1' ORDER BY eventSeq DESC LIMIT 1").get() as { id: string };
   const since = Date.UTC(2030, 0, 1);
   f.db.run("UPDATE scheduler_intents SET status = 'unknown', updatedAt = ? WHERE id = ?", [since, id]);
-  expect(await t.run(since + 29 * MIN)).toMatchObject({ sent: 0 });
-  expect(await t.run(since + 31 * MIN)).toMatchObject({ sent: 1 });
-  expect(t.sent[0]).toContain(`[调度停住] p · T1：意图 ${id}`);
-  expect(await t.run(since + 90 * MIN)).toMatchObject({ sent: 0 });
+  const stalls = () => t.sent.filter((x) => x.startsWith("[调度停住]"));
+  await t.run(since + 29 * MIN);
+  expect(stalls()).toHaveLength(0);
+  await t.run(since + 31 * MIN);
+  expect(stalls()).toHaveLength(1);
+  expect(stalls()[0]).toContain(`[调度停住] p · T1：意图 ${id}`);
+  await t.run(since + 90 * MIN);
+  expect(stalls()).toHaveLength(1);
   f.db.run("UPDATE scheduler_intents SET updatedAt = ? WHERE id = ?", [since + 60 * MIN, id]);
-  expect(await t.run(since + 95 * MIN)).toMatchObject({ sent: 1 });
+  await t.run(since + 95 * MIN);
+  expect(stalls()).toHaveLength(2);
 });
 
 /** 本机时间的下一个 10:05，保证 ts 落在它汇总的 [前一天 10:00, 当天 10:00) 窗口里 */
@@ -294,4 +300,19 @@ test("[验收线 12] 拿不相干卡的 start_node 建卡前缀豁免不了对�
   expect(await f.cli("pm", "stage", "T1", "--from", "blocked", "--to", "build", "--dedup", "dag-start:T1:probe:restate")).toMatchObject({ ok: true });
   expect(cmds(marked(f))).toEqual(["restate-approve", "task-set", "stage"]);
   expect(marked(f).filter((e) => e.kind === "stage").length).toBe(2);
+});
+
+test("[验收线 2] r2 lookback-drops-unsent：通知通道断了 49 小时，恢复后没送出的干预照样推", async () => {
+  const f = fixture("on");
+  const t = ticker(f);
+  await toBuild(f);
+  expect(await f.cli("pm", "task-set", "T1", "--rev", rev(f), "--model", "x")).toMatchObject({ ok: true });
+  f.advance(11 * MIN);
+  t.down(true);
+  expect(await t.run()).toMatchObject({ sent: 0 });
+  f.advance(49 * 60 * MIN);
+  t.down(false);
+  expect(await t.run()).toMatchObject({ sent: 1 });
+  expect(t.sent[0]).toContain("pm：restate-approve×1、task-set×1");
+  expect(await t.run()).toMatchObject({ sent: 0 });
 });

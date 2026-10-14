@@ -8,7 +8,7 @@ import { isOwnerLike } from "../lib/ledger-checks.js";
 import { getEventByDedup, getTask, LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { pmRailsScope, workflowModes } from "../lib/pm-rails.js";
-import { cardPushes, digestText, digestWindow, interventionEvents, PM_RAILS_LOOKBACK_MS, PROJECT_TARGET, stalledIntents, type PmRailsState } from "../lib/pm-rails-notice.js";
+import { advanceLowWater, cardPushes, digestText, digestWindow, interventionEvents, stalledIntents, type PmRailsProjectState, type PmRailsState } from "../lib/pm-rails-notice.js";
 import { cachedPmRailsMode, pmRailsMode } from "../lib/pm-rails-policy.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
 import type { LedgerCli, LedgerDeps, Result } from "./ledger-context.js";
@@ -54,21 +54,25 @@ function readState(path: string): PmRailsState {
 
 /** 一个项目这一轮：干预合并推送 + 停住提醒；返回发出去的条数。推送失败就停在这里，状态不前进 */
 async function projectTick(db: Database, project: string, state: PmRailsState, now: number, send: (t: string) => Promise<boolean>): Promise<number> {
-  const st = state.projects[project] ??= { cards: {}, stalls: [] };
+  const prev = state.projects[project] as Partial<PmRailsProjectState> | undefined; // r1 写的旧文件没有 after
+  const st: PmRailsProjectState = { after: prev?.after ?? 0, cards: prev?.cards ?? {}, stalls: prev?.stalls ?? [] };
   let sent = 0;
-  const events = interventionEvents(db, { project, fromTs: now - PM_RAILS_LOOKBACK_MS });
-  const seen = new Set(events.map((e) => e.target || PROJECT_TARGET));
-  for (const card of Object.keys(st.cards)) if (!seen.has(card)) delete st.cards[card]; // 窗口外的卡不会再有要推的，游标不涨
-  for (const p of cardPushes(project, events, st, now)) {
-    if (!(await send(p.text))) return sent;
-    st.cards[p.card] = p.lastSeq; sent++;
+  const events = interventionEvents(db, { project, afterSeq: st.after });
+  try {
+    for (const p of cardPushes(project, events, st, now)) {
+      if (!(await send(p.text))) return sent;
+      st.cards[p.card] = p.lastSeq; sent++;
+    }
+  } finally {
+    state.projects[project] = advanceLowWater(events, st); // 推失败提前返回也落一次：已推的那几条不重推
   }
+  const cur = state.projects[project];
   const stalls = stalledIntents(db, project, now);
-  for (const s of stalls.filter((x) => !st.stalls.includes(x.key))) {
+  for (const s of stalls.filter((x) => !cur.stalls.includes(x.key))) {
     if (!(await send(s.text))) return sent;
-    st.stalls.push(s.key); sent++;
+    cur.stalls.push(s.key); sent++;
   }
-  st.stalls = st.stalls.filter((k) => stalls.some((s) => s.key === k)); // 意图结清 / 状态变了就忘掉，列表不涨
+  cur.stalls = cur.stalls.filter((k) => stalls.some((s) => s.key === k)); // 意图结清 / 状态变了就忘掉，列表不涨
   return sent;
 }
 

@@ -17,22 +17,23 @@ const PM_RAILS_DIGEST_HOUR = 10;
 /** 一条推送里最多列这么多个事件号，多的折成「等 N 条」 */
 const SEQ_MAX = 8;
 /** 项目级干预（冻结 / 解冻）在分组里用的卡名 */
-export const PROJECT_TARGET = "(项目)";
+const PROJECT_TARGET = "(项目)";
 
-/** 单次推送往回看多久：bridge 停了这么久之后不再逐条补推（每日汇总照样带上） */
-export const PM_RAILS_LOOKBACK_MS = 48 * 3600_000;
-
-export interface PmRailsProjectState { cards: Record<string, number>; stalls: string[] }
+/**
+ * after = 低水位：这个事件号及以前的 on 干预都已推过，下一轮只从它往后读（不按时间截断，通知断多久都不丢）；
+ * cards = 低水位之后已推到哪条（同一张卡分组推，别的卡可能还卡在前面）。
+ */
+export interface PmRailsProjectState { after: number; cards: Record<string, number>; stalls: string[] }
 export interface PmRailsState { projects: Record<string, PmRailsProjectState>; digestDay?: string }
 
 type Intervention = { cmd?: unknown; by?: unknown };
 const iv = (e: LedgerEvent): Intervention => (e.data.intervention ?? {}) as Intervention;
 const cardOf = (e: LedgerEvent): string => e.target || PROJECT_TARGET;
 
-/** on 期间打标的干预事件 */
-export function interventionEvents(db: Database, q: { project: string; fromTs: number; toTs?: number }): LedgerEvent[] {
-  const rows = db.query(`SELECT * FROM events WHERE project = ? AND ts >= ? AND ts < ? AND json_extract(data, '$.intervention.mode') = 'on' ORDER BY seq`)
-    .all(q.project, q.fromTs, q.toTs ?? Number.MAX_SAFE_INTEGER) as Record<string, unknown>[];
+/** on 期间打标的干预事件：afterSeq 之后、ts 在 [fromTs, toTs) 内 */
+export function interventionEvents(db: Database, q: { project: string; afterSeq?: number; fromTs?: number; toTs?: number }): LedgerEvent[] {
+  const rows = db.query(`SELECT * FROM events WHERE project = ? AND seq > ? AND ts >= ? AND ts < ? AND json_extract(data, '$.intervention.mode') = 'on' ORDER BY seq`)
+    .all(q.project, q.afterSeq ?? 0, q.fromTs ?? 0, q.toTs ?? Number.MAX_SAFE_INTEGER) as Record<string, unknown>[];
   return rows.map(toEvent);
 }
 
@@ -59,7 +60,7 @@ export interface CardPush { card: string; lastSeq: number; text: string }
 export function cardPushes(project: string, events: readonly LedgerEvent[], st: PmRailsProjectState, now: number): CardPush[] {
   const groups = new Map<string, LedgerEvent[]>();
   for (const e of events) {
-    if (e.seq <= (st.cards[cardOf(e)] ?? 0)) continue;
+    if (e.seq <= Math.max(st.after, st.cards[cardOf(e)] ?? 0)) continue;
     groups.set(cardOf(e), [...(groups.get(cardOf(e)) ?? []), e]);
   }
   const out: CardPush[] = [];
@@ -73,6 +74,18 @@ export function cardPushes(project: string, events: readonly LedgerEvent[], st: 
     }
   }
   return out;
+}
+
+/** 推完一轮后把低水位推到「从头连续都已推过」的最后一条，并丢掉不再需要的卡游标；返回新状态 */
+export function advanceLowWater(events: readonly LedgerEvent[], st: PmRailsProjectState): PmRailsProjectState {
+  let after = st.after;
+  for (const e of events) {
+    if (e.seq <= after) continue;
+    if (e.seq > (st.cards[cardOf(e)] ?? 0)) break;
+    after = e.seq;
+  }
+  const cards = Object.fromEntries(Object.entries(st.cards).filter(([, seq]) => seq > after));
+  return { ...st, after, cards };
 }
 
 export interface Stall { key: string; text: string }

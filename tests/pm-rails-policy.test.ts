@@ -41,3 +41,17 @@ test("[验收线 2、6] peer / 执行者 / 没作用域不标；off 原样返回
   expect(inScope("on", "agent-pm")).toEqual({ ...e.data, manual: true, intervention: { cmd: "stage", by: "agent-pm", role: "pm", mode: "on" } });
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("[验收线 2] 低水位只推过「从头连续都推过」的那段：别的卡还没推，后面推过的卡也不重推", async () => {
+  const { advanceLowWater, cardPushes } = await import("../src/lib/pm-rails-notice.js");
+  const ev = (seq: number, target: string, ts: number) => ({ seq, ts, actor: "agent-pm", project: "p", target, kind: "stage" as const, text: "",
+    data: { intervention: { cmd: "stage", by: "agent-pm", mode: "on" } }, dedupKey: null }) as never;
+  const MIN = 60_000, events = [ev(1, "A", 0), ev(2, "B", 9 * MIN), ev(3, "A", 1 * MIN)];
+  let st = { after: 0, cards: {} as Record<string, number>, stalls: [] as string[] };
+  const first = cardPushes("p", events, st, 12 * MIN);
+  expect(first.map((p) => [p.card, p.lastSeq])).toEqual([["A", 3]]); // B 还没满 10 分钟
+  st = advanceLowWater(events, { ...st, cards: { A: 3 } });
+  expect(st).toMatchObject({ after: 1, cards: { A: 3 } });
+  expect(cardPushes("p", events.filter((e: { seq: number }) => e.seq > st.after), st, 20 * MIN).map((p) => [p.card, p.lastSeq])).toEqual([["B", 2]]);
+  expect(advanceLowWater(events, { ...st, cards: { A: 3, B: 2 } })).toMatchObject({ after: 3, cards: {} });
+});
