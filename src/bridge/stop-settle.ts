@@ -190,7 +190,7 @@ async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promi
     markWithheld(d, t, t.drain.text);
     return own;
   }
-  if (!failed) await settleCallers(d, t.cid, t.drain.text); // 失败那一轮的 drain 是错误原文，不是答谁的
+  if (!failed) await settleCallers(d, t.cid, t.drain.text, recOf(t)?.askers ?? []); // 失败那一轮的 drain 是错误原文，不是答谁的
   return own;
 }
 
@@ -413,9 +413,11 @@ export function closeRecoveredCards(cid: string, now = Date.now()): void {
 }
 
 /** 只在 settlesOwnTurn 为真时调（settleStopTurn） */
-async function settleCallers(d: CallerSettleDeps, cid: string, drainedText: string | null): Promise<void> {
+async function settleCallers(d: CallerSettleDeps, cid: string, drainedText: string | null, askers: readonly string[] = []): Promise<void> {
   const pac = d.answerable(cid);
-  if (!pac) {
+  // 几个 agent 的请求一起开的这一轮（押后合批，held-flush.ts）：别人那份已被单独答掉、只剩它一个在等，这一轮的话也不是专答它的——
+  // 不推不消化，回程留着等 target 用 send_to_agent 答它（tests/held-agent-batch.test.ts「回复不认错人」）
+  if (!pac || (askers.length > 1 && askers.includes(pac.callerChannelId))) {
     d.nudgeAmbiguous(cid);
     return;
   }
