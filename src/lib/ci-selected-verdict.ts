@@ -84,8 +84,23 @@ export function judgeSelected(input: SelectedVerdictInput): SelectedVerdict {
   return { allow: true, reason: `${outOfScope.length} 条失败都在责任选集与改动之外`, outOfScope };
 }
 
-/** bun 的汇总行「 N fail」，N > 0：这片的测试步骤红过。成功结束的片里出现它，说明这片是按回执放行的。 */
-export const hasBunFailures = (log: string): boolean => /^\s*[1-9]\d* fail\s*$/m.test(log);
+const SUMMARY_LINE = /^\s*(\d+) ([a-z].*?)\s*$/;
+/**
+ * bun 收尾汇总里 fail 或 error 大于 0：这片的测试步骤红过。成功结束的片里出现它，说明这片是按回执放行的。
+ * 只认最后一行「Ran N tests across M files.」紧挨着的上方汇总块（「 N pass / fail / error / skip / expect() calls」…）；
+ * 测试自己打的「 1 fail」在汇总之前，不算。没有收尾汇总（没跑测试、零文件片、崩溃）读作没红过。
+ */
+export function hasBunFailures(log: string): boolean {
+  const lines = log.split(/\r?\n/);
+  let i = lines.findLastIndex((l) => /^Ran \d+ tests? across \d+ files?\./.test(l));
+  if (i < 0) return false;
+  for (i--; i >= 0; i--) {
+    const m = SUMMARY_LINE.exec(lines[i]!);
+    if (!m) return false;
+    if (Number(m[1]) > 0 && /^(fail|errors?)$/.test(m[2]!)) return true;
+  }
+  return false;
+}
 
 /**
  * 分片自己存的 shard.log（bun 原样输出）→ parseFailedLog 认的 `gh run view --log-failed` 形状：每行加 `作业\t步骤\t` 前缀

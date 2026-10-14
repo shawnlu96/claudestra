@@ -166,7 +166,7 @@ function readWebBuild(input: ProofInput): { facts: WebBuildFacts["webBuild"] | n
 const workflowPath = (run: ProofRun) => (run.workflowRef.startsWith(`${run.repo}/`) ? run.workflowRef.slice(run.repo.length + 1) : run.workflowRef).split("@")[0]!;
 
 /**
- * 放行了的片 = 日志里 bun 红过（「N fail」，N > 0）的片，加上事实里带 applied 回执的片。每片都要有本次 run / attempt / 检出 / 这份日志的回执，
+ * 放行了的片 = bun 收尾汇总里 fail / error 大于 0 的片，加上事实里带 applied 回执的片。每片都要有本次 run / attempt / 检出 / 这份日志的回执，
  * 全部出自同一份责任选集；都成立才汇成一节。没有放行的片：section 为 null、没有问题。
  */
 export function selectedSectionOf(input: ProofInput, tested: string): { section: SelectedSection | null; problems: string[] } {

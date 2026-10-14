@@ -91,6 +91,13 @@ describe("the shard log the verdict reads", () => {
   test("a red bun summary is told apart from a green one", () => {
     expect([hasBunFailures(log), hasBunFailures(log.replace(" 1 fail", " 0 fail"))]).toEqual([true, false]);
   });
+
+  test("only bun's closing summary counts: a passing test that prints \" 1 fail\" (or a fake summary) before it is still green", () => {
+    const printed = shardLog([["tests/a.test.ts", [" 1 fail", " 3 error", "Ran 1 test across 1 file.", "(pass) prints fail text [1.00ms]"]]], 0);
+    expect(hasBunFailures(printed)).toBe(false);
+    expect(hasBunFailures(printed.replace(" 0 fail", " 0 fail\n 1 error"))).toBe(true); // an unhandled error between tests is red too
+    expect(hasBunFailures("ok\n 1 fail")).toBe(false); // no closing summary at all: never ran to the end, nothing released
+  });
 });
 
 describe("the mode and the receipt shape", () => {

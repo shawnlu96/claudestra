@@ -11,7 +11,7 @@ import { buildGraph, oxcScanner, type OxcParseSync } from "../src/lib/ci-impact-
 import type { ImpactInputs } from "../src/lib/ci-impact-inputs.js";
 import { type ChangedFile, selectImpactedTests } from "../src/lib/ci-impact-select.js";
 import { selectLightTests } from "../src/lib/ci-light-select.js";
-import { readResponsibility, responsibilityDigest } from "../src/lib/ci-selected-verdict.js";
+import { judgeSelected, readResponsibility, responsibilityDigest } from "../src/lib/ci-selected-verdict.js";
 
 const scan = oxcScanner(parseSync as unknown as OxcParseSync);
 type Files = Record<string, string>;
@@ -75,6 +75,14 @@ describe("[验收线 1] responsibility is frozen beside an unchanged execution p
     expect(responsibilityOf(facts({ event: "workflow_dispatch", select: never }))).toMatchObject({ tests: "all" });
     expect(responsibilityOf(facts({ event: "merge_group", select: never }))).toMatchObject({ tests: "all" });
     expect(responsibilityOf(facts({ select: never }))).toMatchObject({ tests: "all", fallbackReasons: ["选择器失败：must not select"] });
+  });
+
+  test("the slow-list fallback freezes \"all\" too: a PR that only touches a slow test runs full, and owns everything that full run fails", () => {
+    const p = buildPlan(facts(CASES.slowOnly));
+    expect([p.scope, p.reasons]).toEqual(["full", ["排除慢清单后选集为空"]]);
+    expect(p.responsibility).toEqual({ tests: "all", digest: responsibilityDigest("all"), fallbackReasons: ["排除慢清单后选集为空"] });
+    expect(judgeSelected({ responsibility: p.responsibility!, failures: [{ file: "tests/b.test.ts", name: "flaky", timedOut: false }],
+      changed: ["tests/slow.test.ts"], complete: true, steps: {} })).toMatchObject({ allow: false });
   });
 
   test("a dispatch that belongs to a PR is computed on its checkout like the PR run", () => {

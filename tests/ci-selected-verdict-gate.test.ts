@@ -218,6 +218,14 @@ describe("[验收线 3] gateVerdict: what counts as released and what a receipt 
     expect(gateVerdict(input(new Map([[3, receipt()]]), "off")).problems.join()).toContain("CI_SELECTED_GATE=off");
     expect(gateVerdict({ mode: "off", run, logs: new Map([[4, "ok\n 0 fail"]]), receipts: new Map() })).toEqual({ verdict: null, problems: [] });
   });
+
+  test("off: a green shard whose passing test printed \" 1 fail\" is not a release — no receipt needed, the gate stays green", () => {
+    const green = LOG.replace("(fail) under load [5001.00ms]\n  ^ this test timed out after 5000ms.", "  1 fail\n 1 fail\n(pass) prints [1.00ms]")
+      .replace(" 1 pass\n 1 fail", " 2 pass\n 0 fail");
+    expect(green).toContain("\n 1 fail\n(pass)");
+    for (const mode of ["off", "observe", "on"] as const) expect(gateVerdict({ mode, run, logs: new Map([[1, green]]), receipts: new Map() }))
+      .toEqual({ verdict: null, problems: [] });
+  });
 });
 
 describe("[验收线 5] the check job keeps its name, its first step and the wording the scheduler reads", () => {

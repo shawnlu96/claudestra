@@ -409,7 +409,7 @@ jobs:
           REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
           GH_TOKEN: ${{ github.token }}
 
-      # 责任选集放行（merge-arch-CISEL1，scripts/ci-selected-verdict.ts gate）：成功结束却红过的片（日志里 bun 的「N fail」，N > 0）
+      # 责任选集放行（merge-arch-CISEL1，scripts/ci-selected-verdict.ts gate）：成功结束却红过的片（bun 收尾汇总里 fail / error 大于 0）
       # 都必须有本次 run / attempt / 检出 / 那份日志的 on 放行回执，且出自同一份责任选集；缺一份、对不上就红。有放行时汇总成工件
       # ci-selected-verdict，日志一行 `ci-selected: allow=… out_of_scope=N`。没有片被放行时（off 档恒如此）不写工件、以 0 退出，结论与改前一致。
       # 上面「All shards succeeded」这一步的名字与措辞不动（调度器 GATE / GATE_VERDICT 认它）。

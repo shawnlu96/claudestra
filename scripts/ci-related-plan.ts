@@ -151,6 +151,8 @@ export function responsibilityOf(f: PlanFacts): CiResponsibility {
   try { sel = ioMapPart(f, "on", f.select("on")).sel; }
   catch (e) { return responsibility("all", [`选择器失败：${(e as Error).message}`]); }
   if (sel.run !== "selected" || !sel.proposed) return responsibility("all", sel.fullReasons.length ? sel.fullReasons : ["选择器没有给出选集"]);
+  // decide() 的同一条兜底：去掉慢清单后什么都不剩就全量跑，责任也就是全量（慢测试照旧留在选集里，只是不靠它们撑起非 all）
+  if (!withoutSlow(sel.tests, f.slow).length) return responsibility("all", ["排除慢清单后选集为空"]);
   return responsibility(sel.tests);
 }
 

@@ -3,7 +3,7 @@
 //     分片测试步骤里 bun test 失败后才调（off 档根本不调）。写 <输出目录>/receipt.json，日志打一行 `ci-selected:`；
 //     只有 CI_SELECTED_GATE=on 且判定放行时以 0 退出（这一片以成功结束），其余都以 1 退出、由调用方按 bun 原来的退出码失败。
 //   bun scripts/ci-selected-verdict.ts gate <分片日志目录> <回执目录> <输出目录>
-//     check 作业：成功结束却红过的片（日志里 bun 的「N fail」，N > 0）都必须有本次 run / attempt / 检出 / 这份日志的放行回执，缺一份就红。
+//     check 作业：成功结束却红过的片（bun 收尾汇总里 fail / error 大于 0）都必须有本次 run / attempt / 检出 / 这份日志的放行回执，缺一份就红。
 //     有放行时写 <输出目录>/verdict.json（工件 ci-selected-verdict）并打 `ci-selected: allow=1 out_of_scope=N`。
 // 模式来自受信仓库变量 CI_SELECTED_GATE，ci.yml 里先归一成 off / observe / on 三个字面量再给脚本（PR 改不了仓库变量，也带不进别的值）。
 // tests/ci-selected-verdict-gate.test.ts。
@@ -19,7 +19,11 @@ import {
 /** scripts/ci-related-plan.ts 的 planDigest 同一算法；不 import 它，因为它带着 oxc-parser，而 check 作业不装依赖。 */
 const planDigestOf = (p: unknown): string => `sha256:${createHash("sha256").update(JSON.stringify(p)).digest("hex")}`;
 
-const parseJson = (text: string): unknown => { try { return JSON.parse(text); } catch { return null; } };
+/** 读不懂的计划 / 回执读作 null：下游一律不放行（没有责任选集 / 不是合法回执，原因写进回执与 ::error::），所以这里丢掉异常无害；原因另打一行 ::warning:: 留诊断。 */
+const parseJson = (text: string): unknown => {
+  try { return JSON.parse(text); }
+  catch (e) { console.log(`::warning::ci-selected JSON 解析失败（按不放行处理）：${(e as Error).message}`); return null; }
+};
 const readText = (path: string): string | undefined => (path && existsSync(path) ? readFileSync(path, "utf8") : undefined);
 
 function git(args: string[]): string | null {

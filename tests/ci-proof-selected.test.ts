@@ -104,4 +104,12 @@ describe("[验收线 4] a released proof carries its receipts, and is invalid wi
     expect(verify(input(), OMIT)).toMatchObject({ ok: true, mergeAuthorized: true });
     expect(verify(input(), { junk: true })).toMatchObject({ ok: true, mergeAuthorized: true });
   });
+
+  test("no release: a passing test that prints \" 1 fail\" above bun's green summary still gets the unchanged proof", () => {
+    const i = input(), k = 2, printed = logOf(k).replace("(pass) ok [1.00ms]", " 1 fail\n(pass) ok [1.00ms]");
+    i.shardLogs.set(`test-shard-${k}`, printed);
+    i.facts.set(`ci-facts-shard-${k}`, shardFacts({ ...ENV, ...CORE_OK }, k, printed));
+    const { manifest, report, selected } = buildCiProof(i);
+    expect([report.refusals, manifest?.policyVersion, selected]).toEqual([[], CI_PROOF_POLICY_VERSION, null]);
+  });
 });
