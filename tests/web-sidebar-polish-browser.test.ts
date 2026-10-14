@@ -39,7 +39,10 @@ const LONG = "claudestra-sidebar-polish-runner";
 const COORD: CtxBoundaryInfo = { policy: "coordinator", window: 200_000, hardCap: 250_000, remaining: 6_000, level: "ok" };
 const EXEC: CtxBoundaryInfo = { policy: "executor", window: 200_000, hardCap: 250_000, remaining: 64_000, level: "ok" };
 const LONG_TASK = { id: "T7", stage: "live", round: 0 };
-/** 6 个会话：长名字挂阶段 + 上下文芯片、工作中、压缩中、协调类余量在压缩线附近、带显示名的审查返工、空闲 */
+/** 中文长名字（汉字一字一 em，比 ASCII 难留 8 个字）：一个是会话名本身，一个是显示名（后面跟「| 原名」） */
+const LONG_ZH = "侧栏打磨执行会话超长名称";
+const LABEL_ZH = "侧栏打磨执行会话超长";
+/** 8 个会话：长名字挂阶段 + 上下文芯片、工作中、压缩中、协调类余量在压缩线附近、带显示名的审查返工、空闲；中文长名字 / 中文显示名各挂两芯片 */
 function agents() {
   const now = Date.now();
   const ag = (name: string, minAgo: number, p: Record<string, unknown> = {}) =>
@@ -50,6 +53,8 @@ function agents() {
     ag("dev-bravo", 2, { compacting: true }),
     ag("pm-coordinator", 5, { ctxBoundary: COORD, contextTokens: 194_000 }),
     ag("review-charlie-cross-model", 8, { label: "跨模型审查", ledgerTask: { id: "T9", stage: "fix", round: 2 } }),
+    ag(LONG_ZH, 12, { ledgerTask: { id: "T11", stage: "review", round: 1 }, ctxBoundary: EXEC, contextTokens: 136_000 }),
+    ag("uxside1-label-runner", 15, { label: LABEL_ZH, ledgerTask: { id: "T12", stage: "build", round: 0 }, ctxBoundary: COORD, contextTokens: 194_000 }),
     ag("docs-writer", 40),
   ];
 }
@@ -187,20 +192,22 @@ async function shot(p: Page, v: Variant, width: number, view: string) {
 }
 
 /** 浏览器里量：「会话」标题行数、长名字可见几个字、各芯片的可见文字和 title、行 title、顶栏可见按钮 */
-const MEASURE = `(({ long }) => {
+const MEASURE = `(({ names }) => {
   const lines = (el) => el ? Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)) : -1;
   const title = [...document.querySelectorAll("aside span")].find((s) => s.textContent === "会话");
-  const node = [...document.querySelectorAll("aside span")].flatMap((s) => [...s.childNodes]).find((n) => n.nodeType === 3 && n.data === long);
-  let visible = -1;
-  if (node) {
+  const nameAt = (long) => {
+    const node = [...document.querySelectorAll("aside span")].flatMap((s) => [...s.childNodes]).find((n) => n.nodeType === 3 && n.data === long);
+    if (!node) return { visible: -1, rowTitle: null };
     let clip = node.parentElement;
     while (clip && getComputedStyle(clip).overflowX === "visible") clip = clip.parentElement;
     const right = clip.getBoundingClientRect().right - 8; // 省略号约一个字宽
     const r = document.createRange();
-    visible = 0;
+    let visible = 0;
     for (let i = 0; i < node.data.length; i++) { r.setStart(node, i); r.setEnd(node, i + 1); if (r.getBoundingClientRect().right <= right) visible++; else break; }
-  }
-  const row = node?.parentElement?.closest("button");
+    return { visible, rowTitle: node.parentElement.closest("button").getAttribute("title") };
+  };
+  const named = Object.fromEntries(names.map((n) => [n, nameAt(n)]));
+  const { visible, rowTitle } = named[names[0]];
   const text = (el) => (el?.innerText ?? "").trim();
   const chips = (sel) => [...document.querySelectorAll(sel)].filter((el) => !el.closest("#cstra-chip-legend"))
     .map((el) => ({ text: text(el), title: el.getAttribute("title"), aria: el.getAttribute("aria-label") }));
@@ -212,15 +219,17 @@ const MEASURE = `(({ long }) => {
     .map((b) => b.getBoundingClientRect().right)) - aside.right : 0;
   const rowOverflow = Math.max(0, ...[...document.querySelectorAll("aside li button")].map((b) =>
     Math.max(...[...b.children].map((c) => c.getBoundingClientRect().right)) - b.getBoundingClientRect().right));
-  return { titleLines: lines(title), visible, termTitles, headerOverflow, rowOverflow, rowTitle: row?.getAttribute("title") ?? null, buttons,
+  return { titleLines: lines(title), visible, named, termTitles, headerOverflow, rowOverflow, rowTitle, buttons,
     stage: chips("[data-ledger-stage]"), ctx: chips("[data-chip=ctx]"), busy: chips("[data-chip=busy]"), compacting: chips("[data-chip=compacting]") };
 })`;
 interface Chip { text: string; title: string | null; aria: string | null }
 interface Measure {
-  titleLines: number; visible: number; termTitles: number; headerOverflow: number; rowOverflow: number; rowTitle: string | null; buttons: string[];
+  titleLines: number; visible: number; named: Record<string, { visible: number; rowTitle: string | null }>; termTitles: number;
+  headerOverflow: number; rowOverflow: number; rowTitle: string | null; buttons: string[];
   stage: Chip[]; ctx: Chip[]; busy: Chip[]; compacting: Chip[];
 }
-const measure = (p: Page) => p.evaluate<Measure>(`${MEASURE}(${JSON.stringify({ long: LONG })})`);
+const NAMES = [LONG, LONG_ZH, LABEL_ZH];
+const measure = (p: Page) => p.evaluate<Measure>(`${MEASURE}(${JSON.stringify({ names: NAMES })})`);
 
 const TERMS = /压缩线|硬上限|上下文边界/;
 const LEGEND = 'button[aria-controls="cstra-chip-legend"]';
@@ -270,10 +279,14 @@ test.skipIf(!enabled)("after: 标题一行、长名字 ≥ 8 个字、窄时芯�
     expect([k, r[k].m.headerOverflow <= 0.5, r[k].m.rowOverflow <= 0.5]).toEqual([k, true, true]);
   }
   const d = r["1280-default"].m;
-  expect(d.visible).toBeGreaterThanOrEqual(8);
+  // ASCII 长名字、中文长名字、中文显示名（后跟「| 原名」）都至少露 8 个字：1280 默认侧栏和 390 手机
+  for (const k of ["1280-default", "390-default"]) for (const n of NAMES) expect([k, n, r[k].m.named[n].visible >= 8]).toEqual([k, n, true]);
+  expect(d.named[LONG_ZH].rowTitle).toBe(LONG_ZH);
+  expect(d.named[LABEL_ZH].rowTitle).toBe(`${LABEL_ZH} | uxside1-label-runner`);
   // 桌面 title / aria-label = 词表那句话，不含术语
-  expect(d.ctx.map((c) => c.title).sort()).toEqual([ctxChipWords(EXEC, "zh"), ctxChipWords(COORD, "zh")].sort());
-  expect(d.stage.map((c) => c.title)).toEqual([stageChipWords(LONG_TASK, "zh"), stageChipWords({ id: "T9", stage: "fix", round: 2 }, "zh")]);
+  expect(d.ctx.map((c) => c.title).sort()).toEqual([EXEC, COORD, EXEC, COORD].map((b) => ctxChipWords(b, "zh")).sort());
+  expect(d.stage.map((c) => c.title)).toEqual([LONG_TASK, { id: "T9", stage: "fix", round: 2 }, { id: "T11", stage: "review", round: 1 }, { id: "T12", stage: "build", round: 0 }]
+    .map((t) => stageChipWords(t, "zh")));
   for (const c of [...d.ctx, ...d.stage, ...d.busy, ...d.compacting]) {
     expect(c.title).toBe(c.aria);
     expect(TERMS.test(c.title ?? "")).toBe(false);
@@ -285,7 +298,7 @@ test.skipIf(!enabled)("after: 标题一行、长名字 ≥ 8 个字、窄时芯�
   expect(n.stage.every((c) => c.text === "")).toBe(true);
   expect(n.ctx.every((c) => /^-?\d+k$/.test(c.text))).toBe(true);
   expect([...n.busy, ...n.compacting].every((c) => c.text === "")).toBe(true);
-  expect(n.visible).toBeGreaterThanOrEqual(3);
+  for (const name of NAMES) expect([name, n.named[name].visible >= 3]).toEqual([name, true]);
 }, 120_000);
 
 test.skipIf(!enabled)("after 390: 点图例图标出卡片，逐行真实芯片 + 同一句话；再点收起", async () => {

@@ -69,3 +69,11 @@ const STATE_WORDS: Record<RowState, Words> = {
 export function rowStateWords(s: RowState, lang: Lang): string {
   return STATE_WORDS[s][lang];
 }
+
+/** 行尾时间的短写（行窄时代替「12分钟前」「3小时12分前」）：只留最大一个单位，给名字让出约 8 个字（agent-row.tsx） */
+export function agoShort(ts: number | null | undefined, lang: Lang, now = Date.now()): string {
+  if (!ts) return "";
+  const s = Math.max(0, Math.floor((now - ts) / 1000)), m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  const [n, zh, en] = s < 60 ? [s, "秒", "s"] : m < 60 ? [m, "分", "m"] : h < 24 ? [h, "小时", "h"] : [d, "天", "d"];
+  return `${n}${lang === "en" ? en : zh}`;
+}

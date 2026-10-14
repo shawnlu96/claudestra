@@ -1,6 +1,6 @@
 /** web/features/chat/chip-words.ts：侧栏会话行四种芯片（上下文余量、台账阶段、工作中、压缩中）的一句话解释，中英两份、不带术语 */
 import { describe, expect, test } from "bun:test";
-import { ctxChipWords, rowStateWords, stageChipWords, stageWords } from "@/features/chat/chip-words";
+import { agoShort, ctxChipWords, rowStateWords, stageChipWords, stageWords } from "@/features/chat/chip-words";
 import type { CtxBoundaryInfo } from "@/features/chat/ctx-boundary-view";
 import { STAGES } from "../src/lib/ledger-stages";
 
@@ -32,5 +32,12 @@ describe("chip-words", () => {
     expect(rowStateWords("busy", "zh")).toBe("它正在跑一轮");
     expect(rowStateWords("compacting", "zh")).toBe("正在压缩上下文，稍后恢复");
     expect(rowStateWords("busy", "en")).toBe("it is running a turn");
+  });
+
+  test("行尾时间短写：只留最大一个单位", () => {
+    const now = 1_800_000_000_000, ago = (sec: number) => now - sec * 1000;
+    expect([45, 12 * 60, 3 * 3600 + 12 * 60, 23 * 3600, 2 * 86400].map((s) => agoShort(ago(s), "zh", now))).toEqual(["45秒", "12分", "3小时", "23小时", "2天"]);
+    expect([45, 12 * 60, 3 * 3600, 2 * 86400].map((s) => agoShort(ago(s), "en", now))).toEqual(["45s", "12m", "3h", "2d"]);
+    expect(agoShort(null, "zh", now)).toBe("");
   });
 });

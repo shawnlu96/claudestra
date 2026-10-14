@@ -6,8 +6,9 @@ import { reviewChipView, stageChipView, stageSentence, taskIdInName, type StageI
 import { stageChipWords } from "../chip-words";
 
 /**
- * 侧栏 agent 行尾的台账阶段小标（ledger-stage.ts 出标签与色调）。宽度按行按钮的 @container 分三档，名字优先：
- * ≥18rem = 图标 + 任务号 + 阶段；中间档 = 图标 + 阶段；更窄只剩图标。title / aria-label 是 chip-words.ts 的一句话，
+ * 侧栏 agent 行尾的台账阶段小标（ledger-stage.ts 出标签与色调）。tiers（侧栏行用）按行按钮的 @container 分三档，名字优先：
+ * ≥27rem = 图标 + 任务号 + 阶段；≥24rem = 图标 + 阶段；更窄只剩图标、收紧边距（默认侧栏的行约 14rem，要给中文名留 8 个字）。
+ * 不传 tiers（图例卡）总是全显示。title / aria-label 是 chip-words.ts 的一句话，
  * 手机看侧栏顶的图例卡（chip-legend.tsx），长按 agent 菜单标题下面那行是 LedgerStageLine。
  */
 
@@ -22,27 +23,28 @@ const TONE: Record<StageTone, { bg: string; fg: string }> = {
     fg: "text-base-content/[0.78] [[data-theme=dark]_&]:text-base-content/55 dark:[:root:not([data-theme=light])_&]:text-base-content/55",
   },
 };
-/** 中间档（图标 + 阶段）的起点：默认 16rem 侧栏的行按钮约 14rem，这一档要等侧栏拖宽才出现，否则长名字只剩三个字母；英文短名宽一倍，起点再放宽 */
-const MID_TIER = { zh: "hidden @[15rem]:inline", en: "hidden @[17rem]:inline" } as const;
+/** 各档的起点（tiers）：阶段字 / 任务号；英文阶段字宽一倍，起点再放宽。档位算法见 tests/web-sidebar-polish-browser.test.ts 的中文长名字 */
+const TIER = { zh: { mid: "hidden @[24rem]:inline", id: "hidden @[27rem]:inline" }, en: { mid: "hidden @[26rem]:inline", id: "hidden @[29rem]:inline" } } as const;
+const TIGHT = "-ml-1 px-0.5 @[18rem]:ml-0 @[18rem]:px-1";
 
-export function LedgerStageChip({ task, names }: { task: LedgerTaskRef; names: (string | null | undefined)[] }) {
+export function LedgerStageChip({ task, names, tiers = false }: { task: LedgerTaskRef; names: (string | null | undefined)[]; tiers?: boolean }) {
   const lang = useLang();
   const v = stageChipView(task, lang);
   const tone = TONE[v.tone];
-  const mid = MID_TIER[lang];
+  const tier = tiers ? TIER[lang] : { mid: "", id: "" };
   const words = stageChipWords(task, lang);
   return (
     <span
       role="img"
       aria-label={words}
-      className={`flex shrink-0 items-center gap-1 rounded px-1 py-px text-[10.5px] font-medium leading-4 ${tone.bg} ${tone.fg}`}
+      className={`flex shrink-0 items-center gap-1 rounded py-px text-[10.5px] font-medium leading-4 ${tiers ? TIGHT : "px-1"} ${tone.bg} ${tone.fg}`}
       title={words}
       data-ledger-stage={task.stage}
     >
       <StageIcon kind={v.icon} className="size-3 shrink-0" />
-      {!taskIdInName(names, v.id) && <span aria-hidden className="hidden font-mono @[18rem]:inline">{v.id}</span>}
-      <span aria-hidden className={mid}>{v.short}</span>
-      {v.round !== null && <span aria-hidden className={`font-mono tabular-nums ${mid}`}>R{v.round}</span>}
+      {!taskIdInName(names, v.id) && <span aria-hidden className={`font-mono ${tier.id}`}>{v.id}</span>}
+      <span aria-hidden className={tier.mid}>{v.short}</span>
+      {v.round !== null && <span aria-hidden className={`font-mono tabular-nums ${tier.mid}`}>R{v.round}</span>}
     </span>
   );
 }

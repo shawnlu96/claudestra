@@ -8,7 +8,8 @@ import type { AgentSession } from "../type";
 import { ctxView } from "../ctx-level";
 import { rowOpenIntent } from "../open-intent";
 import { fmtAgo } from "../fmt-time";
-import { useT } from "@/lib/i18n";
+import { useLang, useT } from "@/lib/i18n";
+import { agoShort } from "../chip-words";
 import { MasterIcon } from "./master-icon";
 import { swipeReg } from "./agent-row-swipe";
 import { SwipeActions } from "./agent-row-actions";
@@ -98,6 +99,7 @@ export function AgentRow({
   // 相对时间(owner 2026-07-14):x秒前/x分钟前/x小时x分前/x天前;
   // Sidebar 的 30s tick 让它保鲜
   const lastAt = fmtAgo(a.lastActivityTs);
+  const lastShort = agoShort(a.lastActivityTs, useLang());
   const draft = useSyncExternalStore(subscribeDrafts, () => hasDraft(a.name), () => false);
   // 左滑删除(owner 2026-07-14:「临时起的 agent 污染列表,永久删除」):
   // 横滑露出红色删除钮,二次点击确认后 removeAgent(kill + registry 条目删,
@@ -135,6 +137,7 @@ export function AgentRow({
   const ctxPct = Math.min(100, cv.pct);
   // 命中具名上下文边界的（执行类等）按边界上色：过压缩线黄、过硬上限红；其余照旧按 1M 刻度（ctx-boundary-view.ts）
   const bnd = hasNamedPolicy(a.ctxBoundary) && a.status === "active" ? a.ctxBoundary : null;
+  const dense = !!bnd || !!a.ledgerTask; // 挂着芯片的行：「工作中」更早缩成点
   const ctxTone = bnd ? BOUNDARY_ROW_TONE[bnd.level] : { deep: "bg-error/30", high: "bg-error/14", mid: "bg-warning/12", none: "bg-base-content/[0.04]" }[cv.level];
   // 忙碌态 = 行外框(owner 2026-09-06:「工作中给它加一个不断闪烁的黄色边框」);
   // 压缩中同款蓝色常亮。状态点 / 「工作中」文字保留,边框是给一眼扫过用的。
@@ -324,7 +327,7 @@ export function AgentRow({
           </span>
           <RepoTag a={a} />
           {bnd && <CtxBoundaryChip b={bnd} tiers />}
-          {tail}{a.ledgerTask && <LedgerStageChip task={a.ledgerTask} names={[a.label, a.displayName]} />}
+          {tail}{a.ledgerTask && <LedgerStageChip task={a.ledgerTask} names={[a.label, a.displayName]} tiers />}
           {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
               放在 truncate 容器**外面**、时间之前:侧栏窄时只缩名字,标不被省略号吃掉;描边警示色不铺底 */}
@@ -341,13 +344,15 @@ export function AgentRow({
               名字同时加粗——一眼能扫出「谁回了我还没看」 */}
           <UnreadPill count={a.unread ?? 0} />
           {a.status === "creating" ? <span className="shrink-0 pl-1 text-[11px] text-info-soft-80">{t("创建中")}</span> : compacting ? (
-            <RowStateChip state="compacting" />
+            <RowStateChip state="compacting" dense={dense} />
           ) : (a.busy || busyLive) ? (
-            <RowStateChip state="busy" />
+            <RowStateChip state="busy" dense={dense} />
           ) : (
             lastAt && (
-              <span className="shrink-0 pl-1 font-mono text-[11px] tabular-nums text-base-content/35">
-                {lastAt}
+              // 行 <22rem 写短（「12分」），给名字让位；万一还挤，时间最后才省略（名字有 8 字下限）
+              <span className="-ml-1 min-w-0 shrink-[0.01] truncate font-mono text-[11px] tabular-nums text-base-content/35 @[22rem]:ml-0 @[22rem]:pl-1">
+                <span className="hidden @[22rem]:inline">{lastAt}</span>
+                <span className="@[22rem]:hidden">{lastShort}</span>
               </span>
             )
           )}
@@ -359,14 +364,14 @@ export function AgentRow({
 }
 
 /** 名字框的最小宽度（--nf，配合下面的 min-w 类）：前 8 个字（短名按自身长度），汉字按 1em、其余按 0.55em 估，超过 8 个字再留省略号的宽。
- *  它只挡会收缩的邻居（所在仓、「| 原名」、任务短名）；行尾芯片按 @container 缩，缩完仍放不下时这条线按行按钮宽度封顶
- *  （≥12rem 封 30cqw，更窄封 20cqw），名字跟着省略，不把行尾时间挤出行外 */
+ *  行尾芯片和时间按 @container 先缩（档位见各芯片），缩完仍放不下时这条线按行按钮宽度封顶（≥12rem 封 56cqw = 默认侧栏 8 个汉字，
+ *  更窄封 30cqw），名字跟着省略，不把行尾挤出行外。中文长名字的实测在 tests/web-sidebar-polish-browser.test.ts */
 function nameFloor(text: string): string {
   const chars = [...text];
   const em = chars.slice(0, 8).reduce((n, c) => n + (/[\u2E80-\uFFEF]/.test(c) ? 1 : 0.55), 0) + (chars.length > 8 ? 0.8 : 0);
   return `${em.toFixed(2)}em`;
 }
-const NAME_FLOOR = "min-w-[min(var(--nf),20cqw)] @[12rem]:min-w-[min(var(--nf),30cqw)]";
+const NAME_FLOOR = "min-w-[min(var(--nf),30cqw)] @[12rem]:min-w-[min(var(--nf),56cqw)]";
 
 /** 名字后面的小标：单人 project 的 emoji、总控、mock（在名字的省略容器里） */
 function NameTags({ a, projEmoji }: { a: AgentSession; projEmoji?: string }) {

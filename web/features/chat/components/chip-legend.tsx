@@ -15,16 +15,23 @@ import { InfoIcon } from "./line-icons";
  * 只在 sm 以下出现：桌面芯片自带 title，顶栏那排按钮也没有多余的宽度。卡片挂在顶栏行（relative）下面，宽度跟顶栏走。
  */
 
-/** 行尾「工作中」「压缩中」：行按钮 @container ≥12rem 显字，更窄缩成状态点（agent-row.tsx 与图例共用） */
-export function RowStateChip({ state }: { state: RowState }) {
+/** 字 / 状态点的分界：挂着上下文 / 阶段芯片的行（dense）要给名字留 8 个字，<18rem 就缩成点；其余行 <12rem 才缩 */
+const STATE_TIER = {
+  dense: { box: "-ml-1 @[18rem]:ml-0 @[18rem]:pl-1", text: "hidden @[18rem]:inline", dot: "@[18rem]:hidden" },
+  loose: { box: "pl-1", text: "hidden @[12rem]:inline", dot: "@[12rem]:hidden" },
+} as const;
+
+/** 行尾「工作中」「压缩中」：按行按钮的 @container 显字或缩成状态点（agent-row.tsx 与图例共用） */
+export function RowStateChip({ state, dense = false }: { state: RowState; dense?: boolean }) {
   const t = useT();
   const words = rowStateWords(state, useLang());
   const busy = state === "busy";
+  const tier = STATE_TIER[dense ? "dense" : "loose"];
   return (
     <span role="img" aria-label={words} title={words} data-chip={state}
-      className={`flex shrink-0 items-center pl-1 text-[11px] ${busy ? "text-warning-soft-80" : "text-info-soft-80"}`}>
-      <span className="hidden @[12rem]:inline">{t(busy ? "工作中" : "压缩中")}</span>
-      <span className={`size-1.5 rounded-full @[12rem]:hidden ${busy ? "bg-warning" : "bg-info"}`} />
+      className={`flex shrink-0 items-center text-[11px] ${tier.box} ${busy ? "text-warning-soft-80" : "text-info-soft-80"}`}>
+      <span className={tier.text}>{t(busy ? "工作中" : "压缩中")}</span>
+      <span className={`size-1.5 rounded-full ${tier.dot} ${busy ? "bg-warning" : "bg-info"}`} />
     </span>
   );
 }

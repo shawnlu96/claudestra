@@ -6,7 +6,7 @@ import { ctxChipWords } from "../chip-words";
 /**
  * 上下文边界小标：「执行类 余 35k」。列表行里只给命中具名策略的会话显示（个人会话走全局，不加标），
  * 用量面板里每个 Claude Code 会话都显示。title / aria-label 是 chip-words.ts 的一句话（不说术语）；配置有问题时带「!」。
- * tiers（侧栏行用）：按行按钮的 @container 缩，名字优先——≥18rem 带类别，≥12rem「余 35k」，更窄只剩数字。
+ * tiers（侧栏行用）：按行按钮的 @container 缩，名字优先——≥30rem 带类别，≥18rem「余 35k」，更窄只剩数字并收紧左边距（默认侧栏给中文名留 8 个字）。
  */
 export function CtxBoundaryChip({ b, withLabel = true, tiers = false }: { b: CtxBoundaryInfo; withLabel?: boolean; tiers?: boolean }) {
   const t = useT();
@@ -21,13 +21,13 @@ export function CtxBoundaryChip({ b, withLabel = true, tiers = false }: { b: Ctx
       aria-label={words}
       title={words}
       data-chip="ctx"
-      className={`shrink-0 whitespace-nowrap font-mono text-[10px] tabular-nums ${BOUNDARY_TEXT[b.level]}`}
+      className={`shrink-0 whitespace-nowrap font-mono text-[10px] tabular-nums ${tiers ? "-ml-1 @[18rem]:ml-0" : ""} ${BOUNDARY_TEXT[b.level]}`}
     >
-      {withLabel && <span className={`font-sans ${tiers ? "hidden @[18rem]:inline" : ""}`}>{t(boundaryLabel(b.policy))} </span>}
+      {withLabel && <span className={`font-sans ${tiers ? "hidden @[30rem]:inline" : ""}`}>{t(boundaryLabel(b.policy))} </span>}
       {tiers ? (
         <>
-          <span className="hidden @[12rem]:inline">{full}</span>
-          <span className="@[12rem]:hidden">{bare}</span>
+          <span className="hidden @[18rem]:inline">{full}</span>
+          <span className="@[18rem]:hidden">{bare}</span>
         </>
       ) : (
         full
