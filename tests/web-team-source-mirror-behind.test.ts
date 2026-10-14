@@ -86,7 +86,7 @@ test("N8A8B-1b 真实取数节奏（并发 2、每轮上限 8、60 秒到期）�
     if (w.t >= 5 * 60_000) break;
     w.advance();
   }
-  expect(counts.length).toBe(61);
+  expect(counts.length).toBe(5 * 60_000 / POLL_MS + 1);
   // 首轮 26 个同时读到 → 60 秒时同时到期，每轮上限 8：第 70 秒那轮还剩 2 个在排队（落后 70 秒，但没发过请求、不是读失败），不算过期
   expect(counts.filter((c) => c.n > 0)).toEqual([]);
 });

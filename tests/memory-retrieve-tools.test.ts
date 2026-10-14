@@ -51,8 +51,10 @@ async function probe(kind: string, mode: string): Promise<void> {
     add("图文件坑", ["src/lib/widget-store.ts"], "T1");
   }
   const identity = { agent: mode === "unauthorized" ? "agent-other" : "agent-x", sessionId: "s1", family: "codex", verified: true };
-  mock.module("../src/bridge/caller-identity.js", () => ({ callerOf: () => ({ identity, channelId: "test" }) }));
-  mock.module("../src/bridge/ledger-feed.js", () => ({ ledgerDb: () => db }));
+  const caller = await import("../src/bridge/caller-identity.js");
+  mock.module("../src/bridge/caller-identity.js", () => ({ ...caller, callerOf: () => ({ identity, channelId: "test" }) }));
+  const feed = await import("../src/bridge/ledger-feed.js");
+  mock.module("../src/bridge/ledger-feed.js", () => ({ ...feed, ledgerDb: () => db }));
   const read = await import("../src/lib/ledger-read.js");
   mock.module("../src/lib/ledger-read.js", () => ({ ...read, LedgerReader: class { get() { return db; } } }));
   const embed = await import("../src/lib/memory-embed.js");

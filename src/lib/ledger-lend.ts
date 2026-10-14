@@ -30,6 +30,7 @@ import { claimAuthorFamily } from "./lend-author-family.js";
 import { fixStartRetry } from "./lend-fix-start.js";
 import { setTask } from "./ledger-write.js";
 import { leaseRestore } from "./lend-send-back-restore.js";
+import { settleReclaimIntent, type ReclaimIntentOutcome, type ReclaimIntentPrep } from "./lend-reclaim-intent.js";
 import { getLendPeer } from "./scheduler-placement-reservations.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
@@ -356,7 +357,8 @@ export function sweepLend(db: Database, ctx: WriteCtx, samples?: Map<string, Len
  * PM takes a card's write work back: the live order (if any) is cancelled, the write lease ends, and the card's assignee goes back to
  * what it was before lending when it still names the peer's worker. A later deliver for the old order is refused (`cancelled`).
  */
-export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string; reason: string; retire?: LendAuthorSample }): { lease: WriteLeaseRow | null; cancelled: string | null } {
+export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string; reason: string; retire?: LendAuthorSample; intent?: ReclaimIntentPrep; unpin?: boolean }):
+  { lease: WriteLeaseRow | null; cancelled: string | null; intent: ReclaimIntentOutcome | null; unpinned: boolean } {
   return tx(db, () => {
     const task = mustTask(db, input.taskId), beforeBasis = lendAuthorBasis(db, input.taskId);
     if (!isManager(db, ctx.actor, task)) throw new LedgerError("forbidden", `收回要项目 ${task.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
@@ -368,12 +370,13 @@ export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string
     }
     const lease = endWriteLease(db, task.id, `PM 收回：${input.reason}`, now);
     if (!lease && !o) throw new LedgerError("not_found", `任务 ${task.id} 没有写租约，也没有未结的写单`);
-    const back = leaseRestore(task, lease);
+    const back = leaseRestore(task, lease, input.unpin ? lease?.peer ?? o?.peer : undefined); // --unpin: only a placement pinned on this peer
     if (back) setTask(db, ctx, { id: task.id, rev: task.rev, patch: back.patch as never });
     note(db, ctx, { project: task.project, taskId: task.id, orderId: o?.orderId ?? "", peer: lease?.peer ?? o?.peer ?? "" },
       `出借：PM 收回写代码（${input.reason}）`, { op: "reclaim", ...(o ? { cancelled: o.orderId } : {}) });
     retireAfterLeaseEnd(db, ctx, task, !!back, beforeBasis, LEND_AUTHOR_PORTS, input.retire);
-    return { lease, cancelled: o?.orderId ?? null };
+    const intent = settleReclaimIntent(db, ctx, { task, order: o ?? null, lease, prep: input.intent }); // RECLAIMINT1: same transaction
+    return { lease, cancelled: o?.orderId ?? null, intent, unpinned: !!back?.unpinned };
   });
 }
 

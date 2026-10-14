@@ -15,6 +15,7 @@ import { measureComments } from "./rules/comments.ts";
 import { measureDead } from "./rules/dead.ts";
 import { measureDeps } from "./rules/deps.ts";
 import { measureDup } from "./rules/dup.ts";
+import { measureMockLeak } from "./rules/mock-leak.ts";
 import { loadParser, measureFn, type SpanParser } from "./rules/fn.ts";
 import { measurePatterns } from "./rules/patterns.ts";
 import { measureSize } from "./rules/size.ts";
@@ -43,6 +44,7 @@ const RULES: Rule[] = [
   { id: "comments", prefixes: ["comments"], run: (f) => measureComments(f) },
   { id: "dead", prefixes: ["dead"], run: () => measureDead(ROOT) },
   { id: "testenv", prefixes: ["testenv"], run: (f) => measureTestEnv(f) },
+  { id: "mockleak", prefixes: ["mockleak"], run: (f) => measureMockLeak(f) },
 ];
 
 let parserMemo: Promise<{ name: string; parse: SpanParser } | null> | null = null;

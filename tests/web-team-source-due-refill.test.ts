@@ -94,7 +94,7 @@ test("N8A8H-1 T 全部缓存 → T+30 列表水位全前进、own 不变 → 列
     while (w.t < 30_000) { await w.poll(); counts.push({ t: w.t, n: stale(w.mirrors()) }); }
     await w.poll(true);
     const moved = w.t;
-    expect(moved).toBe(35_000);
+    expect(moved).toBe((Math.ceil(30_000 / POLL_MS) + 1) * POLL_MS); // 30 秒后的第一轮
     counts.push({ t: w.t, n: stale(w.mirrors()) });
     expect(w.reads.length).toBe(26); // 还没到 60 秒重拉间隔：用缓存
     while (w.t < moved + 5 * 60_000) { await w.poll(); counts.push({ t: w.t, n: stale(w.mirrors()) }); }
