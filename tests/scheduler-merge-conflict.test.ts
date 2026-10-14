@@ -13,6 +13,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { advanceMergeRun, beginMergeRun, getMergeRun, type MergePhase } from "../src/lib/scheduler-merge.js";
 import { bounceReceipt, MAX_MERGE_BOUNCES, parseBounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
+import { setCiCancelModeSource } from "../src/lib/scheduler-merge-ci-cancel.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -140,7 +141,12 @@ describe("i28-M12 conflict goes back to fix without freezing the queue", () => {
 });
 
 describe("i28-M12 red required CI on the reviewed head goes back to fix", () => {
-  test("UNSTABLE / BLOCKED with a failed or cancelled required check → ci_fail bounce with check names and run links", async () => {
+  // CICANCEL1: off / observe keep this bounce word for word; on (a cancel re-run once) is tests/scheduler-merge-ci-cancel.test.ts
+  for (const ciCancel of ["off", "observe"] as const) test(`${ciCancel}: UNSTABLE / BLOCKED with a failed or cancelled required check → ci_fail bounce`, async () => {
+    setCiCancelModeSource(() => ciCancel);
+    try { await failedOrCancelledBounces(); } finally { setCiCancelModeSource(null); }
+  });
+  const failedOrCancelledBounces = async () => {
     for (const [phase, mergeState, bucket] of [["ready", "UNSTABLE", "fail"], ["ready", "BLOCKED", "cancel"], ["await_ci", "UNSTABLE", "fail"],
       ["await_ci", "BEHIND", "fail"], ["updating", "UNSTABLE", "cancel"]] as const) {
       await with_(phase, async (f) => {
@@ -151,7 +157,7 @@ describe("i28-M12 red required CI on the reviewed head goes back to fix", () => 
         expect(f.calls).not.toContain("update");
       });
     }
-  });
+  };
   test("a failed non-required check, or a red required check on a moved head, keeps the old unknown", async () => {
     for (const p of [{ mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "pass" as const }, { name: "lint", bucket: "fail" as const }] },
       { head: N, mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "fail" as const }] }]) {

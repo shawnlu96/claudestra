@@ -15,21 +15,21 @@ const ev = (kind: string, data: Record<string, unknown> = {}, text = "", actor =
 /** 脱敏事件：除了 redacted，其它字段即使带了也是不该读的诱饵（证明 eventLine 不读） */
 const red = (kind: string, bait: Record<string, unknown> = {}) => ev(kind, { redacted: true, ...bait }, "", "agent-secret-name");
 
-describe("脱敏事件只说类型 + 详情仅主场", () => {
+describe("脱敏事件只说类型 + 详情在任务所在的机器上", () => {
   test("复现测试:redacted verify 不再默认成「线上验证失败」", () => {
-    expect(eventLine(red("verify"))).toBe("线上验证（结果仅主场）");
+    expect(eventLine(red("verify"))).toBe("线上验证（结果在任务所在的机器上）");
     // 带了 result 也不读：脱敏后哪怕 result=pass 也不说通过
-    expect(eventLine(red("verify", { result: "pass" }))).toBe("线上验证（结果仅主场）");
+    expect(eventLine(red("verify", { result: "pass" }))).toBe("线上验证（结果在任务所在的机器上）");
   });
 
   test("复现测试:redacted 各类型只给类型名，不读 to / verdict / headSHA / version / 操作者", () => {
-    expect(eventLine(red("stage", { to: "build", from: "review" }))).toBe("推进阶段（目标阶段仅主场）");
-    expect(eventLine(red("review", { verdict: "pass", round: 3, p0: 1 }))).toBe("审查（结论仅主场）");
-    expect(eventLine(red("deliver", { headSHA: "0b7b79c1234" }))).toBe("交付（详情仅主场）");
-    expect(eventLine(red("deploy", { version: "v9" }))).toBe("上线（详情仅主场）");
-    expect(eventLine(red("rollback"))).toBe("回滚（详情仅主场）");
-    expect(eventLine(red("decision"))).toBe("拍板（详情仅主场）");
-    expect(eventLine(red("note"))).toBe("备注（详情仅主场）");
+    expect(eventLine(red("stage", { to: "build", from: "review" }))).toBe("推进阶段（目标阶段在任务所在的机器上）");
+    expect(eventLine(red("review", { verdict: "pass", round: 3, p0: 1 }))).toBe("审查（结论在任务所在的机器上）");
+    expect(eventLine(red("deliver", { headSHA: "0b7b79c1234" }))).toBe("交付（详情在任务所在的机器上）");
+    expect(eventLine(red("deploy", { version: "v9" }))).toBe("上线（详情在任务所在的机器上）");
+    expect(eventLine(red("rollback"))).toBe("回滚（详情在任务所在的机器上）");
+    expect(eventLine(red("decision"))).toBe("拍板（详情在任务所在的机器上）");
+    expect(eventLine(red("note"))).toBe("备注（详情在任务所在的机器上）");
     // 建任务 / 改字段这类本来就不上「最近 3 件事」的，脱敏后也不上（op 不读）
     expect(eventLine(red("task", { op: "new" }))).toBeNull();
     for (const k of ["stage", "review", "verify", "deliver"]) expect(eventLine(red(k))).not.toContain("secret-name");
@@ -37,7 +37,7 @@ describe("脱敏事件只说类型 + 详情仅主场", () => {
 
   test("复现测试:脱敏事件的近似时间标记也不读（只有类型和时间）", () => {
     const r = recentThree([red("verify", { approxTime: true })]);
-    expect(r).toEqual([{ seq: r[0]!.seq, ts: r[0]!.ts, kind: "verify", text: "线上验证（结果仅主场）", approx: false }]);
+    expect(r).toEqual([{ seq: r[0]!.seq, ts: r[0]!.ts, kind: "verify", text: "线上验证（结果在任务所在的机器上）", approx: false }]);
   });
 });
 

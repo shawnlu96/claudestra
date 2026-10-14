@@ -33,15 +33,15 @@ const TIMEOUT_ONLY = ciLog([at(`##[group]${SLOW}:`), at("(fail) production liveP
 const ASSERTED = ciLog([at(`##[group]${SLOW}:`), at("error: expect(received).toBe(expected)"),
   at("(fail) production livePlacementIO observes formal starts [0.40ms]"), at("##[endgroup]")]);
 
-interface Gh { attempt: number; status: string; conclusion: string; log: string | Error; files: string[]; argv: string[][] }
+interface Gh { attempt: number; status: string; conclusion: string; headSha: string; log: string | Error; files: string[]; argv: string[][] }
 const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 const no = (stderr: string): BoundedResult => ({ code: 1, stdout: "", stderr, timedOut: false });
 /** Answers gh argv like the real CLI would for run 77 / PR 7; the compare says the carried head is up to date with main. */
 const fakeGh = (gh: Gh) => async (argv: string[]): Promise<BoundedResult> => {
   gh.argv.push(argv);
   const cmd = argv.slice(1).join(" ");
-  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion") {
-    return ok(JSON.stringify({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion }));
+  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion,headSha") {
+    return ok(JSON.stringify({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion, headSha: gh.headSha }));
   }
   if (cmd === "run view 77 --repo example/repo --log-failed") return gh.log instanceof Error ? no(gh.log.message) : ok(gh.log);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: gh.files.map((path) => ({ path })) }));
@@ -64,7 +64,7 @@ const CARRY = { ok: true, reason: "净 diff 一致", mainParent: FIX, mainHead: 
 function card(over: Partial<Gh> = {}) {
   const c = mergedCard();
   c.db.query("UPDATE scheduler_merges SET phase='updating', mergeSha=NULL, reason=NULL WHERE intentId=?").run(c.intent);
-  const gh: Gh = { attempt: 1, status: "in_progress", conclusion: "", log: TIMEOUT_ONLY, files: ["src/lib/x.ts", "tests/x.test.ts"], argv: [], ...over };
+  const gh: Gh = { attempt: 1, status: "in_progress", conclusion: "", headSha: NEW, log: TIMEOUT_ONLY, files: ["src/lib/x.ts", "tests/x.test.ts"], argv: [], ...over };
   let snap = snapOf(NEW, "fail", null);
   const merges: string[] = [];
   const external = { inspect: async () => snap, freshness: async () => ({ behindBy: 0, mainHead: FIX }),

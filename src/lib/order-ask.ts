@@ -10,6 +10,7 @@
  * order-ask-default.ts）；其余（blocker、没写 class 的旧版、出借池远端写单）照旧，blocking 列不写（null）——写成 true 会让
  * owner 侧推送 / 横幅把它当成要 owner 处理的事（ask-push.ts）。tests/order-ask-default.test.ts。
  */
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { NewAsk, OpenedAsk } from "./ledger-asks.js";
@@ -29,7 +30,8 @@ export interface AskDeps {
   /** 开一条 ask（bridge 的 asks 写连接）；beforeWrite 透传给 openAskFull，在拿到写锁后、查重 / 写入前调，抛了就什么都不写 */
   open(input: NewAsk, beforeWrite?: () => void): OpenedAsk;
   /** 台账通知投给 PM（在线空闲直投，否则押后）；handed = 送达或已进押后队列 */
-  notify(to: string, text: string, messageId: string): Promise<{ handed: boolean; note: string }>;
+  /** level：带默认做法、到时自动定的提问是常规（info），要 PM 回答的是 action */
+  notify(to: string, text: string, messageId: string, level: PmNoticeLevel): Promise<{ handed: boolean; note: string }>;
   /** 记下这条 ask 的通知已交出（extra.notice = handed） */
   markHanded(askId: string): void;
   /** 卡上追加一条事件（台账写连接，ledger-write.ts appendEvent）：审查单上的提问记在这里 */
@@ -135,7 +137,7 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
   }
   const text = askNoticeText({ taskId: src.task.id, orderId: src.orderId, from: src.from, askId: ask.id,
     question: q.question, options: q.options, ...(nonblocking ? { default: q.default, class: q.class } : {}) });
-  const sent = await deps.notify(askee, text, `ledger-ask:${ask.id}`).catch((e: unknown) => {
+  const sent = await deps.notify(askee, text, `ledger-ask:${ask.id}`, nonblocking ? "info" : "action").catch((e: unknown) => {
     if (!nonblocking) throw e;
     console.error(`⚠️ ask ${ask.id} 通知未发出，重试同一提问会补投：${(e as Error).message}`);
     return { handed: false, note: "通知未发出；提问已登记，仍按默认继续" };

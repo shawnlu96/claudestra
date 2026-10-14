@@ -38,6 +38,8 @@ export const MACHINE_WORDS = {
   planOnly: "这里只能看和规划；开工、合并要在任务所在的机器上做",
   fullTextThere: "全文只在任务所在的机器上",
   visibleThere: "只在任务所在的机器上能看", originalThere: "原文只在任务所在的机器上能看", openSessionThere: "会话要在任务所在的机器上打开",
+  replayThere: "回放要在任务所在的机器上看",
+  planningMachine: "默认由哪台机器规划", boundHere: "项目和任务所在的机器由本机绑定决定，不可改",
 } as const;
 
 /** low-priority 徽章与批量面板 */
@@ -91,6 +93,9 @@ const words: Record<string, string> = {
   [MACHINE_WORDS.visibleThere]: "Only visible on the machine running this task",
   [MACHINE_WORDS.originalThere]: "Original text is only visible on the machine running this task",
   [MACHINE_WORDS.openSessionThere]: "Open sessions on the machine running this task",
+  [MACHINE_WORDS.replayThere]: "Replay on the machine running this task",
+  [MACHINE_WORDS.planningMachine]: "Machine that plans by default",
+  [MACHINE_WORDS.boundHere]: "Project and the machine running this task come from this machine's binding; not editable",
   [LP_WORDS.badgeOn]: "Queued→{t}", [LP_WORDS.badgeExhausted]: "Low priority used up", [LP_WORDS.badgeWalled]: "Limit hit, waiting for reset",
   [LP_WORDS.walledTitle]: "Usage limit hit, continuing automatically at {time}",
   [LP_WORDS.compactLabel]: "Low priority + compact", [LP_WORDS.onLabel]: "Low priority on", [LP_WORDS.offLabel]: "Low priority off",

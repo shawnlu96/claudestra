@@ -108,8 +108,9 @@ export const isRedacted = (e: LedgerEventView): boolean => e.data.redacted === t
 
 /** 脱敏事件只说类型：会上「最近 3 件事」/ 回放的那几类；其余（建任务、改字段、调度等）脱敏后不说 */
 const REDACTED_LINE: Record<string, string> = {
-  stage: "推进阶段（目标阶段仅主场）", review: "审查（结论仅主场）", verify: "线上验证（结果仅主场）", deliver: "交付（详情仅主场）",
-  deploy: "上线（详情仅主场）", rollback: "回滚（详情仅主场）", decision: "拍板（详情仅主场）", note: "备注（详情仅主场）",
+  stage: "推进阶段（目标阶段在任务所在的机器上）", review: "审查（结论在任务所在的机器上）", verify: "线上验证（结果在任务所在的机器上）",
+  deliver: "交付（详情在任务所在的机器上）", deploy: "上线（详情在任务所在的机器上）", rollback: "回滚（详情在任务所在的机器上）",
+  decision: "拍板（详情在任务所在的机器上）", note: "备注（详情在任务所在的机器上）",
 };
 
 /** 一条事件的一句话；返回 null = 这类事件不上「最近 3 件事」（建任务 / 改字段 / 事项 / meta） */

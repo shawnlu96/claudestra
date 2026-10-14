@@ -17,7 +17,7 @@ async function fallbackProbe(route: string, injected = false, revoke = true, fai
 const a = process.argv.slice(2), text = a.join(' ');
 if (text.includes('update-branch') || text.startsWith('run rerun')) appendFileSync(${JSON.stringify(log)}, JSON.stringify(a)+'\\n');
 let out = {};
-if (text.includes('--json attempt,status,conclusion')) out = {attempt:1,status:'completed',conclusion:'failure'};
+if (text.includes('--json attempt,status,conclusion,headSha')) out = {attempt:1,status:'completed',conclusion:'failure',headSha:process.env.FAKE_RUN_HEAD};
 else if (text.includes('--log-failed')) out = ${JSON.stringify(failedLog)};
 else if (text.includes('--json files')) out = {files:[{path:'src/own.ts'}]};
 else if (text.includes('/compare/')) out = {base:'b'.repeat(40),commits:['f'.repeat(40)]};
@@ -35,7 +35,7 @@ const w = mainCiWorld();
 try {
 writePolicy({mainCiPause:${JSON.stringify(mode)},mergeUnsentCancel:'off',ciKnownFlaky:'on',ciClaimUnsent:${JSON.stringify(claimUnsent)}});
 if (${injected}) { w.ci.ports.ciBehind=ciBehindGh(); w.ci.ports.ciRerun=ciRerunGh(); }
-const c = w.card('C'); w.ci.defaultCi='failure'; w.ci.prChecks.set('C','fail');
+const c = w.card('C'); process.env.FAKE_RUN_HEAD = c.head; w.ci.defaultCi='failure'; w.ci.prChecks.set('C','fail');
 if (${JSON.stringify(route)} === 'flaky') {
  const owner={actor:'owner',now:Date.now()};
  const f=createFeature(w.db,owner,{project:'p',slug:'flaky',title:'fix'}).row.id;

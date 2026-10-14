@@ -18,8 +18,11 @@ import { noteDelivered, senderTrigger, turnStartedAt } from "./stop-settle.js";
 import { getAgentStatus } from "./event-bus.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "../lib/registry.js";
 import { fitIdleBatch, HELD_IDLE_CARRIER_LABEL, heldIdleCarrierId, heldIdleMode, registryIdleScope, type HeldIdleBatch } from "../lib/held-idle-batch.js";
-import { heldIdleBatchText, INBOX_BUDGET, INBOX_MAX_CHARS, INBOX_MAX_PREVIEWS, INBOX_MAX_TAKE, INBOX_PREVIEW_CHARS, inboxPreviewTail } from "../lib/inbox-batch.js";
+import {
+  HELD_AGENT_BATCH_HINT, HELD_AGENT_BATCH_TITLE, heldIdleBatchText, INBOX_BUDGET, INBOX_MAX_CHARS, INBOX_MAX_PREVIEWS, INBOX_MAX_TAKE, INBOX_PREVIEW_CHARS, inboxPreviewTail,
+} from "../lib/inbox-batch.js";
 import { controlFor } from "../lib/runtimes/index.js";
+import { agentBatchMembers, heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
 import { adoptStrandedTransfers, currentPmTarget, expectPmTarget, handedOver, roleHandoffs, shouldRetry, type PmTarget } from "./pm-held-transfer.js";
 
 export interface FlushDeps {
@@ -45,6 +48,10 @@ export interface FlushDeps {
   now?: () => number;
   /** 批次里每条的正文渲染（和正常投递同一个）；不给 = initInbox 交来的那个，都没有就不走批次 */
   render?: (env: Envelope) => Promise<string>;
+  /** agent 消息合批开没开（lib/held-agent-batch.ts）；不给 = 每次现读环境变量 */
+  agentBatch?: () => boolean;
+  /** 合批送达的本机 agent 消息逐条补的网页入站镜像；不给 = initInbox 交来的那个 */
+  mirror?: (channelId: string, env: Envelope) => void;
 }
 
 /**
@@ -165,9 +172,51 @@ export function productionIdleControl(env: Record<string, string | undefined> = 
 setHeldIdleDefault(() => productionIdleControl());
 
 let heldRender: FlushDeps["render"];
-/** initInbox 交来的渲染（bridge.ts 的 renderContentForLocal） */
-export function setHeldRender(render: FlushDeps["render"]): void {
+let heldMirror: FlushDeps["mirror"];
+/** initInbox 交来的渲染（bridge.ts 的 renderContentForLocal）和本机 agent 消息的网页入站镜像 */
+export function setHeldRender(render: FlushDeps["render"], mirror?: FlushDeps["mirror"]): void {
   heldRender = render;
+  heldMirror = mirror;
+}
+
+/**
+ * 一封载体带走的一组：内部通知批次（权限分组，开关 CLAUDESTRA_HELD_IDLE_BATCH）或押后 agent 消息合批（HMB-1，
+ * 开关 CLAUDESTRA_HELD_AGENT_BATCH）。两者只在最后一查、送达回调、批首文字、网页镜像上不同，载体本身同一套
+ */
+interface CarrierBatch {
+  items: HeldItem[];
+  expectSession?: string;
+  /** 投递层所有 await 之后的最后一查：shown 每条仍该由这封载体带走 */
+  wanted: (shown: readonly HeldItem[]) => () => boolean;
+  /** 真送达后逐条的送达回调 */
+  delivered: (channelId: string, env: Envelope) => void;
+  title?: string;
+  hint?: string;
+  /** 逐条补网页入站镜像（agent 消息逐条投递时 deliverToLocal 画，载体代它们画） */
+  mirror?: boolean;
+  /** 成员是按投递顺序连续的一段（agent 合批）：一条渲染失败就截在它前面，后面的不越过它先送 */
+  ordered?: boolean;
+}
+
+const idleCarrier = (d: FlushDeps, channelId: string, b: HeldIdleBatch<HeldItem>): CarrierBatch => ({
+  items: b.items, expectSession: b.scope.sessionId, wanted: (shown) => d.held.idleBatchWanted(channelId, b, shown),
+  delivered: (c, e) => d.held.idleDelivered(c, e),
+});
+
+/**
+ * 这个边界要合批送出的 agent 消息（目标空闲才调）：到期、不是交给当班 PM 的、没进内部通知批次的本机 agent 消息里，按投递顺序连续的一段。
+ * 最后一查只看开关、还在队里、没被 check_inbox 领走——会话 / 额度闸 / 撤下守卫在投递层对载体再核一遍（同内部通知批次）
+ */
+function agentCarrier(d: FlushDeps, channelId: string, due: readonly HeldItem[], taken: ReadonlySet<HeldItem>): CarrierBatch | undefined {
+  const on = d.agentBatch ?? (() => heldAgentBatchOn());
+  if (!on()) return undefined;
+  const m = agentBatchMembers(due, (i) => !taken.has(i) && heldKindOf(i.env) === "agent" && isAgentBatchable(i));
+  if (!m.items.length) return undefined;
+  return {
+    items: m.items, expectSession: m.expectSession, title: HELD_AGENT_BATCH_TITLE, hint: HELD_AGENT_BATCH_HINT, mirror: true, ordered: true,
+    wanted: (shown) => () => on() && shown.every((i) => !!d.held.get(channelId)?.includes(i) && !leaseActive(i)),
+    delivered: (c, e) => { for (const fn of deliveredHooks) fn(c, e); },
+  };
 }
 
 /**
@@ -191,7 +240,7 @@ function dropCarriers(held: HeldQueue, channelId: string): void {
  * 返回 single = 这一组这一趟不走批次（渲染不了、只有一条、载体没送出去），调用方逐条走原路径。
  */
 async function releaseIdleBatch(
-  d: FlushDeps, channelId: string, batch: HeldIdleBatch<HeldItem>, fresh: { ws: LocalEndpoint["ws"]; cwd?: string }, reason: string,
+  d: FlushDeps, channelId: string, batch: CarrierBatch, fresh: { ws: LocalEndpoint["ws"]; cwd?: string }, reason: string,
 ): Promise<"sent" | "busy" | "single"> {
   const render = d.render ?? heldRender;
   if (!render) return "single";
@@ -202,6 +251,7 @@ async function releaseIdleBatch(
       parts.push({ item, text: await render(item.env) });
     } catch (e) {
       console.error(`⚠️ 押后批次单条渲染失败，这条留在原路径（${item.env.meta.messageId}）: ${String(e)}`);
+      if (batch.ordered) break;
     }
   }
   if (parts[0]?.item !== batch.items[0]) return "single";
@@ -209,7 +259,7 @@ async function releaseIdleBatch(
   // 预算按最终载体全文算（逐条原信息抬头、分隔、批首都在内），批首的说明按最长的情形留位
   const fit = fitIdleBatch(parts, { maxItems: INBOX_MAX_TAKE, maxChars: INBOX_MAX_CHARS, maxEntryChars: INBOX_BUDGET, maxPreviews: INBOX_MAX_PREVIEWS },
     (text, item) => `${text.slice(0, INBOX_PREVIEW_CHARS)}${inboxPreviewTail(text.length, item.env.meta.messageId)}`,
-    (entries) => heldIdleBatchText(entries, note(INBOX_MAX_PREVIEWS, parts.length)).length);
+    (entries) => heldIdleBatchText(entries, note(INBOX_MAX_PREVIEWS, parts.length), batch.title, batch.hint).length);
   const full = fit.entries.filter((e) => !e.preview), previews = fit.entries.length - full.length;
   if (!full.length || fit.entries.length < 2) return "single";
   // all = 这一批真带走（送达后出队）的；shown 另含只给开头的：它们的正文也在载体里，撤下 / 权限变了同样不能发
@@ -219,11 +269,13 @@ async function releaseIdleBatch(
   const id = heldIdleCarrierId(shown);
   const carrier: Envelope = {
     from: { kind: "bridge", label: HELD_IDLE_CARRIER_LABEL }, to, intent: "notification",
-    content: heldIdleBatchText(fit.entries, note(previews, fit.left)),
-    meta: { messageId: id, threadId: id, ts: new Date().toISOString(), triggerKind: "bridge_synth", waitForIdle: true, expectSession: batch.scope.sessionId },
+    content: heldIdleBatchText(fit.entries, note(previews, fit.left), batch.title, batch.hint),
+    meta: { messageId: id, threadId: id, ts: new Date().toISOString(), triggerKind: "bridge_synth", waitForIdle: true, expectSession: batch.expectSession },
   };
+  // 载体没有原发送人：会被 PM 角色规则转给当班 PM 的（收件人是退任 PM），成员却留在这里——不组载体，逐条走原路径
+  if (currentPmTarget(channelId, carrier)) return "single";
   const turn = d.turnAt ?? turnStartedAt, at = turn(channelId);
-  const wanted = d.held.idleBatchWanted(channelId, batch, shown);
+  const wanted = batch.wanted(shown);
   expectPmTarget(carrier, channelId);
   const flight = d.held.idleCarrierHold(channelId, carrier, to);
   let r: Delivery;
@@ -245,11 +297,13 @@ async function releaseIdleBatch(
   const gone = all.filter((i) => d.held.get(channelId)?.includes(i));
   d.held.idleCarrierSent(carrier, gone); // Codex 打字投递被第二道闸退回时按它复原（held-queue.ts holdFirst）
   for (const item of gone) {
-    // 先 touch 再出队落盘（同逐条投递）；本机 agent 的并进这一轮的 callers
+    // 先 touch 再出队落盘（同逐条投递）；本机 agent 的并进这一轮的 callers，发的是请求的也记进 askers（回合失败要告诉它）
     d.touch(channelId, item.env);
-    if (item.env.from.kind === "local") noteDelivered(channelId, item.env.from);
+    const { from, intent, meta } = item.env;
+    if (from.kind === "local") noteDelivered(channelId, from, Date.now(), false, intent === "request" && !meta.skipInterAgentWatchdog);
+    if (batch.mirror) (d.mirror ?? heldMirror)?.(channelId, item.env);
     notifyHeldSettled(item.env, "delivered");
-    d.held.idleDelivered(channelId, item.env);
+    batch.delivered(channelId, item.env);
     d.held.remove(channelId, item);
   }
   console.log(`▶️ 押后消息批次投递(${reason}): ${all.length} 条 → ${to.agentName || channelId}（${id}：${all.map((i) => `${fromLabel(i.env)} ${i.env.meta.messageId}`).join("、")}）`);
@@ -301,7 +355,10 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     const groups = mode === "off" ? [] : d.held.idleBatches(channelId)
       .map((b) => ({ ...b, items: b.items.filter((i) => mine.includes(i) && !unresolved.has(i)) })).filter((b) => b.items.length > 1);
     if (mode === "observe") for (const g of groups) console.log(`👀 押后批次（只观察，${reason}）: ${evAgent} 有 ${g.items.length} 条内部通知本可一次送出（${g.items.map((i) => i.env.meta.messageId).join("、")}）`);
-    const batchOf = new Map(mode === "on" ? groups.flatMap((g) => g.items.map((i) => [i, g] as const)) : []);
+    const carriers = mode === "on" ? groups.map((g) => idleCarrier(d, channelId, g)) : [];
+    // 按下面逐条投的顺序给（押满时限的 owner 答复排最前、它们本来就先投），合批只取连续的一段
+    const agents = working ? undefined : agentCarrier(d, channelId, mine.filter((i) => !unresolved.has(i) && !late.has(i)), new Set(carriers.flatMap((c) => c.items)));
+    const batchOf = new Map([...carriers, ...(agents ? [agents] : [])].flatMap((c) => c.items.map((i) => [i, c] as const)));
     const batched = new Set<HeldItem>();
     for (const item of [...due.filter((i) => away.has(i)), ...mine.filter((i) => late.has(i)), ...mine.filter((i) => !late.has(i))]) {
       if (unresolved.has(item)) continue;

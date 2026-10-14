@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { acquireLock } from "./file-lock.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
@@ -27,22 +27,31 @@ function cooldownPath(baseUrl: string, dir: string): string {
   const origin = sharedLedgerCenterUrl(baseUrl).origin;
   return join(dir, "shared-ledger-cooldowns", `${createHash("sha256").update(origin).digest("hex")}.json`);
 }
+/** One explicit Retry-After (or a deadline already on disk) stops every V1/V2 request to the center; never longer than this. */
+const MAX_COOLDOWN_MS = 600_000;
 /** An unreadable/invalid cooldown is no cooldown: the next 429 atomically overwrites it, so no one has to delete it by hand. */
 const warnedCorrupt = new Set<string>();
-export function sharedLedgerNotBefore(baseUrl: string, dir = STATE_DIR): number {
+/** A deadline written before the cap (or by a huge header) reads as at most now + 10 minutes, and at most 10 minutes after the
+ * file was written so that it still expires; the file itself is left alone. */
+function cappedDeadline(path: string, deadline: number, now: number): number {
+  let written = Infinity;
+  try { written = Math.ceil(statSync(path).mtimeMs); } catch { /* raced with a rewrite: the now-based cap still applies */ }
+  return Math.min(deadline, now + MAX_COOLDOWN_MS, written + MAX_COOLDOWN_MS);
+}
+export function sharedLedgerNotBefore(baseUrl: string, dir = STATE_DIR, now = Date.now()): number {
   const path = cooldownPath(baseUrl, dir);
   const state = readJsonStateSync(path, (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
-  if (state.status !== "corrupt") return warnedCorrupt.delete(path), state.status === "missing" ? 0 : state.data as number;
+  if (state.status !== "corrupt") return warnedCorrupt.delete(path), state.status === "missing" ? 0 : cappedDeadline(path, state.data as number, now);
   // Once per broken spell (every push re-reads it); fixed text, never the file's content or path.
   if (!warnedCorrupt.has(path)) { warnedCorrupt.add(path); console.warn("shared ledger cooldown file unreadable; treated as no cooldown"); }
   return 0;
 }
-/** Missing Retry-After uses a cross-process exponential streak; explicit seconds/date honor the center's deadline. */
+/** Missing Retry-After uses a cross-process exponential streak; explicit seconds/date honor the center's deadline up to ten minutes. */
 function retryDelay(raw: string | null, now: number, failures: number, random = Math.random): number {
   if (raw?.trim()) {
     const seconds = Number(raw), date = Date.parse(raw);
-    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-    if (!Number.isFinite(seconds) && Number.isFinite(date)) return Math.max(0, date - now);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(MAX_COOLDOWN_MS, seconds * 1000);
+    if (!Number.isFinite(seconds) && Number.isFinite(date)) return Math.min(MAX_COOLDOWN_MS, Math.max(0, date - now));
   }
   return Math.min(120_000, 5_000 * 2 ** Math.min(5, Math.max(0, failures - 1)) * (1 + random() * 0.2));
 }
@@ -52,10 +61,13 @@ function limitStreak(path: string): LimitStreak {
     && Number.isSafeInteger((v as LimitStreak).failures) && (v as LimitStreak).failures >= 0 && Number.isFinite((v as LimitStreak).at));
   return state.status === "ok" ? state.data as LimitStreak : { failures: 0, at: 0 };
 }
-/** Preserve the center's optional timing header during locally enforced cooldowns, without inventing one. */
-export function sharedLedgerRetryAfter(baseUrl: string, dir = STATE_DIR): string | null {
+/** Whole seconds left until a deadline (min 1), the form a replayed Retry-After takes instead of the center's original value. */
+const remainingSeconds = (ms: number) => String(Math.max(1, Math.ceil(ms / 1000)));
+/** During a locally enforced cooldown, replay the center's optional timing header as the time left (following any extended
+ * deadline), without inventing one when the center gave none. */
+export function sharedLedgerRetryAfter(baseUrl: string, dir = STATE_DIR, now = Date.now()): string | null {
   const raw = limitStreak(cooldownPath(baseUrl, dir)).retryAfter;
-  return typeof raw === "string" ? raw : null;
+  return typeof raw === "string" ? remainingSeconds(sharedLedgerNotBefore(baseUrl, dir, now) - now) : null;
 }
 export async function sharedLedgerRateLimited(baseUrl: string, raw: string | null, now: number, dir = STATE_DIR, random = Math.random): Promise<number> {
   const path = cooldownPath(baseUrl, dir);
@@ -68,7 +80,7 @@ export async function sharedLedgerRateLimited(baseUrl: string, raw: string | nul
       const failures = limitStreak(path).failures + 1;
       delay = retryDelay(raw, now, failures, random);
       writeJsonAtomicSync(`${path}.streak`, { failures, at: now, retryAfter: raw }, { mode: 0o600, commitIf: lock.held });
-      writeJsonAtomicSync(path, Math.max(sharedLedgerNotBefore(baseUrl, dir), Math.ceil(now + delay)), { mode: 0o600, commitIf: lock.held });
+      writeJsonAtomicSync(path, Math.max(sharedLedgerNotBefore(baseUrl, dir, now), Math.ceil(now + delay)), { mode: 0o600, commitIf: lock.held });
     } finally { lock.release(); }
   } catch { console.warn("shared ledger cooldown not recorded"); } // Still report 429 even when its shared state cannot be written.
   return delay;
@@ -128,8 +140,8 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     const signingKey = { ...key };
     const base = sharedLedgerCenterUrl(baseUrl);
     const startedAt = now();
-    const blocked = sharedLedgerNotBefore(baseUrl, options.stateDir) - startedAt;
-    if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked, sharedLedgerRetryAfter(baseUrl, options.stateDir));
+    const blocked = sharedLedgerNotBefore(baseUrl, options.stateDir, startedAt) - startedAt;
+    if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked, sharedLedgerRetryAfter(baseUrl, options.stateDir, startedAt));
     const url = new URL(path, base);
     if (url.origin !== base.origin || url.pathname !== path || url.search || url.hash) throw new SharedLedgerUnavailable();
     const attemptNonce = randomBytes(24).toString("hex");
@@ -145,9 +157,10 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
         ...(method === "GET" ? {} : { body }) });
     } catch { throw new SharedLedgerUnavailable(); } // Fetch implementations may throw errors carrying response bodies or credentials.
     if (response.status === 429) {
-      const delay = await sharedLedgerRateLimited(baseUrl, response.headers.get("retry-after"), now(), options.stateDir, options.random);
-      // nginx may return HTML; retain only its safe timing header, not a rejection body or source-DAG outcome.
-      throw new SharedLedgerRemoteError(429, null, delay, response.headers.get("retry-after"));
+      const raw = response.headers.get("retry-after");
+      const delay = await sharedLedgerRateLimited(baseUrl, raw, now(), options.stateDir, options.random);
+      // nginx may return HTML; retain only its timing header, as capped whole seconds, not a rejection body or source-DAG outcome.
+      throw new SharedLedgerRemoteError(429, null, delay, raw === null ? null : remainingSeconds(delay));
     }
     if (response.status >= 500) throw new SharedLedgerUnavailable();
     if (!response.ok) throw new SharedLedgerRemoteError(response.status, await rejection(response.status, response));

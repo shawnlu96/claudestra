@@ -20,6 +20,7 @@ import { readSharedLedgerMode } from "./shared-ledger-mode.js";
 import { mirrorTaskHeads, type MirrorEntry } from "./shared-ledger-projector.js";
 import { scrubSharedLedger, SharedLedgerScrubError, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { sharedLedgerDagVersion, sourceDagScrubView } from "./shared-ledger-source-dag-push-version.js";
+import { mirrorSkipBinding } from "./shared-ledger-mirror-skip.js";
 
 /** Heads already proven to be commits of the install repo; one cache for the mirror loop and the write check. */
 const known = new Set<string>();
@@ -60,9 +61,9 @@ export const dagWriteScrubProbe: { view?: (view: unknown) => void } = {};
 
 type Ids = Pick<MirrorEntry, "projectId" | "centerFeatureId" | "sourceInstanceId">;
 /** The upload buildSourceDagUpload would build from this version once it is the current one (a new version has no bindings of its own). */
-function pendingUpload(pending: PendingDagVersion, ids: Ids | undefined) {
+function pendingUpload(pending: PendingDagVersion, ids: Ids | undefined, skip?: (taskId: string) => boolean) {
   return { schemaVersion: 1 as const, projectId: ids?.projectId, featureId: ids?.centerFeatureId, sourceInstanceId: ids?.sourceInstanceId,
-    dag: sharedLedgerDagVersion(pending, pending.nodes) };
+    dag: sharedLedgerDagVersion(pending, pending.nodes, {}, skip) };
 }
 
 const VERSION_PATH = "$.manifest.features[0].versions[0]";
@@ -94,7 +95,7 @@ export function dagWriteBlocked(db: Database, f: Pick<Feature, "id" | "project">
     ids = readSharedLedgerMirrors(dir)[f.id];
   } catch { return []; } // Unverifiable authority or mirror state never uploads a DAG (pushSourceDagMirror), so nothing can be blocked.
   const scrub = (deps.scrub ?? realScrubSync)(pendingHeads(db, f, pending));
-  const original = pendingUpload(pending, ids);
+  const original = pendingUpload(pending, ids, mirrorSkipBinding(f.project, scrub, deps.policy));
   dagWriteScrubProbe.view?.(sourceDagScrubView(original));
   const limit = sharedLedgerExportLimits();
   const fitted = { ...original, dag: { ...original.dag, reason: fitSharedLedgerText(original.dag.reason, limit.reason),

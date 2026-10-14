@@ -67,6 +67,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // 项目组入口起的常驻小根（team-view-entry.tsx）订着 machines：不卸就留给同进程后面的文件，一改 machines 就在注销后的 DOM 外重渲
+  await React.act(async () => (await import(mod("../collab/team-view-entry.tsx"))).unmountOpenViewGuardForTest());
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   await GlobalRegistrator.unregister();
 });
