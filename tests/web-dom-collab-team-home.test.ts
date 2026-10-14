@@ -286,7 +286,7 @@ for (const width of [1280, 390]) {
       expect(c.homeOnly).toEqual(["say"]);
       expect(c.recent).toBeNull();
       expect(c.people).toContain("中心暂未开放");
-      expect(c.say).toContain("对它说只在主场机器上可用");
+      expect(c.say).toContain("这张卡在 其他成员的机器 上执行");
       expect(JSON.stringify(c)).not.toContain("仅主场可见");
       expect(c.buttons).toEqual([]);
       expect(c.input).toBe(false);
@@ -294,6 +294,7 @@ for (const width of [1280, 390]) {
   });
 }
 
+// UXCARD1：标题下只写卡自己的目标句，extra.goal 为空时三边都不退回事项一句话（本机 / 主场 / 非主场一致）
 test("复现测试:本机事项号 ≠ 中心 feature.id、extra.goal 为空时，主场详情目标句与本机详情一致", async () => {
   localItemId = "local-feature";
   try {
@@ -303,9 +304,9 @@ test("复现测试:本机事项号 ≠ 中心 feature.id、extra.goal 为空时�
       await v.unmount();
       return t.includes("同源双喂");
     };
-    expect(await goal("local")).toBe(true);
-    expect(await goal("home")).toBe(true);
-    expect(await goal("away")).toBe(true);
+    expect(await goal("local")).toBe(false);
+    expect(await goal("home")).toBe(false);
+    expect(await goal("away")).toBe(false);
   } finally { localItemId = null; }
 });
 
@@ -349,7 +350,7 @@ test("复现测试:主场 = 本机，/agents 快照 idle 后本机事件流说 t
     expect(home).toEqual(local);
     const away = await live("away");
     expect(away.events).toBe(0);
-    expect(away.thinking.say).toContain("对它说只在主场机器上可用");
+    expect(away.thinking.say).toContain("这张卡在 其他成员的机器 上执行");
     expect(away.thinking.say).not.toContain("它在干活");
   } finally { sseOn = false; sseStreams.clear(); }
 }, 30_000);

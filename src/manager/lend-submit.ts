@@ -9,7 +9,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { getOrder, LEND_JOURNAL_PATH, openLendJournal } from "../lib/lend-journal.js";
-import { ancestorsIn, readReportIn, submitLendResult, submitLendWork, type SubmitterDeps } from "../lib/lend-submit.js";
+import { ancestorsIn, readReportIn, submitLendResult, type SubmitterDeps } from "../lib/lend-submit.js";
+import { submitWorkWithUi } from "../lib/lend-ui-submit.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { output } from "./core.js";
@@ -17,7 +18,7 @@ import { parseLedgerArgs } from "./ledger-identity.js";
 import { arbitrateFlags } from "../lib/lend-arbiter-submit.js";
 
 const USAGE = "usage: lend submit <orderId> --verdict pass|changes|block (--findings '<json 数组>' | --findings-file <文件>) --report <报告文件>" +
-  " | lend submit <orderId> --summary-file <一行摘要> --self-check-file <自查>（开工 / 修复单）";
+  " | lend submit <orderId> --summary-file <一行摘要> --self-check-file <自查> [--ui-shots-file <截图清单>]（开工 / 修复单）";
 
 async function ps(): Promise<string> {
   const proc = Bun.spawn(["ps", "-eo", "pid=,ppid="], { stdout: "pipe", stderr: "pipe" });
@@ -54,24 +55,28 @@ async function submitWork(orderId: string, f: Record<string, string | undefined>
   }
   const db = openLendJournal();
   try {
-    const r = await submitLendWork(db, orderId, { summary, selfCheck }, realDeps);
-    output(r.ok ? { ok: true, duplicate: r.duplicate, message: r.duplicate ? "这份交付已经交过，不用再交" : "交付已记下，出借服务会推送、开 PR 并转给对方" } : r);
+    const ui = f["ui-shots-file"] !== undefined ? resolve(f["ui-shots-file"]) : undefined;
+    const r = await submitWorkWithUi(db, orderId, { summary, selfCheck }, ui, realDeps);
+    const tail = r.note ? `；${r.note}` : "";
+    output(r.ok ? { ok: true, duplicate: r.duplicate, message: (r.duplicate ? "这份交付已经交过，不用再交" : "交付已记下，出借服务会推送、开 PR 并转给对方") + tail }
+      : { ok: false, error: r.error });
   } catch (e) {
     output({ ok: false, error: (e as Error).message });
   } finally { db.close(); }
 }
 
 export async function cmdLendSubmit(args: string[]): Promise<void> {
-  const p = parseLedgerArgs(args, ["verdict", "findings", "findings-file", "report", "summary-file", "self-check-file"]);
+  const p = parseLedgerArgs(args, ["verdict", "findings", "findings-file", "report", "summary-file", "self-check-file", "ui-shots-file"]);
   if ("error" in p) return output({ ok: false, error: `${p.error}；${USAGE}` });
   const [orderId] = p.pos;
   const f = p.flags; arbitrateFlags(f);
   if (f["summary-file"] !== undefined || f["self-check-file"] !== undefined) {
-    if (!orderId || p.pos.length !== 1 || !f["summary-file"] || !f["self-check-file"] || f.verdict || f.report || f.findings || f["findings-file"]) return output({ ok: false, error: USAGE });
+    if (!orderId || p.pos.length !== 1 || !f["summary-file"] || !f["self-check-file"] || f.verdict || f.report || f.findings || f["findings-file"]
+      || f["ui-shots-file"] === "") return output({ ok: false, error: USAGE });
     if (!existsSync(LEND_JOURNAL_PATH)) return output({ ok: false, error: "本机没有出借 journal：这台机器没在出借" });
     return submitWork(orderId, f);
   }
-  if (!orderId || p.pos.length !== 1 || !f.verdict || !f.report || (f.findings === undefined) === (f["findings-file"] === undefined)) {
+  if (!orderId || p.pos.length !== 1 || !f.verdict || !f.report || (f.findings === undefined) === (f["findings-file"] === undefined) || f["ui-shots-file"] !== undefined) {
     return output({ ok: false, error: USAGE });
   }
   if (!existsSync(LEND_JOURNAL_PATH)) return output({ ok: false, error: "本机没有出借 journal：这台机器没在出借" });
