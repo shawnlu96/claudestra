@@ -16,6 +16,7 @@ import { fitTimeoutLink } from "./train-ci-timeout-diag.js";
 import type { RecoveryMode } from "./recovery-policy.js";
 import { carFailureClass, type TrainCiClassPort } from "./scheduler-train-ci-rerun.js";
 import { configuredVoidSkip, skipKey, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode, voidSkipNote } from "./scheduler-merge-train-skip.js";
+import { confirmFailed, ensureProof, jointlyProven, provenHeads, settleSet, type SetOps, type TrainProof } from "./scheduler-merge-train-set.js";
 
 export { nextSkip, skipKey } from "./scheduler-merge-train-skip.js";
 
@@ -29,13 +30,16 @@ export const TRAIN_BRANCH = /^train\/(?!.*\.\.)[A-Za-z0-9_-][A-Za-z0-9._-]{0,79}
 
 export interface TrainCandidate { taskId: string; prRef: string; head: string }
 interface TrainMember extends TrainCandidate { files: string[] }
-type CarStatus = "new" | "assemble" | "ci" | "green" | "red" | "split" | "dropped";
+/** `partial` = green on its own, replaced as evidence by the confirmation car's joint proof (scheduler-merge-train-set.ts). */
+type CarStatus = "new" | "assemble" | "ci" | "green" | "red" | "split" | "dropped" | "partial";
 /** `created` = the branch may exist on GitHub: claimed (saved) before the create call, so cleanup deletes it even after a crash. */
 export interface TrainCar {
   id: string; level: number; parent: string | null; members: string[]; branch: string; created: boolean; assembled: string[];
   pr: number | null; status: CarStatus; startedAt: number; failed?: { name: string; link: string }[]; summary?: string;
   /** Set when its CI ran past TRAIN_CI_TIMEOUT_MS under trainCiTimeout on: the cancel claim and its diagnosis (train-ci-timeout.ts). */
   timeout?: CarTimeout;
+  /** The confirmation car: the survivors of a bisect on the train's base at their exact heads; never split, red = they go serial. */
+  confirm?: true;
 }
 interface TrainBounce { taskId: string; head: string; receipt: string }
 type TrainPhase = "testing" | "settling" | "cleanup" | "done";
@@ -44,6 +48,13 @@ export interface TrainState {
   outcome: "merged" | "void" | "serial" | null; reason: string | null;
   members: TrainMember[]; cars: TrainCar[]; cleared: string[]; merged: { taskId: string; sha: string }[];
   bounced: TrainBounce[]; serial: string[]; dropped: string[]; ciRuns: number; startedAt: number; updatedAt: number;
+  /**
+   * The joint CI proof `cleared` is released on (scheduler-merge-train-set.ts). While testing, `cleared` is only the local result
+   * of each green car; settling releases nothing this does not cover.
+   */
+  proof?: TrainProof;
+  /** CI runs of the confirmation car, apart from `ciRuns` (the first car plus the bisect, whose budget stays 1 + 2 per level). */
+  confirmRuns?: number;
   /** `taskId:head` an earlier train already sent serial or bounced: regrouping them would replay the same failure. */
   skip: string[];
   /** The cancel of runs still on this train's branches when it exits under trainCiTimeout on (train-ci-timeout.ts exitCancel). */
@@ -51,7 +62,7 @@ export interface TrainState {
   /** trainCiTimeout mode read once at a void's cleanup: on = nextSkip also hands on its serial / bounced (scheduler-merge-train-skip.ts). */
   voidSkip?: RecoveryMode;
 }
-export type TrainEventKind = "observe" | "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done" | "hold";
+export type TrainEventKind = "observe" | "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done" | "hold" | "confirm";
 export interface TrainEvent { at: number; train: string; seq: number; kind: TrainEventKind; text: string; data?: Record<string, unknown> }
 export interface TrainCheck { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel"; link?: string }
 
@@ -111,10 +122,11 @@ export const repoOfPr = (prRef: string): string => {
 const member = (s: TrainState, taskId: string) => s.members.find((m) => m.taskId === taskId)!;
 const names = (s: TrainState, ids: readonly string[]) => ids.join("、") || "（无）";
 const trainLabel = (s: TrainState): string => `第 ${s.seq} 辆车 ${s.id}`;
+const ciCount = (s: TrainState): string => `CI ${s.ciRuns} 次${s.confirmRuns ? `，确认车 ${s.confirmRuns} 次` : ""}`;
 const STEP_TEXT: Record<TrainPhase, string> = { testing: "拼车 / 跑 CI", settling: "逐张合并", cleanup: "收尾", done: "已结束" };
 /** One line for PM's board: which train, which cards, which step. */
 export const trainView = (s: TrainState): string => `${trainLabel(s)}：${names(s, s.members.map((m) => m.taskId))}，${STEP_TEXT[s.phase]}` +
-  `，CI ${s.ciRuns} 次${s.outcome ? `，结果 ${s.outcome}` : ""}`;
+  `，${ciCount(s)}${s.outcome ? `，结果 ${s.outcome}` : ""}`;
 
 async function emit(s: TrainState, deps: Io, kind: TrainEventKind, text: string, data?: Record<string, unknown>, notify = false, alarm = false) {
   deps.store.event(s.project, { at: deps.now(), train: s.id, seq: s.seq, kind, text, ...(data ? { data } : {}) });
@@ -215,7 +227,7 @@ async function stampVoidSkip(s: TrainState, deps: TrainDeps): Promise<void> {
   save(s, deps);
 }
 
-async function toSerial(s: TrainState, deps: TrainDeps, ids: readonly string[], why: string): Promise<void> {
+async function toSerial(s: TrainState, deps: Io, ids: readonly string[], why: string): Promise<void> {
   const fresh = ids.filter((id) => !s.serial.includes(id));
   if (!fresh.length) return;
   s.serial.push(...fresh);
@@ -259,7 +271,8 @@ async function assemble(s: TrainState, car: TrainCar, deps: TrainDeps): Promise<
   }
   car.pr = await deps.gh.openDraft(s.repo, car.branch, `[merge train ${s.id}] ${car.members.join(", ")}`,
     `合并列车 ${trainLabel(s)}，车厢 ${car.id}（第 ${car.level} 层），只跑 CI，不合并。成员：${car.members.join("、")}`);
-  car.status = "ci"; car.startedAt = deps.now(); s.ciRuns++;
+  car.status = "ci"; car.startedAt = deps.now();
+  if (car.confirm) s.confirmRuns = (s.confirmRuns ?? 0) + 1; else s.ciRuns++;
   save(s, deps);
 }
 
@@ -295,6 +308,7 @@ async function failCar(s: TrainState, car: TrainCar, failed: { name: string; lin
   car.status = "red"; car.failed = failed; car.summary = summary;
   await emit(s, deps, "ci", `车厢 ${car.id}（${names(s, car.members)}）${what}：${failed.map((f) => f.name).join("、")}；${summary}`,
     { car: car.id, level: car.level, result: timeout ? "timeout" : "red", failed, pr: car.pr }, true);
+  if (car.confirm) return confirmFailed(s, car, deps, SET_OPS, timeout ? "CI 超时" : "CI 红"); // never bisected again: the parts already passed alone
   if (car.members.length === 1) {
     const id = car.members[0]!, m = member(s, id);
     const req = failed.filter((f) => deps.requiredChecks.includes(f.name));
@@ -322,11 +336,12 @@ async function giveUp(s: TrainState, deps: TrainDeps, why: string): Promise<void
   for (const car of s.cars) if (["new", "assemble", "ci"].includes(car.status)) car.status = "dropped";
   s.phase = "cleanup"; s.outcome = "serial"; s.reason = why;
   save(s, deps);
-  await emit(s, deps, "alarm", `${why}，整批回串行路径，请 PM 看看（CI ${s.ciRuns} 次）`, { reason: why }, true, true);
+  await emit(s, deps, "alarm", `${why}，整批回串行路径，请 PM 看看（${ciCount(s)}）`, { reason: why }, true, true);
 }
 
 const ACTIVE: readonly CarStatus[] = ["new", "assemble", "ci"];
 const OPS: TimeoutOps<TrainDeps> = { failCar, giveUp, emit, save };
+const SET_OPS: SetOps<Io> = { emit, save, toSerial, newCar };
 
 async function stepTesting(s: TrainState, deps: TrainDeps): Promise<void> {
   if (deps.now() - s.startedAt > TRAIN_DEADLINE_MS) {
@@ -363,14 +378,16 @@ async function stepTesting(s: TrainState, deps: TrainDeps): Promise<void> {
   // A red car whose halves all came back green failed only in combination: nothing to bounce, so nothing is trusted.
   const lost = s.cars.find((c) => c.status === "split" && !s.cars.some((k) => k.parent === c.id && (k.status === "red" || k.status === "split")));
   if (lost) return giveUp(s, deps, `车厢 ${lost.id} 整体红、拆开都绿，定位不到`);
+  // Green cars are local results: only a set one car carried whole is released; otherwise the confirmation car runs first.
+  if (!(await settleSet(s, deps, SET_OPS))) return;
   s.phase = s.cleared.length || s.bounced.length ? "settling" : "cleanup";
   if (s.phase === "cleanup") s.outcome = "serial";
   save(s, deps);
 }
 
-/** main since the train's base holds nothing but merges of cleared members (first parent = previous main). */
+/** main since the train's base holds nothing but merges of the members its joint proof covers (first parent = previous main). */
 async function mainOnlyMembers(s: TrainState, mainHead: string, gh: TrainGh): Promise<boolean> {
-  const heads = new Set(s.members.filter((m) => s.cleared.includes(m.taskId)).map((m) => m.head.toLowerCase()));
+  const heads = new Set(provenHeads(s));
   let cur = mainHead;
   for (let i = 0; i <= s.members.length; i++) {
     if (sameSha(cur, s.base)) return true;
@@ -397,6 +414,7 @@ async function stepSettling(s: TrainState, deps: TrainDeps): Promise<void> {
     }
     save(s, deps);
   }
+  await ensureProof(s, deps, SET_OPS); // fail-closed: cleared members without a joint proof leave for the serial path
   const left = unsettled(s).filter((id) => s.cleared.includes(id));
   if (left.length) {
     if (deps.now() - s.startedAt > TRAIN_DEADLINE_MS) return voidTrain(s, deps, "列车超过总时限");
@@ -437,7 +455,7 @@ async function stepCleanup(s: TrainState, deps: TrainDeps): Promise<void> {
   s.phase = "done";
   save(s, deps);
   await emit(s, deps, "done", `结束（${s.outcome ?? "void"}）：合并 ${names(s, s.merged.map((m) => m.taskId))}，退回 ${names(s, s.bounced.map((b) => b.taskId))}` +
-    `，串行 ${names(s, s.serial)}，CI ${s.ciRuns} 次`, { outcome: s.outcome, ciRuns: s.ciRuns }, true);
+    `，串行 ${names(s, s.serial)}，${ciCount(s)}`, { outcome: s.outcome, ciRuns: s.ciRuns, ...(s.confirmRuns ? { confirmRuns: s.confirmRuns } : {}) }, true);
 }
 
 export async function stepTrain(s: TrainState, deps: TrainDeps): Promise<TrainState> { // one step of a live train
@@ -460,7 +478,7 @@ export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & 
   const bounce = s.bounced.find((b) => b.taskId === m.taskId && sameSha(b.head, m.head));
   if (bounce) return { bounce: bounce.receipt };
   if (s.phase === "testing") return "wait";
-  if (!s.cleared.includes(m.taskId)) return releaseOutsider(s, run, deps, voidTrain); // i28-MT1f2f2: it waits, the merge pass lends its slot to the members
+  if (!s.cleared.includes(m.taskId) || !(await ensureProof(s, deps, SET_OPS))) return releaseOutsider(s, run, deps, voidTrain); // i28-MT1f2f2: it waits, the merge pass lends its slot to the members
   const why = await verdictNow(s, deps.gh);
   if (!why) return "cleared";
   await voidTrain(s, deps, `合并前核对：${why}`);
@@ -469,6 +487,7 @@ export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & 
 
 /** Every verified member's remote head as tested and main = base + this train's merges only; the reason it fails, or null. */
 async function verdictNow(s: TrainState, gh: TrainGh): Promise<string | null> {
+  if (!jointlyProven(s)) return "成员没有一起通过 CI 的联合证明";
   return await headsMoved(s, gh) ?? (await mainOnlyMembers(s, await gh.mainHead(s.repo), gh) ? null : "main 自列车起点以来多了非本批的提交");
 }
 
@@ -481,6 +500,6 @@ export async function recheckCleared(s: TrainState, deps: Io & Pick<TrainDeps, "
 }
 /** The verified member the merge override may merge with `--match-head-commit` (any project's settling train). */
 export function clearedMember(states: readonly TrainState[], prRef: string, head: string): TrainState | null {
-  return states.find((s) => s.phase === "settling" && trainMode(s.project) === "on" && s.members.some((m) => m.prRef === prRef && sameSha(m.head, head) &&
+  return states.find((s) => s.phase === "settling" && trainMode(s.project) === "on" && jointlyProven(s) && s.members.some((m) => m.prRef === prRef && sameSha(m.head, head) &&
     s.cleared.includes(m.taskId) && !s.merged.some((x) => x.taskId === m.taskId))) ?? null;
 }
