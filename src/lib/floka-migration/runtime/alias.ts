@@ -9,7 +9,7 @@ import { parseTxMode } from "../transaction/executor.ts";
 import type { Json, TxStep } from "../transaction/types.ts";
 import { planRuntimeAlias, socketIdentity } from "./plan.ts";
 import { unlinkOwned } from "./take.ts";
-import type { AliasFs, Refusal, RuntimeAliasInput, RuntimeAliasPlan, RuntimeAliasReport } from "./types.ts";
+import type { AliasFs, EntryHold, Refusal, RuntimeAliasInput, RuntimeAliasPlan, RuntimeAliasReport } from "./types.ts";
 
 export { planRuntimeAlias } from "./plan.ts";
 
@@ -30,15 +30,24 @@ export async function applyRuntimeAlias(i: RuntimeAliasInput): Promise<RuntimeAl
   if (mode === "observe") return { mode, status: "observed", changed: false, plan, identityBefore: plan.identity, refusals: plan.refusals };
   if (plan.refusals.length) return refused(plan, plan.refusals);
   const create = plan.action === "create-alias";
-  let mine: string | null = null;
+  let mine: EntryHold | null = null;
   if (create) {
     try {
       await i.fs.symlink(plan.currentReal, plan.aliasDir);
-      mine = await i.fs.entryId(plan.aliasDir);
+      mine = await i.fs.hold(plan.aliasDir);
     } catch (e) {
       return refused(plan, [{ code: "conflict-entry", scope: "alias", detail: `建别名失败(可能刚被别人占用):${errText(e)}` }]);
     }
   }
+  try {
+    return await verifyAlias(i, plan, create, mine?.id ?? null);
+  } finally {
+    await mine?.release();
+  }
+}
+
+/** 建完(或已在)经别名再查 server 身份;对不上就撤掉本次建的那条(mine = 建完时的标识)并拒绝 */
+async function verifyAlias(i: RuntimeAliasInput, plan: RuntimeAliasPlan, create: boolean, mine: string | null): Promise<RuntimeAliasReport> {
   const after = await socketIdentity(i, plan.aliasDir);
   if (after !== plan.identity) {
     const cleanup = create ? (await unlinkOwned(i.fs, plan.aliasDir, plan.currentReal, mine)).refusal : undefined;
@@ -47,20 +56,28 @@ export async function applyRuntimeAlias(i: RuntimeAliasInput): Promise<RuntimeAl
     const refusals: Refusal[] = [{ code: "identity-mismatch", scope: "server", detail }, ...(cleanup ? [cleanup] : [])];
     return { ...refused(plan, refusals, create), identityAfter: after };
   }
-  return { mode, status: create ? "aliased" : "already", changed: create, plan, identityBefore: plan.identity, identityAfter: after };
+  return { mode: "on", status: create ? "aliased" : "already", changed: create, plan, identityBefore: plan.identity, identityAfter: after };
 }
 
 /**
  * 回滚:去掉别名,路径解析回到只有现存 runtime 目录。别名不在就是无事可做(幂等);
  * 别名位置是真实目录 / 指向别处 / 失效软链时不是本库建的,拒绝且不碰。server 连不上不拦回滚,但回滚前后身份必须相同。
- * 计划前先记下别名这一项的标识,删时按 take.ts 先取走再核:期间任何时刻被换掉都拒绝,替代项放回原位。
+ * 计划前先占住并记下别名这一项的标识(占住期间 inode 号不会被后来者复用),删时按 take.ts 先取走再核:期间任何时刻被换掉都拒绝,替代项放回原位。
  */
 export async function rollbackRuntimeAlias(i: RuntimeAliasInput): Promise<RuntimeAliasReport> {
   if (parseTxMode(i.mode) !== "on") {
     return refused(undefined, [{ code: "mode-not-on", scope: "path", detail: `${RUNTIME_ITEM} 不是 on,不回滚` }]);
   }
   // 入参不成立时 planRuntimeAlias 会拒绝,这里只是不去 lstat 非法路径
-  const entry = typeof i.aliasDir === "string" && isAbsolute(i.aliasDir) ? await i.fs.entryId(resolve(i.aliasDir)) : null;
+  const entry = typeof i.aliasDir === "string" && isAbsolute(i.aliasDir) ? await i.fs.hold(resolve(i.aliasDir)) : null;
+  try {
+    return await rollbackHeld(i, entry?.id ?? null);
+  } finally {
+    await entry?.release();
+  }
+}
+
+async function rollbackHeld(i: RuntimeAliasInput, entry: string | null): Promise<RuntimeAliasReport> {
   const plan = await planRuntimeAlias(i);
   const blocking = plan.refusals.filter((r) => r.scope !== "server");
   if (blocking.length) return refused(plan, blocking);

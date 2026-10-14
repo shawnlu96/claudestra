@@ -43,7 +43,7 @@ function world(names: { current?: string; alias?: string } = {}): World {
     return (nodeAliasFs[k] as (...x: string[]) => unknown)(...a);
   }) as AliasFs[K];
   w.fs = {
-    kind: logged("kind"), resolve: logged("resolve"), fileId: logged("fileId"), entryId: logged("entryId"), readlink: logged("readlink"),
+    kind: logged("kind"), resolve: logged("resolve"), fileId: logged("fileId"), entryId: logged("entryId"), hold: logged("hold"), readlink: logged("readlink"),
     symlink: logged("symlink"), unlink: logged("unlink"), rename: logged("rename"), link: logged("link"),
   };
   w.probe = {
@@ -108,7 +108,7 @@ describe("[验收线 1] 迁移前后是同一个 server", () => {
     await rollbackRuntimeAlias(input(w));
     expect(w.probeLog.length).toBeGreaterThan(0);
     expect(new Set(w.probeLog)).toEqual(new Set([`identify ${join(w.current, SOCK)}`, `identify ${join(w.alias, SOCK)}`]));
-    expect(new Set(w.fsLog.map((l) => l.split(" ")[0]))).toEqual(new Set(["kind", "resolve", "fileId", "entryId", "symlink", "rename", "unlink"]));
+    expect(new Set(w.fsLog.map((l) => l.split(" ")[0]))).toEqual(new Set(["kind", "resolve", "fileId", "entryId", "hold", "symlink", "rename", "unlink"]));
   });
 
   test("[验收线 1] 经别名看到的是另一个 server:拒绝并撤掉刚建的别名", async () => {
@@ -453,6 +453,20 @@ describe("[验收线 2] off / observe / on、冲突与回滚", () => {
     const r = await runTransaction({ txId: "tx-off", mode: "on", items: {}, steps: [step], adapter: null, stateDir: join(w.root, "tx-state") });
     expect(r.steps.map((s) => s.state)).toEqual(["skipped"]);
     expect(writes(w)).toEqual([]);
+  });
+
+  test("[验收线 2] 占住期间别名被删掉再建同目标软链:新一条标识不同(Linux 立刻复用 inode 号也认得出)", async () => {
+    const w = world();
+    symlinkSync(w.current, w.alias);
+    const held = await nodeAliasFs.hold(w.alias);
+    try {
+      rmSync(w.alias);
+      symlinkSync(w.current, w.alias);
+      expect(held!.id).not.toBe(await nodeAliasFs.entryId(w.alias));
+    } finally {
+      await held!.release();
+    }
+    expect(await nodeAliasFs.hold(join(w.root, "nope"))).toBeNull();
   });
 });
 

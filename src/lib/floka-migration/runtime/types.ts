@@ -21,6 +21,11 @@ export interface AliasFs {
   fileId(path: string): Promise<string | null>;
   /** 不跟随软链的这一项自身标识(dev:ino):认「还是不是本次建的那条软链」;不存在返回 null */
   entryId(path: string): Promise<string | null>;
+  /**
+   * 占住这一项(不跟随软链)并给出它此刻的 entryId;不存在返回 null。占住期间它被删也不会把 inode 号让给后来者
+   * (Linux 会立刻复用刚释放的号,只凭 dev:ino 认不出「换成了另一条」)。只读,不写目录;用完必须 release
+   */
+  hold(path: string): Promise<EntryHold | null>;
   /** 软链自身的目标原文(不解析) */
   readlink(path: string): Promise<string>;
   symlink(target: string, path: string): Promise<void>;
@@ -29,6 +34,11 @@ export interface AliasFs {
   rename(from: string, to: string): Promise<void>;
   /** 硬链接;目标已存在时失败,用来不覆盖地放回 */
   link(existing: string, path: string): Promise<void>;
+}
+
+export interface EntryHold {
+  id: string;
+  release(): Promise<void>;
 }
 
 /** 只读查询:这个 socket 路径后面是哪个 server(连不上返回 null)。生产实现包 tmux-helper 的查询,见 adapters.ts */

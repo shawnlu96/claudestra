@@ -3,11 +3,42 @@
  * 查询函数(tmuxRaw)传进来,这里只发一条只读的 display-message,所以不会手写 socket 目标,也不会拉起 server。
  */
 
-import { link, lstat, readlink, realpath, rename, stat, symlink, unlink } from "fs/promises";
+import { constants } from "fs";
+import { link, lstat, open, readlink, realpath, rename, stat, symlink, unlink } from "fs/promises";
 import { basename, dirname, join } from "path";
-import type { AliasFs, EntryKind, ServerProbe } from "./types.ts";
+import type { AliasFs, EntryHold, EntryKind, ServerProbe } from "./types.ts";
 
 const missing = (e: unknown): boolean => ["ENOENT", "ENOTDIR"].includes(String((e as { code?: unknown } | null)?.code));
+
+/** 只打开这一项本身、不跟随软链也不读内容:Linux 的 O_PATH|O_NOFOLLOW、macOS 的 O_SYMLINK;别的平台不占 */
+const HOLD_FLAGS: number | null =
+  process.platform === "linux" ? 0o10000000 | constants.O_NOFOLLOW
+  : process.platform === "darwin" && constants.O_SYMLINK ? constants.O_SYMLINK | constants.O_RDONLY
+  : null;
+
+async function entryId(path: string): Promise<string | null> {
+  try {
+    const s = await lstat(path);
+    return `${s.dev}:${s.ino}`;
+  } catch (e) {
+    if (missing(e)) return null;
+    throw e;
+  }
+}
+
+/** 先开描述符占住 inode 再 lstat 取标识;开不了(平台不支持、无权限)就只给标识,不占 */
+async function hold(path: string): Promise<EntryHold | null> {
+  const fd = HOLD_FLAGS === null ? null : await open(path, HOLD_FLAGS).catch(() => null);
+  const id = await entryId(path).catch(async (e) => {
+    await fd?.close();
+    throw e;
+  });
+  if (id === null) {
+    await fd?.close();
+    return null;
+  }
+  return { id, release: async () => { await fd?.close().catch(() => undefined); } };
+}
 
 export const nodeAliasFs: AliasFs = {
   async kind(path): Promise<EntryKind> {
@@ -29,15 +60,8 @@ export const nodeAliasFs: AliasFs = {
       throw e;
     }
   },
-  async entryId(path) {
-    try {
-      const s = await lstat(path);
-      return `${s.dev}:${s.ino}`;
-    } catch (e) {
-      if (missing(e)) return null;
-      throw e;
-    }
-  },
+  entryId,
+  hold,
   readlink: (path) => readlink(path),
   symlink: (target, path) => symlink(target, path, "dir"),
   unlink: (path) => unlink(path),
