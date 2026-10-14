@@ -7,13 +7,13 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CronJob } from "../src/lib/cron-job.js";
-import type { CronRunRecord } from "../src/lib/cron-run-state.js";
+import { createCronRunStore, type CronRunRecord } from "../src/lib/cron-run-state.js";
 import { collectRunEvidence, parseResultLine } from "../src/lib/sentinel-pilot-evidence.js";
 import {
   noteDispatch, REPORT_FOOTER, renderReport, reportFileName, reportReadyAt, sentinelPilotMode, setSentinelPilotMode, type SlotStatus,
 } from "../src/lib/sentinel-pilot.js";
 import {
-  buildDayReport, CATCHUP_DAYS, sentinelPilotTick, sincePath, type SentinelTickDeps, type SessionLines,
+  buildDayReport, CATCHUP_DAYS, LEDGER_KEEP_FINISHED, sentinelPilotTick, sincePath, type SentinelTickDeps, type SessionLines,
 } from "../src/lib/sentinel-pilot-tick.js";
 import { cmdSentinelPilot } from "../src/manager/sentinel-pilot-cmds.js";
 
@@ -321,6 +321,23 @@ describe("第 1 轮审查回归", () => {
   });
 });
 
+describe("复现（第 2 轮审查）", () => {
+  test("stale-result-survives-final-reply：同一条消息里两次 reply，各自是一条回复，以最后一次为准", () => {
+    const reply = (text: string, id: string) => ({ type: "tool_use", id, name: "mcp__claudestra__reply", input: { chat_id: "1", text } });
+    const both = line({ type: "assistant", timestamp: at(1), message: { id: "m1", content: [reply("哨兵结果:正常 — ok", "r1"), reply("撤回,没查成", "r2")] } });
+    expect(collectRunEvidence([PROMPT, both], WINDOW, { prompt: job.prompt }).result).toBeNull();
+    const kept = line({ type: "assistant", timestamp: at(1), message: { id: "m1", content: [reply("撤回", "r1"), reply("哨兵结果:异常 — 偏冷", "r2")] } });
+    expect(collectRunEvidence([PROMPT, kept], WINDOW, { prompt: job.prompt }).result).toEqual({ verdict: "异常", note: "偏冷" });
+  });
+  test("ledger-coverage-suppresses-missed-run：台账没到裁剪条数，较晚的别的记录不能压掉没检查", async () => {
+    const other = run({ key: "other@x", jobId: "other", epochMinute: (SLOT + 30 * MIN) / MIN });
+    const { deps, calls } = tickDeps("observe", { listRuns: async () => [other] }, DAY);
+    await sentinelPilotTick(after(), deps);
+    expect(readFileSync(reportPath(), "utf8")).toContain("## 15:30 · 没检查");
+    expect(calls.errors.filter((e) => e.includes("不补"))).toHaveLength(0);
+  });
+});
+
 describe("补生成范围（审查 catchup-limited-to-yesterday）", () => {
   const days = ["2026-10-10", "2026-10-11", "2026-10-12", DAY, "2026-10-14", "2026-10-15"];
   const old = run({ key: "other@1", jobId: "other", epochMinute: new Date(2026, 9, 1).getTime() / MIN });
@@ -346,12 +363,24 @@ describe("补生成范围（审查 catchup-limited-to-yesterday）", () => {
     expect(readFileSync(sincePath(join(dir, "reports"), job), "utf8")).toBe("2026-10-15");
   });
   test("台账已裁到某天之后：那几天不补（不判没检查），只报一次", async () => {
-    const { deps, calls } = tickDeps("observe", {}, "2026-10-10");
+    // 结束记录到了裁剪条数，最早一条在 10-13 当天之内（应检时刻之后则被裁的就是之前那些天）
+    const filler = Array.from({ length: LEDGER_KEEP_FINISHED }, (_, i) =>
+      run({ key: `other@${i}`, jobId: "other", epochMinute: new Date(2026, 9, 13, 0, 1).getTime() / MIN + i }));
+    const { deps, calls } = tickDeps("observe", { listRuns: async () => [...filler, run()] }, "2026-10-10");
     await sentinelPilotTick(late(3), deps);
     await sentinelPilotTick(late(4), deps);
     const files = readdirSync(join(dir, "reports")).filter((f) => f.endsWith(".md")).sort();
     expect(files).toEqual([DAY, "2026-10-14", "2026-10-15"].map((d) => reportFileName(job, d)));
     expect(calls.errors.filter((e) => e.includes("不补"))).toHaveLength(3);
+  });
+  test("LEDGER_KEEP_FINISHED 和 cron-run-state 的真实裁剪条数一致", async () => {
+    // 默认条数的真实 store：放 KEEP+1 条老的结束记录，下一次写就裁成 KEEP 条
+    let data: unknown = { version: 1, runs: Array.from({ length: LEDGER_KEEP_FINISHED + 1 }, (_, i) => run({ key: `o@${i}`, epochMinute: i })) };
+    const store = createCronRunStore(join(dir, "cron-runs.json"), {
+      now: () => SLOT, io: { read: async () => ({ status: "ok", data }), write: async (_p, d) => { data = d; } },
+    });
+    expect((await store.claim({ ...run(), key: undefined } as never)).claimed).toBe(true);
+    expect((await store.list()).filter((r) => r.status === "success")).toHaveLength(LEDGER_KEEP_FINISHED);
   });
   test("set 开时记启用起点（已有不动），关时删掉", async () => {
     const path = join(dir, "sentinel-pilot.json");

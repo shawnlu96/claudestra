@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CronJob } from "./cron-job.js";
-import { createCronRunStore, type CronRunRecord } from "./cron-run-state.js";
+import { createCronRunStore, isUnfinishedCronRun, type CronRunRecord } from "./cron-run-state.js";
 import { findJsonlBySessionId } from "./jsonl-cost.js";
 import { notify } from "./notify.js";
 import { statePath } from "./paths.js";
@@ -161,12 +161,19 @@ function dueReports(jobs: CronJob[], now: number, deps: SentinelTickDeps): Due[]
 }
 
 /**
- * 台账里最早的一条都晚于这天的第一个应检时刻：这天的记录可能已被按条数裁掉，「没有记录」不可信，不出报告（不判没检查）。
- * 台账为空不算（新装、从没跑过）。
+ * cron-runs.json 结束记录的保留条数（cron-run-state.ts 的 KEEP_FINISHED，那边不导出；tests 用真实 store 钉住这个值）。
+ * 台账只有裁剪会删记录，而裁剪只在结束记录超过这个数时发生、裁完至少留这么多条：不到这个数就一定没裁过。
+ */
+export const LEDGER_KEEP_FINISHED = 300;
+
+/**
+ * 这天的「没有记录」可不可信：结束记录不到 LEDGER_KEEP_FINISHED 条 → 从没裁过，可信（缺就是没检查）；
+ * 到了这个数、且台账里最早的一条晚于这天第一个应检时刻 → 这天的记录可能已被裁掉，不出报告（不判没检查）。
+ * 不能只凭「有一条较晚的记录」推断裁过：首次启用、真实漏检都是这个样子（审查 ledger-coverage-suppresses-missed-run）。
  */
 function ledgerCovers(runs: readonly CronRunRecord[], job: CronJob, day: string): boolean {
   const first = dueSlots(job.schedule, day)[0];
-  if (first === undefined || !runs.length) return true;
+  if (first === undefined || runs.filter((r) => !isUnfinishedCronRun(r)).length < LEDGER_KEEP_FINISHED) return true;
   return runs.reduce((m, r) => Math.min(m, r.epochMinute), Infinity) <= Math.floor(first / 60_000);
 }
 const uncovered = new Set<string>();

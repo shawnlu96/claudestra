@@ -48,23 +48,30 @@ function isHumanText(text: string, prompt: { text: string; seen: boolean }): boo
   return !t.startsWith("<");
 }
 
-/** reply：时间窗内最后一条有文字的回复（同一条 API 消息拆成的多行按 message.id 合在一起）；纯工具调用的行不算回复、不清它 */
+/**
+ * reply：时间窗内最后一条有文字的回复。回复边界：每次 reply 调用各算一条（同一次模型响应可以发多条渠道消息）；
+ * 普通 assistant 文字按 message.id 合在一起（同一条 API 消息拆成的多行）。纯工具调用的行不算回复、不清它。
+ */
 interface Acc {
   out: RunSessionEvidence; openQuestions: Set<string>; prompt: { text: string; seen: boolean };
   reply: { id: unknown; texts: string[] } | null;
 }
 
+/** 一段回复：text 块带 message.id（同 id 相邻合并），reply 调用的 id 是 null（永远自成一条） */
+interface Segment { id: unknown; text: string }
+
 function onAssistant(rec: AnyRecord, acc: Acc): void {
   const ev = acc.out.evidence;
   const content = Array.isArray(rec.message?.content) ? rec.message.content : [];
-  const texts: string[] = [];
+  const msgId = rec.message?.id;
+  const segs: Segment[] = [];
   for (const b of content as AnyRecord[]) {
-    if (b?.type === "text" && typeof b.text === "string") texts.push(b.text);
+    if (b?.type === "text" && typeof b.text === "string") segs.push({ id: msgId, text: b.text });
     if (b?.type !== "tool_use" || typeof b.name !== "string") continue;
     const input: AnyRecord = b.input && typeof b.input === "object" ? b.input : {};
     if (REPLY_TOOL.test(b.name)) {
       const text = typeof input.text === "string" ? input.text : "";
-      texts.push(text);
+      segs.push({ id: null, text });
       if ((Array.isArray(input.components) && input.components.length > 0) || parseInlineButtons(text).length > 0) ev.buttonsSent += 1;
     }
     if (b.name === "AskUserQuestion" && typeof b.id === "string") acc.openQuestions.add(b.id);
@@ -72,13 +79,16 @@ function onAssistant(rec: AnyRecord, acc: Acc): void {
     ev.tools += 1;
     if (isMutatingTool(b.name, JSON.stringify(input))) ev.mutating += 1;
   }
-  const all = texts.join("\n");
+  const all = segs.map((x) => x.text).join("\n");
   if (rec.isApiErrorMessage === true ? /rate.?limit|usage.?limit/i.test(String(rec.error ?? "")) || isLimitHitText(all) : isLimitHitText(all)) {
     ev.rateLimitText ??= all.trim() || "rate_limit（没有原文）";
-  } else if (all.trim()) {
-    const id = rec.message?.id;
-    if (acc.reply && id !== undefined && acc.reply.id === id) acc.reply.texts.push(all);
-    else acc.reply = { id, texts: [all] };
+    return;
+  }
+  for (const seg of segs) {
+    if (!seg.text.trim()) continue;
+    const r = acc.reply;
+    if (r && seg.id !== null && seg.id !== undefined && r.id === seg.id) r.texts.push(seg.text);
+    else acc.reply = { id: seg.id, texts: [seg.text] };
   }
 }
 
