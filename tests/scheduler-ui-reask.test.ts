@@ -215,6 +215,22 @@ describe("[验收线 3] never reopened after a rejection or an unverified answer
     });
   }
 
+  // The same, with A's ask behind more than a page of newer B answers: the lookup is not bounded by the newest-20 window.
+  for (const [answer, step] of [["approve", { kind: "intent", targetStage: "merge" }], ["reject", { kind: "escalate", code: "ui_rejected" }]] as const) {
+    test(`after A → B×21 → A, the current values' earlier ask (${answer}) still decides; no second ask`, async () => {
+      policy("on");
+      const f = await passed(true);
+      try {
+        ownerAsk(f, { at: 300, answer });
+        for (let i = 0; i < 21; i++) ownerAsk(f, { head: OLD, at: 400 + i });
+        expect(plan(f)).toMatchObject(step);
+        if (answer === "reject") expect(await f.tick()).toMatchObject({ step: "manual" });
+        expect(asks(f)).toBe(22);
+        expect(uiOwnerReaskPending()).toEqual([]);
+      } finally { f.close(); }
+    });
+  }
+
   test("a manager-opened ask on top of a stale scheduler approval does not count: the scheduler reopens instead", async () => {
     policy("on");
     const f = await passed(true);

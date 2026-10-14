@@ -38,10 +38,15 @@ function boundTo(params: unknown): { task: unknown; head?: string; specRev?: num
  * Only the scheduler's own asks count, as in the merge write (uiMergeRefusal): a manager-opened ask never releases the card.
  */
 export function projectUiGate(db: Database, task: LedgerTask, now: number): UiGate {
-  const rows = db.query(`SELECT id FROM asks WHERE taskId = ? AND kind = 'authorize' ORDER BY createdAt DESC, id DESC LIMIT 20`)
-    .all(task.id) as { id: string }[];
-  const mine = rows.map(({ id }) => getAsk(db, id)).filter((ask): ask is Ask => !!ask?.bind && ask.bind.action === UI_ASK_ACTION &&
-    ask.fromAgent === "scheduler" && ask.state !== "superseded" && boundTo(ask.bind.params).task === task.id);
+  // Every id, read lazily: the newest ask usually decides; currentBindingGate reads further only for a stale newest one.
+  const ids = db.query(`SELECT id FROM asks WHERE taskId = ? AND kind = 'authorize' AND fromAgent = 'scheduler'
+    ORDER BY createdAt DESC, id DESC`).all(task.id) as { id: string }[];
+  const mine = function* (): Generator<Ask> {
+    for (const { id } of ids) {
+      const ask = getAsk(db, id);
+      if (ask?.bind?.action === UI_ASK_ACTION && ask.state !== "superseded" && boundTo(ask.bind.params).task === task.id) yield ask;
+    }
+  }();
   const gateOf = (ask: Ask): UiGate => {
     const { task: _t, ...bound } = boundTo(ask.bind?.params);
     if (ask.expiresAt <= now || (ask.state !== "open" && ask.state !== "answered")) return { state: "none" };
@@ -49,8 +54,11 @@ export function projectUiGate(db: Database, task: LedgerTask, now: number): UiGa
     const check = checkAsk(ask, bindHash(ask.bind!, "scheduler"), "scheduler", now);
     return check.ok ? { state: "approved", ...bound, ownerVerified: ownerAnswered(ask.answer) } : { state: "rejected", ...bound };
   };
-  const newest = mine[0] ? gateOf(mine[0]) : { state: "none" as const };
-  return currentBindingGate(db, task, newest, mine.slice(1).map((a) => ({ bound: boundTo(a.bind?.params), gate: () => gateOf(a) }))) ?? newest;
+  const first = mine.next();
+  if (first.done) return { state: "none" };
+  const newest = gateOf(first.value);
+  const older = function* () { for (const a of mine) yield { bound: boundTo(a.bind?.params), gate: () => gateOf(a) }; }();
+  return currentBindingGate(db, task, newest, older) ?? newest;
 }
 
 type Card = Pick<PlannerSnapshot, "task" | "screenshotsDigest">;

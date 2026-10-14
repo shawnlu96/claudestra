@@ -25,11 +25,12 @@ type Bound = { head?: string; specRev?: number; screenshotsDigest?: string };
  * an ownerVisual card: that older ask decides, so a binding that went A → B → A never gets a second ask. Null = the newest decides.
  */
 export function currentBindingGate(db: Database, task: LedgerTask, newest: UiGate,
-  older: readonly { bound: Bound; gate: () => UiGate }[]): UiGate | null {
+  older: Iterable<{ bound: Bound; gate: () => UiGate }>): UiGate | null {
   const digest = task.extra.screenshotsDigest;
   const current = (b: Bound) => b.head === task.headSHA && b.specRev === task.specRev && b.screenshotsDigest === digest;
   if (newest.state === "none" || typeof digest !== "string" || !task.headSHA || current(newest)) return null;
-  const hit = older.find((o) => current(o.bound));
+  let hit: { gate: () => UiGate } | undefined;
+  for (const o of older) if (current(o.bound)) { hit = o; break; }
   if (!hit || !ownerVisualOf(db, task, listEvents(db, { project: task.project, target: task.id }))) return null;
   return hit.gate();
 }
