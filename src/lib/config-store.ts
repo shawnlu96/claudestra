@@ -71,7 +71,7 @@ export interface AppConfig {
   talkEnabled?: boolean;
   /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
   peerRelayJoinStrict?: boolean;
-  /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 observe）；launcher 每轮现读 */
+  /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 on；observe / off 要显式设置）；launcher 每轮现读 */
   bridgeWatchdog?: "on" | "observe" | "off";
   bridgeWatchdogDiag?: "on" | "observe" | "off"; // 卡住时抓现场，缺省 on（lib/bridge-watchdog-diag.ts）
   bridgeWatchdogOob?: "on" | "observe" | "off"; // 卡住 / 恢复的带外通知，缺省 on（lib/bridge-watchdog-oob.ts）

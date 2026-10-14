@@ -1060,12 +1060,6 @@ export async function listWindowIdsByName(name: string): Promise<string[]> {
   return ids;
 }
 
-/** master session 是否存在 */
-export async function masterSessionExists(): Promise<boolean> {
-  const out = await tmuxRaw(["list-sessions", "-F", "#{session_name}"]);
-  return out.split("\n").includes(MASTER_SESSION);
-}
-
 /** master:0 这个窗口是否存在（区别于 master session 本身存在） */
 export async function masterWindowExists(): Promise<boolean> {
   const out = await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_index}"]);

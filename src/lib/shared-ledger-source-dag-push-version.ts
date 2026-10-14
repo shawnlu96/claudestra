@@ -9,12 +9,13 @@ import type { SharedLedgerDag } from "./shared-ledger-contract.js";
 export const isPrivateRepoGlob = (glob: string): boolean => glob.startsWith("repo:");
 
 export interface SharedLedgerDagText { reason?: string; oneLine?: (node: DagNode) => string }
+/** skip: bindings left out (mirrorSkipBinding, shared-ledger-mirror-skip.ts); their nodes stay, unbound. */
 export function sharedLedgerDagVersion(dag: Pick<DagVersion, "version" | "reasonText">, nodes: readonly DagNode[],
-  text: SharedLedgerDagText = {}): SharedLedgerDag & { reason: string } {
+  text: SharedLedgerDagText = {}, skip?: (taskId: string) => boolean): SharedLedgerDag & { reason: string } {
   return { version: dag.version, reason: text.reason ?? dag.reasonText,
     nodes: nodes.map((n) => ({ key: n.key, deps: n.deps, fileGlobs: (n.fileGlobs ?? []).filter((g) => !isPrivateRepoGlob(g)), estimate: n.estimate,
       oneLine: text.oneLine ? text.oneLine(n) : n.oneLine })),
-    bindings: nodes.filter((n) => n.taskId).map((n) => ({ nodeKey: n.key, taskId: n.taskId! })) };
+    bindings: nodes.filter((n) => n.taskId && !skip?.(n.taskId)).map((n) => ({ nodeKey: n.key, taskId: n.taskId! })) };
 }
 
 /** The scrub allowlist (shared-ledger-scrub.ts) knows the DAG version shape under an import manifest, not the upload's
