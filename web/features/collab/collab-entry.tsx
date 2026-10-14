@@ -77,7 +77,7 @@ function FailedRow({ projectId }: { projectId: string }) {
   const busy = useProbing(projectId);
   const label = entryText(lang, "没读到，点一下重试");
   return <li data-collab-entry="failed">
-    <div className={`${ROW} text-base-content/40`} aria-disabled="true">
+    <div className={`${ROW} text-base-content/40`}>
       <Icon name="listTree" size={14} />
       <span className="truncate font-medium">{t("协作视图")}</span>
       <button type="button" aria-label={label} title={label} aria-busy={busy || undefined}
