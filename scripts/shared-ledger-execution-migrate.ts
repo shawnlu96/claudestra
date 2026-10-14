@@ -4,6 +4,7 @@
  *   center.json = { centerId, baseUrl, teamId, personId, instanceId, projectId }; the bearer comes from SHARED_LEDGER_V2_DRILL_BEARER
  *   and the signing key is the drill root's own instance key. Production state directories are refused; a formal migration
  *   (X15 passed + owner authorization) is out of scope for this script.
+ * plan.json lists the whole group (本机 / peer A / peer B), each member an isolated state dir under the drill root.
  * Exit codes: 0 done (dry-run / switched / exported), 2 refused (itemized list on stderr), 3 frozen pending PM, 1 usage / error.
  */
 import { readFileSync } from "node:fs";
@@ -45,7 +46,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   const center = deps.center?.(root) ?? (centerFile ? liveCenter(root, centerFile, deps.env ?? process.env) : null);
   if (!center) { print("缺 --center"); return 1; }
   if (action === "reverse") {
-    const out = await exportForReverse({ root, batchId: plan.batchId, featureIds: plan.featureIds, center });
+    const out = await exportForReverse({ root, batchId: plan.batchId, featureIds: plan.featureIds, center, members: plan.members ?? [] });
     print(`冻结 → 导出 ${out.export} → 核对报告 ${out.report}；直接回写：拒绝${out.centerAdvanced ? "（中心已有新提交）" : ""}`);
     return 3;
   }
