@@ -29,6 +29,7 @@ export interface DesktopScopeFacts {
   event: string;
   headRef: string;
   mode: CiDesktopScopeMode;
+  scope?: string;
   /** PR 合并提交相对第一个父提交的改动；null = 读不出。 */
   changes: readonly ChangedFile[] | null;
   /** 读不懂的 diff 记录、或读改动时的失败原因；非空就照旧跑。 */
@@ -58,7 +59,7 @@ function mustRunReasons(f: DesktopScopeFacts): string[] {
 
 /** 判定（纯函数）。line 是固定的一行，PM 观察期就抽它。 */
 export function decideDesktopScope(f: DesktopScopeFacts): DesktopScopeDecision {
-  const must = mustRunReasons(f), wouldSkip = must.length === 0, run = !(wouldSkip && f.mode === "on");
+  const must = mustRunReasons(f), wouldSkip = must.length === 0, run = !(wouldSkip && (f.scope === "light" || f.mode === "on"));
   const reasons = wouldSkip ? [`未改 desktop 输入（改动 ${f.changes?.length ?? 0} 个）${run ? `，mode=${f.mode} 照旧跑` : ""}`] : must;
   const verdict = !wouldSkip ? "必须跑" : run ? "本可跳过" : "跳过";
   return { run, wouldSkip, reasons, line: `desktop 范围：mode=${f.mode} 结论=${verdict} 原因=${reasons.join("；")}` };
@@ -79,7 +80,7 @@ function main(env: Record<string, string | undefined>): void {
   const event = env.GITHUB_EVENT_NAME ?? "", headRef = env.GITHUB_HEAD_REF ?? "", mode = ciDesktopScopeMode(env.CI_DESKTOP_SCOPE);
   // 只有普通 PR 才需要读改动；其余事件不看 diff 就是「必须跑」
   const read = event === "pull_request" && !headRef.startsWith("train/") ? readChanges() : { changes: null, bad: [] };
-  const d = decideDesktopScope({ event, headRef, mode, ...read });
+  const d = decideDesktopScope({ event, headRef, mode, scope: env.CI_PLAN_SCOPE, ...read });
   console.log(d.line);
   console.log(`::notice title=desktop-scope::${d.line}`);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${d.line}\n`);

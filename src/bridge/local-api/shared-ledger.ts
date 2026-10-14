@@ -7,6 +7,7 @@ import { parseSharedLedgerCommand } from "../../lib/shared-ledger-contract-valid
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "../../lib/shared-ledger-contract-transfer.js";
 import { sharedLedgerBodyLimit } from "../../lib/shared-ledger-contract.js";
 import { parseActivityCursor } from "../../lib/shared-ledger-contract-reads.js";
+import { TASK_FACTS_RESOURCE } from "../../lib/shared-ledger-contract-task-facts.js";
 import { cachedSharedLedgerRead } from "./shared-ledger-read-cache.js";
 
 export interface SharedLedgerProxyDeps {
@@ -30,7 +31,7 @@ function rateLimited(response: unknown, retryAfter: string | null): Response {
 }
 function actionFor(resource: string, method: string): SharedLedgerLocalCredential["projects"][number]["actions"][number] | null {
   if (method === "GET" && /^(?:features(?:\/[A-Za-z0-9_.:-]+)?|commands\/[A-Za-z0-9_.:-]+)$/.test(resource)) return "read";
-  if (method === "GET" && (resource === "ext-capabilities" || extRead(resource))) return "read";
+  if (method === "GET" && (resource === "ext-capabilities" || extRead(resource) || TASK_FACTS_RESOURCE.test(resource))) return "read";
   if (method !== "POST") return null;
   return resource === "commands" ? "plan" : resource === "imports" ? "import" : resource === "projections" ? "project" : null;
 }
@@ -71,6 +72,11 @@ export async function handleSharedLedgerApi(req: Request, path: string, principa
       const ext = extRead(resource);
       if (ext) {
         const read = ext.after === null ? await client.versions(ext.featureId) : await client.activity(ext.featureId, ext.after);
+        return read.projectId === deps.projectId ? json(200, read) : json(403, { error: "project unavailable" });
+      }
+      const facts = TASK_FACTS_RESOURCE.exec(resource);
+      if (facts) {
+        const read = await client.taskFacts(facts[1]!);
         return read.projectId === deps.projectId ? json(200, read) : json(403, { error: "project unavailable" });
       }
       const slot = { get: () => retryAfter, set: (v: string) => { retryAfter = v; } };

@@ -46,14 +46,14 @@ test("on: a spec-defined question is answered once from a fresh read-only sessio
   expect(summary[0]!.firstLine).not.toContain("\n");
 });
 
+// agents-PMJOB2：改规格 / 改范围成了软门（直回候选，只能按 specDecided 答，见下一条测试），这里只留硬门
 const MUST_ESCALATE: [string, string][] = [
-  ["改规格", "验收线 2 能不能改成也允许 src/lib/outside.ts？"], ["改范围", "需要扩围 src/lib/outside.ts 一行，可以吗？"],
   ["权限", "能给我开写台账的权限吗？"], ["删数据", "可以删掉旧的状态文件数据吗？"], ["release", "这次要不要发 release？"], ["tag", "合并后需要打 tag 吗？"],
   ["中心限流", "中心限流的阈值要不要调？"], ["schema", "asks 表要不要加一列 schema？"], ["改额度线", "额度线可以调到 90 吗？"],
 ];
 
 // [验收线 2]
-test("on: spec / scope changes and the seven owner categories never go back directly; the PM gets the original and a draft", async () => {
+test("on: the owner categories never go back directly; the PM gets the original at once and the draft goes to the digest", async () => {
   w = await jobWorld("on");
   for (const [label, q] of MUST_ESCALATE) {
     const before = w.pm.length, { askId } = await w.ask(q);
@@ -67,7 +67,8 @@ test("on: spec / scope changes and the seven owner categories never go back dire
   await pmJob.sweep();
   expect(w.asker).toEqual([]);
   expect(w.remote).toEqual([]);
-  const hints = w.pm.slice(before);
+  expect(w.pm).toHaveLength(before); // agents-PMJOB2 PM 定 6：草稿提示进摘要，不单独叫醒 PM
+  const hints = w.digest.queued(P).map((e) => ({ id: e.id, content: e.firstLine }));
   expect(hints).toHaveLength(MUST_ESCALATE.length);
   for (const job of w.store.list()) {
     expect(job).toMatchObject({ state: "observed", result: { verdict: "escalate" } });
@@ -77,6 +78,22 @@ test("on: spec / scope changes and the seven owner categories never go back dire
     expect(draft).toContain("## 待批项");
     expect(draft).toContain(job.forbidden!);
   }
+});
+
+const SOFT: [string, string][] = [["改规格", "验收线 2 能不能改成也允许 src/lib/outside.ts？"], ["改范围", "需要扩围 src/lib/outside.ts 一行，可以吗？"]];
+
+// [验收线 3]
+test("on: a spec / scope change question is a direct candidate, but a non-specDecided answer escalates the original to the PM", async () => {
+  w = await jobWorld("on");
+  for (const [label, q] of SOFT) {
+    const { askId } = await w.ask(q), before = w.pm.length;
+    expect(w.store.get(askId)).toMatchObject({ direct: true, hard: false, forbidden: label });
+    expect(await w.work()).toBe(1);
+    await pmJob.sweep();
+    expect(w.store.get(askId)).toMatchObject({ state: "escalated", note: expect.stringContaining("specDecided") });
+    expect(w.pm.slice(before)).toEqual([{ to: A, id: `ledger-ask:${askId}`, content: expect.stringContaining(original(askId, q)) }]);
+  }
+  expect(w.asker).toEqual([]);
 });
 
 const BAD_OUTPUT: [string, (specPath: string) => string, RegExp][] = [
@@ -144,16 +161,18 @@ test("off: every envelope goes out byte for byte in order, and nothing is read o
 test("observe: the original goes out at once with the pending draft; the finished draft is linked by a follow-up, never sent to the executor", async () => {
   w = await jobWorld(null); // 没配 = observe
   const q = "验收线 1 的行数上限是多少？", { askId } = await w.ask(q), draft = w.store.draftPath(askId);
-  expect(w.pm).toEqual([{ to: A, id: `ledger-ask:${askId}`, content: `${original(askId, q)}\n处理员草稿（待生成，完成后另有一条提示）：${draft}` }]); // 没等模型
+  expect(w.pm).toEqual([{ to: A, id: `ledger-ask:${askId}`, content: `${original(askId, q)}\n处理员草稿（待生成，完成后进摘要）：${draft}` }]); // 没等模型
   expect(w.runs).toEqual([]);
   expect(readFileSync(draft, "utf8")).toContain("待生成");
   expect(w.store.get(askId)).toMatchObject({ state: "queued", direct: false, mode: "observe" });
   expect(await w.work()).toBe(1);
   await pmJob.sweep();
   await pmJob.sweep();
-  expect(w.pm).toHaveLength(2);
-  expect(w.pm[1]).toMatchObject({ to: A, id: `pm-job-draft:${askId}` });
-  for (const part of [`ask ${askId}`, draft, "T1", "未发给执行者"]) expect(w.pm[1]!.content).toContain(part);
+  expect(w.pm).toHaveLength(1); // agents-PMJOB2 PM 定 6：草稿完成进摘要队列，不再单独叫醒 PM
+  const queued = w.digest.queued(P);
+  expect(queued).toHaveLength(1);
+  expect(queued[0]).toMatchObject({ id: `pm-job-draft:${askId}`, source: "pm-job", card: "T1" });
+  for (const part of [`ask ${askId}`, draft, "未发给执行者"]) expect(queued[0]!.firstLine).toContain(part);
   const done = readFileSync(draft, "utf8");
   for (const part of [`ask ${askId}`, "验收线 1 说的是新文件不超过 800 行。", `${w.specPath}:4`]) expect(done).toContain(part);
   expect(w.asker).toEqual([]);

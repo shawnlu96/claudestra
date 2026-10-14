@@ -43,10 +43,10 @@ const interrupted = (job: PmJob) => {
   return { result, draft: pmJobDraft({ ...job, state: "drafted", result }) };
 };
 
-/** 批准路径里的仓库相对文件（或规格文件本身）有多少行；越出仓库 / 不在批准路径 / 读不到 = null */
-function approvedLines(job: Pick<PmJob, "repoDir" | "paths" | "specPath">, file: string, read: PmJobWorkerDeps["read"]): number | null {
+/** 批准路径里的仓库相对文件（或规格文件本身：按这次跑的那份规格）有多少行；越出仓库 / 不在批准路径 / 读不到 = null */
+function approvedLines(job: Pick<PmJob, "repoDir" | "paths" | "specPath">, spec: string, file: string, read: PmJobWorkerDeps["read"]): number | null {
   const count = (text: string | null) => (text === null ? null : text.split("\n").length);
-  if (file === job.specPath) return count(read(file));
+  if (file === job.specPath) return count(spec);
   if (!file || isAbsolute(file) || file.split(/[\\/]/).some((s) => s === ".." || s === "." || !s)) return null;
   if (!job.paths.some((p) => p === file || new Bun.Glob(p).match(file))) return null;
   const full = join(job.repoDir, file);
@@ -58,15 +58,20 @@ function approvedLines(job: Pick<PmJob, "repoDir" | "paths" | "specPath">, file:
 }
 
 async function answer(job: PmJob, d: PmJobWorkerDeps): Promise<{ result: PmJobResult; usage?: PmJobUsage }> {
-  const spec = d.read(job.specPath);
+  // 有接单时的快照就用快照跑（PM 答问时追加的「PM 补」不再让草稿落空）；没快照的旧单子照旧读文件、核哈希
+  const spec = job.spec ?? d.read(job.specPath);
   if (spec === null) return { result: escalated("规格文件读不到") };
-  if (specHashOf(spec) !== job.specHash) return { result: escalated("规格在提问之后改过") };
+  if (job.spec === undefined && specHashOf(spec) !== job.specHash) return { result: escalated("规格在提问之后改过") };
   const prompt = pmJobPrompt(job, spec);
   // 一次全新会话：不带 thread（不 resume）、只读沙箱、不加载全局 MCP
   const r = await d.run({ prompt, cwd: job.repoDir, sandbox: "read-only", timeoutMs: d.timeoutMs, isolateMcp: true });
   const usage: PmJobUsage = { requests: 1, elapsedMs: r.elapsedMs, promptChars: prompt.length, answerChars: r.ok ? r.message.length : 0 };
   if (!r.ok) return { result: escalated(`处理员运行失败：${r.message.slice(0, 300)}`), usage };
-  return { result: judgePmJobOutput(r.message, { forbidden: job.forbidden, lines: (f) => approvedLines(job, f, d.read) }), usage };
+  const specLines = spec.split("\n");
+  return { result: judgePmJobOutput(r.message, {
+    forbidden: job.forbidden, ...(job.forbiddenAll ? { gates: { all: job.forbiddenAll, hard: job.hard === true } } : {}),
+    lines: (f) => approvedLines(job, spec, f, d.read), specPath: job.specPath, specLine: (n) => (n >= 1 && n <= specLines.length ? specLines[n - 1]! : null),
+  }), usage };
 }
 
 /** 一单：额度不够 / 不明不上模型；槽位满就放回队列（返回 false，这轮不再领）；其余都写出 drafted */

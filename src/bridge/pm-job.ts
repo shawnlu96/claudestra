@@ -15,10 +15,10 @@ import { isTestScopeAsk } from "../lib/order-ask-default.js";
 import { assertOrderTakesAsks } from "../lib/order-ask-terminal.js";
 import { askNoticeText } from "../lib/order-ask.js";
 import { PmDigestStore } from "../lib/pm-digest-store.js";
-import { forbiddenOf } from "../lib/pm-job-rules.js";
+import { gatesOf } from "../lib/pm-job-rules.js";
 import { PmJobStore } from "../lib/pm-job-store.js";
-import { pmJobAnswerText, pmJobDraft, pmJobEscalateLine, pmJobHintText, pmJobPendingLine, pmJobSummaryLine } from "../lib/pm-job-text.js";
-import { PM_JOB_OPEN, type PmJob, type PmJobState } from "../lib/pm-job-types.js";
+import { pmJobAnswerText, pmJobDraft, pmJobEscalateLine, pmJobHintLine, pmJobPendingLine, pmJobSummaryLine } from "../lib/pm-job-text.js";
+import { PM_JOB_OPEN, PM_JOB_SPEC_MAX, type PmJob, type PmJobState } from "../lib/pm-job-types.js";
 import { specHashOf } from "../lib/pm-job-worker.js";
 import { activeProjectPm } from "../lib/pm-role.js";
 import { classifyPmRoute } from "../lib/pm-route.js";
@@ -143,11 +143,13 @@ export class PmJobBridge {
     const mentioned = [...`${spec}\n${a.body}`.matchAll(PATH_RE)].map((m) => m[0]);
     const paths = [...new Set([...globs, ...mentioned, "src/lib/order-standard-answers.ts"].filter(cleanPath))].slice(0, 80);
     const options = Array.isArray(a.extra.options) ? a.extra.options.map(String) : [];
-    const forbidden = forbiddenOf([a.body, ...options].join("\n")), at = now(); // 候选项也是提问的一部分
+    const gates = gatesOf(a.body, options), at = now(); // 候选项也是提问的一部分，但只过硬门
     return {
       v: 1, askId, messageId, project, card: a.taskId, orderId: String(a.extra.orderId), target: a.fromAgent, pm, specRev: task.specRev, specPath,
       specHash: specHashOf(spec), repoDir, paths, question: a.body, options,
-      mode, modeGen: store.gen(project), direct: mode === "on" && !forbidden, forbidden, state: "queued", createdAt: at, updatedAt: at,
+      // 只命中软门的也是直回候选，但只能按 specDecided 答（judgePmJobOutput 核）
+      mode, modeGen: store.gen(project), direct: mode === "on" && !gates.hard, forbidden: gates.all[0] ?? null, forbiddenAll: gates.all, hard: gates.hard,
+      ...(Buffer.byteLength(spec) <= PM_JOB_SPEC_MAX ? { spec } : {}), state: "queued", createdAt: at, updatedAt: at,
       draftPath: store.draftPath(askId),
     };
   }
@@ -253,7 +255,7 @@ export class PmJobBridge {
   }
 
   private async tellPm(job: PmJob): Promise<void> {
-    const handed = job.state === "sent" ? this.summarize(job) : job.state === "observed" ? await this.hint(job) : await this.escalate(job);
+    const handed = job.state === "sent" ? this.summarize(job) : job.state === "observed" ? this.hint(job) : await this.escalate(job);
     if (handed) await this.deps.store.update(job.askId, [job.state], this.deps.now(), (j) => ({ ...j, pmNotice: "handed" }));
   }
 
@@ -265,10 +267,14 @@ export class PmJobBridge {
     return true;
   }
 
-  private async hint(job: PmJob): Promise<boolean> {
-    const db = this.deps.db(), pm = this.currentPm(job);
+  /** observe 草稿生成：一行进 PM 摘要队列，不单独叫醒 PM（agents-PMJOB2 PM 定 6）；同 id 不重复入队 */
+  private hint(job: PmJob): boolean {
+    const db = this.deps.db();
     if (db && hasAsksTable(db) && getAsk(db, job.askId)?.state !== "open") return true; // PM 已经答了 / 提问撤了：不再补提示
-    return !!pm && (await this.deps.notify(pm, pmJobHintText(job), `pm-job-draft:${job.askId}`)).handed;
+    const { digest, now } = this.deps, at = now();
+    digest.record({ at, project: job.project, send: "digest", reason: "处理员草稿", source: "pm-job", kind: "sync", mode: digest.mode(job.project) },
+      { id: `pm-job-draft:${job.askId}`, project: job.project, at, kind: "sync", source: "pm-job", card: job.card, firstLine: pmJobHintLine(job) });
+    return true;
   }
 
   /** 原问题（按台账里的提问重写原通知，沿用原 messageId）加草稿附注交给当班 PM；提问已不在等回答就不用发了 */

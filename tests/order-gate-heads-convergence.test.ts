@@ -4,6 +4,7 @@ import { fourRoundFix } from "./fix-strategy-helpers.js";
 import { remoteProbe } from "./fix-strategy-remote-helpers.js";
 import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
 import { listEvents } from "../src/lib/ledger-store.js";
+import { gateRefusalFacts } from "../src/lib/scheduler-dispatch-block.js";
 
 test("acceptance 3: convergence gate refusal must record an alarm", async () => {
   const f = await fourRoundFix();
@@ -16,6 +17,7 @@ test("acceptance 3: convergence gate refusal must record an alarm", async () => 
     await expect(fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).rejects.toThrow();
     const alarms = () => listEvents(f.db, { target: "T1" }).filter((e) => e.data.op === "gate_refused");
     expect(alarms()).toHaveLength(1);
+    expect(alarms()[0]!.data).toMatchObject(gateRefusalFacts(f.task(), listEvents(f.db, { target: "T1" }), intent.id, p.context.spec));
     expect(alarms()[0]!.data.waiting).toContain("等本机执行者接手");
     expect(f.db.query("SELECT orderId FROM lend_orders WHERE taskId = 'T1'").all()).toEqual([]);
     expect(listEvents(f.db, { target: "T1" }).filter((e) => e.data.op === "fix_strategy")).toEqual([]);

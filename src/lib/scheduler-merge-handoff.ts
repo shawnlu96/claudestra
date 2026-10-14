@@ -12,7 +12,9 @@ import { canTransition, nextTaskState, type LedgerEvent, type LedgerTask } from 
 import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
-import { cardFileLocks, coveredBy, replaceCardFileLocks } from "./ledger-scheduler-lease-sync.js";
+import { cardFileLocks, coveredBy, replaceCardFileLocks, type FileLock } from "./ledger-scheduler-lease-sync.js";
+import { prCoordinates } from "./card-repo.js";
+import { recordObserved, type ObservedAction } from "./recovery-policy.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { mergeReviewProof } from "./scheduler-merge.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
@@ -211,19 +213,98 @@ export function narrowHandoffLocks(db: Database, ctx: WriteCtx,
       return { narrowed: false, reason };
     };
     if ("refused" in input.files) return skip(input.files.refused);
-    const paths = input.files.map((f) => (f.includes("*") ? null : resourceKey(f)));
-    if (paths.includes(null)) return skip("PR 改动里有调度器认不了的路径");
-    const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.map((g) => (typeof g === "string" ? resourceKey(g) : null)) : [];
-    if (!globs.length || globs.includes(null)) return skip("卡的 fileGlobs 缺失或不合规");
-    const held = cardFileLocks(db, task.id);
-    if (!held.length) return skip("卡没拿文件锁");
-    if (held.some((h) => h.resource.startsWith("repo:"))) return skip("私仓卡的锁带 repo: 前缀，PR 路径对不上，交接后不收窄");
-    // PR ∩ fileGlobs, and never a lock the card does not already cover: narrowing only ever gives files back
-    const to = [...new Set(paths as string[])].filter((p) => globs.some((g) => coveredBy(p, g!)) && held.some((h) => coveredBy(p, h.resource))).sort();
-    const from = held.map((h) => h.resource);
+    const held = cardFileLocks(db, task.id), target = narrowTarget(task, held, input.files, input.pr);
+    if ("skipped" in target) return skip(target.skipped);
+    const { from, to, paths, repo } = target;
     replaceCardFileLocks(db, task, held, to, now);
     insertEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler",
-      text: `交接后文件锁收窄到 PR 实际改动：${from.length} → ${to.length} 把`, data: { op: NARROW_OP, handoffSeq: follow.event.seq, head: input.head, from, to, files: paths } }, true);
+      text: narrowedText(from, to), data: { op: NARROW_OP, handoffSeq: follow.event.seq, head: input.head, from, to, files: paths, ...(repo ? { repo } : {}) } }, true);
     return { narrowed: true, from, to, duplicate: false };
+  });
+}
+
+const narrowedText = (from: readonly string[], to: readonly string[]): string => `交接后文件锁收窄到 PR 实际改动：${from.length} → ${to.length} 把`;
+const LOCK_REPO = /^repo:([\w.-]+\/[\w.-]+)\//;
+
+/**
+ * The narrowing itself, shared by the handoff and a private card's foreign_repo escalation (scheduler-merge-handoff-private.ts):
+ * PR ∩ fileGlobs, and never a lock the card does not already cover — narrowing only ever gives files back. A card whose locks
+ * carry `repo:<owner>/<name>/` (PRIVLOCK1) narrows only when every lock names the PR's own repository; its PR paths get that head.
+ */
+export type NarrowTarget = { from: string[]; to: string[]; paths: string[]; repo: string | null } | { skipped: string };
+export function narrowTarget(task: LedgerTask, held: readonly FileLock[], files: readonly string[], pr: string): NarrowTarget {
+  const repo = held.some((h) => h.resource.startsWith("repo:")) ? lockRepo(held, pr) : null;
+  if (repo && "skipped" in repo) return repo;
+  const head = repo ? `repo:${repo.repo}/` : "";
+  const paths = files.map((f) => (f.includes("*") ? null : resourceKey(head + f)));
+  if (paths.includes(null)) return { skipped: "PR 改动里有调度器认不了的路径" };
+  const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.map((g) => (typeof g === "string" ? resourceKey(g) : null)) : [];
+  if (!globs.length || globs.includes(null)) return { skipped: "卡的 fileGlobs 缺失或不合规" };
+  if (!held.length) return { skipped: "卡没拿文件锁" };
+  const to = [...new Set(paths as string[])].filter((p) => globs.some((g) => coveredBy(p, g!)) && held.some((h) => coveredBy(p, h.resource))).sort();
+  return { from: held.map((h) => h.resource), to, paths: paths as string[], repo: repo?.repo ?? null };
+}
+
+/** The one repository every `repo:` lock names, when it is the PR's (case-insensitive); a bare lock mixed in or another repository refuses. */
+function lockRepo(held: readonly FileLock[], pr: string): { repo: string } | { skipped: string } {
+  const repos = new Set(held.map((h) => LOCK_REPO.exec(h.resource)?.[1]?.toLowerCase() ?? ""));
+  if (repos.has("")) return { skipped: "卡的锁混了裸路径和 repo: 前缀" };
+  const prRepo = prCoordinates(pr)?.repo.toLowerCase();
+  if (repos.size !== 1) return { skipped: `卡的锁混了 ${repos.size} 个仓库` };
+  const [repo] = repos as Set<string>;
+  return prRepo === repo ? { repo } : { skipped: `卡的锁在 repo:${repo}，不是 PR 的仓库 ${prRepo ?? "（PR 链接不合规）"}` };
+}
+
+/**
+ * dispatch-recovery-PRIVLOCK2 · the writes of a private card's merge-stage narrowing; scheduler-merge-handoff-private.ts reads the
+ * PR and decides when. Kept here so the event write base stays with the writer modules. Each is rechecked in its own transaction:
+ * a card that left this merge, head or PR, or got an open intent while the PR was read, is left alone and nothing is recorded.
+ */
+const PRIVATE_OP = "merge_private_narrow";
+export type PrFiles = readonly string[] | { refused: string };
+type PrivateInput = { taskId: string; head: string; pr: string | null; files: PrFiles };
+export const privateNarrowKey = (taskId: string, head: string): string => `scheduler:${PRIVATE_OP}:${taskId}:${head}`;
+export const openIntent = (db: Database, taskId: string): boolean =>
+  !!db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1").get(taskId);
+const offPrivateMerge = (task: LedgerTask, input: PrivateInput): boolean =>
+  task.stage !== "merge" || (task.headSHA ?? "none") !== input.head || task.pr !== input.pr;
+
+/** on: the card's locks down to PR ∩ fileGlobs (narrowTarget), or one record of why not, once per (card, head). */
+export function narrowPrivateLocks(db: Database, ctx: { now: number }, input: PrivateInput): NarrowResult {
+  return tx(db, () => {
+    const task = mustTask(db, input.taskId);
+    if (offPrivateMerge(task, input)) return { narrowed: false, reason: "卡已不在这次 merge 上（阶段、head 或 PR 已变）" };
+    const key = privateNarrowKey(task.id, input.head), repo = prCoordinates(task.pr)?.repo.toLowerCase() ?? null;
+    const prev = getEventByDedup(db, key);
+    if (prev) {
+      return prev.data.skipped ? { narrowed: false, reason: String(prev.data.skipped) }
+        : { narrowed: true, from: prev.data.from as string[], to: prev.data.to as string[], duplicate: true };
+    }
+    if (openIntent(db, task.id)) return { narrowed: false, reason: "卡还有未结调度意图" };
+    const write = (text: string, data: Record<string, unknown>) => insertEvent(db, { actor: "scheduler", now: ctx.now, dedupKey: key },
+      { project: task.project, target: task.id, kind: "scheduler", text, data: { op: PRIVATE_OP, head: input.head, repo, ...data } }, true);
+    const held = cardFileLocks(db, task.id);
+    const target = "refused" in input.files ? { skipped: input.files.refused } : narrowTarget(task, held, input.files, task.pr ?? "");
+    if ("skipped" in target) {
+      write(`交接后文件锁不收窄：${target.skipped}`, { skipped: target.skipped });
+      return { narrowed: false, reason: target.skipped };
+    }
+    replaceCardFileLocks(db, task, held, target.to, ctx.now);
+    write(narrowedText(target.from, target.to), { from: target.from, to: target.to, files: target.paths });
+    return { narrowed: true, from: target.from, to: target.to, duplicate: false };
+  });
+}
+
+/** observe: what on would do, one recovery note per (card, head) under `note`'s key; the locks stay as they are. */
+export function observePrivateNarrow(db: Database, input: PrivateInput,
+  note: Pick<ObservedAction, "project" | "mechanism" | "target" | "actionKey">, now: number): void {
+  const { head, files } = input;
+  tx(db, () => {
+    const task = mustTask(db, input.taskId);
+    if (offPrivateMerge(task, input) || openIntent(db, task.id)) return;
+    const target = "refused" in files ? { skipped: files.refused } : narrowTarget(task, cardFileLocks(db, task.id), files, task.pr ?? "");
+    const action = "skipped" in target ? `不收窄：${target.skipped}` : `收窄 ${target.from.length} → ${target.to.length} 把`;
+    const data = "skipped" in target ? { head, skipped: target.skipped } : { head, from: target.from, to: target.to, repo: target.repo };
+    recordObserved(db, { ...note, action, data }, now);
   });
 }
