@@ -9,6 +9,7 @@
  */
 import { redactSecrets } from "../../redact-secrets.js";
 import { currentValueOf, parseConfigOptions } from "../config.js";
+import { TEXT_LIMITS } from "../transcript.js";
 import type { ToolStatus } from "./blocks.js";
 
 type Rec = Record<string, any>;
@@ -36,8 +37,6 @@ export interface SessionInfo {
 }
 
 const TERMINAL = new Set(["completed", "failed"]);
-/** 思考只留末尾这么多原文（预览只要最后几行） */
-const THOUGHT_KEEP = 4_000;
 
 export function createToolTracker(now: () => number) {
   let running: LiveTool[] = [], fresh: LiveTool[] = [], results: string[] = [];
@@ -85,20 +84,26 @@ export function createToolTracker(now: () => number) {
   };
 }
 
-/** 思考预览：最后一整行，连同前两行一起打码（有的规则跨行：Bearer\n长串） */
+/**
+ * 思考预览：最后一整行。整段思考（从开始到现在）先一起打码、再取最后一行——有的规则跨行（password=\n\n值、Bearer\n长串），
+ * 先按行 / 按字截窗口会把标签切掉、值原样漏出来。半行不显示（可能是半个密钥），只在新的一行攒齐时重算。
+ * 超过 transcript.ts 的扫描上限就不再攒原文（每次重算是整段打码），只显示「思考中…」。tests/acp-tui-live.test.ts。
+ */
 export function createThought() {
-  let raw = "";
+  let raw = "", on = false, over = false, shown = "";
   return {
     add(text: string): void {
-      raw = (raw + text).slice(-THOUGHT_KEEP);
+      on = true;
+      if (over) return;
+      raw += text;
+      if (raw.length > TEXT_LIMITS.scan) return void ([raw, shown, over] = ["", "", true]);
+      if (!text.includes("\n")) return;
+      const lines = redactSecrets(raw.slice(0, raw.lastIndexOf("\n") + 1)).split("\n").filter((l) => l.trim());
+      shown = lines.at(-1)?.trim() ?? "";
     },
-    clear: (): void => void (raw = ""),
-    active: (): boolean => raw.length > 0,
-    preview(): string {
-      const done = raw.slice(0, raw.lastIndexOf("\n") + 1);
-      const lines = redactSecrets(done.split("\n").slice(-4).join("\n")).split("\n").filter((l) => l.trim());
-      return lines.at(-1)?.trim() ?? "";
-    },
+    clear: (): void => void ([raw, on, over, shown] = ["", false, false, ""]),
+    active: (): boolean => on,
+    preview: (): string => shown,
   };
 }
 

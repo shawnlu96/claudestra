@@ -61,6 +61,36 @@ describe("思考预览", () => {
   });
 });
 
+describe("思考预览先打码再取窗口（验收 10：PR1546-r1 P1）", () => {
+  const VALUE = "Sup3rS3cretValue9";
+  const leaks = (chunks: string[]) => {
+    const th = createThought();
+    const seen = chunks.map((c) => (th.add(c), th.preview()));
+    return seen.filter((p) => p.includes(VALUE));
+  };
+
+  test("行窗口边界：标签和值之间隔 5 个换行，值也不漏", () => {
+    expect(leaks([`password=${"\n".repeat(5)}${VALUE}\n`])).toEqual([]);
+  });
+
+  test("字符窗口边界：标签和值之间隔 4000 个空格，值也不漏", () => {
+    expect(leaks([`password=${" ".repeat(4000)}${VALUE}\n`])).toEqual([]);
+  });
+
+  test("分块送达：同一段拆成很多块进来，每一步的预览都不漏", () => {
+    for (const gap of ["\n".repeat(5), " ".repeat(4000)]) {
+      const text = `先想一下\npassword=${gap}${VALUE}\n后面还有\n`;
+      expect(leaks(text.match(/[\s\S]{1,7}/g)!)).toEqual([]);
+    }
+  });
+
+  test("超过扫描上限就不再攒原文：只显示思考中，不出内容", () => {
+    const th = createThought();
+    th.add(`${"x".repeat(20_000)}\n${VALUE}\n`);
+    expect([th.active(), th.preview()]).toEqual([true, ""]);
+  });
+});
+
 describe("状态栏信息：只认标准事件", () => {
   test("用量、配置、压缩中；同样的值不算变化", () => {
     const i = createSessionInfo();

@@ -152,6 +152,17 @@ describe("脱敏与上限不回退", () => {
     expect(st.out).toContain("[redacted]");
   });
 
+  test("思考预览经 update 写到终端的字节里没有明文（行窗口 / 字符窗口 / 分块三种）", () => {
+    const VALUE = "Sup3rS3cretValue9";
+    for (const gap of ["\n".repeat(5), " ".repeat(4000)]) {
+      const { st, s } = screen(80);
+      const text = `password=${gap}${VALUE}\n下一步\n`;
+      for (const piece of text.match(/[\s\S]{1,5}/g)!) s.update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: piece } });
+      expect(st.out).not.toContain(VALUE);
+      expect(st.out).toContain("✻ 下一步");
+    }
+  });
+
   test("超长正文照 transcript.ts 的上限截（200 行），注明原本多少行", () => {
     const { s, view } = screen(80);
     const t = createAcpTranslator(() => "T");
