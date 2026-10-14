@@ -48,6 +48,8 @@ export interface CronRunRecord {
   error?: string;
   /** 定向现存 agent：发 prompt 之前落；有它 = 可能已经发出去 */
   dispatchAttemptedAt?: string;
+  /** 定向现存 agent：发 prompt 时目标 agent 的会话 id（哨兵试点日报按它读会话记录）；取不到不写 */
+  targetSessionId?: string;
   reportChannel?: string;
   dir?: string;
   temp?: CronRunTemp;
