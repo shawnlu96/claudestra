@@ -6,6 +6,7 @@ import { isPersonalProject } from "../../lib/lend-policy.js";
 import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
 import { looksLikeSharedLedgerJoinCode } from "../../lib/shared-ledger-join.js";
 import { parseV2ProjectsResponse, parseV2ProjectsTeamResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
+import { teamInstancesSnapshot } from "./shared-projects-team-instances.js";
 import { requireProjectPerson, SharedProjectsError, type ProjectPerson, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 export interface SharedProjectsLocalSnapshot {
@@ -83,10 +84,12 @@ export async function sharedProjectsSnapshot(d: SharedProjectsPorts, local: Shar
     return { ...project, projectRole, localProjectIds: bindings.filter(b => b.centerId === project.centerId
       && b.teamId === project.teamId && b.projectId === project.projectId).map(b => b.localProjectId ?? b.projectId) };
   }));
-  const { team: teamRecord, teamDirectory, teamRole } = await teamSnapshot(d, who);
+  const teamRead = teamSnapshot(d, who);
+  const [{ team: teamRecord, teamDirectory, teamRole }, teamInstances] = await Promise.all([teamRead,
+    teamInstancesSnapshot(d, who, teamRead.then(t => t.teamDirectory))]);
   return {
     v: 1 as const, identity: { ...who }, capabilities: SHARED_PROJECTS_CAPABILITIES,
-    teamRole, team: teamRecord, teamDirectory, projects,
+    teamRole, team: teamRecord, teamDirectory, teamInstances, projects,
     localProjects: local.projects.map(p => ({ id: p.id, name: p.name, dirs: [...p.dirs], personal: p.personal,
       eligible: !p.personal && !bindings.some(b => (b.localProjectId ?? b.projectId) === p.id) })),
     peers: local.peers.map(p => ({ name: p.name, enabled: p.enabled, invitable: p.invitable, ...(p.instanceId ? { instanceId: p.instanceId } : {}) })),

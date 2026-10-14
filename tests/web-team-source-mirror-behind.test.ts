@@ -1,5 +1,5 @@
 /**
- * team-project-N8A8B：团队概览「主场镜像过期」不因详情的有意重拉间隔误报。
+ * team-project-N8A8B：团队概览「进度可能不是最新的」不因详情的有意重拉间隔误报。
  * 水位（sourceSeq / observedAt）是本机全局事件号，列表每 5 秒一轮都比详情新；详情水位变时 60 秒才重拉一次。
  * 旧红新绿：main 上两次重拉之间的 feature 全计为过期；修完只有落后超过 DETAIL_REFRESH_MS + POLL_MS（读失败回退旧缓存）
  * 或详情自己的 observedAt 超过 10 分钟才计为过期。fake session + 可注入时钟，按 5 秒一轮模拟。

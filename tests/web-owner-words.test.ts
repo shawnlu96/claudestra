@@ -127,3 +127,13 @@ describe("A 段文件里没有第二份叫法", () => {
     for (const file of FILES) expect({ file, hit: code(file).match(old)?.[0] ?? null }).toEqual({ file, hit: null });
   });
 });
+
+import { STAGE_NAME } from "../web/features/collab/collab-detail-model";
+test("B 段阶段词表保持同一个对象", () => expect(STAGE_NAME).toBe(STAGE_WORD));
+
+import { stageLabel, type LedgerTaskView } from "../web/features/collab/collab-model";
+test("B 段未知阶段的状态短语也用词表，不露英文键", () => {
+  const unknown = { stage: "parked" } as unknown as LedgerTaskView;
+  expect(stageLabel(unknown, [], null)).toBe("其他");
+  expect(stageLabel(unknown, [], null, ownerWordsTr("en"))).toBe("Other");
+});

@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test';
 import { READS_OFF, SharedLedgerReads } from '../web/lib/api/shared-ledger-reads';
-import type { ExtCapabilities, FeatureActivity, FeatureVersions, ReadsTransport } from '../web/lib/api/shared-ledger-reads';
+import type { ExtCapabilities, FeatureActivity, FeatureVersions, ReadsTransport, TaskFacts } from '../web/lib/api/shared-ledger-reads';
+import { ApiError } from '../web/lib/api/client';
+import { TASK_FACTS_FIXTURE } from '../src/lib/shared-ledger-contract-task-facts-fixtures';
+import { parseSharedLedgerTaskFacts, type SharedLedgerTaskFacts } from '../src/lib/shared-ledger-contract-task-facts';
 import {
   SHARED_LEDGER_ACTIVITY_FIXTURE, SHARED_LEDGER_EXT_CAPABILITIES_NEW_FIXTURE, SHARED_LEDGER_EXT_CAPABILITIES_READONLY_FIXTURE,
   SHARED_LEDGER_VERSIONS_FIXTURE,
@@ -21,6 +24,7 @@ function transport(extCapabilities: () => Promise<ExtCapabilities>) {
     extCapabilities: async () => { calls.push('caps'); return extCapabilities(); },
     versions: async id => { calls.push(`versions:${id}`); return versions; },
     activity: async (id, after) => { calls.push(`activity:${id}:${after}`); return activity; },
+    taskFacts: async id => { calls.push(`task-facts:${id}`); return facts; },
   };
   return { t, calls };
 }
@@ -71,4 +75,86 @@ test('an aborted capability read propagates instead of turning into all-off', as
   const ctrl = new AbortController();
   const reads = new SharedLedgerReads(identity, transport(async () => { ctrl.abort(); throw new Error('aborted'); }).t);
   await expect(reads.capabilities(ctrl.signal)).rejects.toThrow('aborted');
+});
+
+// task-facts: hand-copied browser type, checked both ways against the contract type.
+const facts: TaskFacts = TASK_FACTS_FIXTURE;
+const factsBack: SharedLedgerTaskFacts = facts;
+function factsTransport(answer: () => Promise<unknown>) {
+  const calls: string[] = [];
+  const { t } = transport(async () => { throw new Error('ext-capabilities must not be asked'); });
+  const ft: ReadsTransport = { ...t,
+    extCapabilities: async () => { calls.push('caps'); throw new Error('unexpected'); },
+    taskFacts: async id => { calls.push(`task-facts:${id}`); return answer() as Promise<TaskFacts>; } };
+  return { reads: new SharedLedgerReads(identity, ft), calls };
+}
+const quiet = <T>(run: () => Promise<T>) => {
+  const warn = console.warn, warned: unknown[][] = [];
+  console.warn = (...a: unknown[]) => { warned.push(a); };
+  return run().finally(() => { console.warn = warn; }).then(value => ({ value, warned }));
+};
+
+test('[验收线 4] old center 403 → null, no throw, no ext-capabilities request, no log', async () => {
+  expect(factsBack).toBe(facts);
+  const { reads, calls } = factsTransport(async () => { throw new ApiError('forbidden', 403, { code: 'forbidden' }); });
+  const { value, warned } = await quiet(() => reads.taskFacts('feature-a', signal));
+  expect(value).toBeNull();
+  expect(calls).toEqual(['task-facts:feature-a']);
+  expect(warned).toEqual([]);
+});
+
+test('[验收线 4] 429 / 503 / offline / bad shape / other team-project-feature → null; extra keys dropped', async () => {
+  const fails: (() => Promise<unknown>)[] = [
+    async () => { throw new ApiError('rate limited', 429); },
+    async () => { throw new ApiError('unavailable', 503); },
+    async () => { throw new TypeError('Failed to fetch'); },
+    async () => ({ ...facts, tasks: 'x' }),
+    async () => ({ ...facts, tasks: [{ ...facts.tasks[0]!, lastEvent: { at: 0, kind: 'stage' } }] }),
+    async () => ({ ...facts, tasks: [null] }),
+    async () => ({ ...facts, teamId: 'team-b' }),
+    async () => ({ ...facts, projectId: 'project-b' }),
+    async () => ({ ...facts, featureId: 'feature-b' }),
+  ];
+  for (const fail of fails) {
+    const { reads } = factsTransport(fail);
+    const { value, warned } = await quiet(() => reads.taskFacts('feature-a', signal));
+    expect(value).toBeNull();
+    expect(warned.every(a => !/team-b|project-b|feature-b|Failed/.test(String(a[0])))).toBe(true);
+  }
+  const leaky = { ...facts, actor: 'x', tasks: facts.tasks.map(t => ({ ...t, text: '原文', lastEvent: t.lastEvent && { ...t.lastEvent, summary: 's' } })) };
+  const { reads } = factsTransport(async () => leaky);
+  expect(await reads.taskFacts('feature-a', signal)).toEqual(facts);
+});
+
+test('[验收线 4] contract-invalid shapes the contract rejects → null (seq, id shape, duplicates, cap, done exclusivity)', async () => {
+  const live = facts.tasks.find(t => t.stageSince !== null && t.lastEvent !== null)!;
+  const variants: unknown[] = [
+    { ...facts, serverSeq: -1 },
+    { ...facts, tasks: [{ ...live, taskId: '' }] },
+    { ...facts, tasks: [live, live] },
+    { ...facts, tasks: Array.from({ length: 1001 }, (_, i) => ({ ...live, taskId: `task-${i}` })) },
+    { ...facts, tasks: [{ ...live, doneAt: 1790000000600 }] },
+  ];
+  for (const variant of variants) {
+    expect(() => parseSharedLedgerTaskFacts(variant)).toThrow('invalid_field');
+    const { reads } = factsTransport(async () => variant);
+    expect((await quiet(() => reads.taskFacts('feature-a', signal))).value).toBeNull();
+  }
+  const full = { ...facts, tasks: Array.from({ length: 1000 }, (_, i) => ({ ...live, taskId: `task-${i}` })) };
+  const { reads } = factsTransport(async () => full);
+  expect((await reads.taskFacts('feature-a', signal))?.tasks).toHaveLength(1000);
+});
+
+test('[验收线 4] no backoff or cache: a call right after 429 goes out again; aborted signal throws', async () => {
+  let n = 0;
+  const { reads, calls } = factsTransport(async () => { if (n++ === 0) throw new ApiError('rate limited', 429); return facts; });
+  await quiet(async () => {
+    expect(await reads.taskFacts('feature-a', signal)).toBeNull();
+    expect(await reads.taskFacts('feature-a', signal)).toEqual(facts);
+    expect(await reads.taskFacts('feature-a', signal)).toEqual(facts);
+  });
+  expect(calls).toEqual(['task-facts:feature-a', 'task-facts:feature-a', 'task-facts:feature-a']);
+  const ctrl = new AbortController();
+  const aborted = factsTransport(async () => { ctrl.abort(); throw new Error('aborted'); });
+  await expect(aborted.reads.taskFacts('feature-a', ctrl.signal)).rejects.toThrow('aborted');
 });

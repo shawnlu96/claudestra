@@ -145,3 +145,15 @@ async function notifyOldHolder(db: Database, ctx: WriteCtx, id: string, reason: 
     });
   } catch (e) { console.warn(`old holder reclaim notice failed; retry next tick: ${(e as Error).message}`); }
 }
+
+/**
+ * The reclaimed peer's author row is stale (its lease ended), yet bindFixReplacement refuses to bind over a live peer row: retire it the
+ * way a scheduler reclaim does, re-checking in the same transaction that no lease was taken again meanwhile.
+ */
+export function retireReclaimedPeerAuthor(db: Database, ctx: WriteCtx, intentId: string, taskId: string): void {
+  tx(db, () => {
+    if (heldLease(db, mustTask(db, taskId))) throw new LedgerError("conflict", "写租约又被持有，不在本机另建作者");
+    db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE taskId = ? AND role = 'author' AND transport = 'peer' AND state != 'retired'")
+      .run(intentId, ctx.now ?? Date.now(), taskId);
+  });
+}

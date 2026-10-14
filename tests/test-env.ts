@@ -20,3 +20,10 @@ export function testChildEnv(extra: Record<string, string | undefined> = {}): Re
   for (const [k, v] of Object.entries({ ...base, ...extra })) if (v !== undefined) out[k] = v;
   return out;
 }
+
+/** CI_IO_TRACE（merge-arch-SELECT5）：最小 env + --config=/dev/null 的子进程不继承记录器；设了就透传并 preload bunfig 的同一入口，没设两者皆空 */
+export function ciIoTraceChild(parent: Record<string, string | undefined> = process.env): { argv: string[]; env: Record<string, string> } {
+  const out = parent.CI_IO_TRACE;
+  if (!out) return { argv: [], env: {} };
+  return { argv: ["--preload", `${import.meta.dir}/../src/lib/sync-fs-trace.ts`], env: { CI_IO_TRACE: out } };
+}

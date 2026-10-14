@@ -68,7 +68,7 @@ describe("[验收线 3] the slow list runs at night and only at night", () => {
     expect(Object.keys(ci.on).sort()).toEqual(["pull_request", "push", "workflow_dispatch"]); // dispatch = the serial full re-check (SELECT1)
     const tests = ci.jobs.tests!;
     expect(tests.name).toBe("test shard ${{ matrix.shard }} of 8");
-    expect(tests.strategy!.matrix).toEqual({ shard: [1, 2, 3, 4, 5, 6, 7, 8] });
+    expect(String(tests.strategy!.matrix.shard)).toBe("${{ fromJSON(needs.plan.outputs.scope == 'light' && '[1]' || '[1,2,3,4,5,6,7,8]') }}");
     const unit = step(tests, "Unit tests").run!;
     expect(unit).toContain('bun run --silent test:shard ${{ matrix.shard }}/8 > "$RUNNER_TEMP/files.txt"\n');
     expect(unit).toContain("printf 'shard=%s/8\\n");
@@ -76,9 +76,9 @@ describe("[验收线 3] the slow list runs at night and only at night", () => {
     expect(unit).not.toContain("slow");
     // full runs (push / train / dispatch / a PR not under on) keep the whole-suite check; a dispatch checks out the request's merge commit
     const full = step(ci.jobs.check!, "Shards cover every test file exactly once") as { run?: string; if?: string; env?: Record<string, string> };
-    expect(full).toMatchObject({ run: 'bun run --silent test:shard verify shards 8 "$CHECKOUT_SHA"', if: "needs.plan.outputs.scope != 'related'",
+    expect(full).toMatchObject({ run: 'bun run --silent test:shard verify shards 8 "$CHECKOUT_SHA"', if: "needs.plan.outputs.scope != 'related' && needs.plan.outputs.scope != 'light'",
       env: { CHECKOUT_SHA: "${{ inputs.merge || github.sha }}" } });
-    expect((step(ci.jobs.check!, "Shards cover the related selection exactly once") as { if?: string }).if).toBe("needs.plan.outputs.scope == 'related'");
+    expect((step(ci.jobs.check!, "Shards cover the related selection exactly once") as { if?: string }).if).toBe("needs.plan.outputs.scope == 'related' || needs.plan.outputs.scope == 'light'");
     for (const j of Object.values(ci.jobs)) for (const s of j.steps) expect(s.run ?? "").not.toContain("test:shard slow");
     const ran = [1, 2, 3, 4, 5, 6, 7, 8].flatMap((k) => listed(`${k}/8`));
     for (const f of slow) expect(ran).not.toContain(f);

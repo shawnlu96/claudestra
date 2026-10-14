@@ -195,11 +195,11 @@ test("[验收线 2] 没载完时额度、已知指标、小片完成数、待做
   // 子 DAG 小片：去掉标题（Feature F01）后不剩数字
   const chips = () => Array.from(m.host.querySelectorAll("[data-place=frame] button"), (b) => (b.textContent ?? "").replace(b.getAttribute("title") ?? "", ""));
   expect(chips().join("|")).not.toMatch(/\d/);
-  expect(text(m.host, "[data-place=work]")).not.toMatch(/(就绪可开|被挡) · \d|(本机|peer) \d/);
+  expect(text(m.host, "[data-place=work]")).not.toMatch(/(可以开工|受阻) · \d|(本机|peer) \d/);
   await m.render(h(Page, { r: twoMachines(full), quota }));
   expect(text(m.host, "[data-metric=quota]")).toBe("Claude 75%周额度");
   expect(chips().every((c) => /^\d+在干活/.test(c))).toBe(true);
-  expect(text(m.host, "[data-place=work]")).toMatch(/就绪可开 · \d+/);
+  expect(text(m.host, "[data-place=work]")).toMatch(/可以开工 · \d+/);
   expect(text(m.host, "[data-place=work]")).toMatch(/peer 3/);
   await m.unmount();
 });

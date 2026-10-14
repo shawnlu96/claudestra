@@ -128,14 +128,14 @@ test("新鲜度随当前时钟重判：主场停推、没有新快照，时间�
   expect(team.ov.mirror![0]!.freshUntil).toBe(observedAt + MIRROR_FRESH_MS);
   // 同一份快照（team.ov.now = now），只有显示时钟往前走
   const fresh = renderTeam(teamWorkBoard(dag, team.ov, now, NAMES));
-  expect(fresh).toContain("主场镜像最新");
+  expect(fresh).toContain("进度是最新的");
   expect(fresh).not.toContain("分钟前同步");
   const later = now + MIRROR_FRESH_MS;
   const b = teamWorkBoard(dag, team.ov, later, NAMES);
   expect(b.now).toBe(later);
   const stale = renderTeam(b);
-  expect(stale).not.toContain("主场镜像最新");
-  expect(stale).toContain("1 个 feature 主场镜像过期");
-  expect(stale).toContain("主场 11 分钟前同步");
-  expect(renderTeam(teamWorkBoard(dag, team.ov, later + 30 * 60_000, NAMES))).toContain("主场 41 分钟前同步");
+  expect(stale).not.toContain("进度是最新的");
+  expect(stale).toContain("1 个模块的进度可能不是最新的");
+  expect(stale).toContain("11 分钟没收到任务所在机器的更新");
+  expect(renderTeam(teamWorkBoard(dag, team.ov, later + 30 * 60_000, NAMES))).toContain("41 分钟没收到任务所在机器的更新");
 });

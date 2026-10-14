@@ -1,3 +1,4 @@
+import { PRIORITY_CMDS } from "./ledger-priority-cmds.js";
 import { PM_SWITCH_CMDS } from "./pm-switch.js";
 import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledger-resource-scope-cmds.js";
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
@@ -77,6 +78,7 @@ import { SECURITY_POOL_CMDS } from "./security-pool-cmds.js";
 import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
 import { MAIN_CI_CMDS } from "./ledger-main-ci-cmds.js";
+import { LEND_AUTHOR_RETIRE_CMDS } from "../lib/lend-author-retire-cmds.js";
 import { AUTHOR_REBUILD_CMDS } from "../lib/scheduler-author-rebuild-cmds.js";
 import { PMAUTO_CMDS, PMAUTO_SERVICE } from "./ledger-observation-wiring.js";
 import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
@@ -91,7 +93,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_RECOVERY_CMDS,
   ...SHARED_EXEC_CMDS,
   ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...SHARED_AUTO_CMDS, ...CENTER_REPLICA_CMDS, ...PM_SWITCH_CMDS,
-  ...WRITE_CMDS,
+  ...WRITE_CMDS, ...PRIORITY_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...DEP_CMDS,
@@ -123,6 +125,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...PRIVATE_POOL_CMDS, // 私仓卡进统一池开关（SECPOOL2）
   ...CI_KNOWN_FLAKY_CMDS, // 已知偶发测试清单（CIF8）
   ...MAIN_CI_CMDS, // 主线 CI 暂停的状态 / 修复绑定 / 调度写口（MAINCIW）
+  ...LEND_AUTHOR_RETIRE_CMDS,
   ...AUTHOR_REBUILD_CMDS, // 作者重建的观察 / 等待说明写口（AREB2）
   ...CARD_PAUSE_CMDS, // 卡级暂停 / 继续（UXPAUSE1）
   ...PMAUTO_CMDS, // 观察期登记与普通 P2 积压（PMAUTO1）

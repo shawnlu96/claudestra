@@ -167,10 +167,10 @@ export const isGateRefusal = (message: string): boolean => message.includes("外
 
 /** Catch outside the offer transaction so refused orders roll back before their alarm is persisted. */
 export function gateOfferTransaction<T>(db: Database, ctx: WriteCtx, task: Pick<LedgerTask, "project" | "id" | "stage">,
-  offer: () => T): T {
+  offer: () => T, facts?: Record<string, unknown> & { intentId: string }): T {
   try { return tx(db, offer); }
   catch (e) {
-    if (e instanceof OrderRenderError) tx(db, () => recordGateRefused(db, ctx, task, e.message));
+    if (e instanceof OrderRenderError) tx(db, () => recordGateRefused(db, ctx, task, e.message, facts));
     throw e;
   }
 }
@@ -182,7 +182,7 @@ export function gateOfferTransaction<T>(db: Database, ctx: WriteCtx, task: Pick<
 export function recordGateRefused(db: Database, ctx: WriteCtx, task: Pick<LedgerTask, "project" | "id" | "stage">, message: string,
   facts?: Record<string, unknown> & { intentId: string }): { event: LedgerEvent; duplicate: boolean } {
   const reason = message.replace(/\s+/g, " ").trim().slice(0, 560);
-  // With facts (the scheduler's pool path, scheduler-dispatch-block.ts) one event per offer: a re-offer after a material change is a new block.
+  // With facts (pool and remote convergence), one event per intent: a re-offer after a material change is a new block.
   const key = `scheduler:gate-refused:${task.id}:${createHash("sha256").update(reason).digest("hex").slice(0, 24)}${facts ? `:${facts.intentId}` : ""}`;
   const prior = getEventByDedup(db, key);
   if (prior) return { event: prior, duplicate: true };

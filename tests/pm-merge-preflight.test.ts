@@ -72,6 +72,29 @@ function fakeGh(o: { head?: string; main?: string; runs?: (head: string) => Chec
 const base = { pr: PR, expectedHead: HEAD, actualMain: MAIN, checks: CHECKS };
 
 describe("preflight gates before any API write", () => {
+  test.each(["failure", "cancelled", "skipped", "neutral"])("[验收线 1] light CI %s refuses before waiting for full", async (conclusion) => {
+    const g = fakeGh({ runs: (h) => green(h, [...CHECKS, "ci scope light"])
+      .map((r, i) => i === 0 ? { ...r, conclusion } : r) });
+    const state = conclusion === "failure" ? "fail" : conclusion === "neutral" ? "unknown" : conclusion;
+    expect(await preflight(base, g.run)).toEqual({ ok: false, exit: 2, reason: `CI ${state}：typecheck` });
+  });
+  test("[验收线 1] full rerun failure refuses while the full marker is pending", async () => {
+    const g = fakeGh({ runs: (h) => green(h, [...CHECKS, "ci scope light", "ci scope full"])
+      .map((r) => r.name === "build" ? { ...r, conclusion: "failure" }
+        : r.name === "ci scope full" ? { ...r, status: "in_progress", conclusion: null } : r) });
+    expect(await preflight(base, g.run)).toEqual({ ok: false, exit: 2, reason: "CI fail：build" });
+  });
+  test("[验收线 1] light CI keeps missing as refusal, green and pending as waiting, full green as passing", async () => {
+    for (const kind of ["missing", "green", "pending", "full"] as const) {
+      const g = fakeGh({ runs: (h) => green(h, [...CHECKS, "ci scope light", ...(kind === "full" ? ["ci scope full"] : [])])
+        .filter((r) => kind !== "missing" || r.name !== "build")
+        .map((r) => kind === "pending" && r.name === "build" ? { ...r, status: "in_progress", conclusion: null } : r) });
+      const v = await preflight(base, g.run);
+      if (kind === "full") expect(v).toMatchObject({ ok: true, detail: expect.stringContaining("CI 全绿：") });
+      else expect(v).toEqual(kind === "missing" ? { ok: false, exit: 2, reason: "当前 head 缺 CI run：build" }
+        : { ok: false, exit: 3, reason: "只有轻量 CI，等全量" });
+    }
+  });
   test("all seven required checks green on exactly the final head → ok; nothing written", async () => {
     const g = fakeGh();
     expect(await preflight(base, g.run)).toMatchObject({ ok: true });

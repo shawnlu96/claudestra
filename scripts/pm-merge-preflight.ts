@@ -3,6 +3,7 @@
  * 必需 CI 取卡所在项目的正式配置（scheduler.json requiredChecks），不由命令行定义。用法、退出码与薄接线提案见 USAGE（--help）。
  * tests/pm-merge-preflight*.test.ts。
  */
+import { CI_SCOPE_LIGHT, CI_SCOPE_FULL, lightOnly } from "../src/lib/ci-queue-full.js";
 import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { repoEnvVar } from "../src/lib/env-file.js";
@@ -61,6 +62,7 @@ function ciVerdict(states: Record<string, CheckState>): Verdict {
   const list = Object.entries(states), by = (s: CheckState) => list.filter(([, v]) => v === s).map(([k]) => k);
   for (const s of ["fail", "cancelled", "skipped", "unknown"] as const) if (by(s).length) return refuse(`CI ${s}：${by(s).join(", ")}`);
   if (by("missing").length) return refuse(`当前 head 缺 CI run：${by("missing").join(", ")}`);
+  if (lightOnly(Object.entries(states).map(([name, bucket]) => ({ name, bucket })))) return wait("只有轻量 CI，等全量");
   if (by("pending").length) return wait(`CI 未完成：${by("pending").join(", ")}`);
   return { ok: true, detail: `CI 全绿：${list.map(([k]) => k).join(", ")}` };
 }
@@ -99,7 +101,9 @@ export async function preflight(input: PreflightInput, run: Run, prove: Prove = 
     } catch (e) { return refuse(`证明读取失败：${(e as Error).message.slice(0, 200)}`); }
     if (!proof.ok) return refuse(`纯 main 合并证明不成立：${proof.reason}`);
   }
-  return ciVerdict(await headChecks(run, repo, input.expectedHead, input.checks));
+  const states = await headChecks(run, repo, input.expectedHead, [...new Set([...input.checks, CI_SCOPE_LIGHT, CI_SCOPE_FULL])]);
+  for (const name of [CI_SCOPE_LIGHT, CI_SCOPE_FULL]) if (states[name] === "missing" && !input.checks.includes(name)) delete states[name];
+  return ciVerdict(states);
 }
 
 /** After update-branch: wait until every required check has a run on the new head; a run that never appears is not green. */
