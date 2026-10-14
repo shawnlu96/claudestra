@@ -18,6 +18,9 @@ import { borrowPeers, localReviewerCount, localWriterCount } from "./scheduler-p
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import { newLocalWriteRoom } from "./scheduler-slot-hold.js";
 import type { PlacementReservation, ReservationPort } from "./scheduler-placement-reservations.js";
+import { peersOnly } from "./scheduler-agent-pool-plan.js";
+import { getTask } from "./ledger-store.js";
+import { recoveryPolicy, type ObservedAction, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 
 export type StartPlacement = { where: "local"; reason: string } |
   { where: "peer"; peer: string; repo: string; reason: string; reservation?: PlacementReservation } | { where: "refused"; reason: string };
@@ -31,7 +34,69 @@ export interface StartPlacementIO {
   now(): number;
   /** One injected policy source; observe computes shadow placement without consuming a seat. */
   reservations?: ReservationPort | ((project: string) => ReservationPort);
+  /** privateStartPlacement's reader; absent = the file-backed recoveryPolicy. Only read for a private card. */
+  recovery?: RecoveryPolicyPort;
 }
+
+/**
+ * dispatch-recovery-PRIVSTART1: a private card (a `repo:` fileGlob, the autostart private gate's test) has no checkout the planner
+ * accepts here, so its start goes to a peer or waits. Recovery key privateStartPlacement: off = unchanged; observe = unchanged, plus one
+ * would-be record per card and spec revision; on = placement over peersOnly(facts), and no peer room / no placement / a failed
+ * read is refused, never this machine. A public card never reads the key. tests/scheduler-placement-start-private*.test.ts.
+ */
+const PRIVATE_KEY = "privateStartPlacement";
+export const PRIVATE_ONLY_PEER = "私仓卡只放 peer";
+const isPrivateStart = (globs: readonly string[]): boolean => globs.some((g) => g.startsWith("repo:"));
+
+/** A public card is always off; a failed or unknown read is off too (it never turns the peers-only placement on). */
+export function privateStartMode(project: string, globs: readonly string[], policy: RecoveryPolicyPort = recoveryPolicy): RecoveryMode {
+  if (!isPrivateStart(globs)) return "off";
+  try {
+    const mode = policy(project, PRIVATE_KEY).mode;
+    return mode === "on" || mode === "observe" ? mode : "off";
+  } catch { return "off"; }
+}
+
+/** Queued would-be records by dedup key; `true` = already written by this process. Bounded, so an undrained queue stays small. */
+const observed = new Map<string, ObservedAction | true>();
+const QUEUE_MAX = 500;
+
+/**
+ * Queue observe's would-be record (`wouldBe` = peer:<name> or 等) for the card; absent card = nothing (a capacity simulation).
+ * The scheduler's ledger connection is query_only, so records wait here for a writer (drainPrivateStartObserved); the ledger's
+ * dedup key and this process's map keep one record per card and spec revision.
+ */
+export function notePrivateStart(db: Database, project: string, card: string | undefined, actual: string, wouldBe: string, reason: string): void {
+  if (!card) return;
+  let specRev = 1; // a card not created yet starts at specRev 1 (ledger-write createTask)
+  try { specRev = getTask(db, card)?.specRev ?? 1; } catch { /* unreadable: the new card's revision */ }
+  const actionKey = `private-start:s${specRev}`;
+  const key = JSON.stringify([project, card, actionKey]);
+  if (observed.has(key)) return;
+  if (observed.size >= QUEUE_MAX * 10) for (const [k, v] of observed) if (v === true) observed.delete(k);
+  if (privateStartPending().length >= QUEUE_MAX) return; // nobody is draining: drop it unmarked
+  observed.set(key, { project, mechanism: PRIVATE_KEY, target: card, actionKey,
+    action: `私仓卡只放 peer 时放到 ${wouldBe}（现在放 ${actual}）：${reason}`.slice(0, 400), data: { actual, wouldBe, specRev } });
+}
+
+export const privateStartPending = (): ObservedAction[] => [...observed.values()].filter((v): v is ObservedAction => v !== true);
+
+/** Writes each queued record once; one that throws stays queued for the next drain. Returns how many were written. */
+export async function drainPrivateStartObserved(write: (a: ObservedAction) => void | Promise<void>): Promise<number> {
+  let written = 0;
+  for (const [key, a] of [...observed]) {
+    if (a === true) continue;
+    try {
+      await write(a);
+      observed.set(key, true);
+      written++;
+    } catch { /* stays queued */ }
+  }
+  return written;
+}
+
+/** Tests only. */
+export function resetPrivateStartObserved(): void { observed.clear(); }
 
 const PEER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -58,8 +123,11 @@ function locksFree(db: Database, project: string, globs: readonly string[], task
 }
 
 export async function startPlacement(db: Database, io: StartPlacementIO,
-  q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}`; taskId?: string }, finishFirst = false): Promise<StartPlacement> {
+  q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}`; taskId?: string; card?: string },
+  finishFirst = false): Promise<StartPlacement> {
   const pin = q.want === "auto" ? null : q.want;
+  const priv = privateStartMode(q.project, q.fileGlobs, io.recovery);
+  const card = q.card ?? q.taskId;
   const policy = io.policy(q.project);
   const reservations = typeof io.reservations === "function" ? io.reservations(q.project) : io.reservations;
   let borrow: readonly BorrowEntry[] = [];
@@ -68,18 +136,23 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     [borrow, repo] = await Promise.all([io.borrow(), io.originRepo(q.repoDir)]);
   } catch (e) {
     if (pin) return { where: "refused", reason: `读借入名单 / 仓库地址失败：${(e as Error).message}` };
+    if (priv === "on") return { where: "refused", reason: `${PRIVATE_ONLY_PEER}：读借入名单 / 仓库地址失败：${(e as Error).message}` };
+    if (priv === "observe") notePrivateStart(db, q.project, card, "local", "等", `读借入名单 / 仓库地址失败：${(e as Error).message}`);
     const refusal = localFamilyRefusal({ remote: policy?.remote ?? null }, "write", "claude");
     if (refusal && !policy?.remote?.agents) return { where: "refused", reason: refusal };
     if ((!policy?.remote?.agents && policy?.remote?.localPriority === "off")) return { where: "refused", reason: `本机不写代码，读借入名单失败：${(e as Error).message}` };
     if (!localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null).room) return { where: "refused", reason: "本机写槽已满，且无法确认 peer 空位" };
     return { where: "local", reason: `读借入名单 / 仓库地址失败，放本机：${(e as Error).message}` };
   }
-  const facts: PlacementFacts = {
+  const all: PlacementFacts = {
     remote: policy?.remote ?? null,
     peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents, { exceptTask: q.taskId, enforce: reservations?.mode === "on" }).map(peerFacts),
     repo, local: localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null), pin, tried: [], lastPeer: null, writeLeasePeer: null,
     locksFree: locksFree(db, q.project, q.fileGlobs, q.taskId),
   };
+  // on: placement, finishing reservation and the reservations shadow all see peers only (an explicit peer pin is the PM's choice).
+  const peersFirst = priv === "on" && !pin;
+  const facts = peersFirst ? peersOnly(all) : all;
   // Only automatic admission opts in; the PM's manual start_node placement keeps its explicit choice.
   const placed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts, q.taskId)) : placeFor(facts, "write", "claude");
   const mode = reservations?.mode ?? "observe";
@@ -88,6 +161,15 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     const proposed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(shadow, reserveFinishing(db, q.project, shadow)) : placeFor(shadow, "write", "claude");
     reservations?.observe?.({ actual: placed.kind === "peer" ? `peer:${placed.peer}` : placed.kind,
       proposed: proposed.kind === "peer" ? `peer:${proposed.peer}` : proposed.kind });
+  }
+  if (priv === "observe" && !pin) {
+    const only = peersOnly(all);
+    const would = finishFirst && policy?.remote?.agents ? reservedStartPlacement(only, reserveFinishing(db, q.project, only, q.taskId)) : placeFor(only, "write", "claude");
+    notePrivateStart(db, q.project, card, placed.kind === "peer" ? `peer:${placed.peer}` : placed.kind === "wait" ? "等" : "local",
+      would.kind === "peer" && repo ? `peer:${would.peer}` : "等", would.reason);
+  }
+  if (peersFirst && !(placed.kind === "peer" && repo)) {
+    return { where: "refused", reason: `${PRIVATE_ONLY_PEER}：${placed.kind === "peer" ? "项目目录 origin 不是 GitHub 仓库" : placed.reason}` };
   }
   if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason,
     ...(mode === "off" ? {} : { reservation: { mode, family: placed.family, maxOpen: policy?.remote?.agents ? null : borrow.find((b) => b.peer === placed.peer)!.maxOpen } }) };
