@@ -142,7 +142,7 @@ test.skipIf(!out)("UXI18N1: team project settings, invitations and confirmation 
 
           // 3. Project confirmation cards: the card list (an answerable card) and the local binding choice.
           const k = await open(`fixture=expiry&expiresAt=${Date.now() + 600_000}`);
-          await k.page.getByRole("button", { name: en ? "Confirm synthetic action" : "确认合成操作", exact: true }).waitFor();
+          await k.page.getByRole("region", { name: "项目确认卡", exact: true }).waitFor(); // UXASK2: the dialog keeps one entry row, cards are answered in the inbox
           await shot(k, "cards");
           if (en) english("cards", await controlText(k.page, "section"));
           await k.ctx.close();
