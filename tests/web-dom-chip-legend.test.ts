@@ -23,7 +23,6 @@ interface El {
 }
 interface Doc { createElement(tag: string): El; body: El & { appendChild(c: El): void } }
 
-const mod = (p: string) => new URL(`../web/${p}`, import.meta.url).href;
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let doc: Doc;
@@ -37,9 +36,9 @@ beforeAll(async () => {
   React = webRequire("react") as ReactNS;
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
   doc = (globalThis as unknown as { document: Doc }).document;
-  const cs = await import(mod("features/chat/chat-store.ts"));
-  const row = await import(mod("features/chat/components/agent-row.tsx"));
-  const legend = await import(mod("features/chat/components/chip-legend.tsx"));
+  const cs = require("../web/features/chat/chat-store.ts");
+  const row = require("../web/features/chat/components/agent-row.tsx");
+  const legend = require("../web/features/chat/components/chip-legend.tsx");
   ui = { ChatStoreProvider: cs.ChatStoreProvider, AgentRow: row.AgentRow, ChipLegend: legend.ChipLegend };
 });
 
