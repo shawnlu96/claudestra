@@ -44,10 +44,11 @@
 
 ## 聊天流
 
-**打开 agent**（`chat-store.openAgent`）：断旧流、`openGen++`、有缓存快照先秒开 → `loadMessages` → `openStream`；打开即 `POST /agents/:name/read`（跨端已读）。
+**打开 agent**（`chat-store.openAgent`）：断旧流、`openGen++`、有缓存快照先秒开；切走时快照与同步锚（游标 + 翻页态）一起存（`switch-sync.ts`），切回有锚只走 `syncDelta`，没锚走 `loadMessages`；
+`openStream` 不等历史，与之并行开，流事件先进 `EventGate` 排队，历史落地后按序放行（游标已推进，已入历史的由判重拦下）；打开即 `POST /agents/:name/read`（跨端已读）。
 
 - **历史**（`lib/api/history.ts` → `lib/chat/history-shape.ts`）：`GET /agents/:name/history` 取 session 清单（mtime 降序，live + 归档）→ 最新 session
-  `…/history/:sid?limit=500`（轮转竞态时依次试最新 3 个）→ 剔掉 `/agents/:name/hidden` 的隐藏区间 → `toChatMessages` 把同回合的连续 assistant 记录
+  `…/history/:sid?limit=150`（`FULL_PAGE`；只有 404 才依次试更早的，最多 3 个；超时 / 5xx 照抛，不显示错会话）→ 剔掉 `/agents/:name/hidden` 的隐藏区间 → `toChatMessages` 把同回合的连续 assistant 记录
   合成一泡、按钮点击 payload 回填 label。「哪条是我发的」= `api:<principalId>`（owner 缺省 `api:owner:self`）+ `GET /whoami` 的 ownerIds（按机器缓存 5 分钟）。
   全量加载记游标 `{sid, lastSeq}`（合并前最后一条原始记录的 seq，不能用气泡 id 推）；唤醒时 `syncDelta` 只拉 `?after=<lastSeq>&limit=300`，
   轮转 / 超一页 / 连败回退全量；`before=` 向上翻页，翻空自动接更旧 session 的尾页。
@@ -55,7 +56,7 @@
   `: connected`，之后 5s 一 ping）。本地按 `agent ∈ {name, agent-name}` 过滤、翻译成协议 v1（`agent_status → status/done`、`tool_start → tool`、
   `assistant_text → text`、`chat_message(out) → reply`、`chat_message(in) → user-in`、`question → ask`、`bg_task_* → bg-*`、
   `chat_held → user-in + held`：本人的发言被押在对方这一轮之后 / 押后作罢，气泡下标「排队中」，送达的回声摘掉，`features/chat/held-echo.ts`），每条带 `eid = bridge seq`
-  供断点重放；连流即补拉 `/agents/:name/pending`（thinking / compacting / 未答 AUQ）与 `/bg-tasks`；心跳转 `[DONE]`。`openStream` 有 10s 握手超时、
+  供断点重放；连流即补拉 `/agents/:name/pending`（thinking / compacting / 未答 AUQ）与 `/bg-tasks`——不挡实时事件，快照到了按 `ReplayMerge` 合入（实时已说过的不往回拨）；心跳转 `[DONE]`。`openStream` 有 10s 握手超时、
   25s 无字节看门狗；`reader.cancel()` 不关 iOS 底层连接，一律 `AbortController.abort()`；自然断流按 1s→10s 退避走 `maybeReconnect({fast:true})`。
 - **重连决策**（`reconnect-policy.ts` 纯函数）：900ms 风暴地板（force 300ms）→ 同 agent 历史在飞 <25s 让路 → 历史浏览模式不动 → 流 30s 内有字节视为
   健康只布 12s 探针 → 短暂离开 <5min 且有 eid 走 `fast`（只重连流带 ?since）→ 有游标走 `delta`（**先差量后开流，串行；流不带 since**，否则重放与
