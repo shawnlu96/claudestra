@@ -10,7 +10,7 @@
 import type { Database } from "bun:sqlite";
 import { blocksTrain, listOpenRequests, manualTurn, trainSignal } from "./manual-merge-queue.js";
 import { manualQueueMode } from "./manual-merge-queue-facts.js";
-import { headMayRide, observeUnifiedCandidates, openUnifiedCandidates } from "./merge-queue-candidates.js";
+import { boardingRefusal, headMayRide, observeUnifiedCandidates, openUnifiedCandidates } from "./merge-queue-candidates.js";
 import { formingCarries } from "./merge-queue-candidates-member.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
@@ -43,6 +43,8 @@ export function manualMergeGate(db: Database, store: TrainStore | null | undefin
      */
     formFence(project: string, save: () => void): void {
       db.transaction(() => {
+        const stale = boardingRefusal(db, project, save, Date.now(), policy); // CAND1: members bound before formTrain's awaits, judged again here
+        if (stale) throw new TrainFormFenced(`${project} ${stale}，本轮不组新车`);
         const turn = manualQueueMode(project, policy) === "on" ? manualTurn(db, project, "none", Date.now()) : null;
         // CAND1: a due head riding this very train does not stop it; one left out keeps the old fairness (no train, it is claimed first)
         if (turn && blocksTrain(turn) && !(turn.kind === "due" && formingCarries(save, turn.req.seq))) {

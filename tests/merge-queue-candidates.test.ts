@@ -116,6 +116,25 @@ describe("[验收线 2] what never boards", () => {
     expect(w.hub.calls).toEqual([]);
   }, 60_000);
 
+  /** The change lands while formTrain awaits its first PR file read: the pick is already made, the save has not happened yet. */
+  async function raced(change: () => void) {
+    let fired = false;
+    setup("on", { files: (n) => { if (!fired) { fired = true; change(); } return `src/${n}.ts`; } });
+    w.card("A");
+    await request("M");
+    await passes(6, () => w.store.load("p")?.phase === "done");
+    expect(fired).toBe(true);
+    expect(forms().filter((f) => f.includes("M"))).toEqual([]);
+  }
+  test("the queue frozen during formation: the train binding M is not saved, nothing is sent", async () => {
+    await raced(() => setFrozen(w.db, { actor: "owner", now: Date.now() }, { project: "p", frozen: true, reason: "查事故" }));
+    expect(w.hub.calls).toEqual([]);
+  }, 60_000);
+  test("the switch set off during formation: no unified member is saved, M takes the old manual path", async () => {
+    await raced(() => policy("off"));
+    expect(callsOf("M").filter((c) => !c.startsWith("serial-merge:"))).toEqual([]);
+  }, 60_000);
+
   test("a member whose request is revoked after boarding is never sent", async () => {
     setup("on");
     w.card("A1");

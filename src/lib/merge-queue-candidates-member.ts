@@ -91,6 +91,8 @@ type Save = () => void;
 type FormingSave = Save & { forming?: TrainState };
 /** The save closure of a train being formed, carrying that train: wrappers of the fence pass the closure on untouched. */
 export const formingSave = (state: TrainState, save: Save): Save => Object.assign(() => save(), { forming: state });
+/** The train behind this save, or null (a save that is not a forming train's). */
+export const formingTrain = (save: Save): TrainState | null => (save as FormingSave).forming ?? null;
 /** Whether the train behind this save carries the manual request `seq` as a bound member. */
 export const formingCarries = (save: Save, seq: number): boolean =>
   !!(save as FormingSave).forming?.members.some((m) => bindingOf(m)?.requestSeq === seq);

@@ -17,7 +17,7 @@ import { manualTurn, type Turn } from "./manual-merge-queue.js";
 import { manualQueueMode } from "./manual-merge-queue-facts.js";
 import { mergeContentUiMode } from "./merge-content-ui.js";
 import { mergeQueueFacts, unifiedQueueMode, type QueueEntry, type QueueFactsPorts } from "./merge-queue-facts.js";
-import { bindingOf, openUnifiedPass, predictBatch, unifiedFiles, type UnifiedCandidate } from "./merge-queue-candidates-member.js";
+import { bindingOf, formingTrain, openUnifiedPass, predictBatch, unifiedFiles, type UnifiedCandidate } from "./merge-queue-candidates-member.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { nextSkip, type TrainCandidate, type TrainStore } from "./scheduler-merge-train.js";
@@ -87,6 +87,27 @@ export function unifiedPick(db: Database, project: string, now: number, old: rea
 export function headMayRide(db: Database, project: string, turn: Turn, now: number, policy: RecoveryPolicyPort = recoveryPolicy): boolean {
   if (turn.kind !== "due" || unifiedCandidatesMode(project, policy) !== "on") return false;
   return unifiedPick(db, project, now, [], unifiedCaps(policy)).candidates.some((c) => bindingOf(c)?.requestSeq === turn.req.seq);
+}
+
+/**
+ * formFence's admission check of a forming train, in the save's own ledger snapshot: the pick was made before formTrain's awaits
+ * (PR files, main head), so a member bound then boards only if the switch is still on and the same pick, made again now, still
+ * lists it with the same head and binding (a frozen queue, a revoked / held request, a lost ui acceptance, a tier switched off).
+ * null = save; a reason = no train this pass (the next pass picks again). Plain auto members keep the old admission, unchecked here.
+ */
+export function boardingRefusal(db: Database, project: string, save: () => void, now: number, policy: RecoveryPolicyPort = recoveryPolicy): string | null {
+  const bound = (formingTrain(save)?.members ?? []).filter((m) => bindingOf(m));
+  if (!bound.length) return null;
+  const mode = unifiedCandidatesMode(project, policy);
+  if (mode !== "on") return `统一候选开关已是 ${mode}，不再接新的统一成员`;
+  const picked = unifiedPick(db, project, now, [], unifiedCaps(policy)).candidates;
+  for (const m of bound) {
+    const b = bindingOf(m)!;
+    const same = picked.some((c) => c.taskId === m.taskId && c.head.toLowerCase() === m.head.toLowerCase()
+      && bindingOf(c)?.source === b.source && bindingOf(c)?.ui === b.ui && bindingOf(c)?.requestSeq === b.requestSeq);
+    if (!same) return `${m.taskId} @ ${short(m.head)} 落盘前已不是统一候选`;
+  }
+  return null;
 }
 
 /** Opens the pass's ports for the train tick and the claim (manual-merge-queue-pass.ts, once per pass). */
