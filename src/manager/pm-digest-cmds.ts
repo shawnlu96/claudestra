@@ -2,11 +2,13 @@
  * PM 推送摘要（agents-PMDIG1，docs/architecture/pm-digest.md）的 manager 命令：
  * - `ledger pm-digest`：只读，最近 24 小时给当班 PM 的推送里立即送 / 可合并各多少、来源与理由分布、队里还剩几条；
  * - `ledger pm-digest-mode <on|observe|off>`：项目开关（缺省 observe），项目真 PM / master / owner 才能切。
+ * - `ledger pm-hold [off|hold|batch] [--every <分钟>]`：PM 暂存（lib/pm-hold.ts），不带模式只读状态；切换同上要项目真 PM。
  */
 import { pmRouteStats } from "../lib/pm-route-stats.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { PM_DIGEST_LOG_MS, PmDigestStore, type DigestRecord } from "../lib/pm-digest-store.js";
 import type { DigestMode } from "../lib/pm-digest.js";
+import { PM_HOLD_DEFAULT_MIN, PmHoldStore } from "../lib/pm-hold.js";
 import type { LedgerCli } from "./ledger-context.js";
 import { PM_JOB_CMDS } from "./pm-job-cmds.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -42,6 +44,19 @@ function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> 
         const from = store.routeMode(project);
         store.setRouteMode(project, mode);
         return { ok: true, project, from, routeMode: mode };
+      } },
+    "pm-hold": { valued: ["project", "every"], bools: [], usage: "pm-hold [off|hold|batch] [--every <分钟>] [--project <id>]（PM 暂存；不带模式只读状态）",
+      run: async (c: LedgerCli) => {
+        const project = c.project(), mode = c.p.pos[1], hold = new PmHoldStore();
+        const queued = (): number => hold.queue().filter((e) => e.project === project).length;
+        if (mode === undefined) return { ok: true, project, ...hold.setting(project), queued: queued() };
+        if (mode !== "off" && mode !== "hold" && mode !== "batch") throw new LedgerError("invalid", "模式只能是 off / hold / batch");
+        const every = c.p.flags.every === undefined ? PM_HOLD_DEFAULT_MIN : Number(c.p.flags.every);
+        if (!Number.isInteger(every) || every < 1 || every > 1440) throw new LedgerError("invalid", "--every 是 1–1440 的整数分钟");
+        c.requireRealPm(project, "切 PM 暂存开关");
+        const from = hold.setting(project).mode;
+        hold.setSetting(project, { mode, everyMin: every, since: c.deps.now() });
+        return { ok: true, project, from, mode, everyMin: every, queued: queued() };
       } },
     "pm-digest-mode": { valued: ["project"], bools: [], usage: "pm-digest-mode <on|observe|off> [--project <id>]（PM 推送摘要开关，缺省 observe）",
       run: async (c: LedgerCli) => {

@@ -1,4 +1,4 @@
-import { classifyPmPush, PM_DIGEST_LABEL, type DigestInput, type DigestVerdict } from "./pm-digest.js";
+import { classifyPmPush, digestFallback, PM_DIGEST_LABEL, type DigestInput, type DigestVerdict } from "./pm-digest.js";
 import type { PmDigestStore } from "./pm-digest-store.js";
 import { pmRouteConfigured } from "./pm-route-mode.js";
 import { classifyPmRoute } from "./pm-route.js";
@@ -9,7 +9,7 @@ interface RouteEnvelope {
   from: { kind: DigestInput["fromKind"] };
   intent: string;
   content: string;
-  meta: { messageId: string; triggerKind: string; skipInterAgentWatchdog?: boolean };
+  meta: { messageId: string; triggerKind: string; skipInterAgentWatchdog?: boolean; pmLevel?: DigestInput["level"] };
 }
 interface Deps { store: PmDigestStore; now(): number }
 
@@ -29,7 +29,7 @@ export function routePmPush(env: RouteEnvelope, project: string, deps: Deps, leg
   if (store.mode(project) === "off" && !pmRouteConfigured(store.modePath, project)) return legacy();
   const id = env.meta.messageId, source = sender ?? env.from.kind;
   const input: DigestInput = { fromKind: env.from.kind, sender, intent: env.intent,
-    triggerKind: env.meta.triggerKind, oneShot: !!env.meta.skipInterAgentWatchdog, body };
+    triggerKind: env.meta.triggerKind, oneShot: !!env.meta.skipInterAgentWatchdog, body, ...(env.meta.pmLevel ? { level: env.meta.pmLevel } : {}) };
   const plan = classifyPmRoute(input), original = env.content;
   return withPmRouteRecord({ messageId: id, mode, tags: plan.tags }, (scope) => {
     try {
@@ -49,9 +49,7 @@ export function routePmPush(env: RouteEnvelope, project: string, deps: Deps, leg
       }
       if (mode === "on" && plan.digest) {
         const base = classifyPmPush(input), enqueue = store.mode(project) === "on";
-        const verdict: DigestVerdict = base.send === "digest" ? base : {
-          send: "digest", reason: "受信列车进度", kind: "sync", source, firstLine: body,
-        };
+        const verdict: DigestVerdict = base.send === "digest" ? base : digestFallback(body, source, plan.tags[0]?.reason ?? "受信列车进度");
         record(store, project, deps.now(), id, source, verdict, store.mode(project) === "off", enqueue);
         return enqueue;
       }

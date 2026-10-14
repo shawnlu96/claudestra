@@ -87,7 +87,7 @@ async function remoteAsk(body: string, peer: string): Promise<Response> {
   const task = getTask(db, who.taskId);
   if (!task) return refused("not_held", "这一单的卡已不在台账里");
   const r = await openOrderAsk(db, {
-    open: (input, beforeWrite) => openAskFull(askDb(), input, Date.now(), { beforeWrite }), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
+    open: (input, beforeWrite) => openAskFull(askDb(), input, Date.now(), { beforeWrite }), notify: (to, text, messageId, pmLevel) => sendLedgerNotice({ to, text, messageId, pmLevel }),
     markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }), record: (ctx, input) => void appendEvent(askDb(), ctx, input),
   }, { task, orderId: who.orderId, from: `${who.worker}@${who.peer}`, keyPrefix: `lend-ask:g${who.gen}`,
     // 拿到 asks 写锁后再核一遍持单（等锁期间可能结清 / 失租）：结清时已关过这一单的提问，不能再开出新的

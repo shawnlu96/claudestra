@@ -10,6 +10,7 @@
  * observe 只记台账（state 目录下的 JSON）并推 PM 摘要（同一进程只推一次），不发任何信号；摘要发出前重新枚举进程表、重核全部资格
  * （REAPALIVE1），只报复查时还在的。off 不枚举、不记、不推、不发信号。
  */
+import { asInfo } from "./pm-notice-level.js";
 import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -163,7 +164,7 @@ async function observe(first: Found[], rescan: Scan, host: CardReapHost, d: Card
       const text = `[调度引擎] 卡 worktree 下有 ${alive.length} 个残留进程（observe 模式：只记录，没发信号；这是发送前刚复查进程表的快照，`
         + `你查看时可能已经退出；要回收：ledger scheduler-recovery ${project} on --key ${CARD_REAP_KEY} --reason <为什么>）：\n${lines.join("\n")}`;
       step = "摘要没推出去";
-      await host.notifyPm(alive[0].task, text);
+      await asInfo(() => host.notifyPm(alive[0].task, text)); // 只记录的观察报告：常规
       d.observed.add(alive.map(({ p, task, why }) => ({ key: procKey(p), card: task.id, pid: p.pid, comm: basename(p.comm).slice(0, 40), at: d.now(), why })));
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
