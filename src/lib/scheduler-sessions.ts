@@ -15,6 +15,7 @@ import {
 } from "./scheduler-review-swap.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { securityPoolMode, securityReviewLocalOnly } from "./security-pool.js";
+import { unlessHandedOver } from "./recovery-peer-lease-family.js";
 
 export type SessionRole = "author" | "reviewer";
 /** Stages a card is finished in: only these retire. build / review / fix / merge / live never do (tests/scheduler-retire.test.ts). */
@@ -97,7 +98,7 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     if (input.transport !== "acp" && input.transport !== "tmux" && input.transport !== "peer") throw new LedgerError("invalid", "transport 不认识");
     const agent = field(input.agent, "agent"), sessionId = field(input.sessionId, "sessionId");
     requireSessionIdentity(db, task, input, agent);
-    const prior = lendAuthorBindPrior(db, ctx, task, input, getSchedulerSession(db, task.id, input.role),
+    const prior = lendAuthorBindPrior(db, ctx, task, input, unlessHandedOver(db, getSchedulerSession(db, task.id, input.role)), // PEERLEASE1 handover first
       input.lendAuthorRecovery ?? (() => false), (old) => {
         preserveSessionHistory(db); assignFixStep(db, ctx, task, input, input.intentId, old.agent, ctx.now ?? Date.now());
       });

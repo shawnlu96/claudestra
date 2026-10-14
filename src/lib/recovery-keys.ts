@@ -63,6 +63,7 @@ export const RECOVERY_KEYS = [
   "mergeUnsentCancel",
   "modelOutcome",
   "nearMarker",
+  "peerLeaseRecovery",
   "placementReservations",
   "planGap",
   "poolIdleSkip",

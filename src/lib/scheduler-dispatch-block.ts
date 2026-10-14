@@ -15,6 +15,7 @@ import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, listEvents } from "./ledger-store.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
+import { FIX_LEASE_WAIT_CODE } from "./lend-fix-reassign-event.js";
 import { stepOfStage } from "./lend-git.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
@@ -244,7 +245,7 @@ function dispatchCategory(d: PlannerDecision): DispatchCategory {
   if (d.code === GATE_BLOCK_CODE) return "security_material";
   if (d.code === "in_flight" || d.code === "intent_in_flight" || d.code === "unknown_effect") return "in_flight";
   if (d.code === "capacity") return "capacity";
-  if (d.code === "placement" || d.code === "placement_pinned") return CAPACITY.test(d.reason) && !d.reason.includes("不是容量") ? "capacity" : "peer_unavailable";
+  if (d.code === "placement" || d.code === "placement_pinned" || d.code === FIX_LEASE_WAIT_CODE) return CAPACITY.test(d.reason) && !d.reason.includes("不是容量") ? "capacity" : "peer_unavailable";
   return "no_ready_work";
 }
 
