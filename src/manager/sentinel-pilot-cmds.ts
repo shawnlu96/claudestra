@@ -5,6 +5,7 @@
  * 哨兵试点见 lib/sentinel-pilot.ts（agents-T14b）。
  */
 import type { CronJob } from "../lib/cron-job.js";
+import { outputSync } from "./core.js";
 import {
   localDate, nextReportDeadline, parseLocalDate, renderReport, SENTINEL_RESULT_HINT, sentinelPilotMode, setSentinelPilotMode,
 } from "../lib/sentinel-pilot.js";
@@ -58,7 +59,7 @@ export async function cmdSentinelPilot(args: string[], c?: Partial<SentinelCmdDe
     mode: c?.mode ?? ((id) => sentinelPilotMode(id)),
     setMode: c?.setMode ?? ((job, mode) => setSentinelPilotMode(job, mode)),
     now: c?.now ?? Date.now,
-    out: c?.out ?? ((d) => console.log(typeof d === "string" ? d : JSON.stringify(d))),
+    out: c?.out ?? outputSync,
   };
   const [sub, ...rest] = args;
   if (sub === "show") return cmdShow(ctx);
