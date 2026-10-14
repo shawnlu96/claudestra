@@ -88,8 +88,11 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
     { ...deps, command: mainCiTestPorts.command ?? deps.command, policy: deps.policy ?? recoveryPolicy, cwd: policy.repoDir });
   const plan = mainCiPlanFor(gate, project, { taskId: "", head: "" }, mainCiClaims(gate.db, project))!;
   if (mode === "observe" && plan.actions.formTrain === "pause") {
+    // MAINCIW2: the original reason stays as it was; what the run-aware rule would do and its run id / attempt go to data.evidence
+    const ci = mainCiPlanFor(gate, project, { taskId: "", head: "" }, [], "run")!;
+    const evidence = ci.ci ? ["--evidence", JSON.stringify({ rule: "run", newReason: ci.reason, runs: ci.ci.runs.slice(-10) })] : [];
     await ledger(deps.manager, project, "observe", "--sha", health.mainSha ?? "none", "--state", health.state,
-      "--reason", `${plan.reason}：${mainCiReasonText(health)}`);
+      "--reason", `${plan.reason}：${mainCiReasonText(health)}`, ...evidence);
   }
   const n = plan.notification;
   if (!n) return;
