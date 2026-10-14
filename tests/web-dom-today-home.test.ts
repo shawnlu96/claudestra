@@ -122,7 +122,7 @@ async function until(ok: () => boolean, what: string) {
 async function mount(part: "main" | "strip" | "shell", width = 1280) {
   win.happyDOM.setViewport({ width, height: 900 });
   setContextRequestForTest(null);
-  ui.closeCollab();
+  await React.act(async () => ui.closeCollab());
   ui.asksStore.closeDrawer();
   const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null } as { project: string | null; task: string | null } };
   const h = React.createElement as (...a: unknown[]) => unknown;
@@ -233,14 +233,14 @@ test("[验收线 4] 点『卡住了』一行：collab-nav 是 {该项目, 该任
   await v.click(v.host.querySelector("[data-now-stuck-row='proj-b/B1']"), "stuck row");
   expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1" });
   expect(v.seen.toContent).toBe(1);
-  ui.closeCollab();
+  await React.act(async () => ui.closeCollab());
   await tick();
   await v.unmount();
   const w = await mount("main");
   await until(() => w.all("[data-now-wait-task]").length === 1, "wait task");
   await w.click(w.host.querySelector("[data-now-wait-task=A1]"), "view task");
   expect(w.seen.nav).toEqual({ project: "proj-a", task: "A1" });
-  ui.closeCollab();
+  await React.act(async () => ui.closeCollab());
   await tick();
   await w.unmount();
 });
@@ -282,7 +282,7 @@ test("[回归] 页面版、整页、展开的侧栏条同时挂着也只跑一�
   expect(ledgerCalls().sort()).toEqual(once);
   expect(streams()).toBe(before);
   // 盖层收起、侧栏条收起：还有主区空状态那份在看，读取不中止也不重起
-  ui.closeCollab();
+  await React.act(async () => ui.closeCollab()); // collab-nav 是 store 外的更新，包进 act：不包时 CI 慢机上偶发不重画（r4 CI 红）
   await until(() => v.all("main [data-now=page]").length === 1, "overlay closed");
   await v.click(v.host.querySelector("[data-now=strip] button[aria-expanded]"), "collapse strip");
   await tick(200);
