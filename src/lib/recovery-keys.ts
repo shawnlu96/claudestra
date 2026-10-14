@@ -78,4 +78,6 @@ export const RECOVERY_KEYS = [
   "ciLogPerJob",
   "mergeUnifiedCandidates",
   "privateStartPlacement",
+  "centerReplicaPull",
+  "lendAuthorRebuild",
 ] as const;
