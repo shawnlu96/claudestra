@@ -37,6 +37,7 @@ export const RECOVERY_KEYS = [
   "iaWatchdogScope",
   "lendAuthorRebuild",
   "lendConfigFailure",
+  "lendReclaimIntent",
   "lendUiShots",
   "lendUiUpload",
   "lendUsageReport",
