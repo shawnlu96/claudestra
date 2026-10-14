@@ -88,18 +88,32 @@ export function attentionOf(snap: CountSnap, lines: readonly Pick<LineView, "id"
 }
 
 /**
- * 计数源的状态：loading = 还没载完（显示骨架，不出任何数字）；ready = 出数，missing = 20 秒后仍没读到详情的 feature 数（> 0 时出提示）。
+ * 计数源的状态：loading = 还没载完（三个状态词与「进行中」显示骨架）；ready = 出数，missing = 出数时仍没读到详情的 feature 数（> 0 时出提示）。
  * none = 这个源读不到看板（老 bridge 没有 /work、读失败且手上没有上一份，或已超时）：状态词不出数字也不出骨架，已知指标照常出
  */
 export type CountState = { status: "loading" } | { status: "none" } | { status: "ready"; snap: CountSnap; missing: number };
 export const snapOf = (c: CountState | null | undefined): CountSnap | null => (c?.status === "ready" ? c.snap : null);
 
-interface TeamLast { list: { features: readonly { id: string }[] }; details: ReadonlyMap<string, unknown> }
+interface TeamLast { list: { features: readonly { id: string }[] }; details: ReadonlyMap<string, unknown>; failed?: ReadonlySet<string>; waiting?: ReadonlySet<string> }
+const teamLast = (source: object): TeamLast | null | undefined =>
+  "last" in source && typeof source.last === "function" ? (source.last as () => TeamLast | null)() : undefined;
 /** 团队源列表里还没拉到详情的 feature 数；不是团队源（没有 last，team-source-shared.ts SharedSource 才有）= 0，列表还没读到 = null */
 export function missingFeatures(source: object): number | null {
-  if (!("last" in source) || typeof source.last !== "function") return 0;
-  const got = (source.last as () => TeamLast | null)();
+  const got = teamLast(source);
+  if (got === undefined) return 0;
   return got ? got.list.features.filter((f) => !got.details.has(f.id)).length : null;
+}
+
+/**
+ * 计数还要等的 feature 数（TEAMCNT1）：没详情、也不在本轮 failed 里（读失败 / 429 停发）的。
+ * 试过没拉到的不挡放行（缺的仍计进 missingFeatures 出提示）；还在排队（waiting）的照旧要等。非团队源 = 0，列表还没读到 = null
+ */
+export function unreadFeatures(source: object): number | null {
+  const got = teamLast(source);
+  if (got === undefined) return 0;
+  if (!got) return null;
+  const tried = (id: string) => !!got.failed?.has(id) && !got.waiting?.has(id);
+  return got.list.features.filter((f) => !got.details.has(f.id) && !tried(f.id)).length;
 }
 
 export interface QuotaFamilyPct { family: string; pct: number }

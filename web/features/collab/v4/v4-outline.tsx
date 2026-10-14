@@ -20,7 +20,7 @@ export function Outline(props: {
   onWaits: () => void;
   selected: string | null;
   onPick: (id: string) => void;
-  /** 进行中芯片的数与列出的卡（count-words.ts，顶栏同一份）；没载完时各芯片的数都是骨架 */
+  /** 进行中芯片的数与列出的卡（count-words.ts，顶栏同一份）；没载完时只有「进行中」是骨架，已完成 / 全部 / P0 从总览出数（TEAMCNT1） */
   counts: CountState;
   tr: Tr;
 }) {
@@ -39,7 +39,7 @@ export function Outline(props: {
       <div className={v.filters} role="tablist">
         {FILTERS.map((f) => (
           <button key={f} type="button" role="tab" aria-selected={filter === f} className={`${v.chip} ${filter === f ? v.chipOn : ""}`} onClick={() => props.onFilter(f)}>
-            {countText(tr, FILTER_LABEL[f])} {loading ? <span className={v.skel} aria-hidden /> : <span className={v.cnt}>{filterCount(ov, f, snap)}</span>}
+            {countText(tr, FILTER_LABEL[f])} {loading && f === "active" ? <span className={v.skel} aria-hidden /> : <span className={v.cnt}>{filterCount(ov, f, snap)}</span>}
           </button>
         ))}
       </div>
