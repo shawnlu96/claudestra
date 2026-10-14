@@ -63,6 +63,8 @@ function rowsOf(nodes: readonly EtaNode[] | null, cards: readonly LedgerTask[], 
 }
 
 const isOpen = (r: Row) => r.cls !== "completed" && r.cls !== "deferred";
+/** 已开卡、停在 spec 的就绪行计数仍算 ready，但 24 小时没动静也算久未动（规格验收线 1：冻结 active + 旧 spec 行 → stale） */
+const staleSpec = (r: Row, now: number) => r.cls === "ready" && r.task?.stage === "spec" && r.activity !== null && now - r.activity >= STALE_MS;
 
 /** 冻结行先拿掉再照原规则判；拿掉后没剩下能动的行（没有或只剩在等前置的）且有没完成的冻结行 → frozen */
 function stateOf(status: string, rows: readonly Row[], complete: boolean, now: number): FeatureState {
@@ -73,7 +75,7 @@ function stateOf(status: string, rows: readonly Row[], complete: boolean, now: n
   const open = live.filter(isOpen);
   if (live.some((r) => r.cls === "active" && r.activity !== null && now - r.activity < STALE_MS)) return "run";
   if (has("blocked")) return "blocked";
-  if (has("active")) return "stale";
+  if (has("active") || live.some((r) => staleSpec(r, now))) return "stale";
   if (live.some((r) => r.cls === "ready" && r.count.key !== PAGE_CHECK_KEY)) return "ready";
   if (open.length && open.every((r) => r.count.key === PAGE_CHECK_KEY)) return "gate";
   if (open.every((r) => r.cls === "waiting") && rows.some((r) => r.frozen && isOpen(r))) return "frozen";

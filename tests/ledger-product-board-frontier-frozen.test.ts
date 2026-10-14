@@ -35,9 +35,14 @@ test("[验收线 1] 冻结行不参与判状态：冻结旧 active + 没冻结�
   const frozen = ["Tf"];
   expect(run([oldActive("Tf"), node("n", null)], { events: oldEvents("Tf"), frozen }).state).toBe("ready");
   expect(run([oldActive("Tf"), node("n", null)], { events: oldEvents("Tf") }).state).toBe("stale");
-  // 没 DAG 的 feature：一张冻结的 active 卡 + 一张没冻结、25 小时没动、在规格复述阶段的卡（stage=spec 按 nodeClasses 是没开工，计 ready）
-  const cards = [card("Tf", "build", now - 25 * HOUR), card("Ts", "restate", now - 25 * HOUR)];
+  // 没 DAG 的 feature：一张冻结的 active 卡 + 一张没冻结、25 小时没动的 spec 卡（计数仍是 ready，状态算久未动）
+  const cards = [card("Tf", "build", now - 25 * HOUR), card("Ts", "spec", now - 25 * HOUR)];
+  expect(run(null, { cards, frozen }).state).toBe("stale");
   expect(run(null, { cards, events: oldEvents("Tf", "Ts"), frozen }).state).toBe("stale");
+  expect(run([oldActive("Tf"), node("Ts", card("Ts", "spec", now - 25 * HOUR))], { events: oldEvents("Tf", "Ts"), frozen }).state).toBe("stale");
+  // 1 小时内动过的 spec 卡、没绑卡的就绪节点仍是 ready；计数不变
+  expect(run(null, { cards: [cards[0]!, card("Ts", "spec")], events: oldEvents("Tf"), frozen }).state).toBe("ready");
+  expect(productNodeCounts(countRows([oldActive("Tf"), node("Ts", card("Ts", "spec", now - 25 * HOUR))])).ready).toBe(1);
 });
 
 test("[验收线 1] 只剩冻结行（可以再加在等前置的行）→ frozen；没有冻结名单时同一份夹具和原来一样", () => {
