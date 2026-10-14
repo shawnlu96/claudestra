@@ -193,6 +193,10 @@
 .btn { height: 28px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--panel); color: var(--text-2); cursor: pointer; font-size: var(--fs-2); display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
 .btn.pri { background: var(--accent); border-color: var(--accent); color: #fff; margin-left: auto; }
 .btn:disabled { opacity: .5; cursor: default; }
+/* 「叫停这一轮」：和「对它说」标题同一行靠右；确认态变红，提醒再点一次就发出 */
+.stopRound { margin-left: auto; height: 24px; padding: 0 9px; font-size: var(--fs-3); font-weight: 500; letter-spacing: 0; color: var(--text-2); }
+.stopRound[data-stop-round="confirm"], .stopRound[data-stop-round="error"] { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, var(--line-2)); }
+.stopRound[data-stop-round="done"] { color: var(--ok); }
 .rcpt { display: flex; align-items: center; gap: 7px; font-size: var(--fs-2); color: var(--muted); margin-top: 8px; }
 .rcpt.ok { color: var(--ok); } .rcpt.err { color: var(--err); }
 .links { display: flex; gap: 8px; flex-wrap: wrap; }

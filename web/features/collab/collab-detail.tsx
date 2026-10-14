@@ -33,11 +33,17 @@ import { TeamSessionSec } from "./team-session/team-session-view";
 import { stepLineView } from "./collab-step-line-model";
 import { StepLine } from "./collab-step-line";
 import { Icon, type IconName } from "./collab-icons";
-import { dwellText, fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
+import { fmtDuration, lineOf, type LedgerOverview, type LineView, type Tr } from "./collab-model";
 import { ChecklistSec } from "./collab-checklist";
 import { CollabReplay } from "./collab-replay-player";
 import type { RunningReviewer } from "./collab-reviewers";
 import { CollabSay } from "./collab-say";
+import { NowSec, StopRound } from "./detail-now";
+import { detailNowTr } from "./detail-now-i18n";
+import { awaySayText, canStopRound, detailGoal, nowFactsOf, nowSentence, stageTimes } from "./detail-now-model";
+import { instanceName, NO_NAMES, OTHER_MACHINE, type InstanceNames } from "./team-instance-names";
+import { sharedIdentity } from "./team-source-key";
+import { useInstanceNames } from "./work/use-work-board";
 import v2 from "./collab-v2.module.css";
 import { useTaskDetail } from "./use-collab";
 import s from "./collab.module.css";
@@ -147,33 +153,17 @@ function Sec({ title, children }: { title: string; children: React.ReactNode }) 
   );
 }
 
-function NowSec({ line, total, tr }: { line: LineView; total: number | undefined; tr: Tr }) {
-  return (
-    <Sec title={tr("现在")}>
-      <div className={`${s.nowbox} ${TONE[line.tone]}`}>
-        <div className={s.k}>
-          <Icon name={line.attention === "problem" ? "rotateCcw" : line.attention === "progress" ? "zap" : "hourglass"} size={14} />
-          {line.stageLabel}
-        </div>
-        {line.reason && <div className={s.r}>{line.reason}</div>}
-        <div className={s.m}>
-          {dwellText(line, tr)}
-          {typeof total === "number" && total > 0 && ` · ${tr("已用时 {d}", { d: fmtDuration(total, tr) })}`}
-        </div>
-      </div>
-    </Sec>
-  );
-}
-
 function StagesSec({ d, line, tr }: { d: TaskDetail; line: LineView; tr: Tr }) {
+  const segs = stageSegments(d);
+  const times = stageTimes(segs, tr);
   return (
     <Sec title={tr("阶段与用时")}>
       <div className={`${s.steps} ${TONE[line.tone]}`}>
-        {stageSegments(d).map((g) => (
+        {segs.map((g, i) => (
           <div key={g.label} className={`${s.s} ${g.state === "past" ? s.past : g.state === "current" ? s.cur : ""}`}>
             <i />
             {tr(g.label)}
-            <em>{g.ms > 0 ? fmtDuration(g.ms, tr) : g.state === "future" ? "" : "—"}</em>
+            {times[i] !== null && <em>{times[i]}</em>}
           </div>
         ))}
       </div>
@@ -262,10 +252,12 @@ function RunningReviewerRow({ r, now, tr }: { r: RunningReviewer; now: number; t
   );
 }
 
-const MACHINE: Record<NonNullable<TeamPerson["machine"]>, string> = { local: "本机", other: "其他成员的机器" };
+/** 参与者所在机器的名字：实例 id → team-instance-names.ts 查到的机器名，查不到写「其他成员的机器」 */
+type MachineOf = (instance: string | null) => string | null;
 
 /** 团队卡的一位参与者：名字、所在机器；实例 id 只进 title */
-function TeamPersonRow({ p, tr }: { p: TeamPerson; tr: Tr }) {
+function TeamPersonRow({ p, machineOf, tr }: { p: TeamPerson; machineOf: MachineOf; tr: Tr }) {
+  const machine = p.machine && (machineOf(p.instance) ?? OTHER_MACHINE);
   return (
     <div className={s.pp} data-team-person={p.role}>
       <span className={s.av}>
@@ -276,7 +268,7 @@ function TeamPersonRow({ p, tr }: { p: TeamPerson; tr: Tr }) {
           {p.name ?? tr(p.reason ?? "参与者同步中")}
           <span>
             {tr(ROLE[p.role].label)}
-            {p.machine && <span title={p.instance ?? undefined}>{` · ${tr(MACHINE[p.machine])}`}</span>}
+            {machine && <span title={p.instance ?? undefined}>{` · ${tr(machine)}`}</span>}
           </span>
         </div>
         <div className={s.d}>{tr(ROLE[p.role].duty)}</div>
@@ -286,7 +278,7 @@ function TeamPersonRow({ p, tr }: { p: TeamPerson; tr: Tr }) {
 }
 
 /** 非主场卡的参与者：读到正文时列作者 / 审查员 / PM 三类；读不到时只列团队卡事实里的作者，另写原因 */
-function TeamPeopleSec({ t, running, now, tr }: { t: TeamBodyView; running: readonly RunningReviewer[]; now: number; tr: Tr }) {
+function TeamPeopleSec({ t, running, now, machineOf, tr }: { t: TeamBodyView; running: readonly RunningReviewer[]; now: number; machineOf: MachineOf; tr: Tr }) {
   const read = t.status === "ok" || t.status === "syncing";
   const people = read ? t.people : t.people.filter((p) => p.role === "executor" && p.name);
   const reason = PEOPLE_REASON[t.status];
@@ -294,7 +286,7 @@ function TeamPeopleSec({ t, running, now, tr }: { t: TeamBodyView; running: read
     <Sec title={tr("参与者")}>
       <div className={s.ppl}>
         {running.map((r) => <RunningReviewerRow key={r.id} r={r} now={now} tr={tr} />)}
-        {people.map((p) => <TeamPersonRow key={p.role} p={p} tr={tr} />)}
+        {people.map((p) => <TeamPersonRow key={p.role} p={p} machineOf={machineOf} tr={tr} />)}
       </div>
       {reason && <BodyNote k={`people-${t.status}`} text={tr(reason)} />}
     </Sec>
@@ -344,9 +336,39 @@ function PeopleSec(props: {
   );
 }
 
+/** 对它说：主场本机挂输入框（执行者在线时旁边是「叫停这一轮」）；别的机器为主场写在哪台机器、为什么不行 */
+function SaySec({ d, line, exec, working, away, tr }: {
+  d: TaskDetail; line: LineView; exec: AgentSession | undefined; working: boolean; away: { machine: string } | null; tr: Tr;
+}) {
+  const stage = d.task.stage;
+  if (stage === "done" || stage === "cancelled") return null;
+  if (away) {
+    return (
+      <div className={s.sayDock}>
+        <Sec title={line.agent ? `${tr("对它说")} · ${line.agent}` : tr("对它说")}>
+          <HomeOnlyNote k="say" text={awaySayText(away.machine, tr)} />
+        </Sec>
+      </div>
+    );
+  }
+  if (!line.agent) return null;
+  const stop = canStopRound({ homeLocal: true, executorOnline: exec?.status === "active", stage });
+  return (
+    <div className={s.sayDock}>
+      <div className={s.sec}>
+        <h5>
+          {`${tr("对它说")} · ${line.agent}`}
+          {stop && <StopRound agent={line.agent} tr={tr} />}
+        </h5>
+        <CollabSay agent={line.agent} working={working} tr={tr} />
+      </div>
+    </div>
+  );
+}
+
 function Body(props: {
   d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; running: readonly RunningReviewer[]; now: number; tr: Tr; extra?: React.ReactNode;
-  homeOnly?: ReadonlySet<CollabHomeOnly>; project: string;
+  homeOnly?: ReadonlySet<CollabHomeOnly>; project: string; machineOf: MachineOf;
 }) {
   const { d, line, action, running, now, tr } = props;
   const home: HomeOnly = (k) => props.homeOnly?.has(k) ?? false;
@@ -369,9 +391,12 @@ function Body(props: {
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
   const working = isWorking(stream, exec?.busy);
   const pr = d.task.pr && /^https:\/\//.test(d.task.pr) ? d.task.pr : null;
+  // 别的机器为主场（对它说不在本机）：一句话里写「在 <机器名>」，对它说写原因
+  const away = home("say") ? { machine: tr(props.machineOf(d.task.team?.executorInstanceId ?? null) ?? OTHER_MACHINE) } : null;
+  const sentence = nowSentence(nowFactsOf(d, line, running, now, away?.machine ?? null), tr);
   return (
     <div className={s.pb}>
-      <NowSec line={line} total={d.task.metrics.totalMs} tr={tr} />
+      <NowSec line={line} total={d.task.metrics.totalMs} now={sentence} action={working && !home("sessions") && action.text ? action.text : null} tr={tr} />
       <StagesSec d={d} line={line} tr={tr} />
       {props.extra}
       {d.team && <BodySec t={d.team} now={d.now} tr={tr} />}
@@ -386,7 +411,7 @@ function Body(props: {
       <StepsSec d={d} agents={agents} tr={tr} />
       <ReviewSec d={d} tr={tr} home={home} />
       {d.team?.specText && <SpecSec text={d.team.specText} tr={tr} />}
-      {d.team ? <TeamPeopleSec t={d.team} running={running} now={now} tr={tr} />
+      {d.team ? <TeamPeopleSec t={d.team} running={running} now={now} machineOf={props.machineOf} tr={tr} />
         : <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} open={open} agents={agents} home={home} />}
       {d.team && d.task.itemId && (
         <TeamSessionSec key={d.task.id} project={props.project} featureId={d.task.itemId} cardId={d.task.id} tr={tr}
@@ -400,23 +425,17 @@ function Body(props: {
           </a>
         </div>
       )}
-      {home("say") ? (
-        d.task.stage !== "done" && d.task.stage !== "cancelled" && (
-          <div className={s.sayDock}>
-            <Sec title={line.agent ? `${tr("对它说")} · ${line.agent}` : tr("对它说")}>
-              <HomeOnlyNote k="say" text={tr("对它说只在主场机器上可用")} />
-            </Sec>
-          </div>
-        )
-      ) : line.agent && d.task.stage !== "done" && d.task.stage !== "cancelled" && (
-        <div className={s.sayDock}>
-          <Sec title={`${tr("对它说")} · ${line.agent}`}>
-            <CollabSay agent={line.agent} working={working} tr={tr} />
-          </Sec>
-        </div>
-      )}
+      <SaySec d={d} line={line} exec={exec} working={working} away={away} tr={tr} />
     </div>
   );
+}
+
+/** 别的机器为主场的卡才读 peer 名表（本机 shared-projects 快照）；本机卡不请求 */
+function useMachineOf(project: string, away: boolean): MachineOf {
+  const id = sharedIdentity(project);
+  const names: InstanceNames = useInstanceNames(id && away ? id.machine : null) ?? NO_NAMES;
+  const local = id?.homeInstanceId ?? null;
+  return useCallback((instance: string | null) => instanceName(instance, names, local), [names, local]);
 }
 
 const NO_ACTIONS: ActionMap = new Map();
@@ -441,7 +460,7 @@ export function CollabDetail(props: {
   const { project, id, rev, now, ov, onClose } = props;
   const collabTr = useCollabT();
   const lang = useLang();
-  const tr = useMemo(() => teamBodyTr(collabTr, lang), [collabTr, lang]);
+  const tr = useMemo(() => detailNowTr(teamBodyTr(collabTr, lang), lang), [collabTr, lang]);
   const source = useCollabSource(project);
   const narrow = useNarrow();
   const load = useTaskDetail(project, id, rev);
@@ -456,11 +475,14 @@ export function CollabDetail(props: {
   const homeOnly = d && source.homeOnlyOf ? source.homeOnlyOf(d) : source.homeOnly;
   // 团队视图里主场本机的详情（homeOnly 为空集）：总览那条线是中心投影（没有执行者），改用详情里的本机任务算
   const homeLocal = !!d && !!source.homeOnly && homeOnly?.size === 0;
+  const machineOf = useMachineOf(project, !!homeOnly?.has("say"));
   const task = d?.task ?? ov.tasks?.find((t) => t.id === id);
   // 已完成的卡在总览里只有摘要（没有目标句、步骤线）：用详情现算一条线；详情到之前不显示目标句，免得先闪事项的一句话
   const completed = !!task && ["done", "verified", "cancelled"].includes(task.stage);
   const fullLine = task ? lineOf(task, ov, new Map((ov.items ?? []).map((i) => [i.id, i])), now, tr) : null;
   const line = completed || homeLocal ? (d ? fullLine : null) : props.line ?? fullLine;
+  // 标题下只写这张卡自己的目标句，不退回事项的一句话；已完成的卡总览没有 extra，等详情到了再写
+  const goal = detailGoal(completed ? d?.task : task);
   // 主场本机：执行者是本机 agent，团队流不带它的动作；用源另订本机 /events 得到的动作表，此刻动作同 collab-view lineAction 的算法
   const ha = source.homeActions;
   const homeActs = useSyncExternalStore(ha?.subscribe ?? noSubscribe, ha?.get ?? noActions, noActions);
@@ -480,7 +502,7 @@ export function CollabDetail(props: {
             <span className={s.tid}>{id}</span>
             {task?.title ?? ""}
           </div>
-          {line?.goal && <div className={s.b}>{line.goal}</div>}
+          {goal && <div className={s.b}>{goal}</div>}
         </div>
         <button type="button" className={s.ib} aria-label={tr("关闭")} onClick={close}>
           <Icon name={narrow ? "arrowLeft" : "x"} size={15} />
@@ -488,7 +510,7 @@ export function CollabDetail(props: {
       </div>
       {d && line ? (
         <Body d={d} line={line} action={action(line)} stream={stream} project={project}
-          running={props.reviewers} now={now} tr={tr} extra={props.extra} homeOnly={homeOnly} />
+          running={props.reviewers} now={now} tr={tr} extra={props.extra} homeOnly={homeOnly} machineOf={machineOf} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>
       )}
