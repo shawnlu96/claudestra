@@ -33,3 +33,11 @@ test("the production probe asks for every PR state and refuses bad coordinates w
   expect(await p.prs("not a repo", B)).toMatchObject({ state: "unknown" });
   expect(argv).toHaveLength(1);
 });
+
+test("[验收线 3] truncated output is incomplete: never absent / none / present / exists, always unknown", () => {
+  const cut = (r: BoundedResult): BoundedResult => ({ ...r, truncated: true });
+  expect(parseBranchProbe(cut(res(2)), B)).toMatchObject({ state: "unknown", why: expect.stringContaining("截断") });
+  expect(parseBranchProbe(cut(res(0, `${SHA}\trefs/heads/${B}\n`)), B).state).toBe("unknown");
+  expect(parsePrProbe(cut(res(0, "[]")), B)).toMatchObject({ state: "unknown", why: expect.stringContaining("截断") });
+  expect(parsePrProbe(cut(res(0, JSON.stringify([{ number: 41, headRefName: B }]))), B).state).toBe("unknown");
+});

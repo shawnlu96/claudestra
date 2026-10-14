@@ -1,7 +1,7 @@
 /**
  * Production reads behind lend-reclaim-intent.ts: does the order branch exist on origin, and does any PR (open, closed or merged)
  * have it as head. Structured argv, no shell, no prompts, bounded time. Only a successful, complete, well-formed answer may say
- * "absent" / "none"; a failure, timeout, auth error or output it cannot parse is `unknown`, which keeps the intent unknown.
+ * "absent" / "none"; a failure, timeout, auth error, truncated or unparsable output is `unknown`, which keeps the intent unknown.
  * tests/lend-reclaim-intent-probe.test.ts drives it with a fake runner.
  */
 import { REPO_RE } from "./lend-config.js";
@@ -14,11 +14,14 @@ const SHA40 = /^[0-9a-f]{40}$/;
 /** gh lists at most this many; a full page could hide nothing that matters (any row already keeps unknown). */
 const PR_LIMIT = 100;
 const tail = (r: BoundedResult): string => (r.stderr || r.stdout).trim().split("\n").pop()?.slice(0, 200) ?? "";
+/** runBounded cut the output at its cap: an empty or short-looking answer is then not the whole answer. */
+const TRUNCATED = (what: string): string => `${what} 的输出被截断，结果不完整`;
 const failed = (what: string, r: BoundedResult): string => r.timedOut ? `${what} 超时` : `${what} 失败（exit ${r.code}）：${tail(r)}`;
 
 /** `git ls-remote --exit-code`: exit 2 with no output is git's own "no matching ref"; anything else unclear is unknown. */
 export function parseBranchProbe(r: BoundedResult, branch: string): BranchProbe {
   if (r.timedOut) return { state: "unknown", why: "git ls-remote 超时" };
+  if (r.truncated) return { state: "unknown", why: TRUNCATED("git ls-remote") };
   if (r.code === 2 && !r.stdout.trim()) return { state: "absent" };
   if (r.code !== 0) return { state: "unknown", why: failed("git ls-remote", r) };
   const rows = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => l.split(/\s+/));
@@ -29,6 +32,7 @@ export function parseBranchProbe(r: BoundedResult, branch: string): BranchProbe 
 /** `gh pr list --state all --json number,headRefName`: an array of well-formed rows, every one naming this branch, or unknown. */
 export function parsePrProbe(r: BoundedResult, branch: string): PrProbe {
   if (r.timedOut || r.code !== 0) return { state: "unknown", why: failed("gh pr list", r) };
+  if (r.truncated) return { state: "unknown", why: TRUNCATED("gh pr list") };
   let rows: unknown;
   try { rows = JSON.parse(r.stdout); } catch { return { state: "unknown", why: "gh pr list 的输出不是 JSON" }; } // the reason is the result: unparsable = unknown
   if (!Array.isArray(rows)) return { state: "unknown", why: "gh pr list 的输出不是数组" };
