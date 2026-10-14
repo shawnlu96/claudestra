@@ -98,3 +98,10 @@ test("failed light graph falls back full and keeps the PR head binding; observe 
   expect(p).toMatchObject({ scope: "full", prHead: P, queueMode: "on" }); expect(p.reasons.join()).toContain("parse failed");
   expect(buildPlan(facts({ lightSelect, queueMode: "observe" }))).toMatchObject({ scope: "full", prHead: P, reasons: ["ciRelatedChecks=off"] });
 });
+
+test("only the CI plan script imports the light helper; merge and PM entrances stay independent", () => {
+  const root = new URL("..", import.meta.url).pathname;
+  const paths = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "src", "scripts"], { cwd: root }).stdout.toString().split("\n");
+  const users = paths.filter((p) => p.endsWith(".ts") && /from ["'][^"']*\/ci-light-select\.[jt]s["']/.test(readFileSync(`${root}/${p}`, "utf8")));
+  expect(users).toEqual(["scripts/ci-related-plan.ts"]);
+});
