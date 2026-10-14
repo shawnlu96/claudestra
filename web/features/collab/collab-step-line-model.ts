@@ -5,11 +5,14 @@
  * 形状不可信：未知字段丢掉，老 bridge 没有 stepLine = null。纯函数，单测 tests/web-collab-step-line.test.ts。
  */
 
+import { STEP_WORD } from "@/lib/owner-words";
+
 /** 线上的 7 格：初审、终审合成「审查」一格（显示轮次大的那一次，同一轮终审优先，与 bridge currentReview 同口径） */
 export const SLOT_KEYS = ["restate", "write", "review", "fix", "ui_check", "merge", "verify"] as const;
 export type SlotKey = (typeof SLOT_KEYS)[number];
 export const SLOT_LABEL: Record<SlotKey, string> = {
-  restate: "复述", write: "写", review: "审查", fix: "修", ui_check: "看界面", merge: "合并部署", verify: "核对",
+  restate: STEP_WORD.restate!, write: STEP_WORD.write!, review: STEP_WORD.review!, fix: STEP_WORD.fix!,
+  ui_check: STEP_WORD.ui_check!, merge: "合并部署", verify: "核对",
 };
 export type SlotState = "assigned" | "delivered" | "done";
 export type WaitKind = "blocked" | "owner" | "review";

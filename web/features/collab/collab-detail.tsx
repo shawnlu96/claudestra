@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { createPortal } from "react-dom";
 import { useCollabT } from "./collab-i18n";
 import { useLang } from "@/lib/i18n";
+import { MACHINE_WORDS } from "@/lib/owner-words";
 import { teamBodyTr } from "./team-body/team-body-i18n";
 import { useCollabSource } from "./team-source-context";
 import type { CollabHomeOnly } from "./team-source";
@@ -193,7 +194,7 @@ function RecentSec({ d, tr, home }: { d: TaskDetail; tr: Tr; home: HomeOnly }) {
           <span>{r.text}</span>
         </div>
       ))}
-      {homeText && <HomeOnlyNote k="events.text" text={tr(recent.length ? "原文仅主场可见" : "仅主场可见")} />}
+      {homeText && <HomeOnlyNote k="events.text" text={tr(recent.length ? MACHINE_WORDS.originalThere : MACHINE_WORDS.visibleThere)} />}
     </Sec>
   );
 }
@@ -229,7 +230,7 @@ function ReviewSec({ d, tr, home }: { d: TaskDetail; tr: Tr; home: HomeOnly }) {
           {r.full.includes("\n") && <FullText text={r.full} tr={tr} />}
         </div>
       ))}
-      {hidden && <HomeOnlyNote k="review.text" text={tr(reviews.length ? "原文仅主场可见" : "仅主场可见")} />}
+      {hidden && <HomeOnlyNote k="review.text" text={tr(reviews.length ? MACHINE_WORDS.originalThere : MACHINE_WORDS.visibleThere)} />}
     </Sec>
   );
 }
@@ -335,7 +336,7 @@ function PeopleSec(props: {
           </div>
         ))}
       </div>
-      {sessionsHome && <HomeOnlyNote k="sessions" text={tr(people.length || running.length ? "打开会话仅主场" : "仅主场可见")} />}
+      {sessionsHome && <HomeOnlyNote k="sessions" text={tr(people.length || running.length ? MACHINE_WORDS.openSessionThere : MACHINE_WORDS.visibleThere)} />}
     </Sec>
   );
 }

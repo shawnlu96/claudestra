@@ -11,7 +11,7 @@ describe("stepLineView", () => {
     expect(stepLineView({ steps: "x" }, "build")).toBeNull();
     const v = stepLineView(info([row({ step: "write", executor: "agent-x", executorKind: "agent" })]), "build")!;
     expect(v.slots.map((s) => s.key)).toEqual([...SLOT_KEYS]);
-    expect(v.slots.map((s) => s.label)).toEqual(["复述", "写", "审查", "修", "看界面", "合并部署", "核对"]);
+    expect(v.slots.map((s) => s.label)).toEqual(["确认需求", "开发", "审查", "返工", "看界面", "合并部署", "核对"]);
     expect(v.slots.filter((s) => s.filled).map((s) => s.key)).toEqual(["write"]);
     expect(v.slots.find((s) => s.key === "merge")).toMatchObject({ filled: false, executor: null, state: null });
   });
