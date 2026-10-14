@@ -64,6 +64,7 @@ export const RECOVERY_KEYS = [
   "placementReservations",
   "planGap",
   "poolIdleSkip",
+  "privateMergeNarrow",
   "privateStartPlacement",
   "reviewLocalFirst",
   "roleModel",
@@ -80,7 +81,5 @@ export const RECOVERY_KEYS = [
   "unifiedMergeQueue",
   "updateGap",
   "wakeStopped",
-  "lendUsageReport",
-  "privateMergeNarrow",
   "writeLocalEqual",
 ] as const;
