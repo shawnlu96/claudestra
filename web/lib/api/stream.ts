@@ -90,10 +90,11 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
         const mapped = translate(evt, opts.lang, ids);
         if (!mapped) continue;
         seen.see(mapped);
-        const f = frame({ ...mapped, eid: evt.seq }); // eid = bridge seq：下次重连 ?since=<eid>
-        if (heldBg && isBgEvent(mapped)) heldBg.push(f);
+        // 扣下延后补发的 bg 帧不带 eid：eid 是按序的断点锚，倒着补会被读端当成 bridge 重启去整页重拉；
+        // 断流时还没补出去的 bg 增量也不靠 since 重放——重连会重新拉 /bg-tasks 快照
+        if (heldBg && isBgEvent(mapped)) heldBg.push(frame(mapped));
         else {
-          controller.enqueue(f);
+          controller.enqueue(frame({ ...mapped, eid: evt.seq })); // eid = bridge seq：下次重连 ?since=<eid>
           emitted++;
         }
       }

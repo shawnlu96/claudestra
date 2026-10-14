@@ -19,6 +19,7 @@ const sessions: Record<string, Msg[]> = {};
 const calls: string[] = [];
 const streams: { agents: string; push(e: unknown): void }[] = [];
 let holdDelta: Promise<void> | null = null;
+let holdBg: Promise<void> | null = null;
 let bridgeSeq = 1000;
 
 const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
@@ -49,7 +50,10 @@ async function fakeFetch(input: string | URL | Request, init?: RequestInit): Pro
     return json({ messages: all.slice(-Number(url.searchParams.get("limit"))) });
   }
   if (/^\/agents\/[^/]+\/(hidden|pending)$/.test(p)) return json(p.endsWith("hidden") ? { ranges: [] } : {});
-  if (/^\/agents\/[^/]+\/bg-tasks$/.test(p)) return json({ tasks: [] });
+  if (/^\/agents\/[^/]+\/bg-tasks$/.test(p)) {
+    if (holdBg) await holdBg;
+    return json({ tasks: [{ id: "sh1", kind: "shell", title: "npm run build", lines: ["old"] }] });
+  }
   return json({ error: "not found" }, 404);
 }
 
@@ -81,6 +85,7 @@ beforeEach(() => {
   calls.length = 0;
   streams.length = 0;
   holdDelta = null;
+  holdBg = null;
 });
 
 test("冷启动整页只要 150 条", async () => {
@@ -144,4 +149,21 @@ test("没有快照的 agent 照旧整页，流同样不等历史", async () => {
   } finally {
     globalThis.fetch = fakeFetch as typeof fetch;
   }
+});
+
+test("/bg-tasks 快照晚到：扣下的 bg 帧补发不能让 eid 倒退、误判 bridge 重启去整页重拉（PR1485-r1 P1 bg-held-eid-regression）", async () => {
+  sessions.w = [msg(1, "user", "q"), msg(2, "assistant", "a")];
+  let release!: () => void;
+  holdBg = new Promise<void>((r) => (release = r));
+  const store = new ChatStore() as Store & { readonly state: { bgTasks: { id: string; kind: string; lines: string[] }[] } };
+  await store.openAgent("w");
+  const live = streams.find((s) => s.agents.includes("w"))!;
+  live.push({ seq: 101, ts: new Date().toISOString(), agent: "agent-w", chatId: "", type: "bg_task_update", data: { id: "sh1", items: ["new"] } });
+  live.push(liveText("w", 3, "chat after bg"));
+  await until(() => texts(store).includes("chat after bg"), "聊天事件先放");
+  release();
+  await until(() => store.state.bgTasks.some((t) => t.lines.includes("new")), "bg 快照 + 增量");
+  await tick(20);
+  expect(calls.filter((c) => c.includes("/history/s-w?") && !c.includes("after="))).toHaveLength(1); // 只有打开时那一次整页
+  expect(store.state.bgTasks[0]).toMatchObject({ id: "sh1", kind: "shell", lines: ["old", "new"] });
 });
