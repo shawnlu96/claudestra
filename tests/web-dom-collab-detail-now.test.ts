@@ -50,8 +50,9 @@ function ledger(): LedgerOverview {
       t({ id: "BD1", title: "开发中的卡", stage: "build", round: 0, agent: "agent-dev", stageSince: NOW - 12 * MIN }),
       // UXCARD3：出借写卡（tasks.agent 是本机占位会话）、退回人工的返工卡、没有调度记录的老卡
       t({ id: "LD1", title: "出借写卡", stage: "build", round: 1, agent: "agent-lend-ph", stageSince: NOW - 15 * MIN }),
-      t({ id: "MN1", title: "退回人工的卡", stage: "fix", round: 5, agent: "agent-dev", stageSince: NOW - 50 * MIN }),
-      t({ id: "OLD1", title: "老卡", stage: "review", round: 1, agent: "agent-dev", stageSince: NOW - 336 * 60 * MIN }),
+      t({ id: "MN1", title: "退回人工的卡", stage: "fix", round: 5, agent: "agent-dev", stageSince: NOW - 50 * MIN, metrics: { totalMs: 120 * MIN } }),
+      t({ id: "OLD1", title: "老卡", stage: "review", round: 1, agent: "agent-dev", stageSince: NOW - 336 * 60 * MIN,
+        metrics: { totalMs: 120 * MIN } }),
     ],
     deps: [],
   } as unknown as LedgerOverview;
@@ -297,6 +298,8 @@ for (const width of [1280, 390]) {
     expect(v.stop()).toBeNull();
     expect(v.sec("现在")).toContain("退回人工（manual）：缺凭据 · 已等 50分");
     expect(v.sec("现在")).toContain("下一步：PM 接手");
+    // 不是老卡：「已用时」照旧跟在下一步后面（老卡才去掉）
+    expect(v.sec("现在")).toContain("已用时 2小时");
     expect(v.sec("现在")).not.toMatch(/在改第 \d+ 轮/);
     await v.unmount();
   });
@@ -307,7 +310,8 @@ for (const width of [1280, 390]) {
     expect(v.stop()).toBeNull();
     expect(v.sec("现在")).toContain("老卡（没有调度记录）· 停在审查，调度器不派活");
     expect(v.sec("现在")).toContain("下一步：PM 收尾或补调度记录");
-    expect(v.sec("现在")).not.toMatch(/已等|超过 30 分钟|小时/);
+    // 夹具给了 totalMs（2 小时）：「现在」也不跟「已用时」
+    expect(v.sec("现在")).not.toMatch(/已等|已用时|超过 30 分钟|小时/);
     await v.unmount();
   });
 }

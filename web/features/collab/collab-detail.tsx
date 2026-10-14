@@ -417,7 +417,8 @@ function Body(props: {
     online: (a) => agents.some((x) => x.name === uiAgentName(a) && x.status === "active") });
   return (
     <div className={s.pb}>
-      <NowSec line={line} total={d.task.metrics.totalMs} now={sentence} action={working && !home("sessions") && action.text ? action.text : null} tr={tr}
+      {/* 老卡不写时长（UXCARD3）：句子里没有，「已用时」也不跟在下一步后面 */}
+      <NowSec line={line} total={props.work?.column === "legacy" ? undefined : d.task.metrics.totalMs} now={sentence} action={working && !home("sessions") && action.text ? action.text : null} tr={tr}
         stale={read?.kind === "stale" ? staleText(read.at, tr) : null} />
       <StagesSec d={d} line={line} tr={tr} />
       <DetailUsage id={target?.id ?? null} awayMachine={away?.machine ?? null} tr={tr} />
