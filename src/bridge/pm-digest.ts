@@ -5,6 +5,8 @@
  *   条目记成被这封带走（carriedBy = 信封上的载体号，不用 messageId：同一条 Discord 消息的两次按钮点击 messageId 相同，是两封），
  *   这封送到 / 收件箱确认时按它实际带着的那份出队（收件方已不是当班 PM 就回队给当班的），作罢回队；失败 / 离线就把正文还原、条目留队。
  * - observe：照常逐条投（env 原样），只记「本来会合并」；off：不记不排。开关切走后队里剩的照常送出。
+ * - 拉取（pm-route-mode.ts pmDigestPull，缺省 on）：上面的「随立即送带上 / 窗口单独送」都不做，队列只给 `ledger pm-digest --list` 看；
+ *   off 才回到推送摘要，且 owner / peer 的消息永远不带（摘要拼进正文会显示在对方自己的消息气泡里）。
  */
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
@@ -125,6 +127,12 @@ export class PmDigest {
       }
       if (pmJob.wants(env, project) && await pmJob.intake(env, project, to.agentName)) return { envelope: env, outcome: { kind: "sent", note: "pm-job" } }; // PMJOB1
     }
+    if (this.deps.store.pullMode(project) === "on") { // 拉取模式：队里的只记账等 PM 拉，不搭车、不单独送
+      this.release(env);
+      return own ? { envelope: env, outcome: { kind: "dropped", reason: "摘要只供 PM 拉取" } } : send(env, to);
+    }
+    // owner / peer 的消息不搭摘要：拼进正文会原样显示在对方自己的消息里
+    if (env.from.kind === "user" || env.from.kind === "api") return this.release(env), send(env, to);
     return this.serial(project, () => this.sendWithDigest(env, to, send, project, own));
   }
 
@@ -221,8 +229,10 @@ export class PmDigest {
     if (!router || !db) return;
     const { store, now } = this.deps, t = now(), live = this.deps.heldCarriers();
     store.reconcile((id) => live.has(id), t);
+    const pull = (p: string): boolean => store.pullMode(p) === "on";
+    store.expire(pull, t);
     await this.tickHold(router, db, t);
-    const queue = store.read().queue.filter((e) => !e.carriedBy);
+    const queue = store.read().queue.filter((e) => !e.carriedBy && !pull(e.project));
     for (const project of new Set(queue.map((e) => e.project))) {
       const oldest = Math.min(...queue.filter((e) => e.project === project).map((e) => e.at));
       if (t - (this.pending.get(project) ?? -Infinity) < PM_DIGEST_WINDOW_MS || (store.mode(project) === "on" && t - oldest < PM_DIGEST_WINDOW_MS)) continue;
