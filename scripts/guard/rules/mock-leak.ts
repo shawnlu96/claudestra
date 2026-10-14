@@ -111,10 +111,40 @@ function returnedObject(src: string, from: number, to: number): number {
   return fn ? returnIn(src, from + fn[0].length - 1, closeOf(src, from + fn[0].length - 1)) : -1;
 }
 
-/** 块 [open, close] 里第一个 `return {…}` / `return ({…})` 的 `{` 下标 */
+const BLOCK_KW = /(?:^|[^\w$.])(?:if|for|while|switch|catch|with)\s*$/;
+
+/** close 位置的 `)` 往回配对的 `(` 下标（字符串已遮罩） */
+function openOf(src: string, close: number): number {
+  let depth = 0;
+  for (let i = close; i >= 0; i--) {
+    if (src[i] === ")") depth++;
+    else if (src[i] === "(" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** at 位置的 `{` 是函数体吗：`=> {`、`function f(…) {`、方法 `name(…) {`（可带返回类型）；`if (…) {` 之类不算 */
+function isFnBody(src: string, at: number): boolean {
+  const before = src.slice(Math.max(0, at - 400), at);
+  if (/=>\s*$/.test(before)) return true;
+  const sig = /\)\s*(?::\s*[^{}()=;]+)?$/.exec(before);
+  if (!sig) return false;
+  const paren = openOf(src, at - before.length + sig.index);
+  return paren >= 0 && !BLOCK_KW.test(src.slice(Math.max(0, paren - 20), paren));
+}
+
+/** 块 [open, close] 里属于本函数（跳过嵌套函数体）的第一个 `return {…}` / `return ({…})` 的 `{` 下标 */
 function returnIn(src: string, open: number, close: number): number {
-  const m = /\breturn\s*\(?\s*\{/.exec(src.slice(open, close));
-  return m ? open + m.index + m[0].length - 1 : -1;
+  for (let i = open + 1; i < close; i++) {
+    if (src[i] === "{" && isFnBody(src, i)) i = closeOf(src, i);
+    else if (src.startsWith("return", i) && !/[\w$.]/.test(src[i - 1]!) && !/[\w$]/.test(src[i + 6] ?? "")) {
+      const m = /return\s*\(?\s*\{/y;
+      m.lastIndex = i;
+      if (m.exec(src)) return m.lastIndex - 1;
+      i += 5;
+    }
+  }
+  return -1;
 }
 
 /** 对象字面量的键；有展开返回 null（视为全导出） */

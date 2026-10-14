@@ -132,3 +132,25 @@ describe("[验收线 2] 列不全时只认展开", () => {
     expect(measure(`mock.module("../src/lib/m.js", () => ({ a, c, ns, default: f, K, E, v }));`, mod).partial).toBe(0);
   });
 });
+
+describe("[验收线 2] 只认工厂自己那层的 return（r1 审查 nested-return-object）", () => {
+  const mod = { "src/lib/m.ts": "export function a() {}\nexport function b() {}\n" };
+  test("嵌套函数里的 return {…} 不当成工厂的返回对象", () => {
+    const fp = `mock.module("../src/lib/m.ts", () => {\n  const helper = () => { return {}; };\n  return { a, b };\n});`;
+    expect(measure(fp, mod)).toMatchObject({ partial: 0, live: 0 });
+    const fn = `mock.module("../src/lib/m.ts", () => {\n  const helper = () => { return { a, b }; };\n  return { a };\n});`;
+    expect(measure(fn, mod)).toMatchObject({ partial: 1, live: 0, detail: ['mockleak tests/x.test.ts:1 "../src/lib/m.ts" 缺 1 个导出:b'] });
+  });
+
+  test("function 声明、方法、带返回类型的嵌套函数也跳过；if 块里的 return 仍算工厂的", () => {
+    const nested = [
+      `mock.module("../src/lib/m.ts", function () {`,
+      `  function h(): Rec { return { a, b }; }`,
+      `  const o = { m(x) { return { a, b }; } };`,
+      `  if (flag) { return { a }; }`,
+      `  return { a, b };`,
+      `});`,
+    ].join("\n");
+    expect(measure(nested, mod).partial).toBe(1);
+  });
+});
