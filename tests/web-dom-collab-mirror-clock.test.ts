@@ -114,9 +114,11 @@ async function mount(at: number) {
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null,
     h(ui.TeamSource, { identity: IDENTITY }, h(ui.CollabView, { project: ui.sharedCollabProject(IDENTITY) }))) as never));
   await until(() => (host.textContent ?? "").includes(fx.list.features[0]!.title), "team view");
-  const tab = Array.from(host.querySelectorAll("button,[role=tab]")).find((x) => (x.textContent ?? "").trim().startsWith("规划与提案")); // UXHOME1：团队源下「团队」标签改名
-  if (!tab) throw new Error("no 规划与提案 tab");
-  await React.act(async () => tab.click());
+  for (const label of ["团队", "规划与提案"]) {
+    const tab = Array.from(host.querySelectorAll("[role=tab]")).find((x) => (x.textContent ?? "").trim() === label);
+    if (!tab) throw new Error(`no ${label} tab`);
+    await React.act(async () => tab.click());
+  }
   await until(() => panel(host).length > 0, "planning panel");
   return { host, unmount: async () => { await React.act(async () => { openCollabTask(null); root.unmount(); }); host.remove(); } };
 }
