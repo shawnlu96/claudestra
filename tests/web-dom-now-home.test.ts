@@ -37,7 +37,7 @@ let ui: {
   ChatStoreProvider: (p: { children: unknown }) => unknown; useChatStoreApi: () => Store;
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
   asksStore: { get(): { open: boolean; focus: string | null; asks: unknown[] }; refresh(): Promise<void>; closeDrawer(): void };
-  useCollabNav: () => { project: string | null }; closeCollab: () => void;
+  useCollabNav: () => { project: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
 };
 
 const FP = "mac-a";
@@ -107,17 +107,20 @@ beforeAll(async () => {
     if (/^\/api\/v1\/ledger\/local-(group|solo)$/.test(path)) return json(LEDGER);
     return json({ ok: false, error: "not in fixture" }, 404);
   }) as typeof fetch;
-  const [list, side, now, store, nav, asks, collabNav] = [
+  const [list, side, now, store, nav, asks, collabNav, viewEntry] = [
     require("../web/features/chat/components/message-list.tsx"), require("../web/features/chat/components/sidebar.tsx"),
     require("../web/features/now/now-home.tsx"), require("../web/features/chat/chat-store.ts"),
     require("../web/features/chat/components/nav-context.tsx"), require("../web/features/asks/asks-store.ts"),
-    require("../web/features/collab/collab-nav.ts")];
+    require("../web/features/collab/collab-nav.ts"), require("../web/features/collab/team-view-entry.tsx")];
   ui = { MessageList: list.MessageList, Sidebar: side.Sidebar, NowStrip: now.NowStrip, ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi,
-    ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore, useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab };
+    ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore, useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab,
+    unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest };
 });
 
 afterEach(async () => {
   for (const off of [...live]) await off();
+  // 项目组入口起的常驻小根（team-view-entry.tsx）订着 machines、快照是本文件换过的 currentFp：不卸就留给后面的文件，一改 machines 就在注销后的 DOM 外重渲
+  await React.act(async () => ui.unmountOpenViewGuard());
 });
 
 afterAll(async () => {
@@ -153,6 +156,13 @@ async function mount(part: "main" | "sidebar" | "strip", width = 1280, bindingsD
   const host = doc.createElement("div");
   doc.body.appendChild(host);
   const root = createRoot(host as never);
+  // 一建根就登记：后面的渲染 / 读数抛错也由 afterEach 卸掉
+  const unmount = async () => {
+    if (!live.delete(unmount)) return;
+    await React.act(async () => root.unmount());
+    host.remove();
+  };
+  live.add(unmount);
   const body = part === "main" ? h(ui.MessageList) : part === "sidebar" ? h(ui.Sidebar, { onSelect: () => { seen.toContent++; } }) : h(ui.NowStrip);
   const nav = { showContent: false, toContent: () => { seen.toContent++; }, toList: () => {} };
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null, h(ui.ChatNavContext.Provider, { value: nav }, h(Probe), body)) as never));
@@ -164,12 +174,6 @@ async function mount(part: "main" | "sidebar" | "strip", width = 1280, bindingsD
   };
   const all = (sel: string) => Array.from(host.querySelectorAll(sel));
   const texts = (sel: string) => all(sel).map((e) => (e.textContent ?? "").replace(/\s+/g, " ").trim());
-  const unmount = async () => {
-    if (!live.delete(unmount)) return;
-    await React.act(async () => root.unmount());
-    host.remove();
-  };
-  live.add(unmount);
   return { host, seen, click, all, texts, text: () => (host.textContent ?? "").replace(/\s+/g, " "), unmount };
 }
 

@@ -9,7 +9,7 @@
  * 修完这些请求为 0，指标显示「暂无」（带原因 title）。本机同数据的数字与请求路径保持不变。
  * happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { setAppConfigForTest } from "../web/lib/app-config";
@@ -110,6 +110,12 @@ beforeAll(async () => {
   ui = { CollabView: view.CollabView, ChatStoreProvider: store.ChatStoreProvider, TeamSource: ops.TeamSource, sharedCollabProject: nav.sharedCollabProject };
 });
 
+/** 本文件挂上的根：用例中途失败（含 mount 里等不到首屏）也在 afterEach 卸掉，先卸根、afterAll 再注销 happy-dom */
+const live = new Set<() => Promise<void>>();
+afterEach(async () => {
+  for (const off of [...live]) await off();
+});
+
 afterAll(async () => {
   globalThis.fetch = realFetch;
   setAppConfigForTest(null); // 模块级缓存：别把夹具的 app-config 留给后面的测试文件
@@ -129,6 +135,12 @@ async function mount(side: "local" | "team", width: number) {
   const host = doc.createElement("div");
   doc.body.appendChild(host);
   const root = createRoot(host as never);
+  const unmount = async () => {
+    if (!live.delete(unmount)) return;
+    await React.act(async () => root.unmount());
+    host.remove();
+  };
+  live.add(unmount);
   const h = React.createElement as (...a: unknown[]) => unknown;
   const collab = side === "team"
     ? h(ui.TeamSource, { identity: IDENTITY }, h(ui.CollabView, { project: ui.sharedCollabProject(IDENTITY) }))
@@ -152,7 +164,7 @@ async function mount(side: "local" | "team", width: number) {
       return cell ? { value: cell.querySelector("b")!.textContent, title: cell.getAttribute("title") } : null;
     },
     button: (label: string) => buttons().find((x) => (x.textContent ?? "").trim().startsWith(label)) ?? null,
-    unmount: async () => { await React.act(async () => root.unmount()); host.remove(); },
+    unmount,
   };
 }
 

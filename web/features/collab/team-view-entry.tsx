@@ -5,7 +5,7 @@
  * 绑定不可区分 / 还没核对上 / 中心 403 → 一行禁用说明，不回退本机。
  */
 import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { machines } from "@/lib/machines";
 import { bindingState, lostCenterKey, machineCenterKey, resolveCollabSource, invalidCenterKey, subscribeBindings, type BindingState,
   type BlockedReason, type CollabSourceChoice } from "@/lib/collab-source-binding";
@@ -36,11 +36,17 @@ export function useCollabBindings(fp: string): BindingState {
  * 这里单独起一个常驻的小根（不进页面 DOM），只要打开着的是这台机器的中心 key（不论从项目组还是 N5 列表打开），
  * 就持有该机 store 的订阅（15s / focus 刷新不停），每次回包都核对，key 过期（改绑 / 解绑 / 停用）即关掉视图
  */
-let guardMounted = false;
+let guardRoot: Root | null = null;
 function mountOpenViewGuard() {
-  if (guardMounted || typeof document === "undefined") return;
-  guardMounted = true;
-  createRoot(document.createElement("div")).render(<OpenViewGuard />);
+  if (guardRoot || typeof document === "undefined") return;
+  guardRoot = createRoot(document.createElement("div"));
+  guardRoot.render(<OpenViewGuard />);
+}
+
+/** 测试用：卸掉常驻小根（挂 happy-dom 的测试注销前调，别让它订着 machines 留给同进程后面的测试文件）；下一次入口挂载再起 */
+export function unmountOpenViewGuardForTest(): void {
+  guardRoot?.unmount();
+  guardRoot = null;
 }
 
 function OpenViewGuard() {
