@@ -15,6 +15,7 @@ export const HEAD_WORDS = {
   team: "团队版",
   none: MACHINE_WORDS.noProgress,
   stale: MACHINE_WORDS.staleModules,
+  syncedJust: "刚刚同步",
   syncedMin: "{n} 分钟前同步",
   syncedHour: "{n} 小时前同步",
   showStale: "看是哪几个",
@@ -30,6 +31,7 @@ const AGO: Record<string, string> = {
 
 const EN: Record<string, string> = {
   [HEAD_WORDS.team]: "Team version",
+  [HEAD_WORDS.syncedJust]: "synced just now",
   [HEAD_WORDS.syncedMin]: "synced {n} min ago",
   [HEAD_WORDS.syncedHour]: "synced {n} h ago",
   [HEAD_WORDS.showStale]: "Show which",
@@ -60,9 +62,9 @@ export function headMirror(ov: Pick<LedgerOverview, "mirror" | "items">, now: nu
   return { state: "fresh", observedAt: seen.length ? Math.min(...seen) : null };
 }
 
-/** 那一行的文字（不含「团队版 · 」前缀） */
+/** 那一行的文字（不含「团队版 · 」前缀）；不足一分钟（含没带观测时刻的）写「刚刚同步」，不写「0 分钟前」 */
 export function headMirrorText(m: HeadMirror, now: number, h: HeadTr): string {
   if (m.state === "stale") return h(HEAD_WORDS.stale, { n: m.names.length });
   if (m.state === "none") return h(HEAD_WORDS.none);
-  return m.observedAt === null ? h(HEAD_WORDS.syncedMin, { n: 0 }) : mirrorAgo(m.observedAt, now, h);
+  return m.observedAt === null || now - m.observedAt < 60_000 ? h(HEAD_WORDS.syncedJust) : mirrorAgo(m.observedAt, now, h);
 }

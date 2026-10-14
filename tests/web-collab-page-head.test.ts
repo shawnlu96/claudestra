@@ -26,6 +26,14 @@ test("[验收线 5] 全部新鲜：『团队版 · N 分钟前同步』，N 取�
   expect(line([fresh(3), none])).toBe("团队版 · 3 分钟前同步");
 });
 
+test("[验收线 5] 不足一分钟写『团队版 · 刚刚同步』，不写『0 分钟前』；满一分钟照常写分钟", () => {
+  expect(line([fresh(0)])).toBe("团队版 · 刚刚同步");
+  expect(headMirrorText({ state: "fresh", observedAt: NOW - 59_000 }, NOW, zh)).toBe("刚刚同步");
+  expect(headMirrorText({ state: "fresh", observedAt: null }, NOW, zh)).toBe("刚刚同步");
+  expect(line([fresh(1)])).toBe("团队版 · 1 分钟前同步");
+  expect(line([fresh(0)], NOW, en)).toBe("Team version · synced just now");
+});
+
 test("[验收线 5] 有过期：写过期个数，名单是过期的那几个（与事项同序）；新鲜的不在名单里", () => {
   const mirror = [fresh(1), stale(25), fresh(2), stale(90)];
   expect(line(mirror)).toBe("团队版 · 2 个模块的进度可能不是最新的");
@@ -55,7 +63,7 @@ test("满 60 分钟写小时（mirror-fresh.ts mirrorAgo 的口径）；英文�
 });
 
 test("[PM 补 3] 页头的每一种文字、标签名与副标题都不出内部词", () => {
-  const texts = [line([fresh(7)]), line([stale(30), fresh(1)]), line([none]), headMirrorText({ state: "fresh", observedAt: min(125) }, NOW, zh),
+  const texts = [line([fresh(7)]), line([fresh(0)]), line([stale(30), fresh(1)]), line([none]), headMirrorText({ state: "fresh", observedAt: min(125) }, NOW, zh),
     zh(HEAD_WORDS.planTab), zh(HEAD_WORDS.planSub), zh(HEAD_WORDS.showStale)];
   for (const text of texts) for (const bad of ["主场", "镜像", "feature", "spec", "parked", "可执行", "就绪可开", "复述"]) {
     expect({ text, bad, hit: text.includes(bad) }).toEqual({ text, bad, hit: false });

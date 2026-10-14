@@ -39,7 +39,7 @@ import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamP
 import { TeamPanel } from "./team-panel";
 import { DEFAULT_FILTER, metricsOf, type Filter } from "./v4/v4-model";
 import { MetricsBar } from "./metrics-bar";
-import { CollabPageHead } from "./collab-page-head";
+import { CollabPageHead, HEAD_WRAP } from "./collab-page-head";
 import { useWeekQuota } from "./use-count-source";
 import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
@@ -201,7 +201,7 @@ export function CollabView({ project }: { project: string }) {
 
   return (
     <div className={`${s.tokens} ${s.root} ${v.v4}`}>
-      <div className={v.top}>
+      <div className={v.top} style={narrow ? HEAD_WRAP : undefined}>
         <button type="button" className={`${s.ib} ${v.back}`} aria-label={tr("返回")} onClick={nav.toList}>
           <Icon name="arrowLeft" size={16} />
         </button>

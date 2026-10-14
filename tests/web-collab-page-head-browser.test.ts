@@ -37,6 +37,18 @@ const settle = async (page: Page) => {
 };
 const head = (page: Page) => page.locator("[data-collab-head]");
 const mirrorSec = (page: Page) => page.locator("section h5", { hasText: /^镜像$/ });
+/** 页头小字和过期名单里被省略号截掉的文字（内容比框宽） */
+const clipped = (page: Page) => page.evaluate(`[...document.querySelectorAll("[data-collab-head], [data-collab-head] span, [data-collab-head-stale] li")]
+  .filter((el) => el.scrollWidth > el.clientWidth + 1).map((el) => el.textContent)`) as Promise<string[]>;
+type Box = { top: number; bottom: number; width: number };
+/** 手机顶栏：两个按钮、那行小字、过期名单的位置 */
+const rowBoxes = (page: Page) => page.evaluate(`(() => {
+  const r = (el) => { const b = el.getBoundingClientRect(); return { top: b.top, bottom: b.bottom, width: b.width }; };
+  const head = document.querySelector("[data-collab-head]");
+  const btns = [...document.querySelectorAll("button")].filter((b) => /^(规划与提案|待你处理)/.test(b.textContent.trim()));
+  return { head: r(head.parentElement), buttons: { top: Math.min(...btns.map((b) => r(b).top)), bottom: Math.max(...btns.map((b) => r(b).bottom)), width: 0 },
+    list: r(document.querySelector("[data-collab-head-stale]") ?? head) };
+})()`) as Promise<{ head: Box; buttons: Box; list: Box }>;
 
 test.skipIf(!out)("UXHOME1：团队页头（新鲜 / 过期）、规划与提案标签、本机团队标签，1280 与 390 改前改后", async () => {
   if (!out) return;
@@ -74,7 +86,8 @@ test.skipIf(!out)("UXHOME1：团队页头（新鲜 / 过期）、规划与提案
             if (after) {
               await head(g.page).first().waitFor();
               const text = (await head(g.page).first().innerText()).trim();
-              if (state === "fresh") expect({ width, text }).toEqual({ width, text: expect.stringMatching(/^团队版 · \d+ 分钟前同步$/) as unknown as string });
+              // 夹具里「新鲜」的观测时刻就是此刻：不足一分钟写「刚刚同步」
+              if (state === "fresh") expect({ width, text }).toEqual({ width, text: "团队版 · 刚刚同步" });
               else {
                 expect({ width, text }).toEqual({ width, text: "团队版 · 2 个模块的进度可能不是最新的" });
                 await head(g.page).first().click();
@@ -82,10 +95,20 @@ test.skipIf(!out)("UXHOME1：团队页头（新鲜 / 过期）、规划与提案
                 expect(names).toEqual(stale.list.features.map((f) => f.title));
                 expect(await head(g.page).first().getAttribute("aria-expanded")).toBe("true");
               }
+              // 那行小字与过期名单都不被省略号截断
+              expect({ width, clipped: await clipped(g.page) }).toEqual({ width, clipped: [] });
+              if (narrow) {
+                // 手机：小字在标题与两个按钮下面独占一行，过期名单也在这一行里全宽展开，不和按钮并排
+                await settle(g.page);
+                const box = await rowBoxes(g.page);
+                expect({ width, below: box.head.top >= box.buttons.bottom - 1, wide: box.head.width >= width * 0.8 }).toEqual({ width, below: true, wide: true });
+                if (state === "stale") expect({ width, listWide: box.list.width >= width * 0.8, listBelow: box.list.top >= box.buttons.bottom - 1 })
+                  .toEqual({ width, listWide: true, listBelow: true });
+              }
               expect(await mirrorSec(g.page).count()).toBe(0);
               expect(await g.page.locator("body").innerText()).not.toMatch(/主场镜像/);
             }
-            if (state === "fresh" || !narrow) await shot(g, `team-${state}`);
+            await shot(g, `team-${state}`);
             await g.ctx.close();
             if (state === "stale") continue;
 

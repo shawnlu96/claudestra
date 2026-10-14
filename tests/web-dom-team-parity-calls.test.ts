@@ -293,7 +293,7 @@ const mirrorSec = (host: El) => Array.from(host.querySelectorAll("section")).fin
 test("[验收线 5] 团队视图页头写『团队版 · N 分钟前同步』，右栏没有『镜像』节；标签叫『规划与提案』，里面只有团队规划、不渲染成员面板", async () => {
   const v = await mount("team", 1200);
   await until(() => headLine(v.host) !== null, "page head line");
-  expect([headLine(v.host)!.getAttribute("data-collab-head"), headLine(v.host)!.textContent]).toEqual(["fresh", "团队版 · 0 分钟前同步"]);
+  expect([headLine(v.host)!.getAttribute("data-collab-head"), headLine(v.host)!.textContent]).toEqual(["fresh", "团队版 · 刚刚同步"]);
   expect(mirrorSec(v.host)).toBeUndefined();
   expect(v.host.textContent).not.toMatch(/主场镜像/);
   expect(tabs(v.host)).toContain("规划与提案");
@@ -332,7 +332,7 @@ test("[验收线 5] 有过期：页头写过期个数（按钮），点开原地
 test("[验收线 5] 手机：团队源顶栏按钮与整屏页标题是『规划与提案』、副标题『团队规划与成员提案』，页头同样写团队版", async () => {
   const v = await mount("team", 390);
   await until(() => headLine(v.host) !== null, "page head line");
-  expect(headLine(v.host)!.textContent).toBe("团队版 · 0 分钟前同步");
+  expect(headLine(v.host)!.textContent).toBe("团队版 · 刚刚同步");
   expect(v.button("规划与提案")).not.toBeNull();
   expect(v.button("团队")).toBeNull();
   await v.click("规划与提案");

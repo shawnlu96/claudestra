@@ -212,6 +212,18 @@ function summary(view: NowView, tr: Translate): string {
   return `${tr("{n} 个 agent 在干活", { n: view.workers.length })} · ${tr("{n} 件等你", { n: view.waitTotal })}`;
 }
 
+/** 侧栏条收起时那句：两段各自不折行；条宽不够一行（桌面侧栏默认 16rem）时整句换到「现在」下面一行，再窄就「N 件等你」另起一行，件数不被省略号吃掉 */
+function StripSummary({ view, tr }: { view: NowView; tr: Translate }) {
+  return (
+    <span className="order-last flex basis-full flex-wrap gap-x-1 text-[13px] text-base-content/60 @[22rem]:order-none @[22rem]:min-w-0 @[22rem]:flex-1 @[22rem]:basis-0"
+      data-now-summary>
+      <span className="hidden @[22rem]:inline">· </span>
+      <span className="whitespace-nowrap">{tr("{n} 个 agent 在干活", { n: view.workers.length })}</span>
+      <span className="whitespace-nowrap font-medium text-base-content/75"> · {tr("{n} 件等你", { n: view.waitTotal })}</span>
+    </span>
+  );
+}
+
 function PageBody({ source, fp }: { source: Source; fp: string | null }) {
   const tr = useNowT();
   const view = useNowView(source);
@@ -240,12 +252,12 @@ function StripBody({ source, fp }: { source: Source; fp: string | null }) {
     } catch { /* 隐私模式 / 存储被禁：这次照常展开收起，只是下次打开不记得 */ }
   };
   return (
-    <div className="mb-2 rounded-xl border border-base-300 bg-base-100" data-now="strip" data-now-open={open ? "1" : "0"}>
-      <button type="button" className="flex w-full min-w-0 items-center gap-2 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-base-300/40"
+    <div className="@container mb-2 rounded-xl border border-base-300 bg-base-100" data-now="strip" data-now-open={open ? "1" : "0"}>
+      <button type="button" className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-base-300/40"
         aria-expanded={open} title={tr(open ? "收起现在总览" : "展开现在总览")} onClick={toggle}>
         <span className="shrink-0 text-[13px] font-semibold">{tr("现在")}</span>
-        <span className="min-w-0 flex-1 truncate text-[13px] text-base-content/60" data-now-summary>· {summary(view, tr)}</span>
-        <Chevron open={open} className="text-base-content/45" />
+        <StripSummary view={view} tr={tr} />
+        <Chevron open={open} className="ml-auto shrink-0 text-base-content/45" />
       </button>
       {/* 高度动画：grid 行从 0fr 到 1fr；收起时 inert，里面的行不进 Tab 序、读屏也不念 */}
       <div className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}>

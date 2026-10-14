@@ -184,7 +184,7 @@ const LOCAL_ONLY = [/\/me\/last-seen\/shared-ledger:/, /\/ledger\/shared-ledger:
 test("复现测试：团队总览显示镜像状态；本机总览没有", async () => {
   const team = await mountView("team", 1200);
   // UXHOME1：右栏「镜像」节去掉了，新鲜度只在页头那一行「团队版 · …」
-  await until(() => /团队版 · \d+ 分钟前同步/.test(team.text()), "mirror line in page head");
+  await until(() => /团队版 · (刚刚|\d+ 分钟前)同步/.test(team.text()), "mirror line in page head");
   await team.unmount();
   const local = await mountView("local", 1200);
   expect(local.text()).not.toMatch(/主场镜像/);

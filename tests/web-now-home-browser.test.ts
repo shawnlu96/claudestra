@@ -155,7 +155,14 @@ test.skipIf(!out)("UXHOME1：落地页（桌面主区 / 手机侧栏条收起与
           if (after) {
             await g.page.waitForFunction(`document.querySelectorAll("[data-now-worker]").length >= 2 && document.querySelectorAll("[data-now-wait]").length >= 3`);
             const strip = g.page.locator("[data-now=strip]");
-            expect((await strip.locator("button[aria-expanded]").innerText()).replace(/\s+/g, " ").trim()).toBe("现在 · 2 个 agent 在干活 · 3 件等你");
+            // 手机侧栏够宽是一行「现在 · …」；桌面侧栏 16rem 放不下一行，整句换到「现在」下面（这时不带开头那个点）
+            const summary = width < 640 ? "现在 · 2 个 agent 在干活 · 3 件等你" : "现在 2 个 agent 在干活 · 3 件等你";
+            expect({ width, text: (await strip.locator("button[aria-expanded]").innerText()).replace(/\s+/g, " ").trim() }).toEqual({ width, text: summary });
+            // 桌面侧栏 16rem 宽：「N 件等你」整段看得见（不被省略号截、不出条外），放不下一行就换到「现在」下面
+            const fit = await g.page.evaluate(`(() => { const s = document.querySelector("[data-now=strip]"), b = s.getBoundingClientRect();
+              const parts = [...s.querySelectorAll("[data-now-summary] > span")].filter((e) => e.offsetWidth);
+              return parts.map((e) => { const r = e.getBoundingClientRect(); return { text: e.textContent.trim(), clipped: e.scrollWidth > e.clientWidth + 1 || r.right > b.right + 0.5 }; }); })()`);
+            expect({ width, fit }).toEqual({ width, fit: expect.arrayContaining([{ text: "· 3 件等你", clipped: false }, { text: "2 个 agent 在干活", clipped: false }]) as unknown as object[] });
             // 侧栏团队区：区头「团队」；成组的 Claudestra 不重复，单成员的设计组件库还在；绑定项目组的协作视图行带「团队」小标
             expect((await team.locator("h2").innerText()).trim()).toBe("团队");
             expect(await team.getByRole("button", { name: "Claudestra" }).count()).toBe(0);
