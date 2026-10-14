@@ -1,3 +1,5 @@
+import { rejectPriorityFields } from "./ledger-priority-guard.js";
+import { syncPriorityDag } from "./ledger-priority-lifecycle.js";
 /**
  * feature 与子 DAG 的写入（T84 = 阶段 1 L1，设计稿 docs/design/feature-dag.md）：建 feature、改 feature、建 DAG 初版。
  * 每个导出函数一个 BEGIN IMMEDIATE 事务，改行与一条 feature 事件（target = feature id）同进同出；改字段带 rev（CAS），
@@ -68,6 +70,7 @@ function checkTitleFree(db: Database, project: string, title: string, self: stri
 }
 
 function checkPatch(p: FeaturePatch): FeaturePatch {
+  rejectPriorityFields(p);
   const out: FeaturePatch = {};
   if (p.title !== undefined) out.title = line(p.title, "feature 名字", FEATURE_TITLE_MAX, true);
   if (p.ownerWords !== undefined) out.ownerWords = String(p.ownerWords);
@@ -81,6 +84,7 @@ function checkPatch(p: FeaturePatch): FeaturePatch {
 const sameOp = (op: string) => (prev: LedgerEvent) => prev.data.op === op;
 
 export function createFeature(db: Database, ctx: WriteCtx, input: NewFeature): WriteResult<Feature> {
+  rejectPriorityFields(input);
   return tx(db, () => {
     if (!SLUG.test(input.slug)) throw new LedgerError("invalid", "feature id 只能是字母数字开头、≤40 位的字母 / 数字 / - / _");
     const origin = ledgerOrigin(db);
@@ -138,6 +142,7 @@ export function nodeTask(db: Database, feature: Pick<Feature, "id" | "project">,
 /** 校验一个节点输入并补成快照：status 取此刻的 stage，没卡为 planned */
 function buildNode(db: Database, feature: Pick<Feature, "id" | "project">, x: unknown): DagNode {
   if (!x || typeof x !== "object" || Array.isArray(x)) throw new LedgerError("invalid", "每个节点要是对象 {key?, taskId?, oneLine?, deps?, estimate?, fileGlobs?}");
+  rejectPriorityFields(x);
   const n = x as Record<string, unknown>;
   const key = n.key ?? n.taskId;
   if (typeof key !== "string" || !NODE_KEY.test(key)) throw new LedgerError("invalid", "节点要有 key（字母数字开头、≤40 位；有 taskId 时缺省取它）");
@@ -221,6 +226,7 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const rev = cur.rev + 1;
     db.prepare("UPDATE features SET currentVersion = 1, rev = ?, updatedAt = ? WHERE id = ?").run(rev, now, cur.id);
     linkTasks(db, ctx, cur, nodes);
+    syncPriorityDag(db, ctx, cur, nodes);
     const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, uiPageCheck: true, nodes: nodes.map((n) => n.key), rev, ...scrub } }, true);
     return { row: getDagVersion(db, cur.id, 1) as DagVersion, event, duplicate: false };
   });
