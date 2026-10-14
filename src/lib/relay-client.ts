@@ -14,6 +14,7 @@ import { InboundRouter, type Logger } from "./relay-client-inbound.js";
 import { OutboundTable, type RequestOptions } from "./relay-client-outbound.js";
 import { PushTable } from "./relay-client-push.js";
 import { DEFAULT_LIVENESS, RelayLiveness, type LivenessOptions } from "./relay-liveness.js";
+import { DEFAULT_SEND_QUEUE, RelaySendQueue, type SendQueueOptions } from "./relay-send-queue.js";
 import { RelayTraffic } from "./relay-traffic.js";
 import { remoteCode } from "./remote-text.js";
 import { RelayError, type InboundHandler, type PushAck, type PushRequest, type RelayInfo, type RelayRequest, type RelayResponse, type RelayState } from "./relay-client-types.js";
@@ -47,6 +48,7 @@ export interface ConnectOptions {
   log?: Logger;
   timing?: Partial<RelayTiming>;
   liveness?: LivenessOptions;
+  sendQueue?: SendQueueOptions;
 }
 
 const DEFAULT_TIMING: RelayTiming = {
@@ -58,6 +60,9 @@ const DEFAULT_TIMING: RelayTiming = {
   headGraceMs: 5_000,
   pushTimeoutMs: 15_000,
 };
+
+/** 回帖正文的分块：发送队列按块轮转，块越小插队越细；16 KB 在 30 KB/s 的上行上约半秒一块，帧头开销不到 0.5% */
+const REPLY_CHUNK_BYTES = 16 * 1024;
 
 const jitter = (ms: number): number => Math.round(ms * (0.8 + Math.random() * 0.4));
 const rand = (n: number): Uint8Array => new Uint8Array(randomBytes(n));
@@ -86,14 +91,16 @@ export class RelayClient {
   private readonly pushes: PushTable;
   private readonly liveness: RelayLiveness;
   private readonly traffic = new RelayTraffic();
+  private readonly queue: RelaySendQueue;
 
   constructor(private readonly o: ConnectOptions) {
     this.timing = { ...DEFAULT_TIMING, ...o.timing };
     this.liveness = new RelayLiveness(o.liveness ?? DEFAULT_LIVENESS);
     this.log = o.log ?? ((level, msg) => (level === "info" ? console.log : console.error)(`[relay] ${msg}`));
+    this.queue = new RelaySendQueue((raw) => this.write(raw), o.sendQueue ?? DEFAULT_SEND_QUEUE);
     const send = (f: object) => this.send(f);
     this.outbound = new OutboundTable(send, rand, LIMITS.maxChunkBytes, this.timing.headGraceMs);
-    this.inbound = new InboundRouter(send, o.onInbound, this.log, LIMITS.maxChunkBytes, this.traffic);
+    this.inbound = new InboundRouter((f) => this.send(f, true), o.onInbound, this.log, REPLY_CHUNK_BYTES, this.traffic);
     this.pushes = new PushTable(send, rand, this.timing.pushTimeoutMs);
     this.open();
   }
@@ -150,6 +157,7 @@ export class RelayClient {
     this.reconnectTimer = null;
     this.ws?.close(1000, "client closing");
     this.ws = null;
+    this.queue.reset();
     this.outbound.rejectAll(new RelayError("closed", "client", "client closed"));
     this.pushes.rejectAll(new RelayError("closed", "client", "client closed"));
     this.inbound.abortAll();
@@ -177,11 +185,18 @@ export class RelayClient {
     };
   }
 
-  private send(frame: object): boolean {
+  /** 所有帧经发送队列（relay-send-queue.ts）：回帖（reply）分道交错、按窗口放行，其余直写、永远插在回帖正文前面 */
+  private send(frame: object, reply = false): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    const f = frame as Record<string, unknown>;
+    return reply ? this.queue.reply(f) : this.queue.send(f);
+  }
+
+  private write(raw: string): boolean {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     try {
-      const raw = JSON.stringify(frame);
       ws.send(raw);
       this.liveness.onSend(raw.length);
       this.traffic.onWire(raw.length);
@@ -196,6 +211,7 @@ export class RelayClient {
     if (this.ws !== ws) return; // 旧连接的收尾：新连接已经接管
     this.ws = null;
     this.clearTimers();
+    this.queue.reset();
     const fatal = FATAL_CODES.has(this.lastError ?? "");
     const wasOnline = this._state === "online";
     if (this._state !== "closed") this._state = "offline";
@@ -266,6 +282,7 @@ export class RelayClient {
       case "welcome": return this.onWelcome(f);
       case "ping": return void this.send({ t: "pong", ts: f.ts });
       case "pong": {
+        this.queue.onPong(f.ts);
         this.liveness.onPong();
         if (this.pongTimer) clearTimeout(this.pongTimer);
         this.pongTimer = null;
@@ -319,6 +336,8 @@ export class RelayClient {
       else this.inbound.onEnd(from ?? RELAY_FROM, e);
       return;
     }
+    // 回帖可能已整段进了发送队列、入站表早就删了：不管表里还有没有，排着的正文都丢掉
+    this.queue.drop(from === RELAY_FROM ? undefined : from, e.id);
     if (!this.inbound.onCancel(from ?? RELAY_FROM, e.id)) this.outbound.onCancel(e.id);
   }
 
