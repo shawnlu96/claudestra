@@ -218,11 +218,17 @@ async function localQuotaView(now: number): Promise<{ quota: QuotaReport; walled
   }
 }
 
-export async function borrowView(now = deps.now()): Promise<Record<string, unknown>> {
-  const [read, ctx, localQuota] = await Promise.all([readLend(deps.lendPath), deps.context(), localQuotaView(now)]);
+/** 有效借入与逐条 peerView（GET /borrow 与团队名册共用）：lend.json、联系人、台账、scheduler.json 都在这里读一次 */
+export async function borrowPeerViews(now = deps.now()) {
+  const [read, ctx] = await Promise.all([readLend(deps.lendPath), deps.context()]);
   const eff = effectiveLend(read, ctx.contacts, ctx.projects, now);
   const db = openDb();
   const { projects, cfg } = projectsView();
+  return { read, ctx, eff, db, projects, cfg, peers: eff.borrow.map((b) => peerView(db, b, now, cfg)) };
+}
+
+export async function borrowView(now = deps.now()): Promise<Record<string, unknown>> {
+  const [{ read, ctx, eff, db, projects, cfg, peers }, localQuota] = await Promise.all([borrowPeerViews(now), localQuotaView(now)]);
   return {
     ok: true, now, schedulerOk: cfg !== null, projects, localQuota,
     borrow: {
@@ -233,7 +239,7 @@ export async function borrowView(now = deps.now()): Promise<Record<string, unkno
       maxOpenLimit: MAX_OPEN,
     },
     ledger: !!db && hasTable(db, "lend_orders"),
-    peers: eff.borrow.map((b) => peerView(db, b, now, cfg)),
+    peers,
     remote: remoteRows(db, (d, id) => placementView(d, id, cfg, eff.borrow, now)),
   };
 }

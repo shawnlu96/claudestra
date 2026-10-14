@@ -30,6 +30,7 @@ import { notifyProjectPm } from "./pm-notify.js";
 import { schedulerV2SkipAny, schedulerV2Unskipped } from "./scheduler-v2-skip.js";
 import { mainCiTrainPause } from "./scheduler-main-ci-wiring-gate.js";
 import { ciProofAdmits, ciProofTrain } from "./scheduler-ci-proof-gate.js";
+import { formingSave, memberCheck, unifiedFiles, unifiedTrainCandidates } from "./merge-queue-candidates-member.js";
 import {
   clearedMember, formTrain, nextSkip, recheckCleared, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
   type TrainGh, type TrainState, type TrainStore,
@@ -118,8 +119,11 @@ export function mergeCandidates(db: Database, project: string, ui: { now: number
 /** The train's candidates: the auto, non-ui cards above. */
 export const trainCandidates = (db: Database, project: string): TrainCandidate[] => mergeCandidates(db, project, null);
 
-/** merged = its own merge run recorded the merge at this head; gone = it left the train's reach (head, stage, PM hold). */
-export function memberStatusOf(db: Database, taskId: string, head: string): MemberStatus {
+/**
+ * merged = its own merge run recorded the merge at this head; gone = it left the train's reach (head, stage, PM hold). `bound` = the
+ * last question of a member that boarded through the unified candidates (CAND1 memberCheck) in place of the `mode = auto` rule.
+ */
+export function memberStatusOf(db: Database, taskId: string, head: string, bound: ((task: LedgerTask) => string | null) | null = null): MemberStatus {
   const merged = db.query(`SELECT mergeSha FROM scheduler_merges WHERE taskId = ? AND lower(reviewedHead) = lower(?) AND phase = 'merged'
     AND mergeSha IS NOT NULL ORDER BY updatedAt DESC LIMIT 1`).get(taskId, head) as { mergeSha: string } | null;
   if (merged) return { kind: "merged", sha: merged.mergeSha };
@@ -128,8 +132,8 @@ export function memberStatusOf(db: Database, taskId: string, head: string): Memb
   // head before stage: a card that went back to fix with a new head moved, and a moved verified member voids its train
   if (task && task.headSHA?.toLowerCase() !== head.toLowerCase()) return { kind: "gone", why: `head 变成 ${task.headSHA?.slice(0, 12)}`, moved: true };
   if (!task || task.stage !== "merge") return { kind: "gone", why: `阶段 ${task?.stage ?? "缺卡"}` };
-  if (mode !== "auto") return { kind: "gone", why: `流程改为 ${mode ?? "缺流程"}` };
-  return { kind: "waiting" };
+  const why = bound ? bound(task) : mode !== "auto" ? `流程改为 ${mode ?? "缺流程"}` : null;
+  return why ? { kind: "gone", why } : { kind: "waiting" };
 }
 
 export interface TrainContext { gh: TrainGh; store: TrainStore }
@@ -146,18 +150,21 @@ export type FormFence = (project: string, save: () => void) => void;
 export interface TrainTickDeps { notifyPm: Notify; now(): number; formFence?: FormFence }
 
 const fenced = (store: TrainStore, project: string, fence: FormFence | undefined): TrainStore =>
-  fence ? { ...store, save: (s) => fence(project, () => store.save(s)) } : store;
+  fence ? { ...store, save: (s) => fence(project, formingSave(s, () => store.save(s))) } : store;
 
 /** One train step per project per pass; a GitHub hiccup is logged and retried next pass, a stop still ends the pass. */
 export async function mergeTrainTick(db: Database, projects: readonly string[], deps: TrainTickDeps,
   ctx: TrainContext | null = defaultTrainContext(), requiredChecks: (project: string) => readonly string[] | null = configChecks): Promise<void> {
   if (!ctx || !db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return;
+  unifiedFiles(db, (c) => cachedFiles(ctx.gh, c)); // CAND1: observe predicts its batch with the tick's cached PR file reads
   for (const project of projects) {
     try {
       const required = requiredChecks(project);
       if (!required?.length) continue;
       const fuse = ciIoMapFuse(db, ctx.gh, deps); await fuse?.carry(project); // merge-arch-SELECT4: what earlier passes left open, red car or not
-      const train: TrainDeps = { ...ctx, now: deps.now, requiredChecks: required, memberStatus: (id, head) => memberStatusOf(db, id, head),
+      const live = ctx.store.load(project);
+      const train: TrainDeps = { ...ctx, now: deps.now, requiredChecks: required,
+        memberStatus: (id, head) => memberStatusOf(db, id, head, memberCheck(db, live, id, head, deps.now())),
         ciTimeout: trainCiTimeoutPort(db, deps.now),
         ciClass: trainCiClassPort(db, deps.now),
         ioMapFuse: fuse,
@@ -168,11 +175,10 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
             console.error(`⚠️ [merge-train] PM 通知没发出去（状态文件已记）：${(e as Error).message}`);
           });
         } };
-      const live = ctx.store.load(project);
       const voided = live && live.phase !== "done" ? mainCiTrainPause(db, live, train) : null; if (voided) await train.notify(live!, voided, false); // MAINCIW
       if (live && live.phase !== "done") { if (!schedulerV2SkipAny(db, live.members)) await stepTrain(live, train); } // S2D2: skip members hold the train
-      else await formTrain(project, schedulerV2Unskipped(db, trainCandidates(db, project)), { ...train, store: fenced(ctx.store, project, deps.formFence) },
-        (c) => cachedFiles(ctx.gh, c), nextSkip(live));
+      else await formTrain(project, schedulerV2Unskipped(db, unifiedTrainCandidates(db, project, trainCandidates(db, project), deps.now())),
+        { ...train, store: fenced(ctx.store, project, deps.formFence) }, (c) => cachedFiles(ctx.gh, c), nextSkip(live));
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       console.error(`⚠️ [merge-train] ${project}：${(e as Error).message}`);
