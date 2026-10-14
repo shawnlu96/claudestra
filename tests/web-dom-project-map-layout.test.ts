@@ -22,7 +22,8 @@ beforeAll(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   React = webRequire("react") as ReactNS;
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
-  ({ ProductView } = await import(new URL("../web/features/collab/product/product-view.tsx", import.meta.url).href));
+  // 字面量 require：测试选择器认得这条边（非字面量 import 会让选择退化成全量），根 tsc 也不去解析 web 的 tsx
+  ({ ProductView } = require("../web/features/collab/product/product-view.tsx") as { ProductView: unknown });
 });
 afterAll(async () => {
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
