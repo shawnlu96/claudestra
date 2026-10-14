@@ -38,7 +38,8 @@ describe("X15 演练 · 断网：中心不可用", () => {
     const w = await world(), T = await mergeReady(w, "task-offline"), M = await mergeReady(w, "task-merge");
     const ctx = await mergeIntent(w, M, H1);
     const { orderId, result } = await claimedWrite(w, T);
-    const starts = ["worker-b"]; // the one worker peer B started for the order
+    // peer B's worker starts on its claim: the number of claims the center saw for the order is the number of starts
+    const claims = () => w.k.center.log.filter(e => e.command === "lend.claim").length;
     const askId = ctx.authorizationAskId;
     await w.local.client.queryAsk({ ...V2_FIXTURE_SCOPE, askId });
     for (const i of w.all) await i.refresh();
@@ -91,8 +92,10 @@ describe("X15 演练 · 断网：中心不可用", () => {
     expect((await w.peerB.raw(pending)).command).toBe("lend.result");
     expect(w.served(from)).toEqual(["lend.result 200"]);
     expect(w.k.center.rows().orders.get(orderId)).toMatchObject({ status: "done", resultOperationId: "lend-offline" });
-    expect(starts).toEqual(["worker-b"]);
-    // 本机阶段命令同样显式重交（同一 requestId：回执先查，再发一次）；合并在恢复后正常跑一次
+    expect(claims()).toBe(1);
+    // 合并在恢复后照常跑一次；本机阶段命令同样显式重交（同一 requestId：回执先查，再发一次）
+    expect(outcome(await runMerge(w, ctx))).toMatchObject({ state: "succeeded", reported: true, replayed: false });
+    expect(w.ghCalls()).toHaveLength(1);
     expect((await w.local.send(stage)).command).toBe("task.stage");
     evidence(w, "offline", [
       { item: `peer-b:lend:${orderId}`, instance: "peer-b", local: { outbox: "pending_submission", requestId: result.requestId },

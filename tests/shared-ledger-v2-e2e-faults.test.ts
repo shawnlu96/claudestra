@@ -8,6 +8,7 @@ import { centralEnvelope } from "../src/lib/scheduler-central-context.js";
 import { checkSchedulerCentral } from "../src/lib/scheduler-central-gate.js";
 import { parseCommand, v2ObjectDigest } from "../src/lib/shared-ledger-contract-v2.js";
 import { V2_FIXTURE_SCOPE } from "../src/lib/shared-ledger-contract-v2-fixtures.js";
+import { testChildEnv } from "./test-env.js";
 import {
   cleanupWorlds, connectionOf, D, evidence, H1, lease, mergeIntent, mergeReady, outcome, RESOURCE, runMerge, versions, world, type World,
 } from "./shared-ledger-v2-e2e-world.test.js";
@@ -74,8 +75,8 @@ describe("X15 演练 · 崩溃", () => {
           process.kill(process.pid, "SIGKILL");
           await new Promise(() => {});
         });`;
-    const proc = Bun.spawn(["bun", "-e", child], { env: { ...w.ghEnv, X15_CRASH: JSON.stringify({ context: ctx,
-      connection: connectionOf(w, "local", w.local.actor), journal: join(w.local.dir, "central-journal") }) }, stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["bun", "-e", child], { env: testChildEnv({ PATH: w.ghEnv.PATH, GH_LOG: w.ghEnv.GH_LOG, X15_CRASH: JSON.stringify({ context: ctx,
+      connection: connectionOf(w, "local", w.local.actor), journal: join(w.local.dir, "central-journal") }) }), stdout: "pipe", stderr: "pipe" });
     await proc.exited;
     expect(proc.signalCode).toBe("SIGKILL");
     expect(w.ghCalls()).toHaveLength(1);
