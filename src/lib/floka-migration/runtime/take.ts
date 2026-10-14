@@ -53,7 +53,7 @@ async function putBack(fs: AliasFs, parked: string, aliasDir: string): Promise<s
 export async function unlinkOwned(fs: AliasFs, aliasDir: string, currentReal: string, entry: string | null): Promise<Removal> {
   // 预检只为常见情形少一次挪动;真正的所有权保证在取走之后的核对
   if (entry === null || (await fs.entryId(aliasDir)) !== entry) {
-    return { changed: false, refusal: conflict(`别名 ${aliasDir} 已不在或已被替换,不是本次核对过的那条软链,不删`) };
+    return { changed: false, refusal: conflict(`别名 ${aliasDir} 已不在、已被替换或未能占住,不是本次核对过的那条软链,不删`) };
   }
   const parked = join(dirname(aliasDir), `.${basename(aliasDir)}.floka-unlink-${randomUUID()}`);
   try {

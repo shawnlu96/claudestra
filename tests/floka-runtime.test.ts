@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { nodeAliasFs, tmuxServerProbe } from "../src/lib/floka-migration/runtime/adapters.ts";
+import { holdWith, type HoldIo, nodeAliasFs, tmuxServerProbe } from "../src/lib/floka-migration/runtime/adapters.ts";
 import { applyRuntimeAlias, planRuntimeAlias, rollbackRuntimeAlias, RUNTIME_ITEM, runtimeAliasStep } from "../src/lib/floka-migration/runtime/alias.ts";
 import type { AliasFs, RuntimeAliasInput, ServerProbe } from "../src/lib/floka-migration/runtime/types.ts";
 import { runTransaction, type TxStep } from "../src/lib/floka-migration/transaction/executor.ts";
@@ -467,6 +467,44 @@ describe("[验收线 2] off / observe / on、冲突与回滚", () => {
       await held!.release();
     }
     expect(await nodeAliasFs.hold(join(w.root, "nope"))).toBeNull();
+  });
+
+  test("[验收线 2] open 与路径查询之间别名被换:标识取自占住的描述符,不是路径上的替代项", async () => {
+    const closed: string[] = [];
+    // 描述符占住 1:100,路径此刻已是另一项 1:200
+    const io: HoldIo = { open: async () => ({ stat: async () => ({ dev: 1, ino: 100 }), close: async () => { closed.push("fd"); } }), entryId: async () => "1:200" };
+    const held = await holdWith(io, "/x/alias");
+    expect([held!.id, held!.pinned]).toEqual(["1:100", true]);
+    await held!.release();
+    const broken: HoldIo = { ...io, open: async () => ({ stat: async () => { throw new Error("EBADF"); }, close: async () => { closed.push("bad"); } }) };
+    await expect(holdWith(broken, "/x/alias")).rejects.toThrow("EBADF");
+    expect(closed).toEqual(["fd", "bad"]); // 释放关掉占位;stat 失败也先关再抛
+  });
+
+  test("[验收线 2] 占不住时 pinned=false;真实适配器占住的标识就是这一项自身", async () => {
+    expect((await holdWith({ open: async () => null, entryId: async () => "1:300" }, "/x/alias"))!.pinned).toBe(false);
+    expect(await holdWith({ open: async () => null, entryId: async () => null }, "/x/alias")).toBeNull();
+    const w = world();
+    symlinkSync(w.current, w.alias);
+    const held = await nodeAliasFs.hold(w.alias);
+    try {
+      expect(held!.pinned).toBe(process.platform === "linux" || process.platform === "darwin");
+      expect(held!.id).toBe((await nodeAliasFs.entryId(w.alias))!);
+    } finally {
+      await held!.release();
+    }
+  });
+
+  test("[验收线 2] 回滚时别名占不住:拒绝且不删,不凭可能被复用的标识动手", async () => {
+    const w = world();
+    expect((await applyRuntimeAlias(input(w))).status).toBe("aliased");
+    const before = tree(w.root);
+    w.fsLog.length = 0;
+    const fs: AliasFs = { ...w.fs, hold: async (p) => { const h = await w.fs.hold(p); return h && { ...h, pinned: false }; } };
+    const back = await rollbackRuntimeAlias(input(w, "on", { fs }));
+    expect([back.status, back.changed, back.refusals!.map((r) => r.code)]).toEqual(["refused", false, ["conflict-entry"]]);
+    expect(writes(w)).toEqual([]);
+    expect(tree(w.root)).toEqual(before);
   });
 });
 

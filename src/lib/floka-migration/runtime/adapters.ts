@@ -26,18 +26,40 @@ async function entryId(path: string): Promise<string | null> {
   }
 }
 
-/** 先开描述符占住 inode 再 lstat 取标识;开不了(平台不支持、无权限)就只给标识,不占 */
-async function hold(path: string): Promise<EntryHold | null> {
-  const fd = HOLD_FLAGS === null ? null : await open(path, HOLD_FLAGS).catch(() => null);
-  const id = await entryId(path).catch(async (e) => {
-    await fd?.close();
-    throw e;
-  });
-  if (id === null) {
-    await fd?.close();
-    return null;
+/** hold 用到的两步 IO;测试注入假的来复现「open 与 lstat 之间被换」的窗口 */
+export interface HoldIo {
+  /** 按 HOLD_FLAGS 打开这一项本身;平台不支持或打不开回 null */
+  open(path: string): Promise<{ stat(): Promise<{ dev: number; ino: number }>; close(): Promise<void> } | null>;
+  entryId(path: string): Promise<string | null>;
+}
+
+const nodeHoldIo: HoldIo = {
+  open: (path) => (HOLD_FLAGS === null ? Promise.resolve(null) : open(path, HOLD_FLAGS).catch(() => null)), // 打不开就按占不住处理,pinned=false 让调用方拒绝删
+  entryId,
+};
+
+const closeQuietly = async (fd: { close(): Promise<void> }): Promise<void> => {
+  await fd.close().catch(() => undefined); // 关不掉也只是占位提前失效,判断已作出
+};
+
+/**
+ * 占住这一项并给标识。标识取自打开的描述符(fstat),不取自路径:open 与路径查询之间别名被换时,
+ * 返回的仍是真被占住的那一项,路径上的替代项与它对不上,之后的所有权核对自然拒绝。
+ * 打不开(平台不支持、无权限、刚好不在)时不占,pinned=false:这时不担保标识不被复用,调用方须拒绝据此删除。
+ */
+export async function holdWith(io: HoldIo, path: string): Promise<EntryHold | null> {
+  const fd = await io.open(path);
+  if (fd === null) {
+    const id = await io.entryId(path);
+    return id === null ? null : { id, pinned: false, release: async () => undefined };
   }
-  return { id, release: async () => { await fd?.close().catch(() => undefined); } };
+  try {
+    const s = await fd.stat();
+    return { id: `${s.dev}:${s.ino}`, pinned: true, release: () => closeQuietly(fd) };
+  } catch (e) {
+    await closeQuietly(fd);
+    throw e;
+  }
 }
 
 export const nodeAliasFs: AliasFs = {
@@ -61,7 +83,7 @@ export const nodeAliasFs: AliasFs = {
     }
   },
   entryId,
-  hold,
+  hold: (path) => holdWith(nodeHoldIo, path),
   readlink: (path) => readlink(path),
   symlink: (target, path) => symlink(target, path, "dir"),
   unlink: (path) => unlink(path),

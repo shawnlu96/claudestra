@@ -22,6 +22,9 @@ const refused = (plan: RuntimeAliasPlan | undefined, refusals: Refusal[], change
   mode: "on", status: "refused", changed, refusals, ...(plan ? { plan, identityBefore: plan.identity } : {}),
 });
 
+/** 只有真占住的标识才能作删除依据;没占住给 null,unlinkOwned 据此拒绝删、原样保留 */
+const pinnedId = (h: EntryHold | null): string | null => (h?.pinned ? h.id : null);
+
 /** 按开关执行:off 什么都不读,observe 只出计划,on 建别名(已在则不动)。拒绝以报告返回,不抛 */
 export async function applyRuntimeAlias(i: RuntimeAliasInput): Promise<RuntimeAliasReport> {
   const mode = parseTxMode(i.mode);
@@ -40,7 +43,7 @@ export async function applyRuntimeAlias(i: RuntimeAliasInput): Promise<RuntimeAl
     }
   }
   try {
-    return await verifyAlias(i, plan, create, mine?.id ?? null);
+    return await verifyAlias(i, plan, create, pinnedId(mine));
   } finally {
     await mine?.release();
   }
@@ -62,7 +65,7 @@ async function verifyAlias(i: RuntimeAliasInput, plan: RuntimeAliasPlan, create:
 /**
  * 回滚:去掉别名,路径解析回到只有现存 runtime 目录。别名不在就是无事可做(幂等);
  * 别名位置是真实目录 / 指向别处 / 失效软链时不是本库建的,拒绝且不碰。server 连不上不拦回滚,但回滚前后身份必须相同。
- * 计划前先占住并记下别名这一项的标识(占住期间 inode 号不会被后来者复用),删时按 take.ts 先取走再核:期间任何时刻被换掉都拒绝,替代项放回原位。
+ * 计划前先占住并记下别名这一项的标识(占住期间 inode 号不会被后来者复用;占不住就不删,拒绝),删时按 take.ts 先取走再核:期间任何时刻被换掉都拒绝,替代项放回原位。
  */
 export async function rollbackRuntimeAlias(i: RuntimeAliasInput): Promise<RuntimeAliasReport> {
   if (parseTxMode(i.mode) !== "on") {
@@ -71,7 +74,7 @@ export async function rollbackRuntimeAlias(i: RuntimeAliasInput): Promise<Runtim
   // 入参不成立时 planRuntimeAlias 会拒绝,这里只是不去 lstat 非法路径
   const entry = typeof i.aliasDir === "string" && isAbsolute(i.aliasDir) ? await i.fs.hold(resolve(i.aliasDir)) : null;
   try {
-    return await rollbackHeld(i, entry?.id ?? null);
+    return await rollbackHeld(i, pinnedId(entry));
   } finally {
     await entry?.release();
   }
