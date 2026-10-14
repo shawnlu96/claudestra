@@ -112,14 +112,16 @@ function holdsSeat(db: Database, project: string, agent: string, reviewer: boole
 
 /**
  * agent 名的 seat 回查 scheduler_sessions（未退役、非 peer）：只认真正让它占位的绑定（holdsSeat），空闲绑定（如 merge / live）不抢；
- * 同一 agent 同时在几张卡上干活时按角色、updatedAt 取第一条占位的。步骤优先取它在 task_steps 里最近的一行，否则按卡的阶段
+ * 同一 agent 同时在几张卡上干活时只看与 seat 同角色的绑定，按 updatedAt 取第一条占位的（都判不出时取该角色最新一条）。步骤优先取它在 task_steps 里最近的一行，否则按卡的阶段
  */
 function sessionOf(db: Database, project: string, agent: string, reviewer: boolean): { taskId: string; step: string | null } | null {
   const rows = db.query(`SELECT s.taskId, s.role, t.stage FROM scheduler_sessions s JOIN tasks t ON t.id = s.taskId
     WHERE t.project = ? AND s.agent = ? AND s.transport != 'peer' AND s.state != 'retired'
-    ORDER BY (s.role = ?) DESC, s.updatedAt DESC`).all(project, agent, reviewer ? "reviewer" : "author") as
+    ORDER BY s.updatedAt DESC`).all(project, agent) as
     { taskId: string; role: string; stage: string }[];
-  const r = rows.find((x) => holdsSeat(db, project, agent, reviewer, x)) ?? rows[0];
+  // 只在与 seat 同角色的绑定里挑：审查员 seat 的未结审查互相保留占位时，作者阶段的捷径不能把它改认到作者卡上
+  const role = reviewer ? "reviewer" : "author", same = rows.filter((x) => x.role === role), pool = same.length ? same : rows;
+  const r = pool.find((x) => holdsSeat(db, project, agent, reviewer, x)) ?? pool[0];
   if (!r) return null;
   const own = hasTable(db, "task_steps")
     ? db.query("SELECT step FROM task_steps WHERE taskId = ? AND executor = ? ORDER BY updatedAt DESC, round DESC LIMIT 1").get(r.taskId, agent) as { step: string } | null

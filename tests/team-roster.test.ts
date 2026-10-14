@@ -265,6 +265,18 @@ test("[验收线 4] 同一 agent 两个工作绑定加一个更新的空闲绑�
   expect(ws[0]).toMatchObject({ name: "agent-shared", taskId: "W2", step: "write", round: 2, since: 5000 });
 });
 
+test("[验收线 4] 审查员 seat 的两条未结审查互相保留占位，另有作者在 build：回查仍落在审查卡上，作者绑定不抢", () => {
+  card("R1", "merge", { agent: "author-r" }); card("R2", "merge", { agent: "author-r" }); card("A1", "build", { agent: "agent-shared" });
+  const bind = (taskId: string, role: string, at: number) => db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+    VALUES (?, ?, 'agent-shared', ?, 'claude', 'acp', 'active', ?, 0, ?)`).run(taskId, role, `s-${taskId}`, `i-${taskId}`, at);
+  bind("R1", "reviewer", 1); bind("R2", "reviewer", 2); bind("A1", "author", 3);
+  for (const t of ["R1", "R2"]) db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
+    VALUES (?, ?, ?, 'review', 'review', 0, 1, 1, 3, 'submitted', 't', 0, 0)`).run(`rv-${t}`, t, P);
+  const ws = teamRoster(input({ poolTotals: (t) => t })).machines[0]!.workers;
+  expect(ws).toHaveLength(1);
+  expect(ws[0]).toMatchObject({ name: "agent-shared", role: "reviewer", taskId: "R2", step: "review" });
+});
+
 test("[验收线 5] peer 名叫 local：照列为单独一台，worker、卡与产出归它，不混记到本机", () => {
   hello("local");
   card("T1", "build"); order("1", "T1", { peer: "local" });
