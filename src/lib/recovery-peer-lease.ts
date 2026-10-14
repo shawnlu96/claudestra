@@ -21,6 +21,7 @@ import { FIX_LEASE_WAIT_CODE, FIX_RELAY_OP, FIX_RELAY_WINDOW_MS, leaseWaitOpen }
 import { FIX_REASSIGN_DEFAULT_MIN } from "./lend-fix-reassign-config.js";
 import type { RelayAway } from "./lend-fix-reassign.js";
 import type { LocalSwapFact } from "./recovery-fix-local-swap.js";
+import type { RemoteHead } from "./order-deliver.js";
 
 export const PEER_LEASE_KEY = "peerLeaseRecovery" as const;
 const LIVE = ["pending", "submitted", "unknown"];
@@ -29,6 +30,8 @@ export interface PeerLeasePorts {
   policy?: RecoveryPolicyPort;
   /** The family a new local author would run in now (frozen at handover); absent = scheduler-local-author.ts launch's own choice. */
   authorRuntime?: (project: string) => AuthorFamily | Promise<AuthorFamily>;
+  /** The lease branch's remote head before a handover (recovery-peer-lease-head.ts); absent = `git ls-remote`. */
+  remoteHead?: (repo: string, branch: string) => Promise<RemoteHead>;
 }
 const ports = new WeakMap<Database, PeerLeasePorts>();
 /** Same wiring pattern as setLocalSwapPorts: tests and the service inject ports per ledger. */

@@ -4,6 +4,8 @@
  * - observe's relay note: the planner tags the holder wait with the would-be relay or why there is none (recovery-peer-lease.ts); one
  *   `scheduler-recovery-observe` note per card / spec / round / head / holder / wait stretch / outcome;
  * - the peer author handover (recovery-peer-lease-handover.ts): off = nothing; observe = one note per would-be handover or block;
+ *   a lease branch whose remote head is unreadable or past the ledger's head is a block (recovery-peer-lease-head.ts): observe notes it,
+ *   on records it (`--op peer-head-block`, the rev moves), never handed over;
  *   on = `scheduler-fix-relay --op peer-handover` with the session and lease generation assessed here and the runtime a new local
  *   author would be created in now (frozen on the event). The transaction re-reads the switch and every proof; a block is noted, the
  *   card is never forced (no slot freed, no binding retired without the proofs). scheduler-local-author.ts creates in that frozen
@@ -22,6 +24,7 @@ import { FIX_LEASE_WAIT_CODE, leaseWaitOpen } from "./lend-fix-reassign-event.js
 import { observedTag, PEER_LEASE_KEY, peerLeaseMode, peerLeasePorts, relayObserveKey } from "./recovery-peer-lease.js";
 import { handoverCheck, handoverObserveKey } from "./recovery-peer-lease-handover.js";
 import { handoverRuntimeDrift } from "./recovery-peer-lease-family.js";
+import { probeHandoverHead } from "./recovery-peer-lease-head.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -66,6 +69,17 @@ async function handover(db: Database, task: LedgerTask, manager: Manager): Promi
     return;
   }
   const ev = c.evidence;
+  const head = await probeHandoverHead(db, ev); // the stop report is no preservation: the lease branch must stand at the ledger's head
+  if (head.why && mode === "observe") {
+    await note(db, task, manager, handoverObserveKey(task.id, { why: head.why, relevant: true }), `peer 作者交接阻断：${head.why}`, { kind: "handover_blocked", why: head.why });
+    return;
+  }
+  if (head.why) { // on: recorded once, the rev moves (this tick's plan is refused); the next snapshot plans on the old row again
+    const r = await manager("ledger", "scheduler-fix-relay", task.id, "--op", "peer-head-block", "--rev", String(task.rev), "--session", ev.sessionId,
+      "--lease-at", String(ev.leaseAt));
+    if (r.ok !== true) console.error(`⚠️ [scheduler] ${task.id} peer 作者交接阻断没记上，下轮重算：${String(r.error)}`);
+    return;
+  }
   if (mode === "observe") {
     await note(db, task, manager, handoverObserveKey(task.id, c), `本会让 peer 作者 ${ev.agent}（${ev.family}）的绑定退出 active，再由本机建修复作者`,
       { kind: "handover", evidence: ev });

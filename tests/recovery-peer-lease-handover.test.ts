@@ -31,6 +31,7 @@ const E2E_MS = 30_000;
 const WRITE: RemotePolicy = { mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "o/r" };
 const CODEX = { codex: { total: 2, busy: 0 }, claude: { total: 0, busy: 0 } };
 const PEER_AUTHOR = { agent: "w1@mate", sessionId: "sess-mate" };
+const AT_H2: RemoteHead = { ok: true, head: H2 };
 
 async function ready() {
   const f = autoFixture({ reviewerRuntime: "claude-code" });
@@ -48,7 +49,8 @@ async function ready() {
   const heads: Record<string, RemoteHead> = { main: { ok: true, head: "b".repeat(40) } };
   const mode = { now: "on" as RecoveryMode };
   const runtime = { now: "codex" as "claude" | "codex" };
-  setPeerLeasePorts(f.db, { policy: () => ({ mode: mode.now, manualAfterMs: null, source: "config" }), authorRuntime: () => runtime.now });
+  setPeerLeasePorts(f.db, { policy: () => ({ mode: mode.now, manualAfterMs: null, source: "config" }), authorRuntime: () => runtime.now,
+    remoteHead: async (_repo, branch) => heads[branch] ?? { ok: false as const, error: "没有这个分支" } });
   const lend = {
     borrow: async () => borrow, notifyPm: async () => {}, schedulerPolicy: () => policy,
     result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key),
@@ -197,7 +199,7 @@ describe("peerLeaseRecovery · peer author handover", () => {
       await reclaim(p);
       const lease = getWriteLease(p.f.db, "T1")!;
       const ctx = { actor: "scheduler", now: p.f.tickDeps.now() };
-      const base = { taskId: "T1", rev: p.f.task().rev, sessionId: PEER_AUTHOR.sessionId, leaseAt: lease.updatedAt, runtime: "codex" };
+      const base = { taskId: "T1", rev: p.f.task().rev, sessionId: PEER_AUTHOR.sessionId, leaseAt: lease.updatedAt, runtime: "codex", remoteHead: AT_H2 };
       expect(() => applyPeerHandover(p.f.db, ctx, { ...base, leaseAt: lease.updatedAt - 1 })).toThrow("代次");
       expect(() => applyPeerHandover(p.f.db, ctx, { ...base, rev: base.rev - 1 })).toThrow("变了");
       expect(() => applyPeerHandover(p.f.db, ctx, { ...base, sessionId: "other" })).toThrow();
@@ -234,7 +236,7 @@ describe("peerLeaseRecovery · peer author handover", () => {
       // The transaction itself re-reads the switch: not on, no handover even when called.
       const lease = getWriteLease(q.f.db, "T1")!;
       expect(() => applyPeerHandover(q.f.db, { actor: "scheduler" }, { taskId: "T1", rev: q.f.task().rev, sessionId: PEER_AUTHOR.sessionId,
-        leaseAt: lease.updatedAt, runtime: "codex" })).toThrow("不是 on");
+        leaseAt: lease.updatedAt, runtime: "codex", remoteHead: AT_H2 })).toThrow("不是 on");
     } finally { q.f.close(); }
   }, E2E_MS);
 });
@@ -244,7 +246,7 @@ const claimedAgain = (p: P) => {
   p.f.db.run("UPDATE lend_orders SET status = 'claimed', leaseUntil = ? WHERE taskId = 'T1'", [p.f.tickDeps.now() + 3_600_000]);
   p.f.db.run("UPDATE task_workflows SET authorFamily = 'claude' WHERE taskId = 'T1'"); // no done order left: the workflow names mate's Claude
 };
-const proofArgs = (p: P) => ({ taskId: "T1", rev: p.f.task().rev, sessionId: PEER_AUTHOR.sessionId, leaseAt: getWriteLease(p.f.db, "T1")!.updatedAt, runtime: "codex" });
+const proofArgs = (p: P) => ({ taskId: "T1", rev: p.f.task().rev, sessionId: PEER_AUTHOR.sessionId, leaseAt: getWriteLease(p.f.db, "T1")!.updatedAt, runtime: "codex", remoteHead: AT_H2 });
 
 describe("peerLeaseRecovery · peer stop proof", () => {
   test("[验收线 4] PM cancel alone: a claimed order cancelled by the reclaim is no stop proof — no handover, binding stays active", async () => {
@@ -341,6 +343,88 @@ describe("peerLeaseRecovery · frozen runtime through the plan", () => {
       const drift = observed(p).filter((e) => (e.data.data as { kind?: string } | undefined)?.kind === "runtime_drift" || e.text.includes("交接冻结"));
       expect(drift).toHaveLength(1);
       expect(drift[0].text).toContain("交接冻结 codex");
+    } finally { p.f.close(); }
+  }, E2E_MS);
+});
+
+const relayCli = (p: P) => p.cli("scheduler", "scheduler-fix-relay", "T1", "--op", "peer-handover", "--rev", String(p.f.task().rev),
+  "--session", PEER_AUTHOR.sessionId, "--lease-at", String(getWriteLease(p.f.db, "T1")!.updatedAt), "--runtime", "codex");
+
+const headBlocks = (p: P) => p.events().filter((e) => e.kind === "scheduler" && e.data.op === "peer_author_handover_head_block");
+const stoppedThenReclaimed = async (p: P) => {
+  await toFix(p);
+  claimedAgain(p);
+  leaseLend(p.f.db, { actor: "owner", now: p.f.tickDeps.now() }, "mate", { v: 1, orderId: p.orders()[0].orderId, gen: 1, action: "release", reason: "stopped", detail: null });
+  expect(p.orders()[0].status).toBe("unknown");
+};
+
+describe("peerLeaseRecovery · preserved head before the handover", () => {
+  test("[验收线 4] stopped with unpreserved pushed head: mate pushed H3 past the ledger's H2, then reported stopped — no handover", async () => {
+    const p = await ready();
+    try {
+      await stoppedThenReclaimed(p);
+      p.heads[BRANCH] = { ok: true, head: H3 }; // mate's worker pushed H3, never delivered it
+      await reclaim(p);
+      expect(p.f.task().headSHA).toBe(H2);
+      expect(await relayCli(p)).toMatchObject({ ok: false, error: expect.stringContaining("未交付成果") });
+      const ctx = { actor: "scheduler", now: p.f.tickDeps.now() };
+      expect(() => applyPeerHandover(p.f.db, ctx, { ...proofArgs(p), remoteHead: { ok: true, head: H3 } })).toThrow("未保全");
+      expect(() => applyPeerHandover(p.f.db, ctx, { ...proofArgs(p), remoteHead: null })).toThrow("核不了");
+      const rev = p.f.task().rev;
+      await p.tick();
+      // The block is recorded once and moves the rev: the plan made on the snapshot that dropped the old row is refused.
+      expect(headBlocks(p)).toEqual([expect.objectContaining({ data: expect.objectContaining({ head: H2, remoteHead: H3, branch: BRANCH }) })]);
+      expect(p.f.task().rev).toBeGreaterThan(rev);
+      await p.tick();
+      await p.tick();
+      expect(headBlocks(p)).toHaveLength(1);
+      expect(handovers(p)).toEqual([]);
+      expect(p.author()).toEqual([expect.objectContaining({ agent: PEER_AUTHOR.agent, transport: "peer", state: "active" })]);
+      expect(p.created).toEqual([]);
+      expect(observed(p).filter((e) => e.text.includes(H3.slice(0, 12)))).toHaveLength(1);
+      expect(p.f.db.query("SELECT mode FROM task_workflows WHERE taskId = 'T1'").get()).toEqual({ mode: "manual" });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("[验收线 4] remote head unreadable: no handover, no local author; observe notes the block and changes nothing", async () => {
+    const p = await ready();
+    try {
+      await stoppedThenReclaimed(p);
+      await reclaim(p);
+      delete p.heads[BRANCH];
+      expect(await relayCli(p)).toMatchObject({ ok: false, error: expect.stringContaining("核不了") });
+      await p.tick();
+      await p.tick();
+      p.heads[BRANCH] = { ok: true, head: H2 }; // read back later: the recorded block stands, PM decides
+      await p.tick();
+      expect(handovers(p)).toEqual([]);
+      expect(headBlocks(p)).toHaveLength(1);
+      expect(p.created).toEqual([]);
+      expect(p.author()).toEqual([expect.objectContaining({ agent: PEER_AUTHOR.agent, state: "active" })]);
+    } finally { p.f.close(); }
+    const q = await ready();
+    try {
+      await stoppedThenReclaimed(q);
+      q.heads[BRANCH] = { ok: true, head: H3 };
+      await reclaim(q);
+      q.mode.now = "observe";
+      await q.tick();
+      await q.tick();
+      expect(headBlocks(q)).toEqual([]);
+      expect(handovers(q)).toEqual([]);
+      expect(observed(q)).toEqual([expect.objectContaining({ text: expect.stringContaining("未交付成果") })]);
+    } finally { q.f.close(); }
+  }, E2E_MS);
+
+  test("[验收线 4] stopped and the branch stands at the ledger's head: the handover records the head it read", async () => {
+    const p = await ready();
+    try {
+      await stoppedThenReclaimed(p);
+      await reclaim(p);
+      await p.tick();
+      expect(headBlocks(p)).toEqual([]);
+      expect(handovers(p)).toHaveLength(1);
+      expect(handovers(p)[0].data).toMatchObject({ remoteHead: H2, head: H2, branch: BRANCH });
     } finally { p.f.close(); }
   }, E2E_MS);
 });

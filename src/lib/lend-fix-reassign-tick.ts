@@ -33,13 +33,14 @@ interface RelayCommand {
 
 export const fixRelayCommand = {
   valued: ["op", "rev", "session", "lease-at", "runtime"], bools: [],
-  usage: "scheduler-fix-relay <task> --op close-pr|wait-start|wait-end|peer-handover [--rev N] [--session S --lease-at T --runtime R]（调度服务：改派收尾 / 计时 / 作者交接）",
+  usage: "scheduler-fix-relay <task> --op close-pr|wait-start|wait-end|peer-handover|peer-head-block [--rev N] [--session S --lease-at T --runtime R]（调度服务：改派收尾 / 计时 / 作者交接）",
   async run(c: RelayCommand): Promise<Record<string, unknown>> {
     const ctx = c.ctx(), op = c.need("op");
     if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "自动改派的收尾只由调度服务记账");
     if (op === "close-pr") return { ok: true, relayPr: await closeRelayedPr(c.db, ctx, c.p.pos[1], c.deps.relayGh) };
-    if (op === "peer-handover") return { ok: true, ...(await import("./recovery-peer-lease-handover.js")).peerHandoverCommand(c) }; // PEERLEASE1
-    if (op !== "wait-start" && op !== "wait-end") throw new LedgerError("invalid", "--op 只能是 close-pr / wait-start / wait-end / peer-handover");
+    if (op === "peer-handover") return { ok: true, ...(await (await import("./recovery-peer-lease-handover.js")).peerHandoverCommand(c)) }; // PEERLEASE1
+    if (op === "peer-head-block") return { ok: true, ...(await (await import("./recovery-peer-lease-handover.js")).peerHeadBlockCommand(c)) }; // PEERLEASE1
+    if (op !== "wait-start" && op !== "wait-end") throw new LedgerError("invalid", "--op 只能是 close-pr / wait-start / wait-end / peer-handover / peer-head-block");
     return tx(c.db, () => {
       const task = c.task(c.p.pos[1]);
       if (op === "wait-start" && (task.stage !== "fix" || task.rev !== Number(c.need("rev")) || getWorkflow(c.db, task.id)?.mode !== "auto")) {
