@@ -19,6 +19,7 @@ import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import type { Git } from "./scheduler-review-worktree.js";
 import { writeTextAtomicSync } from "./state-file.js";
 import type { Rebuild } from "./scheduler-author-rebuild-checkout.js";
+import { lendAuthorCheckout } from "./lend-author-retire-checkout.js";
 import type { EnsureResult } from "./worker-session.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -104,7 +105,8 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
           return { kind: "unknown", reason: `${p.agent} 的目录、项目或运行时不符` };
         }
         const saved = await whileOwned(env.active, () => env.ledger("ledger", "scheduler-autostart", "step", String(intent.eventSeq), "local-author",
-          task.id, intent.id, `--rev=${task.rev}`, `--agent=${row.name}`, `--author-family=${family}`, `--dedup=local-author:${intent.id}`, ...(rebuild ? [`--replaces=${rebuild.replaces}`] : [])));
+          task.id, intent.id, `--rev=${task.rev}`, `--agent=${row.name}`, `--author-family=${family}`, `--dedup=local-author:${intent.id}`,
+          ...(rebuild?.replaces ? [`--replaces=${rebuild.replaces}`] : [])));
         if (saved.code === "lease-lost") throw new SchedulerStopped(String(saved.error));
         if (saved.ok !== true) return { kind: "unknown", reason: `本机会话已建，写回执行者失败：${String(saved.error)}` };
         return { kind: "ready", created: true, ref: { taskId: task.id, role: "author", agent: row.name, sessionId: row.sessionId,
@@ -119,6 +121,7 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
 }
 
 export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, opts: LocalStartOptions = {}, rebuild?: Rebuild): Promise<EnsureResult> {
+  rebuild ??= lendAuthorCheckout(env, task);
   const intent = claimed(env, task, rebuild?.replaces);
   if (!intent) return { kind: "manual", reason: "缺当前作者建会话意图，需 PM 指定执行者或由调度器重新计划" };
   const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, opts, rebuild?.name);

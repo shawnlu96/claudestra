@@ -17,6 +17,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "fix-strategy-remote-branch.ts": "vcs=1",
     "fix-strategy-remote-context.ts": "notice=2",
     "fix-strategy-runtime.ts": "proc=1 fs=2 vcs=1",
+    "lend-author-retire-checkout.ts": "vcs=3",
     "lend-fix-reassign-pr.ts": "proc=1 vcs=4",
     "lend-git.ts": "vcs=1",
     "pool-review-proof-raw.ts": "fs=2",
@@ -49,6 +50,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "effect-count-refresh.ts": "ledger=1", // EFFAUTO1: `ledger scheduler-recovery-observe` for effCountRefresh notes, through the pass manager
     "fix-strategy-tick.ts": "ledger=10",
     "ledger-pool-refusal-tick.ts": "ledger=1",
+    "lend-author-retire-tick.ts": "ledger=2",
     "lend-fix-reassign-tick.ts": "ledger=2",
     "lend-pr-takeover-refusal-request.ts": "ledger=1",
     "manual-merge-queue-pass.ts": "ledger=1",
@@ -200,6 +202,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-steps-write.ts": "sql=3 stmt=3",
     "ledger-write.ts": "sql=4 stmt=4",
     "lend-author-family.ts": "sql=1 stmt=1",
+    "lend-author-retire-write.ts": "sql=1 stmt=1",
     "lend-config-failure-pool.ts": "sql=2 stmt=2",
     "lend-fix-reassign-start.ts": "sql=1 stmt=1",
     "lend-fix-start.ts": "sql=1 stmt=1 proc=1 vcs=3",

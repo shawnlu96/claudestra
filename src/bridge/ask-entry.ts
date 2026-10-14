@@ -23,6 +23,7 @@ import { initSharedLedgerV2 } from "./shared-ledger-v2-wiring.js";
 import { initHumanNode } from "./human-node.js";
 import { initJoinOffers, onJoinOfferAnswered } from "./shared-ledger-join-offer.js";
 import { initCenterProposalInbox, onCenterProposalAnswered } from "./center-proposal-inbox.js";
+import { initCenterReplicaPull } from "../lib/shared-ledger-center-replica-pull-wiring.js";
 import { initTeamBodyFetch } from "./team-body-fetch.js";
 import { installSharedLedgerProjectAudit } from "./shared-ledger-project-audit-wiring.js";
 
@@ -271,6 +272,7 @@ export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: Disc
   installSharedLedgerProjectAudit(); // 共享项目核对接管改绑维护：必须在 initJoinOffers 首次维护之前同步装上（bridge/shared-ledger-project-audit-wiring.ts）
   initJoinOffers(); // 共享台账入组邀请：过期清理 + 补处理漏掉的作答（bridge/shared-ledger-join-offer.ts）
   initCenterProposalInbox(); // 中心待批的成员提案进「待你处理」：每 5 分钟拉一轮（bridge/center-proposal-inbox.ts）
+  initCenterReplicaPull(); // 中心批准的新 feature / 改图每 5 分钟落成本机副本；centerReplicaPull 缺省 observe（lib/shared-ledger-center-replica-pull.ts）
   initTeamBodyFetch(); // 主场领取中心的会话页请求、脱敏后回传；teamBody 全 off 时不轮询（bridge/team-body-fetch.ts）
   initHumanNode(); // 指给人的任务：进 build / fix 开指派 ask，作答写台账、通知 PM（bridge/human-node.ts）
   if (discord && d.controlChannelId) initAskPin(discord, d.controlChannelId);

@@ -27,6 +27,7 @@ import { materialsPolicyPort } from "../lib/recovery-materials-wiring.js";
 import { cfgReaderPath } from "../lib/recovery-materials-wiring.js" with { type: "macro" };
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { isDeliverRequest, LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
+import { sampleLendAuthor, sampleLendAuthorSweep } from "../lib/lend-author-retire-read.js";
 import { cancelLend, claimLend, leaseLend, listLendOrders, pollLend, reclaimLend, refuse, sweepLend, type LendNotice,
   type OfferInput } from "../lib/ledger-lend.js";
 
@@ -231,11 +232,12 @@ async function offer(c: LedgerCli, again: boolean): Promise<Result> {
     ...(o.branch ? { branch: o.branch, base: o.base } : {}), ...(materialsDiag ? { materialsDiag } : {}) };
 }
 
-function reclaim(c: LedgerCli): Result {
+async function reclaim(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   const reason = c.p.flags.reason ?? "";
   if (!reason.trim()) throw new LedgerError("invalid", "收回要写 --reason");
-  const r = reclaimLend(c.db, c.ctx(), { taskId: task.id, reason });
+  c.requireManager(task.project, "收回写代码");
+  const r = reclaimLend(c.db, c.ctx(), { taskId: task.id, reason, retire: await sampleLendAuthor(c.db, task.id, lendDeps(c).result?.remoteHead) });
   return { ok: true, task: task.id, peer: r.lease?.peer ?? null, cancelled: r.cancelled };
 }
 
@@ -268,7 +270,7 @@ async function bridgeCall(c: LedgerCli, endpoint: LendEndpoint): Promise<Result>
   if (c.deps.actor !== "owner") throw new LedgerError("forbidden", "lend 接口命令只给 bridge 用（以 owner 身份调）");
   const [, peer, raw] = c.p.pos;
   if (!peer || !PEER_RE.test(peer)) throw new LedgerError("invalid", "peer 名不合法");
-  const notified = await tell(c, sweepLend(c.db, c.ctx()));
+  const notified = await tell(c, sweepLend(c.db, c.ctx(), await sampleLendAuthorSweep(c.db, lendDeps(c).result?.remoteHead, c.ctx().now)));
   let body: unknown;
   try {
     body = JSON.parse(raw ?? "");
@@ -297,7 +299,7 @@ async function bridgeCall(c: LedgerCli, endpoint: LendEndpoint): Promise<Result>
 
 async function sweep(c: LedgerCli): Promise<Result> {
   if (c.deps.actor !== "owner") throw new LedgerError("forbidden", "lend-sweep 只给 bridge 用（以 owner 身份调）");
-  const notices = sweepLend(c.db, c.ctx());
+  const notices = sweepLend(c.db, c.ctx(), await sampleLendAuthorSweep(c.db, lendDeps(c).result?.remoteHead, c.ctx().now));
   return { ok: true, expired: notices.length, notified: await tell(c, notices) };
 }
 
