@@ -3,7 +3,8 @@
  * 分区列表的「已完成」：收着是一行（总数、近 24 小时完成数、最近 3 个），点开是搜索框 + 「今天 / 昨天 / 更早 / 时间未知」分段（SUBDAG5），
  * 默认只展开第一个非空段，每段先 20 行、每次再显示 50；全部没有完成时间时不出段标题，退回平铺。分段与搜索的规则在 focus-done-model.ts。
  * 全部完成（autoOpen）时默认展开；用户手动收起过的 feature 本次会话不再自动展开（模块级集合，FocusBoard 按 feature 重挂也记得住）。
- * 收着的段不卸载，只收成 0 高（高度过渡要它在）；跳转（reveal）先清搜索、展开所在段、分页扩到它，不带过渡，FocusBoard 才滚得准。
+ * 收着的段不卸载，只收成 0 高（高度过渡要它在）；跳转（reveal）先清搜索、展开所在段、分页扩到它。这一次所有段的开合都不带过渡：
+ * 搜索时摊开、清空后收起的段（可能在目标上面）若还在动画，FocusBoard 按旧位置滚，目标会被挤出视口（tests/web-collab-subdag-done-browser.test.ts）。
  */
 import { useState, type KeyboardEvent } from "react";
 import { Icon } from "../collab-icons";
@@ -58,7 +59,8 @@ export function FocusDone({ featureId, done, done24h, autoOpen, now, links, reve
   /** 搜索时用户收起的段（搜索词一变就清空：结果全摊开） */
   const [shut, setShut] = useState<{ q: string; keys: ReadonlySet<SectionKey> }>({ q: "", keys: new Set() });
   const [rows, setRows] = useState<Record<SectionKey, number>>({ today: FIRST_ROWS, yesterday: FIRST_ROWS, earlier: FIRST_ROWS, undated: FIRST_ROWS });
-  const [instant, setInstant] = useState<SectionKey | null>(null);
+  /** 跳转引起的这次开合不走过渡；用户再点段标题或改搜索词时恢复 */
+  const [instant, setInstant] = useState(false);
   const [revealed, setRevealed] = useState(0);
   const fresh = useFresh(done);
   const todayStart = localMidnight(now);
@@ -73,14 +75,14 @@ export function FocusDone({ featureId, done, done24h, autoOpen, now, links, reve
       setQuery("");
       setPicked(new Set([...browsing, k]));
       setRows((r) => ({ ...r, [k]: Math.max(r[k], rowsToShow(at)) }));
-      setInstant(k);
+      setInstant(true);
     }
   }
   const searching = query.trim() !== "";
   const shown = searching ? doneSections(done, todayStart, query) : all;
   const isOpen = (k: SectionKey) => (searching ? !(shut.q === query && shut.keys.has(k)) : browsing.has(k));
   const toggleSection = (k: SectionKey) => {
-    setInstant(null);
+    setInstant(false);
     const flip = (set: ReadonlySet<SectionKey>) => {
       const next = new Set(set);
       if (!next.delete(k)) next.add(k);
@@ -101,7 +103,7 @@ export function FocusDone({ featureId, done, done24h, autoOpen, now, links, reve
   ].filter(Boolean).join(" · ");
   const flat = undatedOnly(done);
   const filled = SECTION_KEYS.filter((k) => shown[k].length > 0);
-  const section = (k: SectionKey) => <DoneSection key={k} k={k} rows={shown[k]} limit={rows[k]} open={flat || isOpen(k)} flat={flat} instant={instant === k}
+  const section = (k: SectionKey) => <DoneSection key={k} k={k} rows={shown[k]} limit={rows[k]} open={flat || isOpen(k)} flat={flat} instant={instant}
     fresh={fresh} todayStart={todayStart} links={links} ft={ft} onToggle={() => toggleSection(k)} onMore={() => setRows((r) => ({ ...r, [k]: r[k] + MORE_ROWS }))} />;
   return (
     <>
@@ -115,7 +117,7 @@ export function FocusDone({ featureId, done, done24h, autoOpen, now, links, reve
       </div>
       {open && (
         <div className={st.body} data-done-list>
-          <SearchBox query={query} setQuery={setQuery} ft={ft} />
+          <SearchBox query={query} setQuery={(q) => { setInstant(false); setQuery(q); }} ft={ft} />
           {filled.length === 0 ? <p className={st.none}>{ft("没有匹配")}</p> : filled.map(section)}
         </div>
       )}

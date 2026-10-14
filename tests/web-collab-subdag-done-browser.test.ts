@@ -2,7 +2,8 @@
  * team-project-SUBDAG5 已完成区截图（opt-in）：SUBDAG_SHOTS_DIR=<仓库外目录> bun test tests/web-collab-subdag-done-browser.test.ts
  * 夹具 tests/helpers/subdag-fixture.ts，时钟 MAIN_NOW（上海 20:00），浅色，guardedPage 拦非回环请求。主线 F1 已完成 30 = 今天 12 / 昨天 8 / 更早 10，
  * 全完成 F9 12/12 其中今天 5。截图：1280 折叠 / 展开 / 搜索 / 全完成自动展开；390 走旧手机列表，只证明没回退（改前改后页面文本一致）。
- * 分页和「更早第 15 位」用第二个服务：extra 钩子给 F1 再塞 55 个更早完成的节点（5 个排在 d30 前面），更早段变 65 行，d30 落在第 15 位。
+ * 分页和「更早第 15 位」用第二个服务：extra 钩子给 F1 再塞 55 个更早完成的节点（5 个排在 d30 前面），更早段变 65 行，d30 落在第 15 位；
+ * 另塞 50 个昨天完成的 yd 节点，搜「d」时今天 / 昨天 / 更早都命中，跳转后昨天段要收起（它在目标上面，收起不能挪走目标）。
  * SUBDAG_BASELINE_WEB=<基线的 web 目录> 换成改前构建、文件名前缀 before-，只截图不断言。本文件不 import 带 react 的模块。
  */
 import { expect, test } from "bun:test";
@@ -38,12 +39,14 @@ const flashedInView = (key: string) => `(() => { const el = ${DONE}?.querySelect
 /** 列表 / 画布 / 手机分段就位（手机上全完成的 feature 只有一个收着的 ✓ 块，没有节点 key 可等） */
 const READY = `!!document.querySelector("[data-focus-board], [class*=world], [class*=mseg]")`;
 
-/** 给 F1 多 55 个更早完成的节点：x01–x05 落在 d21（72h 前）和 d30（81h 前）之间，x06–x55 比 d30 还早 */
+/** 给 F1 多 55 个更早完成的节点（x01–x05 落在 d21 72h 前和 d30 81h 前之间，x06–x55 比 d30 还早）和 50 个昨天完成的（38–43h 前） */
 function biggerF1(board: DagBoard): DagBoard {
-  const extra = Array.from({ length: 55 }, (_, i) => node(`x${String(i + 1).padStart(2, "0")}`, "done", [],
+  const earlier = Array.from({ length: 55 }, (_, i) => node(`x${String(i + 1).padStart(2, "0")}`, "done", [],
     { doneAt: MAIN_NOW - (i < 5 ? 72.5 + i : 90 + i) * HOUR, round: 1 }));
+  const yesterday = Array.from({ length: 50 }, (_, i) => node(`yd${String(i).padStart(2, "0")}`, "done", [], { doneAt: MAIN_NOW - (38 + i / 10) * HOUR, round: 1 }));
+  const extra = [...earlier, ...yesterday];
   return { ...board, features: board.features.map((f) => f.id !== "F1" ? f
-    : { ...f, nodes: [...f.nodes, ...extra], counts: { ...f.counts, total: f.counts.total + 55, done: f.counts.done + 55 } }) };
+    : { ...f, nodes: [...f.nodes, ...extra], counts: { ...f.counts, total: f.counts.total + extra.length, done: f.counts.done + extra.length } }) };
 }
 const bigExtra: Extra = async (path, url, req) => {
   if (req.headers.get("x-fixture-raw") || (path !== `${L}/dag` && path !== `${L}/dag/F1`)) return null;
@@ -152,7 +155,7 @@ test.skipIf(!out)("SUBDAG5: 已完成区搜索 / 按天分段 / 分页，1280 / 
       await page.locator('[data-done-section="earlier"]').getByRole("button", { name: "再显示 50", exact: true }).click();
       checks.earlierAfter = await page.evaluate(visibleRows("earlier"));
       await page.locator('[data-done-section="earlier"] h4 button').click();
-      await page.locator("[data-focus-board] [data-section=done] input").fill("x0");
+      await page.locator("[data-focus-board] [data-section=done] input").fill("d");
       await page.evaluate(`document.querySelector("[data-focus-board]").scrollTop = 0`);
       await page.locator('[data-focus-key="a-owner"]').getByRole("button", { name: "d30", exact: true }).click();
       await page.waitForFunction(`(${flashedInView("d30")})?.flash === true`, undefined, { timeout: 5_000 });
@@ -182,9 +185,9 @@ test.skipIf(!out)("SUBDAG5: 已完成区搜索 / 按天分段 / 分页，1280 / 
   expect(checks.searchKeys).toEqual(["d17"]);
   expect(checks.afterEsc).toEqual(["", 12]);
   expect(checks.noMatch).toBe("已完成 30 没有匹配");
-  // [验收线 3] 搜索中跳到更早第 15 位：搜索清空、更早展开、在视口里、闪一次
+  // [验收线 3] 搜索「d」（三段都命中）中跳到更早第 15 位：搜索清空、更早展开、昨天收起后目标仍在视口里、闪一次
   expect(checks.jump).toEqual({ search: "", row: { flash: true, inView: true, section: "earlier", index: 14 },
-    sections: [["今天 12", "true"], ["昨天 8", "false"], ["更早 65", "true"]] });
+    sections: [["今天 12", "true"], ["昨天 58", "false"], ["更早 65", "true"]] });
   // [验收线 4]
   expect(checks.autoSections).toEqual([["今天 5", "true"], ["昨天 7", "false"]]);
   expect([checks.autoOpen, checks.autoAfterClose]).toEqual(["true", "false"]);
