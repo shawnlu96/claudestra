@@ -62,6 +62,9 @@ jobs:
         id: plan
         run: bun scripts/ci-related-plan.ts plan "$RUNNER_TEMP/ci-related-plan"
         env:
+          CI_QUEUE_LIGHT: ${{ vars.CI_QUEUE_LIGHT }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CI_PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           CI_RELATED_CHECKS: ${{ vars.CI_RELATED_CHECKS }}
           CI_IO_MAP: ${{ vars.CI_IO_MAP }}
           GH_TOKEN: ${{ github.token }}
@@ -111,7 +114,7 @@ jobs:
       # 一片红不取消其它片：每片的失败都看得到
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ${{ fromJSON(needs.plan.outputs.scope == 'light' && '[1]' || '[1,2,3,4,5,6,7,8]') }}
     steps:
       # guard 要拿推送前的 baseline 比对（放宽必须有 raised[] 记录），需要完整历史；有 6 个测试 `git show` 固定的历史提交，
       # 所以各片也不能浅克隆
@@ -185,7 +188,7 @@ jobs:
       # related（plan 作业给出）：只跑冻结计划分给本片的文件，日志第 3 行记计划 digest；分不到文件的片写显式的 zero=1、不启动 bun test
       # （空参数会跑全仓）。scripts/ci-related-verify.ts 核对。
       - uses: actions/download-artifact@v4
-        if: needs.plan.outputs.scope == 'related'
+        if: needs.plan.outputs.scope == 'related' || needs.plan.outputs.scope == 'light'
         with:
           name: ci-related-plan
           path: ${{ runner.temp }}/ci-related-plan
@@ -197,10 +200,10 @@ jobs:
         env:
           CI_IO_TRACE: ${{ github.event_name == 'push' && format('{0}/io-trace.jsonl', runner.temp) || '' }}
         run: |
-          if [ "${{ needs.plan.outputs.scope }}" = related ]; then
+          if [ "${{ needs.plan.outputs.scope }}" = related ] || [ "${{ needs.plan.outputs.scope }}" = light ]; then
             bun scripts/ci-related-plan.ts files "$RUNNER_TEMP/ci-related-plan/plan.json" "${{ needs.plan.outputs.digest }}" ${{ matrix.shard }} > "$RUNNER_TEMP/files.txt"
             mapfile -t files < "$RUNNER_TEMP/files.txt"
-            printf 'shard=%s/8\nhead=%s\nplan=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "${{ needs.plan.outputs.digest }}" > "$RUNNER_TEMP/shard.log"
+            printf 'shard=%s/%s\nhead=%s\nplan=%s\n' ${{ matrix.shard }} "${{ needs.plan.outputs.scope == 'light' && '1' || '8' }}" "$(git rev-parse HEAD)" "${{ needs.plan.outputs.digest }}" > "$RUNNER_TEMP/shard.log"
             if [ ${#files[@]} -eq 0 ]; then echo zero=1 >> "$RUNNER_TEMP/shard.log"; exit 0; fi
             bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
             exit 0
@@ -350,21 +353,21 @@ jobs:
       # （tests/slow-tests.txt）；清单里有不存在 / 重复的文件、超过上限也红。
       # 全量运行（push / 列车 / 补验 / 非 on 的 PR）照旧核全部测试文件；补验检出的是请求绑定的合并提交，不是 main 的 GITHUB_SHA
       - name: Shards cover every test file exactly once
-        if: needs.plan.outputs.scope != 'related'
+        if: needs.plan.outputs.scope != 'related' && needs.plan.outputs.scope != 'light'
         run: bun run --silent test:shard verify shards 8 "$CHECKOUT_SHA"
         env:
           CHECKOUT_SHA: ${{ inputs.merge || github.sha }}
 
       - uses: actions/download-artifact@v4
-        if: needs.plan.outputs.scope == 'related'
+        if: needs.plan.outputs.scope == 'related' || needs.plan.outputs.scope == 'light'
         with:
           name: ci-related-plan
           path: related-plan
 
       # related：各片恰好跑了冻结计划的选集（不漏、不重、不跨计划，零执行片显式）；这只是相关测试覆盖，合入前另做 full 补验
       - name: Shards cover the related selection exactly once
-        if: needs.plan.outputs.scope == 'related'
-        run: bun scripts/ci-related-verify.ts related-plan/plan.json "${{ needs.plan.outputs.digest }}" shards 8 "$GITHUB_SHA"
+        if: needs.plan.outputs.scope == 'related' || needs.plan.outputs.scope == 'light'
+        run: bun scripts/ci-related-verify.ts related-plan/plan.json "${{ needs.plan.outputs.digest }}" shards "${{ needs.plan.outputs.scope == 'light' && '1' || '8' }}" "$GITHUB_SHA"
 
       # 第 1 片复用过检查时（ci-proof-reuse 工件里有回执）逐份再核一遍（scripts/ci-proof-reuse-verify.ts）：绑定写下它的那次 run / attempt
       # 与这里检出算出的输入，原 run 经 API 重新读回。核出问题就红；没有回执直接通过；API 读不到只警告。pattern 匹配不到工件不算失败。
@@ -510,6 +513,7 @@ jobs:
   # GITHUB_EVENT_NAME、GITHUB_HEAD_REF 是 runner 自带的环境变量，脚本直接读。
   desktop-scope:
     name: desktop scope
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -528,6 +532,7 @@ jobs:
         id: scope
         run: bun scripts/ci-desktop-scope.ts
         env:
+          CI_PLAN_SCOPE: ${{ needs.plan.outputs.scope }}
           CI_DESKTOP_SCOPE: ${{ vars.CI_DESKTOP_SCOPE }}
 
   # 菜单栏小程序（desktop/）：窗口 TS 的类型检查 + Rust 外壳的 cargo test。跑在 macOS 上，因为 app 只支持 macOS
