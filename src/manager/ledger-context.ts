@@ -60,6 +60,8 @@ export interface LedgerDeps {
   lend?: LendCliDeps;
   /** PMR-2 干预标记 / 推送的开关与状态文件；不给 = 读本机 recovery-policy.json 的 keys.pmRails、statePath("pm-rails.json")（单测注入） */
   pmRails?: { mode?(project: string): PmRailsMode; statePath?: string };
+  /** start_node 子进程带来的出处（环境变量 START_NODE_ATTEMPT_ENV）；PM 手敲的命令没有，照抄命令文本也带不过去 */
+  startNodeAttempt?: string;
   /** 自动改派交付后关旧 PR 用的 gh（i28-RA1）；不给 = 真跑 gh（单测注入） */
   relayGh?: Gh;
 }

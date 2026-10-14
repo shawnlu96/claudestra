@@ -31,6 +31,7 @@ import { FEATURE_SPLIT_CMDS } from "./ledger-feature-split-cmds.js";
 import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
 import { FEATURE_MIGRATE_CMDS } from "./ledger-feature-migrate-cmd.js";
 import { parseLedgerArgs, resolveActor, type ParsedArgs } from "./ledger-identity.js";
+import { START_NODE_ATTEMPT_ENV } from "../lib/ledger-autostart-grant.js";
 import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
 import { DISPATCH_CMDS } from "./ledger-dispatch-cmds.js";
@@ -193,6 +194,7 @@ async function realDeps(args: string[], p: ParsedArgs | null): Promise<LedgerDep
     autoProjects: () => { const s = readSchedulerConfig(); return s.enabled ? Object.keys(s.projects) : []; },
     autoDispatch: () => readSchedulerConfig().autoDispatch,
     notifyOwner: (text) => notify({ source: "ledger", chatId: repoEnvVar("CONTROL_CHANNEL_ID"), text }),
+    startNodeAttempt: process.env[START_NODE_ATTEMPT_ENV] || undefined,
   };
 }
 export async function cmdLedger(args: string[]): Promise<void> {

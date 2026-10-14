@@ -333,7 +333,10 @@ test("[验收线 12] r3 start-node-same-task-spoof：给自己建的卡伪造建
   expect(cmds(marked(f, "T2"))).toEqual(["stage", "decision"]);
 });
 
-/** 照 start_node 的参数手工走一遍：feature fx（节点 a–e）、按 attempt x 建卡开 auto、放置说明、跳过复述、绑节点 */
+/**
+ * 照 start_node 的参数走一遍：feature fx（节点 a–e）、按 attempt x 建卡开 auto、放置说明、跳过复述、绑节点。
+ * 后三步带 start_node 子进程的出处（startNodeAttempt = x），模拟 bridge 起的子进程；不带出处的写法见验收线 19。
+ */
 async function startNodeKit(f: F) {
   expect(await f.cli("pm", "feature-new", "fx", "--title", "探针", "--project", "p")).toMatchObject({ ok: true });
   const nodes = JSON.stringify(["a", "b", "c", "d", "e"].map((key) => ({ key, oneLine: key, fileGlobs: [`src/${key}.ts`] })));
@@ -347,11 +350,13 @@ async function startNodeKit(f: F) {
       "--fallback", "x")).toMatchObject({ ok: true });
   };
   const why = startNodePeerWhy("mate", "选最少"), skip = peerRestateSkip(why).stage;
+  const sn = (...args: string[]) => f.cliWith({ startNodeAttempt: "x" }, "pm", ...args);
+  const bindArgs = (node: string, id: string) => ["dag-bind", fx, node, id, "--rev", String(getFeature(f.db, fx)!.rev), key(id, "bind")];
   return {
-    fx, key, open, why,
-    place: (id: string, text = why) => f.cli("pm", "decision", id, text, key(id, "placement")),
-    restate: (id: string, ...more: string[]) => f.cli("pm", "stage", id, "--from", "spec", "--to", "restate", ...more, "--text", skip.text, key(id, "restate")),
-    bind: (node: string, id: string) => f.cli("pm", "dag-bind", fx, node, id, "--rev", String(getFeature(f.db, fx)!.rev), key(id, "bind")),
+    fx, key, open, why, bindArgs,
+    place: (id: string, text = why) => sn("decision", id, text, key(id, "placement")),
+    restate: (id: string, ...more: string[]) => sn("stage", id, "--from", "spec", "--to", "restate", ...more, "--text", skip.text, key(id, "restate")),
+    bind: (node: string, id: string) => sn(...bindArgs(node, id)),
   };
 }
 
@@ -423,4 +428,18 @@ test("[验收线 17] 状态文件坏了：报错给出按当前最大事件号�
   writeFileSync(statePath, error.slice(error.indexOf("{\"projects\"")));
   expect(await t.run()).toMatchObject({ ok: true, sent: 0 });
   expect(t.sent).toEqual([]);
+});
+
+test("[验收线 19] start_node 半途中断后 PM 照抄同一 attempt 的步骤补完：没有 start_node 子进程的出处，照标", async () => {
+  const f = fixture("observe");
+  const { open, bindArgs, bind } = await startNodeKit(f);
+  await open("fx-a", false);
+  expect(await f.cli("pm", ...bindArgs("a", "fx-a"))).toMatchObject({ ok: true }); // 逐字照抄 start_node 的 bind，PM 自己的 shell 里没有出处
+  expect(cmds(marked(f, "fx-a"))).toEqual(["dag-bind"]);
+  await open("fx-b", false);
+  expect(await f.cliWith({ startNodeAttempt: "y" }, "pm", ...bindArgs("b", "fx-b"))).toMatchObject({ ok: true }); // 出处是别的 attempt
+  expect(cmds(marked(f, "fx-b"))).toEqual(["dag-bind"]);
+  await open("fx-c", false);
+  expect(await bind("c", "fx-c")).toMatchObject({ ok: true }); // start_node 本次的子进程
+  expect(marked(f, "fx-c")).toEqual([]);
 });

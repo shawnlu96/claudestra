@@ -47,16 +47,16 @@ function bindStep(db: Database, p: ParsedArgs, task: LedgerTask, dedup: string):
 }
 
 /**
- * 认 start_node 开 auto 之后自己发的那几步（lib/dag-tools-steps.ts），用和执行同一份 CLI 解析结果（重复旗标按最后一份）：
- * dedup 键 `dag-start:<卡>:<attempt>:<步>`，同一 attempt 的建卡事件在库里，命令的每个参数都和 start_node 那一步一致——
- * peer 卡的放置说明（startNodePeerWhy 模板）、引用这条说明的 spec→restate、绑本卡的节点。tests/pm-rails.test.ts「验收线 12 / 14」。
- * 上限：PM 和 start_node 是同一个系统用户，豁免是防手误的护栏、不是安全边界；刻意伪造步骤的 dedup、照 start_node 的参数伪造
- * （例如编一条放置理由）不修，见 docs/architecture/pm-rails.md。
+ * 认 start_node 开 auto 之后自己发的那几步（lib/dag-tools-steps.ts）：子进程带着 start_node 设的出处（START_NODE_ATTEMPT_ENV），等于 dedup
+ * `dag-start:<卡>:<attempt>:<步>` 里的 attempt；同一 attempt 的建卡事件在库里；命令按执行用的同一份解析结果逐项等于那一步——peer 卡的
+ * 放置说明（startNodePeerWhy 模板）、引用它的 spec→restate、绑本卡的节点。tests/pm-rails.test.ts「验收线 12 / 14 / 19」。
+ * 上限：PM 和 start_node 是同一个系统用户，豁免是防手误的护栏、不是安全边界；刻意设置出处环境变量才算伪造，不修，见 docs/architecture/pm-rails.md。
  */
-function startNodeStep(db: Database, p: ParsedArgs): boolean {
+function startNodeStep(db: Database, p: ParsedArgs, from: string | undefined): boolean {
   const dedup = p.flags.dedup ?? "";
   if (!dedup.startsWith(DAG_START_DEDUP_PREFIX)) return false;
   const [taskId, attempt, step, ...rest] = dedup.slice(DAG_START_DEDUP_PREFIX.length).split(":");
+  if (!from || from !== attempt) return false; // 不是 start_node 本次起的子进程：PM 照抄同一条命令补步骤照标
   const key = (s: string) => `${DAG_START_DEDUP_PREFIX}${taskId}:${attempt}:${s}`;
   const born = getEventByDedup(db, key("task-new"));
   const task = getTask(db, taskId);
@@ -75,7 +75,7 @@ function startNodeStep(db: Database, p: ParsedArgs): boolean {
 
 /** 读命令、调度服务、owner、start_node 开卡步骤不开作用域：读不写事件，调度 / owner 从来不是 PM 角色（也省下调度 tick 每条命令的快照查询） */
 export function withPmRails<T>(deps: LedgerDeps, args: string[], p: ParsedArgs, run: () => Promise<T>): Promise<T> {
-  if (!isLedgerWrite(args, p) || deps.actor === "scheduler" || isOwnerLike(deps.actor) || startNodeStep(deps.db, p)) return run();
+  if (!isLedgerWrite(args, p) || deps.actor === "scheduler" || isOwnerLike(deps.actor) || startNodeStep(deps.db, p, deps.startNodeAttempt)) return run();
   const scope = { cmd: args[0] ?? "", mode: cachedPmRailsMode(deps.pmRails?.mode ?? pmRailsMode), modesAtStart: workflowModes(deps.db) };
   return pmRailsScope.run(scope, run);
 }
