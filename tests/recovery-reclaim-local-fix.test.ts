@@ -113,3 +113,28 @@ for (const edge of ["tree", "create"] as const) {
     } finally { f.close(); }
   });
 }
+
+/** A refused local build (create failure or full write slots) must not fall back to a fresh peer order once the switch left on. */
+for (const refusal of ["create", "slots"] as const) {
+  test(`on → observe, then the local ${refusal} refuses: no remote fallback order, no lease`, async () => {
+    const { f, p, intent } = await reclaimedFix("on");
+    try {
+      if (refusal === "create") {
+        const manager = p.deps.manager;
+        p.deps.manager = async (...a) => {
+          if (a[0] !== "create") return manager(...a);
+          setReclaimLocalFixPolicy(f.db, () => ({ mode: "observe", manualAfterMs: null, source: "config" }));
+          return { ok: false, error: "local create refused" };
+        };
+      } else {
+        p.context.maxWorkers = 0;
+        let reads = 0; // the entry gate reads on; the switch flips before the fallback edge
+        setReclaimLocalFixPolicy(f.db, () => ({ mode: reads++ === 0 ? "on" : "observe", manualAfterMs: null, source: "config" }));
+      }
+      const result = await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
+      expect(result).toMatchObject({ step: "waiting" }); expect(result.detail).toContain("reclaimLocalFix 已切到 observe");
+      expect(remoteOrder(f.db, intent.id)).toBeNull(); expect(heldLease(f.db, f.task())).toBeNull();
+      expect(getIntent(f.db, intent.id)?.status).not.toBe("done");
+    } finally { f.close(); }
+  });
+}

@@ -121,7 +121,7 @@ const OTHER_FAMILY: AfterReclaim = { claim: "peer family swap", bound: "收回�
 
 /**
  * After the write lease is gone (one reclaim, never two): claim, build the local author with the material's family and bind it.
- * label.gate (no swap) is re-read at the create and bind edges, the way a swap's localSwapGate / localSwapAuthority are.
+ * label.gate (no swap) is re-read at the create, bind and remote-fallback edges, the way a swap's localSwapGate / localSwapAuthority are.
  */
 async function localAfterReclaim(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, material: Material, source: string,
   context: RemoteConvergenceContext, deps: ConvergenceLifecycle, swap: LocalSwapEvidence | null, label: AfterReclaim) {
@@ -140,7 +140,8 @@ async function localAfterReclaim(db: Database, ctx: WriteCtx, intent: SchedulerI
   if (swap && "wait" in local) return localSwapWait(db, ctx, intent, local.wait);
   const halt = swap && !("wait" in local) ? localSwapAuthority(db, mustTask(db, task.id), swap) : null;
   if (halt) return localSwapWait(db, ctx, intent, halt);
-  const drift = !("wait" in local) ? label.gate?.("stopped") : null;
+  // also before a refused local build falls back remote: a fresh peer order would take a held lease the switch no longer allows
+  const drift = label.gate?.("stopped");
   if (drift) return { ok: true, step: "waiting", detail: drift.reason };
   if (!("wait" in local)) {
     bindFixReplacement(db, ctx, intent.id, local, material.path, deps.registryPath);
