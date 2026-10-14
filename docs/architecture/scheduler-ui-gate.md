@@ -64,17 +64,19 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src
   push writes no review_carry and never carries. Asking the owner only after catching up with main is UIOWNCARRY2.
 - Before the owner screenshot ask the scheduler catches the PR up with main (`src/lib/scheduler-ui-owner-fresh.ts`, switch
   `uiOwnerAskFresh`, default observe). The snapshot carries, for a review-stage ownerVisual UI card only, whether the head contains
-  the main this machine last fetched (`refs/remotes/origin/main` in the project's repoDir, local git; unreadable = unknown).
+  the remote's current main (`git ls-remote origin refs/heads/main` in the project's repoDir, cached 20s; missing objects fetched
+  with the merge driver's `+refs/heads/main:refs/remotes/origin/main` refspec; any failure = unknown), never just the last local fetch.
   Under `on`, a head behind main gets a `merge` intent at node `ui_owner_fresh` in place of the ask (the plan write admits that node
   only in review, ownerVisual, `on`, with the head's passing review; never while the queue is frozen, when the ask goes out as
   before). The merge tick begins it like a merge run, but in review, without the owner's approval and without the merge slot; it is
   no merge-queue / train candidate (those read merge-stage cards only). The merge driver runs its own update-branch and review_carry
-  proof (the same carry record `scheduler-review.ts` trusts), and stops it right before `claimAndMerge`; independently, the journal
+  proof (the same carry record `scheduler-review.ts` trusts; `mergeDirect` never skips the update for it), and stops it right before `claimAndMerge`; independently, the journal
   refuses any `merging` claim that is not a merge-stage `merge_deploy` / `manual_merge` run, and a fresh run that goes `unknown`
   ends as failed without freezing the queue. Conflict / red CI go through the CIF gate and send the card review → fix with the bounce.
   When done, `renderInputs` (UIOWNCARRY1) at the head the screenshots were registered on and at the new head are compared in a
   `ui_owner_fresh` record: identical → the next plan asks the owner on the new head with the card's digest; different or unreadable
-  → escalate `ui_owner_reshoot` (PM re-shoots on the new head), no ask. At most two chases per review entry, one per head; unknown
+  → escalate `ui_owner_reshoot` (PM re-shoots on the new head), no ask. The record binds only while the card's digest, specRev and
+  round still match it and no delivery registered screenshots after it, so a re-shoot on the new head lifts the escalation. At most two chases per review entry, one per head; unknown
   freshness asks as before. `observe` asks as before and records one observation per owner ask on a head behind main; `off` is as
   before. PM screenshot acceptance (non-ownerVisual cards) never chases.
 

@@ -26,7 +26,7 @@ import { advanceMergeRun, beginMergeRun, carryReceipt, getMergeRun, mergeRunDrif
 import { planScheduler, type PlannerDecision } from "../src/lib/scheduler-plan.js";
 import { currentReviewFacts } from "../src/lib/scheduler-review.js";
 import type { MainContains } from "../src/lib/scheduler-ui-owner-fresh.js";
-import { OWNER_FRESH_DONE, OWNER_FRESH_NODE, uiOwnerAskFreshMode } from "../src/lib/scheduler-ui-owner-fresh.js";
+import { OWNER_FRESH_DONE, OWNER_FRESH_NODE, ownerFreshStep, uiOwnerAskFreshMode } from "../src/lib/scheduler-ui-owner-fresh.js";
 
 const DIGEST = "d".repeat(64), PR = "https://github.com/example/repo/pull/5", SCHED = { actor: "scheduler" }, OWNER = { actor: "owner" };
 let root = "", work = "", reviewed = "", base = "";
@@ -193,6 +193,32 @@ describe("[验收线 1] owner ask on a head behind main, render inputs unchanged
   });
 });
 
+describe("[验收线 1] round 1: mergeDirect never skips the chase; the default fact reads the remote's current main", () => {
+  test("mergeDirect on, PR BEHIND with green CI: the chase still sends update-branch", async () => {
+    const w = world();
+    const r = begin(w);
+    const updates: string[] = [];
+    const { external, merges } = github(() => reviewed);
+    const direct: MergeExternal = { ...external, direct: () => true, inspect: async () => pr(reviewed, { mergeState: "BEHIND" }),
+      freshness: async () => ({ behindBy: 1, mainHead: heads.lib!.main }), updateBranch: async (p) => { updates.push(p); } };
+    const end = await driveMerge(run(w, r.intentId), direct, advance(w, r.intentId));
+    expect([updates, merges, end.phase, task(w).stage]).toEqual([[PR], [], "updating", "review"]);
+  });
+  test("production default: origin/main fetched before main moved still reads behind (ls-remote), never the stale cache", async () => {
+    const w = world();
+    const bare = join(root, `origin-${Date.now()}.git`), clone = join(root, `clone-${Date.now()}`);
+    await sh("init", "-q", "--bare", bare);
+    await sh("push", "-q", bare, `${base}:refs/heads/main`, `${reviewed}:refs/heads/feature`);
+    await sh("clone", "-q", bare, clone);
+    await sh("push", "-q", bare, `${heads.lib!.main}:refs/heads/main`); // main moves after the clone fetched: origin/main is stale
+    expect(execFileSync("git", ["rev-parse", "refs/remotes/origin/main"], { cwd: clone, encoding: "utf8" }).trim()).toBe(base);
+    writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: clone } } }));
+    const d = planScheduler(autoSnapshot(w.db, task(w), { registry: [], maxWorkers: 2 }));
+    expect(d).toMatchObject({ kind: "intent", action: "merge", node: OWNER_FRESH_NODE });
+    expect((d as Planned).reason).toContain(heads.lib!.main.slice(0, 12));
+  });
+});
+
 describe("[验收线 2] main's part changed web/: no ask, back to PM to re-shoot", () => {
   test("on: the record says render inputs changed; the plan escalates with the re-shoot reason", () => {
     const w = world();
@@ -212,6 +238,34 @@ describe("[验收线 2] main's part changed web/: no ask, back to PM to re-shoot
     step(w, r.intentId, "resolved", { receipt: OWNER_FRESH_DONE });
     expect(record(w)?.data.renderSame).toBe(false);
     expect(plan(w, fresh)).toMatchObject({ kind: "escalate", code: "ui_owner_reshoot" });
+  });
+});
+
+describe("[回归] a re-shoot on the new head voids the earlier re-shoot record", () => {
+  const reshot = (w: W, digest: string) => {
+    const r = begin(w);
+    chase(w, r.intentId, "web");
+    step(w, r.intentId, "resolved", { receipt: OWNER_FRESH_DONE });
+    expect(plan(w, fresh)).toMatchObject({ kind: "escalate", code: "ui_owner_reshoot" });
+    const extra = { ...task(w).extra, screenshotsDigest: digest };
+    w.db.query("UPDATE tasks SET extra=? WHERE id='T1'").run(JSON.stringify(extra));
+    w.add("agent-author", "deliver", { head: heads.web!.merged, uiEvidence: { digest, head: heads.web!.merged } });
+  };
+  const make = () => ({ kind: "wait", code: "in_flight", reason: "x" }) as PlannerDecision;
+  for (const [name, digest] of [["new digest", "e".repeat(64)], ["same digest re-delivered", DIGEST]] as const) {
+    test(`${name}: the gate lets the ask through`, () => {
+      const w = world();
+      reshot(w, digest);
+      expect(ownerFreshStep(autoSnapshot(w.db, task(w), opts(fresh)), make)).toBeNull();
+    });
+  }
+  test("a digest changed without a delivery no longer matches the record either", () => {
+    const w = world();
+    const r = begin(w);
+    chase(w, r.intentId, "web");
+    step(w, r.intentId, "resolved", { receipt: OWNER_FRESH_DONE });
+    w.db.query("UPDATE tasks SET extra=? WHERE id='T1'").run(JSON.stringify({ ...task(w).extra, screenshotsDigest: "e".repeat(64) }));
+    expect(ownerFreshStep(autoSnapshot(w.db, task(w), opts(fresh)), make)).toBeNull();
   });
 });
 

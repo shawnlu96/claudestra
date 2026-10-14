@@ -1,8 +1,8 @@
 /**
  * UIOWNCARRY2: before the scheduler opens an owner screenshot ask on an ownerVisual card it first brings the PR up to the current main,
  * so the owner's approval does not have to be re-shot at merge time. Pieces:
- * - fact (scheduler-snapshot.ts): for a review-stage ownerVisual UI card, whether the PR head contains the main this machine fetched
- *   (`refs/remotes/origin/main` in the project's repoDir); unreadable = unknown, which asks as before.
+ * - fact (scheduler-snapshot.ts): for a review-stage ownerVisual UI card, whether the PR head contains the remote's current main
+ *   (git ls-remote in the project's repoDir, missing objects fetched); unreadable = unknown, which asks as before.
  * - plan (scheduler-plan.ts reviewPass → ownerFreshStep): under `on` a behind head gets a `merge` intent at node OWNER_FRESH_NODE in
  *   place of the ask. The merge tick begins it through beginMergeRun (stage review, no owner approval yet: ownerFreshRefusal) and drives
  *   it with the merge driver's own update-branch and review_carry proof (carryReview: the same review_carry + merge_phase pair that
@@ -69,16 +69,36 @@ export interface OwnerFreshFact { mode: RecoveryMode; contains: boolean | null; 
 export interface OwnerFreshSnapshot { ownerFresh?: OwnerFreshFact }
 export type MainContains = (project: string, head: string) => { contains: boolean | null; mainHead: string | null };
 
-/** Local git only, no network: the main the scheduler last fetched. Any doubt is null. */
-const localMainContains: MainContains = (project, head) => {
+/** How long one remote read of main serves (per repoDir): snapshots are taken many times a tick, the remote moves on a minutes scale. */
+const REMOTE_TTL_MS = 20_000;
+const remoteMain = new Map<string, { at: number; head: string | null }>();
+
+/**
+ * The current main, not whatever this machine fetched last: the remote's refs/heads/main (git ls-remote, cached REMOTE_TTL_MS), its
+ * commit and the PR head fetched into the repoDir when missing (the same `+refs/heads/main:refs/remotes/origin/main` refspec the
+ * merge driver's carryReview fetches), then ancestry. Any failure (network, rate limit, no repoDir, objects missing) is null.
+ */
+const remoteMainContains: MainContains = (project, head) => {
   let repo: string | undefined;
   try { repo = readSchedulerConfig().projects[project]?.repoDir; } catch { repo = undefined; }
   if (!repo) return { contains: null, mainHead: null };
-  const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf8", timeout: 10_000 });
-  const main = git("rev-parse", "--verify", "--quiet", `${MAIN_REF}^{commit}`);
-  const mainHead = main.status === 0 ? main.stdout.trim().toLowerCase() : null;
-  if (!mainHead || !SHA.test(mainHead)) return { contains: null, mainHead: null };
-  const r = git("merge-base", "--is-ancestor", mainHead, head);
+  const git = (timeout: number, ...args: string[]) =>
+    spawnSync("git", args, { cwd: repo, encoding: "utf8", timeout, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  const now = Date.now();
+  let cached = remoteMain.get(repo);
+  if (!cached || now - cached.at > REMOTE_TTL_MS) {
+    const r = git(15_000, "ls-remote", "--quiet", "origin", "refs/heads/main");
+    const sha = r.status === 0 ? r.stdout.split(/\s+/)[0]?.trim().toLowerCase() ?? "" : "";
+    cached = { at: now, head: SHA.test(sha) ? sha : null };
+    remoteMain.set(repo, cached);
+  }
+  const mainHead = cached.head;
+  if (!mainHead) return { contains: null, mainHead: null };
+  const has = (sha: string) => git(10_000, "cat-file", "-e", `${sha}^{commit}`).status === 0;
+  const want = [...(has(mainHead) ? [] : [`+refs/heads/main:${MAIN_REF}`]), ...(has(head) ? [] : [head])];
+  if (want.length && git(60_000, "fetch", "--no-tags", "--quiet", "origin", ...want).status !== 0) return { contains: null, mainHead };
+  if (!has(mainHead) || !has(head)) return { contains: null, mainHead };
+  const r = git(10_000, "merge-base", "--is-ancestor", mainHead, head);
   return { contains: r.status === 0 ? true : r.status === 1 ? false : null, mainHead };
 };
 
@@ -88,17 +108,23 @@ export function ownerFreshFact(task: LedgerTask, template: string | undefined, o
   if (template !== "ui" || !ownerVisual || task.stage !== "review" || !task.headSHA || !SHA.test(task.headSHA)) return undefined;
   const mode = uiOwnerAskFreshMode(task.project, deps.policy);
   if (mode === "off") return undefined;
-  try { return { mode, ...(deps.contains ?? localMainContains)(task.project, task.headSHA) }; }
+  try { return { mode, ...(deps.contains ?? remoteMainContains)(task.project, task.headSHA) }; }
   catch { return { mode, contains: null, mainHead: null }; }
 }
 
 // ---- plan ---------------------------------------------------------------------------------------------------------------------
 
 const own = (e: LedgerEvent, op: string): boolean => e.kind === "scheduler" && e.actor === "scheduler" && e.data.op === op;
-/** The trusted record ownerFreshClose wrote for the run that ended on `head`. */
-const freshRecord = (events: readonly LedgerEvent[], head: string): LedgerEvent | undefined =>
-  events.findLast((e) => own(e, FRESH_OP) && e.data.to === head && typeof e.data.intentId === "string" && isOwnerFreshRun(e.data.intentId) &&
+/**
+ * The trusted record ownerFreshClose wrote for the run that ended on `head`, while it still speaks for the card's current screenshot
+ * evidence: same digest, specRev and round, and no delivery registered screenshots after it (a re-shoot on the new head voids it).
+ */
+function freshRecord(task: LedgerTask, events: readonly LedgerEvent[], head: string): LedgerEvent | undefined {
+  const rec = events.findLast((e) => own(e, FRESH_OP) && e.data.to === head && typeof e.data.intentId === "string" && isOwnerFreshRun(e.data.intentId) &&
     e.dedupKey === `scheduler:${e.data.intentId}:ui-owner-fresh`);
+  if (!rec || rec.data.digest !== (task.extra.screenshotsDigest ?? null) || rec.data.specRev !== task.specRev || rec.data.round !== task.round) return undefined;
+  return events.some((e) => e.seq > rec.seq && e.kind === "deliver" && e.data.uiEvidence != null) ? undefined : rec;
+}
 
 type Make = (node: string, reason: string) => PlannerDecision;
 /**
@@ -108,7 +134,7 @@ type Make = (node: string, reason: string) => PlannerDecision;
 export function ownerFreshStep(s: PlannerSnapshot & OwnerFreshSnapshot, make: Make): PlannerDecision | null {
   const f = s.ownerFresh, head = s.task.headSHA;
   if (!f || f.mode !== "on" || !s.ownerVisual || s.workflow?.template !== "ui" || s.task.stage !== "review" || !head) return null;
-  const rec = freshRecord(s.events, head);
+  const rec = freshRecord(s.task, s.events, head);
   if (rec && rec.data.renderSame !== true) {
     const why = typeof rec.data.why === "string" ? `：${rec.data.why}` : "";
     return { kind: "escalate", code: "ui_owner_reshoot", reason: `${OWNER_FRESH_RESHOOT}（head ${short(head)}）${why}`.slice(0, 500) };

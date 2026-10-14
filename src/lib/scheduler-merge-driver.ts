@@ -246,7 +246,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     run = await advance(run.phase, to, run.rev, receipt, mergeSha, newHead);
     return run;
   };
-  const direct = source.direct?.(run) === true;
+  const direct = source.direct?.(run) === true && !ownerFreshEnd(run); // UIOWNCARRY2: a fresh run always updates, mergeDirect never skips it
   const external = withCancelHandoff(watchUnknown(() => run, direct ? rereadUnknown(source, assertActive) : source, step, (pr) => { noChecks = pr.noChecks === true; }),
     foreign, MERGE_NOT_SENT, stopped); // CICANCEL1: a twice-cancelled CI goes to the PM through the same hook
   if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
