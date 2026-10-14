@@ -8,6 +8,8 @@
 .chip:hover { color: var(--text); border-color: var(--text-2); }
 .cnum { display: inline-flex; align-items: center; gap: 2px; font-family: var(--mono); color: var(--muted); }
 .cnum.ok { color: var(--ok); } .cnum.run { color: var(--s-run); }
+/* 子 DAG 框头 / 收起小片 / 手机节头的状态词（dag-canvas.tsx FeatureWordsLine）：写字，不只是图标 */
+.words { flex: none; white-space: nowrap; color: var(--muted); font-size: var(--fs-3); font-variant-numeric: tabular-nums; }
 .chipIn { animation: chipIn 420ms ease; }
 @keyframes chipIn { from { opacity: 0; transform: translateY(-6px) scale(.9); } }
 

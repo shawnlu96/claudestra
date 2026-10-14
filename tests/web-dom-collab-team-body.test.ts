@@ -156,9 +156,9 @@ for (const width of [1280, 390]) {
     expect(v.people).not.toContain("仅主场可见");
     expect(v.titles).toEqual([HOME]);
     expect(v.all).not.toMatch(/[0-9a-f]{16,}/i);
-    // 对它说：行为同 main（不挂输入框），占位换成新文字
+    // 对它说：行为同 main（不挂输入框），占位写在哪台机器、为什么不行（UXCARD1）
     expect(v.homeOnly).toEqual(["say"]);
-    expect(v.say).toBe("对它说对它说只在主场机器上可用");
+    expect(v.say).toBe("对它说这张卡在 其他成员的机器 上执行，对它说要那台机器授权，暂不支持");
     expect(v.all).not.toContain("仅主场可见");
     expect(v.textarea).toBe(false);
   });

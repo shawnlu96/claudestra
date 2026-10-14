@@ -137,7 +137,7 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
   }
   // 交付文件留在副本里供 submit 读取；只排除根目录，避免隐藏仓库自己的同名文件。
   try {
-    appendFileSync(join(dir, ".git", "info", "exclude"), input.write ? "\n/summary.txt\n/selfcheck.md\n" : "\n/report.md\n/findings.json\n");
+    appendFileSync(join(dir, ".git", "info", "exclude"), input.write ? "\n/summary.txt\n/selfcheck.md\n/ui-shots/\n/.ui-base/\n" : "\n/report.md\n/findings.json\n");
   } catch (e) {
     return { ok: false, reason: `排除交付文件失败：${(e as Error).message}` };
   }

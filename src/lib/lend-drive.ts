@@ -43,6 +43,8 @@ import { readSandboxOwner } from "./sandbox-order-owner.js";
 import { claimCaps, deliveredActual, rememberNoCaps } from "./role-model-settings-lend.js";
 import { lendUsageFor } from "./lend-usage-report.js";
 import { suggestFamilyProblem } from "./role-model-settings-wire.js";
+import { sendUiShots, type UiShotBudget } from "./lend-ui-send.js";
+import type { UiEvidence } from "./order-deliver-ui.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -117,6 +119,13 @@ export interface LendDeps {
   log(msg: string): void;
   /** proto 2 只认这轮 beat 的应答（lend-beat.ts，at = 收到的时刻）：null = 这轮没续上，截止不动；不设 / undefined = proto 1 逐单 lease renew */
   renewal?(row: LendRow): { res: LendRes<Lease | null>; at: number } | null | undefined;
+  /**
+   * 交付截图的上传（LENDUI2 lend-ui-send.ts，生产 = `manager lend call <peer> shot`）：body = { meta, file }，file 是工作副本里的拷贝；
+   * 不设（测试的假依赖、老接线）= 开关 off，不上传、交付不带清单
+   */
+  shot?: LendCall<"shot">;
+  /** 截图上传的本轮预算（lend-loop.ts roundDeps 每轮给一份，同一 peer 的各单共用）；不设 = 每次 publishWork 各算各的 */
+  shotBudget?: UiShotBudget;
   /** true = 这轮先不发这张单的结束通知（不联网阶段、这个 peer 本轮出站已失败、proto 2 的收回停单改在 beat 里带 ended）：不算发过，标记留着 */
   settleHold?(row: LendRow): boolean;
 }
@@ -428,12 +437,20 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
     step: str(o?.step), summary: work.summary, selfCheck: work.selfCheck }, d.push, { gate: () => g.gate(), settle: (e, r) => g.settle(e, r), check: (e) => g.check(e) });
   if (!pub.ok) return pub.at === "check" ? haltPublish(row, pub.denied!, d) : (await stop(pub), null);
   const pr = pub;
+  const shots = await sendUiShots(row, d, g); // 截图（LENDUI2）：不上传 / 传不成的都是 none，照常交付
+  if (shots.kind === "halt") return haltPublish(row, shots.denied, d);
+  if (shots.kind === "wait") return null;
   const late = await g.check("payload"); // 之后到落正文全是同步的
   if (late) return haltPublish(row, late, d);
-  const payload = { v: 1, orderId: row.orderId, gen: row.leaseGen,
+  const build = (uiEvidence?: UiEvidence) => ({ v: 1, orderId: row.orderId, gen: row.leaseGen,
     deliver: { v: 1, orderId: row.orderId, head: work.head, evidence: pr.pr ? `https://github.com/${t.repo}/pull/${pr.pr}` : t.branch, summary: work.summary,
-      selfCheck: work.selfCheck },
-    branch: t.branch, pr: pr.pr, session: { id: row.sessionId, family: row.family }, ...deliveredActual(d.db, row), ...lendUsageFor(d.db, row, { now: d.now }) };
+      selfCheck: work.selfCheck, ...(uiEvidence ? { uiEvidence } : {}) },
+    branch: t.branch, pr: pr.pr, session: { id: row.sessionId, family: row.family }, ...deliveredActual(d.db, row), ...lendUsageFor(d.db, row, { now: d.now }) });
+  let payload = build(shots.kind === "ok" ? shots.evidence : undefined);
+  if (shots.kind === "ok" && Buffer.byteLength(JSON.stringify(payload)) > BODY_MAX_BYTES) {
+    d.log(`${row.orderId} 截图不随交付：manifest_too_large`);
+    payload = build();
+  }
   const raw = JSON.stringify(payload);
   if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await publishFailed(row, { reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }, d), null);
   clearPublishFail(d.db, row.orderId);

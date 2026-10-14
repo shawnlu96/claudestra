@@ -12,9 +12,13 @@ import { isAskForViewer } from "../ask-viewer";
 import { AuqChoices, PermissionChoices, ReplyChoices } from "./ask-choices";
 import { AssignedChoices, assignedRejectText, isHumanNodeAsk } from "./assigned-choices";
 import { TerminalIcon } from "./ask-icons";
+import { askWord } from "../ask-words";
+import { isTeamProjectAsk, teamProjectCardOf } from "../team-project-asks";
+import { ProjectChoice } from "@/features/collab/shared-projects/project-choice";
 
 /**
  * 一张开着的「待你处理」卡的作答区（ask-card.tsx）：reply / 人发起的是按钮行 + 文本框（答不了的凭据只给一句说明），
+ * 团队项目确认卡（UXASK2）只用专用控件（TeamProjectChoices），规则不认的不给作答；
  * AUQ / 权限走原有的按键端点，Codex 弹框只能去终端（额度用完的只是告知几点恢复、回合失败卡 extra.failure 只说明已停，都不叫人去终端）。作答一律乐观（asks-store.answer）。
  */
 export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
@@ -57,15 +61,18 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   // ACP 宿主的卡（额度 / 权限）：按钮原样交给 bridge，由它转给宿主（set_config_option / 权限回包），不发键
   const acp = !!ask.extra?.acp;
   const pickAcp = (action: string) => run(() => answerAcp(dialogAgent, action), wireLabels(rows, [`[button:${action}]`]));
+  const team = !runtime && isTeamProjectAsk(ask);
+  const answerCard = (choices: string[]) => run(() => answerAskCard(ask.project, ask.id, { choices }), wireLabels(rows, choices));
   const auqLabels = (sel: number[][]) => (ask.options as { options?: { label: string }[] }[]).flatMap((q, qi) => sel[qi]?.map((oi) => q.options?.[oi]?.label ?? "") ?? []).filter(Boolean);
 
   return (
     <div className="mt-3">
       {!runtime && !canAnswer && <p className="text-[13px] opacity-75">{t("这个登录凭据只能看，作答要在 owner 本人的设备上")}</p>}
-      {!runtime && canAnswer && isHumanNodeAsk(ask) && (
+      {team && <TeamProjectChoices ask={ask} busy={busy || !canAnswer} onAnswer={answerCard} />}
+      {!runtime && canAnswer && !team && isHumanNodeAsk(ask) && (
         <AssignedChoices busy={busy} onAnswer={(wire, text, atts) => run(() => answerAskCard(ask.project, ask.id, { choices: [wire], text, atts }), wireLabels(rows, [wire]), text)} />
       )}
-      {!runtime && canAnswer && !isHumanNodeAsk(ask) && (
+      {!runtime && canAnswer && !team && !isHumanNodeAsk(ask) && (
         <ReplyChoices
           rows={rows}
           allowText={ask.allowText}
@@ -92,6 +99,24 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
             : <><TerminalIcon />{t("这个弹框要到终端里处理")}</>}
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * 团队项目确认卡的作答（UXASK2）：识别规则同 lib/shared-projects-source.ts（teamProjectCardOf）。带「选本机项目」的用 ProjectChoice
+ * （预选推荐项、没选不能确认、提交按钮 + select wire），没有的两颗按钮各发自己的 [button:id]；规则不认的不出任何作答控件。
+ * 格式按不看时间的那次判（now = 0），免得刚过期的合法卡被说成「格式不对」；过期由 bridge 拒（409，走 run 的失败文案）。
+ */
+function TeamProjectChoices({ ask, busy, onAnswer }: { ask: WebAsk; busy: boolean; onAnswer: (choices: string[]) => void }) {
+  const t = useT();
+  const card = teamProjectCardOf(ask, 0);
+  if (!card) return <p className="text-[13px] text-warning">{askWord(t, "这张确认卡格式不对，不能在这里确认")}</p>;
+  if (card.choice) return <ProjectChoice cardId={card.id} choice={card.choice} busy={busy} accept={card.accept} decline={card.decline} onAnswer={onAnswer} />;
+  return (
+    <div className="flex flex-wrap gap-2">
+      <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => onAnswer([`[button:${card.accept.id}]`])}>{card.accept.label}</button>
+      <button type="button" className="btn btn-sm" disabled={busy} onClick={() => onAnswer([`[button:${card.decline.id}]`])}>{card.decline.label}</button>
     </div>
   );
 }

@@ -10,6 +10,7 @@ import { agentLabel, answerSummary, askWhere, askAttachments, closedText, spanTe
 import { activeAnswered, clearAnswered, markAnswered } from "../answer-cooldown";
 import { asksStore, useAsks } from "../asks-store";
 import { isAskForViewer } from "../ask-viewer";
+import { isTeamProjectAsk } from "../team-project-asks";
 import { AskActions } from "./ask-actions";
 import { AnswerImages } from "./assigned-choices";
 import { ChatIcon, ClockIcon, TrashIcon } from "./ask-icons";
@@ -74,7 +75,8 @@ export function AskCard(props: { ask: WebAsk; now: number; focused: boolean; onO
           <pre className="max-h-60 overflow-auto whitespace-pre-wrap font-sans text-[12.5px]">{ask.body}</pre>
         </div>
       )}
-      {ask.bind && (
+      {/* 团队项目确认卡（UXASK2）不摆 bind 参数（满屏 id）：要批的内容在上面 bridge 写的 context 里 */}
+      {ask.bind && !isTeamProjectAsk(ask) && (
         <div className="mt-2 rounded-lg border border-warning/30 bg-warning/5 p-2.5 text-[12px]">
           <div className="mb-1 font-medium text-warning">{t("批准的是：{action}", { action: ask.bind.version ? `${ask.bind.action} · ${ask.bind.version}` : ask.bind.action })}</div>
           <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11.5px] opacity-85">{JSON.stringify(ask.bind.params, null, 2)}</pre>

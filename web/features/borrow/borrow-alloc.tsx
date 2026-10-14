@@ -1,7 +1,8 @@
 "use client";
 /** Per-family agent slots and read-only quota; successful saves flash and failures shake. */
 import { useEffect, useRef, useState } from "react";
-import { useT } from "@/lib/i18n";
+import { useLang, useT } from "@/lib/i18n";
+import { LEND_WORDS, ownerWordsTr } from "@/lib/owner-words";
 import { machineNow, stillOn, type LocalBody, type LocalProjectView, type QuotaReport } from "./borrow-api";
 import { cardLocked, saveThenRefresh, type Feed } from "./borrow-feed";
 import { LOCAL_MAX, localAgentsBody, oneAtATime, resetIn, weekUsed } from "./borrow-model";
@@ -45,6 +46,7 @@ export function LocalRow(props: {
 }) {
   const { project: p, feed } = props;
   const t = useT();
+  const slotsWord = ownerWordsTr(useLang())(LEND_WORDS.slots);
   const card = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [waitAfter, setWaitAfter] = useState<number | null>(null);
@@ -73,7 +75,7 @@ export function LocalRow(props: {
         {FAMILIES.map((f) => (
           <div key={f} className="flex min-w-0 flex-wrap items-center gap-1.5">
             <span className="font-medium">{FAMILY_LABEL[f]}</span>
-            <Stepper value={p.agents?.[f] ?? 0} limit={LOCAL_MAX} min={0} label={`${FAMILY_LABEL[f]} ${t("名额")}`}
+            <Stepper value={p.agents?.[f] ?? 0} limit={LOCAL_MAX} min={0} label={`${FAMILY_LABEL[f]} ${slotsWord}`}
               disabled={disabled} onCommit={(n, el) => save(localAgentsBody(p, f, n), el)} />
           </div>
         ))}

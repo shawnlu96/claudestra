@@ -62,6 +62,8 @@ const words: Record<string, string> = {
   '加入后对应的本机项目': 'Local project after joining', '请选择本机项目': 'Choose a local project',
   '推荐选项已选中；': 'Recommended option selected. ', '本机项目已选中；': 'Local project selected. ', '请选择本机项目；': 'Choose a local project. ',
   '只有点击确认才会加入。': 'You join only after you confirm.',
+  // Dialog entry to the inbox (UXASK2)
+  '有 {n} 张团队项目确认待你处理': '{n} team project confirmations are waiting for you', '去处理': 'Review',
 };
 
 /**

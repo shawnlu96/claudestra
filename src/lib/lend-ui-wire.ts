@@ -27,7 +27,7 @@ const IHDR_LEN = 13;
 const PNG_MIN = 8 + 12 + IHDR_LEN;
 
 /** PNG only, first chunk a 13-byte IHDR, bounded dimensions, a chunk walk that reaches IEND; data = the bytes to store. */
-function checkShotPng(b: Uint8Array): { ok: true; data: Uint8Array; width: number; height: number } | LendShotRefusal {
+export function checkShotPng(b: Uint8Array): { ok: true; data: Uint8Array; width: number; height: number } | LendShotRefusal {
   if (b.length > LEND_SHOT_LIMITS.png) return shotRefusal("too_large", `截图超过 ${LEND_SHOT_LIMITS.png} 字节`);
   if (sniffImage(b) !== "image/png") return shotRefusal("invalid", "只收 PNG（按文件头认）");
   if (b.length < PNG_MIN) return shotRefusal("invalid", "PNG 不完整");
