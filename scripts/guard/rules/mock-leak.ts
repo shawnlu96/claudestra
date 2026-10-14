@@ -47,7 +47,7 @@ const STR_LIT = /^\s*(["'`])([^"'`$\\]*)\1\s*$/;
  * 模块说明符参数（原文片段）解析成仓库相对路径的候选：字面量、`join(import.meta.dir, "<字面量>")`、
  * `new URL("<字面量>", import.meta.url)`（可带 .href / .pathname）。解析不到返回 null。
  */
-export function specCandidates(testFile: string, arg: string): string[] | null {
+function specCandidates(testFile: string, arg: string): string[] | null {
   const join = /^\s*join\s*\(\s*import\.meta\.dir\s*,\s*(["'`])([^"'`$\\]*)\1\s*\)\s*$/.exec(arg);
   const url = /^\s*new\s+URL\s*\(\s*(["'`])([^"'`$\\]*)\1\s*,\s*import\.meta\.url\s*\)\s*(?:\.\s*(?:href|pathname))?\s*$/.exec(arg);
   const lit = STR_LIT.exec(arg);
@@ -77,7 +77,7 @@ const sameTarget = (a: Target, b: Target) =>
   a.kind === "file" ? b.kind === "file" && a.path === b.path : a.kind === "unknown" && b.kind === "unknown" && a.key === b.key;
 
 /** 模块的运行时导出名；有 `export * from`（整体转出、列不全）返回 null */
-export function runtimeExports(raw: string): Set<string> | null {
+function runtimeExports(raw: string): Set<string> | null {
   const src = maskStrings(raw, true);
   if (/\bexport\s*\*\s*from\b/.test(src)) return null;
   const names = new Set<string>();
