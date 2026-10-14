@@ -18,6 +18,7 @@ import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import type { Git } from "./scheduler-review-worktree.js";
 import { writeTextAtomicSync } from "./state-file.js";
+import { handoverRuntime } from "./recovery-peer-lease-runtime.js";
 import type { Rebuild } from "./scheduler-author-rebuild-checkout.js";
 import type { EnsureResult } from "./worker-session.js";
 
@@ -77,7 +78,8 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
   const intent = claimed(env, task, rebuild?.replaces);
   if (!intent) return { kind: "wait", reason: "作者建会话意图已改变，下一轮重算" };
   const policy = readSchedulerConfig(opts.configPath).projects[task.project], made: { agent?: string } = {}; // made: AREB1 Created
-  const family = rebuild?.family ?? (policy?.agents ? poolAuthorRuntime(task.project, policy.agents, env.db.filename) : localAuthorRuntime(task.project, opts.configPath));
+  const family = rebuild?.family ?? handoverRuntime(env.db, task) // PEERLEASE1: the handover's frozen runtime, on only
+    ?? (policy?.agents ? poolAuthorRuntime(task.project, policy.agents, env.db.filename) : localAuthorRuntime(task.project, opts.configPath));
   const guard = () => {
     env.active();
     if (claimed(env, task, rebuild?.replaces)?.id !== intent.id) throw new Error("卡或建会话意图已改变，停止本次创建");

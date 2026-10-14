@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import { listLendOrders } from "../src/lib/ledger-lend.js";
+import { leaseLend, listLendOrders } from "../src/lib/ledger-lend.js";
 import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
@@ -47,7 +47,8 @@ async function ready() {
   const policy = { maxActiveWorkers: 2, remote: WRITE };
   const heads: Record<string, RemoteHead> = { main: { ok: true, head: "b".repeat(40) } };
   const mode = { now: "on" as RecoveryMode };
-  setPeerLeasePorts(f.db, { policy: () => ({ mode: mode.now, manualAfterMs: null, source: "config" }), authorRuntime: () => "codex" });
+  const runtime = { now: "codex" as "claude" | "codex" };
+  setPeerLeasePorts(f.db, { policy: () => ({ mode: mode.now, manualAfterMs: null, source: "config" }), authorRuntime: () => runtime.now });
   const lend = {
     borrow: async () => borrow, notifyPm: async () => {}, schedulerPolicy: () => policy,
     result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key),
@@ -75,7 +76,7 @@ async function ready() {
   const author = () => f.db.query("SELECT agent, sessionId, family, transport, state FROM scheduler_sessions WHERE taskId = 'T1' AND role = 'author' ORDER BY rowid")
     .all() as { agent: string; sessionId: string; family: string; transport: string; state: string }[];
   await toBuild(f);
-  return { f, cli, tick, hello, lendCall, heads, mode, events, author, created, policy, orders: () => listLendOrders(f.db, "T1") };
+  return { f, cli, tick, hello, lendCall, heads, mode, runtime, events, author, created, policy, orders: () => listLendOrders(f.db, "T1") };
 }
 type P = Awaited<ReturnType<typeof ready>>;
 
@@ -235,5 +236,111 @@ describe("peerLeaseRecovery · peer author handover", () => {
       expect(() => applyPeerHandover(q.f.db, { actor: "scheduler" }, { taskId: "T1", rev: q.f.task().rev, sessionId: PEER_AUTHOR.sessionId,
         leaseAt: lease.updatedAt, runtime: "codex" })).toThrow("不是 on");
     } finally { q.f.close(); }
+  }, E2E_MS);
+});
+
+/** The old write order put back to claimed at generation 1, as if mate's worker were still on it when PM reclaimed. */
+const claimedAgain = (p: P) => {
+  p.f.db.run("UPDATE lend_orders SET status = 'claimed', leaseUntil = ? WHERE taskId = 'T1'", [p.f.tickDeps.now() + 3_600_000]);
+  p.f.db.run("UPDATE task_workflows SET authorFamily = 'claude' WHERE taskId = 'T1'"); // no done order left: the workflow names mate's Claude
+};
+const proofArgs = (p: P) => ({ taskId: "T1", rev: p.f.task().rev, sessionId: PEER_AUTHOR.sessionId, leaseAt: getWriteLease(p.f.db, "T1")!.updatedAt, runtime: "codex" });
+
+describe("peerLeaseRecovery · peer stop proof", () => {
+  test("[验收线 4] PM cancel alone: a claimed order cancelled by the reclaim is no stop proof — no handover, binding stays active", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      claimedAgain(p);
+      expect(await reclaim(p)).toMatchObject({ ok: true });
+      expect(p.orders()[0]).toMatchObject({ status: "cancelled", leaseGen: 1 });
+      expect(() => applyPeerHandover(p.f.db, { actor: "scheduler", now: p.f.tickDeps.now() }, proofArgs(p))).toThrow("只是本机撤单");
+      await p.tick();
+      await p.tick();
+      expect(handovers(p)).toEqual([]);
+      expect(p.author()).toEqual([expect.objectContaining({ agent: PEER_AUTHOR.agent, transport: "peer", state: "active" })]);
+      expect(p.created).toEqual([]);
+      expect(observed(p)).toHaveLength(1);
+      expect(observed(p)[0].text).toContain("缺出借方报停或干净撤单回执");
+      // Nothing is forced: the old gate keeps refusing the peer row, the card waits in manual with the block on record.
+      expect(p.f.db.query("SELECT mode FROM task_workflows WHERE taskId = 'T1'").get()).toEqual({ mode: "manual" });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("[验收线 4] the lender's own `release stopped` of that generation before the reclaim: the handover goes through", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      claimedAgain(p);
+      leaseLend(p.f.db, { actor: "owner", now: p.f.tickDeps.now() }, "mate", { v: 1, orderId: p.orders()[0].orderId, gen: 1, action: "release", reason: "stopped", detail: null });
+      expect(p.orders()[0].status).toBe("unknown");
+      await reclaim(p);
+      await p.tick();
+      expect(handovers(p)).toHaveLength(1);
+      expect(handovers(p)[0].data.stops).toEqual([expect.objectContaining({ orderId: p.orders()[0].orderId, gen: 1, worker: "w1", proof: "stopped_report" })]);
+      expect(p.author()).toEqual([expect.objectContaining({ agent: PEER_AUTHOR.agent, state: "retired" })]);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("[验收线 4] a stopped report of another generation, or a peer author that is no proven order's worker: refused", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      claimedAgain(p);
+      leaseLend(p.f.db, { actor: "owner", now: p.f.tickDeps.now() }, "mate", { v: 1, orderId: p.orders()[0].orderId, gen: 1, action: "release", reason: "stopped", detail: null });
+      p.f.db.run("UPDATE lend_orders SET leaseGen = 2 WHERE taskId = 'T1'"); // the report was for generation 1
+      await reclaim(p);
+      expect(() => applyPeerHandover(p.f.db, { actor: "scheduler", now: p.f.tickDeps.now() }, proofArgs(p))).toThrow("缺出借方报停");
+    } finally { p.f.close(); }
+    const q = await ready();
+    try {
+      await toFix(q);
+      await reclaim(q);
+      q.f.db.run("UPDATE scheduler_sessions SET agent = 'w9@mate' WHERE taskId = 'T1' AND role = 'author'");
+      expect(() => applyPeerHandover(q.f.db, { actor: "scheduler", now: q.f.tickDeps.now() }, proofArgs(q))).toThrow("会话代次不符");
+      await q.tick();
+      expect(handovers(q)).toEqual([]);
+    } finally { q.f.close(); }
+  }, E2E_MS);
+});
+
+const localRuntime = (p: P, runtime: "codex" | "claude-code") => {
+  const reg = JSON.parse(readFileSync(p.f.registryPath, "utf8"));
+  reg.agents["agent-task-one"] = { ...reg.agents["agent-task-one"], runtime, transport: runtime === "codex" ? "acp" : "tmux" };
+  writeFileSync(p.f.registryPath, JSON.stringify(reg));
+};
+
+describe("peerLeaseRecovery · frozen runtime through the plan", () => {
+  test("[验收线 5] frozen Claude: the plan asks for Claude, the Claude author passes the session gate and gets the fix", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      p.runtime.now = "claude";
+      localRuntime(p, "claude-code");
+      await reclaim(p);
+      for (let i = 0; i < 6 && !p.f.intents().some((x) => x.action === "dispatch" && x.node === "fix"); i++) await p.tick();
+      expect(handovers(p)[0].data.runtime).toBe("claude");
+      expect(p.created).toEqual(["claude"]);
+      expect(snap(p).workflow?.authorFamily).toBe("claude");
+      expect(p.f.intents().filter((x) => x.action === "dispatch" && x.node === "fix")).toEqual([expect.objectContaining({ recipient: "agent-task-one" })]);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("[验收线 5] a local binding in another family than the frozen one is not passed off as it: no override, one drift note", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      await reclaim(p);
+      for (let i = 0; i < 4 && !p.created.length; i++) await p.tick();
+      expect(handovers(p)[0].data.runtime).toBe("codex");
+      // Simulate a bypassed creation: the new local author's binding says Claude.
+      p.f.db.run("UPDATE scheduler_sessions SET family = 'claude' WHERE taskId = 'T1' AND role = 'author' AND state = 'active' AND transport != 'peer'");
+      expect(snap(p).workflow?.authorFamily).toBe("claude"); // the old head's source, not the stray binding passed off as the handover's
+      await p.tick();
+      await p.tick();
+      const drift = observed(p).filter((e) => (e.data.data as { kind?: string } | undefined)?.kind === "runtime_drift" || e.text.includes("交接冻结"));
+      expect(drift).toHaveLength(1);
+      expect(drift[0].text).toContain("交接冻结 codex");
+    } finally { p.f.close(); }
   }, E2E_MS);
 });

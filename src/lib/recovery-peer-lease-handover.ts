@@ -3,8 +3,9 @@
  * whose write work PM formally reclaimed from a peer, the card's old peer author binding leaves `active` in one replayable scheduler
  * transaction. Only the card's current author row, transport peer, the exact session and lease generation the tick assessed, and only
  * on the existing proofs: lend-reborrow-facts.ts captureReborrowFacts (a real PM's reclaim of this exact ended lease, no live order or
- * unknown result, no open step or intent, the previous order terminal — done / cancelled / released — and no write order since). Time
- * offline is never a stop proof. Not here: archive / kill receipts (nothing is faked, nothing remote is touched), recordSessionRetirement's
+ * unknown result, no open step or intent, the previous order terminal and no write order since) — preparation only — plus the lender's
+ * own end fact for every write order of that lease generation (recovery-peer-lease-stop.ts). A borrower-side cancel or time offline is
+ * never a stop proof. Not here: archive / kill receipts (nothing is faked, nothing remote is touched), recordSessionRetirement's
  * finished-card rule (unchanged), the old row's family. The runtime this machine will create the author in is frozen on the event;
  * scheduler-auto-snapshot.ts trusts it only while the new local binding confirms it (recovery-peer-lease-family.ts).
  * tests/recovery-peer-lease-handover.test.ts.
@@ -21,11 +22,12 @@ import { captureReborrowFacts } from "./lend-reborrow-facts.js";
 import { getSchedulerSession, preserveSessionHistory } from "./scheduler-sessions.js";
 import { PEER_LEASE_KEY, peerLeaseMode } from "./recovery-peer-lease.js";
 import { PEER_HANDOVER_OP } from "./recovery-peer-lease-family.js";
+import { peerStopProofs, type StopProof } from "./recovery-peer-lease-stop.js";
 
 /** What the handover stands on; the tick passes session + lease generation, the transaction re-reads all of it. */
 export interface HandoverEvidence {
   specRev: number; round: number; head: string; agent: string; sessionId: string; family: AuthorFamily;
-  peer: string; leaseAt: number; reclaimSeq: number; previousOrder: string; fingerprint: string;
+  peer: string; leaseAt: number; reclaimSeq: number; previousOrder: string; fingerprint: string; stops: StopProof[];
 }
 /** relevant = an active peer author row on an auto fix card: its block is worth one observe note; otherwise nothing to say. */
 export type HandoverCheck = { evidence: HandoverEvidence } | { why: string; relevant: boolean };
@@ -46,8 +48,10 @@ export function handoverCheck(db: Database, task: LedgerTask): HandoverCheck {
   catch (e) { if (e instanceof LedgerError) return { why: e.message, relevant: true }; throw e; }
   if (row.createdAt > facts.lease.updatedAt) return { why: "peer 作者绑定晚于收回：代次不符", relevant: true };
   if (!task.headSHA) return { why: "卡上没有 head", relevant: true };
+  const stops = peerStopProofs(db, task.id, lease.peer, facts.lease.branch, facts.reclaim.seq, row.agent); // the lender's own end facts, not the reclaim
+  if (typeof stops === "string") return { why: stops, relevant: true };
   return { evidence: { specRev: task.specRev, round: task.round, head: task.headSHA, agent: row.agent, sessionId: row.sessionId, family: row.family,
-    peer: lease.peer, leaseAt: facts.lease.updatedAt, reclaimSeq: facts.reclaim.seq, previousOrder: facts.previous.orderId, fingerprint: facts.fingerprint } };
+    peer: lease.peer, leaseAt: facts.lease.updatedAt, reclaimSeq: facts.reclaim.seq, previousOrder: facts.previous.orderId, fingerprint: facts.fingerprint, stops } };
 }
 
 /**

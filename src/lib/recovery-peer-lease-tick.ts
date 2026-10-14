@@ -6,10 +6,12 @@
  * - the peer author handover (recovery-peer-lease-handover.ts): off = nothing; observe = one note per would-be handover or block;
  *   on = `scheduler-fix-relay --op peer-handover` with the session and lease generation assessed here and the runtime a new local
  *   author would be created in now (frozen on the event). The transaction re-reads the switch and every proof; a block is noted, the
- *   card is never forced (no slot freed, no binding retired without the proofs).
+ *   card is never forced (no slot freed, no binding retired without the proofs). scheduler-local-author.ts creates in that frozen
+ *   runtime (recovery-peer-lease-family.ts handoverRuntime); a local binding in another family is noted once (runtime_drift).
  * tests/recovery-peer-lease-tick.test.ts.
  */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, listEvents } from "./ledger-store.js";
@@ -19,6 +21,8 @@ import { heldLease } from "./ledger-lend-lease.js";
 import { FIX_LEASE_WAIT_CODE, leaseWaitOpen } from "./lend-fix-reassign-event.js";
 import { observedTag, PEER_LEASE_KEY, peerLeaseMode, peerLeasePorts, relayObserveKey } from "./recovery-peer-lease.js";
 import { handoverCheck, handoverObserveKey } from "./recovery-peer-lease-handover.js";
+import { handoverRuntimeDrift } from "./recovery-peer-lease-family.js";
+import { taskWorkerRefs } from "./scheduler-sessions.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -75,9 +79,20 @@ async function handover(db: Database, task: LedgerTask, manager: Manager): Promi
   if (r.ok !== true) console.error(`⚠️ [scheduler] ${task.id} peer 作者交接没记上，下轮重算：${String(r.error)}`);
 }
 
-/** After the card's plan, before the clock: both halves are independent and each is idempotent. */
+/** A local author bound in another family than the handover froze: the snapshot keeps the old source (gate refuses); noted once. */
+async function observeDrift(db: Database, task: LedgerTask, manager: Manager): Promise<void> {
+  if (peerLeaseMode(db, task.project) === "off") return;
+  const author = taskWorkerRefs(db, task.id).author, drift = handoverRuntimeDrift(db, task, author);
+  if (!drift || !author) return;
+  const key = `runtime-drift:${createHash("sha256").update(JSON.stringify([task.id, author.sessionId, drift])).digest("hex").slice(0, 32)}`;
+  await note(db, task, manager, key, `交接冻结 ${drift.frozen}，本机作者 ${author.agent} 却绑成 ${drift.bound}：不按它判作者家族，等 PM 核对`,
+    { kind: "runtime_drift", ...drift, agent: author.agent, sessionId: author.sessionId });
+}
+
+/** After the card's plan, before the clock: the halves are independent and each is idempotent. */
 export async function peerLeaseTick(db: Database, task: LedgerTask, plan: PlannerDecision, manager: Manager): Promise<void> {
   if (task.stage !== "fix") return;
   await observeRelay(db, task, plan, manager);
   await handover(db, task, manager);
+  await observeDrift(db, task, manager);
 }
