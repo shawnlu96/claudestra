@@ -137,7 +137,7 @@ test.skipIf(!out)("UXTERM1 A 段：侧栏 low-priority 徽章与借出页，1280
 import { serve as serveCollab } from './helpers/collab-fixture-serve';
 import { generateHomeFixture } from '@/features/collab/shared/home-fixture-gen';
 import { generateTeamFixture } from '@/features/collab/shared/team-fixture-gen';
-import type { Page } from 'playwright-core';
+import type { Locator, Page } from 'playwright-core';
 
 const COLLAB_VIEWS = ['outline', 'overview', 'work', 'detail', 'planning'] as const;
 /** 步骤线与详情占位已统一词表，完整标签豁免清单保持为空。 */
@@ -399,9 +399,12 @@ function opsFixture() {
   // 开卡表单原样显示所属模块的 id：夹具给一个可读 id，不让截图检查把 uuid 当标题
   const detail = JSON.parse(JSON.stringify(f).replaceAll(f.feature.id, 'module-sync')) as typeof f;
   fx.list.features = [detail.feature];
-  const view = execFixtureView(detail.feature.id, detail.tasks[0]?.taskId ?? 'task');
+  // 详情要打开的卡：挑一张进行中的（默认筛选只列进行中），执行视图与待审批都挂在它上面，按它绑定的规划节点标题去点
+  const open = detail.tasks.find(t => t.stage !== 'done' && t.stage !== 'verified')!;
+  const card = detail.dag.nodes.find(n => n.key === open.sourceTaskId)!.oneLine;
+  const view = execFixtureView(detail.feature.id, open.taskId);
   view.pendingAsks = view.pendingAsks.map(a => ({ ...a, expiresAt: NOW + 600_000, bind: { ...a.bind!, expiresAt: NOW + 600_000 } }));
-  return { list: fx.list, detail, view };
+  return { list: fx.list, detail, view, card };
 }
 
 async function opsBundle(repo: string, dir: string) {
@@ -443,14 +446,30 @@ function opsServe(dist: string, fx: ReturnType<typeof opsFixture>) {
   } });
 }
 
-/** 打开团队规划页，再按 view 展开团队操作区；返回要拍到的那块 */
-async function opsNavigate(page: Page, view: OpsView, lang: 'zh' | 'en', narrow: boolean, title: string) {
+/**
+ * exec / task / approve：打开一张团队卡详情（生产 source.ops(openTask) → TaskOps + 按卡过滤的 ExecEntry），在详情里展开；
+ * proposal：团队规划页（source.ops(null) → FeatureOps 的新建模块表单）。返回前断言确实在对应入口里
+ */
+async function opsNavigate(page: Page, view: OpsView, lang: 'zh' | 'en', narrow: boolean, title: string, card: string) {
   const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
   await page.getByText(title, { exact: true }).first().waitFor();
-  // 「团队」（桌面是中区标签，手机是顶栏按钮）→ 子标签「规划与提案」
-  await page.getByRole(narrow ? 'button' : 'tab', { name: tr('团队', 'Team'), exact: true }).click();
-  await page.getByRole('tab', { name: tr('规划与提案', 'Planning and proposals'), exact: true }).click();
-  const exec = page.getByRole('region', { name: tr('共享执行', 'Shared execution'), exact: true });
+  let exec: Locator;
+  if (view === 'proposal') {
+    // 「团队」（桌面是中区标签，手机是顶栏按钮）→ 子标签「规划与提案」
+    await page.getByRole(narrow ? 'button' : 'tab', { name: tr('团队', 'Team'), exact: true }).click();
+    await page.getByRole('tab', { name: tr('规划与提案', 'Planning and proposals'), exact: true }).click();
+    exec = page.getByRole('region', { name: tr('共享执行', 'Shared execution'), exact: true });
+  } else {
+    // 手机先点模块进任务列表，再点卡；桌面直接点画布 / 大纲里的卡
+    if (narrow) await page.getByRole('button').filter({ has: page.getByText(title, { exact: true }) }).first().click();
+    await page.getByText(card, { exact: true }).first().click();
+    // 详情入口才有「团队操作」（TaskOps）；规划页入口只有「团队规划」，进错入口这里就失败
+    const ops = page.getByText('团队操作', { exact: true });
+    await ops.first().waitFor();
+    expect(await page.getByText(tr('团队规划', 'Team planning'), { exact: true }).count()).toBe(0);
+    // 详情里的共享执行面板按卡过滤：只列这一张卡
+    exec = page.getByRole('region', { name: tr('共享执行', 'Shared execution'), exact: true });
+  }
   await exec.waitFor();
   let target = exec;
   if (view === 'task') {
@@ -483,7 +502,7 @@ test.skipIf(!out)('UXTERM5：团队操作区（执行面板 / 开卡 / 审批 / 
           const g = await guardedPage(browser, String(server.url), { width });
           await g.page.clock.install({ time: NOW });
           await g.page.goto(`${server.url}?mode=on&lang=${lang}`);
-          await opsNavigate(g.page, view, lang, width === 390, fx.detail.feature.title);
+          await opsNavigate(g.page, view, lang, width === 390, fx.detail.feature.title, fx.card);
           const name = `${phase}-ops-${view}-${width}${lang === 'en' ? '-en' : ''}`, text = await g.page.locator('body').innerText();
           texts[name] = text;
           if (lang === 'zh') {
