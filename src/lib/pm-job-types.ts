@@ -11,8 +11,10 @@ export type PmJobState = "queued" | "running" | "drafted" | "sending" | "sent" |
 export const PM_JOB_OPEN: readonly PmJobState[] = ["queued", "running", "drafted", "sending"];
 export const PM_JOB_STATES: readonly PmJobState[] = [...PM_JOB_OPEN, "sent", "unknown", "escalated", "observed", "dropped"];
 
-/** 首版白名单（规格 PM 定 2）；模型不能自己加 */
-export const PM_JOB_TYPES = { acceptance: "验收编号 / 范围解释", standard: "标准答复查证", location: "实现位置查证" } as const;
+/** 白名单（PMJOB1 PM 定 2；specDecided 是 PMJOB2 加的，依据只能是规格行、答复开头由代码引规格原文）；模型不能自己加 */
+export const PM_JOB_TYPES = { acceptance: "验收编号 / 范围解释", standard: "标准答复查证", location: "实现位置查证", specDecided: "规格已定：当前规格含 PM 补已写明" } as const;
+/** 接单时存进单子的规格快照上限（字节）：超过就不存，worker 照旧读文件并按「规格在提问之后改过」判 */
+export const PM_JOB_SPEC_MAX = 64 * 1024;
 
 export interface PmJobEvidence { file: string; line: number }
 
@@ -54,8 +56,14 @@ export interface PmJob {
   modeGen: number;
   /** on 且事先没被代码判成必须升级：成功才直回；false = 只出草稿 */
   direct: boolean;
-  /** 接单时代码按问题原文判出的必须升级类别 */
+  /** 接单时代码按问题原文判出的第一个门（旧单子只有这个字段） */
   forbidden: string | null;
+  /** 命中的全部门（PMJOB2）：问题正文过全部门，候选项只过硬门 */
+  forbiddenAll?: string[];
+  /** 命中了硬门：任何类型都不能代答 */
+  hard?: boolean;
+  /** 接单时的规格原文快照（≤ PM_JOB_SPEC_MAX）：worker 有快照就用快照跑 */
+  spec?: string;
   state: PmJobState;
   createdAt: number;
   updatedAt: number;

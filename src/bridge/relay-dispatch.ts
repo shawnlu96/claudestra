@@ -5,7 +5,7 @@
  */
 import { apiPathOk, isRedeemRequest, RELAY_BASE_HEADER } from "../lib/relay-protocol.js";
 import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, RELAY_SAME_NET_HEADER } from "../lib/relay-machine-path.js";
-import { forwardHeaders, gzipJson, headersToObject } from "../lib/relay-stream.js";
+import { forwardHeaders, headersToObject } from "../lib/relay-stream.js";
 import { RelayError, type InboundContext, type InboundRequest, type InboundResponse } from "../lib/relay-client-types.js";
 import { setRequestContext } from "./request-context.js";
 import { renewDeviceCookie } from "./device-cookie-renew.js";
@@ -36,5 +36,5 @@ export async function dispatchMachineRequest(req: InboundRequest, ctx: InboundCo
     ...(req.headers[RELAY_SAME_NET_HEADER] === "1" ? { sameNetwork: true } : {}),
   });
   const r = renewDeviceCookie(request, await handleApi(request)); // 设备 cookie 随使用续发，iOS 7 天清 cookie 也掉不了配对
-  return { status: r.status, ...(await gzipJson(headersToObject(r.headers), r.body, req.headers["accept-encoding"])) };
+  return { status: r.status, headers: headersToObject(r.headers), body: r.body }; // 压缩在 InboundRouter 统一做（relay-stream.ts gzipBody）
 }

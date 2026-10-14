@@ -103,23 +103,26 @@ async function settle(page: Page) {
  * 从「待你处理」页点提案的「去处理」：全站收件箱抽屉在最上层（标题、那张卡都点得到，手机上整屏页不再盖住它），卡带聚焦边框；
  * 返回后回到「待你处理」页。
  */
-async function inboxFromWaits(g: Awaited<ReturnType<typeof guardedPage>>, narrow: boolean, shot: (g: Awaited<ReturnType<typeof guardedPage>>, view: string) => Promise<void>) {
+/** UXHOME1 PM 补：「去处理」每一行都有；card = 点哪一行（提案卡，或带卡号的普通卡） */
+const CARDS = { proposal: { id: "ask-proposal", title: `提案待你批准：${PROPOSAL_TITLE}` }, plain: { id: "ask-a7", title: "接口命名二选一" } } as const;
+async function inboxFromWaits(g: Awaited<ReturnType<typeof guardedPage>>, narrow: boolean, shot: (g: Awaited<ReturnType<typeof guardedPage>>, view: string) => Promise<void>,
+  card: (typeof CARDS)[keyof typeof CARDS] = CARDS.proposal) {
   await g.page.waitForFunction(`[...document.querySelectorAll("button")].some((b) => /^待你处理\\s*2$/.test(b.innerText.trim()))`);
   await waitsButton(g.page).click();
   await g.page.getByText("这个项目上开着、等你的").waitFor();
-  await g.page.getByRole("button", { name: `去处理 提案待你批准：${PROPOSAL_TITLE}`, exact: true }).last().click();
+  await g.page.getByRole("button", { name: `去处理 ${card.title}`, exact: true }).last().click();
   const drawer = g.page.getByRole("dialog", { name: "待你处理" });
-  await drawer.getByText(`提案待你批准：${PROPOSAL_TITLE}`).waitFor();
-  await g.page.waitForFunction(`(() => { const r = document.getElementById("ask-ask-proposal").getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()`);
+  await drawer.getByText(card.title).first().waitFor();
+  await g.page.waitForFunction(`(() => { const r = document.getElementById("ask-${card.id}").getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()`);
   await g.page.waitForTimeout(400); // scrollIntoView 的平滑滚动停稳
   const top = await g.page.evaluate(`(() => {
-    const dialog = document.querySelector('[role="dialog"]'), card = document.getElementById("ask-ask-proposal");
+    const dialog = document.querySelector('[role="dialog"]'), card = document.getElementById("ask-${card.id}");
     const title = [...dialog.querySelectorAll("span")].find((x) => x.textContent === "待你处理");
     const onTop = (el) => { const r = el.getBoundingClientRect(); return dialog.contains(document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 12))); };
     return { title: onTop(title), card: onTop(card), focused: card.className.includes("border-primary"), sheet: document.body.innerText.includes("这个项目上开着、等你的") };
   })()`);
   expect<unknown>({ narrow, ...(top as object) }).toEqual({ narrow, title: true, card: true, focused: true, sheet: !narrow }); // 手机上整屏页先收起；桌面右栏照旧在抽屉底下
-  await shot(g, "05-inbox-from-waits");
+  if (card === CARDS.proposal) await shot(g, "05-inbox-from-waits");
   // 返回：抽屉收起，「待你处理」页还在
   await drawer.getByRole("button", { name: narrow ? "返回" : "关闭" }).click();
   await drawer.waitFor({ state: "detached" });
@@ -168,7 +171,7 @@ test.skipIf(!out)("UXINBOX1：待你处理计数 / 去处理 / 提案区读失�
             const rail = g.page.locator("aside section", { hasText: "要你定的" }).first();
             await rail.getByText(`提案待你批准：${PROPOSAL_TITLE}`).waitFor();
             await rail.getByText("接口命名二选一").waitFor();
-            expect(await rail.getByRole("button", { name: /^去处理/ }).count()).toBe(1);
+            expect(await rail.getByRole("button", { name: /^去处理/ }).count()).toBe(2); // UXHOME1 PM 补：每一行都有「去处理」
           }
           await shot(g, "01-home");
           // 「待你处理」页
@@ -183,12 +186,25 @@ test.skipIf(!out)("UXINBOX1：待你处理计数 / 去处理 / 提案区读失�
             if (narrow) await g.page.waitForFunction(`location.hash.startsWith("#asks")`);
           } else await shot(g, "02-waits");
           await g.ctx.close();
-          if (after) await inboxFromWaits(await open("ok", "&drawer=1"), narrow, shot);
+          if (after) {
+            await inboxFromWaits(await open("ok", "&drawer=1"), narrow, shot);
+            await inboxFromWaits(await open("ok", "&drawer=1"), narrow, shot, CARDS.plain);
+            // 有卡号的行：点卡号照旧打开任务详情（不是收件箱）
+            const k = await open("ok");
+            await waitsButton(k.page).click();
+            await k.page.getByText("这个项目上开着、等你的").waitFor();
+            await k.page.getByRole("button", { name: /^i28-A7/ }).last().click();
+            await k.page.getByText("这个项目上开着、等你的").waitFor({ state: "detached" });
+            await k.page.getByText(home.details["i28-A7"]!.task.title, { exact: false }).first().waitFor();
+            expect(await k.page.getByRole("dialog", { name: "待你处理" }).count()).toBe(0);
+            await k.ctx.close();
+          }
 
           // 团队标签提案区：列表正常 / 读 429 / 读 404
           for (const review of ["ok", "429", "404"] as const) {
             const t = await open(review);
-            await (narrow ? t.page.getByRole("button", { name: "团队", exact: true }) : t.page.getByRole("tab", { name: "团队", exact: true })).click();
+            const tab = after ? "规划与提案" : "团队"; // UXHOME1：团队源下「团队」标签改名
+            await (narrow ? t.page.getByRole("button", { name: tab, exact: true }) : t.page.getByRole("tab", { name: tab, exact: true })).click();
             await t.page.getByText("待审提案", { exact: true }).first().waitFor();
             await t.page.getByText("正在读取…").waitFor({ state: "detached" });
             if (after) {

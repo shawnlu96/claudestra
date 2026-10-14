@@ -126,10 +126,10 @@ test("[验收线 3] 修阶段最后一行是已交付的 fix:2 → 只写「修�
   expect(node(board, "T44").stepLine!.active).toEqual({ step: "fix", round: 2, roundUnknown: true });
   expect(node(board, "R5").stepLine!.active).toEqual({ step: "review", round: 5 });
   const html = renderNodes(board.features[0]!.nodes);
-  expect(text(html.T44!)).toContain("修");
+  expect(text(html.T44!)).toContain("返工");
   expect(text(html.T44!)).not.toMatch(/第\s*\d+\s*轮/);
-  expect(text(html.R5!)).toContain("审 · 第 5 轮");
-  expect(text(html.S2D2C!)).toContain("修");
+  expect(text(html.R5!)).toContain("审查 · 第 5 轮");
+  expect(text(html.S2D2C!)).toContain("返工");
   // 纯函数同口径：已派照它的轮次；退到兜底步骤（修阶段没有 fix 行）的照旧
   const steps = (rows: Steps) => rows.map(([id, state]) => ({ sourceStepId: id, sourceRev: 1, sourceSeq: 1, state }));
   expect(teamStepLine(steps([["fix:3", "assigned"]]), "fix")!.active).toEqual({ step: "fix", round: 3 });
@@ -143,8 +143,8 @@ test("[验收线 4] 本机夹具（同样的节点和步骤行）：执行人、
   for (const n of nodes) expect(n.ownerUnknown).toBeUndefined();
   for (const n of nodes) expect(n.stepLine?.active?.roundUnknown).toBeUndefined();
   const html = renderNodes(nodes);
-  expect(text(html.T44!)).toContain("修 · 第 2 轮");
-  expect(text(html.R5!)).toContain("审 · 第 5 轮");
+  expect(text(html.T44!)).toContain("返工 · 第 2 轮");
+  expect(text(html.R5!)).toContain("审查 · 第 5 轮");
   expect(text(html.S2D2C!)).toContain("dev-1");
   // 本机没有执行人的节点（未绑卡、已完成 / 已取消）照旧「未派」
   for (const key of ["Y1", "X12", "D1"]) expect(text(html[key]!)).toContain("未派");

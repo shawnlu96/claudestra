@@ -282,10 +282,10 @@ describe("[验收线 4] a pure module beside the existing paths", () => {
     }
   });
 
-  test("only the CI plan scripts import the selector (SELECT1): trains, the serial driver, manual queues and PM ops do not", () => {
+  test("only CI plan scripts and the pure light helper use the graph: merge entrances do not", () => {
     const ls = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "src", "scripts"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\n").filter((p) => /\.ts$/.test(p));
     const users = ls.filter((p) => !p.startsWith("src/lib/ci-impact-") && /ci-impact-(graph|select|inputs)/.test(readFileSync(join(ROOT, p), "utf8")));
-    expect(users).toEqual(["scripts/ci-desktop-scope.ts", "scripts/ci-related-plan.ts"]);
+    expect(users).toEqual(["scripts/ci-desktop-scope.ts", "scripts/ci-related-plan.ts", "src/lib/ci-light-select.ts"]);
   });
 });
 

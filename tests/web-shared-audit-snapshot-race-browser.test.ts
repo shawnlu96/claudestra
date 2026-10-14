@@ -78,12 +78,13 @@ async function capture(page: Page, name: string) {
   expect(issues).toEqual([]);
   return { file: name + '.png', shotIssues: issues };
 }
+// UXHOME1：团队源下「团队」标签改名「规划与提案」；改前基线上仍叫「团队」，两种都认
 async function scenario(page: Page, f: ReturnType<typeof syntheticServer>, width: number, theme: string) {
   const narrow = width < 700;
   Object.assign(f.state, { seq: 40, reads: 0, posts: 0, hold: false, cancelled: 0, held: [] });
   await page.goto(`${f.server.url}?mode=on&theme=${theme}`);
   await page.getByText(f.title, { exact: true }).first().waitFor();
-  await page.getByRole(narrow ? 'button' : 'tab', { name: '团队', exact: true }).first().click();
+  await page.getByRole(narrow ? 'button' : 'tab', { name: /^(规划与提案|团队)$/ }).first().click();
   const panels = page.getByLabel('共享执行');
   await panels.first().waitFor();
   // Wide S2W keeps the team slot beside the task detail slot. The narrow layout mounts one slot at a time,
