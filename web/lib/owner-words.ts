@@ -37,6 +37,7 @@ export const MACHINE_WORDS = {
   openQuestions: "任务所在的机器上有 {n} 个问题在等回答",
   planOnly: "这里只能看和规划；开工、合并要在任务所在的机器上做",
   fullTextThere: "全文只在任务所在的机器上",
+  visibleThere: "只在任务所在的机器上能看", originalThere: "原文只在任务所在的机器上能看", openSessionThere: "会话要在任务所在的机器上打开",
 } as const;
 
 /** low-priority 徽章与批量面板 */
@@ -87,6 +88,9 @@ const words: Record<string, string> = {
   [MACHINE_WORDS.openQuestions]: "{n} questions are waiting for an answer on the task's machine",
   [MACHINE_WORDS.planOnly]: "View and plan only here; start and merge on the machine running the task",
   [MACHINE_WORDS.fullTextThere]: "Full text is only on the machine running the task",
+  [MACHINE_WORDS.visibleThere]: "Only visible on the machine running this task",
+  [MACHINE_WORDS.originalThere]: "Original text is only visible on the machine running this task",
+  [MACHINE_WORDS.openSessionThere]: "Open sessions on the machine running this task",
   [LP_WORDS.badgeOn]: "Queued→{t}", [LP_WORDS.badgeExhausted]: "Low priority used up", [LP_WORDS.badgeWalled]: "Limit hit, waiting for reset",
   [LP_WORDS.walledTitle]: "Usage limit hit, continuing automatically at {time}",
   [LP_WORDS.compactLabel]: "Low priority + compact", [LP_WORDS.onLabel]: "Low priority on", [LP_WORDS.offLabel]: "Low priority off",

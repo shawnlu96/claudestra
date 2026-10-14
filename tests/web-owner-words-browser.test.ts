@@ -140,14 +140,8 @@ import { generateTeamFixture } from '@/features/collab/shared/team-fixture-gen';
 import type { Page } from 'playwright-core';
 
 const COLLAB_VIEWS = ['outline', 'overview', 'work', 'detail', 'planning'] as const;
-/** 待 PM 另开卡：范围外步骤线 / 详情占位（按完整词豁免，不能放行其他含「主场 / 复述」的句子）。 */
-const PENDING_WORDS = [
-  { file: 'team-session/team-session-view.tsx', text: '按页向主场机器读取，只读', position: '会话历史说明' },
-  { file: 'collab-step-line-model.ts', text: '复述', position: '7 格步骤线与详情步骤标题' },
-  { file: 'collab-detail.tsx', text: '原文仅主场可见', position: '事件 / 审查正文占位' },
-  { file: 'collab-detail.tsx', text: '仅主场可见', position: '缺正文占位' },
-  { file: 'collab-detail.tsx', text: '打开会话仅主场', position: '参与者会话占位' },
-];
+/** 步骤线与详情占位已统一词表，完整标签豁免清单保持为空。 */
+const PENDING_WORDS: { file: string; text: string; position: string }[] = [];
 const remainingBanned = (text: string) => {
   // 只剥掉占完整一行的已登记标签 / 句子，不替换长句里的同一子串。
   for (const { text: word } of PENDING_WORDS) text = text.replaceAll(new RegExp(`^${word}$`, 'gm'), '');
