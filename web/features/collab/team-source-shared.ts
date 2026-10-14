@@ -9,6 +9,7 @@ import type { FeatureDetail, FeatureList, SharedLedgerSession } from "@/lib/api/
 import { teamBodyTransport, type TeamBodyTransport } from "@/lib/api/shared-ledger-team-body";
 import { fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
 import { localProjectOf } from "@/lib/collab-source-binding";
+import { rememberDetailTarget } from "./detail-pause-target";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
@@ -271,6 +272,7 @@ function homeMirror(project: string) {
       const own = await fetchLedgerTask(local, card, signal);
       // 卡号、事项号换成团队视图的（总览 ov.items 是中心 feature）：本机事项号和中心 feature.id 不一定相同，不换目标句查不到
       const out: TaskDetail = { ...own, task: { ...own.task, id, itemId: d.task.itemId } };
+      rememberDetailTarget(out, local, card);
       details.add(out);
       for (const n of [own.task.agent, own.task.pm]) { const b = bareAgent(n); if (b) agents.add(b); }
       syncActs(); // 详情返回前就到了的执行者动作，此刻放出来
