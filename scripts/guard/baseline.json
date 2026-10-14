@@ -491,6 +491,24 @@
       "from": 0,
       "to": 0,
       "why": "merge-arch-REUSE1 按规格给第 1 片的 typecheck 与入口打包两步套上复用包装（scripts/ci-proof-reuse.ts，受信仓库变量 CI_PROOF_REUSE 缺省 observe：照常执行只记拟命中，on 才跳过并留回执），加上传复用记录 / 回执工件的步骤与 check 作业里的回执核对一步；测试、guard、必需检查名、always()、fail-fast:false、GUARD_BASE / GUARD_STRICT、既有 timeout 与覆盖核对原样不动，caps 不动"
+    },
+    {
+      "key": "guard:scripts/guard/rules/mock-leak.ts",
+      "from": 0,
+      "to": 0,
+      "why": "MOCKLEAK1 新增 mockleak 规则（测试里的 mock.module 须带全被 mock 模块的导出、不许经活命名空间调自己），默认上限 0，存量已改到 0，不放宽任何已有项；package.json 的 check / guard 脚本和 CI Guard 步骤不变"
+    },
+    {
+      "key": "guard:scripts/guard/index.ts",
+      "from": 0,
+      "to": 0,
+      "why": "MOCKLEAK1 新增 mockleak 规则（测试里的 mock.module 须带全被 mock 模块的导出、不许经活命名空间调自己），默认上限 0，存量已改到 0，不放宽任何已有项；package.json 的 check / guard 脚本和 CI Guard 步骤不变"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "MOCKLEAK1 新增 mockleak 规则（测试里的 mock.module 须带全被 mock 模块的导出、不许经活命名空间调自己），默认上限 0，存量已改到 0，不放宽任何已有项；package.json 的 check / guard 脚本和 CI Guard 步骤不变"
     }
   ]
 }
