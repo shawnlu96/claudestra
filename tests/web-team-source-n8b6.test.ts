@@ -167,6 +167,6 @@ test("[验收线 3] 同一份团队步骤线进任务详情 / 列表：当前步
   expect(p.stderr.toString()).toBe("");
   const { line, dots } = JSON.parse(p.stdout.toString()) as { line: string; dots: string };
   expect(line).toMatch(/data-step="fix"[^>]*aria-current="step"/);
-  expect(text(dots)).toContain("修");
+  expect(text(dots)).toContain("返工");
   expect(text(dots)).not.toMatch(/第\s*\d+\s*轮/);
 });
