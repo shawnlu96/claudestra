@@ -19,7 +19,7 @@ import { ProductPanes } from "../product/product-panes";
 import { useProductBoard } from "../product/use-product-board";
 import { DagCanvasView } from "./dag-canvas";
 import { compareOverlay } from "./dag-diff";
-import { drawable, layoutDag, nodeId, type DNode } from "./dag-layout";
+import { drawable, layoutDag, nodeId, type DagCanvas, type DNode } from "./dag-layout";
 import { MobileDag } from "./dag-mobile";
 import { ownerOf, progressRows, type AgentLite } from "./dag-progress";
 import { WorkBoardContent } from "../work/work-board-view";
@@ -33,7 +33,7 @@ import { DiffPage, NodePage, VersionsPage } from "./dag-props";
 import type { BoardNode, DagBoard, FeatureCard } from "./dag-types";
 import { useDagBoard, useDagCompare, useDagVersions } from "./use-dag-board";
 import { useDagUi } from "./use-dag-ui";
-import { useFocusPane } from "./use-focus-pane";
+import { useFocusPane, type DrawCanvas } from "./use-focus-pane";
 import { useFocusFeature } from "../team-source-context";
 import d from "./dag.module.css";
 
@@ -96,7 +96,7 @@ export function useDagPanes(a: DagPanesArgs) {
   const overlay = useMemo(() => (ui.compare && cmp ? compareOverlay(ui.compare.featureId, cmp.toNodes, cmp.fromNodes, cmp.diff) : null), [ui.compare, cmp]);
   const hasProduct = product.status === "ok";
   const shown = useMemo(() => hasProduct && ui.featureId ? features.filter(f => f.id === ui.featureId) : features, [hasProduct, ui.featureId, features]);
-  const canvas = useMemo(() => layoutDag(shown, ui.open, ui.doneOpen, overlay), [shown, ui.open, ui.doneOpen, overlay]);
+  const canvas = useMemo(() => layoutDag(shown, ui.open, ui.doneOpen, overlay, ui.donePages), [shown, ui.open, ui.doneOpen, overlay, ui.donePages]);
   const detail = useDagVersions(a.project, a.sel?.kind === "dver" ? a.sel.f : null, a.rev);
   const featureOf = (id: string) => features.find((f) => f.id === id);
   const selNode = !ui.compare && binding ? nodeId(binding.feature.id, binding.node.key) : a.sel?.kind === "dnode" ? nodeId(a.sel.f, a.sel.key) : null;
@@ -140,16 +140,16 @@ export function useDagPanes(a: DagPanesArgs) {
   const progress = <WorkBoardContent team={work.kind === "team"} board={work.board} retrying={work.retrying} loading={counts.status === "loading"}
     onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
-  const dagCanvas = (
-    <DagCanvasView canvas={canvas} shelf={shelf} evicted={ui.evicted} look={(n: DNode) => lookOf(n.featureId, n.node)} compare={ui.compare} focus={ui.focus}
-      onNode={onNode} onOwner={ui.jumpRow} onFold={ui.toggleDone} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
+  const drawCanvas: DrawCanvas = (c: DagCanvas, onFold, sh = shelf) => (
+    <DagCanvasView canvas={c} shelf={sh} evicted={ui.evicted} look={(n: DNode) => lookOf(n.featureId, n.node)} compare={ui.compare} focus={ui.focus}
+      onNode={onNode} onOwner={ui.jumpRow} onFold={onFold} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
   );
   const focusPane = useFocusPane({ now: a.now, narrow: a.narrow, hot: a.hot, tr, ui, board, hasProduct, work, onNode, onVersions, onOwner: jumpRowFromPage });
   const paneProps = { board: hasProduct ? product.board : null, loading: product.status === "loading", featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
     onTask: a.pickTask, graph, dagBoard: board, now: a.now, tr, progress };
   const center = (causal: React.ReactNode, team: React.ReactNode) => (
     <CountContext.Provider value={counts}>
-      <ProductPanes {...paneProps} narrow={false} team={team} subdag={focusPane(dagCanvas)} fallback={<div className={v.center}>{causal}</div>} />
+      <ProductPanes {...paneProps} narrow={false} team={team} subdag={focusPane(canvas, drawCanvas)} fallback={<div className={v.center}>{causal}</div>} />
     </CountContext.Provider>
   );
   const mobile = (fallback: React.ReactNode) => (

@@ -30,8 +30,11 @@ describe("layoutFocus", () => {
     expect(g.nodes.filter((n) => !mid!.includes(n.key)).every((n) => n.kind === "mini")).toBe(true);
     expect(g.folds.map((x) => [x.kind, x.n])).toEqual([["rest", 29], ["far", 8]]);
     expect(g.folds.every((x) => x.members.length === 0)).toBe(true);
-    expect(g.folds[0]!.x).toBeLessThan(g.nodes.find((n) => n.key === "d30")!.x);
-    expect(g.folds[1]!.x).toBeGreaterThan(g.nodes.find((n) => n.key === "n1")!.x);
+    // 「其余」在左列顶上，「更远」在右列底下，都不另占列
+    const at = (k: string) => g.nodes.find((n) => n.key === k)!;
+    expect([g.folds[0]!.x, g.folds[0]!.y < at("d30").y]).toEqual([at("d30").x, true]);
+    expect([g.folds[1]!.x, g.folds[1]!.y > Math.max(...right!.map((k) => at(k).y))]).toEqual([at("n1").x, true]);
+    expect(c.w).toBe(14 * 2 + 3 * 220 + 2 * 72);
     expect(overlaps(c)).toBe(false);
   });
 
