@@ -15,9 +15,8 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { POOL_RECIPIENT } from "./scheduler-pool-plan.js";
-import { poolOrderId } from "./scheduler-pool-facts.js";
 
-export const RECLAIM_INTENT_KEY = "lendReclaimIntent";
+const RECLAIM_INTENT_KEY = "lendReclaimIntent";
 const PROBE_TIMEOUT_MS = 90_000;
 
 /** origin's answer for the order branch: absent only when the query succeeded and found no such ref. */
@@ -30,12 +29,16 @@ export interface ReclaimIntentProbe {
 }
 
 /** What the reclaim was prepared against, read before its transaction; the transaction re-reads all of it. */
-export interface ReclaimCandidate {
+interface ReclaimCandidate {
   intentId: string; orderId: string; peer: string; branch: string; repo: string; leaseGen: number;
   taskRev: number; specRev: number; round: number;
 }
+/** The order a pool intent's offer event links (scheduler-pool-facts.ts poolOrderId), injected: that module sits above ledger-lend.ts. */
+type PoolLink = (db: Database, intentId: string) => string | null;
 export interface ReclaimIntentPrep {
   mode: RecoveryMode;
+  /** the same link reader the preparation used, for the in-transaction re-check */
+  link: PoolLink;
   diagnostic?: string;
   candidate: ReclaimCandidate | null;
   /** why there is no candidate */
@@ -49,7 +52,7 @@ export type ReclaimIntentOutcome =
   | { status: "none"; reason: string };
 
 /** The order fields this module reads; reclaimLend hands over its LendOrder as read in the transaction, before it cancelled it. */
-export interface LiveOrder {
+interface LiveOrder {
   orderId: string; step: string; status: string; peer: string; branch: string | null; repo: string; leaseGen: number;
   resultSha: string | null; receipt: unknown; eventSeq: number | null;
 }
@@ -58,10 +61,10 @@ const liveOrder = (db: Database, taskId: string): LiveOrder | null => db.query(`
   resultSha, receipt, eventSeq FROM lend_orders WHERE taskId = ? AND status IN ('pooled','claimed','unknown')`).get(taskId) as LiveOrder | null;
 
 /** The pool intent this order became: exactly one pool_offer event naming it, and that intent's own link resolving back to it. */
-function linkedIntent(db: Database, taskId: string, orderId: string): string | { none: string } {
+function linkedIntent(db: Database, link: PoolLink, taskId: string, orderId: string): string | { none: string } {
   const ids = (db.query(`SELECT json_extract(data, '$.id') AS id FROM events WHERE target = ? AND kind = 'scheduler'
     AND json_extract(data, '$.op') = 'pool_offer' AND json_extract(data, '$.orderId') = ?`).all(taskId, orderId) as { id: unknown }[])
-    .map((r) => r.id).filter((id): id is string => typeof id === "string" && poolOrderId(db, id) === orderId);
+    .map((r) => r.id).filter((id): id is string => typeof id === "string" && link(db, id) === orderId);
   if (ids.length === 0) return { none: `出借单 ${orderId} 不是调度挂池出的单，没有对应的调度意图` };
   if (new Set(ids).size > 1) return { none: `出借单 ${orderId} 对上了多条调度意图，不认关联` };
   return ids[0];
@@ -78,14 +81,14 @@ function intentMismatch(db: Database, id: string, taskId: string, peer: string):
 }
 
 /** The candidate as the ledger shows it now, or why there is none. Shared by the preparation and the in-transaction re-check. */
-function candidateOf(db: Database, task: LedgerTask): ReclaimCandidate | { none: string } {
+function candidateOf(db: Database, link: PoolLink, task: LedgerTask): ReclaimCandidate | { none: string } {
   if (task.stage !== "build") return { none: `卡在 ${task.stage}，只结清开工阶段收回留下的意图` };
   const o = liveOrder(db, task.id);
   if (!o) return { none: "没有未结的出借单" };
   if (o.step !== "write") return { none: `未结的出借单是 ${o.step} 单，不是开工单` };
   if (o.status !== "unknown") return { none: `出借单 ${o.orderId} 是 ${o.status}，不是结果不明` };
   if (!o.branch) return { none: `出借单 ${o.orderId} 没有出借分支` };
-  const id = linkedIntent(db, task.id, o.orderId);
+  const id = linkedIntent(db, link, task.id, o.orderId);
   if (typeof id !== "string") return id;
   const bad = intentMismatch(db, id, task.id, o.peer);
   if (bad) return { none: bad };
@@ -101,14 +104,14 @@ async function bounded<T>(run: () => Promise<T>, fail: (why: string) => T, ms: n
   finally { clearTimeout(timer); }
 }
 
-export interface PrepareDeps { probe: ReclaimIntentProbe; policy?: RecoveryPolicyPort; timeoutMs?: number }
+export interface PrepareDeps { probe: ReclaimIntentProbe; link: PoolLink; policy?: RecoveryPolicyPort; timeoutMs?: number }
 
 /** Outside the reclaim transaction: the switch, the candidate, and (unless off) the two remote reads. Never throws on a probe. */
 export async function prepareReclaimIntent(db: Database, task: LedgerTask, deps: PrepareDeps): Promise<ReclaimIntentPrep> {
   const policy = (deps.policy ?? recoveryPolicy)(task.project, RECLAIM_INTENT_KEY);
-  const head = { mode: policy.mode, ...(policy.diagnostic ? { diagnostic: policy.diagnostic } : {}) };
+  const head = { mode: policy.mode, link: deps.link, ...(policy.diagnostic ? { diagnostic: policy.diagnostic } : {}) };
   if (policy.mode === "off") return { ...head, candidate: null };
-  const c = candidateOf(db, task);
+  const c = candidateOf(db, deps.link, task);
   if ("none" in c) return { ...head, candidate: null, none: c.none };
   const ms = deps.timeoutMs ?? PROBE_TIMEOUT_MS;
   const [branch, pr] = await Promise.all([
@@ -138,7 +141,7 @@ const prLine = (p: PrProbe | undefined): string | null => !p ? "PR 没查" : p.s
   : p.state === "exists" ? `已有以该分支为 head 的 PR（#${p.numbers.join(" #")}）` : `PR 查询不确定：${p.why}`;
 
 /** Every in-transaction re-check; order is the reclaim's own read of the live order, before it cancelled it. */
-function driftOf(db: Database, task: LedgerTask, order: LiveOrder | null, lease: WriteLease | null, c: ReclaimCandidate): string[] {
+function driftOf(db: Database, link: PoolLink, task: LedgerTask, order: LiveOrder | null, lease: WriteLease | null, c: ReclaimCandidate): string[] {
   const out: string[] = [];
   if (task.rev !== c.taskRev || task.specRev !== c.specRev || task.round !== c.round) out.push("卡在核对后被改过（rev / specRev / round）");
   if (task.stage !== "build") out.push(`卡已不在开工阶段（${task.stage}）`);
@@ -148,7 +151,7 @@ function driftOf(db: Database, task: LedgerTask, order: LiveOrder | null, lease:
   if (!lease || lease.peer !== c.peer || lease.branch !== c.branch) out.push("写租约与核对时的出借方 / 分支对不上");
   const bad = intentMismatch(db, c.intentId, task.id, c.peer);
   if (bad) out.push(bad);
-  else if (poolOrderId(db, c.intentId) !== c.orderId) out.push(`调度意图 ${c.intentId} 的挂池关联变了`);
+  else if (link(db, c.intentId) !== c.orderId) out.push(`调度意图 ${c.intentId} 的挂池关联变了`);
   const others = db.query(`SELECT id FROM scheduler_intents WHERE taskId = ? AND id != ? AND status IN ('pending','submitted','unknown')`)
     .all(task.id, c.intentId) as { id: string }[];
   if (others.length) out.push(`同卡还有未结的调度意图：${others.map((r) => r.id).join("、")}`);
@@ -172,8 +175,9 @@ export function settleReclaimIntent(db: Database, ctx: WriteCtx, input: SettleIn
   const c = prep.candidate;
   if (!c) return { status: "none", reason: prep.none ?? prep.diagnostic ?? "没有收回留下的未知意图" };
   const order = input.order;
-  const reasons = [...driftOf(db, task, order, input.lease, c), ...(order ? ledgerResults(db, order) : []), branchLine(prep.branch), prLine(prep.pr)]
-    .filter((r): r is string => !!r);
+  // Probe errors carry remote text: one line, no control characters, or the observation note (textOneLine) would refuse the whole reclaim.
+  const reasons = [...driftOf(db, prep.link, task, order, input.lease, c), ...(order ? ledgerResults(db, order) : []), branchLine(prep.branch), prLine(prep.pr)]
+    .filter((r): r is string => !!r).map((r) => r.replace(/[\p{Cc}\p{Cf}\u2028\u2029\s]+/gu, " ").trim().slice(0, 200));
   const seq = reclaimSeq(db, task.id, c.orderId);
   const basis = `收回事件 #${seq ?? "?"}；单 ${c.orderId} 第 ${c.leaseGen} 代租约；分支 ${c.branch} origin 上不存在；无以它为 head 的 PR（含已关闭）；台账无交付 / 回执`;
   const decision = decideRecovery({ mode: prep.mode, manualAfterMs: null, source: "config" });

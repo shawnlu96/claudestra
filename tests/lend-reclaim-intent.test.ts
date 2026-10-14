@@ -14,6 +14,7 @@ import type { BranchProbe, PrProbe, ReclaimIntentProbe } from "../src/lib/lend-r
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
+import { poolOrderId } from "../src/lib/scheduler-pool-facts.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 const REMOTE = { mode: "balance" as const, roles: ["write" as const], poolTimeoutMin: 15, repo: "o/r" };
@@ -95,6 +96,7 @@ const kept: [string, (w: World) => void, string][] = [
   ["branch query failed", (w) => { w.remote.branch = { state: "unknown", why: "git ls-remote 失败（exit 128）" }; }, "分支查询不确定"],
   ["PR query timed out", (w) => { w.remote.pr = { state: "unknown", why: "gh pr list 超时" }; }, "PR 查询不确定"],
   ["branch probe throws", (w) => { w.remote.branch = async () => { throw new Error("no network"); }; }, "查询出错：no network"],
+  ["PR query fails with multi-line stderr", (w) => { w.remote.pr = { state: "unknown", why: "gh pr list 失败\n\tHTTP 502\u2028" }; }, "gh pr list 失败 HTTP 502"],
 ];
 for (const [name, arrange, why] of kept) {
   test(`[验收线 ${name.includes("query") || name.includes("throws") ? 3 : 2}] ${name}: the intent stays unknown, the reclaim itself succeeds and says why`, async () => {
@@ -177,6 +179,18 @@ test("[验收线 5] off: no remote read, no extra output field, and the ledger e
   } finally { a.f.close(); b.f.close(); }
 });
 
+test("[验收线 3] observe with a multi-line probe error records one line and the reclaim still succeeds", async () => {
+  const w = await world();
+  try {
+    setMode("observe");
+    w.remote.branch = { state: "unknown", why: "fatal:\n\tAuthentication failed" };
+    const r = await w.reclaim();
+    expect(r).toMatchObject({ ok: true, intent: { status: "kept_unknown", observed: true } });
+    expect(w.observed()[0].text).toContain("分支查询不确定：fatal: Authentication failed");
+    expect(JSON.parse(w.observed()[0].data)).toMatchObject({ wouldSettle: false });
+  } finally { w.f.close(); }
+});
+
 test("[验收线 5] observe: one deduplicated observation naming the intent and its basis; the intent is not touched", async () => {
   const w = await world();
   try {
@@ -191,7 +205,7 @@ test("[验收线 5] observe: one deduplicated observation naming the intent and 
     const { settleReclaimIntent } = await import("../src/lib/lend-reclaim-intent.js");
     const { prepareReclaimIntent } = await import("../src/lib/lend-reclaim-intent.js");
     w.f.db.run("UPDATE lend_orders SET status = 'unknown' WHERE orderId = ?", [w.orderId]); // replay the same order + generation
-    const prep = await prepareReclaimIntent(w.f.db, w.f.task(), { probe: { branch: async () => ({ state: "absent" }), prs: async () => ({ state: "none" }) } });
+    const prep = await prepareReclaimIntent(w.f.db, w.f.task(), { link: poolOrderId, probe: { branch: async () => ({ state: "absent" }), prs: async () => ({ state: "none" }) } });
     const order = getLendOrder(w.f.db, w.orderId)!;
     settleReclaimIntent(w.f.db, w.f.at("pm"), { task: w.f.task(), order, lease: { ...getWriteLease(w.f.db, "T1")!, state: "held" }, prep });
     expect(w.observed()).toHaveLength(1);
@@ -236,7 +250,7 @@ test("[验收线 3] remote reads that never answer are unknown after the bound, 
   const w = await world();
   try {
     const { prepareReclaimIntent } = await import("../src/lib/lend-reclaim-intent.js");
-    const prep = await prepareReclaimIntent(w.f.db, w.f.task(), { policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }), timeoutMs: 20,
+    const prep = await prepareReclaimIntent(w.f.db, w.f.task(), { link: poolOrderId, policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }), timeoutMs: 20,
       probe: { branch: () => new Promise(() => {}), prs: () => new Promise(() => {}) } });
     expect(prep).toMatchObject({ mode: "on", candidate: { intentId: w.id, orderId: w.orderId, leaseGen: 1, branch: BRANCH },
       branch: { state: "unknown", why: expect.stringContaining("没回") }, pr: { state: "unknown", why: expect.stringContaining("没回") } });

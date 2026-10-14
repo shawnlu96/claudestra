@@ -34,6 +34,7 @@ import { cancelLend, claimLend, leaseLend, listLendOrders, pollLend, reclaimLend
 import { heldLease } from "../lib/ledger-lend-lease.js";
 import { prepareReclaimIntent, type ReclaimIntentProbe } from "../lib/lend-reclaim-intent.js";
 import { reclaimIntentProbe } from "../lib/lend-reclaim-intent-probe.js";
+import { poolOrderId } from "../lib/scheduler-pool-facts.js";
 import { cliOfferFamily, offerWithAuthorFamily, refreshCliOffer } from "../lib/lend-cli-author-family.js";
 import { placementOf } from "../lib/lend-placement-view.js";
 import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
@@ -245,7 +246,7 @@ async function reclaim(c: LedgerCli): Promise<Result> {
   // Same gate as the lease-end writer's identity check: an actor it refuses gets the existing blocked note, so skip the remote sample.
   const actor = c.ctx().actor, mayRetire = actor === "scheduler" || (actor !== getMeta(c.db, task.project).team?.dispatcher && isManager(c.db, actor, task));
   const retire = mayRetire ? await sampleLendAuthor(c.db, task.id, lendDeps(c).result?.remoteHead) : undefined;
-  const unpin = c.p.bools.has("unpin"), intent = await prepareReclaimIntent(c.db, task, { probe: lendDeps(c).reclaimProbe ?? reclaimIntentProbe() });
+  const unpin = c.p.bools.has("unpin"), intent = await prepareReclaimIntent(c.db, task, { probe: lendDeps(c).reclaimProbe ?? reclaimIntentProbe(), link: poolOrderId });
   const r = reclaimLend(c.db, c.ctx(), { taskId: task.id, reason, retire, intent, unpin });
   return { ok: true, task: task.id, peer: r.lease?.peer ?? null, cancelled: r.cancelled, ...(r.intent ? { intent: r.intent } : {}), ...(unpin ? { unpinned: r.unpinned } : {}) };
 }
