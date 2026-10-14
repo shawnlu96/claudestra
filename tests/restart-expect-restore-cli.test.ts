@@ -1,14 +1,22 @@
 import { testChildEnv } from "./test-env.js";
 import { test, expect } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { restoreObservations } from "../src/manager/restart-expect-restore.js";
 import { LauncherRestoreGate } from "../src/lib/launcher-restore-gate.js";
 
+/**
+ * The manager has seconds of built-in sampling waits before it exits (800ms dead re-check per restore probe, /model 400ms + 700ms ticks),
+ * so a fixed 8s kill raced it under CI load and cut model-* runs off mid-switch (FLAKYLST1). Its exit is the done signal;
+ * the child is killed only once it stops calling the fake tmux for STALL_MS (a real hang), or at HARD_MS so it cannot outlive the test.
+ */
+const STALL_MS = 20_000, HARD_MS = 100_000;
+
 function fakeTmux(mode: string, paths: Record<string, string>): string {
-  const { count, replacement, state, drift, log, ready, modelEntered, modelLiteral, applied, prompt, settings } = paths;
+  const { count, replacement, state, drift, log, ready, modelEntered, modelLiteral, applied, prompt, settings, beat } = paths;
   return `#!/bin/sh
+printf . >> '${beat}'
 case "$*" in
   *list-windows*window_id*)
     n=$(cat '${count}'); n=$((n + 1)); printf '%s' "$n" > '${count}'
@@ -85,12 +93,14 @@ test(`LSTGUARD1 real manager ${mode}: safe mutations and correct gate accounting
   const replacement = join(dir, "replacement.json");
   writeFileSync(count, "0");
   const drift = join(dir, "drift");
+  const beat = join(dir, "beat");
+  writeFileSync(beat, "");
   const ready = join(dir, "ready"), modelEntered = join(dir, "model-entered"), modelLiteral = join(dir, "model-literal"), applied = join(dir, "applied");
   const prompt = join(dir, "model-prompt"), settings = join(dir, ".claude/settings.json");
   writeFileSync(prompt, readFileSync(resolve(import.meta.dir, "fixtures/switch-confirm/cc2.1.280-switch-model.txt"), "utf8")
     .replace("❯ 1. Yes, switch to Sonnet 5", "  1. Yes, switch to Sonnet 5").replace("  2. No, go back", "❯ 2. No, go back"));
   if (mode === "model-capture-fail") { mkdirSync(join(dir, ".claude")); writeFileSync(settings, '{"model":"old-default"}'); }
-  writeFileSync(join(bin, "tmux"), fakeTmux(mode, { count, replacement, state, drift, log, ready, modelEntered, modelLiteral, applied, prompt, settings }));
+  writeFileSync(join(bin, "tmux"), fakeTmux(mode, { count, replacement, state, drift, log, ready, modelEntered, modelLiteral, applied, prompt, settings, beat }));
   chmodSync(join(bin, "tmux"), 0o755);
   writeFileSync(join(bin, "ps"), `#!/bin/sh
 if [ '${mode}' = lock-unknown ] || { [ -f '${drift}' ] && ${mode.endsWith("unknown") ? "true" : "false"}; }; then exit 2; fi
@@ -114,11 +124,17 @@ exit 0
         env: testChildEnv({ HOME: dir, TMPDIR: dir, PATH: `${bin}:/usr/bin:/bin`, CLAUDESTRA_STATE_DIR: state,
           CLAUDESTRA_RUNTIME_DIR: run, BRIDGE_URL: "ws://127.0.0.1:9", BRIDGE_PORT: "9" }), stdout: "pipe", stderr: "pipe",
       });
-      const timer = setTimeout(() => proc.kill(), 8000);
+      const started = Date.now();
+      let seen = 0, lastBeat = started;
+      const timer = setInterval(() => {
+        const now = Date.now(), size = statSync(beat).size;
+        if (size !== seen) { seen = size; lastBeat = now; }
+        if (now - lastBeat > STALL_MS || now - started > HARD_MS) proc.kill();
+      }, 250);
       try {
         const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
         return { ok: code === 0, out, err };
-      } finally { clearTimeout(timer); }
+      } finally { clearInterval(timer); }
     });
     const mutations = readFileSync(log, "utf8");
     if (mode.startsWith("model-")) {
@@ -145,6 +161,6 @@ exit 0
     else expect(why).toStartWith("skipped:");
     expect(JSON.parse(readFileSync(path, "utf8")).agents[agent.name].failures).toBe(mode === "launch-failure" ? 1 : 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
-}, 10_000);
+}, HARD_MS + 10_000);
 
 }
