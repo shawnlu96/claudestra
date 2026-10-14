@@ -86,8 +86,8 @@ function inboundRows(item: string, cols: number, at: Date): string[] {
   const body = (cut > 2 ? item.slice(cut + 1) : item.slice(2)).split("\n").map((l, i) => (i ? l.replace(/^ {2}/, "") : l));
   const bar = [span("┃ ", "36")];
   return [
-    ...renderPara({ lead: bar, body: [span(who, "1;36"), span(` · ${hhmm(at)}`, "2")] }, cols),
-    ...body.flatMap((l) => renderPara({ lead: bar, body: [span(l)] }, cols)),
+    ...renderPara({ lead: bar, cont: bar, body: [span(who, "1;36"), span(` · ${hhmm(at)}`, "2")] }, cols),
+    ...body.flatMap((l) => renderPara({ lead: bar, cont: bar, body: [span(l)] }, cols)),
   ];
 }
 
@@ -100,10 +100,10 @@ function permissionRows(item: string, cols: number): string[] {
   const bar = [span("│ ", "33")];
   return [
     ...renderPara({ body: [span("╭─ ", "33"), span("⏸ 需要审批", "1;33")] }, cols),
-    ...renderPara({ lead: bar, body: [span(lines[0]!.replace(/^⏸ /, ""), "1")] }, cols),
-    ...lines.slice(1).flatMap((l) => renderPara({ lead: bar, body: [span(l.trim())] }, cols)),
-    ...opts.flatMap((o) => renderPara({ lead: bar, body: [span(o, "33")] }, cols)),
-    ...(hint ? renderPara({ lead: bar, body: [span(hint, "2")] }, cols) : []),
+    ...renderPara({ lead: bar, cont: bar, body: [span(lines[0]!.replace(/^⏸ /, ""), "1")] }, cols),
+    ...lines.slice(1).flatMap((l) => renderPara({ lead: bar, cont: bar, body: [span(l.trim())] }, cols)),
+    ...opts.flatMap((o) => renderPara({ lead: bar, cont: bar, body: [span(o, "33")] }, cols)),
+    ...(hint ? renderPara({ lead: bar, cont: bar, body: [span(hint, "2")] }, cols) : []),
     ...renderPara({ body: [span("╰─", "33")] }, cols),
   ];
 }
@@ -113,7 +113,7 @@ function stopRows(item: string, cols: number, at: Date): string[] {
   const label = item.replace(/^── | ──$/g, "");
   const color = /打断|中断/u.test(label) ? "33" : /失败/u.test(label) ? "31" : "2";
   const head = `── ${label} · ${at.toTimeString().slice(0, 8)} `;
-  const fill = Math.max(2, Math.min(cols - 1, 60) - Bun.stringWidth(head));
+  const fill = Math.max(2, Math.min(cols - 1, 48) - Bun.stringWidth(head));
   return renderPara({ body: [span(head, color), span("─".repeat(fill), "2")] }, cols);
 }
 

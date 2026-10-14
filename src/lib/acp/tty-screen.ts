@@ -1,5 +1,5 @@
 /**
- * ACP 窗口是 TTY 时的画法（src/acp-host.ts 接线；不是 TTY 就不用它，照旧一段一行纯文本，测试和日志靠那个）。
+ * ACP 窗口的逐行视图：新视图（tui/screen.ts）出错时的退路，CLAUDESTRA_ACP_TUI=0 时直接用它（src/acp-host.ts 接线；不是 TTY 两个都不用，照旧一段一行纯文本）。
  * 不设滚动区：底栏（状态行，接了输入时再加一行输入行）永远在最后，光标停在最后一行行尾；要写内容就先擦掉底栏、写内容、再画回来。
  * 光标只用 \r、ESC[2K 擦行、ESC[1A 上移（tmux attach、网页终端都认）；颜色（SGR）每行自带复位。排法和颜色在 tty-layout.ts。tests/acp-tty.test.ts。
  */

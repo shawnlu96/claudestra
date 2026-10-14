@@ -67,10 +67,17 @@ function sessionSteps(): Step[] {
   ];
 }
 
-/** 照宿主的顺序把整轮喂给视图；flush 在回合结束前（host.ts 收尾时吐攒着的正文） */
-export function playSession(view: ViewSink, compact: CompactSource = { from: "claudestra-meta" }): void {
+/** 照宿主的顺序把整轮喂给视图；flush 在回合结束前（host.ts 收尾时吐攒着的正文）。steps：只放前几步（截「回合进行中」的样子） */
+/** 回合进行中：读完一个文件、git diff 还在跑、思考到一半 */
+export function playBusy(view: ViewSink): void {
+  playSession(view, undefined, 5);
+  const u = thought("diff 只动了一个文件，等它跑完再看测试。\n");
+  view.update(u);
+}
+
+export function playSession(view: ViewSink, compact: CompactSource = { from: "claudestra-meta" }, steps = Infinity): void {
   const t = createAcpTranslator(() => "T", compact);
-  for (const step of sessionSteps()) {
+  for (const step of sessionSteps().slice(0, steps)) {
     if (step.item?.startsWith("──")) for (const e of t.flush()) for (const i of transcriptOfEntry(e)) view.show(i, step.at);
     if (step.item) view.show(step.item, step.at);
     for (const u of step.updates ?? []) {
