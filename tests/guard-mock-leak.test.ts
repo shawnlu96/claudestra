@@ -180,6 +180,13 @@ describe("[验收线 2] 嵌套函数带内联对象 / 泛型返回类型也跳�
 describe("[验收线 2] case 标签 / for await 后的块是工厂自己的（r3 审查 nested-return-object）", () => {
   const mod = { "src/lib/m.ts": "export const a = 1;\nexport const b = 2;\n" };
   const factory = (...lines: string[]) => [`mock.module("../src/lib/m.ts", () => {`, ...lines, `});`].join("\n");
+  test("case 表达式换行不建立方法成员上下文（r4 nested-return-object）", () => {
+    for (const expression of ["case\n choose()", "case\n await\n choose()", "case flag ?\n choose() :\n other()", "case\n (choose())"]) {
+      const src = factory(`switch (flag) { ${expression}: { return { a }; } default: throw new Error("bad"); }`);
+      expect(measure(src)).toMatchObject({ partial: 1, live: 0 });
+      expect(measure(src.replace("../src/lib/m.ts", "pkg"))).toMatchObject({ partial: 1, live: 0 });
+    }
+  });
   test("包名 + switch 里 case choose(): { return { a }; }，default 抛错 → 1", () => {
     const src = `mock.module("pkg", () => {\n  switch (flag) {\n    case choose(): { return { a }; }\n    default: throw new Error("bad");\n  }\n});`;
     expect(measure(src)).toMatchObject({ partial: 1, live: 0, detail: ['mockleak tests/x.test.ts:1 "pkg" 列不出全部导出（解析不到或有 export * from）：工厂里要展开真实模块快照'] });

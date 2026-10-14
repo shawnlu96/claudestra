@@ -137,7 +137,7 @@ const NOT_METHOD = /^(?:if|for|while|switch|catch|with|await|return|typeof|void|
 const MODIFIER = /(?:(?<![\w$#])(?:async|get|set|static|public|private|protected|readonly|override|abstract|accessor)\s+|\*\s*)$/;
 
 /**
- * paren 位置的 `(` 是函数签名吗：前面是 `function [*] [名字]`，或处在成员位置（`{ , ; }` 或换行之后，可带修饰词 / `*`）的
+ * paren 位置的 `(` 是函数签名吗：前面是 `function [*] [名字]`，或处在成员位置（`{ , ; }` 或类体内换行之后，可带修饰词 / `*`）的
  * 方法名 / 计算键，可带泛型参数。`case f(): {`、`for await (…) {`、`a.b() {` 这类调用或语句不算。
  */
 function isSignature(src: string, paren: number): boolean {
@@ -153,7 +153,19 @@ function isSignature(src: string, paren: number): boolean {
   if (start < 0) return false;
   let rest = src.slice(Math.max(0, start - 200), start);
   for (let m = MODIFIER.exec(rest); m; m = MODIFIER.exec(rest)) rest = rest.slice(0, m.index);
-  return /(?:[{,;}]\s*|\n[ \t]*)$/.test(rest) || (start <= 200 && !rest.trim());
+  return /[{,;}]\s*$/.test(rest) || (/\n[ \t]*$/.test(rest) && inClassBody(src, paren)) || (start <= 200 && !rest.trim());
+}
+
+/** 换行只有在类的成员层才允许省略分号；switch 的 case 表达式也能换行，不能因此把调用当方法。 */
+function inClassBody(src: string, at: number): boolean {
+  const stack: number[] = [];
+  for (let i = 0; i < at; i++) {
+    const c = src[i]!;
+    if (PAIR[c]) stack.push(i);
+    else if (c === PAIR[src[stack.at(-1) ?? -1]!]) stack.pop();
+  }
+  const open = stack.at(-1);
+  return open !== undefined && src[open] === "{" && /\bclass\b[^{};]*$/.test(src.slice(0, open));
 }
 
 /** gt 位置的 `>` 往回配对的泛型 `<` 下标（跳过 `=>`），配不上返回 -1 */
