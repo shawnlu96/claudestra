@@ -17,6 +17,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, getMeta, getTask, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
+import { manualCaseSlaCovers } from "./manual-case-sla-compat.js";
 import type { ServiceFacts } from "./scheduler-autostart.js";
 import { MERGE_RETRY_PREFIX, resumeVerdict, serviceBlock, type ResumeVerdict } from "./scheduler-autostart-resume.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
@@ -222,6 +223,7 @@ function claimNotice(d: ManualStallDeps, f: ManualFacts, card: ActionCard, polic
   return busyAsLedgerError("写入", () => d.db.transaction((): Claim => {
     const cur = readManualFacts(d.db, f.taskId, d.svc);
     if (!cur || stateVersion(cur) !== card.version) return { ok: false, action: "raced", why: "卡在读和认领之间被改过，下一轮重读" };
+    if (manualCaseSlaCovers(f.project, listEvents(d.db, { project: f.project, target: f.taskId }))) return { ok: false, action: "raced", why: "本段已并入逾期合并提醒（SLA1）" };
     const again = decideManual(cur, policy, d.now);
     if (again.kind !== "card" || again.card.fingerprint !== card.fingerprint) {
       return { ok: false, action: "raced", why: `读和认领之间判定变了（${again.kind === "card" ? "证据变了" : again.why}），下一轮重读` };
@@ -279,6 +281,7 @@ export async function manualStallTick(d: ManualStallDeps): Promise<ManualStallOu
     const ids = d.db.query("SELECT taskId FROM task_workflows WHERE project = ? AND mode = 'manual' ORDER BY taskId").all(project) as { taskId: string }[];
     for (const { taskId } of ids) {
       const f = readManualFacts(d.db, taskId, d.svc);
+      if (f && manualCaseSlaCovers(project, listEvents(d.db, { project, target: taskId }))) continue; // SLA1: this episode is in a batched overdue reminder
       if (f) out.push(await onCard(d, f, policy));
     }
   }

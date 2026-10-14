@@ -48,6 +48,7 @@ export const RECOVERY_KEYS = [
   "mainCarryMerge",
   "mainCiPause",
   "manualCaseOwnership",
+  "manualCaseSla",
   "manualMergeQueue",
   "manualRecovery",
   "manualStall",
