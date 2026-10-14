@@ -50,20 +50,12 @@ export async function handleSharedLedgerApi(req: Request, path: string, principa
   const action = actionFor(resource, req.method);
   if (!action || new URL(req.url).search) return json(400, { error: "unsupported shared ledger route" });
   if (principal.disabled || principal.peer) return json(403, { error: "shared ledger identity unavailable" });
-  // The transport error keeps only status + parsed body; remember the center's Retry-After from the raw 429 response.
-  let retryAfter: string | null = null;
-  const base = deps.fetch ?? fetch;
-  const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    const response = await base(input, init);
-    if (response.status === 429) retryAfter = response.headers.get("retry-after");
-    return response;
-  }) as typeof fetch;
   try {
     const service = deps.serviceSubject?.(principal);
     const credential = resolveSharedLedgerCredential(service ?? principal.id, service ? "service" : "person",
       deps.centerId, deps.teamId, deps.projectId, action, deps.stateDir);
     if (!credential) return json(403, { error: "shared ledger identity unavailable" });
-    const client = new SharedLedgerClient(credential, deps.key, { fetch: fetcher, scrub: deps.scrub });
+    const client = new SharedLedgerClient(credential, deps.key, { fetch: deps.fetch, scrub: deps.scrub, stateDir: deps.stateDir });
     if (req.method === "GET") {
       if (resource.startsWith("commands/")) return json(200, await client.receipt(resource.slice("commands/".length)));
       // Team-level booleans only, but the credential above already required read on this project.
@@ -104,7 +96,7 @@ export async function handleSharedLedgerApi(req: Request, path: string, principa
     if (projection.projectId !== deps.projectId) return json(403, { error: "project unavailable" });
     return json(200, await client.projection(projection));
   } catch (error) {
-    if (error instanceof SharedLedgerRemoteError) return error.status === 429 ? rateLimited(error.response, retryAfter) : json(error.status, error.response);
+    if (error instanceof SharedLedgerRemoteError) return error.status === 429 ? rateLimited(error.response, error.retryAfter) : json(error.status, error.response);
     if (error instanceof SharedLedgerScrubError) return json(400, { error: "upload blocked", fields: error.fields });
     if (error instanceof SyntaxError) return json(400, { error: "invalid JSON" });
     // Credentials and server/transport exception messages can contain secrets; return a fixed offline error.

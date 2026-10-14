@@ -7,7 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
 import { signSharedLedgerRequest, SHARED_LEDGER_AUTH_HEADERS } from "./shared-ledger-auth.js";
-import { sharedLedgerCenterUrl, sharedLedgerNotBefore, sharedLedgerRateLimited, sharedLedgerSucceeded, SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
+import { sharedLedgerCenterUrl, sharedLedgerNotBefore, sharedLedgerRetryAfter, sharedLedgerRateLimited, sharedLedgerSucceeded, SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
 import type { SharedLedgerConnection } from "./shared-ledger-client.js";
 import type { InstanceKey } from "./instance-key.js";
 import { fail, parseError, V2_ERROR_STATUS, V2ContractError, type V2ErrorCode } from "./shared-ledger-contract-v2.js";
@@ -51,7 +51,7 @@ async function signedAttempt(conn: Stage2Connection, method: "GET" | "POST", pat
   try {
     const { baseUrl, bearer, instanceId } = conn.connection, now = conn.now ?? Date.now;
     const startedAt = now(), blocked = sharedLedgerNotBefore(baseUrl, conn.stateDir) - startedAt;
-    if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked);
+    if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked, sharedLedgerRetryAfter(baseUrl, conn.stateDir));
     let url: URL;
     try {
       const base = sharedLedgerCenterUrl(baseUrl);
@@ -71,7 +71,7 @@ async function signedAttempt(conn: Stage2Connection, method: "GET" | "POST", pat
     } catch { return fail("unavailable"); } // fetch errors may carry bodies or credentials; keep none of it
     if (response.status === 429) {
       const delay = await sharedLedgerRateLimited(baseUrl, response.headers.get("retry-after"), now(), conn.stateDir, conn.random);
-      throw new SharedLedgerRemoteError(429, null, delay);
+      throw new SharedLedgerRemoteError(429, null, delay, response.headers.get("retry-after"));
     }
     if (response.status >= 500) return fail("unavailable");
     if (!response.ok) return await rejection(response);

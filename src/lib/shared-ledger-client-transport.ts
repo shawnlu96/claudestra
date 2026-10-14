@@ -11,7 +11,7 @@ import type { SharedLedgerConnection } from "./shared-ledger-client.js";
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 
 export class SharedLedgerRemoteError extends Error {
-  constructor(readonly status: number, readonly response: unknown, readonly retryAfterMs = 5_000) { super(`shared ledger rejected (${status})`); }
+  constructor(readonly status: number, readonly response: unknown, readonly retryAfterMs = 5_000, readonly retryAfter: string | null = null) { super(`shared ledger rejected (${status})`); }
 }
 export class SharedLedgerRollback extends Error {
   constructor(readonly serverSeq: number) { super("shared ledger sequence rollback; cache rebuilt"); }
@@ -46,11 +46,16 @@ function retryDelay(raw: string | null, now: number, failures: number, random = 
   }
   return Math.min(120_000, 5_000 * 2 ** Math.min(5, Math.max(0, failures - 1)) * (1 + random() * 0.2));
 }
-interface LimitStreak { failures: number; at: number }
+interface LimitStreak { failures: number; at: number; retryAfter?: string | null }
 function limitStreak(path: string): LimitStreak {
   const state = readJsonStateSync(`${path}.streak`, (v) => !!v && typeof v === "object"
     && Number.isSafeInteger((v as LimitStreak).failures) && (v as LimitStreak).failures >= 0 && Number.isFinite((v as LimitStreak).at));
   return state.status === "ok" ? state.data as LimitStreak : { failures: 0, at: 0 };
+}
+/** Preserve the center's optional timing header during locally enforced cooldowns, without inventing one. */
+export function sharedLedgerRetryAfter(baseUrl: string, dir = STATE_DIR): string | null {
+  const raw = limitStreak(cooldownPath(baseUrl, dir)).retryAfter;
+  return typeof raw === "string" ? raw : null;
 }
 export async function sharedLedgerRateLimited(baseUrl: string, raw: string | null, now: number, dir = STATE_DIR, random = Math.random): Promise<number> {
   const path = cooldownPath(baseUrl, dir);
@@ -62,7 +67,7 @@ export async function sharedLedgerRateLimited(baseUrl: string, raw: string | nul
     try {
       const failures = limitStreak(path).failures + 1;
       delay = retryDelay(raw, now, failures, random);
-      writeJsonAtomicSync(`${path}.streak`, { failures, at: now }, { mode: 0o600, commitIf: lock.held });
+      writeJsonAtomicSync(`${path}.streak`, { failures, at: now, retryAfter: raw }, { mode: 0o600, commitIf: lock.held });
       writeJsonAtomicSync(path, Math.max(sharedLedgerNotBefore(baseUrl, dir), Math.ceil(now + delay)), { mode: 0o600, commitIf: lock.held });
     } finally { lock.release(); }
   } catch { console.warn("shared ledger cooldown not recorded"); } // Still report 429 even when its shared state cannot be written.
@@ -124,7 +129,7 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     const base = sharedLedgerCenterUrl(baseUrl);
     const startedAt = now();
     const blocked = sharedLedgerNotBefore(baseUrl, options.stateDir) - startedAt;
-    if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked);
+    if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked, sharedLedgerRetryAfter(baseUrl, options.stateDir));
     const url = new URL(path, base);
     if (url.origin !== base.origin || url.pathname !== path || url.search || url.hash) throw new SharedLedgerUnavailable();
     const attemptNonce = randomBytes(24).toString("hex");
@@ -142,7 +147,7 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     if (response.status === 429) {
       const delay = await sharedLedgerRateLimited(baseUrl, response.headers.get("retry-after"), now(), options.stateDir, options.random);
       // nginx may return HTML; retain only its safe timing header, not a rejection body or source-DAG outcome.
-      throw new SharedLedgerRemoteError(429, null, delay);
+      throw new SharedLedgerRemoteError(429, null, delay, response.headers.get("retry-after"));
     }
     if (response.status >= 500) throw new SharedLedgerUnavailable();
     if (!response.ok) throw new SharedLedgerRemoteError(response.status, await rejection(response.status, response));
