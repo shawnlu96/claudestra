@@ -38,9 +38,11 @@ jobs:
     name: ci related plan
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # pull-requests: read：补验按 PR 元数据的源分支（head.ref）认列车，同 SHA 的别的分支不算数（merge-arch-CISEL1）
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
       digest: ${{ steps.plan.outputs.digest }}

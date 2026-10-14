@@ -121,15 +121,29 @@ describe("[验收线 1] responsibility is frozen beside an unchanged execution p
   });
 });
 
-describe("[验收线 1] a dispatch reads its PR's branch from the remote refs, bound to the request's head", () => {
-  const H = "b".repeat(40), O = "c".repeat(40), ls = (...l: string[]) => () => l.join("\n");
-  test("the branch pointing at the PR head, a train branch winning; a reason when the PR moved, no branch matches or the refs are unreadable", () => {
-    expect(dispatchPrRefOf(ls(`${H}\trefs/pull/7/head`, `${O}\trefs/heads/main`, `${H}\trefs/heads/task/x`), 7, H)).toEqual({ ref: "task/x" });
-    expect(dispatchPrRefOf(ls(`${H}\trefs/pull/7/head`, `${H}\trefs/heads/task/x`, `${H.toUpperCase()}\trefs/heads/train/pr-1`), 7, H))
-      .toEqual({ ref: "train/pr-1" });
-    expect(dispatchPrRefOf(ls(`${O}\trefs/pull/7/head`, `${H}\trefs/heads/task/x`), 7, H)).toMatchObject({ reason: expect.stringContaining("不是请求绑定的") });
-    expect(dispatchPrRefOf(ls(`${H}\trefs/pull/8/head`, `${H}\trefs/heads/task/x`), 7, H)).toMatchObject({ reason: expect.stringContaining("不是请求绑定的") });
-    expect(dispatchPrRefOf(ls(`${H}\trefs/pull/7/head`, `${O}\trefs/heads/task/x`), 7, H)).toEqual({ reason: "没有分支指向 PR #7 的 head" });
-    expect(dispatchPrRefOf(() => { throw new Error("git ls-remote：denied"); }, 7, H)).toMatchObject({ reason: expect.stringContaining("denied") });
+describe("[验收线 1] a dispatch reads its PR's source branch from the PR's metadata, bound to the request's head", () => {
+  const H = "b".repeat(40), O = "c".repeat(40), R = "o/r";
+  const pr = (over: Record<string, unknown> = {}, head: Record<string, unknown> = {}) => () =>
+    JSON.stringify({ state: "open", ...over, head: { ref: "task/x", sha: H, repo: { full_name: R }, ...head } });
+  test("head.ref of an open same-repo PR whose head is the request's", () => {
+    expect(dispatchPrRefOf(pr(), R, 7, H)).toEqual({ ref: "task/x" });
+    expect(dispatchPrRefOf(pr({}, { ref: "train/pr-1", sha: H.toUpperCase() }), R, 7, H)).toEqual({ ref: "train/pr-1" });
+  });
+  test("a reason when the PR moved, came from a fork, was closed, has no branch name or cannot be read", () => {
+    expect(dispatchPrRefOf(pr({}, { sha: O }), R, 7, H)).toMatchObject({ reason: expect.stringContaining("不是请求绑定的") });
+    expect(dispatchPrRefOf(pr({}, { repo: { full_name: "fork/r" } }), R, 7, H)).toMatchObject({ reason: expect.stringContaining("不在本仓") });
+    expect(dispatchPrRefOf(pr({}, { repo: null }), R, 7, H)).toMatchObject({ reason: expect.stringContaining("不在本仓") });
+    expect(dispatchPrRefOf(pr({ state: "closed" }), R, 7, H)).toMatchObject({ reason: expect.stringContaining("不是开放状态") });
+    expect(dispatchPrRefOf(pr({}, { ref: "" }), R, 7, H)).toMatchObject({ reason: expect.stringContaining("源分支名") });
+    expect(dispatchPrRefOf(() => "{", R, 7, H)).toMatchObject({ reason: expect.stringContaining("读不到") });
+    expect(dispatchPrRefOf(() => { throw new Error("gh api：denied"); }, R, 7, H)).toMatchObject({ reason: expect.stringContaining("denied") });
+  });
+  test("a closed train PR whose train branch is gone, with an ordinary alias on the same commit, still freezes all", () => {
+    // 第 3 轮审查复现：列车清理关掉 PR、删掉 train/ 分支，普通分支仍指向同一提交——只认 PR 元数据，不按同 SHA 猜分支
+    const closedTrain = pr({ state: "closed" }, { ref: "train/pr-7" }), open = pr({}, { ref: "train/pr-7" });
+    for (const raw of [closedTrain, open]) {
+      const ref = dispatchPrRefOf(raw, R, 7, H);
+      expect(responsibilityOf(facts({ event: "workflow_dispatch", dispatchPr: 7, dispatchPrRef: ref })).tests).toBe("all");
+    }
   });
 });

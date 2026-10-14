@@ -12,8 +12,8 @@
 // 责任选集（merge-arch-CISEL1，src/lib/ci-selected-verdict.ts）：plan.json 另冻结 responsibility = 这张 PR 本该负责的测试，与执行范围
 // （scope / tests / shards）分开算、互不影响。普通 PR（不论整次重跑、标签、light、CI_RELATED_CHECKS 哪一档）与属于某张 PR 的补验用同一选择器
 // （CI_IO_MAP=on 时用读取图）在同一检出上按 on 口径算；任何兜底全量、push、列车、其它事件都记 "all"。补验没有 GITHUB_HEAD_REF，
-// 从远端引用（git ls-remote）认那张 PR 的分支：refs/pull/<pr>/head 要等于请求绑定的 head、且有分支指向它；读不到、对不上记 "all"，
-// 指向它的分支里有 train/ 就按列车记 "all"。tests/ci-related-plan-responsibility.test.ts。
+// 从那张 PR 的元数据（gh api pulls/<pr>）认源分支 head.ref：PR 要开放、源在本仓、head.sha 等于请求绑定的 head；读不到、对不上记 "all"，
+// head.ref 是 train/ 就按列车记 "all"（同 SHA 的别的分支证明不了来源，不认）。tests/ci-related-plan-responsibility.test.ts。
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -95,8 +95,8 @@ export interface PlanFacts {
   /** workflow_dispatch: the PR the full re-check belongs to (set only after its binding checked out); absent = no PR */
   dispatchPr?: number;
   /**
-   * workflow_dispatch with dispatchPr: that PR's own branch, read from the remote refs and bound to the request's head (a dispatch carries no
-   * GITHUB_HEAD_REF); reason = could not read or bind it. Absent or a reason freezes "all", and a train/ branch is a train.
+   * workflow_dispatch with dispatchPr: that PR's own source branch (head.ref), read from its metadata and bound to the request's head
+   * (a dispatch carries no GITHUB_HEAD_REF); reason = could not read or bind it. Absent or a reason freezes "all", and a train/ branch is a train.
    */
   dispatchPrRef?: { ref: string } | { reason: string };
 }
@@ -225,35 +225,38 @@ const run = (cwd: string) => (...args: string[]): string => {
 };
 
 /**
- * workflow_dispatch: the PR's branch, from `git ls-remote origin refs/pull/<pr>/head refs/heads/*` (contents: read is enough). The PR ref must
- * still be the request's head, and some branch must point at it; any train/ branch there makes it a train. Otherwise a reason.
+ * workflow_dispatch: the PR's own source branch, from the PR's metadata (`gh api repos/<repo>/pulls/<pr>`; pull-requests: read). A branch
+ * that merely points at the same commit proves nothing about which branch the PR came from, so only head.ref counts, and only when the PR
+ * is open, its head is the request's head and it comes from this repo. Anything else is a reason, which freezes "all".
  */
-export function dispatchPrRefOf(raw: () => string, pr: number, wantHead: string): NonNullable<PlanFacts["dispatchPrRef"]> {
-  let refs: [string, string][];
-  try { refs = raw().split("\n").filter(Boolean).map((l) => l.split("\t") as [string, string]); }
-  catch (e) { return { reason: `读不到远端引用：${(e as Error).message}` }; } // the reason freezes "all": nothing is exempted without the branch
-  const want = wantHead.toLowerCase(), at = (sha: string) => sha.toLowerCase() === want;
-  const prHead = refs.find(([, r]) => r === `refs/pull/${pr}/head`)?.[0];
-  if (!prHead || !at(prHead)) return { reason: `PR #${pr} 的 head ${prHead?.slice(0, 12) ?? "（读不到）"} 不是请求绑定的 ${wantHead.slice(0, 12)}` };
-  const branches = refs.filter(([sha, r]) => at(sha) && r.startsWith("refs/heads/")).map(([, r]) => r.slice("refs/heads/".length));
-  if (!branches.length) return { reason: `没有分支指向 PR #${pr} 的 head` };
-  return { ref: branches.find((b) => b.startsWith("train/")) ?? branches[0]! };
+export function dispatchPrRefOf(raw: () => string, repo: string, pr: number, wantHead: string): NonNullable<PlanFacts["dispatchPrRef"]> {
+  let p: { state?: unknown; head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } | null } };
+  try { p = JSON.parse(raw()); }
+  catch (e) { return { reason: `读不到 PR #${pr} 的元数据：${(e as Error).message}` }; } // the reason freezes "all": nothing is exempted without the branch
+  const h = p?.head, sha = typeof h?.sha === "string" ? h.sha : "", ref = typeof h?.ref === "string" ? h.ref : "";
+  const from = typeof h?.repo?.full_name === "string" ? h.repo.full_name : "";
+  if (!sha || sha.toLowerCase() !== wantHead.toLowerCase()) return { reason: `PR #${pr} 的 head ${sha.slice(0, 12) || "（读不到）"} 不是请求绑定的 ${wantHead.slice(0, 12)}` };
+  if (!from || from.toLowerCase() !== repo.toLowerCase()) return { reason: `PR #${pr} 的源分支不在本仓（${from || "读不到"}）` };
+  if (p.state !== "open") return { reason: `PR #${pr} 不是开放状态（${String(p.state ?? "读不到")}）` };
+  if (!ref) return { reason: `读不到 PR #${pr} 的源分支名` };
+  return { ref };
 }
+
+const gh = (cwd: string, ...args: string[]): string => {
+  const r = Bun.spawnSync(["gh", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  if (r.exitCode !== 0) throw new Error(`gh ${args[0]} ${args[1]}：${r.stderr.toString().trim().slice(0, 200)}`);
+  return r.stdout.toString();
+};
 
 /** gh / git as the read map's source: the newest successful main push run that is an ancestor of the PR head (HEAD^2). */
 function fetchIoMap(root: string, tmp: string, env: Record<string, string | undefined>): IoMapResult {
   const repo = env.GITHUB_REPOSITORY ?? "", dir = join(tmp, "ci-io-map-in");
-  const gh = (...args: string[]): string => {
-    const r = Bun.spawnSync(["gh", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
-    if (r.exitCode !== 0) throw new Error(`gh ${args[0]} ${args[1]}：${r.stderr.toString().trim().slice(0, 200)}`);
-    return r.stdout.toString();
-  };
   return resolveIoMap({ now: new Date(),
-    runs: () => gh("api", `repos/${repo}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=50`),
+    runs: () => gh(root, "api", `repos/${repo}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=50`),
     isAncestor: (sha) => Bun.spawnSync(["git", "merge-base", "--is-ancestor", sha, "HEAD^2"], { cwd: root }).exitCode === 0,
     download: (id) => {
       rmSync(dir, { recursive: true, force: true });
-      gh("run", "download", String(id), "-R", repo, "-n", "ci-io-map", "-D", dir);
+      gh(root, "run", "download", String(id), "-R", repo, "-n", "ci-io-map", "-D", dir);
       return readFileSync(join(dir, "io-map.json"), "utf8");
     } });
 }
@@ -314,7 +317,8 @@ function planMain(outDir: string | undefined): void {
   const plan = buildPlan({ event, sha: parents[0]!, mode: env.CI_RELATED_CHECKS ?? "", headRef: env.GITHUB_HEAD_REF ?? "",
     ...(event === "pull_request" && parents.length === 3 ? { prHead: parents[2]! } : {}),
     ...(event === "workflow_dispatch" && Number(env.REQ_PR) > 0 && parents.length === 3 ? { dispatchPr: Number(env.REQ_PR),
-      dispatchPrRef: dispatchPrRefOf(() => git("ls-remote", "origin", `refs/pull/${Number(env.REQ_PR)}/head`, "refs/heads/*"), Number(env.REQ_PR), env.REQ_HEAD ?? "") } : {}),
+      dispatchPrRef: dispatchPrRefOf(() => gh(root, "api", `repos/${env.GITHUB_REPOSITORY ?? ""}/pulls/${Number(env.REQ_PR)}`), env.GITHUB_REPOSITORY ?? "",
+        Number(env.REQ_PR), env.REQ_HEAD ?? "") } : {}),
     queueMode: env.CI_QUEUE_LIGHT ?? "", runAttempt: Number(env.GITHUB_RUN_ATTEMPT || "1"), labels: JSON.parse(env.CI_PR_LABELS || "[]"),
     allTests: testFiles(headPaths.join("\n")), slow: existsSync(slowFile) ? parseSlowList(readFileSync(slowFile, "utf8")) : [],
     ...prSelect(root, env.RUNNER_TEMP ?? outDir, headPaths, env), ioMode: env.CI_IO_MAP ?? "", seconds: loadDurations().seconds });

@@ -11,7 +11,7 @@ Code: `src/lib/ci-selected-verdict.ts` (pure verdict, receipt and proof section)
 | run | responsibility |
 |-----|----------------|
 | ordinary PR (any `CI_RELATED_CHECKS`, light, whole re-run, `ci-full` label) | the selector under on on the same checkout; the read map's selection when `CI_IO_MAP=on` |
-| `workflow_dispatch` full re-check that belongs to a PR | the same, on the request's merge commit (base + head), once `git ls-remote` shows `refs/pull/<pr>/head` at the request's head and a non-`train/` branch pointing at it; otherwise `"all"` (a dispatch has no `GITHUB_HEAD_REF`) |
+| `workflow_dispatch` full re-check that belongs to a PR | the same, on the request's merge commit (base + head), once the PR's metadata (`gh api repos/<repo>/pulls/<pr>`, `pull-requests: read`) shows it open, from this repo, with `head.sha` at the request's head and a non-`train/` `head.ref` (another branch on the same commit proves nothing about the source); otherwise `"all"` (a dispatch has no `GITHUB_HEAD_REF`) |
 | any full fallback of the selector (global input, graph failure, bad diff line) | `"all"` with the reasons |
 | push (main), train PR, other events, a dispatch with no PR | `"all"` |
 
