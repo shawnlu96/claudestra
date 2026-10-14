@@ -12,6 +12,7 @@ import { choice, digest, id, integer, literal, nullable, object, record } from "
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 import { EXT_CAPABILITIES_OFF, parseSharedLedgerReadResponse, type SharedLedgerExtCapabilities } from "./shared-ledger-contract-reads.js";
+import { parseSharedLedgerTaskFacts } from "./shared-ledger-contract-task-facts.js";
 import { scrubSharedLedger, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { parseSourceDagUpload, parseSourceDagUploadResponse, SOURCE_DAG_UPLOAD_RESOURCE, type SourceDagUpload, type SourceDagUploadOutcome } from "./shared-ledger-contract-source-dag.js";
 import { sourceDagScrubView } from "./shared-ledger-source-dag-push-version.js";
@@ -79,6 +80,16 @@ export class SharedLedgerClient<P extends SharedLedgerProjectsProtocol = SharedL
     if (!/^[A-Za-z0-9_.:-]+$/.test(id)) throw new Error("invalid feature id");
     const result = parseSharedLedgerReadResponse("versions", await this.request("GET", `features/${id}/versions`));
     if (result.teamId !== this.connection.teamId) throw new SharedLedgerUnavailable();
+    return result;
+  }
+  /** Standalone read: an old center's 403 (and 404/429) stay SharedLedgerRemoteError, never an empty result; bad bodies are Unavailable. */
+  async taskFacts(id: string) {
+    if (!/^[A-Za-z0-9_.:-]+$/.test(id)) throw new Error("invalid feature id");
+    const raw = await this.request("GET", `features/${id}/task-facts`);
+    let result;
+    try { result = parseSharedLedgerTaskFacts(raw); }
+    catch { throw new SharedLedgerUnavailable(); } // A body outside the closed contract is an unusable answer, same as a 5xx.
+    if (result.teamId !== this.connection.teamId || result.featureId !== id) throw new SharedLedgerUnavailable();
     return result;
   }
   async activity(id: string, afterServerSeq: number) {
