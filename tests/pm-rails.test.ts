@@ -124,6 +124,9 @@ test("[验收线 2] PM 代交 deliver 照标；首次把 spec 卡设成 auto（�
   expect(await f.cli("pm", "workflow-set", "T2", "--rev", "1", "--template", "code", "--version", "2", "--mode", "auto", "--author-family", "claude",
     "--fallback", "x")).toMatchObject({ ok: true });
   expect(marked(f, "T2")).toEqual([]);
+  // 冒用 start_node 的 dedup 键：同一 attempt 没有 task-new，照标
+  expect(await f.cli("pm", "stage", "T1", "--from", "review", "--to", "blocked", "--dedup", "dag-start:T1:fake:restate")).toMatchObject({ ok: true });
+  expect(cmds(marked(f))).toEqual(["restate-approve", "deliver", "stage"]);
 });
 
 test("[验收线 5] on：同卡 10 分钟内的干预合并成一条推给 owner，满窗口才发、发过不重发", async () => {

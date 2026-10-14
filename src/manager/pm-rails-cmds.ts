@@ -4,7 +4,8 @@
  * 推不出去不记，下一轮重推；第一次切到 on 的项目从当时的最新事件号起算，不补推旧账。tests/pm-rails*.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { LedgerError } from "../lib/ledger-store.js";
+import { isOwnerLike } from "../lib/ledger-checks.js";
+import { getEventByDedup, LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { pmRailsScope, workflowModes } from "../lib/pm-rails.js";
 import { cardPushes, digestText, digestWindow, interventionEvents, maxSeq, stalledIntents, type PmRailsState } from "../lib/pm-rails-notice.js";
@@ -16,9 +17,23 @@ import { isWriteInvocation } from "./write-commands.js";
 
 const PM_RAILS_STATE_PATH = statePath("pm-rails.json");
 
-/** 读命令不开作用域（它们不写事件，也省一次快照查询） */
+/** start_node 开 auto 之后的几步（lib/dag-tools-steps.ts：绑节点、peer 卡的跳过复述）是开卡本身，不算干预 */
+const START_STEPS_AFTER_AUTO = new Set(["bind", "placement", "restate"]);
+
+/**
+ * 认 start_node 自己的步骤：--dedup 是 `dag-start:<卡>:<attempt>:<步>`，且同一 attempt 的 task-new 已在库里（就是这次开卡建的卡）。
+ * dedup 键一次一用（重放只返回旧事件），所以 PM 手工补一个同名键写不出新事件，绕不过标记。
+ */
+function startNodeStep(db: Database, args: readonly string[]): boolean {
+  const i = args.findIndex((a) => a === "--dedup" || a.startsWith("--dedup="));
+  const key = i < 0 ? "" : args[i].startsWith("--dedup=") ? args[i].slice(8) : args[i + 1] ?? "";
+  const m = /^(dag-start:.+:[^:]+):([^:]+)$/.exec(key);
+  return !!m && START_STEPS_AFTER_AUTO.has(m[2]) && getEventByDedup(db, `${m[1]}:task-new`) !== null;
+}
+
+/** 读命令、调度服务、owner、start_node 开卡步骤不开作用域：读不写事件，调度 / owner 从来不是 PM 角色（也省下调度 tick 每条命令的快照查询） */
 export function withPmRails<T>(deps: LedgerDeps, args: string[], run: () => Promise<T>): Promise<T> {
-  if (!isWriteInvocation("ledger", args)) return run();
+  if (!isWriteInvocation("ledger", args) || deps.actor === "scheduler" || isOwnerLike(deps.actor) || startNodeStep(deps.db, args)) return run();
   const scope = { cmd: args[0] ?? "", mode: cachedPmRailsMode(deps.pmRails?.mode ?? pmRailsMode), modesAtStart: workflowModes(deps.db) };
   return pmRailsScope.run(scope, run);
 }
