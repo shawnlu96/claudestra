@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { nodeAliasFs, tmuxServerProbe } from "../src/lib/floka-migration/runtime/adapters.ts";
@@ -42,7 +42,7 @@ function world(names: { current?: string; alias?: string } = {}): World {
     w.fsLog.push(`${k} ${a.join(" -> ")}`);
     return (nodeAliasFs[k] as (...x: string[]) => unknown)(...a);
   }) as AliasFs[K];
-  w.fs = { kind: logged("kind"), resolve: logged("resolve"), fileId: logged("fileId"), symlink: logged("symlink"), unlink: logged("unlink") };
+  w.fs = { kind: logged("kind"), resolve: logged("resolve"), fileId: logged("fileId"), entryId: logged("entryId"), symlink: logged("symlink"), unlink: logged("unlink") };
   w.probe = {
     identify: async (socketPath) => {
       w.probeLog.push(`identify ${socketPath}`);
@@ -96,7 +96,7 @@ describe("[验收线 1] 迁移前后是同一个 server", () => {
     await rollbackRuntimeAlias(input(w));
     expect(w.probeLog.length).toBeGreaterThan(0);
     expect(new Set(w.probeLog)).toEqual(new Set([`identify ${join(w.current, SOCK)}`, `identify ${join(w.alias, SOCK)}`]));
-    expect(new Set(w.fsLog.map((l) => l.split(" ")[0]))).toEqual(new Set(["kind", "resolve", "fileId", "symlink", "unlink"]));
+    expect(new Set(w.fsLog.map((l) => l.split(" ")[0]))).toEqual(new Set(["kind", "resolve", "fileId", "entryId", "symlink", "unlink"]));
   });
 
   test("[验收线 1] 经别名看到的是另一个 server:拒绝并撤掉刚建的别名", async () => {
@@ -233,6 +233,56 @@ describe("[验收线 2] off / observe / on、冲突与回滚", () => {
     const again = await rollbackRuntimeAlias(input(w));
     expect([again.status, again.changed]).toEqual(["absent", false]);
     expect(writes(w)).toHaveLength(2);
+  });
+
+  test("[验收线 2] 回滚期间别名被换成外来文件:拒绝,不删替代项", async () => {
+    const w = world();
+    await applyRuntimeAlias(input(w));
+    const real = w.probe;
+    w.probe = {
+      identify: async (p) => {
+        if (p.startsWith(w.current) && kindOf(w.alias) === "symlink") { rmSync(w.alias); writeFileSync(w.alias, "foreign important"); }
+        return real.identify(p);
+      },
+    };
+    const r = await rollbackRuntimeAlias(input(w));
+    expect([r.status, r.changed, codes(r)]).toEqual(["refused", false, ["conflict-entry"]]);
+    expect(readFileSync(w.alias, "utf8")).toBe("foreign important");
+    expect(writes(w)).toEqual([`symlink ${w.current} -> ${w.alias}`]);
+  });
+
+  test("[验收线 2] 建别名后核身份期间别名被换成外来文件:拒绝,如实报告已建过别名,不删替代项", async () => {
+    const w = world();
+    const real = w.probe;
+    w.probe = {
+      identify: async (p) => {
+        if (!p.startsWith(w.alias)) return real.identify(p);
+        rmSync(w.alias);
+        writeFileSync(w.alias, "foreign important");
+        return null;
+      },
+    };
+    const r = await applyRuntimeAlias(input(w));
+    expect([r.status, r.changed, codes(r)]).toEqual(["refused", true, ["identity-mismatch", "conflict-entry"]]);
+    expect(readFileSync(w.alias, "utf8")).toBe("foreign important");
+    expect(writes(w)).toEqual([`symlink ${w.current} -> ${w.alias}`]);
+  });
+
+  test("[验收线 2] 建别名后被换成另一条同样指向现存目录的软链:不是本次建的那一条,不删", async () => {
+    const w = world();
+    const real = w.probe;
+    w.probe = {
+      identify: async (p) => {
+        if (!p.startsWith(w.alias)) return real.identify(p);
+        rmSync(w.alias);
+        symlinkSync(w.current, w.alias);
+        return null;
+      },
+    };
+    const r = await applyRuntimeAlias(input(w));
+    expect([r.status, r.changed, codes(r)]).toEqual(["refused", true, ["identity-mismatch", "conflict-entry"]]);
+    expect(realpathSync(w.alias)).toBe(w.current);
+    expect(writes(w)).toEqual([`symlink ${w.current} -> ${w.alias}`]);
   });
 
   test("[验收线 2] 开关不是 on 不回滚;server 掉了不拦回滚", async () => {
