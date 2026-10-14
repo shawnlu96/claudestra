@@ -10,7 +10,6 @@ import { type CiSelectedMode, ciSelectedMode } from "./ci-selected-verdict.js";
 import { type CiSelectedPort, type CiSelectedRead, type CiSelectedReceipt, ghCiSelectedPort, readCiSelectedReceipt,
   readCiSelectedRunReceipt } from "./ci-selected-receipt.js";
 import { LedgerReader } from "./ledger-read.js";
-import { notifyProjectPm } from "./pm-notify.js";
 import { type ObservedAction, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -86,7 +85,8 @@ export function bindCiSelectedSink(manager: Manager, assertActive: () => void): 
       if (r.ok !== true) throw new Error(String(r.error ?? "scheduler-recovery-observe 失败"));
     },
     notifiedSince: (project, key, since) => readDb().query(REPAIR_SQL).get(project, since, key) !== null,
-    notify: (project, text) => notifyProjectPm(readDb(), project, text, { fromName: "scheduler", level: "info",
+    // pm-notify pulls the bridge client in, which resolves the bridge URL at load: loaded on first notice, not with the merge driver
+    notify: async (project, text) => (await import("./pm-notify.js")).notifyProjectPm(readDb(), project, text, { fromName: "scheduler", level: "info",
       stillActive: () => { try { assertActive(); return true; } catch { return false; } } }), // a lost lease only means this notice is not sent
   };
   sink = mine;
@@ -181,9 +181,12 @@ function mark(checks: PrSnapshot["checks"], required: string, bucket: "fail" | "
   return checks.map((c) => names.includes(c.name) || (runPath && c.link?.includes(runPath)) ? { ...c, bucket } : c);
 }
 
-/** 合并驱动的一行接线（driveMerge）：全绿的快照才去读回执；没有端口（测试进程没注入）原样返回同一个对象。 */
+/**
+ * 合并驱动的一行接线（driveMerge）：全绿的快照才去读回执。只包 gh 版 external（mergeExternal 标了 ciSelected）；注入的 external
+ * （测试世界）和没有端口（测试进程没注入）时原样返回同一个对象，不碰 GitHub。
+ */
 export function withCiSelectedGate(base: MergeExternal, run: Pick<MergeRun, "project" | "taskId" | "requiredChecks">): MergeExternal {
-  if (!ports().port) return base;
+  if (base.ciSelected !== true || !ports().port) return base;
   const inspect = base.inspect.bind(base);
   return { ...base, async inspect(prRef) {
     const pr = await inspect(prRef), repo = repoOf(prRef), port = ports().port;

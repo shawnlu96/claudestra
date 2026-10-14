@@ -45,6 +45,7 @@ export interface MergeExternal {
   proofWait?(run: MergeRun, pr: PrSnapshot): Promise<null | "wait" | string>; // scheduler-ci-proof-gate.ts: direct path only, asked before the claim
   /** mergeDirect on: the PR's own green CI + a clean merge suffice — no update-branch, no full re-check; main's post-merge CI judges the mix. */
   direct?(run: MergeRun): boolean;
+  ciSelected?: boolean; // CISEL2: only the gh-backed external reads release receipts
   /** Pause between the direct path's UNKNOWN re-reads (tests pass 0). */
   unknownRereadMs?: number;
 }

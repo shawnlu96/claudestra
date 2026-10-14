@@ -12,6 +12,9 @@ import { bindCiSelectedSink, CI_SELECTED_OBSERVE, CI_SELECTED_REPAIR, ciSelected
   selectedDecision, useCiSelectedPorts, withCiSelectedGate } from "../src/lib/scheduler-ci-selected-gate.js";
 import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
+import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
+import { mainCiDrive } from "../src/lib/scheduler-main-ci-wiring-driver.js";
+import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 
 const H = "a".repeat(40), MERGE = "b".repeat(40), MAIN = "c".repeat(40), M = "e".repeat(40), TREE = "f".repeat(40);
@@ -61,6 +64,7 @@ function fixture(initial: MergeRun = base, snapshot = pr()) {
     carryReview: async () => ({ ok: false, reason: "不沿用" }),
     updateBranch: async () => { calls.push("update"); },
     merge: async () => { calls.push("merge"); snapshot = pr({ state: "MERGED", mergeSha: M }); return M; },
+    ciSelected: true, // stands in for mergeExternal
   };
   const advance = async (from: MergeRun["phase"], to: MergeRun["phase"], rev: number, receipt?: string, mergeSha?: string) => {
     expect([from, rev]).toEqual([row.phase, row.rev]);
@@ -219,6 +223,21 @@ describe("[验收线 5] no release marker: merge gate behaves exactly as before"
     expect(withCiSelectedGate(ops, base)).toBe(ops);
   });
 
+  test("an injected external (not the gh-backed mergeExternal) is never read, even with a port", async () => {
+    const x = use();
+    const f = fixture();
+    delete f.ops.ciSelected;
+    expect(withCiSelectedGate(f.ops, base)).toBe(f.ops);
+    await f.drive();
+    expect(f.row.phase).toBe("merged");
+    expect(x.calls).toEqual([]);
+  });
+
+  test("the gh-backed mergeExternal carries the mark through every wrapper it is assembled with", () => {
+    const e = mergeExternal({ repoDir: "/nonexistent", requiredChecks: [GATE] } as unknown as Parameters<typeof mergeExternal>[0]);
+    expect(e.ciSelected).toBe(true);
+  });
+
   test("selectedDecision: plain without a marker", () => {
     expect(selectedDecision({ marked: false, receipt: null }, "on")).toEqual({ kind: "plain" });
   });
@@ -293,5 +312,59 @@ describe("write sink binding (scheduler-service.ts mergeTick)", () => {
     using _sink = bindCiSelectedSink(async () => ({ ok: true }), () => { throw new SchedulerStopped("lease lost"); });
     const f = fixture();
     await expect(driveMerge(f.row, f.ops, f.advance, () => {})).rejects.toThrow(/lease lost/);
+  });
+});
+
+describe("[验收线 1] production wiring: the scheduler's own mergeExternal (no injected external) runs the receipt check", () => {
+  const policyCfg = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: [GATE], repoDir: "/tmp/project" } } }).projects.p!;
+  /** gh faked at the command boundary only: repo view, pr view, pr checks, compare, the merge API. */
+  function ghWorld() {
+    const calls: string[][] = [];
+    let merged = false;
+    const ok = (v: unknown) => ({ code: 0, stdout: JSON.stringify(v), stderr: "", timedOut: false });
+    const command = (async (argv: string[]) => {
+      calls.push(argv);
+      if (argv[1] === "repo") return ok({ nameWithOwner: "o/r" });
+      if (argv[1] === "pr" && argv[2] === "view") return ok({ state: merged ? "MERGED" : "OPEN", headRefOid: H, headRefName: "task/T1", baseRefName: "main",
+        isDraft: false, isCrossRepository: false, mergeStateStatus: "CLEAN", mergeCommit: merged ? { oid: M } : null });
+      if (argv[1] === "pr" && argv[2] === "checks") return ok(green);
+      if (argv[1] === "api" && argv.includes("-X")) { merged = true; return ok({ merged: true, sha: M }); }
+      if (argv[1] === "api" && String(argv[2]).includes("/compare/")) return ok({ behind: 0, main: MAIN });
+      throw new Error(`unexpected ${argv.join(" ")}`);
+    }) as unknown as Parameters<typeof mergeExternal>[1];
+    return { calls, command, sent: () => calls.some((a) => a.includes("-X")) };
+  }
+  const drive = async (ext: MergeExternal) => {
+    let row = { ...base };
+    const advance = async (_f: MergeRun["phase"], to: MergeRun["phase"], _r: number, receipt?: string, mergeSha?: string) =>
+      (row = { ...row, phase: to, rev: row.rev + 1, reason: receipt ?? null, mergeSha: mergeSha ?? row.mergeSha });
+    await mainCiDrive(row, ext, advance, () => {});
+    return row;
+  };
+
+  test("observe: the marked mergeExternal reads the receipt, bounces via ci_fail, never sends the merge", async () => {
+    const x = use({ key: "observe" }), g = ghWorld();
+    const row = await drive(mergeExternal(policyCfg, g.command));
+    expect(x.calls).toContain("verdict");
+    expect(row.phase).toBe("resolved");
+    expect(row.reason).toMatch(/ci_fail/);
+    expect(g.sent()).toBe(false);
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_OBSERVE]);
+  });
+
+  test("on: the same wiring merges", async () => {
+    const x = use(), g = ghWorld();
+    const row = await drive(mergeExternal(policyCfg, g.command));
+    expect(x.calls).toContain("verdict");
+    expect(row.phase).toBe("merged");
+    expect(g.sent()).toBe(true);
+  });
+
+  test("the same external without the mark (an injected one) is not read: it merges as before", async () => {
+    const x = use({ key: "observe" }), g = ghWorld();
+    const { ciSelected: _mark, ...unmarked } = mergeExternal(policyCfg, g.command);
+    const row = await drive(unmarked);
+    expect(x.calls).toEqual([]);
+    expect(row.phase).toBe("merged");
   });
 });
