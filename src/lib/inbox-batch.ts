@@ -14,9 +14,13 @@
 /** 一条的抬头（不带批内编号；batchText 再把「── 来自」换成「── k/N · 来自」） */
 import type { IdleHeldLike } from "./held-idle-batch.js";
 
+/** 押后 agent 消息合批（held-agent-batch.ts）的批首：每条照原样处理，答复按发送人分别回，bridge 不替它拆一条合答 */
+export const HELD_AGENT_BATCH_TITLE = "排队给你的 agent 消息";
+export const HELD_AGENT_BATCH_HINT = "。逐条处理；要答复谁就用 send_to_agent 发给谁（每个发送人分别回），一条 reply 合答几个人时 bridge 不转给任何一方";
+
 /** Shared batch rendering for a later release adapter; no synthetic envelope replaces the original messages. */
-export function heldIdleBatchText(parts: readonly { item: IdleHeldLike; text: string }[], note = ""): string {
-  return [`[内部 waitForIdle 通知：${parts.length} 条${note}]`, ...parts.map(({ item, text }, i) => {
+export function heldIdleBatchText(parts: readonly { item: IdleHeldLike; text: string }[], note = "", title = "内部 waitForIdle 通知", hint = ""): string {
+  return [`[${title}：${parts.length} 条${note}${hint}]`, ...parts.map(({ item, text }, i) => {
     const { from, intent, meta } = item.env;
     const source = from.kind === "local" ? { kind: from.kind, channelId: from.channelId, agentName: from.agentName }
       : { kind: from.kind, label: from.label };

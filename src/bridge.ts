@@ -465,7 +465,7 @@ const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ??
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
 const stillHeldFor = (target: string) => (r: { messageId?: string; callerChannelId: string }) => requestStillHeld(r, heldFromOf(target));
-const answerablePac = (target: string): PendingAgentCall | undefined => pendingAgentCalls.answerable(target, stillHeldFor(target));
+const answerablePac = (target: string): PendingAgentCall | undefined => answerableUnmixed(pendingAgentCalls, target, stillHeldFor(target)); // 混了几个请求方的一轮不认
 /** target 明确答给 caller(回发 send_to_agent / reply 到 caller 的频道):精确取那一槽,请求还押着的不算 */
 const exactPac = (target: string, caller: string) => pendingAgentCalls.exact(target, caller, stillHeldFor(target));
 /** 好几个 caller 同时在等、target 又没指明答给谁:谁都不推,提醒它用 send_to_agent 分别回(同一批只提醒一次) */
@@ -580,7 +580,7 @@ import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard,
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
+import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
