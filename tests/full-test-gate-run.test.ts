@@ -1,0 +1,233 @@
+// 全量测试闸的真实并发（src/lib/full-test-gate.ts）：每个申请是独立的驱动进程（runFullTestGate + 临时 permit 目录），
+// bun test 换成假的子进程——它把 start / end 写进事件文件，等测试放出 go-<名> 才退出。不碰真实宿主闸目录。
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { NOT_STARTED_EXIT, readPermitEntries, runLogPath } from "../src/lib/full-test-gate.ts";
+import { writeGatePolicy } from "../src/lib/full-test-gate-policy.ts";
+
+const ROOT = join(import.meta.dir, "..");
+let root: string;
+let dir: string;
+const kids: ReturnType<typeof Bun.spawn>[] = [];
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "full-gate-run-"));
+  dir = join(root, "gate");
+  writeFileSync(join(root, "fake.ts"), `
+    import { appendFileSync, existsSync } from "node:fs";
+    const [name] = process.argv.slice(2);
+    const log = (what) => appendFileSync(${JSON.stringify(join(root, "events"))}, what + " " + name + " " + Date.now() + "\\n");
+    log("start");
+    process.on("SIGTERM", () => { log("term"); process.exit(Number(process.env.TERM_CODE ?? 143)); });
+    while (!existsSync(${JSON.stringify(root)} + "/go-" + name)) {
+      if (!existsSync(${JSON.stringify(root)})) process.exit(0); // 用例收尾删了临时目录：别留下空转的进程
+      await Bun.sleep(20);
+    }
+    log("end");
+    process.exit(Number(process.env.CODE ?? 0));
+  `);
+  writeFileSync(join(root, "driver.ts"), `
+    import { runFullTestGate } from ${JSON.stringify(join(ROOT, "src/lib/full-test-gate.ts"))};
+    const [dir, name, ...args] = process.argv.slice(2);
+    process.exit(await runFullTestGate({ args, command: [process.execPath, ${JSON.stringify(join(root, "fake.ts"))}, name], env: process.env, dir,
+      pollMs: 50, noticeMs: Number(process.env.NOTICE_MS ?? 30000), drainMs: 2000, minuteMs: Number(process.env.MINUTE_MS ?? 60000) }));
+  `);
+});
+
+afterEach(() => {
+  for (const k of kids.splice(0)) k.kill("SIGKILL");
+  for (const name of ["a", "b", "c", "d"]) writeFileSync(join(root, `go-${name}`), ""); // 放走被 SIGKILL 驱动留下的假 bun test
+  rmSync(root, { recursive: true, force: true });
+});
+
+function drive(name: string, args: string[] = [], extra: Record<string, string> = {}) {
+  const env: Record<string, string | undefined> = { ...process.env, CI: "", GITHUB_ACTIONS: "", ...extra };
+  delete env.CLAUDESTRA_FULL_TEST_PERMIT;
+  const child = Bun.spawn([process.execPath, join(root, "driver.ts"), dir, name, ...args], { env, stdout: "pipe", stderr: "pipe" });
+  kids.push(child);
+  return { child, stderr: new Response(child.stderr).text() };
+}
+
+type Ev = { what: string; name: string; at: number };
+function events(): Ev[] {
+  if (!existsSync(join(root, "events"))) return [];
+  return readFileSync(join(root, "events"), "utf8").split("\n").filter(Boolean).map((l) => {
+    const [what, name, at] = l.split(" ");
+    return { what: what!, name: name!, at: Number(at) };
+  });
+}
+const started = () => events().filter((e) => e.what === "start").map((e) => e.name);
+function runLog(): Record<string, unknown>[] {
+  return existsSync(runLogPath(dir)) ? readFileSync(runLogPath(dir), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+}
+
+async function until(cond: () => boolean, what: string, ms = 15_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`等不到：${what}；events=${JSON.stringify(events())}`);
+    await Bun.sleep(30);
+  }
+}
+const go = (name: string) => writeFileSync(join(root, `go-${name}`), "");
+const on = (max: number, extra: object = {}) => writeGatePolicy(dir, { mode: "on", max, source: "ask_test", ...extra });
+
+describe("[验收线 1] on、max=2：第 3 个全量排队，前一个退出后才开始", () => {
+  test("off（等同改前）：3 个同时开始", async () => {
+    writeGatePolicy(dir, { mode: "off" });
+    const runs = ["a", "b", "c"].map((n) => drive(n));
+    await until(() => started().length === 3, "3 个都开始");
+    for (const n of ["a", "b", "c"]) go(n);
+    expect(await Promise.all(runs.map((r) => r.child.exited))).toEqual([0, 0, 0]);
+  }, 30_000);
+
+  test("on：同时最多 2 个，第 3 个等到前一个退出", async () => {
+    on(2);
+    const runs = ["a", "b", "c"].map((n) => drive(n, [], { NOTICE_MS: "100" }));
+    await until(() => started().length === 2, "前 2 个开始");
+    await Bun.sleep(800);
+    expect(started()).toHaveLength(2);
+    const waiting = ["a", "b", "c"].find((n) => !started().includes(n))!;
+    const first = started()[0]!;
+    go(first);
+    await until(() => started().length === 3, "第 3 个开始");
+    const end = events().find((e) => e.what === "end" && e.name === first)!;
+    const late = events().find((e) => e.what === "start" && e.name === waiting)!;
+    expect(late.at).toBeGreaterThanOrEqual(end.at);
+    for (const n of ["a", "b", "c"]) go(n);
+    expect(await Promise.all(runs.map((r) => r.child.exited))).toEqual([0, 0, 0]);
+    const queuedErr = await runs[["a", "b", "c"].indexOf(waiting)]!.stderr;
+    expect(queuedErr).toMatch(/排队中 mode=on max=2 队列位置=1 已等 \d+s worktree=.+ id=full-/);
+    expect(queuedErr).toMatch(/获准 mode=on max=2，等待 \d+s/);
+    expect(readPermitEntries(dir)).toEqual([]);
+  }, 30_000);
+});
+
+describe("[验收线 2] 带文件不排队；认不出的参数报错退出", () => {
+  test("名额占满时带文件的调用照样直接跑，不登记", async () => {
+    on(1);
+    const a = drive("a");
+    await until(() => started().includes("a"), "a 开始");
+    const b = drive("b", ["tests/x.test.ts", "--timeout", "100"]);
+    await until(() => started().includes("b"), "带文件的 b 直接开始");
+    go("b");
+    expect(await b.child.exited).toBe(0);
+    go("a");
+    expect(await a.child.exited).toBe(0);
+    expect(runLog().filter((r) => r.event === "start").map((r) => r.id)).toHaveLength(1);
+  }, 30_000);
+
+  test("只带 --timeout / -t 取值的是全量：名额满时排队", async () => {
+    on(1);
+    const a = drive("a");
+    await until(() => started().includes("a"), "a 开始");
+    const b = drive("b", ["--timeout", "10000", "-t", "name"]);
+    await until(() => runLog().some((r) => r.event === "queued"), "b 排队");
+    expect(started()).toEqual(["a"]);
+    go("a");
+    await until(() => started().includes("b"), "b 开始");
+    go("b");
+    expect([await a.child.exited, await b.child.exited]).toEqual([0, 0]);
+  }, 30_000);
+
+  test("认不出的参数：退出码 2，测试未启动", async () => {
+    on(1);
+    const r = drive("a", ["--frobnicate"]);
+    expect(await r.child.exited).toBe(2);
+    expect(await r.stderr).toContain("测试未启动");
+    expect(started()).toEqual([]);
+  }, 30_000);
+});
+
+describe("[验收线 4] 信号与回收", () => {
+  test("排队中 SIGTERM：撤销、不留占位，测试没启动", async () => {
+    on(1);
+    const a = drive("a");
+    await until(() => started().includes("a"), "a 开始");
+    const b = drive("b");
+    await until(() => runLog().some((r) => r.event === "queued"), "b 排队");
+    b.child.kill("SIGTERM");
+    expect(await b.child.exited).toBe(143);
+    expect(await b.stderr).toContain("测试未启动");
+    expect(readPermitEntries(dir)!.map((e) => e.status)).toEqual(["active"]);
+    go("a");
+    expect(await a.child.exited).toBe(0);
+    expect(started()).toEqual(["a"]);
+    expect(readPermitEntries(dir)).toEqual([]);
+  }, 30_000);
+
+  test("运行中 SIGTERM：转发给 bun test、等它退出、释放，退出码透传", async () => {
+    on(1);
+    const a = drive("a", [], { TERM_CODE: "42" });
+    await until(() => started().includes("a"), "a 开始");
+    a.child.kill("SIGTERM");
+    expect(await a.child.exited).toBe(42);
+    expect(events().some((e) => e.what === "term" && e.name === "a")).toBe(true);
+    expect(readPermitEntries(dir)).toEqual([]);
+    expect(runLog().find((r) => r.event === "end")).toMatchObject({ code: 42, released: true });
+  }, 30_000);
+
+  test("持有者被 SIGKILL：假 bun test 还在跑时名额不放，进程树确认没了才回收", async () => {
+    on(1);
+    const a = drive("a");
+    await until(() => started().includes("a"), "a 开始");
+    a.child.kill("SIGKILL");
+    await a.child.exited;
+    const b = drive("b");
+    await until(() => runLog().some((r) => r.event === "queued"), "b 排队");
+    await Bun.sleep(500);
+    expect(started()).toEqual(["a"]);
+    go("a");
+    await until(() => started().includes("b"), "a 的进程树没了之后 b 开始");
+    const end = events().find((e) => e.what === "end" && e.name === "a")!;
+    expect(events().find((e) => e.what === "start" && e.name === "b")!.at).toBeGreaterThanOrEqual(end.at);
+    go("b");
+    expect(await b.child.exited).toBe(0);
+  }, 30_000);
+});
+
+describe("[验收线 6] observe / 缺策略 / 坏文件：不阻塞、有登记", () => {
+  for (const [label, setup] of [
+    ["策略缺失", () => {}],
+    ["坏文件", () => { writeGatePolicy(dir, { mode: "observe" }); writeFileSync(join(dir, "policy.json"), "{bad"); }],
+    ["observe", () => writeGatePolicy(dir, { mode: "observe", max: 2 })],
+  ] as const) {
+    test(label, async () => {
+      setup();
+      const runs = ["a", "b", "c"].map((n) => drive(n));
+      await until(() => started().length === 3, "3 个都开始（不阻塞）");
+      for (const n of ["a", "b", "c"]) go(n);
+      expect(await Promise.all(runs.map((r) => r.child.exited))).toEqual([0, 0, 0]);
+      const starts = runLog().filter((r) => r.event === "start");
+      expect(starts).toHaveLength(3);
+      expect(starts.every((r) => r.mode === "observe" && typeof r.running === "number" && typeof r.worktree === "string")).toBe(true);
+      expect(Math.max(...starts.map((r) => r.wouldQueueAt as number))).toBe(1);
+      if (label === "坏文件") expect((await runs[0]!.stderr)).toContain("按 observe 处理");
+    }, 30_000);
+  }
+
+  test("on 缺 source：按 observe，不阻塞，stderr 说明", async () => {
+    writeGatePolicy(dir, { mode: "on", max: 1 });
+    const runs = ["a", "b"].map((n) => drive(n));
+    await until(() => started().length === 2, "2 个都开始");
+    for (const n of ["a", "b"]) go(n);
+    expect(await Promise.all(runs.map((r) => r.child.exited))).toEqual([0, 0]);
+    expect(await runs[0]!.stderr).toContain("缺 source");
+    expect(runLog().filter((r) => r.event === "start").every((r) => r.mode === "observe")).toBe(true);
+  }, 30_000);
+});
+
+test("[验收线 7] 等超过 maxWaitMin：非零退出、测试未启动、bun test 没被启动", async () => {
+  on(1, { maxWaitMin: 1 });
+  const a = drive("a");
+  await until(() => started().includes("a"), "a 开始");
+  const b = drive("b", [], { MINUTE_MS: "600" });
+  expect(await b.child.exited).toBe(NOT_STARTED_EXIT);
+  expect(await b.stderr).toContain("测试未启动");
+  expect(started()).toEqual(["a"]);
+  expect(readPermitEntries(dir)!.map((e) => e.status)).toEqual(["active"]);
+  expect(runLog().some((r) => r.event === "timeout")).toBe(true);
+  go("a");
+  expect(await a.child.exited).toBe(0);
+}, 30_000);

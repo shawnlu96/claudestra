@@ -12,6 +12,9 @@ import { installCiIoTrace } from "../src/lib/ci-io-trace.ts";
 // CI_IO_TRACE（merge-arch-SELECT2）：读取记录器得在 node:fs 的 ESM 具名绑定生成之前装上（见 src/lib/ci-io-trace.ts 文件头），
 // 所以下面会碰 node:fs 的依赖都改成装完再动态 import；静态导入的只有不碰 node:fs 的几个
 installCiIoTrace();
+// 直接敲的全量 `bun test` 也过本机全量测试闸（docs/architecture/full-test-gate.md）：要排队就交给 scripts/test.ts 监管、本进程等它退出；
+// CI、带文件、经 scripts/test.ts 起的（带许可标记）原样往下走。放在最前面：交出去时本进程什么都还没动
+await (await import("../src/lib/full-test-gate-preload.ts")).gateDirectBunTest();
 const { mkdtempSync } = await import("node:fs");
 const { readAutoloadedEnvUnguarded } = await import("../src/lib/env-file.ts");
 const { REPO_ROOT } = await import("../src/lib/repo-root.ts");
