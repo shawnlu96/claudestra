@@ -3,12 +3,11 @@
 // 各片测试步骤带 CI_IO_TRACE 跑（src/lib/ci-io-trace.ts），工件 ci-io-trace-shard-<k> 里是一份 JSONL；这里把它们合成
 // {version:1, sha, generatedAt, entries:[{module, reads[], walks[], spawns[]}], untracked}，模块与路径都排序去重。给了片数时缺任何一片就不出图
 // （缺一片的图会漏读取，SELECT3 拿它选测试不安全）。读不懂的行跳过并在日志里记条数。失败只写原因、退出码非 0，
-// ci.yml 那一步 continue-on-error，不影响 main 判绿。只用系统库（ci-impact-graph.ts 也只用 node:path）：check 作业不 bun install。tests/ci-io-map.test.ts。
+// ci.yml 那一步 continue-on-error，不影响 main 判绿。只用系统库：check 作业不 bun install。tests/ci-io-map.test.ts。
 // untracked（SELECT5）：起过的仓库模块自己一条记录都没有——子进程没装记录器（最小 env、--config=/dev/null）或真的不碰文件，
 // 图里它的依赖是盲区而不是「没有」。只如实列出、不算失败；SELECT3 不读这个字段（parseIoMap 忽略多余字段）。
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { MODULE_FILE } from "../src/lib/ci-impact-graph.ts";
 
 const KINDS = { read: "reads", walk: "walks", spawn: "spawns" } as const;
 type Kind = keyof typeof KINDS;
@@ -18,6 +17,8 @@ export interface IoMap { version: 1; sha: string; generatedAt: string; entries: 
 
 /** 透传给最小 env 子进程的 `--preload` 记录器本身（argv 里的仓库文件都记成 spawn）：它不读仓库，列进来只是噪音 */
 const RECORDER_PRELOAD = "src/lib/sync-fs-trace.ts";
+/** 仓库模块的扩展名（同选择器里的 MODULE_FILE）；选择器只许 CI plan 脚本 import（SELECT1 守着），这里不引它 */
+const MODULE_FILE = /\.(?:[cm]?[jt]sx?)$/;
 
 /**
  * Repo modules some entry spawned that have no entry of their own (the child left no record at all). A module that spawns itself
