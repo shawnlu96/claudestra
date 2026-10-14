@@ -244,6 +244,13 @@ export const DICT: Record<string, string> = {
   "Claude 全局默认": "Claude global defaults",
   "影响所有未单独钉模型/effort 的新会话（含终端里直接开的 claude）。已钉的 agent 不受影响。":
     "Applies to new sessions without a pinned model/effort (including claude started in a terminal). Pinned agents are unaffected.",
+  "Codex 全局默认": "Codex global defaults",
+  "影响所有未单独钉模型/推理档的新 Codex 会话（含终端里直接开的 codex）。已钉的 agent 和正在运行的会话不受影响。":
+    "Applies to new Codex sessions without a pinned model/reasoning level (including codex started in a terminal). Pinned agents and running sessions are unaffected.",
+  "Codex 默认": "Codex default",
+  "推理档": "Reasoning",
+  "已保存；新模型不支持原来的推理档，已改回该模型的默认档": "Saved; the new model doesn't support the previous reasoning level, so it was reset to that model's default",
+  "读不到 Codex 模型目录（codex 没装或出错），暂时只能改推理档。": "Can't read the Codex model list (codex missing or failing); only the reasoning level can be changed for now.",
   "推送通知": "Push notifications",
   "推送不带正文": "Hide content in notifications",
   "推送里看不到内容，点开才看得到：打开后，这台电脑发出的推送只写「有新消息」，不带 agent 名和消息内容，点开进会话列表。推送要经过中继和 Apple / Google 的推送服务，打开后它们看不到内容。对这台电脑配对的所有设备都生效。":
