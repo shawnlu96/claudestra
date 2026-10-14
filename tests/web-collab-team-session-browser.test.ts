@@ -158,7 +158,7 @@ test.skipIf(!out)("team session viewer: content / home offline / not open at 128
   for (const width of [1280, 390]) {
     expect(texts[`after-team-session-content-${width}`]).toContain("已遮蔽 1 段");
     expect(texts[`after-team-session-content-${width}`]).toContain("3 步工具调用");
-    expect(texts[`after-team-session-home-offline-${width}`]).toContain("主场离线，暂时看不了会话");
-    expect(texts[`after-team-session-not-open-${width}`]).toContain("主场未开放会话");
+    expect(texts[`after-team-session-home-offline-${width}`]).toContain("任务所在的机器离线，暂时看不了会话");
+    expect(texts[`after-team-session-not-open-${width}`]).toContain("任务所在的机器未开放会话");
   }
 }, 240_000);
