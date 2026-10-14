@@ -3,47 +3,48 @@ import type { ReactNode } from "react";
 import type { LedgerReviewRef, LedgerTaskRef } from "@/lib/chat/agents";
 import { useLang, useT } from "@/lib/i18n";
 import { reviewChipView, stageChipView, stageSentence, taskIdInName, type StageIcon as IconKind, type StageTone } from "../ledger-stage";
+import { stageChipWords } from "../chip-words";
 
 /**
- * 侧栏 agent 行尾的台账阶段小标（ledger-stage.ts 出标签与色调）。宽度按行按钮的 @container 分三档，名字优先：
- * ≥18rem = 图标 + 任务号 + 阶段；≥11rem（英文 13rem）= 色点 + 阶段；更窄只剩色点。整句放 title（桌面悬停）和 sr-only（读屏），
- * 手机长按走 agent 菜单，菜单标题下面那行就是 LedgerStageLine。
+ * 侧栏 agent 行尾的台账阶段小标（ledger-stage.ts 出标签与色调）。tiers（侧栏行用）按行按钮的 @container 分三档，名字优先：
+ * ≥27rem = 图标 + 任务号 + 阶段；≥24rem = 图标 + 阶段；更窄只剩图标、收紧边距（默认侧栏的行约 14rem，要给中文名留 8 个字）。
+ * 不传 tiers（图例卡）总是全显示。title / aria-label 是 chip-words.ts 的一句话，
+ * 手机看侧栏顶的图例卡（chip-legend.tsx），长按 agent 菜单标题下面那行是 LedgerStageLine。
  */
 
 /** 字色直接用状态 token：浅色主题在 globals.css 里已压深到 ≥4.5:1，深色用原色；中性色深浅各一档透明度 */
-const TONE: Record<StageTone, { bg: string; dot: string; fg: string }> = {
-  error: { bg: "bg-error/12", dot: "bg-error", fg: "text-error" },
-  warning: { bg: "bg-warning/15", dot: "bg-warning", fg: "text-warning" },
-  primary: { bg: "bg-primary/12", dot: "bg-primary", fg: "text-primary" },
-  success: { bg: "bg-success/12", dot: "bg-success", fg: "text-success" },
+const TONE: Record<StageTone, { bg: string; fg: string }> = {
+  error: { bg: "bg-error/12", fg: "text-error" },
+  warning: { bg: "bg-warning/15", fg: "text-warning" },
+  primary: { bg: "bg-primary/12", fg: "text-primary" },
+  success: { bg: "bg-success/12", fg: "text-success" },
   neutral: {
     bg: "bg-base-content/[0.07]",
-    dot: "bg-base-content/40",
     fg: "text-base-content/[0.78] [[data-theme=dark]_&]:text-base-content/55 dark:[:root:not([data-theme=light])_&]:text-base-content/55",
   },
 };
-/** 中间档（色点 + 阶段）的起点：英文短名（Review / Verified）比两个汉字宽一倍，默认 16rem 侧栏里的执行者行会把名字挤成省略号，起点放宽到 13rem */
-const MID_TIER = { zh: "hidden @[11rem]:inline", en: "hidden @[13rem]:inline" } as const;
+/** 各档的起点（tiers）：阶段字 / 任务号；英文阶段字宽一倍，起点再放宽。档位算法见 tests/web-sidebar-polish-browser.test.ts 的中文长名字 */
+const TIER = { zh: { mid: "hidden @[24rem]:inline", id: "hidden @[27rem]:inline" }, en: { mid: "hidden @[26rem]:inline", id: "hidden @[29rem]:inline" } } as const;
+const TIGHT = "-ml-1 px-0.5 @[18rem]:ml-0 @[18rem]:px-1";
 
-export function LedgerStageChip({ task, names }: { task: LedgerTaskRef; names: (string | null | undefined)[] }) {
-  const t = useT();
+export function LedgerStageChip({ task, names, tiers = false }: { task: LedgerTaskRef; names: (string | null | undefined)[]; tiers?: boolean }) {
   const lang = useLang();
   const v = stageChipView(task, lang);
   const tone = TONE[v.tone];
-  const mid = MID_TIER[lang];
-  const sentence = stageSentence(v, t);
+  const tier = tiers ? TIER[lang] : { mid: "", id: "" };
+  const words = stageChipWords(task, lang);
   return (
     <span
-      className={`flex shrink-0 items-center gap-1 rounded px-1 py-px text-[10.5px] font-medium leading-4 ${tone.bg} ${tone.fg}`}
-      title={sentence}
+      role="img"
+      aria-label={words}
+      className={`flex shrink-0 items-center gap-1 rounded py-px text-[10.5px] font-medium leading-4 ${tiers ? TIGHT : "px-1"} ${tone.bg} ${tone.fg}`}
+      title={words}
       data-ledger-stage={task.stage}
     >
-      <span className="sr-only">{sentence}</span>
-      <span aria-hidden className={`size-1.5 shrink-0 rounded-full @[18rem]:hidden ${tone.dot}`} />
-      <StageIcon kind={v.icon} className="hidden size-3 @[18rem]:block" />
-      {!taskIdInName(names, v.id) && <span aria-hidden className="hidden font-mono @[18rem]:inline">{v.id}</span>}
-      <span aria-hidden className={mid}>{v.short}</span>
-      {v.round !== null && <span aria-hidden className={`font-mono tabular-nums ${mid}`}>R{v.round}</span>}
+      <StageIcon kind={v.icon} className="size-3 shrink-0" />
+      {!taskIdInName(names, v.id) && <span aria-hidden className={`font-mono ${tier.id}`}>{v.id}</span>}
+      <span aria-hidden className={tier.mid}>{v.short}</span>
+      {v.round !== null && <span aria-hidden className={`font-mono tabular-nums ${tier.mid}`}>R{v.round}</span>}
     </span>
   );
 }

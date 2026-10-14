@@ -231,10 +231,10 @@ test("复现测试:主场到时没回 → 主场离线，不自动重发；点�
   const v = await open("offline");
   await v.click("[data-session-toggle]");
   expect(v.state()).toBe("loading");
-  expect(v.text()).toContain("正在向主场机器读取会话");
+  expect(v.text()).toContain("正在向任务所在的机器读取会话");
   await v.settle();
   expect(v.state()).toBe("home_offline");
-  expect(v.text()).toContain("主场离线，暂时看不了会话");
+  expect(v.text()).toContain("任务所在的机器离线，暂时看不了会话");
   expect(posts()).toBe(1);
   const polls = seen.filter((r) => r.method === "GET" && r.path.includes("/session-pages/")).length;
   // 再等几个等待窗口：既不重发也不再轮询
@@ -258,7 +258,7 @@ test("复现测试:主场到时没回 → 主场离线，不自动重发；点�
   const early = await open("ticket-offline");
   await early.click("[data-session-toggle]");
   await early.settle();
-  expect(early.text()).toContain("主场离线，暂时看不了会话");
+  expect(early.text()).toContain("任务所在的机器离线，暂时看不了会话");
   expect(seen.some((r) => r.path.includes("/session-pages/"))).toBe(false);
   await early.close();
 });
@@ -299,7 +299,7 @@ test("复现测试:403 → 不在成员里并清掉已读到的页；not_open �
   await off.click("[data-session-toggle]");
   await off.settle();
   expect(off.state()).toBe("not_open");
-  expect(off.text()).toContain("主场未开放会话");
+  expect(off.text()).toContain("任务所在的机器未开放会话");
   expect(off.sec().querySelector("[data-session-retry]")).toBeNull();
   await off.close();
 

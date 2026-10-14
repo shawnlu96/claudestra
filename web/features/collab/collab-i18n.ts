@@ -94,9 +94,9 @@ const COLLAB_WORDS: Record<string, string> = {
   "回放进度": "Replay position",
   "回放": "Replay",
   // 团队视图「仅主场」占位与脱敏 / 缺字段事件（team-parity-I）：只在协作视图用，留在本表不进全局字典
-  "仅主场可见": "Home only",
-  "原文仅主场可见": "Original text at home only",
-  "打开会话仅主场": "Open session at home only",
+  [MACHINE_WORDS.visibleThere]: ownerWordEn(MACHINE_WORDS.visibleThere)!,
+  [MACHINE_WORDS.originalThere]: ownerWordEn(MACHINE_WORDS.originalThere)!,
+  [MACHINE_WORDS.openSessionThere]: ownerWordEn(MACHINE_WORDS.openSessionThere)!,
   "回放仅主场": "Replay at home only",
   "阶段未知": "Stage unknown",
   "受阻前阶段未知": "Stage before blocked unknown",

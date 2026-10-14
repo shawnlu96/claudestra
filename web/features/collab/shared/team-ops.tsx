@@ -154,11 +154,14 @@ function TaskOps({ ops, taskId }: { ops: Ops; taskId: string }) {
   const at = last?.team.index.get(taskId);
   const d = at ? last?.details.get(at.featureId) : undefined;
   const capabilities: Capabilities = d?.capabilities ?? {};
-  const reason = (r?: string) => !r || r === 'V1 仅共享规划，执行操作仍在主场' ? collabTr(MACHINE_WORDS.planOnly) : r;
-  const reasons = [...new Set(EXECUTION_ACTIONS.map((a) => capabilities[a]?.reason).filter(Boolean))];
+  const reason = (a?: typeof EXECUTION_ACTIONS[number]) => {
+    const cap = a ? capabilities[a] : undefined, r = cap?.reason;
+    return !r || cap?.code === 'execution_not_shared' || r.includes('主场') ? collabTr(MACHINE_WORDS.planOnly) : r;
+  };
+  const reasons = [...new Set(EXECUTION_ACTIONS.filter(a => capabilities[a]?.reason).map(a => reason(a)))];
   return <Sec title={tr('团队操作')}>
     <div className={s.line}>{EXECUTION_ACTIONS.map((a, i) => <button key={a} type="button" className={c.btn} disabled={!capabilities[a]?.enabled}
-      title={reason(capabilities[a]?.reason)}>{tr(LABELS[i]!)}</button>)}</div>
-    <div className={v.muted}>{reasons.length ? reasons.map(reason).join(' · ') : reason()} · {collabTr(MACHINE_WORDS.fullTextThere)}</div>
+      title={reason(a)}>{tr(LABELS[i]!)}</button>)}</div>
+    <div className={v.muted}>{reasons.length ? reasons.join(' · ') : reason()} · {collabTr(MACHINE_WORDS.fullTextThere)}</div>
   </Sec>;
 }

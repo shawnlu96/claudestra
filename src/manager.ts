@@ -2623,6 +2623,7 @@ switch (cmd) {
     break;
   }
 
+  case "sentinel-pilot": await (await import("./manager/sentinel-pilot-cmds.js")).cmdSentinelPilot(args); break; // 哨兵试点日报（lib/sentinel-pilot.ts）
   case "cron-history":
     await cmdCronHistory(args[0] || undefined);
     break;

@@ -14,7 +14,6 @@ import { createHash } from "node:crypto";
 import { SharedLedgerClient, SharedLedgerRemoteError, type SharedLedgerConnection } from "../../lib/shared-ledger-client.js";
 
 const READ_CACHE_MS = 10_000;
-const READ_BACKOFF_DEFAULT_MS = 5_000;
 
 type Subject = Pick<SharedLedgerLocalCredential, "centerId" | "teamId" | "kind" | "localSubject">;
 type Credential = Subject & SharedLedgerConnection;
@@ -30,13 +29,6 @@ const subjectKey = (c: Subject) => JSON.stringify([c.centerId, c.teamId, c.kind,
 /** The bearer itself never sits in a key */
 const credentialKey = (c: Credential) => JSON.stringify([c.baseUrl, c.personId, c.instanceId, createHash("sha256").update(c.bearer).digest("hex")]);
 const keyOf = (scope: string, c: Credential, resource: string) => JSON.stringify([scope, subjectKey(c), credentialKey(c), resource]);
-
-function retryAfterMs(header: string | null, now: number): number {
-  const raw = header?.trim() ?? "";
-  if (/^\d+$/.test(raw)) return Number(raw) * 1000;
-  const at = raw ? Date.parse(raw) : NaN;
-  return Number.isFinite(at) ? Math.max(0, at - now) : READ_BACKOFF_DEFAULT_MS;
-}
 
 /** Merge a 429 cooldown into an entry: the later deadline (and the header that came with it) wins, never the latest reply */
 function holdCooldown(e: Entry, block: { blockedUntil: number; header: string | null }): void {
@@ -66,7 +58,7 @@ export function clearSharedLedgerReadCache(): void { entries.clear(); }
 
 /**
  * Read `resource` through the cache. `read` goes to the center through the handler's client; `retry` is the handler's
- * Retry-After slot (its fetcher records the center's raw header there; a cached 429 writes the remaining seconds into it).
+ * Retry-After slot (the transport error holds the center's header; a cached 429 writes its remaining seconds into it).
  */
 export async function cachedSharedLedgerRead<T>(scope: string, credential: Credential, resource: string,
   read: () => Promise<T>, retry: RetryAfterSlot): Promise<T> {
@@ -89,8 +81,8 @@ export async function cachedSharedLedgerRead<T>(scope: string, credential: Crede
     }, (error: unknown) => {
       if (error instanceof SharedLedgerRemoteError && error.status === 429) {
         // The cooldown holds even when a write made this read obsolete meanwhile
-        const at = sharedLedgerReadClock.now(), header = retry.get();
-        const block = { blockedUntil: at + retryAfterMs(header, at), header };
+        const at = sharedLedgerReadClock.now(), header = error.retryAfter;
+        const block = { blockedUntil: at + error.retryAfterMs, header };
         holdCooldown(mine, block);
         const current = entries.get(key);
         if (current && current !== mine) holdCooldown(current, block);

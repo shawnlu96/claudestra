@@ -23,47 +23,62 @@ const fin = (v: unknown): number => { if (typeof v === "number" && Number.isFini
 const finOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : fin(v));
 const str = (v: unknown): string => { if (typeof v === "string") return v; throw BAD; };
 const strOrNull = (v: unknown): string | null => (v === null || v === undefined ? null : str(v));
+const bool = (v: unknown): boolean => { if (typeof v === "boolean") return v; throw BAD; };
 const strs = (v: unknown): string[] => { if (Array.isArray(v) && v.every(s => typeof s === "string")) return [...v]; throw BAD; };
 const oneOf = <T extends string>(v: unknown, all: readonly T[]): T => { if (all.includes(v as T)) return v as T; throw BAD; };
 
 function slotOf(v: unknown): RosterSlot | null {
   if (v === null || v === undefined) return null;
   if (!isObj(v)) throw BAD;
-  return { total: fin(v.total), busy: fin(v.busy), reportedBusy: finOrNull(v.reportedBusy), held: v.held === true };
+  return { total: fin(v.total), busy: fin(v.busy), reportedBusy: finOrNull(v.reportedBusy), placeable: fin(v.placeable), held: bool(v.held) };
 }
 function quotaOf(v: unknown): RosterQuota | null {
   if (v === null || v === undefined) return null;
   if (!isObj(v)) throw BAD;
-  return { usedPct: fin(v.usedPct), stopPct: finOrNull(v.stopPct), observedAt: finOrNull(v.observedAt) };
+  return { usedPct: fin(v.usedPct), resetAt: fin(v.resetAt), stopPct: finOrNull(v.stopPct), observedAt: finOrNull(v.observedAt) };
 }
 function workerOf(v: unknown): RosterWorker {
   if (!isObj(v)) throw BAD;
   return {
-    id: str(v.id), name: str(v.name), family: oneOf(v.family, ROSTER_FAMILIES), role: oneOf(v.role, ["author", "reviewer"] as const),
+    id: str(v.id), name: strOrNull(v.name), family: oneOf(v.family, ROSTER_FAMILIES), role: oneOf(v.role, ["author", "reviewer"] as const),
     state: oneOf(v.state, ["running", "silent", "no_beat", "unknown"] as const),
-    card: strOrNull(v.card), step: strOrNull(v.step), round: finOrNull(v.round), since: finOrNull(v.since),
+    taskId: strOrNull(v.taskId), step: strOrNull(v.step), round: finOrNull(v.round), since: finOrNull(v.since),
+    phase: strOrNull(v.phase), excerpt: strOrNull(v.excerpt), beatAt: finOrNull(v.beatAt),
   };
 }
 function cardsOf(v: unknown): RosterCards {
   if (!isObj(v)) throw BAD;
-  return { active: strs(v.active ?? []), merge: strs(v.merge ?? []) };
+  return { merge: strs(v.merge), live: strs(v.live), blocked: strs(v.blocked) };
 }
 function outputOf(v: unknown): RosterOutputDay[] {
   if (!Array.isArray(v)) throw BAD;
-  return v.map(d => { if (!isObj(d)) throw BAD; return { day: str(d.day), delivered: fin(d.delivered) }; });
+  return v.map(d => { if (!isObj(d)) throw BAD; return { day: str(d.day), delivered: fin(d.delivered), reviewed: fin(d.reviewed) }; });
 }
 const perFamily = <T>(v: unknown, of: (x: unknown) => T): Record<RosterFamily, T> => {
   const o = isObj(v) ? v : v === null || v === undefined ? {} : (() => { throw BAD; })();
   return { claude: of(o.claude), codex: of(o.codex) };
 };
+function grantOf(v: unknown): RosterMachine["grant"] {
+  if (v == null) return null;
+  if (!isObj(v)) throw BAD;
+  return { roles: strs(v.roles), repos: fin(v.repos), until: fin(v.until), ordersLeftToday: fin(v.ordersLeftToday) };
+}
+function pausedOf(v: unknown): RosterMachine["paused"] {
+  if (v == null) return null;
+  if (!isObj(v)) throw BAD;
+  return { reason: str(v.reason), until: fin(v.until) };
+}
 function machineOf(v: unknown): RosterMachine {
   if (!isObj(v)) throw BAD;
   const online = v.online === null || v.online === undefined ? null : typeof v.online === "boolean" ? v.online : (() => { throw BAD; })();
   if (!Array.isArray(v.workers)) throw BAD;
   return {
-    key: str(v.key), name: str(v.name), instanceId: strOrNull(v.instanceId), online,
+    machineKey: str(v.machineKey), instanceId: strOrNull(v.instanceId), online,
+    checkedAt: finOrNull(v.checkedAt), latencyMs: finOrNull(v.latencyMs), helloAt: finOrNull(v.helloAt),
+    proto: v.proto == null ? null : oneOf(v.proto, ["local", "push", "poll"] as const), why: strOrNull(v.why),
+    grant: grantOf(v.grant), paused: pausedOf(v.paused),
     slots: perFamily(v.slots, slotOf), quota: perFamily(v.quota, quotaOf),
-    workers: v.workers.map(workerOf), cards: cardsOf(v.cards ?? {}), output: outputOf(v.output ?? []),
+    workers: v.workers.map(workerOf), cards: cardsOf(v.cards), output: outputOf(v.output),
   };
 }
 
@@ -72,9 +87,13 @@ export function parseRosterWire(x: unknown): Roster | null {
   if (!isObj(x) || !isObj(x.self) || !Array.isArray(x.machines)) return null;
   const instanceId = x.self.instanceId;
   if (instanceId !== null && instanceId !== undefined && typeof instanceId !== "string") return null;
-  if (typeof x.generatedAt !== "number" || !Number.isFinite(x.generatedAt)) return null;
-  const um = isObj(x.unattributed) ? x.unattributed.merge : [];
-  if (!Array.isArray(um) || !um.every(s => typeof s === "string")) return null;
+  if (typeof x.now !== "number" || !Number.isFinite(x.now)) return null;
+  if (typeof x.project !== "string") return null;
+  let unattributed: RosterCards;
+  try { unattributed = cardsOf(x.unattributed); } catch (e) {
+    if (e !== BAD) throw e;
+    return null; // Malformed outer card lists cannot be interpreted as no unassigned cards.
+  }
   const machines: RosterMachine[] = [];
   let dropped = 0;
   for (const m of x.machines) {
@@ -83,26 +102,26 @@ export function parseRosterWire(x: unknown): Roster | null {
       dropped++;
     }
   }
-  return { generatedAt: x.generatedAt, self: { instanceId: instanceId ?? null }, machines, unattributed: { merge: [...um] }, dropped };
+  return { now: x.now, project: x.project, self: { instanceId: instanceId ?? null }, machines, unattributed, dropped };
 }
 
 // ---------- 位子格 ----------
 
 export type CellState = "running" | "silent" | "pending" | "other" | "held" | "empty" | "unknown";
-export interface CellWorker { card: string | null; step: string | null; round: number | null; since: number | null; name: string }
+export interface CellWorker { card: string | null; step: string | null; round: number | null; since: number | null; name: string | null }
 export interface Cell { state: CellState; worker: CellWorker | null }
 export interface SlotCells { cells: Cell[]; overflow: number; label: string }
 
 const cellOf = (state: CellState, w: RosterWorker | null = null): Cell =>
-  ({ state, worker: w && { card: w.card, step: w.step, round: w.round, since: w.since, name: w.name } });
+  ({ state, worker: w && { card: w.taskId, step: w.step, round: w.round, since: w.since, name: w.name } });
 
 /** 一台机器一个家族的位子格：running → silent → pending → other → held → empty；slot 为 null 给一个 unknown 格，label 为 key */
-export function slotCells(machine: Pick<RosterMachine, "key" | "slots" | "workers">, family: RosterFamily): SlotCells {
+export function slotCells(machine: Pick<RosterMachine, "machineKey" | "proto" | "slots" | "workers">, family: RosterFamily): SlotCells {
   const slot = machine.slots[family];
   if (!slot) return { cells: [cellOf("unknown")], overflow: 0, label: "roster.slot.unknown" };
   const mine = machine.workers.filter(w => w.family === family);
   const by = (s: RosterWorker["state"][]) => mine.filter(w => s.includes(w.state)).map(w => cellOf(w.state === "running" ? "running" : w.state === "silent" ? "silent" : "pending", w));
-  const busy = machine.key === LOCAL_MACHINE_KEY ? slot.busy : Math.max(slot.reportedBusy ?? slot.busy, slot.busy);
+  const busy = machine.proto === "local" ? slot.busy : Math.max(slot.reportedBusy ?? slot.busy, slot.busy);
   const other = Math.max(0, busy - mine.length);
   const occupied = [...by(["running"]), ...by(["silent"]), ...by(["no_beat", "unknown"]), ...Array.from({ length: other }, () => cellOf("other"))];
   const total = Math.max(0, Math.floor(slot.total));
@@ -142,6 +161,7 @@ export interface RosterInput {
 export interface CardView { id: string; title: string | null; stage: string | null }
 export interface MachineView {
   key: string; name: string; instanceId: string | null; online: boolean | null; isSelf: boolean;
+  checkedAt: number | null; latencyMs: number | null; helloAt: number | null; output: RosterOutputDay[];
   slots: Record<RosterFamily, SlotCells>; quota: Record<RosterFamily, QuotaState>;
   workers: RosterWorker[]; cards: RosterCards;
 }
@@ -179,14 +199,15 @@ function machineView(m: RosterMachine, workers: RosterWorker[], now: number): Ma
   const base = { ...m, workers };
   const fam = <T>(f: (x: RosterFamily) => T) => ({ claude: f("claude"), codex: f("codex") });
   return {
-    key: m.key, name: m.name, instanceId: m.instanceId, online: m.online, isSelf: m.key === LOCAL_MACHINE_KEY,
+    key: m.proto === "local" ? LOCAL_MACHINE_KEY : `peer:${m.machineKey}`, name: m.machineKey, instanceId: m.instanceId, online: m.online, isSelf: m.proto === "local",
+    checkedAt: m.checkedAt, latencyMs: m.latencyMs, helloAt: m.helloAt, output: m.output,
     slots: fam(f => slotCells(base, f)), quota: fam(f => quotaState(m.quota[f], now)), workers, cards: m.cards,
   };
 }
 
 /** 一台机器归谁：本机 → selfPersonId；peer → instances 里的 personId；只认目录里的人 */
 function ownerOf(m: RosterMachine, input: RosterInput, members: Set<string>): string | null {
-  const pid = m.key === LOCAL_MACHINE_KEY ? input.selfPersonId
+  const pid = m.proto === "local" ? input.selfPersonId
     : m.instanceId === null ? null : input.instances?.find(i => i.instanceId === m.instanceId)?.personId ?? null;
   return pid !== null && members.has(pid) ? pid : null;
 }
@@ -230,7 +251,7 @@ export function rosterOf(input: RosterInput): RosterView {
     if (!mine.has(id)) mine.set(id, cardOf(id));
     cards.set(pid, mine);
   };
-  for (const [pid, ms] of owned) for (const m of ms) for (const id of [...m.cards.active, ...m.cards.merge]) give(pid, id);
+  for (const [pid, ms] of owned) for (const m of ms) for (const id of [...m.workers.flatMap(w => w.taskId ? [w.taskId] : []), ...m.cards.merge, ...m.cards.live, ...m.cards.blocked]) give(pid, id);
   if (directory) for (const t of input.tasks) for (const pid of taskOwners(t, input, directory)) if (members.has(pid)) give(pid, t.id);
   const people = (directory ?? []).map((d): PersonView => {
     const ms = owned.get(d.personId) ?? [];
@@ -289,7 +310,7 @@ function usageOf(machines: MachineView[], raw: RosterMachine[], family: RosterFa
   const keyed = new Map(machines.map(m => [m.key, m]));
   let used = 0, total = 0;
   for (const m of known) {
-    const cells = keyed.get(m.key)?.slots[family];
+    const cells = keyed.get(m.proto === "local" ? LOCAL_MACHINE_KEY : `peer:${m.machineKey}`)?.slots[family];
     used += cells ? cells.cells.filter(c => OCCUPIED.has(c.state)).length + cells.overflow : 0;
     total += m.slots[family]!.total;
   }
@@ -298,7 +319,7 @@ function usageOf(machines: MachineView[], raw: RosterMachine[], family: RosterFa
 
 /** 指标条：成员数照目录；roster 为 null 时机器、位子、worker、合并、交付都是 null */
 export function rosterMetrics(view: RosterView, roster: Roster | null): RosterMetrics {
-  if (!roster) {
+  if (!roster || roster.dropped > 0) {
     return { members: view.memberCount, online: null, claude: null, codex: null, writing: null, reviewing: null, awaitingMerge: null, deliveredToday: null };
   }
   const machines = allMachines(view);
@@ -306,7 +327,7 @@ export function rosterMetrics(view: RosterView, roster: Roster | null): RosterMe
   const merge = new Set([...roster.machines.flatMap(m => m.cards.merge), ...roster.unattributed.merge]);
   return {
     members: view.memberCount,
-    online: { n: roster.machines.filter(m => m.online === true).length, m: roster.machines.length },
+    online: roster.machines.some(m => m.online === null) ? null : { n: roster.machines.filter(m => m.online === true).length, m: roster.machines.length },
     claude: usageOf(machines, roster.machines, "claude"),
     codex: usageOf(machines, roster.machines, "codex"),
     writing: workers.filter(w => w.role === "author").length,
