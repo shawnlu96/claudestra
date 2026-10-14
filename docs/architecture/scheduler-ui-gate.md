@@ -9,7 +9,7 @@ paths, `extra.screenshotsDigest` = their sha256). Who looks depends on the card.
 | `ownerVisual` (global palette, theme tokens, redesign) | the owner | the scheduler's screenshot ask (`scheduler_ui_screenshot`), answered with the authenticated owner mark |
 
 Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src/lib/scheduler-ui-merge-refusal.ts` (merge-write / merge-run check), `src/lib/ledger-ui-approve.ts`
-(writes), `src/lib/ledger-ui-approve-verdict.ts` (PM's verdict read back + the fix order it makes), `src/manager/ledger-ui-cmds.ts` (CLI). Tests: `tests/scheduler-ui-pm-gate.test.ts`, `tests/scheduler-ui-owner-visual.test.ts`, `tests/scheduler-ui-merge-begin.test.ts`.
+(writes), `src/lib/ledger-ui-approve-verdict.ts` (PM's verdict read back + the fix order it makes), `src/manager/ledger-ui-cmds.ts` (CLI). Tests: `tests/scheduler-ui-pm-gate.test.ts`, `tests/scheduler-ui-owner-visual.test.ts`, `tests/scheduler-ui-merge-begin.test.ts`, `tests/scheduler-ui-reask.test.ts`.
 
 ## Flow after a passing review
 
@@ -42,6 +42,13 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src
 - Read from the task writes that name the key (`ownerVisualOf`): an extra rewritten for other fields without `ownerVisual`
   leaves it unchanged, so turning it off takes `ownerVisual: false` or `ui-owner-visual off`. Writes by the scheduler identity
   or a manager decide; anyone else's can only turn it on, never off.
+- Only the scheduler's own screenshot ask counts, in the planner (`projectUiGate`) and in the merge write (`uiMergeRefusal`) alike: an
+  ask a manager opens with the same bind is ignored, so PM cannot release the card with one.
+- After the head / specRev / digest changes, the scheduler reopens the owner ask itself (`src/lib/scheduler-ui-reask.ts`, switch
+  `uiOwnerReask`, default observe): when its newest ask was approved by the authenticated owner on older values, `on` plans a new
+  ask bound to the card's current values (same askKey); `observe` escalates `ui_stale` as before and records one would-reopen
+  observation with the old and new binding; `off` escalates `ui_stale` as before. A rejected or unverified answer is never
+  reopened, and once a scheduler ask for the current values exists (open, answered or expired) the existing branch decides.
 
 ## Compatibility
 

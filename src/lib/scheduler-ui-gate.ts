@@ -2,18 +2,19 @@
  * The before / after screenshot gate of a UI card. By default PM accepts it (`ledger ui-approve` / `ui-reject`, decision events);
  * a card marked ownerVisual (global look: palette, theme tokens, redesign) still needs the owner's authorized ask. Every record
  * counts only when bound to the card's current head / specRev / digest (PM's also to the round) and written by someone allowed
- * to: a manager other than the team dispatcher. Observe reads these without opening anything. Docs: docs/architecture/scheduler-ui-gate.md.
+ * to: a manager other than the team dispatcher (PM verdicts); an owner ask counts only when the scheduler opened it.
+ * Observe reads these without opening anything. Docs: docs/architecture/scheduler-ui-gate.md.
  */
 import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered } from "./ledger-asks.js";
-import { isManager } from "./ledger-checks.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { rejectFix, type PmUiGate, type UiFix } from "./ledger-ui-approve-verdict.js";
 import { SRC_DIR } from "./repo-root.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { DIGEST_RE, UI_ASK_ACTION } from "./scheduler-ui-merge-refusal.js";
+import { ownerReask } from "./scheduler-ui-reask.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 
@@ -32,7 +33,10 @@ function boundTo(params: unknown): { task: unknown; head?: string; specRev?: num
     ...(typeof p.screenshotsDigest === "string" ? { screenshotsDigest: p.screenshotsDigest } : {}) };
 }
 
-/** The newest live screenshot ask decides; the planner then checks its head / specRev / digest against the card. */
+/**
+ * The newest live scheduler screenshot ask decides; the planner then checks its head / specRev / digest against the card.
+ * Only the scheduler's own asks count, as in the merge write (uiMergeRefusal): a manager-opened ask never releases the card.
+ */
 export function projectUiGate(db: Database, task: LedgerTask, now: number): UiGate {
   const rows = db.query(`SELECT id FROM asks WHERE taskId = ? AND kind = 'authorize' ORDER BY createdAt DESC, id DESC LIMIT 20`)
     .all(task.id) as { id: string }[];
@@ -40,7 +44,7 @@ export function projectUiGate(db: Database, task: LedgerTask, now: number): UiGa
     const ask = getAsk(db, id);
     const from = ask?.fromAgent;
     if (!ask?.bind || ask.bind.action !== UI_ASK_ACTION || !from || ask.state === "superseded") continue;
-    if (from !== "scheduler" && !isManager(db, from, task)) continue;
+    if (from !== "scheduler") continue;
     const { task: boundTask, ...bound } = boundTo(ask.bind.params);
     if (boundTask !== task.id) continue;
     if (ask.expiresAt <= now || (ask.state !== "open" && ask.state !== "answered")) return { state: "none" };
@@ -75,7 +79,9 @@ export function uiPassStep(s: PlannerSnapshot, node: string, reviewSeq: number):
   const pmNoticed = asks.some((i) => i.status === "done" && i.head === s.task.headSHA && i.receipt?.startsWith(PM_NOTICE_RECEIPT) &&
     i.receipt.endsWith(noticeTag(s.screenshotsDigest as string)));
   if (s.ownerVisual) {
-    if (owner.state !== "none" && !ownerBound(s, owner)) return { kind: "escalate", code: "ui_stale", reason: "截图许可绑定的 head/specRev 已过期" };
+    if (owner.state !== "none" && !ownerBound(s, owner)) {
+      return ownerReask(s, owner) ?? { kind: "escalate", code: "ui_stale", reason: "截图许可绑定的 head/specRev 已过期" };
+    }
     if (owner.state === "rejected") return { kind: "escalate", code: "ui_rejected", reason: "owner 未批准前后截图" };
     if (owner.state === "open") return { kind: "wait", code: "owner_screenshot", reason: "等待 owner 看前后截图" };
     if (owner.state === "approved") {
