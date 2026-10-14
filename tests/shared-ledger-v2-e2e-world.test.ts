@@ -71,6 +71,9 @@ export function cleanupWorlds(): void {
 const pair = generateKeyPairSync("ed25519");
 const KEY = { privateKey: pair.privateKey, publicKey: String(pair.publicKey.export({ format: "jwk" }).x) };
 const bearer = (id: InstanceId) => `x15-${id}-bearer-0123456789`;
+/** What a separate process on that instance needs to open its own signed transport (it generates its own instance key). */
+export const connectionOf = (w: { center: { baseUrl: string } }, id: InstanceId, actor: V2Actor) => ({ centerId: "center",
+  baseUrl: w.center.baseUrl, teamId: "team", personId: actor.personId, instanceId: actor.instanceId, bearer: bearer(id) });
 const CENTER_ACTORS: Record<string, V2Actor> = { [bearer("local")]: ACTORS.owner, [bearer("peer-a")]: ACTORS.member, [bearer("peer-b")]: ACTORS.executor };
 
 /** The center behind a real local port. A lost response (commit, then no answer) reaches the caller as a 502, which the
@@ -175,6 +178,16 @@ export const bindFor = (w: World, taskId: string, head: string, actions: string[
   return { ...(V2_DTO_FIXTURES.ask.valid as { bind: Record<string, unknown> }).bind, taskId, featureId: F, taskRev: t.rev,
     specRev: t.specRev, workflowRev: wf.rev, head, actions, homeInstanceId: "local", expiresAt: 100_000 };
 };
+
+/** A card already reviewed at H1 and waiting for the owner's merge, seeded straight into the center (the loop file walks the full
+ * path there); 本机 holds its lease. */
+export async function mergeReady(w: World, taskId = "task-merge") {
+  const t = V2_DTO_FIXTURES.task.valid as Record<string, unknown>, wf = V2_DTO_FIXTURES.workflow.valid as Record<string, unknown>;
+  w.k.center.seed({ tasks: [{ ...t, id: taskId, featureId: F, itemId: null, stage: "merge", head: H1, pr: PR,
+    review: { verdict: "pass", reviewedHead: H1, reportArtifactId: "artifact-review" } }], workflows: [{ ...wf, taskId }] });
+  await lease(w, taskId);
+  return taskId;
+}
 
 /** 本机 (home) takes the card's center lease; every lease-bound command below runs inside it. */
 export async function lease(w: World, taskId: string) {
