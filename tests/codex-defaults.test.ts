@@ -108,6 +108,53 @@ describe("GET/PUT /config/codex-defaults", () => {
   });
 });
 
+describe("认不出的写法 / 并发（验收 7、8）", () => {
+  test("引号转义键名、多行字符串：effort-only 按文件里实际的模型校验", async () => {
+    for (const toml of ['"mod\\u0065l" = "gpt-5.5-mini"\n[t]\n', 'model = """\ngpt-5.5-mini"""\n[t]\n']) {
+      writeFileSync(cfg, toml);
+      expect(await (await codexDefaultsRoute(req("GET"), OWNER, deps())).json()).toMatchObject({ model: "gpt-5.5-mini" });
+      const r = await codexDefaultsRoute(req("PUT", { effort: "high" }), OWNER, deps());
+      expect(r.status).toBe(400); // mini 不支持 high
+      expect(readFileSync(cfg, "utf8")).toBe(toml);
+      expect((await codexDefaultsRoute(req("PUT", { effort: "low" }), OWNER, deps())).status).toBe(200);
+      expect(Bun.TOML.parse(readFileSync(cfg, "utf8"))).toMatchObject({ model_reasoning_effort: "low", t: {} });
+    }
+  });
+
+  test("认不出的写法 → 422，文件不动、无备份", async () => {
+    const toml = "model.x = 1\n[t]\n";
+    writeFileSync(cfg, toml);
+    expect((await codexDefaultsRoute(req("GET"), OWNER, deps())).status).toBe(422);
+    const r = await codexDefaultsRoute(req("PUT", { effort: "low" }), OWNER, deps());
+    expect(r.status).toBe(422);
+    expect(readFileSync(cfg, "utf8")).toBe(toml);
+    expect(backups()).toEqual([]);
+  });
+
+  test("两个 PUT 交错：A（effort=xhigh）停在等目录上，B（model=mini）先写成 → A 409，不会写出 mini+xhigh", async () => {
+    writeFileSync(cfg, ORIGINAL.replace('"xhigh"', '"high"'));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = deps({ catalog: async () => { await gate; return CATALOG; } });
+    const a = codexDefaultsRoute(req("PUT", { effort: "xhigh" }), OWNER, slow);
+    const b = await codexDefaultsRoute(req("PUT", { model: "gpt-5.5-mini" }), OWNER, deps());
+    expect(await b.json()).toMatchObject({ ok: true, model: "gpt-5.5-mini", effort: null, effortCleared: true });
+    release();
+    const ra = await a;
+    expect(ra.status).toBe(409);
+    const final = Bun.TOML.parse(readFileSync(cfg, "utf8")) as Record<string, unknown>;
+    expect(final.model).toBe("gpt-5.5-mini");
+    expect(final.model_reasoning_effort).toBeUndefined();
+  });
+
+  test("写后自检读回不对 → 回滚到原文件并报错", async () => {
+    const corrupt: CodexConfigWriter = (path, text) => writeFileSync(path, text === ORIGINAL ? text : "model = \n");
+    const r = await codexDefaultsRoute(req("PUT", { effort: "low" }), OWNER, deps({ write: corrupt }));
+    expect(r.status).toBe(500);
+    expect(readFileSync(cfg, "utf8")).toBe(ORIGINAL);
+  });
+});
+
 describe("writeCodexDefaults 原子性", () => {
   test("rename 之前原文件被别人改过 → 不提交，别人的改动保留", () => {
     const sneaky: CodexConfigWriter = (path, text, opts) => {
@@ -115,7 +162,7 @@ describe("writeCodexDefaults 原子性", () => {
       if (opts?.commitIf && !opts.commitIf()) throw new Error("提交前核验没通过");
       writeFileSync(path, text);
     };
-    expect(() => writeCodexDefaults(home, { model: "gpt-5.5-mini" }, { write: sneaky })).toThrow("核验");
+    expect(() => writeCodexDefaults(home, { model: "gpt-5.5-mini" }, { write: sneaky })).toThrow("刚被别处改过");
     expect(readFileSync(cfg, "utf8")).toContain("[projects.");
   });
 

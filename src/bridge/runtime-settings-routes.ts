@@ -11,7 +11,7 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { isPiThinkingLevel } from "../lib/pi-launch.js";
 import { codexEffort } from "../lib/codex-launch.js";
 import { codexDisplayDefaults, loadCodexCatalog, readCodexConfigDefaults, validateCodexChoice, type CodexModel } from "../lib/codex-catalog.js";
-import { codexConfigPath, readCodexDefaultsToml, writeCodexDefaults, type CodexConfigWriter } from "../lib/codex-config-write.js";
+import { CodexConfigError, codexConfigPath, readCodexDefaultsToml, writeCodexDefaults, type CodexConfigWriter } from "../lib/codex-config-write.js";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody, notInScope } from "./api-respond.js";
@@ -217,18 +217,26 @@ export interface CodexDefaultsDeps {
   write?: CodexConfigWriter;
 }
 
-const readToml = (home: string): string => {
+/** 原文快照（null = 文件不存在）：校验和提交都用它，见 lib/codex-config-write.ts writeCodexDefaults */
+const readToml = (home: string): string | null => {
   const p = codexConfigPath(home);
-  return existsSync(p) ? readFileSync(p, "utf8") : "";
+  return existsSync(p) ? readFileSync(p, "utf8") : null;
 };
 
 /** PUT body 的一项：缺 = 不动；null / "" = 清掉（回到 Codex 自己的默认）；别的类型 = 非法 */
 const bodyField = (v: unknown): string | undefined | false =>
   v === undefined ? undefined : v === null ? "" : typeof v === "string" ? v.trim() : false;
 
+/** 认不出的写法 422、校验后被别处改了 409，都没动文件；别的（读写失败）500 */
+const configError = (e: unknown, what: string): Response =>
+  e instanceof CodexConfigError
+    ? apiJson(e.code === "conflict" ? 409 : 422, { ok: false, code: e.code, error: e.message })
+    : apiJson(500, { ok: false, error: `${what} config.toml 失败（原文件没动）: ${(e as Error).message}` });
+
 /**
  * GET/PUT /config/codex-defaults：只给全权。影响所有没钉模型 / 档位的新 Codex 会话（含终端里直接开的 codex），
  * 已钉的 agent（registry 的 model / effort 进了启动参数）和在跑的会话不受影响——这里不重启任何东西。
+ * PUT 先拍一份原文快照，读当前值、校验、提交都基于它；中途（等目录 / 读 body）文件被别的请求改了就 409。
  */
 export async function codexDefaultsRoute(
   req: Request,
@@ -237,11 +245,13 @@ export async function codexDefaultsRoute(
 ): Promise<Response> {
   if (!isFullScope(principal)) return forbidden("codex-defaults requires a full-scope token");
   if (req.method !== "GET" && req.method !== "PUT") return apiJson(405, { ok: false, error: "GET / PUT only" });
+  let snap: string | null;
   let cur: { model: string | null; effort: string | null };
   try {
-    cur = readCodexDefaultsToml(readToml(deps.home));
+    snap = readToml(deps.home);
+    cur = readCodexDefaultsToml(snap ?? "");
   } catch (e) {
-    return apiJson(500, { ok: false, error: `读取 config.toml 失败: ${(e as Error).message}` });
+    return configError(e, "读取");
   }
   const catalog = await deps.catalog();
   const codexDefault = codexDisplayDefaults(catalog, { model: null, effort: null }, null);
@@ -263,9 +273,9 @@ export async function codexDefaultsRoute(
   const bad = validateCodexChoice(catalog, { model: model ?? "", effort: effort ?? "", targetModel });
   if (bad) return apiJson(400, { ok: false, error: bad });
   try {
-    const r = writeCodexDefaults(deps.home, { model, effort }, { write: deps.write });
+    const r = writeCodexDefaults(deps.home, { model, effort }, { before: snap, write: deps.write });
     return apiJson(200, { ok: true, ...readCodexDefaultsToml(r.text), codexDefault, backedUp: !!r.backup, ...(effortCleared ? { effortCleared } : {}) });
   } catch (e) {
-    return apiJson(500, { ok: false, error: `写入 config.toml 失败（原文件没动）: ${(e as Error).message}` });
+    return configError(e, "写入");
   }
 }
