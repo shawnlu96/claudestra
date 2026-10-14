@@ -10,9 +10,8 @@ import type { WriteCtx } from "./ledger-checks.js";
 import { mustTask } from "./ledger-checks.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { LedgerError, listEvents } from "./ledger-store.js";
+import { listEvents } from "./ledger-store.js";
 import { heldLease } from "./ledger-lend-lease.js";
-import { tx } from "./ledger-tx.js";
 import type { SwapGate } from "./fix-strategy-guard.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 
@@ -50,18 +49,6 @@ export function reclaimLocalFixGate(db: Database, ctx: WriteCtx, intent: Schedul
       data: { intentId: intent.id, specRev: task.specRev, round: task.round, head: task.headSHA, reclaimSeq: reclaim.seq, family } }, ctx.now ?? Date.now());
   }
   return { act: false, why: `；已收回（事件 #${reclaim.seq}），reclaimLocalFix=${mode}` };
-}
-
-/**
- * The reclaimed peer's author row is stale (its lease ended), yet bindFixReplacement refuses to bind over a live peer row: retire it the
- * way a scheduler reclaim does, re-checking in the same transaction that no lease was taken again meanwhile.
- */
-export function retireReclaimedPeerAuthor(db: Database, ctx: WriteCtx, intentId: string, taskId: string): void {
-  tx(db, () => {
-    if (heldLease(db, mustTask(db, taskId))) throw new LedgerError("conflict", "写租约又被持有，不在本机另建作者");
-    db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE taskId = ? AND role = 'author' AND transport = 'peer' AND state != 'retired'")
-      .run(intentId, ctx.now ?? Date.now(), taskId);
-  });
 }
 
 /**

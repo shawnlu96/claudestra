@@ -11,7 +11,7 @@ import { bindFixReplacement } from "./scheduler-sessions.js";
 import { remoteContext, convergencePlacement, type RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { placeFor } from "./scheduler-family-pick.js";
 import { heldLease, writeOrderWire, lastReviewOf } from "./ledger-lend-lease.js";
-import { reclaimForFamilySwap } from "./lend-reclaim-scheduler.js";
+import { reclaimForFamilySwap, retireReclaimedPeerAuthor } from "./lend-reclaim-scheduler.js";
 import { remoteOrder, offerConvergence } from "./fix-strategy-remote-order.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { getLendPeer } from "./ledger-lend-peers.js";
@@ -23,7 +23,7 @@ import { explicitLocal } from "./scheduler-local-pin.js";
 import { localSwapAuthority, localSwapCreate, localSwapOf, localSwapReady, localSwapReclaimEdge, localSwapWait, reclaimedBefore, retireLocalAuthor } from "./recovery-fix-local-swap-run.js";
 import { getIntent } from "./ledger-scheduler.js";
 import type { LocalSwapEvidence } from "./recovery-fix-local-swap.js";
-import { reclaimLocalFixEdge, reclaimLocalFixGate, retireReclaimedPeerAuthor } from "./recovery-reclaim-local-fix.js";
+import { reclaimLocalFixEdge, reclaimLocalFixGate } from "./recovery-reclaim-local-fix.js";
 import type { SwapGate } from "./fix-strategy-guard.js";
 
 type Material = { path: string; family: AuthorFamily };
