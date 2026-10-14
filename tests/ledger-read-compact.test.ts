@@ -12,6 +12,7 @@ import { schedulerProjectView } from "../src/lib/ledger-scheduler";
 import { homeView, lineOf, type LedgerOverview, type LedgerTaskView, type LineView } from "../web/features/collab/collab-model";
 import { stepLineView } from "../web/features/collab/collab-step-line-model";
 import { metricsOf, mobileSections, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
+import { countSnap, type CountBoard } from "../web/features/collab/count-words";
 import { causalCanvas } from "../web/features/collab/v4/causal-model";
 
 /** 本地正午：「今天」按跑测试这台机器的零点算，和服务端（bridge 本机）同一口径 */
@@ -131,9 +132,11 @@ test("首页、指标、大纲、因果画布、手机列表（含今日完成�
   expect(hs.todayDone.length).toBeGreaterThan(0);
   expect(hs.todayDone).not.toContain(`d${DONE_TODAY}`); // 昨天完成、今天补了 note：不算今日完成
   expect(metricsOf(slim, hs.todayDone.length, 3)).toEqual(metricsOf(full, hf.todayDone.length, 3));
-  expect(stageCounts(slim)).toEqual(stageCounts(full));
-  for (const f of ["all", "runnable", "waiting", "done", "p0"] as const) {
-    const ids = (ov: LedgerOverview) => outlineOf(ov, f).map((g) => [g.id, g.title, g.tasks.map((t) => [t.id, t.title, t.stage])]);
+  const board: CountBoard = { working: full.tasks.filter((t) => !["done", "verified", "cancelled"].includes(t.stage)).map((t) => ({ taskId: t.id, featureId: null })),
+    merging: [], waiting: [], todo: { ready: [], blocked: [] } };
+  expect(stageCounts(countSnap(board, slim))).toEqual(stageCounts(countSnap(board, full)));
+  for (const f of ["all", "active", "done", "p0"] as const) {
+    const ids = (ov: LedgerOverview) => outlineOf(ov, f, countSnap(board, ov).active).map((g) => [g.id, g.title, g.tasks.map((t) => [t.id, t.title, t.stage])]);
     expect(ids(slim)).toEqual(ids(full));
   }
   const geo = (ov: LedgerOverview) => {
