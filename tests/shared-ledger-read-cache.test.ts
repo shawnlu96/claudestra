@@ -165,3 +165,20 @@ test("[验收线 3] a successful POST commands by the same credential → the ne
     expect(lists(hits)).toBe(2);
   });
 });
+
+test("[验收线 2] a successful write keeps an active 429 cooldown: GET features stays local until Retry-After passes", async () => {
+  await withCenter(async ({ get, post, hits, answer, advance }) => {
+    answer((method, resource) => method === "GET" && resource === "features"
+      ? new Response("slow", { status: 429, headers: { "Retry-After": "20" } }) : ok(method, resource));
+    expect((await get("features")).status).toBe(429);
+    advance(1_000);
+    expect((await post("commands", SHARED_LEDGER_COMMAND_FIXTURES[3]!.payload)).status).toBe(200);
+    answer(ok);
+    const held = await get("features");
+    expect([held.status, held.headers.get("retry-after")]).toEqual([429, "19"]);
+    expect(lists(hits)).toBe(1);
+    advance(19_000);
+    expect((await get("features")).status).toBe(200);
+    expect(lists(hits)).toBe(2);
+  });
+});

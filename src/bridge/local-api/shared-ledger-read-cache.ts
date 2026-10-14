@@ -42,12 +42,17 @@ function prune(now: number) {
   for (const [key, e] of entries) if (!e.running && e.expires <= now && (e.blockedUntil ?? 0) <= now) entries.delete(key);
 }
 
-/** Drop every cached feature list of this credential subject (any state dir): called after its write succeeded */
+/**
+ * Drop every cached feature list of this credential subject (any state dir): called after its write succeeded. The cached
+ * value and any in-flight read become obsolete, but an active 429 cooldown stays: a write does not lift the center's limit.
+ */
 function forgetSharedLedgerList(c: Subject): void {
-  const subject = subjectKey(c);
-  for (const key of entries.keys()) {
+  const subject = subjectKey(c), now = sharedLedgerReadClock.now();
+  for (const [key, e] of entries) {
     const [, s, , resource] = JSON.parse(key) as [string, string, string, string];
-    if (s === subject && resource === "features") entries.delete(key);
+    if (s !== subject || resource !== "features") continue;
+    if (e.blockedUntil !== undefined && now < e.blockedUntil) entries.set(key, { expires: 0, blockedUntil: e.blockedUntil, header: e.header });
+    else entries.delete(key);
   }
 }
 
@@ -77,11 +82,15 @@ export async function cachedSharedLedgerRead<T>(scope: string, credential: Crede
       if (entries.get(key) === mine) Object.assign(mine, { value, expires: sharedLedgerReadClock.now() + READ_CACHE_MS });
       return value;
     }, (error: unknown) => {
-      if (entries.get(key) !== mine) throw error;
       if (error instanceof SharedLedgerRemoteError && error.status === 429) {
+        // The cooldown holds even when a write made this read obsolete meanwhile
         const at = sharedLedgerReadClock.now(), header = retry.get();
-        Object.assign(mine, { blockedUntil: at + retryAfterMs(header, at), header });
-      } else entries.delete(key);
+        const block = { blockedUntil: at + retryAfterMs(header, at), header };
+        Object.assign(mine, block);
+        const current = entries.get(key);
+        if (current && current !== mine) Object.assign(current, block);
+        else if (!current) entries.set(key, { expires: 0, ...block });
+      } else if (entries.get(key) === mine) entries.delete(key);
       throw error;
     }).finally(() => { delete mine.running; });
   }
