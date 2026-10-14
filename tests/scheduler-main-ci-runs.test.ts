@@ -180,7 +180,7 @@ describe("[验收线 3] round 2: green checks on a cancelled sole push run", () 
   });
   test("a successful run next to it, or the run still going, stays green", () => {
     for (const runs of [[{ id: 7, status: "completed", conclusion: "cancelled" }, { id: 8, status: "completed", conclusion: "success" }],
-      [{ status: "in_progress" }], [{ status: "completed", conclusion: "success" }], []]) {
+      [{ status: "in_progress" }], [{ status: "completed", conclusion: "success" }]]) {
       expect(plan(health({ tests: OK, web: OK, runs, at: T0 + 20 * MIN }))).toMatchObject({ reason: "healthy", actions: go });
     }
   });
@@ -188,5 +188,33 @@ describe("[验收线 3] round 2: green checks on a cancelled sole push run", () 
     const h = health({ tests: OK, web: OK, runs: [{ status: "bogus" }], at: T0 + 20 * MIN });
     expect(h.ci).toMatchObject({ verdict: "unhealthy", why: "runs_unreadable" });
     expect(plan(h)).toMatchObject({ actions: paused });
+  });
+});
+
+describe("[验收线 3] round 3: green checks do not bypass the push run deadlines", () => {
+  const OK = { status: "completed", conclusion: "success" };
+  test("green checks do not bypass overdue push evidence", () => {
+    const h = health({ tests: OK, web: OK, runs: [{ status: "in_progress", created: T0 }], at: T0 + 61 * MIN });
+    expect(h.state).toBe("green");
+    expect(h.ci).toMatchObject({ verdict: "evidence_missing", why: "run_overdue" });
+    expect(plan(h)).toMatchObject({ reason: "main_ci_evidence_missing", actions: paused });
+    expect(plan(h, "legacy")).toMatchObject({ reason: "healthy", actions: go });
+    // the boundary: exactly 60 minutes is still the run's own time
+    expect(plan(health({ tests: OK, web: OK, runs: [{ status: "in_progress" }], at: T0 + MAIN_CI_RUN_MAX_MS }))).toMatchObject({ reason: "healthy", actions: go });
+  });
+  test("green checks do not bypass absent push evidence", () => {
+    const h = health({ tests: OK, web: OK, runs: [], commit: T0, at: T0 + 61 * MIN });
+    expect(h.ci).toMatchObject({ verdict: "evidence_missing", why: "run_not_created" });
+    expect(plan(h)).toMatchObject({ reason: "main_ci_evidence_missing", actions: paused });
+    expect(plan(h, "legacy")).toMatchObject({ reason: "healthy", actions: go });
+    expect(health({ tests: OK, web: OK, runs: [], commit: T0, at: T0 + MAIN_CI_RUN_CREATE_MS }).ci).toMatchObject({ verdict: "evidence_missing" });
+  });
+  test("green checks, no push run yet inside 15 minutes: waiting, not healthy; no commit time: not admitted", () => {
+    const h = health({ tests: OK, web: OK, runs: [], commit: T0, at: T0 + MAIN_CI_RUN_CREATE_MS - 1 });
+    expect(h.ci).toMatchObject({ verdict: "pending", why: "run_not_created_yet" });
+    expect(plan(h)).toMatchObject({ reason: "main_ci_pending", actions: go, notification: null });
+    const noTime = health({ tests: OK, web: OK, runs: [], commit: null, at: T0 + MIN });
+    expect(noTime.ci).toMatchObject({ verdict: "unhealthy", why: "commit_time_unavailable" });
+    expect(plan(noTime)).toMatchObject({ actions: paused });
   });
 });

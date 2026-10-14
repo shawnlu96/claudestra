@@ -129,18 +129,21 @@ function parsePushRuns(raw: unknown, sha: string): { runs: MainCiPushRun[]; comm
 
 /**
  * Run-aware reading of the same reasons, for this SHA only (staleness, drift and read errors never get here, or stay a fault):
- * green checks whose only push runs were cancelled are evidence_missing; a completed non-success check is a fault even while others
+ * green checks still obey the run deadlines below, and green checks whose only push runs were cancelled are evidence_missing; a completed non-success check is a fault even while others
  * are pending; missing / pending with an active push run is waiting until
  * the run is MAIN_CI_RUN_MAX_MS old; no push run is waiting until MAIN_CI_RUN_CREATE_MS after the commit; anything else is evidence_missing.
  */
 function classifyRuns(h: MainCiHealth, raw: unknown, sha: string): MainCiRunVerdict {
   const parsed = parsePushRuns(raw, sha), runs = parsed?.runs ?? [];
   const v = (verdict: MainCiRunVerdict["verdict"], why: MainCiRunVerdict["why"]): MainCiRunVerdict => ({ verdict, why, runs });
-  // Green checks still need trustworthy run evidence: a sole (every) push run cancelled with no new attempt is not a healthy main.
+  // Green checks still need trustworthy run evidence: every push run cancelled with no new attempt, a run past its deadline, or no
+  // run past the creation deadline is not a healthy main; no run yet inside that window only waits.
   if (h.state === "green") {
     if (!parsed) return v("unhealthy", "runs_unreadable");
-    const cancelled = runs.length > 0 && runs.every((r) => r.status === "completed" && r.conclusion === "cancelled");
-    return cancelled ? v("evidence_missing", "run_cancelled") : v("green", "healthy");
+    if (runs.some((r) => activeRun.has(r.status) && h.observedAt - r.createdAt > MAIN_CI_RUN_MAX_MS)) return v("evidence_missing", "run_overdue");
+    if (runs.length) return runs.every((r) => r.status === "completed" && r.conclusion === "cancelled") ? v("evidence_missing", "run_cancelled") : v("green", "healthy");
+    if (parsed.commitTime === null) return v("unhealthy", "commit_time_unavailable");
+    return h.observedAt - parsed.commitTime >= MAIN_CI_RUN_CREATE_MS ? v("evidence_missing", "run_not_created") : v("pending", "run_not_created_yet");
   }
   if (h.reasons.some((r) => !["missing_check", "pending_check", "unsuccessful_check"].includes(r.code))) return v("unhealthy", "other_fault");
   const failed = h.reasons.filter((r) => r.code === "unsuccessful_check");
