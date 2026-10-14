@@ -6,40 +6,41 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { recoverLendCentral } from "../src/bridge/shared-ledger-v2-lend.js";
 import { writeLendCentralOrder } from "../src/lib/ledger-lend-central-home.js";
+import { getOrder } from "../src/lib/lend-journal.js";
+import { workerName } from "../src/lib/lend-worker-name.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { V2_DTO_FIXTURES, V2_FIXTURE_SCOPE } from "../src/lib/shared-ledger-contract-v2-fixtures.js";
 import { readSharedLedgerMode, writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { migrationCenter, runExecutionMigration, type MigrationPlan } from "../src/lib/shared-ledger-v2-migration.js";
 import { approvedAsk, featureRows } from "./helpers/shared-ledger-v2-fake-center-kit.js";
+import { claimedWrite, cleanupLendApi, expectStartedOnce, legacyClaimed, startsOf } from "./shared-ledger-v2-e2e-executor.test.js";
 import {
   cleanupWorlds, D, evidence, F, H0, H1, mergeIntent, mergeReady, outcome, REPO, RESOURCE, runMerge, versions, world, type World,
 } from "./shared-ledger-v2-e2e-world.test.js";
 
-afterEach(cleanupWorlds);
+afterEach(() => { cleanupLendApi(); cleanupWorlds(); });
 
-/** A write order on card T, claimed by peer B: the worker it started is the one in-flight piece of work during the outage. */
-async function claimedWrite(w: World, T: string) {
-  w.k.center.seed({ tasks: [{ ...w.task(T), stage: "build", head: null }] });
-  const created = await w.local.send(w.local.cmd("lend.create", { ...versions(w, T), featureId: F, family: "codex", step: "write",
-    executorInstanceId: "peer-b", specArtifactId: "artifact", head: H0, round: 0, branch: "feat/x15-offline", base: "main", grantId: "grant-b", grantDigest: D }));
-  const o = w.k.center.rows().orders.get(created.result.entityId)!;
-  const common = { ...V2_FIXTURE_SCOPE, orderId: o.orderId, taskId: T, specRev: o.specRev, round: 0, leaseGen: 1, serviceGeneration: o.serviceGeneration,
-    epoch: o.epoch, bootId: o.bootId, executorInstanceId: "peer-b", worker: { kind: "peer_agent" as const, instanceId: "peer-b", agentId: "worker-b" } };
-  await w.peerB.raw(w.peerB.cmd("lend.claim", { claim: { ...common, head: H0, grantId: o.grantId, grantDigest: o.grantDigest, claimedAt: w.k.center.time } }));
-  const result = w.peerB.cmd("lend.result", { result: { ...common, expectedHead: H0, head: H1, operationId: "lend-offline", resultDigest: D,
-    verdict: "delivered", summary: "peer B 断网期间完成", artifactIds: [], observedAt: w.k.center.time } });
-  return { orderId: o.orderId, result };
+/** Peer B's in-flight result for the claimed order, as the worker under the claimed lease would report it. */
+function resultOf(w: World, orderId: string) {
+  const o = w.k.center.rows().orders.get(orderId)!;
+  return w.peerB.cmd("lend.result", { result: { ...V2_FIXTURE_SCOPE, orderId, taskId: o.taskId, specRev: o.specRev, round: o.round, leaseGen: o.leaseGen,
+    serviceGeneration: o.serviceGeneration, epoch: o.epoch, bootId: o.bootId, executorInstanceId: "peer-b", worker: o.worker, expectedHead: H0, head: H1,
+    operationId: "lend-offline", resultDigest: D, verdict: "delivered", summary: "peer B 断网期间完成", artifactIds: [], observedAt: w.k.center.time } });
 }
 
 describe("X15 演练 · 断网：中心不可用", () => {
   test("只读缓存与草稿、最近成功时间；派单 / 阶段 / 合并 / 开卡全停；在途成果进 outbox；恢复后显式核对再重交一次", async () => {
     const w = await world(), T = await mergeReady(w, "task-offline"), M = await mergeReady(w, "task-merge");
     const ctx = await mergeIntent(w, M, H1);
-    const { orderId, result } = await claimedWrite(w, T);
-    // peer B's worker starts on its claim: the number of claims the center saw for the order is the number of starts
-    const claims = () => w.k.center.log.filter(e => e.command === "lend.claim").length;
+    // peer B's real loop claims through 本机's lend API and starts its worker; starts are counted from the worker's own record
+    const { orderId, b } = await claimedWrite(w, T);
+    const claims = () => w.k.center.log.filter(e => e.command === "lend.claim").length, starts = () => startsOf(w.peerB.dir, orderId).length;
+    expect(await b.until(orderId, "started")).toBe("started");
+    expect([claims(), starts()]).toEqual([1, 1]);
+    const result = resultOf(w, orderId);
     const askId = ctx.authorizationAskId;
     await w.local.client.queryAsk({ ...V2_FIXTURE_SCOPE, askId });
     for (const i of w.all) await i.refresh();
@@ -73,6 +74,9 @@ describe("X15 演练 · 断网：中心不可用", () => {
     // peer B 在途成果：发不出去 → 只存它本机 outbox（非权威、待重交）
     await expect(w.peerB.raw(result)).rejects.toThrow("unavailable");
     expect(await w.peerB.outbox.saveResult(result)).toEqual({ state: "pending_submission", authoritative: false });
+    // peer B 的循环在断网期间照跑、并重启一次：单子仍是 started，worker 不再起
+    await b.restart(); await b.restart();
+    expect([getOrder(b.h.db, orderId)?.state, starts()]).toEqual(["started", 1]);
     expect(w.k.center.log.length).toBe(before);
 
     // 恢复：端口回来后什么都不会自己发
@@ -92,21 +96,25 @@ describe("X15 演练 · 断网：中心不可用", () => {
     expect((await w.peerB.raw(pending)).command).toBe("lend.result");
     expect(w.served(from)).toEqual(["lend.result 200"]);
     expect(w.k.center.rows().orders.get(orderId)).toMatchObject({ status: "done", resultOperationId: "lend-offline" });
+    // 恢复后：本机显式核对领单（只对账，freshClaim=false），peer B 再重启一次——领单 1 次、worker 启动 1 次
+    expect(await recoverLendCentral(orderId, "claim", true)).toMatchObject({ status: "confirmed", freshClaim: false });
+    await b.restart();
     expect(claims()).toBe(1);
+    expectStartedOnce(w.peerB.dir, orderId);
     // 合并在恢复后照常跑一次；本机阶段命令同样显式重交（同一 requestId：回执先查，再发一次）
     expect(outcome(await runMerge(w, ctx))).toMatchObject({ state: "succeeded", reported: true, replayed: false });
     expect(w.ghCalls()).toHaveLength(1);
     expect((await w.local.send(stage)).command).toBe("task.stage");
     evidence(w, "offline", [
-      { item: `peer-b:lend:${orderId}`, instance: "peer-b", local: { outbox: "pending_submission", requestId: result.requestId },
-        center: { receiptWhilePending: "unknown", order: "claimed→done", resubmissions: 1 } },
+      { item: `peer-b:lend:${orderId}`, instance: "peer-b", local: { outbox: "pending_submission", requestId: result.requestId, workerStarts: starts() },
+        center: { receiptWhilePending: "unknown", order: "claimed→done", resubmissions: 1, claims: claims() } },
       { item: `local:command:${stage.requestId}`, instance: "local", local: { status: "unavailable", lastSuccessAt: lastOk },
         center: { committedAfterRestore: true } },
     ]);
   });
 });
 
-const ORDER = "old-order", OLD_TASK = "old-task";
+const ORDER = "old-order", OLD_TASK = "old-task", WORKER = workerName(ORDER);
 /** Member ledgers on the real schema: 本机 owns the card and the claimed order lent to peer B; peer B holds the same order. */
 function memberLedgers(w: World) {
   const row = { taskId: OLD_TASK, project: "project", peer: "peer-b", family: "codex" as const, step: "review" as const, specRev: 1, round: 0,
@@ -118,7 +126,7 @@ function memberLedgers(w: World) {
         agent: "agent-x15", extra: { sharedFeatureId: "feature" } });
       db.run("PRAGMA foreign_keys = OFF");
       writeLendCentralOrder(db, ORDER, i === w.local ? row : { ...row, peer: "local" }, 1_000);
-      db.run("UPDATE lend_orders SET status = 'claimed', leaseGen = 1, worker = 'worker-b' WHERE orderId = ?", [ORDER]);
+      db.run("UPDATE lend_orders SET status = 'claimed', leaseGen = 1, worker = ? WHERE orderId = ?", [WORKER, ORDER]);
     } finally { closeLedger(path); }
   }
 }
@@ -127,7 +135,16 @@ async function migrationWorld() {
   w.k.center.seed({ features: [featureRows("feature", "task", "planning").feature], asks: [approvedAsk("ask", "feature", "task")] });
   for (const i of w.all) await writeSharedLedgerMode("feature", { authorityMode: "planning", sharedPlanning: true }, i.dir);
   memberLedgers(w);
-  return { w, center: migrationCenter(w.local.transport), mode: (i: { dir: string }) => readSharedLedgerMode("feature", i.dir) };
+  // peer B's real loop already claimed the order on the legacy path and started its worker (one start record)
+  const { b, state } = await legacyClaimed(w.peerB.dir, ORDER, OLD_TASK);
+  expect([state, startsOf(w.peerB.dir, ORDER)]).toEqual(["started", [{ orderId: ORDER, worker: WORKER }]]);
+  /** After the migration step: peer B's loop runs again and restarts; the order is still started and no second worker started. */
+  const startedOnce = async () => {
+    await b.restart(); await b.restart();
+    expect(getOrder(b.h.db, ORDER)?.state).toBe("started");
+    expect(expectStartedOnce(w.peerB.dir, ORDER).worker).toBe(WORKER);
+  };
+  return { w, startedOnce, center: migrationCenter(w.local.transport), mode: (i: { dir: string }) => readSharedLedgerMode("feature", i.dir) };
 }
 function plan(w: World, orders: MigrationPlan["orders"]): MigrationPlan {
   const { manifestDigest: _a, evidence: _b, featureIds: _c, frozenAt: _d, batchId: _e, ...manifest } =
@@ -143,7 +160,7 @@ const orderRow = (i: { dir: string }) => {
 
 describe("X15 演练 · 迁移过程中有活单", () => {
   test("在途出借单没声明：本机与 peer B 逐项拒绝，三成员模式不动，中心零调用", async () => {
-    const { w, center, mode } = await migrationWorld(), from = w.k.center.log.length;
+    const { w, center, mode, startedOnce } = await migrationWorld(), from = w.k.center.log.length;
     const out = await runExecutionMigration({ root: w.root, plan: plan(w, {}), center, mode: "commit" });
     expect(out.status).toBe("refused");
     expect(out.status === "refused" && out.findings.map(f => `${f.code}:${f.item}`).sort())
@@ -151,22 +168,24 @@ describe("X15 演练 · 迁移过程中有活单", () => {
     expect(w.k.center.log.length).toBe(from);
     for (const i of w.all) expect(mode(i)).toEqual({ authorityMode: "planning", sharedPlanning: true });
     expect(orderRow(w.peerB)).toMatchObject({ status: "claimed", leaseGen: 1 });
+    await startedOnce();
   });
 
   test("显式导入并核对租约（gen 1 / 头）：整组切到 execution、中心领租；订单不重发，peer B 的在途单原样保留", async () => {
-    const { w, center, mode } = await migrationWorld(), from = w.k.center.log.length;
+    const { w, center, mode, startedOnce } = await migrationWorld(), from = w.k.center.log.length;
     const out = await runExecutionMigration({ root: w.root, plan: plan(w, { [ORDER]: { disposition: "import", leaseGen: 1, head: H0 } }), center, mode: "commit" });
     expect(out).toMatchObject({ status: "switched", epochs: { feature: 2 }, leases: ["task"] });
     expect(w.served(from)).toEqual(["lease.acquire 200"]);
     expect(w.k.center.log.slice(from).filter(e => e.route === "migrations").map(e => e.status)).toEqual([200]);
     for (const i of w.all) expect(mode(i)).toMatchObject({ authorityMode: "execution", centerExecution: { centerFeatureId: "feature", epoch: 2 } });
     expect(w.served(from).some(c => c.startsWith("lend."))).toBe(false);
-    expect([orderRow(w.local), orderRow(w.peerB)]).toEqual([{ status: "claimed", leaseGen: 1, head: H0, worker: "worker-b" },
-      { status: "claimed", leaseGen: 1, head: H0, worker: "worker-b" }]);
+    expect([orderRow(w.local), orderRow(w.peerB)]).toEqual([{ status: "claimed", leaseGen: 1, head: H0, worker: WORKER },
+      { status: "claimed", leaseGen: 1, head: H0, worker: WORKER }]);
+    await startedOnce();
   });
 
   test("切换回包丢失：全组冻结在 migrating 门后，按批次回执留证（committed），迁移命令不重试", async () => {
-    const { w, center, mode } = await migrationWorld(), from = w.k.center.log.length;
+    const { w, center, mode, startedOnce } = await migrationWorld(), from = w.k.center.log.length;
     w.k.center.inject({ kind: "drop", route: "migrations" });
     const out = await runExecutionMigration({ root: w.root, plan: plan(w, { [ORDER]: { disposition: "import", leaseGen: 1, head: H0 } }), center, mode: "commit" });
     expect(out).toMatchObject({ status: "frozen", step: "switch", batch: { status: "committed", batchId: "batch-x15" } });
@@ -178,7 +197,8 @@ describe("X15 演练 · 迁移过程中有活单", () => {
     expect(record).toMatchObject({ state: "frozen_pending_pm", step: "switch", batch: { status: "committed" } });
     expect(record.holds.map((h: { instanceId: string; hold: string }) => `${h.instanceId}:${h.hold}`)).toEqual(["local:migrating", "peer-a:migrating", "peer-b:migrating"]);
     expect(w.served(from)).toEqual([]); // 冻结后不领租、不发任何执行命令
+    await startedOnce();
     evidence(w, "migration-live-order", [{ item: "center:migration:batch-x15", instance: "local",
-      local: { frozen: record.state, holds: record.holds.length }, center: { batch: record.batch.status } }]);
+      local: { frozen: record.state, holds: record.holds.length, peerBWorkerStarts: startsOf(w.peerB.dir, ORDER).length }, center: { batch: record.batch.status } }]);
   });
 });

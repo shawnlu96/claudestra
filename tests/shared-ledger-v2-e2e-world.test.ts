@@ -1,8 +1,9 @@
 /** X15 e2e world: one S2C fake center served on a 127.0.0.1 port, three isolated instances (本机 = home + owner, peer A = member,
  * peer B = executor), each with its own temp dir, mode file, signed S2T transport, X7 exec gate / client, X7 local outbox, read
  * cache and X8 journal. Merges run a fake `gh` from the drill's own bin dir; nothing reaches GitHub, a production bridge or the
- * production state directory. The center implementation lives in the private repo: `task.deliver` / `task.review` below are the
- * minimal center semantics the fake center does not model yet (test fixture only, not a center reference).
+ * production state directory. The center implementation lives in the private repo: `task.deliver` / `task.review` and the X9
+ * home-proxy admission of `lend.claim` / `lend.result` below are center semantics the fake center does not model yet (test fixture
+ * only, not a center reference).
  * This file holds no test; the e2e files import it (the wiring-world precedent).
  */
 import { expect } from "bun:test";
@@ -23,7 +24,7 @@ import { SharedLedgerExecGate, type ExecIdentity } from "../src/lib/shared-ledge
 import { SharedLedgerExecLocal } from "../src/lib/shared-ledger-exec-local.js";
 import { writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { createStage2Transport, type Stage2Transport } from "../src/lib/shared-ledger-v2-transport.js";
-import type { CommandHandlers } from "./helpers/shared-ledger-v2-fake-center-commands.js";
+import { COMMAND_HANDLERS, type CommandContext, type CommandHandlers } from "./helpers/shared-ledger-v2-fake-center-commands.js";
 import { executionAt, must, requireLease } from "./helpers/shared-ledger-v2-fake-center-state.js";
 import { ACTORS, kit } from "./helpers/shared-ledger-v2-fake-center-kit.js";
 
@@ -34,8 +35,22 @@ export const RESOURCE = [{ ...V2_FIXTURE_SCOPE, repository: REPO, kind: "file", 
 export const LABELS = { local: "本机", "peer-a": "peer A", "peer-b": "peer B" } as const;
 export type InstanceId = keyof typeof LABELS;
 
+/** X9 home proxy: the order's home, as that order's scoped lend service, submits for the executor its claim / result names; the
+ * executor-side rules then apply unchanged. Any other actor goes through the fake center's own handler as before. */
+function viaHome<K extends "lend.claim" | "lend.result">(type: K, of: (c: CommandContext<K>) => { orderId: string; executorInstanceId: string }) {
+  return (ctx: CommandContext<K>) => {
+    const p = of(ctx), a = ctx.actor, order = must(ctx.state.orders.get(p.orderId));
+    const proxied = a.kind === "service" && a.serviceId === "lend" && a.orderId === order.orderId && a.instanceId === order.homeInstanceId
+      && a.actions.includes(type);
+    return (COMMAND_HANDLERS[type] as (c: CommandContext<K>) => ReturnType<NonNullable<CommandHandlers[K]>>)(
+      proxied ? { ...ctx, actor: { ...a, instanceId: p.executorInstanceId } } : ctx);
+  };
+}
+
 /** Minimal delivery / review semantics: home only, live lease, the order the step rode on is settled at the same head. */
 export const E2E_HANDLERS: CommandHandlers = {
+  "lend.claim": viaHome("lend.claim", c => c.command.payload.claim),
+  "lend.result": viaHome("lend.result", c => c.command.payload.result),
   "task.deliver": ctx => {
     const p = ctx.command.payload, task = executionAt(ctx, p);
     requireLease(ctx.state, p.taskId, ctx.command, ctx.now);
@@ -75,6 +90,16 @@ const bearer = (id: InstanceId) => `x15-${id}-bearer-0123456789`;
 export const connectionOf = (w: { center: { baseUrl: string } }, id: InstanceId, actor: V2Actor) => ({ centerId: "center",
   baseUrl: w.center.baseUrl, teamId: "team", personId: actor.personId, instanceId: actor.instanceId, bearer: bearer(id) });
 const CENTER_ACTORS: Record<string, V2Actor> = { [bearer("local")]: ACTORS.owner, [bearer("peer-a")]: ACTORS.member, [bearer("peer-b")]: ACTORS.executor };
+/** 本机's order-scoped lend service (what the bridge's lend API signs as for one order): its own bearer, the home's instance key. */
+export function lendServiceTransport(w: { center: { baseUrl: string } }, orderId: string) {
+  const actor: V2Actor = { kind: "service", personId: ACTORS.owner.personId, instanceId: "local", serviceId: "lend",
+    representedPersonId: ACTORS.owner.personId, orderId, projects: ["project"], actions: ["lend.claim", "lend.renew", "lend.result"] };
+  const token = `x15-local-lend-${orderId}-0123456789`;
+  CENTER_ACTORS[token] = actor;
+  const transport = createStage2Transport({ key: KEY, projectId: "project", connection: { centerId: "center", baseUrl: w.center.baseUrl,
+    teamId: "team", personId: actor.personId, instanceId: actor.instanceId, bearer: token } });
+  return { actor, transport };
+}
 
 /** The center behind a real local port. A lost response (commit, then no answer) reaches the caller as a 502, which the
  * transport classifies like any network loss (unavailable); `down()` closes the port so connections are refused outright. */
