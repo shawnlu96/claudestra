@@ -12,6 +12,7 @@ import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, typ
 import { getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { getDeployRun, resolveDeployRun } from "../lib/scheduler-deploy.js";
 import { intFlag } from "./ledger-identity.js";
+import { recoveryPolicy } from "../lib/recovery-policy.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
@@ -193,6 +194,7 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       const agent = c.need("agent");
       const bound = bindSchedulerSession(c.db, c.ctx(), {
         taskId: c.p.pos[1] ?? "", role: role as SessionRole, intentId: c.need("intent"), agent,
+        lendAuthorRecovery: () => recoveryPolicy(c.task(c.p.pos[1]).project, "lendAuthorRebuild").mode === "on",
         sessionId: c.need("session"), family: family as "claude" | "codex", transport: transport as SessionTransport,
         registryPath: c.deps.registryPath,
       });
