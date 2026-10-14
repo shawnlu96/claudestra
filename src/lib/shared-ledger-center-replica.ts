@@ -9,13 +9,14 @@
  *   leaves the gate closed (mode first) and a pusher entry that fails closed on a missing feature.
  * - Anything over the local limits is refused before any write, with a fixed reason in `center-replica status`.
  * - REPLPULL1: a skipped feature (other project / not planning / other home) and a first detail read that fails keep their fixed
- *   reason in the state file (`skipped`). One sync run at a time (sync lock); dryRun reads the center, writes nothing and
- *   answers what a real run would create / replay / skip (the background pull's observe mode, shared-ledger-center-replica-pull.ts).
+ *   reason in the state file (`skipped`). One sync run at a time (sync lock); dryRun reads the center, takes no lock, writes
+ *   nothing (pass it a read-only ledger connection) and runs land()'s checks up to the first write, then predicts the writer's
+ *   answer (the background pull's observe mode, shared-ledger-center-replica-pull.ts).
  */
 import type { Database } from "bun:sqlite";
 import { STATE_DIR } from "./paths.js";
 import { instanceKeySync, type InstanceKey } from "./instance-key.js";
-import { getFeature } from "./ledger-feature.js";
+import { effectiveNodes, getDagVersion, getFeature, type DagNode, type Feature } from "./ledger-feature.js";
 import { resourceKey } from "./ledger-scheduler.js";
 import { LedgerError } from "./ledger-store.js";
 import { SharedLedgerClient, SharedLedgerRemoteError } from "./shared-ledger-client.js";
@@ -26,7 +27,7 @@ import type { MirrorEntry } from "./shared-ledger-projector.js";
 import { readSharedLedgerBindings } from "./shared-ledger-gate-bindings.js";
 import { resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
 import { readSharedLedgerMode, writeSharedLedgerMode, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
-import { checkReplicaNodes, REPLICA_ACTOR, REPLICA_ID_CLAIMED, replicaBoundNodes, writeCenterReplica, type CenterNode } from "./shared-ledger-center-replica-write.js";
+import { checkReplicaNodes, REPLICA_ACTOR, REPLICA_ID_CLAIMED, replicaBoundNodes, writeCenterReplica, type CenterNode, type ReplicaWrite } from "./shared-ledger-center-replica-write.js";
 import { readCenterClaims } from "./shared-ledger-center-claims.js";
 import { readCenterReplicas, scopeKey, updateCenterReplicas, withCenterReplicaLock, withCenterReplicaSyncLock, type ReplicaScope } from "./shared-ledger-center-replica-state.js";
 
@@ -111,6 +112,8 @@ const errorText = (e: unknown) => e instanceof SharedLedgerRemoteError && [401, 
 export async function syncCenterReplicas(db: Database, opts: CenterReplicaSyncOptions = {}) {
   const dir = opts.stateDir ?? STATE_DIR;
   const skip = opts.syncLock === "skip";
+  // dryRun takes no lock: the lock file is a write, and a dry run has nothing to keep single.
+  if (opts.dryRun === true) return syncAll(db, opts);
   const out = await withCenterReplicaSyncLock(dir, 0, () => syncAll(db, opts));
   if (out) return out;
   if (skip) return { ok: true, busy: true, scopes: [] as ScopeResult[], features: [] as ReplicaResult[] };
@@ -154,12 +157,39 @@ async function noteSkip(dir: string, now: () => number, where: ReplicaScope, cen
   await updateCenterReplicas(dir, (s) => { (s.skipped ??= {})[centerFeatureId] = { ...where, lastSkip, lastError, at: now() }; });
 }
 
-/** dryRun answer once the detail passed every check: what land() would do, read only. */
-function wouldLand(db: Database, dir: string, detail: SharedLedgerFeatureDetail, centerFeatureId: string, localFeatureId: string): ReplicaResult {
-  const existing = getFeature(db, localFeatureId), prior = readCenterReplicas(dir).replicas[centerFeatureId];
-  const version = detail.dag.version;
-  const result = !existing ? "created" : existing.currentVersion < version || prior?.rev !== detail.feature.rev ? "replayed" : "unchanged";
-  return { centerFeatureId, result, localFeatureId, version };
+/** Same lookup as the writer's replicaCenterId (shared-ledger-center-replica-write.ts): last replica event's center feature id. */
+function replicaCenterIdOf(db: Database, featureId: string): string | null {
+  const r = db.prepare(`SELECT json_extract(data, '$.centerFeatureId') AS c FROM events WHERE target = ? AND kind = 'feature' AND actor = ?
+    AND json_extract(data, '$.op') = 'center-replica' ORDER BY seq DESC LIMIT 1`).get(featureId, REPLICA_ACTOR) as { c: string | null } | null;
+  return r?.c ?? null;
+}
+const nodeShape = (n: DagNode) => ({ key: n.key, taskId: n.taskId, oneLine: n.oneLine, deps: n.deps, estimate: n.estimate, fileGlobs: n.fileGlobs ?? [] });
+const titleTaken = (db: Database, project: string, title: string, except: string) =>
+  !!db.prepare("SELECT id FROM features WHERE project = ? AND title = ? AND id != ?").get(project, title, except);
+
+/**
+ * dryRun: what writeCenterReplica would answer, read only — the same checks in the same order (an error the writer would throw
+ * maps the way land() maps it). Kept next to land() so a change to the writer's checks shows up here; the pull's observe mode
+ * relies on it matching a real run.
+ */
+function predictReplicaWrite(db: Database, w: ReplicaWrite, existing: Feature | null): ReplicaResult {
+  const failedWith = (reason: string): ReplicaResult => ({ centerFeatureId: w.centerFeatureId, result: "failed", reason, localFeatureId: w.localFeatureId });
+  const done = (result: "created" | "replayed" | "unchanged", version: number): ReplicaResult => ({ centerFeatureId: w.centerFeatureId, result, localFeatureId: w.localFeatureId, version });
+  if (!existing) return titleTaken(db, w.localProject, w.title, w.localFeatureId) ? failedWith("本机项目里已有同名 feature") : done("created", w.version);
+  if (replicaCenterIdOf(db, existing.id) !== w.centerFeatureId) return { centerFeatureId: w.centerFeatureId, result: "refused", reason: REPLICA_REASONS.idTaken };
+  if (existing.project !== w.localProject) return failedWith("副本所在的本机项目变了");
+  if (w.version < existing.currentVersion) return failedWith("中心版本比本机副本旧");
+  const bound = replicaBoundNodes(db, existing);
+  if ([...bound.keys()].some((k) => !w.nodes.some((n) => n.key === k))) return failedWith("中心新版本移出了本机已绑卡的节点");
+  let nodes: DagNode[];
+  try { nodes = checkReplicaNodes(db, w, bound); } catch { return failedWith(REPLICA_REASONS.ledger); } // land(): not an own conflict → ledger
+  if (w.version === existing.currentVersion) {
+    const cur = getDagVersion(db, existing.id, existing.currentVersion);
+    const same = !!cur && JSON.stringify(effectiveNodes(db, cur).map(nodeShape)) === JSON.stringify(nodes.map(nodeShape)) && existing.title === w.title;
+    return same ? done("unchanged", existing.currentVersion) : failedWith("中心同一版本的内容与本机副本不一致");
+  }
+  if (existing.title !== w.title && titleTaken(db, existing.project, w.title, existing.id)) return failedWith("本机项目里已有同名 feature");
+  return done("replayed", w.version);
 }
 
 async function syncOne(db: Database, dir: string, now: () => number, client: SharedLedgerClient, credential: SharedLedgerLocalCredential,
@@ -190,7 +220,7 @@ async function syncOne(db: Database, dir: string, now: () => number, client: Sha
   if (!localFeatureId) return refused(REPLICA_REASONS.badId);
   const limit = centerReplicaLimitReason(detail);
   if (limit) return refused(limit);
-  if (dryRun) return wouldLand(db, dir, detail, centerFeatureId, localFeatureId);
+  if (dryRun) return land(db, dir, now, credential, scope, detail, centerFeatureId, localFeatureId, failed, refused, true);
   // Identity check through state update run under the per-id lock: a colliding center feature syncing concurrently waits,
   // then sees this replica's mode / rows and is refused.
   const landed = await withCenterReplicaLock(dir, localFeatureId, () => land(db, dir, now, credential, scope, detail, centerFeatureId, localFeatureId, failed, refused));
@@ -199,7 +229,7 @@ async function syncOne(db: Database, dir: string, now: () => number, client: Sha
 
 async function land(db: Database, dir: string, now: () => number, credential: SharedLedgerLocalCredential, scope: ReplicaScope & { localProject: string },
   detail: SharedLedgerFeatureDetail, centerFeatureId: string, localFeatureId: string, failed: (reason: string, localFeatureId?: string) => Promise<ReplicaResult>,
-  refused: (reason: string) => Promise<ReplicaResult>): Promise<ReplicaResult> {
+  refused: (reason: string) => Promise<ReplicaResult>, dryRun = false): Promise<ReplicaResult> {
   const { localProject, ...where } = scope;
   let mode;
   try { mode = readSharedLedgerMode(localFeatureId, dir); } catch { return failed(REPLICA_REASONS.ledger, localFeatureId); }
@@ -219,6 +249,8 @@ async function land(db: Database, dir: string, now: () => number, credential: Sh
       if (source !== undefined && source !== taskId) return failed(BIND_MISMATCH, localFeatureId);
     }
   }
+  // dryRun stops here, before the first write: every check above ran, the writer's own checks are predicted read only.
+  if (dryRun) return predictReplicaWrite(db, write, existing);
   // Pusher entry first (inert until the mode says pushable), then the gate closes, then the ledger rows appear.
   const prior: { wrote: boolean; entry?: MirrorEntry } = { wrote: false };
   await updateSharedLedgerMirrors(dir, (m) => {
