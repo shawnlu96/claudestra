@@ -1,8 +1,8 @@
 /**
  * 切换 agent 走增量（SYN-1）：切走时快照与同步锚一起存，切回只拉游标后的差量，推送流同时开。历史落地会按 composeView 重组视图、
  * 洗掉重组前到的已定稿直播气泡，所以流事件先进 EventGate 排队，落地后按序放行；游标已推进，已入历史的由 coveredByCursor /
- * historyHasReply / findEchoTarget 拦下（tests/web-switch-sync.test.ts）。不补 since 重放：历史要先拿会话清单再拉页（≥2 个来回），
- * 流 1 个来回就订阅上了，读盘总在订阅之后，两者之间没有空窗。
+ * historyHasReply / findEchoTarget 拦下（tests/web-switch-sync.test.ts）。ponytail: 不补 since 重放——历史先拿会话清单再拉页（≥2 个来回），
+ * 流 1 个来回就订阅上，读盘几乎总在订阅之后；流若更慢，中间那一两秒的事件靠回合内 7s 对账 / 下次对齐补，真漏了再加重放。
  */
 import type { ChatState } from "./chat-store";
 import type { HistoryCursor } from "./live-merge";
