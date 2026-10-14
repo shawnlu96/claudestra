@@ -22,7 +22,6 @@ type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client
 interface El { textContent: string | null; getAttribute(n: string): string | null; className: string; querySelector(s: string): El | null;
   querySelectorAll(s: string): ArrayLike<El>; appendChild(c: El): void; remove(): void }
 const webRequire = createRequire(new URL("../web/package.json", import.meta.url));
-const ui = (p: string) => import(new URL(`../web/features/collab/${p}`, import.meta.url).href);
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let mods: Record<string, Record<string, unknown>>;
@@ -36,8 +35,15 @@ beforeAll(async () => {
     { preconnect: () => {} });
   React = webRequire("react") as ReactNS;
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
-  const [src, bar, outline, props, product, canvas, work] = await Promise.all([ui("use-count-source.ts"), ui("metrics-bar.tsx"), ui("v4/v4-outline.tsx"),
-    ui("v4/v4-props.tsx"), ui("product/product-view.tsx"), ui("dag/dag-canvas.tsx"), ui("work/work-board-content.tsx")]);
+  const [src, bar, outline, props, product, canvas, work] = await Promise.all([
+    import(new URL("../web/features/collab/use-count-source.ts", import.meta.url).href),
+    import(new URL("../web/features/collab/metrics-bar.tsx", import.meta.url).href),
+    import(new URL("../web/features/collab/v4/v4-outline.tsx", import.meta.url).href),
+    import(new URL("../web/features/collab/v4/v4-props.tsx", import.meta.url).href),
+    import(new URL("../web/features/collab/product/product-view.tsx", import.meta.url).href),
+    import(new URL("../web/features/collab/dag/dag-canvas.tsx", import.meta.url).href),
+    import(new URL("../web/features/collab/work/work-board-content.tsx", import.meta.url).href),
+  ]);
   mods = { src, bar, outline, props, product, canvas, work };
 });
 afterAll(async () => {

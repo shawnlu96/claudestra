@@ -12,6 +12,7 @@ import { runLocalStart, type QueuedStart } from "./scheduler-local-runtime-start
 import type { Database } from "bun:sqlite";
 import { dirname, join } from "node:path";
 import type { StartPlan } from "./dag-tools-start.js";
+import { DAG_START_DEDUP_PREFIX } from "./ledger-autostart-grant.js";
 import { getFeature } from "./ledger-feature.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
@@ -64,7 +65,7 @@ const FALLBACK = "PM 接管，按手动流程推进（派审 + 合并队列）";
 /** manager 的 JSON 结果 → null（成功）或错误文字 */
 const failed = (r: any): string | null => (r?.ok ? null : String(r?.error ?? r?.code ?? "manager 没有返回结果").slice(0, 500));
 
-const dedup = (io: StepIO, p: StartPlan, step: string) => `dag-start:${p.taskId}:${io.attempt}:${step}`;
+const dedup = (io: StepIO, p: StartPlan, step: string) => `${DAG_START_DEDUP_PREFIX}${p.taskId}:${io.attempt}:${step}`;
 
 /** 以调用方身份跑一条 ledger 写命令；workflow-set 不收 --dedup（它自己按 workflow-rev 做 CAS），step 给 null */
 function ledger(io: StepIO, p: StartPlan, sub: string, target: string, flags: Record<string, string | undefined>, step: string | null, extraPos: string[] = []) {

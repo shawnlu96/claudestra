@@ -56,7 +56,7 @@ export function workRow(nodeKey: string, extra: Partial<WorkRow> = {}): WorkRow 
 
 /** /work 团队行（work-types.ts TeamWorkRow）：中心没有开工时间、常规耗时 */
 export function teamRow(nodeKey: string, extra: Partial<TeamWorkRow> = {}): TeamWorkRow {
-  return { taskId: `T-${nodeKey}`, featureId: "F1", nodeKey, title: `卡 ${nodeKey}`, who: null, machine: null, stage: "build", reason: null, team: null, ...extra };
+  return { taskId: `T-${nodeKey}`, featureId: "F1", nodeKey, title: `卡 ${nodeKey}`, who: null, instance: null, machine: null, stage: "build", reason: null, team: null, ...extra };
 }
 
 export const workBoard = (extra: Partial<WorkBoard> = {}): WorkBoard => ({
@@ -64,7 +64,7 @@ export const workBoard = (extra: Partial<WorkBoard> = {}): WorkBoard => ({
 });
 
 export const teamWorkBoard = (extra: Partial<TeamWorkBoard> = {}): TeamWorkBoard => ({
-  now: 0, working: [], waiting: [], todo: { ready: [], blocked: [] }, machines: {}, mirror: [], ...extra,
+  now: 0, working: [], merging: [], waiting: [], todo: { ready: [], blocked: [] }, machines: {}, mirror: [], ...extra,
 });
 
 export const MAIN_NOW = Date.UTC(2026, 9, 14, 12);

@@ -8,8 +8,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { dagBoard } from "../src/lib/ledger-dag-board.js";
 import { featureDetail, featureDiff } from "../src/lib/ledger-dag-board-history.js";
 import { getFeature } from "../src/lib/ledger-feature.js";
+import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
+import { appendEvent, createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
+import { PAGE_CHECK_KEY } from "../src/lib/ui-acceptance.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { compareOf, compareOverlay, defaultCompare, diffLists } from "../web/features/collab/dag/dag-diff";
 import { defaultOpen, drawable, layoutDag, MAX_OPEN, nodeId, topoOrder } from "../web/features/collab/dag/dag-layout";
@@ -175,5 +177,57 @@ describe("补充（手造快照）：超过 MAX_OPEN 个 feature", () => {
     expect(open.length).toBe(MAX_OPEN);
     expect(open).not.toContain("f0");
     expect(layoutDag(snapshot.features, open, new Set()).groups.length).toBe(MAX_OPEN);
+  });
+});
+
+// SUBDAG2：只断言 src 投影的形状（web 类型的 lastEvent / doneAt 由 SUBDAG1 手抄，合并后再核两边一致）。放在最后：这里往台账里补事件。
+describe("L4 真实投影 → 节点的最近一条事件 / 完成时刻（src 形状）", () => {
+  const srcNodes = (project: string, featureId: string) => db.transaction(() => dagBoard(db, project, NOW)).deferred().features.find((f) => f.id === featureId)!.nodes;
+  const rawEvent = (ts: number, target: string, kind: string, text: string, data: unknown) =>
+    db.prepare("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'scheduler', ?, ?, ?, ?, ?)").run(ts, P, target, kind, text, J(data));
+  let noteAt = 0;
+
+  beforeAll(() => {
+    noteAt = appendEvent(db, { actor: "agent-exec", now: 950 }, { project: P, target: "T2", kind: "note", text: "接口先按旧字段出\n基线 " + "a".repeat(40) }).event.ts;
+    // 调度记账与观察类 note 都排在它之后（调度器自己写的，不走 appendEvent）
+    rawEvent(960, "T2", "scheduler", "settle 记账", { op: "settle" });
+    rawEvent(961, "T2", "scheduler", "plan 记账", { op: "plan" });
+    rawEvent(962, "T2", "note", "观察到恢复", { op: "recovery_observe" });
+    rawEvent(963, "T2", "memory", "", {});
+    // T1 建卡时直接是 done、没有 stage 事件：补一条收尾的（手改库，同上面的 Z）
+    rawEvent(650, "T1", "stage", "", { from: "verified", to: "done" });
+    // 没有任务的已完成节点：别的项目里凭整页验收源 done 的 feature，PAGEOK 没绑卡（ui-page-display.ts）
+    const f = createFeature(db, owner(970), { project: "other", slug: "page", title: "整页验收" }).row;
+    const x1 = { key: "X1", taskId: "X1", oneLine: "别的项目的卡", deps: [] };
+    initDag(db, owner(971), { id: f.id, rev: f.rev, nodes: [x1] });
+    // PAGEOK 只在有 ui 卡时由系统补（ui-acceptance.ts），这里手写一版带上它
+    const page = { key: PAGE_CHECK_KEY, taskId: null, oneLine: "整页验收", deps: ["X1"], status: "planned", estimate: "", inheritedFrom: null };
+    db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes, cancels, scopeChange, askId) "
+      + "VALUES (?, 2, 'new_issue', '手改', 'hand', 'hand', 972, ?, '[]', 0, NULL)").run(f.id, J([{ ...x1, status: "done", estimate: "", inheritedFrom: null }, page]));
+    db.run("CREATE TABLE IF NOT EXISTS ui_page_vectors (sourceId TEXT, revision INTEGER, state TEXT, entries TEXT)");
+    db.run("CREATE TABLE IF NOT EXISTS ui_page_members (project TEXT, featureId TEXT, sourceId TEXT, revision INTEGER)");
+    db.prepare("INSERT INTO ui_page_vectors VALUES ('s1', 1, 'verified', ?)").run(J([{ scope: { featureId: f.id, dagVersion: 2 }, verdict: "approve" }]));
+    db.prepare("INSERT INTO ui_page_members VALUES ('other', ?, 's1', 1)").run(f.id);
+    db.prepare("UPDATE features SET status = 'done', currentVersion = 2 WHERE id = ?").run(f.id);
+  });
+
+  test("[验收线 2] 进行中节点的 lastEvent = 最后一条有信息事件，之后的噪音不影响；doneAt 为 null", () => {
+    const nodes = srcNodes(P, F);
+    const t2 = nodes.find((n) => n.key === "T2")!;
+    expect(t2.phase).toBe("active");
+    expect(t2.lastEvent).toEqual({ at: noteAt, actor: "agent-exec", kind: "note", text: `接口先按旧字段出 基线 ${"a".repeat(12)}` });
+    expect(t2.doneAt).toBeNull();
+    // 只有噪音与空文本 stage 的进行中节点、没开始的节点、missing 节点：两项都是 null（键在）
+    for (const key of ["T4", "T3", "M", "Z"]) expect(nodes.find((n) => n.key === key)).toMatchObject({ lastEvent: null, doneAt: null });
+  });
+  test("[验收线 2] 已完成节点带 doneAt（最后一条 stage 的 ts），lastEvent 为 null", () => {
+    expect(srcNodes(P, F).find((n) => n.key === "T1")).toMatchObject({ phase: "done", doneAt: 650, lastEvent: null });
+  });
+  test("[验收线 2] 没有任务的已完成节点：两项都是 null", () => {
+    const page = srcNodes("other", "ab12-page").find((n) => n.key === PAGE_CHECK_KEY)!;
+    expect(page).toMatchObject({ phase: "done", taskId: null, acceptedBy: "project_source", lastEvent: null, doneAt: null });
+  });
+  test("[验收线 2] 过一遍 JSON 两个键都在（null 不会像 undefined 那样消失）", () => {
+    for (const n of wire(srcNodes(P, F))) expect(Object.keys(n)).toEqual(expect.arrayContaining(["lastEvent", "doneAt"]));
   });
 });

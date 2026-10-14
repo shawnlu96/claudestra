@@ -62,7 +62,7 @@ export function AsksEntry({ machineKey }: { machineKey: string }) {
           >
             <InboxIcon />
             <span className="min-w-0 truncate">
-              <span className="font-semibold">{t("待你处理")} · {agentLabel(banner.fromAgent, t, banner.kind)}</span> {banner.title}
+              <span className="font-semibold">{t("待你处理")} · {agentLabel(banner, t)}</span> {banner.title}
             </span>
           </button>,
           document.body,

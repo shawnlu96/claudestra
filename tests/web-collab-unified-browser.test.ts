@@ -2,8 +2,9 @@
  * team-project-N8：项目组「协作视图」按绑定统一入口，真 Chromium + 合成两台机器（中继模式 /m/<fp>/api/v1/*），不连生产 bridge / 中心。
  * 截图私存：COLLAB_UNIFIED_SHOTS_DIR=<仓库外目录>（缺省写临时目录、跑完删掉），390 / 1280 各一套，manifest 记 head 与 fixture 摘要。
  */
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright-core";
+import * as childProcess from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -122,6 +123,25 @@ async function git(...args: string[]) {
   return out.trim();
 }
 
+function closePipesOnExit(child: childProcess.ChildProcess) {
+  // Chrome descendants can retain its pipes after it exits; Playwright's close wait needs every pipe closed.
+  // The browser is already gone on exit, so destroying its streams loses no browser output.
+  child.once("exit", () => { for (const stream of child.stdio) stream?.destroy(); });
+}
+
+async function launchBrowser() {
+  const spawn = childProcess.spawn;
+  const hook = spyOn(childProcess, "spawn").mockImplementation(((...args: unknown[]) => {
+    const child = Reflect.apply(spawn, childProcess, args) as childProcess.ChildProcess;
+    if (Array.isArray(args[1]) && args[1].includes("--remote-debugging-pipe")) closePipesOnExit(child);
+    return child;
+  }) as typeof childProcess.spawn);
+  try {
+    return await chromium.launch({ headless: true,
+      ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  } finally { hook.mockRestore(); }
+}
+
 beforeAll(async () => {
   mkdirSync(shots, { recursive: true, mode: 0o700 }); chmodSync(shots, 0o700);
   const build = Bun.spawn([process.execPath, "build", entry, "--target", "browser", "--outdir", scratch, "--tsconfig-override", "web/tsconfig.json"],
@@ -145,7 +165,7 @@ beforeAll(async () => {
       <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/team-view-harness.css"></head>
       <body><div id="root"></div><script src="/team-view-harness.js"></script></body></html>`, { headers: { "Content-Type": "text/html" } });
   } });
-  browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  browser = await launchBrowser();
 }, 120_000);
 
 afterAll(async () => {
@@ -157,10 +177,40 @@ afterAll(async () => {
       fixtureSha256: createHash("sha256").update(readFileSync(entry)).digest("hex"),
       testSha256: createHash("sha256").update(readFileSync("tests/web-collab-unified-browser.test.ts")).digest("hex"), shots: manifest }, null, 2), { mode: 0o600 });
   } finally {
-    server?.stop(true);
-    try { await browser?.close(); } finally { if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true }); }
+    try {
+      await browser?.close();
+    } finally {
+      server?.stop(true);
+      if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true });
+    }
   }
 }, 60_000);
+
+test("Chromium cleanup closes native process pipes even while a descendant retains them", async () => {
+  const script = `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+    console.log(child.pid);
+    process.stdin.once('data', () => process.exit(0));
+  `;
+  const child = childProcess.spawn("node", ["-e", script], { stdio: ["pipe", "pipe", "pipe"] });
+  closePipesOnExit(child);
+  const closed = new Promise<number | null>((resolve, reject) => {
+    child.once("close", resolve);
+    child.once("error", reject);
+  });
+  let descendant: number | undefined;
+  try {
+    descendant = Number(await new Promise<string>((resolve) => child.stdout.once("data", (data) => resolve(data.toString().trim()))));
+    child.stdin.end("exit");
+    expect(await closed).toBe(0);
+    expect(Number.isSafeInteger(descendant) && descendant > 0).toBe(true);
+    expect(() => process.kill(descendant!, 0)).not.toThrow();
+  } finally {
+    child.kill();
+    if (descendant && Number.isSafeInteger(descendant) && descendant > 0) process.kill(descendant, "SIGTERM");
+  }
+});
 
 /** React DevTools 钩子只记录页面主根；守卫另起的根也会提交，不能让它覆盖待断言的渲染树。 */
 const HOOK = `window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { supportsFiber: true, renderers: new Map(), inject() { return 1; },

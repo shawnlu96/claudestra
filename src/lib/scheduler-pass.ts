@@ -17,6 +17,7 @@ import { mergeExternal } from "./scheduler-merge-external.js";
 import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { mergeAgain, reclaimLentSlots } from "./scheduler-merge-reclaim.js";
+import { mergePipeStep } from "./scheduler-merge-pipe.js";
 import { deployYield, passClock } from "./scheduler-deploy-first.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
 import { mainCiPass } from "./scheduler-main-ci-wiring.js";
@@ -176,6 +177,8 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const claim = await manual.claim(manager, config); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
       late.push(...claim.claimed); failed.push(...claim.failed);
       if (cut("manualClaim")) return done();
+      failed.push(...(await mergePipeStep(db, config, { manager, external, active, train: opts.train, policy: opts.recoveryPolicy, pace: pace.phase(), late })).failed); // MRGPIPE1
+      if (cut("mergePipe")) return done();
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
       if (cut("observe")) return done();

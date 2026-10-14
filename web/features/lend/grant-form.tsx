@@ -1,6 +1,7 @@
 "use client";
 /** Grants expose per-family slots, repositories and expiry; failures shake the form. */
 import { useState } from "react";
+import { LEND_WORDS } from "@/lib/owner-words";
 import { postGrant } from "./lend-api";
 import { useLendT } from "./lend-i18n";
 import { LendIcon } from "./lend-icons";
@@ -99,8 +100,8 @@ export function GrantForm({ peers, grants, maxDays, initial, onDone, onFail, onC
       <div className="grid grid-cols-2 gap-3 text-xs">
         {(["claude", "codex"] as const).map((family) => (
           <label key={family} className="flex min-w-0 flex-col gap-1">
-            <span className="text-base-content/60">{family === "claude" ? "Claude" : "Codex"} {t("名额")}</span>
-            <input type="number" min={0} max={16} step={1} aria-label={`${family === "claude" ? "Claude" : "Codex"} ${t("名额")}`}
+            <span className="text-base-content/60">{family === "claude" ? "Claude" : "Codex"} {t(LEND_WORDS.slots)}</span>
+            <input type="number" min={0} max={16} step={1} aria-label={`${family === "claude" ? "Claude" : "Codex"} ${t(LEND_WORDS.slots)}`}
               className="input input-sm w-full min-w-0" value={f[family] ?? 0} disabled={busy}
               onChange={(e) => setF({ ...f, [family]: Number(e.target.value) })} />
           </label>

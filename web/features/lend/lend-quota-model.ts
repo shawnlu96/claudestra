@@ -3,6 +3,8 @@
  * 状态（below / warn / stop / unknown）由 bridge 判好，这里只决定怎么显示，不按百分比自己猜停没停。
  * 表单只做「是不是 0..100 整数、提醒线是否低于停线」的即时提示，最终以 bridge 校验为准。tests/web-lend-quota.test.ts。
  */
+import { LEND_WORDS } from "@/lib/owner-words";
+
 export type QuotaFamily = "codex" | "claude";
 export type LineState = "below" | "warn" | "stop" | "unknown";
 export type LineLimit = "none" | "half" | "zero";
@@ -34,7 +36,7 @@ export function draftProblem(d: LineDraft): string | null {
   const warn = pctOf(d.warn);
   const stop = pctOf(d.stop);
   if (warn === null || stop === null) return "要是 0 到 100 的整数";
-  if (warn >= stop) return "提醒线要低于停接线";
+  if (warn >= stop) return LEND_WORDS.warnBelowStop;
   return null;
 }
 
@@ -46,7 +48,7 @@ export const isDirty = (f: Pick<FamilyLine, "warnPct" | "stopPct">, d: LineDraft
 /** 状态 → 文案与色调；停接只看 bridge 给的 state，不看百分比 */
 export function stateBadge(f: Pick<FamilyLine, "state" | "mode" | "limit">): { text: string; tone: "success" | "warning" | "error" | "muted" } {
   if (f.state === "unknown") return { text: "用量未知", tone: "muted" };
-  if (f.state === "stop") return f.limit === "zero" ? { text: "已停接", tone: "error" } : { text: "超过停接线（未执行）", tone: "warning" };
+  if (f.state === "stop") return f.limit === "zero" ? { text: LEND_WORDS.stopped, tone: "error" } : { text: LEND_WORDS.overStopLine, tone: "warning" };
   if (f.state === "warn") return { text: f.limit === "half" ? "提醒 · 已缩减" : "提醒", tone: "warning" };
   return { text: "正常", tone: "success" };
 }

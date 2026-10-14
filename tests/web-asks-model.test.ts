@@ -1,7 +1,7 @@
 /** web/features/asks/asks-model.ts：分组计数、气泡 ↔ ask 对应、已答回填、答案人话、时间文案、乐观作答；以及 stream-shape 的作答回显只留原文 */
 import { describe, expect, test } from "bun:test";
 import {
-  agentLabel, answeredGroups, answerSummary, applyPending, askAttachments, askCounts, askForReply, clicksFromAnswer, closedText,
+  agentLabel, answeredGroups, askWhere, answerSummary, applyPending, askAttachments, askCounts, askForReply, clicksFromAnswer, closedText,
   groupAsks, PENDING_MAX_MS, rowGroup, spanText, waitsOnOwner, wireLabels, type PendingAnswer, type WebAsk,
 } from "@/features/asks/asks-model";
 import type { WebComponentRow } from "@/lib/chat/events";
@@ -68,8 +68,8 @@ describe("分组与计数", () => {
   });
 
   test("大总管显示成人话，不露内部名", () => {
-    expect(agentLabel("master", (s) => s)).toBe("大总管");
-    expect(agentLabel("agent-x", (s) => s)).toBe("x");
+    expect(agentLabel(ask({ fromAgent: "master" }), (s) => s)).toBe("大总管");
+    expect(agentLabel(ask({ fromAgent: "agent-x" }), (s) => s)).toBe("x");
   });
 });
 
@@ -182,11 +182,62 @@ describe("第二版（T11b PR A）", () => {
     expect([ask({}), ask({ assignee: "local:owner:self" }), ask({ assignee: "local:guest:aa11", kind: "assigned" }), ask({ kind: "accept" })].map(waitsOnOwner)).toEqual([true, true, false, false]);
   });
 
-  test("人 / 系统发起的没有 agent：卡片按类型写「指派」「审核」；聊天气泡永远对不上它；被取代的写「已被新版本取代」", () => {
-    expect(agentLabel(null, (x) => x, "assigned")).toBe("指派");
-    expect(agentLabel(null, (x) => x, "decide")).toBe("审核");
+  test("人 / 系统发起的没有 agent：卡片按类型写标签；聊天气泡永远对不上它；被取代的写「已被新版本取代」", () => {
+    expect(agentLabel(ask({ fromAgent: null, kind: "assigned" }), (x) => x)).toBe("指派");
+    expect(agentLabel(ask({ fromAgent: null, kind: "decide" }), (x) => x)).toBe("拍板");
     expect(askForReply([ask({ fromAgent: null, source: "human" })], "x", rows)).toBeNull();
     expect(closedText(ask({ state: "superseded" }), (x) => x)).toBe("已被新版本取代");
     expect(groupAsks([ask({ state: "superseded" })]).recent).toHaveLength(1);
+  });
+});
+
+describe("卡头（UXASK1）", () => {
+  const id = (s: string) => s;
+  const projects = [{ id: "claudestra", name: "Claudestra" }];
+  const sys = (over: Partial<WebAsk>) => ask({ fromAgent: null, source: "system", ...over });
+  const proposal = sys({ project: "master", kind: "authorize", extra: { centerProposal: { localProjectId: "claudestra" } } });
+  const team = sys({ project: "master", kind: "authorize", createdBy: "system:shared-projects" });
+
+  test("agentLabel 七种没有 agent 的类型标签，不再写「审核」", () => {
+    const cases: [WebAsk, string][] = [
+      [proposal, "批准提案"],
+      [team, "团队项目确认"],
+      [sys({ createdBy: "system:shared-ledger-join-offer", kind: "authorize" }), "团队项目确认"],
+      [sys({ kind: "decide" }), "拍板"],
+      [sys({ kind: "authorize" }), "授权"],
+      [sys({ kind: "owner_action" }), "你来做"],
+      [sys({ kind: "accept" }), "验收"],
+      [ask({ fromAgent: null, source: "human", kind: "assigned" }), "指派"],
+    ];
+    for (const [a, label] of cases) expect(agentLabel(a, id)).toBe(label);
+    // 团队项目确认要 source=system；同 createdBy 的非系统卡按类型写
+    expect(agentLabel(ask({ fromAgent: null, source: "human", kind: "authorize", createdBy: "system:shared-projects" }), id)).toBe("授权");
+    // 原型链上的键不算
+    expect(agentLabel(sys({ kind: "authorize", createdBy: "toString" }), id)).toBe("授权");
+    // 有 agent 的照旧
+    expect(agentLabel(ask({ fromAgent: "agent-dev-1", kind: "decide" }), id)).toBe("dev-1");
+    expect(cases.map(([a]) => agentLabel(a, id))).not.toContain("审核");
+  });
+
+  test("askWhere：有任务标题 / 只有卡号 / 没有卡号", () => {
+    expect(askWhere(ask({ project: "claudestra", taskId: "i28-A7", taskTitle: "侧栏会话行芯片解释" }), projects)).toBe("Claudestra · 侧栏会话行芯片解释");
+    expect(askWhere(ask({ project: "claudestra", taskId: "i28-A7" }), projects)).toBe("Claudestra · i28-A7");
+    expect(askWhere(ask({ project: "claudestra", taskId: null }), projects)).toBe("Claudestra");
+  });
+
+  test("askWhere：中心提案取 localProjectId；master 写大总管；未知项目写原 id", () => {
+    expect(askWhere(proposal, projects)).toBe("Claudestra");
+    expect(askWhere(team, projects)).toBe("大总管");
+    expect(askWhere(ask({ project: "nowhere", taskId: null }), projects)).toBe("nowhere");
+  });
+
+  test("对照基准：四张卡的卡头", () => {
+    const head = (a: WebAsk) => `${agentLabel(a, id)} · ${askWhere(a, projects)}`;
+    expect([
+      ask({ fromAgent: "agent-dev-1", project: "claudestra", taskId: "i28-A7", taskTitle: "侧栏会话行芯片解释" }),
+      sys({ project: "claudestra", kind: "authorize" }),
+      proposal,
+      team,
+    ].map(head)).toEqual(["dev-1 · Claudestra · 侧栏会话行芯片解释", "授权 · Claudestra", "批准提案 · Claudestra", "团队项目确认 · 大总管"]);
   });
 });
