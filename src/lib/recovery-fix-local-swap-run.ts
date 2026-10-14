@@ -103,6 +103,7 @@ export function localSwapCreate(db: Database, intent: SchedulerIntent, ev: Local
   let quota: string | null = "本机额度尚未在作者工作树之后复核";
   const lifecycle: ConvergenceLifecycle = { ...deps,
     artifacts: { ...deps.artifacts, policy: deps.artifacts?.policy ?? localSwapPorts(db).policy },
+    artifactGate: localSwapGate(db, intent, ev, base),
     localFamilyWait: (task, family) => localSwapAuthority(db, mustTask(db, task.id), ev) ?? deps.localFamilyWait?.(task, family) ?? null,
     authorTree: deps.authorTree && (async (source, target, recorded) => {
       const tree = await deps.authorTree!(source, target, recorded);

@@ -4,7 +4,6 @@ import { closeSync, fstatSync, lstatSync, readFileSync, readdirSync, readlinkSyn
 import { dirname, join, resolve } from "node:path";
 import { openAttachment } from "./attachment-lookup.js";
 import { stripComments } from "./skip-effects-auto-scope-scan.js";
-import { unquoteGitPath } from "./ci-impact-select.js";
 import { REPO_ROOT } from "./repo-root.js";
 import type { ObservedAction, RecoveryMode, RecoveryPolicyPort } from "./recovery-policy.js";
 import type { Git } from "./scheduler-review-worktree.js";
@@ -127,12 +126,9 @@ function* candidatesCheck(worktree: string, context: ConvArtifactContext): Check
   for (const artifact of candidates) {
     const item = { path: artifact.path };
     if (tracked.some((p) => coversBuildPath([item.path], p) || coversBuildPath([p], item.path))) throw new Error(`清单产物已被 HEAD/index 跟踪：${item.path}`);
-    for (let offset = 0; offset < artifact.members.length; offset += 100) {
-      const batch = artifact.members.slice(offset, offset + 100);
-      const ignored = yield ["-C", worktree, "-c", "core.quotePath=true", "check-ignore", "--no-index", "--", ...batch, artifact.path];
-      const paths = new Set(ignored.out.split("\n").filter(Boolean).map(unquoteGitPath));
-      if (ignored.code !== 0 || batch.some((p) => !paths.has(p))) throw new Error(`清单产物并非完整 ignored：${item.path}`);
-    }
+    // Git cannot re-include children of an excluded directory; checking its root covers the already validated subtree.
+    const ignored = yield ["-C", worktree, "check-ignore", "--quiet", "--no-index", "--", artifact.path];
+    if (ignored.code !== 0) throw new Error(`清单产物并非完整 ignored：${item.path}`);
   }
   return candidates;
 }

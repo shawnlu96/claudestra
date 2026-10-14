@@ -46,7 +46,7 @@ for (const mode of ["off", "observe"] as const) test(`[验收线 2] ${mode} reta
     for (let i = 0; i < 2; i++) expect(await f.open(mode)).toHaveProperty("manual");
     retained(f); expect(existsSync(f.quarantineRoot)).toBe(false);
     expect(f.observed).toHaveLength(mode === "observe" ? 1 : 0);
-    if (mode === "observe") expect(f.observed[0]).toMatchObject({ mechanism: "convIgnoredBuildArtifacts", action: "挪走 6 项", data: { paths: buildPaths, count: 6 } });
+    if (mode === "observe") expect(f.observed[0]).toMatchObject({ mechanism: "convIgnoredBuildArtifacts", action: "本会挪走 6 项", data: { paths: buildPaths, count: 6 } });
   } finally { f.close(); }
 });
 
@@ -347,4 +347,27 @@ test("[验收线 4] a symlinked isolation ancestor creates nothing outside the b
     })).toThrow();
     expect(readdirSync(external)).toEqual(["marker"]); retained(f);
   } finally { f.close(); }
+});
+
+test("[验收线 3] root ignore proof covers non-ASCII child names but refuses a directory with only ignored children", async () => {
+  for (const excludedRoot of [true, false]) {
+    const f = artifactFixture();
+    try {
+      const special = "web/out/空 格.bin";
+      writeFileSync(join(f.dir, special), "special bytes");
+      if (!excludedRoot) {
+        const path = join(f.dir, "web/.gitignore");
+        writeFileSync(path, readFileSync(path, "utf8").replace("/out/", "/out/*"));
+        command(f.dir, "add", "web/.gitignore"); command(f.dir, "commit", "-qm", "only ignore children");
+      }
+      const proof = await convArtifactProof(git, f.dir, f.main, f.context("on"));
+      if (excludedRoot) {
+        expect(proof.reason).toBeNull(); expect(await f.open("on")).toEqual({ dir: f.dir });
+        const batch = join(convArtifactIsolationPath(f.context("on")), batches(f)[0]);
+        expect(readFileSync(join(batch, "artifacts", special), "utf8")).toBe("special bytes");
+      } else {
+        expect(proof.reason).not.toBeNull(); retained(f); expect(existsSync(f.quarantineRoot)).toBe(false);
+      }
+    } finally { f.close(); }
+  }
 });

@@ -21,15 +21,15 @@ async function localArtifactSwap(mode: RecoveryMode) {
   p.probe.deps.authorTree = (source, target, recorded) => openFixWorktree(git, source, target, recorded, async () => ({ ok: true, head: f.head }));
   await toFix(p, leaked(), f.head);
   expect(await p.tick()).toMatchObject({ step: "pool_refused" });
-  const advance = async () => {
+  const advance = async (passes = 3) => {
     await p.later(FIX_LOCAL_SWAP_WAIT_MS + MIN);
-    for (let i = 0; i < 3; i++) await p.later(MIN);
+    for (let i = 0; i < passes; i++) await p.later(MIN);
   };
   const creates = () => p.probe.effects.filter((e) => e.startsWith("create:"));
   return { f, p, advance, creates, close: () => { p.f.close(); f.close(); } };
 }
 
-for (const mode of ["on", "off", "observe"] as const) (mode === "off" ? test : test.failing)(`[验收线 1] [验收线 2] localSwapCreate ${mode} real linked tree reaches the intended result`, async () => {
+for (const mode of ["on", "off", "observe"] as const) test(`[验收线 1] [验收线 2] localSwapCreate ${mode} real linked tree reaches the intended result`, async () => {
   const s = await localArtifactSwap(mode), { f, p } = s;
   try {
     await s.advance();
@@ -50,12 +50,16 @@ for (const mode of ["on", "off", "observe"] as const) (mode === "off" ? test : t
     } else {
       expect(s.creates()).toHaveLength(0); expect(existsSync(f.quarantineRoot)).toBe(false);
       for (const [relative, bytes] of f.bytes) expect(readFileSync(join(f.dir, relative)).toString("hex")).toBe(bytes.toString("hex"));
-      if (mode === "observe") expect(observations[0]!.data).toMatchObject({ action: "本会挪走 6 项", paths: buildPaths, count: 6 });
+      if (mode === "observe") {
+        expect(observations[0]!.text).toMatch(/本会\s*挪走 6 项/);
+        expect(observations[0]!.text.match(/本会/g)).toHaveLength(1);
+        expect(observations[0]!.data).toMatchObject({ paths: buildPaths, count: 6 });
+      }
     }
   } finally { s.close(); }
 });
 
-for (const late of ["tracked", "ignored", "quota"] as const) test.failing(`[验收线 5] localSwapCreate ${late} drift during the post-isolation quota await still blocks create`, async () => {
+for (const late of ["tracked", "ignored", "quota"] as const) test(`[验收线 5] localSwapCreate ${late} drift during the post-isolation quota await still blocks create`, async () => {
   const s = await localArtifactSwap("on"), { f, p } = s;
   try {
     const quota = localSwapPorts(p.f.db).quota!;
@@ -69,9 +73,26 @@ for (const late of ["tracked", "ignored", "quota"] as const) test.failing(`[验�
       }
       return quota(family);
     };
-    await s.advance(); expect(tripped).toBe(true); expect(s.creates()).toHaveLength(0);
+    await s.advance(1); expect(tripped).toBe(true); expect(s.creates()).toHaveLength(0);
     expect(p.swaps()).not.toEqual([expect.objectContaining({ status: "done" })]);
     expect(getSchedulerSession(p.f.db, "T1", "author")?.sessionId).toBe("s-one");
     expect(p.events().some((e) => String(e.data.reason ?? "").includes(late === "quota" ? "额度" : "有改动"))).toBe(true);
+  } finally { s.close(); }
+});
+
+for (const late of ["switch", "old-session"] as const) test(`[验收线 5] localSwapCreate ${late} drift before candidate proof prevents isolation`, async () => {
+  const s = await localArtifactSwap("on"), { f, p } = s;
+  try {
+    const tree = p.probe.deps.authorTree!;
+    let tripped = false;
+    p.probe.deps.authorTree = async (...args) => {
+      tripped = true;
+      if (late === "switch") p.state.mode = "off";
+      else p.probe.edit((r) => { r.agents["agent-task-one"].status = "active"; });
+      return tree(...args);
+    };
+    await s.advance(1); expect(tripped).toBe(true); expect(s.creates()).toHaveLength(0);
+    expect(existsSync(f.quarantineRoot)).toBe(false);
+    for (const [relative, bytes] of f.bytes) expect(readFileSync(join(f.dir, relative)).toString("hex")).toBe(bytes.toString("hex"));
   } finally { s.close(); }
 });

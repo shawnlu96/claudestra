@@ -41,6 +41,8 @@ export interface ConvergenceLifecycle {
   /** The replacement author's own card-branch tree; `source` is read-only (fix-strategy-worktree.ts). */
   authorTree?(source: string, target: FixTreeTarget, recorded: string | null): Promise<FixTree | Pinned>;
   artifacts?: Pick<ConvArtifactContext, "policy" | "repository" | "quarantineRoot">;
+  /** Isolation needs the stopped-author proof before the tree returns; create's quota and strict dirty proof run afterward. */
+  artifactGate?: SwapGate;
   registryPath?: string;
   slotLockPath?: string;
   worktreeRoot?: string;
@@ -178,7 +180,8 @@ async function authorTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, 
   if (!prior) convergenceEvent(db, ctx, intent, "worktree", { dir, head: intent.head, branch: task.branch });
   deps.active();
   const artifacts = intent.action === "fix_swap" ? convArtifactContext(db, task, intent.id, ctx.now ?? Date.now(),
-    () => { deps.active(); return authorGate(db, intent) ?? edge?.("stopped")?.reason ?? (!edge ? "缺旧作者停止执行门，不隔离" : null); }, deps.artifacts) : undefined;
+    () => { deps.active(); const stopped = deps.artifactGate ?? edge;
+      return authorGate(db, intent) ?? stopped?.("stopped")?.reason ?? (!stopped ? "缺旧作者停止执行门，不隔离" : null); }, deps.artifacts) : undefined;
   const target = { taskId: task.id, branch: task.branch, head: intent.head, root, artifacts };
   const opened: FixTree = deps.authorTree ? await deps.authorTree(source, target, dir) : { manual: "缺作者工作树端口" };
   deps.active();
@@ -209,7 +212,8 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
     let refused: string | null = null; // the gate again at the effect edge: a codex slot wait or the tree may have taken a while
     const create = async () => {
       deps.active();
-      if (role === "author" && (refused = authorGate(db, intent) ?? gate?.("stopped")?.reason ?? convTreeCreateEdge(dir.dir, task.branch, intent.head))) return { kind: "wait", reason: refused };
+      if (role === "author" && (refused = authorGate(db, intent) ?? gate?.("stopped")?.reason ??
+        (intent.action === "fix_swap" ? convTreeCreateEdge(dir.dir, task.branch, intent.head) : null))) return { kind: "wait", reason: refused };
       convergenceEvent(db, ctx, intent, "creating", { agent: name, family, dir: dir.dir });
       const result = await deps.manager("create", name, dir.dir, "--project", task.project, "--task", `${task.id} 收敛`,
         "--card", task.id, "--card-role", role === "author" ? "author" : "other", ...runtime);

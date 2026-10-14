@@ -18,7 +18,8 @@ export function convArtifactContext(db: Database, task: { id: string; project: s
   gate: () => string | null, overrides: Overrides = {}): ConvArtifactContext {
   return { ...overrides, taskId: task.id, project: task.project, intentId, gate,
     expected: task.branch !== undefined && task.headSHA !== undefined ? { branch: task.branch, head: task.headSHA } : undefined,
-    observe: (a) => { recordObserved(db, a, now); } };
+    // The shared ledger formatter supplies its own conditional prefix; keep it once in the stored observation.
+    observe: (a) => { recordObserved(db, { ...a, action: a.action.replace(/^本会/, "") }, now); } };
 }
 const key = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 24);
 const within = (root: string, path: string) => { const r = relative(resolve(root), resolve(path)); return r === "" || (r !== ".." && !r.startsWith("../") && !isAbsolute(r)); };
@@ -150,7 +151,7 @@ function observed(context: ConvArtifactContext, candidates: BuildArtifact[]): vo
   const batch = createHash("sha256").update(JSON.stringify(candidates)).digest("hex").slice(0, 24);
   const intent = createHash("sha256").update(context.intentId).digest("hex").slice(0, 24);
   context.observe({ project: context.project, mechanism: "convIgnoredBuildArtifacts", target: context.taskId,
-    actionKey: `artifacts:${intent}:${batch}`, action: `挪走 ${candidates.length} 项`, data: { intentId: context.intentId, paths: candidates.map((c) => c.path), count: candidates.length } });
+    actionKey: `artifacts:${intent}:${batch}`, action: `本会挪走 ${candidates.length} 项`, data: { intentId: context.intentId, paths: candidates.map((c) => c.path), count: candidates.length } });
 }
 
 /** Read-only preflight. Only on can provisionally exempt proven candidates; all other dirty semantics stay canonical. */
@@ -194,4 +195,3 @@ export function convArtifactProofSync(git: (args: string[]) => Result, worktree:
     return context.gate();
   } catch (e) { return retryWorktreeDirtySync(git, worktree, repo) ?? `构建产物证明失败：${String(e)}`; }
 }
-
