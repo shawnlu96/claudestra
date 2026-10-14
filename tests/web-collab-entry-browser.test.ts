@@ -1,8 +1,8 @@
 /**
  * team-project-UXENTRY1：侧栏「协作视图」行和团队区——探测中先占同高的位、读失败出灰行 + 重试，403 / 404 / 501 照旧不出。
  * 真 Chromium + team-view-harness 夹具（起法同 tests/web-collab-sidebar-browser.test.ts），中继模式 /m/mac-a/api/v1/*，数据全部合成：
- * 两个本机项目（未绑定团队，各自探本机台账）：甲先等 2.5 秒再回 200；乙先回两次 503（第一次也晚 2.5 秒）再回 200。
- * 团队快照：第一次晚 3 秒、回 500，之后回 200。只许回环请求，其余拦掉并断言为 0。
+ * 两个本机项目（未绑定团队，各自探本机台账）：甲回 200；乙先回两次 503 再回 200。团队快照：第一次回 500，之后回 200。
+ * 各接口的第一次回包压在 held 上，测试看完首屏占位才放行（不靠计时：CI 机器开页面就可能超过几秒）。只许回环请求，其余拦掉并断言为 0。
  * 截图（opt-in）：COLLAB_ENTRY_SHOTS_DIR=<仓库外目录>；再带 COLLAB_ENTRY_BASE_REPO=<基线 checkout> 同一流程拍改前（改前只拍图、不断言）。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
@@ -25,7 +25,7 @@ const work = mkdtempSync(join(tmpdir(), "cstra-test-collab-entry-"));
 const shotsDir = OUT ?? join(work, "shots");
 const ENTRY = "web/features/collab/team-view-harness.tsx";
 const NOW = Date.UTC(2026, 9, 8, 4, 0);
-const SLOW_LEDGER_MS = 2_500, SLOW_TEAM_MS = 3_000;
+const BEFORE_SETTLE_MS = 3_500;
 const A = { id: "alpha-app", name: "本机项目甲", emoji: "📦" }, B = { id: "beta-app", name: "本机项目乙", emoji: "📦" };
 const PROJECTS = { "mac-a": [A, B] };
 const ledger = generateTeamFixture({ seed: 3, features: 1, nodes: 5, now: NOW }).local;
@@ -41,10 +41,12 @@ bindings: () => [{ centerId: identity.center, teamId: identity.team, projectId: 
 } as Partial<SharedProjectsPorts> as SharedProjectsPorts);
 const localSnapshot = { peers: [], projects: [{ id: "team-local", name: "团队项目丙（本机）", dirs: ["/synthetic/team-local"], personal: false }] };
 
-/** 每条接口按顺序消费的状态码（用完停在最后一个）；第一次回包晚多久 */
+/** 每条接口按顺序消费的状态码（用完停在最后一个）；hold = 台账 / 快照的第一次回包等测试 release() 再回 */
 /** context：200 = 有一条绑定；"none" = 200 但没有绑定（没入团队，前端按 403 处理）；其余 = 直接回这个状态码 */
-interface Plan { ledger: Record<string, number[]>; ledgerFirstMs: number; context: 200 | "none" | number; snapshot: number[]; snapshotFirstMs: number }
+interface Plan { ledger: Record<string, number[]>; context: 200 | "none" | number; snapshot: number[]; hold: boolean }
 let plan: Plan;
+let held: Promise<void> = Promise.resolve();
+let release = () => {};
 let hits: Record<string, number> = {};
 const take = (key: string, list: number[]) => list[Math.min((hits[key] = (hits[key] ?? 0) + 1) - 1, list.length - 1)]!;
 
@@ -55,13 +57,13 @@ async function api(path: string): Promise<Response> {
     return plan.context === 200 ? json({ identities: [identity] }) : json({ error: "synthetic" }, plan.context);
   }
   if (path === "/shared-projects/snapshot") {
-    if (!hits.snapshot) await Bun.sleep(plan.snapshotFirstMs);
+    if (!hits.snapshot) await held;
     const status = take("snapshot", plan.snapshot);
     return status === 200 ? json(await sharedProjectsSnapshot(ports(), localSnapshot)) : json({ error: "synthetic" }, status);
   }
   const id = path.match(/^\/ledger\/([^/]+)$/)?.[1];
   if (id && plan.ledger[id]) {
-    if (!hits[id]) await Bun.sleep(plan.ledgerFirstMs);
+    if (!hits[id]) await held;
     const status = take(id, plan.ledger[id]!);
     return status === 200 ? json({ ok: true, ...ledger }) : json({ ok: false, error: "synthetic" }, status);
   }
@@ -115,8 +117,8 @@ afterAll(async () => {
 
 const start = (over: Partial<Plan> = {}) => {
   hits = {};
-  plan = { ledger: { [A.id]: [200], [B.id]: [503, 503, 200] }, ledgerFirstMs: SLOW_LEDGER_MS, context: 200, snapshot: [500, 200],
-    snapshotFirstMs: SLOW_TEAM_MS, ...over };
+  plan = { ledger: { [A.id]: [200], [B.id]: [503, 503, 200] }, context: 200, snapshot: [500, 200], hold: true, ...over };
+  held = plan.hold ? new Promise((r) => (release = r)) : Promise.resolve();
 };
 async function open(server: ReturnType<typeof Bun.serve>, width: number) {
   const g = await guardedPage(browser, String(server.url), { width });
@@ -138,66 +140,74 @@ async function shot(page: Page, label: string, name: string) {
   issues[`${label}-${name}`] = await shotIssues(page);
 }
 
+/** 一边（改前 / 改后）的三态流程；改前只拍图不断言。页面由调用方在 finally 里关，断言失败也不留下继续发请求的旧页面 */
+async function flow(label: "before" | "after", page: Page, width: number) {
+  await group(page, A.name).getByText("（合成会话行）").waitFor();
+  const y0 = { a: await sessionY(page, A.name), b: await sessionY(page, B.name) };
+  if (label === "after") {
+    expect(hits[A.id] ?? 0).toBe(0); // 台账首包还压着：下面看到的确实是读到之前的首屏
+    await page.locator("li[data-collab-entry=pending]").nth(1).waitFor();
+    expect(await page.locator("li[data-collab-entry=pending]").count()).toBe(2);
+    await page.locator("[data-team-projects=pending]").waitFor();
+    expect(await page.locator("[data-team-projects=pending]").count()).toBe(1);
+    expect(await page.locator("body").innerText()).not.toMatch(/加载中|正在读取|Loading/);
+  }
+  await shot(page, label, `1-pending-${width}`);
+  release();
+
+  if (label === "after") {
+    const ready = group(page, A.name).getByRole("button", { name: "协作视图" });
+    await ready.waitFor();
+    expect(await rowH(page, "li[data-collab-entry=pending], li[data-collab-entry=failed]")).toBe(await rowH(page, "[data-collab-entry=ready]"));
+    expect(await sessionY(page, A.name)).toBe(y0.a);
+    const retry = group(page, B.name).getByRole("button", { name: "没读到，点一下重试" });
+    await retry.waitFor();
+    expect(await retry.getAttribute("title")).toBe("没读到，点一下重试");
+    expect((await retry.innerText()).trim()).toBe("");
+    expect(await sessionY(page, B.name)).toBe(y0.b);
+    expect(await group(page, B.name).getByRole("button", { name: "协作视图" }).count()).toBe(0); // 灰行不能开
+    await team(page).getByText("没读到团队项目").waitFor();
+    expect(await team(page).getByRole("button", { name: "重试" }).isVisible()).toBe(true);
+  } else await page.waitForTimeout(BEFORE_SETTLE_MS);
+  await shot(page, label, `2-failed-${width}`);
+
+  if (label === "after") {
+    // 乙：每点一次只多一个台账请求；第二次 503 仍是灰行，第三次 200 变正常行，会话行一直不动
+    const retry = group(page, B.name).getByRole("button", { name: "没读到，点一下重试" });
+    const before = hits[B.id]!;
+    await retry.click();
+    await page.waitForFunction("!document.querySelector('[aria-busy=true]')");
+    expect(hits[B.id]).toBe(before + 1);
+    expect(await retry.isVisible()).toBe(true);
+    await retry.click();
+    await group(page, B.name).getByRole("button", { name: "协作视图" }).waitFor();
+    expect(hits[B.id]).toBe(before + 2);
+    expect(await sessionY(page, B.name)).toBe(y0.b);
+    // 团队区：点一次重试 = 一次 refresh（快照接口多一个请求），读到后出团队行
+    const snaps = hits.snapshot!;
+    await team(page).getByRole("button", { name: "重试" }).click();
+    await team(page).getByRole("button", { name: "团队项目丙", exact: false }).waitFor();
+    expect(hits.snapshot).toBe(snaps + 1);
+    expect(await team(page).getByText("没读到团队项目").count()).toBe(0);
+  } else await page.waitForTimeout(1_000);
+  await shot(page, label, `3-recovered-${width}`);
+  if (label === "after") for (const name of [`1-pending-${width}`, `2-failed-${width}`, `3-recovered-${width}`]) expect(issues[`after-${name}`]).toEqual([]);
+}
+
 for (const width of [1280, 390]) {
   test(`${width}：首屏占位 → 读到换正常行（下方会话行不动）/ 失败灰行 + 重试 → 恢复；团队区占位 → 没读到 + 重试 → 恢复`, async () => {
     for (const { label, server } of sides) {
       start();
-      const t0 = Date.now();
       const { page, ctx, errors, external: ext } = await open(server, width);
-      await group(page, A.name).getByText("（合成会话行）").waitFor();
-      const y0 = { a: await sessionY(page, A.name), b: await sessionY(page, B.name) };
-      if (label === "after") {
-        expect(Date.now() - t0).toBeLessThan(SLOW_LEDGER_MS); // 下面看到的确实是读到之前的首屏
-        expect(await page.locator("li[data-collab-entry=pending]").count()).toBe(2);
-        expect(await page.locator("[data-team-projects=pending]").count()).toBe(1);
-        expect(await page.locator("body").innerText()).not.toMatch(/加载中|正在读取|Loading/);
+      try {
+        await flow(label, page, width);
+        if (label === "after") expect(errors).toEqual([]);
+        expect(ext).toEqual([]);
+        external.push(...ext);
+      } finally {
+        release();
+        await ctx.close();
       }
-      await shot(page, label, `1-pending-${width}`);
-
-      if (label === "after") {
-        const ready = group(page, A.name).getByRole("button", { name: "协作视图" });
-        await ready.waitFor();
-        expect(await rowH(page, "li[data-collab-entry=pending], li[data-collab-entry=failed]")).toBe(await rowH(page, "[data-collab-entry=ready]"));
-        expect(await sessionY(page, A.name)).toBe(y0.a);
-        const retry = group(page, B.name).getByRole("button", { name: "没读到，点一下重试" });
-        await retry.waitFor();
-        expect(await retry.getAttribute("title")).toBe("没读到，点一下重试");
-        expect((await retry.innerText()).trim()).toBe("");
-        expect(await sessionY(page, B.name)).toBe(y0.b);
-        expect(await group(page, B.name).getByRole("button", { name: "协作视图" }).count()).toBe(0); // 灰行不能开
-        await team(page).getByText("没读到团队项目").waitFor();
-        expect(await team(page).getByRole("button", { name: "重试" }).isVisible()).toBe(true);
-      } else await page.waitForTimeout(SLOW_TEAM_MS + 500);
-      await shot(page, label, `2-failed-${width}`);
-
-      if (label === "after") {
-        // 乙：每点一次只多一个台账请求；第二次 503 仍是灰行，第三次 200 变正常行，会话行一直不动
-        const retry = group(page, B.name).getByRole("button", { name: "没读到，点一下重试" });
-        const before = hits[B.id]!;
-        await retry.click();
-        await page.waitForFunction("!document.querySelector('[aria-busy=true]')");
-        expect(hits[B.id]).toBe(before + 1);
-        expect(await retry.isVisible()).toBe(true);
-        await retry.click();
-        await group(page, B.name).getByRole("button", { name: "协作视图" }).waitFor();
-        expect(hits[B.id]).toBe(before + 2);
-        expect(await sessionY(page, B.name)).toBe(y0.b);
-        // 团队区：点一次重试 = 一次 refresh（快照接口多一个请求），读到后出团队行
-        const snaps = hits.snapshot!;
-        await team(page).getByRole("button", { name: "重试" }).click();
-        await team(page).getByRole("button", { name: "团队项目丙", exact: false }).waitFor();
-        expect(hits.snapshot).toBe(snaps + 1);
-        expect(await team(page).getByText("没读到团队项目").count()).toBe(0);
-      } else await page.waitForTimeout(1_000);
-      await shot(page, label, `3-recovered-${width}`);
-
-      if (label === "after") {
-        for (const name of [`1-pending-${width}`, `2-failed-${width}`, `3-recovered-${width}`]) expect(issues[`after-${name}`]).toEqual([]);
-        expect(errors).toEqual([]);
-      }
-      expect(ext).toEqual([]);
-      external.push(...ext);
-      await ctx.close();
     }
   }, 120_000);
 }
@@ -206,15 +216,18 @@ test("1280：台账 403 / 404 不出「协作视图」行；团队区 403（没�
   const after = sides.find((s) => s.label === "after")!.server;
   // 团队区 501：context 正常、快照接口回 501（这台 bridge 不支持团队项目）；context 本身 501 会让项目组入口走团队选源的「读不到」，不是本卡的事
   for (const [ledgerStatus, context, snapshot] of [[403, "none", 200], [404, 404, 200], [200, 200, 501]] as const) {
-    start({ ledger: { [A.id]: [200], [B.id]: [ledgerStatus] }, ledgerFirstMs: 0, context, snapshot: [snapshot], snapshotFirstMs: 0 });
+    start({ ledger: { [A.id]: [200], [B.id]: [ledgerStatus] }, context, snapshot: [snapshot], hold: false });
     const { page, ctx, errors, external: ext } = await open(after, 1280);
-    await group(page, A.name).getByRole("button", { name: "协作视图" }).waitFor();
-    await page.waitForFunction("!document.querySelector('[data-collab-entry=pending], [data-team-projects=pending]')");
-    const b = group(page, B.name);
-    expect(await b.locator("[data-collab-entry]").count()).toBe(ledgerStatus === 200 ? 1 : 0);
-    expect(await team(page).count()).toBe(0);
-    expect(errors).toEqual([]);
-    expect(ext).toEqual([]);
-    await ctx.close();
+    try {
+      await group(page, A.name).getByRole("button", { name: "协作视图" }).waitFor();
+      await page.waitForFunction("!document.querySelector('[data-collab-entry=pending], [data-team-projects=pending]')");
+      const b = group(page, B.name);
+      expect(await b.locator("[data-collab-entry]").count()).toBe(ledgerStatus === 200 ? 1 : 0);
+      expect(await team(page).count()).toBe(0);
+      expect(errors).toEqual([]);
+      expect(ext).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
   }
 }, 60_000);
