@@ -77,5 +77,6 @@ export const RECOVERY_KEYS = [
   "peerLeaseRecovery",
   "effCountCarry",
   "ciLogPerJob",
+  "mergeUnifiedCandidates",
   "privateStartPlacement",
 ] as const;
