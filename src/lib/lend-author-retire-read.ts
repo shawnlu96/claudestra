@@ -1,7 +1,6 @@
 /** External reads finish before any SQLite writer begins. No head is inferred from an ended lease. */
 import type { Database } from "bun:sqlite";
 import { remoteHeadAt } from "./lend-git.js";
-import { STALE_WRITE_SQL, WRITE_POOL_TTL_MS } from "./ledger-lend.js";
 import { runBounded } from "./run-bounded.js";
 import { getTask } from "./ledger-store.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
@@ -26,15 +25,6 @@ export async function sampleLendAuthor(db: Database, taskId: string, read: ReadL
     sample.heads.push({ repo: o.repo, branch: o.branch, head });
   }
   return sample;
-}
-
-/** Sweep candidates only, not every historical peer writer on every bridge poll. */
-export async function sampleLendAuthorSweep(db: Database, read: ReadLendHead = readLendAuthorHead, now = Date.now()): Promise<Map<string, LendAuthorSample>> {
-  const ids = db.query(`SELECT DISTINCT taskId FROM lend_orders WHERE ${STALE_WRITE_SQL}`)
-    .all(now - WRITE_POOL_TTL_MS) as { taskId: string }[];
-  const samples = new Map<string, LendAuthorSample>();
-  for (const { taskId } of ids) { const s = await sampleLendAuthor(db, taskId, read); if (s) samples.set(taskId, s); }
-  return samples;
 }
 
 /** A stalled injected/read port cannot stall the scheduler pass beyond the existing remote-head budget. */

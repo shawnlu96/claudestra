@@ -28,10 +28,14 @@ describe("recovery key table", () => {
     for (const k of RECOVERY_KEYS) expect(k).toMatch(/^[a-z][A-Za-z0-9]{2,40}$/);
   });
 
-  test("[验收线 5] no key from before the move is lost, the old order is kept and mergeUnion is appended", () => {
-    expect(RECOVERY_KEYS.slice(0, BEFORE.length) as readonly string[]).toEqual(BEFORE);
+  test("[验收线 5] no key from before the move is lost and mergeUnion is there", () => {
+    for (const k of BEFORE) expect(RECOVERY_KEYS as readonly string[]).toContain(k);
     expect(RECOVERY_KEYS).toContain("mergeUnion");
     expect(REEXPORTED).toBe(RECOVERY_KEYS); // recovery-policy.ts re-exports the same table for every caller
+  });
+
+  test("KEYSORT1: the table is in JS default sort order", () => {
+    expect([...RECOVERY_KEYS]).toEqual([...RECOVERY_KEYS].sort());
   });
 
   test("the file holds only the table, one key per line, and .gitattributes merges it with union", () => {

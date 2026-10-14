@@ -345,6 +345,7 @@ describe("写事件的底座只给写入模块", () => {
   // agent-lifecycle-store.ts：卡 worker 登记 / 收回（LIFE1）在自己的事务里写 worker_agents 与一条 scheduler 事件，不推阶段
   // merge-content-review.ts：合并内容沿用证据（REVIEW1）在自己的 immediate 事务里复核台账现状与开关，只写一条去重的 scheduler 事件（observe 下为观察 note），不推阶段
   // card-pause-write.ts：卡级暂停 / 继续（UXPAUSE1）在自己的事务里核权限、撤未领池单、取消 pending 意图，只写 card_pause / card_resume decision，不推阶段
+  // ledger-manual-merge-record.ts：人工合入登记（AUDTRAIN4）在自己的 immediate 事务里核权限 / 阶段 / head / PR，只写一条去重的 manual_merge_record 调度事件，不推阶段
   // scheduler-spec-wait-ledger.ts：缺规格提醒（PMWAKE）只经 ledger CLI 调度身份写 spec_wait 事件，事务内重算门与 feature PM、按次去重，不推阶段
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
@@ -369,7 +370,7 @@ describe("写事件的底座只给写入模块", () => {
       "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
       "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts", "lib/ledger-lend-relay.ts",
-      "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-lease-finished.ts", "lib/ledger-scheduler-pool.ts",
+      "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-manual-merge-record.ts", "lib/ledger-scheduler-lease-finished.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/lend-arbiter-result.ts", "lib/lend-ask-auth.ts", "lib/lend-author-retire-cmds.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts",
       "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts",

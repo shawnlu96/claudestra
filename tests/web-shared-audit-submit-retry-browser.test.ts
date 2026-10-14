@@ -70,17 +70,17 @@ async function capture(page: Page, name: string, issues: Record<string, ShotIssu
 
 type Fixture = ReturnType<typeof serve>;
 const L = {
-  zh: { team: '团队', edit: /^编辑规划 /, locked: '已绑卡，节点锁定', reason: '改图原因', submit: '提交新版本', saved: '已保存，详情刷新失败',
+  zh: { team: /^(规划与提案|团队)$/ as string | RegExp, edit: /^编辑规划 /, locked: '已绑卡，节点锁定', reason: '改图原因', submit: '提交新版本', saved: '已保存，详情刷新失败',
     readFailed: '读取失败，保留缓存与草稿', retry: '重试' },
-  en: { team: 'Team', edit: /^Edit plan /, locked: 'Bound task; node locked', reason: 'Rewrite reason', submit: 'Submit new version',
+  en: { team: /^(Plans & proposals|Team)$/ as string | RegExp, edit: /^Edit plan /, locked: 'Bound task; node locked', reason: 'Rewrite reason', submit: 'Submit new version',
     saved: 'Saved; detail refresh failed', readFailed: 'Read failed; cache and draft retained', retry: 'Retry' },
 };
 
 async function save(page: Page, f: Fixture, lang: 'zh' | 'en', width: number) {
   const t = L[lang], { fx, commands } = f;
   await page.getByText(fx.details.at(-1)!.feature.title, { exact: true }).first().waitFor();
-  await (width < 700 ? page.getByRole('button', { name: t.team, exact: true }).first()
-    : page.getByRole('tab', { name: t.team, exact: true }).or(page.getByRole('button', { name: t.team, exact: true })).first()).click();
+  await (width < 700 ? page.getByRole('button', { name: t.team }).first()
+    : page.getByRole('tab', { name: t.team }).or(page.getByRole('button', { name: t.team })).first()).click();
   await page.getByRole('button', { name: t.edit }).click();
   const free = page.locator('fieldset').filter({ hasNot: page.getByText(t.locked) }).first();
   await free.getByRole('textbox').nth(1).fill('写入成功后的新规划');

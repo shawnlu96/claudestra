@@ -4,7 +4,8 @@
  * 1. with the scratch worktree's .gitattributes blanked, `git merge-tree` conflicts, and only on union files that main's
  *    .gitattributes names (git reads attributes from the current worktree, so a blank file there is "without attributes");
  * 2. a real `git merge --no-ff` of the fetched main, with main's union lines as core.attributesFile (a PR cut before the
- *    union line still merges like main will), exits 0 with no unmerged path and no conflict marker in the union files;
+ *    union line still merges like main will), exits 0 with no unmerged path and no conflict marker in the union files, and each
+ *    union file with an order check (registry-order.ts ORDERED_UNION_FILES) passes it on the merged text (KEYSORT1);
  * 3. the main-carry proof (review-main-carry-proof.ts) accepts it under the CARRY2 criteria, whatever mainCarryMerge says now:
  *    the switch only decides whether the post-push carry keeps the review or sends it back to re-review, never whether to push.
  * pushUnionMerge sends it with a lease on the reviewed head: the server updates the ref only while it still is that head, and the
@@ -13,6 +14,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { orderCheckFor } from "./registry-order.js";
 import { gitReader, originIs, reviewMainCarryProof } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
 
@@ -85,7 +87,10 @@ async function mergeIn(git: GitRun, input: UnionTrialInput, wt: string, dir: str
   if (merged.code !== 0) return refuse("带 union 的真 git merge 仍有冲突", main, files);
   if ((await git(wt, ["ls-files", "-u"])).stdout.trim()) return refuse("合并后仍有未解决路径", main, files);
   for (const f of files) {
-    if (MARKER.test((await git(wt, ["show", `HEAD:${f}`])).stdout)) return refuse(`${f} 合并结果里有冲突标记`, main, files);
+    const merged = (await git(wt, ["show", `HEAD:${f}`])).stdout;
+    if (MARKER.test(merged)) return refuse(`${f} 合并结果里有冲突标记`, main, files);
+    const problem = orderCheckFor(f)?.(merged); // KEYSORT1: a same-gap union that left the table out of order goes back to fix
+    if (problem) return refuse(`${f} union 结果${problem}`, main, files);
   }
   const [mergeSha, ...parents] = (await git(wt, ["rev-list", "--parents", "-n", "1", "HEAD"])).stdout.trim().toLowerCase().split(/\s+/);
   if (!mergeSha || !SHA.test(mergeSha) || parents.join(" ") !== `${input.reviewedHead} ${main}`) return refuse("合并提交的父提交不是「审过的 head + main」", main, files);

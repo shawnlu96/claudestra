@@ -3,13 +3,14 @@
  * 按 L4 节点上的 stepLine（src/lib/ledger-step-line.ts 的 active + steps）画。这些步骤只是节点内部的进度，不画成节点。
  * 初审、终审并进「审」一格（轮次取大的）；看界面并进「合并」（合并前的截图闸）。没 stepLine = 全空。
  */
+import { STEP_WORD } from "@/lib/owner-words";
 import type { StepLineLite } from "./dag-types";
 
 export const STEP_SLOTS = [
-  { key: "restate", label: "复述", steps: ["restate"] },
-  { key: "write", label: "写", steps: ["write"] },
-  { key: "review", label: "审", steps: ["review", "final_review"] },
-  { key: "fix", label: "修", steps: ["fix"] },
+  { key: "restate", label: STEP_WORD.restate, steps: ["restate"] },
+  { key: "write", label: STEP_WORD.write, steps: ["write"] },
+  { key: "review", label: STEP_WORD.review, steps: ["review", "final_review"] },
+  { key: "fix", label: STEP_WORD.fix, steps: ["fix"] },
   { key: "merge", label: "合并", steps: ["ui_check", "merge"] },
   { key: "verify", label: "验证", steps: ["verify"] },
 ] as const;

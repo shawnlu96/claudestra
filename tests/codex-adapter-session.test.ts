@@ -8,7 +8,7 @@ import { AcpIncompatibleError } from "../src/lib/acp/protocol.ts";
 import { RpcError } from "../src/lib/acp/rpc.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
 import { fakeApp, harness, MODEL, tick, until } from "./helpers/codex-fake-app.ts";
-import { testChildEnv } from "./test-env.ts";
+import { ciIoTraceChild, testChildEnv } from "./test-env.ts";
 
 const rpc = (s: AcpSession) => (s as unknown as { rpc: { request(m: string, p: unknown): Promise<any>; notify(m: string, p: unknown): void } }).rpc;
 const NEW = { cwd: "/w", mcpServers: [] };
@@ -26,7 +26,9 @@ describe("启动环境（B13、B15、B38）", () => {
   });
 
   test("B38 环境不合格的真进程：initialize 回 data.fatal，宿主当协议不兼容（固定键、不重起），关 stdin 后退出码 0", async () => {
-    const proc = spawnAdapter([process.execPath, CODEX_ACP_ADAPTER_MAIN], testChildEnv({ CODEX_PATH: "/nope/codex", INITIAL_AGENT_MODE: "yolo" }), process.cwd(), () => {});
+    const trace = ciIoTraceChild();
+    const env = testChildEnv({ CODEX_PATH: "/nope/codex", INITIAL_AGENT_MODE: "yolo", ...trace.env });
+    const proc = spawnAdapter([process.execPath, ...trace.argv, CODEX_ACP_ADAPTER_MAIN], env, process.cwd(), () => {});
     const session = new AcpSession(proc.wire, { onUpdate: () => {}, onPermission: async () => null, log: () => {} });
     const err = await session.initialize().catch((e) => e);
     expect(err).toBeInstanceOf(AcpIncompatibleError);

@@ -2,7 +2,7 @@
  * team-project-N8F 截图（opt-in）：MIRROR_FRESH_SHOTS_DIR=<目录> bun test tests/web-collab-mirror-fresh-browser.test.ts
  * 团队视图「团队」标签的规划面板，四个 feature 分别是 fresh（刚同步）/ 5 分钟前 / 11 分钟前 / 无镜像，390 / 1280 各一张，过截图自动检查。
  * observedAt 按服务器收到请求时的真实时钟往前推（页面的 now 是浏览器里的 Date.now）。MIRROR_FRESH_BASELINE_WEB=<main 的 web 目录> 换成改前的构建，
- * 文件名前缀 before-（对照：main 上 5 分钟那个已标「主场镜像过期」）。纯 fixture，不连生产。
+ * 文件名前缀 before-（对照：main 上 5 分钟那个已标「进度可能不是最新的」）。纯 fixture，不连生产。
  */
 import { expect, test } from "bun:test";
 import { chromium, type Browser } from "playwright-core";
@@ -65,8 +65,8 @@ test.skipIf(!out)("mirror freshness: team planning panel at 390 / 1280, fresh / 
       page.on("pageerror", (e) => errors.push(e.message));
       await page.goto(`${server.url}?side=team&theme=light&project=${fx.project}&team=${fx.team}`);
       await page.getByText(fx.list.features[0]!.title, { exact: false }).first().waitFor({ timeout: 15_000 });
-      await (width < 700 ? page.getByRole("button", { name: "团队", exact: true }).first()
-        : page.getByRole("tab", { name: "团队" }).or(page.getByRole("button", { name: "团队", exact: true })).first()).click();
+      await (width < 700 ? page.getByRole("button", { name: /^(规划与提案|团队)$/ }).first()
+        : page.getByRole("tab", { name: /^(规划与提案|团队)$/ }).or(page.getByRole("button", { name: /^(规划与提案|团队)$/ })).first()).click();
       await page.getByText("团队规划", { exact: true }).waitFor();
       await page.evaluate("document.fonts.ready");
       await page.evaluate("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))");
@@ -85,6 +85,11 @@ test.skipIf(!out)("mirror freshness: team planning panel at 390 / 1280, fresh / 
   for (const [name, list] of Object.entries(issues)) expect({ name, list }).toEqual({ name, list: [] });
   if (prefix === "after-") for (const text of Object.values(texts)) {
     // 规划面板每个 feature 一行「v2 · …」：fresh / 5 分钟最新、11 分钟写多久前同步、无镜像照旧
-    expect(text.match(/^v2 · .*$/gm)).toEqual(["v2 · 主场镜像最新", "v2 · 主场镜像最新", "v2 · 主场 11 分钟前同步", "v2 · 尚无执行镜像"]);
+    expect(text.match(/^v2 · .*$/gm)).toEqual([
+      "v2 · 任务所在的机器 其他成员的机器 · 进度是最新的",
+      "v2 · 任务所在的机器 其他成员的机器 · 进度是最新的",
+      "v2 · 任务所在的机器 其他成员的机器 · 11 分钟没收到任务所在机器的更新",
+      "v2 · 任务所在的机器 其他成员的机器 · 还没收到任务所在机器的进度",
+    ]);
   }
 }, 180_000);

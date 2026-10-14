@@ -39,7 +39,8 @@ export function lookupRouteTarget(listResult: unknown, rawTarget: string): Route
 /** /api/v1 按名字找 agent（带不带 agent- 前缀都认）。list 失败 / 抛错都抛 ListUnavailableError，由 apiErrorResponse 映射成 503 */
 export async function findListedAgent(list: () => Promise<unknown>, name: string): Promise<any | null> {
   const agents = await listAgentsStrict(list);
-  return agents.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name) ?? null;
+  const hit = agents.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name);
+  return hit ? { ...hit } : null; // 名单可能是 api-routes 的共享缓存：交出副本，调用方改字段不串到别的请求
 }
 
 /** route_to_agent 入口：查不到目标就把拒绝帧（投递前，sent:false）回给调用方并返回 null，bridge.ts 随即 break */
