@@ -24,7 +24,8 @@ const web = resolve("web");
 const comp = join(web, "features/chat/components");
 /** 本卡改过、改前要换回 BASE 原文的 web 文件（新文件 chip-legend / chip-words / sidebar-polish-i18n 在 BASE 上没人 import） */
 const CHANGED = ["features/chat/components/sidebar.tsx", "features/chat/components/agent-row.tsx", "features/chat/components/ctx-boundary-chip.tsx",
-  "features/chat/components/ledger-stage-chip.tsx", "features/chat/components/line-icons.tsx", "features/talk/workspace-switch.tsx"];
+  "features/chat/components/ledger-stage-chip.tsx", "features/chat/components/line-icons.tsx", "features/chat/components/sidebar-admin-buttons.tsx",
+  "features/talk/workspace-switch.tsx"];
 type Variant = "before" | "after";
 const work = mkdtempSync(join(tmpdir(), "uxside1-"));
 const bundles: Partial<Record<Variant, string>> = {};
