@@ -173,3 +173,84 @@ test("[验收线 5] default observe aggregates would-skip counts into one ten-mi
       logs: ['[centerRequestBudget] 本会跳过 {"projection-idle":4}'] });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+import { createHash } from "node:crypto";
+import { mkdirSync, utimesSync } from "node:fs";
+import { deferSharedLedger, sharedLedgerRetryAfter } from "../src/lib/shared-ledger-client-transport.js";
+
+const DAY = 86_400_000, CAP = 600_000;
+function limitedCenter(header: (time: number) => string) {
+  const stateDir = mkdtempSync(join(tmpdir(), "cooldown-cap-"));
+  const key = instanceKeySync(stateDir)!;
+  const connection = { centerId: "test", baseUrl: "https://budget.invalid", teamId: "team", personId: "owner", instanceId: "home", bearer: "test" };
+  const w = { stateDir, time: 1_000_000_000, calls: 0, limited: true };
+  const fetcher = (async () => {
+    w.calls++;
+    return w.limited ? new Response("nginx", { status: 429, headers: { "Retry-After": header(w.time) } }) : Response.json({ ok: true });
+  }) as unknown as typeof fetch;
+  const read = () => requestSharedLedger(connection, key, { stateDir, now: () => w.time, fetch: fetcher }, "GET", "/v1/teams/team/features");
+  return { w, read, origin: connection.baseUrl, close: () => rmSync(stateDir, { recursive: true, force: true }) };
+}
+
+test.each([
+  ["86400 seconds", () => "86400", CAP],
+  ["an HTTP date a day later", (t: number) => new Date(t + DAY).toUTCString(), CAP],
+  ["600 seconds", () => "600", 600_000],
+])("[验收线 1] Retry-After %s records a cooldown of at most ten minutes", async (_, header, expected) => {
+  const c = limitedCenter(header);
+  try {
+    await expect(c.read()).rejects.toMatchObject({ status: 429, retryAfterMs: expected, retryAfter: String(expected / 1000) });
+    expect(sharedLedgerNotBefore(c.origin, c.w.stateDir, c.w.time)).toBe(c.w.time + expected);
+    const file = join(c.w.stateDir, "shared-ledger-cooldowns", `${createHash("sha256").update(c.origin).digest("hex")}.json`);
+    expect(JSON.parse(await Bun.file(file).text())).toBe(c.w.time + expected);
+  } finally { c.close(); }
+});
+
+test("[验收线 2] a day-long deadline already on disk reads as at most now + 10 minutes and expires then", async () => {
+  const c = limitedCenter(() => "30");
+  try {
+    const dir = join(c.w.stateDir, "shared-ledger-cooldowns");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${createHash("sha256").update(c.origin).digest("hex")}.json`);
+    writeFileSync(file, JSON.stringify(c.w.time + DAY));
+    utimesSync(file, c.w.time / 1000, c.w.time / 1000); // written "now" on the fake clock, so the deadline must expire in ten minutes
+    expect(sharedLedgerNotBefore(c.origin, c.w.stateDir, c.w.time)).toBe(c.w.time + CAP);
+    await expect(c.read()).rejects.toMatchObject({ status: 429, retryAfterMs: CAP });
+    expect(c.w.calls).toBe(0);
+    c.w.time += CAP;
+    c.w.limited = false;
+    await c.read();
+    expect(c.w.calls).toBe(1);
+  } finally { c.close(); }
+});
+
+test.each([
+  ["seconds", () => "30"],
+  ["an HTTP date", (t: number) => new Date(t + 30_000).toUTCString()],
+])("[PM 补 4] cooldown replays the seconds left, not the center's original %s", async (_, header) => {
+  const c = limitedCenter(header);
+  try {
+    await expect(c.read()).rejects.toMatchObject({ status: 429, retryAfterMs: 30_000, retryAfter: "30" });
+    c.w.time += 25_000;
+    await expect(c.read()).rejects.toMatchObject({ status: 429, retryAfterMs: 5000, retryAfter: "5" });
+    expect(sharedLedgerRetryAfter(c.origin, c.w.stateDir, c.w.time)).toBe("5");
+    c.w.time += 4_500;
+    await expect(c.read()).rejects.toMatchObject({ retryAfter: "1" });
+    expect(c.w.calls).toBe(1);
+    c.w.time += 1_500;
+    c.w.limited = false;
+    await c.read();
+    expect(c.w.calls).toBe(2);
+  } finally { c.close(); }
+});
+
+test("[PM 补 4] an extended deadline (mirror-loop / team-body defer) moves the replayed Retry-After with it", async () => {
+  const c = limitedCenter(() => "30");
+  try {
+    await expect(c.read()).rejects.toMatchObject({ retryAfter: "30" });
+    await deferSharedLedger(c.origin, c.w.time + 50_000, c.w.stateDir);
+    c.w.time += 25_000;
+    await expect(c.read()).rejects.toMatchObject({ retryAfterMs: 25_000, retryAfter: "25" });
+    expect(c.w.calls).toBe(1);
+  } finally { c.close(); }
+});

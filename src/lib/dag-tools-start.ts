@@ -19,6 +19,7 @@ import { notePrivateStart, parseStartPlacement, PRIVATE_ONLY_PEER, privateStartM
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { uiSpecGate } from "./spec-lint.js";
 import { observationGate } from "./spec-lint-observation.js";
+import { cardIdGate } from "./shared-ledger-mirror-skip-id.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { gitOriginRepo, noCloneReason, privatePoolMode, privateStart, type PrivatePoolMode } from "./card-repo.js";
 
@@ -179,6 +180,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (!node.fileGlobs?.length) return no("no_globs", `节点 ${node.key} 没有 fileGlobs：先用 rewrite_dag 的 update 补上文件范围`);
   const taskId = args.taskId ?? cardNames(env.db, f, node.key).taskId;
   if (!TASK_ID.test(taskId)) return no("invalid", `卡号 ${taskId} 不合法（字母数字开头，≤ 60 位，只含字母数字 _ . -）`);
+  const idGate = cardIdGate(taskId); if (idGate) return no("invalid", idGate);
   const lint = uiSpecGate(env.db, env.ledgerDir, taskId, args.spec, f.project); if (lint) return no("spec_lint", lint);
   const obs = observationGate({ ledgerDir: env.ledgerDir, project: f.project, taskId, inline: args.spec }, { policy: env.recoveryPolicy });
   if (obs) return no("spec_lint", obs);

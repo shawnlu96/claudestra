@@ -12,7 +12,8 @@ import { usePort, useViewport } from "../v4/use-viewport";
 import { ViewportTools } from "../v4/viewport-tools";
 import v from "../v4/v4.module.css";
 import type { Compare } from "./dag-diff";
-import type { DagCanvas, DGroup, DNode } from "./dag-layout";
+import type { DagCanvas, DGroup, DNode, FoldKind } from "./dag-layout";
+import { focusT } from "./focus-i18n";
 import { NodeBody, nodeClass, type NodeLook } from "./dag-node";
 import type { FeatureCard } from "./dag-types";
 import d from "./dag.module.css";
@@ -33,7 +34,8 @@ export interface DagCanvasProps {
   focus: Focus | null;
   onNode: (featureId: string, key: string) => void;
   onOwner: (agent: string) => void;
-  onFold: (featureId: string) => void;
+  /** kind：点的是哪种小片（dag-layout.ts DFold.kind）；框头「✓N 收起」和框角 ✓N 不带 */
+  onFold: (featureId: string, kind?: FoldKind) => void;
   onFeature: (featureId: string) => void;
   onVersions: (featureId: string) => void;
   onBackground: () => void;
@@ -108,7 +110,7 @@ function VersionBar({ g, compare, onVersions, tr }: { g: DGroup; compare: Compar
 
 function GroupFrame({ g, p }: { g: DGroup; p: DagCanvasProps }) {
   const f = g.feature;
-  const doneShown = f.counts.done > 0 && g.folds.length === 0 && p.compare?.featureId !== f.id;
+  const doneShown = !g.focus && f.counts.done > 0 && !g.folds.some((x) => !x.kind) && p.compare?.featureId !== f.id;
   return (
     <div className={d.group} style={{ left: g.x, top: g.y, width: g.w, height: g.h }}>
       <div className={d.gh}>
@@ -123,12 +125,16 @@ function GroupFrame({ g, p }: { g: DGroup; p: DagCanvasProps }) {
   );
 }
 
+/** 小片的字（focus-i18n.ts 的词）：框角 ✓N 只有数，读屏念「N 个已完成」 */
+const FOLD_WORD: Record<FoldKind, string> = { rest: "其余 {n} 已完成", far: "更远 {n}", more: "还有 {n} 个已完成" };
+
 export function DagCanvasView(p: DagCanvasProps) {
   const { canvas, tr } = p;
   const { box, port } = usePort();
   const vp = useViewport(canvas, port, p.focus, p.onBackground);
   const { view, glide, handlers } = vp;
   const nodes = canvas.groups.flatMap((g) => g.nodes);
+  const ft = focusT(tr);
   return (
     <div className={d.wrap}>
       <Shelf shelf={p.shelf} evicted={p.evicted} onFeature={p.onFeature} />
@@ -148,8 +154,9 @@ export function DagCanvasView(p: DagCanvasProps) {
             );
           })}
           {canvas.groups.flatMap((g) => g.folds).map((f) => (
-            <button key={f.id} type="button" className={d.fold} style={{ left: f.x, top: f.y, width: f.w, height: f.h }} onClick={() => p.onFold(f.featureId)}>
-              <Icon name="check" size={12} />{f.n}
+            <button key={f.id} type="button" className={d.fold} style={{ left: f.x, top: f.y, width: f.w, height: f.h }} onClick={() => p.onFold(f.featureId, f.kind)}
+              aria-label={f.kind ? undefined : ft("{n} 个已完成", { n: f.n })} data-fold={f.kind ?? "done"}>
+              {f.kind !== "far" && <Icon name="check" size={12} />}{f.kind ? ft(FOLD_WORD[f.kind], { n: f.n }) : f.n}
             </button>
           ))}
         </div>

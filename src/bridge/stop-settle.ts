@@ -112,7 +112,21 @@ export function noteTurnCut(cid: string, at = Date.now()): void {
   cutSince.add(cid);
 }
 /** 这一轮没有投递记录（CC 到点自己续跑）：接着做的是撞错那一轮，中间插进的外人一轮不算（resumeRec） */
-const recOf = (t: StopTurn): TriggerRec | undefined => turnTrigger.get(t.cid) ?? resumeRec(t.cid);
+const recOfCid = (cid: string): TriggerRec | undefined => turnTrigger.get(cid) ?? resumeRec(cid);
+const recOf = (t: StopTurn): TriggerRec | undefined => recOfCid(t.cid);
+/**
+ * 没指明收件人的答复（target 在自己频道 reply、Stop 兜底）归谁：回程簿说恰好一个在等还不够——这一轮是几个 agent 的请求一起开的
+ * （押后合批，held-flush.ts），别人那份被 send_to_agent 单独答掉后只剩它，这句话也不是专答它的，不认（tests/held-agent-batch.test.ts）。
+ * bridge.ts 的 reply 分支和 Stop 兜底都经它；send_to_agent 的精确答复不经它
+ */
+export function answerableUnmixed<P extends { callerChannelId: string }>(
+  book: { answerable(target: string, stillHeld: (req: { messageId?: string; callerChannelId: string }) => boolean): P | undefined },
+  target: string, stillHeld: (req: { messageId?: string; callerChannelId: string }) => boolean,
+): P | undefined {
+  return unmixed(book.answerable(target, stillHeld), recOfCid(target)?.askers ?? []);
+}
+const unmixed = <P extends { callerChannelId: string }>(pac: P | undefined, askers: readonly string[]): P | undefined =>
+  pac && !(askers.length > 1 && askers.includes(pac.callerChannelId)) ? pac : undefined;
 /** 这个频道当前这一轮的开启时刻；没有 = 这一轮不是 bridge 送的消息开的，或已经 Stop / 被打断（bridge/held-flush.ts 用它判补投记录过没过期） */
 export const turnStartedAt = (cid: string): number | undefined => turnTrigger.get(cid)?.at;
 const triggerOf = (t: StopTurn): TurnTrigger => t.trigger ?? recOf(t)?.who ?? "stranger";
@@ -190,7 +204,7 @@ async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promi
     markWithheld(d, t, t.drain.text);
     return own;
   }
-  if (!failed) await settleCallers(d, t.cid, t.drain.text); // 失败那一轮的 drain 是错误原文，不是答谁的
+  if (!failed) await settleCallers(d, t.cid, t.drain.text, recOf(t)?.askers ?? []); // 失败那一轮的 drain 是错误原文，不是答谁的
   return own;
 }
 
@@ -413,8 +427,9 @@ export function closeRecoveredCards(cid: string, now = Date.now()): void {
 }
 
 /** 只在 settlesOwnTurn 为真时调（settleStopTurn） */
-async function settleCallers(d: CallerSettleDeps, cid: string, drainedText: string | null): Promise<void> {
-  const pac = d.answerable(cid);
+async function settleCallers(d: CallerSettleDeps, cid: string, drainedText: string | null, askers: readonly string[] = []): Promise<void> {
+  // 几个请求方一起开的一轮只剩它在等时不推不消化（见 answerableUnmixed），回程留着等 target 用 send_to_agent 答它
+  const pac = unmixed(d.answerable(cid), askers);
   if (!pac) {
     d.nudgeAmbiguous(cid);
     return;

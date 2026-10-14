@@ -17,20 +17,24 @@ export const product: ProductBoard = {
 };
 
 test('longest path columns, completed solid edges and unfinished dotted edges', () => {
-  const c = productLayout(product, true);
-  expect(c.nodes.find(n => n.id === 'shared')?.column).toBe(3);
-  expect(c.edges.map(e => e.solid)).toEqual([true, false, false]);
+  const c = productLayout(product, { doneOpen: true });
+  // 已收尾的 base 是链头的小标签；paused 的 shared 进「已暂停」，view → shared 不画
+  expect(c.nodes.find(n => n.id === 'base')?.chip).toBe(true);
+  expect(c.nodes.find(n => n.id === 'view')?.rank).toBe(2);
+  expect(c.edges.map(e => e.solid)).toEqual([true, false]);
   expect(c.nodes.some(n => n.id === 'gone')).toBe(false);
   expect(c.boxOf.get('view')).toBe('view');
 });
-test('done collapsed, paused retained and no-DAG card count retained', () => {
+test('done collapsed into a chip, paused moved out of the main area and no-DAG card count retained', () => {
   const c = productLayout(product);
   expect(c.done.map(f => f.id)).toEqual(['base']);
-  expect(c.nodes.some(n => n.id === 'base')).toBe(false);
-  expect(c.fold?.members).toEqual(['base']);
-  expect(c.edges.map(e => e.solid)).toEqual([true, false, false]);
+  expect(c.nodes.filter(n => !n.chip).some(n => n.id === 'base')).toBe(false);
+  expect(c.chips).toEqual([]);
+  expect(c.edges.map(e => e.solid)).toEqual([true, false]);
   expect(c.nodes.find(n => n.id === 'cards')?.feature.counts.total).toBe(1);
-  expect(c.nodes.some(n => n.feature.status === 'paused')).toBe(true);
+  expect(c.nodes.some(n => n.feature.status === 'paused')).toBe(false);
+  expect(c.paused.map(f => f.id)).toEqual(['shared']);
+  expect(productLayout(product, { doneOpen: true, pausedOpen: true }).chips.map(x => x.id)).toEqual(['paused:shared', 'done:base']);
 });
 test('cycles, missing endpoints, empty boards and branching never recurse or overlap', () => {
   const b = { features: ['a', 'b', 'c', 'd'].map(id => feature(id)), deps: [
@@ -43,7 +47,7 @@ test('cycles, missing endpoints, empty boards and branching never recurse or ove
   expect(productLayout({ features: [], deps: [] }).w).toBe(0);
   const branch = productLayout({ features: ['a', 'b', 'c', 'd'].map(id => feature(id)),
     deps: [['a', 'c'], ['a', 'b'], ['b', 'c'], ['c', 'd']].map(([from, to]) => ({ from, to, note: '' })) });
-  expect(branch.nodes.map(n => n.column)).toEqual([0, 1, 2, 3]);
+  expect(branch.nodes.map(n => n.rank)).toEqual([0, 1, 2, 3]);
 });
 test('missing/invalid fields reject instead of entering render', () => {
   expect(() => assertProductBoard(product)).not.toThrow();
@@ -51,6 +55,56 @@ test('missing/invalid fields reject instead of entering render', () => {
     { ...product, features: [feature('x', { eta: undefined as never })] },
     { ...product, features: [feature('x', { counts: { total: 1, active: 0, completed: 0 } })] },
     { ...product, features: [feature('x'), feature('x')] }]) expect(() => assertProductBoard(body)).toThrow();
+});
+test('PDLAYOUT1 [验收线 2]: links / areas / frozen / paused and frozen states pass; malformed links or areas are dropped, not fatal', async () => {
+  const { projectMapBoard, PROJECT_MAP_NOW } = await import('./helpers/project-map-fixture');
+  const full = projectMapBoard(PROJECT_MAP_NOW);
+  expect(() => assertProductBoard(full)).not.toThrow();
+  expect(full.links).toHaveLength(4);
+  expect(full.features.map(f => f.state)).toEqual(expect.arrayContaining(['paused', 'frozen']));
+  const warn = console.warn;
+  const warned: string[] = [];
+  console.warn = (m: string) => { warned.push(m); };
+  try {
+    const bad = { ...projectMapBoard(PROJECT_MAP_NOW), links: [{ from: 'a', kind: 'task' }], areas: [{ id: 1 }] };
+    expect(() => assertProductBoard(bad)).not.toThrow();
+    expect('links' in bad || 'areas' in bad).toBe(false);
+    expect(warned).toHaveLength(1);
+    const odd = { ...product, links: [{ from: 'base', to: 'flow', note: '', kind: 'future', satisfied: true, count: 1, evidence: [] }] };
+    assertProductBoard(odd);
+    expect(odd.links).toEqual([]);
+  } finally { console.warn = warn; }
+  for (const body of [{ ...product, features: [feature('x', { area: 3 as never })] },
+    { ...product, deps: [{ from: 'a', to: 'b', note: '', satisfied: 'yes' }] }]) expect(() => assertProductBoard(body)).toThrow();
+});
+test('PDLAYOUT1 [验收线 2]: link evidence is checked per kind; a malformed record drops links (one warning), the board stays usable', async () => {
+  const { projectMapBoard, PROJECT_MAP_NOW } = await import('./helpers/project-map-fixture');
+  const task = { from: 'n1', to: 'n2', fromStage: 'impl', toStage: 'spec', satisfied: false };
+  const lock = { node: 'n1', wanted: 'src/a.ts', held: 'src/**', holder: 't1', since: PROJECT_MAP_NOW };
+  const wrap = (kind: string, evidence: unknown[]) => ({ from: 'f-team', to: 'f-private', note: '', kind, satisfied: false, count: evidence.length, evidence });
+  const warn = console.warn;
+  const warned: string[] = [];
+  console.warn = (m: string) => { warned.push(m); };
+  try {
+    const good = { ...projectMapBoard(PROJECT_MAP_NOW), links: [wrap('task', [task]), wrap('lock', [lock]), wrap('future', [{}])] };
+    assertProductBoard(good);
+    expect(good.links!.map(l => l.kind)).toEqual(['task', 'lock']);
+    expect(warned).toHaveLength(0);
+    const bad: unknown[][] = [
+      [{}], [{ ...task, satisfied: 'no' }], [{ ...task, fromStage: undefined }], [{ ...task, to: 3 }], [task, null], [lock],
+    ];
+    const badLock: unknown[][] = [
+      [{}], [{ ...lock, since: 'bad' }], [{ ...lock, since: Number.NaN }], [{ ...lock, since: -1 }], [{ ...lock, holder: undefined }], [{ ...lock, held: 1 }], [task],
+    ];
+    const cases = [...bad.map(e => wrap('task', e)), ...badLock.map(e => wrap('lock', e))];
+    for (const link of cases) {
+      const body = { ...projectMapBoard(PROJECT_MAP_NOW), links: [wrap('task', [task]), link] };
+      expect(() => assertProductBoard(body)).not.toThrow();
+      expect('links' in body).toBe(false);
+      expect(body.features).toHaveLength(projectMapBoard(PROJECT_MAP_NOW).features.length);
+    }
+    expect(warned).toEqual(cases.map(() => '[product] dropped malformed links'));
+  } finally { console.warn = warn; }
 });
 test('ETA today has time, other dates have month/day, null is hidden', () => {
   const now = new Date(2026, 9, 2, 9).getTime();

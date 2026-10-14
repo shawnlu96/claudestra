@@ -20,7 +20,7 @@
 - **隔离**：不连生产 bridge、不读生产状态目录；X13 迁移只在临时根目录内跑（`assertDrillRoot`）。
 - **留证**：每项演练里转成 unknown 或待重交的条目，逐项写进演练根目录的 `drills/<演练>.json`（本机侧 / 中心侧各一份证据），
   用例写完再读回核对条目。
-- 运行：`bun test tests/shared-ledger-v2-e2e`（14 个用例，约 2 秒）。
+- 运行：`bun test tests/shared-ledger-v2-e2e`（15 个用例，约 2 秒）。
 
 ## 判定口径（每项故障演练都要满足）
 
@@ -133,6 +133,17 @@
   - 步骤：另外清空 peer B 的 registry 再重启。
   - 预期：启动记录变成 2 条，`expectStartedOnce` 抛错（各演练用的就是这条断言）；中心 `lend.claim` 仍是 1 条——只数领单发现不了重复启动。
 
+### 2.7 领单回包丢失（重新领单只对账）
+
+用例：`X15 演练 · 领单回包丢失 › 中心已 claimed、回包丢了：首轮不记 declined；下一轮重新领单只对账、不重复领、不重开租约；worker 只启动一次`
+（文件 `shared-ledger-v2-e2e-claim.test.ts`）
+
+| 步骤 | 中心应收到 | 预期 | 留证 |
+|---|---|---|---|
+| 对 `commands` / `lend.claim` 注入 drop，peer B 借方循环拉挂单后领单 | 回执查询、订单视图、`lend.claim dropped` | 中心订单 claimed 给 peer B、租约 gen 1；本机出借接口回 `503 unavailable`；peer B 的单留在 asked（不记 declined），日志「下轮再试」 | `drills/lost-claim-receipt.json`（peer B 首轮状态） |
+| 下一轮重新领单 | 只有回执查询（committed）和订单视图，不再收 `lend.claim` | peer B 单 claimed、leaseGen 1；中心 leaseGen / leaseUntil 不变（不开第二个租约） | 同上（重新领单时中心收到的请求） |
+| 往下起 worker，再重启两次 | 无新的 `lend.claim` | 单 started；启动记录 1 条（`expectStartedOnce`），假 worker 只建过一次；中心 `lend.claim` 全程 1 条（dropped） | 同上（启动次数、中心订单状态与 leaseGen） |
+
 ## 3. 旧备份恢复（验收线 3）
 
 用例：`X15 验收线 3：旧备份恢复 › 冻结 → 升代际 → 撤旧租约 → 核对已确认回执；序列倒退报警并重建缓存；丢掉的合并只留证不重跑`
@@ -162,15 +173,18 @@
 
 ## 待修的产品缺陷（已报 PM，等修复卡）
 
-- **领单待定被借方当成拒绝**：中心 `lend.claim` 已提交但回包丢失（或领单时中心不可用）时，本机出借接口
-  （`src/bridge/shared-ledger-v2-lend-api.ts` 的 `pending()`）回 `503 unavailable`；借方 `claimOrder`（`src/lib/lend-drive.ts`）只把
-  transport / bad_response / max_open 当「下轮再试」，于是把这张单永久记成 declined、不起 worker 也不再领，中心却是 claimed 给
-  peer B、租约在跑。转发结论那条路径已把 `unavailable` 当可重试。复现：在本组 world 里对 `commands` / `lend.claim` 注入 drop 后跑
-  peer B 的借方循环。本卡不改产品代码，这条不写成通过的用例；修复卡合并后补「领单回包丢失 → 重新领单只对账、仍只启动一次」用例。
+暂无。
+
+已修：
+
+- **领单待定被借方当成拒绝**（已修，i28-LENDCLAIM1 合并提交 `98219c4b7fa5`）：中心 `lend.claim` 已提交但回包丢失（或领单时中心不可用）时，
+  本机出借接口（`src/bridge/shared-ledger-v2-lend-api.ts` 的 `pending()`）回 `503 unavailable`；借方 `claimOrder`（`src/lib/lend-drive.ts`）
+  原先只把 transport / bad_response / max_open 当「下轮再试」，会把这张单永久记成 declined。修复后 `unavailable` 与转发结论同样当可重试。
+  对应用例见 2.7：`X15 演练 · 领单回包丢失 › 中心已 claimed、回包丢了：首轮不记 declined；下一轮重新领单只对账、不重复领、不重开租约；worker 只启动一次`。
 
 ## execution 开放前的人工核对
 
-1. `bun test tests/shared-ledger-v2-e2e` 14 个用例全绿，上表每一项的预期与留证都对得上。
+1. `bun test tests/shared-ledger-v2-e2e` 15 个用例全绿，上表每一项的预期与留证都对得上。
 2. X0–X15 全部 16 个节点各自的验收证据齐全（X12 合并、X13 迁移演练、本清单）。
 3. 上面「已知局限」逐条确认有对应的后续卡或接受说明；「待修的产品缺陷」的修复卡已合并并补上对应用例。
 4. 以上全部满足后，由 owner 另行决定是否打开 execution 总开关；本卡不打开它。
