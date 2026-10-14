@@ -8,12 +8,14 @@
 import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered, type Ask } from "./ledger-asks.js";
+import { listEvents } from "./ledger-store.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { rejectFix, type PmUiGate, type UiFix } from "./ledger-ui-approve-verdict.js";
 import { SRC_DIR } from "./repo-root.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { DIGEST_RE, UI_ASK_ACTION } from "./scheduler-ui-merge-refusal.js";
+import { DIGEST_RE, ownerVisualOf, UI_ASK_ACTION } from "./scheduler-ui-merge-refusal.js";
+import { ownerCarriedAsk, ownerCarryBlock } from "./scheduler-ui-owner-carry.js";
 import { currentBindingGate, ownerReask } from "./scheduler-ui-reask.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import { currentReviewFacts } from "./scheduler-review.js";
@@ -58,7 +60,16 @@ export function projectUiGate(db: Database, task: LedgerTask, now: number): UiGa
   if (first.done) return { state: "none" };
   const newest = gateOf(first.value);
   const older = function* () { for (const a of mine) yield { bound: boundTo(a.bind?.params), gate: () => gateOf(a) }; }();
-  return currentBindingGate(db, task, newest, older, now) ?? newest;
+  return ownerCarried(db, task, currentBindingGate(db, task, newest, older, now) ?? newest, first.value.id, now);
+}
+
+/** UIOWNCARRY1: the newest ask's owner approval carried by the scheduler's own update-branch reads as bound to the card's head,
+ * through the merge write's own pairing function (ownerCarriedAsk), on ownerVisual cards only. */
+function ownerCarried(db: Database, task: LedgerTask, gate: UiGate, newestId: string, now: number): UiGate {
+  if (gate.state !== "approved" || !gate.ownerVerified || !task.headSHA || gate.head === task.headSHA) return gate;
+  const events = listEvents(db, { project: task.project, target: task.id });
+  if (!ownerVisualOf(db, task, events) || ownerCarriedAsk(db, task, events, now)?.id !== newestId) return gate;
+  return { ...gate, head: task.headSHA };
 }
 
 type Card = Pick<PlannerSnapshot, "task" | "screenshotsDigest">;
@@ -121,7 +132,7 @@ export function uiFixPackage(s: PlannerSnapshot, codeFix: () => NonNullable<Plan
 export function uiMergeBlock(s: PlannerSnapshot): string | null {
   if (!s.screenshotsDigest || !DIGEST_RE.test(s.screenshotsDigest)) return "前后截图摘要缺失";
   const owner = s.uiGate.state === "approved" && s.uiGate.ownerVerified === true && ownerBound(s, s.uiGate);
-  if (s.ownerVisual) return owner ? null : "本卡要 owner 看截图：缺与当前 head/specRev/摘要相符的 owner 认证答复";
+  if (s.ownerVisual) return owner ? null : ownerCarryBlock(s.task, s.events, s.uiGate) ?? "本卡要 owner 看截图：缺与当前 head/specRev/摘要相符的 owner 认证答复";
   return owner || (pmBound(s, s.pmUiGate) && s.pmUiGate.state === "approved") ? null : "缺与当前 head/specRev/轮次/摘要相符的 PM 截图验收";
 }
 

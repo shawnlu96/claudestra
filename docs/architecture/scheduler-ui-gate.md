@@ -9,7 +9,7 @@ paths, `extra.screenshotsDigest` = their sha256). Who looks depends on the card.
 | `ownerVisual` (global palette, theme tokens, redesign) | the owner | the scheduler's screenshot ask (`scheduler_ui_screenshot`), answered with the authenticated owner mark |
 
 Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src/lib/scheduler-ui-merge-refusal.ts` (merge-write / merge-run check), `src/lib/ledger-ui-approve.ts`
-(writes), `src/lib/ledger-ui-approve-verdict.ts` (PM's verdict read back + the fix order it makes), `src/manager/ledger-ui-cmds.ts` (CLI). Tests: `tests/scheduler-ui-pm-gate.test.ts`, `tests/scheduler-ui-owner-visual.test.ts`, `tests/scheduler-ui-merge-begin.test.ts`, `tests/scheduler-ui-reask.test.ts`.
+(writes), `src/lib/ledger-ui-approve-verdict.ts` (PM's verdict read back + the fix order it makes), `src/manager/ledger-ui-cmds.ts` (CLI). Tests: `tests/scheduler-ui-pm-gate.test.ts`, `tests/scheduler-ui-owner-visual.test.ts`, `tests/scheduler-ui-merge-begin.test.ts`, `tests/scheduler-ui-reask.test.ts`, `tests/scheduler-ui-owner-carry.test.ts`.
 
 ## Flow after a passing review
 
@@ -52,6 +52,16 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src
   even when newer asks for other values came after it, however many (A → B → A, `currentBindingGate`; ownerVisual cards only). Such an earlier
   approval releases the card only when the merge write's own lookup (newest 20 answered asks) also finds it; otherwise it goes to
   a person as `ui_unverified`, never to a merge the write refuses and never to a second ask.
+- The owner's approval survives the scheduler's own update-branch carry (`src/lib/scheduler-ui-owner-carry.ts`, switch
+  `uiOwnerCarry`, default observe), on the same terms as PM's UIR1 carry: the card's newest scheduler screenshot ask, answered by
+  the authenticated owner, unexpired, not rejected, bound to the card's specRev / digest, on the carry's old head (or reaching it
+  through earlier owner carries), and the render inputs (`renderInputs`: web/, bridge, assets, package / lock / config, the card's
+  fileGlobs) identical at the approved, old and new heads. `on` writes a `ui_review_carry` at carrySeq + 2 with `ask` / `approvedHead`
+  / `mechanism: uiOwnerCarry`; the planner (`projectUiGate`, so `uiMergeBlock` and `uiPassStep`) and the merge write (`uiMergeRefusal`)
+  accept it only through the one pairing function `ownerCarriedAsk`. Refused under `on`, the carry's merge_phase note and
+  `merge_ui_unapproved` say why and that PM must reshoot on the new head before the scheduler asks the owner again. `observe`
+  behaves as `off` plus one observation per carry (would carry / would not, and why). PM's manual update-branch or an executor
+  push writes no review_carry and never carries. Asking the owner only after catching up with main is UIOWNCARRY2.
 
 ## Compatibility
 
