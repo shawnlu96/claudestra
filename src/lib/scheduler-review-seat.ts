@@ -2,10 +2,9 @@
 import type { Database } from "bun:sqlite";
 import { recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 
+/** Invalid policy keeps legacy counts; diagnostics remain in the central reader rather than every capacity lookup. */
 export function reviewSeatMode(project: string): RecoveryMode {
-  const p = recoveryPolicy(project, "reviewSeatIdle");
-  if (p.diagnostic) console.error(`[scheduler-review-seat] ${p.diagnostic}`);
-  return p.mode;
+  return recoveryPolicy(project, "reviewSeatIdle").mode;
 }
 
 /** ledger dispatch names a review kind, not an agent: keep every local binding until that round's subsequent verdict. */
