@@ -1,0 +1,105 @@
+/* 子 DAG 分区列表（focus-board.tsx / focus-card.tsx / focus-next.tsx / focus-done.tsx）。颜色只用 collab.module.css .tokens 已有的变量，不加新色值；
+   动效（呼吸点、事件行滑入、分段条过渡、卡片淡出收起、行先出后进）在 reduced-motion 下全部关掉。 */
+.pane { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 20px 24px; }
+
+/* 头部 */
+.head { flex: none; padding: 10px 20px 8px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.headTop { display: flex; align-items: center; gap: 12px; }
+.bar { flex: 1; min-width: 0; display: flex; gap: 2px; height: 8px; border-radius: 4px; overflow: hidden; }
+.barSeg { flex: 0 1 0; min-width: 0; height: 100%; padding: 0; border-radius: 0; transition: flex-grow 400ms ease; }
+button.barSeg { cursor: pointer; }
+button.barSeg:hover { filter: brightness(1.15); }
+.segOk { background: var(--ok); }
+.segRun { background: var(--s-run); }
+.segWait { background: var(--warn); }
+.segIdle { background: var(--line-2); }
+.toggle { flex: none; display: inline-flex; border: 1px solid var(--line-2); border-radius: 6px; overflow: hidden; font-size: var(--fs-3); }
+.toggle button { padding: 2px 10px; color: var(--muted); }
+.toggle button[aria-pressed="true"] { background: var(--panel-2); color: var(--text); font-weight: 600; }
+.words { color: var(--muted); font-size: var(--fs-3); font-variant-numeric: tabular-nums; }
+
+/* 分区 */
+.section { padding-top: 12px; }
+.secHead { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.secTitle { margin: 0 0 6px; color: var(--text); font-size: var(--fs-1); font-weight: 600; font-variant-numeric: tabular-nums; }
+.secTitle button { display: inline-flex; align-items: center; gap: 4px; color: inherit; font-weight: inherit; }
+.secNote { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--fs-3); }
+.sub { display: inline-flex; align-items: center; gap: 4px; margin: 6px 0 2px; color: var(--text-2); font-size: var(--fs-3); font-weight: 600; }
+.faint { color: var(--muted); font-size: var(--fs-3); font-weight: 400; }
+.sub.faint { display: block; }
+
+/* 进行中卡 */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+.card {
+  position: relative; display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 7px 10px 7px 12px; border: 1px solid var(--line-2);
+  border-left: 3px solid var(--bc, var(--line-2)); border-radius: 8px; background: var(--panel); cursor: pointer; transition: border-color 150ms ease;
+}
+.card:hover { border-color: var(--text-2); border-left-color: var(--bc, var(--line-2)); }
+.run { --bc: var(--s-run); }
+.wait { --bc: var(--warn); }
+.hot { --bc: var(--accent); }
+.missing { outline: 1px dashed var(--warn); outline-offset: -1px; }
+.cardMain { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 0; text-align: left; }
+.line { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-3); color: var(--muted); }
+.cardMain .line:first-child { font-size: var(--fs-2); color: var(--text); }
+.dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--bc, var(--line-2)); }
+.breathe { animation: breathe 2.4s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: .3; } }
+.key { flex: none; font-family: var(--mono); font-size: var(--fs-3); color: var(--muted); }
+.one { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { flex: none; padding: 0 6px; border-radius: 8px; background: var(--panel-2); color: var(--muted); font-size: var(--fs-3); font-variant-numeric: tabular-nums; }
+.badgeBig { color: var(--text); font-weight: 700; }
+.stepBar { flex: none; display: flex; width: 54px; }
+.stepBar > span { flex: 1; }
+.step { flex: none; color: var(--text-2); }
+.reason { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--warn); }
+.who { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); text-decoration: underline dotted; text-underline-offset: 2px; }
+.whoText { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.dwell { flex: none; font-variant-numeric: tabular-nums; }
+.track { position: relative; flex: none; width: 48px; height: 3px; border-radius: 2px; background: var(--line-2); }
+.fill { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--s-run); }
+.overflow { position: absolute; top: 0; bottom: 0; left: 100%; border-radius: 0 2px 2px 0; background: var(--warn); opacity: .55; }
+.trackOver .fill { background: var(--warn); }
+.event { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--fs-3); }
+.eventIn { animation: eventIn 320ms ease-out; }
+@keyframes eventIn { from { transform: translateY(70%); opacity: 0; } }
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.chipToggle { display: inline-flex; padding: 1px; color: var(--muted); }
+.chip {
+  display: inline-flex; align-items: center; gap: 2px; padding: 0 6px; border: 1px solid var(--line-2); border-radius: 9px; color: var(--text-2);
+  font-family: var(--mono); font-size: var(--fs-3); line-height: 16px; white-space: nowrap;
+}
+button.chip:hover { border-color: var(--text-2); }
+.chipOk { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+
+/* 接下来 / 已完成的行 */
+.row {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; min-width: 0; padding: 3px 8px; border: 1px solid transparent; border-radius: 6px;
+  text-align: left; font-size: var(--fs-2); color: var(--text-2); transition: opacity 150ms ease, border-color 150ms ease;
+}
+.row:hover { background: var(--panel-2); }
+.rowEnd { flex: none; color: var(--muted); font-size: var(--fs-3); font-variant-numeric: tabular-nums; }
+.cancelled .one, .cancelled .key { text-decoration: line-through; color: var(--muted); }
+.more { margin: 2px 8px; color: var(--muted); font-size: var(--fs-3); }
+.more:hover { color: var(--text); }
+.farLine { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 4px; }
+.farLine .sub { margin: 0 4px 0 0; }
+
+/* 依赖联动：悬停卡的上下游一跳描边，无关的变淡 */
+.row[data-rel="on"], .chip[data-rel="on"] { border-color: var(--text-2); }
+.row[data-rel="off"], .chip[data-rel="off"] { opacity: .4; }
+
+/* 离开（完成的卡、移进可以开工的行）：淡出并收起高度；刚移进可以开工的行等淡出完再淡入 */
+.leaving { animation: leave 360ms ease forwards; pointer-events: none; overflow: hidden; }
+@keyframes leave { to { opacity: 0; max-height: 0; padding-top: 0; padding-bottom: 0; margin: 0; border-width: 0; } }
+.cards .leaving { max-height: 200px; }
+.row.leaving { max-height: 40px; }
+.arrive { animation: arrive 360ms ease 360ms backwards; }
+@keyframes arrive { from { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .breathe, .eventIn, .arrive { animation: none; }
+  .barSeg, .row, .card { transition: none; }
+  .leaving { display: none; }
+}

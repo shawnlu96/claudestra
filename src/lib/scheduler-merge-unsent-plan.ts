@@ -2,6 +2,7 @@
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { MAIN_CI_PAUSE, MAIN_CI_UPDATE_NOT_SENT } from "./scheduler-merge-unsent-receipts.js";
+import { CLAIM_MAIN_CAUSE, claimMainUnsent } from "./scheduler-merge-freshness-receipts.js";
 
 export const UNSENT_BOUNCE_LIMIT_REASON = "同一 head 连续三次未发出合并就取消，请 PM 核对 GitHub 并排期";
 
@@ -14,8 +15,10 @@ function cancellation(events: readonly LedgerEvent[], marker: LedgerEvent): bool
   // Updating normally has a request in flight; only the main-CI send stack's explicit unsent attestation permits a retry.
   const unsentUpdate = d.phase === "updating" && d.cause === MAIN_CI_PAUSE && d.counted === false &&
     typeof d.receipt === "string" && d.receipt.startsWith(MAIN_CI_UPDATE_NOT_SENT);
+  // MRGFRESH1: a merging claim the sending driver refused before the merge call because main moved (scheduler-merge-freshness-unsent.ts)
+  const unsentClaim = d.phase === "merging" && d.cause === CLAIM_MAIN_CAUSE && d.counted === true && claimMainUnsent(d.receipt);
   if (marker.kind !== "scheduler" || d.op !== "merge_unsent_cancel" || typeof d.intentId !== "string" || typeof d.counted !== "boolean" ||
-    marker.dedupKey !== `scheduler:${d.intentId}:merge:unsent` || (!["ready", "await_ci"].includes(String(d.phase)) && !unsentUpdate)) return false;
+    marker.dedupKey !== `scheduler:${d.intentId}:merge:unsent` || (!["ready", "await_ci"].includes(String(d.phase)) && !unsentUpdate && !unsentClaim)) return false;
   const terminal = events.find((e) => e.seq === marker.seq - 1), settle = events.find((e) => e.seq === marker.seq - 2);
   return !!terminal && !!settle && [terminal, settle].every((e) => e.kind === "scheduler" && e.actor === marker.actor && e.ts === marker.ts &&
     e.project === marker.project && e.target === marker.target && e.data.imported !== true) &&

@@ -137,14 +137,14 @@ function render(page: "Overview" | "WaitsPage"): string {
   return p.stdout.toString();
 }
 
-test("[验收线 3] 「要你定的」与「待你处理」页：提案行有「去处理」（只这一行），有卡号的行照旧是任务链接、没有「去处理」", () => {
+test("[验收线 3] 「要你定的」与「待你处理」页：每一行都有「去处理」（UXHOME1 PM 补），有卡号的行照旧是任务链接", () => {
   for (const page of ["Overview", "WaitsPage"] as const) {
     const html = render(page);
-    expect(html.match(/去处理/g)?.length).toBe(2); // 按钮文字 + aria-label，各一次 = 只有一个按钮
+    expect(html.match(/去处理/g)?.length).toBe(4); // 按钮文字 + aria-label，各一次 × 两行 = 每行一个按钮
     expect(html).toContain('aria-label="去处理 提案待你批准：卡片工作优先级"');
     expect(html).toContain("i28-A7");
     expect(html).toContain("阻塞提问那张卡");
-    expect(html).not.toContain('aria-label="去处理 标题 ask-plain"');
+    expect(html).toContain('aria-label="去处理 标题 ask-plain"');
     expect(html).not.toMatch(/批准<\/button>|驳回<\/button>/); // 协作视图里不另做批准按钮
   }
 });
