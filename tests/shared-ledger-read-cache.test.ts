@@ -49,7 +49,7 @@ async function withCenter(run: (w: {
       await Bun.sleep(1); // in flight across callers
       return answer(method, resource);
     }) as unknown as typeof fetch;
-    const deps = { stateDir: dir, centerId: "fake-center", teamId: "team-a", projectId: "project-a", key: fakeKey(), fetch: fetcher,
+    const deps = { stateDir: dir, centerId: "fake-center", teamId: "team-a", projectId: "project-a", key: fakeKey(), fetch: fetcher, random: () => 0.5,
       scrub: { identity: { username: "fake-user", hostname: "fake-host" } } };
     const call = (req: Request, resource: string, principal = owner) =>
       handleSharedLedgerApi(req, `/shared-ledger/${resource}`, principal, deps).then((r) => r!);
@@ -113,11 +113,11 @@ test("[验收线 2] center 429 (Retry-After: 20) → same key answers 429 + Retr
       expect(((await res.json()) as { retryAfter?: unknown }).retryAfter).toBe(Number(res.headers.get("retry-after")));
     }
     expect(hits).toEqual(["GET features/feature-a"]);
-    // another key is not blocked by this one
-    expect((await get("features")).status).toBe(200);
+    // All resources share the center origin cooldown.
+    expect((await get("features")).status).toBe(429);
     advance(1); // 20s after the 429
     expect((await get("features/feature-a")).status).toBe(200);
-    expect(hits).toEqual(["GET features/feature-a", "GET features", "GET features/feature-a"]);
+    expect(hits).toEqual(["GET features/feature-a", "GET features/feature-a"]);
   });
 });
 
@@ -136,8 +136,12 @@ test("[验收线 2] concurrent callers of a 429 all get the center's Retry-After
     answer(ok);
     advance(4_999);
     const held = await get("features");
-    expect([held.status, held.headers.get("retry-after")]).toEqual([429, "1"]);
+    expect(held.status).toBe(429);
+    expect(Number(held.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(Number(held.headers.get("retry-after"))).toBeLessThanOrEqual(2);
     advance(1);
+    expect((await get("features")).status).toBe(429);
+    advance(1_000);
     expect((await get("features")).status).toBe(200);
     expect(lists(hits)).toBe(2);
   });
@@ -172,7 +176,7 @@ test("[验收线 2] a successful write keeps an active 429 cooldown: GET feature
       ? new Response("slow", { status: 429, headers: { "Retry-After": "20" } }) : ok(method, resource));
     expect((await get("features")).status).toBe(429);
     advance(1_000);
-    expect((await post("commands", SHARED_LEDGER_COMMAND_FIXTURES[3]!.payload)).status).toBe(200);
+    expect((await post("commands", SHARED_LEDGER_COMMAND_FIXTURES[3]!.payload)).status).toBe(429);
     answer(ok);
     const held = await get("features");
     expect([held.status, held.headers.get("retry-after")]).toEqual([429, "19"]);

@@ -11,6 +11,7 @@ import { placementPin } from "./scheduler-local-pin.js";
 import { reviewLocalFacts } from "./scheduler-agent-pool-review-local.js";
 import { writeLocalFacts } from "./scheduler-agent-pool-write-local.js";
 import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
+import { finishingSeatReservation } from "./scheduler-review-seat-reserve.js";
 
 /** 卡的 extra 列（JSON 文本）；坏了按空，订单 repo 回到 PR / 预留的 repo */
 function extraOf(text: string): Record<string, unknown> {
@@ -31,20 +32,21 @@ export function reserveFinishing(db: Database, project: string, facts: Placement
     ORDER BY t.createdAt, t.id`).all(project) as
     { id: string; project: string; headSHA: string | null; pr: string | null; extra: string; stage: "review" | "fix"; authorFamily: AuthorFamily }[];
   const sim = reviewLocalFacts(reserved, { project }, recoveryPolicy); // shares reserved's pool and peers, which the loop updates in place
+  const reservation = finishingSeatReservation(db, project);
   let own: string | null | undefined; // the project's repository, read once and only if a review is queued
   for (const task of queued) {
     const author = remoteHeadFamily(db, task) ?? task.authorFamily;
     const family = task.stage === "review" ? (author === "claude" ? "codex" : "claude") : author;
     const role = task.stage === "review" ? "reviewer" : "author";
-    // A bound or creating local session already consumed its seat in localAgentPool, including re-review and fix reuse.
-    if (db.query(`SELECT 1 FROM scheduler_sessions WHERE taskId=? AND role=? AND family=? AND transport!='peer' AND state!='retired'
-      UNION ALL SELECT 1 FROM scheduler_intents WHERE taskId=? AND action='ensure_session' AND status IN ('submitted','unknown')
-      AND receipt LIKE ? LIMIT 1`).get(task.id, role, family, task.id, `%ensure ${role} ${family}%`)) continue;
+    // Skip only seats already consumed by a binding or begun creation; idle reviewers still need finishing priority under on.
+    const seat = reservation(task.id, role, family);
+    if (seat === "counted") continue;
     const extra = extraOf(task.extra);
     // REVLOCAL1: a queued review is seated where reviewLocalFirst (on) would really send it; no card, so the simulation records nothing.
     // A private card's review is peers only (agentPoolReview → privateRepoOf → peersOnly): the switch never seats it here.
     const priv = task.stage === "review" && !!foreignRepoOf({ pr: task.pr, extra }, own === undefined ? (own = projectRepoFor(project)) : own);
     const placed = placeAgentPool({ ...(priv ? reserved : sim), repo: cardRepo({ pr: task.pr, extra }, { repo: reserved.repo }),
+      ...(!priv && seat === "local" ? { peers: [] } : {}),
       ...(task.stage === "review" ? { pin: placementPin(extra) } : {}),
       writeLeasePeer: task.stage === "fix" ? heldLease(db, task)?.peer ?? null : null }, task.stage, family);
     if (placed.kind === "local") reserved.local.pool!.running[family]++;

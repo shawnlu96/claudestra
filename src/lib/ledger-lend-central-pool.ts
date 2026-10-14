@@ -4,6 +4,7 @@
  * under the center's order id. Home rows and claim projections are written only on this process's writer connection, never by the bridge.
  * Wiring details: docs/design/shared-ledger-v2-stage2-plan.md §2.2 / §2.3.
  */
+import { centerRequestBudgetMode, lendBudgetVersion, lendBudgetPaused, settleLendBudget } from "./center-request-budget.js";
 import type { Database } from "bun:sqlite";
 import type { LendFamily } from "./lend-config.js";
 import { stepOfStage, roleOfStep, remoteHeadAt, type LendStep } from "./lend-git.js";
@@ -61,6 +62,7 @@ export interface LendCentralPoolPort {
   offer(task: LedgerTask, intent: SchedulerIntent, attemptKey: string, pool: { maxWorkers: number; remote: RemotePolicy },
     saved: OfferInput | null, standing?: boolean): Promise<LendCentralPoolOffer | null>;
   transport(project: string): LendCentralTransport | null;
+  readOrder?(project: string, orderId: string): Promise<LendCentralView | null>;
   outbox(): LendCentralOutbox;
   /** The trusted binding for projecting a claim (home row + center view + peer registry); null = not bindable yet. */
   binding?(orderId: string, view: LendCentralView): Promise<LendCentralBinding | null>;
@@ -151,7 +153,8 @@ async function syncClaim(p: LendCentralPoolPort, d: Database, task: LedgerTask, 
   const transport = p.transport(task.project);
   if (!transport) return held("中心传输未接好（unavailable）");
   try {
-    const view = await transport.view(orderId);
+    const view = p.readOrder ? await p.readOrder(task.project, orderId) : await transport.view(orderId);
+    if (!view) return held("中心订单读取暂停，稍后自动重试");
     if (view.order.status !== "claimed") return { step: "pool_pooled", detail: `中心出借单 ${orderId} 还没人领` };
     const binding = await p.binding(orderId, view);
     if (!binding) return held(`中心出借单 ${orderId} 已领，绑定还没齐，下一轮回投`);
@@ -193,6 +196,7 @@ export function lendCentralPoolPort(src: LendCentralPoolSources): LendCentralPoo
     db: src.db,
     transport: (project) => src.wiring.transportFor(project)?.lend((id) => outbox().read(id)?.command ?? null) ?? null,
     outbox,
+    readOrder: budgetOrderReader(src),
     observe: (entry) => src.wiring.observe(entry),
     offer: async (task, intent, attemptKey, pool, saved, standing = false) => {
       const d = src.db();
@@ -302,4 +306,27 @@ async function freshInput(d: Database, task: LedgerTask, role: "review" | "write
   if (role === "write" && !write) return null;
   return { taskId: task.id, peer: o.peer, family: o.family, repo: o.repo, pr: role === "write" ? null : o.pr, spec: o.spec,
     borrow: poolBorrow(borrows.find((b) => b.peer === o.peer) ?? null, !!pool.remote.agents), ...(write ? { write } : {}) };
+}
+
+/** Scheduler polls use the same durable per-order pause as bridge priming. */
+function budgetOrderReader(src: LendCentralPoolSources) {
+  const versions = new Map<string, string>();
+  return async (project: string, orderId: string): Promise<LendCentralView | null> => {
+    const d = src.db(), row = d?.query("SELECT taskId, peer FROM lend_orders WHERE orderId = ?").get(orderId) as { taskId: string; peer: string } | null;
+    const version = lendBudgetVersion(src.wiring, project, row ? [row.taskId, row.peer] : null);
+    if (versions.has(orderId) && versions.get(orderId) !== version) src.wiring.reset();
+    versions.set(orderId, version);
+    const mode = centerRequestBudgetMode(project, src.wiring.dir), now = src.now ?? Date.now;
+    if (lendBudgetPaused(src.wiring.dir, orderId, version, mode, now())) return null;
+    const transport = src.wiring.transportFor(project);
+    if (!transport) return null;
+    try {
+      const view = await transport.lend(() => null).view(orderId);
+      await settleLendBudget(src.wiring.dir, orderId, version, null, now());
+      return view;
+    } catch (error) {
+      await settleLendBudget(src.wiring.dir, orderId, version, error, now());
+      throw error;
+    }
+  };
 }
