@@ -178,6 +178,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   webLoader("web-dom-subdag-full-entry"),
   webLoader("web-dom-subdag-work-share"),
   webLoader("web-dom-team-counts-unknown"),
+  webLoader("web-dom-team-ops-machine-label"),
   webLoader("web-dom-team-parity-calls"),
   webLoader("web-dom-team-parity-home-only"),
   webLoader("web-dom-team-project-ask"),
