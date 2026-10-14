@@ -56,6 +56,10 @@ export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
       directory: t.directory == null ? null : list(t.directory, v => {
         const m = object(v);
         return { personId: text(m.personId), code: text(m.code, 128), teamRole: choice(m.teamRole, ["owner", "member"]) };
+      }),
+      instances: t.instances == null ? null : list(t.instances, v => {
+        const i = object(v);
+        return { instanceId: text(i.instanceId, 128), personId: text(i.personId) };
       }) };
   });
   const projects = list(data.projects, parseSharedProject);

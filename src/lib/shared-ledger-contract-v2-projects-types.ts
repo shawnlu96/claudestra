@@ -6,7 +6,7 @@ import type {
   V2ProjectsSimpleError, V2ProjectsProjectConflict, V2ProjectsOperationConflict,
 } from "./shared-ledger-contract-v2-projects.js";
 import type {
-  parseV2TeamRecord, parseV2TeamDirectoryMember, V2_PROJECTS_TEAM_REQUEST_SCHEMAS, V2_PROJECTS_TEAM_SUCCESS_SCHEMAS,
+  parseV2TeamRecord, parseV2TeamDirectoryMember, parseV2TeamInstance, V2_PROJECTS_TEAM_REQUEST_SCHEMAS, V2_PROJECTS_TEAM_SUCCESS_SCHEMAS,
   V2ProjectsTeamConflict,
 } from "./shared-ledger-contract-v2-projects.js";
 
@@ -33,6 +33,7 @@ export type V2ProjectsResponses = {
 
 export type V2TeamRecord = Infer<typeof parseV2TeamRecord>;
 export type V2TeamDirectoryMember = Infer<typeof parseV2TeamDirectoryMember>;
+export type V2TeamInstance = Infer<typeof parseV2TeamInstance>;
 export type V2ProjectsTeamEndpoint = keyof typeof V2_PROJECTS_TEAM_REQUEST_SCHEMAS;
 export type V2ProjectsTeamRequests = { [E in V2ProjectsTeamEndpoint]: Infer<(typeof V2_PROJECTS_TEAM_REQUEST_SCHEMAS)[E]> };
 export type V2ProjectsTeamSuccesses = { [E in V2ProjectsTeamEndpoint]: Infer<(typeof V2_PROJECTS_TEAM_SUCCESS_SCHEMAS)[E]> };
