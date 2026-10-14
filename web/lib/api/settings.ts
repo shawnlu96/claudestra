@@ -124,6 +124,25 @@ export function putClaudeDefaults(patch: { model?: string; effort?: string }): P
   return api<ClaudeDefaults>("/config/claude-defaults", { method: "PUT", json: patch, timeoutMs: 8000 }).then((r) => ({ model: r.model, effort: r.effort }));
 }
 
+// ── Codex 全局默认（模型 + 推理档，bridge 写 ~/.codex/config.toml 顶层两行）；null / "" = 清掉、回到 Codex 自己的默认 ──
+export type CodexCatalogModel = { id: string; name: string; efforts: string[]; defaultEffort: string | null };
+export interface CodexDefaults {
+  model: string | null;
+  effort: string | null;
+  /** `codex debug models` 的目录；拉不到时为空、catalogOk=false（此时 bridge 不让改模型） */
+  models: CodexCatalogModel[];
+  catalogOk: boolean;
+  /** 两项都没写时 Codex 实际用的 */
+  codexDefault: { model: string | null; effort: string | null };
+}
+// 首次要跑一次 `codex debug models`（bridge 缓存 10 分钟），超时与 /codex-models 一致
+export function getCodexDefaults(): Promise<CodexDefaults> {
+  return api<CodexDefaults>("/config/codex-defaults", { timeoutMs: 20_000 });
+}
+export function putCodexDefaults(patch: { model?: string | null; effort?: string | null }): Promise<CodexDefaults & { effortCleared?: boolean }> {
+  return api("/config/codex-defaults", { method: "PUT", json: patch, timeoutMs: 20_000 });
+}
+
 // ── 归档保留天数 ──
 export function getArchiveRetention(): Promise<{ days?: number; defaultDays?: number }> {
   return api("/settings/archive-retention", { timeoutMs: 4000 });
