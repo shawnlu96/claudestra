@@ -214,6 +214,22 @@ const COMPRESSIBLE = /^(?:application\/(?:json|javascript|xml|manifest\+json|[\w
 const gzipAsync = promisify(gzip);
 
 /**
+ * Accept-Encoding 是否接受 gzip（RFC 9110 §12.5.3）：按编码名 + q 值判断，`gzip;q=0` 是明确拒收。
+ * 显式写了 gzip 就以它为准，没写才看 `*`；只认 gzip 这个词会把拒收当成接受。
+ */
+function acceptsGzip(acceptEncoding: string): boolean {
+  let star: boolean | null = null;
+  for (const part of acceptEncoding.split(",")) {
+    const [name, ...params] = part.split(";").map((x) => x.trim().toLowerCase());
+    const q = params.find((p) => p.startsWith("q="));
+    const ok = !q || Number(q.slice(2)) > 0; // q 写坏（NaN）当拒收：NaN > 0 为 false
+    if (name === "gzip" || name === "x-gzip") return ok;
+    if (name === "*") star = ok;
+  }
+  return star === true;
+}
+
+/**
  * 浏览器经中继拿的响应（隧道与路径模式）在本机 gzip 后再上中继：上行慢时 JSON / JS 原文再经 base64 是大头，
  * 历史 / agent 列表压完约剩两成；front 原样转 content-encoding，浏览器按头自己解。本机 Web 已压过的（带 content-encoding）、
  * 没声明 gzip 的、分段（206 / content-range）的原样过。整读可以——只压一次性正文；gzip 走线程池，不卡事件循环。
@@ -222,7 +238,7 @@ export async function gzipBody(
   status: number, headers: Headers, body: Uint8Array | ReadableStream<Uint8Array> | null, acceptEncoding = "",
 ): Promise<{ headers: Headers; body: Uint8Array | ReadableStream<Uint8Array> | null }> {
   if (!body || status === 206 || headers["content-range"] || headers["content-encoding"]) return { headers, body };
-  if (!/\bgzip\b/i.test(acceptEncoding) || !COMPRESSIBLE.test(headers["content-type"] ?? "")) return { headers, body };
+  if (!acceptsGzip(acceptEncoding) || !COMPRESSIBLE.test(headers["content-type"] ?? "")) return { headers, body };
   const raw = body instanceof Uint8Array ? body : new Uint8Array(await new Response(body).arrayBuffer());
   if (raw.length < GZIP_MIN_BYTES) return { headers, body: raw };
   const { "content-length": _len, ...rest } = headers;

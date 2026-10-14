@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import { RelayTraffic, trafficPath } from "../src/lib/relay-traffic.js";
 import { InboundRouter } from "../src/lib/relay-client-inbound.js";
-import { gzipBody } from "../src/lib/relay-stream.js";
+import { b64, gzipBody } from "../src/lib/relay-stream.js";
 import { eventsQueryFilter } from "../src/bridge/event-bus.js";
 
 function clock(start = 1_000_000) {
@@ -152,6 +152,37 @@ describe("gzipBody", () => {
     const js = await gzipBody(200, { "content-type": "application/javascript; charset=utf-8" }, big, "gzip");
     expect(js.headers["content-encoding"]).toBe("gzip");
     expect(Buffer.from(gunzipSync(js.body as Uint8Array)).equals(Buffer.from(big))).toBe(true);
+  });
+});
+
+describe("隧道回帖按 Accept-Encoding 的 q 值决定压不压（PR1482-r1 gzip-qzero-regression）", () => {
+  const js = new TextEncoder().encode("console.log('relay');\n".repeat(94)).subarray(0, 2048);
+  async function tunnelGet(acceptEncoding: string) {
+    const frames: Record<string, unknown>[] = [];
+    const r = new InboundRouter((f) => (frames.push(f as Record<string, unknown>), true), async () => ({ status: 200, headers: { "content-type": "application/javascript" }, body: js }), () => {});
+    r.onReq({ t: "req", id: "js1", from: "relay", method: "GET", path: "/app.js", headers: { "accept-encoding": acceptEncoding }, more: false });
+    while (r.size) await Bun.sleep(1);
+    const res = frames.find((f) => f.t === "res") as { headers: Record<string, string>; body: string };
+    return { enc: res.headers["content-encoding"], body: b64.dec(res.body) };
+  }
+
+  test("identity, gzip;q=0 明确拒收 gzip：原文返回", async () => {
+    const out = await tunnelGet("identity, gzip;q=0");
+    expect(out.enc).toBeUndefined();
+    expect(Buffer.from(out.body).equals(Buffer.from(js))).toBe(true);
+  });
+
+  test("gzip;q=0.5 照常压缩，解开与原文一致", async () => {
+    const out = await tunnelGet("gzip;q=0.5, identity");
+    expect(out.enc).toBe("gzip");
+    expect(Buffer.from(gunzipSync(out.body)).equals(Buffer.from(js))).toBe(true);
+  });
+
+  test("q 值大小写、空格、*;q=0 / * 兜底", async () => {
+    expect((await tunnelGet("GZIP ; Q=0.000")).enc).toBeUndefined();
+    expect((await tunnelGet("br, *;q=0")).enc).toBeUndefined();
+    expect((await tunnelGet("br, *")).enc).toBe("gzip");
+    expect((await tunnelGet("*, gzip;q=0")).enc).toBeUndefined(); // 显式写了 gzip 就以它为准
   });
 });
 
