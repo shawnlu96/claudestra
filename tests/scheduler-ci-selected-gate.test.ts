@@ -46,11 +46,12 @@ function world(w: World = {}) {
   };
   const policy: RecoveryPolicyPort = () => ({ mode: w.key ?? "on", manualAfterMs: null, source: "config" });
   let now = 1_000_000;
-  const at = new Map<ObservedAction, number>(), fail = { observe: 0, notify: 0 }, tries = { observe: 0, notify: 0 };
+  const at = new Map<ObservedAction, number>(), fail = { observe: 0, notify: 0, notified: 0 }, tries = { observe: 0, notify: 0, notified: 0 };
   const sink: CiSelectedSink = {
     observe: async (a) => {
       tries.observe++;
       if (fail.observe > 0) { fail.observe--; throw new Error("ledger busy"); }
+      if (a.data?.kind === CI_SELECTED_REPAIR_NOTIFIED && (tries.notified++, fail.notified > 0)) { fail.notified--; throw new Error("ledger busy"); }
       if (!notes.some((n) => n.actionKey === a.actionKey && n.target === a.target)) { notes.push(a); at.set(a, now); } // the ledger's dedup key
     },
     pendingRepairs: (_p, since) => notes.filter((e) => e.data?.kind === CI_SELECTED_REPAIR && at.get(e)! >= since
@@ -249,6 +250,34 @@ describe("[验收线 4] on registers out-of-scope failures for repair, telling P
     expect(x.notes.filter((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED).map((n) => n.target)).toEqual(["T1", "T2"]);
     await inspect("T3");
     expect(x.notices).toHaveLength(1);
+  });
+
+  test("a notice that went out but whose notified record did not land is never sent again: only the record is retried", async () => {
+    const x = use();
+    x.fail.notified = 3; // the bridge takes every notice; the ledger refuses the first three notified writes
+    for (let i = 0; i < 5; i++) expect((await inspect()).checks).toEqual(green); // the same now, run, attempt, file and test
+    expect(x.notices).toHaveLength(1);
+    expect(x.tries.notify).toBe(1);
+    expect(x.tries.notified).toBe(4); // retried until it landed, then no more
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
+    await inspect("T2"); // another card, same test, within 24 hours: covered
+    expect(x.notices).toHaveLength(1);
+  });
+
+  test("a notice still unconfirmed when another card releases the same test is not re-sent either", async () => {
+    const x = use();
+    x.fail.notified = 1;
+    await inspect();
+    x.fail.notified = 5;
+    await inspect("T2");
+    x.tick(10 * 60_000);
+    await inspect("T3");
+    expect(x.notices).toHaveLength(1);
+    x.fail.notified = 0;
+    x.tick(10 * 60_000);
+    await inspect("T4");
+    expect(x.notices).toHaveLength(1);
+    expect(x.notes.filter((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED).map((n) => n.target)).toEqual(["T1", "T2", "T3"]); // T4's fact is covered by those
   });
 
   test("a merge tick re-sends a pending notice with no new release (at most every 10 minutes; plain greens unchanged)", async () => {

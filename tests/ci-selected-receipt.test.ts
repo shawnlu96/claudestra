@@ -126,10 +126,35 @@ describe("gh port", () => {
     expect(r).toMatchObject({ marked: true, receipt: null, problem: expect.stringMatching(/已过期/) });
   });
 
-  test("no verdict artifact beside unexpired shard logs = no release (one listing, no log read)", async () => {
-    const g = ghArtifacts([shardLog(), { name: "ci-related-plan", expired: false }]);
-    expect(await g.port.verdict("o/r", 9)).toEqual({ present: false, text: null });
-    expect(g.argv).toHaveLength(1);
+  test("[验收线 3] a verdict lost alone beside fresh shard logs: the check job's log still decides (a release is never plain)", async () => {
+    const lost = ghArtifacts([shardLog(), { name: "ci-related-plan", expired: false }], { code: 0, stdout: "2026-10-14T00:00:00Z ci-selected: allow=1 out_of_scope=1\n" });
+    expect(await lost.port.verdict("o/r", 9)).toEqual({ present: true, text: null, problem: expect.stringMatching(/日志显示放行/) });
+    const r = await readCiSelectedReceipt({ ...fakeSelectedPort().port, verdict: (repo, id) => lost.port.verdict(repo, id) }, "o/r", HEAD);
+    expect(r).toMatchObject({ marked: true, receipt: null });
+    const plain = ghArtifacts([shardLog()], { code: 0, stdout: "2026-10-14T00:00:00Z ci-selected: allow=0 out_of_scope=0\n" });
+    expect(await plain.port.verdict("o/r", 9)).toEqual({ present: false, text: null });
+  });
+
+  test("a finished check job's log is read once per job; an unfinished one is read again", async () => {
+    const jobs = (status: string) => ({ jobs: [{ id: 4, name: "typecheck + test + guard", status }] });
+    let status = "in_progress";
+    const argv: string[][] = [];
+    const command = (async (a: string[]) => {
+      argv.push(a);
+      const ok = (v: unknown) => ({ code: 0, stdout: typeof v === "string" ? v : JSON.stringify(v), stderr: "", timedOut: false });
+      if (a[2]!.includes("/artifacts")) return ok({ artifacts: [shardLog()] });
+      if (a[2]!.includes("/jobs?")) return ok(jobs(status));
+      return ok("ok\n");
+    }) as unknown as Parameters<typeof ghCiSelectedPort>[0];
+    const port = ghCiSelectedPort(command);
+    const logs = () => argv.filter((a) => a[2]!.endsWith("/logs")).length;
+    await port.verdict("o/r", 9);
+    await port.verdict("o/r", 9);
+    expect(logs()).toBe(2);
+    status = "completed";
+    await port.verdict("o/r", 9);
+    await port.verdict("o/r", 9);
+    expect(logs()).toBe(3);
   });
 
   test("[验收线 3] the artifacts are gone: the check job's log decides; a log that is gone too cannot prove no release", async () => {
