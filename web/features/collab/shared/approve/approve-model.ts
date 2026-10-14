@@ -1,3 +1,4 @@
+import { MACHINE_WORDS } from '../../../../lib/owner-words';
 /** Browser-side V2 scope approval / business authorization. The center re-checks role, bind, expiry and versions. */
 export type ApproveAction = 'scope.change' | 'home.change' | 'task.cancel' | 'merge' | 'deploy' | 'release' | 'artifact.share' | 'workflow.auto';
 export interface ApprovalBind {
@@ -139,12 +140,12 @@ export function settleIfCurrent(current: ApprovalState, pending: ApprovalState, 
   return settleApproval(pending, result);
 }
 
-/** Shared copy / redacted summary are labelled as such; the full original is only ever "仅在主场". */
+/** Shared copy / redacted summary are labelled as such; the full original only ever stays on the machine running the task. */
 export function documentView(document: ApprovalDocument | null) {
-  if (!document) return { kind: 'none' as const, label: '无共享材料', body: '', original: '仅在主场', originalDigest: null, sharedDigest: null };
-  if (document.copy) return { kind: 'copy' as const, label: '共享副本', body: document.copy.content, original: '仅在主场',
+  if (!document) return { kind: 'none' as const, label: '无共享材料', body: '', original: MACHINE_WORDS.originalThere, originalDigest: null, sharedDigest: null };
+  if (document.copy) return { kind: 'copy' as const, label: '共享副本', body: document.copy.content, original: MACHINE_WORDS.originalThere,
     originalDigest: document.originalDigest, sharedDigest: document.copy.sharedDigest };
-  return { kind: 'summary' as const, label: '脱敏摘要', body: document.summary, original: '仅在主场',
+  return { kind: 'summary' as const, label: '脱敏摘要', body: document.summary, original: MACHINE_WORDS.originalThere,
     originalDigest: document.originalDigest, sharedDigest: null };
 }
 

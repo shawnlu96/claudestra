@@ -19,7 +19,6 @@ const EN: Record<string, string> = {
   "正文暂时读不到": "Text temporarily unavailable",
   "参与者同步中": "Syncing participants",
   "中心暂未同步阶段明细": "Stage details not synced by the center yet",
-  "对它说只在主场机器上可用": "Talking to it only works on the home machine",
 };
 
 export function teamBodyTr(tr: Tr, lang: Lang): Tr {
