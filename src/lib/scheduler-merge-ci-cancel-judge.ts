@@ -40,7 +40,7 @@ const parseFacts = (m: RegExpExecArray, at: number): CancelFacts | null => {
   return Number.isSafeInteger(attempt) && attempt >= 1 ? { prHead: m[at]!, link: m[at + 1]!, attempt } : null;
 };
 
-/** The run is ended unsent and the card goes to the PM (scheduler-fallback.ts); `why` is the manual reason. */
+/** The run ends unsent and the card goes to the PM (scheduler-merge-ci-cancel.ts toPm); `why` is the reason it gives. */
 export const CANCEL_TWICE = "CI 连续被取消";
 const MANUAL_LEAD = "CI 被取消，退人工";
 export const cancelManualReceipt = (f: CancelFacts, why: string): string => `${MANUAL_LEAD}（${why}）：${facts(f)}`;

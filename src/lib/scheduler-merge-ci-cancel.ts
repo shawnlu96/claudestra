@@ -1,11 +1,8 @@
 /**
- * Required CI that was only cancelled (merge-arch-CICANCEL1): GitHub's PR concurrency group cancels a whole run whenever another run
- * of the PR starts (a re-run of an older head included), so "every red check is a cancel" says nothing about the reviewed code.
- * Switch `ciCancelRerun`: off = the old ci_fail path; observe = the same, plus one note saying what on would do; on = the cancelled
- * run is re-run once through CIF1's claim (same once-per-head budget, same send journal), and a run that was already re-run and is
- * cancelled again goes to the PM, never to fix: through the driver's fallback-manual hook (the foreign-repo one) with the reason,
- * else the run ends unsent and the planner's merge_retry_requires_pm hands the card over. Any failed check is ci_fail in every mode (cancelOnly), and a run
- * whose head is not the reviewed head is never re-run: the gate waits and reads the checks again. tests/scheduler-merge-ci-cancel*.test.ts.
+ * Required CI that was only cancelled (merge-arch-CICANCEL1): the PR concurrency group cancels a run whenever another run of the PR starts,
+ * so it says nothing about the reviewed code. Switch `ciCancelRerun`: off = ci_fail as before; observe = the same plus one note; on = one
+ * rerun through CIF1's claim (same per-head budget and send journal), and a cancel after a rerun goes to the PM (driver hook, else the
+ * run ends unsent and the planner escalates), never to fix. Any failed check stays ci_fail. tests/scheduler-merge-ci-cancel.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
