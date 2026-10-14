@@ -3,8 +3,8 @@
  * freshness read that found the branch up to date); the durable `merging` claim is awaited after that read, and main can
  * move meanwhile. Right after the claim the driver asks once more and compares: a moved, lagging or unreadable main ends
  * the claim with an explicit unsent receipt (MERGE_NOT_SENT — the merge call was never made). The ledger settles that receipt
- * as it does every pre-send refusal (scheduler-merge.ts advanceMergeRun), and whichever attempt comes next reads the head
- * as behind from `ready` and refreshes the branch first.
+ * on an auto card as an unsent cancellation without a freeze (scheduler-merge-freshness-unsent.ts; a manual card goes through
+ * manualUnsentAtSend), the planner requeues it, and the next attempt reads the head as behind from `ready` and refreshes it.
  *
  * This narrows the window; it does not close it. The REST merge only pins the PR head (`sha`), there is no compare-and-swap
  * on main, so main can still move between this read and GitHub applying the merge. That remainder is closed only by the
@@ -16,9 +16,8 @@
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MainFreshness, MergeExternal } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
+import { MAIN_MOVED_AT_CLAIM, MAIN_UNREAD_AT_CLAIM } from "./scheduler-merge-freshness-receipts.js";
 
-const MAIN_MOVED_AT_CLAIM = "领取 merging 期间 main 已变";
-const MAIN_UNREAD_AT_CLAIM = "领取 merging 后读不到 main";
 const SHA = /^[a-f0-9]{40}$/i;
 
 /** Why the main the CI ran against is no longer the main about to be merged into; null = same head, nothing behind. */
