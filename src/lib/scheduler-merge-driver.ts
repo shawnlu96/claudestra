@@ -15,6 +15,7 @@ import { mergeUnionStep } from "./scheduler-merge-union.js";
 import { countCarryStep } from "./review-count-carry.js";
 import { lightOnly } from "./ci-queue-full.js";
 import { mainMovedSinceCi } from "./scheduler-merge-freshness.js";
+import { withCiSelectedGate } from "./scheduler-ci-selected-gate.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -244,6 +245,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     run = await advance(run.phase, to, run.rev, receipt, mergeSha, newHead);
     return run;
   };
+  source = withCiSelectedGate(source, run); // merge-arch-CISEL2: a green released by the CI selected gate counts only under effective on
   const direct = source.direct?.(run) === true;
   const external = withCancelHandoff(watchUnknown(() => run, direct ? rereadUnknown(source, assertActive) : source, step, (pr) => { noChecks = pr.noChecks === true; }),
     foreign, MERGE_NOT_SENT, stopped); // CICANCEL1: a twice-cancelled CI goes to the PM through the same hook

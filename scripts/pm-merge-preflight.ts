@@ -16,6 +16,9 @@ import { reviewMainCarryProof, type MainCarryInput } from "../src/lib/review-mai
 import { ghJson, headChecks, type CheckState, type Run } from "../src/lib/review-main-carry-manual-ci.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 import { ciProofPreflight } from "../src/lib/scheduler-ci-proof-gate.js";
+import { type CiSelectedPort, ghCiSelectedPort } from "../src/lib/ci-selected-receipt.js";
+import { ciSelectedPreflight } from "../src/lib/scheduler-ci-selected-gate.js";
+import type { RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { ghCiProofPort } from "../src/lib/scheduler-ci-proof-port.js";
 import { parseRequiredChecks, readSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { resolveActor } from "../src/manager/ledger-identity.js";
@@ -166,6 +169,9 @@ export interface CliDeps {
   checksOf?: (project: string) => unknown;
   deployConfigured?: (project: string) => boolean;
   verify?: typeof verifyMergedCarry;
+  /** CISEL2 放行回执读口；缺省：真 CLI 用 gh，注入了 run 的测试不读（与改前一致） */
+  selected?: CiSelectedPort | null;
+  policy?: RecoveryPolicyPort;
 }
 const realLedger = (): Database | null => new LedgerReader().get();
 function realActor(): string | null {
@@ -244,6 +250,10 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
     const checks = requiredChecksFor((deps.ledger ?? realLedger)(), flags.task!, flags.pr!, deps.checksOf ?? ((p) => projectOf(p)?.requiredChecks));
     let head = flags["expected-head"]!;
     const actor = (deps.actor ?? realActor)(), now = deps.now ?? Date.now, tag = bools.has("merge") ? "合并未发出：" : "";
+    // CISEL2: a green the CI selected gate released counts only under effective on (lib/scheduler-ci-selected-gate.ts); no release = nothing added
+    const selected = deps.selected !== undefined ? deps.selected : deps.run ? null : ghCiSelectedPort(runBounded);
+    const selectedCheck = async (at: string) => !selected ? { ok: true as const, line: null } : ciSelectedPreflight({ repo: parsePr(flags.pr!).repo, head: at,
+      project: getTask((deps.ledger ?? realLedger)()!, flags.task!)?.project ?? "" }, selected, deps.policy);
     // the ledger gate, re-read from the read-only ledger right before each GitHub write (r2 merge-auth); it also names the reviewed head
     const authorize = (at: string): { ok: true; detail: string; base: string } | { ok: false; exit: 2; reason: string } => {
       if (!actor) return { ok: false, exit: 2, reason: "认不出你的身份（ledger 同一规则），不授权" };
@@ -269,6 +279,9 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
     const v = await preflight(input, run, deps.prove);
     if (!v.ok) return { exit: v.exit, lines: [...lines, `${tag}${v.reason}`] };
     lines.push(v.detail);
+    const sel = await selectedCheck(head);
+    if (!sel.ok) return { exit: 2, lines: [...lines, `${tag}${sel.reason}`] };
+    if (sel.line) lines.push(sel.line);
     if (!deps.run) lines.push(...await ciProofLines((deps.ledger ?? realLedger)(), flags.task!, flags.pr!, head, checks)); // GATE1: real CLI only (an injected runner has no GitHub)
     if (bools.has("update-branch") && !bools.has("merge")) return { exit: 0, lines: [...lines, "新 head 要先 `ledger main-carry` 写正式沿用，再跑本脚本"] };
     const auth = authorize(head);
@@ -277,6 +290,8 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
     if (!bools.has("merge")) return { exit: 0, lines };
     const again = await preflight(input, run, deps.prove); // the last read right before the irreversible call
     if (!again.ok) return { exit: again.exit, lines: [...lines, `合并未发出：${again.reason}`] };
+    const selAgain = await selectedCheck(head);
+    if (!selAgain.ok) return { exit: 2, lines: [...lines, `合并未发出：${selAgain.reason}`] };
     const last = authorize(head);
     if (!last.ok) return { exit: last.exit, lines: [...lines, `合并未发出：${last.reason}`] };
     if (last.base !== reviewed) return { exit: 2, lines: [...lines, `合并未发出：台账审查 head 变了（${last.base.slice(0, 12)}），证明作废`] };

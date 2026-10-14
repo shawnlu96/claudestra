@@ -49,3 +49,28 @@ Trains and main pushes never benefit: their responsibility is always `"all"`.
 `scripts/ci-proof-artifact.ts shard-facts` adds the shard's receipt to its facts (`selected`, only when there is one; facts are otherwise unchanged). The producer finds released shards the same way as the gate; each needs its receipt bound to this run, attempt, checkout and log, or there is no proof. With releases it writes the section `selected.json` (`version: "ci-selected-1"`, run, attempt, head, responsibility digest, each receipt with its digest) into the `ci-proof` artifact and appends its digest to the manifest: `policyVersion = "ci-full-1+ci-selected-1:<sha256>"`. The covered-universe evidence (`tests.selectedDigest = tests.universeDigest`) is the same as before. `report.json` gains `selected: { version, digest }` only in that case.
 
 `verifyCiProof` compares `policyVersion` exactly as before; only the suffixed form is read as a released proof, and then `CiRunEvidence.selected` must hash to the suffix, match the run, the attempt and the manifest's checkout, and each receipt must hash to its listed digest and be applied for that same run. A missing or mismatched section is an invalid proof. A proof with no release is unchanged. The port (`scheduler-ci-proof-port.ts`) does not read `selected.json` yet: until it does, a released proof never authorises a merge (CISEL2).
+
+## Ledger side (CISEL2)
+
+Code: `src/lib/ci-selected-receipt.ts` (the one read port), `src/lib/scheduler-ci-selected-gate.ts` (mode, decision, wiring, records). Tests: `tests/ci-selected-receipt.test.ts`, `tests/scheduler-ci-selected-gate.test.ts`, the CISEL2 block of `tests/pm-merge-preflight.test.ts`.
+
+**Read port.** `readCiSelectedReceipt(port, repo, head)` takes the CI workflow's newest `pull_request` run for the PR head and its latest attempt; `readCiSelectedRunReceipt(port, repo, runId, checkout)` reads a given run (the ci-full re-check). A run is *marked* when it lists an unexpired `ci-selected-verdict` artifact. The verdict must parse strictly (exact keys, version 1, `sha256:` responsibility digest, at least one shard receipt digest), name this run id and its latest attempt, and its checkout must be the PR head or GitHub's test merge whose second parent is the head (ci-full: exactly the request's merge commit). Otherwise the receipt is null. The answer is `{ allowed, outOfScope[], runUrl, … }`; `allowed` = the CI released under `on` with at least one out-of-scope failure. The scheduler's merge paths and `scripts/pm-merge-preflight.ts` read only through it.
+
+**Effective mode.** The stricter of the repository variable `CI_SELECTED_GATE` (unset / unknown = observe, unreadable = off) and the recovery key `ciSelectedGate` (absent = observe, unreadable policy = off); off is stricter than observe, observe than on.
+
+**Decision** (only for a snapshot whose checks are all green; a red or pending snapshot is never read):
+
+| marked | receipt | mode | result |
+|---|---|---|---|
+| no | – | any | unchanged (`plain`) |
+| yes | null or not allowed | any | red |
+| yes | allowed | on | accepted; repairs registered |
+| yes | allowed | observe | red + one `ci_selected_gate_observe` observation |
+| yes | allowed | off | red, nothing recorded |
+
+*Red* in the merge driver: `driveMerge` wraps `inspect` (one line) so the run's required checks, and checks linking to that run, read `fail`; the existing ci_fail path then bounces (CIF1 / CIF2 / CICANCEL1 unchanged). A failed GitHub read marks them `pending` for that tick (no merge, no bounce). Every inspect goes through it, so serial merges, `mergeDirect` and the final pre-claim read all see the same answer. In the ci-full re-check (one line in `fullRecheck`) a red is the existing `run_failed` (unknown for PM). The PM preflight refuses with exit 2. Trains are untouched (their responsibility is `"all"`), and nothing here reads or clears the main CI pause (ROLLBACK1 / `mainCiPause`).
+
+**Records** go through the merge tick's leased manager (`bindCiSelectedSink` in `scheduler-service.ts` mergeTick, like the other sinks); with no sink bound (tests, other processes) they are only logged, never thrown, and a failed write never changes the answer. Both are `recovery_observe` notes of mechanism `ciSelectedGate` on the card:
+
+- observe: `data.kind = "ci_selected_gate_observe"`, action key `observe.<run>.<attempt>.<head12>` (one per run + attempt + head), with head, run / attempt, run URL, the out-of-scope `{file, name}` list and `wouldAllow: true`.
+- on: one `data.kind = "ci_selected_repair"` fact per out-of-scope failure per release (`repair.<key>.<run>.<attempt>`, `key` = sha256 of file + test name). A failure with no notified fact in the last 24 hours is `notified: true` and goes into one `info`-level notice to the project PM with the run link (routine: PM pulls it, it never wakes them). Nothing is added to the CIF8 known-flaky list and no fix node is opened; PM decides.
