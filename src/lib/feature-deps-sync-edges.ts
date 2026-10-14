@@ -28,7 +28,7 @@ export function mergeFeatureDeps(edges: readonly FeatureDep[]): FeatureDep[] {
 export function computeErrorHandled(file: SyncFile, st: GroupState, error: unknown, mode: "observe" | "on", now: number): boolean {
   if (error instanceof TooManyFeatureDeps) {
     st.skipped = "too_many_edges"; st.skippedEdges = error.count;
-    noteOncePerDay(file, "#too_many_edges", now, `团队依赖：边数 ${error.count} 超过上限 ${FEATURE_DEPS_LIMIT}，本轮跳过（不是上传失败）`);
+    noteOncePerDay(file, "#too_many_edges", now, `团队依赖：合并后 ${error.count} 条边超过上限 ${FEATURE_DEPS_LIMIT}，本轮不发送；原因是边太多，不是网络或中心故障`);
     return true;
   }
   if (mode !== "observe") return false;

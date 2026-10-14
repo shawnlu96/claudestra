@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ import type { MirrorEntry } from "../src/lib/shared-ledger-projector.js";
 import type { FeatureDepsUpload } from "../src/lib/shared-ledger-contract-feature-deps.js";
 import { SharedLedgerRemoteError } from "../src/lib/shared-ledger-client.js";
 import { serviceCredential } from "./shared-ledger-mirror-fixture.test.js";
+import { mergeFeatureDeps, TooManyFeatureDeps } from "../src/lib/feature-deps-sync-edges.js";
 
 async function world(mode: "off" | "observe" | "on" = "observe") {
   const dir = mkdtempSync(join(tmpdir(), "feature-deps-")), db = openLedger(":memory:"), ctx = { actor: "owner", now: 1 };
@@ -48,7 +49,7 @@ async function world(mode: "off" | "observe" | "on" = "observe") {
     } }) });
   const state = () => JSON.parse(readFileSync(join(dir, "feature-deps-sync.json"), "utf8"));
   const group = () => Object.values(state().groups)[0] as any;
-  return { dir, db, fs, entries, uploads, pass, policy, group, state,
+  return { dir, db, fs, entries, uploads, pass, policy, group, state, dep,
     advance: (ms: number) => { now += ms; }, fail: (e: Error | null) => { failure = e; },
     close: () => { closeLedger(":memory:"); rmSync(dir, { recursive: true, force: true }); } };
 }
@@ -149,5 +150,90 @@ test("[验收线 2] corrupt state is preserved and isolated from mirror projecti
   try {
     const path = join(w.dir, "feature-deps-sync.json"); writeFileSync(path, "broken");
     await w.pass(); expect(w.uploads).toHaveLength(0); expect(readFileSync(path, "utf8")).toBe("broken");
+  } finally { w.close(); }
+});
+
+test("[验收线 1] home mirrors all off: on clears once with an empty upload then forgets the group", async () => {
+  const w = await world("on");
+  try {
+    await w.pass(); expect(w.uploads).toHaveLength(1);
+    for (const [, e] of w.entries) e.enabled = false;
+    w.advance(1000); await w.pass([]);
+    expect(w.uploads).toHaveLength(2); expect(w.uploads[1]).toEqual({ schemaVersion: 1, teamId: "team-a", sourceInstanceId: "home-a", edges: [] });
+    expect(w.state().groups).toEqual({});
+    w.advance(6 * 3600_000); await w.pass([]); expect(w.uploads).toHaveLength(2);
+  } finally { w.close(); }
+});
+test("[验收线 1] home mirrors all off under observe: no upload, the clear is recorded once", async () => {
+  const w = await world("on");
+  try {
+    await w.pass(); w.policy("observe");
+    for (const [, e] of w.entries) e.enabled = false;
+    w.advance(1000); await w.pass([]);
+    const at = w.group().clearObservedAt;
+    expect(at).toBeGreaterThan(0); expect(w.uploads).toHaveLength(1);
+    w.advance(6 * 3600_000); await w.pass([]);
+    expect(w.group().clearObservedAt).toBe(at); expect(w.uploads).toHaveLength(1);
+    w.policy("off"); const before = readFileSync(join(w.dir, "feature-deps-sync.json"), "utf8");
+    w.advance(1000); await w.pass([]); expect(readFileSync(join(w.dir, "feature-deps-sync.json"), "utf8")).toBe(before);
+  } finally { w.close(); }
+});
+test("[验收线 2] a group merely missing from live (not due or truncated) is neither cleared nor sent empty", async () => {
+  const w = await world("on");
+  try {
+    await w.pass(); expect(w.uploads).toHaveLength(1);
+    const other: [string, MirrorEntry] = ["other-team-feature", { ...w.entries[0]![1], teamId: "team-b", sourceInstanceId: "other-home" }];
+    w.advance(6 * 3600_000); await w.pass([]); await w.pass([other]);
+    expect(w.uploads).toHaveLength(1); expect(Object.keys(w.state().groups)).toHaveLength(1);
+    expect(w.group().clearObservedAt).toBeUndefined();
+  } finally { w.close(); }
+});
+test("[验收线 3] two local features on one center feature merge into one edge and upload", async () => {
+  const w = await world("on");
+  try {
+    const [a, b, , d] = w.fs as [string, string, string, string];
+    w.entries.push([d, { ...w.entries[0]![1], centerFeatureId: "center-feature-0" }]);
+    w.dep(d, b, "second local edge onto the same center pair");
+    w.db.prepare("UPDATE features SET status='done' WHERE id=?").run(d);
+    await w.pass();
+    expect(w.uploads).toHaveLength(1); expect(w.group().failures).toBe(0);
+    const merged = w.uploads[0]!.edges.filter((e) => e.from === "center-feature-0" && e.to === "center-feature-1" && e.kind === "declared");
+    expect(merged).toEqual([{ projectId: "shared-project", from: "center-feature-0", to: "center-feature-1", kind: "declared", satisfied: false, count: 2 }]);
+    expect(a).not.toBe(d);
+  } finally { w.close(); }
+});
+test("[验收线 3] merge sums counts, satisfied only when all are, drops self loops; over the cap throws a skip", () => {
+  const e = (satisfied: boolean, count = 1, to = "y") => ({ projectId: "p", from: "x", to, kind: "task" as const, satisfied, count });
+  expect(mergeFeatureDeps([e(true, 2), e(true, 3)])).toEqual([e(true, 5)]);
+  expect(mergeFeatureDeps([e(true), e(false)])).toEqual([e(false, 2)]);
+  expect(mergeFeatureDeps([e(true, 1, "x")])).toEqual([]);
+  const many = Array.from({ length: 2001 }, (_, i) => e(true, 1, `y${i}`));
+  expect(mergeFeatureDeps(many.slice(0, 2000))).toHaveLength(2000);
+  expect(() => mergeFeatureDeps(many)).toThrow(TooManyFeatureDeps);
+});
+test("[验收线 3] more than 2000 merged edges: no upload, too_many_edges recorded, no backoff, no upload-failure log", async () => {
+  const w = await world("on"), warn = spyOn(console, "warn");
+  try {
+    const extra = Array.from({ length: 65 }, (_, i) => createFeature(w.db, { actor: "owner", now: 1 }, { project: "p", slug: `bulk-${i}`, title: `bulk-${i}` }).row.id);
+    extra.forEach((id, i) => w.entries.push([id, { ...w.entries[0]![1], centerFeatureId: `bulk-${i}` }]));
+    // Acyclic on purpose (i < j): 65 * 64 / 2 = 2080 declared edges, the board rejects cycles.
+    extra.forEach((from, i) => extra.slice(i + 1).forEach((to) => w.dep(from, to, "bulk")));
+    await w.pass();
+    expect(w.uploads).toHaveLength(0);
+    expect(w.group().skipped).toBe("too_many_edges"); expect(w.group().skippedEdges).toBeGreaterThan(2000);
+    expect(w.group().failures).toBe(0); expect(w.group().nextAttemptAt).toBe(0);
+    const logs = warn.mock.calls.map((c) => String(c[0]));
+    expect(logs.some((l) => l.includes("上传失败"))).toBe(false); expect(logs.filter((l) => l.includes("超过上限"))).toHaveLength(1);
+    w.advance(300_000); await w.pass(); expect(warn.mock.calls.filter((c) => String(c[0]).includes("超过上限"))).toHaveLength(1);
+  } finally { warn.mockRestore(); w.close(); }
+});
+test("[验收线 4] observe compute errors keep failures and backoff untouched; on still backs off", async () => {
+  const w = await world("observe");
+  try {
+    // Stands in for a ledger read failure inside compute (the board itself tolerates missing tables).
+    spyOn(w.db, "transaction").mockImplementation(() => { throw new Error("ledger read failed"); });
+    await w.pass(); expect(w.group().failures).toBe(0); expect(w.group().nextAttemptAt).toBe(0);
+    w.policy("on"); w.advance(300_000); await w.pass();
+    expect(w.group().failures).toBe(1); expect(w.group().nextAttemptAt).toBeGreaterThan(0); expect(w.uploads).toHaveLength(0);
   } finally { w.close(); }
 });
