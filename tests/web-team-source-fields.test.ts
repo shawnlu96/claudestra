@@ -5,7 +5,7 @@
  */
 import { expect, test } from "bun:test";
 import { teamOverview, teamTaskDetail } from "@/features/collab/team-source-adapter";
-import { sharedCollabSource } from "@/features/collab/team-source-shared";
+import { DETAIL_BEHIND_MS, POLL_MS, sharedCollabSource } from "@/features/collab/team-source-shared";
 import { parseStepId, teamStepLine, UNKNOWN_EXECUTOR } from "@/features/collab/team-source-steps";
 import { stepLineView } from "@/features/collab/collab-step-line-model";
 import { homeView, lineOf, teamNote } from "@/features/collab/collab-model";
@@ -130,15 +130,15 @@ test("复现测试：新列表加旧详情缓存：读新详情失败回退旧�
       fresh.feature.projection = { ...p, observedAt: now };
       const src2 = memSource(() => list, () => { if (fail) throw new Error("synthetic detail failure"); return fresh; });
       await src2.overview(signal);
-      tick(5_000);
+      tick(POLL_MS);
       fail = true;
-      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 1, observedAt: now + 5_000 } }] };
+      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 1, observedAt: now + POLL_MS } }] };
       ov = await src2.overview(signal);
-      // 落后 5 秒是有意的重拉间隔，不算过期（N8A8B）
+      // 落后一轮轮询是有意的重拉间隔，不算过期（N8A8B）
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("fresh");
-      // 落后从第一次看到列表领先（+5 秒那轮）算起，超过 65 秒才算（N8A8G）
-      tick(65_001);
-      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 2, observedAt: now + 70_001 } }] };
+      // 落后从第一次看到列表领先（+POLL_MS 那轮）算起，超过 DETAIL_BEHIND_MS 才算（N8A8G）
+      tick(DETAIL_BEHIND_MS + 1);
+      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 2, observedAt: now + POLL_MS + DETAIL_BEHIND_MS + 1 } }] };
       ov = await src2.overview(signal);
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("stale");
     } finally { console.warn = warn; }

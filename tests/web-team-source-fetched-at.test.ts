@@ -14,7 +14,7 @@ import { SharedLedgerSession, type FeatureDetail, type FeatureList, type Transpo
 const PUSH_MS = 10_000, PUSH_PER_ROUND = 12;
 
 /** 中心：每 10 秒一轮推送，每轮按最久没推的先推至多 12 个；列表 / 详情读到的都是读那一刻中心的投影 */
-function center() {
+function center(pushMs = PUSH_MS) {
   const fx = generateTeamFixture({ features: 26 });
   const t0 = fx.now;
   let t = t0, seq = 1, nextPush = t0, fail: ((id: string) => Error | null) | null = null, pushing = true;
@@ -53,17 +53,19 @@ function center() {
     /** 前进一轮列表轮询；到点的推送轮先推 */
     advance: () => {
       t += POLL_MS;
-      while (pushing && nextPush <= t) { pushRound(); nextPush += PUSH_MS; serverSeq++; }
+      while (pushing && nextPush <= t) { pushRound(); nextPush += pushMs; serverSeq++; }
     },
     /** 主场停推（列表也不再前进） */
     stop: () => { pushing = false; },
     lagOf: (id: string) => t - proj.get(id)!.observedAt,
     fail: (f: ((id: string) => Error | null) | null) => { fail = f; } };
 }
+/** N8A8C-1 的推送节奏跟着列表轮询走：原模拟是 5 秒轮询 / 10 秒推送，推送间隔 = 两轮轮询（CBUDGET2 起轮询 15 秒） */
+const RHYTHM_PUSH_MS = 2 * POLL_MS;
 const staleCount = (m: readonly { mirror: string | null }[]) => m.filter((x) => x.mirror === "stale").length;
 
-test("N8A8C-1 中心每 10 秒推至多 12 个、详情 observedAt 落后 0–30 秒，列表 5 秒 / 详情 60 秒 / 每轮上限 8，10 分钟内概览过期计数始终 0", async () => {
-  const c = center();
+test("N8A8C-1 中心每两轮轮询推至多 12 个、详情 observedAt 落后至多三个推送周期，列表 POLL_MS / 详情 60 秒 / 每轮上限 8，10 分钟内概览过期计数始终 0", async () => {
+  const c = center(RHYTHM_PUSH_MS);
   const counts: { t: number; n: number; own: number }[] = [];
   let maxLag = 0;
   for (;;) {
@@ -73,16 +75,16 @@ test("N8A8C-1 中心每 10 秒推至多 12 个、详情 observedAt 落后 0–30
     if (c.t >= 10 * 60_000) break;
     c.advance();
   }
-  expect(counts.length).toBe(121);
-  // 推送节奏确实让 observedAt 落后到 20 秒以上（不是每轮全推的理想中心）
-  expect(maxLag).toBeGreaterThanOrEqual(20_000);
-  expect(maxLag).toBeLessThanOrEqual(30_000);
+  expect(counts.length).toBe(10 * 60_000 / POLL_MS + 1);
+  // 推送节奏确实让 observedAt 落后到两个推送周期以上（不是每轮全推的理想中心）
+  expect(maxLag).toBeGreaterThanOrEqual(2 * RHYTHM_PUSH_MS);
+  expect(maxLag).toBeLessThanOrEqual(3 * RHYTHM_PUSH_MS);
   // 适配层重判与数据源自己转好的那份（按注入时钟）一致，都没有过期
   expect(counts.filter((x) => x.n > 0 || x.own > 0)).toEqual([]);
 });
 
 test("N8A8C-1 旧口径（按详情内容 observedAt 比列表）在同样节奏下会报过期：确认模拟复现了 PAGEOK r6", async () => {
-  const c = center();
+  const c = center(RHYTHM_PUSH_MS);
   let worst = 0;
   for (;;) {
     await c.round();
