@@ -54,8 +54,9 @@ interface ClaudeGlobals {
 export async function handleAgentsList(url: URL, principal: Principal, io: AgentsListIo): Promise<Response> {
   try {
     const agents = await listAgentsForPrincipal(url, principal, io);
-    // PEERINFO1：只有 peer 凭据、且开关 on 才多一个 instance；owner / web / 其他调用方的回包逐字不变
-    const instance = principal.peer ? (io.peerInstance ?? peerInstanceBlock)(principal.peer) : undefined;
+    // PEERINFO1：只有已配对 peer 的凭据、且开关 on 才多一个 instance；owner / web / 未兑换邀请（invite:）等其他调用方的回包逐字不变
+    const paired = !!principal.peer && !principal.peer.startsWith("invite:");
+    const instance = paired ? (io.peerInstance ?? peerInstanceBlock)(principal.peer!) : undefined;
     return apiJson(200, instance ? { ok: true, agents, instance } : { ok: true, agents });
   } catch (e) {
     return apiErrorResponse(e); // manager list 失败 → 503 可重试（peer 不再看到 200 + 空列表），其余 500

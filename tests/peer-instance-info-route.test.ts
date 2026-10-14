@@ -7,6 +7,8 @@ import type { Principal } from "../src/lib/principals.ts";
 
 const INFO: PeerInstanceInfo = { version: "2.33.0", commit: "d9427176deff576232a2b47e0c0dc3a6bb0afd31", channel: "release", switches: { lendUiUpload: "off" } };
 const PEER = { id: "token:tok_p", role: "external", name: "peer-x", agents: ["*"], peer: "peer-x", createdAt: "" } as Principal;
+/** 未兑换的邀请 token：兑换前允许只读 GET 列表（peer-signature / peer-trust），但还不是已配对 peer */
+const INVITE = { id: "token:tok_i", role: "external", name: "invite", agents: [], peer: "invite:pending", createdAt: "" } as Principal;
 const OWNER = { id: "token:tok_o", role: "owner", name: "owner", agents: ["*"], createdAt: "" } as Principal;
 const WEB = { id: "token:tok_w", role: "external", name: "web", agents: ["*"], createdAt: "" } as Principal;
 /** 改前的回包：manager list 是空表时 handleAgentsList 回的正文 */
@@ -43,4 +45,10 @@ test("peer 凭据 + off / observe：回包与改前逐字相同；observe 只多
   expect(logs.length).toBe(1);
   expect(logs[0]).toContain("version, commit, channel, switches.lendUiUpload");
   expect(logs[0]).not.toContain(INFO.commit!.slice(0, 7));
+});
+
+test("未兑换邀请凭据（invite:）：即使开关 on，回包与改前逐字相同，组装与日志都不跑", async () => {
+  for (const m of ["on", "observe", "off"] as const) expect(await get(INVITE, m)).toBe(BEFORE);
+  expect(calls).toBe(0);
+  expect(logs).toEqual([]);
 });
