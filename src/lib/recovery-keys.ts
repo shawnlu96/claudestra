@@ -71,6 +71,7 @@ export const RECOVERY_KEYS = [
   "effCountRefresh",
   "wakeStopped",
   "lendUsageReport",
+  "lendUiUpload",
   "convergenceStall",
   "mergePipe",
   "ciLogPerJob",
