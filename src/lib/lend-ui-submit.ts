@@ -67,7 +67,7 @@ function privacyHit(texts: string[], f: PrivacyFacts): string | null {
 }
 
 /** 去掉 iCCP 块（stripImageMeta 白名单保留它；B 侧另删）：输入已是 checkShotPng 走通过的 PNG */
-function dropIccp(b: Uint8Array): Uint8Array {
+export function dropIccp(b: Uint8Array): Uint8Array {
   const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
   const parts: Uint8Array[] = [b.subarray(0, 8)];
   for (let at = 8; at + 12 <= b.length;) {

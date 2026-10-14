@@ -43,7 +43,7 @@ import { readSandboxOwner } from "./sandbox-order-owner.js";
 import { claimCaps, deliveredActual, rememberNoCaps } from "./role-model-settings-lend.js";
 import { lendUsageFor } from "./lend-usage-report.js";
 import { suggestFamilyProblem } from "./role-model-settings-wire.js";
-import { sendUiShots } from "./lend-ui-send.js";
+import { sendUiShots, type UiShotBudget } from "./lend-ui-send.js";
 import type { UiEvidence } from "./order-deliver-ui.js";
 
 export const BEAT_MS = 60_000;
@@ -124,6 +124,8 @@ export interface LendDeps {
    * 不设（测试的假依赖、老接线）= 开关 off，不上传、交付不带清单
    */
   shot?: LendCall<"shot">;
+  /** 截图上传的本轮预算（lend-loop.ts roundDeps 每轮给一份，同一 peer 的各单共用）；不设 = 每次 publishWork 各算各的 */
+  shotBudget?: UiShotBudget;
   /** true = 这轮先不发这张单的结束通知（不联网阶段、这个 peer 本轮出站已失败、proto 2 的收回停单改在 beat 里带 ended）：不算发过，标记留着 */
   settleHold?(row: LendRow): boolean;
 }

@@ -4,8 +4,9 @@
  * 开关是恢复键 lendUiUpload（lend-key-mode.ts，缺省 off、只认显式值）：off / 端口不在 / work 里没有 ui = 什么都不做，交付和改动前逐字相同；
  * observe = 不上传，lend_meta 记一条 uiShotsObserved:<单号>（同一个 head 只记一次），交付不带清单；on = 上传、带清单。
  * 进度记在 lend_meta lend-ui-up:<单号>（head 变了重来，已成的槽位不重传）。全有或全无：一张永久失败就不带清单交付（A 已收下的留着、不登记）；
- * 暂时失败本轮不落正文、下一轮接着传，从第一次上传起满 PUBLISH_GIVE_UP_MS 还不成就不带清单交付。每轮每单开始上传 20 秒后不再起新的上传（至少一张）。
- * 每张之前先过守卫（只核不记）、再重读拷贝核 sha256；A 回的 sha256 / bytes / 宽高要和本地拷贝逐项相等（端到端摘要核对）。
+ * 暂时失败本轮不落正文、下一轮接着传，从第一次上传起满 PUBLISH_GIVE_UP_MS 还不成就不带清单交付。
+ * 预算按 peer 按轮算（uiShotBudget，lend-loop.ts roundDeps 每轮给一份，同一 peer 的各单共用）：这个 peer 本轮第一张开始 20 秒后不再起新的上传（至少一张）。
+ * 每张之前先过守卫（只核不记）、再重读拷贝核 sha256；拷贝名就是期望的 sha256，shot 子进程只发它自己读到、核过等于这个摘要的那份字节；A 回的 sha256 / bytes / 宽高要和本地拷贝逐项相等（端到端摘要核对）。
  * 日志只写 code，不写本机路径（心跳摘要会发给 A）。tests/lend-ui-send.test.ts。
  */
 import { createHash } from "node:crypto";
@@ -30,11 +31,25 @@ export const uiShotOrder = (a: Pick<UiShot, "view" | "size" | "phase">, b: Pick<
   cmp(a.view, b.view) || cmp(a.size, b.size) || cmp(a.phase === "before" ? "0" : "1", b.phase === "before" ? "0" : "1");
 export const sha256Hex = (b: Uint8Array): string => createHash("sha256").update(b).digest("hex");
 
-/** 每轮每单的上传预算：开始上传超过这么久不再起新的一张 */
+/** 每个 peer 每轮的上传预算：这个 peer 本轮第一张开始超过这么久不再起新的一张 */
 const UI_ROUND_BUDGET_MS = 20_000;
+
+/** 一轮的上传预算（各单共用）：take = 这个 peer 现在还能不能起一张新的上传；本轮第一张总能起 */
+export interface UiShotBudget { take(peer: string, now: number): boolean }
+export function uiShotBudget(): UiShotBudget {
+  const start = new Map<string, number>();
+  return {
+    take(peer, now) {
+      const s = start.get(peer);
+      if (s === undefined) return (start.set(peer, now), true);
+      return now - s < UI_ROUND_BUDGET_MS;
+    },
+  };
+}
 const REF = /^s\d{2}\.png$/;
 const HEX64 = /^[0-9a-f]{64}$/;
-const PERMANENT = new Set([400, 401, 403, 404, 409, 413]);
+/** 0 = shot 子进程本地就拒了（拷贝摘要不符 / 没去干净元数据），请求没发出去 */
+const PERMANENT = new Set([0, 400, 401, 403, 404, 409, 413]);
 const CODE = /^[a-z][a-z0-9_]{0,39}$/;
 
 /** 单测换开关（生产不调，读本机恢复策略） */
@@ -46,7 +61,7 @@ interface Progress { head: string; since: number | null; done: Record<string, Do
 
 export type UiSend = { kind: "none" } | { kind: "ok"; evidence: UiEvidence } | { kind: "wait" } | { kind: "halt"; denied: PublishDenial };
 type Guard = { check(effect: "payload"): Promise<PublishDenial | null> };
-type SendDeps = Pick<LendDeps, "db" | "now" | "log" | "shot">;
+type SendDeps = Pick<LendDeps, "db" | "now" | "log" | "shot" | "shotBudget">;
 
 const upKey = (orderId: string): string => `lend-ui-up:${orderId}`;
 export const uiObservedKey = (orderId: string): string => `uiShotsObserved:${orderId}`;
@@ -69,7 +84,7 @@ function observe(d: SendDeps, row: LendRow, head: string, ui: WorkUi): void {
 
 type Answer = { ok: true; done: Done } | { ok: false; permanent: boolean; code: string };
 
-/** A 对一张图的回答：200 严格解析并逐项对本地拷贝；404 / 403 / 400 / 401 / 409 / 413 永久；其余（503、正文坏了）暂时 */
+/** A 对一张图的回答：200 严格解析并逐项对本地拷贝；0（本地拒）/ 404 / 403 / 400 / 401 / 409 / 413 永久；其余（503、正文坏了）暂时 */
 function classifyShotAnswer(res: { status: number; body: unknown }, local: WorkUiShot): Answer {
   const b = res.body as Record<string, unknown> | null;
   if (res.status === 200) {
@@ -113,12 +128,11 @@ export async function sendUiShots(row: LendRow, d: SendDeps, g: Guard): Promise<
   };
   if (p.failed) return { kind: "none" };
   const shots = [...ui.shots].sort(uiShotOrder);
-  const start = d.now();
-  let sent = 0;
+  const budget = d.shotBudget ?? uiShotBudget(); // 不经 lend 循环（没有本轮共用的一份）= 只管这一次调用
   for (const s of shots) {
     if (p.done[slotKey(s)]) continue;
     if (p.since !== null && d.now() - p.since >= PUBLISH_GIVE_UP_MS) return give("give_up");
-    if (sent > 0 && d.now() - start >= UI_ROUND_BUDGET_MS) return { kind: "wait" };
+    if (!budget.take(row.peer, d.now())) return { kind: "wait" };
     const denied = await g.check("payload");
     if (denied) return { kind: "halt", denied };
     const path = uiCopyPath(row.dir ?? "", s.sha256);
@@ -126,7 +140,6 @@ export async function sendUiShots(row: LendRow, d: SendDeps, g: Guard): Promise<
     if (!copy?.ok || sha256Hex(copy.bytes) !== s.sha256 || copy.bytes.length !== s.bytes) return give("local_changed");
     if (p.since === null) p.since = d.now();
     saveProgress(d, row.orderId, p);
-    sent++;
     let a: Answer;
     try {
       const meta = { orderId: row.orderId, gen: row.leaseGen, head: work.head, view: s.view, size: s.size, phase: s.phase };

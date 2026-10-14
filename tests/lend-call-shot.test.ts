@@ -4,6 +4,7 @@
  * 其他 op 的形状与行为不变。出站换成假 fetch（不连网），peers 记录用假的，LEND_ROOT 用临时目录。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,12 +61,13 @@ async function run(args: string[], o: LendCallIo = io()): Promise<{ out: Record<
   try { await cmdLendCall(args, o); } finally { console.log = log; }
   return { out: JSON.parse(lines[0]!), raw: lines.join("\n") };
 }
+/** 拷贝按 lend submit 的样子起名：<去过元数据的字节的 sha256>.png */
+const put = (b: Buffer, name = `${createHash("sha256").update(b).digest("hex")}.png`): string => { const f = join(copy, name); writeFileSync(f, b); return f; };
 const shot = (file: string, meta: unknown = META) => ["mate", "shot", "--meta", typeof meta === "string" ? meta : JSON.stringify(meta), "--png-file", file];
 
 describe("[验收线 4] lend call shot", () => {
   test("合法：子进程自己读拷贝、用 lendShotBody 拼请求体（A 的解析器认），E2E 出站带 Bearer；argv 与输出里都没有 token", async () => {
-    const file = join(copy, "a.png");
-    writeFileSync(file, png("before"));
+    const file = put(png("before"));
     const argv = shotArgv("mate", { meta: META, file });
     expect(argv).toEqual(["lend", "call", ...shot(file)]);
     const { out, raw } = await run(argv.slice(2));
@@ -80,8 +82,7 @@ describe("[验收线 4] lend call shot", () => {
   });
 
   test("不是调度服务环境 → forbidden，不发请求", async () => {
-    const file = join(copy, "a.png");
-    writeFileSync(file, png("b"));
+    const file = put(png("b"));
     for (const env of [{ CLAUDESTRA_SCHEDULER_SERVICE: "" }, { DISCORD_CHANNEL_ID: "123" }, { CLAUDESTRA_LEND_WORKER: "1" }]) {
       process.env.CLAUDESTRA_SCHEDULER_SERVICE = "1";
       delete process.env.DISCORD_CHANNEL_ID;
@@ -114,9 +115,27 @@ describe("[验收线 4] lend call shot", () => {
     expect(sent).toHaveLength(0);
   });
 
+  test("子进程只发自己读到、摘要等于文件名并已去干净元数据的字节；核过之后被换掉 → 本地拒，不发请求（审查 upload-reread-privacy-race）", async () => {
+    const clean = png("a");
+    const name = `${createHash("sha256").update(clean).digest("hex")}.png`;
+    const iend = clean.length - 12;
+    const priv = Buffer.concat([clean.subarray(0, iend), chunk("tEXt", Buffer.from("Comment\0/Users/he/secret")), clean.subarray(iend)]);
+    const swapped = put(priv, name); // 父进程核过原拷贝后，worker 把同名文件换成带私有元数据的 PNG
+    const r1 = await run(shot(swapped));
+    expect(r1.out).toMatchObject({ ok: false, code: "local_changed" });
+    expect(r1.raw).not.toContain("secret");
+    const iccp = Buffer.concat([clean.subarray(0, 33), chunk("iCCP", Buffer.from("MacBook Display\0\0x")), clean.subarray(33)]);
+    for (const dirty of [priv, iccp]) expect((await run(shot(put(dirty)))).out).toMatchObject({ ok: false, code: "invalid", error: "截图拷贝没去干净元数据" });
+    expect((await run(shot(put(clean, "a.png")))).out).toMatchObject({ ok: false, code: "invalid" }); // 不是 <sha256>.png
+    expect(sent).toHaveLength(0);
+    put(clean, name);
+    expect((await run(shot(swapped))).out).toMatchObject({ ok: true, status: 200 });
+    const got = parseLendShot(JSON.parse(String(sent[0]!.init.body)));
+    expect(got.ok && Buffer.from(got.value.png).equals(clean)).toBe(true);
+  });
+
   test("meta 多键 / 少键 / 字段不对 / 超过 1 KiB → 拒；拼出的请求体超过上限 → 拒；都不发请求", async () => {
-    const file = join(copy, "a.png");
-    writeFileSync(file, png("a"));
+    const file = put(png("a"));
     const { phase: _p, ...missing } = META;
     for (const meta of [{ ...META, png: "x" }, missing, { ...META, gen: 0 }, { ...META, head: "abc" }, { ...META, phase: "during" }, "不是 JSON",
       { ...META, view: "v".repeat(1100) }]) {
@@ -129,8 +148,7 @@ describe("[验收线 4] lend call shot", () => {
   });
 
   test("参数形状不对 → usage；对方回 4xx 照样 ok:true 带状态码；抛错 = transport", async () => {
-    const file = join(copy, "a.png");
-    writeFileSync(file, png("a"));
+    const file = put(png("a"));
     for (const args of [["mate", "shot", "--body", "{}"], ["mate", "shot", "--meta", JSON.stringify(META)], [...shot(file), "extra"], ["mate", "shot", "--png-file", file, "--meta", "{}"]]) {
       expect((await run(args)).out.error).toContain("usage");
     }

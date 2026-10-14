@@ -6,13 +6,17 @@
  * 输出 {ok:true, status, body}：只要请求到了对方并拿回响应就是 ok:true，对方的拒绝在 body 里；发不出去 / 不知道发没发出去是 ok:false。
  * LENDUI2：`lend call <peer> shot --meta '<json>' --png-file <path>` 传一张交付截图（lib/lend-ui-send.ts 经 lend-deps.ts 调）。图不进命令行：
  * 子进程自己读 LEND_ROOT/work 下的拷贝（O_NOFOLLOW、普通文件、nlink 1、≤ 1 MiB），用 lendShotBody 拼请求体；token 照旧只从 peers.json 读。
+ * 拷贝名是 lend submit 核过的 `<sha256>.png`：读到的字节摘要必须等于文件名、并且已去过元数据（checkShotPng + 去 iCCP 后不变），
+ * 否则 local_changed / invalid、不发请求。发出去的就是这一次读到并核过的字节（父进程核过之后被换掉也发不出去）。
  * tests/lend-call-shot.test.ts。
  */
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { basename, join } from "node:path";
 import { LEND_ROOT } from "../lib/lend-clone.js";
 import { proxyVarsIn, peerLendProblem, type LendAnyOp } from "../lib/lend-remote.js";
 import { readBytesIn } from "../lib/lend-submit.js";
-import { LEND_SHOT_LIMITS, lendShotBody, type LendShotSlot } from "../lib/lend-ui-wire.js";
+import { checkShotPng, LEND_SHOT_LIMITS, lendShotBody, type LendShotSlot } from "../lib/lend-ui-wire.js";
+import { dropIccp } from "../lib/lend-ui-submit.js";
 import { fields, guard, ORDER_ID, pattern, pick, SHA40, whole } from "../lib/lend-wire-v2-schema.js";
 import { SIZE, VIEW, type UiPhase } from "../lib/order-deliver-ui.js";
 import type { HttpPeer } from "../lib/peers.js";
@@ -27,6 +31,7 @@ const MAX_BODY = 96 * 1024;
 const META_MAX = 1024;
 const SHOT_FETCH_MS = 40_000;
 const PHASES: readonly UiPhase[] = ["before", "after"];
+const COPY_NAME = /^([0-9a-f]{64})\.png$/;
 
 /** 只给单测换掉出站与目录；生产不传 */
 export interface LendCallIo {
@@ -90,6 +95,11 @@ async function shotCall(args: string[], io: LendCallIo): Promise<void> {
   if (!meta.ok) return output({ ok: false, code: "invalid", error: meta.error });
   const png = readBytesIn(join(io.lendRoot ?? LEND_ROOT, "work"), file, { max: LEND_SHOT_LIMITS.png, what: "截图拷贝", field: "--png-file" });
   if (!png.ok) return output({ ok: false, code: "invalid", error: png.error });
+  const want = COPY_NAME.exec(basename(file))?.[1];
+  if (!want) return output({ ok: false, code: "invalid", error: "--png-file 要是 <sha256>.png 的截图拷贝" });
+  if (createHash("sha256").update(png.bytes).digest("hex") !== want) return output({ ok: false, code: "local_changed", error: "截图拷贝的摘要和文件名不符" });
+  const clean = checkShotPng(png.bytes);
+  if (!clean.ok || Buffer.compare(dropIccp(clean.data), png.bytes) !== 0) return output({ ok: false, code: "invalid", error: "截图拷贝没去干净元数据" });
   const body = lendShotBody(meta.value, png.bytes);
   const max = io.bodyMax ?? LEND_SHOT_LIMITS.body;
   if (Buffer.byteLength(body) > max) return output({ ok: false, code: "invalid", error: `请求体超过 ${max} 字节` });

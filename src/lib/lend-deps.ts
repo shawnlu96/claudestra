@@ -197,9 +197,13 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     if (r.ok !== true) throw new Error(String(r.error ?? "manager lend call 失败"));
     return { status: Number(r.status), body: r.body };
   };
-  /** 截图：meta 进参数、图只给拷贝路径（子进程自己读），token 由子进程从 peers.json 读，不进参数 */
+  /**
+   * 截图：meta 进参数、图只给拷贝路径（子进程自己读、核摘要），token 由子进程从 peers.json 读，不进参数。
+   * 子进程在本地就拒了（拷贝被换、没去干净元数据）= 什么都没发：回 status 0 带 code（lend-ui-send.ts 当永久失败），不算这个 peer 出站失败
+   */
   const shot = async (peer: string, _op: "shot", body: Record<string, unknown>) => {
     const r = await shotOut(...shotArgv(peer, body));
+    if (r.ok !== true && (r.code === "local_changed" || r.code === "invalid")) return { status: 0, body: { ok: false, code: r.code } };
     if (r.ok !== true) throw new Error(String(r.code ?? "manager lend call shot 失败"));
     return { status: Number(r.status), body: r.body };
   };

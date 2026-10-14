@@ -23,7 +23,7 @@ import { lendTick, type LoopDeps } from "../src/lib/lend-loop.js";
 import type { LendCall } from "../src/lib/lend-remote.js";
 import { lendUiPort } from "../src/lib/lend-ui-deliver.js";
 import { PUBLISH_GIVE_UP_MS } from "../src/lib/lend-pr-takeover-retry.js";
-import { uiCopyPath, uiObservedKey, useUiUploadMode } from "../src/lib/lend-ui-send.js";
+import { sendUiShots, uiCopyPath, uiObservedKey, uiShotBudget, useUiUploadMode } from "../src/lib/lend-ui-send.js";
 import { prepareUiShots, storeUiCopies } from "../src/lib/lend-ui-submit.js";
 import { lendShotBody } from "../src/lib/lend-ui-wire.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
@@ -274,8 +274,8 @@ function fakeA(ui: () => WorkUi | undefined, script: (n: number) => { status: nu
 }
 
 describe("[验收线 3] 传输分类与续传", () => {
-  test("404 / 403 / 400 / 401 / 409 / 413 → 当轮不带清单交付", async () => {
-    for (const status of [404, 403, 400, 401, 409, 413]) {
+  test("404 / 403 / 400 / 401 / 409 / 413（及 0 = shot 子进程本地拒、没发出去）→ 当轮不带清单交付", async () => {
+    for (const status of [404, 403, 400, 401, 409, 413, 0]) {
       const h = harness({ shot: async () => ({ status, body: { ok: false, code: status === 403 ? "shots_off" : "x", error: "no" } }) });
       await h.start();
       await h.tick();
@@ -315,6 +315,26 @@ describe("[验收线 3] 传输分类与续传", () => {
     await h.tick();
     expect(h.shotCalls.length).toBe(6);
     expect((h.deliver()!.uiEvidence as UiEvidence).shots).toHaveLength(6);
+  });
+
+  test("预算按 peer 按轮共用：同一 peer 同轮第二张单在 peer 已用满 20 秒后不再起新的上传（审查 upload-budget-per-order）", async () => {
+    let ui: WorkUi | undefined;
+    const slow = fakeA(() => ui);
+    const h = harness();
+    ui = await h.start();
+    const calls: string[] = [];
+    const shot: LendCall<"shot"> = async (p, o, b) => { calls.push((b.meta as { orderId: string }).orderId); h.clock.t += 11_000; return slow(p, o, b); };
+    const one = h.row(), two = { ...one, orderId: "lend:T9:2" };
+    const budget = uiShotBudget();
+    const d = { db: h.db, now: () => h.clock.t, log: () => {}, shot, shotBudget: budget };
+    const g = { check: async () => null };
+    expect((await sendUiShots(one, d, g)).kind).toBe("ok"); // 0s、11s 各起一张
+    expect((await sendUiShots(two, d, g)).kind).toBe("wait"); // 22s：本轮这个 peer 的预算用完，一张都不起
+    expect(calls).toEqual([one.orderId, one.orderId]);
+    expect(budget.take("other", h.clock.t)).toBe(true); // 别的 peer 各算各的
+    const next = { ...d, shotBudget: uiShotBudget() }; // 下一轮：新的一份
+    expect((await sendUiShots(two, next, g)).kind).toBe("ok");
+    expect(calls).toHaveLength(4);
   });
 
   test("本轮对这个 peer 出站失败过 → 不再调 shot", async () => {
