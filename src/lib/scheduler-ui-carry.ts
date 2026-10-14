@@ -116,7 +116,8 @@ export function uiCarryPlan(db: Database, task: LedgerTask, intentId: string, ev
   let main: UiCarryPlan = NONE, review: UiCarryPlan = NONE, own: Pick<UiCarryPlan, "commit"> = NONE, ownCarried = false;
   let owner: OwnerCarryPlan = { ...NONE, carried: false };
   const judge = (read: (() => GitRead) | string, touched: Touched, net: string[] | string) => {
-    owner = uiOwnerCarryPlan(db, { task, intentId, ev, ownerVisual, events, read, now }, deps.policy); // UIOWNCARRY1
+    owner = uiOwnerCarryPlan(db, { task, intentId, ev, ownerVisual, events, read, now }, (_seq, dedupKey, text, data) => // UIOWNCARRY1
+      void insertEvent(db, { actor: "scheduler", now, dedupKey }, { project: task.project, target: task.id, kind: "scheduler", text, data }, true), deps.policy);
     const mainJudged = mode !== "off" && reviewMode !== "on";
     if (mainJudged) main = mainCarryPlan(db, task, intentId, ev, now, mode, pm, ownerVisual, touched);
     review = uiReviewCarryPlan(db, { task, intentId, ev, pm, approval, ownerVisual, heldFrom, read, now }, deps.policy);

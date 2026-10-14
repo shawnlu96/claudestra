@@ -14,7 +14,6 @@ import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, ownerAnswered, type Ask } from "./ledger-asks.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { insertEvent } from "./ledger-tx.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { GitRead } from "./scheduler-ui-carry-proof.js";
 import { renderInputs, uiReviewCarryKey } from "./scheduler-ui-review-carry.js";
@@ -95,8 +94,10 @@ export interface OwnerCarryInput { task: LedgerTask; intentId: string; ev: Carry
 export interface OwnerCarryPlan { carried: boolean; note: string | null; commit: (carrySeq: number) => void }
 const NONE: OwnerCarryPlan = { carried: false, note: null, commit: () => {} };
 
+/** The carry record's writer, handed in by uiCarryPlan (the ledger writer side): `ui_review_carry` under uiReviewCarryKey at carrySeq + 2. */
+export type WriteOwnerCarry = (carrySeq: number, dedupKey: string, text: string, data: Record<string, unknown>) => void;
 /** Judged inside the carry's transaction before the head moves, in uiCarryPlan's temp repo. Never throws. Not ownerVisual: NONE. */
-export function uiOwnerCarryPlan(db: Database, x: OwnerCarryInput, policy?: RecoveryPolicyPort): OwnerCarryPlan {
+export function uiOwnerCarryPlan(db: Database, x: OwnerCarryInput, write: WriteOwnerCarry, policy?: RecoveryPolicyPort): OwnerCarryPlan {
   const mode = uiOwnerCarryMode(x.task.project, policy);
   if (mode === "off" || !x.ownerVisual) return NONE;
   const { task, ev } = x, a = newestAsk(db, task), held = approvedHead(a, task, x.now);
@@ -126,9 +127,8 @@ export function uiOwnerCarryPlan(db: Database, x: OwnerCarryInput, policy?: Reco
   const data = { ...base, approvalSeq: null, mechanism: KEY, round: task.round, digest: task.extra.screenshotsDigest, renderInputs: inputs.to,
     renderCount: inputs.count, mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash };
   if (mode === "observe") return observe(true, `沿用 owner 截图批准到 ${ev.newHead.slice(0, 12)}（渲染输入 ${inputs.count} 项与批准时一致）`, { ...data, renderSame: true });
-  return { carried: true, note: null, commit: (carrySeq) => void insertEvent(db, { actor: "scheduler", now: x.now, dedupKey: uiReviewCarryKey(x.intentId, carrySeq) }, {
-    project: task.project, target: task.id, kind: "scheduler", text: `沿用 owner 截图批准到新 head ${ev.newHead.slice(0, 12)}（渲染输入与批准时一致）`,
-    data: { op: CARRY_OP, ...data, carrySeq } }, true) };
+  return { carried: true, note: null, commit: (carrySeq) => write(carrySeq, uiReviewCarryKey(x.intentId, carrySeq),
+    `沿用 owner 截图批准到新 head ${ev.newHead.slice(0, 12)}（渲染输入与批准时一致）`, { op: CARRY_OP, ...data, carrySeq }) };
 }
 
 /**
