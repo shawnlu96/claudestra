@@ -46,6 +46,7 @@ export const RECOVERY_KEYS = [
   "mainCarryMerge",
   "mainCiPause",
   "manualCaseOwnership",
+  "manualCaseSla",
   "manualMergeQueue",
   "manualRecovery",
   "manualStall",
@@ -79,9 +80,6 @@ export const RECOVERY_KEYS = [
   "uiReviewCarry",
   "unifiedMergeQueue",
   "updateGap",
-  "mergeUnion",
-  "lendUsageReport",
-  "manualCaseSla",
   "wakeStopped",
   "writeLocalEqual",
 ] as const;
