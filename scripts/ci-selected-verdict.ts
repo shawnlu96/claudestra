@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { canonicalJson } from "../src/lib/canonical-json.ts";
 import {
-  type CiSelectedMode, ciSelectedMode, hasBunFailures, judgeSelected, logDigest, parseReceipt, readResponsibility, RECEIPT_VERSION, receiptDigest,
+  type CiSelectedMode, ciSelectedMode, claimsApplied, hasBunFailures, judgeSelected, logDigest, parseReceipt, readResponsibility, RECEIPT_VERSION, receiptDigest,
   receiptProblems, shardComplete, type ShardReceipt, shardLogFailures,
 } from "../src/lib/ci-selected-verdict.ts";
 
@@ -83,7 +83,8 @@ export interface GateVerdict {
  * 且所有回执出自同一份责任选集。没有放行的片时 verdict 为 null、problems 为空：结论与改前一致。
  */
 export function gateVerdict(x: GateInput): { verdict: GateVerdict | null; problems: string[] } {
-  const claimed = [...x.receipts].filter(([, r]) => { const p = parseReceipt(r); return p?.applied && p.attempt === x.run.attempt; }).map(([k]) => k);
+  // 读不懂的自称放行回执也算声称（下面核回执时按不合法拒绝），只有读得懂且属于别的 attempt 的才不算
+  const claimed = [...x.receipts].filter(([, r]) => claimsApplied(r) && (parseReceipt(r)?.attempt ?? x.run.attempt) === x.run.attempt).map(([k]) => k);
   const released = [...new Set([...[...x.logs].filter(([, log]) => hasBunFailures(log)).map(([k]) => k), ...claimed])].sort((a, b) => a - b);
   if (!released.length) return { verdict: null, problems: [] };
   const problems = released.flatMap((k) => receiptProblems(x.receipts.get(k), { shard: k, ...x.run, log: x.logs.get(k) }));

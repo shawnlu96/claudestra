@@ -11,7 +11,7 @@ Code: `src/lib/ci-selected-verdict.ts` (pure verdict, receipt and proof section)
 | run | responsibility |
 |-----|----------------|
 | ordinary PR (any `CI_RELATED_CHECKS`, light, whole re-run, `ci-full` label) | the selector under on on the same checkout; the read map's selection when `CI_IO_MAP=on` |
-| `workflow_dispatch` full re-check that belongs to a PR | the same, on the request's merge commit (base + head) |
+| `workflow_dispatch` full re-check that belongs to a PR | the same, on the request's merge commit (base + head), once `git ls-remote` shows `refs/pull/<pr>/head` at the request's head and a non-`train/` branch pointing at it; otherwise `"all"` (a dispatch has no `GITHUB_HEAD_REF`) |
 | any full fallback of the selector (global input, graph failure, bad diff line) | `"all"` with the reasons |
 | push (main), train PR, other events, a dispatch with no PR | `"all"` |
 
@@ -40,7 +40,7 @@ A receipt binds mode, shard, run id, attempt, checkout head, plan digest, respon
 
 ### Gate
 
-The check job (`typecheck + test + guard`) keeps its name, its first step `All shards succeeded` and that step's wording (`GATE` / `GATE_VERDICT` in `scheduler-merge-ci-rerun-log.ts`). After the existing checks, `Released shards carry receipts` treats as released every shard whose bun closing summary (the block right above the last `Ran N tests across M files.` line, not test output before it) shows fail or error above 0 (it ended green, so something released it) plus any shard an applied receipt of this attempt claims. Each must have a receipt of this run, attempt, checkout and log, applied under on, all from one responsibility; otherwise the gate is red, as it is for a release while the mode read here is not on (a switch mid-run). With a release it uploads `ci-selected-verdict` (mode, run / attempt, head, responsibility digest, every out-of-scope `{file, name}`, each receipt's digest) and logs `ci-selected: allow=1 out_of_scope=N`.
+The check job (`typecheck + test + guard`) keeps its name, its first step `All shards succeeded` and that step's wording (`GATE` / `GATE_VERDICT` in `scheduler-merge-ci-rerun-log.ts`). After the existing checks, `Released shards carry receipts` treats as released every shard whose bun closing summary (the block right above the last `Ran N tests across M files.` line, not test output before it) shows fail or error above 0 (it ended green, so something released it) plus any shard a receipt of this attempt claims (`applied` not `false`, an unreadable one included). An applied receipt must carry a responsibility digest or it does not parse. Each must have a receipt of this run, attempt, checkout and log, applied under on, all from one responsibility; otherwise the gate is red, as it is for a release while the mode read here is not on (a switch mid-run). With a release it uploads `ci-selected-verdict` (mode, run / attempt, head, responsibility digest, every out-of-scope `{file, name}`, each receipt's digest) and logs `ci-selected: allow=1 out_of_scope=N`.
 
 Trains and main pushes never benefit: their responsibility is always `"all"`.
 

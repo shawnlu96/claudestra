@@ -105,12 +105,14 @@ describe("the mode and the receipt shape", () => {
     expect(["off", "ON", "", undefined, "observe", "yes"].map(ciSelectedMode)).toEqual(["off", "on", "observe", "observe", "observe", "observe"]);
   });
 
-  test("a receipt that claims applied without on + allow, or has an unknown field, does not parse", () => {
+  test("a receipt that claims applied without on + allow + a responsibility digest, or has an unknown field, does not parse", () => {
     const r = { version: 1, kind: "ci-selected-shard", mode: "on", shard: 1, runId: 9, attempt: 1, head: "a".repeat(40), planDigest: "p",
-      responsibilityDigest: null, logDigest: `sha256:${"0".repeat(64)}`, exitCode: 1, allow: true, applied: true, reason: "", outOfScope: [] };
+      responsibilityDigest: `sha256:${"1".repeat(64)}`, logDigest: `sha256:${"0".repeat(64)}`, exitCode: 1, allow: true, applied: true, reason: "", outOfScope: [] };
     expect(parseReceipt(r)).not.toBeNull();
     expect(parseReceipt({ ...r, mode: "observe" })).toBeNull();
     expect(parseReceipt({ ...r, allow: false })).toBeNull();
     expect(parseReceipt({ ...r, extra: 1 })).toBeNull();
+    expect(parseReceipt({ ...r, responsibilityDigest: null })).toBeNull();
+    expect(parseReceipt({ ...r, responsibilityDigest: null, allow: false, applied: false })).not.toBeNull();
   });
 });

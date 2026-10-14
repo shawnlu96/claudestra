@@ -135,13 +135,15 @@ export const logDigest = (log: string): string => sha256(log);
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+/** 回执自称放行（applied 不是 false，含读不懂的）：这样的片一律要核回执，读不懂就是缺回执，不能当没放行跳过。 */
+export const claimsApplied = (raw: unknown): boolean => isObj(raw) && raw.applied !== false;
 const posInt = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) > 0;
 const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const RECEIPT_KEYS = ["version", "kind", "mode", "shard", "runId", "attempt", "head", "planDigest", "responsibilityDigest", "logDigest", "exitCode",
   "allow", "applied", "reason", "outOfScope"];
 
-/** 严格读一份回执：字段恰好这些、类型都对；applied 只能出现在 on 且 allow 的回执上。不认识的读作 null。 */
+/** 严格读一份回执：字段恰好这些、类型都对；applied 只能出现在 on 且 allow、带责任选集 digest 的回执上。不认识的读作 null。 */
 export function parseReceipt(raw: unknown): ShardReceipt | null {
   if (!isObj(raw) || Object.keys(raw).length !== RECEIPT_KEYS.length || !RECEIPT_KEYS.every((k) => k in raw)) return null;
   const r = raw as unknown as ShardReceipt;
@@ -149,7 +151,7 @@ export function parseReceipt(raw: unknown): ShardReceipt | null {
   if (!posInt(r.shard) || !posInt(r.runId) || !posInt(r.attempt) || typeof r.head !== "string" || !SHA.test(r.head)) return null;
   if (typeof r.planDigest !== "string" || !(r.responsibilityDigest === null || DIGEST.test(String(r.responsibilityDigest)))) return null;
   if (!DIGEST.test(String(r.logDigest)) || !Number.isSafeInteger(r.exitCode) || typeof r.reason !== "string") return null;
-  if (typeof r.allow !== "boolean" || typeof r.applied !== "boolean" || (r.applied && !(r.allow && r.mode === "on"))) return null;
+  if (typeof r.allow !== "boolean" || typeof r.applied !== "boolean" || (r.applied && !(r.allow && r.mode === "on" && r.responsibilityDigest !== null))) return null;
   if (!Array.isArray(r.outOfScope) || !r.outOfScope.every((f) => isObj(f) && typeof f.file === "string" && typeof f.name === "string")) return null;
   return r;
 }

@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { parseSync } from "oxc-parser";
-import { buildPlan, type PlanFacts, responsibilityOf } from "../scripts/ci-related-plan.ts";
+import { buildPlan, dispatchPrRefOf, type PlanFacts, responsibilityOf } from "../scripts/ci-related-plan.ts";
 import { buildGraph, oxcScanner, type OxcParseSync } from "../src/lib/ci-impact-graph.js";
 import type { ImpactInputs } from "../src/lib/ci-impact-inputs.js";
 import { type ChangedFile, selectImpactedTests } from "../src/lib/ci-impact-select.js";
@@ -86,7 +86,19 @@ describe("[验收线 1] responsibility is frozen beside an unchanged execution p
   });
 
   test("a dispatch that belongs to a PR is computed on its checkout like the PR run", () => {
-    expect(responsibilityOf(facts({ event: "workflow_dispatch", dispatchPr: 7 }))).toEqual(buildPlan(facts()).responsibility!);
+    expect(responsibilityOf(facts({ event: "workflow_dispatch", dispatchPr: 7, dispatchPrRef: { ref: "task/x" } }))).toEqual(buildPlan(facts()).responsibility!);
+  });
+
+  test("a dispatch for a train PR, or whose PR branch could not be read and bound, is \"all\" and exempts nothing", () => {
+    const never = () => { throw new Error("must not select"); };
+    const d = (over: Partial<PlanFacts>) => responsibilityOf(facts({ event: "workflow_dispatch", dispatchPr: 7, headRef: "", select: never, ...over }));
+    expect(d({ dispatchPrRef: { ref: "train/pr-1" } })).toMatchObject({ tests: "all", fallbackReasons: ["列车 PR 始终全量"] });
+    expect(d({})).toMatchObject({ tests: "all", fallbackReasons: ["补验对应 PR 的分支未知"] });
+    expect(d({ dispatchPrRef: { reason: "PR #7 的 head 不是请求绑定的" } })).toMatchObject({ tests: "all",
+      fallbackReasons: ["补验对应 PR 的分支未知：PR #7 的 head 不是请求绑定的"] });
+    const p = buildPlan(facts({ event: "workflow_dispatch", dispatchPr: 7, headRef: "", dispatchPrRef: { ref: "train/pr-1" } }));
+    expect(judgeSelected({ responsibility: p.responsibility!, failures: [{ file: "tests/b.test.ts", name: "flaky", timedOut: false }],
+      changed: ["src/lib/a.ts"], complete: true, steps: {} })).toMatchObject({ allow: false });
   });
 
   test("CI_IO_MAP=on: the read map's selection is the responsibility; observe keeps the registry rules", () => {
@@ -106,5 +118,18 @@ describe("[验收线 1] responsibility is frozen beside an unchanged execution p
     expect(readResponsibility({ ...r, tests: "everything" })).toBeNull();
     expect(readResponsibility(undefined)).toBeNull();
     expect(readResponsibility({ tests: "all", digest: responsibilityDigest("all"), fallbackReasons: [] })).toMatchObject({ tests: "all" });
+  });
+});
+
+describe("[验收线 1] a dispatch reads its PR's branch from the remote refs, bound to the request's head", () => {
+  const H = "b".repeat(40), O = "c".repeat(40), ls = (...l: string[]) => () => l.join("\n");
+  test("the branch pointing at the PR head, a train branch winning; a reason when the PR moved, no branch matches or the refs are unreadable", () => {
+    expect(dispatchPrRefOf(ls(`${H}\trefs/pull/7/head`, `${O}\trefs/heads/main`, `${H}\trefs/heads/task/x`), 7, H)).toEqual({ ref: "task/x" });
+    expect(dispatchPrRefOf(ls(`${H}\trefs/pull/7/head`, `${H}\trefs/heads/task/x`, `${H.toUpperCase()}\trefs/heads/train/pr-1`), 7, H))
+      .toEqual({ ref: "train/pr-1" });
+    expect(dispatchPrRefOf(ls(`${O}\trefs/pull/7/head`, `${H}\trefs/heads/task/x`), 7, H)).toMatchObject({ reason: expect.stringContaining("不是请求绑定的") });
+    expect(dispatchPrRefOf(ls(`${H}\trefs/pull/8/head`, `${H}\trefs/heads/task/x`), 7, H)).toMatchObject({ reason: expect.stringContaining("不是请求绑定的") });
+    expect(dispatchPrRefOf(ls(`${H}\trefs/pull/7/head`, `${O}\trefs/heads/task/x`), 7, H)).toEqual({ reason: "没有分支指向 PR #7 的 head" });
+    expect(dispatchPrRefOf(() => { throw new Error("git ls-remote：denied"); }, 7, H)).toMatchObject({ reason: expect.stringContaining("denied") });
   });
 });

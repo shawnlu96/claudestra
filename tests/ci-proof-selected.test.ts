@@ -97,6 +97,17 @@ describe("[验收线 4] a released proof carries its receipts, and is invalid wi
     expect(buildCiProof(input({ 3: receiptFor(3, { mode: "observe" }) })).report.refusals.join()).toContain("没有放行");
   });
 
+  test("producer: an applied receipt with no responsibility digest writes no proof — never the plain full proof that skips the receipts", () => {
+    const nulled = { ...receiptFor(3), responsibilityDigest: null };
+    const got = buildCiProof(input({ 3: nulled }));
+    expect([got.manifest, got.selected, got.report.verdict]).toEqual([null, null, "refused"]);
+    expect(got.report.refusals.join()).toContain("不是合法回执");
+    // same receipt on a shard whose log is green: applied still claims a release, so it is checked rather than skipped
+    const i = input(), f = shardFacts({ ...ENV, ...CORE_OK }, 4, logOf(4), nulled);
+    i.facts.set("ci-facts-shard-4", f);
+    expect(buildCiProof(i).manifest).toBeNull();
+  });
+
   test("no release: the proof is what it was — exact policyVersion, no section, no report field, and a stray section is ignored", () => {
     const { manifest, report, selected } = buildCiProof(input());
     expect([manifest!.policyVersion, selected, "selected" in report]).toEqual([CI_PROOF_POLICY_VERSION, null, false]);

@@ -19,7 +19,7 @@ import {
   CI_WEB_BUILD_BUDGET, CI_WEB_BUILD_CHECK, CI_WEB_BUILD_OUTCOMES, type CiWebBuildMode, type CiWebBuildOutcome, ciWebBuildMode, judgeCiWebBuild,
 } from "../src/lib/ci-web-build-policy.ts";
 import {
-  hasBunFailures, parseReceipt, receiptDigest, receiptProblems, type SelectedSection, SELECTED_SECTION_VERSION, sectionDigest, selectedPolicyVersion,
+  claimsApplied, hasBunFailures, parseReceipt, receiptDigest, receiptProblems, type SelectedSection, SELECTED_SECTION_VERSION, sectionDigest, selectedPolicyVersion,
   type ShardReceipt,
 } from "../src/lib/ci-selected-verdict.ts";
 import { fullRequestId } from "../src/lib/scheduler-ci-full-request.ts";
@@ -173,15 +173,17 @@ export function selectedSectionOf(input: ProofInput, tested: string): { section:
   const problems: string[] = [], ok: ShardReceipt[] = [];
   for (let k = 1; k <= SHARDS; k++) {
     const f = input.facts.get(shardFactsName(k)), log = input.shardLogs.get(`test-shard-${k}`), raw = isObj(f) ? f.selected : undefined;
-    if (!(log !== undefined && hasBunFailures(log)) && !parseReceipt(raw)?.applied) continue;
+    if (!(log !== undefined && hasBunFailures(log)) && !claimsApplied(raw)) continue;
     const bad = receiptProblems(raw, { shard: k, runId: input.run.runId, attempt: input.run.attempt, head: tested, log });
     if (bad.length) problems.push(...bad);
     else ok.push(parseReceipt(raw)!);
   }
   const digests = [...new Set(ok.map((r) => r.responsibilityDigest))];
   if (digests.length > 1) problems.push(`各片放行回执的责任选集不一致：${digests.join(", ")}`);
-  if (problems.length || !ok.length || !digests[0]) return { section: null, problems };
-  return { section: { version: SELECTED_SECTION_VERSION, runId: input.run.runId, attempt: input.run.attempt, head: tested, responsibilityDigest: digests[0],
+  const resp = digests[0];
+  if (ok.length && !resp) problems.push("放行回执没有责任选集 digest");
+  if (problems.length || !resp) return { section: null, problems };
+  return { section: { version: SELECTED_SECTION_VERSION, runId: input.run.runId, attempt: input.run.attempt, head: tested, responsibilityDigest: resp,
     receipts: ok.map((r) => ({ shard: r.shard, digest: receiptDigest(r), receipt: r })) }, problems };
 }
 
