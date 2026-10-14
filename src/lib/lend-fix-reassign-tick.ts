@@ -32,13 +32,14 @@ interface RelayCommand {
 }
 
 export const fixRelayCommand = {
-  valued: ["op", "rev"], bools: [],
-  usage: "scheduler-fix-relay <task> --op close-pr|wait-start|wait-end [--rev N]（调度服务专用：自动改派的旧 PR 收尾与等租约方计时）",
+  valued: ["op", "rev", "session", "lease-at", "runtime"], bools: [],
+  usage: "scheduler-fix-relay <task> --op close-pr|wait-start|wait-end|peer-handover [--rev N] [--session S --lease-at T --runtime R]（调度服务：改派收尾 / 计时 / 作者交接）",
   async run(c: RelayCommand): Promise<Record<string, unknown>> {
     const ctx = c.ctx(), op = c.need("op");
     if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "自动改派的收尾只由调度服务记账");
     if (op === "close-pr") return { ok: true, relayPr: await closeRelayedPr(c.db, ctx, c.p.pos[1], c.deps.relayGh) };
-    if (op !== "wait-start" && op !== "wait-end") throw new LedgerError("invalid", "--op 只能是 close-pr / wait-start / wait-end");
+    if (op === "peer-handover") return { ok: true, ...(await import("./recovery-peer-lease-handover.js")).peerHandoverCommand(c) }; // PEERLEASE1
+    if (op !== "wait-start" && op !== "wait-end") throw new LedgerError("invalid", "--op 只能是 close-pr / wait-start / wait-end / peer-handover");
     return tx(c.db, () => {
       const task = c.task(c.p.pos[1]);
       if (op === "wait-start" && (task.stage !== "fix" || task.rev !== Number(c.need("rev")) || getWorkflow(c.db, task.id)?.mode !== "auto")) {
@@ -73,6 +74,7 @@ async function relayPrFollowUp(db: Database, task: LedgerTask, manager: Manager,
 /** After the card's plan: open the holder-wait clock on fix_lease_wait, close it on any other decision. */
 export async function trackLeaseWait(db: Database, task: LedgerTask, plan: PlannerDecision, manager: Manager): Promise<void> {
   if (task.stage !== "fix") return;
+  await (await import("./recovery-peer-lease-tick.js")).peerLeaseTick(db, task, plan, manager); // PEERLEASE1: observe notes + peer author handover
   // The relay's own pool intent keeps the stretch open: the offer re-plans and must still see the clock past the threshold.
   const holder = heldLease(db, task)?.peer;
   const relaying = plan.kind === "intent" && !!holder && !!plan.recipient?.startsWith(POOL_RECIPIENT) && plan.recipient !== `${POOL_RECIPIENT}${holder}`;
