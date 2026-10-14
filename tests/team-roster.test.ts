@@ -233,3 +233,39 @@ test("回包外形：self、machines 顺序（本机在前，peer 按名排序�
   expect(r.machines.map((m) => m.machineKey)).toEqual(["local", PEER, "Zed"]);
   expect(machine(r, "Zed")).toMatchObject({ online: null, checkedAt: null, latencyMs: null, instanceId: null });
 });
+
+test("[验收线 4] creating 审查员：流程节点 adversarial_review 换成真实步骤 review，回查轮次与开始时刻", () => {
+  card("R2", "review", { family: "codex" }); ensure("ens-r2", "R2", "adversarial_review", "ensure reviewer codex");
+  step("R2", "review", 1, "agent-old", "agent", "done", NOW - 5000);
+  step("R2", "review", 2, "agent-old", "agent", "assigned", 1100);
+  const w = teamRoster(input({ poolTotals: (t) => t })).machines[0]!.workers.find((x) => x.taskId === "R2");
+  expect(w).toMatchObject({ id: "local:creating:R2:adversarial_review", name: null, role: "reviewer", family: "codex", step: "review", round: 2, since: 100 });
+});
+
+test("[验收线 4] 同一 agent 有工作绑定与空闲绑定：回查认占位的那条，空闲（merge）的新绑定不抢", () => {
+  card("W1", "build", { agent: "agent-shared" }); card("I1", "merge", { agent: "agent-shared" });
+  const bind = (taskId: string, at: number) => db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+    VALUES (?, 'author', 'agent-shared', ?, 'claude', 'acp', 'active', ?, 0, ?)`).run(taskId, `s-${taskId}`, `i-${taskId}`, at);
+  bind("W1", 1); bind("I1", 2);
+  step("W1", "write", 3, "agent-shared", "agent", "assigned", 5000);
+  const ws = teamRoster(input({ poolTotals: (t) => t })).machines[0]!.workers;
+  expect(ws).toHaveLength(1);
+  expect(ws[0]).toMatchObject({ name: "agent-shared", taskId: "W1", step: "write", round: 3, since: 4000 });
+});
+
+test("[验收线 5] peer 名叫 local：照列为单独一台，worker、卡与产出归它，不混记到本机", () => {
+  hello("local");
+  card("T1", "build"); order("1", "T1", { peer: "local" });
+  card("L1", "live"); step("L1", "write", 0, "lend-aaaaaaaaaa@local", "peer", "delivered", NOW - 10);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const r = teamRoster(input({ borrowPeers: [], poolTotals: (t) => t }));
+    expect(r.machines.map((m) => [m.machineKey, m.proto])).toEqual([["local", "local"], ["local", "push"]]);
+    const [self, peer] = r.machines as [RosterMachine, RosterMachine];
+    expect(peer.workers.map((w) => w.taskId)).toEqual(["T1"]);
+    expect(self.workers).toEqual([]);
+    expect([self.cards.live, peer.cards.live]).toEqual([[], ["L1"]]);
+    expect([self.output[6]!.delivered, peer.output[6]!.delivered]).toEqual([0, 1]);
+    expect(warn).toHaveBeenCalled();
+  } finally { warn.mockRestore(); }
+});

@@ -7,12 +7,14 @@ import type { Database } from "bun:sqlite";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { stepPeer, type ExecutorKind } from "./ledger-steps.js";
 import { LEND_LIVE } from "./ledger-lend-schema.js";
+import { localDay } from "./lend-journal.js";
 import { lendWorkerRows } from "./lend-workers-view.js";
 import { codexWeeklyLine } from "./quota-codex-line.js";
 import type { QuotaReport } from "./quota-week.js";
 import type { AgentLimits } from "./scheduler-agent-pool-config.js";
 import { workingSeats } from "./scheduler-agent-pool-ledger.js";
 import { readSwitch, weeklyLine } from "./scheduler-autostart.js";
+import { stepOfNode } from "./scheduler-work-order.js";
 import { getLendPeer, hasPeersTable, pausedFamily, unifiedPeerCapacity, type LendPeer } from "./scheduler-placement-reservations.js";
 
 const FAMILIES = ["claude", "codex"] as const;
@@ -73,13 +75,10 @@ export interface RosterInput {
 const hasTable = (db: Database, name: string): boolean =>
   !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
-const emptyCards = (): Cards => ({ merge: [], live: [], blocked: [] });
+/** 本机在归属 / 产出里的内部键：peer 名是配置数据、可以就叫 "local"，内部不能拿 "local" 当本机（char(0) 不会出现在 peer 名里） */
+const SELF = "\u0000self";
 
-/** bridge 本地日期 YYYY-MM-DD */
-function localDay(ms: number): string {
-  const d = new Date(ms);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
+const emptyCards = (): Cards => ({ merge: [], live: [], blocked: [] });
 
 /** 含今天共 7 个本地日期（旧 → 新）与第一天 0 点 */
 export function weekDays(now: number): { days: string[]; start: number } {
@@ -99,12 +98,24 @@ function stepRound(db: Database, taskId: string | null, step: string | null): { 
 
 const STAGE_STEP: Record<string, string> = { restate: "restate", build: "write", fix: "fix", review: "review" };
 
-/** agent 名的 seat 回查 scheduler_sessions（未退役、非 peer）：卡号与步骤；步骤优先取它在 task_steps 里最近的一行，否则按卡的阶段 */
+type Seats = NonNullable<ReturnType<typeof workingSeats>>;
+
+/** 这张卡是否让 agent 占着这个 seat：去掉该卡后 workingSeats（调度器同一口径，含未结 review effect）里这个 seat 消失或不再是审查员 */
+function holdsSeat(db: Database, project: string, agent: string, reviewer: boolean, taskId: string): boolean {
+  const rest = workingSeats(db, project, taskId)?.get(agent);
+  return !rest || (reviewer && !rest.reviewer);
+}
+
+/**
+ * agent 名的 seat 回查 scheduler_sessions（未退役、非 peer）：只认真正让它占位的那条绑定（holdsSeat），空闲绑定（如 merge / live）不抢；
+ * 同一 agent 同时在两张卡上干活（去掉哪张都还占位）时按角色、updatedAt 取第一条。步骤优先取它在 task_steps 里最近的一行，否则按卡的阶段
+ */
 function sessionOf(db: Database, project: string, agent: string, reviewer: boolean): { taskId: string; step: string | null } | null {
-  const r = db.query(`SELECT s.taskId, s.role, t.stage FROM scheduler_sessions s JOIN tasks t ON t.id = s.taskId
+  const rows = db.query(`SELECT s.taskId, s.role, t.stage FROM scheduler_sessions s JOIN tasks t ON t.id = s.taskId
     WHERE t.project = ? AND s.agent = ? AND s.transport != 'peer' AND s.state != 'retired'
-    ORDER BY (s.role = ?) DESC, s.updatedAt DESC LIMIT 1`).get(project, agent, reviewer ? "reviewer" : "author") as
-    { taskId: string; role: string; stage: string } | null;
+    ORDER BY (s.role = ?) DESC, s.updatedAt DESC`).all(project, agent, reviewer ? "reviewer" : "author") as
+    { taskId: string; role: string; stage: string }[];
+  const r = rows.find((x) => holdsSeat(db, project, agent, reviewer, x.taskId)) ?? rows[0];
   if (!r) return null;
   const own = hasTable(db, "task_steps")
     ? db.query("SELECT step FROM task_steps WHERE taskId = ? AND executor = ? ORDER BY updatedAt DESC, round DESC LIMIT 1").get(r.taskId, agent) as { step: string } | null
@@ -112,12 +123,12 @@ function sessionOf(db: Database, project: string, agent: string, reviewer: boole
   return { taskId: r.taskId, step: own?.step ?? (r.role === "reviewer" ? "review" : STAGE_STEP[r.stage] ?? null) };
 }
 
-/** 本机 worker：workingSeats 的每个键一行，回查不到的卡号 / 步骤 / 轮次为 null，但仍是一个 seat */
-function localWorkers(db: Database, project: string, seats: Map<string, { family: AuthorFamily; reviewer: boolean }> | null): Worker[] {
+/** 本机 worker：workingSeats 的每个键一行，回查不到的卡号 / 步骤 / 轮次为 null，但仍是一个 seat；creating 的流程节点换成真实步骤（stepOfNode） */
+function localWorkers(db: Database, project: string, seats: Seats | null): Worker[] {
   const out: Worker[] = [];
   for (const [key, seat] of seats ?? []) {
     const creating = key.match(/^creating:(.+):([^:]+)$/);
-    const found = creating ? { taskId: creating[1]!, step: creating[2]! } : sessionOf(db, project, key, seat.reviewer);
+    const found = creating ? { taskId: creating[1]!, step: stepOfNode(creating[2]!) ?? creating[2]! } : sessionOf(db, project, key, seat.reviewer);
     const at = stepRound(db, found?.taskId ?? null, found?.step ?? null);
     out.push({
       id: `local:${key.replace(/^agent-/, "")}`, name: creating ? null : key, family: seat.family, role: seat.reviewer ? "reviewer" : "author",
@@ -174,7 +185,7 @@ const quotaOf = (r: QuotaReport | null, f: Family, stopPct: number | null, obser
   return w ? { usedPct: w.weekUsedPct, resetAt: w.resetAt, stopPct, observedAt } : null;
 };
 
-/** 本项目 merge / live / blocked 的卡按最近一次 write / fix 步骤（updatedAt）的执行者归到机器：peer 名 / "local" / null（不归） */
+/** 本项目 merge / live / blocked 的卡按最近一次 write / fix 步骤（updatedAt）的执行者归到机器：peer 名 / SELF / null（不归） */
 function cardOwners(db: Database, project: string): { id: string; stage: keyof Cards; machine: string | null }[] {
   const steps = hasTable(db, "task_steps");
   const rows = db.query(`SELECT t.id, t.stage, ${steps ? `(SELECT s.executor || char(1) || s.executorKind FROM task_steps s
@@ -183,11 +194,11 @@ function cardOwners(db: Database, project: string): { id: string; stage: keyof C
   return rows.map((r) => {
     if (!r.doer) return { id: r.id, stage: r.stage, machine: null };
     const [executor, kind] = r.doer.split("\u0001") as [string, ExecutorKind];
-    return { id: r.id, stage: r.stage, machine: kind === "peer" ? stepPeer({ executor, executorKind: kind }) : "local" };
+    return { id: r.id, stage: r.stage, machine: kind === "peer" ? stepPeer({ executor, executorKind: kind }) : SELF };
   });
 }
 
-/** 7 天产出：task_steps join tasks；交付 = write / fix delivered，审完 = review / final_review done；机器 = stepPeer ?? local */
+/** 7 天产出：task_steps join tasks；交付 = write / fix delivered，审完 = review / final_review done；机器 = stepPeer ?? SELF */
 function outputs(db: Database, project: string, now: number): Map<string, Map<string, { delivered: number; reviewed: number }>> {
   const out = new Map<string, Map<string, { delivered: number; reviewed: number }>>();
   if (!hasTable(db, "task_steps")) return out;
@@ -197,7 +208,7 @@ function outputs(db: Database, project: string, now: number): Map<string, Map<st
     AND ((s.step IN ('write','fix') AND s.state = 'delivered') OR (s.step IN ('review','final_review') AND s.state = 'done'))`)
     .all(project, start, now) as { step: string; executor: string; executorKind: ExecutorKind; updatedAt: number }[];
   for (const r of rows) {
-    const machine = stepPeer(r) ?? "local", day = localDay(r.updatedAt);
+    const machine = stepPeer(r) ?? SELF, day = localDay(r.updatedAt);
     const byDay = out.get(machine) ?? out.set(machine, new Map()).get(machine)!;
     const cell = byDay.get(day) ?? byDay.set(day, { delivered: 0, reviewed: 0 }).get(day)!;
     if (r.step === "write" || r.step === "fix") cell.delivered++;
@@ -257,14 +268,16 @@ export function teamRoster(inp: RosterInput): Roster {
   const local = localMachine(inp, seats);
   const seen = new Set(local.workers.map((w) => w.id));
   const remote = peerWorkers(db, project, now, seen);
-  const names = [...new Set([...inp.borrowPeers, ...livePeers(db, project), ...remote.keys()])].filter((p) => p !== "local").sort();
+  const names = [...new Set([...inp.borrowPeers, ...livePeers(db, project), ...remote.keys()])].sort();
+  // 叫 "local" 的 peer 照列（machineKey 与本机同名，网页靠 machines[0] / proto 区分），归属与产出走内部键，不与本机混记
+  if (names.includes("local")) console.warn(`[team-roster] ${project} 有 peer 名叫 "local"，machineKey 与本机同名；本机是 machines[0]（proto local）`);
   const machines = [local, ...names.map((p) => peerMachine(inp, p, remote.get(p) ?? []))]
     .map((m) => ({ ...m, cards: emptyCards(), output: [] as RosterMachine["output"] }));
-  const byKey = new Map(machines.map((m) => [m.machineKey, m]));
+  const byKey = new Map(machines.map((m, i) => [i === 0 ? SELF : m.machineKey, m]));
   const unattributed = emptyCards();
   // 归属到名册外的 peer（借入已撤、也没有未结单）的卡不丢：进 unattributed
   for (const c of cardOwners(db, project)) ((c.machine && byKey.get(c.machine)?.cards) || unattributed)[c.stage].push(c.id);
   const out = outputs(db, project, now), { days } = weekDays(now);
-  for (const m of machines) m.output = days.map((day) => ({ day, ...(out.get(m.machineKey)?.get(day) ?? { delivered: 0, reviewed: 0 }) }));
+  for (const [key, m] of byKey) m.output = days.map((day) => ({ day, ...(out.get(key)?.get(day) ?? { delivered: 0, reviewed: 0 }) }));
   return { now, project, self: { instanceId: inp.selfInstanceId }, machines, unattributed };
 }
