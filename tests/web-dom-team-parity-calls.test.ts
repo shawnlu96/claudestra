@@ -159,7 +159,7 @@ const LOCAL_ONLY = [/\/me\/last-seen\/shared-ledger:/, /\/ledger\/shared-ledger:
 test("复现测试:团队 CollabView 不再请求本机 last-seen / 谁在干活 / 团队标签接口", async () => {
   const v = await mount("team", 1200);
   await v.click("谁在干活");
-  await v.click("团队");
+  await v.click("规划与提案");
   await tick(300);
   const hits = calls.filter((c) => LOCAL_ONLY.some((re) => re.test(c)));
   expect(hits).toEqual([]);

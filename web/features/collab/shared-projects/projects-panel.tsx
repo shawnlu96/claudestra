@@ -1,6 +1,8 @@
 "use client";
 import { useState } from "react";
-import { boundProjects, projectKey, teamKey, type CreateProject, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
+import type { ComponentType } from "react";
+import { projectKey, teamKey, type CreateProject, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
+import { teamAreaProjects } from "./grouped-projects";
 import { CreateProjectForm } from "./create-project";
 import { ProjectDialog } from "./project-dialog";
 import { ProjectMembers } from "./project-members";
@@ -9,8 +11,19 @@ import { useProjects } from "./use-projects";
 import { ProjectCards } from "./project-cards";
 import { TeamSettings } from "./team-settings";
 
-/** Mount once per machine. The port and the navigation callback are both pinned to that machine. */
-export function SharedProjectsPanel({ port, openFeatures }: { port: SharedProjectsPort; openFeatures: (project: SharedProject) => void }) {
+const NONE: ReadonlySet<string> = new Set();
+
+/** A row of the team area. projects-entry.tsx supplies the production one (same source choice as the project-group entry). */
+export type ProjectRowComponent = ComponentType<{ project: SharedProject }>;
+
+/**
+ * Mount once per machine. The port and the row are both pinned to that machine.
+ * grouped = local projects that currently form a sidebar group: their group already carries the collab entry, so no row here.
+ * Without Row (synthetic harness) each row is a plain button calling openFeatures.
+ */
+export function SharedProjectsPanel({ port, openFeatures, Row, grouped = NONE }: {
+  port: SharedProjectsPort; openFeatures?: (project: SharedProject) => void; Row?: ProjectRowComponent; grouped?: ReadonlySet<string>;
+}) {
   const { snapshot, error, refresh } = useProjects(port);
   const [opened, setOpened] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -20,12 +33,12 @@ export function SharedProjectsPanel({ port, openFeatures }: { port: SharedProjec
   if (!snapshot && !opened) return null;
   return <section className="my-2 space-y-1" aria-label="团队项目">
     <div className="flex items-center justify-between gap-2 px-2">
-      <h2 className="text-xs font-semibold opacity-60">团队 · 全部 feature</h2>
+      <h2 className="text-xs font-semibold opacity-60">团队</h2>
       <button type="button" className="btn btn-ghost btn-xs" disabled={!snapshot?.teams.length} onClick={() => setOpened(true)}>项目设置</button>
     </div>
     {snapshot?.sourceWarnings?.map(warning => <p key={warning} role="status" className="px-2 text-xs opacity-60">{warning}</p>)}
-    {snapshot && boundProjects(snapshot).map(p => <button key={projectKey(p)} type="button"
-      className="block w-full truncate rounded-lg px-2 py-2 text-left text-sm hover:bg-base-300" onClick={() => openFeatures(p)} aria-label={p.name} title={p.name}>
+    {snapshot && teamAreaProjects(snapshot, grouped).map(p => Row ? <Row key={projectKey(p)} project={p} /> : <button key={projectKey(p)} type="button"
+      className="block w-full truncate rounded-lg px-2 py-2 text-left text-sm hover:bg-base-300" onClick={() => openFeatures?.(p)} aria-label={p.name} title={p.name}>
       <span>{p.name}</span>{p.status === "archived" ? " · 已归档" : ""}
     </button>)}
     {opened && <ProjectDialog title="团队项目" close={() => setOpened(false)}>

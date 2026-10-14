@@ -8,9 +8,9 @@ import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from "r
 import { createRoot } from "react-dom/client";
 import { machines } from "@/lib/machines";
 import { bindingState, lostCenterKey, machineCenterKey, resolveCollabSource, invalidCenterKey, subscribeBindings, type BindingState,
-  type BlockedReason } from "@/lib/collab-source-binding";
+  type BlockedReason, type CollabSourceChoice } from "@/lib/collab-source-binding";
 import { CollabEntry } from "./collab-entry";
-import { setLedgerAccess, useLedgerAccess } from "./collab-cache";
+import { setLedgerAccess, useLedgerAccess, type Access } from "./collab-cache";
 import { closeCollab, useCollabNav } from "./collab-nav";
 import { useCollabT } from "./collab-i18n";
 
@@ -18,7 +18,8 @@ const subscribeMachines = (cb: () => void) => machines.subscribe(cb);
 const currentFp = () => machines.currentFp();
 const noFp = () => null;
 
-const REASON: Record<BlockedReason, string> = {
+/** 选不出源的三种原因（项目组入口、「现在」各项目、侧栏团队区的保留行共用这一张表） */
+export const BLOCKED_REASON: Record<BlockedReason, string> = {
   ambiguous: "绑定无法区分（同一中心项目在多个团队），已停用",
   checking: "团队绑定暂时读不到，稍后自动重试",
   revoked: "团队权限已失效",
@@ -63,8 +64,11 @@ export function UnifiedCollabEntry({ projectId }: { projectId: string }) {
   return fp ? <MachineEntry key={fp} fp={fp} projectId={projectId} /> : <CollabEntry projectId={projectId} />;
 }
 
-function MachineEntry({ fp, projectId }: { fp: string; projectId: string }) {
-  const t = useCollabT();
+/**
+ * 一个本机项目的协作视图选源，带撤权判断（项目组入口、「现在」各项目、侧栏团队区的保留行都用这一个，开出来的键才字节相等）。
+ * key = 可区分的中心键（没有 = 本机 / 停用）；access = 该键（或本机项目）台账读不读得了。
+ */
+export function useCollabChoice(fp: string, projectId: string): { choice: CollabSourceChoice; key: string | null; access: Access; settled: boolean } {
   const { identities, settled } = useCollabBindings(fp);
   const base = resolveCollabSource(identities, projectId, fp);
   const key = base.kind === "center" ? base.key : null;
@@ -72,6 +76,12 @@ function MachineEntry({ fp, projectId }: { fp: string; projectId: string }) {
   const lost = base.kind === "local" ? lostCenterKey(fp, projectId) : null;
   const access = useLedgerAccess(key ?? lost ?? projectId);
   const choice = key || lost ? resolveCollabSource(identities, projectId, fp, (k) => k === (key ?? lost) && access === "no", lost) : base;
+  return { choice, key, access, settled };
+}
+
+function MachineEntry({ fp, projectId }: { fp: string; projectId: string }) {
+  const t = useCollabT();
+  const { choice, key, access, settled } = useCollabChoice(fp, projectId);
   // context 已证明有读凭据：预置可读，CollabEntry 就不会去探 `/ledger/<中心 key>`
   useLayoutEffect(() => {
     if (key && access === "unknown") setLedgerAccess(key, "yes");
@@ -80,7 +90,7 @@ function MachineEntry({ fp, projectId }: { fp: string; projectId: string }) {
   if (choice.kind === "blocked") {
     if (!settled) return null;
     return <li><p role="status" data-collab-blocked={choice.reason} className="px-2 text-xs opacity-60">
-      {t("协作视图")} · {REASON[choice.reason]}</p></li>;
+      {t("协作视图")} · {BLOCKED_REASON[choice.reason]}</p></li>;
   }
-  return access === "yes" ? <CollabEntry projectId={choice.key} /> : null;
+  return access === "yes" ? <CollabEntry projectId={choice.key} team /> : null;
 }

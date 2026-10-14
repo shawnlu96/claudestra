@@ -4,7 +4,7 @@
  * 没选中 = 项目概览，边 = 条件原文与判定依据，折叠组 = 成员，「待你处理」= 挂在这个项目上的那几条，
  * 团队成员 = 他在本项目手上的卡（team-panel-cards.tsx）+ 本机的打开会话；手机上团队面板本身也用这里的外框整屏打开。
  */
-import { mirrorAt, mirrorCounts, type HomeView, type LedgerDepView, type LedgerOverview, type OwnerWait, type Tr } from "../collab-model";
+import { mirrorAt, type HomeView, type LedgerDepView, type LedgerOverview, type OwnerWait, type Tr } from "../collab-model";
 import { useChatStoreApi } from "../../chat/chat-store";
 import { useChatNav } from "../../chat/components/nav-context";
 import { uiAgentName } from "@/lib/chat/agents";
@@ -13,16 +13,15 @@ import { TeamPanelCards } from "../team-panel-cards";
 import type { Member } from "./v4-selection";
 import { Icon } from "../collab-icons";
 import { asksStore } from "../../asks/asks-store";
-import type { WebAsk } from "../../asks/asks-model";
 import { useLang } from "@/lib/i18n";
 import { featureProposalsTr } from "@/lib/i18n-dict-feature-proposals";
-import { isProposalWait } from "../owner-waits";
 import s from "../collab.module.css";
 import type { CFold } from "./causal-model";
 import { causeOf, edgeBasis, STATE_WORD, stageCounts } from "./v4-model";
 import { attentionOf, type CountState } from "../count-words";
 import { countText } from "../count-words-i18n";
 import { looksLikeId } from "../team-source-adapter";
+import { useTeamTab } from "../collab-page-head";
 import v from "./v4.module.css";
 
 export const hhmm = (ms: number) => new Date(ms).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -65,10 +64,9 @@ function TaskLink({ id, ov, onPick }: { id: string; ov: LedgerOverview; onPick: 
   );
 }
 
-/** 提案授权卡没有卡号、点不进任务：给一个「去处理」，打开全站收件箱并定位到这张卡（批准 / 驳回只在那里做） */
-function WaitGo({ w }: { w: OwnerWait & { extra?: WebAsk["extra"] } }) {
+/** 每一行都给一个「去处理」：打开全站收件箱并定位到这张卡（作答只在那里做，协作视图里不另做一套）；有卡号的行卡号照旧点进任务详情 */
+function WaitGo({ w }: { w: OwnerWait }) {
   const tr = featureProposalsTr(useLang());
-  if (!isProposalWait(w)) return null;
   return (
     <button type="button" className={s.btn} style={{ alignSelf: "flex-start" }} aria-label={`${tr("去处理")} ${w.title}`} onClick={() => asksStore.openDrawer(w.id)}>
       {tr("去处理")} <Icon name="chevronRight" size={13} />
@@ -108,7 +106,6 @@ export function Overview(props: {
             ))}
         </div>
       </Sec>
-      {ov.mirror && <MirrorSec m={mirrorCounts(ov.mirror, props.now ?? ov.now)} tr={tr} />}
       {view.pm.pm && <Sec title="PM"><div className={v.kv}>{view.pm.pm} · {tr("在管")} {view.pm.managing} · {tr("排队")} {view.pm.queued.length}</div></Sec>}
     </Shell>
   );
@@ -129,21 +126,6 @@ function NowLine({ counts, view, tr }: { counts: CountState; view: HomeView; tr:
       </div>
       {counts.missing > 0 && <div className={v.warn}>{countText(tr, "另有 {k} 个 feature 还没读到，数字不含它们", { k: counts.missing })}</div>}
     </>
-  );
-}
-
-/**
- * 团队总览：各 feature 执行镜像的新鲜度（过期 = 看到的可能不是现在的状态）。有过期的报过期数；全部有镜像且都新鲜才说最新；
- * 有 feature 还没有镜像（没有证据）就是暂无，不凭缺值说最新。本机总览没有 mirror，不显示
- */
-function MirrorSec({ m, tr }: { m: ReturnType<typeof mirrorCounts>; tr: Tr }) {
-  return (
-    <Sec title={tr("镜像")}>
-      <div className={v.kv}>
-        {m.stale > 0 ? <span className={v.warn}>{tr("{n} 个 feature 主场镜像过期", { n: m.stale })}</span>
-          : m.none === 0 && m.fresh > 0 ? tr("主场镜像最新") : tr("暂无")}
-      </div>
-    </Sec>
   );
 }
 
@@ -271,7 +253,8 @@ export function MemberPage({ m, project, onClose, tr }: { m: Member; project: st
   );
 }
 
-/** 手机：团队面板整屏（桌面在中区「团队」标签里） */
+/** 手机：团队面板整屏（桌面在中区「团队」标签里）；团队源下叫「规划与提案」（collab-page-head.tsx useTeamTab） */
 export function TeamPage({ onClose, tr, children }: { onClose: () => void; tr: Tr; children: React.ReactNode }) {
-  return <Shell title={tr("团队")} sub={tr("最近 10 分钟的真实往来")} onClose={onClose} tr={tr}>{children}</Shell>;
+  const tab = useTeamTab(tr);
+  return <Shell title={tab.label} sub={tab.sub} onClose={onClose} tr={tr}>{children}</Shell>;
 }
