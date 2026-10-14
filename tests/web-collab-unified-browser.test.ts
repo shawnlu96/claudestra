@@ -296,12 +296,14 @@ for (const width of [1280, 390]) {
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await page.getByText("B 机的 feature", { exact: false }).first().waitFor();
     expect(await tree(page)).toEqual(["CollabSwitch>SharedCollabContent>TeamSource>CollabView"]);
+    await page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ }).first().waitFor();
     const viaGroup = await page.locator("main").innerText();
     await shot(page, "3-bound-home-view", width);
     if (mobile) await page.getByRole("button", { name: "返回", exact: true }).click();
     await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
     expect(await opened(page)).toBe(n5Key("mac-a"));
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
+    await page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ }).first().waitFor();
     expect(await page.locator("main").innerText()).toBe(viaGroup);
     expect({ paths: [...new Set(ledgerHits("claudestra"))], atMostTwo: ledgerHits("claudestra").length <= 2 }) // UXNUM1：主场本机的卡读本机 /work，只这一条；两个入口各挂载一次 → 至多 2 次
       .toEqual({ paths: ["mac-a /ledger/claudestra/work"], atMostTwo: true });
