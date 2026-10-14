@@ -217,11 +217,17 @@ async function prFiles(files: HandoffFiles | null, prRef: string, head: string):
   }
 }
 
-/** Best effort: the ledger event is the durable record; a stop still ends the pass. */
-const tell = (c: HandoffCard<unknown>, text: string): Promise<void> => asInfo(() => c.deps.notifyPm(c.task, text)).catch((e) => { // 合并进度：常规
-  if (e instanceof SchedulerStopped) throw e;
-  console.error(`⚠️ [scheduler] ${c.task.id} 合并交接通知没发出去（台账已记）：${(e as Error).message}`);
-});
+/**
+ * Best effort: the ledger event is the durable record; a stop still ends the pass. `routine` = 只记卡片不送 PM（交接进度）；
+ * 合并落地要 PM 本机跟上 main 再 verify，没人推就停在 live，所以那条不能标常规（tests/pm-notice-level.test.ts）。
+ */
+const tell = (c: HandoffCard<unknown>, text: string, routine = false): Promise<void> => {
+  const send = () => c.deps.notifyPm(c.task, text);
+  return (routine ? asInfo(send) : send()).catch((e) => {
+    if (e instanceof SchedulerStopped) throw e;
+    console.error(`⚠️ [scheduler] ${c.task.id} 合并交接通知没发出去（台账已记）：${(e as Error).message}`);
+  });
+};
 
 /**
  * The owner merged main into the PR after the handoff: record the move when only main came in (the review still covers the
@@ -291,7 +297,7 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
     }
     const r = await c.deps.manager("ledger", "scheduler-merge-handoff", task.id, "--head", task.headSHA, "--pr", task.pr);
     if (r.ok !== true) return c.out("held", `交接没记上：${String(r.error)}`);
-    if (r.duplicate !== true) await tell(c, `[调度引擎] ${task.id} 审查通过，合并交给仓库方：${task.pr} @ ${short(task.headSHA)}（证据见台账 merge_handoff）`);
+    if (r.duplicate !== true) await tell(c, `[调度引擎] ${task.id} 审查通过，合并交给仓库方：${task.pr} @ ${short(task.headSHA)}（证据见台账 merge_handoff）`, true);
     return c.out("handoff", `已交仓库方合并 ${task.pr}${narrowAfterHandoff(c, pr.files)}`);
   }
   if (pr.state === "CLOSED") return c.escalate(`交给仓库方的 PR 被关闭、没有合并：${task.pr}`);
