@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import { dirname, join, relative, resolve } from "path";
 import { nodeStateFs } from "../src/lib/floka-migration/state/fs-adapter.ts";
 import { inspectLayout } from "../src/lib/floka-migration/state/layout.ts";
-import { migrateState, rollbackState } from "../src/lib/floka-migration/state/migrate.ts";
+import { migrateState, recoverState, rollbackState } from "../src/lib/floka-migration/state/migrate.ts";
 import type { StateFs, StateMigrationOptions } from "../src/lib/floka-migration/state/types.ts";
 import { stateDirIn } from "../src/lib/state-dir.ts";
 
@@ -235,12 +235,18 @@ describe("[验收线 2] 拒绝情形与零身份生成", () => {
     expect(JSON.stringify(r)).toContain("仍有写者未停:bridge pid 4242");
     fx.active.length = 0;
     let asks = 0;
-    // 准备问 2 次、搬根前复核 2 次;建别名前复核时冒出写者 → 已搬的根要补偿回去
+    // 准备问 2 次、搬根前复核 2 次;建别名前复核时冒出写者 → 补偿也不能在写者在时搬回,停在 rollback_failed
     const late = { activeWriters: async () => (++asks > 4 ? ["cron pid 7"] : []) };
-    const r2 = await migrateState(opts(fx, { writers: late, txId: "state-2" }));
-    expect(r2.status).toBe("rolled_back");
+    const spy = spyFs();
+    const r2 = await migrateState(opts(fx, { writers: late, txId: "state-2", fs: spy.fs }));
+    expect(r2.status).toBe("rollback_failed");
     expect(r2.error).toContain("cron pid 7");
     expect(r2.failedStep).toBe("state-alias");
+    expect(r2.layout).toBe("moved");
+    expect(spy.calls.filter((c) => WRITES.includes(c))).toEqual(["rename"]);
+    expect(snap(fx.newRoot)).toEqual(before);
+    const done = await recoverState(opts(fx, { txId: "state-2" }), "migrate");
+    expect(done.status).toBe("rolled_back");
     expect(snap(fx.oldRoot)).toEqual(before);
     expect(existsSync(fx.newRoot)).toBe(false);
   });
@@ -275,6 +281,107 @@ describe("[验收线 2] 拒绝情形与零身份生成", () => {
     const mods = [...seen].map((f) => relative(resolve(import.meta.dir, ".."), f));
     expect(mods.some((m) => /instance-(id|key)|key-file|lib\/paths\.ts/.test(m))).toBe(false);
     expect(mods).toContain("src/lib/floka-migration/transaction/executor.ts");
+  });
+});
+
+const LIVE = (fx: Fx) => ({ ...probe(fx), activeWriters: async () => ["live-writer"] });
+const writesOf = (calls: string[]) => calls.filter((c) => WRITES.includes(c));
+
+describe("[验收线 2] 续跑以日志身份为准,补偿同样要求停写", () => {
+  const swaps: [string, (root: string) => void][] = [
+    ["instance-id", (root) => writeFileSync(join(root, "instance-id"), "identity-replaced\n", { mode: 0o600 })],
+    ["私钥", (root) => writeFileSync(join(root, "instance-key.pem"), String(generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" })), { mode: 0o600 })],
+    ["根权限", (root) => chmodSync(root, 0o755)],
+  ];
+  for (const [what, swap] of swaps) {
+    test(`journaled:state-move 中断后${what}被换:同 txId 续跑拒绝,不动任何根`, async () => {
+      const fx = fixture();
+      seed(fx.oldRoot);
+      await expect(migrateState(opts(fx, { crashAt: crashAt("journaled:state-move") }))).rejects.toBeInstanceOf(Crash);
+      swap(fx.oldRoot);
+      const replaced = snap(fx.oldRoot);
+      const spy = spyFs();
+      const r = await migrateState(opts(fx, { fs: spy.fs }));
+      expect(r.status).toBe("refused");
+      expect(r.error).toContain("续跑时两个根都没有事务开始时的身份");
+      expect(r.layout).toBe("legacy");
+      expect(writesOf(spy.calls)).toEqual([]);
+      expect(snap(fx.oldRoot)).toEqual(replaced);
+      expect(existsSync(fx.newRoot)).toBe(false);
+      expect((await recoverState(opts(fx), "migrate")).status).toBe("refused");
+    });
+  }
+
+  test("搬根后中断、新根身份被换:续跑拒绝;换回原身份后续完", async () => {
+    const fx = fixture();
+    seed(fx.oldRoot);
+    const before = snap(fx.oldRoot);
+    await expect(migrateState(opts(fx, { crashAt: crashAt("committed:state-move") }))).rejects.toBeInstanceOf(Crash);
+    const original = readFileSync(join(fx.newRoot, "instance-id"));
+    writeFileSync(join(fx.newRoot, "instance-id"), "identity-replaced\n", { mode: 0o600 });
+    const r = await migrateState(opts(fx));
+    expect(r.status).toBe("refused");
+    expect(r.layout).toBe("moved");
+    writeFileSync(join(fx.newRoot, "instance-id"), original, { mode: 0o600 });
+    const ok = await migrateState(opts(fx));
+    expect(ok.status).toBe("committed");
+    expect(snap(fx.newRoot)).toEqual(before);
+  });
+
+  test("搬根后中断、续跑时写者在:不建别名也不搬回(含空新根重建),写者停后续补偿", async () => {
+    const fx = fixture();
+    seed(fx.oldRoot);
+    mkdirSync(fx.newRoot, { mode: 0o755 });
+    chmodSync(fx.newRoot, 0o755);
+    const before = snap(fx.oldRoot);
+    await expect(migrateState(opts(fx, { crashAt: crashAt("committed:state-move") }))).rejects.toBeInstanceOf(Crash);
+    const spy = spyFs();
+    const r = await migrateState(opts(fx, { writers: LIVE(fx), fs: spy.fs }));
+    expect(r.status).toBe("rollback_failed");
+    expect(r.layout).toBe("moved");
+    expect(writesOf(spy.calls)).toEqual([]);
+    expect(JSON.stringify(r.steps)).toContain("live-writer");
+    const again = await recoverState(opts(fx, { writers: LIVE(fx), fs: spy.fs }), "migrate");
+    expect(again.status).toBe("rollback_failed");
+    expect(writesOf(spy.calls)).toEqual([]);
+    const done = await recoverState(opts(fx), "migrate");
+    expect(done.status).toBe("rolled_back");
+    expect(done.layout).toBe("legacy");
+    expect(snap(fx.oldRoot)).toEqual(before);
+    expect(readdirSync(fx.newRoot)).toEqual([]);
+    expect(statSync(fx.newRoot).mode & 0o7777).toBe(0o755);
+  });
+
+  test("建别名后中断、续补偿时写者在:不删别名;写者停后撤别名并搬回", async () => {
+    const fx = fixture();
+    seed(fx.oldRoot);
+    const before = snap(fx.oldRoot);
+    await expect(migrateState(opts(fx, { crashAt: crashAt("applied:state-alias") }))).rejects.toBeInstanceOf(Crash);
+    const spy = spyFs();
+    const r = await recoverState(opts(fx, { writers: LIVE(fx), fs: spy.fs }), "migrate");
+    expect(r.status).toBe("rollback_failed");
+    expect(r.layout).toBe("migrated");
+    expect(writesOf(spy.calls)).toEqual([]);
+    const done = await recoverState(opts(fx), "migrate");
+    expect(done.status).toBe("rolled_back");
+    expect(snap(fx.oldRoot)).toEqual(before);
+  });
+
+  test("回滚撤别名后中断、续补偿时写者在:不重建别名;写者停后恢复迁移后形态", async () => {
+    const fx = fixture();
+    seed(fx.oldRoot);
+    expect((await migrateState(opts(fx))).status).toBe("committed");
+    const mid = snap(fx.newRoot);
+    await expect(rollbackState(opts(fx, { txId: "rb", crashAt: crashAt("applied:state-unalias") }))).rejects.toBeInstanceOf(Crash);
+    const spy = spyFs();
+    const r = await recoverState(opts(fx, { txId: "rb", writers: LIVE(fx), fs: spy.fs }), "rollback");
+    expect(r.status).toBe("rollback_failed");
+    expect(r.layout).toBe("moved");
+    expect(writesOf(spy.calls)).toEqual([]);
+    const done = await recoverState(opts(fx, { txId: "rb" }), "rollback");
+    expect(done.status).toBe("rolled_back");
+    expect(done.layout).toBe("migrated");
+    expect(snap(fx.newRoot)).toEqual(mid);
   });
 });
 

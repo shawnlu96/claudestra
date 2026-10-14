@@ -6,12 +6,13 @@
  */
 
 import { resolve } from "path";
-import { parseTxMode, runTransaction } from "../transaction/executor.ts";
+import { parseTxMode, rollbackTransaction, runTransaction } from "../transaction/executor.ts";
 import type { TxMode, TxStep } from "../transaction/types.ts";
 import {
   dataRoot, deviceProblem, inspectLayout, readIdentity, rootProblems, sameOwner, writerProblem,
 } from "./layout.ts";
-import type { Layout, NodeStat, StateMigrationOptions, StateReport } from "./types.ts";
+import { journalAnchor, type Owner } from "./anchor.ts";
+import type { Layout, StateMigrationOptions, StateReport } from "./types.ts";
 
 const STATE_ITEM = "rename.state";
 
@@ -21,9 +22,9 @@ interface Ctx {
   o: StateMigrationOptions;
   oldRoot: string;
   newRoot: string;
-  /** 本次运行开始时数据根的身份摘要与根目录属主 / 权限;每一步都拿它核对 */
+  /** 事务的身份摘要与根目录属主 / 权限:新事务取此刻数据根,续跑取日志里的锚(anchor.ts);每一步都拿它核对 */
   identity: string;
-  rootStat: NodeStat | null;
+  owner: Owner | null;
   /** 迁移前新根是空目录时它的权限;补偿时按原样重建 */
   emptyNewMode: number | null;
   layout: Layout;
@@ -35,7 +36,7 @@ async function prepare(o: StateMigrationOptions, dir: Direction, rootIssues: str
   const oldRoot = resolve(o.oldRoot);
   const newRoot = resolve(o.newRoot);
   const layout = await inspectLayout(o.fs, oldRoot, newRoot);
-  const ctx: Ctx = { o, oldRoot, newRoot, identity: "", rootStat: null, emptyNewMode: null, layout, problems: [...rootIssues] };
+  const ctx: Ctx = { o, oldRoot, newRoot, identity: "", owner: null, emptyNewMode: null, layout, problems: [...rootIssues] };
   const problems = ctx.problems;
   if (layout.kind === "legacy" && layout.newEmptyDir) ctx.emptyNewMode = (await o.fs.lstat(newRoot))?.mode ?? null;
   if (layout.kind === "conflict") return problems.push(...layout.reasons), ctx;
@@ -44,7 +45,8 @@ async function prepare(o: StateMigrationOptions, dir: Direction, rootIssues: str
   const id = await readIdentity(o.fs, root);
   if (id.ok) ctx.identity = id.sum;
   else problems.push(`${id.problem}(${root === oldRoot ? "旧根" : "新根"}),拒绝迁移,也不会生成新身份`);
-  ctx.rootStat = await o.fs.lstat(root);
+  const st = await o.fs.lstat(root);
+  ctx.owner = st && { mode: st.mode, uid: st.uid, gid: st.gid };
   if (dir === "rollback" && layout.kind === "legacy") problems.push("数据还在旧根,没有可回滚的迁移");
   const dev = await deviceProblem(o.fs, root, root === oldRoot ? newRoot : oldRoot);
   if (dev) problems.push(dev);
@@ -53,9 +55,12 @@ async function prepare(o: StateMigrationOptions, dir: Direction, rootIssues: str
   return ctx;
 }
 
-/** 动手前的最后一道:写者仍须全停、设备仍须相同。中断后续跑不再走冲突检查,所以每个 apply 都要自己再问 */
-async function guardWrite(c: Ctx, from: string, to: string): Promise<void> {
-  const problem = (await writerProblem(c.o)) ?? (await deviceProblem(c.o.fs, from, to));
+/**
+ * 每次改磁盘前的最后一道(正向 apply 与补偿都要过):写者仍须全停;改名还要求同一设备。
+ * 续跑不再走冲突检查;补偿在写者未停时也不能动根——抛错让执行器停在 rollback_failed、日志留着,写者停了用 recoverState 续。
+ */
+async function guardWrite(c: Ctx, rename?: { from: string; to: string }): Promise<void> {
+  const problem = (await writerProblem(c.o)) ?? (rename ? await deviceProblem(c.o.fs, rename.from, rename.to) : null);
   if (problem) throw new Error(problem);
 }
 
@@ -68,7 +73,7 @@ async function hasIdentity(c: Ctx, root: string, identity: string): Promise<bool
 
 /** root 是普通目录,身份与本次开始时一致,属主 / 权限没变 */
 async function holdsData(c: Ctx, root: string): Promise<boolean> {
-  return (await hasIdentity(c, root, c.identity)) && sameOwner(await c.o.fs.lstat(root), c.rootStat);
+  return (await hasIdentity(c, root, c.identity)) && sameOwner(await c.o.fs.lstat(root), c.owner);
 }
 
 const isAlias = async (c: Ctx): Promise<boolean> =>
@@ -85,11 +90,11 @@ async function moved(c: Ctx, from: string, to: string): Promise<boolean> {
 function moveStep(id: string, from: (c: Ctx) => string, to: (c: Ctx) => string, recovery: string): TxStep<Ctx> {
   return {
     id, item: STATE_ITEM, recovery,
-    read: async (c) => ({ from: from(c), to: to(c), identity: c.identity, emptyNewMode: id === "state-move" ? c.emptyNewMode : null }),
+    read: async (c) => ({ from: from(c), to: to(c), identity: c.identity, ...c.owner, emptyNewMode: id === "state-move" ? c.emptyNewMode : null }),
     conflicts: async (c) => c.problems,
     done: async (c) => moved(c, from(c), to(c)),
     apply: async (c) => {
-      await guardWrite(c, from(c), to(c));
+      await guardWrite(c, { from: from(c), to: to(c) });
       if (!(await holdsData(c, from(c)))) throw new Error("数据根的身份 / 属主和开始时不一致,停下");
       await c.o.fs.rename(from(c), to(c));
     },
@@ -104,6 +109,7 @@ function moveStep(id: string, from: (c: Ctx) => string, to: (c: Ctx) => string, 
       }
       // 原路径上冒出了别的目录 / 文件(搬迁窗口里有写者重建了根):两边都不能动,留日志等人
       if (src) throw new Error("原路径被别的东西占了(可能是搬迁窗口里新建的根),不覆盖,需人工核查");
+      await guardWrite(c, { from: to(c), to: from(c) });
       await c.o.fs.rename(to(c), from(c));
       if (b.emptyNewMode !== null) await c.o.fs.mkdir(to(c), b.emptyNewMode);
     },
@@ -116,29 +122,33 @@ const aliasStep: TxStep<Ctx> = {
   conflicts: async () => [],
   done: isAlias,
   apply: async (c) => {
-    await guardWrite(c, c.newRoot, c.oldRoot);
+    await guardWrite(c);
     await c.o.fs.symlink(c.newRoot, c.oldRoot);
   },
   verify: async (c) => (await isAlias(c)) && (await holdsData(c, c.newRoot)) && (await readIdentity(c.o.fs, c.oldRoot)).ok,
   compensate: async (c) => {
-    if (await isAlias(c)) await c.o.fs.unlink(c.oldRoot);
+    if (!(await isAlias(c))) return;
+    await guardWrite(c);
+    await c.o.fs.unlink(c.oldRoot);
   },
 };
 
 const unaliasStep: TxStep<Ctx> = {
   id: "state-unalias", item: STATE_ITEM, recovery: "在旧路径重建指向新根的 symlink",
-  read: async (c) => ({ link: c.oldRoot, target: c.newRoot }),
+  read: async (c) => ({ link: c.oldRoot, target: c.newRoot, identity: c.identity, ...c.owner }),
   conflicts: async (c) => c.problems,
   done: async (c) => (await c.o.fs.lstat(c.oldRoot)) === null || (await holdsData(c, c.oldRoot)),
   apply: async (c) => {
-    await guardWrite(c, c.newRoot, c.oldRoot);
+    await guardWrite(c);
     if (!(await isAlias(c))) throw new Error("旧路径不是本迁移建的别名,不删");
     await c.o.fs.unlink(c.oldRoot);
   },
   verify: async (c) => (await c.o.fs.lstat(c.oldRoot))?.kind !== "symlink",
   compensate: async (c) => {
     // 只看形态不看身份:续跑时本次可能算不出身份,而旧路径空着、新根是目录时重建别名总是回到删除前
-    if ((await c.o.fs.lstat(c.oldRoot)) === null && (await c.o.fs.lstat(c.newRoot))?.kind === "dir") await c.o.fs.symlink(c.newRoot, c.oldRoot);
+    if ((await c.o.fs.lstat(c.oldRoot)) !== null || (await c.o.fs.lstat(c.newRoot))?.kind !== "dir") return;
+    await guardWrite(c);
+    await c.o.fs.symlink(c.newRoot, c.oldRoot);
   },
 };
 
@@ -149,17 +159,38 @@ const STEPS: Record<Direction, TxStep<Ctx>[]> = {
 
 const EXPECT: Record<Direction, Layout["kind"]> = { migrate: "migrated", rollback: "legacy" };
 
-async function run(o: StateMigrationOptions, dir: Direction): Promise<StateReport> {
+type Action = "run" | "recover";
+
+const refusedReport = (o: StateMigrationOptions, mode: TxMode, error: string, layout: StateReport["layout"]): StateReport =>
+  ({ txId: o.txId, mode, status: "refused", steps: [], error, layout });
+
+/**
+ * 有日志就以日志里的锚为准:某个根(普通目录)必须仍持有锚里的身份与属主 / 权限,否则整次拒绝、不动任何根。
+ * 新根冒出别的身份(搬迁窗口里被重建)不影响:锚在哪个根就按哪个根续,补偿时再拒绝覆盖。
+ */
+async function bindAnchor(ctx: Ctx, dir: Direction): Promise<string | null> {
+  const a = await journalAnchor(ctx.o.journalDir, ctx.o.txId, STEPS[dir].map((s) => s.id));
+  if (a.kind === "none") return null;
+  if (a.kind === "bad") return a.error;
+  Object.assign(ctx, { identity: a.anchor.identity, owner: { mode: a.anchor.mode, uid: a.anchor.uid, gid: a.anchor.gid } });
+  for (const root of [ctx.oldRoot, ctx.newRoot]) if (await holdsData(ctx, root)) return null;
+  return "续跑时两个根都没有事务开始时的身份 / 属主(中断后被换过或数据丢了),拒绝继续,日志保留待人工核查";
+}
+
+async function run(o: StateMigrationOptions, dir: Direction, action: Action): Promise<StateReport> {
   const mode: TxMode = parseTxMode(o.mode);
   if (mode === "off") return { txId: o.txId, mode, status: "off", steps: [], layout: "unchecked" };
   const rootIssues = await rootProblems(o);
   // 输入本身不合法(自定义根未批准等)时连续跑也不做:续跑不再过冲突检查
-  if (mode === "on" && rootIssues.length) return { txId: o.txId, mode, status: "refused", steps: [], error: rootIssues.join(";"), layout: "unchecked" };
+  if (mode === "on" && rootIssues.length) return refusedReport(o, mode, rootIssues.join(";"), "unchecked");
   const ctx = await prepare(o, dir, rootIssues);
-  const report = await runTransaction<Ctx>({
+  const anchorIssue = mode === "on" ? await bindAnchor(ctx, dir) : null;
+  if (anchorIssue) return refusedReport(o, mode, anchorIssue, ctx.layout.kind);
+  const tx = {
     txId: o.txId, mode, items: { [STATE_ITEM]: mode }, steps: STEPS[dir], adapter: ctx,
     stateDir: o.journalDir, crashAt: o.crashAt, lockWaitMs: o.lockWaitMs,
-  });
+  };
+  const report = action === "run" ? await runTransaction<Ctx>(tx) : await rollbackTransaction<Ctx>(tx);
   const after = await inspectLayout(o.fs, ctx.oldRoot, ctx.newRoot);
   // 同一 txId 的已提交日志会让执行器直接回报 committed;磁盘形态对不上就不能说成功
   if (report.status === "committed" && after.kind !== EXPECT[dir]) {
@@ -169,7 +200,13 @@ async function run(o: StateMigrationOptions, dir: Direction): Promise<StateRepor
 }
 
 /** 旧根 → 新根 + 旧路径别名 */
-export const migrateState = (o: StateMigrationOptions): Promise<StateReport> => run(o, "migrate");
+export const migrateState = (o: StateMigrationOptions): Promise<StateReport> => run(o, "migrate", "run");
 
 /** 撤别名 + 当前完整数据搬回旧根;不用任何迁移前快照 */
-export const rollbackState = (o: StateMigrationOptions): Promise<StateReport> => run(o, "rollback");
+export const rollbackState = (o: StateMigrationOptions): Promise<StateReport> => run(o, "rollback", "run");
+
+/**
+ * 续补偿:事务停在 rollback_failed(补偿时写者未停等)或中断在执行中,写者停下后用同一 txId 调它,
+ * 逆序撤掉该事务已做的步骤。direction 是当初那次事务的方向(migrateState → "migrate")。
+ */
+export const recoverState = (o: StateMigrationOptions, direction: Direction): Promise<StateReport> => run(o, direction, "recover");

@@ -120,5 +120,7 @@ export async function writerProblem(o: StateMigrationOptions): Promise<string | 
   return active.length ? `仍有写者未停:${[...new Set(active)].join("、")}` : null;
 }
 
-export const sameOwner = (a: NodeStat | null, b: NodeStat | null): boolean =>
+type OwnerLike = Pick<NodeStat, "mode" | "uid" | "gid">;
+
+export const sameOwner = (a: OwnerLike | null, b: OwnerLike | null): boolean =>
   !!a && !!b && a.mode === b.mode && a.uid === b.uid && a.gid === b.gid;
