@@ -18,7 +18,7 @@ for (const route of ["behind", "ciBehind"] as const) {
         w.ci.prChecks.set("C", "fail");
         const fix = w.newSha();
         w.ci.ports.ciRerun = {
-          runAttempt: async () => ({ attempt: 1, status: "completed", conclusion: "failure" }),
+          runAttempt: async () => ({ attempt: 1, status: "completed", conclusion: "failure", headSha: c.head }),
           failedLog: async () => ["##[group]tests/stale.test.ts:", "error: expect(received).toBe(expected)",
             "(fail) stale [0.40ms]", "##[endgroup]", " 1 fail", "Ran 1 tests across 1 files.",
             "##[error]Process completed with exit code 1."].join("\n"),

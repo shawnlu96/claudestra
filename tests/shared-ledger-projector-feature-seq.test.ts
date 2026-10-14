@@ -103,3 +103,29 @@ test("[验收线 1] legacy global watermark stays monotonic; no global advanceme
     expect(active.entry.featureWatermark).toBe(globalSeq(f));
   } finally { await f.close(); }
 });
+
+test("[验收线 3] on-mode idle at the global watermark records the feature seq so the heartbeat can fire later", async () => {
+  const f = integrationFixture();
+  try {
+    for (let i = 0; i < 5; i++) setMeta(f.db, { actor: "owner" }, { project: f.project, key: "docsDir", value: `old-${i}` });
+    let calls = 0, now = 2000;
+    const deps = () => ({ now, budgetMode: "on" as const, scrub: SCRUB,
+      client: { projection: async (p: SharedLedgerProjection) => {
+        calls++;
+        return { schemaVersion: 1 as const, sourceInstanceId: p.sourceInstanceId, sourceSeq: p.sourceSeq, serverSeq: calls, digest: "a".repeat(64) };
+      } },
+    });
+    // The feature's max-seq card moved elsewhere: its own seq dropped below the stored feature watermark.
+    const entry = mirrorEntry(f, globalSeq(f), { featureWatermark: globalSeq(f), lastPushAt: 1000 });
+    const idle = await pushSharedLedgerMirror(f.db, f.id, entry, deps());
+    expect(idle.outcome).toEqual({ kind: "idle", seq: entry.watermark });
+    const ownSeq = idle.entry.featureWatermark!;
+    expect(ownSeq).toBeLessThan(entry.watermark);
+    expect(idle.entry).toEqual({ ...entry, featureWatermark: ownSeq });
+    setMeta(f.db, { actor: "owner" }, { project: f.project, key: "docsDir", value: "heartbeat-unrelated" });
+    now += 300_000;
+    const heartbeat = await pushSharedLedgerMirror(f.db, f.id, idle.entry, deps());
+    expect(heartbeat.outcome).toMatchObject({ kind: "pushed", seq: globalSeq(f) });
+    expect(calls).toBe(1);
+  } finally { await f.close(); }
+});

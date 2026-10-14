@@ -10,6 +10,7 @@
  * 消息来源（回合结束 @ 不 @ owner）只在真正送达时才标。
  * 硬规则（P0、第 3 轮不通过）：用 runManager 调 `ledger escalate --auto` 由 CLI 记账（dedup 按 review 的 seq），PM 下一轮经 escalate 收到。
  */
+import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
 import type { ServerWebSocket } from "bun";
 import { LedgerReader } from "../lib/ledger-read.js";
 import { getMeta, getTask, listEvents } from "../lib/ledger-store.js";
@@ -165,7 +166,7 @@ export function teamRouterTicker(d: TickerDeps): () => Promise<void> {
   };
 }
 
-type Notice = Pick<RouteNotice, "to" | "text" | "messageId">;
+type Notice = Pick<RouteNotice, "to" | "text" | "messageId"> & { pmLevel?: PmNoticeLevel };
 
 function envelopeOf(n: Notice, channelId: string, client: Client | undefined): Envelope {
   return {
@@ -175,7 +176,7 @@ function envelopeOf(n: Notice, channelId: string, client: Client | undefined): E
     intent: "notification",
     content: n.text,
     // waitForIdle：目标主回合在跑就押到 Stop、永不抢占（bridge.ts deliverToLocal 判忙）；不带的话回合开头投进去会被静默丢掉
-    meta: { messageId: n.messageId, triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true },
+    meta: { messageId: n.messageId, triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, ...(n.pmLevel ? { pmLevel: n.pmLevel } : {}) },
   };
 }
 

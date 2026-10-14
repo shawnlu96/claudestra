@@ -161,6 +161,10 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
   return null;
 }
 
+/** A 侧一时回不了话（网络断、回包坏、中心 503 unavailable）：claim 与转发结论共用，下轮原样再发（两处都对同单幂等） */
+const TRANSIENT_CODES: ReadonlySet<string> = new Set(["transport", "bad_response", "unavailable"]);
+export const transientLendCode = (code: string): boolean => TRANSIENT_CODES.has(code);
+
 export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   const body = { orderId: row.orderId, worker: workerName(row.orderId) };
   const caps = claimCaps(d.db, row.peer, d.now()); // TIER1b：告诉 A 本机认得 claim 应答里的 suggest
@@ -172,7 +176,7 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   }
   const now = d.now();
   if (!r.ok) {
-    if (r.code === "transport" || r.code === "bad_response" || r.code === "max_open") return d.log(`claim ${row.orderId} 暂未成功（${r.code}），下轮再试`);
+    if (transientLendCode(r.code) || r.code === "max_open") return d.log(`claim ${row.orderId} 暂未成功（${r.code}），下轮再试`);
     advance(d.db, row.orderId, "asked", "declined", { reason: `A 拒绝领单：${r.code} ${r.error}` }, now);
     return;
   }
@@ -471,7 +475,7 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   if (denied) return void (await haltPublish(row, denied, d));
   const r = await lendRequest(d.call, row.peer, "result", body);
   if (!r.ok) {
-    if (r.code === "transport" || r.code === "bad_response" || r.code === "unavailable") return d.log(`转发 ${row.orderId} 的结论暂未成功（${r.code}），下轮原样重发`);
+    if (transientLendCode(r.code)) return d.log(`转发 ${row.orderId} 的结论暂未成功（${r.code}），下轮原样重发`);
     if (resultReplayPending("result", r)) return d.log(`转发 ${row.orderId} 的结论撞上 A 的防重放（同一秒原字节已发过一次），留着待取回执，下轮重新签名原样重发`);
     const gone = GONE[r.code], note = r.code === DELIVERY_NOTE ? await amendDelivery(row, r.error, d) : undefined; // 说明不全：补写重交
     if (note === null) return;

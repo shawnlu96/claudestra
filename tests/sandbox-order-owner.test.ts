@@ -3,7 +3,7 @@
  * 只在 /tmp 下的临时根目录里起 sleep / perl，不碰生产 tmux、bridge 或状态目录。
  */
 import { afterAll, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -164,10 +164,11 @@ test("补登记子进程：核根目录、清理开始后拒绝；记录不存�
   await expect(addSandboxOwned(owners, key(), { pid: child().pid })).rejects.toThrow("已经开始清理");
 });
 
-test("自有临时目录：登记真实路径 + dev/ino；软链 / 家目录 / 属主目录 / 与别单重叠拒绝；可补登记", async () => {
+test("自有临时目录：登记真实路径 + dev/ino（+ 文件系统给得出的出生时间）；软链 / 家目录 / 属主目录 / 与别单重叠拒绝；可补登记", async () => {
   const tmpA = mkdtempSync("/tmp/sbo-place-");
   const rec = await registerSandboxOwner(owners, { key: key(), root, resources: [], dirs: [tmpA] });
-  expect(rec.dirs).toEqual([{ path: realpathSync(tmpA), dev: expect.any(Number), ino: expect.any(Number) }]);
+  const born = lstatSync(tmpA, { bigint: true }).birthtimeNs;
+  expect(rec.dirs).toEqual([{ path: realpathSync(tmpA), dev: expect.any(Number), ino: expect.any(Number), ...(born > 0n && { birth: String(born) }) }]);
   expect(readSandboxOwner(owners, key()).status).toBe("ok");
   const link = join(base, "dirlink");
   symlinkSync(tmpA, link);

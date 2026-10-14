@@ -1,13 +1,14 @@
+import { ownerWordEn } from './owner-words';
 /** Feature proposal copy (N7W). Titles, node text and member codes are data, never translation keys. */
 const words: Record<string, string> = {
-  '新建 feature 提案': 'New feature proposal', '标题': 'Title', '描述': 'Description', '原话（可选）': 'Owner words (optional)',
+  '新建模块提案': 'New module proposal', '标题': 'Title', '描述': 'Description', '原话（可选）': 'Owner words (optional)',
   '节点': 'Node', '节点代号': 'Node key', '一句话描述': 'One-line summary', '依赖': 'Dependencies', '文件范围': 'File globs',
   '估时': 'Estimate', '添加节点': 'Add node', '删除节点': 'Remove node', '提交提案': 'Submit proposal', '取消': 'Cancel',
-  '提交中…': 'Submitting…', '项目、主场由本机绑定决定，不可改': 'Project and home come from this machine binding',
+  '提交中…': 'Submitting…',
   '节点需有唯一代号、描述和文件范围；依赖必须存在': 'Nodes need unique keys, summaries and globs; dependencies must exist',
   '我的提案': 'My proposals', '最近提交': 'Latest submission', '查询结果': 'Check result',
   '已提交，待项目 owner 批准': 'Submitted; awaiting project owner', '已批准，待中心发布': 'Approved; awaiting publish',
-  '待同步，结果未确认': 'Pending sync; result unconfirmed', '已发布': 'Published', '中心 feature': 'Center feature',
+  '待同步，结果未确认': 'Pending sync; result unconfirmed', '已发布': 'Published', '中心模块': 'Center module',
   '已驳回': 'Rejected', '已过期': 'Expired', '冲突：内容与中心不一致，请改后重新提交': 'Conflict: change content and resubmit',
   '本机设备无权操作团队提案（403）': 'This device cannot act on team proposals (403)',
   '中心不支持提案协议（502）': 'Center does not support proposals (502)', '提案内容不符合要求': 'Proposal content is invalid',
@@ -30,7 +31,7 @@ const words: Record<string, string> = {
 };
 export function featureProposalsTr(language: 'zh' | 'en') {
   return (key: string, params?: Record<string, string | number>): string => {
-    let value = language === 'en' ? words[key] ?? key : key;
+    let value = language === 'en' ? words[key] ?? ownerWordEn(key) ?? key : key;
     for (const [k, v] of Object.entries(params ?? {})) value = value.replaceAll(`{${k}}`, String(v));
     return value;
   };

@@ -34,6 +34,8 @@ import { MobileList } from "./v4/v4-mobile";
 import { PaneLayout } from "./v4/side-pane";
 import { Outline } from "./v4/v4-outline";
 import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamPage, WaitsPage } from "./v4/v4-props";
+import { AttentionPage } from "./v4/attention-page";
+import { snapOf } from "./count-words";
 import { TeamPanel } from "./team-panel";
 import { DEFAULT_FILTER, metricsOf, type Filter } from "./v4/v4-model";
 import { MetricsBar } from "./metrics-bar";
@@ -65,7 +67,7 @@ function useSelection(openTask: string | null) {
   };
   const select = (x: Selection) => {
     if (x?.kind === "task") return pickTask(x.id);
-    setBack(x && x.kind !== "waits" && x.kind !== "team" ? openTask : null);
+    setBack(x && x.kind !== "waits" && x.kind !== "team" && x.kind !== "attention" ? openTask : null);
     setBackSel(x?.kind === "member" && sel?.kind === "team" ? sel : null);
     openCollabTask(null);
     setSel(x);
@@ -159,8 +161,10 @@ export function CollabView({ project }: { project: string }) {
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "member" && <MemberPage m={resolved} project={project} onClose={close} tr={tr} />)
-    || (resolved?.kind === "team" && <TeamPage onClose={close} tr={tr}>{team}</TeamPage>);
-  const right = detail || page || <Overview ov={o} view={hv} counts={dag.counts} waits={waits} projectName={projectName} onPick={pickTask} now={now} tr={tr} since={lastSeen.state.since !== null && (
+    || (resolved?.kind === "team" && <TeamPage onClose={close} tr={tr}>{team}</TeamPage>)
+    || (resolved?.kind === "attention" && <AttentionPage which={resolved.which} lines={hv.lines} active={snapOf(dag.counts)?.active} onPick={pickTask} onClose={close} tr={tr} />);
+  const right = detail || page || <Overview ov={o} view={hv} counts={dag.counts} waits={waits} projectName={projectName} onPick={pickTask} now={now} tr={tr}
+    onAttention={(which) => select({ kind: "attention", which })} since={lastSeen.state.since !== null && (
     <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={pickTask} onDismiss={lastSeen.dismiss} />
   )} />;
 

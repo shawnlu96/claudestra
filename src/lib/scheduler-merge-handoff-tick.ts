@@ -4,6 +4,7 @@
  * Every road here either writes through the scheduler CLI or gives the card to PM; nothing merges, updates a branch, forms a
  * train or plans a merge intent. tests/scheduler-merge-handoff.test.ts, tests/scheduler-merge-handoff-carry.test.ts.
  */
+import { asInfo } from "./pm-notice-level.js";
 import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { ghEnv } from "./peer-pr-github.js";
@@ -217,7 +218,7 @@ async function prFiles(files: HandoffFiles | null, prRef: string, head: string):
 }
 
 /** Best effort: the ledger event is the durable record; a stop still ends the pass. */
-const tell = (c: HandoffCard<unknown>, text: string): Promise<void> => c.deps.notifyPm(c.task, text).catch((e) => {
+const tell = (c: HandoffCard<unknown>, text: string): Promise<void> => asInfo(() => c.deps.notifyPm(c.task, text)).catch((e) => { // 合并进度：常规
   if (e instanceof SchedulerStopped) throw e;
   console.error(`⚠️ [scheduler] ${c.task.id} 合并交接通知没发出去（台账已记）：${(e as Error).message}`);
 });

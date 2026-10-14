@@ -283,6 +283,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "media-outbound.ts": "sql=2 stmt=4 fs=4",
     "memory-retrieve-head.ts": "proc=1 vcs=1",
     "notify.ts": "notice=1",
+    "pm-notice-level.ts": "stmt=1",
     "pm-notify.ts": "notice=2",
     "pm-slim.ts": "fs=1",
     "projects.ts": "proc=1 vcs=1",

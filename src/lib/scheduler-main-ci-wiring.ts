@@ -16,6 +16,7 @@
  * - the train tick (scheduler-merge-train-tick.ts): a testing / settling train is voided (no culprit, no bounce), then cleans up.
  * A PM repair binding (`ledger main-ci-repair`, planMainCi's approval) lets exactly that card / head / main / fault through the serial path.
  */
+import { asInfo } from "./pm-notice-level.js";
 import { readFailureResponse } from "./ci-main-failure-response-runtime.js";
 import type { Database } from "bun:sqlite";
 import { getWorkflow } from "./ledger-scheduler.js";
@@ -100,7 +101,8 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
   if (!n) return;
   // claim first, durably; a lost claim (another process, an earlier run) means no send, and a send that fails after it is not retried
   const claim = await ledger(deps.manager, project, "claim", "--key", n.key, "--kind", n.kind, "--sha", n.mainSha ?? "none");
-  if (claim.claimed === true) await notify(gate, project, mainCiNoticeText(target, health, n, mode) + response, deps.active);
+  const send = () => notify(gate, project, mainCiNoticeText(target, health, n, mode) + response, deps.active);
+  if (claim.claimed === true) await (mode === "on" ? send() : asInfo(send)); // 没开暂停只是观察：常规
 }
 
 /** The pass's one call (scheduler-pass.ts). Never throws for a project's read or write, only for a stop. */

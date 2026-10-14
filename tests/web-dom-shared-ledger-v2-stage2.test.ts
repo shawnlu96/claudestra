@@ -103,10 +103,10 @@ async function create(ui: Awaited<ReturnType<typeof mount>>) {
   await React.act(async () => { form.dispatchEvent(new EventCtor('submit', { bubbles: true, cancelable: true }));
     await new Promise(resolve => setTimeout(resolve, 20)); });
 }
-test('stage2 DOM center capability disables create with its exact reason; home, executor and serverSeq are visible', async () => {
+test('stage2 DOM center capability disables create with its exact reason; task machine, executor and serverSeq are visible', async () => {
   await panel(async ui => {
     expect(ui.button('开卡').disabled).toBe(true); expect(ui.button('开卡').title).toBe('center reason');
-    expect(ui.host.textContent).toContain('主场 · 本机'); expect(ui.host.textContent).toContain('执行地 · peer A');
+    expect(ui.host.textContent).toContain('任务所在的机器 · 本机'); expect(ui.host.textContent).toContain('执行地 · peer A');
     expect(ui.host.textContent).toContain('中心 serverSeq · 40');
   }, { disabled: true });
 });
