@@ -23,7 +23,15 @@ beforeEach(() => {
     if (process.env.DETACH) {
       // 脱组的后代：系统自带的 sh（macOS 读不到它的环境）、detached（另起一组），等 go-x 才退出
       const { spawn } = await import("node:child_process");
-      const d = spawn("/bin/sh", ["-c", "while [ ! -e '${root}/go-x' ] && [ -d '${root}' ]; do sleep 0.05; done"], { detached: true, stdio: "ignore" });
+      const loop = "while [ ! -e '${root}/go-x' ] && [ -d '${root}' ]; do sleep 0.05; done";
+      if (process.env.DETACH === "chain") {
+        // 短命的中间一环：脱组的 sh 把末端放到后台、写下它的 PID 就退出，监管进程一次也扫不到它；假 bun test 等它退出后也退出
+        const mid = spawn("/bin/sh", ["-c", \`/bin/sh -c "\${loop}" & echo $! >> '${root}/desc'; exit 0\`], { detached: true, stdio: "ignore" });
+        await new Promise((r) => mid.once("exit", r));
+        log("end");
+        process.exit(0);
+      }
+      const d = spawn("/bin/sh", ["-c", loop], { detached: true, stdio: "ignore" });
       d.unref();
       appendFileSync(${JSON.stringify(join(root, "desc"))}, d.pid + "\\n");
       if (process.env.DETACH === "exit") { log("end"); process.exit(0); }
@@ -218,7 +226,7 @@ describe("[验收线 4] 信号与回收", () => {
     const a = drive("a", [], { DETACH: "exit" });
     expect(await a.child.exited).toBe(0);
     expect(alive(descendant())).toBe(true);
-    expect(await a.stderr).toContain("还有后代进程");
+    expect(await a.stderr).toContain("名额保留");
     expect(runLog().find((r) => r.event === "end")).toMatchObject({ code: 0, released: false });
     expect(readPermitEntries(dir)!.map((e) => e.status)).toEqual(["active"]);
     const b = drive("b");
@@ -227,6 +235,24 @@ describe("[验收线 4] 信号与回收", () => {
     expect(started()).toEqual(["a"]);
     go("x");
     await until(() => started().includes("b"), "后代退出后 b 开始");
+    go("b");
+    expect(await b.child.exited).toBe(0);
+  }, 30_000);
+
+  test("脱组后代、中间一环在第一次扫描前就生灭：末端还在就不释放，它退出后才回收", async () => {
+    on(1);
+    const a = drive("a", [], { DETACH: "chain" });
+    expect(await a.child.exited).toBe(0);
+    expect(alive(descendant())).toBe(true);
+    expect(await a.stderr).toContain("名额保留");
+    expect(runLog().find((r) => r.event === "end")).toMatchObject({ code: 0, released: false });
+    expect(readPermitEntries(dir)!.map((e) => e.status)).toEqual(["active"]);
+    const b = drive("b");
+    await until(() => runLog().some((r) => r.event === "queued"), "b 排队");
+    await Bun.sleep(800);
+    expect(started()).toEqual(["a"]);
+    go("x");
+    await until(() => started().includes("b"), "末端退出后 b 开始");
     go("b");
     expect(await b.child.exited).toBe(0);
   }, 30_000);

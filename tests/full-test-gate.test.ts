@@ -90,7 +90,8 @@ describe("进程树观察（进程组 + 脱组后代）", () => {
     writeFileSync(join(root, "trees", `${id}.json`), JSON.stringify(body));
   };
   const running = (t: TreeRoot) => ({ state: "running", ...t });
-  const proc = (pid: number, extra: Partial<Proc> = {}): Proc => ({ pid, ppid: 1, pgid: pid, start: `s${pid}`, uniq: null, puniq: null, ...extra });
+  const proc = (pid: number, extra: Partial<Proc> = {}): Proc => ({ pid, ppid: 1, pgid: pid, start: `s${pid}`, uid: null, uniq: null, puniq: null,
+    ver: null, opv: null, ...extra });
 
   test("没记录 = absent；spawning = absent（放行行没发出，测试没开始也不会开始）；坏记录 / 读不出进程表 = unknown", () => {
     expect(observeTree(root, "none")).toBe("absent");
@@ -98,34 +99,60 @@ describe("进程树观察（进程组 + 脱组后代）", () => {
     expect(observeTree(root, "s", () => { throw new Error("spawning 不该扫进程表"); })).toBe("absent");
     writeTree("bad", { state: "running", pgid: 5 });
     expect(observeTree(root, "bad")).toBe("unknown");
-    writeTree("t", running({ pgid: 100, start: "s100", uniq: null, members: [] }));
+    writeTree("t", running({ pgid: 100, start: "s100", uniq: null, ver: null, uid: null, members: [] }));
     expect(observeTree(root, "t", () => null)).toBe("unknown");
     expect(observeTree(root, "t", () => [proc(7)])).toBe("absent");
     expect(observeTree(root, "t", () => [proc(7), proc(101, { pgid: 100 })])).toBe("present");
   });
 
   test("成员：根、登记过的成员、根的进程组；组长 PID 换了人 = 原来的组已没了", () => {
-    const tree: TreeRoot = { pgid: 100, start: "s100", uniq: null, members: [{ pid: 300, start: "s300", uniq: null }] };
-    const pids = (procs: Proc[]) => liveTree(tree, "id", procs, () => null).map((p) => p.pid).sort();
+    const tree: TreeRoot = { pgid: 100, start: "s100", uniq: null, ver: null, uid: null, members: [{ pid: 300, start: "s300", uniq: null, ver: null }] };
+    const pids = (procs: Proc[]) => liveTree(tree, "id", procs, () => null).members.map((p) => p.pid).sort();
     expect(pids([proc(100), proc(101, { pgid: 100 }), proc(300), proc(400)])).toEqual([100, 101, 300]);
     expect(pids([proc(300, { start: "reused" })])).toEqual([]); // 登记过的 PID 换了人
     expect(pids([proc(100, { start: "other" }), proc(101, { pgid: 100 })])).toEqual([]);
   });
 
-  test("脱组后代：macOS 按原始父进程唯一 ID（过继给 launchd 后不变）、Linux 按父 PID、两边都认环境标记", () => {
-    const tree: TreeRoot = { pgid: 100, start: "s100", uniq: "1000", members: [{ pid: 200, start: "s200", uniq: "2000" }] };
+  test("脱组后代：macOS 按原始父进程唯一 ID、Linux 按父 PID、两边都认环境标记", () => {
+    const tree: TreeRoot = { pgid: 100, start: "s100", uniq: "1000", ver: null, uid: null, members: [{ pid: 200, start: "s200", uniq: "2000", ver: null }] };
     const marker = (pids: number[]) => (pid: number) => (pids.includes(pid) ? ["A=1", "CLAUDESTRA_FULL_TEST_PERMIT=id"] : ["A=1"]);
-    const pids = (procs: Proc[], env = marker([])) => liveTree(tree, "id", procs, env).map((p) => p.pid).sort();
+    const pids = (procs: Proc[], env = marker([])) => liveTree(tree, "id", procs, env).members.map((p) => p.pid).sort();
     // 根和登记过的 200 都已退出：200 的孩子（ppid=1，另一组）和孙子照样认得出
     expect(pids([proc(201, { uniq: "2001", puniq: "2000" }), proc(202, { uniq: "2002", puniq: "2001" }), proc(9, { uniq: "2003", puniq: "5" })]))
       .toEqual([201, 202]);
     // Linux：父 PID 是活成员
     expect(pids([proc(200), proc(210, { ppid: 200 }), proc(211, { ppid: 210 })])).toEqual([200, 210, 211]);
-    // 环境标记：认不出父进程的孤儿；macOS 只看根之后出生的
+    // 环境标记：认不出父进程的孤儿（macOS 只看根之后被过继的，见下一条）
     expect(pids([proc(500, { uniq: "1500", puniq: "7" }), proc(501, { uniq: "1501", puniq: "1500" })], marker([500]))).toEqual([500, 501]);
-    expect(pids([proc(600, { uniq: "900", puniq: "7" })], marker([600]))).toEqual([]);
     expect(pids([proc(700)], marker([700]))).toEqual([700]);
     expect(pids([proc(700)], marker([]))).toEqual([]);
+  });
+
+  test("macOS：按原始父进程 PID 版本号认（过继后不变）；血缘断了、环境读不到的孤儿记作 unclaimed，整树按还在算", () => {
+    // 根 ver=1000（已退出），登记过的成员 200（ver=1010，已退出）；版本号全机递增
+    const tree: TreeRoot = { pgid: 100, start: "s100", uniq: "1", ver: 1000, uid: 501, members: [{ pid: 200, start: "s200", uniq: "2", ver: 1010 }] };
+    const marked = (pids: number[]) => (pid: number) => (pids.includes(pid) ? ["A=1", "CLAUDESTRA_FULL_TEST_PERMIT=id"] : pid === 77 ? ["A=1"] : []);
+    const orphan = (pid: number, ver: number, opv: number, extra: Partial<Proc> = {}) => proc(pid, { uid: 501, ver, opv, puniq: "1", ...extra });
+    const live = (procs: Proc[], env = marked([])) => {
+      const t = liveTree(tree, "id", procs, env);
+      return { members: t.members.map((p) => p.pid).sort(), unclaimed: t.unclaimed.map((p) => p.pid).sort() };
+    };
+    // 过继后 p_puniqueid 被改成 launchd 的 1：按原始父进程版本号照样认出 200 的孩子、孙子
+    expect(live([orphan(201, 1011, 1010), orphan(202, 1012, 1011, { ppid: 201 })])).toEqual({ members: [201, 202], unclaimed: [] });
+    // 中间一环（ver=1020）没被扫到就退出了：末端认不出，环境读不到 → unclaimed；observeTree 按 present
+    expect(live([orphan(300, 1021, 1020)])).toEqual({ members: [], unclaimed: [300] });
+    writeTree("v", running(tree));
+    expect(observeTree(root, "v", () => [orphan(300, 1021, 1020)])).toBe("present");
+    expect(observeTree(root, "v", () => [orphan(301, 990, 980)])).toBe("absent");
+    // 环境里有本次标记 = 成员；读得到环境、没标记 = 外人
+    expect(live([orphan(300, 1021, 1020)], marked([300]))).toEqual({ members: [300], unclaimed: [] });
+    expect(live([orphan(77, 1021, 1020)])).toEqual({ members: [], unclaimed: [] });
+    // 不算：根之前就有的原始父进程、launchd 直接起的（原始父进程是 launchd，版本号很小）、别的用户、父进程还是原来那个（唯一 ID 对得上；它 exec 过、版本号变了也一样）
+    expect(live([orphan(400, 1030, 990), orphan(401, 1031, 613), orphan(402, 1032, 1025, { uid: 0 }),
+      proc(403, { uid: 501, ver: 1040, opv: 1039, ppid: 404, puniq: "u404" }), proc(404, { uid: 501, ver: 1041, opv: 900, uniq: "u404" })])).toEqual({ members: [], unclaimed: [] });
+    // 版本号是 int32，回绕后仍按差值比
+    const wrapped: TreeRoot = { ...tree, ver: 2147483600, members: [] };
+    expect(liveTree(wrapped, "id", [orphan(500, -2147483600, -2147483640)], () => null).unclaimed.map((p) => p.pid)).toEqual([500]);
   });
 
   test("真实进程：bun test 换组生出的后代在根退出、被过继之后仍算在树里，退出后才 absent", async () => {
@@ -143,7 +170,7 @@ describe("进程树观察（进程组 + 脱组后代）", () => {
     const sleeper = Number(out.trim());
     expect(sleeper).toBeGreaterThan(1); // 0 会让下面的 kill 打到整个进程组
     try {
-      writeTree(id, running({ pgid: rootChild.pid!, start: self.start, uniq: self.uniq, members: [] }));
+      writeTree(id, running({ pgid: rootChild.pid!, start: self.start, uniq: self.uniq, ver: self.ver, uid: self.uid, members: [] }));
       expect(scanProcesses()!.find((p) => p.pid === sleeper)!.pgid).not.toBe(rootChild.pid);
       expect(observeTree(root, id)).toBe("present");
     } finally {
