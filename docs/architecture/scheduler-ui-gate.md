@@ -49,7 +49,9 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src
   ask bound to the card's current values (same askKey); `observe` escalates `ui_stale` as before and records one would-reopen
   observation with the old and new binding; `off` escalates `ui_stale` as before. A rejected or unverified answer is never
   reopened, and once a scheduler ask for the current values exists (open, answered or expired) the existing branch decides —
-  even when newer asks for other values came after it, however many (A → B → A, `currentBindingGate`; ownerVisual cards only).
+  even when newer asks for other values came after it, however many (A → B → A, `currentBindingGate`; ownerVisual cards only). Such an earlier
+  approval releases the card only when the merge write's own lookup (newest 20 answered asks) also finds it; otherwise it goes to
+  a person as `ui_unverified`, never to a merge the write refuses and never to a second ask.
 
 ## Compatibility
 

@@ -9,7 +9,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { recoveryPolicy, type ObservedAction, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
-import { ownerVisualOf } from "./scheduler-ui-merge-refusal.js";
+import { ownerVisualOf, uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 const KEY = "uiOwnerReask";
 const OUTBOX_MAX = 500;
@@ -23,16 +23,19 @@ type Bound = { head?: string; specRev?: number; screenshotsDigest?: string };
 /**
  * The newest scheduler ask is bound to other values but an older one (open, answered or expired) to the card's current ones, on
  * an ownerVisual card: that older ask decides, so a binding that went A → B → A never gets a second ask. Null = the newest decides.
+ * Its approval releases the card only when the merge write (uiMergeRefusal, newest 20 answered asks) finds it too; one the write
+ * cannot see reads as unverified, so the card goes to a person (ui_unverified) instead of a merge the write refuses, or a reopen.
  */
 export function currentBindingGate(db: Database, task: LedgerTask, newest: UiGate,
-  older: Iterable<{ bound: Bound; gate: () => UiGate }>): UiGate | null {
+  older: Iterable<{ bound: Bound; gate: () => UiGate }>, now: number): UiGate | null {
   const digest = task.extra.screenshotsDigest;
   const current = (b: Bound) => b.head === task.headSHA && b.specRev === task.specRev && b.screenshotsDigest === digest;
   if (newest.state === "none" || typeof digest !== "string" || !task.headSHA || current(newest)) return null;
   let hit: { gate: () => UiGate } | undefined;
   for (const o of older) if (current(o.bound)) { hit = o; break; }
   if (!hit || !ownerVisualOf(db, task, listEvents(db, { project: task.project, target: task.id }))) return null;
-  return hit.gate();
+  const gate = hit.gate();
+  return gate.state === "approved" && gate.ownerVerified && uiMergeRefusal(db, task, now) !== null ? { ...gate, ownerVerified: false } : gate;
 }
 
 /** Read every time; an unreadable file / unknown key is off (the escalation as before). */

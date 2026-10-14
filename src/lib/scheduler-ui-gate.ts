@@ -58,7 +58,7 @@ export function projectUiGate(db: Database, task: LedgerTask, now: number): UiGa
   if (first.done) return { state: "none" };
   const newest = gateOf(first.value);
   const older = function* () { for (const a of mine) yield { bound: boundTo(a.bind?.params), gate: () => gateOf(a) }; }();
-  return currentBindingGate(db, task, newest, older) ?? newest;
+  return currentBindingGate(db, task, newest, older, now) ?? newest;
 }
 
 type Card = Pick<PlannerSnapshot, "task" | "screenshotsDigest">;
