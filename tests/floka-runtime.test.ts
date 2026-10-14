@@ -158,7 +158,7 @@ describe("[验收线 2] off / observe / on、冲突与回滚", () => {
   test("[验收线 2] 缺省与不认识的开关值都是 off:不读不写不查询", async () => {
     const w = world();
     for (const mode of [undefined, "off", "ON", "yes", 1, null]) {
-      const r = await applyRuntimeAlias(input(w, mode));
+      const r = await applyRuntimeAlias(input(w, "on", { mode })); // 经 over 传,undefined 不会被默认参数换成 on
       expect([r.mode, r.status, r.changed]).toEqual(["off", "off", false]);
     }
     expect(w.fsLog).toEqual([]);
@@ -239,7 +239,7 @@ describe("[验收线 2] off / observe / on、冲突与回滚", () => {
     const w = world();
     await applyRuntimeAlias(input(w));
     for (const mode of ["off", "observe", undefined]) {
-      const r = await rollbackRuntimeAlias(input(w, mode));
+      const r = await rollbackRuntimeAlias(input(w, "on", { mode }));
       expect([r.status, codes(r)]).toEqual(["refused", ["mode-not-on"]]);
     }
     expect(kindOf(w.alias)).toBe("symlink");
