@@ -45,7 +45,9 @@ import { detailPauseTr } from "./detail-pause-i18n";
 import { PauseCard, useCardPause } from "./detail-pause";
 import { detailTarget } from "./detail-pause-target";
 import { DetailUsage } from "./detail-usage";
-import { awaySayText, canStopRound, detailGoal, nowFactsOf, nowSentence, stageTimes } from "./detail-now-model";
+import { awaySayText, detailGoal, nowFactsOf, nowSentence, staleText, stageTimes, stopTarget } from "./detail-now-model";
+import { homeReadOf } from "./detail-home-read";
+import type { TaskWorkFacts } from "./work/task-work-facts";
 import { instanceName, NO_NAMES, OTHER_MACHINE, type InstanceNames } from "./team-instance-names";
 import { sharedIdentity } from "./team-source-key";
 import { useInstanceNames } from "./work/use-work-board";
@@ -101,7 +103,7 @@ const ROLE: Record<Participant["role"], { label: string; icon: IconName; duty: s
 type HomeOnly = (k: CollabHomeOnly) => boolean;
 
 /** 「仅主场可见」占位：一行弱化说明，排版同审查行的正文 */
-function HomeOnlyNote({ k, text }: { k: CollabHomeOnly; text: string }) {
+function HomeOnlyNote({ k, text }: { k: CollabHomeOnly | "say-failed" | "say-lent"; text: string }) {
   return (
     <div className={s.rr} data-home-only={k}>
       <div className={s.tx}>{text}</div>
@@ -341,31 +343,35 @@ function PeopleSec(props: {
   );
 }
 
-/** 对它说：主场本机挂输入框（执行者在线时旁边是「叫停这一轮」）；别的机器为主场写在哪台机器、为什么不行 */
-function SaySec({ d, line, exec, working, away, tr, pause }: {
-  d: TaskDetail; line: LineView; exec: AgentSession | undefined; working: boolean; away: { machine: string } | null; tr: Tr;
+/**
+ * 对它说：主场本机挂输入框（叫停条件满足时旁边是「叫停这一轮」，打到快照里的执行者 stop）；别的机器为主场写在哪台机器、为什么不行。
+ * 主场本机读失败（note = failed）写「本机详情暂时读不到」；执行者是出借 worker（note = lent）写「在伙伴机器上」，都不挂输入框（UXCARD3）
+ */
+function SaySec({ d, line, working, away, note, stop, tr, pause }: {
+  d: TaskDetail; line: LineView; working: boolean; away: { machine: string } | null; note: "failed" | "lent" | null; stop: string | null; tr: Tr;
   pause: React.ReactNode;
 }) {
   const stage = d.task.stage;
   if (stage === "done" || stage === "cancelled") return null;
-  if (away) {
+  if (away || note) {
+    const text = away ? awaySayText(away.machine, tr) : note === "lent" ? tr("执行者在伙伴机器上，从这里发不到") : tr("本机详情暂时读不到，恢复后可用");
     return (
       <div className={s.sayDock}>
-        <Sec title={line.agent ? `${tr("对它说")} · ${line.agent}` : tr("对它说")}>
-          <HomeOnlyNote k="say" text={awaySayText(away.machine, tr)} />
+        <Sec title={line.agent && note !== "lent" ? `${tr("对它说")} · ${line.agent}` : tr("对它说")}>
+          <HomeOnlyNote k={note ? `say-${note}` : "say"} text={text} />
+          {note === "lent" && pause}
         </Sec>
       </div>
     );
   }
   if (!line.agent) return pause ? <div className={s.sec}>{pause}</div> : null;
-  const stop = canStopRound({ homeLocal: true, executorOnline: exec?.status === "active", stage });
   return (
     <div className={s.sayDock}>
       <div className={s.sec}>
         <h5>
           {`${tr("对它说")} · ${line.agent}`}
           <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {stop && <StopRound agent={line.agent} tr={tr} />}{pause}
+            {stop && <StopRound agent={stop} tr={tr} />}{pause}
           </span>
         </h5>
         <CollabSay agent={line.agent} working={working} tr={tr} />
@@ -376,7 +382,7 @@ function SaySec({ d, line, exec, working, away, tr, pause }: {
 
 function Body(props: {
   d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; running: readonly RunningReviewer[]; now: number; tr: Tr; extra?: React.ReactNode;
-  homeOnly?: ReadonlySet<CollabHomeOnly>; project: string; machineOf: MachineOf;
+  homeOnly?: ReadonlySet<CollabHomeOnly>; project: string; machineOf: MachineOf; work: TaskWorkFacts | null | undefined;
 }) {
   const { d, line, action, running, now, tr } = props;
   const home: HomeOnly = (k) => props.homeOnly?.has(k) ?? false;
@@ -399,14 +405,20 @@ function Body(props: {
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
   const working = isWorking(stream, exec?.busy);
   const pr = d.task.pr && /^https:\/\//.test(d.task.pr) ? d.task.pr : null;
+  // 主场本机读本机台账的结果（UXCARD3）：stale = 读失败、显示的是上次本机详情；failed = 从没读成功、显示的是中心详情（不说成「在本机」）
+  const read = homeReadOf(d);
   // 别的机器为主场（对它说不在本机）：一句话里写「在 <机器名>」，对它说写原因
-  const away = home("say") ? { machine: tr(props.machineOf(d.task.team?.executorInstanceId ?? null) ?? OTHER_MACHINE) } : null;
-  const target = detailTarget(d, props.project, away !== null);
+  const away = home("say") && read?.kind !== "failed" ? { machine: tr(props.machineOf(d.task.team?.executorInstanceId ?? null) ?? OTHER_MACHINE) } : null;
+  const target = detailTarget(d, props.project, away !== null || read?.kind === "failed");
   const pause = useCardPause(target, d);
-  const sentence = nowSentence({ ...nowFactsOf(d, line, running, now, away?.machine ?? null), pause: pause.view }, tr);
+  const sentence = nowSentence({ ...nowFactsOf(d, line, running, now, away?.machine ?? null), pause: pause.view, work: props.work }, tr);
+  const homeLocal = !away && read?.kind !== "failed";
+  const stop = stopTarget({ homeLocal, work: props.work, homeRead: read !== null, stage: d.task.stage,
+    online: (a) => agents.some((x) => x.name === uiAgentName(a) && x.status === "active") });
   return (
     <div className={s.pb}>
-      <NowSec line={line} total={d.task.metrics.totalMs} now={sentence} action={working && !home("sessions") && action.text ? action.text : null} tr={tr} />
+      <NowSec line={line} total={d.task.metrics.totalMs} now={sentence} action={working && !home("sessions") && action.text ? action.text : null} tr={tr}
+        stale={read?.kind === "stale" ? staleText(read.at, tr) : null} />
       <StagesSec d={d} line={line} tr={tr} />
       <DetailUsage id={target?.id ?? null} awayMachine={away?.machine ?? null} tr={tr} />
       {props.extra}
@@ -436,7 +448,8 @@ function Body(props: {
           </a>
         </div>
       )}
-      <SaySec d={d} line={line} exec={exec} working={working} away={away} tr={tr}
+      <SaySec d={d} line={line} working={working} away={away} tr={tr} stop={stop && uiAgentName(stop)}
+        note={read?.kind === "failed" ? "failed" : homeLocal && props.work?.lent ? "lent" : null}
         pause={target && <PauseCard key={`${target.project}:${target.id}`} target={target} view={pause.view}
           stage={d.task.stage} onChange={pause.update} tr={tr} />} />
     </div>
@@ -469,6 +482,8 @@ export function CollabDetail(props: {
   onClose: () => void;
   /** v4 属性区多挂的段（它的因果线），排在阶段与用时之后 */
   extra?: React.ReactNode;
+  /** 「谁在干活」快照里这张卡的事实（use-dag-panes.tsx workFacts，UXCARD3）：undefined = 快照没到，null = 快照里没有这张卡 */
+  work?: TaskWorkFacts | null;
 }) {
   const { project, id, rev, now, ov, onClose } = props;
   const collabTr = useCollabT();
@@ -523,7 +538,7 @@ export function CollabDetail(props: {
       </div>
       {d && line ? (
         <Body key={`${project}:${id}`} d={d} line={line} action={action(line)} stream={stream} project={project}
-          running={props.reviewers} now={now} tr={tr} extra={props.extra} homeOnly={homeOnly} machineOf={machineOf} />
+          running={props.reviewers} now={now} tr={tr} extra={props.extra} homeOnly={homeOnly} machineOf={machineOf} work={props.work} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>
       )}

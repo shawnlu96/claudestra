@@ -38,6 +38,8 @@ let sseOn = false;
 const sseStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
 /** 非 null 时本卡详情请求先等本机流接通、推这些帧、稍等，再回详情（详情还在路上时动作先到）；/agents 里 dev 同时归属本机项目 */
 let beforeDetail: object[] | null = null;
+/** UXCARD3：本卡本机详情回 500（主场本机读失败） */
+let detailDown = false;
 const sse = (e: object) => { for (const c of sseStreams) c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`)); };
 let chatApi: {
   state: { browsing: { sessionId: string } | null; messages: { content: string }[]; loadingHistory: boolean; historyError: boolean; historyHasMore: boolean };
@@ -149,6 +151,7 @@ beforeAll(async () => {
     }
     if (url.pathname === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (url.pathname === `/api/v1/ledger/${PROJECT}`) return json(relabel({ ok: true, ...home }));
+    if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}` && detailDown) return json({ ok: false, error: "boom" }, 500);
     if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}` && beforeDetail?.length) {
       const frames = beforeDetail;
       beforeDetail = []; // 每次挂载只在首个详情请求前推一次：之后的重读不再补发（流不重放）
@@ -210,7 +213,7 @@ async function until(ok: () => boolean, what: string, read: () => string) {
 }
 
 
-type Side = "local" | "home" | "away" | "nokey" | "fresh";
+type Side = "local" | "home" | "away" | "nokey" | "fresh" | `fresh-${string}`;
 const IDS: Record<Exclude<Side, "local">, Identity> = {
   home: { ...IDENTITY, homeInstanceId: "home-1" },
   away: { ...IDENTITY, homeInstanceId: "other-instance" },
@@ -222,7 +225,7 @@ let leftover: (() => Promise<void>) | null = null;
 async function mount(side: Side, width: number) {
   await leftover?.();
   (globalThis as unknown as { window: Win }).window.happyDOM.setViewport({ width, height: 900 });
-  const identity = side === "local" ? null : IDS[side];
+  const identity = side === "local" ? null : side.startsWith("fresh-") ? { ...IDS.fresh, person: `person-${side}` } : IDS[side as keyof typeof IDS];
   const project = identity ? ui.sharedCollabProject(identity) : PROJECT;
   nav.openCollab(project);
   nav.openCollabTask(FOCUS);
@@ -378,3 +381,55 @@ test("复现测试:主场 = 本机，详情加载期间本机事件流先说 thi
     expect(home).toEqual(local);
   } finally { sseOn = false; beforeDetail = null; sseStreams.clear(); }
 }, 30_000);
+
+/**
+ * UXCARD3 [验收线 3]：主场本机卡同卡刷新时本机详情读失败，保留上次本机详情、「现在」下多一行「数据可能过期」，名字和时长不变；
+ * 成功 / 失败交替刷新几轮，「现在」主句不在两种文字之间切换；两种失败都不写「在 本机」「在 本机 上执行」。
+ * 刷新靠本机 /events 的 ledger 事件（团队源订了本机流，本项目 ledger 事件发刷新）。旧红：main 上失败那轮换成中心详情，写「在 本机」。
+ */
+for (const width of [1280, 390]) {
+  test(`[验收线 3] ${width} 宽 主场本机卡刷新读失败：保留上次本机详情 + 数据可能过期；交替几轮「现在」不换文字`, async () => {
+    sseOn = true;
+    try {
+      const v = await mount(`fresh-stale-${width}`, width);
+      for (let i = 0; i < 400 && sseStreams.size === 0; i++) await tick();
+      const now = () => v.panel()?.querySelector("[data-now=who]")?.textContent ?? "";
+      const first = now();
+      expect(first).not.toBe("");
+      expect(v.sec("对它说")).toContain("对它说 · dev");
+      const refresh = async (down: boolean) => {
+        detailDown = down;
+        const before = calls.filter((c) => c.includes(`/tasks/${FOCUS}`)).length;
+        sse({ seq: 1, ts: "", agent: "", chatId: "", type: "ledger", data: { project: PROJECT } });
+        await until(() => calls.filter((c) => c.includes(`/tasks/${FOCUS}`)).length > before, "reread", v.text);
+        await tick(150);
+      };
+      const seen = new Set<string>();
+      for (const down of [true, false, true, false, true]) {
+        await refresh(down);
+        seen.add(now());
+        const stale = v.sec("现在") ?? "";
+        if (down) expect(stale).toMatch(/数据可能过期（本机详情最后读到 \d\d:\d\d）/);
+        else expect(stale).not.toContain("数据可能过期");
+        expect(v.text()).not.toContain("在 本机");
+        expect(v.text()).not.toContain("仅主场");
+        expect(v.homeOnly()).toEqual([]);
+      }
+      expect([...seen]).toEqual([first]);
+      await v.unmount();
+    } finally { sseOn = false; detailDown = false; sseStreams.clear(); }
+  }, 30_000);
+
+  test(`[验收线 3] ${width} 宽 主场本机卡第一次打开就读失败：中心详情，不写「在 本机」，对它说写本机详情暂时读不到`, async () => {
+    detailDown = true;
+    try {
+      const v = await mount(`fresh-down-${width}`, width);
+      expect(v.sec("现在")).not.toContain("在 本机");
+      expect(v.text()).not.toContain("在 本机 上执行");
+      expect(v.sec("对它说")).toContain("本机详情暂时读不到，恢复后可用");
+      expect(v.hasInput()).toBe(false);
+      expect(v.panel()?.querySelector("[data-stop-round]")).toBeNull();
+      await v.unmount();
+    } finally { detailDown = false; }
+  });
+}

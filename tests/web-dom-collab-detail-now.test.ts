@@ -48,6 +48,10 @@ function ledger(): LedgerOverview {
     tasks: [
       t({ id: "RV1", title: "在审的卡", stage: "review", round: 2, agent: "agent-dev", stageSince: NOW - 40 * MIN, extra: { goal: GOAL } }),
       t({ id: "BD1", title: "开发中的卡", stage: "build", round: 0, agent: "agent-dev", stageSince: NOW - 12 * MIN }),
+      // UXCARD3：出借写卡（tasks.agent 是本机占位会话）、退回人工的返工卡、没有调度记录的老卡
+      t({ id: "LD1", title: "出借写卡", stage: "build", round: 1, agent: "agent-lend-ph", stageSince: NOW - 15 * MIN }),
+      t({ id: "MN1", title: "退回人工的卡", stage: "fix", round: 5, agent: "agent-dev", stageSince: NOW - 50 * MIN }),
+      t({ id: "OLD1", title: "老卡", stage: "review", round: 1, agent: "agent-dev", stageSince: NOW - 336 * 60 * MIN }),
     ],
     deps: [],
   } as unknown as LedgerOverview;
@@ -80,6 +84,15 @@ function center(): { list: FeatureList; detail: FeatureDetail } {
   return { list: { schemaVersion: 1, teamId: "team-a", serverSeq: 9, capabilities: caps, features: [feature] } as unknown as FeatureList, detail };
 }
 
+/** 本机 /work（UXCARD3）：只放 BD1 和三张新卡，RV1 不在快照里走回退；workOn = false 时回 404（快照没到） */
+const wrow = (id: string, p: Record<string, unknown>) => ({ taskId: id, featureId: null, nodeKey: null, title: id, who: "agent-dev", machine: "local", step: "write",
+  round: 1, since: NOW - 12 * MIN, normalMinutes: 60, remainingMinutes: 40, overMinutes: 0, reason: null, code: null, estimate: "", ...p });
+const WORK = { now: NOW, asOfSeq: 1, machines: { local: 1, alice: 1 }, completionHours: null, availableSlots: 1,
+  working: [wrow("BD1", {}), wrow("LD1", { who: "peer:alice · codex", machine: "alice", since: NOW - 15 * MIN })],
+  waiting: [wrow("MN1", { step: "fix", round: 5, code: "manual", reason: "退回人工（manual）：缺凭据", since: NOW - 50 * MIN })],
+  todo: { ready: [], blocked: [] }, legacy: [{ taskId: "OLD1", title: "老卡", stage: "review" }], legacyTotal: 1 };
+let workOn = true;
+
 const calls: string[] = [];
 let snapshot = false;
 const realFetch = globalThis.fetch;
@@ -98,7 +111,8 @@ beforeAll(async () => {
     if (url.pathname === `/api/v1/ledger/${PROJECT}`) return json({ ok: true, ...home });
     const task = url.pathname.match(new RegExp(`^/api/v1/ledger/${PROJECT}/tasks/(\\w+)$`));
     if (task) return json(detail(home, task[1]!));
-    if (url.pathname === "/api/v1/agents") return json({ ok: true, agents: [{ name: "agent-dev", status: "active", busy: true }] });
+    if (url.pathname === `/api/v1/ledger/${PROJECT}/work` && workOn) return json(WORK);
+    if (url.pathname === "/api/v1/agents") return json({ ok: true, agents: [{ name: "agent-dev", status: "active", busy: true }, { name: "agent-lend-ph", status: "active" }] });
     if (url.pathname === "/api/v1/agents/agent-dev/interrupt" || url.pathname === "/api/v1/agents/dev/interrupt") return json({ ok: true });
     if (url.pathname === "/api/v1/shared-ledger/features") return json(c.list);
     if (url.pathname === "/api/v1/shared-ledger/features/F1") return json(c.detail);
@@ -155,6 +169,9 @@ async function open(id: string, side: "local" | "team", width = 1280) {
   const panel = () => Array.from(doc.body.querySelectorAll("aside")).find((a) => (a.textContent ?? "").includes(id)) ?? null;
   const ready = () => /参与者/.test(panel()?.textContent ?? "") && !/正在读取/.test(panel()?.textContent ?? "");
   for (let i = 0; i < 150 && !ready(); i++) await tick();
+  await tick(80);
+  // 「谁在干活」快照：本机 /work 回来后详情换成快照的句子（RV1 不在快照里，照旧）
+  if (side === "local" && workOn) for (let i = 0; i < 100 && !calls.includes(`GET /api/v1/ledger/${PROJECT}/work`); i++) await tick();
   await tick(80);
   const p = panel()!;
   const sec = (title: string) => {
@@ -259,4 +276,48 @@ test("[验收线 4] 卡片详情的文件范围默认折叠成「文件范围 ·
   expect(GLOBS.every((g) => (page.host.textContent ?? "").includes(g))).toBe(true);
   expect(page.host.querySelector("[data-node-files]")).toBeNull();
   await page.unmount();
+});
+
+// ———— followup-reliability-UXCARD3 [验收线 1]：叫停 / 对它说的可见性读「谁在干活」快照 ————
+for (const width of [1280, 390]) {
+  test(`[验收线 1] ${width} 宽 出借写卡：现在写 peer 机器和家族；本机占位会话在线也没有叫停；对它说写在伙伴机器上`, async () => {
+    const v = await open("LD1", "local", width);
+    // 先看叫停：main 上执行者 / 占位会话在线就出按钮（旧红）
+    expect(v.stop()).toBeNull();
+    expect(v.sec("现在")).toContain("alice 上的 codex 在写 · 已 15分");
+    expect(v.sec("现在")).not.toContain("lend-ph");
+    expect(v.sec("对它说")).toContain("执行者在伙伴机器上，从这里发不到");
+    expect(v.p.querySelector("textarea")).toBeNull();
+    await v.unmount();
+  });
+
+  test(`[验收线 1] ${width} 宽 退回人工：快照在等（manual）→ 写退回人工原因、下一步 PM 接手，不写「在改第 5 轮」，没有叫停`, async () => {
+    const v = await open("MN1", "local", width);
+    // 先看叫停：main 上执行者 / 占位会话在线就出按钮（旧红）
+    expect(v.stop()).toBeNull();
+    expect(v.sec("现在")).toContain("退回人工（manual）：缺凭据 · 已等 50分");
+    expect(v.sec("现在")).toContain("下一步：PM 接手");
+    expect(v.sec("现在")).not.toMatch(/在改第 \d+ 轮/);
+    await v.unmount();
+  });
+
+  test(`[验收线 1] ${width} 宽 老卡：写老卡、不写时长和「超过 30 分钟」，执行者在线也没有叫停`, async () => {
+    const v = await open("OLD1", "local", width);
+    // 先看叫停：main 上执行者 / 占位会话在线就出按钮（旧红）
+    expect(v.stop()).toBeNull();
+    expect(v.sec("现在")).toContain("老卡（没有调度记录）· 停在审查，调度器不派活");
+    expect(v.sec("现在")).toContain("下一步：PM 收尾或补调度记录");
+    expect(v.sec("现在")).not.toMatch(/已等|超过 30 分钟|小时/);
+    await v.unmount();
+  });
+}
+
+test("[验收线 1] 快照没到（本机 /work 读不到）：开发卡执行者在线也不出叫停，句子按旧逻辑", async () => {
+  workOn = false;
+  try {
+    const v = await open("BD1", "local");
+    expect(v.sec("现在")).toContain("执行者 dev 在写 · 已 12分");
+    expect(v.stop()).toBeNull();
+    await v.unmount();
+  } finally { workOn = true; }
 });
