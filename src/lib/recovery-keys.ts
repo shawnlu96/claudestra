@@ -79,4 +79,5 @@ export const RECOVERY_KEYS = [
   "mergeUnifiedCandidates",
   "privateStartPlacement",
   "centerReplicaPull",
+  "lendAuthorRebuild",
 ] as const;
