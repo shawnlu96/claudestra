@@ -84,11 +84,12 @@ export function relayObserveKey(taskId: string, s: { specRev: number; round: num
 
 /**
  * agentPoolWork's hook when a fix with a write-lease holder must wait (scheduler-agent-pool-plan.ts). null = not this mechanism's
- * (off, not a holder wait, no peer could ever take it): the caller's own wait stands unchanged. Otherwise relayAway's answers.
+ * (off, no other borrowed peer, not a holder wait, no peer could ever take it): the caller's own wait stands unchanged. Otherwise relayAway's answers.
  */
 export function poolRelayAway(s: PeerLeaseSnapshot, since: number, facts: PlacementFacts, lease: string, waitReason: string): RelayAway {
   const mode = s.peerLease?.mode ?? "off", now = s.pool?.now;
   if (mode === "off" || !s.workflow || !s.pool?.remote.agents || now === undefined || s.task.stage !== "fix" || !s.task.headSHA || !s.task.pr) return null;
+  if (!facts.peers.some((p) => p.peer !== lease)) return null; // no other borrowed peer: nothing to relay to, the holder wait stands as is
   const family = s.workflow.authorFamily, tried = facts.tried.includes(lease);
   // A file lock blocks every peer alike: only the holder's own refusal (or its spent attempt this round) is a holder wait.
   if (!tried && !poolPeerRefusal({ ...facts, locksFree: true }, facts.peers.find((p) => p.peer === lease), "fix", family)) return null;

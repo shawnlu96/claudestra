@@ -12,7 +12,8 @@ import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
-import { listEvents } from "../src/lib/ledger-store.js";
+import { getTask, listEvents } from "../src/lib/ledger-store.js";
+import { placementOf } from "../src/lib/lend-placement-view.js";
 import type { Grant } from "../src/lib/lend-wire-v2.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
@@ -257,6 +258,26 @@ describe("peerLeaseRecovery · agents pool relay", () => {
       both(p, FULL);
       expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
       expect(relays(p)).toHaveLength(1);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("[验收线 3] observe / on in a pool of several borrowed peers: the holder wait keeps its panel category (capacity / peer_unavailable), never no_ready_work", async () => {
+    const p = await ready();
+    try {
+      await toPoolFix(p);
+      const view = () => placementOf(p.f.db, getTask(p.f.db, "T1")!, p.policy, [borrowOf("mate"), borrowOf("other")], p.f.tickDeps.now());
+      for (const m of ["observe", "on"] as RecoveryMode[]) {
+        p.mode.now = m;
+        both(p, FULL);
+        expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("等 codex 空位") });
+        expect(view()).toMatchObject({ category: "capacity", block: null });
+      }
+      p.mode.now = "observe";
+      p.f.advance(5 * MIN); // mate's hello goes stale; other is fresh with a free slot, but the lease is mate's and the clock still runs
+      p.hello("other", FREE);
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      expect(view()).toMatchObject({ category: "peer_unavailable", block: null });
+      expect(relays(p)).toEqual([]);
     } finally { p.f.close(); }
   }, E2E_MS);
 
