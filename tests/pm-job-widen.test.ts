@@ -61,6 +61,31 @@ test("c: specDecided with any evidence outside the spec file escalates", () => {
 });
 
 // [验收线 1]
+test("c: the whole raw evidence list is checked before trimming: a 21st off-spec entry, too many entries or a malformed entry all escalate", () => {
+  const spec20 = Array.from({ length: 20 }, () => ({ file: "spec.md", line: 10 }));
+  expect(judgePmJobOutput(decided({ evidence: [...spec20, { file: "src/a.ts", line: 2 }] }), ctxOf(ASKED_DECIDED))).toMatchObject({ verdict: "escalate" });
+  expect(judgePmJobOutput(decided({ evidence: [...spec20, { file: "spec.md", line: 10 }] }), ctxOf(ASKED_DECIDED))).toMatchObject({ verdict: "escalate", reason: expect.stringContaining("超过 20 条") });
+  expect(judgePmJobOutput(decided({ evidence: [{ file: "spec.md", line: 10 }, { file: "src/a.ts", line: "2" }] }), ctxOf(ASKED_DECIDED)))
+    .toMatchObject({ verdict: "escalate", reason: expect.stringContaining("格式不合法") });
+  expect(judgePmJobOutput(decided({ evidence: [...spec20.slice(0, 19), { file: "src/a.ts", line: 2 }] }), ctxOf(ASKED_DECIDED)))
+    .toMatchObject({ verdict: "escalate", reason: expect.stringContaining("只能是规格文件的行：src/a.ts:2") });
+  expect(judgePmJobOutput(decided({ evidence: spec20 }), ctxOf(ASKED_DECIDED))).toMatchObject({ verdict: "answer" });
+});
+
+// [验收线 1]
+test("c: on mode, a 21st off-spec evidence entry escalates end to end: nothing reaches the asker and the ask stays open", async () => {
+  w = await jobWorld("on");
+  writeFileSync(w.specPath, SPEC2);
+  const { askId } = await w.ask(ASKED_DECIDED);
+  const evidence = [...Array.from({ length: 20 }, () => ({ file: w!.specPath, line: 10 })), { file: "src/lib/thing.ts", line: 2 }];
+  expect(await w.work(() => ok(decided({ evidence })))).toBe(1);
+  await pmJob.sweep();
+  expect(w.store.get(askId)!.result).toMatchObject({ verdict: "escalate" });
+  expect(w.asker).toEqual([]);
+  expect(getAsk(w.f.db, askId)).toMatchObject({ state: "open" });
+});
+
+// [验收线 1]
 test("d: approval wording in the model's own sentence escalates; the same words only inside the quoted spec line do not", () => {
   expect(judgePmJobOutput(decided({ answer: "已批准，你可以改。" }), ctxOf(ASKED_DECIDED))).toMatchObject({ verdict: "escalate", reason: expect.stringContaining("批准口吻") });
   const out = judgePmJobOutput(decided(), ctxOf(ASKED_DECIDED));

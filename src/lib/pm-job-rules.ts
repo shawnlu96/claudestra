@@ -105,6 +105,7 @@ export interface JudgeCtx {
 }
 
 const ANSWER_MAX = 2000;
+const EVIDENCE_MAX = 20;
 const QUOTE_MAX = 200;
 const clean = (s: string): string => s.replace(/\p{Cf}+/gu, "").replace(/[\u2028\u2029]/g, "\n").replace(/[^\S\n]+/g, " ").trim();
 
@@ -113,11 +114,12 @@ export function judgePmJobOutput(text: string, ctx: JudgeCtx): PmJobResult {
   const pending = Array.isArray(raw?.pending) ? raw.pending.filter((p): p is string => typeof p === "string").map((p) => clean(p).slice(0, 300)).slice(0, 10) : [];
   const type = typeof raw?.type === "string" ? raw.type.slice(0, 40) : "unknown";
   const answer = typeof raw?.answer === "string" ? clean(raw.answer).slice(0, ANSWER_MAX) : "";
-  const evidence: PmJobEvidence[] = (Array.isArray(raw?.evidence) ? raw.evidence : []).flatMap((e) => {
+  const rawEvidence: unknown[] = Array.isArray(raw?.evidence) ? raw.evidence : [];
+  const evidence: PmJobEvidence[] = rawEvidence.flatMap((e) => {
     const file = (e as PmJobEvidence | null)?.file, line = (e as PmJobEvidence | null)?.line;
     return typeof file === "string" && typeof line === "number" && Number.isInteger(line) ? [{ file, line }] : [];
-  }).slice(0, 20);
-  const escalate = (reason: string): PmJobResult => ({ verdict: "escalate", type, answer, evidence, reason, pending });
+  });
+  const escalate = (reason: string): PmJobResult => ({ verdict: "escalate", type, answer, evidence: evidence.slice(0, EVIDENCE_MAX), reason, pending });
   if (!raw) return escalate("处理员输出不是约定的 JSON");
   const gates = ctx.gates ?? { all: ctx.forbidden ? [ctx.forbidden] : [], hard: !!ctx.forbidden };
   if (gates.hard) return escalate(`问题属于必须由 PM 处理的类别：${(ctx.gates ? gates.all.filter((l) => HARD.has(l)) : gates.all).join("、")}`);
@@ -127,6 +129,9 @@ export function judgePmJobOutput(text: string, ctx: JudgeCtx): PmJobResult {
   if (!answer) return escalate("处理员没有给出答复");
   if (GRANT.test(norm(answer))) return escalate("答复带批准口吻，处理员没有批准权");
   if (!evidence.length) return escalate("答复没有 文件:行 依据");
+  // 先校验完整原始列表，再裁剪展示：格式不合法或超条数的依据不能被静默丢掉后放行
+  if (evidence.length !== rawEvidence.length) return escalate("依据格式不合法（每条须是 {file: 字符串, line: 整数}）");
+  if (evidence.length > EVIDENCE_MAX) return escalate(`依据超过 ${EVIDENCE_MAX} 条`);
   const bad = evidence.find((e) => { const n = ctx.lines(e.file); return n === null || e.line < 1 || e.line > n; });
   if (bad) return escalate(`依据无效（不在批准路径或行号不存在）：${bad.file.slice(0, 200)}:${bad.line}`);
   if (type !== "specDecided") return { verdict: "answer", type, answer, evidence, reason: "", pending };
