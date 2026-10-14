@@ -17,13 +17,13 @@ import { SHA } from "./manual-merge-queue-facts.js";
 export const MANUAL_MERGE_RECORD_OP = "manual_merge_record";
 const BASE = "main";
 
-export interface ManualMergeInput { taskId: string; head: string; mergeSha: string; pr: string; base: string; mainHead: string; receipt: string }
-export interface ManualMergeFact {
+interface ManualMergeInput { taskId: string; head: string; mergeSha: string; pr: string; base: string; mainHead: string; receipt: string }
+interface ManualMergeFact {
   op: typeof MANUAL_MERGE_RECORD_OP; v: 1; phase: "merged"; head: string; mergeSha: string; pr: string; base: typeof BASE; mainHead: string;
   specRev: number; round: number; mergeEntrySeq: number; receipt: string;
 }
 /** 判定要对上的卡当前身份（巡检与登记各自从库里读） */
-export interface MergeIdentity { headSHA: string | null; pr: string | null; specRev: number; round: number; entrySeq: number }
+interface MergeIdentity { headSHA: string | null; pr: string | null; specRev: number; round: number; entrySeq: number }
 
 /** 本卡最近一次进入 merge 的 stage 事件 seq（同 scheduler-merge-handoff.ts mergeEntry 的口径）；没进过 = 0 */
 export const mergeEntrySeq = (db: Database, taskId: string): number =>
