@@ -100,22 +100,26 @@ const STAGE_STEP: Record<string, string> = { restate: "restate", build: "write",
 
 type Seats = NonNullable<ReturnType<typeof workingSeats>>;
 
-/** 这张卡是否让 agent 占着这个 seat：去掉该卡后 workingSeats（调度器同一口径，含未结 review effect）里这个 seat 消失或不再是审查员 */
-function holdsSeat(db: Database, project: string, agent: string, reviewer: boolean, taskId: string): boolean {
-  const rest = workingSeats(db, project, taskId)?.get(agent);
+/** workingSeats 里绑定按阶段占位的条件（作者在 spec/restate/build/fix、审查员在 review）；其余审查员占位靠未结 review effect，由 holdsSeat 判 */
+const WORKING_STAGE: Record<string, readonly string[]> = { author: ["spec", "restate", "build", "fix"], reviewer: ["review"] };
+
+/** 这张卡是否让 agent 占着这个 seat：阶段就在占位口径里，或去掉该卡后 workingSeats（调度器同一口径，含未结 review effect）里这个 seat 消失 / 不再是审查员 */
+function holdsSeat(db: Database, project: string, agent: string, reviewer: boolean, b: { taskId: string; role: string; stage: string }): boolean {
+  if (WORKING_STAGE[b.role]?.includes(b.stage)) return true;
+  const rest = workingSeats(db, project, b.taskId)?.get(agent);
   return !rest || (reviewer && !rest.reviewer);
 }
 
 /**
- * agent 名的 seat 回查 scheduler_sessions（未退役、非 peer）：只认真正让它占位的那条绑定（holdsSeat），空闲绑定（如 merge / live）不抢；
- * 同一 agent 同时在两张卡上干活（去掉哪张都还占位）时按角色、updatedAt 取第一条。步骤优先取它在 task_steps 里最近的一行，否则按卡的阶段
+ * agent 名的 seat 回查 scheduler_sessions（未退役、非 peer）：只认真正让它占位的绑定（holdsSeat），空闲绑定（如 merge / live）不抢；
+ * 同一 agent 同时在几张卡上干活时按角色、updatedAt 取第一条占位的。步骤优先取它在 task_steps 里最近的一行，否则按卡的阶段
  */
 function sessionOf(db: Database, project: string, agent: string, reviewer: boolean): { taskId: string; step: string | null } | null {
   const rows = db.query(`SELECT s.taskId, s.role, t.stage FROM scheduler_sessions s JOIN tasks t ON t.id = s.taskId
     WHERE t.project = ? AND s.agent = ? AND s.transport != 'peer' AND s.state != 'retired'
     ORDER BY (s.role = ?) DESC, s.updatedAt DESC`).all(project, agent, reviewer ? "reviewer" : "author") as
     { taskId: string; role: string; stage: string }[];
-  const r = rows.find((x) => holdsSeat(db, project, agent, reviewer, x.taskId)) ?? rows[0];
+  const r = rows.find((x) => holdsSeat(db, project, agent, reviewer, x)) ?? rows[0];
   if (!r) return null;
   const own = hasTable(db, "task_steps")
     ? db.query("SELECT step FROM task_steps WHERE taskId = ? AND executor = ? ORDER BY updatedAt DESC, round DESC LIMIT 1").get(r.taskId, agent) as { step: string } | null
