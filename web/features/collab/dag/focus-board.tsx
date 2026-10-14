@@ -5,7 +5,7 @@
  * 悬停或聚焦一张卡：接下来、已完成里它的上下游行描边，其余变淡。点 chip 或从「谁在干活」跳来：先展开所在折叠，再滚到那一行闪一次
  * （dag.module.css 的 .flash）。头部图视图也用（FocusHead），接在画布上面，随时能切回列表。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { Tr } from "../collab-model";
 import type { DagView } from "./use-dag-ui";
 import type { BoardNode, FeatureCard } from "./dag-types";
@@ -29,6 +29,7 @@ interface HeadProps {
   onSeg?: (section: Section) => void;
   ft: Ft;
   tr: Tr;
+  narrow?: boolean;
 }
 
 const machineName = (m: string, ft: Ft) => (m === "local" ? ft("本机") : m);
@@ -40,7 +41,7 @@ function workingMachines(active: readonly FocusCard[]): [string, number][] {
   return [...out];
 }
 
-export function FocusHead({ model, feature, view, setView, onVersions, onSeg, ft, tr }: HeadProps) {
+export function FocusHead({ model, feature, view, setView, onVersions, onSeg, ft, tr, narrow }: HeadProps) {
   const { head } = model;
   const segs = [
     { k: "done", n: head.done, cls: s.segOk, to: "done", label: ft("已完成 {n}", { n: head.done }) },
@@ -62,11 +63,11 @@ export function FocusHead({ model, feature, view, setView, onVersions, onSeg, ft
             ? <button key={g.k} type="button" className={`${s.barSeg} ${g.cls}`} style={{ flexGrow: g.n }} title={g.label} aria-label={g.label} onClick={() => onSeg(g.to)} />
             : <span key={g.k} className={`${s.barSeg} ${g.cls}`} style={{ flexGrow: g.n }} title={g.label} />))}
         </div>
-        <div className={s.toggle} role="group">
+        {!narrow && <div className={s.toggle} role="group">
           {(["list", "graph"] as const).map((k) => (
             <button key={k} type="button" aria-pressed={view === k} onClick={() => setView(k)}>{ft(k === "list" ? "列表" : "图")}</button>
           ))}
-        </div>
+        </div>}
         <button type="button" className={d.vbtn} onClick={() => onVersions(feature.id)} aria-label={tr("版本")}>
           v{feature.currentVersion}
           {feature.pending && <span className={d.pend} title={tr("待批")} />}
@@ -96,9 +97,44 @@ function useRelation(nodes: readonly BoardNode[]) {
   return { rel, setHover };
 }
 
+/** 只观察分区与滚动口相交；root 与 sticky 使用同一个滚动口，避免手机外壳改变高度后锚点错位。 */
+function useSectionAnchor(root: RefObject<HTMLDivElement | null>, narrow: boolean | undefined, counts: string) {
+  const [active, setActive] = useState<Section>("active");
+  useEffect(() => {
+    const el = root.current;
+    if (!narrow || !el) return;
+    const sections = [...el.querySelectorAll<HTMLElement>("[data-section]")];
+    const size = new ResizeObserver(() => el.style.setProperty("--focus-scroll-height", `${el.clientHeight}px`));
+    el.style.setProperty("--focus-scroll-height", `${el.clientHeight}px`);
+    size.observe(el);
+    const visible = new Set<Element>();
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting && entry.intersectionRect.height > 1) visible.add(entry.target); else visible.delete(entry.target);
+      }
+      const first = sections.find((section) => visible.has(section) && section.getBoundingClientRect().bottom > el.getBoundingClientRect().top + 54);
+      if (first) setActive(first.dataset.section as Section);
+    }, { root: el, rootMargin: "-53px 0px -65% 0px", threshold: [0, 0.01] });
+    sections.forEach((section) => observer.observe(section));
+    return () => { observer.disconnect(); size.disconnect(); };
+  }, [root, narrow, counts]);
+  return active;
+}
+
+function FocusAnchors({ model, next, active, onSeg, ft }: { model: FocusModel; next: number; active: Section; onSeg: (s: Section) => void; ft: Ft }) {
+  const items = [{ key: "active", label: "进行中 {n}", n: model.active.length },
+    { key: "next", label: "接下来 {n}", n: next }, { key: "done", label: "已完成 {n}", n: model.done.length }] as const;
+  return <div className={s.anchors} data-focus-anchors>
+    {items.map((i) => <button key={i.key} type="button" aria-pressed={active === i.key} disabled={!i.n} onClick={() => onSeg(i.key)}>
+      {ft(i.label, { n: i.n })}
+    </button>)}
+  </div>;
+}
+
 export function FocusBoard(p: BoardProps) {
   const { model, feature, ft, tr } = p;
   const root = useRef<HTMLDivElement>(null);
+  const active = useSectionAnchor(root, p.narrow, `${feature.id}:${model.active.length}:${model.done.length}:${model.head.idle}`);
   const nodes = useMemo(() => new Map(feature.nodes.map((n) => [n.key, n])), [feature.nodes]);
   const { rel, setHover } = useRelation(feature.nodes);
   const [pulse, setPulse] = useState<{ key: string; seq: number } | null>(null);
@@ -121,14 +157,18 @@ export function FocusBoard(p: BoardProps) {
     void el.offsetWidth;
     el.classList.add(d.flash);
   }, [pulse]);
-  const toSection = (k: Section) => root.current?.querySelector(`[data-section="${k}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  const toSection = (k: Section) => root.current?.querySelector(`[data-section="${k}"]`)?.scrollIntoView({ block: "start",
+    behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   const cards = useExiting(model.active, (c) => c.nodeKey);
   const links: RowLinks = { rel, onRow: p.onNode };
   const nNext = model.next.ready.length + model.next.oneHop.length + model.next.far.length;
+  const head = <FocusHead model={model} feature={feature} view={p.view} setView={p.setView} onVersions={p.onVersions}
+    onSeg={p.narrow ? undefined : toSection} narrow={p.narrow} ft={ft} tr={tr} />;
   return (
-    <div className={s.pane}>
-      <FocusHead model={model} feature={feature} view={p.view} setView={p.setView} onVersions={p.onVersions} onSeg={toSection} ft={ft} tr={tr} />
+    <div className={`${s.pane} ${p.narrow ? s.narrow : ""}`}>
+      {!p.narrow && head}
       <div ref={root} className={s.scroll} data-focus-board={feature.id}>
+        {p.narrow && <>{head}<FocusAnchors model={model} next={nNext} active={active} onSeg={toSection} ft={ft} /></>}
         {cards.length > 0 && (
           <section data-section="active" className={s.section}>
             <h3 className={s.secTitle}>{ft("进行中 {n}", { n: model.active.length })}</h3>

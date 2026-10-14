@@ -154,10 +154,10 @@ export function useDagPanes(a: DagPanesArgs) {
   );
   const mobile = (fallback: React.ReactNode) => (
     <CountContext.Provider value={counts}>
-      <ProductPanes {...paneProps} narrow={true} fallback={fallback} subdag={
+      <ProductPanes {...paneProps} narrow={true} fallback={fallback} subdag={focusPane.narrow(
         <MobileDag features={drawable(shown)} open={ui.open} doneOpen={ui.doneOpen} look={(f, n) => lookOf(f.id, n)}
           onFeature={ui.toggleFeature} onFold={ui.toggleDone} onVersions={onVersions} onNode={onNode} onOwner={ui.jumpRow} tr={tr} />
-      } />
+      )} />
       {a.narrow && diffPage && <div className={d.backdrop} onClick={(e) => e.target === e.currentTarget && a.close()}><div className={d.drawer}>{diffPage}</div></div>}
     </CountContext.Provider>
   );
