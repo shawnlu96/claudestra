@@ -14,12 +14,14 @@ import s from './product.module.css';
 interface Props {
   board: ProductBoard; narrow: boolean; now: number; onFeature: (id: string) => void; tr: Tr; featureMeta?: (f: ProductFeature) => React.ReactNode;
   activeUnknown?: boolean; onTask?: (id: string) => void;
+  /** 项目 id：工具条偏好按项目分开存（projmap:<project>:…）；缺省时共用一份 */
+  project?: string;
 }
 
 export function ProductView(p: Props) {
   if (p.narrow) return <ProductMobile board={p.board} now={p.now} onFeature={p.onFeature} tr={p.tr} featureMeta={p.featureMeta} activeUnknown={p.activeUnknown} />;
   return <ProductCanvas board={p.board} now={p.now} onFeature={p.onFeature} onTask={p.onTask} tr={p.tr} featureMeta={p.featureMeta}
-    activeUnknown={p.activeUnknown} />;
+    activeUnknown={p.activeUnknown} project={p.project} />;
 }
 
 export function FeatureTrail({ title, onBack, tr }: { title: string; onBack: () => void; tr: Tr }) {

@@ -77,6 +77,35 @@ test('PDLAYOUT1 [验收线 2]: links / areas / frozen / paused and frozen states
   for (const body of [{ ...product, features: [feature('x', { area: 3 as never })] },
     { ...product, deps: [{ from: 'a', to: 'b', note: '', satisfied: 'yes' }] }]) expect(() => assertProductBoard(body)).toThrow();
 });
+test('PDLAYOUT1 [验收线 2]: link evidence is checked per kind; a malformed record drops links (one warning), the board stays usable', async () => {
+  const { projectMapBoard, PROJECT_MAP_NOW } = await import('./helpers/project-map-fixture');
+  const task = { from: 'n1', to: 'n2', fromStage: 'impl', toStage: 'spec', satisfied: false };
+  const lock = { node: 'n1', wanted: 'src/a.ts', held: 'src/**', holder: 't1', since: PROJECT_MAP_NOW };
+  const wrap = (kind: string, evidence: unknown[]) => ({ from: 'f-team', to: 'f-private', note: '', kind, satisfied: false, count: evidence.length, evidence });
+  const warn = console.warn;
+  const warned: string[] = [];
+  console.warn = (m: string) => { warned.push(m); };
+  try {
+    const good = { ...projectMapBoard(PROJECT_MAP_NOW), links: [wrap('task', [task]), wrap('lock', [lock]), wrap('future', [{}])] };
+    assertProductBoard(good);
+    expect(good.links!.map(l => l.kind)).toEqual(['task', 'lock']);
+    expect(warned).toHaveLength(0);
+    const bad: unknown[][] = [
+      [{}], [{ ...task, satisfied: 'no' }], [{ ...task, fromStage: undefined }], [{ ...task, to: 3 }], [task, null], [lock],
+    ];
+    const badLock: unknown[][] = [
+      [{}], [{ ...lock, since: 'bad' }], [{ ...lock, since: Number.NaN }], [{ ...lock, since: -1 }], [{ ...lock, holder: undefined }], [{ ...lock, held: 1 }], [task],
+    ];
+    const cases = [...bad.map(e => wrap('task', e)), ...badLock.map(e => wrap('lock', e))];
+    for (const link of cases) {
+      const body = { ...projectMapBoard(PROJECT_MAP_NOW), links: [wrap('task', [task]), link] };
+      expect(() => assertProductBoard(body)).not.toThrow();
+      expect('links' in body).toBe(false);
+      expect(body.features).toHaveLength(projectMapBoard(PROJECT_MAP_NOW).features.length);
+    }
+    expect(warned).toEqual(cases.map(() => '[product] dropped malformed links'));
+  } finally { console.warn = warn; }
+});
 test('ETA today has time, other dates have month/day, null is hidden', () => {
   const now = new Date(2026, 9, 2, 9).getTime();
   expect(productEta(new Date(2026, 9, 2, 14).getTime(), now, '今天')).toBe('今天 14:00');

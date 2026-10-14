@@ -63,8 +63,16 @@ const frontierItem = (i: unknown) => record(i) && typeof i.key === 'string' && s
 const bool = (v: unknown) => typeof v === 'boolean';
 const depOk = (d: unknown) => record(d) && typeof d.from === 'string' && typeof d.to === 'string' && typeof d.note === 'string'
   && absentOr(d.satisfied, bool) && absentOr(d.count, count) && absentOr(d.evidence, Array.isArray);
+const str = (v: unknown) => typeof v === 'string';
+const strs = (r: Record<string, unknown>, keys: string[]) => keys.every(k => str(r[k]));
+/** Evidence is checked per kind (same fields as edges.ts TaskEvidence / LockEvidence); an unknown kind is ignored later, so its evidence is not inspected. */
+const EVIDENCE_OK: Record<string, (e: unknown) => boolean> = {
+  task: (e) => record(e) && strs(e, ['from', 'to', 'fromStage', 'toStage']) && bool(e.satisfied),
+  lock: (e) => record(e) && strs(e, ['node', 'wanted', 'held', 'holder']) && count(e.since),
+};
 const linkOk = (l: unknown) => record(l) && typeof l.from === 'string' && typeof l.to === 'string' && typeof l.note === 'string'
-  && typeof l.kind === 'string' && bool(l.satisfied) && count(l.count) && Array.isArray(l.evidence) && l.evidence.every(record);
+  && typeof l.kind === 'string' && bool(l.satisfied) && count(l.count) && Array.isArray(l.evidence)
+  && (!Object.hasOwn(EVIDENCE_OK, l.kind) || l.evidence.every(EVIDENCE_OK[l.kind]));
 const areasOk = (a: unknown) => Array.isArray(a) && a.every(x => record(x) && typeof x.id === 'string' && typeof x.name === 'string')
   && new Set(a.map(x => (x as { id: string }).id)).size === a.length;
 

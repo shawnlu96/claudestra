@@ -20,15 +20,17 @@ function writePref(key: string, value: string) {
   try { store()?.setItem(key, value); } catch { /* 存不进去只是下次不记得 */ }
 }
 
-/** 本设备记住的模式与已收尾展开；project 缺省时各项目共用一份 */
+/** 本设备记住的模式与已收尾展开；换项目就按新项目的 key 重读（不沿用上一个项目的状态）。project 缺省时各项目共用一份 */
 export function useMapPrefs(project = '_') {
   const key = (k: string) => `projmap:${project}:${k}`;
-  const [mode, setModeState] = useState<MapMode>(() => (readPref(key('mode')) === 'lane' ? 'lane' : 'dep'));
-  const [doneOpen, setDoneState] = useState(() => readPref(key('done')) === '1');
+  const read = () => ({ project, mode: (readPref(key('mode')) === 'lane' ? 'lane' : 'dep') as MapMode, doneOpen: readPref(key('done')) === '1' });
+  const [saved, setSaved] = useState(read);
+  const cur = saved.project === project ? saved : read();
+  if (cur !== saved) setSaved(cur);
   return {
-    mode, doneOpen,
-    setMode: (v: MapMode) => { setModeState(v); writePref(key('mode'), v); },
-    setDoneOpen: (v: boolean) => { setDoneState(v); writePref(key('done'), v ? '1' : '0'); },
+    mode: cur.mode, doneOpen: cur.doneOpen,
+    setMode: (v: MapMode) => { setSaved({ ...cur, mode: v }); writePref(key('mode'), v); },
+    setDoneOpen: (v: boolean) => { setSaved({ ...cur, doneOpen: v }); writePref(key('done'), v ? '1' : '0'); },
   };
 }
 

@@ -16,7 +16,6 @@ const webRequire = createRequire(new URL("../web/package.json", import.meta.url)
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let ProductView: unknown;
-const realStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
 
 beforeAll(async () => {
   GlobalRegistrator.register({ url: "http://localhost/", width: 1280, height: 900 });
@@ -36,14 +35,16 @@ afterEach(() => {
 const tr = (s: string, p?: Record<string, unknown>) => s.replace(/\{(\w+)\}/g, (_, k) => String(p?.[k] ?? ""));
 const doc = () => (globalThis as unknown as { document: { createElement(t: string): El; body: El } }).document;
 
-async function mount() {
+async function mount(extra: Record<string, unknown> = {}) {
   const host = doc().createElement("div");
   doc().body.appendChild(host);
   const root = createRoot(host as never);
   const h = React.createElement as unknown as (...a: unknown[]) => unknown;
   await React.act(async () => root.render(h(ProductView, { board: projectMapBoard(PROJECT_MAP_NOW), narrow: false, now: PROJECT_MAP_NOW,
-    onFeature: () => {}, tr }) as never));
-  return { host, unmount: async () => { await React.act(async () => root.unmount()); host.remove(); } };
+    onFeature: () => {}, tr, ...extra }) as never));
+  const rerender = (more: Record<string, unknown>) => React.act(async () => root.render(h(ProductView, { board: projectMapBoard(PROJECT_MAP_NOW), narrow: false,
+    now: PROJECT_MAP_NOW, onFeature: () => {}, tr, ...more }) as never));
+  return { host, rerender, unmount: async () => { await React.act(async () => root.unmount()); host.remove(); } };
 }
 const all = (host: El, sel: string) => Array.from(host.querySelectorAll(sel));
 const button = (host: El, text: string | RegExp) => all(host, "button").find((b) => (typeof text === "string" ? b.textContent === text : text.test(b.textContent ?? "")))!;
@@ -92,6 +93,7 @@ test("「按板块」 shows 7 lane heads and is remembered", async () => {
 });
 
 test("a throwing localStorage still renders, in dependency mode", async () => {
+  const realStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   Object.defineProperty(globalThis, "localStorage", { configurable: true, get() { throw new Error("blocked"); } });
   try {
     const { host, unmount } = await mount();
@@ -103,4 +105,21 @@ test("a throwing localStorage still renders, in dependency mode", async () => {
   } finally {
     if (realStorage) Object.defineProperty(globalThis, "localStorage", realStorage);
   }
+});
+
+test("preferences are kept per project and a project switch reloads that project's keys", async () => {
+  const ls = (globalThis as unknown as { localStorage: { getItem(k: string): string | null; setItem(k: string, v: string): void } }).localStorage;
+  ls.setItem("projmap:beta:mode", "lane");
+  const { host, rerender, unmount } = await mount({ project: "alpha" });
+  expect(button(host, "按依赖").getAttribute("aria-checked")).toBe("true");
+  await click(button(host, "已收尾 8"));
+  expect([ls.getItem("projmap:alpha:done"), ls.getItem("projmap:_:done"), ls.getItem("projmap:beta:done")]).toEqual(["1", null, null]);
+  await rerender({ project: "beta" });
+  expect(button(host, "按板块").getAttribute("aria-checked")).toBe("true");
+  expect(button(host, "已收尾 8").getAttribute("aria-expanded")).toBe("false");
+  await click(button(host, "按依赖"));
+  expect([ls.getItem("projmap:beta:mode"), ls.getItem("projmap:alpha:mode")]).toEqual(["dep", null]);
+  await rerender({ project: "alpha" });
+  expect(button(host, "已收尾 8").getAttribute("aria-expanded")).toBe("true");
+  await unmount();
 });
