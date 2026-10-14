@@ -60,7 +60,7 @@ test.skipIf(!out)("TODAY1：今天页（桌面主区 / 整页 / 手机侧栏条�
           if (width >= 640) {
             if (after) {
               await g.page.waitForFunction(`document.querySelectorAll("[data-now=page] [data-now-stuck-row]").length === 3 && !!document.querySelector("[data-now=page] [data-now-quota]")`);
-              const strip = (await g.page.locator("[data-now=strip] button[aria-expanded]").innerText()).replace(/\s+/g, " ").trim();
+              const strip = (await g.page.locator("[data-now=strip] button[aria-expanded]").first().innerText()).replace(/\s+/g, " ").trim();
               expect(strip).toBe("今天 3 件要你处理 · 3 个 agent 在干活");
               expect((await g.page.locator("[data-now=page] h2").innerText()).trim()).toBe("今天");
             }
@@ -79,7 +79,7 @@ test.skipIf(!out)("TODAY1：今天页（桌面主区 / 整页 / 手机侧栏条�
             }
           } else {
             await shot("list");
-            await g.page.locator("[data-now=strip] button[aria-expanded]").click();
+            await g.page.locator("[data-now=strip] button[aria-expanded]").first().click();
             await g.page.waitForFunction(`document.querySelector("[data-now=strip]").dataset.nowOpen === "1"`);
             if (after) await g.page.waitForFunction(`document.querySelectorAll("[data-now=strip] [data-now-stuck-row]").length === 3`);
             await shot("list-open");
