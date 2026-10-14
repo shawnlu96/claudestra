@@ -118,6 +118,7 @@ function Player({ d, tr, onClose }: { d: TaskDetail; tr: Tr; onClose: () => void
             {cur.approx && "≈"}
             {fmtEventTime(cur.ts, d.now, tr)}
           </span>
+          {cur.intervention && <span className={base.manualBadge} data-intervention>{tr("人工干预")}</span>}
           {cur.text}
         </div>
       </div>
@@ -127,7 +128,7 @@ function Player({ d, tr, onClose }: { d: TaskDetail; tr: Tr; onClose: () => void
         {frames.map((f, k) => (
           <button key={f.seq} type="button" data-i={k} className={`${s.rpItem} ${k === i ? s.cur : k > i ? s.fut : ""}`} onClick={() => (setPlaying(false), setI(k))}>
             <span className={s.tm}>{fmtEventTime(f.ts, d.now, tr)}</span>
-            <span>{f.text}</span>
+            <span>{f.intervention && <span className={base.manualBadge} data-intervention>{tr("人工干预")}</span>}{f.text}</span>
           </button>
         ))}
       </div>

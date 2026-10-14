@@ -74,6 +74,7 @@ import { POOL_REFUSAL_CMDS } from "./ledger-pool-refusal-cmds.js";
 import { SCHEDULER_RECOVERY_CMDS } from "./ledger-scheduler-recovery-cmds.js";
 import { LOCK_YIELD_CMDS, LOCK_YIELD_SERVICE_COMMANDS } from "./ledger-lock-yield-cmds.js";
 import { PM_DIGEST_CMDS } from "./pm-digest-cmds.js";
+import { PM_RAILS_CMDS, withPmRails } from "./pm-rails-cmds.js";
 import { SECURITY_POOL_CMDS } from "./security-pool-cmds.js";
 import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
@@ -121,6 +122,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...POOL_REFUSAL_CMDS, // 池单拒审的调度服务写口（MODELXP2）
   ...LOCK_YIELD_CMDS, // 停滞卡让锁（RLOCK2）
   ...PM_DIGEST_CMDS, // PM 推送摘要（PMDIG1）
+  ...PM_RAILS_CMDS, // 人工干预推 owner（PMR-2）
   ...SECURITY_POOL_CMDS, // security 卡审查进统一池开关（SECPOOL1）
   ...PRIVATE_POOL_CMDS, // 私仓卡进统一池开关（SECPOOL2）
   ...CI_KNOWN_FLAKY_CMDS, // 已知偶发测试清单（CIF8）
@@ -148,7 +150,7 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
   if ("error" in p) return { ok: false, code: "invalid", error: p.error, usage: `ledger ${spec.usage}` };
   try {
     deps.assertLease?.(); // 写锁、registry / projects 这些 await 都过了：台账事务是同步的，核完直接跑
-    return await spec.run(new LedgerCli(deps, p));
+    return await withPmRails(deps, args, async () => spec.run(new LedgerCli(deps, p)));
   } catch (e) {
     if (e instanceof SchedulerLeaseLost) return { ok: false, code: "lease-lost", error: e.message };
     if (e instanceof LedgerError) return { ok: false, code: e.code, error: e.message, ...(e.current ? { current: e.current } : {}), usage: `ledger ${spec.usage}` };

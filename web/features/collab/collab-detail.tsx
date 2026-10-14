@@ -191,7 +191,10 @@ function RecentSec({ d, tr, home }: { d: TaskDetail; tr: Tr; home: HomeOnly }) {
           <span className={s.ic}>
             <Icon name={EVENT_ICON[r.kind] ?? "history"} size={13} />
           </span>
-          <span>{r.text}</span>
+          <span>
+            {r.intervention && <span className={s.manualBadge} data-intervention>{tr("人工干预")}</span>}
+            {r.text}
+          </span>
         </div>
       ))}
       {homeText && <HomeOnlyNote k="events.text" text={tr(recent.length ? MACHINE_WORDS.originalThere : MACHINE_WORDS.visibleThere)} />}
