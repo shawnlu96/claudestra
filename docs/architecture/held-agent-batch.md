@@ -12,6 +12,7 @@
 
 - 在回合边界、目标空闲时，`flushHeld` 把这个收件人到期的本机 agent 消息拼成一封载体，一次送出。可以来自多个发送人。
   只取按到达顺序连续的一段：碰到进不了合批的条目（peer、owner、带附件的……）就停，不越过它，顺序和逐条投递一致。
+  渲染时某一条出错也一样：截在它前面，它走原路径，后面的不越过它。
   逻辑在 `src/bridge/held-flush.ts` 的 `agentCarrier`，成员判定在 `src/lib/held-agent-batch.ts`。
 - 载体和内部通知批次（`CLAUDESTRA_HELD_IDLE_BATCH`）是同一套，见 `releaseIdleBatch`：
   - 条数和字数上限同 check_inbox。放不下的留到下一个边界，最早的排最前；超长的只给开头，附 `check_inbox({ read })` 分页读入口。
@@ -24,6 +25,8 @@
 
 - owner、卡片答复、peer、guest 的消息：外人一轮只投一个发送人（`mayJoin`），owner 的有自己的插队规则。
 - 交给当班 PM 的角色消息（`pm-held-transfer` 的分轮规则）。
+- 收件人是退任 PM：载体没有原发送人，会被 PM 角色规则转给当班 PM，而成员（前任之间自己的对话）留在原处，所以不组载体、逐条走原路径。
+  要合这一类得让载体保留成员的路由属性，涉及 `project-pm-delivery`，不在本卡范围。
 - check_inbox 租约内的、额度闸押着的、带附件的（附件在逐条投递的 meta 里，载体带不走）。
 - `expectSession` 跟这一段第一个带会话的不一样的调度派单：一封载体只能核一个会话，这一段在它前面截断。
 - 内部通知批次开着时，已归进那批的条目。
