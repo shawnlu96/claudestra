@@ -12,6 +12,7 @@ import { choice, digest, id, integer, literal, nullable, object, record } from "
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 import { EXT_CAPABILITIES_OFF, parseSharedLedgerReadResponse, type SharedLedgerExtCapabilities } from "./shared-ledger-contract-reads.js";
+import { parseFeatureDepsUpload, parseFeatureDepsReceipt, type FeatureDepsUpload } from "./shared-ledger-contract-feature-deps.js";
 import { parseSharedLedgerTaskFacts } from "./shared-ledger-contract-task-facts.js";
 import { scrubSharedLedger, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { parseSourceDagUpload, parseSourceDagUploadResponse, SOURCE_DAG_UPLOAD_RESOURCE, type SourceDagUpload, type SourceDagUploadOutcome } from "./shared-ledger-contract-source-dag.js";
@@ -164,6 +165,16 @@ export class SharedLedgerClient<P extends SharedLedgerProjectsProtocol = SharedL
     const result = parseImportReceipt(await this.request("POST", `imports/${payload.batchId}`, payload));
     if (result.status !== (payload.mode === "activate" ? "active" : "revoked") || result.batchId !== payload.batchId
       || result.projectId !== payload.projectId || result.receipt.manifestDigest !== payload.manifestDigest) throw new SharedLedgerUnavailable();
+    return result;
+  }
+  /** Full replacement, one signed POST. Scrub every string in the existing upload vocabulary, then parse the original shape. */
+  async uploadFeatureDeps(input: FeatureDepsUpload) {
+    const body = parseFeatureDepsUpload(input);
+    if (body.teamId !== this.connection.teamId || body.sourceInstanceId !== this.connection.instanceId) throw new SharedLedgerUnavailable();
+    const payload = this.scrub({ sourceInstanceId: body.sourceInstanceId, featureId: body.teamId,
+      tasks: body.edges.map((e) => ({ sourceTaskId: e.projectId, deps: [e.from, e.to, e.kind] })) }, () => body);
+    const result = parseFeatureDepsReceipt(await this.request("POST", "feature-deps", payload));
+    if (result.accepted !== payload.edges.length) throw new SharedLedgerUnavailable();
     return result;
   }
   async projection(input: SharedLedgerProjection) {
