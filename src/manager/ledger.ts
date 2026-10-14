@@ -1,3 +1,4 @@
+import { PRIORITY_CMDS } from "./ledger-priority-cmds.js";
 import { PM_SWITCH_CMDS } from "./pm-switch.js";
 import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledger-resource-scope-cmds.js";
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
@@ -91,7 +92,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_RECOVERY_CMDS,
   ...SHARED_EXEC_CMDS,
   ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...SHARED_AUTO_CMDS, ...CENTER_REPLICA_CMDS, ...PM_SWITCH_CMDS,
-  ...WRITE_CMDS,
+  ...WRITE_CMDS, ...PRIORITY_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...DEP_CMDS,

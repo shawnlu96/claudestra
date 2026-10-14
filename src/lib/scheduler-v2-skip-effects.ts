@@ -83,6 +83,10 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** SQL of the ledger writer layer: it runs inside a `ledger <sub>` transaction or the gated step that drives it */
   writer: {
+    // Priority DAG ownership stays in existing transactions; schema in migrations; authorized registration in CLI transactions.
+    "ledger-priority-lifecycle.ts": "sql=8 stmt=8",
+    "ledger-priority-schema.ts": "sql=1 stmt=2",
+    "ledger-priority-write.ts": "sql=4 stmt=4",
     "scheduler-review-stale.ts": "sql=1 stmt=1",
     "agent-lifecycle-schema.ts": "stmt=1", "agent-lifecycle-store.ts": "sql=6 stmt=6", "fix-strategy-remote-order.ts": "sql=1 stmt=1",
     "fix-strategy-remote.ts": "sql=1 stmt=1 notice=1", "fix-strategy-session.ts": "sql=4 stmt=4", "fix-strategy-task-write.ts": "sql=1 stmt=1",

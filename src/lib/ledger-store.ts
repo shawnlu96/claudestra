@@ -1,3 +1,4 @@
+import { migratePriority, PRIORITY_TABLES, PRIORITY_COLUMNS, PRIORITY_INDEXES } from "./ledger-priority-schema.js";
 /**
  * 内置台账的库（docs 10-ledger §2 §3）：打开、建表迁移、行映射、只读查询。写入在 ledger-write.ts（每次写一个 BEGIN IMMEDIATE 事务）。
  * bun:sqlite + WAL + busy_timeout：CLI、bridge 等多个进程同时开同一个文件；按路径只开一次，测试传 ":memory:" 或临时路径（先例 web-state.ts）。
@@ -30,7 +31,7 @@ export { schemaVersion };
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
 export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings", "audit_baseline", "task_steps", ...SCHEDULER_TABLES,
-  ...FEATURE_TABLES, ...LEND_TABLES, ...DEPLOY_TABLES, "lend_push_queue", "lend_peer_cooldowns", ...LEND_RELAY_TABLES, ...MEMORY_TABLES, ...WORKER_AGENTS_TABLES] as const;
+  ...FEATURE_TABLES, ...LEND_TABLES, ...DEPLOY_TABLES, "lend_push_queue", "lend_peer_cooldowns", ...LEND_RELAY_TABLES, ...MEMORY_TABLES, ...WORKER_AGENTS_TABLES, ...PRIORITY_TABLES] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -145,7 +146,7 @@ function migrateDeps(db: Database): void {
 export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2,
   STEPS_SCHEMA, SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA, FEATURE_SCHEMA, DAG_REWRITE_SCHEMA, LEND_SCHEMA,
   DEPLOY_SCHEMA, LEND_WRITE_SCHEMA, LEND_PEERS_SCHEMA, SCHEDULER_MERGE_WAIT_SCHEMA, FEATURE_DEPS_SCHEMA, LEND_QUEUE_SCHEMA, LEND_PEER_COOLDOWN_SCHEMA,
-  migratePeerCooldownBaseline, LEND_RELAY_SCHEMA, MEMORY_SCHEMA, WORKER_AGENTS_SCHEMA, installProjectionGuard, LEND_ORDERS_TASK_SCHEMA];
+  migratePeerCooldownBaseline, LEND_RELAY_SCHEMA, MEMORY_SCHEMA, WORKER_AGENTS_SCHEMA, installProjectionGuard, LEND_ORDERS_TASK_SCHEMA, migratePriority];
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 /** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */
@@ -241,7 +242,7 @@ const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
   ...LEND_COLUMNS,
   ...DEPLOY_COLUMNS,
   ...MEMORY_COLUMNS,
-  ...WORKER_AGENTS_COLUMNS,
+  ...WORKER_AGENTS_COLUMNS, ...PRIORITY_COLUMNS,
 };
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
 const REQUIRED_INDEXES: Record<string, readonly string[]> = {
@@ -254,7 +255,7 @@ const REQUIRED_INDEXES: Record<string, readonly string[]> = {
   ...LEND_INDEXES,
   ...DEPLOY_INDEXES,
   ...MEMORY_INDEXES,
-  ...WORKER_AGENTS_INDEXES,
+  ...WORKER_AGENTS_INDEXES, ...PRIORITY_INDEXES,
 };
 
 const LEDGER_SCHEMA: SchemaSpec = { label: "台账库", migrations: LEDGER_MIGRATIONS, tables: LEDGER_TABLES, columns: REQUIRED_COLUMNS, indexes: REQUIRED_INDEXES };
