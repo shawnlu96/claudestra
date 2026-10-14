@@ -23,8 +23,8 @@ import { teamSessionStoreOf, type SessionCard, type SessionFailure, type Session
 
 type Phase = "idle" | "loading" | "ready" | SessionFailure;
 const REASON: Record<SessionFailure, string> = {
-  home_offline: "主场离线，暂时看不了会话", not_open: "主场未开放会话", not_member: "你不在该项目成员里", expired: "请求已过期",
-  gate_refused: "主场拒绝提供这张卡的会话", unsupported: "中心暂未开放会话", unavailable: "会话暂时读不到",
+  home_offline: "任务所在的机器离线，暂时看不了会话", not_open: "任务所在的机器未开放会话", not_member: "你不在该项目成员里", expired: "请求已过期",
+  gate_refused: "任务所在的机器拒绝提供这张卡的会话", unsupported: "中心暂未开放会话", unavailable: "会话暂时读不到",
 };
 /** 这几种可以再要一次（只在用户点的时候发）；主场没开 / 不是成员 / 主场拒发再点也一样，不给按钮 */
 const RETRY: ReadonlySet<Phase> = new Set(["home_offline", "expired", "unavailable"]);
@@ -140,7 +140,7 @@ function Status({ phase, busy, onRetry, tr }: { phase: Phase; busy: boolean; onR
   if (busy) {
     return (
       <div className={s.rr} data-session-status="loading" role="status">
-        <div className={s.tx} style={{ display: "flex", alignItems: "center", gap: 6 }}><Icon name="hourglass" size={13} />{tr("正在向主场机器读取会话…")}</div>
+        <div className={s.tx} style={{ display: "flex", alignItems: "center", gap: 6 }}><Icon name="hourglass" size={13} />{tr("正在向任务所在的机器读取会话…")}</div>
       </div>
     );
   }
@@ -272,7 +272,7 @@ export function TeamSessionSec({ project, featureId, cardId, blocked, tr: base }
         <span className={s.av}><Icon name="messageSquare" size={14} /></span>
         <div>
           <div className={s.n}>{tr("作者 / 审查员会话")}</div>
-          <div className={s.d}>{tr("按页向主场机器读取，只读")}</div>
+          <div className={s.d}>{tr("按页向任务所在的机器读取，只读")}</div>
           {blocked ? <div className={s.d} data-session-status={blocked}>{tr(REASON[blocked])}</div> : (
             <button type="button" className={s.btn} style={{ marginTop: 8 }} aria-expanded={open} data-session-toggle="" onClick={toggle}>
               {tr(open ? "收起会话" : "查看会话")}

@@ -13,6 +13,7 @@ import { recoveryPolicy } from "./recovery-policy.js";
 import { reviewLocalFacts } from "./scheduler-agent-pool-review-local.js";
 import { writeLocalFacts } from "./scheduler-agent-pool-write-local.js";
 import { privateRepoOf, privateReviewWait, privateWriteWait } from "./scheduler-foreign-repo.js";
+import { poolRelayAway } from "./recovery-peer-lease.js";
 
 /** PRIVPLACE1: the same facts with this machine taken out (no local room, no family slot, localPriority off): peers only. */
 export function peersOnly<T extends PlacementFacts>(f: T): T {
@@ -69,6 +70,9 @@ export function agentPoolWork(s: PlannerSnapshot, since: number, role: Exclude<P
   }
   const priv = privateRepoOf(s); // PRIVPLACE1: never a local author for a private card (its pin / spec cases are remoteWork's)
   const placed: Placement = placeWithRetries(priv ? peersOnly(facts) : facts, role, s.workflow.authorFamily);
+  const lease = role === "fix" && !facts.pin && placed.kind === "wait" ? facts.writeLeasePeer : null; // PEERLEASE1: the pool relay (recovery-peer-lease.ts)
+  const relay = lease ? poolRelayAway(s, since, priv ? peersOnly(facts) : facts, lease, priv ? `${privateWriteWait(priv)}（${placed.reason}）` : placed.reason) : null;
+  if (relay) return relay;
   if (priv && placed.kind !== "peer") return { wait: `${privateWriteWait(priv)}（${placed.reason}）`, code: "placement" };
   return placed.kind === "peer" ? { peer: placed.peer, reason: `挂池：${role} 给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` }
     : placed.kind === "wait" ? { wait: placed.reason, code: "placement" } : null;

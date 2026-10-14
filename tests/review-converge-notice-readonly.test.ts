@@ -144,8 +144,8 @@ describe("failed follow-up notice on the read-only scheduler connection", () => 
     cleanup.push(() => { singleton.release(); maintenance.release(); });
     const home = join(f.dir, "home"), runtime = join(f.dir, "runtime");
     mkdirSync(home); mkdirSync(runtime);
-    // OWN1 夹具：子进程的状态目录是 f.dir，本例只测跟进通知，manualCaseOwnership 关掉
-    writeFileSync(join(f.dir, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualCaseOwnership: "off" } } } }));
+    // OWN1 / SLA1 夹具：子进程的状态目录是 f.dir，本例只测跟进通知，manualCaseOwnership / manualCaseSla 关掉
+    writeFileSync(join(f.dir, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualCaseOwnership: "off", manualCaseSla: "off" } } } }));
     const env = testChildEnv({ PATH: process.env.PATH!, HOME: home, TMPDIR: process.env.TMPDIR!, CLAUDESTRA_STATE_DIR: f.dir,
       CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1", CLAUDESTRA_SCHEDULER_SERVICE: "1",
       BRIDGE_URL: "ws://127.0.0.1:9", BRIDGE_PORT: "9",

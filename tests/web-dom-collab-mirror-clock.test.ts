@@ -1,9 +1,10 @@
 /**
  * team-project-N8F2：团队规划面板的时效文案跟 use-collab 的走表时钟走，与卡片同钟（N8F r1 审查 P2 planning-clock · freshness）。
  * TeamSource + CollabView 真挂到 happy-dom（React 19），fetch 拦到 generateTeamFixture 的夹具，observedAt 固定。
- * 旧红新绿：11 分钟时首次读取，面板「主场 11 分钟前同步」；时钟推进到 90 分钟、serverSeq 不变、走一次真实 5 秒轮询、走表重渲染后，
+ * 旧红新绿：11 分钟时首次读取，面板「11 分钟没收到任务所在机器的更新」；时钟推进到 90 分钟、serverSeq 不变、走一次真实列表轮询、走表重渲染后，
  * main 上面板仍是「11 分钟前」（取的是上次读取总览时的 ov.now），卡片已是「1 小时前」；修完两边逐字相同。
  * 走表：拦下 use-collab 的 30 秒 setInterval，推进 Date.now 后手动触发一次（就是它到点会做的事）。
+ * 列表轮询：pollWait 的 POLL_MS（15 秒）setTimeout 缩到 20ms，仍是 team-source 自己发起的那次读。
  * 新鲜窗口：9 分钟不标过期、11 分钟标过期（mirrorLine 阈值不动）。happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
@@ -11,6 +12,7 @@ import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { setAppConfigForTest } from "../web/lib/app-config";
 import { generateTeamFixture } from "../web/features/collab/shared/team-fixture-gen";
+import { POLL_MS } from "../web/features/collab/team-source-shared";
 import type { FeatureDetail } from "../web/lib/api/shared-ledger";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
@@ -39,7 +41,7 @@ const IDENTITY: Identity = { center: "center", team: fx.team, person: "person-a"
 /** observedAt 固定；页面时钟 = OBSERVED + ago（Date.now 由本文件控制） */
 const OBSERVED = Date.now() - 24 * 60 * MIN;
 let ago = 0;
-const realNow = Date.now, realFetch = globalThis.fetch, realSetInterval = globalThis.setInterval;
+const realNow = Date.now, realFetch = globalThis.fetch, realSetInterval = globalThis.setInterval, realSetTimeout = globalThis.setTimeout;
 /** use-collab 的走表（TICK_MS = 30 秒）：拦下回调，测试里手动到点 */
 const ticks = new Set<() => void>();
 let listReads = 0;
@@ -58,6 +60,8 @@ beforeAll(async () => {
     if (ms === 30_000) { ticks.add(fn); const id = realSetInterval(() => {}, 1 << 30); return id; }
     return realSetInterval(fn, ms, ...rest);
   }) as typeof setInterval;
+  globalThis.setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) =>
+    realSetTimeout(fn, ms === POLL_MS ? 20 : ms, ...rest)) as typeof setTimeout;
   React = webRequire("react") as ReactNS;
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
   doc = (globalThis as unknown as { document: Doc }).document;
@@ -83,6 +87,7 @@ beforeAll(async () => {
 afterAll(async () => {
   Date.now = realNow;
   globalThis.setInterval = realSetInterval;
+  globalThis.setTimeout = realSetTimeout;
   globalThis.fetch = realFetch;
   setAppConfigForTest(null);
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
@@ -95,7 +100,7 @@ async function until(ok: () => boolean, what: string, rounds = 150) {
   throw new Error(`timeout waiting for ${what}`);
 }
 
-const MIRROR = /主场 \d+ (?:分钟|小时)前同步|主场镜像最新/g;
+const MIRROR = /\d+ (?:分钟|小时)没收到任务所在机器的更新|进度是最新的/g;
 /** 团队规划面板里那一行的时效文案 */
 function panel(host: El): string[] {
   const all = Array.from(host.querySelectorAll("*"));
@@ -114,25 +119,27 @@ async function mount(at: number) {
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null,
     h(ui.TeamSource, { identity: IDENTITY }, h(ui.CollabView, { project: ui.sharedCollabProject(IDENTITY) }))) as never));
   await until(() => (host.textContent ?? "").includes(fx.list.features[0]!.title), "team view");
-  const tab = Array.from(host.querySelectorAll("button,[role=tab]")).find((x) => (x.textContent ?? "").trim().startsWith("规划与提案")); // UXHOME1：团队源下「团队」标签改名
-  if (!tab) throw new Error("no 规划与提案 tab");
-  await React.act(async () => tab.click());
+  for (const label of ["团队", "规划与提案"]) {
+    const tab = Array.from(host.querySelectorAll("[role=tab]")).find((x) => (x.textContent ?? "").trim() === label);
+    if (!tab) throw new Error(`no ${label} tab`);
+    await React.act(async () => tab.click());
+  }
   await until(() => panel(host).length > 0, "planning panel");
   return { host, unmount: async () => { await React.act(async () => { openCollabTask(null); root.unmount(); }); host.remove(); } };
 }
 
 test("验收 1：11 分钟时读取 →「11 分钟前」；推进到 90 分钟、serverSeq 不变、真实轮询并重渲染 → 面板「1 小时前」与卡片逐字相同", async () => {
   const v = await mount(11 * MIN);
-  expect(panel(v.host)).toEqual(["主场 11 分钟前同步"]);
+  expect(panel(v.host)).toEqual(["11 分钟没收到任务所在机器的更新"]);
   ago = 90 * MIN;
   const before = listReads;
-  await until(() => listReads > before, "a real 5s poll", 400); // POLL_MS = 5 秒
+  await until(() => listReads > before, "a real list poll", 400); // POLL_MS 的定时器已缩到 20ms
   await wait(50);
   expect(ticks.size).toBeGreaterThan(0);
   await React.act(async () => { for (const t of ticks) t(); });
   await wait(50);
   const planning = panel(v.host);
-  expect(planning).toEqual(["主场 1 小时前同步"]);
+  expect(planning).toEqual(["1 小时没收到任务所在机器的更新"]);
   // 同一 feature 的卡片：打开详情，「现在」一节的原因行（teamNote，按 use-collab 的 now）
   await React.act(async () => openCollabTask(fx.details[0]!.tasks[0]!.sourceTaskId));
   await until(() => (v.host.textContent ?? "").includes("现在"), "card detail");
@@ -142,11 +149,11 @@ test("验收 1：11 分钟时读取 →「11 分钟前」；推进到 90 分钟�
   await v.unmount();
 }, 20_000);
 
-test("验收 2：新鲜窗口不变 —— 9 分钟「主场镜像最新」，11 分钟标过期", async () => {
+test("验收 2：新鲜窗口不变 —— 9 分钟「进度是最新的」，11 分钟标过期", async () => {
   const fresh = await mount(9 * MIN);
-  expect(panel(fresh.host)).toEqual(["主场镜像最新"]);
+  expect(panel(fresh.host)).toEqual(["进度是最新的"]);
   await fresh.unmount();
   const stale = await mount(11 * MIN);
-  expect(panel(stale.host)).toEqual(["主场 11 分钟前同步"]);
+  expect(panel(stale.host)).toEqual(["11 分钟没收到任务所在机器的更新"]);
   await stale.unmount();
 });

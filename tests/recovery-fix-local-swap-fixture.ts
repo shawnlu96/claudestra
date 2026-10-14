@@ -119,15 +119,15 @@ export async function swapFixture(opts: { mode?: RecoveryMode; manualStallHours?
 export type Sx = Awaited<ReturnType<typeof swapFixture>>;
 
 /** Build → mate writes H2 in Claude → local Codex review finds P1 with `report` → fix; lease at mate, no task.agent. */
-export async function toFix(p: Sx, report: string) {
+export async function toFix(p: Sx, report: string, head = H2) {
   p.hello();
   await p.tick();
   const [build] = p.orders();
   expect(build).toMatchObject({ peer: "mate", step: "write", family: "claude" });
   expect(await p.lendCall("lend-claim", { v: 1, orderId: build!.orderId, worker: "w1" })).toMatchObject({ ok: true });
-  p.heads[BRANCH] = { ok: true, head: H2 };
+  p.heads[BRANCH] = { ok: true, head };
   expect(await p.lendCall("lend-write", { v: 1, orderId: build!.orderId, gen: 1, branch: BRANCH, pr: 7, session: { id: "sess-mate", family: "claude" },
-    deliver: { v: 1, orderId: build!.orderId, head: H2, evidence: BRANCH, summary: "改好了", selfCheck: "单测全绿" } })).toMatchObject({ ok: true });
+    deliver: { v: 1, orderId: build!.orderId, head, evidence: BRANCH, summary: "改好了", selfCheck: "单测全绿" } })).toMatchObject({ ok: true });
   p.remote.agents = { claude: 1, codex: 1 };
   await p.tick(); await p.tick(); await p.tick();
   const path = join(p.f.dir, "report-r1.md");
@@ -135,8 +135,8 @@ export async function toFix(p: Sx, report: string) {
   const findings = join(p.f.dir, "p1.json");
   writeFileSync(findings, JSON.stringify([P1]));
   expect(await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "changes", "--p0", "0", "--p1", "1", "--p2", "0",
-    "--head", H2, "--session", "s-rv", "--family", "codex", "--findings", findings, "--path", path)).toMatchObject({ ok: true });
+    "--head", head, "--session", "s-rv", "--family", "codex", "--findings", findings, "--path", path)).toMatchObject({ ok: true });
   await p.tick();
-  expect(p.f.task()).toMatchObject({ stage: "fix", headSHA: H2 });
+  expect(p.f.task()).toMatchObject({ stage: "fix", headSHA: head });
   p.f.db.run("UPDATE tasks SET agent = NULL WHERE id = 'T1'");
 }

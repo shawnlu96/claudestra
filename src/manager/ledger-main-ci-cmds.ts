@@ -16,7 +16,7 @@ import { runBounded } from "../lib/run-bounded.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { projectRepo } from "../lib/scheduler-foreign-repo.js";
 import { mainCiSha, type MainCiTarget } from "../lib/scheduler-main-ci.js";
-import { mainCiFaultKey, planMainCi, type MainCiPmApproval } from "../lib/scheduler-main-ci-plan.js";
+import { mainCiEvidence, mainCiEvidenceKey, mainCiFaultKey, planMainCi, type MainCiPmApproval } from "../lib/scheduler-main-ci-plan.js";
 import { readMainCiNow } from "../lib/scheduler-main-ci-wiring-gh.js";
 import { MAIN_CI_MAX_AGE_MS, mainCiApprovals, mainCiPms, readMainCiState } from "../lib/scheduler-main-ci-wiring-store.js";
 import { claimMainCiNotice, lendMainCiSlot, recordMainCiRepair, revokeMainCiRepair, takeMainCiSlot, writeMainCiState } from "../lib/scheduler-main-ci-wiring-write.js";
@@ -121,7 +121,7 @@ export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-main-ci": {
-    valued: ["op", "read-failure-since", "uncertainty", "key", "kind", "sha", "state", "reason", "intent", "response"],
+    valued: ["op", "read-failure-since", "uncertainty", "key", "kind", "sha", "state", "reason", "intent", "response", "evidence"],
     usage: SERVICE_USAGE,
     run(c) {
       const [, project, ...extra] = c.p.pos;
@@ -151,9 +151,11 @@ export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
       if (op === "observe") {
         const s = c.need("sha"), state = c.need("state");
         if ((s !== "none" && !mainCiSha(s)) || !["red", "unknown", "green"].includes(state)) throw new LedgerError("invalid", "--sha / --state 无效");
-        const reason = one(c, "reason", 400);
-        const r = recordObserved(c.db, { project, mechanism: "mainCiPause", target: "", actionKey: `main-ci:${s.toLowerCase()}:${state}`,
-          action: `暂停：${reason}`, data: { mainSha: s === "none" ? null : s.toLowerCase(), state, reason } }, ctx.now ?? Date.now());
+        const reason = one(c, "reason", 400), ev = c.p.flags.evidence === undefined ? null : mainCiEvidence(c.p.flags.evidence);
+        if (c.p.flags.evidence !== undefined && !ev) throw new LedgerError("invalid", "--evidence 要是 {rule, newReason, runs:[{id, attempt, status, conclusion}]}（runs ≤ 10，≤ 2 KB）");
+        const r = recordObserved(c.db, { project, mechanism: "mainCiPause", target: "", actionKey: `main-ci:${s.toLowerCase()}:${state}` +
+          (ev ? `:${mainCiEvidenceKey(ev)}` : ""), action: `${ev && /^(healthy|main_ci_pending)：/.test(reason) ? "放行" : "暂停"}：${reason}`,
+          data: { mainSha: s === "none" ? null : s.toLowerCase(), state, reason, ...ev ? { evidence: ev } : {} } }, ctx.now ?? Date.now());
         return { ok: true, project, recorded: r.recorded };
       }
       if (op === "lend-slot") { lendMainCiSlot(c.db, ctx, project, c.need("intent")); return { ok: true, project }; }

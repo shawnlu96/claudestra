@@ -20,10 +20,11 @@ const ownerRead = (record = t.record) => ({ ...t.responses.team, team: { ...reco
 const local = { projects: [{ id: "local-a", name: "本机名", dirs: [], personal: false }], peers: [] };
 
 /** The actual producer and route; `team` / `updateTeam` are the only injected center reads. */
-function bridge(team?: SharedProjectsPorts["team"], updateTeam?: SharedProjectsPorts["updateTeam"]) {
+function bridge(team?: SharedProjectsPorts["team"], updateTeam?: SharedProjectsPorts["updateTeam"],
+  teamInstances?: SharedProjectsPorts["teamInstances"]) {
   const d = { person: async () => ({ ...p.person, ...p.requests.list, subject: "owner:self" }), list: async () => [p.project],
     members: async () => [p.member], bindings: () => [{ ...p.identity, localProjectId: "local-a" }],
-    ...(team ? { team } : {}), ...(updateTeam ? { updateTeam } : {}) } as unknown as SharedProjectsPorts;
+    ...(team ? { team } : {}), ...(updateTeam ? { updateTeam } : {}), ...(teamInstances ? { teamInstances } : {}) } as unknown as SharedProjectsPorts;
   const sent: { path: string; method?: string; json: unknown; header?: string }[] = [];
   const request: ProjectRequest = async (path, init) => {
     sent.push({ path, method: init.method, json: init.json, header: init.headers?.["x-shared-ledger-project"] });
@@ -161,5 +162,48 @@ describe("team rename through the actual route", () => {
     await port.list(signal());
     await expect(port.updateTeam!(scope, { rev: 1, name: "x" }, signal())).rejects.toMatchObject({ status: 403 });
     expect(member.sent.map(s => s.path)).toEqual(["/shared-projects/snapshot"]);
+  });
+});
+
+describe("ROSTER2a teamInstances consumption", () => {
+  const instances = async () => ({ ...t.responses.teamInstances, instances: [t.ownerInstance, { ...t.selfInstance, personId: "person-other" }] });
+  test("[验收线 5] a new snapshot yields instances of directory members only", async () => {
+    const next = projectSourceSnapshot(await bridge(async () => ownerRead(), undefined, instances).raw());
+    expect(next.teams[0]?.instances).toEqual([{ instanceId: "instance-owner", personId: "person-owner" },
+      { instanceId: "instance-demo", personId: "person-other" }]);
+  });
+  test("[验收线 5] old bridge (no teamInstances key) or unavailable read: instances null, everything else unchanged", async () => {
+    const raw = await bridge(async () => ownerRead(), undefined, instances).raw();
+    const { teamInstances: _i, ...old } = raw;
+    const before = projectSourceSnapshot(old), after = projectSourceSnapshot(raw);
+    expect(before.teams[0]?.instances).toBeNull();
+    const { instances: _a, ...afterTeam } = after.teams[0]!, { instances: _b, ...beforeTeam } = before.teams[0]!;
+    expect(afterTeam).toEqual(beforeTeam);
+    expect({ ...after, teams: [] }).toEqual({ ...before, teams: [] });
+    const degraded = projectSourceSnapshot(await bridge(async () => ownerRead(), undefined, async () => { throw new Error("x"); }).raw());
+    expect(degraded.teams[0]?.instances).toBeNull();
+    expect(projectSourceSnapshot(await bridge(async () => ownerRead()).raw()).teams[0]?.instances).toBeNull();
+  });
+  test("[验收线 5] malformed instances are rejected as a bad snapshot (502)", async () => {
+    const raw = await bridge(async () => ownerRead(), undefined, instances).raw();
+    const bads = [
+      { available: true, instances: "x" },
+      { available: true, instances: [{ instanceId: "", personId: "person-owner" }] },
+      { available: true, instances: [{ instanceId: "i".repeat(129), personId: "person-owner" }] },
+      { available: true, instances: [{ instanceId: "a\u0000b", personId: "person-owner" }] },
+      { available: true, instances: [{ instanceId: "instance-owner" }] },
+      { available: true, instances: [null] },
+      "x",
+      // A present key must carry a boolean discriminator; only a missing key means an old bridge.
+      {}, { available: "true", instances: [] }, { available: 123 }, { available: null }, { instances: [] },
+    ];
+    for (const teamInstances of bads) {
+      expect(() => projectSourceSnapshot({ ...raw, teamInstances })).toThrow(ProjectFailure);
+      try { projectSourceSnapshot({ ...raw, teamInstances }); } catch (e) { expect((e as ProjectFailure).status).toBe(502); }
+    }
+    const base = { teams: [{ centerId: "c", teamId: "t", personId: "x", teamRole: null }], projects: [], localProjects: [], peers: [] };
+    expect(parseProjectSnapshot(base).teams[0]?.instances).toBeNull();
+    const picked = parseProjectSnapshot({ ...base, teams: [{ ...base.teams[0], instances: [{ instanceId: "i-1", personId: "x", extra: "DROP" }] }] });
+    expect(picked.teams[0]?.instances).toEqual([{ instanceId: "i-1", personId: "x" }]);
   });
 });

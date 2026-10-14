@@ -273,9 +273,9 @@ for (const width of [1200, 390]) {
     expect(v.text()).toContain("中心暂未开放");
     expect(v.sec("参与者")).toContain("中心暂未开放");
     expect(v.sec("对它说")).toContain("这张卡在 其他成员的机器 上执行");
-    expect(v.text()).not.toContain("仅主场可见");
+    expect(v.text()).not.toContain("只在任务所在的机器上能看");
     // 规格全文：团队操作段既有的「全文仅在主场」
-    expect(v.text()).toContain("全文仅在主场");
+    expect(v.text()).toContain("全文只在任务所在的机器上");
     expect(v.text()).not.toContain("回放仅主场");
     expect(v.text()).not.toContain("回放这条任务");
     expect(v.text()).not.toContain("打开会话 →");
@@ -291,19 +291,19 @@ for (const width of [1200, 390]) {
     expect(recent).toContain("线上验证（结果仅主场）");
     expect(recent).toContain("审查（结论仅主场）");
     expect(recent).toContain("推进阶段（目标阶段仅主场）");
-    expect(recent).toContain("原文仅主场可见");
+    expect(recent).toContain("原文只在任务所在的机器上能看");
     expect(recent).not.toContain("线上验证失败");
     expect(recent).not.toContain("线上验证通过");
     expect(v.text()).not.toContain("bait");
     expect(v.text()).not.toContain("undefined");
     // 脱敏审查不出空行：审查区块只有占位
-    expect(v.sec("审查")).toContain("仅主场可见");
+    expect(v.sec("审查")).toContain("只在任务所在的机器上能看");
     expect(v.sec("审查")).not.toMatch(/R\?|R\d/);
     // 三条脱敏事件没有阶段证据：不可回放
     expect(v.buttons().find((b) => (b.textContent ?? "").includes("回放仅主场"))?.disabled).toBe(true);
     // 执行者代号照常展示，但不是本机打开会话凭据
     expect(v.sec("参与者")).toContain("dev");
-    expect(v.sec("参与者")).toContain("打开会话仅主场");
+    expect(v.sec("参与者")).toContain("会话要在任务所在的机器上打开");
     // 同名本机 agent 的模型不挂到团队执行者上
     expect(v.sec("参与者")).not.toContain("fixture-model");
     expect(v.text()).not.toContain("打开会话 →");
@@ -361,10 +361,10 @@ test("复现测试:英文模式团队占位走协作视图本地词表，不回�
     expect(team.text).toContain("This card runs on Another member's machine");
     expect(team.text).not.toMatch(/中心暂未开放|对它说只在/);
     expect(team.replay).toBe(false);
-    expect(team.text).toContain("Full text at home only");
+    expect(team.text).toContain("Full text is only on the machine running the task");
     expect(team.text).not.toMatch(/仅主场/);
     expect(red).toContain("Live verification (result at home only)");
-    expect(red).toContain("Open session at home only");
+    expect(red).toContain("Open sessions on the machine running this task");
     expect(red).not.toMatch(/仅主场|线上验证/);
   } finally {
     i18n.setLang("zh");

@@ -98,6 +98,31 @@ button.chip:hover { border-color: var(--text-2); }
 .arrive { animation: arrive 360ms ease 360ms backwards; }
 @keyframes arrive { from { opacity: 0; } }
 
+/* 手机沿用同一张卡，只放宽换行与点击区；滚动口内的 sticky 锚点不会被详情全屏页卸载。 */
+.narrow .scroll { padding: 0 0 24px; overflow-x: hidden; }
+.narrow .head { padding: 8px 12px; }
+.narrow button, .narrow [role="button"] { min-width: 44px; min-height: 44px; }
+.narrow .section { padding: 12px 12px 0; scroll-margin-top: 53px; }
+/* 最后一节收起时也能滚到锚点下面，否则它永远到不了观察器的顶部区域。 */
+.narrow .section:last-child { min-height: calc(var(--focus-scroll-height) - 53px); }
+.narrow .cards { grid-template-columns: minmax(0, 1fr); }
+.narrow .cardMain { width: 100%; }
+.narrow .line { flex-wrap: wrap; width: 100%; }
+.narrow .key { flex-shrink: 1; max-width: 45%; overflow-wrap: anywhere; }
+.narrow .one, .narrow .reason, .narrow .event { white-space: normal; overflow-wrap: anywhere; }
+.narrow .who, .narrow .whoText { max-width: 100%; flex-shrink: 1; white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.narrow .track { margin-right: 48px; }
+.narrow .chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; justify-content: center; }
+.narrow .chipToggle { justify-content: center; align-items: center; }
+.narrow .row { flex-wrap: wrap; align-items: center; }
+.narrow .rowEnd { flex-shrink: 1; max-width: 100%; overflow-wrap: anywhere; }
+.narrow .secHead { flex-wrap: wrap; }
+.narrow .secNote { white-space: normal; overflow-wrap: anywhere; }
+.anchors { position: sticky; top: 0; z-index: 2; display: flex; gap: 4px; padding: 4px 12px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.anchors button { flex: 1; min-width: 0; border-radius: 6px; font-size: var(--fs-2); color: var(--muted); }
+.anchors button[aria-pressed="true"] { background: var(--panel-2); color: var(--text); font-weight: 600; }
+.anchors button:disabled { opacity: .5; cursor: default; }
+
 @media (prefers-reduced-motion: reduce) {
   .breathe, .eventIn, .arrive { animation: none; }
   .barSeg, .row, .card { transition: none; }

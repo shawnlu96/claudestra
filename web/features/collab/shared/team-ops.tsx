@@ -13,7 +13,6 @@ import { sharedLedgerTr } from '@/lib/i18n-dict-shared-ledger';
 import { CollabSourceContext } from '../team-source-context';
 import { sharedCollabProject } from '../team-source-key';
 import { sharedCollabSource } from '../team-source-shared';
-import { looksLikeId } from '../team-source-adapter';
 import { Sec } from '../v4/v4-props';
 import type { Tr } from '../collab-model';
 import { useCollabT } from '../collab-i18n';
@@ -22,6 +21,9 @@ import { makeDraft, rebaseDraft, rewrite, type Draft } from './shared-model';
 import { useSharedSubmission } from './use-shared-submission';
 import { productionExecPort } from './exec/production-port';
 import { PlanEditor } from './shared-forms';
+import { MACHINE_WORDS } from '@/lib/owner-words';
+import { instanceName } from '../team-instance-names';
+import { useInstanceNames } from '../work/use-work-board';
 import { ProposalForm, ProposalsPanel } from '../feature-proposals/proposals-view';
 import c from '../collab.module.css';
 import v from '../v4/v4.module.css';
@@ -110,6 +112,7 @@ function Notices({ ops }: { ops: Ops }) {
 
 function FeatureOps({ ops, clock }: { ops: Ops; clock?: number }) {
   const { tr } = ops, last = ops.source.last(), now = clock ?? last?.team.ov.now ?? 0, collabTr = useCollabT();
+  const names = useInstanceNames(ops.identity.machine);
   const features = last?.list.features ?? [];
   const caps = last?.list.capabilities ?? {};
   const latest = ops.draft?.latest;
@@ -128,31 +131,37 @@ function FeatureOps({ ops, clock }: { ops: Ops; clock?: number }) {
     {features.map((f) => {
       const d = last?.details.get(f.id);
       const editable = f.authorityMode === 'planning' && !!d?.capabilities[f.version ? 'dag.rewrite' : 'dag.init']?.enabled;
-      const mirror = mirrorLine(f.projection?.observedAt ?? null, now, tr, collabTr);
+      const machine = instanceName(f.homeInstanceId, names, ops.identity.homeInstanceId ?? null);
+      const machineLabel = machine === '本机' || machine === '其他成员的机器' ? collabTr(machine) : machine;
+      const mirror = mirrorLine(f.projection?.observedAt ?? null, now, collabTr);
       return <div key={f.id} className={v.row}>
         <div className={v.kv}>{f.title}</div>
-        <div className={v.muted}>v{f.version} · {[looksLikeId(f.homeInstanceId) ? null : `${tr('主场')} ${f.homeInstanceId}`, mirror,
-          f.authorityMode === 'source' ? tr('来源镜像只读') : null].filter(Boolean).join(' · ')}</div>
+        <div className={v.muted}>v{f.version} · {[`${collabTr(MACHINE_WORDS.machine)} ${machineLabel}`, mirror,
+          f.authorityMode === 'source' ? collabTr(MACHINE_WORDS.readOnlyCopy) : null].filter(Boolean).join(' · ')}</div>
         <div className={s.line}><button type="button" className={c.btn} disabled={ops.busy || !editable}
           aria-label={`${tr('编辑规划')} ${f.title}`} onClick={() => void ops.open(f.id)}>{tr('编辑规划')}</button></div>
       </div>;
     })}
-    {!features.length && <div className={v.muted}>{tr('暂无 feature')}</div>}
+    {!features.length && <div className={v.muted}>{collabTr('暂无模块')}</div>}
     <div className={s.line}><button type="button" className={c.btn} disabled={ops.busy || !caps['feature.new']?.enabled}
-      onClick={() => ops.setCreating(true)}>{tr('新建 feature')}</button></div>
+      onClick={() => ops.setCreating(true)}>{collabTr('新建模块')}</button></div>
   </>;
   return <Sec title={tr('团队规划')}><Notices ops={ops} /><ProposalsPanel identity={ops.identity} />{body}</Sec>;
 }
 
 function TaskOps({ ops, taskId }: { ops: Ops; taskId: string }) {
-  const { tr } = ops, last = ops.source.last();
+  const { tr } = ops, last = ops.source.last(), collabTr = useCollabT();
   const at = last?.team.index.get(taskId);
   const d = at ? last?.details.get(at.featureId) : undefined;
   const capabilities: Capabilities = d?.capabilities ?? {};
-  const reasons = [...new Set(EXECUTION_ACTIONS.map((a) => capabilities[a]?.reason).filter(Boolean))];
+  const reason = (a?: typeof EXECUTION_ACTIONS[number]) => {
+    const cap = a ? capabilities[a] : undefined, r = cap?.reason;
+    return !r || cap?.code === 'execution_not_shared' || r.includes('主场') ? collabTr(MACHINE_WORDS.planOnly) : r;
+  };
+  const reasons = [...new Set(EXECUTION_ACTIONS.filter(a => capabilities[a]?.reason).map(a => reason(a)))];
   return <Sec title={tr('团队操作')}>
     <div className={s.line}>{EXECUTION_ACTIONS.map((a, i) => <button key={a} type="button" className={c.btn} disabled={!capabilities[a]?.enabled}
-      title={capabilities[a]?.reason ?? tr('V1 仅共享规划，执行操作仍在主场')}>{tr(LABELS[i]!)}</button>)}</div>
-    <div className={v.muted}>{reasons.length ? reasons.join(' · ') : tr('V1 仅共享规划，执行操作仍在主场')} · {tr('全文仅在主场')}</div>
+      title={reason(a)}>{tr(LABELS[i]!)}</button>)}</div>
+    <div className={v.muted}>{reasons.length ? reasons.join(' · ') : reason()} · {collabTr(MACHINE_WORDS.fullTextThere)}</div>
   </Sec>;
 }

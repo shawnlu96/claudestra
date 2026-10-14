@@ -153,13 +153,13 @@ for (const width of [1280, 390]) {
     expect(v.people).toContain("其他成员的机器");
     expect(v.people).toMatch(/执行者[\s\S]*中心暂未同步该角色身份[\s\S]*审查员[\s\S]*中心暂未同步该角色身份[\s\S]*PM/);
     expect(v.people).not.toContain("未记录");
-    expect(v.people).not.toContain("仅主场可见");
+    expect(v.people).not.toContain("只在任务所在的机器上能看");
     expect(v.titles).toEqual([HOME]);
     expect(v.all).not.toMatch(/[0-9a-f]{16,}/i);
     // 对它说：行为同 main（不挂输入框），占位写在哪台机器、为什么不行（UXCARD1）
     expect(v.homeOnly).toEqual(["say"]);
     expect(v.say).toBe("对它说这张卡在 其他成员的机器 上执行，对它说要那台机器授权，暂不支持");
-    expect(v.all).not.toContain("仅主场可见");
+    expect(v.all).not.toContain("只在任务所在的机器上能看");
     expect(v.textarea).toBe(false);
   });
 }
@@ -176,7 +176,7 @@ test("复现测试:中心 403 → 你不在该项目成员里；无能力位 →
   expect(empty.all).toContain("正文同步中");
   expect(empty.people).toContain("参与者同步中");
   for (const v of [forbidden, off, empty]) {
-    expect(v.all).not.toContain("仅主场可见");
+    expect(v.all).not.toContain("只在任务所在的机器上能看");
     expect(v.homeOnly).toEqual(["say"]);
   }
 });

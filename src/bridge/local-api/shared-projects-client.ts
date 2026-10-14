@@ -8,7 +8,7 @@ import { peerFetch } from "../relay-link.js";
 import { proposeSharedProjectInvite, sendApprovedSharedProjectInvite, type ProjectInvitePorts } from "./shared-projects-invite.js";
 import { STATE_DIR } from "../../lib/paths.js";
 import { SharedLedgerClient } from "../../lib/shared-ledger-client.js";
-import { SharedLedgerProjectConflict } from "../../lib/shared-ledger-client-projects.js";
+import { SharedLedgerInvalidResponse, SharedLedgerProjectConflict } from "../../lib/shared-ledger-client-projects.js";
 import { SharedLedgerRemoteError } from "../../lib/shared-ledger-client-transport.js";
 import { parseV2ProjectsRequest, parseV2ProjectsResponse, type V2ProjectInvite } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { readSharedLedgerBindings, type SharedLedgerBinding } from "../../lib/shared-ledger-gate-bindings.js";
@@ -56,6 +56,7 @@ export function sharedProjectsClientPorts(principal: Principal, requested: strin
       if (error instanceof SharedLedgerProjectConflict && "status" in error.current) throw new SharedProjectsError(409, "project_conflict", error.current);
       if (error instanceof SharedLedgerProjectConflict && !("projectId" in error.current)) throw new SharedTeamConflict(error.current);
       if (error instanceof SharedLedgerRemoteError && error.status < 500) throw new SharedProjectsError(error.status, "center_rejected");
+      if (error instanceof SharedLedgerInvalidResponse) throw new SharedProjectsError(503, "center_invalid_response"); // Only teamInstances throws it.
       throw new SharedProjectsError(503, "center_unavailable"); // Never propagate center or bearer text to cards and HTTP.
     }
   };
@@ -75,6 +76,7 @@ export function sharedProjectsClientPorts(principal: Principal, requested: strin
     patch: (who, id, input) => checked(async () => (await client(who, "project").updateProject(id, input)).project),
     members: (who, id) => checked(async () => (await client(who, "read").projectMembers(id)).members),
     team: who => checked(() => client(who, "read").team()),
+    teamInstances: who => checked(() => client(who, "read").teamInstances()),
     updateTeam: (who, input) => checked(async () => (await client(who, "project").updateTeam(input)).team),
     remove: (who, id, personId) => checked(async () => { await client(who, "project").removeProjectMember(id, personId); }),
     authorizeAnswer: async ask => !!await sharedProjectAnswerPrincipal(ask, stateDir),

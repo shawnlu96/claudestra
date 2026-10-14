@@ -3,6 +3,7 @@
  * 限并发 2、只有执行镜像水位变时同一 feature 60 秒一次、打开的 feature 每轮优先、429 本轮停发并按 Retry-After 推迟、缓存照用。
  */
 import { expect, test } from "bun:test";
+import { missingFeatures, unreadFeatures } from "@/features/collab/count-words";
 import { sharedCollabSource, detailBackoffMs, DETAIL_CONCURRENCY, DETAIL_REFRESH_MS } from "@/features/collab/team-source-shared";
 import { sharedProductBoard } from "@/features/collab/dag/shared-product-model";
 import { generateTeamFixture } from "@/features/collab/shared/team-fixture-gen";
@@ -214,4 +215,38 @@ test("N8A8 r1：点进没详情的 feature → 立刻重拉一轮（不等台账
   expect(w.src.last()!.details.has(missing.id)).toBe(true);
   ctl.abort();
   await following;
+});
+
+test("TEAMCNT1 3 个 feature、首轮其中 1 个详情 429：本轮结束 last().failed 就有它，计数不用等下一轮（unread 0、missing 1）；读成功后移出 failed", async () => {
+  const w = world();
+  w.setList((l) => ({ ...l, features: l.features.slice(0, 3) }));
+  const bad = w.fx.list.features[2]!.id;
+  w.reject((id) => id === bad);
+  await w.round();
+  const got = w.src.last()!;
+  expect([...got.failed]).toEqual([bad]);
+  expect(got.waiting.size).toBe(0);
+  expect(got.details.size).toBe(2);
+  expect(unreadFeatures(w.src)).toBe(0);
+  expect(missingFeatures(w.src)).toBe(1);
+  // 下一轮（退避过后）读成功：移出 failed，缺的补齐
+  w.reject(null);
+  w.advance();
+  await w.round();
+  expect(w.src.last()!.failed.size).toBe(0);
+  expect(missingFeatures(w.src)).toBe(0);
+});
+
+test("TEAMCNT1 429 停发：同轮排在后面、没发请求的 feature 也进 failed（不是排队 waiting）", async () => {
+  const w = world();
+  w.setList((l) => ({ ...l, features: l.features.slice(0, 6) }));
+  const first = w.fx.list.features[0]!.id;
+  w.reject((id) => id === first);
+  await w.round();
+  const got = w.src.last()!;
+  expect(got.failed.has(first)).toBe(true);
+  // 2 路并发：一路 429 后本轮停发，剩下没发的都算本轮没拉到
+  expect(got.details.size + got.failed.size).toBe(6);
+  expect(unreadFeatures(w.src)).toBe(0);
+  for (const id of got.failed) expect(got.waiting.has(id)).toBe(false);
 });

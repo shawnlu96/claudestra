@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
-  parseV2TeamRecord, parseV2TeamDirectoryMember, parseV2ProjectsTeamRequest, parseV2ProjectsTeamResponse,
+  parseV2TeamRecord, parseV2TeamDirectoryMember, parseV2TeamInstance, parseV2ProjectsTeamRequest, parseV2ProjectsTeamResponse,
   parseV2ProjectsRequest, parseV2ProjectsResponse, V2_PROJECTS_REQUEST_SCHEMAS, V2_PROJECTS_SUCCESS_SCHEMAS, V2_PROJECTS_SUCCESS_STATUS,
   V2_PROJECTS_TEAM_REQUEST_SCHEMAS, V2_PROJECTS_TEAM_SUCCESS_SCHEMAS, V2_PROJECTS_TEAM_SUCCESS_STATUS,
   type V2ProjectsEndpoint, type V2ProjectsTeamResponses,
@@ -17,14 +17,15 @@ function invalid(fn: () => unknown, code: V2ErrorCode = "invalid_field") {
   expect((caught as Error).message).toBe(code);
 }
 const teamEndpoints = ["team", "teamUpdate"] as const;
+const allTeamEndpoints = [...teamEndpoints, "teamInstances"] as const;
 
 describe("N9K acceptance 1: team read contract positive round-trip and shared fixtures", () => {
   test("exact team endpoint maps and statuses", () => {
-    expect(Object.keys(V2_PROJECTS_TEAM_REQUEST_SCHEMAS)).toEqual([...teamEndpoints]);
-    expect(Object.keys(V2_PROJECTS_TEAM_SUCCESS_SCHEMAS)).toEqual([...teamEndpoints]);
-    expect(V2_PROJECTS_TEAM_SUCCESS_STATUS).toEqual({ team: 200, teamUpdate: 200 });
+    expect(Object.keys(V2_PROJECTS_TEAM_REQUEST_SCHEMAS)).toEqual([...allTeamEndpoints]);
+    expect(Object.keys(V2_PROJECTS_TEAM_SUCCESS_SCHEMAS)).toEqual([...allTeamEndpoints]);
+    expect(V2_PROJECTS_TEAM_SUCCESS_STATUS).toEqual({ team: 200, teamUpdate: 200, teamInstances: 200 });
   });
-  for (const endpoint of teamEndpoints) {
+  for (const endpoint of allTeamEndpoints) {
     test(`${endpoint}: request/response round-trip field by field`, () => {
       const f = createV2ProjectsTeamFixtures();
       expect(parseV2ProjectsTeamRequest(endpoint, f.requests[endpoint])).toEqual(f.requests[endpoint]);
@@ -121,7 +122,7 @@ describe("N9K acceptance 2: negatives fail closed", () => {
   });
   test("requests never carry teamRole or personId", () => {
     const f = createV2ProjectsTeamFixtures();
-    for (const endpoint of teamEndpoints) {
+    for (const endpoint of allTeamEndpoints) {
       for (const key of ["teamRole", "personId", "role", "instanceId"]) {
         invalid(() => parseV2ProjectsTeamRequest(endpoint, { ...f.requests[endpoint], [key]: key === "teamRole" ? "owner" : "person-demo" }));
       }
@@ -167,5 +168,50 @@ describe("N9K acceptance 3: existing project endpoints are byte-for-byte unchang
     const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     expect(sha(JSON.stringify(f))).toBe("83d096ea38689bfd427dd27df41594de9004c1ff2358f1a20eb13c64ba59a346");
     expect(sha(JSON.stringify(parsed))).toBe("cac7b9fd858c09e48affb525ca10425c21d12d26812d267545bd0bee473d8a9c");
+  });
+});
+
+describe("ROSTER2a GET /v1/team/instances contract", () => {
+  test("[验收线 1] valid response parses; every invalid teamInstances sample fails closed", () => {
+    const f = createV2ProjectsTeamFixtures();
+    expect(parseV2TeamInstance(f.selfInstance)).toEqual(f.selfInstance);
+    expect(parseV2ProjectsTeamRequest("teamInstances", f.requests.teamInstances)).toEqual(f.team);
+    expect(parseV2ProjectsTeamResponse("teamInstances", 200, f.responses.teamInstances, f.scopes.teamInstances))
+      .toEqual(f.responses.teamInstances);
+    const empty = { ...f.responses.teamInstances, instances: [] };
+    expect(parseV2ProjectsTeamResponse("teamInstances", 200, empty, f.team)).toEqual(empty);
+    // One person may own several machines; one machine belongs to one person only.
+    const twoMachines = { ...f.responses.teamInstances, instances: [f.selfInstance, { ...f.selfInstance, instanceId: "instance-demo-2" }] };
+    expect(parseV2ProjectsTeamResponse("teamInstances", 200, twoMachines, f.team)).toEqual(twoMachines);
+    const probes = f.invalidResponses.filter(r => r.endpoint === "teamInstances");
+    expect(probes.map(r => r.label)).toEqual(["instances extra key", "instances row extra key", "instances row publicKey",
+      "instances other team", "instances other center", "duplicate instanceId", "instanceId not an id", "personId not an id",
+      "instances status 201", "instances conflict"]);
+    for (const probe of probes) invalid(() => parseV2ProjectsTeamResponse("teamInstances", probe.status, probe.body, f.scopes.teamInstances));
+  });
+  test("[验收线 1] scope is team-only; errors follow simpleError statuses with no 409", () => {
+    const f = createV2ProjectsTeamFixtures();
+    for (const key of ["personId", "projectId", "operationId", "instanceId"] as const) {
+      invalid(() => parseV2ProjectsTeamResponse("teamInstances", 200, f.responses.teamInstances, { ...f.team, [key]: "demo-b" }));
+    }
+    for (const key of ["centerId", "teamId"] as const) {
+      invalid(() => parseV2ProjectsTeamResponse("teamInstances", 200, f.responses.teamInstances, { ...f.team, [key]: "other" }));
+    }
+    expect(parseV2ProjectsTeamResponse("teamInstances", 403, f.errors.forbidden, f.team)).toEqual(f.errors.forbidden);
+    invalid(() => parseV2ProjectsTeamResponse("teamInstances", 404, f.errors.forbidden, f.team));
+    invalid(() => parseV2ProjectsTeamResponse("teamInstances", 409, f.errors.teamConflict, f.team));
+    for (const key of Object.keys(f.selfInstance)) {
+      const missing: Record<string, unknown> = { ...f.selfInstance }; delete missing[key];
+      invalid(() => parseV2TeamInstance(missing));
+    }
+  });
+  test("[验收线 2] team / teamUpdate fixtures are byte-for-byte the pre-ROSTER2a baseline; /v1/team takes no new key", () => {
+    const f = createV2ProjectsTeamFixtures();
+    const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+    expect(sha(JSON.stringify({ requests: { team: f.requests.team, teamUpdate: f.requests.teamUpdate },
+      responses: { team: f.responses.team, teamUpdate: f.responses.teamUpdate } })))
+      .toBe("9ee168ff12d4aad582507120513028828433b59020d0c731f1a3907ac0ee9245");
+    invalid(() => parseV2ProjectsTeamRequest("team", { ...f.requests.team, instances: true }));
+    invalid(() => parseV2ProjectsTeamResponse("team", 200, { ...f.responses.team, instances: f.responses.teamInstances.instances }, f.scopes.team));
   });
 });

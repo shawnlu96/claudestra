@@ -41,6 +41,7 @@ export const REPLICA_REASONS = Object.freeze({
   noCredential: "本机没有可用的 service 凭据（owner:self、kind=service、带 project 权限）",
   noKey: "本机实例密钥不可用，无法签名读中心",
   credentialRejected: "凭据无效：中心拒绝了本机 service 凭据",
+  rateLimited: "中心限流，稍后自动重试",
   unreachable: "中心不可达或回包无效（5 秒超时）",
   notHome: "主场不是本实例，不落副本",
   notPlanned: "不是中心规划（N7 新建发布）的 feature，不落副本",
@@ -111,7 +112,8 @@ export type ReplicaResult =
 interface ScopeResult extends ReplicaScope { localProject: string; error: string | null }
 
 const errorText = (e: unknown) => e instanceof SharedLedgerRemoteError && [401, 403].includes(e.status)
-  ? REPLICA_REASONS.credentialRejected : REPLICA_REASONS.unreachable;
+  ? REPLICA_REASONS.credentialRejected : e instanceof SharedLedgerRemoteError && e.status === 429
+    ? REPLICA_REASONS.rateLimited : REPLICA_REASONS.unreachable;
 
 export async function syncCenterReplicas(db: Database, opts: CenterReplicaSyncOptions = {}) {
   const dir = opts.stateDir ?? STATE_DIR;
@@ -139,15 +141,23 @@ async function syncAll(db: Database, opts: CenterReplicaSyncOptions) {
     if (!credential) { await fail(REPLICA_REASONS.noCredential); continue; }
     const key = (opts.key ?? (() => (dryRun ? readInstanceKey(dir) : instanceKeySync(dir))))();
     if (!key) { await fail(REPLICA_REASONS.noKey); continue; }
-    const transport = { timeoutMs: CENTER_TIMEOUT_MS, ...(opts.fetch ? { fetch: opts.fetch } : {}) };
+    const transport = { stateDir: dir, now, timeoutMs: CENTER_TIMEOUT_MS, ...(opts.fetch ? { fetch: opts.fetch } : {}) };
     let ids: string[];
     try {
       const list = await new SharedLedgerFeatureProposalClient(credential, key, transport).listProject(scope);
       ids = [...new Set(list.proposals.flatMap((r) => r.proposal.kind === "new" && r.operation.state === "published" && r.operation.featureId
         ? [r.operation.featureId] : []))].filter((id) => !opts.centerFeatureId || id === opts.centerFeatureId);
-    } catch (e) { await fail(errorText(e)); continue; }
+    } catch (e) { await fail(errorText(e)); if (errorText(e) === REPLICA_REASONS.rateLimited) break; continue; }
     const client = new SharedLedgerClient(credential, key, transport);
-    for (const id of ids) features.push(await syncOne(db, dir, now, client, credential, { ...scope, localProject: b.localProject }, id, dryRun));
+    let limited = false;
+    for (const id of ids) {
+      const result: ReplicaResult = limited ? { centerFeatureId: id, result: "skipped", reason: REPLICA_REASONS.rateLimited }
+        : await syncOne(db, dir, now, client, credential, { ...scope, localProject: b.localProject }, id, dryRun);
+      features.push(result);
+      if ("reason" in result && result.reason === REPLICA_REASONS.rateLimited) limited = true;
+      if (limited && result.result === "skipped" && !dryRun) await noteSkip(dir, now, scope, id, REPLICA_REASONS.rateLimited, null);
+    }
+    if (limited) { await fail(REPLICA_REASONS.rateLimited); break; }
     scopes.push({ ...scope, localProject: b.localProject, error: null });
     if (!dryRun) await updateCenterReplicas(dir, (s) => { s.scopes[scopeKey(scope)] = { syncedAt: now(), lastError: null, lastErrorAt: null }; });
   }

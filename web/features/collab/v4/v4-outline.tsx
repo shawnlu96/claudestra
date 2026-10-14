@@ -6,8 +6,7 @@ import { FILTER_LABEL, FILTERS, filterCount, outlineOf, type Filter } from "./v4
 import { snapOf, type CountState } from "../count-words";
 import { countText } from "../count-words-i18n";
 import v from "./v4.module.css";
-import { useLang } from "@/lib/i18n";
-import { sharedLedgerTr } from "@/lib/i18n-dict-shared-ledger";
+import { MACHINE_WORDS, stageWord } from "@/lib/owner-words";
 
 export function Outline(props: {
   project: string;
@@ -21,27 +20,26 @@ export function Outline(props: {
   onWaits: () => void;
   selected: string | null;
   onPick: (id: string) => void;
-  /** 进行中芯片的数与列出的卡（count-words.ts，顶栏同一份）；没载完时各芯片的数都是骨架 */
+  /** 进行中芯片的数与列出的卡（count-words.ts，顶栏同一份）；没载完时只有「进行中」是骨架，已完成 / 全部 / P0 从总览出数（TEAMCNT1） */
   counts: CountState;
   tr: Tr;
 }) {
   const { ov, lines, filter, tr } = props;
   const done = useDonePages(props.project, ov);
-  const homeTr = sharedLedgerTr(useLang());
   // 「已完成」把翻到的更早的卡并进各事项组，底部「更多」接着翻（collab-done.tsx）
   const snap = snapOf(props.counts);
   const groups = outlineOf(filter === "done" ? { ...ov, tasks: [...ov.tasks, ...done.pages] } : ov, filter, snap?.active ?? null);
   const loading = props.counts.status === "loading";
   return (
     <nav className={v.outline} aria-label={tr("大纲")}>
-      <button type="button" className={`${v.waits} ${props.waits.length ? v.hasWaits : ""}`} title={props.waitsUnknown ? homeTr("V1 仅共享规划，执行操作仍在主场") : undefined}
+      <button type="button" className={`${v.waits} ${props.waits.length ? v.hasWaits : ""}`} title={props.waitsUnknown ? tr(MACHINE_WORDS.planOnly) : undefined}
         onClick={props.onWaits}>
         {tr("待你处理")} <b>{props.waitsUnknown ? tr("暂无") : props.waits.length}</b>
       </button>
       <div className={v.filters} role="tablist">
         {FILTERS.map((f) => (
           <button key={f} type="button" role="tab" aria-selected={filter === f} className={`${v.chip} ${filter === f ? v.chipOn : ""}`} onClick={() => props.onFilter(f)}>
-            {countText(tr, FILTER_LABEL[f])} {loading ? <span className={v.skel} aria-hidden /> : <span className={v.cnt}>{filterCount(ov, f, snap)}</span>}
+            {countText(tr, FILTER_LABEL[f])} {loading && f === "active" ? <span className={v.skel} aria-hidden /> : <span className={v.cnt}>{filterCount(ov, f, snap)}</span>}
           </button>
         ))}
       </div>
@@ -55,7 +53,7 @@ export function Outline(props: {
                 <span className={`${v.dot} ${l ? v[l.tone] ?? "" : t.stage === "done" || t.stage === "verified" ? v.green : ""}`} />
                 <span className={v.tid}>{t.id}</span>
                 <span className={v.ott}>{t.title}</span>
-                <span className={v.ost}>{l?.stageLabel ?? tr(t.stage === "done" ? "已完成" : t.stage)}</span>
+                <span className={v.ost}>{l?.stageLabel ?? tr(stageWord(t.stage))}</span>
               </button>
             );
           })}

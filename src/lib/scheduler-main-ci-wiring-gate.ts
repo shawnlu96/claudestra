@@ -38,13 +38,18 @@ export function openMainCiGate(db: Database, config: SchedulerConfig): MainCiGat
   return gate;
 }
 
-export function mainCiPlanFor(gate: MainCiGate, project: string, candidate: { taskId: string; head: string }, claims: readonly string[] = []): MainCiPlan | null {
+/**
+ * MAINCIW2: the rule follows the project's mode, on = run-aware (a running main push run only waits), observe = the original rule;
+ * observe asks for "run" explicitly only to record what on would do.
+ */
+export function mainCiPlanFor(gate: MainCiGate, project: string, candidate: { taskId: string; head: string }, claims: readonly string[] = [],
+  rule: "legacy" | "run" = gate.modes.get(project) === "on" ? "run" : "legacy"): MainCiPlan | null {
   const read = gate.reads.get(project);
   if (!read) return null;
   const approvals = mainCiApprovals(gate.db, project, read.target.repo);
   return planMainCi({ target: read.target, health: read.health, currentMainSha: read.currentMainSha, now: gate.now(), maxAgeMs: MAIN_CI_MAX_AGE_MS,
     readFailureSince: read.state.readFailureSince, uncertainty: read.state.uncertainty, candidate: { project, repo: read.target.repo, ...candidate },
-    projectPms: mainCiPms(gate.db, project, approvals), approvals, notificationClaims: claims });
+    projectPms: mainCiPms(gate.db, project, approvals), approvals, notificationClaims: claims, rule });
 }
 
 export function decide(gate: MainCiGate, project: string, taskId: string, head: string): "go" | "pause" {

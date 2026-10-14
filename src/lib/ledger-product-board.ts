@@ -10,6 +10,7 @@ import { productEdges } from "./ledger-product-board-edges.js";
 import { productNodeCounts } from "./product-node-counts.js";
 import { countRows, productFrontier } from "./ledger-product-board-frontier.js";
 import type { LedgerEvent } from "./ledger-stages.js";
+import { projectMapConfig } from "./project-map-config.js";
 import { isSourceAcceptedNode, pageAcceptedBySource } from "./ui-page-display.js";
 
 export function nodeCounts(nodes: readonly EtaNode[]) {
@@ -18,6 +19,8 @@ export function nodeCounts(nodes: readonly EtaNode[]) {
 
 /** Reads only current effective nodes and project-owned tasks. Caller wraps one deferred transaction. */
 export function productBoard(db: Database, project: string, now: number) {
+  const map = projectMapConfig(project), grouped = map.areas.length > 0;
+  const areaOf = new Map(map.areas.flatMap((a) => a.features.map((id) => [id, a.id] as const)));
   const tasks = listTasks(db, project), own = new Map(tasks.map((t) => [t.id, t]));
   const events = new Map<string, LedgerEvent[]>();
   for (const e of listEvents(db, { project })) {
@@ -39,12 +42,13 @@ export function productBoard(db: Database, project: string, now: number) {
       completed: cards.filter((t) => nodePhase(t.id, t.stage) === "done").length,
       active: cards.filter((t) => nodePhase(t.id, t.stage) === "active").length, waiting: 0 };
     return { id: f.id, title: f.title, status: f.status, hasDag: f.currentVersion > 0, version: f.currentVersion,
-      ...(!f.currentVersion ? { cards: productFeatureCards(tasks, project, f.id) } : {}),
+      ...(!f.currentVersion ? { cards: productFeatureCards(tasks, project, f.id) } : {}), ...(grouped ? { area: areaOf.get(f.id) ?? null } : {}),
       counts, eta: f.currentVersion ? featureEta(nodes, pace, active, events, now) : null,
       lastActivityAt: cards.length ? Math.max(...cards.map((t) => t.updatedAt)) : null,
-      ...productFrontier({ status: f.status, nodes: f.currentVersion ? nodes : null, cards, events, now }) };
+      ...productFrontier({ status: f.status, nodes: f.currentVersion ? nodes : null, cards, events, now, frozen: map.frozen }) };
   });
   const deps = featureDeps(db, project).map(({ from, to, note }) => ({ from, to, note }));
   propagateEtas(features, deps);
-  return { throughput: { verified12h: pace.verified12h, perHour: pace.perHour }, features, ...productEdges(db, { project, deps, features, tasks, entries }) };
+  return { throughput: { verified12h: pace.verified12h, perHour: pace.perHour }, features,
+    ...(grouped ? { areas: map.areas.map(({ id, name }) => ({ id, name })) } : {}), ...productEdges(db, { project, deps, features, tasks, entries }) };
 }

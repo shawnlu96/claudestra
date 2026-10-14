@@ -8,6 +8,8 @@
  * requestId lookups resolve through S2L's own outbox, so recovery re-asks for exactly the journaled command.
  * The center order itself is created by S2F2 (lend.create), not here.
  */
+import { centerRequestBudgetMode, budgetWouldSkip, lendBudgetVersion, lendBudgetPaused, settleLendBudget } from "../lib/center-request-budget.js";
+import { schedulerV2Route } from "../lib/scheduler-v2-pass.js";
 import type { Database } from "bun:sqlite";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -63,23 +65,39 @@ export function lendTransportFor(wiring: Stage2Wiring, outboxDir: string, projec
 
 export function lendBindings(src: LendBindingSources) {
   const views = new Map<string, LendCentralView>(), peers = new Map<string, LendPeer>(), priming = new Set<string>();
-  const prime = (project: string, orderId: string, peerName: string) => {
+  const versions = new Map<string, string>();
+  const prime = (project: string, orderId: string, peerName: string, version: string) => {
     if (priming.has(orderId)) return;
     priming.add(orderId);
     void (async () => {
       const transport = lendTransportFor(src.wiring, src.outboxDir, project);
       if (!transport) return;
       const [view, peer] = await Promise.all([transport.view(orderId), (src.peer ?? registryPeer)(peerName)]);
+      await settleLendBudget(src.wiring.dir, orderId, version, null);
+      if (versions.get(orderId) !== version) return;
       views.set(orderId, view as LendCentralView);
       if (peer) peers.set(peerName, peer);
-    })().catch((e: Error) => console.warn(`[stage2 lend] ${orderId}: ${e.message}`)).finally(() => priming.delete(orderId));
+    })().catch(async (e: Error) => {
+      await settleLendBudget(src.wiring.dir, orderId, version, e);
+      console.warn(`[stage2 lend] ${orderId}: center read failed`);
+    }).finally(() => priming.delete(orderId));
   };
 
   function bindingFor(orderId: string): LendCentralJournalEntry | null {
     const d = src.db(), local = d ? getLendOrder(d, orderId) : null;
     if (!local) return null;
+    const mode = centerRequestBudgetMode(local.project, src.wiring.dir);
+    const localRoute = schedulerV2Route(local.taskId, d) === "local";
+    if (localRoute && mode === "on") return null;
+    const version = lendBudgetVersion(src.wiring, local.project, [local.taskId, local.peer]);
+    if (versions.has(orderId) && versions.get(orderId) !== version) { views.delete(orderId); src.wiring.reset(); }
+    versions.set(orderId, version);
     const view = views.get(orderId), peer = peers.get(local.peer);
-    if (!view || !peer) { prime(local.project, orderId, local.peer); return null; }
+    const wouldPrime = (!view || !peer) && !priming.has(orderId);
+    if (localRoute && wouldPrime) budgetWouldSkip(mode, "lend-local");
+    const pauseMode = mode === "observe" && (localRoute || !wouldPrime) ? "off" : mode;
+    if (lendBudgetPaused(src.wiring.dir, orderId, version, pauseMode)) return null;
+    if (!view || !peer) { prime(local.project, orderId, local.peer, version); return null; }
     const o = view.order, scope = src.wiring.scope(local.project), opened = src.wiring.open({ subject: "owner:self", kind: "person" }, local.project);
     if (!scope || !opened || o.projectId !== scope.projectId || o.teamId !== scope.teamId || o.taskId !== local.taskId) return null;
     if (o.executorInstanceId !== null && o.executorInstanceId !== peer.instanceId) return null;

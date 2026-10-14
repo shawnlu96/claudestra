@@ -4,11 +4,13 @@ import { readFileSync } from "node:fs";
 import type { LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { DISPUTE_RULE, FIX_STRATEGY_RULE } from "./fix-strategy.js";
+import { uiAuthorDeliveryLines } from "./ui-delivery-guidance.js";
 
 export function convergenceOrderLines(db: Database | undefined, task: LedgerTask): string[] {
   const material = db && listEvents(db, { project: task.project, target: task.id }).findLast((e) => e.kind === "scheduler" &&
     e.data.op === "fix_strategy" && e.data.specRev === task.specRev && e.data.round === task.round)?.data.material;
-  return [DISPUTE_RULE, FIX_STRATEGY_RULE, ...(typeof material === "string" ? [`历轮报告原文、修复 diff 摘要、复现 probe：${material}`] : [])];
+  return [DISPUTE_RULE, FIX_STRATEGY_RULE, ...uiAuthorDeliveryLines(db, task),
+    ...(typeof material === "string" ? [`历轮报告原文、修复 diff 摘要、复现 probe：${material}`] : [])];
 }
 
 /** The existing remote order's spec input carries the material itself: a lender cannot open this machine's artifact path. */

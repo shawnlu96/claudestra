@@ -150,7 +150,8 @@ test("N8A9: source-DAG 429 preserves confirmed projection, never increments DAG 
     expect(e.dagError).toBeUndefined();
     expect(e.dagVersion).toBeUndefined();
     for (const id of w.ids.slice(1)) expect(w.entries()[id]).toEqual(before[id]);
-    expect(transport.sharedLedgerNotBefore("https://center.example/", w.dir)).toBe(w.now() + 5000);
+    expect(transport.sharedLedgerNotBefore("https://center.example/", w.dir) - w.now()).toBeGreaterThanOrEqual(5000);
+    expect(transport.sharedLedgerNotBefore("https://center.example/", w.dir) - w.now()).toBeLessThanOrEqual(6000);
   } finally { await w.f.close(); }
 });
 
@@ -184,12 +185,12 @@ test.each([null, "3", "600", "-1", "bad", "", "Thu, 01 Jan 1970 00:01:43 GMT"])(
   try {
     const c = center(w, () => new Response("secret body", { status: 429, headers: header === null ? {} : { "Retry-After": header } }));
     const e = w.entries()[w.ids[0]!]!, credential = resolveMirrorCredential(e, w.dir)!;
-    const client = new SharedLedgerClient(credential, instanceKeySync(w.dir)!, { fetch: c.fetcher, now: w.now, stateDir: w.dir, scrub: SCRUB });
+    const client = new SharedLedgerClient(credential, instanceKeySync(w.dir)!, { fetch: c.fetcher, now: w.now, stateDir: w.dir, scrub: SCRUB, random: () => 0.5 });
     const upload: SourceDagUpload = { schemaVersion: 1, projectId: e.projectId, featureId: e.centerFeatureId, sourceInstanceId: e.sourceInstanceId,
       dag: { version: 1, reason: "Work", nodes: [], bindings: [] } };
     let error: unknown;
     try { await client.sourceDag(upload); } catch (e) { error = e; }
-    const ms = header === "3" || header?.includes("GMT") ? 3000 : header === "600" ? 60_000 : 5000;
+    const ms = header === "3" || header?.includes("GMT") ? 3000 : header === "600" ? 600_000 : 5500;
     expect(error).toBeInstanceOf(SharedLedgerRemoteError);
     expect(error).toMatchObject({ status: 429, response: null, retryAfterMs: ms });
     expect(JSON.stringify(error)).not.toContain("secret");
