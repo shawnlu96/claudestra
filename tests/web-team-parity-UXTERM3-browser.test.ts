@@ -5,6 +5,8 @@ import { mkdirSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { guardedPage } from "./helpers/collab-fixture-serve";
 import { shotIssues } from "./helpers/ui-shot-checks";
+import { SHARED_LEDGER_CAPABILITIES } from "../src/lib/shared-ledger-contract";
+import { generateTeamFixture } from "@/features/collab/shared/team-fixture-gen";
 import { generateHomeFixture } from "@/features/collab/shared/home-fixture-gen";
 import { BANNED_OWNER_WORDS, MACHINE_WORDS, STEP_WORD, ownerWordEn } from "../web/lib/owner-words";
 import type { TaskDetail } from "../web/features/collab/collab-detail-model";
@@ -25,35 +27,51 @@ function fixture(variant: string) {
     sessions: variant === "empty" ? {} : { author: { agent: "agent-dev" } }, events: variant === "empty" ? [] : [event],
     stepLine: { steps: [{ step: "write", executor: "agent-dev", state: "assigned", round: 0 }], active: { step: "write", round: 0 } } };
   if (variant === "review") detail.events.push({ ...event, seq: 2, kind: "review", text: "需要调整用语", data: { round: 1, verdict: "changes", reviewer: "agent-reviewer" } });
-  return { detail, ov: { ...home.overview, tasks: [task], items: [], deps: [] } };
+  const team = generateTeamFixture({ features: 1, nodes: 6, now: home.now });
+  team.list.capabilities = SHARED_LEDGER_CAPABILITIES; team.details[0]!.capabilities = SHARED_LEDGER_CAPABILITIES;
+  return { detail, team: { list: team.list, detail: team.details[0] }, ov: { ...home.overview, tasks: [task], items: [], deps: [] } };
 }
 
 async function bundle(repo: string, dir: string) {
   mkdirSync(dir, { recursive: true });
   const from = (path: string) => JSON.stringify(resolve(repo, path));
   const entry = resolve(dir, "entry.ts");
-  await Bun.write(entry, `import { createElement as h } from ${from("web/node_modules/react/index.js")};
+  await Bun.write(entry, `import { createElement as h, useEffect, useState } from ${from("web/node_modules/react/index.js")};
 import { createRoot } from ${from("web/node_modules/react-dom/client.js")};
 import { setLang } from ${from("web/lib/i18n.tsx")};
 import { useCollabT } from ${from("web/features/collab/collab-i18n.ts")};
 import { CollabDetail } from ${from("web/features/collab/collab-detail.tsx")};
-import { CollabSourceContext } from ${from("web/features/collab/team-source-context.ts")};
+import { CollabSourceContext, useCollabSource } from ${from("web/features/collab/team-source-context.ts")};
+import { TeamSource } from ${from("web/features/collab/shared/team-ops.tsx")};
 import { ChatStoreProvider } from ${from("web/features/chat/chat-store.ts")};
 import { TeamSessionSec } from ${from("web/features/collab/team-session/team-session-view.tsx")};
 import { sharedCollabProject } from ${from("web/features/collab/team-source-key.ts")};
 import styles from ${from("web/features/collab/collab.module.css")};
 const q = new URLSearchParams(location.search);
 setLang(q.get("lang") === "en" ? "en" : "zh");
-const { detail, ov } = await (await fetch('/fixture.json?variant=' + (q.get('variant') || 'detail'))).json();
-const project = sharedCollabProject({ center: 'center', team: 'team-a', person: 'person-a', project: 'fixture', machine: 'local' });
+const { detail, ov, team } = await (await fetch('/fixture.json?variant=' + (q.get('variant') || 'detail'))).json();
+const identity = { center: 'center', team: 'team-a', person: 'person-a', project: 'claude-orchestrator', machine: 'local' };
+const project = sharedCollabProject(identity);
+const transport = { list: async () => team.list, detail: async () => team.detail,
+  command: async () => { throw new Error('unexpected write'); }, receipt: async () => { throw new Error('unexpected receipt'); } };
 const source = { homeOnly: new Set(['events.text', 'review.text', 'sessions']),
   task: async () => detail, overview: async () => ov, follow: async () => {} };
+function Details() {
+  const upstream = useCollabSource(project), [ready, setReady] = useState(false);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    upstream.overview(ctrl.signal).then(() => { if (!ctrl.signal.aborted) setReady(true); });
+    return () => ctrl.abort();
+  }, [upstream]);
+  if (!ready) return null;
+  return h(CollabSourceContext.Provider, { value: source }, h(CollabDetail, {
+    project, id: detail.task.id, rev: 1, now: detail.now, ov, reviewers: [], actions: new Map(),
+    extra: upstream.ops(detail.task.id), action: () => ({ kind: 'idle', text: '' }), onClose: () => {} }));
+}
 function App() {
   const tr = useCollabT();
   return q.get('view') === 'session' ? h('aside', { className: styles.tokens, style: { width: 'min(100%, 560px)', padding: 16 } },
-    h(TeamSessionSec, { project, featureId: 'F1', cardId: 'CARD1', tr })) : h(CollabSourceContext.Provider, { value: source },
-    h(CollabDetail, { project, id: detail.task.id, rev: 1, now: detail.now, ov, reviewers: [], actions: new Map(),
-      action: () => ({ kind: 'idle', text: '' }), onClose: () => {} }));
+    h(TeamSessionSec, { project, featureId: 'F1', cardId: 'CARD1', tr })) : h(TeamSource, { identity, transport }, h(Details));
 }
 createRoot(document.getElementById('root')).render(h(ChatStoreProvider, null, h(App)));
 `);
@@ -106,6 +124,9 @@ async function details(page: Page, url: string, phase: string, width: number, la
     const text = variant === "detail" ? await save(page, phase, "detail", width, lang, texts) : await page.locator("body").innerText();
     if (phase !== "after") continue;
     expect(text).not.toMatch(/主场|\bhome\b/i);
+    const plan = lang === "zh" ? MACHINE_WORDS.planOnly : ownerWordEn(MACHINE_WORDS.planOnly)!;
+    expect(text.split(plan)).toHaveLength(2);
+    expect(await page.locator(`button[title=${JSON.stringify(plan)}]`).count()).toBe(4);
     const words = lang === "zh" ? PHRASES : EN;
     expect(await page.locator('[data-home-only="events.text"]').innerText()).toBe(words[variant === "empty" ? 0 : 1]!);
     expect(await page.locator('[data-home-only="review.text"]').innerText()).toBe(words[variant === "review" ? 1 : 0]!);
