@@ -73,6 +73,8 @@ export interface AppConfig {
   peerRelayJoinStrict?: boolean;
   /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 observe）；launcher 每轮现读 */
   bridgeWatchdog?: "on" | "observe" | "off";
+  bridgeWatchdogDiag?: "on" | "observe" | "off"; // 卡住时抓现场，缺省 on（lib/bridge-watchdog-diag.ts）
+  bridgeWatchdogOob?: "on" | "observe" | "off"; // 卡住 / 恢复的带外通知，缺省 on（lib/bridge-watchdog-oob.ts）
   /** 设备 cookie 随使用续发（bridge/device-cookie-renew.ts，缺省 observe = 只记「会续发」）；每次续发判断现读 */
   deviceCookieRenew?: "on" | "observe" | "off";
   /** Jev（TypeSafe System One）API key：PUT /api/v1/settings 写、GET 只回尾四位；env TYPESAFE_API_KEY 兜底（lib/jev.ts） */
@@ -124,6 +126,8 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
     ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
     ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
+    ...(raw.bridgeWatchdogDiag === "on" || raw.bridgeWatchdogDiag === "observe" || raw.bridgeWatchdogDiag === "off" ? { bridgeWatchdogDiag: raw.bridgeWatchdogDiag } : {}),
+    ...(raw.bridgeWatchdogOob === "on" || raw.bridgeWatchdogOob === "observe" || raw.bridgeWatchdogOob === "off" ? { bridgeWatchdogOob: raw.bridgeWatchdogOob } : {}),
     ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
     ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
     ...(raw.chatGuard && typeof raw.chatGuard === "object"
