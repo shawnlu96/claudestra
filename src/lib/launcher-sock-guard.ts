@@ -4,7 +4,8 @@
  * 窗口列表只有在连着「真的那个服务」时才可信：连上一个空的新服务，所有 agent 都像死了、都像空闲。
  * 例外「确认新建」：连续 3 次 absent、new-session 前无同路径服务、新建后当场记下服务 pid 和套接字 inode；之后只要 pid、inode
  * 都对得上，窗口列表就是自己刚起的服务（空是真空），dead 恢复不冻结、不受大量 dead 阈值限制（真重启不等人）。
- * 恢复键 tmuxSockHeal（off / observe / on，缺省 observe）每次现读。tests/launcher-sock-guard.test.ts。
+ * 恢复键 tmuxSockHeal（off / observe / on，缺省 observe）每次现读。新建时刻和确认身份落盘：launcher 被部署 / launchd 重启后
+ * 冻结照旧生效，读坏了按「刚新建」保守冻结 10 分钟。tests/launcher-sock-guard.test.ts。
  */
 import { busyAgentWindows } from "./busy-windows.js";
 import { t } from "./i18n.js";
@@ -13,6 +14,8 @@ import { readProjects, resolveProjectForDir } from "./projects.js";
 import { recoveryPolicy, type RecoveryKey } from "./recovery-policy.js";
 import { readActiveAgents } from "./registry.js";
 import { REPO_ROOT } from "./repo-root.js";
+import { statePath } from "./paths.js";
+import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { LIVE_PROBE_PORTS, masterSessionProbe, planSockHeal, sameSockServers, type SockHealMode, type SockProbe, type TmuxServerProc } from "./tmux-sock-probe.js";
 
 const SOCK_HEAL_KEY: RecoveryKey = "tmuxSockHeal";
@@ -40,6 +43,9 @@ export interface SockGuardPorts {
   now: () => number;
   log: (msg: string) => void;
   alert: (text: string) => Promise<void>;
+  /** 上次新建记录；undefined = 没有记录，null = 读坏了 */
+  loadMark: () => CreateMark | undefined | null;
+  saveMark: (m: CreateMark) => void;
 }
 
 /** exists = 照常；start = 连续 3 次 absent，可以新建；hold = 本轮什么都不做（不新建） */
@@ -47,6 +53,7 @@ export type MasterVerdict = "exists" | "start" | "hold";
 /** skip = 本轮不恢复；confirmed = 确认新建的服务，恢复不受阈值限制；normal = 照常（受阈值限制） */
 export type RestoreMode = "skip" | "confirmed" | "normal";
 interface ServerId { pid: number; inode: number }
+export interface CreateMark { createdAt: number; confirmed: ServerId | null }
 
 export class LauncherSockGuard {
   private lastState: SockProbe["state"] | null = null;
@@ -60,10 +67,11 @@ export class LauncherSockGuard {
   private startApproved = false;
   private confirmed: ServerId | null = null;
   private confirmedAnnounced = false;
+  private markLoaded = false;
   constructor(private readonly p: SockGuardPorts) {}
 
   async check(): Promise<MasterVerdict> {
-    try { return await this.decide(); } catch (e) {
+    try { this.loadMark(); return await this.decide(); } catch (e) {
       this.p.log(`🧷 tmux 探测出错，本轮不动：${(e as Error).message}`); // 主循环不能因探测抛错而退出（launcher 退了没人拉大总管）
       return "hold";
     }
@@ -96,18 +104,19 @@ export class LauncherSockGuard {
     const servers = await this.p.servers();
     const inode = this.p.inode();
     if (probe.state !== "exists" || servers?.length !== 1 || inode === null) {
-      this.confirmed = null;
+      this.setConfirmed(null);
       this.p.log(`🧷 新建后核不出新服务（探测 ${probe.state}，服务 ${servers?.length ?? "?"} 个，inode ${inode ?? "无"}），不算确认新建`);
       return;
     }
-    this.confirmed = { pid: servers[0].pid, inode };
+    this.setConfirmed({ pid: servers[0].pid, inode });
     this.confirmedAnnounced = false;
-    this.p.log(`🧷 确认新建 master：服务 pid ${this.confirmed.pid}，套接字 inode ${inode}`);
+    this.p.log(`🧷 确认新建 master：服务 pid ${servers[0].pid}，套接字 inode ${inode}`);
     if (this.startStale) await this.alert(t("🧷 残留套接字：无服务进程、无持有者，已新建 master。", "🧷 Stale socket: no server, no holder; created a new master."));
   }
 
   /** startMaster 在 new-session 之前调：有同路径服务进程（或查不了）就不建。放行即记下新建时刻（冻结 10 分钟） */
   async claimCreate(): Promise<boolean> {
+    this.loadMark();
     const servers = await this.p.servers();
     if (servers === null) {
       this.once("create:ps", HOUR_MS, () => this.p.log("🧷 new-session 前读不了进程表，本轮不新建 master"));
@@ -122,11 +131,14 @@ export class LauncherSockGuard {
       return false;
     }
     this.createdAt = this.p.now();
+    this.confirmed = null;
+    this.saveMark();
     return true;
   }
 
   /** 依赖窗口列表的判断此刻该不该冻结；返回原因，null = 不冻结 */
   frozen(): string | null {
+    this.loadMark();
     if (this.lastState !== "exists") return `tmux 探测 ${this.lastState ?? "未做"}`;
     if (this.p.now() - this.createdAt < CREATED_FREEZE_MS) return "10 分钟内新建过 master";
     return null;
@@ -134,6 +146,7 @@ export class LauncherSockGuard {
 
   /** restoreDeadAgents 入口：探测不是 exists 一律跳过；确认新建且 pid / inode 都对得上 = confirmed；否则按冻结规则 */
   async restoreMode(source: string): Promise<RestoreMode> {
+    this.loadMark();
     const skip = (why: string): RestoreMode => {
       this.once(`restore:${why}`, UNKNOWN_LOG_MS, () => this.p.log(`🔁 [${source}] 跳过 dead 恢复：${why}`));
       return "skip";
@@ -152,15 +165,19 @@ export class LauncherSockGuard {
     return [`tmux（${why}）`];
   }
 
+  /** Claude Code 升级续波入口（continueWave 不走 busy）：冻结时整轮不动，pending 原样留着，调用方 30 分钟后再来 */
+  waveHold(): boolean {
+    const why = this.frozen();
+    if (why) this.once(`wave:${why}`, UNKNOWN_LOG_MS, () => this.p.log(`🆙 Claude Code 升级 / 续波暂停：${why}`));
+    return why !== null;
+  }
+
   /** 一轮 dead ≥ 10 且超过 active 一半：这轮不复活（true），告警；连续 3 轮再告一次等人。低于阈值清零（false）。
-   *  confirmed（确认新建的服务）不受阈值限制，第一次恢复发一条说明 */
-  async massDead(names: string[], mode: RestoreMode = "normal"): Promise<boolean> {
+   *  传 manager list 原样结果，在这里数 dead：恢复闸会滤掉失败满 3 次 / 缺目录的，滤完再数会漏掉这次断连。confirmed 不受阈值限制 */
+  async massDead(agents: { name: string; status?: string }[], mode: RestoreMode = "normal"): Promise<boolean> {
+    const names = agents.filter((a) => a.status === "dead").map((a) => a.name);
     if (mode === "confirmed") {
       this.massStreak = 0;
-      if (!this.confirmedAnnounced) {
-        this.confirmedAnnounced = true;
-        await this.alert(t(`🔁 确认新建后恢复 ${names.length} 个 agent`, `🔁 Restoring ${names.length} agent(s) after a confirmed new master`));
-      }
       return false;
     }
     let active: number;
@@ -189,6 +206,13 @@ export class LauncherSockGuard {
     return true;
   }
 
+  /** 确认新建后第一次真要恢复时发一条说明（count = 过滤后真正要 restart 的个数） */
+  async noteRestore(count: number, mode: RestoreMode): Promise<void> {
+    if (mode !== "confirmed" || !count || this.confirmedAnnounced) return;
+    this.confirmedAnnounced = true;
+    await this.alert(t(`🔁 确认新建后恢复 ${count} 个 agent`, `🔁 Restoring ${count} agent(s) after a confirmed new master`));
+  }
+
   /** 当前同路径服务恰好一个，且 pid、inode 都与确认新建时一致；任一不一致或查不出就作废确认 */
   private async stillConfirmed(): Promise<boolean> {
     const servers = await this.p.servers();
@@ -196,9 +220,37 @@ export class LauncherSockGuard {
     const ok = servers?.length === 1 && servers[0].pid === this.confirmed?.pid && inode === this.confirmed?.inode;
     if (!ok) {
       this.p.log(`🧷 确认新建作废：服务 ${servers?.map((x) => x.pid).join(",") ?? "?"}、inode ${inode ?? "无"} 与新建时（pid ${this.confirmed?.pid}、inode ${this.confirmed?.inode}）不一致`);
-      this.confirmed = null;
+      this.setConfirmed(null);
     }
     return ok;
+  }
+
+  private setConfirmed(c: ServerId | null): void {
+    this.confirmed = c;
+    this.saveMark();
+  }
+
+  /** 进程内第一次用到时读一次上次新建记录；读坏了按「刚新建、未确认」冻结 10 分钟（宁可多等，不把空服务当全员空闲） */
+  private loadMark(): void {
+    if (this.markLoaded) return;
+    this.markLoaded = true;
+    let m: CreateMark | undefined | null;
+    try { m = this.p.loadMark(); } catch (e) { m = null; this.p.log(`🧷 读新建记录出错：${(e as Error).message}`); }
+    if (m === undefined) return;
+    if (m === null) {
+      this.createdAt = this.p.now();
+      this.p.log("🧷 新建记录读不了，按刚新建过 master 冻结 10 分钟");
+      return;
+    }
+    this.createdAt = Math.min(m.createdAt, this.p.now()); // 时钟回拨时别把冻结拖成无限期
+    this.confirmed = m.confirmed;
+  }
+
+  private saveMark(): void {
+    if (!Number.isFinite(this.createdAt)) return; // 从没新建过：没什么可记
+    try { this.p.saveMark({ createdAt: this.createdAt, confirmed: this.confirmed }); } catch (e) {
+      this.p.log(`🧷 新建记录写不了（launcher 重启后冻结会丢）：${(e as Error).message}`);
+    }
   }
 
   private async observe(): Promise<SockProbe> {
@@ -275,6 +327,12 @@ async function liveHealMode(): Promise<SockHealMode> {
   }
 }
 
+const MARK_PATH = statePath("launcher-sock-guard.json");
+const isServerId = (x: unknown): boolean =>
+  x === null || (typeof x === "object" && Number.isInteger((x as ServerId).pid) && Number.isInteger((x as ServerId).inode));
+const isMark = (x: unknown): boolean =>
+  typeof x === "object" && x !== null && Number.isFinite((x as CreateMark).createdAt) && isServerId((x as CreateMark).confirmed);
+
 const LIVE_GUARD_PORTS: SockGuardPorts = {
   probe: () => masterSessionProbe(),
   servers: async () => {
@@ -291,6 +349,11 @@ const LIVE_GUARD_PORTS: SockGuardPorts = {
   now: () => Date.now(),
   log: (msg) => console.log(msg),
   alert: (text) => notify({ source: "launcher", chatId: process.env.CONTROL_CHANNEL_ID || "", text }).then(() => {}),
+  loadMark: () => {
+    const r = readJsonStateSync(MARK_PATH, isMark);
+    return r.status === "ok" ? (r.data as CreateMark) : r.status === "missing" ? undefined : null;
+  },
+  saveMark: (m) => writeJsonAtomicSync(MARK_PATH, m),
 };
 
 export const sockGuard = new LauncherSockGuard(LIVE_GUARD_PORTS);

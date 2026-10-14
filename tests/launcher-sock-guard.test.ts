@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { LauncherSockGuard, type SockGuardPorts } from "../src/lib/launcher-sock-guard.ts";
+import { LauncherSockGuard, type CreateMark, type SockGuardPorts } from "../src/lib/launcher-sock-guard.ts";
 import type { SockHealMode, SockProbe, TmuxServerProc } from "../src/lib/tmux-sock-probe.ts";
 
 const SERVER: TmuxServerProc = { pid: 795, ppid: 1, command: "tmux -S /fake.sock new-session" };
@@ -7,12 +7,15 @@ const pr = (state: SockProbe["state"], o: Partial<SockProbe> = {}): SockProbe =>
   ({ state, why: state, code: state === "exists" ? 0 : 1, stderr: "", ms: 3, sock: "present", inode: 42, refused: false, servers: null, stale: false, ...o });
 const refused = (servers: TmuxServerProc[] = [SERVER]) => pr("unknown", { why: "连接被拒", refused: true, servers });
 
-function rig(o: { probes?: SockProbe[]; servers?: TmuxServerProc[] | null; mode?: SockHealMode; active?: number } = {}) {
+const dead = (names: string[], alive = 0) => [...names.map((name) => ({ name, status: "dead" })), ...Array.from({ length: alive }, (_, i) => ({ name: `live-${i}`, status: "active" }))];
+
+function rig(o: { probes?: SockProbe[]; servers?: TmuxServerProc[] | null; mode?: SockHealMode; active?: number; mark?: CreateMark | null } = {}) {
   const queue = [...(o.probes ?? [])];
   const s = {
     clock: 0, sleeps: [] as number[], usr1: [] as number[], logs: [] as string[], alerts: [] as string[], busyCalls: 0,
     servers: o.servers === undefined ? [] : o.servers, inode: 42 as number | null, mode: o.mode ?? "observe", active: o.active ?? 20, probes: 0,
     push: (...p: SockProbe[]) => queue.push(...p),
+    mark: o.mark as CreateMark | undefined | null, saved: [] as CreateMark[],
   };
   const ports: SockGuardPorts = {
     probe: async () => { s.probes++; const p = queue.shift(); if (!p) throw new Error("没有预置的探测结果"); return p; },
@@ -26,6 +29,8 @@ function rig(o: { probes?: SockProbe[]; servers?: TmuxServerProc[] | null; mode?
     now: () => s.clock,
     log: (m) => { s.logs.push(m); },
     alert: async (t) => { s.alerts.push(t); },
+    loadMark: () => s.mark,
+    saveMark: (m) => { s.saved.push(structuredClone(m)); s.mark = structuredClone(m); },
   };
   return { s, g: new LauncherSockGuard(ports) };
 }
@@ -144,15 +149,21 @@ describe("冻结与大量 dead [验收线 4]", () => {
   test("dead 达到阈值那轮不复活并告警，连续 3 轮再告一次；低于阈值照旧", async () => {
     const { s, g } = rig({ active: 15 });
     const names = Array.from({ length: 10 }, (_, i) => `agent-${i}`);
-    expect(await g.massDead(names)).toBe(true);
+    expect(await g.massDead(dead(names, 5))).toBe(true);
     expect(s.alerts.length).toBe(1);
     expect(s.alerts[0]).toContain("agent-0");
-    expect(await g.massDead(names)).toBe(true);
+    expect(await g.massDead(dead(names, 5))).toBe(true);
     expect(s.alerts.length).toBe(1);
-    expect(await g.massDead(names)).toBe(true);
+    expect(await g.massDead(dead(names, 5))).toBe(true);
     expect(s.alerts.length).toBe(2);
-    expect(await g.massDead(names.slice(0, 9))).toBe(false);
-    expect(await rig({ active: 25 }).g.massDead(names)).toBe(false); // 没超过一半
+    expect(await g.massDead(dead(names.slice(0, 9), 6))).toBe(false);
+    expect(await rig({ active: 25 }).g.massDead(dead(names, 15))).toBe(false); // 没超过一半
+  });
+
+  test("阈值按 manager list 里全部 dead 数（恢复闸过滤之前）：12/20 dead 即使只剩 9 个可恢复也不复活", async () => {
+    const { g } = rig({ active: 20 });
+    const list = dead(Array.from({ length: 12 }, (_, i) => `agent-${i}`), 8);
+    expect(await g.massDead(list)).toBe(true);
   });
 });
 
@@ -187,8 +198,10 @@ describe("确认新建后照常恢复 [验收线 4]", () => {
   test("pid、inode 一致：dead 恢复不冻结、不受阈值限制，发一条说明；自动升级仍冻结 10 分钟", async () => {
     const { s, g } = await confirmedRig();
     expect(await g.restoreMode("boot")).toBe("confirmed");
-    expect(await g.massDead(names, "confirmed")).toBe(false);
-    expect(s.alerts.filter((a) => a.includes("确认新建后恢复 12 个")).length).toBe(1);
+    expect(await g.massDead(dead(names), "confirmed")).toBe(false);
+    await g.noteRestore(9, "confirmed"); // 过滤后真要 restart 的个数
+    await g.noteRestore(9, "confirmed");
+    expect(s.alerts.filter((a) => a.includes("确认新建后恢复 9 个")).length).toBe(1);
     expect((await g.busy("master:0")).length).toBe(1);
     expect(s.busyCalls).toBe(0);
   });
@@ -200,7 +213,7 @@ describe("确认新建后照常恢复 [验收线 4]", () => {
     await g.check();
     const mode = await g.restoreMode("periodic");
     expect(mode).toBe("normal");
-    expect(await g.massDead(names, mode)).toBe(true);
+    expect(await g.massDead(dead(names), mode)).toBe(true);
   });
   test("inode 变了 / 查不出：不算确认", async () => {
     const a = await confirmedRig();
@@ -238,5 +251,60 @@ describe("残留套接字连续确认后新建 [验收线 2]", () => {
   test("残留只出现 1–2 次（之后 lsof 查不了 = unknown）：不新建", async () => {
     const r = rig({ probes: [pr("absent", { stale: true }), pr("absent", { stale: true }), pr("unknown", { why: "lsof 查不了" })] });
     expect(await r.g.check()).toBe("hold");
+  });
+});
+
+describe("续波入口也受冻结 [验收线 4]", () => {
+  test("刚新建过 master：waveHold 挡住（continueWave 不走 busy）；10 分钟后放行；探测不是 exists 也挡", async () => {
+    const { s, g } = rig({ servers: [], probes: [pr("absent"), pr("absent"), pr("absent"), pr("exists"), pr("exists"), pr("unknown")] });
+    await g.check();
+    await g.claimCreate();
+    await g.check();
+    expect(g.waveHold()).toBe(true);
+    expect(s.logs.some((l) => l.includes("续波暂停"))).toBe(true);
+    s.clock += 10 * 60_000;
+    await g.check();
+    expect(g.waveHold()).toBe(false);
+    await g.check();
+    expect(g.waveHold()).toBe(true);
+  });
+});
+
+describe("新建冻结跨 launcher 重启 [验收线 4]", () => {
+  test("实例 A 新建后落盘；重启后的实例 B 首检 exists 仍冻结，10 分钟后解除", async () => {
+    const a = rig({ servers: [], probes: [pr("absent"), pr("absent"), pr("absent")] });
+    await a.g.check();
+    await a.g.claimCreate();
+    expect(a.s.mark?.createdAt).toBe(0);
+    const b = rig({ mark: a.s.mark, probes: [pr("exists"), pr("exists")] });
+    b.s.clock = 60_000;
+    await b.g.check();
+    expect(b.g.frozen()).toContain("10 分钟");
+    expect(b.g.waveHold()).toBe(true);
+    expect(await b.g.restoreMode("boot")).toBe("skip");
+    b.s.clock = 10 * 60_000;
+    await b.g.check();
+    expect(b.g.frozen()).toBeNull();
+  });
+
+  test("确认新建的 pid、inode 也落盘：重启后对得上照样 confirmed，对不上作废并落盘", async () => {
+    const a = await confirmedRig();
+    expect(a.s.mark?.confirmed).toEqual({ pid: 795, inode: 42 });
+    const b = rig({ mark: a.s.mark, servers: [SERVER], probes: [pr("exists")] });
+    await b.g.check();
+    expect(await b.g.restoreMode("boot")).toBe("confirmed");
+    b.s.inode = 43;
+    expect(await b.g.restoreMode("boot")).toBe("skip");
+    expect(b.s.mark?.confirmed).toBeNull();
+  });
+
+  test("记录读坏了：按刚新建冻结 10 分钟；没有记录不冻结", async () => {
+    const bad = rig({ mark: null, probes: [pr("exists")] });
+    await bad.g.check();
+    expect(bad.g.frozen()).toContain("10 分钟");
+    const none = rig({ probes: [pr("exists")] });
+    await none.g.check();
+    expect(none.g.frozen()).toBeNull();
+    expect(none.s.saved).toEqual([]);
   });
 });

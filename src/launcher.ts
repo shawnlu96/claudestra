@@ -699,12 +699,13 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     }
     const agents: any[] = list.agents;
     // manager.ts list 会把 "registry active 但 window 丢了" 的标为 status="dead"
+    if (await sockGuard.massDead(agents, sockMode)) return; // 大量 dead 按过滤前的全部 dead 判
     const reallyDead = await restoreGate.select(agents);
     if (reallyDead.length === 0) {
       if (source === "boot") console.log("🔁 开机自检：没有需要恢复的 dead agent");
       return;
     }
-    if (await sockGuard.massDead(reallyDead.map((a: any) => a.name), sockMode)) return;
+    await sockGuard.noteRestore(reallyDead.length, sockMode);
     // 持租约压住 periodic 巡检——不论 boot 还是 periodic 先到,先到者拿租约,
     // 后到者被 685 的 `>= restartWaveUntil` 门槛挡住,不再撞车重启同一批(P1)
     restartWaveUntil = Date.now() + 10 * 60_000;
@@ -873,6 +874,7 @@ async function checkClaudeCodeUpdate() {
     await probeClaudeBinaryHealth("轮询");
     return;
   }
+  if (sockGuard.waveHold()) { lastClaudeUpdateCheck = Date.now() - CLAUDE_UPDATE_CHECK_INTERVAL_MS + 30 * 60_000; return; } // tmux 冻结：续波不走 busy，整轮不动，pending 留着
   // 上一波有人在忙没重启完：只续波（按原身份、动手前再核），不重新检查 / 安装同一版本
   const resumed = await continueWave(claudeWavePorts(async () => null), current);
   if (resumed) return settleClaudeWave(resumed);
@@ -1050,10 +1052,8 @@ async function main() {
     await Bun.sleep(CHECK_INTERVAL_MS);
 
     const master = await sockGuard.check(); // 连续 3 次确认 absent 才 start；unknown 本轮不动
-    if (master !== "exists") {
-      if (master === "start") { console.log("💀 大总管 tmux session 不存在，正在重启..."); await startMaster(); }
-      continue;
-    }
+    if (master === "start") { console.log("💀 大总管 tmux session 不存在，正在重启..."); await startMaster(); }
+    if (master !== "exists") continue;
 
     // session 活着但 window:0 可能没了（被手动 kill-window 或 tmux 异常）。
     // 这种情况 captureLast 会抓到隔壁 agent 的 pane 然后把 Enter 发去瞎戳，
