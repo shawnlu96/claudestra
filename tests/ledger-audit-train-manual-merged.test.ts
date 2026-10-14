@@ -275,7 +275,7 @@ describe("[验收线 4] 真入口：拒绝与成功的写入边界", () => {
     expect(events()).toBe(n + 1);
     const entry = (db.query("SELECT MAX(seq) AS s FROM events WHERE target = 'B' AND kind = 'stage'").get() as { s: number }).s;
     const [ev] = manualEvents();
-    expect({ ...ev!, data: JSON.parse(ev!.data) }).toEqual({ seq: r.event, actor: "agent-pm", project: P, target: "B", kind: "scheduler", data: {
+    expect({ ...ev!, data: JSON.parse(ev!.data) }).toEqual({ seq: r.event!, actor: "agent-pm", project: P, target: "B", kind: "scheduler", data: {
       op: "manual_merge_record", v: 1, phase: "merged", head: head("B"), mergeSha: MERGE, pr: prOf("B"), base: "main", mainHead: MAIN,
       specRev: 1, round: 1, mergeEntrySeq: entry, receipt: RECEIPT } });
     expect(await record("B", {}, "owner", NOW)).toMatchObject({ ok: true, duplicate: true, event: r.event });
