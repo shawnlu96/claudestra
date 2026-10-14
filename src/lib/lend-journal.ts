@@ -41,6 +41,10 @@ export const WORKER_STATES: readonly LendState[] = ["started", "result_pending"]
 export const isTerminal = (s: LendState): boolean => NEXT[s].length === 0;
 export const canMove = (from: LendState, to: LendState): boolean => NEXT[from].includes(to);
 
+/** LENDUI2：worker 交的截图，按清单规范顺序；拷贝在 <工作副本>/.git/lend-ui-shots/<sha256>.png（去过元数据的字节） */
+export interface WorkUiShot { view: string; size: string; phase: "before" | "after"; sha256: string; bytes: number; width: number; height: number }
+export interface WorkUi { summary: string; shots: WorkUiShot[] }
+
 export interface LendRow {
   orderId: string;
   peer: string;
@@ -65,8 +69,8 @@ export interface LendRow {
   submit: "sending" | "sent" | null;
   payload: Record<string, unknown> | null;
   payloadSha: string | null;
-  /** 写单：worker 交来的 head / 一行摘要 / 自查（lend submit 落的）；推送、开 PR 之后才拼成 payload 发给 A */
-  work: { head: string; summary: string; selfCheck: string } | null;
+  /** 写单：worker 交来的 head / 一行摘要 / 自查（lend submit 落的）；推送、开 PR 之后才拼成 payload 发给 A。ui = 交了截图（LENDUI2，升级前的单没有） */
+  work: { head: string; summary: string; selfCheck: string; ui?: WorkUi } | null;
   receipt: Record<string, unknown> | null;
   reason: string | null;
   /** 终态之后还没做完的外部效果（lend-drive.ts settleOrder）：和终态同一次写入，做完清成 null；非 null 的单每轮补做 */

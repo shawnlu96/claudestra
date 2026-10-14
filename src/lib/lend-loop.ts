@@ -118,7 +118,7 @@ function roundDeps(d: LoopDeps, r: Round): LoopDeps {
   };
   const live = (peer: string) => r.v2 && speaksV2(d.db, peer);
   return {
-    ...d, call: gate(d.call), ...(d.v2 ? { v2: { ...d.v2, call: gate(d.v2.call) } } : {}),
+    ...d, call: gate(d.call), ...(d.v2 ? { v2: { ...d.v2, call: gate(d.v2.call) } } : {}), ...(d.shot ? { shot: gate(d.shot) } : {}),
     settleHold: (row) => r.offline || r.failed.has(row.peer) || (row.settle?.notify === "stopped" && isRevoked(row) && live(row.peer)),
     renewal: (row) => (live(row.peer) ? r.renewals.get(row.orderId) ?? null : undefined),
   };

@@ -71,4 +71,5 @@ export const RECOVERY_KEYS = [
   "effCountRefresh",
   "wakeStopped",
   "lendUsageReport",
+  "lendUiUpload",
 ] as const;

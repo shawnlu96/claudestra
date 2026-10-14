@@ -59,6 +59,7 @@ import { bindLendSandbox, sandboxOwnersDir } from "./lend-sandbox.js";
 import { cardWorkerIndex } from "./agent-lifecycle-store.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { launchRecording } from "./role-model-settings-lend.js";
+import { lendUiUploadMode } from "./lend-key-mode.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -69,9 +70,15 @@ const plainManager = (lease: SchedulerLease | undefined, extra: Record<string, s
 
 /** 对 A 的单次出站上限：超时就强杀 `manager lend call`，按传输失败处理（本轮跳过这个 peer 的其余出站） */
 const OUTBOUND_MS = 15_000;
-const outboundManager = (lease: SchedulerLease | undefined): Manager => (...args) => runManagerProcess(args, {
-  bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, timeoutMs: OUTBOUND_MS,
+/** 传一张交付截图（LENDUI2 `lend call <peer> shot`，子进程里 fetch 40 秒）：单独的上限，env 同上 */
+const SHOT_MS = 45_000;
+const outboundManager = (lease: SchedulerLease | undefined, timeoutMs = OUTBOUND_MS): Manager => (...args) => runManagerProcess(args, {
+  bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, timeoutMs,
   env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "1", [SCHEDULER_LEASE_ENV]: encodeLease(lease) } });
+
+/** `manager lend call <peer> shot` 的参数：只有 meta（槽位与单号）和拷贝路径 */
+export const shotArgv = (peer: string, body: Record<string, unknown>): string[] =>
+  ["lend", "call", peer, "shot", "--meta", JSON.stringify(body.meta), "--png-file", String(body.file)];
 
 /** 本进程的 hello 启动号：调度服务重启就换一个（A 按 boot + seq 防回滚） */
 const BOOT = newBoot();
@@ -121,6 +128,21 @@ const reviewWake = (row: LendRow): string[] => [
   `${submitCmd(row)} --verdict pass|changes|block --findings-file findings.json --report report.md`,
 ];
 
+/**
+ * 写单交截图的两行（LENDUI2）：lendUiUpload 不是 off 才有，off 时尾注和改动前逐字相同。before 怎么拍要写清：
+ * 10-14 夜里三张出借 ui 卡退回 ui_missing_screenshots 的根因就是没有成对的「改前」图。
+ */
+const uiShotLines = (row: LendRow): string[] => {
+  const base = `origin/${row.wire?.write?.base || "main"}`;
+  return [
+    `规格要求前后截图的话：截图存到当前目录的 ui-shots/（PNG）；只截被测页面本身（浏览器测试的页面截图，用测试数据），不截桌面、终端、浏览器外框；` +
+      `before 在基线 ${base} 上截（同一份副本里 git stash 或检出 ${base} 跑同一条截图测试；或 git worktree add --detach .ui-base ${base} 在那里跑），` +
+      `after 在交付的 HEAD 上截；图名按 before-<状态>-<尺寸>.png / after-<状态>-<尺寸>.png 成对，同一展示状态 + 尺寸一对，最多 8 对；图宽要是尺寸宽的 1 / 2 / 3 倍。`,
+    `写好 ui-shots/manifest.json（{"v":1,"summary":"一行说明","shots":[{"view":"home","size":"390x844","phase":"before","file":"before-home-390x844.png"},…]}），` +
+      "交付命令末尾加 --ui-shots-file ui-shots/manifest.json；summary / view 里不写本机路径、用户名、主机名。截图被拒会说原因，改不好就去掉这个参数，照常交代码。",
+  ];
+};
+
 /** 写单：只在当前分支上提交；这个副本推不出去（推送由出借服务做），摘要 / 自查走文件，不进命令行参数 */
 const writeFooter = (row: LendRow): string[] => [
   `你是一次性的出借 worker，只做上面这一单；当前目录是这张单的独立 clone，已检出订单分支 ${row.wire?.write?.branch ?? "（见标题）"}，别动别的目录、别切别的分支。`,
@@ -128,6 +150,7 @@ const writeFooter = (row: LendRow): string[] => [
   "做完在当前目录里跑（一次就行，重复交同一份无害）：",
   `${submitCmd(row)} --summary-file summary.txt --self-check-file selfcheck.md`,
   "summary.txt 是一行摘要（≤ 500 字节）；selfcheck.md 是自查，逐条对验收线（≤ 4000 字节）。交的是当前分支的 HEAD，交之前先提交干净。",
+  ...(lendUiUploadMode() === "off" ? [] : uiShotLines(row)),
 ];
 
 const isWriteRow = (row: LendRow): boolean => isWriteStep(String(orderOf(row)?.step ?? ""));
@@ -168,9 +191,16 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const svc: Manager = (...a) => owned(() => schedulerManagerWith(lease)(...a));
   const plain: Manager = (...a) => owned(() => manager(lease)(...a));
   const out: Manager = (...a) => owned(() => outboundManager(lease)(...a));
+  const shotOut: Manager = (...a) => owned(() => outboundManager(lease, SHOT_MS)(...a));
   const call = async (peer: string, op: string, body: Record<string, unknown>) => {
     const r = await out("lend", "call", peer, op, "--body", JSON.stringify(body));
     if (r.ok !== true) throw new Error(String(r.error ?? "manager lend call 失败"));
+    return { status: Number(r.status), body: r.body };
+  };
+  /** 截图：meta 进参数、图只给拷贝路径（子进程自己读），token 由子进程从 peers.json 读，不进参数 */
+  const shot = async (peer: string, _op: "shot", body: Record<string, unknown>) => {
+    const r = await shotOut(...shotArgv(peer, body));
+    if (r.ok !== true) throw new Error(String(r.code ?? "manager lend call shot 失败"));
     return { status: Number(r.status), body: r.body };
   };
   /** 读失败一律 unknown（worker-liveness.ts）；服务停止 / 失租照样往外抛，不被吞成 unknown */
@@ -180,7 +210,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const lendLog = (m: string) => console.error(`[lend] ${m}`);
   const procPorts = systemProcPorts();
   return {
-    db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
+    db: journal, now: () => Date.now(), call: call as LendCall, shot, env: process.env, footer, verifyReceipt,
     sandbox: { owners: sandboxOwnersDir(journal.filename), active, mode: () => readSchedulerConfig().lifecycle?.mode ?? "observe", card: (worker) => {
       const db = ledger.get();
       if (!db) throw new Error("LIFE1 cardWorkerIndex 不可读");
