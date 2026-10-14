@@ -17,9 +17,13 @@ import { CLAIM_MAIN_CAUSE, claimMainUnsent } from "./scheduler-merge-freshness-r
 import { observeDedupKey, recoveryPolicy } from "./recovery-policy.js";
 import { getEventByDedup, listEvents } from "./ledger-store.js";
 import { getIntent, getWorkflow } from "./ledger-scheduler.js";
-import type { insertEvent } from "./ledger-tx.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import type { LedgerEvent } from "./ledger-stages.js";
+
+/** The caller supplies its authorized event writer, as scheduler-merge-unsent.ts takes it (no ledger-tx import here). */
+type WriteEvent = (db: Database, ctx: WriteCtx, event: {
+  project: string; target: string; kind: "scheduler" | "note"; text: string; data: Record<string, unknown>;
+}, primary: boolean) => LedgerEvent;
 
 const CLAIM_CANCEL = "auto 卡领取 merging 后 main 已变，合并未发出，自动取消重排";
 
@@ -38,7 +42,7 @@ function eligible(db: Database, row: MergeRun, receipt: string): boolean {
 }
 
 /** Called on merging → unknown after the existing unsent exits; false leaves the old freeze path untouched. */
-export function claimMainUnsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, raw: string | undefined, write: typeof insertEvent): boolean {
+export function claimMainUnsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, raw: string | undefined, write: WriteEvent): boolean {
   const receipt = raw?.trim() ?? "";
   if (row.phase !== "merging" || !eligible(db, row, receipt)) return false;
   const mode = recoveryPolicy(row.project, "mergeUnsentCancel").mode;
