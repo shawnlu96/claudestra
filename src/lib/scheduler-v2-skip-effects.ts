@@ -22,13 +22,13 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-create-retry.ts": "vcs=2", "scheduler-deploy-job.ts": "fs=3", "scheduler-dispatch-recovery.ts": "ledger=4 stmt=2",
     "scheduler-existing-author.ts": "vcs=1", "scheduler-main-merge-carry.ts": "vcs=2", "scheduler-merge-external.ts": "vcs=3",
     "scheduler-merge-union-git.ts": "fs=4 vcs=1", // KEYUNION1: the merge driver's scratch-worktree union merge + push, under the merge tick's skipTask
-    "effect-count-refresh-git.ts": "fs=1 vcs=1", // EFFAUTO1: the merge driver's scratch-worktree count refresh + push, under the merge tick's skipTask
+    "effect-count-refresh-git.ts": "fs=2 vcs=1", // EFFAUTO1: the merge driver's scratch-worktree count refresh + push, under the merge tick's skipTask
     "scheduler-review-head.ts": "proc=1 vcs=4", "scheduler-review-rebase.ts": "stmt=1 proc=1 vcs=1", "scheduler-spec-resume-deps.ts": "proc=1 notice=1 vcs=1",
     "scheduler-ui-carry-proof.ts": "proc=1", "scheduler-ui-carry.ts": "fs=2", "scheduler-ui-gate.ts": "notice=1",
   },
   /** `ledger <sub>` calls through the pass manager, held by schedulerV2SkipManager */
   manager: {
-    "fix-strategy-tick.ts": "ledger=8", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
+    "fix-strategy-tick.ts": "ledger=10", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
     "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
@@ -41,7 +41,9 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2", "scheduler-main-ci-wiring.ts": "ledger=3 notice=4", "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2", "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1", "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1", "scheduler-observe-tick.ts": "ledger=1",
+    "scheduler-merge-pipe.ts": "ledger=2", // MRGPIPE1: `ledger scheduler-merge-step` (slot yield) and `scheduler-recovery-observe` through the pass manager
     "scheduler-ci-proof-gate.ts": "ledger=1", // GATE1: `ledger scheduler-recovery-observe` (the observe note) through the pass manager
+    "scheduler-merge-ci-log-read.ts": "ledger=1 vcs=3", // merge tick's CI reads; observation through the guarded pass manager
     "scheduler-pool-tick.ts": "ledger=1", "scheduler-post-verify.ts": "ledger=2", "scheduler-recovery-ports.ts": "ledger=4", "scheduler-review-pm-tick.ts": "ledger=1",
     "scheduler-review-swap-runtime.ts": "ledger=1 proc=1", "scheduler-sec-review.ts": "ledger=1", "scheduler-service.ts": "ledger=6 proc=1", "merge-deploy-outbox.ts": "ledger=1",
     "scheduler-spec-resume.ts": "ledger=3", "scheduler-spec-wait.ts": "ledger=1 stmt=1",

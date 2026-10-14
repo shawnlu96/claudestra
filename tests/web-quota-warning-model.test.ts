@@ -51,12 +51,12 @@ describe("出不出提醒", () => {
 describe("文案", () => {
   const one = (fl: FamilyLine, mode: "on" | "observe" = "on") => warnTexts(warningItems(view([fl], mode), NOW)[0]!);
   test("停接（执行）= 已停止接新单，在跑的单照常", () => {
-    expect(one(STOP)).toEqual({ title: "{family} 本周已用 {pct}%，达到停接线", status: "已停止接新单，在跑的单照常做完" });
+    expect(one(STOP)).toEqual({ title: "{family} 本周已用 {pct}%，到了不再接新活的线", status: "已不再接新活，在跑的活照常做完" });
   });
-  test("提醒（执行）= 未停接、名额减半", () => expect(one(WARN).status).toBe("未停接，新单名额已减半"));
+  test("提醒（执行）= 未停接、名额减半", () => expect(one(WARN).status).toBe("仍在接新活，能同时跑的数量已减半"));
   test("只观察：写明未停接", () => {
-    expect(one(f({ ...STOP, limit: "none", mode: "observe" }), "observe").status).toBe("只观察：未停接，仍在接新单");
-    expect(one(f({ ...WARN, limit: "none", mode: "observe" }), "observe").status).toBe("只观察：未停接，名额未缩减");
+    expect(one(f({ ...STOP, limit: "none", mode: "observe" }), "observe").status).toBe("只观察：没停，仍在接新活");
+    expect(one(f({ ...WARN, limit: "none", mode: "observe" }), "observe").status).toBe("只观察：仍在接新活，能同时跑的数量没减");
   });
 });
 

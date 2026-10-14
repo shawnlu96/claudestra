@@ -7,6 +7,7 @@
  * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记，只认最近一个线世代（周窗口 resetAt + 两条线 + 模式，带观察世代）里
  * 关掉过的状态 + 收窄档：同一条线不再弹；提醒→停接、改线 / 改模式（改回旧值也算新一代）、新的一周就再出现。tests/web-quota-warning-*.test.ts。
  */
+import { LEND_WORDS } from "@/lib/owner-words";
 import type { FamilyLine, QuotaFamily, QuotaLinesView } from "./lend-quota-model";
 
 export interface WarnItem {
@@ -47,10 +48,10 @@ export function warningItems(view: QuotaLinesView | null | undefined, now: numbe
 
 /** 一条提醒的文案（中文原文 + 变量，渲染处经 quota-warning-i18n 翻译） */
 export function warnTexts(it: WarnItem): { title: string; status: string } {
-  const title = it.level === "stop" ? "{family} 本周已用 {pct}%，达到停接线" : "{family} 本周已用 {pct}%，达到提醒线";
-  const status = it.stopped ? "已停止接新单，在跑的单照常做完"
-    : it.level === "stop" ? "只观察：未停接，仍在接新单"
-    : it.enforced ? "未停接，新单名额已减半" : "只观察：未停接，名额未缩减";
+  const title = it.level === "stop" ? LEND_WORDS.warnTitleStop : "{family} 本周已用 {pct}%，达到提醒线";
+  const status = it.stopped ? LEND_WORDS.statusStopped
+    : it.level === "stop" ? LEND_WORDS.statusObserveStop
+    : it.enforced ? LEND_WORDS.statusHalved : LEND_WORDS.statusObserveWarn;
   return { title, status };
 }
 

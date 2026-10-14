@@ -73,7 +73,11 @@ export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
       const p = object(v);
       return { id: text(p.id, 32), name: text(p.name, 128), personal: boolean(p.personal), bound: boolean(p.bound) };
     }),
-    peers: list(data.peers, v => { const p = object(v); return { id: text(p.id), name: text(p.name, 128) }; }),
+    // instanceId 可选（老 bridge 没有）：只给协作视图认执行实例的机器名，形状不对按坏快照拒
+    peers: list(data.peers, v => {
+      const p = object(v);
+      return { id: text(p.id), name: text(p.name, 128), ...(p.instanceId === undefined ? {} : { instanceId: text(p.instanceId, 64) }) };
+    }),
   };
 }
 

@@ -302,6 +302,13 @@ describe("MERGEFAST2/3 a run that got the slot after mergeTick is driven again i
   test("a reclaimed slot drives again", () => {
     expect(mergeAgain(db(), ["p"], ["T1"], on)).toBe(true);
   });
+  test("[验收线 4] a manual claim of this pass (late, its run already begun at ready) drives again only with mergeDirect on", () => {
+    const d = db();
+    d.run("INSERT INTO scheduler_intents VALUES ('i1','p','merge','submitted')");
+    d.run("INSERT INTO scheduler_merges VALUES ('i1','ready')");
+    const off = () => ({ mode: "off" }) as ReturnType<RecoveryPolicyPort>;
+    expect([mergeAgain(d, ["p"], ["M"], on), mergeAgain(d, ["p"], ["M"], observe), mergeAgain(d, ["p"], ["M"], off)]).toEqual([true, false, false]);
+  });
   test("a merge intent not begun yet (planned = pending, or claimed) drives again; a begun or settled one, another action or project does not", () => {
     const d = db();
     d.run("INSERT INTO scheduler_intents VALUES ('i1','p','merge','submitted'), ('i2','p','review','pending'), ('i3','q','merge','pending'), ('i5','p','merge','done')");

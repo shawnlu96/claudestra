@@ -72,4 +72,7 @@ export const RECOVERY_KEYS = [
   "wakeStopped",
   "lendUsageReport",
   "lendUiUpload",
+  "convergenceStall",
+  "mergePipe",
+  "ciLogPerJob",
 ] as const;

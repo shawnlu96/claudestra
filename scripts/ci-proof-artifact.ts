@@ -318,13 +318,26 @@ export function proofRun(env: Obj, event: unknown): ProofRun {
   };
 }
 
+/** desktop 作业按范围没有真跑（merge-arch-CIDESK1：结论是 success，但没写 ran=true）时的结果；不是 success，证明照常拒。 */
+export const DESKTOP_NOT_RUN = "无需运行";
+
+/**
+ * `toJSON(needs)` → 作业 id → 结果。desktop 的 success 只有在它导出 ran="true"（真在 macOS 上跑完）时才算数；按范围跳过的那条
+ * success 记成「无需运行」，buildCiProof 因它不是 success 而拒。其他作业照原样。
+ */
+export function proofNeeds(raw: unknown): Record<string, string> {
+  return Object.fromEntries(Object.entries(isObj(raw) ? raw : {}).map(([job, v]) => {
+    const result = isObj(v) ? String(v.result) : "";
+    const ran = isObj(v) && isObj(v.outputs) ? v.outputs.ran : undefined;
+    return [job, job === "desktop" && result === "success" && ran !== "true" ? DESKTOP_NOT_RUN : result];
+  }));
+}
+
 function proveMain(shardsDir: string, factsDir: string, outDir: string, env: Obj): void {
   const event = typeof env.GITHUB_EVENT_PATH === "string" && existsSync(env.GITHUB_EVENT_PATH) ? parseJson(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : null;
-  const needsRaw = parseJson(String(env.NEEDS ?? ""));
-  const needs = Object.fromEntries(Object.entries(isObj(needsRaw) ? needsRaw : {}).map(([job, v]) => [job, isObj(v) ? String(v.result) : ""]));
   const { manifest, report } = buildCiProof({
     run: proofRun(env, event), checkout: { sha: git(["rev-parse", "HEAD"]), tree: git(["rev-parse", "HEAD^{tree}"]) },
-    bunVersion: Bun.version, lockfile: readFileSync("bun.lock", "utf8"), files: testFiles(git(["ls-files"])), needs,
+    bunVersion: Bun.version, lockfile: readFileSync("bun.lock", "utf8"), files: testFiles(git(["ls-files"])), needs: proofNeeds(parseJson(String(env.NEEDS ?? ""))),
     slow: existsSync(SLOW_LIST) ? parseSlowList(readFileSync(SLOW_LIST, "utf8")) : [],
     shardLogs: readArtifacts(shardsDir, "shard.log"),
     facts: new Map([...readArtifacts(factsDir, FACTS_FILE)].map(([name, text]) => [name, parseJson(text)])),

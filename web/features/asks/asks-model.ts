@@ -10,6 +10,8 @@ import { isReservedButtonId } from "@/lib/chat/reserved-button-ids";
 import type { ChatMessage } from "@/features/chat/type";
 import { isAskForAudience } from "./ask-audience";
 import { isAskForViewer } from "./ask-viewer";
+import { askWord } from "./ask-words";
+import { TEAM_PROJECT_CARD_BUTTONS } from "@/lib/shared-projects-source";
 
 /** superseded = 同一个 agent 同一件事又问了新的一版（授权参数变了），旧卡片失效 */
 export type AskState = "open" | "answered" | "expired" | "cancelled" | "superseded";
@@ -23,6 +25,8 @@ export interface WebAsk {
   createdBy?: string | null;
   project: string;
   taskId: string | null;
+  /** 卡号对应的任务标题（bridge lib/ask-task-title.ts，读得了台账才给）；老 bridge / 查不到不给，卡头退回卡号 */
+  taskTitle?: string;
   title: string;
   context: string;
   body: string;
@@ -97,10 +101,37 @@ export function askCounts(asks: WebAsk[]): { waiting: number; accept: number } {
   return { waiting: g.waiting.length, accept: g.accept.length };
 }
 
-/** 卡片 / 横幅上给人看的名字：大总管不显示内部名；人 / 系统发起的没有 agent，按类型写「指派」「审核」 */
-export function agentLabel(name: string | null, t: (s: string) => string, kind?: WebAsk["kind"]): string {
-  if (!name) return kind === "assigned" ? t("指派") : t("审核");
-  return name === "master" ? t("大总管") : uiAgentName(name);
+/** 这张卡是为哪个本机项目开的中心提案授权卡（卡挂在大总管上）；不是提案卡 → null */
+export function proposalProjectOf(a: Pick<WebAsk, "extra">): string | null {
+  const local = a.extra?.centerProposal?.localProjectId;
+  return typeof local === "string" && local ? local : null;
+}
+
+/** 团队项目确认卡：识别规则同 lib/shared-projects-source.ts projectSourceCards */
+const isTeamProjectCard = (a: Pick<WebAsk, "createdBy" | "source">): boolean =>
+  typeof a.createdBy === "string" && Object.hasOwn(TEAM_PROJECT_CARD_BUTTONS, a.createdBy) && a.source === "system";
+
+const KIND_LABEL: Record<WebAsk["kind"], string> = { decide: "拍板", authorize: "授权", owner_action: "你来做", accept: "验收", assigned: "指派" };
+
+/** 卡片 / 横幅上给人看的名字：大总管不显示内部名；人 / 系统发起的没有 agent，按卡的类型写（不再写「审核」） */
+export function agentLabel(ask: Pick<WebAsk, "fromAgent" | "kind" | "extra" | "createdBy" | "source">, t: (s: string) => string): string {
+  const name = ask.fromAgent;
+  if (name) return name === "master" ? t("大总管") : uiAgentName(name);
+  if (proposalProjectOf(ask)) return askWord(t, "批准提案");
+  if (isTeamProjectCard(ask)) return askWord(t, "团队项目确认");
+  return askWord(t, KIND_LABEL[ask.kind] ?? "拍板");
+}
+
+/** 卡头的上下文「项目名 · 任务标题」：提案卡取它为之开的本机项目；没有任务标题写卡号，也没有卡号只写项目 */
+export function askWhere(
+  ask: Pick<WebAsk, "project" | "taskId" | "taskTitle" | "extra">,
+  projects: readonly { id: string; name: string }[],
+  t: (s: string) => string = (s) => s,
+): string {
+  const id = proposalProjectOf(ask) ?? ask.project;
+  const project = id === "master" ? askWord(t, "大总管") : (projects.find((p) => p.id === id)?.name || id);
+  const task = ask.taskTitle || ask.taskId;
+  return task ? `${project} · ${task}` : project;
 }
 
 /**

@@ -17,10 +17,12 @@ import { mergeExternal } from "./scheduler-merge-external.js";
 import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { mergeAgain, reclaimLentSlots } from "./scheduler-merge-reclaim.js";
+import { mergePipeStep } from "./scheduler-merge-pipe.js";
 import { deployYield, passClock } from "./scheduler-deploy-first.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
 import { mainCiPass } from "./scheduler-main-ci-wiring.js";
 import { openCiProofGate } from "./scheduler-ci-proof-gate.js";
+import { openCiLogPerJob } from "./scheduler-merge-ci-log-read.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
@@ -146,6 +148,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
       // GATE1 证明闸：本轮的模式、只读 GitHub 端口与观察记录写口；合并 external 被替换时（测试世界）不接真 gh，闸不开
       openCiProofGate(db, config, opts.recoveryPolicy, opts.external ? undefined : guard(active, runBounded), manager, active);
+      openCiLogPerJob(db, opts.recoveryPolicy, manager, active);
       if (cut("mainCi")) return done();
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
@@ -164,15 +167,20 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
       const reclaim = await reclaimLentSlots(db, localMerge, manager, trains); failed.push(...reclaim.failed);
       if (cut("reclaim")) return done();
-      // MERGEFAST2/3：直接合开着时，本轮 mergeTick 之后才拿到槽的卡（取回 / 人工 / auto tick 刚计划的）同轮再推一次，每轮最多一次
+      // MERGEFAST2/3：直接合开着时，本轮 mergeTick 之后才拿到槽的卡同轮再推一次，每轮最多一次：取回的、人工认领的（都记进 late，
+      // 认领时运行已 begin，查询看不到）、auto tick 刚计划的（意图还没有运行，mergeAgain 自己查）
       let again = false;
+      const late = [...reclaim.reclaimed];
       const mergeNow = async () => {
-        if (again || !mergeAgain(db, localMerge, reclaim.reclaimed, opts.recoveryPolicy ?? recoveryPolicy)) return;
+        if (again || !mergeAgain(db, localMerge, late, opts.recoveryPolicy ?? recoveryPolicy)) return;
         again = true;
         await mergeTick(db, config, manager, external, active, pace.phase(), trains);
       };
-      failed.push(...(await manual.claim(manager, config)).failed); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
+      const claim = await manual.claim(manager, config); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
+      late.push(...claim.claimed); failed.push(...claim.failed);
       if (cut("manualClaim")) return done();
+      failed.push(...(await mergePipeStep(db, config, { manager, external, active, train: opts.train, policy: opts.recoveryPolicy, pace: pace.phase(), late })).failed); // MRGPIPE1
+      if (cut("mergePipe")) return done();
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
       if (cut("observe")) return done();

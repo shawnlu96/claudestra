@@ -2,7 +2,7 @@
  * merge-arch-SELECT1: the serial / manual merge full re-check (src/lib/scheduler-ci-full-request.ts) — when it is needed, the
  * dedupe of dispatches, bounded waits and classified failures, the gh port's argv, and the driver's await_ci call site.
  */
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -34,6 +34,7 @@ function fakePort(subject: () => FullSubject | "wait" = () => subj()) {
   return { port, calls, runs };
 }
 beforeEach(() => resetFullDispatches());
+afterEach(() => { setSystemTime(); });
 
 describe("[验收线 3] related green never merges alone; the serial full re-check is bound, deduped and bounded", () => {
   test("a passed `ci scope full` lets the PR's own green stand; related, an empty or pending scope needs the re-check; no scope check = pre-SELECT1 full run", () => {
@@ -136,7 +137,10 @@ describe("[验收线 3] related green never merges alone; the serial full re-che
     const f = fakePort(() => s), sent: string[] = [];
     f.runs.push(fact(fullRequestId(subj()), { status: "completed", conclusion: "success" }));
     const send = async () => { sent.push("merge"); return MERGED; };
-    const late = Date.now() + 6 * 60_000; // pass.at is stamped by the real clock a few ms after this, so a +1ms margin races it
+    // fullRecheck stamps pass.at from Date.now(), not from its `now` argument: freeze the clock so the stamp is exactly T and the
+    // 5-minute freshness boundary is asserted to the millisecond instead of racing the real clock with a margin.
+    const T = Date.UTC(2026, 9, 13, 6, 0), late = T + 5 * 60_000 + 1;
+    setSystemTime(new Date(T));
     expect(await fullRecheck(run0, pr(), f.port, 0)).toBeNull();
     s = subj(H, H2);
     await expect(fullBoundMerge(run0.prRef, H, f.port, send, late)).rejects.toThrow(/pass_expired.*合并未发出/);

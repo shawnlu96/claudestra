@@ -28,7 +28,17 @@ export interface AutostartClaim {
   peer?: { name: string; repo: string; reason: string } | null;
 }
 
-export const claimDedup = (featureId: string, key: string, arm: string): string => `autostart:${featureId}:${key}:${arm}`;
+/** claim dedupKey 的前缀：claimDedup 拼 key、调度快照两条查询按它圈 dedupKey 区间（走 events 的 dedupKey 唯一索引），只定义在这里 */
+export const AUTOSTART_DEDUP_PREFIX = "autostart:";
+/** start_node 各步的 dedupKey 前缀（dag-tools-steps.ts、dag-start-settle.ts 拼 key，快照 starts 查询圈区间）；放在这里是因为本文件依赖轻，查询侧引用不会带出环 */
+export const DAG_START_DEDUP_PREFIX = "dag-start:";
+/** 前缀区间的开上界：末尾的 ':' 换成 ';'（ASCII 紧随其后），`k >= prefix AND k < dedupRangeEnd(prefix)` 等价于区分大小写的 `k LIKE 'prefix%'` */
+export function dedupRangeEnd(prefix: string): string {
+  if (!prefix.endsWith(":")) throw new Error(`dedup 前缀须以 ':' 结尾：${prefix}`);
+  return `${prefix.slice(0, -1)};`;
+}
+
+export const claimDedup = (featureId: string, key: string, arm: string): string => `${AUTOSTART_DEDUP_PREFIX}${featureId}:${key}:${arm}`;
 export const settleDedup = (seq: number): string => `autostart-settle:${seq}`;
 
 function toClaim(row: Record<string, unknown>): AutostartClaim {

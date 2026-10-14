@@ -2,8 +2,9 @@
  * team-project-N8：项目组「协作视图」按绑定统一入口，真 Chromium + 合成两台机器（中继模式 /m/<fp>/api/v1/*），不连生产 bridge / 中心。
  * 截图私存：COLLAB_UNIFIED_SHOTS_DIR=<仓库外目录>（缺省写临时目录、跑完删掉），390 / 1280 各一套，manifest 记 head 与 fixture 摘要。
  */
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright-core";
+import * as childProcess from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -122,6 +123,25 @@ async function git(...args: string[]) {
   return out.trim();
 }
 
+function closePipesOnExit(child: childProcess.ChildProcess) {
+  // Chrome descendants can retain its pipes after it exits; Playwright's close wait needs every pipe closed.
+  // The browser is already gone on exit, so destroying its streams loses no browser output.
+  child.once("exit", () => { for (const stream of child.stdio) stream?.destroy(); });
+}
+
+async function launchBrowser() {
+  const spawn = childProcess.spawn;
+  const hook = spyOn(childProcess, "spawn").mockImplementation(((...args: unknown[]) => {
+    const child = Reflect.apply(spawn, childProcess, args) as childProcess.ChildProcess;
+    if (Array.isArray(args[1]) && args[1].includes("--remote-debugging-pipe")) closePipesOnExit(child);
+    return child;
+  }) as typeof childProcess.spawn);
+  try {
+    return await chromium.launch({ headless: true,
+      ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  } finally { hook.mockRestore(); }
+}
+
 beforeAll(async () => {
   mkdirSync(shots, { recursive: true, mode: 0o700 }); chmodSync(shots, 0o700);
   const build = Bun.spawn([process.execPath, "build", entry, "--target", "browser", "--outdir", scratch, "--tsconfig-override", "web/tsconfig.json"],
@@ -145,7 +165,7 @@ beforeAll(async () => {
       <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/team-view-harness.css"></head>
       <body><div id="root"></div><script src="/team-view-harness.js"></script></body></html>`, { headers: { "Content-Type": "text/html" } });
   } });
-  browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  browser = await launchBrowser();
 }, 120_000);
 
 afterAll(async () => {
@@ -157,10 +177,40 @@ afterAll(async () => {
       fixtureSha256: createHash("sha256").update(readFileSync(entry)).digest("hex"),
       testSha256: createHash("sha256").update(readFileSync("tests/web-collab-unified-browser.test.ts")).digest("hex"), shots: manifest }, null, 2), { mode: 0o600 });
   } finally {
-    server?.stop(true);
-    try { await browser?.close(); } finally { if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true }); }
+    try {
+      await browser?.close();
+    } finally {
+      server?.stop(true);
+      if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true });
+    }
   }
 }, 60_000);
+
+test("Chromium cleanup closes native process pipes even while a descendant retains them", async () => {
+  const script = `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+    console.log(child.pid);
+    process.stdin.once('data', () => process.exit(0));
+  `;
+  const child = childProcess.spawn("node", ["-e", script], { stdio: ["pipe", "pipe", "pipe"] });
+  closePipesOnExit(child);
+  const closed = new Promise<number | null>((resolve, reject) => {
+    child.once("close", resolve);
+    child.once("error", reject);
+  });
+  let descendant: number | undefined;
+  try {
+    descendant = Number(await new Promise<string>((resolve) => child.stdout.once("data", (data) => resolve(data.toString().trim()))));
+    child.stdin.end("exit");
+    expect(await closed).toBe(0);
+    expect(Number.isSafeInteger(descendant) && descendant > 0).toBe(true);
+    expect(() => process.kill(descendant!, 0)).not.toThrow();
+  } finally {
+    child.kill();
+    if (descendant && Number.isSafeInteger(descendant) && descendant > 0) process.kill(descendant, "SIGTERM");
+  }
+});
 
 /** React DevTools 钩子只记录页面主根；守卫另起的根也会提交，不能让它覆盖待断言的渲染树。 */
 const HOOK = `window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { supportsFiber: true, renderers: new Map(), inject() { return 1; },
@@ -173,6 +223,9 @@ async function open(width: number, machine: Fp = "mac-a", extra: Record<string, 
   await page.addInitScript(HOOK);
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
+  // 不是每条用例都断言 errors：页面抛错 / 渲染进程崩溃当场写进测试日志，CI 上等文案等到超时的那几次才看得出页面当时是不是已经坏了
+  page.on("pageerror", (e) => console.error(`[collab-unified] pageerror（${machine} ${width}）：${e.message.slice(0, 500)}`));
+  page.on("crash", () => console.error(`[collab-unified] 页面渲染进程崩溃（${machine} ${width}）`));
   await page.route(/^(?!http:\/\/127\.0\.0\.1)/, (r) => r.abort()); // 只许回环
   const q = new URLSearchParams({ machine, projects: JSON.stringify(PROJECTS), ...extra });
   await page.goto(`${server.url}?${q}`);
@@ -191,6 +244,22 @@ const opened = (page: Page) => page.evaluate("document.body.dataset.open ?? ''")
 const ledgerHits = (id: string) => world.log.filter((l) => l.endsWith(` /ledger/${id}`) || l.includes(` /ledger/${id}/`));
 const centerHits = () => world.log.filter((l) => l.includes("/shared-ledger/features"));
 const contextHits = (fp: Fp) => world.log.filter((l) => l === `${fp} /shared-ledger/context`);
+/**
+ * 回到页面（focus）后，两个 context 读者（本节点 store、N5 列表，各发一条）都读到「身份已不在」并且页面已经按它重画。
+ * 只数 identities 为空的回包：focus 时 store 若有在途请求会单飞丢掉这次（要等它 15s 的下一轮），在途那条带的还是旧身份，不能算数。
+ * 回包收完后等两帧，React 把两处状态提交完再往下断言（原来是固定等 500ms）。
+ */
+async function identitiesGone(page: Page) {
+  let seen = 0;
+  const both = page.waitForResponse(async (r) => {
+    if (!r.url().endsWith("/shared-ledger/context") || r.status() !== 200) return false;
+    const body = await r.json().catch(() => null) as { identities?: unknown[] } | null;
+    return Array.isArray(body?.identities) && body.identities.length === 0 && ++seen >= 2;
+  });
+  await page.evaluate("window.dispatchEvent(new Event('focus'))");
+  await (await both).finished();
+  await page.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(undefined))))");
+}
 /** 渲染树里 TeamSource 的祖先链与它下面的 CollabView */
 const tree = (page: Page) => page.evaluate(`(() => {
   const name = (f) => typeof f.type === "function" ? f.type.displayName || f.type.name : null;
@@ -343,11 +412,8 @@ for (const width of [1280, 390]) {
     await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor({ timeout: 40_000 });
     // 读凭据被移除：bridge 只列仍有读凭据的身份，context 200、identities 为空
     world.context["mac-a"] = { status: 200, body: { identities: [] } };
-    const refreshed = page.waitForResponse((r) => r.url().endsWith("/shared-ledger/context"));
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await refreshed;
+    await identitiesGone(page);
     await page.waitForFunction("document.body.dataset.open === ''");
-    await page.waitForTimeout(500); // 两个 context 读者（本 store / N5 列表）都落地
     await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor();
     expect(await entryOf(page, "claudestra").count()).toBe(0);
     expect(ledgerHits("claudestra")).toEqual([]);
@@ -441,10 +507,7 @@ test("1280：中心 403 → 绑定变成跨团队不可区分 → 身份消失�
   await page.evaluate("window.dispatchEvent(new Event('focus'))");
   await group(page, "claudestra").getByText("绑定无法区分", { exact: false }).waitFor();
   world.context["mac-a"] = { status: 200, body: { identities: [] } };
-  const refreshed = page.waitForResponse((r) => r.url().endsWith("/shared-ledger/context"));
-  await page.evaluate("window.dispatchEvent(new Event('focus'))");
-  await refreshed;
-  await page.waitForTimeout(500);
+  await identitiesGone(page);
   await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor();
   expect(await entryOf(page, "claudestra").count()).toBe(0);
   expect(ledgerHits("claudestra")).toEqual([]);
