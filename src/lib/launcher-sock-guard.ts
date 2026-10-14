@@ -15,7 +15,7 @@ import { readActiveAgents } from "./registry.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { LIVE_PROBE_PORTS, masterSessionProbe, planSockHeal, sameSockServers, type SockHealMode, type SockProbe, type TmuxServerProc } from "./tmux-sock-probe.js";
 
-export const SOCK_HEAL_KEY: RecoveryKey = "tmuxSockHeal";
+const SOCK_HEAL_KEY: RecoveryKey = "tmuxSockHeal";
 const ABSENT_CONFIRM = 3;
 const ABSENT_GAP_MS = 2_000;
 const HEAL_WAIT_MS = 2_000;

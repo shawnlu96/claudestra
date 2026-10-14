@@ -1060,11 +1060,6 @@ export async function listWindowIdsByName(name: string): Promise<string[]> {
   return ids;
 }
 
-/** master session 确定存在（查询失败 / 被拒 / 超时都是 false，但别据此新建：要不要建看 lib/tmux-sock-probe.ts 的三态） */
-export async function masterSessionExists(): Promise<boolean> {
-  return (await (await import("./tmux-sock-probe.js")).masterSessionProbe()).state === "exists"; // 动态导入：那边静态依赖本文件
-}
-
 /** master:0 这个窗口是否存在（区别于 master session 本身存在） */
 export async function masterWindowExists(): Promise<boolean> {
   const out = await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_index}"]);

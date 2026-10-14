@@ -12,7 +12,7 @@ import { basename, dirname, join } from "node:path";
 import { MASTER_SESSION, TMUX_SOCK, tmuxRawStrict } from "./tmux-helper.js";
 import { TmuxCommandError } from "./tmux-failure.js";
 
-export type SockProbeState = "exists" | "absent" | "unknown";
+type SockProbeState = "exists" | "absent" | "unknown";
 export interface TmuxServerProc { pid: number; ppid: number; command: string }
 
 export interface SockProbe {
@@ -81,7 +81,7 @@ export function sameSockServers(psOut: string, sockPath: string, realpath: (p: s
 }
 
 /** tmux 失败的分类：被拒（no server running）/ 连接时套接字不在 = refused；超时、权限等 = 其他 */
-export function tmuxFailureRefused(err: string): boolean {
+function tmuxFailureRefused(err: string): boolean {
   return /no server running on /.test(err) || /error connecting to .*\(No such file or directory\)/.test(err);
 }
 
