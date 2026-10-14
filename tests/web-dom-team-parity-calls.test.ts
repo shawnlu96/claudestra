@@ -174,6 +174,7 @@ const LOCAL_ONLY = [/\/me\/last-seen\/shared-ledger:/, /\/ledger\/shared-ledger:
 test("复现测试:团队 CollabView 不再请求本机 last-seen / 谁在干活 / 团队标签接口", async () => {
   const v = await mount("team", 1200);
   await v.click("谁在干活");
+  await v.click("团队");
   await v.click("规划与提案");
   await tick(300);
   const hits = calls.filter((c) => LOCAL_ONLY.some((re) => re.test(c)));
@@ -302,14 +303,15 @@ const headLine = (host: El) => host.querySelector("[data-collab-head]");
 const tabs = (host: El) => Array.from(host.querySelectorAll("[role=tab]")).map((x) => (x.textContent ?? "").trim());
 const mirrorSec = (host: El) => Array.from(host.querySelectorAll("section")).find((x) => x.querySelector("h5")?.textContent === "镜像");
 
-test("[验收线 5] 团队视图页头写『团队版 · N 分钟前同步』，右栏没有『镜像』节；标签叫『规划与提案』，里面只有团队规划、不渲染成员面板", async () => {
+test("[验收线 5] 团队视图页头写『团队版 · N 分钟前同步』，右栏没有『镜像』节；标签叫『团队』，规划在子标签、不读本机往来", async () => {
   const v = await mount("team", 1200);
   await until(() => headLine(v.host) !== null, "page head line");
   expect([headLine(v.host)!.getAttribute("data-collab-head"), headLine(v.host)!.textContent]).toEqual(["fresh", "团队版 · 刚刚同步"]);
   expect(mirrorSec(v.host)).toBeUndefined();
   expect(v.host.textContent).not.toMatch(/主场镜像/);
-  expect(tabs(v.host)).toContain("规划与提案");
-  expect(tabs(v.host)).not.toContain("团队");
+  expect(tabs(v.host)).toContain("团队");
+  expect(tabs(v.host)).not.toContain("规划与提案");
+  await v.click("团队");
   await v.click("规划与提案");
   expect(v.host.textContent).toContain("团队规划");
   expect(v.host.textContent).not.toMatch(/最近 10 分钟|加载团队|peer-mac/);
@@ -341,20 +343,20 @@ test("[验收线 5] 有过期：页头写过期个数（按钮），点开原地
   }
 });
 
-test("[验收线 5] 手机：团队源顶栏按钮与整屏页标题是『规划与提案』、副标题『团队规划与成员提案』，页头同样写团队版", async () => {
+test("[验收线 5] 手机：团队源顶栏按钮与整屏页标题是『团队』、副标题『成员与位子』，页头同样写团队版", async () => {
   const v = await mount("team", 390);
   await until(() => headLine(v.host) !== null, "page head line");
   expect(headLine(v.host)!.textContent).toBe("团队版 · 刚刚同步");
-  expect(v.button("规划与提案")).not.toBeNull();
-  expect(v.button("团队")).toBeNull();
-  await v.click("规划与提案");
+  expect(v.button("团队")).not.toBeNull();
+  expect(v.button("规划与提案")).toBeNull();
+  await v.click("团队");
   const sheet = (doc.body.textContent ?? "");
-  expect(sheet).toContain("规划与提案团队规划与成员提案");
+  expect(sheet).toContain("团队成员与位子");
   expect(sheet).not.toContain("最近 10 分钟的真实往来");
   await v.unmount();
 });
 
-test("[验收线 5] 本机源逐字不变：页头只有项目名，标签 / 手机按钮叫『团队』，副标题『最近 10 分钟的真实往来』，成员面板照常读本机接口", async () => {
+test("[验收线 5] 本机源请求不变：页头只有项目名，标签 / 手机按钮叫『团队』，副标题『成员与位子』，成员面板照常读本机接口", async () => {
   const v = await mount("local", 1200);
   expect(headLine(v.host)).toBeNull();
   expect(v.host.textContent).not.toMatch(/团队版|规划与提案/);
@@ -367,7 +369,7 @@ test("[验收线 5] 本机源逐字不变：页头只有项目名，标签 / 手
   expect(headLine(m.host)).toBeNull();
   expect(m.button("规划与提案")).toBeNull();
   await m.click("团队");
-  expect(doc.body.textContent ?? "").toContain("团队最近 10 分钟的真实往来");
+  expect(doc.body.textContent ?? "").toContain("团队成员与位子");
   expect(doc.body.textContent ?? "").not.toContain("规划与提案");
   await m.unmount();
 });

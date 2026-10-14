@@ -1,13 +1,9 @@
 "use client";
 /**
- * 协作视图页头（UXHOME1）：项目名；团队源多一行小字「团队版 · …」，说清看的是团队版、数据多久前同步的。
- * 新鲜度只在这一处（右栏原来的那一节去掉了）：有过期的写过期个数（警示色），点它原地展开是哪几个；都没过期写最早那份多久前同步；
- * 一份都没收到写还没收到。本机源只有项目名，和以前一样。手机顶栏的「团队 / 规划与提案」按钮也在这里，跟着数据源换名字。
- * 样式写在行内：v4.module.css 的 .top 是一行 flex，这里只多一个竖排的小块，不为它动公共样式表。
- * 手机（给了 onTeam）：顶栏一行放不下那行小字和两个按钮，小字挪到标题下面独占整行（.top 换成可折行，HEAD_WRAP），过期名单也在这一整行里展开，
- * 不和「规划与提案」「待你处理」并排挤成窄窄一列；项目名最多两行不省略号。
+ * 项目页头统一呈现镜像新鲜度；过期名单原地展开，避免和成员名册混在一起。
+ * 手机的新鲜度独占一行，项目名最多两行；「团队」入口在两种来源下保持同名。
  */
-import { useContext, useMemo, useState, type CSSProperties } from "react";
+import { useContext, useState, type CSSProperties } from "react";
 import { useLang } from "@/lib/i18n";
 import { headMirror, headMirrorText, headTr, HEAD_WORDS } from "./collab-head-i18n";
 import { Icon } from "./collab-icons";
@@ -18,13 +14,10 @@ import v from "./v4/v4.module.css";
 /** 看的是不是团队版：团队视图在 CollabView 外面包了数据源（team-source-context.ts），本机没有 */
 export const useTeamSourced = (): boolean => useContext(CollabSourceContext) !== null;
 
-/** 「团队」标签 / 手机按钮 / 手机整屏页的名字与副标题：团队源装的是规划与提案，本机源逐字不变 */
+/** Roster is the team entry for both sources; planning remains a child tab. */
 export function useTeamTab(tr: Tr): { label: string; sub: string } {
-  const team = useTeamSourced(), lang = useLang();
-  return useMemo(() => {
-    const h = headTr(lang);
-    return team ? { label: h(HEAD_WORDS.planTab), sub: h(HEAD_WORDS.planSub) } : { label: tr("团队"), sub: tr("最近 10 分钟的真实往来") };
-  }, [team, lang, tr]);
+  const lang = useLang();
+  return { label: tr("团队"), sub: lang === "zh" ? "成员与位子" : "Members and seats" };
 }
 
 /** 竖排小块先让：手机顶栏放不下时项目名和那行小字省略，按钮不折行 */
