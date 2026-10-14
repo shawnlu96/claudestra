@@ -194,6 +194,8 @@ interface CarrierBatch {
   hint?: string;
   /** 逐条补网页入站镜像（agent 消息逐条投递时 deliverToLocal 画，载体代它们画） */
   mirror?: boolean;
+  /** 成员是按投递顺序连续的一段（agent 合批）：一条渲染失败就截在它前面，后面的不越过它先送 */
+  ordered?: boolean;
 }
 
 const idleCarrier = (d: FlushDeps, channelId: string, b: HeldIdleBatch<HeldItem>): CarrierBatch => ({
@@ -211,7 +213,7 @@ function agentCarrier(d: FlushDeps, channelId: string, due: readonly HeldItem[],
   const m = agentBatchMembers(due, (i) => !taken.has(i) && heldKindOf(i.env) === "agent" && isAgentBatchable(i));
   if (!m.items.length) return undefined;
   return {
-    items: m.items, expectSession: m.expectSession, title: HELD_AGENT_BATCH_TITLE, hint: HELD_AGENT_BATCH_HINT, mirror: true,
+    items: m.items, expectSession: m.expectSession, title: HELD_AGENT_BATCH_TITLE, hint: HELD_AGENT_BATCH_HINT, mirror: true, ordered: true,
     wanted: (shown) => () => on() && shown.every((i) => !!d.held.get(channelId)?.includes(i) && !leaseActive(i)),
     delivered: (c, e) => { for (const fn of deliveredHooks) fn(c, e); },
   };
@@ -249,6 +251,7 @@ async function releaseIdleBatch(
       parts.push({ item, text: await render(item.env) });
     } catch (e) {
       console.error(`⚠️ 押后批次单条渲染失败，这条留在原路径（${item.env.meta.messageId}）: ${String(e)}`);
+      if (batch.ordered) break;
     }
   }
   if (parts[0]?.item !== batch.items[0]) return "single";
@@ -269,6 +272,8 @@ async function releaseIdleBatch(
     content: heldIdleBatchText(fit.entries, note(previews, fit.left), batch.title, batch.hint),
     meta: { messageId: id, threadId: id, ts: new Date().toISOString(), triggerKind: "bridge_synth", waitForIdle: true, expectSession: batch.expectSession },
   };
+  // 载体没有原发送人：会被 PM 角色规则转给当班 PM 的（收件人是退任 PM），成员却留在这里——不组载体，逐条走原路径
+  if (currentPmTarget(channelId, carrier)) return "single";
   const turn = d.turnAt ?? turnStartedAt, at = turn(channelId);
   const wanted = batch.wanted(shown);
   expectPmTarget(carrier, channelId);
