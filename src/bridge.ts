@@ -2228,8 +2228,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws: targetClient.ws,
           cwd: targetClient.cwd,
         };
-        // v2.4.16+ oneShot=true：fire-and-forget，跳 pushback 和 watchdog。
-        const oneShot = msg.oneShot === true;
+        // v2.4.16+ oneShot=true：fire-and-forget，跳 pushback 和 watchdog。pmLevel 只认没注册频道的系统进程（调度器）的帧，agent 自己的连接带了也丢
+        const oneShot = msg.oneShot === true, pmLevel = !fromChannelId && (msg.pmLevel === "action" || msg.pmLevel === "info") ? msg.pmLevel : undefined;
         const env: RouterEnvelope = {
           from: fromEnv,
           to: toEnv,
@@ -2241,7 +2241,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             ts: new Date().toISOString(),
             threadId: newThreadId(),
             skipInterAgentWatchdog: oneShot || undefined,
-            expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined, pmLevel: msg.pmLevel === "action" || msg.pmLevel === "info" ? msg.pmLevel : undefined,
+            expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined, pmLevel,
           },
         };
         // v2.24+: 给某个 agent 发消息 = 回了它的消息。它之前发来的那条
