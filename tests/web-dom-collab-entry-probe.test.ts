@@ -2,6 +2,7 @@
  * UXENTRY1：侧栏「协作视图」入口的探测状态（web/features/collab/dag/shared-entry-probe.ts）。
  * 网络失败 → failed + 一条重探；连点 retryNow 不叠在途请求和定时器；403 / 404 → no 且不算失败；成功清掉 failed。
  * fetchLedger 与 collab-cache 用 mock.module 换成可控的假实现（只在本文件开着，结束后转回真实现）。
+ * 不挂 DOM；叫 web-dom-* 只因为探测模块和 collab-cache 带 react（guard tests-web-pure）。
  */
 import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { ApiError } from "@/lib/api/client";

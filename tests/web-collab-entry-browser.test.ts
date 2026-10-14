@@ -107,7 +107,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const s of sides) s.server.stop(true);
-  await browser?.close();
+  // Chrome 的子进程偶尔攥着管道不放，close() 会一直等（web-collab-unified-browser 有同样的绕法）；页面都已关掉，等 10 秒放手不丢证据
+  await Promise.race([browser?.close(), Bun.sleep(10_000)]);
   if (OUT) writeFileSync(join(OUT, "manifest.json"), JSON.stringify({ manifest, issues, external }, null, 2));
   else rmSync(work, { recursive: true, force: true });
 }, 60_000);
@@ -174,7 +175,7 @@ for (const width of [1280, 390]) {
         const retry = group(page, B.name).getByRole("button", { name: "没读到，点一下重试" });
         const before = hits[B.id]!;
         await retry.click();
-        await page.waitForFunction(() => !document.querySelector("[aria-busy=true]"));
+        await page.waitForFunction("!document.querySelector('[aria-busy=true]')");
         expect(hits[B.id]).toBe(before + 1);
         expect(await retry.isVisible()).toBe(true);
         await retry.click();
@@ -208,7 +209,7 @@ test("1280：台账 403 / 404 不出「协作视图」行；团队区 403（没�
     start({ ledger: { [A.id]: [200], [B.id]: [ledgerStatus] }, ledgerFirstMs: 0, context, snapshot: [snapshot], snapshotFirstMs: 0 });
     const { page, ctx, errors, external: ext } = await open(after, 1280);
     await group(page, A.name).getByRole("button", { name: "协作视图" }).waitFor();
-    await page.waitForFunction(() => !document.querySelector("[data-collab-entry=pending], [data-team-projects=pending]"));
+    await page.waitForFunction("!document.querySelector('[data-collab-entry=pending], [data-team-projects=pending]')");
     const b = group(page, B.name);
     expect(await b.locator("[data-collab-entry]").count()).toBe(ledgerStatus === 200 ? 1 : 0);
     expect(await team(page).count()).toBe(0);
