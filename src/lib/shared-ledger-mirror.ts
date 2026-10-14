@@ -177,6 +177,6 @@ export function sharedMirrorStatus(featureId: string, dir = STATE_DIR) {
     mode: { authorityMode: mode.authorityMode, sharedPlanning: mode.sharedPlanning, mirror: mode.mirror === true },
     ...(e ? { centerFeatureId: e.centerFeatureId, batchId: e.batchId, watermark: e.watermark, lastPushSeq: e.lastPushSeq,
       lastPushAt: at(e.lastPushAt), lastError: e.lastError, lastErrorAt: at(e.lastErrorAt), failures: e.failures,
-      nextAttemptAt: at(e.nextAttemptAt), snapshotPending: e.snapshot } : {}),
+      nextAttemptAt: at(e.nextAttemptAt), snapshotPending: e.snapshot, skippedTasks: e.skippedTasks ?? [] } : {}),
     freshness: "本机任一事件推进全局 seq 时推送;整机无事件时中心如实显示过期(PM 10-02 定 A)" };
 }
