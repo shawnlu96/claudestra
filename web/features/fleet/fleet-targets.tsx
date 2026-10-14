@@ -1,4 +1,5 @@
 "use client";
+import { LP_WORDS } from "@/lib/owner-words";
 import { useMemo, useState } from "react";
 import type { ProjectMeta } from "@/features/chat/type";
 import type { FleetAgent, FleetOutcome, FleetResult } from "@/lib/api/fleet";
@@ -33,7 +34,7 @@ export function TargetPicker(p: TargetPickerProps) {
   const inUse = useMemo(() => p.projects.filter((x) => p.agents.some((a) => a.project === x.id)), [p.projects, p.agents]);
   const filters = [
     { key: "all", label: t("全部"), list: eligible },
-    { key: "walled", label: t("撞墙中"), list: eligible.filter((a) => a.lp?.walled) },
+    { key: "walled", label: t(LP_WORDS.badgeWalled), list: eligible.filter((a) => a.lp?.walled) },
     { key: "ctx", label: t("上下文 >{n}k", { n: ctxK }), list: eligible.filter((a) => (a.contextTokens ?? 0) > ctxK * 1000) },
   ];
   const setList = (list: FleetAgent[]) => p.setPicked(new Set(list.map((a) => a.name)));

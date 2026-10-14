@@ -364,7 +364,7 @@ for (const width of [1280, 390]) {
     reset();
     world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a"), identity("mac-a", { team: "team-other", localProjectId: "elsewhere" })] } };
     const { page } = await open(width);
-    await group(page, "claudestra").getByText("绑定无法区分", { exact: false }).waitFor();
+    await group(page, "claudestra").getByText("多个绑定", { exact: false }).waitFor();
     expect(await entryOf(page, "claudestra").count()).toBe(0);
     await shot(page, "6-ambiguous", width);
     expect(centerHits()).toEqual([]);
@@ -508,7 +508,7 @@ test("1280：中心 403 → 绑定变成跨团队不可区分 → 身份消失�
   await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor({ timeout: 40_000 });
   world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a"), identity("mac-a", { team: "team-other", localProjectId: "elsewhere" })] } };
   await page.evaluate("window.dispatchEvent(new Event('focus'))");
-  await group(page, "claudestra").getByText("绑定无法区分", { exact: false }).waitFor();
+  await group(page, "claudestra").getByText("多个绑定", { exact: false }).waitFor();
   world.context["mac-a"] = { status: 200, body: { identities: [] } };
   await identitiesGone(page);
   await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor();
