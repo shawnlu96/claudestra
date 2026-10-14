@@ -40,6 +40,7 @@ import { readPeers } from "../lib/peers.js";
 import { readPinnedKey } from "../lib/pool-review-proof-admit.js";
 import { saveRawResult } from "../lib/pool-review-proof-raw.js";
 import { runBounded } from "../lib/run-bounded.js";
+import { isManager } from "../lib/ledger-checks.js";
 import { getEventByDedup, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { scanRelays, settleRelay, takeRelays, type RelaySend } from "../lib/ledger-lend-relay.js";
 import { bridgeSend } from "../lib/bridge-client.js";
@@ -237,7 +238,10 @@ async function reclaim(c: LedgerCli): Promise<Result> {
   const reason = c.p.flags.reason ?? "";
   if (!reason.trim()) throw new LedgerError("invalid", "收回要写 --reason");
   c.requireManager(task.project, "收回写代码");
-  const r = reclaimLend(c.db, c.ctx(), { taskId: task.id, reason, retire: await sampleLendAuthor(c.db, task.id, lendDeps(c).result?.remoteHead) });
+  // Same gate as the lease-end writer's identity check: an actor it refuses gets the existing blocked note, so skip the remote sample.
+  const actor = c.ctx().actor, mayRetire = actor === "scheduler" || (actor !== getMeta(c.db, task.project).team?.dispatcher && isManager(c.db, actor, task));
+  const retire = mayRetire ? await sampleLendAuthor(c.db, task.id, lendDeps(c).result?.remoteHead) : undefined;
+  const r = reclaimLend(c.db, c.ctx(), { taskId: task.id, reason, retire });
   return { ok: true, task: task.id, peer: r.lease?.peer ?? null, cancelled: r.cancelled };
 }
 
