@@ -5,6 +5,8 @@
  * 一键收回点一下就发、不二次确认，这个 peer 的在跑单当场转「停止中」；数据、轮询与收回在 lend-state.useLendState。
  */
 import { useState } from "react";
+import { useLang } from "@/lib/i18n";
+import { LEND_WORDS, ownerWordsTr } from "@/lib/owner-words";
 import { useChatStoreApi } from "../chat/chat-store";
 import { GrantForm } from "./grant-form";
 import { useLendT, useRemainingText } from "./lend-i18n";
@@ -26,11 +28,12 @@ function GrantRow({ g, now, fresh, leaving, busy, err, onRevoke, onRegrant }: {
   g: GrantView; now: number; fresh: boolean; leaving: boolean; busy: boolean; err: { msg: string; n: number } | null; onRevoke: () => void; onRegrant: () => void;
 }) {
   const t = useLendT();
+  const words = ownerWordsTr(useLang());
   const remainingText = useRemainingText();
   const status = grantStatus(g, now);
   const mark = STATUS_ICON[status];
   const left = remainingMs(g, now);
-  const slots = Object.entries(g.families).map(([f, n]) => `${f} ${n}`).join(" · ");
+  const slots = Object.entries(g.families).map(([f, n]) => `${f === "claude" ? "Claude" : f === "codex" ? "Codex" : f} ${n}`).join(" / ");
   // 失败一次 n 加一：内层按 n 重挂，抖动动画每次都重新播
   return (
     <div className={leaving ? css.fadeOut : fresh ? css.fadeIn : ""}>
@@ -53,7 +56,7 @@ function GrantRow({ g, now, fresh, leaving, busy, err, onRevoke, onRegrant }: {
       </div>
       <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-base-content/50">
         <span className="font-mono">{g.repos.join(", ")}</span>
-        <span>{slots} · {g.ordersPerDay}/d</span>
+        <span>{words(LEND_WORDS.grantLine, { slots, n: g.ordersPerDay })}</span>
         {left !== null && <span className="tabular-nums">{left > 0 ? remainingText(splitRemaining(left)) : t("已到期")}</span>}
       </div>
     </div>
@@ -93,7 +96,7 @@ export function LendPanel() {
         ))}
         {!data.grants.length && !form && <div className="py-1 text-center text-xs text-base-content/40">{t("还没有授权")}</div>}
       </div>
-      <div className="pt-1 text-[11px] font-semibold uppercase tracking-wider text-base-content/40">{t("借出中的单")}</div>
+      <div className="pt-1 text-[11px] font-semibold uppercase tracking-wider text-base-content/40">{t(LEND_WORDS.lentWork)}</div>
       <LentOrders orders={orders} stopping={stopping} now={now} onOpen={(agent) => void store.openAgent(agent)} />
       {loadErr && <p className="text-[11px] text-error">{loadErr}</p>}
     </section>

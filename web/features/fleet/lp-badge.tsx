@@ -1,6 +1,7 @@
 "use client";
 import { lpBadgeText, type LpState } from "@/lib/api/fleet";
-import { useT } from "@/lib/i18n";
+import { useLang, useT } from "@/lib/i18n";
+import { LP_WORDS, ownerWordsTr } from "@/lib/owner-words";
 import { Svg } from "./icons";
 
 /** lucide snail：low-priority 开着 */
@@ -14,7 +15,7 @@ export const SnailIcon = ({ className }: { className?: string }) => (
   </Svg>
 );
 
-/** lucide hourglass：撞墙等待中 */
+/** lucide hourglass：额度用完，等重置 */
 const HourglassIcon = () => (
   <Svg>
     <path d="M5 22h14" />
@@ -24,7 +25,7 @@ const HourglassIcon = () => (
   </Svg>
 );
 
-/** lucide ban：本周 LP 额度用完 */
+/** lucide ban：本周 low-priority 额度用完 */
 const BanIcon = () => (
   <Svg>
     <circle cx="12" cy="12" r="10" />
@@ -32,10 +33,11 @@ const BanIcon = () => (
   </Svg>
 );
 
-/** 侧栏行与批量面板共用的 LP 徽章；关着且没撞墙 / 状态不明时不显示 */
+/** 侧栏行与批量面板共用的 low-priority 徽章；关着且额度没用完 / 状态不明时不显示。徽章上的词中英文都从 lib/owner-words 取 */
 export function LpBadge({ lp }: { lp?: LpState | null }) {
   const t = useT();
-  const text = lpBadgeText(lp);
+  const words = ownerWordsTr(useLang());
+  const text = lpBadgeText(lp, words);
   if (!lp || !text) return null;
   const on = lp.lowPriority === "on";
   const tone = on ? "text-info/80" : lp.lowPriority === "exhausted" ? "text-error/70" : "text-warning/80";
@@ -43,11 +45,11 @@ export function LpBadge({ lp }: { lp?: LpState | null }) {
     ? t("low-priority 开着，到 {time}{pct}", { time: lp.resetsAt ?? "?", pct: lp.allowancePct !== undefined ? ` · ${lp.allowancePct}%` : "" })
     : lp.lowPriority === "exhausted"
       ? t("本周 low-priority 额度已用完")
-      : t("撞墙等待中，到 {time} 自动继续", { time: lp.resetsAt ?? "?" });
+      : words(LP_WORDS.walledTitle, { time: lp.resetsAt ?? "?" });
   return (
     <span className={`flex shrink-0 items-center gap-0.5 text-[11px] ${tone}`} title={title}>
       {on ? <SnailIcon /> : lp.lowPriority === "exhausted" ? <BanIcon /> : <HourglassIcon />}
-      <span className="font-mono tabular-nums">{t(text)}</span>
+      <span className="font-mono tabular-nums">{text}</span>
     </span>
   );
 }

@@ -16,6 +16,13 @@ const TIMED_OUT = /^\s*\^ this test timed out after \d+ms\.?\s*$/;
 const FAIL_COUNT = /^\s*(\d+) fail\s*$/;
 /** Errors outside any test (a crashed file, an unhandled rejection) are red without a `(fail)` line of their own. */
 const OUTSIDE_TEST = /error between tests|Unhandled error|^error: .*(?:Cannot find module|SyntaxError)/i;
+/**
+ * bun's own result line for one test: the marker at the very start of the line (gh prefix and timestamp already dropped), then
+ * the test's title. The title is a name, not output: it is never read as an error outside a test (dispatch-recovery-CIPARSE1).
+ * An indented `(pass) ` is text a test printed itself and is not one. tests/ci-failed-log-parse.test.ts.
+ */
+const RESULT_LINE = /^\((?:pass|fail|skip|todo)\) /;
+export const isResultLine = (line: string): boolean => RESULT_LINE.test(line);
 /** Any error bun or the runner prints; inside a file group it belongs to the next `(fail)`, anywhere else it is unaccounted. */
 const ERROR = /^\s*(?:error:|##\[error\]|panic\b)/i;
 /** The one runner error every red bun step ends with. */
@@ -107,7 +114,7 @@ function parseStep(lines: string[]): CiFailure[] | null {
   let errored = false; // an error line in this group not yet claimed by a `(fail)`
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (OUTSIDE_TEST.test(line)) return null;
+    if (!isResultLine(line) && OUTSIDE_TEST.test(line)) return null;
     const group = GROUP.exec(line);
     if (group) {
       if (errored) return null;
