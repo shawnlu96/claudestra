@@ -102,6 +102,21 @@ describe("[验收线 6] mainCiPause switch", () => {
     expect(await scenario(off, "off")).toEqual(a);
   });
 
+  test("observe's notice is only recorded, so switching to on for the same red main still sends the pause notice once", async () => {
+    writePolicy({ mainCiPause: "observe" });
+    w.card("T1");
+    const red = w.hub.main;
+    w.ci.bySha.set(red, "failure");
+    w.hub.pending = true; // 卡的 CI 还没出结果：observe 照旧调度，但这两轮合不进 main
+    await passes(w, 2);
+    expect(w.notices).toHaveLength(1);
+    writePolicy({ mainCiPause: "on" });
+    await passes(w, 3);
+    expect(w.hub.main).toBe(red);
+    expect(w.notices).toHaveLength(2);
+    expect(w.notices[1]).not.toContain("观察期");
+  });
+
   test("off: zero main / check reads, zero notes, zero notices", async () => {
     await scenario(w, "off");
     expect(w.ci.reads).toEqual([]);

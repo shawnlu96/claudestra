@@ -15,6 +15,8 @@ import {
 } from "./instance-signature.js";
 import { readOrCreateKeyFile } from "./key-file.js";
 import { STATE_DIR } from "./paths.js";
+import { barrierActive, MaintenanceBarrierError } from "./state-maintenance/barrier.js";
+import { maintenanceRoot } from "./state-maintenance/paths.js";
 
 export {
   isPublicKey, MAX_SKEW_S, SIG_HEADERS, verifyPurpose, verifySigned,
@@ -31,18 +33,29 @@ const publicOf = (k: KeyObject): string => String(createPublicKey(k).export({ fo
 
 const cache = new Map<string, InstanceKey>();
 
-/** 读（或生成）本机密钥；读写失败返回 null——调用方照常发请求，只是不带签名 */
-export function instanceKeySync(dir: string = STATE_DIR): InstanceKey | null {
+/** 私钥文件坏了:维护中明确拒绝(屏障错误),窗口外照旧按读失败处理;错误里不带私钥正文 */
+function parseKey(pem: string, maintRoot: string): KeyObject {
+  try {
+    return createPrivateKey(pem);
+  } catch {
+    if (barrierActive(maintRoot)) throw new MaintenanceBarrierError("状态根维护中,instance-key.pem 无效,拒绝替换或生成");
+    throw new Error("instance-key.pem 不是可解析的私钥");
+  }
+}
+
+/** 读（或生成）本机密钥；读写失败返回 null——调用方照常发请求，只是不带签名。状态根维护中缺失 / 无效则抛 MaintenanceBarrierError */
+export function instanceKeySync(dir: string = STATE_DIR, maintRoot: string = maintenanceRoot()): InstanceKey | null {
   const hit = cache.get(dir);
   if (hit) return hit;
   const path = join(dir, "instance-key.pem");
   try {
-    const pem = readOrCreateKeyFile(path, () => String(generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" })));
-    const privateKey = createPrivateKey(pem);
+    const pem = readOrCreateKeyFile(path, () => String(generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" })), maintRoot);
+    const privateKey = parseKey(pem, maintRoot);
     const key = { publicKey: publicOf(privateKey), privateKey };
     cache.set(dir, key);
     return key;
   } catch (e) {
+    if (e instanceof MaintenanceBarrierError) throw e;
     console.error(`⚠️ 读写 ${path} 失败，跨实例请求这次不带签名: ${(e as Error).message}`);
     return null;
   }

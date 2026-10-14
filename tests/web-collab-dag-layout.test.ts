@@ -1,8 +1,9 @@
 /** 子 DAG 图的布局（web/features/collab/dag/dag-layout.ts）与节点内进度条（dag-steps.ts）：分列、不重叠、done 折叠、MAX_OPEN、线 */
 import { describe, expect, test } from "bun:test";
-import { defaultOpen, foldId, layoutDag, longestPath, MAX_OPEN, nodeId, openWith, topoOrder, type DagCanvas } from "../web/features/collab/dag/dag-layout";
+import { defaultOpen, donePageOf, foldId, layoutDag, longestPath, MAX_OPEN, nodeId, openWith, topoOrder, type DagCanvas } from "../web/features/collab/dag/dag-layout";
+import { compareOverlay } from "../web/features/collab/dag/dag-diff";
 import { nodeSteps } from "../web/features/collab/dag/dag-steps";
-import { feature, node } from "./web-collab-dag-fixture";
+import { feature, mainlineFeature, node } from "./web-collab-dag-fixture";
 
 const overlaps = (c: DagCanvas) => {
   const boxes = c.groups.flatMap((g) => [...g.nodes, ...g.folds]);
@@ -111,5 +112,77 @@ describe("nodeSteps：节点内进度条（不是节点）", () => {
     const s = nodeSteps({ active: { step: "final_review", round: 3 }, steps: [{ step: "review", round: 2, state: "done" }, { step: "write", round: 1, state: "done" }] });
     expect(s.current).toMatchObject({ key: "review", round: 3 });
     expect(nodeSteps(null).slots.every((x) => x.state === "todo")).toBe(true);
+  });
+});
+
+/** v190 形状（SUBDAG7）：180 个节点，已完成 157（第 0 列 67、第 1..3 列各 30），进行中 8，没开始 15 */
+function bigFeature() {
+  const col = (c: number, n: number) => Array.from({ length: n }, (_, i) => node(`c${c}-${String(i).padStart(2, "0")}`, "done", c ? [`c${c - 1}-00`] : []));
+  const done = [...col(0, 67), ...col(1, 30), ...col(2, 30), ...col(3, 30)];
+  const active = Array.from({ length: 8 }, (_, i) => node(`a${i}`, "active", ["c3-00"]));
+  const idle = Array.from({ length: 15 }, (_, i) => node(`i${String(i).padStart(2, "0")}`, "idle", [`a${i % 8}`]));
+  return feature("big", [...done, ...active, ...idle]);
+}
+
+describe("layoutDag：已完成分页（SUBDAG7）", () => {
+  const big = bigFeature();
+  const page = (p: number) => layoutDag([big], ["big"], new Set(["big"]), null, new Map([["big", p]]));
+  const doneAt = (c: DagCanvas, col: number) => c.groups[0]!.nodes.filter((n) => n.node.phase === "done" && n.key.startsWith(`c${col}-`));
+
+  test("第 1 页：每列最多 12 个已完成，其余进这一列底部的「还有 N」", () => {
+    const c = page(1);
+    const g = c.groups[0]!;
+    expect(big.nodes).toHaveLength(180);
+    for (const col of [0, 1, 2, 3]) expect(doneAt(c, col)).toHaveLength(12);
+    expect(doneAt(c, 0).map((n) => n.key)).toEqual(Array.from({ length: 12 }, (_, i) => `c0-${String(i).padStart(2, "0")}`));
+    expect(g.folds.map((x) => [x.id, x.kind, x.n, x.members.length])).toEqual([
+      [`${foldId("big")}:0`, "more", 55, 55], [`${foldId("big")}:1`, "more", 18, 18], [`${foldId("big")}:2`, "more", 18, 18], [`${foldId("big")}:3`, "more", 18, 18],
+    ]);
+    const fold0 = g.folds[0]!, last0 = doneAt(c, 0).at(-1)!;
+    expect(fold0.x).toBe(last0.x);
+    expect(fold0.y).toBeGreaterThan(last0.y);
+    expect(c.boxOf.get(nodeId("big", "c0-40"))).toBe(fold0.id);
+    expect(overlaps(c)).toBe(false);
+  });
+
+  test("线：指向列小片的不画，从列小片出发的照画", () => {
+    const c = page(1);
+    expect(c.edges.some((e) => e.to.startsWith(foldId("big")))).toBe(false);
+    const f = feature("ff", [node("D0", "done"), ...Array.from({ length: 13 }, (_, i) => node(`D${i + 1}`, "done", ["D0"])), node("A", "active", ["D13"]), node("B", "done", ["A"])]);
+    const ids = layoutDag([f], ["ff"], new Set(["ff"]), null, new Map([["ff", 1]])).edges.map((e) => e.id);
+    expect(ids).toContain(`${foldId("ff")}:1>${nodeId("ff", "A")}`);
+    expect(ids).toContain(`${nodeId("ff", "A")}>${nodeId("ff", "B")}`);
+  });
+
+  test("第 2 页最多 24 个", () => {
+    const c = page(2);
+    expect(doneAt(c, 0)).toHaveLength(24);
+    expect(doneAt(c, 1)).toHaveLength(24);
+    expect(c.groups[0]!.folds.map((x) => x.n)).toEqual([43, 6, 6, 6]);
+    expect(doneAt(page(3), 1)).toHaveLength(30);
+    expect(page(3).groups[0]!.folds.map((x) => x.id)).toEqual([`${foldId("big")}:0`]);
+  });
+
+  test("不传 donePages，或 Map 里没有这个 feature：和改前一样", () => {
+    const f = mainlineFeature();
+    for (const done of [new Set<string>(), new Set(["F1"])]) {
+      expect(layoutDag([f], ["F1"], done, null, new Map([["other", 1]]))).toEqual(layoutDag([f], ["F1"], done));
+      expect(layoutDag([f], ["F1"], done, null, undefined)).toEqual(layoutDag([f], ["F1"], done));
+    }
+    expect(layoutDag([big], ["big"], new Set(["big"])).groups[0]!.nodes).toHaveLength(180);
+  });
+
+  test("对比模式不分页", () => {
+    const ov = compareOverlay("big", big.nodes, big.nodes, { diff: { added: [], removed: [], carried: big.nodes.map((n) => ({ key: n.key, changed: false })), cancelled: [] }, rewrittenDone: [] });
+    const c = layoutDag([big], ["big"], new Set(["big"]), ov, new Map([["big", 1]]));
+    expect(c.groups[0]!.nodes).toHaveLength(180);
+    expect(c.groups[0]!.folds).toEqual([]);
+  });
+
+  test("donePageOf：第 0 列第 30 个已完成节点在第 3 页；第 12 个第 1 页，第 13 个第 2 页；没完成的第 1 页", () => {
+    expect(donePageOf(big, "c0-29")).toBe(3);
+    expect(donePageOf(big, "c0-11")).toBe(1);
+    expect(donePageOf(big, "c0-12")).toBe(2);
+    expect(donePageOf(big, "a0")).toBe(1);
   });
 });

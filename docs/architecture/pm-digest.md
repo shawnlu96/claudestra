@@ -21,7 +21,11 @@
 
 下面这些总是立即送：owner 和人类消息、API / peer 消息、卡片答复（`ask_answer`）、其他 bridge 通知（含 `ledger` 的执行者提问和交付，以及本功能自己的单独摘要 `pm-digest`，防自环）、调度器的其他通知，以及等回复的 agent 消息。
 
-## 送出时机（开关 `on`）
+## 拉取（`ledger pm-digest-pull`，按项目，缺省 `on`）
+
+PM 不需要实时知道常规进展，要的时候自己拉（owner 10-15 定）。拉取开着时，下面第 2、3 步都不做：可合并的消息照常进队、返回 `note: "digest"`，但不搭在任何消息前面，定时器也不单独送；PM 用 `ledger pm-digest --list` 看队里的条目，放满 24 小时没人拉的出队（原始内容在卡片、台账、处理员草稿里）。切 `off` 回到下面的推送摘要；即使推送，owner / peer 的消息（`from.kind` 为 `user` / `api`）也不搭摘要，因为拼进正文的摘要会显示在对方自己的消息气泡里。
+
+## 送出时机（开关 `on`，拉取 `off`）
 
 1. 可合并的消息不投递，记进项目摘要队列（落盘），返回 `sent / note: "digest"`。押后队列重投时也一样，到这里出队。
 2. 立即送的消息投给这位 PM 时（按项目串行：读队列、拼摘要、发送、真送到出队是一个整体，并发的立即送和定时摘要不会各带一份），把队里的摘要插到正文前面（在转交抬头之后），一次投递送达。投出前先把这些条目记成被这封带走（`carriedBy` = 这封的**载体号** `pmDigest.carrier`，形如 `<message_id>#<随机>`，随信封落盘；同一封重拼沿用，不同信封哪怕 message_id 相同——同一条 Discord 消息的两次按钮点击——也各有各的），不再拼进别的摘要。结局三种：
@@ -29,7 +33,7 @@
    - 押在 PM 的押后队列（`note: "queued"` / `heldBy`）：押后队列落盘的就是带摘要的这份，PM 可能经 `check_inbox` 领走。摘要留在信封上，`pmDigest.ids` 记着这份带的条目；押后队列报结局（`onHeldSettled`）时，`delivered`（Stop 重投或收件箱确认）按**收件方实际拿到的那份**的 `ids` 出队，其余回队；`discarded` / `gave-up` 全部回队。`check_inbox` 领取不经投递时的当班检查，所以结清时再核一次：收件方已不是条目所属项目的当班 PM（例如切当班后前任领走了 owner 发给它的直聊），这些条目不算送到、回队，下个窗口交给当班 PM（前任已读到的那份摘要不撤回；领取前就剥离要改 `bridge/inbox.ts`，不在本卡范围）。重启后盘上的信封、摘要队列里的 `carriedBy` 都在，收件箱确认照样结清，窗口不会再发一遍。同一封在内存里被押回（hold 认出同一封不重写盘）时新拼进去的条目不在盘上那份的 `ids` 里，结清时回队。
    - 离线、失败：正文原样还原、条目回队。
    摘要块记在信封的 `pmDigest` 上，重投时按记录摘掉旧块、条目回队后重新拼，不会叠两层；改投给非当班 PM 时同样摘掉回队。定时器每轮先核对一次：`carriedBy` 指向的载体号已不在押后队列盘上任何信封里（投递途中崩溃等没报结局的情形）就放回队，宁可重一次不吞。
-3. 队里最早一条等满 `PM_DIGEST_WINDOW_MS`（30 分钟）后，定时器（每分钟一次）单独送一条摘要（bridge `pm-digest`，`waitForIdle`）。它经 bridge 启动时 `initTeamRouter` 交来的 router `deliver` 发出（`pmDigest.start`，team-router.ts 里一行），不借用任何单条押后消息的发送闭包；信封再经 `deliverPmLocal` 时由 wrap 在项目锁里现拼正文。如果这条摘要押在 PM 的押后队列里，一个窗口内不再起新的；它重投时队列已空就丢掉，不发空摘要。
+3. 队里最早一条等满 `PM_DIGEST_WINDOW_MS`（4 小时）后，定时器（每分钟一次）单独送一条摘要（bridge `pm-digest`，`waitForIdle`）。它经 bridge 启动时 `initTeamRouter` 交来的 router `deliver` 发出（`pmDigest.start`，team-router.ts 里一行），不借用任何单条押后消息的发送闭包；信封再经 `deliverPmLocal` 时由 wrap 在项目锁里现拼正文。如果这条摘要押在 PM 的押后队列里，一个窗口内不再起新的；它重投时队列已空就丢掉，不发空摘要。
 4. 摘要每行的格式是「来源 · 卡号 · 首行原文（截断 120 字）」。同一来源同一张卡（没有卡号时按同一首行）合并成一行，并记次数 `（×n）`。
 
 ## 开关：`on` / `observe` / `off`（按项目，缺省 `observe`）
@@ -37,6 +41,24 @@
 - `observe`：照常逐条投递，信封原样不动，只记录归类结果（`digest` 即本来会合并的）。
 - `off`：不记录，也不排队。
 - 从 `on` 切走后，队里剩下的条目在下一轮定时器立刻送出，不等窗口。
+
+## 通知级别：发送方标 `action` / `info`（`src/lib/pm-notice-level.ts`，分流开关 `on` 时生效）
+
+推给 PM 的系统通知由发送方在代码里标级别，分流只认这个结构化字段（信封 `meta.pmLevel`），不看正文文字，换语言、改文案都不影响：
+
+- `action`：要 PM 当场动手，立即叫醒。`info`：常规，**不送 PM**，也不进摘要——发送方本来就把它记在卡片 / 台账里（上线后提醒、缺规格提醒、合并进度、主线 CI 状态都有台账记录），分流这里只记一笔统计（`ledger pm-digest` 的 `level.info`）。PM 按需拉：`ledger pm-todo` 列观察期已到、还没结的上线后待办（`--all` 连没到期的），配合看 DAG。
+- 怎么标：`notifyProjectPm(..., { level })`；调用链深、不便改签名的发送点在外面包 `asInfo(() => deps.notifyPm(...))`（AsyncLocalStorage，同 `pmNotifyTarget`）；bridge 合成的台账通知走 `sendLedgerNotice({ ..., pmLevel })`。
+- 已标 `info`：上线后待办（`scheduler-post-verify.ts`；同一个 `sendToPm` 还发待写规格、合并 / 审查 / 观察期提醒，那些要 PM 动手，不标）、残留进程观察报告（`card-proc-reap.ts`）、合并交接进度（`scheduler-merge-handoff-tick.ts`）、主线 CI 未开暂停时的通知、带默认做法到时自动定的执行者提问（`order-ask.ts`）。没带默认做法的执行者提问标 `action`。
+- 没标级别的通知照旧走原规则（正文保护字样，宁可多叫醒）；新加的系统通知要标级别。
+
+## 暂存：`ledger pm-hold`（`src/lib/pm-hold.ts`，按项目，缺省 `off`）
+
+PM 每被叫醒一次都要重读整段上下文，额度的大头是叫醒次数。暂存开着时，投给当班 PM 的推送在摘要 / 分流之前就被截下、全文落盘（`pm-hold.json`），不叫醒 PM：
+
+- 豁免（照常立即送）：owner / 人类 / peer 对话（`fromKind` 为 `user` / `api`、`user_discord`、peer 回程 `peer_http`）、卡片答复（`ask_answer`）、整包信封自己（label `pm-hold`）。
+- `hold`：一直攒，切回 `off` 后下一轮 tick 整包送一封；`batch --every N`：队里最早一条等满 N 分钟（缺省 60）整包送一封。
+- 整包：同来源同正文合成一条带次数，单条截 3000 字，整包超 4 万字的留到下一包；真送到或押进 PM 队里才出队，没送到留队下一轮再试。暂存文件写不进时这条照常往下走（宁可叫醒，不吞）。
+- 命令：`ledger pm-hold` 只读状态与队列条数；`ledger pm-hold <off|hold|batch> [--every N]` 要项目真 PM / master / owner。
 
 ## 状态与命令
 

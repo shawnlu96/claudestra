@@ -3,9 +3,13 @@
  * artifact) binds the merge subject, instead of today's name / bucket check. related never authorises a merge; only a full
  * proof does. judgeCiCoverage is the one entry for planner, inspect, mergeCandidates and the deploy tick; it only narrows the
  * prior verdict (off / observe / on). Not wired anywhere yet. docs/architecture/ci-proof.md, tests/ci-proof.test.ts.
+ * merge-arch-CISEL1: a proof whose policyVersion carries the `+ci-selected-1:<digest>` suffix had shards released by receipt; it is
+ * valid only with that section (CiRunEvidence.selected) matching the digest, the run, the attempt and the checkout. Any other
+ * policyVersion is compared exactly as before. docs/architecture/ci-selected-gate.md, tests/ci-proof-selected.test.ts.
  */
 import { type CiProofManifest, type CiProofScope, type CiProofTrain, ciProofManifestDigest, parseCiProofManifest } from "./ci-proof-manifest.js";
 import { type CiRunReuse, ciProofReuseProblems } from "./ci-proof-reuse.js";
+import { sectionProblems, selectedPolicyVersion } from "./ci-selected-verdict.js";
 
 export type CiCoverageGateMode = "off" | "observe" | "on";
 const GATE_MODES: readonly CiCoverageGateMode[] = ["off", "observe", "on"];
@@ -52,6 +56,8 @@ export interface CiRunEvidence {
   artifact: { runId: number; attempt: number; digest: string; content: unknown } | null;
   /** The run's reuse receipts with their original runs read back (merge-arch-REUSE1); absent / null = it reused nothing. */
   reuse?: CiRunReuse | null;
+  /** The `ci-proof` artifact's selected.json (merge-arch-CISEL1); read only when the manifest says shards were released. */
+  selected?: unknown;
 }
 
 type CiProofResult =
@@ -118,8 +124,16 @@ function trainProblems(want: CiProofTrain | undefined, m: CiProofManifest): stri
   return out;
 }
 
+/** The approved policy exactly, or that policy plus a released-by-receipt section that checks out against this run. */
+function policyProblems(x: CiProofExpect, m: CiProofManifest, ev: CiRunEvidence): string[] {
+  if (m.policyVersion === x.policyVersion) return [];
+  const prefix = selectedPolicyVersion(x.policyVersion, "");
+  if (!m.policyVersion.startsWith(prefix)) return ["manifest policyVersion 不符"];
+  return sectionProblems(ev.selected, { digest: m.policyVersion.slice(prefix.length), runId: ev.runId, attempt: ev.attempt, head: m.checkout.sha });
+}
+
 /** Every bound field of the manifest against the subject. */
-function bindingProblems(x: CiProofExpect, m: CiProofManifest): string[] {
+function bindingProblems(x: CiProofExpect, m: CiProofManifest, ev: CiRunEvidence): string[] {
   const out: string[] = [];
   const folded: [string, string, string][] = [
     ["repo", m.repo, x.repo], ["head", m.head, x.head], ["base", m.base, x.base],
@@ -129,12 +143,11 @@ function bindingProblems(x: CiProofExpect, m: CiProofManifest): string[] {
     ["tests.universeDigest", m.tests.universeDigest, x.testsUniverseDigest],
   ];
   const exact: [string, string, string][] = [
-    ["workflow.path", m.workflow.path, x.workflow.path], ["policyVersion", m.policyVersion, x.policyVersion],
-    ["toolchain.bun", m.toolchain.bun, x.toolchain.bun],
+    ["workflow.path", m.workflow.path, x.workflow.path], ["toolchain.bun", m.toolchain.bun, x.toolchain.bun],
   ];
   for (const [field, got, want] of folded) if (!eq(got, want)) out.push(`manifest ${field} 不符`);
   for (const [field, got, want] of exact) if (got !== want) out.push(`manifest ${field} 不符`);
-  return out.concat(trainProblems(x.train, m));
+  return out.concat(policyProblems(x, m, ev), trainProblems(x.train, m));
 }
 
 /** What a full proof needs on top of a bound one: every test, every required check, nothing skipped or cancelled. */
@@ -156,7 +169,7 @@ export function verifyCiProof(x: CiProofExpect, ev: CiRunEvidence | null): CiPro
   if (typeof read === "string") return { ok: false, scope: null, mergeAuthorized: false, reasons: [...run, read] };
   const { manifest: m, digest } = read;
   const reuse = ciProofReuseProblems({ ...x, ...x.toolchain, tree: x.checkout.tree }, ev, ev.reuse);
-  const bound = [...run, ...jobProblems(x, ev), ...bindingProblems(x, m), ...reuse];
+  const bound = [...run, ...jobProblems(x, ev), ...bindingProblems(x, m, ev), ...reuse];
   if (bound.length) return { ok: false, scope: null, mergeAuthorized: false, reasons: bound };
   if (m.scope === "related") return { ok: true, scope: "related", mergeAuthorized: false, manifestDigest: digest, reasons: ["related 证明不授权合并"] };
   const full = fullProblems(x, m, ev);

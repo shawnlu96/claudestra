@@ -1,6 +1,7 @@
 'use client';
 import { useState } from 'react';
 import type { Command } from '../../../lib/api/shared-ledger';
+import { MACHINE_WORDS } from '../../../lib/owner-words';
 import type { Draft } from './shared-model';
 import type { Tr } from '../collab-model';
 import { NodeConflicts } from './shared-conflicts';
@@ -18,7 +19,7 @@ export function NewFeature({ project, home, busy, tr, onSubmit, onCancel }: {
     <label>{tr('项目')}<input required value={projectId} onChange={e => setProject(e.target.value)} /></label>
     <label>{tr('标题')}<input required value={title} onChange={e => setTitle(e.target.value)} /></label>
     <label>{tr('描述')}<textarea value={description} onChange={e => setDescription(e.target.value)} /></label>
-    <label>{tr('默认规划主场')}<input required value={homeId} onChange={e => setHome(e.target.value)} /></label>
+    <label>{tr(MACHINE_WORDS.planningMachine)}<input required value={homeId} onChange={e => setHome(e.target.value)} /></label>
     <div className={s.actions}><button className={c.btn} disabled={busy || !title.trim()}>{tr('创建')}</button>
       <button className={c.btn} type="button" onClick={onCancel}>{tr('取消')}</button></div>
   </form>;

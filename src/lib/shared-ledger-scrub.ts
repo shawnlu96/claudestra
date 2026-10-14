@@ -41,15 +41,34 @@ function sharedGlobAllowed(value: string): boolean {
   }
   return stack.length === 0;
 }
-/** Inspect originals before masking: detecting a secret must refuse upload even if a masker could hide it. */
-export function scrubSharedLedger<T>(input: unknown, parser: Schema<T>, context: SharedLedgerScrubContext): T {
-  const fields = new Set<string>();
+/** The check visit applies to every string (shape = its field name); also behind sharedLedgerValueBlocked. */
+function stringBlocked(context: SharedLedgerScrubContext): (value: string, shape: string) => boolean {
   const commits = context.commits ?? new Set<string>();
   const known = [...(context.knownSecrets ?? []), ...(context.knownAddresses ?? []), ...(context.personalValues ?? [])].filter(Boolean);
-  if (!context.identity.username.trim() || !context.identity.hostname.trim()) throw new SharedLedgerScrubError(["$.<identity>"]);
   const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const names = [context.identity.username, context.identity.hostname].map((name) =>
     new RegExp(`(?<![A-Za-z0-9])${escape(name)}(?![A-Za-z0-9])`, "i"));
+  return (value, shape) => {
+    const digest = ["manifestDigest", "specDigest"].includes(shape) && /^[a-f0-9]{64}$/.test(value);
+    const head = shape === "head" && commits.has(value.toLowerCase());
+    const pathHit = shape === "fileGlobs" ? !sharedGlobAllowed(value) : absolutePath.test(value);
+    if (names.some((name) => name.test(value)) || known.some((secret) => value.includes(secret)) || address.test(value) || pathHit) return true;
+    if (digest || head) return false;
+    const peer = redactForPeer(value);
+    const pr = redactPeerPr(value, context.identity, commits);
+    return !!(peer.count || pr.count || peerPrSecretHit(value, commits));
+  };
+}
+const identityMissing = (context: SharedLedgerScrubContext) => !context.identity.username.trim() || !context.identity.hostname.trim();
+/** One value judged exactly as the scrub judges it in field `shape`; a missing identity blocks everything, as the scrub does. */
+export function sharedLedgerValueBlocked(value: string, context: SharedLedgerScrubContext, shape = ""): boolean {
+  return identityMissing(context) || stringBlocked(context)(value, shape);
+}
+/** Inspect originals before masking: detecting a secret must refuse upload even if a masker could hide it. */
+export function scrubSharedLedger<T>(input: unknown, parser: Schema<T>, context: SharedLedgerScrubContext): T {
+  const fields = new Set<string>();
+  if (identityMissing(context)) throw new SharedLedgerScrubError(["$.<identity>"]);
+  const blocked = stringBlocked(context);
   const visit = (value: unknown, path: string, shape: string): void => {
     if (Array.isArray(value)) { value.forEach((v, i) => visit(v, `${path}[${i}]`, shape)); return; }
     if (value && typeof value === "object") {
@@ -60,16 +79,7 @@ export function scrubSharedLedger<T>(input: unknown, parser: Schema<T>, context:
       }
       return;
     }
-    if (typeof value !== "string") return;
-    const digest = ["manifestDigest", "specDigest"].includes(shape) && /^[a-f0-9]{64}$/.test(value);
-    const head = shape === "head" && commits.has(value.toLowerCase());
-    const pathHit = shape === "fileGlobs" ? !sharedGlobAllowed(value) : absolutePath.test(value);
-    if (names.some((name) => name.test(value)) || known.some((secret) => value.includes(secret)) || address.test(value) || pathHit) fields.add(path);
-    if (!digest && !head) {
-      const peer = redactForPeer(value);
-      const pr = redactPeerPr(value, context.identity, commits);
-      if (peer.count || pr.count || peerPrSecretHit(value, commits)) fields.add(path);
-    }
+    if (typeof value === "string" && blocked(value, shape)) fields.add(path);
   };
   visit(input, "$", "$");
   if (fields.size) throw new SharedLedgerScrubError([...fields].sort());

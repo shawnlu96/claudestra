@@ -64,9 +64,9 @@ async function render(mode: 'on' | 'observe' | 'off') {
   } finally { await React.act(async () => root.unmount()); host.remove(); fetchSpy.mockRestore(); }
 }
 
-test('[验收线 1] on: formal TeamSource mounts the execution panel with home, serverSeq and enabled create', async () => {
+test('[验收线 1] on: formal TeamSource mounts the execution panel with task machine, serverSeq and enabled create', async () => {
   const r = await render('on');
-  expect(r.text).toContain('共享执行'); expect(r.text).toContain('serverSeq · 40'); expect(r.text).toContain('主场 · 本机');
+  expect(r.text).toContain('共享执行'); expect(r.text).toContain('serverSeq · 40'); expect(r.text).toContain('任务所在的机器 · 本机');
   expect(r.button('开卡')?.disabled).toBe(false);
   expect(r.urls).toContain(`/api/v1/shared-exec/context?teamId=team-a&projectId=claude-orchestrator&featureId=${FEATURE}`);
   // Reads go to this machine's project; the center coordinates were only the context lookup key.

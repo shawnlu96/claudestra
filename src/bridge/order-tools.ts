@@ -60,7 +60,7 @@ const HANDLERS: Record<string, OrderToolHandler> = {
     findPr: (c, branch) => findPrRows(cwdOf(c.agent), branch, runBounded),
   }),
   ask: (call, args) => askOrder(call, args, {
-    db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
+    db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId, pmLevel) => sendLedgerNotice({ to, text, messageId, pmLevel }),
     // handedAt：默认做法提问的 15 分钟从这里算（order-ask-default.ts）
     markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed", handedAt: Date.now() } }), record: (ctx, input) => void appendEvent(askDb(), ctx, input),
   }),

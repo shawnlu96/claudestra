@@ -35,15 +35,15 @@ export const TIMEOUT_ONLY = ciLog([at(`##[group]${SLOW}:`), at("(fail) 本机 AP
 export const assertIn = (file: string) => ciLog([at(`##[group]${file}:`), at("error: expect(received).toBe(expected)"),
   at("(fail) b > 断言 [0.40ms]"), at("##[endgroup]")]);
 
-export interface Gh { attempt: number; status: string; conclusion: string; log: string | Error; runView: Error | null; files: string[]; argv: string[][] }
+export interface Gh { attempt: number; status: string; conclusion: string; headSha: string; log: string | Error; runView: Error | null; files: string[]; argv: string[][] }
 const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 const no = (stderr: string): BoundedResult => ({ code: 1, stdout: "", stderr, timedOut: false });
 /** Answers gh argv like the real CLI would: CIF1's calls, and CIF2's with main having changed every file after the merge-base. */
 const fakeGh = (gh: Gh, onUpdate: () => void) => async (argv: string[]): Promise<BoundedResult> => {
   gh.argv.push(argv);
   const cmd = argv.slice(1).join(" ");
-  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion") {
-    return gh.runView ? no(gh.runView.message) : ok(JSON.stringify({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion }));
+  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion,headSha") {
+    return gh.runView ? no(gh.runView.message) : ok(JSON.stringify({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion, headSha: gh.headSha }));
   }
   if (cmd === "run view 77 --repo example/repo --log-failed") return gh.log instanceof Error ? no(gh.log.message) : ok(gh.log);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: gh.files.map((path) => ({ path })) }));
@@ -70,7 +70,7 @@ const snapOf = (head: string, bucket: "fail" | "pending"): PrSnapshot => ({ stat
 function waitCard(over: Partial<Gh> = {}, opts: { behind?: boolean } = {}) {
   const c = mergedCard();
   c.db.query("UPDATE scheduler_merges SET phase='await_ci', mergeSha=NULL WHERE intentId=?").run(c.intent);
-  const gh: Gh = { attempt: 1, status: "in_progress", conclusion: "", log: new Error(STILL_RUNNING), runView: null,
+  const gh: Gh = { attempt: 1, status: "in_progress", conclusion: "", headSha: HEAD, log: new Error(STILL_RUNNING), runView: null,
     files: ["src/lib/x.ts", "tests/x.test.ts"], argv: [], ...over };
   let snap = snapOf(HEAD, "fail");
   const run = fakeGh(gh, () => { snap = snapOf(NEW, "pending"); }) as never;

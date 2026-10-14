@@ -1,7 +1,7 @@
 /**
  * 历史拉取（此前 BFF app/api/chat/history 的编排部分；纯变换在 lib/chat/history-shape.ts）。
  * 三种取法，返回形状与 chat-store 既有约定一致：
- *   全量：最新 session 的最后 500 条（依次试最新的 3 个 session——/clear 轮转中途最新的可能正被拷贝）；
+ *   全量：最新 session 的最后 FULL_PAGE 条（最新的读不到（404，/clear 轮转中途正被拷贝）才依次试更早的，最多 3 个）；
  *   after=<seq>+session：差量（唤醒秒画）；pinned 不再是最新 session → rotated；browse=1 = 历史现场向下翻，不做轮转检测；
  *   before=<seq>+session：向上分页；本 session 翻空 → 自动接上一个（更旧的）session 的尾页（stitched）。
  * 「删除」的隐藏区间（GET /agents/:name/hidden）在合并成气泡前剔掉；lastSeq / hasMore 按整页算。
@@ -90,18 +90,22 @@ async function hiddenPredicate(agentKey: string, sid: string): Promise<((seq: nu
   return (seq) => mine.some((r) => seq >= r.fromSeq && seq <= r.toSeq);
 }
 
+/** 首页条数：慢中继上 500 条要 135KB / 十几秒，150 条够铺满一屏多，更早的往上滚翻页（before=） */
+export const FULL_PAGE = 150;
+
 export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise<HistoryPage> {
   const agentKey = apiAgentName(agent);
   const name = encodeURIComponent(agentKey);
   const ids = await selfIds();
   // 守门记录（dropped 合成气泡 / released 打标）：一次拉全，按页时间范围合并；没权限（guest）或旧 bridge 就没有记录
-  const guardRecords = listGuard(agentKey, true).catch(() => [] as GuardItem[]);
+  let guardRecords: Promise<GuardItem[]> | null = null; // 用到才拉：差量页不合守门记录，别每次白发一个请求
+  const guards = () => (guardRecords ??= listGuard(agentKey, true).catch(() => [] as GuardItem[]));
   const page = (sid: string, qs: string) => api<Page>(`/agents/${name}/history/${encodeURIComponent(sid)}${qs}`, { timeoutMs: 10_000, signal: q.signal });
   const sessions = () => api<SessionList>(`/agents/${name}/history`, { timeoutMs: 8000, signal: q.signal }).then((l) => (l.sessions ?? []).map((s) => s.sessionId));
   // merge=false：差量页（after）不合守门记录——它们在全量 / 翻页时已按时间范围合过，差量页范围小、常常为空
   const shape = async (items: NeutralMessage[], sid: string, tail?: boolean, merge = true) => {
     const msgs = toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: await hiddenPredicate(agentKey, sid), selfIds: ids, lang: getLang() });
-    return merge ? mergeGuardRecords(msgs, await guardRecords, ids, { newest: tail !== false }) : msgs;
+    return merge ? mergeGuardRecords(msgs, await guards(), ids, { newest: tail !== false }) : msgs;
   };
   try {
     if (q.after !== undefined && q.session) {
@@ -131,11 +135,14 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
     let lastErr: unknown = null;
     for (const sid of sids.slice(0, 3)) {
       try {
-        const items = (await page(sid, "?limit=500")).messages ?? [];
+        const items = (await page(sid, `?limit=${FULL_PAGE}`)).messages ?? [];
+        const hasMore = items.length >= FULL_PAGE || fullLoadHasMore(items.length, sids, sid);
         // lastSeq = 合并成气泡前最后一条原始记录的 seq——差量同步的游标锚（不能用气泡 id 推）
-        return { data: await shape(items, sid), sessionId: sid, lastSeq: items.length ? items[items.length - 1].seq : null, hasMore: fullLoadHasMore(items.length, sids, sid) };
+        return { data: await shape(items, sid), sessionId: sid, lastSeq: items.length ? items[items.length - 1].seq : null, hasMore };
       } catch (e) {
-        lastErr = e; // not found（轮转竞态）→ 试下一个；其它错误也顺延，全败再抛
+        // 只有 404（轮转竞态，最新的还没落盘）才试更早的；超时 / 5xx 照抛——退到旧会话会显示错的会话
+        if (!(e instanceof ApiError && e.status === 404)) throw e;
+        lastErr = e;
       }
     }
     throw lastErr ?? new Error("no readable session");

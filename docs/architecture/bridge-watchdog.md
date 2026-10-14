@@ -14,11 +14,11 @@ launchd 托管 `com.claudestra.bridge`（KeepAlive），只在进程**退出**�
 
 | 值 | 行为 |
 | --- | --- |
-| `"observe"`（缺省；不写 / 坏值 / config.json 坏了都按它） | 照常探测和判定，不重启。每次判定写一条日志（launcher 日志里 `🩺 bridge 卡住[…] 本该重启（observe）`），每种原因每小时最多通知 master 一次「本该重启」 |
-| `"on"` | 判为卡住 → `launchctl kickstart -k gui/<uid>/com.claudestra.bridge`，写日志并通知 master「bridge 卡住，已自动重启」，带原因与最后一次正常的时间 |
+| `"observe"`（要显式设置才生效） | 照常探测和判定，不重启。每次判定写一条日志（launcher 日志里 `🩺 bridge 卡住[…] 本该重启（observe）`），每种原因每小时最多通知 master 一次「本该重启」 |
+| `"on"`（缺省；不写 / 坏值 / config.json 坏了都按它） | 判为卡住 → `launchctl kickstart -k gui/<uid>/com.claudestra.bridge`，写日志并通知 master「bridge 卡住，已自动重启」，带原因与最后一次正常的时间 |
 | `"off"` | 不探测 |
 
-部署时缺省 observe；PM 观察 24 小时没有误判再切 on。
+升级后没设过这个键的机器会从只记录变成自动重启；不想要就显式设 `"observe"`。
 
 > `config-store.ts` 的读写是白名单式的，`bridgeWatchdog` 已加进 `merge()` 的白名单：网页设置等任何 `set*`（读→改→写）都会原样保留它。
 

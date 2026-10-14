@@ -39,7 +39,9 @@ const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", ti
 /** gh for run 77 / PR 7: attempt `attempt` (1 unless said) red, the given failed log, PR files outside the tests. */
 const fakeGh = (log: string, attempt = 1) => async (argv: string[]): Promise<BoundedResult> => {
   const cmd = argv.slice(1).join(" ");
-  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion") return ok(JSON.stringify({ attempt, status: "completed", conclusion: "failure" }));
+  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion,headSha") {
+    return ok(JSON.stringify({ attempt, status: "completed", conclusion: "failure", headSha: HEAD }));
+  }
   if (cmd === "run view 77 --repo example/repo --log-failed") return ok(log);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: [{ path: "src/lib/usage-store.ts" }] }));
   return { code: 1, stdout: "", stderr: `unexpected gh ${cmd}`, timedOut: false };

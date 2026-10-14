@@ -57,13 +57,13 @@ test('business authorization without a proposal sends only the bound ask answer'
     .toThrow('invalid_command_input');
 });
 
-test('shared copy and redacted summary are labelled as such; the original is only at home', () => {
+test('shared copy and redacted summary are labelled as such; the original is only on the machine running the task', () => {
   const copy = documentView(approveFixtureMergeView.document);
-  expect(copy).toMatchObject({ kind: 'copy', label: '共享副本', body: '批准共享的规格副本', original: '仅在主场' });
+  expect(copy).toMatchObject({ kind: 'copy', label: '共享副本', body: '批准共享的规格副本', original: '原文只在任务所在的机器上能看' });
   expect(copy.sharedDigest).not.toBe(copy.originalDigest);
   const summary = documentView(view.document);
-  expect(summary).toMatchObject({ kind: 'summary', label: '脱敏摘要', original: '仅在主场', sharedDigest: null });
-  expect(documentView(null)).toMatchObject({ kind: 'none', body: '', original: '仅在主场' });
+  expect(summary).toMatchObject({ kind: 'summary', label: '脱敏摘要', original: '原文只在任务所在的机器上能看', sharedDigest: null });
+  expect(documentView(null)).toMatchObject({ kind: 'none', body: '', original: '原文只在任务所在的机器上能看' });
   for (const shown of [copy, summary]) expect(shown.label).not.toContain('原文');
   const swapped: ApprovalView = { ...approveFixtureMergeView, document: { ...approveFixtureMergeView.document!,
     copy: { ...approveFixtureMergeView.document!.copy!, sharedDigest: 'f'.repeat(64) } } };

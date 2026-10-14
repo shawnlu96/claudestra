@@ -260,7 +260,11 @@ describe("三个落库点", () => {
     for (const slug of ["src", "wide"]) createFeature(db, ctx, { project: "n8b8p", slug, title: slug });
     initDag(db, ctx, { id: "n8b8-src", rev: 1, nodes: [node("A"), node("B")] });
     setPolicy("n8b8p", "off"); // 先把带长 key 的初版写进去（on 下 initDag 自己就会拒）
-    initDag(db, ctx, { id: "n8b8-wide", rev: 1, nodes: [node(LONG), node("B")] });
+    // 开卡闸（shared-ledger-mirror-skip-id.ts）不让新节点带会撞闸的卡号：这里要的是闸之前留下的旧数据，直接写库
+    const legacy = [LONG, "B"].map((key) => ({ key, taskId: null, oneLine: `node ${key}`, deps: [], status: "planned", estimate: "", inheritedFrom: null, cardSlug: "wide" }));
+    db.prepare("INSERT INTO dag_versions (featureId,version,reasonKind,reasonText,proposedBy,createdAt,nodes) VALUES ('n8b8-wide',1,'initial','初版','owner',1001,?)")
+      .run(JSON.stringify(legacy));
+    db.prepare("UPDATE features SET currentVersion = 1 WHERE id = 'n8b8-wide'").run();
     setPolicy("n8b8p", "on");
     const views: unknown[] = [];
     dagWriteScrubProbe.view = (v) => views.push(v);
