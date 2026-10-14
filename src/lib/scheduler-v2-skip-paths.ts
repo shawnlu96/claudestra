@@ -42,6 +42,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
     why: "its only effect is scheduler-merge-step on the lender's intent" },
   { step: "manual.claim", file: "manual-merge-queue-pass.ts", fn: "manualMergeGate().claim", effects: ["ledger"], gates: ["manager"],
     why: "manual-merge-claim is resolved to the queue turn's card" },
+  { step: "mergePipeStep", file: "scheduler-merge-pipe.ts", fn: "mergePipeStep", effects: ["ledger"], gates: ["pace", "manager"],
+    why: "MRGPIPE1: scheduler-merge-step (slot yield) on the holder's intent / scheduler-recovery-observe on its card; candidates come from paceCards" },
   { step: "schedulerObserveTick", file: "scheduler-observe-tick.ts", fn: "schedulerObserveTick", effects: ["ledger"], gates: ["pace", "manager"],
     why: "paceCards filters; memory-auto is project level" },
   { step: "opts.supervise", file: "agent-supervisor-deps.ts", fn: "superviseStep", effects: ["ledger", "session", "notice"], gates: ["hook", "manager"],
@@ -89,6 +91,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "scheduler-review-hold": "task", "scheduler-review-snapshot": "intent", "scheduler-review-swap": "intent", "scheduler-sec-review-alarm": "task",
   "scheduler-session-bind": "task", "scheduler-session-retire": "task", "scheduler-settle": "intent", "scheduler-spec-place": "task", "scheduler-stage": "intent",
   "scheduler-supervise": "supervise", "scheduler-ui-ask": "intent", "scheduler-unclaimed": "intent", "scheduler-unclaimed-sent": "intent",
+  "scheduler-lend-author-retire": "task",
   "scheduler-content-review": "task", // merge-arch-REVIEW1 (merge-content-review-sink.ts)
   "scheduler-worker-retire": "worker-retire", "verify": "task",
 };

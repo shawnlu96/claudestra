@@ -13,14 +13,13 @@
  * tests/lend-usage-report.test.ts。
  */
 import { Database } from "bun:sqlite";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { getMeta, LIVE_STATES, setMeta, type LendRow, type LendState } from "./lend-journal.js";
 import { usageOf, type LendUsage } from "./lend-wire.js";
 import { HELLO_FRESH_MS } from "./lend-wire-v2.js";
 import { LEND_PROTO_USAGE } from "./lend-wire-v2-schema.js";
-import { PROJECTS_PATH, resolveProjectForRealDir, type ProjectDef } from "./projects.js";
-import { isRecoveryMode, readRecoveryFile, RECOVERY_POLICY_PATH, type RecoveryMode } from "./recovery-policy.js";
-import { REPO_ROOT } from "./repo-root.js";
+import { explicitLendKeyMode, type ModeDeps } from "./lend-key-mode.js";
+import type { RecoveryMode } from "./recovery-policy.js";
 import { FAMILY_SQL as FAMILY, USAGE_DB_PATH } from "./usage-store.js";
 
 const USAGE_REPORT_KEY = "lendUsageReport" as const;
@@ -44,22 +43,14 @@ export function usageAcked(db: Database, peer: string, now = Date.now()): boolea
 
 // ── 出借方 B：开关 ──
 
-export interface ModeDeps { policyPath?: string; projectsPath?: string; repoRoot?: string }
+export type { ModeDeps };
 
 /**
  * lendUsageReport 的生效值：本机 claudestra 仓库（REPO_ROOT）所属项目的 keys.lendUsageReport 显式值；没设、项目 mode 继承、文件坏、
  * 项目解析不出 = off。同步读（交回正文在同步段里拼），从不抛。
  */
 export function usageReportMode(o: ModeDeps = {}): RecoveryMode {
-  try {
-    const projects = (JSON.parse(readFileSync(o.projectsPath ?? PROJECTS_PATH, "utf8")) as { projects?: ProjectDef[] }).projects;
-    const project = Array.isArray(projects) ? resolveProjectForRealDir(projects, o.repoRoot ?? REPO_ROOT)?.id : undefined;
-    if (!project) return "off";
-    const f = readRecoveryFile(o.policyPath ?? RECOVERY_POLICY_PATH);
-    if (f.status !== "ok" || !Object.hasOwn(f.data.projects, project)) return "off";
-    const m = f.data.projects[project].keys?.[USAGE_REPORT_KEY];
-    return isRecoveryMode(m) ? m : "off";
-  } catch { return "off"; }
+  return explicitLendKeyMode(USAGE_REPORT_KEY, o);
 }
 
 // ── 出借方 B：读库与汇总 ──

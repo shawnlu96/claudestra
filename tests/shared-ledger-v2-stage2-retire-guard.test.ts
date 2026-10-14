@@ -154,14 +154,14 @@ test("v23 has no guard: appended migration adds exactly one version and preserve
   expect(f.db.query("SELECT name FROM sqlite_master WHERE name LIKE 'v2_projection_%'").all()).toEqual([]);
   const before = business(f.db); f.db.close();
   const db = openLedger(f.path);
-  expect(LEDGER_SCHEMA_VERSION).toBe(24); expect(schemaVersion(db)).toBe(24); expect(business(db)).toEqual(before);
+  expect(LEDGER_MIGRATIONS.indexOf(installProjectionGuard) + 1).toBe(24); expect(schemaVersion(db)).toBe(LEDGER_SCHEMA_VERSION); expect(business(db)).toEqual(before);
   expect(db.query("SELECT name FROM sqlite_master WHERE name LIKE 'v2_projection_%'").all()).toHaveLength(4);
   expect(db.query("PRAGMA table_info(v2_projection_guard)").all().map((c: any) => c.name)).toEqual(["taskId"]);
   expect(db.query("PRAGMA table_info(v2_projection_writer)").all().map((c: any) => c.name)).toEqual(["token"]);
   guardProjectionTasks(db, ["B"], []); installProjectionGuard(db); installProjectionGuard(db);
   expect(business(db)).toEqual(before); expect(isProjectionGuarded(db, "B")).toBe(true);
   closeLedger(f.path); const reopened = openLedger(f.path);
-  expect(schemaVersion(reopened)).toBe(24); expect(business(reopened)).toEqual(before); expect(isProjectionGuarded(reopened, "B")).toBe(true);
+  expect(schemaVersion(reopened)).toBe(LEDGER_SCHEMA_VERSION); expect(business(reopened)).toEqual(before); expect(isProjectionGuarded(reopened, "B")).toBe(true);
 });
 
 test("first connection repairs missing triggers; cache identity is retained", () => {
@@ -196,7 +196,7 @@ for (const legacy of [false, true]) for (const wrongTarget of [false, true]) {
     expect(() => openLedger(f.path)).toThrow("Invalid projection guard trigger");
     const raw = new Database(f.path);
     expect(business(raw)).toEqual(before); expect(isProjectionGuarded(raw, "B")).toBe(true);
-    expect(schemaVersion(raw)).toBe(legacy ? 23 : 24);
+    expect(schemaVersion(raw)).toBe(legacy ? 23 : LEDGER_SCHEMA_VERSION);
     expect(raw.query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(PROJECTION_GUARD_TRIGGER_DDL[1].name)).toBeNull();
     raw.query(`DROP TRIGGER ${PROJECTION_GUARD_TRIGGER_DDL[0].name}`).run(); raw.close();
     expect(isProjectionGuarded(openLedger(f.path), "B")).toBe(true);
@@ -270,7 +270,7 @@ test("raw v23 connection without guards retains real slot, finished-card and str
 
 
 test("regression control: modifying only migration seven leaves an existing v23 ledger unguarded", () => {
-  const f = fixture(true), steps = [...LEDGER_MIGRATIONS.slice(0, -1)], old = steps[6];
+  const f = fixture(true), steps = [...LEDGER_MIGRATIONS.slice(0, LEDGER_MIGRATIONS.indexOf(installProjectionGuard))], old = steps[6];
   steps[6] = (db) => {
     if (typeof old === "function") old(db); else for (const sql of old) db.prepare(sql).run();
     installProjectionGuard(db);

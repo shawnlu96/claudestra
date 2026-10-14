@@ -28,6 +28,12 @@ export function serve(home: HomeFixture, team: TeamFromHome, bundle: string, leg
     if (path === "/api/v1/asks") return json({ ok: true, asks: [ask], now: home.now, canAnswer: true });
     if (path === "/api/v1/peers/contacts") return json({ contacts: [{ name: "peer-mac", online: true, stale: false, agents: [{ name: "dev-x", busy: true }] }] });
     if (path === "/api/v1/team/quota") return json({ providers: [{ provider: "claude", used: 0.42, observedAt: home.now }] });
+    // 出借额度线（UXNUM1 顶栏「周额度」）：看者本机的，两边同一份；Claude 75%，Codex 读不到（略去）
+    if (path === "/api/v1/lend/quota-lines") return json({ ok: true, at: home.now, config: { status: "ok", error: null, mode: "on" }, families: [
+      { family: "claude", warnPct: 80, stopPct: 95, weekUsedPct: 75, resetAt: null, observedAt: home.now, source: "live", freshness: "fresh", state: "below", mode: "on",
+        limit: "none", wouldLimit: "none", granted: 2, lineCap: 2, available: 2, slots: 2 },
+      { family: "codex", warnPct: 80, stopPct: 95, weekUsedPct: null, resetAt: null, observedAt: null, source: null, freshness: null, state: "unknown", mode: "on",
+        limit: "none", wouldLimit: "none", granted: 0, lineCap: 0, available: null, slots: null }] });
     if (path === "/api/v1/team/activity") return url.searchParams.get("project") === p ? json({ now: home.now, interactions: [], truncated: false }) : json({ error: "no project" }, 404);
     // 页面挂载时的只读查询：夹具没有会话用量（上下文一律「未知」）；本人是 team-a 成员但不在任何共享项目里、没有提案记录（不出提案按钮）
     if (path === "/api/v1/team/worker-context") return json({ known: false });

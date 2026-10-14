@@ -11,6 +11,8 @@ import { bridgePortOf } from "./bridge-port.js";
 import { DEFAULT_BRIDGE_PORT } from "./bridge-url.js";
 import { notify } from "./notify.js";
 import { t } from "./i18n.js";
+import { captureBridgeDiag, realDiagIo } from "./bridge-watchdog-diag.js";
+import { realOobIo, sendBridgeOob, type OobEvent } from "./bridge-watchdog-oob.js";
 
 /** config.json 的键；缺省 / 坏值 = observe */
 const WATCHDOG_CONFIG_KEY = "bridgeWatchdog";
@@ -31,6 +33,8 @@ export const WATCHDOG_LIMITS = {
   maxRestartsPerWindow: 3,
   /** 同一原因的通知（observe 的「本该重启」、on 的报警）至少隔这么久 */
   notifyEveryMs: 60 * 60_000,
+  /** 抓现场最多等这么久（模块自己的总时限更短），到点不管抓没抓完都往下走 */
+  diagBudgetMs: 15_000,
 } as const;
 
 export function parseWatchdogMode(raw: unknown): WatchdogMode {
@@ -68,12 +72,22 @@ export interface WatchdogState {
   lastRelayOkAt: number | null;
   restarts: number[];
   notifiedAt: Partial<Record<string, number>>;
+  /** 当前卡住事件：第一次判卡住时建，探测恢复正常时清。现场和带外通知按它每个事件只做一次 */
+  episode: StuckEpisode | null;
+}
+
+interface StuckEpisode {
+  reason: StuckReason;
+  startedAt: number;
+  lastOkAt: number | null;
+  diagDir: string | null;
 }
 
 export function initialWatchdogState(): WatchdogState {
   return {
     pid: null, pidSince: 0, apiFails: 0, lastApiError: null, lastApiOkAt: null,
     relayDownSince: null, relaySig: null, relaySigSince: 0, lastRelayOkAt: null, restarts: [], notifiedAt: {},
+    episode: null,
   };
 }
 
@@ -169,6 +183,12 @@ export interface WatchdogDeps {
   log(line: string): void;
   notify(text: string): Promise<void>;
   now(): number;
+  /** 抓 bridge 进程现场（bridge-watchdog-diag.ts），返回现场目录名 / null；每个卡住事件调一次，在重启之前。不给 = 不抓 */
+  captureDiag?(pid: number): Promise<string | null>;
+  /** 不经 bridge 的通知（bridge-watchdog-oob.ts）；每个卡住事件开始、恢复各调一次。不给 = 不发 */
+  oob?(event: OobEvent): Promise<void>;
+  /** 覆盖 WATCHDOG_LIMITS.diagBudgetMs（测试用） */
+  diagBudgetMs?: number;
 }
 
 const fmtTime = (at: number | null) => (at === null ? t("无记录", "never") : new Date(at).toISOString());
@@ -184,6 +204,36 @@ function noticeText(action: WatchdogAction, v: Extract<Verdict, { stuck: true }>
         ? t(`🚨 bridge 卡住，1 小时内已自动重启 ${n} 次，不再重启，请人工处理。`, `🚨 Bridge stuck; restarted ${n} times within an hour already, not restarting again. `)
         : t("👀 bridge 卡住，本该重启（observe 模式，未重启）。", "👀 Bridge stuck; would have restarted (observe mode, no restart). ");
   return head + tail;
+}
+
+/** 卡住事件按它开始时的原因判恢复：接口卡住看探测成功；中继卡住看连上（或中继已停用） */
+function episodeRecovered(ep: StuckEpisode, probe: ProbeResult): boolean {
+  if (!probe.ok) return false;
+  return ep.reason === "api" || !probe.relay.enabled || probe.relay.connected;
+}
+
+/** 抓现场：抛错、超过时限都只记一行，返回 null，调用方照常重启 */
+async function captureDiagOnce(deps: WatchdogDeps, pid: number): Promise<string | null> {
+  if (!deps.captureDiag) return null;
+  const budget = deps.diagBudgetMs ?? WATCHDOG_LIMITS.diagBudgetMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timedOut = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), budget); });
+    const r = await Promise.race([deps.captureDiag(pid), timedOut]);
+    if (r !== "timeout") return r;
+    deps.log(`🩺 抓现场超过 ${budget}ms，不等了，照常往下走`);
+  } catch (e) {
+    deps.log(`🩺 抓现场失败（不影响重启）: ${(e as Error).message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  return null;
+}
+
+async function sendOob(deps: WatchdogDeps, kind: OobEvent["kind"], ep: StuckEpisode, mode: WatchdogMode): Promise<void> {
+  if (!deps.oob) return;
+  const ev: OobEvent = { kind, reason: ep.reason, lastOkAt: ep.lastOkAt, startedAt: ep.startedAt, watchdogMode: mode, diagDir: ep.diagDir };
+  await deps.oob(ev).catch((e) => deps.log(`🩺 带外通知失败: ${(e as Error).message}`));
 }
 
 /** 一轮：off 不探测；部署中跳过；查 PID → 探测 → 判定 → 执行 */
@@ -203,7 +253,21 @@ export async function runWatchdogRound(prev: WatchdogState, deps: WatchdogDeps):
   const seen = observeRound(prev, pid, probe, at);
   const out = decideRound(seen.state, seen.verdict, mode, at);
   const v = seen.verdict;
-  if (!v.stuck || out.action === "none") return { state: out.state, action: out.action };
+  if (!v.stuck || out.action === "none") {
+    const ep = out.state.episode;
+    if (!ep || !episodeRecovered(ep, probe)) return { state: out.state, action: out.action };
+    deps.log(`🩺 bridge 恢复正常（卡住始于 ${fmtTime(ep.startedAt)}，原因 ${ep.reason}）`);
+    await sendOob(deps, "recovered", ep, mode);
+    return { state: { ...out.state, episode: null }, action: out.action };
+  }
+  // 卡住事件的第一次判定：先抓现场（重启后旧进程就没了），带外通知与重启并行发，不拖重启
+  let episode = out.state.episode;
+  let oobSent: Promise<void> = Promise.resolve();
+  if (!episode) {
+    episode = { reason: v.reason, startedAt: at, lastOkAt: v.lastOkAt, diagDir: await captureDiagOnce(deps, pid) };
+    oobSent = sendOob(deps, "stuck", episode, mode);
+  }
+  out.state = { ...out.state, episode };
   let restartError: string | undefined;
   if (out.action === "restart") {
     let r: Awaited<ReturnType<WatchdogDeps["restart"]>> | undefined;
@@ -214,7 +278,8 @@ export async function runWatchdogRound(prev: WatchdogState, deps: WatchdogDeps):
     }
     if (r === "deploying" || r === "pid-changed") {
       deps.log(`🩺 bridge 卡住[${v.reason}] 但${r === "deploying" ? "部署正在进行" : "bridge 已换进程"}，本次不重启`);
-      return { state: { ...clearCounters(prev), pid: r === "pid-changed" ? null : prev.pid }, action: "skipped" };
+      await oobSent;
+      return { state: { ...clearCounters(prev), pid: r === "pid-changed" ? null : prev.pid, episode }, action: "skipped" };
     }
     // 重启历史按动作完成后的时钟记（kickstart 不早于此刻之前），只会偏晚、不会偏早：冷却与小时上限按实际重启时间算
     if (r === "restarted") out.state = { ...out.state, restarts: [...out.state.restarts.slice(0, -1), deps.now()] };
@@ -222,6 +287,7 @@ export async function runWatchdogRound(prev: WatchdogState, deps: WatchdogDeps):
   const label = { restart: "已重启", cooldown: "距上次重启不足 15 分钟，本次不重启", alarm: "重启过多，只报警", observe: "本该重启（observe）", none: "" }[out.action];
   deps.log(`🩺 bridge 卡住[${v.reason}] ${label}${restartError ? `，重启失败: ${restartError}` : ""}：${v.detail}；最后一次正常 ${fmtTime(v.lastOkAt)}`);
   if (out.notify) await deps.notify(noticeText(out.action, v, restartError)).catch((e) => deps.log(`🩺 通知失败: ${(e as Error).message}`));
+  await oobSent;
   return { state: out.state, action: out.action };
 }
 
@@ -249,6 +315,9 @@ async function bridgePid(): Promise<number | null> {
 function realWatchdogDeps(bridgeUrl: string, chatId: string): WatchdogDeps {
   const port = bridgePortOf(bridgeUrl) ?? DEFAULT_BRIDGE_PORT;
   const target = `gui/${process.getuid?.() ?? 0}/${BRIDGE_LABEL}`;
+  const log = (line: string) => console.log(line);
+  const diagIo = realDiagIo(log);
+  const oobIo = realOobIo(log);
   return {
     mode: readWatchdogMode,
     deployRunning: () => {
@@ -282,7 +351,9 @@ function realWatchdogDeps(bridgeUrl: string, chatId: string): WatchdogDeps {
       await Bun.sleep(8_000); // 通知走 bridge：等新进程起来再发，否则只落进 undelivered-alerts.log
       return "restarted";
     },
-    log: (line) => console.log(line),
+    log,
+    captureDiag: (pid) => captureBridgeDiag(pid, diagIo),
+    oob: (event) => sendBridgeOob(event, oobIo),
     notify: async (text) => {
       await notify({ source: "launcher", chatId, text });
     },

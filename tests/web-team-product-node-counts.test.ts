@@ -1,6 +1,7 @@
 /**
  * team-project-N8B1：团队产品卡的完成 / 进行中 / 受阻与本机产品板 nodeCounts 同一套规则（PAGEOK r11 F3）。
  * 夹具 A 照「会话列表」（main 上显示 6 进行中 · 3 受阻，本机 3 / 8）；夹具 B 照「直连优先」（main 上受阻 0，本机 19）。
+ * team-project-PDSTATE1：等依赖的节点计 waiting 不计受阻，团队与本机同一个 twin，所以两边一起变。
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { sharedProductBoard } from "@/features/collab/dag/shared-product-model";
@@ -42,7 +43,7 @@ function fixture(nodes: N[], center: { completed: number; blocked: number }, loo
 
 const range = (p: string, k: number) => Array.from({ length: k }, (_, i) => `${p}${i}`);
 
-test("夹具 A（会话列表，33 节点）：14 / 33 · 3 进行中 · 8 受阻，与本机 nodeCounts 相同（main 上 6 / 3）", () => {
+test("夹具 A（会话列表，33 节点）：14 / 33 · 3 进行中 · 3 受阻 · 5 在等，与本机 nodeCounts 相同（main 上 6 / 3）", () => {
   const done = range("d", 14);
   const nodes = [...done.map((k) => n(k, "verified")), ...range("b", 3).map((k) => n(k, "blocked", [done[0]!])),
     n("fix", "fix", done), n("live", "live", done), n("merge", "merge", done),
@@ -50,17 +51,17 @@ test("夹具 A（会话列表，33 节点）：14 / 33 · 3 进行中 · 8 受�
   // 游离卡（没挂在节点上）不计数
   const { team, local } = fixture(nodes, { completed: 14, blocked: 3 }, [proj("loose", "build")]);
   expect(nodes.length).toBe(33);
-  expect(local).toMatchObject({ total: 33, completed: 14, active: 3, blocked: 8, ready: 8 });
+  expect(local).toMatchObject({ total: 33, completed: 14, active: 3, blocked: 3, waiting: 5, ready: 8 });
   expect(team).toMatchObject({ total: 33, completed: 14, active: local.active, blocked: local.blocked });
   expect(team.activeUnknown).toBeUndefined();
   expect(warns).toEqual([]);
 });
 
-test("夹具 B（直连优先，23 节点）：3 完成、19 等依赖、1 可开工 → 团队受阻 19，与本机相同（main 上 0）", () => {
+test("夹具 B（直连优先，23 节点）：3 完成、19 等依赖、1 可开工 → 团队与本机都是受阻 0、在等 19", () => {
   const nodes = [...range("d", 3).map((k) => n(k, "done")), n("next", null, ["d0"]), ...range("w", 19).map((k) => n(k, null, ["next"]))];
   const { team, local } = fixture(nodes, { completed: 3, blocked: 0 });
-  expect(local).toMatchObject({ total: 23, completed: 3, active: 0, ready: 1, blocked: 19 });
-  expect(team).toMatchObject({ total: 23, completed: 3, active: local.active, blocked: 19 });
+  expect(local).toMatchObject({ total: 23, completed: 3, active: 0, ready: 1, blocked: 0, waiting: 19 });
+  expect(team).toMatchObject({ total: 23, completed: 3, active: local.active, blocked: 0 });
   expect(warns).toEqual([]);
 });
 
@@ -68,7 +69,7 @@ test("远期 / 取消 / 卡缺失 / 没绑卡 spec / 游离卡混合：团队进
   const nodes = [n("ok", "verified"), n("x", "cancelled"), n("lost", "missing"), n("plan", null, ["x"]), n("spec", "spec", ["lost"]),
     n("go", "build", ["ok"]), n("far", null, ["go"], "（远期）以后再说")];
   const { team, local } = fixture(nodes, { completed: 2, blocked: 0 }, [proj("loose", "blocked")]);
-  expect(local).toMatchObject({ completed: 2, active: 1, ready: 1, blocked: 2, deferred: 1 });
+  expect(local).toMatchObject({ completed: 2, active: 1, ready: 1, blocked: 1, waiting: 1, deferred: 1 });
   expect(team).toMatchObject({ completed: 2, active: local.active, blocked: local.blocked });
   expect(warns).toEqual([]);
 });

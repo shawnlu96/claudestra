@@ -15,7 +15,7 @@ import { updateTask } from "./fix-strategy-task-write.js";
  * to an older fix/write row and take_order hands the old writer this fix), an existing one is reassigned. Rows of earlier rounds
  * stay as history; the step event keeps who was replaced. Same transaction as the binding, so both commit or roll back.
  */
-function assignFixStep(db: Database, ctx: WriteCtx, task: LedgerTask, ref: SessionRef, intentId: string, replaces: string | null, now: number): void {
+export function assignFixStep(db: Database, ctx: WriteCtx, task: LedgerTask, ref: SessionRef, intentId: string, replaces: string | null, now: number): void {
   db.query(`INSERT INTO task_steps (taskId, step, round, executor, executorKind, state, createdAt, updatedAt) VALUES (?, 'fix', ?, ?, 'agent', 'assigned', ?, ?)
     ON CONFLICT (taskId, step, round) DO UPDATE SET executor = excluded.executor, executorKind = 'agent', state = 'assigned', rev = rev + 1, updatedAt = excluded.updatedAt`)
     .run(task.id, task.round, ref.agent, now, now);

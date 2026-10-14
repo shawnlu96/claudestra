@@ -12,6 +12,7 @@ import { createFeature, initDag, requireManager, setFeature } from "../lib/ledge
 import { storedOrigin } from "../lib/ledger-origin.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { autostartShow } from "./ledger-autostart-cmds.js";
+import { FEATURE_CLOSE_CMDS } from "./ledger-feature-close-cmds.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -74,6 +75,7 @@ function listFeatureDeps(c: LedgerCli): Result {
 }
 
 export const FEATURE_CMDS: Record<string, CommandSpec> = {
+  ...FEATURE_CLOSE_CMDS,
   "feature-dep-add": { valued: ["note", "project"], usage: "feature-dep-add <from> <to> [--note <≤60 字>]（from 是前置）", run: featureDep },
   "feature-dep-rm": { valued: ["project"], usage: "feature-dep-rm <from> <to>", run: featureDep },
   "feature-deps": { valued: ["project"], usage: "feature-deps [<feature>]", run: listFeatureDeps },

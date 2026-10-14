@@ -10,6 +10,8 @@ import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.js";
 import { noteContentCarry } from "./merge-content-review-sink.js";
 import { mergeUnionStep } from "./scheduler-merge-union.js";
+import { countCarryStep } from "./review-count-carry.js";
+import { mainMovedSinceCi } from "./scheduler-merge-freshness.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -52,7 +54,7 @@ const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" &
 /** MCRY3 at await_ci: only the head moved. No merge was sent (merging never returns here) and the scheduler's own update-branch was
  * already carried into reviewedHead, so this is the author's push. */
 const authorPush = (run: MergeRun, pr: PrSnapshot): boolean => !sameHead(run, pr) && samePr({ ...run, reviewedHead: pr.head }, pr);
-const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
+export const green = (run: Pick<MergeRun, "requiredChecks">, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
 const short = (s: string) => s.slice(0, 12);
@@ -117,7 +119,7 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   const carry = await carryOf(run, external, pr.head);
   await noteContentCarry(run, pr.head, carry); // merge-arch-REVIEW1: PROOF1 evidence via the injected sink; never changes this path
   const back = (c: ReviewCarry) => step("await_review", movedHeadReceipt(run.reviewedHead, pr.head, c), undefined, pr.head); // scheduler-review-rebase.ts
-  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) return back(carry);
+  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) return (await countCarryStep(run, pr, step, back)) ?? back(carry); // CARRYCNT1
   const receipt = carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
     mainHead: carry.mainHead, diffHash: carry.diffHash }) + carryChainSuffix(carry.chain);
   const carrying = () => step("await_ci", receipt, undefined, pr.head);
@@ -145,9 +147,10 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
 }
 
 /** The last read is taken before the irreversible `merging` claim, so a transient UNKNOWN there still waits and a conflict
- * still bounces; after the claim only the head-pinned merge API runs (GitHub refuses a moved head, so nothing merges early). */
+ * still bounces; after the claim only the head-pinned merge API runs (GitHub refuses a moved head, so nothing merges early).
+ * `ciMain` (serial path only) is the main the green CI was read against, compared once more after the claim (MRGFRESH1). */
 async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step, assertActive: () => void, trained = false,
-  recheck: Recheck = () => null, direct = false): Promise<MergeRun> {
+  recheck: Recheck = () => null, direct = false, ciMain?: MainFreshness): Promise<MergeRun> {
   const fresh = await external.inspect(run.prRef);
   const same = samePr(run, fresh);
   if (same && fresh.mergeState === "UNKNOWN") return unknownWait(run, step);
@@ -159,6 +162,10 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   if (proof) return proof === "wait" ? run : step("unknown", proof);
   const claimed = await step("merging", `CI 全绿：${fresh.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
   assertActive();
+  // MRGFRESH1: main may have moved while the claim was awaited. Nothing was sent, which the receipt says. The merge API pins only
+  // the head, so the rest of the window is the repository's strict up-to-date / merge queue protection (scheduler-merge-freshness.ts).
+  const moved = ciMain ? await mainMovedSinceCi(external, run, ciMain, assertActive) : null;
+  if (moved) return step("unknown", `${MERGE_NOT_SENT}：${moved}`);
   // The claim's transaction re-read the ledger, but another write (a PM revoking the UI approval, the manual queue policy going off)
   // can commit before its receipt gets back here: re-read once more right before the irreversible call, marked as the one read that
   // knows the claim is still unsent (a `merging` row seen after a restart may have sent). Nothing was sent, which the receipt says.
@@ -175,10 +182,10 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
 
 /** A related-only green needs the serial full re-check (scheduler-ci-full-request.ts) before the claim; a cleared train already ran full. */
 async function fullThenMerge(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, assertActive: () => void, trained: boolean,
-  recheck: Recheck): Promise<MergeRun> {
+  recheck: Recheck, ciMain: MainFreshness): Promise<MergeRun> {
   const full = trained ? null : await external.fullRecheck?.(run, pr);
   if (full) return full === "wait" ? run : step("unknown", full);
-  return claimAndMerge(run, external, step, assertActive, trained, recheck);
+  return claimAndMerge(run, external, step, assertActive, trained, recheck, false, trained ? undefined : ciMain); // a train member keeps its car's joint proof
 }
 
 /** Gives the card to PM with a manual reason (scheduler-fallback-manual); wired by the merge tick. */
@@ -302,7 +309,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (direct) return await claimAndMerge(run, external, step, assertActive, train === "cleared", recheck, true); // no freshness, no full re-check
       const stale = await external.freshness(run.prRef, pr.head); // GitHub keeps saying CLEAN for a stale branch; a train clearance is re-asked after it
       if (stale.behindBy > 0 && (train !== "cleared" || await external.train?.(run) !== "cleared")) return await refresh(`等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交`);
-      return await fullThenMerge(run, pr, external, step, assertActive, train === "cleared", recheck);
+      return await fullThenMerge(run, pr, external, step, assertActive, train === "cleared", recheck, stale);
     }
     if (run.phase === "merging") return await mergingStep(run, external, step);
     return run;

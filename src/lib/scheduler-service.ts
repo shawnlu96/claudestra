@@ -17,6 +17,8 @@ import { mainCiDrive, mainCiHolds } from "./scheduler-main-ci-wiring-driver.js";
 import { settleMergedDeploy } from "./merge-deploy-outbox.js";
 import { bindContentCarrySink, unsentAware } from "./merge-content-review-sink.js";
 import { bindMergeUnionSink } from "./scheduler-merge-union.js";
+import { bindEffCountRefreshSink } from "./effect-count-refresh.js";
+import { bindCountCarrySink } from "./review-count-carry.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -57,6 +59,8 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
   let handled = 0;
   using _contentSink = bindContentCarrySink(manager, assertActive); // merge-arch-REVIEW1: driver carries → `ledger scheduler-content-review`, this tick only
   using _unionSink = bindMergeUnionSink(manager, assertActive); // KEYUNION1: mergeUnion notes → `ledger scheduler-recovery-observe`, this tick only
+  using _effCountSink = bindEffCountRefreshSink(manager, assertActive); // EFFAUTO1: effCountRefresh notes → `ledger scheduler-recovery-observe`, this tick only
+  using _countCarrySink = bindCountCarrySink(manager, assertActive); // CARRYCNT1: effCountCarry notes → `ledger scheduler-recovery-observe`, this tick only
   // the repository owner merges a mergeHandoff project: no merge run is begun or driven here (MHO1)
   // MTRBUD2: keys follow the config's project order (position taken before the mergeHandoff filter, as deployCards does), then eventSeq
   const all = Object.entries(config.projects).map(([project, policy], k) => ({ project, policy, k })).filter(({ policy }) => !policy.mergeHandoff)

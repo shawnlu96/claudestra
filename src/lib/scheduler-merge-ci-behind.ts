@@ -11,6 +11,7 @@ import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
 import type { EventKind } from "./ledger-stages.js";
+import { rethrowCiLogStop, judgeCiLog } from "./scheduler-merge-ci-log-read.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 import { parseFailedLog } from "./scheduler-merge-ci-rerun-log.js";
@@ -93,7 +94,13 @@ async function planBehind(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[], 
   if (new Set(runs.map((m) => `${m![1]}/${m![2]}`)).size !== 1) return "失败检查分属多个 run";
   const [repo, runId] = [runs[0]![1]!, runs[0]![2]!];
   if (repo.toLowerCase() !== pull[1]!.toLowerCase()) return "run 与 PR 不在同一仓库";
-  const failures = parseFailedLog(await log.failedLog(repo, runId));
+  return judgeCiLog(run, repo, runId, async () => (await log.runAttempt(repo, runId)).attempt, log, "cif2", (text) => judgeBehindLog(text, run, pr, checks, log, gh, repo, runId, pull[2]!),
+    (p) => typeof p === "string" ? { wouldKind: "bounce", why: p } : { wouldKind: "behind", why: "main 已改过失败测试", files: Object.keys(p.files) });
+}
+
+async function judgeBehindLog(text: string, run: MergeRun, pr: PrSnapshot, checks: FailedCheck[], log: CiRerunGh, gh: CiBehindGh,
+  repo: string, runId: string, pull: string): Promise<BehindPlan | string> {
+  const failures = parseFailedLog(text);
   if (!failures) return "失败日志解析不出 bun test 的失败用例";
   const files = [...new Set(failures.map((f) => f.file))];
   if (files.length > MAX_FILES) return `失败的测试文件超过 ${MAX_FILES} 个`;
@@ -109,7 +116,7 @@ async function planBehind(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[], 
     if (!hits.length) return `main 在 merge-base 之后没改过 ${file}`;
     byFile[file] = hits.map(short);
   }
-  return { repo, pull: pull[2]!, link: `https://github.com/${repo}/actions/runs/${runId}`, prHead: pr.head, mainHead: since.mainHead,
+  return { repo, pull, link: `https://github.com/${repo}/actions/runs/${runId}`, prHead: pr.head, mainHead: since.mainHead,
     checks: checks.map((c) => c.name), files: byFile };
 }
 
@@ -140,6 +147,7 @@ async function behindOrBounce(run: MergeRun, pr: PrSnapshot, external: MergeExte
   try {
     plan = await planBehind(run, pr, checks, ghs.log, ghs.gh);
   } catch (e) {
+    rethrowCiLogStop(e);
     plan = `读 CI / main 失败：${oneLine((e as Error).message)}`;
   }
   if (typeof plan === "string") return bounce(plan);

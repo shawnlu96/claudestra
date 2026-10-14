@@ -1,5 +1,6 @@
 import { staleReplacementObservation } from "./scheduler-review-stale.js";
-import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
+import { lendAuthorBudget, type LendAuthorBudget, type LendAuthorPreparation } from "./lend-author-retire-tick.js";
+import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence, resumeStallFallback } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
  * `ledger scheduler-*` CLI under the scheduler identity, which re-checks inside its own transaction. Per card at most
@@ -30,6 +31,7 @@ import { paceCards, rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeFirst } from "./scheduler-merge-order.js";
 import { peerPrHold } from "./peer-pr-hold.js";
 import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
+import { mergePipeHold } from "./scheduler-merge-pipe.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
@@ -51,6 +53,7 @@ export interface AutoTickDeps {
   /** The ledger CLI under the scheduler identity. */
   manager: Manager;
   /** The adapter for this bound session's route, or why it cannot be driven automatically. */
+  prepareAuthor?(task: LedgerTask, budget?: LendAuthorBudget): Promise<LendAuthorPreparation>;
   worker(ref: SessionRef): WorkerSession | { manual: string };
   /** Find or create this card's session for the role. It never binds: binding is a ledger write through the CLI. */
   ensure(task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult>;
@@ -408,6 +411,7 @@ class Card {
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     const lapse = open?.action === "merge" ? null : await this.refusalLapse();
     if (lapse) return this.escalate(lapse, open?.id);
+    const stall = await resumeStallFallback(this, open, sendNotice); if (stall) return stall; // CONVREPO1：本机制记的 unknown 只续退回人工
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
     if (open?.action === "merge") {
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
@@ -432,7 +436,7 @@ class Card {
     if (plan.action === "merge" && this.handoff) return driveHandoff(this); // 交仓库方合并：不计划合并意图、不占合并槽（MHO1）
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
       : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
-      : plan.action === "merge" ? mergeSlotHold(this.task) : null;
+      : plan.action === "merge" ? mergeSlotHold(this.task) ?? mergePipeHold(this.db, this.task) : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);
     if ("error" in intent) return this.refused(intent.code, intent.error);
@@ -445,7 +449,7 @@ const reportsBudgetEnd = (pace?: TickPace): pace is TickPace & { budgetEnded(): 
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
   pace?: TickPace, afterMerges?: () => Promise<void>): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
-  const poolIdleObservation = { candidates: 0, idle: 0, mismatches: 0 };
+  const poolIdleObservation = { candidates: 0, idle: 0, mismatches: 0 }, authorBudget = lendAuthorBudget();
   deps = { ...deps, poolIdleObservation };
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
@@ -500,7 +504,9 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     }
     try {
       const pool = await poolOf(policy.remote);
-      out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
+      const prepared = await deps.prepareAuthor?.(task, authorBudget) ?? task;
+      if ("deferred" in prepared) { out.cards.push({ taskId, step: "held", detail: prepared.reason }); continue; }
+      out.cards.push(await new Card(db, prepared, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });

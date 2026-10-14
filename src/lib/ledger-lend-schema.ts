@@ -26,13 +26,22 @@ const ordersTable = (name: string): string => `CREATE TABLE IF NOT EXISTS ${name
     resultSha TEXT, receipt TEXT, eventSeq INTEGER, reason TEXT, supersedes TEXT,
     createdBy TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, branch TEXT, base TEXT, seenAt INTEGER)`;
 
+/** 按 taskId 等值查（调度快照每张卡的 localWriteOwner）：部分唯一索引 lend_orders_live 只覆盖在途状态，用不上 */
+export const LEND_ORDERS_TASK_INDEX = "CREATE INDEX IF NOT EXISTS lend_orders_task ON lend_orders(taskId)";
+
 const ORDER_INDEXES: readonly string[] = [
   "CREATE INDEX IF NOT EXISTS lend_orders_peer_status ON lend_orders(peer, status)",
   `CREATE UNIQUE INDEX IF NOT EXISTS lend_orders_live ON lend_orders(taskId) WHERE status IN (${inList(LEND_LIVE)})`,
+  LEND_ORDERS_TASK_INDEX,
 ];
 
+/** 一条语句一次 prepare().run()；LEND_SCHEMA 和 v25 那步共用 */
+const runEach = (db: Database, sqls: readonly string[]): void => {
+  for (const sql of sqls) db.prepare(sql).run();
+};
+
 export function LEND_SCHEMA(db: Database): void {
-  for (const sql of [ordersTable("lend_orders"), ...ORDER_INDEXES]) db.prepare(sql).run();
+  runEach(db, [ordersTable("lend_orders"), ...ORDER_INDEXES]);
 }
 
 /** T93 建的表（step 只收 review、没有 branch / base）原样搬进新表：SQLite 改不了 CHECK，只能重建 */
@@ -88,4 +97,9 @@ export const LEND_COLUMNS: Record<string, readonly string[]> = {
   lend_write_leases: ["taskId", "peer", "fp", "branch", "repo", "prevAssignee", "prevAssigneeKind", "state", "reason"],
   lend_peers: ["peer", "fp", "proto", "boot", "seq", "grant", "slots", "paused", "helloAt"],
 };
-export const LEND_INDEXES: Record<string, readonly string[]> = { lend_orders: ["lend_orders_peer_status", "lend_orders_live"] };
+/** v25（dispatch-recovery-SNAPSQL1）：已有的库补 lend_orders_task；新库在 LEND_SCHEMA 那步就建了，这里可重跑 */
+export function LEND_ORDERS_TASK_SCHEMA(db: Database): void {
+  runEach(db, [LEND_ORDERS_TASK_INDEX]);
+}
+
+export const LEND_INDEXES: Record<string, readonly string[]> = { lend_orders: ["lend_orders_peer_status", "lend_orders_live", "lend_orders_task"] };

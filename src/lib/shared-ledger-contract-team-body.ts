@@ -9,6 +9,7 @@ import {
   array, boolean, choice, digest, id, integer, invalid, literal, nonce, nullable, object, optional, positive, record, text, unique, type Schema,
 } from "./shared-ledger-contract-schema.js";
 import { EVENT_KINDS, STAGES, type EventKind, type Stage } from "./ledger-stages.js";
+import { teamBodyIdentity, teamBodySpecMeta, type TeamBodyIdentity, type TeamBodySpecMeta } from "./team-body-roles-contract.js";
 
 /** Relative to `/v1/teams/{teamId}/`. Uploads, claims and returns are signed with the home instance's service credentials. */
 export const TEAM_BODY_PATHS = {
@@ -60,15 +61,16 @@ export interface TeamBodyError { schemaVersion: 1; code: TeamBodyErrorCode; stat
  */
 export interface TeamBodyRecord {
   featureId: string; taskId: string; kind: TeamBodyKind; sourceKey: string; text: string;
-  scrubVersion: number; maskedSegments: number; digest: string; meta?: TeamBodyEventMeta;
+  scrubVersion: number; maskedSegments: number; digest: string; meta?: TeamBodyEventMeta | TeamBodySpecMeta;
 }
 /**
  * The home event behind an event / review record (team-project-TEAMVIS10 / TEAMVIS9), so members can replay its stages:
  * the ledger event kind, its time (Unix ms) and, for a stage event only, the stage it moved to. Enums and numbers only,
  * so it is not scrubbed and not in the digest. A center that predates it refuses the batch (400); the home then sends
- * without it (team-body-sync-meta.ts).
+ * without it (team-body-sync-meta.ts). A review's meta may name its reviewer and a spec's meta is `{pm}` (TEAMVIS12,
+ * team-body-roles-contract.ts); an event carries neither.
  */
-export interface TeamBodyEventMeta { kind: EventKind; ts: number; stageTo?: Stage }
+export interface TeamBodyEventMeta { kind: EventKind; ts: number; stageTo?: Stage; reviewer?: TeamBodyIdentity; pm?: never }
 export interface TeamBodyUpload { schemaVersion: 1; projectId: string; sourceInstanceId: string; batchId: string; records: TeamBodyRecord[] }
 /** One result per uploaded record, same order. unchanged = same key and digest already stored (idempotent retry). */
 interface TeamBodyUploadResult {
@@ -109,7 +111,7 @@ const seqKey: Schema<string> = (v) => typeof v === "string" && /^(?:0|[1-9][0-9]
 const cursor = text(512, 1);
 const limit: Schema<number> = (v) => positive(v) <= TEAM_BODY_PAGE_LIMIT_MAX ? v as number : invalid();
 const errorCode = choice(TEAM_BODY_ERROR_CODES);
-const metaShape = object({ kind: choice(EVENT_KINDS), ts: positive, stageTo: optional(choice(STAGES)) });
+const metaShape = object({ kind: choice(EVENT_KINDS), ts: positive, stageTo: optional(choice(STAGES)), reviewer: optional(teamBodyIdentity) });
 const eventMeta: Schema<TeamBodyEventMeta> = (value) => {
   const m = metaShape(value);
   if (m.stageTo !== undefined && m.kind !== "stage") invalid();
@@ -117,11 +119,15 @@ const eventMeta: Schema<TeamBodyEventMeta> = (value) => {
 };
 const recordShape = object({
   featureId: id, taskId: id, kind: choice(TEAM_BODY_KINDS), sourceKey: id, text: bodyText,
-  scrubVersion: positive, maskedSegments: integer, digest, meta: optional(eventMeta),
+  scrubVersion: positive, maskedSegments: integer, digest, meta: optional(record),
 });
+const metaOf = { event: eventMeta, review: eventMeta, spec: teamBodySpecMeta };
 const bodyRecord: Schema<TeamBodyRecord> = (value) => {
-  const r = recordShape(value);
-  if (r.meta !== undefined && r.kind !== "event" && r.kind !== "review") invalid();
+  const { meta, ...plain } = recordShape(value), r: TeamBodyRecord = plain;
+  if (meta !== undefined) {
+    if (r.kind === "session-page" || (r.kind === "event" && Object.hasOwn(meta, "reviewer"))) invalid();
+    r.meta = metaOf[r.kind as keyof typeof metaOf](meta);
+  }
   if (r.kind !== "session-page") seqKey(r.sourceKey);
   if (teamBodyDigest(r.text) !== r.digest) invalid();
   return r;

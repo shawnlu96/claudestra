@@ -1,3 +1,4 @@
+import { prepareLendAuthor, type LendAuthorDeps } from "./lend-author-retire-tick.js";
 import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author.js";
 import { cardRoleCreate } from "./card-role-definitions.js";
@@ -21,6 +22,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
+import { wakeGaveUp } from "./scheduler-wake-stopped.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { existingAuthorIdentity, freshExistingAuthor } from "./scheduler-existing-author.js";
 import { noticeIdentityConflict } from "./scheduler-identity-notice.js";
@@ -66,7 +68,7 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * git subprocess runs through `git` (checked before the spawn and after the exit), and a bridge frame asks `alive` in the
  * same synchronous block as the send.
  */
-interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive; rebuild?: AuthorRebuildDeps; notify: (task: LedgerTask, text: string) => Promise<void> }
+interface Env extends LocalAuthorEnv, ReviewHeadEnv { lendAuthor?: LendAuthorDeps; alive: StillActive; rebuild?: AuthorRebuildDeps; notify: (task: LedgerTask, text: string) => Promise<void> }
 const checkoutOf = (env: Env, taskId: string): string => reviewCheckoutDir(env.worktreeRoot, taskId);
 
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
@@ -127,7 +129,7 @@ async function identityConflict(env: Env, task: LedgerTask, agent: string, reaso
 async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult> {
   const { registryRow } = env;
   if (role === "author") {
-    if (!task.agent) return retryCleanCreate(env, task, role, (create) => ensureLocalAuthor({ ...env, create }, task)); // 建失败且现场已清：退避重试
+    if (!task.agent) return retryCleanCreate(env, task, role, (create) => ensureLocalAuthor({ ...env, create }, task, env.lendAuthor?.start)); // 建失败且现场已清：退避重试
     const row = registryRow(task.agent), gone = `执行者 ${task.agent} 不在本机 registry`;
     if (row) return refOf(task, role, row, family); // AREB1: an author LIFE1 formally retired is rebuilt under authorRebuild, else the old manual
     return retryCleanCreate(env, task, role, (create) => rebuildRetiredAuthor({ ...env, create }, task, family, gone, { readConfig: env.readConfig, ...env.rebuild }));
@@ -192,7 +194,7 @@ function worker(env: Env, ref: SessionRef): WorkerSession | { manual: string } {
   return ref.role === "reviewer" && !("manual" in w) ? sendsFromOwnCheckout(env, ref, w) : w;
 }
 
-function channelWorker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession | { manual: string } {
+function channelWorker({ db, registryRow, alive, create }: Env, ref: SessionRef): WorkerSession | { manual: string } {
   const row = registryRow(ref.agent);
   if (!row) return { manual: `${ref.agent} 不在本机 registry` };
   if (row.sessionId !== ref.sessionId) return { manual: `${ref.agent} 的当前 session 已不是台账绑定的那个` };
@@ -207,7 +209,7 @@ function channelWorker({ db, registryRow, alive }: Env, ref: SessionRef): Worker
     ledger: { result: (r, probe) => ledgerResult(db, r, probe) },
   };
   if (route.route === "acp") return createAcpWorker({ ...deps, port: acpPort(db, registryRow, alive) });
-  const port = messagePort(db, registryRow, undefined, alive);
+  const port = messagePort(db, registryRow, undefined, alive, { wake: { db, manager: create } });
   if (route.route === "tmux") return createTmuxFallbackWorker({ ...deps, port, reason: route.fallbackReason ?? "tmux 兼容回退" });
   return createChannelWorker({ ...deps, port });
 }
@@ -226,6 +228,7 @@ export interface AutoDepsOpts {
   netTimeoutMs?: number;
   readConfig?: () => SchedulerConfig;
   /** Tests only: the author rebuild's policy / swap reading (scheduler-author-rebuild.ts). */ rebuild?: AuthorRebuildDeps;
+  lendAuthor?: LendAuthorDeps;
   /** Tests only: `manager create` in place of the real child process (still behind localCreateGuard). */ create?: Manager;
   /** Tests only: the PM notice channel in place of the bridge (notifyProjectPm). */ notifyPm?: (task: LedgerTask, text: string) => Promise<void>;
 }
@@ -240,10 +243,10 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   const notify = opts.notifyPm ?? ((task: LedgerTask, text: string) => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive }));
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
     net: (args) => whileOwned(active, () => netGit(args)), readConfig,
-    create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild, notify };
+    create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild, lendAuthor: opts.lendAuthor, notify };
   return withSchedulerV2Intents({
-    manager: schedulerManagerWith(lease),
-    worker: (ref) => worker(env, ref),
+    manager: schedulerManagerWith(lease), prepareAuthor: (task, budget) => prepareLendAuthor(env, task, env.lendAuthor, budget),
+    worker: (ref) => wakeGaveUp(env, ref, registryRow(ref.agent)) ?? worker(env, ref),
     ensure: async (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
       : (role === "author" ? await existingAuthor(env, task, family) : null)
       ?? localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family),

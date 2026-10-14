@@ -11,7 +11,7 @@ import type { FatalCause } from "../src/lib/acp/codex-adapter/turns.ts";
 import { FailureDedup, type AcpFailure } from "../src/lib/acp/failures.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
 import type { SteerResult } from "../src/lib/acp/turn.ts";
-import { testChildEnv } from "./test-env.ts";
+import { ciIoTraceChild, testChildEnv } from "./test-env.ts";
 
 /** 假进程树：aliveFor = 还要几次 kill 才死（Infinity = 杀不死） */
 function fakeTree(aliveFor = 0, left: Survivor[] = []) {
@@ -170,8 +170,9 @@ await Bun.sleep(600000);
 
   async function start(extra: Record<string, string> = {}) {
     const logs: string[] = [];
-    const env = testChildEnv({ CODEX_PATH: codex, INITIAL_AGENT_MODE: "agent-full-access", CODEX_CONFIG: "{}", ...extra });
-    const proc = spawnAdapter([process.execPath, CODEX_ACP_ADAPTER_MAIN], env, dir, (m) => void logs.push(m), "cx");
+    const trace = ciIoTraceChild();
+    const env = testChildEnv({ CODEX_PATH: codex, INITIAL_AGENT_MODE: "agent-full-access", CODEX_CONFIG: "{}", ...trace.env, ...extra });
+    const proc = spawnAdapter([process.execPath, ...trace.argv, CODEX_ACP_ADAPTER_MAIN], env, dir, (m) => void logs.push(m), "cx");
     const session = new AcpSession(proc.wire, { onUpdate: () => {}, onPermission: async () => null, log: (m) => void logs.push(m) });
     await session.initialize();
     await session.create(dir);

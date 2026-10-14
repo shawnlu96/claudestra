@@ -19,14 +19,15 @@ import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import {
-  CLAIM_OP, eventAt, intentOf, listRequests, manualIntentId, MANUAL_MERGE_NODE, manualQueueMode, REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
+  CLAIM_OP, configHandoff, eventAt, handoffWhy, intentOf, listRequests, manualIntentId, MANUAL_MERGE_NODE, manualQueueMode, REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
   type ManualRequest,
 } from "./manual-merge-queue-facts.js";
+import { ridingRequests } from "./merge-queue-candidates-member.js";
 import { recordObserved } from "./recovery-policy.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { beginMergeRun, getMergeRun } from "./scheduler-merge.js";
 import { HOLD_LIMIT_MS, trainHolds } from "./scheduler-merge-train-hold.js";
-import { lentSlotPending } from "./scheduler-merge-train-hold-slot.js";
+import { defaultTrainStore, lentSlotPending } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 import { mergeCandidates } from "./scheduler-merge-train-tick.js";
 
@@ -54,7 +55,12 @@ function requestStatus(db: Database, req: ManualRequest, now: number): RequestSt
   const intent = intentOf(db, req);
   if (intent) {
     const run = getMergeRun(db, intent.id), phase = run?.phase ?? null;
-    if (intent.status === "pending" || intent.status === "submitted") return { state: "running", why: run?.reason ?? null, phase };
+    if (intent.status === "pending" || intent.status === "submitted") {
+      // MQ1P2: the project switched to mergeHandoff after the claim. mergeTick skips the project, so the run sits where it was,
+      // slot included, until the project switches back (driven on, re-checked in full) — said here, never a bare "合并中".
+      const stalled = configHandoff(req.project) ? `${handoffWhy(req.project)}；已认领的运行停在 ${phase ?? "未开始"}，仍占着合并槽，切回非交接后才继续` : null;
+      return { state: "running", why: stalled ?? run?.reason ?? null, phase };
+    }
     if (intent.status === "done") return { state: "merged", why: intent.receipt, phase };
     if (intent.status === "unknown") return { state: "unknown", why: intent.receipt ?? run?.reason ?? null, phase };
     return { state: "ended", why: run?.reason ?? intent.receipt, phase };
@@ -99,12 +105,16 @@ export function manualTurn(db: Database, project: string, train: TrainSignal, no
     const req = requestAt(db, Number(live.id.slice(4)));
     if (req) return { kind: "active", req, intentId: live.id };
   }
-  const head = listRequests(db, project).find((r) => requestStatus(db, r, now).state === "queued");
+  const queued = listRequests(db, project).filter((r) => requestStatus(db, r, now).state === "queued");
+  const holder = db.query("SELECT taskId FROM scheduler_resources WHERE project = ? AND resource = ?").get(project, `merge:${project}`) as
+    { taskId: string } | null;
+  // CAND1: a request whose member the settling train is ready to merge takes its turn inside that train (no train wait, no owed turn)
+  const riding = queued.length ? ridingRequests(db, project, defaultTrainStore) : null, member = riding?.size ? queued.find((r) => riding.has(r.seq)) : undefined;
+  if (member) return { kind: "due", req: member, wait: holder ? `合并槽在 ${holder.taskId} 手里，等它结清` : null };
+  const head = queued[0];
   if (!head) return { kind: "none" };
   const owed = owedToAuto(db, project, now);
   if (owed) return { kind: "owed", req: head, why: owed };
-  const holder = db.query("SELECT taskId FROM scheduler_resources WHERE project = ? AND resource = ?").get(project, `merge:${project}`) as
-    { taskId: string } | null;
   const wait = train === "corrupt" ? "合并列车状态文件读不了，先不占槽"
     : train === "holds" ? "等当前列车合并 / 部署完（不打断活车）"
     : holder ? `合并槽在 ${holder.taskId} 手里，等它结清`

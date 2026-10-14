@@ -26,12 +26,14 @@ export interface MatrixRow {
 
 /** 「…误调」行的 present = 发出了那条本机请求（看请求记录，不看界面） */
 export const MATRIX: readonly MatrixRow[] = [
-  { section: "在场 agent", ref: "M1", view: "home", cls: "F", local: "present", team: "unknown" },
+  // UXNUM1（PM 10-13 放行）：下面五行团队期望 unknown → absent。owner 10-13 19:57 选 D『没数据的指标整项藏起来』，absent 与暂无同样诚实
+  { section: "在场 agent", ref: "M1", view: "home", cls: "F", local: "present", team: "absent" },
+  // present = 顶栏「在干活」「在等」两格都是数字（UXNUM1 去掉了「进行中」格，由这两格代替；口径 count-words.ts）
   { section: "进行中", ref: "M2", view: "home", cls: "A", local: "present", team: "present" },
-  { section: "今日完成", ref: "M3", view: "home", cls: "F", local: "present", team: "unknown" },
-  { section: "审查轮次", ref: "M4", view: "home", cls: "D", local: "present", team: "unknown" },
-  { section: "P0/P1 修掉", ref: "M4", view: "home", cls: "D", local: "present", team: "unknown" },
-  { section: "平均等复核", ref: "M5", view: "home", cls: "D", local: "present", team: "unknown" },
+  { section: "今日完成", ref: "M3", view: "home", cls: "F", local: "present", team: "absent" },
+  { section: "审查轮次", ref: "M4", view: "home", cls: "D", local: "present", team: "absent" },
+  { section: "P0/P1 修掉", ref: "M4", view: "home", cls: "D", local: "present", team: "absent" },
+  { section: "平均等复核", ref: "M5", view: "home", cls: "D", local: "present", team: "absent" },
   { section: "待你处理", ref: "W1", view: "home", cls: "F", local: "present", team: "unknown" },
   { section: "上次以来", ref: "W2", view: "home", cls: "C", local: "present", team: "absent" },
   { section: "上次以来·本机接口误调", ref: "W2", view: "home", cls: "F", local: "present", team: "absent" },
@@ -79,8 +81,9 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "台账变更触发重拉", ref: "E1", view: "home", cls: "A", local: "present", team: "present", limit: "夹具服务器不推实时事件，团队 5s 轮询没有在测试里计时" },
   { section: "此刻动作", ref: "E2", view: "home", cls: "E", local: "present", team: "absent", limit: "夹具里没有 tool_* / agent_status 事件流" },
   { section: "刚推进高亮", ref: "E3", view: "home", cls: "A", local: "present", team: "present", limit: "要两次快照之间推进阶段，夹具是静态的" },
-  { section: "周额度 / 协作消息", ref: "M6", view: "home", cls: "A", local: "present", team: "present", limit: "两边都是「暂无数据来源」占位，不是数据项" },
-  // present = 产品卡「N 进行中」等于本机产品板真值（productNodeCounts 口径）
+  // UXNUM1：看者本机 bridge 的 /lend/quota-lines（夹具给一族百分比），本机版和团队版同一份；「协作消息」没有数据来源，已去掉
+  { section: "周额度", ref: "M6", view: "home", cls: "A", local: "present", team: "present" },
+  // present = 产品卡「在干活 a · 在等 b」等于看板口径的真值（count-words.ts，按看板行的 feature 归属数；UXNUM1 起不再显示 productNodeCounts 的进行中）
   { section: "产品卡·进行中计数", ref: "M7", view: "home", cls: "B", local: "present", team: "present" },
   { section: "产品卡·预计完成", ref: "M7", view: "home", cls: "D", local: "present", team: "absent" },
   { section: "已完成分页", ref: "M8", view: "home", cls: "A", local: "present", team: "present", limit: "夹具总览没有 doneCursor" },

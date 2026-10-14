@@ -428,9 +428,9 @@ describe("[验收 2] 一律退回原人工规则", () => {
   test("新增 / 删除 / 移组条目、同数值改注释、混入代码", async () => {
     const other = /除既有条目的计数外还有改动/;
     await rejected(commit((file) => { file(PROBE, (s) => s + EFFECT); file(INV, (s) => s.replace(ENTRY, `${ENTRY.replace("1", "2")}, "zz-new.ts": "fs=1"`)); }), other);
-    await rejected(commit((file) => file(INV, (s) => s.replace(`${ENTRY}, `, ""))), other);
+    await rejected(commit((file) => file(INV, (s) => s.replace(`    ${ENTRY},\n`, ""))), other);
     const stale = '"scheduler-review-stale.ts": "sql=1 stmt=1",';
-    await rejected(commit((file) => file(INV, (s) => s.replace(`${ENTRY}, `, "").replace(stale, `${stale} ${ENTRY},`))), other);
+    await rejected(commit((file) => file(INV, (s) => s.replace(`    ${ENTRY},\n`, "").replace(stale, `${stale}\n    ${ENTRY},`))), other);
     await rejected(commit((file) => { file(PROBE, (s) => s + EFFECT); file(INV, (s) => s.replace(ENTRY, ENTRY.replace("1", "2")).replace("card work run", "card work ran")); }), other);
     await rejected(commit((file) => { file(PROBE, (s) => s + EFFECT); file(INV, (s) => s.replace(ENTRY, ENTRY.replace("1", "2")) + "export const extra = 1;\n"); }), other);
   }, 240_000);

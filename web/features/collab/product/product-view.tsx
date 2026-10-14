@@ -11,6 +11,9 @@ import v from '../v4/v4.module.css';
 import d from '../dag/dag.module.css';
 import { productEta, productLayout } from './product-layout';
 import s from './product.module.css';
+import { featureWords } from '../count-words';
+import { countText } from '../count-words-i18n';
+import { useCountContext } from '../use-count-source';
 
 interface Props { board: ProductBoard; narrow: boolean; now: number; onFeature: (id: string) => void; tr: Tr; featureMeta?: (f: ProductFeature) => React.ReactNode; activeUnknown?: boolean }
 
@@ -18,6 +21,7 @@ function FeatureBody({ feature: f, now, tr, featureMeta, activeUnknown }: Pick<P
   const eta = productEta(f.eta?.at, now, tr('今天'));
   // 全局（整个源没有进行中数）或本 feature 标了 activeUnknown：都不出「N 进行中」，占位 0 不能当真 0
   const hideActive = activeUnknown || f.counts.activeUnknown === true;
+  const words = useCountContext();
   return <>
     <strong className={s.title} style={featureMeta ? { flexShrink: 0 } : undefined}>{f.title || f.id}</strong>
     {f.hasDag ? <>
@@ -25,9 +29,25 @@ function FeatureBody({ feature: f, now, tr, featureMeta, activeUnknown }: Pick<P
       <span className={s.bar} role="progressbar" aria-label={f.title} aria-valuemin={0} aria-valuemax={f.counts.total || 1}
         aria-valuenow={f.counts.completed}><span style={{ width: `${Math.min(100, f.counts.total ? f.counts.completed / f.counts.total * 100 : 0)}%` }} /></span>
     </> : <span className={s.numbers}>{f.counts.total} {tr('卡')}</span>}
-    <span className={s.stats}>{!hideActive && <span><Icon name="zap" size={12} />{f.counts.active} {tr('进行中')}</span>}
-      <span>{f.counts.blocked ?? f.cards?.filter(c => c.stage === 'blocked').length ?? 0} {tr('受阻')}</span>{eta && <span className={s.eta}>{tr('预计')} {eta}</span>}</span>
+    <span className={s.stats}>{words && words.status !== 'none' ? <FeatureWords id={f.id} tr={tr} /> : <>
+      {!hideActive && <span><Icon name="zap" size={12} />{f.counts.active} {tr('进行中')}</span>}
+      <span>{f.counts.blocked ?? f.cards?.filter(c => c.stage === 'blocked').length ?? 0} {tr('受阻')}</span></>}
+      {eta && <span className={s.eta}>{tr('预计')} {eta}</span>}</span>
     {featureMeta?.(f)}
+  </>;
+}
+
+/**
+ * 产品卡的两个数（UXNUM1）：「在干活 a · 在等 b」，按看板行的 feature 归属数（count-words.ts，和顶栏同一份）；没载完是骨架。
+ * 没有 CountContext 的老调用方（单测直接挂）照旧显示 feature 自带的「进行中 / 受阻」
+ */
+function FeatureWords({ id, tr }: { id: string; tr: Tr }) {
+  const counts = useCountContext();
+  const w = counts?.status === 'ready' ? featureWords(counts.snap, id) : null;
+  const n = (x: number | undefined) => x === undefined ? <span className={v.skel} aria-hidden /> : x;
+  return <>
+    <span data-product-words="working"><Icon name="zap" size={12} />{countText(tr, '在干活')} {n(w?.working)}</span>
+    <span data-product-words="waiting"><Icon name="clock" size={12} />{countText(tr, '在等')} {n(w?.waiting)}</span>
   </>;
 }
 
