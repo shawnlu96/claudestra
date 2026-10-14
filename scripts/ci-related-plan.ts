@@ -9,6 +9,9 @@
 // 缺省 / 空 = observe（实际跑什么照旧按上面的规则，另算一份「读取图会选 N」记进 plan.json 与日志）；on = 用读取图的选集；off = 不算。
 // 图取自最近一次成功的 main push 运行（sha 是 PR head 的祖先）的 ci-io-map 工件；取不到、读不懂、超过 7 天都退回上面的规则并写明原因。
 // tests/ci-impact-io-map.test.ts。
+// 责任选集（merge-arch-CISEL1，src/lib/ci-selected-verdict.ts）：plan.json 另冻结 responsibility = 这张 PR 本该负责的测试，与执行范围
+// （scope / tests / shards）分开算、互不影响。普通 PR（不论整次重跑、标签、light、CI_RELATED_CHECKS 哪一档）与属于某张 PR 的补验用同一选择器
+// （CI_IO_MAP=on 时用读取图）在同一检出上按 on 口径算；任何兜底全量、push、列车、其它事件都记 "all"。tests/ci-related-plan-responsibility.test.ts。
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -17,6 +20,7 @@ import { buildGraph, oxcScanner, type OxcParseSync, tsconfigAliases } from "../s
 import { ciIoMapMode, type IoMapResult, resolveIoMap, unionChanges } from "../src/lib/ci-impact-io-map.js";
 import { type ImpactSelection, ciRelatedChecksMode, parseNameStatus, type SelectInput, selectImpactedTests } from "../src/lib/ci-impact-select.js";
 import { selectLightTests, type LightSelection } from "../src/lib/ci-light-select.js";
+import { type CiResponsibility, responsibility } from "../src/lib/ci-selected-verdict.js";
 import { fullRequestId } from "../src/lib/scheduler-ci-full-request.js";
 import { loadDurations, parseSlowList, planShards, testFiles, withoutSlow } from "./ci-test-shard.ts";
 
@@ -60,6 +64,8 @@ export interface CiPlan {
    * merge commit, so a later reader (src/lib/ci-io-map-fuse.ts) binds a plan to an exact PR head through this field, never through `sha`.
    */
   prHead?: string;
+  /** merge-arch-CISEL1: the tests this PR is answerable for, frozen beside (never instead of) the execution fields above */
+  responsibility?: CiResponsibility;
 }
 
 export const planDigest = (p: CiPlan): string => `sha256:${createHash("sha256").update(JSON.stringify(p)).digest("hex")}`;
@@ -84,6 +90,8 @@ export interface PlanFacts {
   runAttempt?: number;
   labels?: readonly string[];
   lightSelect?: () => LightSelection;
+  /** workflow_dispatch: the PR the full re-check belongs to (set only after its binding checked out); absent = no PR */
+  dispatchPr?: number;
 }
 /** The selection over the read map; sel null = no usable map (reasons say why). */
 export interface IoMapSelect { sel: ImpactSelection | null; sha: string | null; generatedAt: string | null; reasons: string[] }
@@ -127,7 +135,23 @@ export function buildPlan(f: PlanFacts): CiPlan {
       : full(f, [lightError ?? "light 图不可用，实际全量"]) : decide(f);
   if (light) plan.light = light;
   if (f.queueMode !== undefined) plan.queueMode = f.queueMode;
-  return f.event === "pull_request" && f.prHead ? { ...plan, prHead: f.prHead } : plan;
+  return { ...(f.event === "pull_request" && f.prHead ? { ...plan, prHead: f.prHead } : plan), responsibility: responsibilityOf(f) };
+}
+
+/**
+ * What this PR is answerable for, whatever the run executes: the selector under on (and the read map when CI_IO_MAP=on) on the
+ * same checkout. "all" for main, trains, other events, a dispatch with no PR, and every full fallback of the selector.
+ */
+export function responsibilityOf(f: PlanFacts): CiResponsibility {
+  if (f.event === "push") return responsibility("all", ["push（main）始终全量"]);
+  if (f.event === "workflow_dispatch" && !f.dispatchPr) return responsibility("all", ["没有对应 PR 的派发始终全量"]);
+  if (f.event !== "pull_request" && f.event !== "workflow_dispatch") return responsibility("all", [`事件 ${f.event} 全量`]);
+  if (f.event === "pull_request" && f.headRef.startsWith("train/")) return responsibility("all", ["列车 PR 始终全量"]);
+  let sel: ImpactSelection;
+  try { sel = ioMapPart(f, "on", f.select("on")).sel; }
+  catch (e) { return responsibility("all", [`选择器失败：${(e as Error).message}`]); }
+  if (sel.run !== "selected" || !sel.proposed) return responsibility("all", sel.fullReasons.length ? sel.fullReasons : ["选择器没有给出选集"]);
+  return responsibility(sel.tests);
 }
 
 /** The one decision: full unless an ordinary PR under on gets a non-empty bounded selection. */
@@ -214,7 +238,7 @@ function prSelect(root: string, tmp: string, headPaths: string[], env: Record<st
     try { return parseNameStatus(git("diff", "-z", "--name-status", "-M", from, "HEAD")); }
     catch (e) { return { changes: [], bad: [`git diff 失败：${(e as Error).message}`] }; } // read as a full fallback reason by the selector
   };
-  let sides: ReturnType<SelectInput["load"]> | undefined;
+  let sides: ReturnType<SelectInput["load"]> | undefined, fetched: IoMapResult | undefined;
   const load = () => (sides ??= (() => {
     if (git("rev-list", "--parents", "-n", "1", "HEAD").trim().split(" ").length !== 3) throw new Error("PR 检出不是合并提交");
     const baseDir = join(tmp, "ci-related-base");
@@ -236,7 +260,7 @@ function prSelect(root: string, tmp: string, headPaths: string[], env: Record<st
     },
     select: (mode) => { const d = diff("HEAD^1"); return selectImpactedTests({ mode, changes: d.changes, badChanges: d.bad, headPaths, load }); },
     ioSelect: (mode) => {
-      const got = fetchIoMap(root, tmp, env);
+      const got = (fetched ??= fetchIoMap(root, tmp, env)); // the plan's own run and the responsibility both ask; one download
       if ("reason" in got) return { sel: null, sha: null, generatedAt: null, reasons: [got.reason] };
       const pr = diff("HEAD^1"), since = diff(got.map.sha);
       const sel = selectImpactedTests({ mode, changes: unionChanges(pr.changes, since.changes), badChanges: [...pr.bad, ...since.bad], headPaths, load,
@@ -259,6 +283,7 @@ function planMain(outDir: string | undefined): void {
   const parents = git("rev-list", "--parents", "-n", "1", "HEAD").trim().split(" ");
   const plan = buildPlan({ event, sha: parents[0]!, mode: env.CI_RELATED_CHECKS ?? "", headRef: env.GITHUB_HEAD_REF ?? "",
     ...(event === "pull_request" && parents.length === 3 ? { prHead: parents[2]! } : {}),
+    ...(event === "workflow_dispatch" && Number(env.REQ_PR) > 0 && parents.length === 3 ? { dispatchPr: Number(env.REQ_PR) } : {}),
     queueMode: env.CI_QUEUE_LIGHT ?? "", runAttempt: Number(env.GITHUB_RUN_ATTEMPT || "1"), labels: JSON.parse(env.CI_PR_LABELS || "[]"),
     allTests: testFiles(headPaths.join("\n")), slow: existsSync(slowFile) ? parseSlowList(readFileSync(slowFile, "utf8")) : [],
     ...prSelect(root, env.RUNNER_TEMP ?? outDir, headPaths, env), ioMode: env.CI_IO_MAP ?? "", seconds: loadDurations().seconds });
@@ -267,6 +292,8 @@ function planMain(outDir: string | undefined): void {
   writeFileSync(join(outDir, "plan.json"), JSON.stringify(plan, null, 1));
   const line = planLine(plan, digest);
   console.log(line);
+  const r = plan.responsibility!;
+  console.log(`责任选集 ${r.tests === "all" ? "all" : r.tests.length}${r.fallbackReasons.length ? `（${r.fallbackReasons.slice(0, 4).join("；")}）` : ""} · ${r.digest}`);
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `scope=${plan.scope}\ndigest=${digest}\nmode=${plan.mode || "observe"}\n`);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${line}\n`);
 }

@@ -7,6 +7,9 @@
 // 串行 / 人工队列的 full 补验（merge-arch-SELECT1 的 workflow_dispatch，在 main 上触发、检出请求绑定的测试合并提交）：只有请求的
 // request_id 就是它绑定内容的摘要、且证明作业检出的正是 inputs.merge 与 inputs.tree 时，才按「被测的是那个合并提交」写证明
 // （merge-arch-GATE1）；别的「检出 ≠ GITHUB_SHA」一律照旧拒绝。
+// 责任选集放行（merge-arch-CISEL1，src/lib/ci-selected-verdict.ts）：分片事实带上本片的放行回执；有片按回执放行时，回执汇成带版本号的一节
+// （输出目录的 selected.json），它的 digest 写进 manifest.policyVersion 的后缀，「实际覆盖全集」的证据照旧。成功结束却红过的片缺回执、
+// 回执对不上就没有证明。没有放行的证明与改前逐字一致。tests/ci-proof-selected.test.ts。
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15,6 +18,10 @@ import { type CiProofManifest, CI_PROOF_MANIFEST_VERSION, ciProofManifestDigest,
 import {
   CI_WEB_BUILD_BUDGET, CI_WEB_BUILD_CHECK, CI_WEB_BUILD_OUTCOMES, type CiWebBuildMode, type CiWebBuildOutcome, ciWebBuildMode, judgeCiWebBuild,
 } from "../src/lib/ci-web-build-policy.ts";
+import {
+  hasBunFailures, parseReceipt, receiptDigest, receiptProblems, type SelectedSection, SELECTED_SECTION_VERSION, sectionDigest, selectedPolicyVersion,
+  type ShardReceipt,
+} from "../src/lib/ci-selected-verdict.ts";
 import { fullRequestId } from "../src/lib/scheduler-ci-full-request.ts";
 import { parseSlowList, testFiles, verifyShards, withoutSlow } from "./ci-test-shard.ts";
 
@@ -46,7 +53,7 @@ const posInt = (v: unknown): v is number => Number.isSafeInteger(v) && (v as num
 
 /** 一个作业自己写下的事实：哪次 run、第几次 attempt、检出的 head、到这一步为止的作业状态。 */
 interface JobFacts { version: number; job: string; runId: number; attempt: number; head: string; status: string }
-export interface ShardFacts extends JobFacts { logDigest: string; core?: Record<(typeof CORE_STEPS)[number], string> }
+export interface ShardFacts extends JobFacts { logDigest: string; core?: Record<(typeof CORE_STEPS)[number], string>; selected?: unknown }
 export interface WebBuildFacts extends JobFacts { webBuild: { mode: CiWebBuildMode; outcome: CiWebBuildOutcome; seconds: number; depsCacheHit: boolean } }
 
 /** 每个作业都在 Actions 里读同一组环境变量；读不出合法值就抛，调用方记警告、不写事实（之后证明因缺事实而拒）。 */
@@ -56,9 +63,10 @@ function jobFacts(env: Obj, job: string, status: string): JobFacts {
   return { version: FACTS_VERSION, job, runId, attempt, head, status };
 }
 
-export function shardFacts(env: Obj, k: number, log: string): ShardFacts {
+/** receipt：本片的放行回执（scripts/ci-selected-verdict.ts 写的 receipt.json 解出来的值）；没有就不带这个字段，事实与改前一致。 */
+export function shardFacts(env: Obj, k: number, log: string, receipt?: unknown): ShardFacts {
   const core = k === 1 ? { core: { typecheck: String(env.CORE_TYPECHECK ?? ""), guard: String(env.CORE_GUARD ?? ""), build: String(env.CORE_BUILD ?? "") } } : {};
-  return { ...jobFacts(env, `test-shard-${k}`, String(env.JOB_STATUS ?? "")), logDigest: sha256(log), ...core };
+  return { ...jobFacts(env, `test-shard-${k}`, String(env.JOB_STATUS ?? "")), logDigest: sha256(log), ...core, ...(receipt === undefined ? {} : { selected: receipt }) };
 }
 
 /** 事实工件的公共字段是否属于这次 run 的这次 attempt；返回问题（空 = 是）。重跑前留下的工件 attempt 对不上，在这里被拒。 */
@@ -112,6 +120,8 @@ export interface ProofReport {
   /** 为什么没有 full 证明（空 = 有）。 */
   refusals: string[];
   webBuild: { mode: CiWebBuildMode; outcome: CiWebBuildOutcome | null; seconds: number | null; depsCacheHit: boolean | null; wouldReject: string | null };
+  /** 只在有片按回执放行时出现：一节的版本与 digest（内容在 selected.json，digest 同 manifest.policyVersion 的后缀） */
+  selected?: { version: string; digest: string };
 }
 
 const GROUP = /^::group::(.+):$/;
@@ -155,12 +165,32 @@ function readWebBuild(input: ProofInput): { facts: WebBuildFacts["webBuild"] | n
 /** workflow 文件路径：GITHUB_WORKFLOW_REF 是 `<owner>/<repo>/<路径>@<ref>`。 */
 const workflowPath = (run: ProofRun) => (run.workflowRef.startsWith(`${run.repo}/`) ? run.workflowRef.slice(run.repo.length + 1) : run.workflowRef).split("@")[0]!;
 
-function manifestOf(input: ProofInput, checks: string[]): CiProofManifest {
+/**
+ * 放行了的片 = 日志里 bun 红过（「N fail」，N > 0）的片，加上事实里带 applied 回执的片。每片都要有本次 run / attempt / 检出 / 这份日志的回执，
+ * 全部出自同一份责任选集；都成立才汇成一节。没有放行的片：section 为 null、没有问题。
+ */
+export function selectedSectionOf(input: ProofInput, tested: string): { section: SelectedSection | null; problems: string[] } {
+  const problems: string[] = [], ok: ShardReceipt[] = [];
+  for (let k = 1; k <= SHARDS; k++) {
+    const f = input.facts.get(shardFactsName(k)), log = input.shardLogs.get(`test-shard-${k}`), raw = isObj(f) ? f.selected : undefined;
+    if (!(log !== undefined && hasBunFailures(log)) && !parseReceipt(raw)?.applied) continue;
+    const bad = receiptProblems(raw, { shard: k, runId: input.run.runId, attempt: input.run.attempt, head: tested, log });
+    if (bad.length) problems.push(...bad);
+    else ok.push(parseReceipt(raw)!);
+  }
+  const digests = [...new Set(ok.map((r) => r.responsibilityDigest))];
+  if (digests.length > 1) problems.push(`各片放行回执的责任选集不一致：${digests.join(", ")}`);
+  if (problems.length || !ok.length || !digests[0]) return { section: null, problems };
+  return { section: { version: SELECTED_SECTION_VERSION, runId: input.run.runId, attempt: input.run.attempt, head: tested, responsibilityDigest: digests[0],
+    receipts: ok.map((r) => ({ shard: r.shard, digest: receiptDigest(r), receipt: r })) }, problems };
+}
+
+function manifestOf(input: ProofInput, checks: string[], policyVersion: string): CiProofManifest {
   const covered = withoutSlow(input.files, input.slow ?? []).sort(), universe = listDigest(covered);
   return {
     version: CI_PROOF_MANIFEST_VERSION, repo: input.run.repo, head: input.run.head, base: input.run.base,
     checkout: { ...input.checkout }, workflow: { path: workflowPath(input.run), sha: input.run.workflowSha },
-    policyVersion: CI_PROOF_POLICY_VERSION, toolchain: { bun: input.bunVersion, lockfileDigest: sha256(input.lockfile) },
+    policyVersion, toolchain: { bun: input.bunVersion, lockfileDigest: sha256(input.lockfile) },
     tests: { universeDigest: universe, selectedDigest: listDigest(ranFiles(input.shardLogs)), count: covered.length },
     scope: "full", checks,
   };
@@ -170,7 +200,7 @@ function manifestOf(input: ProofInput, checks: string[]): CiProofManifest {
  * 汇总判定（纯函数）。任何一条不成立都没有 manifest：必需作业没全 success、分片覆盖核对不过（verifyShards）、某片或核心步骤的事实
  * 不属于本次 attempt、检出不是这次 run 的提交、on 模式下 web 构建没成功。observe 下 web 构建失败只进 webBuild.wouldReject。
  */
-export function buildCiProof(input: ProofInput): { manifest: CiProofManifest | null; report: ProofReport } {
+export function buildCiProof(input: ProofInput): { manifest: CiProofManifest | null; report: ProofReport; selected: SelectedSection | null } {
   const { run } = input, refusals: string[] = [], tested = run.tested?.sha ?? run.sha;
   for (const [job, names] of Object.entries(PROOF_JOBS)) {
     if (input.needs[job] !== "success") refusals.push(`作业 ${names.length > 1 ? job : names[0]} 结果 ${input.needs[job] ?? "未知"}，不是 success`);
@@ -179,6 +209,8 @@ export function buildCiProof(input: ProofInput): { manifest: CiProofManifest | n
   if (run.tested && input.checkout.tree !== run.tested.tree) refusals.push(`证明作业检出的 tree ${input.checkout.tree.slice(0, 12)} ≠ 补验请求绑定的 ${run.tested.tree.slice(0, 12)}`);
   refusals.push(...verifyShards(input.shardLogs, { n: SHARDS, head: tested, bunVersion: input.bunVersion, files: input.files, slow: input.slow }));
   refusals.push(...shardProblems(input));
+  const selected = selectedSectionOf(input, tested);
+  refusals.push(...selected.problems);
   const known = [WEB_FACTS_NAME, ...Array.from({ length: SHARDS }, (_, i) => shardFactsName(i + 1))];
   const extra = [...input.facts.keys()].filter((n) => !known.includes(n));
   if (extra.length) refusals.push(`多出来的事实工件：${extra.join(", ")}`);
@@ -195,7 +227,8 @@ export function buildCiProof(input: ProofInput): { manifest: CiProofManifest | n
   let manifest: CiProofManifest | null = null;
   if (!refusals.length) {
     const checks = [...Object.values(PROOF_JOBS).flat(), ...(verdict.inProof ? [CI_WEB_BUILD_CHECK] : [])];
-    const parsed = parseCiProofManifest(manifestOf(input, checks));
+    const policy = selected.section ? selectedPolicyVersion(CI_PROOF_POLICY_VERSION, sectionDigest(selected.section)) : CI_PROOF_POLICY_VERSION;
+    const parsed = parseCiProofManifest(manifestOf(input, checks, policy));
     if (parsed.ok) manifest = parsed.manifest;
     else refusals.push(parsed.reason);
   }
@@ -203,8 +236,9 @@ export function buildCiProof(input: ProofInput): { manifest: CiProofManifest | n
     version: FACTS_VERSION, runId: run.runId, attempt: run.attempt, checkout: tested, verdict: manifest ? "full" : "refused",
     manifestDigest: manifest ? ciProofManifestDigest(manifest) : null, refusals,
     webBuild: { mode: input.webBuildMode, outcome: web.facts?.outcome ?? null, seconds: web.facts?.seconds ?? null, depsCacheHit: web.facts?.depsCacheHit ?? null, wouldReject },
+    ...(manifest && selected.section ? { selected: { version: SELECTED_SECTION_VERSION, digest: sectionDigest(selected.section) } } : {}),
   };
-  return { manifest, report };
+  return { manifest, report, selected: manifest ? selected.section : null };
 }
 
 export type RunCommand = (cmd: string[], cwd: string, timeoutMs: number) => Promise<{ code: number | null; timedOut: boolean }>;
@@ -335,7 +369,7 @@ export function proofNeeds(raw: unknown): Record<string, string> {
 
 function proveMain(shardsDir: string, factsDir: string, outDir: string, env: Obj): void {
   const event = typeof env.GITHUB_EVENT_PATH === "string" && existsSync(env.GITHUB_EVENT_PATH) ? parseJson(readFileSync(env.GITHUB_EVENT_PATH, "utf8")) : null;
-  const { manifest, report } = buildCiProof({
+  const { manifest, report, selected } = buildCiProof({
     run: proofRun(env, event), checkout: { sha: git(["rev-parse", "HEAD"]), tree: git(["rev-parse", "HEAD^{tree}"]) },
     bunVersion: Bun.version, lockfile: readFileSync("bun.lock", "utf8"), files: testFiles(git(["ls-files"])), needs: proofNeeds(parseJson(String(env.NEEDS ?? ""))),
     slow: existsSync(SLOW_LIST) ? parseSlowList(readFileSync(SLOW_LIST, "utf8")) : [],
@@ -345,6 +379,7 @@ function proveMain(shardsDir: string, factsDir: string, outDir: string, env: Obj
   });
   writeJson(join(outDir, "report.json"), report);
   if (manifest) writeJson(join(outDir, "manifest.json"), manifest);
+  if (selected) writeJson(join(outDir, "selected.json"), selected);
   report.refusals.forEach((r) => console.log(`::warning title=ci-proof::${r}`));
   if (report.webBuild.wouldReject) console.log(`::warning title=ci-web-build::拟拒绝（observe，不影响合并）：${report.webBuild.wouldReject}`);
   console.log(manifest ? `::notice title=ci-proof::full ${report.manifestDigest} run ${report.runId} attempt ${report.attempt}`
@@ -355,7 +390,10 @@ async function main(args: string[]): Promise<number> {
   const [cmd, a, b, c] = args;
   if (cmd === "web-build" && a) return webBuildMain(a, process.env);
   try {
-    if (cmd === "shard-facts" && new RegExp(`^[1-${SHARDS}]$`).test(a ?? "") && b && c) writeJson(c, shardFacts(process.env, Number(a), existsSync(b) ? readFileSync(b, "utf8") : ""));
+    if (cmd === "shard-facts" && new RegExp(`^[1-${SHARDS}]$`).test(a ?? "") && b && c) {
+      const receipt = process.env.SELECTED_RECEIPT && existsSync(process.env.SELECTED_RECEIPT) ? parseJson(readFileSync(process.env.SELECTED_RECEIPT, "utf8")) : undefined;
+      writeJson(c, shardFacts(process.env, Number(a), existsSync(b) ? readFileSync(b, "utf8") : "", receipt));
+    }
     else if (cmd === "prove" && a && b && c) proveMain(a, b, c, process.env);
     else console.log("::warning title=ci-proof::用法：shard-facts <k> <shard.log> <输出> | web-build <输出> | prove <分片目录> <事实目录> <输出目录>");
   } catch (e) {

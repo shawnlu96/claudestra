@@ -193,26 +193,40 @@ jobs:
           name: ci-related-plan
           path: ${{ runner.temp }}/ci-related-plan
 
+      # 责任选集放行（merge-arch-CISEL1）要读冻结计划里的 responsibility（全量运行也要），单独下载一份；off 档不下载。
+      # 下不到只是没有责任选集（判定不放行），不让本片变红。
+      - uses: actions/download-artifact@v4
+        if: vars.CI_SELECTED_GATE != 'off'
+        continue-on-error: true
+        with:
+          name: ci-related-plan
+          path: ${{ runner.temp }}/ci-selected-plan
+
       # 实测读取图（merge-arch-SELECT2，src/lib/ci-io-trace.ts）：只有 push main 的全量跑设 CI_IO_TRACE，测试进程和它在仓库根下起的
       # `bun <file>` 子进程把「哪个模块读了仓库里哪个文件」追加进同一份 JSONL；PR、列车、补验为空串 = 不装记录器。不改任何选测试结果。
+      # 责任选集放行（merge-arch-CISEL1，scripts/ci-selected-verdict.ts）：受信仓库变量 CI_SELECTED_GATE 在这里归一成 off / on / observe
+      # 三个字面量（PR 带不进别的值）。bun test 失败时：off 原样按 bun 的退出码失败，不调判定；observe 另跑判定、留回执与一行
+      # `ci-selected:`，照旧失败；on 判定放行时这一步以成功结束（回执随后上传），不放行照旧失败。不整步 continue-on-error。
       - name: Unit tests
         shell: bash
         env:
           CI_IO_TRACE: ${{ github.event_name == 'push' && format('{0}/io-trace.jsonl', runner.temp) || '' }}
         run: |
+          gate="${{ vars.CI_SELECTED_GATE == 'off' && 'off' || vars.CI_SELECTED_GATE == 'on' && 'on' || 'observe' }}"
+          selected() { [ "$gate" != off ] && CI_SELECTED_GATE="$gate" CORE_TYPECHECK="${{ steps.typecheck.outcome }}" bun scripts/ci-selected-verdict.ts shard ${{ matrix.shard }} "$1" "$RUNNER_TEMP/shard.log" "$RUNNER_TEMP/files.txt" "$RUNNER_TEMP/ci-selected-plan/plan.json" "${{ needs.plan.outputs.digest }}" "$RUNNER_TEMP/ci-selected" && return 0; exit "$1"; }
           if [ "${{ needs.plan.outputs.scope }}" = related ] || [ "${{ needs.plan.outputs.scope }}" = light ]; then
             bun scripts/ci-related-plan.ts files "$RUNNER_TEMP/ci-related-plan/plan.json" "${{ needs.plan.outputs.digest }}" ${{ matrix.shard }} > "$RUNNER_TEMP/files.txt"
             mapfile -t files < "$RUNNER_TEMP/files.txt"
             printf 'shard=%s/%s\nhead=%s\nplan=%s\n' ${{ matrix.shard }} "${{ needs.plan.outputs.scope == 'light' && '1' || '8' }}" "$(git rev-parse HEAD)" "${{ needs.plan.outputs.digest }}" > "$RUNNER_TEMP/shard.log"
             if [ ${#files[@]} -eq 0 ]; then echo zero=1 >> "$RUNNER_TEMP/shard.log"; exit 0; fi
-            bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
+            bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log" || selected $?
             exit 0
           fi
           bun run --silent test:shard ${{ matrix.shard }}/8 > "$RUNNER_TEMP/files.txt"
           mapfile -t files < "$RUNNER_TEMP/files.txt"
           discovered=$(bun test --shard=99999/99999 2>&1 | sed -n 's|.*: running 0/\([0-9]*\) test files.*|\1|p')
           printf 'shard=%s/8\nhead=%s\ndiscovered=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
-          bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
+          bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log" || selected $?
 
       # 红片、被取消的片也上传已有的日志（诊断用）。测试步骤之前就失败 / 被取消、根本没生成日志时只给一条警告、没有工件——
       # 汇总作业照样因为这一片不是 success 而红，缺工件不会被当成通过。
@@ -222,6 +236,17 @@ jobs:
           name: test-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/shard.log
           if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
+      # 本片的放行回执（只有判定跑过才有文件；off 档从不生成）。不容错：on 下放行了却没把回执传上去，这一片就该红
+      - name: Upload selected receipt
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-selected-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/ci-selected/receipt.json
+          if-no-files-found: ignore
           overwrite: true
           retention-days: 14
 
@@ -306,6 +331,7 @@ jobs:
           CORE_TYPECHECK: ${{ steps.typecheck.outcome }}
           CORE_GUARD: ${{ steps.guard.outcome }}
           CORE_BUILD: ${{ steps.build.outcome }}
+          SELECTED_RECEIPT: ${{ runner.temp }}/ci-selected/receipt.json
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -382,6 +408,29 @@ jobs:
           CI_PROOF_REUSE_REVOKED: ${{ vars.CI_PROOF_REUSE_REVOKED }}
           REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
           GH_TOKEN: ${{ github.token }}
+
+      # 责任选集放行（merge-arch-CISEL1，scripts/ci-selected-verdict.ts gate）：成功结束却红过的片（日志里 bun 的「N fail」，N > 0）
+      # 都必须有本次 run / attempt / 检出 / 那份日志的 on 放行回执，且出自同一份责任选集；缺一份、对不上就红。有放行时汇总成工件
+      # ci-selected-verdict，日志一行 `ci-selected: allow=… out_of_scope=N`。没有片被放行时（off 档恒如此）不写工件、以 0 退出，结论与改前一致。
+      # 上面「All shards succeeded」这一步的名字与措辞不动（调度器 GATE / GATE_VERDICT 认它）。
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ci-selected-shard-*
+          path: selected
+
+      - name: Released shards carry receipts
+        run: bun scripts/ci-selected-verdict.ts gate shards selected "$RUNNER_TEMP/ci-selected"
+        env:
+          CI_SELECTED_GATE: ${{ vars.CI_SELECTED_GATE == 'off' && 'off' || vars.CI_SELECTED_GATE == 'on' && 'on' || 'observe' }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-selected-verdict
+          path: ${{ runner.temp }}/ci-selected/verdict.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
 
       # 实测读取图（merge-arch-SELECT2，scripts/ci-io-map.ts）：只在 push main、上面全部核对通过后，把 8 片的读取记录合成 io-map.json，
       # 作为工件 ci-io-map 留 14 天给 SELECT3 选测试用。缺片不出图；三步都 continue-on-error，汇总失败只在日志里写原因，不影响 main 判绿。
