@@ -4,7 +4,11 @@
  */
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { setAppConfigForTest } from "../web/lib/app-config";
-import { fetchHistory, FULL_PAGE } from "../web/lib/api/history";
+
+// 根 tsc 不开 jsx，连 import type 都会牵进 lib/i18n.tsx；按运行时路径导入，只声明用到的公开面
+interface HistoryPage { data: { content: string }[]; sessionId?: string; lastSeq?: number | null; hasMore?: boolean }
+const spec = "@/lib/api/history";
+const { fetchHistory, FULL_PAGE } = (await import(spec)) as { fetchHistory(agent: string): Promise<HistoryPage>; FULL_PAGE: number };
 
 const realFetch = globalThis.fetch;
 const calls: string[] = [];

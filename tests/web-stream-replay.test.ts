@@ -4,8 +4,16 @@
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { setAppConfigForTest } from "../web/lib/app-config";
-import { openAgentEventStream, ReplayMerge } from "../web/lib/api/stream";
 import type { WebStreamEvent } from "../web/lib/chat/events";
+
+interface Merge { see(e: WebStreamEvent): void; merge(snapshot: WebStreamEvent[]): WebStreamEvent[] }
+interface Reader { read(): Promise<{ value?: Uint8Array; done: boolean }>; cancel(): Promise<void> }
+// 根 tsc 不开 jsx，连 import type 都会经 lib/api/history 牵进 lib/i18n.tsx；按运行时路径导入，只声明用到的公开面
+const spec = "@/lib/api/stream";
+const { openAgentEventStream, ReplayMerge } = (await import(spec)) as {
+  openAgentEventStream(agent: string, opts: { lang: "zh" }): Promise<{ getReader(): Reader }>;
+  ReplayMerge: new () => Merge;
+};
 
 const realFetch = globalThis.fetch;
 const enc = new TextEncoder();
@@ -33,7 +41,7 @@ let seq = 0;
 const ev = (type: string, data: Record<string, unknown>) => ({ seq: ++seq, ts: new Date().toISOString(), agent: "agent-a", chatId: "", type, data });
 
 /** 读帧直到拿到一个非心跳事件 */
-async function next(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<WebStreamEvent & { eid?: number }> {
+async function next(reader: Reader): Promise<WebStreamEvent & { eid?: number }> {
   const dec = new TextDecoder();
   for (;;) {
     const { value, done } = await reader.read();
@@ -55,7 +63,7 @@ test("快照没回来，实时事件照样先到；快照回来后只补实时�
   answerPending({ thinking: true, question: { questions: [], ts: 1 } }); // 快照里的 thinking 已过时
   const got = [await next(reader), await next(reader), await next(reader), await next(reader)];
   expect(got.map((e) => e.t)).toEqual(["ask", "bg-start", "bg-update", "bg-sync"]); // 没有往回拨的 status: running
-  reader.cancel();
+  await reader.cancel();
 });
 
 test("ReplayMerge：实时已见的 bg 任务不复活；快照之后才起的任务并进 bg-sync 全集", () => {
