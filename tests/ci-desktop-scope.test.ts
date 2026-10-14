@@ -185,14 +185,15 @@ describe("[验收线 4] ci.yml: one desktop check, a success on both paths", () 
 
   test("desktop-scope reads the variable once, checks out the tested commit with both parents and only runs the decider", () => {
     expect(scope).toMatchObject({ name: "desktop scope", "runs-on": "ubuntu-latest", "timeout-minutes": 5, outputs: { run: "${{ steps.scope.outputs.run }}" } });
-    expect(scope.needs).toBeUndefined();
+    expect(scope.needs).toBe("plan");
     expect(scope.if).toBeUndefined();
     const [checkout, bun, decideStep, ...rest] = scope.steps;
     expect(rest).toEqual([]);
     expect(checkout).toMatchObject({ uses: "actions/checkout@v4", with: { ref: "${{ inputs.merge }}" } });
     expect(Number(checkout!.with!["fetch-depth"])).toBeGreaterThanOrEqual(2);
     expect(bun).toEqual({ uses: "oven-sh/setup-bun@v2", with: { "bun-version": "1.3.14" } });
-    expect(decideStep).toEqual({ name: "Decide desktop scope", id: "scope", run: "bun scripts/ci-desktop-scope.ts", env: { CI_DESKTOP_SCOPE: "${{ vars.CI_DESKTOP_SCOPE }}" } });
+    expect(decideStep).toEqual({ name: "Decide desktop scope", id: "scope", run: "bun scripts/ci-desktop-scope.ts",
+      env: { CI_PLAN_SCOPE: "${{ needs.plan.outputs.scope }}", CI_DESKTOP_SCOPE: "${{ vars.CI_DESKTOP_SCOPE }}" } });
     expect(ciText.match(/vars\.CI_DESKTOP_SCOPE/g)).toHaveLength(1);
     expect(scope.steps.some((s) => /bun install/.test(s.run ?? ""))).toBe(false);
   });

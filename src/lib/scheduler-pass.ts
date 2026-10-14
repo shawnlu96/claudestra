@@ -21,6 +21,7 @@ import { mergePipeStep } from "./scheduler-merge-pipe.js";
 import { deployYield, passClock } from "./scheduler-deploy-first.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
 import { mainCiPass } from "./scheduler-main-ci-wiring.js";
+import { ciQueueFullStep } from "./scheduler-ci-queue-full.js";
 import { openCiProofGate } from "./scheduler-ci-proof-gate.js";
 import { openCiLogPerJob } from "./scheduler-merge-ci-log-read.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
@@ -155,9 +156,9 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
       await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
       if (cut("train")) return done();
-      // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       const external = opts.external ?? ((p: SchedulerConfig["projects"][string]) => mergeExternal(p, guard(active, runBounded)));
-      await mergeTick(db, config, manager, external, active, pace.phase(), trains);
+      failed.push(...await ciQueueFullStep(db, config, { manager, external, active, command: guard(active, runBounded), policy: opts.recoveryPolicy, pace: pace.phase() }));
+      if (cut("ciQueueFull")) return done(); await mergeTick(db, config, manager, external, active, pace.phase(), trains);
       if (cut("merge")) return done();
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
