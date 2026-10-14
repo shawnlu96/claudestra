@@ -10,7 +10,7 @@ import { fakeConnection, fakeKey } from "./shared-ledger-client.test.js";
 const connection = { ...fakeConnection, teamId: "team-a" };
 function client(status: number, body: unknown, paths: string[] = []) {
   const fetcher = (async (url: URL) => { paths.push(url.pathname); return Response.json(body, { status }); }) as unknown as typeof fetch;
-  return new SharedLedgerClient(connection, fakeKey(), { fetch: fetcher });
+  return new SharedLedgerClient({ ...connection, baseUrl: `https://${crypto.randomUUID()}.invalid` }, fakeKey(), { fetch: fetcher });
 }
 
 describe("SharedLedgerClient add-only reads", () => {

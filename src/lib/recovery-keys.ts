@@ -16,6 +16,7 @@ export const RECOVERY_KEYS = [
   "cardPause",
   "cardProcReap",
   "centerReplicaPull",
+  "centerRequestBudget",
   "ciClaimUnsent",
   "ciCoverageGate",
   "ciIoMapFuse",

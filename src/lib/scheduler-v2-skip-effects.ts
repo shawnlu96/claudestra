@@ -262,6 +262,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     // card-repo: gitOriginRepo reads the local origin (callers: autostart privateGate after the S2D2 feature hook, spec-resume / local-author
     // under pace)
     "card-repo.ts": "proc=1 vcs=1",
+    "center-request-budget.ts": "fs=1",
     // Project CI reads have no card; response writes use the guarded scheduler CLI, never the pass read connection.
     "ci-main-failure-response-runtime.ts": "ledger=1 fs=1 vcs=2",
     "dag-tools-steps.ts": "stmt=1",
@@ -309,7 +310,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-yield.ts": "fs=2",
     "shared-ledger-center-claims.ts": "fs=1",
     // N8B8: reachable through dag-write-scrub's read of the mirror state (readSharedLedgerMirrors); their writes belong to `shared-mirror` and the cron mirror loop
-    "shared-ledger-client-transport.ts": "fs=1",
+    "shared-ledger-client-transport.ts": "fs=2",
     "shared-ledger-contract-v2-transaction.ts": "stmt=2",
     "shared-ledger-mirror.ts": "fs=2",
     "shared-ledger-mode.ts": "stmt=1 fs=2",
