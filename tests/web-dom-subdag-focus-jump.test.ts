@@ -14,7 +14,7 @@ const webRequire = createRequire(new URL("../web/package.json", import.meta.url)
 const mod = (p: string) => new URL(`../web/features/${p}`, import.meta.url).href;
 interface Ui {
   featureId: string | null; open: string[]; doneOpen: ReadonlySet<string>; flash: { id: string; seq: number } | null;
-  selectFeature: (id: string) => void; jumpNode: (f: string, key: string) => void;
+  selectFeature: (id: string) => void; jumpNode: (f: string, key: string) => void; view: string; setView: (v: "list" | "graph") => void;
 }
 type Hook = (a: Record<string, unknown>) => (canvas: unknown) => unknown;
 interface El { remove(): void }
@@ -86,5 +86,20 @@ test("桌面列表：只切 feature 并闪，不改 open / ✓N（列表自己�
   expect(m.ui().open).toEqual(["F2"]);
   expect([...m.ui().doneOpen]).toEqual([]);
   expect(m.ui().flash?.id).toBe("F1::d1");
+  await m.unmount();
+});
+
+test("桌面列表跨 feature 跳转后切到「图」：目标 feature 被展开，画布不只剩 shelf（P1 graph-after-cross-feature-list-jump）", async () => {
+  const m = await mount(false);
+  await m.act((ui) => ui.selectFeature("F2"));
+  await m.act((ui) => ui.jumpNode("F1", "a1"));
+  expect(m.ui().open).toEqual(["F2"]);
+  await m.act((ui) => ui.setView("graph"));
+  expect(m.ui().view).toBe("graph");
+  expect(m.ui().featureId).toBe("F1");
+  expect(m.ui().open).toContain("F1");
+  await m.act((ui) => ui.setView("list"));
+  await m.act((ui) => ui.setView("graph"));
+  expect(m.ui().open.filter((id) => id === "F1")).toHaveLength(1);
   await m.unmount();
 });
