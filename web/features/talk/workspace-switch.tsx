@@ -24,8 +24,8 @@ export function WorkspaceSwitch({ active }: { active: "workbench" | "talk" }) {
   );
 }
 
-/** 工作台侧栏顶部：Chat 入口开着出切换；关着（缺省）显示原来的「会话」标题（lib/talk-gate.ts） */
+/** 工作台侧栏顶部：Chat 入口开着出切换；关着（缺省）显示原来的「会话」标题（lib/talk-gate.ts）。标题不折行不收缩：和一排按钮同一行，收缩会被挤成「会 / 话」两行 */
 export function WorkbenchTitle() {
   const t = useT();
-  return showWorkspaceSwitch(useTalkEnabled()) ? <WorkspaceSwitch active="workbench" /> : <span className="font-semibold">{t("会话")}</span>;
+  return showWorkspaceSwitch(useTalkEnabled()) ? <WorkspaceSwitch active="workbench" /> : <span className="shrink-0 whitespace-nowrap font-semibold">{t("会话")}</span>;
 }
