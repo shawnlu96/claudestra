@@ -2,6 +2,8 @@
  * launcher 的 tmux 套接字护栏（SOCKGUARD1）：连续确认 absent 才新建 master、new-session 前查同路径服务进程、
  * 探测不可信时冻结依赖窗口列表的判断（dead 恢复、自动升级的「全员空闲」）、一次大量 dead 不批量复活、USR1 自愈。
  * 窗口列表只有在连着「真的那个服务」时才可信：连上一个空的新服务，所有 agent 都像死了、都像空闲。
+ * 例外「确认新建」：连续 3 次 absent、new-session 前无同路径服务、新建后当场记下服务 pid 和套接字 inode；之后只要 pid、inode
+ * 都对得上，窗口列表就是自己刚起的服务（空是真空），dead 恢复不冻结、不受大量 dead 阈值限制（真重启不等人）。
  * 恢复键 tmuxSockHeal（off / observe / on，缺省 observe）每次现读。tests/launcher-sock-guard.test.ts。
  */
 import { busyAgentWindows } from "./busy-windows.js";
@@ -27,6 +29,8 @@ export interface SockGuardPorts {
   probe: () => Promise<SockProbe>;
   /** 同路径 tmux 服务进程；null = 进程表读不了 */
   servers: () => Promise<TmuxServerProc[] | null>;
+  /** 套接字当前 inode；null = 不在或读不了 */
+  inode: () => number | null;
   healMode: () => Promise<SockHealMode>;
   /** 只发 SIGUSR1，别的信号这里没有入口 */
   usr1: (pid: number) => void;
@@ -40,6 +44,9 @@ export interface SockGuardPorts {
 
 /** exists = 照常；start = 连续 3 次 absent，可以新建；hold = 本轮什么都不做（不新建） */
 export type MasterVerdict = "exists" | "start" | "hold";
+/** skip = 本轮不恢复；confirmed = 确认新建的服务，恢复不受阈值限制；normal = 照常（受阈值限制） */
+export type RestoreMode = "skip" | "confirmed" | "normal";
+interface ServerId { pid: number; inode: number }
 
 export class LauncherSockGuard {
   private lastState: SockProbe["state"] | null = null;
@@ -48,6 +55,11 @@ export class LauncherSockGuard {
   /** USR1 发过仍不通的 pid：不再发，等人处理 */
   private readonly healFailed = new Set<number>();
   private massStreak = 0;
+  /** 本次 start 判定是否来自残留套接字；以及允许 created() 记确认新建（只有 check 判了 start 才算） */
+  private startStale = false;
+  private startApproved = false;
+  private confirmed: ServerId | null = null;
+  private confirmedAnnounced = false;
   constructor(private readonly p: SockGuardPorts) {}
 
   async check(): Promise<MasterVerdict> {
@@ -58,6 +70,8 @@ export class LauncherSockGuard {
   }
 
   private async decide(): Promise<MasterVerdict> {
+    this.startApproved = false;
+    let stale = false;
     for (let i = 0; i < ABSENT_CONFIRM; i++) {
       if (i) await this.p.sleep(ABSENT_GAP_MS);
       const probe = await this.observe();
@@ -66,9 +80,30 @@ export class LauncherSockGuard {
         await this.onUnknown(probe);
         return "hold";
       }
+      stale ||= probe.stale;
     }
-    this.p.log(`🧷 tmux 探测连续 ${ABSENT_CONFIRM} 次 absent，允许新建 master`);
+    this.p.log(`🧷 tmux 探测连续 ${ABSENT_CONFIRM} 次 absent${stale ? "（残留套接字）" : ""}，允许新建 master`);
+    this.startStale = stale;
+    this.startApproved = true;
     return "start";
+  }
+
+  /** startMaster 在 new-session 之后调：新服务可连、同路径服务恰好一个、套接字有 inode，才记成「确认新建」 */
+  async created(): Promise<void> {
+    if (!this.startApproved) return;
+    this.startApproved = false;
+    const probe = await this.observe();
+    const servers = await this.p.servers();
+    const inode = this.p.inode();
+    if (probe.state !== "exists" || servers?.length !== 1 || inode === null) {
+      this.confirmed = null;
+      this.p.log(`🧷 新建后核不出新服务（探测 ${probe.state}，服务 ${servers?.length ?? "?"} 个，inode ${inode ?? "无"}），不算确认新建`);
+      return;
+    }
+    this.confirmed = { pid: servers[0].pid, inode };
+    this.confirmedAnnounced = false;
+    this.p.log(`🧷 确认新建 master：服务 pid ${this.confirmed.pid}，套接字 inode ${inode}`);
+    if (this.startStale) await this.alert(t("🧷 残留套接字：无服务进程、无持有者，已新建 master。", "🧷 Stale socket: no server, no holder; created a new master."));
   }
 
   /** startMaster 在 new-session 之前调：有同路径服务进程（或查不了）就不建。放行即记下新建时刻（冻结 10 分钟） */
@@ -97,11 +132,16 @@ export class LauncherSockGuard {
     return null;
   }
 
-  /** restoreDeadAgents 入口：冻结时跳过（boot / periodic 都跳） */
-  skipRestore(source: string): boolean {
+  /** restoreDeadAgents 入口：探测不是 exists 一律跳过；确认新建且 pid / inode 都对得上 = confirmed；否则按冻结规则 */
+  async restoreMode(source: string): Promise<RestoreMode> {
+    const skip = (why: string): RestoreMode => {
+      this.once(`restore:${why}`, UNKNOWN_LOG_MS, () => this.p.log(`🔁 [${source}] 跳过 dead 恢复：${why}`));
+      return "skip";
+    };
+    if (this.lastState !== "exists") return skip(`tmux 探测 ${this.lastState ?? "未做"}`);
+    if (this.confirmed && await this.stillConfirmed()) return "confirmed";
     const why = this.frozen();
-    if (why) this.once(`restore:${why}`, UNKNOWN_LOG_MS, () => this.p.log(`🔁 [${source}] 跳过 dead 恢复：${why}`));
-    return why !== null;
+    return why ? skip(why) : "normal";
   }
 
   /** 自动升级的「全员空闲」判断：冻结时按「有人在忙」答，调用方照旧 30 分钟后重试 */
@@ -112,8 +152,17 @@ export class LauncherSockGuard {
     return [`tmux（${why}）`];
   }
 
-  /** 一轮 dead ≥ 10 且超过 active 一半：这轮不复活（true），告警；连续 3 轮再告一次等人。低于阈值清零（false） */
-  async massDead(names: string[]): Promise<boolean> {
+  /** 一轮 dead ≥ 10 且超过 active 一半：这轮不复活（true），告警；连续 3 轮再告一次等人。低于阈值清零（false）。
+   *  confirmed（确认新建的服务）不受阈值限制，第一次恢复发一条说明 */
+  async massDead(names: string[], mode: RestoreMode = "normal"): Promise<boolean> {
+    if (mode === "confirmed") {
+      this.massStreak = 0;
+      if (!this.confirmedAnnounced) {
+        this.confirmedAnnounced = true;
+        await this.alert(t(`🔁 确认新建后恢复 ${names.length} 个 agent`, `🔁 Restoring ${names.length} agent(s) after a confirmed new master`));
+      }
+      return false;
+    }
     let active: number;
     try { active = await this.p.activeCount(); } catch (e) {
       this.p.log(`🔁 读不了 registry active 数，本轮不复活：${(e as Error).message}`);
@@ -138,6 +187,18 @@ export class LauncherSockGuard {
       ));
     }
     return true;
+  }
+
+  /** 当前同路径服务恰好一个，且 pid、inode 都与确认新建时一致；任一不一致或查不出就作废确认 */
+  private async stillConfirmed(): Promise<boolean> {
+    const servers = await this.p.servers();
+    const inode = this.p.inode();
+    const ok = servers?.length === 1 && servers[0].pid === this.confirmed?.pid && inode === this.confirmed?.inode;
+    if (!ok) {
+      this.p.log(`🧷 确认新建作废：服务 ${servers?.map((x) => x.pid).join(",") ?? "?"}、inode ${inode ?? "无"} 与新建时（pid ${this.confirmed?.pid}、inode ${this.confirmed?.inode}）不一致`);
+      this.confirmed = null;
+    }
+    return ok;
   }
 
   private async observe(): Promise<SockProbe> {
@@ -218,6 +279,9 @@ const LIVE_GUARD_PORTS: SockGuardPorts = {
   probe: () => masterSessionProbe(),
   servers: async () => {
     try { return sameSockServers(await LIVE_PROBE_PORTS.ps(), LIVE_PROBE_PORTS.sockPath); } catch { return null; /* 调用方把 null 当「查不了」，不新建 */ }
+  },
+  inode: () => {
+    try { return LIVE_PROBE_PORTS.stat(LIVE_PROBE_PORTS.sockPath).ino; } catch { return null; /* 套接字不在 / 读不了：调用方当「核不上」，回到冻结规则 */ }
   },
   healMode: liveHealMode,
   usr1: (pid) => process.kill(pid, "SIGUSR1"),

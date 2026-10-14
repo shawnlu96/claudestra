@@ -188,6 +188,7 @@ async function startMaster() {
   // server 意外继承到非 0 的 base-index（-f /dev/null 在 tmuxRaw 已经处理，
   // 这里是 belt-and-suspenders）。
   await tmuxRaw(["new-session", "-d", "-s", SESSION_NAME, "-n", MASTER_WINDOW_NAME, "-c", MASTER_DIR]);
+  await sockGuard.created(); // 当场记新服务 pid + 套接字 inode：对得上时 dead 恢复不冻结、不受阈值限制
   await tmuxRaw(["set-option", "-t", SESSION_NAME, "base-index", "0"]).catch(() => {});
   await pinMasterWindowName();
   await Bun.sleep(500);
@@ -673,7 +674,7 @@ let listFailStreak = 0;
 const LIST_FAIL_ALERT_AFTER = 5;
 
 async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
-  if (sockGuard.skipRestore(source)) return; // 窗口列表不可信（探测不是 exists / 刚新建过 master）
+  const sockMode = await sockGuard.restoreMode(source); if (sockMode === "skip") return; // 窗口列表不可信（探测不是 exists / 刚新建过 master 且核不上）
   try {
     const list = parseManagerList(await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 60_000));
     if (!list.ok) {
@@ -703,7 +704,7 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
       if (source === "boot") console.log("🔁 开机自检：没有需要恢复的 dead agent");
       return;
     }
-    if (await sockGuard.massDead(reallyDead.map((a: any) => a.name))) return;
+    if (await sockGuard.massDead(reallyDead.map((a: any) => a.name), sockMode)) return;
     // 持租约压住 periodic 巡检——不论 boot 还是 periodic 先到,先到者拿租约,
     // 后到者被 685 的 `>= restartWaveUntil` 门槛挡住,不再撞车重启同一批(P1)
     restartWaveUntil = Date.now() + 10 * 60_000;

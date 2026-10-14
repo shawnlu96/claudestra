@@ -4,19 +4,20 @@ import type { SockHealMode, SockProbe, TmuxServerProc } from "../src/lib/tmux-so
 
 const SERVER: TmuxServerProc = { pid: 795, ppid: 1, command: "tmux -S /fake.sock new-session" };
 const pr = (state: SockProbe["state"], o: Partial<SockProbe> = {}): SockProbe =>
-  ({ state, why: state, code: state === "exists" ? 0 : 1, stderr: "", ms: 3, sock: "present", inode: 42, refused: false, servers: null, ...o });
+  ({ state, why: state, code: state === "exists" ? 0 : 1, stderr: "", ms: 3, sock: "present", inode: 42, refused: false, servers: null, stale: false, ...o });
 const refused = (servers: TmuxServerProc[] = [SERVER]) => pr("unknown", { why: "连接被拒", refused: true, servers });
 
 function rig(o: { probes?: SockProbe[]; servers?: TmuxServerProc[] | null; mode?: SockHealMode; active?: number } = {}) {
   const queue = [...(o.probes ?? [])];
   const s = {
     clock: 0, sleeps: [] as number[], usr1: [] as number[], logs: [] as string[], alerts: [] as string[], busyCalls: 0,
-    servers: o.servers === undefined ? [] : o.servers, mode: o.mode ?? "observe", active: o.active ?? 20, probes: 0,
+    servers: o.servers === undefined ? [] : o.servers, inode: 42 as number | null, mode: o.mode ?? "observe", active: o.active ?? 20, probes: 0,
     push: (...p: SockProbe[]) => queue.push(...p),
   };
   const ports: SockGuardPorts = {
     probe: async () => { s.probes++; const p = queue.shift(); if (!p) throw new Error("没有预置的探测结果"); return p; },
     servers: async () => s.servers,
+    inode: () => s.inode,
     healMode: async () => s.mode,
     usr1: (pid) => { s.usr1.push(pid); },
     activeCount: async () => s.active,
@@ -117,13 +118,13 @@ describe("冻结与大量 dead [验收线 4]", () => {
   test("probe 不是 exists：dead 恢复和自动升级都不跑（升级按有人在忙）", async () => {
     const { s, g } = rig({ probes: [pr("unknown")] });
     await g.check();
-    expect(g.skipRestore("periodic")).toBe(true);
+    expect(await g.restoreMode("periodic")).toBe("skip");
     expect((await g.busy("master:0")).length).toBe(1);
     expect(s.busyCalls).toBe(0);
   });
 
-  test("还没探测过也冻结", () => {
-    expect(rig().g.skipRestore("boot")).toBe(true);
+  test("还没探测过也冻结", async () => {
+    expect(await rig().g.restoreMode("boot")).toBe("skip");
   });
 
   test("10 分钟内新建过 master：冻结；过了 10 分钟恢复", async () => {
@@ -132,7 +133,7 @@ describe("冻结与大量 dead [验收线 4]", () => {
     expect(await g.claimCreate()).toBe(true);
     await g.check();
     expect(g.frozen()).toContain("10 分钟");
-    expect(g.skipRestore("boot")).toBe(true);
+    expect(await g.restoreMode("boot")).toBe("skip"); // 没走 created()：不算确认新建
     s.clock += 10 * 60_000;
     await g.check();
     expect(g.frozen()).toBeNull();
@@ -167,5 +168,75 @@ describe("留痕", () => {
     expect(lines[1]).toContain("pid 795");
     expect(lines[1]).toContain("inode 42");
     expect(lines[1]).toContain("code 1");
+  });
+});
+
+async function confirmedRig(o: { stale?: boolean; active?: number } = {}) {
+  const r = rig({ servers: [SERVER], active: o.active ?? 20,
+    probes: [pr("absent", { stale: o.stale ?? false }), pr("absent"), pr("absent"), pr("exists"), pr("exists")] });
+  r.s.servers = [];
+  expect(await r.g.check()).toBe("start");
+  expect(await r.g.claimCreate()).toBe(true);
+  r.s.servers = [SERVER]; // new-session 起来的新服务
+  await r.g.created();
+  return r;
+}
+
+describe("确认新建后照常恢复 [验收线 4]", () => {
+  const names = Array.from({ length: 12 }, (_, i) => `agent-${i}`);
+  test("pid、inode 一致：dead 恢复不冻结、不受阈值限制，发一条说明；自动升级仍冻结 10 分钟", async () => {
+    const { s, g } = await confirmedRig();
+    expect(await g.restoreMode("boot")).toBe("confirmed");
+    expect(await g.massDead(names, "confirmed")).toBe(false);
+    expect(s.alerts.filter((a) => a.includes("确认新建后恢复 12 个")).length).toBe(1);
+    expect((await g.busy("master:0")).length).toBe(1);
+    expect(s.busyCalls).toBe(0);
+  });
+  test("pid 变了：回到冻结；过了 10 分钟按阈值不复活并告警", async () => {
+    const { s, g } = await confirmedRig();
+    s.servers = [{ ...SERVER, pid: 900 }];
+    expect(await g.restoreMode("periodic")).toBe("skip");
+    s.clock += 10 * 60_000;
+    await g.check();
+    const mode = await g.restoreMode("periodic");
+    expect(mode).toBe("normal");
+    expect(await g.massDead(names, mode)).toBe(true);
+  });
+  test("inode 变了 / 查不出：不算确认", async () => {
+    const a = await confirmedRig();
+    a.s.inode = 43;
+    expect(await a.g.restoreMode("boot")).toBe("skip");
+    const b = await confirmedRig();
+    b.s.inode = null;
+    expect(await b.g.restoreMode("boot")).toBe("skip");
+  });
+  test("新建后核不出（服务两个）：不算确认", async () => {
+    const r = rig({ servers: [], probes: [pr("absent"), pr("absent"), pr("absent"), pr("exists")] });
+    await r.g.check();
+    await r.g.claimCreate();
+    r.s.servers = [SERVER, { ...SERVER, pid: 796 }];
+    await r.g.created();
+    expect(await r.g.restoreMode("boot")).toBe("skip");
+  });
+  test("没经过 check 判 start 就调 created：不记", async () => {
+    const r = rig({ probes: [pr("exists")] });
+    await r.g.created();
+    expect(r.s.probes).toBe(0);
+  });
+});
+
+describe("残留套接字连续确认后新建 [验收线 2]", () => {
+  test("3 次残留 absent → start；新建后记一行残留套接字说明，算确认新建", async () => {
+    const r = rig({ servers: [], probes: [pr("absent", { stale: true }), pr("absent", { stale: true }), pr("absent", { stale: true }), pr("exists")] });
+    expect(await r.g.check()).toBe("start");
+    expect(await r.g.claimCreate()).toBe(true);
+    r.s.servers = [SERVER];
+    await r.g.created();
+    expect(r.s.alerts.some((a) => a.includes("残留套接字：无服务进程、无持有者，已新建"))).toBe(true);
+    expect(await r.g.restoreMode("boot")).toBe("confirmed");
+  });
+  test("残留只出现 1–2 次（之后 lsof 查不了 = unknown）：不新建", async () => {
+    const r = rig({ probes: [pr("absent", { stale: true }), pr("absent", { stale: true }), pr("unknown", { why: "lsof 查不了" })] });
+    expect(await r.g.check()).toBe("hold");
   });
 });

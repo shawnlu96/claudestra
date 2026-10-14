@@ -5,9 +5,13 @@ const SOCK = "/fake/run/master.sock";
 const SERVER_LINE = `  795     1 tmux -f /dev/null -S ${SOCK} new-session -d -s master -n master -c /x`;
 const enoent = () => { throw Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" }); };
 
-function ports(o: Partial<SockProbePorts> & { tmux?: { code: number | null; out?: string; err?: string }; psOut?: string | Error } = {}): SockProbePorts & { tmuxCalls: number } {
+type Run = { code: number | null; out: string; err: string };
+function ports(o: Partial<SockProbePorts> & { tmux?: { code: number | null; out?: string; err?: string }; psOut?: string | Error; lsofR?: Run | Error } = {}):
+  SockProbePorts & { tmuxCalls: number; lsofPaths: string[] } {
   const p = {
     tmuxCalls: 0,
+    lsofPaths: [] as string[],
+    lsof: async (path: string) => { p.lsofPaths.push(path); if (o.lsofR instanceof Error) throw o.lsofR; return o.lsofR ?? { code: 1, out: "", err: "" }; },
     sockPath: SOCK,
     stat: o.stat ?? (() => ({ ino: 42 })),
     listSessions: o.listSessions ?? (async () => { p.tmuxCalls++; return { code: o.tmux ? o.tmux.code : 0, out: o.tmux?.out ?? "", err: o.tmux?.err ?? "" }; }),
@@ -19,13 +23,14 @@ function ports(o: Partial<SockProbePorts> & { tmux?: { code: number | null; out?
 }
 
 describe("masterSessionProbe 三态 [验收线 1]", () => {
-  test("连接被拒 → unknown（改前当成不存在）", async () => {
+  test("连接被拒但同路径服务还在 → unknown（改前当成不存在），不查 lsof", async () => {
     const r = await masterSessionProbe(ports({ tmux: { code: 1, err: `no server running on ${SOCK}` }, psOut: SERVER_LINE }));
     expect(r.state).toBe("unknown");
     expect(r.refused).toBe(true);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("no server running");
     expect(r.servers?.map((s) => s.pid)).toEqual([795]);
+    expect(r.stale).toBe(false);
   });
 
   test("超时（被杀）→ unknown", async () => {
@@ -109,7 +114,7 @@ describe("同路径服务进程", () => {
 });
 
 describe("planSockHeal", () => {
-  const base: SockProbe = { state: "unknown", why: "连接被拒", code: 1, stderr: "", ms: 1, sock: "present", inode: 42, refused: true, servers: [{ pid: 795, ppid: 1, command: "tmux" }] };
+  const base: SockProbe = { state: "unknown", why: "连接被拒", code: 1, stderr: "", ms: 1, sock: "present", inode: 42, refused: true, servers: [{ pid: 795, ppid: 1, command: "tmux" }], stale: false };
   test("恰好一个同路径服务：on 发、observe 记、off 告警", () => {
     expect(planSockHeal(base, "on")).toEqual({ kind: "signal", pid: 795 });
     expect(planSockHeal(base, "observe")).toEqual({ kind: "observe", pid: 795 });
@@ -126,5 +131,39 @@ describe("planSockHeal", () => {
   });
   test("套接字不存在 + 一个服务进程 → 发", () => {
     expect(planSockHeal({ ...base, sock: "missing", refused: true }, "on")).toEqual({ kind: "signal", pid: 795 });
+  });
+});
+
+describe("残留套接字 [验收线 2]", () => {
+  const refusedNoServer = { tmux: { code: 1, err: `no server running on ${SOCK}` }, psOut: "  12 1 tmux -S /other.sock new-session" };
+  test("被拒 + 无同路径服务 + lsof 无持有者 → absent（stale），lsof 用 realpath 后的路径", async () => {
+    const p = ports({ ...refusedNoServer, realpath: (x) => (x === "/fake/run" ? "/private/fake/run" : x) });
+    const r = await masterSessionProbe(p);
+    expect(r.state).toBe("absent");
+    expect(r.stale).toBe(true);
+    expect(r.why).toContain("残留套接字");
+    expect(p.lsofPaths).toEqual(["/private/fake/run/master.sock"]);
+  });
+  test("lsof 有持有者 → unknown", async () => {
+    const r = await masterSessionProbe(ports({ ...refusedNoServer, lsofR: { code: 0, out: "4242\n", err: "" } }));
+    expect(r.state).toBe("unknown");
+    expect(r.why).toContain("4242");
+  });
+  test("lsof 报错 / 超时 / 起不来 → unknown", async () => {
+    for (const lsofR of [{ code: 1, out: "", err: "lsof: status error" }, { code: null, out: "", err: "" }, { code: 0, out: "", err: "" }, new Error("ENOENT lsof")]) {
+      const r = await masterSessionProbe(ports({ ...refusedNoServer, lsofR }));
+      expect(r.state).toBe("unknown");
+      expect(r.stale).toBe(false);
+    }
+  });
+  test("进程表读不了 → unknown，不查 lsof", async () => {
+    const p = ports({ ...refusedNoServer, psOut: new Error("ps 失败") });
+    expect((await masterSessionProbe(p)).state).toBe("unknown");
+    expect(p.lsofPaths).toEqual([]);
+  });
+  test("超时 / 权限这类非 ECONNREFUSED：不走残留判定", async () => {
+    const p = ports({ tmux: { code: 1, err: `error connecting to ${SOCK} (Permission denied)` }, psOut: "" });
+    expect((await masterSessionProbe(p)).state).toBe("unknown");
+    expect(p.lsofPaths).toEqual([]);
   });
 });
