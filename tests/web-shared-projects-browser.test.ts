@@ -52,7 +52,7 @@ function n4UiFixture() {
     if (url.pathname === "/api/v1/asks") return Response.json({ asks: asks.map(a => ({ ...a, canAnswer: true })) });
     if (url.pathname.endsWith("/answer")) {
       const a = asks.find(a => url.pathname === `/api/v1/ledger/master/asks/${a.id}/answer`);
-      if (!a || a.state !== "open") return Response.json({ ok: false }, { status: 409 });
+      if (!a || a.state !== "open" || a.expiresAt <= Date.now()) return Response.json({ ok: false, code: "ask_closed" }, { status: 409 });
       const b = await req.json() as { choices: string[] };
       a.state = "answered"; a.answer = { choices: b.choices, labels: [], text: "", via: "web_card", owner: true,
         principal: "owner:self", at: Date.now() };
@@ -63,7 +63,7 @@ function n4UiFixture() {
       localSnapshot: async () => ({ projects: [{ id: "local-app", name: "不同本机名称", dirs: ["/synthetic/n4"], personal: false }],
         peers: [{ name: "synthetic-transport", enabled: true, invitable: true }] }) });
   };
-  return { handle, sent, reset: () => { asks.length = 0; sent.length = 0; } };
+  return { handle, sent, asks, reset: () => { asks.length = 0; sent.length = 0; } };
 }
 async function git(...args: string[]) {
   const p = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -73,7 +73,13 @@ async function git(...args: string[]) {
 }
 beforeAll(async () => {
   mkdirSync(shots, { recursive: true, mode: 0o700 }); chmodSync(shots, 0o700);
-  const build = Bun.spawn([process.execPath, "build", entry, "--target", "browser", "--outdir", scratch,
+  // UXASK2: like the production shell, start the inbox store and mount AsksDrawer next to the fixture (cards are answered there now).
+  const abs = (f: string) => JSON.stringify(resolve(f)), shell = join(scratch, "shell.ts");
+  writeFileSync(shell, `import { createElement } from ${abs("web/node_modules/react/index.js")}; import { createRoot } from ${abs("web/node_modules/react-dom/client.js")};
+import { asksStore, useAsks } from ${abs("web/features/asks/asks-store.ts")}; import { AsksDrawer } from ${abs("web/features/asks/components/asks-drawer.tsx")};
+import ${abs(entry)}; asksStore.start("synthetic-machine");
+createRoot(document.body.appendChild(document.createElement("div"))).render(createElement(() => useAsks().open ? createElement(AsksDrawer, { onOpenChat() {} }) : null));`);
+  const build = Bun.spawn([process.execPath, "build", shell, "--target", "browser", "--outdir", scratch,
     "--tsconfig-override", "web/tsconfig.json"], { stdout: "pipe", stderr: "pipe" });
   if (await build.exited) throw new Error(await new Response(build.stderr).text());
   const req = createRequire(resolve("web/package.json"));
@@ -83,14 +89,14 @@ beforeAll(async () => {
   const css = (await postcss([tw({ base: resolve("web") })]).process(readFileSync(from, "utf8"), { from })).css;
   server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === "/fixture.js") return new Response(Bun.file(join(scratch, "fixture-harness.js")));
+    if (path === "/fixture.js") return new Response(Bun.file(join(scratch, "shell.js")));
     if (path === "/style.css") return new Response(css, { headers: { "Content-Type": "text/css" } });
     if (path === "/app-config.json") return Response.json({ mode: "direct", fp: "synthetic-machine" });
     if (path.startsWith("/api/v1/")) return await n4.handle(request) ?? new Response(null, { status: 404 });
     if (path !== "/") return new Response(null, { status: 404 });
     return new Response(`<!doctype html><html><head><meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"></head>
-      <body><div id="root"></div><script src="/fixture.js"></script></body></html>`, { headers: { "Content-Type": "text/html" } });
+      <body><div id="root"></div><script type="module" src="/fixture.js"></script></body></html>`, { headers: { "Content-Type": "text/html" } });
   } });
   browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   const warm = await browser.newPage({ viewport: { width: 390, height: 900 } }); // First page, navigation and render, off test budgets.
@@ -138,31 +144,21 @@ async function openSettings(page: Page) {
   await page.getByRole("button", { name: "项目设置", exact: true }).click();
   await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
 }
-for (const [name, offset] of [
-  ["expired project card buttons are disabled", -1],
-  ["unexpired project card buttons require an explicit click", 60_000],
-  ["project card expires while open and disables buttons on the next poll", 1000],
-] as const) browserTest(name, async () => {
-  const now = new Date("2026-10-07T12:00:00Z");
-  const { page, errors } = await newPage(390, `?fixture=expiry&expiresAt=${now.getTime() + offset}`, now);
-  try {
-    const accept = page.getByRole("button", { name: "确认合成操作", exact: true });
-    const decline = page.getByRole("button", { name: "取消合成操作", exact: true });
-    await accept.waitFor();
-    expect(await accept.isDisabled()).toBe(offset < 0);
-    expect(await decline.isDisabled()).toBe(offset < 0);
-    expect(await page.locator("body").getAttribute("data-calls")).toBeNull();
-    if (offset === 1000) {
-      await page.clock.fastForward(2000);
-      await page.waitForFunction("Number(document.body.dataset.cardReads) >= 2");
-      expect(await accept.isDisabled()).toBe(true);
-      expect(await decline.isDisabled()).toBe(true);
-    } else if (offset > 0) {
-      await accept.click();
-      expect(JSON.parse((await page.locator("body").getAttribute("data-calls"))!)).toEqual(["answer"]);
-    }
-    expect(errors).toEqual([]);
-  } finally { await page.close(); }
+for (const [name, offset] of [["expired card: inbox refuses (409), rolls back", -1], ["unexpired card: inbox answers on click", 60_000],
+  ["card expiring while open: inbox refuses (409), rolls back", 1500]] as const) browserTest(`entry row only; ${name}`, async () => {
+  const now = new Date(), btn = { type: "buttons", buttons: [{ id: "shared_project_confirm", label: "确认合成操作" }, { id: "shared_project_cancel", label: "取消合成操作" }] };
+  n4.asks.push({ id: "expiry-card", project: "master", source: "system", createdBy: "system:shared-projects", kind: "authorize", title: "合成过期卡", context: "合成", options: [btn],
+    state: "open", answer: null, fromAgent: null, extra: {}, createdAt: +now, expiresAt: +now + offset } as unknown as Ask);
+  const { page, errors } = await newPage(390, `?fixture=expiry&expiresAt=${+now + offset}`, now);
+  try { // Asks-store data drives the entry row; the dialog never polls (cardReads unset) nor answers. A refused answer undoes the optimistic fade.
+    await page.getByText("有 1 张团队项目确认待你处理", { exact: true }).waitFor(); await page.clock.fastForward(10_000);
+    expect([await page.locator("body").getAttribute("data-card-reads"), await page.getByRole("button").count()]).toEqual([null, 1]);
+    await page.getByRole("button", { name: "去处理", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "待你处理" });
+    const accept = drawer.getByRole("button", { name: "确认合成操作", exact: true }); await accept.waitFor(); expect(n4.asks[0]!.state).toBe("open");
+    if (offset === 1500) await new Promise(r => setTimeout(r, 1600)); await accept.click(); // 1500: real bridge time passes expiresAt first.
+    await drawer.getByText(offset > 1500 ? "已记下" : "这件已经处理过了（或已过期）", { exact: true }).waitFor();
+    expect([n4.asks[0]!.state, await drawer.getByText("团队项目确认 · 1").count()]).toEqual(offset > 1500 ? ["answered", 0] : ["open", 1]); expect(errors).toEqual([]);
+  } finally { await page.close(); n4.reset(); }
 }, TEST_TIMEOUT_MS);
 browserTest("actual N4 source renders binding and invitation approval without claiming unavailable creation or exit", async () => {
   const { page, errors } = await newPage(390, "?fixture=n4-source");
@@ -184,12 +180,16 @@ browserTest("actual N4 source renders binding and invitation approval without cl
     await page.getByText("synthetic-transport", { exact: true }).click();
     await page.getByRole("button", { name: "邀请成员", exact: true }).click();
     await page.getByText("邀请确认卡已生成，请由本人核对后发送。", { exact: true }).waitFor();
-    await page.clock.fastForward(2000); // Exercise the real cards polling timer without spending the test budget waiting on wall time.
-    await page.getByText("邀请加入团队项目 合成项目 B", { exact: true }).waitFor();
+    await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))"); // The inbox store re-reads; the dialog itself never polls.
+    await page.getByText("有 1 张团队项目确认待你处理", { exact: true }).waitFor(); await page.getByRole("button", { name: "去处理", exact: true }).click();
+    const drawer = page.getByRole("dialog", { name: "待你处理" }); await drawer.getByText("团队项目确认 · 1").waitFor();
+    await drawer.getByText("邀请加入团队项目 合成项目 B", { exact: true }).waitFor();
     expect(n4.sent).toEqual([]);
     expect(await page.locator("body").innerText()).not.toContain(createV2ProjectsFixtures().invite.code);
     await screenshot(page, "n4-api-invite-approval-390");
-    await page.getByRole("button", { name: "发送邀请", exact: true }).click();
+    await drawer.getByRole("button", { name: "发送邀请", exact: true }).click();
+    await drawer.getByRole("button", { name: "返回", exact: true }).click(); // 去处理 closed the modal dialog; reopen it to see the entry row again
+    await page.getByRole("button", { name: "项目设置", exact: true }).click();
     await page.getByText("暂无待确认的项目操作。", { exact: true }).waitFor();
     expect(n4.sent).toHaveLength(1);
     expect((n4.sent[0] as { projectInvite: { personId: string } }).projectInvite.personId).toBe("person-peer");

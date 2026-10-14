@@ -10,6 +10,7 @@
 import { effectiveLend } from "./lend-policy.js";
 import type { LendEntry } from "./lend-config.js";
 import { advance, getMeta, liveOrders, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
+import { uiShotBudget } from "./lend-ui-send.js";
 import { claimOrder, claimProblem, driveLeased, revoke, settleOrder, type LendDeps } from "./lend-drive.js";
 import { liveGrant, isRevoked } from "./lend-grant.js";
 import { claudeLendSlots, lendBlockedReason, lendPollCapacity } from "./lend-claude-worker-capacity.js";
@@ -118,7 +119,7 @@ function roundDeps(d: LoopDeps, r: Round): LoopDeps {
   };
   const live = (peer: string) => r.v2 && speaksV2(d.db, peer);
   return {
-    ...d, call: gate(d.call), ...(d.v2 ? { v2: { ...d.v2, call: gate(d.v2.call) } } : {}),
+    ...d, call: gate(d.call), ...(d.v2 ? { v2: { ...d.v2, call: gate(d.v2.call) } } : {}), ...(d.shot ? { shot: gate(d.shot), shotBudget: uiShotBudget() } : {}),
     settleHold: (row) => r.offline || r.failed.has(row.peer) || (row.settle?.notify === "stopped" && isRevoked(row) && live(row.peer)),
     renewal: (row) => (live(row.peer) ? r.renewals.get(row.orderId) ?? null : undefined),
   };
