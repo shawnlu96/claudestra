@@ -81,3 +81,22 @@ test("reads at most four cards per pass, including manual cards without a workfl
   const f = fixture("on", 5);
   try { await f.tick(); expect(f.reads).toBe(4); } finally { closeLedger(":memory:"); }
 });
+
+test("before merge-begin light-only on permits only a durably claimed rerun; observe performs no external writes", async () => {
+  for (const mode of ["on", "observe"] as const) {
+    const f = fixture(mode), writes: string[] = [], source = f.io.external(), command = f.io.command;
+    try {
+      Object.assign(f.io, { external: () => ({ ...source,
+        updateBranch: async () => { writes.push("updateBranch"); }, merge: async () => { writes.push("merge"); return H; } }) });
+      f.io.command = async (args) => {
+        expect(f.db.query("SELECT 1 FROM scheduler_merges LIMIT 1").get()).toBeNull();
+        expect(f.db.query(`SELECT 1 FROM events WHERE target='T1' AND json_extract(data,'$.mechanism')='ciQueueFull'
+          AND json_extract(data,'$.actionKey') LIKE 'rerun:%' LIMIT 1`).get()).not.toBeNull();
+        writes.push("rerun"); return command(args);
+      };
+      expect(await f.tick()).toEqual([]);
+      expect(writes).toEqual(mode === "on" ? ["rerun"] : []);
+      expect(f.db.query("SELECT 1 FROM scheduler_merges LIMIT 1").get()).toBeNull();
+    } finally { closeLedger(":memory:"); }
+  }
+});
