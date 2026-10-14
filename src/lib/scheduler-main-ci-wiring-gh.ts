@@ -4,6 +4,7 @@
  * The envelopes carry the project / repo of the trusted target (scheduler.json), never a value read from a card, PR or text.
  */
 import type { runBounded } from "./run-bounded.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { mainCiSha, readMainCi, type MainCiHealth, type MainCiReadPort, type MainCiTarget } from "./scheduler-main-ci.js";
 
 type Command = typeof runBounded;
@@ -65,9 +66,17 @@ function mainCiGhPort(command: Command, cwd?: string): MainCiReadPort {
       const excluded = nonPushSuites(actions.items);
       const filtered = runs.items.filter((raw) => !obj(raw) || !obj(raw.app) || raw.app.slug !== "github-actions" ||
         !obj(raw.check_suite) || !excluded.has(raw.check_suite.id as number));
+      // MAINCIW2: the run lifecycle goes to the verdict too; the commit time is read only when no push run exists yet, and a failed read
+      // of it is null (the run-aware verdict then pauses as a read failure) so the original health is never changed by it.
+      const push = actions.items.filter((r) => obj(r) && r.event === "push");
+      let commitTime: unknown = null;
+      if (push.length === 0) {
+        try { const c = (await api(`repos/${t.repo}/commits/${sha}`)).commit; commitTime = obj(c) && obj(c.committer) ? c.committer.date : null; }
+        catch (e) { if (e instanceof SchedulerStopped) throw e; commitTime = null; }
+      }
       // Pagination incompleteness must still reach evaluateMainCi as invalid_checks, never be erased by filtering unrelated suites.
       return { project: t.project, repo: t.repo, sha, total_count: runs.total === runs.items.length ? filtered.length : runs.total, check_runs: filtered,
-        commit_status: { sha: status.first.sha, total_count: status.total, statuses: status.items } };
+        commit_status: { sha: status.first.sha, total_count: status.total, statuses: status.items }, push_runs: { runs: push, commit_time: commitTime } };
     },
   };
 }

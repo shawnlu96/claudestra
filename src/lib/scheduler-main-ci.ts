@@ -20,6 +20,20 @@ export interface MainCiHealth {
   reasons: readonly MainCiReason[];
   /** Reuses the train's presentation type; only check-run completed/success or commit-status success maps to pass. */
   checks: readonly TrainCheck[];
+  /**
+   * MAINCIW2's run-aware verdict for the same evidence (state / reasons above keep the original MAINCI meaning). Present only when
+   * the checks envelope carried the current SHA's push runs; planMainCi uses it only under rule "run" (mainCiPause=on).
+   */
+  ci?: MainCiRunVerdict;
+}
+/** One GitHub Actions workflow run of the current main SHA, as listed (the API lists each run's latest attempt). */
+interface MainCiPushRun { id: number; attempt: number; status: string; conclusion: string | null; createdAt: number }
+interface MainCiRunVerdict {
+  /** pending = the push run is still going and nothing failed; evidence_missing = a conservative pause; unhealthy = the original pause (a failed check, a read / evidence fault). */
+  verdict: "green" | "pending" | "evidence_missing" | "unhealthy";
+  why: "healthy" | "run_active" | "run_not_created_yet" | "run_not_created" | "run_overdue" | "run_completed_checks_missing" | "run_cancelled" |
+    "check_failed" | "other_fault" | "runs_unreadable" | "commit_time_unavailable";
+  runs: readonly MainCiPushRun[];
 }
 /** Repo/project come from the adapter's trusted routing, never from a task title or a cached PR head. */
 export interface MainCiReadPort {
@@ -39,6 +53,8 @@ const copyTarget = (target: MainCiTarget): MainCiTarget =>
   ({ ...target, requiredChecks: Array.isArray(target?.requiredChecks) ? [...target.requiredChecks] : [] });
 const health = (target: MainCiTarget, observedAt: number, mainSha: string | null, state: MainCiState,
   reasons: MainCiReason[], checks: TrainCheck[] = []): MainCiHealth => ({ target: copyTarget(target), observedAt, mainSha, state, reasons, checks });
+/** A push run that has not been created this long after the commit, or runs this long, is an evidence fault, not waiting. */
+export const MAIN_CI_RUN_CREATE_MS = 15 * 60_000, MAIN_CI_RUN_MAX_MS = 60 * 60_000;
 
 /**
  * Snapshot envelopes: main = {project, repo, ref, sha}; checks = {project, repo, sha, total_count, check_runs}.
@@ -85,7 +101,60 @@ export function evaluateMainCi(target: MainCiTarget, snapshot: MainCiSnapshot): 
     }
   }
   const state = reasons.length === 0 ? "green" : reasons.some((r) => r.code !== "unsuccessful_check") ? "unknown" : "red";
-  return health(target, snapshot.observedAt, sha, state, reasons.length ? reasons : [{ code: "healthy" }], runs);
+  const h = health(target, snapshot.observedAt, sha, state, reasons.length ? reasons : [{ code: "healthy" }], runs);
+  return "push_runs" in checks ? { ...h, ci: classifyRuns(h, checks.push_runs, sha) } : h;
+}
+
+const activeRun = new Set(["queued", "in_progress", "waiting", "pending", "requested"]);
+const runStatuses = new Set([...activeRun, "completed"]);
+const time = (v: unknown): number | null => {
+  const t = typeof v === "string" && /^\d{4}-\d\d-\d\dT/.test(v) ? Date.parse(v) : NaN;
+  return Number.isSafeInteger(t) && t >= 0 ? t : null;
+};
+/** push_runs = {runs, commit_time}: the SHA's Actions runs (any event; only push runs on this SHA count) and the commit's committer date. */
+function parsePushRuns(raw: unknown, sha: string): { runs: MainCiPushRun[]; commitTime: number | null } | null {
+  if (!obj(raw) || !Array.isArray(raw.runs)) return null;
+  const runs: MainCiPushRun[] = [], ids = new Set<number>();
+  for (const r of raw.runs) {
+    if (!obj(r) || r.event !== "push") continue;
+    const createdAt = time(r.created_at), completed = r.status === "completed";
+    if (!mainCiSha(r.head_sha) || r.head_sha.toLowerCase() !== sha || !Number.isSafeInteger(r.id) || (r.id as number) < 1 || ids.has(r.id as number) ||
+      !Number.isSafeInteger(r.run_attempt) || (r.run_attempt as number) < 1 || typeof r.status !== "string" || !runStatuses.has(r.status) ||
+      (completed ? typeof r.conclusion !== "string" || !conclusions.has(r.conclusion) : r.conclusion !== null) || createdAt === null) return null;
+    ids.add(r.id as number);
+    runs.push({ id: r.id as number, attempt: r.run_attempt as number, status: r.status, conclusion: r.conclusion as string | null, createdAt });
+  }
+  return { runs: runs.sort((a, b) => a.id - b.id), commitTime: time(raw.commit_time) };
+}
+
+/**
+ * Run-aware reading of the same reasons, for this SHA only (staleness, drift and read errors never get here, or stay a fault):
+ * green checks still obey the run deadlines below, and green checks whose only push runs were cancelled are evidence_missing; a completed non-success check is a fault even while others
+ * are pending; missing / pending with an active push run is waiting until
+ * the run is MAIN_CI_RUN_MAX_MS old; no push run is waiting until MAIN_CI_RUN_CREATE_MS after the commit; anything else is evidence_missing.
+ */
+function classifyRuns(h: MainCiHealth, raw: unknown, sha: string): MainCiRunVerdict {
+  const parsed = parsePushRuns(raw, sha), runs = parsed?.runs ?? [];
+  const v = (verdict: MainCiRunVerdict["verdict"], why: MainCiRunVerdict["why"]): MainCiRunVerdict => ({ verdict, why, runs });
+  // Green checks still need trustworthy run evidence: every push run cancelled with no new attempt, a run past its deadline, or no
+  // run past the creation deadline is not a healthy main; no run yet inside that window only waits.
+  if (h.state === "green") {
+    if (!parsed) return v("unhealthy", "runs_unreadable");
+    if (runs.some((r) => activeRun.has(r.status) && h.observedAt - r.createdAt > MAIN_CI_RUN_MAX_MS)) return v("evidence_missing", "run_overdue");
+    if (runs.length) return runs.every((r) => r.status === "completed" && r.conclusion === "cancelled") ? v("evidence_missing", "run_cancelled") : v("green", "healthy");
+    if (parsed.commitTime === null) return v("unhealthy", "commit_time_unavailable");
+    return h.observedAt - parsed.commitTime >= MAIN_CI_RUN_CREATE_MS ? v("evidence_missing", "run_not_created") : v("pending", "run_not_created_yet");
+  }
+  if (h.reasons.some((r) => !["missing_check", "pending_check", "unsuccessful_check"].includes(r.code))) return v("unhealthy", "other_fault");
+  const failed = h.reasons.filter((r) => r.code === "unsuccessful_check");
+  if (failed.some((r) => r.conclusion !== "cancelled")) return v("unhealthy", "check_failed");
+  if (!parsed) return v("unhealthy", "runs_unreadable");
+  if (failed.length) return v("evidence_missing", "run_cancelled");
+  const active = runs.filter((r) => activeRun.has(r.status));
+  if (active.length) return active.some((r) => h.observedAt - r.createdAt > MAIN_CI_RUN_MAX_MS) ? v("evidence_missing", "run_overdue") : v("pending", "run_active");
+  if (runs.length) return v("evidence_missing", runs.every((r) => r.conclusion === "cancelled") ? "run_cancelled" : "run_completed_checks_missing");
+  if (parsed.commitTime === null) return v("unhealthy", "commit_time_unavailable");
+  return h.observedAt - parsed.commitTime >= MAIN_CI_RUN_CREATE_MS ? v("evidence_missing", "run_not_created") : v("pending", "run_not_created_yet");
 }
 
 /** Combined statuses contain the latest value per context, unlike the historical /statuses endpoint. */

@@ -44,7 +44,8 @@ describe("[验收线 3] recovery on a new green main; stale, drifting or incompl
     w.ci.mainOverride = () => (++n % 2 ? w.hub.main : "f".repeat(40));
   }));
   for (const state of ["missing", "pending"] as Ci[]) {
-    test(`the required check is ${state}`, () => paused(() => { w.ci.bySha.set(w.hub.main, state); }));
+    // MAINCIW2: inside 15 minutes of the commit with no push run this only waits; past it the missing run is evidence_missing, still a pause
+    test(`the required check is ${state}`, () => paused(() => { w.ci.bySha.set(w.hub.main, state); w.ci.commitAgeMs = 16 * 60_000; }));
   }
 });
 
