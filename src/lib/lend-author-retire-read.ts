@@ -29,7 +29,7 @@ export async function sampleLendAuthor(db: Database, taskId: string, read: ReadL
 }
 
 /** Sweep candidates only, not every historical peer writer on every bridge poll. */
-export async function sampleLendAuthorSweep(db: Database, read: ReadLendHead, now = Date.now()): Promise<Map<string, LendAuthorSample>> {
+export async function sampleLendAuthorSweep(db: Database, read: ReadLendHead = readLendAuthorHead, now = Date.now()): Promise<Map<string, LendAuthorSample>> {
   const ids = db.query(`SELECT DISTINCT taskId FROM lend_orders WHERE ${STALE_WRITE_SQL}`)
     .all(now - WRITE_POOL_TTL_MS) as { taskId: string }[];
   const samples = new Map<string, LendAuthorSample>();
