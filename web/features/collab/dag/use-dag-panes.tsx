@@ -27,6 +27,7 @@ import { useTeamWorkBoard, useWorkBoard } from "../work/use-work-board";
 import { countBoardOf } from "../count-words";
 import { CountContext, useCountState, useRoundFresh, type CountInput } from "../use-count-source";
 import { teamWorkBoard } from "../team-work-model";
+import type { TeamWorkBoard, WorkBoard } from "../work/work-types";
 import type { LedgerOverview } from "../collab-model";
 import { DiffPage, NodePage, VersionsPage } from "./dag-props";
 import type { BoardNode, DagBoard, FeatureCard } from "./dag-types";
@@ -36,6 +37,8 @@ import { useFocusFeature } from "../team-source-context";
 import d from "./dag.module.css";
 
 const NO_FEATURES: readonly FeatureCard[] = [];
+/** 谁在干活标签、计数与子 DAG 共用的那一份看板；团队版也带 retrying（主场本机行读本机 /work 失败时标签出重试图标） */
+type PaneWork = { kind: "local"; board: WorkBoard | null; retrying: boolean } | { kind: "team"; board: TeamWorkBoard | null; retrying: boolean };
 
 export interface DagPanesArgs {
   project: string;
@@ -72,7 +75,8 @@ function useBoard(a: DagPanesArgs, board: DagBoard | null, dagLoading: boolean, 
   const pending = shown.pending || (!!a.noWorkBoard && !dagFresh);
   const counts = useCountState({ project: a.project, ov: a.ov ?? null, board: counted, boardPending: pending, boardFailed: !a.noWorkBoard && local.retrying && !local.board,
     source: a.source ?? {} });
-  return { work: shown, counts };
+  const work: PaneWork = a.noWorkBoard ? { kind: "team", board: team.board, retrying: team.retrying } : { kind: "local", board: local.board, retrying: local.retrying };
+  return { work, counts };
 }
 
 export function useDagPanes(a: DagPanesArgs) {
@@ -132,7 +136,7 @@ export function useDagPanes(a: DagPanesArgs) {
   // useDagBoard 在 rev 变后重拉期间留着上一轮的快照：团队看板由总览 + 快照合成，不同轮就先按旧快照出数、新快照到了再跳
   const dagFresh = useRoundFresh(load, load.status !== "loading", a.rev);
   const { work, counts } = useBoard(a, board, load.status === "loading", dagFresh);
-  const progress = <WorkBoardContent team={a.noWorkBoard} board={work.board} retrying={work.retrying} loading={counts.status === "loading"}
+  const progress = <WorkBoardContent team={work.kind === "team"} board={work.board} retrying={work.retrying} loading={counts.status === "loading"}
     onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
   const dagCanvas = (
