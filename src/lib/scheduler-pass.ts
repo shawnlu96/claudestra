@@ -22,6 +22,7 @@ import { deployYield, passClock } from "./scheduler-deploy-first.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
 import { mainCiPass } from "./scheduler-main-ci-wiring.js";
 import { openCiProofGate } from "./scheduler-ci-proof-gate.js";
+import { openCiLogPerJob } from "./scheduler-merge-ci-log-read.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
@@ -147,6 +148,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
       // GATE1 证明闸：本轮的模式、只读 GitHub 端口与观察记录写口；合并 external 被替换时（测试世界）不接真 gh，闸不开
       openCiProofGate(db, config, opts.recoveryPolicy, opts.external ? undefined : guard(active, runBounded), manager, active);
+      openCiLogPerJob(db, opts.recoveryPolicy, manager, active);
       if (cut("mainCi")) return done();
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
