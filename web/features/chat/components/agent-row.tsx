@@ -1,6 +1,6 @@
 "use client";
 import { UnreadPill } from "./unread-pill";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { hasDraft, subscribeDrafts } from "../drafts";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { agentRepoLabel, repoTagFits } from "../agent-repo";
@@ -19,6 +19,7 @@ import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 import { MissionBadge } from "./mission-ui";
 import { LedgerStageChip } from "./ledger-stage-chip";
 import { CtxBoundaryChip } from "./ctx-boundary-chip";
+import { RowStateChip } from "./chip-legend";
 import { BOUNDARY_ROW_TONE, hasNamedPolicy } from "../ctx-boundary-view";
 import { useFullScope } from "../contacts-data";
 import { TapHint } from "./tap-hint";
@@ -271,6 +272,7 @@ export function AgentRow({
         {lead}
         <button
           className="@container relative flex min-w-0 flex-1 select-none items-center gap-2.5 text-left sm:gap-2"
+          title={a.label ? `${a.label} | ${a.displayName}` : t(a.displayName)}
           {...menu.handlers}
           onPointerDown={(e) => {
             tapIntent = { name: a.name, ts: Date.now(), x: e.clientX, y: e.clientY };
@@ -309,17 +311,19 @@ export function AgentRow({
           ) : (
             <RuntimeStatusIcon a={a} busy={a.busy || busyLive} compacting={compacting} />
           )}
-          <span className={`min-w-0 flex-auto truncate text-[15px] sm:text-sm ${a.unread ? "font-semibold" : ""}`}>
-            {pinned && <span className="mr-0.5 text-[10px]">📌</span>}
-            {a.label || t(a.displayName)}
-            {a.label && <span className="ml-1 text-[12px] font-normal text-base-content/40">| {a.displayName}</span>}
+          {/* 名字至少留 8 个字宽（nameFloor），行尾芯片先按 @container 缩；显示名不收缩（只在比整个名字框还宽时省略），「| 原名」先缩 */}
+          <span className={`flex flex-auto items-baseline overflow-hidden text-[15px] sm:text-sm ${NAME_FLOOR} ${a.unread ? "font-semibold" : ""}`}
+            style={{ "--nf": nameFloor(a.label ? `${a.label} | ${a.displayName}` : t(a.displayName)) } as CSSProperties} data-row-name>
+            {pinned && <span className="mr-0.5 shrink-0 text-[10px]">📌</span>}
+            <span className="max-w-full shrink-0 truncate">{a.label || t(a.displayName)}</span>
+            {a.label && <span className="ml-1 min-w-0 shrink-[100] truncate text-[12px] font-normal text-base-content/40">| {a.displayName}</span>}
             {/* 单人 project 的归属 emoji 挪到名字后面、缩小压淡:放在行首会跟组头的
                 「emoji + 名字」长得一样(owner 2026-09-06「文件夹跟 agent 像同一个样式,
                 不知道该点哪个」)——行首只留状态点 = 这是 agent 不是文件夹 */}
             <NameTags a={a} projEmoji={projEmoji} />
           </span>
           <RepoTag a={a} />
-          {bnd && <CtxBoundaryChip b={bnd} />}
+          {bnd && <CtxBoundaryChip b={bnd} tiers />}
           {tail}{a.ledgerTask && <LedgerStageChip task={a.ledgerTask} names={[a.label, a.displayName]} />}
           {a.mission && <MissionBadge mission={a.mission} compact />}
           {/* 非激活且输入框里有没发的字 → 【草稿】(owner 2026-09-24);切回来就是当前会话,标自然消失。
@@ -337,9 +341,9 @@ export function AgentRow({
               名字同时加粗——一眼能扫出「谁回了我还没看」 */}
           <UnreadPill count={a.unread ?? 0} />
           {a.status === "creating" ? <span className="shrink-0 pl-1 text-[11px] text-info-soft-80">{t("创建中")}</span> : compacting ? (
-            <span className="shrink-0 pl-1 text-[11px] text-info-soft-80">{t("压缩中")}</span>
+            <RowStateChip state="compacting" />
           ) : (a.busy || busyLive) ? (
-            <span className="shrink-0 pl-1 text-[11px] text-warning-soft-80">{t("工作中")}</span>
+            <RowStateChip state="busy" />
           ) : (
             lastAt && (
               <span className="shrink-0 pl-1 font-mono text-[11px] tabular-nums text-base-content/35">
@@ -354,15 +358,25 @@ export function AgentRow({
   );
 }
 
+/** 名字框的最小宽度（--nf，配合下面的 min-w 类）：前 8 个字（短名按自身长度），汉字按 1em、其余按 0.55em 估，超过 8 个字再留省略号的宽。
+ *  它只挡会收缩的邻居（所在仓、「| 原名」、任务短名）；行尾芯片按 @container 缩，缩完仍放不下时这条线按行按钮宽度封顶
+ *  （≥12rem 封 30cqw，更窄封 20cqw），名字跟着省略，不把行尾时间挤出行外 */
+function nameFloor(text: string): string {
+  const chars = [...text];
+  const em = chars.slice(0, 8).reduce((n, c) => n + (/[\u2E80-\uFFEF]/.test(c) ? 1 : 0.55), 0) + (chars.length > 8 ? 0.8 : 0);
+  return `${em.toFixed(2)}em`;
+}
+const NAME_FLOOR = "min-w-[min(var(--nf),20cqw)] @[12rem]:min-w-[min(var(--nf),30cqw)]";
+
 /** 名字后面的小标：单人 project 的 emoji、总控、mock（在名字的省略容器里） */
 function NameTags({ a, projEmoji }: { a: AgentSession; projEmoji?: string }) {
   const t = useT();
   return (
     <>
-      {a.task && <span className="ml-1.5 text-[12px] font-normal text-base-content/45">{a.task}</span>}
-      {projEmoji && <span className="ml-1.5 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
-      {a.pinnedMaster && <span className="badge badge-primary badge-xs ml-1 align-middle">{t("总控")}</span>}
-      {a.mock && <span className="badge badge-ghost badge-xs ml-1 align-middle">mock</span>}
+      {a.task && <span className="ml-1.5 min-w-0 shrink-[100] truncate text-[12px] font-normal text-base-content/45">{a.task}</span>}
+      {projEmoji && <span className="ml-1.5 shrink-0 text-[11px] opacity-60 align-middle">{projEmoji}</span>}
+      {a.pinnedMaster && <span className="badge badge-primary badge-xs ml-1 shrink-0 align-middle">{t("总控")}</span>}
+      {a.mock && <span className="badge badge-ghost badge-xs ml-1 shrink-0 align-middle">mock</span>}
     </>
   );
 }
