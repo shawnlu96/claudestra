@@ -318,7 +318,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "sqlite-migrate.ts": "stmt=2",
     "state-file.ts": "fs=7",
     "sys-memory.ts": "proc=1",
-    "tmux-helper.ts": "stmt=3 proc=24 fs=1",
+    "tmux-helper.ts": "stmt=3 proc=23 fs=1",
     "unmanaged-archive.ts": "fs=4",
     "update-inflight.ts": "proc=2 fs=2",
     "usage-store.ts": "sql=32 stmt=44 fs=1",
