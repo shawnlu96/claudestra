@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { STATE_DIR } from "./paths.js";
+import { STATE_DIR, stateDirIn } from "./paths.js";
 import { acquireMaintenance } from "./scheduler-maintenance.js";
 import { LedgerReader } from "./ledger-read.js";
 import { writeJsonAtomicSync } from "./state-file.js";
@@ -45,7 +45,7 @@ function landing(p: string): string {
 }
 /** The production state directories: the default home path, the configured STATE_DIR and an explicit env override. */
 export function productionDirs(env: NodeJS.ProcessEnv = process.env): string[] {
-  return [join(homedir(), ".claude-orchestrator"), STATE_DIR, env.CLAUDESTRA_STATE_DIR].filter((p): p is string => !!p).map(real);
+  return [stateDirIn(homedir()), STATE_DIR, env.CLAUDESTRA_STATE_DIR].filter((p): p is string => !!p).map(real);
 }
 /** Drill roots live strictly inside the OS temp directory and never overlap a production state directory (either way round). */
 export function assertDrillRoot(root: string, production = productionDirs(), temp = real(tmpdir())): string {
