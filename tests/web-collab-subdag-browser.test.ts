@@ -29,6 +29,8 @@ const READY = `!!(document.querySelector("[data-focus-board]") || document.query
 const HEADINGS = `[...document.querySelectorAll("[data-focus-board] h3")].map((h) => ({ text: h.innerText.trim(), top: h.getBoundingClientRect().top, bottom: h.getBoundingClientRect().bottom }))`;
 const FIRST_CARD = `${BOARD}?.querySelector("[data-section=active] [data-focus-key]")?.getAttribute("data-focus-key") ?? null`;
 const DIGIT_ONLY = `[...document.querySelectorAll("button")].filter((b) => b.getClientRects().length && /^[✓\\s]*\\d+$/.test(b.innerText.trim())).map((b) => b.innerText.trim())`;
+const DONE_IN_VIEW = `(() => { const h = document.querySelector("[data-focus-board] [data-section=done] h3"); if (!h) return false;
+  const r = h.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()`;
 const DONE_ROWS = `${BOARD}?.querySelectorAll("[data-section=done] [data-focus-key]").length ?? 0`;
 /** 画布自带的浮条（视口外还有几件、适配全部）盖在节点上：改前同一画布就有，本卡不改画布，只在「图」那张放过这两类 */
 const CANVAS_PILLS = /还有 \d+ 件在|适配全部/;
@@ -97,6 +99,10 @@ test.skipIf(!out)("SUBDAG4: 子 DAG 分区列表，本机 / 团队，1280 / 390"
       checks.doneRows = await page.evaluate(DONE_ROWS);
       if (after) {
         await openFeature(page, MAIN_TITLE);
+        // 分段条：点「已完成」段滚到已完成区，标题进入视口（PM 补 · 首屏直达另外两区）
+        await page.locator('button[aria-label="已完成 30"]').click();
+        await page.waitForFunction(DONE_IN_VIEW, undefined, { timeout: 5_000 });
+        checks.segDoneInView = await page.evaluate(DONE_IN_VIEW);
         // chip：a-owner 的上游 d30 在已完成区（默认收着），点了先展开再滚到那一行闪一次
         await page.locator('[data-focus-key="a-owner"]').getByRole("button", { name: "d30", exact: true }).click();
         await page.waitForFunction(flashed("d30"), undefined, { timeout: 5_000 });
@@ -142,6 +148,7 @@ test.skipIf(!out)("SUBDAG4: 子 DAG 分区列表，本机 / 团队，1280 / 390"
   expect(heads.map((h) => h.text)).toEqual(["进行中 8", "接下来 16", "已完成 30"]);
   expect(checks.firstCard).toBe("a-owner");
   expect(checks.digitOnly).toEqual([]);
+  expect(checks.segDoneInView).toBe(true);
   // [验收线 2] 全完成 feature 不点就展开
   expect(checks.doneRows as number).toBeGreaterThanOrEqual(12);
   // [验收线 3] 图 = 画布；chip / 跳转闪到目标，已完成目标先展开

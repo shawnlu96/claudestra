@@ -41,7 +41,7 @@ export function useDagUi(features: readonly FeatureCard[]) {
   };
   return {
     tab, featureId, open, doneOpen, compare, focus, flash, evicted, ensureOpen, view, setView,
-    /** use-focus-pane.tsx 在 effect 里报告列表此刻能不能显示（有产品 DAG）；只给 jumpNode 读 */
+    /** use-focus-pane.tsx 在 effect 里报告列表此刻能不能显示（桌面且有产品 DAG）；只给 jumpNode 读 */
     setListable,
     selectFeature: (id: string) => {
       setFeatureId(id); setManual([id]);

@@ -17,6 +17,8 @@ import s from "./focus-board.module.css";
 
 interface FocusPaneArgs {
   now: number;
+  /** 手机：子 DAG 仍是 MobileDag（use-dag-panes.tsx 的 mobile），列表不渲染，跳转要照画布的跳法展开 feature / ✓N */
+  narrow: boolean;
   hot: string | null;
   tr: Tr;
   ui: ReturnType<typeof useDagUi>;
@@ -39,7 +41,8 @@ function focusWork(kind: "local" | "team", board: WorkBoard | TeamWorkBoard | nu
 export function useFocusPane(p: FocusPaneArgs) {
   const { ui, hasProduct } = p;
   const { setListable } = ui;
-  useEffect(() => setListable(hasProduct), [setListable, hasProduct]);
+  const listable = hasProduct && !p.narrow;
+  useEffect(() => setListable(listable), [setListable, listable]);
   const feature = hasProduct && ui.featureId ? p.board?.features.find((f) => f.id === ui.featureId) ?? null : null;
   const work = useMemo(() => focusWork(p.work.kind, p.work.board), [p.work.kind, p.work.board]);
   const model = useMemo(() => (feature ? subdagFocus(feature, work, p.now) : null), [feature, work, p.now]);
