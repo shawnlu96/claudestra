@@ -70,6 +70,7 @@ export const RECOVERY_KEYS = [
   "privateStartPlacement",
   "reclaimLocalFix",
   "reviewLocalFirst",
+  "reviewSeatIdle",
   "roleModel",
   "skipEffectsAutoScope",
   "specObservationHours",

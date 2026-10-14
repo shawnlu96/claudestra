@@ -6,6 +6,8 @@ import type { AuthorFamily } from "./ledger-scheduler.js";
 import { zeroAgentCounts, type AgentPoolLoad } from "./scheduler-agent-pool.js";
 import type { AgentLimits } from "./scheduler-agent-pool-config.js";
 import { hasStepsTable, MANUAL_TICKET } from "./scheduler-manual-author.js";
+import { reviewSeatCondition, reviewSeatMode } from "./scheduler-review-seat.js";
+import type { RecoveryMode } from "./recovery-policy.js";
 
 const hasTable = (db: Database, name: string): boolean =>
   !!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
@@ -34,10 +36,12 @@ export const STARTS_SQL = `SELECT t.agent, w.authorFamily AS family FROM events 
 
 /**
  * The canonical working-stage read (LS2, RVCAP1) behind both the AgentPool and the local reviewer count: authors in
- * spec/restate/build/fix, reviewers in review or with an unsettled review effect, and begun creations. A reviewer's begun
- * creation stays reserved whatever the card's stage. null = the ledger has no session table (no authority to read).
+ * spec/restate/build/fix, reviewers with unsettled effects or recovery-selected review evidence, and begun creations.
+ * off/observe keep legacy review-stage bindings. Begun reviewer creation stays reserved whatever the card's stage;
+ * null = the ledger has no session table (no authority to read).
  */
-export function workingSeats(db: Database, project: string, exceptTask: string | null = null): Map<string, WorkingSeat> | null {
+export function workingSeats(db: Database, project: string, exceptTask: string | null = null,
+  reviewMode: RecoveryMode = reviewSeatMode(project)): Map<string, WorkingSeat> | null {
   if (!hasTable(db, "scheduler_sessions")) return null;
   const intents = hasTable(db, "scheduler_intents"), seats = new Map<string, WorkingSeat>();
   const seat = (key: string, family: AuthorFamily, reviewer: boolean): void => {
@@ -52,7 +56,7 @@ export function workingSeats(db: Database, project: string, exceptTask: string |
       AND json_extract(e.data,'$.head') IS i.head AND json_extract(e.data,'$.reviewerSessionId')=s.sessionId))))` : "";
   const rows = db.query(`SELECT DISTINCT s.agent, s.family, s.role FROM scheduler_sessions s JOIN tasks t ON t.id=s.taskId
     WHERE t.project=? AND t.id!=? AND s.transport!='peer' AND s.state!='retired'
-    AND ((s.role='author' AND t.stage IN ('spec','restate','build','fix')) OR (s.role='reviewer' AND (t.stage='review'${unsettledReview})))`)
+    AND ((s.role='author' AND t.stage IN ('spec','restate','build','fix')) OR (s.role='reviewer' AND ((${reviewSeatCondition(db, reviewMode)})${unsettledReview})))`)
     .all(project, exceptTask ?? "") as { agent: string; family: AuthorFamily; role: string }[];
   for (const r of rows) seat(r.agent, r.family, r.role === "reviewer");
   // A submitted ensure has already begun creating. Reserve it until a binding or an explicit cancellation exists.

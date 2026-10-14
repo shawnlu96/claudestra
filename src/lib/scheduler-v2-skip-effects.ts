@@ -86,6 +86,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-post-verify.ts": "ledger=2",
     "scheduler-recovery-ports.ts": "ledger=4",
     "scheduler-review-pm-tick.ts": "ledger=1",
+    "scheduler-review-seat-wait.ts": "ledger=1",
     "scheduler-review-swap-runtime.ts": "ledger=1 proc=1",
     "scheduler-sec-review.ts": "ledger=1",
     "scheduler-service.ts": "ledger=6 proc=1",
