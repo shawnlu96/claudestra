@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { listEvents } from "../src/lib/ledger-store.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { mustTask } from "../src/lib/ledger-checks.js";
 import { countCarryReceipt, countCarryReview, useCountCarryLedgerMode } from "../src/lib/review-count-carry-ledger.js";
@@ -83,6 +84,8 @@ describe("CARRYCNT1 count carry in the merge step's transaction", () => {
       },
         none, "不是效果点计数刷新"],
       ["claim by a PM", () => card([H0, H1], owner), none, "调度服务自己写"],
+      ["private-repo card", card, (c) => c.db.query("UPDATE tasks SET extra=? WHERE id='T9'").run(JSON.stringify({ fileGlobs: ["repo:acme/secret/src/**"] })),
+        "私仓卡"],
       ["UI card", card, (c) => c.db.query("UPDATE task_workflows SET template='ui'").run(), "UI 卡"],
       ["manual_merge", card, (c) => c.db.query("UPDATE scheduler_intents SET node='manual_merge' WHERE id=?").run(c.intent), "人工合并"],
       ["key off in the transaction", card, none, "不是 on", "off"],
@@ -96,7 +99,7 @@ describe("CARRYCNT1 count carry in the merge step's transaction", () => {
       try {
         mutate(c);
         const before = snapshot(c.db), actor = name === "owner identity" ? owner : sch;
-        const direct = () => c.db.transaction(() => countCarryReview(c.db, actor, run(c), H1, counted(H0, H1), 300, mergeReviewProof))();
+        const direct = () => c.db.transaction(() => countCarryReview(c.db, actor, run(c), H1, counted(H0, H1), 300, mergeReviewProof, insertEvent))();
         expect(() => on(direct, mode), name).toThrow(why);
         expect(snapshot(c.db), name).toBe(before);
         expect(() => on(() => step(c, "await_ci", counted(H0, H1), H1, actor), mode), name).toThrow();
@@ -161,7 +164,7 @@ describe("CARRYCNT1 count carry in the merge step's transaction", () => {
   test("a CARRY2 receipt is untouched by the count path", () => {
     const c = card(null);
     try {
-      expect(on(() => c.db.transaction(() => countCarryReview(c.db, sch, run(c), H1, "沿用审查：…", 300, mergeReviewProof))())).toBeNull();
+      expect(on(() => c.db.transaction(() => countCarryReview(c.db, sch, run(c), H1, "沿用审查：…", 300, mergeReviewProof, insertEvent))())).toBeNull();
     } finally { c.close(); }
   });
 });

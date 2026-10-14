@@ -3,17 +3,18 @@
  * countCarryReview first). A receipt not starting with COUNT_CARRY_LEAD is null (CARRY2 as before); one that does is written only
  * when all hold, else a LedgerError and not one row: the scheduler identity; a strict receipt naming (row.reviewedHead, newHead);
  * effCountCarry read now is on; the run is `updating` and the claim that put it there is the scheduler's own EFFAUTO1 claim for
- * exactly (H0, H1) (never git's author field); the task in merge at H0, no UI card, no manual_merge run; the formal source PASS
+ * exactly (H0, H1) (never git's author field); the task in merge at H0, no private-repo card (card-repo.ts privateCardRepo), no UI card, no manual_merge run; the formal source PASS
  * (reviewProof on carrySourceTask, injected: no import of scheduler-merge.ts) holds; no count carry since that review (one per
  * source review: bounded, never chasing main). The review_carry it writes is its last row, so carriedHead finds merge_phase at seq+1.
  * tests/review-count-carry-ledger.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
+import { privateCardRepo } from "./card-repo.js";
 import { mustTask } from "./ledger-checks.js";
 import { getIntent, getWorkflow } from "./ledger-scheduler.js";
+import type { EventKind } from "./ledger-stages.js";
 import { LedgerError, listEvents } from "./ledger-store.js";
-import { insertEvent } from "./ledger-tx.js";
 import { MANUAL_MERGE_NODE } from "./manual-merge-queue-facts.js";
 import { recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 import { carrySourceTask } from "./review-main-carry-auto-source.js";
@@ -63,9 +64,13 @@ function claimSeq(db: Database, row: MergeRun, oldHead: string, newHead: string)
   return claim.seq;
 }
 
+/** ledger-tx insertEvent, injected by scheduler-merge.ts (only write modules import ledger-tx; tests/ledger-migrate.test.ts). */
+type WriteEvent = (db: Database, ctx: WriteCtx, e: { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> },
+  primary: boolean) => { seq: number };
+
 /** null = not a count receipt (the caller's CARRY2 path); else the review_carry seq, or a throw with nothing written. */
 export function countCarryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string, receipt: string, now: number,
-  reviewProof: ReviewProof): { seq: number; ui: UiCarryPlan } | null {
+  reviewProof: ReviewProof, insertEvent: WriteEvent): { seq: number; ui: UiCarryPlan } | null {
   if (!receipt.startsWith(COUNT_CARRY_LEAD)) return null;
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "计数沿用只许调度服务身份写");
   const ev = parseCountCarryReceipt(receipt);
@@ -75,6 +80,7 @@ export function countCarryReview(db: Database, ctx: WriteCtx, row: MergeRun, new
   const claim = claimSeq(db, row, ev.oldHead, ev.newHead);
   const task = mustTask(db, row.taskId), workflow = getWorkflow(db, row.taskId), intent = getIntent(db, row.intentId);
   if (task.stage !== "merge" || task.headSHA !== ev.oldHead) refuse("任务阶段或旧 head 已变");
+  if (privateCardRepo(task)) refuse("私仓卡读不到本仓完整调度图，不沿用计数提交（照 SKIPAUTO1）");
   if (!workflow || workflow.template === "ui") refuse("UI 卡（或没有流程记录）不沿用计数提交");
   if (!intent || intent.taskId !== task.id || intent.node === MANUAL_MERGE_NODE) refuse("人工合并（或找不到本 run 的合并意图）不沿用计数提交");
   let sourceReviewSeq: number;

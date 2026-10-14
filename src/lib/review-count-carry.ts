@@ -8,6 +8,9 @@
  * the ledger refusing it goes back to review with that reason (noted as failed), never to unknown. mergeState / CI on the new head
  * are the next pass's await_ci road, unchanged. tests/review-count-carry*.test.ts.
  */
+import { Database } from "bun:sqlite";
+import { privateCardRepo } from "./card-repo.js";
+import { getTask, LEDGER_PATH } from "./ledger-store.js";
 import type { RecoveryMode } from "./recovery-policy.js";
 import { countCarryProof, type CountProof, type CountProofInput } from "./review-count-carry-proof.js";
 import { countCarryMode, countCarryReceipt, EFF_COUNT_CARRY_KEY } from "./review-count-carry-ledger.js";
@@ -24,6 +27,8 @@ export interface CountCarryNote { taskId: string; actionKey: string; action: str
 export interface CountCarryPorts {
   mode(project: string): RecoveryMode;
   repoDir(project: string): string | null;
+  /** card-repo.ts privateCardRepo on the card; an unreadable card counts as private (the proof then refuses). */
+  privateRepo(taskId: string): boolean;
   prove(input: CountProofInput): Promise<CountProof>;
   note(note: CountCarryNote): Promise<void>;
 }
@@ -32,6 +37,14 @@ let writer: Manager | null = null;
 const DEFAULT_PORTS: CountCarryPorts = {
   mode: (project) => countCarryMode(project), // read every pass, never throws: an unreadable policy is off (the old re-review)
   repoDir: (project) => readSchedulerConfig().projects[project]?.repoDir ?? null,
+  privateRepo: (taskId) => {
+    let db: Database | undefined;
+    try {
+      db = new Database(LEDGER_PATH, { readonly: true });
+      const task = getTask(db, taskId);
+      return !task || !!privateCardRepo(task);
+    } catch { return true; } finally { db?.close(); }
+  },
   prove: (input) => countCarryProof(input),
   note: async (n) => {
     if (!writer) throw new Error("合并 tick 没有绑定台账写口");
@@ -77,7 +90,8 @@ export async function countCarryStep(run: MergeRun, pr: PrSnapshot, step: Step, 
   if (mode === "off") return null;
   const repoDir = ports.repoDir(run.project), ref = PR.exec(run.prRef), oldHead = run.reviewedHead.toLowerCase(), newHead = pr.head.toLowerCase();
   if (!repoDir || !ref) return null;
-  const proof = await ports.prove({ repoDir, repository: ref[1]!, prNumber: ref[2]!, oldHead, newHead });
+  const proof = await ports.prove({ repoDir, repository: ref[1]!, prNumber: ref[2]!, oldHead, newHead,
+    privateRepo: ports.privateRepo(run.taskId) });
   if (proof.kind === "none") return null;
   const facts: Record<string, unknown> = { mode, oldHead, newHead, ...(proof.kind === "refused" ? { reason: proof.reason } : {}),
     blobFrom: proof.blobFrom ?? null, blobTo: proof.blobTo ?? null, entries: proof.entries ?? [] };

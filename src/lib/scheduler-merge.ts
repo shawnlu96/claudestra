@@ -182,7 +182,7 @@ export function parseCarryReceipt(receipt: string): CarryEvidence | null {
  */
 function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string, receipt: string, now: number, chainRaw?: string): { seq: number; ui: UiCarryPlan } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "沿用审查只许调度服务身份写");
-  const counted = countCarryReview(db, ctx, row, newHead, receipt, now, mergeReviewProof); if (counted) return counted; // CARRYCNT1
+  const counted = countCarryReview(db, ctx, row, newHead, receipt, now, mergeReviewProof, insertEvent); if (counted) return counted; // CARRYCNT1
   const ev = parseCarryReceipt(receipt);
   if (!ev || ev.oldHead !== row.reviewedHead || ev.newHead !== newHead) throw new LedgerError("invalid", "沿用审查回执缺证据或 head 对不上");
   const task = mustTask(db, row.taskId);

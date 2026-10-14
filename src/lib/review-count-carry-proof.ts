@@ -4,7 +4,7 @@
  * a. H1 has the single parent H0; b. its subject is EFFAUTO1's REFRESH_SUBJECT (either missing: `none`, not a count commit at all);
  * c. the raw diff H0 → H1 is one `M 100644 → 100644` record of SKIP_EFFECTS_INVENTORY (its blobs B0 → B1 kept);
  * d. SKIPAUTO1 (checkSkipEffectsAutoScope over readScopeGit's raw-byte objects, PR headRefOid = H1) classes H0 → H1 as a pure count
- *    change matching this process's trusted scan, merge base H0;
+ *    change matching this process's trusted scan, merge base H0; a private-repo card is never eligible (as SKIPAUTO1 rules);
  * e. every changed entry's new value is COUNT_VALUE (no backslash or anything else that changes how TS reads the literal).
  * Every command is bounded (scopeRunIn / scopeBytesIn deadlines); any failure, timeout or mismatch is a refusal, never a carry.
  * The record checks (rawInventoryChange, badCountValues) are shared with the post-merge verify. tests/review-count-carry*.test.ts.
@@ -22,7 +22,8 @@ const RAW_DIFF_MAX = 4096;
 const SCAN_TIMEOUT_MS = 90_000;
 
 interface CountEntry { file: string; gate: string; from: string; to: string }
-export interface CountProofInput { repoDir: string; repository: string; prNumber: string; oldHead: string; newHead: string }
+/** privateRepo: card-repo.ts privateCardRepo(task) held (or the card could not be read); SKIPAUTO1 then never classes it eligible. */
+export interface CountProofInput { repoDir: string; repository: string; prNumber: string; oldHead: string; newHead: string; privateRepo: boolean }
 export type CountProof = Readonly<
   | { kind: "none"; reason: string }
   | { kind: "refused"; reason: string; blobFrom?: string; blobTo?: string; entries?: readonly CountEntry[] }
@@ -69,7 +70,7 @@ async function countOnly(io: CountProofIo, input: CountProofInput): Promise<Coun
   const change = rawInventoryChange(new TextDecoder("utf-8", { fatal: true }).decode(raw));
   if (typeof change === "string") return { kind: "refused", reason: change };
   const diff = await readScopeGit(input.repository, input.prNumber, newHead, io.scanRun, io.objectsRun, io.bytes);
-  const judged = await checkSkipEffectsAutoScope({ ...diff, base: oldHead }, [SKIP_EFFECTS_INVENTORY], newHead, { mode: "on", privateRepo: false });
+  const judged = await checkSkipEffectsAutoScope({ ...diff, base: oldHead }, [SKIP_EFFECTS_INVENTORY], newHead, { mode: "on", privateRepo: input.privateRepo });
   const entries = (judged?.entries ?? []).map(({ file, gate, from, to }) => ({ file, gate, from, to }));
   const more = { ...change, entries };
   if (!judged?.eligible) {

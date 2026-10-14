@@ -10,12 +10,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { privateCardRepo } from "../src/lib/card-repo.js";
 import { useEffCountRefreshPorts, type RefreshNote } from "../src/lib/effect-count-refresh.js";
 import { REFRESH_SUBJECT, type RefreshTrial } from "../src/lib/effect-count-refresh-git.js";
 import { mustTask } from "../src/lib/ledger-checks.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
-import { closeLedger, getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getMeta, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import type { LedgerEvent } from "../src/lib/ledger-stages.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { scopeBytesIn, scopeRunIn, type ScopeRun } from "../src/lib/order-deliver-scope-git.js";
@@ -94,12 +95,14 @@ function io(newHead: string, over: ProofOver = {}): CountProofIo {
 }
 
 /** The deploy kit's auto card (cross-family PASS at `head`), its merge run at await_ci on `head`. */
-function cardAt(head: string) {
+function cardAt(head: string, privateRepo = false) {
   const dir = mkdtempSync(join(tmpdir(), "count-carry-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const pm = { actor: "owner", now: 100 }, sch = { actor: "scheduler", now: 101 };
   createTask(db, pm, { project: "p", id: "T9", title: "count carry", kind: "code", agent: "agent-author" });
   setWorkflow(db, pm, { taskId: "T9", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "PM 接手" });
   db.query("UPDATE tasks SET stage='merge', round=1, rev=2, headSHA=?, pr=?, branch='feat/t9' WHERE id='T9'").run(head, PR);
+  const globs = privateRepo ? ["repo:example/repo/src/lib/**"] : ["src/lib/**"]; // the same card, only the repo: prefix differs
+  db.query("UPDATE tasks SET extra=? WHERE id='T9'").run(JSON.stringify({ fileGlobs: globs, ...(privateRepo ? { repo: "example/repo" } : {}) }));
   const intent = (id: string, node: string, action: string, status: string) => db.query(`INSERT INTO scheduler_intents
     (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
     VALUES (?,'T9','p',?,?,1,?,2,1,?,2,?,'seed',100,100)`).run(id, node, action, id === "m9" ? 4 : 2, head, status);
@@ -117,16 +120,16 @@ function cardAt(head: string) {
 }
 type Card = ReturnType<typeof cardAt>;
 
-interface Drive { mode: RecoveryMode; ledgerMode?: RecoveryMode; h0?: string; h1?: string; proof?: ProofOver; realNote?: boolean; restart?: boolean; draft?: boolean }
+interface Drive { mode: RecoveryMode; privateRepo?: boolean; ledgerMode?: RecoveryMode; h0?: string; h1?: string; proof?: ProofOver; realNote?: boolean; restart?: boolean; draft?: boolean }
 const OK_TRIAL = (sha: string): RefreshTrial => ({ ok: true, sha, files: [INVENTORY],
   entries: [{ file: "scheduler-merge-conflict.ts", gate: "writer", from: "sql=3 stmt=3", to: "sql=3 stmt=4" }] });
 
 /** CI red only on counts at H0 → EFFAUTO1 (on) claims and pushes H1 → the next pass reads H1; then what the ledger holds. */
 async function drive(o: Drive, after?: (c: Card) => Promise<void>) {
-  const h0 = o.h0 ?? H0, h1 = o.h1 ?? H1, c = cardAt(h0), notes: CountCarryNote[] = [], refreshNotes: RefreshNote[] = [];
+  const h0 = o.h0 ?? H0, h1 = o.h1 ?? H1, c = cardAt(h0, o.privateRepo), notes: CountCarryNote[] = [], refreshNotes: RefreshNote[] = [];
   const effPorts = () => useEffCountRefreshPorts({ mode: () => "on", repoDir: () => "/repo", trial: async () => OK_TRIAL(h1), remoteHead: async () => h0,
     push: async () => ({ ok: true }), note: async (n) => { refreshNotes.push(n); } });
-  const carryPorts = () => useCountCarryPorts({ mode: () => o.mode, repoDir: () => work, prove: (i) => countCarryProof(i, io(h1, o.proof)),
+  const carryPorts = () => useCountCarryPorts({ mode: () => o.mode, repoDir: () => work, privateRepo: (id) => !!privateCardRepo(getTask(c.db, id)), prove: (i) => countCarryProof(i, io(h1, o.proof)),
     ...(o.realNote ? {} : { note: async (n: CountCarryNote) => { notes.push(n); } }) });
   const tick = (pr: PrSnapshot) => {
     const external = { inspect: async () => pr, freshness: async () => ({ behindBy: 0, mainHead: base }), carryReview: async () => PURE_MAIN,
@@ -239,6 +242,18 @@ describe("CARRYCNT1 count carry (real merge tick, real git)", () => {
     expect(await notes(await commitOn(H0, bump, "chore: counts"))).toEqual([]); // b
     expect(await notes(await commitOn(await commitOn(H0, () => {}, "wip"), bump))).toEqual([]); // a
   }, 600_000);
+
+  test("[验收线 2] a private-repo card (matching clone, scheduler graph, valid EFFAUTO1 claim) never count-carries; the public twin does", async () => {
+    const priv = await drive({ mode: "on", privateRepo: true });
+    reReviewed(priv);
+    expect(priv.claim).toStartWith(`效果点计数自动刷新（CI 只红在效果点计数）：CI head ${H0} → 计数提交 ${H1}（`);
+    expect(priv.notes).toEqual([]);
+    const observed = await drive({ mode: "observe", privateRepo: true });
+    reReviewed(observed);
+    expect(observed.notes.map((n) => [n.actionKey.split(".")[0], n.data.reason])).toEqual([["wouldnot", expect.stringContaining("私仓卡")]]);
+    const pub = await drive({ mode: "on", privateRepo: false });
+    expect([pub.run.phase, pub.task.headSHA, pub.task.round, pub.carries.length]).toEqual(["await_ci", H1, 1, 1]);
+  }, 300_000);
 
   test("[验收线 3] the proof holds but the ledger refuses (on in the driver, off in the transaction): back to review, no unknown, no freeze", async () => {
     const r = await drive({ mode: "on", ledgerMode: "off" });
