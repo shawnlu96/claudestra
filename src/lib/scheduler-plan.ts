@@ -29,6 +29,7 @@ import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
 import { centerReviewed } from "./scheduler-center-facts.js";
 import { ciProofAdmits } from "./scheduler-ci-proof-gate.js";
 import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./review-source-proof.js";
+import { ownerFreshStep } from "./scheduler-ui-owner-fresh.js";
 
 export interface WorkerRef {
   agent: string;
@@ -279,7 +280,8 @@ function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, down
     const bind = { task: s.task.id, specRev: s.task.specRev, head: s.task.headSHA as string, screenshotsDigest: s.screenshotsDigest as string };
     if (ui.kind === "wait") return wait(ui.code, ui.reason);
     if (ui.kind === "escalate") return escalate(ui.code, ui.reason, facts.eventSeq);
-    if (ui.kind === "ask_owner") return makeIntent(s, node, "ask", "请 owner 看前后截图", [taskResource(s)], { askBind: bind });
+    if (ui.kind === "ask_owner") return ownerFreshStep(s, (id, why) => makeIntent(s, { ...node, id }, "merge", why, [taskResource(s)])) // UIOWNCARRY2
+      ?? makeIntent(s, node, "ask", "请 owner 看前后截图", [taskResource(s)], { askBind: bind });
     if (ui.kind === "notify_pm") return makeIntent(s, node, "ask", "请 PM 看前后截图", [taskResource(s)], { pmNotice: { ...bind, round: s.task.round } });
     if (ui.kind === "fix") {
       return makeIntent(s, node, "stage", "PM 未通过前后截图，进入 fix", [taskResource(s)], { targetStage: "fix", ...(downgrade ? { downgrade } : {}) });
