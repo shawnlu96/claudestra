@@ -33,7 +33,7 @@ let ui: {
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
   asksStore: { refresh(): Promise<void>; closeDrawer(): void; get(): { open: boolean; focus: string | null } };
   useCollabNav: () => { project: string | null; task: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
-  TODAY_KEY: string;
+  TODAY_KEY: string; resetLedgers: () => void;
 };
 
 const FP = "mac-a";
@@ -84,12 +84,15 @@ beforeAll(async () => {
     require("../web/features/collab/collab-nav.ts"), require("../web/features/collab/team-view-entry.tsx"), require("../web/features/collab/collab-switch.tsx")];
   ui = { MessageList: list.MessageList, Sidebar: side.Sidebar, NowStrip: now.NowStrip, CollabSwitch: sw.CollabSwitch, closingCollab: sw.closingCollab,
     ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi, ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore,
-    useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab, unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest, TODAY_KEY: now.TODAY_KEY };
+    useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab, unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest, TODAY_KEY: now.TODAY_KEY,
+    resetLedgers: require("../web/features/now/now-ledgers.ts").resetTodayLedgersForTest };
 });
 
 afterEach(async () => {
   for (const off of [...live]) await off();
   await React.act(async () => ui.unmountOpenViewGuard());
+  // 台账读取是模块级共用的一份（拒绝访问的记录也在里面）：用例之间清掉
+  await React.act(async () => ui.resetLedgers());
   world = freshWorld();
   calls.length = 0;
   aborted.length = 0;
@@ -254,5 +257,30 @@ test("[验收线 4] 桌面点侧栏条『整页』：主区盖出今天页；再
   await v.click(master(), "session row again");
   expect(v.seen.nav.project).toBeNull();
   await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed");
+  await v.unmount();
+});
+
+test("[回归] 页面版、整页、展开的侧栏条同时挂着也只跑一套读取：没选会话时点『整页』不重读，每项目各一次", async () => {
+  win.localStorage.setItem("cstra_now_open", "1");
+  const v = await mount("shell");
+  await until(() => v.all("[data-now-stuck-row]").length >= 3 && ledgerCalls().length === 6, "first reads");
+  await tick(100);
+  const once = ["GET /api/v1/ledger/proj-a", "GET /api/v1/ledger/proj-a/product", "GET /api/v1/ledger/proj-b",
+    "GET /api/v1/ledger/proj-b/product", "GET /api/v1/ledger/proj-c", "GET /api/v1/ledger/proj-c/product"];
+  expect(ledgerCalls().sort()).toEqual(once);
+  // 事件流外壳别处也会连（侧栏），这里只看「整页」盖上之后没有多连
+  const streams = () => calls.filter((c) => c === "GET /api/v1/events").length;
+  const before = streams();
+  await v.click(v.host.querySelector("[data-now=strip] [data-now-full]"), "full page");
+  await until(() => v.all("main [data-now=page]").length === 2, "overlay over empty-state page");
+  await tick(200);
+  expect(ledgerCalls().sort()).toEqual(once);
+  expect(streams()).toBe(before);
+  // 盖层收起、侧栏条收起：还有主区空状态那份在看，读取不中止也不重起
+  ui.closeCollab();
+  await until(() => v.all("main [data-now=page]").length === 1, "overlay closed");
+  await v.click(v.host.querySelector("[data-now=strip] button[aria-expanded]"), "collapse strip");
+  await tick(200);
+  expect(ledgerCalls().sort()).toEqual(once);
   await v.unmount();
 });

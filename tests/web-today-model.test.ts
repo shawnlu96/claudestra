@@ -74,8 +74,17 @@ test("对不上模块的 agent 归到「其他」一行；读不了台账的项�
   const a = v.doing.find((p) => p.row.id === "proj-a")!;
   expect(a.modules!.at(-1)).toMatchObject({ id: null, title: "其他", faces: [{ name: "a-ops", label: "a-ops", doing: "整理日志" }] });
   const denied = todayView(input({ denied: new Set(["proj-a", "proj-c"]) }), deps).doing.find((p) => p.row.id === "proj-a")!;
-  expect(denied.modules).toBeNull();
-  expect(denied.workers.map((w) => w.name)).toEqual(["a-dev1", "a-dev2"]);
+  expect(denied).toMatchObject({ modules: null, workers: [], doing: false });
+});
+
+test("[验收线 1] 台账 403 的项目只出项目行：有忙的 agent 也不列 agent 行（与没有产品看板的退回区分开）", () => {
+  const agents = [...todayAgents(), { name: "c-busy", displayName: "c-busy", purpose: "", cwd: "/repo", status: "active", projectId: "proj-c", busy: true }];
+  const v = todayView(input({ agents: agents as AgentSession[] }), deps);
+  const of = (id: string) => [...v.doing, ...v.rest].find((p) => p.row.id === id)!;
+  expect(of("proj-c")).toMatchObject({ modules: null, workers: [], doing: false });
+  expect(of("proj-c").row.working).toBe(1);
+  expect(of("proj-b")).toMatchObject({ modules: null, doing: true });
+  expect(of("proj-b").workers.map((w) => w.name)).toEqual(["b-dev"]);
 });
 
 test("[验收线 1] 今天完成合计 3（昨天完成的不算）；unknownMetrics 含 todayDone 的项目不计入、单独计数", () => {

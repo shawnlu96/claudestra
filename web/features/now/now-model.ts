@@ -114,9 +114,9 @@ export interface TodayFace { name: string; label: string; doing: string }
 export interface TodayModule { id: string | null; title: string; completed: number; total: number; active: number; faces: TodayFace[] }
 export interface TodayProject {
   row: NowProject;
-  /** 产品看板的在做模块（含末尾的「其他」）；null = 没有产品看板 / 读不了台账，退回按 agent 列 */
+  /** 产品看板的在做模块（含末尾的「其他」）；null = 没有产品看板（退回按 agent 列）或读不了台账（只出项目行） */
   modules: TodayModule[] | null;
-  /** 退回时列的 agent 行（UXHOME1 的在干活） */
+  /** 没有产品看板时列的 agent 行（UXHOME1 的在干活）；台账读不了的项目为空 */
   workers: NowWorker[];
   /** 有在做事项：没有的项目超过折叠数时收进「其余 K 个项目」 */
   doing: boolean;
@@ -231,7 +231,9 @@ export function todayView(input: TodayInput, deps: NowDeps): TodayView {
     const lines = ov ? homeView(ov, input.now, t, ownerWaits(input.asks, row.id, undefined).waits).lines : [];
     for (const l of lines) if (l.attention === "problem" || l.attention === "stuck") stuck.push(stuckRow(l, row.id, row.name, t));
     const board = ov ? input.boards.get(row.id) : undefined;
-    const workers = input.agents.filter((a) => a.busy && a.projectId === row.id).map((a) => base.workers.find((w) => w.name === a.name)!);
+    // 台账读不了（403 / 404）：只出项目行，不列 agent；没有产品看板：退回按 agent 列
+    const denied = input.denied.has(row.id);
+    const workers = denied ? [] : input.agents.filter((a) => a.busy && a.projectId === row.id).map((a) => base.workers.find((w) => w.name === a.name)!);
     const modules = board ? modulesOf(row.id, board, lines, input.agents, lang, t) : null;
     doing.push({ row, modules, workers, doing: modules ? modules.length > 0 : workers.length > 0 });
   }

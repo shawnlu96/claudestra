@@ -104,7 +104,8 @@ beforeAll(async () => {
     if (path === "/api/v1/asks") return json({ ok: true, asks: ASKS, now: NOW, canAnswer: true });
     if (path === "/api/v1/shared-ledger/context") return world.identities === "fail" ? json({ ok: false }, 503) : json({ identities: world.identities });
     if (path === "/api/v1/shared-projects/snapshot") return json(SNAPSHOT);
-    if (/^\/api\/v1\/ledger\/local-(group|solo)$/.test(path)) return json(LEDGER);
+    // TODAY1：页面版读每个本机项目的台账，403 / 404 只出项目行；四个项目都答空台账，团队项目的 agent 行照 UXHOME1 出
+    if (/^\/api\/v1\/ledger\/(local|team)-(group|solo)$/.test(path)) return json(LEDGER);
     return json({ ok: false, error: "not in fixture" }, 404);
   }) as typeof fetch;
   const [list, side, now, store, nav, asks, collabNav, viewEntry] = [
@@ -196,7 +197,12 @@ test("[验收线 2] 桌面没选会话时主区是『今天』页，三块齐全
   expect(v.texts("[data-now-project=team-group]")[0]).toBe("团队成组团队在干活 1 个 agent待你处理 1 件");
   expect(v.texts("[data-now-project=local-solo]")[0]).toBe("本机单成员");
   // 不新增请求：除了外壳本来就读的会话 / 未读 / 项目 / 待办，只有团队绑定那一份（项目组入口读的同一个 store）
-  expect(calls.filter((c) => !/^GET \/(app-config\.json|api\/v1\/(agents|unread|projects|asks|shared-ledger\/context|ledger\/[\w-]+(\/product)?|events|lend\/quota-lines))$/.test(c))).toEqual([]);
+  // TODAY1 起页面版另读各项目台账 / 产品看板、事件流、额度（规格 PM 定 9）：逐条点名、恰好各一次，从外壳请求里拿出去，其余照原断言
+  const today = ["GET /api/v1/events", "GET /api/v1/lend/quota-lines", ...PROJECTS.flatMap((p) => [`GET /api/v1/ledger/${p.id}`, `GET /api/v1/ledger/${p.id}/product`])];
+  expect(calls.filter((c) => today.includes(c)).sort()).toEqual([...today].sort());
+  expect(calls.filter((c) => /\/quota$/.test(c))).toEqual([]);
+  const shell = calls.filter((c) => !today.includes(c));
+  expect(shell.filter((c) => !/^GET \/(app-config\.json|api\/v1\/(agents|unread|projects|asks|shared-ledger\/context))$/.test(c))).toEqual([]);
   await v.unmount();
 });
 
