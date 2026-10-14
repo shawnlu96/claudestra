@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Principal } from "../src/lib/principals.js";
@@ -7,6 +7,7 @@ import type { CodexModel } from "../src/lib/codex-catalog.js";
 import { codexDefaultsRoute, type CodexDefaultsDeps } from "../src/bridge/runtime-settings-routes.ts";
 import { writeCodexDefaults, type CodexConfigWriter } from "../src/lib/codex-config-write.ts";
 import { sandboxDeniedRoute } from "../src/bridge/sandbox-routes.ts";
+import { writeTextAtomicSync } from "../src/lib/state-file.ts";
 
 const OWNER: Principal = { id: "owner:self", role: "owner", agents: ["*", "master"], createdAt: "2026-01-01T00:00:00Z", manage: true, credential: "dev_o1" };
 const GUEST: Principal = { id: "guest:1", role: "external", name: "g", agents: ["worker"], createdAt: "2026-01-01T00:00:00Z", manage: false, credential: "dev_g1" };
@@ -147,11 +148,25 @@ describe("认不出的写法 / 并发（验收 7、8）", () => {
     expect(final.model_reasoning_effort).toBeUndefined();
   });
 
-  test("写后自检读回不对 → 回滚到原文件并报错", async () => {
-    const corrupt: CodexConfigWriter = (path, text) => writeFileSync(path, text === ORIGINAL ? text : "model = \n");
-    const r = await codexDefaultsRoute(req("PUT", { effort: "low" }), OWNER, deps({ write: corrupt }));
-    expect(r.status).toBe(500);
-    expect(readFileSync(cfg, "utf8")).toBe(ORIGINAL);
+  test("rename 之后别的进程追加合法的 [projects] → 保留磁盘内容（不回滚、不删），409", async () => {
+    const extra = '\n[projects."/x"]\ntrust_level = "trusted"\n';
+    const thenAppend: CodexConfigWriter = (path, text, opts) => {
+      writeTextAtomicSync(path, text, opts);
+      appendFileSync(path, extra); // 原子写返回之后，另一个进程的合法修改
+    };
+    const r = await codexDefaultsRoute(req("PUT", { effort: "low" }), OWNER, deps({ write: thenAppend }));
+    expect(r.status).toBe(409);
+    expect(readFileSync(cfg, "utf8")).toBe(ORIGINAL.replace('"xhigh"', '"low"') + extra);
+  });
+
+  test("原来没有文件、rename 之后被别人改了 → 也不删", () => {
+    rmSync(cfg);
+    const thenAppend: CodexConfigWriter = (path, text, opts) => {
+      writeTextAtomicSync(path, text, opts);
+      appendFileSync(path, "x = 1\n");
+    };
+    expect(() => writeCodexDefaults(home, { model: "m" }, { write: thenAppend })).toThrow("已保留磁盘上的内容");
+    expect(readFileSync(cfg, "utf8")).toBe('model = "m"\nx = 1\n');
   });
 });
 

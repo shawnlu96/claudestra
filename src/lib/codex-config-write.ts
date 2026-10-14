@@ -3,8 +3,8 @@
  *
  * 只动这两行：别的表、注释、空行、顺序逐字保留（用户手写的 mcp_servers / profiles 都在这个文件里）。
  * 不用 TOML 库重写：解析再序列化会丢注释、改格式。这里是一个够用的行扫描——认得各种字符串（含多行）、带转义的
- * 引号键名、注释和跨行数组 / 内联表；认不出的写法一律拒写（CodexConfigError unsupported）。改完再用 Bun.TOML.parse
- * 核对「除这两项外结构不变」，写盘后再解析一次，不对就回滚。纯函数单测：tests/codex-config-write.test.ts。
+ * 引号键名、注释和跨行数组 / 内联表；认不出的写法一律拒写（CodexConfigError unsupported）。写盘前用 Bun.TOML.parse
+ * 核对新文本「除这两项外结构不变」；提交之后不回滚（见 checkWritten）。纯函数单测：tests/codex-config-write.test.ts。
  */
 import { copyFileSync, chmodSync, existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -258,7 +258,7 @@ const KEEP_BACKUPS = 5;
 export type CodexConfigWriter = typeof writeTextAtomicSync;
 
 /**
- * 读 → 改 → 核对 → 备份 → 原子写（tmp + rename，保留原权限）→ 写后再解析，不对就回滚。
+ * 读 → 改 → 核对（只对内存里的新文本）→ 备份 → 原子写（tmp + rename，保留原权限）→ 读回，提交之后不回滚。
  * opts.before = 调用方校验时用的那份原文（null = 文件不存在）：磁盘上的和它不一样就 conflict，rename 前再核一次——
  * 校验和提交必须基于同一份快照，否则两个请求交错会写出目录不支持的组合（tests/codex-defaults.test.ts 并发用例）。
  */
@@ -288,19 +288,16 @@ export function writeCodexDefaults(
   } catch (e) {
     throw raced ? conflict() : e;
   }
-  checkWritten(path, text, before, write);
+  checkWritten(path, text);
   return { text, backup, changed: true };
 }
 
-/** 写后自检：磁盘上的就是要写的且能解析；否则回滚到原文（原来没有就删掉）并报错 */
-function checkWritten(path: string, text: string, before: string | null, write: CodexConfigWriter): void {
-  const disk = readOrNull(path);
-  let ok = disk === text;
-  try { if (ok) Bun.TOML.parse(disk!); } catch { ok = false; } // 解析失败就是自检不过，下面回滚并报错
-  if (ok) return;
-  if (before === null) unlinkSync(path);
-  else write(path, before, { preserveMode: true, mode: 0o600 });
-  throw new Error("写完自检没通过（读回的内容不对或解析不了），已回滚到原文件");
+/**
+ * 写后读回：和刚写的不一样 = rename 之后有别人（Codex 自己会写 [projects.*]）合法地改了它。磁盘上的内容一律保留——
+ * 不回滚、不删、不再覆盖（回滚会把别人的改动冲掉），报 conflict 让页面刷新重试。tests/codex-defaults.test.ts「rename 之后」用例。
+ */
+function checkWritten(path: string, text: string): void {
+  if (readOrNull(path) !== text) throw new CodexConfigError("config.toml 写入后又被别处改过，已保留磁盘上的内容，请刷新后核对", "conflict");
 }
 
 /** 每次保存都备份一份，只留最近 KEEP_BACKUPS 份（文件名带 ISO 时间，字典序即时间序） */
