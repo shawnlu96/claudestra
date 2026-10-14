@@ -107,8 +107,10 @@ beforeAll(async () => {
     if (/^\/api\/v1\/ledger\/local-(group|solo)$/.test(path)) return json(LEDGER);
     return json({ ok: false, error: "not in fixture" }, 404);
   }) as typeof fetch;
-  const [list, side, now, store, nav, asks, collabNav] = [require("../web/features/chat/components/message-list.tsx"), require("../web/features/chat/components/sidebar.tsx"),
-    require("../web/features/now/now-home.tsx"), require("../web/features/chat/chat-store.ts"), require("../web/features/chat/components/nav-context.tsx"), require("../web/features/asks/asks-store.ts"),
+  const [list, side, now, store, nav, asks, collabNav] = [
+    require("../web/features/chat/components/message-list.tsx"), require("../web/features/chat/components/sidebar.tsx"),
+    require("../web/features/now/now-home.tsx"), require("../web/features/chat/chat-store.ts"),
+    require("../web/features/chat/components/nav-context.tsx"), require("../web/features/asks/asks-store.ts"),
     require("../web/features/collab/collab-nav.ts")];
   ui = { MessageList: list.MessageList, Sidebar: side.Sidebar, NowStrip: now.NowStrip, ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi,
     ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore, useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab };
