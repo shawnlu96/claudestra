@@ -148,7 +148,7 @@ export function FocusBoard(p: BoardProps) {
         )}
         {model.done.length > 0 && (
           <section data-section="done" className={s.section}>
-            <FocusDone done={model.done} done24h={model.head.done24h} autoOpen={model.autoOpenDone} now={p.now} links={links} reveal={pulse} ft={ft} />
+            <FocusDone featureId={feature.id} done={model.done} done24h={model.head.done24h} autoOpen={model.autoOpenDone} now={p.now} links={links} reveal={pulse} ft={ft} />
           </section>
         )}
       </div>
