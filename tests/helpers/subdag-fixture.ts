@@ -76,7 +76,7 @@ function teamDetail(f: FeatureCard, now: number): FeatureDetail {
     dag: { version: 1, nodes, bindings: tasks.map((t) => ({ nodeKey: t.sourceTaskId.replace(/^T-/, ""), taskId: t.taskId })) }, tasks };
 }
 
-export function subdagFixture(now = MAIN_NOW) {
+function subdagFixture(now = MAIN_NOW) {
   const features = localFeatures(now);
   const details = new Map(features.map((f) => [f.id, teamDetail(f, now)]));
   const list: FeatureList = { schemaVersion: 1, teamId: SUBDAG_TEAM, serverSeq: 5, capabilities: {}, features: [...details.values()].map((d) => d.feature) };
