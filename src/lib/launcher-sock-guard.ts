@@ -130,10 +130,18 @@ export class LauncherSockGuard {
       ));
       return false;
     }
+    const [prevAt, prevConfirmed] = [this.createdAt, this.confirmed];
     this.createdAt = this.p.now();
     this.confirmed = null;
-    this.saveMark();
-    return true;
+    const err = this.saveMark();
+    if (err === null) return true;
+    // 记录没落盘就新建，launcher 一重启冻结就丢，空服务会被当成全员空闲 / 全员 dead：宁可不建，下一轮再试
+    [this.createdAt, this.confirmed] = [prevAt, prevConfirmed];
+    await this.alertOnce(`create:mark:${err}`, t(
+      `⚠️ launcher 本要新建 master，但新建记录写不了（${err}），不新建，下一轮再试。`,
+      `⚠️ launcher was about to create master, but could not write the create mark (${err}); not creating, will retry next round.`,
+    ));
+    return false;
   }
 
   /** 依赖窗口列表的判断此刻该不该冻结；返回原因，null = 不冻结 */
@@ -246,10 +254,13 @@ export class LauncherSockGuard {
     this.confirmed = m.confirmed;
   }
 
-  private saveMark(): void {
-    if (!Number.isFinite(this.createdAt)) return; // 从没新建过：没什么可记
-    try { this.p.saveMark({ createdAt: this.createdAt, confirmed: this.confirmed }); } catch (e) {
-      this.p.log(`🧷 新建记录写不了（launcher 重启后冻结会丢）：${(e as Error).message}`);
+  /** 返回出错信息，null = 已落盘（或从没新建过、没什么可记） */
+  private saveMark(): string | null {
+    if (!Number.isFinite(this.createdAt)) return null;
+    try { this.p.saveMark({ createdAt: this.createdAt, confirmed: this.confirmed }); return null; } catch (e) {
+      const msg = (e as Error).message;
+      this.p.log(`🧷 新建记录写不了：${msg}`);
+      return msg;
     }
   }
 

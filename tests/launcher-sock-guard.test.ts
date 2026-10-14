@@ -15,7 +15,7 @@ function rig(o: { probes?: SockProbe[]; servers?: TmuxServerProc[] | null; mode?
     clock: 0, sleeps: [] as number[], usr1: [] as number[], logs: [] as string[], alerts: [] as string[], busyCalls: 0,
     servers: o.servers === undefined ? [] : o.servers, inode: 42 as number | null, mode: o.mode ?? "observe", active: o.active ?? 20, probes: 0,
     push: (...p: SockProbe[]) => queue.push(...p),
-    mark: o.mark as CreateMark | undefined | null, saved: [] as CreateMark[],
+    mark: o.mark as CreateMark | undefined | null, saved: [] as CreateMark[], saveFail: false,
   };
   const ports: SockGuardPorts = {
     probe: async () => { s.probes++; const p = queue.shift(); if (!p) throw new Error("没有预置的探测结果"); return p; },
@@ -30,7 +30,10 @@ function rig(o: { probes?: SockProbe[]; servers?: TmuxServerProc[] | null; mode?
     log: (m) => { s.logs.push(m); },
     alert: async (t) => { s.alerts.push(t); },
     loadMark: () => s.mark,
-    saveMark: (m) => { s.saved.push(structuredClone(m)); s.mark = structuredClone(m); },
+    saveMark: (m) => {
+      if (s.saveFail) throw new Error("EACCES: permission denied");
+      s.saved.push(structuredClone(m)); s.mark = structuredClone(m);
+    },
   };
   return { s, g: new LauncherSockGuard(ports) };
 }
@@ -306,5 +309,19 @@ describe("新建冻结跨 launcher 重启 [验收线 4]", () => {
     await none.g.check();
     expect(none.g.frozen()).toBeNull();
     expect(none.s.saved).toEqual([]);
+  });
+
+  test("新建记录写不了：claimCreate 不放行（不 new-session），告警；重启后不会无冻结地放过", async () => {
+    for (const mark of [undefined, { createdAt: -60 * 60_000, confirmed: null }]) {
+      const a = rig({ servers: [], mark, probes: [pr("absent"), pr("absent"), pr("absent")] });
+      a.s.saveFail = true;
+      expect(await a.g.check()).toBe("start");
+      expect(await a.g.claimCreate()).toBe(false);
+      expect(a.s.alerts.join()).toContain("EACCES");
+      expect(a.s.mark).toEqual(mark);
+      a.s.saveFail = false;
+      expect(await a.g.claimCreate()).toBe(true);
+      expect(a.s.mark?.createdAt).toBe(0);
+    }
   });
 });
