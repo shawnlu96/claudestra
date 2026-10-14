@@ -37,9 +37,10 @@
 - 押着时这条请求不算送到，送达后几个 caller 同时在等。
 - target 用 send_to_agent 回给 X，只消化 X 那一槽。
 - 没指明答给谁的回复（自己频道 reply、Stop 兜底），只在恰好一个 caller 在等时才推。多个在等就谁都不推，提醒 target 分别回。
-- 补的一处在 `bridge/stop-settle.ts settleCallers`。这一轮如果是几个 agent 的请求一起开的，那么 A 被单独答掉、只剩 B 在等时，
-  Stop 兜底不把这一轮的话推给 B，也不静默消化 B 的槽。回程留着，等 target 用 send_to_agent 答 B。
-  只发 oneShot 通知的发送人不算请求方，不挡唯一请求方的兜底。
+- 补的一处是 `bridge/stop-settle.ts answerableUnmixed`。target 在自己频道 reply（`bridge.ts answerablePac`）和 Stop 兜底，
+  都经它判没指明收件人的答复归谁。这一轮如果是几个 agent 的请求一起开的，那么 A 被单独答掉、只剩 B 在等时，这句话不认成答 B 的：
+  既不推给 B，也不消化 B 的槽。回程留着，等 target 用 send_to_agent 答 B；精确答复不经这道判定。
+  只发 oneShot 通知的发送人不算请求方，不挡唯一请求方。
 
 ## 和逐条投递的差别
 

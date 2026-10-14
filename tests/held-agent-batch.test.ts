@@ -9,7 +9,7 @@ import { AgentCallBook } from "../src/bridge/agent-calls.js";
 import { clearOpenedBy, flushHeld, onHeldDelivered, type FlushDeps } from "../src/bridge/held-flush.js";
 import { HeldQueue, onHeldSettled, unseenFrom, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
-import { noteDelivered, settleStopTurn, type CallerSettleDeps } from "../src/bridge/stop-settle.js";
+import { answerableUnmixed, noteDelivered, settleStopTurn, type CallerSettleDeps } from "../src/bridge/stop-settle.js";
 import { agentBatchMembers, HELD_AGENT_BATCH_ENV, heldAgentBatchOn } from "../src/lib/held-agent-batch.js";
 import { requestStillHeld } from "../src/lib/held-pac.js";
 import { INBOX_BUDGET, INBOX_MAX_TAKE } from "../src/lib/inbox-batch.js";
@@ -79,7 +79,13 @@ const originals = (content: string) => [...content.matchAll(/^\[\d+\/\d+ (\{.*\}
 
 const offs: (() => void)[] = [];
 let settled: string[] = [], hooked: string[] = [];
-beforeEach(() => {
+const noopSettle: CallerSettleDeps = {
+  answerable: () => undefined, waiting: () => [], rearmResume: () => {}, consume: () => {}, pushBack: async () => {}, nudgeAmbiguous: () => {},
+  markApiError: () => undefined, clearWithheld: () => {}, takeApiErrorNotice: () => [], notify: async () => {}, metric: () => {}, recovered: () => {},
+};
+beforeEach(async () => {
+  // stop-settle 的「这一轮谁开的」是模块级状态：上一个用例没走 Stop 的话会并进下一个用例的这一轮，先空收一次
+  await settleStopTurn(noopSettle, { cid: ME, stopChannelId: ME, stopWs: ws, candidateWs: ws, event: "Stop", drain: { text: null } });
   clearOpenedBy();
   settled = [];
   hooked = [];
@@ -199,6 +205,28 @@ describe("回复不认错人：同一批里 A、B 各一条请求", () => {
     expect(s.calls.slot(ME, SENDERS.B.ch)).toBeDefined(); // 等 target 用 send_to_agent 答 B
     await s.stopTurn(null); // 没文字的一轮同样不静默消化 B
     expect(s.calls.slot(ME, SENDERS.B.ch)).toBeDefined();
+  });
+
+  test("mixed-turn-own-reply：精确答 A 后在自己频道 reply——不推给 B、不占 B 的槽，B 之后仍能被精确答复（PR1528-r1 P1）", async () => {
+    const s = scene();
+    await s.r.stop();
+    s.calls.consume(ME, SENDERS.A.ch, s.calls.exact(ME, SENDERS.A.ch, s.stillHeld)!);
+    expect(s.calls.answerable(ME, s.stillHeld)?.callerName).toBe("agent-b"); // 只看回程簿（改动前 bridge.ts 的 answerablePac）就会认成 B
+    expect(answerableUnmixed(s.calls, ME, s.stillHeld)).toBeUndefined(); // reply 分支和 Stop 兜底共用的判定：不认
+    expect(s.calls.slot(ME, SENDERS.B.ch)).toBeDefined();
+    const b = s.calls.exact(ME, SENDERS.B.ch, s.stillHeld)!; // target 之后用 send_to_agent 答 B：精确答复照常有效
+    expect(b.callerName).toBe("agent-b");
+    s.calls.consume(ME, SENDERS.B.ch, b);
+    expect(s.calls.waiting(ME, s.stillHeld)).toEqual([]);
+  });
+
+  test("对照：只有一个请求方开的一轮，自己频道 reply 照旧归它", async () => {
+    const s = scene();
+    s.r.held.remove(ME, s.r.held.get(ME)![1]); // B 那条不在这一批（比如已被别处处理）
+    s.calls.consume(ME, SENDERS.B.ch);
+    await s.r.stop();
+    expect(s.r.sends).toHaveLength(1);
+    expect(answerableUnmixed(s.calls, ME, s.stillHeld)?.callerName).toBe("agent-a");
   });
 
   test("对照：同一批里另一条只是 oneShot 通知（不等回）——唯一的请求方照旧拿到 Stop 兜底", async () => {
