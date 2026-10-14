@@ -129,13 +129,19 @@ function parsePushRuns(raw: unknown, sha: string): { runs: MainCiPushRun[]; comm
 
 /**
  * Run-aware reading of the same reasons, for this SHA only (staleness, drift and read errors never get here, or stay a fault):
- * a completed non-success check is a fault even while others are pending; missing / pending with an active push run is waiting until
+ * green checks whose only push runs were cancelled are evidence_missing; a completed non-success check is a fault even while others
+ * are pending; missing / pending with an active push run is waiting until
  * the run is MAIN_CI_RUN_MAX_MS old; no push run is waiting until MAIN_CI_RUN_CREATE_MS after the commit; anything else is evidence_missing.
  */
 function classifyRuns(h: MainCiHealth, raw: unknown, sha: string): MainCiRunVerdict {
   const parsed = parsePushRuns(raw, sha), runs = parsed?.runs ?? [];
   const v = (verdict: MainCiRunVerdict["verdict"], why: MainCiRunVerdict["why"]): MainCiRunVerdict => ({ verdict, why, runs });
-  if (h.state === "green") return v("green", "healthy");
+  // Green checks still need trustworthy run evidence: a sole (every) push run cancelled with no new attempt is not a healthy main.
+  if (h.state === "green") {
+    if (!parsed) return v("unhealthy", "runs_unreadable");
+    const cancelled = runs.length > 0 && runs.every((r) => r.status === "completed" && r.conclusion === "cancelled");
+    return cancelled ? v("evidence_missing", "run_cancelled") : v("green", "healthy");
+  }
   if (h.reasons.some((r) => !["missing_check", "pending_check", "unsuccessful_check"].includes(r.code))) return v("unhealthy", "other_fault");
   const failed = h.reasons.filter((r) => r.code === "unsuccessful_check");
   if (failed.some((r) => r.conclusion !== "cancelled")) return v("unhealthy", "check_failed");

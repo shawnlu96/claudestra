@@ -87,9 +87,11 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
   const response = await readFailureResponse(gate.db, { project, health, currentMainSha: current, now: gate.now() },
     { ...deps, command: mainCiTestPorts.command ?? deps.command, policy: deps.policy ?? recoveryPolicy, cwd: policy.repoDir });
   const plan = mainCiPlanFor(gate, project, { taskId: "", head: "" }, mainCiClaims(gate.db, project))!;
-  if (mode === "observe" && plan.actions.formTrain === "pause") {
-    // MAINCIW2: the original reason stays as it was; what the run-aware rule would do and its run id / attempt go to data.evidence
-    const ci = mainCiPlanFor(gate, project, { taskId: "", head: "" }, [], "run")!;
+  // MAINCIW2: a sample per push run id / attempt of the current SHA, under observe and on, so a failed attempt and its successful
+  // rerun each keep the judgement of their time. reason = this mode's own plan reason (observe: the original rule, unchanged);
+  // data.evidence = the run-aware reason and runs. With no push run listed only observe's original pause note, byte for byte.
+  const ci = mode === "on" ? plan : mainCiPlanFor(gate, project, { taskId: "", head: "" }, [], "run")!;
+  if (ci.ci?.runs.length || (mode === "observe" && plan.actions.formTrain === "pause")) {
     const evidence = ci.ci ? ["--evidence", JSON.stringify({ rule: "run", newReason: ci.reason, runs: ci.ci.runs.slice(-10) })] : [];
     await ledger(deps.manager, project, "observe", "--sha", health.mainSha ?? "none", "--state", health.state,
       "--reason", `${plan.reason}：${mainCiReasonText(health)}`, ...evidence);

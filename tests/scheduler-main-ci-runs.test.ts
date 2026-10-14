@@ -168,3 +168,25 @@ describe("[验收线 5] modes and anomalies unchanged", () => {
     expect(plan(ambiguous).actions).toEqual(paused);
   });
 });
+
+describe("[验收线 3] round 2: green checks on a cancelled sole push run", () => {
+  const OK = { status: "completed", conclusion: "success" };
+  test("sole push run completed / cancelled, no new attempt, required checks success: evidence_missing under run, never green", () => {
+    const h = health({ tests: OK, web: OK, runs: [{ status: "completed", conclusion: "cancelled" }], at: T0 + 20 * MIN });
+    expect(h.state).toBe("green"); // the original health keeps its meaning
+    expect(h.ci).toMatchObject({ verdict: "evidence_missing", why: "run_cancelled" });
+    expect(plan(h)).toMatchObject({ reason: "main_ci_evidence_missing", actions: paused, faultKey: null, notification: null });
+    expect(plan(h, "legacy")).toMatchObject({ reason: "healthy", actions: go }); // observe / off unchanged
+  });
+  test("a successful run next to it, or the run still going, stays green", () => {
+    for (const runs of [[{ id: 7, status: "completed", conclusion: "cancelled" }, { id: 8, status: "completed", conclusion: "success" }],
+      [{ status: "in_progress" }], [{ status: "completed", conclusion: "success" }], []]) {
+      expect(plan(health({ tests: OK, web: OK, runs, at: T0 + 20 * MIN }))).toMatchObject({ reason: "healthy", actions: go });
+    }
+  });
+  test("green checks with unreadable run evidence: not green under run", () => {
+    const h = health({ tests: OK, web: OK, runs: [{ status: "bogus" }], at: T0 + 20 * MIN });
+    expect(h.ci).toMatchObject({ verdict: "unhealthy", why: "runs_unreadable" });
+    expect(plan(h)).toMatchObject({ actions: paused });
+  });
+});

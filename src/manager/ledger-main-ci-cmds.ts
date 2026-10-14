@@ -154,8 +154,8 @@ export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
         const reason = one(c, "reason", 400), ev = c.p.flags.evidence === undefined ? null : mainCiEvidence(c.p.flags.evidence);
         if (c.p.flags.evidence !== undefined && !ev) throw new LedgerError("invalid", "--evidence 要是 {rule, newReason, runs:[{id, attempt, status, conclusion}]}（runs ≤ 10，≤ 2 KB）");
         const r = recordObserved(c.db, { project, mechanism: "mainCiPause", target: "", actionKey: `main-ci:${s.toLowerCase()}:${state}` +
-          (ev ? `:${mainCiEvidenceKey(ev)}` : ""),
-          action: `暂停：${reason}`, data: { mainSha: s === "none" ? null : s.toLowerCase(), state, reason, ...ev ? { evidence: ev } : {} } }, ctx.now ?? Date.now());
+          (ev ? `:${mainCiEvidenceKey(ev)}` : ""), action: `${ev && /^(healthy|main_ci_pending)：/.test(reason) ? "放行" : "暂停"}：${reason}`,
+          data: { mainSha: s === "none" ? null : s.toLowerCase(), state, reason, ...ev ? { evidence: ev } : {} } }, ctx.now ?? Date.now());
         return { ok: true, project, recorded: r.recorded };
       }
       if (op === "lend-slot") { lendMainCiSlot(c.db, ctx, project, c.need("intent")); return { ok: true, project }; }

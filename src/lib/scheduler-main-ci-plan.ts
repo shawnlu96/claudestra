@@ -80,7 +80,7 @@ export function mainCiEvidence(raw: string): MainCiEvidence | null {
  */
 export function mainCiEvidenceKey(ev: MainCiEvidence): string {
   const runs = ev.runs.map((r) => `${r.id}@${r.attempt}`).join("/");
-  return `${ev.newReason}:${runs.length <= 40 ? runs : `h${createHash("sha256").update(runs).digest("hex").slice(0, 16)}`}`;
+  return `${ev.newReason}:${runs.length <= 32 ? runs : `h${createHash("sha256").update(runs).digest("hex").slice(0, 16)}`}`;
 }
 
 /** Exact repair identity; notification dedup deliberately excludes volatile check progress. */
@@ -156,8 +156,9 @@ export function planMainCi(input: MainCiPlanInput): MainCiPlan {
   const recent = recentObservation(input);
   const current = recent && mainCiSha(input.currentMainSha) && mainCiSha(h.mainSha) && input.currentMainSha.toLowerCase() === h.mainSha.toLowerCase();
   const repair = scopeOk && current ? repairApproval(input, fault) : undefined;
-  const green = scopeOk && current && h.state === "green";
   const rule = input.rule === "run" ? "run" : "legacy";
+  // Under "run" the run verdict must agree: green checks on a cancelled sole push run are evidence_missing, not admission.
+  const green = scopeOk && current && h.state === "green" && (rule === "legacy" || !h.ci || h.ci.verdict === "green");
   // Waiting is judged only for this exact, fresh, in-scope SHA; stale / drifted / unreadable evidence never reaches it.
   const waiting = rule === "run" && scopeOk && current && !green && h.ci?.verdict === "pending";
   const evidence = rule === "run" && scopeOk && current && h.ci?.verdict === "evidence_missing";

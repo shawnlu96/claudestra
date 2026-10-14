@@ -111,6 +111,41 @@ describe("[验收线 4] observe samples keep the run evidence per attempt", () =
   });
 });
 
+describe("[验收线 3] / [验收线 4] round 2 through the pass", () => {
+  test("on: sole push run cancelled, required checks green: no begin, no merge, sample main_ci_evidence_missing", async () => {
+    const w = world();
+    writePolicy({ mainCiPause: "on" });
+    w.card("T1");
+    w.ci.bySha.set(w.hub.main, "success");
+    w.ci.workflowRuns = [run(w, { status: "completed", conclusion: "cancelled" })];
+    const calls = await passes(w, 3);
+    expect(merges(calls)).toEqual([]);
+    expect(w.managerLog.filter((a) => a[1] === "scheduler-merge-begin")).toEqual([]);
+    expect(samples(w).map((x) => (x.evidence as { newReason: string }).newReason)).toEqual(["main_ci_evidence_missing"]);
+  });
+
+  for (const mode of ["on", "observe"] as const) {
+    test(`${mode}: same SHA, attempt 1 failed then the rerun succeeded: both attempts kept with their own judgement`, async () => {
+      const w = world();
+      writePolicy({ mainCiPause: mode });
+      w.card("T1");
+      w.hub.pending = true;
+      const sha = w.hub.main;
+      w.ci.bySha.set(sha, "failure");
+      w.ci.workflowRuns = [run(w, { id: 9, attempt: 1, status: "completed", conclusion: "failure" })];
+      await w.pass();
+      w.ci.bySha.set(sha, "success");
+      w.ci.workflowRuns = [run(w, { id: 9, attempt: 2, status: "completed", conclusion: "success" })];
+      await w.pass();
+      const s = samples(w);
+      expect(s.map((x) => [x.state, String(x.reason).split("：")[0], x.evidence])).toEqual([
+        ["red", "main_unhealthy", { rule: "run", newReason: "main_unhealthy", runs: [{ id: 9, attempt: 1, status: "completed", conclusion: "failure" }] }],
+        ["green", "healthy", { rule: "run", newReason: "healthy", runs: [{ id: 9, attempt: 2, status: "completed", conclusion: "success" }] }]]);
+      expect(s.map((x) => x.actionKey)).toEqual([`main-ci:${sha}:red:main_unhealthy:9@1`, `main-ci:${sha}:green:healthy:9@2`]);
+    });
+  }
+});
+
 describe("scheduler-main-ci --op observe --evidence (PM 补 10-14 15:53 exception)", () => {
   const SHA = "d".repeat(40);
   const observe = (w: MainCiWorld, ...extra: string[]) =>
@@ -131,6 +166,13 @@ describe("scheduler-main-ci --op observe --evidence (PM 补 10-14 15:53 exceptio
       expect(await observe(w, "--evidence", bad)).toMatchObject({ ok: false, code: "invalid" });
     }
     expect(samples(w)).toEqual([]);
+  });
+
+  test("the longest reason with a 40-character run list still fits the 120-character actionKey (digest)", async () => {
+    const w = world();
+    const runs = [12345678901, 12345678902, 1234567890].map((id) => ({ id, attempt: 1, status: "completed", conclusion: "cancelled" }));
+    expect(await observe(w, "--evidence", JSON.stringify({ rule: "run", newReason: "main_ci_evidence_missing", runs }))).toMatchObject({ recorded: true });
+    expect(String(samples(w)[0]!.actionKey)).toMatch(new RegExp(`^main-ci:${SHA}:unknown:main_ci_evidence_missing:h[0-9a-f]{16}$`));
   });
 
   test("same SHA, two attempts: one sample each, evidence stored structured", async () => {
