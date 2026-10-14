@@ -72,6 +72,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-auto-tick.ts": "ledger=8",
     "scheduler-autostart-resume.ts": "ledger=1",
     "scheduler-ci-proof-gate.ts": "ledger=1", // GATE1: `ledger scheduler-recovery-observe` (the observe note) through the pass manager
+    "scheduler-ci-selected-gate.ts": "ledger=1 notice=3", // CISEL2: observe / repair notes via `ledger scheduler-recovery-observe` through the pass manager; info notice to PM
     "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1",
     "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5",
@@ -266,6 +267,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "center-request-budget.ts": "fs=1",
     // Project CI reads have no card; response writes use the guarded scheduler CLI, never the pass read connection.
     "ci-main-failure-response-runtime.ts": "ledger=1 fs=1 vcs=2",
+    "ci-selected-receipt.ts": "fs=1 vcs=3", // CISEL2: GET-only gh reads of runs / artifacts / commits / the variable; fs = private temp dir for the artifact
     "dag-tools-steps.ts": "stmt=1",
     "file-lock.ts": "fs=7",
     "github-release.ts": "proc=1 vcs=1",
