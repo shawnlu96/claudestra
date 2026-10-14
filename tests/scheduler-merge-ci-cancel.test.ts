@@ -39,7 +39,10 @@ const fakeGh = (gh: Gh) => async (argv: string[]): Promise<BoundedResult> => {
   }
   if (cmd === "run view 77 --repo example/repo --log-failed") return ok(gh.log);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: [{ path: "src/lib/x.ts" }] }));
-  if (cmd === "run rerun 77 --failed --repo example/repo") return ok(void Object.assign(gh, { attempt: gh.attempt + 1, status: "queued", conclusion: "" }) ?? "");
+  if (cmd === "run rerun 77 --failed --repo example/repo") {
+    Object.assign(gh, { attempt: gh.attempt + 1, status: "queued", conclusion: "" });
+    return ok("");
+  }
   return { code: 1, stdout: "", stderr: `unexpected gh ${cmd}`, timedOut: false };
 };
 const snapOf = (gate: Bucket, shard?: Bucket, mergeState = "UNSTABLE"): PrSnapshot => ({ state: "OPEN", head: HEAD, branch: "feat/t9", base: "main",
@@ -58,8 +61,8 @@ function card(mode: RecoveryMode, over: Partial<Gh> = {}) {
     carryReview: async () => ({ ok: false, reason: "不沿用" }), updateBranch: async () => { throw new Error("不该更新分支"); },
     merge: async (_pr: string, head: string) => { merges.push(head); throw new Error("停在合并前"); }, ciRerun: ciRerunGh(fakeGh(gh) as never) } as MergeExternal;
   const tick = (now = 200) => schedulerMergeTick(c.db, config, ledgerAs(c.db, "scheduler", () => now), () => external);
-  const state = () => ({ run: getMergeRun(c.db, c.intent)?.phase, stage: (c.db.query("SELECT stage FROM tasks WHERE id='T9'").get() as { stage: string }).stage,
-    mode: getWorkflow(c.db, "T9")?.mode });
+  const state = (): { run: string | undefined; stage: string; mode: string | undefined } => ({ run: getMergeRun(c.db, c.intent)?.phase,
+    stage: (c.db.query("SELECT stage FROM tasks WHERE id='T9'").get() as { stage: string }).stage, mode: getWorkflow(c.db, "T9")?.mode });
   const events = (kind: string, op: string) => (c.db.query(`SELECT text, data FROM events WHERE target='T9' AND kind=? AND json_extract(data,'$.op')=?
     ORDER BY seq`).all(kind, op) as { text: string; data: string }[]).map((e) => ({ text: e.text, ...JSON.parse(e.data) }));
   const reruns = () => gh.argv.filter((a) => a.startsWith("run rerun")).length;

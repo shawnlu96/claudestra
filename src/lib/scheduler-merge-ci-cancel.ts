@@ -11,8 +11,6 @@ import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
-import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
-import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { rethrowCiLogStop } from "./scheduler-merge-ci-log-read.js";
 import { ciRerunGhOf, CI_RUN_LINK, fitRerunReceipt } from "./scheduler-merge-ci-rerun.js";
 import { RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
@@ -25,13 +23,15 @@ import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 let source: ((project: string) => RecoveryMode) | null = null;
 /** Tests only: answer the mode without a recovery-policy.json; null restores the file. */
 export function setCiCancelModeSource(fn: ((project: string) => RecoveryMode) | null): void { source = fn; }
-export const ciCancelMode = (project: string): RecoveryMode => source ? source(project) : recoveryPolicy(project, "ciCancelRerun").mode;
+const ciCancelMode = (project: string): RecoveryMode => source ? source(project) : recoveryPolicy(project, "ciCancelRerun").mode;
 
 type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
-type Hosted = MergeExternal & { cancelHandoff?: ForeignEscalate };
+/** The driver's own pieces, injected so this module stays below it: the hook, its "not sent" receipt prefix, its stop test. */
+interface Handoff { escalate: ForeignEscalate; notSent: string; isStop: (e: unknown) => boolean }
+type Hosted = MergeExternal & { cancelHandoff?: Handoff };
 /** driveMerge's fallback-manual hook, carried on the external so bounceStep reaches it; absent = the ledger-only handover. */
-export const withCancelHandoff = (external: MergeExternal, handoff?: ForeignEscalate): MergeExternal =>
-  handoff ? { ...external, cancelHandoff: handoff } as Hosted : external;
+export const withCancelHandoff = (external: MergeExternal, escalate: ForeignEscalate | undefined, notSent: string, isStop: (e: unknown) => boolean): MergeExternal =>
+  escalate ? { ...external, cancelHandoff: { escalate, notSent, isStop } } as Hosted : external;
 const sameSha = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const oneLine = (e: unknown) => (e as Error).message.trim().split("\n")[0]?.slice(0, 300) ?? "";
 
@@ -95,10 +95,10 @@ async function toPm(run: MergeRun, external: MergeExternal, step: Step, facts: C
   const reason = `${why}：${facts.link}（第 ${facts.attempt} 次）`;
   if (handoff) {
     try {
-      await handoff(run, `pm_takeover: ${reason}；解除：PM 核对是谁取消了本 head 的 CI，重跑绿后交回合并队列`); // manual-reason.ts code format
-      return await step("unknown", `${MERGE_NOT_SENT}：${reason}`);
+      await handoff.escalate(run, `pm_takeover: ${reason}；解除：PM 核对是谁取消了本 head 的 CI，重跑绿后交回合并队列`); // manual-reason.ts code format
+      return await step("unknown", `${handoff.notSent}：${reason}`);
     } catch (e) {
-      if (e instanceof SchedulerStopped) throw e;
+      if (handoff.isStop(e)) throw e;
       console.error(`⚠️ [merge] ${run.taskId} ${why}，退人工没写成，改由台账结束本次合并：${oneLine(e)}`);
     }
   }
