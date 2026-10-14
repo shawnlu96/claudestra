@@ -1,9 +1,14 @@
-/** Derived feature states the backend currently emits; `state` stays a plain string so a newer backend's state never breaks an older page. */
-export const PRODUCT_FEATURE_STATES = ['done', 'run', 'blocked', 'stale', 'ready', 'gate', 'wait'] as const;
+/**
+ * Derived feature states; `state` stays a plain string so a newer backend's state never breaks an older page.
+ * paused / frozen come from PDSTATE2 — older backends never send them.
+ */
+export const PRODUCT_FEATURE_STATES = ['done', 'run', 'blocked', 'stale', 'ready', 'gate', 'wait', 'paused', 'frozen'] as const;
 export type ProductFeatureState = (typeof PRODUCT_FEATURE_STATES)[number];
 /** A next-up node: sinceMs is when its card entered the current stage (compare with the response's now); member is a peer name or the local label. */
 export interface ProductFrontierItem {
   key: string; taskId: string | null; title: string; stage: string | null; round: number; member: string | null; sinceMs: number | null;
+  /** PDSTATE2: the node sits on the freeze list */
+  frozen?: true;
 }
 
 export interface ProductFeature {
@@ -21,10 +26,28 @@ export interface ProductFeature {
   complete?: boolean;
   frontier?: ProductFrontierItem[];
   lastActivityAt?: number | null;
+  /** PDSTATE2 area id (see ProductBoard.areas); null / unknown id = ungrouped */
+  area?: string | null;
 }
+/** Hand copies of TaskEvidence / LockEvidence in src/lib/ledger-product-board-edges.ts (not a twin, same as PDSTATE1). */
+export interface ProductTaskEvidence { from: string; to: string; fromStage: string; toStage: string; satisfied: boolean }
+export interface ProductLockEvidence { node: string; wanted: string; held: string; holder: string; since: number }
+/** feature_deps rows; kind / satisfied / count / evidence come from PDEDGE1 and are absent on older backends. */
+export interface ProductDep {
+  from: string; to: string; note: string;
+  kind?: 'split' | 'declared'; satisfied?: boolean; count?: number; evidence?: unknown[];
+}
+/** Derived cross-feature edges (PDEDGE1): task dependencies and file-lock contention. */
+export interface ProductLink {
+  from: string; to: string; note: string; kind: 'task' | 'lock'; satisfied: boolean; count: number;
+  evidence: (ProductTaskEvidence | ProductLockEvidence)[];
+}
+export interface ProductArea { id: string; name: string }
 export interface ProductBoard {
   features: ProductFeature[];
-  deps: { from: string; to: string; note: string }[];
+  deps: ProductDep[];
+  links?: ProductLink[];
+  areas?: ProductArea[];
 }
 
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -36,13 +59,41 @@ export const knownFeatureState = (v: unknown): ProductFeatureState | null =>
   (PRODUCT_FEATURE_STATES as readonly unknown[]).includes(v) ? (v as ProductFeatureState) : null;
 
 const frontierItem = (i: unknown) => record(i) && typeof i.key === 'string' && strOrNull(i.taskId) && typeof i.title === 'string'
-  && strOrNull(i.stage) && count(i.round) && strOrNull(i.member) && (i.sinceMs === null || count(i.sinceMs));
+  && strOrNull(i.stage) && count(i.round) && strOrNull(i.member) && (i.sinceMs === null || count(i.sinceMs)) && absentOr(i.frozen, (v) => v === true);
+const bool = (v: unknown) => typeof v === 'boolean';
+const depOk = (d: unknown) => record(d) && typeof d.from === 'string' && typeof d.to === 'string' && typeof d.note === 'string'
+  && absentOr(d.satisfied, bool) && absentOr(d.count, count) && absentOr(d.evidence, Array.isArray);
+const str = (v: unknown) => typeof v === 'string';
+const strs = (r: Record<string, unknown>, keys: string[]) => keys.every(k => str(r[k]));
+/** Evidence is checked per kind (same fields as edges.ts TaskEvidence / LockEvidence); an unknown kind is ignored later, so its evidence is not inspected. */
+const EVIDENCE_OK: Record<string, (e: unknown) => boolean> = {
+  task: (e) => record(e) && strs(e, ['from', 'to', 'fromStage', 'toStage']) && bool(e.satisfied),
+  lock: (e) => record(e) && strs(e, ['node', 'wanted', 'held', 'holder']) && count(e.since),
+};
+const linkOk = (l: unknown) => record(l) && typeof l.from === 'string' && typeof l.to === 'string' && typeof l.note === 'string'
+  && typeof l.kind === 'string' && bool(l.satisfied) && count(l.count) && Array.isArray(l.evidence)
+  && (!Object.hasOwn(EVIDENCE_OK, l.kind) || l.evidence.every(EVIDENCE_OK[l.kind]));
+const areasOk = (a: unknown) => Array.isArray(a) && a.every(x => record(x) && typeof x.id === 'string' && typeof x.name === 'string')
+  && new Set(a.map(x => (x as { id: string }).id)).size === a.length;
 
 /** PDSTATE1 fields are optional, but when present they must be well-formed. */
 function derivedFieldsOk(f: Record<string, unknown>, counts: Record<string, unknown>, eta: unknown): boolean {
   return absentOr(counts.waiting, count) && absentOr(f.state, (v) => typeof v === 'string') && absentOr(f.complete, (v) => typeof v === 'boolean')
     && absentOr(f.frontier, (v) => Array.isArray(v) && v.every(frontierItem)) && absentOr(f.lastActivityAt, (v) => v === null || count(v))
+    && absentOr(f.area, strOrNull)
     && (!record(eta) || (absentOr(eta.done, (v) => typeof v === 'boolean') && absentOr(eta.basis, (b) => record(b) && absentOr(b.cpHours, count))));
+}
+
+/**
+ * links / areas are optional extras an older backend never sends: a malformed one is dropped (one warning) instead of failing
+ * the whole board. Links of an unknown kind are ignored.
+ */
+function dropBadExtras(v: Record<string, unknown>) {
+  const bad = [...(v.links !== undefined && !(Array.isArray(v.links) && v.links.every(linkOk)) ? ['links'] : []),
+    ...(v.areas !== undefined && !areasOk(v.areas) ? ['areas'] : [])];
+  for (const k of bad) delete v[k];
+  if (bad.length) console.warn(`[product] dropped malformed ${bad.join(', ')}`);
+  if (Array.isArray(v.links)) v.links = v.links.filter(l => l.kind === 'task' || l.kind === 'lock');
 }
 
 /** Reject incomplete successful bodies before rendering; missing fields cannot safely enter the product layout. */
@@ -61,7 +112,6 @@ export function assertProductBoard(v: unknown): asserts v is ProductBoard {
       !record(c) || typeof c.id !== 'string' || typeof c.title !== 'string' || typeof c.stage !== 'string'))) throw new Error('Invalid feature cards');
     ids.add(f.id);
   }
-  if (v.deps.some(d => !record(d) || typeof d.from !== 'string' || typeof d.to !== 'string' || typeof d.note !== 'string')) {
-    throw new Error('Invalid product dependencies');
-  }
+  if (!v.deps.every(depOk)) throw new Error('Invalid product dependencies');
+  dropBadExtras(v);
 }
