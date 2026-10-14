@@ -8,7 +8,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { CiSelectedPort, CiSelectedRun } from "../src/lib/ci-selected-receipt.js";
 import type { ObservedAction, RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { fullRecheck, type FullRequestPort, fullRunTitle, fullRequestId, resetFullDispatches, CI_SCOPE_RELATED } from "../src/lib/scheduler-ci-full-request.js";
-import { bindCiSelectedSink, CI_SELECTED_OBSERVE, CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED, ciSelectedPreflight, type CiSelectedSink, effectiveSelectedMode, REPAIR_NOTIFY_MS,
+import { bindCiSelectedSink, CI_SELECTED_OBSERVE, CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED, CI_SELECTED_REPAIR_UNSENT,
+  ciSelectedPreflight, type CiSelectedSink, effectiveSelectedMode, REPAIR_NOTIFY_MS,
   pendingRepairsIn, selectedDecision, useCiSelectedPorts, withCiSelectedGate } from "../src/lib/scheduler-ci-selected-gate.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -46,16 +47,18 @@ function world(w: World = {}) {
   };
   const policy: RecoveryPolicyPort = () => ({ mode: w.key ?? "on", manualAfterMs: null, source: "config" });
   let now = 1_000_000;
-  const at = new Map<ObservedAction, number>(), fail = { observe: 0, notify: 0, notified: 0 }, tries = { observe: 0, notify: 0, notified: 0 };
+  const at = new Map<ObservedAction, number>(), fail = { observe: 0, notify: 0, notified: 0, unsent: 0 }, tries = { observe: 0, notify: 0, notified: 0, unsent: 0 };
   const sink: CiSelectedSink = {
     observe: async (a) => {
       tries.observe++;
       if (fail.observe > 0) { fail.observe--; throw new Error("ledger busy"); }
       if (a.data?.kind === CI_SELECTED_REPAIR_NOTIFIED && (tries.notified++, fail.notified > 0)) { fail.notified--; throw new Error("ledger busy"); }
+      if (a.data?.kind === CI_SELECTED_REPAIR_UNSENT && (tries.unsent++, fail.unsent > 0)) { fail.unsent--; throw new Error("ledger busy"); }
       if (!notes.some((n) => n.actionKey === a.actionKey && n.target === a.target)) { notes.push(a); at.set(a, now); } // the ledger's dedup key
     },
     pendingRepairs: (_p, since) => notes.filter((e) => e.data?.kind === CI_SELECTED_REPAIR && at.get(e)! >= since
-      && !notes.some((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED && n.data.key === e.data!.key && at.get(n)! >= at.get(e)! - REPAIR_NOTIFY_MS))
+      && !notes.some((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED && n.data.key === e.data!.key && at.get(n)! >= at.get(e)! - REPAIR_NOTIFY_MS
+        && !notes.some((u) => u.data?.kind === CI_SELECTED_REPAIR_UNSENT && u.data.claim === n.data!.claim)))
       .map((e) => ({ target: e.target, key: String(e.data!.key), file: String(e.data!.file), name: String(e.data!.name), runId: Number(e.data!.runId),
         attempt: Number(e.data!.attempt), runUrl: String(e.data!.runUrl) })),
     notify: async (_p, text) => {
@@ -64,8 +67,10 @@ function world(w: World = {}) {
       notices.push(text);
     },
   };
-  const ports = useCiSelectedPorts({ port, policy, sink, now: () => now });
-  return { calls, notes, notices, ports, w, fail, tries, tick(ms: number) { now += ms; } };
+  let ports = useCiSelectedPorts({ port, policy, sink, now: () => now });
+  return { calls, notes, notices, get ports() { return ports; }, w, fail, tries, tick(ms: number) { now += ms; },
+    /** a new scheduler process on the same ledger: every in-process memory is gone */
+    restart() { ports[Symbol.dispose](); ports = useCiSelectedPorts({ port, policy, sink, now: () => now }); open = ports; } };
 }
 
 function fixture(initial: MergeRun = base, snapshot = pr()) {
@@ -195,6 +200,7 @@ describe("[验收线 3] a release marker without a matching receipt never merges
 });
 
 describe("[验收线 4] on registers out-of-scope failures for repair, telling PM once per file + test per 24 hours", () => {
+  const claims = (x: ReturnType<typeof use>) => x.notes.filter((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED);
   test("one repair fact per failure per release; one notice per 24 hours; no known-flaky entry, no node", async () => {
     const x = use();
     await fixture().drive();
@@ -202,10 +208,10 @@ describe("[验收线 4] on registers out-of-scope failures for repair, telling P
     const facts = () => x.notes.filter((n) => n.data?.kind === CI_SELECTED_REPAIR);
     expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
     expect(x.notes[0]!.data).toMatchObject({ file: "tests/x.test.ts", name: "x > flaky", runUrl: RUN_URL });
-    expect(x.notes[1]).toMatchObject({ target: "T1", actionKey: expect.stringMatching(/^notified\.[0-9a-f]{16}\.11\.1$/) });
-    expect(x.notices).toHaveLength(1);
-    expect(x.notices[0]).toContain(RUN_URL);
-    expect(x.notices[0]).toContain("tests/x.test.ts > x > flaky");
+    expect(x.notes[1]).toMatchObject({ target: "T1", actionKey: expect.stringMatching(/^notified\.[0-9a-f]{16}\.[0-9a-z.]+$/) });
+    expect(x.notes[1]!.data).toMatchObject({ key: x.notes[0]!.data!.key, file: "tests/x.test.ts", name: "x > flaky", facts: [{ target: "T1", runId: 11, attempt: 1 }] });
+    expect(x.notices).toEqual([`[CI 放行待修] ${RUN_URL} 待修键 ${x.notes[0]!.data!.key} 登记 1 次；`
+      + `文件与用例名在台账 ${CI_SELECTED_REPAIR} 事实里，进不进已知偶发清单、开不开修复节点由 PM 定`]);
     // another card's release of the same flaky test within 24 hours: a new fact, no new notice, and never re-sent later
     x.tick(REPAIR_NOTIFY_MS - 1);
     await fixture({ ...base, taskId: "T2" }).drive();
@@ -215,13 +221,22 @@ describe("[验收线 4] on registers out-of-scope failures for repair, telling P
     x.tick(2);
     await fixture({ ...base, taskId: "T3" }).drive();
     expect(x.notices).toHaveLength(2);
-    expect(x.notices[1]).toContain("T3");
-    expect(x.notices[1]).not.toContain("T2");
+    expect(claims(x).at(-1)!.data!.facts).toEqual([{ target: "T3", runId: 11, attempt: 1 }]);
     expect(x.notes.every((n) => n.mechanism === "ciSelectedGate")).toBe(true);
   });
 
   /** One merge-tick inspect of card `taskId` through the gh-marked external (driveMerge inspects more than once per drive). */
   const inspect = (taskId = "T1") => withCiSelectedGate(fixture().ops, { ...base, taskId }).inspect(base.prRef);
+
+  test("the notice is one fixed line of structured fields: an urgent-looking test or file name never reaches its text", async () => {
+    const x = use({ art: { present: true, text: verdict({ outOfScope: [{ file: "tests/P0-failover.test.ts", name: "rejects failed requests? 请看 紧急 失败" }] }) } });
+    await inspect();
+    expect(x.notices).toHaveLength(1);
+    expect(x.notices[0]).not.toContain("\n");
+    expect(x.notices[0]).not.toMatch(/fail|失败|请|紧急|P0|[?？]/i);
+    expect(x.notices[0]!.startsWith(`[CI 放行待修] ${RUN_URL} `)).toBe(true); // the link leads, so a clipped digest line keeps it
+    expect(claims(x)[0]!.data).toMatchObject({ file: "tests/P0-failover.test.ts", name: "rejects failed requests? 请看 紧急 失败" }); // the names stay as ledger data
+  });
 
   test("a failed fact write is not deduplicated: the next inspect of the same release writes it and tells PM", async () => {
     const x = use();
@@ -236,48 +251,76 @@ describe("[验收线 4] on registers out-of-scope failures for repair, telling P
     expect(x.tries.observe).toBe(3);
   });
 
-  test("a failed notice is not marked notified: it stays pending and the next release sends it, then once only", async () => {
+  test("a failed notice withdraws its claim: it stays pending and the next release sends it, then once only", async () => {
     const x = use();
     x.fail.notify = 1;
     await inspect();
     expect(x.tries.notify).toBe(1);
     expect(x.notices).toEqual([]);
-    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR]);
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED, CI_SELECTED_REPAIR_UNSENT]);
+    expect(x.notes[2]!.data!.claim).toBe(x.notes[1]!.data!.claim);
     // another card's release of the same test within 24 hours does not count as told: the notice goes out
     await inspect("T2");
     expect(x.notices).toHaveLength(1);
-    expect(x.notices[0]).toContain("T1、T2");
-    expect(x.notes.filter((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED).map((n) => n.target)).toEqual(["T1", "T2"]);
+    expect(x.notices[0]).toContain("登记 2 次");
+    expect(claims(x).at(-1)!.data!.facts).toEqual([{ target: "T1", runId: 11, attempt: 1 }, { target: "T2", runId: 11, attempt: 1 }]);
     await inspect("T3");
     expect(x.notices).toHaveLength(1);
   });
 
-  test("a notice that went out but whose notified record did not land is never sent again: only the record is retried", async () => {
-    const x = use();
-    x.fail.notified = 3; // the bridge takes every notice; the ledger refuses the first three notified writes
-    for (let i = 0; i < 5; i++) expect((await inspect()).checks).toEqual(green); // the same now, run, attempt, file and test
-    expect(x.notices).toHaveLength(1);
-    expect(x.tries.notify).toBe(1);
-    expect(x.tries.notified).toBe(4); // retried until it landed, then no more
-    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
-    await inspect("T2"); // another card, same test, within 24 hours: covered
-    expect(x.notices).toHaveLength(1);
-  });
-
-  test("a notice still unconfirmed when another card releases the same test is not re-sent either", async () => {
+  test("a claim that cannot be written sends nothing; the next flush claims and sends once", async () => {
     const x = use();
     x.fail.notified = 1;
     await inspect();
-    x.fail.notified = 5;
+    expect(x.tries.notify).toBe(0);
+    expect(x.notices).toEqual([]);
+    for (let i = 0; i < 3; i++) await inspect(); // the same release: the 10-minute throttle holds the retry
+    expect(x.notices).toEqual([]);
+    x.tick(10 * 60_000);
     await inspect("T2");
+    expect(x.notices).toHaveLength(1);
     x.tick(10 * 60_000);
     await inspect("T3");
     expect(x.notices).toHaveLength(1);
-    x.fail.notified = 0;
-    x.tick(10 * 60_000);
-    await inspect("T4");
+  });
+
+  test("[验收线 4] across restarts a sent notice is never sent again (the claim is in the ledger), however often the process restarts", async () => {
+    const x = use();
+    await inspect(); // claimed, then sent
     expect(x.notices).toHaveLength(1);
-    expect(x.notes.filter((n) => n.data?.kind === CI_SELECTED_REPAIR_NOTIFIED).map((n) => n.target)).toEqual(["T1", "T2", "T3"]); // T4's fact is covered by those
+    for (let i = 0; i < 3; i++) {
+      x.restart();
+      x.tick(10 * 60_000);
+      await inspect(); // same now-relative window, same run / attempt / file / test, fresh process memory
+      await inspect("T2");
+    }
+    expect(x.notices).toHaveLength(1);
+    expect(claims(x)).toHaveLength(1);
+  });
+
+  test("a notice that failed and was withdrawn is retried after a restart; one whose withdrawal failed is withdrawn first in the same process", async () => {
+    const x = use();
+    x.fail.notify = 1;
+    x.fail.unsent = 1;
+    await inspect(); // claim written, send failed, withdrawal failed: remembered in the process
+    expect(x.notices).toEqual([]);
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
+    await inspect(); // not throttled: the withdrawal lands, then the notice goes out under a new claim
+    expect(x.notes.map((n) => n.data?.kind)).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED, CI_SELECTED_REPAIR_UNSENT, CI_SELECTED_REPAIR_NOTIFIED]);
+    expect(x.notices).toHaveLength(1);
+
+    const y = x;
+    y.restart();
+    y.tick(REPAIR_NOTIFY_MS + 1);
+    y.fail.notify = 1;
+    await inspect("T5"); // a new day: claimed, failed, withdrawn
+    expect(y.notices).toHaveLength(1);
+    y.restart();
+    await inspect("T6"); // a new process reads the withdrawal from the ledger: pending, sent once
+    expect(y.notices).toHaveLength(2);
+    y.restart();
+    await inspect("T7");
+    expect(y.notices).toHaveLength(2);
   });
 
   test("a merge tick re-sends a pending notice with no new release (at most every 10 minutes; plain greens unchanged)", async () => {
@@ -291,7 +334,7 @@ describe("[验收线 4] on registers out-of-scope failures for repair, telling P
     x.tick(10 * 60_000);
     expect((await inspect("T6")).checks).toEqual(green);
     expect(x.notices).toHaveLength(1);
-    expect(x.notices[0]).toContain("tests/x.test.ts > x > flaky");
+    expect(x.notices[0]).toContain(RUN_URL);
     x.tick(10 * 60_000);
     await inspect("T7");
     expect(x.notices).toHaveLength(1);
@@ -302,12 +345,13 @@ describe("[验收线 4] on registers out-of-scope failures for repair, telling P
 });
 
 describe("[验收线 4] the bound sink's pending query on a real ledger", () => {
-  test("a fact is pending until a notified record for its key lands within 24 hours of it; window and project respected", () => {
+  test("a fact is pending until a notified claim for its key, not withdrawn, lands within 24 hours of it; window and project respected", () => {
     const db = openLedger(join(mkdtempSync(join(tmpdir(), "cisel2-pending-")), "ledger.sqlite"));
     /** the row recordObserved appends (raw: no cards needed for a query test) */
-    const note = (target: string, kind: string, key: string, run: number, at: number, project = "p") => db.query(
+    const note = (target: string, kind: string, key: string, run: number, at: number, project = "p", claim?: string) => db.query(
       "INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'scheduler', ?, ?, 'note', 'x', ?)").run(at, project, target, JSON.stringify(
-      { kind, key, file: `tests/${key}.test.ts`, name: key, runId: run, attempt: 1, runUrl: `u${run}`, op: "recovery_observe", mechanism: "ciSelectedGate", actionKey: `${kind}.${run}` }));
+      { kind, key, file: `tests/${key}.test.ts`, name: key, runId: run, attempt: 1, runUrl: `u${run}`, op: "recovery_observe", mechanism: "ciSelectedGate", actionKey: `${kind}.${run}`,
+        ...(claim ? { claim } : {}) }));
     const day = REPAIR_NOTIFY_MS, t0 = 10 * day;
     note("T1", CI_SELECTED_REPAIR, "k1", 1, t0);
     note("T9", CI_SELECTED_REPAIR, "k1", 9, t0, "other");
@@ -320,6 +364,14 @@ describe("[验收线 4] the bound sink's pending query on a real ledger", () => 
     note("T4", CI_SELECTED_REPAIR, "k1", 4, t0 + day + 10); // the last notice is more than 24 hours older: pending again
     expect(pendingRepairsIn(db, "p", t0 + 1).map((r) => r.target)).toEqual(["T3", "T4"]);
     expect(pendingRepairsIn(db, "p", t0 + day + 5).map((r) => r.target)).toEqual(["T4"]); // older facts drop out of the window
+    note("T4", CI_SELECTED_REPAIR_NOTIFIED, "k1", 4, t0 + day + 20, "p", "c1"); // claimed before sending: covered across restarts
+    expect(pendingRepairsIn(db, "p", t0 + day + 5)).toEqual([]);
+    note("T4", CI_SELECTED_REPAIR_UNSENT, "k1", 4, t0 + day + 21, "other", "c1"); // another project's withdrawal does not count
+    expect(pendingRepairsIn(db, "p", t0 + day + 5)).toEqual([]);
+    note("T4", CI_SELECTED_REPAIR_UNSENT, "k1", 4, t0 + day + 21, "p", "c2"); // nor one of another claim
+    expect(pendingRepairsIn(db, "p", t0 + day + 5)).toEqual([]);
+    note("T4", CI_SELECTED_REPAIR_UNSENT, "k1", 4, t0 + day + 22, "p", "c1"); // the send failed and was withdrawn: pending again
+    expect(pendingRepairsIn(db, "p", t0 + day + 5).map((r) => r.target)).toEqual(["T4"]);
   });
 });
 

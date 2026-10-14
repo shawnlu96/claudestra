@@ -26,20 +26,23 @@ const { setMeta } = await import("../src/lib/ledger-write.js");
 const { asInfo } = await import("../src/lib/pm-notice-level.js");
 const { PmDigestStore } = await import("../src/lib/pm-digest-store.js");
 const { PmDigest } = await import("../src/bridge/pm-digest.js");
+const { digestText } = await import("../src/lib/pm-digest.js");
 const { bindCiSelectedSink, CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED, useCiSelectedPorts, withCiSelectedGate } = await import("../src/lib/scheduler-ci-selected-gate.js");
 type Envelope = import("../src/bridge/router.js").Envelope;
 type LocalEndpoint = import("../src/bridge/router.js").LocalEndpoint;
 type CiSelectedPort = import("../src/lib/ci-selected-receipt.js").CiSelectedPort;
 type MergeExternal = import("../src/lib/scheduler-merge-driver.js").MergeExternal;
 
-const PROJ = "cisel2-route", PM = "agent-cisel2-pm", H = "a".repeat(40), RUN_URL = "https://github.com/o/r/actions/runs/11";
+const PM = "agent-cisel2-pm", H = "a".repeat(40);
+/** a real-length run page of a real-length repository */
+const RUN_URL = "https://github.com/shawnlu96/claudestra/actions/runs/18234567890";
 const D = (c: string) => `sha256:${c.repeat(64)}`;
-const verdict = JSON.stringify({ version: 1, kind: "ci-selected-verdict", mode: "on", runId: 11, attempt: 1, head: H, responsibilityDigest: D("1"),
-  outOfScope: [{ file: "tests/x.test.ts", name: "x > flaky" }], shards: { "1": D("2") } });
+let outOfScope = [{ file: "tests/x.test.ts", name: "x > flaky" }];
 const port: CiSelectedPort = {
-  prRun: async () => ({ id: 11, attempt: 1, headSha: H, event: "pull_request", status: "completed", conclusion: "success", url: RUN_URL }),
+  prRun: async () => ({ id: 18234567890, attempt: 1, headSha: H, event: "pull_request", status: "completed", conclusion: "success", url: RUN_URL }),
   runById: async () => { throw new Error("unused"); },
-  verdict: async () => ({ present: true, text: verdict }),
+  verdict: async () => ({ present: true, text: JSON.stringify({ version: 1, kind: "ci-selected-verdict", mode: "on", runId: 18234567890, attempt: 1, head: H,
+    responsibilityDigest: D("1"), outOfScope, shards: { "1": D("2") } }) }),
   commitParents: async () => [],
   variable: async () => "on",
 };
@@ -57,8 +60,16 @@ const dirs: string[] = [];
 let open: Disposable | null = null;
 afterEach(() => { faking = false; frames.length = 0; open?.[Symbol.dispose](); open = null; for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-test("[验收线 4] the repair notice from the bound sink is queued in the PM's digest (not dropped as an info push), then counted as told", async () => {
+const cases = [
+  { title: "a plain test name", project: "cisel2-route", failures: [{ file: "tests/x.test.ts", name: "x > flaky" }] },
+  { title: "a long test name that reads urgent (failed / 失败 / ?)", project: "cisel2-route-urgent", failures: [{
+    file: "tests/scheduler-merge-train-bisect-recovery.test.ts",
+    name: "merge train bisect > rejects failed requests after the second attempt timed out and the car was sent back for 失败 recheck?" }] },
+];
+for (const c of cases) test(`[验收线 4] ${c.title}: the repair notice from the bound sink is queued in the PM's digest with its run link, then counted as told`, async () => {
   faking = true;
+  outOfScope = c.failures;
+  const PROJ = c.project;
   const db = openLedger(LEDGER_PATH); // the sink reads through the production read-only LedgerReader on the same file
   setMeta(db, { actor: "owner" }, { project: PROJ, key: "pms", value: [PM] });
   /** the leased manager's `ledger scheduler-recovery-observe`, written as recordObserved would */
@@ -99,9 +110,12 @@ test("[验收线 4] the repair notice from the bound sink is queued in the PM's 
   expect(delivered).toEqual([]); // non-urgent: not pushed …
   const queued = store.queued(PROJ);
   expect(queued).toHaveLength(1); // … but in the digest the PM pulls
-  expect(queued[0]!.firstLine).toContain("tests/x.test.ts > x > flaky");
   expect(queued[0]!.firstLine).toContain(RUN_URL);
+  expect(digestText(queued)).toContain(RUN_URL); // the rendered digest clips its line: the link leads, so it survives whole
+  expect(frame.text).not.toContain(c.failures[0]!.name); // the names are ledger data, not notice text
 
   const kinds = (db.query("SELECT json_extract(data,'$.kind') AS k FROM events WHERE project=? AND kind='note' ORDER BY seq").all(PROJ) as { k: string }[]).map((r) => r.k);
   expect(kinds).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
+  const told = db.query("SELECT data FROM events WHERE project=? AND json_extract(data,'$.kind')=?").get(PROJ, CI_SELECTED_REPAIR_NOTIFIED) as { data: string };
+  expect(JSON.parse(told.data)).toMatchObject(c.failures[0]!);
 });

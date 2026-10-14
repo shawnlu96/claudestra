@@ -3,8 +3,9 @@
  * 只有回执核得上、有效档是 on 才接受这次绿。有效档 = 仓库变量 CI_SELECTED_GATE 与恢复键 ciSelectedGate 中更严的一个
  * （off 比 observe 严，observe 比 on 严）。observe：当红走现有 ci_fail，另记一条 ci_selected_gate_observe 观察（run + attempt + head 去重）；
  * off：当红、不记；带放行标记却读不出回执：当红。on 接受时，每个范围外失败登记一条待修事实，同文件同用例 24 小时内只通知 PM 一次；
- * 去重只在写成功后确认，通知发出后才另记「已通知」，没发出去的待修留在台账里，之后的合并 tick 补送；发出去了但「已通知」没记下的，
- * 本进程记着已发，只补记、不重发。通知不标级别，走 PM 分流的普通摘要归类（进摘要队列，或照常送到），不会被当成只记卡片的常规丢掉。
+ * 去重只在写成功后确认。发通知前先在台账落一条「已通知」认领（跨重启的幂等标识），发不出去再落一条「未送达」撤销它，待修照旧待发、之后补送；
+ * 认领落不下就不发。通知只有一行固定模板：run 链接与待修键（字符集卡死的结构化字段），文件和用例名只在台账事实里，不进正文，
+ * 不会让分流按字样判成要紧；不标级别，走 PM 分流的普通摘要归类（进摘要队列，或照常送到）。
  * 没有放行标记的绿 / 红原样返回。docs/architecture/ci-selected-gate.md，tests/scheduler-ci-selected-gate.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -24,6 +25,8 @@ const CI_SELECTED_KEY = "ciSelectedGate" as const;
 export const CI_SELECTED_OBSERVE = "ci_selected_gate_observe";
 export const CI_SELECTED_REPAIR = "ci_selected_repair";
 export const CI_SELECTED_REPAIR_NOTIFIED = "ci_selected_repair_notified";
+/** 撤销一条「已通知」认领：认领后通知没发出去 */
+export const CI_SELECTED_REPAIR_UNSENT = "ci_selected_repair_unsent";
 export const REPAIR_NOTIFY_MS = 24 * 3600_000;
 /** 待修通知的发送方名：不是 scheduler（它的通知除列车 / 上线后待办外都立即送），pm-digest.ts 把它的 oneShot 归进摘要 */
 const CI_SELECTED_SENDER = "ci-selected-gate";
@@ -50,7 +53,7 @@ export function selectedDecision(read: CiSelectedRead, mode: CiSelectedMode): Se
 /** 观察与待修的台账写口；合并 tick 绑定（bindCiSelectedSink），没绑定时只打日志。 */
 export interface CiSelectedSink {
   observe(a: ObservedAction): Promise<void>;
-  /** since 起登记、还没被「已通知」盖住的待修事实（同 key 的已通知记录在事实前 24 小时内或之后就算盖住） */
+  /** since 起登记、还没被「已通知」盖住的待修事实（同 key、没被「未送达」撤销的已通知认领在事实前 24 小时内或之后就算盖住） */
   pendingRepairs(project: string, since: number): PendingRepair[];
   notify(project: string, text: string): Promise<void>;
 }
@@ -63,25 +66,30 @@ let over: Partial<Ports> = {};
 const ports = (): Ports => ({ ...defaults(), ...over });
 const said = new Set<string>();
 const flushed = new Map<string, number>();
-/** 已真发出去的待修通知（项目 + key → 发出时刻）：「已通知」没记下时 24 小时内只补记、不重发 */
-const sent = new Map<string, number>();
-/** 发出去了、「已通知」还没全记下的（项目 → 它们的 key）：下一次 inspect 就补记，不等 10 分钟节流 */
-const owed = new Map<string, Set<string>>();
+/** 认领落了、通知没发出去、「未送达」也没落下的（项目 → 认领）：下一次 inspect 先补落「未送达」，不等 10 分钟节流 */
+const unsent = new Map<string, Map<string, Claim>>();
+interface Claim { id: string; key: string; target: string }
+let claimSeq = 0;
 /** Tests: replace some ports until disposed. */
 export function useCiSelectedPorts(next: Partial<Ports>): Disposable {
   const before = over;
   over = { ...before, ...next };
-  said.clear(); flushed.clear(); sent.clear(); owed.clear();
-  return { [Symbol.dispose]: () => { over = before; said.clear(); flushed.clear(); sent.clear(); owed.clear(); } };
+  said.clear(); flushed.clear(); unsent.clear();
+  return { [Symbol.dispose]: () => { over = before; said.clear(); flushed.clear(); unsent.clear(); } };
 }
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 const OBSERVED = (e: string, kind: string) => `${e}.kind='note' AND json_extract(${e}.data,'$.op')='recovery_observe'
   AND json_extract(${e}.data,'$.mechanism')='${CI_SELECTED_KEY}' AND json_extract(${e}.data,'$.kind')='${kind}'`;
-/** 待发送的待修：since 起的事实里，同 key 没有「事实前 24 小时内或之后」的已通知记录的（已通知 = 通知真发出去后另记的一条）。 */
+/**
+ * 待发送的待修：since 起的事实里，同 key 没有「事实前 24 小时内或之后」的已通知认领的（认领 = 发通知前落的一条，
+ * 发不出去时同 claim 的「未送达」把它撤销）。
+ */
 const PENDING_SQL = `SELECT e.target, e.data FROM events e WHERE e.project=? AND e.ts>=? AND ${OBSERVED("e", CI_SELECTED_REPAIR)}
   AND NOT EXISTS (SELECT 1 FROM events n WHERE n.project=e.project AND n.ts>=e.ts-${REPAIR_NOTIFY_MS} AND ${OBSERVED("n", CI_SELECTED_REPAIR_NOTIFIED)}
-    AND json_extract(n.data,'$.key')=json_extract(e.data,'$.key')) ORDER BY e.seq LIMIT 200`;
+    AND json_extract(n.data,'$.key')=json_extract(e.data,'$.key')
+    AND NOT EXISTS (SELECT 1 FROM events u WHERE u.project=n.project AND u.ts>=n.ts AND ${OBSERVED("u", CI_SELECTED_REPAIR_UNSENT)}
+      AND json_extract(u.data,'$.claim')=json_extract(n.data,'$.claim'))) ORDER BY e.seq LIMIT 200`;
 const pendingRow = (target: string, raw: string): PendingRepair | null => {
   try {
     const d = JSON.parse(raw) as Record<string, unknown>;
@@ -178,50 +186,69 @@ async function registerRepairs(who: Who, r: CiSelectedReceipt): Promise<void> {
 }
 
 const FLUSH_MS = 10 * 60_000;
-/** 一条待修的通知正文：首行就是摘要里的那一行（文件 > 用例 + run 链接），不带卡号（同卡不同用例在摘要里不合成一行）；不写要 PM 回话的字样 */
-const repairNotice = (ps: PendingRepair[]): string => [`[CI 放行待修] ${ps[0]!.file} > ${ps[0]!.name}（${ps.at(-1)!.runUrl}）`,
-  `${[...new Set(ps.map((p) => p.target))].join("、")} 按责任选集放行合并时这条范围外的测试是红的，已登记为待修事实；加不加进已知偶发清单、开不开修复节点由 PM 定。`].join("\n");
+/** 只认 GitHub Actions 的 run 页地址（字符集卡死）；别的形状不进正文，只写 run 号 */
+const RUN_URL_RE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+(?:\/attempts\/\d+)?$/;
 /**
- * 给 PM 补送待发送的待修，每个 key（文件 + 用例）一条，发出去后才逐条记「已通知」。发不出去什么都不记，待修留在台账里，
- * 下次登记或合并 tick 的补送再发（重启也一样，读的是台账）。发出去了、「已通知」没记下：本进程 24 小时内只补记不重发
- * （只有补记前进程重启才可能重发一次）。
+ * 一条待修的通知正文：只有一行固定模板，填的都是字符集卡死的结构化字段（run 链接、16 位十六进制待修键、次数），链接排在最前，
+ * 摘要截断首行也留得住。文件和用例名是数据：只在台账事实里（同一待修键），不进正文，免得用例名里的 failed / 失败等字样让分流判成要紧；
+ * 不带卡号（卡号同样是任意字样）。不写要 PM 回话的字样。
+ */
+const repairNotice = (ps: readonly PendingRepair[]): string => {
+  const last = ps.at(-1)!, link = RUN_URL_RE.test(last.runUrl) ? last.runUrl : `run ${last.runId}`;
+  return `[CI 放行待修] ${link} 待修键 ${last.key} 登记 ${ps.length} 次；文件与用例名在台账 ${CI_SELECTED_REPAIR} 事实里，进不进已知偶发清单、开不开修复节点由 PM 定`;
+};
+const unsentNote = (project: string, c: Claim): ObservedAction => ({ project, mechanism: CI_SELECTED_KEY, target: c.target, actionKey: `unsent.${c.id}`,
+  action: `待修通知没发出去，撤销认领 ${c.id}`, data: { kind: CI_SELECTED_REPAIR_UNSENT, key: c.key, claim: c.id } });
+/**
+ * 给 PM 补送待发送的待修，每个 key（文件 + 用例）一条。先落一条「已通知」认领（claim 每次新的，跨重启也认），落下了才发；
+ * 发不出去就落「未送达」撤销认领，待修照旧待发，下次登记或合并 tick 的补送再发（重启也一样，读的是台账）；「未送达」也落不下的，
+ * 本进程记着，下一次 inspect 先补落。认领落下、通知发出之间进程没了，按已发算（不重发）；只有通知失败且「未送达」没落下就重启时，这一条不再补送。
  */
 async function flushRepairs(who: Who): Promise<void> {
   const now = ports().now();
   flushed.set(who.project, now);
-  for (const [k, at] of sent) if (now - at >= REPAIR_NOTIFY_MS) sent.delete(k);
-  const debt = new Set<string>(); // 只欠这一轮还 pending 的：别处已记下「已通知」的 key 不再算欠
-  owed.set(who.project, debt);
   await write("待修通知", who, async (s) => {
+    let failed: unknown = null;
+    const owe = unsent.get(who.project);
+    for (const [id, c] of owe ?? []) {
+      try { await s.observe(unsentNote(who.project, c)); owe!.delete(id); } catch (e) {
+        if (e instanceof SchedulerStopped) throw e;
+        failed ??= e;
+      }
+    }
+    if (owe && !owe.size) unsent.delete(who.project);
+    if (failed) throw failed; // 撤销没补上：先别读 pending（那几条认领还盖着），下次再来
     const byKey = new Map<string, PendingRepair[]>();
     for (const p of s.pendingRepairs(who.project, now - REPAIR_NOTIFY_MS)) byKey.set(p.key, [...byKey.get(p.key) ?? [], p]);
-    let failed: unknown = null;
     for (const [key, ps] of byKey) {
-      const mine = `${who.project} ${key}`;
+      const last = ps.at(-1)!, c: Claim = { id: `${now.toString(36)}.${(claimSeq++).toString(36)}`, key, target: last.target };
       try {
-        if (!sent.has(mine)) {
-          await s.notify(who.project, repairNotice(ps));
-          sent.set(mine, now);
-        }
-        debt.add(key);
-        for (const p of ps) {
-          await s.observe({ project: who.project, mechanism: CI_SELECTED_KEY, target: p.target, actionKey: `notified.${p.key}.${p.runId}.${p.attempt}`,
-            action: `待修已通知 PM：${p.file} > ${p.name}（run ${p.runId}）`.slice(0, 300),
-            data: { kind: CI_SELECTED_REPAIR_NOTIFIED, key: p.key, file: p.file, name: p.name, runId: p.runId, attempt: p.attempt, runUrl: p.runUrl } });
-        }
-        debt.delete(key);
+        await s.observe({ project: who.project, mechanism: CI_SELECTED_KEY, target: c.target, actionKey: `notified.${key}.${c.id}`,
+          action: `待修通知 PM：${last.file} > ${last.name}（run ${last.runId}）`.slice(0, 300),
+          data: { kind: CI_SELECTED_REPAIR_NOTIFIED, key, claim: c.id, file: last.file, name: last.name, runId: last.runId, attempt: last.attempt, runUrl: last.runUrl,
+            facts: ps.map((p) => ({ target: p.target, runId: p.runId, attempt: p.attempt })) } });
       } catch (e) {
         if (e instanceof SchedulerStopped) throw e;
-        failed ??= e; // 这一条留到下次，其余照送
+        failed ??= e; // 认领没落下：不发，这一条留到下次，其余照送
+        continue;
+      }
+      try { await s.notify(who.project, repairNotice(ps)); } catch (e) {
+        if (e instanceof SchedulerStopped) throw e;
+        failed ??= e;
+        try { await s.observe(unsentNote(who.project, c)); } catch (u) {
+          if (u instanceof SchedulerStopped) throw u;
+          const m = unsent.get(who.project) ?? new Map<string, Claim>();
+          unsent.set(who.project, m.set(c.id, c));
+        }
       }
     }
     if (failed) throw failed;
   });
 }
-/** 合并 tick 里顺带补送：绑了写口才做，每个项目最多 10 分钟一次（欠着「已通知」补记的不等）；补送失败只打日志，不影响这次 inspect 的回答。 */
+/** 合并 tick 里顺带补送：绑了写口才做，每个项目最多 10 分钟一次（欠着「未送达」补落的不等）；补送失败只打日志，不影响这次 inspect 的回答。 */
 async function maybeFlush(who: Who): Promise<void> {
   if (!ports().sink) return;
-  if (!owed.get(who.project)?.size && ports().now() - (flushed.get(who.project) ?? -Infinity) < FLUSH_MS) return;
+  if (!unsent.get(who.project)?.size && ports().now() - (flushed.get(who.project) ?? -Infinity) < FLUSH_MS) return;
   await flushRepairs(who);
 }
 
