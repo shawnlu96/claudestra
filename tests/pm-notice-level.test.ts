@@ -7,6 +7,7 @@ import { asInfo, pmNoticeLevel } from "../src/lib/pm-notice-level.js";
 import { PmDigestStore } from "../src/lib/pm-digest-store.js";
 import { routePmPush } from "../src/lib/pm-route-delivery.js";
 import type { DigestInput } from "../src/lib/pm-digest.js";
+import { sendToPm, type SpecWaitEnv } from "../src/lib/scheduler-spec-wait.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -53,4 +54,11 @@ test("an info push with route on is only recorded: not delivered, not queued for
   expect(store.queued("p")).toEqual([]);
   expect(store.read().log.map((r) => r.project)).toEqual(["p"]);
   expect(routePmPush(env("action", "m2"), "p", deps, () => false, "[engine] please look", "scheduler")).toBe(false);
+});
+
+test("sendToPm itself sets no level: merge, review and observation reminders reuse it and must still reach the PM", async () => {
+  let seen: unknown = "unset";
+  const env = { notifyPm: async () => { seen = pmNoticeLevel.getStore(); } } as unknown as SpecWaitEnv;
+  await sendToPm(env, "p", "agent-pm", "[合并] 请 PM 推进");
+  expect(seen).toBeUndefined();
 });
