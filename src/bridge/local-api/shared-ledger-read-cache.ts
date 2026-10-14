@@ -38,6 +38,11 @@ function retryAfterMs(header: string | null, now: number): number {
   return Number.isFinite(at) ? Math.max(0, at - now) : READ_BACKOFF_DEFAULT_MS;
 }
 
+/** Merge a 429 cooldown into an entry: the later deadline (and the header that came with it) wins, never the latest reply */
+function holdCooldown(e: Entry, block: { blockedUntil: number; header: string | null }): void {
+  if (e.blockedUntil === undefined || block.blockedUntil > e.blockedUntil) Object.assign(e, block);
+}
+
 function prune(now: number) {
   for (const [key, e] of entries) if (!e.running && e.expires <= now && (e.blockedUntil ?? 0) <= now) entries.delete(key);
 }
@@ -86,9 +91,9 @@ export async function cachedSharedLedgerRead<T>(scope: string, credential: Crede
         // The cooldown holds even when a write made this read obsolete meanwhile
         const at = sharedLedgerReadClock.now(), header = retry.get();
         const block = { blockedUntil: at + retryAfterMs(header, at), header };
-        Object.assign(mine, block);
+        holdCooldown(mine, block);
         const current = entries.get(key);
-        if (current && current !== mine) Object.assign(current, block);
+        if (current && current !== mine) holdCooldown(current, block);
         else if (!current) entries.set(key, { expires: 0, ...block });
       } else if (entries.get(key) === mine) entries.delete(key);
       throw error;

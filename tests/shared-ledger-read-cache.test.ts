@@ -182,3 +182,29 @@ test("[验收线 2] a successful write keeps an active 429 cooldown: GET feature
     expect(lists(hits)).toBe(2);
   });
 });
+
+test("[验收线 2] a late obsolete 429 never shortens a later, longer cooldown of the same key", async () => {
+  await withCenter(async ({ get, post, hits, answer, advance }) => {
+    const pending: Array<(r: Response) => void> = [];
+    answer((method, resource) => method === "GET" && resource === "features"
+      ? new Promise<Response>((resolve) => pending.push(resolve)) : ok(method, resource));
+    const a = get("features");
+    while (pending.length < 1) await Bun.sleep(1);
+    expect((await post("commands", SHARED_LEDGER_COMMAND_FIXTURES[3]!.payload)).status).toBe(200);
+    const b = get("features");
+    while (pending.length < 2) await Bun.sleep(1);
+    pending[1]!(new Response("slow", { status: 429, headers: { "Retry-After": "20" } }));
+    expect((await b).status).toBe(429);
+    advance(1_000);
+    pending[0]!(new Response("slow", { status: 429, headers: { "Retry-After": "5" } }));
+    expect((await a).status).toBe(429);
+    answer(ok);
+    advance(5_000);
+    const held = await get("features");
+    expect([held.status, held.headers.get("retry-after")]).toEqual([429, "14"]);
+    expect(lists(hits)).toBe(2);
+    advance(14_000);
+    expect((await get("features")).status).toBe(200);
+    expect(lists(hits)).toBe(3);
+  });
+});
