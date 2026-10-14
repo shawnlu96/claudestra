@@ -2,8 +2,9 @@
  * team-project-N8：项目组「协作视图」按绑定统一入口，真 Chromium + 合成两台机器（中继模式 /m/<fp>/api/v1/*），不连生产 bridge / 中心。
  * 截图私存：COLLAB_UNIFIED_SHOTS_DIR=<仓库外目录>（缺省写临时目录、跑完删掉），390 / 1280 各一套，manifest 记 head 与 fixture 摘要。
  */
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright-core";
+import * as childProcess from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -122,6 +123,25 @@ async function git(...args: string[]) {
   return out.trim();
 }
 
+function closePipesOnExit(child: childProcess.ChildProcess) {
+  // Chrome descendants can retain its pipes after it exits; Playwright's close wait needs every pipe closed.
+  // The browser is already gone on exit, so destroying its streams loses no browser output.
+  child.once("exit", () => { for (const stream of child.stdio) stream?.destroy(); });
+}
+
+async function launchBrowser() {
+  const spawn = childProcess.spawn;
+  const hook = spyOn(childProcess, "spawn").mockImplementation(((...args: unknown[]) => {
+    const child = Reflect.apply(spawn, childProcess, args) as childProcess.ChildProcess;
+    if (Array.isArray(args[1]) && args[1].includes("--remote-debugging-pipe")) closePipesOnExit(child);
+    return child;
+  }) as typeof childProcess.spawn);
+  try {
+    return await chromium.launch({ headless: true,
+      ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  } finally { hook.mockRestore(); }
+}
+
 beforeAll(async () => {
   mkdirSync(shots, { recursive: true, mode: 0o700 }); chmodSync(shots, 0o700);
   const build = Bun.spawn([process.execPath, "build", entry, "--target", "browser", "--outdir", scratch, "--tsconfig-override", "web/tsconfig.json"],
@@ -145,7 +165,7 @@ beforeAll(async () => {
       <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/team-view-harness.css"></head>
       <body><div id="root"></div><script src="/team-view-harness.js"></script></body></html>`, { headers: { "Content-Type": "text/html" } });
   } });
-  browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  browser = await launchBrowser();
 }, 120_000);
 
 afterAll(async () => {
@@ -157,10 +177,40 @@ afterAll(async () => {
       fixtureSha256: createHash("sha256").update(readFileSync(entry)).digest("hex"),
       testSha256: createHash("sha256").update(readFileSync("tests/web-collab-unified-browser.test.ts")).digest("hex"), shots: manifest }, null, 2), { mode: 0o600 });
   } finally {
-    server?.stop(true);
-    try { await browser?.close(); } finally { if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true }); }
+    try {
+      await browser?.close();
+    } finally {
+      server?.stop(true);
+      if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true });
+    }
   }
 }, 60_000);
+
+test("Chromium cleanup closes native process pipes even while a descendant retains them", async () => {
+  const script = `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+    console.log(child.pid);
+    process.stdin.once('data', () => process.exit(0));
+  `;
+  const child = childProcess.spawn("node", ["-e", script], { stdio: ["pipe", "pipe", "pipe"] });
+  closePipesOnExit(child);
+  const closed = new Promise<number | null>((resolve, reject) => {
+    child.once("close", resolve);
+    child.once("error", reject);
+  });
+  let descendant: number | undefined;
+  try {
+    descendant = Number(await new Promise<string>((resolve) => child.stdout.once("data", (data) => resolve(data.toString().trim()))));
+    child.stdin.end("exit");
+    expect(await closed).toBe(0);
+    expect(Number.isSafeInteger(descendant) && descendant > 0).toBe(true);
+    expect(() => process.kill(descendant!, 0)).not.toThrow();
+  } finally {
+    child.kill();
+    if (descendant && Number.isSafeInteger(descendant) && descendant > 0) process.kill(descendant, "SIGTERM");
+  }
+});
 
 /** React DevTools 钩子只记录页面主根；守卫另起的根也会提交，不能让它覆盖待断言的渲染树。 */
 const HOOK = `window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { supportsFiber: true, renderers: new Map(), inject() { return 1; },
@@ -246,14 +296,17 @@ for (const width of [1280, 390]) {
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await page.getByText("B 机的 feature", { exact: false }).first().waitFor();
     expect(await tree(page)).toEqual(["CollabSwitch>SharedCollabContent>TeamSource>CollabView"]);
+    await page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ }).first().waitFor();
     const viaGroup = await page.locator("main").innerText();
     await shot(page, "3-bound-home-view", width);
     if (mobile) await page.getByRole("button", { name: "返回", exact: true }).click();
     await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
     expect(await opened(page)).toBe(n5Key("mac-a"));
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
+    await page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ }).first().waitFor();
     expect(await page.locator("main").innerText()).toBe(viaGroup);
-    expect(ledgerHits("claudestra")).toEqual([]);
+    expect({ paths: [...new Set(ledgerHits("claudestra"))], atMostTwo: ledgerHits("claudestra").length <= 2 }) // UXNUM1：主场本机的卡读本机 /work，只这一条；两个入口各挂载一次 → 至多 2 次
+      .toEqual({ paths: ["mac-a /ledger/claudestra/work"], atMostTwo: true });
     expect(errors).toEqual([]);
   }, 90_000);
 
@@ -268,7 +321,7 @@ for (const width of [1280, 390]) {
     expect(await opened(page)).toBe(n5Key("mac-b"));
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await page.getByText("B 机的 feature", { exact: false }).first().waitFor();
-    expect(ledgerHits("claude-orchestrator")).toEqual([]);
+    expect([...new Set(ledgerHits("claude-orchestrator"))]).toEqual(["mac-b /ledger/claude-orchestrator/work"]); // UXNUM1：同上（B 机 feature 主场在 mac-b）
     expect(world.log.filter((l) => l.startsWith("mac-b") && l.includes("/shared-ledger/features")).every((l) => l.endsWith(`[${PROJECT}]`))).toBe(true);
     await shot(page, "2-bound-member-view", width);
     expect(errors).toEqual([]);
@@ -422,7 +475,7 @@ test("1280：N5 列表先打开中心视图、项目组入口的 context 后回�
   await page.waitForFunction("document.body.dataset.open === ''", undefined, { timeout: 20_000 });
   await entryOf(page, "claudestra").click();
   expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
-  expect(ledgerHits("claudestra")).toEqual([]);
+  expect([...new Set(ledgerHits("claudestra"))]).toEqual(["mac-a /ledger/claudestra/work"]); // UXNUM1：同上
 }, 60_000);
 
 for (const change of ["改绑", "解绑"] as const) {

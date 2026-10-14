@@ -1,12 +1,12 @@
 /**
  * 中继上行：流量账（src/lib/relay-traffic.ts）的聚合与摘要、入站路由（relay-client-inbound.ts）的记账点、
- * 路径模式 JSON 压缩（relay-stream.ts gzipJson）、/events 的 agent 过滤参数（bridge/event-bus.ts eventsQueryFilter）。
+ * 路径模式 JSON 压缩（relay-stream.ts gzipBody）、/events 的 agent 过滤参数（bridge/event-bus.ts eventsQueryFilter）。
  */
 import { describe, expect, test } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import { RelayTraffic, trafficPath } from "../src/lib/relay-traffic.js";
 import { InboundRouter } from "../src/lib/relay-client-inbound.js";
-import { gzipJson } from "../src/lib/relay-stream.js";
+import { b64, gzipBody } from "../src/lib/relay-stream.js";
 import { eventsQueryFilter } from "../src/bridge/event-bus.js";
 
 function clock(start = 1_000_000) {
@@ -112,12 +112,12 @@ describe("InboundRouter 记账", () => {
   });
 });
 
-describe("gzipJson", () => {
+describe("gzipBody", () => {
   const stream = (u: Uint8Array) => new Response(u).body!;
   const big = new TextEncoder().encode(JSON.stringify({ ok: true, messages: Array.from({ length: 200 }, (_, i) => ({ seq: i, text: "同一段回复正文 " + i })) }));
 
   test("浏览器接受 gzip 的 JSON ≥1KB：压缩、去 content-length、加 vary，解开还是原文", async () => {
-    const out = await gzipJson({ "content-type": "application/json", "content-length": String(big.length) }, stream(big), "gzip, deflate, br");
+    const out = await gzipBody(200, { "content-type": "application/json", "content-length": String(big.length) }, stream(big), "gzip, deflate, br");
     expect(out.headers["content-encoding"]).toBe("gzip");
     expect(out.headers["content-length"]).toBeUndefined();
     expect(out.headers.vary).toBe("Accept-Encoding");
@@ -128,15 +128,61 @@ describe("gzipJson", () => {
 
   test("不该压的原样放行：SSE、没声明 gzip、已有编码；小 JSON 整读但不压", async () => {
     const sse = stream(big);
-    expect((await gzipJson({ "content-type": "text/event-stream" }, sse, "gzip")).body).toBe(sse);
+    expect((await gzipBody(200, { "content-type": "text/event-stream" }, sse, "gzip")).body).toBe(sse);
     const noAccept = stream(big);
-    expect((await gzipJson({ "content-type": "application/json" }, noAccept, "")).body).toBe(noAccept);
+    expect((await gzipBody(200, { "content-type": "application/json" }, noAccept, "")).body).toBe(noAccept);
     const encoded = stream(big);
-    expect((await gzipJson({ "content-type": "application/json", "content-encoding": "br" }, encoded, "gzip")).body).toBe(encoded);
-    const small = await gzipJson({ "content-type": "application/json; charset=utf-8" }, stream(new TextEncoder().encode('{"ok":true}')), "gzip");
+    expect((await gzipBody(200, { "content-type": "application/json", "content-encoding": "br" }, encoded, "gzip")).body).toBe(encoded);
+    const small = await gzipBody(200, { "content-type": "application/json; charset=utf-8" }, stream(new TextEncoder().encode('{"ok":true}')), "gzip");
     expect(small.headers["content-encoding"]).toBeUndefined();
     expect(new TextDecoder().decode(small.body as Uint8Array)).toBe('{"ok":true}');
-    expect((await gzipJson({ "content-type": "application/json" }, null, "gzip")).body).toBeNull();
+    expect((await gzipBody(200, { "content-type": "application/json" }, null, "gzip")).body).toBeNull();
+  });
+
+  test("二进制、可能是长流的 text/plain、分段响应不压；JS / 字节正文照压", async () => {
+    const skip = [
+      [200, { "content-type": "image/png" }],
+      [200, { "content-type": "text/plain" }],
+      [206, { "content-type": "application/json" }],
+      [200, { "content-type": "application/json", "content-range": "bytes 0-9/99" }],
+    ] as const;
+    for (const [status, h] of skip) {
+      expect((await gzipBody(status, { ...h }, big, "gzip")).body).toBe(big);
+    }
+    const js = await gzipBody(200, { "content-type": "application/javascript; charset=utf-8" }, big, "gzip");
+    expect(js.headers["content-encoding"]).toBe("gzip");
+    expect(Buffer.from(gunzipSync(js.body as Uint8Array)).equals(Buffer.from(big))).toBe(true);
+  });
+});
+
+describe("隧道回帖按 Accept-Encoding 的 q 值决定压不压（PR1482-r1 gzip-qzero-regression）", () => {
+  const js = new TextEncoder().encode("console.log('relay');\n".repeat(94)).subarray(0, 2048);
+  async function tunnelGet(acceptEncoding: string) {
+    const frames: Record<string, unknown>[] = [];
+    const r = new InboundRouter((f) => (frames.push(f as Record<string, unknown>), true), async () => ({ status: 200, headers: { "content-type": "application/javascript" }, body: js }), () => {});
+    r.onReq({ t: "req", id: "js1", from: "relay", method: "GET", path: "/app.js", headers: { "accept-encoding": acceptEncoding }, more: false });
+    while (r.size) await Bun.sleep(1);
+    const res = frames.find((f) => f.t === "res") as { headers: Record<string, string>; body: string };
+    return { enc: res.headers["content-encoding"], body: b64.dec(res.body) };
+  }
+
+  test("identity, gzip;q=0 明确拒收 gzip：原文返回", async () => {
+    const out = await tunnelGet("identity, gzip;q=0");
+    expect(out.enc).toBeUndefined();
+    expect(Buffer.from(out.body).equals(Buffer.from(js))).toBe(true);
+  });
+
+  test("gzip;q=0.5 照常压缩，解开与原文一致", async () => {
+    const out = await tunnelGet("gzip;q=0.5, identity");
+    expect(out.enc).toBe("gzip");
+    expect(Buffer.from(gunzipSync(out.body)).equals(Buffer.from(js))).toBe(true);
+  });
+
+  test("q 值大小写、空格、*;q=0 / * 兜底", async () => {
+    expect((await tunnelGet("GZIP ; Q=0.000")).enc).toBeUndefined();
+    expect((await tunnelGet("br, *;q=0")).enc).toBeUndefined();
+    expect((await tunnelGet("br, *")).enc).toBe("gzip");
+    expect((await tunnelGet("*, gzip;q=0")).enc).toBeUndefined(); // 显式写了 gzip 就以它为准
   });
 });
 

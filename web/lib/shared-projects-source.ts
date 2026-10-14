@@ -35,13 +35,18 @@ export function projectSourceSnapshot(value: unknown): ProjectSnapshot {
     capabilities: { invite: object(capabilities.invite).available === true, leave: object(capabilities.leave).available === true } };
 }
 
+/** Team-project confirmation cards: createdBy → [accept, decline] button ids (asks-model agentLabel reuses the keys). */
+export const TEAM_PROJECT_CARD_BUTTONS: Readonly<Record<string, readonly [string, string]>> = {
+  "system:shared-projects": ["shared_project_confirm", "shared_project_cancel"],
+  "system:shared-ledger-join-offer": ["sl_join_accept", "sl_join_decline"],
+};
+
 /** Read only N4/N3's public card surface. Never carry bind.params, body, invitation codes or arbitrary response extras into React. */
 export function projectSourceCards(value: unknown, now = Date.now()): ProjectCard[] {
   return list(object(value).asks, v => {
     const a = object(v);
     if (a.state !== "open" || !Number.isSafeInteger(a.expiresAt) || Number(a.expiresAt) <= now) return null;
-    const ids = a.createdBy === "system:shared-projects" ? ["shared_project_confirm", "shared_project_cancel"]
-      : a.createdBy === "system:shared-ledger-join-offer" ? ["sl_join_accept", "sl_join_decline"] : null;
+    const ids = typeof a.createdBy === "string" && Object.hasOwn(TEAM_PROJECT_CARD_BUTTONS, a.createdBy) ? TEAM_PROJECT_CARD_BUTTONS[a.createdBy]! : null;
     if (!ids || a.source !== "system" || a.kind !== "authorize") return null;
     const rows = list(a.options, v => object(v));
     const buttons = rows.filter(r => r.type === "buttons").flatMap(r => list(r.buttons, v => object(v)));

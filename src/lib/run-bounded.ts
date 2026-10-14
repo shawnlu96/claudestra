@@ -12,6 +12,7 @@ export interface BoundedResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  truncated?: boolean;
 }
 
 /** 输出上限：命令正常输出都在几十 KB 内，超了就截断（不让一个异常输出把内存吃满） */
@@ -46,13 +47,13 @@ function hookParentExit(): void {
   }
 }
 
-export function runBounded(argv: string[], opts: { cwd?: string; env?: Record<string, string | undefined>; timeoutMs: number }): Promise<BoundedResult> {
+export function runBounded(argv: string[], opts: { cwd?: string; env?: Record<string, string | undefined>; timeoutMs: number; maxBytes?: number }): Promise<BoundedResult> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(argv[0], argv.slice(1), { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     } catch (e) {
-      resolve({ code: null, stdout: "", stderr: (e as Error).message, timedOut: false });
+      resolve({ code: null, stdout: "", stderr: (e as Error).message, timedOut: false, truncated: false });
       return;
     }
     const pid = child.pid;
@@ -60,13 +61,18 @@ export function runBounded(argv: string[], opts: { cwd?: string; env?: Record<st
       hookParentExit();
       live.add(pid);
     }
-    const out: string[] = [];
-    const err: string[] = [];
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
     let size = 0;
-    const take = (buf: string[]) => (chunk: Buffer) => {
-      if (size >= CAP) return;
-      size += chunk.length;
-      buf.push(chunk.toString("utf8"));
+    let truncated = false;
+    const cap = opts.maxBytes ?? CAP;
+    const take = (buf: Buffer[]) => (chunk: Buffer) => {
+      const room = Math.max(0, cap - size);
+      if (chunk.length >= room) truncated = true;
+      if (!room) return;
+      const kept = chunk.subarray(0, room);
+      size += kept.length;
+      buf.push(kept);
     };
     child.stdout?.on("data", take(out));
     child.stderr?.on("data", take(err));
@@ -83,7 +89,7 @@ export function runBounded(argv: string[], opts: { cwd?: string; env?: Record<st
       }
       child.stdout?.destroy();
       child.stderr?.destroy();
-      resolve({ code, stdout: out.join(""), stderr: err.join("") + extraErr, timedOut });
+      resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") + extraErr, timedOut, truncated });
     };
     const timer = setTimeout(() => finish(null, true), opts.timeoutMs);
     child.on("error", (e) => finish(null, false, e.message)); // 命令不存在（ENOENT）等：按失败返回，原因进 stderr

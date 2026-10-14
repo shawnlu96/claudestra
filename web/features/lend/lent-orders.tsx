@@ -4,6 +4,7 @@
  * （开跑 play / 交付 check / 停止 square，待补发 clock）。有 agent 的行打开 worker 会话；没起过的 released 单只展示失败原因。
  * 状态只按 lend-model.orderPhase：收回后 live 的转圈，70 秒还 live 闪告警，journal 进终态才是已停。
  */
+import { LEND_WORDS } from "@/lib/owner-words";
 import { useLendT } from "./lend-i18n";
 import { LendIcon, type LendIconName } from "./lend-icons";
 import { isLive, orderPhase, orderTitle, timeline, type OrderPhase, type OrderView, type TimelineItem } from "./lend-model";
@@ -83,7 +84,7 @@ export function LentOrders({ orders, stopping, now, onOpen }: {
   const t = useLendT();
   const live = orders.filter(isLive);
   const ended = orders.filter((o) => !isLive(o));
-  if (!orders.length) return <div className="py-2 text-center text-xs text-base-content/40">{t("暂无借出的单")}</div>;
+  if (!orders.length) return <div className="py-2 text-center text-xs text-base-content/40">{t(LEND_WORDS.noLentWork)}</div>;
   return (
     <div className="space-y-0.5">
       {live.map((o) => <OrderRow key={o.orderId} order={o} phase={orderPhase(o, stopping, now)} onOpen={onOpen} />)}

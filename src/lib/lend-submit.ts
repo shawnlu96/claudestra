@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { isWriteStep } from "./lend-git.js";
-import { advance, getOrder, JournalConflict, orderOf, type LendRow } from "./lend-journal.js";
+import { advance, getOrder, JournalConflict, orderOf, type LendRow, type WorkUi } from "./lend-journal.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
 import { arbiterSubmit } from "./lend-arbiter-submit.js";
 import { lendVerdictForPeer } from "./memory-tools-wire.js";
@@ -31,8 +31,8 @@ export interface SubmitInput {
   report: string;
 }
 
-/** 写单交活：一行摘要与自查（都进 A 的 DeliverWire：摘要 ≤ 500 字节单行，自查 ≤ 4000 字节） */
-export interface WorkInput { summary: string; selfCheck: string }
+/** 写单交活：一行摘要与自查（都进 A 的 DeliverWire：摘要 ≤ 500 字节单行，自查 ≤ 4000 字节）；ui = 已核过、已拷贝的截图（LENDUI2 lend-ui-submit.ts） */
+export interface WorkInput { summary: string; selfCheck: string; ui?: WorkUi }
 
 /** POST /api/v1/lend/result 的请求体，整份存进 journal：A 按原始字节的 sha256 做幂等，重发必须逐字节一样 */
 interface LendResultPayload {
@@ -147,7 +147,7 @@ export async function submitLendWork(db: Database, orderId: string, input: WorkI
   const head = await d.headOf?.(row.dir!);
   if (!head || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, error: "读不到工作副本的 HEAD（先 git commit）" };
   if (head === String(orderOf(row)?.head ?? "")) return { ok: false, error: "HEAD 还在订单起点上：先把改动 git commit 到当前分支" };
-  const work = { head, summary: input.summary.trim(), selfCheck: input.selfCheck };
+  const work = { head, summary: input.summary.trim(), selfCheck: input.selfCheck, ...(input.ui ? { ui: input.ui } : {}) };
   const sha = payloadSha(JSON.stringify(work));
   if (row.state === "result_pending") {
     return row.work && payloadSha(JSON.stringify(row.work)) === sha ? { ok: true, duplicate: true, sha }
@@ -205,26 +205,36 @@ export async function submitLendResult(db: Database, orderId: string, input: Sub
  * 硬链（nlink > 1：可能是副本外文件的别名）、非普通文件、超过 64 KiB；打开后再比一次 inode，挡住核对与打开之间换掉目录的竞态。
  */
 export function readReportIn(dir: string, reportPath: string): { ok: true; text: string } | { ok: false; error: string } {
-  if (!reportPath || reportPath.includes("\0")) return { ok: false, error: "reportPath 不能为空、不能带 NUL" };
+  const r = readBytesIn(dir, reportPath, { max: REPORT_MAX_BYTES, what: "报告", field: "reportPath" });
+  return r.ok ? { ok: true, text: Buffer.from(r.bytes).toString("utf8") } : r;
+}
+
+/** readBytesIn 报错里的名字：what = 文件叫什么（报告 / 截图…），field = 路径参数叫什么 */
+export interface ReadInOpts { max: number; what: string; field: string }
+
+/** 按字节读副本里的一个文件，规则同 readReportIn（readReportIn 就是它的 64 KiB 文本版）；上限与报错里的名字作参数 */
+export function readBytesIn(dir: string, path: string, o: ReadInOpts): { ok: true; bytes: Uint8Array } | { ok: false; error: string } {
+  const { max, what } = o;
+  if (!path || path.includes("\0")) return { ok: false, error: `${o.field} 不能为空、不能带 NUL` };
   const root = realOr(dir);
-  const abs = resolve(dir, reportPath);
+  const abs = resolve(dir, path);
   let real: string;
-  try { real = realpathSync.native(abs); } catch { return { ok: false, error: `读不到报告 ${reportPath}（文件不存在？）` }; }
+  try { real = realpathSync.native(abs); } catch { return { ok: false, error: `读不到${what} ${path}（文件不存在？）` }; }
   const inside = (p: string) => { const rel = relative(root, p); return !!rel && !rel.startsWith("..") && !isAbsolute(rel); };
-  if (!inside(real)) return { ok: false, error: "报告不在这张单的工作副本里（或是指向副本外的软链），不收" };
+  if (!inside(real)) return { ok: false, error: `${what}不在这张单的工作副本里（或是指向副本外的软链），不收` };
   let fd: number;
-  try { fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { return { ok: false, error: "报告打不开（软链不收）" }; }
+  try { fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { return { ok: false, error: `${what}打不开（软链不收）` }; }
   try {
     const st = fstatSync(fd);
     const named = statSync(real);
-    if (!st.isFile()) return { ok: false, error: "报告要是普通文件" };
-    if (st.nlink !== 1) return { ok: false, error: "报告是硬链接（可能是副本外文件的别名），不收；另存一份普通文件再交" };
-    if (st.ino !== named.ino || st.dev !== named.dev || !inside(realOr(abs))) return { ok: false, error: "报告在核对时被换掉了，不收" };
-    if (st.size > REPORT_MAX_BYTES) return { ok: false, error: `报告 ${st.size} 字节，超过 ${REPORT_MAX_BYTES}，请精简后再交（不截断）` };
-    const buf = Buffer.alloc(REPORT_MAX_BYTES + 1);
+    if (!st.isFile()) return { ok: false, error: `${what}要是普通文件` };
+    if (st.nlink !== 1) return { ok: false, error: `${what}是硬链接（可能是副本外文件的别名），不收；另存一份普通文件再交` };
+    if (st.ino !== named.ino || st.dev !== named.dev || !inside(realOr(abs))) return { ok: false, error: `${what}在核对时被换掉了，不收` };
+    if (st.size > max) return { ok: false, error: `${what} ${st.size} 字节，超过 ${max}，请精简后再交（不截断）` };
+    const buf = Buffer.alloc(max + 1);
     const n = readSync(fd, buf, 0, buf.length, 0);
-    if (n > REPORT_MAX_BYTES) return { ok: false, error: `报告超过 ${REPORT_MAX_BYTES} 字节，请精简后再交（不截断）` };
-    return { ok: true, text: buf.subarray(0, n).toString("utf8") };
+    if (n > max) return { ok: false, error: `${what}超过 ${max} 字节，请精简后再交（不截断）` };
+    return { ok: true, bytes: buf.subarray(0, n) };
   } finally { closeSync(fd); }
 }
 

@@ -79,16 +79,52 @@ export function inboxCard(localProjectId: string, r: ProposalRecord, selfPersonI
   };
 }
 
-/** 执行结果卡的 createdBy：和授权卡分开，轮询收卡 / 答复钩子都不碰它 */
-const PROPOSAL_RESULT_CREATOR = "system:center-proposal-inbox-result";
+/** 成员表里用到的三列（GET /v1/projects/:id/members） */
+export interface InboxMember { personId: string; role: string; status: string }
+export const NOT_APPROVER_REASON = "本人在该项目不是 owner，无审批权";
+/** 本人在这个中心项目里能不能批（PROPRESULT1）：中心只认项目 owner；成员表里没有本人、不是 owner、不是 active 都不能。表形状不对抛 TypeError（调用方当读失败） */
+export function canApprove(members: readonly InboxMember[], selfPersonId: string): boolean {
+  if (!Array.isArray(members) || members.some(m => !m || typeof m.personId !== "string")) throw new TypeError("members shape");
+  return !!selfPersonId && members.some(m => m.personId === selfPersonId && m.role === "owner" && m.status === "active");
+}
 
-/** 需要 owner 再看一眼的执行结果进「待你处理」（未执行 / 中心报错 / conflict / 中心状态不是终态；办成了的不开，见 decisionSettled）：每张授权卡一张，无按钮 */
-export function resultCard(askId: string, title: string, text: string): NewAsk & { source: "system"; createdBy: string } {
+/** 执行结果卡的 createdBy：和授权卡分开，轮询收卡不碰它 */
+export const PROPOSAL_RESULT_CREATOR = "system:center-proposal-inbox-result";
+export const RESULT_ACK_BUTTON = "cp_result_ack";
+export const RESULT_MASTER_BUTTON = "cp_result_master";
+/** 结果卡上记的提案标识和固定错误码（「交给大总管」拼文字用） */
+export interface ResultMeta { proposalId: string; proposalRev: number; code: string }
+
+/** 需要 owner 再看一眼的执行结果进「待你处理」（未执行 / 中心报错 / conflict / 中心状态不是终态；办成了的不开，见 decisionSettled）：每张授权卡一张；
+ * 「知道了」只关卡，「交给大总管」把固定格式的一段发给 master 再关（PROPRESULT1） */
+export function resultCard(askId: string, title: string, text: string, meta?: ResultMeta): NewAsk & { source: "system"; createdBy: string } {
   return {
     source: "system", createdBy: PROPOSAL_RESULT_CREATOR, kind: "owner_action", project: MASTER_PROJECT,
-    title: clip(`成员提案处理结果：${clean(title)}`, 200), context: text, options: [], allowText: false, blocking: false,
-    dedupKey: `center-proposal-result:${askId}`, extra: { centerProposalResultOf: askId },
+    title: clip(`成员提案处理结果：${clean(title)}`, 200), context: text,
+    options: [{ type: "buttons", buttons: [
+      { id: RESULT_ACK_BUTTON, label: "知道了", style: "secondary" }, { id: RESULT_MASTER_BUTTON, label: "交给大总管", style: "primary" }] }],
+    allowText: false, blocking: false,
+    dedupKey: `center-proposal-result:${askId}`, extra: { centerProposalResultOf: askId, ...(meta ? { centerProposalResultMeta: { ...meta } } : {}) },
   };
+}
+
+/** 结果卡的答复：是结果卡、已答、owner 本人答、只点了两个按钮之一 → 点的是哪个；否则 null（不生效） */
+export function resultAnswer(a: Ask): "ack" | "master" | null {
+  if (a.createdBy !== PROPOSAL_RESULT_CREATOR || a.state !== "answered" || !ownerAnswered(a.answer)) return null;
+  const choices = a.answer?.choices ?? [];
+  const ack = choices.includes(`[button:${RESULT_ACK_BUTTON}]`), master = choices.includes(`[button:${RESULT_MASTER_BUTTON}]`);
+  return ack === master ? null : ack ? "ack" : "master";
+}
+
+const CODE = /^[a-z0-9_]{1,64}$/;
+/** 「交给大总管」发的那一段：固定格式，只有标题（再过一次脱敏）、错误码、提案号、rev、卡号；卡上的结果正文、中心原文、凭据都不带 */
+export function handoffText(a: Pick<Ask, "id" | "title" | "extra">): string {
+  const m = a.extra.centerProposalResultMeta as Partial<ResultMeta> | undefined;
+  const proposalId = typeof m?.proposalId === "string" && ID.test(m.proposalId) ? m.proposalId : "未知";
+  const rev = typeof m?.proposalRev === "number" && Number.isSafeInteger(m.proposalRev) && m.proposalRev > 0 ? String(m.proposalRev) : "未知";
+  const code = typeof m?.code === "string" && CODE.test(m.code) ? m.code : "unknown";
+  const title = clip(clean(a.title.replace(/^成员提案处理结果：/, "")), 200);
+  return [`[owner 把一张成员提案处理结果卡交给你处理（${a.id}）]`, `标题：${title}`, `错误码：${code}`, `提案号：${proposalId}`, `rev：${rev}`].join("\n");
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;

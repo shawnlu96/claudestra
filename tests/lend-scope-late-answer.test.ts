@@ -5,7 +5,7 @@
  * manager list 换成只列本文件登记的 worker（不起子进程、不碰 tmux）；整文件在独立状态目录的子进程里跑（tests/isolated-state.ts）。
  */
 import { expect, mock } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { instanceKeySync, keyFingerprint, signedHeaders, type InstanceKey } from "../src/lib/instance-key.ts";
@@ -13,6 +13,7 @@ import { LEND_PATH } from "../src/lib/lend-config.ts";
 import { advance, LEND_JOURNAL_PATH, openLendJournal, recordAsked, type LendState } from "../src/lib/lend-journal.ts";
 import { workerName } from "../src/lib/lend-worker-name.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
+import { REGISTRY_PATH } from "../src/lib/registry.ts";
 import { isolatedStateSuite } from "./isolated-state.ts";
 
 const { afterAll, beforeAll, describe, test } = isolatedStateSuite(import.meta.path);
@@ -42,8 +43,16 @@ function seed(orderId: string, to: LendState[] = []): string {
   for (const s of to) { advance(db, orderId, cur, s); cur = s; }
   db.close();
   listed.push(agent);
+  touchRegistry();
   clients.set(`ch-${agent}`, { ws: {} as never, channelId: `ch-${agent}`, cwd: dirA });
   return agent;
+}
+
+/** manager create 收尾会写 registry.json，bridge 的名单缓存认它作废（lib/agent-lookup-cache.ts）；这里不起真 manager，只把 mtime 往后推 */
+function touchRegistry(): void {
+  if (!existsSync(REGISTRY_PATH)) writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: {} }));
+  const t = new Date(Date.now() + ++n * 1_000);
+  utimesSync(REGISTRY_PATH, t, t);
 }
 
 function move(orderId: string, from: LendState, to: LendState): void {

@@ -13,6 +13,7 @@ import {
   SHARED_LEDGER_ACTIVITY_FIXTURE, SHARED_LEDGER_EXT_CAPABILITIES_NEW_FIXTURE, SHARED_LEDGER_EXT_CAPABILITIES_OLD_CENTER_STATUS,
   SHARED_LEDGER_EXT_CAPABILITIES_READONLY_FIXTURE, SHARED_LEDGER_FEATURE_FIXTURE, SHARED_LEDGER_LIST_FIXTURE, SHARED_LEDGER_VERSIONS_FIXTURE,
 } from "../src/lib/shared-ledger-contract-fixtures.js";
+import { TASK_FACTS_FIXTURE, TASK_FACTS_OLD_CENTER_STATUS } from "../src/lib/shared-ledger-contract-task-facts-fixtures.js";
 import type { InstanceKey } from "../src/lib/instance-key.js";
 import type { Principal } from "../src/lib/principals.js";
 
@@ -38,6 +39,11 @@ function answer(resource: string): Response {
   if (center.overrides.has(resource)) return Response.json(center.overrides.get(resource));
   const ext = resource === "ext-capabilities" || /^features\/[^/]+\/(?:versions|activity\/\d+)$/.test(resource);
   if (ext && center.mode === "old") return Response.json({ error: "not found" }, { status: SHARED_LEDGER_EXT_CAPABILITIES_OLD_CENTER_STATUS });
+  if (resource === "features/feature-a/task-facts") {
+    // An old center's router has no such route and falls through to forbidden.
+    return center.mode === "old" ? Response.json({ code: "forbidden", status: 403, message: "forbidden" }, { status: TASK_FACTS_OLD_CENTER_STATUS })
+      : Response.json(TASK_FACTS_FIXTURE);
+  }
   if (resource === "ext-capabilities") {
     return Response.json(center.mode === "new" ? SHARED_LEDGER_EXT_CAPABILITIES_NEW_FIXTURE : SHARED_LEDGER_EXT_CAPABILITIES_READONLY_FIXTURE);
   }
@@ -157,5 +163,49 @@ describe("P1-D add-only reads through the real bridge proxy and client", () => {
     expect(await caps!.json()).toEqual(SHARED_LEDGER_EXT_CAPABILITIES_READONLY_FIXTURE);
     expect((await gate("/shared-ledger/features/feature-a/versions"))!.status).toBe(200);
     expect((await gate("/shared-ledger/ext-capabilities", "project-b"))!.status).toBe(403);
+  });
+
+  test("[验收线 3] task-facts: new center 200 byte-identical; old center 403 passes the validated error through", async () => {
+    reset("new");
+    const ok = (await call("/shared-ledger/features/feature-a/task-facts"))!;
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toBe(JSON.stringify(TASK_FACTS_FIXTURE));
+    reset("old");
+    expect(await read("/shared-ledger/features/feature-a/task-facts")).toEqual({ status: 403, body: { code: "forbidden", status: 403, message: "forbidden" } });
+    expect(center.paths).toEqual(["/v1/teams/team-a/features/feature-a/task-facts"]);
+  });
+
+  test("[验收线 3] task-facts: other project 403 'project unavailable'; no read grant or other-project grant 403 with zero center requests", async () => {
+    reset("new");
+    center.overrides.set("features/feature-a/task-facts", { ...TASK_FACTS_FIXTURE, projectId: "project-b" });
+    expect(await read("/shared-ledger/features/feature-a/task-facts")).toEqual({ status: 403, body: { error: "project unavailable" } });
+    reset("new");
+    for (const principal of [planner, otherProject]) {
+      expect(await read("/shared-ledger/features/feature-a/task-facts", principal)).toEqual({ status: 403, body: { error: "shared ledger identity unavailable" } });
+    }
+    expect(center.paths).toEqual([]);
+  });
+
+  test("[验收线 3] task-facts: any query string, encoded ?, extra segments and POST are 400 without reaching the center", async () => {
+    reset("new");
+    const path = "/shared-ledger/features/feature-a/task-facts";
+    expect((await read(path, owner, "?x=1")).status).toBe(400);
+    expect((await read(path, owner, "?featureId=other")).status).toBe(400);
+    for (const bad of ["features/feature-a/task-facts%3Fx=1", "features/feature-a%3F/task-facts", "features/feature-a/b/task-facts",
+      "features/feature-a/task-facts/x"]) expect((await read(`/shared-ledger/${bad}`)).status).toBe(400);
+    const post = await handleSharedLedgerApi(new Request(`http://127.0.0.1/api/v1${path}`, { method: "POST", body: "{}" }), path, owner, deps);
+    expect(post!.status).toBe(400);
+    expect(center.paths).toEqual([]);
+  });
+
+  test("[验收线 3] task-facts forwards through sharedLedgerGateProxy with the binding picked by project header", async () => {
+    reset("new");
+    const path = "/shared-ledger/features/feature-a/task-facts";
+    const gate = (project: string) => sharedLedgerGateProxy(new Request(`http://127.0.0.1/api/v1${path}`,
+      { headers: { [SHARED_LEDGER_PROJECT_HEADER]: project } }), path, owner, handleSharedLedgerApi, { stateDir: root, key: () => key });
+    const ok = (await gate("project-a"))!;
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toBe(JSON.stringify(TASK_FACTS_FIXTURE));
+    expect((await gate("project-b"))!.status).toBe(403);
   });
 });

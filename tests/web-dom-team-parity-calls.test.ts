@@ -175,18 +175,17 @@ test("复现测试:团队 CollabView 不再请求本机 last-seen / 谁在干活
 test("复现测试:团队 3 张 done、observedAt=now 不显示今日完成 3", async () => {
   const v = await mount("team", 1200);
   // 夹具 3 张 done 的镜像刚刷新（observedAt = 此刻）：observedAt 不是完成时刻，不能数成「今日完成 3」
-  expect(v.metric("今日完成")).toEqual({ value: "暂无", title: "暂无数据来源" });
+  // UXNUM1：不知道的指标整格不出（不是 3，也不是「暂无」）
+  expect(v.metric("今日完成")).toBeNull();
   await v.unmount();
 });
 
 test("复现测试:团队未知指标与待你处理显示暂无并给原因，区别于本机「—」", async () => {
   const v = await mount("team", 1200);
-  for (const k of ["在场 agent", "今日完成", "审查轮次", "P0/P1 修掉", "平均等复核"]) {
-    const m = v.metric(k);
-    expect({ k, value: m?.value }).toEqual({ k, value: "暂无" });
-    expect(m?.title).toBeTruthy();
-  }
-  expect(v.metric("进行中")?.value).toBe("2");
+  // UXNUM1：五项不知道的指标整格不出；「进行中」格由看板口径的「在干活」「在等」代替
+  for (const k of ["在场 agent", "今日完成", "审查轮次", "P0/P1 修掉", "平均等复核"]) expect({ k, cell: v.metric(k) }).toEqual({ k, cell: null });
+  expect(v.metric("进行中")).toBeNull();
+  expect([v.metric("在干活")?.value, v.metric("在等")?.value].every((x) => /^\d+$/.test(x ?? ""))).toBe(true);
   const waits = v.button("待你处理");
   expect(waits?.querySelector("b")?.textContent).toBe("暂无");
   expect(waits?.title).toBeTruthy();
@@ -247,7 +246,8 @@ test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英�
     const m = await mount("team", 390);
     const phone = m.button("For you")?.title;
     await m.unmount();
-    expect({ ...desk, work, zhLeft, phone }).toEqual({ presence: "Home presence unknown", waits: EXEC, work: { board: true, zhUi: false, hint: false }, zhLeft: false,
+    // UXNUM1：在场 agent 整格不出，自然没有原因 title
+    expect({ ...desk, work, zhLeft, phone }).toEqual({ presence: undefined, waits: EXEC, work: { board: true, zhUi: false, hint: false }, zhLeft: false,
       phone: "No data source yet" });
   } finally {
     i18n.setLang("zh");
@@ -266,8 +266,9 @@ test("复现测试:英文模式团队未知数值不回落中文「暂无」（�
     const phoneWaits = m.button("For you")?.querySelector("b")?.textContent;
     await m.unmount();
     const NA = "Unknown";
+    // UXNUM1：五项指标整格不出（也就不会回落中文「暂无」）；待你处理照旧是 Unknown
     expect({ values, deskWaits, phoneWaits }).toEqual({
-      values: { "Agents present": NA, "Done today": NA, "Review rounds": NA, "P0/P1 fixed": NA, "Avg review wait": NA },
+      values: { "Agents present": undefined, "Done today": undefined, "Review rounds": undefined, "P0/P1 fixed": undefined, "Avg review wait": undefined },
       deskWaits: NA, phoneWaits: NA,
     });
     // 本机同数据：已知 0 / 数字照旧，不被未知短词替换

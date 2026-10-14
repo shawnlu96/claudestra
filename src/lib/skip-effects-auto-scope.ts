@@ -14,7 +14,7 @@ import type { RecoveryMode } from "./recovery-policy.js";
 export const SKIP_EFFECTS_INVENTORY = "src/lib/scheduler-v2-skip-effects.ts";
 const LIB_DIR = "src/lib";
 /** 扫描规则与判定器本身：PR 碰了其中任何一个，受信扫描不再代表 PR 的 CI，回人工 */
-const JUDGE_GLOBS = ["scripts/skip-effects.ts", "src/lib/scheduler-v2-skip-paths.ts", "src/lib/skip-effects-auto-scope*.ts",
+export const JUDGE_GLOBS = ["scripts/skip-effects.ts", "src/lib/scheduler-v2-skip-paths.ts", "src/lib/skip-effects-auto-scope*.ts",
   "src/lib/order-deliver-scope*.ts", "src/lib/order-wire-file-scope.ts", "tests/shared-ledger-v2-stage2-skip-paths.test.ts"];
 const READ_CONCURRENCY = 8;
 
@@ -80,7 +80,7 @@ async function limited<T>(items: T[], n: number, f: (x: T) => Promise<void>): Pr
  * head 的调度轮可达图：与受信 passGraph 同一套起点 / 去注释 / 取 import / 去 gate 文件，只是按需异步取 blob（PR 源码只当字符串），
  * 每个文件只去一次注释；再交给受信 effectSites 数效果点。
  */
-async function headScan(objects: NonNullable<ScopeDiff["objects"]>, head: string): Promise<Map<string, string>> {
+export async function headScan(objects: NonNullable<ScopeDiff["objects"]>, head: string): Promise<Map<string, string>> {
   const prefix = `${LIB_DIR}/`;
   const tree = new Set((await objects.list(head, LIB_DIR)).filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes("/"))
     .map((p) => p.slice(prefix.length)));

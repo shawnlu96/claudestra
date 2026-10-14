@@ -27,8 +27,10 @@ import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
 import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
 import { unsentEnd } from "./scheduler-merge-unsent.js";
+import { claimMainUnsentEnd } from "./scheduler-merge-freshness-unsent.js";
 import { uiUnsentEnd } from "./scheduler-ui-review-carry.js";
 import { mergeDeployReceiptData, registerMergedDeploy } from "./merge-deploy-outbox.js";
+import { countCarryReview } from "./review-count-carry-ledger.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -181,6 +183,7 @@ export function parseCarryReceipt(receipt: string): CarryEvidence | null {
  */
 function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string, receipt: string, now: number, chainRaw?: string): { seq: number; ui: UiCarryPlan } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "沿用审查只许调度服务身份写");
+  const counted = countCarryReview(db, ctx, row, newHead, receipt, now, mergeReviewProof, insertEvent); if (counted) return counted; // CARRYCNT1
   const ev = parseCarryReceipt(receipt);
   if (!ev || ev.oldHead !== row.reviewedHead || ev.newHead !== newHead) throw new LedgerError("invalid", "沿用审查回执缺证据或 head 对不上");
   const task = mustTask(db, row.taskId);
@@ -249,6 +252,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       return getMergeRun(db, row.intentId) as MergeRun;
     }
     if (input.to === "unknown" && unsentEnd(db, ctx, row, input.receipt, insertEvent)) return getMergeRun(db, row.intentId) as MergeRun;
+    if (input.to === "unknown" && claimMainUnsentEnd(db, ctx, row, input.receipt, insertEvent)) return getMergeRun(db, row.intentId) as MergeRun; // MRGFRESH1
     const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
     // Only updating → await_review follows an update this attempt sent; from ready a drift (PM switch) is refused, so the driver's unknown cancels.
     if (drift && input.to !== "unknown" && !(input.to === "await_review" && input.from === "updating")) throw new LedgerError("conflict", `合并运行已失效：${drift}`);

@@ -6,16 +6,13 @@
  * 这里不 import react（tests 直接测）；订阅接到 React 的那几行在 collab-view.tsx 的 useOwnerWaits。
  */
 import { bindingState, localProjectOf, subscribeBindings } from "@/lib/collab-source-binding";
-import { waitsOnOwner, type WebAsk } from "../asks/asks-model";
+import { proposalProjectOf, waitsOnOwner, type WebAsk } from "../asks/asks-model";
 import { sharedIdentity } from "./team-source-key";
 
 export interface OwnerWaits { waits: WebAsk[]; unknown: boolean }
 
-/** 这张卡是为哪个本机项目开的中心提案授权卡；不是提案卡 → null */
-export function proposalProjectOf(a: Pick<WebAsk, "extra">): string | null {
-  const local = a.extra?.centerProposal?.localProjectId;
-  return typeof local === "string" && local ? local : null;
-}
+/** 提案卡认法定义在 asks-model（收件箱卡头也用），这里照旧转出 */
+export { proposalProjectOf };
 /** 提案授权卡没有卡号：行上给「去处理」，打开全站收件箱定位到它 */
 export const isProposalWait = (a: { extra?: WebAsk["extra"] }): boolean => proposalProjectOf(a) !== null;
 

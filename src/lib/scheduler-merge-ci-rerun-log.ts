@@ -7,19 +7,26 @@
 export interface CiFailure { file: string; name: string; timedOut: boolean }
 
 /** gh prefixes each line with `job<TAB>step<TAB>`, then the runner's ISO timestamp. */
-const PREFIX = /^([^\t]*)\t([^\t]*)\t/;
-const STAMP = /^﻿?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?/;
-const GROUP = /^##\[group\](\S+\.test\.[cm]?[jt]sx?):\s*$/;
+export const PREFIX = /^([^\t]*)\t([^\t]*)\t/;
+export const STAMP = /^﻿?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?/;
+export const GROUP = /^##\[group\](\S+\.test\.[cm]?[jt]sx?):\s*$/;
 /** bun prints `(fail) describe > name [6189.00ms]`; the timing is dropped so a repeated summary line matches its group entry. */
-const FAIL = /^\(fail\) (.+?)(?: \[[\d.]+m?s\])?\s*$/;
-const TIMED_OUT = /^\s*\^ this test timed out after \d+ms\.?\s*$/;
-const FAIL_COUNT = /^\s*(\d+) fail\s*$/;
+export const FAIL = /^\(fail\) (.+?)(?: \[[\d.]+m?s\])?\s*$/;
+export const TIMED_OUT = /^\s*\^ this test timed out after \d+ms\.?\s*$/;
+export const FAIL_COUNT = /^\s*(\d+) fail\s*$/;
 /** Errors outside any test (a crashed file, an unhandled rejection) are red without a `(fail)` line of their own. */
-const OUTSIDE_TEST = /error between tests|Unhandled error|^error: .*(?:Cannot find module|SyntaxError)/i;
+export const OUTSIDE_TEST = /error between tests|Unhandled error|^error: .*(?:Cannot find module|SyntaxError)/i;
+/**
+ * bun's own result line for one test: the marker at the very start of the line (gh prefix and timestamp already dropped), then
+ * the test's title. The title is a name, not output: it is never read as an error outside a test (dispatch-recovery-CIPARSE1).
+ * An indented `(pass) ` is text a test printed itself and is not one. tests/ci-failed-log-parse.test.ts.
+ */
+const RESULT_LINE = /^\((?:pass|fail|skip|todo)\) /;
+export const isResultLine = (line: string): boolean => RESULT_LINE.test(line);
 /** Any error bun or the runner prints; inside a file group it belongs to the next `(fail)`, anywhere else it is unaccounted. */
-const ERROR = /^\s*(?:error:|##\[error\]|panic\b)/i;
+export const ERROR = /^\s*(?:error:|##\[error\]|panic\b)/i;
 /** The one runner error every red bun step ends with. */
-const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
+export const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
 
 /**
  * The sharded workflow's gate (ci.yml job `typecheck + test + guard`, step `All shards succeeded`) fails with exactly this when a
@@ -27,8 +34,8 @@ const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
  * the runner's `Run` echo block plus this line and the exit code: any other text there (or the line in any other step) is read
  * as a failed step and makes the log unaccountable.
  */
-const GATE = { job: "typecheck + test + guard", step: "All shards succeeded" };
-const GATE_VERDICT = /^##\[error\]分片没有全部成功：\w+\s*$/;
+export const GATE = { job: "typecheck + test + guard", step: "All shards succeeded" };
+export const GATE_VERDICT = /^##\[error\]分片没有全部成功：\w+\s*$/;
 const RUN_ECHO = "##[group]Run ";
 /**
  * The runner echoes that step's own command (ci.yml) and its shell inside the Run group; nothing else may sit there.
@@ -107,7 +114,7 @@ function parseStep(lines: string[]): CiFailure[] | null {
   let errored = false; // an error line in this group not yet claimed by a `(fail)`
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (OUTSIDE_TEST.test(line)) return null;
+    if (!isResultLine(line) && OUTSIDE_TEST.test(line)) return null;
     const group = GROUP.exec(line);
     if (group) {
       if (errored) return null;
@@ -134,7 +141,6 @@ function parseStep(lines: string[]): CiFailure[] | null {
       if (!found.some((f) => f.name === name)) return null; // bun's closing recap repeats earlier failures; a new one is unaccounted
       continue;
     }
-    if (found.some((f) => f.file === file && f.name === name)) continue;
     found.push({ file, name, timedOut: !errored && TIMED_OUT.test(nextText(lines, i + 1)) });
     errored = false;
   }

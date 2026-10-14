@@ -3,7 +3,7 @@
  * 服务端结案后清掉失败红字。接口 mock 掉（@/lib/api/asks），拉取可以手动按顺序放行。
  * 以及列表拉不到时（老 bridge 404、503、断网、超时）不让聊天气泡永久「正在核对」（PR B 第 3 轮 P1）。
  */
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 
 type A = Record<string, unknown>;
 interface AsksStore {
@@ -16,19 +16,24 @@ let serverList: A[] = [];
 const queue: { resolve: (v: unknown) => void; snapshot: A[] }[] = [];
 let manual = false;
 let failWith: unknown = null;
-// mock.module 对整个进程生效、本文件结束也不撤：同进程后面的文件（web-dom-* 经 asks.ts 用 takeAskHint 等）要拿到其余真导出
-const realAsks = await import("@/lib/api/asks");
+let mockActive = false;
+// mock.module 不随文件结束撤销：只在本文件用假实现，后续文件须转回真实 API，也保留其余真导出。
+// 先复制真导出，避免 mock 改写模块绑定后，关闭开关仍转调回假实现。
+const realAsks = { ...await import("@/lib/api/asks") };
 mock.module("@/lib/api/asks", () => ({
   ...realAsks,
-  fetchAsks: () => {
+  fetchAsks: (signal?: AbortSignal) => {
+    if (!mockActive) return realAsks.fetchAsks(signal);
     if (failWith) return Promise.reject(failWith);
     const snapshot = structuredClone(serverList);
     if (!manual) return Promise.resolve({ ok: true, asks: snapshot, now: Date.now() });
     return new Promise((resolve) => queue.push({ resolve, snapshot }));
   },
-  followAskEvents: () => new Promise(() => {}),
-  postPresence: () => Promise.resolve(),
+  followAskEvents: (...args: Parameters<typeof realAsks.followAskEvents>) => mockActive ? new Promise(() => {}) : realAsks.followAskEvents(...args),
+  postPresence: (visible: boolean) => mockActive ? Promise.resolve() : realAsks.postPresence(visible),
 }));
+beforeAll(() => { mockActive = true; });
+afterAll(() => { mockActive = false; });
 // 变量路径：根 tsconfig 没有 DOM 类型，store 用到 document / serviceWorker，只在运行时加载（类型取 AsksStore 的形状）
 const STORE = "@/features/asks/asks-store";
 const { asksStore } = (await import(STORE)) as { asksStore: AsksStore };

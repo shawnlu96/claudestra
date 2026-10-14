@@ -17,10 +17,12 @@ import { mergeExternal } from "./scheduler-merge-external.js";
 import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { mergeAgain, reclaimLentSlots } from "./scheduler-merge-reclaim.js";
+import { mergePipeStep } from "./scheduler-merge-pipe.js";
 import { deployYield, passClock } from "./scheduler-deploy-first.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
 import { mainCiPass } from "./scheduler-main-ci-wiring.js";
 import { openCiProofGate } from "./scheduler-ci-proof-gate.js";
+import { openCiLogPerJob } from "./scheduler-merge-ci-log-read.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
@@ -115,6 +117,7 @@ function guardAutoDeps(d: AutoTickDeps, active: Active): AutoTickDeps {
     manager: guard(active, leaseAware(d.manager)), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
     reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now, borrow: d.borrow && guard(active, d.borrow),
     prState: d.prState && guard(active, d.prState),
+    prepareAuthor: d.prepareAuthor && guard(active, d.prepareAuthor),
     worker: (ref) => { active(); const w = d.worker(ref); return "manual" in w ? w : guardWorker(w, active); },
   };
 }
@@ -146,6 +149,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
       // GATE1 证明闸：本轮的模式、只读 GitHub 端口与观察记录写口；合并 external 被替换时（测试世界）不接真 gh，闸不开
       openCiProofGate(db, config, opts.recoveryPolicy, opts.external ? undefined : guard(active, runBounded), manager, active);
+      openCiLogPerJob(db, opts.recoveryPolicy, manager, active);
       if (cut("mainCi")) return done();
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
@@ -176,6 +180,8 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const claim = await manual.claim(manager, config); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
       late.push(...claim.claimed); failed.push(...claim.failed);
       if (cut("manualClaim")) return done();
+      failed.push(...(await mergePipeStep(db, config, { manager, external, active, train: opts.train, policy: opts.recoveryPolicy, pace: pace.phase(), late })).failed); // MRGPIPE1
+      if (cut("mergePipe")) return done();
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
       if (cut("observe")) return done();
