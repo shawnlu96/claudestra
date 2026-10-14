@@ -8,6 +8,7 @@ import {
   replayEventsSince,
   subscriberCount,
   getAgentStatus,
+  lastEventSeq,
   RING_LIMIT,
   __resetEventBusForTest,
   markChannelExternallyBusy,
@@ -37,6 +38,14 @@ describe("emitEvent", () => {
     expect(b.seq).toBe(2);
     expect(a.ts).toBeTruthy();
     expect(Date.parse(a.ts)).toBeGreaterThan(0);
+  });
+
+  test("lastEventSeq = 最后发出那条的 seq（transient 也算）；/bg-tasks 快照带它给 web 判重", () => {
+    expect(lastEventSeq()).toBe(0);
+    mk("alpha");
+    expect(lastEventSeq()).toBe(1);
+    emitEvent({ agent: "alpha", chatId: "c", type: "thinking_telemetry", data: {} }, { transient: true });
+    expect(lastEventSeq()).toBe(2);
   });
 
   test("字段原样保留", () => {

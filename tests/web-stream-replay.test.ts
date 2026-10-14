@@ -1,6 +1,7 @@
 /**
  * SYN-1 验收 4：连流补拉（/pending、/bg-tasks）不再挡实时事件——聊天类实时事件先放，快照到了再按 ReplayMerge 合入，
- * 实时已说过的挂起态不拿快照往回拨；后台任务的实时增量排在快照后面放（PR1485-r1 P1：update 先到会丢 shell 的类型 / 标题 / 旧输出）。
+ * 实时已说过的挂起态不拿快照往回拨；后台任务的实时增量排在快照后面放（PR1485-r1 P1：update 先到会丢 shell 的类型 / 标题 / 旧输出），
+ * 已含在快照里的（seq ≤ 快照 seq）不再放（PR1485-r2 P1：否则同一行出现两次）。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { setAppConfigForTest } from "../web/lib/app-config";
@@ -103,6 +104,48 @@ test("bg-update 先于快照（items 为空，只带进度）：任务不丢", a
   expect(cards).toHaveLength(1);
   expect(cards[0]).toMatchObject({ id: "sh1", kind: "shell", title: "npm run build" });
   expect(cards[0].lines).toEqual(["old 1", "old 2"]);
+});
+
+/** 快照与在途 bg 增量重叠（PR1485-r2 P1）：bridge 先写 recent 再发 update，快照可能已含这条——按快照带的 seq 判，不按文本 */
+test("已含在快照里的 bg-update 先到被扣：不重复；快照之后同文本的新行照常追加", async () => {
+  const store = new ChatStore();
+  const reader = (await openAgentEventStream("a", { lang: "zh" })).getReader();
+  const covered = ev("bg_task_update", { id: "sh1", kind: "shell", items: ["new"] });
+  push(covered);
+  push(ev("assistant_text", { text: "live chat" }));
+  processStreamEvent(store, await next(reader)); // 聊天先到，bg 被扣
+  answerPending({});
+  answerBg({ tasks: [{ id: "sh1", kind: "shell", title: "build", lines: ["old", "new"] }], seq: covered.seq });
+  const got: WebStreamEvent[] = [];
+  while (got.at(-1)?.t !== "bg-sync") got.push(await next(reader));
+  push(ev("bg_task_update", { id: "sh1", kind: "shell", items: ["new"] })); // 快照之后真的又输出了一行 new
+  push(ev("assistant_text", { text: "end" }));
+  while (got.at(-1)?.t !== "text") got.push(await next(reader));
+  expect(got.map((e) => e.t)).toEqual(["bg-start", "bg-update", "bg-sync", "bg-update", "text"]);
+  for (const e of got) processStreamEvent(store, e);
+  expect(store.state.bgTasks[0].lines).toEqual(["old", "new", "new"]);
+  await reader.cancel();
+});
+
+test("快照先到、已含在快照里的 bg 帧后到：照样丢；不在快照里的任务（快照前已收尾）照放", async () => {
+  const store = new ChatStore();
+  const reader = (await openAgentEventStream("a", { lang: "zh" })).getReader();
+  const late = ev("bg_task_update", { id: "sh1", kind: "shell", items: ["new"] }); // bridge 已写进 recent，帧还在路上
+  const gone = ev("bg_task_completed", { id: "sa9", kind: "subagent", status: "done", durationMs: 5 });
+  push(ev("assistant_text", { text: "live chat" }));
+  processStreamEvent(store, await next(reader)); // 等补拉请求真正发出去
+  answerPending({});
+  answerBg({ tasks: [{ id: "sh1", kind: "shell", title: "build", lines: ["old", "new"] }], seq: gone.seq });
+  const got = [await next(reader), await next(reader), await next(reader)];
+  expect(got.map((e) => e.t)).toEqual(["bg-start", "bg-update", "bg-sync"]);
+  push(late);
+  push(gone);
+  push(ev("assistant_text", { text: "end" }));
+  got.push(await next(reader)); got.push(await next(reader));
+  expect(got.slice(3)).toMatchObject([{ t: "bg-done", id: "sa9" }, { t: "text", text: "end" }]);
+  for (const e of got) processStreamEvent(store, e);
+  expect(store.state.bgTasks.find((t) => t.id === "sh1")?.lines).toEqual(["old", "new"]);
+  await reader.cancel();
 });
 
 test("ReplayMerge：实时已有 ask / ask-cleared 时快照里的 ask 丢弃；bg 快照原样放行（顺序由流排队保证）", () => {

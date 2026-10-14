@@ -226,6 +226,9 @@ export function forgetAgent(agent: string): void {
   agentDoneAt.delete(agent);
 }
 
+/** 最后发出的那条事件的 seq（还没发过 = 起点前一位）：快照接口带上它，订阅方据此判断哪些增量已含在快照里 */
+export const lastEventSeq = (): number => nextSeq - 1;
+
 export function replayEventsSince(
   since: number,
   filter: EventFilter = {},
