@@ -117,7 +117,7 @@ test.skipIf(!out)("UXCARD1 detail: review / build / no-goal (local) + away merge
         await g.page.setViewportSize({ width, height: width < 640 ? 1400 : 2300 });
         await g.page.clock.setFixedTime(home.now);
         await (s.side === "local" ? liveAgent(g.page, home) : peerNames(g.page, home));
-        await g.page.goto(`${proxy.url}?side=${s.side}&theme=light&project=${home.project}&team=${home.team}`);
+        await g.page.goto(`${proxy.url}?side=${s.side}&loadAgents=1&theme=light&project=${home.project}&team=${home.team}`);
         await g.page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
         await openCard(g.page, home, s.id, width < 640, s.ready);
         const ref = `${prefix}-${s.view}-${width}.png`;

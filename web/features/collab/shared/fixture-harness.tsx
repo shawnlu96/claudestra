@@ -15,7 +15,9 @@ const params = new URLSearchParams(location.search);
 const project = params.get('project') ?? 'claude-orchestrator';
 const identity = { center: 'center', team: params.get('team') ?? 'team-a', person: 'person-a', project, machine: 'local' };
 
-/** 会话列表照生产外壳（chat.tsx）挂载时读一次：详情里执行者在线 / 忙闲、「叫停这一轮」都看它 */
+/** 会话列表照生产外壳（chat.tsx）挂载时读一次：详情里执行者在线 / 忙闲、「叫停这一轮」都看它。
+ *  ?loadAgents=1 才开，缺省关：其他用这个 harness 的测试不多出 /agents 请求，行为不变 */
+const seedAgents = params.get('loadAgents') === '1';
 function SeedAgents() {
   const store = useChatStoreApi();
   useEffect(() => void store.loadAgents(), [store]);
@@ -25,7 +27,7 @@ function SeedAgents() {
 function Harness() {
   useEffect(() => asksStore.start('local'), []);
   return <ChatStoreProvider>
-    <SeedAgents />
+    {seedAgents && <SeedAgents />}
     <div style={{ position: 'absolute', inset: 0, display: 'flex' }}>
       {params.get('side') === 'team'
         ? <TeamSource identity={identity}><CollabView project={sharedCollabProject(identity)} /></TeamSource>
