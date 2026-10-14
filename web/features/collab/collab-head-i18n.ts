@@ -25,8 +25,8 @@ export const HEAD_WORDS = {
 
 /** mirror-fresh.ts mirrorAgo 的两句模板 → 页头的写法（中文也换，所以不是只有英文才查表） */
 const AGO: Record<string, string> = {
-  "主场 {n} 分钟前同步": HEAD_WORDS.syncedMin,
-  "主场 {n} 小时前同步": HEAD_WORDS.syncedHour,
+  [MACHINE_WORDS.staleMinutes]: HEAD_WORDS.syncedMin,
+  [MACHINE_WORDS.staleHours]: HEAD_WORDS.syncedHour,
 };
 
 const EN: Record<string, string> = {

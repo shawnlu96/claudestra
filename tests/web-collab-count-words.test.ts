@@ -89,10 +89,10 @@ describe("本机 /work 看板", () => {
     const restating: WorkBoard = { ...work, working: [row("S", { step: "restate" })], waiting: [], todo: { ready: [], blocked: [] } };
     const spec = { tasks: [{ ...ov.tasks[0]!, id: "S", stage: "spec" as const }], items: [] };
     const local = countSnap(countBoardOf(restating, false), spec);
-    expect(stageCounts(local)).toEqual([{ label: "复述", n: 1 }]);
+    expect(stageCounts(local)).toEqual([{ label: "确认需求", n: 1 }]);
     const teamRow = { taskId: "S", featureId: "F01", nodeKey: "s", title: "", who: null, instance: null, machine: null, stage: "spec" as const, reason: "等 owner", team: null };
     const team = countSnap({ working: [], merging: [], waiting: [teamRow], todo: { ready: [], blocked: [] } }, spec);
-    expect(stageCounts(team)).toEqual([{ label: "复述", n: 1 }]);
+    expect(stageCounts(team)).toEqual([{ label: "确认需求", n: 1 }]);
     expect(team.stages.reduce((n, c) => n + c.n, 0)).toBe(team.words.working + team.words.waiting);
   });
 
