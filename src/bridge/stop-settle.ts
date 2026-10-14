@@ -116,8 +116,8 @@ const recOfCid = (cid: string): TriggerRec | undefined => turnTrigger.get(cid) ?
 const recOf = (t: StopTurn): TriggerRec | undefined => recOfCid(t.cid);
 /**
  * 没指明收件人的答复（target 在自己频道 reply、Stop 兜底）归谁：回程簿说恰好一个在等还不够——这一轮是几个 agent 的请求一起开的
- * （押后合批，held-flush.ts），别人那份被 send_to_agent 单独答掉后只剩它，这句话也不是专答它的，不认（tests/held-agent-batch.test.ts）。
- * bridge.ts 的 reply 分支和 Stop 兜底都经它；send_to_agent 的精确答复不经它
+ * （押后合批，held-flush.ts），这句话就不是专答剩下那一位的，不认（tests/held-agent-batch.test.ts）。
+ * bridge.ts 的 reply 分支和 Stop 兜底都经它；send_to_agent / reply 到对方频道的精确答复不经它
  */
 export function answerableUnmixed<P extends { callerChannelId: string }>(
   book: { answerable(target: string, stillHeld: (req: { messageId?: string; callerChannelId: string }) => boolean): P | undefined },
@@ -125,8 +125,8 @@ export function answerableUnmixed<P extends { callerChannelId: string }>(
 ): P | undefined {
   return unmixed(book.answerable(target, stillHeld), recOfCid(target)?.askers ?? []);
 }
-const unmixed = <P extends { callerChannelId: string }>(pac: P | undefined, askers: readonly string[]): P | undefined =>
-  pac && !(askers.length > 1 && askers.includes(pac.callerChannelId)) ? pac : undefined;
+/** 混了几个请求方的一轮说的话不认给任何一个：本轮的另一位、更早一轮留下的旧槽都不行（审查 mixed-turn-stale-caller） */
+const unmixed = <P>(pac: P | undefined, askers: readonly string[]): P | undefined => (askers.length > 1 ? undefined : pac);
 /** 这个频道当前这一轮的开启时刻；没有 = 这一轮不是 bridge 送的消息开的，或已经 Stop / 被打断（bridge/held-flush.ts 用它判补投记录过没过期） */
 export const turnStartedAt = (cid: string): number | undefined => turnTrigger.get(cid)?.at;
 const triggerOf = (t: StopTurn): TurnTrigger => t.trigger ?? recOf(t)?.who ?? "stranger";

@@ -220,6 +220,19 @@ describe("回复不认错人：同一批里 A、B 各一条请求", () => {
     expect(s.calls.waiting(ME, s.stillHeld)).toEqual([]);
   });
 
+  test("mixed-turn-stale-caller：更早一轮 C 的回程还挂着，本轮 A、B 合批且都被精确答掉——没指明收件人的答复不认给 C", async () => {
+    const s = scene();
+    s.calls.add(ME, { callerChannelId: SENDERS.C.ch, callerName: "agent-c", targetName: "agent-me", targetChannelId: ME, ts: 1 }, "old-c"); // 早已送到 C 的请求
+    await s.r.stop();
+    for (const w of [SENDERS.A.ch, SENDERS.B.ch]) s.calls.consume(ME, w, s.calls.exact(ME, w, s.stillHeld)!);
+    expect(s.calls.answerable(ME, s.stillHeld)?.callerName).toBe("agent-c"); // 只看回程簿会认成 C
+    expect(answerableUnmixed(s.calls, ME, s.stillHeld)).toBeUndefined();
+    await s.stopTurn("这一轮答 A、B 的话");
+    expect(s.pushed).toEqual([]);
+    expect(s.consumed).toEqual([]);
+    expect(s.calls.slot(ME, SENDERS.C.ch)).toBeDefined();
+  });
+
   test("对照：只有一个请求方开的一轮，自己频道 reply 照旧归它", async () => {
     const s = scene();
     s.r.held.remove(ME, s.r.held.get(ME)![1]); // B 那条不在这一批（比如已被别处处理）
@@ -245,6 +258,30 @@ describe("回复不认错人：同一批里 A、B 各一条请求", () => {
     }, { cid: ME, stopChannelId: ME, stopWs: ws, candidateWs: ws, event: "Stop", drain: { text: "给 B 的答复" } });
     expect(pushed).toEqual(["agent-b"]);
     expect(calls.slot(ME, SENDERS.B.ch)).toBeUndefined();
+  });
+
+  test("agent-batch-overtakes-peer：[A, peer, B] 不越过 peer——A 单独送，下一个边界 peer，再下一个 B（和逐条投递同序）", async () => {
+    const a = msg("A"), p = msg("peer"), b = msg("B");
+    const r = rig([a, p, b]);
+    const order: string[] = [];
+    for (let k = 0; k < 3; k++) {
+      await r.stop();
+      order.push(...r.sends.splice(0).map((x) => x.env.meta.messageId));
+    }
+    expect(order).toEqual([a, p, b].map((i) => i.env.meta.messageId));
+  });
+
+  test("[A, B, peer]：A、B 一批，peer 下一个边界；[A, owner, B]：A 单独，owner、B 依次在后", async () => {
+    const a = msg("A"), b = msg("B"), p = msg("peer");
+    const r = rig([a, b, p]);
+    await r.stop();
+    expect(originals(r.sends[0].content).map((o) => o.message_id)).toEqual([a, b].map((i) => i.env.meta.messageId));
+    expect(r.ids()).toEqual([p.env.meta.messageId]);
+    const a2 = msg("A"), o = msg("owner"), b2 = msg("B");
+    const q = rig([a2, o, b2]);
+    await q.stop();
+    expect(q.sends.map((x) => x.env.meta.messageId)).toEqual([a2.env.meta.messageId]);
+    expect(q.ids()).toEqual([o, b2].map((i) => i.env.meta.messageId));
   });
 
   test("外人（peer）不进合批：它先到就单独开一轮，agent 们等下一个边界一起送", async () => {
@@ -298,15 +335,23 @@ describe("开关与成员", () => {
     for (const v of ["off", "OFF", " 0 ", "false"]) expect(heldAgentBatchOn({ [HELD_AGENT_BATCH_ENV]: v })).toBe(false);
   });
 
-  test("调度派单的 expectSession：载体只能带一个，和最早带会话那条不同的留到下一个边界；带附件的、额度闸押的不进", async () => {
+  test("调度派单的 expectSession：载体只能带一个，和这一段第一个带会话的不同就停；带附件的、额度闸押的同样截断这一段", async () => {
+    const ok = () => true;
     const s1 = msg("A", { expectSession: "s1" }), s2 = msg("B", { expectSession: "s2" }), plain = msg("C"), att = msg("B", { attachments: ["/x.png"] });
-    expect(agentBatchMembers([s1, s2, plain]).items).toEqual([s1, plain]);
-    expect(agentBatchMembers([s1, s2]).items).toEqual([]); // 只剩一条 = 不合批
-    const wall = msg("A");
-    wall.reason = "quota_wall";
-    const r = rig([s1, att, s2, plain, wall]);
+    expect(agentBatchMembers([s1, plain, s2], ok).items).toEqual([s1, plain]);
+    expect(agentBatchMembers([s1, s2, plain], ok).items).toEqual([]); // 第二条就停，只剩一条 = 不合批
+    const r = rig([s1, plain, s2]);
     await r.stop();
     expect(r.sends[0].env.meta.expectSession).toBe("s1");
     expect(originals(r.sends[0].content).map((o) => o.message_id)).toEqual([s1, plain].map((i) => i.env.meta.messageId));
+    expect(r.ids()).toEqual([s2.env.meta.messageId]);
+    const wall = msg("A");
+    wall.reason = "quota_wall";
+    for (const cut of [att, wall]) {
+      const a = msg("A"), c = msg("C");
+      const q = rig([a, cut, c]);
+      await q.stop();
+      expect(q.sends.map((x) => x.env.meta.messageId)).toEqual([a.env.meta.messageId]); // 不越过它：a 单独走，c 排在它后面
+    }
   });
 });
