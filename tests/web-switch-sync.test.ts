@@ -63,7 +63,9 @@ async function until(cond: () => boolean, what: string) {
 }
 const texts = (s: Store) => s.state.messages.map((m) => m.content);
 /** watcher 的直播 assistant_text：data.seq / sid = jsonl 行号与会话（差量覆盖判重的依据） */
-const liveText = (agent: string, seq: number, text: string) => ({ seq: ++bridgeSeq, ts: new Date().toISOString(), agent: `agent-${agent}`, chatId: "", type: "assistant_text", data: { text, seq, sid: `s-${agent}` } });
+const liveText = (agent: string, seq: number, text: string) => ({
+  seq: ++bridgeSeq, ts: new Date().toISOString(), agent: `agent-${agent}`, chatId: "", type: "assistant_text", data: { text, seq, sid: `s-${agent}` },
+});
 
 let ChatStore: new () => Store;
 beforeAll(async () => {
