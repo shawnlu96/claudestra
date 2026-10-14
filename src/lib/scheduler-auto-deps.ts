@@ -245,7 +245,7 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
     net: (args) => whileOwned(active, () => netGit(args)), readConfig,
     create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild, lendAuthor: opts.lendAuthor, notify };
   return withSchedulerV2Intents({
-    manager: schedulerManagerWith(lease), prepareAuthor: (task) => prepareLendAuthor(env, task, env.lendAuthor),
+    manager: schedulerManagerWith(lease), prepareAuthor: (task, budget) => prepareLendAuthor(env, task, env.lendAuthor, budget),
     worker: (ref) => wakeGaveUp(env, ref, registryRow(ref.agent)) ?? worker(env, ref),
     ensure: async (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
       : (role === "author" ? await existingAuthor(env, task, family) : null)

@@ -39,6 +39,7 @@ import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamP
 import { TeamPanel } from "./team-panel";
 import { DEFAULT_FILTER, metricsOf, type Filter } from "./v4/v4-model";
 import { MetricsBar } from "./metrics-bar";
+import { CollabPageHead, HEAD_WRAP } from "./collab-page-head";
 import { useWeekQuota } from "./use-count-source";
 import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
@@ -200,12 +201,11 @@ export function CollabView({ project }: { project: string }) {
 
   return (
     <div className={`${s.tokens} ${s.root} ${v.v4}`}>
-      <div className={v.top}>
+      <div className={v.top} style={narrow ? HEAD_WRAP : undefined}>
         <button type="button" className={`${s.ib} ${v.back}`} aria-label={tr("返回")} onClick={nav.toList}>
           <Icon name="arrowLeft" size={16} />
         </button>
-        <span className={v.ttl}>{projectName}</span>
-        {narrow && <button type="button" className={v.teamM} onClick={() => select({ kind: "team" })}>{tr("团队")}</button>}
+        <CollabPageHead name={projectName} ov={o} now={now} tr={tr} onTeam={narrow ? () => select({ kind: "team" }) : undefined} />
         {narrow && <button type="button" className={v.waitsM} title={waitsUnknown ? tr("暂无数据来源") : undefined} onClick={() => select({ kind: "waits" })}>
           {tr("待你处理")} <b>{waitsUnknown ? tr("暂无") : waits.length}</b></button>}
         {!narrow && <MetricsBar m={m} counts={dag.counts} quota={quota} waitUnknown={!!o.unknownMetrics?.includes("reviewWait")} connected={connected} tr={tr} />}

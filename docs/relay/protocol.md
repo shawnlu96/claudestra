@@ -155,6 +155,16 @@ claudestra-relay-auth-v2
 
 每台实例每分钟 ≤ 60 个 push 帧（`pushPerFpPerMinute`），超过回 `rate_limited`，不断线。实例侧等 `push-ack` 15 秒。中继日志只记 fp、kind、状态、耗时，不记 payload。
 
+### 3.6 实例侧上行调度（实现约定，不改线上格式）
+
+实例的 WebSocket 客户端（Bun）看不到发送缓冲，帧交给 `send` 就只能排队尾。所以客户端（`src/lib/relay-send-queue.ts`）在帧进 socket 之前自己调度：
+
+- 控制帧（`ping` / `pong` / `auth` / `cancel` / `error` / `push` / `contacts` / `code`）和本机发出的请求帧直接写，永远不排在回帖正文后面。
+- 回帖（`res` / `data` / `end`）按「`to` + `id`」分道，每次放「近来发得最少」的那道一帧（已发字节按 1 秒半衰期衰减），所以新来的小响应和 SSE 事件先走。回帖正文按 16 KB 分块（`maxChunkBytes` 仍是 64 KB 上限）。
+- 已写出、中继还没确认的回帖字节不超过一个窗口。客户端每写窗口的 1/4 插一个普通 `ping`，`ts` 单调递增。中继按序处理并原样回带 `ts`（§8 已要求必答），所以某个 `ts` 的 `pong` 到了，就说明它之前写的字节都已到达。窗口 = 实测送达速率 × 400 ms，夹在 32 KB～4 MB 之间：慢上行上在途只压几百毫秒的数据，快链路上窗口随确认变快而长大。
+- 收到 `cancel`，或回帖流半途断了，就丢掉本道排着的帧；断线时清空队列。
+- 浏览器方向的回帖（隧道与路径模式，`to` 为空）若是一次性文本类正文（JSON / JS / CSS / HTML / SVG / XML），且请求声明了 `accept-encoding: gzip`、本机 Web 没压过、不是 206，满 1 KB 就由实例 gzip 后再发。front 原样转 `content-encoding`，浏览器自己解。peer 回帖不压，因为对方的调用方不会按头解。
+
 ## 4. 联系人门控与 peer 路由
 
 ```json

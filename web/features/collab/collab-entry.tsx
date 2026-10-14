@@ -13,7 +13,8 @@ import { useLedgerAccess } from "./collab-cache";
 import { Icon } from "./collab-icons";
 import { openCollab, useCollabNav } from "./collab-nav";
 
-export function CollabEntry({ projectId }: { projectId: string }) {
+/** team：打开的是团队中心键（team-view-entry.tsx 传），行尾多一个文字小标「团队」；本机项目不带 */
+export function CollabEntry({ projectId, team = false }: { projectId: string; team?: boolean }) {
   const t = useCollabT();
   const nav = useChatNav();
   const cur = useCollabNav();
@@ -43,6 +44,7 @@ export function CollabEntry({ projectId }: { projectId: string }) {
       >
         <Icon name="listTree" size={14} className="text-accent" />
         <span className="truncate font-medium">{t("协作视图")}</span>
+        {team && <span data-collab-team-badge className="ml-auto shrink-0 rounded border border-base-300 px-1 text-[11px] leading-4 text-base-content/55">{t("团队")}</span>}
       </button>
     </li></>
   );

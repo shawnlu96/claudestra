@@ -5,6 +5,7 @@ import type { DagTab } from '../dag/use-dag-ui';
 import type { DagBoard } from '../dag/dag-types';
 import { hasFeatureSnapshot } from './dag-availability';
 import { FeatureCards, FeatureTrail, ProductView } from './product-view';
+import { useTeamTab } from '../collab-page-head';
 import v from '../v4/v4.module.css';
 import d from '../dag/dag.module.css';
 import s from './product.module.css';
@@ -37,6 +38,7 @@ interface Props {
  */
 export function ProductPanes(p: Props) {
   const { board, loading = false } = p;
+  const teamTab = useTeamTab(p.tr).label;
   const has = !!board || loading;
   const feature = board?.features.find(f => f.id === p.featureId);
   const tab = p.narrow && p.tab === 'team' ? has ? 'product' : 'dag'
@@ -59,7 +61,7 @@ export function ProductPanes(p: Props) {
         const disabled = k === 'dag' && has && !feature;
         const on = p.narrow && k === 'product' ? tab !== 'progress' : tab === k;
         const label = k === 'dag' && feature ? `${p.tr(LABELS[k])} · ${feature.title}`
-          : p.tr(k === 'dag' && !has && !p.graph ? '因果线' : LABELS[k]);
+          : k === 'team' ? teamTab : p.tr(k === 'dag' && !has && !p.graph ? '因果线' : LABELS[k]);
         return <button key={k} type="button" role="tab" disabled={disabled} aria-selected={on}
           title={disabled ? p.tr('先在产品 DAG 里选一个 feature') : label}
           className={`${s.tab} ${p.narrow ? `${d.msegBtn} ${on ? d.msegOn : ''}` : `${v.tab} ${on ? v.tabOn : ''}`}`}

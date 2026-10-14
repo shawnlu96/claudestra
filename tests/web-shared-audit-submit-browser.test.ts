@@ -76,8 +76,8 @@ async function scenario(browser: Browser, fixture: ReturnType<typeof serve>, wid
     await page.request.get(`${url}__reset`);
     await page.goto(`${url}?side=team&project=${fx.project}&team=${fx.team}&theme=${theme}`);
     await page.getByText(fx.details.at(-1)!.feature.title, { exact: true }).first().waitFor();
-    await (width < 700 ? page.getByRole('button', { name: '团队', exact: true }).first()
-      : page.getByRole('tab', { name: '团队', exact: true }).or(page.getByRole('button', { name: '团队', exact: true })).first()).click();
+    await (width < 700 ? page.getByRole('button', { name: /^(规划与提案|团队)$/ }).first()
+      : page.getByRole('tab', { name: /^(规划与提案|团队)$/ }).or(page.getByRole('button', { name: /^(规划与提案|团队)$/ })).first()).click();
     await page.getByRole('button', { name: /^编辑规划 / }).click();
     const free = page.locator('fieldset').filter({ hasNot: page.getByText('已绑卡，节点锁定') }).first();
     await free.getByRole('textbox').nth(1).fill('写入成功后的新规划');

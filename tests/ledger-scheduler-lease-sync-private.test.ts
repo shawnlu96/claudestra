@@ -104,12 +104,24 @@ test("[验收线 3] an open write dispatch refuses narrowing a private card; its
   }
 });
 
-test("the merge handoff leaves a private card's locks whole: PR paths carry no repo: head to match them", () => {
-  const head = "c".repeat(40), pr = "https://github.com/acme/cloud/pull/9";
+/** PRIVLOCK2 supersedes PRIVLOCK1's "locks stay whole": PR paths get the card's repo: head when its locks all name the PR's repository. */
+function handOff(pr: string, head = "c".repeat(40)) {
   db.query("UPDATE tasks SET stage = 'merge', headSHA = ?, pr = ? WHERE id = 'TEAMVIS9'").run(head, pr);
   insertEvent(db, { actor: "scheduler", now: 100 }, { project: "p", target: "TEAMVIS9", kind: "scheduler", text: "合并交给仓库方",
     data: { op: "merge_handoff", evidence: { v: 1, pr, head } } }, false);
-  const r = narrowHandoffLocks(db, { actor: "scheduler", now: 110 }, { taskId: "TEAMVIS9", head, pr, files: ["src/a.ts"] });
-  expect(r).toMatchObject({ narrowed: false, reason: expect.stringContaining("repo:") });
+  return narrowHandoffLocks(db, { actor: "scheduler", now: 110 }, { taskId: "TEAMVIS9", head, pr, files: ["src/a.ts"] });
+}
+
+test("the merge handoff narrows a private card to the PR's files under its repo: head when the repository matches", () => {
+  expect(handOff("https://github.com/Acme/Cloud/pull/9")).toMatchObject({ narrowed: true, from: [...WIDE].sort(), to: [`${R}src/a.ts`] });
+  expect(locks("TEAMVIS9")).toEqual([`${R}src/a.ts`, "slot:p:agents:0", "task:s1"]);
+  expect(placementFree()).toBe(true);
+});
+
+test("the merge handoff leaves a private card's locks whole when they name another repository or mix in a bare path", () => {
+  expect(handOff("https://github.com/acme/other/pull/9")).toMatchObject({ narrowed: false, reason: expect.stringContaining("repo:acme/cloud") });
   expect(locks("TEAMVIS9")).toEqual([...WIDE, "slot:p:agents:0", "task:s1"].sort());
+  db.query("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', 'src/x.ts', 'TEAMVIS9', 'i-TEAMVIS9', 50, 'card')").run();
+  expect(handOff("https://github.com/acme/cloud/pull/9", "d".repeat(40))).toMatchObject({ narrowed: false, reason: expect.stringContaining("裸路径") });
+  expect(locks("TEAMVIS9")).toEqual([...WIDE, "slot:p:agents:0", "src/x.ts", "task:s1"].sort());
 });

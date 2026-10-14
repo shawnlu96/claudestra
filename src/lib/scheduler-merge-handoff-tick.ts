@@ -76,25 +76,40 @@ export function ghPrState(command: typeof runBounded = runBounded,
     return dir ? handoffOnMain(dir, command) : null;
   }): ReadPr {
   return async (prRef, follow, handing) => {
-    const r = await command(["gh", "pr", "view", prRef, "--json", "state,headRefOid,mergeCommit,baseRefName"], { env: ghEnv(), timeoutMs: 30_000 });
-    if (r.code !== 0 || r.timedOut) throw new Error(`gh pr view 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}`);
-    const raw = JSON.parse(r.stdout) as { state?: unknown; headRefOid?: unknown; mergeCommit?: { oid?: unknown } | null; baseRefName?: unknown };
-    const mergeSha = typeof raw.mergeCommit?.oid === "string" && SHA.test(raw.mergeCommit.oid) ? raw.mergeCommit.oid : null;
-    if (!["OPEN", "MERGED", "CLOSED"].includes(String(raw.state)) || typeof raw.headRefOid !== "string" || !SHA.test(raw.headRefOid)) {
-      throw new Error("gh pr view 输出不合规");
-    }
-    const pr: HandoffPr = { state: raw.state as HandoffPr["state"], head: raw.headRefOid, mergeSha,
-      ...(typeof raw.baseRefName === "string" ? { base: raw.baseRefName } : {}) };
+    const read = await ghPrRead(prRef, command, 30_000);
+    if (!read.ok) throw new Error(read.message);
+    const { pr } = read, { mergeSha } = pr;
     // a PR retargeted off main goes to PM: neither its files, its carry nor its landing are worth a git read
     if (offMain(pr)) return pr;
     const files = handing && pr.state === "OPEN" ? { files: await prFiles(filesOf(handing.project), prRef, pr.head) } : {};
     const landing = follow && pr.state === "MERGED" && mergeSha ? { landing: await mainLanding(mainOf(follow.project), prRef, pr.base, mergeSha) } : {};
-    const read: HandoffPr = { ...pr, ...files, ...landing };
+    const full: HandoffPr = { ...pr, ...files, ...landing };
     // CLOSED goes to PM anyway; MERGED without its merge commit is read again next round
-    if (!follow || same(pr.head, follow.head) || pr.state === "CLOSED" || (pr.state === "MERGED" && !mergeSha)) return read;
+    if (!follow || same(pr.head, follow.head) || pr.state === "CLOSED" || (pr.state === "MERGED" && !mergeSha)) return full;
     const carry = carryOf(follow.project);
-    return carry ? { ...read, carry: await carry(prRef, follow.head, pr.head, pr.state === "MERGED" ? mergeSha : null) } : read;
+    return carry ? { ...full, carry: await carry(prRef, follow.head, pr.head, pr.state === "MERGED" ? mergeSha : null) } : full;
   };
+}
+
+/**
+ * One `gh pr view` of a full PR URL. A refusal carries the old thrown message (`message`, stderr's first line included) and, apart
+ * from it, a class and exit code only (`kind`, `code`): a private repository's stderr may name its remote (PRIVLOCK2).
+ */
+export type GhPrRead = { ok: true; pr: HandoffPr } | { ok: false; kind: "timeout" | "failed" | "malformed"; code: number | null; message: string };
+export async function ghPrRead(prRef: string, command: typeof runBounded, timeoutMs: number): Promise<GhPrRead> {
+  const r = await command(["gh", "pr", "view", prRef, "--json", "state,headRefOid,mergeCommit,baseRefName"], { env: ghEnv(), timeoutMs });
+  if (r.code !== 0 || r.timedOut) {
+    return { ok: false, kind: r.timedOut ? "timeout" : "failed", code: r.code ?? null,
+      message: `gh pr view 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}` };
+  }
+  let raw: { state?: unknown; headRefOid?: unknown; mergeCommit?: { oid?: unknown } | null; baseRefName?: unknown };
+  try { raw = JSON.parse(r.stdout); } catch (e) { return { ok: false, kind: "malformed", code: 0, message: (e as Error).message }; }
+  const mergeSha = typeof raw?.mergeCommit?.oid === "string" && SHA.test(raw.mergeCommit.oid) ? raw.mergeCommit.oid : null;
+  if (!["OPEN", "MERGED", "CLOSED"].includes(String(raw?.state)) || typeof raw.headRefOid !== "string" || !SHA.test(raw.headRefOid)) {
+    return { ok: false, kind: "malformed", code: 0, message: "gh pr view 输出不合规" };
+  }
+  return { ok: true, pr: { state: raw.state as HandoffPr["state"], head: raw.headRefOid, mergeSha,
+    ...(typeof raw.baseRefName === "string" ? { base: raw.baseRefName } : {}) } };
 }
 
 /** `owner/repo` (lowercased) of an origin on exactly github.com — scp form `git@github.com:o/r`, `https://` or `ssh://` — else null. */
@@ -113,17 +128,22 @@ function githubRepoOf(url: string): string | null {
  * as configured is the PR repository on github.com itself (checked before any fetch): another repository's main vouches for
  * nothing. Refusals no retry changes are `ok: false`.
  */
-function gitIn(repoDir: string, command: typeof runBounded) {
-  const raw = gitRaw(repoDir, command);
+function gitIn(repoDir: string, command: typeof runBounded, timeoutMs = 120_000) {
+  const raw = gitRaw(repoDir, command, timeoutMs);
   return async (...args: string[]) => {
     const r = await raw(...args);
-    if (r.code !== 0 || r.timedOut) throw new Error(`git ${args[0]} 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}`);
+    if (r.code !== 0 || r.timedOut) throw new GitStepFailed(args[0]!, r.timedOut ? null : r.code ?? null,
+      `git ${args[0]} 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}`);
     return r.stdout;
   };
 }
+/** A failed git step: the message as before, and apart from it the step and exit code (null = timed out) without stderr (PRIVLOCK2). */
+export class GitStepFailed extends Error {
+  constructor(readonly step: string, readonly code: number | null, message: string) { super(message); this.name = "GitStepFailed"; }
+}
 /** The bare git step in the project's clone, exit code and all (for a question whose `no` is exit 1). */
-function gitRaw(repoDir: string, command: typeof runBounded) {
-  return (...args: string[]) => command(["git", ...args], { cwd: repoDir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 120_000 });
+function gitRaw(repoDir: string, command: typeof runBounded, timeoutMs = 120_000) {
+  return (...args: string[]) => command(["git", ...args], { cwd: repoDir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs });
 }
 
 /** `owner/repo` of a full PR URL when the clone's origin is that very repository, else null (checked before any fetch). */
@@ -174,8 +194,8 @@ export function handoffOnMain(repoDir: string, command: typeof runBounded = runB
 }
 
 /** Same clone and origin check as a carry; the three-dot diff is what GitHub lists as the PR's files. */
-export function handoffFiles(repoDir: string, command: typeof runBounded = runBounded): HandoffFiles {
-  const git = gitIn(repoDir, command);
+export function handoffFiles(repoDir: string, command: typeof runBounded = runBounded, timeoutMs = 120_000): HandoffFiles {
+  const git = gitIn(repoDir, command, timeoutMs);
   return async (prRef, head) => {
     if (!SHA.test(head) || !(await prRepoIn(git, prRef))) return null;
     await git("fetch", "--no-tags", "--quiet", "origin", head, `+refs/heads/main:${MAIN_REF}`);
