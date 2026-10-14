@@ -7,6 +7,9 @@ import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { handleProductBoardApi } from "../src/bridge/local-api/product-board.js";
 import type { Principal } from "../src/lib/principals.js";
+import { rmSync, writeFileSync } from "fs";
+import { PROJECT_MAP_PATH } from "../src/lib/project-map-config.js";
+import { assertProductBoard } from "../web/lib/api/product-board-types.js";
 const now = 100 * HOUR;
 const task = (id: string, stage: Stage): LedgerTask => ({ id, stage, project: "p", kind: "code", updatedAt: 1 } as LedgerTask);
 const node = (key: string, stage: Stage | null = null, deps: string[] = [], estimate = "半天", oneLine = key): EtaNode => ({
@@ -89,6 +92,24 @@ test("database projection uses current effective nodes; no DAG uses cards and no
     // Only feature_deps may be absent on a previously deployed schema.
     db.prepare("DROP TABLE feature_deps").run();
     expect(productBoard(db, "p", now).deps).toEqual([]);
+    // [验收线 3] project-map-PDSTATE2：不带配置时没有 areas / area；带配置时板块按配置顺序、没归组的 area: null、冻结名单生效、计数不变
+    const g = createFeature(db, ctx, { project: "p", slug: "g", title: "g", status: "paused" }).row;
+    createTask(db, ctx, { project: "p", id: "T9", title: "T9", kind: "code", stage: "build" });
+    db.prepare("UPDATE tasks SET featureId=? WHERE id='T9'").run(g.id);
+    const plain = productBoard(db, "p", now);
+    expect(plain).not.toHaveProperty("areas");
+    for (const feat of plain.features) expect(feat).not.toHaveProperty("area");
+    expect(plain.features.find((x) => x.id === g.id)!.state).toBe("paused");
+    try {
+      writeFileSync(PROJECT_MAP_PATH, JSON.stringify({ p: { areas: [{ id: "zeta", name: "后", features: [g.id] }, { id: "alpha", name: "前", features: [] }],
+        frozenTasks: ["T9", "t"] } }));
+      const grouped = productBoard(db, "p", now);
+      expect(grouped.areas).toEqual([{ id: "zeta", name: "后" }, { id: "alpha", name: "前" }]);
+      expect(grouped.features.map((x) => [x.id, x.area])).toEqual(plain.features.map((x) => [x.id, x.id === g.id ? "zeta" : null]));
+      expect(grouped.features.map((x) => x.counts)).toEqual(plain.features.map((x) => x.counts));
+      expect(grouped.features.find((x) => x.id === g.id)!.frontier).toEqual([expect.objectContaining({ key: "T9", frozen: true })]);
+      for (const body of [plain, grouped]) expect(() => assertProductBoard(body)).not.toThrow();
+    } finally { rmSync(PROJECT_MAP_PATH, { force: true }); }
   } finally { closeLedger(":memory:"); }
 });
 const owner: Principal = { id: "owner:self", role: "owner", agents: ["*"], createdAt: "" };
