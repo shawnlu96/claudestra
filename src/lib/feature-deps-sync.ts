@@ -90,7 +90,7 @@ export async function syncFeatureDeps(db: Database, live: Entries, deps: SyncDep
         const mode = groupMode(g, policy);
         if (mode === "off") continue;
         const st = file.groups[g.id] ??= fresh(), at = now(), scope = scopeOf(g);
-        remember(st, g);
+        delete st.clearObservedAt;
         try {
           if (st.lastComputedAt === null || at - st.lastComputedAt >= COMPUTE_MS || at < st.lastComputedAt) {
             st.wouldSend = null; st.lastComputedAt = at; st.scopeHash = null;
@@ -114,6 +114,7 @@ export async function syncFeatureDeps(db: Database, live: Entries, deps: SyncDep
           const receipt = await client.uploadFeatureDeps(body);
           if (receipt.schemaVersion !== 1 || receipt.accepted !== body.edges.length) throw new Error("receipt mismatch");
           st.hash = currentHash; st.lastSentAt = now(); st.failures = 0; st.nextAttemptAt = 0; st.unsupportedUntil = 0;
+          rememberSent(st, current);
         } catch (error) { if (uploadFailed(file, g.centerId, st, error, now())) { limited = true; break; } }
       }
       if (!limited) await clearStaleGroups(file, { self, now, mirrors, mode: modeOf, wait, client: clientFor,
@@ -124,9 +125,9 @@ export async function syncFeatureDeps(db: Database, live: Entries, deps: SyncDep
   }
 }
 
-/** What a later stale clear needs once the mirror entries are gone: the modes to honour and where the credential lives. */
-function remember(st: GroupState, g: Group): void {
+/** Coverage of the replacement the center now holds, written only with a validated receipt: a later unsent computation
+ * must not drop a project whose off policy still has to block a stale clear. Needed once the mirror entries are gone. */
+function rememberSent(st: GroupState, g: Group): void {
   st.projects = [...new Set(g.entries.map(([, e]) => e.localProject))].sort();
   st.centerProjects = [...new Set(g.entries.filter(([, e]) => e.sourceInstanceId === g.sourceInstanceId).map(([, e]) => e.projectId))].sort();
-  delete st.clearObservedAt;
 }

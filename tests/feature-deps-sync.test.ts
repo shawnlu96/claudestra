@@ -262,3 +262,17 @@ test("[验收线 1] legacy state with no registry entry left for the team stays 
     expect(w.uploads).toHaveLength(0); expect(w.state().groups[JSON.stringify(["center-a", "team-gone", "home-a"])].failures).toBe(0);
   } finally { w.close(); }
 });
+test("[验收线 1] stale clear honours the coverage of the last upload, not of a later unsent computation", async () => {
+  const w = await world("on");
+  try {
+    w.entries.push(["feature-q", { ...w.entries[0]![1], localProject: "q", centerFeatureId: "center-q" }]);
+    const policy = (q: string) => writeFileSync(join(w.dir, "recovery-policy.json"), JSON.stringify({ projects: {
+      p: { keys: { featureDeps: "on" } }, q: { keys: { featureDeps: q } } } }));
+    policy("on"); await w.pass(); expect(w.uploads).toHaveLength(1);
+    w.entries.at(-1)![1].enabled = false; policy("off");
+    w.advance(1000); await w.pass(); expect(w.uploads).toHaveLength(1);
+    for (const [, e] of w.entries) e.enabled = false;
+    w.advance(1000); await w.pass([]);
+    expect(w.uploads).toHaveLength(1); expect(Object.keys(w.state().groups)).toHaveLength(1);
+  } finally { w.close(); }
+});
