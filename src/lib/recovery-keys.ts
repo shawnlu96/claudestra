@@ -79,6 +79,8 @@ export const RECOVERY_KEYS = [
   "nearMarker",
   "peerInstanceInfo",
   "peerLeaseRecovery",
+  "peerPrHeadReview",
+  "peerPrRequeue",
   "placementReservations",
   "planGap",
   "pmRails",

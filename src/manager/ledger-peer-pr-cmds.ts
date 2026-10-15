@@ -6,12 +6,15 @@
  */
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { getWorkflow } from "../lib/ledger-scheduler.js";
 import { getTask, LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { readPeerPrConfig, type PeerPrConfig } from "../lib/peer-pr-config.js";
 import { peerPrGithub, type PeerPrGithub } from "../lib/peer-pr-github.js";
 import { verifiedIntake } from "../lib/peer-pr-intake.js";
-import { intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, REDELIVER_PREFIX, type PushResult } from "../lib/peer-pr-ledger.js";
+import { headLineage } from "../lib/peer-pr-head-review-git.js";
+import { headReviewMode, type Lineage } from "../lib/peer-pr-head-review.js";
+import { headSettleWrite, headWrite, intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, REDELIVER_PREFIX, type PushResult } from "../lib/peer-pr-ledger.js";
 import { claimRedelivery, requestRedelivery } from "../lib/peer-pr-retry.js";
 import { peerPrSpec } from "../lib/peer-pr-spec.js";
 import { readReviewReport } from "../lib/peer-pr-tick.js";
@@ -32,6 +35,12 @@ function configFor(project: string): PeerPrConfig {
 
 /** GitHub reads of the intake command; tests swap `make` (there the ledger CLI runs in-process). */
 export const intakeGithub = { make: (repoDir: string): PeerPrGithub => peerPrGithub(repoDir) };
+
+/** PEERHEAD1: how the new head relates to the card's, read from the peer repository (never from args); unreadable = missing. */
+async function lineageOf(repoDir: string, oldHead: string | null, newHead: string): Promise<Lineage> {
+  if (!oldHead) return "missing";
+  try { return await headLineage.read(repoDir, oldHead, newHead); } catch { return "missing"; }
+}
 
 /** The spec card is written once, before the card exists (mode 0600); a duplicate intake keeps the first one. */
 function writeSpec(n: number, text: string): string {
@@ -61,13 +70,29 @@ export const PEER_PR_CMDS: Record<string, CommandSpec> = {
   },
   "peer-pr-observe": {
     valued: ["head"], bools: [],
-    usage: "peer-pr-observe <task> --head <sha>（peer PR 的新 head 稳定后交给卡：fix 直接复验，review 有结论时先转 fix）",
-    run(c) {
+    usage: "peer-pr-observe <task> --head <sha>（peer PR 的新 head 稳定后交给卡：fix 直接复验，review 有结论时先转 fix；manual 卡走作者新推复审 / 结论结算，peerPrHeadReview）",
+    async run(c) {
       const task = c.task(c.p.pos[1]);
       allow(c, task.project, "记 peer PR 新 head ");
-      configFor(task.project);
+      const cfg = configFor(task.project), head = c.need("head");
+      const mode = headReviewMode(task.project);
+      // PEERHEAD1: a manual card is only ever the author-push flow's (headWrite; its own head again = settle the round's verdict)
+      if (mode !== "off" && getWorkflow(c.db, task.id)?.mode === "manual") {
+        if (head === task.headSHA) {
+          c.deps.assertLease?.();
+          const r = headSettleWrite(c.db, c.ctx(), { taskId: task.id, maxRounds: cfg.maxRounds });
+          return { ok: true, moved: r.moved, reason: r.reason, top: r.top === true, requeued: r.requeued ?? null, wouldRequeue: r.wouldRequeue ?? null,
+            task: { id: r.task.id, stage: r.task.stage, round: r.task.round } };
+        }
+        const lineage = await lineageOf(cfg.repoDir, task.headSHA, head);
+        c.deps.assertLease?.();
+        const r = headWrite(c.db, c.ctx(), { taskId: task.id, head, lineage, maxRounds: cfg.maxRounds });
+        return { ok: true, moved: r.moved, reason: r.reason, top: r.top === true, lineage, task: { id: r.task.id, stage: r.task.stage, round: r.task.round } };
+      }
+      // off: no repository read and no registration, the observe as it was
+      const lineage = mode === "off" ? undefined : await lineageOf(cfg.repoDir, task.headSHA, head);
       c.deps.assertLease?.();
-      const r = observeWrite(c.db, c.ctx(), { taskId: task.id, head: c.need("head") });
+      const r = observeWrite(c.db, c.ctx(), { taskId: task.id, head, ...(lineage ? { lineage } : {}) });
       return { ok: true, moved: r.moved, reason: r.reason, task: { id: r.task.id, stage: r.task.stage, round: r.task.round } };
     },
   },

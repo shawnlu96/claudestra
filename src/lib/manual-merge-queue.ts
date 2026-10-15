@@ -17,11 +17,12 @@ import type { WriteCtx } from "./ledger-checks.js";
 import { mustTask } from "./ledger-checks.js";
 import { getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
+import type { LedgerTask } from "./ledger-stages.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import {
   CLAIM_OP, configHandoff, eventAt, handoffWhy, intentOf, listRequests, manualIntentId, MANUAL_MERGE_NODE, manualQueueMode, REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
-  type ManualRequest,
+  type ManualRequest, type Refusal,
 } from "./manual-merge-queue-facts.js";
 import { ridingRequests } from "./merge-queue-candidates-member.js";
 import { recordObserved } from "./recovery-policy.js";
@@ -184,12 +185,20 @@ const sameBinding = (a: ManualRequest, b: RequestInput): boolean => a.head === b
  * binding again answers the existing one; a different one is refused until the open one is revoked or has ended.
  */
 export function recordRequest(db: Database, ctx: WriteCtx, input: RequestInput): { request: ManualRequest; duplicate: boolean; status: RequestStatus } {
+  return writeRequest(db, ctx, input, (task) => {
+    if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", `人工合并排队要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
+  });
+}
+
+/** Binding, review and refusal checks every request goes through; `authorize` decides who may file it, `vet` may refuse a wait too. */
+function writeRequest(db: Database, ctx: WriteCtx, input: RequestInput, authorize: (task: LedgerTask) => void,
+  more: { vet?: (refusal: Refusal | null) => void; data?: Record<string, unknown> } = {}): { request: ManualRequest; duplicate: boolean; status: RequestStatus } {
   const reason = textOneLine(input.reason, "原因", 600), now = ctx.now ?? Date.now();
   if (!SHA.test(input.head)) throw new LedgerError("invalid", "--head 要是完整 40 位 SHA");
   if (![input.specRev, input.round, input.reviewSeq].every((n) => Number.isSafeInteger(n) && n >= 0)) throw new LedgerError("invalid", "--spec-rev / --round / --review-seq 要是非负整数");
   return tx(db, () => {
     const task = mustTask(db, input.taskId), wf = getWorkflow(db, task.id);
-    if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", `人工合并排队要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
+    authorize(task);
     if (task.headSHA !== input.head || task.specRev !== input.specRev || task.round !== input.round) {
       throw new LedgerError("conflict", `绑定与卡当前不一致：卡是 head ${task.headSHA?.slice(0, 12) ?? "空"} / specRev ${task.specRev} / 第 ${task.round} 轮`);
     }
@@ -212,11 +221,33 @@ export function recordRequest(db: Database, ctx: WriteCtx, input: RequestInput):
       review: { seq: f.eventSeq, actor: ev.actor, reviewer: f.reviewer, sessionId: f.reviewerSessionId, family: f.reviewerFamily, reportPath: f.reportPath, verdict: f.verdict } };
     const refusal = requestRefusal(db, draft, now);
     if (refusal?.kind === "void") throw new LedgerError("conflict", `不能排人工合并：${refusal.why}`);
+    more.vet?.(refusal);
     const e = insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "decision", text: reason,
       data: { op: REQUEST_OP, head: draft.head, specRev: draft.specRev, round: draft.round, uiDigest: draft.uiDigest, review: draft.review,
-        frozen: getMeta(db, task.project).queueFrozen.frozen } }, false);
+        frozen: getMeta(db, task.project).queueFrozen.frozen, ...more.data } }, false);
     const request = { ...draft, seq: e.seq, ts: e.ts };
     return { request, duplicate: false, status: requestStatus(db, request, now) };
+  });
+}
+
+/** Why the scheduler filed a request (merge-arch-PEERHEAD1): the switch, the request it replaced and the pass it relies on. */
+export interface RequeueBasis { mechanism: "peerPrRequeue"; mode: "on"; priorRequestSeq: number | null; passSeq: number }
+
+/**
+ * The scheduler's own requeue of a peer PR card it pulled out of the queue for the author's new head (peer-pr-ledger.ts
+ * headSettleWrite, peerPrRequeue on). Same binding / review / refusal checks as a PM's request, filed as `scheduler` (never as a
+ * PM) with its basis in data.byScheduler. Unlike a PM's request it never queues behind a wait: `block` (hold, pause, frozen queue,
+ * unanswered ask, ...) and every wait of requestRefusal are re-read in this transaction and refuse it.
+ */
+export function requeueByScheduler(db: Database, ctx: WriteCtx, input: RequestInput & { basis: RequeueBasis }, block: (task: LedgerTask) => string | null) {
+  if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "调度器代排人工合并只由调度服务做");
+  const { basis, ...req } = input;
+  return writeRequest(db, ctx, req, (task) => {
+    const why = block(task);
+    if (why) throw new LedgerError("conflict", `调度器不代排：${why}`);
+  }, {
+    vet: (refusal) => { if (refusal) throw new LedgerError("conflict", `调度器不代排：${refusal.why}`); },
+    data: { byScheduler: { ...basis } },
   });
 }
 
