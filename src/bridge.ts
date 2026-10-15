@@ -1,5 +1,5 @@
 import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
-import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
+import { deliverPmLocal, pmClientFor, setPmDeliveryClients } from "./bridge/local-api/project-pm-delivery.js";
 import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 /**
  * Discord Bridge Service — 主入口
@@ -10,7 +10,7 @@ import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { requestStillHeld } from "./lib/held-pac.js";
-import { missingReplyFiles, stageApiReplyFiles } from "./bridge/api-reply-files.js";
+import { replyFilesRefusal, stageApiReplyFiles } from "./bridge/api-reply-files.js";
 import { stageLocalReplyFiles, withLocalAttachments } from "./bridge/local-reply-files.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
@@ -707,7 +707,7 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
-  const target = await import("./lib/api-reply-target.js"), refused = await target.deadApiTarget(to.tokenId) ?? await missingReplyFiles(env.meta.files || []);
+  const target = await import("./lib/api-reply-target.js"), refused = await target.deadApiTarget(to.tokenId) ?? await replyFilesRefusal(env, to.tokenId, pendingApiRequests, apiThreadResults);
   if (refused) return { envelope: env, outcome: { kind: "error", error: new Error(refused) } }; // token 已删 / 已停用或附件不在：整条报错、请求不出队
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
@@ -727,7 +727,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
   // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
-  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles, owner: pending?.fileOwner });
+  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, receipt: pending, threadId });
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
@@ -3194,6 +3194,7 @@ const server = Bun.serve({
 
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
 initPeerIngress(serveApiRequest); startLegacyWebPort(drainingFetch(bridgeFetch)); // 旧 web 端口由 bridge 接管（BRIDGE_LEGACY_WEB_PORT，bridge/legacy-web-port.ts）
+setPmDeliveryClients(clients); // 押后归属判调度助理在不在线看这张表（重启后还没投过信也要认得出已连上的）
 initForward({ clients, deliver, pendingReplies, pendingThreads, emitEvent, controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord });
 initInbox({
   clients, held: heldLocalMsgs, calls: pendingAgentCalls, render: renderContentForLocal,

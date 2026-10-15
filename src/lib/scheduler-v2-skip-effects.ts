@@ -67,12 +67,14 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "merge-content-review-sink.ts": "ledger=1", // merge-arch-REVIEW1: `ledger scheduler-content-review` from the merge driver's carry, through the pass manager
     "merge-deploy-outbox.ts": "ledger=1",
     "merge-queue-candidates.ts": "ledger=1", // CAND1: `ledger scheduler-recovery-observe` for mergeUnifiedCandidates notes, through the pass manager
+    "merge-queue-owner-pass.ts": "ledger=1",
     "observation-auto-register-tick.ts": "ledger=1", // Spec registration through the leased pass manager
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
     "pm-todo-p2.ts": "ledger=2", // PULLTODO1: `ledger scheduler-pm-todo` / `scheduler-recovery-observe` for the P2 diff notice, through the pass manager
     "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
     "recovery-peer-lease-tick.ts": "ledger=3", // PEERLEASE1: observe / fix-relay calls through the pass manager
+    "remote-review-tick.ts": "ledger=3 fs=3 notice=3", // RRL-1: files / notices only after `ledger scheduler-remote-review` passed the pass manager
     "review-converge-notice.ts": "ledger=4",
     "review-count-carry.ts": "ledger=1", // CARRYCNT1: `ledger scheduler-recovery-observe` for effCountCarry notes, through the pass manager
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes

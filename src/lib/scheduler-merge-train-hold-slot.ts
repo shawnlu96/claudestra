@@ -1,3 +1,4 @@
+import { ownerSlotTurn } from "./merge-queue-owner-hooks.js";
 /**
  * The merge-slot side of a live train's right of way (i28-MT1f2, scheduler-merge-train-hold.ts says why it lives here).
  * - mergeSlotHold: the auto tick asks right before it plans a merge intent; a card the train will not merge waits with a
@@ -60,6 +61,7 @@ const slotHolder = (db: Database, project: string) => db.query("SELECT intentId,
  */
 export async function mergeSlotTurn(db: Database, run: MergeRun, advance: Advance, drive: (run: MergeRun) => Promise<MergeRun>,
   store: TrainStore | null = defaultTrainStore(), now: number = Date.now()): Promise<MergeRun> {
+  const owner = await ownerSlotTurn(db, run, advance, now); if (owner) return owner;
   if (!store) return drive(run);
   const s = loadTrain(store, run.project), holder = slotHolder(db, run.project), mine = holder?.intentId === run.intentId;
   if (s && trainHolds(s, now) && !ridesTrain(s, run.taskId, run.reviewedHead) && (run.phase === "ready" || run.phase === "await_ci")) {

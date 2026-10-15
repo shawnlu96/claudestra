@@ -69,6 +69,7 @@ export const RECOVERY_KEYS = [
   "mergeDeployDetach",
   "mergeDirect",
   "mergePipe",
+  "mergeQueueOwner",
   "mergeStaleYield",
   "mergeUnifiedCandidates",
   "mergeUnion",

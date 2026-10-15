@@ -3,6 +3,7 @@
  * - `ledger pm-digest [--list]`：只读，最近 24 小时给当班 PM 的推送里立即送 / 可合并各多少、来源与理由分布、队里还剩几条；--list 列出条目；
  * - `ledger pm-digest-pull <on|off>`：摘要队列只供拉取（缺省 on）还是旧的推送摘要，切换要项目真 PM。
  * - `ledger pm-digest-mode <on|observe|off>`：项目开关（缺省 observe），项目真 PM / master / owner 才能切。
+ * - `ledger pm-peer-inbox [on|off]`：peer 机器消息先投调度助理（DPR-1，缺省 off），不带模式只读；切换要项目真 PM（调度助理自己切不了）。
  * - `ledger pm-hold [off|hold|batch] [--every <分钟>]`：PM 暂存（lib/pm-hold.ts），不带模式只读状态；切换同上要项目真 PM。
  * - `ledger pm-todo [--all]`：只读，PM 按需拉的上线后待办（lib/pm-todo.ts）；缺省只列观察期已到的，--all 连没到的一起列；摘要队列有条目时带条数。
  */
@@ -36,7 +37,7 @@ export function pmDigestStats(store: PmDigestStore, project: string, now: number
   };
 }
 
-function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> {
+export function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> {
   return {
     "pm-digest": { valued: ["project"], bools: ["list"], usage: "pm-digest [--project <id>] [--list]（只读：最近 24 小时给当班 PM 的推送立即送 / 可合并分布；--list 列出队里等拉的条目）",
       run: async (c: LedgerCli) => {
@@ -61,6 +62,15 @@ function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> 
         const from = store.routeMode(project);
         await store.setRouteMode(project, mode);
         return { ok: true, project, from, routeMode: mode };
+      } },
+    "pm-peer-inbox": { valued: ["project"], bools: [], usage: "pm-peer-inbox [on|off] [--project <id>]（peer 机器消息先投调度助理，缺省 off；不带模式只读）",
+      run: async (c: LedgerCli) => {
+        const project = c.project(), mode = c.p.pos[1], from = store.peerInbox(project);
+        if (mode === undefined) return { ok: true, project, peerInbox: from };
+        if (mode !== "on" && mode !== "off") throw new LedgerError("invalid", "开关只能是 on / off");
+        c.requireRealPm(project, "切 peer 消息转调度助理开关");
+        await store.setPeerInbox(project, mode);
+        return { ok: true, project, from, peerInbox: mode };
       } },
     "pm-hold": { valued: ["project", "every"], bools: [], usage: "pm-hold [off|hold|batch] [--every <分钟>] [--project <id>]（PM 暂存；不带模式只读状态）",
       run: async (c: LedgerCli) => {
