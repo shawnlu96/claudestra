@@ -115,6 +115,16 @@ ui card still needs PM's screenshot approval at handoff (`uiMergeRefusal`). Know
 card is already in fix only shows up in the next `take_order`; a lent fix order names the local report path only, so a lender
 gets no report text (left to a later card). The ledger cannot see GitHub: a PR merged in the moment between the read and the bounce write still goes to fix (known limit: nothing reads the PR of a card in fix, so the author finds it merged and asks PM). Tests: `tests/remote-review-bounce.test.ts`.
 
+## Draft until the handoff (RRL-3)
+
+On a `mergeHandoff` project the exec prompt (`lib/dag-tools-prompt.ts`, rendered by `start_node`, the scheduler's autostart and the
+author rebuild) asks for a **draft** PR (`gh pr create --draft`); other PR projects are unchanged, since our own merge train's
+`gh pr merge` cannot merge a draft. The owner's queue skips drafts, so it does not review heads this machine has not reviewed yet.
+`ghPrRead` reads `isDraft`; `ghPrState` runs `gh pr ready` on a draft read `OPEN` at the followed head (handed over only, never
+on a moved head). `driveHandoff` reads a draft once more right after the `merge_handoff` record, so it turns ready in the same
+pass. A refusal never holds the handoff: it shows in the tick detail and every later poll of a handed-over draft tries again.
+A remote bounce leaves the PR ready (the owner's re-review follows the new head on its own).
+
 ## The local merge paths a handoff project never reaches
 
 - **Merge intent**: the auto tick never plans one (`driveHandoff` replaces it); an open one is escalated, not queued.

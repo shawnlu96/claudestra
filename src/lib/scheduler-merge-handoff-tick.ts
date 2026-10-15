@@ -28,6 +28,10 @@ export interface HandoffPr {
   base?: string;
   /** MERGED after the handoff: whether the configured clone's main holds the merge commit (only then may the card go live). */
   landing?: MainLanding;
+  /** GitHub's isDraft (absent = not reported, read as not a draft). */
+  draft?: boolean;
+  /** A draft followed after the handoff that `gh pr ready` refused this time: tried again on the next read. */
+  readyError?: string;
 }
 /** `mainHead` = the main commit, read from the PR repository's main, that was found to contain the merge commit. */
 type MainLanding = { ok: true; mainHead: string } | { ok: false; reason: string };
@@ -35,7 +39,10 @@ type MainLanding = { ok: true; mainHead: string } | { ok: false; reason: string 
 export type HandoffOnMain = (prRef: string, mergeSha: string) => Promise<MainLanding>;
 /** `refused`: reading this head again gives the same answer (the list is too long to vouch for); recorded once, locks stay whole. */
 type PrFiles = string[] | { refused: string };
-/** `follow` = the PR head this machine follows after the handoff (absent before it). A failed read or git step throws. */
+/**
+ * `follow` = the PR head this machine follows after the handoff (absent before it). A failed read or git step throws. A draft PR
+ * read OPEN at the followed head is marked ready first (RRL-3: the owner's queue skips drafts until the handoff).
+ */
 export type ReadPr = (prRef: string, follow?: { project: string; head: string }, handing?: { project: string }) => Promise<HandoffPr>;
 /** The PR's net changed paths (merge-base with main → head, renames as both sides); null when the clone cannot tell this time. */
 export type HandoffFiles = (prRef: string, head: string) => Promise<PrFiles | null>;
@@ -86,7 +93,9 @@ export function ghPrState(command: typeof runBounded = runBounded,
     if (offMain(pr)) return pr;
     const files = handing && pr.state === "OPEN" ? { files: await prFiles(filesOf(handing.project), prRef, pr.head) } : {};
     const landing = follow && pr.state === "MERGED" && mergeSha ? { landing: await mainLanding(mainOf(follow.project), prRef, pr.base, mergeSha) } : {};
-    const full: HandoffPr = { ...pr, ...files, ...landing };
+    // only the head that was handed over: a PR moved off it goes to PM or is carried first, never readied on a guess
+    const ready = follow && pr.state === "OPEN" && pr.draft && same(pr.head, follow.head) ? await markReady(prRef, command) : {};
+    const full: HandoffPr = { ...pr, ...files, ...landing, ...ready };
     // CLOSED goes to PM anyway; MERGED without its merge commit is read again next round
     if (!follow || same(pr.head, follow.head) || pr.state === "CLOSED" || (pr.state === "MERGED" && !mergeSha)) return full;
     const carry = carryOf(follow.project);
@@ -100,19 +109,26 @@ export function ghPrState(command: typeof runBounded = runBounded,
  */
 export type GhPrRead = { ok: true; pr: HandoffPr } | { ok: false; kind: "timeout" | "failed" | "malformed"; code: number | null; message: string };
 export async function ghPrRead(prRef: string, command: typeof runBounded, timeoutMs: number): Promise<GhPrRead> {
-  const r = await command(["gh", "pr", "view", prRef, "--json", "state,headRefOid,mergeCommit,baseRefName"], { env: ghEnv(), timeoutMs });
+  const r = await command(["gh", "pr", "view", prRef, "--json", "state,headRefOid,mergeCommit,baseRefName,isDraft"], { env: ghEnv(), timeoutMs });
   if (r.code !== 0 || r.timedOut) {
     return { ok: false, kind: r.timedOut ? "timeout" : "failed", code: r.code ?? null,
       message: `gh pr view 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}` };
   }
-  let raw: { state?: unknown; headRefOid?: unknown; mergeCommit?: { oid?: unknown } | null; baseRefName?: unknown };
+  let raw: { state?: unknown; headRefOid?: unknown; mergeCommit?: { oid?: unknown } | null; baseRefName?: unknown; isDraft?: unknown };
   try { raw = JSON.parse(r.stdout); } catch (e) { return { ok: false, kind: "malformed", code: 0, message: (e as Error).message }; }
   const mergeSha = typeof raw?.mergeCommit?.oid === "string" && SHA.test(raw.mergeCommit.oid) ? raw.mergeCommit.oid : null;
   if (!["OPEN", "MERGED", "CLOSED"].includes(String(raw?.state)) || typeof raw.headRefOid !== "string" || !SHA.test(raw.headRefOid)) {
     return { ok: false, kind: "malformed", code: 0, message: "gh pr view 输出不合规" };
   }
   return { ok: true, pr: { state: raw.state as HandoffPr["state"], head: raw.headRefOid, mergeSha,
-    ...(typeof raw.baseRefName === "string" ? { base: raw.baseRefName } : {}) } };
+    ...(typeof raw.baseRefName === "string" ? { base: raw.baseRefName } : {}), ...(raw.isDraft === true ? { draft: true } : {}) } };
+}
+
+/** `gh pr ready` of a full PR URL: the PR no longer a draft, or why not (stderr's first line, as ghPrRead's refusal carries it). */
+async function markReady(prRef: string, command: typeof runBounded): Promise<Pick<HandoffPr, "draft" | "readyError">> {
+  const r = await command(["gh", "pr", "ready", prRef], { env: ghEnv(), timeoutMs: 30_000 });
+  if (r.code === 0 && !r.timedOut) return { draft: false };
+  return { readyError: `gh pr ready 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}` };
 }
 
 /** `owner/repo` (lowercased) of an origin on exactly github.com — scp form `git@github.com:o/r`, `https://` or `ssh://` — else null. */
@@ -291,6 +307,20 @@ async function remoteBounce<O>(c: HandoffCard<O>, pr: string, head: string, read
   return c.out("remote_bounce", `仓库方审查 ${p.remote.reportId} 有 ${p.remote.p1} 个 P1，退回 fix`);
 }
 
+/**
+ * A draft PR just handed over is read once more as handed over, which turns it ready (ghPrState, RRL-3): the owner's queue skips
+ * drafts, so until then nobody there reviews it. A miss only delays that: every later poll of a handed-over draft tries again.
+ */
+async function readyNow(c: HandoffCard<unknown>, pr: string, head: string): Promise<string> {
+  try {
+    const r = await c.deps.prState!(pr, { project: c.task.project, head });
+    return r.readyError ? `；草稿没转成 ready，下轮再试：${r.readyError}` : "";
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    return `；草稿转 ready 前读 PR 失败，下轮再试：${(e as Error).message}`;
+  }
+}
+
 /** First call hands the card over (PR open at the card's head, or PM); later calls follow the PR until merged / closed. */
 export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const { task } = c;
@@ -323,7 +353,8 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
     const r = await c.deps.manager("ledger", "scheduler-merge-handoff", task.id, "--head", task.headSHA, "--pr", task.pr);
     if (r.ok !== true) return c.out("held", `交接没记上：${String(r.error)}`);
     if (r.duplicate !== true) await tell(c, `[调度引擎] ${task.id} 审查通过，合并交给仓库方：${task.pr} @ ${short(task.headSHA)}（证据见台账 merge_handoff）`, true);
-    return c.out("handoff", `已交仓库方合并 ${task.pr}${narrowAfterHandoff(c, pr.files)}`);
+    const ready = pr.draft ? await readyNow(c, task.pr, task.headSHA) : "";
+    return c.out("handoff", `已交仓库方合并 ${task.pr}${ready}${narrowAfterHandoff(c, pr.files)}`);
   }
   if (pr.state === "CLOSED") return c.escalate(`交给仓库方的 PR 被关闭、没有合并：${task.pr}`);
   if (offMain(pr)) return c.escalate(`交给仓库方的 PR 被改投到 ${pr.base}（${pr.state}），交接只认合进 main：不进 live`);
@@ -335,7 +366,8 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const bounced = await remoteBounce(c, task.pr, task.headSHA, pr); // after a recorded carry: the head followed now
   if (bounced) return bounced;
   if (pr.state === "OPEN") {
-    return c.out("waiting", `${moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果"}${narrowAfterHandoff(c, pr.files)}`);
+    const ready = pr.readyError ? `；草稿没转成 ready，下轮再试：${pr.readyError}` : "";
+    return c.out("waiting", `${moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果"}${ready}${narrowAfterHandoff(c, pr.files)}`);
   }
   // a read that never said whether main holds the merge commit proves nothing: held, never live (a moved head still went to PM above)
   if (!pr.landing?.ok) return c.out("held", "PR 已合并但没证实进了 main，下轮再看：读 PR 没给出 main 是否含合并提交");
