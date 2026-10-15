@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { getGitHubRepo, getLatestRelease } from "../src/lib/github-release.ts";
@@ -322,6 +322,23 @@ describe("[验收线 3] 安装地址与 origin 更新器解析一致;cwd / workt
     ]) expect(installSlug(u)).toBe(releaseSlugOf(u) ?? "");
   });
 
+  test("两端对同一组地址给出正确的 owner/repo:带点的仓库名保留完整,只剥结尾 .git", () => {
+    for (const [u, want] of [
+      ["https://github.com/owner/repo.name.git", "owner/repo.name"],
+      ["https://github.com/owner/repo.name", "owner/repo.name"],
+      ["git@github.com:owner/a.b.c.git", "owner/a.b.c"],
+      ["ssh://git@ssh.github.com:443/owner/repo.js.git", "owner/repo.js"],
+      [`https://github.com/${NEW}.git/`, NEW],
+      [`  git@github.com:${NEW}.git  `, NEW],
+      [`https://github.com/${NEW}.git`, NEW],
+      ["https://github.com/owner/.git", null],
+      ["https://git.example.com/a/b.git", null],
+    ] as const) {
+      expect(releaseSlugOf(u)).toBe(want);
+      expect(installSlug(u)).toBe(want ?? "");
+    }
+  });
+
   test("fake 下载:新地址安装与更新器查的是同一个 release API", async () => {
     const env = fakeInstallEnv();
     for (const url of [installDefaultUrl(NEW), `git@github.com:${NEW}`]) {
@@ -378,4 +395,36 @@ test("gitRepoPort 写是比较后交换:当前值不对就失败、不追加", a
   const cfg = configBytes(dir);
   await expect(gitRepoPort(dir).setUrl("origin", "url", `https://github.com/${OLD}.git`, `https://github.com/${NEW}.git`)).rejects.toThrow();
   expect(configBytes(dir)).toBe(cfg);
+});
+
+test("[验收线 2] gitRepoPort 持 config.lock 写:核对后别的 git 进程改不进来,origin 只有新值", async () => {
+  const from = `https://github.com/${OLD}.git`, to = `https://github.com/${NEW}.git`;
+  const dir = repo({ origin: from });
+  let raced: number | null = null;
+  await gitRepoPort(dir, {
+    beforeCommit() {
+      const p = Bun.spawnSync(["git", "-C", dir, "config", "--local", "remote.origin.url", "https://git.example.com/custom.git"], { stdout: "pipe", stderr: "pipe", env: ENV });
+      raced = p.exitCode;
+    },
+  }).setUrl("origin", "url", from, to);
+  expect(raced).not.toBeNull();
+  expect(raced).not.toBe(0);
+  expect(git(dir, "config", "--local", "--get-all", "remote.origin.url")).toBe(to);
+  expect(existsSync(join(dir, ".git", "config.lock"))).toBe(false);
+});
+
+test("[验收线 2] gitRepoPort:config.lock 被别人占着就拒绝,一个字节不写;不留锁和副本", async () => {
+  const from = `https://github.com/${OLD}.git`;
+  const dir = repo({ origin: from });
+  const cfg = configBytes(dir);
+  const lock = join(dir, ".git", "config.lock");
+  writeFileSync(lock, "");
+  await expect(gitRepoPort(dir).setUrl("origin", "url", from, `https://github.com/${NEW}.git`)).rejects.toThrow(/config\.lock/);
+  expect(configBytes(dir)).toBe(cfg);
+  expect(existsSync(lock)).toBe(true);
+  rmSync(lock);
+  // 值不对时也放锁、删副本
+  await expect(gitRepoPort(dir).setUrl("origin", "url", "https://git.example.com/x.git", from)).rejects.toThrow();
+  expect(configBytes(dir)).toBe(cfg);
+  expect(readdirSync(join(dir, ".git")).filter((f) => f.startsWith("config."))).toEqual([]);
 });

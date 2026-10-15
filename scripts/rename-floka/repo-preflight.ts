@@ -9,8 +9,9 @@
  * 用法:bun scripts/rename-floka/repo-preflight.ts [--repo <目录>] [--mode off|observe|on] [--from owner/repo] [--to owner/repo]
  *        [--plan <计划.json>] [--rollback] [--record <记录.json>]
  */
-import { renameSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { resolve } from "node:path";
+import { writeJsonAtomic } from "../../src/lib/state-file.ts";
 import {
   applyRepoMigration, OFFICIAL_REPO, planRepoMigration, PROPOSED_REPO, REPO_ITEM, rollbackRepoMigration,
 } from "../../src/lib/floka-repo/migrate.ts";
@@ -24,39 +25,85 @@ function git(dir: string, args: string[]): { code: number; out: string; err: str
   return { code: p.exitCode ?? 1, out: p.stdout.toString(), err: p.stderr.toString().trim() };
 }
 
-/** 真实 RepoGit:只读本仓(--local)配置原值,不经 insteadOf;写只有按原值精确替换的 `git config --fixed-value --replace-all` */
-export function gitRepoPort(dir: string): RepoGit {
-  const list = async (): Promise<RemoteEntry[]> => {
-    const r = git(dir, ["config", "--local", "-z", "--get-regexp", "^remote\\..*\\.(url|pushurl)$"]);
-    if (r.code === 1 && !r.out) return [];
-    if (r.code !== 0) throw new Error(`git config 读 remote 失败(exit ${r.code}):${r.err}`);
-    const byName = new Map<string, { name: string; urls: string[]; pushUrls: string[] }>();
-    for (const rec of r.out.split("\0").filter(Boolean)) {
-      const nl = rec.indexOf("\n");
-      const key = nl < 0 ? rec : rec.slice(0, nl);
-      const value = nl < 0 ? "" : rec.slice(nl + 1);
-      const m = /^remote\.(.+)\.(url|pushurl)$/.exec(key);
-      if (!m) continue;
-      const e = byName.get(m[1]) ?? { name: m[1], urls: [], pushUrls: [] };
-      (m[2] === "url" ? e.urls : e.pushUrls).push(value);
-      byName.set(m[1], e);
-    }
-    return [...byName.values()];
-  };
+function configPath(dir: string): string {
+  const r = git(dir, ["rev-parse", "--git-common-dir"]);
+  if (r.code !== 0) throw new Error(`${dir} 不是 git 仓库:${r.err}`);
+  return resolve(dir, r.out.trim(), "config");
+}
+
+/** 读某个配置文件里的 remote url / pushurl 原值(-z:值里有换行也不拆错) */
+function readRemotes(dir: string, file: string): RemoteEntry[] {
+  const r = git(dir, ["config", "--file", file, "-z", "--get-regexp", "^remote\\..*\\.(url|pushurl)$"]);
+  if (r.code === 1 && !r.out) return [];
+  if (r.code !== 0) throw new Error(`git config 读 remote 失败(exit ${r.code}):${r.err}`);
+  const byName = new Map<string, { name: string; urls: string[]; pushUrls: string[] }>();
+  for (const rec of r.out.split("\0").filter(Boolean)) {
+    const nl = rec.indexOf("\n");
+    const key = nl < 0 ? rec : rec.slice(0, nl);
+    const value = nl < 0 ? "" : rec.slice(nl + 1);
+    const m = /^remote\.(.+)\.(url|pushurl)$/.exec(key);
+    if (!m) continue;
+    const e = byName.get(m[1]) ?? { name: m[1], urls: [], pushUrls: [] };
+    (m[2] === "url" ? e.urls : e.pushUrls).push(value);
+    byName.set(m[1], e);
+  }
+  return [...byName.values()];
+}
+
+const valuesOf = (entries: RemoteEntry[], remote: string, key: "url" | "pushurl"): readonly string[] => {
+  const e = entries.find((x) => x.name === remote);
+  return e ? (key === "url" ? e.urls : e.pushUrls) : [];
+};
+
+/**
+ * 真实 RepoGit:只读本仓(--local,即 git 公共目录的 config)原值,不经 insteadOf。
+ * 写是真正的比较后交换:先按 git 自己的规矩排他建 config.lock(别的 git 进程这期间改不了 config),
+ * 锁内现读、核对当前值恰是 from,在锁旁的副本上做 `--fixed-value --replace-all`、核对结果恰是 to,再把副本写进锁文件改名提交。
+ * 旧值不在(被别人改过)就放锁退出,一个字节不写——`--replace-all` 比不中时会追加新值,所以不能直接对 config 跑它。
+ * beforeCommit 只给测试注入:在持锁、核对之后、提交之前调用。
+ */
+export function gitRepoPort(dir: string, hooks: { beforeCommit?: () => void } = {}): RepoGit {
   return {
-    listRemotes: list,
+    async listRemotes() { return readRemotes(dir, configPath(dir)); },
     async setUrl(remote, key, from, to) {
-      const e = (await list()).find((x) => x.name === remote);
-      const vals = e ? (key === "url" ? e.urls : e.pushUrls) : [];
-      if (vals.length !== 1 || vals[0] !== from) throw new Error(`${remote}.${key} 当前值 ${JSON.stringify(vals)} 不是 ${JSON.stringify(from)},不改`);
-      // 不用 `git remote set-url <新> <旧>`:它拿 insteadOf 改写后的地址去比,配了 insteadOf 的机器上比不中原值
-      const r = git(dir, ["config", "--local", "--fixed-value", "--replace-all", `remote.${remote}.${key}`, to, from]);
-      if (r.code !== 0) throw new Error(`git config 改 ${remote}.${key} 失败(exit ${r.code}):${r.err}`);
+      const cfg = configPath(dir);
+      const lock = `${cfg}.lock`;
+      let fd: number;
+      try { fd = openSync(lock, "wx"); } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`${lock} 已存在:别的 git 进程正在改配置,不改`);
+        throw e;
+      }
+      const stage = `${cfg}.floka-stage-${process.pid}`;
+      let committed = false;
+      try {
+        const name = `remote.${remote}.${key}`;
+        const vals = valuesOf(readRemotes(dir, cfg), remote, key);
+        if (vals.length !== 1 || vals[0] !== from) throw new Error(`${name} 当前值 ${JSON.stringify(vals)} 不是 ${JSON.stringify(from)},不改`);
+        const mode = statSync(cfg).mode & 0o777;
+        writeFileSync(stage, readFileSync(cfg));
+        // 不用 `git remote set-url <新> <旧>`:它拿 insteadOf 改写后的地址去比,配了 insteadOf 的机器上比不中原值
+        const r = git(dir, ["config", "--file", stage, "--fixed-value", "--replace-all", name, to, from]);
+        if (r.code !== 0) throw new Error(`git config 改 ${name} 失败(exit ${r.code}):${r.err}`);
+        const after = valuesOf(readRemotes(dir, stage), remote, key);
+        if (after.length !== 1 || after[0] !== to) throw new Error(`${name} 改后是 ${JSON.stringify(after)},不是 ${JSON.stringify(to)},不提交`);
+        hooks.beforeCommit?.();
+        writeSync(fd, readFileSync(stage));
+        fsyncSync(fd);
+        closeSync(fd);
+        fd = -1;
+        chmodSync(lock, mode);
+        renameSync(lock, cfg);
+        committed = true;
+      } finally {
+        if (fd >= 0) closeSync(fd);
+        if (!committed) try { unlinkSync(lock); } catch { /* 已不在 */ }
+        try { unlinkSync(stage); } catch { /* 没建 */ }
+      }
     },
   };
 }
 
-/** 迁移记录:JSON 文件,先写临时文件再原子改名 */
+/** 迁移记录:JSON 文件,经 state-file 的原子写(tmp + rename) */
 export function fileRecordStore(path: string): RecordStore {
   return {
     async load() {
@@ -67,9 +114,7 @@ export function fileRecordStore(path: string): RecordStore {
       return r;
     },
     async save(record) {
-      const tmp = `${path}.${process.pid}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
-      renameSync(tmp, path);
+      await writeJsonAtomic(path, record, { trailingNewline: true });
     },
   };
 }

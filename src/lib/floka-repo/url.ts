@@ -6,10 +6,14 @@
  *   带凭据、带尾斜杠、别的主机、大小写不同都不算,一律当自定义地址不动。
  */
 
-/** owner/repo 宽松解析:`github.com(:port)?[:/]owner/repo`,repo 截到第一个 `.` 或 `/` 为止(与 v2.4.6 起的更新器同义) */
+/**
+ * owner/repo 宽松解析:`github.com(:port)?[:/]owner/repo(.git)?(/)?` 到行尾。repo 名保留中间的点(repo.name),只剥结尾的 `.git`。
+ * v2.4.6 起的更新器把 repo 截到第一个 `.`,带点的仓库会查错 Release;install.sh 原先认得对,现在两边都按完整名。
+ */
 export function releaseSlugOf(url: string): string | null {
-  const m = url.trim().match(/github\.com(?::\d+)?[:/]([^/]+\/[^/.]+)/);
-  return m ? m[1] : null;
+  const m = url.trim().match(/github\.com(?::\d+)?[:/]([^/\s]+\/[^/\s]+)\/?$/);
+  const slug = m ? m[1].replace(/\.git$/, "") : "";
+  return slug && !slug.endsWith("/") ? slug : null;
 }
 
 /** 更新器与 install.sh 查最新 release 的同一个地址 */
