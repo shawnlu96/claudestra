@@ -105,6 +105,10 @@ describe("the scan's rules (synthetic sources)", () => {
       probe(`export const port = { recordObserved(a: unknown) { return a; } };`),
       probe(`abstract class P { abstract recordObserved(a: unknown); }`),
       probe(`declare function gateRecovery(db: Database): boolean;`),
+      probe(`class P { recordObserved(a: unknown): number { return 1; } }`),
+      probe(`class P { private static async gateRecovery(db: Database): Promise<boolean> { return true; } }`),
+      probe(`class P { recordObserved(a: unknown): void;\n  recordObserved(a: unknown, b?: number): void {} }`),
+      probe(`export const port = { *recordObserved(a: unknown): Generator<number> { yield 1; } };`),
       // an observe port declared but never called
       probe(`export interface Deps { observe(a: ObservedAction): Promise<void> }`),
       probe(`export const deps = { observe(a: ObservedAction) { return a; } };`),
@@ -117,6 +121,11 @@ describe("the scan's rules (synthetic sources)", () => {
       `interface Port { recordObserved(): void }\nexport const go = (p: Port) => p.recordObserved();`,
       `export function gateRecovery() { return 1; }\nif (gateRecovery()) run();`,
       `export const deps = { observe: (a: ObservedAction) => send(a) };\nawait deps.observe?.(a);`,
+      // a call in a conditional's first arm, or a case label, is followed by `:` and is still a call
+      `export const observe = (db: Database, enabled: boolean) =>\n  enabled ? recordObserved(db, { mechanism: k }, 0) : null;`,
+      `export const go = (on: boolean) => on ? await gateRecovery(db, a, act, o) : false;`,
+      `export const go = (on: boolean) => on\n  ? n * recordObserved(db, a, 0) : 0;`,
+      `switch (x) { case gateRecovery(db, a, act, o): break; }`,
     ];
     for (const s of real) expect(keysWithoutSampleSink([KEY], [probe(s)])).toEqual([]);
   });

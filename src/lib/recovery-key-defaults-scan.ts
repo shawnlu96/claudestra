@@ -102,13 +102,28 @@ function isCall(code: string, at: number, open: number): boolean {
     if (code[close] === "(") depth++;
     else if (code[close] === ")" && --depth === 0) break;
   }
-  if (/^\s*[{:]/.test(code.slice(close + 1, close + 64))) return false;
+  const after = code.slice(close + 1, close + 64);
+  if (/^\s*\{/.test(after) || (/^\s*:/.test(after) && memberHead(code, at))) return false;
   depth = 0;
   for (let i = at - 1; i >= 0; i--) { // the innermost `{` around the name: a type body declares, never calls
     if (code[i] === "}") depth++;
     else if (code[i] === "{" && depth-- === 0) return !/(?:\binterface\s+[\w$]+(?:<[^{]*>)?(?:\s+extends\s+[^{]*)?|\btype\s+[\w$]+(?:<[^=]*>)?\s*=)\s*$/.test(code.slice(Math.max(0, i - 200), i));
   }
   return true;
+}
+
+/**
+ * Whether the name at `at` starts a member / statement (so `name(...): T` is a return type, not a call): the token before it,
+ * past member modifiers and a generator `*`, is the start of the file or `{ } ; , )`. A call followed by `:` sits after an
+ * operator or keyword instead (`c ? recordObserved(x) : y`, `case gateRecovery(a):`).
+ */
+function memberHead(code: string, at: number): boolean {
+  let head = code.slice(Math.max(0, at - 200), at).trimEnd();
+  for (let prev = ""; prev !== head;) {
+    prev = head;
+    head = head.replace(/(?:^|(?<=[^\w$]))(?:async|static|public|private|protected|readonly|override|declare|get|set)$/, "").replace(/(?<=[{};,)]\s*)\*$/, "").trimEnd();
+  }
+  return head === "" || /[{};,)]$/.test(head);
 }
 
 const quoted = (text: string, key: string) => text.includes(`"${key}"`) || text.includes(`'${key}'`) || text.includes(`\`${key}\``);
