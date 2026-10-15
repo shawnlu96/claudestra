@@ -1,4 +1,4 @@
-# Claudestra 中继协议 v2
+# Floka 中继协议 v2
 
 一台装了 bridge 的机器（**实例**）只向外连一条 WebSocket 到中继；中继之后能做三件事：把浏览器打到 `https://<slug>.<base>/…` 的请求送给这台实例的本机 Web（**隧道**），把别的实例对它 `/api/v1/*` 的调用送过去（**peer**），以及告诉它联系人在不在线（**在线状态**）。实例不需要公网 IP、不开端口、不装 Tailscale。
 
@@ -252,13 +252,13 @@ front 按 `Host`（反代之后按 `X-Forwarded-Host`）分两种：
 |---|---|
 | `GET /healthz` | `{"ok":true,"online":N,"pending":M,"version":"…","commit":"…"}`（`commit` 有才带：`RELAY_COMMIT` 或部署脚本写的 `.relay-commit`），无身份信息；不看主机名 |
 | `GET /v1/ws` | WebSocket 升级（§1）；不看主机名 |
-| `GET /` | 一页静态 HTML：输入配对短码 → 跳 `/c/<code>`；说明「这是一台中继，要用 Claudestra 先在你的电脑上装 bridge」。`?e=code` 显示「无效或已过期」 |
+| `GET /` | 一页静态 HTML：输入配对短码 → 跳 `/c/<code>`；说明「这是一台中继，要用 Floka 先在你的电脑上装 bridge」。`?e=code` 显示「无效或已过期」 |
 | `GET /c?code=…` | 无 JS 的表单提交 → `302 /c/<code>` |
 | `GET /c/<code>` | 短码有效 → `302 https://<slug>.<base>/pair#<code>`（浏览器把 # 带过去）；无效 → `302 /?e=code`；同一地址查太多次 → `429` 页（§6.1） |
 | `GET /i` | 邀请落地。带 cookie `cstra_home=<slug>`（形状合法）→ `302 https://<slug>.<base>/join`（邀请载荷在 #，浏览器原样带过去）；没有或形状不对 → 一页 HTML：读 # 里的邀请、显示「谁邀你」，让用户输入自己的 slug 或短码后跳到自己的实例 `/join#…`，或引导安装 |
 | 其它 | `404`；非 GET / HEAD → `405` |
 
-**`<slug>.<base>`**（隧道）：slug 形状不合法或主机名不属于 `<base>` → `404 unknown host`；slug 没登记过 → `404` 页「没有叫这个名字的 Claudestra」；登记过但不在线 → `503` 页「这台电脑不在线」（离线也给页面，不是裸错误）；在线 → 转成 `req` 帧（§3.1，`from:"relay"`），请求正文 > `maxChunkBytes` 就切成 `data` 帧；收到 `res` 立刻回状态与头，`data` 逐块写给浏览器，`end` 收尾；浏览器断开 → 发 `cancel`；实例回 `error` 或等不到头 → `502` JSON `{ok:false,error:<code>,message}`。WebSocket 升级请求在隧道上 → `426`（本版不隧道 WS；Web 用的是 SSE）。
+**`<slug>.<base>`**（隧道）：slug 形状不合法或主机名不属于 `<base>` → `404 unknown host`；slug 没登记过 → `404` 页「没有叫这个名字的 Floka」；登记过但不在线 → `503` 页「这台电脑不在线」（离线也给页面，不是裸错误）；在线 → 转成 `req` 帧（§3.1，`from:"relay"`），请求正文 > `maxChunkBytes` 就切成 `data` 帧；收到 `res` 立刻回状态与头，`data` 逐块写给浏览器，`end` 收尾；浏览器断开 → 发 `cancel`；实例回 `error` 或等不到头 → `502` JSON `{ok:false,error:<code>,message}`。WebSocket 升级请求在隧道上 → `426`（本版不隧道 WS；Web 用的是 SSE）。
 
 front 的响应头补 `strict-transport-security`；不改写 HTML；不缓存。
 

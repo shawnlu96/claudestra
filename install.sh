@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Claudestra one-line installer
+# Floka one-line installer
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/shawnlu96/claudestra/main/install.sh | bash
@@ -131,7 +131,7 @@ confirm() {
 # ────────────────────────────────────────────
 
 printf "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
-printf "${BOLD}  $(L "Claudestra 一键安装脚本" "Claudestra one-line installer")${RESET}\n"
+printf "${BOLD}  $(L "Floka 一键安装脚本" "Floka one-line installer")${RESET}\n"
 printf "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n\n"
 
 OS="$(uname -s)"

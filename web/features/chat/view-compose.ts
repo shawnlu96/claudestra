@@ -9,14 +9,14 @@ import type { ChatMessage } from "./type";
 import { pruneLiveBubbles, type HistoryCursor } from "./live-merge";
 
 /**
- * 剥掉 Claudestra 的**入站注入头**：`[🌐 来自 Web 端用户「x」（…）。\n用 reply() …]\n\n正文`。
+ * 剥掉 Floka 的**入站注入头**：`[🌐 来自 Web 端用户「x」（…）。\n用 reply() …]\n\n正文`。
  *
  * 为什么需要：本地那条乐观气泡只有**正文**，而历史里的入站消息可能自带这段头
  * （Pi 会话没有 Claude Code 的 `<channel>` 包装，入站消息在会话记录里就是带头裸文
  * 本）⇒ 两边 norm 不相等 ⇒ 用户发一条、屏上出现两条（owner 2026-09-14 实测）。
  * Claude Code 侧历史里本来就是解包后的正文，这个函数对它是 no-op（不影响既有去重）。
  *
- * 只认 Claudestra 注入头（`[` + 来源 emoji + …`]`），普通以 `[` 开头的用户文本不动。
+ * 只认 Floka 注入头（`[` + 来源 emoji + …`]`），普通以 `[` 开头的用户文本不动。
  */
 const INBOUND_HEAD_RE = /^\[(?:🌐|💬|🤖|🤝|🛰|📨|📬)[^\]]*\]\s*/u;
 export function stripInboundHeader(x: string): string {

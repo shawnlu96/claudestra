@@ -1,5 +1,5 @@
 /**
- * Claudestra Web Push Service Worker。
+ * Floka Web Push Service Worker。
  * - push：无条件展示通知（iOS/Safari 对「push 到达却不展示」有惩罚，静默几次后丢弃该订阅的后续推送；每条独立 tag）；
  *   dismiss 型只清同一台机器（fp）、同 agent 的旧通知；「推送不带正文」的机器发的 dismiss 与通知都不带 agent，按 fp 一起清。
  *   badge 字段同步 App 图标角标。
@@ -70,7 +70,7 @@ async function markRead(agent, fp) {
 }
 
 self.addEventListener("push", (event) => {
-  let payload = { title: "Claudestra", body: "", url: "/chat", tag: BRAND.claudestra.tag, agent: "", ts: 0, type: "", fp: "" };
+  let payload = { title: "Floka", body: "", url: "/chat", tag: BRAND.claudestra.tag, agent: "", ts: 0, type: "", fp: "" };
   try {
     const raw = event.data.json();
     // 新族缺省 tag 只在 payload 自己没给 tag 时生效；不带 proto 的与改名前逐字相同

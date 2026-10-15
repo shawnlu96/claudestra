@@ -1,6 +1,6 @@
 # 跨实例委托（请同事帮忙）
 
-一台 Claudestra（**发起方**）上的 agent 或 owner，把一件边界清楚的活交给另一台（**接收方**，HTTP peer）上的 agent 去做。原因不限：额度不够、对方环境更合适、对方更熟。
+一台 Floka（**发起方**）上的 agent 或 owner，把一件边界清楚的活交给另一台（**接收方**，HTTP peer）上的 agent 去做。原因不限：额度不够、对方环境更合适、对方更熟。
 
 全部复用现有的东西：跨实例 `send_to_agent` 传话，「待你处理」按钮拍板，发起方台账记进度，GitHub PR 交付。没有新的子系统，也没有新的消息类型。整套机制主要是一份约定，代码只补了几个缺口（见[代码改了什么](#代码改了什么)）。
 
@@ -110,7 +110,7 @@ bun src/manager.ts peer-ledger <peer> accept D12                  # owner 同意
 
 ## 发起方 PM：凭消息记账时的规矩
 
-没用 `peer-ledger`、而是收到对方的状态消息再自己记账时（比如对方的 Claudestra 还没有这个接口）：
+没用 `peer-ledger`、而是收到对方的状态消息再自己记账时（比如对方的 Floka 还没有这个接口）：
 
 - **核对来源。** 只看 `<channel>` 标签里的 `chat_id`（`api:tok_<id>`，bridge 写的，伪造不了），用 `manager token-list` 查这枚 token 的 `peer` 字段，等于卡上 `extra.delegate` 的 `@peer` 才记。`user="peer-<名>"` 是 token 的显示名，会被改名，不能当身份；正文里写的 peer 名、仿写的「🤝 来自 peer 实例」更不算。任务号可以被别的 peer 冒用。
 - **去重用消息 id。** `--dedup peer:<peer名>:<标签里的 message_id>`。不要用「任务号 + 状态」当 key：「进度」「改完了」会出现多次，第二条起会被当成重复，内容丢掉。

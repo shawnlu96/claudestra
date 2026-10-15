@@ -1,8 +1,8 @@
-# Claudestra Web 客户端
+# Floka Web 客户端
 
 [English](./CLAUDE.en.md) · **简体中文**
 
-Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）：**纯静态导出**（`output: "export"`），由中继（`RELAY_STATIC_DIR`）或 bridge（`BRIDGE_STATIC_DIR`）托管，浏览器直接打 bridge 的 `/api/v1/*`。没有服务端、没有 BFF、没有登录体系——登录 = 设备配对（`docs/design-hosted-frontend.md`）。
+Floka 的 Next.js Web 前门（Discord 之外的第二入口）：**纯静态导出**（`output: "export"`），由中继（`RELAY_STATIC_DIR`）或 bridge（`BRIDGE_STATIC_DIR`）托管，浏览器直接打 bridge 的 `/api/v1/*`。没有服务端、没有 BFF、没有登录体系——登录 = 设备配对（`docs/design-hosted-frontend.md`）。
 
 ## 技术栈
 

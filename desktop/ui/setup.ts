@@ -45,7 +45,7 @@ function actionCard(inst: Install, onLaunched: () => void): HTMLElement {
   const note = h("p", { class: "muted" });
   const willInstall = !inst.has_checkout;
   const label = willInstall
-    ? t("下载并安装 Claudestra", "Download and install Claudestra")
+    ? t("下载并安装 Floka", "Download and install Floka")
     : inst.daemons_installed ? t("重新运行安装向导", "Run setup again") : t("在终端里运行安装向导", "Run setup in Terminal");
   const go = button(label, willInstall ? "download" : "terminal", async (b) => {
     b.disabled = true;
@@ -62,8 +62,8 @@ function actionCard(inst: Install, onLaunched: () => void): HTMLElement {
     }
   }, "primary");
   const explain = willInstall
-    ? t(`会在终端里运行官方安装脚本（install.sh），把 Claudestra 装到 ${inst.repo}，缺的依赖用 Homebrew 补上，装完接着进安装向导。`,
-      `Runs the official install.sh in Terminal: clones Claudestra into ${inst.repo}, adds missing tools via Homebrew, then continues into setup.`)
+    ? t(`会在终端里运行官方安装脚本（install.sh），把 Floka 装到 ${inst.repo}，缺的依赖用 Homebrew 补上，装完接着进安装向导。`,
+      `Runs the official install.sh in Terminal: clones Floka into ${inst.repo}, adds missing tools via Homebrew, then continues into setup.`)
     : t(`安装向导要在终端里一问一答（选入口、手机访问方式、同意权限说明），所以在「终端」里打开 ${inst.repo} 的 bun run setup。`,
       `Setup is an interactive Q&A (entry point, phone access, permission consent), so it runs as bun run setup in ${inst.repo} inside Terminal.`);
   return h("section", { class: "card" }, h("h3", {}, t("安装", "Install")), h("p", {}, explain), go, note);

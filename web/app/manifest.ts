@@ -15,13 +15,13 @@ export const dynamic = "force-static";
  */
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Claudestra",
-    short_name: "Claudestra",
+    name: "Floka",
+    short_name: "Floka",
     description: "远程操控本地 Claude Code 会话",
     start_url: "/chat",
     scope: "/",
     display: "standalone",
-    // 邀请落地页的「在我的 Claudestra 中打开」，装成桌面 PWA 时也由本应用接。旧 scheme 一直保留（早先发出的链接照开）；
+    // 邀请落地页的「在我的 Floka 中打开」，装成桌面 PWA 时也由本应用接。旧 scheme 一直保留（早先发出的链接照开）；
     // 新 scheme web+floka: 先能接，落地页要等 rename.browserProtocol write=on 才发它（src/lib/floka-browser-protocol/invite.ts）。
     // 两个值与 src/lib/floka-browser-protocol/names.ts 同值（web 不 import src），tests/floka-browser-protocol.test.ts 钉住
     protocol_handlers: [

@@ -15,7 +15,7 @@ import { EffortButtons, SwitcherBadge } from "./switcher-parts";
  * 为什么不复用 ClaudeSwitcher 的面板：Pi 的模型来自 provider 配置
  * （`~/.pi/agent/models.json`，写法 `provider/model`），不是 Claude Code 的别名表；
  * 切换也不走 CC 的 `/model`、`/effort` 注入（Pi 的 `/model` 是"打开选择器"的交互
- * 语义），而是走 Claudestra 扩展注册的确定性命令 `/claudestra-model`、
+ * 语义），而是走 Floka 扩展注册的确定性命令 `/claudestra-model`、
  * `/claudestra-thinking`（由桥接侧 tmux 注入，扩展内部直接调 setModel /
  * setThinkingLevel）。
  *

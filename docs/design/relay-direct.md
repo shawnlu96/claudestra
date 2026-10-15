@@ -202,7 +202,7 @@ Initial proposal: STUN only, no TURN deployment; use existing relay for permitte
 A TURN-selected candidate is a forwarded route and cannot carry the direct-only large-file class.
 
 (c) enrollment and TLS reachability are prerequisites, not automatic installer actions.
-Tailscale avoids the Claudestra relay but is not proof of a direct physical route; expose that distinction in diagnostics.
+Tailscale avoids the Floka relay but is not proof of a direct physical route; expose that distinction in diagnostics.
 Initially ordinary overlay HTTPS is eligible only for small operations, even after a successful direct UDP probe.
 Bulk requires a path that cannot silently switch to third-party forwarding: verified LAN, independent direct HTTPS or non-relay ICE.
 (d) public peer ingress must remain peer-only: strip device cookies/headers, reject device endpoints/non-peer tokens,
@@ -254,7 +254,7 @@ Route UI uses a small animated connection glyph: direct pulses point-to-point; r
 probing/recovering uses a rotating pulse; offline pauses with reduced opacity. No explanatory route prose in the ordinary flow.
 Provide accessible labels and a static equivalent under reduced motion; diagnostics can give explicit transport details.
 
-Large files with logical size over 256 KiB never use Claudestra relay, TURN or ordinary overlay routes in phase one.
+Large files with logical size over 256 KiB never use Floka relay, TURN or ordinary overlay routes in phase one.
 A successful Tailscale direct probe is not a lifetime guarantee: subsequent bytes could use DERP/peer relay without an HTTP failure.
 Reject overlay bulk before sending any bytes; do not try to repair this with periodic polling or abort after forwarded bytes have escaped.
 Re-enable overlay bulk only after a separately reviewed underlay can enforce no forwarding for the entire transfer; status hints alone are insufficient.

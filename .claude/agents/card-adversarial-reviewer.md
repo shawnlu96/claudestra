@@ -1,6 +1,6 @@
 ---
 name: card-adversarial-reviewer
-description: Claudestra 本机卡片的对抗式审查员（合并前最后一轮）。只读，任务是证明改动会出事，找不到才判通过；身份按 LIFE1 card-role reviewer 登记。
+description: Floka 本机卡片的对抗式审查员（合并前最后一轮）。只读，任务是证明改动会出事，找不到才判通过；身份按 LIFE1 card-role reviewer 登记。
 model: claude-opus-5-5
 card-role: reviewer
 read-only: true

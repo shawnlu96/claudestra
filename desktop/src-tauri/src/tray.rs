@@ -82,7 +82,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     let menu = Menu::new(app)?;
     menu.append(&summary)?;
     menu.append(&sep()?)?;
-    menu.append(&item("open-web", "打开 Claudestra 网页", "Open Claudestra")?)?;
+    menu.append(&item("open-web", "打开 Floka 网页", "Open Floka")?)?;
     menu.append(&item("show-doctor", "体检…", "Health check…")?)?;
     menu.append(&item("show-setup", "安装向导…", "Setup…")?)?;
     menu.append(&restart)?;
@@ -94,7 +94,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayHandles> {
     let icon = TrayIconBuilder::with_id("main")
         .icon(img)
         .icon_as_template(template)
-        .tooltip("Claudestra")
+        .tooltip("Floka")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, ev| crate::on_menu(app, ev.id().as_ref()))
@@ -155,9 +155,9 @@ pub fn apply(app: &AppHandle, status: &Result<Value, String>) {
             }
             let light = Light::from_status(v["overall"].as_str().unwrap_or(""));
             let text = match light {
-                Light::Ok => tr("Claudestra 运行正常", "Claudestra is running"),
-                Light::Warn => tr("Claudestra 有警告", "Claudestra has warnings"),
-                _ => tr("Claudestra 有服务没在运行", "A Claudestra service is down"),
+                Light::Ok => tr("Floka 运行正常", "Floka is running"),
+                Light::Warn => tr("Floka 有警告", "Floka has warnings"),
+                _ => tr("Floka 有服务没在运行", "A Floka service is down"),
             };
             (light, text)
         }

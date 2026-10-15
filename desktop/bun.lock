@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "claudestra-desktop",
+      "name": "floka-desktop",
       "devDependencies": {
         "@tauri-apps/cli": "^2",
       },
