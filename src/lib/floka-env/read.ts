@@ -7,7 +7,7 @@
  *
  * on 档写回双名时另记一份同步指纹（SYNC_VAR，后缀:值的短哈希，不含值本身）。子进程继承双名后，只认旧名的启动 / 过滤处
  * （runtimes/pi-acp.ts 的前缀、acp/adapter-proc.ts 的删除……）只改或只删旧名：新名那份仍等于同步时的值 ⇒ 它是过期副本，
- * 以改过的旧名为准（删了就当删了），不让父进程的旧值经「新名优先」翻回来。
+ * 以改过的旧名为准（删了就当删了），不让父进程的旧值经「新名优先」翻回来。只用于普通变量；隔离变量两名不同一律拒绝（readIsolationEnv）。
  */
 import { createHash } from "node:crypto";
 import { flokaName, ISOLATED_DIRS, ISOLATION_SUFFIXES, LEGACY_PREFIX, legacyName, RENAMED_SUFFIXES } from "./names.ts";
@@ -90,14 +90,13 @@ export class FlokaIsolationConflict extends Error {
 }
 
 /**
- * 隔离变量：不看档位，两套名字都认；都设了且不同就抛 FlokaIsolationConflict。
- * 例外只有一种：新名是 on 档同步时的过期副本、之后只改了旧名（staleTwin）——取旧名，与 off 档逐项相同，取到的值照样过各隔离闸。
- * 同步后只删了旧名的不算删：留下的那个照认（宁可仍按沙箱 / 测试跑）。
+ * 隔离变量：不看档位，两套名字都认；都设了且不同就抛 FlokaIsolationConflict——无条件，不看同步指纹。
+ * 普通变量的过期副本例外（staleTwin）不适用于这里：子进程只把旧名的 SANDBOX / TEST 改成 0、新名仍是 1，
+ * 若当成「可信覆盖」就会被判成生产进程，后面的沙箱路径 / 端口 / runtime 闸全短路。要改隔离变量就两个名字一起改。
+ * 只删了一边的不算删：留下的那个照认（宁可仍按沙箱 / 测试跑）。
  */
 export function readIsolationEnv(suffix: string, env: Env = process.env): string | undefined {
   const [o, n] = [env[legacyName(suffix)], env[flokaName(suffix)]];
-  const stale = staleTwin(suffix, o, n, env);
-  if (stale?.value !== undefined) return stale.value;
   if (present(o) && present(n) && differ(o, n)) throw new FlokaIsolationConflict(suffix);
   return present(o) ? o : present(n) ? n : o;
 }

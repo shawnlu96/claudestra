@@ -240,19 +240,54 @@ describe("[验收线 2] 隔离闸认两套生产根与端口，不看档位", ()
     expect(env.CLAUDESTRA_LAB_RELAY_PORT).toBe("4200");
   });
 
-  test("隔离变量的同步副本：同步后只改旧名取旧名（同 off 档）；只删旧名不算删；没同步过或两边都改了照样冲突拒绝", () => {
+  test("隔离变量没有同步副本例外：on 档同步后只改旧名也按冲突拒绝；只删一边留下的照认；两边都改成同值放行", () => {
     const parent: Record<string, string | undefined> = { FLOKA_RENAME_ENV: "on", CLAUDESTRA_SANDBOX_ROOT: "/sbx/a" };
     applyRenamedEnv(parent);
     expect(parent.FLOKA_SANDBOX_ROOT).toBe("/sbx/a");
-    expect(readIsolationEnv("SANDBOX_ROOT", { ...parent, CLAUDESTRA_SANDBOX_ROOT: "/sbx/b" })).toBe("/sbx/b");
+    expect(() => readIsolationEnv("SANDBOX_ROOT", { ...parent, CLAUDESTRA_SANDBOX_ROOT: "/sbx/b" })).toThrow("FLOKA_SANDBOX_ROOT");
     const dropped: Record<string, string | undefined> = { ...parent, CLAUDESTRA_SANDBOX_ROOT: undefined };
     expect(readIsolationEnv("SANDBOX_ROOT", dropped)).toBe("/sbx/a");
     applyRenamedEnv(dropped);
     expect([dropped.CLAUDESTRA_SANDBOX_ROOT, dropped.FLOKA_SANDBOX_ROOT]).toEqual(["/sbx/a", "/sbx/a"]);
+    expect(readIsolationEnv("SANDBOX_ROOT", { ...parent, CLAUDESTRA_SANDBOX_ROOT: "/sbx/b", FLOKA_SANDBOX_ROOT: "/sbx/b" })).toBe("/sbx/b");
     expect(() => readIsolationEnv("SANDBOX_ROOT", { ...parent, CLAUDESTRA_SANDBOX_ROOT: "/sbx/b", FLOKA_SANDBOX_ROOT: "/sbx/c" })).toThrow("FLOKA_SANDBOX_ROOT");
-    expect(() => readIsolationEnv("SANDBOX_ROOT", { CLAUDESTRA_SANDBOX_ROOT: "/sbx/b", FLOKA_SANDBOX_ROOT: "/sbx/a" })).toThrow("FLOKA_SANDBOX_ROOT");
     expect(parent.FLOKA_RENAME_ENV_SYNC).not.toContain("/sbx/a"); // 指纹不含值
   });
+
+  /** 真实父子进程：父进程 on 档同步双名后，子进程继承 env、改档位并只把旧名隔离开关改成 0，子进程入口必须拒绝（不能被判成生产进程） */
+  function staleIsolationChild(parentVars: Record<string, string | undefined>, childVars: Record<string, string>) {
+    const kid = [
+      `const r = await import(${JSON.stringify(join(LIB, "floka-env/read.ts"))});`,
+      `const s = await import(${JSON.stringify(join(LIB, "sandbox.ts"))});`,
+      `r.applyRenamedEnv(process.env);`,
+      `console.log(JSON.stringify({ sandbox: s.isSandbox(process.env), old: process.env.CLAUDESTRA_SANDBOX, neu: process.env.FLOKA_SANDBOX }));`,
+    ].join("\n");
+    const parent = [
+      `const r = await import(${JSON.stringify(join(LIB, "floka-env/read.ts"))});`,
+      `r.applyRenamedEnv(process.env);`,
+      `const k = Bun.spawnSync([process.execPath, "--no-env-file", "-e", ${JSON.stringify(kid)}], { env: { ...process.env, ...${JSON.stringify(childVars)} }, stdout: "pipe", stderr: "pipe" });`,
+      `console.log(JSON.stringify({ code: k.exitCode, out: k.stdout.toString().trim(), err: k.stderr.toString() }));`,
+    ].join("\n");
+    const home = tmp("floka-env-stale-");
+    const r = Bun.spawnSync([process.execPath, "--no-env-file", "-e", parent], { env: testChildEnv({ HOME: home, ...parentVars }), cwd: home, stdout: "pipe", stderr: "pipe" });
+    expect(r.exitCode).toBe(0);
+    return JSON.parse(r.stdout.toString().trim().split("\n").pop()!) as { code: number; out: string; err: string };
+  }
+
+  for (const gear of GEARS) {
+    test(`${gear}：on 档父进程同步后，子进程只把旧名沙箱开关改 0 —— 冲突拒绝，不判成生产进程`, () => {
+      const k = staleIsolationChild({ ...PROD_LIKE, FLOKA_RENAME_ENV: "on", CLAUDESTRA_SANDBOX: "1" }, { FLOKA_RENAME_ENV: gear, CLAUDESTRA_SANDBOX: "0" });
+      expect(k.code).not.toBe(0);
+      expect(k.err).toContain("FLOKA_SANDBOX");
+      expect(k.out).not.toContain('"sandbox":false');
+    });
+
+    test(`${gear}：on 档父进程同步后，子进程只把旧名测试标记改 0 —— 冲突拒绝`, () => {
+      const k = staleIsolationChild({ ...PROD_LIKE, FLOKA_RENAME_ENV: "on", CLAUDESTRA_TEST: "1" }, { FLOKA_RENAME_ENV: gear, CLAUDESTRA_TEST: "0" });
+      expect(k.code).not.toBe(0);
+      expect(k.err).toContain("FLOKA_TEST");
+    });
+  }
 
   test("生产配置里的 FLOKA_ 目录进拒绝清单", () => {
     expect(productionDeny([{ FLOKA_STATE_DIR: "/srv/floka-state" }], { port: 3847, dirs: [] }).dirs).toContain("/srv/floka-state");
