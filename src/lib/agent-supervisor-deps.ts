@@ -79,7 +79,7 @@ function superviseDeps(env: SuperviseEnv): SuperviseDeps {
       if (r.ok !== true) throw new Error(`退回人工失败：${String(r.error)}`);
       const project = getTask(db, taskId)?.project;
       if (r.duplicate !== true && project) {
-        await owned(() => notifyProjectPm(db, project, `[调度引擎] ${taskId} 退回人工，请接手：${reason}`, { fromName: "scheduler", stillActive: alive }));
+        await owned(() => notifyProjectPm(db, project, `[调度引擎] ${taskId} 退回人工，请接手：${reason}`, { fromName: "scheduler", level: "action", stillActive: alive }));
       }
     },
     async notifyCaller(caller, text) {

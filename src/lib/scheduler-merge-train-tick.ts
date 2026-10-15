@@ -36,6 +36,7 @@ import {
   clearedMember, formTrain, nextSkip, recheckCleared, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
   type TrainGh, type TrainState, type TrainStore,
 } from "./scheduler-merge-train.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 const EVENTS_KEPT = 200;
 interface TrainFile { v: 1; seq: number; state: TrainState | null; view: string; events: TrainEvent[] }
@@ -145,7 +146,7 @@ const defaultTrainContext = (gh: () => TrainGh = () => trainGh()): TrainContext 
 /** The context the merge driver's external uses: its gh calls go through the same (guarded) command as every other merge call. */
 export const trainContext = (command: Parameters<typeof trainGh>[0]): TrainContext | null => defaultTrainContext(() => trainGh(command));
 
-type Notify = (task: LedgerTask, text: string) => Promise<void>;
+type Notify = (task: LedgerTask, text: string, level: PmNoticeLevel) => Promise<void>;
 /** `formFence` (MQ1, manual-merge-queue-pass.ts): the save of a newly formed train goes through it; a throw = not formed. */
 export type FormFence = (project: string, save: () => void) => void;
 export interface TrainTickDeps { notifyPm: Notify; now(): number; formFence?: FormFence }
@@ -169,9 +170,9 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
         ciTimeout: trainCiTimeoutPort(db, deps.now),
         ciClass: trainCiClassPort(db, deps.now),
         ioMapFuse: fuse,
-        notify: async (s, text) => {
+        notify: async (s, text, alarm) => { // 告警要 PM 看；组车 / 二分 / 车厢 CI / 作废回串行由列车自己接着做：常规
           const task = s.members.map((m) => getTask(db, m.taskId)).find(Boolean);
-          if (task) await deps.notifyPm(task, text).catch((e) => {
+          if (task) await deps.notifyPm(task, text, alarm ? "action" : "info").catch((e) => {
             if (e instanceof SchedulerStopped) throw e; // a lost lease ends the pass, it is not a lost notice
             console.error(`⚠️ [merge-train] PM 通知没发出去（状态文件已记）：${(e as Error).message}`);
           });
@@ -201,9 +202,9 @@ export const guardedCommand = (active: () => void, command: typeof runBounded = 
 export async function mergeTrainPass(db: Database, projects: readonly string[], active: () => void,
   ctx: TrainContext | null = trainContext(guardedCommand(active)), formFence?: FormFence): Promise<void> {
   const alive = () => { try { active(); return true; } catch { return false; } };
-  await mergeTrainTick(db, projects, { now: Date.now, formFence, notifyPm: async (task, text) => {
+  await mergeTrainTick(db, projects, { now: Date.now, formFence, notifyPm: async (task, text, level) => {
     active();
-    try { await notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive }); } finally { active(); }
+    try { await notifyProjectPm(db, task.project, text, { fromName: "scheduler", level, stillActive: alive }); } finally { active(); }
   } }, ctx);
 }
 

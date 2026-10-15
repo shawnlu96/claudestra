@@ -18,6 +18,7 @@ import { getEventByDedup, listTasks } from "./ledger-store.js";
 import { cardRepo, projectRepo } from "./scheduler-foreign-repo.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { notifyProjectPm } from "./pm-notify.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 import type { CenterResult } from "./center-deploy-worker.js";
 
 export interface CenterTickPorts {
@@ -28,7 +29,7 @@ export interface CenterTickPorts {
 }
 interface Deps {
   manager: (...args: string[]) => Promise<Record<string, unknown>>; assertActive(): void; now(): number;
-  notifyPm?: (project: string, text: string) => Promise<void>; center?: CenterTickPorts;
+  notifyPm?: (project: string, text: string, level: PmNoticeLevel) => Promise<void>; center?: CenterTickPorts;
 }
 const requireOk = (r: Record<string, unknown>) => { if (r.ok !== true) throw new Error("中心部署台账写入失败"); return r; };
 const call = async (d: Deps, task: string, op: string) => {
@@ -65,7 +66,7 @@ async function finish(db: Database, d: Deps, project: string, s: CenterState, sa
     if (!s.noticeClaimed) {
       s.noticeClaimed = true; save(s); d.assertActive();
       const text = `中心部署失败：${proof.cards.join("、")} ${proof.sha.slice(0, 12)} exit ${r.code ?? "null"}`;
-      if (d.notifyPm) await d.notifyPm(project, text);
+      if (d.notifyPm) await d.notifyPm(project, text, "action");
       else await notifyProjectPm(db, project, text, { fromName: "scheduler", level: "action", stillActive: () => {
         try { d.assertActive(); return true; } catch { return false; /* Lost lease cannot send an action. */ }
       } });

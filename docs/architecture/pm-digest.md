@@ -17,7 +17,7 @@
 | `post-verify` | 发送方 `scheduler`，首行以 `[上线后待办] <卡>` 开头 |
 | `train` | 发送方 `scheduler`，单行，首行是合并列车的「第 N 层二分：」或「车厢 …（…）CI 红：」（调度服务自己接着二分、退修；列车作废、告警等其他列车通知照旧立即送） |
 | `audit` | bridge `ledger-audit`，首行以 `[🔎 台账巡检]` 开头 |
-| `sync` | 其他 agent（不含 scheduler / master / pm-switch）发来的消息：oneShot，或首行开头写「只同步」；等回复（非 oneShot）的「只同步」只认单行，首行以下还有内容就立即送；**整段正文**任一行都不能带失败、冻结、事故、告警、交付、提问、问号、「请」、方案 / 下一步 / 意见 / 怎么办 / 能否等字样（摘要只留首行，后面几行的要紧事或请求一进队就看不见了） |
+| `sync` | 其他 agent（不含 scheduler / master / pm-switch）发来的消息：oneShot（只按 `level` 分流、不看正文，见下文「通知级别」），或首行开头写「只同步」；等回复（非 oneShot）的「只同步」只认单行，首行以下还有内容就立即送；**整段正文**任一行都不能带失败、冻结、事故、告警、交付、提问、问号、「请」、方案 / 下一步 / 意见 / 怎么办 / 能否等字样（摘要只留首行，后面几行的要紧事或请求一进队就看不见了） |
 
 下面这些总是立即送：owner 和人类消息、API / peer 消息、卡片答复（`ask_answer`）、其他 bridge 通知（含 `ledger` 的执行者提问和交付，以及本功能自己的单独摘要 `pm-digest`，防自环）、调度器的其他通知，以及等回复的 agent 消息。
 
@@ -47,9 +47,17 @@ PM 不需要实时知道常规进展，要的时候自己拉（owner 10-15 定�
 推给 PM 的系统通知由发送方在代码里标级别，分流只认这个结构化字段（信封 `meta.pmLevel`），不看正文文字，换语言、改文案都不影响：
 
 - `action`：要 PM 当场动手，立即叫醒。`info`：常规，**不送 PM**，也不进摘要——发送方本来就把它记在卡片 / 台账里（上线后提醒、缺规格提醒、合并进度、主线 CI 状态都有台账记录），分流这里只记一笔统计（`ledger pm-digest` 的 `level.info`）。PM 按需拉：`ledger pm-todo` 列观察期已到、还没结的上线后待办（`--all` 连没到期的），配合看 DAG。
-- 怎么标：`notifyProjectPm(..., { level })`；调用链深、不便改签名的发送点在外面包 `asInfo(() => deps.notifyPm(...))`（AsyncLocalStorage，同 `pmNotifyTarget`）；bridge 合成的台账通知走 `sendLedgerNotice({ ..., pmLevel })`。
-- 已标 `info`：上线后待办（`scheduler-post-verify.ts`；同一个 `sendToPm` 还发待写规格、合并 / 审查 / 观察期提醒，那些要 PM 动手，不标）、残留进程观察报告（`card-proc-reap.ts`）、合并交接进度（`scheduler-merge-handoff-tick.ts`）、主线 CI 未开暂停时的通知、带默认做法到时自动定的执行者提问（`order-ask.ts`）。没带默认做法的执行者提问标 `action`。
-- 没标级别的通知照旧走原规则（正文保护字样，宁可多叫醒）；新加的系统通知要标级别。
+- **必填，不标编译不过**（agents-NOTICETYPE1）：`notifyProjectPm(..., { level })`、`sendLedgerNotice({ ..., pmLevel })`、`sendToPm(env, project, to, text, level)`、`notifyTaskPm(..., label, level)`，以及各模块注入的 `notifyPm(task | project, text, level)` 端口，级别参数都是必填的 `PmNoticeLevel`。逐个调用点按语义标：要 PM 动手 / 决定 / 失败 / 安全标 `action`；进度、已自动处理、仅供知悉标 `info`；拿不准标 `action`。`asInfo(() => ...)` 保留为兼容（没过类型检查的调用方才会落到它的隐式级别），被它包住的调用照样显式写 `"info"`。`tests/pm-notice-level-types.test.ts` 用 `@ts-expect-error` 钉住「少了级别编译不过」，`tests/pm-notice-level-guard.test.ts` 扫 src 不许 `level: undefined` / `as any` / `as never` 绕过。
+- 标 `info` 的例子：上线后待办（`scheduler-post-verify.ts`）、残留进程观察报告（`card-proc-reap.ts`）、合并交接进度（`scheduler-merge-handoff-tick.ts`）、主线 CI 未开暂停时的通知、manual 已自动交回、等跨家族 peer、spec 等放置、观察期自动转正、合并列车的非告警进度、带默认做法到时自动定的执行者提问（`order-ask.ts`）。
+- **分流**：`classifyPmPush` / `classifyPmRoute` 见到结构化级别（调度器、bridge 合成通知、agent 的 oneShot）就只认它——`action` 立即送，`info` 进摘要（分流开关 `on` 时调度器 / 台账的 `info` 照旧只记一笔、不进摘要）。正文正则（`URGENT_RE` / `HALT_RECHECK_RE`，`pmBodyUrgent`）只剩没有级别、也不是 oneShot 的外来消息（老版本 peer、老格式 bridge 消息、等回复的 agent 消息）在用。
+- **样本记录口**：归类记录带 `levelSource: "structured" | "regex"`（规格里写作 source；记录已有表示发送方的 `source` 字段，所以另起名），`ledger pm-digest` 的统计可以按它看本项目入口是否都走了结构化级别。没有新恢复键——类型强制不是运行时开关。
+
+### agent 的 oneShot：`send_to_agent({ oneShot: true, level })`
+
+- `send_to_agent` 有可选参数 `level`（`action` / `info`），经 bridge 写进信封 `meta.pmLevel`。bridge 只在 **oneShot** 且值严格是 `action` / `info` 时放行 agent 帧带的级别（`frameLevel`，`pm-notice-level.ts`）；等回复的帧、非法值一律丢；调度器帧（没注册频道的系统进程）照旧认。级别只影响 PM 侧立即送 / 摘要的分流，不碰身份和信任。
+- PM 侧：oneShot + `action` → 立即送；oneShot + `info` → 进摘要、不送；**没标级别的 oneShot（不论中英文、不论正文写什么）→ 不送、进摘要队列（条目带 `unleveled`），`ledger pm-todo` 把它们列出来（发送方 · 首行，卡号在 task）**，PM 拉取时处理。系统发送方（scheduler / master / pm-switch）不算「其他 agent」，没标级别时照旧原规则。
+- 审批 / 要 PM 决定的 `send_to_agent` 由发送方标 `level: "action"`（立即叫醒）；纯进度标 `info`。例：`send_to_agent({ target: "agent-pm", oneShot: true, level: "action", text: "agents-X1: please approve the migration plan (PR #12)" })`；`send_to_agent({ target: "agent-pm", oneShot: true, level: "info", text: "agents-X1 进度：第 2 步已过" })`。master / 执行者模板里的这条说明由 PM 在模板侧补。
+- 只在摘要开关 `on` 时生效（`observe` / `off` 照常逐条投，模式语义不变）。回退：`ledger pm-digest-pull <project> off` 把摘要队列改回推送，没标级别的 oneShot 随下一封立即送的消息或 4 小时窗口摘要送到 PM，不会只躺在 pm-todo 里。
 
 ## 暂存：`ledger pm-hold`（`src/lib/pm-hold.ts`，按项目，缺省 `off`）
 

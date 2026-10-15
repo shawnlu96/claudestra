@@ -37,6 +37,7 @@ import type { TrainStore } from "./scheduler-merge-train.js";
 import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
 import { trainCandidates } from "./scheduler-merge-train-tick.js";
 import { isTestProcess } from "./test-guard.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type ProjectSchedule = SchedulerConfig["projects"][string];
@@ -69,11 +70,11 @@ async function ledger(m: Manager, project: string, op: string, ...args: string[]
   return r;
 }
 
-async function notify(gate: MainCiGate, project: string, text: string, active?: () => void): Promise<void> {
+async function notify(gate: MainCiGate, project: string, text: string, level: PmNoticeLevel, active?: () => void): Promise<void> {
   if (mainCiTestPorts.notify) return mainCiTestPorts.notify(project, text);
   const alive = () => { try { active?.(); return true; } catch { return false; } };
   active?.();
-  try { await notifyProjectPm(gate.db, project, text, { fromName: "scheduler", stillActive: alive }); } finally { active?.(); }
+  try { await notifyProjectPm(gate.db, project, text, { fromName: "scheduler", level, stillActive: alive }); } finally { active?.(); }
 }
 
 /** One read of one project, then its durable state, its observe note and its PM notice; the gate keeps the read for this pass. */
@@ -106,8 +107,8 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
   // claim first, durably; a lost claim (another process, an earlier run) means no send, and a send that fails after it is not retried
   const claim = await ledger(deps.manager, project, "claim", "--key", mode === "on" ? n.key : `${n.key}${OBSERVE_CLAIM}`, "--kind", n.kind,
     "--sha", n.mainSha ?? "none");
-  const send = () => notify(gate, project, mainCiNoticeText(target, health, n, mode) + response, deps.active);
-  if (claim.claimed === true) await (mode === "on" ? send() : asInfo(send)); // 没开暂停只是观察：常规
+  const send = (level: PmNoticeLevel) => notify(gate, project, mainCiNoticeText(target, health, n, mode) + response, level, deps.active);
+  if (claim.claimed === true) await (mode === "on" ? send("action") : asInfo(() => send("info"))); // 没开暂停只是观察：常规
 }
 
 /** The pass's one call (scheduler-pass.ts). Never throws for a project's read or write, only for a stop. */

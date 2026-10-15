@@ -45,7 +45,7 @@ export async function postVerifyTick(env: SpecWaitEnv): Promise<Failed> {
         }
         if (rec.due !== true || mode !== "on") continue;
         try {
-          await asInfo(() => sendToPm(env, project, String(rec.to), String(rec.text))); // 上线后待办是常规：卡上有记录，PM 用 pm-todo 拉
+          await asInfo(() => sendToPm(env, project, String(rec.to), String(rec.text), "info")); // 上线后待办是常规：卡上有记录，PM 用 pm-todo 拉
         } catch (e) {
           // overdue 没写终结记录：下个 30 分钟窗口按发送意图重发，直到送达
           if (e instanceof SchedulerStopped) throw e;

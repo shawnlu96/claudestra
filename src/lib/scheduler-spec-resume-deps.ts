@@ -46,6 +46,6 @@ export function specResumeStep(db: Database, config: SchedulerConfig, ledger: Le
     place: (d, q) => privatePlace(q, (at) => startPlacement(d, { policy, borrow: readEffectiveBorrow, originRepo: origin, now: Date.now,
       reservations: (project) => placementReservationPort(project, recoveryPolicy) }, at, true)),
     repoDir: async (project) => (await readProjects()).projects.find((p) => p.id === project)?.dirs.find((d) => existsSync(join(d, ".git"))) ?? null,
-    notifyPm: (project, text) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive }),
+    notifyPm: (project, text, level) => notifyProjectPm(db, project, text, { fromName: "scheduler", level, stillActive: alive }),
   }, pace);
 }

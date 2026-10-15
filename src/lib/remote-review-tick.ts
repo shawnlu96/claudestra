@@ -100,7 +100,7 @@ export async function remoteReviewStep(db: Database, config: SchedulerConfig, de
   const projects = Object.entries(config.projects).filter(([, p]) => p.handoffPeer).map(([id]) => id);
   if (!projects.length) return [];
   const alive = () => { try { deps.active(); return true; } catch { return false; /* not provably active: send nothing */ } };
-  const notify = deps.notify ?? ((project: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive }));
+  const notify = deps.notify ?? ((project: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", level: "action", stillActive: alive }));
   const dir = deps.dir ?? REMOTE_INBOX_DIR;
   const booked = await bookInbox(config, deps, dir, notify), late = await applyLate(db, projects, deps);
   return [...booked, ...late, ...await sendNotices(db, projects, deps, notify)];

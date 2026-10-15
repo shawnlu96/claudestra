@@ -65,7 +65,7 @@ async function noticeDismissed(a: Ask): Promise<void> {
   if (a.kind === "assigned") {
     if (!a.taskId) return;
     const text = t(`[🗑 ${a.taskId} 指派给 ${a.assignee} 的事项被 owner 删掉了（${a.id}）]`, `[🗑 ${a.taskId}: the item assigned to ${a.assignee} was deleted by the owner (${a.id})]`);
-    return notifyTaskPm(getTask(askDb(), a.taskId), a.project, text, a.id, "ask-dismiss");
+    return notifyTaskPm(getTask(askDb(), a.taskId), a.project, text, a.id, "ask-dismiss", "action"); // owner 删了指派：PM 要改排
   }
   if (a.source !== "reply" || !answersGoToAgent(a) || !d) return;
   const to = await answerTarget(a);

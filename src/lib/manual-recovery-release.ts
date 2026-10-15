@@ -17,6 +17,7 @@ import { fixLocalSwapManual } from "./recovery-fix-local-swap-manual.js";
 import { manualEntry, type ManualReasonCode } from "./manual-reason.js";
 import type { RecoveryKey } from "./recovery-policy.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 /** What the leased CLI read outside the ledger; only its digest enters the fingerprint. */
 export interface ExternalSnapshot { source: string; digest: string; readAt: number }
@@ -146,7 +147,7 @@ export interface RecoveryTickDeps {
   policy?: ExplicitPolicyPort;
   /** the leased `scheduler-manual-resume --mechanism`; business refusals arrive as LedgerError */
   write(task: LedgerTask, mechanism: string, mode: "on" | "observe"): Promise<Record<string, unknown>>;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   yieldNow?(): boolean;
 }
 
@@ -182,7 +183,7 @@ export async function manualRecoveryTick(db: Database, projects: readonly string
       const why = typeof r.reason === "string" ? r.reason : m.id;
       if (mode.mode === "observe") { out.push({ ...row, action: r.recorded === true ? "would_resume" : "observed_before", why }); continue; }
       out.push({ ...row, action: "resumed", why });
-      await d.notifyPm(task, `[manual 扩展恢复] ${taskId} 已交回自动：${why}`).catch((e) => {
+      await d.notifyPm(task, `[manual 扩展恢复] ${taskId} 已交回自动：${why}`, "info").catch((e) => {
         if (e instanceof SchedulerStopped) throw e;
         console.error(`⚠️ [scheduler] manual 扩展恢复通知没发出去（台账已记 workflow_resume，不重发）：${(e as Error).message}`);
       });

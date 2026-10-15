@@ -33,6 +33,7 @@ import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./schedul
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import type { TickPace } from "./scheduler-yield.js";
 import { writeTextAtomicSync } from "./state-file.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Failed = { taskId: string; error: string }[];
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -162,7 +163,7 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
   const alive = () => {
     try { o.active(); return true; } catch { return false; /* 存活检查抛错 = 服务在停或丢了租约：什么都不发 */ }
   };
-  const notifyPm = (project: string, text: string) => notifyProjectPm(o.db, project, text, { fromName: "scheduler", stillActive: alive });
+  const notifyPm = (project: string, text: string, level: PmNoticeLevel) => notifyProjectPm(o.db, project, text, { fromName: "scheduler", level, stillActive: alive });
   return {
     // AUD：授予分支的 localDelivery 模式从 CFG 现读（off 不动、observe 记一行、on 先核 origin head 再经调度身份 CLI 交回）
     resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO, policy: recoveryPolicy,

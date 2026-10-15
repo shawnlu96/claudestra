@@ -57,12 +57,13 @@ import { writeTextAtomicSync } from "../lib/state-file.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
 
 /** Tests inject all three; production reads lend.json + peers + projects fresh on every call (a revoked borrow applies at once). */
 export interface LendCliDeps {
   reborrowSource?: ReborrowSourceProbe;
   borrow(): Promise<BorrowEntry[]>;
-  notifyPm(project: string, text: string): Promise<void>;
+  notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
   /** 审查结论与写单交付共用（报告目录、写报告、签回执）；写单另要查远端 head 与对方指纹（只测审查的注入可以不给） */
   result: LendResultDeps & Partial<Pick<LendDeliverDeps, "remoteHead" | "peerFp">>;
   /** v2 收回核对（i28-W2）：订单分支在远端的状态；不给 = 真 git ls-remote */
@@ -85,7 +86,7 @@ function realLendDeps(c: LedgerCli): LendCliDeps {
       const [read, ctx] = await Promise.all([readLend(), readLendContext()]);
       return effectiveLend(read, ctx.contacts, ctx.projects).borrow;
     },
-    notifyPm: (project, text) => notifyProjectPm(c.db, project, text, { fromName: "lend" }),
+    notifyPm: (project, text, level) => notifyProjectPm(c.db, project, text, { fromName: "lend", level }),
     result: {
       reportDir: (o) => statePath("ledger", "reviews", `${o.taskId}-r${o.round}`),
       writeReport: (path, body) => {
@@ -124,7 +125,7 @@ async function tell(c: LedgerCli, notices: LendNotice[]): Promise<number> {
   let sent = 0;
   for (const n of notices) {
     try {
-      await lendDeps(c).notifyPm(n.project, n.text);
+      await lendDeps(c).notifyPm(n.project, n.text, "action"); // 出借单过期 / 停了 / 结果不明：PM 要核对
       sent++;
     } catch (e) {
       console.error(`⚠️ 出借通知 PM 失败（${n.taskId}）：${(e as Error).message}`);

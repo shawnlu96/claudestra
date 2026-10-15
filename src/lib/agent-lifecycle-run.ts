@@ -26,6 +26,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { dueRetries, gatedCollect, retireWorktree, type CleanupOpts } from "./agent-lifecycle-cleanup.js";
 import { pathsOverlap } from "./sandbox.js";
 import { dirVerdict, identityVerdict, socketProblem, type OwnedDir, type OwnedResource, type ProcessProbe, type SandboxOwnerRecord } from "./sandbox-order-owner.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export interface LifecycleDeps extends Pick<RetireDeps, "git" | "exists">, CleanupOpts {
   /** plain manager CLI: archive / remove */
@@ -40,7 +41,7 @@ export interface LifecycleDeps extends Pick<RetireDeps, "git" | "exists">, Clean
   record(r: RetireRecord): Promise<void>;
   now(): number;
   /** the existing PM notice channel, for the one notice of a cleanup only a person can resolve (agent-lifecycle-backoff.ts) */
-  notifyPm?(a: Action, text: string): Promise<void>;
+  notifyPm?(a: Action, text: string, level: PmNoticeLevel): Promise<void>;
   /** when the plan's facts were read (lifecycleSnapshot's now); unset only in test seams that drive a fake manager by name */
   planAt?: number;
 }

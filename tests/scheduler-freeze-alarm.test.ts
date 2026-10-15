@@ -93,7 +93,7 @@ describe("i28-M10 refused scheduler plans alarm PM once per reason", () => {
       const { f, refuse, alarms } = await refusedCard();
       const real = f.tickDeps.notifyPm;
       let down = true, attempts = 0;
-      f.tickDeps.notifyPm = async (t, text) => { attempts++; if (down) throw new Error("bridge 不在"); return real(t, text); };
+      f.tickDeps.notifyPm = async (t, text, level) => { attempts++; if (down) throw new Error("bridge 不在"); return real(t, text, level); };
       const logged: string[] = [];
       const err = console.error;
       console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
@@ -122,7 +122,7 @@ describe("i28-M10 refused scheduler plans alarm PM once per reason", () => {
     const { f, refuse, alarms } = await refusedCard();
     let down = true;
     const real = f.tickDeps.notifyPm;
-    f.tickDeps.notifyPm = async (t, text) => { if (down) throw new Error("bridge 不在"); return real(t, text); };
+    f.tickDeps.notifyPm = async (t, text, level) => { if (down) throw new Error("bridge 不在"); return real(t, text, level); };
     const err = console.error;
     console.error = () => {};
     try {
@@ -141,7 +141,7 @@ describe("i28-M10 refused scheduler plans alarm PM once per reason", () => {
     const { f } = await refusedCard();
     let down = true;
     const real = f.tickDeps.notifyPm;
-    f.tickDeps.notifyPm = async (t, text) => { if (down) throw new Error("bridge 不在"); return real(t, text); };
+    f.tickDeps.notifyPm = async (t, text, level) => { if (down) throw new Error("bridge 不在"); return real(t, text, level); };
     const err = console.error;
     console.error = () => {};
     try {

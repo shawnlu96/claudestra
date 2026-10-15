@@ -13,6 +13,7 @@ import { centralPoolStep } from "./ledger-lend-central-pool.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { poolIdleCandidate, observePoolIdle, logPoolIdleObservation, type PoolIdleObservation } from "./scheduler-pool-idle.js";
 import { claimSlot } from "./scheduler-priority-order.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -20,7 +21,7 @@ export interface PoolTickDeps {
   manager: Manager;
   recoveryPolicy?: RecoveryPolicyPort;
   poolIdleObservation?: PoolIdleObservation;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   /** Called when a lost notice must be logged; SchedulerStopped is rethrown by the caller's handler. */
   lost(what: string): (e: unknown) => void;
   /** MODELXP2 读池单拒审事实的只读句柄；不给 = 本模块自己的只读 LedgerReader（同 scheduler.ts 的默认台账） */
@@ -58,6 +59,6 @@ export async function drivePool(deps: PoolTickDeps, task: LedgerTask, intent: Sc
   }
   if (res.ok !== true) return { step: res.code === "conflict" ? "lost_race" : "held", detail: `挂池一步没走通：${String(res.error)}` };
   const outcome = String(res.outcome), text = String(res.text ?? "");
-  if (outcome === "timeout") await deps.notifyPm(task, `[调度引擎] ${task.id} ${text}`).catch(deps.lost("挂池超时通知没发出去（台账已记撤回）"));
+  if (outcome === "timeout") await deps.notifyPm(task, `[调度引擎] ${task.id} ${text}`, "action").catch(deps.lost("挂池超时通知没发出去（台账已记撤回）"));
   return { step: `pool_${outcome}`, detail: text };
 }

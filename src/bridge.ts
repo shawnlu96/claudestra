@@ -16,6 +16,7 @@ import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inlin
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
+import { frameLevel } from "./lib/pm-notice-level.js";
 import { CODEX_SLOT_MAX, withCodexSlot } from "./lib/pm-job-slots.js"; // ask_codex 并发护栏:配额是 owner 的订阅;与 PM 处理员共用槽位(PMJOB1)
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
@@ -2228,8 +2229,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws: targetClient.ws,
           cwd: targetClient.cwd,
         };
-        // v2.4.16+ oneShot=true：fire-and-forget，跳 pushback 和 watchdog。pmLevel 只认没注册频道的系统进程（调度器）的帧，agent 自己的连接带了也丢
-        const oneShot = msg.oneShot === true, pmLevel = !fromChannelId && (msg.pmLevel === "action" || msg.pmLevel === "info") ? msg.pmLevel : undefined;
+        const oneShot = msg.oneShot === true, pmLevel = frameLevel(msg, !!fromChannelId); // v2.4.16+ oneShot：跳 pushback / watchdog。pmLevel 见 frameLevel：调度器帧照旧认，agent 帧只认 oneShot 的
         const env: RouterEnvelope = {
           from: fromEnv,
           to: toEnv,
