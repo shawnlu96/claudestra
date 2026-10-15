@@ -1,5 +1,5 @@
 /** Real manager/ledger subprocesses write; the convergence tick holds a query-only reader and injected notification port. */
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, cpSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { autoFixture, H1, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
@@ -17,6 +17,9 @@ import { acquireLock } from "../src/lib/file-lock.js";
 import { encodeLease, SCHEDULER_LEASE_ENV } from "../src/lib/scheduler-lease-env.js";
 import { WIRE_MAX_BYTES } from "../src/lib/order-wire.js";
 import { fitDigest } from "../src/lib/order-wire-fit-history.js";
+
+// Each test spawns several real manager subprocesses (~1s apiece on CI runners); bun's 5s default times them out.
+setDefaultTimeout(30_000);
 
 const ROOT = join(import.meta.dir, ".."), MANAGER = join(ROOT, "src", "manager.ts");
 const report = (n: number) => "review evidence with a concrete assertion\n".repeat(n);
@@ -264,7 +267,7 @@ for (const phase of ["before notification", "after failed notification"] as cons
       expect(events.filter((e) => e.data.op === "plan_rejected_informed")).toHaveLength(1);
       expect(remoteOrder(p.db, p.intent.id)).toBeNull();
     } finally { p.close(); }
-  }, 15_000);
+  }, 30_000);
 }
 
 test("size alarm receipts are scheduler-only, require an existing alarm, and deduplicate independently", async () => {
