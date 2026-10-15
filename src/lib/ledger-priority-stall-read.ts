@@ -13,7 +13,7 @@ import { featurePm } from "./scheduler-autostart.js";
 import { isPriorityStallProgress, PRIORITY_STALL_MS, type StallBasis, type StallBlock } from "./ledger-priority-stall.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 
-interface Graph { f: Feature; nodes: DagNode[]; lanes: Lanes | null }
+interface Graph { f: Feature; nodes: DagNode[]; lanes: Lanes | null; versions?: { at: number; nodes: DagNode[] }[] }
 interface Facts {
   tasks: Map<string, LedgerTask | null>;
   graphs: Map<string, Graph | null>;
@@ -28,8 +28,11 @@ interface Facts {
   threshold: number;
   lend: boolean;
 }
-/** An unmet upstream: another object to chase, or a graph configuration problem that nobody can progress. */
-type Upstream = { task: string } | { node: DagNode; g: Graph } | { config: string };
+/**
+ * An unmet upstream: another object to chase, or a graph configuration problem that nobody can progress.
+ * at = when this dependency edge took effect, so a chased upstream's window never predates the reference that put it on a now chain.
+ */
+type Upstream = ({ task: string } | { node: DagNode; g: Graph } | { config: string }) & { at: number };
 /** own = the object itself is a non-terminal now target */
 interface Built { b: StallBasis; ups: Upstream[]; own: boolean; terminal: boolean }
 
@@ -92,12 +95,24 @@ function liveBeat(db: Database, facts: Facts, t: LedgerTask): { orderId: string;
 }
 
 /** Upstreams that can still move are chased; missing, cancelled or released-but-unselected ones are graph configuration. */
-function taskUpstream(db: Database, facts: Facts, id: string, why: string): Upstream {
+function taskUpstream(db: Database, facts: Facts, id: string, why: string, at: number): Upstream {
   const t = task(db, facts, id);
-  if (!t) return { config: `前置卡 ${id} 不存在` };
-  if (t.stage === "cancelled") return { config: `前置卡 ${id} 已取消` };
-  if (isSatisfied(t) || t.stage === "done") return { config: `前置卡 ${id} 已满足但${why}` };
-  return { task: id };
+  if (!t) return { config: `前置卡 ${id} 不存在`, at };
+  if (t.stage === "cancelled") return { config: `前置卡 ${id} 已取消`, at };
+  if (isSatisfied(t) || t.stage === "done") return { config: `前置卡 ${id} 已满足但${why}`, at };
+  return { task: id, at };
+}
+
+/** The node edge took effect at the oldest version of the unbroken run, back from the current one, that still carries it. */
+function nodeEdgeSince(db: Database, g: Graph, key: string, dep: string): number {
+  g.versions ??= (db.query("SELECT version FROM dag_versions WHERE featureId=? AND version<=? ORDER BY version DESC").all(g.f.id, g.f.currentVersion) as { version: number }[])
+    .flatMap(({ version }) => { const v = getDagVersion(db, g.f.id, version); return v ? [{ at: v.createdAt, nodes: v.nodes }] : []; });
+  let at = g.versions[0]?.at ?? g.f.createdAt;
+  for (const v of g.versions) {
+    if (!v.nodes.some((n) => n.key === key && n.deps.includes(dep))) break;
+    at = v.at;
+  }
+  return at;
 }
 
 function taskBasis(db: Database, project: string, taskId: string, facts: Facts): Built {
@@ -118,7 +133,7 @@ function taskBasis(db: Database, project: string, taskId: string, facts: Facts):
   const why = ask ? `等 PM 答 ask ${ask.id}` : frozen ? "项目合并队列冻结" : block.kind === "feature"
     ? `feature 是 ${f!.status}` : deps.length ? `依赖没满足：${deps.map((d) => d.from).join(", ")}` : `阶段 ${t.stage} 无有效推进`;
   const ups = block.kind !== "deps" ? [] : deps.map((d) => d.kind === "branch" && d.derived === "active"
-    ? { config: `分叉 ${d.from} → ${taskId} 没选定` } : taskUpstream(db, facts, d.from, "边未放行"));
+    ? { config: `分叉 ${d.from} → ${taskId} 没选定`, at: d.createdAt } : taskUpstream(db, facts, d.from, "边未放行", d.createdAt));
   const terminal = ["done", "cancelled", "verified"].includes(t.stage), own = effective.effective === "now" && !terminal;
   const event = progress?.ts ?? t.createdAt;
   return { own, terminal, ups, b: { project, key: record?.id ?? `task:${taskId}`, label: taskId, taskId, featureId: t.featureId ?? null, nodeKey: null,
@@ -143,9 +158,9 @@ function nodeBasis(db: Database, g: Graph, n: DagNode, facts: Facts): Built {
     ? `${waiting.why === "deps" ? "依赖没满足" : waiting.why === "files" ? "文件锁阻塞" : "没有文件范围"}：${waiting.on.join(", ")}`
     : typeof recorded?.data.why === "string" ? recorded.data.why : "已满足依赖，等自动开工资格复核";
   const ups: Upstream[] = block.kind !== "deps" ? [] : block.on.map((k) => {
-    const d = g.nodes.find((x) => x.key === k);
-    if (!d) return { config: `前置节点 ${f.id}/${k} 不在图里` };
-    return d.taskId ? taskUpstream(db, facts, d.taskId, "节点未放行") : { node: d, g };
+    const d = g.nodes.find((x) => x.key === k), at = nodeEdgeSince(db, g, n.key, k);
+    if (!d) return { config: `前置节点 ${f.id}/${k} 不在图里`, at };
+    return d.taskId ? taskUpstream(db, facts, d.taskId, "节点未放行", at) : { node: d, g, at };
   });
   const terminal = ["done", "dropped"].includes(f.status), own = !terminal && readPriority(db, f.project, target).effective === "now";
   return { own, terminal, ups, b: { project: f.project, key: r?.id ?? `node:${f.id}:${n.key}`, label: `${f.id}/${n.key}`, taskId: null, featureId: f.id,
@@ -199,16 +214,19 @@ export function priorityStallBases(db: Database, project: string, key?: string, 
   for (const root of roots) {
     if (!root.own || root.b.block.kind !== "deps") continue;
     root.b.eligible = false;
-    const config: string[] = [], seen = new Set<Built>([root]), queue = [...root.ups];
+    // A path is referenced by the now chain only since its latest edge took effect (and the root became now), so the reference epoch
+    // is the max along the path and the min over paths; a node reached again through an earlier-referenced path is relaxed again.
+    const config: string[] = [], best = new Map<Built, number>([[root, root.b.nowSince]]);
+    const queue = root.ups.map((up) => ({ up, since: Math.max(root.b.nowSince, up.at) }));
     for (let i = 0; i < queue.length; i++) {
-      const up = queue[i]!;
+      const { up, since } = queue[i]!;
       if ("config" in up) { config.push(up.config); continue; }
       const u = "task" in up ? ofTask(up.task) : ofNode(up.g, up.node);
-      if (!u || seen.has(u) || u.terminal) continue;
-      seen.add(u);
-      if (u.b.block.kind === "deps") { queue.push(...u.ups); continue; }
+      if (!u || u.terminal || (best.get(u) ?? Infinity) <= since) continue;
+      best.set(u, since);
+      if (u.b.block.kind === "deps") { queue.push(...u.ups.map((x) => ({ up: x, since: Math.max(since, x.at) }))); continue; }
       if (!u.b.impact.includes(root.b.label)) u.b.impact.push(root.b.label);
-      if (!u.own) earliest.set(u, Math.min(earliest.get(u) ?? Infinity, root.b.nowSince));
+      if (!u.own) earliest.set(u, Math.min(earliest.get(u) ?? Infinity, since));
       if (!watched.includes(u)) watched.push(u);
     }
     // A broken graph has nobody to chase: the waiting object itself carries a note-only episode.

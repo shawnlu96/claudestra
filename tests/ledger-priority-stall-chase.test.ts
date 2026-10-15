@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
-import { addDep } from "../src/lib/ledger-deps-write.js";
+import { addDep, removeDep } from "../src/lib/ledger-deps-write.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { setPriority, setPriorityMode } from "../src/lib/ledger-priority-write.js";
 import { listAsks } from "../src/lib/ledger-asks.js";
@@ -212,4 +212,38 @@ test("[验收线 7] a genuinely stalled build card with no live order still esca
   now = t0 + 2 * W; await tick();
   expect(listAsks(db, { project, states: ["open"] })).toEqual([expect.objectContaining({ kind: "owner_action", title: "now 停滞：T" })]);
   expect(notices).toBe(0);
+});
+
+test("[验收线 1] a new task edge onto an old now root starts a fresh upstream window; removing and re-adding restarts it", () => {
+  build("A"); build("B"); nowTask("A");
+  now = t0 + 5 * W;
+  addDep(db, { actor: pm, now }, { from: "B", to: "A", when: "B live" });
+  const b = () => priorityStallBases(db, project, undefined, now).find((x) => x.taskId === "B")!;
+  expect(b()).toMatchObject({ eligible: true, nowSince: t0 + 5 * W, impact: ["A"] });
+  expect(priorityStallDue(db, b(), now)).toBe(false);
+  // The keyed recheck shares the epoch.
+  expect(priorityStallBases(db, project, b().key, now)).toEqual([b()]);
+  now = t0 + 6 * W;
+  expect(priorityStallDue(db, b(), now)).toBe(true);
+  removeDep(db, { actor: pm, now }, { from: "B", to: "A" });
+  addDep(db, { actor: pm, now }, { from: "B", to: "A", when: "B live" });
+  expect(b().nowSince).toBe(t0 + 6 * W);
+  expect(priorityStallDue(db, b(), now)).toBe(false);
+});
+
+test("[验收线 1] a node edge added in a later DAG version dates the upstream window from that version; the earliest path wins", () => {
+  build("B"); build("C");
+  graph([{ key: "b", taskId: "B" }, { key: "c", taskId: "C" }, { key: "a1", oneLine: "a1", deps: ["c"], fileGlobs: ["src/a1.ts"] },
+    { key: "a2", oneLine: "a2", fileGlobs: ["src/a2.ts"] }]);
+  nowNode("a1"); nowNode("a2");
+  const v2 = t0 + 3 * W, v1 = db.query("SELECT nodes FROM dag_versions WHERE featureId=? AND version=1").get(fid) as { nodes: string };
+  const nodes = (JSON.parse(v1.nodes) as { key: string; deps: string[] }[]).map((n) => n.key === "a2" ? { ...n, deps: ["b"] } : n.key === "a1" ? { ...n, deps: ["b", "c"] } : n);
+  db.query(`INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes)
+    SELECT featureId, 2, 'requirement_change', 'rewire', proposedBy, approvedBy, ?, ? FROM dag_versions WHERE featureId=? AND version=1`).run(v2, JSON.stringify(nodes), fid);
+  db.query("UPDATE features SET currentVersion=2 WHERE id=?").run(fid);
+  now = v2;
+  const bases = priorityStallBases(db, project, undefined, now);
+  expect(bases.find((x) => x.taskId === "B")).toMatchObject({ eligible: true, nowSince: v2, impact: [`${fid}/a1`, `${fid}/a2`] });
+  expect(bases.find((x) => x.taskId === "C")).toMatchObject({ eligible: true, nowSince: t0 });
+  expect(bases.filter((x) => priorityStallDue(db, x, now)).map((x) => x.label)).toEqual(["C"]);
 });
