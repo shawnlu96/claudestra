@@ -65,18 +65,17 @@ describe("团队合成数据（12 feature）", () => {
     expect(missingFeatures({})).toBe(0);
   });
 
-  test("TEAMCNT1 还要等的 feature 数：没详情且不在 failed 里；排队（waiting）的照旧要等；不是团队源 = 0；列表还没读到 = null", () => {
+  test("CNTGATE1 还要等的 feature 数 = 没详情的 feature 数：failed（读失败 / 429 停发）、waiting 都不豁免；不是团队源 = 0；列表还没读到 = null", () => {
     const list = { features: FEATURES.map((id) => ({ id })) };
     const details = new Map(FEATURES.slice(0, 9).map((id) => [id, {}]));
     const at = (failed: string[], waiting: string[] = []) => ({ last: () => ({ list, details, failed: new Set(failed), waiting: new Set(waiting) }) });
     expect(unreadFeatures(at([]))).toBe(3);
-    expect(unreadFeatures(at(["F10", "F11"]))).toBe(1);
-    expect(unreadFeatures(at(["F10", "F11", "F12"]))).toBe(0);
-    // 有详情的 feature 这一轮重拉失败也不影响；排队的不当失败
-    expect(unreadFeatures(at(["F01", "F10", "F11", "F12"], ["F12"]))).toBe(1);
-    // 放行时 missing 仍是没详情的个数
-    expect(missingFeatures(at(["F10", "F11", "F12"]))).toBe(3);
-    // 老形状（没有 failed）：照旧要全部到齐
+    expect(unreadFeatures(at(["F10", "F11"]))).toBe(3);
+    expect(unreadFeatures(at(["F10", "F11", "F12"]))).toBe(3);
+    // 有详情的 feature 这一轮重拉失败不影响；排队的同样要等
+    expect(unreadFeatures(at(["F01", "F10", "F11", "F12"], ["F12"]))).toBe(3);
+    // 和出提示的 missing 同一个数
+    expect(missingFeatures(at(["F10", "F11", "F12"]))).toBe(unreadFeatures(at(["F10", "F11", "F12"])));
     expect(unreadFeatures({ last: () => ({ list, details }) })).toBe(3);
     expect(unreadFeatures({ last: () => null })).toBeNull();
     expect(unreadFeatures({})).toBe(0);
