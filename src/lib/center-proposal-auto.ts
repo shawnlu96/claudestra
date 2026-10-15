@@ -105,7 +105,7 @@ function repoFiles(): readonly string[] | null {
 /**
  * 一条 glob 的命中（去重，按发现顺序）。files = 仓库现有文件：带通配的 glob 对能匹配到的每个现有文件套全部保护规则
  * （src/lib/scheduler-wip-?ate.ts 盖到 scheduler-wip-gate.ts 就算），不只核固定的代表清单。
- * 文件名段里有 ? / [ ] 这种按字符遮名字的，或读不到仓库文件清单，交 owner（glob_unresolved）。
+ * 运行代码范围的任何通配符都可能引入新的受保护名字，无法排除交集时交 owner；现有文件清单只补充具体原因。
  */
 export function globHits(raw: string, files: readonly string[] | null = repoFiles()): AutoReason[] {
   const g = raw.replace(/^\.\//, "");
@@ -122,7 +122,7 @@ export function globHits(raw: string, files: readonly string[] | null = repoFile
     for (const [f, why] of CONCRETE) if (f === g || f.startsWith(`${g}/`)) hits.add(why);
     return [...hits];
   }
-  if (/[?[\]]/.test(g.slice(g.lastIndexOf("/") + 1)) || files === null) hits.add("glob_unresolved");
+  if (!NO_KEYWORD_ROOTS.some(r => g.startsWith(r)) || /[?[\]]/.test(g.slice(g.lastIndexOf("/") + 1)) || files === null) hits.add("glob_unresolved");
   const glob = new Bun.Glob(g);
   for (const [d, why] of PROTECTED_DIRS) {
     if (prefix.startsWith(d)) hits.add(why);
