@@ -12,7 +12,7 @@ import { shellEscape } from "../claude-launch.js";
 import { codexDeveloperInstructions } from "../codex-launch.js";
 import { pathOverrideAssignments } from "../paths.js";
 import { normalizePiEnvProfile, piActivateTools, piBinName, piEnvFlags, type PiEnvProfile } from "../pi-env.js";
-import { isPiThinkingLevel } from "../pi-launch.js";
+import { PI_LOCKED_EFFORT, PI_LOCKED_MODEL } from "../pi-launch.js";
 import { piAgentDirOf } from "../pi-path.js";
 import { assertSandboxRuntime, isSandbox } from "../sandbox.js";
 import { ACP_RUNTIME_ENV, PI_ARGS_ENV } from "../acp/host-runtime.js";
@@ -48,7 +48,6 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
   const agent = spec.agentName || spec.settingsName;
   if (!agent) throw new Error("ACP 宿主需要 agent 名（LaunchSpec.agentName / settingsName）");
   if (!spec.sessionId) throw new Error("ACP 宿主需要会话 id");
-  const effort = spec.effort?.trim();
   const pairs: [string, string | undefined][] = [
     ["DISCORD_CHANNEL_ID", spec.channelId],
     ["BRIDGE_URL", spec.bridgeUrl],
@@ -66,8 +65,8 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
     [ACP_RUNTIME_ENV, "pi"],
     // 与 piAvailable() 的探测同源：窗口不继承 manager 的 env，PI_BIN 不带过去就会预检通过、窗口里找不到 pi
     ["PI_BIN", piBinName()],
-    ["CLAUDESTRA_ACP_MODEL", spec.model?.trim() || undefined],
-    ["CLAUDESTRA_ACP_EFFORT", effort && isPiThinkingLevel(effort) ? effort : undefined], // 同 tmux 版：只放 pi 认的档位
+    ["CLAUDESTRA_ACP_MODEL", PI_LOCKED_MODEL],
+    ["CLAUDESTRA_ACP_EFFORT", PI_LOCKED_EFFORT], // 同 tmux 版：全局锁
     [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env)))],
     // 窗口不继承 manager 的 env（继承 tmux server 的）：沙箱里把上面核过的目录显式带过去，宿主起适配器前会再核一遍
     ["PI_CODING_AGENT_DIR", sandbox ? env.PI_CODING_AGENT_DIR : undefined],
