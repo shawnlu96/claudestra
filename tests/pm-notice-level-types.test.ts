@@ -19,9 +19,11 @@ import type { P2NoticeDeps } from "../src/lib/p2-backlog-notice.js";
 import type { HumanNodeDeps } from "../src/bridge/human-node.js";
 import type { IdentityNotify } from "../src/lib/scheduler-identity-notice.js";
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
+import type { centerDeployTick } from "../src/lib/center-deploy-tick.js";
 
 declare const db: Database, task: LedgerTask, env: SpecWaitEnv;
 declare const auto: AutoTickDeps, pool: PoolTickDeps, train: TrainTickDeps, retire: RetireDeps, resume: ManualResumeDeps;
+declare const center: NonNullable<Parameters<typeof centerDeployTick>[2]["notifyPm"]>;
 declare const reap: CardReapHost, converge: FollowUpNoticeDeps, p2: P2NoticeDeps, human: HumanNodeDeps, identity: IdentityNotify;
 
 export function missingLevelDoesNotCompile(): void {
@@ -55,6 +57,8 @@ export function missingLevelDoesNotCompile(): void {
   void human.notifyPm(task, "x", "ask_1");
   // @ts-expect-error IdentityNotify
   void identity(task, "x");
+  // @ts-expect-error centerDeployTick 的 notifyPm 端口
+  void center("p", "x");
 }
 
 export function levelGivenCompiles(): void {
@@ -62,6 +66,7 @@ export function levelGivenCompiles(): void {
   void sendLedgerNotice({ to: "agent-pm", text: "x", messageId: "m", pmLevel: "info" });
   void sendToPm(env, "p", "agent-pm", "x", "info");
   void auto.notifyPm(task, "x", "action");
+  void center("p", "x", "action");
 }
 
 test("the level checks above are compile-time only (tsc --noEmit covers tests/)", () => {

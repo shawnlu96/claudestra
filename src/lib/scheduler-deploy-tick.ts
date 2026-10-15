@@ -250,8 +250,8 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
 
 export async function deployTick(db: Database, config: SchedulerConfig, d: DeployTickDeps, pace?: TickPace): Promise<number> {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) return 0;
-  // center-deploy-tick 的端口不带级别：它自己的生产路径标 action，注入的测试端口同样经 notifyPm 按 action 转
-  await centerDeployTick(db, config, { ...d, notifyPm: d.notifyPm && ((project, text) => notifyPm(d, db, project, text)) });
+  // center-deploy-tick 在发送处自己定级（中心部署失败 = action），这里原样透传调用方的级别
+  await centerDeployTick(db, config, d);
   let handled = 0;
   // MTRBUD1: a tick cut off by the pace resumes after its last card, so a running job that only waits (unreadable is never
   // dead) cannot take the phase's one card every pass from a due verify; a tick that got through every card starts in order

@@ -36,7 +36,8 @@ test("immediate: owner, card answers, executor question / delivery, merge / depl
     ["incident", { ...agent("agent-ops", "生产事故告警：5xx 飙升"), level: "action" }],
     ["asks PM", { ...agent("agent-peerpm", "这个要你拍板吗？"), level: "action" }],
     ["request expecting reply", agent("agent-task-1", "进度更新", false)],
-    ["master", agent("master", "大总管通知")],
+    ["master action", { ...agent("master", "Please approve X"), level: "action" }],
+    ["master expecting reply", agent("master", "大总管通知", false)],
     ["unknown bridge", bridge("quota-wall", "额度")],
     ["audit without header", bridge("ledger-audit", "其他巡检格式")],
   ];
@@ -51,6 +52,15 @@ test("urgent words anywhere in the body (not just the first line) go out immedia
   }
   expect(classifyPmPush(agent("agent-ops", "【只同步】进度\n部署失败", false)).send).toBe("now");
   expect(classifyPmPush(agent("agent-ops", "【只同步】部署失败", false))).toMatchObject({ send: "now", levelSource: "regex" });
+});
+
+test("master's oneShot follows the sender-marked level like any other agent: unlevelled is held for pm-todo whatever the body says", () => {
+  for (const body of ["Please approve X", "大总管通知：要你拍板"]) {
+    expect(classifyPmPush(agent("master", body))).toMatchObject({ send: "digest", unleveled: true, source: "master", levelSource: "structured" });
+    expect(classifyPmPush(agent("agent-x", body))).toMatchObject({ send: "digest", unleveled: true, levelSource: "structured" });
+  }
+  expect(classifyPmPush({ ...agent("master", "进度"), level: "info" })).toMatchObject({ send: "digest", levelSource: "structured" });
+  expect(classifyPmPush({ ...agent("master", "进度"), level: "info" })).not.toHaveProperty("unleveled");
 });
 
 test("the bridge's own digest envelope is always immediate (never re-queued)", () => {

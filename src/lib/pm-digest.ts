@@ -41,7 +41,7 @@ export type DigestVerdict =
   | ({ send: "now"; reason: string } & Basis)
   | ({ send: "digest"; reason: string; kind: DigestKind; source: string; card?: string; firstLine: string; detail?: string[] } & Basis);
 
-/** 不算「其他 agent」的发送方：调度器、大总管、PM 切换通知；它们的 oneShot 不归进度同步 */
+/** 旧规则里不算「其他 agent」的发送方：调度器、大总管、PM 切换通知（大总管的 oneShot 已先按级别分流，这里只剩等回复的帧） */
 const SYSTEM_SENDERS = new Set(["scheduler", "master", "pm-switch"]);
 /** 正文任一行带这些字样的 agent 消息按要紧算（失败 / 冻结 / 事故 / 交付 / 提问 / 要人回答），宁可多叫醒一次 */
 const URGENT_RE = /失败|冻结|事故|告警|报警|故障|阻塞|卡住|blocker|交付|已交|提问|请|需要你|要你|问你|想问|回复我|意见|方案|下一步|怎么(办|定|做|处理)|如何|能否|可否|是否|[?？]|紧急|急|P0|回滚|挂了|宕|incident|fail/i;
@@ -62,8 +62,11 @@ const CARD_RE = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[A-Z][A-Z0-9]{2,}\b/;
 /** 正文像要紧事 / 要回答（失败、交付、提问、停单、重派……）：只给没标级别、也不是 oneShot 的外来消息用，pm-route 的保护项共用 */
 export const pmBodyUrgent = (body: string): boolean => URGENT_RE.test(body) || HALT_RECHECK_RE.test(body);
 
-/** 本机系统进程以固定名义发的帧（调度器、出借服务、台账唤醒）和系统发送方：不算「其他 agent」，没标级别时照旧规则 */
-const PROCESS_SENDERS = new Set([...SYSTEM_SENDERS, "lend", "ledger"]);
+/**
+ * 本机系统进程以固定名义发的帧（调度器、PM 切换、出借服务、台账唤醒）：不算「其他 agent」，没标级别时照旧规则。
+ * master 不在内：它的 oneShot 也是 send_to_agent 发的，和其他 agent 一样只认发送方标的级别（没标的进 pm-todo）
+ */
+const PROCESS_SENDERS = new Set(["scheduler", "pm-switch", "lend", "ledger"]);
 /** 其他 agent 发来的 oneShot：级别由发送方在 send_to_agent 上标，PM 侧不看正文 */
 export const agentOneShot = (m: Pick<DigestInput, "fromKind" | "sender" | "oneShot" | "intent">): boolean =>
   m.fromKind === "local" && m.oneShot && m.intent !== "response" && !PROCESS_SENDERS.has(m.sender ?? "");
