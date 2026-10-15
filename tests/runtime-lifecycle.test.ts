@@ -10,7 +10,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { buildClaudeCommand } from "../src/lib/claude-launch.ts";
-import { buildPiCommand, PI_LOCKED_EFFORT, PI_LOCKED_MODEL } from "../src/lib/pi-launch.ts";
+import { buildPiCommand, PI_LOCKED_EFFORT, PI_LOCKED_MODEL, type PiLaunchOptions } from "../src/lib/pi-launch.ts";
 import { normalizePiEnvProfile, type PiEnvProfile } from "../src/lib/pi-env.ts";
 import {
   allSources,
@@ -209,7 +209,7 @@ describe("Claude Code：启动命令与改造前逐字一致", () => {
 });
 
 // 模型 / thinking 被全局锁定（pi-launch.ts PI_LOCKED_*）：改造前的命令只差这两段，其余仍逐字比对
-const piLocked = <T extends object>(o: T) => buildPiCommand({ ...(o as never), model: PI_LOCKED_MODEL, effort: PI_LOCKED_EFFORT });
+const piLocked = (o: PiLaunchOptions) => buildPiCommand({ ...o, model: PI_LOCKED_MODEL, effort: PI_LOCKED_EFFORT });
 
 describe("Pi：启动命令与改造前逐字一致", () => {
   for (const [name, c] of CASES) {
