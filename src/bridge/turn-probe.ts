@@ -6,6 +6,7 @@
 import { readRegistryAgents } from "../lib/registry.js";
 import { MASTER_SESSION, tmuxRawStrict, windowTarget } from "../lib/tmux-helper.js";
 import { controlFor, normalizeTransport, type Transport } from "../lib/runtimes/index.js";
+import { piPaneClearlyIdle } from "../lib/pi-stuck-thinking.js";
 import { paneClearlyIdle, turnState, type TurnInput, type TurnState } from "../lib/turn-state.js";
 import { acpHostTurnBusy } from "./acp-link.js";
 import { hasActiveBgActivities } from "./bg-activity-watcher.js";
@@ -35,7 +36,7 @@ async function capture(win: string): Promise<string | null> {
 
 /**
  * 按已知窗口判：win 为 null（窗口不在 / 查不到）时只剩事件态可用。
- * 事件态 thinking、画面却明确空闲（CC）：隔 1 秒再看一帧、再看有多久没活动，确认是卡住的就以画面为准，
+ * 事件态 thinking、画面却明确空闲（CC / tmux 上的 Pi）：隔 1 秒再看一帧、再看有多久没活动，确认是卡住的就以画面为准，
  * 并把事件态收成 done（给了 chatId 时）——否则押后闸 / 抢占要等 permission-watcher 两分钟的对账。见 lib/turn-state.ts stuckThinkingIdle。
  */
 export async function probeTurnAt(
@@ -45,8 +46,11 @@ export async function probeTurnAt(
   const input = { pane, status: statusOf(agent), runtime, bgActive: hasActiveBgActivities(agent) };
   const first = turnState(input);
   if (first.main !== "busy" || input.status !== "thinking") return first;
-  if (!controlFor(runtime).paneHeuristics) return chatId ? settleByHost(first, input, agent, chatId, hostBusy) : first;
-  if (!paneClearlyIdle(pane)) return first;
+  const cc = controlFor(runtime).paneHeuristics;
+  // tmux 上的 Pi 有自己的画面判据（扩展的 Stop 被别的扩展挡住时靠它，lib/pi-stuck-thinking.ts）；认不出画面再走宿主
+  const paneIdle = cc ? paneClearlyIdle(pane) : runtime === "pi" && piPaneClearlyIdle(pane);
+  if (!cc && !paneIdle) return chatId ? settleByHost(first, input, agent, chatId, hostBusy) : first;
+  if (!paneIdle) return first;
   await Bun.sleep(RECHECK_MS);
   const quietMs = Date.now() - Math.max(...namesOf(agent).map(lastActivityAt));
   const again = turnState({ ...input, status: statusOf(agent), paneAgain: win ? await capture(win) : null, quietMs });
