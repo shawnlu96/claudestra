@@ -3,8 +3,8 @@
  * 本迁移只拥有两类条目：settings 的新族 allow 规则、.env 里登记变量的 FLOKA_ 同值副本；其余全是 keep / skip，
  * 用户自定义与其他插件的条目只报告、不写。tests/floka-install-config.test.ts。
  */
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { LEGACY_FAMILY, MCP_FAMILIES, NEW_FAMILY, mcpToolPrefix, type McpFamily } from "../floka-mcp/families.js";
 import { ENV_FAMILIES, LEGACY_PREFIX } from "../floka-env/names.js";
@@ -19,9 +19,22 @@ export const settingsPathOf = (h: InstallHome): string => join(h.home, ".claude"
 export const envPathOf = (h: InstallHome): string => join(h.repoRoot, ".env");
 
 const canonical = (path: string): string => { try { return realpathSync(path); } catch { return resolve(path); } };
-/** 本次迁移的目标文件身份：settings 与 .env 所在目录的真实路径指纹。日志按它认领，换仓库 / checkout / HOME 就是另一个目标 */
-export const installTarget = (h: InstallHome): string => createHash("sha256")
-  .update(`${canonical(h.home)}\0${canonical(h.repoRoot)}`).digest("hex").slice(0, 16);
+const print = (s: string): string => createHash("sha256").update(s).digest("hex").slice(0, 16);
+
+/** 写入器实际落到的文件：跟随软链（含悬空软链）到底；文件还不存在就是真实父目录下的同名文件 */
+function resolvedFile(path: string): string {
+  let p = resolve(path);
+  for (let hop = 0; hop < 40; hop++) {
+    try { return realpathSync(p); } catch { /* 不存在或悬空：下面逐跳解析 */ }
+    try { p = resolve(dirname(p), readlinkSync(p)); } catch { return join(canonical(dirname(p)), basename(p)); }
+  }
+  return p;
+}
+/** 单个受管文件的身份：解析软链后的真实路径指纹。软链改指向别处、换仓库 / HOME 都是另一个目标 */
+export const fileTarget = (path: string): string => print(resolvedFile(path));
+/** 本次迁移整体的目标身份（生产入口的 txId 用）：HOME、仓库目录与两个受管文件的解析后目标 */
+export const installTarget = (h: InstallHome): string =>
+  print([canonical(h.home), canonical(h.repoRoot), resolvedFile(settingsPathOf(h)), resolvedFile(envPathOf(h))].join("\0"));
 
 /** 本迁移拥有的 allow：两族各一条通配，旧的那条永远保留（旧族会话还在用） */
 export const familyAllow = (f: McpFamily): string => `${mcpToolPrefix(f)}*`;
@@ -49,7 +62,7 @@ export const valuePrint = (rhs: string): string => createHash("sha256").update(r
 
 /**
  * 一条赋值占几行物理行：与 env-file.ts parseDotenv（Bun 口径）同一规则——引号值的闭合引号是其后只剩空白 / 注释的那个
- * 同类引号，可以落在后面的行上；找不到闭合就按未加引号的单行处理。
+ * 同类引号，可以落在后面的行上；找不到闭合就按未加引号的单行处理。lines 已去掉行尾 CR（CRLF 文件同一口径）。
  */
 function assignmentSpan(lines: string[], i: number, rhs: string): number {
   const v = rhs.replace(/^[ \t]+/, ""), q = v[0];
@@ -59,17 +72,21 @@ function assignmentSpan(lines: string[], i: number, rhs: string): number {
   return close ? rest.slice(0, close.index).split("\n").length : 1;
 }
 
-/** index 是赋值首行，span 是它占的物理行数；rhs 是 `=` 后的完整原文（多行值含换行）。多行值内部的行不当赋值认 */
-export interface EnvLine { index: number; span: number; brand: "CLAUDESTRA" | "FLOKA"; suffix: string; rhs: string; lead: string }
+/**
+ * index 是赋值首行，span 是它占的物理行数；rhs 是 `=` 后的完整原文字节（多行值含换行与中间行的 CR），不含末行的行尾 CR，
+ * eol 是末行的行尾 CR（CRLF 文件为 "\r"）。多行值内部的行不当赋值认。
+ */
+export interface EnvLine { index: number; span: number; brand: "CLAUDESTRA" | "FLOKA"; suffix: string; rhs: string; lead: string; eol: string }
 export function envLines(text: string): EnvLine[] {
-  const out: EnvLine[] = [], lines = text.split("\n");
+  const out: EnvLine[] = [], raw = text.split("\n"), lines = raw.map(l => l.replace(/\r$/, ""));
   for (let index = 0; index < lines.length; index++) {
     const any = ANY_KEY.exec(lines[index]!);
     if (!any) continue;
     const span = assignmentSpan(lines, index, any[1]!), m = ENV_LINE.exec(lines[index]!);
     if (m && TWIN_SUFFIXES.includes(m[3]!)) {
-      const rhs = [m[4]!, ...lines.slice(index + 1, index + span)].join("\n");
-      out.push({ index, span, lead: m[1]!, brand: m[2] as EnvLine["brand"], suffix: m[3]!, rhs });
+      const cr = (i: number) => raw[i]!.length - lines[i]!.length ? "\r" : "", last = index + span - 1;
+      const rhs = span === 1 ? m[4]! : [m[4]! + cr(index), ...raw.slice(index + 1, last), lines[last]!].join("\n");
+      out.push({ index, span, lead: m[1]!, brand: m[2] as EnvLine["brand"], suffix: m[3]!, rhs, eol: cr(last) });
     }
     index += span - 1;
   }

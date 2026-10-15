@@ -1,8 +1,8 @@
 /**
  * rename.installConfig：off 什么都不读不写；observe 只出逐项计划；on 用迁移事务执行两个写步骤（steps.ts）。
  * 回滚只对本迁移的日志生效：已提交的按日志逆序补偿，补偿重读当前文件、只撤本迁移加的条目，之后日志记为已回滚。
- * 日志放在维护根下（不在 ~/.claude、仓库或状态 / 运行目录里）。日志每步旧值带目标指纹（plan.ts installTarget），
- * 续跑、重放和回滚前都先核：日志属于别的仓库 / HOME 时一律拒绝，不把已提交当成这次的结果，也不拿旧值去补偿别的文件。
+ * 日志放在维护根下（不在 ~/.claude、仓库或状态 / 运行目录里）。日志每步旧值带本步受管文件的目标指纹（steps.ts stepTargets），
+ * 续跑、重放和回滚前都先逐步核：日志属于别的仓库 / HOME、或受管文件的软链已改指向别处时一律拒绝，不把已提交当成这次的结果，也不拿旧值去补偿别的文件。
  * tests/floka-install-config.test.ts。
  */
 import { dirname, join } from "node:path";
@@ -13,8 +13,8 @@ import type { TxReport } from "../floka-migration/transaction/types.js";
 import { journalOutside } from "../floka-config/transaction.js";
 import type { RenameMode } from "../floka-config/values.js";
 import { object } from "../floka-config/values.js";
-import { envPathOf, installConfigMode, installTarget, planInstallConfig, settingsPathOf, type InstallHome, type PlanEntry } from "./plan.js";
-import { INSTALL_CONFIG_ITEM, STEP_IDS, installConfigSteps } from "./steps.js";
+import { envPathOf, installConfigMode, planInstallConfig, settingsPathOf, type InstallHome, type PlanEntry } from "./plan.js";
+import { INSTALL_CONFIG_ITEM, STEP_IDS, installConfigSteps, stepTargets } from "./steps.js";
 
 export interface InstallConfigOptions extends InstallHome { config: unknown; txId: string; journalDir: string; crashAt?: (p: string) => void }
 export interface InstallConfigReport { mode: RenameMode; status: TxReport["status"]; plan: PlanEntry[]; tx?: TxReport; error?: string }
@@ -26,13 +26,13 @@ const txOptions = (o: Omit<InstallConfigOptions, "config">) => ({
   adapter: null, stateDir: o.journalDir, crashAt: o.crashAt,
 });
 
-/** 日志里任一步记的目标与当前不同（或没记目标）就返回拒绝原因；没有日志 / 日志坏了交给执行器按原路处理 */
+/** 日志里任一步记的目标与该步受管文件当前的目标不同（或没记目标）就返回拒绝原因；没有日志 / 日志坏了交给执行器按原路处理 */
 async function foreignJournal(o: Omit<InstallConfigOptions, "config">): Promise<string | null> {
   const load = await loadJournal(o.journalDir, o.txId, [...STEP_IDS]);
   if (load.kind !== "ok") return null;
-  const target = installTarget(o);
-  return load.journal.steps.some(r => object(r.before).target !== target)
-    ? `事务 ${o.txId} 的日志属于另一个仓库 / HOME，拒绝在当前目标上重放或回滚` : null;
+  const targets = stepTargets(o);
+  return load.journal.steps.some(r => object(r.before).target !== targets[r.id])
+    ? `事务 ${o.txId} 的日志属于另一个仓库 / HOME 或另一个文件目标（软链已改指向），拒绝在当前目标上重放或回滚` : null;
 }
 
 const refusedReport = (txId: string, error: string): TxReport => ({ txId, mode: "on", status: "refused", steps: [], error });

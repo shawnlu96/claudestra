@@ -345,3 +345,70 @@ test("全新机器显式选新根：空 ~/.floka 里生成身份", () => {
   expect(readdirSync(join(home, ".floka")).sort()).toEqual(["instance-id", "instance-key.pem"]);
   expect(startup(home).status).toBe(0);
 });
+
+/** 真实 Bun 加载口径：空环境下 --env-file 读出的变量（含 CRLF 规范化与 $ 展开），不经本仓的简化解析器 */
+function bunEnv(path: string): Record<string, string> {
+  const r = spawnSync(process.execPath, ["--config=/dev/null", `--env-file=${path}`, "-e", "process.stdout.write(JSON.stringify(process.env))"],
+    { env: {}, encoding: "utf8", timeout: 20_000, cwd: tmp("bun-env") });
+  expect(r.status).toBe(0);
+  return JSON.parse(r.stdout);
+}
+
+test("[验收线 1] CRLF 换行的 .env：单行与多行值都补新名，真实 Bun 读出旧值不变、新名同值；回滚还原字节", async () => {
+  const f = fixture(), path = join(f.repoRoot, ".env");
+  const text = 'CLAUDESTRA_ACP_MODEL="one\r\ntwo"\r\nCLAUDESTRA_STATE_DIR=/srv/state\r\nDISCORD_NOTE=keep\r\n';
+  writeFileSync(path, text);
+  const was = bunEnv(path);
+  expect(was.CLAUDESTRA_ACP_MODEL).toBe("one\ntwo");
+  expect((await runInstallConfig({ ...f, config: on })).status).toBe("committed");
+  const now = bunEnv(path);
+  for (const [k, v] of Object.entries(was)) expect(now[k]).toBe(v);
+  expect(now.FLOKA_ACP_MODEL).toBe("one\ntwo");
+  expect(now.FLOKA_STATE_DIR).toBe("/srv/state");
+  expect(envOf(f).split("\n").slice(0, -1).every(l => l.endsWith("\r"))).toBe(true); // 插入的行沿用 CRLF
+  expect((await runInstallConfig({ ...f, config: on })).status).toBe("committed");
+  expect((await rollbackInstallConfig(f)).status).toBe("rolled_back");
+  expect(envOf(f)).toBe(text);
+});
+
+test("[验收线 1] 补新名会改变 Bun 展开结果（别的变量引用新名 / 旧值自引用）：拒绝写入，文件不变", async () => {
+  for (const text of ["CLAUDESTRA_ACP_MODEL=opus\nCUSTOM=$FLOKA_ACP_MODEL\n", "CLAUDESTRA_ACP_MODEL=a\nCLAUDESTRA_ACP_MODEL=${CLAUDESTRA_ACP_MODEL}b\n",
+    "CLAUDESTRA_STATE_DIR=/s\nCLAUDESTRA_ACP_MODEL=x${FLOKA_STATE_DIR}\n"]) {
+    const f = fixture(), path = join(f.repoRoot, ".env");
+    writeFileSync(path, text);
+    const before = snapshot(f.home, f.repoRoot);
+    const r = await runInstallConfig({ ...f, config: on });
+    expect(r.status).toBe("refused");
+    expect(JSON.stringify(r.tx)).toContain("拒绝写入");
+    expect(snapshot(f.home, f.repoRoot)).toEqual(before);
+  }
+  // 展开结果不受影响的引用照常迁移：真实 Bun 读出新名与旧名同值
+  const f = fixture(), path = join(f.repoRoot, ".env");
+  writeFileSync(path, "BASE=/srv\nCLAUDESTRA_STATE_DIR=${BASE}/state\n");
+  expect((await runInstallConfig({ ...f, config: on })).status).toBe("committed");
+  expect(bunEnv(path).FLOKA_STATE_DIR).toBe("/srv/state");
+});
+
+test("[验收线 3] .env 软链换了目标：同一事务的重放 / 回滚拒绝，新目标里用户已有的条目不动", async () => {
+  const f = fixture(), envA = join(tmp("env-a"), "a.env"), envB = join(tmp("env-b"), "b.env"), link = join(f.repoRoot, ".env");
+  writeFileSync(envA, "CLAUDESTRA_ACP_MODEL=opus\n");
+  const textB = "CLAUDESTRA_ACP_MODEL=opus\nFLOKA_ACP_MODEL=opus\n";
+  writeFileSync(envB, textB);
+  rmSync(link);
+  symlinkSync(envA, link);
+  expect((await runInstallConfig({ ...f, config: on })).status).toBe("committed");
+  expect(readFileSync(envA, "utf8")).toBe("CLAUDESTRA_ACP_MODEL=opus\nFLOKA_ACP_MODEL=opus\n");
+  rmSync(link);
+  symlinkSync(envB, link);
+  const settled = snapshot(f.home, f.repoRoot);
+  expect((await runInstallConfig({ ...f, config: on })).status).toBe("refused");
+  expect((await rollbackInstallConfig(f)).status).toBe("refused");
+  expect(readFileSync(envB, "utf8")).toBe(textB);
+  expect(snapshot(f.home, f.repoRoot)).toEqual(settled);
+  // 软链指回 A：日志认领得上，回滚只撤 A 里本迁移加的新名
+  rmSync(link);
+  symlinkSync(envA, link);
+  expect((await rollbackInstallConfig(f)).status).toBe("rolled_back");
+  expect(readFileSync(envA, "utf8")).toBe("CLAUDESTRA_ACP_MODEL=opus\n");
+  expect(readFileSync(envB, "utf8")).toBe(textB);
+});
