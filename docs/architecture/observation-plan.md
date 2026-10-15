@@ -108,6 +108,7 @@ PVDEFER1 提醒算法未改。
 `recovery-key-class.ts` 仅分类，不设缺省档。逐个核过当前 RECOVERY_KEYS：下列键涉及安全证明、权限或资源清理，
 按高风险处理；未列出的键为普通调度、排队、记录、部署时序或重试策略，没有新增 schema 迁移恢复键，schema 类目前为空。
 manualStall 仍禁止自动登记，分类不授予额外权限。按字母序，每行一个键与理由：
+- `askDefaultAll`（permission）：按默认方案自动批准提问与规格文件扩围。
 - `authorRebuild`（permission）：依据退役证明重建作者并重新指派。
 - `cardProcReap`（delete-data）：回收卡片进程及其运行资源。
 - `ciCoverageGate`（safety）：决定合并所需 CI 证据是否齐全。

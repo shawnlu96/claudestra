@@ -23,7 +23,7 @@ export const observationAutoRegisterTickAt = (path: string) => async (env: SpecW
     let covered: Set<string> | undefined;
     for (const project of env.svc.projects) {
       if (autoMode(env.db, project) === "off") continue;
-      for (const task of listTasks(env.db, project)) {
+      for (const task of (env.reads?.tasks(project) ?? listTasks(env.db, project))) {
         if (task.stage !== "verified" || getEventByDedup(env.db, postVerifyDoneKey(task.id))) continue;
         const section = postVerifySection(env.readSpec(task.id)?.text);
         const keys = automaticKeys(section ?? "", project);

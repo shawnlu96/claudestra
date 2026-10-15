@@ -128,6 +128,13 @@ test("[验收线 4] high-risk key with a 24-hour window and three records promot
   expect((await due(T + 24 * H)).outcome).toBe("promoted");
 });
 
+test("[验收线 4] automatic scope approval needs the high-risk observation window and sample count", async () => {
+  text = text.replace("askReminder", "askDefaultAll");
+  await register(); samples("askDefaultAll", 2);
+  expect((await due()).outcome).toBe("extended");
+  expect(recoveryPolicy("p", "askDefaultAll", paths.recovery).mode).toBe("observe");
+});
+
 for (const change of ["error", "misjudged", "digest", "authority", "mode"] as const) {
   test(`[验收线 5] ${change} prevents promotion and produces a pull todo`, async () => {
     await register(); samples();
