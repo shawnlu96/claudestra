@@ -26,15 +26,22 @@ Helpers: `prMergeOff(p)` = mergeHandoff or localMerge (no PR merges on this mach
 
 | Where | Local project | Every other project |
 |---|---|---|
-| `start_node` base (`lib/dag-tools-start.ts`) | `main`; `dag-tools-steps.ts` only fetches for an `origin/` base, so no fetch | `origin/main`, fetched first |
-| Executor brief (`lib/dag-tools-prompt.ts`) | commit on the card branch, **no push, no PR**; deliver checks the local branch | unchanged byte for byte |
-| `take_order` wire (`lib/order-take.ts`) | outputs / writeBack name the local branch, not origin | unchanged |
+| `start_node` base (`lib/dag-tools-start.ts`; the bridge tool and the scheduler's own autostart, `scheduler-autostart-deps.ts`, both inject `localMerge`) | `main`; `dag-tools-steps.ts` only fetches for an `origin/` base, so no fetch | `origin/main`, fetched first |
+| Rebuilding a missing author (`scheduler-local-author-plan.ts` / `scheduler-local-author.ts`) | base `main` (or the card's head), local brief, no `fetch origin` | `origin/main`, fetched first |
+| Executor brief (`lib/dag-tools-prompt.ts`) | commit on the card branch, **no push, no PR**; deliver checks the local branch. The machine-wide `ledger/prompts/exec-template.md` is written for the PR flow and is **not** used | unchanged byte for byte |
+| `take_order` wire (`lib/order-take.ts`) | outputs / writeBack name the local branch; acceptance starts with the project's checks | unchanged |
+| `take_review` wire (`lib/review-order.ts`) | acceptance starts with the project's checks (then the spec lines, cut to the wire's item cap) | unchanged |
+| Standard answers (`lib/order-standard-answers.ts`, on every order) | "no PR CI, the checks are: …" instead of "PR head CI" / "the merge gate checks CI" | unchanged |
 | MCP `deliver` (`lib/order-deliver.ts`) | head = `git rev-parse refs/heads/<branch>` in `repoDir`; no `ls-remote`, no `gh`, no `--pr`, `task.pr` untouched; a different head is `head_mismatch` | origin head + open PR |
 | Work order acceptance (`lib/scheduler-work-order.ts`) | the project's own checks for author and reviewer | `bun run check` + PR CI |
 | Review pack (`lib/review-pack.ts`) | `git diff main...HEAD` and the project's checks | `origin/main...HEAD` + `bun run check` |
 
 The deliver-time out-of-scope file registration (`order-deliver-scope.ts`) reads the PR's diff; a local card has no PR,
 so it records `deliver_scope_unavailable` (no `gh` is run) and the reviewer checks the diff against `fileGlobs` by hand.
+
+Not adapted (fail safe, back to PM): the author *rebuild* after a lost session (AREB1, `scheduler-author-rebuild*.ts`) reads the
+PR head from `origin/<branch>`, and the PM resume grant (`scheduler-autostart-deps.ts` `remoteHead`) reads `ls-remote origin`; on a
+local project both fail their read and hand the card to PM manually instead of acting.
 
 ## Merge side (node local2)
 

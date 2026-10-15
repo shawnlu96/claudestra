@@ -13,6 +13,10 @@ import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import type { VerifiedCall } from "../src/lib/order-tool-route.js";
 import { runBounded } from "../src/lib/run-bounded.js";
+import { startIo } from "../src/lib/scheduler-autostart-deps.js";
+import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
+import { ensureLocalAuthor } from "../src/lib/scheduler-local-author.js";
+import { localAuthorPlan } from "../src/lib/scheduler-local-author-plan.js";
 import { resolveActor } from "../src/manager/ledger-identity.js";
 import { runLedger } from "../src/manager/ledger.js";
 
@@ -116,5 +120,61 @@ describe("start_node：非本地项目不变", () => {
     expect(out).not.toContain("自定义");
     for (const s of ["push 分支和开 PR 可以", "开好 PR", "--pr"]) expect(out).not.toContain(s);
     expect(out).toContain("做完在分支 feat/t1 上 commit，**不 push、不开 PR**");
+  });
+});
+
+describe("调度器自己的开卡 / 补建路径（复现 local-start-paths）", () => {
+  const cfg = (local: boolean) => ({ enabled: true, autoDispatch: true, projects: { [P]: { maxActiveWorkers: 2, requiredChecks: ["cargo test"], repoDir: repo,
+    ...(local ? { localMerge: true } : {}) } } });
+  const files = (local: boolean) => {
+    const configPath = join(dir, "scheduler.json"), projectsPath = join(dir, "projects.json");
+    writeFileSync(configPath, JSON.stringify(cfg(local)));
+    writeFileSync(projectsPath, JSON.stringify({ projects: [{ id: P, dirs: [repo] }] }));
+    return { configPath, projectsPath };
+  };
+
+  test("autostart 的 startEnv 按 scheduler.json 注入 localMerge", () => {
+    const env = (local: boolean) => startIo({ db, ledger: async () => ({ ok: true }), active: () => {}, lease: undefined } as never,
+      parseSchedulerConfig(cfg(local))).startEnv();
+    expect(env(true).localMerge?.(P)).toBe(true);
+    expect(env(false).localMerge?.(P)).toBe(false);
+    expect(env(true).localMerge?.("__proto__")).toBe(false);
+  });
+
+  test("补建执行者：起点本机 main、说明本地口径、checkout 不 fetch origin", async () => {
+    expect(await call(deps(true), "start_node", { featureId: "n7", key: "a" })).toMatchObject({ ok: true });
+    const opts = files(true);
+    db.query("UPDATE tasks SET agent = NULL WHERE id = 'n7-a'").run();
+    const task = getTask(db, "n7-a")!;
+    const plan = await localAuthorPlan(db, task, join(dir, "wt2"), opts);
+    if (typeof plan === "string") throw new Error(plan);
+    expect(plan).toMatchObject({ base: "main", localMerge: true });
+    expect(plan.promptText).toContain("不 push、不开 PR");
+    expect(plan.promptText).not.toContain("开好 PR");
+    const plain = await localAuthorPlan(db, task, join(dir, "wt2"), files(false));
+    expect(typeof plain !== "string" && plain.base).toBe("origin/main");
+    expect(typeof plain !== "string" && "localMerge" in plain).toBe(false);
+
+    files(true);
+    const seq = (db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number }).s;
+    db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, eventSeq, taskRev, specRev, head, templateVersion, status, reason, createdAt, updatedAt)
+      VALUES ('i-author', 'n7-a', ?, 'write', 'ensure_session', 1, ?, ?, ?, NULL, 3, 'submitted', 'author', 1, 1)`).run(P, seq + 1, task.rev, task.specRev);
+    const calls: string[][] = [];
+    const r = await ensureLocalAuthor({ db, worktreeRoot: join(dir, "wt2"), active: () => {}, registryRow: () => undefined,
+      git: async (args) => {
+        calls.push(args);
+        if (args.includes("rev-parse")) {
+          if (args.at(-1)?.startsWith("refs/heads/")) return { code: 1, out: "" };
+          if (args.at(-1) === "--absolute-git-dir") return { code: 0, out: join(dir, "wt2-git") };
+          return { code: 0, out: "1".repeat(40) };
+        }
+        if (args.includes("add")) mkdirSync(args.at(-2)!, { recursive: true });
+        return { code: 0, out: "" };
+      },
+      create: async () => ({ ok: false, error: "测试到此为止" }), ledger: async () => ({ ok: true }) }, task, opts);
+    expect(r.kind).not.toBe("ok");
+    expect(calls.some((a) => a.includes("fetch"))).toBe(false);
+    expect(calls.find((a) => a.includes("rev-parse") && a.at(-1)?.endsWith("^{commit}"))?.at(-1)).toBe("main^{commit}");
+    expect(calls.some((a) => a.includes("worktree") && a.includes("add"))).toBe(true);
   });
 });

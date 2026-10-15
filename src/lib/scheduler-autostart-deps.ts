@@ -108,7 +108,7 @@ function grantPorts(o: WireOpts, config: SchedulerConfig): Required<Pick<ResumeT
 }
 
 /** start_node 要的读环境与执行 IO：路径、registry、项目目录从生产位置现读；git 套 whileOwned */
-function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "startEnv" | "stepIO" | "plain"> {
+export function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "startEnv" | "stepIO" | "plain"> {
   const git = ownedGit(o);
   const agentNames = () => readRegistryAgentsSync().map((a) => a.name);
   const execTemplate = statePath("ledger", "prompts", "exec-template.md");
