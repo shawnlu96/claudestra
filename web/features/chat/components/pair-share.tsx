@@ -164,7 +164,7 @@ export function PairCodeCard({ pair, full, onAgain, busy, onPaired }: {
   if (phase !== "waiting") return <PairDone phase={phase} who={who} busy={busy} onAgain={onAgain} />;
   const canShare = typeof navigator !== "undefined" && typeof navigator.share === "function";
   const share = () =>
-    void navigator.share({ title: t("配对 Claudestra"), text: t("10 分钟内打开这个链接，就能用这台电脑上的 Claudestra"), url: pair.link }).catch((e: Error) => {
+    void navigator.share({ title: t("配对 Floka"), text: t("10 分钟内打开这个链接，就能用这台电脑上的 Floka"), url: pair.link }).catch((e: Error) => {
       if (e.name !== "AbortError") console.warn("[pair] 系统分享失败:", e.message); // 用户关掉分享面板 = AbortError，不算错
     });
   return (

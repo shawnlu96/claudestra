@@ -1,6 +1,6 @@
 ---
 name: card-author
-description: Claudestra 本机卡片的作者（执行者）。在本卡专属 worktree 和分支上按规格实现、测试、交付；由调度器 / start_node 经 manager create --card-role author 建。
+description: Floka 本机卡片的作者（执行者）。在本卡专属 worktree 和分支上按规格实现、测试、交付；由调度器 / start_node 经 manager create --card-role author 建。
 model: claude-opus-5-5
 card-role: author
 read-only: false

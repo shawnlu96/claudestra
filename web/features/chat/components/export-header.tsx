@@ -23,7 +23,7 @@ export function ExportHeader({ meta, agent, count, at, lang }: { meta: ExportMet
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <span className="flex size-[22px] shrink-0 items-center justify-center rounded-full bg-accent text-[11px] text-white">✦</span>
-          <span className="text-[15px] font-semibold tracking-tight">Claudestra</span>
+          <span className="text-[15px] font-semibold tracking-tight">Floka</span>
           {meta.version && (
             <span className="font-mono text-[11px] text-base-content/50">
               v{meta.version}

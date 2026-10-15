@@ -398,7 +398,7 @@ P1 不做 sealed 推送，理由是：
 - **效果**（开了开关的机器）：推送正文中继看不到，也伪造不了；它能丢推送，也看得到推送时间。
 
 **P3：APNs。**
-- bridge 发 `{aps:{alert:{title:"Claudestra", body:"有新消息"}, "mutable-content":1}, e2e:"<密文>"}`，壳里的 NSE 用 Keychain 里的密钥解密，再替换标题和正文。NSE 大约有 30 秒时限，超时就显示通用文本。
+- bridge 发 `{aps:{alert:{title:"Floka", body:"有新消息"}, "mutable-content":1}, e2e:"<密文>"}`，壳里的 NSE 用 Keychain 里的密钥解密，再替换标题和正文。NSE 大约有 30 秒时限，超时就显示通用文本。
 - 在此之前，iOS 壳收到的 APNs 推送一律「不带正文」：开关打开的机器强制这样发；开关关着的机器由「不带正文」开关决定。
 
 ## 6. 推荐与分期
@@ -423,7 +423,7 @@ P1 不做 sealed 推送，理由是：
 
 **P1a 推送不带正文**
 1. 开关缺省关，存 `config.json` 的 `pushNoContent`；`/api/v1/settings` 能读能写，guest 写被拒；设置页有开关，中英文都有。
-2. 打开后，回复、已读 dismiss、静默角标、系统提醒、「待你处理」这几类推送的 Web Push / APNs payload，只含 Claudestra、「有新消息」/「New message」、角标、时间、`/chat`、`cstra-<ts>`，Web Push 另有 fp。逐字节检查，不含 agent 名、设备名、guest 名、ask id、正文。
+2. 打开后，回复、已读 dismiss、静默角标、系统提醒、「待你处理」这几类推送的 Web Push / APNs payload，只含 Floka、「有新消息」/「New message」、角标、时间、`/chat`、`cstra-<ts>`，Web Push 另有 fp。逐字节检查，不含 agent 名、设备名、guest 名、ask id、正文。
 3. 直发和经中继两条出口都改写（改写在出口之前）。
 4. 开关现读：关掉后下一条推送就恢复正文。`config.json` 坏了按「开」处理。
 5. SW 的 dismiss 按 fp 和 agent 一起匹配，不带正文的 dismiss 不清别的机器的通知。

@@ -52,7 +52,7 @@ manager permissions list|presets|get <n>|set <n> --preset <p>|set <n> --disallow
 manager effort list|get <n>|<n> <low|medium|high|xhigh|max|auto>|reset <n>
 manager mode list|get <n>|<n> <default|acceptEdits|bypassPermissions|dontAsk|plan>
 
-# 跨 Claudestra HTTP peer（v2.15+ 一键邀请为主）
+# 跨 Floka HTTP peer（v2.15+ 一键邀请为主）
 manager peer-invite-new --agents <a,b|*> [--force]    # 生成一次性邀请串（24h 有效）
 manager peer-join-auto '<邀请串>' [--agents <x,y>]     # 粘贴对方的邀请串，一步完成
 manager peer-invite-list / peer-invite-revoke <inv_id>
@@ -88,9 +88,9 @@ manager peer-http-list / peer-http-test <名称> / peer-http-scope <名称> --ag
 
 **批量管理**：「撞墙的都开 LP 再压缩」「额度回来了，把 LP 都关掉」「上下文超线的都压一下」「给某项目全员发一段话」→ 用 MCP 工具 `mcp__claudestra__fleet`（新族会话里叫 `mcp__floka__fleet`，看你的工具列表里是哪个前缀；延迟加载的，先 ToolSearch `select:<全名>`；别用 Bash 跑 manager fleet）：先 `op:"state"` 看状态，再 `op:"run"` 预演（dryRun 默认就是 true），确认后再传 `dryRun:false`。它不会动你自己。
 
-## 跨 Claudestra 协作（HTTP peer）
+## 跨 Floka 协作（HTTP peer）
 
-两台 Claudestra 经 HTTP API 互访。**开放我方能力给对方**：`peer-invite-new --agents <a,b|*>` 生成一次性邀请串发给对方（24h 有效，对方粘贴即完成，无需回执）；对方要开放给我们则由对方生成、我们 `peer-join-auto '<串>'`。对方 pre-v2.15 时才用旧三步握手（`peer-http-invite/join/accept`）。
+两台 Floka 经 HTTP API 互访。**开放我方能力给对方**：`peer-invite-new --agents <a,b|*>` 生成一次性邀请串发给对方（24h 有效，对方粘贴即完成，无需回执）；对方要开放给我们则由对方生成、我们 `peer-join-auto '<串>'`。对方 pre-v2.15 时才用旧三步握手（`peer-http-invite/join/accept`）。
 
 - 收到带「🤝 来自 peer 实例」注入头的消息 = 对方实例的跨机请求，直接 `reply()` 回答，超范围礼貌拒绝。
 - 调对方 agent：`send_to_agent({ target: "<agent>@<peer名>" })`，回复会自动 push 回来。
@@ -110,7 +110,7 @@ manager peer-http-list / peer-http-test <名称> / peer-http-scope <名称> --ag
 ## 版本与更新
 
 - 「检查更新」→ `manager version`；「升级」→ `manager update`（git pull + 重载 bridge/launcher/cron 三个 launchd daemon，不碰机器上其它服务；执行前告知用户会重启服务）
-- 自动更新默认开（Claudestra 30 分钟一查、Claude Code 每周一查，全员空闲才升）。「关掉自动更新」→ 分清指谁：Claude Code → `auto-update claude off`；Claudestra → `auto-update claudestra off`；含糊先问。
+- 自动更新默认开（Floka 30 分钟一查、Claude Code 每周一查，全员空闲才升）。「关掉自动更新」→ 分清指谁：Claude Code → `auto-update claude off`；Floka → `auto-update claudestra off`；含糊先问。
 
 ## 行为准则
 

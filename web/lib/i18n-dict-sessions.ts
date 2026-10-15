@@ -48,8 +48,8 @@ export const SESSIONS_DICT: Record<string, string> = {
   "← 返回": "← Back",
   "这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。":
     "This session isn't managed, so it can't receive messages. Adopting it opens a window for it, lets you chat with it and adds it to the agent list.",
-  "这种运行时的会话只读：历史能看能搜，但收编不了——Claudestra 还没法往这种会话里发消息。":
-    "Sessions from this runtime are read-only: you can browse and search the history but can't adopt them — Claudestra can't send messages into them yet.",
+  "这种运行时的会话只读：历史能看能搜，但收编不了——Floka 还没法往这种会话里发消息。":
+    "Sessions from this runtime are read-only: you can browse and search the history but can't adopt them — Floka can't send messages into them yet.",
   "刷新": "Refresh",
   "归档是空的": "The archive is empty",
   "恢复": "Restore",

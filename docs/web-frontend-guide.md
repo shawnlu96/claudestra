@@ -1,13 +1,13 @@
-# Claudestra Web 前端接入指南
+# Floka Web 前端接入指南
 
 > [English](./web-frontend-guide.en.md) · **简体中文**
 
 > 写给接手 Web UI 的开发者。目标：不用读完整个 codebase，就能把一个网页版控制台跑起来。
-> 有问题让 owner 拉你进他的 Claudestra Discord 服务器，在 #agent-claudestra 频道直接问（那是一个常驻的 Claude 开发 agent，本文档也是它写的，它对 bridge 侧代码全知）。
+> 有问题让 owner 拉你进他的 Floka Discord 服务器，在 #agent-claudestra 频道直接问（那是一个常驻的 Claude 开发 agent，本文档也是它写的，它对 bridge 侧代码全知）。
 
 ## 0. 一句话背景
 
-Claudestra 是一个多 Claude Code 会话编排器：一个 Bridge 进程管着 N 个跑在 tmux 里的 Claude Code 会话，目前唯一的前端是 Discord。从 v2.6 起核心已与 Discord 解耦，v2.8–v2.9 把数据面（实时事件流、历史对话、用量统计）全部铺好了 —— **Web UI 是这些铺垫的收口**。你不需要碰 tmux / Discord / MCP 的任何细节，只和 Bridge 的 HTTP API 打交道。
+Floka 是一个多 Claude Code 会话编排器：一个 Bridge 进程管着 N 个跑在 tmux 里的 Claude Code 会话，目前唯一的前端是 Discord。从 v2.6 起核心已与 Discord 解耦，v2.8–v2.9 把数据面（实时事件流、历史对话、用量统计）全部铺好了 —— **Web UI 是这些铺垫的收口**。你不需要碰 tmux / Discord / MCP 的任何细节，只和 Bridge 的 HTTP API 打交道。
 
 ## 1. 必读材料（按顺序，约 1 小时）
 

@@ -32,7 +32,7 @@ const commit = git(["rev-parse", "--short", "HEAD"]);
 // 2026-09-18 排除 *.md:一条只改 web/CLAUDE.md 的文档提交让服务端 webCommit 前进、bundle 烤的
 // 还是上一个 → 「新版本已就绪」横幅永远亮着、刷新也没用(owner 实报)。文档不进 bundle,不算前端变更。
 const webCommit = git(["log", "-1", "--format=%h", "--", ".", ":(exclude)*.md"]);
-// Claudestra 版本（仓库根 package.json）：机器的 minClient 拿它比（lib/version-check.ts）
+// Floka 版本（仓库根 package.json）：机器的 minClient 拿它比（lib/version-check.ts）
 let version = "";
 try {
   version = String(JSON.parse(readFileSync(join(webDir, "..", "package.json"), "utf8")).version ?? "");

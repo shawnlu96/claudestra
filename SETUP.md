@@ -48,18 +48,18 @@ bun run setup
 
 That's it. The wizard does everything else: it checks your dependencies, walks you through creating a Discord bot (with embedded links and click-by-click instructions), collects every ID it needs, writes `.env`, renders `master/CLAUDE.md`, registers the MCP server, and installs the three launchd daemons.
 
-### Cross-Claudestra peer collaboration (HTTP peers)
+### Cross-Floka peer collaboration (HTTP peers)
 
-Two Claudestra instances can share specialist agents without a shared Discord server, a second bot, or filesystem / SSH access — peers are simply API clients of each other, each holding a Bearer token the other side issued and scoped to specific agents.
+Two Floka instances can share specialist agents without a shared Discord server, a second bot, or filesystem / SSH access — peers are simply API clients of each other, each holding a Bearer token the other side issued and scoped to specific agents.
 
 **One-click invite (v2.15+, recommended)** — two steps, no forms:
 
 1. **A creates an invite**: in the web client, Settings → Peer collaboration → *Create invite* (pick which agents to expose), or `bun src/manager.ts peer-invite-new --agents <a,b>`. On the relay this is a link (`https://<relay>/i#…`); without a relay it's a string. Send it to the other side over any private channel (DM, Signal, whatever).
-2. **B opens it** (link → lands in their own Claudestra's join page, one click) **or pastes it**: Settings → Peer collaboration → *Join*, or `bun src/manager.ts peer-join-auto '<invite>'`. B's bridge calls A back automatically — done. A gets a notification with the new peer's name.
+2. **B opens it** (link → lands in their own Floka's join page, one click) **or pastes it**: Settings → Peer collaboration → *Join*, or `bun src/manager.ts peer-join-auto '<invite>'`. B's bridge calls A back automatically — done. A gets a notification with the new peer's name.
 
 Invites are single-use and expire after 24h (the embedded token is revoked on expiry/revocation — `peer-invite-list` / `peer-invite-revoke <id>` manage pending ones). Joining exposes **nothing** of B by default: it's a one-way grant (B can call A's shared agents). For two-way access, B sends A an invite of their own — the entries merge into one peer.
 
-The older three-step handshake (`peer-http-invite` / `peer-http-join` / `peer-http-accept`) still works and is what you need when the other side runs a pre-v2.15 Claudestra.
+The older three-step handshake (`peer-http-invite` / `peer-http-join` / `peer-http-accept`) still works and is what you need when the other side runs a pre-v2.15 Floka.
 
 From then on any agent can call `send_to_agent({ target: "<agent>@<peer>", text: "..." })` — the bridge POSTs the peer's `/api/v1` messages endpoint and pushes the reply back to the caller as a synthetic message, no polling. `peer-http-list` shows peers + handshake state; `peer-http-remove <peer>` deletes the peer and revokes the token you issued, cutting access instantly.
 
@@ -85,14 +85,14 @@ The relay is the default way out, and it needs nothing installed on the phone or
 
    The bridge log prints `🛰 中继: 已连接 …`. The machine's identity on the relay is its key fingerprint (`claudestra relay-status`), not a hostname.
 2. On the computer run `claudestra pair`: it prints a QR code, a link (`https://relay.example.com/pair#…`) and an 8-character code (10 minutes, single use). Scan the QR with the phone camera, open the link in any browser, or type the code at `https://relay.example.com/` — short-code pairings wait for you to confirm in the terminal (or the web client's Devices panel). The browser then holds a device credential issued by *your* bridge; there is no password. One browser can pair several machines and switch between them in the top bar. The web client's Peer panel has a *Pair a new device* button for the same thing.
-3. Invites become links: Settings → Peer collaboration → *Create invite* yields `https://relay.example.com/i#…`. The other side opens it and lands in their own Claudestra's join page; someone without one is guided to install first.
+3. Invites become links: Settings → Peer collaboration → *Create invite* yields `https://relay.example.com/i#…`. The other side opens it and lands in their own Floka's join page; someone without one is guided to install first.
 
 Honest note: this version of the relay terminates TLS and hosts the page's JavaScript, so it can read tunnelled traffic (including the device cookie) — trusting a hosted relay means trusting its operator, like any SaaS. Run your own with [docs/relay/self-host.md](docs/relay/self-host.md); protocol and boundaries are in [docs/relay/protocol.md](docs/relay/protocol.md), the full design in [docs/design-hosted-frontend.md](docs/design-hosted-frontend.md).
 
 ### What you get out of the box
 
 - **Multi-agent orchestration** — the master in `#control` spawns per-agent Discord channels, routes messages, attaches screenshots, handles interrupts.
-- **Auto-update** — Claudestra itself polls for new releases every 30 min; Claude Code CLI every 7 days. Both are toggleable via `bun src/manager.ts auto-update status|<target> on|off`.
+- **Auto-update** — Floka itself polls for new releases every 30 min; Claude Code CLI every 7 days. Both are toggleable via `bun src/manager.ts auto-update status|<target> on|off`.
 - **Discord slash autocomplete** — every skill in `~/.claude/skills/`, installed plugins, each agent's project-level `<cwd>/.claude/skills/`, plus a curated set of Claude Code built-ins (`/cost`, `/context`, `/compact`, `/mcp`, `/review`, …) show up as Discord slash commands. Rescanned every 30 min.
 - **TUI modal adaptation** — numbered menus (`/model`) and arrow sliders (`/effort`) render as Discord buttons. Anything bridge can't parse → 🤖 button escalates to the master agent.
 - **Cron scheduling** — `cron-add` / `cron-list` / `cron-history`; temporary agents spin up, run a prompt, report, and clean up.
@@ -184,7 +184,7 @@ bun src/manager.ts install-cli
 
 ## Upgrading
 
-By default both Claudestra and Claude Code auto-update in the background — you don't need to do anything. Claudestra polls every 30 min, Claude Code weekly, and the upgrade only fires while every agent is idle. You get an @mention in `#control` before and after.
+By default both Floka and Claude Code auto-update in the background — you don't need to do anything. Floka polls every 30 min, Claude Code weekly, and the upgrade only fires while every agent is idle. You get an @mention in `#control` before and after.
 
 **To disable auto-update:**
 
@@ -274,7 +274,7 @@ If you are asking someone else for help, paste this output first.
 
 ### Day-2 basics: is it running, where are the logs, how do I restart it
 
-Claudestra runs as three launchd user agents. Everything below works from any directory.
+Floka runs as three launchd user agents. Everything below works from any directory.
 
 ```bash
 # Are they alive? (PID in column 1, "-" means loaded but not running)
@@ -340,7 +340,7 @@ Discord caches slash commands per client for up to an hour. If you've just insta
 1. Wait up to 30 min (bridge rescans + re-registers automatically) **or** `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge` to force an immediate rescan.
 2. Then restart the Discord mobile/desktop app to clear its client-side cache.
 
-The same applies if Discord is still showing an old command list after a Claudestra upgrade.
+The same applies if Discord is still showing an old command list after a Floka upgrade.
 
 ---
 

@@ -1,0 +1,370 @@
+{
+  "format": "claudestra.rename-brand-result",
+  "version": 1,
+  "base": "979e588151b4614fd1a160deeff804beba25dd8e",
+  "mode": "on",
+  "plan": {
+    "ok": true,
+    "digest": "3756b61db9893fc89a433ce270d797d8a01e1262111ca7b8d1167b3f8103fee4",
+    "rulesDigest": "e71bfb6e7802f71e3270c73db7cae57c469a5d2ec80930b4d1a053f10e0ff6d1",
+    "totals": {
+      "files": 5777,
+      "hitFiles": 1408,
+      "hits": 7456,
+      "brand": 303,
+      "protocol": 6081,
+      "history": 1072,
+      "rejected": 0
+    },
+    "brand": {
+      "brand1.display-code-text": {
+        "files": 39,
+        "hits": 97
+      },
+      "brand1.display-data": {
+        "files": 10,
+        "hits": 32
+      },
+      "brand1.display-docs": {
+        "files": 56,
+        "hits": 169
+      },
+      "brand1.package-descriptions": {
+        "files": 2,
+        "hits": 2
+      },
+      "brand1.package-names": {
+        "files": 3,
+        "hits": 3
+      }
+    },
+    "manual": {
+      "brand1.protocol.app-artifacts": {
+        "files": 1,
+        "hits": 7
+      },
+      "brand1.protocol.emitted-text": {
+        "files": 10,
+        "hits": 14
+      },
+      "brand1.protocol.lowercase": {
+        "files": 98,
+        "hits": 385
+      },
+      "brand1.protocol.native-identity": {
+        "files": 7,
+        "hits": 27
+      },
+      "brand1.protocol.out-of-range": {
+        "files": 1114,
+        "hits": 4822
+      },
+      "brand1.protocol.package-identity": {
+        "files": 4,
+        "hits": 5
+      },
+      "brand1.protocol.short-internal": {
+        "files": 69,
+        "hits": 267
+      },
+      "brand1.protocol.symbols": {
+        "files": 7,
+        "hits": 7
+      },
+      "builtin.path-rename": {
+        "files": 2,
+        "hits": 2
+      },
+      "protocol.env": {
+        "files": 28,
+        "hits": 118
+      },
+      "protocol.http-headers": {
+        "files": 10,
+        "hits": 25
+      },
+      "protocol.identities": {
+        "files": 4,
+        "hits": 6
+      },
+      "protocol.install-paths": {
+        "files": 10,
+        "hits": 12
+      },
+      "protocol.mcp-tool-prefix": {
+        "files": 3,
+        "hits": 3
+      },
+      "protocol.network-addresses": {
+        "files": 21,
+        "hits": 35
+      },
+      "protocol.reverse-dns": {
+        "files": 17,
+        "hits": 30
+      },
+      "protocol.sign-and-wire-labels": {
+        "files": 9,
+        "hits": 26
+      },
+      "protocol.state-and-checkout": {
+        "files": 55,
+        "hits": 195
+      },
+      "protocol.storage-and-cookies": {
+        "files": 44,
+        "hits": 95
+      }
+    },
+    "kept": {
+      "brand1.history.migration-tests": {
+        "files": 2,
+        "hits": 24
+      },
+      "history.migration-tooling": {
+        "files": 15,
+        "hits": 1015
+      },
+      "history.records": {
+        "files": 1,
+        "hits": 4
+      },
+      "history.transcripts": {
+        "files": 2,
+        "hits": 29
+      }
+    },
+    "rejections": {}
+  },
+  "staging": {
+    "scanned": "/tmp",
+    "found": []
+  },
+  "applied": {
+    "edits": 303,
+    "written": [
+      ".claude/agents/card-adversarial-reviewer.md",
+      ".claude/agents/card-author.md",
+      ".claude/agents/card-pm-reviewer.md",
+      ".claude/agents/card-reviewer.md",
+      ".claude/agents/claudestra.md",
+      "CLAUDE.md",
+      "CLAUDE.zh-CN.md",
+      "README.md",
+      "README.zh-CN.md",
+      "SETUP.md",
+      "SETUP.zh-CN.md",
+      "desktop/README.md",
+      "desktop/bun.lock",
+      "desktop/package.json",
+      "desktop/src-tauri/src/cli.rs",
+      "desktop/src-tauri/src/env.rs",
+      "desktop/src-tauri/src/main.rs",
+      "desktop/src-tauri/src/tray.rs",
+      "desktop/ui/dom.ts",
+      "desktop/ui/index.html",
+      "desktop/ui/main.ts",
+      "desktop/ui/setup.ts",
+      "docs/architecture/features.md",
+      "docs/architecture/features.zh-CN.md",
+      "docs/architecture/interrupts.md",
+      "docs/architecture/lend-claude-workers.md",
+      "docs/architecture/overview.md",
+      "docs/architecture/overview.zh-CN.md",
+      "docs/architecture/pi-acp-migration.md",
+      "docs/architecture/pi-acp-sandbox.md",
+      "docs/architecture/quota-wall.md",
+      "docs/architecture/sandbox.md",
+      "docs/design/pm-intervention-rails.md",
+      "docs/design/program-status-osc7501.md",
+      "docs/design/relay-direct.md",
+      "docs/design/shared-ledger-projects.md",
+      "docs/design-hosted-frontend.md",
+      "docs/design-http-peers.en.md",
+      "docs/design-http-peers.md",
+      "docs/design-jev-integration.md",
+      "docs/design-multi-frontend.en.md",
+      "docs/design-multi-frontend.md",
+      "docs/design-notify-channels.md",
+      "docs/jev.md",
+      "docs/relay/README.md",
+      "docs/relay/e2e-design.md",
+      "docs/relay/protocol.md",
+      "docs/runtimes/codex-save-compact-plan.md",
+      "docs/runtimes/codex.md",
+      "docs/talk/protocol.md",
+      "docs/team/lend-trial.md",
+      "docs/team/orchestration-team.en.md",
+      "docs/team/orchestration-team.md",
+      "docs/team/peer-delegation.md",
+      "docs/web-frontend-guide.en.md",
+      "docs/web-frontend-guide.md",
+      "install.sh",
+      "master/CLAUDE.md.template",
+      "native/README.md",
+      "native/package.json",
+      "native/www/error.html",
+      "native/www/index.html",
+      "roles/adversarial-reviewer.md",
+      "roles/dispatcher.md",
+      "roles/executor.md",
+      "roles/pm.md",
+      "roles/reviewer.md",
+      "web/.env.example",
+      "web/CLAUDE.en.md",
+      "web/CLAUDE.md",
+      "web/SETUP.md",
+      "web/SETUP.zh-CN.md",
+      "web/app/i/page.tsx",
+      "web/app/join/page.tsx",
+      "web/app/layout.tsx",
+      "web/app/manifest.ts",
+      "web/features/chat/components/attachment-preview.tsx",
+      "web/features/chat/components/chat.tsx",
+      "web/features/chat/components/export-header.tsx",
+      "web/features/chat/components/invite-intake.tsx",
+      "web/features/chat/components/pair-share.tsx",
+      "web/features/chat/components/peers-invite-checklist.tsx",
+      "web/features/chat/components/peers-invite-share.tsx",
+      "web/features/chat/components/peers-modal.tsx",
+      "web/features/chat/components/pi-model-switcher.tsx",
+      "web/features/chat/components/settings/backend-update-section.tsx",
+      "web/features/chat/components/settings/font-section.tsx",
+      "web/features/chat/components/settings/notify-section.tsx",
+      "web/features/chat/components/settings/skills-section.tsx",
+      "web/features/chat/components/settings/update-prefs.tsx",
+      "web/features/chat/components/share-dock.tsx",
+      "web/features/chat/components/sidebar.tsx",
+      "web/features/chat/components/splash.tsx",
+      "web/features/chat/components/unmanaged-sessions.tsx",
+      "web/features/chat/components/update-toast.tsx",
+      "web/features/chat/invite-intake.ts",
+      "web/features/chat/invite-link.ts",
+      "web/features/chat/view-compose.ts",
+      "web/features/devtools/dev-overlay.tsx",
+      "web/features/pair/pair-screen.tsx",
+      "web/lib/i18n-dict-attach.ts",
+      "web/lib/i18n-dict-notify.ts",
+      "web/lib/i18n-dict-sessions.ts",
+      "web/lib/i18n-dict.ts",
+      "web/lib/pairing.ts",
+      "web/public/sw.js",
+      "web/scripts/gen-build-info.mjs",
+      "web/scripts/make-icons.mjs"
+    ],
+    "notApproved": []
+  },
+  "residue": {
+    "ok": true,
+    "digest": "cc9de680ae140a800bb18554d929e5117a89b0cc9b2adca8c62db8ea6f52a980",
+    "rulesDigest": "e71bfb6e7802f71e3270c73db7cae57c469a5d2ec80930b4d1a053f10e0ff6d1",
+    "totals": {
+      "files": 5777,
+      "hitFiles": 1369,
+      "hits": 7153,
+      "brand": 0,
+      "protocol": 6081,
+      "history": 1072,
+      "rejected": 0
+    },
+    "brand": {},
+    "manual": {
+      "brand1.protocol.app-artifacts": {
+        "files": 1,
+        "hits": 7
+      },
+      "brand1.protocol.emitted-text": {
+        "files": 10,
+        "hits": 14
+      },
+      "brand1.protocol.lowercase": {
+        "files": 98,
+        "hits": 385
+      },
+      "brand1.protocol.native-identity": {
+        "files": 7,
+        "hits": 27
+      },
+      "brand1.protocol.out-of-range": {
+        "files": 1114,
+        "hits": 4822
+      },
+      "brand1.protocol.package-identity": {
+        "files": 4,
+        "hits": 5
+      },
+      "brand1.protocol.short-internal": {
+        "files": 69,
+        "hits": 267
+      },
+      "brand1.protocol.symbols": {
+        "files": 7,
+        "hits": 7
+      },
+      "builtin.path-rename": {
+        "files": 2,
+        "hits": 2
+      },
+      "protocol.env": {
+        "files": 28,
+        "hits": 118
+      },
+      "protocol.http-headers": {
+        "files": 10,
+        "hits": 25
+      },
+      "protocol.identities": {
+        "files": 4,
+        "hits": 6
+      },
+      "protocol.install-paths": {
+        "files": 10,
+        "hits": 12
+      },
+      "protocol.mcp-tool-prefix": {
+        "files": 3,
+        "hits": 3
+      },
+      "protocol.network-addresses": {
+        "files": 21,
+        "hits": 35
+      },
+      "protocol.reverse-dns": {
+        "files": 17,
+        "hits": 30
+      },
+      "protocol.sign-and-wire-labels": {
+        "files": 9,
+        "hits": 26
+      },
+      "protocol.state-and-checkout": {
+        "files": 55,
+        "hits": 195
+      },
+      "protocol.storage-and-cookies": {
+        "files": 44,
+        "hits": 95
+      }
+    },
+    "kept": {
+      "brand1.history.migration-tests": {
+        "files": 2,
+        "hits": 24
+      },
+      "history.migration-tooling": {
+        "files": 15,
+        "hits": 1015
+      },
+      "history.records": {
+        "files": 1,
+        "hits": 4
+      },
+      "history.transcripts": {
+        "files": 2,
+        "hits": 29
+      }
+    },
+    "rejections": {},
+    "unclassified": []
+  }
+}

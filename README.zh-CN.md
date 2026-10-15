@@ -1,10 +1,10 @@
-# Claudestra
+# Floka
 
 [English](./README.md) · **简体中文**
 
 > 在自己电脑上跑编码 agent（Claude Code、Pi 都是一等运行时），用手机通过内置的 Web 应用指挥它们 —— Discord 可选。
 
-Claudestra 让你在自己的电脑上运行编码 agent（**Claude Code** 与 **Pi** 都是一等运行时），然后从任何地方（手机、平板、另一台电脑）指挥它们。默认入口是自带的 **PWA Web 客户端**：一条安装命令跑完它就已经在跑了，设备扫码配对；手机可以走中继、Tailscale、局域网或你自己的域名（默认中继，但不是必选）。**Discord 是可选的** —— 安装时一个默认不勾的框，想要它的推送和按钮就勾上。每个 session 都活在 tmux 里，所以当你回到工位，可以直接 `tmux attach` 继续同一个进程。
+Floka 让你在自己的电脑上运行编码 agent（**Claude Code** 与 **Pi** 都是一等运行时），然后从任何地方（手机、平板、另一台电脑）指挥它们。默认入口是自带的 **PWA Web 客户端**：一条安装命令跑完它就已经在跑了，设备扫码配对；手机可以走中继、Tailscale、局域网或你自己的域名（默认中继，但不是必选）。**Discord 是可选的** —— 安装时一个默认不勾的框，想要它的推送和按钮就勾上。每个 session 都活在 tmux 里，所以当你回到工位，可以直接 `tmux attach` 继续同一个进程。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
@@ -14,7 +14,7 @@ Claudestra 让你在自己的电脑上运行编码 agent（**Claude Code** 与 *
 
 ## 它解决什么问题
 
-Claude Code 是一个只能在终端里用的工具——不在电脑前你就用不了。Claudestra 在你本地的 session 前面搭了一道持久化的门（Discord 和/或 Web 应用），让你可以：
+Claude Code 是一个只能在终端里用的工具——不在电脑前你就用不了。Floka 在你本地的 session 前面搭了一道持久化的门（Discord 和/或 Web 应用），让你可以：
 
 - 从手机上跟任意一个正在运行的 Claude Code session 对话。
 - 并行跑多个 session，每个 session 对应一个独立的 Discord 频道。
@@ -46,7 +46,7 @@ Claude Code 是一个只能在终端里用的工具——不在电脑前你就�
         └──  每个 session 是一个原生 tab
 ```
 
-Claudestra 基于 Claude Code 的**原生 Channel 协议（MCP）**，不是屏幕抓取。Bridge 进程充当扇出层，把 Discord 消息路由到对应的 `channel-server` 实例，绕过了官方插件"一个 token 只能绑一个 session"的限制。
+Floka 基于 Claude Code 的**原生 Channel 协议（MCP）**，不是屏幕抓取。Bridge 进程充当扇出层，把 Discord 消息路由到对应的 `channel-server` 实例，绕过了官方插件"一个 token 只能绑一个 session"的限制。
 
 ## 功能
 
@@ -55,7 +55,7 @@ Claudestra 基于 Claude Code 的**原生 Channel 协议（MCP）**，不是屏�
 - **多前端 API（v2.6.0+）** — Discord 只是第一个前端。`GET /events` SSE 实时事件流（tool 调用 / 文本 / 状态）；`POST /api/v1/agents/:name/messages` 让外部用户凭 token 与圈定的 agent 对话（同步 wait / 传文件 / 审计镜像回 Discord）。网页端、Telegram bot 都基于同一套合同接入 —— 见 `docs/design-multi-frontend.md`。
 - **Agent 间通信** — `send_to_agent(target, text)` MCP 工具直接把消息注入到另一个 agent 的上下文。
 - **定时任务** — 声明式 cron 表达式，自动创建临时 agent、执行 prompt、通知 Discord、清理。
-- **跨 Claudestra 协作（HTTP peer）** — 两个 Claudestra 实例互为 API 客户端：各自给对方签一个**按 agent 圈定 scope 的 Bearer token**，不需要共享 Discord 服务器，也不需要第二个 bot。v2.15+ 起是**一键邀请**：勾选要开放的 agent、发一个串过去、对方粘贴即自动完成握手（一次性、24h 过期、可撤销；大总管永远不可分享）。之后任何 agent 都能 `send_to_agent({ target: "agent@peer" })` 跨机调用，回复自动 push 回调用方。开放范围 = token scope；`peer-http-remove` 撤销即时生效。双方都不需要公网 IP——任何私有通路都行（Tailscale 最省事，但非必须）。
+- **跨 Floka 协作（HTTP peer）** — 两个 Floka 实例互为 API 客户端：各自给对方签一个**按 agent 圈定 scope 的 Bearer token**，不需要共享 Discord 服务器，也不需要第二个 bot。v2.15+ 起是**一键邀请**：勾选要开放的 agent、发一个串过去、对方粘贴即自动完成握手（一次性、24h 过期、可撤销；大总管永远不可分享）。之后任何 agent 都能 `send_to_agent({ target: "agent@peer" })` 跨机调用，回复自动 push 回调用方。开放范围 = token scope；`peer-http-remove` 撤销即时生效。双方都不需要公网 IP——任何私有通路都行（Tailscale 最省事，但非必须）。
 - **管理按钮跳过 LLM** — 状态、监工、销毁、重启、定时任务等按钮由 Bridge 直接执行，零 token，瞬间响应。
 
 ### Web 客户端（v2.10+）
@@ -82,11 +82,11 @@ Discord 之外的第二道前门 —— 完全建立在多前端 API 之上的 *
 - **精确空闲检测** — 通过 Claude Code 的 `Stop` / `Notification` hooks 驱动 Discord typing indicator。
 
 ### 可靠性和运维
-- **自动更新（v1.3+，可配置 v1.4+）** — Claudestra 自身每 30 分钟查 GitHub；Claude Code CLI 每 7 天查一次。只在所有 agent 空闲时才升级。`bun src/manager.ts auto-update <target> on|off` 切换。
+- **自动更新（v1.3+，可配置 v1.4+）** — Floka 自身每 30 分钟查 GitHub；Claude Code CLI 每 7 天查一次。只在所有 agent 空闲时才升级。`bun src/manager.ts auto-update <target> on|off` 切换。
 - **重启电脑后保留（v1.7.9+）** — setup 时装好三个 launchd agent、登录即启；重启后 launcher 会自动把 registry 里所有 agent 用 `claude --resume` 拉回到原 Discord 频道。
 - **Session-idle Discord 按钮（v1.3+）** — Claude Code 弹出 resume 对话框时，Discord 收到三个按钮（从摘要恢复 / 恢复完整 / 不再询问）；master 自动确认保持常驻。
 - **Wedge 检测（v1.6+）** — agent 的 tmux pane 30 分钟没变化且非 idle → @你 + 一键 Esc / Ctrl+C 救回按钮。
-- **自我更新** — `bun src/manager.ts update` 做 `git pull` + 重载 Claudestra 自己那三个 launchd daemon（不碰机器上任何其它服务）。
+- **自我更新** — `bun src/manager.ts update` 做 `git pull` + 重载 Floka 自己那三个 launchd daemon（不碰机器上任何其它服务）。
 
 ### 可观测性
 - **Token 用量统计（v1.6+）** — `bun src/manager.ts cost [--agent <n>] [--today|--week]` 从 Claude Code 的 JSONL 汇总 per-agent / per-model 消耗。
@@ -208,7 +208,7 @@ bun src/manager.ts cron-history [name|id]
 bun src/manager.ts version                          # 当前版本 + 是否有新版
 bun src/manager.ts update                           # git pull + 重载 3 个 launchd daemon
 bun src/manager.ts auto-update status               # 查看自动更新开关
-bun src/manager.ts auto-update claudestra on|off    # Claudestra 自更新（30 分钟轮询）
+bun src/manager.ts auto-update claudestra on|off    # Floka 自更新（30 分钟轮询）
 bun src/manager.ts auto-update claude on|off        # Claude Code CLI 更新（周轮询）
 
 # 可观测性
@@ -226,7 +226,7 @@ bun src/manager.ts permissions reset <name>
 # Bot 邀请链接（v1.8.1+）
 bun src/manager.ts invite-link           # 给自己用的完整权限链接
 
-# 跨 Claudestra HTTP peer — 互签 scoped token，不需要共享 Discord 服务器
+# 跨 Floka HTTP peer — 互签 scoped token，不需要共享 Discord 服务器
 # 一键邀请（v2.15+，推荐）：A 生成、B 粘贴即完成——一次性、24h 有效
 bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <我方bridge地址>] [--force]        # A：打印一键邀请串
 bun src/manager.ts peer-join-auto '<邀请串>' [--agents <x,y>] [--force]                       # B：粘贴即自动握手
@@ -275,7 +275,7 @@ bun src/manager.ts install-cli
 
 | key | 用途 |
 |-----|------|
-| `autoUpdate.claudestra` | Claudestra 自更新，30 分钟轮询（默认 `true`） |
+| `autoUpdate.claudestra` | Floka 自更新，30 分钟轮询（默认 `true`） |
 | `autoUpdate.claudeCode` | Claude Code CLI 更新，周轮询（默认 `true`） |
 
 `~/.claude-orchestrator/` 下其他状态文件：`registry.json`（active agent）、`cron.json` + `cron-history.json`、`metrics.jsonl`。
