@@ -24,6 +24,8 @@ export interface PromptVars {
   template?: WorkflowTemplate;
   /** scheduler.json localMerge 项目：分支只在本机，交付本地提交，不 push、不开 PR；其余项目的说明逐字不变 */
   localMerge?: boolean;
+  /** scheduler.json mergeHandoff 项目：PR 先开草稿，交接时调度器转 ready（scheduler-merge-handoff-tick.ts）；仓库方收卡跳过草稿 */
+  mergeHandoff?: boolean;
 }
 
 const DEFAULT_TEMPLATE = `你是 {TASK}「{TITLE}」的执行者。PM 是 {PM}。审查由调度器另派一个跨模型的审查会话做，你不用自己找审查员。
@@ -56,6 +58,9 @@ const PR_DELIVER = "「开工 / 修复」单：做完 push，**开好 PR（base 
 const LOCAL_DELIVER = "「开工 / 修复」单：做完在分支 {BRANCH} 上 commit，**不 push、不开 PR**（本项目没有 PR 流程），" +
   "再用 deliver 工具（或 \`ledger deliver {TASK} --from build|fix --head <完整 sha>\`）交付，就结束这一轮。" +
   "head 是本机分支 {BRANCH} 的完整 sha，deliver 按它核对。调度器会自己派审、转修复，合并由 PM 在本机完成。";
+/** 自己的合并队列用 gh pr merge，草稿合不了：只有交给仓库方合并的项目才开草稿 */
+const HANDOFF_DELIVER = PR_DELIVER.replace("开好 PR（base main，已开过的不用重开）",
+  "开好 PR（草稿：\`gh pr create --draft\`；base main，已开过的不用重开；审查通过交给仓库方时调度器会转 ready，别自己转）");
 const PR_LINE = "push 分支和开 PR 可以。", LOCAL_LINE = "只 commit 到本卡分支，不 push、不开 PR。";
 
 export function renderExecPrompt(v: PromptVars, template: string = DEFAULT_TEMPLATE): string {
@@ -64,7 +69,7 @@ export function renderExecPrompt(v: PromptVars, template: string = DEFAULT_TEMPL
   };
   // ledger/prompts/exec-template.md 是整机一份、按 PR 流程写的，正文可能允许 push / 开 PR：localMerge 项目不用它，只用默认正文的本地版
   const body = v.localMerge ? DEFAULT_TEMPLATE.replace(PR_LINE, LOCAL_LINE) : template;
-  const auto = AUTO_SECTION.replace("{DELIVER_LINE}", () => (v.localMerge ? LOCAL_DELIVER : PR_DELIVER));
+  const auto = AUTO_SECTION.replace("{DELIVER_LINE}", () => (v.localMerge ? LOCAL_DELIVER : v.mergeHandoff ? HANDOFF_DELIVER : PR_DELIVER));
   // 一次替换：值里恰好有 {TASK} 这类字样也不会被二次展开
   return (body.trimEnd() + "\n" + auto + (v.template === "ui" ? UI_SECTION : "")).replace(/\{(TASK|TITLE|PM|BRANCH|BASE|WORKTREE|SPEC|LEDGER)\}/g, (m) => map[m] ?? m);
 }

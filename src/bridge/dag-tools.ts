@@ -293,6 +293,7 @@ function liveDeps(): DagToolDeps {
         return Object.hasOwn(c.projects, project) ? null : `调度服务没列项目 ${project}（scheduler.json projects）`;
       },
       localMerge: (project) => localMergeOf(project) !== null,
+      mergeHandoff: (project) => readSchedulerConfig().projects[project]?.mergeHandoff === true,
       template: () => (existsSync(statePath("ledger", "prompts", "exec-template.md")) ? readFileSync(statePath("ledger", "prompts", "exec-template.md"), "utf8") : null),
       placement: (db, q) => startPlacement(db, livePlacementIO(git), q),
     }),
