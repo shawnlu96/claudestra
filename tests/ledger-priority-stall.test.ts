@@ -108,7 +108,7 @@ test("PM retries are bounded; a success stops retries; failure details reach own
   expect(claim(t0 + W + 3 * 60_000)).toBeUndefined();
   const owner = claim(t0 + 2 * W + 2 * 60_000);
   expect(owner.action).toBe("owner");
-  expect(stallNotice(owner.basis, owner.cycle, t0 + 3 * W)).toContain("PM 通知：failed");
+  expect(stallNotice(owner.basis, owner.cycle, t0 + 3 * W)).toContain("卡上提醒：failed");
 });
 
 test("owner todo already open for this target is associated in a later cycle", () => {
@@ -145,7 +145,10 @@ test("unbound planned nodes inherit now and are monitored with precise dependenc
   const bases = priorityStallBases(db, project).filter((b) => b.taskId === null);
   expect(bases).toHaveLength(2);
   expect(bases.some((b) => b.why.includes("依赖没满足"))).toBe(true);
-  expect(claimPriorityStalls(db, ctx(t0 + W), project)).toHaveLength(3);
+  // STALLVER2: b only waits on a, so a is chased instead of b being reported again.
+  expect(bases.find((b) => b.nodeKey === "b")).toMatchObject({ eligible: false, block: { kind: "deps", on: ["a"] } });
+  expect(bases.find((b) => b.nodeKey === "a")).toMatchObject({ eligible: true, impact: ["ab12-work/b"] });
+  expect(claimPriorityStalls(db, ctx(t0 + W), project)).toHaveLength(2);
 });
 
 test("threshold requires owner, validates bounds and records the change", () => {
@@ -171,7 +174,7 @@ test("CLI writer: identical request replays; rev CAS and changed dedup payload r
   expect(priorityStallRevision(db, project, b.key)).toBeGreaterThan(0);
 });
 
-test("isolated scheduler tick uses real CLI writer; observe emits zero notices/asks, on follows heal→PM→owner", async () => {
+test("isolated scheduler tick uses real CLI writer; observe emits zero notes/asks, on follows heal→note→owner", async () => {
   let now = t0 + W, notices = 0;
   const config = { enabled: true, autoDispatch: true, projects: { [project]: { maxActiveWorkers: 3 } } } as unknown as SchedulerConfig;
   const manager = async (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: [project], now: () => now,
@@ -181,12 +184,13 @@ test("isolated scheduler tick uses real CLI writer; observe emits zero notices/a
   expect(await priorityStallTick(db, config, ports)).toEqual([]);
   now += W; expect(await priorityStallTick(db, config, ports)).toEqual([]);
   now += W; expect(await priorityStallTick(db, config, ports)).toEqual([]);
-  expect(notices).toBe(0); expect(listAsks(db, { project })).toHaveLength(0);
+  const notes = () => listEvents(db).filter((e) => e.data.namespace === "priority-stall-note");
+  expect(notices).toBe(0); expect(notes()).toHaveLength(0); expect(listAsks(db, { project })).toHaveLength(0);
   mode("on", 2, now);
   expect(await priorityStallTick(db, config, ports)).toEqual([]);
-  expect(notices).toBe(1);
+  expect(notices).toBe(0); expect(notes()).toHaveLength(1);
   expect(await priorityStallTick(db, config, ports)).toEqual([]);
-  expect(notices).toBe(1);
+  expect(notices).toBe(0); expect(notes()).toHaveLength(1);
   now += W;
   expect(await priorityStallTick(db, config, ports)).toEqual([]);
   expect(listAsks(db, { project })).toHaveLength(1);

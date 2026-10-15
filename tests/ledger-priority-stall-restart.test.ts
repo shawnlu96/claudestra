@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
+import { openLedger, closeLedger, listEvents } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { setPriority, setPriorityMode } from "../src/lib/ledger-priority-write.js";
 import { claimPriorityStalls, finishPriorityStall, priorityStallOwner } from "../src/lib/ledger-priority-stall-store.js";
@@ -44,11 +44,12 @@ test("disk restart and independent connections retain one heal claim; query_only
       loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {} });
     const config = { enabled: true, autoDispatch: true, projects: { [project]: { maxActiveWorkers: 3 } } } as unknown as SchedulerConfig;
     const ports = { manager, active: () => {}, now: () => now, notify: async () => { notices++; } };
+    const notes = () => listEvents(writer).filter((e) => e.data.namespace === "priority-stall-note");
     now += 60_000;
     expect(await priorityStallTick(reader, config, ports)).toEqual([]);
-    expect(notices).toBe(1);
+    expect(notices).toBe(0); expect(notes()).toHaveLength(1);
     expect(await priorityStallTick(reader, config, ports)).toEqual([]);
-    expect(notices).toBe(1);
+    expect(notices).toBe(0); expect(notes()).toHaveLength(1);
     now += W;
     // Simulate a restart after owner claim but before the atomic owner-ask transaction.
     const owner = claimPriorityStalls(writer, ctx(), project)[0];
