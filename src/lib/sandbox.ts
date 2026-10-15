@@ -10,6 +10,9 @@ import { existsSync, realpathSync, statSync } from "fs";
 import { dirname, join, relative, resolve, isAbsolute, basename } from "path";
 import { installOutboundGuard } from "./sandbox-outbound.js";
 import { piStateDirProblem } from "./sandbox-pi-fs.js";
+import { FlokaIsolationConflict, readIsolationEnv } from "./floka-env/read.js";
+import { suffixOf } from "./floka-env/names.js";
+import { productionRoots } from "./floka-env/roots.js";
 import {
   isLab, LAB_FLAG, labConfigProblems, labInstancePortsOf, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrl, labRelayUrlProblem, LAB_ROOT_ENV,
   readLabInstances,
@@ -34,13 +37,23 @@ class SandboxViolation extends Error {
   }
 }
 
+/** 隔离变量（旧名常量）：FLOKA_ 同名也认、不看改名档位；两名冲突当沙箱违规拒绝（lib/floka-env/read.ts） */
+function iso(key: string, env: Env): string {
+  try {
+    return (readIsolationEnv(suffixOf(key), env) || "").trim();
+  } catch (e) {
+    if (e instanceof FlokaIsolationConflict) throw new SandboxViolation([e.message]);
+    throw e;
+  }
+}
+
 /**
  * 只认 1（开）与空 / 0（关）；写成 true / yes 之类直接报错——悄悄当成「关」就是带着沙箱意图跑生产。
  * 沙箱关着却带了 lab 开关（任何非空、非 0 的值）也报错：所有闸都先问这里，在这儿短路就等于 lab 意图按生产跑
  */
 export function isSandbox(env: Env = process.env): boolean {
-  const v = (env[SANDBOX_FLAG] || "").trim();
-  const lab = (env[LAB_FLAG] || "").trim();
+  const v = iso(SANDBOX_FLAG, env);
+  const lab = iso(LAB_FLAG, env);
   if ((v === "" || v === "0") && lab !== "" && lab !== "0") {
     throw new SandboxViolation([`${LAB_FLAG}=${lab} 但沙箱没开（${SANDBOX_FLAG}=${v || "空"}）：lab 只能和 ${SANDBOX_FLAG}=1 一起用`]);
   }
@@ -84,7 +97,7 @@ export function pathsOverlap(a: string, b: string): boolean {
 }
 
 function denyPorts(env: Env): number[] {
-  return (env[SANDBOX_DENY_PORTS_ENV] || "").split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+  return iso(SANDBOX_DENY_PORTS_ENV, env).split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
 }
 
 /** 生产端口 = 默认端口（调用方传 lib/bridge-url.ts 的 DEFAULT_BRIDGE_PORT）+ 生产改过的；清单可以缺，默认端口永远在 */
@@ -93,7 +106,7 @@ function productionPorts(defaultPort: number, env: Env): number[] {
 }
 
 export function denyDirs(env: Env): string[] {
-  return (env[SANDBOX_DENY_DIRS_ENV] || "").split(":").map((s) => s.trim()).filter(Boolean);
+  return iso(SANDBOX_DENY_DIRS_ENV, env).split(":").map((s) => s.trim()).filter(Boolean);
 }
 
 /**
@@ -114,18 +127,26 @@ export interface DirCheck {
 }
 
 /**
- * 状态 / 运行目录必须显式 override，且与生产目录（默认值 + 生产改过的，见 SANDBOX_DENY_DIRS_ENV）互不包含
- * ——放在生产目录里面也算写生产。纯函数；lib/paths.ts 在模块加载时经 enforceSandboxProcess 调。
+ * 状态 / 运行目录必须显式 override，且与生产目录（两套默认根 + 生产改过的，见 SANDBOX_DENY_DIRS_ENV）互不包含
+ * ——放在生产目录里面也算写生产。旧名、FLOKA_ 新名设了哪个都算 override，两名冲突也拒。lib/paths.ts 经 enforceSandboxProcess 调。
  */
 export function sandboxDirProblems(c: DirCheck): string[] {
   const out: string[] = [];
-  const prod = [c.defaultStateDir, c.defaultRuntimeDir, ...denyDirs(c.env)];
+  const prod = [...productionRoots(c.defaultStateDir, c.defaultRuntimeDir), ...denyDirs(c.env)];
   const pairs: Array<[string, string, string]> = [
     ["CLAUDESTRA_STATE_DIR", c.stateDir, "状态目录"],
     ["CLAUDESTRA_RUNTIME_DIR", c.runtimeDir, "运行目录"],
   ];
   for (const [key, dir, label] of pairs) {
-    if (!(c.env[key] || "").trim()) {
+    let set: string | undefined;
+    try {
+      set = readIsolationEnv(suffixOf(key), c.env)?.trim();
+    } catch (e) {
+      if (!(e instanceof FlokaIsolationConflict)) throw e;
+      out.push(e.message);
+      continue;
+    }
+    if (!set) {
       out.push(`${key} 没设：${label}会落到生产目录`);
       continue;
     }
@@ -260,7 +281,7 @@ export function sandboxRelayUrlProblem(url: string, env: Env = process.env): str
 export function sandboxPeerUrlProblem(url: string | undefined, env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
   if (!isLab(env)) return "沙箱不建 peer";
-  return url ? labPeerUrlProblem(url, readLabInstances((env[LAB_ROOT_ENV] || "").trim(), SANDBOX_MARKER)) : null;
+  return url ? labPeerUrlProblem(url, readLabInstances(iso(LAB_ROOT_ENV, env), SANDBOX_MARKER)) : null;
 }
 
 /** 沙箱里收的推送订阅 endpoint：非 lab 一律拒，lab 只认假推送端点。非沙箱 null（生产照旧按 lib/push-endpoint.ts） */
@@ -277,7 +298,7 @@ export function sandboxPushEndpointProblem(endpoint: string, env: Env = process.
  */
 export function sandboxAgentDirProblem(dir: string, env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
-  const root = (env[SANDBOX_ROOT_ENV] || "").trim();
+  const root = iso(SANDBOX_ROOT_ENV, env);
   if (!root) return `沙箱没设 ${SANDBOX_ROOT_ENV}，不知道 agent 该建在哪（用 scripts/sandbox.ts 起沙箱）`;
   // 按原样判断，不做 trim：判断的必须就是 tmux -c 收到的那个字符串（规范化见 normalizeSandboxAgentDir）
   if (dir.startsWith("~") && dir !== "~" && !dir.startsWith("~/")) return `沙箱不认 ${dir} 这种 ~user 写法，写绝对路径`;
@@ -310,7 +331,7 @@ export function normalizeSandboxAgentDir(dir: string, env: Env = process.env): s
  */
 export function sandboxCodexHomeProblem(env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
-  const root = (env[SANDBOX_ROOT_ENV] || "").trim();
+  const root = iso(SANDBOX_ROOT_ENV, env);
   const home = (env.CODEX_HOME || "").trim();
   if (!root || !isAbsolute(root)) return `沙箱没设绝对路径的 ${SANDBOX_ROOT_ENV}，不知道 Codex 的根该在哪`;
   if (!home) return "沙箱里没设 CODEX_HOME：Codex 会话 / 凭据会回落到宿主 ~/.codex（用 scripts/sandbox.ts 起沙箱）";
@@ -358,7 +379,7 @@ export function sandboxPiAgentDir(root: string | undefined): string {
  */
 export function sandboxPiAgentDirProblem(env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
-  const root = (env[SANDBOX_ROOT_ENV] || "").trim();
+  const root = iso(SANDBOX_ROOT_ENV, env);
   if (!root || !isAbsolute(root)) return `沙箱没设绝对路径的 ${SANDBOX_ROOT_ENV}，不知道 Pi 的目录该在哪`;
   const want = sandboxPiAgentDir(root);
   const got = env.PI_CODING_AGENT_DIR ?? "";
