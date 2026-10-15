@@ -12,7 +12,7 @@ import { clearDraft, loadDraft, saveDraft } from "../drafts";
 import { agentSkills } from "@/lib/api/chat";
 import { skillUsed } from "@/lib/api/settings";
 import { transcribe } from "@/lib/api/system";
-import { PendingFiles } from "./pending-files";
+import { PendingFiles } from "./pending-files"; import { useAttachmentIntake } from "@/lib/chat/attachment-normalize-intake";
 import { sendComposed, useComposerBus } from "../form-sync";
 import { useMention } from "../use-mention";
 import { MentionLayer } from "./mention-layer";
@@ -393,41 +393,13 @@ export function Composer() {
     if (active) clearDraft(active);
   };
 
-  const addFiles = (picked: File[]) => {
-    if (!picked.length) return;
-    setFiles((prev) => [...prev, ...picked].slice(0, MAX_FILES));
-  };
+  // 选择文件与粘贴共用：先归一化（补类型 / 拦空壳和超限）再进待发列表（lib/chat/attachment-normalize-intake.ts）
+  const { addFiles, notice: attachNotice, dismissNotice } = useAttachmentIntake({ disabled, max: MAX_FILES, taRef, setFiles });
 
   const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
     addFiles(Array.from(e.target.files || []));
     e.target.value = ""; // 允许再次选择同一文件
   };
-
-  // 粘贴带文件（截图 / 复制的文件）→ 附件。窗口级监听:桌面端焦点常常不在
-  // 输入框(刚点完消息/侧栏),Ctrl+V 也要能收(owner 2026-07-24)。纯文本粘贴
-  // files 为空不受影响;焦点在别的输入框(搜索/弹窗)时不劫持它的粘贴。
-  useEffect(() => {
-    if (disabled) return;
-    const onWindowPaste = (e: ClipboardEvent) => {
-      const picked = Array.from(e.clipboardData?.files ?? []);
-      if (!picked.length) return;
-      const ae = document.activeElement;
-      const isOtherInput =
-        ae &&
-        ae !== taRef.current &&
-        (ae instanceof HTMLInputElement ||
-          ae instanceof HTMLTextAreaElement ||
-          (ae as HTMLElement).isContentEditable);
-      if (isOtherInput) return;
-      e.preventDefault();
-      addFiles(picked);
-      taRef.current?.focus();
-    };
-    window.addEventListener("paste", onWindowPaste);
-    return () => window.removeEventListener("paste", onWindowPaste);
-    // addFiles 只调 setFiles 函数式更新,闭包旧引用无害
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [disabled]);
 
   // 触屏设备（pointer: coarse）：Enter/换行键 = 换行，发送只走按钮——手机键盘的
   // 「换行」键就该换行（2026-07-13 owner）。桌面保持 Enter 发送、Shift+Enter 换行。
@@ -547,7 +519,7 @@ export function Composer() {
           )}
 
           <PendingFiles
-            files={files}
+            files={files} notice={attachNotice} onDismissNotice={dismissNotice}
             onRemove={(i) =>
               setFiles((prev) => prev.filter((_, idx) => idx !== i))
             }
