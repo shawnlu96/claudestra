@@ -3,6 +3,7 @@ import type { RecoveryKey } from "./recovery-policy.js";
 type RecoveryRiskClass = "safety" | "permission" | "delete-data" | "schema";
 const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRiskClass; reason: string }>> = {
   askDefaultAll: { class: "permission", reason: "按默认方案自动批准提问与规格文件扩围" },
+  askScopeAuto: { class: "permission", reason: "调度器自动批机械类扩围" },
   authorRebuild: { class: "permission", reason: "依据退役证明重建作者并重新指派" },
   cardProcReap: { class: "delete-data", reason: "回收卡片进程及其运行资源" },
   centerDeployAuto: { class: "permission", reason: "按 owner 授权卡自动部署私仓中心" },

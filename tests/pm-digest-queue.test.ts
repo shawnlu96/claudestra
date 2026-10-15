@@ -29,13 +29,13 @@ const owner = (text = "owner 问进度") => env({ kind: "user", userId: "u", cha
 const execMsg = (text = "执行者问 PM") => env({ kind: "local", agentName: "agent-x", channelId: "ch-x", ws }, text, false);
 const sync = (text = "agents-A1 进度：写完了一半") => env({ kind: "local", agentName: "agent-w", channelId: "ch-w", ws }, text);
 
-function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(), "pm-digest-")), pull: "on" | "off" = "off") {
+async function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(), "pm-digest-")), pull: "on" | "off" = "off") {
   dirs.push(dir);
   const db = openLedger(join(dir, "ledger.sqlite"));
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM] });
   const store = new PmDigestStore(join(dir, "pm-digest.json"), join(dir, "pm-digest-mode.json"));
-  if (mode) store.setMode(P, mode);
-  store.setPullMode(P, pull);
+  if (mode) await store.setMode(P, mode);
+  await store.setPullMode(P, pull);
   let clock = 1_000_000;
   const sent: { content: string; to: string; id: string }[] = [];
   let outcome: Delivery["outcome"] = { kind: "sent" };
@@ -62,7 +62,7 @@ function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(),
 }
 
 test("on: mergeable is not delivered; the next immediate message carries the digest first, then the body, and empties the queue", async () => {
-  const w = world("on");
+  const w = await world("on");
   const r1 = await w.send(sched("T1")), r2 = await w.send(sync());
   expect(r1.outcome).toEqual({ kind: "sent", note: "digest" });
   expect(r2.outcome).toEqual({ kind: "sent", note: "digest" });
@@ -81,7 +81,7 @@ test("on: mergeable is not delivered; the next immediate message carries the dig
 });
 
 test("on: only mergeable → one standalone digest once the oldest has waited a full window", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS - 1000);
   await w.send(sync());
@@ -97,7 +97,7 @@ test("on: only mergeable → one standalone digest once the oldest has waited a 
 });
 
 test("on: repeated reminders for the same card from the same source collapse to one line with a count", async () => {
-  const w = world("on");
+  const w = await world("on");
   for (let i = 0; i < 3; i++) await w.send(sched("T1"));
   await w.send(sched("T2"));
   await w.send(execMsg());
@@ -110,7 +110,7 @@ test("on: repeated reminders for the same card from the same source collapse to 
 });
 
 test("on: a failed / offline immediate delivery keeps the queue and leaves the body untouched", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   for (const o of [{ kind: "error", error: new Error("x") }, { kind: "dropped", reason: "offline" }] as Delivery["outcome"][]) {
     w.setOutcome(o);
@@ -126,7 +126,7 @@ test("on: a failed / offline immediate delivery keeps the queue and leaves the b
 });
 
 test("digest goes after the PM transfer header and is never stacked on a replayed envelope", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   const e = execMsg("正文") as Envelope & { pmTransfer?: { header: string } };
   e.pmTransfer = { header: "[系统转交：原收件人 agent-old；当班 PM agent-pm]" };
@@ -149,7 +149,7 @@ test("observe: delivery sequence identical to no digest at all, only records add
   const plain: unknown[] = [];
   for (const e of inputs()) plain.push(JSON.stringify(e));
   for (const mode of ["observe", "off"] as const) {
-    const w = world(mode), envs = inputs(), got: Delivery[] = [];
+    const w = await world(mode), envs = inputs(), got: Delivery[] = [];
     for (const e of envs) got.push(await w.send(e));
     expect(got.map((d) => d.outcome)).toEqual(envs.map(() => ({ kind: "sent" })));
     expect(w.sent.map((s) => s.content)).toEqual(envs.map((e) => e.content));
@@ -163,7 +163,7 @@ test("observe: delivery sequence identical to no digest at all, only records add
 });
 
 test("messages to anyone but the active PM pass through untouched and unrecorded", async () => {
-  const w = world("on");
+  const w = await world("on");
   const e = sched("T1");
   e.to = workerTo;
   await w.send(e);
@@ -172,7 +172,7 @@ test("messages to anyone but the active PM pass through untouched and unrecorded
 });
 
 test("bridge restart: queued entries survive and are delivered exactly once (with the next immediate, or by the window)", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   await w.send(sync());
   w.restart();
@@ -182,7 +182,7 @@ test("bridge restart: queued entries survive and are delivered exactly once (wit
   await w.send(execMsg("again"));
   expect(w.sent[1]!.content).toBe("again");
 
-  const v = world("on");
+  const v = await world("on");
   await v.send(sched("T9"));
   v.restart();
   await v.tick(); // 窗口没到：不送也不丢
@@ -196,7 +196,7 @@ test("bridge restart: queued entries survive and are delivered exactly once (wit
 });
 
 test("a standalone digest held in the PM's queue blocks new ones for a window; an empty replay is dropped", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS);
   w.setOutcome({ kind: "sent", note: "queued" });
@@ -213,16 +213,16 @@ test("a standalone digest held in the PM's queue blocks new ones for a window; a
 });
 
 test("switching away from on flushes what is left right away", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
-  w.store.setMode(P, "off");
+  await w.store.setMode(P, "off");
   await w.tick();
   expect(w.sent.some((s) => s.content.includes("T1"))).toBe(true);
   expect(w.store.queued(P)).toEqual([]);
 });
 
 test("stats: last 24h counts of immediate vs mergeable with source distribution", async () => {
-  const w = world("observe");
+  const w = await world("observe");
   await w.send(sched("T1"));
   await w.send(sched("T2"));
   await w.send(execMsg());
@@ -232,7 +232,7 @@ test("stats: last 24h counts of immediate vs mergeable with source distribution"
 });
 
 test("concurrent immediates (and a window tick racing them) carry the digest exactly once", async () => {
-  const w = world("on"), order = createKeyedSerial();
+  const w = await world("on"), order = createKeyedSerial();
   const slow = (e: Envelope, t: LocalEndpoint) => order(t.channelId, async () => { await Bun.sleep(5); return w.raw(e, t); });
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS);
@@ -243,7 +243,7 @@ test("concurrent immediates (and a window tick racing them) carry the digest exa
 });
 
 test("the window digest uses the startup sender, not a held replay's withdrawn closure", async () => {
-  const w = world("on");
+  const w = await world("on");
   const withdrawn = async (e: Envelope): Promise<Delivery> => ({ envelope: e, outcome: { kind: "dropped", reason: "已从押后队列撤下" } });
   await w.send(execMsg("押后重投"), withdrawn); // 最近一次投递是一条已撤下的押后条目
   await w.send(sched("T1"));
@@ -255,7 +255,7 @@ test("the window digest uses the startup sender, not a held replay's withdrawn c
 });
 
 test("the digest envelope is never queued again even in on mode (no self loop)", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS);
   await w.tick();
@@ -265,7 +265,7 @@ test("the digest envelope is never queued again even in on mode (no self loop)",
 });
 
 test("corrupt state: writers refuse to overwrite, the message goes out immediately instead of being swallowed", async () => {
-  const w = world("on");
+  const w = await world("on");
   const path = join(w.dir, "pm-digest.json");
   writeFileSync(path, "{not json");
   const r = await w.send(sched("T1"));
@@ -273,7 +273,7 @@ test("corrupt state: writers refuse to overwrite, the message goes out immediate
   expect(w.sent).toHaveLength(1);
   expect(readFileSync(path, "utf-8")).toBe("{not json");
   writeFileSync(join(w.dir, "pm-digest-mode.json"), "[]");
-  expect(() => w.store.setMode(P, "on")).toThrow("拒绝覆盖");
+  await expect(w.store.setMode(P, "on")).rejects.toThrow("拒绝覆盖");
   expect(readFileSync(join(w.dir, "pm-digest-mode.json"), "utf-8")).toBe("[]");
 });
 
@@ -285,7 +285,7 @@ function inboxAck(held: HeldQueue): Envelope[] {
 }
 
 test("held-inbox: a held immediate carries its digest on disk; after a restart the inbox ack settles it and the window never resends", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
   await w.send(execMsg("正文"));
@@ -303,7 +303,7 @@ test("held-inbox: a held immediate carries its digest on disk; after a restart t
 });
 
 test("held-inbox: entries added while the carrier was re-held in memory only (not on disk) go back to the queue on settle", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
   const e = execMsg("正文");
@@ -328,7 +328,7 @@ function inboxAckOne(held: HeldQueue, threadId: string): void {
 }
 
 test("carrier-id: two held clicks sharing a messageId each settle only their own digest, across a restart", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
   const a = execMsg("点击 A"), b = { ...execMsg("点击 B"), meta: { ...a.meta, threadId: "click-b" } };
@@ -350,7 +350,7 @@ test("carrier-id: two held clicks sharing a messageId each settle only their own
 });
 
 test("pm-switch-inbox: the former PM acking its own held chat hands the carried digest back to the on-duty PM", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
   await w.send(execMsg("给 A 的直聊"));
@@ -366,7 +366,7 @@ test("pm-switch-inbox: the former PM acking its own held chat hands the carried 
 });
 
 test("held-inbox: a held carrier that is discarded or vanished returns its entries to the queue (never swallowed)", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
   await w.send(execMsg("正文"));
@@ -377,7 +377,7 @@ test("held-inbox: a held carrier that is discarded or vanished returns its entri
   w.held().discard("ch-pm");
   expect(w.store.queued(P)).toHaveLength(1);
 
-  const v = world("on");
+  const v = await world("on");
   await v.send(sched("T9"));
   v.setOutcome({ kind: "sent", note: "queued" });
   await v.send(execMsg("正文"));
@@ -389,7 +389,7 @@ test("held-inbox: a held carrier that is discarded or vanished returns its entri
 });
 
 test("corrupt-state: malformed queue elements count as corrupt — the message still goes out immediately", async () => {
-  const w = world("on");
+  const w = await world("on");
   const path = join(w.dir, "pm-digest.json");
   writeFileSync(path, JSON.stringify({ queue: [null], log: [] }));
   const r = await w.send(execMsg("正文"));
@@ -401,8 +401,8 @@ test("corrupt-state: malformed queue elements count as corrupt — the message s
 });
 
 test("pull (default): mergeable stays queued for ledger pm-digest --list; immediates go out untouched; the window never sends; 24h later it expires", async () => {
-  const w = world("on", undefined, "on");
-  w.store.setPullMode(P, "on");
+  const w = await world("on", undefined, "on");
+  await w.store.setPullMode(P, "on");
   await w.send(sched("T1"));
   const o = owner("开发咋样了"), x = execMsg("执行者问 PM");
   await w.send(o);
@@ -419,7 +419,7 @@ test("pull (default): mergeable stays queued for ledger pm-digest --list; immedi
 });
 
 test("push mode: an owner / peer message never carries the digest; the next executor message does", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   const o = owner("开发咋样了");
   await w.send(o);

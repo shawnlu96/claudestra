@@ -217,7 +217,7 @@ test("N8A8 r1：点进没详情的 feature → 立刻重拉一轮（不等台账
   await following;
 });
 
-test("TEAMCNT1 3 个 feature、首轮其中 1 个详情 429：本轮结束 last().failed 就有它，计数不用等下一轮（unread 0、missing 1）；读成功后移出 failed", async () => {
+test("TEAMCNT1 / CNTGATE1 3 个 feature、首轮其中 1 个详情 429：本轮结束 last().failed 就有它，但计数照样要等它（unread 1、missing 1）；读成功后移出 failed、unread 归 0", async () => {
   const w = world();
   w.setList((l) => ({ ...l, features: l.features.slice(0, 3) }));
   const bad = w.fx.list.features[2]!.id;
@@ -227,7 +227,7 @@ test("TEAMCNT1 3 个 feature、首轮其中 1 个详情 429：本轮结束 last(
   expect([...got.failed]).toEqual([bad]);
   expect(got.waiting.size).toBe(0);
   expect(got.details.size).toBe(2);
-  expect(unreadFeatures(w.src)).toBe(0);
+  expect(unreadFeatures(w.src)).toBe(1);
   expect(missingFeatures(w.src)).toBe(1);
   // 下一轮（退避过后）读成功：移出 failed，缺的补齐
   w.reject(null);
@@ -235,9 +235,10 @@ test("TEAMCNT1 3 个 feature、首轮其中 1 个详情 429：本轮结束 last(
   await w.round();
   expect(w.src.last()!.failed.size).toBe(0);
   expect(missingFeatures(w.src)).toBe(0);
+  expect(unreadFeatures(w.src)).toBe(0);
 });
 
-test("TEAMCNT1 429 停发：同轮排在后面、没发请求的 feature 也进 failed（不是排队 waiting）", async () => {
+test("TEAMCNT1 / CNTGATE1 429 停发：同轮排在后面、没发请求的 feature 也进 failed（不是排队 waiting），计数照样等它们", async () => {
   const w = world();
   w.setList((l) => ({ ...l, features: l.features.slice(0, 6) }));
   const first = w.fx.list.features[0]!.id;
@@ -247,6 +248,7 @@ test("TEAMCNT1 429 停发：同轮排在后面、没发请求的 feature 也进 
   expect(got.failed.has(first)).toBe(true);
   // 2 路并发：一路 429 后本轮停发，剩下没发的都算本轮没拉到
   expect(got.details.size + got.failed.size).toBe(6);
-  expect(unreadFeatures(w.src)).toBe(0);
+  expect(unreadFeatures(w.src)).toBe(got.failed.size);
+  expect(unreadFeatures(w.src)).toBeGreaterThan(0);
   for (const id of got.failed) expect(got.waiting.has(id)).toBe(false);
 });

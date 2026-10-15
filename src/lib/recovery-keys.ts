@@ -7,6 +7,7 @@
 export const RECOVERY_KEYS = [
   "askDefaultAll",
   "askReminder",
+  "askScopeAuto",
   "audit",
   "auditEscalate",
   "auditIdleFacts",
@@ -80,6 +81,7 @@ export const RECOVERY_KEYS = [
   "placementReservations",
   "planGap",
   "pmRails",
+  "pmTodoPull",
   "poolIdleSkip",
   "privateMergeNarrow",
   "privateRepoMerge",

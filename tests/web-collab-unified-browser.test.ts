@@ -268,6 +268,25 @@ const tree = (page: Page) => page.evaluate(`(() => {
     walk(f.child, next); } };
   walk(window.__fiberRoot?.current, []); return out; })()`) as Promise<string[]>;
 
+async function productReady(page: Page, mobile: boolean) {
+  // PDVIEW1 的远景隐藏卡片明细；桌面用仍可见的标题等候产品板，手机列表继续检查状态明细。
+  const ready = mobile
+    ? page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ })
+    : page.locator("main [data-pd-title]").filter({ hasText: "A 机的 feature" });
+  await ready.first().waitFor();
+  if (!mobile) {
+    // 标题先于 usePort 的首次测量出现；两入口都等摆放和降级过渡结束，才比较同一时刻的可见文本。
+    await page.waitForFunction(`(() => {
+      const world = document.querySelector('main [data-pd-mode]');
+      if (!world) return false;
+      const m = new DOMMatrix(getComputedStyle(world).transform);
+      return m.a < 1 && (m.e !== 0 || m.f !== 0);
+    })()`);
+    await page.evaluate(`Promise.allSettled([...document.querySelector('main [data-pd-mode]').getAnimations({ subtree: true })]
+      .filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))`);
+  }
+}
+
 for (const width of [1280, 390]) {
   const mobile = width < 640;
   test(`${width}：未绑定 / 个人 / 同名本机项目走本机，已绑定（主场机）项目组入口 = N5 列表同 key、同视图，不探本机台账`, async () => {
@@ -296,14 +315,14 @@ for (const width of [1280, 390]) {
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await page.getByText("B 机的 feature", { exact: false }).first().waitFor();
     expect(await tree(page)).toEqual(["CollabSwitch>SharedCollabContent>TeamSource>CollabView"]);
-    await page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ }).first().waitFor();
+    await productReady(page, mobile);
     const viaGroup = await page.locator("main").innerText();
     await shot(page, "3-bound-home-view", width);
     if (mobile) await page.getByRole("button", { name: "返回", exact: true }).click();
     await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
     expect(await opened(page)).toBe(n5Key("mac-a"));
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
-    await page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ }).first().waitFor();
+    await productReady(page, mobile);
     expect(await page.locator("main").innerText()).toBe(viaGroup);
     expect({ paths: [...new Set(ledgerHits("claudestra"))], atMostTwo: ledgerHits("claudestra").length <= 2 }) // UXNUM1：主场本机的卡读本机 /work，只这一条；两个入口各挂载一次 → 至多 2 次
       .toEqual({ paths: ["mac-a /ledger/claudestra/work"], atMostTwo: true });

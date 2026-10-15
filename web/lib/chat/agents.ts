@@ -1,5 +1,5 @@
 import { loadUnreadCounts } from "@/lib/push/unread-counts";
-import { api } from "@/lib/api/client";
+import { apiCached } from "@/lib/etag-cache";
 import type { LpState } from "@/lib/api/fleet";
 
 /** Autopilot（src/lib/missions.ts 的 Mission 子集，bridge GET /agents 的 mission 字段）：until / resumeAt 是 ISO */
@@ -226,7 +226,7 @@ function mapAgent(a: ApiAgent): AgentSession {
 /** signal / timeoutMs 由 features/chat/agent-list-loader.ts 给（可取消、超时见 AGENT_LIST_TIMEOUT_MS）；缺省保持原 5s */
 export async function loadAgents(signal?: AbortSignal, timeoutMs = 5000): Promise<AgentSession[]> {
   const [json, counts] = await Promise.all([
-    api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs, signal }),
+    apiCached<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs, signal }), // 没变回 304（lib/etag-cache.ts）
     loadUnreadCounts(signal, timeoutMs > 0 ? Math.min(timeoutMs, 1000) : 1000),
   ]);
   const all = (json.agents || []).filter((a) => !/^agent-master$/.test(String(a.name || "")));

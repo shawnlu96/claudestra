@@ -6,15 +6,20 @@ import v from "./v4.module.css";
 
 const MORE = { right: "还有 {n} 件在右边 →", down: "下面还有 {n} 件 ↓", left: "← 左边还有 {n} 件", up: "↑ 上面还有 {n} 件" } as const;
 
-export function ViewportTools({ vp, tr }: { vp: Pick<ReturnType<typeof useViewport>, "bump" | "fitAll" | "pan" | "off">; tr: Tr }) {
+export function ViewportTools({ vp, tr, right }: {
+  vp: Pick<ReturnType<typeof useViewport>, "bump" | "fitAll" | "pan" | "off">; tr: Tr; right?: { n: number; text: string };
+}) {
   const { bump, fitAll, pan, off } = vp;
   return (
     <>
       <div className={v.tools}>
         <button type="button" className={`${v.tool} ${bump ? v.bump : ""}`} onClick={fitAll}>{tr("适配全部")}</button>
       </div>
-      {off && (Object.keys(MORE) as (keyof typeof MORE)[]).filter((d) => off[d] > 0).map((d) => (
-        <button key={d} type="button" className={`${v.more} ${v[`more_${d}`]} ${bump ? v.beckon : ""}`} onClick={() => pan(d)}>{tr(MORE[d], { n: off[d] })}</button>
+      {off && (Object.keys(MORE) as (keyof typeof MORE)[]).filter((d) => (d === "right" && right ? right.n : off[d]) > 0).map((d) => (
+        <button key={d} type="button" data-pd-right={d === "right" && right ? true : undefined} className={`${v.more} ${v[`more_${d}`]} ${bump ? v.beckon : ""}`}
+          onClick={() => pan(d)}>
+          {tr(d === "right" && right ? `${right.text} →` : MORE[d], { n: d === "right" && right ? right.n : off[d] })}
+        </button>
       ))}
     </>
   );

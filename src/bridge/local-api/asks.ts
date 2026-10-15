@@ -18,6 +18,7 @@ import { canReadLedger } from "../../lib/devices.js";
 import { getAsk, type Ask, type NewAsk } from "../../lib/ledger-asks.js";
 import { getTask } from "../../lib/ledger-store.js";
 import { agentInScope, isOwnerPrincipal, type Principal } from "../../lib/principals.js";
+import { conditionalJson } from "../../lib/etag.js";
 import { apiJson, forbidden } from "../api-respond.js";
 import { dismissFromCard } from "../ask-dismiss.js";
 import { answerFromCard } from "../ask-entry.js";
@@ -75,13 +76,15 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
   if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
   try {
     // 台账读不了的（guest）只查指给自己的，别让别人的 200 条把它挤掉
-    const rows = listForWeb((a) => canSeeAsk(principal, a), project, ledger ? undefined : assigneesOf(principal));
+    const history = new URL(req.url).searchParams.get("history") === "1"; // 抽屉点「更多」才要更早结案的（asks.ts listForWeb）
+    const rows = listForWeb((a) => canSeeAsk(principal, a), project, ledger ? undefined : assigneesOf(principal), history);
     const views = await Promise.all(rows.map((a) => displaySharedAsk(a, principal.id)));
     const asks = withTaskTitles(views.map((a): Ask & { canAnswer: boolean } => ({
       ...a, canAnswer: !(sharedAskMapping(a) && a.extra.displayStale === true) && canAnswerAsk(principal, a),
     })), (id) => { const db = askReadDb(); return db ? getTask(db, id)?.title : null; }, ledger);
     // full：拿到的是完整列表（台账读得了）——网页据此才敢把「列表里查不到」当成早已结案（asks-model replyAskState）
-    return apiJson(200, { ok: true, asks, full: ledger, presence: ownerPresence.state(), now: Date.now() });
+    // 没变回 304（lib/etag.ts）；now 每次都变，不进 ETag
+    return conditionalJson(req.headers.get("if-none-match"), { ok: true, asks, full: ledger, presence: ownerPresence.state(), now: Date.now() }, ["now"]);
   } catch (e) {
     const shared = sharedAskError(e);
     if (shared) return apiJson(shared.status, { ok: false, ...shared });

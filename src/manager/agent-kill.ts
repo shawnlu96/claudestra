@@ -50,7 +50,7 @@ export interface ArchiveOnlyRemove {
 /** force = 频道删不掉时放弃这一步；lifecycle = 调度自动收回，带计划身份重核（agent-remove-guard.ts） */
 export interface KillOptions {
   force?: boolean; archiveOnly?: ArchiveOnlyRemove; lifecycle?: LifecycleRemove; session?: string; fixStop?: string;
-  restartLock?: RestartLock; sessionRegistry?: () => Registry;
+  restartLock?: RestartLock; sessionRegistry?: () => Registry; expectCreate?: { pid: number; startedAt: string };
 }
 
 /** per-agent restart 互斥（restart-lock.ts）；单测换成内存假件 */
@@ -155,6 +155,13 @@ async function killSession(name: string, deps: OpsDeps, sessionId: string, opts:
 
 export async function runKill(name: string, deps: OpsDeps, opts: KillOptions = {}): Promise<Record<string, unknown>> {
   if (isMasterAgent(name)) return { ok: false, error: "大总管不能 kill（它由 launcher 守护）" };
+  if (opts.expectCreate) { // 只清调用方核过的半建 create 占位（同一标记、无 session id、建会话进程已死），对不上一字节不动，不退化成按名字 kill
+    const e = opts.expectCreate, cur = (await deps.loadRegistry()).agents[name], p = cur?.pending;
+    const same = !!cur && !cur.sessionId && p?.op === "create" && p.pid === e.pid && p.startedAt === e.startedAt && !deps.alive(p.pid);
+    if (!same) return { ok: false, agent: name, refused: "identity", untouched: true, error: `${name} 已不是要清的那个半建 create 占位，未动` };
+    const r = await clearCreateResidue(name, deps, { force: opts.force, restoreStopped: true, expect: e });
+    return r.ok ? { ok: true, agent: name, message: `${name} 是做到一半的 create，已清理：${r.steps.join("；")}` } : { ok: false, agent: name, error: r.error };
+  }
   if (opts.session !== undefined) return killSession(name, deps, opts.session, opts);
   let reg = await deps.loadRegistry();
   const info = reg.agents[name];

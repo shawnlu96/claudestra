@@ -1,12 +1,13 @@
 /**
  * UXNUM1 真 React DOM（happy-dom）：同一份 useCountState + CountContext 挂顶栏、大纲芯片、右栏概览、产品卡、子 DAG 小片（Counts）、谁在干活六处。
  * [验收线 2] 团队列表有 feature 没拿到详情时六处的状态词只有骨架、没有数字；全部到齐后数字一次出现、之后补拉不跳回骨架；20 秒（这里注入 lateMs）仍缺时出数字和提示。
- * TEAMCNT1：本轮试过没拉到（last().failed：读失败 / 429 停发）的 feature 不挡放行；排队（waiting）的照旧等；loading 时顶栏只遮三个状态格、大纲只遮「进行中」。
+ * CNTGATE1：本轮试过没拉到（last().failed：读失败 / 429 停发）的 feature 不再豁免，和排队（waiting）的一样要等到齐或 20 秒兜底；
+ * loading 时顶栏只遮三个状态格，大纲「进行中 / 已完成 / 全部」三枚芯片同一个闸门一起遮，P0 照常。
  * [验收线 3] 团队顶栏没有「暂无」「—」；额度有数时出「周额度 Claude 75%」，null（403 / 404 / 全空）时整格不出；没有「协作消息」。
  * [验收线 4] 谁在干活每个数只出现一次（摘要行不报数；栏标题的数带 wideOnly、手机藏；分段控件桌面藏）；子 DAG 小片有文字标签。
  * 不出网：fetch 一律拒绝并记账。happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, jest, test } from "bun:test";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
@@ -107,11 +108,11 @@ test("[验收线 2] 3 个 feature 详情没到：六处只有骨架；到齐后�
   const partial = round(FEATURES.slice(0, 9)), full = round(FEATURES);
   const m = await mount(h(Page, { r: partial, onState: (s: CountState) => states.push(s.status) }));
   for (const place of Object.keys(NUM_SEL) as (keyof typeof NUM_SEL)[]) {
-    // 大纲芯片：已完成 / 全部 / P0 从总览出数（TEAMCNT1），只有「进行中」是骨架
+    // 大纲芯片：P0 从总览出数，进行中 / 已完成 / 全部三枚是骨架（CNTGATE1）
     if (place !== "chips") expect({ place, numbers: numbers(m.host, place) }).toEqual({ place, numbers: [] });
     expect({ place, skeleton: skeletons(m.host, place) > 0 }).toEqual({ place, skeleton: true });
   }
-  expect(skeletons(m.host, "chips")).toBe(1);
+  expect(skeletons(m.host, "chips")).toBe(3);
   expect(text(m.host, "[data-place]")).not.toContain("加载中");
   await m.render(h(Page, { r: full, onState: (s: CountState) => states.push(s.status) }));
   const words = (place: keyof typeof NUM_SEL) => numbers(m.host, place).map(Number);
@@ -245,28 +246,31 @@ test("[验收线 2] 看板读失败（老 bridge 没有 /work）：不等 20 秒
   await m.unmount();
 });
 
-test("[验收线 1] 本轮 1 个 feature 详情吃到 429（last().failed）：不等下一轮 / 20 秒，立即出数并提示「另有 1 个」", async () => {
+test("[验收线 1] 本轮 1 个 feature 详情吃到 429（last().failed）：不再提前放行，等到 20 秒兜底（注入 lateMs）才出暂计数并提示「另有 1 个」", async () => {
   const states: string[] = [];
   const r = round(FEATURES.slice(0, 11), { failed: FEATURES.slice(11) });
-  const m = await mount(h(Page, { r, onState: (s: CountState) => states.push(s.status) }));
+  const m = await mount(h(Page, { r, lateMs: 40, onState: (s: CountState) => states.push(s.status) }));
+  expect(states[states.length - 1]).toBe("loading");
+  expect(numbers(m.host, "top")).toEqual([]);
+  expect(skeletons(m.host, "chips")).toBe(3);
+  await React.act(async () => { await sleep(80); });
   expect(states[states.length - 1]).toBe("ready");
-  expect(states).not.toContain("loading");
   expect(numbers(m.host, "top").length).toBe(3);
   const hint = "另有 1 个 feature 还没读到，数字不含它们";
   expect(m.host.querySelector("[data-metrics] [role=img]")?.getAttribute("title")).toBe(hint);
   expect(text(m.host, "[data-place=now]")).toContain(hint);
   for (const place of Object.keys(NUM_SEL) as (keyof typeof NUM_SEL)[]) expect({ place, skeleton: skeletons(m.host, place) }).toEqual({ place, skeleton: 0 });
   // 之后补拉到了：只换数字、提示消失，不闪回骨架
-  await m.render(h(Page, { r: round(FEATURES), onState: (s: CountState) => states.push(s.status) }));
+  await m.render(h(Page, { r: round(FEATURES), lateMs: 40, onState: (s: CountState) => states.push(s.status) }));
   expect(numbers(m.host, "top").map(Number)).toEqual([8, 6, 12]);
   expect(m.host.querySelector("[data-metrics] [role=img]")).toBeNull();
-  expect(states).not.toContain("loading");
+  expect(states.slice(states.indexOf("ready"))).not.toContain("loading");
   await m.unmount();
 });
 
 test("[验收线 2] 还在排队（waiting，没发过请求）或还没试过的 feature 不提前放行；20 秒兜底（注入 lateMs）仍生效", async () => {
-  // 列表里的 F12 在排队；即使同一 id 误进了 failed，排队优先，照旧要等
-  for (const more of [{ waiting: ["F12"] }, { waiting: ["F12"], failed: ["F12"] }, {}]) {
+  // 列表里的 F12 在排队、读失败（failed）、两者都有、或还没试过：都照旧要等（CNTGATE1 failed 不豁免）
+  for (const more of [{ waiting: ["F12"] }, { waiting: ["F12"], failed: ["F12"] }, { failed: ["F12"] }, {}]) {
     const states: string[] = [];
     const r = round(FEATURES.slice(0, 11), more);
     const m = await mount(h(Page, { r, lateMs: 40, onState: (s: CountState) => states.push(s.status) }));
@@ -279,15 +283,15 @@ test("[验收线 2] 还在排队（waiting，没发过请求）或还没试过�
   }
 });
 
-test("[验收线 4] loading 时左栏「已完成 / 全部 / P0」照 filterCount 出数，只有「进行中」是骨架", async () => {
+test("[验收线 4] loading 时左栏「进行中 / 已完成 / 全部」三枚芯片同一个闸门出骨架，只有「P0」照 filterCount 出数", async () => {
   const partial = round(FEATURES.slice(0, 9));
   const m = await mount(h(Page, { r: partial }));
   const chips = Array.from(m.host.querySelectorAll("[data-place=chips] [role=tab]"));
   const ov = partial.ov as LedgerOverview;
   expect(chips.map((c) => [c.querySelector("[aria-hidden]") !== null, c.textContent])).toEqual([
     [true, "进行中 "],
-    [false, `已完成 ${filterCount(ov, "done", null)}`],
-    [false, `全部 ${filterCount(ov, "all", null)}`],
+    [true, "已完成 "],
+    [true, "全部 "],
     [false, `P0 ${filterCount(ov, "p0", null)}`],
   ]);
   await m.unmount();
@@ -305,5 +309,80 @@ test("[验收线 5] 本机项目视图（没有 last()）放行照旧：总览 +
   expect(seen[seen.length - 1]).toBe("loading");
   await m.render(h(Probe, { pending: false }));
   expect(seen[seen.length - 1]).toBe("ready");
+  await m.unmount();
+});
+
+/**
+ * CNTGATE1 假时钟 + 模拟团队源：设备核验那次冷开的三轮（2 秒缺一批、16 秒还缺、31 秒补齐），每轮没拉到的都在 last().failed 里（429 停发）。
+ * 夹具 12 个 feature：2 秒缺 3 个、16 秒缺 1 个，比例对应核验时的缺 30 / 缺 11。20 秒前（LATE_MS 原值）各处只有骨架。
+ */
+afterEach(() => jest.useRealTimers());
+const at = (have: readonly string[]) => round(have, { failed: FEATURES.filter((f) => !have.includes(f)) });
+/** 顶栏、右栏、产品卡、左侧三枚芯片（P0 不在闸门内）都还没有数 */
+function noNumbersYet(host: El) {
+  for (const place of ["top", "now", "product", "frame"] as const) expect({ place, numbers: numbers(host, place) }).toEqual({ place, numbers: [] });
+  const chips = Array.from(host.querySelectorAll("[data-place=chips] [role=tab]")).slice(0, 3);
+  expect(chips.map((c) => [c.querySelector("[aria-hidden]") !== null, (c.textContent ?? "").match(/\d/) !== null])).toEqual([[true, false], [true, false], [true, false]]);
+}
+const advance = (ms: number) => React.act(async () => { jest.advanceTimersByTime(ms); });
+
+test("CNTGATE1 [验收线 1] 2 秒缺 3、16 秒缺 1、31 秒补齐：20 秒前处处骨架；20 秒出暂计数带提示；31 秒提示消失、数字更新", async () => {
+  jest.useFakeTimers();
+  const states: string[] = [];
+  const onState = (s: CountState) => states.push(s.status);
+  const m = await mount(h(Page, { r: at([]), onState }));
+  await advance(2_000);
+  await m.render(h(Page, { r: at(FEATURES.slice(0, 9)), onState }));
+  expect(states[states.length - 1]).toBe("loading");
+  noNumbersYet(m.host);
+  await advance(14_000);
+  await m.render(h(Page, { r: at(FEATURES.slice(0, 11)), onState }));
+  expect(states[states.length - 1]).toBe("loading");
+  noNumbersYet(m.host);
+  await advance(3_999);
+  expect(states[states.length - 1]).toBe("loading");
+  noNumbersYet(m.host);
+  await advance(1);
+  expect(states[states.length - 1]).toBe("ready");
+  const hint = "另有 1 个 feature 还没读到，数字不含它们";
+  expect(m.host.querySelector("[data-metrics] [role=img]")?.getAttribute("title")).toBe(hint);
+  expect(text(m.host, "[data-place=now]")).toContain(hint);
+  const early = numbers(m.host, "top").map(Number);
+  expect(early.length).toBe(3);
+  expect(numbers(m.host, "chips").length).toBe(4);
+  await advance(11_000);
+  await m.render(h(Page, { r: at(FEATURES), onState }));
+  expect(m.host.querySelector("[data-metrics] [role=img]")).toBeNull();
+  expect(text(m.host, "[data-place=now]")).not.toContain("还没读到");
+  expect(numbers(m.host, "top").map(Number)).toEqual([8, 6, 12]);
+  expect(numbers(m.host, "chips").map(Number)).toEqual([14, 20, 64, 0]);
+  expect(states.slice(states.indexOf("ready"))).not.toContain("loading");
+  await m.unmount();
+});
+
+test("CNTGATE1 [验收线 2] 20 秒内全部拿到详情：只出现一次完整数字；之后补拉、过了 20 秒都不回骨架、不换数", async () => {
+  jest.useFakeTimers();
+  const tops: string[] = [];
+  const states: string[] = [];
+  const Probe = (p: { r: ReturnType<typeof round> }) => h(Page, { r: p.r, onState: (s: CountState) => states.push(s.status) });
+  const m = await mount(h(Probe, { r: at([]) }));
+  const seen = () => { const n = numbers(m.host, "top").join(","); if (n && tops[tops.length - 1] !== n) tops.push(n); };
+  for (const [ms, have] of [[2_000, FEATURES.slice(0, 9)], [10_000, FEATURES.slice(0, 11)], [3_000, FEATURES]] as const) {
+    await advance(ms);
+    await m.render(h(Probe, { r: at(have) }));
+    seen();
+  }
+  expect(tops).toEqual(["8,6,12"]);
+  expect(m.host.querySelector("[data-metrics] [role=img]")).toBeNull();
+  // 补拉：列表冒出一个还没读到的 feature，且它在 failed 里——不退回骨架
+  const more = round(FEATURES);
+  await m.render(h(Probe, { r: { ...more, source: { last: () => ({ list: { features: [...FEATURES, "F13"].map((id) => ({ id })) }, details: new Map(FEATURES.map((id) => [id, {}])),
+    failed: new Set(["F13"]), waiting: new Set() }) } } }));
+  await advance(10_000);
+  seen();
+  expect(tops).toEqual(["8,6,12"]);
+  expect(states.filter((s, i) => s === "ready" && states[i - 1] !== "ready").length).toBe(1);
+  expect(states.slice(states.indexOf("ready"))).not.toContain("loading");
+  for (const place of Object.keys(NUM_SEL) as (keyof typeof NUM_SEL)[]) expect({ place, skeleton: skeletons(m.host, place) }).toEqual({ place, skeleton: 0 });
   await m.unmount();
 });
