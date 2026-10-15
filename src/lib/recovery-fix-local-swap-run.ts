@@ -30,6 +30,7 @@ import { statePath } from "./paths.js";
 import { git, type Git } from "./scheduler-review-worktree.js";
 import { fixTreePath } from "./fix-strategy-worktree.js";
 import { retryWorktreeDirtySync } from "./scheduler-create-retry-worktree.js";
+import { fixTreeProof, fixTreeProofSync } from "./fix-tree-proof.js";
 
 import { buildArtifactOwner, type ConvArtifactContext } from "./conv-ignored-build-artifacts.js";
 import { convArtifactContext, convArtifactProof, convArtifactProofSync } from "./conv-ignored-build-artifacts-quarantine.js";
@@ -130,20 +131,8 @@ async function treeRefusal(db: Database, task: LedgerTask, source: string | null
   const g = localSwapPorts(db).git ?? git;
   const dir = fixTreePath(deps.worktreeRoot ?? statePath("worktrees"), task.id);
   if (!dir) return "卡号不能安全映射到作者工作树目录";
-  if (existsSync(dir)) {
-    const dirty = (await convArtifactProof(g, dir, await treeOwner(g, dir), preflightContext(db, task, deps, intentId))).reason;
-    if (dirty) return dirty;
-    const sha = await g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
-    if (sha.code !== 0) return `作者工作树 ${dir} 读不了 HEAD，保留等待核对`;
-    if (sha.out !== task.headSHA) return `作者工作树 ${dir} 在 ${sha.out.slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
-  }
-  if (source && task.branch) {
-    const local = await g(["-C", source, "rev-parse", "--verify", "--quiet", `refs/heads/${task.branch}`]);
-    if (local.code === 0 && local.out && local.out !== task.headSHA) {
-      return `本地分支 ${task.branch} 在 ${local.out.slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
-    }
-  }
-  return null;
+  return fixTreeProof(g, { dir: existsSync(dir) ? dir : null, source, branch: task.branch, head: task.headSHA },
+    async () => (await convArtifactProof(g, dir, await treeOwner(g, dir), preflightContext(db, task, deps, intentId))).reason);
 }
 
 const spawnGit: GitSync = (args) => {
@@ -160,23 +149,11 @@ export function treeProofSync(db: Database, task: LedgerTask, source: string | n
   const g = localSwapPorts(db).gitSync ?? spawnGit;
   const dir = fixTreePath(deps.worktreeRoot ?? statePath("worktrees"), task.id);
   if (!dir) return "卡号不能安全映射到作者工作树目录";
-  if (existsSync(dir)) {
+  return fixTreeProofSync(g, { dir: existsSync(dir) ? dir : null, source, branch: task.branch, head: task.headSHA }, () => {
     const owner = buildArtifactOwner(dir, g(["-C", dir, "worktree", "list", "--porcelain"]));
     const port = (args: string[]) => { const r = g(args); return { ...r, out: r.out.endsWith("\0") ? r.out : r.out.trim() }; };
-    const dirty = allowArtifacts ? convArtifactProofSync(port, dir, owner, preflightContext(db, task, deps, "preflight")) : retryWorktreeDirtySync(port, dir, owner);
-    if (dirty) return dirty;
-    const sha = g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
-    if (sha.code !== 0) return `作者工作树 ${dir} 读不了 HEAD，保留等待核对`;
-    if (sha.out.trim() !== task.headSHA) return `作者工作树 ${dir} 在 ${sha.out.trim().slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
-  }
-  if (source && task.branch) {
-    const local = g(["-C", source, "rev-parse", "--verify", "--quiet", `refs/heads/${task.branch}`]);
-    const at = local.out.trim();
-    if (local.code === 0 && at && at !== task.headSHA) {
-      return `本地分支 ${task.branch} 在 ${at.slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
-    }
-  }
-  return null;
+    return allowArtifacts ? convArtifactProofSync(port, dir, owner, preflightContext(db, task, deps, "preflight")) : retryWorktreeDirtySync(port, dir, owner);
+  });
 }
 
 /** Materials-time strategy: the live fact (planned under on) or, once frozen, the pinned evidence; never a faked streak. */

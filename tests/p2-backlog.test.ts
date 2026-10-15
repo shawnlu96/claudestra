@@ -276,7 +276,8 @@ describe("[验收线 6] 越界仍交 PM，坏结构不吞，off / observe 不改
     expect([calls, listEvents(db, {}).length, existsSync(drafts)]).toEqual([[], before, false]);
   });
 
-  test("observe（也是旧配置缺省）：原通知照发，卡上只多一条「本会入积压」，不入积压、不动卡的阶段与合并资格", async () => {
+  test("observe：原通知照发，卡上只多一条「本会入积压」，不入积压、不动卡的阶段与合并资格", async () => {
+    mode("observe"); // PULLTODO1 起缺省 on
     review([p2("F1"), p2("S1", "scope")]);
     const before = getTask(db, "T1");
     expect([await text(), await text()]).toEqual([ORIGINAL, ORIGINAL]);

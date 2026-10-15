@@ -182,9 +182,9 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
       decode(data);
       deps.redraw();
     },
-    line(cols) { // 只改显示：整段先打码再截尾巴（逐行视图也是显示内容），发出去的还是原文
+    line(cols) { // 只改显示：先对原文整段打码、再换 ⏎ 截尾（先换 ⏎ 会让 Bearer\n<值> 这类跨行规则漏掉），发出去的还是原文
       const hint = permissionHint();
-      return fitTail(redactSecrets(hint ? `${hint}❯ ` : `❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`), cols);
+      return fitTail(redactSecrets(hint ? `${hint}❯ ` : `❯ ${buf}`).replace(/\r\n?|\n/g, "⏎"), cols);
     },
     draft: () => ({ text: buf, permission: permissionHint() }),
   };

@@ -25,6 +25,7 @@ set -euo pipefail
 # 配置
 # ────────────────────────────────────────────
 
+# 官方地址：仓库转移（rename.repo）前不改。改的话与 src/lib/floka-repo/migrate.ts 的 OFFICIAL_REPO 同一提交改，测试逐字核两边
 CLAUDESTRA_REPO="${CLAUDESTRA_REPO:-https://github.com/shawnlu96/claudestra.git}"
 # ⚠ 之前这个变量声明了、文档里也写了，但**脚本从头到尾没用过它**（git clone 不带
 #   -b，后面也没 checkout），于是「装某个分支/标签」这件事根本做不到——而下面又
@@ -382,7 +383,9 @@ if [ "$CLAUDESTRA_REF_EXPLICIT" = "1" ]; then
   fi
 else
   # 默认：切到最新 release 版本（如果有的话）
-  GITHUB_API_REPO=$(echo "$CLAUDESTRA_REPO" | sed -n 's|.*github\.com[:/]\(.*\)\.git$|\1|p')
+  # 与自动更新器认 origin 的口径同义（src/lib/floka-repo/url.ts releaseSlugOf，tests/floka-repo.test.ts 逐条对）：
+  # 端口（ssh.github.com:443）不当 owner，没有 .git 后缀也认；repo 名里的点（repo.name）保留，只剥结尾的 .git。以前只认以 .git 结尾、且把 443 当成 owner。
+  GITHUB_API_REPO=$(printf '%s\n' "$CLAUDESTRA_REPO" | head -1 | sed -nE 's#^.*github\.com(:[0-9]+)?[:/]([^/[:space:]]+/[^/[:space:]]+)/?[[:space:]]*$#\2#p' | sed -E 's#\.git$##; /\/$/d')
   if [ -n "$GITHUB_API_REPO" ]; then
     LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_API_REPO}/releases/latest" 2>/dev/null | grep -o '"tag_name":"[^"]*"\|"tag_name": "[^"]*"' | head -1 | cut -d'"' -f4)
     # 只对已有检出生效：全新克隆的 HEAD 是默认分支，天然比 tag 新，照旧切 release

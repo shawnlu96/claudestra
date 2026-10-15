@@ -7,9 +7,10 @@
 import { randomBytes } from "node:crypto";
 import type { InstanceKey } from "./instance-key.js";
 import {
-  FATAL_CODES, LIMITS, PROTOCOL_VERSION, RELAY_FROM, SUBPROTOCOL, asData, asEndOrCancel, asPushAck, asReq, asRes, authSignature, parseFrame,
+  FATAL_CODES, LIMITS, PROTOCOL_VERSION, RELAY_FROM, asData, asEndOrCancel, asPushAck, asReq, asRes, parseFrame,
   relayWsEndpoint, type ErrorFrame, type PeerRecord, type RelayPushCapabilities,
 } from "./relay-protocol.js";
+import { CenterLink } from "./floka-center/client.js";
 import { InboundRouter, type Logger } from "./relay-client-inbound.js";
 import { OutboundTable, type RequestOptions } from "./relay-client-outbound.js";
 import { PushTable } from "./relay-client-push.js";
@@ -49,6 +50,8 @@ export interface ConnectOptions {
   timing?: Partial<RelayTiming>;
   liveness?: LivenessOptions;
   sendQueue?: SendQueueOptions;
+  /** 配置的 `rename` 一节（centerReceive / centerSend，floka-center/gear.ts）；缺省两档 off，与没有兼容层时相同 */
+  rename?: unknown;
 }
 
 const DEFAULT_TIMING: RelayTiming = {
@@ -92,11 +95,13 @@ export class RelayClient {
   private readonly liveness: RelayLiveness;
   private readonly traffic = new RelayTraffic();
   private readonly queue: RelaySendQueue;
+  private readonly center: CenterLink;
 
   constructor(private readonly o: ConnectOptions) {
     this.timing = { ...DEFAULT_TIMING, ...o.timing };
     this.liveness = new RelayLiveness(o.liveness ?? DEFAULT_LIVENESS);
     this.log = o.log ?? ((level, msg) => (level === "info" ? console.log : console.error)(`[relay] ${msg}`));
+    this.center = new CenterLink(o.rename, o.key, this.log);
     this.queue = new RelaySendQueue((raw) => this.write(raw), o.sendQueue ?? DEFAULT_SEND_QUEUE);
     const send = (f: object) => this.send(f);
     this.outbound = new OutboundTable(send, rand, LIMITS.maxChunkBytes, this.timing.headGraceMs);
@@ -107,6 +112,11 @@ export class RelayClient {
 
   get state(): RelayState {
     return this._state;
+  }
+
+  /** 最近一次握手用的族（floka-center） */
+  get family(): "legacy" | "floka" {
+    return this.center.family;
   }
 
   info(): RelayInfo & { retryAt: number | null; lastError: string | null } {
@@ -171,7 +181,7 @@ export class RelayClient {
     this.retryAt = null;
     let ws: WebSocket;
     try {
-      ws = new WebSocket(relayWsEndpoint(this.o.relayUrl), [SUBPROTOCOL]);
+      ws = new WebSocket(relayWsEndpoint(this.o.relayUrl), this.center.offer());
     } catch (e) {
       this.lastError = `bad relay url: ${(e as Error).message}`;
       return this.scheduleReconnect(false);
@@ -350,7 +360,7 @@ export class RelayClient {
     if (ts !== null && Math.abs(Date.now() / 1000 - ts) > 300) {
       this.log("warn", `本机时钟与中继相差超过 300 秒（${Math.round(Date.now() / 1000 - ts)} s），签名请求会被对方判过期`);
     }
-    const sig = authSignature(this.o.key.privateKey, String(f.nonce), this.o.key.publicKey, this.o.name, this.o.slug);
+    const sig = this.center.sign(typeof f.subprotocol === "string" ? f.subprotocol : "", String(f.nonce), this.o.name, this.o.slug);
     this.send({ t: "auth", v: PROTOCOL_VERSION, key: this.o.key.publicKey, name: this.o.name, slug: this.o.slug, sig });
   }
 
@@ -359,6 +369,7 @@ export class RelayClient {
     this.slug = typeof f.slug === "string" ? f.slug : null;
     this.base = typeof f.base === "string" ? f.base : null;
     const push = f.push as Partial<RelayPushCapabilities> | undefined;
+    this.center.welcome(f);
     this.pushCaps = push && typeof push === "object" ? { ...(typeof push.vapidPublicKey === "string" ? { vapidPublicKey: push.vapidPublicKey } : {}), apns: push.apns === true } : null;
     this._state = "online";
     this.lastError = null;

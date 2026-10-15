@@ -32,7 +32,7 @@ describe("[验收线 1] 命令进了真实的 ledger 入口", () => {
     const f = autoFixture();
     try {
       expect(await f.cli("owner", "observation-plans", "--project", "p")).toMatchObject({ ok: true, project: "p", autoMode: "observe", plans: [] });
-      expect(await f.cli("agent-task-one", "p2-backlog", "--project", "p")).toMatchObject({ ok: true, mode: "observe", backlog: [] });
+      expect(await f.cli("agent-task-one", "p2-backlog", "--project", "p")).toMatchObject({ ok: true, mode: "on", backlog: [] }); // PULLTODO1：缺省 on
       // 进得了命令本身：报的是命令自己的参数 / 状态错误，不是「未知子命令」
       const reg = await f.cli("pm", "observation-register", "T1", "--target", "recovery:dagWriteScrub", "--project", "p", "--rule", "v1", "--source", "ledger-events",
         "--hours", "24", "--reason", "x");
@@ -56,7 +56,7 @@ describe("[验收线 1] 命令进了真实的 ledger 入口", () => {
         expect([sub, await f.cli("scheduler", sub, "T1")]).toEqual([sub, forbidden]);
       }
       expect((await f.cli("scheduler", "observation-due", "T1", "obs-1")).code).toBe("not_found"); // 进了命令：没有这条登记
-      expect((await f.cli("scheduler", "p2-backlog-record", "T1", "--review-seq", "1", "--mode", "observe")).code).toBe("invalid"); // 进了命令：还没有审查
+      expect((await f.cli("scheduler", "p2-backlog-record", "T1", "--review-seq", "1", "--mode", "on")).code).toBe("invalid"); // 进了命令：还没有审查
       expect((await f.cli("agent-task-one", "p2-backlog-record", "T1", "--review-seq", "1", "--mode", "observe")).code).toBe("forbidden");
     } finally { f.close(); }
   });
@@ -91,9 +91,10 @@ describe("[验收线 5] 真实调度路径：PASS→merge 的 P2 通知", () => 
     } finally { f.close(); }
   });
 
-  test("缺省 observe：原通知照发，卡上多一条「本会入积压」；off：原通知逐字、不写任何东西", async () => {
+  test("observe：原通知照发，卡上多一条「本会入积压」；off：原通知逐字、不写任何东西", async () => {
     const f = autoFixture(), g = autoFixture();
     try {
+      await setMode(f, "observe"); // PULLTODO1 起缺省 on，observe 要显式配
       const [observe] = await passWithP2(f, [P2]);
       expect(observe).toBe(`[调度引擎] T1 审查通过但留有 P2，已进合并队列，请看 diff：head ${H1}，报告 reviews/T1-r1/report.md`);
       expect([ops(f, "p2_backlog_observe").map((e) => e.data.ordinary), ops(f, "p2_backlog")]).toEqual([[["name-1"]], []]);

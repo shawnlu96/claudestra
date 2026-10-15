@@ -5,7 +5,7 @@
  * 视口不用补偿。按钮触发的移动带过渡（glide），拖拽 / 滚轮不带，否则手跟不上。
  */
 import { useEffect, useRef, useState } from "react";
-import { fitAllView, fitsAll, MAX_K, MIN_K, offscreen, panView, reconcileView, VIEW_PAD, type Dir, type Focus, type View, type ViewCanvas, type ViewState } from "./canvas-view";
+import { fitAllView, fitsAll, initialView, MAX_K, MIN_K, offscreen, panView, reconcileView, VIEW_PAD, type Dir, type Focus, type View, type ViewCanvas, type ViewState } from "./canvas-view";
 
 /** 按下后移过这么多 px 才算拖（之内松手 = 点击） */
 const DRAG_SLOP = 4;
@@ -26,14 +26,17 @@ export function usePort() {
 }
 
 /** 点空白 = onBackground */
-export function useViewport(canvas: ViewCanvas, port: { w: number; h: number }, focus: Focus | null, onBackground: () => void) {
+export function useViewport(canvas: ViewCanvas, port: { w: number; h: number }, focus: Focus | null, onBackground: () => void,
+  opts?: { minK?: number; initial?: (c: ViewCanvas, vw: number, vh: number) => View }) {
+  const minK = opts?.minK ?? MIN_K;
   const drag = useRef<{ id: number; x: number; y: number; vx: number; vy: number; moved: boolean; onButton: boolean } | null>(null);
   const suppress = useRef(false);
   const [st, setSt] = useState<ViewState>(INITIAL);
   const [glide, setGlide] = useState(false);
   const [bump, setBump] = useState(false);
   // 渲染时对齐（不走 effect）：reconcileView 没事可做时原样返回同一个对象，所以这里不会来回触发
-  const next = reconcileView(st, canvas, port.w, port.h, focus);
+  const initial = opts?.initial ?? ((c: ViewCanvas, w: number, h: number) => initialView(c, w, h, minK));
+  const next = reconcileView(st, canvas, port.w, port.h, focus, initial);
   if (next !== st) setSt(next);
   const view = next.view;
   const setView = (f: (v: View) => View, glides = false) => {
@@ -42,8 +45,8 @@ export function useViewport(canvas: ViewCanvas, port: { w: number; h: number }, 
   };
   const fitAll = () => {
     if (!port.w) return;
-    setView(() => fitAllView(canvas, port.w, port.h), true);
-    if (fitsAll(canvas, port.w, port.h)) return;
+    setView(() => fitAllView(canvas, port.w, port.h, minK), true);
+    if (fitsAll(canvas, port.w, port.h, minK)) return;
     setBump(true); // 到文字下限还装不下：按钮和提示动一下（v4.module.css .bump / .beckon，最长 720ms），示意剩下的要靠提示 / 拖拽
     setTimeout(() => setBump(false), 800);
   };
@@ -54,7 +57,7 @@ export function useViewport(canvas: ViewCanvas, port: { w: number; h: number }, 
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const px = e.clientX - r.left, py = e.clientY - r.top;
     setView((v) => {
-      const k = Math.min(MAX_K, Math.max(MIN_K, v.k * (e.deltaY < 0 ? 1.1 : 0.9)));
+      const k = Math.min(MAX_K, Math.max(minK, v.k * (e.deltaY < 0 ? 1.1 : 0.9)));
       return { k, x: px - ((px - v.x) * k) / v.k, y: py - ((py - v.y) * k) / v.k };
     });
   };

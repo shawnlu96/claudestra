@@ -22,6 +22,8 @@ export const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID || "";
 // 对话气泡当成 tool use 推送给 Discord。
 export const MCP_NAME = process.env.MCP_NAME || "claudestra";
 export const MCP_TOOL_PREFIX = `mcp__${MCP_NAME.replace(/-/g, "_")}__`;
+/** 本系统的 MCP 工具（两套命名族都认，规则见 lib/floka-mcp/recognize.ts） */
+export const isOwnMcpTool = (name: string): boolean => ownMcpTool(name, MCP_TOOL_PREFIX);
 
 export const TMP_DIR = RUNTIME_DIR;
 /** 聊天附件落盘目录。曾在 TMP_DIR 下（重启即清），owner 2026-07-13 要求
@@ -34,6 +36,7 @@ import { enforceSandboxBridgeEnv } from "../lib/sandbox.js";
 import { sandboxDiscordStubApi } from "./discord-login-stub.js";
 import { RUNTIME_DIR, INBOX_DIR as STATE_INBOX_DIR } from "../lib/paths.js";
 import { resolveBunPath, bunBinDir } from "../lib/bun-path.js";
+import { isOwnMcpTool as ownMcpTool } from "../lib/floka-mcp/recognize.js";
 export const REPO_ROOT = `${import.meta.dir}/../..`;
 export const MANAGER_PATH = `${REPO_ROOT}/src/manager.ts`;
 /** v2.16+ 支持 env 覆盖(与 launcher.ts 同一语义):MASTER_DIR 移出仓库后 master
