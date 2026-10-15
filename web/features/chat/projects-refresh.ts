@@ -13,6 +13,7 @@ export class ProjectsRefresh {
   private attempt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private inflight: Promise<void> | null = null;
+  private again: Promise<void> | null = null;
 
   constructor(
     private readonly load: ProjectsLoad,
@@ -24,9 +25,19 @@ export class ProjectsRefresh {
     return !this.timer && !this.inflight && this.now() >= this.nextAt;
   }
 
-  /** 拉一次；在途时并进那一次 */
+  /**
+   * 拉一次。在途时不能并进那一次：它可能是操作（改名、拖分组）之前发出的，拿回来的是旧数据——
+   * 等它结束再补拉一次；在途期间来多少次都只补这一次
+   */
   run(): Promise<void> {
-    this.inflight ??= this.once().finally(() => (this.inflight = null));
+    if (this.inflight) {
+      this.again ??= this.inflight.then(() => {
+        this.again = null;
+        return this.run();
+      });
+      return this.again;
+    }
+    this.inflight = this.once().finally(() => (this.inflight = null));
     return this.inflight;
   }
 

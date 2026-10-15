@@ -55,3 +55,28 @@ test("一直失败：重试次数有上限，之后回到低频节拍；guest（
     globalThis.setTimeout = real;
   }
 });
+
+test("在途时又要刷新（操作之后）：不被操作之前发出的那次满足，等它结束再补拉一次；在途期间多次调用只补一次（r2 P1）", async () => {
+  let version = 1;
+  const gates: (() => void)[] = [];
+  const seen: number[] = [];
+  const r = new ProjectsRefresh(async () => {
+    const v = version;
+    await new Promise<void>((done) => gates.push(done));
+    seen.push(v);
+    return "ok";
+  });
+  const before = r.run(); // 操作之前发出的
+  version = 2; // 操作改了项目
+  const after = r.run();
+  const after2 = r.run();
+  gates.shift()!();
+  await before;
+  expect(seen).toEqual([1]);
+  await new Promise((done) => setTimeout(done, 0));
+  gates.shift()!();
+  await after;
+  await after2;
+  expect(seen).toEqual([1, 2]);
+  expect(gates.length).toBe(0);
+});

@@ -144,9 +144,8 @@ function expectSettled(id: string, since: number, dismiss: boolean): void {
 
 /** 一次拉取结束：ok = 成功落地，null = 被更新的结果盖过、不算数。核对待确认的，没确认、又没有别的拉取在路上就再排一次 */
 function settleConfirming(startedAt: number, ok: boolean | null): void {
-  if (ok === null) return;
   for (const [id, c] of confirming) {
-    if (startedAt < c.since) continue;
+    if (ok === null || startedAt < c.since) continue; // 被更新的结果盖过的不核对，但下面照样看要不要补拉——不然没人在路上的确认项就搁住了
     if (ok && settledOnServer(id, c.dismiss)) confirming.delete(id);
     else if (c.tries <= 1) confirming.delete(id);
     else confirming.set(id, { ...c, tries: c.tries - 1 });

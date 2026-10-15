@@ -331,6 +331,34 @@ describe("SYN-2：重复刷新合并成一次", () => {
     s.stop();
   });
 
+  test("后发先到的还是 open、先发的那次随后被丢弃：确认项不能搁住，还要补拉一次（r2 P1）", async () => {
+    const s = started();
+    await tick();
+    fetchLog.length = 0;
+    manual = true;
+    const realSetTimeout = globalThis.setTimeout;
+    let expire: () => void = () => undefined;
+    globalThis.setTimeout = ((f: () => void, ms: number) => (ms === PENDING_MAX_MS + 1 ? ((expire = f), 0) : realSetTimeout(f, ms))) as typeof setTimeout;
+    try {
+      // 提交期间发出两次拉取（A、B），快照都还是 open
+      await asksStore.answer("ask_1", shown, async () => void (asksStore.refresh(), asksStore.refresh()), words);
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    serverList = serverList.map((a) => (a.id === "ask_1" ? { ...a, state: "answered" } : a));
+    manual = false;
+    const [a, b] = queue.splice(0);
+    release([b]); // B 先回来：open，A 还在路上，先不补
+    await tick();
+    release([a]); // A 回来被丢弃（比 B 旧）
+    await settle();
+    expect(fetchLog.length).toBe(3);
+    Date.now = () => realNow() + PENDING_MAX_MS + 1_000;
+    expire();
+    expect(st()).toBe("answered");
+    s.stop();
+  });
+
   test("一直拉不到：补拉有上限，不会无限重试", async () => {
     const s = started();
     await tick();
