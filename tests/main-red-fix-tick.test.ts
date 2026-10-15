@@ -12,8 +12,9 @@ import { bindNode } from "../src/lib/ledger-dag-write.js";
 import { effectiveNodes, getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
-import type { MainRedRun } from "../src/lib/main-red-fix.js";
+import { nodeKey, type MainRedRun } from "../src/lib/main-red-fix.js";
 import { MAIN_RED_FIX_SERVICE, setMainRedFixCliForTest } from "../src/lib/main-red-fix-cmds.js";
 import type { MainRedGh } from "../src/lib/main-red-fix-gh.js";
 import { mainRedFixTick, setMainRedFixTickForTest } from "../src/lib/main-red-fix-tick.js";
@@ -109,6 +110,29 @@ describe("[验收线 1] a red main push run with no merge intent", () => {
   });
 });
 
+test("[验收线 1] a later red attempt of the same run, after its fix card ended: a new node and spec, no dedup clash", async () => {
+  gh.state.runs["ci.yml"] = [run(77, "failure")];
+  await tick();
+  createTask(db, owner, { project: P, id: "agents-OBSAUTO1R1", title: "fix", kind: "code" });
+  bindNode(db, owner, { id: agentsF, rev: getFeature(db, agentsF)!.rev, key: "OBSAUTO1R1", taskId: "agents-OBSAUTO1R1" });
+  db.query("UPDATE tasks SET stage = 'cancelled' WHERE id = 'agents-OBSAUTO1R1'").run();
+  gh.state.runs["ci.yml"] = [run(77, "failure", 2)];
+  expect(await tick()).toEqual([]);
+  expect(nodesOf(agentsF).map((n) => n.key)).toEqual(expect.arrayContaining(["OBSAUTO1R1", "OBSAUTO1R2"]));
+  expect(existsSync(specPath("agents-OBSAUTO1R2"))).toBe(true);
+  expect(ops("main_red_fix_node")).toHaveLength(2);
+  expect(await tick()).toEqual([]);
+  expect(ops("main_red_fix_node")).toHaveLength(2);
+});
+
+test("a ledger write failing inside the fix transaction leaves no orphan spec and no node", async () => {
+  insertEvent(db, { ...owner, dedupKey: nodeKey(P, 77, 1) }, { project: P, target: "", kind: "note", text: "occupied" }, true);
+  gh.state.runs["ci.yml"] = [run(77, "failure")];
+  expect(await tick()).toEqual([expect.objectContaining({ error: expect.stringContaining("UNIQUE") })]);
+  expect(existsSync(specPath("agents-OBSAUTO1R1"))).toBe(false);
+  expect(nodesOf(agentsF).map((n) => n.key)).not.toContain("OBSAUTO1R1");
+});
+
 describe("[验收线 2] known flaky failures re-run once first", () => {
   beforeEach(() => {
     addKnownFlaky(db, { actor: "agent-pm" }, { project: P, file: "tests/flaky.test.ts", featureId: mergeF, node: "BASE1", reason: "竞态" });
@@ -201,6 +225,14 @@ describe("[验收线 5] mainRedRepairBind", () => {
     await tick(); await tick();
     expect(mainCiApprovals(db, P, REPO)).toEqual([]);
     expect(ops("recovery_observe").filter((e) => e.data.mechanism === "mainRedRepairBind")).toHaveLength(1);
+  });
+  test("observe then on: the would-bind note does not block the real binding", async () => {
+    const id = await atMerge();
+    await tick();
+    expect(ops("recovery_observe").filter((e) => e.data.mechanism === "mainRedRepairBind")).toHaveLength(1);
+    modes.mainRedRepairBind = "on";
+    await tick(); await tick();
+    expect(mainCiApprovals(db, P, REPO)).toEqual([expect.objectContaining({ binding: expect.objectContaining({ taskId: id, head: sha("d") }) })]);
   });
   test("on: only this mechanism's card, same faultKey; the PM revoke undoes it and it is not bound again", async () => {
     modes.mainRedRepairBind = "on";

@@ -19,7 +19,7 @@ import { rewriteDag } from "./ledger-dag-write.js";
 import type { DagNode } from "./ledger-feature.js";
 import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
-import { dagKey, faultSet, handledKey, HANDLED_OP, MAIN_RED_FAIL_LIMIT, NODE_OP, rerunKey, RERUN_OP, SOURCE, todoKey, workflowOf,
+import { dagKey, faultSet, handledKey, HANDLED_OP, MAIN_RED_FAIL_LIMIT, nodeKey, NODE_OP, rerunKey, RERUN_OP, SOURCE, todoKey, workflowOf,
   type MainRedFacts, type MainRedWorkflow } from "./main-red-fix.js";
 import { mainRedNodes, nodeState, placeFix, type PlaceDeps, type Placement } from "./main-red-fix-place.js";
 import { recordPmTodo } from "./pm-todo-note.js";
@@ -79,7 +79,7 @@ function writeNode(db: Database, ctx: WriteCtx, project: string, f: MainRedFacts
   const next = composeRewrite(p.cur, { add: [node], remove: [], update: [], cancel: {} }, phase);
   if (!next.ok) return `节点没写成：${next.error}`;
   try {
-    const r = rewriteDag(db, { ...ctx, actor: pm, dedupKey: dagKey(project, f.runId) }, { id: p.f.id, rev: p.f.rev, nodes: next.value, reasonKind: "new_issue",
+    const r = rewriteDag(db, { ...ctx, actor: pm, dedupKey: dagKey(project, f.runId, f.attempt) }, { id: p.f.id, rev: p.f.rev, nodes: next.value, reasonKind: "new_issue",
       cancel: new Map(), scopeChange: false, reasonText: `调度代记：main ${workflowOf(f.workflow).label} 红（run ${f.runId}）的修复节点 ${p.key}`, askFrom: { agent: pm, channelId: null } });
     return r.row.version ? null : "改版要 owner 批，节点没直接生效";
   } catch (e) {
@@ -126,13 +126,14 @@ export function writeMainRedFix(db: Database, ctx: WriteCtx, project: string, f:
     const failedBefore = same.filter((n) => nodeState(db, n).state !== "open").length;
     const { placed, misses: miss, content } = placeAndWrite(db, ctx, project, f, deps);
     if (placed) {
-      mkdirSync(dirname(placed.specPath), { recursive: true });
-      writeFileSync(placed.specPath, placed.spec, { flag: "wx" });
-      insertEvent(db, { ...ctx, dedupKey: `main-red-fix:node:${project}:${f.runId}` }, { project, target: "", kind: "scheduler",
+      insertEvent(db, { ...ctx, dedupKey: nodeKey(project, f.runId, f.attempt) }, { project, target: "", kind: "scheduler",
         text: `main ${label} 红：写了修复节点 ${placed.f.id}/${placed.key} 和规格 ${placed.taskId}`, data: { op: NODE_OP, source: SOURCE, workflow: f.workflow,
           checks: set, featureId: placed.f.id, key: placed.key, taskId: placed.taskId, faultKey: f.faultKey, runId: f.runId, mainSha: f.mainSha } }, true);
       const text = `main ${label} 红（run ${f.runId}）：写了修复节点 ${placed.f.id}/${placed.key}，规格 docs/tasks/${placed.taskId}.md 交自动开卡`;
       handled(db, ctx, project, f, "node", text, { featureId: placed.f.id, key: placed.key });
+      // the spec file last: every ledger write above has gone through, so a failed transaction never leaves an orphan spec behind
+      mkdirSync(dirname(placed.specPath), { recursive: true });
+      writeFileSync(placed.specPath, placed.spec, { flag: "wx" });
       const notify = failedBefore >= MAIN_RED_FAIL_LIMIT ? `[main 红] ${project} 的 ${label} 同一故障修复卡已失败 ${failedBefore} 次，又写了 ${placed.f.id}/${placed.key}：请 PM 看一下 ${f.url}` : null;
       return { outcome: "node", text, notify, node: `${placed.f.id}/${placed.key}` };
     }

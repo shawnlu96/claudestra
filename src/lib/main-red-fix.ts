@@ -30,7 +30,9 @@ export const NODE_OP = "main_red_fix_node", HANDLED_OP = "main_red_fix_handled",
 export const SOURCE = "mainRedFix";
 export const handledKey = (project: string, runId: number, attempt: number) => `main-red-fix:handled:${project}:${runId}:${attempt}`;
 export const rerunKey = (project: string, runId: number) => `main-red-fix:rerun:${project}:${runId}`;
-export const dagKey = (project: string, runId: number) => `main-red-fix-dag:${project}:${runId}`;
+/** The DAG rewrite and the node event go per run id + attempt, as handled does: a later red attempt of the same run is its own write. */
+export const dagKey = (project: string, runId: number, attempt: number) => `main-red-fix-dag:${project}:${runId}:${attempt}`;
+export const nodeKey = (project: string, runId: number, attempt: number) => `main-red-fix:node:${project}:${runId}:${attempt}`;
 export const todoKey = (project: string, runId: number, what: string) => `main-red-fix:todo:${project}:${runId}:${what}`;
 
 export interface MainRedRun { id: number; attempt: number; status: string; conclusion: string | null; headSha: string; url: string; createdAt: number }

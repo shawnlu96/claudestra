@@ -122,7 +122,8 @@ async function oneWorkflow(r: Round, w: Workflow): Promise<void> {
 
 /** mainRedRepairBind: this mechanism's cards at merge whose main is still the fault they were written for; the CLI decides on / observe. */
 async function bindPass(r: Round, policy: RecoveryPolicyPort): Promise<void> {
-  if (policy(r.project, "mainRedRepairBind").mode === "off") return;
+  const bindMode = policy(r.project, "mainRedRepairBind").mode;
+  if (bindMode === "off") return;
   const db = r.env.db, approvals = mainCiApprovals(db, r.project, r.repo);
   for (const n of mainRedNodes(db, r.project).filter((x) => x.workflow === "push" && x.faultKey)) {
     const taskId = nodeState(db, n).node?.taskId, t = taskId ? getTask(db, taskId) : null;
@@ -131,7 +132,9 @@ async function bindPass(r: Round, policy: RecoveryPolicyPort): Promise<void> {
       .get(r.project, t.id, REVOKE_OP)) continue;
     const h = await r.health(), faultKey = h ? mainCiFaultKey(h) : null;
     if (!h?.mainSha || faultKey !== n.faultKey) continue;
-    if (getEventByDedup(db, observeDedupKey({ project: r.project, mechanism: "mainRedRepairBind", target: t.id, actionKey: `main-red:push:${h.mainSha}:bind` }))) continue;
+    // the would-bind note only dedups observe; on goes by the real binding above, so an observed card is bound once on is set
+    if (bindMode === "observe" && getEventByDedup(db, observeDedupKey({ project: r.project, mechanism: "mainRedRepairBind", target: t.id,
+      actionKey: `main-red:push:${h.mainSha}:bind` }))) continue;
     await cli(r, "bind", { taskId: t.id, head: t.headSHA.toLowerCase(), mainSha: h.mainSha.toLowerCase(), faultKey });
   }
 }
