@@ -14,7 +14,10 @@ verified、done、cancelled 不进入当前列表；历史独立保留。
 
 等待事实沿用 work-board，单独区分依赖、容量、owner、结果不明、未知。
 不把无可靠运行事实的卡推断为正在运行。计划节点没有可靠停滞起点时显示未知。
-“当前状态已持续”是基础事实，不是超过升级阈值的结论。
+停滞警示优先读取本项目 meta 的 `priority-stall-threshold`（正数小时），
+当前基线尚无 PRIO3 配置读取器；不存在或值不符合正数小时格式时固定缺省 24 小时。
+服务端以 `stallThresholdMs` 返回毫秒；超过阈值用看板相同的 `--warn` 色标记行和时长。
+这只是基础时长警示，不代表升级机制已启用。计划节点起点未知时不标停滞。
 PRIO3 尚未接入，升级明确显示“尚未启用”；排序、开工显示各自配置，
 登记 now 不代表排序、开工、升级均已生效。
 
@@ -55,3 +58,26 @@ PM 批准的三个入口文件仅 import 与一处调用：
 
 `tests/ledger-priority-panel.test.ts` 覆盖权限拒绝、CAS 回滚、observe、off、
 排序、恢复继承、原话审计与读回，浏览器证据覆盖 390/1280 两宽度和异常状态。
+
+## 收起摘要与调整菜单
+
+面板默认收起，摘要保留 now 数量、观察标签以及排序 / 开工 / 升级各自状态。
+按页面路径与项目在 sessionStorage 记住展开状态；存储受限时用页面内存保留。
+展开后每张工作一行，长标题、feature 全名和来源详情通过悬停提示查看。
+同一句状态标签与说明只显示一次；未绑卡节点明确写“计划节点 · 未开卡 · 节点 key”。
+owner 每行一个“调整”入口，菜单含三档、恢复继承、前移、后移。
+旧快照禁用入口并提示原因；observe 菜单项以“记录本会”开头。
+
+作答接线仍是一处调用，import 改指向 `local-api/ledger-priority-panel-answer.ts`。
+该适配器把业务 CAS 失败转换成 `AskRejected(409, "priority_conflict", …)`，
+网页和 Discord 均提示“版本已变，请刷新后重试”，不误报“已处理”；
+权限失败转换成 `AskRejected(403, "priority_forbidden", 原因)`。
+原业务事务、PRIO1 写入逻辑和已结案 ask 的处理保持原有语义。
+
+浏览器复现：`PRIO_PANEL_SHOTS_DIR=ui-shots bun test tests/ledger-priority-panel.test.ts --test-name-pattern browser:`。
+两种宽度都截混合、空态、失败、旧快照及收起首屏，夹具固定同一个当前时间与阶段起点。
+收起截图分别使用 1280×800 / 390×844，并断言看板列头位于首屏。
+基线以 `origin/main` 的 fixture-harness bundle 配合 `PRIO_PANEL_BASELINE=1`、
+`PRIO_PANEL_BUNDLE=<基线 bundle 目录>` 跑相同测试；不需合并 main。
+上传清单受 8 对上限约束：混合、空态和收起各两宽度，加桌面失败与窄屏旧快照。
+其余两张异常状态截图仍保留在本地证据目录；操作与页面错误记录在 `after-operations.json`。

@@ -5,7 +5,7 @@
  * 答复与过期通知一律不抢占（intent=response / notification），并打 meta.waitForIdle 标记：「目标主回合在忙就押后、Stop 后再投」
  * 由 T13a 接进 deliverToLocal；在那之前 response 照常直投（本来就不抢占）。库的读写在 lib/ledger-asks.ts。
  */
-import { preparePriorityPanelAnswer } from "../lib/ledger-priority-panel-write.js";
+import { preparePriorityPanelAnswer } from "./local-api/ledger-priority-panel-answer.js";
 import { existsSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 import type { ServerWebSocket } from "bun";
@@ -292,7 +292,7 @@ export async function commitAnswer(i: AnswerInput): Promise<Ask> {
   const base = { choices: i.picks.map((p) => p.wire), labels, text: i.text, ...who, via: i.via, at: Date.now(), final: i.final };
   const answer = i.atts?.length ? { ...base, atts: i.atts } : base;
   const within = i.ask.kind === "assigned" && prepareAssigned ? await prepareAssigned(i.ask, answer) : undefined;
-  const a = answerAsk(askDb(), i.ask.id, answer, preparePriorityPanelAnswer(askDb(), i.ask, answer, within));
+  const a = answerAsk(askDb(), i.ask.id, answer, preparePriorityPanelAnswer(askDb(), i.ask, answer, within, AskRejected));
   // 只有 owner 本人作答才算「在」（Discord 只有 ALLOWED_USER_IDS；网页看 owner 标记）：guest 答指给自己的不算，否则 owner 卡活的 ask 5 分钟内只弹横幅
   if (i.from.kind !== "api" || i.from.owner) ownerPresence.touch();
   publishAsk(a);

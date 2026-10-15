@@ -7,7 +7,9 @@ import { answerAsk, getAsk, openAsk, type AskAnswer } from "../src/lib/ledger-as
 import { readPriority, readPriorityOrder, priorityHistory } from "../src/lib/ledger-priority-read.js";
 import { setPriority, setPriorityMode } from "../src/lib/ledger-priority-write.js";
 import { priorityPanel, panelResult } from "../src/lib/ledger-priority-panel.js";
-import { panelAsk, preparePriorityPanelAnswer } from "../src/lib/ledger-priority-panel-write.js";
+import { AskRejected } from "../src/bridge/asks.js";
+import { panelAsk } from "../src/lib/ledger-priority-panel-write.js";
+import { preparePriorityPanelAnswer } from "../src/bridge/local-api/ledger-priority-panel-answer.js";
 
 let db: Database;
 const project = "prio", feature = "ab12-work", now = 10000;
@@ -24,7 +26,7 @@ function request(operation: "set" | "clear" | "up" | "down" = "set") {
     operation, band: "next", snapshot: snapshot.version, observedAt: now }, now), now);
 }
 function apply(a: ReturnType<typeof request>, response = answer) {
-  return answerAsk(db, a.id, response, preparePriorityPanelAnswer(db, a, response));
+  return answerAsk(db, a.id, response, preparePriorityPanelAnswer(db, a, response, undefined, AskRejected));
 }
 beforeEach(() => {
   db = openLedger(":memory:");
@@ -46,6 +48,16 @@ test("读有效 now，继承来源与未绑节点完整；缺数据不能伪装�
   expect(panel.modes.priorityStall.available).toBe(false);
 });
 
+test("停滞阈值优先读取 PRIO3 小时数，缺失或无效时用 24 小时", () => {
+  expect(priorityPanel(db, project, now).stallThresholdMs).toBe(86400000);
+  db.query("INSERT INTO meta(project,key,value) VALUES (?,'priority-stall-threshold','2')").run(project);
+  expect(priorityPanel(db, project, now).stallThresholdMs).toBe(7200000);
+  for (const value of ['null', '-1', '"bad"']) {
+    db.query("UPDATE meta SET value=? WHERE project=? AND key='priority-stall-threshold'").run(value, project);
+    expect(priorityPanel(db, project, now).stallThresholdMs).toBe(86400000);
+  }
+});
+
 test("未认证 owner、外部成员、PM/agent不能通过作答应用，答案与业务均不落库", () => {
   mode("on");
   const a = request();
@@ -54,6 +66,32 @@ test("未认证 owner、外部成员、PM/agent不能通过作答应用，答案
     expect(getAsk(db, a.id)?.state).toBe("open");
     expect(readPriority(db, project, target).effective).toBe("now");
   }
+});
+
+test("作答 CAS 冲突返回 AskRejected 409，保留 open 而非已处理", () => {
+  mode("on");
+  const a = request();
+  mode("observe", 1);
+  try { apply(a); throw new Error("应拒绝冲突"); }
+  catch (error) {
+    expect(error).toBeInstanceOf(AskRejected);
+    expect(error).toMatchObject({ status: 409, code: "priority_conflict", message: "版本已变，请刷新后重试" });
+  }
+  expect(getAsk(db, a.id)?.state).toBe("open");
+  expect(readPriority(db, project, target).effective).toBe("now");
+});
+
+test("作答权限失败返回 AskRejected 403 并带原因，答案与业务不落库", () => {
+  mode("on");
+  const a = request();
+  try { apply(a, { ...answer, owner: undefined }); throw new Error("应拒绝越权"); }
+  catch (error) {
+    expect(error).toBeInstanceOf(AskRejected);
+    expect(error).toMatchObject({ status: 403, code: "priority_forbidden" });
+    expect((error as Error).message).toContain("owner");
+  }
+  expect(getAsk(db, a.id)?.state).toBe("open");
+  expect(readPriority(db, project, target).rev).toBe(0);
 });
 
 test("on：owner 调档经 PRIO1 写入并读回；原话与选择进入优先级历史", () => {
@@ -77,14 +115,14 @@ test("observe 只记本会应用，off 拒绝开请求；切档后旧按钮失�
   mode("on", 1);
   const old = request();
   mode("observe", 2);
-  expect(() => apply(old)).toThrow("版本冲突");
+  expect(() => apply(old)).toThrow("版本已变");
 });
 
 test("目标/继承/排序或快照版本变化，CAS 拒绝且不覆盖；过期快照不能提交", () => {
   mode("on");
   const a = request();
   setPriority(db, { actor: "owner", project, dedupKey: "race" }, { target: { kind: "feature", id: feature }, rev: 1, band: "later", evidence });
-  expect(() => apply(a)).toThrow("版本冲突");
+  expect(() => apply(a)).toThrow("版本已变");
   expect(getAsk(db, a.id)?.state).toBe("open");
   const snap = priorityPanel(db, project, now);
   expect(() => panelAsk(db, project, { target, rev: 0, operation: "set", band: "now", snapshot: snap.version, observedAt: 1 }, 90000)).toThrow("过期");
@@ -118,10 +156,14 @@ test("构造越权 HTTP 请求：普通 agent、guest、只读 token 与 peer �
 async function shotFixture() {
   const { generateHomeFixture } = await import("../web/features/collab/shared/home-fixture-gen");
   const home = generateHomeFixture();
+  const { teamFromHome } = await import("./web-team-parity-browser-center.test");
+  const team = await teamFromHome(home);
+  // Both board and panel share this clock and each card's actual stage start.
+  home.overview.tasks.find(t => t.id === "i28-A5")!.stageSince = home.now - (15 * 24 + 20) * 3600000;
   const p = home.project;
   setMeta(db, { actor: "owner" }, { project: p, key: "pms", value: ["pm"] });
   for (const t of home.overview.tasks) {
-    createTask(db, { actor: "owner", now: home.now - 3 * 86400000 }, { project: p, id: t.id, title: t.title, kind: "code", stage: t.stage,
+    createTask(db, { actor: "owner", now: t.stageSince ?? t.updatedAt }, { project: p, id: t.id, title: t.title, kind: "code", stage: t.stage,
       agent: t.agent ?? undefined, spec: "spec.md" });
     db.query(`INSERT INTO task_workflows(taskId,project,template,templateVersion,mode,authorFamily,fallback,specRev,rev,createdAt,updatedAt)
       VALUES (?,?,'code',2,'observe','codex','PM',1,1,0,0)`).run(t.id, p);
@@ -134,15 +176,19 @@ async function shotFixture() {
     VALUES (?,1,'initial','','owner','owner',0,?,'[]',0)`).run(f.id, JSON.stringify(nodes));
   db.query("UPDATE tasks SET featureId=? WHERE project=? AND id LIKE 'i28-A%'").run(f.id, p);
   setPriority(db, { actor: "owner", project: p, dedupKey: "shot-now" }, { target: { kind: "feature", id: f.id }, rev: 0, band: "now", evidence });
-  const at = Date.now();
+  const at = home.now;
   db.query(`INSERT INTO asks(id,project,taskId,source,kind,blocking,title,expiresAt,state,createdAt,updatedAt)
-    VALUES ('shot-owner',?,'i28-A7','system','owner_action',1,'待 owner 确认',?,'open',?,?)`).run(p, at + 86400000, at - 86400000, at);
+    VALUES ('shot-owner',?,'i28-A7','system','owner_action',1,'待 owner 确认',?,'open',?,?)`).run(p, at + 86400000, home.overview.tasks.find(t => t.id === "i28-A7")!.stageSince!, at);
   db.query(`INSERT INTO scheduler_intents(id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,templateVersion,status,reason,createdAt,updatedAt)
-    VALUES ('shot-unknown','i28-A4',?,'review','dispatch',1,2,1,1,2,'unknown','结果待核实',?,?)`).run(p, at - 2 * 86400000, at - 86400000);
+    VALUES ('shot-unknown','i28-A4',?,'review','dispatch',1,2,1,1,2,'unknown','结果待核实',?,?)`).run(p, at - 2 * 86400000, home.overview.tasks.find(t => t.id === "i28-A4")!.stageSince!);
   db.query(`INSERT INTO lend_orders(orderId,taskId,project,peer,family,step,specRev,round,head,repo,wire,text,sha256,status,leaseMs,createdBy,createdAt,updatedAt)
-    VALUES ('shot-pool','i28-A6',?,'fixture','codex','write',1,0,'h','a/b','{}','','s','pooled',1000,'owner',?,?)`).run(p, at - 3600000, at);
-  const snapshot = () => ({ ...priorityPanel(db, p, Date.now(), { registry: [], manualRegistry: [], maxWorkers: 2, now: Date.now() }), canWrite: true });
-  return { home, snapshot };
+    VALUES ('shot-pool','i28-A6',?,'fixture','codex','write',1,0,'h','a/b','{}','','s','pooled',1000,'owner',?,?)`).run(p, home.overview.tasks.find(t => t.id === "i28-A6")!.stageSince!, at);
+  const snapshot = () => ({ ...priorityPanel(db, p, home.now, { registry: [], manualRegistry: [], maxWorkers: 2, now: home.now }), canWrite: true });
+  for (const row of snapshot().rows.filter(r => r.taskId)) {
+    const task = home.overview.tasks.find(t => t.id === row.taskId)!;
+    expect(row.since).toBe(task.stageSince ?? task.updatedAt);
+  }
+  return { home, team, snapshot };
 }
 
 const shotsDir = process.env.PRIO_PANEL_SHOTS_DIR;
@@ -151,38 +197,43 @@ test.skipIf(!shotsDir)("browser: desktop/mobile states, owner changes, CAS, off/
   const { mkdirSync, readdirSync } = await import("node:fs");
   const { resolve } = await import("node:path");
   const { bundleHarness, serve, guardedPage } = await import("./helpers/collab-fixture-serve");
-  const { teamFromHome } = await import("./web-team-parity-browser-center.test");
   const { homeWorkBoard } = await import("../web/features/collab/shared/home-fixture-gen");
-  const { home, snapshot } = await shotFixture();
+  const { home, team, snapshot } = await shotFixture();
   const out = shotsDir!, baseline = process.env.PRIO_PANEL_BASELINE === "1", phase = baseline ? "before" : "after";
   mkdirSync(out, { recursive: true });
   const bundle = process.env.PRIO_PANEL_BUNDLE ?? await bundleHarness(out);
-  const { server } = serve(home, await teamFromHome(home), bundle);
+  const { server } = serve(home, team, bundle);
   const browser = await chromium.launch({ headless: true, channel: "chrome" });
   const evidenceLog: Record<string, unknown> = {};
   try {
     for (const width of [1280, 390]) {
-      const height = width === 390 ? 3400 : 2000, size = `${width}x${height}`;
-      for (const view of ["mixed", "empty", "failure", "stale"]) {
+      for (const view of ["mixed", "empty", "failure", "stale", "collapsed"]) {
+        const height = view === "collapsed" ? width === 390 ? 844 : 800 : width === 390 ? 1600 : 1100;
+        const size = `${width}x${height}`;
         const g = await guardedPage(browser, String(server.url), { width });
         const { page, ctx } = g;
         let fail = view === "failure", empty = view === "empty", owner = true, reads = 0;
         await page.setViewportSize({ width, height });
-        await page.clock.install();
+        await page.clock.install({ time: new Date(home.now) });
+        await page.route(`**/api/v1/ledger/${home.project}/work`, route => {
+          const board = homeWorkBoard(home);
+          for (const row of board.working) row.overMinutes = Math.max(0, (home.now - row.since) / 60000 - row.normalMinutes);
+          return route.fulfill({ json: board });
+        });
         await page.route(`**/api/v1/ledger/${home.project}/priority`, route => {
           reads++;
           return route.fulfill({ status: fail ? 503 : 200, json: fail ? { error: "模拟读取失败" } : { ...snapshot(), canWrite: owner, ...(empty ? { rows: [] } : {}) } });
         });
         await page.route(`**/api/v1/ledger/${home.project}/priority/requests`, async route => {
           try {
-            const ask = openAsk(db, panelAsk(db, home.project, route.request().postDataJSON(), Date.now()));
+            const ask = openAsk(db, panelAsk(db, home.project, route.request().postDataJSON(), home.now), home.now);
             await route.fulfill({ status: 201, json: { askId: ask.id, label: ask.title, choice: "[button:priority_apply]" } });
           } catch (e) { await route.fulfill({ status: 409, json: { error: (e as Error).message } }); }
         });
         await page.route(`**/api/v1/ledger/${home.project}/asks/*/answer`, async route => {
           const id = route.request().url().split("/").at(-2)!;
           try {
-            const a = getAsk(db, id)!, response = { ...answer, at: Date.now(), text: route.request().postDataJSON().text, labels: [a.title] };
+            const a = getAsk(db, id)!, response = { ...answer, at: home.now + 1, text: route.request().postDataJSON().text, labels: [a.title] };
             apply(a, response);
             await route.fulfill({ json: { ok: true } });
           } catch (e) { await route.fulfill({ status: 409, json: { error: (e as Error).message } }); }
@@ -194,7 +245,8 @@ test.skipIf(!shotsDir)("browser: desktop/mobile states, owner changes, CAS, off/
         await page.getByRole("tab", { name: /谁在干活/ }).first().click();
         await page.locator("[data-work-board]").waitFor();
         if (!baseline) {
-          await page.getByRole("heading", { name: "当前现在做" }).waitFor();
+          await page.getByRole("heading", { name: /^当前现在做/ }).waitFor();
+          await page.locator("[data-priority-panel] summary").click();
           if (view === "stale") { await page.getByText("档位来源：", { exact: false }).first().waitFor(); fail = true; await page.getByRole("button", { name: "刷新", exact: true }).click(); }
           if (fail) {
             await page.getByRole("alert").waitFor();
@@ -202,6 +254,14 @@ test.skipIf(!shotsDir)("browser: desktop/mobile states, owner changes, CAS, off/
           }
           else if (empty) await page.getByText(/当前没有有效 now/).waitFor();
           else await page.locator("[data-priority-panel] article").first().waitFor();
+        }
+        if (!baseline && view === "mixed") await verifyRows(page);
+        if (!baseline && view === "collapsed") await page.locator("[data-priority-panel] summary").click();
+        if (view === "collapsed") {
+          const heading = page.locator('[data-work-board] h3:visible').first();
+          const box = await heading.boundingBox();
+          expect(box && box.y + box.height < height).toBe(true);
+          if (!baseline) expect(await page.locator('[data-priority-panel] details').getAttribute('open')).toBe(null);
         }
         await page.evaluate("document.fonts.ready");
         expect(await page.evaluate<boolean>("document.documentElement.scrollWidth <= innerWidth + 1")).toBe(true);
@@ -215,14 +275,31 @@ test.skipIf(!shotsDir)("browser: desktop/mobile states, owner changes, CAS, off/
       }
     }
     if (!baseline) await teamPriorityNavigation(browser, String(server.url), home.project, snapshot);
-    const shots = readdirSync(out).filter(f => /^(before|after)-.+-(1280x2000|390x3400)\.png$/.test(f)).map(file => {
+    const shots = readdirSync(out).filter(f => /^(before|after)-.+-\d+x\d+\.png$/.test(f)
+      && !f.includes('failure-390') && !f.includes('stale-1280')).map(file => {
       const m = file.match(/^(before|after)-(.+)-(\d+x\d+)\.png$/)!;
       return { phase: m[1], view: m[2], size: m[3], file };
     });
-    await Bun.write(resolve(out, "manifest.json"), JSON.stringify({ v: 1, summary: "当前现在做面板：混合阶段、空列表、失败和旧快照，桌面与窄屏对照", shots }, null, 2));
+    await Bun.write(resolve(out, "manifest.json"), JSON.stringify({ v: 1, summary: "当前现在做面板：混合阶段、空列表、失败、旧快照及收起首屏，桌面与窄屏 8 组对照", shots }, null, 2));
     await Bun.write(resolve(out, `${phase}-operations.json`), JSON.stringify(evidenceLog, null, 2));
   } finally { await browser.close(); server.stop(true); }
 }, 180000);
+
+async function verifyRows(page: import("playwright-core").Page) {
+  const panel = page.locator("[data-priority-panel]");
+  const rows = panel.locator("article");
+  expect(await panel.getByRole("button", { name: /^调整：/ }).count()).toBe(await rows.count());
+  expect(await panel.locator('[data-stalled="true"]').count()).toBe(1);
+  const long = panel.locator('article').filter({ hasText: 'i28-A5' });
+  expect(await long.textContent()).toContain('15 天 20 小时');
+  // State labels must not repeat the same explanatory text.
+  expect(await long.locator('[title="执行中"]').textContent()).toBe('执行中');
+  const bounds = (await panel.boundingBox())!;
+  for (const row of await rows.all()) {
+    const button = (await row.getByRole("button", { name: /^调整：/ }).boundingBox())!;
+    expect(button.x + button.width <= bounds.x + bounds.width).toBe(true);
+  }
+}
 
 async function browserOperations(page: import("playwright-core").Page, p: string,
   snapshot: () => ReturnType<typeof priorityPanel> & { canWrite: boolean }, readonly: () => void, reads: () => number) {
@@ -235,27 +312,30 @@ async function browserOperations(page: import("playwright-core").Page, p: string
     { mechanism: "priorityPanel", mode, rev: snapshot().modes.priorityPanel.rev, evidence });
   try {
     const before = readPriority(db, p, first.target).rev;
-    await row().getByRole("button", { name: "记录本会现在做", exact: true }).click();
+    const adjust = async (name: string) => {
+      await row().getByRole("button", { name: /^调整：/ }).click();
+      await row().getByRole("button", { name, exact: true }).click();
+    };
+    await adjust("记录本会现在做");
     await confirm("确认记录");
     await panel.getByText("已记录本会调整，业务档位与顺序未变。", { exact: true }).waitFor();
     expect(readPriority(db, p, first.target).rev).toBe(before);
     setMode("on"); await refresh();
-    await row().getByRole("button", { name: "改为现在做", exact: true }).waitFor();
-    await row().getByRole("button", { name: "改为现在做", exact: true }).click(); await confirm("确认应用");
+    await adjust("现在做"); await confirm("确认应用");
     await panel.getByText("已应用，服务端读回一致。", { exact: true }).waitFor();
     expect(readPriority(db, p, first.target).explicit).toBe("now");
-    await row().getByRole("button", { name: "恢复继承", exact: true }).click(); await confirm("确认应用");
+    await adjust("恢复继承"); await confirm("确认应用");
     await page.waitForFunction("!document.querySelector('[aria-label=\"确认优先级请求\"]')");
     expect(readPriority(db, p, first.target).explicit).toBe(null);
-    await row().getByRole("button", { name: "后移", exact: true }).click(); await confirm("确认应用");
+    await adjust("后移"); await confirm("确认应用");
     await page.waitForFunction("!document.querySelector('[aria-label=\"确认优先级请求\"]')");
     expect(snapshot().rows[1]!.key).toBe(first.key);
-    await row().getByRole("button", { name: "前移", exact: true }).click(); await confirm("确认应用");
+    await adjust("前移"); await confirm("确认应用");
     await page.waitForFunction("!document.querySelector('[aria-label=\"确认优先级请求\"]')");
     expect(snapshot().rows[0]!.key).toBe(first.key);
-    await row().getByRole("button", { name: "改为接着做", exact: true }).click();
+    await adjust("接着做");
     setMode("observe"); await confirm("确认应用");
-    await panel.getByText(/版本冲突或快照过期/).waitFor();
+    await panel.getByText(/版本已变，请刷新后重试/).waitFor();
     expect(readPriority(db, p, first.target).effective).toBe("now");
     await refresh();
     readonly(); await refresh();
@@ -289,6 +369,7 @@ async function teamPriorityNavigation(browser: import("playwright-core").Browser
     await g.page.goto(`${url}?side=team&project=${p}#chat`);
     await g.page.getByRole("tab", { name: /谁在干活/ }).click();
     const planned = snapshot().rows.find(r => r.target.kind === "node")!;
+    await g.page.locator("[data-priority-panel] summary").click();
     await g.page.locator("[data-priority-panel] article").filter({ hasText: planned.title }).getByRole("button").first().click();
     const dialog = g.page.getByRole("dialog", { name: "本机计划节点详情" });
     await dialog.getByText("为什么还没开卡", { exact: true }).waitFor();

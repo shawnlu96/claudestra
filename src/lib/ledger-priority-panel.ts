@@ -47,6 +47,16 @@ function nodeFacts(node: BoardNode, nodes: BoardNode[]): Pick<PriorityPanelRow, 
     : { state: "unknown", reason: "未绑卡计划：开工及停滞数据未知", since: null };
 }
 
+/** PRIO3 is optional on this baseline; absent/invalid threshold uses a 24-hour visual warning. */
+function stallThreshold(db: Database, project: string): number {
+  const row = db.query("SELECT value FROM meta WHERE project=? AND key='priority-stall-threshold'").get(project) as { value: string } | null;
+  if (!row) return 86400000;
+  try {
+    const hours: unknown = JSON.parse(row.value);
+    return typeof hours === "number" && Number.isFinite(hours) && hours > 0 ? hours * 3600000 : 86400000;
+  } catch { return 86400000; } // Invalid optional PRIO3 metadata must not hide otherwise readable now work.
+}
+
 export function priorityPanel(db: Database, project: string, now: number, opts?: WorkBoardOptions) {
   const ctx = boardContext(db, project, now);
   const features = hasFeatureSchema(db) ? db.query("SELECT * FROM features WHERE project=?").all(project) as Feature[] : [];
@@ -80,7 +90,7 @@ export function priorityPanel(db: Database, project: string, now: number, opts?:
   // Time is kept outside the digest: polling alone cannot invalidate an unchanged owner choice.
   const policy = Object.fromEntries(Object.entries(modes).map(([key, value]) => [key, { ...value, available: key === "priorityPanel" }]));
   const version = createHash("sha256").update(canonicalJson({ rows: rows.map(r => ({ key: r.key, stage: r.stage, priority: r.priority })), order, modes: policy })).digest("hex");
-  return { project, now, version, asOfSeq: ctx.asOfSeq, rows, order, modes: policy };
+  return { project, now, stallThresholdMs: stallThreshold(db, project), version, asOfSeq: ctx.asOfSeq, rows, order, modes: policy };
 }
 
 /** Historical decisions remain queryable after a completed card leaves the current panel. */

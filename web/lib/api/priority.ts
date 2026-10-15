@@ -9,7 +9,7 @@ export interface PanelRow {
     source: 'explicit' | 'feature' | 'system'; inheritedFrom: string | null; order: number | null; note: string | null };
 }
 export interface PrioritySnapshot {
-  project: string; now: number; version: string; rows: PanelRow[]; canWrite: boolean;
+  project: string; now: number; stallThresholdMs: number; version: string; rows: PanelRow[]; canWrite: boolean;
   modes: Record<'priorityPanel' | 'prioritySort' | 'priorityNowStart' | 'priorityStall', { mode: 'off' | 'observe' | 'on'; rev: number; available: boolean }>;
   order: { members: string[]; rev: number };
 }
