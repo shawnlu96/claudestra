@@ -24,7 +24,7 @@ import { observeOwnerFresh } from "./scheduler-ui-owner-fresh.js";
 
 const UI_APPROVE = "scheduler_ui_approve";
 /** Moves the engine may make itself; build/fix→review is the worker's deliver, merge→live is the merge queue's. */
-const ENGINE_MOVES: ReadonlySet<string> = new Set(["restate>build", "review>fix", "review>merge"]);
+const ENGINE_MOVES: ReadonlySet<string> = new Set(["restate>build", "review>fix", "review>merge", "fix>review"]); // fix>review: only SELFHEAL1's plan (scheduler-fix-selfheal.ts)
 
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 

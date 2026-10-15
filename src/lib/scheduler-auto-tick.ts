@@ -195,7 +195,8 @@ class Card {
     }
     if (got.kind === "manual") {
       await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`);
-      return this.escalate(`${role} session：${got.reason}`, intent.id);
+      const refetch = await (await import("./scheduler-head-refetch.js")).headRefetch(this, got.reason); if ("wait" in refetch) return this.out("waiting", refetch.wait); // SELFHEAL1
+      return this.escalate(`${role} session：${refetch.reason}`, intent.id);
     }
     const ref = got.ref;
     const b = await this.deps.manager("ledger", "scheduler-session-bind", this.task.id, "--role", role, "--intent", intent.id,
@@ -234,7 +235,8 @@ class Card {
       const pinned = await this.deps.pinReview(this.task, ref, intent.head);
       if ("manual" in pinned) {
         await this.settle(intent.id, "pending", "cancelled", `未投递：${oneLine(pinned.manual)}`);
-        return this.escalate(staleReplacementObservation(this.db, this.task, { ...ref, source: "local" }, pinned.manual), intent.id);
+        const refetch = await (await import("./scheduler-head-refetch.js")).headRefetch(this, pinned.manual); if ("wait" in refetch) return this.out("waiting", refetch.wait); // SELFHEAL1
+        return this.escalate(staleReplacementObservation(this.db, this.task, { ...ref, source: "local" }, refetch.reason), intent.id);
       }
       checkout = pinned.dir;
     }
@@ -425,13 +427,14 @@ class Card {
       return this.drive(open, again);
     }
     if (open) return this.drive(open, null);
-    const peerHold = peerPrHold(this.db, this.task); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
+    const peerHold = peerPrHold(this.db, this.task, this.deps.now(), this.deps.recoveryPolicy); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
     const snap = autoSnapshot(this.db, this.task, this.opts), plan = planScheduler(snap);
     await (await import("./lend-fix-reassign-tick.js")).trackLeaseWait(this.db, this.task, plan, this.deps.manager); // i28-RA1：等租约方计时
     const back = await (await import("./recovery-fix-local-swap-tick.js")).trackLocalSwap(this.db, this.task, snap, plan, this.deps); // GATESWAP1
     if (back) return this.out("manual", back);
     await (await import("./scheduler-merge-handoff-private.js")).narrowPrivateMerge(this, plan); // PRIVLOCK2：私仓卡退回人工前收窄锁
     await (await import("./scheduler-review-seat-wait.js")).trackReviewSeatWait(this.db, this.task, snap, plan, this.deps);
+    if (plan.kind === "escalate") await (await import("./scheduler-head-refetch.js")).observeFixSelfHeal(this, plan); // SELFHEAL1 observe sample
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);

@@ -7,8 +7,12 @@
 import { lendAskProblem, type LendAskParams } from "./lend-ask.js";
 import type { LendEntry } from "./lend-config.js";
 import type { LendDeps } from "./lend-drive.js";
-import { openSlots, orderOf, ordersToday, patchOrder, type LendRow } from "./lend-journal.js";
+import { getMeta, openSlots, orderOf, ordersToday, patchOrder, setMeta, type LendRow } from "./lend-journal.js";
 import { SHELL_SENTENCE } from "./lend-grant-rules.js";
+import { readFileSync } from "node:fs";
+import { PROJECTS_PATH, resolveProjectForRealDir, type ProjectDef } from "./projects.js";
+import { recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
+import { REPO_ROOT } from "./repo-root.js";
 
 const KINDS = ["start", "acked", "stopped"] as const;
 type LendNoticeKind = (typeof KINDS)[number];
@@ -60,11 +64,54 @@ function quotaOf(row: LendRow, entry: LendEntry, d: Pick<LendDeps, "db" | "now">
   return `今天第 ${ordersToday(d.db, row.peer, d.now())}/${entry.ordersPerDay} 单，${row.family} 位 ${openSlots(d.db, row.peer, row.family)}/${fam}，授权到 ${entry.until}`;
 }
 
+export type NoticeOnceModePort = () => RecoveryMode;
+/** 本机 claudestra 仓库所属项目的 selfHealBeforeManual（继承项目 mode / 缺省）；读不了 = off */
+const localMode: NoticeOnceModePort = () => {
+  try {
+    const projects = (JSON.parse(readFileSync(PROJECTS_PATH, "utf8")) as { projects?: ProjectDef[] }).projects;
+    const project = Array.isArray(projects) ? resolveProjectForRealDir(projects, REPO_ROOT)?.id : undefined;
+    const p = recoveryPolicy(project ?? "-", "selfHealBeforeManual");
+    return p.source === "error" ? "off" : p.mode;
+  } catch { return "off"; }
+};
+let onceMode: NoticeOnceModePort = localMode;
+/** Tests only: swap the switch reader; returns the restore. */
+export function configureLendNoticeOnce(port: NoticeOnceModePort | null): () => void {
+  const was = onceMode;
+  onceMode = port ?? localMode;
+  return () => { onceMode = was; };
+}
+
+/** 卡 + head + 种类的去重键；没有卡号或 head 不是完整 SHA 的不去重 */
+export function noticeOnceKey(p: Pick<LendNoticeParams, "peer" | "repo" | "taskId" | "head" | "kind">): string | null {
+  if (!p.taskId || !/^[0-9a-f]{40}$/.test(p.head)) return null;
+  return `notice-once:${JSON.stringify([p.peer, p.repo, p.taskId, p.head, p.kind])}`;
+}
+
+/** 同卡同 head 同种通知已经送到过：on 跳过（true）；observe 记一行照发（false）；off / 没送过 false */
+function alreadyTold(p: LendNoticeParams, d: LendDeps): boolean {
+  const key = noticeOnceKey(p), mode = key ? onceMode() : "off";
+  if (!key || mode === "off" || !getMeta(d.db, key)) return false;
+  if (mode === "on") { d.log(`${p.orderId} ${p.kind} 通知不重发：同卡 ${p.taskId} 同 head 已通知过（${getMeta(d.db, key)}）`); return true; }
+  setMeta(d.db, `${key}:observed:${p.orderId}`, String(d.now()));
+  d.log(`恢复观察（selfHealBeforeManual）：本会跳过 ${p.orderId} 的 ${p.kind} 通知（同卡 ${p.taskId} 同 head 已通知过）`);
+  return false;
+}
+
+function markTold(p: LendNoticeParams, d: LendDeps): void {
+  const key = noticeOnceKey(p);
+  if (key && onceMode() !== "off" && !getMeta(d.db, key)) setMeta(d.db, key, p.orderId);
+}
+
 /** 起 worker 之前：开跑通知交出去了返回（记了 start 的）行；没交出去返回 null，调用方这轮不起 worker、下轮再发 */
 export async function ensureStartNotice(row: LendRow, entry: LendEntry, d: LendDeps): Promise<LendRow | null> {
   if (row.notices?.start) return row;
-  const told = await d.notify(noticeParams(row, "start", null, quotaOf(row, entry, d)));
-  if (!told.ok) return (d.log(`${row.orderId} 开跑通知没交出去，暂不起 worker：${told.error}`), null);
+  const p = noticeParams(row, "start", null, quotaOf(row, entry, d));
+  if (!alreadyTold(p, d)) {
+    const told = await d.notify(p);
+    if (!told.ok) return (d.log(`${row.orderId} 开跑通知没交出去，暂不起 worker：${told.error}`), null);
+    markTold(p, d);
+  }
   return patchOrder(d.db, row.orderId, [row.state], { notices: { ...row.notices, start: d.now() } }, d.now());
 }
 
@@ -79,7 +126,11 @@ export function endNotice(row: LendRow, to: string, why: string | null): Pick<Le
 export async function flushEndNotice(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const end = row.notices?.end;
   if (!end || end.sentAt !== null) return row;
-  const told = await d.notify(noticeParams(row, end.kind, end.why, "（已结束）"));
-  if (!told.ok) return (d.log(`${row.orderId} ${end.kind === "acked" ? "交付" : "停止"}通知没交出去，下轮补发：${told.error}`), null);
+  const p = noticeParams(row, end.kind, end.why, "（已结束）");
+  if (!alreadyTold(p, d)) {
+    const told = await d.notify(p);
+    if (!told.ok) return (d.log(`${row.orderId} ${end.kind === "acked" ? "交付" : "停止"}通知没交出去，下轮补发：${told.error}`), null);
+    markTold(p, d);
+  }
   return patchOrder(d.db, row.orderId, [row.state], { notices: { ...row.notices, end: { ...end, sentAt: d.now() } } }, d.now());
 }

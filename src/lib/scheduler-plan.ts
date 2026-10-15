@@ -30,6 +30,7 @@ import { centerReviewed } from "./scheduler-center-facts.js";
 import { ciProofAdmits } from "./scheduler-ci-proof-gate.js";
 import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./review-source-proof.js";
 import { ownerFreshStep } from "./scheduler-ui-owner-fresh.js";
+import { fixSelfHeal } from "./scheduler-fix-selfheal.js";
 
 export interface WorkerRef {
   agent: string;
@@ -216,10 +217,10 @@ const bouncePackage = (bounce: MergeBounce | null): WorkOrderFacts | null => bou
 
 function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
   const read = fixStartReviewFacts(s.task, s.events);
-  if (read.kind !== "facts") return escalate("fix_report", "修复阶段缺上一轮完整审查报告");
+  if (read.kind !== "facts") return fixSelfHeal(s, null, escalate("fix_report", "修复阶段缺上一轮完整审查报告")); // SELFHEAL1
   const facts = convergeReview(s.events, read.facts, s.fixDiff).facts;
   const p1 = facts.findings.filter((f) => f.severity === "P1");
-  if (!p1.length) return escalate("fix_report", "修复阶段没有 P1，需 PM 核对为什么退回");
+  if (!p1.length) return fixSelfHeal(s, facts, escalate("fix_report", "修复阶段没有 P1，需 PM 核对为什么退回")); // SELFHEAL1
   const minRound = reviewStartRound(s);
   const streaks = p1.map((f) => p1FindingStreak(s.events, f, facts.round, minRound));
   const total = p1AnyStreak(s.events, facts.round, minRound);

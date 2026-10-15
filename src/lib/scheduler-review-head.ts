@@ -14,6 +14,10 @@ import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import type { Git } from "./scheduler-review-worktree.js";
+import { fetchHeadVia } from "./scheduler-head-refetch-git.js";
+import { peerPrHeadMissing } from "./peer-pr-hold.js";
+import { peerPrOf } from "./peer-pr-ledger.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
 const REVIEW_FETCH_TIMEOUT_MS = 60_000;
@@ -31,6 +35,7 @@ export interface ReviewHeadEnv {
   /** Local git (lease-checked). */ git: Git;
   /** Network git (bounded and lease-checked). */ net: Git;
   readConfig?: () => SchedulerConfig;
+  /** selfHealBeforeManual's switch (tests); default the live recovery policy. */ recoveryPolicy?: RecoveryPolicyPort;
 }
 
 /** The refs this card's delivery may be fetched through: its lend branch, then its PR head. */
@@ -74,6 +79,9 @@ export function lendProjectDir(env: ReviewHeadEnv, task: LedgerTask): string | n
  * `dir` is the reviewer's checkout (`isCheckout`: tracked edits there refuse before any fetch) or the repository it is added from.
  */
 export async function prepareReviewHead(env: ReviewHeadEnv, task: LedgerTask, head: string, dir: string, isCheckout: boolean): Promise<string | null> {
+  // SELFHEAL1: a peer PR card's head (first review included, before its worktree is added) is checked — and under
+  // selfHealBeforeManual on fetched once through refs/pull/<n>/head — in the project repository; a miss is the classified reason.
+  if (peerPrOf(task)) return peerPrHeadMissing(task, head, env.git, env.readConfig ?? readSchedulerConfig, env.net, env.recoveryPolicy);
   if (!remoteHeadFamily(env.db, task)) return null;
   if (!SHA40.test(head)) return `派审 head ${head} 不是完整的 commit id，不取对象、不派审`;
   const has = async () => { const r = await env.git(["-C", dir, "rev-parse", "--verify", "--quiet", `${head}^{commit}`]); return r.code === 0 && r.out === head; };
@@ -92,11 +100,6 @@ export async function prepareReviewHead(env: ReviewHeadEnv, task: LedgerTask, he
   const repoDir = repo.dir;
   const mine = await commonDir(env.git, dir), project = await commonDir(env.git, repoDir);
   if (!mine || mine !== project) return `${dir} 与项目仓库 ${repoDir} 不共用对象库，不从别处取交付 head ${short}`;
-  const tried: string[] = [];
-  for (const ref of refs) {
-    const f = await env.net(["-C", repoDir, "fetch", "--no-tags", "-q", "origin", ref]);
-    if (f.code === 0 && await has()) return null;
-    tried.push(f.code === 0 ? `${ref}：取到了但不含该 commit（引用已移动？）` : `${ref}：${cut(f.out)}`);
-  }
-  return `交付 head ${short} 从项目仓库 origin 取不到，不派审：${tried.join("；")}`.slice(0, 600);
+  const tried = await fetchHeadVia(env.net, repoDir, refs, has);
+  return tried && `交付 head ${short} 从项目仓库 origin 取不到，不派审：${tried.join("；")}`.slice(0, 600);
 }

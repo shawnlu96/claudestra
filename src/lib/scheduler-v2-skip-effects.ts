@@ -75,6 +75,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-ci-selected-gate.ts": "ledger=1 notice=3", // CISEL2: observe / repair notes via `ledger scheduler-recovery-observe` through the pass manager; info notice to PM
     "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1",
+    "scheduler-head-refetch.ts": "ledger=1", // SELFHEAL1: `ledger scheduler-recovery-observe` head-refetch attempt notes, through the pass manager
     "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5",
     "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2",
