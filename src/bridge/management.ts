@@ -15,26 +15,33 @@ import { confirmDeps, handleTeamButton } from "./team-confirm.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent } from "./event-bus.js";
 import { runManagerProcess } from "../lib/run-manager.js";
+import { agentListCache } from "./agent-lookup.js";
 import { handleSwmodelButton, isSwmodelButton } from "./swmodel-button.js";
 import { handleStatuslineConsentButton, SLWRAP_PREFIX } from "./account-usage-statusline-consent.js";
 
 /**
- * 各 manager 子命令的超时上限（毫秒）。只读类命令必须短 —— 它们坐在热轮询路径上
- * （permission-watcher 每 8s 一次 `list`）；生命周期类命令本身就要等 Claude Code
+ * 各 manager 子命令的超时上限（毫秒）。只读类命令必须短；生命周期类命令本身就要等 Claude Code
  * 起来，给足时间。没有超时的话，manager 或它拉起的 tmux/claude 一旦挂住，调用方
- * 就永久 await，轮询每轮堆一个子进程。
+ * 就永久 await。`list` 不在这里：走共享缓存（bridge/agent-lookup.ts 的 agentListCache），超时也在那边。
  */
 const MANAGER_TIMEOUT_MS: Record<string, number> = {
-  list: 20_000,
   sessions: 20_000,
   version: 20_000,
   cost: 30_000,
 };
 const MANAGER_TIMEOUT_DEFAULT_MS = 120_000; // create / resume / restart 要等 CC 启动
 
+/** 不会改 agent 名单的命令：跑完不用作废名单缓存（其余一律作废，多读一次 list 的代价远小于名单晚一拍） */
+const LIST_PRESERVING = new Set(["sessions", "version", "cost", "doctor", "ledger", "project-list", "cron-list", "cron-history", "peer-http-list", "peer-invite-list"]);
+
 export async function runManager(...args: string[]): Promise<any> {
+  if (args.length === 1 && args[0] === "list") return agentListCache.result(); // 全 bridge 共用一份名单（watcher / 按钮 / API / route_to_agent）
   const budget = MANAGER_TIMEOUT_MS[args[0] ?? ""] ?? MANAGER_TIMEOUT_DEFAULT_MS;
-  return runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: budget });
+  try {
+    return await runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: budget });
+  } finally {
+    if (!LIST_PRESERVING.has(args[0] ?? "")) agentListCache.invalidate(); // create / kill / restart / rename 后下一次读拿新名单
+  }
 }
 
 export async function buildStatusPanel(): Promise<{

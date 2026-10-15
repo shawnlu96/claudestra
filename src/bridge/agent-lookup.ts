@@ -4,7 +4,16 @@
  * 发送方以为对方不存在、不会重试。叶子模块：只依赖 src/lib，bridge.ts 与 api-routes.ts 各一行接线。
  */
 import { agentsFromList, listAgentsStrict, runManagerProcess } from "../lib/run-manager.js";
+import { createListCache } from "../lib/agent-list-cache.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
+
+/** 名单子进程本身的超时：坐在 watcher 热轮询上，挂住要能强杀；route_to_agent 另有更短的等待预算（下面 ROUTE_LIST_BUDGET_MS） */
+const LIST_SPAWN_BUDGET_MS = 20_000;
+
+/** bridge 进程唯一的 manager list 缓存（lib/agent-list-cache.ts）：management.runManager("list") 与 route_to_agent 都从这里取 */
+export const agentListCache = createListCache({
+  list: () => runManagerProcess(["list"], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: LIST_SPAWN_BUDGET_MS }),
+});
 
 /**
  * route_to_agent 查 list 的预算，比 runManager 给 list 的 20s 短：拒绝必须赶在调用方超时之前回去（bridgeSend 默认 10s、
@@ -13,7 +22,14 @@ import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
  */
 export const ROUTE_LIST_BUDGET_MS = 6_000;
 
-const listForRoute = () => runManagerProcess(["list"], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: ROUTE_LIST_BUDGET_MS });
+/** 等共享缓存最多 ROUTE_LIST_BUDGET_MS；超了按「不可用」拒，子进程照跑完、结果留给下一次 */
+export function listForRoute(list: () => Promise<unknown> = agentListCache.result, budgetMs = ROUTE_LIST_BUDGET_MS): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, error: `manager list 超过 ${budgetMs / 1000}s 未返回` }), budgetMs);
+  });
+  return Promise.race([list(), timeout]).finally(() => clearTimeout(timer));
+}
 
 export type RouteLookup =
   | { agents: any[]; target: any; targetName: string }
@@ -48,7 +64,7 @@ export async function routeLookupOrReject(
   ws: { send(data: string): unknown },
   requestId: unknown,
   rawTarget: string,
-  list: () => Promise<unknown> = listForRoute,
+  list: () => Promise<unknown> = () => listForRoute(),
 ): Promise<Extract<RouteLookup, { target: unknown }> | null> {
   // list 调用本身抛错（spawn / 读管道失败）也在投递前，同样回 list_unavailable，不能冒到外层 catch 变成 sent:true 的普通 error
   const listResult = await list().catch((e: unknown) => ({ ok: false, error: `manager list 调用异常: ${(e as Error).message}` }));

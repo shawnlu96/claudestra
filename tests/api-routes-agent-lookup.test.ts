@@ -1,7 +1,7 @@
 /**
  * SYN-4：/api/v1/agents/:name/* 按名字找 agent 不再每次现起 `manager list`。
  * 子进程（临时 HOME / 状态目录、最小 env、死 bridge）里经 serveApiRequest 真鉴权、真 registry.json；
- * 只注入 manager（计数的 runManager，不起子进程）和 tmux（抛错）。
+ * 只注入 manager（计数的 runManagerProcess，不起子进程）和 tmux（抛错）。
  * 老实现：10 个 /pending 调 10 次 list（红）；新实现：缓存期内 1 次（绿）。找人语义逐条对照老实现。
  */
 import { expect, mock, test } from "bun:test";
@@ -71,10 +71,11 @@ async function childSuite(): Promise<void> {
       throw new Error("no tmux server in test");
     },
   }));
-  const realMgmt = await import("../src/bridge/management.ts");
-  mock.module(join(import.meta.dir, "../src/bridge/management.ts"), () => ({
-    ...realMgmt,
-    runManager: async (...args: string[]) => {
+  // 计数的是真子进程那一层（LSC-1 起共享缓存在 management.runManager 里面，mock 它会把缓存一起绕过）
+  const realRun = await import("../src/lib/run-manager.ts");
+  mock.module(join(import.meta.dir, "../src/lib/run-manager.ts"), () => ({
+    ...realRun,
+    runManagerProcess: async (args: string[]) => {
       if (args[0] !== "list") return { ok: false, error: `manager ${args[0]} 不在本测试里` };
       listCalls++;
       await Bun.sleep(20); // 子进程有耗时：并发请求要能合到同一次
