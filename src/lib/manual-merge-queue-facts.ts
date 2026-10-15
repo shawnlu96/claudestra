@@ -20,6 +20,7 @@ import { readSchedulerConfig } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
+import { standingHold } from "./pm-handback.js";
 import { UI_ASK_ACTION, uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 export const MANUAL_MERGE_NODE = "manual_merge";
@@ -210,12 +211,6 @@ function authorizationRefusal(db: Database, taskId: string, head: string, now: n
   return null;
 }
 
-/** A workflow event that switched the card to manual on purpose to keep it there (PM / owner hold). */
-const holdOf = (events: readonly LedgerEvent[]): LedgerEvent | null => {
-  const t = events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow");
-  return t?.data.hold ? t : null;
-};
-
 /** A run of this request carried the review to the card's current head (scheduler-merge.ts carryReview, scheduler identity only). */
 const carriedTo = (events: readonly LedgerEvent[], intentId: string, head: string | null): boolean =>
   !!head && events.some((e) => e.kind === "scheduler" && e.actor === "scheduler" && e.data.op === "review_carry" && e.data.intentId === intentId && e.data.to === head);
@@ -246,7 +241,7 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
   }
   const frozen = getMeta(db, task.project).queueFrozen;
   if (frozen.frozen) return { kind: "wait", why: `项目合并队列已冻结：${frozen.reason || "无原因"}` };
-  const hold = holdOf(events);
+  const hold = standingHold(events, req); // PMHAND1 11b: lifted by a later request of whoever set it (pm-handback.ts)
   if (hold) return { kind: "wait", why: `卡被明确留在人工（#${hold.seq}）` };
   const safety = openSafetyHold(events);
   if (safety) return { kind: "wait", why: `安全留证 #${safety.seq} 未处置` };
