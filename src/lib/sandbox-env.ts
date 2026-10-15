@@ -6,6 +6,7 @@ import { join } from "path";
 import { settingsLaunchArgs } from "./agent-settings.js";
 import { sandboxAcpHome } from "./acp/stub.js";
 import { isLab } from "./sandbox-lab.js";
+import { withFlokaTwins } from "./floka-env/read.js";
 import { SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV, sandboxPiAgentDir } from "./sandbox.js";
 
 type Env = Record<string, string | undefined>;
@@ -66,7 +67,8 @@ export interface ProductionDeny {
 }
 
 const PROD_PORT_KEYS = ["BRIDGE_PORT", "PEER_INGRESS_PORT", "WEB_PORT", "BRIDGE_LEGACY_WEB_PORT"];
-const PROD_DIR_KEYS = ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR", "MASTER_DIR", "BRIDGE_STATIC_DIR"];
+// 生产配置改用 FLOKA_ 新名（rename.env）指的目录同样要避开，不看档位
+const PROD_DIR_KEYS = ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR", "FLOKA_STATE_DIR", "FLOKA_RUNTIME_DIR", "MASTER_DIR", "BRIDGE_STATIC_DIR"];
 
 /** 把几份生产配置（plist 的 EnvironmentVariables、生产仓库 .env …）合成拒绝清单，外加默认值 */
 export function productionDeny(sources: Env[], defaults: { port: number; dirs: string[] }): ProductionDeny {
@@ -115,7 +117,7 @@ export function sandboxEnv(
     PI_CODING_AGENT_DIR: sandboxPiAgentDir(opts.layout.root),
   });
   if (opts.staticDir) out.BRIDGE_STATIC_DIR = opts.staticDir;
-  return out;
+  return withFlokaTwins(out, base); // 调用者是 rename.env=on 才另出同值的 FLOKA_ 名与档位开关；否则逐字节不变
 }
 
 /**
