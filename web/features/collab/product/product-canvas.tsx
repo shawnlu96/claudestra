@@ -69,7 +69,7 @@ export function ProductCanvas(p: CanvasProps) {
       <div className={`${v.world} ${vp.glide ? v.glide : ''}`} data-pd-mode={canvas.mode}
         style={{ transform: `translate(${vp.view.x}px, ${vp.view.y}px) scale(${vp.view.k})` }}>
         {canvas.zones.map(z => <Zone key={z.id} z={z} tr={p.tr} onLane={toggleLane} />)}
-        <ProductEdges canvas={canvas} onPick={setPick} tr={p.tr} />
+        <ProductEdges canvas={canvas} onPick={setPick} pick={pick} tr={p.tr} />
         {canvas.nodes.map(n => (n.chip ? chip(n, 'done') : card(n)))}
         {canvas.chips.map(c => chip(c, c.tag))}
       </div>
