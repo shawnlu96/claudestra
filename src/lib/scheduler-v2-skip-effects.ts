@@ -18,6 +18,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "fix-strategy-remote-branch.ts": "vcs=1",
     "fix-strategy-remote-context.ts": "notice=2",
     "fix-strategy-runtime.ts": "proc=1 fs=2 vcs=1",
+    "launchd-oneshot.ts": "fs=3",
     "lend-author-retire-checkout.ts": "vcs=3",
     "lend-fix-reassign-pr.ts": "proc=1 vcs=4",
     "lend-git.ts": "vcs=1",
@@ -36,7 +37,6 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-ci-queue-full.ts": "ledger=1 vcs=1", // per-card skipTask; ledger uses the pass manager
     "scheduler-create-retry-worktree.ts": "vcs=8",
     "scheduler-create-retry.ts": "vcs=2",
-    "scheduler-deploy-job.ts": "fs=3",
     "scheduler-dispatch-recovery.ts": "ledger=4 stmt=2",
     "scheduler-existing-author.ts": "vcs=1",
     "scheduler-identity-notice.ts": "notice=1",

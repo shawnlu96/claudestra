@@ -7,6 +7,8 @@ export interface State {
   loaded: boolean | null;
   /** All surviving processes, including descendants/orphans of an unloaded job; null means unknown. */
   pids: readonly number[] | null;
+  /** Job main processes only. Older adapters may omit this when pids already counts main processes. */
+  instances?: readonly number[] | null;
 }
 interface LegacyState extends State { restartDisabled: boolean }
 export interface Lease { assertHeld(): void }
@@ -17,6 +19,8 @@ export interface Journal {
   /** Next operation; saved before any effects, advanced only after successful verification. */
   cursor: number;
   status: "running" | "committed" | "rolled-back";
+  /** Immutable recovery input; callers may have upgraded Bun or moved the checkout since preparation. */
+  snapshot?: ServicePlan;
 }
 
 /**

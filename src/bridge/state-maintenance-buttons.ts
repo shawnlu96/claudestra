@@ -8,6 +8,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { openMaintenance, productionContext, type MaintContext } from "../lib/state-maintenance/context.js";
 import { issueGrant, type GrantAction } from "../lib/state-maintenance/grant.js";
+import { partsEntry, handlePartButton } from "../lib/floka-services/install/buttons.js";
 
 const PREFIX = "smaint:";
 /** 管理面板入口(management.ts 的面板上同名按钮) */
@@ -62,7 +63,8 @@ export function panelFor(s: Status, chatId: string, key: Uint8Array = MAC_KEY): 
   const extra: any[] = s.runs.filter((x) => RECOVERABLE.has(x.phase) || x.noteOk === false).slice(-3)
     .map((x) => button(chatId, "recover", x.runId, `恢复 ${x.runId.slice(-6)}`, "danger", key));
   if (s.pendingNotes) extra.push(button(chatId, "note", "", "补记指针", "secondary", key));
-  return { text: lines.join("\n"), components: [{ type: "buttons", buttons: btns.slice(0, 5) }, ...(extra.length ? [{ type: "buttons", buttons: extra.slice(0, 5) }] : [])] };
+  return { text: lines.join("\n"), components: [{ type: "buttons", buttons: btns.slice(0, 5) }, ...(extra.length ? [{ type: "buttons", buttons: extra.slice(0, 5) }] : []),
+    partsEntry((a, b) => macFor(key, chatId, a, b))] };
 }
 
 const fmt = (r: any): string => (r?.ok ? "✅ " : "❌ ") + JSON.stringify(r ?? {}, null, 1).slice(0, 1500);
@@ -75,6 +77,7 @@ async function act(ctx: MaintContext, runManager: RunManager, action: GrantActio
 }
 
 export async function handleStateMaintButton(id: string, chatId: string, runManager: RunManager, ctx: MaintContext = productionContext()): Promise<Reply> {
+  if (id.startsWith("smaint:parts:")) return handlePartButton(id, runManager, ctx, (a, b) => macFor(MAC_KEY, chatId, a, b), true);
   if (id === PANEL_ID) {
     const s = (await runManager("state-maintenance", "status")) as Status;
     return s?.ok ? panelFor(s, chatId) : { text: `❌ ${s?.error ?? "读不到维护状态"}` };
