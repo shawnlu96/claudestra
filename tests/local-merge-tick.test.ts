@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
 import { standardAnswers } from "../src/lib/order-standard-answers.js";
 import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
@@ -23,14 +24,14 @@ async function atMerge() {
   expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   const reads: string[] = [], ready: string[][] = [];
   /** One pass of the auto tick for a localMerge project; `fresh` = a restarted service (new deps, same ledger). */
-  const local = async () => {
-    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, localMerge: true } }, { ...f.tickDeps,
+  const local = async (notifyPm = f.tickDeps.notifyPm) => {
+    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, localMerge: true } }, { ...f.tickDeps, notifyPm,
       manager: async (...args) => { if (args[1] === "scheduler-local-merge-ready") ready.push(args); return f.tickDeps.manager(...args); },
       prState: async (ref) => { reads.push(ref); throw new Error("本地项目不该读 PR"); } });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
-  const readyEvents = () => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "local_merge_ready");
+  const readyEvents = (op = "local_merge_ready") => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === op);
   const mergeIntents = () => f.intents().filter((i) => i.action === "merge");
   return { f, local, reads, ready, readyEvents, mergeIntents };
 }
@@ -44,7 +45,8 @@ describe("ONB-2 自动 tick：本地项目停在 merge 等 PM", () => {
       expect(h.readyEvents()).toMatchObject([{ actor: "scheduler", kind: "scheduler", data: { op: "local_merge_ready", head: H1 } }]);
       expect(f.notices.slice(notices)).toEqual([`[调度引擎] T1 审查通过，等 PM 跑 ledger local-merge T1 --head ${H1}（本地合并项目，没有 PR）`]);
       for (let i = 0; i < 3; i++) expect(await h.local()).toMatchObject({ step: "waiting" });
-      expect(h.ready).toHaveLength(1); // a waiting card reads the ledger only: no CLI call per pass
+      expect(h.ready.map((a) => a.slice(2))).toEqual([["T1", "--head", H1], ["T1", "--head", H1, "--notified"]]); // waiting: ledger reads only
+      expect(h.readyEvents("local_merge_notified")).toHaveLength(1);
       expect(f.notices.length).toBe(notices + 1);
       expect(h.readyEvents()).toHaveLength(1);
       // the CLI itself is idempotent per stay in merge and head (a restart that raced the ledger read)
@@ -54,6 +56,31 @@ describe("ONB-2 自动 tick：本地项目停在 merge 等 PM", () => {
       expect(f.db.query("SELECT * FROM scheduler_resources WHERE resource = 'merge:p'").all()).toEqual([]);
       expect(f.task().stage).toBe("merge");
       expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+    } finally { f.close(); }
+  });
+
+  test("通知没发出去：就绪已记、不记回执，下一轮（含重启）重发，发出后才记回执、不再发（r1 审查 P2）", async () => {
+    const h = await atMerge(), { f } = h;
+    try {
+      const notices = f.notices.length;
+      expect(await h.local(async () => { throw new Error("bridge down"); })).toMatchObject({ step: "local_ready" });
+      expect([h.readyEvents().length, h.readyEvents("local_merge_notified").length, f.notices.length]).toEqual([1, 0, notices]);
+      expect(await h.local()).toMatchObject({ step: "local_ready" }); // a fresh deps object: the restart case
+      expect([h.readyEvents().length, h.readyEvents("local_merge_notified").length, f.notices.length]).toEqual([1, 1, notices + 1]);
+      expect(await h.local()).toMatchObject({ step: "waiting" });
+      expect(f.notices.length).toBe(notices + 1);
+    } finally { f.close(); }
+  });
+
+  test("就绪记录在写入事务里复核合并闸：计划之后冻结了，就不记、不通知（r1 审查 P2）", async () => {
+    const h = await atMerge(), { f } = h;
+    try {
+      expect(await f.cli("pm", "freeze", "--reason", "查不明合并", "--project", "p")).toMatchObject({ ok: true });
+      const ready = () => f.tickDeps.manager("ledger", "scheduler-local-merge-ready", "T1", "--head", H1);
+      expect(await ready()).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("冻结") });
+      expect(h.readyEvents()).toEqual([]);
+      expect(await f.cli("pm", "unfreeze", "--project", "p")).toMatchObject({ ok: true });
+      expect(await ready()).toMatchObject({ ok: true, duplicate: false });
     } finally { f.close(); }
   });
 
@@ -95,6 +122,13 @@ describe("ONB-2 验收 7：本地项目的 manual-merge-request 被拒", () => {
       expect(await request()).toMatchObject({ ok: false, code: "conflict", error: expect.stringMatching(/本地合并（localMerge）.*改用 ledger local-merge/) });
       cfg(false);
       expect(await request()).toMatchObject({ ok: false, error: expect.stringContaining("不是 manual") });
+      cfg(true);
+      // r1 审查 P1：切本地前已认领（意图 pending）的同绑定请求，也不能用 duplicate 绕过拒绝
+      const req = insertEvent(f.db, { actor: "pm", now: Date.now() }, { project: "p", target: "T1", kind: "decision", text: "旧请求",
+        data: { op: "manual_merge_request", head: H1, specRev: t.specRev, round: t.round, uiDigest: null, review: { seq: review.seq } } }, false);
+      f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
+        VALUES (?,'T1','p','manual_merge','merge',1,?,?,?,?,2,'pending','merge',1,1)`).run(`mmq:${req.seq}`, req.seq, t.rev, t.specRev, H1);
+      expect(await request()).toMatchObject({ ok: false, code: "conflict", error: expect.stringMatching(/本地合并（localMerge）/) });
     } finally { f.close(); }
   });
 });

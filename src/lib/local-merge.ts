@@ -17,6 +17,7 @@ import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 const LOCAL_MERGE_OP = "local_merge";
 const LOCAL_READY_OP = "local_merge_ready";
+const LOCAL_NOTIFIED_OP = "local_merge_notified";
 const SHA = /^[a-f0-9]{40}$/i;
 
 /** How the commit that lands on main was made; `backfill` = the head was already on main, only the record was missing. */
@@ -24,36 +25,48 @@ export type LocalMergeMode = "ff" | "merge" | "backfill";
 export interface CheckResult { check: string; code: number | null; timedOut: boolean; ms: number }
 export interface LocalMergeInput { taskId: string; head: string; mergeSha: string; base: string; mode: LocalMergeMode; checks: CheckResult[] }
 
-/** The card's latest entry into `merge`: a ready record belongs to one stay there (same rule as the merge handoff). */
-const mergeEntry = (events: readonly LedgerEvent[]): number => events.findLast((e) => e.kind === "stage" && e.data.to === "merge")?.seq ?? 0;
-const recordKey = (taskId: string, head: string): string => `local-merge:${taskId}:${head.toLowerCase()}`;
-const readyKey = (taskId: string, entry: number, head: string): string => `scheduler:${LOCAL_READY_OP}:${taskId}:s${entry}:${head.toLowerCase()}`;
+/**
+ * The card's latest entry into `merge`: ready, notice and merge records belong to one stay there, so a card that goes live → fix →
+ * review → merge again on the same head is merged again, not answered with the first stay's record.
+ */
+const mergeEntry = (db: Database, task: LedgerTask): number =>
+  listEvents(db, { project: task.project, target: task.id }).findLast((e) => e.kind === "stage" && e.data.to === "merge")?.seq ?? 0;
+const recordKey = (db: Database, task: LedgerTask, head: string): string => `local-merge:${task.id}:s${mergeEntry(db, task)}:${head.toLowerCase()}`;
+const readyKey = (db: Database, task: LedgerTask, head: string): string => `scheduler:${LOCAL_READY_OP}:${task.id}:s${mergeEntry(db, task)}:${head.toLowerCase()}`;
+const noticeKey = (db: Database, task: LedgerTask, head: string): string => `${readyKey(db, task, head)}:notified`;
 
-/** The local_merge record of this card at this head, if one was written: a rerun returns it instead of merging again. */
-export const localMergeRecord = (db: Database, taskId: string, head: string): LedgerEvent | null => getEventByDedup(db, recordKey(taskId, head));
+/** PM (not the dispatcher) / master / owner of the card's project: checked before anything is read back or written. */
+export function assertMayLocalMerge(db: Database, actor: string, task: LedgerTask): void {
+  if (!actorMayConfigure(db, actor, task.project)) throw new LedgerError("forbidden", `本地合并要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${actor}）`);
+}
 
-/** This stay's ready record at the card's current head (the tick reads it so a waiting card costs no CLI call). */
-export function localReadyOf(db: Database, task: LedgerTask): LedgerEvent | null {
-  if (!task.headSHA) return null;
-  return getEventByDedup(db, readyKey(task.id, mergeEntry(listEvents(db, { project: task.project, target: task.id })), task.headSHA));
+/** This stay's local_merge record at this head, if one was written: a rerun returns it instead of merging again. */
+export const localMergeRecord = (db: Database, task: LedgerTask, head: string): LedgerEvent | null => getEventByDedup(db, recordKey(db, task, head));
+
+/** Where the card's current head stands in this stay: no ready record, ready but the PM notice not confirmed sent, or notified. */
+export function localReadyState(db: Database, task: LedgerTask): "none" | "ready" | "notified" {
+  if (!task.headSHA || !getEventByDedup(db, readyKey(db, task, task.headSHA))) return "none";
+  return getEventByDedup(db, noticeKey(db, task, task.headSHA)) ? "notified" : "ready";
 }
 
 /**
- * Scheduler only: an auto card in `merge` at its full head waits for the PM's local merge. One record per stay in `merge` and
- * head; a replay (another pass, a restart) returns the first one, so the PM is told once.
+ * Scheduler only. Ready: an auto card in `merge` at its full head that the PM could merge right now (same gate as local-merge, minus
+ * the caller) waits for the PM; one record per stay and head. Notified: the receipt after the PM notice went out, so a notice that
+ * failed is sent again on the next pass or after a restart, and one that went out is not. A replay returns the first record.
  */
-export function recordLocalReady(db: Database, ctx: WriteCtx, input: { taskId: string; head: string }): { event: LedgerEvent; duplicate: boolean } {
+export function recordLocalReady(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; notified?: boolean }): { event: LedgerEvent; duplicate: boolean } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "本地合并就绪只由调度服务记");
   return tx(db, () => {
-    const task = mustTask(db, input.taskId), workflow = getWorkflow(db, task.id);
+    const task = mustTask(db, input.taskId), workflow = getWorkflow(db, task.id), now = ctx.now ?? Date.now();
     if (task.stage !== "merge" || workflow?.mode !== "auto") throw new LedgerError("conflict", "任务不在自动流程的 merge 阶段");
     if (!SHA.test(input.head) || task.headSHA !== input.head) throw new LedgerError("conflict", "就绪的 head 不是任务当前的完整 head");
-    const key = readyKey(task.id, mergeEntry(listEvents(db, { project: task.project, target: task.id })), input.head);
-    const prev = getEventByDedup(db, key);
+    const key = input.notified ? noticeKey(db, task, input.head) : readyKey(db, task, input.head), prev = getEventByDedup(db, key);
     if (prev) return { event: prev, duplicate: true };
-    const event = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, { project: task.project, target: task.id,
-      kind: "scheduler", text: `审查通过，等 PM 本地合并：ledger local-merge ${task.id} --head ${input.head}`,
-      data: { op: LOCAL_READY_OP, head: input.head } }, true);
+    if (input.notified && !getEventByDedup(db, readyKey(db, task, input.head))) throw new LedgerError("conflict", "还没记本地合并就绪");
+    if (!input.notified) mergeableNow(db, task, workflow, input.head, now);
+    const text = input.notified ? `已通知 PM 本地合并 ${task.id}` : `审查通过，等 PM 本地合并：ledger local-merge ${task.id} --head ${input.head}`;
+    const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler", text,
+      data: { op: input.notified ? LOCAL_NOTIFIED_OP : LOCAL_READY_OP, head: input.head } }, true);
     return { event, duplicate: false };
   });
 }
@@ -71,13 +84,8 @@ function reviewOf(db: Database, task: LedgerTask, workflow: TaskWorkflow): Revie
   return read.facts;
 }
 
-/**
- * Who may merge, and whether this card at this head may merge now: PM (not the dispatcher) / master / owner, card in `merge`, head =
- * ledger head = the head this round's review passed, UI screenshots accepted, queue not frozen. Throws the reason; writes nothing.
- */
-export function localMergeGate(db: Database, actor: string, taskId: string, head: string, now: number): { task: LedgerTask; review: ReviewFacts } {
-  const task = mustTask(db, taskId), workflow = getWorkflow(db, task.id);
-  if (!actorMayConfigure(db, actor, task.project)) throw new LedgerError("forbidden", `本地合并要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${actor}）`);
+/** Whether this card may merge at this head now: in `merge`, head = ledger head = the head this round's review passed, UI accepted, queue not frozen. */
+function mergeableNow(db: Database, task: LedgerTask, workflow: TaskWorkflow | null, head: string, now: number): ReviewFacts {
   if (task.kind !== "code" || task.stage !== "merge") throw new LedgerError("conflict", `卡在 ${task.stage}，不在 merge`);
   if (!workflow) throw new LedgerError("conflict", "卡没有流程记录");
   if (!SHA.test(head) || task.headSHA?.toLowerCase() !== head.toLowerCase()) {
@@ -88,7 +96,14 @@ export function localMergeGate(db: Database, actor: string, taskId: string, head
   if (ui) throw new LedgerError("conflict", `UI 验收：${ui}`);
   const review = reviewOf(db, task, workflow);
   if (review.head.toLowerCase() !== head.toLowerCase()) throw new LedgerError("conflict", `本轮通过审查的是 ${review.head.slice(0, 12)}，不是这个 head`);
-  return { task, review };
+  return review;
+}
+
+/** Who may merge (PM, not the dispatcher / master / owner) and whether this card at this head may merge now. Throws the reason; writes nothing. */
+export function localMergeGate(db: Database, actor: string, taskId: string, head: string, now: number): { task: LedgerTask; review: ReviewFacts } {
+  const task = mustTask(db, taskId);
+  assertMayLocalMerge(db, actor, task);
+  return { task, review: mergeableNow(db, task, getWorkflow(db, task.id), head, now) };
 }
 
 /**
@@ -97,14 +112,16 @@ export function localMergeGate(db: Database, actor: string, taskId: string, head
  */
 export function recordLocalMerge(db: Database, ctx: WriteCtx, input: LocalMergeInput): { event: LedgerEvent; duplicate: boolean } {
   return tx(db, () => {
-    const prev = localMergeRecord(db, input.taskId, input.head);
+    const current = mustTask(db, input.taskId);
+    assertMayLocalMerge(db, ctx.actor, current);
+    const prev = localMergeRecord(db, current, input.head);
     if (prev) return { event: prev, duplicate: true };
     if (![input.mergeSha, input.base].every((s) => SHA.test(s))) throw new LedgerError("invalid", "合并提交和基线要是完整 SHA");
     const now = ctx.now ?? Date.now();
     const { task, review } = localMergeGate(db, ctx.actor, input.taskId, input.head, now);
     const move = canTransition(task, "live", "pm");
     if (!move.ok) throw new LedgerError("conflict", move.reason);
-    const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: recordKey(task.id, input.head) }, { project: task.project, target: task.id,
+    const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: recordKey(db, task, input.head) }, { project: task.project, target: task.id,
       kind: "decision", text: `本地合并进 main：${input.head.slice(0, 12)} → ${input.mergeSha.slice(0, 12)}（${input.mode}）`,
       data: { op: LOCAL_MERGE_OP, head: input.head, mergeSha: input.mergeSha, base: input.base, mode: input.mode, checks: input.checks,
         reviewSeq: review.eventSeq } }, true);

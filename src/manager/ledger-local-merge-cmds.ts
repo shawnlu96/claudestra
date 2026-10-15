@@ -2,7 +2,8 @@
  * Local merge CLI (ONB-2, docs/architecture/local-merge.md), logic in lib/local-merge.ts + lib/local-merge-run.ts:
  * - `local-merge <task> --head <sha>`: the PM (not the dispatcher) / master / owner merges a reviewed card of a localMerge project
  *   into local main and moves it to live; running it is the PM's confirmation. A rerun returns the first record.
- * - `scheduler-local-merge-ready <task> --head <sha>`: scheduler identity only (lib/shared-ledger-gate-cli-services.ts).
+ * - `scheduler-local-merge-ready <task> --head <sha> [--notified]`: scheduler identity only (lib/shared-ledger-gate-cli-services.ts);
+ *   `--notified` records that the PM notice went out.
  */
 import { recordLocalReady } from "../lib/local-merge.js";
 import { runLocalMerge } from "../lib/local-merge-run.js";
@@ -29,10 +30,11 @@ export const LOCAL_MERGE_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-local-merge-ready": {
-    valued: ["head"], bools: [],
-    usage: "scheduler-local-merge-ready <task> --head <sha>（调度服务专用：localMerge 卡审查通过，等 PM 跑 local-merge）",
+    valued: ["head"], bools: ["notified"],
+    usage: "scheduler-local-merge-ready <task> --head <sha> [--notified]（调度服务专用：localMerge 卡审查通过，等 PM 跑 local-merge；--notified 记已通知 PM）",
     run(c) {
-      const r = recordLocalReady(c.db, c.ctx(), { taskId: taskId(c, "scheduler-local-merge-ready <task> --head <sha>"), head: c.need("head") });
+      const id = taskId(c, "scheduler-local-merge-ready <task> --head <sha> [--notified]");
+      const r = recordLocalReady(c.db, c.ctx(), { taskId: id, head: c.need("head"), notified: c.p.bools.has("notified") });
       return { ok: true, seq: r.event.seq, duplicate: r.duplicate };
     },
   },

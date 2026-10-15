@@ -11,10 +11,10 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { acquireLock } from "./file-lock.js";
 import { LedgerError } from "./ledger-store.js";
-import type { WriteCtx } from "./ledger-checks.js";
+import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { checkArgv, type LocalMergeProject } from "./scheduler-config.js";
-import { localMergeGate, localMergeRecord, recordLocalMerge, type CheckResult, type LocalMergeMode } from "./local-merge.js";
+import { assertMayLocalMerge, localMergeGate, localMergeRecord, recordLocalMerge, type CheckResult, type LocalMergeMode } from "./local-merge.js";
 
 /** Each check gets this long (PM default, 2026-10-15); a hung check fails the merge instead of holding the project lock forever. */
 const CHECK_TIMEOUT_MS = 30 * 60_000;
@@ -95,10 +95,13 @@ export async function runLocalMerge(db: Database, ctx: WriteCtx, local: LocalMer
   deps: LocalMergeRunDeps = {}): Promise<LocalMergeOutcome> {
   const done = (seq: number, data: Record<string, unknown>, duplicate: boolean): LocalMergeOutcome => ({ ok: true, duplicate, seq,
     mode: data.mode as LocalMergeMode, head: String(data.head), mergeSha: String(data.mergeSha), base: String(data.base), checks: data.checks as CheckResult[] });
-  const prev = localMergeRecord(db, input.taskId, input.head);
+  // caller and project first: a rerun's earlier record is only handed back to someone who may merge, while the project is local
+  const current = mustTask(db, input.taskId);
+  assertMayLocalMerge(db, ctx.actor, current);
+  if (!local) refuse(`项目 ${current.project} 不是 localMerge 项目（scheduler.json），合并走 PR 流程`);
+  const prev = localMergeRecord(db, current, input.head);
   if (prev) return done(prev.seq, prev.data, true);
   const { task } = localMergeGate(db, ctx.actor, input.taskId, input.head, ctx.now ?? Date.now());
-  if (!local) refuse(`项目 ${task.project} 不是 localMerge 项目（scheduler.json），合并走 PR 流程`);
   if (!local!.repoDir || !isAbsolute(local!.repoDir)) refuse("scheduler.json 里本项目的 repoDir 不是绝对路径");
   const head = task.headSHA!, git = gitAt(local!.repoDir, deps.command ?? runBounded);
   const lock = await lockRepo(git, local!.repoDir);

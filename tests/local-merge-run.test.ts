@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
-import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
+import { listEvents } from "../src/lib/ledger-store.js";
 import { runLocalMerge, type LocalMergeOutcome } from "../src/lib/local-merge-run.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
 
@@ -122,6 +122,40 @@ describe("local-merge：合进本地 main", () => {
   });
 });
 
+describe("local-merge：重跑（r1 审查 P1）", () => {
+  test("已合并后重跑也先认调用者和项目：非 PM、项目不再是 localMerge 都拒，不交回原记录", async () => {
+    const f = await atMerge();
+    try {
+      await merge(f);
+      const events = listEvents(f.db, { project: "p", target: "T1" }).length;
+      await expect(merge(f, { actor: "agent-task-one" })).rejects.toThrow(/PM/);
+      await expect(runLocalMerge(f.db, { actor: "pm", now: Date.now() }, null, { taskId: "T1", head })).rejects.toThrow(/不是 localMerge 项目/);
+      expect(listEvents(f.db, { project: "p", target: "T1" })).toHaveLength(events);
+    } finally { f.close(); }
+  });
+
+  test("同一 head 第二次进 merge（live → fix → review → merge）：再合一次进 live，不拿第一次的记录顶替", async () => {
+    const f = await atMerge();
+    try {
+      const first = await merge(f);
+      const stage = async (from: string, to: string) => {
+        const r = await f.cli("pm", "stage", "T1", "--from", from, "--to", to, "--text", "回滚后重走");
+        if (r.ok !== true) throw new Error(JSON.stringify(r));
+      };
+      await stage("live", "fix");
+      await stage("fix", "review");
+      await f.review("pass", head, []);
+      await stage("review", "merge");
+      const second = await merge(f);
+      expect(second).toMatchObject({ duplicate: false, mode: "backfill", head, mergeSha: head });
+      expect(second.seq).not.toBe(first.seq);
+      expect(f.task().stage).toBe("live");
+      expect(records(f)).toHaveLength(2);
+      expect(await merge(f)).toEqual({ ...second, duplicate: true });
+    } finally { f.close(); }
+  });
+});
+
 describe("local-merge：git 一侧的拒绝，main 不动", () => {
   test("有冲突", async () => {
     git(repo, "checkout", "-q", "feat/t1");
@@ -200,7 +234,7 @@ describe("local-merge：台账一侧的拒绝，台账和 main 都不动", () =>
       git(repo, "reset", "-q", "--hard", base);
       f.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T1'").run(other); // the ledger head moved past the reviewed one
       await refused(f, () => merge(f, { head: other }), /审查/);
-      expect(getEventByDedup(f.db, `local-merge:T1:${other}`)).toBeNull();
+      expect(records(f)).toEqual([]);
     } finally { f.close(); }
   });
 

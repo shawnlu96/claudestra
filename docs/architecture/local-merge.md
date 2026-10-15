@@ -47,16 +47,18 @@ local project both fail their read and hand the card to PM manually instead of a
 
 | When | Where | What |
 |---|---|---|
-| Planner says "merge" | `scheduler-auto-tick.ts` → `lib/local-merge-tick.ts` | no merge intent, no merge slot, no `gh`; `ledger scheduler-local-merge-ready <task> --head` writes one `scheduler` event `op: "local_merge_ready"` (dedup = this entry into `merge` + head); PM is told once. A card already marked ready reads the ledger only (no CLI call per pass); a restart does not tell PM again |
+| Planner says "merge" | `scheduler-auto-tick.ts` → `lib/local-merge-tick.ts` | no merge intent, no merge slot, no `gh`; `ledger scheduler-local-merge-ready <task> --head` writes one `scheduler` event `op: "local_merge_ready"` (dedup = this entry into `merge` + head) only if the card passes the merge gate minus the caller (a queue frozen after planning: nothing written). After the PM notice went out, `--notified` writes `op: "local_merge_notified"`; a failed notice gets no receipt and is sent again next pass, also after a restart. A notified card reads the ledger only (no CLI call per pass) |
 | A merge intent left from before the switch | auto tick | not driven: the card goes to PM (`scheduler-fallback-manual`) |
 | PM runs `ledger local-merge <task> --head <sha>` | `manager/ledger-local-merge-cmds.ts` → `lib/local-merge-run.ts` | running it is the PM's confirmation; steps below |
 
 `local-merge` (`runLocalMerge`), in this order — any refusal before step 6 leaves main, the card and the ledger as they were:
 
-1. A `local_merge` record for this card and head already exists → return it (`duplicate: true`).
-2. Ledger gate (`localMergeGate`, `lib/local-merge.ts`): caller is the project's PM (not the dispatcher) / master / owner; card in `merge`; `--head` = ledger head
+1. Caller is the project's PM (not the dispatcher) / master / owner, and the project is `localMerge` — checked before anything is handed back.
+   A `local_merge` record for this stay in `merge` and head already exists → return it (`duplicate: true`). The key carries the card's latest
+   entry into `merge`, so the same head merged again after live → fix → review → merge gets a new record (a `backfill`), not the old one.
+2. Ledger gate (`localMergeGate`, `lib/local-merge.ts`): the caller again; card in `merge`; `--head` = ledger head
    = the head this round's review passed (an auto card: the merge proof `mergeReviewProof`, cross-family; a manual card: its round's review, no P0/P1);
-   UI screenshots accepted; queue not frozen. The project must be `localMerge` with an absolute `repoDir`.
+   UI screenshots accepted; queue not frozen. `repoDir` must be absolute.
 3. Project lock: `<git common dir>/claudestra-local-merge.lock` (`lib/file-lock.ts`, no wait) — a second run meanwhile is `busy`.
 4. The main directory must be on `main` with a clean `git status --porcelain` (untracked files count). Then the commit that will land:
    head already on main → only the record is written (`backfill`, no checks); main an ancestor of head → fast-forward (`ff`);
@@ -72,7 +74,7 @@ If step 7 fails after step 6, the head is on main: rerunning the command backfil
 The PR paths a localMerge project never reaches (`prMergeOff`, same places as a handoff project): merge driver (`mergeTick`), merge train and slot
 reclaim (`scheduler-pass.ts`), main CI gate (`mainCiPass`), merge pipe (`mergePipeStep`), CI queue full (`ciQueueFullStep`), the manual merge queue's
 owner / candidate observation and claim (`manual-merge-queue-pass.ts`). `manual-merge-request` is refused with a pointer to `local-merge`
-(`requestRefusal`, reason `localWhy`); the unified queue view shows such cards excluded with code `local_merge`.
+(`recordRequest` checks it before answering an open same-binding request, and `requestRefusal`; reason `localWhy`); the unified queue view shows such cards excluded with code `local_merge`.
 
 Tests: `tests/scheduler-config-local-merge.test.ts`, `tests/dag-tools-local-merge.test.ts` (real git, no origin),
 `tests/order-deliver-local-merge.test.ts` (real git + a fake `gh` on PATH that must never be called),
