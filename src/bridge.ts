@@ -2168,7 +2168,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               const result = msg.lendSupplement === true ? await sendLendRelay(httpPeer, peerAgentName, String(msg.text || "")) : routeToHttpPeer(
                 ws, fromChannelId, fromName, httpPeer, peerAgentName, String(msg.text || ""),
                 typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
-                msg.oneShot === true, // v2.17.2 任务#85:FYI 不挂 2h 轮询/超时推回
+                frameLevel(msg, true) ?? msg.oneShot === true, // v2.17.2 任务#85:FYI 不挂 2h 轮询/超时推回；oneShot 带合法级别就传级别（agents-PEERLEVEL1）
                 () => recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, `${peerAgentName}@${httpPeer.name}`, msg.text), // 对方收下后：PM 带 ask id 回远端执行者（i28-ASK4）
               );
               ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));

@@ -50,10 +50,10 @@ export function inviteMessage(code: string, agents: string[], lang: "zh" | "en" 
   if (!inv || !link) return null;
   const list = agents.join(", ");
   return lang === "en"
-    ? `${inv.name} invites your Claudestra to collaborate${list ? ` (you'll be able to reach: ${list})` : ""}. ` +
-        `Open this link and confirm in your own Claudestra:\n${link}\n\n` +
-        `If the link doesn't open, paste this whole message under Peer → Join in your Claudestra. Valid for 24h, single use.`
-    : `${inv.name} 邀请你的 Claudestra 一起协作${list ? `（加入后你可以找：${list}）` : ""}。` +
-        `点开这个链接，按提示在你自己的 Claudestra 里确认就行：\n${link}\n\n` +
-        `链接打不开的话，把这整段话粘贴到你的 Claudestra → Peer → 加入。24 小时内有效，只能用一次。`;
+    ? `${inv.name} invites your Floka to collaborate${list ? ` (you'll be able to reach: ${list})` : ""}. ` +
+        `Open this link and confirm in your own Floka:\n${link}\n\n` +
+        `If the link doesn't open, paste this whole message under Peer → Join in your Floka. Valid for 24h, single use.`
+    : `${inv.name} 邀请你的 Floka 一起协作${list ? `（加入后你可以找：${list}）` : ""}。` +
+        `点开这个链接，按提示在你自己的 Floka 里确认就行：\n${link}\n\n` +
+        `链接打不开的话，把这整段话粘贴到你的 Floka → Peer → 加入。24 小时内有效，只能用一次。`;
 }

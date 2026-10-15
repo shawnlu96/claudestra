@@ -15,7 +15,7 @@ import { FoldToggle, GroupAnchor, groupOneShots, MoreSubsNote, SessionName, sess
  * 侧栏原来只列**纳管**的 agent（有频道、能对话）。但机器上还有一堆没纳管的会话：
  * pi-web 起的 Pi 会话、终端里手敲的 `pi`/`claude`、别人的会话……它们此前在网页里
  * 完全不可见。这个分区把它们摆出来 —— **能看历史、能收编**，但**不能直接对话**
- * （没挂 Claudestra 扩展就没有消息注入通道，这是硬边界，收编后才可对话）。
+ * （没挂 Floka 扩展就没有消息注入通道，这是硬边界，收编后才可对话）。
  *
  * 数据源：BFF /api/sessions（代理 Bridge GET /api/v1/session-list，manager 扫盘得到，
  * 两种 runtime 合并、按最近活动排序）。
@@ -451,7 +451,7 @@ function SessionViewer({
               <span className="text-xs text-base-content/50">
                 {canAdoptSession(session)
                   ? t("这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。")
-                  : t("这种运行时的会话只读：历史能看能搜，但收编不了——Claudestra 还没法往这种会话里发消息。")}
+                  : t("这种运行时的会话只读：历史能看能搜，但收编不了——Floka 还没法往这种会话里发消息。")}
               </span>
               {canAdoptSession(session) && (
                 <button className="btn btn-outline btn-sm ml-auto" onClick={() => setAdopting(true)}>

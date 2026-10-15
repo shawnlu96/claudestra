@@ -8,7 +8,7 @@ import { KIND_LABEL, NotifyChannelModal, resultText, TYPE_LABEL } from "./notify
 
 /**
  * 设置 · 通知 · 第三方渠道（docs/design-notify-channels.md）：把「待你处理」、安全 / 系统提醒、Talk @ 推到自己配的 ntfy / Bark / Webhook，
- * 点开回 Claudestra 处理。整份配置一次 PUT；密钥只在 bridge，这里只见尾四位。只给全权设备（「通知」整页在 nav.settingsPagesFor 里就滤掉了）。
+ * 点开回 Floka 处理。整份配置一次 PUT；密钥只在 bridge，这里只见尾四位。只给全权设备（「通知」整页在 nav.settingsPagesFor 里就滤掉了）。
  * 设置页里只列已有渠道（启停、编辑入口）；添加和编辑都进单个渠道的配置弹窗（notify-channel-form.tsx），设置页不被表单撑长。
  */
 const MAX_CHANNELS = 10;
@@ -106,7 +106,7 @@ export function NotifySection() {
   const upsert = (w: NotifyChannelWire) => commit(w.id ? wires((c) => (c.id === w.id ? w : toWire(c))) : [...wires(), w]);
   const editingId = modal?.view?.id;
   return (
-    <Section title={t("通知渠道")} desc={t("把「待你处理」和安全、系统提醒推到你自己的 ntfy / Bark / Webhook。点开通知回到 Claudestra 处理。")}>
+    <Section title={t("通知渠道")} desc={t("把「待你处理」和安全、系统提醒推到你自己的 ntfy / Bark / Webhook。点开通知回到 Floka 处理。")}>
       <div className="space-y-2">
         {cfg.channels.length === 0 && <p className="text-xs text-base-content/50">{t("还没有通知渠道。")}</p>}
         {cfg.channels.map((c) => (

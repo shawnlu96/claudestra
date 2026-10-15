@@ -6,8 +6,8 @@ export const NOTIFY_DICT: Record<string, string> = {
   "第三方渠道": "Third-party channels",
   "通知渠道": "Notification channels",
   // ── 设置页列表 ──
-  "把「待你处理」和安全、系统提醒推到你自己的 ntfy / Bark / Webhook。点开通知回到 Claudestra 处理。":
-    "Send “Needs you” items and security / system alerts to your own ntfy, Bark or webhook. Tap a notification to handle it in Claudestra.",
+  "把「待你处理」和安全、系统提醒推到你自己的 ntfy / Bark / Webhook。点开通知回到 Floka 处理。":
+    "Send “Needs you” items and security / system alerts to your own ntfy, Bark or webhook. Tap a notification to handle it in Floka.",
   "还没有通知渠道。": "No notification channels yet.",
   "添加渠道": "Add channel",
   "编辑渠道": "Edit channel",

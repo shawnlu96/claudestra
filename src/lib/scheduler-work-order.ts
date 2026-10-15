@@ -12,6 +12,7 @@ import { statePath } from "./paths.js";
 import { SRC_DIR } from "./repo-root.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 import { bounceReviewLine, bounceWork } from "./scheduler-merge-conflict.js";
+import { remoteFixWork, withRemoteWork } from "./remote-review-current.js";
 import { localAuthorAcceptance, localReviewRule, standardAnswers } from "./order-standard-answers.js";
 import { uiReviewBasis } from "./ui-acceptance.js";
 import { withDeliverScope } from "./order-deliver-scope.js";
@@ -53,7 +54,9 @@ export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Pl
       writeBack: `${CLI} review ${task.id} --reviewer ${ref.agent} --verdict pass|changes|block --p0 N --p1 N --p2 N --head ${intent.head ?? "<head>"}` +
         ` --session ${ref.sessionId} --family ${ref.family} --findings <逐项结论.json> --path ${report}（不要带 --to，阶段由调度器推）` });
   }
-  const bounce = w?.bounce ? bounceWork(w.bounce) : null;
+  const remote = db ? remoteFixWork(db, task, w?.bounce?.remote?.seq) : null; // 仓库方 P1 随单带上（RRL-2），已有退回时追加在后
+  const own = w?.bounce ? bounceWork(w.bounce) : remote && w?.reportPath ? { inputs: [`上一轮审查报告：${w.reportPath}`], acceptance: [] } : null;
+  const bounce = withRemoteWork(own, remote, []);
   return { ...base, inputs: [spec, ...(bounce ? bounce.inputs : w?.reportPath ? [`上一轮审查报告：${w.reportPath}`] : []), ...convergenceOrderLines(db, task),
       standardAnswers("author", undefined, local?.checks)],
     outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: [...(bounce?.acceptance ?? []), ...(local ? localAuthorAcceptance(local.checks) : AUTHOR_ACCEPTANCE)],

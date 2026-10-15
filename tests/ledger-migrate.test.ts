@@ -346,6 +346,7 @@ describe("写事件的底座只给写入模块", () => {
   // recovery-machine-policy.ts：整机恢复策略（LCFG1W）的审计在自己的事务里核 owner / master 后写，已生效 / 作废 note 复用 recovery-policy.ts，不推阶段
   // agent-lifecycle-store.ts：卡 worker 登记 / 收回（LIFE1）在自己的事务里写 worker_agents 与一条 scheduler 事件，不推阶段
   // remote-review-ledger.ts：仓库方审查结论入账（RRL-1）只写按报告编号 + head 去重的 scheduler 事件与送达标记，不推阶段；退回人工走 fallbackToManual
+  // remote-review-bounce.ts：仓库方 P1 打回（RRL-2）只由调度服务在自己的事务里复核 auto / merge / head / PR / 当前未处理的 P1，merge → fix 与合并退回同形（stage 事件带 mergeBounce），另写一条按远端事件号去重的 scheduler 事件
   // merge-content-review.ts：合并内容沿用证据（REVIEW1）在自己的 immediate 事务里复核台账现状与开关，只写一条去重的 scheduler 事件（observe 下为观察 note），不推阶段
   // card-pause-write.ts：卡级暂停 / 继续（UXPAUSE1）在自己的事务里核权限、撤未领池单、取消 pending 意图，只写 card_pause / card_resume decision，不推阶段
   // ledger-manual-merge-record.ts：人工合入登记（AUDTRAIN4）在自己的 immediate 事务里核权限 / 阶段 / head / PR，只写一条去重的 manual_merge_record 调度事件，不推阶段
@@ -383,7 +384,7 @@ describe("写事件的底座只给写入模块", () => {
       "lib/main-red-fix-write.ts",
       "lib/manual-merge-queue.ts", "lib/memory-retrieve-order.ts", "lib/merge-content-review.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts", "lib/private-merge-ledger.ts",
       "lib/recovery-machine-policy.ts", "lib/recovery-peer-lease-handover.ts", "lib/recovery-policy.ts",
-      "lib/remote-review-ledger.ts",
+      "lib/remote-review-bounce.ts", "lib/remote-review-ledger.ts",
       "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy-reconcile-write.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts",
       "lib/scheduler-merge-handoff.ts",
@@ -393,6 +394,6 @@ describe("写事件的底座只给写入模块", () => {
       "lib/scheduler-sessions.ts", "lib/scheduler-spec-wait-ledger.ts", "lib/scheduler-ui-carry.ts", "lib/scheduler-ui-review-carry.ts",
       "lib/shared-ledger-center-replica-write.ts", "lib/shared-ledger-v2-projection-write.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-autostart-step.ts", "lib/ledger-human.ts", "lib/scheduler-apply.ts",
-      "lib/scheduler-deploy-reconcile-write.ts", "lib/scheduler-spec-resume-write.ts"]);
+      "lib/scheduler-deploy-reconcile-write.ts", "lib/scheduler-manual-merge-ledger.ts", "lib/scheduler-spec-resume-write.ts"]);
   });
 });

@@ -6,7 +6,7 @@ Owner, 2026-07-19: "Pull the Discord-dependent parts out of peer collaboration �
 
 ## 1. Core idea
 
-**A peer = another Claudestra instance, talking to us as an API client.**
+**A peer = another Floka instance, talking to us as an API client.**
 
 The v2.6 multi-frontend API already solved every hard problem peer collaboration has: Bearer-token auth, per-agent scope, synchronous `wait` / thread polling, audit mirroring, history API. HTTP peers invent no new protocol — the remote instance holds a token I issued and calls my `/api/v1/agents/:name/messages`, exactly the same path the web UI uses. The entire complexity of Discord peers (channel scoping, bot permission matrices, encoding PeerEvent in HTML comments, the shared `#agent-exchange` channel, `[EOT]` markers to prevent ack loops) simply **does not exist** in the HTTP model.
 
@@ -73,8 +73,8 @@ New module `src/bridge/http-peer.ts`:
 The remote POSTs to my messages endpoint with Bearer = the token I issued. Scope 403, offline 409, the `wait` resolver, mirror auditing, history recording are **all already in place**. The only change:
 
 - `renderContentForLocal` branches the injected header on `principal.peer`:
-  `[🤝 来自 peer 实例「ahh」的跨机请求（HTTP，非本机用户）。对方是另一个 Claudestra 的 agent/用户；用 reply() 回答，回复会自动转交对方调用方。]`
-  (i.e. "cross-machine request from peer instance 'ahh' (HTTP, not a local user). The sender is an agent/user of another Claudestra; answer with `reply()` and the response is forwarded back to their caller automatically.")
+  `[🤝 来自 peer 实例「ahh」的跨机请求（HTTP，非本机用户）。对方是另一个 Floka 的 agent/用户；用 reply() 回答，回复会自动转交对方调用方。]`
+  (i.e. "cross-machine request from peer instance 'ahh' (HTTP, not a local user). The sender is an agent/user of another Floka; answer with `reply()` and the response is forwarded back to their caller automatically.")
 - Rate limiting reuses the per-token 120/min.
 
 ## 6. Security

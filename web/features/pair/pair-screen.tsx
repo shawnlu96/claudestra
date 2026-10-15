@@ -66,7 +66,7 @@ export function PairScreen() {
     <div className="flex min-h-dvh items-center justify-center bg-base-200 px-4">
       <div className="card w-full max-w-sm bg-base-100 shadow-lg">
         <div className="card-body">
-          <h1 className="mb-1 text-center text-xl font-bold">Claudestra</h1>
+          <h1 className="mb-1 text-center text-xl font-bold">Floka</h1>
           <p className="mb-4 text-center text-xs text-base-content/60">{t("把这个浏览器配对到你的电脑")}</p>
           {flow.phase.kind === "pending" ? (
             <PendingCard machineName={flow.phase.machineName} code={flow.phase.code} approver={flow.phase.approver} onCancel={flow.cancel} />
@@ -88,7 +88,7 @@ export function PairScreen() {
           </p>
           {list.length > 0 && (
             <Link href="/chat" className="btn btn-ghost btn-sm mt-2 w-full">
-              {t("回到 Claudestra")}
+              {t("回到 Floka")}
             </Link>
           )}
         </div>

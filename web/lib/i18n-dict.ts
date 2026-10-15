@@ -6,7 +6,7 @@
  * - 句中片段（如「重置」「已重启」）英文故意小写、无句号。
  * - 带变量的句子整句做 key，变量写 {name}（t(s, { name })）；译文保留同名占位，tests/web-i18n.test.ts 查。
  * - 英文要分单复数的写成「单数|复数」，按 {n} 选（lib/i18n-fill.ts）；中文原文里别用 |。
- * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
+ * - 品牌名（Floka）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
 import { ATTACH_DICT } from "./i18n-dict-attach";
 import { TOOLS_DICT } from "./i18n-dict-tools";
@@ -85,10 +85,10 @@ export const DICT: Record<string, string> = {
   "或者把对方发来的那段话 / 链接粘贴到这里": "Or paste the message / link they sent you here",
   "现在你的 agent 可以直接找对方开放给你的 agent 了。": "Your agents can now reach the agents they shared with you.",
   "对方还没开放任何 agent 给你": "They haven't shared any agents with you yet",
-  "对方点开链接，在他自己的 Claudestra 里点一下「加入」就完成。": "They open the link and tap Join in their own Claudestra. That's it.",
-  "允许用这个 Claudestra 打开协作邀请链接？以后别人发来的邀请点一下就能直接到这里确认。":
-    "Let this Claudestra open collaboration invite links? Invites people send you will open right here in one tap.",
-  "回到 Claudestra": "Back to Claudestra",
+  "对方点开链接，在他自己的 Floka 里点一下「加入」就完成。": "They open the link and tap Join in their own Floka. That's it.",
+  "允许用这个 Floka 打开协作邀请链接？以后别人发来的邀请点一下就能直接到这里确认。":
+    "Let this Floka open collaboration invite links? Invites people send you will open right here in one tap.",
+  "回到 Floka": "Back to Floka",
   "查看": "View",
   "检测到": "Found",
   "以后再说": "Later",
@@ -98,7 +98,7 @@ export const DICT: Record<string, string> = {
   "没认出邀请：请复制对方发来的整段话或完整链接": "No invite found. Copy the whole message or the full link they sent",
   "剪贴板里没有邀请。先复制对方发来的那段话或链接。": "No invite on the clipboard. Copy the message or link they sent first.",
   "链接里的邀请码缺了或被截断了。请让对方重新复制整条链接发给你。": "The invite code in the link is missing or cut off. Ask them to copy the whole link again.",
-  "Claudestra 协作邀请": "Claudestra collaboration invite",
+  "Floka 协作邀请": "Floka collaboration invite",
   "能连到对方": "You can reach them",
   "连不上对方": "Can't reach them",
   "已加入": "Joined",
@@ -545,7 +545,7 @@ export const DICT: Record<string, string> = {
   "展开已完成的后台任务": "Show completed background tasks",
   "{n} 个已完成": "{n} completed",
   "回到底部": "Scroll to bottom",
-  "这台机器需要升级 Claudestra 才能配合这个版本的网页": "This machine needs a Claudestra update to work with this version of the web app",
+  "这台机器需要升级 Floka 才能配合这个版本的网页": "This machine needs a Floka update to work with this version of the web app",
   "xhigh + 动态 workflow 编排;仅本 session,需 CC 开启 dynamic workflows":
     "xhigh + dynamic workflow orchestration; this session only, needs dynamic workflows enabled in Claude Code",
   "ultracode = xhigh + 动态编排,仅本 session(重启回落);需 CC /config 开启 dynamic workflows":
@@ -711,8 +711,8 @@ export const DICT: Record<string, string> = {
   "给": "for",
   "已拒绝这次配对": "Pairing denied",
   "再配一台": "Pair another",
-  "配对 Claudestra": "Pair with Claudestra",
-  "10 分钟内打开这个链接，就能用这台电脑上的 Claudestra": "Open this link within 10 minutes to use Claudestra on this computer",
+  "配对 Floka": "Pair with Floka",
+  "10 分钟内打开这个链接，就能用这台电脑上的 Floka": "Open this link within 10 minutes to use Floka on this computer",
   "分享…": "Share…",
   "新设备扫码或打开链接就配好了；在配对页手输短码的，会在这里等你允许。10 分钟内有效，只能用一次。": "The new device is paired as soon as it scans the code or opens the link; if someone types the short code instead, it waits here for you to allow it. Valid 10 minutes, single use.",
   "拿到它的人就有这台电脑的全部权限，只发给你自己。": "Whoever gets it has full access to this computer — send it only to yourself.",
@@ -884,7 +884,7 @@ export const DICT: Record<string, string> = {
 
   // ── HTTP peer 管理 ───────────────────────────────────
   "Peer 协作": "Peers",
-  "跨 Claudestra 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。":
+  "跨 Floka 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。":
     "Each side issues the other a scoped token; send_to_agent(\"<agent>@<peer>\") reaches remote agents. Removing revokes instantly.",
   "握手完成": "Connected",
   "等待对方回执": "Awaiting receipt",
@@ -954,7 +954,7 @@ export const DICT: Record<string, string> = {
     "Updates the server and the web client together: fetch the new version → install dependencies → " +
     "rebuild the web client if it changed → restart the web client, bridge, launcher and cron in turn. " +
     "No manual build needed; the page disconnects briefly while it runs.",
-  "升级 Claudestra": "Update Claudestra",
+  "升级 Floka": "Update Floka",
   "当前": "Current",
   "检查失败": "Check failed",
   "正在检查新版本…": "Checking for updates…",
@@ -967,7 +967,7 @@ export const DICT: Record<string, string> = {
   "正式版": "Release",
   "Beta：跟着 main 的每个提交，修复来得最快，但没经过发版验证。": "Beta: follows every commit on main — fixes arrive first, but haven't been through a release.",
   "正式版：只升到 GitHub 上正式发布的版本（推荐）。": "Release: only updates to versions published as GitHub releases (recommended).",
-  "自动升级 Claudestra": "Auto-update Claudestra",
+  "自动升级 Floka": "Auto-update Floka",
   "每 30 分钟检查一次，所有 agent 都空闲时才升；关掉后只提醒不升级。": "Checks every 30 minutes and updates only when every agent is idle; when off, it only notifies you.",
   "自动升级 Claude Code": "Auto-update Claude Code",
   "每周检查一次，同样只在所有 agent 都空闲时才升。": "Checks weekly and likewise updates only when every agent is idle.",

@@ -83,7 +83,7 @@
   加一条不变式：一台机器上，同一个 `(centerId, teamId, projectId)` 最多绑一个本机项目，同一个本机项目最多绑一个中心项目（现在只保证后者）。
 - projects.json **不加**中心字段。备选是给 `ProjectDef` 加 `shared:{centerId,teamId,projectId}`：好处是一个文件看全；
   坏处是 projects.json 是宽松读、多处写的管理数据，而绑定决定 gate proxy 用哪份凭据，属于安全面。推荐保留单一来源，
-  网页 / CLI 显示时把两份文件 join 起来（「本机项目 claudestra ↔ 团队项目 Claudestra」）。
+  网页 / CLI 显示时把两份文件 join 起来（「本机项目 claudestra ↔ 团队项目 Floka」）。
 - 本机项目 id 和中心 id **允许不同**。新建本地项目时默认取中心 id（撞了再加 -2），显示名默认取中心显示名。
 - **个人项目**（`isPersonalProject` 为真：标了 personal 或目录是伞形根 / 解析不了）**永远不能绑定中心项目**，也不能从它发起建中心项目；
   已绑定的项目不能再改成 personal（改之前要先在网页「退出团队项目」）。空目录的新本地项目不算个人项目（规则只看 personal 标记与已有目录），
@@ -139,7 +139,7 @@ bridge 用本实例签名兑换 `/v1/join`，核对 center/team/project/person/i
 1. 项目 owner 在项目页点「邀请成员」，在已握手的 peer 列表里选一台（可多选），可附一句话。
 2. owner 机器 bridge：`POST /v1/projects/:id/invites` 拿码 → 按 JN3 `POST /api/v1/shared-ledger-join-offer` 递给对方 bridge。
    offer 体新增非机密字段 `project: {teamId, projectId, name}`，**只用于卡面显示和预选**，兑换后以中心 grant 为准，不一致即判失败。
-3. 对方 bridge 开授权卡「加入团队项目 Claudestra？」，卡上就是本机项目选择（见 3.2）。owner 点「加入」。
+3. 对方 bridge 开授权卡「加入团队项目 Floka？」，卡上就是本机项目选择（见 3.2）。owner 点「加入」。
 4. 对方 bridge：兑换码（JN1，实例私钥签名）→ 中心在**同一个兑换事务**里登记凭据、标码已用、按 `project_invites` 把 `project_members` 从 invited 置 active
    （任一步失败整体回滚，码不算用掉）→ 本机写凭据 → 按卡上选择新建或绑定本地项目 → 写绑定 → 回执给邀请方。
    中心兑换代码（`src/shared-ledger/join.ts`、`identity.ts`）的改动归 N1（§6）。

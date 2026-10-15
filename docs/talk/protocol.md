@@ -1,6 +1,6 @@
 # 跨实例 Chat（talk）协议 v1
 
-人与人的 Chat（代码名 talk，界面叫 Chat）在两台 Claudestra 实例之间怎么传。**本文是定稿，传输还没实现**：一期只有本机 Chat（`src/lib/talk-*.ts`、`src/bridge/talk*.ts`），这里的入口、outbox、重投在二期写。规则的纯函数参考实现在 `src/lib/talk-protocol.ts`，测试向量在 `tests/talk-protocol.test.ts`。改协议先改这里。
+人与人的 Chat（代码名 talk，界面叫 Chat）在两台 Floka 实例之间怎么传。**本文是定稿，传输还没实现**：一期只有本机 Chat（`src/lib/talk-*.ts`、`src/bridge/talk*.ts`），这里的入口、outbox、重投在二期写。规则的纯函数参考实现在 `src/lib/talk-protocol.ts`，测试向量在 `tests/talk-protocol.test.ts`。改协议先改这里。
 
 关键字 MUST / SHOULD / MAY 按 RFC 2119 理解。术语沿用 [中继协议](../relay/protocol.md)：**fp / 指纹** = 实例公钥 sha256 前 16 位十六进制四位一组；**期望指纹** = 按 peer 记录现算出来的对方指纹（`src/lib/peer-trust.ts` 的 `expectedPeerFp`：peers.json 的 fp → `relay://` 里的 fp → 钉住的指纹）。
 

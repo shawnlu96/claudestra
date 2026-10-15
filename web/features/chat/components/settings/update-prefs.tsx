@@ -105,7 +105,7 @@ export function UpdatePrefsPanel({ state }: { state: ReturnType<typeof useUpdate
             : t("正式版：只升到 GitHub 上正式发布的版本（推荐）。")}
         </span>
       </div>
-      {toggle("claudestra", t("自动升级 Claudestra"), t("每 30 分钟检查一次，所有 agent 都空闲时才升；关掉后只提醒不升级。"))}
+      {toggle("claudestra", t("自动升级 Floka"), t("每 30 分钟检查一次，所有 agent 都空闲时才升；关掉后只提醒不升级。"))}
       {toggle("claudeCode", t("自动升级 Claude Code"), t("每周检查一次，同样只在所有 agent 都空闲时才升。"))}
       {err && <div className="text-xs text-error">{err}</div>}
     </div>

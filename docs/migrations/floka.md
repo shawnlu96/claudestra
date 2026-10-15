@@ -9,7 +9,8 @@
 
 - **新值是建议值。** 设计稿 `codex-last.md` 在写清单的机器上读不到，`new` 一列按固定规则推出：
   `Claudestra→Floka`、`claudestra` / `cstra`→`floka`、`CLAUDESTRA_→FLOKA_`、`com.claudestra.*→ai.floka.*`。PM 对设计稿核定后直接改清单。
-- **负责卡是占位名。** `rename-floka-<区域>` 十二张卡都还没建，清单里写「待建」；建卡后把真实卡号填回 `card`。
+- **负责卡已回填。** `card` 写真实卡号和阶段（以台账 DAG `b5cf-rename-floka` 为准，BRAND1 回填）。兼容层已验收的项，新名在切换窗口切；
+  写「未覆盖」的项（如 `sign.talk-ack`、`wire.file-formats`、`brand.short-*`）还没有卡做兼容，CLEAN1 开工前由 PM 补卡。
 - **两项要 owner 拍板**：iOS bundle id（`bundle.ios`，上架后不可改）、新仓库的归属与名字（`repo.slug`）。拍板前这两项不动。
 - 基线 `772cda6e` 加上本卡四个文件，清点通过：4542 个文件，旧名出现 6197 处，其中 4909 处归到 78 个登记项（调用点 3551），
   1288 处在允许表里（801 处是本卡这四个文件自己），未登记 0。
@@ -134,7 +135,7 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | `legacy.autostart-wrapper` | claudestra-autostart | （不改名，只清理） | retire | 手工 | 4 / 1 |
 | `state.root` | ~/.claude-orchestrator | ~/.floka | migrate-once | 手工 | 315 / 105 |
 | `runtime.dir` | /tmp/claude-orchestrator | /tmp/floka | migrate-once | 手工 | 32 / 12 |
-| `runtime.tmux-ready-option` | @claudestra_ready | @floka_ready | dual-read | 机械 | 29 / 19 |
+| `runtime.tmux-ready-option` | @claudestra_ready | @floka_ready | dual-read（机械只改新写入名；旧选项回落读取保留到 CLEAN1 验收） | 机械 | 29 / 19 |
 | `runtime.sandbox-dirs` | /tmp/claudestra-sandbox-<port> | /tmp/floka-sandbox-<port> | rename-only | 机械 | 2 / 1 |
 | `runtime.log-files` | /tmp/claudestra-<daemon>.{out,err}、/tmp/claudestra-lab-<port> | /tmp/floka-<同名> | migrate-once | 手工 | 13 / 5 |
 | `state.config-autoupdate-key` | config.json 的 autoUpdate.claudestra | autoUpdate.floka | dual-read | 手工 | 10 / 8 |
@@ -162,7 +163,7 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | `sign.quota-hmac` | claudestra-quota-hmac-v1 | floka-quota-hmac-v1 | rename-only | 手工 | 1 / 1 |
 | `sign.fixture-purposes` | claudestra-req-v2（设计稿候选）、claudestra-other-v1 / cstra-other-v1 / cstra-redeem-v1（测试反例） | floka-<同名> | rename-only | 机械 | 4 / 3 |
 | `wire.relay-subprotocol` | claudestra-relay.v2 | floka-relay.v2 | dual-accept | 手工 | 4 / 2 |
-| `wire.e2e-labels` | cstra-e2e-v1 / cstra-peer-e2e-v1 / cstra-peer-redeem-v1 / cstra-peer-redeem-response-v1 | （冻结，不改） | frozen | 手工 | 12 / 6 |
+| `wire.e2e-labels` | cstra-e2e-v1 / cstra-peer-e2e-v1 / cstra-peer-redeem-v1 / cstra-peer-redeem-response-v1 | floka-peer-e2e-v1 / floka-peer-redeem-v1 / floka-peer-redeem-response-v1（三个 peer 标签双认）；cstra-e2e-v1（设备侧）另议 | dual-accept | 手工 | 12 / 6 |
 | `wire.acp-extensions` | _claudestra/cancel、_meta.claudestra、claudestra:context、claudestra:bootstrap、claudestra-meta | _floka/cancel、_meta.floka、floka:context、floka:bootstrap、floka-meta | rename-only | 机械 | 71 / 33 |
 | `wire.file-formats` | claudestra.cjson/v2、claudestra.review-evidence、refs/claudestra/peer-pr、claudestra-web-commit、claudestra-send-refused、claudestra-mcp-mount | floka.cjson/v2、floka.review-evidence、refs/floka/peer-pr、floka-web-commit、floka-send-refused、floka-mcp-mount | dual-read | 手工 | 19 / 8 |
 | `wire.webhook-source` | source: "claudestra"（通知 webhook 正文） | source: "floka" | announce | 手工 | 9 / 9 |
@@ -224,7 +225,7 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | master.sock、registry.json、projects.json、peers.json、config.json、cron.json 等 | 无品牌文件名：只随状态根 / runtime 目录整体搬家，文件名不动 |
 | BRIDGE_URL、BRIDGE_PORT、BRIDGE_STATIC_DIR、MCP_NAME、DISCORD_*、CODEX_HOME 等 | 无品牌环境变量：不属于 CLAUDESTRA_* 族，不改 |
 
-另有三项带旧名但冻结：E2E 标签（`wire.e2e-labels`，密钥派生标签）、`<profile>.bak-claudestra`（`external.profile-backup`）、
+另有带旧名但冻结或另议的：设备侧 E2E 标签 `cstra-e2e-v1`（`wire.e2e-labels` 里另议的那个；三个 peer 标签已双认）、`<profile>.bak-claudestra`（`external.profile-backup`）、
 以及只清理不改名的遗留项（`legacy.*`、`cookie.legacy-session`）。
 
 ## 三类允许表

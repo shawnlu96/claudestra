@@ -4,7 +4,7 @@
 
 ## 系统概览
 
-Claudestra 是一个多 session 编排器，基于 Claude Code 原生的 **Channel 协议**（MCP 的一个扩展）。一个 Bridge 进程把单个 Discord bot token 扇出到多个 Claude Code session——每个 session 作为一个独立的 channel 监听者注册。
+Floka 是一个多 session 编排器，基于 Claude Code 原生的 **Channel 协议**（MCP 的一个扩展）。一个 Bridge 进程把单个 Discord bot token 扇出到多个 Claude Code session——每个 session 作为一个独立的 channel 监听者注册。
 
 ```
  Discord (一个 bot, 一个 token)
