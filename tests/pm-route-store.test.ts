@@ -23,19 +23,19 @@ function route(s: PmDigestStore, id: string, kind: PmRouteClass, at = 1_000_000,
 }
 
 // [验收线 4]
-test("old and independent modes survive each other's writes and corrupt route modes fail to observe", () => {
+test("old and independent modes survive each other's writes and corrupt route modes fail to observe", async () => {
   const s = store();
   expect(s.routeMode("p")).toBe("observe");
-  s.setMode("p", "on");
+  await s.setMode("p", "on");
   expect(s.routeMode("p")).toBe("observe");
-  s.setRouteMode("p", "off"); s.setMode("p", "off");
+  await s.setRouteMode("p", "off"); await s.setMode("p", "off");
   expect(s.routeMode("p")).toBe("off");
-  s.setRouteMode("p", "on"); expect(s.mode("p")).toBe("off");
+  await s.setRouteMode("p", "on"); expect(s.mode("p")).toBe("off");
   const restart = new PmDigestStore(s.path, s.modePath);
   expect(restart.routeMode("p")).toBe("on");
   writeFileSync(s.modePath, "{bad");
   expect(s.routeMode("p")).toBe("observe");
-  expect(() => s.setRouteMode("p", "on")).toThrow();
+  await expect(s.setRouteMode("p", "on")).rejects.toThrow();
   expect(readFileSync(s.modePath, "utf8")).toBe("{bad");
 });
 
@@ -82,7 +82,7 @@ test("real manager entry has independent authorized switch and read-only route s
   writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: [{ id: "p", name: "p", dirs: [], createdAt: "2026-01-01" }] }));
   const path = join(dir, "ledger.sqlite"); openLedger(path); closeLedger(path);
   expect(isWriteInvocation("ledger", ["pm-route-mode", "on", "--project", "p"])).toBe(true);
-  s.setMode("p", "off");
+  await s.setMode("p", "off");
   expect(await cli(s, ["pm-route-mode", "on", "--project", "p"])).toMatchObject({ ok: true, routeMode: "on" });
   expect(s.mode("p")).toBe("off");
   const before = readFileSync(s.modePath, "utf8");

@@ -81,6 +81,7 @@ export const RECOVERY_KEYS = [
   "placementReservations",
   "planGap",
   "pmRails",
+  "pmTodoPull",
   "poolIdleSkip",
   "privateMergeNarrow",
   "privateRepoMerge",

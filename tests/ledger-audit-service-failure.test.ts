@@ -14,6 +14,8 @@ function harness(over: Partial<LedgerAuditDeps> = {}) {
     channelOf: (to) => to === "on-duty-pm" ? "pm-channel" : undefined,
     busy: async () => false,
     failureTargets: () => [{ project: "project-a", to: "on-duty-pm" }],
+    // 本文件测失败告警：普通发现照推送路径走（pmTodoPull 的分流在 ledger-audit-service-pulltodo.test.ts）
+    pmTodo: { mode: () => "off", record: () => {}, observe: () => {} },
     runManager: async (...args) => { calls.push(args); return response; },
     ...over,
   };
