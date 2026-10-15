@@ -208,7 +208,7 @@ describe("deliverPmLocal：peer 机器消息转调度助理", () => {
     await same(peerEnv(MERGED, { meta: { messageId: "reply_fwd_1", triggerKind: "peer_http", ts: "x", threadId: "t" } }));
     await same(peerEnv(MERGED, { from: { kind: "api", tokenId: "tok_owner", name: "owner", owner: true } }));
     await same(peerEnv(MERGED, { from: { kind: "user", userId: "u1", username: "owner" } as Envelope["from"] }));
-    await same(peerEnv(MERGED, { from: { kind: "local", agentName: "agent-task-1", channelId: "channel-t" } }));
+    await same(peerEnv(MERGED, { from: { kind: "local", agentName: "agent-task-1", channelId: "channel-t", ws: socket() } }));
     await same(peerEnv(MERGED, {}, { agentName: B, channelId: "channel-b" }), "channel-b");
     await same(peerEnv(MERGED, {}, { agentName: "agent-lend-1", channelId: "channel-lend" }), "channel-lend");
   });
