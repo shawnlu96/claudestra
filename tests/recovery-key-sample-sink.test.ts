@@ -31,17 +31,22 @@ function exemptionProblems(exempt: readonly string[], max = LEGACY_NO_SAMPLE_MAX
   ];
 }
 
+/** The real scan over src/lib, run once (about a second; both tests below read it). */
+let scanned: string[] | undefined;
+const realGaps = () => (scanned ??= keysWithoutSampleSink(RECOVERY_KEYS, srcLib()));
+const SCAN_MS = 30_000;
+
 describe("recovery key sample sinks (src/lib)", () => {
   test("every key in the table has a sample sink or is an exempt old key", () => {
-    expect(missingSinks(RECOVERY_KEYS, srcLib())).toEqual([]);
-  });
+    expect(realGaps().filter((k) => !LEGACY_NO_SAMPLE_KEYS.includes(k)).map((k) => `${k}：${HINT}`)).toEqual([]);
+  }, SCAN_MS);
 
   test("exemption list: subset of the frozen old keys, no longer than at merge, and every entry still lacks a sink", () => {
     expect(exemptionProblems(LEGACY_NO_SAMPLE_KEYS)).toEqual([]);
     expect(LEGACY_NO_SAMPLE_MAX).toBeLessThanOrEqual(43); // merge-time value; lowering is the only allowed edit
-    const gaps = keysWithoutSampleSink(RECOVERY_KEYS, srcLib());
+    const gaps = realGaps();
     expect(LEGACY_NO_SAMPLE_KEYS.filter((k) => RECOVERY_KEYS.includes(k as RecoveryKey) && !gaps.includes(k))).toEqual([]); // gained a sink → leave the list
-  });
+  }, SCAN_MS);
 });
 
 describe("the scan's rules (synthetic sources)", () => {
@@ -68,11 +73,29 @@ describe("the scan's rules (synthetic sources)", () => {
     expect(keysWithoutSampleSink([KEY], [mech(`const u = "https://x"; const r = /\\/\\//; gateRecovery(db, { mechanism: "${KEY}" }, act, o);`)])).toEqual([]);
   });
 
+  test("[验收线 3] text is no write: a type import, a call spelled in a string, or a comment inside a template expression", () => {
+    const probe = (text: string): ScanSource => ({ path: "src/lib/probe.ts", text });
+    const fooled = [
+      probe(`import type { ObservedAction } from "./recovery-policy.js";\nexport const k = "${KEY}";`),
+      probe(`export const k = "${KEY}";\nexport const help = "recordObserved(db, action)";`),
+      probe(`export const k = "${KEY}";\nexport const label = \`value \${/* recordObserved( */ 1}\`;`),
+      probe(`export const k = "${KEY}";\nexport const t = \`gateRecovery(db, a) \${"op: 'recovery_observe'"}\`;`),
+      probe(`export const k = "${KEY}";\nconst r = /recordObserved\\(/;`),
+      // the port type in code without any observe call, or an observe call without the port type
+      probe(`export const k = "${KEY}";\nconst a: ObservedAction = { mechanism: k } as never; send(a);`),
+      probe(`export const k = "${KEY}";\nexport function observeThing(a: unknown) { return a; }`),
+      probe(`import { type ObservedAction } from "./recovery-policy.js";\nexport const k = "${KEY}"; observe(k);`),
+    ];
+    for (const s of fooled) expect(keysWithoutSampleSink([KEY], [s])).toEqual([KEY]);
+    // a real call inside a template expression is code
+    expect(keysWithoutSampleSink([KEY], [probe(`export const t = \`\${recordObserved(db, { mechanism: "${KEY}" }, 0).seq}\`;`)])).toEqual([]);
+  });
+
   test("other sink shapes: gate, recovery_observe note, ObservedAction for a port, the observe CLI, key constants, adapters", () => {
     const shapes = [
       `gateRecovery(db, { project: p, mechanism: "${KEY}", target: "", actionKey: "a", action: "b" }, act, o);`,
       `appendEvent(db, ctx, { kind: "note", data: { op: "recovery_observe", mechanism: "${KEY}" } });`,
-      `const rec: ObservedAction = { project: p, mechanism: "${KEY}", target: "", actionKey: "a", action: "b" }; await port(rec);`,
+      `const rec: ObservedAction = { project: p, mechanism: "${KEY}", target: "", actionKey: "a", action: "b" }; await deps.observe(rec);`,
       `await m("ledger", "scheduler-recovery-observe", id, "--mechanism", "${KEY}");`,
     ];
     for (const s of shapes) expect(keysWithoutSampleSink([KEY], [mech(s)])).toEqual([]);

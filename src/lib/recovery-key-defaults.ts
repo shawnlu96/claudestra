@@ -23,7 +23,7 @@ export const LEGACY_OBSERVE_KEYS: readonly string[] = Object.freeze([
   "manualCaseOwnership", "manualCaseSla", "manualMergeQueue", "manualRecovery", "manualStall", "materials", "mergeContentReview",
   "mergeContentUi", "mergeDeployDetach", "mergeDirect", "mergePipe", "mergeStaleYield", "mergeUnifiedCandidates", "mergeUnion",
   "mergeUnsentCancel", "mirrorSkipBlockedId", "modelOutcome", "nearMarker", "peerInstanceInfo", "peerLeaseRecovery",
-  "placementReservations", "planGap", "pmRails", "poolIdleSkip", "privateMergeNarrow", "privateStartPlacement",
+  "placementReservations", "planGap", "pmRails", "poolIdleSkip", "privateMergeNarrow", "privateRepoMerge", "privateStartPlacement",
   "reclaimLocalFix", "reviewLocalFirst", "reviewSeatIdle", "roleModel", "selfHealBeforeManual", "skipEffectsAutoScope",
   "specObservationHours", "staleReplacement", "teamBody", "tmuxSockHeal", "trainCiTimeout", "uiCarry", "uiCarryOwnGlobs",
   "uiDelivery", "uiManualResume", "uiOwnerAskFresh", "uiOwnerCarry", "uiOwnerReask", "uiReviewCarry", "unifiedMergeQueue",
@@ -61,7 +61,7 @@ export function markDefaultOn(p: RecoveryPolicy, explicit: RecoveryMode | undefi
 const noted = new WeakMap<Database, Set<string>>();
 /**
  * The gate's read: a policy on by default leaves one project-level note per project + key (dedup in the ledger; a per-connection
- * memo saves the repeat transaction). Bookkeeping only: a failed write (a query_only connection) never changes the gate.
+ * memo saves the repeat transaction, kept only for a write that committed on its own). Bookkeeping only: a failed write (a query_only connection) never changes the gate.
  */
 export function noteDefaultOn(db: Database, a: { project: string; mechanism: RecoveryKey }, p: RecoveryPolicy, now: number): RecoveryPolicy {
   if (!DEFAULT_ON.has(p)) return p;
@@ -72,7 +72,7 @@ export function noteDefaultOn(db: Database, a: { project: string; mechanism: Rec
     appendEvent(db, { actor: "scheduler", now, dedupKey }, { project: a.project, target: "", kind: "note",
       text: `恢复键 ${a.mechanism} 未配置，按新键缺省档 on 生效（回退：ledger scheduler-recovery ${a.project} off --key ${a.mechanism} --reason …）`,
       data: { op: "recovery_default_on", mechanism: a.mechanism } });
-    noted.set(db, seen.add(dedupKey));
+    if (!db.inTransaction) noted.set(db, seen.add(dedupKey)); // inside an outer transaction a rollback could drop the note: no memo
   } catch { /* retried on the next read */ }
   return p;
 }

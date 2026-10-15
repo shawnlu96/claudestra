@@ -49,16 +49,32 @@ describe("defaultRecoveryMode", () => {
     expect(defaultRecoveryMode("materials", [])).toBe("on"); // the same check without the snapshot: not high-risk
     expect(defaultRecoveryMode(NEW, [], () => true)).toBe("observe");
     const path = file({ projects: { a: { keys: { audit: "on" } }, b: { mode: "on" } } });
-    for (const k of RECOVERY_KEYS.filter((k) => k !== NEW)) {
-      expect(LEGACY_OBSERVE_KEYS).toContain(k);
+    for (const k of RECOVERY_KEYS.filter((k) => LEGACY_OBSERVE_KEYS.includes(k))) { // old keys only: later keys have their own default
       expect(recoveryPolicy("z", k, MISSING)).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
       expect(recoveryPolicy("a", k, path).mode).toBe(k === "audit" ? "on" : "observe");
       expect(recoveryPolicy("b", k, path).mode).toBe("on");
     }
   });
 
-  test("the snapshot is frozen at the 97 keys main had when the card merged (only a smaller table may follow)", () => {
-    expect(LEGACY_OBSERVE_KEYS.length).toBe(97);
+  test("[验收线 2] every key registered after the card defaults by its class: high-risk observe, any other on", () => {
+    const later = RECOVERY_KEYS.filter((k) => !LEGACY_OBSERVE_KEYS.includes(k));
+    expect(later).toContain(NEW);
+    for (const k of later) {
+      const want = highRiskRecoveryKey(k) ? "observe" : "on";
+      expect([k, defaultRecoveryMode(k)]).toEqual([k, want]);
+      expect([k, recoveryPolicy("z", k, MISSING).mode]).toEqual([k, want]);
+    }
+    // a future registration (another test's or a real new key) is not held to the snapshot
+    const FUTURE = "zzFutureRegisteredKey" as RecoveryKey;
+    (RECOVERY_KEYS as unknown as string[]).push(FUTURE);
+    try {
+      expect(recoveryPolicy("z", FUTURE, MISSING).mode).toBe("on");
+      expect(defaultRecoveryMode(FUTURE, LEGACY_OBSERVE_KEYS, (k) => k === FUTURE)).toBe("observe");
+    } finally { (RECOVERY_KEYS as unknown as string[]).splice(RECOVERY_KEYS.indexOf(FUTURE), 1); }
+  });
+
+  test("the snapshot is frozen at the 98 keys main had when the card merged (only a smaller table may follow)", () => {
+    expect(LEGACY_OBSERVE_KEYS.length).toBe(98);
     expect(new Set(LEGACY_OBSERVE_KEYS).size).toBe(LEGACY_OBSERVE_KEYS.length);
     expect(Object.isFrozen(LEGACY_OBSERVE_KEYS)).toBe(true);
   });
@@ -83,6 +99,22 @@ describe("recovery_default_on note", () => {
     db = openLedger(path); // a fresh connection (no memo) still dedups in the ledger
     await gateRecovery(db, action("p", NEW), () => 0, { now: 3000, policy });
     expect(notes(db)).toHaveLength(2);
+    closeLedger(path);
+  });
+
+  test("a note rolled back with an outer transaction is written again on the next read (no memo inside a transaction)", async () => {
+    const path = tempLedgerPath("recovery-default-on-rollback-");
+    const db = openLedger(path);
+    const policy: RecoveryPolicyPort = (p, k) => recoveryPolicy(p, k, MISSING);
+    db.run("BEGIN");
+    await gateRecovery(db, action("p", NEW), () => 0, { now: 1, policy });
+    expect(notes(db)).toHaveLength(1);
+    db.run("ROLLBACK");
+    expect(notes(db)).toHaveLength(0);
+    await gateRecovery(db, action("p", NEW), () => 0, { now: 2, policy });
+    expect(notes(db)).toHaveLength(1);
+    await gateRecovery(db, action("p", NEW), () => 0, { now: 3, policy });
+    expect(notes(db)).toHaveLength(1);
     closeLedger(path);
   });
 
