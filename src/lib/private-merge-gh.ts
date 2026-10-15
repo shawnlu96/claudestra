@@ -70,10 +70,12 @@ export function privateGh(command: typeof runBounded, dir: string, repo: string,
     },
     async checks() {
       const r = await gh(["pr", "checks", n, "--repo", repo, "--json", "name,bucket"]);
-      // gh exits 8 for pending checks while still printing JSON; "no checks reported" is an empty list, said outright
+      // gh exits 1 for a failed check and 8 for a pending one while still printing JSON; "no checks reported" is an empty list, said outright
       if (!r.timedOut && !r.stdout.trim() && [0, 1, 8].includes(r.code ?? -1) && /no checks reported/i.test(r.stderr)) return [];
-      if (r.timedOut || ![0, 8].includes(r.code ?? -1)) return failOf("gh pr checks", r);
+      if (r.timedOut || ![0, 1, 8].includes(r.code ?? -1)) return failOf("gh pr checks", r);
       const list = json(r.stdout);
+      // exit 1 is also gh's plain error: without a JSON list it stays a failure (class and exit code), never "malformed"
+      if (r.code === 1 && !Array.isArray(list)) return failOf("gh pr checks", r);
       if (!Array.isArray(list) || list.some((c) => !c || typeof c.name !== "string" ||
         !["pass", "fail", "pending", "skipping", "cancel"].includes(String(c.bucket)))) return malformed("gh pr checks");
       return list.map((c) => ({ name: c.name as string, bucket: c.bucket as CheckBucket }));

@@ -9,7 +9,8 @@
  *    a draft or a mergeability GitHub has not computed waits; CONFLICTING bounces as a conflict;
  * 3. CI — main's required status checks; none readable (no protection / no permission) = every check finished green and at least
  *    one passed, no check at all goes to PM 「私仓没有可核的 CI」; running checks wait, at most 2 hours per head, then PM once; a red
- *    one bounces to fix through the ledger's own bounce (its names must be the run's required checks, else PM — the ledger refuses);
+ *    one bounces to fix through the ledger's own bounce, the run's check list first set to the private repository's verified
+ *    required checks (private-merge-ledger.ts privateBounceChecks), so the ledger's name gate takes the private repository's own names;
  * 4. the merge — claim `merging`, the driver's recheck, `gh pr merge --match-head-commit <reviewed head>`, then a read back: only a
  *    MERGED PR at that head with a merge commit is `merged`.
  * gh failing (any step) is retried next pass; the 3rd in a row on one head goes to PM. Going to PM is the driver's own foreign_repo
@@ -26,7 +27,7 @@ import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 import { projectRepoFor } from "./scheduler-foreign-repo.js";
 import { privateMergeMode, privateMergePorts, privateMergeVerdict, recordPrivateMerge } from "./private-merge-gate.js";
 import { isGhFail, privateGh, type GhFail, type PrivateCheck, type PrivateGh, type PrivatePr } from "./private-merge-gh.js";
-import { narrowPrivateOnce, privateMergeTurn } from "./private-merge-ledger.js";
+import { narrowPrivateOnce, privateBounceChecks, privateMergeTurn } from "./private-merge-ledger.js";
 
 type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
@@ -42,18 +43,19 @@ const red = (c: PrivateCheck) => c.bucket === "fail" || c.bucket === "cancel";
 const ghFails = new Map<string, { head: string; n: number }>();
 export function resetPrivateMergeForTest(): void { ghFails.clear(); }
 
-type CiVerdict = { go: string[] } | { wait: string } | { red: string[] } | { pm: string };
+/** red: the failed names and the verified required list they belong to (protection's, or every check seen when none is readable). */
+type CiVerdict = { go: string[] } | { wait: string } | { red: string[]; verified: string[] } | { pm: string };
 /** Required checks when main's protection names them; else every check finished green and at least one passed. */
 function privateCi(required: readonly string[] | null, checks: readonly PrivateCheck[]): CiVerdict {
   if (required) {
     const failed = required.filter((n) => checks.some((c) => c.name === n && red(c)));
-    if (failed.length) return { red: failed };
+    if (failed.length) return { red: failed, verified: [...required] };
     const open = required.filter((n) => !checks.some((c) => c.name === n) || checks.some((c) => c.name === n && c.bucket !== "pass"));
     return open.length ? { wait: `必过检查未完成：${open.join("、").slice(0, 200)}` } : { go: [...required] };
   }
   if (!checks.length) return { pm: NO_CI_REASON };
   const failed = [...new Set(checks.filter(red).map((c) => c.name))];
-  if (failed.length) return { red: failed };
+  if (failed.length) return { red: failed, verified: [...new Set(checks.map((c) => c.name))] };
   if (checks.some((c) => c.bucket === "pending")) return { wait: "checks 还在跑" };
   const passed = [...new Set(checks.filter((c) => c.bucket === "pass").map((c) => c.name))];
   return passed.length ? { go: passed } : { pm: NO_CI_REASON };
@@ -106,15 +108,21 @@ async function recordMerged(c: Ctx, sha: string, receipt: string, byPm: boolean)
   return c.step("merged", receipt, sha);
 }
 
-/** The bounce receipt the ledger re-parses; required names only (the ledger checks them against the run). */
-async function bounce(c: Ctx, cause: "conflict" | "ci_fail", failed: string[] = []): Promise<MergeRun> {
+/** The bounce receipt the ledger re-parses; a red CI first carries the private repository's verified names into the run's list. */
+async function bounce(c: Ctx, cause: "conflict" | "ci_fail", failed: string[] = [], verified: string[] = []): Promise<MergeRun> {
   if (cause === "ci_fail") {
-    const known = c.run.requiredChecks.split(",");
-    const unknown = failed.filter((n) => !known.includes(n));
-    if (unknown.length) return toPm(c, `私仓必过检查失败（${failed.join("、").slice(0, 200)}），台账的合并退回只认本项目必过检查名`);
+    const db = privateMergePorts().ledger();
+    // over 20 checks seen without protection: only the failed ones are carried (each is a verified required check either way)
+    const undo = db && (privateBounceChecks(db, c.run, verified) ?? privateBounceChecks(db, c.run, failed));
+    if (!undo) return toPm(c, `私仓必过检查失败（${failed.join("、").slice(0, 200)}），检查名无法记入合并退回`);
     ghFails.delete(c.run.intentId);
     note(c, "bounce-ci", `必过检查失败，退回 fix：${failed.join("、").slice(0, 200)}`);
-    return c.step("resolved", bounceReceipt({ cause, prHead: c.head, mainHead: null, checks: failed.map((name) => ({ name, link: "" })) }));
+    try {
+      return await c.step("resolved", bounceReceipt({ cause, prHead: c.head, mainHead: null, checks: failed.map((name) => ({ name, link: "" })) }));
+    } catch (e) {
+      undo();
+      throw e;
+    }
   }
   const main = await c.gh.mainHead();
   if (isGhFail(main)) return ghFailed(c, main);
@@ -147,7 +155,7 @@ async function openPr(c: Ctx, pr: PrivatePr): Promise<MergeRun> {
   if (isGhFail(checks)) return ghFailed(c, checks);
   const ci = privateCi(required, checks);
   if ("pm" in ci) return toPm(c, ci.pm);
-  if ("red" in ci) return c.run.phase === "merging" ? toPm(c, `合并发出后必过检查失败：${ci.red.join("、").slice(0, 200)}`) : bounce(c, "ci_fail", ci.red);
+  if ("red" in ci) return c.run.phase === "merging" ? toPm(c, `合并发出后必过检查失败：${ci.red.join("、").slice(0, 200)}`) : bounce(c, "ci_fail", ci.red, ci.verified);
   if ("wait" in ci) return waitOr(c, ci.wait);
   if (pr.mergeable !== "MERGEABLE") return waitOr(c, "GitHub 还没算出能否合并");
   await toAwaitCi(c, `私仓 PR ${short(c.head)} 可合并，CI 全绿（${required ? "分支保护的必过检查" : "全部 check"}）`);

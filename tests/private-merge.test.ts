@@ -18,6 +18,7 @@ import { ForeignRepoError, setForeignRepoLookupForTest } from "../src/lib/schedu
 import type { MergeExternal } from "../src/lib/scheduler-merge-driver.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { setPrivateMergePortsForTest } from "../src/lib/private-merge-gate.js";
+import { privateGh } from "../src/lib/private-merge-gh.js";
 import { privateMergeDrive, resetPrivateMergeForTest } from "../src/lib/private-merge.js";
 import { ledgerAs } from "./deploy-test-kit.js";
 
@@ -57,7 +58,9 @@ function ghCommand(gh: FakeGh) {
     if (a === "api" && argv[2] === `repos/${REPO}/commits/main`) return ok(`${MAIN}\n`);
     if (a === "pr" && b === "checks") {
       if (!gh.checks.length) return err(1, "no checks reported on the 'x' branch");
-      return ok(JSON.stringify(gh.checks), gh.checks.some((c) => c.bucket === "pending") ? 8 : 0);
+      // real gh: exit 1 when a check failed, 8 when one is pending, JSON on stdout either way
+      const code = gh.checks.some((c) => c.bucket === "fail" || c.bucket === "cancel") ? 1 : gh.checks.some((c) => c.bucket === "pending") ? 8 : 0;
+      return ok(JSON.stringify(gh.checks), code);
     }
     if (a === "pr" && b === "merge") {
       gh.pr = { ...gh.pr, state: "MERGED", mergeCommit: { oid: MERGE_SHA } };
@@ -328,11 +331,25 @@ describe("[验收线 5] red CI, conflict, one merge per private repository", () 
     expect(merges(gh)).toEqual([]);
   });
 
-  test("a red check the ledger cannot take as a bounce (not a project required check name) goes to PM, never unknown", async () => {
+  test("the private repository's own required check name (not the project's) red: bounced to fix, not PM", async () => {
     const gh = fakeGh({ protection: ["build"], checks: [{ name: "build", bucket: "fail" }] }), k = open("on", gh);
     const m = await tick(k);
-    expect(m.fallbacks[0]![2]).toContain("私仓必过检查失败（build）");
+    expect(run(k.db).phase).toBe("resolved");
+    expect(run(k.db).requiredChecks).toBe("build");
+    expect(run(k.db).reason).toStartWith(`ci_fail: 退回 fix（ci_fail）：PR head ${HEAD}，失败检查 [{"name":"build","link":""}]`);
+    expect(stage(k.db).stage).toBe("fix");
+    expect(m.fallbacks).toEqual([]);
     expect(frozen(k.db)).not.toContain("true");
+    expect(merges(gh)).toEqual([]);
+  });
+
+  test("no protection: a red check of the private repository's own bounces to fix with every check seen as the run's list", async () => {
+    const gh = fakeGh({ protection: 404, checks: [{ name: "lint", bucket: "pass" }, { name: "test", bucket: "fail" }] }), k = open("on", gh);
+    const m = await tick(k);
+    expect(run(k.db).requiredChecks).toBe("lint,test");
+    expect(run(k.db).reason).toContain(`失败检查 [{"name":"test","link":""}]`);
+    expect(stage(k.db).stage).toBe("fix");
+    expect(m.fallbacks).toEqual([]);
   });
 
   test("a conflict bounces as a conflict with main's head", async () => {
@@ -359,6 +376,19 @@ describe("[验收线 5] red CI, conflict, one merge per private repository", () 
     expect(run(k.db, other).phase).toBe("await_review");
     await tick(k);
     expect(run(k.db).phase).toBe("merged");
+  });
+});
+
+describe("[验收线 5] gh pr checks exit codes", () => {
+  const checksOf = (r: BoundedResult) => privateGh(async () => r, "/tmp/x", REPO, 12).checks();
+  test("exit 1 with failed checks on stdout is a red result, not a gh failure", async () => {
+    expect(await checksOf(ok(JSON.stringify([{ name: "ci", bucket: "fail" }]), 1))).toEqual([{ name: "ci", bucket: "fail" }]);
+  });
+  test("exit 1 without a JSON list stays a gh failure (class and exit code only)", async () => {
+    expect(await checksOf({ code: 1, stdout: "", stderr: SECRET_STDERR, timedOut: false })).toEqual({ fail: "gh pr checks 失败（exit 1）" });
+  });
+  test("exit 8 with pending checks is still read", async () => {
+    expect(await checksOf(ok(JSON.stringify([{ name: "ci", bucket: "pending" }]), 8))).toEqual([{ name: "ci", bucket: "pending" }]);
   });
 });
 

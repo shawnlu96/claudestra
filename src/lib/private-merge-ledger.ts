@@ -1,7 +1,10 @@
 /**
- * merge-arch-MERGEAUTO1 · the private merge's ledger reads and its one lock write:
+ * merge-arch-MERGEAUTO1 · the private merge's ledger reads and its two writes (bounce names, file locks):
  * - serial: one private repository merges one card at a time, judged on the ledger's open merge runs (scheduler_merges), so a
  *   restart loses nothing: a run already `merging` goes first, else the oldest run (createdAt, then intent id); the rest wait;
+ * - bounce names: a private repository's red required checks carry their own names (not the project's), so just before the bounce
+ *   the run's fixed check list is set to the private repository's verified ones (privateBounceChecks), the ledger's bounce gate
+ *   (scheduler-merge-conflict.ts closeMergeRun) then takes them unchanged; the bounce ends the run, a refused bounce puts the list back;
  * - narrowing (privateMergeNarrow, kept): the private card no longer goes to PM under on, so this path narrows its file locks once
  *   per (card, head) with the existing narrowTarget / replaceCardFileLocks under the same dedup key the PM branch uses
  *   (scheduler-merge-handoff.ts privateNarrowKey); observe records what it would do, off does nothing. Best effort: a failure
@@ -17,6 +20,7 @@ import { getEventByDedup } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { observeDedupKey, recordObserved } from "./recovery-policy.js";
 import type { runBounded } from "./run-bounded.js";
+import { parseRequiredChecks } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { narrowTarget, privateNarrowKey, type PrFiles } from "./scheduler-merge-handoff.js";
 import { GitStepFailed, handoffFiles } from "./scheduler-merge-handoff-tick.js";
@@ -32,6 +36,23 @@ export function privateMergeTurn(db: Database, repo: string): Pick<MergeRun, "in
     (Pick<MergeRun, "intentId" | "taskId" | "prRef" | "phase" | "createdAt">)[];
   const mine = rows.filter((r) => prCoordinates(r.prRef)?.repo.toLowerCase() === repo);
   return mine.find((r) => r.phase === "merging") ?? mine[0] ?? null;
+}
+
+const BOUNCE_PHASES = ["ready", "updating", "await_ci"];
+
+/**
+ * The run's required checks become the private repository's verified ones (`names`, the ledger's 1–20 name rule) while it still has
+ * not sent a merge and is at the rev the driver holds. Returns the undo (puts the old list back if the run is still that open run),
+ * or null when the names or the run do not fit: the caller then goes to PM.
+ */
+export function privateBounceChecks(db: Database, run: MergeRun, names: readonly string[]): (() => void) | null {
+  const checks = parseRequiredChecks([...names]);
+  if (!checks) return null;
+  const list = checks.join(","), marks = BOUNCE_PHASES.map(() => "?").join(",");
+  const set = (to: string, from: string) => tx(db, () => db.query(`UPDATE scheduler_merges SET requiredChecks=?
+    WHERE intentId=? AND rev=? AND requiredChecks=? AND phase IN (${marks})`).run(to, run.intentId, run.rev, from, ...BOUNCE_PHASES).changes);
+  if (list !== run.requiredChecks && set(list, run.requiredChecks) !== 1) return null;
+  return () => { if (list !== run.requiredChecks) set(run.requiredChecks, list); };
 }
 
 const NARROW_KEY = "privateMergeNarrow" as const;
