@@ -352,7 +352,7 @@ describe("ci.yml：只改 plan 作业", () => {
     expect(text.match(/vars\.CI_IO_MAP/g)).toHaveLength(1);
     const env = ci.jobs.plan!.steps.find((s) => s.name === "Plan test selection")!.env!;
     expect(env).toMatchObject({ CI_IO_MAP: "${{ vars.CI_IO_MAP }}", GH_TOKEN: "${{ github.token }}", CI_RELATED_CHECKS: "${{ vars.CI_RELATED_CHECKS }}" });
-    expect(ci.jobs.plan!.permissions).toEqual({ contents: "read", actions: "read" });
+    expect(ci.jobs.plan!.permissions).toEqual({ contents: "read", actions: "read", "pull-requests": "read" });
     for (const [id, job] of Object.entries(ci.jobs)) if (id !== "plan") expect(`${id}:${job.permissions === undefined}`).toBe(`${id}:true`);
     expect(ci.permissions).toBeUndefined();
   });

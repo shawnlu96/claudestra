@@ -11,6 +11,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { projectPmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiCarriedFrom } from "./scheduler-ui-carry-read.js";
+import { ownerCarriedAsk } from "./scheduler-ui-owner-carry.js";
 
 export const UI_ASK_ACTION = "scheduler_ui_screenshot";
 export const DIGEST_RE = /^[a-f0-9]{64}$/i;
@@ -46,7 +47,8 @@ export function uiMergeRefusal(db: Database, task: LedgerTask, now: number): str
   });
   if (owner) return null;
   const events = listEvents(db, { project: task.project, target: task.id });
-  if (ownerVisualOf(db, task, events)) return "缺同 head/specRev/摘要的 owner 截图授权（本卡要 owner 看截图）";
+  // UIOWNCARRY1: an owner approval on an older head counts only along the scheduler's own carries (the planner's projectUiGate reads the same)
+  if (ownerVisualOf(db, task, events)) return ownerCarriedAsk(db, task, events, now) ? null : "缺同 head/specRev/摘要的 owner 截图授权（本卡要 owner 看截图）";
   const pm = projectPmUiGate(db, task, events);
   // UICAR2: bound to an older head, it counts only through the scheduler's update-branch carries each paired with its ui_carry
   return pm.state === "approved" && pm.specRev === task.specRev && pm.round === task.round && pm.screenshotsDigest === digest &&

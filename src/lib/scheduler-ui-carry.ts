@@ -4,7 +4,8 @@
  * extra.fileGlobs) by this process's own git, PM's last verdict is approved on `from` with the card's digest, and the card is not
  * ownerVisual. Switch `uiCarry` (recovery-policy.ts): off / observe (record only) / on. Read side: scheduler-ui-carry-read.ts.
  * UIR1 (uiReviewCarry, scheduler-ui-review-carry.ts) is judged in the same call and temp repo, on render-input trees, and after both
- * UICAR3 (uiCarryOwnGlobs, scheduler-ui-carry-own-globs.ts) on main's touched list against the card's own files.
+ * UICAR3 (uiCarryOwnGlobs, scheduler-ui-carry-own-globs.ts) on main's touched list against the card's own files. UIOWNCARRY1
+ * (uiOwnerCarry, scheduler-ui-owner-carry.ts) is the ownerVisual cards' own layer, judged in the same call and temp repo.
  */
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -21,6 +22,7 @@ import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyP
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { isUiPath, ownGlobsCarryPlan, type OwnGlobsFacts } from "./scheduler-ui-carry-own-globs.js";
 import { UI_CARRY_OP, uiCarriedFrom, uiCarryKey, uiCarryOwnGlobsMode } from "./scheduler-ui-carry-read.js";
+import { uiOwnerCarryMode, uiOwnerCarryPlan, type OwnerCarryPlan } from "./scheduler-ui-owner-carry.js";
 import { uiReviewCarryMode, uiReviewCarryPlan } from "./scheduler-ui-review-carry.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-merge-refusal.js";
 import type { CarryEvidence } from "./scheduler-merge.js";
@@ -98,20 +100,24 @@ function mainCarryPlan(db: Database, task: LedgerTask, intentId: string, ev: Car
  * assets / i18n …): UICAR2 is not judged, and its ui_review_carry is committed first, at carrySeq + 2. Otherwise UICAR2's ui_carry (on)
  * keeps carrySeq + 2 and any observe record follows it. UICAR3 (uiCarryOwnGlobs) is judged last and only when neither carried; its
  * ui_carry (on) then takes carrySeq + 2 and the others' refusal notes are dropped. Readers: scheduler-ui-carry-read.ts.
+ * UIOWNCARRY1 (ownerVisual cards only, which every other layer refuses) is committed first; carried, the others' notes are dropped.
  */
 export function uiCarryPlan(db: Database, task: LedgerTask, intentId: string, ev: CarryEvidence, now: number,
   deps: UiCarryDeps = {}): UiCarryPlan {
   if (getWorkflow(db, task.id)?.template !== "ui") return NONE;
   const mode = uiCarryMode(task.project, deps.policy), reviewMode = uiReviewCarryMode(task.project, deps.policy);
-  const ownMode = uiCarryOwnGlobsMode(task.project, deps.policy);
-  if (mode === "off" && reviewMode === "off" && ownMode === "off") return NONE;
+  const ownMode = uiCarryOwnGlobsMode(task.project, deps.policy), ownerMode = uiOwnerCarryMode(task.project, deps.policy);
+  if (mode === "off" && reviewMode === "off" && ownMode === "off" && ownerMode === "off") return NONE;
   const events = listEvents(db, { project: task.project, target: task.id });
   const pm = projectPmUiGate(db, task, events), ownerVisual = ownerVisualOf(db, task, events);
   const approval = events.find((e) => e.seq === pm.seq);
   // PM approved an older head: the hops up to this carry's `from` must each be the scheduler's own trusted carry (UIR1 chains)
   const heldFrom = pm.head !== undefined && pm.head !== ev.oldHead && uiCarriedFrom(db, task, events, pm, deps.policy);
   let main: UiCarryPlan = NONE, review: UiCarryPlan = NONE, own: Pick<UiCarryPlan, "commit"> = NONE, ownCarried = false;
+  let owner: OwnerCarryPlan = { ...NONE, carried: false };
   const judge = (read: (() => GitRead) | string, touched: Touched, net: string[] | string) => {
+    owner = uiOwnerCarryPlan(db, { task, intentId, ev, ownerVisual, events, read, now }, (_seq, dedupKey, text, data) => // UIOWNCARRY1
+      void insertEvent(db, { actor: "scheduler", now, dedupKey }, { project: task.project, target: task.id, kind: "scheduler", text, data }, true), deps.policy);
     const mainJudged = mode !== "off" && reviewMode !== "on";
     if (mainJudged) main = mainCarryPlan(db, task, intentId, ev, now, mode, pm, ownerVisual, touched);
     review = uiReviewCarryPlan(db, { task, intentId, ev, pm, approval, ownerVisual, heldFrom, read, now }, deps.policy);
@@ -136,7 +142,7 @@ export function uiCarryPlan(db: Database, task: LedgerTask, intentId: string, ev
       });
     } catch (e) { const no = `canonical 沿用在本库证不了（${why(e)}）`; judge(no, `main 触碰清单算不出（${why(e)}）`, no); }
   }
-  const note = ownCarried ? null : [main.note, review.note].filter(Boolean).join("；").slice(0, 500) || null;
-  const order = ownCarried ? [own, main, review] : reviewMode === "on" ? [review, main, own] : [main, review, own];
+  const note = ownCarried || owner.carried ? null : [owner.note, main.note, review.note].filter(Boolean).join("；").slice(0, 500) || null;
+  const order = [owner, ...ownCarried ? [own, main, review] : reviewMode === "on" ? [review, main, own] : [main, review, own]];
   return { note, commit: (carrySeq) => { for (const p of order) p.commit(carrySeq); } };
 }

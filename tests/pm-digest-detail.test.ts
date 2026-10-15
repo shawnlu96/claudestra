@@ -23,7 +23,8 @@ const env = (from: Envelope["from"], content: string, oneShot = true): Envelope 
 const agent = (name: string, text: string) => env({ kind: "local", agentName: name, channelId: "", ws }, text);
 const audit = (list: [string, string][]) => env({ kind: "bridge", label: "ledger-audit" },
   auditNoticeText(list.map(([taskId, detail]) => ({ project: P, taskId, detail, suggestion: "核一下" })), "manager ledger audit"));
-const owner = () => env({ kind: "user", userId: "u", channelId: "ch-pm" }, "owner 问进度", false);
+/** 推送摘要搭的立即送：执行者等回复的消息（owner / peer 的消息不搭） */
+const execMsg = () => env({ kind: "local", agentName: "agent-x", channelId: "ch-x", ws }, "执行者问 PM", false);
 const POST_VERIFY = "[上线后待办] agents-PV1 已上线，规格要求 PM 接着做：\n- 核对线上摘要\n- 切开关到 on\n做完用 ledger post-verify-done agents-PV1 结掉。";
 
 function world() {
@@ -34,13 +35,14 @@ function world() {
   const path = join(dir, "pm-digest.json");
   const store = new PmDigestStore(path, join(dir, "pm-digest-mode.json"));
   store.setMode(P, "on");
+  store.setPullMode(P, "off"); // 这里测的是推送摘要的拼法
   const sent: string[] = [];
   const raw = async (e: Envelope): Promise<Delivery> => (sent.push(e.content), { envelope: e, outcome: { kind: "sent" } });
   const digest = new PmDigest({ store, now: () => 1_000_000, db: () => db, agents: () => [], heldCarriers: () => new Set() });
   live.push(digest);
   const send = (e: Envelope) => digest.wrap(raw, db, P)(e, pmTo);
-  /** 让 owner 的一条立即送把队列摘要带出来，返回摘要块（正文之前的部分） */
-  const flush = async (): Promise<string> => (await send(owner()), sent.at(-1)!.replace(/\n\nowner 问进度$/, ""));
+  /** 让执行者的一条立即送把队列摘要带出来，返回摘要块（正文之前的部分） */
+  const flush = async (): Promise<string> => (await send(execMsg()), sent.at(-1)!.replace(/\n\n执行者问 PM$/, ""));
   return { path, store, sent, send, flush };
 }
 

@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import type { MergeRun } from "./scheduler-merge.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
+import { ciSelectedFullPass } from "./scheduler-ci-selected-gate.js";
 
 export const CI_SCOPE_FULL = "ci scope full";
 export const CI_SCOPE_RELATED = "ci scope related";
@@ -109,6 +110,7 @@ export async function fullRecheck(run: MergeRun, pr: PrSnapshot, port: FullReque
   if (subject.head.toLowerCase() !== run.reviewedHead.toLowerCase() || subject.head.toLowerCase() !== pr.head.toLowerCase()) return "wait"; // the driver handles a moved head
   const id = fullRequestId(subject);
   const d = decideFull({ id, runs: await port.runs(subject.repo), dispatchedAt: dispatched.get(id), now });
+  if (d.kind === "pass") { const sel = await ciSelectedFullPass(run, subject, d.runId); if (sel) return sel === "wait" ? "wait" : fail("run_failed", sel); } // CISEL2
   if (d.kind === "pass") {
     // main may have moved while the runs were read: the pass only counts for a binding that is still the current one
     if (!sameBinding(subject, await port.subject(run.prRef, run.reviewedHead))) return "wait"; // next tick binds the new base: a new request

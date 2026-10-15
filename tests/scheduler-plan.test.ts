@@ -1,8 +1,12 @@
 import { FIX_STRATEGY_RULE } from "../src/lib/fix-strategy.js";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { LedgerEvent, LedgerTask, Stage } from "../src/lib/ledger-stages.js";
 import type { SchedulerIntent, TaskWorkflow } from "../src/lib/ledger-scheduler.js";
 import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/scheduler-plan.js";
+import { resetUiOwnerReaskObserved } from "../src/lib/scheduler-ui-reask.js";
+
+// ui_stale plans queue uiOwnerReask observe records in a module-level outbox; drop them so later files in the process start empty.
+afterEach(() => resetUiOwnerReaskObserved());
 
 const HEAD = "a".repeat(40);
 const author: WorkerRef = { agent: "agent-author", sessionId: "session-author", taskId: "T1", family: "claude", source: "local" };

@@ -14,6 +14,11 @@ export interface NodeStat {
   gid: number;
   /** 所在文件系统;跨设备判定只看它 */
   dev: number;
+  /** 一致性快照用的元数据(lib/state-maintenance/inventory.ts):前后任一变化即「非一致快照」 */
+  ino?: number;
+  size?: number;
+  mtimeMs?: number;
+  ctimeMs?: number;
 }
 
 /** 文件系统适配器。读接口找不到返回 null;写接口失败直接抛(由事务执行器补偿) */
@@ -22,6 +27,8 @@ export interface StateFs {
   readdir(path: string): Promise<string[]>;
   readFile(path: string): Promise<Uint8Array | null>;
   realpath(path: string): Promise<string | null>;
+  /** 清单记 symlink 本身指向什么(不跟随);可选,没有就只记类型 */
+  readlink?(path: string): Promise<string | null>;
   /** 原子改名;跨设备由底层报 EXDEV,绝不退化成复制 */
   rename(from: string, to: string): Promise<void>;
   symlink(target: string, path: string): Promise<void>;

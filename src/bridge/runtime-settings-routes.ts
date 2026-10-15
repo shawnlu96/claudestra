@@ -1,7 +1,8 @@
 /**
  * 非 Claude Code 运行时的模型 / 档位切换（从 api-routes 拆出来：那个文件只许变小）。
  * - Pi：GET /pi-models 读 ~/.pi/agent/models.json；POST /agents/:name/pi-settings 注入扩展命令（transport=acp 的走宿主，同 Codex）
- * - Codex：GET /codex-models 读 `codex debug models`；POST /agents/:name/codex-settings 写 registry 后重启
+ * - Codex：GET /codex-models 读 `codex debug models`；POST /agents/:name/codex-settings 写 registry 后重启；
+ *   GET/PUT /config/codex-defaults 读写 ~/.codex/config.toml 顶层的全局默认（lib/codex-config-write.ts）
  * Claude Code 的 /claude-settings 仍在 api-routes（与 permission-watcher 的代按逻辑缠在一起）。
  * runManager 由调用方注入：它在 management.ts（hub），bridge 模块不能反向 import。
  */
@@ -9,7 +10,10 @@ import { agentInScope, type Principal } from "../lib/principals.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { isPiThinkingLevel } from "../lib/pi-launch.js";
 import { codexEffort } from "../lib/codex-launch.js";
-import { codexDisplayDefaults, loadCodexCatalog, readCodexConfigDefaults, validateCodexChoice } from "../lib/codex-catalog.js";
+import { codexDisplayDefaults, loadCodexCatalog, readCodexConfigDefaults, validateCodexChoice, type CodexModel } from "../lib/codex-catalog.js";
+import { CodexConfigError, codexConfigPath, readCodexDefaultsToml, writeCodexDefaults, type CodexConfigWriter } from "../lib/codex-config-write.js";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody, notInScope } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 import { rememberSwitchOverride } from "./switch-override.js";
@@ -30,6 +34,7 @@ export async function handleRuntimeSettingsRoutes(
 ): Promise<Response | null> {
   if (path === "/pi-models" && req.method === "GET") return piModels(principal);
   if (path === "/codex-models" && req.method === "GET") return codexModels(principal);
+  if (path === "/config/codex-defaults") return codexDefaultsRoute(req, principal);
   if (RUNTIME_UPDATE_PATH.test(path) && req.method === "POST") return handleRuntimeUpdate(path, principal, runManager); // 横幅「更新并重启」
   const set = path.match(/^\/agents\/([^/]+)\/(pi|codex)-settings$/);
   if (!set || req.method !== "POST") return null;
@@ -202,4 +207,75 @@ async function codexSettings(
   }
   rememberSwitchOverride(canonical, { ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
   return apiJson(200, { ok: true, agent: canonical, model: model || null, effort: effort || null });
+}
+
+// ── Codex 全局默认 ─────────────────────────────────────────────────────────
+
+export interface CodexDefaultsDeps {
+  home: string;
+  catalog: () => Promise<CodexModel[] | null>;
+  write?: CodexConfigWriter;
+}
+
+/** 原文快照（null = 文件不存在）：校验和提交都用它，见 lib/codex-config-write.ts writeCodexDefaults */
+const readToml = (home: string): string | null => {
+  const p = codexConfigPath(home);
+  return existsSync(p) ? readFileSync(p, "utf8") : null;
+};
+
+/** PUT body 的一项：缺 = 不动；null / "" = 清掉（回到 Codex 自己的默认）；别的类型 = 非法 */
+const bodyField = (v: unknown): string | undefined | false =>
+  v === undefined ? undefined : v === null ? "" : typeof v === "string" ? v.trim() : false;
+
+/** 认不出的写法 422、校验后被别处改了 409，都没动文件；别的（读写失败）500 */
+const configError = (e: unknown, what: string): Response =>
+  e instanceof CodexConfigError
+    ? apiJson(e.code === "conflict" ? 409 : 422, { ok: false, code: e.code, error: e.message })
+    : apiJson(500, { ok: false, error: `${what} config.toml 失败（原文件没动）: ${(e as Error).message}` });
+
+/**
+ * GET/PUT /config/codex-defaults：只给全权。影响所有没钉模型 / 档位的新 Codex 会话（含终端里直接开的 codex），
+ * 已钉的 agent（registry 的 model / effort 进了启动参数）和在跑的会话不受影响——这里不重启任何东西。
+ * PUT 先拍一份原文快照，读当前值、校验、提交都基于它；中途（等目录 / 读 body）文件被别的请求改了就 409。
+ */
+export async function codexDefaultsRoute(
+  req: Request,
+  principal: Principal,
+  deps: CodexDefaultsDeps = { home: homedir(), catalog: () => loadCodexCatalog() },
+): Promise<Response> {
+  if (!isFullScope(principal)) return forbidden("codex-defaults requires a full-scope token");
+  if (req.method !== "GET" && req.method !== "PUT") return apiJson(405, { ok: false, error: "GET / PUT only" });
+  let snap: string | null;
+  let cur: { model: string | null; effort: string | null };
+  try {
+    snap = readToml(deps.home);
+    cur = readCodexDefaultsToml(snap ?? "");
+  } catch (e) {
+    return configError(e, "读取");
+  }
+  const catalog = await deps.catalog();
+  const codexDefault = codexDisplayDefaults(catalog, { model: null, effort: null }, null);
+  if (req.method === "GET") return apiJson(200, { ok: true, ...cur, models: catalog ?? [], catalogOk: !!catalog, codexDefault });
+
+  const body: any = await readJsonBody(req);
+  if (body === INVALID_JSON) return invalidJsonBody();
+  const model = bodyField(body?.model);
+  let effort = bodyField(body?.effort);
+  if (model === false || effort === false) return apiJson(400, { ok: false, error: "model / effort 必须是字符串或 null" });
+  if (model === undefined && effort === undefined) return apiJson(400, { ok: false, error: 'body must contain "model" and/or "effort"' });
+  // 写进全局配置的模型拼错了，所有新 Codex 会话都起不来：目录拉不到就不让设模型
+  if (model && !catalog) return apiJson(503, { ok: false, error: "读不到 Codex 模型目录（codex 没装或 `codex debug models` 失败），暂时不能改模型" });
+  const targetModel = (model === undefined ? cur.model : model) || codexDefault.model;
+  // 只换模型时，原来的档位新模型不一定支持：清掉，回到新模型自己的默认档
+  const target = catalog?.find((m) => m.id === targetModel);
+  const effortCleared = model !== undefined && effort === undefined && !!cur.effort && !!target?.efforts.length && !target.efforts.includes(cur.effort);
+  if (effortCleared) effort = "";
+  const bad = validateCodexChoice(catalog, { model: model ?? "", effort: effort ?? "", targetModel });
+  if (bad) return apiJson(400, { ok: false, error: bad });
+  try {
+    const r = writeCodexDefaults(deps.home, { model, effort }, { before: snap, write: deps.write });
+    return apiJson(200, { ok: true, ...readCodexDefaultsToml(r.text), codexDefault, backedUp: !!r.backup, ...(effortCleared ? { effortCleared } : {}) });
+  } catch (e) {
+    return configError(e, "写入");
+  }
 }

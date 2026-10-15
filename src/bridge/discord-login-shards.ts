@@ -4,6 +4,7 @@
 // 同一次按钮 / slash 被处理 N 次。这里让被 strategy 销毁的 shard 永不再 internalConnect。
 // 测试：tests/discord-login-orphan.test.ts
 import { SimpleShardingStrategy } from "discord.js";
+import { refuseForeignResume } from "./discord-login-stub.js";
 
 /** @discordjs/ws 的 WebSocketManager（discord.js 顶层同名导出的是它自己那个，类型不同） */
 type WsManager = ConstructorParameters<typeof SimpleShardingStrategy>[0];
@@ -12,9 +13,16 @@ interface ReconnectingShard { internalConnect(): Promise<void> }
 
 class FinalDestroyStrategy extends SimpleShardingStrategy {
   override async destroy(options?: Parameters<SimpleShardingStrategy["destroy"]>[0]): Promise<void> {
-    // shards 在 d.ts 里是 private；销毁后它就被父类 clear 掉，所以必须在这之前拿到
-    const shards = (this as unknown as { shards: Map<number, ReconnectingShard> }).shards;
-    for (const shard of shards.values()) shard.internalConnect = async () => {};
+    // shards 在 d.ts 里是 private；销毁后它就被父类 clear 掉，所以必须在这之前拿到。
+    // 上游改了内部结构就告警并退回原 destroy：最坏漏孤儿 shard（重复会话），不至于每次 login 都抛、Discord 永远连不上
+    const shards = (this as unknown as { shards?: unknown }).shards;
+    const list = shards instanceof Map ? [...(shards as Map<number, Partial<ReconnectingShard>>).values()] : null;
+    if (!list || list.some((shard) => typeof shard.internalConnect !== "function")) {
+      console.warn(`⚠️ @discordjs/ws 内部结构变了（找不到 SimpleShardingStrategy.shards 或 WebSocketShard.internalConnect）：`
+        + `退回原 destroy，断线重连可能留下孤儿 shard（bridge/discord-login-shards.ts）`);
+    } else {
+      for (const shard of list) shard.internalConnect = async () => {};
+    }
     await super.destroy(options);
   }
 }
@@ -32,7 +40,10 @@ export interface ShardReaper {
 export function createShardReaper(): ShardReaper {
   let current: FinalDestroyStrategy | null = null;
   return {
-    buildStrategy: (manager) => (current = new FinalDestroyStrategy(manager)),
+    buildStrategy: (manager) => {
+      refuseForeignResume(manager); // 桩模式：恢复地址也只认桩（bridge/discord-login-stub.ts）
+      return (current = new FinalDestroyStrategy(manager));
+    },
     guard: (login) => login.catch(async (e: unknown) => {
       await current?.destroy({ reason: "login 失败，拆掉这次的 shard 由 connector 退避后重来" });
       throw e;

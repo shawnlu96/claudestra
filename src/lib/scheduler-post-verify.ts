@@ -13,6 +13,7 @@ import {
 } from "./scheduler-post-verify-ledger.js";
 import { deferPlan, postVerifyDeferMode } from "./scheduler-post-verify-defer.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { asInfo } from "./pm-notice-level.js";
 import { sendToPm, specWaitMode, type SpecWaitEnv } from "./scheduler-spec-wait.js";
 
 type Failed = { taskId: string; error: string }[];
@@ -44,7 +45,7 @@ export async function postVerifyTick(env: SpecWaitEnv): Promise<Failed> {
         }
         if (rec.due !== true || mode !== "on") continue;
         try {
-          await sendToPm(env, project, String(rec.to), String(rec.text));
+          await asInfo(() => sendToPm(env, project, String(rec.to), String(rec.text))); // 上线后待办是常规：卡上有记录，PM 用 pm-todo 拉
         } catch (e) {
           // overdue 没写终结记录：下个 30 分钟窗口按发送意图重发，直到送达
           if (e instanceof SchedulerStopped) throw e;

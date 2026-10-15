@@ -31,6 +31,7 @@ import { claimMainUnsentEnd } from "./scheduler-merge-freshness-unsent.js";
 import { uiUnsentEnd } from "./scheduler-ui-review-carry.js";
 import { mergeDeployReceiptData, registerMergedDeploy } from "./merge-deploy-outbox.js";
 import { countCarryReview } from "./review-count-carry-ledger.js";
+import { mergeClaimRefusal, ownerFreshClose, ownerFreshFail, ownerFreshRefusal, ownerFreshVoid, runStage } from "./scheduler-ui-owner-fresh.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -81,14 +82,15 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
   if (request) return request;
   if (task.headSHA !== run.reviewedHead) return "任务 head 已变化，旧审查失效";
   if (task.pr !== run.prRef || task.branch !== run.expectedBranch) return "任务 PR 或分支已变化";
-  if (task.stage !== "merge") return `任务阶段已从 merge 变为 ${task.stage}`;
+  const stage = runStage(db, run.intentId); // UIOWNCARRY2: a fresh run (scheduler-ui-owner-fresh.ts) lives in review
+  if (task.stage !== stage) return `任务阶段已从 ${stage} 变为 ${task.stage}`;
   if (getMeta(db, run.project).queueFrozen.frozen) return "项目合并队列已冻结";
   if (["ready", "updating", "await_ci", "merging"].includes(run.phase)) {
     const review = currentReviewFacts(task, listEvents(db, { project: run.project, target: run.taskId }), (a) => actorMayConfigure(db, a, task.project));
     if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) return "当前 head 的审查结论已不合格";
     // The screenshot approval is re-read like the review: withdrawn, replaced or bound to an older head, the run stops before GitHub.
-    const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
+    const ui = stage === "review" ? ownerFreshRefusal(db, task) : workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) return `UI 截图验收已失效：${ui}`;
     if (run.beforeSend && !manual) return sendSourceRefusal(db, run, task, workflow, mergeReviewProof); // MCRY6: the pinned source, re-proved
   }
@@ -134,17 +136,18 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
       return { run: old, duplicate: true };
     }
     const manual = intent.node === MANUAL_MERGE_NODE, now = ctx.now ?? Date.now();
-    if (intent.status !== "submitted" || task.stage !== "merge" || workflow?.mode !== (manual ? "manual" : "auto") ||
+    const stage = runStage(db, intentId); // UIOWNCARRY2: review for a fresh run, which holds no merge slot
+    if (intent.status !== "submitted" || task.stage !== stage || workflow?.mode !== (manual ? "manual" : "auto") ||
       workflow.specRev !== task.specRev || task.rev !== intent.taskRev || !sha(task.headSHA) || task.headSHA !== intent.head) {
       throw new LedgerError("conflict", "合并意图、阶段、规格、任务版本或完整 head 不一致");
     }
     // Same gate as the merge intent's write (requireReviewedMerge), re-read here: PM acceptance, or the owner's for ownerVisual.
-    const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
+    const ui = stage === "review" ? ownerFreshRefusal(db, task) : workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) throw new LedgerError("conflict", ui);
     if (getMeta(db, task.project).queueFrozen.frozen) throw new LedgerError("conflict", "项目合并队列已冻结");
     const lock = db.query("SELECT 1 FROM scheduler_resources WHERE project=? AND resource=? AND intentId=?")
       .get(task.project, `merge:${task.project}`, intentId);
-    if (!lock) throw new LedgerError("conflict", "本意图未占项目合并槽");
+    if (!lock && stage === "merge") throw new LedgerError("conflict", "本意图未占项目合并槽");
     const review = mergeReviewProof(db, task, workflow, manual ? { intent, now } : undefined);
     if (!task.pr || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/.test(task.pr) || !task.branch) {
       throw new LedgerError("invalid", "自动合并只接受完整 GitHub PR URL");
@@ -187,7 +190,7 @@ function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string
   const ev = parseCarryReceipt(receipt);
   if (!ev || ev.oldHead !== row.reviewedHead || ev.newHead !== newHead) throw new LedgerError("invalid", "沿用审查回执缺证据或 head 对不上");
   const task = mustTask(db, row.taskId);
-  if (task.stage !== "merge" || task.headSHA !== row.reviewedHead) throw new LedgerError("conflict", "沿用审查时任务阶段或旧 head 已变");
+  if (task.stage !== runStage(db, row.intentId) || task.headSHA !== row.reviewedHead) throw new LedgerError("conflict", "沿用审查时任务阶段或旧 head 已变");
   // MCRY2: from ready the head was moved before this attempt began: only the previous attempt's own update-branch carries
   const priorIntent = row.phase === "ready" ? readyCarryPrior(db, row, task, getMergeRun) : null;
   const carried = autoCarryEvidence(db, task, ev, chainRaw, mergeReviewProof, undefined, { intent: getIntent(db, row.intentId), now });
@@ -216,6 +219,7 @@ function observeMergeState(db: Database, ctx: WriteCtx, row: MergeRun, receipt: 
   const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
   const now = ctx.now ?? Date.now();
+  if (isSlotTurn(receipt) && runStage(db, row.intentId) === "review") return row; // UIOWNCARRY2: a fresh run never takes the merge slot
   if (isSlotTurn(receipt)) { turnMergeSlot(db, ctx, row, receipt, now); return getMergeRun(db, row.intentId) as MergeRun; } // i28-MT1f2f2: lend the slot to a live train / take it back
   const since = receipt === MERGE_UNKNOWN_WAIT ? row.unknownSince ?? now : null;
   if (since !== row.unknownSince) {
@@ -236,8 +240,12 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       throw new LedgerError("conflict", `合并步骤当前 ${row.phase}@${row.rev}，不能从 ${input.from}@${input.rev} 推 ${input.to}`);
     }
     if (input.from === input.to) return observeMergeState(db, ctx, row, input.receipt);
+    const fresh = runStage(db, row.intentId) === "review"; // UIOWNCARRY2: never merges; unknown ends it without a freeze
+    if (input.to === "merging") { const no = mergeClaimRefusal(db, row); if (no) throw new LedgerError("conflict", no); }
+    if (input.to === "unknown" && fresh) { ownerFreshFail(db, ctx, row, text(input.receipt, "回执"), insertEvent); return getMergeRun(db, row.intentId) as MergeRun; }
     if (input.to === "resolved") { // before any merge was sent: a conflict / red CI goes back to fix, a manual switch ends it; no freeze
-      closeMergeRun(db, ctx, row, input.receipt, mergeRunDrift(db, row, ctx.now ?? Date.now()));
+      const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
+      if (fresh) ownerFreshClose(db, ctx, row, input.receipt, drift, insertEvent); else closeMergeRun(db, ctx, row, input.receipt, drift);
       return getMergeRun(db, row.intentId) as MergeRun;
     }
     // Every road to unknown passes here: once the PM took the card over and no merge was sent, whatever made the driver
@@ -271,7 +279,8 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     const now = ctx.now ?? Date.now();
     const carry = input.to === "await_ci" && input.newHead ? carryReview(db, ctx, row, input.newHead, receipt as string, now, chain?.raw) : null;
     const carrySeq = carry?.seq ?? null;
-    if (input.to === "await_review") {
+    if (input.to === "await_review" && fresh) ownerFreshVoid(db, ctx, row, now);
+    else if (input.to === "await_review") {
       const task = mustTask(db, row.taskId);
       if (task.stage !== "merge" || task.headSHA !== row.reviewedHead || !canTransition(task, "review", "pm").ok) {
         throw new LedgerError("conflict", "分支更新时任务阶段或旧 head 已变");

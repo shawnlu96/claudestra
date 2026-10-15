@@ -21,7 +21,11 @@
 
 下面这些总是立即送：owner 和人类消息、API / peer 消息、卡片答复（`ask_answer`）、其他 bridge 通知（含 `ledger` 的执行者提问和交付，以及本功能自己的单独摘要 `pm-digest`，防自环）、调度器的其他通知，以及等回复的 agent 消息。
 
-## 送出时机（开关 `on`）
+## 拉取（`ledger pm-digest-pull`，按项目，缺省 `on`）
+
+PM 不需要实时知道常规进展，要的时候自己拉（owner 10-15 定）。拉取开着时，下面第 2、3 步都不做：可合并的消息照常进队、返回 `note: "digest"`，但不搭在任何消息前面，定时器也不单独送；PM 用 `ledger pm-digest --list` 看队里的条目，放满 24 小时没人拉的出队（原始内容在卡片、台账、处理员草稿里）。切 `off` 回到下面的推送摘要；即使推送，owner / peer 的消息（`from.kind` 为 `user` / `api`）也不搭摘要，因为拼进正文的摘要会显示在对方自己的消息气泡里。
+
+## 送出时机（开关 `on`，拉取 `off`）
 
 1. 可合并的消息不投递，记进项目摘要队列（落盘），返回 `sent / note: "digest"`。押后队列重投时也一样，到这里出队。
 2. 立即送的消息投给这位 PM 时（按项目串行：读队列、拼摘要、发送、真送到出队是一个整体，并发的立即送和定时摘要不会各带一份），把队里的摘要插到正文前面（在转交抬头之后），一次投递送达。投出前先把这些条目记成被这封带走（`carriedBy` = 这封的**载体号** `pmDigest.carrier`，形如 `<message_id>#<随机>`，随信封落盘；同一封重拼沿用，不同信封哪怕 message_id 相同——同一条 Discord 消息的两次按钮点击——也各有各的），不再拼进别的摘要。结局三种：
@@ -42,9 +46,9 @@
 
 推给 PM 的系统通知由发送方在代码里标级别，分流只认这个结构化字段（信封 `meta.pmLevel`），不看正文文字，换语言、改文案都不影响：
 
-- `action`：要 PM 当场动手，立即叫醒。`info`：常规，只进摘要、不单独叫醒，随下一次立即送的消息顺带送到；队里最早一条等满 4 小时才单独送一条摘要。
+- `action`：要 PM 当场动手，立即叫醒。`info`：常规，**不送 PM**，也不进摘要——发送方本来就把它记在卡片 / 台账里（上线后提醒、缺规格提醒、合并进度、主线 CI 状态都有台账记录），分流这里只记一笔统计（`ledger pm-digest` 的 `level.info`）。PM 按需拉：`ledger pm-todo` 列观察期已到、还没结的上线后待办（`--all` 连没到期的），配合看 DAG。
 - 怎么标：`notifyProjectPm(..., { level })`；调用链深、不便改签名的发送点在外面包 `asInfo(() => deps.notifyPm(...))`（AsyncLocalStorage，同 `pmNotifyTarget`）；bridge 合成的台账通知走 `sendLedgerNotice({ ..., pmLevel })`。
-- 已标 `info`：上线后待办与待写规格（`sendToPm`）、残留进程观察报告（`card-proc-reap.ts`）、合并交接进度（`scheduler-merge-handoff-tick.ts`）、主线 CI 未开暂停时的通知、带默认做法到时自动定的执行者提问（`order-ask.ts`）。没带默认做法的执行者提问标 `action`。
+- 已标 `info`：上线后待办（`scheduler-post-verify.ts`；同一个 `sendToPm` 还发待写规格、合并 / 审查 / 观察期提醒，那些要 PM 动手，不标）、残留进程观察报告（`card-proc-reap.ts`）、合并交接进度（`scheduler-merge-handoff-tick.ts`）、主线 CI 未开暂停时的通知、带默认做法到时自动定的执行者提问（`order-ask.ts`）。没带默认做法的执行者提问标 `action`。
 - 没标级别的通知照旧走原规则（正文保护字样，宁可多叫醒）；新加的系统通知要标级别。
 
 ## 暂存：`ledger pm-hold`（`src/lib/pm-hold.ts`，按项目，缺省 `off`）

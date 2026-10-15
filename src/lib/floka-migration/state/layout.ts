@@ -11,7 +11,7 @@ import type { Layout, NodeStat, StateFs, StateMigrationOptions } from "./types.t
 /** 实例身份文件(lib/instance-id.ts、lib/instance-key.ts 的文件名);迁移前后必须逐字节相同 */
 const IDENTITY_FILES = ["instance-id", "instance-key.pem"] as const;
 /** 新根的默认目录名(home 下) */
-const NEW_ROOT_NAME = ".floka";
+export const NEW_ROOT_NAME = ".floka";
 /** 与 lib/instance-id.ts 的 isInstanceId 同一形状;不 import 它,因为那个模块带着身份生成器和生产路径 */
 const INSTANCE_ID = /^[\w-]{1,64}$/;
 
@@ -35,8 +35,8 @@ export async function readIdentity(fs: StateFs, root: string): Promise<Identity>
   if (!INSTANCE_ID.test(Buffer.from(parts[0]!).toString("utf8").trim())) return { ok: false, problem: "instance-id 内容无效" };
   try {
     if (createPrivateKey(Buffer.from(parts[1]!)).asymmetricKeyType !== "ed25519") return { ok: false, problem: "instance-key.pem 不是 ed25519 私钥" };
-  } catch (e) {
-    return { ok: false, problem: `instance-key.pem 解析失败:${(e as Error).message}` };
+  } catch {
+    return { ok: false, problem: "instance-key.pem 解析失败" }; // 解析错误的原文可能带私钥片段,不回显
   }
   const h = createHash("sha256");
   for (const p of parts) h.update(createHash("sha256").update(p).digest());

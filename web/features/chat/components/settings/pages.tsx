@@ -19,6 +19,7 @@ import { useGroqKey, GroqKeySection } from "./groq-key-section";
 import { useJevKey, JevKeySection } from "./jev-key-section";
 import { useClaudeDefaults, ClaudeDefaultsSection } from "./claude-defaults-section";
 import { RoleModelSettingsSection } from "./role-model-settings-section";
+import { CodexDefaultsSection } from "./codex-defaults-section";
 import { usePushToggle, DevicePushSection, MachinePushSections } from "./push-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section";
 import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
@@ -187,5 +188,7 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
           <RoleModelSettingsSection modelOptions={s.modelOptions} />
         </>
       );
+    case "codex":
+      return <CodexDefaultsSection />;
   }
 }

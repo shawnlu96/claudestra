@@ -81,7 +81,12 @@ export interface AppConfig {
   jevApiKey?: string;
   /** Chat Guard（bridge/chat-guard.ts）：mode 缺省 on（没配 Jev key 时自然不生效）；blockAt 缺省 0.85 */
   chatGuard?: { mode?: "off" | "on"; blockAt?: number };
+  /** floka 改名的分项开关；state = 状态根迁移维护档位（lib/state-maintenance），只认 off / observe / on，缺省和未知值按 off。
+   *  其余子键原样保留：set* 是读改写，在这里过滤会把别的分项抹掉 */
+  rename?: Record<string, unknown> & { state?: unknown };
 }
+
+export type RenameStateMode = "off" | "observe" | "on";
 
 /** 归档保留天数缺省值（设置里可改） */
 export const DEFAULT_ARCHIVE_RETENTION_DAYS = 90;
@@ -130,6 +135,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(raw.bridgeWatchdogOob === "on" || raw.bridgeWatchdogOob === "observe" || raw.bridgeWatchdogOob === "off" ? { bridgeWatchdogOob: raw.bridgeWatchdogOob } : {}),
     ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
     ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
+    ...(raw.rename && typeof raw.rename === "object" && !Array.isArray(raw.rename) ? { rename: { ...raw.rename } } : {}),
     ...(raw.chatGuard && typeof raw.chatGuard === "object"
       ? {
           chatGuard: {
@@ -361,6 +367,20 @@ export async function adoptWebSettings(web: { groqApiKey?: unknown; lang?: unkno
   if (takeLang) cfg.lang = web.lang as AppLang;
   if (takeKey || takeLang) await writeConfig(cfg);
   return { groqApiKey: takeKey, lang: takeLang };
+}
+
+/** rename.state 的生效档位：缺省、未知值、坏文件一律 off（打错字不能变成执行） */
+export function renameStateMode(cfg: AppConfig = readConfigSync()): RenameStateMode {
+  const v = cfg.rename?.state;
+  return v === "observe" || v === "on" ? v : "off";
+}
+
+/** 受控写入：只由 manager state-maintenance mode（核过单次授权与角色）调用；切档本身不触发任何迁移 */
+export async function setRenameStateMode(mode: RenameStateMode): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.rename = { ...cfg.rename, state: mode };
+  await writeConfig(cfg);
+  return cfg;
 }
 
 export { CONFIG_PATH, DEFAULT_CONFIG };

@@ -8,7 +8,6 @@
  * 项目开关 autostart.specWait：on 发；observe（缺省）只写记录不发；off 什么都不做。私仓节点（fileGlobs 含 repo:）照发，正文带开卡说明（私仓进池开关 on 时是自动开卡）。
  * tests/scheduler-spec-wait.test.ts。
  */
-import { asInfo } from "./pm-notice-level.js";
 import type { AutostartReads } from "./scheduler-autostart-snapshot.js";
 import type { Database } from "bun:sqlite";
 import { featureLanes } from "./dag-tools-lanes.js";
@@ -38,7 +37,7 @@ export interface SpecWaitEnv {
 
 /** 也给上线后 PM 提醒（scheduler-post-verify.ts）用 */
 export const sendToPm = (env: SpecWaitEnv, project: string, to: string, text: string) =>
-  env.specWaitSend ? env.specWaitSend(env.db, project, to, text) : asInfo(() => pmNotifyTarget.run(to, () => env.notifyPm(project, text))); // 待写规格 / 上线后待办是常规
+  env.specWaitSend ? env.specWaitSend(env.db, project, to, text) : pmNotifyTarget.run(to, () => env.notifyPm(project, text)); // 不定级别：合并 / 审查 / 观察期提醒也走这里，要 PM 动手
 
 /** 项目级开关 autostart.specWait（缺省 observe）；上线后 PM 提醒共用 */
 export const specWaitMode = (db: Database, project: string): "on" | "observe" | "off" => readSwitch(db, project).specWait ?? "observe";
@@ -75,7 +74,7 @@ export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
           }
           if (rec.due !== true || mode !== "on") continue;
           try {
-            await sendToPm(env, project, pm, text);
+            await sendToPm(env, project, pm, text); // 待写规格要 PM 写规格才能往下走：不标常规
           } catch (e) {
             if (e instanceof SchedulerStopped) throw e;
             failed.push({ taskId: `${f.id}/${key}`, error: `缺规格提醒发给 ${pm} 失败：${(e as Error).message}` });

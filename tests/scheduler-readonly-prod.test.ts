@@ -272,8 +272,8 @@ async function manualDependent(id: string) {
 
 async function manualCard(mode: "on" | "observe" | "off") {
   f = await readonlyFixture({ stateDir: STATE_DIR });
-  // OWN1 夹具：这些用例只测 MAN2，manualCaseOwnership 显式关掉
-  writeFileSync(join(f.root, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualStall: mode, manualCaseOwnership: "off" } } } }));
+  // OWN1 / SLA1 夹具：这些用例只测 MAN2，manualCaseOwnership、manualCaseSla 显式关掉
+  writeFileSync(join(f.root, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualStall: mode, manualCaseOwnership: "off", manualCaseSla: "off" } } } }));
   createTask(f.prepare.db, f.prepare.at("owner"), { project: "p", id: "T0", title: "dependency", kind: "code" });
   await manualDependent("T1");
   for (const [from, to] of [["spec", "restate"], ["restate", "build"], ["build", "review"], ["review", "merge"], ["merge", "live"]] as const) {
@@ -319,7 +319,8 @@ test("MAN2 CLI rereads mode/fingerprint and all task/workflow fences; refusals p
     expect(getWorkflow(f.db(), "T1")).toEqual(wf);
   }
   f.beforeChild((a) => {
-    if (a[1] === "scheduler-manual-resume") writeFileSync(join(f.root, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualStall: "off", manualCaseOwnership: "off" } } } }));
+    if (a[1] === "scheduler-manual-resume") writeFileSync(join(f.root, "recovery-policy.json"),
+      JSON.stringify({ projects: { p: { keys: { manualStall: "off", manualCaseOwnership: "off", manualCaseSla: "off" } } } }));
   });
   const refused = await f.pass();
   expect(refused.failed).toEqual([]);
