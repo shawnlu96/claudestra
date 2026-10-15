@@ -88,11 +88,14 @@ describe("acp 版的选择与启动命令", () => {
     expect(cmd).toEndWith(" /opt/bun /repo/src/acp-host.ts");
     const args = piAcpArgs(SPEC, "agent-pa", "/repo");
     expect(cmd).toContain(` ${PI_ARGS_ENV}=${shellEscape(JSON.stringify(args))} `);
-    expect(args.slice(0, 6)).toEqual(["--approve", "--no-extensions", "--no-skills", "--no-prompt-templates", "--name", "agent-pa"]);
-    expect(args[6]).toBe("--append-system-prompt");
-    expect(args[7]).toContain("你的职责: 写代码");
-    expect(args[7]).toContain("Reply rules");
-    expect(args).toHaveLength(8);
+    expect(args.slice(0, 10)).toEqual([
+      "--approve", "--no-extensions", "--no-skills", "--no-prompt-templates",
+      "--model", "cc-switch-open-code-go/deepseek-v4.1-flash", "--thinking", "max", "--name", "agent-pa",
+    ]);
+    expect(args[10]).toBe("--append-system-prompt");
+    expect(args[11]).toContain("你的职责: 写代码");
+    expect(args[11]).toContain("Reply rules");
+    expect(args).toHaveLength(12);
     expect(cmd).not.toContain("CLAUDESTRA_CODEX_PREAMBLE"); // 系统提示每次起 pi 都带，不要重启前言
   });
 

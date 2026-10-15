@@ -37,7 +37,9 @@ export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, san
   const piEnv = keepReplyTool(sandbox ? undefined : (spec.extras?.piEnv as PiEnvProfile | undefined), mcp);
   const prompt = codexDeveloperInstructions({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(repoRoot) });
   const flags = sandbox ? SANDBOX_PI_FLAGS : piEnvFlags(piEnv);
-  return [piEnv?.trustProject === false ? "--no-approve" : "--approve", ...flags, "--name", agent, "--append-system-prompt", prompt];
+  // 全局锁走 Pi 自己的启动参数：宿主 setConfig 是 strict=false，失败不拦启动，光靠环境变量会漏锁
+  const lock = ["--model", PI_LOCKED_MODEL, "--thinking", PI_LOCKED_EFFORT];
+  return [piEnv?.trustProject === false ? "--no-approve" : "--approve", ...flags, ...lock, "--name", agent, "--append-system-prompt", prompt];
 }
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
