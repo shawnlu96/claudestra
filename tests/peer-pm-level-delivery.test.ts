@@ -68,7 +68,8 @@ describe("[验收线 3] 分类器：只为 API 来源 + info 开口子", () => {
   test("api + info → 摘要；api + action / 缺省、user + info → 照旧立即送 / 受保护", () => {
     expect(classifyPmPush(input("info"))).toMatchObject({ send: "digest", reason: "发送方标 info", levelSource: "structured" });
     expect(classifyPmRoute(input("info"))).toEqual({ tags: [{ route: "digest", rule: "level.info", reason: "peer 标为常规：进摘要" }] });
-    for (const m of [input("action"), input(undefined), input("info", "user")]) {
+    // 不是 API 入口建的信封（triggerKind 不是 system）带了 info 也不开口子（tests/pm-notice-level.test.ts 的 owner 保护照旧）
+    for (const m of [input("action"), input(undefined), input("info", "user"), { ...input("info"), triggerKind: "agent_tool" }]) {
       expect(classifyPmPush(m)).toEqual({ send: "now", reason: "owner / 人类 / peer 的消息" });
       expect(classifyPmRoute(m)).toEqual({ tags: [{ route: "owner", rule: "protect.owner", reason: "人类或 peer 对话" }], immediate: true });
     }
