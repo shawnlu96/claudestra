@@ -1,6 +1,6 @@
+import { priorityNowSwitch } from "./scheduler-priority-now.js";
 import { scanSpecHead } from "./spec-lint-head.js";
 import { activeProjectPm } from "./pm-role.js";
-import { switchOff } from "./shared-ledger-gate-switch.js";
 export { switchOff } from "./shared-ledger-gate-switch.js";
 import { sharedLedgerPlanningReason } from "./shared-ledger-gate.js";
 /**
@@ -142,10 +142,10 @@ export interface GateStop { gate: GateCode; why: string }
 const stop = (gate: GateCode, why: string): GateStop => ({ gate, why });
 
 /** feature 级的门（对它的所有节点一样）：服务、开关、状态、提案、冻结、PM、容量 */
-export function featureGate(db: Database, f: Feature, svc: ServiceFacts): GateStop | null {
+export function featureGate(db: Database, f: Feature, svc: ServiceFacts, key?: string, observe = false): GateStop | null {
   const shared = sharedLedgerPlanningReason(f.id); if (shared) return stop("feature", shared);
   if (!svc.autoDispatch || !svc.projects.includes(f.project)) return stop("service", `调度服务没对项目 ${f.project} 开自动派单（scheduler.json enabled + autoDispatch + 列出项目）`);
-  const off = switchOff(readSwitch(db, f.project), f.id);
+  const off = priorityNowSwitch(db, f, readSwitch(db, f.project), key, observe);
   if (off) return stop("switch", off);
   if (f.status !== "active") return stop("feature", `feature 是 ${f.status}，不是 active`);
   if (!f.currentVersion) return stop("feature", "feature 还没建 DAG");
@@ -213,7 +213,7 @@ export function nodeGate(db: Database, f: Feature, key: string, lanes: Lanes | n
 
 /** 台账里的全部门（claim 事务重核用的就是这一个）；null = 能开 */
 export function ledgerGate(db: Database, f: Feature, key: string, svc: ServiceFacts): GateStop | null {
-  return featureGate(db, f, svc) ?? nodeGate(db, f, key, featureLanes(db, f))
+  return featureGate(db, f, svc, key) ?? nodeGate(db, f, key, featureLanes(db, f))
     ?? nodeCapacity(f, currentViews(db, f).find((n) => n.key === key)?.fileGlobs ?? []);
 }
 

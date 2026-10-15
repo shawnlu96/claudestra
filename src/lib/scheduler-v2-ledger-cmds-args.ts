@@ -9,6 +9,8 @@ const rule = (target: Target, handling: Handling): Readonly<CommandRule> => Obje
 
 /** Explicit classification makes a new scheduler CLI call require a routing decision in the inventory test. */
 export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<CommandRule>>> = Object.freeze({
+  "scheduler-priority-stall": rule("task", "unmapped"),
+  "scheduler-priority-now": rule("task", "unmapped"),
   "scheduler-plan": rule("task", "mixed"),
   "scheduler-center-deploy": rule("task", "unmapped"),
   "scheduler-pm-todo": rule("task", "unmapped"),
