@@ -4,6 +4,8 @@ import type { BoardNode, DagBoard, FeatureCard, FeatureCounts, FeatureDetail } f
 import type { TeamOverview } from './team-source-adapter';
 import { looksLikeId, SETTLED, stageOf } from './team-source-adapter';
 import { teamStepLine } from './team-source-steps';
+import { nodeFacts } from './team-source-task-facts';
+import type { TaskFact } from '@/lib/api/shared-ledger-reads';
 
 /**
  * 节点算出来的进度和中心 Feature.counts（refreshFeatureState：绑定的执行镜像里 done / verified / cancelled 算完成）交叉核对：
@@ -31,7 +33,8 @@ export function centerCounts(f: FeatureList['features'][number]): FeatureCounts 
   return { total: f.counts.total, done: f.counts.completed, active: 0, idle: 0, missing: f.counts.missing, activeUnknown: true };
 }
 
-export function teamDagBoard(project: string, list: FeatureList, details: ReadonlyMap<string, SharedDetail>, team: TeamOverview): DagBoard {
+export function teamDagBoard(project: string, list: FeatureList, details: ReadonlyMap<string, SharedDetail>, team: TeamOverview,
+  facts?: (featureId: string) => ReadonlyMap<string, TaskFact> | null): DagBoard {
   const features: FeatureCard[] = list.features.map(f => {
     const d = details.get(f.id);
     const ids = new Map([...team.index].filter(([, at]) => at.featureId === f.id && at.key).map(([id, at]) => [at.key!, id]));
@@ -50,7 +53,7 @@ export function teamDagBoard(project: string, list: FeatureList, details: Readon
         satisfied: phase === 'done', ready: !view?.blockedBy?.length, missing: !!bound && !task, phase,
         round: null, handler: null, stepLine, since: null, pr: view?.pr ?? null, branch: null,
         // 投影里没有执行人：开了工的卡不知道是谁，不是没派——节点上不写「未派」
-        ...(task && status !== 'spec' ? { ownerUnknown: true as const } : {}) };
+        ...(task && status !== 'spec' ? { ownerUnknown: true as const } : {}), ...nodeFacts(bound ? facts?.(f.id)?.get(bound.taskId) : undefined, phase) };
     });
     return { id: f.id, title: f.title, status: f.status === 'done' ? 'done' : 'active', ownerWords: f.description,
       currentVersion: f.version, version: null, pending: null, lastActivityAt: f.updatedAt,

@@ -54,6 +54,7 @@ beforeAll(async () => {
       new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...headers } });
     if (path === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (path === "/api/v1/shared-ledger/features") return json(fx.list);
+    if (path.endsWith("/task-facts")) return json({ error: "not supported" }, 404);
     if (path.startsWith(DETAIL)) {
       const id = path.slice(DETAIL.length);
       details.push(id);
