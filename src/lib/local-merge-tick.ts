@@ -19,7 +19,7 @@ export async function driveLocalReady<O>(c: HandoffCard<O>): Promise<O> {
     if (r.ok !== true) return c.out("held", `本地合并就绪没记上：${String(r.error)}`);
   }
   // claim before send: the PM is told at most once (a crash after the claim loses the notice, never doubles it); only a send that
-  // threw closes the claim, so the next pass (or a restart) claims again, re-checking the merge gate
+  // provably never left (sent=false) closes the claim, so the next pass (or a restart) claims again, re-checking the merge gate
   const claim = await record("--notice");
   if (claim.ok !== true) return c.out("held", `本地合并通知没认领上：${String(claim.error)}`);
   if (claim.duplicate === true) return c.out("waiting", wait);
@@ -27,8 +27,13 @@ export async function driveLocalReady<O>(c: HandoffCard<O>): Promise<O> {
     await c.deps.notifyPm(task, `[调度引擎] ${task.id} ${wait}（本地合并项目，没有 PR）`, "action"); // the PM has to run local-merge
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
-    const f = await record("--notice-failed");
-    console.error(`⚠️ [scheduler] ${task.id} 本地合并就绪通知没发出去（${f.ok === true ? "下轮重发" : `失败没记上，不再重发：${String(f.error)}`}）：${(e as Error).message}`);
+    const why = (e as Error | undefined)?.message;
+    if ((e as { sent?: unknown } | undefined)?.sent !== false) { // timeout / dropped after the frame left: the bridge may have delivered
+      console.error(`⚠️ [scheduler] ${task.id} 本地合并就绪通知结果不明，不重发，PM 看 local_merge_ready 记录：${why}`);
+    } else {
+      const f = await record("--notice-failed");
+      console.error(`⚠️ [scheduler] ${task.id} 本地合并就绪通知没发出去（${f.ok === true ? "下轮重发" : `失败没记上，不再重发：${String(f.error)}`}）：${why}`);
+    }
   }
   return c.out("local_ready", wait);
 }

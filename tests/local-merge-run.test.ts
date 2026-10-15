@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runLocalMerge, type LocalMergeOutcome } from "../src/lib/local-merge-run.js";
+import { runBounded } from "../src/lib/run-bounded.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
 
 const git = (cwd: string, ...args: string[]) => {
@@ -192,6 +193,23 @@ describe("local-merge：git 一侧的拒绝，main 不动", () => {
       // the check itself drops the lock the way a reclaim after expiry would
       const lost = `rm -r ${join(repo, ".git", "claudestra-local-merge.lock")}`;
       await refused(f, () => merge(f, { checks: ["test -f feat.txt", lost] }), /锁/);
+    } finally { f.close(); }
+  });
+
+  test("最后一次门检查之后锁被回收：紧贴 merge 前再核锁，不 merge、main 不动（r3 审查 P2）", async () => {
+    const f = await atMerge();
+    try {
+      // the reclaim lands right after the final main check (the second `rev-parse --verify main`), past every earlier held()
+      let mainReads = 0;
+      const command: NonNullable<Parameters<typeof runLocalMerge>[4]>["command"] = async (argv, opts) => {
+        const r = await runBounded(argv, opts);
+        if (argv[1] === "rev-parse" && argv[2] === "--verify" && ++mainReads === 2) rmSync(join(repo, ".git", "claudestra-local-merge.lock"), { recursive: true });
+        return r;
+      };
+      const run = () => runLocalMerge(f.db, { actor: "pm", now: Date.now() }, { repoDir: repo, checks: ["test -f feat.txt"] },
+        { taskId: "T1", head }, { command, checkTimeoutMs: 30_000, tmpRoot: tmp });
+      await refused(f, run, /锁在合并前失效/);
+      expect(mainReads).toBe(2);
     } finally { f.close(); }
   });
 

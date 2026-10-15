@@ -122,6 +122,7 @@ export async function runLocalMerge(db: Database, ctx: WriteCtx, local: LocalMer
     if (!lock.held()) refuse("本地合并锁在检查期间失效（被别的合并回收），main 没动，重跑 local-merge");
     if ((await mainState(git)) !== base) refuse("检查期间 main 变了，重跑 local-merge");
     localMergeGate(db, ctx.actor, task.id, head, Date.now()); // the ledger may have moved during the checks
+    if (!lock.held()) refuse("本地合并锁在合并前失效（被别的合并回收），main 没动，重跑 local-merge"); // the last await before merge
     await git.out("merge", "--ff-only", target);
     return record(mode, target, checks);
   } finally {

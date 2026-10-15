@@ -36,6 +36,9 @@ async function atMerge() {
   return { f, local, reads, ready, readyEvents, mergeIntents };
 }
 
+/** A send that provably never left this process (bridgeSend sent=false): the only failure that reopens the claim. */
+const notSent = async (): Promise<void> => { throw Object.assign(new Error("发给 pm 失败：Bridge 连接出错"), { sent: false }); };
+
 describe("ONB-2 自动 tick：本地项目停在 merge 等 PM", () => {
   test("记一条 local_merge_ready、通知 PM 一次；再跑和重启都不重发；不建合并意图、不占槽、不读 PR", async () => {
     const h = await atMerge(), { f } = h;
@@ -75,11 +78,29 @@ describe("ONB-2 自动 tick：本地项目停在 merge 等 PM", () => {
     } finally { f.close(); }
   });
 
+  test("通知结果不明（帧已发出后超时 / 断线，或错误没带 sent）：保留认领，下一轮、重启都不重发（r3 审查 P1）", async () => {
+    for (const unknown of [{ sent: true }, {}]) {
+      const h = await atMerge(), { f } = h;
+      try {
+        const notices = f.notices.length;
+        // the bridge delivered, then the answer never came back: notifyProjectPm throws with the bridgeSend sent flag
+        const send = async (t: Parameters<typeof f.tickDeps.notifyPm>[0], text: string, level: "action" | "info") => {
+          await f.tickDeps.notifyPm(t, text, level);
+          throw Object.assign(new Error("发给 pm 失败：Bridge 请求超时"), unknown);
+        };
+        expect(await h.local(send)).toMatchObject({ step: "local_ready" });
+        for (let i = 0; i < 2; i++) expect(await h.local()).toMatchObject({ step: "waiting" }); // fresh deps each pass: restarts
+        expect([h.readyEvents("local_merge_notice").length, h.readyEvents("local_merge_notice_failed").length]).toEqual([1, 0]);
+        expect(f.notices.length).toBe(notices + 1);
+      } finally { f.close(); }
+    }
+  });
+
   test("通知发送失败：关掉这次认领，下一轮（含重启）再认领再发；之后不再发（r1 审查 P2）", async () => {
     const h = await atMerge(), { f } = h;
     try {
       const notices = f.notices.length, count = (op: string) => h.readyEvents(op).length;
-      expect(await h.local(async () => { throw new Error("bridge down"); })).toMatchObject({ step: "local_ready" });
+      expect(await h.local(notSent)).toMatchObject({ step: "local_ready" });
       expect([count("local_merge_ready"), count("local_merge_notice"), count("local_merge_notice_failed"), f.notices.length]).toEqual([1, 1, 1, notices]);
       expect(await h.local()).toMatchObject({ step: "local_ready" }); // a fresh deps object: the restart case
       expect([count("local_merge_ready"), count("local_merge_notice"), count("local_merge_notice_failed"), f.notices.length]).toEqual([1, 2, 1, notices + 1]);
@@ -92,7 +113,7 @@ describe("ONB-2 自动 tick：本地项目停在 merge 等 PM", () => {
     const h = await atMerge(), { f } = h;
     try {
       const notices = f.notices.length;
-      expect(await h.local(async () => { throw new Error("bridge down"); })).toMatchObject({ step: "local_ready" });
+      expect(await h.local(notSent)).toMatchObject({ step: "local_ready" });
       expect(await f.cli("pm", "freeze", "--reason", "查不明合并", "--project", "p")).toMatchObject({ ok: true });
       expect(await h.local()).toMatchObject({ step: "waiting" });
       // the claim itself re-checks the gate (a freeze that lands between the tick's plan and its write)
