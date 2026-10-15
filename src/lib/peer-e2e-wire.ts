@@ -32,7 +32,7 @@ const FP_RE = /^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/;
 const RECORD_PATH_RE = /^\/api\/v1\/e2e\/([A-Za-z0-9_-]{22})\/([1-9]\d{0,16})$/;
 const RID_LIMIT = 1n << 56n;
 const INNER_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
-const INNER_REQ_HEADERS = new Set(["authorization", "content-type", "accept", "x-claudestra-key", "x-claudestra-ts", "x-claudestra-sig"]);
+const INNER_REQ_HEADERS = new Set(["authorization", "content-type", "accept", "x-claudestra-key", "x-claudestra-ts", "x-claudestra-sig", "x-floka-key", "x-floka-ts", "x-floka-sig"]);
 const INNER_RES_HEADERS = new Set(["content-type", "retry-after"]);
 const PATH_MAX = 2048;
 
@@ -44,6 +44,7 @@ export interface Hello {
 }
 
 export interface HelloReply {
+  capabilities?: unknown;
   be: Uint8Array;
   sid: Uint8Array;
   ttl: number;
@@ -71,7 +72,7 @@ export function parseHello(raw: unknown): Hello | { error: "e2e_bad_hello" | "e2
 }
 
 export const encodeHelloReply = (r: HelloReply): string =>
-  JSON.stringify({ v: 1, be: toB64url(r.be), sid: toB64url(r.sid), ttl: r.ttl, confirm: toB64url(r.confirm), key: r.key });
+  JSON.stringify({ v: 1, be: toB64url(r.be), sid: toB64url(r.sid), ttl: r.ttl, confirm: toB64url(r.confirm), key: r.key, ...(r.capabilities ? { capabilities: r.capabilities } : {}) });
 
 export function parseHelloReply(raw: unknown): HelloReply | null {
   const o = raw as Record<string, unknown> | null;

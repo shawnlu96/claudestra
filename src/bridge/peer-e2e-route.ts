@@ -1,3 +1,4 @@
+import { peerHeaders, peerHeader, verifyPeerRequest, peerRouteOptions } from "../lib/floka-peer/route.js";
 /**
  * 收方的接线（docs/relay/e2e-design.md §5.1）：/api/v1/e2e/* 在 serveApiRequest 里最先处理，解开的内层请求带上
  * 「来自哪个会话」再交回原路由，于是 authApi 照旧验内层的 Bearer、签名与重放，peerGate 再核 token 的主人 = 会话发起方
@@ -7,7 +8,7 @@
  * 所以外层身份在这里、在任何解析和 ECDH 之前核：中继帧由 relay-inbound 核过（验签、联系人、记下的钥匙、防重放），直连的在 directSender 核。
  * 状态可注入，集成测试直接 import（tests/peer-e2e-relay.test.ts）。
  */
-import { isPublicKey, keyFingerprint, SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
+import { isPublicKey, keyFingerprint, SIG_HEADERS } from "../lib/instance-key.js";
 import { e2ePeerOf, localE2e, pinPeerE2eKey, readHttpPeers, type LocalE2e } from "../lib/peer-e2e-local.js";
 import { e2eBodyCap, readRequestCapped, serveE2e, type E2ePeer } from "../lib/peer-e2e-serve.js";
 import { SessionTable } from "../lib/peer-e2e-sessions.js";
@@ -47,10 +48,10 @@ export function createE2eRoute(d: RouteDeps) {
   }
 
   function outerSigned(req: Request, body: Uint8Array, idk: string): boolean {
-    const h = (k: string) => req.headers.get(k) ?? "";
+    const h = (k: string) => peerHeader(req.headers, k);
     if (h(SIG_HEADERS.key) !== idk) return false;
     const u = new URL(req.url);
-    if (verifySigned(idk, { method: req.method, path: u.pathname + u.search, ts: h(SIG_HEADERS.ts), sig: h(SIG_HEADERS.sig), body }) !== "ok") return false;
+    if (verifyPeerRequest(idk, req.headers, { method: req.method, path: u.pathname + u.search, body }) !== "ok") return false;
     return helloReplays.seen(h(SIG_HEADERS.sig), h(SIG_HEADERS.ts), (d.now ?? Date.now)(), idk) === false; // 满了（full）同样拒
   }
 
@@ -60,10 +61,10 @@ export function createE2eRoute(d: RouteDeps) {
    * hello 的防重放也在这里、在扣 hello 限速之前：截获一个 hello 反复重放，耗不掉这个发件人（中继、直连共用）的握手额度
    */
   async function directSender(req: Request, url: URL, clientIp: string | null, body: Uint8Array): Promise<string | Response> {
-    const h = (k: string) => req.headers.get(k) ?? "";
+    const h = (k: string) => peerHeader(req.headers, k);
     const key = h(SIG_HEADERS.key);
     const peer = isPublicKey(key) ? byFp.get(keyFingerprint(key)) : undefined;
-    if (peer && peer.idk === key && verifySigned(key, { method: req.method, path: url.pathname + url.search, ts: h(SIG_HEADERS.ts), sig: h(SIG_HEADERS.sig), body }) === "ok") {
+    if (peer && peer.idk === key && verifyPeerRequest(key, req.headers, { method: req.method, path: url.pathname + url.search, body }) === "ok") {
       const replayed = url.pathname === E2E_HELLO_PATH && helloReplays.seen(h(SIG_HEADERS.sig), h(SIG_HEADERS.ts), (d.now ?? Date.now)(), key) !== false;
       return replayed ? e2eError(401, "e2e_signature") : peer.fp; // 重放与缓存满（full）同 outerSigned 一样拒，不另开 code
     }
@@ -96,14 +97,14 @@ export function createE2eRoute(d: RouteDeps) {
     if (sender instanceof Response) return sender;
     if (url.pathname === E2E_HELLO_PATH && !helloAllowed(sender)) return e2eError(429, "e2e_rate_limited");
     return serveE2e(req, url.pathname, {
-      myFp: local.fp,
+      ...peerRouteOptions(local), myFp: local.fp,
       machine: async () => local.machine,
       mySignedKey: async () => local.signed,
       sessions,
       peerByFp: (fp) => byFp.get(fp) ?? null,
       pinNewer: (p, ek) => d.pin(p.name, ek),
       // 直连的 hello 在 directSender 里验过签、记过重放，这里再记一次就成了「重放」：只核钥匙是同一把
-      outerSigned: body ? (r, _b, idk) => r.headers.get(SIG_HEADERS.key) === idk : outerSigned,
+      outerSigned: body ? (r, _b, idk) => peerHeaders(r.headers).key === idk : outerSigned,
       dispatch: (inner, peerFp) => {
         setRequestContext(inner, { ...ctx, e2e: { peerFp } });
         return handle(inner);

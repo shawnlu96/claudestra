@@ -1,3 +1,6 @@
+import { e2eReceiveFamily } from "./floka-peer/signature.js";
+import { bindSessionFamily, sessionLabel, sessionAllowed } from "./floka-peer/session.js";
+import { E2E_LABELS } from "./floka-compat/e2e/families.js";
 /**
  * peer E2E 的收方（docs/relay/e2e-design.md §4.1.4、§5.1）：hello 建会话，记录流解开后交给原来的 API 路由。
  * 处理顺序写死，测试按同样的顺序钉（tests/peer-e2e.test.ts）：
@@ -16,7 +19,7 @@ import { compareE2eKey, verifyE2eKey, type MachineE2eKey, type SignedE2eKey } fr
 import type { SessionTable } from "./peer-e2e-sessions.js";
 import {
   E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, e2eError, encodeHelloReply, encodeResponseHead,
-  E2E_BODY_MAX, E2E_RESPONSE_MAX, parseHello, parseInnerHead, parseRecordPath, PEER_E2E_LABEL,
+  E2E_BODY_MAX, E2E_RESPONSE_MAX, parseHello, parseInnerHead, parseRecordPath,
 } from "./peer-e2e-wire.js";
 import { readBoundedRequestBody, RequestBodyError } from "./request-body.js";
 
@@ -31,6 +34,8 @@ export interface E2ePeer {
 }
 
 export interface ServeDeps {
+  rename?: unknown;
+  capabilities?: () => unknown;
   myFp: string;
   machine: () => Promise<MachineE2eKey | null>;
   mySignedKey: () => Promise<SignedE2eKey | null>;
@@ -100,6 +105,8 @@ async function hello(req: Request, d: ServeDeps, ctx: ServeContext): Promise<Res
   const peer = d.peerByFp(h.from);
   if (!peer) return e2eError(403, "e2e_unknown_peer");
   if (!d.outerSigned(req, body, peer.idk)) return e2eError(401, "e2e_signature");
+  const family = e2eReceiveFamily(req, body, d.rename);
+  if (!family) return e2eError(401, "e2e_signature");
   const theirs = await verifyE2eKey(peer.idk, h.key);
   if (!theirs) return e2eError(400, "e2e_bad_key");
   const cmp = compareE2eKey(peer.ek, theirs);
@@ -107,10 +114,10 @@ async function hello(req: Request, d: ServeDeps, ctx: ServeContext): Promise<Res
   if (cmp === "newer") await d.pinNewer(peer, theirs);
   const [m, mine] = await Promise.all([d.machine(), d.mySignedKey()]);
   if (!m || !mine) return e2eError(503, "e2e_unavailable");
-  const r = await respond({ fp: d.myFp, devId: utf8(h.from), label: PEER_E2E_LABEL }, { local: m.pair, remoteStatic: theirs.pubBytes, ce: h.ce }).catch(() => null); // ce 不是合法点
+  const r = await respond({ fp: d.myFp, devId: utf8(h.from), label: E2E_LABELS[family].peer }, { local: m.pair, remoteStatic: theirs.pubBytes, ce: h.ce }).catch(() => null); // ce 不是合法点
   if (!r) return e2eError(400, "e2e_bad_hello");
-  d.sessions.add(h.from, r.sid, r.keys);
-  return new Response(encodeHelloReply({ be: r.be, sid: r.sid, ttl: E2E_SESSION_TTL_S, confirm: r.confirm, key: mine }), {
+  bindSessionFamily(d.sessions.add(h.from, r.sid, r.keys), family);
+  return new Response(encodeHelloReply({ be: r.be, sid: r.sid, ttl: E2E_SESSION_TTL_S, confirm: r.confirm, key: mine, capabilities: d.capabilities?.() }), {
     headers: { "content-type": "application/json" },
   });
 }
@@ -118,14 +125,14 @@ async function hello(req: Request, d: ServeDeps, ctx: ServeContext): Promise<Res
 async function record(req: Request, sid: Uint8Array, rid: bigint, d: ServeDeps, ctx: ServeContext): Promise<Response> {
   // 1. 找会话
   const s = d.sessions.get(sid);
-  if (!s) return e2eError(401, "e2e_session");
+  if (!s || !sessionAllowed(s, d.rename)) return e2eError(401, "e2e_session");
   if (ctx.sender !== undefined && ctx.sender !== s.peerFp) return e2eError(403, "e2e_peer_mismatch");
   const body = await readBody(req, ctx, E2E_BODY_MAX);
   if (!body) return e2eError(413, "e2e_too_large");
   // 2. 解密全部记录（验 tag、要求见到 final）；失败窗口不动，伪造的大 rid 推不动窗口
   let parts: Uint8Array[];
   try {
-    parts = await openAll({ key: s.keys.c2b, sid, dir: DIR_REQ, rid, label: PEER_E2E_LABEL }, body);
+    parts = await openAll({ key: s.keys.c2b, sid, dir: DIR_REQ, rid, label: sessionLabel(s) }, body);
   } catch (e) {
     if (e instanceof RecordError) return e2eError(400, "e2e_record");
     throw e;
@@ -135,7 +142,7 @@ async function record(req: Request, sid: Uint8Array, rid: bigint, d: ServeDeps, 
   if (!s.window.accept(rid)) return e2eError(409, "e2e_replay");
   if (!d.sessions.use(s)) return e2eError(401, "e2e_session");
   // 4、5. 这个 rid 唯一一次加密响应
-  const scope = { key: s.keys.b2c, sid, dir: DIR_RES, rid, label: PEER_E2E_LABEL } as const;
+  const scope = { key: s.keys.b2c, sid, dir: DIR_RES, rid, label: sessionLabel(s) } as const;
   const inner = innerRequest(req, parts);
   const res = inner ? await d.dispatch(inner, s.peerFp) : Response.json({ ok: false, error: "bad inner request" }, { status: 400 });
   const head = utf8(encodeResponseHead(res.status, res.headers));
