@@ -6,11 +6,11 @@ import { tmpdir } from "node:os";
 import { openOrderAsk, type AskDeps } from "../src/lib/order-ask.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta, appendEvent } from "../src/lib/ledger-write.js";
-import { getAsk, openAskFull, patchAsk } from "../src/lib/ledger-asks.js";
+import { getAsk, openAskFull, patchAsk, answerAsk } from "../src/lib/ledger-asks.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
 import { scopeFileLocked } from "../src/lib/ask-scope-auto.js";
-import { ensureDeliverScope } from "../src/lib/order-deliver-scope.js";
+import { ensureDeliverScope, scopeInputs } from "../src/lib/order-deliver-scope.js";
 import type { ScopeDiff } from "../src/lib/order-deliver-scope-git.js";
 
 let db: Database, dir: string, dbPath: string, spec: string, mode: RecoveryMode, notices: number, priorConfig: string | undefined;
@@ -123,10 +123,10 @@ function diff(next = wired): ScopeDiff {
   } };
 }
 
-test("[验收线 3] deliver_scope removes only verified wire diff, preserves line counts as evidence", async () => {
+test("[验收线 3] deliver_scope retains verified wire diff and line counts as evidence", async () => {
   await ask(wireQ());
   await ensureDeliverScope(db, task(), H, async () => diff(), Date.now(), policy);
-  expect(notes("deliver_scope")[0].data).toMatchObject({ files: [], askScopeAuto: { files: [{ path: host, added: 2, deleted: 0, granted: true }] } });
+  expect(notes("deliver_scope")[0].data).toMatchObject({ files: [{ path: host, added: 2, deleted: 0 }], askScopeAuto: { files: [{ path: host, added: 2, deleted: 0, granted: true }] } });
 });
 
 for (const [name, change] of [
@@ -188,3 +188,81 @@ test("[验收线 3] deletion count and specification changes cannot reuse the gr
   await ensureDeliverScope(db, task(), B, async () => changed, Date.now(), policy);
   expect(notes("deliver_scope")[1].data).toMatchObject({ files: [{ path: host }], askScopeAuto: { files: [{ granted: false }] } });
 });
+
+
+test("[验收线 2] same head review reflects current mode and always shows approved paths", async () => {
+  await ask(wireQ());
+  await ensureDeliverScope(db, task(), H, async () => diff(), Date.now(), policy);
+  const event = notes("deliver_scope")[0]!;
+  expect(event.text).toContain(`已自动核准:${host}(小接线)`);
+  expect(event.data.files).toMatchObject([{ path: host, added: 2, deleted: 0 }]);
+  const enabled = scopeInputs(db, task(), H, policy).join("\n");
+  expect(enabled).toContain("已自动核准：");
+  expect(enabled.split("已自动核准：")[1]).toContain(`${JSON.stringify(host)}：+2 / -0`);
+  for (const state of ["off", "observe"] as const) {
+    mode = state;
+    await ensureDeliverScope(db, task(), H, async () => { throw new Error("same head must reuse event"); }, Date.now(), policy);
+    const review = scopeInputs(db, task(), H, policy).join("\n");
+    expect(review).not.toContain("已自动核准");
+    expect(review).toContain(`${JSON.stringify(host)}：+2 / -0`);
+    expect(review).toContain("规格外文件（相对 PR base）：");
+  }
+});
+
+for (const forgery of ["other card ask", "wrong actor", "different grants", "wrong target"] as const) {
+  test(`[验收线 3] forged grant remains outside: ${forgery}`, async () => {
+    mode = "off";
+    const askId = idOf(await ask(wireQ()));
+    const grants = [{ path: host, kind: "wire", source, check: "wire" }];
+    patchAsk(db, askId, { extra: { askScopeAuto: true, scopeGrants: grants } });
+    answerAsk(db, askId, { choices: [], labels: [], text: "provisional", principal: "system:ask-scope-auto", via: "terminal", at: Date.now(), final: true });
+    const event = { actor: "system:ask-scope-auto", project: "p", target: "T1",
+      data: { op: "ask_scope_auto", rule: "ask-scope-auto/v1", specRev: 1, askId, grants } };
+    createTask(db, { actor: "owner" }, { id: "T2", project: "p", title: "other card", kind: "code" });
+    if (forgery === "other card ask") {
+      db.run("UPDATE asks SET taskId = 'T2' WHERE id = ?", [String(event.data.askId)]);
+    }
+    const data = forgery === "different grants" ? { ...event.data, grants: [{ ...(event.data.grants as object[])[0], check: "forged" }] } : event.data;
+    appendEvent(db, { actor: forgery === "wrong actor" ? "owner" : event.actor }, {
+      project: event.project, target: forgery === "wrong target" ? "T2" : event.target, kind: "note", text: "forged", data,
+    });
+    for (const [state, head] of [["on", H], ["off", B], ["observe", "c".repeat(40)]] as const) {
+      mode = state;
+      await ensureDeliverScope(db, task(), head, async () => diff(), Date.now(), policy);
+      const delivered = notes("deliver_scope").at(-1)!;
+      expect(delivered.data.files).toMatchObject([{ path: host }]);
+      expect(scopeInputs(db, task(), head, policy).join("\n")).not.toContain("已自动核准");
+    }
+  });
+}
+
+
+test("[验收线 3] changing grant details while Git proof runs revokes delivery approval", async () => {
+  const askId = idOf(await ask(wireQ()));
+  const d = diff();
+  d.objects!.prHead = async () => {
+    const grants = getAsk(db, askId)!.extra.scopeGrants as object[];
+    patchAsk(db, askId, { extra: { scopeGrants: [{ ...grants[0], check: "changed during proof" }] } });
+    return H;
+  };
+  await ensureDeliverScope(db, task(), H, async () => d, Date.now(), policy);
+  expect(notes("deliver_scope")[0]!.data).toMatchObject({ files: [{ path: host }], askScopeAuto: { files: [{ granted: false }] } });
+});
+
+for (const deleting of [false, true]) {
+  test(`[验收线 4] a deleted definition source only proves base-key deletion: ${deleting}`, async () => {
+    await ask(keyQ());
+    const path = "src/lib/recovery-keys.ts", empty = "export const RECOVERY_KEYS = [\n] as const;\n";
+    const keyed = empty.replace("]", '  "cardFeature",\n]');
+    const d: ScopeDiff = { base: B, filesComplete: true,
+      files: [{ path, added: deleting ? 0 : 1, deleted: deleting ? 1 : 0 }, { path: source, added: 0, deleted: 1 }], objects: {
+        mergeBase: async () => B, prHead: async () => H,
+        list: async (commit) => commit === B ? [path, source] : [path],
+        show: async (commit, file) => file === source ? 'export const KEY = "cardFeature";\n'
+          : ((commit === B) === deleting ? keyed : empty),
+      } };
+    await ensureDeliverScope(db, task(), H, async () => d, Date.now(), policy);
+    expect(notes("deliver_scope")[0]!.data).toMatchObject({ files: [{ path }], askScopeAuto: { files: [{ granted: deleting }] } });
+    if (deleting) expect(notes("deliver_scope")[0]!.text).toContain(`已自动核准:${path}(登记项)`);
+  });
+}

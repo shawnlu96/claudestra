@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import type { ScopeGrant } from "./ask-scope-registry.js";
+import { scopeWireProtected, type ScopeGrant } from "./ask-scope-registry.js";
 import { scopeMatches } from "./ask-scope-auto-plan.js";
 import { recoveryKeysOrderProblem } from "./registry-order.js";
 import { inventoryGates, inventoryLines, parseInventory } from "./skip-effects-auto-scope-scan.js";
@@ -8,6 +8,7 @@ import { judgeCommandRegistry } from "./ask-scope-auto-commands.js";
 import { additions, codeLines, escapeRx, ownDefinition, scopeParser as parser, validModule, type ScopeProof } from "./ask-scope-auto-proof.js";
 
 function wireDiff(grant: ScopeGrant, base: string, head: string, proof: ScopeProof): string | null {
+  if (scopeWireProtected(grant.path)) return "权限闸文件不自动接线";
   const added = additions(base, head), code = codeLines(head);
   if (!base || !added || added.length < 2 || added.length > 4 || !added.every((l) => code.has(l.line))) return "不是纯新增 import 一行 + 调用 ≤3 行";
   const imports = added.filter((l) => /^import /.test(l.text));
@@ -35,22 +36,23 @@ function keyDiff(base: string, head: string, proof: ScopeProof): string | null {
   const problem = recoveryKeysOrderProblem(head);
   if (problem) return problem;
   const key = /^ {2}"([^"\n]+)",$/;
-  const reduce = (text: string) => {
+  const reduce = (text: string, other: string, old: boolean) => {
     const lines = text.split("\n"), headers = lines.flatMap((l, i) => l === "export const RECOVERY_KEYS = [" ? [i] : []);
     const start = headers[0] ?? -1, end = lines.findIndex((l, i) => i > start && l.startsWith("]"));
     if (headers.length !== 1 || !codeLines(text).has(start) || end < 0) throw new Error("键表边界不明确");
+    const otherLines = new Set(other.split("\n"));
     return lines.filter((line, i) => {
       const m = i > start && i < end ? key.exec(line) : null;
-      return !m || !ownDefinition(m[1]!, proof);
+      return !m || !ownDefinition(m[1]!, proof, false, old) || (otherLines.has(line) && !ownDefinition(m[1]!, proof, false, !old));
     }).join("\n");
   };
-  return reduce(base) === reduce(head) ? null : "改了本卡定义之外的键或表结构";
+  return reduce(base, head, true) === reduce(head, base, false) ? null : "改了本卡定义之外的键或表结构";
 }
 
 function effectDiff(base: string, head: string, proof: ScopeProof): string | null {
   if (!proof.scan) return "缺少 skip-effects 同源扫描";
   const before = parseInventory(base), after = parseInventory(head), gates = inventoryGates(head), oldGates = inventoryGates(base);
-  const own = (file: string) => scopeMatches(`src/lib/${file}`, proof.globs) && proof.sources.has(`src/lib/${file}`);
+  const own = (file: string) => scopeMatches(`src/lib/${file}`, proof.globs) && (proof.sources.has(`src/lib/${file}`) || !!proof.baseSources?.has(`src/lib/${file}`));
   const erase = (text: string) => {
     const lines = text.split("\n"), { start, end } = inventoryLines(lines);
     if (!codeLines(text).has(start - 1) || lines.filter((l) => l.startsWith("export const SKIP_EFFECT_FILES")).length !== 1) throw new Error("效果表边界不明确");
