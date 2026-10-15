@@ -3,7 +3,7 @@
  * 不能冒充「目标不存在」；list 成功但确实没有目标时行为不变（no_target / null → 404）。
  */
 import { describe, expect, test } from "bun:test";
-import { findListedAgent, lookupRouteTarget, routeLookupOrReject } from "../src/bridge/agent-lookup.ts";
+import { findListedAgent, listForRoute, lookupRouteTarget, routeLookupOrReject } from "../src/bridge/agent-lookup.ts";
 import { interpretManagerRun, ListUnavailableError } from "../src/lib/run-manager.ts";
 
 const timedOut = interpretManagerRun({ cmd: "list", out: "", err: "", exitCode: null, timedOut: true, budgetMs: 15_000 });
@@ -72,5 +72,18 @@ describe("findListedAgent（/api/v1 findApiAgent）", () => {
   test("名字带不带 agent- 前缀都能找到", async () => {
     expect((await findListedAgent(async () => okList, "alpha"))?.channelId).toBe("c1");
     expect((await findListedAgent(async () => okList, "agent-alpha"))?.channelId).toBe("c1");
+  });
+});
+
+describe("listForRoute（LSC-1：route_to_agent 等共享缓存有上限）", () => {
+  test("缓存迟迟不回：预算到点按「不可用」拒，不冒充 no_target", async () => {
+    const t0 = Date.now();
+    const r = await listForRoute(() => new Promise(() => {}), 30);
+    expect(Date.now() - t0).toBeLessThan(1_000);
+    expect(lookupRouteTarget(r, "alpha")).toMatchObject({ rejected: "list_unavailable" });
+  });
+
+  test("预算内回来的名单照常用", async () => {
+    expect(await listForRoute(async () => okList, 1_000)).toEqual(okList);
   });
 });
