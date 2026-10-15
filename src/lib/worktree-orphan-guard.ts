@@ -5,12 +5,11 @@
  * - 每个信号与每条 observe 推送都落一行动作台账（state 下 JSON，留最近 ACTION_CAP 条）：pid、命令名、cwd、存活、累计 CPU、信号、结果。
  *   命令只记 basename（argv 里可能带凭据）。测试注入的假 ports 不经过这里，单测见 tests/worktree-orphan-guard.test.ts。
  */
-import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { stdoutOf } from "./lend-proc-reap.js";
+import { runOut } from "./lend-proc-reap.js";
 import { statePath } from "./paths.js";
 import type { Proc, ProcPorts, Sig } from "./proc-reap-core.js";
-import { writeJsonAtomicSync } from "./state-file.js";
+import { readJsonStateSync, StateCorruptError, writeJsonAtomicSync } from "./state-file.js";
 
 export interface ProcFacts { tty: string | null; cpuSec: number | null; comm: string }
 export interface GuardSources {
@@ -59,20 +58,31 @@ export function parseDaemons(out: string): Set<number> | null {
   return pids;
 }
 
-/** 两条命令起不来（不在 / spawn 失败）都折成「读不出」：护栏据此整轮不给进程，丢掉的错误不会导致误杀 */
-export function systemGuardSources(): GuardSources {
+export type Runner = (argv: string[]) => Promise<{ out: string; code: number }>;
+
+/** 两条命令起不来（不在 / spawn 失败）或非零退出（输出可能只有一半）都算「读不出」：护栏据此整轮不给进程 */
+export function systemGuardSources(run: Runner = runOut): GuardSources {
+  const ok = async (argv: string[]) => {
+    const r = await run(argv).catch(() => null); // 起不来 = 读不出，丢掉的错误不会导致误杀
+    return r && r.code === 0 ? r.out : null;
+  };
   return {
-    facts: async () => { const out = await stdoutOf(["ps", "-axo", "pid=,tty=,time=,comm="]).catch(() => null); return out ? parseFacts(out) : null; }, // 起不来 = 读不出，见上
-    daemons: async () => parseDaemons(await stdoutOf(["launchctl", "list"]).catch(() => "")), // 空输出没表头 = 读不出
+    facts: async () => { const out = await ok(["ps", "-axo", "pid=,tty=,time=,comm="]); return out ? parseFacts(out) : null; },
+    daemons: async () => { const out = await ok(["launchctl", "list"]); return out === null ? null : parseDaemons(out); },
   };
 }
 
-/** 动作台账：state 下 JSON 数组，追加后只留最近 ACTION_CAP 条；读坏了当空（只丢旧记录，不影响回收） */
+/**
+ * 动作台账：state 下 JSON 数组，追加后只留最近 ACTION_CAP 条。文件坏了（解析不了 / 不是数组 / 读失败）就拒写并抛
+ * StateCorruptError，原文件原样留作事后分析；guardReap 把错误记日志，信号照发。
+ */
 export function fileActionSink(path = statePath("worktree-orphan-actions.json")): ActionSink {
-  const read = (): ActionRow[] => {
-    try { const v = JSON.parse(readFileSync(path, "utf8")); return Array.isArray(v) ? v : []; } catch { return []; } // 没文件 / 读坏：只丢旧记录
+  return (rows) => {
+    if (!rows.length) return;
+    const cur = readJsonStateSync(path, Array.isArray);
+    if (cur.status === "corrupt") throw new StateCorruptError(path, cur.error);
+    writeJsonAtomicSync(path, [...(cur.status === "ok" ? (cur.data as ActionRow[]) : []), ...rows].slice(-ACTION_CAP));
   };
-  return (rows) => { if (rows.length) writeJsonAtomicSync(path, [...read(), ...rows].slice(-ACTION_CAP)); };
 }
 
 type Snap = Proc & { cpuSec: number | null };

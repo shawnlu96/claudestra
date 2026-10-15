@@ -11,6 +11,7 @@ import { patrolCardProcs, reapCardProcs, resetCardPatrolClock, type CardProcDeps
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { systemProcPorts } from "../src/lib/lend-proc-reap.js";
 import type { Proc, ProcPorts } from "../src/lib/proc-reap-core.js";
+import { writeFileSync } from "node:fs";
 import { fileActionSink, guardReap, parseCpuTime, parseDaemons, parseFacts, systemGuardSources, type ActionRow, type GuardSources,
   type ProcFacts } from "../src/lib/worktree-orphan-guard.js";
 
@@ -146,7 +147,7 @@ test("[验收线 3] observe：零信号，只出台账与 PM 推送；同一 pid
     result: "只记录，已推 PM（卡已 done）", owner: "卡=T3" }]);
 });
 
-test("动作台账文件：追加、读坏了当空；写失败只记日志不挡信号", async () => {
+test("动作台账文件：追加；写失败只记日志不挡信号", async () => {
   const f = fixture([]);
   const path = join(f.home, "actions.json");
   const sink = fileActionSink(path);
@@ -200,4 +201,33 @@ test.if(process.platform === "darwin")("[验收线 2/4] 真进程（macOS）：�
   for (const r of rows) expect(r).toMatchObject({ pid, comm: "perl", cwd: dir });
   expect(rows[2].cpuSec).not.toBeNull();
   if (process.env.RTO2_EVIDENCE) console.log(JSON.stringify(rows, null, 2));
+});
+
+test("[r1 P1 daemon-probe-partial-fail-open 复现] launchctl / ps 只出表头或部分输出后非零退出 = 读不出：护栏整轮不给进程", async () => {
+  const header = "PID\tStatus\tLabel\n";
+  const runner = (code: number) => async (argv: string[]) => (argv[0] === "launchctl" ? { out: header, code }
+    : { out: "  77 ??  0:01.00 /opt/tools/bin/bun\n", code: 0 });
+  expect(await systemGuardSources(runner(1)).daemons()).toBeNull();
+  expect(await systemGuardSources(runner(0)).daemons()).toEqual(new Set());
+  const psFail = systemGuardSources(async (argv) => (argv[0] === "ps" ? { out: "  77 ??  0:01.00 /opt/tools/bin/bun\n", code: 1 } : { out: header, code: 0 }));
+  expect(await psFail.facts()).toBeNull();
+  expect(await guardReap({ uid: UID, self: 1, list: async () => [proc(77, "/w/t")], signal: () => true, sleep: async () => {} }, psFail, () => {}, () => {})
+    .ports.list()).toEqual([]); // ps 打印了 pid=77 后 exit 1：一样不给
+  const base: ProcPorts = { uid: UID, self: 1, list: async () => [proc(77, "/w/t")], signal: () => true, sleep: async () => {} };
+  const lines: string[] = [];
+  const g = guardReap(base, systemGuardSources(runner(1)), () => {}, (m) => lines.push(m));
+  expect(await g.ports.list()).toEqual([]);
+  expect(lines.join("\n")).toContain("这轮一个进程都不给");
+});
+
+test("[r1 P2 corrupt-action-ledger-overwrite 复现] 台账文件损坏：拒绝覆盖、原文件原样保留，错误记日志，信号照发", () => {
+  const f = fixture([]);
+  const path = join(f.home, "actions.json");
+  writeFileSync(path, '[{"pid": 1, "res');
+  const lines: string[] = [];
+  const base: ProcPorts = { uid: UID, self: 1, list: async () => [], signal: () => true, sleep: async () => {} };
+  const g = guardReap(base, { facts: async () => new Map(), daemons: async () => new Set() }, fileActionSink(path), (m) => lines.push(m));
+  expect(g.ports.signal(9, "SIGTERM")).toBe(true);
+  expect(readFileSync(path, "utf8")).toBe('[{"pid": 1, "res');
+  expect(lines[0]).toContain("拒绝覆盖写");
 });

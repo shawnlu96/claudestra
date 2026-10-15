@@ -90,8 +90,8 @@ for `lend/work/<order>`.
 - Production guard (`src/lib/worktree-orphan-guard.ts`, RTO2-1) wraps the system process table for both sides. A process with a
   controlling terminal, or a running `com.claudestra.*` launchd job (bridge / launcher / cron / scheduler), is dropped before
   any pick. So is a process whose `ps` facts are missing or whose command changed (pid reused). If `ps` or `launchctl` cannot be
-  read, nothing is handed out that pass. Every signal and every observe push is one row in `state/worktree-orphan-actions.json`
-  (last 500, tmp+rename via `writeJsonAtomicSync`): pid, command basename, cwd, age, cumulative CPU, signal, result. Tests in `tests/worktree-orphan-guard.test.ts`.
+  read or exits non-zero, nothing is handed out that pass. Every signal and every observe push is one row in `state/worktree-orphan-actions.json`
+  (last 500, tmp+rename via `writeJsonAtomicSync`): pid, command basename, cwd, age, cumulative CPU, signal, result; a corrupt file is left as is and not overwritten (`StateCorruptError`, logged, signals still go). Tests in `tests/worktree-orphan-guard.test.ts`.
 
 ## When PM is told
 
