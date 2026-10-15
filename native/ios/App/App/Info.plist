@@ -58,6 +58,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>claudestra</string>
+				<string>floka</string>
 			</array>
 		</dict>
 	</array>

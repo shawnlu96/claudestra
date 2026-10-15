@@ -4,7 +4,8 @@
  * 出口（relay-dispatch.ts）调 renewDeviceCookie；Bearer / peer / E2E 内层的请求没有记号，不会续发。开关 config.json deviceCookieRenew：
  * on 续发、observe（缺省）只记「会续发」、off 什么都不做（tests/device-cookie-renew.test.ts）。
  */
-import { DEVICE_COOKIE, deviceCookieHeader } from "../lib/devices.js";
+import { deviceCookieHeaders } from "../lib/devices.js";
+import { BROWSER_FAMILIES, BROWSER_NAMES } from "../lib/floka-browser-protocol/names.js";
 import { readConfigSync, type AppConfig } from "../lib/config-store.js";
 import { LogThrottle } from "../lib/log-throttle.js";
 import { requestContextOf } from "./request-context.js";
@@ -38,7 +39,8 @@ export function noteDeviceAuth(req: Request, credentialId: string, token: string
 export function renewDeviceCookie(req: Request, res: Response, now = Date.now()): Response {
   const hit = authed.get(req);
   if (!hit || res.status >= 400) return res;
-  if (res.headers.getSetCookie().some((c) => c.startsWith(`${DEVICE_COOKIE}=`))) return res;
+  // 两族都算：写了其中一族的删除 / 新值，续发同名就会盖掉它
+  if (res.headers.getSetCookie().some((c) => BROWSER_FAMILIES.some((f) => c.startsWith(`${BROWSER_NAMES[f].deviceCookie}=`)))) return res;
   if (now - (lastIssued.get(hit.credentialId) ?? -Infinity) < RENEW_EVERY_MS) return res;
   const mode = modeOf();
   if (mode === "off") return res;
@@ -48,10 +50,11 @@ export function renewDeviceCookie(req: Request, res: Response, now = Date.now())
     console.log(`[device-cookie] 会续发：凭据 ${hit.credentialId}（来源 ${ctx.source}，${new URL(req.url).pathname}）；deviceCookieRenew=on 才真的下发`);
     return res;
   }
-  // Path / Secure 与配对时同一规则（bridge/devices.ts cookieFor）：经中继写机器前缀，中继还会再钉一次
-  const cookie = deviceCookieHeader(hit.token, { path: ctx.pathPrefix ? `${ctx.pathPrefix}/` : "/", secure: ctx.https || ctx.source === "relay" });
+  // Path / Secure 与配对时同一规则（bridge/devices.ts cookieFor）：经中继写机器前缀，中继还会再钉一次；
+  // rename.browserProtocol write=on 时两族同值一起续（off / observe 只有旧族，与现行逐字相同）
+  const cookies = deviceCookieHeaders(hit.token, { path: ctx.pathPrefix ? `${ctx.pathPrefix}/` : "/", secure: ctx.https || ctx.source === "relay" });
   const headers = new Headers(res.headers);
-  headers.append("set-cookie", cookie);
+  for (const cookie of cookies) headers.append("set-cookie", cookie);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 

@@ -1,10 +1,10 @@
-# Claudestra
+# Floka
 
 **English** · [简体中文](./README.zh-CN.md)
 
 > Run your coding agents — Claude Code and Pi — on your workstation, and drive them from your phone through the built-in web app (Discord optional).
 
-Claudestra lets you run coding agents on your workstation — **Claude Code** and **Pi** are both first-class runtimes — and drive them from anywhere: phone, tablet, or another machine. The default front door is the bundled **PWA web client**: one install command and it is running, paired to your devices by QR code; phones reach it through a relay, Tailscale, your LAN or your own domain (the relay is the default, never required). **Discord is optional** — an unchecked box in the installer you can tick if you want its push notifications and buttons. Every session lives in tmux, so the moment you are back at your desk you can attach and keep going in the same process.
+Floka lets you run coding agents on your workstation — **Claude Code** and **Pi** are both first-class runtimes — and drive them from anywhere: phone, tablet, or another machine. The default front door is the bundled **PWA web client**: one install command and it is running, paired to your devices by QR code; phones reach it through a relay, Tailscale, your LAN or your own domain (the relay is the default, never required). **Discord is optional** — an unchecked box in the installer you can tick if you want its push notifications and buttons. Every session lives in tmux, so the moment you are back at your desk you can attach and keep going in the same process.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df.svg)](https://bun.sh)
@@ -14,7 +14,7 @@ Claudestra lets you run coding agents on your workstation — **Claude Code** an
 
 ## Why
 
-Coding agents are terminal-only tools: if you aren't at your computer, you aren't using them. Claudestra puts a persistent front door — a web app, and optionally Discord — in front of your local sessions so you can:
+Coding agents are terminal-only tools: if you aren't at your computer, you aren't using them. Floka puts a persistent front door — a web app, and optionally Discord — in front of your local sessions so you can:
 
 - Chat with any active session from your phone — Claude Code or Pi.
 - Run several sessions in parallel — one conversation per session.
@@ -46,7 +46,7 @@ Coding agents are terminal-only tools: if you aren't at your computer, you aren'
         └──  every session shows up as a native tab
 ```
 
-Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than scraping terminal output. The Bridge process acts as a fan-out layer that routes Discord messages to the correct `channel-server` instance, working around the official plugin's one-token-one-session limitation.
+Floka builds on Claude Code's native **Channel protocol** (MCP) rather than scraping terminal output. The Bridge process acts as a fan-out layer that routes Discord messages to the correct `channel-server` instance, working around the official plugin's one-token-one-session limitation.
 
 ## Features
 
@@ -56,7 +56,7 @@ Claudestra builds on Claude Code's native **Channel protocol** (MCP) rather than
 - **Agent-to-agent messaging** — `send_to_agent(target, text)` MCP tool injects a message directly into another agent's context.
 - **Orchestration team** — `team up --project <id> [--dispatcher]` sets up a PM, optional dispatcher and built-in reviewer roles; executors just `ledger deliver` and the ledger routes the work to whoever picks it up next. See [docs/team/orchestration-team.en.md](./docs/team/orchestration-team.en.md).
 - **Cron scheduling** — declarative cron expressions spin up a temporary agent, run a prompt, notify Discord, then clean up.
-- **Cross-Claudestra peer collaboration (HTTP peers)** — two Claudestra instances call each other's agents as plain API clients: each side issues the other a **scoped Bearer token**, no shared Discord guild and no second bot required. v2.15+ makes it a **one-click invite**: pick the agents to share, send one link (or string), the other side opens it — handshake completes automatically (single-use, 24h expiry, revocable; the master orchestrator can never be shared). After that any agent can call `send_to_agent({ target: "agent@peer" })` and the reply is pushed back as a synthetic message. Exposure = token scope; `peer-http-remove` revokes access instantly. No public IP needed on either side — through the relay (v2.28+, the default) nothing is opened at all; without one, any private path works (Tailscale, LAN, a reverse proxy).
+- **Cross-Floka peer collaboration (HTTP peers)** — two Floka instances call each other's agents as plain API clients: each side issues the other a **scoped Bearer token**, no shared Discord guild and no second bot required. v2.15+ makes it a **one-click invite**: pick the agents to share, send one link (or string), the other side opens it — handshake completes automatically (single-use, 24h expiry, revocable; the master orchestrator can never be shared). After that any agent can call `send_to_agent({ target: "agent@peer" })` and the reply is pushed back as a synthetic message. Exposure = token scope; `peer-http-remove` revokes access instantly. No public IP needed on either side — through the relay (v2.28+, the default) nothing is opened at all; without one, any private path works (Tailscale, LAN, a reverse proxy).
 - **LLM-free management** — status / kill / restart / cron buttons execute directly on the Bridge, zero-token overhead and near-instant response.
 
 ### Web client (v2.10+)
@@ -83,11 +83,11 @@ Setup + phone remote access (relay by default, Tailscale optional / PWA install)
 - **Idle detection** — Claude Code `Stop` / `Notification` hooks drive Discord typing indicators precisely.
 
 ### Reliability & ops
-- **Auto-update (v1.3+, configurable v1.4+)** — Claudestra itself polls GitHub every 30 min; Claude Code CLI every 7 days. Only upgrades while every agent is idle. Toggle per-target via `bun src/manager.ts auto-update <target> on|off`.
+- **Auto-update (v1.3+, configurable v1.4+)** — Floka itself polls GitHub every 30 min; Claude Code CLI every 7 days. Only upgrades while every agent is idle. Toggle per-target via `bun src/manager.ts auto-update <target> on|off`.
 - **Reboot survival (v1.7.9+)** — the three launchd agents are installed during setup and start at login; on reboot the launcher revives every registry-known agent with `claude --resume` into its original Discord channel.
 - **Session-idle Discord buttons (v1.3+)** — when Claude Code's resume dialog appears, agents surface buttons in Discord (resume from summary / resume full / don't ask again); master auto-confirms to stay always-on.
 - **Wedge watcher (v1.6+)** — if an agent's tmux pane stays unchanged for 30 min while not idle, you get an @mention with Esc / Ctrl+C rescue buttons.
-- **Self-updating** — `bun src/manager.ts update` does `git pull` + reloads Claudestra's three launchd daemons (nothing else on the machine is touched).
+- **Self-updating** — `bun src/manager.ts update` does `git pull` + reloads Floka's three launchd daemons (nothing else on the machine is touched).
 
 ### Observability
 - **Token-usage rollup (v1.6+)** — `bun src/manager.ts cost [--agent <name>] [--today|--week]` aggregates per-agent / per-model tokens straight from Claude Code's JSONL files.
@@ -210,7 +210,7 @@ bun src/manager.ts cron-history [name|id]
 bun src/manager.ts version                          # current version + whether update available
 bun src/manager.ts update                           # git pull + reload the 3 launchd daemons
 bun src/manager.ts auto-update status               # show auto-update toggles
-bun src/manager.ts auto-update claudestra on|off    # Claudestra self-update (30-min poll)
+bun src/manager.ts auto-update claudestra on|off    # Floka self-update (30-min poll)
 bun src/manager.ts auto-update claude on|off        # Claude Code CLI (weekly poll)
 
 # Observability
@@ -237,7 +237,7 @@ bun src/manager.ts token-revoke <tokenId|name>
 bun src/manager.ts install-cli
 bun src/manager.ts tmux-help             # tmux crash course (incl. iTerm2 -CC mode)
 
-# Cross-Claudestra HTTP peers — mutual scoped tokens, no shared Discord guild
+# Cross-Floka HTTP peers — mutual scoped tokens, no shared Discord guild
 # One-click invite (v2.15+, recommended): A generates, B pastes, done — single-use, 24h TTL
 bun src/manager.ts peer-invite-new --agents <a,b|*> [--url <my-bridge-url>] [--force]        # A: print one-click invite
 bun src/manager.ts peer-join-auto '<invite>' [--agents <x,y>] [--force]                      # B: paste invite, auto-handshake
@@ -277,7 +277,7 @@ Runtime toggles live in `~/.claude-orchestrator/config.json` (managed via `manag
 
 | Key | Purpose |
 |-----|---------|
-| `autoUpdate.claudestra` | Claudestra self-update, 30-min poll (default `true`) |
+| `autoUpdate.claudestra` | Floka self-update, 30-min poll (default `true`) |
 | `autoUpdate.claudeCode` | Claude Code CLI update, weekly poll (default `true`) |
 
 Other state files under `~/.claude-orchestrator/`: `registry.json` (active agents), `cron.json` + `cron-history.json`, `metrics.jsonl`.

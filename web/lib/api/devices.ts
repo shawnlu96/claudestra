@@ -4,7 +4,7 @@
  */
 import { defaultDeviceName } from "@/lib/pairing";
 import type { ShareOpts } from "@/lib/guest-share";
-import { api, apiRaw, apiErrorFrom, type ApiError } from "./client";
+import { api, apiRaw, apiErrorFrom, DEVICE_HEADER, type ApiError } from "./client";
 
 export interface PairedInfo {
   fp: string;
@@ -72,7 +72,7 @@ export async function ensureDirectCredential(): Promise<boolean> {
     if (who.status !== 401) return who.ok;
     const r = await fetch("/api/v1/devices/legacy-session", {
       method: "POST", credentials: "include", cache: "no-store",
-      headers: { "Content-Type": "application/json", "x-cstra-device": "1" },
+      headers: { "Content-Type": "application/json", [DEVICE_HEADER]: "1" }, // 只写旧族：各档 bridge 都认（client.ts FLOKA_DEVICE_HEADER）
       body: JSON.stringify({ deviceName }),
     });
     return r.ok;

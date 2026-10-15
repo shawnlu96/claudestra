@@ -269,7 +269,7 @@ export function bounceWork(b: MergeBounce): { inputs: string[]; acceptance: stri
 
 /** The targeted re-review line for the reviewer after a bounce fix. */
 export const bounceReviewLine = (b: MergeBounce): string => b.cause === "update_fail"
-  ? `定向复验：本轮只因更新分支失败退回过（原 head ${b.prHead.slice(0, 12)}），只看合入 main 的合并提交，不沿用旧审查`
+  ? `定向复验：因更新分支失败退回过（原 head ${b.prHead.slice(0, 12)}），范围是原 head..新 head 的全部作者改动：合并提交只核合入 main 的部分，合并之外的作者提交全部复验（git log --no-merges --first-parent ${b.prHead.slice(0, 12)}..新 head，正常审查口径），不沿用旧审查`
   : b.cause === "conflict"
-  ? `定向复验：本轮只因和 main 冲突退回过（原 head ${b.prHead.slice(0, 12)}），只看解冲突的合并提交，不沿用旧审查`
-  : `定向复验：本轮只因 PR 头 CI 失败退回过（原 head ${b.prHead.slice(0, 12)}），只看修 CI 的改动，不沿用旧审查`;
+  ? `定向复验：因和 main 冲突退回过（原 head ${b.prHead.slice(0, 12)}），范围是原 head..新 head 的全部作者改动：合并提交只核解冲突的部分，合并之外的作者提交全部复验（git log --no-merges --first-parent ${b.prHead.slice(0, 12)}..新 head，正常审查口径），不沿用旧审查`
+  : `定向复验：因 PR 头 CI 红退回过（原 head ${b.prHead.slice(0, 12)}），范围是原 head..新 head 的全部作者改动：合并提交只核合入 main 的部分，合并之外的作者提交全部复验（git log --no-merges --first-parent ${b.prHead.slice(0, 12)}..新 head，正常审查口径），不沿用旧审查`;

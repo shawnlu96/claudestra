@@ -15,9 +15,10 @@ import { observeDedupKey } from "./recovery-policy.js";
 import { FIX_LOCAL_SWAP_KEY, localSwapMode, stretchAnchor, takeoverKey, type LocalSwapFact, type SwapSnapshot } from "./recovery-fix-local-swap.js";
 import { FIX_LOCAL_SWAP_MECHANISM, localSwapGrantEnded, manualSwapFact, manualSwapNow, ownerStallMs } from "./recovery-fix-local-swap-manual.js";
 import { recoveryMark } from "./manual-recovery-release.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
-interface TickPorts { manager: Manager; notifyPm(task: LedgerTask, text: string): Promise<void> }
+interface TickPorts { manager: Manager; notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void> }
 
 const record = (m: Manager, task: LedgerTask, actionKey: string, action: string, data: Record<string, unknown>) =>
   m("ledger", "scheduler-recovery-observe", task.id, "--mechanism", FIX_LOCAL_SWAP_KEY, "--action-key", actionKey, "--action", action, "--data", JSON.stringify(data));
@@ -39,7 +40,7 @@ async function reviewGateNotice(db: Database, task: LedgerTask, snap: SwapSnapsh
   const text = `[调度引擎] ${task.id} 第 ${task.round} 轮审查单被外发闸拒收，只能本机审；本机没有 ${family} 审查名额（${plan.reason}）。` +
     "不加审查容量、不放行同家族审查：PM 核对后处理";
   if (mode === "on") {
-    try { await ports.notifyPm(task, text); }
+    try { await ports.notifyPm(task, text, "action"); }
     catch (e) { console.error(`⚠️ [scheduler] ${task.id} 审查闸拒通知没发出去，下轮重发：${(e as Error).message}`); return; }
   }
   warn(task, "审查闸拒通知回执", await record(ports.manager, task, actionKey, mode === "on" ? `已通知 PM：${text}` : `会通知 PM：${text}`,
@@ -53,7 +54,7 @@ async function grantEnd(db: Database, task: LedgerTask, ports: TickPorts): Promi
   const r = await ports.manager("ledger", "scheduler-fallback-manual", task.id, "--reason", why);
   if (r.ok !== true) { console.error(`⚠️ [scheduler] ${task.id} fixLocalSwap 授权结束回 manual 没写上，下轮重试：${String(r.error)}`); return null; }
   if (r.duplicate !== true) {
-    await ports.notifyPm(task, `[调度引擎] ${task.id} fixLocalSwap 授权已用完，照旧回 manual：${why}`)
+    await ports.notifyPm(task, `[调度引擎] ${task.id} fixLocalSwap 授权已用完，照旧回 manual：${why}`, "action")
       .catch((e: Error) => console.error(`⚠️ [scheduler] ${task.id} 回 manual 通知没发出去（台账已记）：${e.message}`));
   }
   return why;

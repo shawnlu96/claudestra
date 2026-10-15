@@ -6,6 +6,7 @@
 import type { Database } from "bun:sqlite";
 import { mergeObservationTodos } from "./pm-todo-observation.js";
 import { mergeAuditTodos } from "./pm-todo-audit.js";
+import { mergeOneShotTodos } from "./pm-todo-oneshot.js";
 import { getEventByDedup, listTasks } from "./ledger-store.js";
 import { parseObservation } from "./scheduler-post-verify-defer.js";
 import { postVerifyDoneKey, postVerifySection, verifiedAt } from "./scheduler-post-verify-ledger.js";
@@ -32,5 +33,5 @@ export function pmTodos(db: Database, project: string, readSpec: (taskId: string
     const hours = o && o !== "bad" ? o.hours : null, dueAt = at + (hours ?? 0) * HOUR_MS;
     out.push({ task: t.id, verifiedAt: at, hours, due: now >= dueAt, dueAt, what: firstPoint(section) });
   }
-  return mergeAuditTodos(db, project, mergeObservationTodos(db, project, out, now));
+  return mergeOneShotTodos(project, mergeAuditTodos(db, project, mergeObservationTodos(db, project, out, now))); // 没标级别的 oneShot（NOTICETYPE1）
 }

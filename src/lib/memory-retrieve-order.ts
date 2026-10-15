@@ -114,7 +114,7 @@ function retrievalData(db: Database, task: LedgerTask, kind: MemoryOrderKind, he
   }));
   const used = ["graph", "file", ...(opts.vector ? ["vector"] : [])];
   return {
-    op: "memory_rank", order: kind, specRev: task.specRev, head, routes: used, items,
+    op: "memory_rank", order: kind, specRev: task.specRev, head, routes: used, items, selectionVersion: ranked.selectionVersion,
     dropped: ranked.dropped.slice(0, DROPPED_MAX).map((d) => ({ id: d.id, score: Number(d.score.toFixed(6)), reason: dropText(d.reason) })),
   };
 }

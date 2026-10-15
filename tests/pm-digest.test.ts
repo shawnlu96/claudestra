@@ -29,23 +29,38 @@ test("immediate: owner, card answers, executor question / delivery, merge / depl
     ["ledger delivery", bridge("ledger", "[台账] T1 已交付 PR #12")],
     ["scheduler other", agent("scheduler", "[调度引擎] T1 退回人工，请接手：合并失败")],
     ["scheduler freeze", agent("scheduler", "[合并队列] 冻结队列：main 红")],
-    ["agent delivery", agent("agent-task-1", "T1 已交付，PR #33")],
-    ["merge failure", agent("agent-task-1", "合并失败：冲突")],
-    ["deploy failure", agent("agent-ops", "部署失败，回滚中")],
-    ["incident", agent("agent-ops", "生产事故告警：5xx 飙升")],
-    ["asks PM", agent("agent-peerpm", "这个要你拍板吗？")],
+    // agent 的 oneShot 只认发送方标的级别（agents-NOTICETYPE1）：要 PM 处理的由发送方标 action
+    ["agent delivery", { ...agent("agent-task-1", "T1 已交付，PR #33"), level: "action" }],
+    ["merge failure", { ...agent("agent-task-1", "合并失败：冲突"), level: "action" }],
+    ["deploy failure", { ...agent("agent-ops", "部署失败，回滚中"), level: "action" }],
+    ["incident", { ...agent("agent-ops", "生产事故告警：5xx 飙升"), level: "action" }],
+    ["asks PM", { ...agent("agent-peerpm", "这个要你拍板吗？"), level: "action" }],
     ["request expecting reply", agent("agent-task-1", "进度更新", false)],
-    ["master", agent("master", "大总管通知")],
+    ["master action", { ...agent("master", "Please approve X"), level: "action" }],
+    ["master expecting reply", agent("master", "大总管通知", false)],
     ["unknown bridge", bridge("quota-wall", "额度")],
     ["audit without header", bridge("ledger-audit", "其他巡检格式")],
   ];
   for (const [name, input] of now) expect([name, classifyPmPush(input).send]).toEqual([name, "now"]);
 });
 
-test("urgent words anywhere in the body (not just the first line) go out immediately", () => {
-  for (const body of ["agents-X1 进度更新\n部署失败,需要你拍板?", "agents-X1 进度\n顺便：T1 已交付 PR #9", "进度同步\n\n合并失败：冲突", "只同步\n有个问题想问你"])
-    expect([body, classifyPmPush(agent("agent-ops", body)).send]).toEqual([body, "now"]);
+test("urgent words anywhere in the body (not just the first line) go out immediately — only for messages without a level that are not oneShot", () => {
+  for (const body of ["agents-X1 进度更新\n部署失败,需要你拍板?", "agents-X1 进度\n顺便：T1 已交付 PR #9", "进度同步\n\n合并失败：冲突", "只同步\n有个问题想问你"]) {
+    // 没标级别的 agent oneShot 不看正文：一律进摘要、列 pm-todo（agents-NOTICETYPE1）
+    expect([body, classifyPmPush(agent("agent-ops", body))]).toMatchObject([body, { send: "digest", unleveled: true, levelSource: "structured" }]);
+    expect([body, classifyPmPush({ ...agent("agent-ops", body), level: "action" }).send]).toEqual([body, "now"]);
+  }
   expect(classifyPmPush(agent("agent-ops", "【只同步】进度\n部署失败", false)).send).toBe("now");
+  expect(classifyPmPush(agent("agent-ops", "【只同步】部署失败", false))).toMatchObject({ send: "now", levelSource: "regex" });
+});
+
+test("master's oneShot follows the sender-marked level like any other agent: unlevelled is held for pm-todo whatever the body says", () => {
+  for (const body of ["Please approve X", "大总管通知：要你拍板"]) {
+    expect(classifyPmPush(agent("master", body))).toMatchObject({ send: "digest", unleveled: true, source: "master", levelSource: "structured" });
+    expect(classifyPmPush(agent("agent-x", body))).toMatchObject({ send: "digest", unleveled: true, levelSource: "structured" });
+  }
+  expect(classifyPmPush({ ...agent("master", "进度"), level: "info" })).toMatchObject({ send: "digest", levelSource: "structured" });
+  expect(classifyPmPush({ ...agent("master", "进度"), level: "info" })).not.toHaveProperty("unleveled");
 });
 
 test("the bridge's own digest envelope is always immediate (never re-queued)", () => {
@@ -54,8 +69,8 @@ test("the bridge's own digest envelope is always immediate (never re-queued)", (
 });
 
 test("uncertain samples go out immediately", () => {
-  expect(classifyPmPush(agent("agent-x", "请看一下这个")).send).toBe("now"); // 像在要人动手
-  expect(classifyPmPush(agent("agent-x", "卡住了")).send).toBe("now");
+  expect(classifyPmPush(agent("agent-x", "只同步：请看一下这个", false)).send).toBe("now"); // 像在要人动手
+  expect(classifyPmPush(agent("agent-x", "只同步：卡住了", false)).send).toBe("now");
   expect(classifyPmPush(agent("", "", false)).send).toBe("now");
   expect(classifyPmPush({ ...agent("agent-x", "进度"), fromKind: "user" }).send).toBe("now");
 });
@@ -81,6 +96,7 @@ test("classifier-body: a sender waiting for a reply with a request below a「只
   expect(classifyPmPush(agent("agent-ops", "只同步:agents-X1 进度\n请给出下一步方案", false)).send).toBe("now");
   // 等回复的消息：首行以下还有内容，摘要只留首行会把它截掉，拿不准就立即送
   expect(classifyPmPush(agent("agent-ops", "【只同步】agents-X1 进度\n附：明天继续", false)).send).toBe("now");
-  // oneShot 正文里的请求措辞同样不进摘要
-  expect(classifyPmPush(agent("agent-ops", "agents-X1 进度\n下一步方案怎么定，给个意见")).send).toBe("now");
+  // oneShot 不看正文（agents-NOTICETYPE1）：请求措辞要立即送，由发送方标 action；没标的进摘要、列 pm-todo
+  expect(classifyPmPush({ ...agent("agent-ops", "agents-X1 进度\n下一步方案怎么定，给个意见"), level: "action" }).send).toBe("now");
+  expect(classifyPmPush(agent("agent-ops", "agents-X1 进度\n下一步方案怎么定，给个意见"))).toMatchObject({ send: "digest", unleveled: true });
 });

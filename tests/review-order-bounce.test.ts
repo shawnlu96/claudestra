@@ -72,7 +72,7 @@ afterEach(() => closeLedger(":memory:"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("合并退回后的复验单带定向复验说明", () => {
-  for (const [name, b, line] of [["CI 失败", CI, "只看修 CI 的改动"], ["和 main 冲突", CONFLICT, "只看解冲突的合并提交"]] as const) {
+  for (const [name, b, line] of [["CI 失败", CI, "只核合入 main 的部分"], ["和 main 冲突", CONFLICT, "合并提交只核解冲突的部分"]] as const) {
     test(`${name}：本机审查单的 inputs 里有一行`, () => {
       card(3, bounced(b));
       expect(targeted(localOrder())).toEqual([expect.stringContaining(line)]);

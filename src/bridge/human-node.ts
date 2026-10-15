@@ -20,6 +20,7 @@ import { memberKey } from "../lib/talk-rooms.js";
 import { notifyTaskPm } from "./ask-expire.js";
 import { askDb, askDbIfExists, AskRejected, createAsk, publishAsk, setOnAssignedAnswer, setPrepareAssigned } from "./asks.js";
 import { meOf, selfFp, talkDb, talkPrincipals } from "./talk.js";
+import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
 
 const TICK_MS = 5000;
 const STALE = "指派已过时：任务改派、离开了 build / fix 或 PM 重开了指派";
@@ -58,7 +59,7 @@ export interface HumanNodeDeps {
   /** 撤掉一条过时的指派（cancelled，发 SSE 让网页收起来）；已不是 open 的不动 */
   cancelAsk: (askId: string, reason: string) => void;
   /** 给 task.pm 发一条不抢占的通知：PM 不在线就不投、不转投大总管 */
-  notifyPm: (task: LedgerTask, text: string, askId: string) => Promise<void>;
+  notifyPm: (task: LedgerTask, text: string, askId: string, level: PmNoticeLevel) => Promise<void>;
   /** 作答的 principal（+ 设备凭据）→ 人；默认按 talk 的 people 表解析 */
   answerer?: (principal: string, device?: string) => Promise<Answerer | null>;
 }
@@ -178,7 +179,7 @@ export async function noticeAssignedAnswer(d: HumanNodeDeps, ask: AssignedAsk, a
   const task = db && ask.taskId && isHumanNodeAsk(ask) ? getTask(db, ask.taskId) : null;
   if (!db || !result || !task || task.project !== ask.project) return false;
   if (result === "done" && projectHasTeam(db, task.project)) return false;
-  await d.notifyPm(task, pmNotice(task, result), ask.id);
+  await d.notifyPm(task, pmNotice(task, result), ask.id, "action"); // 人工节点的结果：PM 要据此推进
   return true;
 }
 
@@ -210,7 +211,7 @@ export function initHumanNode(): () => void {
       publishAsk(a);
       console.log(`🧹 撤掉过时的指派 ${a.id}（${a.taskId} → ${a.assignee}）`);
     },
-    notifyPm: (task, text, askId) => notifyTaskPm(task, task.project, text, askId, "human-node"),
+    notifyPm: (task, text, askId, level) => notifyTaskPm(task, task.project, text, askId, "human-node", level),
   };
   setPrepareAssigned((a, answer) => prepareAssignedAnswer(deps, a, answer));
   setOnAssignedAnswer(async (a, answer) => void (await noticeAssignedAnswer(deps, a, answer)));

@@ -10,6 +10,7 @@ import type { CleanupEntry, RetireRecord } from "./agent-lifecycle-store.js";
 import type { Action } from "./agent-lifecycle.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { Git } from "./scheduler-review-worktree.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export const MANUAL_BACKOFF_MS = 6 * 3_600_000;
 export type ManualKind = "dirty" | "main_repo";
@@ -114,7 +115,7 @@ export function manualNotice(agent: string, kind: ManualKind, entries: readonly 
 export interface ManualDeps {
   git?: Git; du?(paths: string[]): Promise<number | null>; now(): number;
   /** the existing PM notice channel (production: notifyProjectPm); absent = the notice goes out through the pass's failed list */
-  notifyPm?(a: Action, text: string): Promise<void>;
+  notifyPm?(a: Action, text: string, level: PmNoticeLevel): Promise<void>;
 }
 
 /**
@@ -148,7 +149,7 @@ export async function manualOutcome(deps: ManualDeps, a: Action, seen: Pick<Reti
   const bytes = seen.por?.files.length && deps.du ? await deps.du(seen.por.files).catch(() => null) : null;
   const notice = manualNotice(a.agent, kind, seen.pending, seen.steps, seen.por?.files ?? null, bytes);
   if (!deps.notifyPm) return { mark, notified: [...notified, kind], told: false, notice };
-  try { await deps.notifyPm(a, notice); } catch (e) {
+  try { await deps.notifyPm(a, notice, "action"); } catch (e) { // 生命周期转人工：PM 要接手
     if (e instanceof SchedulerStopped) throw e;
     return { mark, notified, told: false, notice: `${notice}（报 PM 没送达，下轮再报：${(e as Error).message}）` };
   }

@@ -14,6 +14,7 @@ import { getTask, listEvents } from "./ledger-store.js";
 import { grantVerdict, localDeliveryPolicy, RESUME_GRANT_OP, type LocalDeliveryPolicyPort } from "./order-local-deliver.js";
 import { readSwitch, switchOff, type ServiceFacts } from "./scheduler-autostart.js";
 import type { TickPace } from "./scheduler-yield.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export const MERGE_RETRY_PREFIX = "merge_retry_requires_pm：";
 const MODE_OPS = new Set(["merge_resolve", "deploy_resolve", "fallback_manual", "workflow_resume"]);
@@ -83,7 +84,7 @@ export interface ResumeTickEnv {
   svc: ServiceFacts;
   /** 调度身份的 ledger CLI（已套租约守卫） */
   ledger(...args: string[]): Promise<Record<string, unknown>>;
-  notifyPm(project: string, text: string): Promise<void>;
+  notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
   /** 进程内去重：同一次交付被核心拒绝只通知一次 */
   memo: Set<string>;
   /** CFG 的 recoveryPolicy（mechanism=localDelivery）；缺 = observe */
@@ -125,7 +126,7 @@ export async function autoResumeTick(env: ResumeTickEnv, pace?: TickPace): Promi
       env.memo.add(key);
       const why = v.facts.grant ? `授予 ${v.facts.grant} 后执行者本人交付了新 head` : "合并撤销后执行者交付了新 head";
       await env.notifyPm(project, `[自动交回 ${taskId}] ${why} ${v.facts.head.slice(0, 12)}，交回调度被拒：${String(r.error)}。` +
-        "对完账后用 workflow-resume 手动交回。").catch((e) => failed.push({ taskId, error: `通知 PM 失败：${(e as Error).message}` }));
+        "对完账后用 workflow-resume 手动交回。", "action").catch((e) => failed.push({ taskId, error: `通知 PM 失败：${(e as Error).message}` }));
     }
   }
   return failed;

@@ -15,6 +15,7 @@ import { within, worktreeDirs } from "./scheduler-retire.js";
 import { claudeTmpDirFor } from "./scheduler-retire-tmp.js";
 import { V2Held } from "./scheduler-v2-retire.js";
 import { schedulerV2Held, schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 /** Every path an action's cleanup can touch: its card's checkouts, its cwd, a retry's entries, and their temp folders. */
 function actionPaths(a: Action, deps: Pick<LifecycleDeps, "worktreeRoot" | "tmp">): string[] {
@@ -51,7 +52,7 @@ export function schedulerV2LifecycleDeps(db: Database, plan: Pick<Plan, "actions
     },
     ...(deps.tmp ? { tmp: { ...deps.tmp, rm: async (p: string) => { hold(touching([p])); return deps.tmp!.rm(p); } } } : {}),
     record: async (r) => { hold([r]); return deps.record(r); },
-    ...(deps.notifyPm ? { notifyPm: async (a: Action, text: string) => { hold([a]); return deps.notifyPm!(a, text); } } : {}),
+    ...(deps.notifyPm ? { notifyPm: async (a: Action, text: string, level: PmNoticeLevel) => { hold([a]); return deps.notifyPm!(a, text, level); } } : {}),
   };
 }
 

@@ -29,7 +29,7 @@ const PRESETS = [
   "Cascadia Code",
 ];
 
-const SAMPLE = "Claudestra 快速的棕色狐狸跳过懒狗 0123456789 Aa Gg Qq";
+const SAMPLE = "Floka 快速的棕色狐狸跳过懒狗 0123456789 Aa Gg Qq";
 
 function FontRow({ label, value, onChange, generic }: { label: string; value: string; onChange: (v: string) => void; generic: string }) {
   const t = useT();

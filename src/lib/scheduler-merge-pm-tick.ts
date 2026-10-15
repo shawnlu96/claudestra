@@ -36,7 +36,7 @@ async function remind(env: SpecWaitEnv, project: string, taskId: string, mode: "
   // 记录后状态变了（开关改 observe / off、新请求 / 新验收 / 离开 merge、换 PM）：不发陈旧动作
   if (mergePmMode(env.db, project) !== "on" || now?.key !== c.key || mergePmTarget(env.db, taskId) !== pm) return;
   try {
-    if ((await sendToPm(env, project, pm, String(rec.text))) as unknown === false) throw new Error("发送端回 false");
+    if ((await sendToPm(env, project, pm, String(rec.text), "action")) as unknown === false) throw new Error("发送端回 false");
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return void failed.push({ taskId, error: `合并待处置提醒发给 ${pm} 失败：${(e as Error).message}` });

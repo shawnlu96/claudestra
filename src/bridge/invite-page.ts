@@ -5,8 +5,13 @@
  * 对方的 Claudestra 地址这张页不知道，也绝不让人填：手机走 App 链接 claudestra://，电脑走浏览器登记过的
  * web+claudestra: 链接，都不行就复制邀请，他打开自己的 Claudestra 时会从剪贴板认出来。
  * 挂在 /api/v1 下是因为 HTTPS 反代和 peer 专用端口都只转发这一段。
+ * scheme 按 rename.browserProtocol（lib/floka-browser-protocol/invite.ts）：write=on 才给 floka:// / web+floka:，缺省与现行逐字相同；
+ * 旧链接（别人早先发出的 claudestra:// / web+claudestra:）不经这张页，由对方的 App / 浏览器登记直接接，一直能开。
  */
+import { inviteSchemes, type InviteSchemes } from "../lib/floka-browser-protocol/invite.js";
+import { browserPolicy, type BrowserPolicy } from "../lib/floka-browser-protocol/policy.js";
 
+const SCHEMES = "__INVITE_SCHEMES__";
 const HTML = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Claudestra 协作邀请</title>
@@ -52,7 +57,7 @@ h1{font-size:19px;margin:0 0 6px;text-wrap:balance}p{margin:6px 0;color:var(--mu
     ta.remove(); return ok;
   }
   var open = el("a", "btn", mobile ? "在 Claudestra App 中打开" : "在我的 Claudestra 中打开");
-  open.href = (mobile ? "claudestra://join#" : "web+claudestra:") + code;
+  open.href = ${SCHEMES} + code;
   var c = el("button", "btn sec", "复制邀请");
   c.onclick = function(){ copy(c); };
   el("p", "small", mobile
@@ -61,8 +66,13 @@ h1{font-size:19px;margin:0 0 6px;text-wrap:balance}p{margin:6px 0;color:var(--mu
 })();
 </script></body></html>`;
 
-export function invitePageResponse(): Response {
-  return new Response(HTML, {
+/** 脚本里的 scheme 只来自固定表（inviteSchemes）；JSON 编码，缺省档生成的那一句与改名前逐字相同 */
+function invitePageHtml(s: InviteSchemes): string {
+  return HTML.split(SCHEMES).join(`(mobile ? ${JSON.stringify(s.app)} : ${JSON.stringify(s.web)})`);
+}
+
+export function invitePageResponse(policy: BrowserPolicy = browserPolicy()): Response {
+  return new Response(invitePageHtml(inviteSchemes(policy)), {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",

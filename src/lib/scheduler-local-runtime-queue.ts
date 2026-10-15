@@ -84,7 +84,7 @@ async function stillReady({ io, plan: p, opts }: Pending): Promise<string | null
 async function notify(item: Pending, text: string): Promise<void> {
   try {
     if (item.opts.queuedNotice) await item.opts.queuedNotice(text);
-    else await notifyProjectPm(item.io.db(), item.plan.project, text, { fromName: "scheduler" });
+    else await notifyProjectPm(item.io.db(), item.plan.project, text, { fromName: "scheduler", level: "action" });
   } catch (e) { console.error(`[scheduler-local-runtime] 排队开卡结果通知失败：${(e as Error).message}`); }
 }
 

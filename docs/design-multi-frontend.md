@@ -388,7 +388,7 @@ modal，选择动作只能由 owner 完成。API/Telegram 用户触发它们时�
 | C1 | parseChatId + adapters 注册表 + Discord send 包壳 | ~150 行 | 低 |
 | C2 | Discord 全面收编 | 渐进，不计 | — |
 
-- 发布：A 可单独发；A+B+C1 合并为一个 **minor**（headline：「Claudestra 现在有开放的
+- 发布：A 可单独发；A+B+C1 合并为一个 **minor**（headline：「Floka 现在有开放的
   HTTP API 与实时事件流——网页端、Telegram、任何前端都能接入」）。遵守攒批规则。
 
 > **已完成（v2.6.0）**：本节是当时的排期，A/B/C1 最终随 v2.6.0 一起发布。之后
@@ -415,7 +415,7 @@ modal，选择动作只能由 owner 完成。API/Telegram 用户触发它们时�
 ## 12. Claude Code agents 模式适配（2026-07-09 追加，owner 立项）
 
 CC 2.1.x 的 bg agent 体系（daemon、respawn-on-kill、每个 TUI 的 ← 键 agents 视图）
-与 Claudestra 的 tmux 前台模型冲突：误按 ← 可把前台会话 fork 成 bg 分身、窗口变
+与 Floka 的 tmux 前台模型冲突：误按 ← 可把前台会话 fork 成 bg 分身、窗口变
 attach 旁观视图、Discord/MCP 链路静默断掉（当日事故三连环，见 mem0）。上游无禁用
 开关（keybindings 不覆盖 agents 视图、settings 无相关键）。
 

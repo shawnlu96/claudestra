@@ -1,10 +1,10 @@
-# Claudestra iOS 壳(Capacitor)
+# Floka iOS 壳(Capacitor)
 
 WKWebView 直接加载自托管的 web 客户端,不打包前端;壳只负责图标/启动图、状态栏与安全区、
 原生键盘、APNs 推送(WKWebView 无 Service Worker,Web Push 不可用)、离线错误页。
 
 **服务器地址不编进包**:首次启动显示本地设置页(`www/index.html`),填入你自己部署的
-Claudestra 地址后存在本机(UserDefaults),之后直接加载它;web 设置里可「更换服务器」。
+Floka 地址后存在本机(UserDefaults),之后直接加载它;web 设置里可「更换服务器」。
 实现:`ios/App/App/ServerConfig.swift`(`ServerConfig` 插件)+ `ClaudestraViewController.swift`
 (运行时把地址塞进 Capacitor 的 serverURL)。同一份包可以分发给任何人连各自的服务器。
 

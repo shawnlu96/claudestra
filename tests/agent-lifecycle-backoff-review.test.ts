@@ -105,12 +105,12 @@ describe("pm-delivery: the notice goes through the PM channel, and only a delive
       calls.push({ project, text, alive: o.stillActive!() });
     };
     const a = { agent: "agent-d", taskId: "C1" } as Action;
-    await lifecycleNotifier(f.db, config, () => {}, send)(a, "hi");
+    await lifecycleNotifier(f.db, config, () => {}, send)(a, "hi", "action");
     expect(calls).toEqual([{ project: "p", text: "hi", alive: true }]);
-    await lifecycleNotifier(f.db, config, () => {}, send)({ ...a, taskId: null }, "no card");
+    await lifecycleNotifier(f.db, config, () => {}, send)({ ...a, taskId: null }, "no card", "action");
     expect(calls[1].project).toBe("other");
     const stopped = () => { throw new SchedulerStopped("lease lost"); };
-    await expect(lifecycleNotifier(f.db, config, stopped, send)(a, "x")).rejects.toThrow("lease lost");
+    await expect(lifecycleNotifier(f.db, config, stopped, send)(a, "x", "action")).rejects.toThrow("lease lost");
     expect(calls.length).toBe(2);
   });
 });

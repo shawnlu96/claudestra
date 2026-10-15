@@ -1,11 +1,20 @@
 /**
- * Claudestra Web Push Service Worker。
+ * Floka Web Push Service Worker。
  * - push：无条件展示通知（iOS/Safari 对「push 到达却不展示」有惩罚，静默几次后丢弃该订阅的后续推送；每条独立 tag）；
  *   dismiss 型只清同一台机器（fp）、同 agent 的旧通知；「推送不带正文」的机器发的 dismiss 与通知都不带 agent，按 fp 一起清。
  *   badge 字段同步 App 图标角标。
  * - notificationclick：聚焦已有窗口（postMessage 原地切会话；「待你处理」推送则打开抽屉），没有则新开 /chat（?ask= 由页面打开抽屉）。点通知 = 已读：回执给**发通知的那台机器**
  *   （payload 里的 fp；老 payload 没有就用 IndexedDB 里记的当前机器）——凭据是 HttpOnly cookie，SW 的 fetch 自动带上。
+ * - 品牌两族（src/lib/floka-browser-protocol/sw.ts 是同一套规则，tests/floka-browser-protocol.test.ts 对照）：
+ *   payload 不带 proto 时一切与改名前相同；proto="floka" 时缺省 tag 换新族，发给页面的消息仍是旧族 type（旧页面照认），
+ *   另带新族 alias 与通知 id，新页面按 id 去重。回执的 CSRF 头只写旧族一个：新旧 bridge 都认它，两族同发反而撞冲突。
+ *   去重只用内存，不假设已有 CacheStorage。
  */
+const BRAND = {
+  claudestra: { openAgent: "cstra-open-agent", openAsk: "cstra-open-ask", tag: "cstra" },
+  floka: { openAgent: "floka-open-agent", openAsk: "floka-open-ask", tag: "floka" },
+};
+const DEVICE_HEADER = "x-cstra-device";
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
@@ -54,19 +63,23 @@ async function receiptBase(fp) {
 async function markRead(agent, fp) {
   const base = await receiptBase(fp);
   if (base === null) return;
-  const headers = { "Content-Type": "application/json", "x-cstra-device": "1" };
+  const headers = { "Content-Type": "application/json", [DEVICE_HEADER]: "1" };
   const post = (p) => fetch(`${base}/api/v1/agents/${encodeURIComponent(agent)}/${p}`, { method: "POST", headers, body: "{}", credentials: "include" }).catch(() => {});
   await post("read");
   await post("notify-read");
 }
 
 self.addEventListener("push", (event) => {
-  let payload = { title: "Claudestra", body: "", url: "/chat", tag: "cstra", agent: "", ts: 0, type: "", fp: "" };
+  let payload = { title: "Floka", body: "", url: "/chat", tag: BRAND.claudestra.tag, agent: "", ts: 0, type: "", fp: "" };
   try {
-    payload = { ...payload, ...event.data.json() };
+    const raw = event.data.json();
+    // 新族缺省 tag 只在 payload 自己没给 tag 时生效；不带 proto 的与改名前逐字相同
+    if (raw && typeof raw === "object" && raw.proto === "floka" && !("tag" in raw)) payload.tag = BRAND.floka.tag;
+    payload = { ...payload, ...raw };
   } catch {
     /* 非 JSON payload,用默认 */
   }
+  const proto = payload.proto === "floka" ? "floka" : "";
   if (typeof payload.badge === "number" && self.navigator && typeof self.navigator.setAppBadge === "function") {
     try {
       if (payload.badge > 0) self.navigator.setAppBadge(payload.badge).catch(() => {});
@@ -97,14 +110,36 @@ self.addEventListener("push", (event) => {
       tag: payload.tag,
       icon: "/icons/icon-192.png",
       badge: "/icons/icon-192.png",
-      data: { url: payload.url, agent: payload.agent, ts: payload.ts || Date.now(), fp: payload.fp || "", ask: payload.ask || "" },
+      data: {
+        url: payload.url, agent: payload.agent, ts: payload.ts || Date.now(), fp: payload.fp || "", ask: payload.ask || "",
+        ...(proto ? { proto, id: typeof payload.id === "string" ? payload.id : "" } : {}),
+      },
     }),
   );
 });
 
+/** SW → 页面的「打开」消息：type 恒为旧族；proto=floka 补新族 alias 与 id（新页面去重用） */
+function openMessage(kind, value, fp, proto, id) {
+  const base = kind === "ask" ? { type: BRAND.claudestra.openAsk, ask: value, fp } : { type: BRAND.claudestra.openAgent, agent: value, fp };
+  if (proto !== "floka") return base;
+  return { ...base, alias: kind === "ask" ? BRAND.floka.openAsk : BRAND.floka.openAgent, ...(id ? { id } : {}) };
+}
+
+/** 同一条通知（两族各推一条、同 id）只处理一次：内存里记最近的 id，SW 重启丢了也只是可能多处理一次 */
+const handledIds = new Set();
+function firstClick(id) {
+  if (!id) return true;
+  if (handledIds.has(id)) return false;
+  if (handledIds.size >= 200) handledIds.delete(handledIds.values().next().value);
+  handledIds.add(id);
+  return true;
+}
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data || {};
+  const proto = data.proto === "floka" ? "floka" : "";
+  if (proto && !firstClick(typeof data.id === "string" ? data.id : "")) return;
   const url = data.url || "/chat";
   const agent = typeof data.agent === "string" ? data.agent : "";
   const ask = typeof data.ask === "string" ? data.ask : ""; // 「待你处理」推送：已有窗口直接打开抽屉定位这张卡
@@ -116,8 +151,8 @@ self.addEventListener("notificationclick", (event) => {
         if ("focus" in w) {
           await w.focus();
           // 已有窗口：postMessage 让页面原地切到该 agent 会话（比 navigate 整页刷新顺滑）
-          if (ask) w.postMessage({ type: "cstra-open-ask", ask, fp: data.fp || "" });
-          else if (agent) w.postMessage({ type: "cstra-open-agent", agent, fp: data.fp || "" });
+          if (ask) w.postMessage(openMessage("ask", ask, data.fp || "", proto, data.id));
+          else if (agent) w.postMessage(openMessage("agent", agent, data.fp || "", proto, data.id));
           return;
         }
       }

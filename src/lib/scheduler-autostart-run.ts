@@ -27,6 +27,7 @@ import type { TickPace } from "./scheduler-yield.js";
 import { schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 import { wipGateNode } from "./scheduler-wip-gate.js";
 import { autostartNodes } from "./scheduler-priority-order.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
 type Failed = { taskId: string; error: string }[];
@@ -43,7 +44,7 @@ export interface StartTickEnv {
   readSpec(taskId: string): SpecFile | null;
   /** Claude 的额度快照（只读、不联网）；读不到抛错或给 unknown 都不拦 */
   quota(): Promise<InventoryQuota>;
-  notifyPm(project: string, text: string): Promise<void>;
+  notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
   /** 进程内去重（额度到线按窗口只通知一次） */
   memo: Set<string>;
   now(): number;
@@ -54,7 +55,7 @@ const short = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").slice
 
 async function notify(env: StartTickEnv, project: string, text: string, failed: Failed, taskId: string): Promise<void> {
   try {
-    await env.notifyPm(project, text);
+    await env.notifyPm(project, text, "action"); // 三处调用都是开卡中断 / 失败 / 额度暂停
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     failed.push({ taskId, error: `通知 PM 失败：${(e as Error).message}` });

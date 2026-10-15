@@ -25,7 +25,8 @@ async function one(env: SpecWaitEnv, p: ObservationPlan, failed: Failed): Promis
   if (rec.ok !== true) return void failed.push({ taskId: p.taskId, error: `观察期登记 ${p.id} 核对失败：${String(rec.error ?? rec.code)}` });
   if (rec.outcome !== "judge" && rec.outcome !== "promoted" && rec.outcome !== "extended") return;
   try {
-    if (!p.authorization && rec.outcome !== "extended" && (await sendToPm(env, p.project, String(rec.to ?? ""), String(rec.text))) as unknown === false) throw new Error("发送端回 false");
+    const level = rec.outcome === "promoted" ? "info" : "action"; // 自动转正：仅供知悉；要 PM 判断的：action
+    if (!p.authorization && rec.outcome !== "extended" && (await sendToPm(env, p.project, String(rec.to ?? ""), String(rec.text), level)) as unknown === false) throw new Error("发送端回 false");
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return void failed.push({ taskId: p.taskId, error: `观察期登记 ${p.id} 的结果没发出去，下一轮重发：${(e as Error).message}` });

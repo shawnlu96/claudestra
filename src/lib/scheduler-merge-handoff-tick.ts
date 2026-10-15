@@ -15,6 +15,7 @@ import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from 
 import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 /**
  * `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in.
@@ -43,7 +44,7 @@ type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface HandoffCard<O> {
   db: Database;
   task: LedgerTask;
-  deps: { manager: Manager; notifyPm(task: LedgerTask, text: string): Promise<void>; now(): number; prState?: ReadPr };
+  deps: { manager: Manager; notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>; now(): number; prState?: ReadPr };
   out(step: string, detail: string): O;
   escalate(reason: string): Promise<O>;
 }
@@ -222,7 +223,7 @@ async function prFiles(files: HandoffFiles | null, prRef: string, head: string):
  * 合并落地要 PM 本机跟上 main 再 verify，没人推就停在 live，所以那条不能标常规（tests/pm-notice-level.test.ts）。
  */
 const tell = (c: HandoffCard<unknown>, text: string, routine = false): Promise<void> => {
-  const send = () => c.deps.notifyPm(c.task, text);
+  const send = () => c.deps.notifyPm(c.task, text, routine ? "info" : "action");
   return (routine ? asInfo(send) : send()).catch((e) => {
     if (e instanceof SchedulerStopped) throw e;
     console.error(`⚠️ [scheduler] ${c.task.id} 合并交接通知没发出去（台账已记）：${(e as Error).message}`);

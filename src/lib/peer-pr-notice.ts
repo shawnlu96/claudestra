@@ -12,6 +12,7 @@ import type { PeerPrGithub } from "./peer-pr-github.js";
 import { pushDedupKey, unsentNotices, type PushResult } from "./peer-pr-ledger.js";
 import type { LocalIdentity } from "./peer-pr-redact.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export type BridgeSendResult = Awaited<ReturnType<typeof bridgeSend>>;
@@ -24,7 +25,7 @@ export interface PeerPrDeps {
   manager: Manager;
   /** One `peer_pr_push` frame to the bridge (bridgeSend with the pass's stillActive). */
   bridge(frame: Record<string, unknown>): Promise<BridgeSendResult>;
-  notifyPm(project: string, text: string): Promise<void>;
+  notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
   /** A review report, only from under ledger/reviews and at most REPORT_MAX_BYTES. */
   readReport(path: string): { text: string } | { error: string };
   identity: LocalIdentity;
@@ -77,7 +78,7 @@ export async function noticeOnce(c: PeerPrCtx, target: string, key: string, text
     msg = text;
   }
   try {
-    await c.deps.notifyPm(c.cfg.project, msg);
+    await c.deps.notifyPm(c.cfg.project, msg, "action");
   } catch (e) {
     logUnlessStopped("通知 PM 没发出去（台账已记，稍后重发）", e);
     c.state.noticeFailAt.set(memo, c.deps.now());

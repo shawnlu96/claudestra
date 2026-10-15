@@ -9,6 +9,6 @@ export async function notifyAutostartQuotaWait(env: StartTickEnv, project: strin
   const key = `quota:codex:${over.id}:${over.resetsAtMs ?? "?"}`;
   if (env.memo.has(key)) return;
   const reset = over.resetsAtMs ? new Date(over.resetsAtMs).toISOString() : "未知";
-  await env.notifyPm(project, `[自动开卡] Codex 周额度 ${over.id} 已用 ${over.usedPct}%，到了 ${codexWeeklyLine(env.db, project)}% 的线，暂停自动开卡（窗口 ${reset} 重置）。`);
+  await env.notifyPm(project, `[自动开卡] Codex 周额度 ${over.id} 已用 ${over.usedPct}%，到了 ${codexWeeklyLine(env.db, project)}% 的线，暂停自动开卡（窗口 ${reset} 重置）。`, "action");
   env.memo.add(key);
 }

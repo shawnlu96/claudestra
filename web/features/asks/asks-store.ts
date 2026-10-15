@@ -14,6 +14,7 @@ import { askFromLink, hashBase, leavePlan, shouldPush } from "@/lib/hash-nav";
 import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
 import { applyPending, ASK_EVENT_REFRESH_MS, ASK_LIST_WAIT_MS, PENDING_MAX_MS, type PendingAnswer, type WebAsk } from "./asks-model";
 import { isAskForViewer } from "./ask-viewer";
+import { onSwOpen } from "@/lib/sw-inbox";
 
 export interface AsksSnap {
   asks: WebAsk[];
@@ -264,11 +265,8 @@ export const asksStore = {
         await new Promise((r) => setTimeout(r, wait));
       }
     })();
-    // 已有窗口时点「待你处理」推送：SW 发 cstra-open-ask（web/public/sw.js），直接打开抽屉定位；别的机器发的先不管（按当前机器显示）
-    const onSw = (e: MessageEvent) => {
-      const d = e.data as { type?: string; ask?: string };
-      if (d?.type === "cstra-open-ask" && d.ask) enter(d.ask);
-    };
+    // 已有窗口时点「待你处理」推送：SW 发 cstra-open-ask（web/public/sw.js；两族都认、同一条只处理一次，lib/sw-inbox.ts），直接打开抽屉定位；别的机器发的先不管（按当前机器显示）
+    const onSw = (e: MessageEvent) => onSwOpen("ask", e.data, (o) => enter(o.value));
     // 左滑 / 返回键落到 #asks 就开（含从「回到对话」的会话页退回来），离开就关
     const onPop = () => {
       const on = onAsksPage();

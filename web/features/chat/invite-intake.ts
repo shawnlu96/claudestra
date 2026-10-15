@@ -1,6 +1,6 @@
 /**
  * 被邀请方这一侧「收邀请」的小状态（tests/web-invite-intake.test.ts）：
- * - 浏览器登记：让本浏览器用这个 Claudestra 打开 web+claudestra: 链接（邀请落地页的「在我的 Claudestra 中打开」）。
+ * - 浏览器登记：让本浏览器用这个 Floka 打开 web+claudestra: 链接（邀请落地页的「在我的 Floka 中打开」）。
  *   浏览器不告诉我们用户允没允许，只能等真有一次经登记跳进 /join（?i=）才算确认；确认前隔几天提醒一次。
  * - 剪贴板里的邀请：同一个邀请码只提示一次（处理过的记下来）。
  * 所有 localStorage 读写都包 try/catch：隐私模式 / 禁存储时照样能用，只是会多提醒。
@@ -20,7 +20,7 @@ const store = (): Store | null => {
   }
 };
 
-/** 该不该弹「允许用 Claudestra 打开邀请链接」：支持登记、还没确认过、且不在「以后再说」的冷却期里 */
+/** 该不该弹「允许用 Floka 打开邀请链接」：支持登记、还没确认过、且不在「以后再说」的冷却期里 */
 export function shouldAskHandler(supported: boolean, now = Date.now(), s: Store | null = store()): boolean {
   if (!supported) return false;
   const v = s?.getItem(HANDLER_KEY) ?? "";

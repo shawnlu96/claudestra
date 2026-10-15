@@ -29,7 +29,7 @@ async function handoffFixture() {
   const reads: string[] = [], levels: string[] = [];
   const hand = async () => {
     const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps,
-      notifyPm: async (t, text) => { levels.push(pmNoticeLevel.getStore() ?? "none"); await f.tickDeps.notifyPm(t, text); },
+      notifyPm: async (t, text, level) => { levels.push(pmNoticeLevel.getStore() ?? "none"); await f.tickDeps.notifyPm(t, text, level); },
       prState: async (ref) => { reads.push(ref); if (pr instanceof Error) throw pr; return pr; } });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];

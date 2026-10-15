@@ -98,7 +98,7 @@ function SkillRow({ s, home, showRuntime, offIn }: { s: LibrarySkill; home: stri
         <span className="min-w-0 truncate font-mono text-[13px] font-medium">{s.name}</span>
         {showRuntime && <span className={`${tag} badge-ghost`}>{RUNTIME_LABEL[s.runtime]}</span>}
         <span className={`${tag} badge-ghost`}>{t(SCOPE_LABEL[s.scope])}</span>
-        {s.managedBy && <span className={`${tag} badge-info badge-outline`}>{s.managedBy === "claudestra" ? "Claudestra" : "CC Switch"}</span>}
+        {s.managedBy && <span className={`${tag} badge-info badge-outline`}>{s.managedBy === "claudestra" ? "Floka" : "CC Switch"}</span>}
         {s.shadowedBy && <span className={`${tag} badge-warning`}>{t("被{scope}的同名技能盖过", { scope: t(SCOPE_LABEL[s.shadowedBy]) })}</span>}
         {!s.shadowedBy && s.runtime !== "claude-code" && s.sameNameElsewhere > 0 && (
           <span className={`${tag} badge-warning badge-outline`}>{t("同名还有 {n} 处", { n: s.sameNameElsewhere })}</span>

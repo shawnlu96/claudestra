@@ -332,7 +332,7 @@ The Discord logic still living in `bridge.ts` (inbound `messageCreate`, slash co
 | C1 | parseChatId + adapters registry + Discord send wrapper | ~150 lines | Low |
 | C2 | Full Discord absorption | Incremental, not counted | — |
 
-- Release: A could ship on its own; A+B+C1 are merged into a single **minor** (headline: "Claudestra now has an open HTTP API and a live event stream — web clients, Telegram, any frontend can plug in"). Follow the batching rule.
+- Release: A could ship on its own; A+B+C1 are merged into a single **minor** (headline: "Floka now has an open HTTP API and a live event stream — web clients, Telegram, any frontend can plug in"). Follow the batching rule.
 
 > **Shipped (v2.6.0)**: this section is the schedule as it stood then; A/B/C1 all shipped
 > together in v2.6.0. Later additions are outside this plan (the agents-mode adaptation in
@@ -349,7 +349,7 @@ The Discord logic still living in `bridge.ts` (inbound `messageCreate`, slash co
 
 ## 12. Adapting to Claude Code agents mode (added 2026-07-09, scheduled by the owner)
 
-CC 2.1.x's bg-agent system (a daemon, respawn-on-kill, the ← key opening the agents view in every TUI) conflicts with Claudestra's tmux-foreground model: a mis-pressed ← can fork a foreground session into a bg doppelganger, turn the window into a read-only attach view, and silently break the Discord/MCP link (three chained incidents that day; see mem0). Upstream provides no way to disable it (keybindings don't cover the agents view and there is no relevant settings key).
+CC 2.1.x's bg-agent system (a daemon, respawn-on-kill, the ← key opening the agents view in every TUI) conflicts with Floka's tmux-foreground model: a mis-pressed ← can fork a foreground session into a bg doppelganger, turn the window into a read-only attach view, and silently break the Discord/MCP link (three chained incidents that day; see mem0). Upstream provides no way to disable it (keybindings don't cover the agents view and there is no relevant settings key).
 
 The adaptation follows this design's transport-decoupling principle — management visibility is also a neutral service rendered on multiple frontends:
 

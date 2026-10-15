@@ -134,11 +134,11 @@ test("无 manage 授权、有打开方式：菜单照常，但没有『主管 PM
   await ui.unmount();
 });
 
-test("有 manage、本机没有打开方式：菜单能打开且只显示『主管 PM』（带当前 PM 名）", async () => {
+test("有 manage、本机没有打开方式：菜单能打开，只有 manage 才给的「主管 PM」（带当前 PM 名）和「接入编排」（ONB-3）", async () => {
   const ui = await mount();
   await ui.open();
   expect(ui.menu()).not.toBeNull();
-  expect(ui.labels()).toEqual(["主管 PM · pm-a▸"]);
+  expect(ui.labels()).toEqual(["主管 PM · pm-a▸", "接入编排"]);
   await ui.unmount();
 });
 
@@ -249,7 +249,7 @@ test("菜单关掉后结果才回来：不去关新开的菜单；失败原因�
   await React.act(async () => state.pending.shift()!({ ok: false, status: 403, error: "late denied" }));
   await tick();
   expect(ui.menu()).not.toBeNull();
-  expect(ui.labels()).toEqual(["主管 PM · pm-a▸"]);
+  expect(ui.labels()).toEqual(["主管 PM · pm-a▸", "接入编排"]);
   expect(ui.body()).toContain("主管 PM 切换失败：late denied");
   await ui.unmount();
 });

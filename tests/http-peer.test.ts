@@ -224,6 +224,45 @@ describe("http-peer 出站状态机", () => {
     expect(h.pushed.length).toBe(0);
   });
 
+  // [验收线 1]
+  test("oneShot 带级别:请求体带 level(info / action);非 oneShot、oneShot 没标级别都不带(agents-PEERLEVEL1)", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    initHttpPeer({
+      deliver: async (env) => ({ envelope: env, outcome: { kind: "sent" } }),
+      fetchImpl: (async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(String(init.body)));
+        return json(202, { ok: true, accepted: true, threadId: "t9" });
+      }) as unknown as typeof fetch,
+      pollIntervalMs: 10, pollGiveUpMs: 50, findPeer: async () => PEER,
+    });
+    const cases: [boolean | "info" | "action", unknown][] = [["info", "info"], ["action", "action"], [true, undefined]];
+    for (const [i, [arg, want]] of cases.entries()) {
+      expect(routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "进度", undefined, arg).pushBack).toBe(false);
+      for (let t = 0; t < 200 && bodies.length <= i; t++) await sleep(10);
+      expect(bodies[i]!.wait).toBe(0);
+      expect(bodies[i]!.level).toBe(want);
+      expect("level" in bodies[i]!).toBe(want !== undefined);
+    }
+    // 非 oneShot:不带 level(发送侧本来就不会把级别传给非 oneShot;bridge.ts 只在 oneShot 时传级别)
+    expect(routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题").pushBack).toBe(true);
+    for (let t = 0; t < 200 && bodies.length <= cases.length; t++) await sleep(10);
+    expect("level" in bodies[cases.length]!).toBe(false);
+    await sleep(150); // 非 oneShot 那条轮询到 pollGiveUpMs 收尾,别漏进下一条用例
+  });
+
+  test("oneShot 带级别投递失败仍推回错误", async () => {
+    const h = { pushed: [] as string[] };
+    initHttpPeer({
+      deliver: async (env) => (h.pushed.push(env.content), { envelope: env, outcome: { kind: "sent" } }),
+      fetchImpl: (async () => json(403, { ok: false })) as unknown as typeof fetch,
+    });
+    const r = routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "FYI", undefined, "info");
+    expect(r.pushBack).toBe(false);
+    await firstPush(h);
+    expect(h.pushed).toHaveLength(1);
+    expect(h.pushed[0]).toContain("拒绝了请求");
+  });
+
   test("oneShot 投递失败仍推回错误——失败绝不静默", async () => {
     const h = { pushed: [] as string[] };
     initHttpPeer({

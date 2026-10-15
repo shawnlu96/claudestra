@@ -44,14 +44,14 @@ bun run setup
 
 就这样。向导负责剩下的一切：检查依赖、带你创建 Discord bot（内嵌链接 + 一步一步说点哪里）、收集所有需要的 ID、写 `.env`、渲染 `master/CLAUDE.md`、注册 MCP、装好三个 launchd daemon。
 
-### 跨 Claudestra 协作（HTTP peer）
+### 跨 Floka 协作（HTTP peer）
 
-两个 Claudestra 实例共享专精 agent，不需要共享 Discord 服务器、不需要第二个 bot、更不用给对方文件系统 / SSH 权限 —— peer 之间就是互为 API 客户端：各自持有对方签发的、按 agent 圈定 scope 的 Bearer token。
+两个 Floka 实例共享专精 agent，不需要共享 Discord 服务器、不需要第二个 bot、更不用给对方文件系统 / SSH 权限 —— peer 之间就是互为 API 客户端：各自持有对方签发的、按 agent 圈定 scope 的 Bearer token。
 
 **一键邀请（v2.15+，推荐）** —— 两步完成，零表单：
 
 1. **A 生成邀请**：Web 客户端 设置 → Peer 协作 → 「生成邀请」（勾选要开放的 agent），或 `bun src/manager.ts peer-invite-new --agents <a,b>`。连着中继时得到的是一条链接（`https://<中继>/i#…`），没中继是一段邀请串。发给对方（走任意私聊渠道）。
-2. **B 点开**（链接直接落到他自己 Claudestra 的加入页，点一下完成）**或粘贴**：设置 → Peer 协作 → 「加入」，或 `bun src/manager.ts peer-join-auto '<邀请>'`。B 的 bridge 自动回调 A 完成登记——搞定，A 会收到接入通知。
+2. **B 点开**（链接直接落到他自己 Floka 的加入页，点一下完成）**或粘贴**：设置 → Peer 协作 → 「加入」，或 `bun src/manager.ts peer-join-auto '<邀请>'`。B 的 bridge 自动回调 A 完成登记——搞定，A 会收到接入通知。
 
 邀请串一次性、24h 过期（过期/撤销都会连带吊销内嵌 token；`peer-invite-list` / `peer-invite-revoke <id>` 管理待兑换的）。B 粘贴加入时**默认不开放自己的任何 agent**——这是单向授权（B 可调用 A 开放的 agent）；要对称访问，B 也生成一张邀请发回去即可，条目会自动合并成同一个 peer。
 
@@ -81,14 +81,14 @@ bun run setup
 
    bridge 日志会打出 `🛰 中继: 已连接 …`。机器在中继上的身份是密钥指纹（`claudestra relay-status`），不是主机名。
 2. 电脑上运行 `claudestra pair`：打印二维码、链接（`https://relay.example.com/pair#…`）和一个 8 位码（10 分钟有效、只能用一次）。手机相机扫码、任何浏览器打开链接、或在 `https://relay.example.com/` 输入短码——输短码的要在终端（或网页「设备」面板）点头确认。之后这个浏览器持有由**你自己的 bridge** 签发的设备凭据，没有密码这回事；一个浏览器可以配对多台机器，顶栏切换。Web 客户端的 Peer 面板也有「配对新设备」按钮。
-3. 邀请变成链接：设置 → Peer 协作 → 「生成邀请」得到 `https://relay.example.com/i#…`，对方点开就到他自己的 Claudestra 的加入页；没装的人会被引导先安装。
+3. 邀请变成链接：设置 → Peer 协作 → 「生成邀请」得到 `https://relay.example.com/i#…`，对方点开就到他自己的 Floka 的加入页；没装的人会被引导先安装。
 
 一句实话：这版中继是 TLS 的终点、也托管网页的 JS，看得见隧道里的明文（包括设备 cookie）——信任托管中继等于信任它的运营方，和任何 SaaS 一样。自己跑一台见 [docs/relay/self-host.md](docs/relay/self-host.md)，协议与边界见 [docs/relay/protocol.md](docs/relay/protocol.md)，整体设计见 [docs/design-hosted-frontend.md](docs/design-hosted-frontend.md)。
 
 ### 装完有什么
 
 - **多 agent 编排** — `#control` 里的大总管给每个 agent 开独立 Discord 频道、路由消息、挂截图、处理打断。
-- **自动更新** — Claudestra 自身每 30 分钟查一次 release；Claude Code CLI 每 7 天查一次。两个都用 `bun src/manager.ts auto-update <target> on|off` 切换。
+- **自动更新** — Floka 自身每 30 分钟查一次 release；Claude Code CLI 每 7 天查一次。两个都用 `bun src/manager.ts auto-update <target> on|off` 切换。
 - **Discord slash 自动补全** — `~/.claude/skills/` 的 user skill、已装插件、每个 agent 的项目级 `<cwd>/.claude/skills/`、以及精选的 Claude Code 内置命令（`/cost` `/context` `/compact` `/mcp` `/review` …）都会注册成 Discord slash 命令，每 30min 自动重扫。
 - **TUI modal 适配** — 数字菜单（`/model`）和水平滑杆（`/effort`）转成 Discord 按钮；bridge 处理不了的 modal 点 🤖 升级到大总管处理。
 - **Cron 定时任务** — `cron-add` / `cron-list` / `cron-history`；临时起 agent 跑 prompt 报告再销毁。
@@ -180,7 +180,7 @@ bun src/manager.ts install-cli
 
 ## 升级
 
-默认情况下 Claudestra 和 Claude Code 都会后台自动升级，你什么都不用做。Claudestra 每 30 分钟查一次，Claude Code 每周一次，只有在所有 agent 空闲时才会真正升级。升级前后 `#control` 频道 @ 你一次。
+默认情况下 Floka 和 Claude Code 都会后台自动升级，你什么都不用做。Floka 每 30 分钟查一次，Claude Code 每周一次，只有在所有 agent 空闲时才会真正升级。升级前后 `#control` 频道 @ 你一次。
 
 **想关闭自动升级：**
 
@@ -269,7 +269,7 @@ registry 里每个 agent 是否还有活着的 tmux window。它是**只读**的
 
 ### 装完先会这三招：看活没活、看日志、重启
 
-Claudestra 跑成三个 launchd user agent。下面的命令在任何目录下都能用。
+Floka 跑成三个 launchd user agent。下面的命令在任何目录下都能用。
 
 ```bash
 # 活没活？（第一列是 PID，"-" 表示已加载但没在跑）
@@ -335,7 +335,7 @@ Discord 每个客户端缓存 slash 命令最多 1 小时。如果你刚装了 C
 1. 等最多 30min（bridge 自动重扫并重新注册）**或** `launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge` 立即强制重扫
 2. 然后重启 Discord 手机/桌面 App 清客户端缓存
 
-Claudestra 升级后 Discord 里命令列表还是老的 —— 同样处理。
+Floka 升级后 Discord 里命令列表还是老的 —— 同样处理。
 
 ---
 
