@@ -17,10 +17,10 @@ import { readProposals, type ProposalDraft, type TeamProposal } from "../lib/tea
 import { normalizeName, output } from "./core.js";
 import { intFlag } from "./ledger-identity.js";
 // 只取类型：函数由 team-up 的 cmdTeam 注入（team-up 动态 import 本文件，再静态 import 回去就成环）
-import type { Agents, planUp, propose, ProposeOpts, teamContext } from "./team-up.js";
+import type { Agents, planUp, propose, ProposeOpts, repost, teamContext } from "./team-up.js";
 
-/** team-up 里的三个函数，cmdTeam 调 cmdOnboard 时注入；单测直接从 team-up 拿真的传进来 */
-export interface TeamUpOps { planUp: typeof planUp; propose: typeof propose; teamContext: typeof teamContext }
+/** team-up 里的函数，cmdTeam 调 cmdOnboard 时注入；单测直接从 team-up 拿真的传进来 */
+export interface TeamUpOps { planUp: typeof planUp; propose: typeof propose; repost: typeof repost; teamContext: typeof teamContext }
 
 /** 新项目段的缺省并发（PM 缺省定 2） */
 export const DEFAULT_MAX_WORKERS = 2;
@@ -47,8 +47,8 @@ export interface OnboardFacts {
   scheduler: { segment: Record<string, unknown> | null } | null;
   meta: Pick<LedgerMeta, "pms" | "team">;
   agents: Agents;
-  /** 本项目还在等 owner 点的 team up 提案 id */
-  pendingProposal: string | null;
+  /** 本项目还在等 owner 点的 team up 提案；posted = bridge 已把确认卡贴出去 */
+  pendingProposal: { id: string; posted: boolean } | null;
 }
 
 export interface OnboardPlan { items: OnboardItem[]; segment: NewProjectSegment | null; draft: ProposalDraft | null }
@@ -69,14 +69,20 @@ function wanted(f: OnboardFacts, flags: OnboardFlags): Record<string, unknown> {
     ...(flags.checks ? { requiredChecks: flags.checks } : {}), ...(flags.maxWorkers !== undefined ? { maxActiveWorkers: flags.maxWorkers } : {}) };
 }
 
+/** 已有段和这次参数想要的值不同 → 差异说明（不覆盖）；一致 → null。锁外规划和锁内发现「期间别人加上了」共用 */
+function segmentDiff(cur: Record<string, unknown>, want: Record<string, unknown>): string | null {
+  const diffs = Object.entries(want).filter(([k, v]) => JSON.stringify(cur[k]) !== JSON.stringify(v));
+  if (!diffs.length) return null;
+  return `调度项目段已在，和这次参数不同（不覆盖，要改请手动核对）：${diffs.map(([k, v]) => `${k} 现在 ${show(cur[k])}，这次 ${show(v)}`).join("；")}`;
+}
+
 function schedulerItem(f: OnboardFacts, flags: OnboardFlags): { item: OnboardItem; segment: NewProjectSegment | null } {
   const at = (status: ItemStatus, text: string) => ({ item: { key: "scheduler" as const, status, text }, segment: null });
   if (!f.scheduler) return at("blocked", "scheduler.json 不存在：先配置调度服务（onboard 不新建这个文件，也不碰全局开关）");
   const cur = f.scheduler.segment;
   if (cur) {
-    const diffs = Object.entries(wanted(f, flags)).filter(([k, v]) => JSON.stringify(cur[k]) !== JSON.stringify(v));
-    if (!diffs.length) return at("ok", "调度项目段已在");
-    return at("diff", `调度项目段已在，和这次参数不同（不覆盖，要改请手动核对）：${diffs.map(([k, v]) => `${k} 现在 ${show(cur[k])}，这次 ${show(v)}`).join("；")}`);
+    const diff = segmentDiff(cur, wanted(f, flags));
+    return diff ? at("diff", diff) : at("ok", "调度项目段已在");
   }
   if (!f.dir) return at("blocked", "没有目录，建不了调度项目段");
   if (!flags.checks) return at("blocked", "新增调度项目段要带 --checks（本地合并 = 要跑的命令，PR 项目 = CI 检查名；多条用逗号分）");
@@ -94,7 +100,9 @@ function teamItem(f: OnboardFacts, flags: OnboardFlags, plan: TeamUpOps["planUp"
   const at = (status: ItemStatus, text: string) => ({ item: { key: "team" as const, status, text }, draft: null });
   const pm = flags.pm ? normalizeName(flags.pm) : f.meta.pms[0] ?? (f.actor.startsWith("agent-") ? f.actor : null);
   if (!pm) return at("blocked", "项目还没有 PM：用 --pm <agent> 指定");
-  if (f.pendingProposal) return at("todo", `已有 team up 提案 ${f.pendingProposal} 在等 owner 确认，不再重复提议`);
+  const pending = f.pendingProposal;
+  if (pending?.posted) return at("todo", `已有 team up 提案 ${pending.id} 在等 owner 确认，不再重复提议`);
+  if (pending) return at("todo", `已有 team up 提案 ${pending.id}，但确认卡片没贴出去：接入时重贴同一份`);
   const draft = plan({ project: f.project, dir: f.dir, actor: f.actor, pm, audit: f.meta.team?.audit ?? true, meta: f.meta, agents: f.agents });
   if ("error" in draft) return at("blocked", draft.error);
   if (f.meta.team && f.meta.pms.includes(pm) && !draft.roles.length) return at("ok", `编排班子已开，PM ${pm} 已在名单、角色已设`);
@@ -115,7 +123,7 @@ export interface OnboardDeps {
   /** scheduler.json 路径（测试用临时文件） */
   schedulerPath?: string;
   proposals?: ProposeOpts;
-  team: Pick<TeamUpOps, "planUp" | "propose">;
+  team: Pick<TeamUpOps, "planUp" | "propose" | "repost">;
 }
 export interface OnboardInput extends Omit<OnboardFacts, "scheduler" | "meta" | "pendingProposal"> { flags: OnboardFlags; dryRun: boolean }
 
@@ -126,9 +134,37 @@ function readSegment(path: string, project: string): OnboardFacts["scheduler"] {
   return { segment: seg && typeof seg === "object" ? (seg as Record<string, unknown>) : null };
 }
 
-async function pendingOf(project: string, now: number, path?: string): Promise<string | null> {
+async function pendingOf(project: string, now: number, path?: string): Promise<TeamProposal | null> {
   const open = (p: TeamProposal) => p.project === project && p.kind === "up" && (p.status === "pending" || p.status === "confirmed") && p.expiresAt > now;
-  return Object.values(await readProposals(path)).find(open)?.id ?? null;
+  return Object.values(await readProposals(path)).find(open) ?? null;
+}
+
+type Step = { item: OnboardItem; ok: boolean; extra?: Record<string, unknown> };
+
+/**
+ * 补调度项目段。锁外规划时段还不在，进锁时可能已被别的 onboard 加上（changed:false）：和这次参数比，不同就列差异，
+ * 不能报成「已按这次参数接入」。
+ */
+async function applySegment(i: OnboardInput, d: OnboardDeps, facts: OnboardFacts, segment: NewProjectSegment): Promise<Step> {
+  try {
+    const r = await addProject(d.db, { actor: i.actor, now: d.now }, { project: i.project, segment, reason: `team onboard ${i.project}` }, { path: d.schedulerPath });
+    if (r.changed) return { ok: true, item: { key: "scheduler", status: "done", text: `已新增调度项目段（审计事件 #${r.event}）` } };
+    const diff = segmentDiff(r.from ?? {}, wanted(facts, i.flags));
+    return { ok: true, item: diff ? { key: "scheduler", status: "diff", text: diff } : { key: "scheduler", status: "ok", text: "调度项目段已在（期间别人加上了，和这次一致）" } };
+  } catch (e) {
+    const code = e instanceof LedgerError ? e.code : "error";
+    const text = `新增调度项目段没写成：${(e as Error).message}`;
+    return { ok: false, item: { key: "scheduler", status: "todo", text }, extra: { code, error: text } };
+  }
+}
+
+/** 出新提案；或已有提案但卡片没贴出去（bridge 贴成功才记 posted）就重贴同一份。贴不出去都算没完成。 */
+async function applyTeam(d: OnboardDeps, draft: ProposalDraft | null, pending: TeamProposal | null): Promise<Step | null> {
+  const r = draft ? await d.team.propose(draft, d.proposals) : pending && !pending.posted ? await d.team.repost(pending, d.proposals) : null;
+  if (!r) return null;
+  const extra = { proposal: r.proposal, ...(r.ok ? {} : { error: r.error }) };
+  if (r.ok) return { ok: true, item: { key: "team", status: "done", text: `已贴出 team up 提案 ${r.proposal} 的确认卡，等 owner 确认` }, extra };
+  return { ok: false, item: { key: "team", status: "todo", text: `提案 ${r.proposal} 已记下，但${String(r.error)}` }, extra };
 }
 
 /** 核对 → （非 dry-run）补段 → 出提案。任何一项 blocked 就什么都不写。 */
@@ -140,28 +176,21 @@ export async function runOnboard(i: OnboardInput, d: OnboardDeps): Promise<Recor
   let scheduler: OnboardFacts["scheduler"];
   try { scheduler = readSegment(d.schedulerPath ?? SCHEDULER_CONFIG_PATH, i.project); }
   catch (e) { return { ok: false, code: "invalid", error: `scheduler.json 读不出：${(e as Error).message}` }; }
-  const facts: OnboardFacts = { ...i, scheduler, meta, pendingProposal: await pendingOf(i.project, d.now, d.proposals?.path) };
+  const pending = await pendingOf(i.project, d.now, d.proposals?.path);
+  const facts: OnboardFacts = { ...i, scheduler, meta, pendingProposal: pending && { id: pending.id, posted: !!pending.posted } };
   const plan = planOnboard(facts, i.flags, d.team.planUp);
   const head = { project: i.project, dryRun: i.dryRun, git: i.git };
   const blocked = plan.items.filter((x) => x.status === "blocked");
   if (blocked.length) return { ok: false, code: "blocked", error: blocked.map((x) => x.text).join("；"), ...head, items: plan.items };
   if (i.dryRun) return { ok: true, ...head, items: plan.items };
-  const items = [...plan.items];
-  const mark = (key: ItemKey, text: string) => { const at = items.findIndex((x) => x.key === key); items[at] = { key, status: "done", text }; };
-  if (plan.segment) {
-    try {
-      const r = await addProject(d.db, { actor: i.actor, now: d.now }, { project: i.project, segment: plan.segment, reason: `team onboard ${i.project}` },
-        { path: d.schedulerPath });
-      mark("scheduler", r.changed ? `已新增调度项目段（审计事件 #${r.event}）` : "调度项目段已在（期间别人加上了，没覆盖）");
-    } catch (e) {
-      const code = e instanceof LedgerError ? e.code : "error";
-      return { ok: false, code, error: `新增调度项目段没写成：${(e as Error).message}`, ...head, items };
-    }
-  }
-  if (!plan.draft) return { ok: true, ...head, items };
-  const r = await d.team.propose(plan.draft, d.proposals);
-  mark("team", r.ok ? `已出 team up 提案 ${r.proposal}，等 owner 在卡片上确认` : `提案 ${r.proposal} 已记下，但${String(r.error)}`);
-  return { ok: r.ok === true, ...head, items, proposal: r.proposal, ...(r.ok ? {} : { error: r.error }) };
+  let items = [...plan.items];
+  const put = (step: Step) => { items = items.map((x) => (x.key === step.item.key ? step.item : x)); };
+  const seg = plan.segment ? await applySegment(i, d, facts, plan.segment) : null;
+  if (seg) put(seg);
+  if (seg && !seg.ok) return { ok: false, ...head, items, ...seg.extra };
+  const team = await applyTeam(d, plan.draft, pending);
+  if (team) put(team);
+  return { ok: team?.ok ?? true, ...head, items, ...team?.extra };
 }
 
 /** --checks "a,b"：逗号分条（一条检查本身不许含逗号，见 parseRequiredChecks） */

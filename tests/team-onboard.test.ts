@@ -10,11 +10,11 @@ import { join } from "node:path";
 import { getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import { readSchedulerConfig } from "../src/lib/scheduler-config.js";
-import { readProposals, type TeamProposal } from "../src/lib/team-proposal.js";
+import { readProposals, updateProposals, type TeamProposal } from "../src/lib/team-proposal.js";
 import { planOnboard, runOnboard, splitChecks, type OnboardFacts, type OnboardInput } from "../src/manager/team-onboard.js";
-import { planUp, propose } from "../src/manager/team-up.js";
+import { planUp, propose, repost } from "../src/manager/team-up.js";
 
-const team = { planUp, propose };
+const team = { planUp, propose, repost };
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const P = "dn";
@@ -25,14 +25,23 @@ let dir: string;
 let schedulerPath: string;
 let proposalsPath: string;
 let posted: TeamProposal[];
+/** 非空 = 桩当作 bridge 贴卡失败，返回这段错误 */
+let postFail: string | null;
 
 const agents = { "agent-dn-pm": { status: "active", projectId: P }, "agent-exec": { status: "active", projectId: P } };
 const input = (o: Partial<OnboardInput> = {}): OnboardInput => ({
   project: P, dir: "/repos/dn", git: "no-origin", actor: "agent-dn-pm", agents, dryRun: false,
   flags: { localMerge: true, checks: ["cargo test"] }, ...o,
 });
+/** 贴卡桩：同 bridge postProposalCard，贴成功才在提案上记 posted */
+async function post(p: TeamProposal): Promise<string | null> {
+  posted.push(p);
+  if (postFail) return postFail;
+  await updateProposals((m) => void (m[p.id]!.posted = { chatId: "c", messageIds: [] }), NOW, proposalsPath);
+  return null;
+}
 const run = (o: Partial<OnboardInput> = {}) =>
-  runOnboard(input(o), { db, now: NOW, schedulerPath, team, proposals: { path: proposalsPath, post: async (p) => (posted.push(p), null) } }) as Promise<Record<string, any>>;
+  runOnboard(input(o), { db, now: NOW, schedulerPath, team, proposals: { path: proposalsPath, post } }) as Promise<Record<string, any>>;
 const snap = () => ({
   sched: readFileSync(schedulerPath, "utf8"), mtime: statSync(schedulerPath).mtimeMs,
   proposals: existsSync(proposalsPath) ? readFileSync(proposalsPath, "utf8") : null, events: listEvents(db, { project: P }).length,
@@ -45,6 +54,7 @@ beforeEach(() => {
   proposalsPath = join(dir, "proposals.json");
   writeFileSync(schedulerPath, JSON.stringify(SCHED, null, 2) + "\n");
   posted = [];
+  postFail = null;
   setMeta(db, { actor: "owner", now: 1 }, { project: P, key: "pms", value: ["agent-dn-pm"] });
 });
 
@@ -117,6 +127,33 @@ describe("team onboard", () => {
     expect(item.text).toContain("requiredChecks");
     expect(item.text).toContain("maxActiveWorkers");
     expect(snap()).toEqual(before);
+  });
+
+  test("r1 proposal-card-retry：卡片第一次没贴出去 → 报未完成；重跑重贴同一份提案；贴出后再跑不再贴", async () => {
+    postFail = "bridge 不在";
+    const first = await run();
+    expect(first.ok).toBe(false);
+    expect(first.items.find((x: { key: string }) => x.key === "team").status).toBe("todo");
+    const id = first.proposal;
+    postFail = null;
+    const second = await run();
+    expect(second).toMatchObject({ ok: true, proposal: id });
+    expect(second.items.find((x: { key: string }) => x.key === "team").status).toBe("done");
+    expect(posted.map((p) => p.id)).toEqual([id, id]);
+    expect(Object.keys(await readProposals(proposalsPath))).toEqual([id]);
+    const third = await run();
+    expect(third.ok).toBe(true);
+    expect(third.items.find((x: { key: string }) => x.key === "team").text).toContain("在等 owner 确认");
+    expect(posted).toHaveLength(2);
+  });
+
+  test("r1 concurrent-segment-mismatch：两个接入同时规划、参数不同，后进锁的那个列差异，不报成已按自己的参数接入", async () => {
+    const [a, b] = await Promise.all([run(), run({ flags: { localMerge: true, checks: ["cargo clippy"] } })]);
+    const sched = (r: Record<string, any>) => r.items.find((x: { key: string }) => x.key === "scheduler");
+    expect([sched(a).status, sched(b).status].sort()).toEqual(["diff", "done"]);
+    const loser = sched(a).status === "diff" ? sched(a) : sched(b);
+    expect(loser.text).toContain("requiredChecks");
+    expect(listEvents(db, { project: P }).filter((e) => e.data.op === "scheduler_project_add")).toHaveLength(1);
   });
 
   test("新增段缺 --checks、scheduler.json 不存在：拒", async () => {

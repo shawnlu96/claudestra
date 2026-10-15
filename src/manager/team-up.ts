@@ -152,9 +152,15 @@ export async function propose(draft: ProposalDraft, o: ProposeOpts = {}): Promis
   };
 }
 
+/** 提案已记下、卡片没贴出去（bridge 贴成功才记 posted）：重贴同一份，不另起提案；返回形状同 propose */
+export async function repost(p: TeamProposal, o: ProposeOpts = {}): Promise<Record<string, unknown>> {
+  const postError = await (o.post ?? postCard)(p);
+  return { ok: !postError, proposal: p.id, status: p.status, ...(postError ? { error: `${postError}；提案已记下，可稍后重跑` } : {}) };
+}
+
 export async function cmdTeam(args: string[]): Promise<void> {
   const sub = args[0] ?? "";
-  if (sub === "onboard") return (await import("./team-onboard.js")).cmdOnboard(args, { planUp, propose, teamContext });
+  if (sub === "onboard") return (await import("./team-onboard.js")).cmdOnboard(args, { planUp, propose, repost, teamContext });
   if (!["up", "down", "status"].includes(sub)) {
     output({ ok: false, error: "usage: team up|down|status --project <id> [--pm <agent>] [--dispatcher | --dispatcher-agent <agent> | --no-dispatcher] [--no-audit]"
       + " | team onboard --project <id> [--local-merge] [--checks \"a,b\"] [--max-workers N] [--pm <agent>] [--dry-run]" });
