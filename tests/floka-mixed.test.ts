@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { admitRun, NOT_COVERED, parseRollout, rolloutPlan, rolloutSteps, upgradeOrders, CUT_PARTS } from "../scripts/rename-floka/mixed/rollout.ts";
 import { cardMerges, preflight, PRIOR_CARDS, DAEMONS } from "../scripts/rename-floka/mixed/preflight.ts";
-import { closeWorld, MACHINES, rollbackCenter, rollbackMachine, runOrder, checkpoint, createWorld, type World } from "../scripts/rename-floka/mixed/matrix.ts";
+import { closeWorld, MACHINES, rollbackCenter, rollbackMachine, runOrder, checkpoint, createWorld, summarize, type World } from "../scripts/rename-floka/mixed/matrix.ts";
 import { addTask, dataRoot, launchMcp, layoutOf, OLD_SESSION, pushRows, serversSeen, tasks } from "../scripts/rename-floka/mixed/instance.ts";
 import { exchange, familyOf } from "../scripts/rename-floka/mixed/wire.ts";
 import { mixedCommand } from "../scripts/rename-floka/mixed/cli.ts";
@@ -82,6 +82,7 @@ describe("[验收线 1] 临时三实例：全部升级次序，中心 / 客户�
     test(`升级次序 ${o.join("→")}`, async () => {
       const w = await order(o);
       expect(allViolations(w)).toEqual([]);
+      expect(summarize(w)).toMatchObject({ ok: true, unexpected: [] });
       expect(w.stages.map((s) => s.step)).toEqual(["baseline", "center:dual", ...o.map((m) => `cut:${m}`), ...o.map((m) => `send:${m}`)]);
       for (const s of w.stages) {
         expect(s.ok).toBe(true);
@@ -145,6 +146,22 @@ describe("[验收线 2] 注入服务切换与迁移失败：单写者 / 单 serv
       expect([a.request, a.ledger]).toEqual([fam, fam]);
     }
     expect(stage(w, "send:beta").detail[0]).toContain("跳过");
+    expect(stage(w, "send:beta").ok).toBe(false);
+    // 注入的失败是预期内：汇总通过；同一份结果若当成未注入（意外失败），汇总必须不通过
+    expect(summarize(w)).toMatchObject({ ok: true, unexpected: [] });
+    w.expectedFaults.clear();
+    const bad = summarize(w);
+    expect(bad.ok).toBe(false);
+    expect(bad.unexpected).toEqual([expect.stringMatching(/^cut:beta: 意外失败/), expect.stringMatching(/^send:beta: 意外失败/)]);
+  }, LONG);
+
+  test("[验收线 1] 汇总不把拒绝当通过：注入了失败却没失败、或次序里的机器没执行，都判不通过", async () => {
+    const w = await order(["alpha", "beta", "gamma"]);
+    w.expectedFaults.add("alpha");
+    expect(summarize(w).unexpected).toEqual(["cut:alpha: 注入了失败却切成功"]);
+    w.expectedFaults.clear();
+    w.order.push("delta");
+    expect(summarize(w).unexpected).toEqual(["cut:delta: 没有执行", "send:delta: 没有执行"]);
   }, LONG);
 
   test("state 搬根后建别名失败：库补偿搬回，后面的分项一个都不动", async () => {
@@ -158,6 +175,9 @@ describe("[验收线 2] 注入服务切换与迁移失败：单写者 / 单 serv
     expect(await layoutOf(alpha)).toBe("legacy");
     expect(alpha.services.side()).toBe("old");
     expect(existsSync(alpha.newRoot)).toBe(false);
+    expect(summarize(w).ok).toBe(true);
+    w.expectedFaults.clear();
+    expect(summarize(w).ok).toBe(false);
   }, LONG);
 
   test("runtime 经别名看到另一个 server：拒绝并撤别名，state 回滚时新增任务保留", async () => {
@@ -170,6 +190,7 @@ describe("[验收线 2] 注入服务切换与迁移失败：单写者 / 单 serv
     expect(await serversSeen(gamma)).toEqual(["tmux-server:gamma"]);
     expect(existsSync(gamma.runtime.alias)).toBe(false);
     expect(tasks(gamma)).toEqual(["after-state-1.json", "t1.json"]);
+    expect(summarize(w).ok).toBe(true);
   }, LONG);
 
   test("迁移后新增任务的完整回滚：任务、新族会话记录、身份、旧会话都在；回滚后它只收旧族", async () => {
@@ -271,6 +292,22 @@ describe("[验收线 4] 隔离：on 只放行临时三实例 + 本机假中心�
     expect(r).toMatchObject({ ran: true, ok: true, orders: [{ order: ["gamma", "alpha", "beta"], ok: true }] });
     expect(readdirSync(home)).toEqual([]);
     expect(readdirSync(tmp)).toEqual([]);
+  }, LONG);
+
+  test("[验收线 1] CLI：迁移意外拒绝（长路径被事务日志当成凭据）时 ok=false、退出码 1，不把没切完当通过", async () => {
+    const long = join(base(), "a".repeat(90));
+    mkdirSync(long);
+    const r = await mixedCommand(["run", "--mode", "on", "--order", "alpha,beta,gamma", "--tmp", long], REPO);
+    const out = r.out as { ran: boolean; ok: boolean; orders: { ok: boolean; unexpected: string[]; stages: { step: string; ok: boolean }[] }[] };
+    expect(r.code).toBe(1);
+    expect(out).toMatchObject({ ran: true, ok: false, orders: [{ ok: false }] });
+    const stages = out.orders[0]!.stages;
+    for (const m of MACHINES) {
+      expect(stages.find((s) => s.step === `cut:${m}`)!.ok).toBe(false);
+      expect(stages.find((s) => s.step === `send:${m}`)!.ok).toBe(false);
+    }
+    expect(out.orders[0]!.unexpected.some((u) => /^cut:alpha: 意外失败.*refused/.test(u))).toBe(true);
+    expect(readdirSync(long)).toEqual([]);
   }, LONG);
 
   test("CLI：observe（缺省）与越界的 --tmp 都不建任何目录", async () => {

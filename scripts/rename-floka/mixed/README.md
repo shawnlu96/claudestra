@@ -38,6 +38,10 @@ bun scripts/rename-floka/mixed/cli.ts run --mode on [--order gamma,alpha,beta] [
 - 每台四个 daemon 任何时刻最多一个写者（假控制器记 `maxLive`），runtime 新旧两条路径看到同一个 tmux server；
 - 身份、`peers.json`、旧邀请、VAPID 钥匙、状态根之外的外部配置逐字节不变；推送订阅逐行不变；任务只增不减（含迁移后新增的）。
 
+`summarize` 的 `ok` 除了不变量干净，还要求次序里每台的 `cut` 和 `send` 都执行且成功；本机没切完时 `send` 跳过记 `ok=false`。
+只有 `runOrder` 显式注入了失败的机器，其 `cut` / `send` 失败才算预期内（且注入了就必须真的失败）；其余失败（例如迁移拒绝）
+都列进 `unexpected`，CLI `run` 判 `ok=false`、退出码 1。
+
 真实的库：`migrateState` / `rollbackState`、`applyRuntimeAlias` / `rollbackRuntimeAlias`、`runServicePlan`、`selectMcpName` +
 会话族记录、`createRelay` + `connect`、`chooseSendFamily` / `verifyRequestFamilies`、`ledgerSendFamily` / `receiveLedgerUse`、
 `createPushSender`。只有服务控制器、tmux server 探针和推送服务是假的。

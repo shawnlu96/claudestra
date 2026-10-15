@@ -34,6 +34,9 @@ export interface World {
   /** 每台应当在的任务（迁移后新增的也算） */
   expectedTasks: Map<string, Set<string>>;
   stages: StageReport[];
+  /** runOrder 记下的本次升级次序与注入失败的机器：汇总据此区分「预期内回滚」和「意外失败」 */
+  order: string[];
+  expectedFaults: Set<string>;
 }
 
 export interface RunOptions {
@@ -48,7 +51,7 @@ export async function createWorld(base: string): Promise<World> {
   const wire = await startWire(insts);
   const baseline = new Map<string, { identity: string; contracts: Record<string, string>; push: string }>();
   for (const i of insts) baseline.set(i.name, { identity: await identitySum(i), contracts: contracts(i), push: JSON.stringify(pushRows(i)) });
-  return { base, insts, wire, baseline, expectedTasks: new Map(insts.map((i) => [i.name, new Set(tasks(i))])), stages: [] };
+  return { base, insts, wire, baseline, expectedTasks: new Map(insts.map((i) => [i.name, new Set(tasks(i))])), stages: [], order: [], expectedFaults: new Set() };
 }
 
 /** 一台实例此刻的不变量 */
@@ -118,12 +121,13 @@ async function cutMachine(w: World, i: MixedInstance, faults: CutPart[]): Promis
   return { ok, detail };
 }
 
-async function sendStep(w: World, i: MixedInstance): Promise<string[]> {
-  if (!receiving(i)) return ["跳过：本机未切完，不开新发送"];
+/** 跳过（本机没切完）算没完成：ok=false，只有注入失败的机器才在汇总里算预期内 */
+async function sendStep(w: World, i: MixedInstance): Promise<{ ok: boolean; detail: string[] }> {
+  if (!receiving(i)) return { ok: false, detail: ["跳过：本机未切完，不开新发送"] };
   i.rename = { ...i.rename, ...SEND_KEYS };
   await restartClient(w.wire, i);
   await reconnect(w.wire, i); // 带着上次 welcome 学到的中心能力重连
-  return [`center: ${familyOf(w.wire, i)}`];
+  return { ok: true, detail: [`center: ${familyOf(w.wire, i)}`] };
 }
 
 async function runStep(w: World, s: RolloutStep, o: RunOptions): Promise<StageReport> {
@@ -132,7 +136,10 @@ async function runStep(w: World, s: RolloutStep, o: RunOptions): Promise<StageRe
     return checkpoint(w, s.id, true, ["center: dual"]);
   }
   const i = w.insts.find((x) => x.name === s.machine)!;
-  if (s.kind === "send") return checkpoint(w, s.id, true, await sendStep(w, i));
+  if (s.kind === "send") {
+    const r = await sendStep(w, i);
+    return checkpoint(w, s.id, r.ok, r.detail);
+  }
   const r = await cutMachine(w, i, o.faults?.[i.name] ?? []);
   return checkpoint(w, `cut:${i.name}`, r.ok, r.detail);
 }
@@ -140,6 +147,8 @@ async function runStep(w: World, s: RolloutStep, o: RunOptions): Promise<StageRe
 /** 跑一个升级次序：基线 → 中心双认 → 逐机切 → 新发送 */
 export async function runOrder(base: string, order: readonly string[], o: RunOptions = {}): Promise<World> {
   const w = await createWorld(base);
+  w.order = [...order];
+  for (const [m, parts] of Object.entries(o.faults ?? {})) if (parts?.length) w.expectedFaults.add(m);
   await checkpoint(w, "baseline", true, []);
   // 计划里每台的五个分项合成一个阶段执行（同一维护窗口），其余按计划逐步
   for (const s of rolloutSteps(order)) {
@@ -168,8 +177,23 @@ export async function rollbackCenter(w: World): Promise<StageReport> {
 
 export const closeWorld = (w: World): void => stopWire(w.wire);
 
-/** 汇总：给 CLI / 测试看的形状（不含实例对象） */
-export function summarize(w: World): { ok: boolean; stages: Omit<StageReport, "arrivals">[]; roots: string[] } {
+/**
+ * 汇总：给 CLI / 测试看的形状（不含实例对象）。ok 要求不变量全干净，且请求的每台都真的切完、开了新发送；
+ * 只有 runOrder 注入了失败的机器，其 cut / send 失败才算预期内（且必须真的失败、回滚干净），其余任何 ok=false 都是意外失败。
+ */
+export function summarize(w: World): { ok: boolean; unexpected: string[]; stages: Omit<StageReport, "arrivals">[]; roots: string[] } {
   const stages = w.stages.map(({ arrivals: _a, ...s }) => s);
-  return { ok: stages.every((s) => s.violations.length === 0), stages, roots: w.insts.map((i) => join(w.base, i.name)) };
+  const unexpected: string[] = [];
+  for (const s of stages) for (const v of s.violations) unexpected.push(`${s.step}: ${v}`);
+  const machineOf = (step: string): string | undefined => /^(cut|send):(.+)$/.exec(step)?.[2];
+  for (const s of stages) {
+    const m = machineOf(s.step);
+    if (!s.ok && !(m !== undefined && w.expectedFaults.has(m))) unexpected.push(`${s.step}: 意外失败（${s.detail.join("；")}）`);
+  }
+  for (const m of w.order) {
+    for (const kind of ["cut", "send"]) if (!stages.some((s) => s.step === `${kind}:${m}`)) unexpected.push(`${kind}:${m}: 没有执行`);
+    if (w.expectedFaults.has(m) && stages.find((s) => s.step === `cut:${m}`)?.ok) unexpected.push(`cut:${m}: 注入了失败却切成功`);
+  }
+  for (const m of w.expectedFaults) if (!w.order.includes(m)) unexpected.push(`${m}: 注入失败的机器不在升级次序里`);
+  return { ok: unexpected.length === 0, unexpected, stages, roots: w.insts.map((i) => join(w.base, i.name)) };
 }

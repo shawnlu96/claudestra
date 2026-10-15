@@ -4,7 +4,8 @@
  *   plan       [--config f] [--order a,b,c]            observe（缺省）/ on 出滚动计划；off 什么都不出
  *   preflight  [--center-proof f] [--topology f]        开工前核；没有证据的项是 unverified，ready=false 时退出码 1
  *   run        --mode on | --config f  [--order a,b,c] [--tmp dir] [--keep]
- *              只在系统临时目录（--tmp 只能选其下的目录，缺省 /tmp）下新建的目录里起三实例 + 本机假中心跑矩阵；有违例退出码 1
+ *              只在系统临时目录（--tmp 只能选其下的目录，缺省 /tmp）下新建的目录里起三实例 + 本机假中心跑矩阵；
+ *              有违例、或任一台没切完 / 没开新发送（例如迁移拒绝）都判 ok=false、退出码 1
  */
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,7 +68,7 @@ async function run(f: Map<string, string>): Promise<Out> {
       try {
         const s = summarize(w);
         ok &&= s.ok;
-        reports.push({ order, ok: s.ok, stages: s.stages });
+        reports.push({ order, ok: s.ok, unexpected: s.unexpected, stages: s.stages });
       } finally {
         closeWorld(w);
       }
