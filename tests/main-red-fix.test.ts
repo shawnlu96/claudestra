@@ -108,10 +108,17 @@ describe("[验收线 7] the spec passes spec-lint and carries no local path, hos
   });
 });
 
-test("[验收线 5] mainRedRepairBind and mainRedFix without any config are observe", () => {
+test("[验收线 5] mainRedRepairBind without any config is observe (high-risk class)", () => {
   const dir = mkdtempSync(join(tmpdir(), "mrf-policy-"));
   try {
-    for (const key of ["mainRedRepairBind", "mainRedFix"] as const) expect(recoveryPolicy("p", key, join(dir, "none.json")).mode).toBe("observe");
+    expect(recoveryPolicy("p", "mainRedRepairBind", join(dir, "none.json")).mode).toBe("observe");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("[验收线 6] mainRedFix without any config is on (ordinary new key)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mrf-policy-"));
+  try {
+    expect(recoveryPolicy("p", "mainRedFix", join(dir, "none.json")).mode).toBe("on");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
