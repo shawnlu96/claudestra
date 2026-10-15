@@ -54,7 +54,8 @@ const DATA_FILES = [
 /** FILE_PATTERNS 每条的代表路径（tests 核过每条都命中对应规则） */
 export const PATTERN_PROBES = ["CLAUDE.md", "web/next.config.js", "web/public/sw.js"];
 
-type Hit = Exclude<AutoReason, "nodes_empty" | "glob_empty" | "glob_invalid" | "glob_outside_roots" | "glob_wide" | "glob_unresolved" | "text_sensitive_word" | "auto_unconfirmed" | "auto_center_refused">;
+type Hit = Exclude<AutoReason, "nodes_empty" | "glob_empty" | "glob_invalid" | "glob_outside_roots" | "glob_wide" | "glob_unresolved"
+  | "text_sensitive_word" | "auto_unconfirmed" | "auto_center_refused">;
 const CONCRETE: readonly (readonly [string, Hit])[] = [
   ...FILES.map(f => [f, "glob_security_surface"] as const),
   ...PATTERN_PROBES.map(f => [f, "glob_security_surface"] as const),
@@ -92,7 +93,7 @@ function literalHits(g: string, hits: Set<AutoReason>, names = true): void {
 
 /** 仓库里现有的文件（git ls-files，进程内只读一次）；读不到 = null，带通配的 glob 一律判 owner */
 let repoFilesCache: readonly string[] | null | undefined;
-export function repoFiles(): readonly string[] | null {
+function repoFiles(): readonly string[] | null {
   if (repoFilesCache !== undefined) return repoFilesCache;
   try {
     const r = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "ignore" });
