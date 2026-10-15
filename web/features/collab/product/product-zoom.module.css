@@ -1,0 +1,29 @@
+.viewport [data-pd-right] { top: 12px; transform: none; }
+.world [data-pd-detail], .world [data-pd-label] {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 120ms ease, visibility 0s;
+}
+.world[data-zoom='far'] [data-pd-detail], .world[data-zoom='far'] [data-pd-label] {
+  /* 明细退出卡片排版，给两行大标题和进度条留出高度。 */
+  position: absolute;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms ease, visibility 0s 120ms;
+}
+.world[data-zoom='far'] [data-pd-title] {
+  font-size: calc(13px / var(--pd-k));
+  line-height: 1.2;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-height: 2.4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (prefers-reduced-motion: reduce) {
+  .world [data-pd-detail], .world [data-pd-label],
+  .world[data-zoom='far'] [data-pd-detail], .world[data-zoom='far'] [data-pd-label] { transition: none; }
+}
