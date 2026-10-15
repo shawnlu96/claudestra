@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { createTuiScreen } from "../src/lib/acp/tui/screen.ts";
 import { createTtyScreen, type TtyScreen } from "../src/lib/acp/tty-screen.ts";
 import type { TurnState } from "../src/lib/acp/tty-status.ts";
+import { plainUserText } from "../src/lib/cc-own-records.ts";
 import { createLineTranslator } from "../src/lib/session-source.ts";
 import { CONFIG, playBusy, playSession, replayLines } from "../tests/helpers/acp-tui-session.ts";
 
@@ -70,7 +71,9 @@ async function playRestart(screen: TtyScreen, empty = false): Promise<void> {
   const huge = JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "长".repeat(1_200_000) }] } });
   writeFileSync(file, empty ? huge : `${replayLines().join("\n")}\n`);
   screen.show(mod.tuiHeader("agent-demo", SID, true));
-  mod.showReplay(screen, () => file, createLineTranslator(undefined), () => {});
+  // 接法同 acp-host.ts 的 Pi agent：入站来源核不了，只去包装、原文照登
+  const userText = (rec: Record<string, unknown>, t: string) => plainUserText(rec, t, "pi") ?? t;
+  mod.showReplay(screen, { path: () => file, translate: createLineTranslator(undefined), userText }, () => {});
 }
 
 /** 演示模式：不连 bridge、不起适配器，照宿主的顺序把夹具画进当前终端，然后停 30 秒等截图 */

@@ -107,9 +107,9 @@ function playPiThought(view: ViewSink, text = PI_THOUGHT): void {
 /** 「刚重启」要回放的会话文件：整轮会话照真翻译器翻成 Claude Code 形状的行（会话文件 → session-source 翻译后就是这个形状），收到的消息是 user 行 */
 export function replayLines(): string[] {
   const t = createAcpTranslator(() => "2026-10-15T11:03:00.000Z", { from: "claudestra-meta" });
-  // 入站是 Pi 会话文件里的真实形状（pi-session.ts 包的 <channel>，带 bridge 来源头）
+  // 入站是 Pi 会话文件翻译后的真实形状（isMeta + <channel> 包装，带 bridge 来源头）
   const inbound = '<channel source="claudestra" user="owner" api="true">\n[🌐 来自 Web 端用户「owner」]\n\n审一下 LCK-1 的放锁改动\n</channel>';
-  const lines = [JSON.stringify({ type: "user", timestamp: "2026-10-15T11:02:00.000Z", message: { role: "user", content: inbound } })];
+  const lines = [JSON.stringify({ type: "user", isMeta: true, timestamp: "2026-10-15T11:02:00.000Z", message: { role: "user", content: inbound } })];
   const piThought = { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: PI_THOUGHT },
     _meta: { claudestra: { display: true } } };
   for (const step of [{ updates: [piThought] }, ...sessionSteps().slice(2, 6), { updates: [chunk("m1", "结论：放锁条件少了 `relative` 参数，补参数 + 补一条相对路径用例。")] }]) {
