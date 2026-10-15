@@ -2,7 +2,7 @@ import { activeProjectPm } from "./pm-role.js";
 import { schedulerV2SkipFeature, schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 /** Facts are read again by the leased CLI immediately before claiming an episode action. */
 import type { Database } from "bun:sqlite";
-import { blockedBy, depViews, isSatisfied } from "./ledger-deps.js";
+import { blockedBy, depViews, derivedState, isSatisfied, type DepState, type LedgerDep } from "./ledger-deps.js";
 import { effectiveNodes, getDagVersion, getFeature, type DagNode, type Feature } from "./ledger-feature.js";
 import { getTask, getMeta, listDeps, listEvents, toTask } from "./ledger-store.js";
 import { listAsks, hasAsksTable } from "./ledger-asks.js";
@@ -13,12 +13,17 @@ import { featurePm } from "./scheduler-autostart.js";
 import { isPriorityStallProgress, PRIORITY_STALL_MS, type StallBasis, type StallBlock } from "./ledger-priority-stall.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 
-interface Graph { f: Feature; nodes: DagNode[]; lanes: Lanes | null; versions?: { at: number; nodes: DagNode[] }[] }
+interface Graph {
+  f: Feature; nodes: DagNode[]; lanes: Lanes | null;
+  versions?: { at: number; nodes: DagNode[]; bound: Map<string, { taskId: string; boundAt: number }> }[];
+}
 interface Facts {
   tasks: Map<string, LedgerTask | null>;
   graphs: Map<string, Graph | null>;
   deps: ReturnType<typeof listDeps>;
   events: Map<string, LedgerEvent[]>;
+  /** dep add / set / rm events by `from>to` */
+  edges: Map<string, LedgerEvent[]>;
   priority: LedgerEvent[];
   waits: Map<string, LedgerEvent>;
   asks: ReturnType<typeof listAsks>;
@@ -94,23 +99,56 @@ function liveBeat(db: Database, facts: Facts, t: LedgerTask): { orderId: string;
   return { orderId: o.orderId, beatAt: o.beatAt };
 }
 
+/**
+ * A hop references its upstream only while it stays unmet. Replay the upstream's stage moves (and the edge's own state overrides) and
+ * return the start of the current unmet run, never before `start` (when the edge or binding took effect): re-opening a done edge or an
+ * upstream sliding back from live puts it on the now chain afresh.
+ */
+function unmetSince(facts: Facts, t: LedgerTask, start: number, dep?: LedgerDep): number {
+  const moves = [...(facts.events.get(t.id) ?? []).filter((e) => e.kind === "stage"), ...(dep ? facts.edges.get(`${dep.from}>${dep.to}`) ?? [] : [])]
+    .sort((a, b) => a.seq - b.seq);
+  const first = moves.find((e) => e.kind === "stage");
+  let stage = (typeof first?.data.from === "string" ? first.data.from : t.stage) as Stage, stageBefore: Stage | null = null;
+  let state: DepState | null = null, since = start;
+  const unmet = () => {
+    const from = { kind: t.kind, stage, stageBefore };
+    return dep ? (state ?? derivedState(dep.kind, from)) !== "done" : !isSatisfied(from);
+  };
+  for (const e of moves) {
+    const was = unmet();
+    if (e.kind === "dep") state = (e.data.state as DepState | null | undefined) ?? null;
+    else if (typeof e.data.to === "string") { stageBefore = e.data.to === "blocked" ? e.data.from as Stage : null; stage = e.data.to as Stage; }
+    if (!was && unmet()) since = Math.max(start, e.ts);
+  }
+  return since;
+}
+
 /** Upstreams that can still move are chased; missing, cancelled or released-but-unselected ones are graph configuration. */
-function taskUpstream(db: Database, facts: Facts, id: string, why: string, at: number): Upstream {
+function taskUpstream(db: Database, facts: Facts, id: string, why: string, at: number, dep?: LedgerDep): Upstream {
   const t = task(db, facts, id);
   if (!t) return { config: `前置卡 ${id} 不存在`, at };
   if (t.stage === "cancelled") return { config: `前置卡 ${id} 已取消`, at };
   if (isSatisfied(t) || t.stage === "done") return { config: `前置卡 ${id} 已满足但${why}`, at };
-  return { task: id, at };
+  return { task: id, at: unmetSince(facts, t, at, dep) };
 }
 
-/** The node edge took effect at the oldest version of the unbroken run, back from the current one, that still carries it. */
-function nodeEdgeSince(db: Database, g: Graph, key: string, dep: string): number {
+/**
+ * The node edge points at its current upstream (node, or the card bound to it) since the oldest version of the unbroken run, back from
+ * the current one, that carries both the edge and that binding; a card bound later via dag_bindings is referenced from its boundAt.
+ */
+function nodeEdgeSince(db: Database, g: Graph, key: string, dep: string, taskId: string | null): number {
   g.versions ??= (db.query("SELECT version FROM dag_versions WHERE featureId=? AND version<=? ORDER BY version DESC").all(g.f.id, g.f.currentVersion) as { version: number }[])
-    .flatMap(({ version }) => { const v = getDagVersion(db, g.f.id, version); return v ? [{ at: v.createdAt, nodes: v.nodes }] : []; });
+    .flatMap(({ version }) => {
+      const v = getDagVersion(db, g.f.id, version);
+      if (!v) return [];
+      const rows = db.query("SELECT nodeKey, taskId, boundAt FROM dag_bindings WHERE featureId=? AND version=?").all(g.f.id, version) as { nodeKey: string; taskId: string; boundAt: number }[];
+      return [{ at: v.createdAt, nodes: v.nodes, bound: new Map(rows.map((r) => [r.nodeKey, r])) }];
+    });
   let at = g.versions[0]?.at ?? g.f.createdAt;
   for (const v of g.versions) {
-    if (!v.nodes.some((n) => n.key === key && n.deps.includes(dep))) break;
-    at = v.at;
+    const snap = v.nodes.find((n) => n.key === dep)?.taskId, row = snap ? undefined : v.bound.get(dep);
+    if (!v.nodes.some((n) => n.key === key && n.deps.includes(dep)) || (snap || row?.taskId || null) !== taskId) break;
+    at = Math.max(v.at, row?.boundAt ?? 0);
   }
   return at;
 }
@@ -133,7 +171,7 @@ function taskBasis(db: Database, project: string, taskId: string, facts: Facts):
   const why = ask ? `等 PM 答 ask ${ask.id}` : frozen ? "项目合并队列冻结" : block.kind === "feature"
     ? `feature 是 ${f!.status}` : deps.length ? `依赖没满足：${deps.map((d) => d.from).join(", ")}` : `阶段 ${t.stage} 无有效推进`;
   const ups = block.kind !== "deps" ? [] : deps.map((d) => d.kind === "branch" && d.derived === "active"
-    ? { config: `分叉 ${d.from} → ${taskId} 没选定`, at: d.createdAt } : taskUpstream(db, facts, d.from, "边未放行", d.createdAt));
+    ? { config: `分叉 ${d.from} → ${taskId} 没选定`, at: d.createdAt } : taskUpstream(db, facts, d.from, "边未放行", d.createdAt, d));
   const terminal = ["done", "cancelled", "verified"].includes(t.stage), own = effective.effective === "now" && !terminal;
   const event = progress?.ts ?? t.createdAt;
   return { own, terminal, ups, b: { project, key: record?.id ?? `task:${taskId}`, label: taskId, taskId, featureId: t.featureId ?? null, nodeKey: null,
@@ -158,7 +196,7 @@ function nodeBasis(db: Database, g: Graph, n: DagNode, facts: Facts): Built {
     ? `${waiting.why === "deps" ? "依赖没满足" : waiting.why === "files" ? "文件锁阻塞" : "没有文件范围"}：${waiting.on.join(", ")}`
     : typeof recorded?.data.why === "string" ? recorded.data.why : "已满足依赖，等自动开工资格复核";
   const ups: Upstream[] = block.kind !== "deps" ? [] : block.on.map((k) => {
-    const d = g.nodes.find((x) => x.key === k), at = nodeEdgeSince(db, g, n.key, k);
+    const d = g.nodes.find((x) => x.key === k), at = nodeEdgeSince(db, g, n.key, k, d?.taskId ?? null);
     if (!d) return { config: `前置节点 ${f.id}/${k} 不在图里`, at };
     return d.taskId ? taskUpstream(db, facts, d.taskId, "节点未放行", at) : { node: d, g, at };
   });
@@ -180,12 +218,16 @@ export function priorityStallBases(db: Database, project: string, key?: string, 
   const rows = (db.query("SELECT * FROM tasks WHERE project=? AND stage NOT IN ('done','cancelled')").all(project) as Record<string, unknown>[]).map(toTask);
   if (keyedTask && !rows.some((t) => t.id === keyedTask)) rows.push(...(db.query("SELECT * FROM tasks WHERE project=? AND id=?").all(project, keyedTask) as Record<string, unknown>[]).map(toTask));
   const lendCols = db.query("PRAGMA table_info(lend_orders)").all() as { name: string }[];
-  const facts: Facts = { tasks: new Map(rows.map((t) => [t.id, t])), graphs: new Map(), deps: listDeps(db, project), events: new Map(), priority: [], waits: new Map(),
+  const facts: Facts = { tasks: new Map(rows.map((t) => [t.id, t])), graphs: new Map(), deps: listDeps(db, project), events: new Map(), edges: new Map(), priority: [], waits: new Map(),
     asks: hasAsksTable(db) ? listAsks(db, { project, states: ["open"] }) : [], pms: new Set(getMeta(db, project).pms),
     frozen: getMeta(db, project).queueFrozen.frozen, now, threshold: priorityStallThreshold(db, project), lend: lendCols.some((c) => c.name === "beatAt") };
   for (const e of listEvents(db, { project })) {
     if (e.data.namespace === "priority") facts.priority.push(e);
     if (e.data.namespace === "priority-now") facts.waits.set(`${e.data.featureId}/${e.data.key}`, e);
+    if (e.kind === "dep") {
+      const k = `${e.data.from}>${e.target}`, edges = facts.edges.get(k) ?? [];
+      edges.push(e); facts.edges.set(k, edges);
+    }
     if (isPriorityStallProgress(e) || e.kind === "stage") {
       const events = facts.events.get(e.target) ?? [];
       events.push(e); facts.events.set(e.target, events);

@@ -6,7 +6,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
-import { addDep, removeDep } from "../src/lib/ledger-deps-write.js";
+import { addDep, removeDep, setDep } from "../src/lib/ledger-deps-write.js";
+import { bindNode } from "../src/lib/ledger-dag-write.js";
+import { getFeature } from "../src/lib/ledger-feature.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { setPriority, setPriorityMode } from "../src/lib/ledger-priority-write.js";
 import { listAsks } from "../src/lib/ledger-asks.js";
@@ -246,4 +248,44 @@ test("[验收线 1] a node edge added in a later DAG version dates the upstream 
   expect(bases.find((x) => x.taskId === "B")).toMatchObject({ eligible: true, nowSince: v2, impact: [`${fid}/a1`, `${fid}/a2`] });
   expect(bases.find((x) => x.taskId === "C")).toMatchObject({ eligible: true, nowSince: t0 });
   expect(bases.filter((x) => priorityStallDue(db, x, now)).map((x) => x.label)).toEqual(["C"]);
+});
+
+test("[验收线 1] re-opening a satisfied dependency edge starts a fresh upstream window", () => {
+  build("A"); build("B");
+  addDep(db, { actor: pm, now: t0 }, { from: "B", to: "A", when: "B live", state: "done" });
+  nowTask("A");
+  expect(priorityStallBases(db, project, undefined, t0).some((x) => x.taskId === "B")).toBe(false);
+  now = t0 + 10 * W;
+  setDep(db, { actor: pm, now }, { from: "B", to: "A", rev: 1, patch: { state: "waiting" } });
+  const b = () => priorityStallBases(db, project, undefined, now).find((x) => x.taskId === "B")!;
+  expect(b()).toMatchObject({ eligible: true, nowSince: now, impact: ["A"] });
+  expect(priorityStallDue(db, b(), now)).toBe(false);
+  expect(priorityStallBases(db, project, b().key, now)).toEqual([b()]);
+  now += W;
+  expect(priorityStallDue(db, b(), now)).toBe(true);
+});
+
+test("[验收线 1] binding an old card to a waited-on node starts its window at the binding", () => {
+  build("B");
+  graph([{ key: "b", oneLine: "b", fileGlobs: ["src/b.ts"] }, { key: "a1", oneLine: "a1", deps: ["b"], fileGlobs: ["src/a1.ts"] }]);
+  nowNode("a1");
+  now = t0 + 10 * W;
+  bindNode(db, { actor: pm, now }, { id: fid, rev: getFeature(db, fid)!.rev, key: "b", taskId: "B" });
+  const b = () => priorityStallBases(db, project, undefined, now).find((x) => x.taskId === "B")!;
+  expect(b()).toMatchObject({ eligible: true, nowSince: now, impact: [`${fid}/a1`] });
+  expect(priorityStallDue(db, b(), now)).toBe(false);
+  expect(priorityStallBases(db, project, b().key, now)).toEqual([b()]);
+  now += W;
+  expect(priorityStallDue(db, b(), now)).toBe(true);
+});
+
+test("[验收线 1] an upstream regressing from live back to fix re-enters the chain at the regression", () => {
+  build("A"); build("B"); nowTask("A");
+  for (const [from, to] of [["build", "review"], ["review", "merge"], ["merge", "live"]] as const) moveStage(db, { actor: pm, now: t0 }, { taskId: "B", from, to });
+  addDep(db, { actor: pm, now: t0 }, { from: "B", to: "A", when: "B live" });
+  now = t0 + 10 * W;
+  moveStage(db, { actor: pm, now }, { taskId: "B", from: "live", to: "fix" });
+  const b = priorityStallBases(db, project, undefined, now).find((x) => x.taskId === "B")!;
+  expect(b).toMatchObject({ eligible: true, nowSince: now, impact: ["A"] });
+  expect(priorityStallDue(db, b, now)).toBe(false);
 });
