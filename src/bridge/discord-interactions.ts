@@ -922,7 +922,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
         return;
       }
 
-      // 管理按钮
+      if (free && await (await import("../lib/floka-services/install/owner.js")).refusePartClick(id, interaction.user.id, interaction)) return; // 管理按钮
       const mgmtResult = free ? await handleMgmtButton(id, channelId, interaction.message?.id, discord) : null;
       if (mgmtResult) {
         if (mgmtResult.text !== "__HANDLED__") {

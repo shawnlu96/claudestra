@@ -6,7 +6,9 @@
  * 签名带用途前缀，挪不成请求签名、也挪不到别的用途（lib/instance-key.ts signPurpose）。单测在 tests/invite-proof.test.ts。
  */
 import { randomBytes } from "node:crypto";
-import { isPublicKey, keyFingerprint, signPurpose, verifyPurpose, type InstanceKey, type SignPurpose } from "./instance-key.js";
+import { instanceKeySync, isPublicKey, keyFingerprint, signPurpose, type InstanceKey, type SignPurpose } from "./instance-key.js";
+import type { SignatureFamily } from "./floka-compat/signature/families.js";
+import { ledgerPurposeShape, receiveLedgerUse, signLedgerUse, type LedgerReceive } from "./floka-ledger/uses.js";
 import { relayPeerFingerprint } from "./peers.js";
 
 export const INVITE_PROOF_PURPOSE: SignPurpose = "claudestra-invite-pop-v1";
@@ -19,6 +21,8 @@ export function newInviteNonce(): string {
 export interface InviteProof {
   key: string;
   sig: string;
+  /** rename-floka-LEDGER1：只有新族证明带（floka-invite-pop-v1）；不带 = 旧族，字节与改动前相同 */
+  purpose?: string;
 }
 
 /**
@@ -47,9 +51,13 @@ export interface ProofFields {
 
 const fields = (f: ProofFields): string[] => [f.nonce, f.join, f.redeemerFp.toLowerCase(), f.inviterIid, inviteUrlKey(f.inviteUrl)];
 
-/** 邀请方：兑换成功、而且知道兑换方是谁（签名核过的指纹）时才签；没有 nonce（老版本加入方）、指纹或邀请地址返回 null */
-export function signInviteProof(f: ProofFields, key?: InstanceKey | null): InviteProof | null {
+/**
+ * 邀请方：兑换成功、而且知道兑换方是谁（签名核过的指纹）时才签；没有 nonce（老版本加入方）、指纹或邀请地址返回 null。
+ * family 缺省旧族（与改动前同一条 signPurpose）；新族只在 rename.ledgerSend=on 且对端能力证明有效时由调用方选（floka-ledger/config.ts）。
+ */
+export function signInviteProof(f: ProofFields, key?: InstanceKey | null, family: SignatureFamily = "claudestra"): InviteProof | null {
   if (!f.nonce || !f.redeemerFp || !inviteUrlKey(f.inviteUrl)) return null;
+  if (family === "floka") return signLedgerUse("invite-pop", fields(f), key === undefined ? instanceKeySync() : key, "floka");
   return signPurpose(INVITE_PROOF_PURPOSE, fields(f), key); // key 不给 = 本机实例钥匙
 }
 
@@ -57,11 +65,12 @@ export function signInviteProof(f: ProofFields, key?: InstanceKey | null): Invit
  * 加入方：回复里的证明对得上自己这次的 nonce、口令、自己的指纹（redeemerFp）、邀请串里的原始地址，返回邀请方的钥匙与指纹；
  * 不是证明的样子返回 null，形状对但签名不对返回 "bad"（有人在中间改过回复或邀请地址，或者对方不是它声称的那台）。
  */
-export function checkInviteProof(proof: unknown, x: ProofFields): { key: string; fp: string } | "bad" | null {
+export function checkInviteProof(proof: unknown, x: ProofFields, rx: LedgerReceive = {}): { key: string; fp: string } | "bad" | null {
   if (!proof || typeof proof !== "object") return null;
-  const { key, sig } = proof as Record<string, unknown>;
-  if (typeof key !== "string" || typeof sig !== "string") return "bad";
-  if (!isPublicKey(key) || !verifyPurpose(key, INVITE_PROOF_PURPOSE, fields(x), sig)) return "bad";
+  const { key, sig, purpose } = proof as Record<string, unknown>;
+  if (typeof key !== "string" || typeof sig !== "string" || !ledgerPurposeShape("invite-pop", purpose)) return "bad";
+  // rx 不给 = off：只认旧族，与改动前同一条验签；新族证明在 off / observe 下照旧判 bad
+  if (!isPublicKey(key) || !receiveLedgerUse("invite-pop", { key, sig, purpose: purpose as string | undefined }, fields(x), rx).ok) return "bad";
   return { key, fp: keyFingerprint(key) };
 }
 

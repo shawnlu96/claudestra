@@ -6,6 +6,14 @@
  * cstra_api_base；卡死探针的 Worker 是独立文件 hang-worker.js——老 bridge 的 CSP 是 worker-src 'self'，blob: 会被拦）；⑤ React 提交突发探针。
  * 各段的来由与判据见 git log -S 对应片段（原 layout.tsx 的注释）。
  */
+// The rollout setting is browser-local; old keys remain authoritative during coexistence.
+try {
+  var storageMode = localStorage.getItem("rename.webStorage");
+  window.__flokaStorageMode = storageMode === "on" || storageMode === "observe" ? storageMode : "off";
+} catch (e) {
+  // Denied storage must never opt this browser into migration.
+  window.__flokaStorageMode = "off";
+}
 function B(){try{return localStorage.getItem("cstra_api_base")||""}catch(e){return ""}}
 // ① 主题 / 偏好
 try{var t=localStorage.getItem("cstra_theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);[["cstra_theme_vars_css","cstra-theme-vars"],["cstra_font_prefs_css","cstra-font-prefs"],["cstra_chat_prefs_css","cstra-chat-prefs"]].forEach(function(k){var c=localStorage.getItem(k[0]);if(c){var s=document.createElement("style");s.id=k[1];s.textContent=c;document.head.appendChild(s)}})}catch(e){}

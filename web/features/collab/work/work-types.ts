@@ -31,4 +31,6 @@ export interface TeamWorkBoard extends WorkColumns<TeamBoardRow> {
   machines: Record<string, number>;
   /** 各 feature 的镜像证据（总览 ov.mirror），显示时随时间重判 */
   mirror: readonly MirrorFact[];
+  /** 主场本机、本机看板判老卡的团队行（team-work-merge.ts 移出四栏，UXCARD3）：不进计数，放「老卡」折叠 */
+  legacy?: { taskId: string; title: string; stage: string }[];
 }

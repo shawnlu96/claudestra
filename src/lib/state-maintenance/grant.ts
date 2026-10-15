@@ -10,7 +10,7 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureDir, FILE_MODE, maintPaths } from "./paths.js";
 
-const GRANT_ACTIONS = ["observe", "mode", "run", "recover", "note"] as const;
+const GRANT_ACTIONS = ["observe", "mode", "run", "recover", "note", "services", "runtime", "config"] as const;
 export type GrantAction = (typeof GRANT_ACTIONS)[number];
 
 export interface Grant {

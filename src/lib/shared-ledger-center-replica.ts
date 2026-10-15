@@ -77,8 +77,10 @@ export function centerReplicaBaseDigest(detail: Pick<SharedLedgerFeatureDetail, 
 const KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
 const oneLine = (s: string, max: number, required: boolean) => s === s.trim() && (!required || s.length > 0)
   && !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(s) && [...s].length <= max;
-/** Local limits are stricter than the center contract (ledger-feature-write.ts vs contract-v2-dag.ts). */
-function centerReplicaLimitReason(detail: Pick<SharedLedgerFeatureDetail, "feature" | "dag">): string | null {
+type LimitNode = Pick<SharedLedgerFeatureDetail["dag"]["nodes"][number], "key" | "deps" | "oneLine" | "fileGlobs" | "estimate">;
+/** Local limits are stricter than the center contract (ledger-feature-write.ts vs contract-v2-dag.ts).
+ * Also run on new proposals before submit: a proposal the center approves but this replica refuses can never land here. */
+export function centerReplicaLimitReason(detail: { feature: { title: string }; dag: { nodes: readonly LimitNode[] } }): string | null {
   if (!oneLine(detail.feature.title, 60, true)) return REPLICA_REASONS.title;
   if (detail.dag.nodes.length === 0 || detail.dag.nodes.length > 200) return REPLICA_REASONS.nodes;
   for (const n of detail.dag.nodes) {

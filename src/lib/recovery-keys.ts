@@ -7,6 +7,7 @@
 export const RECOVERY_KEYS = [
   "askDefaultAll",
   "askReminder",
+  "askScopeAuto",
   "audit",
   "auditEscalate",
   "auditIdleFacts",
@@ -55,6 +56,8 @@ export const RECOVERY_KEYS = [
   "mainCarry",
   "mainCarryMerge",
   "mainCiPause",
+  "mainRedFix",
+  "mainRedRepairBind",
   "manualCaseOwnership",
   "manualCaseSla",
   "manualMergeQueue",
@@ -79,6 +82,7 @@ export const RECOVERY_KEYS = [
   "placementReservations",
   "planGap",
   "pmRails",
+  "pmTodoPull",
   "poolIdleSkip",
   "privateMergeNarrow",
   "privateRepoMerge",
@@ -104,6 +108,7 @@ export const RECOVERY_KEYS = [
   "uiReviewCarry",
   "unifiedMergeQueue",
   "updateGap",
+  "verifyAfterResolve",
   "wakeStopped",
   "writeLocalEqual",
 ] as const;

@@ -106,9 +106,9 @@ describe("PM hears why a P1 was demoted", () => {
       expect(await f.review("changes", H1, [{ findingId: "cleanup", family: "cleanup", severity: "P1",
         probe: "命名不统一，不挂验收线。其余略" }], ["--path", path])).toMatchObject({ ok: true });
       expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
-      const notice = f.notices.find((t) => t.includes("审查通过但留有 P2"));
-      expect(notice).toContain("1 项 P1 降为 P2");
-      expect(notice).toContain("没对应验收线：「命名不统一，不挂验收线。」");
+      const notice = f.notices.find((t) => t.includes("[P2 积压] T1 第 1 轮"));
+      expect(notice).toContain("降级 cleanup");
+      expect(f.notices.some((t) => t.includes("审查通过但留有 P2"))).toBe(false);
     } finally { f.close(); }
   });
 });

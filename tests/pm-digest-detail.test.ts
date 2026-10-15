@@ -27,15 +27,15 @@ const audit = (list: [string, string][]) => env({ kind: "bridge", label: "ledger
 const execMsg = () => env({ kind: "local", agentName: "agent-x", channelId: "ch-x", ws }, "执行者问 PM", false);
 const POST_VERIFY = "[上线后待办] agents-PV1 已上线，规格要求 PM 接着做：\n- 核对线上摘要\n- 切开关到 on\n做完用 ledger post-verify-done agents-PV1 结掉。";
 
-function world() {
+async function world() {
   const dir = mkdtempSync(join(tmpdir(), "pm-digest-detail-"));
   dirs.push(dir);
   const db = openLedger(join(dir, "ledger.sqlite"));
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM] });
   const path = join(dir, "pm-digest.json");
   const store = new PmDigestStore(path, join(dir, "pm-digest-mode.json"));
-  store.setMode(P, "on");
-  store.setPullMode(P, "off"); // 这里测的是推送摘要的拼法
+  await store.setMode(P, "on");
+  await store.setPullMode(P, "off"); // 这里测的是推送摘要的拼法
   const sent: string[] = [];
   const raw = async (e: Envelope): Promise<Delivery> => (sent.push(e.content), { envelope: e, outcome: { kind: "sent" } });
   const digest = new PmDigest({ store, now: () => 1_000_000, db: () => db, agents: () => [], heldCarriers: () => new Set() });
@@ -47,7 +47,7 @@ function world() {
 }
 
 test("[验收线 1] 两项的巡检推送：摘要里有两张卡号和各自的现象，没有『全部未解决的』那行", async () => {
-  const w = world();
+  const w = await world();
   await w.send(audit([["agents-AA1", "合并 3 天没人收尾"], ["web-BB2", "卡在 review 没有审查员"]]));
   expect(w.sent).toEqual([]);
   const text = await w.flush();
@@ -60,7 +60,7 @@ test("[验收线 1] 两项的巡检推送：摘要里有两张卡号和各自的
 });
 
 test("[验收线 2] 两轮条数相同、内容不同的巡检：摘要里是两行，各带自己的要点", async () => {
-  const w = world();
+  const w = await world();
   await w.send(audit([["agents-AA1", "现象甲"], ["agents-AA2", "现象乙"]]));
   await w.send(audit([["agents-CC3", "现象丙"], ["agents-CC4", "现象丁"]]));
   const lines = (await w.flush()).split("\n");
@@ -74,7 +74,7 @@ test("[验收线 2] 两轮条数相同、内容不同的巡检：摘要里是两
 });
 
 test("[验收线 3] 上线后待办：本行下面列出待办行；同卡同内容两次仍合成一行 ×2", async () => {
-  const w = world();
+  const w = await world();
   await w.send(agent("scheduler", POST_VERIFY));
   await w.send(agent("scheduler", POST_VERIFY));
   const lines = (await w.flush()).split("\n");
@@ -85,7 +85,7 @@ test("[验收线 3] 上线后待办：本行下面列出待办行；同卡同内
 });
 
 test("[验收线 3] 监工巡检列出两行要点；出借服务的进度同步仍只一行、没有 detail", async () => {
-  const w = world();
+  const w = await world();
   await w.send(agent("supervise-watch", "[监工巡检 · 新异常 2 条]\n- agent-a 静默 40 分钟\n- agent-b 的卡两轮没动"));
   await w.send(agent("lend-service", "出借：Sekai 领了开工单\n单号 lend:agents-X1:s1:r0:a0"));
   const queue = w.store.queued(P);
@@ -98,7 +98,7 @@ test("[验收线 3] 监工巡检列出两行要点；出借服务的进度同步
 });
 
 test("[验收线 4] 没有 detail 的旧队列条目照常读出、送出；detail 不是字符串数组按损坏处理", async () => {
-  const w = world();
+  const w = await world();
   const old = { id: "old1", project: P, kind: "audit", source: "ledger-audit", firstLine: "[🔎 台账巡检] 新发现 1 条", at: 1 };
   writeFileSync(w.path, JSON.stringify({ queue: [old], log: [] }));
   expect(w.store.queued(P)).toEqual([old as DigestEntry]);

@@ -1,6 +1,6 @@
 /**
  * Claude Code 启动命令构造。统一 manager/launcher/cron 三处的 Claude Code 启动参数：
- * - MCP server 名（由 env MCP_NAME 控制，默认 claudestra）
+ * - MCP server 名（按会话的命名族，lib/floka-mcp/；显式 env MCP_NAME 照旧优先）
  * - disallowedTools 黑名单（支持命名预设和自定义）
  * - dev channel 加载 + skip-permissions
  */
@@ -11,7 +11,7 @@ import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
 import { isSandbox } from "./sandbox.js";
 import { sandboxLaunchArgs } from "./sandbox-env.js";
-import { ccCallerCredArgs } from "./caller-cred-launch.js";
+import { mcpConfigArgs, mcpEnvSuffix, mcpSessionIdArgs, planMcpLaunch, withMcpFamilySettings } from "./floka-mcp/launch.js";
 import { launchSettingsFor, settingsLaunchArgs } from "./agent-settings.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
@@ -306,13 +306,13 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   // BRIDGE_PORT 也显式带上：tmux 全局环境停在 server 创建那一刻，改过端口后新窗口继承的
   // 仍是旧值，而 hook 等子进程会读它（见 lib/bridge-port.ts）
   const port = bridgePortOf(bridgeUrl);
+  const mcp = planMcpLaunch({ agent: opts.settingsAgent, sessionId: opts.sessionId, resumeId: opts.resumeId, forkSession: opts.forkSession }); // 按会话的 MCP 命名族（lib/floka-mcp/）
   const prefix =
     `DISCORD_CHANNEL_ID=${shellEscape(opts.channelId)} ` +
     `BRIDGE_URL=${shellEscape(bridgeUrl)} ` +
     (port ? `BRIDGE_PORT=${port} ` : "") +
-    `MCP_NAME=${shellEscape(MCP_NAME)}${pathOverrideAssignments(shellEscape)}`;
+    `MCP_NAME=${shellEscape(mcp.name)}${mcpEnvSuffix(mcp)}${pathOverrideAssignments(shellEscape)}`;
 
-  // 解析 disallowedTools
   const disallowed: string[] =
     opts.disallowedTools && opts.disallowedTools.length > 0
       ? [...opts.disallowedTools]
@@ -330,12 +330,12 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
     (opts.permissionMode && opts.permissionMode.trim()) || DEFAULT_PERMISSION_MODE;
   if (mode === "auto") mode = "bypassPermissions";
 
-  const parts: string[] = ["claude", "--dangerously-load-development-channels", `server:${MCP_NAME}`];
-  const own = applyPmSlimSettings(launchSettingsFor(opts.settingsAgent), opts.pmSlim); // agent 设置 + 协调者瘦身（lib/pm-slim.ts）；沙箱与沙箱覆盖合成一份，只传一次 --settings
+  const parts: string[] = ["claude", "--dangerously-load-development-channels", `server:${mcp.name}`];
+  const own = withMcpFamilySettings(applyPmSlimSettings(launchSettingsFor(opts.settingsAgent), opts.pmSlim), mcp); // agent 设置 + 瘦身（lib/pm-slim.ts）+ 命名族，合成一份只传一次 --settings
   const cred = opts.callerCredFile; // 有它就由它带 channel-server 的配置，沙箱那份不再重复给
-  if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own, opts.settingsAgent, !cred).map(shellEscape));
+  if (isSandbox()) parts.push(...sandboxLaunchArgs(mcp.name, resolveBunPath(), SRC_DIR, own, opts.settingsAgent, !cred).map(shellEscape));
   else parts.push(...settingsLaunchArgs(own, opts.settingsAgent).map(shellEscape));
-  parts.push(...ccCallerCredArgs(cred, MCP_NAME).map(shellEscape));
+  parts.push(...mcpConfigArgs(mcp, cred, isSandbox()).map(shellEscape));
 
   // bypassPermissions 走经过验证的 --dangerously-skip-permissions（语义相同，且它
   // 还顺带跳过 workspace trust dialog）；其余模式走 --permission-mode <mode>。
@@ -355,11 +355,9 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
 
   if (opts.resumeId) {
     parts.push("--resume", shellEscape(opts.resumeId));
-    if (opts.forkSession) parts.push("--fork-session");
+    if (opts.forkSession) parts.push("--fork-session", ...mcpSessionIdArgs(mcp)); // 新族分叉：钉住新会话 id 才能记下它的族
     if (opts.displayName) parts.push("--name", shellEscape(opts.displayName));
-  } else if (opts.sessionId) {
-    parts.push("--session-id", shellEscape(opts.sessionId));
-  }
+  } else parts.push(...(opts.sessionId ? ["--session-id", shellEscape(opts.sessionId)] : mcpSessionIdArgs(mcp)));
 
   if (opts.effort && opts.effort.trim() && opts.effort !== "default") {
     // ultracode 是 session-only 的运行时档,启动 flag 传它语义不明——防御性降到

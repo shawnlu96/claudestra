@@ -7,10 +7,12 @@ import { sharedLedgerJoinPinsMatch } from "./shared-ledger-gate-proxy-join-pins.
 import { requireSharedLedgerProject } from "./shared-ledger-project-link.js";
 import { sharedLedgerExpectedProject, sharedLedgerOfferedGrant, type SharedLedgerExpectedProject } from "./shared-ledger-project-link-grant.js";
 import { saveSharedLedgerProjectJoin } from "./shared-ledger-project-link-save.js";
-import { signPurpose, isPublicKey, type InstanceKey } from "./instance-key.js";
+import { isPublicKey, type InstanceKey } from "./instance-key.js";
+import type { SignatureFamily } from "./floka-compat/signature/families.js";
+import { signLedgerUse } from "./floka-ledger/uses.js";
 import { STATE_DIR } from "./paths.js";
 import {
-  parseSharedLedgerJoinCode, SHARED_LEDGER_JOIN_PATH, SHARED_LEDGER_JOIN_PURPOSE, sharedLedgerInstanceId, sharedLedgerJoinFields,
+  parseSharedLedgerJoinCode, SHARED_LEDGER_JOIN_PATH, sharedLedgerInstanceId, sharedLedgerJoinFields,
   type SharedLedgerJoinGrant, type SharedLedgerJoinRequest,
 } from "./shared-ledger-join-protocol.js";
 import { SharedLedgerClient } from "./shared-ledger-client.js";
@@ -27,12 +29,13 @@ const BEARER_RE = /^[A-Za-z0-9_-]{43}$/;
 type Action = SharedLedgerJoinGrant["projects"][number]["actions"][number];
 const ACTIONS: readonly Action[] = ["read", "plan", "import", "project"];
 
-export function signSharedLedgerJoin(code: string, instanceId: string, key: InstanceKey): SharedLedgerJoinRequest {
+/** family defaults to the old one; only rename.ledgerSend = on with a valid center capability picks floka (floka-ledger/uses.ts). */
+export function signSharedLedgerJoin(code: string, instanceId: string, key: InstanceKey, family: SignatureFamily = "claudestra"): SharedLedgerJoinRequest {
   const parsed = parseSharedLedgerJoinCode(code);
   if (!parsed || !ID_RE.test(instanceId)) throw new SharedLedgerJoinError("invalid join input");
-  const signed = signPurpose(SHARED_LEDGER_JOIN_PURPOSE, sharedLedgerJoinFields(parsed.centerId, code.trim(), key.publicKey, instanceId), key);
+  const signed = signLedgerUse("shared-ledger", sharedLedgerJoinFields(parsed.centerId, code.trim(), key.publicKey, instanceId), key, family);
   if (!signed) throw new SharedLedgerJoinError("instance key unavailable");
-  return { code: code.trim(), publicKey: signed.key, instanceId, signature: signed.sig };
+  return { code: code.trim(), publicKey: signed.key, instanceId, signature: signed.sig, ...(signed.purpose ? { purpose: signed.purpose } : {}) };
 }
 
 function parseGrant(v: unknown, centerId: string, instanceId: string): SharedLedgerJoinGrant {

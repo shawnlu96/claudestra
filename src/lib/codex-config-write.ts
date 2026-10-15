@@ -174,8 +174,8 @@ function decodeString(src: string): string | undefined {
 }
 
 /**
- * 读顶层两项。catalog 的 parseCodexConfigDefaults 遇到多行字符串里以 [ 开头的行会提前停，也不解转义，设置页读写要对得上，
- * 所以这里另读一份。键在但值不是字符串（Codex 自己也读不了）= 认不出，抛 unsupported。
+ * 读顶层两项：设置页和 codex-catalog（agent 列表 / 会话设置）共用这一个，两边读出来必须一致。
+ * 键在但值不是字符串（Codex 自己也读不了）= 认不出，抛 unsupported。
  */
 export function readCodexDefaultsToml(toml: string): { model: string | null; effort: string | null } {
   const lines = toml.split(/\r?\n/);

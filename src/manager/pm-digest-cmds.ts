@@ -50,7 +50,7 @@ function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> 
         if (mode !== "on" && mode !== "off") throw new LedgerError("invalid", "开关只能是 on / off");
         c.requireRealPm(project, "切 PM 摘要拉取开关");
         const from = store.pullMode(project);
-        store.setPullMode(project, mode);
+        await store.setPullMode(project, mode);
         return { ok: true, project, from, pull: mode };
       } },
     "pm-route-mode": { valued: ["project"], bools: [], usage: "pm-route-mode <on|observe|off> [--project <id>]（独立分流开关，缺省 observe）",
@@ -59,7 +59,7 @@ function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> 
         if (mode !== "on" && mode !== "observe" && mode !== "off") throw new LedgerError("invalid", "开关只能是 on / observe / off");
         c.requireRealPm(project, "切 PM 分流开关");
         const from = store.routeMode(project);
-        store.setRouteMode(project, mode);
+        await store.setRouteMode(project, mode);
         return { ok: true, project, from, routeMode: mode };
       } },
     "pm-hold": { valued: ["project", "every"], bools: [], usage: "pm-hold [off|hold|batch] [--every <分钟>] [--project <id>]（PM 暂存；不带模式只读状态）",
@@ -81,7 +81,7 @@ function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> 
         if (mode !== "on" && mode !== "observe" && mode !== "off") throw new LedgerError("invalid", "开关只能是 on / observe / off");
         c.requireRealPm(project, "切 PM 推送摘要开关");
         const from = store.mode(project);
-        store.setMode(project, mode as DigestMode);
+        await store.setMode(project, mode as DigestMode);
         return { ok: true, project, from, mode };
       } },
     "pm-todo": { valued: ["project"], bools: ["all"], usage: "pm-todo [--all] [--project <id>]（只读：上线后待办，缺省只列观察期已到的）",

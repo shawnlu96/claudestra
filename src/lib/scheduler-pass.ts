@@ -1,4 +1,5 @@
 import { openMergeQueueOwner } from "./merge-queue-owner-context.js";
+import { priorityStallTick } from "./ledger-priority-stall-tick.js";
 /**
  * One service pass = merge + observe + auto under a single maintenance lease, the same one `update` takes: while an
  * update holds it the whole pass is skipped, never just the merge part. The lease, the stop signal and the singleton lock
@@ -48,6 +49,7 @@ import { lifecycleStep } from "./agent-lifecycle-deps.js";
 import { lockYieldStep } from "./scheduler-lock-yield-deps.js";
 import { schedulerV2PassManager, schedulerV2PassPace } from "./scheduler-v2-pass.js";
 import { schedulerV2SkipAutoDeps, schedulerV2SkipManager } from "./scheduler-v2-skip.js";
+import { flushPrioritySamples } from "./scheduler-priority-order-record.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -141,7 +143,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   const done = (): PassResult => { (opts.log ?? console.log)(clock.line(waits.note())); return { ran: true, failed }; };
   try {
     if (config.enabled) {
-      if (!db) throw new Error("scheduler enabled but ledger is unavailable");
+      if (!db) throw new Error("scheduler enabled but ledger is unavailable"); failed.push(...await priorityStallTick(db, config, { manager, active }));
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
       if (cut("peerPr")) return done();
       // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
@@ -204,7 +206,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         failed.push(...(await (opts.lockYield ?? lockYieldStep)(db, config, manager, deps.notifyPm, opts.recoveryPolicy))); // RLOCK2：先于 auto tick，让出的锁同轮可拿
         if (cut("lockYield")) return done();
         const autoPace = pace.phase();
-        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace, mergeNow)).failed); // 合并卡计划完当场推（mergeNow）
+        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace, mergeNow)).failed); await flushPrioritySamples(manager, db); // mergeNow 当场推；PRIO2 样本
         if (cut("auto")) return done();
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
         if (cut("autostart")) return done();

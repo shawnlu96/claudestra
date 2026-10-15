@@ -12,6 +12,7 @@ import { mergePmDue, mergePmMode } from "./scheduler-merge-pm-ledger.js";
 import { mergePmCandidate, mergePmTarget } from "./scheduler-merge-pm-wait.js";
 import { observationAutoRegisterTick } from "./observation-auto-register-tick.js";
 import { observationTick } from "./observation-plan-tick.js";
+import { mainRedFixTick } from "./main-red-fix-tick.js";
 import { postVerifyTick } from "./scheduler-post-verify.js";
 import { reviewPmTick } from "./scheduler-review-pm-tick.js";
 import { sendToPm, specWaitTick, type SpecWaitEnv } from "./scheduler-spec-wait.js";
@@ -60,4 +61,4 @@ async function mergePmTick(env: SpecWaitEnv): Promise<Failed> {
 }
 
 /** 自动开卡 tick 里按序跑的 PM 提醒：缺规格、上线后、合并待处置、审查已回待处置、观察期到期核对（observation-plan-tick.ts） */
-export const pmWakeTicks = [specWaitTick, postVerifyTick, mergePmTick, reviewPmTick, observationAutoRegisterTick, observationTick] as const;
+export const pmWakeTicks = [specWaitTick, postVerifyTick, mergePmTick, reviewPmTick, mainRedFixTick, observationAutoRegisterTick, observationTick] as const;

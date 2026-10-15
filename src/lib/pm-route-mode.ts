@@ -1,3 +1,6 @@
+import { mkdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { acquireLock } from "./file-lock.js";
 import type { DigestMode } from "./pm-digest.js";
 import { readJsonStateSync, reportCorrupt, StateCorruptError, writeJsonAtomicSync } from "./state-file.js";
 
@@ -14,11 +17,28 @@ export function pmRouteMode(path: string, project: string): DigestMode {
   return mode === "off" || mode === "on" ? mode : "observe";
 }
 
-export function setPmRouteMode(path: string, project: string, mode: DigestMode): void {
-  const r = readJsonStateSync(path, valid);
-  if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
-  const v = (r.status === "ok" ? r.data : {}) as Modes;
-  writeJsonAtomicSync(path, { ...v, routeProjects: { ...v.routeProjects, [project]: mode } });
+/**
+ * pm-digest-mode.json 的读改写都在这把锁里（agents-PULLTODO1；路由 / 拉取 / 摘要三个开关的 setter 共用，锁文件与它同目录）：
+ * 拿不到按 file-lock 的等待上限报错、不写，不退回裸写。
+ */
+export async function withModeLock<T>(path: string, fn: () => T, waitMs?: number): Promise<T> {
+  mkdirSync(dirname(path), { recursive: true });
+  const lockPath = join(dirname(path), `${basename(path)}.lock`);
+  const lock = await acquireLock(lockPath, waitMs);
+  if (!lock) throw new Error(`拿不到 ${lockPath} 的锁（别的进程一直占着），开关没改`);
+  try {
+    if (!lock.held()) throw new Error(`${lockPath} 的锁已失租，开关没改`);
+    return fn();
+  } finally { lock.release(); }
+}
+
+export function setPmRouteMode(path: string, project: string, mode: DigestMode): Promise<void> {
+  return withModeLock(path, () => {
+    const r = readJsonStateSync(path, valid);
+    if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
+    const v = (r.status === "ok" ? r.data : {}) as Modes;
+    writeJsonAtomicSync(path, { ...v, routeProjects: { ...v.routeProjects, [project]: mode } });
+  });
 }
 
 /** 旧 PMDIG off 没有配置独立分流时，不新建只属于分流的记录。 */
@@ -38,9 +58,11 @@ export function pmDigestPull(path: string, project: string): PullMode {
   return r.status === "ok" && (r.data as Modes).pullProjects?.[project] === "off" ? "off" : "on";
 }
 
-export function setPmDigestPull(path: string, project: string, mode: PullMode): void {
-  const r = readJsonStateSync(path, valid);
-  if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
-  const v = (r.status === "ok" ? r.data : {}) as Modes;
-  writeJsonAtomicSync(path, { ...v, pullProjects: { ...v.pullProjects, [project]: mode } });
+export function setPmDigestPull(path: string, project: string, mode: PullMode): Promise<void> {
+  return withModeLock(path, () => {
+    const r = readJsonStateSync(path, valid);
+    if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
+    const v = (r.status === "ok" ? r.data : {}) as Modes;
+    writeJsonAtomicSync(path, { ...v, pullProjects: { ...v.pullProjects, [project]: mode } });
+  });
 }

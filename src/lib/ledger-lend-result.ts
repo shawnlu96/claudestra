@@ -37,13 +37,14 @@ import { lendUiDeliverPort, type LendUiPort } from "./lend-ui-deliver.js";
 import { actualText, intakeActual, notedSuggest } from "./role-model-settings-lend.js";
 import { listEvents } from "./ledger-store.js";
 import type { ModelActual, ModelActualRecord } from "./lend-wire-types.js";
+import { ledgerSigner } from "./floka-ledger/config.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
   reportDir(o: LendOrder): string;
   writeReport(path: string, body: string): void;
   /** Instance-key signature over the receipt fields in order; null = no key, and nothing is recorded. */
-  sign(fields: string[]): { key: string; sig: string } | null;
+  sign(fields: string[]): { key: string; sig: string } | null; // LEDGER1: wrapped by ledgerSigner, old family = this one, bytes unchanged
   /** POOLRV1: keep the received request text under an A-chosen content-hash path; not given = no archive (the result enters, never as an AUTO source) */
   saveRaw?(text: string): RawRef;
   /** POOLRV1: the key this machine pinned for the peer and when; read-only, null = none */
@@ -161,10 +162,10 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
       ...{ lend: { orderId: o.orderId, peer, gen: o.leaseGen, sha256: bodySha, claim: { family: req.session.family, session }, ...evidence } },
     });
     const eventSeq = review.event.seq;
-    const signed = deps.sign([o.orderId, bodySha, String(eventSeq), o.taskId]);
+    const signed = ledgerSigner("lend-receipt", peer, deps.sign)([o.orderId, bodySha, String(eventSeq), o.taskId]);
     if (!signed) return refuse("invalid", "本机读不到实例钥匙，签不了回执；结论不入账");
     deps.writeReport(path, reportBody(o, req, session)); // 抛错整单回滚；签不出来的在上一行就停了，不留文件
-    const receipt: LendReceipt = { orderId: o.orderId, sha256: bodySha, eventSeq, taskId: o.taskId, key: signed.key, sig: signed.sig,
+    const receipt: LendReceipt = { orderId: o.orderId, sha256: bodySha, eventSeq, taskId: o.taskId, ...signed,
       ...noteActual(db, { ...ctx, now }, o, actual) };
     noteUsage(db, { ...ctx, now }, o, req.usage);
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
@@ -269,10 +270,10 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     const r = deliver(db, { actor, now, dedupKey: `lend-deliver:${cur.orderId}:${head}` }, { taskId: task.id, headSHA: head, evidence: path, text, uiEvidence: req.deliver.uiEvidence, ui });
     moveStage(db, { actor: `peer:${peer}`, now, dedupKey: `lend-deliver-stage:${cur.orderId}:${head}` }, { taskId: task.id, from: task.stage, to: "review" });
     const eventSeq = r.event.seq;
-    const signed = deps.sign([cur.orderId, bodySha, String(eventSeq), cur.taskId]);
+    const signed = ledgerSigner("lend-receipt", peer, deps.sign)([cur.orderId, bodySha, String(eventSeq), cur.taskId]);
     if (!signed) return refuse("invalid", "本机读不到实例钥匙，签不了回执；交付不入账");
     deps.writeReport(path, deliverReportBody(cur, req)); // 抛错整单回滚：没有报告就没有入账
-    const receipt: LendReceipt = { orderId: cur.orderId, sha256: bodySha, eventSeq, taskId: cur.taskId, key: signed.key, sig: signed.sig,
+    const receipt: LendReceipt = { orderId: cur.orderId, sha256: bodySha, eventSeq, taskId: cur.taskId, ...signed,
       ...noteActual(db, { actor: `peer:${peer}`, now }, cur, actual) };
     noteUsage(db, { actor: `peer:${peer}`, now }, cur, req.usage);
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")

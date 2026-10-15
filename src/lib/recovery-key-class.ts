@@ -3,6 +3,7 @@ import type { RecoveryKey } from "./recovery-policy.js";
 type RecoveryRiskClass = "safety" | "permission" | "delete-data" | "schema";
 const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRiskClass; reason: string }>> = {
   askDefaultAll: { class: "permission", reason: "按默认方案自动批准提问与规格文件扩围" },
+  askScopeAuto: { class: "permission", reason: "调度器自动批机械类扩围" },
   authorRebuild: { class: "permission", reason: "依据退役证明重建作者并重新指派" },
   cardProcReap: { class: "delete-data", reason: "回收卡片进程及其运行资源" },
   centerDeployAuto: { class: "permission", reason: "按 owner 授权卡自动部署私仓中心" },
@@ -23,6 +24,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   localReviewAdopt: { class: "permission", reason: "接管本机人工审查的授权来源" },
   mainCarry: { class: "safety", reason: "将旧 head 的审查证据沿用到新 head" },
   mainCarryMerge: { class: "safety", reason: "以纯 main 合并证明沿用审查结论" },
+  mainRedRepairBind: { class: "permission", reason: "修复卡自动拿 main-ci 修复绑定" },
   manualCaseOwnership: { class: "permission", reason: "决定人工事项的处理责任人" },
   manualMergeQueue: { class: "permission", reason: "凭 PM 人工请求授权进入合并队列" },
   manualRecovery: { class: "permission", reason: "按证据把人工工作流交回自动调度" },
@@ -51,5 +53,6 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   uiOwnerCarry: { class: "permission", reason: "继承 owner 的视觉批准" },
   uiOwnerReask: { class: "permission", reason: "重发 owner 视觉验收请求" },
   uiReviewCarry: { class: "safety", reason: "继承 UI 审查证明" },
+  verifyAfterResolve: { class: "permission", reason: "对人工结清为 done 的部署由调度器跑完成检查" },
 };
 export const highRiskRecoveryKey = (key: RecoveryKey): boolean => HIGH_RISK_RECOVERY_KEYS[key] !== undefined;

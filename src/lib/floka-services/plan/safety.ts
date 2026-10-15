@@ -10,7 +10,9 @@ export async function port<T>(c: Context, fn: () => Promise<T>): Promise<T> {
   return value;
 }
 function known(s: State): void {
-  if (!s || typeof s.loaded !== "boolean" || !Array.isArray(s.pids) || s.pids.some((p) => !Number.isSafeInteger(p) || p <= 0)) {
+  const valid = (p: number) => Number.isSafeInteger(p) && p > 0;
+  if (!s || typeof s.loaded !== "boolean" || !Array.isArray(s.pids) || !s.pids.every(valid) ||
+      (s.instances !== undefined && (!Array.isArray(s.instances) || !s.instances.every(valid) || s.instances.some(p => !s.pids!.includes(p))))) {
     throw new Error("Service registration/PID state is unknown");
   }
 }
@@ -33,12 +35,12 @@ export async function inventory(c: Context, absent?: Side, running?: Side): Prom
     const old = await port(c, () => c.controller.inspect(c.plan, d, "old"));
     const next = await port(c, () => c.controller.inspect(c.plan, d, "new"));
     known(old); known(next);
-    if (old.pids!.length + next.pids!.length > 1 || (old.loaded && next.loaded)) {
+    if ((old.instances ?? old.pids)!.length + (next.instances ?? next.pids)!.length > 1 || (old.loaded && next.loaded)) {
       throw new Error(`Multiple instances or KeepAlive registrations: ${d.name}`);
     }
     const states = { old, new: next };
     if (absent && !stopped(states[absent])) throw new Error(`Exit not confirmed: ${absent}:${d.name}`);
-    if (running && (states[running].loaded !== true || states[running].pids!.length !== 1)) {
+    if (running && (states[running].loaded !== true || (states[running].instances ?? states[running].pids)!.length !== 1)) {
       throw new Error(`Not running: ${running}:${d.name}`);
     }
   }

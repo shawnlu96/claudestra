@@ -102,6 +102,7 @@ import { invitePageResponse } from "./invite-page.js";
 import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
+import { conditionalJson } from "../lib/etag.js";
 import { restoreAgentArchiveFiles } from "./archive-restore.js";
 
 /**
@@ -308,7 +309,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const path = url.pathname.slice("/api/v1".length);
 
   // GET /api/v1/agents —— scope 内的 agent 快照（热点逻辑在 bridge/agents-list-route.ts：先 scope 后尾读、已停 worker 不读尾、有界并发 + 短缓存）
-  if (path === "/agents" && req.method === "GET") return handleAgentsList(url, principal, { runManager: agentsListRunManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID });
+  if (path === "/agents" && req.method === "GET") {
+    const ifNoneMatch = req.headers.get("if-none-match");
+    return handleAgentsList(url, principal, { runManager: agentsListRunManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID, ifNoneMatch });
+  }
 
   // v2.7+ GET /api/v1/sessions —— 全机器 Claude 会话清单（agents 模式适配，
   // 中性 NeutralSessionInfo；Discord 面板与 web 前端共用同一数据源）。
@@ -1562,7 +1566,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!isFullScope(principal)) return forbidden("projects requires a full-scope token");
     if (req.method === "GET") {
       const r = await runManager("project-list");
-      return apiJson(r?.ok ? 200 : 500, r ?? { ok: false, error: "manager failed" });
+      return r?.ok ? conditionalJson(req.headers.get("if-none-match"), r) : apiJson(500, r ?? { ok: false, error: "manager failed" });
     }
     if (req.method === "POST") {
       const body: any = await readJsonBody(req);

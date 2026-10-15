@@ -29,6 +29,7 @@ import { mergeEntry } from "./scheduler-merge-order.js";
 import { mergeCandidates } from "./scheduler-merge-train-tick.js";
 import { cardRepo, foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
+import { standingHold } from "./pm-handback.js";
 
 type QueueSource = "auto" | "manual";
 /** ready = the existing gate admits it now; running = its merge run holds the slot; blocked = waits in place; excluded = not queued. */
@@ -138,12 +139,12 @@ function cardExclusion({ db, ports, repo }: Read, task: LedgerTask): QueueEntry[
 }
 
 /** The card-level wait reasons both sources share, in the order a reader should see them. */
-function cardWait(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): QueueEntry["reason"] {
+function cardWait(db: Database, task: LedgerTask, events: readonly LedgerEvent[], req?: ManualRequest): QueueEntry["reason"] {
   if (!SHA.test(task.headSHA ?? "") || !task.pr || !task.branch) return { code: "missing_evidence", why: "卡缺完整 head / PR / 分支" };
   const frozen = getMeta(db, task.project).queueFrozen;
   if (frozen.frozen) return { code: "frozen", why: `项目合并队列已冻结：${frozen.reason || "无原因"}` };
-  const wf = events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow");
-  if (wf?.data.hold) return { code: "owner_hold", why: `卡被明确留在人工（#${wf.seq}）` };
+  const wf = standingHold(events, req); // PMHAND1 11b: a request lifts only its own requester's hold (pm-handback.ts)
+  if (wf) return { code: "owner_hold", why: `卡被明确留在人工（#${wf.seq}）` };
   const unknown = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND action = 'merge' AND status = 'unknown'").get(task.id) as { id: string } | null;
   if (unknown) return { code: "unknown_run", why: `合并运行 ${unknown.id} 结果不明，等 PM 核对` };
   return null;
@@ -193,7 +194,7 @@ function requestEntry(r: Read, task: LedgerTask, base: QueueEntry, req: ManualRe
     case "queued": return { ...e, state: "ready" };
     case "running": return { ...e, state: "running" };
     case "unknown": return { ...e, reason: { code: "unknown_run", why: `人工合并结果不明，等 PM 核对：${why}` } };
-    case "waiting": return { ...e, reason: cardWait(r.db, task, listEvents(r.db, { project: task.project, target: task.id })) ?? { code: "manual_waiting", why } };
+    case "waiting": return { ...e, reason: cardWait(r.db, task, listEvents(r.db, { project: task.project, target: task.id }), req) ?? { code: "manual_waiting", why } };
     case "revoked": return { ...e, state: "excluded", reason: { code: "withdrawn", why } };
     case "void": return { ...e, state: "excluded", reason: { code: "manual_void", why } };
     default: return { ...e, state: "excluded", reason: { code: "manual_ended", why: `${row.state}：${why}` } };

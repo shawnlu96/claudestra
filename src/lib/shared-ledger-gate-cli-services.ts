@@ -1,4 +1,6 @@
 export const SCHEDULER_SERVICE_COMMANDS = new Set([
+  "scheduler-priority-stall",
+  "scheduler-priority-now",
   "scheduler-manual-resume", "scheduler-review-hold", "scheduler-review-downgrade",
   "scheduler-convergence", "scheduler-arbiter-delivery",
   "scheduler-plan", "scheduler-plan-rejected", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step", "scheduler-merge-handoff",
@@ -17,6 +19,7 @@ export const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-content-review", // merge-arch-REVIEW1 (manager/ledger-merge-content-review-cmds.ts)
   "scheduler-main-ci", // MAINCIW (manager/ledger-main-ci-cmds.ts)
   "scheduler-recovery-observe", // AUDW1 (manager/ledger-scheduler-recovery-cmds.ts)
+  "scheduler-priority-sample", // PRIO2 (lib/scheduler-priority-order-cmd.ts)
   "scheduler-manual-case-default", // OWN1 (manager/ledger-manual-case-cmds.ts)
   "scheduler-manual-case-sla", // SLA1 (manager/ledger-manual-case-cmds.ts)
 ]);

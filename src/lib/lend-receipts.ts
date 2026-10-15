@@ -6,6 +6,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { orderOf, type LendRow } from "./lend-journal.js";
+import { receiveLedgerUse, type LedgerReceive } from "./floka-ledger/uses.js";
 import { statePath } from "./paths.js";
 
 const LEND_RECEIPTS_PATH = statePath("lend", "receipts.jsonl");
@@ -70,3 +71,11 @@ export function appendReceipt(r: LendReceipt, path = LEND_RECEIPTS_PATH): boolea
   appendFileSync(path, `${JSON.stringify(r)}\n`, { mode: 0o600 });
   return true;
 }
+
+/** A 的回执签名字段，顺序与 lend-deps.ts verifyReceipt 相同 */
+export interface LendAck { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string; purpose?: string }
+export const lendAckFields = (r: LendAck): string[] => [r.orderId, r.sha256, String(r.eventSeq), r.taskId];
+
+/** rename-floka-LEDGER1：回执按 rename.ledgerReceive 双族验（lend-deps.ts verifyReceipt 调）；没有 purpose 的历史回执照旧族原字节验，收据里的 ackSig 从不改写 */
+export const verifyLendAck = (r: LendAck, pinnedKey: string, rx: LedgerReceive = {}): boolean =>
+  receiveLedgerUse("lend-receipt", r, lendAckFields(r), rx, pinnedKey).ok;
