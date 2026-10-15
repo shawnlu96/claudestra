@@ -2,7 +2,8 @@
  * AUDH2-1：merge 阶段、本次停留已交给仓库方合并（merge_handoff 事件，scheduler-merge-handoff.ts）的卡，PM 这边没有合并动作可做。
  * ship_stalled 不再按本机合并的 30 分钟口径催「补做合并部署」：PR 还开着（或这轮没读到）停够 HANDOFF_STALL_MS 才报「去问仓库方」；
  * PR 已合并进 main、合并时 head 是交接跟的 head、本机 clone 的 main 证实含合并提交（与调度器落 live 同一套事实）才提示部署，
- * 证不了就只提示核查、不建议部署 / 推 live；PR 被关掉没合并单独说。冻结 / 列车排队照原规则不报、keep 住。
+ * 证不了就只提示核查、不建议部署 / 推 live；PR 被关掉没合并单独说；卡上 PR 已不是交接的那个，交接证据不算数、只提示核对。
+ * 冻结 / 列车排队照原规则不报、keep 住。
  * merge_ready 对交接卡一律不报：合并由对方队列做，走正式合并入口就是重复合并。
  * key = 卡 + 进 merge 时刻 + 交接事件：同一次交接最多推一次。没有交接事件的卡照原规则。tests/ledger-audit-handoff.test.ts。
  */
@@ -43,6 +44,12 @@ function followedHead(events: readonly LedgerEvent[], ev: LedgerEvent): string |
     && e.data.handoffSeq === ev.seq && e.data.from === head && typeof e.data.to === "string" ? e.data.to : head, handed);
 }
 
+/** 交接绑定的 PR（evidence.pr）：卡上 PR 换过就不能借这次交接的证据（与 scheduler-merge-handoff-tick.ts driveHandoff 同口径） */
+const handedPr = (ev: LedgerEvent): string | null => {
+  const pr = (ev.data.evidence as { pr?: unknown } | undefined)?.pr;
+  return typeof pr === "string" ? pr : null;
+};
+
 type Finding = { rule: "ship_stalled"; taskId: string; since: number; keyParts: (string | number)[]; detail: string; suggestion: string };
 interface Out { emit(f: Finding): void; keep(rule: "ship_stalled", keyParts: (string | number)[]): void }
 
@@ -60,6 +67,11 @@ function unproved(pr: HandoffPrFact, follow: string | null): string | null {
 /** 这次交接该说什么、从哪算、阈值多少（没满阈值由调用方 keep） */
 function verdict(ev: LedgerEvent, events: readonly LedgerEvent[], pr: HandoffPrFact | null | undefined, mergeStallMs: number, prUrl: string,
   now: number): { since: number; limit: number; detail: string; suggestion: string } {
+  const handed = handedPr(ev);
+  if (handed !== prUrl) {
+    return { since: ev.ts, limit: mergeStallMs, detail: `卡上的 PR 已不是交接的那个（${handed ?? "交接没记 PR"} → ${prUrl}），交接证据不覆盖它`,
+      suggestion: "核对交接：新 PR 没经本机交接，按手动流程处理；证实前不要部署、不要推 live" };
+  }
   if (pr?.state === "CLOSED") {
     return { since: ev.ts, limit: mergeStallMs, detail: `交给仓库方的 ${prUrl} 被关闭、没有合并`, suggestion: "问仓库方为什么关了，按结论退回 fix 重交或作废这张卡" };
   }
@@ -116,10 +128,18 @@ async function liveHandoffPr(prUrl: string, project: string): Promise<HandoffPrF
   return { ...pr, landing: landing.ok ? { ok: true } : landing };
 }
 
-/** 快照取数：只读 merge 阶段、本次停留有交接事件的卡；单卡读失败记 null，不影响别的卡 */
+/**
+ * 快照取数：只读 merge 阶段、本次停留有交接事件、卡上 PR 就是交接那个的卡；单卡读失败记 null，不影响别的卡。
+ * 一张一张读：已合并的要在同一个 clone 里 fetch 同一个 main 引用，并行会撞 ref lock、被当成「没证实」推出去且同 key 不再纠正。
+ * ponytail: 只串行本次巡检本项目内的读；与调度器 tick / 别的项目共用 clone 时的并发 fetch 仍可能撞锁，要再收就按 repoDir 加进程锁。
+ */
 export async function collectHandoffPr(tasks: readonly { task: LedgerTask; events: readonly LedgerEvent[] }[],
   read: (prUrl: string, project: string) => Promise<HandoffPrFact | null> = liveHandoffPr): Promise<Record<string, HandoffPrFact | null>> {
-  const want = tasks.filter(({ task, events }) => task.stage === "merge" && PR.test(task.pr ?? "") && handoffEvent(events));
-  const got = await Promise.all(want.map(async ({ task }) => [task.id, await read(task.pr!, task.project).catch(() => null)] as const)); // 抛错同读失败：按没读到处理
-  return Object.fromEntries(got);
+  const got: Record<string, HandoffPrFact | null> = {};
+  for (const { task, events } of tasks) {
+    const ev = task.stage === "merge" ? handoffEvent(events) : null;
+    if (!ev || !PR.test(task.pr ?? "") || handedPr(ev) !== task.pr) continue;
+    got[task.id] = await read(task.pr!, task.project).catch(() => null); // 抛错同读失败：按没读到处理
+  }
+  return got;
 }

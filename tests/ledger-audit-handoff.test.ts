@@ -20,7 +20,7 @@ const review = (at: number) => ev(at, "review", { round: 1, head: H, verdict: "p
 /** 进 merge 于 stageAt；handoff = 同时记交接事件（SYN-2 / FUP-1 的形状）；之后的事件由调用方追加（seq 要更晚） */
 const card = (stageAt: number, handoff: boolean, over: Partial<LedgerTask> = {}) => ({ task: task(over), events: [
   ev(0, "task", { op: "new" }), review(stageAt - MIN), ev(stageAt, "stage", { from: "review", to: "merge" }),
-  ...(handoff ? [ev(stageAt, "scheduler", { op: "merge_handoff", evidence: { pr: PR_URL, head: H } })] : [])] });
+  ...(handoff ? [ev(stageAt, "scheduler", { op: "merge_handoff", evidence: { pr: over.pr ?? PR_URL, head: H } })] : [])] });
 const ci: MergeCiFact = { head: H, state: "green", source: "live", checkedAt: NOW, blockers: [] };
 type Snap = AuditSnapshot & MergeReadyInputs & HandoffInputs & MergeTrainInputs;
 const snap = (tasks: AuditSnapshot["tasks"], pr?: HandoffPrFact | null, over: Partial<Snap> = {}): Snap =>
@@ -100,6 +100,40 @@ describe("AUDH2-1 交接后巡检", () => {
     expect(after[0]!.suggestion).toContain("需要部署");
   });
 
+  test("本机 r2 P1：列车 5 分钟前刚空出、PR 开着已交接 13 小时 → 缓冲期内不报、keep 同一 key，过了照报", () => {
+    trainMode = "on";
+    try {
+      const t = card(NOW - 13 * 60 * MIN, true), freed = { mergeTrain: { active: [], freedAt: NOW - 5 * MIN },
+        trainFacts: { holder: null, cards: { T1: { stage: "merge", merged: false, phase: null } } } } as Partial<Snap>;
+      expect(rules(snap([t], open, freed))).toEqual([]);
+      const key = run(snap([t], open, freed)).keep.find((k) => k.includes("|handoff|"))!;
+      expect(key).toBeTruthy();
+      // 列车空出只把计时挪到空出那刻，PR 开着仍按 12 小时口径
+      expect(rules(snap([t], open, freed), NOW + 60 * MIN)).toEqual([]);
+      const after = rules(snap([t], open, freed), NOW + HANDOFF_STALL_MS);
+      expect(after.map((f) => f.key)).toEqual([key]);
+      expect(after[0]!.suggestion).toContain("去问仓库方");
+    } finally { trainMode = "observe"; }
+  });
+
+  test("本机 r2 P1：交接后卡上 PR 换了（新 PR 同 head、已合并、本机证实进 main）→ 不提示部署 / 推 live，只提示核对交接；不读新 PR", async () => {
+    const other = "https://github.com/o/r/pull/8", first = card(NOW - 2 * 60 * MIN, true);
+    const t = { ...first, task: task({ pr: other }) }; // 交接事件里仍是 PR_URL
+    const f = rules(snap([t], merged));
+    expect(f.map((x) => x.rule)).toEqual(["ship_stalled"]);
+    expect(f[0]!.detail).toContain(`卡上的 PR 已不是交接的那个（${PR_URL} → ${other}）`);
+    expect(f[0]!.suggestion).toContain("证实前不要部署、不要推 live");
+    expect(f[0]!.suggestion).not.toContain("manager update");
+    expect(f.some((x) => x.suggestion.includes("走正式合并入口"))).toBe(false);
+    // 交接没记 PR 同样不认；未满 mergeStallMs 不报、keep
+    const bare = { ...first, events: first.events.map((e) => (e.data.op === "merge_handoff" ? { ...e, data: { op: "merge_handoff", evidence: { head: H } } } : e)) };
+    expect(rules(snap([bare], merged))[0]!.detail).toContain("交接没记 PR");
+    expect(rules(snap([{ ...card(NOW - 20 * MIN, true), task: task({ pr: other }) }], merged))).toEqual([]);
+    const asked: string[] = [];
+    expect(await collectHandoffPr([t], async (u) => { asked.push(u); return merged; })).toEqual({});
+    expect(asked).toEqual([]);
+  });
+
   test("审查 P1：只有合进 main、head 对得上、本机 main 证实含合并提交才提示部署；证不了只提示核查", () => {
     const t = card(NOW - 2 * 60 * MIN, true);
     for (const [pr, why] of [[{ ...merged, base: "release" }, "合进的是 release"], [{ ...merged, base: null }, "读不出的分支"],
@@ -154,13 +188,26 @@ describe("AUDH2-1 交接卡 PR 取数", () => {
   test("只读 merge 阶段有交接事件、带 PR 的卡；单卡读失败 / 抛错记 null", async () => {
     const asked: string[] = [];
     const got = await collectHandoffPr([card(NOW, true), { ...card(NOW, false), task: task({ id: "T2" }) },
-      { ...card(NOW, true), task: task({ id: "T3", pr: "https://github.com/o/r/pull/3" }) }], async (u) => {
+      card(NOW, true, { id: "T3", pr: "https://github.com/o/r/pull/3" })], async (u) => {
       asked.push(u);
       if (u.endsWith("/3")) throw new Error("gh down");
       return open;
     });
     expect(asked).toEqual([PR_URL, "https://github.com/o/r/pull/3"]);
     expect(got).toEqual({ T1: open, T3: null });
+  });
+
+  test("本机 r2 P2：多张交接卡一张一张读（已合并的要 fetch 同一个 main 引用，并行会撞 ref lock）", async () => {
+    let busy = 0, peak = 0;
+    const ids = ["T1", "T2", "T3"], tasks = ids.map((id, i) => card(NOW, true, { id, pr: `https://github.com/o/r/pull/${i + 1}` }));
+    const got = await collectHandoffPr(tasks, async () => {
+      peak = Math.max(peak, ++busy);
+      await new Promise((r) => setTimeout(r, 5));
+      busy--;
+      return merged;
+    });
+    expect(Object.keys(got)).toEqual(ids);
+    expect(peak).toBe(1);
   });
 
   test("gh 输出解析：MERGED 带合并提交、时刻、base、head；失败 / 不合规 = null", async () => {
