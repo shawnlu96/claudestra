@@ -1,3 +1,4 @@
+import { requireMergeQueueOwner } from "./merge-queue-owner-hooks.js";
 /**
  * Right of way for a live merge train (i28-MT1f2, i28-MT1f2f2). While a project's train is testing or settling, any merge into
  * main that is not one of its riding members voids the whole train and throws its CI away. Its members merge one by one, and each
@@ -68,6 +69,7 @@ export function turnMergeSlot(db: Database, ctx: WriteCtx, row: MergeRun, receip
   if (give && (row.phase !== "ready" && row.phase !== "await_ci")) throw new LedgerError("conflict", `合并步骤在 ${row.phase}，不能让出合并槽`);
   if (give && holder?.intentId !== row.intentId) throw new LedgerError("conflict", "本意图未占项目合并槽，无从让出");
   if (!give && holder) throw new LedgerError("conflict", holder.intentId === row.intentId ? "本意图已占项目合并槽" : "项目合并槽仍被占用");
+  if (!give) requireMergeQueueOwner(db, row.taskId, "merge", now, row.intentId);
   if (give) db.prepare("DELETE FROM scheduler_resources WHERE project = ? AND resource = ? AND intentId = ?").run(row.project, lock, row.intentId);
   else db.prepare("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES (?, ?, ?, ?, ?, 'intent')")
     .run(row.project, lock, row.taskId, row.intentId, now);

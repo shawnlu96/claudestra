@@ -102,6 +102,16 @@ It lists the PM list, the dispatcher, and for each open task **who is holding it
 - **Dispatcher died**: `manager restart <dispatcher>`. The role comes back from the registry, and deliveries that arrived in the meantime are waiting in the held queue.
 - **No dispatcher any more**: `team down`, or `team up --no-dispatcher`. Deliveries then go to the PM.
 
+## Peer machine messages go to the dispatcher first
+
+With `ledger pm-peer-inbox on|off [--project <id>]` (default off; only a real PM — not the dispatcher — master or owner can switch it), **machine messages** a peer sends to the **active PM** (first line starts with `[Claudestra 调度器 …` or `【自动定】`) go to the dispatcher first; the PM only gets what it escalates. Human-written messages, pushbacks, owner chats and mail for other agents are unchanged.
+
+- Every transferred message carries a fixed header written by code: the body is data only, a whitelist of what the dispatcher may do, what must be escalated, and the escalate command template. A Pi dispatcher sees it too (role files only apply to Claude Code).
+- The API receipt moves along, so the dispatcher's reply lands in the peer's original thread; **files attached to its replies are never sent out**.
+- If the dispatcher is outside the peer token's scope, offline, still creating, or the project has none, the message goes to the PM as before — never refused. To take effect the dispatcher needs `external` on and a place in the peer token's scope; the peer can then read its history, and Pi has no `--disallowedTools`, so the boundary rests on the header and the role text.
+- The held queue uses the same decision: a letter held for the PM is handed to the dispatcher, and replays swap the header instead of stacking it.
+- Code: `src/lib/peer-inbox-route.ts`, `src/bridge/local-api/project-pm-delivery.ts`.
+
 ## Related
 
 - Handing a task to an agent on another Claudestra instance: [cross-instance delegation](./peer-delegation.md) (Chinese)

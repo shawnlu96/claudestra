@@ -49,8 +49,13 @@ interface ProjectSchedule extends AgentPoolPolicy {
   deploy?: DeployTarget;
   /** true = the repository owner merges: auto cards hand the PR over at merge and never merge here (docs/architecture/merge-handoff.md). */
   mergeHandoff?: boolean;
+  /** peers.json name of the repository owner whose review pushes on handed-over PRs are booked here, not sent to PM (RRL-1) */
+  handoffPeer?: string;
   /** false = this project's agents are never supervised (i28-S1); absent = follow the global switch */
   supervise?: boolean;
+  /** true = a repository without a GitHub PR flow: cards branch off local main, deliver a local commit, and the PM merges into
+   * local main; requiredChecks are then commands run there (docs/architecture/local-merge.md). */
+  localMerge?: boolean;
 }
 /** Agent supervision (i28-S1, lib/agent-supervisor.ts): on unless scheduler.json says otherwise; stuckMin = silent-turn threshold. */
 interface SuperviseConfig { enabled: boolean; stuckMin: number }
@@ -100,17 +105,61 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
     }
     if (p.supervise !== undefined && typeof p.supervise !== "boolean") throw new Error(`scheduler project ${id}: supervise must be boolean`);
     if (p.mergeHandoff !== undefined && typeof p.mergeHandoff !== "boolean") throw new Error(`scheduler project ${id}: mergeHandoff must be boolean`);
+    if (p.handoffPeer !== undefined && (typeof p.handoffPeer !== "string" || !/^[\w-]{1,32}$/.test(p.handoffPeer))) {
+      throw new Error(`scheduler project ${id}: handoffPeer must be a peers.json name`);
+    }
     if (p.mergeHandoff === true && p.deploy !== undefined) throw new Error(`scheduler project ${id}: mergeHandoff cannot deploy (nothing merges here)`);
+    const local = parseLocalMerge(id, p);
     projects[id] = { ...agents, ...localRuntimeFields(p.localAuthorRuntime),
       maxActiveWorkers: agents.agents ? agentLimitSum(agents.agents) : p.maxActiveWorkers as number, requiredChecks,
-      repoDir: p.repoDir, remote: { ...localFamilyPolicy(parseRemote(id, agentPoolRemote(p.remote, !!agents.agents)), p.localAuthorRuntime), ...agents },
+      repoDir: p.repoDir, remote: { ...localFamilyPolicy(parseRemote(id, agentPoolRemote(local ? p.remote ?? { mode: "off" } : p.remote, !!agents.agents)),
+        p.localAuthorRuntime), ...agents },
       ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
       ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}), ...mergeTrainField(id, p.mergeTrain),
-      ...(p.mergeHandoff === true ? { mergeHandoff: true } : {}) };
+      ...(p.mergeHandoff === true ? { mergeHandoff: true } : {}), ...(p.handoffPeer !== undefined ? { handoffPeer: p.handoffPeer as string } : {}),
+      ...(local ? { localMerge: true } : {}) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects, supervise: parseSupervise(r.supervise),
     lifecycle: parseLifecycle(r.lifecycle) };
+}
+
+/**
+ * localMerge is a third merge path, exclusive of the other two: with mergeHandoff nobody here would merge, with deploy the
+ * deploy steps assume a PR merge, and a peer could not reach a branch that never leaves this machine — so remote defaults to
+ * off and any other mode is refused rather than silently ignored.
+ */
+function parseLocalMerge(id: string, p: Record<string, unknown>): boolean {
+  if (p.localMerge === undefined || p.localMerge === false) return false;
+  if (p.localMerge !== true) throw new Error(`scheduler project ${id}: localMerge must be boolean`);
+  if (p.mergeHandoff === true) throw new Error(`scheduler project ${id}: localMerge and mergeHandoff are exclusive`);
+  if (p.deploy !== undefined) throw new Error(`scheduler project ${id}: localMerge cannot deploy`);
+  const r = p.remote as Record<string, unknown> | undefined;
+  if (r !== undefined && (!r || typeof r !== "object" || r.mode !== "off")) throw new Error(`scheduler project ${id}: localMerge needs remote.mode off (or no remote)`);
+  return true;
+}
+
+/** No PR is merged here for this project: the repository owner merges (mergeHandoff) or the PM merges locally (localMerge). */
+export const prMergeOff = (p: Pick<ProjectSchedule, "mergeHandoff" | "localMerge">): boolean => p.mergeHandoff === true || p.localMerge === true;
+
+/** A localMerge check is one command, split on whitespace into argv and never given to a shell (no quoting, no pipes). */
+export const checkArgv = (check: string): string[] => check.split(/\s+/).filter(Boolean);
+
+export interface LocalMergeProject { repoDir: string; checks: string[] }
+/**
+ * The localMerge part of a project's schedule, or null for every other project. An unreadable config reads as null: the
+ * scheduler is then off as a whole, and a caller falling back to the PR path refuses (no origin) instead of passing.
+ */
+export function localMergeOf(project: string, read: () => SchedulerConfig = readSchedulerConfig): LocalMergeProject | null {
+  let p: ProjectSchedule | undefined;
+  try {
+    const all = read().projects;
+    p = Object.hasOwn(all, project) ? all[project] : undefined;
+  } catch (e) {
+    console.error(`⚠ scheduler.json 读不出，按非 localMerge 处理：${(e as Error).message}`);
+    return null;
+  }
+  return p?.localMerge ? { repoDir: p.repoDir, checks: [...p.requiredChecks] } : null;
 }
 
 /** `supervise: false` / `true` / `{ enabled?, stuckMin? }`; absent = DEFAULT_SUPERVISE */

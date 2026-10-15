@@ -71,6 +71,7 @@ import { clearRefusal, runtimeOfWindow } from "../lib/wall-screen.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
 import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
+import { interceptRemoteReview } from "./remote-review-intake.js";
 import { isConfiguredAcpChannel } from "./acp-state.js";
 import { handleAcpClear } from "./acp-clear.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
@@ -973,6 +974,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     }
     if (!text.trim() && attachments.length === 0) return apiJson(400, { ok: false, error: "text is required" });
     waitSec = Math.min(Math.max(waitSec, 0), 300);
+    // 仓库方审查结论交调度器入账、不起 PM 回合（bridge/remote-review-intake.ts）；不命中照原路投
+    const remote = await interceptRemoteReview({ peer: principal.peer, agent: agent.name, text, attachments: attachments.length },
+      deps.mirrorApiExchange.bind(null, { kind: "api", tokenId, name: principal.name || tokenId }, agent.channelId)); if (remote) return remote;
     if (!attachments.length) { const r = await (await import("./ask-entry.js")).answerFromChat({ agent: agent.name, text, principal, askId: url.searchParams.get("ask") }); if (r) return r; }
 
     // Web 斜杠直通只给 owner（bridge/api-slash.ts）：能直通就注入 TUI 并在这里返回（非 owner → 403）；不是命令 → 按普通消息往下投

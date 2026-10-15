@@ -6,9 +6,11 @@ import { appendEvent } from "./ledger-write.js";
 import { listAsks, openAskFull } from "./ledger-asks.js";
 import { readPriorityModes } from "./ledger-priority-read.js";
 import type { PriorityMode } from "./ledger-priority-types.js";
-import { freshStallCycle, nextStallAction, PRIORITY_STALL_MS, stallNotice,
+import { freshStallCycle, nextStallAction, stallNotice,
   type StallAction, type StallBasis, type StallCycle, type StallResult } from "./ledger-priority-stall.js";
-import { priorityStallBases } from "./ledger-priority-stall-read.js";
+import { priorityStallBases, priorityStallThreshold } from "./ledger-priority-stall-read.js";
+
+export { priorityStallThreshold };
 
 const NAMESPACE = "priority-stall", PENDING_MS = 5 * 60_000;
 type Stream = "observe" | "on";
@@ -30,11 +32,6 @@ function state(db: Database, project: string, key: string, stream: Stream): Stal
 function save(db: Database, ctx: WriteCtx, b: StallBasis, stream: Stream, cycle: StallCycle | null, text: string): void {
   appendEvent(db, { ...ctx, dedupKey: undefined }, { project: b.project, target: b.taskId ?? "", kind: "note", text,
     data: { namespace: NAMESPACE, op: "episode", key: b.key, stream, cycle, stage: b.stage, why: b.why } });
-}
-
-export function priorityStallThreshold(db: Database, project: string): number {
-  const row = db.query("SELECT value FROM meta WHERE project=? AND key='priorityStallMs'").get(project) as { value: string } | null;
-  return row ? Number(JSON.parse(row.value)) : PRIORITY_STALL_MS;
 }
 
 /** A separate audited setting; changing a title, note or threshold never rewinds the progress clock. */
@@ -89,7 +86,7 @@ export function priorityStallDue(db: Database, b: StallBasis, now: number): bool
   const threshold = priorityStallThreshold(db, b.project);
   if (!c || c.progress !== b.progress || c.epoch !== b.nowSince) return now - Math.max(b.since, b.nowSince) >= threshold;
   if (c.modeRev !== m.rev || (c.pending && now - c.pending.at >= PENDING_MS)) return true;
-  return nextStallAction(c, now, threshold) !== null;
+  return nextStallAction(c, now, threshold, !!b.config) !== null;
 }
 
 /** Claim all due targets in one transaction. Repeated/concurrent ticks see a pending claim and do nothing. */
@@ -99,13 +96,13 @@ export function claimPriorityStalls(db: Database, ctx: WriteCtx, project: string
     const m = readPriorityModes(db, project).priorityStall as { mode: PriorityMode; rev: number };
     if (m.mode === "off") return [];
     const out: StallClaim[] = [], now = ctx.now ?? Date.now();
-    for (const b of priorityStallBases(db, project, key)) {
+    for (const b of priorityStallBases(db, project, key, now)) {
       if (target !== undefined && (b.taskId ?? "-") !== target) throw new LedgerError("forbidden", "停滞目标不匹配");
       if (!b.eligible) {
         if (state(db, project, b.key, m.mode)) save(db, ctx, b, m.mode, null, "降档或终态，结束停滞周期");
         continue;
       }
-      const c = reconcile(db, ctx, b, m.mode, m.rev), action = nextStallAction(c, now, priorityStallThreshold(db, project));
+      const c = reconcile(db, ctx, b, m.mode, m.rev), action = nextStallAction(c, now, priorityStallThreshold(db, project), !!b.config);
       if (!action) continue;
       const token = crypto.randomUUID(), attempts = (c[action]?.attempts ?? 0) + 1;
       c.pending = { action, token, at: now, attempts };
@@ -116,10 +113,10 @@ export function claimPriorityStalls(db: Database, ctx: WriteCtx, project: string
   }).immediate();
 }
 
-export function livePriorityStallClaim(db: Database, project: string, key: string, token: string): StallClaim | null {
+export function livePriorityStallClaim(db: Database, project: string, key: string, token: string, now = Date.now()): StallClaim | null {
   const m = readPriorityModes(db, project).priorityStall as { mode: PriorityMode; rev: number };
   if (m.mode === "off") return null;
-  const b = priorityStallBases(db, project, key).find((b) => b.key === key);
+  const b = priorityStallBases(db, project, key, now).find((b) => b.key === key);
   const c = state(db, project, key, m.mode);
   if (!b?.eligible || !c?.pending || c.pending.token !== token || c.modeRev !== m.rev || c.progress !== b.progress || c.epoch !== b.nowSince) return null;
   return { basis: b, cycle: c, action: c.pending.action, token, mode: m.mode };
@@ -129,7 +126,7 @@ export function livePriorityStallClaim(db: Database, project: string, key: strin
 export function finishPriorityStall(db: Database, ctx: WriteCtx, project: string, key: string, token: string, result: StallResult, detail: string): boolean {
   requireScheduler(ctx);
   return db.transaction(() => {
-    const live = livePriorityStallClaim(db, project, key, token);
+    const live = livePriorityStallClaim(db, project, key, token, ctx.now);
     if (!live) return false;
     const { basis: b, cycle: c, action, mode } = live;
     c[action] = { at: ctx.now ?? Date.now(), result, detail: detail.slice(0, 1200), attempts: c.pending!.attempts };
@@ -143,8 +140,8 @@ export function finishPriorityStall(db: Database, ctx: WriteCtx, project: string
 export function priorityStallOwner(db: Database, ctx: WriteCtx, project: string, key: string, token: string): string | null {
   requireScheduler(ctx);
   return db.transaction(() => {
-    const live = livePriorityStallClaim(db, project, key, token);
-    if (!live || live.action !== "owner" || live.mode !== "on") return null;
+    const live = livePriorityStallClaim(db, project, key, token, ctx.now);
+    if (!live || live.action !== "owner" || live.mode !== "on" || live.basis.config) return null;
     const { basis: b, cycle: c } = live, now = ctx.now ?? Date.now(), body = stallNotice(b, c, now);
     const existing = listAsks(db, { project, states: ["open"] }).find((a) => a.kind === "owner_action"
       && (a.extra.priorityStallKey === key || (b.taskId && a.taskId === b.taskId && a.extra.mechanism === "priorityStall")));
@@ -153,5 +150,24 @@ export function priorityStallOwner(db: Database, ctx: WriteCtx, project: string,
       extra: { mechanism: "priorityStall", priorityStallKey: key, cycle: c.id, pm: b.pm, featureId: b.featureId, label: b.label } }, now).ask;
     finishPriorityStall(db, ctx, project, key, token, "success", `${existing ? "关联" : "创建"} owner 待办 ${ask.id}\n${body}`);
     return ask.id;
+  }).immediate();
+}
+
+/**
+ * The PM step records the reminder on the card instead of pushing it: claim recheck, note and finish share one transaction, and the
+ * note's dedup (project + key + cycle + step) keeps a rerun or restart from writing it twice. A note is not progress.
+ */
+export function priorityStallNote(db: Database, ctx: WriteCtx, project: string, key: string, token: string): number | null {
+  requireScheduler(ctx);
+  return db.transaction(() => {
+    const live = livePriorityStallClaim(db, project, key, token, ctx.now);
+    if (!live || live.action !== "pm" || live.mode !== "on") return null;
+    const { basis: b, cycle: c } = live, dedupKey = `priority-stall-note:${project}:${key}:${c.id}:pm`;
+    // Unbound nodes have no card: the target stays empty and data names the node, never a made-up id.
+    const note = getEventByDedup(db, dedupKey) ?? appendEvent(db, { ...ctx, dedupKey }, { project, target: b.taskId ?? "", kind: "note",
+      text: stallNotice(b, c, ctx.now ?? Date.now()), data: { namespace: "priority-stall-note", key, cycle: c.id, step: "pm",
+        featureId: b.featureId, nodeKey: b.nodeKey, block: b.block, impact: b.impact, ...b.config ? { config: b.config } : {} } }).event;
+    finishPriorityStall(db, ctx, project, key, token, "success", `已记在卡上 #${note.seq}`);
+    return note.seq;
   }).immediate();
 }

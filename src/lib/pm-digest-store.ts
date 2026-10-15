@@ -2,7 +2,7 @@
  * PM 摘要的落盘状态（agents-PMDIG1）：statePath("pm-digest.json") 存摘要队列与最近 24 小时的归类记录，只有 bridge 写；
  * statePath("pm-digest-mode.json") 存各项目开关（缺省 observe），只有 manager 的 `ledger pm-digest-mode` 写。重启读回队列照常送出。
  */
-import { pmDigestPull, pmRouteMode, setPmDigestPull, setPmRouteMode, withModeLock, type PullMode } from "./pm-route-mode.js";
+import { pmDigestPull, pmPeerInbox, pmRouteMode, setPmDigestPull, setPmPeerInbox, setPmRouteMode, withModeLock, type PullMode } from "./pm-route-mode.js";
 import { tagPmRouteRecord, validPmRouteRecord } from "./pm-route-record.js";
 import type { PmRouteRecord } from "./pm-route-types.js";
 import { statePath } from "./paths.js";
@@ -84,6 +84,10 @@ export class PmDigestStore {
   pullMode(project: string): PullMode { return pmDigestPull(this.modePath, project); }
 
   setPullMode(project: string, mode: PullMode): Promise<void> { return setPmDigestPull(this.modePath, project, mode); }
+
+  peerInbox(project: string): PullMode { return pmPeerInbox(this.modePath, project); }
+
+  setPeerInbox(project: string, mode: PullMode): Promise<void> { return setPmPeerInbox(this.modePath, project, mode); }
 
   /** 与 setRouteMode / setPullMode 同一把锁（pm-route-mode.ts withModeLock） */
   setMode(project: string, mode: DigestMode): Promise<void> {

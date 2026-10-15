@@ -63,7 +63,7 @@ test("real authorized autoResume preserves the heal episode through PM and owner
   expect(claimPriorityStalls(db, ctx(), project)[0]?.action).toBe("owner");
 });
 
-test("disk restart after PM delivery and receipt failure never repeats the notification", async () => {
+test("disk restart after the card note and a lost receipt never repeats the note", async () => {
   const memory = db, root = mkdtempSync(join(tmpdir(), "stall-pm-restart-")), path = join(root, "ledger.sqlite");
   writeFileSync(path, db.serialize()); db = openLedger(path);
   try {
@@ -72,18 +72,19 @@ test("disk restart after PM delivery and receipt failure never repeats the notif
     const ports = { now: () => now, active: () => {}, notify: async () => { notices++; },
       manager: async (...args: string[]) => {
         const input = JSON.parse(args[args.indexOf("--data") + 1]);
-        if (failReceipt && input.op === "finish") return { ok: false, error: "receipt CAS conflict" };
+        if (failReceipt && input.op === "note") { await manager(...args); return { ok: false, error: "receipt lost" }; }
         return manager(...args);
       } };
+    const notes = () => listEvents(db).filter((e) => e.data.namespace === "priority-stall-note");
     await priorityStallTick(db, config, ports);
-    expect(notices).toBe(1);
+    expect(notices).toBe(0); expect(notes()).toHaveLength(1);
     closeLedger(path); db = openLedger(path);
     failReceipt = false; now += 5 * 60_000;
     await priorityStallTick(db, config, ports);
     now += 60_000; await priorityStallTick(db, config, ports);
-    expect(notices).toBe(1);
+    expect(notices).toBe(0); expect(notes()).toHaveLength(1);
     now = t0 + 2 * W; await priorityStallTick(db, config, ports);
-    expect(notices).toBe(1); expect(listAsks(db, { project })).toHaveLength(1);
+    expect(notes()).toHaveLength(1); expect(listAsks(db, { project })).toHaveLength(1);
   } finally { closeLedger(path); db = memory; rmSync(root, { recursive: true, force: true }); }
 });
 

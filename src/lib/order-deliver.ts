@@ -10,6 +10,7 @@
  *    （换分支、PM 收回等）就抛 conflict，台账不动；阶段与执行者 CLI 也会再核一次。
  * 6. 远端 head 核对过后查这个分支的 open PR（lib/order-deliver-pr.ts）：0 个 / 多个 / 跨仓 / base 不是 main / head 不一致 / gh 失败都拒，不写；
  *    通过的 URL 以 --pr 交给 CLI，在同一事务里写进空的或非完整的 task.pr；卡上已是另一个完整 URL 就拒（PR 换了要 PM 处理）。
+ * 6b. scheduler.json localMerge 项目（没有 origin / PR）：4、6 换成 `git rev-parse refs/heads/<branch>`（项目 repoDir 里），不调 gh，不带 --pr，task.pr 保持原样。
  * 7. 只有本次 CLI 新写入成功后，已验证的 bridge 回调才确认来源；确认事务重核回执、卡与会话。
  *    CLI 自报参数/环境不产生来源，重放不补确认；确认前崩溃也保持 manual。
  * 回执只由单号与交付事件决定（阶段固定是交付推到的 review），重试每次一样，不随卡后来的阶段变。
@@ -39,6 +40,10 @@ export interface DeliverDeps {
   /** 这个分支在 origin 上 open 的 PR（bridge 在调用方工作目录跑 gh，lib/order-deliver-pr.ts findPrRows）；必填，没有就不让交付 */
   findPr(call: VerifiedCall, branch: string): Promise<PrRows>;
   run: LedgerRun;
+  /** localMerge 项目的仓库目录（lib/scheduler-config.ts localMergeOf）；null / 不注入 = 走 origin + PR */
+  localMerge?(project: string): { repoDir: string } | null;
+  /** 本机分支的 head（localBranchHead）；localMerge 项目必需，没有就不让交付 */
+  localHead?(repoDir: string, branch: string): Promise<RemoteHead>;
   /** Bridge-owned confirmation; absent means delivery succeeds without automatic handback eligibility. */
   confirmSource?(call: VerifiedCall, input: Parameters<typeof confirmOrderDelivery>[2]): boolean;
 }
@@ -61,6 +66,41 @@ export async function remoteBranchHead(cwd: string | undefined, branch: string, 
   if (!BRANCH.test(branch)) return { ok: false, error: `台账里的分支名 ${branch.slice(0, 80)} 不合法` };
   const r = await run(["git", "ls-remote", "origin", `refs/heads/${branch}`], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 15_000 });
   return parseLsRemote(r, branch);
+}
+
+/** 本机 `git rev-parse --verify refs/heads/<branch>^{commit}`：localMerge 项目的分支不离开这台机器 */
+export async function localBranchHead(repoDir: string, branch: string, run: Runner): Promise<RemoteHead> {
+  if (!BRANCH.test(branch)) return { ok: false, error: `台账里的分支名 ${branch.slice(0, 80)} 不合法` };
+  const argv = ["git", "rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`];
+  const r = await run(argv, { cwd: repoDir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 15_000 });
+  if (r.timedOut) return { ok: false, error: "git rev-parse 超时，查不到本机分支 head" };
+  const sha = r.stdout.trim();
+  return r.code === 0 && SHA40.test(sha) ? { ok: true, head: sha } : { ok: false, error: `本机仓库里没有分支 ${branch}（先 commit）` };
+}
+
+type Checked = { ok: true; pr: string | null } | { ok: false; refusal: OrderToolResult };
+const no = (code: string, error: string): Checked => ({ ok: false, refusal: refuse(code, error) });
+
+/** 第 4、6 步：origin 上的 head 与 open PR */
+async function remoteChecked(call: VerifiedCall, deps: DeliverDeps, task: { id: string; pr: string | null }, branch: string, head: string): Promise<Checked> {
+  const remote = await deps.remoteHead(call, branch);
+  if (!remote.ok) return no("head_unverifiable", remote.error);
+  if (remote.head !== head) return no("head_mismatch", `origin 上 ${branch} 的 head 是 ${remote.head}，不是 ${head}：先 push，或用远端的 head 交付`);
+  const found = await deps.findPr(call, branch);
+  if (!found.ok) return no("pr_unverifiable", found.error);
+  const pr = pickPr(found.rows, branch, head);
+  if (!pr.ok) return no(pr.code, pr.error);
+  if (prConflict(task.pr, pr.url)) return no("pr_mismatch", `台账里 ${task.id} 的 PR 是 ${task.pr}，查到的是 ${pr.url}：PR 换了请 PM 处理`);
+  return { ok: true, pr: pr.url };
+}
+
+/** 第 6b 步：本机分支的 head，没有 PR */
+async function localChecked(deps: DeliverDeps, repoDir: string, branch: string, head: string): Promise<Checked> {
+  if (!deps.localHead) return no("head_unverifiable", "这台 bridge 没接本机分支核对，localMerge 项目没法交付");
+  const local = await deps.localHead(repoDir, branch);
+  if (!local.ok) return no("head_unverifiable", local.error);
+  if (local.head !== head) return no("head_mismatch", `本机分支 ${branch} 的 head 是 ${local.head}，不是 ${head}：用本机分支的 head 交付`);
+  return { ok: true, pr: null };
 }
 
 /** deliver 带 --from 时同一事务把卡推到 review（lib/ledger-write.ts deliver） */
@@ -90,15 +130,11 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   if (!cur) return refuse("not_current_order", `${orderId} 不是你当前的单（take_order 看当前的单；卡可能已被收回或换了人 / 会话）`);
   const { branch, rev } = cur.task;
   if (!branch) return refuse("no_branch", `台账里 ${cur.task.id} 没记分支，bridge 没法核对 head：请 PM 补 --branch，或走 CLI`);
-  const remote = await deps.remoteHead(call, branch);
-  if (!remote.ok) return refuse("head_unverifiable", remote.error);
-  if (remote.head !== head) return refuse("head_mismatch", `origin 上 ${branch} 的 head 是 ${remote.head}，不是 ${head}：先 push，或用远端的 head 交付`);
-  const found = await deps.findPr(call, branch);
-  if (!found.ok) return refuse("pr_unverifiable", found.error);
-  const pr = pickPr(found.rows, branch, head);
-  if (!pr.ok) return refuse(pr.code, pr.error);
-  if (prConflict(cur.task.pr, pr.url)) return refuse("pr_mismatch", `台账里 ${cur.task.id} 的 PR 是 ${cur.task.pr}，查到的是 ${pr.url}：PR 换了请 PM 处理`);
-  const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url, ...(disputes ? { disputes: JSON.stringify(disputes) } : {}),
+  const local = deps.localMerge?.(cur.task.project) ?? null;
+  const checked = local ? await localChecked(deps, local.repoDir, branch, head) : await remoteChecked(call, deps, cur.task, branch, head);
+  if (!checked.ok) return checked.refusal;
+  const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch,
+    ...(checked.pr ? { pr: checked.pr } : {}), ...(disputes ? { disputes: JSON.stringify(disputes) } : {}),
     ...(uiEvidence ? { "ui-evidence": JSON.stringify(uiEvidence) } : {}) };
   const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key);
   if (!r.ok) return r;

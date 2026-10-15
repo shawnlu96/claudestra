@@ -19,12 +19,15 @@ export function conclusionOf(v: VerdictCounts): string {
   return v.p2 > 0 ? `通过，留 ${v.p2} 个 P2` : "通过";
 }
 
+/** The two next steps of a P1 push: below the owner's round cap / at it. The redelivery keeps which one it was (peer-pr-retry.ts). */
+export const P1_STEP = {
+  fix: "修在本 PR 的分支上直接 push，调度器看到新 head 会自动派原审查会话复验。",
+  cap: "复验轮次已到上限，已转 PM；先别推，等 PM 联系。",
+} as const;
+
 export function nextStepOf(v: VerdictCounts, maxRounds: number): string {
   if (v.p0 > 0 || v.verdict === "block") return "已转 PM，先别推。";
-  if (v.p1 > 0) {
-    return v.round < maxRounds ? "修在本 PR 的分支上直接 push，调度器看到新 head 会自动派原审查会话复验。"
-      : "复验轮次已到上限，已转 PM；先别推，等 PM 联系。";
-  }
+  if (v.p1 > 0) return v.round < maxRounds ? P1_STEP.fix : P1_STEP.cap;
   return "已进合并队列，CI 绿了自动合并并部署；别再往这个分支推，P2 另开 PR。";
 }
 
