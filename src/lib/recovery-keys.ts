@@ -91,6 +91,8 @@ export const RECOVERY_KEYS = [
   "uiCarryOwnGlobs",
   "uiDelivery",
   "uiManualResume",
+  "uiOwnerAskFresh",
+  "uiOwnerCarry",
   "uiOwnerReask",
   "uiReviewCarry",
   "unifiedMergeQueue",

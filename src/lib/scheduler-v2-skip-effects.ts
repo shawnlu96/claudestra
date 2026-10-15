@@ -236,6 +236,10 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-review-stale.ts": "sql=1 stmt=1",
     "scheduler-review-swap.ts": "sql=3 stmt=3",
     "scheduler-sessions.ts": "sql=7 stmt=10",
+    // UIOWNCARRY2 round 2: the snapshot's remote-main cache: one detached refresh child (ls-remote / fetch off the write lock) and its file
+    "scheduler-ui-owner-fresh-remote.ts": "proc=2 fs=3",
+    // UIOWNCARRY2: the fresh run's end / void / fail inside the `ledger scheduler-merge-step` transaction; proc = the snapshot's read-only git merge-base
+    "scheduler-ui-owner-fresh.ts": "sql=4 stmt=4 proc=1",
     "scheduler-ui-review-carry.ts": "sql=2 stmt=2",
     "shared-ledger-v2-write-gate-state.ts": "sql=8 stmt=13",
   },

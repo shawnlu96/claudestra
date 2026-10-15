@@ -9,7 +9,7 @@ paths, `extra.screenshotsDigest` = their sha256). Who looks depends on the card.
 | `ownerVisual` (global palette, theme tokens, redesign) | the owner | the scheduler's screenshot ask (`scheduler_ui_screenshot`), answered with the authenticated owner mark |
 
 Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src/lib/scheduler-ui-merge-refusal.ts` (merge-write / merge-run check), `src/lib/ledger-ui-approve.ts`
-(writes), `src/lib/ledger-ui-approve-verdict.ts` (PM's verdict read back + the fix order it makes), `src/manager/ledger-ui-cmds.ts` (CLI). Tests: `tests/scheduler-ui-pm-gate.test.ts`, `tests/scheduler-ui-owner-visual.test.ts`, `tests/scheduler-ui-merge-begin.test.ts`, `tests/scheduler-ui-reask.test.ts`.
+(writes), `src/lib/ledger-ui-approve-verdict.ts` (PM's verdict read back + the fix order it makes), `src/manager/ledger-ui-cmds.ts` (CLI). Tests: `tests/scheduler-ui-pm-gate.test.ts`, `tests/scheduler-ui-owner-visual.test.ts`, `tests/scheduler-ui-merge-begin.test.ts`, `tests/scheduler-ui-reask.test.ts`, `tests/scheduler-ui-owner-carry.test.ts`.
 
 ## Flow after a passing review
 
@@ -52,6 +52,36 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src
   even when newer asks for other values came after it, however many (A → B → A, `currentBindingGate`; ownerVisual cards only). Such an earlier
   approval releases the card only when the merge write's own lookup (newest 20 answered asks) also finds it; otherwise it goes to
   a person as `ui_unverified`, never to a merge the write refuses and never to a second ask.
+- The owner's approval survives the scheduler's own update-branch carry (`src/lib/scheduler-ui-owner-carry.ts`, switch
+  `uiOwnerCarry`, default observe), on the same terms as PM's UIR1 carry: the card's newest scheduler screenshot ask, answered by
+  the authenticated owner, unexpired, not rejected, bound to the card's specRev / digest, on the carry's old head (or reaching it
+  through earlier owner carries), and the render inputs (`renderInputs`: web/, bridge, assets, package / lock / config, the card's
+  fileGlobs) identical at the approved, old and new heads. `on` writes a `ui_review_carry` at carrySeq + 2 with `ask` / `approvedHead`
+  / `mechanism: uiOwnerCarry`; the planner (`projectUiGate`, so `uiMergeBlock` and `uiPassStep`) and the merge write (`uiMergeRefusal`)
+  accept it only through the one pairing function `ownerCarriedAsk`. Refused under `on`, the carry's merge_phase note and
+  `merge_ui_unapproved` say why and that PM must reshoot on the new head before the scheduler asks the owner again. `observe`
+  behaves as `off` plus one observation per carry (would carry / would not, and why). PM's manual update-branch or an executor
+  push writes no review_carry and never carries. Asking the owner only after catching up with main is UIOWNCARRY2.
+- Before the owner screenshot ask the scheduler catches the PR up with main (`src/lib/scheduler-ui-owner-fresh.ts`, switch
+  `uiOwnerAskFresh`, default observe). The snapshot carries, for a review-stage ownerVisual UI card only, whether the head contains
+  the remote's current main (`git ls-remote origin refs/heads/main` in the project's repoDir; missing objects fetched with the merge
+  driver's `+refs/heads/main:refs/remotes/origin/main` refspec), never just the last local fetch. No network on that path: snapshots
+  run inside ledger write transactions, so the fact only reads a state-dir file per repoDir (served 5 min) plus local ancestry; a
+  missing / older-than-60s read kicks one detached child (`scheduler-ui-owner-fresh-remote.ts`) that does the remote read and writes
+  the file. Never read, stale, failed or objects missing = unknown, and the ask goes out as before.
+  Under `on`, a head behind main gets a `merge` intent at node `ui_owner_fresh` in place of the ask (the plan write admits that node
+  only in review, ownerVisual, `on`, with the head's passing review; never while the queue is frozen, when the ask goes out as
+  before). The merge tick begins it like a merge run, but in review, without the owner's approval and without the merge slot; it is
+  no merge-queue / train candidate (those read merge-stage cards only). The merge driver runs its own update-branch and review_carry
+  proof (the same carry record `scheduler-review.ts` trusts; `mergeDirect` never skips the update for it), and stops it right before `claimAndMerge`; independently, the journal
+  refuses any `merging` claim that is not a merge-stage `merge_deploy` / `manual_merge` run, and a fresh run that goes `unknown`
+  ends as failed without freezing the queue. Conflict / red CI go through the CIF gate and send the card review → fix with the bounce.
+  When done, `renderInputs` (UIOWNCARRY1) at the head the screenshots were registered on and at the new head are compared in a
+  `ui_owner_fresh` record: identical → the next plan asks the owner on the new head with the card's digest; different or unreadable
+  → escalate `ui_owner_reshoot` (PM re-shoots on the new head), no ask. The record binds only while the card's digest, specRev and
+  round still match it and no delivery registered screenshots after it, so a re-shoot on the new head lifts the escalation. At most two chases per review entry, one per head; unknown
+  freshness asks as before. `observe` asks as before and records one observation per owner ask on a head behind main; `off` is as
+  before. PM screenshot acceptance (non-ownerVisual cards) never chases.
 
 ## Compatibility
 

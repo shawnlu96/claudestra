@@ -16,6 +16,7 @@ import { countCarryStep } from "./review-count-carry.js";
 import { lightOnly } from "./ci-queue-full.js";
 import { mainMovedSinceCi } from "./scheduler-merge-freshness.js";
 import { withCiSelectedGate } from "./scheduler-ci-selected-gate.js";
+import { ownerFreshEnd } from "./scheduler-ui-owner-fresh.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -156,6 +157,7 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
  * `ciMain` (serial path only) is the main the green CI was read against, compared once more after the claim (MRGFRESH1). */
 async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step, assertActive: () => void, trained = false,
   recheck: Recheck = () => null, direct = false, ciMain?: MainFreshness): Promise<MergeRun> {
+  const ownerFresh = ownerFreshEnd(run); if (ownerFresh) return step("resolved", ownerFresh); // UIOWNCARRY2: up to date + green, never merged
   const fresh = await external.inspect(run.prRef);
   const same = samePr(run, fresh);
   if (same && fresh.mergeState === "UNKNOWN") return unknownWait(run, step);
@@ -247,7 +249,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     return run;
   };
   source = withCiSelectedGate(source, run); // merge-arch-CISEL2: a green released by the CI selected gate counts only under effective on
-  const direct = source.direct?.(run) === true;
+  const direct = source.direct?.(run) === true && !ownerFreshEnd(run); // UIOWNCARRY2: a fresh run always updates, mergeDirect never skips it
   const external = withCancelHandoff(watchUnknown(() => run, direct ? rereadUnknown(source, assertActive) : source, step, (pr) => { noChecks = pr.noChecks === true; }),
     foreign, MERGE_NOT_SENT, stopped); // CICANCEL1: a twice-cancelled CI goes to the PM through the same hook
   if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;

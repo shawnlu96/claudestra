@@ -7,6 +7,7 @@
  *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复），
  *   [stub:send:<目标>] = 回复后再调 send_to_agent 发给目标（沙箱 lab 的跨实例实测：<agent>@<peer>），[stub:whoami] = 先调 whoami、结果写进回复（T85）；
  *   [stub:call:<工具>:<base64url 的 JSON 参数>] = 先调这个 MCP 工具、结果写进回复（T96 派单工具实测，可写多个，按顺序调）；
+ *   [stub:showcase] = 先演一遍终端视图要画的元素（思考、计划、Markdown 正文、3 次工具调用其中 1 次失败；ATUI-1 沙箱实测，showcase()），再走原流程；
  *   [stub:policy] = reply 之后被提供方策略拦下（AIR 给 request 类、不带动作的 sessionFailure，没声明给 legacy 的 cyberPolicy 错误；ACPE1）；
  *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）；STUB_INITIALIZE=<JSON> = 按 JSON merge patch 改 initialize 回包
  *   （null 删键：{"protocolVersion":2}、{"protocolVersion":null} 测协议不兼容，{"_meta":{"steering":null}} 测可选能力降级，见 lib/acp/protocol.ts）。
@@ -152,6 +153,31 @@ async function compact(text: string): Promise<Rec> {
   }
 }
 
+/** [stub:showcase]：终端视图的元素各来一次（只用 ACP 标准事件），每步隔一会儿，窗口里能看到流式和工具原地转圈 */
+async function showcase(): Promise<void> {
+  const say = async (id: string, text: string) => {
+    for (const piece of text.match(/[\s\S]{1,24}/g) ?? []) update({ sessionUpdate: "agent_message_chunk", messageId: id, content: { type: "text", text: piece } }), await sleep(40);
+  };
+  for (const t of ["先读改动，", "再跑测试。\n"]) update({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: t } }), await sleep(300);
+  const plan = (s: string[]) => update({ sessionUpdate: "plan", entries: ["读改动", "跑测试", "写结论"].map((content, i) => ({ content, priority: "medium", status: s[i] })) });
+  plan(["in_progress", "pending", "pending"]);
+  const tool = async (id: string, kind: string, title: string, out: string, failed = false) => {
+    update({ sessionUpdate: "tool_call", toolCallId: id, kind, title, status: "in_progress", ...(kind === "read" ? { locations: [{ path: title }] } : {}) });
+    await sleep(1_200);
+    if (out) update({ sessionUpdate: "tool_call_update", toolCallId: id, _meta: { terminal_output_delta: { data: out, terminal_id: id } } });
+    update({ sessionUpdate: "tool_call_update", toolCallId: id, status: failed ? "failed" : "completed" });
+  };
+  await tool("sc-1", "read", "src/lib/lease-sync.ts", "a\nb\nc\n");
+  plan(["completed", "in_progress", "pending"]);
+  await tool("sc-2", "execute", "git diff --stat HEAD~1", " src/lib/lease-sync.ts | 4 ++--\n");
+  await tool("sc-3", "execute", "bun test tests/lease.test.ts", "(pass) a\n(pass) b\nerror: expect(received).toBe(expected)\n(fail) lease > releases lock\n", true);
+  plan(["completed", "completed", "in_progress"]);
+  await say(randomUUID(), [
+    "## 结论\n\n放锁条件少了 **完整 diff** 参数。\n\n- 第一处：`lease-sync.ts`\n- 第二处：重试\n\n> 审查意见原文\n\n",
+    "```ts\nconst ok = diff(a, b, { relative: false });\n```\n\n| 文件 | 风险 |\n|---|---|\n| lease-sync.ts | 低 |\n| 中文名.ts | 中 |\n\n收尾。\n",
+  ].join(""));
+}
+
 /** 一轮：正文 → 命令 → （慢回合等打断）→ reply → 用量 */
 async function turn(text: string): Promise<Rec> {
   running = { cancelled: false, steered: [] };
@@ -163,6 +189,7 @@ async function turn(text: string): Promise<Rec> {
       update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "You've hit your usage limit. (stub)\n\n" } });
       throw { code: -32603, message: "Internal error", data: { message: "You've hit your usage limit. (stub)", codexErrorInfo: "usageLimitExceeded" } };
     }
+    if (text.includes("[stub:showcase]")) await showcase();
     const msgId = randomUUID();
     for (const piece of ["stub 收到了，", "看一眼再回。"]) update({ sessionUpdate: "agent_message_chunk", messageId: msgId, content: { type: "text", text: piece } }), await sleep(50);
     const cid = `call-${randomUUID().slice(0, 8)}`;
