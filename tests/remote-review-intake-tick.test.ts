@@ -7,7 +7,8 @@ import { listInbox } from "../src/lib/remote-review-inbox.js";
 import { unsentRemoteNotices } from "../src/lib/remote-review-read.js";
 import { remoteReviewStep } from "../src/lib/remote-review-tick.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
-import { HEAD, HEAD2, handoffConfig, P0_TEXT, P1_TEXT, pushText, remoteFixture } from "./helpers/remote-review-fixture.js";
+import { CAP_TEXT, HEAD, HEAD2, handoffConfig, P0_TEXT, P1_TEXT, pushText, remoteFixture } from "./helpers/remote-review-fixture.js";
+import { renderRedeliveryPush } from "../src/lib/peer-pr-retry.js";
 
 let fx: ReturnType<typeof remoteFixture>;
 afterEach(() => fx?.cleanup());
@@ -86,6 +87,21 @@ describe("RRL-1 tick", () => {
     expect(h.notices[0]!.text).toContain("已退回人工");
     await h.step();
     expect(h.notices.length).toBe(1);
+  });
+
+  test("[验收追加 9] the redelivery of a capped P1 arriving first: card back to manual, PM told exactly once", async () => {
+    fx = remoteFixture();
+    fx.stash(renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" })!);
+    const h = harness();
+    expect(await h.step()).toEqual([]);
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
+    expect(h.notices.length).toBe(1);
+    expect(h.notices[0]!.text).toContain("补发");
+    fx.stash(CAP_TEXT); // the original arriving later is the same report id + head: duplicate, no second notice
+    await h.step();
+    await h.step();
+    expect(h.notices.length).toBe(1);
+    expect(fx.remoteEvents().length).toBe(1);
   });
 
   test("a held card keeps its file for a later pass", async () => {
