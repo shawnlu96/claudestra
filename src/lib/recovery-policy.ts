@@ -17,6 +17,7 @@ import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { tx } from "./ledger-tx.js";
 import { appendEvent, type WriteCtx } from "./ledger-write.js";
 import { statePath } from "./paths.js";
+import { defaultRecoveryMode, markDefaultOn, noteDefaultOn } from "./recovery-key-defaults.js";
 import { RECOVERY_KEYS } from "./recovery-keys.js";
 import { writeTextAtomicSync } from "./state-file.js";
 
@@ -28,7 +29,6 @@ const isRecoveryMode = (v: unknown): v is RecoveryMode => RECOVERY_MODES.include
 export { RECOVERY_KEYS };
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
 const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
-const DEFAULT_RECOVERY_MODE: RecoveryMode = "observe";
 export const MANUAL_STALL_HOURS_MAX = 720;
 const HOUR_MS = 3_600_000;
 const validHours = (h: unknown): h is number => Number.isInteger(h) && (h as number) >= 1 && (h as number) <= MANUAL_STALL_HOURS_MAX;
@@ -82,14 +82,14 @@ export interface RecoveryPolicy {
 export type RecoveryPolicyPort = (project: string, mechanism: RecoveryKey) => RecoveryPolicy;
 const stopped = (diagnostic: string): RecoveryPolicy => ({ mode: "off", manualAfterMs: null, source: "error", diagnostic });
 
-/** Read every time, never throws. Effective mode: keys[mechanism] → project mode → observe. */
+/** Read every time, never throws. Effective mode: keys[mechanism] → project mode → defaultRecoveryMode (recovery-key-defaults.ts). */
 export function recoveryPolicy(project: string, mechanism: RecoveryKey, path = RECOVERY_POLICY_PATH): RecoveryPolicy {
   if (!isRecoveryKey(mechanism)) return stopped(`未知恢复键 ${String(mechanism)}（只认 ${RECOVERY_KEYS.join(" / ")}）`);
   const r = readRecoveryFile(path);
   if (r.status === "corrupt") return stopped(`${path} 读不了，恢复停手：${r.error}`);
   const cfg = r.status === "ok" && Object.hasOwn(r.data.projects, project) ? r.data.projects[project] : undefined;
-  return { mode: cfg?.keys?.[mechanism] ?? cfg?.mode ?? DEFAULT_RECOVERY_MODE, manualAfterMs: cfg?.manualStallHours ? cfg.manualStallHours * HOUR_MS : null,
-    source: cfg ? "config" : "default" };
+  return markDefaultOn({ mode: cfg?.keys?.[mechanism] ?? cfg?.mode ?? defaultRecoveryMode(mechanism), manualAfterMs: cfg?.manualStallHours ? cfg.manualStallHours * HOUR_MS : null,
+    source: cfg ? "config" : "default" }, cfg?.keys?.[mechanism] ?? cfg?.mode);
 }
 
 /** What a mechanism may do with one candidate: act (on), observe (record only) or skip (off / below threshold). */
@@ -148,7 +148,7 @@ export type GateOutcome<T> = { outcome: "acted"; value: T } | { outcome: "observ
  */
 export async function gateRecovery<T>(db: Database, a: ObservedAction & { manualStalledMs?: number }, act: () => Promise<T> | T,
   opts: { now: number; policy?: RecoveryPolicyPort }): Promise<GateOutcome<T>> {
-  const d = decideRecovery((opts.policy ?? recoveryPolicy)(a.project, a.mechanism), a);
+  const d = decideRecovery(noteDefaultOn(db, a, (opts.policy ?? recoveryPolicy)(a.project, a.mechanism), opts.now), a);
   if (d.kind === "skip") return { outcome: "skipped", reason: d.reason };
   if (d.kind === "observe") return { outcome: "observed", recorded: recordObserved(db, a, opts.now).recorded };
   return { outcome: "acted", value: await act() };

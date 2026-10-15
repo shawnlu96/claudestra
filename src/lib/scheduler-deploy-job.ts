@@ -5,6 +5,8 @@
  * `observe` keeps two answers apart: the outcome (result.json) and whether the job may still be alive (launchd + the job's
  * maintenance lease). Only a checked "not alive" ends a deploy. Tests: tests/scheduler-deploy-job.test.ts.
  */
+import { machineResult } from "./scheduler-deploy-lock.js";
+import { validateCenterJob, type CenterJobData } from "./center-deploy-worker.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
@@ -18,6 +20,7 @@ import { DEPLOY_LABEL_PREFIX, type DeployRun } from "./scheduler-deploy.js";
 import type { DeployTarget } from "./scheduler-config.js";
 
 export interface DeployJob {
+  kind?: "center"; center?: CenterJobData;
   intentId: string; mergeSha: string; taskId: string; prRef: string; label: string;
   repoDir: string; relayArgv: string[] | null; restartLabels: string[]; timeoutMs: number; createdAt: number;
   env: Record<string, string>;
@@ -26,7 +29,7 @@ export interface DeployJob {
   deploySha?: string;
 }
 type Liveness = "alive" | "dead" | "unreadable";
-type JobView = { label: string; liveness: Liveness; result: { ok: boolean; summary: string } | null; corrupt?: string; deadline: number };
+type JobView = { label: string; liveness: Liveness; result: { ok: boolean; summary: string; status?: "deferred" } | null; corrupt?: string; deadline: number };
 export interface DeployJobs {
   /** The intent's launchd label, fixed before anything is written (it follows from the job directory path). */
   label(run: DeployRun): string;
@@ -67,6 +70,7 @@ export function readDeployJob(path: string): DeployJob {
     !Number.isInteger(r.timeoutMs) || r.timeoutMs < 1000 || r.timeoutMs > 3_600_000 || !Number.isFinite(r.createdAt) ||
     !r.env || Object.values(r.env).some((v) => typeof v !== "string") ||
     (r.deploySha !== undefined && (typeof r.deploySha !== "string" || !/^[a-f0-9]{40}$/i.test(r.deploySha)))) throw new Error("invalid deployment request");
+  if (r.kind === "center") validateCenterJob(r); else if (r.kind !== undefined) throw new Error("invalid deployment kind");
   return r;
 }
 
@@ -175,11 +179,11 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
       const settled = first.status === "missing" && live === "dead" ? read() : first;
       if (settled.status === "missing") return { label: request.label, liveness: live, result: null, deadline, ...(badRequest ? { corrupt: badRequest } : {}) };
       if (settled.status !== "ok") return { label: request.label, liveness: live, result: null, corrupt: `result.json ${settled.status}`, deadline };
-      const r = settled.data as { intentId?: unknown; mergeSha?: unknown; ok?: unknown; summary?: unknown };
+      const r = settled.data as { intentId?: unknown; mergeSha?: unknown; ok?: unknown; summary?: unknown; status?: unknown };
       if (r.intentId !== run.intentId || r.mergeSha !== run.mergeSha || typeof r.ok !== "boolean") {
         return { label: request.label, liveness: live, result: null, corrupt: "result.json identity or format invalid", deadline };
       }
-      return { label: request.label, liveness: live, result: { ok: r.ok, summary: String(r.summary ?? "").slice(0, 400) }, deadline };
+      return { label: request.label, liveness: live, result: { ...machineResult(r), ok: r.ok, summary: String(r.summary ?? "").slice(0, 400) }, deadline };
     },
     async remove(label) {
       if (!label.startsWith(DEPLOY_LABEL_PREFIX)) throw new Error("refusing to remove a non-deploy label");
