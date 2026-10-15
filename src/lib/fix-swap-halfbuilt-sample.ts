@@ -6,8 +6,6 @@
  * action. tests/fix-swap-halfbuilt*.test.ts, tests/fix-strategy-worktree*.test.ts, tests/lend-reclaim-scheduler*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { getEventByDedup } from "./ledger-store.js";
-import { tx } from "./ledger-tx.js";
 import { appendEvent } from "./ledger-write.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 
@@ -39,10 +37,7 @@ export function selfHealSample(db: Database, mode: "observe" | "on", s: SelfHeal
     recordObserved(db, { project: s.project, mechanism: s.key, target: s.taskId, actionKey: actionKey(s), action: s.text, data }, now);
     return;
   }
-  const dedupKey = selfHealDedupKey(s);
-  tx(db, () => {
-    if (getEventByDedup(db, dedupKey)) return;
-    appendEvent(db, { actor: "scheduler", now, dedupKey }, { project: s.project, target: s.taskId, kind: "note",
-      text: `换家族自愈（${s.key}）：${s.text}`.slice(0, 600), data: { ...data, op: "fix_swap_selfheal", mechanism: s.key } });
-  });
+  // appendEvent runs its own immediate transaction and returns the existing event on a repeated dedupKey.
+  appendEvent(db, { actor: "scheduler", now, dedupKey: selfHealDedupKey(s) }, { project: s.project, target: s.taskId, kind: "note",
+    text: `换家族自愈（${s.key}）：${s.text}`.slice(0, 600), data: { ...data, op: "fix_swap_selfheal", mechanism: s.key } });
 }
