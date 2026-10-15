@@ -12,7 +12,7 @@ export const ATTACH_DICT: Record<string, string> = {
   "内容结构太复杂，按纯文本显示": "Content too complex: shown as plain text",
   "内容解析太慢，按纯文本显示": "Content too slow to render: shown as plain text",
   "这台设备不能从应用内分享这个文件": "This device can't share the file from the app",
-  "系统没有提供文件分享。可以在电脑上打开 Claudestra 下载它。": "The system doesn't offer file sharing here. Open Claudestra on a computer to download it.",
+  "系统没有提供文件分享。可以在电脑上打开 Floka 下载它。": "The system doesn't offer file sharing here. Open Floka on a computer to download it.",
   "这台设备不能从应用内分享，可以用「复制全文」。": "Sharing isn't available on this device. Use \"Copy all\" instead.",
   "这台设备不能保存图片，可以截屏": "Can't save images on this device. Take a screenshot instead",
   "点一下加载外链图片 · {host}": "Tap to load external image · {host}",

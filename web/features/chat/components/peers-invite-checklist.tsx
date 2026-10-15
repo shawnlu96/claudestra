@@ -3,7 +3,7 @@ import { useT } from "@/lib/i18n";
 
 /**
  * 邀请串下面的「对方要做的准备」。邀请失败几乎都卡在网络：对方的机器到不到我方地址、
- * 我方 bridge 端口的防火墙放没放行对方——这两步都在 Claudestra 之外，所以生成邀请时就说清楚，
+ * 我方 bridge 端口的防火墙放没放行对方——这两步都在 Floka 之外，所以生成邀请时就说清楚，
  * 而不是等对方粘贴后看到一句「timed out」。
  */
 export function InviteChecklist({ myUrl }: { myUrl?: string }) {

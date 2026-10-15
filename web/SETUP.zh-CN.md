@@ -1,8 +1,8 @@
-# Claudestra Web 客户端 — 安装与运行
+# Floka Web 客户端 — 安装与运行
 
 [English](./SETUP.md) · **简体中文**
 
-Claudestra 的 **Web 前端**——Discord 之外的第二个前门。它是一份 **Next.js 静态导出**
+Floka 的 **Web 前端**——Discord 之外的第二个前门。它是一份 **Next.js 静态导出**
 （`web/out`）：没有自己的服务器、没有登录数据库。bridge 自己托管这些文件并应答所有 API；
 浏览器靠**配对**拿到设备凭据，不是登录。
 
@@ -28,7 +28,7 @@ Claudestra 的 **Web 前端**——Discord 之外的第二个前门。它是一�
 ## 前置条件
 
 - **Node.js ≥ 20** + npm —— 只用来**构建**（Next 16 / React 19）。之后没有任何 Node 进程在跑，bridge（Bun）托管产物。
-- **Claudestra Bridge 必须在跑**（`bun run setup` 把它装成 `com.claudestra.bridge`；不接 Discord 的 Web-only 见
+- **Floka Bridge 必须在跑**（`bun run setup` 把它装成 `com.claudestra.bridge`；不接 Discord 的 Web-only 见
   [Web-only 后端](#web-only-后端不接-discord)）。
 - 没有别的：不需要 SSH / 远程登录、不需要 `.env.local`、不需要签 API token。
 
@@ -90,7 +90,7 @@ npm run dev            # → http://127.0.0.1:33333（热更新）
 
 ## 5. 从手机访问（远程访问）
 
-Claudestra 的全部意义就是用手机操控工作站。按推荐顺序：
+Floka 的全部意义就是用手机操控工作站。按推荐顺序：
 
 ### 中继（默认——一个地址，什么都不装）
 
@@ -208,7 +208,7 @@ https://<machine>.<tailnet>.ts.net:443 {
 
 ### Peer 走同一个 HTTPS 入口
 
-Claudestra peer（调你 agent 的其它实例）可以走这个 HTTPS 入口而不是 bridge 端口，新 peer 不需要防火墙白名单——只要能路由到这台机器（比如在 Tailscale 里分享给他）。
+Floka peer（调你 agent 的其它实例）可以走这个 HTTPS 入口而不是 bridge 端口，新 peer 不需要防火墙白名单——只要能路由到这台机器（比如在 Tailscale 里分享给他）。
 
 1. 挑一个空闲回环端口做 peer 入口，写进仓库 `.env`，如 `PEER_INGRESS_PORT=3848`，重启 bridge。它只服务带 peer token 的 `/api/v1`——没有控制路由、没有 websocket、没有设备 cookie。
 2. 在 `ts.net` 站点块里、web 的 `handle` **之前**把 `/api/v1/*` 路由过去：

@@ -34,7 +34,7 @@ interface TauriGlobal { core: { invoke: <T>(cmd: string, args?: Record<string, u
 
 export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
-  if (!tauri) return Promise.reject(new Error("not running inside the Claudestra app"));
+  if (!tauri) return Promise.reject(new Error("not running inside the Floka app"));
   return tauri.core.invoke<T>(cmd, args);
 }
 

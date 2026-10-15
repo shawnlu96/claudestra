@@ -6,14 +6,14 @@ import { I18nInit } from "@/lib/i18n";
 import { RootBoundary } from "@/components/boundaries";
 
 export const metadata: Metadata = {
-  title: "Claudestra",
-  description: "Claudestra Web 客户端 — 远程操控本地 Claude Code 会话",
-  applicationName: "Claudestra",
+  title: "Floka",
+  description: "Floka Web 客户端 — 远程操控本地 Claude Code 会话",
+  applicationName: "Floka",
   // Next 自动注入 <link rel="manifest">（来自 app/manifest.ts），此处只补齐 iOS 主屏相关
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Claudestra",
+    title: "Floka",
   },
   icons: {
     icon: [

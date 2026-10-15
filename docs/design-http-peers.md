@@ -6,7 +6,7 @@ owner 2026-07-19：「把强依赖 Discord 的 peer 协作拆出来……更方�
 
 ## 1. 核心理念
 
-**Peer = 另一个 Claudestra 实例，作为 API 客户端互访。**
+**Peer = 另一个 Floka 实例，作为 API 客户端互访。**
 
 v2.6 的多前端 API 已经解决了 peer 协作的全部难题：Bearer token 鉴权、per-agent
 scope、同步 wait / thread 轮询、审计镜像、history API。HTTP peer 不新造协议——
@@ -87,7 +87,7 @@ wait resolver、mirror 审计、history 记录**全部现成**。唯一改动：
 
 - `renderContentForLocal` 注入头按 `principal.peer` 分流：
   `[🤝 来自 peer 实例「ahh」的跨机请求（HTTP，非本机用户）。对方是另一个
-  Claudestra 的 agent/用户；用 reply() 回答，回复会自动转交对方调用方。]`
+  Floka 的 agent/用户；用 reply() 回答，回复会自动转交对方调用方。]`
 - rate limit 沿用 per-token 120/min。
 
 ## 6. 安全
@@ -152,7 +152,7 @@ peer 全删了就退回本机；`hold` 顶住「邀请 token 还没签出来」�
 owner：「peer 界面乱的要死……Alex 两边都握手了，为什么一个已握手一个单向？」根子是同一个对方被存成多条：
 他兑换我的邀请 → 只有入站的记录；我加入他的邀请撞名 → 只有出站的 `-2`；他重新加入 → `-3`。
 
-- **实例 id**：每个 Claudestra 在 `STATE_DIR/instance-id` 有一个固定随机 id（`lib/instance-id.ts`）。邀请串带 `iid`，
+- **实例 id**：每个 Floka 在 `STATE_DIR/instance-id` 有一个固定随机 id（`lib/instance-id.ts`）。邀请串带 `iid`，
   兑换回调 body 带 `iid`，记录存 `instanceId`。实例 id 是自报的，只用来找候选，合并要签名证据：
   兑换（`isSameRedeemer`）：同实例 id 且兑换签名的钥匙等于原记录的期望钥匙（记了 `publicKey` 的比完整公钥）= 他重新加入，
   合进原记录并吊销被取代的旧入站 token；撞上已有记录而对不上（含没签名、原记录没有期望指纹）直接拒绝兑换（`redeemIidTaken`，
@@ -173,17 +173,17 @@ owner：「peer 界面乱的要死……Alex 两边都握手了，为什么一�
 - **卡片**：一个对方一张，两行「他 → 我」（我签给他的有效 token、最近来访）/「我 → 他」（在线状态、他开放给我的 agent），
   不再用「握手完成 / 单向 / 等待回执」这些说法。/peers 路由整体搬到 `src/bridge/peers-routes.ts`。
 
-## 6e. 邀请链接：点开 → 回自己的 Claudestra 确认（2026-09-24）
+## 6e. 邀请链接：点开 → 回自己的 Floka 确认（2026-09-24）
 
 owner：「像 Tailscale 邀请那样点开链接、点一下确认」，而且**绝不让对方填自己的地址**。没有中心服务器，所以链接指向
 **邀请方**机器上的落地页 `GET /api/v1/invite#<邀请码>`（`src/bridge/invite-page.ts`，不要 token，# 不进服务器日志，
 页面不发请求不存东西；挂 /api/v1 是因为 HTTPS 反代和 peer 专用端口只转发这段）。落地页只负责把人送回**他自己的**
-Claudestra（加入必须由他那边的 bridge 做）：
+Floka（加入必须由他那边的 bridge 做）：
 
 - 手机：`claudestra://join#码` → iOS App（`native/ios/App/App/AppDelegate.swift`）在已配置的服务器上打开 `/join#码`；
-- 电脑：`web+claudestra:码` → 他的 Claudestra 向浏览器登记过（`web/features/chat/components/invite-intake.tsx`，
+- 电脑：`web+claudestra:码` → 他的 Floka 向浏览器登记过（`web/features/chat/components/invite-intake.tsx`，
   没确认前隔 3 天提醒一次；桌面 PWA 由 manifest `protocol_handlers` 接）→ `/join?i=…`（进来即视为登记生效）；
-- 都不行：「复制邀请」，他打开自己的 Claudestra 时从剪贴板认出来（已授权才自动读；否则 Peer 面板「粘贴邀请」），
+- 都不行：「复制邀请」，他打开自己的 Floka 时从剪贴板认出来（已授权才自动读；否则 Peer 面板「粘贴邀请」），
   或在任意输入框粘贴带邀请的文字直接弹确认。
 
 `/join` 页 = 加入确认卡（`peers-join-confirm.tsx`）：先 `POST /api/v1/peers/inspect` → `peer-invite-inspect`

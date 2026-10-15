@@ -418,7 +418,7 @@ export function PeersPanel() {
   return (
         <div className="space-y-3">
           <p className="text-xs leading-relaxed text-base-content/50">
-            {t("跨 Claudestra 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。")}
+            {t("跨 Floka 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。")}
           </p>
           <RelayCard />
           {err && <div className="alert alert-error px-3 py-2 text-xs">{err}</div>}

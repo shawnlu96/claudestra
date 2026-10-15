@@ -1,13 +1,13 @@
-# Claudestra Web Frontend Integration Guide
+# Floka Web Frontend Integration Guide
 
 > **English** · [简体中文](./web-frontend-guide.md)
 
 > Written for whoever picks up the Web UI. Goal: get a web console running without reading the entire codebase.
-> If you have questions, ask the owner to invite you to his Claudestra Discord server and ask directly in the `#agent-claudestra` channel (that channel is a resident Claude development agent — it wrote this document and knows the bridge-side code inside out).
+> If you have questions, ask the owner to invite you to his Floka Discord server and ask directly in the `#agent-claudestra` channel (that channel is a resident Claude development agent — it wrote this document and knows the bridge-side code inside out).
 
 ## 0. Background in one sentence
 
-Claudestra is a multi-session Claude Code orchestrator: one Bridge process manages N Claude Code sessions running inside tmux, and today the only frontend is Discord. Since v2.6 the core has been decoupled from Discord, and v2.8–v2.9 laid down the entire data plane (live event stream, conversation history, usage stats) — **the Web UI is where all that groundwork pays off**. You don't need to touch any tmux / Discord / MCP details; you only talk to the Bridge's HTTP API.
+Floka is a multi-session Claude Code orchestrator: one Bridge process manages N Claude Code sessions running inside tmux, and today the only frontend is Discord. Since v2.6 the core has been decoupled from Discord, and v2.8–v2.9 laid down the entire data plane (live event stream, conversation history, usage stats) — **the Web UI is where all that groundwork pays off**. You don't need to touch any tmux / Discord / MCP details; you only talk to the Bridge's HTTP API.
 
 ## 1. Required reading (in order, about 1 hour)
 

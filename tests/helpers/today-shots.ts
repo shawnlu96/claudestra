@@ -147,15 +147,17 @@ export async function tailwindCss(repo: string): Promise<string> {
   return (await req("postcss")([req("@tailwindcss/postcss")({ base: resolve(repo, "web") })]).process(readFileSync(globals, "utf8"), { from: globals })).css;
 }
 
-/** 回环服务：页面、样式、打包产物 + 夹具接口；夹具之外的 /api 一律 404 */
-export function serveToday(dist: string, tw: string, fp: string) {
+/** 回环服务：页面、样式、打包产物 + 夹具接口；夹具之外的 /api 一律 404。extra 先答（别的卡加自己的接口，如 ONB-3 的 onboard） */
+export function serveToday(dist: string, tw: string, fp: string, extra?: (path: string, req: Request) => Response | null | Promise<Response | null>) {
   const files = readdirSync(dist), world = todayWorld();
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <link rel="stylesheet" href="/tw.css">${files.filter((f) => f.endsWith(".css")).map((f) => `<link rel="stylesheet" href="/${f}">`).join("")}</head>
     <body><div id="root"></div><script>window.process = { env: { NODE_ENV: "production" } };</script>
     <script type="module" src="/entry.js"></script></body></html>`;
-  return Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+  return Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const path = new URL(req.url).pathname;
+    const own = path.startsWith("/api/v1/") ? await extra?.(path.slice("/api/v1".length), req) : null;
+    if (own) return own;
     if (path === "/") return new Response(html, { headers: { "content-type": "text/html" } });
     if (path === "/tw.css") return new Response(tw, { headers: { "content-type": "text/css" } });
     if (path === "/app-config.json") return Response.json({ mode: "direct", fp, machineName: "fixture", version: "" });

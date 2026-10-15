@@ -39,9 +39,9 @@ pub fn check_error(v: Value) -> Result<Value, String> {
 pub fn desktop_cli_raw(inst: &Install, sub: &str) -> Result<Value, RunError> {
     if !inst.cli_available {
         return Err(RunError::NotStarted(if inst.has_checkout {
-            tr("这份 Claudestra 比小程序旧，先更新（claudestra update）", "This Claudestra checkout is older than the app; update it first")
+            tr("这份 Floka 比小程序旧，先更新（claudestra update）", "This Floka checkout is older than the app; update it first")
         } else {
-            tr("Claudestra 还没装好，打开「安装向导…」", "Claudestra isn't set up yet; open Setup…")
+            tr("Floka 还没装好，打开「安装向导…」", "Floka isn't set up yet; open Setup…")
         }));
     }
     let mut cmd = Command::new(&inst.bun);

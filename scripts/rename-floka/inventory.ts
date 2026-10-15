@@ -405,13 +405,16 @@ type Span = [start: number, end: number];
 /**
  * / 开头的是不是正则字面量：看它前面那个记号（跨行往回看）。右括号后面只有 if / while / for / with 的条件括号
  * （ctlClose 记着最近一个这种括号的位置）才接正则，别的右括号、a++ 后面是除号。认成正则后在本行找不到结尾就还当除号。
+ * < 和展开运算符 ... 后面也接正则；紧贴着 < 的 / 是 JSX 闭合标签 </x>，不是正则。
  */
 function regexEnd(text: string, i: number, ctlClose: number): number {
   const from = Math.max(0, i - 64);
   const before = text.slice(from, i).trimEnd();
   if (before.endsWith(")")) {
     if (from + before.length - 1 !== ctlClose) return -1;
-  } else if (before && (/(?:\+\+|--)$/.test(before) || (!/[(,=:[!&|?{};+*%>~^-]$/.test(before) && !/\b(?:return|typeof|case|in|of|void|delete|throw|else|do|yield|await)$/.test(before)))) {
+  } else if (text[i - 1] === "<") {
+    return -1;
+  } else if (before && (/(?:\+\+|--)$/.test(before) || (!/[(,=:[!&|?{};+*%<>~^-]$|\.\.\.$/.test(before) && !/\b(?:return|typeof|case|in|of|void|delete|throw|else|do|yield|await)$/.test(before)))) {
     return -1;
   }
   let cls = false;

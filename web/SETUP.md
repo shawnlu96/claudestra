@@ -1,8 +1,8 @@
-# Claudestra Web Client — Setup & Run
+# Floka Web Client — Setup & Run
 
 **English** · [简体中文](./SETUP.zh-CN.md)
 
-The **web frontend** for Claudestra — a second front door beside Discord. It is a
+The **web frontend** for Floka — a second front door beside Discord. It is a
 **static Next.js export** (`web/out`): no server of its own, no login database.
 The bridge serves the files itself and answers every API call; browsers are
 **paired** to a machine with a device credential instead of logging in.
@@ -40,7 +40,7 @@ What you get:
 
 - **Node.js ≥ 20** + npm — only to **build** the bundle (Next 16 / React 19). Nothing
   Node-based runs afterwards; the bridge (Bun) serves the output.
-- **The Claudestra Bridge must be running** (`bun run setup` installs it as
+- **The Floka Bridge must be running** (`bun run setup` installs it as
   `com.claudestra.bridge`; Web-only without Discord: see
   [Web-only backend](#web-only-backend-no-discord)).
 - Nothing else: no SSH / Remote Login, no `.env.local`, no API token to issue.
@@ -115,7 +115,7 @@ entry, which serves `out/` directly.
 
 ## 5. Access from your phone (remote access)
 
-The whole point of Claudestra is driving your workstation from your phone. In order
+The whole point of Floka is driving your workstation from your phone. In order
 of recommendation:
 
 ### Relay (default — one address, nothing to install)
@@ -279,7 +279,7 @@ with logs pointed at `~/.claude-orchestrator/caddy/`, bootstrapped with
 
 ### Peers over the same HTTPS entry
 
-Claudestra peers (other instances that call your agents) can use this HTTPS entry instead of the bridge port, so new peers don't need firewall allowlist entries — only a route to this machine (e.g. share it with them in Tailscale).
+Floka peers (other instances that call your agents) can use this HTTPS entry instead of the bridge port, so new peers don't need firewall allowlist entries — only a route to this machine (e.g. share it with them in Tailscale).
 
 1. Pick a free loopback port for the peer entrance and add it to the repo's `.env`, e.g. `PEER_INGRESS_PORT=3848`, then restart the bridge. It serves only `/api/v1` with peer tokens — no control routes, no websocket, no device cookies.
 2. Route `/api/v1/*` to it inside the `ts.net` site block, **before** the web `handle`:

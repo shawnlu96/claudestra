@@ -1,4 +1,4 @@
-//! Claudestra menu-bar app (experimental). A thin shell: tray + one bundled window; every
+//! Floka menu-bar app (experimental). A thin shell: tray + one bundled window; every
 //! decision is made by the repo's `src/desktop-cli.ts`. Chat stays in the bridge-hosted web app.
 
 mod cli;
@@ -188,7 +188,7 @@ fn main() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("failed to build the Claudestra menu-bar app");
+        .expect("failed to build the Floka menu-bar app");
 
     app.run(|_app, event| {
         // keep running with zero windows; only the menu's Quit (exit code set) ends the app
