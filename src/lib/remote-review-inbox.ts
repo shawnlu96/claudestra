@@ -4,7 +4,6 @@
  * file again here and re-runs every check on its own — the file names a card, it does not vouch for anything. Only plain files
  * directly in the inbox, never a link, at most the push cap plus the envelope. tests/remote-review-intake-ledger.test.ts.
  */
-import { randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { statePath } from "./paths.js";
@@ -12,16 +11,25 @@ import { PUSH_MAX_BYTES } from "./peer-pr-message.js";
 import { writeTextAtomicSync } from "./state-file.js";
 
 export const REMOTE_INBOX_DIR = statePath("ledger", "remote-review-inbox");
-const NAME = /^\d{13}-[0-9a-f-]{36}\.json$/;
+/** <receivedAt>-<card>~<report id>~<head12>.json: oldest first by name, and a push still waiting is found by its key. */
+const NAME = /^\d{13}-[\w.-]{1,80}~PR\d{1,9}-r\d{1,4}~[0-9a-f]{12}\.json$/;
 const FILE_MAX = PUSH_MAX_BYTES + 4096;
 
 export interface InboxEntry { v: 1; peer: string; agent: string; taskId: string; receivedAt: number; text: string }
 
-export function writeInbox(entry: Omit<InboxEntry, "v">, dir = REMOTE_INBOX_DIR): string {
-  const path = resolve(dir, `${entry.receivedAt}-${randomUUID()}.json`);
+export interface InboxKey { taskId: string; reportId: string; head12: string }
+const keyOf = (k: InboxKey): string => `${k.taskId}~${k.reportId}~${k.head12}`;
+
+export function writeInbox(entry: Omit<InboxEntry, "v">, key: InboxKey, dir = REMOTE_INBOX_DIR): string {
+  const name = `${entry.receivedAt}-${keyOf(key)}.json`;
+  if (key.taskId !== entry.taskId || !NAME.test(name)) throw new Error(`收件名不合规：${name}`);
+  const path = resolve(dir, name);
   writeTextAtomicSync(path, JSON.stringify({ v: 1, ...entry }), { mode: 0o600 });
   return path;
 }
+
+/** A push with this key is already waiting in the inbox (not yet booked by the scheduler). */
+export const inInbox = (key: InboxKey, dir = REMOTE_INBOX_DIR): boolean => listInbox(dir).some((p) => p.endsWith(`-${keyOf(key)}.json`));
 
 /** Inbox files oldest first; a tmp file of a write in progress has another name and is skipped. */
 export function listInbox(dir = REMOTE_INBOX_DIR): string[] {

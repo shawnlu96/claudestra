@@ -2,12 +2,13 @@
  * `ledger scheduler-remote-review <task> --inbox <file>`: book one repository-owner review push the bridge stashed (RRL-1).
  * Nothing in the file is trusted: it is re-read from the inbox only, the sender must still be the project's handoffPeer, the text
  * must still parse strictly and still match exactly this one card; then lib/remote-review-ledger.ts records it in one transaction.
- * `--notified <seq>` marks that PM got that event's notice. Scheduler service (or a real PM by hand) only.
+ * `--apply <seq>` acts on a booking that did not match then and does now; `--notified <seq>` marks that PM got that event's notice.
+ * Scheduler service (or a real PM by hand) only.
  * tests/remote-review-intake-ledger.test.ts.
  */
 import { LedgerError } from "../lib/ledger-store.js";
 import { readInbox, REMOTE_INBOX_DIR } from "../lib/remote-review-inbox.js";
-import { markRemoteNotified, recordRemoteReview } from "../lib/remote-review-ledger.js";
+import { applyLateRemote, markRemoteNotified, recordRemoteReview } from "../lib/remote-review-ledger.js";
 import { handoffProjects, matchRemoteCard } from "../lib/remote-review-read.js";
 import { parseRemoteReview } from "../lib/remote-review-parse.js";
 import { readSchedulerConfig, type SchedulerConfig } from "../lib/scheduler-config.js";
@@ -34,14 +35,17 @@ function book(c: LedgerCli, taskId: string, file: string, readConfig: () => Sche
 export function remoteReviewCmds(readConfig: () => SchedulerConfig = readSchedulerConfig, dir = REMOTE_INBOX_DIR, reportDir?: string): Record<string, CommandSpec> {
   return {
     "scheduler-remote-review": {
-      valued: ["inbox", "notified"], bools: [],
-      usage: "scheduler-remote-review <task> --inbox <收件文件> | --notified <seq>（仓库方审查结论入账 / 通知已送达；调度服务或项目 PM）",
+      valued: ["inbox", "apply", "notified"], bools: [],
+      usage: "scheduler-remote-review <task> --inbox <收件文件> | --apply <seq> | --notified <seq>" +
+        "（仓库方审查结论入账 / 到 head 后生效 / 通知已送达；调度服务或项目 PM）",
       run(c) {
         const task = c.task(c.p.pos[1]);
         if (c.deps.actor !== "scheduler") c.requireRealPm(task.project, "仓库方审查结论入账");
-        const seq = intFlag(c.p, "notified"), inbox = c.p.flags.inbox;
-        if ((seq === undefined) === (inbox === undefined)) throw new LedgerError("invalid", "--inbox 和 --notified 二选一");
-        if (seq !== undefined) return { ok: true, ...markRemoteNotified(c.db, c.ctx(), { taskId: task.id, seq }) };
+        const notified = intFlag(c.p, "notified"), apply = intFlag(c.p, "apply"), inbox = c.p.flags.inbox;
+        if ([notified, apply, inbox].filter((x) => x !== undefined).length !== 1) throw new LedgerError("invalid", "--inbox / --apply / --notified 三选一");
+        c.deps.assertLease?.();
+        if (notified !== undefined) return { ok: true, ...markRemoteNotified(c.db, c.ctx(), { taskId: task.id, seq: notified }) };
+        if (apply !== undefined) return { ok: true, ...applyLateRemote(c.db, c.ctx(), { taskId: task.id, seq: apply }) };
         const r = book(c, task.id, inbox!, readConfig, dir, reportDir);
         return { ok: true, duplicate: r.duplicate, event: r.event, notice: r.notice };
       },

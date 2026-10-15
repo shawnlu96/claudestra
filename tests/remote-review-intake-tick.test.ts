@@ -7,7 +7,7 @@ import { listInbox } from "../src/lib/remote-review-inbox.js";
 import { unsentRemoteNotices } from "../src/lib/remote-review-read.js";
 import { remoteReviewStep } from "../src/lib/remote-review-tick.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
-import { handoffConfig, P0_TEXT, P1_TEXT, pushText, remoteFixture } from "./helpers/remote-review-fixture.js";
+import { HEAD, HEAD2, handoffConfig, P0_TEXT, P1_TEXT, pushText, remoteFixture } from "./helpers/remote-review-fixture.js";
 
 let fx: ReturnType<typeof remoteFixture>;
 afterEach(() => fx?.cleanup());
@@ -70,6 +70,22 @@ describe("RRL-1 tick", () => {
     expect(await h.step()).toEqual([]);
     expect(h.notices.length).toBe(1);
     expect(unsentRemoteNotices(fx.db, "p")).toEqual([]);
+  });
+
+  test("[验收线 5/8] a P0 that arrived early acts in the first pass after the card reaches its head", async () => {
+    fx = remoteFixture({ head: HEAD2, stage: "build" });
+    fx.stash(P0_TEXT);
+    const h = harness();
+    await h.step();
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    expect(h.notices).toEqual([]);
+    fx.db.query("UPDATE tasks SET headSHA = ?, stage = 'review' WHERE id = 'T1'").run(HEAD);
+    expect(await h.step()).toEqual([]);
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
+    expect(h.notices.length).toBe(1);
+    expect(h.notices[0]!.text).toContain("已退回人工");
+    await h.step();
+    expect(h.notices.length).toBe(1);
   });
 
   test("a held card keeps its file for a later pass", async () => {

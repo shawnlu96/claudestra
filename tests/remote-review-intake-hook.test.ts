@@ -1,19 +1,21 @@
 // RRL-1 验收线 2/3：bridge 钩子只拦三条全中的推送；任一不中（含出错）返回 null = 照原路投给 PM，收件目录不落文件。
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { renderRedeliveryPush } from "../src/lib/peer-pr-retry.js";
 import { join } from "node:path";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { listInbox, readInbox, writeInbox } from "../src/lib/remote-review-inbox.js";
+import { inInbox, listInbox, readInbox, writeInbox } from "../src/lib/remote-review-inbox.js";
 import { interceptRemoteReview, type IntakeDeps, type IntakeInput } from "../src/bridge/remote-review-intake.js";
-import { handoffConfig, INJECT, P1_TEXT, PEER, PM, PR, remoteFixture } from "./helpers/remote-review-fixture.js";
+import { handoffConfig, INJECT, P1_TEXT, PEER, PM, PR, pushText, remoteFixture } from "./helpers/remote-review-fixture.js";
 
 let fx: ReturnType<typeof remoteFixture>;
 afterEach(() => fx?.cleanup());
 
 function harness(over: Partial<IntakeDeps> = {}) {
   const mirrored: string[] = [];
-  const deps: IntakeDeps = { config: () => handoffConfig(), db: () => fx.db, stash: (e) => writeInbox(e, fx.inbox), now: () => 1_700_000_000_000, ...over };
+  const deps: IntakeDeps = { config: () => handoffConfig(), db: () => fx.db, stash: (e, k) => writeInbox(e, k, fx.inbox), waiting: (k) => inInbox(k, fx.inbox),
+    now: () => 1_700_000_000_000, ...over };
   const call = (input: Partial<IntakeInput> = {}) => interceptRemoteReview({ peer: PEER, agent: PM, text: P1_TEXT, attachments: 0, ...input },
     async (line) => { mirrored.push(line); }, deps);
   return { call, mirrored };
@@ -70,10 +72,33 @@ describe("RRL-1 hook: ours → 202, stashed raw, one mirror line", () => {
 
   test("[验收线 3] a failing mirror does not undo the intake", async () => {
     fx = remoteFixture();
-    const deps: IntakeDeps = { config: () => handoffConfig(), db: () => fx.db, stash: (e) => writeInbox(e, fx.inbox), now: () => 1_700_000_000_000 };
+    const deps: IntakeDeps = { config: () => handoffConfig(), db: () => fx.db, stash: (e, k) => writeInbox(e, k, fx.inbox), waiting: (k) => inInbox(k, fx.inbox),
+      now: () => 1_700_000_000_000 };
     const res = await interceptRemoteReview({ peer: PEER, agent: PM, text: P1_TEXT, attachments: 0 }, async () => { throw new Error("discord down"); }, deps);
     expect(res!.status).toBe(202);
     expect(listInbox(fx.inbox).length).toBe(1);
+  });
+});
+
+describe("RRL-1 hook: duplicate-http-ack (review finding r1)", () => {
+  test("[验收线 4] the same report id + head again answers duplicate while waiting, after booking, and as a redelivery", async () => {
+    fx = remoteFixture();
+    const h = harness();
+    expect(await (await h.call())!.json()).not.toHaveProperty("duplicate");
+    const second = await h.call();
+    expect(second!.status).toBe(202);
+    expect(await second!.json()).toEqual({ ok: true, accepted: true, duplicate: true, intake: "remote_review", reportId: "PR1600-r1" });
+    expect(listInbox(fx.inbox).length).toBe(1);
+    expect(h.mirrored.length).toBe(1);
+    // booked by the scheduler: the file is gone, the ledger event answers
+    expect(await fx.cli("scheduler", "T1", "--inbox", listInbox(fx.inbox)[0]!)).toMatchObject({ ok: true, duplicate: false });
+    rmSync(listInbox(fx.inbox)[0]!);
+    expect(await (await h.call())!.json()).toMatchObject({ duplicate: true });
+    expect(await (await h.call({ text: renderRedeliveryPush(P1_TEXT, 1, { stage: "build" })! }))!.json()).toMatchObject({ duplicate: true });
+    expect(listInbox(fx.inbox)).toEqual([]);
+    expect(h.mirrored.length).toBe(1);
+    // another round is not a duplicate
+    expect(await (await h.call({ text: pushText({ verdict: "changes", p1: 1, round: 2 }) }))!.json()).not.toHaveProperty("duplicate");
   });
 });
 

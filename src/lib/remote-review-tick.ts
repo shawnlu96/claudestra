@@ -1,6 +1,7 @@
 /**
  * Scheduler pass step for the repository owner's review pushes (RRL-1): books every inbox file the bridge stashed through
- * `ledger scheduler-remote-review` (oldest first), then sends the PM notices those bookings asked for and marks each sent.
+ * `ledger scheduler-remote-review` (oldest first), applies earlier bookings whose head the card has reached since (`--apply`),
+ * then sends the PM notices those asked for and marks each sent.
  * A booked file is deleted; a held card (v2 skip / pause) keeps its file for a later pass; a refused one moves to failed/ and PM
  * is told where the raw text is, so a push the bridge already answered 202 is never silently lost. Only runs for projects that
  * name a handoffPeer. tests/remote-review-intake-tick.test.ts.
@@ -11,7 +12,7 @@ import { basename, join } from "node:path";
 import { notifyProjectPm } from "./pm-notify.js";
 import { quoteExternal } from "./quote-text.js";
 import { listInbox, readInbox, REMOTE_INBOX_DIR } from "./remote-review-inbox.js";
-import { unsentRemoteNotices } from "./remote-review-read.js";
+import { lateRemoteMatches, unsentRemoteNotices } from "./remote-review-read.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -83,11 +84,24 @@ async function sendNotices(db: Database, projects: readonly string[], deps: Remo
   return failed;
 }
 
+/** Bookings that arrived before the card reached their head act once it has (a P0 must not wait for the next push). */
+async function applyLate(db: Database, projects: readonly string[], deps: RemoteReviewStepDeps): Promise<Failed> {
+  const failed: Failed = [];
+  for (const project of projects) {
+    for (const m of lateRemoteMatches(db, project)) {
+      const r = await deps.manager("ledger", "scheduler-remote-review", m.taskId, "--apply", String(m.seq));
+      if (r.ok !== true && r.held !== true) failed.push({ taskId: m.taskId, error: `仓库方审查结论到 head 后没补上（下一轮再试）：${String(r.error ?? r.code)}` });
+    }
+  }
+  return failed;
+}
+
 export async function remoteReviewStep(db: Database, config: SchedulerConfig, deps: RemoteReviewStepDeps): Promise<Failed> {
   const projects = Object.entries(config.projects).filter(([, p]) => p.handoffPeer).map(([id]) => id);
   if (!projects.length) return [];
   const alive = () => { try { deps.active(); return true; } catch { return false; /* not provably active: send nothing */ } };
   const notify = deps.notify ?? ((project: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive }));
   const dir = deps.dir ?? REMOTE_INBOX_DIR;
-  return [...await bookInbox(config, deps, dir, notify), ...await sendNotices(db, projects, deps, notify)];
+  const booked = await bookInbox(config, deps, dir, notify), late = await applyLate(db, projects, deps);
+  return [...booked, ...late, ...await sendNotices(db, projects, deps, notify)];
 }

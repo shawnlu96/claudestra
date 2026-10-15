@@ -7,8 +7,7 @@ import { listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { renderRedeliveryPush } from "../src/lib/peer-pr-retry.js";
 import { sanitizeForeign } from "../src/lib/order-wire-render.js";
-import { remoteHeadMatch } from "../src/lib/remote-review-ledger.js";
-import { remoteP1At, unsentRemoteNotices } from "../src/lib/remote-review-read.js";
+import { lateRemoteMatches, remoteHeadMatch, remoteP1At, unsentRemoteNotices } from "../src/lib/remote-review-read.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { CAP_TEXT, HEAD, HEAD2, handoffConfig, INJECT, P0_TEXT, P1_TEXT, pushText, REPORT, remoteFixture } from "./helpers/remote-review-fixture.js";
 
@@ -53,7 +52,7 @@ describe("RRL-1 booking", () => {
     expect(r).toMatchObject({ ok: true, notice: null });
     const [e] = fx.remoteEvents();
     expect(e!.data).toMatchObject({ matched: false, head: null, action: null });
-    expect(e!.text).toContain("不生效");
+    expect(e!.text).toContain("到这个 head 才生效");
     expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
     expect(fx.task().stage).toBe("build");
     expect(unsentRemoteNotices(fx.db, "p")).toEqual([]);
@@ -137,6 +136,53 @@ describe("RRL-1 actions", () => {
   });
 });
 
+describe("RRL-1 review findings r1", () => {
+  test("[验收线 5/8] stale-stop-review: a P0 booked before the card reached its head acts once it does (manual + notice), once", async () => {
+    fx = remoteFixture({ head: HEAD2, stage: "build" });
+    await fx.book(P0_TEXT);
+    const seq = fx.remoteEvents()[0]!.seq;
+    expect(lateRemoteMatches(fx.db, "p")).toEqual([]);
+    expect(await fx.cli("scheduler", "T1", "--apply", String(seq))).toMatchObject({ ok: true, event: null }); // still not at that head
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    fx.db.query("UPDATE tasks SET headSHA = ?, stage = 'review' WHERE id = 'T1'").run(HEAD);
+    expect(lateRemoteMatches(fx.db, "p")).toEqual([{ taskId: "T1", seq }]);
+    const r = await fx.cli("scheduler", "T1", "--apply", String(seq));
+    expect(r).toMatchObject({ ok: true, duplicate: false });
+    expect(String(r.notice)).toContain("已退回人工");
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
+    const applied = (r.event as { seq: number; data: Record<string, unknown> });
+    expect(applied.data).toMatchObject({ op: "remote_review_applied", remoteSeq: seq, head: HEAD, action: "manual" });
+    expect(unsentRemoteNotices(fx.db, "p")).toEqual([{ taskId: "T1", seq: applied.seq, text: String(r.notice) }]);
+    expect(lateRemoteMatches(fx.db, "p")).toEqual([]);
+    expect(await fx.cli("scheduler", "T1", "--apply", String(seq))).toMatchObject({ ok: true, duplicate: true, notice: null });
+    expect(await fx.cli("scheduler", "T1", "--notified", String(applied.seq))).toMatchObject({ ok: true });
+    expect(unsentRemoteNotices(fx.db, "p")).toEqual([]);
+  });
+
+  test("[验收线 5] a late P1 on a manual card notifies when the head is reached; a late P1 on an auto card is only marked applied", async () => {
+    fx = remoteFixture({ head: HEAD2, stage: "fix", mode: "manual" });
+    await fx.book(P1_TEXT);
+    fx.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T1'").run(HEAD);
+    const seq = fx.remoteEvents()[0]!.seq;
+    expect(String((await fx.cli("scheduler", "T1", "--apply", String(seq))).notice)).toContain("2 个 P1");
+    fx.cleanup();
+    fx = remoteFixture({ head: HEAD2, stage: "fix" });
+    await fx.book(P1_TEXT);
+    fx.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T1'").run(HEAD);
+    expect(await fx.cli("scheduler", "T1", "--apply", String(fx.remoteEvents()[0]!.seq))).toMatchObject({ ok: true, notice: null });
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    expect(lateRemoteMatches(fx.db, "p")).toEqual([]);
+  });
+
+  test("[验收线 8] redelivery-cap-lost: a redelivered P1 cannot show the owner's round cap, so an aligned auto card goes to PM", async () => {
+    fx = remoteFixture();
+    const r = await fx.book(renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" })!);
+    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", conclusion: "p1", action: "manual" });
+    expect(String(r.notice)).toContain("补发");
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
+  });
+});
+
 describe("RRL-1 the command trusts nothing in the file", () => {
   test("[验收线 2/12] a sender that is not (or no longer) handoffPeer, another card, a tampered text, a file outside the inbox", async () => {
     fx = remoteFixture();
@@ -148,7 +194,7 @@ describe("RRL-1 the command trusts nothing in the file", () => {
     const tampered = fx.stash(P1_TEXT);
     writeFileSync(tampered, readFileSync(tampered, "utf8").replace("head：", "head:"));
     expect(await fx.cli("scheduler", "T1", "--inbox", tampered)).toMatchObject({ ok: false, code: "invalid" });
-    const outside = join(fx.dir, "1700000000000-00000000-0000-0000-0000-000000000000.json");
+    const outside = join(fx.dir, `1700000000000-T1~PR1600-r1~${HEAD.slice(0, 12)}.json`);
     writeFileSync(outside, readFileSync(fx.stash(P1_TEXT), "utf8"));
     expect(await fx.cli("scheduler", "T1", "--inbox", outside)).toMatchObject({ ok: false, code: "invalid" });
     fx.db.query("UPDATE tasks SET pr = NULL WHERE id = 'T1'").run();

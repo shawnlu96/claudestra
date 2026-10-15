@@ -9,6 +9,7 @@ import { createTask } from "../../src/lib/ledger-write.js";
 import { renderReviewPush, type ReviewPush } from "../../src/lib/peer-pr-message.js";
 import type { SchedulerConfig } from "../../src/lib/scheduler-config.js";
 import { writeInbox } from "../../src/lib/remote-review-inbox.js";
+import { parseRemoteReview } from "../../src/lib/remote-review-parse.js";
 import { LedgerCli, type LedgerDeps } from "../../src/manager/ledger-context.js";
 import { parseLedgerArgs } from "../../src/manager/ledger-identity.js";
 import { remoteReviewCmds } from "../../src/manager/ledger-remote-review-cmds.js";
@@ -50,8 +51,11 @@ export function remoteFixture(opts: { stage?: string; mode?: "auto" | "manual"; 
     if ("error" in p) return { ok: false, code: "invalid", error: p.error };
     try { return await s.run(new LedgerCli(deps(actor), p)); } catch (e) { return { ok: false, code: (e as { code?: string }).code, error: (e as Error).message }; }
   };
-  const stash = (text: string, over: { peer?: string; taskId?: string } = {}) =>
-    writeInbox({ peer: over.peer ?? PEER, agent: PM, taskId: over.taskId ?? "T1", receivedAt: (now += 10) + 1_700_000_000_000, text }, inbox);
+  const stash = (text: string, over: { peer?: string; taskId?: string } = {}) => {
+    const taskId = over.taskId ?? "T1", r = parseRemoteReview(text);
+    const key = { taskId, reportId: r?.reportId ?? `PR${PR}-r1`, head12: r?.head12 ?? HEAD.slice(0, 12) };
+    return writeInbox({ peer: over.peer ?? PEER, agent: PM, taskId, receivedAt: (now += 10) + 1_700_000_000_000, text }, key, inbox);
+  };
   const book = (text: string, over: { peer?: string; taskId?: string } = {}) => cli("scheduler", "T1", "--inbox", stash(text, over));
   const remoteEvents = () => listEvents(db, { project: "p", target: "T1" }).filter((e) => e.data.op === "remote_review");
   return {
