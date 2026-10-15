@@ -32,7 +32,7 @@ let worlds = 0;
 export type Ci = "success" | "failure" | "pending" | "missing";
 
 export function writePolicy(keys: Record<string, RecoveryMode>) {
-  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys } } }));
+  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { mergeQueueOwner: "off", ...keys } } } }));
 }
 
 export function mainCiWorld() {
