@@ -3,15 +3,28 @@ import type { HomeFixture } from "@/features/collab/shared/home-fixture-gen";
 import type { TeamFromHome } from "../web-team-parity-browser-center.test";
 import { rosterFixture, rosterSnapshotFixture } from "@/features/collab/team/roster-fixture";
 
+/** Cold-start conditions: per-route delays (ms) and the first N reads of a route answering 500. */
+export interface RosterServeOpts {
+  delay?: Partial<Record<"config" | "contacts" | "context" | "roster" | "snapshot", number>>;
+  fail?: Partial<Record<"roster" | "snapshot", number>>;
+  /** Center project id in the binding context; differs from the local project id to catch reads on the wrong one. */
+  centerProject?: string;
+}
+const ROUTES = { "/app-config.json": "config", "/api/v1/peers/contacts": "contacts", "/api/v1/shared-ledger/context": "context",
+  "/api/v1/team/roster": "roster", "/api/v1/shared-projects/snapshot": "snapshot" } as const;
+
 /** The binding port first reads context; the fixture must supply that authorization hint before its snapshot. */
-export function serveRoster(home: HomeFixture, team: TeamFromHome, bundle: string, status = 200) {
+export function serveRoster(home: HomeFixture, team: TeamFromHome, bundle: string, status = 200, opts: RosterServeOpts = {}) {
   const base = serve(home, team, bundle);
-  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
-    const url = new URL(req.url), path = url.pathname;
-    if (path === "/api/v1/team/roster") return Response.json(rosterFixture(home.now, home.project), { status });
-    if (path === "/api/v1/shared-ledger/context") return Response.json({ identities: [{ center: "center", team: home.team,
-      person: "person-a", project: home.project, localProjectId: home.project, homeInstanceId: home.sourceInstanceId }] });
-    if (path === "/api/v1/shared-projects/snapshot") return Response.json(rosterSnapshotFixture(home.project, home.team, home.sourceInstanceId));
+  const seen = { roster: 0, snapshot: 0 };
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 60, async fetch(req) {
+    const url = new URL(req.url), path = url.pathname, route = ROUTES[path as keyof typeof ROUTES];
+    if (route && opts.delay?.[route]) await Bun.sleep(opts.delay[route]!);
+    if ((route === "roster" || route === "snapshot") && ++seen[route] <= (opts.fail?.[route] ?? 0)) return Response.json({ error: "synthetic" }, { status: 500 });
+    if (route === "roster") return Response.json(rosterFixture(home.now, home.project), { status });
+    if (route === "context") return Response.json({ identities: [{ center: "center", team: home.team,
+      person: "person-a", project: opts.centerProject ?? home.project, localProjectId: home.project, homeInstanceId: home.sourceInstanceId }] });
+    if (route === "snapshot") return Response.json(rosterSnapshotFixture(home.project, home.team, home.sourceInstanceId));
     url.host = new URL(base.server.url).host;
     return fetch(new Request(url.toString(), req));
   } });
@@ -27,7 +40,11 @@ export async function rosterBundle(out: string, baseline?: string) {
   return stdout.trim();
 }
 
-/** Minimal shell mounts the real roster hook twice; no React module is imported into the Bun test process. */
+/**
+ * Minimal shell mounts the real roster hook twice; no React module is imported into the Bun test process.
+ * The shell probes full scope only after its first frame (the sidebar mounts later in the app), so the hook's first frame reads it passively.
+ * view=roster mounts the real TeamRoster instead of the two bare readers; window.__machines exposes the store for switch cases.
+ */
 export async function dualRosterBundle(out: string) {
   const { writeFileSync, mkdirSync } = await import("node:fs");
   const { resolve } = await import("node:path");
@@ -37,10 +54,20 @@ export async function dualRosterBundle(out: string) {
   writeFileSync(entry, `import React from ${path("node_modules/react")};
     import { createRoot } from ${path("node_modules/react-dom/client")};
     import { useTeamRoster } from ${path("features/collab/team/use-team-roster.ts")};
+    import { TeamRoster } from ${path("features/collab/team/team-roster.tsx")};
     import { useFullScope } from ${path("features/chat/contacts-data.ts")};
-    const project = new URLSearchParams(location.search).get("project");
+    import { machines } from ${path("lib/machines.ts")};
+    const q = new URLSearchParams(location.search), project = q.get("project");
+    window.__machines = machines;
     function Reader() { const data = useTeamRoster(project); return React.createElement("output", null, data.roster ? "known" : "unknown"); }
-    function Shell() { useFullScope(); return React.createElement(React.Fragment, null, React.createElement(Reader), React.createElement(Reader)); }
+    function Probe() { useFullScope(); return null; }
+    function Shell() {
+      const [probe, setProbe] = React.useState(false);
+      React.useEffect(() => setProbe(true), []);
+      const body = q.get("view") === "roster" ? React.createElement(TeamRoster, { project, ov: null, agents: [], now: Date.now() })
+        : React.createElement(React.Fragment, null, React.createElement(Reader), React.createElement(Reader));
+      return React.createElement(React.Fragment, null, probe && React.createElement(Probe), body);
+    }
     createRoot(document.getElementById("root")).render(React.createElement(Shell));`);
   const child = Bun.spawn([process.execPath, "build", entry, "--target", "browser", "--outdir", bundle,
     "--tsconfig-override", resolve("web/tsconfig.json")], { stdout: "pipe", stderr: "pipe" });
