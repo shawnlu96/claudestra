@@ -74,8 +74,9 @@ function plannedBefore(events: readonly LedgerEvent[], i: SchedulerIntent, at: L
 
 /**
  * The planner's view for the 11a dispatch: the stale verdicts themselves are left out (every one of the round before the hand-back
- * that does not count, staleRound: none is this round's, so none reads as the card's prior reviewer nor bounds anything), and a review intent of `node` that already finished (`done`) and was planned before the
- * latest PM hand-back belongs to the round the PM took over, so it reads as cancelled and no longer holds the dispatch in `in_flight`.
+ * that does not count, staleRound: none is this round's, so none reads as the card's prior reviewer nor bounds anything), and a
+ * review intent of `node` that already finished (`done`) and was planned before the latest PM hand-back belongs to the round the PM
+ * took over, so it reads as cancelled and no longer holds the dispatch in `in_flight`.
  * Intents planned after the hand-back, and any still pending / submitted / unknown, are kept as they are (the usual in-flight dedup);
  * the intent list itself is unchanged, so the new intent's attempt key still counts them.
  */

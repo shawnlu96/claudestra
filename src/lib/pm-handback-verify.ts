@@ -5,9 +5,9 @@
  *   run's spec (RESOLVED_DONE_SQL). on: the same checklist as driveVerify, dry-run first and only a pass is recorded (never a
  *   failure, nothing waived; the gate is schedulerCanVerify); observe: one note "would verify"; off: no card at all. The mode is
  *   read again after the dry-run, right before the recorded verify: a key switched to off / observe meanwhile stops it.
- * Each recorded try has its own dedup key (`deploy-verify:<intent>:<try>`): the formal `ledger verify` collects the facts again, so a
- * check that turns red between the dry-run and it is written as that try's result but never takes a key a later try needs; tries
- * go on while the card is live, and a pass (or a PM's own `ledger verify`) moves it on and ends them.
+ * The formal `ledger verify` collects the facts again (every check, nothing waived) and is called with `--pass-only`: a check that
+ * turns red between the dry-run and it writes no verify event at all; tries go on while the card is live (each with its own dedup
+ * key `deploy-verify:<intent>:<try>`), and a pass (or a PM's own `ledger verify`) moves it on and ends them.
  * Doc: docs/architecture/pm-handback.md. Tests: tests/pm-handback-verify.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -73,10 +73,10 @@ async function driveResolvedVerify(d: DeployTickDeps, db: Database, run: DeployR
   const dry = await d.manager("ledger", "verify", run.taskId, "--dry-run");
   if (dry.ok !== true || dry.result !== "pass") return;
   if (!allowed()) return; // a permission key: read again right before the recorded verify, the dry-run may have taken a while
-  const r = await d.manager("ledger", "verify", run.taskId, "--dedup", dedupOf(run, at));
+  const r = await d.manager("ledger", "verify", run.taskId, "--dedup", dedupOf(run, at), "--pass-only"); // only a pass is written
   if (r.code === "invalid" || r.code === "forbidden") throw new Error(`ledger verify ${run.taskId}: ${String(r.error)}`);
-  if (r.ok !== true) { // red since the dry-run: the next try comes after RESOLVED_VERIFY_EVERY_MS, as after a red dry-run
-    console.error(`⚠️ [pm-handback] ${run.taskId} 结清后完成检查 dry-run 通过、正式核对未过（${String(r.error ?? r.code)}），稍后重试`);
+  if (r.ok !== true) { // red since the dry-run, nothing written: the next try comes after RESOLVED_VERIFY_EVERY_MS, as after a red dry-run
+    console.error(`⚠️ [pm-handback] ${run.taskId} 结清后完成检查 dry-run 通过、正式核对未过（${String(r.blocking ?? r.error ?? r.code)}），不记、稍后重试`);
     return;
   }
   lastTry.delete(run.intentId);
