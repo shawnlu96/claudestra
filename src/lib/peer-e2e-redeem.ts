@@ -1,3 +1,5 @@
+import { E2E_LABELS, type E2eFamily } from "./floka-compat/e2e/families.js";
+import { openResponse, sealResponse } from "./floka-compat/e2e/redeem.js";
 /**
  * 兑换邀请的 HPKE 信封（docs/relay/e2e-design.md §5.1）：路径照旧是 POST /api/v1/peers/redeem——中继只放行非联系人发这一个路径，
  * 换路径就得改中继。请求体从明文 {join, …} 换成 {v, suite, enc, ct}：
@@ -7,12 +9,11 @@
  */
 import { fromB64url, lp, toB64url, utf8 } from "./e2e/encoding.js";
 import { HpkeContext, setupBaseR, setupBaseS } from "./e2e/hpke.js";
-import { aesKey, gcmOpen, gcmSeal, randomBytes, type EcdhPair } from "./e2e/primitives.js";
+import { type EcdhPair } from "./e2e/primitives.js";
 import { PEER_E2E_SUITE } from "./peer-e2e-wire.js";
 import { remoteCode } from "./remote-text.js";
 
 const REDEEM_LABEL = "cstra-peer-redeem-v1";
-const RESPONSE_LABEL = "cstra-peer-redeem-response-v1";
 const info = (inviterFp: string) => lp(REDEEM_LABEL, inviterFp);
 
 export interface SealedRedeem {
@@ -23,6 +24,7 @@ export interface SealedRedeem {
 }
 
 export interface RedeemSession {
+  family?: E2eFamily;
   ctx: HpkeContext;
   enc: Uint8Array;
 }
@@ -40,43 +42,25 @@ export async function sealRedeemRequest(inviterEkPub: Uint8Array, inviterFp: str
 }
 
 /** 邀请方解开；套件不对、enc 不是合法点、解不开、不是 JSON → null */
-export async function openRedeemRequest(m: EcdhPair, myFp: string, body: SealedRedeem): Promise<{ payload: unknown; session: RedeemSession } | null> {
+export async function openRedeemRequest(m: EcdhPair, myFp: string, body: SealedRedeem, family: E2eFamily = "claudestra"): Promise<{ payload: unknown; session: RedeemSession } | null> {
   const s = body.suite as Record<string, unknown> | undefined;
   if (!s || s.kem !== PEER_E2E_SUITE.kem || s.kdf !== PEER_E2E_SUITE.kdf || s.aead !== PEER_E2E_SUITE.aead) return null;
   const enc = fromB64url(body.enc), ct = fromB64url(body.ct);
   if (!enc || !ct) return null;
-  const ctx = await setupBaseR(enc, m, info(myFp));
-  const pt = ctx && (await ctx.open(utf8(REDEEM_LABEL), ct));
+  const label = E2E_LABELS[family].redeem;
+  const ctx = await setupBaseR(enc, m, lp(label, myFp));
+  const pt = ctx && (await ctx.open(utf8(label), ct));
   if (!ctx || !pt) return null;
   try {
-    return { payload: JSON.parse(new TextDecoder().decode(pt)), session: { ctx, enc } };
+    return { payload: JSON.parse(new TextDecoder().decode(pt)), session: { ctx, enc, family } };
   } catch {
     return null; // 解得开却不是 JSON：对方实现坏了，按无效兑换处理
   }
 }
 
-const responseKey = async (s: RedeemSession) => aesKey(await s.ctx.export(utf8("redeem-response"), 32));
-
-export async function sealRedeemResponse(s: RedeemSession, obj: unknown): Promise<{ v: 1; nonce: string; ct: string }> {
-  const nonce = randomBytes(12);
-  const ct = await gcmSeal(await responseKey(s), nonce, lp(RESPONSE_LABEL, s.enc), utf8(JSON.stringify(obj)));
-  return { v: 1, nonce: toB64url(nonce), ct: toB64url(ct) };
-}
-
-/** 兑换方解开响应；任何一处不对 → null（调用方当兑换失败，回滚本地记录） */
-export async function openRedeemResponse(s: RedeemSession, body: unknown): Promise<unknown | null> {
-  const o = body as Record<string, unknown> | null;
-  if (!o || typeof o !== "object" || o.v !== 1 || typeof o.nonce !== "string" || typeof o.ct !== "string") return null;
-  const nonce = fromB64url(o.nonce), ct = fromB64url(o.ct);
-  if (!nonce || nonce.length !== 12 || !ct) return null;
-  const pt = await gcmOpen(await responseKey(s), nonce, lp(RESPONSE_LABEL, s.enc), ct);
-  if (!pt) return null;
-  try {
-    return JSON.parse(new TextDecoder().decode(pt));
-  } catch {
-    return null; // 同上：解得开却不是 JSON
-  }
-}
+/** E2E1 owns response sealing and opening for both families; legacy contexts default to the old labels. */
+export const sealRedeemResponse = (s: RedeemSession, obj: unknown) => sealResponse({ ...s, family: s.family ?? "claudestra" }, obj);
+export const openRedeemResponse = (s: RedeemSession, body: unknown, family: E2eFamily = "claudestra") => openResponse({ ...s, family }, body);
 
 export type RedeemOutcome = { ok: true; value: unknown } | { ok: false; code: "redeem_failed" | "redeem_unsealed" | "redeem_tampered"; message: string };
 
@@ -89,7 +73,7 @@ export type RedeemOutcome = { ok: true; value: unknown } | { ok: false; code: "r
 export async function readRedeemResponse(s: RedeemSession, status: number, body: unknown): Promise<RedeemOutcome> {
   const sealed = !!body && typeof body === "object" && (body as { v?: unknown }).v === 1 && typeof (body as { ct?: unknown }).ct === "string";
   if (status === 200 && sealed) {
-    const value = await openRedeemResponse(s, body);
+    const value = await openRedeemResponse(s, body, s.family ?? "claudestra");
     return value === null ? { ok: false, code: "redeem_tampered", message: "invite response failed authentication; retry" } : { ok: true, value };
   }
   if (status === 200) return { ok: false, code: "redeem_unsealed", message: "inviter answered without encryption; refusing (retry, or ask for a new invite)" };

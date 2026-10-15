@@ -1,3 +1,4 @@
+import { sealInviteRedeem } from "../lib/floka-peer/redeem.js";
 /**
  * 一键邀请的两端（从 manager/peers.ts 搬出）：兑换（我是邀请方，bridge /api/v1/peers/redeem 委托进来）与加入（我是被邀方）。
  * 合并规则：一个对方只有一条记录、一个实例 id 只属于一条记录；合并要有签名证据（兑换方向看兑换请求的签名，
@@ -18,7 +19,7 @@ import { myFingerprint, peerCliFetch, rawCliFetch, relayStatus } from "./relay.j
 import { fromB64url } from "../lib/e2e/encoding.js";
 import { verifyE2eKey, type SignedE2eKey } from "../lib/e2e-machine-key.js";
 import { localE2e, type LocalE2e } from "../lib/peer-e2e-local.js";
-import { readRedeemResponse, sealRedeemRequest } from "../lib/peer-e2e-redeem.js";
+import { readRedeemResponse } from "../lib/peer-e2e-redeem.js";
 import { peerErrorText } from "../lib/peer-auth-hints.js";
 import { readJsonCapped } from "../lib/body-reader.js";
 import { checkPeerScope, disableTokenById, issuePeerToken, selfPeerName } from "./peers.js";
@@ -180,12 +181,12 @@ async function postRedeem(hs: PeerInviteV2, rev: Reverse, x: { nonce: string; in
   let err = "", failKind: JoinFailureKind = "other";
   const iid = instanceIdSync();
   const payload = { join: hs.join, name: selfPeerName(), nonce: x.nonce, inviteUrl: x.inviteUrl, ...(iid ? { iid } : {}), ...(rev.secret ? { url: rev.url, token: rev.secret } : {}) };
-  const l = x.local, sealed = l && hs.ek ? await sealRedeemRequest(fromB64url(hs.ek.pub)!, hs.fp!, { ...payload, idk: l.key.publicKey, key: l.signed }) : null;
+  const l = x.local, sealed = await sealInviteRedeem(hs, l, payload);
   try {
     // 加密兑换自带信封，直接发到邀请里的地址：进会话层会按指纹撞上本机那条单向记录（有 e2e、没地址）而 e2e_bad_peer（tests/peer-join-oneway.test.ts）
     const r = await (sealed ? rawCliFetch : peerCliFetch)(`${hs.url}/api/v1/peers/redeem`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...sealed?.headers },
       body: JSON.stringify(sealed ? sealed.body : payload),
       signal: AbortSignal.timeout(10_000),
     });
