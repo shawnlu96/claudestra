@@ -63,6 +63,13 @@ const CARD_RE = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[A-Z][A-Z0-9]{2,}\b/;
 export const pmBodyUrgent = (body: string): boolean => URGENT_RE.test(body) || HALT_RECHECK_RE.test(body);
 
 /**
+ * peer 标 info（agents-PEERLEVEL1）：API 入口（api-routes.ts 的信封 triggerKind 恒为 system）只给已认证 peer 标的 info 放 meta.pmLevel
+ * （bridge/api-message-policy.ts）。与本机 info 同走摘要；其余 API 消息照旧立即送、受保护。pm-route 共用
+ */
+export const peerInfo = (m: Pick<DigestInput, "fromKind" | "level" | "triggerKind">): boolean =>
+  m.fromKind === "api" && m.level === "info" && m.triggerKind === "system";
+
+/**
  * 本机系统进程以固定名义发的帧（调度器、PM 切换、出借服务、台账唤醒）：不算「其他 agent」，没标级别时照旧规则。
  * master 不在内：它的 oneShot 也是 send_to_agent 发的，和其他 agent 一样只认发送方标的级别（没标的进 pm-todo）
  */
@@ -93,20 +100,26 @@ export function digestFallback(body: string, source: string, reason: string): Di
 
 export function classifyPmPush(m: DigestInput): DigestVerdict {
   const firstLine = firstLineOf(m.body), sender = m.sender ?? "";
+  if (peerInfo(m)) return infoVerdict(m, firstLine, sender);
   if (m.fromKind === "user" || m.fromKind === "api") return { send: "now", reason: "owner / 人类 / peer 的消息" };
   if (m.triggerKind === "ask_answer") return { send: "now", reason: "卡片答复" };
   if (m.fromKind === "bridge" && sender === PM_DIGEST_LABEL) return { send: "now", reason: "PM 摘要本身（不再进队，防自环）" };
   // 结构化级别：本项目入口（调度器 / bridge 合成通知）与 agent 的 oneShot。等回复的 agent 消息带了也不认（对方在等答复，不能压进摘要）
   if (m.level && (m.fromKind === "bridge" || m.oneShot)) {
     if (m.level === "action") return { send: "now", reason: "发送方标 action", levelSource: "structured" };
-    const base = legacyVerdict(m, firstLine, sender);
-    return { ...(base.send === "digest" ? base : digestFallback(m.body, sender || m.fromKind, "")), reason: "发送方标 info", levelSource: "structured" };
+    return infoVerdict(m, firstLine, sender);
   }
   if (agentOneShot(m)) {
     return { send: "digest", reason: "oneShot 没标级别：不送，进 pm-todo 等 PM 拉", kind: "sync", source: sender || "agent", card: CARD_RE.exec(firstLine)?.[0],
       firstLine, ...(DETAIL_SYNC_SENDERS.has(sender) ? detailOf(m.body) : {}), levelSource: "structured", unleveled: true };
   }
   return legacyVerdict(m, firstLine, sender);
+}
+
+/** 发送方标 info：旧规则能归类就用它的归类，否则按同步进摘要 */
+function infoVerdict(m: DigestInput, firstLine: string, sender: string): DigestVerdict {
+  const base = legacyVerdict(m, firstLine, sender);
+  return { ...(base.send === "digest" ? base : digestFallback(m.body, sender || m.fromKind, "")), reason: "发送方标 info", levelSource: "structured" };
 }
 
 /** 没有结构化级别时的旧规则（正文字样只在这里用） */
