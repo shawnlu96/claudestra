@@ -65,7 +65,7 @@ export async function notifyTaskPm(task: LedgerTask | null, project: string, tex
 export async function sweepExpired(now = Date.now()): Promise<number> {
   const db = askDbIfExists();
   if (!db || !hasAsksTable(db)) return 0;
-  await sweepAskDefaults(db, now, { publish: publishAsk, notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }), tell: tellAsker }); // 不抛
+  await sweepAskDefaults(db, now, { publish: publishAsk, notify: (to, text, messageId, pmLevel) => sendLedgerNotice({ to, text, messageId, pmLevel }), tell: tellAsker }); // 不抛
   const due = dueAsks(db, now);
   let expired = 0;
   for (const a0 of due) {
