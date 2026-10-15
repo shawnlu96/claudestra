@@ -57,6 +57,8 @@ export interface StartEnv {
   autoReady(project: string): string | null;
   /** ledger/prompts/exec-template.md 的内容；没有为 null */
   template(): string | null;
+  /** scheduler.json 里是 localMerge 的项目（lib/scheduler-config.ts localMergeOf）：base 缺省 main、执行者不 push；不注入 = 都不是 */
+  localMerge?(project: string): boolean;
   /** 槽池放置（lib/scheduler-placement-start.ts）；不注入 = 只能放本机，auto 即 local，peer:<名> 一律拒 */
   placement?(db: Database, q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}`; card?: string }): Promise<StartPlacement>;
   /** 私仓进池开关（card-repo.ts）；不注入 = 读 statePath("private-pool.json") */
@@ -98,6 +100,8 @@ export interface StartPlan {
   workflow?: { template: WorkflowTemplate; version: number };
   /** 私仓卡（开关 on、fileGlobs 带 repo:）的 owner/name：不管放本机还是 peer 都写进 extra.repo（i28-SECPOOL2） */
   privateRepo?: string;
+  /** scheduler.json localMerge 项目：没有 origin，建 / 补建 worktree 都不 fetch（scheduler-local-author.ts 按它跳过） */
+  localMerge?: true;
 }
 
 export type Preflight = { ok: true; plan: StartPlan } | { ok: true; already: { taskId: string; key: string } } | { ok: false; code: string; error: string };
@@ -195,7 +199,9 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (names.includes(`agent-${agentName}`)) return no("conflict", `agent agent-${agentName} 已存在`);
   const twin = canonicalTwinError(`agent-${agentName}`, names);
   if (twin) return no("conflict", twin);
-  const base = args.base ?? "origin/main";
+  // 本地合并项目没有 origin：从本机 main 起，dag-tools-steps.ts 只对 origin/ 起点 fetch，所以也不 fetch
+  const local = env.localMerge?.(f.project) === true;
+  const base = args.base ?? (local ? "main" : "origin/main");
   const branch = args.branch ?? `feat/${low}`;
   if (!REF.test(base) || !REF.test(branch)) return no("invalid", "base / branch 只能是普通分支名（字母数字 . _ / -，不含 .. 与 //）");
   const priv = await privateRepoDir(env, f.project, node.fileGlobs, args.repo);
@@ -220,7 +226,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const title = args.title ?? node.oneLine;
   const item = args.item ?? (getItem(env.db, f.project, featureSlug(f, storedOrigin(env.db))) ? featureSlug(f, storedOrigin(env.db)) : null);
   const promptPath = join(env.ledgerDir, "reviews", `${taskId}-exec-prompt.md`);
-  const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir, template: template as WorkflowTemplate };
+  const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir, template: template as WorkflowTemplate,
+    ...(local ? { localMerge: true } : {}) };
   const promptText = renderExecPrompt(vars, env.template() ?? undefined);
   return {
     ok: true,
@@ -231,7 +238,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       ...(want === "local" ? { localOnly: true } : {}),
       peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason, reservation: placed.reservation } : null,
       workflow: { template: template as WorkflowTemplate, version: LATEST_TEMPLATE_VERSION[template as WorkflowTemplate] },
-      ...(priv ? { privateRepo: priv.repo } : {}),
+      ...(priv ? { privateRepo: priv.repo } : {}), ...(local ? { localMerge: true as const } : {}),
     },
   };
 }

@@ -269,7 +269,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "memory-vectors.ts": "sql=1 stmt=2 fs=2",
     "order-deliver-pr.ts": "vcs=2",
     "order-deliver-scope-git.ts": "proc=2",
-    "order-deliver.ts": "ledger=1 vcs=1",
+    "order-deliver.ts": "ledger=1 vcs=2", // ONB-1: vcs = origin ls-remote, or the local branch rev-parse for a localMerge project
     "order-ledger-exit.ts": "ledger=2",
     "order-mark.ts": "ledger=1",
     // security-pool fs=3: only setSecurityPoolMode writes (the owner's `security-pool` command); the pass only reads the switch
