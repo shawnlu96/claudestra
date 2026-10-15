@@ -5,6 +5,7 @@
  * merge queue sends a union result that is out of order back to fix (KEYSORT1). tests/recovery-keys.test.ts checks the order.
  */
 export const RECOVERY_KEYS = [
+  "askDefaultAll",
   "askReminder",
   "audit",
   "auditEscalate",

@@ -22,7 +22,7 @@ import { REVIEW_TICKET_PURPOSE, type TicketSigner } from "./pool-review-proof-ti
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import { commitLendResult, payloadSha, readReportIn } from "./lend-submit.js";
 import { refuse, type OrderToolResult } from "./order-tool-route.js";
-import { askScopeExtra, parseAskWire, parseVerdictWire } from "./order-wire.js";
+import { askScopeExtra, lenientAskFields, parseAskWire, parseVerdictWire } from "./order-wire.js";
 import { isE2eResponse } from "./peer-e2e-client.js";
 import type { HttpPeer } from "./peers.js";
 import { isLendWorkerName } from "./runtimes/clean-env.js";
@@ -168,8 +168,10 @@ async function askPeer(row: LendRow, args: unknown, d: LendToolDeps): Promise<Or
   const noAsk = refuse("peer_no_ask", "对方（发起方）的版本不支持 ask，问题没有发出去：把疑问写进报告，或按规格自行判断");
   if (peerProto(d.db!, row.peer) !== 2) return noAsk;
   if (row.leaseGen === null) return refuse("not_started", `${row.orderId} 还没有租约代数，不能提问`);
-  const r = await lendRequest(d.call, row.peer, "ask", { orderId: row.orderId, gen: row.leaseGen, question: w.value.question, options: w.value.options,
-    ...askScopeExtra(w.value) }); // files / reason 只在有值时发（旧版发起方不认）
+  const base = { orderId: row.orderId, gen: row.leaseGen, question: w.value.question, options: w.value.options, ...askScopeExtra(w.value) }; // files / reason 只在有值时发（旧版发起方不认）
+  const asked = lenientAskFields({ ...w.value }); // ASKDEF1 class / default / risk 同样只在有值时发
+  let r = await lendRequest(d.call, row.peer, "ask", { ...base, ...asked });
+  if (!r.ok && r.code === "invalid" && Object.keys(asked).length) r = await lendRequest(d.call, row.peer, "ask", base); // 旧版发起方不认这三项：去掉重发
   if (notV2(r)) return noAsk;
   if (r.ok) return { ok: true, askId: r.value.askId };
   const unknown = r.code === "transport" || r.code === "bad_response";
