@@ -116,7 +116,7 @@ test("超过 6 个项目时模型照样全给（折叠在界面上做）；新�
   const lots = Array.from({ length: PROJECT_FOLD + 3 }, (_, i): ProjectMeta => ({ id: `p${i}`, name: `项目 ${i}`, dirs: [] }));
   expect(view({ projects: lots }).projects).toHaveLength(PROJECT_FOLD + 3);
   const t = nowTr("zh", zh);
-  const words = ["现在", "{n} 个 agent 在干活", "{n} 件等你", "等你的事", "在干活", "各项目", "没有等你的事", "现在没有 agent 在干活", "还有 {n} 件", "来自 {p}",
+  const words = ["今天", "{n} 个 agent 在干活", "{n} 件等你", "等你的事", "在干活", "各项目", "没有等你的事", "现在没有 agent 在干活", "还有 {n} 件", "来自 {p}",
     "在干活 {n} 个 agent", "待你处理 {n} 件", "展开全部（共 {n} 个）"].map((w) => t(w, { n: 2, p: "x" }));
   for (const w of words) for (const bad of [...BANNED_OWNER_WORDS, "spec", "parked", "可执行", "就绪可开"]) expect({ w, bad, hit: w.includes(bad) }).toEqual({ w, bad, hit: false });
   // 件数 / 个数写明单位，不和协作视图按卡数的「在干活 a · 在等 b」同形
