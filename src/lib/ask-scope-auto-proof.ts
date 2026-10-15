@@ -24,28 +24,34 @@ export function codeLines(text: string): Set<number> {
   return result;
 }
 
-interface DefinitionIndex { keys: Set<string>; commands: Set<string> }
+interface DefinitionIndex { keys: Set<string>; baseKeys: Set<string>; commands: Set<string> }
 const indexes = new WeakMap<ScopeProof, DefinitionIndex>();
+
+/** Normalize complete declarations first: a newline after a literal may continue an expression instead of ending it. */
+function stringKeys(text: string): string[] {
+  const normalized = scopeParser.transformSync(text), code = codeLines(normalized);
+  return normalized.split("\n").flatMap((line, i) => {
+    const match = code.has(i) ? /^export const [\w$]+ = ("(?:\\.|[^"\\])*");$/.exec(line) : null;
+    return match ? [JSON.parse(match[1]!) as string] : [];
+  });
+}
 
 /** Index each scoped source once; registry size must not multiply full-source parsing cost. */
 function definitions(proof: ScopeProof): DefinitionIndex {
   const prior = indexes.get(proof);
   if (prior) return prior;
-  const index: DefinitionIndex = { keys: new Set(), commands: new Set() };
+  const index: DefinitionIndex = { keys: new Set(), baseKeys: new Set(), commands: new Set() };
   const oldCommands = new Set<string>();
   const versions = [...proof.sources].map(([path, text]) => ({ path, text, old: false }))
     .concat([...(proof.baseSources ?? [])].map(([path, text]) => ({ path, text, old: true })));
   for (const { path, text, old } of versions) {
     if (!scopeMatches(path, proof.globs) || !validModule(text)) continue;
     const code = codeLines(text), lines = stripComments(text).split("\n");
-    const exported = new Set(scopeParser.scan(text).exports);
-    for (const name of exported) index.keys.add(name);
+    for (const key of stringKeys(text)) (old ? index.baseKeys : index.keys).add(key);
     lines.forEach((line, i) => {
       if (!code.has(i)) return;
       const command = /^\s*["']([\w-]+)["']\s*:\s*(?:\{|[A-Za-z_$])/.exec(line);
       if (command) (old ? oldCommands : index.commands).add(command[1]!);
-      const key = /^\s*export const ([\w$]+)(?:\s*:\s*string)?\s*=\s*["']([^"']+)["']\s*(?:as const)?\s*;?\s*$/.exec(line);
-      if (key && exported.has(key[1]!)) index.keys.add(key[2]!);
     });
   }
   for (const name of oldCommands) index.commands.delete(name);
@@ -53,7 +59,8 @@ function definitions(proof: ScopeProof): DefinitionIndex {
   return index;
 }
 
-export const ownDefinition = (name: string, proof: ScopeProof, command = false): boolean => definitions(proof)[command ? "commands" : "keys"].has(name);
+export const ownDefinition = (name: string, proof: ScopeProof, command = false, old = false): boolean =>
+  definitions(proof)[command ? "commands" : old ? "baseKeys" : "keys"].has(name);
 export const escapeRx = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Additive subsequence, byte-for-byte: a changed/deleted old line cannot masquerade as an insertion. */
