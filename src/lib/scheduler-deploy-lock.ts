@@ -1,6 +1,6 @@
 /** Machine lock adapter. Deferred is a scheduling outcome: no failed step and no deploy-journal transition. */
 import { dirname, join } from "node:path";
-import { acquireDeployLock, deployLockPath, readDeployLock, waitingDeployLabels } from "./pm-deploy-lock.js";
+import { acquireDeployLock, deployLockPath, holderLiveness, readDeployLock, waitingDeployLabels } from "./pm-deploy-lock.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { recoveryPolicy, RECOVERY_POLICY_PATH, type RecoveryMode } from "./recovery-policy.js";
 import { LedgerReader } from "./ledger-read.js";
@@ -60,9 +60,10 @@ export async function schedulerMachineLock(job: DeployJob, request: string, deps
     return held.status === "ok" && held.record.label !== "scheduler-deploy" ? held.record.label : waiting;
   };
   if (mode === "observe") {
+    // Same verdict as acquireDeployLock(waitMs 0), read-only: missing / dead holder = acquire (on would reap); corrupt / live / unknown = defer.
     const held = readDeployLock(path);
-    if (held.status === "ok") observe("defer", held.record.label);
-    else observe("acquire", "scheduler-deploy");
+    if (held.status === "missing" || held.status === "ok" && holderLiveness(held.record) === "dead") observe("acquire", "scheduler-deploy");
+    else observe("defer", held.status === "ok" ? held.record.label : "unknown");
   }
   const blocked = result && result.kind !== "acquired"
     ? deferredOutcome(result.kind === "timeout" ? result.holder?.label ?? "unknown" : "unknown") : null;
