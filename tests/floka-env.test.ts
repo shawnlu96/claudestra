@@ -338,11 +338,16 @@ describe("[验收线 2] 隔离闸认两套生产根与端口，不看档位", ()
 
 describe("[验收线 3] Node/Jiti 加载、运行中改 env 生效", () => {
   test("state-dir.ts 与 floka-env/ 只依赖 node: 内置", () => {
-    const files = [join(LIB, "state-dir.ts"), ...readdirSync(join(LIB, "floka-env")).map((f) => join(LIB, "floka-env", f))];
+    const files = [join(LIB, "state-dir.ts"), ...readdirSync(join(LIB, "floka-env")).map((f) => join(LIB, "floka-env", f)),
+      join(LIB, "floka-config/default-root.ts"), join(LIB, "floka-config/values.ts")];
+    const allowed = new Set(files.map(f => resolve(f)));
+    // Check every node in the closed graph: allowing the new resolver must not admit application imports.
     for (const f of files) {
       for (const m of readFileSync(f, "utf8").matchAll(/\bfrom\s+"([^"]+)"/g)) {
         const spec = m[1]!;
-        expect(spec.startsWith("node:") || /^\.\/(floka-env\/)?[\w-]+\.(ts|js)$/.test(spec)).toBe(true);
+        if (spec.startsWith("node:")) continue;
+        expect(spec.startsWith(".")).toBe(true);
+        expect(allowed.has(resolve(f, "..", spec.replace(/\.js$/, ".ts")))).toBe(true);
       }
     }
   });

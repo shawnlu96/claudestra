@@ -6,9 +6,13 @@ import { describe, test, expect } from "bun:test";
 import {
   codexDisplayDefaults,
   parseCodexCatalog,
-  parseCodexConfigDefaults,
+  readCodexConfigDefaults,
   validateCodexChoice,
 } from "../src/lib/codex-catalog.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readCodexDefaultsToml } from "../src/lib/codex-config-write.js";
 import { codexLineToClaudeShape } from "../src/lib/codex-session.js";
 import { scanSessionTail } from "../src/lib/session-tail.js";
 import { displayModelEffort } from "../src/lib/display-model.js";
@@ -40,11 +44,33 @@ describe("parseCodexCatalog", () => {
   });
 });
 
-describe("parseCodexConfigDefaults", () => {
-  test("只读第一个 [表] 之前的顶层键", () => {
-    const toml = 'model = "gpt-5.5"\nmodel_reasoning_effort = "high"\n\n[profiles.x]\nmodel = "o3"\n';
-    expect(parseCodexConfigDefaults(toml)).toEqual({ model: "gpt-5.5", effort: "high" });
-    expect(parseCodexConfigDefaults('notify = ["a"]\n[features]\njs_repl = false\n')).toEqual({ model: null, effort: null });
+describe("readCodexConfigDefaults：和设置页同一个解析器（CXG-1-r1 P2 两个读取器不一致）", () => {
+  const readVia = (toml: string) => {
+    const home = mkdtempSync(join(tmpdir(), "codex-cfg-"));
+    try {
+      mkdirSync(join(home, ".codex"));
+      writeFileSync(join(home, ".codex", "config.toml"), toml);
+      return readCodexConfigDefaults(home);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
+  test.each([
+    ["基本：只读第一个 [表] 之前", 'model = "gpt-5.5"\nmodel_reasoning_effort = "high"\n\n[profiles.x]\nmodel = "o3"\n', { model: "gpt-5.5", effort: "high" }],
+    ["没写", 'notify = ["a"]\n[features]\njs_repl = false\n', { model: null, effort: null }],
+    ["单引号字符串", "model = 'gpt-5.5-mini'\n", { model: "gpt-5.5-mini", effort: null }],
+    ["带转义的引号键", '"mod\\u0065l" = "gpt-x"\n"model_reasoning_effort" = "high"\n', { model: "gpt-x", effort: "high" }],
+    ["值里有转义引号", 'model = "a\\"b"\n', { model: 'a"b', effort: null }],
+    ["多行字符串里以 [ 开头的行不算表头", 'notes = """\n[fake]\n"""\nmodel = "gpt-m"\n', { model: "gpt-m", effort: null }],
+    ["多行字符串值", 'model = """\ngpt-5.5-mini"""\n', { model: "gpt-5.5-mini", effort: null }],
+    ["[projects] 表之后的同名键不算顶层", 'model = "top"\n[projects]\nmodel = "inner"\nmodel_reasoning_effort = "low"\n', { model: "top", effort: null }],
+  ])("%s", (_name, toml, want) => {
+    expect(readVia(toml)).toEqual(want);
+    expect(readVia(toml)).toEqual(readCodexDefaultsToml(toml));
+  });
+  test("值不是字符串：设置页报 unsupported，catalog 当没写（显示回落到目录）", () => {
+    expect(() => readCodexDefaultsToml("model_reasoning_effort = 3\n")).toThrow();
+    expect(readVia("model_reasoning_effort = 3\n")).toEqual({ model: null, effort: null });
   });
 });
 

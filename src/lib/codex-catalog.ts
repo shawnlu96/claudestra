@@ -10,6 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { readCodexDefaultsToml } from "./codex-config-write.js";
 import { CODEX_EFFORT_LEVELS, resolveCodexBinary } from "./codex-launch.js";
 import { defaultRunner, type Runner } from "./codex-thread.js";
 import { hasControlChar } from "./flag-like.js";
@@ -39,17 +40,6 @@ export function parseCodexCatalog(raw: unknown): CodexModel[] {
       defaultEffort: typeof m.default_reasoning_level === "string" ? m.default_reasoning_level : null,
       contextWindow: typeof m.context_window === "number" ? m.context_window : null,
     }));
-}
-
-/** config.toml 顶层（第一个 [表] 之前）的 model / model_reasoning_effort；没写就是 null */
-export function parseCodexConfigDefaults(toml: string): { model: string | null; effort: string | null } {
-  const out = { model: null as string | null, effort: null as string | null };
-  for (const line of toml.split("\n")) {
-    if (/^\s*\[/.test(line)) break;
-    const m = /^\s*(model|model_reasoning_effort)\s*=\s*"([^"]*)"/.exec(line);
-    if (m && m[2]) out[m[1] === "model" ? "model" : "effort"] = m[2];
-  }
-  return out;
 }
 
 /** 会话里没写模型 / 档位时显示什么：config.toml 写了就用它，否则目录排第一的模型和该模型的默认档 */
@@ -114,11 +104,12 @@ export function cachedCodexCatalog(): CodexModel[] | null {
   return cache?.models ?? null;
 }
 
+/** config.toml 顶层的 model / model_reasoning_effort；和设置页同一个解析器（codex-config-write.ts），两边读出来一致 */
 export function readCodexConfigDefaults(home: string = homedir()): { model: string | null; effort: string | null } {
   const p = join(home, ".codex", "config.toml");
   try {
-    return existsSync(p) ? parseCodexConfigDefaults(readFileSync(p, "utf8")) : { model: null, effort: null };
+    return existsSync(p) ? readCodexDefaultsToml(readFileSync(p, "utf8")) : { model: null, effort: null };
   } catch {
-    return { model: null, effort: null }; // 读不到就当没写默认值，显示回落到目录
+    return { model: null, effort: null }; // 读不到或值认不出（设置页会报 unsupported）就当没写，显示回落到目录
   }
 }
