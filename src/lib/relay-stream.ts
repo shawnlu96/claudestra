@@ -6,6 +6,7 @@
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import { LIMITS, type Headers } from "./relay-protocol.js";
+import { BROWSER_FAMILIES, BROWSER_NAMES } from "./floka-browser-protocol/names.js";
 
 /** hop-by-hop 与由传输层重算的头，任何方向都不透传 */
 const HOP = new Set(["connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "content-length"]);
@@ -21,12 +22,14 @@ export function forwardHeaders(h: Headers, drop: (k: string) => boolean = () => 
   return out;
 }
 
+const DEVICE_HEADER_NAMES: ReadonlySet<string> = new Set(BROWSER_FAMILIES.map((f) => BROWSER_NAMES[f].deviceHeader));
+
 /**
- * peer 路径要额外去掉的头（§4.1）。cookie 与设备头（lib/devices.ts DEVICE_HEADER）也去：peer 只凭 Bearer + 签名进门，
- * 帧里带着浏览器凭据也不能在本机换成设备身份
+ * peer 路径要额外去掉的头（§4.1）。cookie 与设备头（两族，lib/floka-browser-protocol/names.ts）也去：peer 只凭 Bearer + 签名进门，
+ * 帧里带着浏览器凭据也不能在本机换成设备身份；新族不论 rename 档位都剥，认证认新名之前清洗已经在剥
  */
 export const dropForPeer = (k: string): boolean =>
-  k === "host" || k === "cookie" || k === "x-cstra-device" || k.startsWith("x-forwarded-") || k.startsWith("x-claudestra-relay-");
+  k === "host" || k === "cookie" || DEVICE_HEADER_NAMES.has(k) || k.startsWith("x-forwarded-") || k.startsWith("x-claudestra-relay-");
 
 /** set-cookie 是唯一不能用逗号合并的多值头（Expires 里就有逗号）：帧里多条以 \n 连接，recordToHeaders 再拆回去 */
 export const SET_COOKIE_SEP = "\n";
