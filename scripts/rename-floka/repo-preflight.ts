@@ -24,9 +24,7 @@ function git(dir: string, args: string[]): { code: number; out: string; err: str
   return { code: p.exitCode ?? 1, out: p.stdout.toString(), err: p.stderr.toString().trim() };
 }
 
-const ereEscape = (s: string): string => s.replace(/[.[\]{}()\\*+?^$|]/g, "\\$&");
-
-/** 真实 RepoGit:只读本仓(--local)配置原值,不经 insteadOf;写只有 `git remote set-url <name> <新> ^原值$` */
+/** 真实 RepoGit:只读本仓(--local)配置原值,不经 insteadOf;写只有按原值精确替换的 `git config --fixed-value --replace-all` */
 export function gitRepoPort(dir: string): RepoGit {
   const list = async (): Promise<RemoteEntry[]> => {
     const r = git(dir, ["config", "--local", "-z", "--get-regexp", "^remote\\..*\\.(url|pushurl)$"]);
@@ -51,8 +49,9 @@ export function gitRepoPort(dir: string): RepoGit {
       const e = (await list()).find((x) => x.name === remote);
       const vals = e ? (key === "url" ? e.urls : e.pushUrls) : [];
       if (vals.length !== 1 || vals[0] !== from) throw new Error(`${remote}.${key} 当前值 ${JSON.stringify(vals)} 不是 ${JSON.stringify(from)},不改`);
-      const r = git(dir, ["remote", "set-url", ...(key === "pushurl" ? ["--push"] : []), remote, to, `^${ereEscape(from)}$`]);
-      if (r.code !== 0) throw new Error(`git remote set-url 失败(exit ${r.code}):${r.err}`);
+      // 不用 `git remote set-url <新> <旧>`:它拿 insteadOf 改写后的地址去比,配了 insteadOf 的机器上比不中原值
+      const r = git(dir, ["config", "--local", "--fixed-value", "--replace-all", `remote.${remote}.${key}`, to, from]);
+      if (r.code !== 0) throw new Error(`git config 改 ${remote}.${key} 失败(exit ${r.code}):${r.err}`);
     },
   };
 }

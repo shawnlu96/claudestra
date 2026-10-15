@@ -13,8 +13,6 @@ import { fileRecordStore, gitRepoPort, runRepoCli } from "../scripts/rename-flok
 // 全程只在临时 Git 仓里:不连 GitHub、不连网络。clone 来自本地源仓,curl / fetch 都是 fake。
 const ROOT = join(import.meta.dir, "..");
 const ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
-process.env.GIT_CONFIG_GLOBAL = "/dev/null";
-process.env.GIT_CONFIG_NOSYSTEM = "1";
 
 const roots: string[] = [];
 afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
