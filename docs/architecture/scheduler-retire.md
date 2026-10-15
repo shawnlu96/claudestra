@@ -91,7 +91,7 @@ for `lend/work/<order>`.
   controlling terminal, or a running `com.claudestra.*` launchd job (bridge / launcher / cron / scheduler), is dropped before
   any pick. So is a process whose `ps` facts are missing or whose command changed (pid reused). If `ps` or `launchctl` cannot be
   read, nothing is handed out that pass. Every signal and every observe push is one row in `state/worktree-orphan-actions.json`
-  (last 1000): pid, command basename, cwd, age, cumulative CPU, signal, result. Tests in `tests/worktree-orphan-guard.test.ts`.
+  (last 500, tmp+rename via `writeJsonAtomicSync`): pid, command basename, cwd, age, cumulative CPU, signal, result. Tests in `tests/worktree-orphan-guard.test.ts`.
 
 ## When PM is told
 

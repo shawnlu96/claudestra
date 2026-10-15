@@ -26,7 +26,7 @@ export type ActionSink = (rows: ActionRow[]) => void;
 /** card-proc-reap 的 observe 台账形状（只用到 add 里的 pid / card / why） */
 export interface Observed { has(key: string): boolean; add(rows: { pid: number; card: string; why: string }[]): void }
 
-const ACTION_CAP = 1000;
+const ACTION_CAP = 500;
 const DAEMON_LABEL = /^com\.claudestra\./;
 
 /** ps 的 time（macOS mm:ss.cc，Linux [dd-]hh:mm:ss）→ 秒；解析不了 = null */
