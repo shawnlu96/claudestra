@@ -22,7 +22,7 @@
 
 tick（`cardsTick`）在开关非 off 时也扫 manual peer 卡，但只做一件事：GitHub 上的 head 与卡不同、稳定、本轮已有结论，且结论通过（或本轮是本流程在 manual 下登记的）时，取回新 head 后调 `ledger peer-pr-observe`（已登记的调度命令；manual 卡走新分支）。事务里全部重核：
 
-- 卡是 peer 卡、manual、在 review / fix / merge；hold、卡暂停、队列冻结、安全留证、feature 暂停、待答审批任一在就不动；
+- 卡是 peer 卡、manual、在 review / fix / merge；hold、卡暂停、队列冻结、安全留证、待答审批任一在就不动（peer 卡没有 feature）；
 - 新 head 是纯合 main（`mainMergeCarry` 证明）→ 不动，交 main-carry / CARRY2；
 - 结论不是通过：只有本流程登记的轮才接着走，连续 P1 轮数到 maxRounds 就停（返回 top，tick 通知 PM 一次）；
 - merge 阶段：未结的人工合并请求一律撤销（`manual_merge_revoke`，`byScheduler: peerPrHeadReview`），已占槽且在 ready / await_ci 的运行同一事务 `cancelMergeRun`；运行在 updating / merging / unknown，或卡上有别的未结意图 → 整笔不动，交给合并 driver；
@@ -30,7 +30,7 @@ tick（`cardsTick`）在开关非 off 时也扫 manual peer 卡，但只做一�
 
 ## 3. 只审增量
 
-登记事件 `op: peer_pr_head_review`：`{cause: "author_push", oldHead, newHead, priorReviewSeq, round, specRev, scope, why, flow}`。`review-converge-order.ts convergeOrderLines` 遇到本轮的登记，工单范围写成 `git diff old..new`（作者新改动）+ 上轮 P1 / P2 定向复验，不依赖 SCOPE_ROUND，也不套合 main 重审。新 head 不是后继（force-push）、规格变了、增量对象缺失：`scope: full`，工单写明原因。自动卡（`observeWrite`）在 on 下同样写登记。
+登记事件（note，peer 看不到；去重键 卡 + 轮次 + 新 head）`op: peer_pr_head_review`：`{cause: "author_push", oldHead, newHead, priorReviewSeq, round, specRev, scope, why, flow}`。`review-converge-order.ts convergeOrderLines` 遇到本轮的登记，工单范围写成 `git diff old..new`（作者新改动）+ 上轮 P1 / P2 定向复验，不依赖 SCOPE_ROUND，也不套合 main 重审。新 head 不是后继（force-push）、规格变了、增量对象缺失：`scope: full`，工单写明原因。自动卡（`observeWrite`）在 on 下同样写登记。
 
 ## 4. 通过后自动重新排合并（`headSettleWrite` + `manual-merge-queue.ts requeueByScheduler`）
 
