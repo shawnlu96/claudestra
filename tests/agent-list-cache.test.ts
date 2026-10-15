@@ -7,6 +7,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createListCache, LIST_CACHE_TTL_MS, LIST_STALE_FALLBACK_MS, registryVersion } from "../src/lib/agent-list-cache.ts";
+import { REPO_ROOT } from "../src/lib/repo-root.ts";
+import { testChildEnv } from "./test-env.ts";
 
 const ok = (n: number) => ({ ok: true, agents: [{ name: `agent-${n}` }] });
 
@@ -138,4 +140,30 @@ describe("registryVersion", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("不让进程常驻（PR #1614 CI 超时排查）", () => {
+  test("import 缓存 + management 链、跑一次 route 预算后，子进程 1 秒内自然退出", async () => {
+    // 计时从 import 完成算起：只量常驻句柄（定时器 / watch），不量 CI 上 bun 冷启动的快慢
+    const script = `await import("${REPO_ROOT}/src/lib/agent-list-cache.ts");
+const m = await import("${REPO_ROOT}/src/bridge/agent-lookup.ts");
+await import("${REPO_ROOT}/src/bridge/management.ts");
+await m.listForRoute(async () => ({ ok: true, agents: [] }));
+console.log("loaded");`;
+    const p = Bun.spawn([process.execPath, "--no-env-file", "-e", script], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe", env: testChildEnv() });
+    const reader = p.stdout.getReader();
+    let out = "";
+    while (!out.includes("loaded")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += new TextDecoder().decode(value);
+    }
+    expect(out).toContain("loaded");
+    const t0 = performance.now();
+    const killer = setTimeout(() => p.kill(), 5_000);
+    const code = await p.exited;
+    clearTimeout(killer);
+    expect(performance.now() - t0).toBeLessThan(1_000);
+    expect(code).toBe(0);
+  }, 30_000);
 });
