@@ -17,6 +17,7 @@ import {
 import type { Stage2Transport } from "./shared-ledger-v2-transport.js";
 import { execOperationId } from "./shared-ledger-exec-client.js";
 import type { SharedLedgerMode } from "./shared-ledger-mode.js";
+import { PENDING_AUTHORIZATION, readFrozenManifest, writeFrozenManifest } from "./shared-ledger-v2-migration-ask-frozen.js";
 import {
   assertDrillRoot, batchDir, fileMember, MigrationRefused, sha256File, underRoot, writeRootJson,
   type LocalInventory, type MemberPort, type MigrationFinding, type MigrationMemberSpec,
@@ -55,7 +56,8 @@ export interface MigrationPlan {
   reviews?: Record<string, { reportPath: string; digest: string }>;
 }
 export interface MigrationOptions {
-  root: string; plan: MigrationPlan; center: MigrationCenter; mode: "dry-run" | "commit";
+  /** prepare = the same local checks, then freeze the manifest once (no center call); dry-run / commit send only that manifest. */
+  root: string; plan: MigrationPlan; center: MigrationCenter; mode: "prepare" | "dry-run" | "commit";
   /** Defaults to `fileMember` over `plan.members`; a drill may wrap a port to inject a member failure. */
   members?: MemberPort[]; now?: () => number; pauseWaitMs?: number;
 }
@@ -63,6 +65,7 @@ type Step = "write_gate" | "switch" | "lease" | "local_mode";
 type MemberAck = { label: string; instanceId: string; gate: "confirmed" | "failed" | null; execution: "confirmed" | "failed" | null };
 export type MigrationOutcome =
   | { status: "refused"; findings: MigrationFinding[]; report: string }
+  | { status: "prepared"; manifest: V2MigrationManifest; report: string }
   | { status: "dry-run"; manifestDigest: string; batch: unknown; report: string }
   | { status: "switched"; epochs: Record<string, number>; leases: string[]; members: MemberAck[]; report: string }
   | { status: "frozen"; step: Step; batch: unknown; receipts: unknown[]; members: MemberAck[]; report: string };
@@ -149,13 +152,31 @@ function migrationFindings(root: string, plan: MigrationPlan, group: MemberState
 }
 
 /** Fills evidence / digest and lets the X0 parser re-check every relation (mappings, spec copies, no leases, no unknowns). */
-function buildManifest(plan: MigrationPlan, imported: boolean, frozenAt: number): V2MigrationManifest {
-  const body = { ...structuredClone(plan.manifest), batchId: plan.batchId, featureIds: [...plan.featureIds], frozenAt,
+function buildManifest(plan: MigrationPlan, imported: boolean, frozenAt: number, authorizationAskId: string): V2MigrationManifest {
+  const body = { ...structuredClone(plan.manifest), authorizationAskId, batchId: plan.batchId, featureIds: [...plan.featureIds], frozenAt,
     evidence: { dispatchPaused: true, workersSettled: true, unknownReconciled: true, specsComplete: true, reviewsComplete: true,
       oldOrders: imported ? "imported_reconciled" : "settled", localWriteGateInstalled: true, leasesMustBeAcquired: true },
     manifestDigest: "" } as V2MigrationManifest;
   body.manifestDigest = v2ManifestDigest(body);
   return parseMigrationManifest(body);
+}
+
+/** prepare freezes once (frozenAt kept while the plan is unchanged; the ask id comes only from the center). dry-run / commit
+ * read the frozen manifest and refuse, before any center call, when it is missing, unapproved or differs from the plan in
+ * anything but frozenAt / authorizationAskId / manifestDigest. A fresh frozenAt per run would void the owner's approval. */
+function frozenFor(root: string, plan: MigrationPlan, imported: boolean, mode: MigrationOptions["mode"], now: () => number): V2MigrationManifest | MigrationFinding {
+  const refused = (code: string, detail: string): MigrationFinding => ({ code, item: plan.batchId, detail });
+  let frozen: V2MigrationManifest | null;
+  try { frozen = readFrozenManifest(root, plan.batchId); } catch (e) {
+    if (mode !== "prepare") return refused("frozen_manifest_invalid", `冻结清单读不出（${errCode(e)}）：重跑 ledger shared-exec migration-ask`);
+    frozen = null;
+  }
+  const same = (f: V2MigrationManifest) => buildManifest(plan, imported, f.frozenAt, f.authorizationAskId).manifestDigest === f.manifestDigest;
+  if (mode === "prepare") return buildManifest(plan, imported, frozen && same(frozen) ? frozen.frozenAt : now(), PENDING_AUTHORIZATION);
+  if (!frozen) return refused("frozen_manifest_missing", "没有冻结清单：先跑 ledger shared-exec migration-ask 冻结清单并建迁移授权 ask");
+  if (!same(frozen)) return refused("frozen_manifest_mismatch", "plan 与冻结清单不符：重跑 ledger shared-exec migration-ask 重新冻结并重新批准");
+  if (frozen.authorizationAskId === PENDING_AUTHORIZATION) return refused("frozen_manifest_unauthorized", "冻结清单还没有中心授权 ask：重跑 migration-ask");
+  return frozen;
 }
 
 function memberPorts(root: string, specs: MigrationMemberSpec[] | undefined): MemberPort[] | MigrationFinding {
@@ -214,10 +235,12 @@ async function migrateGroup(root: string, opts: MigrationOptions, report: Record
     Object.assign(report, { dispatchPaused: true, reconciled: plan.reconciled ?? [] });
     const findings = migrationFindings(root, plan, group);
     if (findings.length) return done({ status: "refused", findings });
-    let manifest: V2MigrationManifest;
-    try { manifest = buildManifest(plan, Object.keys(plan.orders ?? {}).length > 0, now()); }
+    let manifest: V2MigrationManifest | MigrationFinding;
+    try { manifest = frozenFor(root, plan, Object.keys(plan.orders ?? {}).length > 0, opts.mode, now); }
     catch (e) { return done({ status: "refused", findings: [{ code: "manifest_invalid", item: plan.batchId, detail: errCode(e) }] }); }
+    if (!("manifestDigest" in manifest)) return done({ status: "refused", findings: [manifest] });
     report.manifestDigest = manifest.manifestDigest;
+    if (opts.mode === "prepare") return done({ status: "prepared", manifest: writeFrozenManifest(root, manifest) });
     if (opts.mode === "dry-run") return await dryRun(opts.center, manifest, done);
     return await commit(root, plan, manifest, opts.center, group, report, done);
   } finally { pause.release(); }

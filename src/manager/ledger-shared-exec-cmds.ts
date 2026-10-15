@@ -6,20 +6,28 @@
  * - receipt <项目> --request <id> --digest <commandDigest> [--operation <id>]：只读查中心回执。
  * - recover <项目> --order <orderId> --kind claim|result [--resubmit]：先查回执、租约、版本；不带 --resubmit 不重交。
  * - observe-log [项目] [--limit n]：observe 档的决定记录。
+ * - migration-ask <项目> --root <演练根> --plan <plan.json> [--expires-in 秒]：PM / owner；冻结清单一次、经中心建迁移授权 ask、
+ *   本机开 owner 的 authorize 卡（peer-MIGASK1，逻辑在 lib/shared-ledger-v2-migration-ask.ts）。
  * There is no entry that writes an execution mode: only X13 does.
  */
+import { openAskFull } from "../lib/ledger-asks.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { STATE_DIR } from "../lib/paths.js";
 import { validAutoShareId } from "../lib/shared-ledger-auto-share-state.js";
 import { readStage2Release, readStage2Switch, writeStage2Release, writeStage2Switch, type Stage2Release, type Stage2Switch } from "../lib/shared-ledger-v2-switch.js";
 import { readStage2ObserveLog, Stage2Wiring } from "../lib/shared-ledger-v2-wiring.js";
+import { migrationCenter, type MigrationPlan } from "../lib/shared-ledger-v2-migration.js";
+import { assertDrillRoot, MigrationRefused, underRoot } from "../lib/shared-ledger-v2-migration-local.js";
+import { createMigrationAsk, migrationAskCard } from "../lib/shared-ledger-v2-migration-ask.js";
+import { readFileSync } from "node:fs";
 import { readJsonStateSync } from "../lib/state-file.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
 const USAGE = "shared-exec switch <项目> [off|observe|on] | release <项目> --kind drill|release --ask <askId> [--expires-at <ms|ISO>] | "
   + "release <项目> --revoke | receipt <项目> --request <id> --digest <commandDigest> [--operation <id>] | "
-  + "recover <项目> --order <orderId> --kind claim|result [--resubmit] | observe-log [项目] [--limit <n>]";
+  + "recover <项目> --order <orderId> --kind claim|result [--resubmit] | observe-log [项目] [--limit <n>] | "
+  + "migration-ask <项目> --root <演练根> --plan <plan.json> [--expires-in <秒>]";
 
 export interface SharedExecCliDeps {
   dir?: string;
@@ -113,9 +121,34 @@ async function recoverCmd(c: LedgerCli, d: SharedExecCliDeps) {
   return { ok: true, project: p, orderId, view, outcome };
 }
 
+/** The plan is read inside the drill root only; the center is this project's own owner credential (Stage2Wiring, as receipt). */
+async function migrationAskCmd(c: LedgerCli, d: SharedExecCliDeps) {
+  const p = project(c.p.pos[2]), rootArg = c.p.flags.root, planArg = c.p.flags.plan;
+  if (!rootArg || !planArg) return invalid();
+  c.requireManager(p, "建迁移授权 ask");
+  const seconds = Number(c.p.flags["expires-in"] ?? 4 * 3600), now = d.now ?? (() => c.deps.now());
+  if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > 7 * 24 * 3600) throw new LedgerError("invalid", "--expires-in 要 60 秒到 7 天");
+  let root: string, plan: MigrationPlan;
+  try { root = assertDrillRoot(rootArg); plan = JSON.parse(readFileSync(underRoot(root, planArg), "utf8")) as MigrationPlan; }
+  catch (e) { throw new LedgerError("invalid", e instanceof MigrationRefused ? e.message : `plan 读不出：${(e as Error).message}`); }
+  const wiring = d.wiring ?? new Stage2Wiring({ dir: d.dir }), scope = wiring.scope(p), transport = wiring.transportFor(p);
+  if (!scope || !transport) throw new LedgerError("conflict", "unavailable: 本机没有该项目的中心凭据或绑定");
+  if (scope.centerId !== plan.centerId || scope.teamId !== plan.manifest?.teamId || scope.projectId !== plan.manifest?.projectId) {
+    throw new LedgerError("invalid", "plan 的中心 / team / project 与本机项目的绑定不符");
+  }
+  const out = await createMigrationAsk({ root, plan, center: migrationCenter(transport), expiresAt: now() + seconds * 1000, now });
+  if (out.status === "refused") {
+    throw new LedgerError("conflict", `迁移授权被拒：${out.findings.map(f => `${f.code}:${f.item} ${f.detail}`).join("；")}（报告 ${out.report}）`);
+  }
+  const card = openAskFull(c.db, migrationAskCard(p, out, c.deps.actor)).ask;
+  return { ok: true, project: p, batchId: out.record.batchId, featureIds: out.record.featureIds, centerAskId: out.record.centerAskId,
+    localAskId: card.id, expiresAt: new Date(out.expiresAt).toISOString(), actionDigest: out.record.actionDigest.slice(0, 12),
+    frozenManifest: out.manifestPath, manifestDigest: out.manifestDigest, report: out.report };
+}
+
 export const SHARED_EXEC_CMDS: Record<string, CommandSpec> = {
   "shared-exec": {
-    valued: ["kind", "ask", "expires-at", "request", "digest", "operation", "order", "limit"],
+    valued: ["kind", "ask", "expires-at", "request", "digest", "operation", "order", "limit", "root", "plan", "expires-in"],
     bools: ["revoke", "resubmit"],
     usage: USAGE,
     run: (c) => sharedExecRun(c),
@@ -128,6 +161,7 @@ export async function sharedExecRun(c: LedgerCli, d: SharedExecCliDeps = {}) {
   if (action === "release") return releaseCmd(c, d);
   if (action === "receipt") return receiptCmd(c, d);
   if (action === "recover") return recoverCmd(c, d);
+  if (action === "migration-ask") return migrationAskCmd(c, d);
   if (action === "observe-log") {
     const limit = c.p.flags.limit ? Number(c.p.flags.limit) : 50;
     if (!Number.isSafeInteger(limit) || limit <= 0) return invalid();
