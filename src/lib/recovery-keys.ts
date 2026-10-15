@@ -74,6 +74,7 @@ export const RECOVERY_KEYS = [
   "peerLeaseRecovery",
   "placementReservations",
   "planGap",
+  "pmRails",
   "poolIdleSkip",
   "privateMergeNarrow",
   "privateStartPlacement",

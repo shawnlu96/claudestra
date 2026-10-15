@@ -93,6 +93,7 @@ One line each; full descriptions in [docs/architecture/features.md](./docs/archi
 - **Context boundaries** — per-project / name-pattern compaction lines: [context-boundary.md](./docs/architecture/context-boundary.md).
 - **Sub-DAG tools** — PM MCP tools `plan_feature` / `rewrite_dag` / `start_node` / `show_dag`: [dag-tools.md](./docs/architecture/dag-tools.md).
 - **Web host shell** — sidebar 「新终端」 opens a persistent host login shell (tmux session `webshell`, master-level terminal grant): [features.md](./docs/architecture/features.md).
+- **PM intervention rails** — PM / master writes on auto cards get `intervention` marks + owner pushes; the limits left unfixed: [pm-rails.md](./docs/architecture/pm-rails.md).
 
 ## Security posture
 

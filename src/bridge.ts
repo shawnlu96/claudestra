@@ -3214,6 +3214,7 @@ void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处�
 }));
 void import("./bridge/fleet/service.js").then((m) => m.initFleet({ clients, deliver, controlChannelId: CONTROL_CHANNEL_ID })); // 批量管理：LP 状态轮询 + fleet 动作（bridge/fleet/）
 void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource, runManager })); // 台账巡检
+void import("./bridge/pm-rails-service.js").then((m) => m.startPmRails({ runManager })); // 人工干预推 owner（PMR-2）
 void import("./bridge/bg-killed-notice.js").then((m) => m.initBgKilledNotice({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource })); // 后台任务被杀提醒执行者（BGW-1）
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});

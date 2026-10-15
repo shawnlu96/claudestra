@@ -17,6 +17,7 @@ import type { ProposeOpts } from "./team-up.js";
 import type { ParsedArgs } from "./ledger-identity.js";
 import type { LendCliDeps } from "./ledger-lend-cmds.js";
 import type { Gh } from "../lib/lend-fix-reassign-pr.js";
+import type { PmRailsMode } from "../lib/pm-rails.js";
 
 export interface LedgerDeps {
   db: Database;
@@ -57,6 +58,10 @@ export interface LedgerDeps {
   notifyOwner?(text: string): Promise<boolean>;
   /** 出借（T93）的 borrow 名单、通知 PM、结论落盘与回执签名；不给 = 读真实的 lend.json / 实例钥匙（单测注入） */
   lend?: LendCliDeps;
+  /** PMR-2 干预标记 / 推送的开关与状态文件；不给 = 读本机 recovery-policy.json 的 keys.pmRails、statePath("pm-rails.json")（单测注入） */
+  pmRails?: { mode?(project: string): PmRailsMode; statePath?: string };
+  /** start_node 子进程带来的出处（环境变量 START_NODE_ATTEMPT_ENV）；PM 手敲的命令没有，照抄命令文本也带不过去 */
+  startNodeAttempt?: string;
   /** 自动改派交付后关旧 PR 用的 gh（i28-RA1）；不给 = 真跑 gh（单测注入） */
   relayGh?: Gh;
 }

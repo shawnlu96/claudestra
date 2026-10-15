@@ -1,4 +1,5 @@
 import { PRIORITY_READ_COMMANDS } from "./ledger-priority-cmds.js";
+import type { ParsedArgs } from "./ledger-identity.js";
 /**
  * 哪些 manager 调用会改状态 → 要过认主守卫（lib/owner-guard.ts）和命令级写锁（lib/file-lock.ts）。
  *
@@ -71,6 +72,20 @@ export const READER_ONLY_SUBS: ReadonlySet<string> = new Set([...PRIORITY_READ_C
 export const DRY_RUN_READS: ReadonlySet<string> = new Set(["audit", "feature-migrate", "feature-split", "pm-switch", "memory-import"]);
 
 /**
+ * 没有旗标表时（manager 入口的认主守卫）认 --dry-run 开关：在 `--` 之前，且前一个词不是光秃的 --旗标（`--out --dry-run` 里它是 --out 的值）。
+ * 拿不准一律当写：这里判读的，按旗标表解析（isLedgerWrite）也一定是读，反过来不成立。旗标值夹带开关属于不修的上限：docs/architecture/pm-rails.md。
+ */
+function dryRunSwitch(args: readonly string[]): boolean {
+  const end = args.indexOf("--"), head = end < 0 ? args : args.slice(0, end);
+  return head.some((a, i) => a === "--dry-run" && i > 0 && !/^--[a-z0-9-]+$/.test(head[i - 1]));
+}
+
+/** ledger 调用写不写，按执行用的那份解析结果判（ledger.ts realDeps、pm-rails 作用域）；解析不了（命令会报错不执行）退回不看旗标表的判法 */
+export function isLedgerWrite(args: readonly string[], p: ParsedArgs | null): boolean {
+  return p && DRY_RUN_READS.has(args[0] ?? "") ? !p.bools.has("dry-run") : isWriteInvocation("ledger", args);
+}
+
+/**
  * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
  * 不影响台账本身的正确性（整批一个 IMMEDIATE 事务）。其余 ledger 写只写 sqlite，不排在 restart 这类长写后面。
  */
@@ -115,7 +130,7 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
   if (cmd === "ledger" && sub === "scheduler-file-scope") return args.includes("--apply");
   // 巡检默认把结果写进 audit_findings；feature-migrate 不带 --dry-run 就是正式迁移
-  if (cmd === "ledger" && DRY_RUN_READS.has(sub)) return !args.includes("--dry-run");
+  if (cmd === "ledger" && DRY_RUN_READS.has(sub)) return !dryRunSwitch(args);
   if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir|team|dispatcher)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
   return false;
 }

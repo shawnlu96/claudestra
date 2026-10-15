@@ -15,6 +15,7 @@ import { composeRewrite, parseRewriteOps, parseToolNodes, planOverExisting, type
 import { preflightStart, startClaims, type StartArgs, type StartEnv } from "../lib/dag-tools-start.js";
 import { runStart, type StepIO } from "../lib/dag-tools-steps.js";
 import { centerPreflight, centerStartFailed } from "../lib/shared-ledger-center-start.js";
+import { START_NODE_ATTEMPT_ENV } from "../lib/ledger-autostart-grant.js";
 import { isManager } from "../lib/ledger-checks.js";
 import { nodePhase } from "../lib/ledger-dag-rules.js";
 import { dagDiff, dagSnapshot } from "../lib/ledger-dag-view.js";
@@ -41,8 +42,8 @@ import { sharedExecStart, type EntryLocalDeps } from "./shared-ledger-v2-entry-m
 export interface DagToolDeps {
   db(): Database | null;
   modeOf?: EntryLocalDeps["modeOf"];
-  /** 以调用方频道跑 manager（create 要等 agent 起来，给得起更长的超时） */
-  manager(args: string[], channelId: string, timeoutMs?: number): Promise<any>;
+  /** 以调用方频道跑 manager（create 要等 agent 起来，给得起更长的超时）；startAttempt = start_node 本次的出处，只给 ledger 子命令带 */
+  manager(args: string[], channelId: string, timeoutMs?: number, startAttempt?: string): Promise<any>;
   callerProject(agent: string): string | null;
   startEnv(): Omit<StartEnv, "db" | "caller">;
   stepIO(): Omit<StepIO, "db" | "manager" | "attempt">;
@@ -220,7 +221,9 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
     const busy = claim(res);
     if (busy) return refuse("busy", `${busy} 正被另一次 start_node 占用：等它结束，或换 taskId / branch`);
     held.push(...res);
-    const io: StepIO = { ...deps.stepIO(), db: () => deps.db() ?? db, manager: (args, timeoutMs) => deps.manager(args, call.channelId, timeoutMs), attempt: randomBytes(4).toString("hex") };
+    const attempt = randomBytes(4).toString("hex");
+    const io: StepIO = { ...deps.stepIO(), db: () => deps.db() ?? db, attempt,
+      manager: (args, timeoutMs) => deps.manager(args, call.channelId, timeoutMs, args[0] === "ledger" ? attempt : undefined) };
     const out = await runStart(io, pre.plan);
     if (!out.ok) return (await centerStartFailed(f.id, key), out as unknown as OrderToolResult);
     const note = TEMPLATE_NOTE[pre.plan.workflow?.template ?? "code"] ?? "";
@@ -276,8 +279,8 @@ function liveDeps(): DagToolDeps {
   const agents = () => readRegistryAgentsSync();
   return {
     db: ledgerDb,
-    manager: (args, channelId, timeoutMs = 30_000) =>
-      runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: channelId }, timeoutMs }),
+    manager: (args, channelId, timeoutMs = 30_000, startAttempt) => runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH,
+      env: { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: channelId, ...(startAttempt ? { [START_NODE_ATTEMPT_ENV]: startAttempt } : {}) }, timeoutMs }),
     callerProject: (agent) => agents().find((x) => x.name === agent)?.projectId ?? null,
     startEnv: () => ({
       ledgerDir: statePath("ledger"), worktreeRoot: statePath("worktrees"),

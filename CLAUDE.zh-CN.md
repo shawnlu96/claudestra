@@ -89,6 +89,7 @@ master/                大总管指令模板（由 setup.ts 渲染）
 - **上下文边界** — 按项目 / 名字模式的压缩线：[context-boundary.md](./docs/architecture/context-boundary.md)。
 - **子 DAG 工具** — PM 用的 MCP 工具 `plan_feature` / `rewrite_dag` / `start_node` / `show_dag`：[dag-tools.md](./docs/architecture/dag-tools.md)。
 - **网页「新终端」** — 侧栏开持久的宿主登录 shell（tmux session `webshell`，要覆盖 master 的终端授予）：[features.zh-CN.md](./docs/architecture/features.zh-CN.md)。
+- **PM 干预留痕** — 自动卡上 PM / master 的写入打 `intervention` 标记并推 owner；不修的上限：[pm-rails.md](./docs/architecture/pm-rails.md)。
 
 ## 安全姿态
 
