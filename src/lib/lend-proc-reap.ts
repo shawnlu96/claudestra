@@ -122,7 +122,7 @@ export async function reapOrphans(db: Database, o: ReapOptions & { now: number }
 }
 
 // 本机进程端口（lsof / ps / kill）：效果点登记在本文件（scheduler-v2-skip-effects foreign 组），卡 worktree 回收也从这里取
-async function stdoutOf(argv: string[]): Promise<string> {
+export async function stdoutOf(argv: string[]): Promise<string> {
   const p = Bun.spawn(argv, { stdout: "pipe", stderr: "ignore" });
   const out = await new Response(p.stdout).text();
   await p.exited; // lsof 有进程读不到时退出码 1，输出照样可用

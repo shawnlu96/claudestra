@@ -7,6 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { stdoutOf } from "./lend-proc-reap.js";
 import { statePath } from "./paths.js";
 import type { Proc, ProcPorts, Sig } from "./proc-reap-core.js";
 import { writeJsonAtomicSync } from "./state-file.js";
@@ -47,8 +48,9 @@ export function parseFacts(out: string): Map<number, ProcFacts> {
   return facts;
 }
 
-/** launchctl list（PID<TAB>Status<TAB>Label）里 com.claudestra.* 在跑的 pid */
-export function parseDaemons(out: string): Set<number> {
+/** launchctl list（PID<TAB>Status<TAB>Label）里 com.claudestra.* 在跑的 pid；没有表头（命令不在 / 失败 / 输出被截）= 读不出 null */
+export function parseDaemons(out: string): Set<number> | null {
+  if (!/^PID\tStatus\tLabel/m.test(out)) return null;
   const pids = new Set<number>();
   for (const l of out.split("\n")) {
     const [pid, , label] = l.split("\t");
@@ -57,25 +59,18 @@ export function parseDaemons(out: string): Set<number> {
   return pids;
 }
 
-async function run(argv: string[]): Promise<string | null> {
-  try {
-    const p = Bun.spawn(argv, { stdout: "pipe", stderr: "ignore" });
-    const out = await new Response(p.stdout).text();
-    return (await p.exited) === 0 ? out : null;
-  } catch { return null; } // 命令不在（非 macOS 没有 launchctl）：调用方按读不出处理，整轮不给进程
-}
-
+/** 两条命令起不来（不在 / spawn 失败）都折成「读不出」：护栏据此整轮不给进程，丢掉的错误不会导致误杀 */
 export function systemGuardSources(): GuardSources {
   return {
-    facts: async () => { const out = await run(["ps", "-axo", "pid=,tty=,time=,comm="]); return out === null ? null : parseFacts(out); },
-    daemons: async () => { const out = await run(["launchctl", "list"]); return out === null ? null : parseDaemons(out); },
+    facts: async () => { const out = await stdoutOf(["ps", "-axo", "pid=,tty=,time=,comm="]).catch(() => null); return out ? parseFacts(out) : null; }, // 起不来 = 读不出，见上
+    daemons: async () => parseDaemons(await stdoutOf(["launchctl", "list"]).catch(() => "")), // 空输出没表头 = 读不出
   };
 }
 
 /** 动作台账：state 下 JSON 数组，追加后只留最近 ACTION_CAP 条；读坏了当空（只丢旧记录，不影响回收） */
 export function fileActionSink(path = statePath("worktree-orphan-actions.json")): ActionSink {
   const read = (): ActionRow[] => {
-    try { const v = JSON.parse(readFileSync(path, "utf8")); return Array.isArray(v) ? v : []; } catch { return []; }
+    try { const v = JSON.parse(readFileSync(path, "utf8")); return Array.isArray(v) ? v : []; } catch { return []; } // 没文件 / 读坏：只丢旧记录
   };
   return (rows) => { if (rows.length) writeJsonAtomicSync(path, [...read(), ...rows].slice(-ACTION_CAP)); };
 }

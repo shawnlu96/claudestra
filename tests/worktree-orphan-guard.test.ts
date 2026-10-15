@@ -74,6 +74,8 @@ test("parseCpuTime / parseFacts / parseDaemons：macOS 与 Linux 的 time 格式
     [12, { tty: null, cpuSec: 63, comm: "/Users/u/.bun/bin/bun" }], [13, { tty: "ttys043", cpuSec: 0, comm: "-zsh" }], [14, { tty: null, cpuSec: 9, comm: "sleep a b" }]]));
   expect(parseDaemons("PID\tStatus\tLabel\n1830\t0\tcom.claudestra.bridge\n-\t0\tcom.claudestra.cron\n99\t0\tcom.apple.x\n1843\t0\tcom.claudestra.scheduler\n"))
     .toEqual(new Set([1830, 1843]));
+  expect(parseDaemons("")).toBeNull(); // 命令不在 / 失败：没有表头 = 读不出
+  expect(parseDaemons("PID\tStatus\tLabel\n")).toEqual(new Set());
 });
 
 test("[验收线 1] 巡检选择：已收卡 worktree 下 ppid=1 选中、目录已删但对得上已收卡的选中；活跃卡、根外、带 tty、daemon 都不选", async () => {
