@@ -20,6 +20,7 @@ import { trainSlots, type MergeTrainInputs, type TrainSlot } from "./ledger-audi
 import { idleRules, type IdleFactInputs, type IdleRules } from "./ledger-audit-idle.js";
 import { MIRROR_PUSH_RULES, mirrorPushAudit, type MirrorPushInputs } from "./ledger-audit-mirror.js";
 import { STALL_RULES, stallAudit, type StallInputs } from "./ledger-audit-stall.js";
+import { handoffStall, type HandoffInputs } from "./ledger-audit-handoff.js";
 import type { WorkflowMode } from "./ledger-scheduler.js";
 
 const MIN = 60_000;
@@ -319,11 +320,14 @@ function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, Audi
 }
 
 type Train = (task: LedgerTask) => TrainSlot;
-function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit, keep: Keep, train: Train): void {
+function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit, keep: Keep, train: Train,
+  handoffPr: HandoffInputs["handoffPr"]): void {
   for (const { task, events, stageSince, blockedBy, unblockedAt } of ts) {
     if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
     // merge 停着是预期的：依赖上还在等前置任务上线（T8h：code 上线才算满足）
     if (task.stage === "merge" && (blockedBy?.length ?? 0) > 0) continue;
+    // AUDH2-1：已交给仓库方合并的卡另按交接口径判（ledger-audit-handoff.ts）
+    if (task.stage === "merge" && handoffStall({ task, events, stageSince }, handoffPr?.[task.id], AUDIT_THRESHOLDS.mergeStallMs, now, { emit, keep })) continue;
     // 从最后一个障碍消失时算：进 merge 之后才解冻 / 前置才上线，停着的时间不算它的
     // AUDTRAIN1（ledger-audit-train.ts）：排队等列车的卡与冻结同样不报、keep 住原 key；列车空着时从它最近一次空出起算
     const slot = train(task), parked = frozen || slot.parked;
@@ -519,7 +523,7 @@ function recoveryAudit(s: Pick<AuditSnapshot, "project"> & RecoveryAuditInputs, 
 }
 
 /** 一个项目一轮巡检；policy = 恢复策略 port，正式巡检（ledger audit）用 CFG 的文件版，单测注入假的 */
-export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs & MirrorPushInputs & StallInputs & RecoveryAuditInputs, now: number,
+export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs & MirrorPushInputs & StallInputs & RecoveryAuditInputs & HandoffInputs, now: number,
   policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
@@ -545,7 +549,7 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
     else skip(why("windows"), "reclaim_executor");
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
-  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit, keep, trainSlots(s, policy));
+  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit, keep, trainSlots(s, policy), s.handoffPr);
   evaluated.push("ship_stalled");
   mergeUnknown(s.mergeUnknown ?? [], emit); evaluated.push("merge_unknown");
   witnessMismatches(ts, emit); evaluated.push("review_witness_mismatch");

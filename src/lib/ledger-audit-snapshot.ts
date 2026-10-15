@@ -20,6 +20,7 @@ import { gateInputs } from "./scheduler-dispatch-block.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
+import { collectHandoffPr, type HandoffPrFact } from "./ledger-audit-handoff.js";
 import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFact } from "./ledger-audit-lend-grant.js";
 import { readMergePm } from "./ledger-audit-merge-pm.js";
 import { readAuditTrain, readMergeTrain } from "./ledger-audit-train.js";
@@ -50,6 +51,8 @@ export interface SnapshotSources {
   reviewers(agent: RegistryAgent, now: number): ReviewerRef[] | { error: string };
   heldPath: string;
   mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number, db: Database): Promise<Record<string, MergeCiFact> | null>; // MAINP2 CI + merge gates
+  /** AUDH2-1：交接卡 PR 现读（ledger-audit-handoff.ts）；测试不给 = 不读，交接卡按「没读到」判 */
+  handoffPr?(prUrl: string): Promise<HandoffPrFact | null>;
   /** AUDLEND1：这个执行者有没有后台 shell 还在跑（ledger-audit-idle.ts）；测试不给 = 不查 */
   bgShell?(agent: RegistryAgent): Promise<boolean>;
   /** N8B7：共享镜像状态文件所在的状态目录（ledger-audit-mirror.ts）；测试不给 = 不读 */
@@ -489,6 +492,8 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
   const get = src.mergeCi ?? (src === realSources ? liveMergeCi : null), ci = new Map(await Promise.all(perProject.map(async (p) => [p.project, await get?.(p.project, p.tasks, now, db)] as const)));
+  const readPr = src.handoffPr ?? (src === realSources ? undefined : null);
+  const prs = new Map(await Promise.all(perProject.map(async (p) => [p.project, readPr === null ? undefined : await collectHandoffPr(p.tasks, readPr)] as const)));
   // AUDLEND1：只给本来要被报空闲的执行者查后台 shell
   const bg = src.bgShell ?? (src === realSources ? agentBgShell : null), byName = new Map((reg?.list ?? []).map((a) => [a.name, a]));
   const probe = async (name: string) => { const a = byName.get(name); return !!a && !!bg && bg(a); };
@@ -515,7 +520,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown, mergeCi: ci.get(project), mergePm: readMergePm(db, project, now), lendGrants, lendGrantBaseline: readLendGrantBaseline(db, project),
+      mergeUnknown, mergeCi: ci.get(project), handoffPr: prs.get(project), mergePm: readMergePm(db, project, now), lendGrants, lendGrantBaseline: readLendGrantBaseline(db, project),
       lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
       ...readAuditTrain(db, project, tasks), // 外部读取可能推进合并；最终同步重读列车与槽，避免把已合并卡标成排队。
       stall: readStallAudit(db, project, src),
