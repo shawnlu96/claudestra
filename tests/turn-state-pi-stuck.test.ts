@@ -51,6 +51,23 @@ describe("Pi 事件态卡在 thinking、画面明确空闲（PSF-1）", () => {
     expect(stuck({ paneAgain: null }).main).toBe("busy");
     expect(stuck({ paneAgain: undefined }).main).toBe("busy");
   });
+  test("审查 r1 P1：只有一行状态行、没有输入框边框 → 认不出，busy", () => {
+    expect(stuck({ pane: "🔗 agent-pi_x", paneAgain: "🔗 agent-pi_x" }).main).toBe("busy");
+  });
+  test("审查 r1 P1：忙碌横线被 16 行工具输出隔在尾部 15 行之外 → 仍 busy", () => {
+    const far = piPane(["── ⠧ Working " + "─".repeat(40), ...Array.from({ length: 16 }, (_, n) => `  工具输出 ${n}`)].join("\n"));
+    expect(stuck({ pane: far, paneAgain: far }).main).toBe("busy");
+  });
+  test("页脚过长 / 只有一条边框 → 认不出，busy", () => {
+    const longFooter = piPane("  已回复。").replace("🔗", Array.from({ length: 6 }, () => "x\n").join("") + "🔗");
+    expect(stuck({ pane: longFooter, paneAgain: longFooter }).main).toBe("busy");
+    const oneRule = ["  已回复。", "─".repeat(52), "~/projects/x", "🔗 agent-pi_x"].join("\n");
+    expect(stuck({ pane: oneRule, paneAgain: oneRule }).main).toBe("busy");
+  });
+  test("bridge 断开时的状态行也认", () => {
+    const off = PI_IDLE.replace(/🔗 .*/, "⚠️ bridge 断开");
+    expect(stuck({ pane: off, paneAgain: off }).main).toBe("idle");
+  });
   test("只对 Pi 生效：Codex 窗口出现同样画面仍只看事件态", () => {
     expect(stuck({ runtime: "codex" }).main).toBe("busy");
   });
