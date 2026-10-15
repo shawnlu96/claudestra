@@ -77,7 +77,7 @@ describe("执行", () => {
   test("on：范围内的品牌字样换掉，命令名 / 包身份 / 协议 / 范围外 / App 身份 / 别处发出的文字不动；残留扫描归零", () => {
     const repo = synthRepo();
     const result = join(tmp("floka-brand-out-"), "brand-result.json");
-    const r = runBrand({ repo, ref: "HEAD", mode: "on", result }) as {
+    const r = runBrand({ repo, ref: "HEAD", mode: "on", result }) as unknown as {
       applied: { written: string[] };
       residue: { ok: boolean; totals: { brand: number; rejected: number } };
     };
