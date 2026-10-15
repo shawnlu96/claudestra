@@ -2,6 +2,7 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
+import { redactForPeer } from "./dispatch-redact.js";
 import { vacuumBackup } from "./ledger-backup.js";
 import { getMemory, memoryDigest, memoryState, recordMemory, secretHits, type Memory, type MemoryCtx, type MemoryInput } from "./ledger-memory.js";
 import { storedOrigin } from "./ledger-origin.js";
@@ -9,6 +10,7 @@ import { busyAsLedgerError, getEventByDedup, LedgerError } from "./ledger-store.
 import { appendEvent } from "./ledger-write.js";
 import { memoryLint } from "./memory-lint.js";
 import { cosine } from "./memory-vectors.js";
+import { pmRailsScope } from "./pm-rails.js";
 
 export const IMPORT_ISSUES = ["format", "redaction", "duplicate", "anchor", "lint"] as const;
 type IssueKind = (typeof IMPORT_ISSUES)[number];
@@ -128,6 +130,13 @@ function writeRow(db: Database, ctx: MemoryCtx, key: string, input: MemoryInput)
   return w.memory;
 }
 
+/** A non-LedgerError keeps its class and first message line (redacted, ≤200 chars) so the real cause is not lost behind "format". */
+function unexpectedReason(e: unknown): string {
+  const name = e instanceof Error ? e.constructor.name || e.name : typeof e;
+  const first = (e instanceof Error ? e.message : String(e)).split(/\r?\n/)[0]!.trim();
+  return redactForPeer(`字段结构不合法（${name}${first ? `: ${first}` : ""}）`.slice(0, 200)).text;
+}
+
 function inspectRow(db: Database, ctx: MemoryCtx, project: string, raw: string, line: number, vectors: ImportVectors): ImportRow | ImportIssue {
   const key = `import:${hash(raw)}`;
   try {
@@ -165,12 +174,17 @@ function inspectRow(db: Database, ctx: MemoryCtx, project: string, raw: string, 
   } catch (e) {
     const kind = e instanceof LedgerError && e.code === "not_found" ? "anchor"
       : e instanceof LedgerError && (e.code === "conflict" || e.code === "dedup_mismatch") ? "duplicate" : "format";
-    return { line, kind, reason: e instanceof LedgerError ? e.message : "字段结构不合法",
+    return { line, kind, reason: e instanceof LedgerError ? e.message : unexpectedReason(e),
       ...(e instanceof LedgerError && typeof e.current?.duplicateOf === "string" ? { duplicateOf: e.current.duplicateOf } : {}) };
   }
 }
 
+/** Planning is pure computation on the snapshot: it runs outside the PM rails scope (the snapshot has no meta table); real writes stay inside it. */
 export function planMemoryImport(db: Database, ctx: MemoryCtx, project: string, raw: string, vectors: ImportVectors = new Map()): ImportPlan {
+  return pmRailsScope.exit(() => planOnSnapshot(db, ctx, project, raw, vectors));
+}
+
+function planOnSnapshot(db: Database, ctx: MemoryCtx, project: string, raw: string, vectors: ImportVectors): ImportPlan {
   const copy = snapshot(db);
   try {
     const plan: ImportPlan = { project, digest: hash(raw), rows: [], issues: [], semanticGaps: [] };
