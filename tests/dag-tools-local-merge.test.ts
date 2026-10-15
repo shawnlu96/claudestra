@@ -106,12 +106,15 @@ describe("start_node：非本地项目不变", () => {
     expect(gitCalls.find((a) => a[0] === "fetch")).toEqual(["fetch", "-q", "origin"]);
   });
 
-  test("renderExecPrompt：localMerge false / 缺省逐字相同；自定义模板只换交付那一行", () => {
+  test("renderExecPrompt：localMerge false / 缺省逐字相同；localMerge 不用整机自定义模板（复现 local-custom-prompt）", () => {
     const V: PromptVars = { task: "T1", title: "t", pm: "agent-pm", branch: "feat/t1", base: "main", worktree: "/wt", spec: "/s.md", ledgerDir: "/l" };
     expect(renderExecPrompt({ ...V, localMerge: false })).toBe(renderExecPrompt(V));
-    const custom = renderExecPrompt({ ...V, localMerge: true }, "自定义 push 分支和开 PR 可以。\n");
-    expect(custom.startsWith("自定义 push 分支和开 PR 可以。\n")).toBe(true);
-    expect(custom).toContain("做完在分支 feat/t1 上 commit，**不 push、不开 PR**");
-    expect(custom).not.toContain("开好 PR");
+    const custom = "自定义 push 分支和开 PR 可以，推完记得开 PR。\n";
+    expect(renderExecPrompt(V, custom).startsWith("自定义 push")).toBe(true); // 非本地项目照用自定义模板
+    const out = renderExecPrompt({ ...V, localMerge: true }, custom);
+    expect(out).toBe(renderExecPrompt({ ...V, localMerge: true }));
+    expect(out).not.toContain("自定义");
+    for (const s of ["push 分支和开 PR 可以", "开好 PR", "--pr"]) expect(out).not.toContain(s);
+    expect(out).toContain("做完在分支 feat/t1 上 commit，**不 push、不开 PR**");
   });
 });

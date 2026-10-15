@@ -100,6 +100,8 @@ export interface StartPlan {
   workflow?: { template: WorkflowTemplate; version: number };
   /** 私仓卡（开关 on、fileGlobs 带 repo:）的 owner/name：不管放本机还是 peer 都写进 extra.repo（i28-SECPOOL2） */
   privateRepo?: string;
+  /** scheduler.json localMerge 项目：没有 origin，建 / 补建 worktree 都不 fetch（scheduler-local-author.ts 按它跳过） */
+  localMerge?: true;
 }
 
 export type Preflight = { ok: true; plan: StartPlan } | { ok: true; already: { taskId: string; key: string } } | { ok: false; code: string; error: string };
@@ -236,7 +238,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       ...(want === "local" ? { localOnly: true } : {}),
       peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason, reservation: placed.reservation } : null,
       workflow: { template: template as WorkflowTemplate, version: LATEST_TEMPLATE_VERSION[template as WorkflowTemplate] },
-      ...(priv ? { privateRepo: priv.repo } : {}),
+      ...(priv ? { privateRepo: priv.repo } : {}), ...(local ? { localMerge: true as const } : {}),
     },
   };
 }

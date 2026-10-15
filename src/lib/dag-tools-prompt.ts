@@ -2,7 +2,7 @@
  * start_node 给执行者的说明（自动卡口径）：写进 ledger/reviews/<卡号>-exec-prompt.md，执行者的 agent 目的里指向它。
  * 自动卡的生命周期归调度器：执行者按调度派单做，不给 PM 发进度 / 交付 / 收到——这一节总是附上，模板覆盖不掉；
  * 去掉它，执行者会照手动卡的习惯去找 PM，PM 和调度器两头推同一张卡。
- * 项目要换正文：放一份 ledger/prompts/exec-template.md（占位符同 DEFAULT_TEMPLATE），不改代码。tests/dag-tools-start.test.ts。
+ * 项目要换正文：放一份 ledger/prompts/exec-template.md（占位符同 DEFAULT_TEMPLATE），不改代码；localMerge 项目不用它（见 renderExecPrompt）。
  * ui 卡另附截图交付一节（同样覆盖不掉）：缺截图时调度器在审查通过后把卡交回 PM，执行者得先知道要交什么。
  */
 import type { WorkflowTemplate } from "./ledger-scheduler.js";
@@ -62,8 +62,8 @@ export function renderExecPrompt(v: PromptVars, template: string = DEFAULT_TEMPL
   const map: Record<string, string> = {
     "{TASK}": v.task, "{TITLE}": v.title, "{PM}": v.pm, "{BRANCH}": v.branch, "{BASE}": v.base, "{WORKTREE}": v.worktree, "{SPEC}": v.spec, "{LEDGER}": v.ledgerDir,
   };
-  // 默认正文里那句「push 分支和开 PR 可以」对本地项目不成立；自定义模板原样用
-  const body = v.localMerge && template === DEFAULT_TEMPLATE ? template.replace(PR_LINE, LOCAL_LINE) : template;
+  // ledger/prompts/exec-template.md 是整机一份、按 PR 流程写的，正文可能允许 push / 开 PR：localMerge 项目不用它，只用默认正文的本地版
+  const body = v.localMerge ? DEFAULT_TEMPLATE.replace(PR_LINE, LOCAL_LINE) : template;
   const auto = AUTO_SECTION.replace("{DELIVER_LINE}", () => (v.localMerge ? LOCAL_DELIVER : PR_DELIVER));
   // 一次替换：值里恰好有 {TASK} 这类字样也不会被二次展开
   return (body.trimEnd() + "\n" + auto + (v.template === "ui" ? UI_SECTION : "")).replace(/\{(TASK|TITLE|PM|BRANCH|BASE|WORKTREE|SPEC|LEDGER)\}/g, (m) => map[m] ?? m);

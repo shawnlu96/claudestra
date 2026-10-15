@@ -17,7 +17,8 @@ import { clipWire as clip, fitFindings, wireFindings } from "./order-findings.js
 import type { ReviewFinding } from "./scheduler-review.js";
 import { parseOrderWire, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import { statePath } from "./paths.js";
-import { standardAnswers } from "./order-standard-answers.js";
+import { localReviewRule, standardAnswers } from "./order-standard-answers.js";
+import { localMergeOf, type LocalMergeProject } from "./scheduler-config.js";
 import { uiReviewBasis } from "./ui-acceptance.js";
 import { specSection } from "./review-pack.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
@@ -118,8 +119,10 @@ function reportPathFor(slot: Pick<ReviewSlot, "task" | "node">, dir = reviewsDir
 }
 
 /** 审查单本身；构造完过一遍 parseOrderWire——发出去的单和收进来的单用同一把尺子，坏了就不发（返回 null 并说明） */
-export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir(), recordMemory = false): { ok: true; order: OrderWire } | { ok: false; error: string } {
+export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir(), recordMemory = false,
+  localOf: (project: string) => LocalMergeProject | null = localMergeOf): { ok: true; order: OrderWire } | { ok: false; error: string } {
   const { task } = slot;
+  const local = localOf(task.project); // localMerge 项目：验收与标准答复换成本项目的必过检查；其余项目逐字不变
   const events = listEvents(db, { project: task.project, target: task.id });
   const wf = getWorkflow(db, task.id);
   const report = reportPathFor(slot, dir);
@@ -132,9 +135,11 @@ export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()
     inputs: [`规格：${specPath ? clip(specPath, WIRE_LIMITS.path) : `ledger show ${task.id}`}（specRev ${task.specRev}）`, `只审 head ${slot.head}${task.branch ? `（分支 ${clip(task.branch, 200)}）` : ""}`,
       // 自动卡的审查员建在自己的审查 worktree 里，调度器派审前把它固定在这个 head（scheduler-review-worktree.ts）
       ...(slot.auto ? ["审查目录：你当前会话的工作目录（调度器已固定在这个 head；只读，不改、不提交、不推送）"] : []),
-      ...(bounce ? [bounceReviewLine(bounce)] : []), ...convergeOrderLines(task.round, events, slot.head), ...convergenceOrderLines(db, task), standardAnswers("review", uiReviewBasis(db, task))],
+      ...(bounce ? [bounceReviewLine(bounce)] : []), ...convergeOrderLines(task.round, events, slot.head), ...convergenceOrderLines(db, task),
+      standardAnswers("review", uiReviewBasis(db, task), local?.checks)],
     outputs: ["结论：submit_verdict（VerdictWire：verdict、p0/p1/p2 计数与逐项 findings 一致）", `报告：${report}（非空；旧版逐项标记可从报告读取）`],
-    acceptance: acceptanceOf(specPath),
+    // 本地检查放最前再按条数上限截：规格验收线已占满上限时也不会让整张单过不了 parseOrderWire
+    acceptance: local ? [clip(localReviewRule(local.checks), WIRE_LIMITS.line), ...acceptanceOf(specPath)].slice(0, WIRE_LIMITS.items) : acceptanceOf(specPath),
     writeBack: `submit_verdict({v:1, orderId:"${slot.orderId}", head:"${slot.head}", …, reportPath:"${report}"})；只记结论，不推阶段`,
     findings: prev.findings,
     fallback: wf?.fallback ? clip(wf.fallback, WIRE_LIMITS.fallback) : null,

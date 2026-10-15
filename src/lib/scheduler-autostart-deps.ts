@@ -124,6 +124,7 @@ function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "star
       projectDirs: async (id) => (await readProjects()).projects.find((p) => p.id === id)?.dirs ?? [],
       branchExists: async (repo, branch) => (await git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).ok,
       autoReady: (project) => (config.enabled && config.autoDispatch && Object.hasOwn(config.projects, project) ? null : `调度服务没对项目 ${project} 开自动派单`),
+      localMerge: (project) => Object.hasOwn(config.projects, project) && config.projects[project]!.localMerge === true, // ONB-1：base main、不 fetch
       placement: (db, q) => startPlacement(db, {
         reservations: (project) => placementReservationPort(project, recoveryPolicy),
         policy: (project) => { const p = config.projects[project]; return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null; },
