@@ -38,7 +38,8 @@ const RESULT_KINDS = new Set(["deliver", "review", "deploy", "verify", "accept"]
 const EXECUTION_OPS = new Set(["order_taken", "work_order_take", "session_bind", "workflow_resume", "merge_done", "deploy_done"]);
 
 /** An explicit allowlist prevents a note, heartbeat, ask or recovery bookkeeping from keeping work alive. */
-export function isPriorityStallProgress(e: Pick<LedgerEvent, "kind" | "data">): boolean {
+export function isPriorityStallProgress(e: Pick<LedgerEvent, "kind" | "data"> & Partial<Pick<LedgerEvent, "actor">>): boolean {
+  if (e.kind === "scheduler" && e.data.op === "workflow_resume" && e.actor === "scheduler") return false;
   if (e.kind === "stage") return typeof e.data.to === "string" && e.data.to !== e.data.from;
   if (RESULT_KINDS.has(e.kind)) return true;
   if (e.kind === "dep") return e.data.state === "done" || e.data.op === "rm" || (e.data.patch as { state?: string } | undefined)?.state === "done";
@@ -57,7 +58,7 @@ export function nextStallAction(c: StallCycle, now: number, threshold: number): 
   if (c.pending) return null;
   if (!c.heal) return now - c.since >= threshold ? "heal" : null;
   if (!c.pm) return c.heal.result !== "success" || now - c.heal.at >= threshold ? "pm" : null;
-  if (c.pm.result !== "success" && c.pm.attempts < PRIORITY_NOTICE_ATTEMPTS) return now - c.pm.at >= Math.min(threshold, 60_000) ? "pm" : null;
+  if (c.pm.result === "failed" && c.pm.attempts < PRIORITY_NOTICE_ATTEMPTS) return now - c.pm.at >= Math.min(threshold, 60_000) ? "pm" : null;
   if (!c.owner && now - c.pm.at >= threshold) return "owner";
   return null;
 }

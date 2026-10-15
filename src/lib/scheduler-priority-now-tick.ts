@@ -1,3 +1,5 @@
+import { pendingPriorityNowKeys } from "./scheduler-priority-now-observation.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { notifyAutostartQuotaWait } from "./scheduler-autostart-quota.js";
 import { localAutostartNode, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
 /** now gets a normal-tick opportunity before the ordinary candidate budget. Existing openCard owns all effects. */
@@ -10,6 +12,12 @@ import { schedulerV2SkipFeature } from "./scheduler-v2-skip-card.js";
 import { wipGateNode } from "./scheduler-wip-gate.js";
 
 interface NowPick { cand: Candidate; maxWorkers: number }
+
+const attempts = new WeakMap<StartTickEnv["db"], Set<string>>();
+
+export function priorityNowAttempted(env: Pick<StartTickEnv, "db">, featureId: string, key: string): boolean {
+  return attempts.get(env.db)?.has(`${featureId}/${key}`) ?? false;
+}
 
 export function pickPriorityNow(env: Pick<StartTickEnv, "db" | "svc" | "readSpec" | "now">, exclude = new Set<string>()): NowPick | null {
   for (const project of [...env.svc.projects].sort()) {
@@ -28,16 +36,20 @@ export function pickPriorityNow(env: Pick<StartTickEnv, "db" | "svc" | "readSpec
 }
 
 /** No writer is opened on the scheduler reader, and off does not inspect nodes/specs. */
-async function recordNowWaiting(env: StartTickEnv): Promise<void> {
+async function recordNowWaiting(env: StartTickEnv, failed: { taskId: string; error: string }[]): Promise<void> {
   for (const project of env.svc.projects) {
     if (readPriorityModes(env.db, project).priorityNowStart.mode === "off") continue;
     for (const f of activeFeatures(env.db, project)) {
       if (schedulerV2SkipFeature(env.db, f.id)) continue;
-      for (const n of currentViews(env.db, f)) {
-        if (n.taskId || !priorityNowNode(env.db, f, n.key)) continue;
+      try {
+        const keys = pendingPriorityNowKeys(env.db, f, env.svc, env.readSpec, env.now());
+        if (!keys.length) continue;
         const r = await env.ledger("ledger", "scheduler-priority-now", f.id, "--project", project,
-          "--data", JSON.stringify({ key: n.key }), "--dedup", `priority-now-check:${crypto.randomUUID()}`);
+          "--data", JSON.stringify({ keys }), "--dedup", `priority-now-check:${crypto.randomUUID()}`);
         if (!r.ok) throw new Error(String(r.error ?? "now 等待记录失败"));
+      } catch (e) {
+        if (e instanceof SchedulerStopped) throw e;
+        failed.push({ taskId: f.id, error: `now 等待记录：${String(e)}` });
       }
     }
   }
@@ -50,8 +62,9 @@ interface StartPorts {
   quotaBlocked(env: StartTickEnv, project: string, failed: { taskId: string; error: string }[]): Promise<boolean>;
 }
 export async function priorityNowStarts(env: StartTickEnv, failed: { taskId: string; error: string }[], ports: StartPorts): Promise<void> {
-  await recordNowWaiting(env);
   const attempted = new Set<string>();
+  attempts.set(env.db, attempted);
+  await recordNowWaiting(env, failed);
   for (;;) {
     const pick = pickPriorityNow(env, attempted);
     if (!pick || attempted.has(`${pick.cand.f.id}/${pick.cand.key}`)) return;

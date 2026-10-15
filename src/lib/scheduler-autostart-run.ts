@@ -1,4 +1,4 @@
-import { pickPriorityNow, priorityNowStarts } from "./scheduler-priority-now-tick.js";
+import { priorityNowAttempted, priorityNowStarts } from "./scheduler-priority-now-tick.js";
 import { autostartSnapshot, type AutostartReads } from "./scheduler-autostart-snapshot.js";
 import { notifyAutostartQuotaWait } from "./scheduler-autostart-quota.js";
 import { localAutostartNode, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
@@ -107,12 +107,12 @@ interface Pick { cand: Candidate; maxWorkers: number }
 
 /** 按项目、feature、车道顺序挑第一个过了全部门的节点；项目合并队列拥堵（WIP 闸 on）就跳过这个项目，claim 前不写任何东西 */
 function pickCandidate(env: StartTickEnv, reads: AutostartReads): Pick | null {
-  const now = pickPriorityNow(env); if (now) return now;
   projects: for (const project of [...env.svc.projects].sort()) {
     for (const f of activeFeatures(env.db, project)) {
       if (featureGate(env.db, f, env.svc) || schedulerV2SkipFeature(env.db, f.id)) continue; // S2D2: no local card for migrating / execution
       const { lanes, views } = reads.feature(f);
       for (const key of lanes?.startNow ?? []) {
+        if (priorityNowAttempted(env, f.id, key)) continue;
         const r = nodeCandidate(env.db, f, key, lanes, views, (id) => env.readSpec(id), env.now());
         if (isStop(r)) continue;
         if (wipGateNode(env.db, project, r.taskId)) continue projects;
@@ -236,7 +236,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
       try { return await env.ledger(...args); } finally { snapshot.invalidate(); }
     } };
     for (const wake of pmWakeTicks) failed.push(...await wake(readEnv));
-    snapshot.invalidate(); await priorityNowStarts(env, failed, { openCard, inFlight, quotaBlocked });
+    await priorityNowStarts(readEnv, failed, { openCard, inFlight, quotaBlocked });
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(readEnv, snapshot.reads);
     snapshot.invalidate(); // 选完就丢弃：后续额度等待、claim 和开卡不再持有项目快照。

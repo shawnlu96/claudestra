@@ -81,14 +81,26 @@ function reconcile(db: Database, ctx: WriteCtx, b: StallBasis, mode: Stream, rev
   return c;
 }
 
+/** Reader prefilter: idle targets do not spawn CLI processes; the writer still rechecks all facts. */
+export function priorityStallDue(db: Database, b: StallBasis, now: number): boolean {
+  const m = readPriorityModes(db, b.project).priorityStall;
+  if (m.mode === "off" || !b.eligible) return false;
+  const c = state(db, b.project, b.key, m.mode as Stream);
+  const threshold = priorityStallThreshold(db, b.project);
+  if (!c || c.progress !== b.progress || c.epoch !== b.nowSince) return now - Math.max(b.since, b.nowSince) >= threshold;
+  if (c.modeRev !== m.rev || (c.pending && now - c.pending.at >= PENDING_MS)) return true;
+  return nextStallAction(c, now, threshold) !== null;
+}
+
 /** Claim all due targets in one transaction. Repeated/concurrent ticks see a pending claim and do nothing. */
-export function claimPriorityStalls(db: Database, ctx: WriteCtx, project: string, key?: string): StallClaim[] {
+export function claimPriorityStalls(db: Database, ctx: WriteCtx, project: string, key?: string, target?: string): StallClaim[] {
   requireScheduler(ctx);
   return db.transaction(() => {
     const m = readPriorityModes(db, project).priorityStall as { mode: PriorityMode; rev: number };
     if (m.mode === "off") return [];
     const out: StallClaim[] = [], now = ctx.now ?? Date.now();
-    for (const b of priorityStallBases(db, project).filter((b) => key === undefined || b.key === key)) {
+    for (const b of priorityStallBases(db, project, key)) {
+      if (target !== undefined && (b.taskId ?? "-") !== target) throw new LedgerError("forbidden", "停滞目标不匹配");
       if (!b.eligible) {
         if (state(db, project, b.key, m.mode)) save(db, ctx, b, m.mode, null, "降档或终态，结束停滞周期");
         continue;
@@ -107,7 +119,7 @@ export function claimPriorityStalls(db: Database, ctx: WriteCtx, project: string
 export function livePriorityStallClaim(db: Database, project: string, key: string, token: string): StallClaim | null {
   const m = readPriorityModes(db, project).priorityStall as { mode: PriorityMode; rev: number };
   if (m.mode === "off") return null;
-  const b = priorityStallBases(db, project).find((b) => b.key === key);
+  const b = priorityStallBases(db, project, key).find((b) => b.key === key);
   const c = state(db, project, key, m.mode);
   if (!b?.eligible || !c?.pending || c.pending.token !== token || c.modeRev !== m.rev || c.progress !== b.progress || c.epoch !== b.nowSince) return null;
   return { basis: b, cycle: c, action: c.pending.action, token, mode: m.mode };

@@ -1,6 +1,6 @@
 import { schedulerV2SkipTask, schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 import type { StallClaim } from "./ledger-priority-stall-store.js";
-import { livePriorityStallClaim, priorityStallRevision } from "./ledger-priority-stall-store.js";
+import { livePriorityStallClaim, priorityStallRevision, priorityStallDue } from "./ledger-priority-stall-store.js";
 import type { Database } from "bun:sqlite";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { readPriorityModes } from "./ledger-priority-read.js";
@@ -22,7 +22,7 @@ export async function priorityStallTick(db: Database, config: SchedulerConfig, p
   const failed: { taskId: string; error: string }[] = [];
   for (const project of Object.keys(config.projects)) {
     if (readPriorityModes(db, project).priorityStall.mode === "off") continue;
-    for (const b of priorityStallBases(db, project).filter((b) => b.eligible || priorityStallRevision(db, project, b.key) > 0)) {
+    for (const b of priorityStallBases(db, project).filter((b) => priorityStallDue(db, b, ports.now?.() ?? Date.now()))) {
       if (b.taskId ? schedulerV2SkipTask(db, b.taskId) : b.featureId && schedulerV2SkipFeature(db, b.featureId)) continue;
       try {
         const command = async (data: StallCommand) => {
@@ -59,11 +59,13 @@ export async function priorityStallTick(db: Database, config: SchedulerConfig, p
             if (ports.notify) await ports.notify(fresh, text);
             else await notifyProjectPm(db, project, text, { fromName: "scheduler", to: fresh.basis.pm, level: "action",
               stillActive: () => { ports.active(); return !!livePriorityStallClaim(db, project, b.key, fresh.token); } });
-            await command({ ...data, op: "finish", result: "success", detail: `已通知 ${fresh.basis.pm}` });
           } catch (e) {
             if (e instanceof SchedulerStopped) throw e;
-            await command({ ...data, op: "finish", result: "failed", detail: String(e) });
+            await command({ ...data, op: "finish", result: "unknown", detail: String(e) });
+            break;
           }
+          // Receipt failures leave the send pending/unknown; they never authorize another delivery.
+          await command({ ...data, op: "finish", result: "success", detail: `已通知 ${fresh.basis.pm}` });
           break;
         }
       } catch (e) {

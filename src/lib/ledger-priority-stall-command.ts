@@ -1,4 +1,3 @@
-import { priorityStallBases } from "./ledger-priority-stall-read.js";
 import type { StallClaim } from "./ledger-priority-stall-store.js";
 /** A leased scheduler command owns every mutation; the daemon keeps its query_only connection. */
 import type { Database } from "bun:sqlite";
@@ -47,10 +46,7 @@ export function priorityStallCommand(db: Database, ctx: WriteCtx, project: strin
     if (live && (live.basis.taskId ?? "-") !== target) throw new LedgerError("forbidden", "停滞目标不匹配");
     let result: Record<string, unknown>;
     if (input.op === "claim") {
-      const basis = priorityStallBases(db, project).find((b) => b.key === input.key);
-      if (!basis) return { ok: true, claims: [] };
-      if ((basis.taskId ?? "-") !== target) throw new LedgerError("forbidden", "停滞目标不匹配");
-      const claims = claimPriorityStalls(db, ctx, project, input.key);
+      const claims = claimPriorityStalls(db, ctx, project, input.key, target);
       if (claims.some((c) => (c.basis.taskId ?? "-") !== target)) throw new LedgerError("forbidden", "停滞目标不匹配");
       result = { claims };
     } else if (input.op === "check") return { ok: true, claim: live };
