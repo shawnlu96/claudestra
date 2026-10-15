@@ -57,7 +57,9 @@ export async function schedulerMachineLock(job: DeployJob, request: string, deps
   };
   const otherLabel = (): string | undefined => {
     const held = readDeployLock(path), waiting = (deps.waiting ?? (() => waitingDeployLabels(path)))().find((l) => l !== "scheduler-deploy");
-    return held.status === "ok" && held.record.label !== "scheduler-deploy" ? held.record.label : waiting;
+    // observe keeps a dead holder's lock in place; on would have reaped it, so it is not a reason to defer.
+    const reaped = !active && held.status === "ok" && holderLiveness(held.record) === "dead";
+    return held.status === "ok" && !reaped && held.record.label !== "scheduler-deploy" ? held.record.label : waiting;
   };
   if (mode === "observe") {
     // Same verdict as acquireDeployLock(waitMs 0), read-only: missing / dead holder = acquire (on would reap); corrupt / live / unknown = defer.
