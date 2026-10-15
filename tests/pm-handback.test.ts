@@ -92,6 +92,19 @@ describe("[验收线 3] review verdicts before / after the PM hand-back", () => 
     expect(planScheduler(snapshot(legacy(20)))).toMatchObject({ kind: "escalate", code: "review_invalid" });
   });
 
+  test("every hand-dispatched verdict of the round before the hand-back is left out, not only the latest (none reads as the prior reviewer)", () => {
+    const hand = (seq: number, who: string) => event(seq, "review", { ...review(seq).data, reviewer: who, reviewerSessionId: `session-${who}` }, "agent-pm");
+    const legacy = (seq: number) => event(seq, "review", { round: 1, verdict: "pass", p0: 0, p1: 0, p2: 0, path: "reviews/T1-r1/manual.md" }, "agent-pm");
+    for (const s of [snapshot(hand(20, "agent-hand"), hand(21, "agent-hand2"), handback(25)), snapshot(hand(20, "agent-hand"), legacy(21), handback(25))]) {
+      const d = planScheduler(s);
+      expect(d).toMatchObject({ kind: "intent", action: "review", recipient: reviewer.agent });
+      expect(d.kind === "intent" && d.reason.startsWith(HANDBACK_REVIEW_TAG)).toBe(true);
+    }
+    // a hand-dispatched one after the hand-back next to an older one: still review_unsolicited
+    expect(planScheduler(snapshot(hand(20, "agent-hand"), handback(25), hand(26, "agent-hand2"))))
+      .toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+  });
+
   test("strict seq order: a verdict equal to or after the hand-back's seq is this round's", () => {
     const evs = [handback(25)];
     expect([24, 25, 26].map((seq) => reviewBeforeHandback(evs, seq))).toEqual([true, false, false]);
