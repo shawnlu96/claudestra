@@ -15,19 +15,22 @@ type Lexed = ScanSource & { code: string };
 const NOT_MECHANISM = /(^|\/)(recovery-keys|recovery-key-class|recovery-key-defaults[\w-]*)\.ts$/;
 const ADAPTER_FILE = /(^|\/)observation-plan-evidence\.ts$/;
 /**
- * Sample writes, matched on lex's `code`: the gate, a direct observe record, a hand-written recovery_observe note, or the
- * scheduler identity's `ledger scheduler-recovery-observe` (it ends in recordObserved).
+ * Sample writes, matched on lex's `code`: a call to the gate or to a direct observe record (SINK_CALL, through isCall), a
+ * hand-written recovery_observe note, or the scheduler identity's `ledger scheduler-recovery-observe` invoked as a command
+ * (the first or second argument of a call; it ends in recordObserved). The command name alone (a table, a list) is no write.
  */
-const SINK = /\bgateRecovery\s*\(|\brecordObserved\s*\(|\bop\s*:\s*"recovery_observe"|"scheduler-recovery-observe"/;
+const SINK_CALL = /(?<![\w$])(?:gateRecovery|recordObserved)\s*\(/g;
+const SINK_NOTE = /\bop\s*:\s*"recovery_observe"/;
+const SINK_CMD = /[\w$)\]]\s*\(\s*(?:"[^"\n]*"\s*,\s*)?"scheduler-recovery-observe"\s*[,)]/g;
 /** String values that are sink tokens: lex keeps these whole (as double-quoted), and blanks every other string body. */
 const SINK_STRINGS = new Set(["recovery_observe", "scheduler-recovery-observe"]);
 /**
  * An injected observe port: the file handles ObservedAction values in code (outside its imports) and calls something named
- * observe* / *Observe* / *Observed* (the port, or the drain that hands queued actions to it; a `function` head is no call).
+ * observe* / *Observe* / *Observed* (the port, or the drain that hands queued actions to it; a declaration is no call).
  * Neither alone counts.
  */
 const PORT_TYPE = /\bObservedAction\b/;
-const PORT_CALL = /(?<!\bfunction\s*)(?<![\w$])[\w$]*[oO]bserve[\w$]*\s*(?:\?\.\s*)?\(/;
+const PORT_CALL = /(?<![\w$])[\w$]*[oO]bserve[\w$]*\s*(?:\?\.\s*)?\(/g;
 const KEY_CONST = /\bconst\s+([A-Za-z_$][\w$]*)(?:\s*:\s*[^=;]+)?\s*=\s*["'`]([A-Za-z][A-Za-z0-9]*)["'`](?:\s+as\s+const)?\s*[;,\n]/g;
 const IMPORT = /\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*["'](\.{1,2}\/[^"']+)["']\s*;?/g;
 
@@ -77,9 +80,35 @@ function lex(src: string): { text: string; code: string } {
 
 /** Whether a file writes samples: a direct sink, or ObservedAction handled in code together with an observe-port call. */
 function hasSink(f: Lexed): boolean {
-  if (SINK.test(f.code)) return true;
+  if (SINK_NOTE.test(f.code) || hasCall(f.code, SINK_CALL) || hasCall(f.code, SINK_CMD)) return true;
   const body = lex(f.text.replace(IMPORT, "")).code;
-  return PORT_TYPE.test(body) && PORT_CALL.test(body);
+  return PORT_TYPE.test(body) && hasCall(body, PORT_CALL);
+}
+
+/** Whether some match of `re` (global, ending at a `(`) in lexed code is a call expression rather than a declaration. */
+function hasCall(code: string, re: RegExp): boolean {
+  for (const m of code.matchAll(re)) if (isCall(code, m.index!, m.index! + m[0].length - 1)) return true;
+  return false;
+}
+
+/**
+ * `code[open]` is the `(` after a name starting at `at`. A declaration is not a call: a `function` / `abstract` head, a
+ * parameter list followed by a body or a return type (`) {`, `): T`), or a member of an interface / object type literal.
+ */
+function isCall(code: string, at: number, open: number): boolean {
+  if (/\b(?:function\*?|abstract)\s*$/.test(code.slice(Math.max(0, at - 16), at))) return false;
+  let depth = 0, close = open;
+  for (; close < code.length; close++) {
+    if (code[close] === "(") depth++;
+    else if (code[close] === ")" && --depth === 0) break;
+  }
+  if (/^\s*[{:]/.test(code.slice(close + 1, close + 64))) return false;
+  depth = 0;
+  for (let i = at - 1; i >= 0; i--) { // the innermost `{` around the name: a type body declares, never calls
+    if (code[i] === "}") depth++;
+    else if (code[i] === "{" && depth-- === 0) return !/(?:\binterface\s+[\w$]+(?:<[^{]*>)?(?:\s+extends\s+[^{]*)?|\btype\s+[\w$]+(?:<[^=]*>)?\s*=)\s*$/.test(code.slice(Math.max(0, i - 200), i));
+  }
+  return true;
 }
 
 const quoted = (text: string, key: string) => text.includes(`"${key}"`) || text.includes(`'${key}'`) || text.includes(`\`${key}\``);

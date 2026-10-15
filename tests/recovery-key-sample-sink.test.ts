@@ -91,6 +91,36 @@ describe("the scan's rules (synthetic sources)", () => {
     expect(keysWithoutSampleSink([KEY], [probe(`export const t = \`\${recordObserved(db, { mechanism: "${KEY}" }, 0).seq}\`;`)])).toEqual([]);
   });
 
+  test("[验收线 3] a declaration or a bare command name is no write: only call expressions and command invocations count", () => {
+    const probe = (text: string): ScanSource => ({ path: "src/lib/probe.ts", text: `export const k = "${KEY}";\n${text}` });
+    const fooled = [
+      probe(`export const commandName = "scheduler-recovery-observe";`),
+      probe(`export const cmds = ["scheduler-recovery-observe", "x"];`),
+      probe(`const t = { "scheduler-recovery-observe": rule("task") };`),
+      probe(`interface Port { recordObserved(): void }`),
+      probe(`interface Port { recordObserved(db: Database, a: ObservedAction) }`),
+      probe(`type Port = { gateRecovery(db: Database): boolean; };`),
+      probe(`export function recordObserved() { return 1; }`),
+      probe(`export async function gateRecovery(db: Database) { return 1; }`),
+      probe(`export const port = { recordObserved(a: unknown) { return a; } };`),
+      probe(`abstract class P { abstract recordObserved(a: unknown); }`),
+      probe(`declare function gateRecovery(db: Database): boolean;`),
+      // an observe port declared but never called
+      probe(`export interface Deps { observe(a: ObservedAction): Promise<void> }`),
+      probe(`export const deps = { observe(a: ObservedAction) { return a; } };`),
+    ];
+    for (const s of fooled) expect(keysWithoutSampleSink([KEY], [s])).toEqual([KEY]);
+    // real calls next to declarations still count
+    const real = [
+      `await o.ledger("ledger", "scheduler-recovery-observe", a.target, "--mechanism", k);`,
+      `await m("scheduler-recovery-observe", id);`,
+      `interface Port { recordObserved(): void }\nexport const go = (p: Port) => p.recordObserved();`,
+      `export function gateRecovery() { return 1; }\nif (gateRecovery()) run();`,
+      `export const deps = { observe: (a: ObservedAction) => send(a) };\nawait deps.observe?.(a);`,
+    ];
+    for (const s of real) expect(keysWithoutSampleSink([KEY], [probe(s)])).toEqual([]);
+  });
+
   test("other sink shapes: gate, recovery_observe note, ObservedAction for a port, the observe CLI, key constants, adapters", () => {
     const shapes = [
       `gateRecovery(db, { project: p, mechanism: "${KEY}", target: "", actionKey: "a", action: "b" }, act, o);`,
