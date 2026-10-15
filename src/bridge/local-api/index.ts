@@ -1,4 +1,5 @@
 import { handleProjectPmApi } from "./project-pm.js";
+import { handleProjectOnboardApi } from "./project-onboard.js";
 import { handleCardPauseApi } from "./card-pause.js";
 import { handleSharedExecApi } from "./shared-exec.js";
 export { LOCAL_API_FEATURES } from "../../lib/shared-ledger-gate-api-features.js";
@@ -58,6 +59,7 @@ const FAMILIES: Family[] = [
   handleTeamBodyApi,
   (req, path, principal) => sharedLedgerGateProxy(req, path, principal, handleSharedLedgerApi),
   (req, path, principal) => handleProjectPmApi(req, path, principal),
+  (req, path, principal) => handleProjectOnboardApi(req, path, principal),
   (req, path, principal) => handleCardPauseApi(req, path, principal),
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,

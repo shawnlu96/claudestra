@@ -1,5 +1,5 @@
 /**
- * `team up|down|status`：一条命令拉起 / 撤下编排班子（docs/team/orchestration-team.md）。
+ * `team up|down|status`（onboard 在 team-onboard.ts）：一条命令拉起 / 撤下编排班子（docs/team/orchestration-team.md）。
  *   up     生成提案（PM 名单、调度助理、巡检开关、角色变动）并请 bridge 贴确认卡片——改 PM 名单要 owner 身份，所以这里什么都不直接改；
  *          已开着调度助理时默认保留它，`--no-dispatcher` 才撤
  *   down   同上，提案内容是关事件路由、把调度助理移出 PM 名单、撤下班子角色
@@ -121,8 +121,9 @@ async function postCard(p: TeamProposal): Promise<string | null> {
   }
 }
 
-async function context(args: string[]) {
-  const p = parseLedgerArgs(args.slice(1), ["project", "pm", "dispatcher-agent"], ["dispatcher", "no-dispatcher", "no-audit"]);
+/** 身份、项目与旗标；team onboard 用同一套（只是旗标不同） */
+export async function teamContext(args: string[], valued: readonly string[], bools: readonly string[]) {
+  const p = parseLedgerArgs(args.slice(1), valued, bools);
   if ("error" in p) return { error: p.error };
   const reg = await loadRegistry();
   const who = resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, reg.agents);
@@ -153,11 +154,13 @@ export async function propose(draft: ProposalDraft, o: ProposeOpts = {}): Promis
 
 export async function cmdTeam(args: string[]): Promise<void> {
   const sub = args[0] ?? "";
+  if (sub === "onboard") return (await import("./team-onboard.js")).cmdOnboard(args);
   if (!["up", "down", "status"].includes(sub)) {
-    output({ ok: false, error: "usage: team up|down|status --project <id> [--pm <agent>] [--dispatcher | --dispatcher-agent <agent> | --no-dispatcher] [--no-audit]" });
+    output({ ok: false, error: "usage: team up|down|status --project <id> [--pm <agent>] [--dispatcher | --dispatcher-agent <agent> | --no-dispatcher] [--no-audit]"
+      + " | team onboard --project <id> [--local-merge] [--checks \"a,b\"] [--max-workers N] [--pm <agent>] [--dry-run]" });
     return;
   }
-  const c = await context(args);
+  const c = await teamContext(args, ["project", "pm", "dispatcher-agent"], ["dispatcher", "no-dispatcher", "no-audit"]);
   if ("error" in c) return output({ ok: false, error: c.error });
   if (!existsSync(LEDGER_PATH)) return output({ ok: false, error: "还没有台账库：先用 ledger 建任务" });
   const db = openLedger();
