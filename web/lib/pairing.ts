@@ -1,3 +1,6 @@
+import { readStorageMode } from "./floka-storage/config";
+import { writeCompatible } from "./floka-storage/local";
+
 /**
  * 配对页的纯逻辑（docs/design-hosted-frontend.md §4）：二维码片段解析、挑战应答的 HMAC、短码整形、设备名。
  * 与 bridge 的 src/lib/pairing-codes.ts 同一算法：hmac = base64url(HMAC-SHA256(key = base64url 解出的秘密, message = challenge))。
@@ -117,10 +120,9 @@ function session(): Store | null {
 }
 
 /** null = 清掉。存不了（隐私模式等）只是离开页面后接不上，与没有这份记录时一样 */
-export function savePendingPairing(p: SavedPending | null, store: Store | null = session()): void {
+export function savePendingPairing(p: SavedPending | null, store: Store | null = session(), mode = readStorageMode()): void {
   try {
-    if (p) store?.setItem(PENDING_KEY, JSON.stringify(p));
-    else store?.removeItem(PENDING_KEY);
+    writeCompatible(store, PENDING_KEY, p ? JSON.stringify(p) : null, mode);
   } catch (e) {
     console.warn("[pair] 记不下待批请求，离开配对页后要重新发起:", (e as Error).message);
   }
