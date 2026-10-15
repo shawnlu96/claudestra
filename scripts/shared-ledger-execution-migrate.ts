@@ -5,6 +5,8 @@
  *   and the signing key is the drill root's own instance key. Production state directories are refused; a formal migration
  *   (X15 passed + owner authorization) is out of scope for this script.
  * plan.json lists the whole group (本机 / peer A / peer B), each member an isolated state dir under the drill root.
+ * dry-run / commit send only the frozen manifest `ledger shared-exec migration-ask` wrote (and the owner approved); a missing,
+ * unapproved or plan-mismatched one is refused (exit 2) before any center call.
  * Exit codes: 0 done (dry-run / switched / exported), 2 refused (itemized list on stderr), 3 frozen pending PM, 1 usage / error.
  */
 import { closeSync, constants, existsSync, openSync, readFileSync, writeSync } from "node:fs";

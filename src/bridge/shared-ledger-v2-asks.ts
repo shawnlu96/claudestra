@@ -6,6 +6,8 @@ import { readSharedLedgerMode } from "../lib/shared-ledger-mode.js";
 import { fail, parseAuthorizationBind, parseCommand, V2ContractError, v2ObjectDigest,
   type V2AuthorizationBind, type V2Command, type V2Fence } from "../lib/shared-ledger-contract-v2.js";
 import type { SharedLedgerExecClient } from "../lib/shared-ledger-exec-client.js";
+import { isOwnerSource } from "../lib/delegate-marker.js";
+import { answerMigrationAsk, migrationAskRecord } from "../lib/shared-ledger-v2-migration-ask-answer.js";
 import type { AnswerInput } from "./asks.js";
 import { sharedAnswerValue, sharedAskMapping, sharedAskOptions, sharedAskView, type SharedAskMapping } from "./shared-ledger-v2-asks-mapping.js";
 
@@ -141,7 +143,7 @@ async function query(a: Ask, principal?: string) {
 
 /** All three answer entry points arrive here; no local decision or answer is persisted. */
 export async function sharedAskAnswer(input: AnswerInput): Promise<Ask | null> {
-  try { return await runSharedAnswer(input); } catch (error) {
+  try { return migrationAskRecord(input.ask) ? await migrationAnswer(input) : await runSharedAnswer(input); } catch (error) {
     if (!(error instanceof V2ContractError)) throw error;
     if (error.status === 409) throw new LedgerError("conflict", error.code);
     const status = error.status >= 500 ? 503 : error.status === 400 ? 400 : 403;
@@ -165,6 +167,13 @@ async function runSharedAnswer(input: AnswerInput): Promise<Ask | null> {
     principal: input.principal, device: input.device, via: input.via, at: Date.now(), final: true } };
   await runtime?.answered(input, view);
   return view;
+}
+/** A migration authorization card (peer-MIGASK1) is answered only at the center, and only by the owner. */
+async function migrationAnswer(input: AnswerInput): Promise<Ask> {
+  if (!runtime) fail("unavailable");
+  const a = await answerMigrationAsk({ ...input, owner: isOwnerSource(input.from) }, runtime.db());
+  runtime.publish(a);
+  return a;
 }
 export async function readSharedAsk(a: Ask, principal?: string): Promise<Ask> {
   const ctx = await query(a, principal);
