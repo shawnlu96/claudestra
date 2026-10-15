@@ -154,7 +154,7 @@ export async function propose(draft: ProposalDraft, o: ProposeOpts = {}): Promis
 
 export async function cmdTeam(args: string[]): Promise<void> {
   const sub = args[0] ?? "";
-  if (sub === "onboard") return (await import("./team-onboard.js")).cmdOnboard(args);
+  if (sub === "onboard") return (await import("./team-onboard.js")).cmdOnboard(args, { planUp, propose, teamContext });
   if (!["up", "down", "status"].includes(sub)) {
     output({ ok: false, error: "usage: team up|down|status --project <id> [--pm <agent>] [--dispatcher | --dispatcher-agent <agent> | --no-dispatcher] [--no-audit]"
       + " | team onboard --project <id> [--local-merge] [--checks \"a,b\"] [--max-workers N] [--pm <agent>] [--dry-run]" });

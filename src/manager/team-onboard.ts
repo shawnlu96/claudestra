@@ -16,7 +16,11 @@ import { addProject, type NewProjectSegment } from "../lib/scheduler-config-writ
 import { readProposals, type ProposalDraft, type TeamProposal } from "../lib/team-proposal.js";
 import { normalizeName, output } from "./core.js";
 import { intFlag } from "./ledger-identity.js";
-import { planUp, propose, teamContext, type Agents, type ProposeOpts } from "./team-up.js";
+// 只取类型：函数由 team-up 的 cmdTeam 注入（team-up 动态 import 本文件，再静态 import 回去就成环）
+import type { Agents, planUp, propose, ProposeOpts, teamContext } from "./team-up.js";
+
+/** team-up 里的三个函数，cmdTeam 调 cmdOnboard 时注入；单测直接从 team-up 拿真的传进来 */
+export interface TeamUpOps { planUp: typeof planUp; propose: typeof propose; teamContext: typeof teamContext }
 
 /** 新项目段的缺省并发（PM 缺省定 2） */
 export const DEFAULT_MAX_WORKERS = 2;
@@ -86,22 +90,22 @@ function schedulerItem(f: OnboardFacts, flags: OnboardFlags): { item: OnboardIte
   return { item: { key: "scheduler", status: "todo", text }, segment };
 }
 
-function teamItem(f: OnboardFacts, flags: OnboardFlags): { item: OnboardItem; draft: ProposalDraft | null } {
+function teamItem(f: OnboardFacts, flags: OnboardFlags, plan: TeamUpOps["planUp"]): { item: OnboardItem; draft: ProposalDraft | null } {
   const at = (status: ItemStatus, text: string) => ({ item: { key: "team" as const, status, text }, draft: null });
   const pm = flags.pm ? normalizeName(flags.pm) : f.meta.pms[0] ?? (f.actor.startsWith("agent-") ? f.actor : null);
   if (!pm) return at("blocked", "项目还没有 PM：用 --pm <agent> 指定");
   if (f.pendingProposal) return at("todo", `已有 team up 提案 ${f.pendingProposal} 在等 owner 确认，不再重复提议`);
-  const draft = planUp({ project: f.project, dir: f.dir, actor: f.actor, pm, audit: f.meta.team?.audit ?? true, meta: f.meta, agents: f.agents });
+  const draft = plan({ project: f.project, dir: f.dir, actor: f.actor, pm, audit: f.meta.team?.audit ?? true, meta: f.meta, agents: f.agents });
   if ("error" in draft) return at("blocked", draft.error);
   if (f.meta.team && f.meta.pms.includes(pm) && !draft.roles.length) return at("ok", `编排班子已开，PM ${pm} 已在名单、角色已设`);
   const why = [!f.meta.team && "班子没开", !f.meta.pms.includes(pm) && `PM ${pm} 不在名单`, draft.roles.length && "registry 角色没设"].filter(Boolean).join("、");
   return { item: { key: "team", status: "todo", text: `出 team up 提案（${why}），owner 在卡片上确认后生效；角色下次重启 PM 生效` }, draft };
 }
 
-export function planOnboard(f: OnboardFacts, flags: OnboardFlags): OnboardPlan {
+export function planOnboard(f: OnboardFacts, flags: OnboardFlags, plan: TeamUpOps["planUp"]): OnboardPlan {
   const project: OnboardItem = { key: "project", status: f.dir ? "ok" : "blocked", text: f.dir ?? "projects.json 里没有目录" };
   const sched = schedulerItem(f, flags);
-  const team = teamItem(f, flags);
+  const team = teamItem(f, flags, plan);
   return { items: [project, gitItem(f, flags), sched.item, team.item], segment: sched.segment, draft: team.draft };
 }
 
@@ -111,6 +115,7 @@ export interface OnboardDeps {
   /** scheduler.json 路径（测试用临时文件） */
   schedulerPath?: string;
   proposals?: ProposeOpts;
+  team: Pick<TeamUpOps, "planUp" | "propose">;
 }
 export interface OnboardInput extends Omit<OnboardFacts, "scheduler" | "meta" | "pendingProposal"> { flags: OnboardFlags; dryRun: boolean }
 
@@ -136,7 +141,7 @@ export async function runOnboard(i: OnboardInput, d: OnboardDeps): Promise<Recor
   try { scheduler = readSegment(d.schedulerPath ?? SCHEDULER_CONFIG_PATH, i.project); }
   catch (e) { return { ok: false, code: "invalid", error: `scheduler.json 读不出：${(e as Error).message}` }; }
   const facts: OnboardFacts = { ...i, scheduler, meta, pendingProposal: await pendingOf(i.project, d.now, d.proposals?.path) };
-  const plan = planOnboard(facts, i.flags);
+  const plan = planOnboard(facts, i.flags, d.team.planUp);
   const head = { project: i.project, dryRun: i.dryRun, git: i.git };
   const blocked = plan.items.filter((x) => x.status === "blocked");
   if (blocked.length) return { ok: false, code: "blocked", error: blocked.map((x) => x.text).join("；"), ...head, items: plan.items };
@@ -154,7 +159,7 @@ export async function runOnboard(i: OnboardInput, d: OnboardDeps): Promise<Recor
     }
   }
   if (!plan.draft) return { ok: true, ...head, items };
-  const r = await propose(plan.draft, d.proposals);
+  const r = await d.team.propose(plan.draft, d.proposals);
   mark("team", r.ok ? `已出 team up 提案 ${r.proposal}，等 owner 在卡片上确认` : `提案 ${r.proposal} 已记下，但${String(r.error)}`);
   return { ok: r.ok === true, ...head, items, proposal: r.proposal, ...(r.ok ? {} : { error: r.error }) };
 }
@@ -169,8 +174,8 @@ function gitState(dir: string | null): GitState {
   return r.stdout.toString().split("\n").map((s) => s.trim()).includes("origin") ? "origin" : "no-origin";
 }
 
-export async function cmdOnboard(args: string[]): Promise<void> {
-  const c = await teamContext(args, ["project", "pm", "checks", "max-workers"], ["local-merge", "dry-run"]);
+export async function cmdOnboard(args: string[], team: TeamUpOps): Promise<void> {
+  const c = await team.teamContext(args, ["project", "pm", "checks", "max-workers"], ["local-merge", "dry-run"]);
   if ("error" in c) return output({ ok: false, error: c.error });
   if (!existsSync(LEDGER_PATH)) return output({ ok: false, error: "还没有台账库：先用 ledger 建任务" });
   let max: number | undefined;
@@ -179,5 +184,5 @@ export async function cmdOnboard(args: string[]): Promise<void> {
   const flags: OnboardFlags = { localMerge: c.p.bools.has("local-merge"), pm: c.p.flags.pm,
     ...(c.p.flags.checks !== undefined ? { checks: splitChecks(c.p.flags.checks) } : {}), ...(max !== undefined ? { maxWorkers: max } : {}) };
   const input: OnboardInput = { project: c.project, dir: c.dir, git: gitState(c.dir), actor: c.actor, agents: c.agents, flags, dryRun: c.p.bools.has("dry-run") };
-  output(await runOnboard(input, { db: openLedger(), now: Date.now() }));
+  output(await runOnboard(input, { db: openLedger(), now: Date.now(), team }));
 }

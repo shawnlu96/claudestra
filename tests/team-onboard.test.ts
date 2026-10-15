@@ -12,6 +12,9 @@ import { setMeta } from "../src/lib/ledger-write.js";
 import { readSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { readProposals, type TeamProposal } from "../src/lib/team-proposal.js";
 import { planOnboard, runOnboard, splitChecks, type OnboardFacts, type OnboardInput } from "../src/manager/team-onboard.js";
+import { planUp, propose } from "../src/manager/team-up.js";
+
+const team = { planUp, propose };
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const P = "dn";
@@ -29,7 +32,7 @@ const input = (o: Partial<OnboardInput> = {}): OnboardInput => ({
   flags: { localMerge: true, checks: ["cargo test"] }, ...o,
 });
 const run = (o: Partial<OnboardInput> = {}) =>
-  runOnboard(input(o), { db, now: NOW, schedulerPath, proposals: { path: proposalsPath, post: async (p) => (posted.push(p), null) } }) as Promise<Record<string, any>>;
+  runOnboard(input(o), { db, now: NOW, schedulerPath, team, proposals: { path: proposalsPath, post: async (p) => (posted.push(p), null) } }) as Promise<Record<string, any>>;
 const snap = () => ({
   sched: readFileSync(schedulerPath, "utf8"), mtime: statSync(schedulerPath).mtimeMs,
   proposals: existsSync(proposalsPath) ? readFileSync(proposalsPath, "utf8") : null, events: listEvents(db, { project: P }).length,
@@ -119,7 +122,7 @@ describe("team onboard", () => {
   test("新增段缺 --checks、scheduler.json 不存在：拒", async () => {
     expect(await run({ flags: { localMerge: true } })).toMatchObject({ ok: false, code: "blocked" });
     const missing = join(dir, "none.json");
-    const r = await runOnboard(input(), { db, now: NOW, schedulerPath: missing, proposals: { path: proposalsPath, post: async () => null } });
+    const r = await runOnboard(input(), { db, now: NOW, schedulerPath: missing, team, proposals: { path: proposalsPath, post: async () => null } });
     expect(r).toMatchObject({ ok: false, code: "blocked" });
     expect(existsSync(missing)).toBe(false);
   });
@@ -132,13 +135,13 @@ describe("planOnboard", () => {
     pendingProposal: null, ...o,
   });
   test("班子已开、PM 角色已设：不出提案", () => {
-    const p = planOnboard(facts(), { localMerge: false, checks: ["ci"] });
+    const p = planOnboard(facts(), { localMerge: false, checks: ["ci"] }, planUp);
     expect(p.draft).toBeNull();
     expect(p.items.find((x) => x.key === "team")?.status).toBe("ok");
     expect(p.segment).toEqual({ maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: "/repos/dn", supervise: false });
   });
   test("不是 git 仓库：拒", () => {
-    expect(planOnboard(facts({ git: "not-git" }), { localMerge: true, checks: ["x"] }).items.find((x) => x.key === "git")?.status).toBe("blocked");
+    expect(planOnboard(facts({ git: "not-git" }), { localMerge: true, checks: ["x"] }, planUp).items.find((x) => x.key === "git")?.status).toBe("blocked");
   });
   test("splitChecks 按逗号分条", () => {
     expect(splitChecks(" cargo test , cargo clippy -- -D warnings ,")).toEqual(["cargo test", "cargo clippy -- -D warnings"]);

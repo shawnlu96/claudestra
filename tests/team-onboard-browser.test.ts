@@ -10,6 +10,7 @@ import { chromium, type Page } from "playwright-core";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { planOnboard, type OnboardFacts } from "../src/manager/team-onboard";
+import { planUp } from "../src/manager/team-up";
 import { guardedPage } from "./helpers/collab-fixture-serve";
 import { bundleToday, serveToday, tailwindCss, TODAY_NOW } from "./helpers/today-shots";
 import { shotIssues, type ShotIssue } from "./helpers/ui-shot-checks";
@@ -31,8 +32,9 @@ function routes(posts: Record<string, unknown>[]) {
     if (path !== "/projects/proj-a/onboard" || req.method !== "POST") return null;
     const b = (await req.json()) as { dryRun: boolean; localMerge?: boolean; checks?: string; maxWorkers?: number };
     posts.push(b);
-    const plan = planOnboard(FACTS, { localMerge: !!b.localMerge, ...(b.checks ? { checks: b.checks.split(",").map((s) => s.trim()) } : {}),
-      ...(b.maxWorkers !== undefined ? { maxWorkers: b.maxWorkers } : {}) });
+    const flags = { localMerge: !!b.localMerge, ...(b.checks ? { checks: b.checks.split(",").map((s) => s.trim()) } : {}),
+      ...(b.maxWorkers !== undefined ? { maxWorkers: b.maxWorkers } : {}) };
+    const plan = planOnboard(FACTS, flags, planUp);
     const blocked = plan.items.filter((x) => x.status === "blocked");
     const items = b.dryRun || blocked.length ? plan.items : plan.items.map((x) => (x.status === "todo" ? { ...x, status: "done" } : x));
     return Response.json({ ok: !blocked.length, project: "proj-a", dryRun: b.dryRun, git: FACTS.git, items,
@@ -69,7 +71,9 @@ test.skipIf(!out)("ONB-3：项目菜单「接入编排」与接入弹窗，1280 
           await g.page.goto(String(server.url));
           const later = g.page.getByRole("button", { name: "以后再说" });
           // 侧栏项目组头：li 的直接子按钮、名字在 .truncate 里、看得见（今天页 / 侧栏条里同名的行不算）
-          const mark = `[...document.querySelectorAll("li > button")].find((b) => b.offsetParent && b.querySelector(":scope > span.truncate")?.textContent === ${JSON.stringify(PROJECT)})?.setAttribute("data-onb-head", "")`;
+          const mark = `[...document.querySelectorAll("li > button")]
+            .find((b) => b.offsetParent && b.querySelector(":scope > span.truncate")?.textContent === ${JSON.stringify(PROJECT)})
+            ?.setAttribute("data-onb-head", "")`;
           await g.page.waitForFunction(`(${mark}, !!document.querySelector("[data-onb-head]"))`, undefined, { timeout: 15_000 });
           const head = g.page.locator("[data-onb-head]");
           if (await later.isVisible().catch(() => false)) await later.click();
