@@ -62,6 +62,23 @@ describe("[验收线 3] review verdicts before / after the PM hand-back", () => 
     expect(planScheduler({ ...s, intents: [i] })).toMatchObject({ kind: "wait", code: "in_flight" });
   });
 
+  test("a review intent the scheduler finished before the hand-back no longer holds the dispatch; one planned after it still does", () => {
+    const intent = (id: string, status: SchedulerIntent["status"]): SchedulerIntent => ({ id, taskId: "T1", project: "p", node: "adversarial_review",
+      action: "review", recipient: reviewer.agent, causalSeq: 11, eventSeq: 0, taskRev: 1, specRev: 1, head: HEAD, templateVersion: 2, status,
+      attempts: 1, receipt: null, reason: "x", createdAt: 1, updatedAt: 1 });
+    const plan = (seq: number, id: string) => event(seq, "scheduler", { op: "plan", id, node: "adversarial_review", action: "review" }, "scheduler");
+    // round 2 auto review done (#20 plan), PM took over and hand-dispatched a review (#22), hand-back at #25
+    const before = { ...snapshot(plan(20, "rv1"), review(22), handback(25)), intents: [intent("rv1", "done")] };
+    const d = planScheduler(before);
+    expect(d).toMatchObject({ kind: "intent", action: "review", recipient: reviewer.agent });
+    expect(d.kind === "intent" && d.reason.startsWith(HANDBACK_REVIEW_TAG) && d.id.endsWith("1")).toBe(true); // attempt counts rv1
+    // still running when handed back: the usual in-flight wait, no second dispatch
+    expect(planScheduler({ ...before, intents: [intent("rv1", "submitted")] })).toMatchObject({ kind: "wait", code: "in_flight" });
+    // planned after the hand-back: this round's, in-flight dedup kept
+    const after = { ...snapshot(review(22), handback(25), plan(26, "rv2")), intents: [intent("rv2", "done")] };
+    expect(planScheduler(after)).toMatchObject({ kind: "wait", code: "in_flight" });
+  });
+
   test("strict seq order: a verdict equal to or after the hand-back's seq is this round's", () => {
     const evs = [handback(25)];
     expect([24, 25, 26].map((seq) => reviewBeforeHandback(evs, seq))).toEqual([true, false, false]);

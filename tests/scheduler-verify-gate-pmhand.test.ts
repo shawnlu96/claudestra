@@ -33,16 +33,18 @@ function jobs() {
 }
 
 /** The scheduler's manager child: `ledger verify` goes through the real write path and its scheduler gate (facts collection skipped). */
-function deps(db: Database, j: DeployJobs, verify: string[], o: { now?: number; dry?: "pass" | "fail" } = {}) {
+function deps(db: Database, j: DeployJobs, verify: string[], o: { now?: number; dry?: "pass" | "fail"; formal?: "pass" | "fail" } = {}) {
   const now = () => o.now ?? 1000, ledger = ledgerAs(db, "scheduler", now);
   const manager = async (...args: string[]) => {
     if (args[1] !== "verify") return ledger(...args);
     verify.push(args.slice(2).join(" "));
     if (args.includes("--dry-run")) return { ok: true, result: o.dry ?? "pass" };
     if (!schedulerCanVerify(db, args[2]!, args[4])) return { ok: false, code: "forbidden", error: "调度服务只可核对自己部署过的本卡" };
-    const r = recordVerify(db, { actor: "scheduler", now: now(), dedupKey: args[4] }, { taskId: args[2]!, result: "pass",
-      data: { checks: [{ id: "pr-merged", status: "pass" }], incomplete: false } });
-    return { ok: true, moved: true, task: r.row };
+    const result = o.formal ?? "pass"; // the formal run collects the facts again: it may turn red after a green dry-run
+    const r = recordVerify(db, { actor: "scheduler", now: now(), dedupKey: args[4] }, { taskId: args[2]!, result,
+      data: { checks: [{ id: "pr-merged", status: result }], incomplete: false } });
+    if (r.duplicate) return { ok: r.event.data.result === "pass", task: r.row, duplicate: true };
+    return result === "pass" ? { ok: true, moved: true, task: r.row } : { ok: false, code: "unverified", error: "检查单没过", task: r.row };
   };
   return { manager, jobs: j, assertActive: () => {}, now };
 }
@@ -69,7 +71,7 @@ describe("[验收线 5] verifyAfterResolve", () => {
     try {
       expect(schedulerCanVerify(f.db, "T9")).toBe(true);
       await deployTick(f.db, config, deps(f.db, jobs().j, verify));
-      expect(verify).toEqual(["T9 --dry-run", "T9 --dedup deploy-verify:m9"]);
+      expect(verify).toEqual(["T9 --dry-run", "T9 --dedup deploy-verify:m9:1000"]);
       expect(stage(f)).toBe("verified");
       expect(notes(f, "pm_handback").map((e) => e.data.type)).toEqual(["resolve_verify"]);
       await deployTick(f.db, config, deps(f.db, jobs().j, verify, { now: 10_000_000 }));
@@ -88,6 +90,22 @@ describe("[验收线 5] verifyAfterResolve", () => {
       expect(listEvents(f.db, { project: "p", target: "T9" }).filter((e) => e.kind === "verify")).toEqual([]);
       await deployTick(f.db, config, deps(f.db, jobs().j, verify, { now: 6_000_000 }));
       expect(stage(f)).toBe("verified");
+    } finally { f.close(); }
+  });
+
+  test("on: a check red after a green dry-run takes no key a later try needs; the next try verifies", async () => {
+    policy("on");
+    const f = await resolvedCard("done"), verify: string[] = [];
+    try {
+      await deployTick(f.db, config, deps(f.db, jobs().j, verify, { now: 5_000_000, formal: "fail" }));
+      expect(verify).toEqual(["T9 --dry-run", "T9 --dedup deploy-verify:m9:5000000"]);
+      expect(stage(f)).toBe("live");
+      await deployTick(f.db, config, deps(f.db, jobs().j, verify, { now: 5_000_001 }));
+      expect(verify).toHaveLength(2); // not due yet
+      await deployTick(f.db, config, deps(f.db, jobs().j, verify, { now: 6_000_000 }));
+      expect(verify.slice(2)).toEqual(["T9 --dry-run", "T9 --dedup deploy-verify:m9:6000000"]);
+      expect(stage(f)).toBe("verified");
+      expect(notes(f, "pm_handback").map((e) => e.data.type)).toEqual(["resolve_verify"]);
     } finally { f.close(); }
   });
 

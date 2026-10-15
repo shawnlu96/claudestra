@@ -4,11 +4,13 @@
  * - 12 verifyAfterResolve: a deploy run a PM / master / owner resolved as `done` whose card is live on the reviewed head and the
  *   run's spec (RESOLVED_DONE_SQL). on: the same checklist as driveVerify, dry-run first and only a pass is recorded (never a
  *   failure, nothing waived; the gate is schedulerCanVerify); observe: one note "would verify"; off: no card at all.
- * The verify dedup key is driveVerify's (`deploy-verify:<intent>`), so a PM's own `ledger verify` (card no longer live) ends it.
+ * Each recorded try has its own dedup key (`deploy-verify:<intent>:<try>`): the formal `ledger verify` collects the facts again, so a
+ * check that turns red between the dry-run and it is written as that try's result but never takes a key a later try needs; tries
+ * go on while the card is live, and a pass (or a PM's own `ledger verify`) moves it on and ends them.
  * Doc: docs/architecture/pm-handback.md. Tests: tests/pm-handback-verify.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { getEventByDedup, getTask } from "./ledger-store.js";
+import { getTask } from "./ledger-store.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { DeployRun } from "./scheduler-deploy.js";
@@ -34,7 +36,8 @@ export function verifyAfterResolveMode(project: string, policy: RecoveryPolicyPo
 /** A resolved run is retried less often than a fresh deploy: its card may stay failing and only a pass is ever recorded. */
 const RESOLVED_VERIFY_EVERY_MS = 10 * 60_000;
 const lastTry = new Map<string, number>();
-const dedupOf = (run: DeployRun) => `deploy-verify:${run.intentId}`;
+/** One key per recorded try, so a try that ends red never stands in for a later one (the ledger replays a used key's result). */
+const dedupOf = (run: DeployRun, at: number) => `deploy-verify:${run.intentId}:${at}`;
 
 /** Live cards whose deploy a human resolved as done, on the merge's reviewed head and the run's spec. */
 function resolvedVerifyRuns(db: Database, project: string): DeployRun[] {
@@ -45,7 +48,7 @@ function resolvedVerifyRuns(db: Database, project: string): DeployRun[] {
 }
 
 function due(d: DeployTickDeps, db: Database, run: DeployRun): boolean {
-  if (getTask(db, run.taskId)?.stage !== "live" || getEventByDedup(db, dedupOf(run))) return false;
+  if (getTask(db, run.taskId)?.stage !== "live") return false; // a pass moved it to verified; a red try leaves it live for the next
   const at = lastTry.get(run.intentId);
   return at === undefined || d.now() - at >= RESOLVED_VERIFY_EVERY_MS;
 }
@@ -53,7 +56,8 @@ function due(d: DeployTickDeps, db: Database, run: DeployRun): boolean {
 /** on: dry-run, and only on a pass the recorded verify (schedulerCanVerify re-checks the gate inside `ledger verify`). */
 async function driveResolvedVerify(d: DeployTickDeps, db: Database, run: DeployRun, policy: RecoveryPolicyPort = recoveryPolicy): Promise<void> {
   if (!due(d, db, run)) return;
-  lastTry.set(run.intentId, d.now());
+  const at = d.now();
+  lastTry.set(run.intentId, at);
   const head = getTask(db, run.taskId)?.headSHA ?? null;
   const mode = verifyAfterResolveMode(run.project, policy);
   if (mode === "observe") {
@@ -64,13 +68,15 @@ async function driveResolvedVerify(d: DeployTickDeps, db: Database, run: DeployR
   if (mode !== "on") return;
   const dry = await d.manager("ledger", "verify", run.taskId, "--dry-run");
   if (dry.ok !== true || dry.result !== "pass") return;
-  const r = await d.manager("ledger", "verify", run.taskId, "--dedup", dedupOf(run));
+  const r = await d.manager("ledger", "verify", run.taskId, "--dedup", dedupOf(run, at));
   if (r.code === "invalid" || r.code === "forbidden") throw new Error(`ledger verify ${run.taskId}: ${String(r.error)}`);
-  lastTry.delete(run.intentId);
-  if (r.ok === true) {
-    recordHandbackSample(db, { project: run.project, taskId: run.taskId, head, type: "resolve_verify",
-      text: `部署 ${run.intentId} 被人工结清为 done 后，调度器跑完成检查并记通过`, data: { intentId: run.intentId } }, d.now());
+  if (r.ok !== true) { // red since the dry-run: the next try comes after RESOLVED_VERIFY_EVERY_MS, as after a red dry-run
+    console.error(`⚠️ [pm-handback] ${run.taskId} 结清后完成检查 dry-run 通过、正式核对未过（${String(r.error ?? r.code)}），稍后重试`);
+    return;
   }
+  lastTry.delete(run.intentId);
+  recordHandbackSample(db, { project: run.project, taskId: run.taskId, head, type: "resolve_verify",
+    text: `部署 ${run.intentId} 被人工结清为 done 后，调度器跑完成检查并记通过`, data: { intentId: run.intentId } }, d.now());
 }
 
 interface Card { key: string; start(): (() => Promise<boolean>) | null }
