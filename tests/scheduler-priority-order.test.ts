@@ -177,6 +177,30 @@ test("人工 / 自动合并竞争：严格更高档才决定，同档交回原�
   expect(mergeContest(db, project, "X1", ["L2"]).winner).toBe("manual");
 });
 
+test("owner 同档显式顺序：提升与合并竞争都不能推翻（lift-order-1 / merge-order-1）", () => {
+  grade();
+  mode("on");
+  setPriorityOrder(db, ctx(), { queue: "project", band: "now", rev: 0, evidence,
+    targets: [{ kind: "task", id: "N2" }, { kind: "task", id: "N1" }] });
+  const r = sortByPriority(db, "author", ["N1", "N2", "W1", "L1"], key, { record: false });
+  expect(r.applied).toEqual(["N2", "N1", "W1", "L1"]);
+  // the owed card N1 stays behind N2 (owner listed it ahead); it still passes the unlisted W1 and the later L1
+  expect(liftWithinBand(r, "N1")).toEqual(["N2", "N1", "W1", "L1"]);
+  // the unlisted W1 passes nobody the owner ordered; the owner head lifts as before
+  expect(liftWithinBand(r, "W1")).toEqual(["N2", "N1", "W1", "L1"]);
+  expect(liftWithinBand(r, "N2")).toEqual(["N2", "N1", "W1", "L1"]);
+  // merge contest: owner order decides in both directions, ties only when the ranking cannot tell them apart
+  expect(mergeContest(db, project, "N1", ["N2"], { record: false })).toEqual({ winner: "auto", would: "auto", manual: "now", auto: "now" });
+  expect(mergeContest(db, project, "N2", ["N1"], { record: false })).toEqual({ winner: "manual", would: "manual", manual: "now", auto: "now" });
+  expect(mergeContest(db, project, "N1", ["W1"], { record: false }).winner).toBe("manual");
+  expect(mergeContest(db, project, "W1", ["N1", "L1"], { record: false }).winner).toBe("auto");
+  expect(mergeContest(db, project, "W1", ["W1"], { record: false }).winner).toBe("tie");
+  mode("observe");
+  expect(mergeContest(db, project, "N1", ["N2"])).toMatchObject({ winner: "tie", would: "auto" });
+  const o = sortByPriority(db, "author", ["N1", "N2", "W1", "L1"], key, { record: false });
+  expect(liftWithinBand(o, "L1")).toEqual(["L1", "N1", "N2", "W1"]);
+});
+
 test("人工合并请求队列按档位重排，同档保持 eventSeq 次序", () => {
   grade();
   mode("on");

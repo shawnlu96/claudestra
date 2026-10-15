@@ -52,12 +52,14 @@ const bandRank = (b: PriorityBand): number => PRIORITY_BANDS.indexOf(b);
 
 export interface Ranked<T> { item: T; key: PriorityKey; index: number; mode: PriorityMode; rank: PriorityRank | null; pinned: boolean }
 
-/** Pure: band, then the owner's explicit order (listed first), then the caller's position. Stable by construction. */
+/** Band, then the owner's explicit order (listed first). 0 = the owner's ranking cannot tell them apart: the old rules decide. */
+function ownerAhead(ra: PriorityRank, rb: PriorityRank): number {
+  return bandRank(ra.band) - bandRank(rb.band) || (ra.order ?? Number.MAX_SAFE_INTEGER) - (rb.order ?? Number.MAX_SAFE_INTEGER);
+}
+
+/** Pure: the owner's ranking, then the caller's position. Stable by construction. */
 function compareRanked<T>(a: Ranked<T>, b: Ranked<T>): number {
-  const ra = a.rank ?? SYSTEM, rb = b.rank ?? SYSTEM;
-  return bandRank(ra.band) - bandRank(rb.band)
-    || (ra.order ?? Number.MAX_SAFE_INTEGER) - (rb.order ?? Number.MAX_SAFE_INTEGER)
-    || a.index - b.index;
+  return ownerAhead(a.rank ?? SYSTEM, b.rank ?? SYSTEM) || a.index - b.index;
 }
 
 /**
@@ -138,8 +140,9 @@ function finish<T>(legacy: T[], applied: T[], would: T[], ranked: Ranked<T>[]): 
 }
 
 /**
- * Existing lifts (budget compensation's owed card, a fairness head) keep working, but only inside their band: the lifted item goes
- * to the front of the applied list, except that it never passes an on item of a better band. Off / observe items lift as before.
+ * Existing lifts (budget compensation's owed card, a fairness head) keep working, but only where the owner's ranking ties: the
+ * lifted item goes to the front of the applied list, except that it never passes an on item of a better band or listed ahead of it
+ * by the owner inside the band. Off / observe items lift as before.
  */
 export function liftWithinBand<T>(result: SortResult<T>, lifted: T): T[] {
   const list = result.applied.filter((x) => x !== lifted);
@@ -148,7 +151,7 @@ export function liftWithinBand<T>(result: SortResult<T>, lifted: T): T[] {
   if (!own || own.mode !== "on" || own.pinned) return [lifted, ...list];
   const better = (x: T) => {
     const r = result.rankOf(x);
-    return !!r && r.mode === "on" && !r.pinned && bandRank((r.rank ?? SYSTEM).band) < bandRank((own.rank ?? SYSTEM).band);
+    return !!r && r.mode === "on" && !r.pinned && ownerAhead(r.rank ?? SYSTEM, own.rank ?? SYSTEM) < 0;
   };
   let at = 0;
   list.forEach((x, i) => { if (better(x)) at = i + 1; });
@@ -189,8 +192,9 @@ type ContestWinner = "manual" | "auto" | "tie";
 export interface ContestResult { winner: ContestWinner; would: ContestWinner; manual: PriorityBand | null; auto: PriorityBand | null }
 
 /**
- * Manual request head vs the auto merge candidates for the one merge slot. Only a strictly better band decides; an equal band (or
- * a project not on) is `tie` and the existing manual/auto fairness (owedToAuto, eventSeq order) decides exactly as before.
+ * Manual request head vs the auto merge candidates for the one merge slot. The owner's ranking (band, then explicit order inside
+ * the band) decides; only when it cannot tell the manual head from the best auto candidate (or the project is not on) is it `tie`,
+ * and the existing manual/auto fairness (owedToAuto, eventSeq order) decides exactly as before.
  */
 export function mergeContest(db: Database | null, project: string, manualTaskId: string | null, autoTaskIds: readonly string[],
   opts: Pick<SortOptions<string>, "reader" | "record" | "now"> = {}): ContestResult {
@@ -199,13 +203,13 @@ export function mergeContest(db: Database | null, project: string, manualTaskId:
   if (!reader || !manualTaskId || !autoTaskIds.length) return none;
   const mode = reader.mode(project);
   if (mode === "off") return none;
-  const manual = reader.rank(project, manualTaskId, "project").band;
-  const auto = autoTaskIds.map((id) => reader.rank(project, id, "project").band).sort((a, b) => bandRank(a) - bandRank(b))[0]!;
-  const would: ContestWinner = bandRank(manual) < bandRank(auto) ? "manual" : bandRank(auto) < bandRank(manual) ? "auto" : "tie";
+  const manual = reader.rank(project, manualTaskId, "project");
+  const auto = autoTaskIds.map((id) => reader.rank(project, id, "project")).sort(ownerAhead)[0]!;
+  const cmp = ownerAhead(manual, auto), would: ContestWinner = cmp < 0 ? "manual" : cmp > 0 ? "auto" : "tie";
   if (opts.record !== false && db) {
     const items = [`manual:${manualTaskId}`, ...autoTaskIds.map((id) => `auto:${id}`)];
     const ranked = rankCandidates(reader, items, (s) => ({ project, taskId: s.slice(s.indexOf(":") + 1) }));
     recordPrioritySort(db, "merge_contest", { ranked, would: refill(ranked, () => true), opts: {}, now: opts.now, contest: would });
   }
-  return { winner: mode === "on" ? would : "tie", would, manual, auto };
+  return { winner: mode === "on" ? would : "tie", would, manual: manual.band, auto: auto.band };
 }

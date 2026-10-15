@@ -39,9 +39,10 @@ off / observe 项目的卡原位不动。
   按次序找第一张 `gate` 放行的卡（`gate` 就是现有依赖、锁、容量、权限、审查闸的判断，返回 null 放行）。
   排在前面被挡住的高档卡记为卡点，名额给下一张合法卡；不会越过任何闸门。
 - `liftWithinBand(result, item)`：既有提升（预算补偿欠的卡、公平队首）的替代。
-  on 项目的卡只提到同档最前，不越过更高档的合法卡；off / observe 照旧直接提到队首。
+  on 项目的卡只在 owner 排序（档位 + 同档显式顺序）分不出先后的范围内提前：不越过更高档的卡，
+  也不越过 owner 在同档显式排在它前面的卡；off / observe 照旧直接提到队首。
 - `mergeContest(db, project, manualTaskId, autoTaskIds)`：人工队首与自动候选争合并槽。
-  只有严格更高档才定胜负；同档返回 `tie`，交回现有人工/自动公平规则（owedToAuto、eventSeq）。
+  先比档位，同档再比 owner 显式顺序；两者都分不出先后才返回 `tie`，交回现有人工/自动公平规则（owedToAuto、eventSeq）。
   observe 下 `winner` 恒为 `tie`，`would` 记本会的结论。
 
 入口名：`author`、`review`、`local_slot`、`lend_slot`、`autostart`、`manual_merge`、`merge_contest`、`train_boarding`。
