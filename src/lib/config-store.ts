@@ -6,10 +6,11 @@
  */
 
 import { normalizeCompactKeep } from "./ctx-boundary-policy.js";
-import { STATE_DIR, CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
-import { readJsonState, readJsonStateSync, reportCorrupt, writeJsonStateGuarded, type StateRead } from "./state-file.js";
+import { CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
+import { readJsonState, readJsonStateSync, reportCorrupt, type StateRead } from "./state-file.js";
 
-const CONFIG_DIR = STATE_DIR;
+import { readAutoUpdateValue as autoUpdateValue } from "./floka-config/values.js";
+import { configView, writeCompatibleConfig } from "./floka-config/store.js";
 const CONFIG_PATH = STATE_CONFIG_PATH;
 
 export type AppLang = "zh" | "en";
@@ -18,7 +19,7 @@ export type UpdateChannel = "release" | "beta";
 
 export interface AppConfig {
   autoUpdate: {
-    claudestra: boolean;
+    claudestra: boolean; floka?: boolean;
     claudeCode: boolean;
     /** Codex（npm 全局）：缺省（不写）= 关，别的安装不会被突然动到；开了由 launcher 轮询，兼容且全员空闲才升（lib/codex-auto-update.ts） */
     codex?: boolean;
@@ -102,9 +103,9 @@ const DEFAULT_CONFIG: AppConfig = {
 function merge(base: AppConfig, raw: any): AppConfig {
   if (!raw || typeof raw !== "object") return base;
   const au = raw.autoUpdate || {};
-  return {
+  return configView(raw, {
     autoUpdate: {
-      claudestra: typeof au.claudestra === "boolean" ? au.claudestra : base.autoUpdate.claudestra,
+      claudestra: autoUpdateValue(au, base.autoUpdate.claudestra),
       claudeCode: typeof au.claudeCode === "boolean" ? au.claudeCode : base.autoUpdate.claudeCode,
       ...(typeof au.codex === "boolean" ? { codex: au.codex } : {}),
       channel: au.channel === "beta" ? "beta" : "release",
@@ -144,7 +145,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
           },
         }
       : {}),
-  };
+  });
 }
 
 function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
@@ -225,7 +226,7 @@ export function readConfigSync(): AppConfig {
  * 0600：里面有 API key（Groq / Jev），不给本机其他用户读；rename 覆盖后旧文件的 0644 也随之收紧。
  */
 export async function writeConfig(cfg: AppConfig): Promise<void> {
-  await writeJsonStateGuarded(CONFIG_PATH, cfg, { mode: 0o600 });
+  await writeCompatibleConfig(CONFIG_PATH, cfg);
 }
 
 /** 设置归档保留天数（0 = 永不自动清理） */
@@ -252,9 +253,9 @@ export async function setUpdateChannel(channel: UpdateChannel): Promise<AppConfi
   return cfg;
 }
 
-export async function setAutoUpdate(target: "claudestra" | "claudeCode" | "codex", enabled: boolean): Promise<AppConfig> {
+export async function setAutoUpdate(target: "claudestra" | "floka" | "claudeCode" | "codex", enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
-  cfg.autoUpdate[target] = enabled;
+  cfg.autoUpdate[target === "floka" ? "claudestra" : target] = enabled;
   await writeConfig(cfg);
   return cfg;
 }

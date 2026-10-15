@@ -18,6 +18,7 @@
 import { LOG_DIR as STATE_LOG_DIR } from "./paths.js";
 import { appendFileSync, existsSync, statSync, copyFileSync, truncateSync, mkdirSync } from "fs";
 import { dirname, join } from "path";
+import { barrierActive } from "./state-maintenance/barrier.js";
 
 export const LOG_DIR = STATE_LOG_DIR;
 
@@ -100,6 +101,7 @@ export function rotateIfLarge(path: string, maxBytes = LOG_ROTATE_BYTES): boolea
  * 只在启动时做——进程运行期间 rename/truncate 都可能和 launchd 的 fd 打架。
  */
 export function initDaemonLogs(stem: string): void {
+  if (barrierActive()) return;
   ensureLogDir();
   for (const kind of ["out", "err"] as LogKind[]) rotateIfLarge(logPath(stem, kind));
 }
