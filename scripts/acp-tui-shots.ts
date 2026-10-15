@@ -62,7 +62,7 @@ const SID = "01a138d1-91d8-72db-b1a0-ee2807fe5971";
 /** 刚重启：宿主的顶部提示 + 历史回放（acp-host.ts 的接线照搬）；旧代码树没有回放模块，照旧宿主只显示长提示 */
 async function playRestart(screen: TtyScreen): Promise<void> {
   const mod = await import("../src/lib/acp/transcript-replay.ts").catch(() => null);
-  if (!mod) return screen.show(`ACP 会话 agent-demo · 线程 ${SID.slice(0, 8)}（底部输入行可直接发消息，/help 看命令；连接日志在 /Users/owner/.claude-orchestrator/logs/acp/agent-demo/host.log）`);
+  if (!mod) return screen.show(`ACP 会话 agent-demo · 线程 ${SID.slice(0, 8)}（底部输入行可直接发消息，/help 看命令；连接日志在 /Users/owner/<状态目录>/logs/acp/agent-demo/host.log）`);
   const file = join(mkdtempSync(join(tmpdir(), "acp-tui-shots-")), "session.jsonl");
   writeFileSync(file, `${replayLines().join("\n")}\n`);
   screen.show(mod.tuiHeader("agent-demo", SID, true));
