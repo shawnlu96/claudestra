@@ -6,7 +6,7 @@
  * 真机上的导出 / 导入入口另排;这里吃的是导出后的 JSON 文件。
  */
 import { createHash } from "node:crypto";
-import { readFileSync, unlinkSync } from "node:fs";
+import { lstatSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { writeTextAtomicSync } from "../../../src/lib/state-file.ts";
 import { OLD_IDENTITY, PROPOSED_IDENTITY, SANDBOX_NOTE, type NativeMode } from "./identity.ts";
 
@@ -70,6 +70,30 @@ function buildNewShell(old: ShellConfig, oldDigest: string): string {
   return `${JSON.stringify(next, null, 2)}\n`;
 }
 
+/** stat follows symlinks and compares inode identity, including directory aliases and hard links. */
+function recordRefusals(oldPath: string, newPath: string, oldDigest: string, newDigest: string): string[] {
+  const recordPath = recordPathOf(newPath);
+  const existing = readOrNull(recordPath);
+  if (existing === null) {
+    try { lstatSync(recordPath); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; // No directory entry means there is no record to protect.
+      throw e;
+    }
+    return [`迁移记录 ${recordPath} 是悬空链接,不覆盖`];
+  }
+  const source = statSync(oldPath);
+  const record = statSync(recordPath);
+  if (source.dev === record.dev && source.ino === record.ino) return ["迁移记录路径与旧壳配置指向同一个文件,不覆盖"];
+  // Only our exact record for this import can be reused; arbitrary JSON or another import is not ownership proof.
+  if (existing !== importRecordText(oldPath, newPath, oldDigest, newDigest)) return [`迁移记录 ${recordPath} 已存在且不属于本次导入,不覆盖`];
+  return [];
+}
+
+function importRecordText(oldPath: string, newPath: string, oldDigest: string, newDigest: string): string {
+  const record: ImportRecord = { version: 1, item: IMPORT_ITEM, oldPath, oldDigest, newPath, newDigest };
+  return `${JSON.stringify(record, null, 2)}\n`;
+}
+
 function compute(oldPath: string, newPath: string): { refusals: string[]; plan?: ImportPlan; text?: string } {
   const oldText = readOrNull(oldPath);
   if (oldText === null) return { refusals: [`旧壳配置 ${oldPath} 不存在`] };
@@ -80,6 +104,7 @@ function compute(oldPath: string, newPath: string): { refusals: string[]; plan?:
   const existing = readOrNull(newPath);
   const newState = existing === null ? "absent" : existing === text ? "same" : "different";
   const refusals = newState === "different" ? [`新壳配置 ${newPath} 已存在且不是这份导入的结果,不覆盖`] : [];
+  refusals.push(...recordRefusals(oldPath, newPath, oldDigest, sha(text)));
   return { refusals, plan: { oldDigest, newDigest: sha(text), newState }, text };
 }
 
@@ -100,8 +125,7 @@ export function applyImport(opts: { mode: NativeMode; oldPath: string; newPath: 
   if (c.refusals.length || !c.plan || c.text === undefined) return result("on", "blocked", { refusals: c.refusals, plan: c.plan });
   if (c.plan.oldDigest !== given.oldDigest) return result("on", "blocked", { refusals: ["旧壳配置在计划之后变了,重新 observe"], plan: c.plan });
   const recordPath = recordPathOf(opts.newPath);
-  const record: ImportRecord = { version: 1, item: IMPORT_ITEM, oldPath: opts.oldPath, oldDigest: c.plan.oldDigest, newPath: opts.newPath, newDigest: c.plan.newDigest };
-  const recordText = `${JSON.stringify(record, null, 2)}\n`;
+  const recordText = importRecordText(opts.oldPath, opts.newPath, c.plan.oldDigest, c.plan.newDigest);
   let writes = 0;
   if (readOrNull(recordPath) !== recordText) { writeTextAtomicSync(recordPath, recordText, { mode: 0o600 }); writes++; }
   if (c.plan.newState === "absent") { writeTextAtomicSync(opts.newPath, c.text, { mode: 0o600 }); writes++; }

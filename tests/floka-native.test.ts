@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "fs";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, symlinkSync, linkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -196,6 +196,64 @@ describe("[验收线 2] 导入幂等、配对凭据原样、新旧 scheme 都能
 });
 
 describe("[验收线 3] 回旧壳:旧配置可读、旧推送凭据仍在、sandbox 不自动继承", () => {
+  test.each(["direct", "source-symlink", "record-symlink", "directory-symlink", "hardlink"])(
+    "record/source collision %s preserves source bytes and push", (alias) => {
+      const dir = tmp();
+      const source = oldShell(dir);
+      const bytes = readFileSync(source, "utf8");
+      let newPath = join(dir, "new.json");
+      const record = `${newPath}.floka-import.json`;
+      let oldPath = source;
+      if (alias === "direct" || alias === "directory-symlink" || alias === "source-symlink") {
+        writeFileSync(record, bytes);
+        oldPath = record;
+        if (alias === "source-symlink") { unlinkSync(source); symlinkSync(record, source); oldPath = source; }
+        if (alias === "directory-symlink") {
+          const aliasDir = `${dir}-alias`;
+          symlinkSync(dir, aliasDir); roots.push(aliasDir);
+          newPath = join(aliasDir, "new.json");
+        }
+      } else if (alias === "hardlink") linkSync(source, record);
+      else symlinkSync(source, record);
+      const plan = planImport({ mode: "observe", oldPath, newPath });
+      const applied = applyImport({ mode: "on", oldPath, newPath, plan });
+      expect(readFileSync(oldPath, "utf8")).toBe(bytes);
+      expect(JSON.parse(readFileSync(oldPath, "utf8")).push).toEqual(OLD_PUSH);
+      expect(applied).toMatchObject({ status: "blocked", writes: 0 });
+      expect(existsSync(newPath)).toBe(false);
+    },
+  );
+
+  test.each([false, true])("unrelated record is preserved (after observe: %s)", (late) => {
+    const dir = tmp();
+    const oldPath = oldShell(dir);
+    const bytes = readFileSync(oldPath, "utf8");
+    const newPath = join(dir, "new.json");
+    const record = `${newPath}.floka-import.json`;
+    const unrelated = '{"unrelated":true}\n';
+    if (!late) writeFileSync(record, unrelated);
+    const plan = planImport({ mode: "observe", oldPath, newPath });
+    if (late) writeFileSync(record, unrelated);
+    expect(applyImport({ mode: "on", oldPath, newPath, plan })).toMatchObject({ status: "blocked", writes: 0 });
+    expect(readFileSync(record, "utf8")).toBe(unrelated);
+    expect(readFileSync(oldPath, "utf8")).toBe(bytes);
+    expect(JSON.parse(bytes).push).toEqual(OLD_PUSH);
+    expect(existsSync(newPath)).toBe(false);
+  });
+
+  test("dangling record symlink is not overwritten", () => {
+    const dir = tmp();
+    const oldPath = oldShell(dir);
+    const newPath = join(dir, "new.json");
+    const record = `${newPath}.floka-import.json`;
+    symlinkSync(join(dir, "missing.json"), record);
+    const plan = planImport({ mode: "observe", oldPath, newPath });
+    expect(plan).toMatchObject({ status: "blocked", writes: 0 });
+    expect(applyImport({ mode: "on", oldPath, newPath, plan }).status).toBe("blocked");
+    expect(lstatSync(record).isSymbolicLink()).toBe(true);
+    expect(existsSync(newPath)).toBe(false);
+  });
+
   test("回滚删掉导入出的新壳配置,旧壳配置逐字节不变", () => {
     const dir = tmp();
     const old = oldShell(dir);
