@@ -236,6 +236,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-fix-reassign-start.ts": "sql=1 stmt=1",
     "lend-fix-start.ts": "sql=1 stmt=1 proc=1 vcs=3",
     "lend-peer-cooldown.ts": "sql=7 stmt=7",
+    "lend-peer-runtime-cooldown.ts": "sql=2 stmt=2", // AUTHCOOL1: inside leaseLend's transaction, like lend-peer-cooldown.ts
     "lend-pr-takeover-ledger.ts": "sql=1 stmt=1",
     "lend-reclaim-scheduler.ts": "sql=5 stmt=5 notice=1",
     "manual-merge-queue.ts": "sql=3 stmt=3",
