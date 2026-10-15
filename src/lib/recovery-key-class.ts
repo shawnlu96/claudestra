@@ -23,6 +23,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   localReviewAdopt: { class: "permission", reason: "接管本机人工审查的授权来源" },
   mainCarry: { class: "safety", reason: "将旧 head 的审查证据沿用到新 head" },
   mainCarryMerge: { class: "safety", reason: "以纯 main 合并证明沿用审查结论" },
+  mainRedRepairBind: { class: "permission", reason: "修复卡自动拿 main-ci 修复绑定" },
   manualCaseOwnership: { class: "permission", reason: "决定人工事项的处理责任人" },
   manualMergeQueue: { class: "permission", reason: "凭 PM 人工请求授权进入合并队列" },
   manualRecovery: { class: "permission", reason: "按证据把人工工作流交回自动调度" },
