@@ -5,7 +5,7 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { Database as RawDb } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -183,11 +183,18 @@ describe("dry-run 只读打开台账（CLI 路径 onboardDb）", () => {
     raw.close();
     return path;
   }
-  /** 目录里每个文件的字节与修改时间、有哪些子目录（迁移前的备份）（-shm 是只读连接也会映射的共享内存索引，不算台账内容） */
-  const files = (path: string) => Object.fromEntries(readdirSync(dirname(path)).filter((f) => !f.endsWith("-shm")).map((f) => {
-    const full = join(dirname(path), f), st = statSync(full);
-    return [f, st.isDirectory() ? "dir" : { bytes: readFileSync(full).toString("base64"), mtime: st.mtimeMs }];
-  }));
+  /**
+   * 目录里每个文件的字节与修改时间、有哪些子目录（迁移前的备份）。只排除台账自己的 SQLite 辅助文件 <db>-shm / <db>-wal：
+   * 规格卡 ONB-3「PM 裁定（2026-10-16 03:39）」定验收线 8 不含这两个（只读打开 WAL 库必动 -shm，immutable=1 并发下会读坏）；
+   * 主库和其余文件仍逐字节、mtime 比对。
+   */
+  const files = (path: string) => {
+    const sidecars = new Set([`${basename(path)}-shm`, `${basename(path)}-wal`]);
+    return Object.fromEntries(readdirSync(dirname(path)).filter((f) => !sidecars.has(f)).map((f) => {
+      const full = join(dirname(path), f), st = statSync(full);
+      return [f, st.isDirectory() ? "dir" : { bytes: readFileSync(full).toString("base64"), mtime: st.mtimeMs }];
+    }));
+  };
 
   test("r2 dry-run-ledger-write：旧 schema + 负责人列偏移的台账，dry-run 不改台账字节 / mtime / user_version，也不出备份", async () => {
     const path = staleLedger();
