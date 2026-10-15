@@ -10,8 +10,10 @@
  * record「本会清理重建」, then the old unknown; on = clear and rebuild). A manual card never heals. tests/fix-swap-halfbuilt*.test.ts.
  *
  * The kill runs in a manager child that reads the registry after this process did. It is only sent for a placeholder whose creating
- * process is dead: nothing can still turn that placeholder into a running session, and runKill
- * hands exactly such a marker to create-guard.ts clearCreateResidue (marker re-checked, recorded window id or a bare shell only).
+ * process is dead, and it carries that placeholder's marker (`--expect-create <pid>@<startedAt>`): the child re-reads the registry
+ * and refuses, touching nothing, unless the entry is still that marker with no session id and a dead creator — a same-name create
+ * that finished meanwhile is never killed by name. Only then does create-guard.ts clearCreateResidue run (marker re-checked,
+ * recorded window id or a bare shell only).
  */
 import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
@@ -146,7 +148,7 @@ export async function healHalfBuilt(db: Database, ctx: WriteCtx, intent: Schedul
   }
   if (healRefusal(db, intent, name, deps, before)) return null;
   if (before !== "absent") { // nothing under the name at all needs no kill
-    const killed = await deps.manager("kill", name); deps.active();
+    const killed = await deps.manager("kill", name, "--expect-create", `${before.pid}@${before.startedAt}`); deps.active();
     if (killed.ok !== true) return null;
   }
   if (healRefusal(db, intent, name, deps, "absent")) return null;

@@ -181,8 +181,8 @@ test("a failed kill other than strictly nothing-there stays unknown", async () =
   } finally { h.f.close(); }
 });
 
-// SWAPFIX1 r2 review (halfbuilt-session-race): the manager kill child reads the registry after this process did. The kill is only sent
-// for a placeholder whose creating process is dead, which runKill hands to create-guard's marker-checked clearCreateResidue.
+// The manager kill child reads the registry after this process did. The kill is only sent for a placeholder whose creating process is
+// dead and carries that marker (`--expect-create`); runKill refuses unless the entry is still it, then clears it through create-guard.
 async function killWorld() {
   const h = await halfBuilt();
   const { intent, name } = await h.start();
@@ -190,11 +190,12 @@ async function killWorld() {
   const world = makeWorld({ windows: [name] });
   world.deps.alive = (pid) => pid !== MARKER.pid; // the child's own pid check: the 90 s-killed creator is gone
   let entry: (() => void) | null = null;
-  h.p.deps.manager = async (cmd, agent) => {
+  h.p.deps.manager = async (cmd, agent, ...rest) => {
     h.p.effects.push(`${cmd}:${agent}`);
     entry?.(); // what happens between this process's last read and the child's first one
     world.st.reg = { socket: "s", agents: h.p.raw().agents };
-    const out = await runKill(agent, world.deps);
+    const ec = /^(\d+)@(.+)$/.exec(rest[rest.indexOf("--expect-create") + 1] ?? ""); // manager.ts's kill argument parsing
+    const out = await runKill(agent, world.deps, ec ? { expectCreate: { pid: Number(ec[1]), startedAt: ec[2] } } : {});
     writeFileSync(h.p.deps.registryPath!, JSON.stringify({ ...h.p.raw(), agents: world.st.reg.agents }));
     return out;
   };
@@ -251,5 +252,42 @@ test("a registry entry that is not a create placeholder, or a shell window no en
       expect(await k.heal()).toBeNull(); // [验收线 3]
       expect(k.h.p.effects).not.toContain(`kill:${k.name}`);
     } finally { k.h.f.close(); }
+  }
+});
+
+test("halfbuilt-session-race: a same-name create that completes before the kill child reads the registry is never killed by name", async () => {
+  const k = await killWorld();
+  try {
+    let args: string[] = [];
+    const send = k.h.p.deps.manager;
+    k.h.p.deps.manager = async (...a) => { args = a; return send(...a); };
+    k.onEntry(() => { // the dead placeholder was cleared by another create that finished: a real session, no pending, a new busy window
+      k.h.p.edit((r) => { r.agents[k.name] = { cwd: k.h.f.dir, status: "active", sessionId: "fresh-session", windowId: "@101" }; });
+      k.world.st.windows = [k.name]; k.world.st.winIds = ["@101"]; k.world.st.busyWindows.push(k.name);
+    });
+    expect(await k.heal()).toBeNull(); // [验收线 3]
+    expect(args).toEqual(["kill", k.name, "--expect-create", `${MARKER.pid}@${MARKER.startedAt}`]);
+    expect(k.world.st.windows).toEqual([k.name]);
+    expect(k.world.st.archived).toEqual([]);
+    expect(k.h.p.raw().agents[k.name]).toMatchObject({ status: "active", sessionId: "fresh-session" });
+    expect(getIntent(k.h.f.db, k.intent.id)?.status).toBe("submitted");
+  } finally { k.h.f.close(); }
+});
+
+test("an expect-create kill refuses, untouched, any entry that is not that dead marker", async () => {
+  const expectCreate = { pid: MARKER.pid, startedAt: MARKER.startedAt };
+  const entries: Record<string, Record<string, unknown>> = {
+    session: { status: "active", sessionId: "s1", pending: MARKER },
+    other: { status: "active", pending: { ...MARKER, startedAt: "2026-10-15T00:00:01.000Z" } },
+    live: { status: "active", pending: MARKER },
+    formal: { status: "active", sessionId: "s0" },
+  };
+  for (const [shape, entry] of Object.entries(entries)) {
+    const world = makeWorld({ windows: ["agent-x"] });
+    world.deps.alive = (pid) => shape === "live" && pid === MARKER.pid;
+    world.st.reg.agents["agent-x"] = entry as never;
+    const before = structuredClone(world.st);
+    expect(await runKill("agent-x", world.deps, { expectCreate })).toMatchObject({ ok: false, refused: "identity", untouched: true });
+    expect(world.st).toEqual(before);
   }
 });
