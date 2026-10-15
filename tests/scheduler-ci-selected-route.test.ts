@@ -1,5 +1,9 @@
 /** Production sink → bridge intake → persistent PM digest, including repository URL boundaries. */
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterEach, expect, mock } from "bun:test";
+import { isolatedStateSuite } from "./isolated-state.js";
+
+// The production sink reads the default ledger; isolate its cached writer/reader and bridge mock from other suites.
+const { test, afterAll } = isolatedStateSuite(import.meta.path);
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +22,8 @@ mock.module("../src/lib/bridge-client.js", () => ({
     return { ok: true, result: { ok: true } };
   },
 }));
-const { LEDGER_PATH, openLedger } = await import("../src/lib/ledger-store.js");
+const { LEDGER_PATH, openLedger, closeLedger } = await import("../src/lib/ledger-store.js");
+afterAll(() => closeLedger(LEDGER_PATH));
 const { setMeta } = await import("../src/lib/ledger-write.js");
 const { asInfo } = await import("../src/lib/pm-notice-level.js");
 const { PmDigestStore } = await import("../src/lib/pm-digest-store.js");
