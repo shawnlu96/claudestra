@@ -6,6 +6,7 @@
  */
 import { scopeWireProtected } from "./ask-scope-registry.js";
 import { DIRS, FILE_PATTERNS, FILES, KEYWORDS } from "./peer-pr-surface.js";
+import { REPO_ROOT } from "./repo-root.js";
 import type { ProposalRecord } from "./shared-ledger-feature-proposals.js";
 
 export type AutoReason =
@@ -96,7 +97,7 @@ let repoFilesCache: readonly string[] | null | undefined;
 function repoFiles(): readonly string[] | null {
   if (repoFilesCache !== undefined) return repoFilesCache;
   try {
-    const r = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "ignore" });
+    const r = Bun.spawnSync(["git", "ls-files", "-z"], { cwd: REPO_ROOT, stdout: "pipe", stderr: "ignore" });
     repoFilesCache = r.exitCode === 0 ? r.stdout.toString().split("\0").filter(Boolean) : null;
   } catch { repoFilesCache = null; }
   return repoFilesCache;
