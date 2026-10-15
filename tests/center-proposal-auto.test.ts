@@ -73,6 +73,7 @@ function harness(initial: ProposalRecord[], o: { mode?: RecoveryMode | null; db?
       auto: {
         mode: () => mode!,
         db: () => db,
+        files: () => REPO,
         hasCard: (key: string) => hasCardOverride ?? asks.some(a => a.dedupKey === key && a.createdBy === PROPOSAL_INBOX_CREATOR),
       },
     }),
@@ -87,23 +88,44 @@ function harness(initial: ProposalRecord[], o: { mode?: RecoveryMode | null; db?
     setCenter: (c: ProposalRecord[]) => { center = c; }, setDecide: (f: typeof decideImpl) => { decideImpl = f; },
     advance: (ms: number) => { now += ms; }, setMode: (m: RecoveryMode) => { mode = m; }, setHasCard: (v: boolean | null) => { hasCardOverride = v; } };
 }
+/** 分类用的仓库文件清单（固定，不随本仓增删文件漂）：普通文件 + 名字被通配遮住也要认出来的保护文件 */
+const REPO = [
+  "web/features/collab/board.tsx", "web/features/collab/list.tsx", "docs/architecture/scheduler-ui-gate.md", "docs/migrations/floka.md",
+  "tests/center-proposal-auto.test.ts", "tests/preload.ts", "src/lib/center-proposal-auto.ts", "src/lib/scheduler-wip-gate.ts",
+  "src/lib/recovery-keys.ts", "src/lib/ledger-store.ts", "src/lib/sqlite-migrate.ts", "src/lib/plain-util.ts", "src/bridge/api-auth.ts",
+];
 const keyOf = (r: ProposalRecord) =>
   execKey(SCOPE.projectId, { localProjectId: LOCAL, proposalId: r.proposalId, proposalRev: r.proposalRev, proposalDigest: r.operation.proposalDigest });
 
 describe("PROPAUTO1 分类（纯函数）", () => {
   test("[验收线 2] 宽 glob 只要能盖到保护路径就判 owner；具体的普通路径判 auto", () => {
-    for (const g of ["**", "*", "src/**", "src/lib/**", "src/bridge/**", "web/**", "src/*/local-api/*.ts"]) expect(globHits(g)).not.toEqual([]);
-    for (const g of ["src/**", "src/lib/**", "src/bridge/**", "**"]) expect(globHits(g)).toContain("glob_wide");
-    for (const g of ["web/features/collab/**", "docs/**", "src/lib/center-proposal-auto*.ts", "tests/center-*.test.ts", "src/lib/foo-*.ts"]) expect(globHits(g)).toEqual([]);
-    expect(globHits("src/bridge/api-auth.ts")).toContain("glob_permission_gate");
-    expect(globHits("src/lib/*-gate.ts")).toContain("glob_permission_gate");
-    expect(globHits("src/hooks/**")).toContain("glob_security_surface");
-    expect(globHits("src/lib/*.ts")).toContain("glob_data_schema"); // 能匹配 ledger-store.ts
-    expect(globHits("src/lib/ledger-schema*.ts")).toContain("glob_data_schema");
-    expect(globHits("db/001_init.sql")).toContain("glob_outside_roots");
-    expect(globHits("src/lib/floka-migration/**")).toContain("glob_data_schema");
-    expect(globHits("../etc/passwd")).toEqual(["glob_invalid"]);
-    expect(globHits("")).toEqual(["glob_empty"]);
+    for (const g of ["**", "*", "src/**", "src/lib/**", "src/bridge/**", "web/**", "src/*/local-api/*.ts"]) expect(globHits(g, REPO)).not.toEqual([]);
+    for (const g of ["src/**", "src/lib/**", "src/bridge/**", "**"]) expect(globHits(g, REPO)).toContain("glob_wide");
+    for (const g of ["web/features/collab/**", "docs/**", "src/lib/center-proposal-auto*.ts", "tests/center-*.test.ts", "src/lib/foo-*.ts"]) expect(globHits(g, REPO)).toEqual([]);
+    expect(globHits("src/bridge/api-auth.ts", REPO)).toContain("glob_permission_gate");
+    expect(globHits("src/lib/*-gate.ts", REPO)).toContain("glob_permission_gate");
+    expect(globHits("src/hooks/**", REPO)).toContain("glob_security_surface");
+    expect(globHits("src/lib/*.ts", REPO)).toContain("glob_data_schema"); // 能匹配 ledger-store.ts
+    expect(globHits("src/lib/ledger-schema*.ts", REPO)).toContain("glob_data_schema");
+    expect(globHits("db/001_init.sql", REPO)).toContain("glob_outside_roots");
+    expect(globHits("src/lib/floka-migration/**", REPO)).toContain("glob_data_schema");
+    expect(globHits("../etc/passwd", REPO)).toEqual(["glob_invalid"]);
+    expect(globHits("", REPO)).toEqual(["glob_empty"]);
+  });
+
+  test("[验收线 2] 通配遮住文件名也认得出：能匹配到的现有文件逐个套保护规则；? / [ ] 遮名字或读不到文件清单交 owner", () => {
+    expect(globHits("src/lib/scheduler-wip-?ate.ts", REPO)).toEqual(["glob_unresolved", "glob_permission_gate"]);
+    expect(globHits("src/lib/scheduler-wip-*ate.ts", REPO)).toEqual(["glob_permission_gate"]);
+    expect(globHits("src/lib/recovery-?eys.ts", REPO)).toEqual(["glob_unresolved", "glob_security_surface"]);
+    expect(globHits("src/lib/recovery-*eys.ts", REPO)).toEqual(["glob_security_surface"]);
+    expect(globHits("src/lib/sqlite-mig*.ts", REPO)).toEqual(["glob_data_schema"]);
+    expect(globHits("src/lib/[p]lain-util.ts", REPO)).toEqual(["glob_unresolved"]);
+    expect(globHits("src/lib/plain-*.ts", REPO)).toEqual([]);
+    expect(globHits("src/lib/plain-*.ts", null)).toEqual(["glob_unresolved"]);
+    expect(globHits("src/lib/plain-util.ts", null)).toEqual([]); // 字面路径不靠文件清单
+    // 默认核本仓 git ls-files：审查探针里的两条在真仓库上同样判 owner
+    expect(globHits("src/lib/scheduler-wip-*ate.ts")).toContain("glob_permission_gate");
+    expect(globHits("src/lib/recovery-*eys.ts")).toContain("glob_security_surface");
   });
 
   test("代表路径真的命中复用的规则（规则改了这里先红）", () => {
@@ -113,16 +135,16 @@ describe("PROPAUTO1 分类（纯函数）", () => {
   });
 
   test("[验收线 2][验收线 6] 词表补判 owner；空 globs / 没有节点判 owner；修订按新的全量节点判", () => {
-    expect(classifyProposal(rec("a"))).toEqual({ route: "auto", reasons: [] });
-    expect(classifyProposal(rec("a", { description: "把凭据存到别处" })).reasons).toEqual(["text_sensitive_word"]);
-    expect(classifyProposal(rec("a", { ownerWords: "drop table x" })).route).toBe("owner");
-    expect(classifyProposal(rec("a", { nodes: [node("x", ["docs/**"], "加 Token 校验")] })).reasons).toEqual(["text_sensitive_word"]);
-    expect(classifyProposal(rec("a", { nodes: [node("x", [])] })).reasons).toEqual(["glob_empty"]);
-    expect(classifyProposal(rec("a", { nodes: [] })).reasons).toEqual(["nodes_empty"]);
-    expect(classifyProposal(rec("a", { kind: "revise", nodes: [node("x", ["docs/**"]), node("y", ["src/lib/ledger-store.ts"])] })).reasons).toEqual(["glob_data_schema"]);
-    expect(classifyProposal(rec("a", { kind: "revise", nodes: [node("x", ["docs/**"])] })).route).toBe("auto");
+    expect(classifyProposal(rec("a"), REPO)).toEqual({ route: "auto", reasons: [] });
+    expect(classifyProposal(rec("a", { description: "把凭据存到别处" }), REPO).reasons).toEqual(["text_sensitive_word"]);
+    expect(classifyProposal(rec("a", { ownerWords: "drop table x" }), REPO).route).toBe("owner");
+    expect(classifyProposal(rec("a", { nodes: [node("x", ["docs/**"], "加 Token 校验")] }), REPO).reasons).toEqual(["text_sensitive_word"]);
+    expect(classifyProposal(rec("a", { nodes: [node("x", [])] }), REPO).reasons).toEqual(["glob_empty"]);
+    expect(classifyProposal(rec("a", { nodes: [] }), REPO).reasons).toEqual(["nodes_empty"]);
+    expect(classifyProposal(rec("a", { kind: "revise", nodes: [node("x", ["docs/**"]), node("y", ["src/lib/ledger-store.ts"])] }), REPO).reasons).toEqual(["glob_data_schema"]);
+    expect(classifyProposal(rec("a", { kind: "revise", nodes: [node("x", ["docs/**"])] }), REPO).route).toBe("auto");
     // 提案人不限
-    expect(classifyProposal(rec("a", { by: SELF, via: "service" })).route).toBe("auto");
+    expect(classifyProposal(rec("a", { by: SELF, via: "service" }), REPO).route).toBe("auto");
   });
 });
 
@@ -163,6 +185,19 @@ describe("PROPAUTO1 接线", () => {
       expect(card.context).toContain("需要你批的原因：");
       expect(card.context).toContain(why);
     }
+    expect(h.results()).toEqual([]);
+  });
+
+  test("[验收线 2] 通配遮住的权限闸 / 关键词文件：标题说明都无害，也只出卡、从不 decide", async () => {
+    const cases = ["src/lib/scheduler-wip-?ate.ts", "src/lib/scheduler-wip-*ate.ts", "src/lib/recovery-?eys.ts", "src/lib/recovery-*eys.ts"]
+      .map((g, i) => rec(`p-obscured-${i}`, { nodes: [node("x", [g])] }));
+    const h = harness(cases);
+    await pollCenterProposals(h.deps);
+    h.advance(RETRY_AFTER_MS + 1);
+    await pollCenterProposals(h.deps);
+    expect(h.decided).toEqual([]);
+    expect(h.asks.length).toBe(cases.length);
+    for (const a of h.asks) expect(a.context).toContain("需要你批的原因：");
     expect(h.results()).toEqual([]);
   });
 

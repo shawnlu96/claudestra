@@ -71,6 +71,8 @@ interface AutoApproveDeps {
   db: () => Database;
   /** 这一版本有没有人工卡（任何状态：open / answered / 已撤都算） */
   hasCard: (dedupKey: string) => boolean;
+  /** 分类时核的仓库现有文件；不给 = 本仓 git ls-files（读不到 → 带通配的 glob 判 owner） */
+  files?: () => readonly string[] | null;
 }
 
 const paramsKey = (p: InboxParams) => `${p.localProjectId}\0${p.proposalId}\0${p.proposalRev}\0${p.proposalDigest}`;
@@ -180,7 +182,7 @@ async function autoRoute(project: InboxProject, pending: Pending, mode: Recovery
   const plan = new Map<string, Plan>(), id = project.localProjectId;
   for (const r of pending.records) {
     if (r.proposal.expiresAt <= d.now()) continue;
-    const params = paramsOf(id, r), verdict = classifyProposal(r);
+    const params = paramsOf(id, r), verdict = a.files ? classifyProposal(r, a.files()) : classifyProposal(r);
     try {
       if (mode === "observe") {
         if (verdict.route === "auto") observeAutoApprove(a.db(), identityOf(project, params), d.now());

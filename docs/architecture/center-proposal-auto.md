@@ -27,10 +27,11 @@ off（或 deps 里没有 `auto`）：以上都不发生，逐字回到旧路径�
 | `glob_security_surface` | peer-pr-surface 的敏感目录、固定文件、文件名规则、文件名关键词（复用其导出的常量） |
 | `glob_permission_gate` | scopeWireProtected：权限闸文件、`-gate` / `-auth` / `auth-` 名字规则 |
 | `glob_data_schema` | ledger-store / ledger-schema / migrate / migration、`*.sql`、shared-ledger-contract*、recovery-key-class / defaults、scripts/guard/ |
+| `glob_unresolved` | 文件名段里有 `?` / `[ ]` 按字符遮名字（`src/lib/scheduler-wip-?ate.ts`），或读不到仓库文件清单（git ls-files 失败）时的通配 glob |
 | `glob_wide` | 通配 glob 的静态前缀是某个保护路径的祖先，且能匹配到它（`src/**`、`src/lib/**`、`src/bridge/**`…） |
 | `text_sensitive_word` | 标题、说明、ownerWords、节点 oneLine 命中固定词表（只补判 owner） |
 
-glob 判法：名字规则对 glob 原文判；通配 glob 用 `Bun.Glob` 对每个具体保护文件试匹配，对保护目录逐段比（剩余段有 `**` 一律算能到）。
+glob 判法：名字规则对 glob 原文判；通配 glob 用 `Bun.Glob` 对仓库现有文件（本仓 `git ls-files`，进程内读一次）逐个试匹配，能匹配到的每个文件套全部保护规则（目录、固定文件、FILE_PATTERNS、文件名关键词、scopeWireProtected、删数据 / schema），所以 `src/lib/scheduler-wip-*ate.ts` 盖到 `scheduler-wip-gate.ts`、`src/lib/recovery-*eys.ts` 盖到 `recovery-keys.ts` 都判 owner；另外对固定的具体保护文件试匹配（兜住仓库里还没有的），对保护目录逐段比（剩余段有 `**` 一律算能到）。docs/ tests/ 下的现有文件只按目录 / 固定文件算，不套名字规则（同 peer-pr-surface：不运行的文件名不算安全面），所以 `docs/**` 不因 `docs/architecture/scheduler-ui-gate.md` 出卡。注意 `web/features/collab/**` 在当前仓库会盖到 `team-source-key.ts`（关键词 key）、`work/team-work-merge.ts`（merge），按规则判 owner。
 修订提案对新的全量节点判，被移除的节点不判。提案人不限。
 
 ## 只 decide 一次
