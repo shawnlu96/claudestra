@@ -346,10 +346,10 @@ test("全新机器显式选新根：空 ~/.floka 里生成身份", () => {
   expect(startup(home).status).toBe(0);
 });
 
-/** 真实 Bun 加载口径：空环境下 --env-file 读出的变量（含 CRLF 规范化与 $ 展开），不经本仓的简化解析器 */
+/** 真实 Bun 加载口径：最小环境下 --env-file 读出的变量（含 CRLF 规范化与 $ 展开），不经本仓的简化解析器 */
 function bunEnv(path: string): Record<string, string> {
   const r = spawnSync(process.execPath, ["--config=/dev/null", `--env-file=${path}`, "-e", "process.stdout.write(JSON.stringify(process.env))"],
-    { env: {}, encoding: "utf8", timeout: 20_000, cwd: tmp("bun-env") });
+    { env: testChildEnv(), encoding: "utf8", timeout: 20_000, cwd: tmp("bun-env") });
   expect(r.status).toBe(0);
   return JSON.parse(r.stdout);
 }
