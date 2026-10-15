@@ -64,7 +64,7 @@ describe("S2I routing of the auto tick's side-effect ports", () => {
     expect(w).not.toBe(o.session); // 验收线 5 (PM 定 10-10): the local worker is a forwarding object
     expect(await deps.ensure(task, "author", "claude")).toBe(o.ready);
     expect(await deps.pinReview(task, ref, HEAD)).toEqual({ dir: "/tmp/rv" });
-    await deps.notifyPm(task, "hi");
+    await deps.notifyPm(task, "hi", "action");
     expect(await deps.manager("ledger", "scheduler-settle", "intent-one", "--from", "pending", "--to", "submitted", "--receipt", "c"))
       .toEqual({ ok: true });
     expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "sent" });
@@ -178,7 +178,7 @@ describe("S2I routing of the auto tick's side-effect ports", () => {
     expect(await w.archive(ref)).toMatchObject({ ok: false, unknown: false });
     expect(await deps.ensure(task, "author", "claude")).toMatchObject({ kind: "wait" });
     expect(await deps.pinReview(task, ref, HEAD)).toHaveProperty("manual");
-    await deps.notifyPm(task, "hi");
+    await deps.notifyPm(task, "hi", "action");
     expect(o.counts).toEqual({ submit: 0, ensure: 0, pin: 0, notify: 0, cancel: 0, manager: 0 });
     expect(c.calls).toHaveLength(0);
     expect(observed.every((code) => code === "skip")).toBe(true);

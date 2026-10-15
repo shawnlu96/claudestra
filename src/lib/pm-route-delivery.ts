@@ -17,9 +17,9 @@ function record(store: PmDigestStore, project: string, at: number, id: string, s
   verdict: DigestVerdict, routeOnly: boolean, enqueue = false): void {
   const mode = store.mode(project);
   store.record({ at, project, mode, source, send: verdict.send, reason: verdict.reason,
-    ...(verdict.send === "digest" ? { kind: verdict.kind } : {}), ...(routeOnly ? { routeOnly: true } : {}) },
+    ...(verdict.send === "digest" ? { kind: verdict.kind } : {}), ...(routeOnly ? { routeOnly: true } : {}), ...(verdict.levelSource ? { levelSource: verdict.levelSource } : {}) },
   enqueue && verdict.send === "digest" ? { id, project, at, kind: verdict.kind, source: verdict.source, firstLine: verdict.firstLine,
-    ...(verdict.card ? { card: verdict.card } : {}), ...(verdict.detail ? { detail: verdict.detail } : {}) } : undefined);
+    ...(verdict.card ? { card: verdict.card } : {}), ...(verdict.detail ? { detail: verdict.detail } : {}), ...(verdict.unleveled ? { unleveled: true as const } : {}) } : undefined);
 }
 
 export function routePmPush(env: RouteEnvelope, project: string, deps: Deps, legacy: () => boolean,

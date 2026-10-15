@@ -32,6 +32,7 @@ import { schedulerV2Lifecycle, schedulerV2SkipTask } from "./scheduler-v2-skip.j
 import { sessionJsonlPath } from "./session-source.js";
 import { readJsonLenient, readJsonStateSync } from "./state-file.js";
 import { readMemory } from "./sys-memory.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string> } {
   const last = (kind: string) => new Map((db.query("SELECT target, MAX(ts) AS ts FROM events WHERE kind = ? AND target != '' GROUP BY target").all(kind) as
@@ -120,9 +121,9 @@ async function du(paths: string[]): Promise<number | null> {
 }
 
 /** LIFE4 PM notices: scheduler-retire-deps.ts's channel and liveness rule; the card's project, else the first configured one. */
-export const lifecycleNotifier = (db: Database, config: SchedulerConfig, active: () => void, send = notifyProjectPm) => (a: Action, text: string): Promise<void> =>
+export const lifecycleNotifier = (db: Database, config: SchedulerConfig, active: () => void, send = notifyProjectPm) => (a: Action, text: string, level: PmNoticeLevel): Promise<void> =>
   whileOwned(active, () => send(db, (db.query("SELECT project FROM tasks WHERE id = ?").get(a.taskId) as { project: string } | null)?.project
-    ?? Object.keys(config.projects)[0] ?? "", text, { fromName: "scheduler", stillActive: () => { try { active(); return true; } catch { return false; } } }));
+    ?? Object.keys(config.projects)[0] ?? "", text, { fromName: "scheduler", level, stillActive: () => { try { active(); return true; } catch { return false; } } }));
 
 let lastObserved = "";
 

@@ -12,10 +12,11 @@ import { schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 import type { CiIoMapFuseGh } from "./ci-io-map-fuse.js";
 import { fuseLedger } from "./ci-io-map-fuse-ledger.js";
 import { ciIoMapFuseHook, type CiIoMapFuseHook } from "./ci-io-map-fuse-run.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 const CALLS: readonly (keyof CiIoMapFuseGh)[] = ["ciRun", "headRuns", "attemptJobs", "attemptFailedLog", "jobLog", "planArtifact", "ioMapVar", "lowerIoMapVar"];
 
-export function ciIoMapFuse(db: Database, gh: object, deps: { now(): number; notifyPm(task: LedgerTask, text: string): Promise<void> },
+export function ciIoMapFuse(db: Database, gh: object, deps: { now(): number; notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void> },
   policy: RecoveryPolicyPort = recoveryPolicy, repoOf: (project: string) => string | null = projectRepoFor): CiIoMapFuseHook | undefined {
   const port = gh as Partial<CiIoMapFuseGh>;
   if (CALLS.some((c) => typeof port[c] !== "function")) return undefined;
@@ -24,6 +25,6 @@ export function ciIoMapFuse(db: Database, gh: object, deps: { now(): number; not
     pm: async (project, members, text) => {
       const task = members.map((id) => getTask(db, id)).find((t) => t?.project === project);
       if (!task) throw new Error("找不到车厢成员的卡，PM 通知没法发");
-      await deps.notifyPm(task, text);
+      await deps.notifyPm(task, text, "action"); // 熔断：PM 要处理
     } });
 }

@@ -20,6 +20,7 @@ import { pushPending } from "./peer-pr-push.js";
 import { localIdentity } from "./peer-pr-redact.js";
 import { runBounded } from "./run-bounded.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Active = () => void;
 export interface PeerPrTickResult { failed: { taskId: string; error: string }[]; log: string[] }
@@ -81,7 +82,7 @@ export function peerPrStep(db: Database | null, active: Active, manager: Manager
     commits: guarded(active, (shas: readonly string[]) => knownCommits(cfg.repoDir, shas)),
     manager,
     bridge: guarded(active, (frame: Record<string, unknown>) => bridgeSend(frame, { timeoutMs: 30_000, stillActive: alive })),
-    notifyPm: guarded(active, (project: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive })),
+    notifyPm: guarded(active, (project: string, text: string, level: PmNoticeLevel) => notifyProjectPm(db, project, text, { fromName: "scheduler", level, stillActive: alive })),
     readReport: (p) => readReviewReport(p),
     identity: localIdentity(),
     now: Date.now,

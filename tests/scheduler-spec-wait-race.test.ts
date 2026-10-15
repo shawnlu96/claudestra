@@ -115,7 +115,7 @@ describe("send-after-stop：缺省发送带本轮存活检查", () => {
   // 与 scheduler-autostart-deps.ts 的 autostartHooks 同款：active() 抛错 = 停了；notifyPm 带 stillActive
   const active = () => { if (stopped) throw new SchedulerStopped("停了"); };
   const alive = () => { try { active(); return true; } catch { return false; } };
-  const prodEnv = () => env({ specWaitSend: undefined, notifyPm: (project, text) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive }) });
+  const prodEnv = () => env({ specWaitSend: undefined, notifyPm: (project, text, level) => notifyProjectPm(db, project, text, { fromName: "scheduler", level, stillActive: alive }) });
 
   beforeEach(() => {
     frames = [];

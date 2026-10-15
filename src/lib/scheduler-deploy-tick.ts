@@ -21,11 +21,12 @@ import { schedulerV2Held } from "./scheduler-v2-skip-card.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { ciProofDeploy } from "./scheduler-ci-proof-gate.js";
 import { handbackCards } from "./pm-handback-verify.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /** notifyPm: the PM notice port (tests); the pass leaves it out and the project's PM is told through the bridge. */
 export interface DeployTickDeps { center?: CenterTickPorts;
-  manager: Manager; jobs: DeployJobs; assertActive: () => void; now: () => number; notifyPm?: (project: string, text: string) => Promise<void> }
+  manager: Manager; jobs: DeployJobs; assertActive: () => void; now: () => number; notifyPm?: (project: string, text: string, level: PmNoticeLevel) => Promise<void> }
 
 /** A daemon that just restarted can fail a probe for a moment; verify is retried this long before its failure is recorded. */
 export const VERIFY_WINDOW_MS = 10 * 60_000;
@@ -156,9 +157,9 @@ const heldReported = new Set<string>();
 const heldKey = (db: Database, run: DeployRun) => `${db.filename}\0${run.intentId}`;
 
 function notifyPm(d: DeployTickDeps, db: Database, project: string, text: string): Promise<void> {
-  if (d.notifyPm) return d.notifyPm(project, text);
+  if (d.notifyPm) return d.notifyPm(project, text, "action");
   const alive = () => { try { d.assertActive(); return true; } catch { return false; /* not provably on duty: send nothing */ } };
-  return notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive });
+  return notifyProjectPm(db, project, text, { fromName: "scheduler", level: "action", stillActive: alive });
 }
 
 /** S2D2C (E26): a skip card's claimed / running deploy is only observed, through the unified gate: no ledger write, no job call,
@@ -249,7 +250,8 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
 
 export async function deployTick(db: Database, config: SchedulerConfig, d: DeployTickDeps, pace?: TickPace): Promise<number> {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) return 0;
-  await centerDeployTick(db, config, d);
+  // center-deploy-tick 的端口不带级别：它自己的生产路径标 action，注入的测试端口同样经 notifyPm 按 action 转
+  await centerDeployTick(db, config, { ...d, notifyPm: d.notifyPm && ((project, text) => notifyPm(d, db, project, text)) });
   let handled = 0;
   // MTRBUD1: a tick cut off by the pace resumes after its last card, so a running job that only waits (unreadable is never
   // dead) cannot take the phase's one card every pass from a due verify; a tick that got through every card starts in order

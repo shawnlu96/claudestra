@@ -7,7 +7,7 @@ import { tagPmRouteRecord, validPmRouteRecord } from "./pm-route-record.js";
 import type { PmRouteRecord } from "./pm-route-types.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, reportCorrupt, StateCorruptError, writeJsonAtomicSync, type StateRead } from "./state-file.js";
-import type { DigestEntry, DigestKind, DigestMode } from "./pm-digest.js";
+import type { DigestEntry, DigestKind, DigestMode, LevelSource } from "./pm-digest.js";
 
 /** 归类记录只留这么久（只读统计看最近 24 小时） */
 export const PM_DIGEST_LOG_MS = 24 * 3600_000;
@@ -23,6 +23,8 @@ export interface DigestRecord {
   mode: DigestMode;
   route?: PmRouteRecord;
   routeOnly?: boolean;
+  /** 归类依据（agents-NOTICETYPE1 样本记录口）：structured = 发送方标的级别，regex = 正文字样；其余判定不记 */
+  levelSource?: LevelSource;
 }
 interface DigestState { queue: DigestEntry[]; log: DigestRecord[] }
 
@@ -32,9 +34,10 @@ const num = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v)
 /** 元素也查：坏一条就整份按损坏处理（读者按空、写者拒写），不让 queue:[null] 之类在投递路径上抛错 */
 const validEntry = (e: unknown): boolean => isObj(e) && str(e.id) && str(e.project) && str(e.kind) && str(e.source) && str(e.firstLine) && num(e.at)
   && (e.card === undefined || str(e.card)) && (e.carriedBy === undefined || str(e.carriedBy))
-  && (e.detail === undefined || (Array.isArray(e.detail) && e.detail.every(str)));
+  && (e.detail === undefined || (Array.isArray(e.detail) && e.detail.every(str))) && (e.unleveled === undefined || e.unleveled === true);
 const validRecord = (r: unknown): boolean => isObj(r) && num(r.at) && str(r.project) && (r.send === "now" || r.send === "digest") && str(r.source)
-  && validPmRouteRecord(r.route) && (r.routeOnly === undefined || typeof r.routeOnly === "boolean");
+  && validPmRouteRecord(r.route) && (r.routeOnly === undefined || typeof r.routeOnly === "boolean")
+  && (r.levelSource === undefined || r.levelSource === "structured" || r.levelSource === "regex");
 const validState = (v: unknown): boolean => isObj(v) && Array.isArray(v.queue) && v.queue.every(validEntry) && Array.isArray(v.log) && v.log.every(validRecord);
 const validModes = (v: unknown): boolean => isObj(v) && (v.projects === undefined || isObj(v.projects));
 

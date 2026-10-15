@@ -52,6 +52,7 @@ import { deliveryFor, type EnsureResult, type SessionRef, type WorkerSession } f
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { specHolds } from "./recovery-plan-gap.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
@@ -76,7 +77,7 @@ export interface TakeoverDeps {
    * and once more after the claim; absent / null / throwing = no_grant.
    */
   grant?(project: string): LiveGrant | null;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   /**
    * observe mode's one record per would-be action (recovery-policy.ts recordObserved; production: `ledger scheduler-recovery-observe`);
    * absent = nothing recorded. Throwing = the record was not written: the card still ends as observe, PM told once per process, no retry.
@@ -155,7 +156,7 @@ class Takeover {
   async tell(code: string, text: string, once?: string): Promise<void> {
     const key = once ?? `${this.task.id}\n${code}\n${text}`;
     if (this.deps.told?.has(key)) return;
-    try { await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 本机接管：${text}`); this.deps.told?.add(key); }
+    try { await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 本机接管：${text}`, "action"); this.deps.told?.add(key); }
     catch (e) { if (e instanceof SchedulerStopped) throw e; console.error(`⚠️ [scheduler] 本机接管通知没发出去（下轮重发）：${(e as Error).message}`); }
   }
 
@@ -472,7 +473,7 @@ export interface TakeoverWire {
 }
 
 /** Production step, after autostart in the same budget and on its pace (yield per card); no policy port / auto dispatch off = nothing. */
-export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pace: TickPace, notifyPm: (project: string, text: string) => Promise<unknown>):
+export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pace: TickPace, notifyPm: (project: string, text: string, level: PmNoticeLevel) => Promise<unknown>):
   Promise<{ taskId: string; error: string }[]> {
   if (!o.takeoverPolicy || !config.enabled || config.autoDispatch !== true) return [];
   const auto = autoTickDeps(o.db, { active: o.active, lease: o.lease });
@@ -481,7 +482,7 @@ export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pac
     worker: auto.worker, grant: liveGrant, authorRuntime: (task) => {
       const agents = config.projects[task.project]?.agents;
       return agents ? poolAuthorRuntime(task.project, agents, o.db.filename) : localAuthorRuntime(task.project);
-    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: observeByCli(o.ledger, o.active),
+    }, notifyPm: async (task, text, level) => { await notifyPm(task.project, text, level); }, observe: observeByCli(o.ledger, o.active),
     codexQuota: async () => (await readInventoryQuota()).codex, borrow: readEffectiveBorrow, now: Date.now, told: TOLD,
   }, config.projects, pace)).failed;
 }

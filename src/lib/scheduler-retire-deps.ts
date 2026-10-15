@@ -36,7 +36,7 @@ function retireDeps(db: Database, ledger: Manager, active: () => void, lease: Sc
   return {
     ledger, agent, worktreeRoot: statePath("worktrees"), exists: existsSync, agents: () => whileOwned(active, () => readLiveAgents()),
     git: (args) => whileOwned(active, () => git(args)), tmp: { root: tmp.root, rm: (p) => whileOwned(active, () => tmp.rm(p)) },
-    notifyPm: (task, text) => whileOwned(active, () => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive })),
+    notifyPm: (task, text, level) => whileOwned(active, () => notifyProjectPm(db, task.project, text, { fromName: "scheduler", level, stillActive: alive })),
   };
 }
 

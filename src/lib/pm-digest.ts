@@ -1,7 +1,8 @@
 /**
  * 给当班 PM 的推送分两类（agents-PMDIG1，docs/architecture/pm-digest.md）：立即送 / 可合并进摘要。纯函数，bridge 投递口（bridge/pm-digest.ts）
- * 与 manager 只读统计共用。只有四类可合并：调度器「上线后待办」提醒、合并列车二分进度 / 车厢 CI 红、台账巡检「新发现」、
- * 其他 agent 的纯进度同步（oneShot 或开头写「只同步」）；其余一律立即送，拿不准也立即送。
+ * 与 manager 只读统计共用。发送方标了级别（pm-notice-level.ts）就只认级别：action 立即送、info 进摘要（agents-NOTICETYPE1）；
+ * 其他 agent 没标级别的 oneShot 不看正文、一律进摘要并在 `ledger pm-todo` 列出。没标级别的其余消息照旧：只有四类可合并——调度器「上线后待办」
+ * 提醒、合并列车二分进度 / 车厢 CI 红、台账巡检「新发现」、其他 agent 开头写「只同步」的等回复消息；其余一律立即送，拿不准也立即送。
  */
 
 import type { PmNoticeLevel } from "./pm-notice-level.js";
@@ -33,9 +34,12 @@ export interface DigestInput {
   level?: PmNoticeLevel;
 }
 
+/** 归类依据（样本记录口）：structured = 按发送方标的级别（或 oneShot 没标级别）分流；regex = 看了正文字样 */
+export type LevelSource = "structured" | "regex";
+type Basis = { levelSource?: LevelSource; unleveled?: true };
 export type DigestVerdict =
-  | { send: "now"; reason: string }
-  | { send: "digest"; reason: string; kind: DigestKind; source: string; card?: string; firstLine: string; detail?: string[] };
+  | ({ send: "now"; reason: string } & Basis)
+  | ({ send: "digest"; reason: string; kind: DigestKind; source: string; card?: string; firstLine: string; detail?: string[] } & Basis);
 
 /** 不算「其他 agent」的发送方：调度器、大总管、PM 切换通知；它们的 oneShot 不归进度同步 */
 const SYSTEM_SENDERS = new Set(["scheduler", "master", "pm-switch"]);
@@ -54,6 +58,15 @@ const AUDIT_HEAD = "[🔎 台账巡检]";
 /** 巡检正文末尾指向全量命令的那行（ledger-audit.ts auditNoticeText），不算要点 */
 const AUDIT_TAIL = "全部未解决的";
 const CARD_RE = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[A-Z][A-Z0-9]{2,}\b/;
+
+/** 正文像要紧事 / 要回答（失败、交付、提问、停单、重派……）：只给没标级别、也不是 oneShot 的外来消息用，pm-route 的保护项共用 */
+export const pmBodyUrgent = (body: string): boolean => URGENT_RE.test(body) || HALT_RECHECK_RE.test(body);
+
+/** 本机系统进程以固定名义发的帧（调度器、出借服务、台账唤醒）和系统发送方：不算「其他 agent」，没标级别时照旧规则 */
+const PROCESS_SENDERS = new Set([...SYSTEM_SENDERS, "lend", "ledger"]);
+/** 其他 agent 发来的 oneShot：级别由发送方在 send_to_agent 上标，PM 侧不看正文 */
+export const agentOneShot = (m: Pick<DigestInput, "fromKind" | "sender" | "oneShot" | "intent">): boolean =>
+  m.fromKind === "local" && m.oneShot && m.intent !== "response" && !PROCESS_SENDERS.has(m.sender ?? "");
 
 function firstLineOf(text: string): string {
   return text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
@@ -79,8 +92,23 @@ export function classifyPmPush(m: DigestInput): DigestVerdict {
   const firstLine = firstLineOf(m.body), sender = m.sender ?? "";
   if (m.fromKind === "user" || m.fromKind === "api") return { send: "now", reason: "owner / 人类 / peer 的消息" };
   if (m.triggerKind === "ask_answer") return { send: "now", reason: "卡片答复" };
+  if (m.fromKind === "bridge" && sender === PM_DIGEST_LABEL) return { send: "now", reason: "PM 摘要本身（不再进队，防自环）" };
+  // 结构化级别：本项目入口（调度器 / bridge 合成通知）与 agent 的 oneShot。等回复的 agent 消息带了也不认（对方在等答复，不能压进摘要）
+  if (m.level && (m.fromKind === "bridge" || m.oneShot)) {
+    if (m.level === "action") return { send: "now", reason: "发送方标 action", levelSource: "structured" };
+    const base = legacyVerdict(m, firstLine, sender);
+    return { ...(base.send === "digest" ? base : digestFallback(m.body, sender || m.fromKind, "")), reason: "发送方标 info", levelSource: "structured" };
+  }
+  if (agentOneShot(m)) {
+    return { send: "digest", reason: "oneShot 没标级别：不送，进 pm-todo 等 PM 拉", kind: "sync", source: sender || "agent", card: CARD_RE.exec(firstLine)?.[0],
+      firstLine, ...(DETAIL_SYNC_SENDERS.has(sender) ? detailOf(m.body) : {}), levelSource: "structured", unleveled: true };
+  }
+  return legacyVerdict(m, firstLine, sender);
+}
+
+/** 没有结构化级别时的旧规则（正文字样只在这里用） */
+function legacyVerdict(m: DigestInput, firstLine: string, sender: string): DigestVerdict {
   if (m.fromKind === "bridge") {
-    if (sender === PM_DIGEST_LABEL) return { send: "now", reason: "PM 摘要本身（不再进队，防自环）" };
     if (sender === "ledger-audit" && firstLine.startsWith(AUDIT_HEAD)) return { send: "digest", reason: "台账巡检新发现", kind: "audit", source: sender, firstLine, ...detailOf(m.body, true) };
     return { send: "now", reason: `bridge 通知（${sender || "?"}）` };
   }
@@ -97,9 +125,9 @@ export function classifyPmPush(m: DigestInput): DigestVerdict {
   // 等回复的「只同步」只认单行：首行以下还有内容就可能是要 PM 回答的，摘要只留首行会把它截掉
   if (!m.oneShot && m.body.trim().includes("\n")) return { send: "now", reason: "等回复且首行以下还有内容" };
   // 看整段正文：摘要只留首行，后面几行里的失败 / 交付 / 要你拍板一旦进队就看不见了
-  if (URGENT_RE.test(m.body) || HALT_RECHECK_RE.test(m.body)) return { send: "now", reason: "正文像要紧事 / 要回答" };
+  if (pmBodyUrgent(m.body)) return { send: "now", reason: "正文像要紧事 / 要回答", levelSource: "regex" };
   return { send: "digest", reason: m.oneShot ? "agent oneShot 进度同步" : "agent 写明只同步", kind: "sync", source: sender || "agent", card: CARD_RE.exec(firstLine)?.[0], firstLine,
-    ...(DETAIL_SYNC_SENDERS.has(sender) ? detailOf(m.body) : {}) };
+    ...(DETAIL_SYNC_SENDERS.has(sender) ? detailOf(m.body) : {}), levelSource: "regex" };
 }
 
 export interface DigestEntry {
@@ -112,6 +140,8 @@ export interface DigestEntry {
   firstLine: string;
   /** 首行之后的要点（巡检 / 上线后待办 / 监工巡检才有，classifyPmPush 已截好）；旧条目没有 */
   detail?: string[];
+  /** 其他 agent 没标级别的 oneShot：`ledger pm-todo` 列出（pm-todo-oneshot.ts） */
+  unleveled?: true;
   at: number;
   /** 拼进了这封（message_id）且它押在 PM 队里：等它送到再出队（bridge/pm-digest.ts） */
   carriedBy?: string;

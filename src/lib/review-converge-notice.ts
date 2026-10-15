@@ -13,6 +13,7 @@ import { createRetryDelay } from "./scheduler-create-retry.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { SchedulerLeaseLost } from "./scheduler-lease-env.js";
 import { countsAsP1, type ReviewFinding } from "./scheduler-review.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export const isRoundCap = (code: string): boolean => code === ROUND_CAP_CODE;
 const PER_ROUND = 6;
@@ -48,7 +49,7 @@ export async function roundCapNotice(db: Database, task: LedgerTask, deps: Follo
   events = listEvents(db, { project: task.project, target: task.id });
   const text = roundCapText(task, events);
   try {
-    await deps.notifyPm(task, text);
+    await deps.notifyPm(task, text, "action"); // 轮次到上限：等 PM 交回
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // a lost lease ends the pass, like every other notice in scheduler-auto-tick.ts
     console.error(`⚠️ [scheduler] 轮次上限通知没发出去（下个 tick 重发）：${(e as Error).message}`);
@@ -60,7 +61,7 @@ export async function roundCapNotice(db: Database, task: LedgerTask, deps: Follo
 
 /** What the failed follow-up notice needs: the PM channel, the scheduler-identity ledger CLI that records "informed", a clock. */
 export interface FollowUpNoticeDeps {
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   manager(...args: string[]): Promise<Record<string, unknown>>;
   now(): number;
 }
@@ -190,7 +191,7 @@ async function noticeSources(db: Database, task: LedgerTask, failed: readonly Le
     const key = convergeNoticeKey(task.id, e.seq);
     if (getEventByDedup(db, key)) { pending.delete(key); continue; }
     if (!pending.has(key)) {
-      try { await deps.notifyPm(task, followUpFailureText(task.id, e)); }
+      try { await deps.notifyPm(task, followUpFailureText(task.id, e), "action"); }
       catch (error) {
         if (error instanceof SchedulerStopped) throw error;
         console.error(`[scheduler] 后续节点失败通知未发送，下个 tick 重试：${(error as Error).message}`);

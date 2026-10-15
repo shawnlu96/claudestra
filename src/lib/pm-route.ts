@@ -1,4 +1,4 @@
-import { classifyPmPush, PM_DIGEST_LABEL, type DigestInput } from "./pm-digest.js";
+import { agentOneShot, classifyPmPush, PM_DIGEST_LABEL, pmBodyUrgent, type DigestInput } from "./pm-digest.js";
 import { matchPmLineRule, matchPmTrainRule, pmLineFixedText } from "./pm-route-rules.js";
 import { routePmAudit } from "./pm-route-audit.js";
 import type { PmRouteClass, PmRoutePlan, PmRouteTag } from "./pm-route-types.js";
@@ -8,7 +8,7 @@ const verdict = (route: PmRouteClass, rule: string, reason: string, immediate = 
 
 /** 复用 PMDIG3 的整段保护 helper，避免复制或渐渐分叉它的停单 / 重派规则。 */
 function protectedBody(m: DigestInput): boolean {
-  return classifyPmPush({ ...m, fromKind: "local", sender: "pm-route-protection", oneShot: true }).send === "now";
+  return pmBodyUrgent(m.body);
 }
 
 export function classifyPmRoute(m: DigestInput): PmRoutePlan {
@@ -22,6 +22,11 @@ export function classifyPmRoute(m: DigestInput): PmRoutePlan {
   const levelTrusted = (m.fromKind === "local" && m.sender === "scheduler" && !!m.oneShot) || (m.fromKind === "bridge" && m.sender === "ledger");
   if (levelTrusted && m.level === "info") return { tags: [{ route: "auto", rule: "level.info", reason: "发送方标为常规：只记卡片，不送 PM" }], body: "" };
   if (levelTrusted && m.level === "action") return verdict("judge", "level.action", "发送方标为要 PM 动手", true);
+  // 其他 agent 的 oneShot 只认 send_to_agent 上标的级别，不看正文（agents-NOTICETYPE1）：action 立即送；info 与没标的都走摘要（没标的另在 pm-todo 列出）
+  if (agentOneShot(m)) {
+    if (m.level === "action") return verdict("judge", "level.action", "发送方标为要 PM 动手", true);
+    return m.level === "info" ? verdict("digest", "level.info", "发送方标为常规：进摘要") : verdict("digest", "oneshot.unleveled", "oneShot 没标级别：进摘要、列 pm-todo");
+  }
   if (m.fromKind === "bridge" && m.sender === "ledger-audit") {
     return routePmAudit(m) ?? verdict("judge", "audit.unparsed", "巡检格式未核实，整封沿用旧路");
   }

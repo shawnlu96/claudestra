@@ -22,6 +22,7 @@ import { factsFingerprint, manualBase } from "./manual-recovery-facts.js";
 import { manualReasonRecord, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type ObservedAction, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 /** Codes MAN2 may lift; anything else (sticky or without a provable release node) is never resumed automatically. */
 const LIFTABLE: readonly ManualReasonCode[] = ["deps_not_live"];
@@ -157,7 +158,7 @@ export interface ManualResumeDeps {
   resume: ResumeWorkflow;
   /** Service wiring supplies the leased CLI; the default belongs to direct writer unit tests. */
   observe?: (db: Database, action: ObservedAction, now: number) => { recorded: boolean } | Promise<{ recorded: boolean }>;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   now(): number;
   policy?: RecoveryPolicyPort;
   yieldNow?(): boolean;
@@ -197,7 +198,7 @@ export async function manualResumeTick(db: Database, projects: Record<string, { 
         continue;
       }
       out.push({ project, taskId, mode, action: "resumed", why: reason });
-      await d.notifyPm(task, `[manual 自动恢复] ${taskId} 已交回自动：${reason}`).catch((e) => {
+      await d.notifyPm(task, `[manual 自动恢复] ${taskId} 已交回自动：${reason}`, "info").catch((e) => {
         if (e instanceof SchedulerStopped) throw e;
         console.error(`⚠️ [scheduler] manual 自动恢复通知没发出去（台账已记 workflow_resume，不重发）：${(e as Error).message}`);
       });

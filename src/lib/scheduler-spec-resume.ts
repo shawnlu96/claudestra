@@ -11,6 +11,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { specPlaceBlock } from "./scheduler-spec-resume-write.js";
 import type { TickPace } from "./scheduler-yield.js";
 import { wipGateSpecPlace } from "./scheduler-wip-gate.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Failed = { taskId: string; error: string }[];
 
@@ -24,7 +25,7 @@ export interface SpecResumeEnv {
   place(db: Database, q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto"; taskId: string }): Promise<StartPlacement>;
   /** 项目的 git 仓库目录；没有为 null（不放置，维持现状） */
   repoDir(project: string): Promise<string | null>;
-  notifyPm(project: string, text: string): Promise<void>;
+  notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
 }
 
 /** 卡推不动的台账回执（卡被改过、不再合格）：下一轮重算，不算失败 */
@@ -65,7 +66,7 @@ async function placeOne(env: SpecResumeEnv, project: string, id: string): Promis
   if (r.ok !== true) return QUIET.has(String(r.code)) ? null : String(r.error ?? r.code);
   if (placed.where === "refused" && r.notified !== true) {
     await env.notifyPm(project, `[自动调度 ${id}] 卡在 spec 等放置：等写代码的空位：${placed.reason}。` +
-      "有空位后调度器下一轮自己接上（放到 peer 就跳过复述），同一原因不再重复报。");
+      "有空位后调度器下一轮自己接上（放到 peer 就跳过复述），同一原因不再重复报。", "info"); // 调度器自己接上：仅供知悉
     const ack = await env.ledger("ledger", "scheduler-spec-place", id, ...cas, "--notified", String((r.event as { seq: number }).seq));
     if (ack.ok !== true) return QUIET.has(String(ack.code)) ? null : String(ack.error ?? ack.code);
   }

@@ -48,6 +48,7 @@ import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { wipGateCard } from "./scheduler-wip-gate.js";
 import { logPoolIdleObservation, type PoolIdleObservation } from "./scheduler-pool-idle.js";
 import { liftWithinBand, slotOrder } from "./scheduler-priority-order.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -62,7 +63,7 @@ export interface AutoTickDeps {
   pinReview(task: LedgerTask, ref: SessionRef, head: string | null): Promise<{ dir: string } | { manual: string }>;
   /** Uncommitted tracked edits in the reviewer's checkout (null = clean): the verdict is refused, so PM must take over. */
   reviewDirty(task: LedgerTask, ref: SessionRef): Promise<string | null>;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   now(): number;
   /** Effective lend.json borrow list (i28-R9); absent = this service never pools. Read once per pass. */
   borrow?(): Promise<BorrowEntry[]>;
@@ -103,7 +104,7 @@ export async function sendNotice(db: Database, deps: AutoTickDeps, key: string, 
   if (pending) perDb(unsent, db).set(key, pending);
   const n = unsent.get(db)?.get(key);
   if (!n) return true;
-  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); await n.informed?.(); }
+  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text, "action"); await n.informed?.(); } // 计划拒收报警
   catch (e) { noticeLost("计划拒收报警没发出去或回执未落盘（台账已记，下轮重试）")(e); return false; }
   unsent.get(db)?.delete(key);
   return true;
@@ -130,7 +131,7 @@ class Card {
     const r = await this.deps.manager("ledger", "scheduler-fallback-manual", this.task.id, "--reason", oneLine(reason), ...(intentId ? ["--intent", intentId] : []));
     if (r.ok !== true) return this.out("held", `退回人工失败：${String(r.error)}`);
     if (r.duplicate !== true) {
-      await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 退回人工，请接手：${oneLine(reason)}`)
+      await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 退回人工，请接手：${oneLine(reason)}`, "action")
         .catch(noticeLost("通知 PM 失败（台账已记退回人工）"));
     }
     return this.out("manual", reason);
@@ -280,7 +281,8 @@ class Card {
       await this.settle(intent.id, "pending", "cancelled", `未开 ask：${shots.missing}`);
       return this.escalate(shots.missing, intent.id);
     }
-    if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, this.deps.notifyPm, (f, t, r) => this.settle(intent.id, f, t, r)));
+    const uiNotify = (t: LedgerTask, x: string) => this.deps.notifyPm(t, x, "action"); // 截图验收要 PM 看
+    if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, uiNotify, (f, t, r) => this.settle(intent.id, f, t, r)));
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
     if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice(plan.downgrade ? plan.reason : null);
     if (r.ok === true) return this.out(intent.action, intent.action === "stage" ? `${this.task.stage}→${plan?.targetStage}` : `ask ${String(r.askId)}`);
@@ -378,7 +380,7 @@ class Card {
       text = typeof (r.event as { text?: unknown } | undefined)?.text === "string" ? (r.event as { text: string }).text : draft;
     }
     try {
-      await this.deps.notifyPm(this.task, text);
+      await this.deps.notifyPm(this.task, text, "action"); // 未领单报警
     } catch (e) {
       noticeLost("未领单报警没发出去（台账已记，稍后重发）")(e);
       failed.set(sent.id, this.deps.now());
