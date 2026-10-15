@@ -2133,6 +2133,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "peer_pr_push": void (await import("./bridge/peer-pr-send.js")).answerPeerPrPush(ws, msg, [...clients.values()].some((c) => c.ws === ws)); break; // i28-A2
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "save_handoff": void (await import("./bridge/handoff-route.js")).answerSaveHandoff(ws, msg, callerOf); break; // codex-compact N3：只写本连接 agent 的交接
+    case "ci_selected_repair": (await import("./bridge/scheduler-ci-selected-notice.js")).answerSelectedRepair(ws, msg); break;
     case "route_to_agent": {
       try {
         let fromChannelId = "";
@@ -2147,7 +2148,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             console.log(`✅ inter-agent 看门狗清掉（${chId} 调了 send_to_agent）`);
           }
         }
-
         // 解析 target:"future_data" → 本地 agent-future_data;"peer:ahh.future_data" → 跨 peer（HTTP transport）
         //   "future_data@ahh" → 同上（短格式）
         const rawTarget = (msg.targetName as string) || "";

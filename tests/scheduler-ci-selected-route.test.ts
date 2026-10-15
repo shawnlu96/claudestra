@@ -1,8 +1,4 @@
-/**
- * merge-arch-CISEL2 [验收线 4]: a repair notice reaches the PM's non-urgent digest. The production sink (bindCiSelectedSink →
- * notifyProjectPm) sends a frame; the bridge's own PmDigest (pmRoute / pmDigest on, pull mode) must queue it for `pm-digest --list`,
- * not record it as a card-only info push — even when the merge tick runs under asInfo.
- */
+/** Production sink → bridge intake → persistent PM digest, including repository URL boundaries. */
 import { afterEach, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,6 +14,7 @@ mock.module("../src/lib/bridge-client.js", () => ({
   bridgeSend: async (msg: Record<string, unknown>, opts?: Parameters<typeof realSend>[1]) => {
     if (!faking) return realSend(msg, opts);
     frames.push(msg);
+    if (msg.type === "ci_selected_repair") enqueueSelectedRepair(msg, activeStore!);
     return { ok: true, result: { ok: true } };
   },
 }));
@@ -25,17 +22,16 @@ const { LEDGER_PATH, openLedger } = await import("../src/lib/ledger-store.js");
 const { setMeta } = await import("../src/lib/ledger-write.js");
 const { asInfo } = await import("../src/lib/pm-notice-level.js");
 const { PmDigestStore } = await import("../src/lib/pm-digest-store.js");
-const { PmDigest } = await import("../src/bridge/pm-digest.js");
+const { enqueueSelectedRepair } = await import("../src/bridge/scheduler-ci-selected-notice.js");
+let activeStore: InstanceType<typeof PmDigestStore> | null = null;
 const { digestText } = await import("../src/lib/pm-digest.js");
 const { bindCiSelectedSink, CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED, useCiSelectedPorts, withCiSelectedGate } = await import("../src/lib/scheduler-ci-selected-gate.js");
-type Envelope = import("../src/bridge/router.js").Envelope;
-type LocalEndpoint = import("../src/bridge/router.js").LocalEndpoint;
 type CiSelectedPort = import("../src/lib/ci-selected-receipt.js").CiSelectedPort;
 type MergeExternal = import("../src/lib/scheduler-merge-driver.js").MergeExternal;
 
 const PM = "agent-cisel2-pm", H = "a".repeat(40);
 /** a real-length run page of a real-length repository */
-const RUN_URL = "https://github.com/shawnlu96/claudestra/actions/runs/18234567890";
+let RUN_URL = "https://github.com/shawnlu96/claudestra/actions/runs/18234567890";
 const D = (c: string) => `sha256:${c.repeat(64)}`;
 let outOfScope = [{ file: "tests/x.test.ts", name: "x > flaky" }];
 const port: CiSelectedPort = {
@@ -61,6 +57,12 @@ let open: Disposable | null = null;
 afterEach(() => { faking = false; frames.length = 0; open?.[Symbol.dispose](); open = null; for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
 const cases = [
+  { title: "failed confirmation retries after scheduler and bridge restart", project: "cisel2-route-retry", retry: true,
+    failures: [{ file: "tests/x.test.ts", name: "x > flaky" }] },
+  { title: "failover repository stays non-urgent", project: "cisel2-route-failover",
+    url: "https://github.com/org/failover/actions/runs/18234567890", failures: [{ file: "tests/x.test.ts", name: "x" }] },
+  { title: "long repository keeps complete URL", project: "cisel2-route-long",
+    url: `https://github.com/org/${"a".repeat(100)}/actions/runs/18234567890`, failures: [{ file: "tests/x.test.ts", name: "x" }] },
   { title: "a plain test name", project: "cisel2-route", failures: [{ file: "tests/x.test.ts", name: "x > flaky" }] },
   { title: "a long test name that reads urgent (failed / 失败 / ?)", project: "cisel2-route-urgent", failures: [{
     file: "tests/scheduler-merge-train-bisect-recovery.test.ts",
@@ -68,14 +70,22 @@ const cases = [
 ];
 for (const c of cases) test(`[验收线 4] ${c.title}: the repair notice from the bound sink is queued in the PM's digest with its run link, then counted as told`, async () => {
   faking = true;
+  RUN_URL = "url" in c ? c.url! : "https://github.com/shawnlu96/claudestra/actions/runs/18234567890";
   outOfScope = c.failures;
   const PROJ = c.project;
+  const dir = mkdtempSync(join(tmpdir(), "cisel2-route-"));
+  dirs.push(dir);
+  activeStore = new PmDigestStore(join(dir, "pm-digest.json"), join(dir, "pm-digest-mode.json"));
   const db = openLedger(LEDGER_PATH); // the sink reads through the production read-only LedgerReader on the same file
   setMeta(db, { actor: "owner" }, { project: PROJ, key: "pms", value: [PM] });
   /** the leased manager's `ledger scheduler-recovery-observe`, written as recordObserved would */
+  let failConfirmation = "retry" in c ? 1 : 0;
   const manager = async (...a: string[]) => {
     const flag = (k: string) => a[a.indexOf(k) + 1]!;
-    const data = { ...JSON.parse(flag("--data")) as Record<string, unknown>, op: "recovery_observe", mechanism: flag("--mechanism"), actionKey: flag("--action-key") };
+    const data: Record<string, unknown> = { ...JSON.parse(flag("--data")) as Record<string, unknown>, op: "recovery_observe", mechanism: flag("--mechanism"), actionKey: flag("--action-key") };
+    if (data.kind === CI_SELECTED_REPAIR_NOTIFIED && failConfirmation-- > 0) throw new Error("temporary confirmation failure");
+    if (db.query("SELECT 1 FROM events WHERE project=? AND target=? AND json_extract(data,'$.actionKey')=?")
+      .get(PROJ, a[2]!, flag("--action-key"))) return { ok: true };
     db.query("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'scheduler', ?, ?, 'note', ?, ?)").run(Date.now(), PROJ, a[2]!, flag("--action"), JSON.stringify(data));
     return { ok: true };
   };
@@ -84,35 +94,32 @@ for (const c of cases) test(`[验收线 4] ${c.title}: the repair notice from th
     using _sink = bindCiSelectedSink(manager, () => {});
     // the tick's inspect, even inside a routine asInfo context
     await asInfo(() => withCiSelectedGate(ops, { project: PROJ, taskId: "T1", requiredChecks: "typecheck + test + guard" }).inspect("https://github.com/o/r/pull/7"));
-  }
-  expect(frames).toHaveLength(1);
-  const frame = frames[0] as { targetName: string; text: string; fromName: string; oneShot: boolean; pmLevel?: string };
-  expect(frame).toMatchObject({ type: "route_to_agent", targetName: PM, oneShot: true });
-  expect(frame.pmLevel).toBeUndefined();
-  expect(frame.fromName).not.toBe("scheduler"); // the scheduler's unlevelled notices are delivered at once, not digested
+    if ("retry" in c) {
+      expect(activeStore.queued(PROJ)).toHaveLength(1);
+      expect(db.query("SELECT 1 FROM events WHERE project=? AND json_extract(data,'$.kind')=?")
+        .get(PROJ, CI_SELECTED_REPAIR_NOTIFIED)).toBeNull();
+      // The scheduler loses all memory and the bridge reloads the persisted queue and receipt.
+      open![Symbol.dispose]();
+      open = useCiSelectedPorts({ port, policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }) });
+      activeStore = new PmDigestStore(activeStore.path, activeStore.modePath);
+      await withCiSelectedGate(ops, { project: PROJ, taskId: "T1", requiredChecks: "typecheck + test + guard" })
+        .inspect("https://github.com/o/r/pull/7");
+    }
 
-  // the bridge's route_to_agent envelope for that frame, through the bridge's own PM digest (route on, digest on, pull mode)
-  const dir = mkdtempSync(join(tmpdir(), "cisel2-route-"));
-  dirs.push(dir);
-  const store = new PmDigestStore(join(dir, "pm-digest.json"), join(dir, "pm-digest-mode.json"));
-  store.setMode(PROJ, "on");
-  store.setRouteMode(PROJ, "on");
-  store.setPullMode(PROJ, "on");
-  const ws = { send: () => {} } as unknown as LocalEndpoint["ws"];
-  const to: LocalEndpoint = { kind: "local", agentName: PM, channelId: "ch-pm", ws };
-  const env: Envelope = { from: { kind: "local", agentName: frame.fromName, channelId: "", ws }, to, intent: "request", content: frame.text,
-    meta: { messageId: "m1", threadId: "t1", ts: "2026-10-15T00:00:00Z", triggerKind: "agent_tool", skipInterAgentWatchdog: true,
-      ...(frame.pmLevel ? { pmLevel: frame.pmLevel as "info" } : {}) } };
-  const delivered: string[] = [];
-  const digest = new PmDigest({ store, now: () => 1, db: () => db, agents: () => [], heldCarriers: () => new Set() });
-  const d = await digest.wrap(async (e) => { delivered.push(e.content); return { envelope: e, outcome: { kind: "sent" } }; }, db, PROJ)(env, to);
-  expect(d.outcome).toEqual({ kind: "sent", note: "digest" });
-  expect(delivered).toEqual([]); // non-urgent: not pushed …
-  const queued = store.queued(PROJ);
-  expect(queued).toHaveLength(1); // … but in the digest the PM pulls
-  expect(queued[0]!.firstLine).toContain(RUN_URL);
-  expect(digestText(queued)).toContain(RUN_URL); // the rendered digest clips its line: the link leads, so it survives whole
-  expect(frame.text).not.toContain(c.failures[0]!.name); // the names are ledger data, not notice text
+  }
+  expect(frames).toHaveLength("retry" in c ? 2 : 1);
+  const frame = frames[0]!;
+  expect(frame).toMatchObject({ type: "ci_selected_repair", project: PROJ, runUrl: RUN_URL });
+  const queued = activeStore.queued(PROJ);
+  expect(queued).toHaveLength(1);
+  expect(queued[0]!.detail).toContain(RUN_URL);
+  expect(digestText(queued)).toContain(RUN_URL);
+  expect(JSON.stringify(frame)).not.toContain(c.failures[0]!.name);
+  // Fresh bridge/store instance after consumption: retry cannot requeue within 24 hours.
+  activeStore.remove(new Set(queued.map((q) => q.id)), Date.now());
+  const restarted = new PmDigestStore(activeStore.path, activeStore.modePath);
+  enqueueSelectedRepair(frame, restarted);
+  expect(restarted.queued(PROJ)).toEqual([]);
 
   const kinds = (db.query("SELECT json_extract(data,'$.kind') AS k FROM events WHERE project=? AND kind='note' ORDER BY seq").all(PROJ) as { k: string }[]).map((r) => r.k);
   expect(kinds).toEqual([CI_SELECTED_REPAIR, CI_SELECTED_REPAIR_NOTIFIED]);
