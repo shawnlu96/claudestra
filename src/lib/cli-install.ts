@@ -3,6 +3,8 @@
  * approved rename transactions live in floka-services/install and share STATE2's executor lock.
  */
 
+// 必须是第一个 import：全新机器（只有 ~/.floka）在下面的模块加载 paths.ts 之前选好状态根（floka-install-config/fresh-root-preload.ts）
+import "./floka-install-config/fresh-root-preload.js";
 import { resolveBridgePort } from "./bridge-url.js";
 import { readDotenvFileSync } from "./env-file.js";
 import { LOG_DIR, ensureLogDir } from "./log-paths.js";

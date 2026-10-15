@@ -18,6 +18,11 @@ export interface InstallHome { home: string; repoRoot: string }
 export const settingsPathOf = (h: InstallHome): string => join(h.home, ".claude", "settings.json");
 export const envPathOf = (h: InstallHome): string => join(h.repoRoot, ".env");
 
+const canonical = (path: string): string => { try { return realpathSync(path); } catch { return resolve(path); } };
+/** 本次迁移的目标文件身份：settings 与 .env 所在目录的真实路径指纹。日志按它认领，换仓库 / checkout / HOME 就是另一个目标 */
+export const installTarget = (h: InstallHome): string => createHash("sha256")
+  .update(`${canonical(h.home)}\0${canonical(h.repoRoot)}`).digest("hex").slice(0, 16);
+
 /** 本迁移拥有的 allow：两族各一条通配，旧的那条永远保留（旧族会话还在用） */
 export const familyAllow = (f: McpFamily): string => `${mcpToolPrefix(f)}*`;
 export const familyToolName = (f: McpFamily, tool: string): string => `${mcpToolPrefix(f)}${tool}`;
@@ -38,16 +43,36 @@ const COMPAT_CONSUMERS: readonly PlanEntry[] = [
   { item: "consumer", key: "master-render", action: "keep", note: "setup.ts 渲染 master/CLAUDE.md 时模板已同时写明两族全名，旧会话照旧、新会话按新名调" },
 ];
 
+const ANY_KEY = /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=(.*)$/;
 const ENV_LINE = /^(\s*(?:export\s+)?)(CLAUDESTRA|FLOKA)_([A-Z0-9_]+)\s*=(.*)$/;
 export const valuePrint = (rhs: string): string => createHash("sha256").update(rhs.trim()).digest("hex").slice(0, 16);
 
-export interface EnvLine { index: number; brand: "CLAUDESTRA" | "FLOKA"; suffix: string; rhs: string; lead: string }
+/**
+ * 一条赋值占几行物理行：与 env-file.ts parseDotenv（Bun 口径）同一规则——引号值的闭合引号是其后只剩空白 / 注释的那个
+ * 同类引号，可以落在后面的行上；找不到闭合就按未加引号的单行处理。
+ */
+function assignmentSpan(lines: string[], i: number, rhs: string): number {
+  const v = rhs.replace(/^[ \t]+/, ""), q = v[0];
+  if (q !== '"' && q !== "'" && q !== "`") return 1;
+  const rest = [v.slice(1), ...lines.slice(i + 1)].join("\n");
+  const close = new RegExp(`${q}[ \\t]*(?:#[^\\n]*)?(?:\\n|$)`).exec(rest);
+  return close ? rest.slice(0, close.index).split("\n").length : 1;
+}
+
+/** index 是赋值首行，span 是它占的物理行数；rhs 是 `=` 后的完整原文（多行值含换行）。多行值内部的行不当赋值认 */
+export interface EnvLine { index: number; span: number; brand: "CLAUDESTRA" | "FLOKA"; suffix: string; rhs: string; lead: string }
 export function envLines(text: string): EnvLine[] {
-  const out: EnvLine[] = [];
-  text.split("\n").forEach((line, index) => {
-    const m = ENV_LINE.exec(line);
-    if (m && TWIN_SUFFIXES.includes(m[3]!)) out.push({ index, lead: m[1]!, brand: m[2] as EnvLine["brand"], suffix: m[3]!, rhs: m[4]! });
-  });
+  const out: EnvLine[] = [], lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const any = ANY_KEY.exec(lines[index]!);
+    if (!any) continue;
+    const span = assignmentSpan(lines, index, any[1]!), m = ENV_LINE.exec(lines[index]!);
+    if (m && TWIN_SUFFIXES.includes(m[3]!)) {
+      const rhs = [m[4]!, ...lines.slice(index + 1, index + span)].join("\n");
+      out.push({ index, span, lead: m[1]!, brand: m[2] as EnvLine["brand"], suffix: m[3]!, rhs });
+    }
+    index += span - 1;
+  }
   return out;
 }
 

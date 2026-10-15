@@ -8,6 +8,7 @@ import { rollbackInstallConfig, runInstallConfig } from "../src/lib/floka-instal
 import { familyAllow, familyToolName, planEnvText, planInstallConfig, planTemplate } from "../src/lib/floka-install-config/plan.ts";
 import { chooseFreshStateRoot } from "../src/lib/floka-install-config/fresh-root.ts";
 import { installConfigWarnings } from "../src/lib/floka-install-config/install.ts";
+import { parseDotenv } from "../src/lib/env-file.ts";
 import { defaultStateRoot } from "../src/lib/floka-config/default-root.ts";
 import { LEGACY_FAMILY, NEW_FAMILY } from "../src/lib/floka-mcp/families.ts";
 import { testChildEnv } from "./test-env.ts";
@@ -129,6 +130,41 @@ test("[验收线 1] 计划逐项：hook 两族共用、兼容消费者列出、.
   expect(JSON.parse(readFileSync(join(f.home, ".claude", "settings.json"), "utf8"))).toEqual({ permissions: { allow: "x" } });
 });
 
+test("[验收线 1] 多行引号值按完整赋值边界复制，Bun 口径下旧值不变、新名同值；回滚整段撤掉", async () => {
+  const f = fixture();
+  const text = ENV_TEXT + [
+    'CLAUDESTRA_ACP_DEVELOPER="line one',
+    'line two"',
+    "DISCORD_NOTE='quoted",
+    "CLAUDESTRA_RUNTIME_DIR=/not/an/assignment'",
+    "CLAUDESTRA_CODEX_BIN=`a`",
+    "",
+  ].join("\n");
+  writeFileSync(join(f.repoRoot, ".env"), text);
+  const was = parseDotenv(text);
+  expect(was.CLAUDESTRA_ACP_DEVELOPER).toBe("line one\nline two");
+  expect(planEnvText(text).map(p => p.key)).not.toContain("FLOKA_RUNTIME_DIR"); // 多行值内部的行不当赋值
+  expect((await runInstallConfig({ ...f, config: on })).status).toBe("committed");
+  const now = parseDotenv(envOf(f));
+  for (const [k, v] of Object.entries(was)) expect(now[k]).toBe(v);
+  expect(now.FLOKA_ACP_DEVELOPER).toBe("line one\nline two");
+  expect(now.FLOKA_CODEX_BIN).toBe("a");
+  expect(now.FLOKA_RUNTIME_DIR).toBeUndefined();
+  expect((await rollbackInstallConfig(f)).status).toBe("rolled_back");
+  expect(envOf(f)).toBe(text);
+});
+
+test("[验收线 1] 复核对不上（同名旧变量出现两次）：拒绝写入，文件不变", async () => {
+  const f = fixture();
+  const text = ENV_TEXT + "CLAUDESTRA_STATE_DIR=/srv/other\n";
+  writeFileSync(join(f.repoRoot, ".env"), text);
+  const before = snapshot(f.home, f.repoRoot);
+  const r = await runInstallConfig({ ...f, config: on });
+  expect(r.status).toBe("refused");
+  expect(JSON.stringify(r.tx)).toContain("拒绝写入");
+  expect(snapshot(f.home, f.repoRoot)).toEqual(before);
+});
+
 test("[验收线 2] 旧会话模板仍调用旧工具，新会话调用新工具", () => {
   const tpl = readFileSync(join(REPO, "master", "CLAUDE.md.template"), "utf8");
   const entries = planTemplate(tpl);
@@ -227,6 +263,28 @@ test("[验收线 3] 迁移前已有的新族 allow / 新名，回滚时保留", 
   expect(envOf(f)).toBe(ENV_TEXT + "FLOKA_STATE_DIR=/srv/state\n");
 });
 
+test("[验收线 3] 日志绑定目标：换仓库重放 / 回滚拒绝，另一仓库的用户条目不动", async () => {
+  const a = fixture(), repoB = tmp("repo-b");
+  mkdirSync(join(repoB, "master"), { recursive: true });
+  writeFileSync(join(repoB, "master", "CLAUDE.md.template"), readFileSync(join(a.repoRoot, "master", "CLAUDE.md.template")));
+  const envB = "CLAUDESTRA_ACP_MODEL=opus\nFLOKA_ACP_MODEL=opus\nCLAUDESTRA_STATE_DIR=/b\n";
+  writeFileSync(join(repoB, ".env"), envB);
+  expect((await runInstallConfig({ ...a, config: on })).status).toBe("committed");
+  const b = { ...a, repoRoot: repoB };
+  const settled = snapshot(a.home, repoB);
+  const again = await runInstallConfig({ ...b, config: on });
+  expect(again.status).toBe("refused");
+  expect(again.error).toContain("另一个仓库");
+  expect((await rollbackInstallConfig(b)).status).toBe("refused");
+  expect(snapshot(a.home, repoB)).toEqual(settled);
+  expect(readFileSync(join(repoB, ".env"), "utf8")).toBe(envB);
+  // 生产入口按目标分 txId：B 是另一笔事务，B 自己能迁、A 的日志照旧可回滚
+  expect(await installConfigWarnings(repoB, on, a.home)).toEqual([]);
+  expect(readFileSync(join(repoB, ".env"), "utf8")).toBe(envB + "FLOKA_STATE_DIR=/b\n");
+  expect((await rollbackInstallConfig(a)).status).toBe("rolled_back");
+  expect(readFileSync(join(repoB, ".env"), "utf8")).toBe(envB + "FLOKA_STATE_DIR=/b\n");
+});
+
 const pem = () => String(generateKeyPairSync("ed25519").privateKey.export({ format: "pem", type: "pkcs8" }));
 function startup(home: string) {
   const env = testChildEnv({ HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "run"), BRIDGE_PORT: "9" });
@@ -249,6 +307,20 @@ test("全新机器只有 ~/.floka：装前起不来，装完（缺省选旧根�
   expect(s.stdout.trim()).toBe(join(home, ".claude-orchestrator"));
   expect(chooseFreshStateRoot(home)).toMatchObject({ status: "not-fresh" }); // 幂等
 });
+
+test("全新机器只有 ~/.floka：真实安装入口 cli-install.ts 加载前选好根，加载与启动都成功", () => {
+  const home = tmp("fresh-entry");
+  mkdirSync(join(home, ".floka"));
+  const env = testChildEnv({ HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "run"), BRIDGE_PORT: "9" });
+  for (const k of ["CLAUDESTRA_STATE_DIR", "FLOKA_STATE_DIR", "FLOKA_RENAME_ENV"]) delete env[k];
+  const r = spawnSync(process.execPath, ["--no-env-file", "--config=/dev/null", "-e", 'await import("./src/lib/cli-install.ts"); console.log("loaded");'],
+    { env, encoding: "utf8", timeout: 30_000, cwd: REPO });
+  expect(r.stderr).not.toContain("legacy state root missing");
+  expect(r.status).toBe(0);
+  expect(r.stdout.trim()).toBe("loaded");
+  expect(readdirSync(join(home, ".floka"))).toEqual([]); // 缺省选旧根，用户的目录不写
+  expect(startup(home).stdout.trim()).toBe(join(home, ".claude-orchestrator"));
+}, 40_000);
 
 test("全新机器的 ~/.floka 已有身份：缺省选新根（旧根成别名），选旧根拒绝", () => {
   const home = tmp("fresh-id");
