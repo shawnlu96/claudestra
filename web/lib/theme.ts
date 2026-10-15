@@ -1,5 +1,6 @@
 "use client";
 import { useSyncExternalStore } from "react";
+import { writeCompatible } from "./floka-storage/local";
 
 /**
  * 明暗主题偏好（owner 2026-07-24:「桌面和移动端都要能切白天黑夜」）。
@@ -32,8 +33,7 @@ function apply(p: ThemePref) {
 export function setThemePref(p: ThemePref) {
   pref = p;
   try {
-    if (p === "auto") localStorage.removeItem(KEY);
-    else localStorage.setItem(KEY, p);
+    writeCompatible(localStorage, KEY, p === "auto" ? null : p);
   } catch { /* 隐私模式 */ }
   apply(p);
   subs.forEach((f) => f());
