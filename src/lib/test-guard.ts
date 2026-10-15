@@ -12,13 +12,26 @@ import { tmpdir } from "os";
 import { basename, dirname, join } from "path";
 import { REPO_ROOT } from "./repo-root.js";
 import { canonicalPath as canonical, pathsOverlap } from "./sandbox.js";
+import { FlokaIsolationConflict, readIsolationEnv } from "./floka-env/read.js";
+import { flokaName, legacyName } from "./floka-env/names.js";
+import { runtimeRoots } from "./floka-env/roots.js";
 
 export const TEST_FLAG = "CLAUDESTRA_TEST";
 
 type Env = Record<string, string | undefined>;
 
+/** 测试标记与目录的两套名字（旧名、FLOKA_ 新名）都认，不看改名档位；两名冲突直接拒（lib/floka-env/read.ts） */
+function iso(suffix: string, env: Env): string | undefined {
+  try {
+    return readIsolationEnv(suffix, env);
+  } catch (e) {
+    if (e instanceof FlokaIsolationConflict) throw new TestIsolationViolation(e.message);
+    throw e;
+  }
+}
+
 export function isTestProcess(env: Env = process.env): boolean {
-  return env[TEST_FLAG] === "1" || env.NODE_ENV === "test";
+  return iso("TEST", env) === "1" || env.NODE_ENV === "test";
 }
 
 export class TestIsolationViolation extends Error {
@@ -59,10 +72,13 @@ export function isUnderTempDir(p: string): boolean {
   return [tmpdir(), ...TEMP_ROOTS].map(canonical).some((r) => c === r || c.startsWith(`${r}/`));
 }
 
-function redirectToTemp(key: string, label: string, dir: string, env: Env, warn: boolean): string {
+/** 换成临时目录：旧名照写，新名在 env 里出现过也一起改写（否则 on 档下一次解析又取回新名那个生产值） */
+function redirectToTemp(suffix: string, label: string, dir: string, env: Env, warn: boolean): string {
   const tmp = mkdtempSync(join(tmpdir(), `cstra-test-${label}-`));
+  const key = legacyName(suffix);
   if (warn) process.stderr.write(`[test-guard] 测试进程的 ${key} 指向 ${dir}（不是测试专用的临时目录，可能是生产目录），已改用 ${tmp}\n`);
   env[key] = tmp;
+  if (env[flokaName(suffix)] !== undefined) env[flokaName(suffix)] = tmp;
   return tmp;
 }
 
@@ -74,8 +90,10 @@ function redirectToTemp(key: string, label: string, dir: string, env: Env, warn:
  * 去掉 CLAUDESTRA_TEST 与 NODE_ENV 再求值（tests/paths.test.ts）。isTemp 只给回归测试注入。
  */
 export function testSafeStateDir(dir: string, env: Env = process.env, isTemp: (p: string) => boolean = isUnderTempDir): string {
-  if (!isTestProcess(env) || isTemp(dir)) return dir;
-  return redirectToTemp("CLAUDESTRA_STATE_DIR", "state", dir, env, true);
+  if (!isTestProcess(env)) return dir;
+  const named = (iso("STATE_DIR", env) || "").trim(); // 档位没让它生效的那个名字也不许指向真实目录（子进程可能是 on 档）
+  if (isTemp(dir) && (!named || isTemp(named))) return dir;
+  return redirectToTemp("STATE_DIR", "state", dir, env, true);
 }
 
 /**
@@ -83,8 +101,11 @@ export function testSafeStateDir(dir: string, env: Env = process.env, isTemp: (p
  * 临时目录」挡不住，和默认目录重叠也换。默认值在每个最小 env 的子进程里都会命中，所以只在显式设了时才提示。
  */
 export function testSafeRuntimeDir(dir: string, defaultDir: string, env: Env = process.env): string {
-  if (!isTestProcess(env) || (isUnderTempDir(dir) && !pathsOverlap(dir, defaultDir))) return dir;
-  return redirectToTemp("CLAUDESTRA_RUNTIME_DIR", "rt", dir, env, Boolean((env.CLAUDESTRA_RUNTIME_DIR || "").trim()));
+  if (!isTestProcess(env)) return dir;
+  const named = (iso("RUNTIME_DIR", env) || "").trim();
+  const safe = (p: string) => isUnderTempDir(p) && !runtimeRoots(defaultDir).some((r) => pathsOverlap(p, r));
+  if (safe(dir) && (!named || safe(named))) return dir;
+  return redirectToTemp("RUNTIME_DIR", "rt", dir, env, Boolean(named));
 }
 
 /** 只由 tests/isolated-state.ts 设在独立状态目录的 bun test 子进程 env 里：必须走默认出借 journal 的用例（路由 / pushWork）在那里跑 */
