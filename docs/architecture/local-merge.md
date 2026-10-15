@@ -47,7 +47,7 @@ local project both fail their read and hand the card to PM manually instead of a
 
 | When | Where | What |
 |---|---|---|
-| Planner says "merge" | `scheduler-auto-tick.ts` → `lib/local-merge-tick.ts` | no merge intent, no merge slot, no `gh`; `ledger scheduler-local-merge-ready <task> --head` writes one `scheduler` event `op: "local_merge_ready"` (dedup = this entry into `merge` + head) only if the card passes the merge gate minus the caller (a queue frozen after planning: nothing written). After the PM notice went out, `--notified` writes `op: "local_merge_notified"`; a failed notice gets no receipt and is sent again next pass, also after a restart. A notified card reads the ledger only (no CLI call per pass) |
+| Planner says "merge" | `scheduler-auto-tick.ts` → `lib/local-merge-tick.ts` | no merge intent, no merge slot, no `gh`; `ledger scheduler-local-merge-ready <task> --head` writes one `scheduler` event `op: "local_merge_ready"` (dedup = this entry into `merge` + head) only if the card passes the merge gate minus the caller (a queue frozen after planning: nothing written). The PM notice is claimed before it is sent: `--notice` writes `op: "local_merge_notice"` (attempt n) after the same gate again, and an open claim answers as a duplicate, so the PM is told at most once, also across a crash or a ledger outage after the send. Only a send that threw writes `--notice-failed` (`op: "local_merge_notice_failed"`, attempt n), and the next pass (or a restart) claims attempt n+1. A crash between claim and send loses that notice; the ready record stays in `ledger show`. A claimed card reads the ledger only (no CLI call per pass) |
 | A merge intent left from before the switch | auto tick | not driven: the card goes to PM (`scheduler-fallback-manual`) |
 | PM runs `ledger local-merge <task> --head <sha>` | `manager/ledger-local-merge-cmds.ts` → `lib/local-merge-run.ts` | running it is the PM's confirmation; steps below |
 
@@ -65,7 +65,8 @@ local project both fail their read and hand the card to PM manually instead of a
    otherwise `git merge-tree --write-tree main head` clean → `git commit-tree` with parents (main, head) (`merge`); a conflict refuses.
 5. A temporary worktree (`git worktree add --detach`) at that commit; each `requiredChecks` entry runs there as argv (`checkArgv`), `CHECK_TIMEOUT_MS`
    (30 min) each, stopping at the first failure. The worktree is always removed. A failed / timed-out check refuses.
-6. main unchanged and the directory still clean, the ledger gate again, then `git merge --ff-only <commit>` in the main directory.
+6. The project lock still held (`lock.held()`: a process paused past the lock's 3-minute expiry may have lost it to another merge), main
+   unchanged and the directory still clean, the ledger gate again, then `git merge --ff-only <commit>` in the main directory.
 7. One transaction (`recordLocalMerge`): a `decision` event `op: "local_merge"` (`head`, `mergeSha`, `base` = main before, `mode`, `checks`
    [{check, code, timedOut, ms}], `reviewSeq`), `merge → live` (stage event with `head`, `mergeSha`, `localMergeSeq`), the card's file locks released.
 

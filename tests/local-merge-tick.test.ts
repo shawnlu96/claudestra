@@ -24,9 +24,9 @@ async function atMerge() {
   expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   const reads: string[] = [], ready: string[][] = [];
   /** One pass of the auto tick for a localMerge project; `fresh` = a restarted service (new deps, same ledger). */
-  const local = async (notifyPm = f.tickDeps.notifyPm) => {
+  const local = async (notifyPm = f.tickDeps.notifyPm, manager = f.tickDeps.manager) => {
     const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, localMerge: true } }, { ...f.tickDeps, notifyPm,
-      manager: async (...args) => { if (args[1] === "scheduler-local-merge-ready") ready.push(args); return f.tickDeps.manager(...args); },
+      manager: async (...args) => { if (args[1] === "scheduler-local-merge-ready") ready.push(args); return manager(...args); },
       prState: async (ref) => { reads.push(ref); throw new Error("本地项目不该读 PR"); } });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
@@ -47,8 +47,8 @@ describe("ONB-2 自动 tick：本地项目停在 merge 等 PM", () => {
       expect(h.readyEvents()).toMatchObject([{ actor: "scheduler", kind: "scheduler", data: { op: "local_merge_ready", head: H1 } }]);
       expect(f.notices.slice(notices)).toEqual([`[调度引擎] T1 审查通过，等 PM 跑 ledger local-merge T1 --head ${H1}（本地合并项目，没有 PR）`]);
       for (let i = 0; i < 3; i++) expect(await h.local()).toMatchObject({ step: "waiting" });
-      expect(h.ready.map((a) => a.slice(2))).toEqual([["T1", "--head", H1], ["T1", "--head", H1, "--notified"]]); // waiting: ledger reads only
-      expect(h.readyEvents("local_merge_notified")).toHaveLength(1);
+      expect(h.ready.map((a) => a.slice(2))).toEqual([["T1", "--head", H1], ["T1", "--head", H1, "--notice"]]); // waiting: ledger reads only
+      expect(h.readyEvents("local_merge_notice")).toHaveLength(1);
       expect(f.notices.length).toBe(notices + 1);
       expect(h.readyEvents()).toHaveLength(1);
       // the CLI itself is idempotent per stay in merge and head (a restart that raced the ledger read)
@@ -61,15 +61,46 @@ describe("ONB-2 自动 tick：本地项目停在 merge 等 PM", () => {
     } finally { f.close(); }
   });
 
-  test("通知没发出去：就绪已记、不记回执，下一轮（含重启）重发，发出后才记回执、不再发（r1 审查 P2）", async () => {
+  test("通知发出后台账再写不进（或进程退出）：下一轮、重启都不重发（r2 审查 P1）", async () => {
+    const h = await atMerge(), { f } = h;
+    try {
+      const notices = f.notices.length;
+      let sent = false;
+      // after the notice went out every ledger write fails: the old receipt-after-send design wrote nothing and told the PM again
+      const send = async (t: Parameters<typeof f.tickDeps.notifyPm>[0], text: string, level: "action" | "info") => { await f.tickDeps.notifyPm(t, text, level); sent = true; };
+      const manager: typeof f.tickDeps.manager = async (...a) => (sent ? { ok: false, error: "ledger down" } : f.tickDeps.manager(...a));
+      expect(await h.local(send, manager)).toMatchObject({ step: "local_ready" });
+      for (let i = 0; i < 3; i++) expect(await h.local()).toMatchObject({ step: "waiting" }); // fresh deps each pass: restarts
+      expect(f.notices.length).toBe(notices + 1);
+    } finally { f.close(); }
+  });
+
+  test("通知发送失败：关掉这次认领，下一轮（含重启）再认领再发；之后不再发（r1 审查 P2）", async () => {
+    const h = await atMerge(), { f } = h;
+    try {
+      const notices = f.notices.length, count = (op: string) => h.readyEvents(op).length;
+      expect(await h.local(async () => { throw new Error("bridge down"); })).toMatchObject({ step: "local_ready" });
+      expect([count("local_merge_ready"), count("local_merge_notice"), count("local_merge_notice_failed"), f.notices.length]).toEqual([1, 1, 1, notices]);
+      expect(await h.local()).toMatchObject({ step: "local_ready" }); // a fresh deps object: the restart case
+      expect([count("local_merge_ready"), count("local_merge_notice"), count("local_merge_notice_failed"), f.notices.length]).toEqual([1, 2, 1, notices + 1]);
+      expect(await h.local()).toMatchObject({ step: "waiting" });
+      expect(f.notices.length).toBe(notices + 1);
+    } finally { f.close(); }
+  });
+
+  test("发送失败后队列冻结：重试前复核合并闸，不认领、不通知；解冻后才发（r2 审查 P2）", async () => {
     const h = await atMerge(), { f } = h;
     try {
       const notices = f.notices.length;
       expect(await h.local(async () => { throw new Error("bridge down"); })).toMatchObject({ step: "local_ready" });
-      expect([h.readyEvents().length, h.readyEvents("local_merge_notified").length, f.notices.length]).toEqual([1, 0, notices]);
-      expect(await h.local()).toMatchObject({ step: "local_ready" }); // a fresh deps object: the restart case
-      expect([h.readyEvents().length, h.readyEvents("local_merge_notified").length, f.notices.length]).toEqual([1, 1, notices + 1]);
+      expect(await f.cli("pm", "freeze", "--reason", "查不明合并", "--project", "p")).toMatchObject({ ok: true });
       expect(await h.local()).toMatchObject({ step: "waiting" });
+      // the claim itself re-checks the gate (a freeze that lands between the tick's plan and its write)
+      expect(await f.tickDeps.manager("ledger", "scheduler-local-merge-ready", "T1", "--head", H1, "--notice"))
+        .toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("冻结") });
+      expect([h.readyEvents("local_merge_notice").length, f.notices.length]).toEqual([1, notices]);
+      expect(await f.cli("pm", "unfreeze", "--project", "p")).toMatchObject({ ok: true });
+      expect(await h.local()).toMatchObject({ step: "local_ready" });
       expect(f.notices.length).toBe(notices + 1);
     } finally { f.close(); }
   });

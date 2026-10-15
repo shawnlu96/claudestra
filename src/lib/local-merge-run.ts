@@ -118,6 +118,8 @@ export async function runLocalMerge(db: Database, ctx: WriteCtx, local: LocalMer
     const checks = await runChecks(git, target, local!.checks, deps);
     const bad = checks.find((c) => c.code !== 0 || c.timedOut);
     if (bad) refuse(`检查没过：${bad.check}（${bad.timedOut ? "超时" : `exit ${bad.code}`}），main 没动`);
+    // checks can outlast the lock's 3-minute expiry if this process was paused: a reclaimed lock means another merge may own main now
+    if (!lock.held()) refuse("本地合并锁在检查期间失效（被别的合并回收），main 没动，重跑 local-merge");
     if ((await mainState(git)) !== base) refuse("检查期间 main 变了，重跑 local-merge");
     localMergeGate(db, ctx.actor, task.id, head, Date.now()); // the ledger may have moved during the checks
     await git.out("merge", "--ff-only", target);

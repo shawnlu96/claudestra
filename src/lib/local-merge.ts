@@ -17,7 +17,8 @@ import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 const LOCAL_MERGE_OP = "local_merge";
 const LOCAL_READY_OP = "local_merge_ready";
-const LOCAL_NOTIFIED_OP = "local_merge_notified";
+const LOCAL_NOTICE_OP = "local_merge_notice";
+const LOCAL_NOTICE_FAILED_OP = "local_merge_notice_failed";
 const SHA = /^[a-f0-9]{40}$/i;
 
 /** How the commit that lands on main was made; `backfill` = the head was already on main, only the record was missing. */
@@ -33,7 +34,6 @@ const mergeEntry = (db: Database, task: LedgerTask): number =>
   listEvents(db, { project: task.project, target: task.id }).findLast((e) => e.kind === "stage" && e.data.to === "merge")?.seq ?? 0;
 const recordKey = (db: Database, task: LedgerTask, head: string): string => `local-merge:${task.id}:s${mergeEntry(db, task)}:${head.toLowerCase()}`;
 const readyKey = (db: Database, task: LedgerTask, head: string): string => `scheduler:${LOCAL_READY_OP}:${task.id}:s${mergeEntry(db, task)}:${head.toLowerCase()}`;
-const noticeKey = (db: Database, task: LedgerTask, head: string): string => `${readyKey(db, task, head)}:notified`;
 
 /** PM (not the dispatcher) / master / owner of the card's project: checked before anything is read back or written. */
 export function assertMayLocalMerge(db: Database, actor: string, task: LedgerTask): void {
@@ -43,30 +43,52 @@ export function assertMayLocalMerge(db: Database, actor: string, task: LedgerTas
 /** This stay's local_merge record at this head, if one was written: a rerun returns it instead of merging again. */
 export const localMergeRecord = (db: Database, task: LedgerTask, head: string): LedgerEvent | null => getEventByDedup(db, recordKey(db, task, head));
 
-/** Where the card's current head stands in this stay: no ready record, ready but the PM notice not confirmed sent, or notified. */
-export function localReadyState(db: Database, task: LedgerTask): "none" | "ready" | "notified" {
-  if (!task.headSHA || !getEventByDedup(db, readyKey(db, task, task.headSHA))) return "none";
-  return getEventByDedup(db, noticeKey(db, task, task.headSHA)) ? "notified" : "ready";
+/**
+ * PM notice attempts of this stay and head: attempt n is claimed (`notice:n`) before it is sent and closed by `notice-failed:n` only when
+ * the send itself failed. `claimed` = the open attempt (sent, or in flight when the process died); otherwise `next` is the one to claim.
+ */
+function noticeAttempt(db: Database, task: LedgerTask, head: string): { n: number; claimed: LedgerEvent | null } {
+  const base = readyKey(db, task, head);
+  for (let n = 1; ; n++) {
+    const claimed = getEventByDedup(db, `${base}:notice:${n}`);
+    if (!claimed || !getEventByDedup(db, `${base}:notice-failed:${n}`)) return { n, claimed };
+  }
 }
 
+/** Where the card's current head stands in this stay: no ready record, ready with no open notice attempt, or the PM notice claimed. */
+export function localReadyState(db: Database, task: LedgerTask): "none" | "ready" | "notified" {
+  if (!task.headSHA || !getEventByDedup(db, readyKey(db, task, task.headSHA))) return "none";
+  return noticeAttempt(db, task, task.headSHA).claimed ? "notified" : "ready";
+}
+
+export type ReadyStep = "ready" | "notice" | "notice-failed";
+const READY_OPS: Record<ReadyStep, string> = { ready: LOCAL_READY_OP, notice: LOCAL_NOTICE_OP, "notice-failed": LOCAL_NOTICE_FAILED_OP };
+
 /**
- * Scheduler only. Ready: an auto card in `merge` at its full head that the PM could merge right now (same gate as local-merge, minus
- * the caller) waits for the PM; one record per stay and head. Notified: the receipt after the PM notice went out, so a notice that
- * failed is sent again on the next pass or after a restart, and one that went out is not. A replay returns the first record.
+ * Scheduler only, one record per stay in `merge` and head. ready: the card passes the merge gate minus the caller, so it waits for the
+ * PM. notice: claims the PM notice before it is sent, after the same gate again (a queue frozen since ready gets no notice); an open claim
+ * is answered as a duplicate, so the PM is told at most once even across a crash between claim and send. notice-failed: the send
+ * threw, so the claim is closed and the next pass may claim again. A replay returns the first record.
  */
-export function recordLocalReady(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; notified?: boolean }): { event: LedgerEvent; duplicate: boolean } {
+export function recordLocalReady(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; step?: ReadyStep }): { event: LedgerEvent; duplicate: boolean } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "本地合并就绪只由调度服务记");
+  const step = input.step ?? "ready";
   return tx(db, () => {
     const task = mustTask(db, input.taskId), workflow = getWorkflow(db, task.id), now = ctx.now ?? Date.now();
     if (task.stage !== "merge" || workflow?.mode !== "auto") throw new LedgerError("conflict", "任务不在自动流程的 merge 阶段");
     if (!SHA.test(input.head) || task.headSHA !== input.head) throw new LedgerError("conflict", "就绪的 head 不是任务当前的完整 head");
-    const key = input.notified ? noticeKey(db, task, input.head) : readyKey(db, task, input.head), prev = getEventByDedup(db, key);
+    const ready = readyKey(db, task, input.head);
+    if (step !== "ready" && !getEventByDedup(db, ready)) throw new LedgerError("conflict", "还没记本地合并就绪");
+    const at = noticeAttempt(db, task, input.head);
+    if (step === "notice" && at.claimed) return { event: at.claimed, duplicate: true };
+    if (step === "notice-failed" && !at.claimed) throw new LedgerError("conflict", "没有未结的通知认领");
+    const key = step === "ready" ? ready : `${ready}:${step}:${at.n}`, prev = getEventByDedup(db, key);
     if (prev) return { event: prev, duplicate: true };
-    if (input.notified && !getEventByDedup(db, readyKey(db, task, input.head))) throw new LedgerError("conflict", "还没记本地合并就绪");
-    if (!input.notified) mergeableNow(db, task, workflow, input.head, now);
-    const text = input.notified ? `已通知 PM 本地合并 ${task.id}` : `审查通过，等 PM 本地合并：ledger local-merge ${task.id} --head ${input.head}`;
+    if (step !== "notice-failed") mergeableNow(db, task, workflow, input.head, now);
+    const text = { ready: `审查通过，等 PM 本地合并：ledger local-merge ${task.id} --head ${input.head}`, notice: `通知 PM 本地合并 ${task.id}（第 ${at.n} 次）`,
+      "notice-failed": `本地合并通知第 ${at.n} 次没发出去` }[step];
     const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler", text,
-      data: { op: input.notified ? LOCAL_NOTIFIED_OP : LOCAL_READY_OP, head: input.head } }, true);
+      data: { op: READY_OPS[step], head: input.head, ...(step === "ready" ? {} : { attempt: at.n }) } }, true);
     return { event, duplicate: false };
   });
 }

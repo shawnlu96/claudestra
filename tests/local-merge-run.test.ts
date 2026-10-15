@@ -186,6 +186,15 @@ describe("local-merge：git 一侧的拒绝，main 不动", () => {
     } finally { f.close(); }
   });
 
+  test("检查期间锁被回收（进程暂停超过锁期限）：动 main 前核锁，失锁即拒（r2 审查 P2）", async () => {
+    const f = await atMerge();
+    try {
+      // the check itself drops the lock the way a reclaim after expiry would
+      const lost = `rm -r ${join(repo, ".git", "claudestra-local-merge.lock")}`;
+      await refused(f, () => merge(f, { checks: ["test -f feat.txt", lost] }), /锁/);
+    } finally { f.close(); }
+  });
+
   test("主目录不干净 / 不在 main 上", async () => {
     const f = await atMerge();
     try {

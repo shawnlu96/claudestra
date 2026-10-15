@@ -18,15 +18,17 @@ export async function driveLocalReady<O>(c: HandoffCard<O>): Promise<O> {
     const r = await record();
     if (r.ok !== true) return c.out("held", `本地合并就绪没记上：${String(r.error)}`);
   }
-  // only a notice that went out gets its receipt: a failed one (or a lost receipt) is sent again next pass, also after a restart
+  // claim before send: the PM is told at most once (a crash after the claim loses the notice, never doubles it); only a send that
+  // threw closes the claim, so the next pass (or a restart) claims again, re-checking the merge gate
+  const claim = await record("--notice");
+  if (claim.ok !== true) return c.out("held", `本地合并通知没认领上：${String(claim.error)}`);
+  if (claim.duplicate === true) return c.out("waiting", wait);
   try {
     await c.deps.notifyPm(task, `[调度引擎] ${task.id} ${wait}（本地合并项目，没有 PR）`, "action"); // the PM has to run local-merge
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
-    console.error(`⚠️ [scheduler] ${task.id} 本地合并就绪通知没发出去（就绪已记，下轮重发）：${(e as Error).message}`);
-    return c.out("local_ready", wait);
+    const f = await record("--notice-failed");
+    console.error(`⚠️ [scheduler] ${task.id} 本地合并就绪通知没发出去（${f.ok === true ? "下轮重发" : `失败没记上，不再重发：${String(f.error)}`}）：${(e as Error).message}`);
   }
-  const n = await record("--notified");
-  if (n.ok !== true) console.error(`⚠️ [scheduler] ${task.id} 本地合并通知回执没记上（下轮会再通知一次）：${String(n.error)}`);
   return c.out("local_ready", wait);
 }
