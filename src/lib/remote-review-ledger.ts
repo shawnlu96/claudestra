@@ -3,8 +3,8 @@
  * remote-review-intake's three checks; `ledger scheduler-remote-review` re-reads and re-parses it and calls recordRemoteReview,
  * which in one transaction keeps the report as quoted data under ledger/reviews, writes one `remote_review` event whose data holds
  * parsed fields only (never the peer's text), and acts: P0 / P1 with the owner's rounds used up → an auto card goes manual and PM
- * hears once; a P1 on a card that is not auto, or a redelivered P1 (capUnknown) → PM hears once (card and report path, no report
- * text), the card is not touched. A P1 on an auto card is left to the bounce step (remoteP1At). Only the current word on a head
+ * hears once; a P1 on a card that is not auto → PM hears once (card and report path, no report text). An old-format redelivered P1
+ * (capUnknown) reached PM as before and is only booked. A P1 on an auto card is left to the bounce step (remoteP1At). Only the current word on a head
  * acts (remoteCurrentAt: highest round); an outranked booking is marked superseded. The head counts only as a prefix of the
  * card's head (in merge also of the head the handoff follows): an early review is `matched: false` until the card reaches it.
  * tests/remote-review-intake-ledger.test.ts.
@@ -51,21 +51,22 @@ function keepReport(task: LedgerTask, r: RemoteReview, body: string, dir = state
 }
 
 type Action = "manual" | "notify" | null;
-type Facts = Pick<RemoteReview, "conclusion" | "p1" | "p2" | "format" | "reportId">;
+type Facts = Pick<RemoteReview, "conclusion" | "p1" | "p2" | "format" | "reportId" | "ambiguous">;
 
 const stops = (r: Facts): boolean => r.conclusion === "p0" || r.conclusion === "p1_cap";
 
-/** A redelivered P1 (capUnknown) never changes the card: whether it is at the cap is a guess either way, so PM hears and decides. */
+/** An old-format redelivered P1 (capUnknown) went to PM through the normal delivery and never changes the card: booked only. */
 function actionOf(task: LedgerTask, r: Facts, auto: boolean): Action {
+  if (capUnknown(r)) return null;
   if (stops(r)) return auto && !TERMINAL_STAGES.includes(task.stage) ? "manual" : "notify";
-  return r.p1 > 0 && (!auto || capUnknown(r)) ? "notify" : null;
+  return r.p1 > 0 && !auto ? "notify" : null;
 }
 
-const factsText = (r: Facts): string => `${remoteConclusionText(r)}${capUnknown(r) ? "（补发，看不出仓库方轮次是否到上限）" : ""}`;
+const factsText = (r: Facts): string => `${remoteConclusionText(r)}${capUnknown(r) ? "（旧格式补发，看不出仓库方轮次是否到上限；原文已原路交 PM，只记账）" : ""}`;
 
 function noticeOf(task: LedgerTask, r: Facts, action: Action, path: string): string | null {
   if (!action) return null;
-  const tail = action === "manual" ? "，已退回人工，请接手" : capUnknown(r) ? "，卡没动，请 PM 定" : "";
+  const tail = action === "manual" ? "，已退回人工，请接手" : "";
   return `[调度引擎] ${task.id} 仓库方审查 ${r.reportId}：${factsText(r)}${tail}；报告：${path}`;
 }
 
@@ -103,7 +104,7 @@ export function recordRemoteReview(db: Database, ctx: WriteCtx, input: { taskId:
     const reportPath = keepReport(task, r, remoteReportBody(task, r, peer), input.reportDir);
     const text = `仓库方审查 ${r.reportId}：${factsText(r)}，head ${r.head12}${head ? "" : "（不是卡上的 head，到这个 head 才生效）"}`;
     const data = { op: REMOTE_REVIEW_OP, peer, reportId: r.reportId, number: r.number, round: r.round, head12: r.head12, format: r.format,
-      conclusion: r.conclusion, p1: r.p1, p2: r.p2, masked: r.masked, matched: !!head, head, stage: task.stage, reportPath };
+      ambiguous: r.ambiguous, conclusion: r.conclusion, p1: r.p1, p2: r.p2, masked: r.masked, matched: !!head, head, stage: task.stage, reportPath };
     const write: Writer = (action, notice, over) => insertEvent(db, { ...ctx, dedupKey }, { project: task.project, target: task.id, kind: "scheduler",
       text: text + overText(over), data: { ...data, action, notice, supersededBy: over?.seq ?? null } }, true);
     const { event, notice } = head ? act(db, ctx, task, r, { head, round: r.round, seq: Infinity, path: reportPath }, write) : { event: write(null, null, null), notice: null };

@@ -100,6 +100,23 @@ describe("RRL-1 hook: duplicate-http-ack (review finding r1)", () => {
     // another round is not a duplicate
     expect(await (await h.call({ text: pushText({ verdict: "changes", p1: 1, round: 2 }) }))!.json()).not.toHaveProperty("duplicate");
   });
+
+  test("[PM 裁定 13] an old-format redelivered P1 is stashed for the record but goes to PM the normal way; a new-format one is taken", async () => {
+    fx = remoteFixture();
+    const h = harness();
+    const legacy = renderRedeliveryPush(P1_TEXT, 1, { stage: "build" }, true)!;
+    expect(await h.call({ text: legacy })).toBeNull();
+    expect(listInbox(fx.inbox).length).toBe(1);
+    expect(readInbox(listInbox(fx.inbox)[0]!, fx.inbox).text).toBe(legacy);
+    expect(h.mirrored).toEqual([]);
+    // the same report id + head again (any format) is a duplicate: nothing more to PM
+    expect(await (await h.call({ text: legacy }))!.json()).toMatchObject({ duplicate: true });
+    expect(await (await h.call())!.json()).toMatchObject({ duplicate: true });
+    expect(listInbox(fx.inbox).length).toBe(1);
+    const next = await h.call({ text: renderRedeliveryPush(pushText({ verdict: "changes", p1: 1, round: 2 }), 2, { stage: "build" })! });
+    expect(next!.status).toBe(202);
+    expect(listInbox(fx.inbox).length).toBe(2);
+  });
 });
 
 describe("RRL-1 wiring", () => {

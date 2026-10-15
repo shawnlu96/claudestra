@@ -33,10 +33,31 @@ describe("RRL-1 parse: the six shapes round-trip", () => {
   test("[验收线 1] the redelivery of a P1 (both 现状 lines) parses, flagged as a redelivery", () => {
     for (const stage of ["build", "live"] as const) {
       const text = renderRedeliveryPush(CASES.p1, 2, { stage })!;
-      expect(parseRemoteReview(text)).toMatchObject({ format: "redelivery", conclusion: "p1", p1: 2, reportId: "PR1600-r2", report: REPORT });
+      expect(parseRemoteReview(text)).toMatchObject({ format: "redelivery", ambiguous: false, conclusion: "p1", p1: 2, reportId: "PR1600-r2", report: REPORT });
     }
-    // the redelivery drops 下一步, so a capped P1 comes back as a P1 of format redelivery (booking leaves the card alone and tells PM: capUnknown)
-    expect(parseRemoteReview(renderRedeliveryPush(CASES.p1_cap, 4, { stage: "build" })!)).toMatchObject({ conclusion: "p1", format: "redelivery" });
+    // the cap line carries what the dropped 下一步 said: a capped P1 redelivered reads as p1_cap
+    expect(parseRemoteReview(renderRedeliveryPush(CASES.p1_cap, 4, { stage: "build" })!)).toMatchObject({ conclusion: "p1_cap", format: "redelivery", ambiguous: false });
+    for (const k of ["pass", "p2", "p0"] as const) {
+      const text = renderRedeliveryPush(CASES[k], 2, { stage: "build" })!;
+      expect(text).not.toContain("复验轮次（原审查当时）");
+      expect(parseRemoteReview(text)).toMatchObject({ format: "redelivery", ambiguous: false, conclusion: k });
+    }
+  });
+
+  test("[PM 裁定 13] the old redelivery format (no cap line) still parses; a P1 in it is ambiguous, other verdicts are not", () => {
+    for (const [k, round] of [["p1", 2], ["p1_cap", 4]] as const) {
+      expect(parseRemoteReview(renderRedeliveryPush(CASES[k], round, { stage: "build" }, true)!)).toMatchObject({ format: "redelivery", ambiguous: true, conclusion: "p1" });
+    }
+    expect(parseRemoteReview(renderRedeliveryPush(CASES.p0, 2, { stage: "live" }, true)!)).toMatchObject({ ambiguous: false, conclusion: "p0" });
+    expect(parseRemoteReview(CASES.p1)).toMatchObject({ format: "review", ambiguous: false });
+  });
+
+  test("[PM 裁定 13] a cap line that does not belong fails: on a non-P1, an unknown value, or the first delivery's 下一步 kept", () => {
+    const re = renderRedeliveryPush(CASES.p1, 2, { stage: "build" })!;
+    expect(parseRemoteReview(re.replace("未到上限", "快到上限"))).toBeNull();
+    const pass = renderRedeliveryPush(CASES.pass, 2, { stage: "build" })!.split("\n");
+    expect(parseRemoteReview([...pass.slice(0, 5), "复验轮次（原审查当时）：未到上限", ...pass.slice(5)].join("\n"))).toBeNull();
+    expect(parseRemoteReview(re.replace("复验轮次（原审查当时）：未到上限", CASES.p1.split("\n")[3]!))).toBeNull();
   });
 
   test("[验收线 1] an empty report and a report with separator-like lines still round-trip", () => {

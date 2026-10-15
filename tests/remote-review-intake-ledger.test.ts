@@ -180,27 +180,50 @@ describe("RRL-1 review findings r2", () => {
   const atHead = () => listEvents(fx.db, { project: "p", target: "T1" });
   const r1P1 = pushText({ verdict: "changes", p1: 1 }, { maxRounds: 4 });
 
-  test("[验收线 6/8] redelivery-normal-p1-escalated: a redelivered P1 below the cap arriving first leaves the auto card as it is, PM is told", async () => {
+  test("[验收线 6 · PM 裁定 13] redelivery-normal-p1-escalated: a new-format redelivered P1 below the cap arriving first books like the original", async () => {
     fx = remoteFixture();
     const r = await fx.book(renderRedeliveryPush(r1P1, 1, { stage: "build" })!);
-    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", conclusion: "p1", action: "notify" });
+    expect(r).toMatchObject({ ok: true, notice: null });
+    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", ambiguous: false, conclusion: "p1", p1: 1, action: null, matched: true });
     expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
     expect(fx.task().stage).toBe("merge");
-    expect(String(r.notice)).toContain("看不出仓库方轮次是否到上限");
-    expect(String(r.notice)).toContain("卡没动");
-    expect(String(r.notice)).not.toContain(INJECT);
-    expect(remoteP1At(atHead(), HEAD)).toBeNull(); // nothing fixes it automatically
-    expect(remoteCurrentAt(atHead(), HEAD)?.data.reportId).toBe("PR1600-r1");
+    expect(remoteP1At(atHead(), HEAD)?.data.reportId).toBe("PR1600-r1"); // the bounce step finds it, as for the original
   });
 
-  test("[验收线 8] the redelivery of a capped P1 arriving first is not left silently on auto: card untouched, PM told once", async () => {
+  test("[验收线 8 · PM 裁定 13] a new-format redelivered capped P1 arriving first: manual and one PM notice, as the original", async () => {
     fx = remoteFixture();
     const r = await fx.book(renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" })!);
-    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", conclusion: "p1", action: "notify" });
-    expect(String(r.notice)).toContain("补发");
-    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", conclusion: "p1_cap", action: "manual" });
+    expect(String(r.notice)).toContain("已退回人工");
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
     expect(unsentRemoteNotices(fx.db, "p").length).toBe(1);
-    expect(remoteP1At(atHead(), HEAD)).toBeNull();
+  });
+
+  test("[PM 裁定 13] an old-format redelivered P1: booked as ambiguous only — card untouched, no notice (PM got it the normal way), no fix", async () => {
+    for (const text of [renderRedeliveryPush(r1P1, 1, { stage: "build" }, true)!, renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" }, true)!]) {
+      fx = remoteFixture();
+      const r = await fx.book(text);
+      expect(r).toMatchObject({ ok: true, notice: null });
+      expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", ambiguous: true, conclusion: "p1", action: null, notice: null });
+      expect(fx.remoteEvents()[0]!.text).toContain("旧格式补发");
+      expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+      expect(fx.task().stage).toBe("merge");
+      expect(unsentRemoteNotices(fx.db, "p")).toEqual([]);
+      expect(remoteP1At(atHead(), HEAD)).toBeNull();
+      expect(remoteCurrentAt(atHead(), HEAD)?.data.ambiguous).toBe(true);
+      fx.cleanup();
+    }
+    fx = remoteFixture({ mode: "manual" });
+    expect(await fx.book(renderRedeliveryPush(r1P1, 1, { stage: "build" }, true)!)).toMatchObject({ ok: true, notice: null });
+  });
+
+  test("[PM 裁定 13] original and redelivery both arriving count once, in either order", async () => {
+    fx = remoteFixture();
+    await fx.book(renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" })!);
+    expect(await fx.book(CAP_TEXT)).toMatchObject({ ok: true, duplicate: true, notice: null });
+    expect(await fx.book(renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" }, true)!)).toMatchObject({ ok: true, duplicate: true });
+    expect(fx.remoteEvents().length).toBe(1);
+    expect(unsentRemoteNotices(fx.db, "p").length).toBe(1);
   });
 
   test("a redelivered P0 still sends the auto card to PM (P0 is readable from the title)", async () => {

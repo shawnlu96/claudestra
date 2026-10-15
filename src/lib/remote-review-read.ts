@@ -46,10 +46,10 @@ export function remoteCurrentAt(events: readonly LedgerEvent[], head: string | n
   return events.filter((e) => isRemote(e) && atHead(e, head)).reduce<LedgerEvent | null>((best, e) => (!best || outranks(e, best) ? e : best), null);
 }
 
-/** The current word on this head when it is a P1 to fix; a redelivered P1 (capUnknown) is left to PM, so it is not returned. */
+/** The current word on this head when it is a P1 to fix; an old-format redelivered P1 (capUnknown) is left to PM, so it is not returned. */
 export function remoteP1At(events: readonly LedgerEvent[], head: string | null): LedgerEvent | null {
   const e = remoteCurrentAt(events, head);
-  return e && Number(e.data.p1) > 0 && !capUnknown(e.data as Pick<RemoteReview, "conclusion" | "format">) ? e : null;
+  return e && Number(e.data.p1) > 0 && !capUnknown(e.data) ? e : null;
 }
 
 export const remoteReviewKey = (taskId: string, r: Pick<RemoteReview, "reportId" | "head12">): string =>

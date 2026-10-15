@@ -89,16 +89,14 @@ describe("RRL-1 tick", () => {
     expect(h.notices.length).toBe(1);
   });
 
-  test("[验收追加 9/11] the redelivery of a capped P1 arriving first: card untouched (not silently), PM told exactly once", async () => {
+  test("[验收追加 9 · PM 裁定 13] the redelivery of a capped P1 arriving first: card back to manual, PM told exactly once", async () => {
     fx = remoteFixture();
     fx.stash(renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" })!);
     const h = harness();
     expect(await h.step()).toEqual([]);
-    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
-    expect(fx.task().stage).toBe("merge");
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
     expect(h.notices.length).toBe(1);
-    expect(h.notices[0]!.text).toContain("补发");
-    expect(h.notices[0]!.text).toContain("请 PM 定");
+    expect(h.notices[0]!.text).toContain("已退回人工");
     fx.stash(CAP_TEXT); // the original arriving later is the same report id + head: duplicate, no second notice
     await h.step();
     await h.step();

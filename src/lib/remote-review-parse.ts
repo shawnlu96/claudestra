@@ -7,13 +7,15 @@
  * nothing is pulled out of it. tests/remote-review-intake-parse.test.ts.
  */
 import { nextStepOf, PUSH_MAX_BYTES, renderReviewPush, type VerdictCounts } from "./peer-pr-message.js";
-import { renderRedeliveryPush } from "./peer-pr-retry.js";
+import { CAP_MARK, renderRedeliveryPush } from "./peer-pr-retry.js";
 
-/** p1_cap = P1 with the owner's rounds used up (only a first delivery says so; a redelivery drops the next-step line). */
+/** p1_cap = P1 with the owner's rounds used up (the next-step line of a first delivery, the cap line of a redelivery). */
 type RemoteConclusion = "pass" | "p2" | "p1" | "p1_cap" | "p0";
 
 export interface RemoteReview {
   format: "review" | "redelivery";
+  /** a redelivered P1 in the format before the cap line: whether the owner's rounds were used up cannot be read (capUnknown) */
+  ambiguous: boolean;
   number: number;
   round: number;
   head12: string;
@@ -49,30 +51,31 @@ function readConclusion(text: string, round: number): Read | null {
 export function parseRemoteReview(text: string): RemoteReview | null {
   if (typeof text !== "string" || Buffer.byteLength(text) > PUSH_MAX_BYTES) return null;
   const lines = text.split("\n");
-  const redelivery = lines[1]?.startsWith("投递补发：") === true;
-  // the redelivery inserts one line after the title and turns 下一步 into 现状; the rest sits one line lower
-  const at = redelivery ? 1 : 0;
-  const title = lines[0]?.match(TITLE), head = lines[1 + at]?.match(HEAD), masked = lines[6 + at]?.match(MASKED);
+  const redelivery = lines[1]?.startsWith("投递补发：") === true, marked = redelivery && lines[5]?.startsWith(CAP_MARK) === true;
+  // the redelivery inserts one line after the title, turns 下一步 into 现状 and (a P1) adds the cap line after it
+  const hd = redelivery ? 1 : 0, at = hd + (marked ? 1 : 0);
+  const title = lines[0]?.match(TITLE), head = lines[1 + hd]?.match(HEAD), masked = lines[6 + at]?.match(MASKED);
   const reply = lines[4 + at];
   if (!title || !head || !masked || !reply?.startsWith(REPLY) || lines.length < 8 + at) return null;
   const number = Number(title[1]), round = Number(title[2]);
   const read = readConclusion(title[3]!, round);
   if (!read) return null;
-  const capped = !redelivery && read.conclusion === "p1" && lines[3] === `下一步：${nextStepOf(read.counts, round)}`;
+  const capLine = redelivery ? lines[5] : lines[3]?.slice("下一步：".length);
+  const capped = read.conclusion === "p1" && capLine === (redelivery ? `${CAP_MARK}已到上限` : nextStepOf(read.counts, round));
   const report = lines.slice(7 + at).join("\n");
   const review = renderReviewPush({ number, taskId: `PR${number}`, head: head[1]!, counts: read.counts, maxRounds: capped ? round : round + 1,
     replyTo: reply.slice(REPLY.length), report, masked: Number(masked[1]) });
-  const same = redelivery ? REDELIVERY_STAGES.some((s) => renderRedeliveryPush(review, round, s) === text) : review === text;
+  const same = redelivery ? REDELIVERY_STAGES.some((s) => renderRedeliveryPush(review, round, s, !marked) === text) : review === text;
   if (!same) return null;
-  return { format: redelivery ? "redelivery" : "review", number, round, head12: head[1]!, reportId: `PR${number}-r${round}`,
+  return { format: redelivery ? "redelivery" : "review", ambiguous: redelivery && !marked && read.conclusion === "p1", number, round, head12: head[1]!, reportId: `PR${number}-r${round}`,
     conclusion: capped ? "p1_cap" : read.conclusion, p1: read.counts.p1, p2: read.counts.p2, masked: Number(masked[1]), report };
 }
 
 /**
- * A redelivered P1: the redelivery drops the next-step line, so whether the owner's rounds were used up cannot be read from it.
- * Nothing acts on it by itself (no manual, no fix): it is booked and PM decides. A redelivered P0 / pass reads as it is.
+ * A P1 redelivered in the format before the cap line: whether the owner's rounds were used up cannot be read from it. The hook
+ * lets it through to PM as before and it is only booked: no manual, no fix. A redelivery with the cap line reads as the original.
  */
-export const capUnknown = (r: Pick<RemoteReview, "conclusion" | "format">): boolean => r.conclusion === "p1" && r.format === "redelivery";
+export const capUnknown = (r: { ambiguous?: unknown }): boolean => r.ambiguous === true;
 
 /** One line for logs, mirrors and notices; built only from parsed fields, never from the peer's free text. */
 export function remoteConclusionText(r: Pick<RemoteReview, "conclusion" | "p1" | "p2">): string {
