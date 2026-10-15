@@ -3,6 +3,8 @@
  * approved rename transactions live in floka-services/install and share STATE2's executor lock.
  */
 
+// 必须是第一个 import：全新机器（只有 ~/.floka）在下面的模块加载 paths.ts 之前选好状态根（floka-install-config/fresh-root-preload.ts）
+import "./floka-install-config/fresh-root-preload.js";
 import { resolveBridgePort } from "./bridge-url.js";
 import { readDotenvFileSync } from "./env-file.js";
 import { LOG_DIR, ensureLogDir } from "./log-paths.js";
@@ -23,6 +25,7 @@ import { refuseInSandbox } from "./sandbox.js";
 import { DAEMONS, cliWrapperScript, systemdUnitHint, type DaemonSpec } from "./cli-wrapper.js";
 import { renderDaemonPlist, type DaemonPlistInput } from "./daemon-plist.js";
 import { withRenameInstallGate } from "./floka-services/install/install-gate.js";
+import { installConfigWarnings } from "./floka-install-config/install.js";
 
 export { DAEMONS, cliWrapperScript } from "./cli-wrapper.js";
 
@@ -654,6 +657,9 @@ async function installClaudestraCli(
   //     （参考 ensureMcpToolsAllowed 注释里的多个 bug 案例）
   try { result.allowedMcpTools = await ensureMcpToolsAllowed(repoRoot); }
   catch (e) { warnings.push(`allow mcp__*__* 工具: ${(e as Error).message}`); }
+  // 5d') rename.installConfig：缺省 off 一字不写；observe 只报差异；on 补新族 allow / .env 新名副本（lib/floka-install-config）
+  try { warnings.push(...(await installConfigWarnings(repoRoot))); }
+  catch (e) { warnings.push(`rename.installConfig: ${(e as Error).message}`); }
 
   // 5e) repo skills/ 里的随包 skill → symlink 到 ~/.claude/skills/（save-compact 等）。只动缺失 / 悬空 / 本仓库的软链，
   //     指向别处的软链和用户自己的目录一律不碰（lib/skills-install.ts；以前这里另有一份会替换任意同名软链）

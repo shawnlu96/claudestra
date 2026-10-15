@@ -11,6 +11,8 @@
  */
 
 import { bridgeHttpBase } from "../lib/bridge-port.js";
+import { hookSessionFamily } from "./hook-family.js";
+import { LEGACY_FAMILY } from "../lib/floka-mcp/families.js";
 
 // 端口跟随 BRIDGE_URL（启动命令显式注入、随每次重启更新），而不是 tmux 全局环境里
 // 可能停在旧值的 BRIDGE_PORT——改过端口后 Stop hook 会静默打到旧端口
@@ -50,6 +52,7 @@ async function main() {
   // StopFailure — Claude 异常退出（也发完成通知）
   // Notification — Claude 等待输入（只停 typing，不重发完成通知）
   if (event === "Stop" || event === "StopFailure" || event === "Notification") {
+    const { family } = await hookSessionFamily(data.session_id);
     try {
       // 必须带超时：try/catch 抓得住"连不上"，抓不住"连上了但不回"。bridge 一旦
       // 卡住（不是挂掉），每个 agent 的每次 Stop hook 都会在这里无限等待，而 hook
@@ -65,6 +68,8 @@ async function main() {
           channelId, event, stopHookActive: !!data.stop_hook_active,
           ...(data.hook_event_name === "Interrupt" ? { interrupt: true } : {}),
           ...(typeof data.session_id === "string" ? { sessionId: data.session_id } : {}),
+          // mcpFamily：本会话的 MCP 命名族（两族共用这条 hook），只有新族才带；缺省 = 旧族，旧会话的请求体逐字不变
+          ...(family !== LEGACY_FAMILY ? { mcpFamily: family } : {}),
         }),
         signal: AbortSignal.timeout(5_000),
       });
