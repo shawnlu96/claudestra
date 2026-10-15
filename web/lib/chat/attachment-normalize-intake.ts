@@ -2,7 +2,7 @@
  * Composer 的附件入口：选择文件与粘贴共用，先过归一化（attachment-normalize.ts）再进待发列表；
  * 拦下的给一条提示（带同一行诊断文字，提示条「详情」展开）。每次粘贴 console.info 一行 [paste-diag]。
  */
-import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { NO_CONTENT_HINT, TOO_LARGE_HINT, normalizeAttachment } from "./attachment-normalize";
 import { formatPasteDiag, readClipboard, type ClipboardRead } from "./attachment-normalize-paste";
 
@@ -39,8 +39,7 @@ function focusedOtherInput(ta: HTMLTextAreaElement | null): boolean {
 
 export function useAttachmentIntake(opts: IntakeOpts) {
   const [notice, setNotice] = useState<AttachNotice | null>(null);
-  const live = useRef(opts);
-  live.current = opts;
+  const { max, taRef, setFiles } = opts; // 都是稳定引用 / 常量：粘贴监听里的旧闭包读到的也是同一份
 
   const intake = async (picked: File[], src: PasteSource | null) => {
     const results = await Promise.all(picked.map(normalizeAttachment));
@@ -51,7 +50,7 @@ export function useAttachmentIntake(opts: IntakeOpts) {
     });
     if (src) console.info(diag);
     const ok = results.flatMap((r) => (r.ok ? [r.file] : []));
-    if (ok.length) live.current.setFiles((prev) => [...prev, ...ok].slice(0, live.current.max));
+    if (ok.length) setFiles((prev) => [...prev, ...ok].slice(0, max));
     const bad = results.find((r) => !r.ok);
     const hint = bad && !bad.ok ? { hint: bad.hint, params: bad.params } : pasteHint(src);
     setNotice(hint ? { ...hint, diag } : null);
@@ -70,16 +69,14 @@ export function useAttachmentIntake(opts: IntakeOpts) {
         console.info(formatPasteDiag({ types: src.types, items: src.items, files: [], html: { fromHtml: 0, refused: src.clip.html.refused, tooLarge: src.clip.html.tooLarge } }));
         return;
       }
-      if (focusedOtherInput(live.current.taRef.current)) return;
+      if (focusedOtherInput(taRef.current)) return;
       e.preventDefault();
       void intake(src.clip.files, src);
-      live.current.taRef.current?.focus();
+      taRef.current?.focus();
     };
     window.addEventListener("paste", onWindowPaste);
     return () => window.removeEventListener("paste", onWindowPaste);
-    // intake 只经 live ref 读最新参数，闭包旧引用无害
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opts.disabled]);
+  }, [opts.disabled]); // eslint-disable-line react-hooks/exhaustive-deps -- intake 只用稳定引用（见上），不必跟着重挂
 
   return { addFiles: (picked: File[]) => void (picked.length && intake(picked, null)), notice, dismissNotice: () => setNotice(null) };
 }
