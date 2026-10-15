@@ -91,7 +91,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-main-ci-wiring.ts": "ledger=3 notice=4",
     "scheduler-manual-merge-tick.ts": "ledger=1", // MANAUTOQ1: `ledger scheduler-autostart manual-merge` through the pass manager, same shape as review-pm
     "scheduler-merge-ci-log-read.ts": "ledger=1 vcs=3", // merge tick's CI reads; observation through the guarded pass manager
-    "scheduler-merge-handoff-tick.ts": "ledger=4 vcs=2",
+    "scheduler-merge-handoff-tick.ts": "ledger=4 vcs=3",
     "scheduler-merge-pipe.ts": "ledger=2", // MRGPIPE1: `ledger scheduler-merge-step` (slot yield) and `scheduler-recovery-observe` through the pass manager
     "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1",
