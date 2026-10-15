@@ -24,17 +24,23 @@ export function kindOf(item: string): ItemKind {
   return "plain";
 }
 
-/** 工具段 → 名字和一句话摘要 */
+/** 工具段 → 名字和一句话摘要；命令串的「＋N 条」（summarizeCommand）在窗口里写明是几条命令 */
 export function toolOf(item: string): { name: string; arg: string } {
   const m = TOOL.exec(item);
-  return m ? { name: m[1]!, arg: m[2]! } : { name: item.replace(/^● /, ""), arg: "" };
+  return m ? { name: m[1]!, arg: m[2]!.replace(/ ＋(\d+) 条/u, " (+$1 条命令)") } : { name: item.replace(/^● /, ""), arg: "" };
 }
 
 /** ACP 标准 ToolKind（schema 里的枚举）→ 给人看的类型 */
 const KIND: Record<string, string> = {
   read: "读取", edit: "编辑", delete: "删除", move: "移动", search: "搜索", execute: "执行", think: "思考", fetch: "抓取", switch_mode: "切换模式", other: "其他",
 };
-const kindLabel = (kind: string | undefined): string => (kind ? KIND[kind] ?? "" : "");
+/** 名字已经说明了类型的不标（Bash 不用再挂「执行」）；other 不标（「其他」没有信息量） */
+const OBVIOUS: Record<string, RegExp> = {
+  read: /read|cat|view|open/i, edit: /edit|write|patch|apply/i, delete: /delete|remove|unlink/i, move: /move|rename/i,
+  search: /grep|glob|find|search|rg/i, execute: /bash|shell|exec|run|command|terminal/i, fetch: /fetch|web|http|curl/i, think: /think/i,
+};
+const kindLabel = (kind: string | undefined, name: string): string =>
+  !kind || kind === "other" || OBVIOUS[kind]?.test(name) ? "" : KIND[kind] ?? "";
 
 export type ToolStatus = "running" | "ok" | "fail" | "lost";
 const MARK: Record<ToolStatus, [string, string]> = { running: ["◐", "33"], ok: ["✓", "32"], fail: ["✗", "31"], lost: ["◌", "2"] };
@@ -43,7 +49,7 @@ const SPIN = ["◐", "◓", "◑", "◒"];
 /** 工具头一行（不折，底栏和滚动记录同一个样子）：状态符号 + 名字(摘要) + 类型 + 进行中的计时 */
 export function toolSpans(t: { name: string; arg: string; kind?: string; status: ToolStatus }, extra = "", tick = 0): Span[] {
   const [mark, color] = MARK[t.status];
-  const label = kindLabel(t.kind);
+  const label = kindLabel(t.kind, t.name);
   return [
     span(t.status === "running" ? SPIN[tick % SPIN.length]! : mark, color), span(" "), span(t.name, "1"),
     span(`(${t.arg})`), ...(label || extra ? [span(` · ${[label, extra].filter(Boolean).join(" · ")}`, "2")] : []),
@@ -108,12 +114,12 @@ function permissionRows(item: string, cols: number): string[] {
   ];
 }
 
-/** 回合分隔：一道暗线，中间是结局和时间；打断黄、失败红 */
+/** 回合分隔：一道满宽暗线，开头是结局和时间；打断黄、失败红 */
 function stopRows(item: string, cols: number, at: Date): string[] {
   const label = item.replace(/^── | ──$/g, "");
   const color = /打断|中断/u.test(label) ? "33" : /失败/u.test(label) ? "31" : "2";
   const head = `── ${label} · ${at.toTimeString().slice(0, 8)} `;
-  const fill = Math.max(2, Math.min(cols - 1, 48) - Bun.stringWidth(head));
+  const fill = Math.max(2, cols - 1 - Bun.stringWidth(head)); // 满宽，和输入框上下的线一样长
   return renderPara({ body: [span(head, color), span("─".repeat(fill), "2")] }, cols);
 }
 

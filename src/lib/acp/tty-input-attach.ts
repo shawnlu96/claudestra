@@ -12,7 +12,7 @@ type Stdin = Pick<NodeJS.ReadStream, "setRawMode" | "setEncoding" | "on" | "resu
 /** 返回输入状态：逐行视图用 line(cols)（createTtyScreen 的 input），新视图用 draft()（tui/screen.ts） */
 export function attachTtyInput(
   stdin: Stdin, host: Pick<AcpHost, "turnState" | "pendingPermission" | "terminal">, tty: TtyScreen, exit: () => void,
-  write: (s: string) => void = (s) => void process.stdout.write(s),
+  logPath?: string, write: (s: string) => void = (s) => void process.stdout.write(s),
 ): TtyInput {
   const input = createTtyInput({
     busy: () => host.turnState.busy,
@@ -21,6 +21,7 @@ export function attachTtyInput(
     print: (line) => tty.print(line),
     redraw: () => tty.tick(),
     exit,
+    logPath,
   });
   stdin.setRawMode(true);
   stdin.setEncoding("utf8");

@@ -56,7 +56,8 @@ function serialize(cells: readonly Cell[]): string {
   return (out + sgr(style, cur)).trimEnd();
 }
 
-/** 按宽度切：优先断在空格处（英文单词不拆），一行里没有空格就硬切；断点处的空格不要 */
+/** 按宽度切：优先断在空格处（英文单词不拆），一行里没有空格就硬切；断点处的空格不要。断点两边有宽字（中日韩）时就地断：
+ * 中文本来就能在任意字间断，退回空格会把整段中文挤到下一行、上一行只剩个前缀（「✻」「abc」）。tests/acp-tui-text.test.ts */
 function breakCells(cells: Cell[], first: number, rest: number): Cell[][] {
   const rows: Cell[][] = [];
   let i = 0, limit = first;
@@ -67,7 +68,7 @@ function breakCells(cells: Cell[], first: number, rest: number): Cell[][] {
       w += cells[j]!.w;
       j++;
     }
-    if (j < cells.length && space > i && cells[j]!.ch !== " ") j = space;
+    if (j < cells.length && space > i && cells[j]!.ch !== " " && cells[j]!.w < 2 && cells[j - 1]!.w < 2) j = space;
     if (j === i) j = i + 1; // 一个字比整行还宽（极窄窗口）：至少放一个，免得死循环
     rows.push(cells.slice(i, j));
     i = j;
