@@ -331,7 +331,7 @@ describe("[验收线 4] next to the serial gate, TRAINHANG and the PM", () => {
   function serial(env: Env) {
     env.db.query("UPDATE scheduler_merges SET phase='await_ci', mergeSha=NULL WHERE intentId=?").run(env.intent);
     const calls: string[] = [], RUN = "https://github.com/example/repo/actions/runs/77";
-    const ciRerun: CiRerunGh = { runAttempt: async () => ({ attempt: 1, status: "completed", conclusion: "failure" }), failedLog: async () => TIMEOUT_LOG,
+    const ciRerun: CiRerunGh = { runAttempt: async () => ({ attempt: 1, status: "completed", conclusion: "failure", headSha: T9_HEAD }), failedLog: async () => TIMEOUT_LOG,
       prFiles: async () => ["src/lib/x.ts"], rerunFailed: async () => { calls.push("rerun"); } };
     const snap: PrSnapshot = { state: "OPEN", head: T9_HEAD, branch: "feat/t9", base: "main", draft: false, crossRepository: false, mergeState: "UNSTABLE",
       mergeSha: null, checks: [{ name: "ci", bucket: "fail", link: `${RUN}/job/9` }] };

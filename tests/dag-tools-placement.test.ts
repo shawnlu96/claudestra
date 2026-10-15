@@ -29,12 +29,12 @@ let dir: string, repo: string, db: Database, now: number, calls: string[][], bra
 let agents: Record<string, { channelId: string; projectId?: string }>;
 let failOn: (args: string[]) => boolean;
 
-async function managerRun(args: string[], channelId: string): Promise<any> {
+async function managerRun(args: string[], channelId: string, startNodeAttempt?: string): Promise<any> {
   if (args[0] === "ledger") {
     const who = resolveActor({ channelId, controlChannelId: "ch-ctl" }, agents);
     if (!who.ok) return { ok: false, code: "forbidden", error: who.error };
     return runLedger(args.slice(1), { db, actor: who.actor, projectIds: [P], loadRegistry: async () => ({ socket: "", agents }) as never,
-      saveRegistry: async () => {}, now: () => now++, autoDispatch: () => true, autoProjects: () => [P] });
+      saveRegistry: async () => {}, now: () => now++, autoDispatch: () => true, autoProjects: () => [P], startNodeAttempt });
   }
   if (args[0] === "create") agents[`agent-${args[1]}`] = { channelId: `ch-${args[1]}`, projectId: P };
   else if (args[0] === "kill") delete agents[args[1]];
@@ -59,9 +59,9 @@ async function fakeGit(args: string[]): Promise<{ ok: boolean; out: string }> {
 function deps(over: Partial<ReturnType<DagToolDeps["startEnv"]>> = {}): DagToolDeps {
   return {
     db: () => db,
-    manager: async (args, channelId) => {
+    manager: async (args, channelId, _timeoutMs, startAttempt) => {
       calls.push(args);
-      return failOn(args) ? { ok: false, error: `注入失败：${args[0]} ${args[1]}` } : managerRun(args, channelId);
+      return failOn(args) ? { ok: false, error: `注入失败：${args[0]} ${args[1]}` } : managerRun(args, channelId, startAttempt);
     },
     callerProject: (a) => agents[a]?.projectId ?? null,
     startEnv: () => ({
@@ -134,6 +134,7 @@ describe("start_node without placement: steps, rollback and products are the pre
     expect((await plan()).ok).toBe(true);
     calls = [];
     const p = product(await start());
+    expect(listEvents(db, { project: P }).filter((e) => e.data.intervention)).toEqual([]);
     expect(digest(p)).toBe(START_GOLDEN.normal);
   });
 
@@ -198,6 +199,7 @@ describe("placement peer:<name>", () => {
     expect(restate!.seq).toBeGreaterThan(decision!.seq);
     expect(restate!.seq).toBeGreaterThan(events.find((e) => e.kind === "scheduler" && e.data.op === "workflow")!.seq);
     expect(getWorkflow(db, "i28-a")).toMatchObject({ mode: "auto", templateVersion: 3 });
+    expect(listEvents(db, { project: P }).filter((e) => e.data.intervention)).toEqual([]);
     expect((await call(deps(), "show_dag", { featureId: "i28" })).version.nodes[0]).toMatchObject({ key: "a", taskId: "i28-a" });
     // The scheduler takes it from there: the skipped restate releases build, and build waits on the pin instead of a local author.
     const snap = autoSnapshot(db, t, { registry: [], maxWorkers: 2, now });

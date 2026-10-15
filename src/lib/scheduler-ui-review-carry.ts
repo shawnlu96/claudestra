@@ -22,7 +22,7 @@ import type { GitRead } from "./scheduler-ui-carry-proof.js";
 import type { CarryEvidence, MergeRun } from "./scheduler-merge.js";
 
 const UI_REVIEW_CARRY_OP = "ui_review_carry";
-const uiReviewCarryKey = (intentId: string, carrySeq: number): string => `scheduler:${intentId}:ui-review-carry:${carrySeq}`;
+export const uiReviewCarryKey = (intentId: string, carrySeq: number): string => `scheduler:${intentId}:ui-review-carry:${carrySeq}`;
 /** Whole directories (any depth) and root files a screenshot is rendered from: the web app, the bridge serving it, shared assets,
  * and the build's dependency / toolchain config. Compared case-insensitively, so a case-only rename on a case-folding disk still counts. */
 const RENDER_DIRS = ["web", "src/bridge", "assets", "public", "static", "styles", "i18n", "locales"] as const;

@@ -36,7 +36,7 @@ function card(checks: string[], link: string) {
     async runAttempt(r, id) {
       expect([r, id]).toEqual([repo, runId]);
       gh.runReads++;
-      return { attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion };
+      return { attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion, headSha: HEAD };
     },
     async failedLog() { return TIMEOUT_ONLY; },
     async prFiles() { return ["src/lib/x.ts"]; },

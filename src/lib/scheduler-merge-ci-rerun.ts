@@ -17,14 +17,18 @@ import { currentCountFailures, effCountRefreshStep } from "./effect-count-refres
 import { ciClaimJournal, settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
 import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
 import { RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
+import { CANCEL_RERUN_TEXT, cancelClaimBase, cancelManualReceipt } from "./scheduler-merge-ci-cancel-judge.js";
 import type { MergeBounce } from "./scheduler-merge-conflict.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 
 /** The GitHub calls this needs; a test (or another host) puts its own on the external as `ciRerun`. */
 export interface CiRerunGh {
-  /** `attempt` > 1 means the run was already re-run; `status` is "completed" once that attempt ended, with its `conclusion`. */
-  runAttempt(repo: string, runId: string): Promise<{ attempt: number; status: string; conclusion: string }>;
+  /**
+   * `attempt` > 1 means the run was already re-run; `status` is "completed" once that attempt ended, with its `conclusion`.
+   * `headSha` is the commit the run tested: a rerun is only ever sent for a run of the reviewed head (merge-arch-CICANCEL1).
+   */
+  runAttempt(repo: string, runId: string): Promise<{ attempt: number; status: string; conclusion: string; headSha: string }>;
   failedLog(repo: string, runId: string): Promise<string>;
   perJobLog?(repo: string, runId: string, attempt: number): Promise<PerJobLog>;
   prFiles(prRef: string): Promise<string[]>;
@@ -48,10 +52,11 @@ export function ciRerunGh(command: typeof runBounded = runBounded): CiRerunGh {
   };
   return {
     async runAttempt(repo, runId) {
-      const raw = JSON.parse(await gh("run", "view", runId, "--repo", repo, "--json", "attempt,status,conclusion")) as
-        { attempt?: unknown; status?: unknown; conclusion?: unknown };
+      const raw = JSON.parse(await gh("run", "view", runId, "--repo", repo, "--json", "attempt,status,conclusion,headSha")) as
+        { attempt?: unknown; status?: unknown; conclusion?: unknown; headSha?: unknown };
       if (!Number.isSafeInteger(raw.attempt) || typeof raw.status !== "string") throw new Error("gh run view 没给出 attempt / status");
-      return { attempt: raw.attempt as number, status: raw.status, conclusion: typeof raw.conclusion === "string" ? raw.conclusion : "" };
+      if (typeof raw.headSha !== "string" || !/^[a-f0-9]{40}$/i.test(raw.headSha)) throw new Error("gh run view 没给出 run 的 headSha");
+      return { attempt: raw.attempt as number, status: raw.status, conclusion: typeof raw.conclusion === "string" ? raw.conclusion : "", headSha: raw.headSha };
     },
     async failedLog(repo, runId) {
       const log = await gh("run", "view", runId, "--repo", repo, "--log-failed");
@@ -69,21 +74,24 @@ export function ciRerunGh(command: typeof runBounded = runBounded): CiRerunGh {
 }
 
 /** Without a `ciRerun` on the external, a test process never reaches the real gh: the bounce stays as it always was there. */
-const ghOf = (external: MergeExternal): CiRerunGh | null =>
+export const ciRerunGhOf = (external: MergeExternal): CiRerunGh | null =>
   (external as MergeExternal & { ciRerun?: CiRerunGh }).ciRerun ?? (isTestProcess() ? null : ciRerunGh());
 
-const RUN_LINK = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/(\d+)(?:\/\S*)?$/;
+export const CI_RUN_LINK = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/(\d+)(?:\/\S*)?$/;
 export interface RerunPlan { repo: string; runId: string; link: string; checks: string[]; cases: string[] }
 type Decision = { kind: "rerun"; plan: RerunPlan } | { kind: "wait" } | { kind: "bounce"; why: string; flaky?: KnownFlakyRed };
 
 /** One workflow run behind every failed check, read from GitHub; anything else is a bounce with the reason. */
 async function decide(run: MergeRun, checks: FailedCheck[], gh: CiRerunGh): Promise<Decision> {
-  const runs = checks.map((c) => RUN_LINK.exec(c.link));
+  const runs = checks.map((c) => CI_RUN_LINK.exec(c.link));
   if (!runs.length || runs.some((m) => !m)) return { kind: "bounce", why: "失败检查没有 Actions run 链接" };
   const ids = new Set(runs.map((m) => `${m![1]}/${m![2]}`));
   if (ids.size !== 1) return { kind: "bounce", why: "失败检查分属多个 run" };
   const [repo, runId] = [runs[0]![1]!, runs[0]![2]!];
-  const { attempt, status, conclusion } = await gh.runAttempt(repo, runId);
+  const { attempt, status, conclusion, headSha } = await gh.runAttempt(repo, runId);
+  // CICANCEL1: a check link may point at another head's run (an older head re-run by hand); re-running it would cancel this
+  // head's CI. Neither CIF1 nor CIF8 (reached only from here) acts on it: wait, the next tick reads the checks again.
+  if (headSha.toLowerCase() !== run.reviewedHead.toLowerCase()) return { kind: "wait" };
   // CIWAIT1: a required check can turn red while other jobs of the run are still going, and gh refuses the failed log until the
   // run ends. Nothing is read, re-run or bounced before that, whatever the attempt: the next tick reads the run again.
   if (status !== "completed") return { kind: "wait" };
@@ -116,10 +124,10 @@ const caseName = (f: CiFailure): string => `${f.file} > ${f.name}`;
 export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, checks: FailedCheck[],
   toReceipt: ToReceipt): Promise<MergeRun> {
   const bounce = () => step("resolved", toReceipt({ cause: "ci_fail", prHead: pr.head, mainHead: null, checks }));
-  const gh = ghOf(external);
+  const gh = ciRerunGhOf(external);
   if (!gh) return bounce();
   if (!run.reason?.startsWith(WAIT_LEAD)) {
-    const links = checks.map((c) => RUN_LINK.exec(c.link));
+    const links = checks.map((c) => CI_RUN_LINK.exec(c.link));
     if (links.length && links.every((m) => m && m[1] === links[0]![1] && m[2] === links[0]![2])) {
       const link = `https://github.com/${links[0]![1]}/actions/runs/${links[0]![2]}`;
       // CIFLEN1: a query that cannot fit the gate stands for no claim either (claims fit with the prefix): skip it, decide reads the run.
@@ -166,10 +174,10 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
 function pendingRerun(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[]): { receipt: string; repo: string; runId: string } | null {
   if (!run.reason?.startsWith(WAIT_LEAD)) return null;
   const receipt = run.reason.slice(WAIT_LEAD.length);
-  const claim = parseRerunReceipt(knownFlakyBase(receipt));
+  const claim = parseRerunReceipt(claimBase(receipt));
   if (!claim || claim.prHead.toLowerCase() !== pr.head.toLowerCase()) return null;
-  const m = RUN_LINK.exec(claim.link);
-  const runOf = (link: string) => RUN_LINK.exec(link)?.slice(1, 3).join("/");
+  const m = CI_RUN_LINK.exec(claim.link);
+  const runOf = (link: string) => CI_RUN_LINK.exec(link)?.slice(1, 3).join("/");
   if (!m || checks.some((c) => runOf(c.link) !== `${m[1]}/${m[2]}`)) return null;
   return { receipt, repo: m[1]!, runId: m[2]! };
 }
@@ -197,6 +205,9 @@ async function awaitRerun(run: MergeRun, pending: { receipt: string; repo: strin
   if (claimed.phase === "resolved") console.error(`⚠️ [merge] ${run.taskId} CI 红，退回 fix：重跑没有开始（${RERUN_SETTLE_MS / 60_000} 分钟后仍是旧 attempt）`);
   return claimed;
 }
+
+/** CIF1's own claim inside a CIF8 (known flaky) or CICANCEL1 (cancelled run) claim; any other receipt unchanged. */
+const claimBase = (receipt: string): string => knownFlakyBase(cancelClaimBase(receipt) ?? receipt);
 
 /** Prefix of the run's reason while a claimed rerun has not shown up on GitHub yet; the claim receipt follows it. */
 export const RERUN_WAIT = "等 CI 重跑开始";
@@ -260,8 +271,11 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
   writeEvent: WriteEvent): string | null {
   const query = receipt.startsWith(QUERY_LEAD);
   const raw = query ? receipt.slice(QUERY_LEAD.length) : receipt;
-  const claim = parseRerunReceipt(knownFlakyBase(raw)); // CIF8: a known flaky claim is CIF1's claim plus the failing files
+  const claim = parseRerunReceipt(claimBase(raw)); // CIF8 / CICANCEL1: CIF1's claim plus the failing files / the cancel mark
   if (!claim) return receipt;
+  // CICANCEL1: a cancelled run's claim the budget refuses goes to the PM (ciCancelGate), never back to fix
+  const cancel = cancelClaimBase(raw) !== null;
+  const toPm = (why: string) => cancelManualReceipt({ prHead: claim.prHead, link: claim.link, attempt: 1 }, why);
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
   if (claim.prHead.toLowerCase() !== row.reviewedHead.toLowerCase() || claim.checks.some((c) => !row.requiredChecks.split(",").includes(c))) {
     throw new LedgerError("invalid", "CI 重跑回执的 head / 检查名与本次合并不符");
@@ -281,20 +295,22 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
     if (now - prior.ts < RERUN_SETTLE_MS) return null;
     writeEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun_stale:${claim.prHead}` }, {
       project: row.project, target: row.taskId, kind: "scheduler",
-      text: `合并队列：CI 重跑没有开始（发出重跑 ${RERUN_SETTLE_MS / 60_000} 分钟后 GitHub 仍是旧那次结果），退回 fix ${claim.link}`,
+      text: `合并队列：CI 重跑没有开始（发出重跑 ${RERUN_SETTLE_MS / 60_000} 分钟后 GitHub 仍是旧那次结果），${cancel ? "退人工" : "退回 fix"} ${claim.link}`,
       data: { op: "merge_ci_rerun_stale", intentId: row.intentId, prHead: claim.prHead, run: claim.link, since: prior.ts, reason: "重跑没有开始" },
     }, true);
-    return bounce;
+    return cancel ? toPm("重跑没有开始") : bounce;
   }
-  const flaky = knownFlakyClaim(db, { ...ctx, now }, row, raw, claim, !!prior, writeEvent); // CIF8
+  const flaky = cancel ? undefined : knownFlakyClaim(db, { ...ctx, now }, row, raw, claim, !!prior, writeEvent); // CIF8
   if (flaky === null) return null;
-  if (prior) return bounce;
+  if (prior) return cancel ? toPm("CI 被取消，本 head 已自动重跑过") : bounce;
   db.prepare("UPDATE scheduler_merges SET rev=rev+1, reason=?, updatedAt=? WHERE intentId=?").run(`${WAIT_LEAD}${receipt}`, now, row.intentId);
   writeEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun:${claim.prHead}` }, {
     project: row.project, target: row.taskId, kind: "scheduler",
-    text: flaky?.text ?? `合并队列：CI 只因本卡没碰的测试超时而红，自动重跑一次（${claim.cases.join("、") || "用例见 run"}）${claim.link}`,
+    text: cancel ? `合并队列：${CANCEL_RERUN_TEXT}（必需检查只有取消、没有失败）${claim.link}`
+      : flaky?.text ?? `合并队列：CI 只因本卡没碰的测试超时而红，自动重跑一次（${claim.cases.join("、") || "用例见 run"}）${claim.link}`,
     data: { op: "merge_ci_rerun", intentId: row.intentId, phase: row.phase, prHead: claim.prHead, run: claim.link, checks: claim.checks,
-      cases: claim.cases, reason: "所有失败都是超时，且失败的测试文件都不在本 PR 改动里", ...flaky?.data, ...ciClaimJournal(row.project) },
+      cases: claim.cases, reason: cancel ? CANCEL_RERUN_TEXT : "所有失败都是超时，且失败的测试文件都不在本 PR 改动里", ...flaky?.data,
+      ...(cancel ? { cancelled: true } : {}), ...ciClaimJournal(row.project) },
   }, true);
   return null;
 }

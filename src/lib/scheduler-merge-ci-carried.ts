@@ -7,9 +7,7 @@
  */
 import type { PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
-
-type Check = PrSnapshot["checks"][number];
-const red = (c: Check): boolean => c.bucket === "fail" || c.bucket === "cancel";
+import { redCheck as red } from "./scheduler-merge-ci-cancel-judge.js";
 
 /**
  * `required`: a required check failed or was cancelled (bounceStep's ci_fail). `unsettled`: only other checks are red and some

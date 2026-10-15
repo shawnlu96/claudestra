@@ -1,0 +1,29 @@
+/* 项目地图（PDLAYOUT1）：工具条、区头、泳道框、小标签。卡片正文仍用 product.module.css（手机列表和面包屑也在用它） */
+.toolbar { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.toolRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.seg { display: inline-flex; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2); }
+.segBtn { min-height: 32px; padding: 0 12px; border-radius: 6px; color: var(--muted); font-size: var(--fs-2); white-space: nowrap; cursor: pointer; }
+.segBtn:disabled { opacity: .45; cursor: default; }
+.segOn { background: var(--panel); color: var(--text); box-shadow: 0 0 0 1px var(--line-2); }
+.pills { display: flex; align-items: center; gap: 8px; }
+.pill { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text-2); font-size: var(--fs-2); white-space: nowrap; cursor: pointer; }
+.pill[aria-expanded="true"] { border-color: var(--accent); color: var(--text); }
+.segBtn:focus-visible, .pill:focus-visible, .chip:focus-visible, .laneDone:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.summary { color: var(--muted); font-size: var(--fs-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zoneHead { position: absolute; display: flex; align-items: center; color: var(--text-2); font-size: var(--fs-2); font-weight: 600; white-space: nowrap; }
+.rowLabel { position: absolute; display: flex; align-items: center; color: var(--muted); font-size: var(--fs-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lane { position: absolute; border: 1px dashed var(--line-2); border-radius: 12px; background: color-mix(in srgb, var(--bg-2) 60%, transparent); }
+.laneHead { display: flex; align-items: center; gap: 6px; height: 26px; margin: 14px 14px 0; color: var(--text-2); font-size: var(--fs-2); font-weight: 600; white-space: nowrap; }
+.laneDone { min-height: 24px; padding: 0 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ok); background: var(--panel); cursor: pointer; }
+.laneDone[aria-expanded="true"] { border-color: var(--ok); }
+.chip { position: absolute; z-index: 2; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text-2); font-size: var(--fs-3); cursor: pointer; transition: border-color 150ms; }
+.chip:hover { border-color: var(--accent); }
+.chipDone { color: var(--ok); }
+.chipDone .chipTitle { color: var(--text-2); }
+.chipPaused { border-style: dashed; }
+.chipTitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.chipTag { flex: none; color: var(--muted); font-size: 11px; }
+.splitFrom { flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+@media (prefers-reduced-motion: reduce) { .chip { transition: none; } }

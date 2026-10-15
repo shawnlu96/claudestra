@@ -340,6 +340,8 @@ describe("写事件的底座只给写入模块", () => {
   // lend-fix-start.ts：修复单起点（i28-FB1）在挂池事务里记起点更新 / 报警 / 重挂事件，不推阶段
   // recovery-policy.ts：恢复策略（dispatch-recovery-CFG）的审计 / 已生效 / 作废 note 在自己的事务里核权限后写，不推阶段
   // lend-pr-takeover-refusal-diagnostic.ts：锁内复核当前阻塞，只经 uiDeliverPort.observe 写去重诊断，不推阶段或改接管业务表
+  // main-red-fix-write.ts：main / Nightly 红修复（MAINRED1）只在 ledger scheduler-main-red-fix（调度身份 + 租约）里写去重的 scheduler 事件、
+  //   观察 note 与修复绑定，节点经 rewriteDag 写，不推阶段
   // manual-merge-queue.ts：人工合并排队（MQ1）的请求 / 撤销 decision 与占槽 scheduler 事件在自己的事务里核权限、重判轮转后写，不推阶段
   // recovery-machine-policy.ts：整机恢复策略（LCFG1W）的审计在自己的事务里核 owner / master 后写，已生效 / 作废 note 复用 recovery-policy.ts，不推阶段
   // agent-lifecycle-store.ts：卡 worker 登记 / 收回（LIFE1）在自己的事务里写 worker_agents 与一条 scheduler 事件，不推阶段
@@ -348,6 +350,7 @@ describe("写事件的底座只给写入模块", () => {
   // ledger-manual-merge-record.ts：人工合入登记（AUDTRAIN4）在自己的 immediate 事务里核权限 / 阶段 / head / PR，只写一条去重的 manual_merge_record 调度事件，不推阶段
   // scheduler-spec-wait-ledger.ts：缺规格提醒（PMWAKE）只经 ledger CLI 调度身份写 spec_wait 事件，事务内重算门与 feature PM、按次去重，不推阶段
   // recovery-peer-lease-handover.ts：本卡（PEERLEASE1）的专用写入模块，peer-handover / peer-head-block 在自己的事务里按 rev / session 做 CAS 复核后写一条 scheduler 事件，不推阶段
+  // private-merge-ledger.ts：私仓合并（MERGEAUTO1）合并前按 (卡, head) 收窄文件锁一次（与交 PM 分支同一 dedupKey）、bounce 前把未发合并的 run 的 requiredChecks 换成私仓核过的名字，事务内重核阶段 / head / PR / rev，不推阶段
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
     const tx: string[] = [];
@@ -376,7 +379,8 @@ describe("写事件的底座只给写入模块", () => {
       "lib/lend-arbiter-result.ts", "lib/lend-ask-auth.ts", "lib/lend-author-retire-cmds.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts",
       "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts",
       "lib/lend-pr-takeover-refusal-diagnostic.ts", "lib/lend-reclaim-scheduler.ts",
-      "lib/manual-merge-queue.ts", "lib/memory-retrieve-order.ts", "lib/merge-content-review.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
+      "lib/main-red-fix-write.ts",
+      "lib/manual-merge-queue.ts", "lib/memory-retrieve-order.ts", "lib/merge-content-review.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts", "lib/private-merge-ledger.ts",
       "lib/recovery-machine-policy.ts", "lib/recovery-peer-lease-handover.ts", "lib/recovery-policy.ts",
       "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy-reconcile-write.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts",

@@ -12,6 +12,7 @@ import { importPair, importPub, type EcdhPair } from "./e2e/primitives.js";
 import { isPublicKey, type InstanceKey } from "./instance-key.js";
 import { readOrCreateKeyFile } from "./key-file.js";
 import { STATE_DIR } from "./paths.js";
+import { MaintenanceBarrierError } from "./state-maintenance/barrier.js";
 
 const BLOB_LABEL = "peer-e2e-key";
 
@@ -81,6 +82,7 @@ async function load(dir: string): Promise<MachineE2eKey | null> {
     if (jwk.crv !== "P-256" || !d || !x || !y) throw new Error("e2e-key.pem is not a P-256 key");
     return { pair: await importPair(d, concat([4], x, y)), ts: Math.floor(statSync(path).mtimeMs / 1000) };
   } catch (e) {
+    if (e instanceof MaintenanceBarrierError) throw e;
     console.error(`⚠️ 读写 ${path} 失败，这次不能建立加密会话: ${(e as Error).message}`);
     return null;
   }
@@ -92,6 +94,6 @@ export function machineE2eKey(dir: string = STATE_DIR): Promise<MachineE2eKey | 
   if (hit) return hit;
   const p = load(dir);
   cache.set(dir, p);
-  void p.then((k) => k || cache.delete(dir));
+  void p.then((k) => k || cache.delete(dir), () => cache.delete(dir));
   return p;
 }

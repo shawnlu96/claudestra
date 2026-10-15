@@ -17,6 +17,11 @@ export function classifyPmRoute(m: DigestInput): PmRoutePlan {
   if (m.triggerKind === "peer_http") return verdict("judge", "protect.peer", "peer 回程沿用投递", true);
   if (m.triggerKind === "ask_answer" || m.intent === "response") return verdict("judge", "protect.answer", "卡片答复或回程", true);
   if (m.fromKind === "bridge" && m.sender === PM_DIGEST_LABEL) return verdict("judge", "protect.digest", "摘要自身不分流");
+  // 系统发送方在代码里标了级别（pm-notice-level.ts）就只认它，不再拿正文字样猜：常规只记在卡片 / 台账里、不送 PM（PM 用 `ledger pm-todo` 按需拉），要动手的立即送。
+  // 只认调度器（与下面受信行规则同一口径）和 bridge 合成的台账通知；普通 agent 帧带的级别不认，免得把要紧消息压进摘要
+  const levelTrusted = (m.fromKind === "local" && m.sender === "scheduler" && !!m.oneShot) || (m.fromKind === "bridge" && m.sender === "ledger");
+  if (levelTrusted && m.level === "info") return { tags: [{ route: "auto", rule: "level.info", reason: "发送方标为常规：只记卡片，不送 PM" }], body: "" };
+  if (levelTrusted && m.level === "action") return verdict("judge", "level.action", "发送方标为要 PM 动手", true);
   if (m.fromKind === "bridge" && m.sender === "ledger-audit") {
     return routePmAudit(m) ?? verdict("judge", "audit.unparsed", "巡检格式未核实，整封沿用旧路");
   }

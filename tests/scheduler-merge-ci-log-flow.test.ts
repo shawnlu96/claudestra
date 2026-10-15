@@ -32,7 +32,7 @@ function card(kind: "A" | "B" | "C", options: Options = {}) {
   const command: typeof runBounded = async (a, opts) => {
     argv.push(a);
     const cmd = a.slice(1).join(" ");
-    if (cmd.includes("--json attempt,status,conclusion")) return ok(JSON.stringify({ attempt, status: "completed", conclusion: "failure" }));
+    if (cmd.includes("--json attempt,status,conclusion,headSha")) return ok(JSON.stringify({ attempt, status: "completed", conclusion: "failure", headSha: HEAD }));
     if (cmd.includes("--json jobs,attempt")) return ok(options.json ?? JSON.stringify({ attempt: 1, jobs: jobs.map((j) =>
       ({ databaseId: j.id, name: j.name, conclusion: "failure", steps: j.failedSteps.map((name) => ({ name, conclusion: "failure" })) })) }));
     if (a.includes("--job")) {

@@ -10,6 +10,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { resetReviewLocalObserved } from "../src/lib/scheduler-agent-pool-review-local.js";
+import { resetUiOwnerReaskObserved } from "../src/lib/scheduler-ui-reask.js";
 import type { InventoryQuota } from "../src/lib/ai-quota.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
@@ -28,8 +29,9 @@ const observe: LocalFallbackPolicyPort = () => ({ mode: "observe", manualAfterMs
 const quota: InventoryQuota = { status: "known", source: "live", observedAt: 1, plan: null, reason: null,
   windows: [{ id: "weekly", kind: "weekly", usedPct: 10, resetsAtMs: null, resetPassed: false }] };
 const OP = "recovery_observe";
-// 「派本机审查」的观察在模块级待写队列里，同进程前面的测试文件留下的同名卡（p / T1）会被这里的一轮写进台账：每例先清空
-beforeEach(() => resetReviewLocalObserved());
+// 「派本机审查」和 uiOwnerReask（scheduler-plan 测试的 ui_stale 会排进去）的观察都在模块级待写队列里，
+// 同进程前面的测试文件留下的同名卡（p / T1）会被这里的一轮写进台账：每例先清空
+beforeEach(() => { resetReviewLocalObserved(); resetUiOwnerReaskObserved(); });
 
 /** R1 with the peer assignee cleared, mate healthy and no local author row: with the lease read as ended (`ended`) the takeover is eligible. */
 async function ready(): Promise<Fx> {

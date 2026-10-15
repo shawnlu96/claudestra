@@ -18,6 +18,7 @@
  * 调用 deliver() + 收尾。
  */
 
+import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
 import type { ServerWebSocket } from "bun";
 import { isOwnerSource, neutralizeDelegateMarker } from "../lib/delegate-marker.js";
 import { PEER_DELEGATION_DOC } from "../lib/peer-ledger.js";
@@ -141,6 +142,8 @@ export interface Envelope {
     files?: string[];
     /** deliverToLocal 不给 target 挂 pendingInterAgentMsg 看门狗：send_to_agent({oneShot:true}) 这类 caller 不等回的，target 的 Stop 也不该被催着回应 */
     skipInterAgentWatchdog?: boolean;
+    /** 系统通知发送方标的级别（lib/pm-notice-level.ts）：PM 分流只认它，不看正文 */
+    pmLevel?: PmNoticeLevel;
     /** 这条是「转交」过来的用户消息（bridge/forward.ts）：接手方不能再转，防来回踢皮球 */
     forwarded?: boolean;
     /** 打断抬头（bridge/preempt.ts 写入，renderContentForLocal 放在正文最前）：这条消息打断了什么 / 这是一条「停」 */

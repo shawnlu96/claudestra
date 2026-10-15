@@ -2,7 +2,7 @@
  * 订单沙箱的显式属主记录：哪一单、哪个 worker、第几代拥有哪些进程（私有 tmux server / 沙箱 bridge / 登记的子进程）和临时目录。
  * 清理只认这里的记录（lib/sandbox-order-cleanup.ts），不按目录名、进程名推断归属。
  * - 身份 = pid + 启动时刻（ps lstart）+ 命令行哈希 + 真实 cwd；只存哈希和入口名，命令行原文可能带凭据，不落盘。
- * - 记录由创建端登记时自己探测进程得来，调用方只给 pid / 目录；根目录、socket、cwd、目录（真实路径 + dev/ino）都核过才写。
+ * - 记录由创建端登记时自己探测进程得来，调用方只给 pid / 目录；根目录、socket、cwd、目录（真实路径 + dev/ino + 出生时间，sandbox-dir-identity.ts）都核过才写。
  * - 存放在沙箱根之外的属主目录（records/ archive/ locks/），终态、重启后仍可读；任何一步读不清都是 unknown，不是「没有」。
  * tests/sandbox-order-owner.test.ts
  */
@@ -13,7 +13,10 @@ import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { acquireLock, type LockHandle } from "./file-lock.js";
 import { DEFAULT_RUNTIME_DIR, RUNTIME_DIR, STATE_DIR, stateDirIn } from "./paths.js";
 import { canonicalPath, denyDirs, pathsOverlap, SANDBOX_MARKER } from "./sandbox.js";
+import { dirIdentity, dirVerdict, type OwnedDir, validDir } from "./sandbox-dir-identity.js";
 import { parseState, writeJsonAtomic } from "./state-file.js";
+
+export { dirIdentity, dirRetainReason, dirVerdict, forDelete, type OwnedDir } from "./sandbox-dir-identity.js";
 
 type OwnedKind = "tmux" | "bridge" | "child";
 
@@ -33,8 +36,6 @@ export interface OwnedResource {
   socket?: string;
 }
 
-/** 创建端显式登记的自有临时目录：真实路径 + dev/ino，同名换了一个目录就对不上 */
-export interface OwnedDir { path: string; dev: number; ino: number }
 
 export interface CleanupMark { attempts: number; lastAt: number; done: boolean; outcomes: string[] }
 
@@ -146,25 +147,6 @@ function rootProblem(root: string, ownerDir: string, what = "沙箱根"): string
   return pathsOverlap(root, ownerDir) ? `${what} ${root} 与属主目录重叠` : null;
 }
 
-/** 此刻的目录身份；不在 = null，软链 / 不是目录抛错；真实路径与 dev/ino 由调用方和登记值比 */
-export function dirIdentity(path: string): OwnedDir | null {
-  if (!lstatSync(path, { throwIfNoEntry: false })) return null;
-  const real = realDir(path, "自有目录");
-  const st = lstatSync(path);
-  return { path: real, dev: st.dev, ino: st.ino };
-}
-
-/** 目录此刻还是不是登记的那个：不在 = gone；软链 / 换了目录 / 读不了 = 说不清 */
-export function dirVerdict(d: OwnedDir): "same" | "gone" | string {
-  try {
-    const now = dirIdentity(d.path);
-    if (!now) return "gone";
-    return now.path === d.path && now.dev === d.dev && now.ino === d.ino ? "same" : `目录 ${d.path} 已不是登记的那个`;
-  } catch (e) {
-    return (e as Error).message;
-  }
-}
-
 /** 私有 socket：必须是 socket 文件、不是软链、真实路径在沙箱根下，且不是任何共享 master socket */
 export function socketProblem(socket: string, root: string): string | null {
   const st = lstatSync(socket, { throwIfNoEntry: false });
@@ -196,8 +178,6 @@ function validResource(r: unknown): r is OwnedResource {
   if (!isNum(o.startedAt) || !/^[0-9a-f]{64}$/.test(String(o.commandHash)) || typeof o.entry !== "string" || !isStr(o.cwd)) return false;
   return o.kind === "tmux" ? isStr(o.socket) : o.socket === undefined;
 }
-
-const validDir = (x: unknown) => isStr((x as OwnedDir)?.path) && isAbsolute((x as OwnedDir).path) && isNum((x as OwnedDir).dev) && isNum((x as OwnedDir).ino);
 
 function validRecord(d: unknown): d is SandboxOwnerRecord {
   const o = d as SandboxOwnerRecord;
@@ -387,7 +367,8 @@ export async function registerSandboxOwner(dir: string, input: RegisterInput, no
 }
 
 /**
- * 重启时的自有目录：都还是登记的那个就原样留。唯一的例外是沙箱根自己被 clean 删掉又同路径重建（新 inode）：旧进程已全退
+ * 重启时的自有目录：都还是登记的那个就原样留。唯一的例外是沙箱根自己被 clean 删掉又同路径重建（新 inode，或复用了旧 inode
+ * 但出生时间不同；旧登记没有出生时间时 inode 相同只能当同一个，与改前一致）：旧进程已全退
  * （调用方核过）、新根里没有沙箱标记（不是别人建好的沙箱）、新根建于这份登记之后（文件系统报得出创建时间时核；早于登记的是
  * 挪进来的旧目录）才重新采集根的身份，随旧根一起没了的根内目录从记录里去掉。根外登记目录回收时会被删：身份变了 / 不在一律拒，
  * 不追认同路径上的新目录；根内目录换了身份、根不在 / 带标记 / 真实路径变了也拒。tests/lifesbx-reup.test.ts

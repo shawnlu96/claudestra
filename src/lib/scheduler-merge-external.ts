@@ -44,6 +44,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
   const gh = (...args: string[]) => run(["gh", ...args]);
   const git = (...args: string[]) => run(["git", ...args]);
   return withMainCi(withCiProofGate(withCiFullRequest(withSchedulerV2Merge(withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
+    ciSelected: true, // CISEL2
     direct: (r) => recoveryPolicy(r.project, "mergeDirect").mode === "on", // read every pass: flipping the key off restores catch-up merging at once
     async inspect(prRef): Promise<PrSnapshot> {
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];

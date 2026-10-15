@@ -4,15 +4,20 @@ import { carryReceipt, MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR, type MergeRun, t
 import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { behindUpdating } from "./scheduler-merge-ci-behind.js";
 import { ciRed } from "./scheduler-merge-ci-carried.js";
+import { redCheck } from "./scheduler-merge-ci-cancel-judge.js";
+import { withCancelHandoff } from "./scheduler-merge-ci-cancel.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.js";
+import { privateMergeDrive } from "./private-merge.js";
 import { noteContentCarry } from "./merge-content-review-sink.js";
 import { mergeUnionStep } from "./scheduler-merge-union.js";
 import { countCarryStep } from "./review-count-carry.js";
 import { lightOnly } from "./ci-queue-full.js";
 import { mainMovedSinceCi } from "./scheduler-merge-freshness.js";
+import { withCiSelectedGate } from "./scheduler-ci-selected-gate.js";
+import { ownerFreshEnd } from "./scheduler-ui-owner-fresh.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -42,6 +47,7 @@ export interface MergeExternal {
   proofWait?(run: MergeRun, pr: PrSnapshot): Promise<null | "wait" | string>; // scheduler-ci-proof-gate.ts: direct path only, asked before the claim
   /** mergeDirect on: the PR's own green CI + a clean merge suffice — no update-branch, no full re-check; main's post-merge CI judges the mix. */
   direct?(run: MergeRun): boolean;
+  ciSelected?: boolean; // CISEL2: only the gh-backed external reads release receipts
   /** Pause between the direct path's UNKNOWN re-reads (tests pass 0). */
   unknownRereadMs?: number;
 }
@@ -57,12 +63,12 @@ const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" &
 const authorPush = (run: MergeRun, pr: PrSnapshot): boolean => !sameHead(run, pr) && samePr({ ...run, reviewedHead: pr.head }, pr);
 export const green = (run: Pick<MergeRun, "requiredChecks">, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
-  checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending") && !lightOnly(checks);
+  checks.every((c) => !redCheck(c) && c.bucket !== "pending") && !lightOnly(checks);
 const short = (s: string) => s.slice(0, 12);
 /** BEHIND only says main moved on; under mergeDirect that is not a reason to wait (GitHub still refuses a real conflict as DIRTY). */
 const mergeable = (state: string, direct: boolean): boolean => state === "CLEAN" || (direct && state === "BEHIND");
 const stopped = (e: unknown): boolean => e instanceof SchedulerStopped;
-const failed = (checks: PrSnapshot["checks"]): boolean => checks.some((c) => c.bucket === "fail" || c.bucket === "cancel");
+const failed = (checks: PrSnapshot["checks"]): boolean => checks.some(redCheck);
 /** UNSTABLE = mergeable but some check isn't green yet (CI still running); a failed/cancelled check is a real anomaly. */
 const unstableWait = (pr: PrSnapshot): "wait" | "failed" | null => pr.mergeState !== "UNSTABLE" ? null : failed(pr.checks) ? "failed" : "wait";
 /** Re-reads the ledger for a reason the run may no longer merge (lib/scheduler-merge.ts mergeRunDrift); null = still valid. */
@@ -152,6 +158,7 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
  * `ciMain` (serial path only) is the main the green CI was read against, compared once more after the claim (MRGFRESH1). */
 async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step, assertActive: () => void, trained = false,
   recheck: Recheck = () => null, direct = false, ciMain?: MainFreshness): Promise<MergeRun> {
+  const ownerFresh = ownerFreshEnd(run); if (ownerFresh) return step("resolved", ownerFresh); // UIOWNCARRY2: up to date + green, never merged
   const fresh = await external.inspect(run.prRef);
   const same = samePr(run, fresh);
   if (same && fresh.mergeState === "UNKNOWN") return unknownWait(run, step);
@@ -178,7 +185,7 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   if (merged.state !== "MERGED" || merged.base !== "main" || !sameHead(run, merged) || merged.mergeSha !== mergeSha) {
     return step("unknown", "合并后 PR 目标分支、head 或合并提交无法核实");
   }
-  return step("merged", `PR 已合并 ${short(mergeSha)}，待 PM 部署`, mergeSha);
+  return step("merged", `PR 已合并 ${short(mergeSha)}，${(await import("./center-deploy-wording.js")).deployWording(run.project, "待 PM 部署", run.prRef)}`, mergeSha);
 }
 
 /** A related-only green needs the serial full re-check (scheduler-ci-full-request.ts) before the claim; a cleared train already ran full. */
@@ -228,7 +235,7 @@ async function updatingStep(run: MergeRun, external: MergeExternal, step: Step):
 async function mergingStep(run: MergeRun, external: MergeExternal, step: Step): Promise<MergeRun> {
   const pr = await external.inspect(run.prRef);
   return pr.state === "MERGED" && pr.base === "main" && pr.mergeSha && /^[a-f0-9]{40}$/i.test(pr.mergeSha) && sameHead(run, pr)
-    ? step("merged", `重启后核实 PR 已合并 ${short(pr.mergeSha)}，待 PM 部署`, pr.mergeSha)
+    ? step("merged", `重启后核实 PR 已合并 ${short(pr.mergeSha)}，${(await import("./center-deploy-wording.js")).deployWording(run.project, "待 PM 部署", run.prRef)}`, pr.mergeSha)
     : step("unknown", "合并曾发出但未能核实结果，不重复 gh pr merge");
 }
 
@@ -242,10 +249,13 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     run = await advance(run.phase, to, run.rev, receipt, mergeSha, newHead);
     return run;
   };
-  const direct = source.direct?.(run) === true;
-  const external = watchUnknown(() => run, direct ? rereadUnknown(source, assertActive) : source, step, (pr) => { noChecks = pr.noChecks === true; });
+  source = withCiSelectedGate(source, run); // merge-arch-CISEL2: a green released by the CI selected gate counts only under effective on
+  const direct = source.direct?.(run) === true && !ownerFreshEnd(run); // UIOWNCARRY2: a fresh run always updates, mergeDirect never skips it
+  const external = withCancelHandoff(watchUnknown(() => run, direct ? rereadUnknown(source, assertActive) : source, step, (pr) => { noChecks = pr.noChecks === true; }),
+    foreign, MERGE_NOT_SENT, stopped); // CICANCEL1: a twice-cancelled CI goes to the PM through the same hook
   if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
+    const priv = await privateMergeDrive(run, step, assertActive, recheck, foreign); if (priv) return priv; // MERGEAUTO1: a private repo checked out here (private-merge.ts)
     if (run.phase === "ready") {
       const pr = await external.inspect(run.prRef);
       if (pr.state !== "OPEN" || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch) {

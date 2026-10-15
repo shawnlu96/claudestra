@@ -5,15 +5,15 @@
  */
 import type { AcpHost } from "./host.js";
 import type { TtyScreen } from "./tty-screen.js";
-import { createTtyInput } from "./tty-input.js";
+import { createTtyInput, type TtyInput } from "./tty-input.js";
 
 type Stdin = Pick<NodeJS.ReadStream, "setRawMode" | "setEncoding" | "on" | "resume">;
 
-/** 返回底栏输入行的画法（交给 createTtyScreen 的 input） */
+/** 返回输入状态：逐行视图用 line(cols)（createTtyScreen 的 input），新视图用 draft()（tui/screen.ts） */
 export function attachTtyInput(
   stdin: Stdin, host: Pick<AcpHost, "turnState" | "pendingPermission" | "terminal">, tty: TtyScreen, exit: () => void,
   write: (s: string) => void = (s) => void process.stdout.write(s),
-): (cols: number) => string {
+): TtyInput {
   const input = createTtyInput({
     busy: () => host.turnState.busy,
     permission: () => host.pendingPermission,
@@ -35,5 +35,5 @@ export function attachTtyInput(
       console.error(`还原终端模式失败（zsh 回到提示符时会自己复位）：${String(e)}`);
     }
   });
-  return (cols) => input.line(cols);
+  return input;
 }

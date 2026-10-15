@@ -17,6 +17,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "这个项目还没有台账": "This project has no ledger yet",
   "PM 派发任务后，这里会按关注度列出每条任务线。已有旧台账可以导入：": "Once the PM dispatches tasks, every task line shows up here, sorted by attention. To import an existing ledger:",
   "导入时推算的近似时间": "Approximate time inferred during import",
+  "人工干预": "Manual intervention",
   "这台设备没有读台账的权限": "This device can’t read the ledger",
   "需要全部 agent 范围、带管理权限的设备。": "It needs a device with access to all agents and manage rights.",
   "写规格卡、派发、盯进度、合并部署、记台账": "Writes specs, dispatches, tracks progress, merges and deploys, keeps the ledger",

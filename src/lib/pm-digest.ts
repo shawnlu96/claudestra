@@ -4,11 +4,13 @@
  * 其他 agent 的纯进度同步（oneShot 或开头写「只同步」）；其余一律立即送，拿不准也立即送。
  */
 
+import type { PmNoticeLevel } from "./pm-notice-level.js";
+
 export type DigestMode = "on" | "observe" | "off";
 export type DigestKind = "post-verify" | "train" | "audit" | "sync";
 
-/** 可合并的推送在摘要队列里最多等这么久：队列里最早一条等满就单独送一条摘要 */
-export const PM_DIGEST_WINDOW_MS = 30 * 60_000;
+/** 可合并的推送在摘要队列里最多等这么久：队列里最早一条等满就单独送一条摘要。常规推送本来就不该叫醒 PM，平时随紧急事顺带送到 */
+export const PM_DIGEST_WINDOW_MS = 4 * 3600_000;
 /** 摘要每行首行原文的截断长度 */
 const LINE_MAX = 120;
 /** 一条推送首行之后最多带这么多行要点进摘要（agents-PMDIG4），多出的折成一行「还有 N 条」 */
@@ -27,6 +29,8 @@ export interface DigestInput {
   oneShot: boolean;
   /** 正文（已去掉 bridge 加的转交抬头 / 摘要块） */
   body: string;
+  /** 发送方在代码里标的级别（pm-notice-level.ts）；分流优先认它 */
+  level?: PmNoticeLevel;
 }
 
 export type DigestVerdict =
@@ -63,6 +67,12 @@ function detailOf(body: string, audit = false): { detail?: string[] } {
   if (!rest.length) return {};
   const more = rest.length - DETAIL_MAX;
   return { detail: [...rest.slice(0, DETAIL_MAX).map(clip), ...(more > 0 ? [`还有 ${more} 条`] : [])] };
+}
+
+/** 分流判了合并、但摘要归类本身判立即送的（受信列车进度、系统常规推送）：首行 + 要点进摘要 */
+export function digestFallback(body: string, source: string, reason: string): DigestVerdict {
+  const firstLine = firstLineOf(body);
+  return { send: "digest", reason, kind: "sync", source, card: CARD_RE.exec(firstLine)?.[0], firstLine, ...detailOf(body) };
 }
 
 export function classifyPmPush(m: DigestInput): DigestVerdict {

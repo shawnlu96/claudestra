@@ -7,7 +7,7 @@ import { useT } from "@/lib/i18n";
  * 图标手抄自 lucide(24 viewBox、stroke),与侧栏按钮同源——仓库不引 icon 库。
  * 手机(< sm)上没有左栏的空间：同一份菜单横向滚动排在标题栏下面，图标 + 文字并排。
  */
-export type SettingsPageId = "general" | "sessions" | "appearance" | "notify" | "connect" | "peers" | "security" | "skills" | "labs" | "claude";
+export type SettingsPageId = "general" | "sessions" | "appearance" | "notify" | "connect" | "peers" | "security" | "skills" | "labs" | "claude" | "codex";
 
 export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNode }[] = [
   {
@@ -147,11 +147,21 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
       </>
     ),
   },
+  {
+    id: "codex",
+    label: "Codex",
+    icon: (
+      <>
+        <polyline points="4 17 10 11 4 5" />
+        <line x1="12" x2="20" y1="19" y2="19" />
+      </>
+    ),
+  },
 ];
 
 /**
  * 这台设备能看的页。非全权设备（guest / 部分 scope）只留纯本地的页和设备页（本设备的退出登录）：会话与自动化、Peer、技能库、
- * Claude、通知、连接与集成整页的接口都要全权。
+ * Claude、Codex、通知、连接与集成整页的接口都要全权。
  */
 export function settingsPagesFor(full: boolean): SettingsPageId[] {
   const local: SettingsPageId[] = ["general", "appearance", "security", "labs"];

@@ -10,9 +10,10 @@ import type { LendState } from "./lend-journal.js";
 import { statePath } from "./paths.js";
 import { pathsOverlap } from "./sandbox.js";
 import {
-  addSandboxOwned, archiveOwnerEvidence, beginSandboxCleanup, dirVerdict, identityVerdict, listSandboxOwners, lockSandboxCleanupKey, lockSandboxOwner, markSandboxCleanup, ownerReviewDue,
+  addSandboxOwned, archiveOwnerEvidence, beginSandboxCleanup, dirRetainReason, dirVerdict, forDelete, identityVerdict, listSandboxOwners,
+  lockSandboxCleanupKey, lockSandboxOwner, markSandboxCleanup, ownerReviewDue,
   probeProcess, readSandboxOwner, registerSandboxOwner, socketProblem,
-  type OwnerListing, type ProcessProbe, type RegisterInput, type SandboxOwnerKey, type SandboxOwnerRecord,
+  type OwnedDir, type OwnerListing, type ProcessProbe, type RegisterInput, type SandboxOwnerKey, type SandboxOwnerRecord,
 } from "./sandbox-order-owner.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 
@@ -36,7 +37,7 @@ export interface CleanupDeps {
 }
 
 /**
- * done = 每个登记进程都确认已退出，socket 和登记临时目录也清了；根与日志始终保留；
+ * done = 每个登记进程都确认已退出，socket 和登记临时目录也清了；根与日志始终保留；根外目录被同路径重建 / 缺出生时间认不出的保留，reason 报一次（记 done，之后不再报）；
  * refused = 证据不足，零动作；partial = 动过手但有没停掉 / 没清掉 / 没记上的，下次再调重试。
  */
 interface CleanupReport { status: "done" | "refused" | "partial"; reason?: string; resources: SandboxResourceReport[]; signals: number; archive?: string }
@@ -56,10 +57,11 @@ async function evidenceProblem(record: SandboxOwnerRecord, deps: CleanupDeps): P
   return live === "no_window" ? null : `worker ${record.key.worker} 活性是 ${live}，不是确定不在`;
 }
 
-/** 全部进程与目录的身份先读一遍：有一个说不清就整单拒绝 */
-async function planResources(record: SandboxOwnerRecord, probe: (pid: number) => Promise<ProcessProbe>): Promise<SandboxPlanned[] | string> {
+/** 全部进程与目录的身份先读一遍：有一个说不清就整单拒绝（保留的根外目录不在此列） */
+async function planResources(record: SandboxOwnerRecord, probe: (pid: number) => Promise<ProcessProbe>, retained: Map<OwnedDir, string>): Promise<SandboxPlanned[] | string> {
   const out: SandboxPlanned[] = [];
   for (const d of record.dirs) {
+    if (retained.has(d)) continue;
     const v = dirVerdict(d);
     if (v !== "same" && v !== "gone") return v;
   }
@@ -77,12 +79,24 @@ async function planResources(record: SandboxOwnerRecord, probe: (pid: number) =>
 }
 
 
-/** 已完成记录只回放历史退出证据；不再把 PID/目录重新认领，仍核保留目录的真实身份。 */
+/** 根外登记目录里被同路径重建（birth 不等）或认不出（缺出生时间）的：不交执行器删，保留，记 done 时报一次 */
+function retainedDirs(record: SandboxOwnerRecord): Map<OwnedDir, string> {
+  const held = new Map<OwnedDir, string>();
+  for (const d of record.dirs) {
+    if (pathsOverlap(d.path, record.root)) continue;
+    const why = dirRetainReason(d);
+    if (why) held.set(d, why);
+  }
+  return held;
+}
+
+/** 已完成记录只回放历史退出证据；不再把 PID/目录重新认领，仍核保留目录的真实身份（被替换 / 缺出生时间而保留的根外目录照旧保留、不再报）。 */
 function completedReport(record: SandboxOwnerRecord): CleanupReport {
   const resources: SandboxResourceReport[] = record.resources.map((r) => ({ kind: r.kind, pid: r.pid, outcome: "already_exited" }));
+  const held = retainedDirs(record);
   for (const d of record.dirs) {
     const v = dirVerdict(d);
-    if (v !== "gone" && (v !== "same" || !pathsOverlap(d.path, record.root))) return refused(`完成记录目录不再可信：${d.path}`);
+    if (v !== "gone" && !held.has(d) && (v !== "same" || !pathsOverlap(d.path, record.root))) return refused(`完成记录目录不再可信：${d.path}`);
     resources.push({ kind: "dir", path: d.path, outcome: v === "gone" ? "already_removed" : "retained" });
   }
   return { status: "done", resources, signals: 0 };
@@ -129,10 +143,11 @@ async function cleanupFrozen(dir: string, key: SandboxOwnerKey, deps: CleanupDep
     if (bad) throw new Error(bad);
     if (!held() || !lock.held()) throw new Error("清理租约已失");
   };
-  const plan = await planResources(record, d.probe);
+  const retained = retainedDirs(record);
+  const plan = await planResources(record, d.probe, retained);
   if (typeof plan === "string") return refused(plan);
   for (const dir of record.dirs) {
-    if (pathsOverlap(dir.path, record.root)) continue;
+    if (pathsOverlap(dir.path, record.root) || retained.has(dir)) continue;
     const bad = await sandboxDirProblem(dir, record.resources.map((r) => r.pid));
     if (bad) return refused(bad);
   }
@@ -143,7 +158,12 @@ async function cleanupFrozen(dir: string, key: SandboxOwnerKey, deps: CleanupDep
     return refused(`属主证据保全失败：${(e as Error).message}`);
   }
   try { await authorize(); } catch (e) { return refused((e as Error).message); }
-  const { resources, signals } = await runSandboxRetire(record, plan, { ...d, authorize });
+  // 交执行器的根外目录用 forDelete 副本：执行器 rmSync 前那次同步复核也按 delete 判，此后缺出生时间 / 被替换就 kept 不删
+  const toRetire = record.dirs.filter((x) => !retained.has(x)).map((x) => pathsOverlap(x.path, record.root) ? x : forDelete(x));
+  const retired = await runSandboxRetire({ ...record, dirs: toRetire }, plan, { ...d, authorize });
+  const resources = [...retired.resources, ...[...retained].map(([x, detail]): SandboxResourceReport => ({ kind: "dir", path: x.path, outcome: "retained", detail }))];
+  const signals = retired.signals;
+  const note = retained.size ? [...retained.values()].join("；") : undefined; // 只在记 done 这一次报；之后 completedReport 不再报
   const done = resources.every((r) => r.outcome !== "stop_failed" && r.outcome !== "kept");
   const mark = { attempts: record.cleanup!.attempts, lastAt: now, done, outcomes: resources.map((r) => `${r.kind}:${r.pid ?? r.path}:${r.outcome}`) };
   try {
@@ -155,7 +175,7 @@ async function cleanupFrozen(dir: string, key: SandboxOwnerKey, deps: CleanupDep
   } catch (e) {
     return { status: "partial", reason: `清理结果没记上：${(e as Error).message}`, resources, signals, archive };
   }
-  return done ? { status: "done", resources, signals, archive } : { status: "partial", reason: "有进程 / socket 没清掉，稍后重试", resources, signals, archive };
+  return done ? { status: "done", ...(note && { reason: note }), resources, signals, archive } : { status: "partial", reason: "有进程 / socket 没清掉，稍后重试", resources, signals, archive };
 
 }
 

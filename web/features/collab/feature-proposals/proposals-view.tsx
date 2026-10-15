@@ -12,6 +12,7 @@ import { ProposalsController, loadFailureText, proposalsController, rereadOffere
 import { PROPOSER_TEXT, proposalInput, splitList, type ProposalEntry, type ProposerStatus } from '@/lib/feature-proposals-model';
 import { useLang } from '@/lib/i18n';
 import { featureProposalsTr } from '@/lib/i18n-dict-feature-proposals';
+import { MACHINE_WORDS } from '@/lib/owner-words';
 import { Icon, type IconName } from '../collab-icons';
 import c from '../collab.module.css';
 import v from '../v4/v4.module.css';
@@ -36,7 +37,7 @@ function Status({ status, tr, owner = false }: { status: ProposerStatus; tr: Tr;
   return <span className={p.status}>
     <span className={status.kind === 'published' ? a.done : a.badge}><Icon name={ICONS[status.kind] ?? 'circleAlert'} />{text(status.kind)}</span>
     {status.cachedState && <span className={v.muted}>{tr('缓存状态')}：{text(status.cachedState)}</span>}
-    {status.kind === 'published' && <span className={v.muted}>{tr('中心 feature')} {status.featureId}{status.version ? ` · v${status.version}` : ''}</span>}
+    {status.kind === 'published' && <span className={v.muted}>{tr('中心模块')} {status.featureId}{status.version ? ` · v${status.version}` : ''}</span>}
   </span>;
 }
 
@@ -56,9 +57,9 @@ export function ProposalForm({ identity, port, onDone }: { identity: Identity; p
     setInvalid(!input);
     if (input && await ctrl.submit(input)) onDone();
   };
-  return <form className={s.form} aria-label={tr('新建 feature 提案')} onSubmit={e => { e.preventDefault(); void submit(); }}>
-    <div className={s.head}>{tr('新建 feature 提案')}</div>
-    <div className={v.muted}>{tr('项目、主场由本机绑定决定，不可改')}</div>
+  return <form className={s.form} aria-label={tr('新建模块提案')} onSubmit={e => { e.preventDefault(); void submit(); }}>
+    <div className={s.head}>{tr('新建模块提案')}</div>
+    <div className={v.muted}>{tr(MACHINE_WORDS.boundHere)}</div>
     <label>{tr('标题')}<input required value={title} onChange={e => setTitle(e.target.value)} /></label>
     <label>{tr('描述')}<textarea value={description} onChange={e => setDescription(e.target.value)} /></label>
     <label>{tr('原话（可选）')}<textarea value={words} onChange={e => setWords(e.target.value)} /></label>

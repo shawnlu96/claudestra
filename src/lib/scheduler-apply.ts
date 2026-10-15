@@ -16,14 +16,15 @@ import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { tx } from "./ledger-tx.js";
 import { applyMove } from "./ledger-write.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
-import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
+import { planScheduler, type PlannerDecision, type PlannerSnapshot } from "./scheduler-plan.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { UI_ASK_ACTION } from "./scheduler-ui-gate.js";
 import { convergeFollowUp } from "./review-converge-followup.js";
+import { observeOwnerFresh } from "./scheduler-ui-owner-fresh.js";
 
 const UI_APPROVE = "scheduler_ui_approve";
 /** Moves the engine may make itself; build/fix→review is the worker's deliver, merge→live is the merge queue's. */
-const ENGINE_MOVES: ReadonlySet<string> = new Set(["restate>build", "review>fix", "review>merge"]);
+const ENGINE_MOVES: ReadonlySet<string> = new Set(["restate>build", "review>fix", "review>merge", "fix>review"]); // fix>review: only SELFHEAL1's plan (scheduler-fix-selfheal.ts)
 
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 
@@ -36,18 +37,18 @@ function claimable(db: Database, ctx: WriteCtx, id: string, action: SchedulerInt
   return intent;
 }
 
-function replanned(db: Database, intent: SchedulerIntent, opts: SnapshotOpts): { task: LedgerTask; plan: Planned } {
+function replanned(db: Database, intent: SchedulerIntent, opts: SnapshotOpts): { task: LedgerTask; plan: Planned; snap: PlannerSnapshot } {
   const task = mustTask(db, intent.taskId);
   const workflow = getWorkflow(db, task.id);
   if (!workflow || workflow.mode !== "auto" || workflow.specRev !== task.specRev) throw new LedgerError("conflict", "任务已不在当前规格的自动流程");
   if (task.rev !== intent.taskRev || task.specRev !== intent.specRev || task.headSHA !== intent.head) {
     throw new LedgerError("conflict", "卡在意图之后被改过（rev / specRev / head），意图作废");
   }
-  const plan = planScheduler(autoSnapshot(db, task, opts, intent.id));
+  const snap = autoSnapshot(db, task, opts, intent.id), plan = planScheduler(snap);
   if (plan.kind !== "intent" || plan.id !== intent.id || plan.action !== intent.action || plan.node !== intent.node) {
     throw new LedgerError("conflict", "按当前台账重算的计划已不是这个意图");
   }
-  return { task, plan };
+  return { task, plan, snap };
 }
 
 function settleDone(db: Database, ctx: WriteCtx, id: string, receipt: string): void {
@@ -104,7 +105,7 @@ export function openSchedulerUiAsk(db: Database, ctx: WriteCtx, input: { intentI
       if (!ask) throw new LedgerError("conflict", "意图已结但找不到它开的 ask");
       return { ask, duplicate: true };
     }
-    const { task, plan } = replanned(db, intent, opts);
+    const { task, plan, snap } = replanned(db, intent, opts);
     if (!plan.askBind) throw new LedgerError("conflict", "计划里没有截图授权的绑定");
     const bind = { action: UI_ASK_ACTION, params: { ...plan.askBind }, approve: [UI_APPROVE] };
     const shots = screenshotRefs(task);
@@ -116,6 +117,7 @@ export function openSchedulerUiAsk(db: Database, ctx: WriteCtx, input: { intentI
       options: [{ type: "buttons", buttons: [{ id: UI_APPROVE, label: "批准合并", style: "success" }, { id: "scheduler_ui_reject", label: "不批准", style: "danger" }] }],
       bind: { ...bind, paramsHash: bindHash(bind, "scheduler") },
     }, ctx.now ?? Date.now());
+    observeOwnerFresh(db, snap, ctx.now ?? Date.now()); // UIOWNCARRY2 observe: this owner ask's head lacks main
     settleDone(db, ctx, intent.id, `ask:${ask.id}`);
     return { ask, duplicate: false };
   });

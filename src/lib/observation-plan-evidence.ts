@@ -1,14 +1,14 @@
 /**
  * 观察期核对的证据适配器（agents-PMAUTO1）：代码白名单，只读台账里的结构化事件，不执行规格里的任何命令，也不搜文本日志。
- * 一个机制要有适配器，必须同时有「observe 档落成台账结构化事件的观察记录」和「结构化的错误来源」；缺任何一个就没有适配器，
- * 到期判不可核、交 PM（日志里搜不到 error 不是无错误证明）。首批名单与依据见 docs/architecture/observation-plan.md。
+ * 专用适配器优先；其它恢复键用 recovery_observe / recovery_error。错误有则核，不要求预先存在错误来源。
  * 判定四条全满足才算过：窗口内观察记录 > 0、结构化错误 = 0、未清的人工误判 = 0、数据源可读且覆盖整个窗口。
  */
 import type { Database } from "bun:sqlite";
+import { RECOVERY_KEYS } from "./recovery-policy.js";
 import { targetLabel, type ObservationPlan, type ObservationTarget, type PlanEvidence } from "./observation-plan.js";
 
 /** 一类事件的 SQL 条件（只作用于 events 表的 data JSON 与 kind），由代码写死，不接受外部输入。 */
-interface EventMatch { where: string }
+interface EventMatch { where: string; params?: string[] }
 export interface EvidenceAdapter {
   /** 观察记录：observe 档「本会怎样」落成的事件 */
   observed: EventMatch;
@@ -30,11 +30,20 @@ const ADAPTERS: Readonly<Record<string, EvidenceAdapter>> = {
 };
 
 export type AdapterPort = (target: ObservationTarget) => EvidenceAdapter | undefined;
-export const evidenceAdapter: AdapterPort = (target) => ADAPTERS[targetLabel(target)];
-export const adaptedTargets = (): string[] => Object.keys(ADAPTERS).sort();
+export const evidenceAdapter: AdapterPort = (target) => {
+  const dedicated = ADAPTERS[targetLabel(target)];
+  if (dedicated) return dedicated;
+  if (target.kind !== "recovery" || !(RECOVERY_KEYS as readonly string[]).includes(target.key)) return undefined;
+  return {
+    observed: { where: "kind = 'note' AND json_extract(data, '$.op') = 'recovery_observe' AND json_extract(data, '$.mechanism') = ?", params: [target.key] },
+    errors: { where: "json_extract(data, '$.op') = 'recovery_error' AND json_extract(data, '$.mechanism') = ?", params: [target.key] },
+    basis: "通用结构化样本；错误有则核，不要求预先存在错误来源",
+  };
+};
+export const adaptedTargets = (): string[] => [...new Set([...Object.keys(ADAPTERS), ...RECOVERY_KEYS.map((k) => `recovery:${k}`)])].sort();
 
 const seqs = (db: Database, project: string, m: EventMatch, from: number, to: number): number[] =>
-  (db.prepare(`SELECT seq FROM events WHERE project = ? AND ts >= ? AND ts <= ? AND (${m.where}) ORDER BY seq`).all(project, from, to) as { seq: number }[]).map((r) => r.seq);
+  (db.prepare(`SELECT seq FROM events WHERE project = ? AND ts >= ? AND ts <= ? AND (${m.where}) ORDER BY seq`).all(project, from, to, ...(m.params ?? [])) as { seq: number }[]).map((r) => r.seq);
 
 /**
  * 读一条登记窗口 [startAt, dueAt] 的证据。complete = 适配器存在、台账读得出、窗口已走完。台账事件只追加不删改，登记又要求起点不早于

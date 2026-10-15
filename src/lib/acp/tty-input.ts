@@ -5,6 +5,7 @@
  * Ctrl-C：raw 模式下不再变成 SIGINT——回合中 = 打断，空闲时 2 秒内连按两次才退出（manager 收宿主改发 SIGTERM，runtimes/acp-control.ts）。
  * tests/acp-tty-input.test.ts。
  */
+import { redactSecrets } from "../redact-secrets.js";
 import type { PermissionCard } from "./permissions.js";
 
 export type TerminalOp =
@@ -35,6 +36,8 @@ export interface TtyInput {
   feed(data: string): void;
   /** 底栏输入行的内容（已按宽度截好） */
   line(cols: number): string;
+  /** 新视图的多行输入框要的原文（tui/footer.ts）：permission = 有审批在等且还没打字时的作答提示 */
+  draft(): { text: string; permission: string | null };
 }
 
 const EXIT_WINDOW_MS = 2_000;
@@ -164,6 +167,10 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     if (ch < " ") return; // 其它控制键不认
     buf += ch;
   };
+  const permissionHint = (): string | null => {
+    const pending = deps.permission();
+    return pending && !buf ? `审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/序号 + 回车）` : null;
+  };
   const decode = createKeyDecoder({
     key,
     paste: (ch) => void (buf += ch),
@@ -175,11 +182,11 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
       decode(data);
       deps.redraw();
     },
-    line(cols) {
-      const pending = deps.permission();
-      if (pending && !buf) return fitTail(`审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/序号 + 回车）❯ `, cols);
-      return fitTail(`❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`, cols);
+    line(cols) { // 只改显示：整段先打码再截尾巴（逐行视图也是显示内容），发出去的还是原文
+      const hint = permissionHint();
+      return fitTail(redactSecrets(hint ? `${hint}❯ ` : `❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`), cols);
     },
+    draft: () => ({ text: buf, permission: permissionHint() }),
   };
 }
 

@@ -14,6 +14,8 @@ import { statePath } from "../src/lib/paths.js";
 import { applyManualCarry } from "../src/lib/review-main-carry-manual.js";
 import { headChecks, main as cli, pinnedMerge, preflight, requiredChecksFor, runStrict, updateBranch, waitForHeadRuns, USAGE, type CliDeps, type Prove,
   type Run } from "../scripts/pm-merge-preflight.js";
+import type { CiSelectedPort } from "../src/lib/ci-selected-receipt.js";
+import type { RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 
 const PR = "https://github.com/o/r/pull/7", HEAD = "a".repeat(40), NEW = "b".repeat(40), MAIN = "c".repeat(40), REVIEWED = "d".repeat(40);
 const CHECKS = ["typecheck", "test-1", "test-2", "test-3", "guard", "build", "web"];
@@ -337,5 +339,42 @@ describe("review r2 · merge-auth: every GitHub write is bound to the ledger's r
     const want = expect.objectContaining({ oldHead: HEAD, newHead: NEW, mainHead: MAIN });
     expect(proofs).toEqual([want, want]); // and once more right before the PUT
     expect(g.merges()).toEqual([["gh", "api", "-X", "PUT", "repos/o/r/pulls/7/merge", "-f", `sha=${NEW}`, "-f", "merge_method=merge"]]);
+  });
+});
+
+describe("merge-arch-CISEL2: a green the CI selected gate released", () => {
+  const RUN_URL = "https://github.com/o/r/actions/runs/11", MERGE = "e".repeat(40), D = (c: string) => `sha256:${c.repeat(64)}`;
+  const verdict = JSON.stringify({ version: 1, kind: "ci-selected-verdict", mode: "on", runId: 11, attempt: 1, head: MERGE, responsibilityDigest: D("1"),
+    outOfScope: [{ file: "tests/x.test.ts", name: "x" }], shards: { "1": D("2") } });
+  const port = (art: { present: boolean; text: string | null }, variable: string | null = "on"): CiSelectedPort => ({
+    prRun: async () => ({ id: 11, attempt: 1, headSha: HEAD, event: "pull_request", status: "completed", conclusion: "success", url: RUN_URL }),
+    runById: async () => { throw new Error("unused"); },
+    verdict: async () => art,
+    commitParents: async (_r, sha) => (sha === MERGE ? [MAIN, HEAD] : [MAIN]),
+    variable: async () => variable,
+  });
+  const policy = (mode: "on" | "observe" | "off"): RecoveryPolicyPort => () => ({ mode, manualAfterMs: null, source: "config" });
+  const argv = ["--pr", PR, "--expected-head", HEAD, "--actual-main", MAIN, "--merge"];
+
+  test("[验收线 5] no release marker: same exit and lines as without the reader", async () => {
+    const a = fakeGh(), b = fakeGh();
+    const plain = await main(argv, a.run);
+    const read = await main(argv, b.run, undefined, { selected: port({ present: false, text: null }), policy: policy("off") });
+    expect(read).toEqual(plain);
+    expect(read.exit).toBe(0);
+  });
+
+  test("[验收线 1] on merges with a line; observe / off / a missing receipt refuse before any merge call", async () => {
+    const on = fakeGh();
+    const r = await main(argv, on.run, undefined, { selected: port({ present: true, text: verdict }), policy: policy("on") });
+    expect(r.exit).toBe(0);
+    expect(r.lines.some((l) => l.includes("CI 责任选集放行") && l.includes(RUN_URL))).toBe(true);
+    for (const [sel, mode] of [[port({ present: true, text: verdict }), "observe"], [port({ present: true, text: verdict }, "off"), "on"],
+      [port({ present: true, text: null }), "on"]] as const) {
+      const g = fakeGh();
+      const x = await main(argv, g.run, undefined, { selected: sel, policy: policy(mode) });
+      expect(x.exit).toBe(2);
+      expect(g.merges()).toEqual([]);
+    }
   });
 });

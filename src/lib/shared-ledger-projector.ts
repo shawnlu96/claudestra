@@ -134,7 +134,8 @@ export async function pushSharedLedgerMirror(db: Database, featureId: string, en
       return { entry: { ...entry, featureWatermark: prior, budgetIdleAt: idleAt }, outcome: { kind: "idle", seq: entry.watermark } };
     }
     seq = mode === "on" && !heartbeat ? Math.max(entry.watermark, ownSeq) : global;
-    if (seq === entry.watermark) return { entry, outcome: { kind: "idle", seq } };
+    // Record the feature seq even here: a stale featureWatermark would keep the heartbeat's unchanged test false forever.
+    if (seq === entry.watermark) return { entry: { ...entry, featureWatermark: ownSeq }, outcome: { kind: "idle", seq } };
     skip = mirrorSkipIds(db, entry.localProject, featureId, ownTasks(db, featureId, entry.localProject).map((t) => t.id), deps.scrub,
       { now: deps.now, policy: deps.skipPolicy });
     current = mirrorTaskProjections(db, featureId, entry, seq, deps.scrub.commits ?? new Set(), skip);

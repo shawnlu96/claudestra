@@ -22,6 +22,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-fix-reassign-pr.ts": "proc=1 vcs=4",
     "lend-git.ts": "vcs=1",
     "pool-review-proof-raw.ts": "fs=2",
+    "private-merge-gh.ts": "vcs=6", // MERGEAUTO1: the merge driver's private-repo gh reads + head-pinned merge, under the merge tick's skipTask
+    "private-merge-ledger.ts": "sql=1 stmt=1", // MERGEAUTO1: the private bounce's run check-list write, inside the merge driver under the merge tick's skipTask
     "recovery-fix-local-swap-run.ts": "proc=1 vcs=1", // GATESWAP1: the commit-edge author-tree proof's synchronous git (treeProofSync)
     "review-converge-followup.ts": "proc=1 fs=2 vcs=1",
     "review-converge-scope.ts": "proc=1 vcs=1",
@@ -52,9 +54,11 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "effect-count-refresh.ts": "ledger=1", // EFFAUTO1: `ledger scheduler-recovery-observe` for effCountRefresh notes, through the pass manager
     "fix-strategy-tick.ts": "ledger=10",
     "ledger-pool-refusal-tick.ts": "ledger=1",
+    "ledger-priority-stall-tick.ts": "ledger=1 notice=2",
     "lend-author-retire-tick.ts": "ledger=2",
     "lend-fix-reassign-tick.ts": "ledger=2",
     "lend-pr-takeover-refusal-request.ts": "ledger=1",
+    "main-red-fix-tick.ts": "ledger=1", // MAINRED1: `ledger scheduler-main-red-fix` through the leased pass manager
     // merge-arch-SLA1: the one PM message of a batch, sent only for episodes whose `ledger scheduler-manual-case-sla <task> --phase claim` passed the manager gate
     "manual-case-sla-tick.ts": "notice=3",
     "manual-merge-queue-pass.ts": "ledger=1",
@@ -62,6 +66,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "merge-content-review-sink.ts": "ledger=1", // merge-arch-REVIEW1: `ledger scheduler-content-review` from the merge driver's carry, through the pass manager
     "merge-deploy-outbox.ts": "ledger=1",
     "merge-queue-candidates.ts": "ledger=1", // CAND1: `ledger scheduler-recovery-observe` for mergeUnifiedCandidates notes, through the pass manager
+    "observation-auto-register-tick.ts": "ledger=1", // Spec registration through the leased pass manager
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
     "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
@@ -72,8 +77,10 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-auto-tick.ts": "ledger=8",
     "scheduler-autostart-resume.ts": "ledger=1",
     "scheduler-ci-proof-gate.ts": "ledger=1", // GATE1: `ledger scheduler-recovery-observe` (the observe note) through the pass manager
+    "scheduler-ci-selected-gate.ts": "ledger=1 notice=3", // CISEL2: observe / repair notes via `ledger scheduler-recovery-observe` through the pass manager; info notice to PM
     "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1",
+    "scheduler-head-refetch.ts": "ledger=1", // SELFHEAL1: `ledger scheduler-recovery-observe` head-refetch attempt notes, through the pass manager
     "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5",
     "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2",
@@ -88,6 +95,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1",
     "scheduler-post-verify.ts": "ledger=2",
+    "scheduler-priority-now-tick.ts": "ledger=1",
     "scheduler-recovery-ports.ts": "ledger=5",
     "scheduler-review-pm-tick.ts": "ledger=1",
     "scheduler-review-seat-wait.ts": "ledger=1",
@@ -107,11 +115,17 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "proc=1 fs=3",
     "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3",
+    "center-deploy-checkout.ts": "vcs=2",
+    "center-deploy-proof.ts": "vcs=1",
+    "center-deploy-run.ts": "proc=1 fs=1",
+    "center-deploy-tick.ts": "ledger=2 notice=1",
+    "center-deploy-worker.ts": "fs=1 vcs=1",
     "ledger-scheduler-lease-finished.ts": "sql=7 stmt=7",
     "lend-pr-takeover-gh.ts": "vcs=4",
     "lend-pr-takeover.ts": "ledger=1",
     "scheduler-autostart-deps.ts": "ledger=2 proc=2 fs=2 notice=1 vcs=1",
     "scheduler-autostart-run.ts": "ledger=3 notice=4",
+    "scheduler-deploy-lock-jobs.ts": "ledger=2 fs=3",
     "scheduler-deploy-reconcile-facts.ts": "vcs=1",
     "scheduler-deploy-reconcile.ts": "ledger=1 notice=1",
     "scheduler-merge-train-gh.ts": "fs=1 vcs=1",
@@ -201,6 +215,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-pool-refusal.ts": "sql=2 stmt=2",
     "ledger-priority-lifecycle.ts": "sql=8 stmt=8",
     "ledger-priority-schema.ts": "sql=1 stmt=2",
+    "ledger-priority-stall-store.ts": "sql=1 stmt=1",
     "ledger-priority-write.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
@@ -235,6 +250,10 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-review-stale.ts": "sql=1 stmt=1",
     "scheduler-review-swap.ts": "sql=3 stmt=3",
     "scheduler-sessions.ts": "sql=7 stmt=10",
+    // UIOWNCARRY2 round 2: the snapshot's remote-main cache: one detached refresh child (ls-remote / fetch off the write lock) and its file
+    "scheduler-ui-owner-fresh-remote.ts": "proc=2 fs=3",
+    // UIOWNCARRY2: the fresh run's end / void / fail inside the `ledger scheduler-merge-step` transaction; proc = the snapshot's read-only git merge-base
+    "scheduler-ui-owner-fresh.ts": "sql=4 stmt=4 proc=1",
     "scheduler-ui-review-carry.ts": "sql=2 stmt=2",
     "shared-ledger-v2-write-gate-state.ts": "sql=8 stmt=13",
   },
@@ -266,6 +285,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "center-request-budget.ts": "fs=1",
     // Project CI reads have no card; response writes use the guarded scheduler CLI, never the pass read connection.
     "ci-main-failure-response-runtime.ts": "ledger=1 fs=1 vcs=2",
+    "ci-selected-receipt.ts": "fs=1 vcs=4", // CISEL2: GET-only gh reads of runs / artifacts / commits / the variable; fs = private temp dir for the artifact
     "dag-tools-steps.ts": "stmt=1",
     "file-lock.ts": "fs=7",
     "github-release.ts": "proc=1 vcs=1",
@@ -280,9 +300,12 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-store.ts": "sql=5 stmt=8 fs=1",
     "ledger-tx.ts": "sql=1",
     "log-paths.ts": "fs=4",
+    "main-red-fix-gh.ts": "vcs=3", // MAINRED1: bounded gh reads of main's runs and the one `gh run rerun --failed` the ledger claimed
     "media-outbound.ts": "sql=2 stmt=4 fs=4",
     "memory-retrieve-head.ts": "proc=1 vcs=1",
     "notify.ts": "notice=1",
+    "pm-deploy-lock.ts": "proc=1 fs=8",
+    "pm-notice-level.ts": "stmt=1",
     "pm-notify.ts": "notice=2",
     "pm-slim.ts": "fs=1",
     "projects.ts": "proc=1 vcs=1",

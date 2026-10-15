@@ -35,15 +35,15 @@ const STALE_DATE = ciLog([at(`##[group]${STALE}:`), at("error: expect(received).
   at("(fail) capacity > 窗口未过期 [0.40ms]"), at("##[endgroup]")]);
 
 interface Gh { log: string | Error; files: string[]; compare: { base: string; commits: string[] } | Error; history: string[];
-  update: Error | null; argv: string[][]; onUpdate: () => void }
+  update: Error | null; argv: string[][]; onUpdate: () => void; runHead: () => string }
 const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 const no = (stderr: string): BoundedResult => ({ code: 1, stdout: "", stderr, timedOut: false });
 /** Answers gh argv like the real CLI would (post `--jq`) for PR 7 and its runs. */
 const fakeGh = (gh: Gh) => async (argv: string[]): Promise<BoundedResult> => {
   gh.argv.push(argv);
   const cmd = argv.slice(1).join(" ");
-  if (/^run view \d+ --repo example\/repo --json attempt,status,conclusion$/.test(cmd)) {
-    return ok(JSON.stringify({ attempt: 1, status: "completed", conclusion: "failure" }));
+  if (/^run view \d+ --repo example\/repo --json attempt,status,conclusion,headSha$/.test(cmd)) {
+    return ok(JSON.stringify({ attempt: 1, status: "completed", conclusion: "failure", headSha: gh.runHead() }));
   }
   if (/^run view \d+ --repo example\/repo --log-failed$/.test(cmd)) return gh.log instanceof Error ? no(gh.log.message) : ok(gh.log);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: gh.files.map((path) => ({ path })) }));
@@ -72,7 +72,7 @@ function card(over: Partial<Gh> = {}, carry: MergeExternal["carryReview"] = asyn
   let snap = snapOf(HEAD, "fail");
   let nextHead = NEW;
   const gh: Gh = { log: STALE_DATE, files: ["src/lib/x.ts", "tests/x.test.ts"], compare: { base: BASE, commits: [OLD, FIX] }, history: [FIX, BASE],
-    update: null, argv: [], onUpdate: () => { snap = snapOf(nextHead, "pending"); }, ...over };
+    update: null, argv: [], onUpdate: () => { snap = snapOf(nextHead, "pending"); }, runHead: () => snap.head, ...over };
   const external = { inspect: async () => snap, freshness: async () => ({ behindBy: 0, mainHead: FIX }), carryReview: carry,
     updateBranch: async () => { throw new Error("不该走 gh pr update-branch"); }, merge: async () => { throw new Error("不该合并"); },
     ciRerun: ciRerunGh(fakeGh(gh) as never), ciBehind: ciBehindGh(fakeGh(gh) as never) } as MergeExternal;

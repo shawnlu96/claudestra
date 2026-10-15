@@ -9,7 +9,7 @@
 import { LEND_FAMILIES, type LendFamily } from "./lend-wire-types.js";
 import { offerBody, parseOffer, type OfferRequest } from "./lend-offer-protocol.js";
 import { arrayOf, BODY_V, fields, guard, LEND_PROTO, MAX_TS, no, OFFER_MAX, ORDER_ID, pattern, pick, REPO, version, whole, type Parsed } from "./lend-wire-v2-schema.js";
-import { askScopeExtra, parseAskWire, type AskScopeReason } from "./order-wire.js";
+import { askScopeExtra, lenientAskFields, parseAskWire, type AskWire } from "./order-wire.js";
 
 export { LEND_PROTO, OFFER_MAX, offerBody, type OfferRequest };
 const HELLO_MS = 60_000;
@@ -48,7 +48,7 @@ type BeatVerdict = (typeof BEAT_VERDICTS)[number];
 interface LeaseV2 { gen: number; expiresAt: number; ms: number }
 export interface BeatAnswer { orderId: string; verdict: BeatVerdict; lease: LeaseV2 | null }
 
-interface AskRequest { v: 1; orderId: string; gen: number; question: string; options: string[]; files?: string[]; reason?: AskScopeReason }
+type AskRequest = { v: 1; orderId: string; gen: number; question: string; options: string[] } & Pick<AskWire, "files" | "reason" | "class" | "default" | "risk">;
 export interface OfferResponse { accepted: string[]; refused: { orderId: string; code: string }[] }
 
 const BOOT = /^[A-Za-z0-9_-]{8,64}$/;
@@ -127,12 +127,13 @@ function parseBeat(raw: unknown): BeatRequest {
 
 /** The question and options follow the local ask tool's limits (order-wire parseAskWire); gen pins the lease it is asked under. */
 function parseAsk(raw: unknown): AskRequest {
-  // files / reason（i28-ASK4 测试类扩围）可选：旧版出借方不带，照常解析；不升版本号
-  const r = fields(raw, "$", ["v", "orderId", "gen", "question", "options"], ["files", "reason"]);
+  // files / reason（i28-ASK4）、class / default / risk（ASKDEF1，宽松：lenientAskFields）可选：旧版出借方不带，照常解析；不升版本号
+  const r = fields(raw, "$", ["v", "orderId", "gen", "question", "options"], ["files", "reason", "class", "default", "risk"]);
   const scope = Object.fromEntries((["files", "reason"] as const).filter((k) => k in r).map((k) => [k, r[k]]));
-  const w = parseAskWire({ v: version(r), orderId: r.orderId, question: r.question, options: r.options, ...scope });
+  const w = parseAskWire({ v: version(r), orderId: r.orderId, question: r.question, options: r.options, ...scope, ...lenientAskFields(r) });
   if (!w.ok) return no("ask", w.error);
-  return { v: BODY_V, orderId: w.value.orderId, gen: whole(r.gen, "gen", 1, 1e9), question: w.value.question, options: w.value.options, ...askScopeExtra(w.value) };
+  const { orderId, question, options } = w.value;
+  return { v: BODY_V, orderId, gen: whole(r.gen, "gen", 1, 1e9), question, options, ...askScopeExtra(w.value), ...lenientAskFields({ ...w.value }) };
 }
 
 const REQUESTS = { hello: parseHello, beat: parseBeat, ask: parseAsk, offer: parseOffer } as const;

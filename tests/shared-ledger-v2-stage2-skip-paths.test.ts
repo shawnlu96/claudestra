@@ -227,12 +227,14 @@ describe("S2D2 ledger subcommands", () => {
       // session-bind / -retire: the first argument is the card; --intent is one of that card's intents
       "session-intent": ["task"] };
     // S2Q rows marked unmapped whose nominal target is not an argument: the gate resolves them by what the command acts on
-    const own = new Set(["manual-merge-claim", "memory-auto", "peer-pr-intake", "scheduler-main-ci"]);
+    const own = new Set(["manual-merge-claim", "memory-auto", "peer-pr-intake", "scheduler-main-ci", "scheduler-priority-now"]);
     for (const [cmd, rule] of Object.entries(SCHEDULER_V2_LEDGER_COMMANDS)) {
       if (own.has(cmd)) continue;
       expect([cmd, same[rule.target]]).toEqual([cmd, expect.arrayContaining([SKIP_LEDGER_COMMANDS[cmd]])]);
     }
     expect(own.has("manual-merge-claim") && SKIP_LEDGER_COMMANDS["manual-merge-claim"]).toBe("manual-claim");
+    expect(SKIP_LEDGER_COMMANDS["scheduler-priority-now"]).toBe("project");
+    expect(SKIP_LEDGER_COMMANDS["scheduler-priority-stall"]).toBe("task-or-none");
   });
 
   test("dynamic call sites can only produce their registered commands", () => {

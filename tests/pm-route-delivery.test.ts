@@ -29,7 +29,8 @@ async function world(routeMode: "on" | "observe" | "off", digestMode: "on" | "ob
   const f = pmFixture(); fixtures.push(f);
   if (redirect) await switchProjectPm(f.db, P, B, { actor: "owner" }, f.deps);
   const store = new PmDigestStore(join(f.dir, "pm-digest.json"), join(f.dir, "pm-digest-mode.json"));
-  writeFileSync(store.modePath, JSON.stringify({ projects: { [P]: digestMode }, routeProjects: { [P]: routeMode } }));
+  // 这里测的是推送摘要与分流的组合（拉取模式见 pm-digest-queue.test.ts）
+  writeFileSync(store.modePath, JSON.stringify({ projects: { [P]: digestMode }, routeProjects: { [P]: routeMode }, pullProjects: { [P]: "off" } }));
   const state = await f.deps.read(), clients = new Map([["channel-a", { ws }], ["channel-b", { ws }]]);
   let clock = 1_000_000;
   Object.assign(pmDigest.deps, { store, db: () => f.db, now: () => movingClock ? clock++ : clock, agents: () => state.agents, heldCarriers: () => new Set() });

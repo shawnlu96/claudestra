@@ -3,6 +3,11 @@
 状态：讨论稿（已撤回合并资格），待 owner 与 Shawn 评审；本稿不改代码、不开实现。卡：PMR-1。依据：`docs/design/scheduler-engine.md`（T68）、
 `docs/team/orchestration-team.md`、`src/lib/manual-reason.ts`，以及 2026-10-07 当天的台账事件。行号以写稿时的 origin/main（`af3c493a`）为准。
 
+> **P0 已实现（PMR-2）**：自动卡（含当过 auto、被切 manual 接管 / 引擎退回人工的卡）上 PM / master 的写入在 `insertEvent` 统一补 `manual:true` + `intervention{cmd,by,role,mode}`（`src/lib/pm-rails.ts`，作用域由 `ledger` CLI 开）；
+> 豁免靠角色（执行者 / 审查员 / peer / scheduler 不是 PM 角色）加 ask、纯备注、escalate。开关是恢复策略键 `pmRails`（按项目，缺省 observe：只标不推），
+> 只推 `mode=on` 时打的标（observe 期的切 on 后不补推）；`ledger pm-rails-tick`（bridge 每 5 分钟）经本机 owner 通知推：同卡 10 分钟合并一条、意图停在 unknown 满 30 分钟推一次、每天 10:00 后汇总前 24 小时。
+> 台账详情的事件挂「人工干预」徽标。P1–P3 未开始。
+
 owner 的要求（10-07 23:21 / 23:25）：自动流程像 dynamic workflow 一样由代码约束，**进了流程就不能中途手工干预，直到达到设计预期**；中间只允许「停止、放弃、重启」这一类动作。
 
 T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操作保留真实 actor，并在事件里标 manual；每张卡带 `fallback: manual`。

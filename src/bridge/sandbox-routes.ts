@@ -18,6 +18,7 @@ interface Rule {
 
 const RULES: Rule[] = [
   { method: "PUT", path: /^\/config\/claude-defaults$/, feature: "改全局 ~/.claude/settings.json" },
+  { method: "PUT", path: /^\/config\/codex-defaults$/, feature: "改全局 ~/.codex/config.toml" },
   { method: "POST", path: /^\/sessions\/[^/]+\/(manage|cleanup|adopt)$/, feature: "归档 / 删除 / 清理 / 收编会话" },
   { method: "POST", path: /^\/agents\/resume$/, feature: "按会话 id 恢复（可能抢生产会话）" },
   { method: "POST", path: /^\/agents\/[^/]+\/(pi|codex)-update$/, feature: "pi update / npm install -g @openai/codex（全局 npm 安装）" },

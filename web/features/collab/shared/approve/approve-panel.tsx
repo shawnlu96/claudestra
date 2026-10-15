@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { MACHINE_WORDS } from '@/lib/owner-words';
 import { Icon } from '../../collab-icons';
 import shared from '../shared.module.css';
 import c from '../../collab.module.css';
@@ -56,7 +57,7 @@ export function ApprovalPanel(p: ApprovalPanelProps & { tr?: (key: string) => st
         <span>{tr('提案摘要')} · {shortDigest(bind.proposalDigest)}</span>
         <span>{tr('基础版')} · v{bind.baseVersion}</span>
         <span><Icon name="clock" /> {tr('期限')} · {new Date(bind.expiresAt).toLocaleString()}</span>
-        <span>{tr('主场')} · {p.instanceNames[bind.homeInstanceId] ?? bind.homeInstanceId}</span>
+        <span>{tr(MACHINE_WORDS.machine)} · {p.instanceNames[bind.homeInstanceId] ?? bind.homeInstanceId}</span>
         <span>{tr('动作')} · {bind.actions.join(', ')}</span>
       </>}
     </div>

@@ -5,19 +5,29 @@
 
 export interface FakeDiscord {
   server: ReturnType<typeof Bun.serve>; identifies: () => number; restHits: () => string[];
+  /** 收到的 RESUME（op 6）次数 */
+  resumes: () => number;
   /** 断网模拟：true = 新 ws 升级一律 503 并掐掉现有连接（REST 照常，配合 resetAfter 缓存 gateway 信息） */
   setDown: (down: boolean) => void;
   /** 此刻已 IDENTIFY 且没断的网关会话数 */
   sessions: () => number;
   /** 像 Discord 一样把同一次按钮点击推给本 bot 的每个会话 */
   clickButton: (id: string) => void;
+  /** 用指定 close code 掐掉已 IDENTIFY 的会话（4000 = discord.js 走 RESUME 恢复） */
+  kick: (code: number) => void;
+}
+
+export interface FakeDiscordOptions {
+  /** READY 里下发的 resume_gateway_url，缺省指回自己；测试用来模拟恶意异源恢复地址 */
+  resumeUrl?: string;
 }
 
 type Conn = { close(code?: number, reason?: string): void; send(m: string): unknown };
 
 /** resetAfterMs：/gateway/bot 的 session_start_limit.reset_after —— 真 Discord 是小时级，discord.js 按它缓存 gateway 信息 */
-export function startFakeDiscord(port: number, log: (m: string) => void = () => {}, resetAfterMs = 0): FakeDiscord {
+export function startFakeDiscord(port: number, log: (m: string) => void = () => {}, resetAfterMs = 0, opts: FakeDiscordOptions = {}): FakeDiscord {
   let identifies = 0;
+  let resumes = 0;
   let down = false;
   const hits: string[] = [];
   const live = new Set<Conn>();
@@ -50,14 +60,14 @@ export function startFakeDiscord(port: number, log: (m: string) => void = () => 
       message(ws, raw) {
         const p = JSON.parse(String(raw)) as { op: number };
         if (p.op === 1) ws.send(JSON.stringify({ op: 11 }));
-        if (p.op === 6) ws.send(JSON.stringify({ op: 9, d: false }));
+        if (p.op === 6 && ++resumes) ws.send(JSON.stringify({ op: 9, d: false }));
         if (p.op !== 2) return;
         identifies++;
         identified.add(ws);
         log(`gateway IDENTIFY #${identifies} → READY`);
         ws.send(JSON.stringify({ op: 0, s: 1, t: "READY", d: {
           v: 10, user: { id: "100", username: "stub", discriminator: "0", bot: true }, guilds: [],
-          session_id: `s${identifies}`, resume_gateway_url: `ws://127.0.0.1:${port}`, application: { id: "100", flags: 0 },
+          session_id: `s${identifies}`, resume_gateway_url: opts.resumeUrl ?? `ws://127.0.0.1:${port}`, application: { id: "100", flags: 0 },
         } }));
       },
     },
@@ -72,7 +82,8 @@ export function startFakeDiscord(port: number, log: (m: string) => void = () => 
     for (const ws of identified) ws.send(JSON.stringify({ op: 0, s: 2, t: "INTERACTION_CREATE", d }));
   };
   return {
-    server, identifies: () => identifies, restHits: () => hits, sessions: () => identified.size, clickButton,
+    server, identifies: () => identifies, resumes: () => resumes, restHits: () => hits, sessions: () => identified.size, clickButton,
+    kick(code) { for (const ws of identified) ws.close(code, "kick"); },
     setDown(v) { down = v; if (v) for (const ws of live) ws.close(1001, "down"); },
   };
 }
