@@ -43,7 +43,6 @@ export async function deliverPmLocal<P extends Receipt>(
   const pushback = isCallerPushback(env), own = original.channelId ? clients.get(original.channelId) : undefined;
   const direct = isHumanDirect(env);
   const name = (pushback && own) || direct || directed ? null : pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
-  liveClients = clients;
   const inbox = name || directed ? null : peerInboxAgent(env, original, facts, (ch) => clients.has(ch));
   if (inbox) {
     const target = endpointOf(inbox, clients.get(inbox.channelId)!);
@@ -180,8 +179,11 @@ async function finalScopeRefusal(env: Envelope, name: string, facts: RouteFacts)
   return { envelope: env, outcome: { kind: "dropped", reason: `API credential scope excludes ${name}` } };
 }
 
-/** 押后归属判定没有入参带连接表：用 deliverPmLocal 最近一次拿到的 bridge 连接表（同一个对象，随连接增删）；还没投过信按不在线 */
+/** 押后归属判定没有入参带连接表：bridge 启动时交来它的连接表（同一个对象，随连接增删）；没交（单测）按不在线 */
 let liveClients: ReadonlyMap<string, unknown> | undefined;
+export function setPmDeliveryClients(clients: ReadonlyMap<string, unknown>): void {
+  liveClients = clients;
+}
 
 /**
  * DPR-1：这一封 peer 机器消息该先投调度助理（lib/peer-inbox-route.ts 判开关 / 来源 / 收件人是当班 PM）。调度助理没在册、

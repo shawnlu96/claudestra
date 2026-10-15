@@ -9,7 +9,7 @@ import { isMachinePeerText, peerInboxDispatcher, peerInboxHeader, PEER_MACHINE_P
 import { renderBouncePush, renderDriftPush, renderMergedPush, renderReviewPush } from "../src/lib/peer-pr-message.js";
 import { PmDigestStore } from "../src/lib/pm-digest-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
-import { deliverPmLocal, pmRoleRoute } from "../src/bridge/local-api/project-pm-delivery.js";
+import { deliverPmLocal, pmRoleRoute, setPmDeliveryClients } from "../src/bridge/local-api/project-pm-delivery.js";
 import { stageApiReplyFiles } from "../src/bridge/api-reply-files.js";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
 import { LedgerCli } from "../src/manager/ledger-context.js";
@@ -256,5 +256,15 @@ describe("deliverPmLocal：peer 机器消息转调度助理", () => {
     expect(pmRoleRoute(off.facts)("channel-a")(peerEnv(MERGED))).toBeNull();
     const out = make({ dispatcherScope: false });
     expect(pmRoleRoute(out.facts)("channel-a")(peerEnv(MERGED))).toBeNull();
+  });
+
+  // 第 1 轮对抗式审查 P2 held-route-bootstrap：在线与否看 bridge 启动时交来的连接表，不靠之前有没有投过信
+  test("押后归属不注入 online 时看 setPmDeliveryClients 交来的连接表", () => {
+    const w = make(), { online: _, ...facts } = w.facts, route = pmRoleRoute(facts);
+    setPmDeliveryClients(new Map());
+    expect(route("channel-a")(peerEnv(MERGED))).toBeNull();
+    setPmDeliveryClients(new Map([["channel-d", {}]]));
+    expect(route("channel-a")(peerEnv(MERGED))).toEqual({ agentName: D, channelId: "channel-d" });
+    setPmDeliveryClients(new Map());
   });
 });

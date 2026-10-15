@@ -1,6 +1,6 @@
 /**
  * peer 机器消息先投调度助理（DPR-1，`ledger pm-peer-inbox`）：只判「这一封该不该转」和转过去带什么抬头，投递在
- * bridge/local-api/project-pm-delivery.ts。只转机器抬头的请求（owner 2026-10-15 定）——真人写的、回程、人类直聊照旧给当班 PM。
+ * bridge/local-api/project-pm-delivery.ts。只转机器抬头的请求——真人写的要人判断，和回程、人类直聊一样照旧给当班 PM。
  * 抬头由代码写死、随每一封走：调度助理是 Pi，起不起角色文件、有没有 /clear 都不影响它看到边界。
  */
 

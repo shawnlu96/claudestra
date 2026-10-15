@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { deliverPmLocal } from "../src/bridge/local-api/project-pm-delivery.js";
-import { stageApiReplyFiles } from "../src/bridge/api-reply-files.js";
+import { replyFilesRefusal, stageApiReplyFiles } from "../src/bridge/api-reply-files.js";
 import { setAttachmentDirsForTest } from "../src/bridge/local-api/attachments.js";
 import { setMediaForTest } from "../src/bridge/local-api/media-refresh.js";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
@@ -112,4 +112,19 @@ test("对照：留给 PM 的请求（真人消息）晚到补答，附件照常�
   expect(claim.threadId).toBe("thr-api_human");
   expect([staged.files.length, table.size]).toEqual([1, 1]);
   expect(staged.warning ?? "").not.toContain("调度助理");
+});
+
+// 第 1 轮对抗式审查 P1 dispatcher-reply-missing-file：deliverToApi 认领前先查附件路径，路径失效会把整条文字也拒掉
+test("调度助理 reply_to 带失效附件路径：在等的、空回合结算后晚到的都不拒文字；留给 PM 的照旧拒", async () => {
+  const gone = join(root, "no-such-file.txt");
+  const refusal = (receipts: Map<string, Receipt[]>, settled: Map<string, Settled>, channelId: string, replyTo?: string) =>
+    replyFilesRefusal({ from: { kind: "local", channelId }, meta: { files: [gone], replyTo } }, "tok_peer", receipts, settled);
+  const live = await world("api_gone_live", true);
+  expect(await refusal(live.receipts, new Map(), live.channel, "api_gone_live")).toBeNull();
+  expect(await refusal(live.receipts, new Map(), live.channel)).toBeNull(); // 没带 reply_to：在等的全被拦
+  const late = await world("api_gone_late", true), settled = settleEmptyTurn(late.receipts, late.channel);
+  expect(await refusal(late.receipts, settled, late.channel, "api_gone_late")).toBeNull();
+  const human = await world("api_gone_human", false);
+  expect(await refusal(human.receipts, new Map(), human.channel, "api_gone_human")).toContain("附件不存在");
+  expect(await refusal(late.receipts, settled, late.channel, "api_other")).toContain("附件不存在"); // reply_to 对不上任何一条：不预判
 });

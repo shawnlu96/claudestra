@@ -49,6 +49,25 @@ export function blockReplyFiles(threadId: string, blocked = true, now = Date.now
   else blockedThreads.delete(threadId);
 }
 
+type ApiWaiting = { messageId?: string; threadId: string };
+type ApiSettledRow = { messageId?: string; tokenId?: string; agentChannelId?: string };
+
+/**
+ * 出站回复认领之前的附件检查（deliverToApi 第一步）：这条回复只会记到不外发附件的 thread 上时，附件反正不发，
+ * 路径失效也不该拒掉整条文字。reply_to 按在等的、再按已结算的找那条；没带 reply_to 时这个调用方在等的全都被拦才算。
+ * 预判和真正认领之间队列可能变：认领后 stageApiReplyFiles 按实际 thread 再核，拷不了的附件只进警告、文字照发。
+ * 队列 key 同 bridge/api-routes.ts apiReqKey（这里不能 import 那个 hub）
+ */
+export async function replyFilesRefusal(env: { from: { kind: string; channelId?: string }; meta: { files?: string[]; replyTo?: string } },
+  tokenId: string, queues: ReadonlyMap<string, readonly ApiWaiting[]>, settled: ReadonlyMap<string, ApiSettledRow>): Promise<string | null> {
+  const channelId = env.from.kind === "local" ? env.from.channelId ?? "" : "", queue = queues.get(`${tokenId}|${channelId}`) ?? [];
+  const id = env.meta.replyTo, live = id ? queue.find((p) => p.messageId === id) : undefined;
+  const done = id && !live ? [...settled].find(([, s]) => s.messageId === id && s.tokenId === tokenId && s.agentChannelId === channelId) : undefined;
+  const threads = live ? [live.threadId] : done ? [done[0]] : id ? [] : queue.map((p) => p.threadId);
+  if (threads.length && threads.every((t) => blockedThreads.has(t))) return null;
+  return missingReplyFiles(env.meta.files || []);
+}
+
 export interface Staged {
   files: (ReplyFileRef & { url: string })[];
   /** 拷进 inbox 的副本（SSE 事件与「待你处理」卡片的附件，形状同 copyOutboundToInbox） */
