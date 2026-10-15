@@ -12,7 +12,7 @@ import { isRuntimeCooldown } from "./lend-peer-cooldown.js";
 import type { LeaseRequest } from "./lend-wire.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import type { LendOrder } from "./ledger-lend.js";
-import { insertEvent } from "./ledger-tx.js";
+import { appendEvent } from "./ledger-write.js";
 import { noteDefaultOn } from "./recovery-key-defaults.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 
@@ -90,8 +90,9 @@ export function runtimeStopCooldown(db: Database, ctx: WriteCtx, o: Order, req: 
   db.run(`INSERT INTO lend_peer_cooldowns (peer, family, until, reason, startedAt, baselineWeekUsedPct) VALUES (?, ?, ?, ?, ?, NULL)
     ON CONFLICT(peer, family) DO UPDATE SET until = excluded.until, reason = excluded.reason, startedAt = excluded.startedAt,
     baselineWeekUsedPct = excluded.baselineWeekUsedPct`, [o.peer, o.family, until, reason, now]);
-  insertEvent(db, ctx, { project: o.project, target: o.taskId, kind: "note",
+  // The caller's dedupKey belongs to the lease request's own event; this note carries none.
+  appendEvent(db, { actor: ctx.actor, now }, { project: o.project, target: o.taskId, kind: "note",
     text: `出借：${o.peer} 的 ${o.family} 冷却到 ${new Date(until).toISOString()}（${reason}）`,
     data: { lend: { orderId: o.orderId, peer: o.peer, op: "runtime_cooldown", family: o.family, until, reason,
-      ...(cur && cur.until > now && !isRuntimeCooldown(cur.reason) ? { replaced: cur.reason } : {}) } } }, false);
+      ...(cur && cur.until > now && !isRuntimeCooldown(cur.reason) ? { replaced: cur.reason } : {}) } } });
 }
