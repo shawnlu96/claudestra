@@ -68,3 +68,18 @@ test("原有字段含义不变：coverage 照旧（3 / 10），costLatency 读 m
   expect(report.channelCoverage).toEqual(channelCoverage(input));
   expect(report.summaryCost).toEqual({ priced: 0, noModelCall: 0, costUnknown: 0, unmarked: 0 });
 });
+
+test("lend-observe-missing-attempts: observe distinguishes empty and error from no attempt", () => {
+  for (const result of ["empty", "error"] as const) {
+    const sample = observeSample("T", 11);
+    sample.data.result = result;
+    sample.data.count = 0;
+    const input = { events: [stage("T", 10, "spec", "build"), sample], tasks: [], memories: [], since: 0, until: 1000 };
+    // Sequence defines phase boundaries; keep the stage before the sample.
+    input.events[0]!.seq = sample.seq - 1;
+    const report = channelCoverage(input);
+    expect(report.uncovered[result]).toBe(1);
+    expect(report.uncovered.no_attempt).toBe(0);
+    expect(report.byChannel.lend).toMatchObject({ orders: 1, covered: 0 });
+  }
+});

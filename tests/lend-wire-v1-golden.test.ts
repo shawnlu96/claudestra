@@ -5,7 +5,7 @@
  * 应答必须和金样本逐字节相同。应答取 bridge 回给对方的那一份（CLI 输出去掉 ok / notified 再补 ok:true，同 local-api/lend.ts）。
  */
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -15,6 +15,7 @@ import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { standardAnswers } from "../src/lib/order-standard-answers.js";
 import { runLedger } from "../src/manager/ledger.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 
 const P = "claude-orchestrator";
 const H = "a".repeat(40);
@@ -68,12 +69,14 @@ async function flow(withV2: boolean): Promise<string[]> {
 beforeEach(async () => {
   db = openLedger(":memory:");
   now = 1_000_000;
+  // Freeze v1 without optional memory observation events shifting receipt sequence numbers.
+  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { [P]: { keys: { memoryLendInjection: "off" } } } }));
   setMeta(db, { actor: "owner", now }, { project: P, key: "pms", value: ["agent-pm"] });
   createTask(db, { actor: "owner", now }, { project: P, id: "T9", title: "T9", kind: "code", spec });
   db.run(`UPDATE tasks SET stage = 'review', headSHA = '${H}', round = 1 WHERE id = 'T9'`);
   await run(["lend-offer", "T9", "--peer", "mate", "--repo", REPO, "--pr", "12"]);
 });
-afterEach(() => closeLedger(":memory:"));
+afterEach(() => { closeLedger(":memory:"); rmSync(RECOVERY_POLICY_PATH, { force: true }); });
 
 const GOLDEN: Record<string, string> = {
   poll: [

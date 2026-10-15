@@ -47,7 +47,7 @@ export async function prepareLendMemory(db: Database, task: LedgerTask, step: Le
     const budget = deps.timeoutMs ?? LEND_PREP_TIMEOUT_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`记忆检索超时（${budget} ms）`)), budget); });
-    try { await Promise.race([ensureMemoryRetrieval(db, task, kind, head, { ...deps, visibility: "team" }), timeout]); }
+    try { await Promise.race([ensureMemoryRetrieval(db, task, kind, head, { ...deps, visibility: "team", throwOnError: true }), timeout]); }
     finally { clearTimeout(timer); }
   } catch (e) {
     let m = failedPrep.get(db);
@@ -75,6 +75,14 @@ export function lendMemory(db: Database, task: LedgerTask, step: LendStep, order
   const kind = kindOf(step), head = made.wire.head, startedAt = Date.now();
   const elapsed = () => Date.now() - startedAt;
   const unchanged = { wire: made.wire, whole: made.whole };
+  const observe = (result: MemoryAttemptResult, ids: string[], section: string, reason?: string) => {
+    try {
+      recordObserved(db, { project: task.project, mechanism: KEY, target: task.id, actionKey: orderId,
+        action: `把 ${ids.length} 条项目记忆写进出借单 ${orderId}（${kind}）`,
+        data: { orderId, order: kind, result, count: ids.length, visibilities: visibilities(db, ids),
+          bytes: Buffer.byteLength(section), elapsedMs: elapsed(), ...(reason ? { reason } : {}) } }, now);
+    } catch (e) { console.error(`⚠️ ${task.id} 出借记忆观察样本没记上：${(e as Error).message}`); }
+  };
   let fit: MemoryFit<OrderWire>, reason: string | undefined;
   try {
     const prep = failedPrep.get(db)?.get(prepKey(task, head, kind));
@@ -91,7 +99,8 @@ export function lendMemory(db: Database, task: LedgerTask, step: LendStep, order
     const why = (e as Error).message;
     console.error(`⚠️ ${task.id} 出借单记忆没放（单子照发）：${why}`);
     return { ...unchanged, commit: () => {
-      if (mode === "act") recordMemoryAttempt(db, task, { orderId, channel: "lend", order: kind, result: "error", count: 0, elapsedMs: elapsed(), reason: why }, now);
+      if (mode === "observe") observe("error", [], "", why);
+      else recordMemoryAttempt(db, task, { orderId, channel: "lend", order: kind, result: "error", count: 0, elapsedMs: elapsed(), reason: why }, now);
     } };
   }
   const took = elapsed();
@@ -100,13 +109,7 @@ export function lendMemory(db: Database, task: LedgerTask, step: LendStep, order
   if (mode === "observe") {
     const would = fit;
     return { ...unchanged, commit: () => {
-      if (!would.section && would.result === "empty") return; // 没有一条候选：不留样本，和改动前一样安静
-      try {
-        recordObserved(db, { project: task.project, mechanism: KEY, target: task.id, actionKey: orderId,
-          action: `把 ${would.ids.length} 条项目记忆写进出借单 ${orderId}（${kind}）`,
-          data: { orderId, order: kind, result: would.result, count: would.ids.length, visibilities: visibilities(db, would.ids),
-            bytes: Buffer.byteLength(would.section), elapsedMs: took, ...(reason ? { reason } : {}) } }, now);
-      } catch (e) { console.error(`⚠️ ${task.id} 出借记忆观察样本没记上：${(e as Error).message}`); }
+      observe(would.result, would.ids, would.section, reason);
     } };
   }
   const added = fit.section ? { ...made.whole, inputs: [...made.whole.inputs, fit.section] } : made.whole;

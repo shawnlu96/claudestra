@@ -2,7 +2,7 @@
  * PMEMTUNE1 验收线 1 / 2 / 5（出借渠道）：出借 write / review 单带标准记忆节（只 team、预算内、推出记一次）；home 记忆一条都不进 wire；
  * 检索抛错 / 事务外准备超时不挡派单；memoryLendInjection 未配置 = observe（只记样本、wire 不变），off = 逐字回到现状。
  */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -190,3 +190,32 @@ describe("[验收线 5] 开关", () => {
     expect(events().some((e) => e.data.op === "memory_rank")).toBe(false);
   });
 });
+
+ test("lend-prep-errors-hidden: closed vectors must suppress fallback memory", async () => {
+    card("build"); remember(pit("检索故障"));
+    const vectors = new Database(":memory:"); vectors.close();
+    const embedder = { model: "m", dims: 3, embed: async () => { throw new Error("embed failed"); } };
+    await prepareLendMemory(db, getTask(db, "T9")!, "write", BASE, { embedder: embedder as never, vectors, headFiles: null });
+    const o = offer();
+    expect(o.status).toBe("pooled");
+    expect(memorySection(o)).toBeUndefined();
+    expect(attempts()[0]!.data).toMatchObject({ result: "error", count: 0, reason: expect.stringContaining("closed") });
+    expect(pushes()).toEqual([]);
+ });
+ test("lend-observe-missing-attempts: empty retrieval records one observation", () => {
+    card("build"); policy(); const o = offer();
+    expect(o.status).toBe("pooled");
+    expect(memorySection(o)).toBeUndefined();
+    expect(observed()).toHaveLength(1);
+    expect(observed()[0]!.data).toMatchObject({ orderId: o.orderId, result: "empty", count: 0, bytes: 0, elapsedMs: expect.any(Number) });
+ });
+ test("lend-observe-missing-attempts: retrieval error records reason without injection", () => {
+    card("build"); policy(); remember(pit("坏的坑"));
+    db.run("DROP TRIGGER memories_no_update");
+    db.run("UPDATE memories SET body = 'not json'");
+    const o = offer();
+    expect(memorySection(o)).toBeUndefined();
+    expect(observed()).toHaveLength(1);
+    expect(observed()[0]!.data).toMatchObject({ result: "error", count: 0, reason: expect.any(String) });
+    expect(pushes()).toEqual([]);
+ });

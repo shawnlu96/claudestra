@@ -331,7 +331,7 @@ export function channelCoverage(input: MetricsInput): ChannelCoverage {
       }
       if (pushed.size) return;
       const last = tried.at(-1);
-      const result = last?.data.op === MEMORY_ATTEMPT_OP ? last.data.result : last ? "observe" : "no_attempt";
+      const result = last?.data.op === MEMORY_ATTEMPT_OP ? last.data.result : last ? (last.data.result === "injected" ? "observe" : last.data.result) : "no_attempt";
       const reason: UncoveredReason = typeof result === "string" && result in out.uncovered ? result as UncoveredReason : "error";
       out.uncovered[reason]++;
     });

@@ -146,6 +146,8 @@ export interface EnsureDeps {
   embedder?: Embedder | null;
   /** 向量库连接；不给 = 打开本机 memory-vectors.sqlite（用完关） */
   vectors?: Database;
+  /** 出借准备必须感知失败；本机领单继续图 + 文件降级。 */
+  throwOnError?: boolean;
   headFiles?: readonly string[] | null;
   /** 测试可指定仓库；生产从本卡项目配置 / 作者工作目录取。 */
   repoDir?: string;
@@ -205,7 +207,7 @@ const candidatesOf = (db: Database, task: LedgerTask, visibility?: MemoryVisibil
 
 /**
  * 派单前（事务外）调：补嵌入缺的记忆向量、嵌入查询文本走语义路，再算一次并登记。已登记过、没有候选、没有模型都照常（没模型 = 两路）。
- * 永不抛出。
+ * 默认失败时降级；throwOnError 供出借准备保留错误结果。
  */
 async function prepareRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null = task.headSHA,
   deps: EnsureDeps = {}): Promise<void> {
@@ -219,6 +221,7 @@ async function prepareRetrieval(db: Database, task: LedgerTask, kind: MemoryOrde
     const semantic = await semanticInputs(db, task, cands, deps);
     registerRetrieval(db, task, kind, head, { now: deps.now, ...semantic, headFiles, visibility, startedAt }, true);
   } catch (e) {
+    if (deps.throwOnError) throw e;
     console.error(`⚠️ ${task.id} 项目记忆检索失败，按图 + 文件两路补：${(e as Error).message}`);
     try { registerRetrieval(db, task, kind, head, { now: deps.now, headFiles, visibility, startedAt }, true); }
     catch (fallbackError) { console.error(`⚠️ ${task.id} 记忆降级登记失败，派单照常：${(fallbackError as Error).message}`); }
@@ -243,7 +246,7 @@ const preparing = new WeakMap<Database, Map<string, Promise<void>>>();
 export async function ensureMemoryRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null = task.headSHA,
   deps: EnsureDeps = {}): Promise<void> {
   if (db.inTransaction) throw new Error("项目记忆外部检索不能持有台账事务");
-  const key = rankKey(task, head, kind, deps.visibility);
+  const key = `${rankKey(task, head, kind, deps.visibility)}:${!!deps.throwOnError}`;
   let pending = preparing.get(db);
   if (!pending) preparing.set(db, pending = new Map());
   const prior = pending.get(key);
