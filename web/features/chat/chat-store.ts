@@ -36,7 +36,7 @@ import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus }
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
 import { liveAnswerText, liveUserText, resolveDeltaClicks, resolvePendingClicks } from "./delta-clicks";
-import { agentsSignature, projectsSignature } from "./agents-signature";
+import { rosterPlan } from "./agents-signature";
 import { ProjectsRefresh } from "./projects-refresh";
 import { AgentListLoader } from "./agent-list-loader";
 import { INITIAL_AGENT_LIST, keepRosterOrder, type AgentListReason, type AgentListStatus } from "./agent-list-state";
@@ -373,8 +373,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (reason === "poll" || reason === "event") this.checkStreamHealth(cur);
     const explicit = reason === "action" || reason === "manual";
     // /projects：显式刷新、成员结构变了、或失败重试 / 低频刷新到点（projects-refresh.ts）才拉；只是忙闲变了不拉
-    if (explicit || this.projectsRefresh.due() || projectsSignature(next) !== projectsSignature(this.state.agents)) void this.loadProjects();
-    if (!explicit && agentsSignature(next) === agentsSignature(this.state.agents)) return;
+    const plan = rosterPlan(this.state.agents, next, explicit, this.projectsRefresh.due());
+    if (plan.projects) void this.loadProjects();
+    if (!plan.update) return;
     // v2.17.2 交互期冻结顺序(peer 补刀:pointerdown 意图捕获只覆盖「按下→click」的后半窗口,
     // 「视觉锁定→手指落下」这段更长的窗口里重排照样让手指落在错行上)。侧栏 2s 内有过触碰/滚动 →
     // 本拍只更新字段不重排,顺序等下一拍(≤15s)再应用;成员增删仍立即生效(新增排尾)。操作后的拉取不冻结。
