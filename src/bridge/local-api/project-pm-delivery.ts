@@ -14,7 +14,7 @@ import { pmDirectedVerdict, type CallerOf } from "../pm-directed-agent.js";
 import { isCallerPushback, isHumanDirect, markPmTransfer, pmTargetDrift, retryLater, setPmRoleRoute, undoPmTransfer, type PmTarget } from "../pm-held-transfer.js";
 import { pmDigest } from "../pm-digest.js";
 
-interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string; acceptsFiles?: boolean }
+interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string; threadId?: string; acceptsFiles?: boolean }
 interface RouteFacts {
   db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile>; callerOf?: CallerOf;
   /** 单测注入：DPR-1 开关（缺省读 pm-digest-mode.json）、同步读 principals（押后归属判定是同步的） */
@@ -116,7 +116,7 @@ async function handOff<P extends Receipt>(
       accepts = movedReceipt.acceptsFiles;
       if (h.noFiles) {
         movedReceipt.acceptsFiles = false; // the dispatcher answers in words only; files never reach the peer (api-reply-files.ts)
-        blockReplyFiles(movedReceipt);
+        if (movedReceipt.threadId) blockReplyFiles(movedReceipt.threadId); // by thread: a late reply_to after the empty-turn settle has no receipt
       }
       const key = `${env.from.tokenId}|${target.channelId}`;
       receipts.set(key, [...(receipts.get(key) ?? []), movedReceipt]);
@@ -141,7 +141,7 @@ async function handOff<P extends Receipt>(
   if (caller && moved) book.add(before, moved.slot, moved.messageId);
   if (movedReceipt) {
     Object.assign(movedReceipt, { agentChannelId: before, agentName: formerName, acceptsFiles: accepts });
-    if (h.noFiles) blockReplyFiles(movedReceipt, false);
+    if (h.noFiles && movedReceipt.threadId) blockReplyFiles(movedReceipt.threadId, false);
     receipts.set(`${movedReceipt.tokenId}|${before}`, [...(receipts.get(`${movedReceipt.tokenId}|${before}`) ?? []), movedReceipt]);
   }
   return delivery;

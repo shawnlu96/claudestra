@@ -91,7 +91,7 @@ describe("开关：pm-digest-mode.json 的 peerInboxProjects", () => {
 
 // ── 投递 ──
 const socket = () => ({ send: () => {} }) as unknown as LocalEndpoint["ws"];
-type Receipt = { tokenId: string; agentChannelId: string; agentName: string; messageId: string; acceptsFiles?: boolean };
+type Receipt = { tokenId: string; agentChannelId: string; agentName: string; messageId: string; threadId: string; acceptsFiles?: boolean };
 
 function delivery(o: { on?: boolean; dispatcherScope?: boolean; dispatcherOnline?: boolean } = {}) {
   const f = pmFixture();
@@ -113,7 +113,7 @@ function delivery(o: { on?: boolean; dispatcherScope?: boolean; dispatcherOnline
     online: (ch: string) => clients.has(ch) };
   const deliver = (env: Envelope, to = env.to as LocalEndpoint) => deliverPmLocal(env, to, clients, new AgentCallBook(null), receipts, send, facts);
   const receipt = (channelId: string, messageId = "api_1") => {
-    const r: Receipt = { tokenId: "tok_peer", agentChannelId: channelId, agentName: channelId === "channel-a" ? A : B, messageId, acceptsFiles: true };
+    const r: Receipt = { tokenId: "tok_peer", agentChannelId: channelId, agentName: channelId === "channel-a" ? A : B, messageId, threadId: `thr-${messageId}-${channelId}`, acceptsFiles: true };
     receipts.set(`tok_peer|${channelId}`, [...(receipts.get(`tok_peer|${channelId}`) ?? []), r]);
     return r;
   };
@@ -218,7 +218,7 @@ describe("deliverPmLocal：peer 机器消息转调度助理", () => {
     const w = make(), r = w.receipt("channel-a");
     await w.deliver(peerEnv(MERGED));
     const table = new Map();
-    const staged = await stageApiReplyFiles(["/etc/hosts"], { agent: D, tokenId: "tok_peer", table, receipt: r, lookup: async () => ({ peer: "remote" }) });
+    const staged = await stageApiReplyFiles(["/etc/hosts"], { agent: D, tokenId: "tok_peer", table, receipt: r, threadId: r.threadId, lookup: async () => ({ peer: "remote" }) });
     expect([staged.files, staged.sent, table.size]).toEqual([[], [], 0]);
     expect(staged.warning).toContain("调度助理");
     // 同一个对方直接问 PM 的回执不受影响
@@ -232,8 +232,9 @@ describe("deliverPmLocal：peer 机器消息转调度助理", () => {
     w.failNext({ kind: "error", error: new Error("ws closed") });
     expect((await w.deliver(env, { kind: "local", agentName: A, channelId: "channel-a", ws: socket() })).outcome.kind).toBe("error");
     expect([r.agentChannelId, r.acceptsFiles, w.receipts.get("tok_peer|channel-a")]).toEqual(["channel-a", true, [r]]);
-    const replied = await stageApiReplyFiles([], { agent: A, tokenId: "tok_peer", table: new Map(), receipt: r });
-    expect(replied.warning).toBeUndefined();
+    const replied = await stageApiReplyFiles(["/etc/hosts"], { agent: A, tokenId: "tok_peer", table: new Map(), receipt: r, threadId: r.threadId,
+      lookup: async () => null });
+    expect(replied.warning ?? "").not.toContain("调度助理"); // 退回 PM 后这条 thread 的附件不再被拦
     // flush 拿 PM 队里那条再投：抬头换不叠
     await w.deliver(env, { kind: "local", agentName: A, channelId: "channel-a", ws: socket() });
     // 调度助理忙时押进它的队，它空闲后再投（收件人已是它自己）：不再转、不再加抬头

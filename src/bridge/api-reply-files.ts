@@ -28,18 +28,25 @@ export interface StageOpts {
   lookup?: (tokenId: string) => Promise<PeerInfo>;
   /** 对方发请求那一刻钉住的 peer 名与指纹（pending.fileOwner，bridge/api-files.ts peerFileOwner）；没有就只认原 token */
   owner?: FileOwner;
-  /** 这条回复认领到的 API 回执（pending）：上面两项没单独给就取它的；被 blockReplyFiles 标过的不外发附件 */
+  /** 这条回复认领到的 API 回执（pending）：上面两项没单独给就取它的 */
   receipt?: { acceptsFiles?: boolean; fileOwner?: FileOwner };
+  /** 这条回复记到的请求 thread（在等的认领，或空回合结算后 reply_to 晚到认领）：被 blockReplyFiles 标过的不外发附件 */
+  threadId?: string;
 }
 
 /**
  * 经调度助理转交的 peer 请求（DPR-1，local-api/project-pm-delivery.ts）：调度助理只回文字，附件一律不登记、不外发。
- * 按回执对象记（进程内，回执本身也只在内存里）；转交没送到、回执退回原收件人时撤掉
+ * 按请求 thread 记，不按回执对象：空回合 Stop 结算后回执已从队列拿走，对方还在轮询时 reply_to 晚到认领只剩 threadId
+ * （lib/pending-reply-scope.ts claimApiReply），按对象记那条路就漏了（tests/peer-inbox-late-reply.test.ts）。
+ * 进程内，和 apiThreadResults 一样随 bridge 重启清空（重启后晚到认领也找不到那条结算记录，peer 回复直接报错不投）；
+ * 记满 BLOCK_KEEP_MS 的顺手清掉（比结算记录留得久）。转交没送到、回执退回原收件人时撤掉
  */
-const filesBlocked = new WeakSet<object>();
-export function blockReplyFiles(receipt: object, blocked = true): void {
-  if (blocked) filesBlocked.add(receipt);
-  else filesBlocked.delete(receipt);
+const blockedThreads = new Map<string, number>();
+const BLOCK_KEEP_MS = 24 * 3600_000;
+export function blockReplyFiles(threadId: string, blocked = true, now = Date.now()): void {
+  for (const [t, at] of blockedThreads) if (now - at > BLOCK_KEEP_MS) blockedThreads.delete(t);
+  if (blocked) blockedThreads.set(threadId, now);
+  else blockedThreads.delete(threadId);
 }
 
 export interface Staged {
@@ -69,7 +76,7 @@ const defaultLookup = async (tokenId: string): Promise<PeerInfo> => findByTokenI
 
 export async function stageApiReplyFiles(paths: string[], o: StageOpts): Promise<Staged> {
   const out: Staged = { files: [], sent: [] };
-  if (o.receipt && filesBlocked.has(o.receipt) && paths.length) return { ...out, warning: "附件没有发出：这条请求经调度助理转交，回复只外发文字，文字照常送达" };
+  if (o.threadId && blockedThreads.has(o.threadId) && paths.length) return { ...out, warning: "附件没有发出：这条请求经调度助理转交，回复只外发文字，文字照常送达" };
   const failed: string[] = [];
   const who = paths.length ? await (o.lookup ?? defaultLookup)(o.tokenId) : null;
   for (const p of paths) {
