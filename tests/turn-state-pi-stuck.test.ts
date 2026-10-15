@@ -109,3 +109,36 @@ describe("押后队列：Pi 漏报 Stop 后，扫描能把 agent 消息投出（
     expect(r.left.length).toBe(1);
   });
 });
+
+describe("验收追加 8 clipped-busy：确认不了上边框（忙碌横线的位置）就保持 busy", () => {
+  const R = "─".repeat(52);
+  const BUSY_TOP = "── ⠧ Working " + "─".repeat(39);
+  const draft = (n: number) => Array.from({ length: n }, (_, k) => `草稿第 ${k + 1} 行`);
+  const FOOT = ["~/projects/x (main) • agent-pi_x", "↑0 ↓0 R0 (auto)", "🔗 agent-pi_x 💬 pi-x-1"];
+  const screen = (...parts: string[][]) => parts.flat().join("\n");
+  const judge = (pane: string) => turnState({ runtime: "pi", status: "thinking", pane, paneAgain: pane, quietMs: PI_STUCK_THINKING_QUIET_MS }).main;
+
+  test("12 行草稿：空闲认得出；在忙时忙碌横线在尾部 15 行之外也判 busy", () => {
+    expect(judge(screen(["  上文"], [R], draft(12), [R], FOOT))).toBe("idle");
+    expect(judge(screen(["  上文"], [BUSY_TOP], draft(12), [R], FOOT))).toBe("busy");
+  });
+  test("额外页脚：6 行以内认得出，忙碌横线被页脚推远也判 busy", () => {
+    const extra = ["pi-lens  ✓ clean", "MCP: 2 servers", ...FOOT];
+    expect(extra.length).toBeLessThanOrEqual(6);
+    expect(judge(screen(["  上文"], [R], [""], [R], extra))).toBe("idle");
+    expect(judge(screen(["  上文"], [BUSY_TOP], draft(10), [R], extra))).toBe("busy");
+  });
+  test("窄窗口：短横线空闲认得出；忙碌横线被裁掉尾巴也判 busy", () => {
+    const r = "─".repeat(20);
+    expect(judge(screen(["  上文"], [r], [""], [r], ["~/p", "🔗 agent-pi_x"]))).toBe("idle");
+    expect(judge(screen(["  上文"], ["── ⠧ Wor"], [""], [r], ["~/p", "🔗 agent-pi_x"]))).toBe("busy");
+    // 正文里恰好有一条纯横线（markdown 分隔线）：不能把它当成上边框，跳过裁短的忙碌横线
+    expect(judge(screen(["  上文", r], ["── ⠧ Wor"], [""], [r], ["~/p", "🔗 agent-pi_x"]))).toBe("busy");
+  });
+  test("上边框被裁出视口（屏幕从草稿中间开始）→ busy", () => {
+    expect(judge(screen(draft(8), [R], FOOT))).toBe("busy");
+  });
+  test("草稿超过上限、认不出布局 → busy", () => {
+    expect(judge(screen(["  上文"], [R], draft(13), [R], FOOT))).toBe("busy");
+  });
+});

@@ -40,9 +40,9 @@ async function capture(win: string): Promise<string | null> {
  * 并把事件态收成 done（给了 chatId 时）——否则押后闸 / 抢占要等 permission-watcher 两分钟的对账。见 lib/turn-state.ts stuckThinkingIdle。
  */
 export async function probeTurnAt(
-  win: string | null, runtime: string | undefined, agent: string, chatId?: string, hostBusy: HostBusy = acpHostTurnBusy,
+  win: string | null, runtime: string | undefined, agent: string, chatId?: string, hostBusy: HostBusy = acpHostTurnBusy, grab: Grab = capture,
 ): Promise<TurnState> {
-  const pane = win ? await capture(win) : null;
+  const pane = win ? await grab(win) : null;
   const input = { pane, status: statusOf(agent), runtime, bgActive: hasActiveBgActivities(agent) };
   const first = turnState(input);
   if (first.main !== "busy" || input.status !== "thinking") return first;
@@ -50,16 +50,37 @@ export async function probeTurnAt(
   // tmux 上的 Pi 有自己的画面判据（扩展的 Stop 被别的扩展挡住时靠它，lib/pi-stuck-thinking.ts）；认不出画面再走宿主
   const paneIdle = cc ? paneClearlyIdle(pane) : runtime === "pi" && piPaneClearlyIdle(pane);
   if (!cc && !paneIdle) return chatId ? settleByHost(first, input, agent, chatId, hostBusy) : first;
-  if (!paneIdle) return first;
-  await Bun.sleep(RECHECK_MS);
-  const quietMs = Date.now() - Math.max(...namesOf(agent).map(lastActivityAt));
-  const again = turnState({ ...input, status: statusOf(agent), paneAgain: win ? await capture(win) : null, quietMs });
-  const stuckName = namesOf(agent).find((n) => getAgentStatus(n) === "thinking");
-  if (again.main === "idle" && chatId && stuckName) {
-    console.log(`🩹 ${agent} 事件态卡在 thinking，画面两帧都空闲、${Math.round(quietMs / 1000)}s 没活动：以画面为准，收成 done`);
-    emitEvent({ agent: stuckName, chatId, type: "agent_status", data: { status: "done", trigger: "pane_idle" } });
+  if (!paneIdle || !win) return first;
+  return settleByPane(input, win, agent, chatId, grab);
+}
+
+/** 抓屏（单测注入） */
+type Grab = (win: string) => Promise<string | null>;
+
+/**
+ * 隔 RECHECK_MS 再抓一帧、重读事件态和安静时长。整个采样期间盯着这个 agent 的非后台事件（同 settleByHost）：
+ * 抓第二帧期间开了新回合 / 进了压缩 / 刚投了消息，这次判闲作废，按当前事件态判、不收 done——
+ * 拿采样前读的状态和安静时长去判，会把刚点亮的回合当成卡住收掉。见 tests/turn-probe-pane-race.test.ts。
+ */
+async function settleByPane(input: TurnInput, win: string, agent: string, chatId: string | undefined, grab: Grab): Promise<TurnState> {
+  let moved = false;
+  const off = subscribeEvents({ agents: namesOf(agent) }, (e) => void (moved ||= !e.type.startsWith("bg_task_")));
+  try {
+    await Bun.sleep(RECHECK_MS);
+    const paneAgain = await grab(win);
+    const now = { ...input, status: statusOf(agent) };
+    if (moved) return turnState(now);
+    const quietMs = Date.now() - Math.max(...namesOf(agent).map(lastActivityAt));
+    const again = turnState({ ...now, paneAgain, quietMs });
+    const stuckName = namesOf(agent).find((n) => getAgentStatus(n) === "thinking");
+    if (again.main === "idle" && chatId && stuckName) {
+      console.log(`🩹 ${agent} 事件态卡在 thinking，画面两帧都空闲、${Math.round(quietMs / 1000)}s 没活动：以画面为准，收成 done`);
+      emitEvent({ agent: stuckName, chatId, type: "agent_status", data: { status: "done", trigger: "pane_idle" } });
+    }
+    return again;
+  } finally {
+    off();
   }
-  return again;
 }
 
 /**
