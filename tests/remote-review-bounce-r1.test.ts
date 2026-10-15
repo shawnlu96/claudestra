@@ -17,6 +17,7 @@ import { HANDOFF_POLL_MS, type HandoffPr } from "../src/lib/scheduler-merge-hand
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { workOrderFor } from "../src/lib/scheduler-work-order.js";
 import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
+import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { autoFixture, H1, H2, P2, toBuild } from "./scheduler-auto-helpers.js";
 import { pushText } from "./helpers/remote-review-fixture.js";
 
@@ -75,6 +76,7 @@ describe("RRL-2 r1", () => {
       expect(await tick()).toMatchObject({ step: "waiting" });
       expect(f.task().stage).toBe("merge");
       book(f, H2);
+      f.advance(HANDOFF_POLL_MS);
       expect(await tick()).toMatchObject({ step: "remote_bounce" });
       const moved = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.kind === "stage")!;
       expect(moved.data).toMatchObject({ to: "fix", mergeBounce: { cause: "remote_review", prHead: H2 } });
@@ -119,5 +121,58 @@ describe("RRL-2 r1", () => {
   test("remote-bounce-receipt-type: no merge-run receipt is made for a remote_review bounce", () => {
     const b: MergeBounce = { cause: "remote_review", prHead: H1, mainHead: null, checks: [], remote: { seq: 1, reportId: "PR7-r1", reportPath: "x", p1: 1 } };
     expect(() => bounceReceipt(b)).toThrow("仓库方审查退回不走合并运行回执");
+  });
+});
+
+describe("RRL-2 r2", () => {
+  const M = "a".repeat(40);
+  const ended: [string, HandoffPr, string][] = [
+    ["MERGED", { state: "MERGED", head: H1, mergeSha: M, base: "main", landing: { ok: true, mainHead: "e".repeat(40) } }, "landed"],
+    ["CLOSED", { state: "CLOSED", head: H1, mergeSha: null }, "manual"],
+  ];
+  for (const [name, read, step] of ended) {
+    test(`bounce-before-pr-state: after the handoff a ${name} PR ends the stay as before, an aligned P1 never sends it to fix`, async () => {
+      const f = autoFixture();
+      try {
+        await toMerge(f);
+        let pr: HandoffPr = { state: "OPEN", head: H1, mergeSha: null }, reads = 0;
+        const tick = hand(f, () => { reads++; return pr; });
+        expect(await tick()).toMatchObject({ step: "handoff" });
+        book(f, H1);
+        pr = read;
+        f.advance(HANDOFF_POLL_MS);
+        expect(await tick()).toMatchObject({ step });
+        expect(reads).toBe(2);
+        expect(f.task().stage).toBe(name === "MERGED" ? "live" : "merge");
+        expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "remote_bounce")).toBe(false);
+      } finally { f.close(); }
+    });
+  }
+
+  test("bounce-before-pr-state: before the handoff a PR already merged goes to PM as before, not to fix", async () => {
+    const f = autoFixture();
+    try {
+      await toMerge(f);
+      book(f, H1);
+      let reads = 0;
+      const tick = hand(f, () => { reads++; return { state: "MERGED", head: H1, mergeSha: M }; });
+      expect(await tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("不交接") });
+      expect(reads).toBe(1);
+      expect(f.task().stage).toBe("merge");
+      expect(getWorkflow(f.db, "T1")!.mode).toBe("manual");
+    } finally { f.close(); }
+  });
+
+  test("bounce-before-pr-state: an open PR whose head is not the P1's head is not bounced on that read", async () => {
+    const f = autoFixture();
+    try {
+      await toMerge(f);
+      expect(await hand(f, () => ({ state: "OPEN", head: H1, mergeSha: null }))()).toMatchObject({ step: "handoff" });
+      book(f, H1);
+      f.advance(HANDOFF_POLL_MS);
+      // the owner moved the PR in a way this machine cannot vouch for: PM, as before; never a fix on a head the PR left
+      expect(await hand(f, () => ({ state: "OPEN", head: H2, mergeSha: null }))()).toMatchObject({ step: "manual" });
+      expect(f.task().stage).toBe("merge");
+    } finally { f.close(); }
   });
 });

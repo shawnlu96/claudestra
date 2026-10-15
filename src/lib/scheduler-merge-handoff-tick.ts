@@ -271,12 +271,13 @@ async function landAfterHandoff(c: HandoffCard<unknown>, follow: HandoffFollow, 
 }
 
 /**
- * An owner P1 booked on this stay's head (before or after the handoff) comes first: back to fix (RRL-2), or PM when a lender wrote
- * the head or the owner's bounces are used up. Null = none pending, the handoff goes on as before.
+ * An owner P1 booked on this stay's head (before or after the handoff) sends the card back to fix (RRL-2), or to PM when a lender
+ * wrote the head or the owner's bounces are used up. Only on a PR just read OPEN at that very head: a merged or closed PR ends
+ * the stay through the handoff's own roads instead (no fix can be delivered to it). Null = none pending, the handoff goes on.
  */
-async function remoteBounce<O>(c: HandoffCard<O>, pr: string, head: string): Promise<O | null> {
+async function remoteBounce<O>(c: HandoffCard<O>, pr: string, head: string, read: HandoffPr): Promise<O | null> {
   const p = pendingRemoteBounce(c.db, c.task);
-  if (!p) return null;
+  if (!p || read.state !== "OPEN" || !same(read.head, p.head)) return null;
   const refused = remoteBounceRefusal(c.db, c.task, p);
   if (refused) return c.escalate(refused);
   const r = await c.deps.manager("ledger", "scheduler-merge-handoff", c.task.id, "--head", head, "--pr", pr, "--remote-bounce", String(p.remote.seq));
@@ -289,8 +290,6 @@ async function remoteBounce<O>(c: HandoffCard<O>, pr: string, head: string): Pro
 export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const { task } = c;
   if (!task.pr || !task.headSHA) return c.escalate("合并要交给仓库方，但卡上没有 PR 或 head");
-  const bounced = await remoteBounce(c, task.pr, task.headSHA);
-  if (bounced) return bounced;
   if (!c.deps.prState) return c.out("held", "没有读 PR 状态的通道，合并交接暂停");
   const follow = handoffOf(c.db, task), handed = follow?.evidence;
   // the evidence is bound to the PR it was handed with: a card whose PR was changed since then cannot borrow another PR's merge
@@ -313,6 +312,8 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
     if (pr.state !== "OPEN" || !same(pr.head, task.headSHA)) {
       return c.escalate(`不交接：PR ${pr.state}，PR head ${short(pr.head)}，台账 head ${short(task.headSHA)}，两边要一致且 PR 开着`);
     }
+    const bounced = await remoteBounce(c, task.pr, task.headSHA, pr);
+    if (bounced) return bounced;
     const r = await c.deps.manager("ledger", "scheduler-merge-handoff", task.id, "--head", task.headSHA, "--pr", task.pr);
     if (r.ok !== true) return c.out("held", `交接没记上：${String(r.error)}`);
     if (r.duplicate !== true) await tell(c, `[调度引擎] ${task.id} 审查通过，合并交给仓库方：${task.pr} @ ${short(task.headSHA)}（证据见台账 merge_handoff）`, true);
@@ -326,6 +327,8 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const stop = moved ? await followMoved(c, follow, pr) : null;
   if (stop) return stop;
   if (pr.state === "OPEN") {
+    const bounced = await remoteBounce(c, task.pr, task.headSHA, pr); // after a recorded carry: the head followed now
+    if (bounced) return bounced;
     return c.out("waiting", `${moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果"}${narrowAfterHandoff(c, pr.files)}`);
   }
   // a read that never said whether main holds the merge commit proves nothing: held, never live (a moved head still went to PM above)

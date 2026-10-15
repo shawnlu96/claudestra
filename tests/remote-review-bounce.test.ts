@@ -32,9 +32,11 @@ function book(f: F, head: string, counts: { verdict?: "pass" | "changes" | "bloc
 }
 
 function harness(f: F) {
-  let pr: HandoffPr = { state: "OPEN", head: H1, mergeSha: null };
+  let pr: HandoffPr | null = null, reads = 0; // default: the PR open at the card's head
   const hand = async () => {
-    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps, prState: async () => pr });
+    f.advance(HANDOFF_POLL_MS); // a handed-over PR is read at most once a minute: every call here is a fresh read
+    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps,
+      prState: async () => { reads++; return pr ?? { state: "OPEN", head: f.task().headSHA!, mergeSha: null }; } });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
@@ -45,7 +47,7 @@ function harness(f: F) {
     if (!r.ok || !r.order) throw new Error(JSON.stringify(r));
     return r.order;
   };
-  return { hand, handoffs, events, order, setPr: (p: HandoffPr) => { pr = p; } };
+  return { hand, handoffs, events, order, reads: () => reads, setPr: (p: HandoffPr | null) => { pr = p; } };
 }
 
 /** build → deliver `head` with the PR → the review order is out (card in review). */
@@ -113,8 +115,6 @@ describe("RRL-2 owner P1 in merge", () => {
         expect(review.text).not.toContain(INJECT);
 
         await passToMerge(f, H2);
-        h.setPr({ state: "OPEN", head: H2, mergeSha: null });
-        f.advance(HANDOFF_POLL_MS);
         expect(await h.hand()).toMatchObject({ step: "handoff" });
         expect(h.handoffs().at(-1)!.data.evidence).toMatchObject({ head: H2 });
         expect(h.handoffs()).toHaveLength(when === "after" ? 2 : 1);
