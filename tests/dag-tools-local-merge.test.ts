@@ -124,20 +124,31 @@ describe("start_node：非本地项目不变", () => {
 });
 
 describe("本地默认说明的文字（PM 要求逐字钉住）", () => {
-  test("与非本地说明只差这三行，其余逐字相同", () => {
+  test("与非本地说明只差这三行、末尾多一行检查没过的说法，其余逐字相同", () => {
     const V: PromptVars = { task: "T1", title: "标题", pm: "agent-pm", branch: "feat/t1", base: "main", worktree: "/wt/t1", spec: "/l/docs/tasks/T1.md", ledgerDir: "/l" };
-    const pr = renderExecPrompt(V).split("\n"), local = renderExecPrompt({ ...V, localMerge: true }).split("\n");
+    const pr = renderExecPrompt(V).split("\n"), all = renderExecPrompt({ ...V, localMerge: true }).split("\n");
+    // ONB-2：本地项目没有 run 链接和合并闸，没过的检查写进证据，由 PM 合并时核对（不能出现「CI 等待」「附 run 链接」）
+    const red = "- 检查没过又不归本卡的，在证据报告里列明失败的检查和复现方法，由 PM 本地合并时核对。";
+    expect(all.at(-2)).toBe(red);
+    expect(all.join("\n")).not.toMatch(/CI 等待|run 链接/);
+    const local = all.filter((l) => l !== red);
     expect(local.length).toBe(pr.length);
     const changed = local.map((l, i) => [pr[i], l]).filter(([a, b]) => a !== b);
     expect(changed.map(([, b]) => b)).toEqual([
       "- 不合并、不部署、不打 tag、不发 release；只 commit 到本卡分支，不 push、不开 PR。只在当前 worktree 改文件，不碰主树。",
       "- 「开工 / 修复」单：做完在分支 feat/t1 上 commit，**不 push、不开 PR**（本项目没有 PR 流程），再用 deliver 工具（或 `ledger deliver T1 --from build|fix --head <完整 sha>`）交付，"
         + "就结束这一轮。head 是本机分支 feat/t1 的完整 sha，deliver 按它核对。调度器会自己派审、转修复，合并由 PM 在本机完成。",
+   
+      "- 交付前必须完成的检查（本项目的必过检查）不放后台（run_in_background），前台跑完再交付。放了后台的，交付前先确认它仍在且已结束（看进程和输出里的退出行）；"
+        + "确认不了就重跑——会话一重启后台任务就被杀，完成信号不会再来。",
     ]);
     expect(changed.map(([a]) => a)).toEqual([
       "- 不合并、不部署、不打 tag、不发 release；push 分支和开 PR 可以。只在当前 worktree 改文件，不碰主树。",
       "- 「开工 / 修复」单：做完 push，**开好 PR（base main，已开过的不用重开）**，再用 deliver 工具（或 `ledger deliver T1 --from build|fix --head <完整 sha> --pr <完整 PR 链接>`）交付，"
         + "就结束这一轮。PR 链接由 deliver 自动登记，没开 PR 会被拒。调度器会自己派审、转修复、排合并。",
+   
+      "- 交付前必须完成的检查（全量 check、CI 等待、monitor）不放后台（run_in_background），前台跑完再交付。放了后台的，交付前先确认它仍在且已结束（看进程和输出里的退出行）；"
+        + "确认不了就重跑——会话一重启后台任务就被杀，完成信号不会再来。",
     ]);
   });
 });

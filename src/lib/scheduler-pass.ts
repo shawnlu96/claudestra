@@ -13,7 +13,7 @@ import { priorityStallTick } from "./ledger-priority-stall-tick.js";
 import type { Database } from "bun:sqlite";
 import { autoTickDeps } from "./scheduler-auto-deps.js";
 import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { prMergeOff, type SchedulerConfig } from "./scheduler-config.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
 import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
@@ -147,8 +147,8 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (!db) throw new Error("scheduler enabled but ledger is unavailable"); failed.push(...await priorityStallTick(db, config, { manager, active }));
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
       failed.push(...await remoteReviewStep(db, config, { manager, active })); if (cut("peerPr")) return done(); // 仓库方审查结论入账（RRL-1）
-      // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
-      const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
+      // mergeHandoff (MHO1) and localMerge (ONB-2) projects merge no PR here: they never reach the train or the slot reclaim
+      const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !prMergeOff(config.projects[p]!));
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
       openMergeQueueOwner(db, config, opts.recoveryPolicy, trains); const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
       await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
