@@ -62,8 +62,9 @@ test("[验收线 1] only structured markers in the post-verify section authorize
 test("[验收线 1] spec registration binds PM, digest and verified; repeats and manual registrations deduplicate", async () => {
   await register(); await register();
   expect(readPlans(paths.plans).plans).toHaveLength(1);
-  expect(readPlans(paths.plans).plans[0]).toMatchObject({ by: PM, source: "spec", startAt: T, dueAt: T + H, authorization: { source: "spec", pm: PM } });
+  expect(readPlans(paths.plans).plans[0]).toMatchObject({ by: PM, source: "ledger-events", startAt: T, dueAt: T + H, authorization: { source: "spec", pm: PM } });
   expect(events("observation_plan")[0].actor).toBe("scheduler");
+  expect(events("observation_plan")[0].data).toMatchObject({ source: "ledger-events", authorization: { source: "spec" } });
   expect(readPlans(paths.plans).plans[0].authorization?.digest).toHaveLength(64);
 });
 
@@ -90,6 +91,7 @@ test("[验收线 2] samples promote without a push and finish a section with onl
   expect(sent).toEqual([]);
   expect(recoveryPolicy("p", "askReminder", paths.recovery).mode).toBe("on");
   expect(events("observation_promote")).toHaveLength(1);
+  expect(events("observation_promote")[0].text).toContain("来源 ledger-events");
   expect(getEventByDedup(db, "post-verify-done:T1")).not.toBeNull();
   expect(pmTodos(db, "p", () => text, T + H)).toEqual([]);
 });
@@ -156,12 +158,13 @@ test("[验收线 6] observe registers and only records would-extend; off neither
 
 test("[验收线 1] a read-only scheduler tick registers once through the leased writer and precedes due checking", async () => {
   const { Database: Sqlite } = await import("bun:sqlite");
-  const { observationAutoRegisterTick } = await import("../src/lib/observation-auto-register-tick.js");
+  const { observationAutoRegisterTick, observationAutoRegisterTickAt } = await import("../src/lib/observation-auto-register-tick.js");
   const { observationCmds } = await import("../src/manager/ledger-observation-cmds.js");
   const { LedgerCli } = await import("../src/manager/ledger-context.js");
   const { parseLedgerArgs } = await import("../src/manager/ledger-identity.js");
   const { pmWakeTicks } = await import("../src/lib/scheduler-merge-pm-tick.js");
   expect(pmWakeTicks.indexOf(observationAutoRegisterTick)).toBe(pmWakeTicks.length - 2);
+  const tick = observationAutoRegisterTickAt(paths.plans);
   const reader = new Sqlite(join(dir, "ledger.sqlite"), { readonly: true });
   reader.run("PRAGMA query_only = ON");
   let calls = 0;
@@ -175,11 +178,11 @@ test("[验收线 1] a read-only scheduler tick registers once through the leased
         autoDispatch: () => true, autoProjects: () => ["p"], loadRegistry: async () => ({ socket: "s", agents: {} }), saveRegistry: async () => {} }, args));
     } } as unknown as SpecWaitEnv;
   try {
-    expect(await observationAutoRegisterTick(env)).toEqual([]);
-    expect(await observationAutoRegisterTick(env)).toEqual([]);
+    expect(await tick(env)).toEqual([]);
+    expect(await tick(env)).toEqual([]);
     expect(readPlans(paths.plans).plans).toHaveLength(1);
-    expect(calls).toBe(2);
-    mode("off"); await observationAutoRegisterTick(env); expect(calls).toBe(2);
+    expect(calls).toBe(1);
+    mode("off"); await tick(env); expect(calls).toBe(1);
   } finally { reader.close(); }
 });
 
@@ -211,8 +214,8 @@ test("[验收线 3] extended items are waiting rows and disappear after PM cance
   const { cancelObservation } = await import("../src/lib/observation-plan.js");
   await register(); await due();
   const todos = pmTodos(db, "p", () => text, T + H);
-  expect(todos).toMatchObject([{ kind: "observation_extended", due: false }]);
-  expect(todos.filter((t) => t.due)).toEqual([]);
+  expect(todos.filter((t) => t.kind === "observation_extended")).toMatchObject([{ kind: "observation_extended", due: false }]);
+  expect(todos.filter((t) => !t.kind)).toHaveLength(1);
   await cancelObservation(db, { actor: PM, now: T + H }, "obs-1", "manual", paths);
   expect(pmTodos(db, "p", () => text, T + H).some((t) => t.kind === "observation_extended")).toBe(false);
   await register(); expect(readPlans(paths.plans).plans).toHaveLength(1);
@@ -257,3 +260,59 @@ test("[验收线 2] formatting around a legacy command does not leave a complete
   await register(); samples(); await due();
   expect(getEventByDedup(db, "post-verify-done:T1")).not.toBeNull();
 });
+
+for (const key of ["unknownKey", "auditIdleFacts"] as const) {
+  test(`[验收线 2] a skipped ${key} keeps the card visible before and after partial promotion`, async () => {
+    text = text.replace("自动转正:askReminder", `自动转正:askReminder、${key}`);
+    if (key === "auditIdleFacts") {
+      await setRecovery(db, owner(), { project: "p", set: { key, mode: "on" }, reason: "manual" }, { path: paths.recovery });
+    }
+    await register();
+    expect(events("observation_register_skip")).toHaveLength(1);
+    expect(pmTodos(db, "p", () => text, T + H)).toMatchObject([{ task: "T1", what: expect.stringContaining("开关已交系统观察") }]);
+    samples(); await due();
+    expect(getEventByDedup(db, "post-verify-done:T1")).toBeNull();
+    expect(pmTodos(db, "p", () => text, T + H)).toMatchObject([{ task: "T1", what: expect.stringContaining("开关已自动转正") }]);
+  });
+}
+
+test("[验收线 3] closing a judgement does not close the card's unfinished post-verify work", async () => {
+  await register();
+  for (let n = 1; n <= 3; n++) await due(T + n * H);
+  const judged = pmTodos(db, "p", () => text, T + 3 * H).find((t) => t.kind === "observation_judged")!;
+  appendEvent(db, { actor: PM, now: T + 3 * H, dedupKey: `pm-todo-done:${judged.dedupKey}` },
+    { project: "p", target: "T1", kind: "note", text: "判断已处理，卡仍有未完成步骤" });
+  expect(getEventByDedup(db, "post-verify-done:T1")).toBeNull();
+  expect(pmTodos(db, "p", () => text, T + 3 * H)).toMatchObject([{ task: "T1" }]);
+  appendEvent(db, { actor: PM, now: T + 3 * H, dedupKey: "post-verify-done:T1" },
+    { project: "p", target: "T1", kind: "note", text: "上线后工作完成" });
+  expect(pmTodos(db, "p", () => text, T + 3 * H)).toEqual([]);
+});
+
+for (const status of ["active", "judged", "cancelled", "skipped", "manual"] as const) {
+  test(`[验收线 1] tick avoids the writer for ${status} targets but discovers new keys and verified generations`, async () => {
+    const { observationAutoRegisterTickAt } = await import("../src/lib/observation-auto-register-tick.js");
+    const { cancelObservation } = await import("../src/lib/observation-plan.js");
+    if (status === "skipped") text = text.replace("askReminder", "unknownKey");
+    if (status === "manual") {
+      await registerObservation(db, { actor: PM, now: T }, { project: "p", taskId: "T1", target: parseTarget("recovery:askReminder"),
+        hours: 1, source: "ledger-events", ruleVersion: "v1", reason: "manual" }, paths);
+    } else await register();
+    if (status === "judged") for (let n = 1; n <= 3; n++) await due(T + n * H);
+    if (status === "cancelled") await cancelObservation(db, { actor: PM, now: T + H }, "obs-1", "manual", paths);
+    const calls: string[] = [];
+    const env = { db, svc: { projects: ["p"] }, readSpec: spec, ledger: async (...args: string[]) => { calls.push(args.join(" ")); return { ok: true }; } } as unknown as SpecWaitEnv;
+    const tick = observationAutoRegisterTickAt(paths.plans);
+    for (let i = 0; i < 3; i++) expect(await tick(env)).toEqual([]);
+    expect(calls).toEqual([]);
+    if (status === "judged" || status === "cancelled" || status === "skipped") {
+      db.run("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'owner', 'p', 'T1', 'stage', '', ?)", [T + 4 * H, JSON.stringify({ to: "verified" })]);
+      expect(await tick(env)).toEqual([]);
+      expect(calls).toHaveLength(1);
+      calls.length = 0;
+    }
+    text += "自动转正:auditIdleFacts\n";
+    expect(await tick(env)).toEqual([]);
+    expect(calls).toEqual(["ledger scheduler-observation-register T1"]);
+  });
+}

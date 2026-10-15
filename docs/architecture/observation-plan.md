@@ -18,8 +18,9 @@
 `ledger scheduler-observation-register <卡>` 重新读取正式规格、检查本项目自动调度仍启用后写入。
 只扫描 verified 且未有 `post-verify-done:<卡>` 的卡；时长复用 observationHours，起点是最近 verified。
 同项目同目标只保留一条 active 计划，已有手动计划优先；同一卡同次 verified 的终结计划不自动重登，撤销后不与 PM 抢控制。
+tick 用只读计划快照与本次 verified 后的 skip note 预筛；已有登记或已跳过的目标不重复调用登记命令，新增目标与新的 verified 仍会核对。
 
-自动计划的 `source=spec`，`authorization` 记录 source、正式规格路径、完整内容 SHA-256 摘要及该卡 PM；
+计划的证据来源保持 `source=ledger-events`；自动计划的 `authorization.source=spec`，另记录正式规格路径、完整内容 SHA-256 摘要及该卡 PM；
 卡没指定 PM 时取项目当班 PM。每次到期及进入目标 writer 的锁后，均重核该 PM 仍有配置权、规格摘要未变、
 specRev / 最近 verified / 目标 observe 世代 / 配置版本未变。卡已离开 verified 或卡 PM 被改也不转正。
 调度身份不能使用手动 observation-register；新登记口和 pm_todo 写口均拒绝 PM、执行者以及无有效租约的调度调用。
@@ -78,9 +79,10 @@ DAG 事件的 data.dagWriteScrub 观察记录及 op=converge_dag_scrub 错误，
 自动计划的转正、判定和顺延均不推送 PM；tick 直接 --sent 记账。PM 用 `ledger pm-todo` 拉：
 判定条目包含原因和证据行；顺延条目 due=false，仅 `--all` 显示。只有观察期和自动转正行的卡，
 全部目标转正后补 `post-verify-done:<卡>` 幂等 note 并消失；含其它检查项的卡保留，摘要注明「开关已自动转正」。
-纯自动工作在登记后交系统管理，不再同时列一条让 PM 手动切开关的到期任务。
+登记中只在卡片摘要注明「开关已交系统观察」，卡片待办仍保留；部分目标跳过登记或 PM 关闭判定条目，都不等于完成上线后工作。
 
 通用写口 `recordPmTodo(db, ctx, {project,target,kind,text,dedupKey})` 写 op=pm_todo 的 note，按 dedupKey 去重。
+去重键拒绝 `post-verify-done:` 与 `pm-todo-done:` 完成命名空间，不能借新增待办伪造完成或关闭其它条目。
 `ledger scheduler-pm-todo <卡> --kind K --text T --dedup K` 仅调度身份使用，只接受这些字段，不接受任意 op / data。
 普通待办缺省列出，不受卡阶段或观察期限制；PM 用 `ledger note <卡> --text 已处理 --dedup pm-todo-done:<dedupKey>` 关闭。
 观察期旧顺延条目会在下一次顺延、判定、转正、取消或 recheck 后自动关闭，避免过期结论继续列出。
@@ -88,7 +90,7 @@ PVDEFER1 提醒算法未改。
 
 ## 事件与崩溃恢复
 
-- `observation_plan` decision：登记 / 撤销 / 标误判 / recheck；登记包含 source=spec 与授权来源。
+- `observation_plan` decision：登记 / 撤销 / 标误判 / recheck；自动登记包含证据来源 source=ledger-events 与授权来源 authorization.source=spec。
 - `observation_plan` note/action=judged：自动判定。
 - `observation_extend` note：登记号 + 顺延次数幂等。
 - `observation_dry_run` note：observe 档预演。

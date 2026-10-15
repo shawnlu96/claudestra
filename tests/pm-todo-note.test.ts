@@ -56,3 +56,15 @@ test("[验收线 7] leased pm-todo command writes only op=pm_todo and rejects ar
   for (const flag of ["--op", "--data"]) expect(await runLedger([...args("scheduler-pm-todo"), flag, "other"], d)).toMatchObject({ ok: false });
   expect(listEvents(db, { project: "p" }).filter((e) => e.kind === "note").map((e) => e.data.op)).toEqual(["pm_todo"]);
 });
+
+for (const dedupKey of ["post-verify-done:T1", "pm-todo-done:deploy:T1"]) {
+  test(`[验收线 7] both PM todo writers reject the completion namespace ${dedupKey}`, async () => {
+    for (const actor of ["scheduler", "agent-pm"]) {
+      expect(() => recordPmTodo(db, { ...ctx, actor }, { ...input, dedupKey })).toThrow("去重键");
+    }
+    const command = args("scheduler-pm-todo");
+    command[command.length - 1] = dedupKey;
+    expect(await runLedger(command, deps("scheduler", () => {}))).toMatchObject({ ok: false, code: "invalid" });
+    expect(listEvents(db, { project: "p" }).some((e) => e.dedupKey === dedupKey)).toBe(false);
+  });
+}

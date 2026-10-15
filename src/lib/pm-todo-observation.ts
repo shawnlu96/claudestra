@@ -3,7 +3,6 @@ import type { Database } from "bun:sqlite";
 import { getEventByDedup, listEvents } from "./ledger-store.js";
 import { appendEvent, type WriteCtx } from "./ledger-write.js";
 import type { ObservationPlan } from "./observation-plan.js";
-import { onlyAutomaticWork } from "./observation-auto-register-spec.js";
 import type { PmTodo } from "./pm-todo.js";
 import { recordPmTodo } from "./pm-todo-note.js";
 
@@ -23,14 +22,14 @@ export function recordObservationTodo(db: Database, ctx: WriteCtx, plan: Observa
 }
 
 /** Existing task rows retain their fields; structured notes add kind / dedupKey to the same output shape. */
-export function mergeObservationTodos(db: Database, project: string, todos: PmTodo[], now: number, readSpec: (id: string) => string | null | undefined): PmTodo[] {
+export function mergeObservationTodos(db: Database, project: string, todos: PmTodo[], now: number): PmTodo[] {
   const events = listEvents(db, { project });
   const visible: PmTodo[] = [];
   for (const todo of todos) {
     const promoted = events.some((e) => e.target === todo.task && e.ts >= todo.verifiedAt && e.data.op === "observation_promote");
-    const registered = events.some((e) => e.target === todo.task && e.ts >= todo.verifiedAt && e.data.op === "observation_plan" && e.data.source === "spec"
+    const registered = events.some((e) => e.target === todo.task && e.ts >= todo.verifiedAt && e.data.op === "observation_plan"
+      && ((e.data.authorization as { source?: string } | undefined)?.source === "spec" || e.data.source === "spec")
       && !events.some((later) => later.data.op === "observation_plan" && later.data.plan === e.data.plan && later.data.action === "cancel"));
-    if (registered && onlyAutomaticWork(readSpec(todo.task) ?? "", project)) continue;
     visible.push(todo);
     if (promoted || registered) todo.what = `${promoted ? "开关已自动转正" : "开关已交系统观察"}；${todo.what}`;
   }

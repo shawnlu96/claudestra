@@ -10,6 +10,7 @@ export function recordPmTodo(db: Database, ctx: WriteCtx, input: PmTodoNoteInput
   if (!actorMaySchedule(db, ctx.actor, input.project)) throw new LedgerError("forbidden", "PM 待办写口只给调度或项目配置人");
   const kind = textOneLine(input.kind, "待办类型", 80), text = textOneLine(input.text, "待办正文", 4000);
   const dedupKey = textOneLine(input.dedupKey, "待办去重键", 300);
+  if (/^(?:post-verify-done|pm-todo-done):/.test(dedupKey)) throw new LedgerError("invalid", "待办去重键不能占用完成记录的命名空间");
   return tx(db, () => {
     const prior = getEventByDedup(db, dedupKey);
     if (prior && (prior.project !== input.project || prior.target !== input.target || prior.kind !== "note"

@@ -31,5 +31,5 @@ export function pmTodos(db: Database, project: string, readSpec: (taskId: string
     const hours = o && o !== "bad" ? o.hours : null, dueAt = at + (hours ?? 0) * HOUR_MS;
     out.push({ task: t.id, verifiedAt: at, hours, due: now >= dueAt, dueAt, what: firstPoint(section) });
   }
-  return mergeObservationTodos(db, project, out, now, readSpec);
+  return mergeObservationTodos(db, project, out, now);
 }

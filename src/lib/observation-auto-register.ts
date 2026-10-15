@@ -5,7 +5,7 @@ import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
 import { appendEvent, type WriteCtx } from "./ledger-write.js";
 import {
   autoMode, lastVerified, observationHours, OBSERVATION_PLANS_PATH, OBSERVATION_RULE_VERSION, parseTarget, targetLabel, targetState, withPlans,
-  type ObservationPlan, type PlanPaths,
+  OBSERVATION_SOURCE, type ObservationPlan, type PlanPaths,
 } from "./observation-plan.js";
 import { automaticKeys, observationSpecPath, observationSpecReader, specDigest, type ObservationSpecReader } from "./observation-auto-register-spec.js";
 import { projectPm } from "./scheduler-autostart.js";
@@ -34,12 +34,12 @@ export async function autoRegisterObservation(db: Database, ctx: WriteCtx, taskI
         if (state.diagnostic || state.mode !== "observe") throw new LedgerError("invalid", state.diagnostic ?? `${label} 现在是 ${state.mode}`);
         if (verifiedAt === null || verifiedAt > (ctx.now ?? Date.now()) || verifiedAt < state.since) throw new LedgerError("invalid", "最近 verified 不能覆盖当前 observe 世代");
         const p: ObservationPlan = { id: `obs-${++doc.seq}`, taskId, project: task.project, target, hours, startAt: verifiedAt, dueAt: verifiedAt + hours * 3600_000,
-          ruleVersion: OBSERVATION_RULE_VERSION, source: "spec", specRev: task.specRev, verifiedAt, generation: state.generation, configRev: state.rev,
+          ruleVersion: OBSERVATION_RULE_VERSION, source: OBSERVATION_SOURCE, specRev: task.specRev, verifiedAt, generation: state.generation, configRev: state.rev,
           by: pm, at: ctx.now ?? Date.now(), reason: "规格授权自动转正", status: "active", misjudged: [],
           authorization: { source: "spec", path: observationSpecPath(taskId), digest: specDigest(spec.text), pm } };
         appendEvent(db, { ...ctx, dedupKey: `observation-plan:${p.id}:register:0` }, { project: p.project, target: taskId, kind: "decision",
           text: `观察期自动登记 ${p.id}：${label}，来源 spec，授权 PM ${pm}`,
-          data: { op: "observation_plan", action: "register", plan: p.id, target: label, source: "spec", authorization: p.authorization, hours, startAt: p.startAt, dueAt: p.dueAt } });
+          data: { op: "observation_plan", action: "register", plan: p.id, target: label, source: p.source, authorization: p.authorization, hours, startAt: p.startAt, dueAt: p.dueAt } });
         doc.plans.push(p); out.push(p); save();
       } catch (e) {
         if (!(e instanceof LedgerError) || e.code === "busy") throw e;
