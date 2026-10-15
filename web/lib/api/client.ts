@@ -9,6 +9,12 @@ import { appConfigSync, loadAppConfig, LOCAL_FP, machineBase } from "@/lib/app-c
 import { machines, type MachineRef } from "@/lib/machines";
 
 export const DEVICE_HEADER = "x-cstra-device";
+/**
+ * 新品牌的 CSRF 头（与 src/lib/floka-browser-protocol/names.ts 同值，web 不 import src；tests/floka-browser-protocol.test.ts 钉住）。
+ * 网页不知道机器的 rename.browserProtocol 档位，所以只写旧族：新旧 bridge 各档都认它。调用方自己带了新族的就不再补旧族——
+ * 两族同发在 on 档算冲突被拒。
+ */
+export const FLOKA_DEVICE_HEADER = "x-floka-device";
 export const API_PREFIX = "/api/v1";
 
 export class ApiError extends Error {
@@ -129,7 +135,8 @@ async function send(path: string, init: ApiInit, machine: MachineRef | undefined
   const method = (init.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = { ...(init.headers ?? {}) };
   if (accept) headers.Accept = accept;
-  if (method !== "GET" && method !== "HEAD") headers[DEVICE_HEADER] = "1";
+  const ownDevice = Object.keys(headers).some((k) => k.toLowerCase() === FLOKA_DEVICE_HEADER);
+  if (method !== "GET" && method !== "HEAD" && !ownDevice) headers[DEVICE_HEADER] = "1";
   let body = init.body;
   if (init.json !== undefined) {
     headers["Content-Type"] = "application/json";

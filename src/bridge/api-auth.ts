@@ -5,7 +5,9 @@
  * 限流按 principal：owner 的所有设备共用 api:owner:self 一个身份，配额相应放大。api-routes 与 web-terminal 都调这里。
  */
 import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePrincipals, type Principal } from "../lib/principals.js";
-import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
+import { csrfOkFor, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
+import { readBrowserCookie } from "../lib/floka-browser-protocol/credentials.js";
+import { browserPolicy } from "../lib/floka-browser-protocol/policy.js";
 import { apiJson } from "./api-respond.js";
 import { checkPeerSignature, peerReplayVerdict, type PeerCheck } from "./peer-signature.js";
 import { PEER_ENTRANCE_ONLY, requestContextOf, sourceAllows } from "./request-context.js";
@@ -49,7 +51,11 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     p = findByBearer(file, secret);
     if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
   } else {
-    const token = cookieValueFrom(req.headers.get("cookie"));
+    // 两族设备 cookie（rename.browserProtocol）：off / observe 只认旧族；on 档两族值不同 = 冲突，拒，不替请求挑一把
+    const policy = browserPolicy();
+    const read = readBrowserCookie(req.headers.get("cookie"), "deviceCookie", policy);
+    if (read.status === "conflict") return apiJson(401, { ok: false, error: "conflicting device cookies", code: "device_conflict" });
+    const token = read.value;
     if (token && !sourceAllows(req, "device")) return apiJson(403, { ok: false, error: "no device credentials on this entrance", code: "device_via_peer_entrance" });
     if (!token) {
       logDeviceRefusal(req, url, "missing_cookie");
@@ -60,7 +66,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
       logDeviceRefusal(req, url, "credential_invalid");
       return apiJson(401, { ok: false, error: "device credential invalid, revoked or expired", code: "device_invalid" });
     }
-    if (!csrfOk(req.method, req.headers.get(DEVICE_HEADER))) return apiJson(403, { ok: false, error: `${DEVICE_HEADER} header required on non-GET requests from a device`, code: "csrf" });
+    if (!csrfOkFor(req.method, req.headers, policy)) return apiJson(403, { ok: false, error: `${DEVICE_HEADER} header required on non-GET requests from a device`, code: "csrf" });
     p = effectivePrincipal(hit);
     void touchLater(hit.credential.id, requestContextOf(req).clientIp);
     device = { id: hit.credential.id, token };

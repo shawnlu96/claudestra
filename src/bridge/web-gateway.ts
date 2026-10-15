@@ -12,6 +12,8 @@ import { timingSafeEqual } from "crypto";
 import { isDirectLoopback, isLoopbackAddress } from "../lib/same-host.js";
 import { resolveExportedPath, staticResponse, type StaticHit } from "../lib/static-site.js";
 import { fallbackStaticRoots, pinnedStaticRoot } from "../lib/web-releases.js";
+import { allowHeadersWith } from "../lib/floka-browser-protocol/credentials.js";
+import { browserPolicy, type BrowserPolicy } from "../lib/floka-browser-protocol/policy.js";
 
 /** bridge.ts 只从这一个模块 import 静态托管相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
 export { appConfigResponse } from "./local-api/version.js";
@@ -36,6 +38,7 @@ function safeTokenEqual(a: string, b: string): boolean {
 export function corsHeadersFor(
   reqOrigin: string | null,
   allowSetting: string,
+  policy: BrowserPolicy = browserPolicy(),
 ): Record<string, string> | null {
   const allowed = (allowSetting || "").split(",").map((s) => s.trim()).filter(Boolean);
   if (!allowed.length) return null;
@@ -46,7 +49,8 @@ export function corsHeadersFor(
   const headers: Record<string, string> = {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID",
+    // 设备头两族同进同出（rename.browserProtocol on 档才可能补新族；旧族本就不在这张表里，新族也不会进来）
+    "Access-Control-Allow-Headers": allowHeadersWith("Authorization, Content-Type, Last-Event-ID", policy),
     "Access-Control-Max-Age": "86400",
   };
   if (origin !== "*") headers["Vary"] = "Origin";

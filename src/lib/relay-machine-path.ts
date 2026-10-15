@@ -2,12 +2,16 @@
  * 中继「按路径找机器」模式（docs/design-hosted-frontend.md §4、§6）：`https://<base>/m/<fp>/api/v1/…` 转给指纹 fp 那台
  * 实例，路径去掉 `/m/<fp>` 前缀。中继与实例都 import 这里的常量与纯函数（tests/relay-machine-path.test.ts）：
  *   - 路径规范化只放 /api/v1 下的请求：拒 `..`、连续 `/`、控制字符、编码过的 `/` `%` `.`——中继不是任意转发器；
- *   - 机器响应头过滤：只放一个名字的 Set-Cookie 且属性钉死（Path 就是这台机器的前缀），别的 Set-Cookie 与能影响
+ *   - 机器响应头过滤：只放设备凭据（两族）的 Set-Cookie 且属性钉死（Path 就是这台机器的前缀），别的 Set-Cookie 与能影响
  *     整个主源的头一律丢——同一主源上所有用户的机器共存，一台机器不能碰到别台的 cookie / SW / 站点数据。
  */
 import { FP_RE, type Headers } from "./relay-protocol.js";
 import { SET_COOKIE_SEP } from "./relay-stream.js";
-import { DEVICE_COOKIE } from "./devices.js";
+import { BROWSER_FAMILIES, BROWSER_NAMES } from "./floka-browser-protocol/names.js";
+
+/** 两族设备 cookie 名：清洗与钉属性不看 rename 档位，两个名字同一规则（认证认不认新名由实例按档位定） */
+const DEVICE_COOKIE_NAMES: readonly string[] = BROWSER_FAMILIES.map((f) => BROWSER_NAMES[f].deviceCookie);
+const namesOf = (n: string | readonly string[]): readonly string[] => typeof n === "string" ? [n] : n;
 
 export const MACHINE_PREFIX = "/m/";
 /** 请求头："api" = 路径模式，实例在进程内 dispatch；没有这个头 = 旧的子域名隧道，实例原样打本机 Web */
@@ -55,16 +59,17 @@ export function parseMachinePath(pathname: string): MachinePath | MachinePathErr
   return apiPathAllowed(rest) ? { fp, rest, prefix: `${MACHINE_PREFIX}${fp}` } : "path_forbidden";
 }
 
-/** 浏览器发来的头里，Cookie 只把设备凭据那一对带给机器：主源上别的 cookie 与这台机器无关 */
-export function filterMachineRequestHeaders(h: Headers, cookieName = DEVICE_COOKIE): Headers {
+/** 浏览器发来的头里，Cookie 只把设备凭据（每族第一对）带给机器：主源上别的 cookie 与这台机器无关 */
+export function filterMachineRequestHeaders(h: Headers, cookieName: string | readonly string[] = DEVICE_COOKIE_NAMES): Headers {
   const out: Headers = {};
   for (const [k, v] of Object.entries(h)) {
     if (k.toLowerCase() !== "cookie") {
       out[k] = v;
       continue;
     }
-    const pair = v.split(";").map((s) => s.trim()).find((s) => s.startsWith(`${cookieName}=`));
-    if (pair) out[k] = pair;
+    const parts = v.split(";").map((s) => s.trim());
+    const pairs = namesOf(cookieName).map((n) => parts.find((s) => s.startsWith(`${n}=`))).filter((s): s is string => !!s);
+    if (pairs.length) out[k] = pairs.join("; ");
   }
   return out;
 }
@@ -94,15 +99,16 @@ function pinnedMachineHeaders(contentType: string): Headers {
 const COOKIE_VALUE_RE = /^[A-Za-z0-9_-]{0,512}$/;
 const KEEP_COOKIE_ATTR_RE = /^(max-age|expires)=/i;
 
-/** 只放设备 cookie，且不管机器怎么写，属性一律改成这一组；值为空 = 删除 cookie，照放 */
-export function pinDeviceCookie(cookie: string, prefix: string, cookieName = DEVICE_COOKIE): string | null {
+/** 只放设备 cookie（两族），且不管机器怎么写，属性一律改成这一组；值为空 = 删除 cookie，照放 */
+export function pinDeviceCookie(cookie: string, prefix: string, cookieName: string | readonly string[] = DEVICE_COOKIE_NAMES): string | null {
   const [nameValue = "", ...attrs] = cookie.split(";").map((s) => s.trim());
   const eq = nameValue.indexOf("=");
-  if (eq <= 0 || nameValue.slice(0, eq).trim() !== cookieName) return null;
+  const name = eq > 0 ? nameValue.slice(0, eq).trim() : "";
+  if (!namesOf(cookieName).includes(name)) return null;
   const value = nameValue.slice(eq + 1).trim();
   if (!COOKIE_VALUE_RE.test(value)) return null;
   const keep = attrs.filter((a) => KEEP_COOKIE_ATTR_RE.test(a));
-  return [`${cookieName}=${value}`, `Path=${prefix}/`, ...keep, "HttpOnly", "Secure", "SameSite=Strict"].join("; ");
+  return [`${name}=${value}`, `Path=${prefix}/`, ...keep, "HttpOnly", "Secure", "SameSite=Strict"].join("; ");
 }
 
 /** 机器给的根相对跳转补上前缀；绝对地址与协议相对地址（//）不动 */
@@ -111,7 +117,7 @@ export function prefixLocation(location: string, prefix: string): string {
 }
 
 /** 机器响应头 → 可以交给浏览器的头（Set-Cookie 多值以 SET_COOKIE_SEP 连接，见 relay-stream.ts） */
-export function filterMachineResponseHeaders(h: Headers, prefix: string, cookieName = DEVICE_COOKIE): Headers {
+export function filterMachineResponseHeaders(h: Headers, prefix: string, cookieName: string | readonly string[] = DEVICE_COOKIE_NAMES): Headers {
   const out: Headers = {};
   for (const [k, v] of Object.entries(h)) {
     const key = k.toLowerCase();

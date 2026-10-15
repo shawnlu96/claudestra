@@ -21,8 +21,13 @@ export default function manifest(): MetadataRoute.Manifest {
     start_url: "/chat",
     scope: "/",
     display: "standalone",
-    // 邀请落地页的「在我的 Claudestra 中打开」（web+claudestra:），装成桌面 PWA 时也由本应用接
-    protocol_handlers: [{ protocol: "web+claudestra", url: "/join?i=%s" }],
+    // 邀请落地页的「在我的 Claudestra 中打开」，装成桌面 PWA 时也由本应用接。旧 scheme 一直保留（早先发出的链接照开）；
+    // 新 scheme web+floka: 先能接，落地页要等 rename.browserProtocol write=on 才发它（src/lib/floka-browser-protocol/invite.ts）。
+    // 两个值与 src/lib/floka-browser-protocol/names.ts 同值（web 不 import src），tests/floka-browser-protocol.test.ts 钉住
+    protocol_handlers: [
+      { protocol: "web+claudestra", url: "/join?i=%s" },
+      { protocol: "web+floka", url: "/join?i=%s" },
+    ],
     orientation: "any",
     background_color: "#171819",
     theme_color: "#171819",
