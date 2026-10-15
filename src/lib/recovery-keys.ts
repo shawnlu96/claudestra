@@ -26,6 +26,7 @@ export const RECOVERY_KEYS = [
   "ciManualResume",
   "ciProofReuse",
   "ciQueueFull",
+  "ciSelectedGate",
   "ciTrainFailureClass",
   "ciWebBuild",
   "convIgnoredBuildArtifacts",
