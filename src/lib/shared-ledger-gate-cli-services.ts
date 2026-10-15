@@ -1,4 +1,6 @@
 export const SCHEDULER_SERVICE_COMMANDS = new Set([
+  "scheduler-priority-stall",
+  "scheduler-priority-now",
   "scheduler-manual-resume", "scheduler-review-hold", "scheduler-review-downgrade",
   "scheduler-convergence", "scheduler-arbiter-delivery",
   "scheduler-plan", "scheduler-plan-rejected", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step", "scheduler-merge-handoff",

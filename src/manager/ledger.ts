@@ -1,3 +1,4 @@
+import { PRIORITY_STALL_CMDS } from "./ledger-priority-stall-cmds.js";
 import { PRIORITY_CMDS } from "./ledger-priority-cmds.js";
 import { PM_SWITCH_CMDS } from "./pm-switch.js";
 import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledger-resource-scope-cmds.js";
@@ -114,6 +115,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS, ...UI_PAGE_BATCH_CMDS,
   ...VERDICT_CMDS, ...MEMORY_CMDS, ...MEMORY_IMPORT_CMDS, ...MEMORY_METRICS_CMDS,
+  ...PRIORITY_STALL_CMDS,
   ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
   ...RECOVERY_CMDS, ...MANUAL_MERGE_CMDS, ...REVIEW_EXPORT_CMDS,
   ...MAIN_CARRY_CMDS, // MAINP2 正式沿用审查（ledger-main-carry-cmds.ts）

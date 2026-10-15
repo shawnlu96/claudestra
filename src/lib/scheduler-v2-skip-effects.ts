@@ -51,6 +51,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** `ledger <sub>` calls through the pass manager, held by schedulerV2SkipManager */
   manager: {
+    "ledger-priority-stall-tick.ts": "ledger=1 notice=2",
+    "scheduler-priority-now-tick.ts": "ledger=1",
     "effect-count-refresh.ts": "ledger=1", // EFFAUTO1: `ledger scheduler-recovery-observe` for effCountRefresh notes, through the pass manager
     "fix-strategy-tick.ts": "ledger=10",
     "ledger-pool-refusal-tick.ts": "ledger=1",
@@ -180,6 +182,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** SQL of the ledger writer layer: it runs inside a `ledger <sub>` transaction or the gated step that drives it */
   writer: {
+    "ledger-priority-stall-store.ts": "sql=1 stmt=1",
     "agent-lifecycle-schema.ts": "stmt=1",
     "agent-lifecycle-store.ts": "sql=6 stmt=6",
     // N8B8 dag-write-scrub: read-only `git cat-file --batch-check` (which heads are real commits; argv from peer-pr-github.ts commitQuery), run by the DAG write points below inside their transaction
