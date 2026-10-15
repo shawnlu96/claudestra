@@ -2,6 +2,7 @@ import { readSchedulerConfig } from "./scheduler-config.js";
 import { localFamilyRefusal } from "./scheduler-local-families-placement.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import { CLAIM_LEASE_MS } from "./scheduler-dispatch.js";
+import { halfBuiltBackoff, healHalfBuilt } from "./fix-swap-halfbuilt.js";
 /** Narrow lifecycle effects for convergence workers; every external effect is leased and journaled before proceeding. */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -202,6 +203,8 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
   const started = getEventByDedup(db, `scheduler:${intent.id}:creating`);
   let row = deps.registry().find((r) => r.name === name);
   if (!started && row) throw new LedgerError("conflict", "收敛会话名已被其他会话占用");
+  const backoff = !started && role === "author" && intent.action === "fix_swap" ? halfBuiltBackoff(db, task.id, ctx.now ?? Date.now()) : null;
+  if (backoff) return { wait: backoff, tree: true }; // SWAPFIX1 2: the re-planned swap waits retryCleanCreate's backoff
   if (!started) {
     const dir = role === "author" ? await authorTree(db, ctx, intent, task, source, deps, gate)
       : await deps.open(source, join(deps.worktreeRoot ?? statePath("worktrees"), `arb-${task.id}-${intent.eventSeq}`), intent.head);
@@ -228,6 +231,8 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
   if (!row?.sessionId) {
     const begun = getEventByDedup(db, `scheduler:${intent.id}:creating`);
     if (begun && (ctx.now ?? Date.now()) - begun.ts >= CLAIM_LEASE_MS) {
+      const healed = await healHalfBuilt(db, ctx, intent, task, name, role, deps); // SWAPFIX1 2: a half-built swap author is cleared and re-planned
+      if (healed) return { wait: healed, tree: true };
       settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "unknown", receipt: "新收敛会话创建已认领但未确认 session id，不重复创建" });
     }
     return { wait: "新会话创建已记，等待 registry session id；不重复创建" };
