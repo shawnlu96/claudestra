@@ -6,6 +6,7 @@
  * - 两族各一条，互不顶替。
  * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记，只认最近一个线世代（周窗口 resetAt + 两条线 + 模式，带观察世代）里
  * 关掉过的状态 + 收窄档：同一条线不再弹；提醒→停接、改线 / 改模式（改回旧值也算新一代）、新的一周就再出现。tests/web-quota-warning-*.test.ts。
+ * Claude 的周重置时刻每次观测都带几百毫秒抖动（同一周 …399963 / …400347），所以世代比较对 resetAt 用 RESET_JITTER_MS 容差，不按字符串全等。
  */
 import { LEND_WORDS } from "@/lib/owner-words";
 import type { FamilyLine, QuotaFamily, QuotaLinesView } from "./lend-quota-model";
@@ -68,6 +69,18 @@ export interface DismissRec { gen: string; since: number; states: string[]; epoc
 export type DismissMap = Record<string, DismissRec>;
 
 const scopeOf = (instance: string, family: QuotaFamily) => `${instance}|${family}`;
+/** 同一周的 resetAt 观测抖动上限；跨周至少差一天，远大于它。按分钟取整不行：抖动正好跨分钟边界时会被打成两代 */
+const RESET_JITTER_MS = 5 * 60_000;
+
+/** 世代 = resetAt|warn/stop|模式：线和模式全等，resetAt 两边都是数字时差在 RESET_JITTER_MS 内算同一周 */
+export function sameGen(a: string, b: string): boolean {
+  if (a === b) return true;
+  const [ra, ...ta] = a.split("|"), [rb, ...tb] = b.split("|");
+  if (ta.join("|") !== tb.join("|")) return false;
+  const x = Number(ra), y = Number(rb);
+  return ra !== "" && rb !== "" && Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) <= RESET_JITTER_MS;
+}
+
 /** key = resetAt|状态:收窄档|warn/stop|模式 → [世代, 状态] */
 const splitKey = (key: string): [string, string] => {
   const [reset, state, line, mode] = key.split("|");
@@ -96,7 +109,7 @@ export function parseDismissed(raw: string | null): DismissMap {
       const last = keys.at(-1);
       if (last) {
         const [gen] = splitKey(last);
-        const states = [...new Set(keys.map(splitKey).filter(([g]) => g === gen).map(([, state]) => state))].slice(-MAX_STATES);
+        const states = [...new Set(keys.map(splitKey).filter(([g]) => sameGen(g, gen)).map(([, state]) => state))].slice(-MAX_STATES);
         out[scope] = { gen, since: 0, states };
       }
     }
@@ -110,14 +123,14 @@ export function isDismissed(m: DismissMap, instance: string, it: WarnItem): bool
   const r = m[scopeOf(instance, it.family)];
   if (!r) return false;
   const [gen, state] = splitKey(it.key);
-  return r.gen === gen && r.states.includes(state);
+  return sameGen(r.gen, gen) && r.states.includes(state);
 }
 
 const capScopes = (entries: [string, DismissRec][]): DismissMap => Object.fromEntries(entries.slice(-MAX_SCOPES));
 
 /** 同配置的关闭取并集，但早于最近一次配置失效的关闭不复活；不同配置保留最新观察/关闭。 */
 function mergeRec(x: DismissRec, y: DismissRec): DismissRec {
-  if (x.gen === y.gen) {
+  if (sameGen(x.gen, y.gen)) {
     const epoch = Math.max(x.epoch ?? 0, y.epoch ?? 0);
     const states = [x, y].flatMap((r) => r.since >= epoch ? r.states : []);
     return { gen: x.gen, since: Math.max(x.since, y.since), ...(epoch ? { epoch } : {}),
@@ -137,7 +150,7 @@ export function observeDismissed(m: DismissMap, instance: string, view: QuotaLin
     // unknown 不提供窗口时不凭空制造新周；阈值/模式仍按真实设置推进失效。
     const resetAt = f.resetAt ?? (cur ? cur.gen.split("|")[0] : "noreset");
     const gen = [resetAt, `${f.warnPct}/${f.stopPct}`, view.config.mode].join("|");
-    if (!cur || cur.gen === gen) continue;
+    if (!cur || sameGen(cur.gen, gen)) continue; // 保留记下时的 resetAt：抖动围着真值转，比原值不会越比越远
     const epoch = Math.max(at, (cur.epoch ?? cur.since) + 1);
     out = capScopes([...Object.entries(out).filter(([k]) => k !== scope), [scope, { gen, since: epoch, epoch, states: [] }]]);
   }
@@ -160,7 +173,7 @@ export function withDismissed(m: DismissMap, instance: string, it: WarnItem, at:
   const scope = scopeOf(instance, it.family);
   const [gen, state] = splitKey(it.key);
   const cur = m[scope];
-  const rec: DismissRec = cur && cur.gen === gen ? { ...cur, since: Math.max(at, cur.since), states: [...cur.states.filter((k) => k !== state), state].slice(-MAX_STATES) }
+  const rec: DismissRec = cur && sameGen(cur.gen, gen) ? { ...cur, since: Math.max(at, cur.since), states: [...cur.states.filter((k) => k !== state), state].slice(-MAX_STATES) }
     : { gen, since: Math.max(at, cur ? cur.since + 1 : at), ...(cur ? { epoch: Math.max(at, (cur.epoch ?? cur.since) + 1) } : {}), states: [state] };
   const out = new Map<string, DismissRec>(Object.entries(m));
   out.delete(scope);
