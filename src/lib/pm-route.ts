@@ -12,6 +12,8 @@ function protectedBody(m: DigestInput): boolean {
 }
 
 export function classifyPmRoute(m: DigestInput): PmRoutePlan {
+  // peer 标 info（只有已认证 peer 的 info 会带上 level）：与本机 agent 的 info 同走摘要；其余 API 消息照旧受保护（agents-PEERLEVEL1）
+  if (m.fromKind === "api" && m.level === "info") return verdict("digest", "level.info", "peer 标为常规：进摘要");
   if (m.fromKind === "user" || m.fromKind === "api") return verdict("owner", "protect.owner", "人类或 peer 对话", true);
   if (m.triggerKind === "user_discord") return verdict("owner", "protect.human", "人类消息触发", true);
   if (m.triggerKind === "peer_http") return verdict("judge", "protect.peer", "peer 回程沿用投递", true);
