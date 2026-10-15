@@ -31,7 +31,7 @@ tick（`cardsTick`）在开关非 off 时也扫 manual peer 卡，但只做一�
 
 ## 3. 只审增量
 
-登记事件（note，peer 看不到；去重键 卡 + 轮次 + 新 head）`op: peer_pr_head_review`：`{cause: "author_push", oldHead, newHead, priorReviewSeq, round, specRev, scope, why, flow}`。`review-converge-order.ts convergeOrderLines` 遇到本轮的登记，工单范围写成 `git diff old..new`（作者新改动）+ 上轮 P1 / P2 定向复验，不依赖 SCOPE_ROUND，也不套合 main 重审。新 head 不是后继（force-push）、规格变了、增量对象缺失：`scope: full`，工单写明原因。
+登记事件（note，peer 看不到；去重键 卡 + 轮次 + 新 head）`op: peer_pr_head_review`：`{cause: "author_push", oldHead, newHead, priorReviewSeq, round, specRev, scope, why, flow}`。`review-converge-order.ts convergeOrderLines` 经纯模块 `peer-pr-head-review-scope.ts headReviewLines`（不引台账写口，channel-server 经 order-tools 加载它也不越过 SPECG1 预检）遇到本轮的登记，工单范围写成 `git diff old..new`（作者新改动）+ 上轮 P1 / P2 定向复验，不依赖 SCOPE_ROUND，也不套合 main 重审。新 head 不是后继（force-push）、规格变了、增量对象缺失：`scope: full`，工单写明原因。
 
 ## 4. 交回自动（`peer-pr-head-review-resume.ts peerPrHeadResume`）
 

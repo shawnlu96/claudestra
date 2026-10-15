@@ -21,8 +21,9 @@ import { manualEntry } from "../src/lib/manual-reason.ts";
 import type { OpenPr, PeerPrGithub } from "../src/lib/peer-pr-github.ts";
 import { headLineage } from "../src/lib/peer-pr-head-review-git.ts";
 import {
-  configureHeadReviewPolicy, HEAD_REVIEW_OP, headReviewMode, registrationScope, roundVerdicts, unresolvedP1Rounds, type Lineage,
+  configureHeadReviewPolicy, headReviewMode, registrationScope, roundVerdicts, unresolvedP1Rounds, type Lineage,
 } from "../src/lib/peer-pr-head-review.ts";
+import { HEAD_REVIEW_OP } from "../src/lib/peer-pr-head-review-scope.ts";
 import type { PeerPrDeps } from "../src/lib/peer-pr-notice.ts";
 import { peerPrTick } from "../src/lib/peer-pr-tick.ts";
 import { statePath } from "../src/lib/paths.ts";

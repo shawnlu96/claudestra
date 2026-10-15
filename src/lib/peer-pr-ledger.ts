@@ -16,8 +16,9 @@ import { peerOfLogin, type PeerPrConfig } from "./peer-pr-config.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import { intentOf, listRequests, revokeOf, REVOKE_OP } from "./manual-merge-queue-facts.js";
 import {
-  flowBlock, HEAD_REVIEW_KEY, headReviewMode, headSample, type Lineage, passingFacts, registrationScope, type Registration, reviewSpecRev, writeRegistration,
+  flowBlock, HEAD_REVIEW_KEY, headReviewMode, headSample, type Lineage, passingFacts, registrationScope, reviewSpecRev, writeRegistration,
 } from "./peer-pr-head-review.js";
+import type { Registration } from "./peer-pr-head-review-scope.js";
 import { getMergeRun } from "./scheduler-merge.js";
 import { cancelMergeRun } from "./scheduler-merge-conflict.js";
 import { currentReviewFacts } from "./scheduler-review.js";

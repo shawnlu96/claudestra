@@ -12,7 +12,8 @@
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { ManualRecoveryMechanism } from "./manual-recovery-release.js";
 import type { ManualReasonRecord } from "./manual-reason.js";
-import { HEAD_REVIEW_OP, REQUEUE_KEY, reviewSpecRev } from "./peer-pr-head-review.js";
+import { REQUEUE_KEY, reviewSpecRev } from "./peer-pr-head-review.js";
+import { HEAD_REVIEW_OP } from "./peer-pr-head-review-scope.js";
 
 export const PEER_PR_HEAD_RESUME = "peer-pr-head-resume";
 const SHA = /^[0-9a-f]{40}$/;

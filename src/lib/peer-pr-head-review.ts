@@ -5,7 +5,7 @@
  * - unresolvedP1Rounds: how many rounds in a row, ending at the latest verdict of this spec, still left a P1. Only that run of
  *   rounds spends maxRounds; a pass that was re-reviewed only because of a new head costs nothing. Rounds still only go up.
  * - the registration event (op peer_pr_head_review, cause author_push) names oldHead / newHead / priorReviewSeq and whether the
- *   next review may look at the author's increment only; headReviewLines turns it into the review order's scope line.
+ *   next review may look at the author's increment only; peer-pr-head-review-scope.ts turns it into the review order's scope line.
  * - flowBlock: hold, card pause, frozen queue, unanswered ask, safety hold stop every registration of this flow (peer cards have no feature).
  * Switches: peerPrHeadReview (items 1–3, new key, default on) and peerPrRequeue (peerPrHeadResume's key: hand a registered manual card
  * back to auto; permission class, default observe, read by the registry through manual-recovery-policy.ts).
@@ -20,10 +20,10 @@ import { standingHold } from "./pm-handback.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { downgradedIds, type ReviewFacts } from "./scheduler-review.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
+import { HEAD_REVIEW_OP, type Registration } from "./peer-pr-head-review-scope.js";
 
 export const HEAD_REVIEW_KEY = "peerPrHeadReview";
 export const REQUEUE_KEY = "peerPrRequeue";
-export const HEAD_REVIEW_OP = "peer_pr_head_review";
 
 let policyPort: RecoveryPolicyPort = recoveryPolicy;
 /** Tests inject a fake policy; null restores the file-backed one. */
@@ -84,12 +84,6 @@ export const passingFacts = (f: Pick<ReviewFacts, "verdict" | "findings">): bool
 /** How the new head relates to the reviewed one (peer-pr-head-review-git.ts reads it from the repository). */
 export type Lineage = "successor" | "force" | "main_merge" | "missing";
 
-export interface Registration {
-  cause: "author_push"; oldHead: string; newHead: string; priorReviewSeq: number | null; round: number; specRev: number;
-  scope: "incremental" | "full"; why: string | null;
-  /** The card's workflow when registered: only a manual registration makes a round this flow's own on a manual card. */
-  flow: "auto" | "manual";
-}
 
 /** Only the author's increment may be reviewed when the new head descends from the reviewed one under the same spec. */
 export function registrationScope(lineage: Lineage, priorSpecRev: number | null, specRev: number): Pick<Registration, "scope" | "why"> {
@@ -116,25 +110,6 @@ export function writeRegistration(db: Database, ctx: WriteCtx, task: Pick<Ledger
   // a note (peers never see notes); dedup per card + round + head, so a replayed registration is the same event
   return appendEvent(db, { actor: ctx.actor, now: ctx.now, dedupKey: `peerpr:head:${task.id}:${r.round}:${r.newHead}` }, { project: task.project, target: task.id,
     kind: "note", text, data: { op: HEAD_REVIEW_OP, ...r, ...extra } }).event;
-}
-
-/** The registration that put `head` into `round`, if this flow put it there. */
-function registrationOf(events: readonly LedgerEvent[], round: number, head: string | null, flow?: Registration["flow"]): (Registration & { seq: number }) | null {
-  const e = events.findLast((x) => x.kind === "note" && x.data.op === HEAD_REVIEW_OP && x.data.round === round && x.data.newHead === head &&
-    (flow === undefined || x.data.flow === flow));
-  return e ? { ...(e.data as unknown as Registration), seq: e.seq } : null;
-}
-
-/** Item 3: the scope line of a review order for a round this flow registered; null for any other round (the order is as before). */
-export function headReviewLines(round: number, events: readonly LedgerEvent[], head: string): string[] | null {
-  const r = registrationOf(events, round, head);
-  if (!r) return null;
-  const prior = r.priorReviewSeq === null ? "上轮审查" : `上轮审查 #${r.priorReviewSeq}`;
-  if (r.scope === "incremental") {
-    return [`第 ${round} 轮是作者在审查后又推了提交：只审作者新改动 git diff ${r.oldHead.slice(0, 12)}..${r.newHead.slice(0, 12)}（旧 head → 新 head）` +
-      `+ ${prior} 的 P1 / P2 定向复验；不重审 PR 其余部分，也不按合 main 重审。`];
-  }
-  return [`第 ${round} 轮是作者推了新提交，但不能只审增量（${r.why}）：全量复审 head ${r.newHead.slice(0, 12)} 相对 main 的改动，并复验 ${prior} 的 P1 / P2。`];
 }
 
 /** Item 7: what stops a registration of this flow (auto and manual); null = nothing does. The hand-back re-checks the same in the registry's base. */
