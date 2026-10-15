@@ -1,5 +1,6 @@
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { claimLaunchdJob, launchdJobEnv, removeLaunchdJob, submitLaunchdJob } from "../../launchd-oneshot.js";
 import type { runBounded } from "../../run-bounded.js";
 import { realRun } from "./host.js";
@@ -21,7 +22,7 @@ export async function submitPartJob(root: string, id: RunnerRequestId, command =
   const label = maintenanceJobLabel(id), dir = jobDir(root, id);
   if (!claimLaunchdJob(dir)) throw new Error("Maintenance job already submitted");
   await submitLaunchdJob({ label, dir, cwd: root,
-    argv: [process.execPath, "--no-env-file", "--config=/dev/null", new URL("./runner.ts", import.meta.url).pathname, id],
+    argv: [process.execPath, "--no-env-file", "--config=/dev/null", fileURLToPath(new URL("./runner.ts", import.meta.url)), id],
     env: launchdJobEnv(process.env, ["FLOKA_STATE_DIR", "FLOKA_RUNTIME_DIR", "FLOKA_SANDBOX", "FLOKA_SANDBOX_ROOT",
       "FLOKA_SANDBOX_DENY_DIRS", "FLOKA_SANDBOX_DENY_PORTS"]) }, domain(), command);
 }

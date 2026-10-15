@@ -8,7 +8,7 @@ import type { InstallCliResult } from "../../cli-install.js";
 import { readStored, ServiceStore } from "./store.js";
 import { join } from "node:path";
 
-/** Legacy installs retain their old behavior in off. Other modes never fall through to legacy reload. */
+/** Off retains legacy rendering. Other modes and recovery state must not fall through to legacy reload. */
 export function renameInstallGate(configPath = CONFIG_PATH, root = maintenanceRoot()): InstallCliResult | null {
   const raw = readJsonStateSync(configPath);
   const rename = object(object(raw.status === "ok" ? raw.data : {}).rename);
@@ -20,12 +20,16 @@ export function renameInstallGate(configPath = CONFIG_PATH, root = maintenanceRo
   return {
     cliWrapper: "", daemons: [], pm2Stopped: [], removedOldAutostartWrapper: false, migratedHookCommand: false,
     web: { staticDir: "", built: false },
-    errors: observe ? [] : [services === "on" && cli !== "on" ? "先把 cli 切到 on" : "服务改名须通过 state-maintenance services 的单次批准执行"],
+    errors: observe ? [] : [services === "on" && cli !== "on" ? "先把 cli 切到 on"
+      : "install-cli/update 未执行安装或重载；服务改名须通过 state-maintenance services 的单次批准执行"],
     warnings: observe ? [`rename.services=${services}, rename.cli=${cli}: observe 只报告，不安装、不加载`] : [],
   };
 }
 
-/** Serialize legacy installers with STATE2 and service transactions; recheck modes after acquiring ownership. */
+/**
+ * Even off prepares the maintenance root and takes STATE2's lock so an installer cannot race a switch.
+ * Recheck modes after acquiring ownership; a lock conflict leaves installation untouched and requires a retry.
+ */
 export async function withRenameInstallGate(install: () => Promise<InstallCliResult>): Promise<InstallCliResult> {
   const root = maintenanceRoot(), before = renameInstallGate(CONFIG_PATH, root);
   if (before) return before;
@@ -33,6 +37,7 @@ export async function withRenameInstallGate(install: () => Promise<InstallCliRes
   prepareMaintenanceRoot(root, [STATE_DIR, RUNTIME_DIR]);
   const lock = takeExecutorLock(root);
   if ("error" in lock) return { cliWrapper: "", daemons: [], pm2Stopped: [], removedOldAutostartWrapper: false,
-    migratedHookCommand: false, web: { staticDir: "", built: false }, errors: [lock.error], warnings: [] };
+    migratedHookCommand: false, web: { staticDir: "", built: false },
+    errors: [`${lock.error}；本次未执行安装或重载，请稍后重试 install-cli/update`], warnings: [] };
   try { return renameInstallGate(CONFIG_PATH, root) ?? await install(); } finally { lock.release(); }
 }

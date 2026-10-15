@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync, cpSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createServicePlan } from "../src/lib/floka-services/plan/index.ts";
 import { serviceMaintenance, servicesBinding } from "../src/lib/floka-services/install/maintenance.ts";
 import { serviceWrapperScript } from "../src/lib/floka-services/install/cli.ts";
@@ -22,6 +23,8 @@ import type { runBounded } from "../src/lib/run-bounded.ts";
 import { refusePartClick } from "../src/lib/floka-services/install/owner.ts";
 import { readPrincipalsStrictSync } from "../src/lib/principals.ts";
 import { cliInstallPaths } from "../src/lib/floka-services/install/production.ts";
+import { maintenanceRoot, prepareMaintenanceRoot } from "../src/lib/state-maintenance/paths.ts";
+import { takeExecutorLock } from "../src/lib/state-maintenance/run-store.ts";
 import type { Controller, Journal, Lease, Service, ServicePlan, Side, State } from "../src/lib/floka-services/plan/types.ts";
 
 const homes: string[] = [];
@@ -95,6 +98,42 @@ test("[验收线 1] four labels and CLI share paths with spaces", () => {
   expect(Bun.spawnSync(["bash", "-n"], { stdin: Buffer.from(script) }).exitCode).toBe(0);
   expect(script).toContain("ai.floka.bridge");
   expect(script).not.toContain("/bin/launchctl bootstrap");
+});
+
+test.each(["job", "wrapper"])("[验收线 1] relocated %s uses real paths with spaces, Unicode and URL delimiters", async kind => {
+  const f = fixture(), repo = join(f.input.home, "源码 repo % #");
+  const lib = join(repo, "src/lib"), install = join(lib, "floka-services/install");
+  cpSync(join(import.meta.dir, "../src/lib"), lib, { recursive: true });
+  symlinkSync(join(import.meta.dir, "../node_modules"), join(repo, "node_modules"));
+  const load = (name: string) => import(pathToFileURL(join(install, `${name}.ts`)).href);
+  if (kind === "job") {
+    const { submitPartJob: submit } = await load("job");
+    const id = "b".repeat(32), runner = join(install, "runner.ts");
+    await submit(f.root, id, async (cmd: string[]) => {
+      const plist = readFileSync(cmd[3]!, "utf8");
+      expect(existsSync(runner)).toBe(true);
+      expect(plist).toContain(`<string>${runner}</string>`);
+      expect(plist).not.toContain("%20");
+      return { code: 0, stdout: "", stderr: "", timedOut: false };
+    });
+    return;
+  }
+  const { serviceWrapperScript: wrapper } = await load("cli");
+  const { WRAPPER_POLICY_PATH: policy } = await load("wrapper-policy");
+  expect(policy).toBe(join(install, "wrapper-policy.ts"));
+  expect(existsSync(policy)).toBe(true);
+  writeFileSync(join(f.input.home, "config.json"), JSON.stringify({ rename: { services: "off", cli: "on" } }));
+  const fake = join(f.input.home, "fake-launchctl"), log = join(f.input.home, "commands");
+  writeFileSync(fake, '#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n[[ "$1" == list && "$2" == com.claudestra.* ]]\n');
+  chmodSync(fake, 0o755);
+  const script = join(f.input.home, "relocated-cli");
+  writeFileSync(script, wrapper(repo, f.input.bunPath, f.plan.services.map(s => s.oldLabel), {
+    root: f.root, stateDir: f.input.home, runtimeDir: join(f.input.home, "runtime"),
+  }).replaceAll("/bin/launchctl", `"${fake}"`));
+  const result = Bun.spawnSync(["bash", script], { env: testChildEnv({ HOME: f.input.home, TMUX: "fake", CALL_LOG: log }) });
+  expect(result.exitCode).toBe(0);
+  expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(
+    f.plan.services.map(s => `list ${s.newLabel}`).concat(f.plan.services.map(s => `list ${s.oldLabel}`)));
 });
 
 test("[验收线 2] on requires single use grant, caller and path proof", async () => {
@@ -192,7 +231,39 @@ test("[验收线 2] installer gate off preserves legacy; observe/on cannot run l
     expect(r.daemons).toEqual([]);
     expect(r.cliWrapper).toBe("");
     expect(r.errors.length).toBe(services === "observe" || cli === "observe" ? 0 : 1);
+    if (r.errors.length) expect(r.errors[0]).toContain("install-cli/update 未执行安装或重载");
   }
+});
+
+test("[验收线 2] legacy install lock conflict reports retry and runs only after maintenance releases ownership", () => {
+  const f = fixture(), root = maintenanceRoot(f.input.home);
+  prepareMaintenanceRoot(root, []);
+  const lock = takeExecutorLock(root);
+  if ("error" in lock) throw new Error(lock.error);
+  const gate = pathToFileURL(join(import.meta.dir, "../src/lib/floka-services/install/install-gate.ts")).href;
+  const code = `
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const { withRenameInstallGate } = await import(${JSON.stringify(gate)});
+    let called = false;
+    const result = await withRenameInstallGate(async () => { called = true; return { errors: [] }; });
+    console.log(JSON.stringify({ called, result }));
+  `;
+  // Exercise the production lock branch with every writable path confined to this temporary HOME.
+  const run = () => {
+    const child = Bun.spawnSync([process.execPath, "--no-env-file", "--config=/dev/null", "-e", code], {
+      env: testChildEnv({ HOME: f.input.home, NODE_ENV: "production", CLAUDESTRA_TEST: "0", FLOKA_TEST: "0",
+        CLAUDESTRA_STATE_DIR: join(f.input.home, "state"), CLAUDESTRA_RUNTIME_DIR: join(f.input.home, "runtime") }),
+    });
+    expect(child.stderr.toString()).toBe("");
+    expect(child.exitCode).toBe(0);
+    return JSON.parse(child.stdout.toString());
+  };
+  try {
+    const blocked = run();
+    expect(blocked.called).toBe(false);
+    expect(blocked.result.errors[0]).toContain("稍后重试 install-cli/update");
+  } finally { lock.release(); }
+  expect(run()).toEqual({ called: true, result: { errors: [] } });
 });
 
 test("[验收线 1] migrated old CLI attach only inspects the new labels and never starts a second set", async () => {

@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { ServiceStore, readStored } from "./store.js";
 import { object, renameMode } from "../../floka-config/values.js";
 import { join } from "node:path";
-export const WRAPPER_POLICY_PATH = new URL("./wrapper-policy.ts", import.meta.url).pathname;
+import { fileURLToPath } from "node:url";
+export const WRAPPER_POLICY_PATH = fileURLToPath(new URL("./wrapper-policy.ts", import.meta.url));
 
 /** Read-only policy: an interrupted/rolled-back switch cannot revive the opposite registration. */
 export function wrapperLabels(root: string, configPath: string): string[] {
