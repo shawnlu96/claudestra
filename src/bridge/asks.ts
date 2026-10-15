@@ -367,8 +367,13 @@ export function initAsks(d: AsksDeps): void {
   deps = d;
 }
 
-/** 网页列表：开着的全给，已结案的只给最近 3 天；owner 删掉的（ask-dismiss.ts 的 dismissed / hidden）不给；visible 是调用方的权限过滤（大总管的 ask 要 scope 含 master） */
-export function listForWeb(visible: (a: Ask) => boolean, project?: string, assignee?: string | readonly string[]): Ask[] {
+/** 已结案的默认只带 24 小时内的（列表每次整份发，旧的占了大半字节）；网页显式看历史时给 3 天 */
+const CLOSED_RECENT_MS = 24 * 3600_000;
+const CLOSED_HISTORY_MS = 3 * 24 * 3600_000;
+
+/** 网页列表：开着的全给，已结案的按 history 给 24 小时 / 3 天；owner 删掉的（ask-dismiss.ts 的 dismissed / hidden）不给；visible 是调用方的权限过滤（大总管的 ask 要 scope 含 master） */
+export function listForWeb(visible: (a: Ask) => boolean, project?: string, assignee?: string | readonly string[], history = false): Ask[] {
   const db = askReadDb();
-  return db ? listAsks(db, { project, assignee, closedSince: Date.now() - 3 * 24 * 3600_000, limit: 200 }).filter((a) => !a.extra.hidden && !a.extra.dismissed && visible(a)) : [];
+  const closedSince = Date.now() - (history ? CLOSED_HISTORY_MS : CLOSED_RECENT_MS);
+  return db ? listAsks(db, { project, assignee, closedSince, limit: 200 }).filter((a) => !a.extra.hidden && !a.extra.dismissed && visible(a)) : [];
 }

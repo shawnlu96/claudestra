@@ -18,3 +18,11 @@ export function agentsSignature(list: AgentSession[]): string {
     )
     .join("");
 }
+
+/**
+ * GET /projects 回包里随 roster 变的部分（成员名 / 状态 / 归属 / purpose，见 manager project-list）：只有它变了轮询才重拉 projects，
+ * 忙闲、上下文、未读这些一拍一变的字段不算（SYN-2）。
+ */
+export function projectsSignature(list: AgentSession[]): string {
+  return list.map((a) => `${a.name}\u0000${a.status}\u0000${a.projectId ?? ""}\u0000${a.purpose ?? ""}`).join("\u0001");
+}

@@ -108,7 +108,7 @@ machines.onSwitch((prev) => {
 });
 
 /** 2xx 正文坏了 = 服务端已执行、只是回包丢了：只有 GET / HEAD 标 retryable；POST 等标了会被 chat-store 发送循环自动重发（tests/web-ledger-meta-guard.test.ts） */
-async function parseBody(res: Response, method: string): Promise<Record<string, unknown>> {
+export async function parseBody(res: Response, method: string): Promise<Record<string, unknown>> {
   const retryable = method === "GET" || method === "HEAD";
   const hint = retryable ? "please retry" : "the request may already have been applied";
   const text = await res.text().catch(() => {

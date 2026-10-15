@@ -20,7 +20,8 @@ import { paneLooksWorking } from "../lib/turn-state.js";
 import { paneTail } from "../lib/pane-tail.js";
 import { tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import type { SessionTailInfo } from "../lib/session-tail.js";
-import { apiErrorResponse, apiJson } from "./api-respond.js";
+import { conditionalJson } from "../lib/etag.js";
+import { apiErrorResponse } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 import { agentListExtras, type AgentListExtras } from "./agent-info-routes.js";
 import { ctxBoundaryViewFor } from "./ctx-boundary.js";
@@ -41,6 +42,8 @@ export interface AgentsListIo {
   tails?: TailIo;
   /** peer 回包的 instance 块（lib/peer-instance-info.ts；单测注入档位 / 内容）。只对 peer 凭据调 */
   peerInstance?: (peer: string) => PeerInstanceInfo | undefined;
+  /** 请求的 If-None-Match：列表没变回 304（lib/etag.ts） */
+  ifNoneMatch?: string | null;
 }
 
 /** 列表里的一行：manager list 的原始字段 + 这里逐步附上的展示字段（老实现就是 any，这里只收紧到有名字的几项） */
@@ -57,7 +60,7 @@ export async function handleAgentsList(url: URL, principal: Principal, io: Agent
     // PEERINFO1：只有已配对 peer 的凭据、且开关 on 才多一个 instance；owner / web / 未兑换邀请（invite:）等其他调用方的回包逐字不变
     const paired = !!principal.peer && !principal.peer.startsWith("invite:");
     const instance = paired ? (io.peerInstance ?? peerInstanceBlock)(principal.peer!) : undefined;
-    return apiJson(200, instance ? { ok: true, agents, instance } : { ok: true, agents });
+    return conditionalJson(io.ifNoneMatch, instance ? { ok: true, agents, instance } : { ok: true, agents });
   } catch (e) {
     return apiErrorResponse(e); // manager list 失败 → 503 可重试（peer 不再看到 200 + 空列表），其余 500
   }

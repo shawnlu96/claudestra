@@ -9,6 +9,7 @@ type A = Record<string, unknown>;
 interface AsksStore {
   get(): { asks: A[]; loaded: boolean; full?: boolean; banner: A | null; notes: Record<string, { ok: boolean; text: string } | undefined> };
   refresh(): Promise<void>;
+  loadHistory(): Promise<void>;
   start(key: string): () => void;
   answer(id: string, shown: unknown, submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean>;
 }
@@ -17,19 +18,23 @@ const queue: { resolve: (v: unknown) => void; snapshot: A[] }[] = [];
 let manual = false;
 let failWith: unknown = null;
 let mockActive = false;
+/** 每次拉取带的 history 参数（SYN-2：合并重复刷新、抽屉「更多」） */
+const fetchLog: boolean[] = [];
+let streamOpts: { onOpen: () => void; onAsk: () => void } | null = null;
 // mock.module 不随文件结束撤销：只在本文件用假实现，后续文件须转回真实 API，也保留其余真导出。
 // 先复制真导出，避免 mock 改写模块绑定后，关闭开关仍转调回假实现。
 const realAsks = { ...await import("@/lib/api/asks") };
 mock.module("@/lib/api/asks", () => ({
   ...realAsks,
-  fetchAsks: (signal?: AbortSignal) => {
-    if (!mockActive) return realAsks.fetchAsks(signal);
+  fetchAsks: (signal?: AbortSignal, history = false) => {
+    if (!mockActive) return realAsks.fetchAsks(signal, history);
+    fetchLog.push(history);
     if (failWith) return Promise.reject(failWith);
     const snapshot = structuredClone(serverList);
     if (!manual) return Promise.resolve({ ok: true, asks: snapshot, now: Date.now() });
     return new Promise((resolve) => queue.push({ resolve, snapshot }));
   },
-  followAskEvents: (...args: Parameters<typeof realAsks.followAskEvents>) => mockActive ? new Promise(() => {}) : realAsks.followAskEvents(...args),
+  followAskEvents: (...args: Parameters<typeof realAsks.followAskEvents>) => mockActive ? ((streamOpts = args[0]), new Promise(() => {})) : realAsks.followAskEvents(...args),
   postPresence: (visible: boolean) => mockActive ? Promise.resolve() : realAsks.postPresence(visible),
 }));
 beforeAll(() => { mockActive = true; });
@@ -37,7 +42,7 @@ afterAll(() => { mockActive = false; });
 // 变量路径：根 tsconfig 没有 DOM 类型，store 用到 document / serviceWorker，只在运行时加载（类型取 AsksStore 的形状）
 const STORE = "@/features/asks/asks-store";
 const { asksStore } = (await import(STORE)) as { asksStore: AsksStore };
-const { askCounts, ASK_LIST_WAIT_MS, PENDING_MAX_MS } = await import("@/features/asks/asks-model");
+const { askCounts, ASK_EVENT_REFRESH_MS, ASK_LIST_WAIT_MS, PENDING_MAX_MS } = await import("@/features/asks/asks-model");
 const { ApiError } = await import("@/lib/api/client");
 
 const ask = (over: A): A => ({
@@ -215,5 +220,69 @@ describe("列表拉不到也不永久锁死：只有第一次请求还没回时�
     await tick();
     expect(loadState()).toEqual([false, false]);
     b.stop();
+  });
+});
+
+describe("SYN-2：重复刷新合并成一次", () => {
+  const g = globalThis as Record<string, unknown>;
+  const noop = () => undefined;
+  let n = 0;
+  /** start 要的 window / document 临时补上；记下 visibilitychange 的处理函数 */
+  function started(): { stop: () => void; wake: () => void } {
+    const saved = { window: g.window, document: g.document };
+    const handlers: Record<string, () => void> = {};
+    g.window = { addEventListener: noop, removeEventListener: noop, location: { href: "http://x/chat", hash: "", search: "", pathname: "/chat" } };
+    g.document = { visibilityState: "visible", addEventListener: (k: string, f: () => void) => (handlers[k] = f), removeEventListener: noop };
+    const stop = asksStore.start(`syn2-${++n}`);
+    return { stop: () => (stop(), Object.assign(g, { window: saved.window, document: saved.document })), wake: () => handlers.visibilitychange() };
+  }
+  const settle = () => new Promise((r) => setTimeout(r, ASK_EVENT_REFRESH_MS + 50));
+
+  test("回前台和事件流重连前后脚到：1 秒内只拉一次，过了 1 秒再来才拉", async () => {
+    const s = started();
+    await tick();
+    const t0 = realNow() + 5_000;
+    Date.now = () => t0;
+    fetchLog.length = 0;
+    s.wake();
+    streamOpts!.onOpen();
+    s.wake();
+    expect(fetchLog.length).toBe(1);
+    Date.now = () => t0 + 1_100;
+    streamOpts!.onOpen();
+    expect(fetchLog.length).toBe(2);
+    s.stop();
+  });
+
+  test("作答期间收到 ask 事件：作答刷新和事件刷新并成一次；事件那次先拉完的，作答后不再补拉", async () => {
+    const s = started();
+    await tick();
+    fetchLog.length = 0;
+    await asksStore.answer("ask_1", shown, async () => streamOpts!.onAsk(), words);
+    await settle();
+    expect(fetchLog.length).toBe(1);
+    fetchLog.length = 0;
+    await asksStore.answer("ask_2", shown, async () => { streamOpts!.onAsk(); await settle(); }, words);
+    await settle();
+    expect(fetchLog.length).toBe(1);
+    s.stop();
+  });
+
+  test("作答时事件流没推（断了）：去抖后照样拉一次，结果以服务端为准", async () => {
+    const s = started();
+    await tick();
+    fetchLog.length = 0;
+    await asksStore.answer("ask_1", shown, async () => undefined, words);
+    expect(fetchLog.length).toBe(0);
+    await settle();
+    expect(fetchLog.length).toBe(1);
+    s.stop();
+  });
+
+  test("抽屉「更多」才带 history 拉 3 天内的；平时的拉取不带", async () => {
+    fetchLog.length = 0;
+    await asksStore.refresh();
+    await asksStore.loadHistory();
+    expect(fetchLog).toEqual([false, true]);
   });
 });

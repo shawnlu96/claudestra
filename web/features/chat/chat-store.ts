@@ -36,7 +36,7 @@ import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus }
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
 import { liveAnswerText, liveUserText, resolveDeltaClicks, resolvePendingClicks } from "./delta-clicks";
-import { agentsSignature } from "./agents-signature";
+import { agentsSignature, projectsSignature } from "./agents-signature";
 import { AgentListLoader } from "./agent-list-loader";
 import { INITIAL_AGENT_LIST, keepRosterOrder, type AgentListReason, type AgentListStatus } from "./agent-list-state";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
@@ -376,10 +376,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 「视觉锁定→手指落下」这段更长的窗口里重排照样让手指落在错行上)。侧栏 2s 内有过触碰/滚动 →
     // 本拍只更新字段不重排,顺序等下一拍(≤15s)再应用;成员增删仍立即生效(新增排尾)。操作后的拉取不冻结。
     const frozen = !explicit && Date.now() - lastSidebarTouchAt < SIDEBAR_FREEZE_MS;
+    const projectsStale = explicit || projectsSignature(next) !== projectsSignature(this.state.agents); // 只是忙闲变了不拉 /projects
     this.produce((s) => {
       s.agents = frozen ? keepRosterOrder(s.agents, next) : next;
     });
-    void this.loadProjects();
+    if (projectsStale) void this.loadProjects();
   }
 
   /** 轮询 / 回前台节拍上的流健康检查(操作后的拉取不算一拍:「连续两拍」按 15s 粒度算)。 */

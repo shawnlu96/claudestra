@@ -76,7 +76,8 @@ const note = (id: string, n: AskNote | null) => {
  * 出错不再往外抛：原因记在 notes 里由卡片显示；返回成没成。删卡（dismiss）走同一套，只是盖上去的是「删了」
  */
 async function optimistic(id: string, over: Omit<PendingAnswer, "at" | "inFlight">, submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean> {
-  const mine = { ...over, at: Date.now(), inFlight: true } as PendingAnswer;
+  const startedAt = Date.now();
+  const mine = { ...over, at: startedAt, inFlight: true } as PendingAnswer;
   pending.set(id, mine);
   show({ notes: note(id, null) });
   try {
@@ -92,7 +93,8 @@ async function optimistic(id: string, over: Omit<PendingAnswer, "at" | "inFlight
     show({ notes: note(id, { ok: false, text: words.fail(e) }) });
     return false;
   } finally {
-    void refresh();
+    // 写库时 bridge 已推过 ask 事件、那次拉取已经拿到结果：不再补拉；没收到（流断了）才走去抖，和随后到的事件并成一次
+    if (lastEventFetchAt < startedAt) soon();
   }
 }
 
@@ -103,12 +105,35 @@ const dismiss = (id: string, submit: () => Promise<unknown>, fail: (e: unknown) 
 /** 拉取序号：先发后到的旧结果（例如写库前发出的 30 秒轮询）不能盖掉后发先到的新结果 */
 let fetchSeq = 0;
 let appliedSeq = 0;
+/** 抽屉里点了「更多」：要 3 天内结案的（默认 bridge 只给 24 小时内的），收起抽屉就回到默认 */
+let withHistory = false;
+let lastFetchAt = 0;
+/** 最近一次由 ask 事件触发的拉取：作答后据此判断要不要补拉 */
+let lastEventFetchAt = 0;
+let soonTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** ask 事件 / 作答后：去抖 ASK_EVENT_REFRESH_MS，一串变化只拉一次 */
+function soon(): void {
+  if (soonTimer) clearTimeout(soonTimer);
+  soonTimer = setTimeout(() => {
+    soonTimer = null;
+    lastEventFetchAt = Date.now();
+    void refresh();
+  }, ASK_EVENT_REFRESH_MS);
+}
+
+/** 回前台和事件流重连常常前后脚到：1 秒内已经拉过就不再拉（去抖里排着的那次照常） */
+const WAKE_DEDUPE_MS = 1000;
+function refreshOnWake(): void {
+  if (Date.now() - lastFetchAt >= WAKE_DEDUPE_MS) void refresh();
+}
 
 async function refresh(): Promise<void> {
   if (denied) return;
   const my = ++fetchSeq;
+  lastFetchAt = Date.now();
   try {
-    const r = await fetchAsks();
+    const r = await fetchAsks(undefined, withHistory);
     if (my < appliedSeq) return;
     appliedSeq = my;
     const audience = r.asks.filter(isAskForViewer);
@@ -147,6 +172,7 @@ function leave(): void {
   if (plan === "wait") return;
   if (plan === "back") return backGuard.back(); // popstate 收起
   if (plan === "strip") stripHash();
+  withHistory = false;
   set({ open: false, focus: null });
 }
 
@@ -161,6 +187,11 @@ export const asksStore = {
     return () => void subs.delete(f);
   },
   refresh,
+  /** 抽屉「最近处理过 → 更多」：拉 3 天内结案的，直到收起抽屉 */
+  loadHistory(): Promise<void> {
+    withHistory = true;
+    return refresh();
+  },
   answer,
   dismiss,
   openDrawer: (focus: string | null = null) => enter(focus),
@@ -179,14 +210,9 @@ export const asksStore = {
       server = [];
       snap = EMPTY;
     }
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const soon = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => void refresh(), ASK_EVENT_REFRESH_MS);
-    };
     const onVis = () => {
       presence(visible());
-      if (visible()) void refresh();
+      if (visible()) refreshOnWake();
     };
     const poll = setInterval(() => visible() && void refresh(), 30_000);
     const beat = setInterval(() => visible() && presence(true), 60_000);
@@ -194,7 +220,7 @@ export const asksStore = {
     void (async () => {
       // 断了就退避重连（5s → 60s）；连上先重拉一次，断线期间的变化不会丢
       for (let wait = 5_000; !ctrl.signal.aborted; wait = Math.min(wait * 2, 60_000)) {
-        await followAskEvents({ signal: ctrl.signal, onOpen: () => ((wait = 2_500), void refresh()), onAsk: soon }).catch(() => undefined); // 断线 / 403：等一会儿再连
+        await followAskEvents({ signal: ctrl.signal, onOpen: () => ((wait = 2_500), refreshOnWake()), onAsk: soon }).catch(() => undefined); // 断线 / 403：等一会儿再连
         if (denied) return;
         await new Promise((r) => setTimeout(r, wait));
       }
@@ -207,6 +233,7 @@ export const asksStore = {
     // 左滑 / 返回键落到 #asks 就开（含从「回到对话」的会话页退回来），离开就关
     const onPop = () => {
       const on = onAsksPage();
+      if (!on) withHistory = false;
       if (on !== snap.open) set({ open: on, focus: null });
     };
     navigator.serviceWorker?.addEventListener("message", onSw);
@@ -225,7 +252,8 @@ export const asksStore = {
       enter(deep);
     } else if (onAsksPage()) set({ open: true });
     return () => {
-      if (timer) clearTimeout(timer);
+      if (soonTimer) clearTimeout(soonTimer);
+      soonTimer = null;
       clearTimeout(slow);
       clearInterval(poll);
       clearInterval(beat);
