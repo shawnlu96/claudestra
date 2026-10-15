@@ -13,20 +13,21 @@ const DAY_MS = 86_400_000;
 const FEEDBACK_HALF_LIFE_DAYS = 30;
 const FEEDBACK_MIN_SAMPLES = 3;
 export const FEEDBACK_FLOOR = 0.2;
+export const UNRELATED_WEIGHT = 0.25;
 
 /** 一次标记：哪种用法、什么时候标的 */
-export interface FeedbackMark { use: "applied" | "irrelevant"; ts: number }
+export interface FeedbackMark { use: "applied" | "irrelevant"; ts: number; weight?: number }
 
 /** 先验乘子，∈ [0.2, 1] */
-export function feedbackPrior(marks: readonly FeedbackMark[], now: number): number {
+export function feedbackPrior(marks: readonly FeedbackMark[], now: number, floor = FEEDBACK_FLOOR): number {
   if (marks.length < FEEDBACK_MIN_SAMPLES) return 1;
   let applied = 0, irrelevant = 0;
   for (const m of marks) {
-    const w = 0.5 ** (Math.max(0, now - m.ts) / DAY_MS / FEEDBACK_HALF_LIFE_DAYS);
+    const w = (m.weight ?? 1) * 0.5 ** (Math.max(0, now - m.ts) / DAY_MS / FEEDBACK_HALF_LIFE_DAYS);
     if (m.use === "applied") applied += w;
     else irrelevant += w;
   }
-  return Math.max(FEEDBACK_FLOOR, Math.min(1, (2 * (applied + 1)) / (applied + irrelevant + 2)));
+  return Math.max(floor, Math.min(1, (2 * (applied + 1)) / (applied + irrelevant + 2)));
 }
 
 /** refs 事件的一行（events.kind = 'memory'，data.op = 'refs'，见 memory-tools-refs.ts） */
@@ -35,7 +36,7 @@ export interface RefsRow { target: string; ts: number; data: string | null }
 /**
  * 按 memoryId 汇总 refs 事件里的 applied / irrelevant；wrong 和坏行跳过。excludeTask = 本卡自己的标记不算（只认别的卡）。
  */
-export function marksByMemory(rows: readonly RefsRow[], excludeTask?: string): Map<string, FeedbackMark[]> {
+export function marksByMemory(rows: readonly RefsRow[], excludeTask?: string, weightOf?: (target: string) => number): Map<string, FeedbackMark[]> {
   const out = new Map<string, FeedbackMark[]>();
   for (const r of rows) {
     if (excludeTask !== undefined && r.target === excludeTask) continue;
@@ -45,7 +46,7 @@ export function marksByMemory(rows: readonly RefsRow[], excludeTask?: string): M
     for (const ref of refs as { id?: unknown; use?: unknown }[]) {
       if (typeof ref?.id !== "string" || (ref.use !== "applied" && ref.use !== "irrelevant")) continue;
       const list = out.get(ref.id) ?? [];
-      list.push({ use: ref.use, ts: r.ts });
+      list.push({ use: ref.use, ts: r.ts, ...(weightOf ? { weight: weightOf(r.target) } : {}) });
       out.set(ref.id, list);
     }
   }

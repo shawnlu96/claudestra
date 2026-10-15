@@ -10,8 +10,8 @@
  */
 import { Database } from "bun:sqlite";
 import { getTask } from "./ledger-store.js";
-import { feedbackPrior, marksByMemory, type RefsRow } from "./memory-feedback-prior.js";
-import { cardPatterns, fileRoute, graphRoute, MEMORY_CAPS, memoryCandidates, rankOrder, RELATIVE_FLOOR, type MemoryRoute } from "./memory-retrieve.js";
+import { FEEDBACK_FLOOR, UNRELATED_WEIGHT, feedbackPrior, type RefsRow } from "./memory-feedback-prior.js";
+import { contextualMarks, cardPatterns, fileRoute, graphRoute, MEMORY_CAPS, memoryCandidates, rankOrder, RELATIVE_FLOOR, type MemoryRoute } from "./memory-retrieve.js";
 
 const RRF_K = 60;
 const ROUTES: MemoryRoute[] = ["graph", "file", "vector"];
@@ -52,7 +52,22 @@ function counts(orders: readonly { ids: string[]; routes: Map<string, MemoryRout
 const rate = (n: number, d: number): number | null => (d ? Number((n / d).toFixed(4)) : null);
 
 /** 回放 [since, until) 内本项目的写单注入；库只读打开、用完关 */
-export function replayRelevance(path: string, project: string, since: number, until: number): ReplayResult {
+export interface ReplayOverrides { relativeFloor?: number; feedbackFloor?: number; unrelatedWeight?: number; count?: number }
+const REPLAY_DEFAULTS = { relativeFloor: RELATIVE_FLOOR, feedbackFloor: FEEDBACK_FLOOR, unrelatedWeight: UNRELATED_WEIGHT, count: MEMORY_CAPS.write.count };
+type Parameters = typeof REPLAY_DEFAULTS;
+function parameters(overrides: ReplayOverrides): Parameters {
+  const p = { ...REPLAY_DEFAULTS, ...overrides };
+  for (const key of ["relativeFloor", "feedbackFloor", "unrelatedWeight"] as const)
+    if (!Number.isFinite(p[key]) || p[key] < 0 || p[key] > 1) throw new Error(`Invalid ${key}`);
+  if (!Number.isInteger(p.count) || p.count < 0) throw new Error("Invalid count");
+  return p;
+}
+export function replayRelevance(path: string, project: string, since: number, until: number, overrides: ReplayOverrides = {}): ReplayResult {
+  return replaySweep(path, project, since, until, [overrides])[0]!.result;
+}
+/** Grid is an explicit list of combinations; one readonly connection and one route preparation per injection. */
+export function replaySweep(path: string, project: string, since: number, until: number, grid: readonly ReplayOverrides[]) {
+  const combinations = grid.map(parameters);
   const db = new Database(path, { readonly: true });
   try {
     db.exec("PRAGMA query_only = 1");
@@ -67,9 +82,7 @@ export function replayRelevance(path: string, project: string, since: number, un
     // 平局和生产 rankMemories 同序：新者优先，再按 id
     const order = (a: Entry, b: Entry) => rankOrder({ score: a.score, createdAt: created.get(a.id) ?? 0, id: a.id }, { score: b.score, createdAt: created.get(b.id) ?? 0, id: b.id });
 
-    const oldOrders: { ids: string[]; routes: Map<string, MemoryRoute[]> }[] = [];
-    const newOrders: typeof oldOrders = [];
-    const appliedKept = { total: 0, kept: 0 }, irrelevantRemoved = { total: 0, removed: 0 };
+    const prepared: { oldIds: string[]; entries: Entry[]; ts: number; marks: Map<string, import("./memory-feedback-prior.js").FeedbackMark[]>; uses: Map<string | undefined, Use | undefined> }[] = [];
     let skipped = 0;
     for (const inj of injections) {
       const d = parse(inj.data);
@@ -97,31 +110,35 @@ export function replayRelevance(path: string, project: string, since: number, un
         entries.push({ id: x.id, score: x.score, routes, far: kindOf(x.id) === "pitfall" && routes.join() === "graph" && graph[g]?.hop === 3 });
       }
 
-      // 新规则
-      const marks = marksByMemory(refs.filter((r) => r.ts < inj.ts) as RefsRow[], inj.target);
-      const rescored = entries.filter((e) => !e.far).map((e) => ({ ...e, score: e.score * feedbackPrior(marks.get(e.id) ?? [], inj.ts) }))
-        .sort(order);
-      const bar = (rescored[0]?.score ?? 0) * RELATIVE_FLOOR;
-      const newIds = rescored.filter((e) => e.score >= bar).slice(0, MEMORY_CAPS.write.count).map((e) => e.id);
-      const routes = new Map(entries.map((e) => [e.id, e.routes]));
-      oldOrders.push({ ids: oldIds, routes });
-      newOrders.push({ ids: newIds, routes });
-
       // 旧条目怎么用：注入之后本卡第一份含这些条目的 refs
       const label = refs.find((r) => r.target === inj.target && r.seq > inj.seq
         && ((parse(r.data).refs ?? []) as { id?: string }[]).some((x) => typeof x?.id === "string" && oldIds.includes(x.id)));
       const uses = new Map(((label ? parse(label.data).refs : []) as { id?: string; use?: Use }[]).map((x) => [x.id, x.use]));
-      for (const id of oldIds) {
-        if (uses.get(id) === "applied") { appliedKept.total++; if (newIds.includes(id)) appliedKept.kept++; }
-        if (uses.get(id) === "irrelevant") { irrelevantRemoved.total++; if (!newIds.includes(id)) irrelevantRemoved.removed++; }
-      }
+      const marks = contextualMarks(db, refs.filter((r) => r.ts < inj.ts) as RefsRow[], inj.target, project, 0);
+      prepared.push({ oldIds, entries, ts: inj.ts, marks, uses });
     }
-    return {
+    return combinations.map((params) => {
+      const oldOrders: { ids: string[]; routes: Map<string, MemoryRoute[]> }[] = [], newOrders: typeof oldOrders = [];
+      const appliedKept = { total: 0, kept: 0 }, irrelevantRemoved = { total: 0, removed: 0 };
+      for (const { oldIds, entries, ts, marks, uses } of prepared) {
+        const rescored = entries.filter((e) => !e.far).map((e) => ({ ...e, score: e.score * feedbackPrior(
+          (marks.get(e.id) ?? []).map((m) => ({ ...m, weight: m.weight === 0 ? params.unrelatedWeight : 1 })), ts, params.feedbackFloor) })).sort(order);
+        const bar = (rescored[0]?.score ?? 0) * params.relativeFloor;
+        const newIds = rescored.filter((e) => e.score >= bar).slice(0, params.count).map((e) => e.id);
+        const routes = new Map(entries.map((e) => [e.id, e.routes]));
+        oldOrders.push({ ids: oldIds, routes }); newOrders.push({ ids: newIds, routes });
+        for (const id of oldIds) {
+          if (uses.get(id) === "applied") { appliedKept.total++; if (newIds.includes(id)) appliedKept.kept++; }
+          if (uses.get(id) === "irrelevant") { irrelevantRemoved.total++; if (!newIds.includes(id)) irrelevantRemoved.removed++; }
+        }
+      }
+    return { params, result: {
       project, since, until, old: counts(oldOrders, kindOf), new: counts(newOrders, kindOf),
       appliedKept: { ...appliedKept, rate: rate(appliedKept.kept, appliedKept.total) },
       irrelevantRemoved: { ...irrelevantRemoved, rate: rate(irrelevantRemoved.removed, irrelevantRemoved.total) },
       skipped,
-    };
+    } };
+    });
   } finally {
     db.close();
   }

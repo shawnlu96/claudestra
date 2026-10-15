@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { replayRelevance } from "../src/lib/memory-relevance-replay.js";
+import { replayRelevance, replaySweep } from "../src/lib/memory-relevance-replay.js";
 import { memoryCandidates, rankMemories, type MemoryRoute } from "../src/lib/memory-retrieve.js";
 import { getTask } from "../src/lib/ledger-store.js";
 
@@ -65,10 +65,10 @@ describe("只读回放 [验收线 5]", () => {
     const r = replayRelevance(path, P, NOW - 7 * DAY, NOW);
     expect(digests()).toEqual(before);
     expect(r.skipped).toBe(0);
-    // 旧：4 + 3 条；新：单 1 m5 m4 m3 m2（不再让坑位），单 2 只剩 m4
-    //   单 2 的 m5：别的卡 5 次无关 → 先验 2/7，1/61 × 2/7 ≈ 0.0047 < 1/62 × 0.35 ≈ 0.0056；m1 只靠远邻图命中
+    // 旧：4 + 3 条；新：单 1 m5 m4 m3 m2（不再让坑位），单 2 m4 m5
+    // 单 2 m5：T1 同文件全权，四张缺失卡各 0.25，总权约 2，先验约 0.5，仍过相对门槛；m1 只靠远邻图命中
     expect(r.old).toEqual({ orders: 2, items: 7, avgPerOrder: 3.5, byKind: { decision: 5, pitfall: 2 }, byRoute: { graph: 1, file: 6, vector: 0 } });
-    expect(r.new).toEqual({ orders: 2, items: 5, avgPerOrder: 2.5, byKind: { decision: 5 }, byRoute: { graph: 0, file: 5, vector: 0 } });
+    expect(r.new).toEqual({ orders: 2, items: 6, avgPerOrder: 3, byKind: { decision: 6 }, byRoute: { graph: 0, file: 6, vector: 0 } });
     expect(r.appliedKept).toEqual({ total: 3, kept: 3, rate: 1 });
     // 单 1 的 m5 新规则下还在（当时别的卡还没标）、m1 拿掉；单 2 的 m1 拿掉
     expect(r.irrelevantRemoved).toEqual({ total: 3, removed: 2, rate: 0.6667 });
@@ -126,4 +126,16 @@ describe("回放平局与生产同序 [验收线 5]", () => {
       rmSync(tdir, { recursive: true, force: true });
     }
   });
+});
+
+ test("网格复用只读准备；每组与单跑一致，覆盖条数及先验参数", () => {
+  const before = digests();
+  const grid = [{}, { relativeFloor: 0, feedbackFloor: 0.7, unrelatedWeight: 0.1, count: 1 }, { count: 0 }];
+  const rows = replaySweep(path, P, NOW - 7 * DAY, NOW, grid);
+  rows.forEach((row, i) => expect(row.result).toEqual(replayRelevance(path, P, NOW - 7 * DAY, NOW, grid[i])));
+  expect(rows[1]!.result.new.items).toBe(2);
+  expect(replayRelevance(path, P, NOW - 7 * DAY, NOW, { unrelatedWeight: 1 }).new.items).toBe(5);
+  expect(rows[2]!.result.new.items).toBe(0);
+  expect(digests()).toEqual(before);
+  expect(() => replaySweep(path, P, NOW - DAY, NOW, [{ count: -1 }])).toThrow("Invalid count");
 });

@@ -21,7 +21,7 @@ import { effectiveNodes, getDagVersion, getFeature, type DagNode } from "./ledge
 import { featureDeps } from "./ledger-feature-deps.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { listDeps } from "./ledger-store.js";
-import { feedbackPrior, marksByMemory, type FeedbackMark, type RefsRow } from "./memory-feedback-prior.js";
+import { feedbackPrior, marksByMemory, type FeedbackMark, UNRELATED_WEIGHT, type RefsRow } from "./memory-feedback-prior.js";
 import type { VectorHit } from "./memory-vectors.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 
@@ -149,7 +149,25 @@ function refsMarks(db: Database, task: Pick<LedgerTask, "id" | "project">): Map<
   if (!hasTable(db, "events")) return new Map();
   const rows = db.query("SELECT target, ts, data FROM events WHERE project = ? AND kind = 'memory' AND json_extract(data, '$.op') = 'refs'")
     .all(task.project) as RefsRow[];
-  return marksByMemory(rows, task.id);
+  return contextualMarks(db, rows, task.id, task.project);
+}
+
+/** Bulk card metadata keeps cross-card feedback outside the ranking transaction. Missing cards are unrelated. */
+export function contextualMarks(db: Database, rows: readonly RefsRow[], taskId: string, project: string, lowWeight = UNRELATED_WEIGHT) {
+  const cards = db.query("SELECT id, featureId, extra FROM tasks WHERE project = ?").all(project) as
+    { id: string; featureId: string | null; extra: string | null }[];
+  const context = new Map(cards.map((c) => {
+    let extra: Record<string, unknown> = {};
+    try { extra = JSON.parse(c.extra ?? "{}"); } catch { /* Malformed historical metadata provides no file relevance evidence. */ }
+    const files = Array.isArray(extra.fileGlobs) ? extra.fileGlobs.filter((x): x is string => typeof x === "string") : [];
+    return [c.id, { feature: c.featureId, files }] as const;
+  }));
+  const self = context.get(taskId);
+  return marksByMemory(rows, taskId, (id) => {
+    const other = context.get(id);
+    return self && other && ((self.feature && self.feature === other.feature)
+      || self.files.some((a) => other.files.some((b) => overlaps(a, b, null)))) ? 1 : lowWeight;
+  });
 }
 
 // ── 图（§3.2） ──

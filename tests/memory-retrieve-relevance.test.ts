@@ -1,3 +1,4 @@
+import { createFeature } from "../src/lib/ledger-feature-write.js";
 /**
  * PMEMTUNE2：坑不再强占坑位（memoryPitfallRelevance）、被标无关的记忆跨卡降权（memoryFeedbackPrior）、两键的 on / observe / off。
  * 纯函数部分用字面候选 + 显式 modes；端到端走 memoryCandidates（模式从 recovery-policy.json 读，测试状态目录隔离）。
@@ -12,7 +13,7 @@ import { LedgerReader } from "../src/lib/ledger-read.js";
 import { closeLedger, getEventByDedup, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import {
-  memoryCandidates, rankMemories, RELATIVE_FLOOR, type Candidate, type GraphHit, type RankOpts, type Routes, type SelectionModes,
+  contextualMarks, memoryCandidates, rankMemories, RELATIVE_FLOOR, type Candidate, type GraphHit, type RankOpts, type Routes, type SelectionModes,
 } from "../src/lib/memory-retrieve.js";
 import { ensureMemoryRetrieval, memoryDedupKey, retrieveMemories } from "../src/lib/memory-retrieve-order.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
@@ -263,4 +264,30 @@ describe("observe 样本走生产形状的 query_only 读连接 [验收线 4]", 
     db.transaction(() => { selected(); })();
     expect(observeNotes()).toEqual([]);
   });
+});
+
+test("PM 补 4：无关卡两次 irrelevant、同 feature applied 仍入选；相关卡 irrelevant 降权", () => {
+  const rows = ["A", "B", "C"].map((target, i) => ({ target, ts: NOW,
+    data: JSON.stringify({ refs: [{ id: "pit", use: i === 2 ? "applied" : "irrelevant" }] }) }));
+  const temp = mkdtempSync(join(tmpdir(), "prior-context-"));
+  const dbPath = join(temp, "ledger.sqlite");
+  const db = openLedger(dbPath);
+  db.query("INSERT INTO ledger_instance (key,value) VALUES ('origin','ab12')").run();
+
+  for (const id of ["SELF", "A", "B", "C"]) createTask(db, { actor: "owner", now: 1 }, { project: P, id, title: id, kind: "code" });
+  for (const slug of ["one", "other"]) createFeature(db, { actor: "owner", now: 1 }, { project: P, slug, title: slug });
+  db.query("UPDATE tasks SET featureId = CASE WHEN id IN ('SELF','C') THEN 'ab12-one' ELSE 'ab12-other' END").run();
+  const marks = contextualMarks(db, rows, "SELF", P);
+  expect(marks.get("pit")!.map((m) => m.weight)).toEqual([0.25, 0.25, 1]);
+  db.query("UPDATE tasks SET extra = ? WHERE id IN ('SELF','A')").run(JSON.stringify({ fileGlobs: ["src/lib/x*.ts"] }));
+  expect(contextualMarks(db, rows, "SELF", P).get("pit")![0]!.weight).toBe(1);
+  const c = [cand("pit", "pitfall"), ...[1, 2, 3, 4].map((i) => cand(`d${i}`, "decision"))];
+  const routes = { vector: vec(["pit", "d1", "d2", "d3", "d4"]) };
+  expect(ids(rank(c, routes, { modes: ON, feedback: marks }))).toContain("pit");
+  expect(rank(c, routes, { modes: ON, feedback: marks }).selected[0]!.feedback).toBe(1);
+  db.query("UPDATE tasks SET featureId = 'ab12-one'").run();
+  const related = contextualMarks(db, rows.map((r) => ({ ...r, data: JSON.stringify({ refs: [{ id: "pit", use: "irrelevant" }] }) })), "SELF", P);
+  closeLedger(dbPath);
+  rmSync(temp, { recursive: true, force: true });
+  expect(ids(rank(c, routes, { modes: ON, feedback: related }))).not.toContain("pit");
 });
