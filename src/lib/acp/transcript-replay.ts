@@ -8,7 +8,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type { LineTranslator } from "../session-source.js";
 import type { TtyScreen } from "./tty-screen.js";
-import { transcriptOfEntry, transcriptOfInbound } from "./transcript.js";
+import { clipThought, transcriptOfEntry, transcriptOfInbound } from "./transcript.js";
 
 export const REPLAY_ITEMS = 20;
 const REPLAY_BYTES = 1 << 20;
@@ -34,13 +34,18 @@ export function tailLines(path: string, max = REPLAY_BYTES): string[] {
   }
 }
 
-/** 收到的消息（会话文件里是 user 的文字块）按「> 来源：」显示；工具结果等其余块照 transcriptOfEntry */
+/** 收到的消息（会话文件里是 user 的文字块）按「> 来源：」显示；思考用终端视图的多行版（clipThought）；其余块照 transcriptOfEntry */
 function itemsOf(e: Rec): string[] {
   const c = e.message?.content;
+  if (e.type === "assistant" && Array.isArray(c)) {
+    return c.flatMap((b: Rec) => (b?.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim()
+      ? [`✻ ${clipThought(b.thinking)}`] : transcriptOfEntry({ ...e, message: { ...e.message, content: [b] } })));
+  }
   if (e.type !== "user") return transcriptOfEntry(e);
   if (typeof c === "string") return c.trim() ? [transcriptOfInbound(c, { user: "消息" })] : [];
   const text = Array.isArray(c) ? c.filter((b: Rec) => b?.type === "text" && typeof b.text === "string").map((b: Rec) => b.text).join("\n") : "";
-  return [...(text.trim() ? [transcriptOfInbound(text, { user: "消息" })] : []), ...transcriptOfEntry({ ...e, message: { content: (Array.isArray(c) ? c : []).filter((b: Rec) => b?.type !== "text") } })];
+  const rest = (Array.isArray(c) ? c : []).filter((b: Rec) => b?.type !== "text");
+  return [...(text.trim() ? [transcriptOfInbound(text, { user: "消息" })] : []), ...transcriptOfEntry({ ...e, message: { content: rest } })];
 }
 
 /** 会话文件的行 → 最近 max 段（翻译器有状态，同一次读一个实例） */

@@ -51,7 +51,7 @@ const oneLine = (s: unknown): string => clip(String(s ?? "").replace(/\s*\n\s*/g
 
 /** 思考的多行版（只给 TTY 终端视图：tui/screen.ts 拿 agent_thought_chunk 原文重排；纯文本窗口仍是 oneLine）：
  * 先脱敏再截，字数上限和 oneLine 一样；截了就注明原本几行（只有一行时注明几个字），续行缩进两格对齐在 ✻ 后面 */
-export const THOUGHT_LINES = 4;
+const THOUGHT_LINES = 4;
 export function clipThought(raw: string): string {
   const s = redactSecrets(scanHead(raw)).trim();
   const all = s.split("\n").filter((l) => l.trim());

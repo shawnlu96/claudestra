@@ -32,6 +32,11 @@ describe("replayOfLines", () => {
     expect(items[0]!.at?.toISOString()).toBe(ts);
   });
 
+  test("思考按多行显示（不压成一行，不出「共 1 行」）", () => {
+    const items = replayOfLines(cc, [assistant([{ type: "thinking", thinking: "先看 diff。\n再看测试。" }])]).map((r) => r.item);
+    expect(items).toEqual(["✻ 先看 diff。\n  再看测试。"]);
+  });
+
   test(`只留最后 ${REPLAY_ITEMS} 段`, () => {
     const lines = Array.from({ length: 50 }, (_, i) => assistant([{ type: "text", text: `第 ${i} 条` }]));
     const items = replayOfLines(cc, lines);
