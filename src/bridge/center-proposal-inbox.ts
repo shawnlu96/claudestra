@@ -4,7 +4,10 @@
  * 答复钩子（ask-entry.ts commitNoticing）：本卡 + bind 校验 + owner 本人答 → forwardDecision 一次，不自动重试；
  * conflict 重拉一次，仍待批就按新 rev 开新卡。凭据缺失 / 中心不可达只记一行日志（只有错误码），下轮再试。
  * 照 shared-ledger-join-offer.ts 的写法：source=system 的 authorize 卡、bind + paramsHash、ownerAnswered。
+ * PROPAUTO1（开关 centerProposalAutoApprove）：核过审批权、建卡之前先分类（lib/center-proposal-auto.ts）；on 档非安全类抢执行占位后
+ * 由系统直接 decide（同一凭据 / 请求体 / rev / 摘要），不建卡、不推送，只写台账事件；安全类照旧出卡并写原因。observe 只记样本，off 逐字旧路径。
  */
+import type { Database } from "bun:sqlite";
 import { instanceIdSync } from "../lib/instance-id.js";
 import { instanceKeySync } from "../lib/instance-key.js";
 import { closeAsk, getAsk, listAsks, MASTER_PROJECT, patchAsk, type Ask } from "../lib/ledger-asks.js";
@@ -22,8 +25,14 @@ import {
 } from "../lib/shared-ledger-feature-proposals-store.js";
 import type { FeatureProposalScope, ProposalList, ProposalRecord } from "../lib/shared-ledger-feature-proposals.js";
 import type { ProposalDecision } from "../lib/shared-ledger-contract-v2-feature-proposals.js";
+import { FeatureProposalRejected, FeatureProposalUnsupported } from "../lib/shared-ledger-feature-proposals.js";
+import type { RecoveryMode } from "../lib/recovery-policy.js";
+import { classifyProposal, reasonText, type AutoReason } from "../lib/center-proposal-auto.js";
 import {
-  canApprove, cardParams, decisionBody, decisionResultText, decisionSettled, handoffText, inboxCard, inboxErrorCode, isDecisionConflict,
+  autoApproveMode, claimExec, execKey, execState, MAX_AUTO_ATTEMPTS, observeAutoApprove, recordExecResult, RETRY_AFTER_MS, type ExecIdentity,
+} from "../lib/center-proposal-auto-exec.js";
+import {
+  canApprove, cardParams, decisionBody, decisionResultText, decisionSettled, handoffText, inboxCard, inboxDedupKey, inboxErrorCode, isDecisionConflict,
   NOT_APPROVER_REASON, paramsOf, pendingApproval, PROPOSAL_INBOX_CREATOR, PROPOSAL_RESULT_CREATOR, proposalTitleOf, resultAnswer, resultCard,
   verifiedAnswer, type InboxMember, type InboxParams, type ResultMeta,
 } from "../lib/center-proposal-inbox.js";
@@ -52,6 +61,18 @@ export interface ProposalInboxDeps {
   /** 结果卡「交给大总管」：固定格式的一段经系统通知通道发给 master */
   handoff: (text: string, askId: string) => Promise<void>;
   log: (line: string) => void;
+  /** PROPAUTO1 自动批准；不给 = 逐字旧路径（同 off） */
+  auto?: AutoApproveDeps;
+}
+interface AutoApproveDeps {
+  /** centerProposalAutoApprove 的档位（按本机项目） */
+  mode: (localProjectId: string) => RecoveryMode;
+  /** 执行占位 / 结果事件 / observe 样本写的台账 */
+  db: () => Database;
+  /** 这一版本有没有人工卡（任何状态：open / answered / 已撤都算） */
+  hasCard: (dedupKey: string) => boolean;
+  /** 分类时核的仓库现有文件；不给 = 本仓 git ls-files（读不到 → 带通配的 glob 判 owner） */
+  files?: () => readonly string[] | null;
 }
 
 const paramsKey = (p: InboxParams) => `${p.localProjectId}\0${p.proposalId}\0${p.proposalRev}\0${p.proposalDigest}`;
@@ -67,12 +88,15 @@ function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** 一轮拉到的待批提案 + 本机 owner 在中心的 personId（卡上区分「本人提的」） */
-interface Pending { records: ProposalRecord[]; self: string }
-const pendingOf = (list: ProposalList & { selfPersonId: string }): Pending => ({ records: pendingApproval(list), self: list.selfPersonId });
+/** 一轮拉到的待批提案 + 本机 owner 在中心的 personId（卡上区分「本人提的」）；all = 这一轮拉到的全部（补记自动批准结果用） */
+interface Pending { records: ProposalRecord[]; self: string; all: ProposalRecord[] }
+const pendingOf = (list: ProposalList & { selfPersonId: string }): Pending => ({ records: pendingApproval(list), self: list.selfPersonId, all: list.proposals });
+
+/** 自动批准对一条待批提案的安排（按 paramsKey）：skip = 不建卡（已自动批 / 在等结果）；reason = 照旧建卡，卡上写原因；都没有 = 原样建卡 */
+interface Plan { skip?: true; reason?: string }
 
 /** 一个项目的一轮：开缺的卡，撤不再待批 / 已被新 rev 取代的卡 */
-function reconcile(project: InboxProject, { records: snapshot, self }: Pending, d: ProposalInboxDeps): Ask[] {
+function reconcile(project: InboxProject, { records: snapshot, self }: Pending, d: ProposalInboxDeps, plan: ReadonlyMap<string, Plan> = new Map()): Ask[] {
   const cards = d.openCards().filter(c => projectOf(c) === project.localProjectId);
   // 单调保护：快照里的 rev 比已开卡的旧 = 迟到的快照，这条提案这一轮不动（不撤新卡、不开旧卡）
   const cardRev = new Map<string, number>();
@@ -88,9 +112,9 @@ function reconcile(project: InboxProject, { records: snapshot, self }: Pending, 
   }
   // 逐张开：一张开卡失败只记一行，不影响别的提案，也不丢已开成功的那些（conflict 结果按返回卡说话）
   const opened: Ask[] = [];
-  for (const r of want.values()) {
-    if (r.proposal.expiresAt <= d.now()) continue;
-    try { opened.push(d.openAsk(inboxCard(project.localProjectId, r, self) as CreateAskInput)); } // dedupKey：同一 rev 再轮询返回已有那张
+  for (const [key, r] of want) {
+    if (r.proposal.expiresAt <= d.now() || plan.get(key)?.skip) continue;
+    try { opened.push(d.openAsk(inboxCard(project.localProjectId, r, self, plan.get(key)?.reason) as CreateAskInput)); } // dedupKey：同一 rev 再轮询返回已有那张
     catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 为 ${r.proposalId} rev ${r.proposalRev} 开卡失败：${(e as Error).name}`); }
   }
   return opened;
@@ -115,6 +139,8 @@ const membersErrorName = (e: unknown) => e instanceof SharedLedgerRemoteError ? 
  */
 async function gatedReconcile(project: InboxProject, pending: Pending, d: ProposalInboxDeps): Promise<Ask[]> {
   const id = project.localProjectId;
+  const mode = d.auto?.mode(id) ?? "off";
+  if (d.auto && mode !== "off") backfillResults(project, pending, d, d.auto);
   if (pending.records.length) {
     let approver: boolean;
     try { approver = canApprove(await d.members(project.scope), pending.self); }
@@ -130,7 +156,85 @@ async function gatedReconcile(project: InboxProject, pending: Pending, d: Propos
     }
     noteApprover(project, "owner", `[proposal-inbox] ${id} 本人是该项目 owner：恢复开提案审批卡`, d);
   }
-  return reconcile(project, pending, d);
+  return reconcile(project, pending, d, d.auto && mode !== "off" ? await autoRoute(project, pending, mode, d, d.auto) : undefined);
+}
+
+const identityOf = (project: InboxProject, params: InboxParams): ExecIdentity =>
+  ({ localProjectId: project.localProjectId, centerProject: project.scope.projectId, params });
+const SKIP: Plan = { skip: true };
+
+/** 上一轮自动发出、结果不明的：中心已不是待批 → 补记结果事件（中心当前状态），不再发。失败只记一行 */
+function backfillResults(project: InboxProject, pending: Pending, d: ProposalInboxDeps, a: AutoApproveDeps): void {
+  try {
+    const db = a.db();
+    for (const r of pending.all) {
+      if (r.operation.state === "pending_approval") continue;
+      const ident = identityOf(project, paramsOf(project.localProjectId, r)), s = execState(db, execKey(ident.centerProject, ident.params));
+      if (s.result || !s.claims.some(c => c.lane === "auto")) continue;
+      recordExecResult(db, ident, { outcome: "settled", centerState: r.operation.state, reasons: [] }, d.now());
+      d.log(`[proposal-inbox] ${project.localProjectId} ${r.proposalId} rev ${r.proposalRev} 自动批准结果补记：中心 ${r.operation.state}`);
+    }
+  } catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 补记自动批准结果失败：${(e as Error).name}`); }
+}
+
+/** 核过审批权后、建卡前：逐条分类。observe 只记「本会自动批」样本；on 档非安全类且这一版本没有人工卡 → autoApprove。出错照旧出卡 */
+async function autoRoute(project: InboxProject, pending: Pending, mode: RecoveryMode, d: ProposalInboxDeps, a: AutoApproveDeps): Promise<Map<string, Plan>> {
+  const plan = new Map<string, Plan>(), id = project.localProjectId;
+  for (const r of pending.records) {
+    if (r.proposal.expiresAt <= d.now()) continue;
+    const params = paramsOf(id, r), verdict = a.files ? classifyProposal(r, a.files()) : classifyProposal(r);
+    try {
+      if (mode === "observe") {
+        if (verdict.route === "auto") observeAutoApprove(a.db(), identityOf(project, params), d.now());
+        continue;
+      }
+      if (verdict.route === "owner") plan.set(paramsKey(params), { reason: reasonText(verdict.reasons) });
+      else if (!a.hasCard(inboxDedupKey(params))) plan.set(paramsKey(params), await autoApprove(project, r, identityOf(project, params), d, a));
+    } catch (e) { d.log(`[proposal-inbox] ${id} 自动批准 ${r.proposalId} rev ${r.proposalRev} 出错：${(e as Error).name}，照旧出卡`); }
+  }
+  return plan;
+}
+
+/**
+ * 一条非安全类提案的自动批准：先抢执行占位，抢到才 decide（和人工路径同一个 d.decide + decisionBody，不伪造 owner 答复）。
+ * 成功写结果事件；409 记 conflict，下一轮按新快照重判；中心明确拒绝 → 交回人工出卡带错误码；结果不明 → 占位留着，
+ * 满 10 分钟仍待批才再发，同一 rev 最多 3 次，第 3 次仍不明交回人工。
+ */
+async function autoApprove(project: InboxProject, r: ProposalRecord, ident: ExecIdentity, d: ProposalInboxDeps, a: AutoApproveDeps): Promise<Plan> {
+  const db = a.db(), now = d.now(), s = execState(db, execKey(ident.centerProject, ident.params));
+  const tag = `[proposal-inbox] ${project.localProjectId} ${r.proposalId} rev ${r.proposalRev}`;
+  const handover = (reasons: AutoReason[], code?: string): Plan => {
+    recordExecResult(db, ident, { outcome: "handover", reasons, ...(code ? { code } : {}) }, d.now());
+    d.log(`${tag} 自动批准交回 owner：${reasons.join(",")}${code ? `（${code}）` : ""}`);
+    return { reason: reasonText(reasons, code) };
+  };
+  if (s.result) {
+    if (s.result.outcome === "handover") return { reason: reasonText(s.result.reasons, s.result.code) };
+    // conflict 之后同一 rev 还待批（中心不该这样）：不再自动发，交给 owner
+    return s.result.outcome === "conflict" ? { reason: reasonText(["auto_unconfirmed"]) } : SKIP;
+  }
+  if (s.claims.some(c => c.lane === "owner")) return {};
+  const tries = s.claims.length;
+  if (tries && now - Math.max(...s.claims.map(c => c.at)) < RETRY_AFTER_MS) return SKIP;
+  if (tries >= MAX_AUTO_ATTEMPTS) return handover(["auto_unconfirmed"]);
+  if (!claimExec(db, ident, "auto", now, tries + 1)) return SKIP;
+  try {
+    const record = await d.decide(project.scope, r.proposalId, decisionBody(ident.params, "approve"));
+    recordExecResult(db, ident, { outcome: "approved", centerState: record.operation.state, reasons: [] }, d.now());
+    d.log(`${tag} 已自动批准（中心 ${record.operation.state}）`);
+    return SKIP;
+  } catch (e) {
+    const code = inboxErrorCode(e);
+    if (isDecisionConflict(e)) {
+      recordExecResult(db, ident, { outcome: "conflict", code, reasons: [] }, d.now());
+      d.log(`${tag} 自动批准遇到 conflict，下一轮按新快照重新分类`);
+      return SKIP;
+    }
+    if (e instanceof FeatureProposalRejected || e instanceof FeatureProposalUnsupported) return handover(["auto_center_refused"], code);
+    if (tries + 1 >= MAX_AUTO_ATTEMPTS) return handover(["auto_unconfirmed"], code);
+    d.log(`${tag} 自动批准第 ${tries + 1} 次结果不明：${code}，占位保留`);
+    return SKIP;
+  }
 }
 
 /** 拉一个项目；失败只记一行（错误码，不含凭据 / 中心原文）→ null，这个项目的卡这一轮不动 */
@@ -196,8 +300,13 @@ async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
   // 日志按真实结果写（PROPRESULT1）：办成「已执行」，报错「执行…失败：<错误码>」，conflict「conflict，已重拉」；code 也记到结果卡上
   let text: string, resultCard = true, code: string, outcome: string;
   const failed = (c: string) => { code = c; outcome = `执行 ${decision} 失败：${c}`; return decisionResultText(title, params, { kind: "error", code: c }); };
+  const held = project ? claimForOwner(project, params, d) : "ok";
   if (!project) text = failed(unreadable ? "binding_state_unreadable" : "project_not_bound");
-  else {
+  else if (held === "error") text = failed("exec_claim_failed");
+  else if (held === "held") {
+    text = decisionResultText(title, params, { kind: "claimed" });
+    resultCard = false; code = "already_executing"; outcome = "未执行：该版本的执行占位已被占";
+  } else {
     try {
       const record = await d.decide(project.scope, params.proposalId, decisionBody(params, decision));
       text = decisionResultText(title, params, { kind: "done", record, decision });
@@ -211,6 +320,13 @@ async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
   d.log(`[proposal-inbox] 卡 ${a.id}（${params.proposalId} rev ${params.proposalRev}）${outcome!}`);
   const meta = { proposalId: params.proposalId, proposalRev: params.proposalRev, code: code! };
   await d.inform(text, { askId: a.id, title, resultCard, meta }).catch((e: Error) => d.log(`[proposal-inbox] 通知 owner 失败：${e.name}`));
+}
+
+/** PROPAUTO1：开关 on 时人工答复发 decide 前也抢同一个执行占位；抢不到 = 已在执行（自动批准或另一次答复），不再发。写不进台账 → error，不发 */
+function claimForOwner(project: InboxProject, params: InboxParams, d: ProposalInboxDeps): "ok" | "held" | "error" {
+  if (!d.auto || d.auto.mode(project.localProjectId) !== "on") return "ok";
+  try { return claimExec(d.auto.db(), identityOf(project, params), "owner", d.now()) ? "ok" : "held"; }
+  catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} ${params.proposalId} 抢执行占位失败：${(e as Error).name}`); return "error"; }
 }
 
 /** conflict：重拉一次；该提案仍待批就按新 rev 开新卡（同时撤这个项目里过时的卡） */
@@ -291,6 +407,11 @@ const liveDeps: ProposalInboxDeps = {
   inform: informOwner,
   handoff: handoffToMaster,
   log: line => console.log(line),
+  auto: {
+    mode: autoApproveMode,
+    db: askDb,
+    hasCard: key => !!askReadDb()?.query("SELECT 1 FROM asks WHERE dedupKey = ? AND createdBy = ?").get(key, PROPOSAL_INBOX_CREATOR),
+  },
 };
 
 let timer: ReturnType<typeof setInterval> | null = null;
