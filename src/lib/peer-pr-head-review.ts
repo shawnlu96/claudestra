@@ -1,12 +1,14 @@
 /**
  * merge-arch-PEERHEAD1 · a peer PR whose review passed and whose author then pushed again. Read side and the shared bits of the
- * two switches; the transactions are peer-pr-ledger.ts (headWrite / headSettleWrite) and manual-merge-queue.ts (requeueByScheduler).
+ * two switches; the transactions are peer-pr-ledger.ts (observeWrite / headWrite), the manual card's hand-back is the RECBASE1
+ * mechanism peerPrHeadResume (peer-pr-head-review-resume.ts).
  * - unresolvedP1Rounds: how many rounds in a row, ending at the latest verdict of this spec, still left a P1. Only that run of
  *   rounds spends maxRounds; a pass that was re-reviewed only because of a new head costs nothing. Rounds still only go up.
  * - the registration event (op peer_pr_head_review, cause author_push) names oldHead / newHead / priorReviewSeq and whether the
  *   next review may look at the author's increment only; headReviewLines turns it into the review order's scope line.
- * - flowBlock: hold, card pause, frozen queue, unanswered ask, safety hold stop every step of this flow (peer cards have no feature).
- * Switches: peerPrHeadReview (items 1–3, new key, default on) and peerPrRequeue (item 4, permission class, default observe).
+ * - flowBlock: hold, card pause, frozen queue, unanswered ask, safety hold stop every registration of this flow (peer cards have no feature).
+ * Switches: peerPrHeadReview (items 1–3, new key, default on) and peerPrRequeue (peerPrHeadResume's key: hand a registered manual card
+ * back to auto; permission class, default observe, read by the registry through manual-recovery-policy.ts).
  * docs/architecture/peer-pr-head-review.md; tests/peer-pr-head-review*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -27,7 +29,7 @@ let policyPort: RecoveryPolicyPort = recoveryPolicy;
 /** Tests inject a fake policy; null restores the file-backed one. */
 export function configureHeadReviewPolicy(port: RecoveryPolicyPort | null): void { policyPort = port ?? recoveryPolicy; }
 
-const modeOf = (project: string, key: typeof HEAD_REVIEW_KEY | typeof REQUEUE_KEY): RecoveryMode => {
+const modeOf = (project: string, key: typeof HEAD_REVIEW_KEY): RecoveryMode => {
   try {
     return policyPort(project, key).mode;
   } catch (e) {
@@ -37,7 +39,6 @@ const modeOf = (project: string, key: typeof HEAD_REVIEW_KEY | typeof REQUEUE_KE
 };
 /** Read right before each use; unreadable = off (the path as it was). */
 export const headReviewMode = (project: string): RecoveryMode => modeOf(project, HEAD_REVIEW_KEY);
-export const requeueMode = (project: string): RecoveryMode => modeOf(project, REQUEUE_KEY);
 
 /** One round of this spec: its latest verdict (null = none yet; "unknown" = a review without a structured verdict) and its P1 count. */
 export interface RoundVerdict { round: number; verdict: string | null; p1: number }
@@ -134,7 +135,7 @@ export function headReviewLines(round: number, events: readonly LedgerEvent[], h
   return [`第 ${round} 轮是作者推了新提交，但不能只审增量（${r.why}）：全量复审 head ${r.newHead.slice(0, 12)} 相对 main 的改动，并复验 ${prior} 的 P1 / P2。`];
 }
 
-/** Item 7: what stops every step of this flow (registration, settle, requeue); null = nothing does. The requeue also re-reads requestRefusal. */
+/** Item 7: what stops a registration of this flow (auto and manual); null = nothing does. The hand-back re-checks the same in the registry's base. */
 export function flowBlock(db: Database, task: Pick<LedgerTask, "id" | "project">, events: readonly LedgerEvent[]): string | null {
   if (getMeta(db, task.project).queueFrozen.frozen) return "项目合并队列已冻结";
   const hold = standingHold(events);
@@ -148,7 +149,7 @@ export function flowBlock(db: Database, task: Pick<LedgerTask, "id" | "project">
 }
 
 /** One sample per card + new head + step (recordObserved dedups); the observation plan reads them as this key's evidence. */
-export function headSample(db: Database, key: typeof HEAD_REVIEW_KEY | typeof REQUEUE_KEY, task: Pick<LedgerTask, "project" | "id">, step: string,
+export function headSample(db: Database, key: typeof HEAD_REVIEW_KEY, task: Pick<LedgerTask, "project" | "id">, step: string,
   head: string, action: string, data: Record<string, unknown>, now: number): { recorded: boolean; seq: number } {
   return recordObserved(db, { project: task.project, mechanism: key, target: task.id, actionKey: `${step}:${head}`, action, data }, now);
 }

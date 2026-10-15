@@ -13,11 +13,15 @@ import { insertEvent } from "../src/lib/ledger-tx.ts";
 import { moveStage, setFrozen } from "../src/lib/ledger-write.ts";
 import { claimManualMerge, listOpenRequests, manualTurn } from "../src/lib/manual-merge-queue.ts";
 import { listRequests, revokeOf } from "../src/lib/manual-merge-queue-facts.ts";
+import { proveRecovery } from "../src/lib/manual-recovery-release.ts";
+import { extensionMode } from "../src/lib/manual-recovery-policy.ts";
 import { PEER_PR_CONFIG_PATH } from "../src/lib/peer-pr-config.ts";
+import { entryHead, PEER_PR_HEAD_RESUME } from "../src/lib/peer-pr-head-review-resume.ts";
+import { manualEntry } from "../src/lib/manual-reason.ts";
 import type { OpenPr, PeerPrGithub } from "../src/lib/peer-pr-github.ts";
 import { headLineage } from "../src/lib/peer-pr-head-review-git.ts";
 import {
-  configureHeadReviewPolicy, HEAD_REVIEW_OP, headReviewMode, registrationScope, requeueMode, roundVerdicts, unresolvedP1Rounds, type Lineage,
+  configureHeadReviewPolicy, HEAD_REVIEW_OP, headReviewMode, registrationScope, roundVerdicts, unresolvedP1Rounds, type Lineage,
 } from "../src/lib/peer-pr-head-review.ts";
 import type { PeerPrDeps } from "../src/lib/peer-pr-notice.ts";
 import { peerPrTick } from "../src/lib/peer-pr-tick.ts";
@@ -54,7 +58,7 @@ afterAll(() => {
   rmSync(PEER_PR_CONFIG_PATH, { force: true });
   headLineage.read = realLineage;
 });
-afterEach(() => { configureHeadReviewPolicy(null); lineage = "successor"; });
+afterEach(() => { configureHeadReviewPolicy(null); lineage = "successor"; rmSync(RECOVERY_POLICY_PATH, { force: true }); });
 
 const pr = (): OpenPr => ({ number: 401, url: "https://github.com/o/r/pull/401", title: "修一个小问题", login: "he-dev",
   branch: "fix/small", head: H1, base: "main", crossRepo: false, headOwner: "o", draft: false });
@@ -87,11 +91,14 @@ function world() {
     const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
   };
+  const pmActions: string[] = [];
+  const notifyPm = f.tickDeps.notifyPm;
+  f.tickDeps.notifyPm = async (task, text, level) => { if (level !== "info") pmActions.push(text); return notifyPm(task, text, level); };
   const card = () => getTask(f.db, "PR401")!;
   const events = () => listEvents(f.db, { project: "p", target: "PR401" });
   /** A manual card's verdict is recorded by PM through `ledger review` naming the reviewer (the official manual path). */
-  const review = async (verdict: "pass" | "changes", head: string, rows: object[]) => {
-    const actor = getWorkflow(f.db, "PR401")?.mode === "manual" ? "pm" : "agent-rv-t1";
+  const review = async (verdict: "pass" | "changes", head: string, rows: object[], by?: string) => {
+    const actor = by ?? (getWorkflow(f.db, "PR401")?.mode === "manual" ? "pm" : "agent-rv-t1");
     const p = `${f.dir}/findings-${head.slice(0, 4)}-${card().round}.json`;
     writeFileSync(p, JSON.stringify(rows));
     f.reviewerCheckoutAt(head);
@@ -110,7 +117,7 @@ function world() {
     poll(); await peerTick();
   };
   const settle = async () => { poll(); await peerTick(); };
-  return { f, open, notices, ownerPushes, deps, peerTick, autoTick, card, events, review, poll, push, settle };
+  return { f, open, notices, pmActions, ownerPushes, deps, peerTick, autoTick, card, events, review, poll, push, settle };
 }
 type W = ReturnType<typeof world>;
 
@@ -136,12 +143,26 @@ async function firstRound(w: W, verdict: "pass" | "changes") {
 const pm = (w: W) => ({ actor: "pm", now: w.f.tickDeps.now() });
 const rounds = (w: W) => w.notices.filter((n) => n.includes("复验轮次到顶"));
 const registrations = (w: W) => w.events().filter((e) => e.kind === "note" && e.data.op === HEAD_REVIEW_OP);
+const headIntents = (w: W, head: string) => w.f.db.query("SELECT action, status FROM scheduler_intents WHERE taskId = 'PR401' AND head = ? ORDER BY eventSeq")
+  .all(head) as { action: string; status: string }[];
 const reviewSeq = (w: W) => w.events().findLast((e) => e.kind === "review")!.seq;
 
-/** r1 pass → merge (auto) → the path hands the card back (manual) → PM queues it by hand: the state PR1593/1598/1602/1603 were in. */
-async function manualQueued(w: W) {
+/** The planner's escalation the peer samples entered manual with (MAN1 code review_unresolved). */
+const ROUND_CAP = "review_round_cap：第 2 轮审查后仍有 P1，复验轮次到顶";
+const resumes = (w: W) => w.events().filter((e) => e.kind === "scheduler" && e.data.op === "workflow_resume");
+/** peerPrRequeue (and the manualRecovery umbrella it is read with) as PM sets it. */
+async function requeueKey(w: W, mode: RecoveryMode) {
+  for (const key of ["manualRecovery", "peerPrRequeue"]) {
+    if (key === "manualRecovery" && mode !== "on") continue;
+    expect(await w.f.cli("pm", "scheduler-recovery", "p", mode, "--key", key, "--reason", `PEERHEAD1 测试 ${key} ${mode}`)).toMatchObject({ ok: true });
+  }
+}
+const prove = (w: W) => proveRecovery(w.f.db, w.card(), getWorkflow(w.f.db, "PR401"), PEER_PR_HEAD_RESUME, null);
+
+/** r1 pass → merge (auto) → the path hands the card back (manual, review_unresolved) → PM queues it by hand: the state PR1593/1598/1602 were in. */
+async function manualQueued(w: W, reason = ROUND_CAP) {
   await firstRound(w, "pass");
-  expect((await w.f.cli("scheduler", "scheduler-fallback-manual", "PR401", "--reason", "PM 接管")).ok).toBe(true);
+  expect((await w.f.cli("scheduler", "scheduler-fallback-manual", "PR401", "--reason", reason)).ok).toBe(true);
   expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("manual");
   const c = w.card();
   const r = await w.f.cli("pm", "manual-merge-request", "PR401", "--head", c.headSHA!, "--spec-rev", String(c.specRev), "--round", String(c.round),
@@ -181,7 +202,7 @@ describe("纯函数：连续未解决 P1 轮数（验收线 1）", () => {
 
   test("未配置：peerPrHeadReview 缺省 on，peerPrRequeue 缺省 observe（验收线 7）", () => {
     configureHeadReviewPolicy(null);
-    expect([headReviewMode("p"), requeueMode("p")]).toEqual(["on", "observe"]);
+    expect([headReviewMode("p"), extensionMode("p", "peerPrRequeue").mode]).toEqual(["on", "observe"]);
   });
 });
 
@@ -256,83 +277,161 @@ describe("自动卡：到顶判定读结论（验收线 1 / 7）", () => {
   });
 });
 
-describe("manual 卡：受限自动复审 → 代排（验收线 2–8）", () => {
-  test("merge + queued 请求 + 最近 pass + 后继提交：旧请求结清，进 review 第 2 轮，工单只审增量；pass 后代排、不发任何通知", async () => {
+describe("manual 卡：登记新 head → peerPrHeadResume 交回自动（验收线 2–8）", () => {
+  test("on：merge + queued 请求 + 最近 pass + 后继提交：结清旧请求、登记、交回 auto、派增量审；pass 走自动合并绑新 head；不推送（验收线 2 / 3 / 8）", async () => {
     setModes("on", "on");
     const w = world();
+    await requeueKey(w, "on");
     const old = await manualQueued(w);
+    const actionsBefore = w.pmActions.length;
     await w.push(H2);
     expect(w.card()).toMatchObject({ stage: "review", round: 2, headSHA: H2 });
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("manual");
     const req = listRequests(w.f.db, "p", "PR401").find((r) => r.seq === old)!;
     expect(revokeOf(w.f.db, req)?.data).toMatchObject({ byScheduler: "peerPrHeadReview" });
     expect(listOpenRequests(w.f.db, "p")).toEqual([]); // 复审期间旧请求占不了槽
     expect(manualTurn(w.f.db, "p", "none", Date.now()).kind).toBe("none");
     const reg = registrations(w).at(-1)!;
     expect(reg.data).toMatchObject({ cause: "author_push", oldHead: H1, newHead: H2, priorReviewSeq: reviewSeq(w), scope: "incremental", settled: { requests: [old] } });
+
+    await w.autoTick(); // the registry (manual-recovery-release.ts) hands it back through scheduler-manual-resume --mechanism
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("auto");
+    expect(resumes(w).map((e) => (e.data.recoveryProof as { mechanism: string; head: string; round: number })))
+      .toEqual([expect.objectContaining({ mechanism: PEER_PR_HEAD_RESUME, head: H2, round: 2 })]);
+    for (let i = 0; i < 3 && !headIntents(w, H2).length; i++) await w.autoTick();
+    expect(headIntents(w, H2).map((i) => i.action)).toEqual(["review"]); // the review order really went out, for the new head
     const lines = convergeOrderLines(2, w.events(), H2).join("\n");
     expect(lines).toContain(`git diff ${H1.slice(0, 12)}..${H2.slice(0, 12)}`);
     expect(lines).not.toContain(H2); // 工单里只写短号
 
-    await w.review("pass", H2, []);
-    await w.settle();
-    const fresh = listRequests(w.f.db, "p", "PR401").filter((r) => !revokeOf(w.f.db, r));
-    expect(w.card()).toMatchObject({ stage: "merge", round: 2, headSHA: H2 });
-    expect(fresh).toHaveLength(1);
-    expect(fresh[0]).toMatchObject({ head: H2, round: 2, requestedBy: "scheduler", review: { seq: reviewSeq(w) } });
-    const ev = w.events().find((e) => e.seq === fresh[0]!.seq)!;
-    expect(ev.data.byScheduler).toMatchObject({ mechanism: "peerPrRequeue", mode: "on", priorRequestSeq: old, passSeq: reviewSeq(w) });
-    // 重复 tick / 重启（新的 tick 内存）都不再登记、不再排
+    await w.review("pass", H2, []); // the bound reviewer's own verdict (the card is auto)
+    await w.peerTick();
+    await until(w, "merge");
+    for (let i = 0; i < 3 && !headIntents(w, H2).some((x) => x.action === "merge"); i++) await w.autoTick();
+    expect(headIntents(w, H2).map((i) => i.action)).toContain("merge"); // the automatic merge, bound to the new head
+    expect(w.f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE taskId = 'PR401' AND action = 'merge' AND head != ?").get(H2)).toEqual({ n: 0 });
+    // 重复 tick / 重启：只登记一次、只交回一次
     await w.settle();
     await peerPrTick(w.f.db, { deps: () => w.deps, state: { heads: new Map(), lastPoll: 0, repo: null, noticeFailAt: new Map(), verifyAt: new Map() } });
-    expect(listRequests(w.f.db, "p", "PR401").filter((r) => !revokeOf(w.f.db, r))).toHaveLength(1);
-    expect(registrations(w)).toHaveLength(1);
-    expect(w.notices).toEqual([]); // 验收线 8：PM 通知 0 次（本测试世界没有 owner 推送口，调度器也没调到）
+    await w.autoTick();
+    expect([registrations(w).length, resumes(w).length]).toEqual([1, 1]);
+    expect(w.notices).toEqual([]); // 验收线 8：peer 路径 PM 通知 0 次
+    expect(w.pmActions.slice(actionsBefore)).toEqual([]); // 调度器侧没有要 PM 动手（action）的通知；注册表交回的那条是 info（只记卡片、不送 PM）
     expect(w.ownerPushes).toEqual([]);
     w.f.close();
   });
 
-  test("复审 changes 不排队、回 fix；连续 changes 到顶时 PM 只听一次", async () => {
+  test("on：交回后复审 changes 回 fix，不合并（验收线 3）", async () => {
     setModes("on", "on");
     const w = world();
+    await requeueKey(w, "on");
     await manualQueued(w);
     await w.push(H2);
+    for (let i = 0; i < 4 && !headIntents(w, H2).length; i++) await w.autoTick();
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("auto");
     await w.review("changes", H2, [P1]);
-    await w.settle();
-    expect(w.card()).toMatchObject({ stage: "fix", round: 2 });
-    expect(listRequests(w.f.db, "p", "PR401").filter((r) => !revokeOf(w.f.db, r))).toEqual([]);
-    expect(w.notices).toEqual([]);
-    await w.push(H3); // 连续 P1 只有 1 轮：照样登记第 3 轮
-    expect(w.card()).toMatchObject({ stage: "review", round: 3, headSHA: H3 });
-    await w.review("changes", H3, [P1]);
-    await w.settle();
-    await w.settle();
-    expect(w.card()).toMatchObject({ stage: "fix", round: 3 });
-    await w.push(H4);
-    await w.settle();
-    expect(w.card()).toMatchObject({ stage: "fix", round: 3, headSHA: H3 });
-    expect(w.notices.filter((n) => n.includes("复验轮次到顶"))).toHaveLength(1);
-    expect(w.notices).toHaveLength(1);
+    await w.peerTick();
+    await until(w, "fix");
+    expect(w.card()).toMatchObject({ stage: "fix", round: 2, headSHA: H2 });
+    expect(headIntents(w, H2).filter((i) => i.action === "merge")).toEqual([]);
     w.f.close();
   });
 
-  test("审查中又推：旧审查绑旧 head；结论（pass）出来后不排队，按最新 head 再登记一轮；force-push 全量并写明原因", async () => {
+  test("审查中又推：旧审查绑旧 head；结论（pass）出来后不合并，按最新 head 再登记一轮；force-push 全量并写明原因（验收线 5）", async () => {
     setModes("on", "on");
     const w = world();
+    await requeueKey(w, "on");
     await manualQueued(w);
     await w.push(H2);
+    for (let i = 0; i < 4 && !headIntents(w, H2).length; i++) await w.autoTick();
     lineage = "force";
     await w.push(H3); // 第 2 轮还没结论
     expect(w.card()).toMatchObject({ stage: "review", round: 2, headSHA: H2 });
     await w.review("pass", H2, []);
     await w.settle();
     await w.settle();
+    await w.autoTick();
     expect(w.card()).toMatchObject({ stage: "review", round: 3, headSHA: H3 });
-    expect(listRequests(w.f.db, "p", "PR401").filter((r) => !revokeOf(w.f.db, r))).toEqual([]); // 中间版本的 pass 不授权
+    expect(w.f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE taskId = 'PR401' AND action = 'merge'").get()).toEqual({ n: 0 }); // 中间版本的 pass 不授权
     expect(registrations(w).at(-1)!.data).toMatchObject({ oldHead: H2, newHead: H3, scope: "full" });
     const lines = convergeOrderLines(3, w.events(), H3).join("\n");
     expect(lines).toContain("不能只审增量");
     expect(lines).toContain("force-push");
     w.f.close();
+  });
+
+  test("peerPrRequeue 未配置 = observe：不交回，一条『本会交回』样本，PM 一次通知；重复 tick 不再记、不再发（验收线 7）", async () => {
+    setModes("on", "observe");
+    const w = world();
+    await manualQueued(w);
+    await w.push(H2);
+    for (let i = 0; i < 3; i++) { await w.autoTick(); await w.settle(); }
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("manual");
+    expect(w.card()).toMatchObject({ stage: "review", round: 2, headSHA: H2 });
+    expect(headIntents(w, H2)).toEqual([]);
+    const samples = w.events().filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "peerPrRequeue");
+    expect(samples).toHaveLength(1);
+    expect(samples[0]!.data.recoveryProof).toMatchObject({ mechanism: PEER_PR_HEAD_RESUME, head: H2, round: 2, subreason: "author_push" });
+    const n = w.notices.filter((x) => x.includes("本会交回 auto"));
+    expect(n).toHaveLength(1);
+    expect(n[0]).toContain("新 head 已登记到 review");
+    expect(w.notices).toHaveLength(1);
+    w.f.close();
+  });
+
+  test("peerPrRequeue off：照样登记进 review，但不交回、不记样本、不通知", async () => {
+    setModes("on", "observe");
+    const w = world();
+    await requeueKey(w, "off");
+    await manualQueued(w);
+    await w.push(H2);
+    for (let i = 0; i < 3; i++) { await w.autoTick(); await w.settle(); }
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("manual");
+    expect(w.card()).toMatchObject({ stage: "review", round: 2, headSHA: H2 });
+    expect(w.events().filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "peerPrRequeue")).toEqual([]);
+    expect(w.notices).toEqual([]);
+    w.f.close();
+  });
+
+  test("不交回：sticky 码（PM 接管）；PR1603 那类最近结论不是 pass；登记后 head 又变；登记的 oldHead 对不上进 manual 的 head（验收线 6）", async () => {
+    setModes("on", "on");
+    // sticky：PM 接管进的 manual，照样登记，但注册表不交回
+    const w = world();
+    await requeueKey(w, "on");
+    await manualQueued(w, "PM 接管");
+    await w.push(H2);
+    expect(w.card()).toMatchObject({ stage: "review", round: 2 });
+    for (let i = 0; i < 3; i++) await w.autoTick();
+    expect([getWorkflow(w.f.db, "PR401")?.mode, resumes(w).length]).toEqual(["manual", 0]);
+    expect(prove(w)).toMatchObject({ kind: "refused", why: expect.stringContaining("pm_takeover") });
+    w.f.close();
+
+    // PR1603：review_unresolved，但最近结论是 changes / P1：不登记、不交回
+    const v = world();
+    await requeueKey(v, "on");
+    await firstRound(v, "changes");
+    expect((await v.f.cli("scheduler", "scheduler-fallback-manual", "PR401", "--reason", ROUND_CAP)).ok).toBe(true);
+    await v.push(H2);
+    for (let i = 0; i < 3; i++) await v.autoTick();
+    expect([getWorkflow(v.f.db, "PR401")?.mode, v.card().headSHA, registrations(v).length, resumes(v).length]).toEqual(["manual", H1, 0, 0]);
+    v.f.close();
+
+    // 登记后 head 又变（H2 → H3，没有登记）：entryHead 不担保，manualBase 照旧拒「head 已变」
+    const u = world();
+    await requeueKey(u, "observe");
+    await manualQueued(u);
+    await u.push(H2);
+    expect(prove(u)).toMatchObject({ kind: "candidate", proof: { mechanism: PEER_PR_HEAD_RESUME, head: H2, round: 2, evidenceSeq: registrations(u).at(-1)!.seq } });
+    const entry = manualEntry(u.events())!;
+    expect(entryHead(u.card(), u.events(), entry.event.seq, entry.record!)).toBe(H1);
+    // 登记的 oldHead 对不上进 manual 时记的 head：不担保
+    expect(entryHead(u.card(), u.events(), entry.event.seq, { ...entry.record!, head: H4 })).toBeNull();
+    // 登记早于这次进 manual：不担保
+    expect(entryHead(u.card(), u.events(), registrations(u).at(-1)!.seq + 1, entry.record!)).toBeNull();
+    u.f.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'PR401'").run(H3);
+    expect(entryHead(u.card(), u.events(), entry.event.seq, entry.record!)).toBeNull();
+    expect(prove(u)).toMatchObject({ kind: "refused", why: "head 已变" });
+    u.f.close();
   });
 
   test("合并已发出 / 运行 unknown 的不碰；纯合 main 的新 head 不算作者改动", async () => {
@@ -402,39 +501,6 @@ describe("manual 卡：受限自动复审 → 代排（验收线 2–8）", () =
       expect(registrations(w)).toEqual([]);
       w.f.close();
     }
-  });
-
-  test("peerPrRequeue 未配置 = observe：不代排，记一条『本会代排』样本，PM 收一次带参数的通知", async () => {
-    setModes("on", "observe");
-    const w = world();
-    await manualQueued(w);
-    await w.push(H2);
-    await w.review("pass", H2, []);
-    await w.settle();
-    await w.settle();
-    expect(w.card()).toMatchObject({ stage: "merge", round: 2, headSHA: H2 });
-    expect(listRequests(w.f.db, "p", "PR401").filter((r) => !revokeOf(w.f.db, r))).toEqual([]);
-    const samples = w.events().filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "peerPrRequeue");
-    expect(samples).toHaveLength(1);
-    expect(samples[0]!.data).toMatchObject({ oldHead: H1, newHead: H2, priorRequestSeq: expect.any(Number), passSeq: reviewSeq(w) });
-    const n = w.notices.filter((x) => x.includes("manual-merge-request"));
-    expect(n).toHaveLength(1);
-    expect(n[0]).toContain(`--head ${H2} --spec-rev ${w.card().specRev} --round 2 --review-seq ${reviewSeq(w)}`);
-    w.f.close();
-  });
-
-  test("peerPrRequeue off：复审通过回 merge，但不代排、不记样本、不通知", async () => {
-    setModes("on", "off");
-    const w = world();
-    await manualQueued(w);
-    await w.push(H2);
-    await w.review("pass", H2, []);
-    await w.settle();
-    expect(w.card()).toMatchObject({ stage: "merge", round: 2, headSHA: H2 });
-    expect(listRequests(w.f.db, "p", "PR401").filter((r) => !revokeOf(w.f.db, r))).toEqual([]);
-    expect(w.events().filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "peerPrRequeue")).toEqual([]);
-    expect(w.notices).toEqual([]);
-    w.f.close();
   });
 
   test("peerPrHeadReview off：manual 卡逐字回到现状（不登记、不碰请求）", async () => {

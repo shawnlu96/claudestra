@@ -7,7 +7,7 @@
  * the bounce adds no round, so the last allowed round's pass followed by red CI must still re-review the new head.
  * PEERHEAD1 (peerPrHeadReview on): "at maxRounds" means consecutive rounds still holding a P1 (peer-pr-head-review.ts), so a pass
  * re-reviewed only for a new head costs nothing; and a manual peer card the author pushed to after a passing review is handed to
- * `ledger peer-pr-observe` too (its manual branch: the new head, or the card's own head once the re-review is in). Off: as it was.
+ * `ledger peer-pr-observe` too (its manual branch registers the new head into review; peerPrHeadResume hands it back). Off: as it was.
  */
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, listEvents } from "./ledger-store.js";
@@ -15,8 +15,8 @@ import type { OpenPr } from "./peer-pr-github.js";
 import { headChecked, markHeadChecked } from "./peer-pr-hold.js";
 import { headStable } from "./peer-pr-intake.js";
 import { hasRoundVerdict, inFlightPeerCards, manualPeerCards, peerPrOf, pushDedupKey, type PeerPrMeta } from "./peer-pr-ledger.js";
-import { HEAD_REVIEW_KEY, headReviewMode, p1RoundsSpent, passingFacts, registrationOf, requeueMode } from "./peer-pr-head-review.js";
-import { listRequests, revokeOf } from "./manual-merge-queue-facts.js";
+import { HEAD_REVIEW_KEY, headReviewMode, p1RoundsSpent, passingFacts, REQUEUE_KEY } from "./peer-pr-head-review.js";
+import { PEER_PR_HEAD_RESUME } from "./peer-pr-head-review-resume.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { renderBouncePush, renderDriftPush } from "./peer-pr-message.js";
 import { fallbackOnce, logUnlessStopped, noticeOnce, record, type PeerPrCtx } from "./peer-pr-notice.js";
@@ -137,46 +137,35 @@ async function checkCard(c: PeerPrCtx, repo: string, card: LedgerTask, meta: Pee
 const MANUAL_RETRY_MS = 5 * 60_000;
 const manualAsked = new WeakMap<PeerPrCtx["state"], Map<string, { head: string; at: number }>>();
 
-/** PM hears once per card + round that consecutive re-reviews still had a P1 at maxRounds (the card stays manual, in fix). */
-const topNotice = (c: PeerPrCtx, card: LedgerTask) => noticeOnce(c, card.id, `head-top:${card.specRev}:${card.round}`,
-  `[peer PR] ${card.id} 作者新推后的复审连续 ${c.cfg.maxRounds} 轮仍有 P1，复验轮次到顶：卡留在人工，请 PM 接手`);
+/** recordObserved's note op (recovery-policy.ts). */
+const RECOVERY_OBSERVE_OP = "recovery_observe";
 
-/** peerPrRequeue observe: PM hears once per new head what the scheduler would have queued, as a command PM can run as is. */
-const requeueKey = (head: string): string => `requeue:${head.slice(0, 12)}`;
-const requeueNotice = (c: PeerPrCtx, card: LedgerTask, w: Record<string, unknown>) => noticeOnce(c, card.id, requeueKey(String(w.head)),
-  `[peer PR] ${card.id} 作者新推后的增量复审已通过，peerPrRequeue 在 observe，调度器没代排。要排就跑：ledger manual-merge-request ${card.id} ` +
-  `--head ${String(w.head)} --spec-rev ${String(w.specRev)} --round ${String(w.round)} --review-seq ${String(w.reviewSeq)} --reason "peer PR 作者新推后增量复审通过"`);
-
-/** This flow's round on the card's head has a verdict to act on (review), or passed and waits for its requeue (merge). */
-function settleDue(c: PeerPrCtx, card: LedgerTask): boolean {
-  const events = listEvents(c.db, { project: card.project, target: card.id });
-  const reg = registrationOf(events, card.round, card.headSHA, "manual");
-  if (!reg) return false;
-  if (card.stage === "review") return currentReviewFacts(card, events).kind === "facts";
-  if (card.stage !== "merge" || listRequests(c.db, card.project, card.id).some((r) => r.seq > reg.seq && !revokeOf(c.db, r))) return false;
-  // waiting in merge: on retries the requeue; observe only until PM has heard of it once; off has nothing to do
-  const mode = requeueMode(card.project);
-  return mode === "on" || (mode === "observe" && !getEventByDedup(c.db, pushDedupKey(card.id, requeueKey(card.headSHA ?? ""), "notice_sent")!));
+/**
+ * peerPrRequeue observe: the registry (peerPrHeadResume) wrote its one would-resume sample for this round + head; PM hears it once per
+ * head, since the card stays manual on the registered head and nobody dispatches its review until PM does (or flips the key on).
+ */
+async function wouldResumeNotice(c: PeerPrCtx, card: LedgerTask): Promise<void> {
+  const head = card.headSHA ?? "";
+  const seen = listEvents(c.db, { project: card.project, target: card.id }).some((e) => {
+    const p = e.data.recoveryProof as { mechanism?: unknown; head?: unknown; round?: unknown } | undefined;
+    return e.kind === "note" && e.data.op === RECOVERY_OBSERVE_OP && e.data.mechanism === REQUEUE_KEY && p?.mechanism === PEER_PR_HEAD_RESUME && p.head === head && p.round === card.round;
+  });
+  if (!seen) return;
+  // project level: a note on the card would be a new fact, so the registry would record one more "would resume" sample
+  await noticeOnce(c, "", `resume:${card.id}:${head.slice(0, 12)}`, `[peer PR] ${card.id} 作者审查通过后又推了 ${head.slice(0, 12)}：新 head 已登记到 review（第 ${card.round} 轮），` +
+    "本会交回 auto 走增量复审（peerPrRequeue 在 observe，没交回）。卡留在人工：请 PM 手动派审，或把 peerPrRequeue 切 on");
 }
 
 /**
- * A manual peer card: only the author-push flow looks at it, and only through the ledger's own checks (headWrite / headSettleWrite).
- * A head GitHub shows that differs from the card's is never settled on: the old head's verdict waits for the newer head.
+ * A manual peer card: only the author-push registration looks at it (headWrite, through the ledger's own checks), and only after a
+ * passing review. Handing it back to auto is peerPrHeadResume's (the manual recovery registry), never this tick's.
  */
 async function checkManual(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta, pr: OpenPr | undefined): Promise<string> {
   if (!pr || pr.base !== "main" || pr.crossRepo) return "";
-  if (pr.head === card.headSHA) {
-    if (headReviewMode(card.project) !== "on" || !settleDue(c, card)) return "";
-    const r = await c.deps.manager("ledger", "peer-pr-observe", card.id, "--head", card.headSHA!);
-    if (r.ok !== true) return `复审结论没结上：${String(r.error)}`;
-    if (r.top === true) await topNotice(c, card);
-    if (r.wouldRequeue && typeof r.wouldRequeue === "object") await requeueNotice(c, card, r.wouldRequeue as Record<string, unknown>);
-    return r.moved === true || r.requeued ? String(r.reason) : "";
-  }
+  if (pr.head === card.headSHA) return (card.stage === "review" ? await wouldResumeNotice(c, card) : undefined, "");
   if (!["review", "fix", "merge"].includes(card.stage) || !hasRoundVerdict(c.db, card)) return "";
-  const events = listEvents(c.db, { project: card.project, target: card.id });
-  const f = currentReviewFacts(card, events);
-  if (!(f.kind === "facts" && passingFacts(f.facts)) && !registrationOf(events, card.round, card.headSHA, "manual")) return "";
+  const f = currentReviewFacts(card, listEvents(c.db, { project: card.project, target: card.id }));
+  if (!(f.kind === "facts" && passingFacts(f.facts))) return "";
   if (!headStable(c.state, meta.number, pr.head, c.deps.now(), c.cfg.headSettleSec)) return "新 head 还没稳";
   const asked = manualAsked.get(c.state) ?? new Map<string, { head: string; at: number }>();
   manualAsked.set(c.state, asked);
@@ -187,7 +176,6 @@ async function checkManual(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta, pr:
   if (fetched) return `取新 head 没对上，下一轮再试：${fetched}`;
   const r = await c.deps.manager("ledger", "peer-pr-observe", card.id, "--head", pr.head);
   if (r.ok !== true) return `新 head 没写进台账：${String(r.error)}`;
-  if (r.top === true) await topNotice(c, card);
   if (r.moved === true) asked.delete(card.id);
   return r.moved === true ? String(r.reason) : "";
 }

@@ -58,7 +58,7 @@ export type ManualBase = { ok: true; events: LedgerEvent[]; entry: ManualEntry &
  * The manual card as it entered: not terminal, still manual, a structured MAN1 entry that `admit` accepts, and no drift of spec /
  * head / UI since, with no card-side refusal. `admit` runs before the drift checks so a code nobody lifts says so first.
  */
-export function manualBase(db: Database, task: LedgerTask, wf: TaskWorkflow | null, admit: (rec: ManualReasonRecord) => string | null): ManualBase {
+export function manualBase(db: Database, task: LedgerTask, wf: TaskWorkflow | null, admit: (rec: ManualReasonRecord) => string | null, entryHead?: (task: LedgerTask, events: readonly LedgerEvent[], entrySeq: number, rec: ManualReasonRecord) => string | null): ManualBase {
   if (TERMINAL_STAGES.includes(task.stage)) return { ok: false, why: `卡已 ${task.stage}` };
   if (wf?.mode !== "manual") return { ok: false, why: "workflow 不是 manual" };
   const events = listEvents(db, { project: task.project, target: task.id });
@@ -68,7 +68,7 @@ export function manualBase(db: Database, task: LedgerTask, wf: TaskWorkflow | nu
   const refused = admit(rec);
   if (refused) return { ok: false, why: refused };
   if (rec.specRev !== task.specRev) return { ok: false, why: `规格已变（specRev ${rec.specRev}→${task.specRev}）` };
-  if ((rec.head ?? null) !== (task.headSHA ?? null)) return { ok: false, why: "head 已变" };
+  if ((rec.head ?? null) !== (entryHead?.(task, events, entry.event.seq, rec) ?? task.headSHA ?? null)) return { ok: false, why: "head 已变" }; // PEERHEAD1：机制担保的 entry head
   if ((rec.uiDigest ?? null) !== uiDigest(task)) return { ok: false, why: "UI 截图摘要已变" };
   const block = cardBlock(db, task, events, entry.event.seq);
   return block ? { ok: false, why: block } : { ok: true, events, entry: { ...entry, record: rec } };

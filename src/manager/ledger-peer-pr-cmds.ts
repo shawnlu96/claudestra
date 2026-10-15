@@ -14,7 +14,7 @@ import { peerPrGithub, type PeerPrGithub } from "../lib/peer-pr-github.js";
 import { verifiedIntake } from "../lib/peer-pr-intake.js";
 import { headLineage } from "../lib/peer-pr-head-review-git.js";
 import { headReviewMode, type Lineage } from "../lib/peer-pr-head-review.js";
-import { headSettleWrite, headWrite, intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, REDELIVER_PREFIX, type PushResult } from "../lib/peer-pr-ledger.js";
+import { headWrite, intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, REDELIVER_PREFIX, type PushResult } from "../lib/peer-pr-ledger.js";
 import { claimRedelivery, requestRedelivery } from "../lib/peer-pr-retry.js";
 import { peerPrSpec } from "../lib/peer-pr-spec.js";
 import { readReviewReport } from "../lib/peer-pr-tick.js";
@@ -70,24 +70,18 @@ export const PEER_PR_CMDS: Record<string, CommandSpec> = {
   },
   "peer-pr-observe": {
     valued: ["head"], bools: [],
-    usage: "peer-pr-observe <task> --head <sha>（peer PR 的新 head 稳定后交给卡：fix 直接复验，review 有结论时先转 fix；manual 卡走作者新推复审 / 结论结算，peerPrHeadReview）",
+    usage: "peer-pr-observe <task> --head <sha>（peer PR 的新 head 稳定后交给卡：fix 直接复验，review 有结论时先转 fix；manual 卡在审查通过后作者新推：登记新 head 进 review，peerPrHeadReview）",
     async run(c) {
       const task = c.task(c.p.pos[1]);
       allow(c, task.project, "记 peer PR 新 head ");
       const cfg = configFor(task.project), head = c.need("head");
       const mode = headReviewMode(task.project);
-      // PEERHEAD1: a manual card is only ever the author-push flow's (headWrite; its own head again = settle the round's verdict)
+      // PEERHEAD1: a manual card only ever meets the author-push registration (headWrite); handing it back is peerPrHeadResume's
       if (mode !== "off" && getWorkflow(c.db, task.id)?.mode === "manual") {
-        if (head === task.headSHA) {
-          c.deps.assertLease?.();
-          const r = headSettleWrite(c.db, c.ctx(), { taskId: task.id, maxRounds: cfg.maxRounds });
-          return { ok: true, moved: r.moved, reason: r.reason, top: r.top === true, requeued: r.requeued ?? null, wouldRequeue: r.wouldRequeue ?? null,
-            task: { id: r.task.id, stage: r.task.stage, round: r.task.round } };
-        }
         const lineage = await lineageOf(cfg.repoDir, task.headSHA, head);
         c.deps.assertLease?.();
-        const r = headWrite(c.db, c.ctx(), { taskId: task.id, head, lineage, maxRounds: cfg.maxRounds });
-        return { ok: true, moved: r.moved, reason: r.reason, top: r.top === true, lineage, task: { id: r.task.id, stage: r.task.stage, round: r.task.round } };
+        const r = headWrite(c.db, c.ctx(), { taskId: task.id, head, lineage });
+        return { ok: true, moved: r.moved, reason: r.reason, lineage, task: { id: r.task.id, stage: r.task.stage, round: r.task.round } };
       }
       // off: no repository read and no registration, the observe as it was
       const lineage = mode === "off" ? undefined : await lineageOf(cfg.repoDir, task.headSHA, head);

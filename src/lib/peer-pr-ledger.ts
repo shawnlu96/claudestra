@@ -14,11 +14,9 @@ import { appendEvent, createTask, deliver, moveStage } from "./ledger-write.js";
 import { BRANCH } from "./order-deliver-pr.js";
 import { peerOfLogin, type PeerPrConfig } from "./peer-pr-config.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
-import { requeueByScheduler } from "./manual-merge-queue.js";
 import { intentOf, listRequests, revokeOf, REVOKE_OP } from "./manual-merge-queue-facts.js";
 import {
-  flowBlock, HEAD_REVIEW_KEY, headReviewMode, headSample, type Lineage, p1RoundsSpent, passingFacts, registrationOf, registrationScope, type Registration,
-  requeueMode, REQUEUE_KEY, reviewSpecRev, writeRegistration,
+  flowBlock, HEAD_REVIEW_KEY, headReviewMode, headSample, type Lineage, passingFacts, registrationScope, type Registration, reviewSpecRev, writeRegistration,
 } from "./peer-pr-head-review.js";
 import { getMergeRun } from "./scheduler-merge.js";
 import { cancelMergeRun } from "./scheduler-merge-conflict.js";
@@ -159,9 +157,9 @@ function register(db: Database, ctx: WriteCtx, from: LedgerTask, to: LedgerTask,
   settled: { requests: number[]; intents: string[] } | null): void {
   const mode = headReviewMode(to.project), now = ctx.now ?? Date.now();
   if (mode === "off") return;
-  const events = listEvents(db, { project: to.project, target: to.id });
+  const events = listEvents(db, { project: to.project, target: to.id }), wf = getWorkflow(db, to.id);
   const reg: Registration = { cause: "author_push", oldHead: from.headSHA ?? "", newHead: to.headSHA ?? "", priorReviewSeq: prior?.seq ?? null,
-    round: to.round, specRev: to.specRev, flow: getWorkflow(db, to.id)?.mode === "manual" ? "manual" : "auto",
+    round: to.round, specRev: to.specRev, flow: wf?.mode === "manual" ? "manual" : "auto",
     ...registrationScope(SHA_RE.test(from.headSHA ?? "") ? lineage : "missing", reviewSpecRev(events, prior?.seq ?? null), to.specRev) };
   const sample = { ...reg, priorVerdict: prior?.data.verdict ?? null, settled };
   if (mode === "on") writeRegistration(db, ctx, to, reg, { settled });
@@ -180,23 +178,23 @@ function standingRequests(db: Database, task: LedgerTask) {
 /** Phases a claimed manual run may be in for this flow to end it: nothing was sent, and no update of the PR branch is in flight. */
 const SETTLEABLE: readonly string[] = ["ready", "await_ci"];
 
-export interface HeadWriteResult { task: LedgerTask; moved: boolean; reason: string; top?: boolean }
+export interface HeadWriteResult { task: LedgerTask; moved: boolean; reason: string }
 
 /**
- * PEERHEAD1 item 2 · `ledger peer-pr-observe` on a manual card: a stable new head on a manual peer card (the auto card's path is observeWrite). Only
- * when the author pushed after a passing review (or into a round this flow registered, while consecutive P1 rounds stay under
- * maxRounds); never for a pure main merge (main-carry), never past a hold / pause / freeze / open ask / safety hold. In merge
- * the card's standing manual requests are revoked and their unsent runs (ready / await_ci) ended in this same transaction; a
+ * PEERHEAD1 item 2 · `ledger peer-pr-observe` on a manual card: a stable new head the author pushed after a passing review (the auto
+ * card's path is observeWrite). Never for a pure main merge (main-carry), never past a hold / pause / freeze / open ask / safety hold.
+ * In merge the card's standing manual requests are revoked and their unsent runs (ready / await_ci) ended in this same transaction; a
  * run past that (updating, merging, unknown) or any other open intent leaves the card to the merge driver. Then PM role
- * merge|review → fix and the peer's deliver: round + 1, the registration names oldHead / newHead / priorReviewSeq.
+ * merge|review → fix and the peer's deliver: round + 1, the registration names oldHead / newHead / priorReviewSeq. The card stays
+ * manual; handing it back to auto for the incremental review is peerPrHeadResume's (peer-pr-head-review-resume.ts).
  */
-export function headWrite(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; lineage: Lineage; maxRounds: number }): HeadWriteResult {
+export function headWrite(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; lineage: Lineage }): HeadWriteResult {
   return write(db, () => {
     let task = mustTask(db, input.taskId);
     const meta = peerPrOf(task);
     if (!meta) throw new LedgerError("invalid", `${task.id} 不是 peer PR 卡`);
     if (!SHA_RE.test(input.head)) throw new LedgerError("invalid", "head 要是完整 40 位 SHA");
-    const hold = (reason: string, top = false): HeadWriteResult => ({ task, moved: false, reason, ...(top ? { top } : {}) });
+    const hold = (reason: string): HeadWriteResult => ({ task, moved: false, reason });
     if (getWorkflow(db, task.id)?.mode !== "manual") return hold("卡不在 manual（自动卡走 peer-pr-observe）");
     const mode = headReviewMode(task.project);
     if (mode === "off") return hold("peerPrHeadReview 是 off：照旧交 PM");
@@ -211,12 +209,7 @@ export function headWrite(db: Database, ctx: WriteCtx, input: { taskId: string; 
     const prior = hasRoundVerdict(db, task);
     if (!prior) return hold("本轮结论还没出：先审完旧 head");
     const facts = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
-    const passed = facts.kind === "facts" && passingFacts(facts.facts);
-    if (!passed) {
-      if (!registrationOf(events, task.round, task.headSHA, "manual")) return hold("最近的结构化审查结论不是通过，本轮也不是本流程登记的：交 PM");
-      const spent = p1RoundsSpent(events, task);
-      if (spent >= input.maxRounds) return hold(`连续 ${spent} 轮审查仍有 P1，复验轮次到顶（maxRounds ${input.maxRounds}）`, true);
-    }
+    if (!(facts.kind === "facts" && passingFacts(facts.facts))) return hold("最近的结构化审查结论不是通过：交 PM");
     const standing = task.stage === "merge" ? standingRequests(db, task) : [];
     const stuck = standing.find((s) => s.intent && (s.intent.status === "unknown" || !s.run || !SETTLEABLE.includes(s.run.phase)));
     if (stuck) return hold(`人工合并请求 #${stuck.req.seq} 的运行已是 ${stuck.intent!.status}/${stuck.run?.phase ?? "-"}：交给合并 driver`);
@@ -242,69 +235,6 @@ export function headWrite(db: Database, ctx: WriteCtx, input: { taskId: string; 
       taskId: task.id, headSHA: input.head, moveFrom: "fix", evidence: `${meta.url}@${input.head}`, text: "调度器按 GitHub PR head 代记" });
     register(db, ctx, from, r.row, prior, input.lineage, settled);
     return { task: r.row, moved: true, reason: `新 head ${input.head.slice(0, 12)} 进第 ${r.row.round} 轮审查${settled.requests.length ? `，结清请求 #${settled.requests.join("、#")}` : ""}` };
-  });
-}
-
-export interface SettleResult {
-  task: LedgerTask; moved: boolean; reason: string; top?: boolean; requeued?: number;
-  /** peerPrRequeue observe: the request a PM can file as is, and whether this call wrote the sample (first time for this head). */
-  wouldRequeue?: { head: string; specRev: number; round: number; reviewSeq: number; recorded: boolean };
-}
-
-/**
- * PEERHEAD1 items 3–4 · `ledger peer-pr-observe` on a manual card with its own head: a manual card in a round this flow registered, its verdict on the card's head
- * in. changes / block → fix (the author's next push comes back through headWrite; top = consecutive P1 rounds reached maxRounds).
- * Passing → merge, then peerPrRequeue: on = requeueByScheduler (re-checks everything in this transaction), observe = one sample
- * with the request PM could file, off = nothing. The caller has checked GitHub still shows this head (no intermediate verdict
- * is ever queued for a newer head).
- */
-export function headSettleWrite(db: Database, ctx: WriteCtx, input: { taskId: string; maxRounds: number }): SettleResult {
-  return write(db, () => {
-    let task = mustTask(db, input.taskId);
-    if (!peerPrOf(task)) throw new LedgerError("invalid", `${task.id} 不是 peer PR 卡`);
-    const hold = (reason: string): SettleResult => ({ task, moved: false, reason });
-    if (getWorkflow(db, task.id)?.mode !== "manual") return hold("卡不在 manual");
-    if (headReviewMode(task.project) !== "on") return hold("peerPrHeadReview 不是 on");
-    let events = listEvents(db, { project: task.project, target: task.id });
-    const owned = registrationOf(events, task.round, task.headSHA, "manual");
-    if (!owned) return hold("本轮不是本流程登记的");
-    const block = flowBlock(db, task, events);
-    if (block) return hold(block);
-    const facts = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
-    if (facts.kind !== "facts") return hold(facts.kind === "none" ? "本轮结论还没出" : `本轮结论不合格：${facts.reason}`);
-    const f = facts.facts, now = ctx.now ?? Date.now(), head = task.headSHA!;
-    if (!passingFacts(f)) {
-      if (task.stage !== "review") return hold(`卡在 ${task.stage}`);
-      task = moveStage(db, ctx, { taskId: task.id, from: "review", to: "fix", asPm: true, text: `第 ${task.round} 轮复审 ${f.verdict}：回 fix 等作者` }).row;
-      events = listEvents(db, { project: task.project, target: task.id });
-      const spent = p1RoundsSpent(events, task);
-      headSample(db, HEAD_REVIEW_KEY, task, "verdict", head, `第 ${task.round} 轮复审 ${f.verdict}，回 fix 等作者`, { verdict: f.verdict, reviewSeq: f.eventSeq, spent }, now);
-      return { task, moved: true, reason: `复审 ${f.verdict}：回 fix`, ...(spent >= input.maxRounds ? { top: true } : {}) };
-    }
-    let moved = false;
-    if (task.stage === "review") {
-      task = moveStage(db, ctx, { taskId: task.id, from: "review", to: "merge", asPm: true, text: `第 ${task.round} 轮增量复审通过：回合并` }).row;
-      moved = true;
-      headSample(db, HEAD_REVIEW_KEY, task, "verdict", head, `第 ${task.round} 轮复审通过，回 merge`, { verdict: f.verdict, reviewSeq: f.eventSeq }, now);
-    }
-    if (task.stage !== "merge") return { ...hold(`卡在 ${task.stage}`), moved };
-    const standing = standingRequests(db, task);
-    if (standing.length) return { ...hold(`已有人工合并请求 #${standing[0]!.req.seq}`), moved };
-    const priorRequestSeq = (owned as { settled?: { requests?: number[] } }).settled?.requests?.at(-1) ?? null;
-    const bind = { head, specRev: task.specRev, round: task.round, reviewSeq: f.eventSeq };
-    const basis = { oldHead: owned.oldHead, newHead: head, priorPassSeq: owned.priorReviewSeq, priorRequestSeq, passSeq: f.eventSeq, round: task.round };
-    const rmode = requeueMode(task.project);
-    if (rmode === "on") {
-      const r = requeueByScheduler(db, ctx, { taskId: task.id, ...bind, reason: `调度器代排：peer PR 作者新推后第 ${task.round} 轮复审 #${f.eventSeq} 通过（peerPrRequeue）`,
-        basis: { mechanism: REQUEUE_KEY, mode: "on", priorRequestSeq, passSeq: f.eventSeq } }, (t) => flowBlock(db, t, listEvents(db, { project: t.project, target: t.id })));
-      headSample(db, REQUEUE_KEY, task, "requeue", head, `已代排人工合并请求 #${r.request.seq}`, { ...basis, request: r.request.seq }, now);
-      return { task, moved: true, reason: `代排人工合并请求 #${r.request.seq}`, requeued: r.request.seq };
-    }
-    if (rmode === "observe") {
-      const s = headSample(db, REQUEUE_KEY, task, "requeue", head, `代排人工合并（${task.id} @ ${head.slice(0, 12)}，第 ${task.round} 轮，审查 #${f.eventSeq}）`, { ...basis, wouldRequest: bind }, now);
-      return { task, moved, reason: "peerPrRequeue 是 observe：只记样本", wouldRequeue: { ...bind, recorded: s.recorded } };
-    }
-    return { ...hold("peerPrRequeue 是 off：照旧由 PM 排"), moved };
   });
 }
 
