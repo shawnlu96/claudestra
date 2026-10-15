@@ -142,7 +142,8 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     const base = sharedLedgerCenterUrl(baseUrl);
     const startedAt = now();
     const blocked = sharedLedgerNotBefore(baseUrl, options.stateDir, startedAt) - startedAt;
-    if (blocked > 0) throw new SharedLedgerRemoteError(429, null, blocked, sharedLedgerRetryAfter(baseUrl, options.stateDir, startedAt));
+    // REPLFAIR1: `synthetic` marks a 429 raised here from the local cooldown, not answered by the center (logs tell them apart).
+    if (blocked > 0) throw Object.assign(new SharedLedgerRemoteError(429, null, blocked, sharedLedgerRetryAfter(baseUrl, options.stateDir, startedAt)), { synthetic: true });
     const url = new URL(path, base);
     if (url.origin !== base.origin || url.pathname !== path || url.search || url.hash) throw new SharedLedgerUnavailable();
     const attemptNonce = randomBytes(24).toString("hex");
