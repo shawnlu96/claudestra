@@ -6,7 +6,7 @@
  * --pane：不起演示，直接截一个已有的 pane（沙箱实测用；配合 TMUX_SOCKET=<socket 路径>）。需要本机 Chrome（或 CHROME_PATH）。
  * 演示：bun scripts/acp-tui-shots.ts --demo before|after home|busy|restart|perm——在当前终端里画同一轮会话夹具（tests/helpers/acp-tui-session.ts），
  * before = 逐行视图 tty-screen.ts，after = 新视图 tui/screen.ts；home = 整轮结束，busy = 回合进行中（含一段 Pi 风格的长思考），
- * restart = 宿主刚重启（顶部提示 + 历史回放；代码树里没有 transcript-replay.ts 时照旧宿主只显示长提示），perm = 审批块在等。画完停着，窗口改尺寸照宿主一样重画。
+ * restart = 宿主刚重启（顶部提示 + 历史回放；restart-empty = 会话文件最后一条记录超过回放读取窗口；代码树里没有 transcript-replay.ts 时照旧宿主只显示长提示），perm = 审批块在等。画完停着，窗口改尺寸照宿主一样重画。
  * --phase <名>：文件名前缀换成它（默认用 variant）。同一个脚本放进旧代码树的副本里跑，就能拍「改之前的新视图」做对照。
  */
 import { chromium, type Browser } from "playwright-core";
@@ -60,13 +60,15 @@ async function shoot(browser: Browser, text: string, cols: number, rows: number,
 const SID = "01a138d1-91d8-72db-b1a0-ee2807fe5971";
 
 /** 刚重启：宿主的顶部提示 + 历史回放（acp-host.ts 的接线照搬）；旧代码树没有回放模块，照旧宿主只显示长提示 */
-async function playRestart(screen: TtyScreen): Promise<void> {
+async function playRestart(screen: TtyScreen, empty = false): Promise<void> {
   // 只有「旧代码树里没这个文件」才退回旧提示；文件在却加载出错照常抛，免得静默拍出旧版截图污染对照
   const replayPath = join(import.meta.dir, "..", "src", "lib", "acp", "transcript-replay.ts");
   const mod = existsSync(replayPath) ? await import(replayPath) : null;
   if (!mod) return screen.show(`ACP 会话 agent-demo · 线程 ${SID.slice(0, 8)}（底部输入行可直接发消息，/help 看命令；连接日志在 /Users/owner/<状态目录>/logs/acp/agent-demo/host.log）`);
   const file = join(mkdtempSync(join(tmpdir(), "acp-tui-shots-")), "session.jsonl");
-  writeFileSync(file, `${replayLines().join("\n")}\n`);
+  // restart-empty：最后一条记录比回放的读取窗口（1 MB）还长、末尾没有换行
+  const huge = JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "长".repeat(1_200_000) }] } });
+  writeFileSync(file, empty ? huge : `${replayLines().join("\n")}\n`);
   screen.show(mod.tuiHeader("agent-demo", SID, true));
   mod.showReplay(screen, () => file, createLineTranslator(undefined), () => {});
 }
@@ -76,13 +78,13 @@ async function demo(variant: string, view: string): Promise<void> {
   const io = { write: (s: string) => void process.stdout.write(s), columns: () => process.stdout.columns || 80, rows: () => process.stdout.rows || 40 };
   const busy = view === "busy" || view === "perm", perm = view === "perm";
   const state = (): TurnState => ({ busy, queued: view === "busy" ? 1 : 0, permissions: perm ? 1 : 0 });
-  const draft = view === "restart" || perm ? "" : "帮我再看一下 LCK-1\n顺便把测试补上";
+  const draft = view.startsWith("restart") || perm ? "" : "帮我再看一下 LCK-1\n顺便把测试补上";
   process.stdout.write("\x1b[H\x1b[2J\x1b[3J");
   const screen: TtyScreen & { config?(raw: unknown): void } = variant === "before"
     ? createTtyScreen(io, state, Date.now, (cols) => `❯ ${draft.replace(/\n/g, "⏎")}`.slice(0, cols - 1))
     : createTuiScreen(io, state, Date.now, () => ({ text: draft, permission: perm ? "审批 [1]允许 [2]总是允许 [3]拒绝（y/n/序号 + 回车）" : null }));
   screen.config?.(CONFIG);
-  if (view === "restart") await playRestart(screen);
+  if (view.startsWith("restart")) await playRestart(screen, view === "restart-empty");
   else if (perm) playSession(screen, undefined, 8);
   else if (busy) playBusy(screen);
   else playSession(screen);
