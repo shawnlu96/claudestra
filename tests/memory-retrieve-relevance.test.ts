@@ -3,9 +3,12 @@
  * 纯函数部分用字面候选 + 显式 modes；端到端走 memoryCandidates（模式从 recovery-policy.json 读，测试状态目录隔离）。
  */
 import type { Database } from "bun:sqlite";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
 import { closeLedger, getEventByDedup, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import {
@@ -220,6 +223,44 @@ describe("开关 [验收线 4]", () => {
     const e1 = getTask(db, "E1")!;
     expect(memoryCandidates(db, e1)).toEqual([]);
     expect(retrieveMemories(db, e1, "write", null, { now: NOW }).ranked).toEqual({ selected: [], dropped: [] });
+    expect(observeNotes()).toEqual([]);
+  });
+});
+
+describe("observe 样本走生产形状的 query_only 读连接 [验收线 4]", () => {
+  test("bridge LedgerReader（PRAGMA query_only = ON）上准备：两键各记一条样本，实际排名仍是旧规则；重试不重复记", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-observe-ro-"));
+    const path = join(dir, "ledger.sqlite");
+    const reader = new LedgerReader(path);
+    try {
+      const w = openLedger(path);
+      w.prepare("INSERT INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
+      createTask(w, { actor: "owner", now: 1 }, { project: P, id: "T1", title: "批量写", kind: "code" });
+      w.prepare("UPDATE tasks SET stage = 'build', extra = ? WHERE id = 'T1'").run(JSON.stringify({ fileGlobs: ["src/lib/x*.ts"] }));
+      recordMemory(w, at(9), pit("老坑"));
+      for (let i = 1; i <= 4; i++) recordMemory(w, at(9 - i), dec(`决定${i}`));
+      closeLedger(path);
+      writePolicy({ memoryPitfallRelevance: "observe", memoryFeedbackPrior: "observe" });
+      const ro = reader.get()!;
+      expect((ro.query("PRAGMA query_only").get() as { query_only: number }).query_only).toBe(1);
+      const task = getTask(ro, "T1")!;
+      for (let i = 0; i < 2; i++) await ensureMemoryRetrieval(ro, task, "write", null, { embedder: null, now: NOW, headFiles: null });
+      const prepared = getEventByDedup(ro, `${memoryDedupKey(task, null, "write")}:prepared`)!;
+      expect(prepared.data.selectionVersion).toBe("base");
+      expect((prepared.data.items as { id: string }[]).map((x) => x.id)).toEqual([M(5), M(4), M(3), M(1)]);
+      const notes = listEvents(ro, { project: P }).filter((e) => e.kind === "note" && e.data.op === "recovery_observe");
+      expect(notes.map((e) => e.data.mechanism).sort()).toEqual(["memoryFeedbackPrior", "memoryPitfallRelevance"]);
+      expect(notes.find((e) => e.data.mechanism === "memoryPitfallRelevance")!.data).toMatchObject({ oldIds: [M(5), M(4), M(3), M(1)], newIds: [M(5), M(4), M(3), M(2)] });
+      expect((ro.query("PRAGMA query_only").get() as { query_only: number }).query_only).toBe(1);
+    } finally {
+      reader.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("已在事务里（同步拼单）不记，也不另开写连接", () => {
+    writePolicy({ memoryPitfallRelevance: "observe" });
+    db.transaction(() => { selected(); })();
     expect(observeNotes()).toEqual([]);
   });
 });

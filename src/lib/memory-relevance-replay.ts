@@ -11,7 +11,7 @@
 import { Database } from "bun:sqlite";
 import { getTask } from "./ledger-store.js";
 import { feedbackPrior, marksByMemory, type RefsRow } from "./memory-feedback-prior.js";
-import { cardPatterns, fileRoute, graphRoute, MEMORY_CAPS, memoryCandidates, RELATIVE_FLOOR, type MemoryRoute } from "./memory-retrieve.js";
+import { cardPatterns, fileRoute, graphRoute, MEMORY_CAPS, memoryCandidates, rankOrder, RELATIVE_FLOOR, type MemoryRoute } from "./memory-retrieve.js";
 
 const RRF_K = 60;
 const ROUTES: MemoryRoute[] = ["graph", "file", "vector"];
@@ -60,8 +60,12 @@ export function replayRelevance(path: string, project: string, since: number, un
       db.query(`SELECT seq, ts, target, data FROM events WHERE project = ? AND ${where} ORDER BY seq`).all(project, ...args) as { seq: number; ts: number; target: string; data: string | null }[];
     const injections = ev("kind = 'scheduler' AND json_extract(data, '$.op') = 'memory_retrieve' AND json_extract(data, '$.order') = 'write' AND ts >= ? AND ts < ?", since, until);
     const refs = ev("kind = 'memory' AND json_extract(data, '$.op') = 'refs'");
-    const kinds = new Map((db.query("SELECT id, kind FROM memories WHERE project = ?").all(project) as { id: string; kind: string }[]).map((m) => [m.id, m.kind]));
+    const mems = db.query("SELECT id, kind, createdAt FROM memories WHERE project = ?").all(project) as { id: string; kind: string; createdAt: number }[];
+    const kinds = new Map(mems.map((m) => [m.id, m.kind]));
+    const created = new Map(mems.map((m) => [m.id, m.createdAt]));
     const kindOf = (id: string) => kinds.get(id) ?? "unknown";
+    // 平局和生产 rankMemories 同序：新者优先，再按 id
+    const order = (a: Entry, b: Entry) => rankOrder({ score: a.score, createdAt: created.get(a.id) ?? 0, id: a.id }, { score: b.score, createdAt: created.get(b.id) ?? 0, id: b.id });
 
     const oldOrders: { ids: string[]; routes: Map<string, MemoryRoute[]> }[] = [];
     const newOrders: typeof oldOrders = [];
@@ -96,7 +100,7 @@ export function replayRelevance(path: string, project: string, since: number, un
       // 新规则
       const marks = marksByMemory(refs.filter((r) => r.ts < inj.ts) as RefsRow[], inj.target);
       const rescored = entries.filter((e) => !e.far).map((e) => ({ ...e, score: e.score * feedbackPrior(marks.get(e.id) ?? [], inj.ts) }))
-        .sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
+        .sort(order);
       const bar = (rescored[0]?.score ?? 0) * RELATIVE_FLOOR;
       const newIds = rescored.filter((e) => e.score >= bar).slice(0, MEMORY_CAPS.write.count).map((e) => e.id);
       const routes = new Map(entries.map((e) => [e.id, e.routes]));

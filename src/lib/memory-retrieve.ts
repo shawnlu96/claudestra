@@ -12,7 +12,7 @@
  * - memoryFeedbackPrior：别的卡在 memoryRefs 标的 applied / irrelevant 汇成先验乘子（memory-feedback-prior.ts），memoryCandidates 一次读完。
  * observe：照算新旧两套，按单记一条 recordObserved 样本，实际用旧的。tests/memory-retrieve-relevance.test.ts。
  */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { memoryStatus, type MemoryState } from "./ledger-memory-fold.js";
 import type { Memory } from "./ledger-memory.js";
@@ -296,8 +296,10 @@ function score(cands: readonly Candidate[], routes: Routes, opts: RankOpts, rule
   }).sort(byScore);
 }
 
-/** 终分降序，平局新者优先，再按 id */
-const byScore = (a: Scored, b: Scored) => b.score - a.score || b.memory.createdAt - a.memory.createdAt || byId(a.id, b.id);
+/** 终分降序，平局新者优先，再按 id（回放 memory-relevance-replay.ts 用同一个比较） */
+export const rankOrder = (a: { score: number; createdAt: number; id: string }, b: { score: number; createdAt: number; id: string }): number =>
+  b.score - a.score || b.createdAt - a.createdAt || byId(a.id, b.id);
+const byScore = (a: Scored, b: Scored) => rankOrder({ score: a.score, createdAt: a.memory.createdAt, id: a.id }, { score: b.score, createdAt: b.memory.createdAt, id: b.id });
 
 /** 坑只靠相邻 feature 的图命中，文件、语义都没中 */
 const farGraphOnly = (s: Scored): boolean =>
@@ -394,20 +396,33 @@ export function rankMemories(cands: readonly Candidate[], routes: Routes, opts: 
 const SAMPLE_PART = /^[\w.:@/-]{1,80}$/;
 const samplePart = (s: string): string => (SAMPLE_PART.test(s) ? s : createHash("sha256").update(s, "utf8").digest("hex").slice(0, 32));
 
+/** 样本写连接：已在事务里（同步拼单）不记——同一单的事务外准备那次已经记过；bridge 的 query_only 读连接另开写连接（同 memory-retrieve-order.ts record） */
+const OBSERVE_WRITER_BUSY_MS = 2_000;
+function observeWriter(db: Database): Database | null {
+  if (db.inTransaction) return null;
+  if ((db.query("PRAGMA query_only").get() as { query_only: number }).query_only !== 1) return db;
+  if (!db.filename || db.filename === ":memory:") return null;
+  const writer = new Database(db.filename, { readwrite: true, create: false });
+  writer.exec(`PRAGMA busy_timeout = ${OBSERVE_WRITER_BUSY_MS}`);
+  return writer;
+}
+
 /**
  * observe 样本：一单（卡 + specRev + 写 / 审查）一条，带新旧条目 id、被拿掉的条目和原因、新补进的条目。
- * 只读连接或已在事务里（同步拼单）不记——同一单的事务外准备那次已经记过；记失败不影响检索。
+ * 事务外记（只读连接走另开的写连接），按单去重；记失败不影响检索。
  */
 function observeSelection(ctx: RetrievalCtx, mechanism: typeof PITFALL_RELEVANCE_KEY | typeof FEEDBACK_PRIOR_KEY, opts: RankOpts,
   current: Ranked, next: Ranked, nextVersion: string): void {
+  let writer: Database | null = null;
   try {
-    if (ctx.db.inTransaction || (ctx.db.query("PRAGMA query_only").get() as { query_only: number }).query_only === 1) return;
+    writer = observeWriter(ctx.db);
+    if (!writer) return;
     const oldIds = current.selected.map((s) => s.id), newIds = next.selected.map((s) => s.id);
     const removed = oldIds.filter((id) => !newIds.includes(id)).map((id) => {
       const d = next.dropped.find((x) => x.id === id);
       return { id, reason: d ? d.reason.kind + (d.reason.kind === "below_floor" && d.reason.rule ? `:${d.reason.rule}` : "") : "reordered" };
     });
-    recordObserved(ctx.db, {
+    recordObserved(writer, {
       project: ctx.task.project, mechanism, target: samplePart(ctx.task.id),
       actionKey: `memsel:${samplePart(ctx.task.id)}:${ctx.task.specRev ?? 0}:${opts.kind}`,
       action: `${opts.kind === "review" ? "审查单" : "写单"}记忆 ${oldIds.length} → ${newIds.length} 条（拿掉 ${removed.length}）`,
@@ -416,5 +431,7 @@ function observeSelection(ctx: RetrievalCtx, mechanism: typeof PITFALL_RELEVANCE
     }, opts.now);
   } catch (e) {
     console.error(`⚠️ ${ctx.task.id} 记忆选择 observe 样本没记上：${(e as Error).message}`);
+  } finally {
+    if (writer && writer !== ctx.db) writer.close();
   }
 }

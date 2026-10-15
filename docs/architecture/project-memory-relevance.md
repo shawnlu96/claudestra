@@ -19,7 +19,7 @@ Two recovery keys. Neither touches permissions or outbound traffic, so both defa
 
 Drop reasons keep the existing kinds, so the `memory_rank` drop text is unchanged. The two new rules use `below_floor` with `rule: "relative" \| "far_graph"`.
 
-`observe`: both selections are computed (current rules, and current rules with that key turned on) and the current one is injected. One `recordObserved` sample is written per order (card + specRev + write/review), carrying `oldIds`, `newIds`, `removed` (id + reason), `added`, and both versions. No sample is written on a `query_only` connection or inside a transaction (the synchronous order assembly): the out-of-transaction prepare pass for the same order has already written it. A sample write that fails is logged and never affects retrieval.
+`observe`: both selections are computed (current rules, and current rules with that key turned on) and the current one is injected. One `recordObserved` sample is written per order (card + specRev + write/review), carrying `oldIds`, `newIds`, `removed` (id + reason), `added`, and both versions. Samples are written outside transactions only. On the bridge's `query_only` reader (`LedgerReader`) a short-lived writer connection is opened for the sample, same as the ranking event in `memory-retrieve-order.ts`. Inside a transaction (the synchronous order assembly) nothing is written, because the out-of-transaction prepare pass for the same order has already written the sample. A sample write that fails is logged and never affects retrieval.
 
 `memory_rank.selectionVersion` is `base`, `pitfall`, `feedback` or `pitfall+feedback` (whichever rules were applied). It is absent when both keys are off. `ledger memory-metrics` can split applied/irrelevant by it.
 
@@ -44,7 +44,7 @@ The marks are read once per retrieval: `memoryCandidates` runs one query over th
 `replayRelevance(path, project, since, until)` opens the ledger `readonly` with `query_only`. For each write-order injection in the window:
 
 - **old selection:** the injected `memoryIds`;
-- **new selection:** the `memory_rank` items and dropped entries that were still eligible (`超条数` / `让坑位`), re-ranked under the new rules, using only refs from other cards written before that injection.
+- **new selection:** the `memory_rank` items and dropped entries that were still eligible (`超条数` / `让坑位`), re-ranked under the new rules, using only refs from other cards written before that injection. Equal scores break the same way as `rankMemories` (shared `rankOrder`: newer `createdAt` first, then id).
 
 Routes for the dropped entries are recomputed for graph and file from the current ledger; a vector hit is inferred when the score exceeds what graph and file explain. Labels come from the card's first refs event after the injection. Output: average items per order and counts by kind and route (old and new), the share of old `applied` items kept (target ≥ 90%), and the share of old `irrelevant` items removed.
 

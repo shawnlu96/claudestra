@@ -10,6 +10,8 @@ import { recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { replayRelevance } from "../src/lib/memory-relevance-replay.js";
+import { memoryCandidates, rankMemories, type MemoryRoute } from "../src/lib/memory-retrieve.js";
+import { getTask } from "../src/lib/ledger-store.js";
 
 const P = "demo";
 const DAY = 86_400_000;
@@ -76,5 +78,52 @@ describe("只读回放 [验收线 5]", () => {
     const r = replayRelevance(path, P, NOW, NOW + DAY);
     expect(r.old).toMatchObject({ orders: 0, items: 0, avgPerOrder: 0 });
     expect(r.appliedKept.rate).toBeNull();
+  });
+});
+
+describe("回放平局与生产同序 [验收线 5]", () => {
+  test("同分卡在第 4 / 5 名：回放和 rankMemories 一样留新的那条，applied 保留率按生产算", () => {
+    const tdir = mkdtempSync(join(tmpdir(), "mem-replay-tie-"));
+    const tpath = join(tdir, "ledger.sqlite");
+    try {
+      const db = openLedger(tpath);
+      db.prepare("INSERT INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
+      createTask(db, { actor: "owner", now: 1 }, { project: P, id: "T1", title: "T1", kind: "code" });
+      db.prepare("UPDATE tasks SET stage = 'build' WHERE id = 'T1'").run();
+      // m1..m5 决定越来越新
+      for (let i = 1; i <= 5; i++) {
+        recordMemory(db, { actor: "pm", now: NOW - (10 - i) * DAY },
+          { project: P, kind: "decision", title: `决定${i}`, body: "b", files: [], via: "tool", authorRole: "owner" } as MemoryInput);
+      }
+      const g = (ns: number[]) => ns.map((n) => ({ id: M(n), hop: 2 as const, via: "同 feature" }));
+      // 图 5 4 3 1 2；文件 3 5 4 2 1；语义 4 3 5 → m1、m2 同分 1/64 + 1/65
+      const routes = {
+        graph: g([5, 4, 3, 1, 2]),
+        file: [3, 5, 4, 2, 1].map((n) => ({ id: M(n), hits: 1, total: 1, first: "x" })),
+        vector: [4, 3, 5].map((n, i) => ({ memoryId: M(n), score: 0.9 - i / 100 })),
+      };
+      const ranked = rankMemories(memoryCandidates(db, getTask(db, "T1")!), routes, { kind: "write", now: NOW, modes: { pitfallRelevance: "off", feedbackPrior: "off" } });
+      expect(ranked.selected.map((s) => s.id)).toEqual([M(5), M(4), M(3), M(2)]);
+      expect(ranked.dropped.map((d) => d.id)).toEqual([M(1)]);
+      expect(ranked.dropped[0]!.score).toBe(ranked.selected[3]!.score);
+
+      const ev = (ts: number, target: string, kind: string, data: unknown): number =>
+        (db.prepare("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'scheduler', ?, ?, ?, '', ?) RETURNING seq")
+          .get(ts, P, target, kind, JSON.stringify(data)) as { seq: number }).seq;
+      const order: MemoryRoute[] = ["graph", "file", "vector"];
+      const r = ev(NOW - DAY, "T1", "scheduler", { op: "memory_rank", order: "write",
+        items: ranked.selected.map((s) => ({ id: s.id, routes: order.filter((x) => s.ranks[x] !== undefined), why: "同 feature", score: Number(s.score.toFixed(6)) })),
+        dropped: ranked.dropped.map((d) => ({ id: d.id, score: Number(d.score.toFixed(6)), reason: "超条数" })) });
+      ev(NOW - DAY, "T1", "scheduler", { op: "memory_retrieve", order: "write", memoryIds: ranked.selected.map((s) => s.id), rankingSeq: r });
+      ev(NOW - DAY + 1000, "T1", "memory", { op: "refs", refs: [{ id: M(2), use: "applied" }] });
+      closeLedger(tpath);
+
+      const out = replayRelevance(tpath, P, NOW - 7 * DAY, NOW);
+      expect(out.appliedKept).toEqual({ total: 1, kept: 1, rate: 1 });
+      expect(out.new.items).toBe(4);
+    } finally {
+      closeLedger(tpath);
+      rmSync(tdir, { recursive: true, force: true });
+    }
   });
 });
