@@ -102,6 +102,12 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** a ≤3-line S2D2 hook (or the module the hooked step drives) skips the card before the effect */
   hook: {
+    "center-deploy-checkout.ts": "vcs=2",
+    "center-deploy-proof.ts": "vcs=1",
+    "center-deploy-run.ts": "proc=1 fs=1",
+    "center-deploy-tick.ts": "ledger=2 notice=1",
+    "center-deploy-worker.ts": "fs=1 vcs=1",
+    "scheduler-deploy-lock-jobs.ts": "ledger=2 fs=3",
     "agent-lifecycle-backoff.ts": "vcs=1",
     "agent-lifecycle-cleanup-archive.ts": "fs=1",
     "agent-lifecycle-cleanup-gate.ts": "fs=1",
@@ -260,6 +266,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** process, file, tmux, store and notice plumbing with no card of its own; its callers are the gated paths */
   infra: {
+    "pm-deploy-lock.ts": "proc=1 fs=8",
     "account-usage-refresh.ts": "stmt=1",
     "acp-turn-gate.ts": "notice=2",
     "agent-settings.ts": "fs=9",

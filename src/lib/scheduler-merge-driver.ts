@@ -184,7 +184,7 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   if (merged.state !== "MERGED" || merged.base !== "main" || !sameHead(run, merged) || merged.mergeSha !== mergeSha) {
     return step("unknown", "合并后 PR 目标分支、head 或合并提交无法核实");
   }
-  return step("merged", `PR 已合并 ${short(mergeSha)}，待 PM 部署`, mergeSha);
+  return step("merged", `PR 已合并 ${short(mergeSha)}，${(await import("./center-deploy-wording.js")).deployWording(run.project, "待 PM 部署", run.prRef)}`, mergeSha);
 }
 
 /** A related-only green needs the serial full re-check (scheduler-ci-full-request.ts) before the claim; a cleared train already ran full. */
@@ -234,7 +234,7 @@ async function updatingStep(run: MergeRun, external: MergeExternal, step: Step):
 async function mergingStep(run: MergeRun, external: MergeExternal, step: Step): Promise<MergeRun> {
   const pr = await external.inspect(run.prRef);
   return pr.state === "MERGED" && pr.base === "main" && pr.mergeSha && /^[a-f0-9]{40}$/i.test(pr.mergeSha) && sameHead(run, pr)
-    ? step("merged", `重启后核实 PR 已合并 ${short(pr.mergeSha)}，待 PM 部署`, pr.mergeSha)
+    ? step("merged", `重启后核实 PR 已合并 ${short(pr.mergeSha)}，${(await import("./center-deploy-wording.js")).deployWording(run.project, "待 PM 部署", run.prRef)}`, pr.mergeSha)
     : step("unknown", "合并曾发出但未能核实结果，不重复 gh pr merge");
 }
 

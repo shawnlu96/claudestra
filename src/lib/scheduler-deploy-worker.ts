@@ -4,6 +4,7 @@
  * writes lease.json (so the scheduler can see it alive) and result.json before letting the lease go. `started` makes a second
  * launch of the same request a no-op. Tests: tests/scheduler-deploy-worker.test.ts.
  */
+import { schedulerMachineLock, machineResult, runCenterDeployJob, centerWorkerAuthorized, type MachineLockDeps } from "./scheduler-deploy-lock.js";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readDeployJob } from "./scheduler-deploy-job.js";
@@ -14,6 +15,7 @@ import { runBounded } from "./run-bounded.js";
 
 export interface WorkerDeps {
   run?: typeof runBounded;
+  machine?: MachineLockDeps; centerRun?: typeof runBounded; centerAuthorized?: typeof centerWorkerAuthorized;
   acquire?: typeof acquireMaintenance;
   now?: () => number;
   uid?: number;
@@ -23,6 +25,7 @@ export interface WorkerDeps {
 
 export async function runDeployJob(requestPath: string, deps: WorkerDeps = {}): Promise<StepsOutcome | null> {
   const job = readDeployJob(requestPath), dir = dirname(requestPath), now = deps.now ?? Date.now;
+  if (job.kind === "center") return runCenterDeployJob(requestPath, deps);
   try { mkdirSync(join(dir, "started"), { mode: 0o700 }); }
   catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
@@ -30,18 +33,20 @@ export async function runDeployJob(requestPath: string, deps: WorkerDeps = {}): 
     return null;
   }
   const write = (o: StepsOutcome) => writeJsonAtomicSync(join(dir, "result.json"), { intentId: job.intentId, mergeSha: job.mergeSha,
-    ok: o.ok, summary: o.summary, relay: o.relay, head: o.head, steps: o.steps, endedAt: now() }, { mode: 0o600 });
+    ...machineResult(o as { status?: unknown }), ok: o.ok, summary: o.summary, relay: o.relay, head: o.head, steps: o.steps, endedAt: now() }, { mode: 0o600 });
   const lease = await (deps.acquire ?? acquireMaintenance)("deploy", { waitMs: deps.lockWaitMs ?? 10 * 60_000 });
   if (!lease) {
     const o: StepsOutcome = { ok: false, summary: "拿不到维护租约（update 在跑或半截），什么都没做", steps: [], relay: "not_needed", head: null };
     write(o);
     return o;
   }
+  const machine = await schedulerMachineLock(job, requestPath, deps.machine);
+  if (machine.blocked) { try { write(machine.blocked); } finally { lease.release(); } return machine.blocked; }
   // Booted out (deadline, or by hand): leave a result and free the lease before dying, so the scheduler can conclude at once
   // instead of waiting for the lease to go stale. runBounded's own handler has already killed the running step's group.
   const onTerm = () => {
-    write({ ok: false, summary: "部署任务收到 SIGTERM（被卸下），中途停止", steps: [], relay: "not_needed", head: null });
-    lease.release();
+    try { write(machine.term() ?? { ok: false, summary: "部署任务收到 SIGTERM（被卸下），中途停止", steps: [], relay: "not_needed", head: null }); }
+    finally { machine.release(); lease.release(); }
     process.exit(143);
   };
   process.once("SIGTERM", onTerm);
@@ -57,5 +62,5 @@ export async function runDeployJob(requestPath: string, deps: WorkerDeps = {}): 
     }
     write(outcome); // before the lease goes: once the lease is free, a result is already on disk
     return outcome;
-  } finally { process.off("SIGTERM", onTerm); lease.release(); }
+  } finally { process.off("SIGTERM", onTerm); machine.release(); lease.release(); }
 }
