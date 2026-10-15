@@ -148,7 +148,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
       failed.push(...await remoteReviewStep(db, config, { manager, active })); if (cut("peerPr")) return done(); // 仓库方审查结论入账（RRL-1）
       // mergeHandoff (MHO1) and localMerge (ONB-2) projects merge no PR here: they never reach the train or the slot reclaim
-      const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !prMergeOff(config.projects[p]!));
+      const trains = opts.train?.store, prMerging = Object.keys(config.projects).filter((p) => !prMergeOff(config.projects[p]!));
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
       openMergeQueueOwner(db, config, opts.recoveryPolicy, trains); const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
       await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
@@ -158,7 +158,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (cut("mainCi")) return done();
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
-      await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
+      await trainTick(db, trainProjects(db, prMerging, trains, manual.blocks), active, manual.formFence);
       if (cut("train")) return done();
       const external = opts.external ?? ((p: SchedulerConfig["projects"][string]) => mergeExternal(p, guard(active, runBounded)));
       failed.push(...await ciQueueFullStep(db, config, { manager, external, active, command: guard(active, runBounded), policy: opts.recoveryPolicy, pace: pace.phase() }));
@@ -171,14 +171,14 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       failed.push(...(await deployReconcileTick(db, config, { manager, assertActive: active, now: Date.now, policy: opts.recoveryPolicy }, pace.phase())));
       if (cut("reconcile")) return done();
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
-      const reclaim = await reclaimLentSlots(db, localMerge, manager, trains); failed.push(...reclaim.failed);
+      const reclaim = await reclaimLentSlots(db, prMerging, manager, trains); failed.push(...reclaim.failed);
       if (cut("reclaim")) return done();
       // MERGEFAST2/3：直接合开着时，本轮 mergeTick 之后才拿到槽的卡同轮再推一次，每轮最多一次：取回的、人工认领的（都记进 late，
       // 认领时运行已 begin，查询看不到）、auto tick 刚计划的（意图还没有运行，mergeAgain 自己查）
       let again = false;
       const late = [...reclaim.reclaimed];
       const mergeNow = async () => {
-        if (again || !mergeAgain(db, localMerge, late, opts.recoveryPolicy ?? recoveryPolicy)) return;
+        if (again || !mergeAgain(db, prMerging, late, opts.recoveryPolicy ?? recoveryPolicy)) return;
         again = true;
         await mergeTick(db, config, manager, external, active, pace.phase(), trains);
       };
