@@ -7,6 +7,7 @@
  * 效果点清单的纯计数改动另由 skip-effects-auto-scope.ts 机器核一次（skipEffectsAutoScope），结果随同一事件登记，文件清单不变。
  * tests/order-deliver-scope.test.ts。
  */
+import { checkDeliveredScope } from "./ask-scope-auto-deliver.js";
 import { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
@@ -116,9 +117,10 @@ export async function ensureDeliverScope(db: Database, task: LedgerTask, head: s
     }
     const files = outsideFiles(db, task, diff.files);
     const auto = await autoScope(task, head, diff, files, policy);
+    const askScope = await checkDeliveredScope(db, task, head, diff, files, policy);
     // 事件文字只记事实；正式授权那一行出单时按当时的策略现算（scopeInputs），模式切换后旧核准不再展示（r1 mode-stale-1）
     record(db, task, key, files.length ? describe(files, null) : "规格外文件：无（相对 PR base）",
-      { op: "deliver_scope", head, base: diff.base, specRev: task.specRev, files, ...(auto ? { skipEffectsAutoScope: auto } : {}) }, now);
+      { op: "deliver_scope", head, base: diff.base, specRev: task.specRev, files, ...askScope, ...(auto ? { skipEffectsAutoScope: auto } : {}) }, now);
   } catch (e) {
     console.error(`⚠️ ${task.id} 规格外文件登记事件写入失败（派审照常，下次派审前再补）：${(e as Error).message}`);
   }

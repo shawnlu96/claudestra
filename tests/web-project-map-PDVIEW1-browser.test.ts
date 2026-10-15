@@ -58,6 +58,12 @@ async function checkNearAndMode(page: Page) {
   await page.waitForTimeout(250);
   expect(await scale(page)).toBeGreaterThanOrEqual(1);
   for (const el of await page.locator('[data-pd-detail], [data-pd-label]').all()) expect(await el.isVisible()).toBe(true);
+  const edge = page.locator('[data-pd-hit]').first();
+  await edge.press('Enter');
+  expect(await edge.getAttribute('aria-pressed')).toBe('true');
+  await page.keyboard.press('Escape');
+  expect(await edge.getAttribute('aria-pressed')).toBe('false');
+  await zoomShots(page);
   await page.getByRole('radio', { name: '按板块' }).click();
   await page.locator('[data-pd-mode="lane"]').waitFor({ state: 'attached' });
   await page.waitForTimeout(150);
@@ -74,6 +80,34 @@ async function checkNearAndMode(page: Page) {
   expect(await scale(page)).toBe(0.45);
 }
 
+async function zoomShots(page: Page) {
+  const canvas = page.locator(world).locator('..');
+  await canvas.hover({ position: { x: 100, y: 100 } });
+  for (let i = 0; i < 8 && await scale(page) < 1; i++) { await page.mouse.wheel(0, -100); await page.waitForTimeout(30); }
+  await alignShot(page);
+  await shot(page, 'near', '1280x800');
+  for (let i = 0; i < 8 && await scale(page) > 0.8; i++) { await page.mouse.wheel(0, 100); await page.waitForTimeout(30); }
+  if (!before) {
+    expect(await scale(page)).toBeGreaterThanOrEqual(0.62);
+    expect(await page.locator(world).getAttribute('data-zoom')).toBe('near');
+  }
+  await alignShot(page);
+  await shot(page, 'mid', '1280x800');
+}
+
+async function alignShot(page: Page) {
+  // 缩放围绕鼠标；额外档位用上方留白取景，避开图例和底部提示，近景第三串留在视口外。
+  const delta = await page.evaluate<{ x: number; y: number }>(`(() => {
+    const m = new DOMMatrix(getComputedStyle(document.querySelector('[data-pd-mode]')).transform);
+    return { x: 24 - m.e, y: (m.a >= 1 ? 144 : 24) - m.f };
+  })()`);
+  const box = (await page.locator(world).locator('..').boundingBox())!;
+  await page.mouse.move(box.x + 100, box.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 100 + delta.x, box.y + 100 + delta.y, { steps: 4 });
+  await page.mouse.up();
+}
+
 async function standard(browser: Awaited<ReturnType<typeof chromium.launch>>, width: number) {
   const size = width === 390 ? '390x844' : '1280x800';
   const { page, ctx, external, errors } = await openProjectMap(browser, { width, board: projectMapBoard(PROJECT_MAP_NOW) });
@@ -87,7 +121,7 @@ async function standard(browser: Awaited<ReturnType<typeof chromium.launch>>, wi
     }
     await page.getByRole('button', { name: '适配全部' }).click();
     await shot(page, 'fit', size);
-    if (before) expect(await scale(page)).toBe(0.96);
+    if (before) { expect(await scale(page)).toBe(0.96); await zoomShots(page); }
     else { await checkFar(page); await checkNearAndMode(page); }
     // 旧 bridge 没有子 DAG / 产品板时显示现成因果线，直接在相同合成总览上核对。
     await page.route('**/api/v1/ledger/*/product', route => route.fulfill({ status: 404, json: {} }));

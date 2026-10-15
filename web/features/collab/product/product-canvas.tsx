@@ -6,13 +6,12 @@
 import { useMemo, useState } from 'react';
 import type { ProductBoard, ProductFeature } from '@/lib/api/product-board';
 import type { Tr } from '../collab-model';
-import { Icon } from '../collab-icons';
 import { usePort, useViewport } from '../v4/use-viewport';
 import { ViewportTools } from '../v4/viewport-tools';
 import v from '../v4/v4.module.css';
 import d from '../dag/dag.module.css';
 import { productLayout, type ProductChip, type ProductNode, type ProductZone } from './product-layout';
-import { ProductCard } from './product-card';
+import { ProductCard, ProductChipContent } from './product-card';
 import { ProductEdgeLegend, ProductEdges } from './product-edges';
 import { ProductSide, type ProductPick } from './product-side';
 import { ProductToolbar, useMapPrefs } from './product-toolbar';
@@ -32,8 +31,7 @@ function Chip({ id, feature, tag, box, onFeature, tr }: { id: string; feature: P
   onFeature: (id: string) => void; tr: Tr }) {
   return <button type="button" className={`${m.chip} ${tag === 'done' ? m.chipDone : m.chipPaused}`} data-pd-chip={id}
     style={{ left: box.x, top: box.y, width: box.w, height: box.h }} title={feature.title} onClick={() => onFeature(feature.id)}>
-    {tag === 'done' && <Icon name="check" size={12} />}<span className={m.chipTitle}>{feature.title || feature.id}</span>
-    {TAG[tag] && <span className={m.chipTag}>{pdText(tr, TAG[tag])}</span>}
+    <ProductChipContent feature={feature} label={TAG[tag]} tr={tr} />
   </button>;
 }
 
@@ -68,7 +66,7 @@ export function ProductCanvas(p: CanvasProps) {
       onDone={() => prefs.setDoneOpen(!prefs.doneOpen)} paused={canvas.paused.length} pausedOpen={pausedOpen} onPaused={() => setPausedOpen(o => !o)}
       summary={canvas.summary} tr={p.tr} />
     {/* 模式换了就重建视口：新布局有独立的初始摆放；数据刷新仍保留用户平移缩放。 */}
-    <ProductViewport key={canvas.mode} canvas={canvas} tr={p.tr} onLane={toggleLane} onPick={setPick}>
+    <ProductViewport key={canvas.mode} canvas={canvas} tr={p.tr} onLane={toggleLane} onPick={setPick} pick={pick}>
       {canvas.nodes.map(n => (n.chip ? chip(n, 'done') : card(n)))}
       {canvas.chips.map(c => chip(c, c.tag))}
     </ProductViewport>
@@ -76,8 +74,8 @@ export function ProductCanvas(p: CanvasProps) {
   </div>;
 }
 
-function ProductViewport({ canvas, tr, onLane, onPick, children }: {
-  canvas: ReturnType<typeof productLayout>; tr: Tr; onLane: (key: string) => void; onPick: (p: ProductPick) => void; children: React.ReactNode;
+function ProductViewport({ canvas, tr, onLane, onPick, pick, children }: {
+  canvas: ReturnType<typeof productLayout>; tr: Tr; onLane: (key: string) => void; onPick: (p: ProductPick) => void; pick: ProductPick | null; children: React.ReactNode;
 }) {
   const { box, port } = usePort();
   const vp = useViewport(canvas, port, null, () => {}, { minK: PRODUCT_MIN_K, initial: productInitialView(canvas, canvas.mode) });
@@ -86,7 +84,7 @@ function ProductViewport({ canvas, tr, onLane, onPick, children }: {
     <div className={`${v.world} ${z.world} ${vp.glide ? v.glide : ''}`} data-pd-mode={canvas.mode} data-zoom={zoomTier(vp.view.k)}
       style={{ transform: `translate(${vp.view.x}px, ${vp.view.y}px) scale(${vp.view.k})`, '--pd-k': vp.view.k } as React.CSSProperties}>
       {canvas.zones.map(zone => <Zone key={zone.id} z={zone} tr={tr} onLane={onLane} />)}
-      <ProductEdges canvas={canvas} onPick={onPick} tr={tr} />
+      <ProductEdges canvas={canvas} onPick={onPick} pick={pick} tr={tr} />
       {children}
     </div>
     <ProductEdgeLegend canvas={canvas} tr={tr} />

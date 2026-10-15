@@ -274,6 +274,17 @@ async function productReady(page: Page, mobile: boolean) {
     ? page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ })
     : page.locator("main [data-pd-title]").filter({ hasText: "A 机的 feature" });
   await ready.first().waitFor();
+  if (!mobile) {
+    // 标题先于 usePort 的首次测量出现；两入口都等摆放和降级过渡结束，才比较同一时刻的可见文本。
+    await page.waitForFunction(`(() => {
+      const world = document.querySelector('main [data-pd-mode]');
+      if (!world) return false;
+      const m = new DOMMatrix(getComputedStyle(world).transform);
+      return m.a < 1 && (m.e !== 0 || m.f !== 0);
+    })()`);
+    await page.evaluate(`Promise.allSettled([...document.querySelector('main [data-pd-mode]').getAnimations({ subtree: true })]
+      .filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))`);
+  }
 }
 
 for (const width of [1280, 390]) {

@@ -85,7 +85,7 @@ export class SharedLedgerReads {
       // Harmless to swallow: facts only decorate sub-DAG cards, the caller keeps its plain card and decides when to ask again.
       // 403 is the old center's normal answer (no route), so it is not logged; other failures log the status only.
       const status = error instanceof ApiError ? error.status : null;
-      if (status !== 403) console.warn(`shared ledger task-facts unavailable (${status ?? "no status"})`);
+      if (status !== 403 && status !== 404) console.warn(`shared ledger task-facts unavailable (${status ?? "no status"})`);
       return null;
     }
   }

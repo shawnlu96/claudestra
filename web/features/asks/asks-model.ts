@@ -209,8 +209,11 @@ export const isMgmtButtonId = isReservedButtonId;
 /** 整行只有管理按钮 */
 export const isMgmtRow = (row: WebComponentRow): boolean => row.type === "buttons" && row.buttons.length > 0 && row.buttons.every((b) => isMgmtButtonId(b.id));
 
-/** bridge 的「待你处理」列表只带开着的和 3 天内结案的（bridge/asks.ts 列表的 closedSince），两边一致 */
-export const ASK_LIST_CLOSED_MS = 3 * 24 * 3600_000;
+/**
+ * bridge 的「待你处理」默认列表只带开着的和 24 小时内结案的（bridge/asks.ts CLOSED_RECENT_MS），两边必须一致：
+ * 这边比那边长，结案 1～3 天的老气泡就查不到 ask、又不够老，按钮会被重新放开（tests/web-asks-closed-window.test.ts）
+ */
+export const ASK_LIST_CLOSED_MS = 24 * 3600_000;
 
 /** 列表状态：loading = 还没拉到；full = 完整列表；partial = 过滤过的（guest、部分 scope 只拿到指给自己的，或 403 恒空），不能拿「查不到」当结案 */
 export type AskListState = "loading" | "full" | "partial";
