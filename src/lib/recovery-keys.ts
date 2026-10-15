@@ -80,6 +80,7 @@ export const RECOVERY_KEYS = [
   "pmRails",
   "poolIdleSkip",
   "privateMergeNarrow",
+  "privateRepoMerge",
   "privateStartPlacement",
   "reclaimLocalFix",
   "reviewLocalFirst",
