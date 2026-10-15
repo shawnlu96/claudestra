@@ -7,7 +7,6 @@ import type { Database } from "bun:sqlite";
 import type { AutoReason } from "./center-proposal-auto.js";
 import type { InboxParams } from "./center-proposal-inbox.js";
 import { getEventByDedup } from "./ledger-store.js";
-import { tx } from "./ledger-tx.js";
 import { appendEvent } from "./ledger-write.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 
@@ -59,22 +58,21 @@ function put(db: Database, id: ExecIdentity, dedupKey: string, now: number, text
 }
 
 /**
- * 抢占位，抢到才许 decide。一个立即事务里先看再写，并发的另一方（同进程另一条路径 / 另一个进程）只会看到已写的那条。
+ * 抢占位，抢到才许 decide。每个占位是一个 UNIQUE dedup 键、由 appendEvent 在它自己的立即事务里写，并发的另一方只会撞回已写的那条（duplicate）。
+ * 人工和自动唯一共用的是首占位；#owner 只在自动写了 handover 结果之后才许占，而 handover 之后自动不再发，所以先看后写之间没有能交错出两次 decide 的窗口。
  * auto：第 attempt 次（1..3）；已有人工占位、已有结果都不抢。owner：首占位空着就占；已被自动占了，只有自动已交还人工（handover）才占 #owner。
  */
 export function claimExec(db: Database, id: ExecIdentity, lane: ExecLane, now: number, attempt = 1): boolean {
   const key = execKey(id.centerProject, id.params);
-  return tx(db, () => {
-    const s = execState(db, key), first = claimOf(db, key);
-    const text = (n: string) => `中心提案执行占位（${n}）：${id.params.proposalId} rev ${id.params.proposalRev}`;
-    if (lane === "auto") {
-      if (s.result || s.claims.some(c => c.lane === "owner") || attempt < 1 || attempt > MAX_AUTO_ATTEMPTS) return false;
-      return put(db, id, attemptKey(key, attempt), now, text(`自动第 ${attempt} 次`), { op: EXEC_OP, lane, attempt, ...identityData(id, key) });
-    }
-    if (!first) return put(db, id, key, now, text("人工答复"), { op: EXEC_OP, lane, attempt: 1, ...identityData(id, key) });
-    if (first.lane === "owner" || s.result?.outcome !== "handover") return false;
-    return put(db, id, ownerKey(key), now, text("自动交还后的人工答复"), { op: EXEC_OP, lane, attempt: 1, ...identityData(id, key) });
-  });
+  const s = execState(db, key), first = claimOf(db, key);
+  const text = (n: string) => `中心提案执行占位（${n}）：${id.params.proposalId} rev ${id.params.proposalRev}`;
+  if (lane === "auto") {
+    if (s.result || s.claims.some(c => c.lane === "owner") || attempt < 1 || attempt > MAX_AUTO_ATTEMPTS) return false;
+    return put(db, id, attemptKey(key, attempt), now, text(`自动第 ${attempt} 次`), { op: EXEC_OP, lane, attempt, ...identityData(id, key) });
+  }
+  if (!first) return put(db, id, key, now, text("人工答复"), { op: EXEC_OP, lane, attempt: 1, ...identityData(id, key) });
+  if (first.lane === "owner" || s.result?.outcome !== "handover") return false;
+  return put(db, id, ownerKey(key), now, text("自动交还后的人工答复"), { op: EXEC_OP, lane, attempt: 1, ...identityData(id, key) });
 }
 
 /** 结果事件：同一键只写一次（返回这次是否写了） */
