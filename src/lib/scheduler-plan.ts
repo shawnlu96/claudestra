@@ -32,6 +32,7 @@ import { ciProofAdmits } from "./scheduler-ci-proof-gate.js";
 import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./review-source-proof.js";
 import { ownerFreshStep } from "./scheduler-ui-owner-fresh.js";
 import { fixSelfHeal } from "./scheduler-fix-selfheal.js";
+import { handbackReview } from "./pm-handback.js";
 
 export interface WorkerRef {
   agent: string;
@@ -317,6 +318,9 @@ function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
 
 function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const found = epochReviewFacts(s);
+  // PMHAND1 11a：PM 交回前手派审查的结论（含旧式无结构结论）不算本轮，对当前 head 照常派审（pm-handback.ts）
+  const back = handbackReview(s, node.id, found, (f) => adoptedReview(s, f) || centerReviewed(s, f) || reviewDispatchProof(s, f), (h) => reviewDispatch(h, node));
+  if (back) return back;
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
   const { facts: f, downgrade } = convergeReview(s.events, found.facts, s.fixDiff);

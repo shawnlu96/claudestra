@@ -14,6 +14,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-plan": rule("task", "mixed"),
   "scheduler-center-deploy": rule("task", "unmapped"),
   "scheduler-pm-todo": rule("task", "unmapped"),
+  "scheduler-priority-sample": rule("task", "unmapped"),
   "scheduler-deploy-reconcile": rule("task", "unmapped"),
   "scheduler-settle": rule("intent", "mixed"),
   "scheduler-stage": rule("intent", "central"),
@@ -52,6 +53,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-review-swap": rule("intent", "unmapped"),
   "scheduler-review-hold": rule("task", "unmapped"),
   "scheduler-recovery-observe": rule("task", "unmapped"),
+  "scheduler-remote-review": rule("task", "unmapped"), // RRL-1: <task> is the card the repository owner's review is booked on
   "scheduler-review-downgrade": rule("task", "unmapped"),
   "scheduler-manual-resume": rule("task", "unmapped"),
   "scheduler-manual-case-default": rule("task", "unmapped"),

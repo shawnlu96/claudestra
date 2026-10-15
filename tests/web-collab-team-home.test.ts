@@ -6,6 +6,7 @@
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { homeCardOf, sharedCollabSource } from "@/features/collab/team-source-shared";
+import { homeReadOf } from "@/features/collab/detail-home-read";
 import { sharedCollabProject } from "@/features/collab/team-source-key";
 import { setAppConfigForTest } from "@/lib/app-config";
 import { SharedLedgerSession, type FeatureDetail, type FeatureList, type Identity, type Transport } from "@/lib/api/shared-ledger";
@@ -136,8 +137,30 @@ test("主场本机但本机台账读不到（404 / 5xx）：退回中心详情�
     expect(got.homeOnly).toEqual(AWAY);
     expect(got.d.events).toEqual([]);
     expect(got.d.team?.status).toBe(body);
+    // UXCARD3：从没读成功过（第一次打开就失败）另标「主场本机读失败」
+    expect(homeReadOf(got.d)).toEqual({ kind: "failed" });
   }
   localStatus = 200;
+});
+
+test("[验收线 3] UXCARD3 同卡刷新本机读失败：返回上次本机成功的详情、homeOnly 仍空集、带过期标记；再读成功一次标记没有", async () => {
+  localStatus = 200;
+  const src = source(HOME, HOME);
+  await src.overview(new AbortController().signal);
+  const read = () => src.task("R1", new AbortController().signal);
+  const first = await read();
+  expect(homeReadOf(first)).toBeNull();
+  localStatus = 500;
+  const kept = await read();
+  expect(kept as unknown).toEqual(first as unknown);
+  expect(src.homeOnlyOf?.(kept)).toEqual(new Set());
+  expect(homeReadOf(kept)).toMatchObject({ kind: "stale" });
+  expect(typeof (homeReadOf(kept) as { at: number }).at).toBe("number");
+  expect(kept.task.agent).toBe("agent-dev");
+  localStatus = 200;
+  const again = await read();
+  expect(homeReadOf(again)).toBeNull();
+  expect(src.homeOnlyOf?.(again)).toEqual(new Set());
 });
 
 test("homeCardOf：只认绑了执行镜像、所在 feature 主场等于本机实例的卡；未绑的规划节点 / 缺本机实例按非主场", async () => {

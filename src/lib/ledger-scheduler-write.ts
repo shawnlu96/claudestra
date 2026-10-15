@@ -1,3 +1,4 @@
+import { requireMergeQueueOwner } from "./merge-queue-owner.js";
 /** Scheduler-only ledger writes: every decision and resource claim is one compare-and-swap transaction. */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -215,6 +216,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")
       .get(task.id) as { id: string } | null;
     if (live) throw new LedgerError("conflict", `任务已有未结调度意图 ${live.id}`);
+    requireMergeQueueOwner(db, task.id, input.action, ctx.now ?? Date.now(), undefined, node);
     releaseIdleWriteSlots(db, task.project);
     const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
     const slots = new Set([...cardWorkerSlots(held, task.id), ...resources.filter((r) => r?.startsWith("slot:"))]);

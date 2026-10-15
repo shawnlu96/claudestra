@@ -129,17 +129,28 @@ function closePipesOnExit(child: childProcess.ChildProcess) {
   child.once("exit", () => { for (const stream of child.stdio) stream?.destroy(); });
 }
 
+let chrome: childProcess.ChildProcess | undefined;
 async function launchBrowser() {
   const spawn = childProcess.spawn;
   const hook = spyOn(childProcess, "spawn").mockImplementation(((...args: unknown[]) => {
     const child = Reflect.apply(spawn, childProcess, args) as childProcess.ChildProcess;
-    if (Array.isArray(args[1]) && args[1].includes("--remote-debugging-pipe")) closePipesOnExit(child);
+    if (Array.isArray(args[1]) && args[1].includes("--remote-debugging-pipe")) { closePipesOnExit(child); chrome = child; }
     return child;
   }) as typeof childProcess.spawn);
   try {
     return await chromium.launch({ headless: true,
       ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   } finally { hook.mockRestore(); }
+}
+
+/** CI 慢机上 browser.close() 偶尔等不到 Chromium 退出、把 afterAll 拖满 60s；限时没关掉就 SIGKILL 它，再给 close() 一次收尾的机会。 */
+async function closeBrowser(b: Browser) {
+  const within = (p: Promise<unknown>, ms: number) => Promise.race([p.then(() => true, () => true), Bun.sleep(ms).then(() => false)]);
+  if (await within(b.close(), 15_000)) return;
+  console.error("[collab-unified] browser.close() 15s 未返回，强杀 Chromium");
+  chrome?.kill("SIGKILL");
+  for (const stream of chrome?.stdio ?? []) stream?.destroy();
+  await within(b.close(), 5_000);
 }
 
 beforeAll(async () => {
@@ -178,7 +189,7 @@ afterAll(async () => {
       testSha256: createHash("sha256").update(readFileSync("tests/web-collab-unified-browser.test.ts")).digest("hex"), shots: manifest }, null, 2), { mode: 0o600 });
   } finally {
     try {
-      await browser?.close();
+      if (browser) await closeBrowser(browser);
     } finally {
       server?.stop(true);
       if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true });
@@ -268,6 +279,25 @@ const tree = (page: Page) => page.evaluate(`(() => {
     walk(f.child, next); } };
   walk(window.__fiberRoot?.current, []); return out; })()`) as Promise<string[]>;
 
+async function productReady(page: Page, mobile: boolean) {
+  // PDVIEW1 的远景隐藏卡片明细；桌面用仍可见的标题等候产品板，手机列表继续检查状态明细。
+  const ready = mobile
+    ? page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ })
+    : page.locator("main [data-pd-title]").filter({ hasText: "A 机的 feature" });
+  await ready.first().waitFor();
+  if (!mobile) {
+    // 标题先于 usePort 的首次测量出现；两入口都等摆放和降级过渡结束，才比较同一时刻的可见文本。
+    await page.waitForFunction(`(() => {
+      const world = document.querySelector('main [data-pd-mode]');
+      if (!world) return false;
+      const m = new DOMMatrix(getComputedStyle(world).transform);
+      return m.a < 1 && (m.e !== 0 || m.f !== 0);
+    })()`);
+    await page.evaluate(`Promise.allSettled([...document.querySelector('main [data-pd-mode]').getAnimations({ subtree: true })]
+      .filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))`);
+  }
+}
+
 for (const width of [1280, 390]) {
   const mobile = width < 640;
   test(`${width}：未绑定 / 个人 / 同名本机项目走本机，已绑定（主场机）项目组入口 = N5 列表同 key、同视图，不探本机台账`, async () => {
@@ -296,14 +326,14 @@ for (const width of [1280, 390]) {
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await page.getByText("B 机的 feature", { exact: false }).first().waitFor();
     expect(await tree(page)).toEqual(["CollabSwitch>SharedCollabContent>TeamSource>CollabView"]);
-    await page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ }).first().waitFor();
+    await productReady(page, mobile);
     const viaGroup = await page.locator("main").innerText();
     await shot(page, "3-bound-home-view", width);
     if (mobile) await page.getByRole("button", { name: "返回", exact: true }).click();
     await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
     expect(await opened(page)).toBe(n5Key("mac-a"));
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
-    await page.locator("main [data-product-words='working']").filter({ hasText: /在干活\s+\d+/ }).first().waitFor();
+    await productReady(page, mobile);
     expect(await page.locator("main").innerText()).toBe(viaGroup);
     expect({ paths: [...new Set(ledgerHits("claudestra"))], atMostTwo: ledgerHits("claudestra").length <= 2 }) // UXNUM1：主场本机的卡读本机 /work，只这一条；两个入口各挂载一次 → 至多 2 次
       .toEqual({ paths: ["mac-a /ledger/claudestra/work"], atMostTwo: true });

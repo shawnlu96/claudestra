@@ -10,6 +10,7 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { ADOPT_OP, adoptedReviewSource } from "../src/lib/scheduler-manual-review-source.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
 import { events, finding, H2, mcpReview, peerReview, plan, resume, reviewsDir, sideTables, toManual, toRound2, type Fx } from "./scheduler-manual-review-source-fixture.test.js";
+import { HANDBACK_REVIEW_TAG } from "../src/lib/pm-handback.js";
 
 let f: Fx;
 afterEach(() => f?.close());
@@ -34,8 +35,8 @@ async function refused(fx: Fx, why: RegExp) {
   expect(mark.refused).toMatch(why);
   expect(sideTables(fx)).toEqual(before);
   expect(adoptedReviewSource(fx.db, fx.task(), getWorkflow(fx.db, "T1")!)).toBeNull();
-  expect(plan(fx)).toMatchObject({ kind: "escalate" });
-  expect(plan(fx)).not.toMatchObject({ kind: "intent" });
+  // PMHAND1 11a: the unadopted verdict predates the PM hand-back, so it is not this round's: a fresh independent review, never the merge
+  expect(plan(fx)).toMatchObject({ kind: "intent", action: "review", reason: expect.stringContaining(HANDBACK_REVIEW_TAG) });
 }
 
 async function manualRound2(): Promise<Fx> {

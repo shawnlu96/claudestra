@@ -30,6 +30,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
     why: "the service's own maintenance lease" },
   { step: "opts.peerPr", file: "peer-pr-tick.ts", fn: "peerPrStep", effects: ["ledger", "gh", "git", "notice"], gates: ["featureless", "manager"],
     why: "peer PR cards are created by peer-pr-intake with no feature; their ledger writes still pass the gate" },
+  { step: "remoteReviewStep", file: "remote-review-tick.ts", fn: "remoteReviewStep", effects: ["ledger", "notice"], gates: ["manager"],
+    why: "RRL-1: each inbox file is booked through the pass manager first; a held card keeps its file, notices exist only for booked events" },
   { step: "mainCiPass", file: "scheduler-main-ci-wiring.ts", fn: "mainCiPass", effects: [], gates: ["none"],
     why: "MAINCIW: project level only (main / check reads, its own meta / notice claim / observe note, the PM notice); no card is named" },
   { step: "trainTick", file: "scheduler-merge-train-tick.ts", fn: "mergeTrainPass", effects: ["gh", "notice"], gates: ["hook"],
@@ -56,6 +58,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
   { step: "specResumeStep", file: "scheduler-spec-resume-deps.ts", fn: "specResumeStep", effects: ["ledger"], gates: ["pace", "manager"], why: "S2D hook" },
   { step: "opts.lockYield", file: "scheduler-lock-yield-deps.ts", fn: "lockYieldStep", effects: ["ledger", "notice"], gates: ["manager"],
     why: "every write is scheduler-lock-yield <taskId>; the PM notice follows only a recorded contend" },
+  { step: "flushPrioritySamples", file: "scheduler-priority-order-record.ts", fn: "flushPrioritySamples", effects: ["ledger"], gates: ["manager"],
+    why: "PRIO2: queued priority-order samples, a project-level note each through the leased pass manager" },
   { step: "schedulerAutoTick", file: "scheduler-auto-tick.ts", fn: "schedulerAutoTick", effects: ["ledger", "session", "git", "gh", "notice"],
     gates: ["pace"], why: "paceCards (S2D); central cards go to S2I through autoTickDeps" },
   { step: "auto.start", file: "scheduler-autostart-run.ts", fn: "autostartTick", effects: ["ledger", "session", "git", "notice"],
@@ -90,6 +94,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "scheduler-deploy-reconcile": "task",
   "scheduler-observation-register": "task",
   "scheduler-pm-todo": "task",
+  "scheduler-priority-sample": "project",
   "scheduler-family-wait": "task", "scheduler-fix-relay": "task", "scheduler-legacy-review-retire": "task", "scheduler-lock-yield": "task", "scheduler-main-ci": "project",
   "scheduler-manual-resume": "task", "scheduler-merge-begin": "intent", "scheduler-merge-handoff": "task", "scheduler-merge-step": "intent",
   "scheduler-model-inform": "task", "scheduler-model-outcome": "intent", "scheduler-observe": "task", "scheduler-plan": "task", "scheduler-plan-rejected": "task",
@@ -103,6 +108,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "scheduler-lend-author-retire": "task",
   "scheduler-main-red-fix": "project",
   "scheduler-content-review": "task", // merge-arch-REVIEW1 (merge-content-review-sink.ts)
+  "scheduler-remote-review": "task-or-none", // RRL-1 (remote-review-tick.ts): `-` when the inbox file could not be read
   "scheduler-worker-retire": "worker-retire", "verify": "task",
 };
 

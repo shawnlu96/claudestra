@@ -98,11 +98,14 @@ beforeAll(async () => {
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
     if (url.pathname === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (url.pathname === `/api/v1/ledger/${PROJECT}`) return json({ ok: true, ...home });
+    if (url.pathname === "/api/v1/asks") return json({ ok: true, asks: [], full: true, now: NOW }); // 完整的空列表 = 已知 0（UXCARD3：不完整且为空算不知道）
     if (url.pathname === "/api/v1/shared-ledger/features") return json(team.list);
     if (url.pathname === "/api/v1/shared-ledger/features/F1") return json(team.detail);
     return json({ ok: false, error: "not in fixture" }, 404);
   }) as typeof fetch;
   const view = await import(mod("collab/collab-view.tsx"));
+  // 生产由外壳 start 待办 store；这里读一次完整的空列表，本机「待你处理」才是已知 0（UXCARD3：没读到算不知道）
+  await (await import(mod("asks/asks-store.ts"))).asksStore.refresh();
   i18n = await import(new URL("../web/lib/i18n.tsx", import.meta.url).href);
   const store = await import(mod("chat/chat-store.ts"));
   const ops = await import(mod("collab/shared/team-ops.tsx"));

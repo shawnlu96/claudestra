@@ -14,10 +14,13 @@ import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
-import { instanceKeySync, keyFingerprint, verifyPurpose } from "./instance-key.js";
+import { instanceKeySync, keyFingerprint } from "./instance-key.js";
+import { ledgerReceive } from "./floka-ledger/config.js";
+import { verifyLendAck, type LendAck } from "./lend-receipts.js";
 import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
 import { sweepTrash } from "./lend-trash.js";
 import { reapOrder, reapOrphans, systemProcPorts } from "./lend-proc-reap.js";
+import { fileActionSink, guardReap, systemGuardSources } from "./worktree-orphan-guard.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
@@ -176,10 +179,10 @@ function gitIdentity(): { name: string; email: string } | null {
   return name && email ? { name, email } : null;
 }
 
-async function verifyReceipt(peer: string, r: { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }): Promise<boolean> {
+async function verifyReceipt(peer: string, r: LendAck): Promise<boolean> {
   const rec = ((await readPeers()).httpPeers ?? []).find((p) => p.name === peer && !p.disabled);
   if (!rec?.publicKey || r.key !== rec.publicKey) return false;
-  return verifyPurpose(rec.publicKey, "claudestra-lend-receipt-v1", [r.orderId, r.sha256, String(r.eventSeq), r.taskId], r.sig);
+  return verifyLendAck(r, rec.publicKey, ledgerReceive()); // rename.ledgerReceive off = the old purpose only, as before
 }
 
 /** 生产依赖。不设 writeOpen：写单开关只认 lend-grant-rules.ts WRITE_ROLE_OPEN（tests/lend-grant.test.ts 钉住） */
@@ -212,7 +215,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const registryRow = (name: string) => readRegistryAgentsSync().find((a) => a.name === name);
   const send = sendVia(registryRow, alive);
   const lendLog = (m: string) => console.error(`[lend] ${m}`);
-  const procPorts = systemProcPorts();
+  const procPorts = guardReap(systemProcPorts(), systemGuardSources(), fileActionSink(), lendLog).ports; // RTO2-1 护栏 + 动作台账
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, shot, env: process.env, footer, verifyReceipt,
     sandbox: { owners: sandboxOwnersDir(journal.filename), active, mode: () => readSchedulerConfig().lifecycle?.mode ?? "observe", card: (worker) => {

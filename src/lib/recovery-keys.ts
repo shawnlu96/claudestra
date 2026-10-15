@@ -69,6 +69,7 @@ export const RECOVERY_KEYS = [
   "mergeDeployDetach",
   "mergeDirect",
   "mergePipe",
+  "mergeQueueOwner",
   "mergeStaleYield",
   "mergeUnifiedCandidates",
   "mergeUnion",
@@ -107,6 +108,7 @@ export const RECOVERY_KEYS = [
   "uiReviewCarry",
   "unifiedMergeQueue",
   "updateGap",
+  "verifyAfterResolve",
   "wakeStopped",
   "writeLocalEqual",
 ] as const;

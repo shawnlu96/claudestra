@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { advance, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
 import { driveLeased, workerName, type LendDeps } from "../src/lib/lend-drive.js";
+import { configureLendNoticeOnce } from "../src/lib/lend-notice.js";
 
 test("different write orders actually create different worker sessions; a crashed same order recovers its own session", async () => {
   const db = openLendJournal(":memory:"), now = Date.now(), workers = new Map<string, { sessionId: string; cwd: string }>(), made: string[] = [];
@@ -16,6 +17,8 @@ test("different write orders actually create different worker sessions; a crashe
     worker: { find: (name) => workers.get(name), create: async (name, cwd, _purpose, gate) => {
       expect(await gate()).toBeNull(); made.push(name); workers.set(name, { sessionId: `fresh-session-${made.length}`, cwd }); return { ok: true };
     }, send: never, kill: never, alive: never } };
+  // 去重开关默认读共享状态目录里的 projects / recovery-policy，别的测试留下文件就成 observe、走会 throw 的 log；这里只测会话分配，钉成 off。
+  const restoreOnce = configureLendNoticeOnce(() => "off");
   try {
     for (const orderId of ["previous-repair", "fresh-repair"]) {
       recordAsked(db, { orderId, peer: "A", fp, family: "codex", preview: { repo: "o/r", step: "fix" } }, now);
@@ -29,5 +32,5 @@ test("different write orders actually create different worker sessions; a crashe
     db.run("UPDATE lend_orders SET state = 'cloned', sessionId = NULL WHERE orderId = 'fresh-repair'");
     await driveLeased(getOrder(db, "fresh-repair")!, deps);
     expect(made.length).toBe(2); expect(getOrder(db, "fresh-repair")?.sessionId).toBe(next.sessionId);
-  } finally { db.close(); }
+  } finally { restoreOnce(); db.close(); }
 });

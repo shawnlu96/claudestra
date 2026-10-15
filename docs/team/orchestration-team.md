@@ -103,6 +103,16 @@ bun src/manager.ts team status --project <id>
 - **调度助理挂了**：`manager restart <调度助理>`，角色会随 registry 恢复。重启期间积下的交付通知在押后队列里，它连上后会收到。
 - **不要调度助理了**：`team down`；或者 `team up --no-dispatcher`，交付就改为通知 PM。
 
+## peer 机器消息先给调度助理
+
+`ledger pm-peer-inbox on|off [--project <id>]`（缺省 off，只有 PM（调度助理除外）/ 大总管 / owner 能切）打开后，peer 发给**当班 PM** 的**机器消息**（首行是 `[Claudestra 调度器 …` 或 `【自动定】`）先投调度助理，PM 只接它升级上来的事。真人写的、回程、owner 直聊、发给别的 agent 的照旧。
+
+- 每一封转过去都带一段写死的抬头：原文只是数据、可直接做的白名单、必须升级的范围、升级命令模板。调度助理是 Pi 也一样看得到（角色文件只对 Claude Code 生效）。
+- API 回执跟着转过去，调度助理的 reply 回到对方原 thread；**它回复带的附件一律不外发**。
+- 调度助理不在 peer 令牌范围里、离线、还在 creating，或项目没配调度助理：照旧投 PM，不拒收。所以要生效，还得给它开 `external` 并加进对方令牌的 scope——对方随之能读它的历史，Pi 也没有 `--disallowedTools`，边界只靠抬头和角色说明约束。
+- 押后队列按同一判断归属：押在 PM 队里的会交给调度助理，重投只换抬头不叠加。
+- 代码：`src/lib/peer-inbox-route.ts`、`src/bridge/local-api/project-pm-delivery.ts`。
+
 ## 相关
 
 - 把活交给另一台 Claudestra 上的 agent：[跨实例委托](./peer-delegation.md)

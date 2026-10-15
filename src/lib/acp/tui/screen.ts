@@ -7,6 +7,7 @@
  */
 import { redactSecrets } from "../../redact-secrets.js";
 import { createTextStream } from "../transcript-stream.js";
+import { clipThought } from "../transcript.js";
 import type { TtyScreen } from "../tty-screen.js";
 import { elapsed, type TurnState } from "../tty-status.js";
 import { itemRows, kindOf, toolOf, toolRows, toolSpans, type ItemKind } from "./blocks.js";
@@ -27,8 +28,8 @@ export interface TuiScreen extends TtyScreen {
   config(raw: unknown): void;
 }
 
-/** 前面空一行再画的元素（一组工具调用、结果之间不空） */
-const GAP: ReadonlySet<ItemKind> = new Set(["message", "inbound", "permission", "plan", "stop"]);
+/** 前面空一行再画的元素（一组工具调用、结果之间不空）；回合分隔后面也空一行，和输入框的线隔开 */
+const GAP: ReadonlySet<ItemKind> = new Set(["message", "inbound", "permission", "plan", "stop", "thinking", "failure", "notice"]);
 const LIVE_TOOLS = 5, LIVE_TABLE = 8;
 
 type Rec = Record<string, any>;
@@ -47,6 +48,8 @@ export function createTuiScreen(io: TuiIo, state: () => TurnState, now: () => nu
   const stream = createTextStream(), tools = createToolTracker(now), thought = createThought(), info = createSessionInfo();
   const cols = () => Math.max(8, io.columns());
   let busySince: number | null = null, inTools = false;
+  /** 思考段先压着：紧跟的 agent_thought_chunk 带来原文就按原文多行重排（段是压成一行的），没有就照段画 */
+  let thinking: { item: string; at: Date } | null = null;
   const gap = (): string[] => ((inTools = false), [GAP_MARK]);
   const msg = createMessageWriter(cols, gap);
 
@@ -79,39 +82,54 @@ export function createTuiScreen(io: TuiIo, state: () => TurnState, now: () => nu
         return (tools.result(item), []);
       case "stop":
         info.compacting(false);
-        return [...settledRows(tools.endTurn()), ...gap(), ...itemRows(kind, item, cols(), at)];
+        return [...settledRows(tools.endTurn()), ...gap(), ...itemRows(kind, item, cols(), at), GAP_MARK];
       default:
         if (item === "✻ 上下文已压缩") info.compacting(false);
+        inTools = false;
         return [...(GAP.has(kind) ? gap() : []), ...itemRows(kind, item, cols(), at)];
     }
   };
 
+  /** 压着的思考段落下去：text = 紧跟的 agent_thought_chunk 原文（没有就照段画） */
+  const flushThinking = (text?: string): string[] => {
+    if (!thinking) return [];
+    const { item, at } = thinking;
+    thinking = null;
+    return piece(text === undefined ? item : `✻ ${clipThought(text)}`, at);
+  };
+
   return {
     show(item, at = new Date()) {
-      const out = settledRows(tools.orphans());
+      const out = [...flushThinking(), ...settledRows(tools.orphans())];
       const pieces = stream.settle(item).map(redactSecrets);
       // 流着的正文的终稿：只补没显示的行（可能一行都不剩）；对不上时 settle 原样还回整段，按新消息重画
       if (msg.open() && kindOf(item) === "message" && !(pieces.length === 1 && pieces[0] === redactSecrets(item))) {
         out.push(...msg.lines(pieces.flatMap((p) => p.split("\n"))), ...msg.end());
       } else {
         if (kindOf(item) !== "inbound") out.push(...msg.end());
-        for (const p of pieces) out.push(...piece(p, at));
+        for (const p of pieces) {
+          if (kindOf(p) === "thinking" && p !== "✻ 上下文已压缩") thinking = { item: p, at };
+          else out.push(...piece(p, at));
+        }
       }
       painter.commit(out);
     },
     update(update) {
       const u = (update ?? {}) as Rec;
-      const out = msg.lines(stream.chunk(u));
-      if (u.sessionUpdate === "agent_thought_chunk" && typeof u.content?.text === "string") thought.add(u.content.text);
+      const text = u.sessionUpdate === "agent_thought_chunk" && typeof u.content?.text === "string" ? u.content.text : undefined;
+      // 压着的思考段配上它的原文：已经进滚动记录了，底栏不再预览一遍
+      const own = thinking !== null && text !== undefined;
+      const out = [...flushThinking(text), ...msg.lines(stream.chunk(u))];
+      if (text !== undefined && !own) thought.add(text);
       else if (["agent_message_chunk", "tool_call", "plan"].includes(u.sessionUpdate)) thought.clear();
       info.update(u);
       out.push(...settledRows(tools.update(u)));
       painter.commit(out);
     },
-    print: (line) => painter.commit(itemRows("plain", redactSecrets(line), cols(), new Date())),
+    print: (line) => ((inTools = false), painter.commit(itemRows("plain", redactSecrets(line), cols(), new Date()))),
     config: (raw) => void (info.config(raw) && painter.commit([])),
-    tick: () => painter.commit(settledRows(tools.orphans())),
+    tick: () => painter.commit([...flushThinking(), ...settledRows(tools.orphans())]),
     resize: () => painter.redraw(),
-    close: () => painter.close(),
+    close: () => (painter.commit(flushThinking()), painter.close()),
   };
 }

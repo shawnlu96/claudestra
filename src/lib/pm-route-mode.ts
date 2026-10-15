@@ -4,11 +4,15 @@ import { acquireLock } from "./file-lock.js";
 import type { DigestMode } from "./pm-digest.js";
 import { readJsonStateSync, reportCorrupt, StateCorruptError, writeJsonAtomicSync } from "./state-file.js";
 
-interface Modes { projects?: Record<string, DigestMode>; routeProjects?: Record<string, DigestMode>; pullProjects?: Record<string, PullMode> }
+interface Modes {
+  projects?: Record<string, DigestMode>; routeProjects?: Record<string, DigestMode>; pullProjects?: Record<string, PullMode>;
+  peerInboxProjects?: Record<string, PullMode>;
+}
 export type PullMode = "on" | "off";
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const valid = (v: unknown): boolean => object(v) && (v.projects === undefined || object(v.projects))
-  && (v.routeProjects === undefined || object(v.routeProjects)) && (v.pullProjects === undefined || object(v.pullProjects));
+  && (v.routeProjects === undefined || object(v.routeProjects)) && (v.pullProjects === undefined || object(v.pullProjects))
+  && (v.peerInboxProjects === undefined || object(v.peerInboxProjects));
 
 export function pmRouteMode(path: string, project: string): DigestMode {
   const r = readJsonStateSync(path, valid);
@@ -32,13 +36,18 @@ export async function withModeLock<T>(path: string, fn: () => T, waitMs?: number
   } finally { lock.release(); }
 }
 
-export function setPmRouteMode(path: string, project: string, mode: DigestMode): Promise<void> {
+/** 锁内读改写一个项目开关；文件损坏就拒写，不把「空 + 这次改动」覆盖回去 */
+function setProjectMode<K extends "routeProjects" | "pullProjects" | "peerInboxProjects">(path: string, key: K, project: string, mode: string): Promise<void> {
   return withModeLock(path, () => {
     const r = readJsonStateSync(path, valid);
     if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
     const v = (r.status === "ok" ? r.data : {}) as Modes;
-    writeJsonAtomicSync(path, { ...v, routeProjects: { ...v.routeProjects, [project]: mode } });
+    writeJsonAtomicSync(path, { ...v, [key]: { ...v[key], [project]: mode } });
   });
+}
+
+export function setPmRouteMode(path: string, project: string, mode: DigestMode): Promise<void> {
+  return setProjectMode(path, "routeProjects", project, mode);
 }
 
 /** 旧 PMDIG off 没有配置独立分流时，不新建只属于分流的记录。 */
@@ -59,10 +68,18 @@ export function pmDigestPull(path: string, project: string): PullMode {
 }
 
 export function setPmDigestPull(path: string, project: string, mode: PullMode): Promise<void> {
-  return withModeLock(path, () => {
-    const r = readJsonStateSync(path, valid);
-    if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
-    const v = (r.status === "ok" ? r.data : {}) as Modes;
-    writeJsonAtomicSync(path, { ...v, pullProjects: { ...v.pullProjects, [project]: mode } });
-  });
+  return setProjectMode(path, "pullProjects", project, mode);
+}
+
+/**
+ * peer 机器消息转调度助理（DPR-1，lib/peer-inbox-route.ts）：缺省 off。文件损坏按 off——照旧投当班 PM，不会有消息被转走。
+ */
+export function pmPeerInbox(path: string, project: string): PullMode {
+  const r = readJsonStateSync(path, valid);
+  if (r.status === "corrupt") reportCorrupt(path, r.error, "pm-peer-inbox");
+  return r.status === "ok" && (r.data as Modes).peerInboxProjects?.[project] === "on" ? "on" : "off";
+}
+
+export function setPmPeerInbox(path: string, project: string, mode: PullMode): Promise<void> {
+  return setProjectMode(path, "peerInboxProjects", project, mode);
 }

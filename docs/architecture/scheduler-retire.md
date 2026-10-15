@@ -75,6 +75,24 @@ has its folder deleted:
 Not covered: PM's own session folders, and folders of old cards retired before this step existed (old manual-card checkouts
 live under PM's scratchpad and have different names).
 
+## Leftover processes
+
+A Bash-tool child such as `bun test` that launchd adopted (ppid=1) gets no signal when the session window closes, and keeps spinning
+after its worktree is removed. `src/lib/card-proc-reap.ts` (RTO1) handles them at two points. On retire, before step 2, it takes
+processes whose cwd is inside the card's two worktrees. It also runs a patrol, throttled to `ORPHAN_EVERY_MS`, over ppid=1
+processes under the worktrees root whose card is finished or whose cwd is gone. The lend side (`lend-proc-reap.ts`) does the same
+for `lend/work/<order>`.
+
+- Signals: TERM, then a grace period, then KILL for those still picked (`proc-reap-core.ts`). Only same-uid processes, never self
+  or pid ≤ 1, and nothing with a symlink anywhere on the path.
+- Mode: per project, recovery key `cardProcReap` (`off` / `observe` / `on`, default `observe`). Observe sends no signal. It records
+  and pushes PM once per process.
+- Production guard (`src/lib/worktree-orphan-guard.ts`, RTO2-1) wraps the system process table for both sides. A process with a
+  controlling terminal, or a running `com.claudestra.*` launchd job (bridge / launcher / cron / scheduler), is dropped before
+  any pick. So is a process whose `ps` facts are missing or whose command changed (pid reused). If `ps` or `launchctl` cannot be
+  read or exits non-zero, nothing is handed out that pass. Every signal and every observe push is one row in `state/worktree-orphan-actions.json`
+  (last 500, tmp+rename via `writeJsonAtomicSync`): pid, command basename, cwd, age, cumulative CPU, signal, result; a corrupt file is left as is and not overwritten (`StateCorruptError`, logged, signals still go). Tests in `tests/worktree-orphan-guard.test.ts`.
+
 ## When PM is told
 
 - **A worktree stays** (uncommitted or untracked files, a live agent works in it, unreadable, not a linked worktree, or

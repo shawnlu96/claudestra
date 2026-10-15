@@ -1,3 +1,4 @@
+import { ownerManualTurn } from "./merge-queue-owner-hooks.js";
 /**
  * Manual merge queue (dispatch-recovery-MQ1): PM's explicit requests to merge workflow-manual cards wait in event-seq order and
  * get the project merge slot (`merge:<project>`) through one authoritative decision, manualTurn, read by both sides of the race:
@@ -30,6 +31,7 @@ import { HOLD_LIMIT_MS, trainHolds } from "./scheduler-merge-train-hold.js";
 import { defaultTrainStore, lentSlotPending } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 import { mergeCandidates } from "./scheduler-merge-train-tick.js";
+import { contestOwed, mergeContest, sortByPriority } from "./scheduler-priority-order.js";
 
 /** What the pass read from the train file (its only writer is the same scheduler, so the claim child is handed it). */
 export const TRAIN_SIGNALS = ["none", "holds", "cleanup", "corrupt"] as const;
@@ -105,7 +107,8 @@ export function manualTurn(db: Database, project: string, train: TrainSignal, no
     const req = requestAt(db, Number(live.id.slice(4)));
     if (req) return { kind: "active", req, intentId: live.id };
   }
-  const queued = listRequests(db, project).filter((r) => requestStatus(db, r, now).state === "queued");
+  const queued = sortByPriority(db, "manual_merge", listRequests(db, project).filter((r) => requestStatus(db, r, now).state === "queued"),
+    (r) => ({ project, taskId: r.taskId }), { now }).applied; // PRIO2
   const holder = db.query("SELECT taskId FROM scheduler_resources WHERE project = ? AND resource = ?").get(project, `merge:${project}`) as
     { taskId: string } | null;
   // CAND1: a request whose member the settling train is ready to merge takes its turn inside that train (no train wait, no owed turn)
@@ -113,7 +116,8 @@ export function manualTurn(db: Database, project: string, train: TrainSignal, no
   if (member) return { kind: "due", req: member, wait: holder ? `合并槽在 ${holder.taskId} 手里，等它结清` : null };
   const head = queued[0];
   if (!head) return { kind: "none" };
-  const owed = owedToAuto(db, project, now);
+  const owed = contestOwed(mergeContest(db, project, head.taskId, () => mergeCandidates(db, project, { now }).map((c) => c.taskId), { now }),
+    () => owedToAuto(db, project, now)); // PRIO2
   if (owed) return { kind: "owed", req: head, why: owed };
   const wait = train === "corrupt" ? "合并列车状态文件读不了，先不占槽"
     : train === "holds" ? "等当前列车合并 / 部署完（不打断活车）"
@@ -137,7 +141,7 @@ export function claimManualMerge(db: Database, ctx: WriteCtx, input: { project: 
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "人工合并占槽只由调度服务做（它同时读列车状态）");
   const now = ctx.now ?? Date.now();
   return tx(db, () => {
-    const turn = manualTurn(db, input.project, input.train, now);
+    const turn = ownerManualTurn(db, input.project, input.train, now) ?? manualTurn(db, input.project, input.train, now);
     if (turn.kind !== "due" || turn.wait) {
       return { claimed: false, turn: turn.kind, why: turn.kind === "due" ? turn.wait : turn.kind === "owed" ? turn.why : null };
     }

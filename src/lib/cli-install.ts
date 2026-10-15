@@ -1,38 +1,6 @@
 /**
- * v2.4.0+：把 Claudestra 的 3 个 daemon 从 pm2 解耦，让 macOS launchd 直接管。
- *
- * 为啥换掉 pm2 启动链：
- *   - pm2 是 Node 写的，依赖一个能跑的 Node 实例。Node 又依赖一堆 dylib（icu4c
- *     之类）。brew 升级 icu4c / OpenSSL / libuv 都可能把 homebrew node 弄废，
- *     pm2 跟着挂；env-node 在 LaunchAgent PATH 里抓到 brew node 反而比 nvm 优先。
- *   - 用户的 node 装哪儿（nvm / fnm / asdf / volta / 系统 brew）千差万别，不能假设。
- *   - launchd 是 macOS 内置，永远在；Bun 是项目硬依赖（bridge / launcher / cron
- *     都跑在 bun 上），路径已经知道。组合起来就一条干净启动链：
- *         /Users/<user>/.bun/bin/bun  /repo/src/X.ts
- *     完全不依赖 node / pm2 / brew。
- *
- * 这个模块装/迁移以下东西（idempotent，每次 install-cli / update 都跑一次也无害）：
- *   1) `claudestra` CLI wrapper → ~/.local/bin/claudestra（XDG 标准，多数 PATH
- *      默认带它）+ ~/.bun/bin/claudestra symlink（兜底覆盖另一种常见 PATH）
- *   2) 四个 user-level LaunchAgent：
- *        com.claudestra.bridge.plist    → bun src/bridge.ts
- *        com.claudestra.launcher.plist  → bun src/launcher.ts
- *        com.claudestra.cron.plist      → bun src/cron.ts
- *        com.claudestra.scheduler.plist → bun src/scheduler.ts
- *      每个都 RunAtLoad=true（开机自启）+ KeepAlive=true（crash 自动重启，替代
- *      pm2 restart_delay）+ ThrottleInterval=10s（防 crash loop）。
- *   3) 迁移：把旧 com.claudestra.autostart.plist（v2.3.x，跑 pm2）+ 旧
- *      pm2.<user>.plist（pm2 startup 装的）unload 并 .bak 备份；把还在跑的 pm2
- *      daemon（discord-bridge / master-launcher / cron-scheduler）stop 掉，
- *      免得跟新 launchd 守护互相打架。
- *   4) 启动新 plist（launchctl bootout 容错 + bootstrap）。
- *
- * pm2 本身没卸：用户想 `pm2 logs` 看历史还能用。`ecosystem.config.cjs` 留着供
- * 临时手动启动 / 老熟人怀旧。但**启动链不再走 pm2**，所有面向用户的文档
- * （README / SETUP / CLAUDE.md / install.sh / master 模板）也已在 v2.13.1 全部
- * 改口径到 launchd —— 之前文档教 pm2、代码装 launchd，照着装会同时跑起两套：
- * 一个 token 两条 Discord 网关、3847 端口 EADDRINUSE 崩溃循环、两个 launcher
- * 抢同一个 tmux session。
+ * Legacy CLI and launchd installation. Default-off rendering stays unchanged;
+ * approved rename transactions live in floka-services/install and share STATE2's executor lock.
  */
 
 import { resolveBridgePort } from "./bridge-url.js";
@@ -54,6 +22,7 @@ import { migrateWebHosting } from "./legacy-web.js";
 import { refuseInSandbox } from "./sandbox.js";
 import { DAEMONS, cliWrapperScript, systemdUnitHint, type DaemonSpec } from "./cli-wrapper.js";
 import { renderDaemonPlist, type DaemonPlistInput } from "./daemon-plist.js";
+import { withRenameInstallGate } from "./floka-services/install/install-gate.js";
 
 export { DAEMONS, cliWrapperScript } from "./cli-wrapper.js";
 
@@ -576,7 +545,12 @@ async function removeOldAutostartWrapper(): Promise<boolean> {
  *
  * Idempotent —— 跑多次只是重写同一份文件 + 重新 load，无害。每次 update 走一次。
  */
-export async function installClaudestraCli(
+export { renameGuardedInstall as installClaudestraCli };
+async function renameGuardedInstall(repoRoot: string, opts: { skipWebBuild?: boolean } = {}): Promise<InstallCliResult> {
+  return withRenameInstallGate(() => installClaudestraCli(repoRoot, opts));
+}
+
+async function installClaudestraCli(
   repoRoot: string,
   /** skipWebBuild：调用方（manager update）本轮已经试过构建——失败时不再把同一个失败的构建跑第二遍 */
   opts: { skipWebBuild?: boolean } = {},

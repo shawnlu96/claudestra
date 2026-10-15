@@ -49,6 +49,8 @@ interface ProjectSchedule extends AgentPoolPolicy {
   deploy?: DeployTarget;
   /** true = the repository owner merges: auto cards hand the PR over at merge and never merge here (docs/architecture/merge-handoff.md). */
   mergeHandoff?: boolean;
+  /** peers.json name of the repository owner whose review pushes on handed-over PRs are booked here, not sent to PM (RRL-1) */
+  handoffPeer?: string;
   /** false = this project's agents are never supervised (i28-S1); absent = follow the global switch */
   supervise?: boolean;
   /** true = a repository without a GitHub PR flow: cards branch off local main, deliver a local commit, and the PM merges into
@@ -103,6 +105,9 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
     }
     if (p.supervise !== undefined && typeof p.supervise !== "boolean") throw new Error(`scheduler project ${id}: supervise must be boolean`);
     if (p.mergeHandoff !== undefined && typeof p.mergeHandoff !== "boolean") throw new Error(`scheduler project ${id}: mergeHandoff must be boolean`);
+    if (p.handoffPeer !== undefined && (typeof p.handoffPeer !== "string" || !/^[\w-]{1,32}$/.test(p.handoffPeer))) {
+      throw new Error(`scheduler project ${id}: handoffPeer must be a peers.json name`);
+    }
     if (p.mergeHandoff === true && p.deploy !== undefined) throw new Error(`scheduler project ${id}: mergeHandoff cannot deploy (nothing merges here)`);
     const local = parseLocalMerge(id, p);
     projects[id] = { ...agents, ...localRuntimeFields(p.localAuthorRuntime),
@@ -111,7 +116,8 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
         p.localAuthorRuntime), ...agents },
       ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
       ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}), ...mergeTrainField(id, p.mergeTrain),
-      ...(p.mergeHandoff === true ? { mergeHandoff: true } : {}), ...(local ? { localMerge: true } : {}) };
+      ...(p.mergeHandoff === true ? { mergeHandoff: true } : {}), ...(p.handoffPeer !== undefined ? { handoffPeer: p.handoffPeer as string } : {}),
+      ...(local ? { localMerge: true } : {}) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects, supervise: parseSupervise(r.supervise),

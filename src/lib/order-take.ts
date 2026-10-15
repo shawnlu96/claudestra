@@ -15,6 +15,7 @@ import { stepAtStage, stepsOf } from "./ledger-steps.js";
 import { isFullSha, parseOrderWire, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
+import { liveBinding } from "./pm-handback.js";
 import type { VerifiedCall } from "./order-tool-route.js";
 import { SRC_DIR } from "./repo-root.js";
 import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
@@ -57,8 +58,8 @@ function currentIntent(db: Database, task: LedgerTask, step: "write" | "fix"): S
 
 /** 卡上的作者会话绑定（没退役的）要是调用方本人本会话；没有绑定 = 手动派的卡，只看步骤执行者 */
 function bindingAllows(db: Database, taskId: string, call: VerifiedCall): boolean {
-  const s = getSchedulerSession(db, taskId, "author");
-  if (!s || s.state === "retired") return true;
+  const s = liveBinding(getSchedulerSession(db, taskId, "author"));
+  if (!s) return true;
   return s.agent === call.agent && !!call.sessionId && s.sessionId === call.sessionId;
 }
 
