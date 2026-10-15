@@ -12,7 +12,7 @@ import {
   ensureOwnerPrincipal, fullGrant, guestGrant, newGuestPrincipal, normalizeGrant, type Approval, type Grant,
 } from "../lib/devices.js";
 import { LEGACY_SESSION_COOKIE, legacySessionClearCookie, redeemLegacySession } from "../lib/legacy-web.js";
-import { cookieWriteNames, readBrowserCookie } from "../lib/floka-browser-protocol/credentials.js";
+import { cookieWritePlan, readBrowserCookie } from "../lib/floka-browser-protocol/credentials.js";
 import { browserPolicy } from "../lib/floka-browser-protocol/policy.js";
 import { webDb } from "./local-api/db.js";
 import { readPrincipalsStrict, reservedNameError, secretEquals, updatePrincipals, type Principal, type PrincipalsFile } from "../lib/principals.js";
@@ -198,10 +198,10 @@ export function hasPairingApprover(file: PrincipalsFile, now = Date.now()): bool
 const LOCAL_PENDING_MAX = 3;
 
 /** 本机待批的领取凭据 `<approvalId>.<秘密>`：只种在发起的浏览器（HttpOnly），取结果 / 取消都要对上——编号在批准横幅里看得到，不当秘密 */
-/** 两族同 rename.browserProtocol：write=on 同值一起种，删时 receive=on 一起删；off / observe 只有旧族 */
+/** 两族同 rename.browserProtocol：write=on 同值一起种，删时 receive=on 一起删，receive=on 没开新写入时种旧族顺手删残留新族；off / observe 只有旧族 */
 function localClaimCookies(value: string | null): string[] {
-  return cookieWriteNames("localClaimCookie", browserPolicy(), value === null)
-    .map((name) => `${name}=${value ?? ""}; Path=/api/v1/devices/; Max-Age=${value ? 600 : 0}; HttpOnly; SameSite=Strict`);
+  return cookieWritePlan("localClaimCookie", browserPolicy(), value === null)
+    .map(({ name, clear }) => `${name}=${clear ? "" : value}; Path=/api/v1/devices/; Max-Age=${clear ? 0 : 600}; HttpOnly; SameSite=Strict`);
 }
 /** on 档两族值不同 = 冲突，当没带：领取 / 取消都对不上 */
 function localClaimOf(req: Request): string[] {

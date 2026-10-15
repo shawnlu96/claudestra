@@ -137,9 +137,10 @@ describe("[验收线 1] 真端口：旧新 cookie × CSRF 矩阵，冲突凭据�
     expect(await cancel(BROWSER_OFF, { [OLD.deviceHeader]: "1" })).not.toEqual(csrfDenied);
   });
 
-  test("Set-Cookie：off / observe / 只开接收 只种旧族（与现行逐字相同）；write=on 两族同值；删除时接收 on 两族一起删", () => {
+  test("Set-Cookie：off / observe 只种旧族（与现行逐字相同）；只开接收 种旧族并删残留新族；write=on 两族同值；删除时接收 on 两族一起删", () => {
     const opts = { path: "/", secure: false };
-    for (const p of [BROWSER_OFF, OBSERVE, RECEIVE]) expect(deviceCookieHeaders(tokenA, opts, p)).toEqual([deviceCookieHeader(tokenA, opts)]);
+    for (const p of [BROWSER_OFF, OBSERVE]) expect(deviceCookieHeaders(tokenA, opts, p)).toEqual([deviceCookieHeader(tokenA, opts)]);
+    expect(deviceCookieHeaders(tokenA, opts, RECEIVE)).toEqual([deviceCookieHeader(tokenA, opts), deviceCookieHeader(null, opts, NEW.deviceCookie)]);
     const both = deviceCookieHeaders(tokenA, opts, WRITE);
     expect(both).toEqual([deviceCookieHeader(tokenA, opts), deviceCookieHeader(tokenA, opts).replace(`${OLD.deviceCookie}=`, `${NEW.deviceCookie}=`)]);
     expect(deviceCookieHeaders(null, opts, BROWSER_OFF)).toEqual([deviceCookieHeader(null, opts)]);
@@ -343,5 +344,61 @@ describe("[验收线 3] off / observe 认证不变；回旧版本仍认最新配
     expect(ok.status).toBe(200);
     expect(await hit(BROWSER_OFF, { cookies, csrf: { [NEW.deviceHeader]: "1" } })).toEqual({ status: 403, code: "csrf" });
     expect(await hit(BROWSER_OFF, { cookies })).toEqual({ status: 403, code: "csrf" });
+  });
+
+  /** 按浏览器规则把 Set-Cookie 落进 cookie jar（同名覆盖，Max-Age=0 删除） */
+  function applySetCookies(jar: Map<string, string>, setCookies: string[]): void {
+    for (const c of setCookies) {
+      const [kv, ...attrs] = c.split(";").map((s) => s.trim());
+      const i = kv!.indexOf("=");
+      const name = kv!.slice(0, i);
+      if (attrs.some((a) => a.toLowerCase() === "max-age=0")) jar.delete(name);
+      else jar.set(name, kv!.slice(i + 1));
+    }
+  }
+  const header = (jar: Map<string, string>) => [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+  async function hitJar(policy: BrowserPolicy, jar: Map<string, string>): Promise<{ status: number; code?: string; id?: string }> {
+    setBrowserPolicyForTest(policy);
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/v1/agents`, { method: "POST", headers: { cookie: header(jar), [OLD.deviceHeader]: "1" } });
+    applySetCookies(jar, res.headers.getSetCookie());
+    const body = await res.json() as { code?: string; credential?: { id?: string } };
+    return { status: res.status, code: body.code, id: body.credential?.id };
+  }
+  const opts = { path: "/", secure: false };
+
+  test("[回归] write=on 配对 A 后关新写入（只开接收）重新配对 B：残留新族被删，jar 只剩 B，认证过", async () => {
+    const jar = new Map<string, string>();
+    applySetCookies(jar, deviceCookieHeaders(tokenA, opts, WRITE));
+    applySetCookies(jar, deviceCookieHeaders(tokenB, opts, RECEIVE));
+    expect([...jar]).toEqual([[OLD.deviceCookie, tokenB]]);
+    expect(readBrowserCookie(header(jar), "deviceCookie", RECEIVE)).toEqual({ status: "ok", value: tokenB, family: "claudestra" });
+    const b = await hitJar(RECEIVE, jar);
+    expect(b.status).toBe(200);
+    expect((await hitJar(WRITE, jar)).id).toBe(b.id);
+  });
+
+  test("[回归] write=on 配对 A → 回旧版本 / off 档重新配对 B → 再开双认：首个请求冲突照拒并删新族镜像，之后按旧族认 B；CSRF 不降级", async () => {
+    const jar = new Map<string, string>();
+    applySetCookies(jar, deviceCookieHeaders(tokenA, opts, WRITE));
+    applySetCookies(jar, deviceCookieHeaders(tokenB, opts, BROWSER_OFF)); // 旧版本 / off：只写旧族（与现行逐字相同，删不到新族）
+    expect(readBrowserCookie(header(jar), "deviceCookie", RECEIVE)).toEqual({ status: "conflict" });
+    expect(await hitJar(RECEIVE, jar)).toMatchObject({ status: 401, code: "device_conflict" });
+    expect([...jar]).toEqual([[OLD.deviceCookie, tokenB]]);
+    const b = await hitJar(RECEIVE, jar);
+    expect(b.status).toBe(200);
+    // 冲突恢复不放松 CSRF：缺头仍 403
+    expect(await hit(RECEIVE, { cookies: Object.fromEntries(jar) })).toEqual({ status: 403, code: "csrf" });
+    // 再开新写入续上两族同值
+    applySetCookies(jar, deviceCookieHeaders(tokenB, opts, WRITE));
+    expect((await hitJar(WRITE, jar)).id).toBe(b.id);
+  });
+
+  test("off / observe 下冲突不存在：旧族照认，响应不带任何 Set-Cookie（逐字等于现状）", async () => {
+    for (const p of [BROWSER_OFF, OBSERVE]) {
+      const jar = new Map([[OLD.deviceCookie, tokenB], [NEW.deviceCookie, tokenA]]);
+      const log = spyOn(console, "info").mockImplementation(() => {});
+      try { expect((await hitJar(p, jar)).status).toBe(200); } finally { log.mockRestore(); }
+      expect(jar.get(NEW.deviceCookie)).toBe(tokenA);
+    }
   });
 });

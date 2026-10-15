@@ -60,11 +60,23 @@ export function csrfPasses(method: string, h: HeaderSource, p: BrowserPolicy): b
   return r.status === "ok" && r.value !== null;
 }
 
-/** 给 Set-Cookie 用的那几个名字：旧族永远写；新族 write=on 才写，删除时 receive=on 就一起删 */
-export function cookieWriteNames(role: CookieRole, p: BrowserPolicy, clearing: boolean): string[] {
-  const neu = clearing ? p.receive === "on" : p.receive === "on" && p.write === "on";
-  return neu ? [OLD[role], NEW[role]] : [OLD[role]];
+/**
+ * 给 Set-Cookie 用的那几个名字与动作：旧族永远照写（种 / 删）；新族 write=on 才同值种，删除时 receive=on 就一起删。
+ * receive=on 而 write 没开时种旧族，同时删掉新族：之前 write=on 种下的新族镜像（或回滚到旧版本后重新配对留下的）
+ * 不会再跟着更新，留着就与新旧族值不同 → 冲突 → 401。off / observe 只有旧族一条，与现行逐字相同。
+ */
+export function cookieWritePlan(role: CookieRole, p: BrowserPolicy, clearing: boolean): { name: string; clear: boolean }[] {
+  const plan = [{ name: OLD[role], clear: clearing }];
+  if (p.receive !== "on") return plan;
+  plan.push({ name: NEW[role], clear: clearing || p.write !== "on" });
+  return plan;
 }
+
+/**
+ * 两族 cookie 冲突时要删的新族名。旧族是唯一每次都写的一族（任何档位、任何版本），新族只是同值镜像，
+ * 冲突只可能是新族过期——拒掉这一请求（冲突照拒，不替请求挑一把），同时删掉新族，下一请求只剩旧族、按旧族判。
+ */
+export const staleMirrorName = (role: CookieRole): string => NEW[role];
 
 /** 中继 /m/<fp>/ 放给机器、放回浏览器的 cookie 名（RELAY 清洗链接线用；off / observe 与现行只放旧族相同） */
 export function relayCookieNames(p: BrowserPolicy): string[] {

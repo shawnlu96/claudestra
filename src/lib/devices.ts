@@ -10,7 +10,7 @@ import type { Principal, PrincipalsFile } from "./principals.js";
 import { canonicalAgentName, isLiteralMaster, isMasterAgent } from "./registry.js";
 import { BROWSER_NAMES } from "./floka-browser-protocol/names.js";
 import { browserPolicy, type BrowserPolicy } from "./floka-browser-protocol/policy.js";
-import { cookieWriteNames, csrfPasses, rawCookie, readBrowserCookie } from "./floka-browser-protocol/credentials.js";
+import { cookieWritePlan, csrfPasses, rawCookie, readBrowserCookie } from "./floka-browser-protocol/credentials.js";
 
 export const OWNER_PRINCIPAL_ID = "owner:self";
 export const DEVICE_COOKIE = BROWSER_NAMES.claudestra.deviceCookie;
@@ -280,9 +280,12 @@ export function deviceCookieHeader(token: string | null, opts: { path?: string; 
   return [`${name}=${token ?? ""}`, `Path=${opts.path ?? "/"}`, `Max-Age=${maxAge}`, "HttpOnly", "SameSite=Strict", ...(opts.secure ? ["Secure"] : [])].join("; ");
 }
 
-/** 要种的全部设备 cookie：旧族永远在（回滚期旧版本照认最新配对），write=on 再加同值的新族；删除时 receive=on 两族一起删 */
+/**
+ * 要种的全部设备 cookie：旧族永远在（回滚期旧版本照认最新配对），write=on 再加同值的新族；删除时 receive=on 两族一起删；
+ * receive=on 但没开新写入时，种旧族的同时删掉残留的新族（不然它带着旧 token 与新旧族冲突）
+ */
 export function deviceCookieHeaders(token: string | null, opts: { path?: string; secure: boolean; maxAgeSec?: number }, policy: BrowserPolicy = browserPolicy()): string[] {
-  return cookieWriteNames("deviceCookie", policy, token === null).map((n) => deviceCookieHeader(token, opts, n));
+  return cookieWritePlan("deviceCookie", policy, token === null).map((w) => deviceCookieHeader(w.clear ? null : token, opts, w.name));
 }
 
 /** CSRF：cookie 鉴权的非 GET/HEAD 必须带自定义头 */
