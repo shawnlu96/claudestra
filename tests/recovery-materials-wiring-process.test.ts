@@ -197,7 +197,7 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
     const { out, pid } = await d.run(["ledger", "lend-offer", "T1"]);
     expect(out).toMatchObject({ ok: true, step: "fix" });
     expect(out.materialsDiag).toBeUndefined();
-    expect(d.calls().slice(before)).toEqual([`${pid} ${P}:materials`]);
+    expect(d.calls().slice(before)).toEqual([`${pid} ${P}:materials`, `${pid} ${P}:memoryLendInjection`]);
     const got = await claimFix(d, "T1");
     expect(got.text).not.toContain("ghp_");
     expect(got.inputs.some((s) => s.startsWith(FULL))).toBe(false);
@@ -258,7 +258,7 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
       const before = d.calls().length;
       const { out, pid } = await d.run(["ledger", "lend-offer", "T-corrupt"]);
       expect(out).toMatchObject({ ok: true, step: "fix" });
-      expect(d.calls().slice(before)).toEqual([`${pid} ${P}:materials`]);
+      expect(d.calls().slice(before)).toEqual([`${pid} ${P}:materials`, `${pid} ${P}:memoryLendInjection`]);
       const got = await claimFix(d, "T-corrupt");
       expect(got.inputs.some((s) => s.startsWith(FULL))).toBe(true);
       expect(got.text).not.toContain(LABEL);
@@ -305,7 +305,7 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
   test("build 单不读 materials 策略，交付只读 uiDelivery", async () => {
     const before = d.calls().length;
     await delivered(d, "T-build", P);
-    expect(d.calls().slice(before).map((call) => call.split(" ")[1])).toEqual([`${P}:uiDelivery`]);
+    expect(d.calls().slice(before).map((call) => call.split(" ")[1])).toEqual([`${P}:memoryLendInjection`, `${P}:uiDelivery`]);
   }, 60_000);
 });
 
