@@ -44,6 +44,8 @@
 - 精准例外里的文件又被本卡 fileGlobs 盖住了（例外就没意义了）：提示 PM 二选一；
 - 解析不出来的行（没有路径 / 写了通配）逐条列出行号。
 
+生产接线：`askDefaultAll` 不是 off 时，写单上的提问开出（`openOrderAsk` 读本卡规格时）顺带跑一次，有提示就在卡上记一条 note（op `spec_exceptions_lint`，同一卡同一组提示只记一次）给 PM。开卡预检（`dag-tools-start.ts`）不在本卡文件范围内，暂不接。
+
 ## 执行者提问怎么处理（恢复键 `askDefaultAll`）
 
 档位走 recovery-policy（缺省 observe，上线后按「上线后 PM」的自动转正行转 on）：
@@ -56,7 +58,7 @@
   - class=scope 带 files、files 全部在本卡规格的精准例外里：当场答「规格精准例外已列：<文件>，按规格写的限制改，交付说明逐条列」，不等 15 分钟、不通知 PM；部分命中 / 没命中照上面 15 分钟默认。
   - 每次自动定 / 自动答在卡上记一条 note（`op: ask_default_all`）。
 
-永远等 PM（结构化判断，不看正文）：提问标了 `risk`（`delete_data` / `permission` / `security` / `schema`）；卡首 `模板：security`；读不到本卡规格；没写 class 的旧版提问。
+永远等 PM（结构化判断，不看正文）：提问标了 `risk`（`delete_data` / `permission` / `security` / `schema`）；卡首 `模板：security`；读不到本卡规格；没写 class 的旧版提问。其中 risk 与 security 模板（没写 class 但带 risk / files 的提问同样判）开出时记进 `extra.held`，扫描对这类提问的所有自动定 / 自动批准一律不碰——包括 i28-ASK4 的 tests/ 扩围自动批准（off 档不记，与改前一致）。
 
 PM 在 15 分钟内回（`send_to_agent` 正文带 `ask <id>`，或网页作答）以 PM 为准；晚于自动定的回复按现有「已按默认定」回执处理，不翻案。i28-ASK4 的 tests/ 扩围自动批准、审查单自动答不变。
 

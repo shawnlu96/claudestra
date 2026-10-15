@@ -30,6 +30,7 @@ import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./re
 import { slotByOrderId } from "./review-order.js";
 import { allExcepted, parseSpecExceptions } from "./spec-exceptions.js";
 import { scanSpecHead } from "./spec-lint-head.js";
+import { lintSpecExceptions } from "./spec-lint.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
 
 export interface AskDeps {
@@ -106,22 +107,28 @@ export const specExceptionAnswer = (files: readonly string[]): string => `规格
 /**
  * ASKDEF1 的结构化分类（不看正文）：held = 永远等 PM 的原因；kind = on 档下怎么处理（null = 走改前的口径）。
  * 本机 design / scope 本来就不阻塞（kind null）；risk / security 模板 / 读不到规格的一律 held。
+ * hard = risk / security 模板：开出时记进 extra.held，所有自动定 / 自动批准路径（含 i28-ASK4 测试类扩围）都不碰（order-ask-default.ts）；
+ * 没写 class 但标了 risk 或带 files 的提问也按这一份判。lint = 规格精准例外的非阻断提示（spec-lint.ts lintSpecExceptions）。
  */
-type AllPlan = { held: string | null; kind: "exception" | "default" | "blocker" | null; files?: string[] };
+type AllPlan = { held: string | null; kind: "exception" | "default" | "blocker" | null; files?: string[]; hard?: boolean; lint?: string[] };
 function defaultAllPlan(db: Database, src: AskSource, q: Question, step: string | null): AllPlan {
   const write = step === null || step === "write" || step === "fix";
-  if (!write || !q.class) return { held: null, kind: null };
-  if (q.risk) return { held: `执行者标了 risk=${q.risk}`, kind: null };
+  if (!write) return { held: null, kind: null };
+  if (q.risk) return { held: `执行者标了 risk=${q.risk}`, kind: null, hard: true };
+  if (!q.class && !q.files?.length) return { held: null, kind: null };
   const task = getTask(db, src.task.id);
   const text = task ? readTextSoft(specPathFor(task, getMeta(db, task.project).docsDir)) : null;
-  if (text === null) return { held: "读不到本卡规格", kind: null };
-  if (scanSpecHead(text).decls.some((d) => d.trim().toLowerCase() === "security")) return { held: "卡是 security 模板", kind: null };
+  if (text === null) return { held: q.class ? "读不到本卡规格" : null, kind: null };
+  if (scanSpecHead(text).decls.some((d) => d.trim().toLowerCase() === "security")) return { held: "卡是 security 模板", kind: null, hard: true };
+  const globs = Array.isArray(task?.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
+  const lint = lintSpecExceptions(text, globs);
+  if (!q.class) return { held: null, kind: null, lint };
   const files = q.class === "scope" && q.files?.length ? q.files : null;
-  if (files && allExcepted(parseSpecExceptions(text), files)) return { held: null, kind: "exception", files };
+  if (files && allExcepted(parseSpecExceptions(text), files)) return { held: null, kind: "exception", files, lint };
   // i28-ASK4 测试类扩围（files 全在 tests/ + reason）照旧走自动批准、追加 fileGlobs 那条路，不在这里改成不阻塞
-  if (step !== null && q.reason && q.files?.every((f) => f.startsWith("tests/"))) return { held: null, kind: null };
-  if (q.class === "blocker") return { held: null, kind: q.default?.trim() ? "blocker" : null };
-  return { held: null, kind: step === null ? null : "default" };
+  if (step !== null && q.reason && q.files?.every((f) => f.startsWith("tests/"))) return { held: null, kind: null, lint };
+  if (q.class === "blocker") return { held: null, kind: q.default?.trim() ? "blocker" : null, lint };
+  return { held: null, kind: step === null ? null : "default", lint };
 }
 
 const OBSERVED: Record<NonNullable<AllPlan["kind"]>, string> = {
@@ -179,7 +186,7 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
       ...(nonblocking ? { blocking: false, expiresAt: 253402300799999 } : {}),
       extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: auto === "exception" ? "skipped" : "pending",
         class: nonblocking ? q.class : "blocker", ...(keepDefault ? { default: q.default } : {}), ...askScopeExtra(q as Partial<AskWire>),
-        ...(mode !== "off" && q.risk ? { risk: q.risk } : {}),
+        ...(mode !== "off" && q.risk ? { risk: q.risk } : {}), ...(on?.hard ? { held: on.held } : {}),
         ...(auto ? { defaultAll: true } : {}), ...(auto === "exception" ? { specException: on!.files } : {}) },
     }, () => {
       const lost = src.recheck?.();
@@ -193,6 +200,7 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
   const ask = opened.ask;
   const askee = ask.assignee ?? pm;
   if (mode === "observe" && plan?.kind && !opened.existed) observeAll(deps, src, ask.id, plan.kind);
+  if (plan?.lint?.length && !opened.existed) lintNote(deps, src, plan.lint);
   if (opened.existed && (ask.state !== "open" || ask.extra.notice !== "pending")) {
     return { askId: ask.id, askee, duplicate: true, notified: ask.extra.notice === "handed", delivered: null, ...behavior };
   }
@@ -219,6 +227,20 @@ function observeAll(deps: Pick<AskDeps, "record">, src: AskSource, askId: string
     });
   } catch (e) {
     console.error(`⚠️ ask ${askId} 的 askDefaultAll 观察没记下：${(e as Error).message}`);
+  }
+}
+
+/** 规格精准例外的非阻断提示记在卡上给 PM（同一卡同一组提示只记一次）；记不下只打日志，不连累提问本身 */
+function lintNote(deps: Pick<AskDeps, "record">, src: AskSource, lint: string[]): void {
+  try {
+    const digest = createHash("sha256").update(JSON.stringify(lint)).digest("hex").slice(0, 16);
+    deps.record({ actor: "system:spec-lint", dedupKey: `spec-exceptions-lint:${src.task.id}:${digest}` }, {
+      project: src.task.project, target: src.task.id, kind: "note",
+      text: `${src.task.id} 规格精准例外检查（不拦开卡，请 PM 处理）：\n${lint.map((l) => `- ${l}`).join("\n")}`,
+      data: { op: "spec_exceptions_lint", hints: lint },
+    });
+  } catch (e) {
+    console.error(`⚠️ ${src.task.id} 的精准例外检查提示没记下：${(e as Error).message}`);
   }
 }
 

@@ -214,3 +214,36 @@ test("lend v2 ask passes class / default / risk through leniently; old peers par
   await sweepAskDefaults(db, now + ASK_DEFAULT_MS * 5, sweepDeps());
   expect(getAsk(db, idOf(classless))?.state).toBe("open");
 });
+
+test("[2] ASK4 test-scope auto-approval also respects risk and the security template (one shared hold)", async () => {
+  const q = { class: "scope", default: "补测试", files: ["tests/a.test.ts"], reason: "new_test" };
+  const risk = await remote({ ...q, risk: "security" });
+  const classless = await remote({ files: ["tests/b.test.ts"], reason: "new_test", risk: "permission", question: "旧版带 risk" });
+  writeFileSync(spec, SPEC.replace("模板：code", "模板：security"));
+  const sec = await remote({ ...q, question: "sec" });
+  for (const r of [risk, classless, sec]) expect(r).toMatchObject({ blocking: true });
+  await sweepAskDefaults(db, now + ASK_DEFAULT_MS * 2, sweepDeps());
+  for (const r of [risk, classless, sec]) expect(getAsk(db, idOf(r))).toMatchObject({ state: "open", extra: { held: expect.any(String) } });
+  expect(getTask(db, "T1")?.extra.fileGlobs).toBeUndefined();
+  expect(told).toHaveLength(0);
+  // off: verbatim pre-change behavior, ASK4 still approves
+  mode = "off";
+  const off = await remote({ ...q, question: "off" });
+  await sweepAskDefaults(db, now + ASK_DEFAULT_MS * 3, sweepDeps());
+  expect(getAsk(db, idOf(off))?.state).toBe("answered");
+});
+
+test("spec-exception lint hints reach the PM as one card note (non-blocking)", async () => {
+  db.run("UPDATE tasks SET extra = json_set(extra, '$.fileGlobs', json('[\"src/lib/*.ts\"]')) WHERE id = 'T1'");
+  writeFileSync(spec, `${SPEC}\n## 精准例外\n\n- 改一下 lib 目录下的东西\n`);
+  const r = await remote({ class: "design", default: "保留两边" });
+  await remote({ class: "design", default: "另一个", question: "再问" });
+  expect(r).toMatchObject({ blocking: false });
+  const n = notes("spec_exceptions_lint");
+  expect(n).toHaveLength(1);
+  expect(n[0].text).toContain("src/lib/a.ts 已在本卡 fileGlobs");
+  expect(n[0].text).toContain("没解析出来");
+  mode = "off";
+  await remote({ class: "design", default: "x", question: "off" });
+  expect(notes("spec_exceptions_lint")).toHaveLength(1);
+});

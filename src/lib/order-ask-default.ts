@@ -14,7 +14,7 @@
  * ASKDEF1（askDefaultAll=on 时开出、extra.defaultAll = true 的提问，order-ask.ts）：远端写单的 design / scope、带 default 的 blocker
  * 同样 15 分钟按默认定、追加「自动定」一节；精准例外命中的不等 15 分钟、不通知 PM，下一次扫描就结案。结论转告执行者：远端经 deps.tell，
  * 本机执行者经 deps.notify（blocker 的执行者在等）；每次自动定 / 自动答卡上记一条 note（op ask_default_all）。是否 defaultAll 只在开出时按档位定，
- * 扫描不再看档位；标了 risk 的永远不在这里定。tests/order-ask-default-all.test.ts。
+ * 扫描不再看档位；标了 risk 的、开出时记了 extra.held（risk / security 模板）的永远不在这里定——ASK4 测试类扩围同样不批。tests/order-ask-default-all.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import type { CallerIdentity } from "./caller-identity.js";
@@ -131,7 +131,8 @@ async function renotify(db: Database, a: Ask, notify: NonNullable<SweepDeps["not
 function closeIfDue(db: Database, id: string, now: number): Ask | null {
   return db.transaction(() => {
     const cur = getAsk(db, id);
-    if (!cur) return null;
+    // risk / security 模板（extra.held，开出时按 order-ask.ts 同一份判定记下）：任何自动定 / 自动批准都不碰，永远等 PM
+    if (!cur || typeof cur.extra.held === "string") return null;
     const scope = cur.state === "open" && isTestScopeAsk(db, cur);
     const all = isDefaultAllAsk(cur), exception = isExceptionAsk(cur);
     if (!scope && !all && !isDefaultAsk(cur) && cur.extra.autoScope !== true) return null;
