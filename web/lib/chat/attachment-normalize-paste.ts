@@ -46,7 +46,7 @@ export function imagesFromHtml(html: string): HtmlImages {
     const sniff = sniffHead(bytes);
     const type = sniff?.mime ?? data[1].toLowerCase();
     const ext = sniff?.ext ?? (type.split("/")[1]?.replace(/[^a-z0-9]/g, "") || "img");
-    out.files.push(new File([bytes as BlobPart], `pasted.${ext}`, { type }));
+    out.files.push(new File([bytes.buffer as ArrayBuffer], `pasted.${ext}`, { type }));
   }
   return out;
 }

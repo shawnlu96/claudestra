@@ -66,12 +66,15 @@ export type Normalized =
   | { ok: true; file: File; diag: FileDiag }
   | { ok: false; reason: "empty" | "unreadable" | "too_large"; hint: string; params?: Record<string, string>; diag: FileDiag };
 
+/** 根目录 tsc 用 Bun 的 File / Blob 类型，没声明 slice（浏览器与 Bun 运行时都有） */
+type HeadSlice = { slice(start: number, end: number): { arrayBuffer(): Promise<ArrayBuffer> } };
+
 /** 读文件头 + 判定；需要补正就用读出的整份字节建新 File（≤10MB；Bun 拿 File 作唯一分片时会沿用旧名） */
 export async function normalizeAttachment(f: File): Promise<Normalized> {
   let head: Uint8Array | null = new Uint8Array();
   if (f.size > 0 && f.size <= MAX_ATTACHMENT_BYTES) {
     // 读不出就是要提示用户「另存为」的那种（失效的文件引用 / 无权限）；结果记进诊断行，不另报
-    head = await f.slice(0, 32).arrayBuffer().then((b) => new Uint8Array(b), () => null);
+    head = await (f as unknown as HeadSlice).slice(0, 32).arrayBuffer().then((b: ArrayBuffer) => new Uint8Array(b), () => null);
   }
   const d = decideAttachment({ name: f.name, type: f.type, size: f.size }, head);
   const diag: FileDiag = { type: f.type, size: f.size, sniff: d.ok ? d.sniff?.mime ?? null : null, readable: head !== null };
