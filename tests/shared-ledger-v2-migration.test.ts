@@ -13,8 +13,9 @@ import { readSharedLedgerMode, writeSharedLedgerModes } from "../src/lib/shared-
 import { createStage2Transport } from "../src/lib/shared-ledger-v2-transport.js";
 import { assertDrillRoot, fileMember, productionDirs, sha256File, writeRootJson, type MemberPort } from "../src/lib/shared-ledger-v2-migration-local.js";
 import {
-  exportForReverse, migrationCenter, runExecutionMigration, type MigrationOutcome, type MigrationPlan,
+  exportForReverse, migrationCenter, runExecutionMigration, type MigrationCenter, type MigrationOutcome, type MigrationPlan,
 } from "../src/lib/shared-ledger-v2-migration.js";
+import { writeFrozenManifest } from "../src/lib/shared-ledger-v2-migration-ask-frozen.js";
 import { main } from "../scripts/shared-ledger-execution-migrate.js";
 import { ACTORS, approvedAsk, featureRows, kit } from "./helpers/shared-ledger-v2-fake-center-kit.js";
 
@@ -89,6 +90,12 @@ function reportFile(root: string) {
   mkdirSync(join(root, "reports"), { recursive: true });
   writeFileSync(join(root, "reports", "task.md"), REPORT);
   return { task: { reportPath: "reports/task.md", digest: sha256File(join(root, "reports", "task.md")) } };
+}
+/** dry-run / commit 只发冻结清单（peer-MIGASK1）：按本用例的 plan 先 prepare 冻结一次，ask id 用夹具里已批准的 "ask"。 */
+async function freeze(w: { root: string; center: MigrationCenter }, p: MigrationPlan) {
+  const out = await runExecutionMigration({ root: w.root, plan: p, center: w.center, mode: "prepare" });
+  expect(out.status).toBe("prepared");
+  if (out.status === "prepared") writeFrozenManifest(w.root, out.manifest, "ask");
 }
 const codes = (o: MigrationOutcome) => o.status === "refused" ? o.findings.map(f => `${f.code}:${f.item}`).sort() : [];
 const localOrders = (root: string) => {
@@ -166,8 +173,9 @@ describe("X13 验收线 1：预检先暂停全组派单并备份；unknown 没�
     expect(existsSync(join(w.root, "shared-ledger-v2-migration", "batch-x13", "dry-run-backup"))).toBe(false);
     const local = await acquireMaintenance("update", lockAt(join(w.root, "local")));
     expect(local).not.toBeNull(); local!.release(); held!.release();
-    const out = await runExecutionMigration({ root: w.root, center: w.center, mode: "dry-run",
-      plan: plan({ reconciled: [{ instanceId: "local", kind: "intent", id: "intent-u", outcome: "done" }] }) });
+    const reconciled = plan({ reconciled: [{ instanceId: "local", kind: "intent", id: "intent-u", outcome: "done" }] });
+    await freeze(w, reconciled);
+    const out = await runExecutionMigration({ root: w.root, center: w.center, mode: "dry-run", plan: reconciled });
     expect(out.status).toBe("dry-run");
   });
 });
@@ -204,8 +212,9 @@ describe("X13 验收线 2：映射 / 规格副本 / 审查证据缺一项拒绝�
   });
   test("显式导入并核对租约 + 审查证据绑定：迁移成功，中心与本机都没有新出借单", async () => {
     const w = await world({ stage: "review", reviewStep: true }, { "peer-a": { order: { status: "claimed", leaseGen: 1 } } });
-    const before = localOrders(w.root);
-    const out = await runExecutionMigration({ root: w.root, plan: plan({ reviews: reportFile(w.root) }, reviewed), center: w.center, mode: "commit" });
+    const before = localOrders(w.root), p = plan({ reviews: reportFile(w.root) }, reviewed);
+    await freeze(w, p);
+    const out = await runExecutionMigration({ root: w.root, plan: p, center: w.center, mode: "commit" });
     expect(out.status).toBe("switched");
     expect(report(out).batch.mappings.some((x: any) => x.kind === "order" && x.sourceId === "old-order")).toBe(true);
     expect(w.k.center.rows().orders.size).toBe(0);
@@ -213,8 +222,9 @@ describe("X13 验收线 2：映射 / 规格副本 / 审查证据缺一项拒绝�
     expect(localOrders(w.root)).toEqual(before);
   });
   test("旧单已结清：清单不带订单，证据 settled；结清单不需要声明", async () => {
-    const w = await world({ order: { status: "done", leaseGen: 3 } });
-    const out = await runExecutionMigration({ root: w.root, plan: plan({ orders: {} }, settled), center: w.center, mode: "dry-run" });
+    const w = await world({ order: { status: "done", leaseGen: 3 } }), p = plan({ orders: {} }, settled);
+    await freeze(w, p);
+    const out = await runExecutionMigration({ root: w.root, plan: p, center: w.center, mode: "dry-run" });
     expect(out.status).toBe("dry-run");
     expect(report(out).manifestDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(w.k.center.log.map(e => e.route)).toEqual(["migrations", "migration"]);
@@ -235,6 +245,7 @@ async function expectGroupHeld(w: Awaited<ReturnType<typeof world>>) {
 describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → 全组 execution 确认；失败按 batch 回执定位并全组冻结", () => {
   test("三步都过：中心 execution + 新 epoch + 主场租约，三个成员都回读确认 execution 绑中心 epoch", async () => {
     const w = await world();
+    await freeze(w, plan());
     const out = await runExecutionMigration({ root: w.root, plan: plan(), center: w.center, mode: "commit" });
     expect(out).toMatchObject({ status: "switched", epochs: { feature: 2 }, leases: ["task"] });
     expect(out.status === "switched" && out.members.map(m => [m.label, m.gate, m.execution]))
@@ -250,6 +261,7 @@ describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → �
   });
   test("peer A 写门失败：中心批次不发（回执 unknown）；全组冻结——未处理的 peer B 也上写门，写不进的 peer A 留维护标记", async () => {
     const w = await world();
+    await freeze(w, plan());
     const members = failing(w.root, "peer-a", m => !!m.feature?.migrating);
     const out = await runExecutionMigration({ root: w.root, plan: plan(), center: w.center, mode: "commit", members });
     expect(out).toMatchObject({ status: "frozen", step: "write_gate", batch: { status: "unknown" } });
@@ -263,6 +275,7 @@ describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → �
   });
   test("切换响应丢失（中心已提交）：batch 回执 committed，冻结，全组写门保持关闭不回 planning", async () => {
     const w = await world();
+    await freeze(w, plan());
     w.k.center.inject({ kind: "drop", route: "migrations" });
     const out = await runExecutionMigration({ root: w.root, plan: plan(), center: w.center, mode: "commit" });
     expect(out).toMatchObject({ status: "frozen", step: "switch", batch: { status: "committed", batchId: "batch-x13" } });
@@ -275,6 +288,7 @@ describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → �
   });
   test("切换时中心不可用（未提交）：batch 回执 unknown，中心仍 planning，全组仍冻结", async () => {
     const w = await world();
+    await freeze(w, plan());
     w.k.center.inject({ kind: "unavailable", route: "migrations" });
     const out = await runExecutionMigration({ root: w.root, plan: plan(), center: w.center, mode: "commit" });
     expect(out).toMatchObject({ status: "frozen", step: "switch", batch: { status: "unknown", result: null } });
@@ -283,6 +297,7 @@ describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → �
   });
   test("租约一步失败：逐条回执 unknown，冻结在 lease 步", async () => {
     const w = await world();
+    await freeze(w, plan());
     w.k.center.inject({ kind: "unavailable", command: "lease.acquire" });
     const out = await runExecutionMigration({ root: w.root, plan: plan(), center: w.center, mode: "commit" });
     expect(out).toMatchObject({ status: "frozen", step: "lease", batch: { status: "committed" },
@@ -291,6 +306,7 @@ describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → �
   });
   test("peer A 没确认 execution：不报 switched，冻结在 local_mode；peer A 写门仍关闭", async () => {
     const w = await world();
+    await freeze(w, plan());
     const members = failing(w.root, "peer-a", m => m.feature?.authorityMode === "execution");
     const out = await runExecutionMigration({ root: w.root, plan: plan(), center: w.center, mode: "commit", members });
     expect(out).toMatchObject({ status: "frozen", step: "local_mode" });
@@ -306,6 +322,7 @@ describe("X13 验收线 3：全组写门 → 整组切换 → 中心租约 → �
 describe("X13 验收线 4：中心已有新提交时反向只冻结 → 导出 → 核对报告", () => {
   test("拒绝直接回写旧本机库；三个成员台账不变、模式冻结，产出导出与报告", async () => {
     const w = await world();
+    await freeze(w, plan());
     expect((await runExecutionMigration({ root: w.root, plan: plan(), center: w.center, mode: "commit" })).status).toBe("switched");
     const set = w.k.command("task.set", { taskId: "task", expectedRev: 1, expectedSpecRev: 1, patch: { title: "迁后新提交" } }, { epoch: 2 });
     expect(w.k.post(ACTORS.member, set).status).toBe(200);
@@ -377,6 +394,7 @@ describe("X13 验收线 5：测试与脚本不写生产目录", () => {
     const w = await world();
     writeFileSync(join(w.root, "plan.json"), JSON.stringify(plan()));
     const run = (action: string) => main(["--root", w.root, "--plan", "plan.json", action], { center: () => w.center, print: () => {} });
+    await freeze(w, plan());
     expect(await run("dry-run")).toBe(0);
     expect(w.k.center.feature("feature")).toMatchObject({ authorityMode: "planning" });
     expect(await run("commit")).toBe(0);

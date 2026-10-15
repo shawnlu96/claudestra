@@ -26,16 +26,21 @@ import { join } from "path";
 import { DEFAULT_BRIDGE_PORT, resolveBridgeUrl } from "./bridge-url.js";
 import { enforceSandboxProcess, SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
 import { testSafeRuntimeDir, testSafeStateDir } from "./test-guard.js";
+import { applyRenamedEnv, readIsolationEnv, readRenamedEnv, withFlokaTwins } from "./floka-env/read.js";
+import { suffixOf } from "./floka-env/names.js";
 /** 入口文件（launcher / cron）经这里拿：它们本来就 import paths，省一行 import（三个文件都在体积上限） */
 export { refuseInSandbox } from "./sandbox.js";
 
 // stateDirIn 定义在 lib/state-dir.ts（那里只依赖 node: 模块，Pi 扩展能安全 import）
 export { stateDirIn };
 
-function envDir(name: string): string | undefined {
-  const v = (process.env[name] || "").trim();
+function envDir(suffix: string): string | undefined {
+  const v = (readRenamedEnv(suffix) || "").trim();
   return v || undefined;
 }
+
+// rename.env：on 档把 FLOKA_ / CLAUDESTRA_ 两名解析成同一个值写回 env（lib/floka-env/read.ts）；off 不动
+applyRenamedEnv(process.env);
 
 /** ~/.claude-orchestrator（或 CLAUDESTRA_STATE_DIR）；测试进程落不到真实目录（lib/test-guard.ts） */
 export const STATE_DIR = testSafeStateDir(stateDir());
@@ -44,7 +49,7 @@ export const STATE_DIR = testSafeStateDir(stateDir());
 export const DEFAULT_RUNTIME_DIR = "/tmp/claude-orchestrator";
 
 /** /tmp/claude-orchestrator（或 CLAUDESTRA_RUNTIME_DIR）；测试进程连不上线上 tmux（lib/test-guard.ts） */
-export const RUNTIME_DIR = testSafeRuntimeDir(envDir("CLAUDESTRA_RUNTIME_DIR") ?? DEFAULT_RUNTIME_DIR, DEFAULT_RUNTIME_DIR);
+export const RUNTIME_DIR = testSafeRuntimeDir(envDir("RUNTIME_DIR") ?? DEFAULT_RUNTIME_DIR, DEFAULT_RUNTIME_DIR);
 
 // 沙箱进程（CLAUDESTRA_SANDBOX=1）在任何路径被用到之前过闸；非沙箱是空操作
 enforceSandboxProcess({
@@ -90,10 +95,14 @@ export function pathOverrideAssignments(escape: (v: string) => string, env: Reco
 
 export function pathOverrideEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
   const out: Record<string, string> = {};
-  // 沙箱的开关、根目录与生产拒绝清单也要跟着传给 agent，它的 hook / channel-server 才会按同一套规则拒绝生产
-  for (const k of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR", SANDBOX_FLAG, SANDBOX_ROOT_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_DENY_DIRS_ENV]) {
-    const v = (env[k] || "").trim();
+  // 沙箱的开关、根目录与生产拒绝清单也要跟着传给 agent，它的 hook / channel-server 才会按同一套规则拒绝生产。
+  // 目录按档位解析（与本进程一致）；沙箱几项两套名字都认（只设了新名也传下去），冲突抛错。on 档另出同值新名
+  const read = (k: string, isolation: boolean) => (isolation ? readIsolationEnv : readRenamedEnv)(suffixOf(k), env);
+  const keys: Array<[string, boolean]> = [["CLAUDESTRA_STATE_DIR", false], ["CLAUDESTRA_RUNTIME_DIR", false]];
+  for (const k of [SANDBOX_FLAG, SANDBOX_ROOT_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_DENY_DIRS_ENV]) keys.push([k, true]);
+  for (const [k, isolation] of keys) {
+    const v = (read(k, isolation) || "").trim();
     if (v) out[k] = v;
   }
-  return out;
+  return withFlokaTwins(out, env);
 }

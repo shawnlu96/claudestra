@@ -1,5 +1,5 @@
 /**
- * UXHOME1「现在」落地页的截图与 DOM 断言（opt-in，截图不进 git）：
+ * UXHOME1「今天」（TODAY1 改名）落地页的截图与 DOM 断言（opt-in，截图不进 git）：
  *   NOW_HOME_SHOTS_DIR=<仓库外目录> [NOW_HOME_BASE_REPO=<基线 main 的检出目录>] bun --no-env-file test tests/web-now-home-browser.test.ts
  * 入口写在仓库外（按绝对路径引仓库里的模块，改前改后同一个入口）：真的 Sidebar + 真的 MessageList + 真的协作覆盖层，
  * 外壳照生产 chat.tsx 的窄屏横滑（< 640 只显示一栏）。数据照规格「对照基准」：4 个 agent 其中 2 个忙；3 件等 owner 的 asks（1 件团队提案卡）；
@@ -155,14 +155,14 @@ test.skipIf(!out)("UXHOME1：落地页（桌面主区 / 手机侧栏条收起与
           if (after) {
             await g.page.waitForFunction(`document.querySelectorAll("[data-now-worker]").length >= 2 && document.querySelectorAll("[data-now-wait]").length >= 3`);
             const strip = g.page.locator("[data-now=strip]");
-            // 手机侧栏够宽是一行「现在 · …」；桌面侧栏 16rem 放不下一行，整句换到「现在」下面（这时不带开头那个点）
-            const summary = width < 640 ? "现在 · 2 个 agent 在干活 · 3 件等你" : "现在 2 个 agent 在干活 · 3 件等你";
+            // 手机侧栏够宽是一行「今天 · …」；桌面侧栏 16rem 放不下一行，整句换到「今天」下面（这时不带开头那个点）
+            const summary = width < 640 ? "今天 · 3 件要你处理 · 2 个 agent 在干活" : "今天 3 件要你处理 · 2 个 agent 在干活";
             expect({ width, text: (await strip.locator("button[aria-expanded]").innerText()).replace(/\s+/g, " ").trim() }).toEqual({ width, text: summary });
-            // 桌面侧栏 16rem 宽：「N 件等你」整段看得见（不被省略号截、不出条外），放不下一行就换到「现在」下面
+            // 桌面侧栏 16rem 宽：「N 件要你处理」整段看得见（不被省略号截、不出条外），放不下一行就换到「今天」下面
             const fit = await g.page.evaluate(`(() => { const s = document.querySelector("[data-now=strip]"), b = s.getBoundingClientRect();
               const parts = [...s.querySelectorAll("[data-now-summary] > span")].filter((e) => e.offsetWidth);
               return parts.map((e) => { const r = e.getBoundingClientRect(); return { text: e.textContent.trim(), clipped: e.scrollWidth > e.clientWidth + 1 || r.right > b.right + 0.5 }; }); })()`);
-            expect({ width, fit }).toEqual({ width, fit: expect.arrayContaining([{ text: "· 3 件等你", clipped: false }, { text: "2 个 agent 在干活", clipped: false }]) as unknown as object[] });
+            expect({ width, fit }).toEqual({ width, fit: expect.arrayContaining([{ text: "3 件要你处理", clipped: false }, { text: "· 2 个 agent 在干活", clipped: false }]) as unknown as object[] });
             // 侧栏团队区：区头「团队」；成组的 Claudestra 不重复，单成员的设计组件库还在；绑定项目组的协作视图行带「团队」小标
             expect((await team.locator("h2").innerText()).trim()).toBe("团队");
             expect(await team.getByRole("button", { name: "Claudestra" }).count()).toBe(0);
@@ -170,7 +170,7 @@ test.skipIf(!out)("UXHOME1：落地页（桌面主区 / 手机侧栏条收起与
             expect(await g.page.locator("[data-collab-team-badge]").count()).toBe(1);
             if (width >= 640) {
               const page = g.page.locator("[data-now=page]");
-              expect((await page.locator("section h3").allInnerTexts()).map((x) => x.replace(/\s+/g, " ").trim())).toEqual(["等你的事 3 件", "在干活 2 个 agent", "各项目"]);
+              expect((await page.locator("section h3").allInnerTexts()).map((x) => x.replace(/\s+/g, " ").trim())).toEqual(["要你处理 3 件", "正在做 2 个 agent 在干活", "团队与额度"]);
               expect(await g.page.getByText("选择左侧一个会话开始").count()).toBe(0);
             }
           }

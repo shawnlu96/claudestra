@@ -1,5 +1,6 @@
 /** Narrow scheduler-only ledger port. Configuration and private results are reread locally, never supplied as CLI payloads. */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getDeployRun } from "./scheduler-deploy.js";
 import { deployJobDir } from "./scheduler-deploy-lock-jobs.js";
@@ -22,8 +23,15 @@ function machine(c: CenterCli, task: LedgerTask) {
   if (!run || run.taskId !== task.id) throw new LedgerError("invalid", "部署记录不匹配");
   const raw = readJsonStateSync(`${deployJobDir(run)}.machine-events.json`);
   if (raw.status !== "ok" || !Array.isArray(raw.data)) return { ok: true };
+  const now = c.ctx().now ?? Date.now(), request = createHash("sha256").update(intent).digest("hex").slice(0, 32);
   for (const [i, sample] of raw.data.entries()) {
-    const s = sample as { status: unknown; label: unknown; at: unknown };
+    const s = sample as { status: unknown; label: unknown; at: unknown; would?: unknown };
+    if (s.status === "observed" && (s.would === "acquire" || s.would === "defer") && typeof s.label === "string" && /^[\w.:-]{1,64}$/.test(s.label)) {
+      // observe tier: one sample per deploy request and would-be action, deduped by recordObserved across ticks.
+      recordObserved(c.db, { project: task.project, mechanism: "deployMachineLock", target: task.id, actionKey: `${s.would}:${request}`,
+        action: s.would === "acquire" ? "取整机部署锁后再部署" : `因整机部署锁被 ${s.label} 占用延后部署`, data: { label: s.label } }, now);
+      continue;
+    }
     if (!["acquired", "deferred"].includes(String(s.status)) || typeof s.label !== "string" || !/^[\w.:-]{1,64}$/.test(s.label)) continue;
     appendEvent(c.db, { ...c.ctx(), dedupKey: `machine-deploy:${intent}:${i}` }, { project: task.project, target: task.id,
       kind: "note", text: `整机部署锁 ${s.status}：${s.label}`, data: { op: "deploy_machine_lock", status: s.status, label: s.label } });
