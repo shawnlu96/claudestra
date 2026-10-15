@@ -14,7 +14,7 @@ import { FP_RE, normalizeHeaders } from "../lib/relay-protocol.js";
 import { RelayError } from "../lib/relay-client.js";
 import { relayCallError } from "../lib/peer-auth-hints.js";
 import { b64, collectBody } from "../lib/relay-stream.js";
-import { signedHeaders } from "../lib/instance-key.js";
+import { signPeerTransport } from "../lib/floka-peer/send.js";
 import { peerIngressSyncRoute } from "./peer-ingress.js";
 
 /** bridge.ts 只从这一个模块 import 控制路由相关的东西（它在 guard 基线里只许缩，多一行 import 都不行） */
@@ -91,7 +91,7 @@ async function relayRequest(req: Request): Promise<Response> {
   const timeoutMs = typeof body.timeoutMs === "number" && body.timeoutMs > 0 ? body.timeoutMs : undefined;
   const bytes = typeof body.body === "string" ? b64.dec(body.body) : new Uint8Array();
   // 对方按 §4.1 验签：签名要盖住实际发出的方法、路径（含查询串）与正文，manager 那头没有实例私钥，只能在这里签
-  const headers = { ...normalizeHeaders(body.headers), ...signedHeaders(method, path, bytes) };
+  const headers = await signPeerTransport(`relay://${to}${path}`, method, bytes, normalizeHeaders(body.headers), { path });
   try {
     const r = await c.request(to, { method, path, headers, body: bytes.length ? bytes : null }, { timeoutMs, maxResponseBytes: MAX_CLI_RESPONSE });
     const out = await collectBody(r.body, MAX_CLI_RESPONSE);

@@ -1,3 +1,4 @@
+import { signPeerTransport } from "../lib/floka-peer/send.js";
 /**
  * manager 侧的中继相关（bridge/relay-routes.ts 的回环路由是它的后端）：
  *   - `claudestra pair` 在 manager/pair.ts（签码、打印 grant、等手输短码的确认）；
@@ -5,7 +6,7 @@
  *   - peerCliFetch：peer 命令里对 relay:// 地址的 fetch 替身——只有 bridge 持有中继连接，manager 请它代调。
  */
 import { bridgeHttpBase } from "../lib/bridge-port.js";
-import { instanceKeySync, keyFingerprint, signedFor } from "../lib/instance-key.js";
+import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import { createE2eOutbound, defaultOutboundDeps } from "../lib/peer-e2e-outbound.js";
 import { relayPeerFingerprint } from "../lib/peers.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
@@ -43,7 +44,7 @@ const e2eOutbound = createE2eOutbound(defaultOutboundDeps());
  * 内层也要带实例签名（同 bridge/http-peer.ts 的 send_to_agent）：对方解开会话后照常验签，没签的一律 401 unsigned
  */
 export async function peerCliFetch(url: string, init: CliFetchInit = {}): Promise<Response> {
-  const inner = { ...init, headers: { ...init.headers, ...signedFor(init.method ?? "GET", url, init.body ?? "") } };
+  const inner = { ...init, headers: await signPeerTransport(url, init.method ?? "GET", init.body ?? "", init.headers) };
   const viaE2e = await e2eOutbound.fetch(url, inner, (u, outer) => rawCliFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }));
   return viaE2e ?? rawCliFetch(url, init);
 }
@@ -62,7 +63,7 @@ export async function peerE2eOnlyFetch(url: string, init: CliFetchInit): Promise
 export async function rawCliFetch(url: string, init: CliFetchInit): Promise<Response> {
   const m = /^relay:\/\/([^/]+)(\/.*)?$/i.exec(url);
   const to = m ? relayPeerFingerprint(`relay://${m[1]}`) : null;
-  if (!m || !to) return fetch(url, { ...init, headers: { ...init.headers, ...signedFor(init.method ?? "GET", url, init.body ?? "") } } as RequestInit);
+  if (!m || !to) return fetch(url, { ...init, headers: await signPeerTransport(url, init.method ?? "GET", init.body ?? "", init.headers) } as RequestInit);
   const bytes = typeof init.body === "string" ? new TextEncoder().encode(init.body) : (init.body ?? new Uint8Array(0));
   const r = await fetch(`${bridgeHttpBase()}/relay/request`, {
     method: "POST",

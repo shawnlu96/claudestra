@@ -10,14 +10,14 @@
  */
 import { findPendingInviteByJoinSecret, isPeerBaseUrl } from "../lib/peers.js";
 import { SlidingWindowLimiter } from "../lib/principals.js";
-import { isPublicKey, keyFingerprint, SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
+import { isPublicKey, keyFingerprint, peerHeaders, verifyRedeemer, openPeerRedeem, trustedRelaySender, invalidRedeemer } from "../lib/floka-peer/redeem.js";
 import { FP_RE } from "../lib/relay-protocol.js";
 import { apiJson, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { requestContextOf, sourceAllows } from "./request-context.js";
 import { verifyE2eKey } from "../lib/e2e-machine-key.js";
 import { recordMetric } from "../lib/metrics.js";
 import { localE2e, type LocalE2e } from "../lib/peer-e2e-local.js";
-import { isSealedRedeem, openRedeemRequest, sealRedeemResponse, type RedeemSession } from "../lib/peer-e2e-redeem.js";
+import { isSealedRedeem, sealRedeemResponse, type RedeemSession } from "../lib/peer-e2e-redeem.js";
 
 /** 每个来源每分钟可以试错几次口令；来源表超过上限先丢最早的（丢了只是那个来源的计数清零） */
 const BAD_JOIN_PER_SOURCE = 10;
@@ -70,13 +70,12 @@ export function relaySenderFp(req: Request): string {
  * 直连的：请求自带签名对得上才算。要在读正文之前调（读的是克隆）。
  */
 export async function redeemSender(req: Request): Promise<{ fp: string; pk: string }> {
-  const key = req.headers.get(SIG_HEADERS.key) ?? "", relayed = relaySenderFp(req);
-  if (relayed) return { fp: relayed, pk: isPublicKey(key) && keyFingerprint(key) === relayed ? key : "" };
-  const ts = req.headers.get(SIG_HEADERS.ts), sig = req.headers.get(SIG_HEADERS.sig);
+  const key = peerHeaders(req.headers).key ?? "", relayed = relaySenderFp(req);
+  const trusted = trustedRelaySender(req, relayed); if (trusted) return trusted;
+  const { ts, sig } = peerHeaders(req.headers);
   if (!ts || !sig || !isPublicKey(key)) return { fp: "", pk: "" };
-  const u = new URL(req.url);
   const body = new Uint8Array(await req.clone().arrayBuffer());
-  const ok = verifySigned(key, { method: req.method, path: u.pathname + u.search, ts, sig, body }) === "ok";
+  const ok = verifyRedeemer(key, req, body, relayed);
   return ok ? { fp: keyFingerprint(key), pk: key } : { fp: "", pk: "" };
 }
 
@@ -108,7 +107,7 @@ async function openSealed(req: Request, raw: unknown, sender: { fp: string; pk: 
   if (!sender.fp) return apiJson(403, { ok: false, error: "redeemer identity unknown" });
   const l = await local();
   if (!l) return apiJson(503, { ok: false, error: "end-to-end key unavailable on this instance" });
-  const o = isSealedRedeem(raw) ? await openRedeemRequest(l.machine.pair, l.fp, raw) : null;
+  const o = await openPeerRedeem(req, l, raw);
   if (!o) return limiterOf(badJoin, sourceKey(req), BAD_JOIN_PER_SOURCE).tryAcquire(now) ? apiJson(400, { ok: false, error: "invalid invite redemption" }) : limited();
   const p = (o.payload ?? {}) as { idk?: unknown; key?: unknown };
   const ek = typeof p.idk === "string" ? await verifyE2eKey(p.idk, p.key) : null;
@@ -121,7 +120,7 @@ async function openSealed(req: Request, raw: unknown, sender: { fp: string; pk: 
 export async function redeemPrecheck(req: Request, now = Date.now(), local: () => Promise<LocalE2e | null> = () => localE2e()): Promise<RedeemInput | Response> {
   const refused = redeemRefusal(req);
   if (refused) return refused;
-  const sender = await redeemSender(req);
+  const sender = await redeemSender(req); if (invalidRedeemer(req, sender)) return apiJson(403, { ok: false, error: "invalid redeemer signature" });
   const raw: any = await readJsonBody(req);
   if (raw === INVALID_JSON) return invalidJsonBody();
   const sealed = isSealedRedeem(raw) ? await openSealed(req, raw, sender, local, now) : null;

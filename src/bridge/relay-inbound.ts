@@ -1,3 +1,6 @@
+import { checkRequest, peerHeaders, peerTrustHeaders } from "../lib/floka-peer/signature.js";
+import { peerPolicy } from "../lib/floka-peer/policy.js";
+import { takePeerSource, takeTunnelMark, stampPeerSource, stampTunnelMark } from "../lib/floka-compat/relay/headers.js";
 /**
  * 经中继送进来的请求在本机怎么走（docs/relay/protocol.md §4）：
  *   - from = "relay" 且带模式头 api：路径模式 https://<base>/m/<fp>/api/v1/…，在进程内直接调 API（relay-dispatch.ts），
@@ -7,13 +10,13 @@
  *     最后打 peer 专用回环入口。
  * 纯逻辑（验签、重放缓存）单独导出给 tests/relay-link.test.ts；fetch 可注入。
  */
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { SIG_HEADERS, isPublicKey, keyFingerprint, verifySigned } from "../lib/instance-key.js";
-import { RELAY_BASE_HEADER, RELAY_FROM, RELAY_FROM_HEADER, apiPathOk, isRedeemRequest, type Headers } from "../lib/relay-protocol.js";
+import { randomBytes } from "node:crypto";
+import { keyFingerprint } from "../lib/instance-key.js";
+import { RELAY_FROM, apiPathOk, isRedeemRequest, type Headers } from "../lib/relay-protocol.js";
 import { RELAY_MODE_API, RELAY_MODE_HEADER } from "../lib/relay-machine-path.js";
 import { ReplayCache } from "../lib/peer-trust.js";
 import { LogThrottle } from "../lib/log-throttle.js";
-import { collectBody, dropForPeer, forwardHeaders, headersToObject, rewriteLocation } from "../lib/relay-stream.js";
+import { collectBody, forwardHeaders, headersToObject, rewriteLocation } from "../lib/relay-stream.js";
 import { RelayError, type InboundContext, type InboundHandler, type InboundRequest, type InboundResponse } from "../lib/relay-client-types.js";
 import { dispatchMachineRequest, type ApiHandler } from "./relay-dispatch.js";
 import { setRequestContext } from "./request-context.js";
@@ -47,12 +50,6 @@ export function relayMark(): string {
   return (mark ??= randomBytes(32).toString("base64url"));
 }
 
-/** 标记比对用常量时间（长度不同直接不等：标记是定长的，长度本身不泄露什么） */
-function markEquals(got: string | null, expected: string): boolean {
-  if (!got || got.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(got), Buffer.from(expected));
-}
-
 /**
  * 隧道请求的标记头（另一个进程内随机值：隧道可能打到还没迁移的旧 web 服务，不能把 peer 入口那个标记也交出去）。
  * bridge 主端口 / 旧 web 端口认出它，就把这个请求的来源定成 relay——中继自己选走隧道还是路径模式，
@@ -69,8 +66,8 @@ const tunnelMark = (): string => (tunnelMarkValue ??= randomBytes(32).toString("
  */
 export function socketTrust(req: Request, addr: string | null): boolean {
   const direct = isDirectLoopback(addr, req.headers.get("x-forwarded-for"));
-  const tunnel = markEquals(req.headers.get(TUNNEL_MARK_HEADER), tunnelMark());
-  req.headers.delete(TUNNEL_MARK_HEADER);
+  const source = takeTunnelMark(req.headers, tunnelMark(), peerPolicy().relay);
+  const tunnel = !source.ok || source.tunnelled;
   const https = req.headers.get("x-forwarded-proto") === "https";
   if (!tunnel) setRequestContext(req, { source: direct ? "loopback" : "lan", clientIp: addr, https });
   else setRequestContext(req, { source: "relay", clientIp: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null, https: true });
@@ -82,13 +79,13 @@ export function socketTrust(req: Request, addr: string | null): boolean {
  * 指纹只经请求上下文（request-context.ts relayFrom）往下传，任何入口的原始头都不会被当成来源。
  */
 export function takeRelayFrom(h: globalThis.Headers, expectedMark: string): string | null {
-  const from = markEquals(h.get(RELAY_MARK_HEADER), expectedMark) ? h.get(RELAY_FROM_HEADER) : null;
-  h.delete(RELAY_MARK_HEADER);
-  h.delete(RELAY_FROM_HEADER);
-  return from || null;
+  const source = takePeerSource(h, expectedMark, peerPolicy().relay);
+  if (!source.ok) h.set(TUNNEL_MARK_HEADER, "invalid-source"); // Preserve ingress denial of the loopback device-cookie exception.
+  return source.ok ? source.from : null;
 }
 
 export interface InboundDeps {
+  rename?: unknown;
   /** 本机 Web：http://127.0.0.1:<webPort> */
   webBase: string;
   /** peer 专用回环入口；没配端口返回 null → local_unreachable */
@@ -106,14 +103,14 @@ export interface InboundDeps {
 }
 
 /** §4.1 第 1、2 步：签名头公钥的指纹必须等于中继盖的 from，签名必须对得上。只验不记，防重放在核过发件人之后（recordPeerReplay） */
-export function verifyPeerSignature(from: string, req: { method: string; path: string; headers: Headers; body: Uint8Array }, now: number): RelayError | null {
-  const key = req.headers[SIG_HEADERS.key];
-  const ts = req.headers[SIG_HEADERS.ts];
-  const sig = req.headers[SIG_HEADERS.sig];
-  if (!key || !ts || !sig) return new RelayError("bad_signature", "peer", RELAY_SIG_DETAIL.missing);
-  if (!isPublicKey(key) || keyFingerprint(key) !== from) return new RelayError("bad_signature", "peer", RELAY_SIG_DETAIL.foreignKey);
-  const r = verifySigned(key, { method: req.method, path: req.path, ts, sig, body: req.body }, now);
-  if (r !== "ok") return new RelayError("bad_signature", "peer", r === "stale" ? RELAY_SIG_DETAIL.stale : RELAY_SIG_DETAIL.mismatch);
+export function verifyPeerSignature(from: string, req: { method: string; path: string; headers: Headers; body: Uint8Array }, now: number, config?: unknown): RelayError | null {
+  const v = checkRequest(req.headers, req, config, now, true);
+  if (v.status !== "ok") {
+    const detail = v.status === "unsigned" ? RELAY_SIG_DETAIL.missing
+      : v.reason === "stale" ? RELAY_SIG_DETAIL.stale : RELAY_SIG_DETAIL.mismatch;
+    return new RelayError("bad_signature", "peer", detail);
+  }
+  if (keyFingerprint(v.publicKey) !== from) return new RelayError("bad_signature", "peer", RELAY_SIG_DETAIL.foreignKey);
   return null;
 }
 
@@ -123,7 +120,7 @@ export function verifyPeerSignature(from: string, req: { method: string; path: s
  */
 export function recordPeerReplay(from: string, req: { method: string; headers: Headers }, cache: ReplayCache, now: number): RelayError | null {
   if (req.method === "GET" || req.method === "HEAD") return null;
-  const seen = cache.seen(req.headers[SIG_HEADERS.sig]!, req.headers[SIG_HEADERS.ts]!, now, from);
+  const seen = cache.seen(peerHeaders(req.headers).sig!, peerHeaders(req.headers).ts!, now, from);
   if (seen === "full") return new RelayError("replay_full", "peer", "replay cache full, retry later");
   if (seen === "before_start") return new RelayError("bad_signature", "peer", RELAY_SIG_DETAIL.beforeStart);
   if (seen) return new RelayError("replay", "peer", "signature already used");
@@ -180,7 +177,9 @@ async function forwardTunnel(req: InboundRequest, ctx: InboundContext, d: Inboun
   // 本机 Web 才会按公网地址算相对跳转，而不是按它自己的回环监听地址
   const publicHost = req.headers["x-forwarded-host"] || req.headers.host || "";
   // 帧里的 x-claudestra-* 只放行中继主机名（§4.2 约定给本机 Web 的）；别的内部头（来源、标记……）一律不往本机 Web 传
-  const headers = forwardHeaders(req.headers, (k) => k.startsWith("x-claudestra-") && k !== RELAY_BASE_HEADER);
+  const stamped = stampTunnelMark(req.headers, { gear: peerPolicy(d.rename).relay, family: "legacy", mark: tunnelMark() });
+  if (!stamped.ok) throw new RelayError("bad_signature", "peer", "invalid tunnel source");
+  const headers = stamped.headers;
   if (publicHost) headers.host = publicHost;
   headers[TUNNEL_MARK_HEADER] = tunnelMark();
   // 隧道打的是回环端口，而且可能正是 bridge 接管的旧 web 端口：bridge 只把「回环 + 无 XFF」认作本机（web-gateway.ts
@@ -222,9 +221,9 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
     throw new RelayError("payload_too_large", "peer", (e as Error).message);
   }
   const now = (d.now ?? Date.now)();
-  const bad = verifyPeerSignature(from, { method: req.method, path: req.path, headers: req.headers, body }, now);
+  const bad = verifyPeerSignature(from, { method: req.method, path: req.path, headers: req.headers, body }, now, d.rename);
   if (bad) throw bad;
-  const refused = await d.refusePeer(from, req);
+  const refused = await d.refusePeer(from, { ...req, headers: peerTrustHeaders(req.headers) });
   if (refused) {
     // 细节只进本机日志：对外同一句，不让联系人借此试探 token。每个发件人每分钟一行（lib/log-throttle.ts）
     const log = refusalLog.take(from, now);
@@ -233,9 +232,9 @@ async function forwardPeer(from: string, req: InboundRequest, ctx: InboundContex
   }
   const replay = recordPeerReplay(from, req, isRedeemRequest(req.method, req.path) ? caches.redeem : caches.peer, now);
   if (replay) throw replay;
-  const headers = forwardHeaders(req.headers, dropForPeer);
-  headers[RELAY_FROM_HEADER] = from;
-  headers[RELAY_MARK_HEADER] = relayMark();
+  const stamped = stampPeerSource(req.headers, { gear: peerPolicy(d.rename).relay, family: "legacy", mark: relayMark(), from });
+  if (!stamped.ok) throw new RelayError("bad_signature", "peer", "invalid relay source");
+  const headers = stamped.headers;
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   let r: Response;
   try {

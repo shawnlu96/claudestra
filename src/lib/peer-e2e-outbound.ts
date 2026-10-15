@@ -1,3 +1,8 @@
+import { peerCapabilities, pinOf, learnPeerCapabilities, type PeerCapabilities } from "./floka-peer/capability.js";
+import { peerPolicy } from "./floka-peer/policy.js";
+import { signRequestFamily } from "./floka-compat/signature/request.js";
+import { E2E_HELLO_PATH } from "./peer-e2e-wire.js";
+import { readJsonCapped } from "./body-reader.js";
 /**
  * 出站那一半（docs/relay/e2e-design.md §5.1）：发往 required peer 的请求一律包进 E2E 会话，别的原样放行。
  * bridge 的 peerFetch（relay-link.ts）和 manager 的 peerCliFetch（manager/relay.ts）都先问这里，所以任何调用方都绕不开：
@@ -18,6 +23,8 @@ export interface OutboundInit {
 export type RawPost = (url: string, init: { method: "POST"; headers: Record<string, string>; body: Uint8Array }) => Promise<Response>;
 
 export interface OutboundDeps {
+  rename?: unknown;
+  capabilities?: PeerCapabilities;
   local: () => Promise<LocalE2e | null>;
   peers: () => Promise<HttpPeer[]>;
   pin: typeof pinPeerE2eKey;
@@ -28,16 +35,17 @@ export interface OutboundDeps {
 const DUPLICATE_TEXT = "对方已经处理过这条（回复在路上丢了），不要重发";
 
 export function createE2eOutbound(d: OutboundDeps) {
+  const capabilities = d.capabilities ?? peerCapabilities;
   const clients = new Map<string, { client: PeerE2eClient; ident: string }>();
 
   /** 会话按 peer 缓存；client 里不留任何一次请求的传输或 signal（T59：缓存了第一次的 raw，signal 到期后第二次必失败） */
-  function clientFor(rec: HttpPeer, local: LocalE2e, base: string): PeerE2eClient {
-    const ident = JSON.stringify([base, rec.e2e, local.fp]);
+  function clientFor(rec: HttpPeer, local: LocalE2e, base: string, family: "claudestra" | "floka"): PeerE2eClient {
+    const ident = JSON.stringify([base, rec.e2e, local.fp, family]);
     const hit = clients.get(rec.name);
     if (hit?.ident === ident) return hit.client;
     let current = e2ePeerOf(rec)!;
     const client = new PeerE2eClient({
-      myFp: local.fp,
+      renameFamily: family, myFp: local.fp,
       peer: () => current,
       machine: async () => local.machine,
       mySignedKey: async () => local.signed,
@@ -64,12 +72,20 @@ export function createE2eOutbound(d: OutboundDeps) {
     if (!local) throw new E2eLocalError("e2e_unavailable", "local E2E key unavailable; refusing to fall back to plaintext");
     const body = typeof init.body === "string" ? new TextEncoder().encode(init.body) : (init.body ?? new Uint8Array(0));
     try {
-      const post: E2ePost = (path, bytes, contentType) => {
+      const pin = pinOf(rec), family = capabilities.family(pin, d.rename, true);
+      const post: E2ePost = async (path, bytes, contentType) => {
         const url = `${base}${path}`;
         const u = new URL(url);
-        return raw(url, { method: "POST", body: bytes, headers: { "content-type": contentType, ...(d.sign ? d.sign("POST", u.pathname + u.search, bytes) : {}) } });
+        const signed = family === "claudestra" && d.sign ? d.sign("POST", u.pathname + u.search, bytes)
+          : signRequestFamily(family, { method: "POST", path: u.pathname + u.search, body: bytes }, local.key);
+        const response = await raw(url, { method: "POST", body: bytes, headers: { "content-type": contentType, ...signed } });
+        if (path === E2E_HELLO_PATH && response.ok && pin && peerPolicy(d.rename).e2e.receive !== "off") {
+          const reply = await readJsonCapped(new Response(response.clone().body), 8192) as { capabilities?: unknown } | null;
+          learnPeerCapabilities(reply?.capabilities, pin, capabilities, d.rename);
+        }
+        return response;
       };
-      return await clientFor(rec, local, base).fetch(init.method ?? "GET", url.slice(base.length), init.headers ?? {}, body, post);
+      return await clientFor(rec, local, base, family).fetch(init.method ?? "GET", url.slice(base.length), init.headers ?? {}, body, post);
     } catch (e) {
       if (!(e instanceof E2eInnerError)) throw e;
       if (e.code === "e2e_duplicate") return markE2eResponse(Response.json({ ok: false, error: DUPLICATE_TEXT }, { status: 409 }));

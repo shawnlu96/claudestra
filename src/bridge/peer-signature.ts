@@ -1,3 +1,4 @@
+import { peerHeaders, verifyPeerRequest, invalidSignedRequest, peerSignatureVerdict } from "../lib/floka-peer/signature.js";
 /**
  * 入站 peer 请求的验签与放行：authApi 认出 peer token 后调 checkPeerSignature，拒了就 401；放行的判完重放再 commit。
  * 钉住规则在 lib/peer-keys.ts，放行规则（期望指纹、老 peer 截止日）在 lib/peer-trust.ts；
@@ -8,11 +9,10 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { STATE_DIR } from "../lib/paths.js";
 import { writeJsonAtomic } from "../lib/state-file.js";
-import { SIG_HEADERS, verifySigned } from "../lib/instance-key.js";
 import { judgeSignature, newlyPinned, type PinnedPeerKey } from "../lib/peer-keys.js";
 import { readPeers } from "../lib/peers.js";
 import { LogThrottle } from "../lib/log-throttle.js";
-import { currentPin, inviteTokenVerdict, peerSigVerdict, recordPeerFp, ReplayCache, type PeerOnce, type PeerSigVerdict, type ReplayVerdict } from "../lib/peer-trust.js";
+import { currentPin, inviteTokenVerdict, recordPeerFp, ReplayCache, type PeerOnce, type PeerSigVerdict, type ReplayVerdict } from "../lib/peer-trust.js";
 
 const PEER_KEYS_PATH = join(STATE_DIR, "peer-keys.json");
 let keys: Map<string, PinnedPeerKey> | null = null;
@@ -56,6 +56,7 @@ const nothing = async (): Promise<void> => {};
 
 export async function checkPeerSignature(req: Request, url: URL, peer: string): Promise<PeerCheck> {
   if (!peer) return { allow: true, legacy: false, commit: nothing };
+  if (await invalidSignedRequest(req, peer)) return { allow: false, reason: "invalid signature family" };
   const data = await readPeers();
   if (peer.startsWith("invite:")) { // 未兑换的邀请 token：还没有对方记录可比，只看邀请本身还在不在、是不是只读
     const v = inviteTokenVerdict(req.method, peer.slice("invite:".length), data.pendingInvites ?? [], Date.now());
@@ -63,7 +64,7 @@ export async function checkPeerSignature(req: Request, url: URL, peer: string): 
   }
   const rec = data.httpPeers?.find((p) => p.name === peer);
   const recordFp = recordPeerFp(rec);
-  const hdr = { key: req.headers.get(SIG_HEADERS.key), ts: req.headers.get(SIG_HEADERS.ts), sig: req.headers.get(SIG_HEADERS.sig) };
+  const hdr = peerHeaders(req.headers);
   let body = new Uint8Array();
   try {
     if (hdr.sig && req.body) body = new Uint8Array(await req.clone().arrayBuffer());
@@ -72,10 +73,10 @@ export async function checkPeerSignature(req: Request, url: URL, peer: string): 
   }
   const path = url.pathname + url.search;
   const prev = currentPin(loaded().get(peer), rec);
-  const check = (pk: string) => verifySigned(pk, { method: req.method, path, ts: hdr.ts!, sig: hdr.sig!, body });
+  const check = (pk: string) => verifyPeerRequest(pk, req.headers, { method: req.method, path, body });
   const next = judgeSignature(prev, hdr, check, new Date().toISOString(), recordFp, rec?.publicKey ?? null);
   const result = next.lastCheck!.result;
-  const verdict = peerSigVerdict(result, !!(recordFp || prev?.publicKey || rec?.publicKey), Date.now());
+  const verdict = peerSignatureVerdict(result, hdr.present, !!(recordFp || prev?.publicKey || rec?.publicKey), Date.now());
   if (!verdict.allow) return rejected(peer, verdict, next.lastCheck);
   if (verdict.legacy && Date.now() - (legacyWarnedAt.get(peer) ?? 0) > LEGACY_WARN_EVERY_MS) {
     legacyWarnedAt.set(peer, Date.now());

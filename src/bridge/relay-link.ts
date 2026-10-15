@@ -1,3 +1,4 @@
+import { preparePeerSend } from "../lib/floka-peer/send.js";
 /**
  * 中继链路（bridge 侧，docs/relay/protocol.md）：.env 配了 RELAY_URL 就在启动时连上中继（lib/relay-client.ts），
  * 之后三件事经它走：浏览器打 https://<slug>.<base> 的隧道流量 → 本机 Web；peers.json 里 baseUrl 为
@@ -256,6 +257,7 @@ type PeerFetchOpts = { fetchImpl?: typeof fetch; timeoutMs?: number; e2eOnly?: b
  * 调用方的 signal / 超时一并带进会话里的每一次外层请求。
  */
 export async function peerFetch(url: string, init: PeerFetchInit, opts: PeerFetchOpts = {}): Promise<Response> {
+  init = await preparePeerSend(url, init);
   const viaE2e = await e2eOutbound.fetch(url, init, (u, outer) => rawPeerFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }, opts));
   if (!viaE2e && opts.e2eOnly) throw new Error("目标不是端到端加密的 peer（可能刚被禁用或地址变了），不发明文");
   return viaE2e ?? rawPeerFetch(url, init, opts);
