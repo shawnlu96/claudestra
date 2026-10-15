@@ -242,9 +242,9 @@ export interface AskWire {
 }
 
 const ASK_CLASSES = ["design", "scope", "blocker"] as const;
-export type AskClass = (typeof ASK_CLASSES)[number];
+type AskClass = (typeof ASK_CLASSES)[number];
 const ASK_RISKS = ["delete_data", "permission", "security", "schema"] as const;
-export type AskRisk = (typeof ASK_RISKS)[number];
+type AskRisk = (typeof ASK_RISKS)[number];
 /** default 的长度上限（Unicode 码点） */
 const ASK_DEFAULT_MAX = 600;
 
