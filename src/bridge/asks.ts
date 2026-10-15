@@ -367,7 +367,10 @@ export function initAsks(d: AsksDeps): void {
   deps = d;
 }
 
-/** 已结案的默认只带 24 小时内的（列表每次整份发，旧的占了大半字节）；网页显式看历史时给 3 天 */
+/**
+ * 已结案的默认只带 24 小时内的（列表每次整份发，旧的占了大半字节）；网页显式看历史时给 3 天。
+ * 网页气泡按同一个窗口判「查不到 = 早已结案」（web/features/asks/asks-model.ts ASK_LIST_CLOSED_MS），改这里要一起改
+ */
 const CLOSED_RECENT_MS = 24 * 3600_000;
 const CLOSED_HISTORY_MS = 3 * 24 * 3600_000;
 

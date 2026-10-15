@@ -12,11 +12,14 @@ interface AsksStore {
   loadHistory(): Promise<void>;
   start(key: string): () => void;
   answer(id: string, shown: unknown, submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean>;
+  dismiss(id: string, submit: () => Promise<unknown>, fail: (e: unknown) => string): Promise<boolean>;
 }
 let serverList: A[] = [];
 const queue: { resolve: (v: unknown) => void; snapshot: A[] }[] = [];
 let manual = false;
 let failWith: unknown = null;
+/** 接下来几次拉取失败（之后恢复） */
+let failNext = 0;
 let mockActive = false;
 /** 每次拉取带的 history 参数（SYN-2：合并重复刷新、抽屉「更多」） */
 const fetchLog: boolean[] = [];
@@ -30,6 +33,7 @@ mock.module("@/lib/api/asks", () => ({
     if (!mockActive) return realAsks.fetchAsks(signal, history);
     fetchLog.push(history);
     if (failWith) return Promise.reject(failWith);
+    if (failNext > 0) return (failNext--, Promise.reject(new TypeError("Failed to fetch")));
     const snapshot = structuredClone(serverList);
     if (!manual) return Promise.resolve({ ok: true, asks: snapshot, now: Date.now() });
     return new Promise((resolve) => queue.push({ resolve, snapshot }));
@@ -61,6 +65,7 @@ beforeEach(async () => {
   Date.now = realNow;
   manual = false;
   failWith = null;
+  failNext = 0;
   queue.length = 0;
   serverList = [ask({ id: "ask_1" }), ask({ id: "ask_2" })];
   await asksStore.refresh();
@@ -258,11 +263,13 @@ describe("SYN-2：重复刷新合并成一次", () => {
     const s = started();
     await tick();
     fetchLog.length = 0;
-    await asksStore.answer("ask_1", shown, async () => streamOpts!.onAsk(), words);
+    // bridge 先写库再推 ask 事件：事件到的时候服务端已经是 answered
+    const commit = (id: string) => (serverList = serverList.map((a) => (a.id === id ? { ...a, state: "answered" } : a)), streamOpts!.onAsk());
+    await asksStore.answer("ask_1", shown, async () => commit("ask_1"), words);
     await settle();
     expect(fetchLog.length).toBe(1);
     fetchLog.length = 0;
-    await asksStore.answer("ask_2", shown, async () => { streamOpts!.onAsk(); await settle(); }, words);
+    await asksStore.answer("ask_2", shown, async () => { commit("ask_2"); await settle(); }, words);
     await settle();
     expect(fetchLog.length).toBe(1);
     s.stop();
@@ -276,6 +283,62 @@ describe("SYN-2：重复刷新合并成一次", () => {
     expect(fetchLog.length).toBe(0);
     await settle();
     expect(fetchLog.length).toBe(1);
+    s.stop();
+  });
+
+  /** 作答时：服务端改成 change 后的样子、推 ask 事件、事件那次 GET 失败一次；返回「到点撤覆盖」的那个计时器 */
+  async function answerWithFailedEventFetch(kind: "answer" | "dismiss", id: string): Promise<() => void> {
+    const realSetTimeout = globalThis.setTimeout;
+    let expire: () => void = () => undefined;
+    globalThis.setTimeout = ((f: () => void, ms: number) => (ms === PENDING_MAX_MS + 1 ? ((expire = f), 0) : realSetTimeout(f, ms))) as typeof setTimeout;
+    const submit = async () => {
+      serverList = kind === "answer" ? serverList.map((a) => (a.id === id ? { ...a, state: "answered" } : a)) : serverList.filter((a) => a.id !== id);
+      failNext = 1;
+      streamOpts!.onAsk();
+    };
+    try {
+      if (kind === "answer") await asksStore.answer(id, shown, submit, words);
+      else await asksStore.dismiss(id, submit, () => "FAIL");
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    return expire;
+  }
+
+  test("事件那次 GET 失败不算确认：恢复后补拉一次，过了 PENDING_MAX_MS 作答的卡不回到 open（r1 P1 refresh-failure）", async () => {
+    const s = started();
+    await tick();
+    fetchLog.length = 0;
+    const expire = await answerWithFailedEventFetch("answer", "ask_1");
+    await settle();
+    await settle();
+    expect(fetchLog.length).toBe(2);
+    Date.now = () => realNow() + PENDING_MAX_MS + 1_000;
+    expire();
+    expect(st()).toBe("answered");
+    s.stop();
+  });
+
+  test("删卡同样：事件 GET 失败一次后恢复，覆盖到点也不再冒出来", async () => {
+    const s = started();
+    await tick();
+    const expire = await answerWithFailedEventFetch("dismiss", "ask_2");
+    await settle();
+    await settle();
+    Date.now = () => realNow() + PENDING_MAX_MS + 1_000;
+    expire();
+    expect(asksStore.get().asks.some((a) => a.id === "ask_2")).toBe(false);
+    s.stop();
+  });
+
+  test("一直拉不到：补拉有上限，不会无限重试", async () => {
+    const s = started();
+    await tick();
+    fetchLog.length = 0;
+    failWith = new TypeError("Failed to fetch");
+    await asksStore.answer("ask_1", shown, async () => undefined, words);
+    for (let i = 0; i < 6; i++) await settle();
+    expect(fetchLog.length).toBe(3);
     s.stop();
   });
 

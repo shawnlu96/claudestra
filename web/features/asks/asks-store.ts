@@ -86,15 +86,14 @@ async function optimistic(id: string, over: Omit<PendingAnswer, "at" | "inFlight
     if (pending.get(id) === mine) pending.set(id, { ...over, at: Date.now() } as PendingAnswer);
     setTimeout(() => show(), PENDING_MAX_MS + 1);
     set({ notes: note(id, { ok: true, text: words.ok }) });
+    expectSettled(id, startedAt, over.dismiss === true);
     return true;
   } catch (e) {
     // 只撤自己这一笔：请求在飞时又点了一次，那一笔的覆盖不能被这次的失败带走
     if (pending.get(id) === mine) pending.delete(id);
     show({ notes: note(id, { ok: false, text: words.fail(e) }) });
+    soon(); // 以服务端为准
     return false;
-  } finally {
-    // 写库时 bridge 已推过 ask 事件、那次拉取已经拿到结果：不再补拉；没收到（流断了）才走去抖，和随后到的事件并成一次
-    if (lastEventFetchAt < startedAt) soon();
   }
 }
 
@@ -108,8 +107,11 @@ let appliedSeq = 0;
 /** 抽屉里点了「更多」：要 3 天内结案的（默认 bridge 只给 24 小时内的），收起抽屉就回到默认 */
 let withHistory = false;
 let lastFetchAt = 0;
-/** 最近一次由 ask 事件触发的拉取：作答后据此判断要不要补拉 */
-let lastEventFetchAt = 0;
+/** 最近一次成功落地的拉取是什么时候发出的 */
+let lastOkStart = 0;
+/** 在路上的拉取：序号 → 发出时间。只有提交开始之后发出的才可能带回这次变更（提交前发出、卡住的不能让补拉一直等） */
+const flying = new Map<number, number>();
+const flyingSince = (t: number) => [...flying.values()].some((at) => at >= t);
 let soonTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** ask 事件 / 作答后：去抖 ASK_EVENT_REFRESH_MS，一串变化只拉一次 */
@@ -117,9 +119,39 @@ function soon(): void {
   if (soonTimer) clearTimeout(soonTimer);
   soonTimer = setTimeout(() => {
     soonTimer = null;
-    lastEventFetchAt = Date.now();
     void refresh();
   }, ASK_EVENT_REFRESH_MS);
+}
+
+/**
+ * 作答 / 删卡提交成功、还没被确认的。确认 = 一次在提交开始之后发出、成功落地、看到它已处理（作答：不再 open；删卡：不在列表里）的拉取。
+ * 没确认（拉取失败、回来的是提交前发的、回来还是 open）就再排一次去抖拉取，最多 CONFIRM_TRIES 次。只看「拉过没有」的话，
+ * 失败的那次也算数，20 秒覆盖到点后卡片会回到待办（tests/web-asks-store.test.ts「SYN-2」）
+ */
+const confirming = new Map<string, { since: number; dismiss: boolean; tries: number }>();
+const CONFIRM_TRIES = 3;
+
+function settledOnServer(id: string, dismiss: boolean): boolean {
+  const a = server.find((x) => x.id === id);
+  return dismiss ? !a : !a || a.state !== "open";
+}
+
+function expectSettled(id: string, since: number, dismiss: boolean): void {
+  if (lastOkStart >= since && settledOnServer(id, dismiss)) return; // ask 事件那次拉取已经拿到了：不再补拉
+  confirming.set(id, { since, dismiss, tries: CONFIRM_TRIES });
+  if (!flyingSince(since) && !soonTimer) soon();
+}
+
+/** 一次拉取结束：ok = 成功落地，null = 被更新的结果盖过、不算数。核对待确认的，没确认、又没有别的拉取在路上就再排一次 */
+function settleConfirming(startedAt: number, ok: boolean | null): void {
+  if (ok === null) return;
+  for (const [id, c] of confirming) {
+    if (startedAt < c.since) continue;
+    if (ok && settledOnServer(id, c.dismiss)) confirming.delete(id);
+    else if (c.tries <= 1) confirming.delete(id);
+    else confirming.set(id, { ...c, tries: c.tries - 1 });
+  }
+  if (!soonTimer && [...confirming.values()].some((c) => !flyingSince(c.since))) soon();
 }
 
 /** 回前台和事件流重连常常前后脚到：1 秒内已经拉过就不再拉（去抖里排着的那次照常） */
@@ -131,11 +163,15 @@ function refreshOnWake(): void {
 async function refresh(): Promise<void> {
   if (denied) return;
   const my = ++fetchSeq;
-  lastFetchAt = Date.now();
+  const startedAt = (lastFetchAt = Date.now());
+  let ok: boolean | null = false;
+  flying.set(my, startedAt);
   try {
     const r = await fetchAsks(undefined, withHistory);
-    if (my < appliedSeq) return;
+    if (my < appliedSeq) return void (ok = null);
     appliedSeq = my;
+    ok = true;
+    lastOkStart = Math.max(lastOkStart, startedAt);
     const audience = r.asks.filter(isAskForViewer);
     const fresh = audience.filter((a) => a.state === "open" && !seen.has(a.id));
     // 第一次拉到的不算「新来的」；之后新来的卡活 ask 在前台就弹横幅
@@ -145,13 +181,16 @@ async function refresh(): Promise<void> {
     const banner = bannerAsk ?? audience.find((a) => a.id === snap.banner?.id && a.state === "open") ?? null;
     show({ loaded: true, full: r.full === true, banner });
   } catch (e) {
-    if (my < appliedSeq) return; // 上一台机器的、或已被更新的结果盖过的失败，不作数
+    if (my < appliedSeq) return void (ok = null); // 上一台机器的、或已被更新的结果盖过的失败，不作数
     const status = e instanceof ApiError ? e.status : 0;
     if (status === 403) denied = true;
     // 403 / 老 bridge 没有 /asks（404、405）= 没有待办；其余（503、断网）还没拿到过列表也先当 partial，都不能让聊天气泡一直「正在核对」
     if (status === 403 || status === 404 || status === 405) server = [];
     if (status === 403 || status === 404 || status === 405 || !snap.loaded) show({ loaded: true, full: false });
     // 拿到过列表的：保留上一份，下次刷新再来
+  } finally {
+    flying.delete(my);
+    settleConfirming(startedAt, ok);
   }
 }
 
@@ -207,6 +246,7 @@ export const asksStore = {
       denied = false;
       seen.clear();
       pending.clear();
+      confirming.clear();
       server = [];
       snap = EMPTY;
     }
