@@ -4,9 +4,9 @@
  *   接通：relay 入口（src/relay.ts，子进程真起一份）读改名环境变量、bridge 入口（relayConnectOptions）读实例配置。
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createRelay, type Relay } from "../src/relay/server.ts";
 import { connect, type RelayClient } from "../src/lib/relay-client.ts";
 import { instanceKeySync, type InstanceKey } from "../src/lib/instance-key.ts";
@@ -14,6 +14,7 @@ import { authSignature, SUBPROTOCOL } from "../src/lib/relay-protocol.ts";
 import { signRelayAuth } from "../src/lib/floka-compat/relay/handshake.ts";
 import { flokaName, legacyName } from "../src/lib/floka-env/names.ts";
 import { relayConnectOptions } from "../src/bridge/relay-link.ts";
+import { CONFIG_PATH } from "../src/lib/paths.ts";
 import { testChildEnv } from "./test-env.ts";
 
 const BASE = "relay.test";
@@ -204,6 +205,56 @@ describe("[验收线 2] bridge 入口读实例配置", () => {
       expect(c.family).toBe("legacy");
       if (JSON.stringify(cfg).includes("bogus")) expect(logs.some((l) => l.includes('rename.centerReceive: "bogus"'))).toBe(true);
       if (typeof (cfg as { rename?: unknown }).rename === "string") expect(logs.some((l) => l.includes("rename: 要是对象"))).toBe(true);
+    });
+  }
+});
+
+describe("[验收线 2] bridge 入口读磁盘上的 config.json（默认生产读取路径，不传 cfg）", () => {
+  const url = (port: number) => `ws://127.0.0.1:${port}/v1/ws`;
+  const NEW = { centerReceive: "on", centerSend: "on" };
+  // 状态目录是 tests/preload.ts 隔离出的临时目录；同进程别的用例可能写过 config.json，用完放回原样
+  const before = existsSync(CONFIG_PATH) ? readFileSync(CONFIG_PATH, "utf-8") : null;
+  afterAll(() => (before === null ? rmSync(CONFIG_PATH, { force: true }) : writeFileSync(CONFIG_PATH, before)));
+
+  function writeConfig(text: string | null): void {
+    mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    if (text === null) rmSync(CONFIG_PATH, { force: true });
+    else writeFileSync(CONFIG_PATH, text);
+  }
+
+  async function familyFromDisk(text: string | null, logs: string[]): Promise<string | undefined> {
+    writeConfig(text);
+    const opts = relayConnectOptions(url(0), newKey(), null, 1, {}, undefined, (_, m) => void logs.push(m));
+    const relay = center(NEW);
+    const c = connect({ ...opts, relayUrl: url(relay.port), timing: { backoffMs: [30], fatalRetryMs: 30, heartbeatMs: 60_000 } });
+    cleanup.push(() => c.close());
+    await waitFor(() => c.state === "online");
+    expect(relay.dropConnection(c.info().fp!)).toBe(true);
+    await waitFor(() => c.state !== "online");
+    await waitFor(() => c.state === "online");
+    return c.family;
+  }
+
+  test("磁盘写 on：默认路径读到 rename 原样，重连后按新族握手", async () => {
+    const text = JSON.stringify({ rename: { state: "off", ...NEW } });
+    writeConfig(text);
+    expect(relayConnectOptions(url(1), newKey(), null, 1, {}).rename).toEqual(JSON.parse(text).rename);
+    expect(await familyFromDisk(text, [])).toBe("floka");
+  });
+
+  for (const text of ['{"rename":"on"}', '{"rename":["on"]}']) {
+    test(`磁盘写 ${text}：错值原样交到 connect，按 off（仍是旧族），日志里有 problems 原文`, async () => {
+      writeConfig(text);
+      expect(relayConnectOptions(url(1), newKey(), null, 1, {}).rename).toEqual(JSON.parse(text).rename);
+      const logs: string[] = [];
+      expect(await familyFromDisk(text, logs)).toBe("legacy");
+      expect(logs.some((l) => l.includes("rename: 要是对象，按 off 处理"))).toBe(true);
+    });
+  }
+
+  for (const [what, text] of [["文件不在", null], ["没写 rename", "{}"], ["文件写坏", "{not json"]] as const) {
+    test(`${what}：按 off，仍是旧族`, async () => {
+      expect(await familyFromDisk(text, [])).toBe("legacy");
     });
   }
 });
