@@ -145,6 +145,27 @@ for (const order of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 
   });
 }
 
+for (const relayed of [false, true]) {
+  test(`[验收线 3] floka session reset transparently rehandshakes in the same call (relay=${relayed})`, async () => {
+    const net = await network(), [a, b] = net.nodes;
+    a.config = structuredClone(ON); b.config = structuredClone(ON);
+    await net.call(0, 1, relayed); await net.call(0, 1, relayed);
+    expect(net.seen.at(-1)).toBe("floka");
+    const before = hash([a.rec, b.rec, a.signed, b.signed]);
+    b.sessions.dropPeer(a.fp); // bridge restart or eviction; rollout configuration is unchanged
+    net.seen.length = 0; net.attempts.length = 0;
+    await net.call(0, 1, relayed);
+    expect(net.attempts).toHaveLength(3); // rejected record, same-family hello, retried record
+    expect(net.attempts.filter(url => url.endsWith(E2E_HELLO_PATH))).toHaveLength(1);
+    expect(net.seen).toEqual(["floka", "floka", "floka"]);
+    expect(a.cache.family(pinOf(b.rec), ON, true)).toBe("floka");
+    expect(hash([a.rec, b.rec, a.signed, b.signed])).toBe(before);
+    net.attempts.length = 0;
+    await net.call(0, 1, relayed);
+    expect(net.attempts).toHaveLength(1);
+  });
+}
+
 for (const gate of ["signature", "e2e", "peerRelayInbound", "rollback"] as const) {
   for (const mode of ["off", "observe"] as const) {
     test(`[验收线 3] receiver rollback ${gate}=${mode} recovers on the next independent call`, async () => {
@@ -160,7 +181,7 @@ for (const gate of ["signature", "e2e", "peerRelayInbound", "rollback"] as const
       if (gate === "rollback") b.sessions.dropPeer(a.fp);
       net.seen.length = 0; net.attempts.length = 0;
       await expect(net.call(0, 1, relayed)).rejects.toThrow();
-      expect(net.attempts).toHaveLength(1);
+      expect(net.attempts).toHaveLength(gate === "e2e" ? 2 : 1); // session loss permits only a same-family hello
       expect(net.seen).not.toContain("claudestra"); // no same-call alternate-family retry
       expect(a.cache.family(pinOf(b.rec), ON)).toBe("claudestra");
       expect(a.cache.family(pinOf(b.rec), ON, true)).toBe("claudestra");

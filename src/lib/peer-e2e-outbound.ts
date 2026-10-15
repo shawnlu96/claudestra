@@ -82,6 +82,8 @@ export function createE2eOutbound(d: OutboundDeps) {
         const response = await recoverPeerSend(url, signed,
           () => raw(url, { method: "POST", body: bytes, headers: { "content-type": contentType, ...signed } }),
           { pin, cache: capabilities, rejected: code => {
+            // A missing record session permits the client's bounded retry; this call keeps its captured family.
+            if (code === "e2e_session" && path !== E2E_HELLO_PATH) return;
             throw new E2eOuterError(code, "peer rejected the selected family; capability retired for future calls", path !== E2E_HELLO_PATH);
           } });
         if (path === E2E_HELLO_PATH && response.ok && pin && peerPolicy(d.rename).e2e.receive !== "off") {

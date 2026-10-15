@@ -30,8 +30,9 @@ invalid values are off. No environment variable, identity file or peer schema is
 - New E2E sends additionally require both E2E switches on and the E2E capability
   bound to the pinned encryption key and version. Unknown or expired capabilities
   select legacy before sending. Failure after sending never triggers another family
-  or a plaintext/anonymous retry. Legacy same-family session-reset behavior remains;
-  a new-family signature/session rejection terminates the current call immediately.
+  or a plaintext/anonymous retry. Both families retain the client's single same-family
+  re-handshake and record retry on `401 e2e_session`. Signature or hello rejection
+  terminates the current call; a second record session rejection also terminates it.
 
 Capability proofs are optional extensions of the legacy hello response. They use
 SIGN1/E2E1's signed capability formats and are advertised only when signature and
@@ -40,9 +41,12 @@ They are checked against trusted peer pins, never learned from untrusted identit
 claims. Off does not learn them; observe reports without retaining them. The bounded
 cache is memory-only; a process restart returns to legacy until a fresh handshake
 authenticates capability again. A new-family send rejected with a signature/session
-401 or relay `bad_signature` retires only that pin's capabilities. The current call
-fails without retry; the next independent call selects legacy and can learn fresh
-signed capabilities during hello. Old-family rejections, token/scope failures,
+401 or relay `bad_signature` retires only that pin's capabilities. A record's
+`e2e_session` refusal still reaches the client's bounded session recovery: the call
+keeps its selected family, and a successful hello can restore authenticated capability.
+If the hello fails (including receiver rollback), the call fails without switching
+family; the next independent call selects legacy and can learn fresh signed
+capabilities during hello. Old-family rejections, token/scope failures,
 network errors, timeouts and 5xx responses do not clear capabilities. These hints
 are not delivery evidence: an unauthenticated refusal can retire a capability but
 cannot prove whether an application request ran. Both families retain the same
