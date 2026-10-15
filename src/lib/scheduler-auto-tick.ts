@@ -47,6 +47,7 @@ import { manualResumeManagerTick } from "./scheduler-recovery-ports.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { wipGateCard } from "./scheduler-wip-gate.js";
 import { logPoolIdleObservation, type PoolIdleObservation } from "./scheduler-pool-idle.js";
+import { liftWithinBand, slotOrder } from "./scheduler-priority-order.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -475,7 +476,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   }
   if (!started) pace?.openList?.();
   const turn = paceCards(db, projects, "auto", pace);
-  const ordered = mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""));
+  const sorted = slotOrder(db, mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""))), ordered = sorted.applied; // PRIO2
   // cursor.autoBudget is written only when the last pass was really cut off by the budget, and cleared once its owed card (fair)
   // is served. While it is owed, this pass puts fair first once, whatever its budget; with nothing owed the order is
   // mergeFirst(finishFirst(...)). Dropping this lift lets the unknown merge that mergeFirst puts first take every slot of a
@@ -493,13 +494,11 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     }
   };
   // The rotation anchor survives later priority cards; otherwise two-card phases repeatedly end on the same merge head.
-  if (owesBudget && fair) {
-    ordered.splice(ordered.indexOf(fair), 1); ordered.unshift(fair);
-  }
+  if (owesBudget && fair) ordered.splice(0, ordered.length, ...liftWithinBand(sorted, fair));
   for (const card of ordered) {
     if (pace?.yieldNow()) { if (pace.budgetEnded?.()) pace.cursor.autoBudget = served ?? pace.cursor.autoBudget ?? pace.cursor.auto; break; }
     // past the budget the one card is the next in rotation, not the card mergeFirst puts first (an unknown merge) every pass
-    const { project, policy, taskId } = pace?.lastCard?.() ? fair! : card;
+    const { project, policy, taskId } = pace?.lastCard?.() ? liftWithinBand(sorted, fair!)[0]! : card; // PRIO2: never past a card the owner ranks ahead
     const task = getTask(db, taskId);
     if (!task || pace?.skipTask?.(taskId)) continue;
     if (!merged && task.stage !== "merge") await driveMerges();

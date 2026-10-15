@@ -3,7 +3,10 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
-import { MAX_SKEW_S, SIG_HEADERS, signPurpose, verifyPurpose, type InstanceKey } from "./instance-signature.js";
+import { MAX_SKEW_S, SIG_HEADERS, type InstanceKey } from "./instance-signature.js";
+import type { SignatureFamily } from "./floka-compat/signature/families.js";
+import { verifyLedgerSignature, type LedgerReceive } from "./floka-ledger/request.js";
+import { signLedgerUse } from "./floka-ledger/uses.js";
 import {
   SharedLedgerError, sharedLedgerBodyLimit, type SharedLedgerCommand,
   type SharedLedgerImport, type SharedLedgerProjection, type SharedLedgerImportControl,
@@ -57,6 +60,8 @@ export interface SharedLedgerSignedRequest {
   ts: string;
   signature: string;
   attemptNonce: string;
+  /** rename-floka-LEDGER1: only floka-family requests carry it; absent = the old family, verified exactly as before. */
+  purpose?: string;
 }
 
 export interface SharedLedgerPrincipal {
@@ -75,7 +80,7 @@ export interface SharedLedgerAuthResult {
 
 export const sharedLedgerCredentialHash = (secret: string): string => createHash("sha256").update(secret).digest("hex");
 
-function signedFields(req: Omit<SharedLedgerSignedRequest, "signature" | "publicKey">): string[] {
+function signedFields(req: Omit<SharedLedgerSignedRequest, "signature" | "publicKey" | "purpose">): string[] {
   return [req.method.toUpperCase(), req.path, req.ts, sharedLedgerCredentialHash(req.body),
     req.attemptNonce, req.instanceId, sharedLedgerCredentialHash(req.bearer)];
 }
@@ -85,12 +90,12 @@ function signedFields(req: Omit<SharedLedgerSignedRequest, "signature" | "public
  * Binding nonce, instance and credential hash also prevents transport credential substitution.
  */
 export function signSharedLedgerRequest(
-  request: Omit<SharedLedgerSignedRequest, "signature" | "publicKey">, key: InstanceKey,
+  request: Omit<SharedLedgerSignedRequest, "signature" | "publicKey" | "purpose">, key: InstanceKey, family: SignatureFamily = "claudestra",
 ): SharedLedgerSignedRequest {
   nonce(request.attemptNonce);
-  const signed = signPurpose(PURPOSE, signedFields(request), key);
+  const signed = signLedgerUse("shared-ledger", signedFields(request), key, family);
   if (!signed) throw new SharedLedgerError("bad_signature");
-  return { ...request, publicKey: signed.key, signature: signed.sig };
+  return { ...request, publicKey: signed.key, signature: signed.sig, ...(signed.purpose ? { purpose: signed.purpose } : {}) };
 }
 
 export function sharedLedgerCommandDigest(envelope: unknown): string {
@@ -103,9 +108,9 @@ function sameHash(a: string, b: string): boolean {
     && timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
 }
 
-function verifyTransport(req: SharedLedgerSignedRequest, replay: SharedLedgerReplayIndex, now: number): void {
+function verifyTransport(req: SharedLedgerSignedRequest, replay: SharedLedgerReplayIndex, now: number, rx: LedgerReceive): void {
   const fields = [req.method, req.path, req.body, req.bearer, req.publicKey, req.instanceId, req.ts, req.signature, req.attemptNonce];
-  if (fields.some((v) => typeof v !== "string") || !verifyPurpose(req.publicKey, PURPOSE, signedFields(req), req.signature)) {
+  if (fields.some((v) => typeof v !== "string") || !verifyLedgerSignature({ key: req.publicKey, sig: req.signature, purpose: req.purpose }, signedFields(req), rx)) {
     throw new SharedLedgerError("bad_signature");
   }
   const ts = Number(req.ts);
@@ -113,6 +118,7 @@ function verifyTransport(req: SharedLedgerSignedRequest, replay: SharedLedgerRep
   nonce(req.attemptNonce);
   // A future-dated signature can stay valid for twice the skew window; retain to signed time + skew.
   const expiresAt = (ts + MAX_SKEW_S) * 1000 + 1;
+  // Family-independent on purpose (LEDGER1): a nonce spent under one family cannot be replayed under the other.
   const replayKey = sharedLedgerCredentialHash(canonicalJson([PURPOSE, req.publicKey, req.attemptNonce]));
   if (!replay || typeof replay.claim !== "function") throw new SharedLedgerError("forbidden");
   if (!replay.claim(replayKey, expiresAt, now)) throw new SharedLedgerError("replayed");
@@ -163,9 +169,9 @@ function parsePayload(req: SharedLedgerSignedRequest, { action, resource, item }
  */
 export function authenticateSharedLedgerRequest(
   req: SharedLedgerSignedRequest, credential: SharedLedgerCredential | null, replay: SharedLedgerReplayIndex, now: number,
-  target: { projectId?: string; homeInstanceId?: string } = {},
+  target: { projectId?: string; homeInstanceId?: string } = {}, rx: LedgerReceive = {},
 ): SharedLedgerAuthResult {
-  verifyTransport(req, replay, now);
+  verifyTransport(req, replay, now, rx);
   if (!credential || !sameHash(sharedLedgerCredentialHash(req.bearer), credential.credentialHash)
     || credential.membershipStatus !== "active" || credential.revokedAt !== null) throw new SharedLedgerError("not_member");
   if (!Number.isSafeInteger(credential.expiresAt) || now >= credential.expiresAt) throw new SharedLedgerError("expired");

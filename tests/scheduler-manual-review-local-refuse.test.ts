@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { HANDBACK_REVIEW_TAG } from "../src/lib/pm-handback.js";
 import { adoptedReviewSource } from "../src/lib/scheduler-manual-review-source.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
 import { events, finding, H1, H2, plan, resume, sideTables, toManual, toRound2, withPr, type Fx } from "./scheduler-manual-review-source-fixture.test.js";
@@ -167,7 +168,7 @@ describe("AUTOACK2 [验收线 2] incomplete local evidence: zero adoption", () =
     await ready();
     await take(f);
     await refused("原审查报告读不到，材料无法核", { checkout: true }, () => rmSync(String(verdictEvent(f).data.path)));
-    expect(plan(f)).toMatchObject({ kind: "escalate" });
+    expect(plan(f)).toMatchObject({ kind: "intent", action: "review", reason: expect.stringContaining(HANDBACK_REVIEW_TAG) }); // PMHAND1 11a: a pre-hand-back verdict is re-reviewed
     expect(events(f).filter((e) => e.data.op === "manual_review_taken")).toHaveLength(1);
   });
 });

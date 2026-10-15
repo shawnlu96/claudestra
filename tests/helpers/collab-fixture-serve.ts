@@ -6,9 +6,13 @@ import { teamOverview } from "@/features/collab/team-source-adapter";
 import { teamDagBoard } from "@/features/collab/team-source-dag";
 import { sharedProductBoard } from "@/features/collab/dag/shared-product-model";
 import type { TeamFromHome } from "../web-team-parity-browser-center.test";
+import type { WorkBoard } from "@/features/collab/work/work-types";
 
-/** legacy = 旧夹具的喂法：本地也由团队模型生成（teamOverview / teamDagBoard / sharedProductBoard，详情 events / timeline 为空） */
-export function serve(home: HomeFixture, team: TeamFromHome, bundle: string, legacy = false) {
+/**
+ * legacy = 旧夹具的喂法：本地也由团队模型生成（teamOverview / teamDagBoard / sharedProductBoard，详情 events / timeline 为空）；
+ * work = 本机 /work 的覆盖（UXCARD3 截图的出借 / 退回人工 / 老卡三种行），不传照旧由 homeWorkBoard 推
+ */
+export function serve(home: HomeFixture, team: TeamFromHome, bundle: string, legacy = false, work?: WorkBoard) {
   const files = readdirSync(bundle), p = home.project, L = `/api/v1/ledger/${p}`;
   const details = new Map(team.details.map((d) => [d.feature.id, d]));
   const teamOv = teamOverview(team.list, details, home.now);
@@ -47,7 +51,7 @@ export function serve(home: HomeFixture, team: TeamFromHome, bundle: string, leg
     if (path === L) return json({ ok: true, ...(legacy ? teamOv.ov : home.overview) });
     if (path === `${L}/dag`) return json(legacy ? teamDagBoard(p, team.list, details, teamOv) : homeDagBoard(home));
     if (path === `${L}/product`) return json(legacy ? sharedProductBoard(team.list, home.now, teamOv.ov.tasks) : homeProductBoard(home));
-    if (path === `${L}/work`) return json(homeWorkBoard(home));
+    if (path === `${L}/work`) return json(work ?? homeWorkBoard(home));
     const diff = path.match(new RegExp(`^${L}/dag/([^/]+)/diff$`));
     if (diff) {
       const d = homeDagDiff(home, diff[1]!, Number(url.searchParams.get("from")), Number(url.searchParams.get("to")));

@@ -27,12 +27,14 @@ const p2BacklogKey = (project: string, taskId: string, reviewSeq: number, findin
   `p2-backlog:${JSON.stringify([project, taskId, reviewSeq, findingId])}`;
 
 /**
- * 能证实是普通 P2 的分类词元：命名、文案、注释、文档、测试补充、整理类。family 的每个词元都要在这张表里才入积压；
- * 加词元 = 承认这一类 P2 不用 PM 逐条看，改这张表要过审。并发、持久化、兼容、接线这类说的是行为，不在表里。
+ * 能证实是普通 P2 的分类词元：命名、文案、注释、文档、测试补充、整理、界面 / 键盘 / 效率 / 规范类。family 的每个词元都要在这张表里才入积压；
+ * 加词元 = 承认这一类 P2 不用 PM 逐条看，改这张表要过审。并发、持久化、兼容、接线、state / spec / data / behavior 这类说的是行为，不在表里。
  */
 const ORDINARY_TOKENS = new Set(["naming", "name", "names", "rename", "wording", "message", "messages", "text", "copy", "typo", "typos", "spelling", "grammar",
   "comment", "comments", "doc", "docs", "documentation", "readme", "style", "format", "formatting", "lint", "nit", "nits", "readability", "cleanup", "tidy",
-  "refactor", "simplify", "simplification", "duplication", "duplicate", "deadcode", "unused", "test", "tests", "coverage", "log", "logs", "logging"]);
+  "refactor", "simplify", "simplification", "duplication", "duplicate", "deadcode", "unused", "test", "tests", "coverage", "log", "logs", "logging",
+  "i18n", "l10n", "translation", "locale", "layout", "spacing", "visual", "ui", "ux", "overlap", "keyboard", "shortcut", "focus", "a11y", "accessibility",
+  "efficiency", "perf", "performance", "standards", "standard", "convention", "conventions"]);
 /** family 按 . _ - 切成词元后整词比对；命中 = 这条 P2 说的是范围 / 权限 / 审批 / 安全，PM 自己看（只为给出更准的原因，放行只看上面的白名单）。 */
 const PROTECTED_TOKENS = new Set(["scope", "scoped", "oos", "outofscope", "boundary", "fileglobs", "globs", "permission", "permissions", "perm", "perms", "auth", "authz",
   "authn", "authorization", "authentication", "access", "acl", "role", "roles", "privilege", "privileges", "approval", "approve", "approvals", "security", "secret",

@@ -35,10 +35,18 @@ describe("认种类：只看段的格式，和是哪个 harness 无关", () => {
 });
 
 describe("定稿样子", () => {
-  test("工具头：状态符号（成功 ✓ / 失败 ✗ / 未完成 ◌）+ 名字(摘要) + ACP 标准类型", () => {
-    expect(toolRows({ name: "Bash", arg: "ls", kind: "execute", status: "ok" }, 60).map(stripSgr)).toEqual(["✓ Bash(ls) · 执行"]);
+  test("工具头：状态符号（成功 ✓ / 失败 ✗ / 未完成 ◌）+ 名字(摘要)；ACP 类型只在名字看不出来时标", () => {
+    expect(toolRows({ name: "Bash", arg: "ls", kind: "execute", status: "ok" }, 60).map(stripSgr)).toEqual(["✓ Bash(ls)"]);
     expect(toolRows({ name: "Bash", arg: "ls", status: "fail" }, 60).map(stripSgr)).toEqual(["✗ Bash(ls)"]);
-    expect(toolRows({ name: "Read", arg: "a.ts", kind: "read", status: "lost" }, 60).map(stripSgr)).toEqual(["◌ Read(a.ts) · 读取 · 未完成"]);
+    expect(toolRows({ name: "Read", arg: "a.ts", kind: "read", status: "lost" }, 60).map(stripSgr)).toEqual(["◌ Read(a.ts) · 未完成"]);
+    expect(toolRows({ name: "apply_patch", arg: "a.ts", kind: "edit", status: "ok" }, 60).map(stripSgr)).toEqual(["✓ apply_patch(a.ts)"]);
+    expect(toolRows({ name: "lookup", arg: "x", kind: "fetch", status: "ok" }, 60).map(stripSgr)).toEqual(["✓ lookup(x) · 抓取"]);
+    expect(toolRows({ name: "claudestra/reply", arg: "", kind: "other", status: "ok" }, 60).map(stripSgr)).toEqual(["✓ claudestra/reply()"]);
+  });
+
+  test("多条命令串的「＋N 条」写成「(+N 条命令)」", () => {
+    expect(toolOf("● Bash(git status --short ＋5 条)")).toEqual({ name: "Bash", arg: "git status --short (+5 条命令)" });
+    expect(toolOf("● Bash(cat x（3 行脚本）)").arg).toBe("cat x（3 行脚本）");
   });
 
   test("结果：成功的暗色一行，失败的红色留末尾几行（续行对齐）", () => {
@@ -65,6 +73,7 @@ describe("定稿样子", () => {
 
   test("回合分隔：结局 + 时间的一道线，窄屏不超宽", () => {
     expect(rows("── 已打断 ──", 30)).toEqual(["── 已打断 · 21:03:05 ────────"]);
-    expect(Bun.stringWidth(rows("── 回合结束 ──", 30)[0]!)).toBeLessThanOrEqual(29);
+    // 满宽：和输入框的线一样长（列数 − 1），宽窗口也不停在半截
+    for (const c of [30, 52, 120]) expect(Bun.stringWidth(rows("── 回合结束 ──", c)[0]!)).toBe(c - 1);
   });
 });

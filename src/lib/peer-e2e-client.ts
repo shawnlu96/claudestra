@@ -1,3 +1,4 @@
+import { peerClientLabel } from "./floka-peer/session.js";
 /**
  * peer E2E 的发起方（docs/relay/e2e-design.md §5.1）：对一个用密钥建立的 peer，所有请求都包进会话发出去。
  * 按「中继是攻击者」写，任何一处都不回退明文：
@@ -19,7 +20,7 @@ import { compareE2eKey, verifyE2eKey, type MachineE2eKey, type SignedE2eKey } fr
 import type { E2ePeer } from "./peer-e2e-serve.js";
 import {
   E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, encodeHello, encodeInnerHead, INNER_REPLAY_REASONS, parseHelloReply, parseResponseHead,
-  PEER_E2E_LABEL, recordPath, E2E_BODY_MAX, E2E_RESPONSE_MAX,
+  recordPath, E2E_BODY_MAX, E2E_RESPONSE_MAX,
 } from "./peer-e2e-wire.js";
 
 export class E2eError extends Error {
@@ -55,6 +56,7 @@ export const markE2eResponse = (r: Response): Response => (AUTHENTICATED.add(r),
 export type E2ePost = (path: string, body: Uint8Array, contentType: string) => Promise<Response>;
 
 export interface ClientDeps {
+  renameFamily?: "claudestra" | "floka";
   myFp: string;
   /** 现在钉着的对方记录（每次握手现读，轮换后能拿到新块） */
   peer: () => E2ePeer;
@@ -142,7 +144,7 @@ export class PeerE2eClient {
   private async send(head: Uint8Array, body: Uint8Array, isRetry: boolean, post: E2ePost): Promise<Response | typeof RETRY> {
     const s = await this.ensure(post);
     const rid = s.nextRid++;
-    const stream = await sealMessage({ key: s.keys.c2b, sid: s.sid, dir: DIR_REQ, rid, label: PEER_E2E_LABEL }, head, body);
+    const stream = await sealMessage({ key: s.keys.c2b, sid: s.sid, dir: DIR_REQ, rid, label: peerClientLabel(this.d) }, head, body);
     // 跳过的 rid 不碍事：收方的窗口只拒重复与过旧的
     if (stream.length > E2E_BODY_MAX) throw new E2eLocalError("e2e_too_large", `request is ${stream.length} bytes, over the peer's ${E2E_BODY_MAX}-byte limit; not sent`);
     let res: Response;
@@ -158,7 +160,7 @@ export class PeerE2eClient {
       if (isRetry) throw new E2eOuterError(code, "peer rejected a fresh session", true);
       return RETRY;
     }
-    const parts = await this.openResponse(res, { key: s.keys.b2c, sid: s.sid, dir: DIR_RES, rid, label: PEER_E2E_LABEL });
+    const parts = await this.openResponse(res, { key: s.keys.b2c, sid: s.sid, dir: DIR_RES, rid, label: peerClientLabel(this.d) });
     let rh;
     try {
       rh = parseResponseHead(JSON.parse(new TextDecoder().decode(parts[0])));
@@ -219,7 +221,7 @@ export class PeerE2eClient {
     const cmp = compareE2eKey(peer.ek, theirs);
     if (cmp === "stale") throw new E2eOuterError("e2e_key_stale", "peer presented an older key block", false);
     const keys = await finish(
-      { fp: peer.fp, devId: utf8(this.d.myFp), label: PEER_E2E_LABEL },
+      { fp: peer.fp, devId: utf8(this.d.myFp), label: peerClientLabel(this.d) },
       { local: m.pair, ephemeral: eph, remoteStatic: theirs.pubBytes, be: r.be, sid: r.sid, confirm: r.confirm },
     );
     if (!keys) throw new E2eOuterError("e2e_confirm", "handshake confirm mismatch (peer lacks its pinned key, or the reply was tampered)", false);

@@ -12,6 +12,7 @@ import { CI_SCOPE_LIGHT, CI_SCOPE_FULL, lightOnly } from "./ci-queue-full.js";
 import type { Database } from "bun:sqlite";
 import type { AuditFinding, AuditRule, AuditSnapshot } from "./ledger-audit.js";
 import { trainSlots, type MergeTrainInputs } from "./ledger-audit-train.js";
+import { handoffEvent } from "./ledger-audit-handoff.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
@@ -64,6 +65,7 @@ export function mergeReadyAudit(s: AuditSnapshot & MergeReadyInputs & MergeTrain
   const train = policy ? trainSlots(s, policy) : null; // AUDTRAIN2：没有策略 port = 原规则
   for (const { task, events, blockedBy } of s.tasks) {
     if (task.stage !== "merge" || currentStageMark(events)?.data.approxTime === true) continue;
+    if (handoffEvent(events)) continue; // AUDH2-1：已交给仓库方合并，本机没有合并入口可走（停滞由 ship_stalled 按交接口径报）
     const stageSince = stageTimeline(events, now).at(-1)?.from ?? null;
     if (stageSince === null) continue;
     const review = carriedReview(task, events);
@@ -125,7 +127,7 @@ export function mergeBlockersOf(db: Database, task: LedgerTask, now: number): st
  */
 export async function collectMergeCi(project: string, tasks: AuditSnapshot["tasks"], now: number, deps: MergeCiDeps):
   Promise<Record<string, MergeCiFact> | null> {
-  const want = tasks.filter(({ task, events }) => task.stage === "merge" && !!task.headSHA && PR.test(task.pr ?? "") && validPass(task, events));
+  const want = tasks.filter(({ task, events }) => task.stage === "merge" && !!task.headSHA && PR.test(task.pr ?? "") && !handoffEvent(events) && validPass(task, events));
   if (!want.length) return {};
   try {
     const checks = parseRequiredChecks(deps.checksOf(project));

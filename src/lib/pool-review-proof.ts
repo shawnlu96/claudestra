@@ -16,6 +16,7 @@ import { POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 import { readRawResult, type RawRef } from "./pool-review-proof-raw.js";
 import { logicalSha, parseReviewTicket, ticketProblem } from "./pool-review-proof-ticket.js";
+import { ledgerReceive } from "./floka-ledger/config.js";
 
 /** The session id writeLendResult gives a pool verdict; a claimed reviewer session with this shape is a pool claim. */
 const LEND_SESSION = /^lend:/;
@@ -116,6 +117,6 @@ function ticketEvidence(lend: Record<string, unknown>, o: OrderRow, task: Pick<L
     return "的原件与入账的票据不一致";
   }
   const bad = ticketProblem(ticket, { orderId: o.orderId, gen: o.leaseGen, taskId: task.id, head: o.head, specRev: o.specRev, round: o.round,
-    family: o.family, worker: o.worker ?? "", session, payloadSha: logicalSha(body) }, ticket.key);
+    family: o.family, worker: o.worker ?? "", session, payloadSha: logicalSha(body) }, ticket.key, ledgerReceive());
   return bad ? `的票据不成立（${bad}）` : null;
 }

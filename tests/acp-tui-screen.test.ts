@@ -31,7 +31,7 @@ describe("整轮会话", () => {
     const lines = session(52);
     expect(lines.every((l) => Bun.stringWidth(l) <= 51)).toBe(true);
     const text = lines.join("\n");
-    for (const want of ["┃ owner · 21:03", "● 计划 · 1/3", "  ▸ 跑测试", "✓ Read(lease-sync.ts) · 读取", "✗ Bash(bun test tests/lease.test.ts) · 执行",
+    for (const want of ["┃ owner · 21:03", "● 计划 · 1/3", "  ▸ 跑测试", "✓ Read(lease-sync.ts)", "✗ Bash(bun test tests/lease.test.ts)",
       "  ⎿ ✗ （共 14 行，末尾 4 行）", "╭─ ⏸ 需要审批", "│ [3] 拒绝", "● 结论", "  • 第一处：lease-sync.ts 的比较", "  │ 引用：审查意见原文",
       "  ╭─ ts", "  lease-sync.ts │ 比较参数 │ 低", "── 已打断 · 21:03:10", "── 回合结束 · 21:03:11"]) expect(text).toContain(want);
     expect(lines.at(-1)).toBe("● 空闲 · 上下文 46% · gpt-5.1-codex · high"); // 窄屏上下文只留百分比，换来多放模型和 effort
@@ -75,13 +75,13 @@ describe("流式与重画", () => {
     st.state = { busy: true, queued: 0, permissions: 0 };
     s.show("● Bash(sleep 3)");
     s.update({ sessionUpdate: "tool_call", toolCallId: "c", kind: "execute", status: "in_progress" });
-    expect(view()).toEqual(["◐ Bash(sleep 3) · 执行 · 0s", "✻ 思考中… 0s · Esc 打断"]);
+    expect(view()).toEqual(["◐ Bash(sleep 3) · 0s", "✻ 思考中… 0s · Esc 打断"]);
     st.now = 2_000;
     s.tick();
-    expect(view()).toEqual(["◑ Bash(sleep 3) · 执行 · 2s", "✻ 思考中… 2s · Esc 打断"]);
+    expect(view()).toEqual(["◑ Bash(sleep 3) · 2s", "✻ 思考中… 2s · Esc 打断"]);
     s.show("  ⎿ 无输出");
     s.update({ sessionUpdate: "tool_call_update", toolCallId: "c", status: "completed" });
-    expect(view()).toEqual(["✓ Bash(sleep 3) · 执行", "  ⎿ 无输出", "✻ 思考中… 2s · Esc 打断"]);
+    expect(view()).toEqual(["✓ Bash(sleep 3)", "  ⎿ 无输出", "✻ 思考中… 2s · Esc 打断"]);
   });
 
   test("思考只在底栏预览，正文一来就收起", () => {

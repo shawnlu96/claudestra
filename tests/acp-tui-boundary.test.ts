@@ -12,7 +12,7 @@ const VIEW = [
 
 test("视图层文件都在清单里（新视图 + 逐行视图）", () => {
   expect(VIEW.map((f) => f.slice(ACP.length + 1)).sort()).toEqual([
-    "transcript-stream.ts", "transcript.ts", "tty-input-attach.ts", "tty-input.ts", "tty-layout.ts", "tty-screen.ts", "tty-status.ts",
+    "transcript-replay.ts", "transcript-stream.ts", "transcript.ts", "tty-input-attach.ts", "tty-input.ts", "tty-layout.ts", "tty-screen.ts", "tty-status.ts",
     "tui/blocks.ts", "tui/footer.ts", "tui/guard.ts", "tui/live.ts", "tui/markdown.ts", "tui/message.ts", "tui/painter.ts", "tui/screen.ts", "tui/text.ts",
   ]);
 });

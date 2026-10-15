@@ -182,6 +182,8 @@ export async function stateMaintenance(argv: string[], d: CmdDeps): Promise<Out>
   const { rest, grant } = grantFlag(argv);
   const [sub, a, b] = rest;
   try {
+    if (["services", "runtime", "config"].includes(sub ?? "")) return await (await import("../lib/floka-services/install/entry.js"))
+      .maintenanceCommand(rest, { root: d.ctx.maintRoot, home: d.ctx.home, ledgerPath: d.ledgerPath, grant });
     if (sub === "status") return status(d);
     if (sub === "observe") return await observe(d, grant);
     if (sub === "mode") return await setMode(d, grant, a);

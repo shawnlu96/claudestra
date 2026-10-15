@@ -12,7 +12,10 @@ interface El {
 }
 const webRequire = createRequire(new URL('../web/package.json', import.meta.url));
 let React: ReactNS, createRoot: ReactDomClient['createRoot'], ProductView: unknown;
+// 已收尾小标签按本地时区出日期；同分片别的测试会改 TZ（跨文件共享），这里钉成 UTC，结束时显式赋回原值
+const savedTZ = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 beforeAll(() => {
+  process.env.TZ = 'UTC';
   GlobalRegistrator.register({ url: 'http://localhost/', width: 1280, height: 800 });
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   React = webRequire('react') as ReactNS;
@@ -20,6 +23,7 @@ beforeAll(() => {
   ({ ProductView } = require('../web/features/collab/product/product-view.tsx') as { ProductView: unknown });
 });
 afterAll(async () => {
+  process.env.TZ = savedTZ;
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   await GlobalRegistrator.unregister();
 });

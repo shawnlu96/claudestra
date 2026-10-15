@@ -5,7 +5,7 @@
  * boundary against a hostile B or another process of the same OS user. tests/pool-review-proof-ticket.test.ts.
  */
 import { createHash } from "node:crypto";
-import { verifyPurpose } from "./instance-signature.js";
+import { ledgerPurposeShape, receiveLedgerUse, type LedgerReceive } from "./floka-ledger/uses.js";
 
 export const REVIEW_TICKET_PURPOSE = "claudestra-lend-review-ticket-v1" as const;
 
@@ -18,8 +18,10 @@ export interface ReviewTicket {
   /** canonical sha256 of the result body without `ticket` (the signature never covers itself); the transport sha stays separate */
   payloadSha: string;
   take: TakeFact; key: string; sig: string;
+  /** rename-floka-LEDGER1: only floka-family tickets carry it (floka-lend-review-ticket-v1); absent = old family, bytes unchanged */
+  purpose?: string;
 }
-type Unsigned = Omit<ReviewTicket, "key" | "sig">;
+type Unsigned = Omit<ReviewTicket, "key" | "sig" | "purpose">;
 
 const canon = (v: unknown): string => Array.isArray(v) ? `[${v.map(canon).join(",")}]`
   : v && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`).join(",")}}`
@@ -34,14 +36,15 @@ export function logicalSha(body: Record<string, unknown>): string {
 const fields = (t: Unsigned): string[] => [t.orderId, String(t.gen), t.taskId, t.head, String(t.specRev), String(t.round), t.family, t.worker,
   t.session, t.payloadSha, t.take.orderId, String(t.take.gen), t.take.agent, t.take.session, String(t.take.at)];
 
-export type TicketSigner = (fields: string[]) => { key: string; sig: string } | null;
+/** The family is the signer's choice (floka-ledger/config.ts ledgerSigner); a purpose it returns is kept on the ticket. */
+export type TicketSigner = (fields: string[]) => { key: string; sig: string; purpose?: string } | null;
 
 /** B: null when the take fact does not match this binding (no take, other session / gen / agent) or there is no key: nothing is sent unsigned-as-signed. */
 export function issueReviewTicket(t: Unsigned, sign: TicketSigner): ReviewTicket | null {
   const k = t.take;
   if (k.orderId !== t.orderId || k.gen !== t.gen || k.agent !== t.worker || k.session !== t.session) return null;
   const s = sign(fields(t));
-  return s ? { ...t, key: s.key, sig: s.sig } : null;
+  return s ? { ...t, key: s.key, sig: s.sig, ...(s.purpose !== undefined ? { purpose: s.purpose } : {}) } : null;
 }
 
 const KEYS = ["v", "orderId", "gen", "taskId", "head", "specRev", "round", "family", "worker", "session", "payloadSha", "take", "key", "sig"];
@@ -51,9 +54,10 @@ const exact = (o: Record<string, unknown>, keys: string[]): boolean => Object.ke
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const whole = (v: unknown, max = 1e15): boolean => Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= max;
 
-/** Strict shape for lend-wire: every field present, nothing extra, identifiers single-line. null = malformed. */
+/** Strict shape for lend-wire: every field present, nothing extra, identifiers single-line; purpose only as this use's floka name. null = malformed. */
 export function parseReviewTicket(v: unknown): ReviewTicket | null {
-  if (!isObj(v) || !exact(v, KEYS) || v.v !== 1 || !isObj(v.take) || !exact(v.take, TAKE_KEYS)) return null;
+  if (!isObj(v) || !exact(v, "purpose" in v ? [...KEYS, "purpose"] : KEYS) || !ledgerPurposeShape("lend-review-ticket", v.purpose)) return null;
+  if (v.v !== 1 || !isObj(v.take) || !exact(v.take, TAKE_KEYS)) return null;
   const k = v.take;
   const ids = [v.orderId, v.taskId, v.family, v.worker, v.session, k.orderId, k.agent, k.session];
   if (!ids.every((x) => typeof x === "string" && ID.test(x))) return null;
@@ -68,10 +72,13 @@ export interface TicketExpect {
   session: string; payloadSha: string;
 }
 
-/** A (writer and proof): null = the ticket is signed by `publicKey` and names exactly this order, binding, body and take; else why not. */
-export function ticketProblem(t: ReviewTicket, want: TicketExpect, publicKey: string): string | null {
+/**
+ * A (writer and proof): null = the ticket is signed by `publicKey` and names exactly this order, binding, body and take; else why not.
+ * rx = rename.ledgerReceive (floka-ledger/config.ts ledgerReceive); not given = off, the old family only, exactly as before.
+ */
+export function ticketProblem(t: ReviewTicket, want: TicketExpect, publicKey: string, rx: LedgerReceive = {}): string | null {
   if (t.key !== publicKey) return "票据不是用钉住的对方钥匙签的";
-  if (!verifyPurpose(publicKey, REVIEW_TICKET_PURPOSE, fields(t), t.sig)) return "票据签名不对";
+  if (!receiveLedgerUse("lend-review-ticket", t, fields(t), rx, publicKey).ok) return "票据签名不对";
   for (const k of Object.keys(want) as (keyof TicketExpect)[]) if (t[k] !== want[k]) return `票据的 ${k} 与这一单不一致`;
   const take = t.take;
   if (take.orderId !== t.orderId || take.gen !== t.gen || take.agent !== t.worker || take.session !== t.session) return "票据的领单事实与提交绑定不一致";

@@ -4,7 +4,7 @@ import { watch, type FSWatcher } from "fs";
 import { stat } from "fs/promises";
 import type { Client } from "discord.js";
 import { TextChannel } from "discord.js";
-import { WATCHER_CONFIG, MCP_TOOL_PREFIX } from "./config.js";
+import { WATCHER_CONFIG, isOwnMcpTool } from "./config.js";
 import { discordReply } from "./discord-api.js";
 import { projectJsonlPath } from "../lib/jsonl-cost.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "../lib/session-source.js";
@@ -69,7 +69,7 @@ const HIDDEN_TOOLS = new Set([
 function isHiddenTool(name: string): boolean {
   if (HIDDEN_TOOLS.has(name)) return true;
   // 只隐藏 Discord 通信相关的 MCP 工具
-  if (name.startsWith(MCP_TOOL_PREFIX)) return true;
+  if (isOwnMcpTool(name)) return true; // 两套命名族（claudestra / floka）
   if (name.startsWith("mcp__plugin_discord_discord__")) return true;
   return false;
 }

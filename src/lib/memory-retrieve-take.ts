@@ -8,6 +8,9 @@ import type { VerifiedCall } from "./order-tool-route.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { reviewCallerOf, reviewSlotsFor, takeReview, type TakeReviewResult } from "./review-order.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
+import type { LedgerTask } from "./ledger-stages.js";
+import { liveBinding } from "./pm-handback.js";
+import { recordHandbackSample } from "./pm-handback-sample.js";
 
 /** 原始身份已由 bridge 验证；记下当前注册身份和凭据世代，等待中重启 / 换会话就拒绝旧领取。 */
 function callerStamp(agent: string): string {
@@ -27,9 +30,19 @@ function claimValid(db: Database, slots: readonly { task: { id: string }; auto?:
   return slots.every((s) => {
     // 手动卡审查员的正式权限是 reviewSlotsFor 按 currentReview 核过的；调度器审查绑定只约束自动卡（作者单无 auto，照旧）
     if (s.auto === false) return true;
-    const bound = getSchedulerSession(db, s.task.id, role);
+    const bound = liveBinding(getSchedulerSession(db, s.task.id, role)); // PMHAND1 9补: retired binds nobody, as in order-take.ts
     return !bound || (bound.state === "active" && bound.agent === who.agent && bound.sessionId === who.sessionId);
   });
+}
+
+/** PMHAND1 9补: an author order taken past a retired binding leaves one sample note per card + head (pm-handback-sample.ts). */
+function noteRetiredAuthors(db: Database, orders: readonly { task: LedgerTask }[], agent: string): void {
+  for (const { task } of orders) {
+    const bound = getSchedulerSession(db, task.id, "author");
+    if (bound?.state !== "retired") continue;
+    recordHandbackSample(db, { project: task.project, taskId: task.id, head: task.headSHA, type: "retired_binding",
+      text: `${agent} 领单：卡上作者绑定 ${bound.agent} 已退役，按无绑定放行`, data: { agent, retired: bound.agent } }, Date.now());
+  }
 }
 
 export async function takeOrderWithMemory(db: Database | null, call: VerifiedCall, deps: EnsureDeps = {}): Promise<ReturnType<typeof takeOrderResult>> {
@@ -37,6 +50,7 @@ export async function takeOrderWithMemory(db: Database | null, call: VerifiedCal
   const orders = currentOrders(db, call);
   if (!orders.length) return takeOrderResult(db, call);
   if (!claimValid(db, orders, "author", call)) return { ok: false, error: "当前会话没有有效领单绑定" };
+  noteRetiredAuthors(db, orders, call.agent);
   const before = claimStamp(db, orders, "author"), caller = callerStamp(call.agent);
   const first = orders[0]!;
   await ensureMemoryRetrieval(db, first.task, "write", first.task.headSHA, deps);

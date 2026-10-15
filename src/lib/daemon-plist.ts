@@ -15,9 +15,17 @@ export interface DaemonPlistInput {
   envPath: string;
   /** StandardOutPath / StandardErrorPath 所在目录 */
   logDir: string;
+  /** Explicit compatibility paths for a prepared migration; legacy rendering remains byte-identical. */
+  environment?: Record<string, string>;
+  escapeXml?: boolean;
 }
 
-export function renderDaemonPlist({ repoRoot, bunPath, daemon, home, envPath, logDir }: DaemonPlistInput): string {
+export function renderDaemonPlist({ repoRoot, bunPath, daemon, home, envPath, logDir, environment, escapeXml }: DaemonPlistInput): string {
+  const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+  if (escapeXml) {
+    repoRoot = xml(repoRoot); bunPath = xml(bunPath); home = xml(home); envPath = xml(envPath); logDir = xml(logDir);
+    daemon = { label: xml(daemon.label), stem: xml(daemon.stem), script: xml(daemon.script) };
+  }
   const argv = [bunPath, `${repoRoot}/${daemon.script}`];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -50,7 +58,7 @@ export function renderDaemonPlist({ repoRoot, bunPath, daemon, home, envPath, lo
     <string>en_US.UTF-8</string>
     <key>LC_ALL</key>
     <string>en_US.UTF-8</string>
-  </dict>
+${environment ? Object.entries(environment).map(([k, v]) => `    <key>${xml(k)}</key>\n    <string>${xml(v)}</string>\n`).join("") : ""}  </dict>
   <key>ProgramArguments</key>
   <array>
 ${argv.map((a) => `    <string>${a}</string>`).join("\n")}

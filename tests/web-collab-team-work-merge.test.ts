@@ -208,3 +208,20 @@ test("[回归] 团队已在合并、本机 /work 还停在审查等待：留在�
   expect(at(b, "T1")).toMatchObject({ who: "agent-t1", step: "review", reason: "等审查员领单", featureId: "fa", nodeKey: "T1" });
   expect(ids(b.waiting)).toContain("T2");
 });
+
+test("[验收线 2] UXCARD3：本机板判老卡的同卡号团队行（review、执行实例 = 本机）移出四栏、进团队板老卡，计数不含它；不是老卡的同卡照旧换本机行", async () => {
+  const { countBoardOf } = await import("@/features/collab/count-words");
+  const raw = teamA();
+  expect(ids(raw.working)).toContain("L2");
+  const local: WorkBoard = { ...localA, working: [row("L1")], legacy: [{ taskId: "L2", title: "L2 老卡", stage: "review" }], legacyTotal: 1 };
+  const b = mergeTeamWork(raw, local, LOCAL, NAMES);
+  for (const c of COLUMNS) expect(ids(b[c])).not.toContain("L2");
+  expect(b.legacy).toEqual([{ taskId: "L2", title: at(raw, "L2").title, stage: "review" }]);
+  expect(countBoardOf(b, true).working.map((r) => r.taskId)).not.toContain("L2");
+  expect(countBoardOf(b, true).working.length).toBe(countBoardOf(mergeTeamWork(raw, localA, LOCAL, NAMES), true).working.length - 1);
+  // 不是老卡的同卡（L1）照旧换成本机行
+  expect(isLocal(at(b, "L1"))).toBe(true);
+  // 执行实例不是本机的行不看本机老卡：同卡号也不动
+  const peer = mergeTeamWork(raw, { ...local, legacy: [{ taskId: "P1", title: "P1", stage: "fix" }] }, LOCAL, NAMES);
+  expect(ids(peer.working)).toContain("P1");
+});

@@ -23,6 +23,7 @@ import { cwdLinkFree, dirOf, errMsg, isLink, mayTouch, noLinks, procLine, termTh
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { RETIRE_STAGES } from "./scheduler-sessions.js";
 import { writeJsonAtomicSync } from "./state-file.js";
+import { fileActionSink, guardReap, systemGuardSources } from "./worktree-orphan-guard.js";
 
 export type { CardReapMode };
 /** observe 台账最多留这么多条（只为「同一进程只推一次」去重） */
@@ -76,7 +77,8 @@ function defaultCardProcs(host: CardReapHost): CardProcDeps | null {
   if (resolve(host.worktreeRoot) !== resolve(statePath("worktrees"))) return null;
   const agents = host.agents;
   const log = (m: string) => console.log(`[scheduler] ${m}`);
-  return { mode: cardReapModeReader(log), ports: systemProcPorts(), log, observed: fileObserveLedger(),
+  const g = guardReap(systemProcPorts(), systemGuardSources(), fileActionSink(), log); // RTO2-1：不碰带 tty / daemon，动作落台账
+  return { mode: cardReapModeReader(log), ports: g.ports, log, observed: g.observed(fileObserveLedger()),
     now: Date.now, active: agents ? async () => void (await agents()) : undefined }; // agents() 走 whileOwned：失租即抛
 }
 
