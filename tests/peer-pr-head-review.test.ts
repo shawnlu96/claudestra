@@ -135,7 +135,7 @@ async function firstRound(w: W, verdict: "pass" | "changes") {
 }
 const pm = (w: W) => ({ actor: "pm", now: w.f.tickDeps.now() });
 const rounds = (w: W) => w.notices.filter((n) => n.includes("复验轮次到顶"));
-const registrations = (w: W) => w.events().filter((e) => e.kind === "scheduler" && e.data.op === HEAD_REVIEW_OP);
+const registrations = (w: W) => w.events().filter((e) => e.kind === "note" && e.data.op === HEAD_REVIEW_OP);
 const reviewSeq = (w: W) => w.events().findLast((e) => e.kind === "review")!.seq;
 
 /** r1 pass → merge (auto) → the path hands the card back (manual) → PM queues it by hand: the state PR1593/1598/1602/1603 were in. */

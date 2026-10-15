@@ -15,7 +15,7 @@ import type { OpenPr } from "./peer-pr-github.js";
 import { headChecked, markHeadChecked } from "./peer-pr-hold.js";
 import { headStable } from "./peer-pr-intake.js";
 import { hasRoundVerdict, inFlightPeerCards, manualPeerCards, peerPrOf, pushDedupKey, type PeerPrMeta } from "./peer-pr-ledger.js";
-import { HEAD_REVIEW_KEY, headReviewMode, p1RoundsSpent, passingFacts, registrationOf } from "./peer-pr-head-review.js";
+import { HEAD_REVIEW_KEY, headReviewMode, p1RoundsSpent, passingFacts, registrationOf, requeueMode } from "./peer-pr-head-review.js";
 import { listRequests, revokeOf } from "./manual-merge-queue-facts.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { renderBouncePush, renderDriftPush } from "./peer-pr-message.js";
@@ -142,7 +142,8 @@ const topNotice = (c: PeerPrCtx, card: LedgerTask) => noticeOnce(c, card.id, `he
   `[peer PR] ${card.id} 作者新推后的复审连续 ${c.cfg.maxRounds} 轮仍有 P1，复验轮次到顶：卡留在人工，请 PM 接手`);
 
 /** peerPrRequeue observe: PM hears once per new head what the scheduler would have queued, as a command PM can run as is. */
-const requeueNotice = (c: PeerPrCtx, card: LedgerTask, w: Record<string, unknown>) => noticeOnce(c, card.id, `requeue:${String(w.head).slice(0, 12)}`,
+const requeueKey = (head: string): string => `requeue:${head.slice(0, 12)}`;
+const requeueNotice = (c: PeerPrCtx, card: LedgerTask, w: Record<string, unknown>) => noticeOnce(c, card.id, requeueKey(String(w.head)),
   `[peer PR] ${card.id} 作者新推后的增量复审已通过，peerPrRequeue 在 observe，调度器没代排。要排就跑：ledger manual-merge-request ${card.id} ` +
   `--head ${String(w.head)} --spec-rev ${String(w.specRev)} --round ${String(w.round)} --review-seq ${String(w.reviewSeq)} --reason "peer PR 作者新推后增量复审通过"`);
 
@@ -152,7 +153,10 @@ function settleDue(c: PeerPrCtx, card: LedgerTask): boolean {
   const reg = registrationOf(events, card.round, card.headSHA, "manual");
   if (!reg) return false;
   if (card.stage === "review") return currentReviewFacts(card, events).kind === "facts";
-  return card.stage === "merge" && !listRequests(c.db, card.project, card.id).some((r) => r.seq > reg.seq && !revokeOf(c.db, r));
+  if (card.stage !== "merge" || listRequests(c.db, card.project, card.id).some((r) => r.seq > reg.seq && !revokeOf(c.db, r))) return false;
+  // waiting in merge: on retries the requeue; observe only until PM has heard of it once; off has nothing to do
+  const mode = requeueMode(card.project);
+  return mode === "on" || (mode === "observe" && !getEventByDedup(c.db, pushDedupKey(card.id, requeueKey(card.headSHA ?? ""), "notice_sent")!));
 }
 
 /**

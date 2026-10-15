@@ -5,17 +5,15 @@
  *   rounds spends maxRounds; a pass that was re-reviewed only because of a new head costs nothing. Rounds still only go up.
  * - the registration event (op peer_pr_head_review, cause author_push) names oldHead / newHead / priorReviewSeq and whether the
  *   next review may look at the author's increment only; headReviewLines turns it into the review order's scope line.
- * - flowBlock: hold, card pause, frozen queue, unanswered ask, safety hold, paused feature stop every step of this flow.
+ * - flowBlock: hold, card pause, frozen queue, unanswered ask, safety hold stop every step of this flow (peer cards have no feature).
  * Switches: peerPrHeadReview (items 1–3, new key, default on) and peerPrRequeue (item 4, permission class, default observe).
  * docs/architecture/peer-pr-head-review.md; tests/peer-pr-head-review*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { cardPauseState } from "./card-pause.js";
-import { getFeature } from "./ledger-feature.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta } from "./ledger-store.js";
-import { insertEvent } from "./ledger-tx.js";
-import type { WriteCtx } from "./ledger-write.js";
+import { appendEvent, type WriteCtx } from "./ledger-write.js";
 import { standingHold } from "./pm-handback.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { downgradedIds, type ReviewFacts } from "./scheduler-review.js";
@@ -112,13 +110,14 @@ export function writeRegistration(db: Database, ctx: WriteCtx, task: Pick<Ledger
   const text = r.scope === "incremental"
     ? `作者推了新提交 ${r.newHead.slice(0, 12)}：第 ${r.round} 轮只审增量 ${r.oldHead.slice(0, 12)}..${r.newHead.slice(0, 12)}`
     : `作者推了新提交 ${r.newHead.slice(0, 12)}：第 ${r.round} 轮全量复审（${r.why}）`;
-  return insertEvent(db, { ...ctx, dedupKey: `peerpr:head:${task.id}:${r.round}:${r.newHead}` }, { project: task.project, target: task.id, kind: "scheduler", text,
-    data: { op: HEAD_REVIEW_OP, ...r, ...extra } }, true);
+  // a note (peers never see notes); dedup per card + round + head, so a replayed registration is the same event
+  return appendEvent(db, { actor: ctx.actor, now: ctx.now, dedupKey: `peerpr:head:${task.id}:${r.round}:${r.newHead}` }, { project: task.project, target: task.id,
+    kind: "note", text, data: { op: HEAD_REVIEW_OP, ...r, ...extra } }).event;
 }
 
 /** The registration that put `head` into `round`, if this flow put it there. */
 export function registrationOf(events: readonly LedgerEvent[], round: number, head: string | null, flow?: Registration["flow"]): (Registration & { seq: number }) | null {
-  const e = events.findLast((x) => x.kind === "scheduler" && x.data.op === HEAD_REVIEW_OP && x.data.round === round && x.data.newHead === head &&
+  const e = events.findLast((x) => x.kind === "note" && x.data.op === HEAD_REVIEW_OP && x.data.round === round && x.data.newHead === head &&
     (flow === undefined || x.data.flow === flow));
   return e ? { ...(e.data as unknown as Registration), seq: e.seq } : null;
 }
@@ -135,16 +134,14 @@ export function headReviewLines(round: number, events: readonly LedgerEvent[], h
   return [`第 ${round} 轮是作者推了新提交，但不能只审增量（${r.why}）：全量复审 head ${r.newHead.slice(0, 12)} 相对 main 的改动，并复验 ${prior} 的 P1 / P2。`];
 }
 
-/** Item 7: what stops every step of this flow (registration, settle, requeue); null = nothing does. */
-export function flowBlock(db: Database, task: Pick<LedgerTask, "id" | "project" | "featureId">, events: readonly LedgerEvent[]): string | null {
+/** Item 7: what stops every step of this flow (registration, settle, requeue); null = nothing does. The requeue also re-reads requestRefusal. */
+export function flowBlock(db: Database, task: Pick<LedgerTask, "id" | "project">, events: readonly LedgerEvent[]): string | null {
   if (getMeta(db, task.project).queueFrozen.frozen) return "项目合并队列已冻结";
   const hold = standingHold(events);
   if (hold) return `卡被明确留在人工（#${hold.seq}）`;
   if (cardPauseState(db, task.id)?.paused) return "卡已暂停";
   const safety = openSafetyHold(events);
   if (safety) return `安全留证 #${safety.seq} 未处置`;
-  const feature = task.featureId ? getFeature(db, task.featureId) : null;
-  if (feature?.status === "paused") return `feature ${feature.id} 已暂停`;
   const asks = db.query("SELECT id FROM asks WHERE taskId = ? AND state = 'open'").all(task.id) as { id: string }[];
   if (asks.length) return `审批未答：${asks.map((a) => a.id).join("、")}`;
   return null;

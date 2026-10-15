@@ -14,7 +14,6 @@ import { appendEvent, createTask, deliver, moveStage } from "./ledger-write.js";
 import { BRANCH } from "./order-deliver-pr.js";
 import { peerOfLogin, type PeerPrConfig } from "./peer-pr-config.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
-import { insertEvent } from "./ledger-tx.js";
 import { requeueByScheduler } from "./manual-merge-queue.js";
 import { intentOf, listRequests, revokeOf, REVOKE_OP } from "./manual-merge-queue-facts.js";
 import {
@@ -232,8 +231,8 @@ export function headWrite(db: Database, ctx: WriteCtx, input: { taskId: string; 
     const from = task, why = `peer PR 作者推了新提交 ${input.head.slice(0, 12)}，本流程结清旧请求重审（peerPrHeadReview）`;
     for (const s of standing) {
       if (s.run) cancelMergeRun(db, ctx, s.run, why, "作者推了新提交，未发出的人工合并作废");
-      insertEvent(db, ctx, { project: task.project, target: task.id, kind: "decision", text: why,
-        data: { op: REVOKE_OP, request: s.req.seq, intent: s.intent?.id ?? null, byScheduler: HEAD_REVIEW_KEY } }, false);
+      appendEvent(db, { actor: ctx.actor, now: ctx.now }, { project: task.project, target: task.id, kind: "decision", text: why,
+        data: { op: REVOKE_OP, request: s.req.seq, intent: s.intent?.id ?? null, byScheduler: HEAD_REVIEW_KEY } });
     }
     if (task.stage !== "fix") task = moveStage(db, ctx, { taskId: task.id, from: task.stage, to: "fix", asPm: true, text: "PR head 在审查结论之后变了：改审新 head" }).row;
     const r = deliver(db, { actor: `peer:${meta.peer}`, now: ctx.now }, {
