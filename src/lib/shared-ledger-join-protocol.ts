@@ -25,7 +25,8 @@ export const sharedLedgerInstanceId = (key: string) => `sli-${createHash("sha256
 export function sharedLedgerJoinFields(centerId: string, code: string, publicKey: string, instanceId: string): string[] {
   return ["JOIN", SHARED_LEDGER_JOIN_PATH, centerId, createHash("sha256").update(code).digest("hex"), publicKey, instanceId];
 }
-export interface SharedLedgerJoinRequest { code: string; publicKey: string; instanceId: string; signature: string }
+/** purpose: floka-family proofs only (rename-floka-LEDGER1); absent = the old family, bytes unchanged. Centers verify via floka-ledger/join.ts. */
+export interface SharedLedgerJoinRequest { code: string; publicKey: string; instanceId: string; signature: string; purpose?: string }
 
 export interface SharedLedgerJoinGrant {
   centerId: string; teamId: string; personId: string; instanceId: string; bearer: string; expiresAt: number;
