@@ -123,6 +123,25 @@ describe("start_node：非本地项目不变", () => {
   });
 });
 
+describe("本地默认说明的文字（PM 要求逐字钉住）", () => {
+  test("与非本地说明只差这三行，其余逐字相同", () => {
+    const V: PromptVars = { task: "T1", title: "标题", pm: "agent-pm", branch: "feat/t1", base: "main", worktree: "/wt/t1", spec: "/l/docs/tasks/T1.md", ledgerDir: "/l" };
+    const pr = renderExecPrompt(V).split("\n"), local = renderExecPrompt({ ...V, localMerge: true }).split("\n");
+    expect(local.length).toBe(pr.length);
+    const changed = local.map((l, i) => [pr[i], l]).filter(([a, b]) => a !== b);
+    expect(changed.map(([, b]) => b)).toEqual([
+      "- 不合并、不部署、不打 tag、不发 release；只 commit 到本卡分支，不 push、不开 PR。只在当前 worktree 改文件，不碰主树。",
+      "- 「开工 / 修复」单：做完在分支 feat/t1 上 commit，**不 push、不开 PR**（本项目没有 PR 流程），再用 deliver 工具（或 `ledger deliver T1 --from build|fix --head <完整 sha>`）交付，"
+        + "就结束这一轮。head 是本机分支 feat/t1 的完整 sha，deliver 按它核对。调度器会自己派审、转修复，合并由 PM 在本机完成。",
+    ]);
+    expect(changed.map(([a]) => a)).toEqual([
+      "- 不合并、不部署、不打 tag、不发 release；push 分支和开 PR 可以。只在当前 worktree 改文件，不碰主树。",
+      "- 「开工 / 修复」单：做完 push，**开好 PR（base main，已开过的不用重开）**，再用 deliver 工具（或 `ledger deliver T1 --from build|fix --head <完整 sha> --pr <完整 PR 链接>`）交付，"
+        + "就结束这一轮。PR 链接由 deliver 自动登记，没开 PR 会被拒。调度器会自己派审、转修复、排合并。",
+    ]);
+  });
+});
+
 describe("调度器自己的开卡 / 补建路径（复现 local-start-paths）", () => {
   const cfg = (local: boolean) => ({ enabled: true, autoDispatch: true, projects: { [P]: { maxActiveWorkers: 2, requiredChecks: ["cargo test"], repoDir: repo,
     ...(local ? { localMerge: true } : {}) } } });
@@ -132,6 +151,29 @@ describe("调度器自己的开卡 / 补建路径（复现 local-start-paths）"
     writeFileSync(projectsPath, JSON.stringify({ projects: [{ id: P, dirs: [repo] }] }));
     return { configPath, projectsPath };
   };
+
+  /** 补一条作者建会话意图，跑一次 ensureLocalAuthor；git 记调用、create 失败收住 */
+  async function ensureOnce(task: ReturnType<typeof getTask> & {}, opts: { configPath: string; projectsPath: string }) {
+    const seq = (db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number }).s;
+    db.query("DELETE FROM scheduler_intents WHERE id = 'i-author'").run();
+    db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, eventSeq, taskRev, specRev, head, templateVersion, status, reason, createdAt, updatedAt)
+      VALUES ('i-author', 'n7-a', ?, 'write', 'ensure_session', 1, ?, ?, ?, NULL, 3, 'submitted', 'author', 1, 1)`).run(P, seq + 1, task.rev, task.specRev);
+    rmSync(join(dir, "wt2"), { recursive: true, force: true });
+    const calls: string[][] = [];
+    const r = await ensureLocalAuthor({ db, worktreeRoot: join(dir, "wt2"), active: () => {}, registryRow: () => undefined,
+      git: async (args) => {
+        calls.push(args);
+        if (args.includes("rev-parse")) {
+          if (args.at(-1)?.startsWith("refs/heads/")) return { code: 1, out: "" };
+          if (args.at(-1) === "--absolute-git-dir") return { code: 0, out: join(dir, "wt2-git") };
+          return { code: 0, out: "1".repeat(40) };
+        }
+        if (args.includes("add")) mkdirSync(args.at(-2)!, { recursive: true });
+        return { code: 0, out: "" };
+      },
+      create: async () => ({ ok: false, error: "测试到此为止" }), ledger: async () => ({ ok: true }) }, task, opts);
+    return { r, calls };
+  }
 
   test("autostart 的 startEnv 按 scheduler.json 注入 localMerge", () => {
     const env = (local: boolean) => startIo({ db, ledger: async () => ({ ok: true }), active: () => {}, lease: undefined } as never,
@@ -156,25 +198,13 @@ describe("调度器自己的开卡 / 补建路径（复现 local-start-paths）"
     expect(typeof plain !== "string" && "localMerge" in plain).toBe(false);
 
     files(true);
-    const seq = (db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number }).s;
-    db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, eventSeq, taskRev, specRev, head, templateVersion, status, reason, createdAt, updatedAt)
-      VALUES ('i-author', 'n7-a', ?, 'write', 'ensure_session', 1, ?, ?, ?, NULL, 3, 'submitted', 'author', 1, 1)`).run(P, seq + 1, task.rev, task.specRev);
-    const calls: string[][] = [];
-    const r = await ensureLocalAuthor({ db, worktreeRoot: join(dir, "wt2"), active: () => {}, registryRow: () => undefined,
-      git: async (args) => {
-        calls.push(args);
-        if (args.includes("rev-parse")) {
-          if (args.at(-1)?.startsWith("refs/heads/")) return { code: 1, out: "" };
-          if (args.at(-1) === "--absolute-git-dir") return { code: 0, out: join(dir, "wt2-git") };
-          return { code: 0, out: "1".repeat(40) };
-        }
-        if (args.includes("add")) mkdirSync(args.at(-2)!, { recursive: true });
-        return { code: 0, out: "" };
-      },
-      create: async () => ({ ok: false, error: "测试到此为止" }), ledger: async () => ({ ok: true }) }, task, opts);
+    const { r, calls } = await ensureOnce(task, opts);
     expect(r.kind).not.toBe("ok");
     expect(calls.some((a) => a.includes("fetch"))).toBe(false);
     expect(calls.find((a) => a.includes("rev-parse") && a.at(-1)?.endsWith("^{commit}"))?.at(-1)).toBe("main^{commit}");
     expect(calls.some((a) => a.includes("worktree") && a.includes("add"))).toBe(true);
+    const plainRun = await ensureOnce(task, files(false)); // 非本地项目：照旧先 fetch origin、从 origin/main 起
+    expect(plainRun.calls.some((a) => a.includes("fetch") && a.includes("origin"))).toBe(true);
+    expect(plainRun.calls.find((a) => a.includes("rev-parse") && a.at(-1)?.endsWith("^{commit}"))?.at(-1)).toBe("origin/main^{commit}");
   });
 });
