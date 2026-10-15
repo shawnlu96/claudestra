@@ -167,9 +167,9 @@ describe("字段来源 [验收线 5]", () => {
     expect(c.taskId).toBe("T-A");
   });
 
-  test("团队行没有 since / normalMinutes：都为 null，不编", () => {
+  test("团队行 since 退回节点", () => {
     const c = subdagFocus(f, { kind: "team", board: teamWorkBoard({ working: [teamRow("A", { who: "m-3", machine: "Bo" })] }) }, NOW).active[0]!;
-    expect([c.who, c.machine, c.since, c.normalMinutes, c.overMinutes, c.family]).toEqual(["m-3", "Bo", null, null, null, null]);
+    expect([c.who, c.machine, c.since, c.normalMinutes, c.overMinutes, c.family]).toEqual(["m-3", "Bo", 4000, null, null, null]);
   });
 });
 

@@ -119,7 +119,7 @@ describe("登记：白名单目标、明确参数、权限", () => {
   });
 });
 
-test("autostart-set 的两个独立开关：--auto-mode / --p2-backlog 各改各的，缺省 observe，别的字段不动", async () => {
+test("autostart-set 的两个独立开关：--auto-mode / --p2-backlog 各改各的，p2Backlog 缺省 on，别的字段不动", async () => {
   const spec = AUTOSTART_CMDS["autostart-set"]!;
   const set = async (...args: string[]) => {
     const p = parseLedgerArgs(["autostart-set", "on", "--project", "a", "--reason", "测", ...args], spec.valued, spec.bools);
@@ -127,9 +127,9 @@ test("autostart-set 的两个独立开关：--auto-mode / --p2-backlog 各改各
     const deps: LedgerDeps = { db, actor: PM, projectIds: ["a"], now: () => clock, loadRegistry: async () => ({ socket: "s", agents: {} }) as Registry, saveRegistry: async () => {} };
     try { return await spec.run(new LedgerCli(deps, p)) as Record<string, any>; } catch (e) { return { ok: false, error: (e as Error).message }; }
   };
-  expect([autoMode(db, "a"), p2BacklogMode(db, "a")]).toEqual(["observe", "observe"]);
+  expect([autoMode(db, "a"), p2BacklogMode(db, "a")]).toEqual(["observe", "on"]);
   expect((await set("--auto-mode", "on", "--spec-wait", "off")).autostart).toMatchObject({ autoMode: "on", specWait: "off" });
-  expect([autoMode(db, "a"), p2BacklogMode(db, "a")]).toEqual(["on", "observe"]);
+  expect([autoMode(db, "a"), p2BacklogMode(db, "a")]).toEqual(["on", "on"]);
   expect((await set("--p2-backlog", "off")).autostart).toMatchObject({ autoMode: "on", p2BacklogMode: "off", specWait: "off" });
   for (const flag of ["--auto-mode", "--p2-backlog"]) expect((await set(flag, "yes")).error).toContain(`${flag} 只能是 on / observe / off`);
 });

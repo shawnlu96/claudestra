@@ -94,7 +94,7 @@ export function attentionOf(snap: CountSnap, lines: readonly Pick<LineView, "id"
 export type CountState = { status: "loading" } | { status: "none" } | { status: "ready"; snap: CountSnap; missing: number };
 export const snapOf = (c: CountState | null | undefined): CountSnap | null => (c?.status === "ready" ? c.snap : null);
 
-interface TeamLast { list: { features: readonly { id: string }[] }; details: ReadonlyMap<string, unknown>; failed?: ReadonlySet<string>; waiting?: ReadonlySet<string> }
+interface TeamLast { list: { features: readonly { id: string }[] }; details: ReadonlyMap<string, unknown> }
 const teamLast = (source: object): TeamLast | null | undefined =>
   "last" in source && typeof source.last === "function" ? (source.last as () => TeamLast | null)() : undefined;
 /** 团队源列表里还没拉到详情的 feature 数；不是团队源（没有 last，team-source-shared.ts SharedSource 才有）= 0，列表还没读到 = null */
@@ -105,16 +105,11 @@ export function missingFeatures(source: object): number | null {
 }
 
 /**
- * 计数还要等的 feature 数（TEAMCNT1）：没详情、也不在本轮 failed 里（读失败 / 429 停发）的。
- * 试过没拉到的不挡放行（缺的仍计进 missingFeatures 出提示）；还在排队（waiting）的照旧要等。非团队源 = 0，列表还没读到 = null
+ * 计数还要等的 feature 数（CNTGATE1）：列表里每个没拿到详情的都要等，和 missingFeatures 同一个数。
+ * last().failed / waiting 只留作读取诊断，不豁免：429 停发时没发过请求的 feature 也会进 failed，豁免它会让「还缺 N 个」和计数同时出现。
+ * 等不到的由 20 秒兜底（use-count-source.ts LATE_MS）出暂计数。非团队源 = 0，列表还没读到 = null
  */
-export function unreadFeatures(source: object): number | null {
-  const got = teamLast(source);
-  if (got === undefined) return 0;
-  if (!got) return null;
-  const tried = (id: string) => !!got.failed?.has(id) && !got.waiting?.has(id);
-  return got.list.features.filter((f) => !got.details.has(f.id) && !tried(f.id)).length;
-}
+export const unreadFeatures = missingFeatures;
 
 export interface QuotaFamilyPct { family: string; pct: number }
 const FAMILY_NAME: Record<string, string> = { claude: "Claude", codex: "Codex" };

@@ -180,7 +180,7 @@ browserTest("actual N4 source renders binding and invitation approval without cl
     await page.getByText("synthetic-transport", { exact: true }).click();
     await page.getByRole("button", { name: "邀请成员", exact: true }).click();
     await page.getByText("邀请确认卡已生成，请由本人核对后发送。", { exact: true }).waitFor();
-    await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))"); // The inbox store re-reads; the dialog itself never polls.
+    await page.clock.fastForward(1_100); await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))"); // frozen clock: step past asks-store's 1s wake dedupe so the inbox re-reads
     await page.getByText("有 1 张团队项目确认待你处理", { exact: true }).waitFor(); await page.getByRole("button", { name: "去处理", exact: true }).click();
     const drawer = page.getByRole("dialog", { name: "待你处理" }); await drawer.getByText("团队项目确认 · 1").waitFor();
     await drawer.getByText("邀请加入团队项目 合成项目 B", { exact: true }).waitFor();

@@ -38,7 +38,9 @@ export function CodexDefaultsSection() {
   const models = d?.models ?? [];
   const model = d?.model ?? "";
   const effort = d?.effort ?? "";
-  // 档位选项跟着「实际会用的模型」走：没设模型时就是 Codex 的默认模型
+  // 档位选项跟着「实际会用的模型」走：没设模型时就是 Codex 的默认模型。
+  // 读不到目录时 models 为空，下拉只剩「Codex 默认」和当前值，提示文字要和这一致（说「只能清空」）。
+  // bridge 这时其实认 Codex 档位全集，但接口不下发那份清单，网页给不出别的可选值
   const shown = models.find((m) => m.id === (model || d?.codexDefault.model));
   const efforts = shown?.efforts.length ? shown.efforts : effort ? [effort] : [];
   const defaultLabel = (v: string | null | undefined) => (v ? `${t("Codex 默认")}（${v}）` : t("Codex 默认"));
@@ -83,7 +85,7 @@ export function CodexDefaultsSection() {
           </select>
         </label>
       </div>
-      {d && !d.catalogOk && <div className="mt-2 text-xs text-warning">{t("读不到 Codex 模型目录（codex 没装或出错），暂时只能改推理档。")}</div>}
+      {d && !d.catalogOk && <div className="mt-2 text-xs text-warning">{t("读不到 Codex 模型目录（codex 没装或出错），暂时只能清空推理档（改回 Codex 默认）。")}</div>}
       {msg && <div className="mt-2 text-xs text-base-content/60">{t(msg)}</div>}
     </Section>
   );

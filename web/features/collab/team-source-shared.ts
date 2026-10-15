@@ -19,6 +19,7 @@ import { reduceAction, type ActionMap } from "./collab-action";
 import type { TaskDetail } from "./collab-detail-model";
 import { sharedIdentity } from "./team-source-key";
 import { teamBodyReader } from "./team-body/team-body-source";
+import { teamTaskFacts } from "./team-source-task-facts";
 import type { CollabHomeOnly, CollabSource, CollabUnavailable, FollowOpts } from "./team-source";
 
 export const POLL_MS = 15_000;
@@ -45,6 +46,7 @@ export interface SharedSourceOpts {
   now?: () => number;
   /** 中心正文读口（测试注入）；缺省走本机 bridge 的 /shared-ledger/team-body/ 代理 */
   body?: TeamBodyTransport;
+  facts?: Parameters<typeof teamTaskFacts>[2];
 }
 
 /** 团队键对不上本机 registry / asks / last-seen / 谁在干活 / 成员卡：这些本机接口一律不调，界面显示「暂无」或隐藏 */
@@ -358,10 +360,11 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
   const localInstance = sharedIdentity(project)?.homeInstanceId ?? null;
   const pokes = new Set<() => void>();
   const poke = () => { for (const p of pokes) p(); };
+  const facts = teamTaskFacts(session, poke, opts.facts);
   const ledgerEvent = (): BridgeEvent => ({ seq: 0, ts: new Date().toISOString(), agent: "", chatId: "", type: "ledger", data: { project } });
   const board = async () => {
     const got = await current();
-    return teamDagBoard(project, got.list, got.details, got.team);
+    return teamDagBoard(project, got.list, got.details, got.team, facts.board(got.list));
   };
   return {
     label,
@@ -378,7 +381,7 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
     last: () => r.st.last,
     poke,
     // 点进一个还没详情的 feature：立刻重拉一轮（它排最前），不等台账下一次变化
-    focus: (id) => { if (id === r.st.open) return; r.st.open = id; if (id && !r.cache.has(id)) poke(); },
+    focus: (id) => { facts.open(id); if (id === r.st.open) return; r.st.open = id; if (id && !r.cache.has(id)) poke(); },
     overview: async (signal) => ({ ...(await abortable(read(), signal)).team.ov, unknownMetrics: UNKNOWN_METRICS }),
     task: async (id, signal) => {
       const got = await abortable(current(), signal);

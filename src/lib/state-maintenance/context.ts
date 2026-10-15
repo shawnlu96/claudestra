@@ -6,7 +6,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { NEW_ROOT_NAME } from "../floka-migration/state/layout.js";
-import { stateDir } from "../state-dir.js";
+import { stateDirIn } from "../state-dir.js";
+import { readRenamedEnv } from "../floka-env/read.js";
 import { maintenanceRoot, prepareMaintenanceRoot, rootProblems, type MaintPaths } from "./paths.js";
 
 export interface MaintContext { home: string; oldRoot: string; newRoot: string; maintRoot: string }
@@ -14,7 +15,7 @@ export interface MaintContext { home: string; oldRoot: string; newRoot: string; 
 /** home 不给 = 本进程的真实 home;维护根此时走 maintenanceRoot() 的测试闸 */
 export function productionContext(home?: string): MaintContext {
   const h = home ?? homedir();
-  return { home: h, oldRoot: stateDir(), newRoot: join(h, NEW_ROOT_NAME), maintRoot: home ? maintenanceRoot(home) : maintenanceRoot() };
+  return { home: h, oldRoot: readRenamedEnv("STATE_DIR")?.trim() || stateDirIn(h), newRoot: join(h, NEW_ROOT_NAME), maintRoot: home ? maintenanceRoot(home) : maintenanceRoot() };
 }
 
 /** 维护根的问题(不建任何目录);状态按钮只读展示时用 */
