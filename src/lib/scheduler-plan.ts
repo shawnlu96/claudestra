@@ -24,6 +24,7 @@ import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
+import { privateRepoMergeAdmits } from "./private-merge-gate.js";
 import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
 import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
 import { centerReviewed } from "./scheduler-center-facts.js";
@@ -338,7 +339,8 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (node.gate === "ci_and_review") {
     const inFlight = liveIntent(s, node, "merge");
     if (inFlight) return inFlight;
-    const foreign = foreignRepoEscalation(s); if (foreign) return foreign; // i28-SECPOOL4: another repository's card goes to PM (scheduler-foreign-repo.ts)
+    // i28-SECPOOL4: another repository's card goes to PM; MERGEAUTO1: a private one checked out here merges (private-merge-gate.ts)
+    const foreign = foreignRepoEscalation(s); if (foreign && !privateRepoMergeAdmits(s)) return foreign;
     const since = latestSeq(s.events, s.task);
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");

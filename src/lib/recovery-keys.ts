@@ -79,6 +79,7 @@ export const RECOVERY_KEYS = [
   "pmTodoPull",
   "poolIdleSkip",
   "privateMergeNarrow",
+  "privateRepoMerge",
   "privateStartPlacement",
   "reclaimLocalFix",
   "reviewLocalFirst",
