@@ -23,25 +23,28 @@ export interface SampleInput<T> {
   opts: Pick<SortOptions<T>, "queue">;
   now?: number;
   claim?: { legacy: T | null; would: T | null; blocked: Blocked[] };
+  /** A list shared by several entries: each candidate's own entry; the sample is labelled with the entries present. */
+  entryOf?: (r: Ranked<T>) => PrioritySortEntry;
   contest?: string;
   /** The ledger file the candidates were read from; a pass flushes only its own ledger's samples. */
   ledger?: string;
 }
 
-const idOf = <T>(r: Ranked<T>): string => r.key.taskId ?? `#${r.index}`;
+const idOf = <T>(r: Ranked<T>): string =>
+  r.key.taskId ?? (r.key.featureId ? `${r.key.featureId}${r.key.nodeKey ? `/${r.key.nodeKey}` : ""}` : `#${r.index}`);
 
 /** What the sample says for one project: its candidates in old and new order, and why each sits where it does. */
 function sampleData<T>(entry: PrioritySortEntry, project: string, input: SampleInput<T>) {
   const mine = (r: Ranked<T>) => r.key.project === project;
-  const own = input.ranked.filter(mine), pick = (x: T | null | undefined) => {
+  const own = input.ranked.filter(mine), of = input.entryOf, pick = (x: T | null | undefined) => {
     const r = x == null ? undefined : input.ranked.find((y) => y.item === x);
     return r && mine(r) ? idOf(r) : null;
   };
   const legacy = own.map(idOf), would = input.would.filter(mine).map(idOf);
   return {
-    op: PRIORITY_SORT_OP, mechanism: "prioritySort", entry, mode: own[0]?.mode ?? "off", queue: input.opts.queue ?? "project",
+    op: PRIORITY_SORT_OP, mechanism: "prioritySort", entry: of ? [...new Set(own.map(of))].sort().join("+") : entry, mode: own[0]?.mode ?? "off", queue: input.opts.queue ?? "project",
     candidates: own.map((r) => ({ id: idOf(r), band: r.rank?.band ?? null, source: r.rank?.source ?? null, rev: r.rank?.rev ?? 0,
-      order: r.rank?.order ?? null, pinned: r.pinned })),
+      order: r.rank?.order ?? null, pinned: r.pinned, ...(of ? { entry: of(r) } : {}) })),
     legacy, would, changed: would.some((id, i) => id !== legacy[i]),
     ...(input.claim ? { claim: { legacy: pick(input.claim.legacy), would: pick(input.claim.would),
       blocked: input.claim.blocked.filter((b) => b.project === project).map((b) => ({ id: b.taskId, band: b.band, why: b.why })) } } : {}),
@@ -84,7 +87,7 @@ export function recordPrioritySort<T>(entry: PrioritySortEntry, input: SampleInp
   const projects = [...new Set(input.ranked.filter((r) => r.mode !== "off").map((r) => r.key.project))];
   let queued = 0;
   for (const project of projects) {
-    const full = sampleData(entry, project, input), cover = JSON.stringify([project, entry]);
+    const full = sampleData(entry, project, input), cover = JSON.stringify([project, full.entry]);
     if (!telling(full, !covered.has(cover))) continue;
     const dedupKey = `priority-sort:${createHash("sha256").update(JSON.stringify([project, full])).digest("hex").slice(0, 40)}`;
     if (handed.has(dedupKey) || pending.has(dedupKey)) continue;

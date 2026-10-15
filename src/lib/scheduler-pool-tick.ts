@@ -44,7 +44,7 @@ export async function drivePool(deps: PoolTickDeps, task: LedgerTask, intent: Sc
   const mode = (deps.recoveryPolicy ?? recoveryPolicy)(task.project, "poolIdleSkip").mode;
   const idle = mode === "off" ? null : poolIdleCandidate(db, task.id, intent.id);
   if (idle && mode === "on") return { step: idle.step, detail: idle.detail };
-  const reread = claimSlot(db, r.mode === "off" ? "local_slot" : "lend_slot", task); if (reread) return reread; // PRIO2 定 3
+  const reread = claimSlot(db, r.mode === "off" ? "local_slot" : "lend_slot", task, { policy: { maxWorkers, remote } }); if (reread) return reread; // PRIO2 定 3
   const res = await deps.manager("ledger", "scheduler-pool", intent.id, "--max-workers", String(r.agents ? Math.min(32, maxWorkers) : maxWorkers), "--mode", r.mode,
     "--roles", r.roles.length ? r.roles.join(",") : "none", "--timeout-min", String(r.poolTimeoutMin),
     // The offer re-plans from these flags: a dropped reviewFirst / localPriority would pick another machine and cancel the intent.

@@ -79,16 +79,25 @@ describe("auto tick: author and review cards compete in one list", () => {
     expect(await order()).toEqual(["T2", "R2", "T3", "R1", "T1"]);
   });
 
-  test("observe：实际次序与旧实现一致；author 与 review 各有样本，经调度身份 CLI 落库，重复 tick 不刷", async () => {
+  test("observe：实际次序与旧实现一致；author 与 review 同一份样本，经调度身份 CLI 落库，重复 tick 不刷", async () => {
     expect(await order()).toEqual(["R1", "R2", "T1", "T2", "T3"]);
-    const queued = pendingPrioritySamples().map((s) => s.data.entry).sort();
-    expect(queued).toEqual(["author", "review"]);
-    const review = pendingPrioritySamples().find((s) => s.data.entry === "review")!;
-    expect([review.data.legacy, review.data.would]).toEqual([["R1", "R2"], ["R2", "R1"]]);
-    expect(await flushPrioritySamples((...a) => f.cli("scheduler", ...a.slice(1)))).toBe(2);
-    expect(sampleEvents(f.db, "p").map((e) => e.data.entry).sort()).toEqual(["author", "review"]);
+    const queued = pendingPrioritySamples();
+    expect(queued.map((s) => s.data.entry)).toEqual(["author+review"]);
+    expect([queued[0]!.data.legacy, queued[0]!.data.would]).toEqual([["R1", "R2", "T1", "T2", "T3"], ["R2", "T2", "T3", "R1", "T1"]]);
+    expect(await flushPrioritySamples((...a) => f.cli("scheduler", ...a.slice(1)))).toBe(1);
+    expect(sampleEvents(f.db, "p").map((e) => e.data.entry)).toEqual(["author+review"]);
     expect(await order()).toEqual(["R1", "R2", "T1", "T2", "T3"]);
     expect(pendingPrioritySamples()).toEqual([]);
+  });
+
+  test("复现 observe-cross-entry-1：各一张 author / review 跨组翻转也有样本，记共享列表完整新旧次序并标注两种覆盖", async () => {
+    f.db.query("DELETE FROM task_workflows WHERE taskId IN ('R2', 'T2', 'T3')").run();
+    band(f.db, "p", task("T1"), "now");
+    expect(await order()).toEqual(["R1", "T1"]);
+    const s = pendingPrioritySamples();
+    expect(s.map((x) => x.data.entry)).toEqual(["author+review"]);
+    expect([s[0]!.data.legacy, s[0]!.data.would]).toEqual([["R1", "T1"], ["T1", "R1"]]);
+    expect(s[0]!.data.candidates.map((c) => [c.id, c.entry])).toEqual([["R1", "review"], ["T1", "author"]]);
   });
 
   test("预算补偿：off 把欠的 later 卡提到队首；on 只在同档内提前，单卡名额也不越过 now", async () => {
@@ -113,12 +122,13 @@ describe("drivePool：认领前重读档位", () => {
   });
   afterEach(() => f.close());
 
-  async function claimAfterSwap(m: PriorityMode) {
+  async function claimAfterSwap(m: PriorityMode, after?: () => void) {
     mode(f.db, "p", m);
     band(f.db, "p", task("T1"), "now"); band(f.db, "p", task("T2"), "later");
     await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, { ...f.tickDeps,
       prepareAuthor: async () => ({ deferred: true, reason: "只排序" }) as never });
     band(f.db, "p", task("T1"), "later"); band(f.db, "p", task("T2"), "now"); // the owner swaps the bands after the sort
+    after?.();
     const calls: string[][] = [];
     const t1 = f.task();
     const r = await drivePool({ db: f.db, manager: async (...a) => { calls.push(a); return { ok: true, outcome: "queued", text: "挂池" }; },
@@ -133,6 +143,14 @@ describe("drivePool：认领前重读档位", () => {
     expect(pooled).toBe(false);
   });
 
+  test("复现 claim-eligibility-1：排在后面的高档卡已不合法（done / 被挡），本卡照常认领并记卡点", async () => {
+    const { r, pooled } = await claimAfterSwap("on", () => f.db.query("UPDATE tasks SET stage = 'done' WHERE id = 'T2'").run());
+    expect(r.step).not.toBe("held");
+    expect(pooled).toBe(true);
+    expect(pendingPrioritySamples().find((s) => s.data.entry === "local_slot")!.data.claim)
+      .toMatchObject({ legacy: "T1", would: "T1", blocked: [{ id: "T2", band: "now", why: expect.stringContaining("done") }] });
+  });
+
   test("observe：照旧认领，只记「本会让出」；off：不重读", async () => {
     const o = await claimAfterSwap("observe");
     expect(o.pooled).toBe(true);
@@ -145,7 +163,7 @@ describe("drivePool：认领前重读档位", () => {
 });
 
 describe("autostart：开卡候选按 feature 档位", () => {
-  async function firstClaim(m: PriorityMode | null): Promise<string | null> {
+  async function firstClaim(m: PriorityMode | null, nodes: Record<string, PriorityBand> = {}): Promise<string | null> {
     const f = autoFixture(), { db, dir } = f, project = "p", now = Date.now();
     try {
       db.prepare("UPDATE ledger_instance SET value = 'ab12' WHERE key = 'origin'").run();
@@ -156,6 +174,7 @@ describe("autostart：开卡候选按 feature 档位", () => {
       }
       band(db, project, { kind: "feature", id: "ab12-a" }, "later");
       band(db, project, { kind: "feature", id: "ab12-c" }, "now");
+      for (const [slug, b] of Object.entries(nodes)) band(db, project, { kind: "node", id: `ab12-${slug}`, nodeKey: "x" }, b);
       if (m) mode(db, project, m);
       const calls: string[][] = [];
       const env: StartTickEnv = {
@@ -177,7 +196,14 @@ describe("autostart：开卡候选按 feature 档位", () => {
     expect(await firstClaim("off")).toBe("ab12-a");
     expect(await firstClaim("on")).toBe("ab12-c");
     expect(await firstClaim("observe")).toBe("ab12-a");
-    expect(pendingPrioritySamples().find((s) => s.data.entry === "autostart")!.data.would).toEqual(["#2", "#1", "#0"]);
+    expect(pendingPrioritySamples().find((s) => s.data.entry === "autostart")!.data.would).toEqual(["ab12-c/x", "ab12-b/x", "ab12-a/x"]);
+  });
+
+  test("复现 autostart-node-rank-1：节点显式档位覆盖 feature 档位，按可开工节点的有效优先级竞争", async () => {
+    const nodes = { a: "now", c: "later" } as const;
+    expect(await firstClaim("off", nodes)).toBe("ab12-a");
+    expect(await firstClaim("on", nodes)).toBe("ab12-a");
+    expect(await firstClaim("on", { c: "next" })).toBe("ab12-b"); // c/x next, b/x next by default: the old feature order decides
   });
 });
 

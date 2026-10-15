@@ -11,19 +11,28 @@ import type { Database } from "bun:sqlite";
 import { readPriority, readPriorityModes } from "./ledger-priority-read.js";
 import { PRIORITY_BANDS, type PriorityBand, type PriorityMode } from "./ledger-priority-types.js";
 import { getTask } from "./ledger-store.js";
+import { TERMINAL_STAGES } from "./ledger-stages.js";
+import type { RemotePolicy } from "./scheduler-config.js";
+import { autoSnapshot } from "./scheduler-auto-snapshot.js";
+import { planScheduler } from "./scheduler-plan.js";
 import { recordPrioritySort, type SampleInput } from "./scheduler-priority-order-record.js";
 
 /** The competing entries; each records under its own name so PM can check that all of them are covered. */
 export type PrioritySortEntry = "author" | "review" | "local_slot" | "lend_slot" | "autostart" | "manual_merge" | "merge_contest"
   | "train_boarding";
-/** One list can hold several entries (the auto tick's cards: author steps and review dispatches); samples are kept per entry. */
+/**
+ * One list can hold several entries (the auto tick's cards: author steps and review dispatches) competing for the same slots: the
+ * sample keeps the whole list (old and new order across entries), labels it with the entries present ("author+review") and marks
+ * each candidate's own entry.
+ */
 type EntryOf<T> = PrioritySortEntry | ((item: T) => PrioritySortEntry);
 
 /**
- * What the module needs to know about one candidate. taskId null = no work identity: the feature's band when `featureId` is given
- * (an autostart node whose card is not opened yet), else the system default `next`, never registered.
+ * What the module needs to know about one candidate. taskId null = no work identity: the node's own band (else its feature's) when
+ * `featureId` and `nodeKey` are given (an autostart node whose card is not opened yet), the feature's band with `featureId` alone,
+ * else the system default `next`, never registered.
  */
-export interface PriorityKey { project: string; taskId: string | null; featureId?: string }
+export interface PriorityKey { project: string; taskId: string | null; featureId?: string; nodeKey?: string }
 
 /** A band as read right now. `order` is the owner's explicit place inside the band (null = not listed). */
 interface PriorityRank { band: PriorityBand; source: string; rev: number; order: number | null }
@@ -31,7 +40,7 @@ interface PriorityRank { band: PriorityBand; source: string; rev: number; order:
 /** Reads stay injectable for tests; the default reads the ledger fresh on every call (no snapshot outlives one sort). */
 export interface PriorityReader {
   mode(project: string): PriorityMode;
-  rank(project: string, taskId: string | null, queue: string, featureId?: string): PriorityRank;
+  rank(project: string, taskId: string | null, queue: string, featureId?: string, nodeKey?: string): PriorityRank;
 }
 
 const SYSTEM: PriorityRank = { band: "next", source: "system", rev: 0, order: null };
@@ -44,10 +53,11 @@ function ledgerPriorityReader(db: Database): PriorityReader {
         return m?.mode === "on" || m?.mode === "off" ? m.mode : "observe";
       } catch { return "off"; } // an unreadable switch is no switch: the old order runs
     },
-    rank(project, taskId, queue, featureId) {
+    rank(project, taskId, queue, featureId, nodeKey) {
       if (!taskId && !featureId) return SYSTEM;
       try {
-        const v = readPriority(db, project, taskId ? { kind: "task", id: taskId } : { kind: "feature", id: featureId! }, queue);
+        const v = readPriority(db, project, taskId ? { kind: "task", id: taskId }
+          : nodeKey ? { kind: "node", id: featureId!, nodeKey } : { kind: "feature", id: featureId! }, queue);
         return { band: v.effective, source: v.source, rev: v.rev, order: v.order };
       } catch { return { ...SYSTEM, source: "unreadable" }; } // unknown card: system default, never a promotion
     },
@@ -115,7 +125,7 @@ function rankCandidates<T>(reader: PriorityReader, items: readonly T[], keyOf: (
     if (!modes.has(key.project)) modes.set(key.project, reader.mode(key.project));
     const mode = modes.get(key.project)!;
     return { item, key, index, mode, pinned: opts.pinned?.(item) ?? false,
-      rank: mode === "off" ? null : reader.rank(key.project, key.taskId, queue, key.featureId) };
+      rank: mode === "off" ? null : reader.rank(key.project, key.taskId, queue, key.featureId, key.nodeKey) };
   });
 }
 
@@ -133,15 +143,10 @@ export function sortByPriority<T>(db: Database | null, entry: EntryOf<T>, items:
   const on = refill(ranked, movable((m) => m === "on")), would = refill(ranked, movable((m) => m !== "off"));
   const result = finish(legacy, on.map((r) => r.item), would.map((r) => r.item), ranked);
   if (opts.record !== false) {
-    recordByEntry(entry, ranked, (part) => ({ ranked: part, would: would.filter((r) => part.includes(r)), opts, now: opts.now, ledger: db?.filename }));
+    const input: SampleInput<T> = { ranked, would, opts, now: opts.now, ledger: db?.filename };
+    recordPrioritySort(typeof entry === "string" ? entry : "author", typeof entry === "string" ? input : { ...input, entryOf: (r) => entry(r.item) });
   }
   return result;
-}
-
-function recordByEntry<T>(entry: EntryOf<T>, ranked: Ranked<T>[], input: (part: Ranked<T>[]) => SampleInput<T>): void {
-  if (typeof entry === "string") { recordPrioritySort(entry, input(ranked)); return; }
-  const live = ranked.filter((r) => r.mode !== "off"), of = new Map(live.map((r) => [r, entry(r.item)]));
-  for (const e of new Set(of.values())) recordPrioritySort(e, input(live.filter((r) => of.get(r) === e)));
 }
 
 function passThrough<T>(legacy: T[], ranked: Ranked<T>[] = []): SortResult<T> {
@@ -254,25 +259,69 @@ export function slotOrder<T extends { project: string; taskId: string }>(db: Dat
   return r;
 }
 
+/** What the claiming card's own snapshot used: the competitors' planner runs under the same seat policy. */
+export interface SlotPolicy { maxWorkers: number; remote?: RemotePolicy }
+
+/**
+ * A card behind still competing for the seat, judged from the ledger as it is now: gone, finished, blocked, already holding an order
+ * in flight, or held by its own gates (deps, locks, capacity, permission, review gate — the planner's wait / escalate) → the
+ * hold-up text; otherwise null (it would plan work and take the seat). An unreadable card never makes another card yield.
+ */
+function slotGate(db: Database | null, project: string, self: string, policy: SlotPolicy | undefined, now?: number): (id: string) => string | null {
+  return (id) => {
+    if (id === self) return null; // the claiming card passed its own gates to reach the claim
+    if (!db) return "读不到台账";
+    try {
+      const t = getTask(db, id);
+      if (!t || t.project !== project) return "卡已不在本项目";
+      if (TERMINAL_STAGES.includes(t.stage) || t.stage === "blocked") return `已 ${t.stage}`;
+      const open = db.query("SELECT status FROM scheduler_intents WHERE taskId = ? AND status IN ('submitted','unknown') LIMIT 1").get(id) as { status: string } | null;
+      if (open) return `已有在途意图（${open.status}）`;
+      const pool = policy?.remote && policy.remote.mode !== "off" ? { remote: policy.remote, borrow: [] } : undefined;
+      const plan = planScheduler(autoSnapshot(db, t, { registry: [], maxWorkers: policy?.maxWorkers ?? 1, now: now ?? Date.now(), pool }));
+      return plan.kind === "intent" ? null : plan.reason;
+    } catch (e) {
+      return `资格读不出：${(e as Error).message}`;
+    }
+  };
+}
+
 /**
  * Right before `ledger scheduler-pool` takes a seat (PM 定 3): re-read the bands of this card and of the cards still behind it in
- * this pass. A card behind that now ranks ahead (a band or owner order changed after the sort) gets the seat: on → this card is held
- * with the hold-up recorded; observe → only "would yield" is recorded and the claim goes on; off → nothing read beyond the mode.
- * The other cards' own gates are judged when the loop reaches them, so a held card waits one pass at most.
+ * this pass, and their eligibility as it is now (slotGate). A legal card behind that now ranks ahead (a band or owner order changed
+ * after the sort) gets the seat: on → this card is held with the hold-up recorded; observe → only "would yield" is recorded and the
+ * claim goes on; off → nothing read beyond the mode. A card ahead that is no longer legal is recorded as the hold-up and never takes
+ * the seat from this one; a held card waits one pass at most.
  */
 export function claimSlot(db: Database | null, entry: "local_slot" | "lend_slot", task: { project: string; id: string },
-  opts: Pick<SortOptions<string>, "reader" | "now"> = {}): { step: string; detail: string } | null {
+  opts: Pick<SortOptions<string>, "reader" | "now"> & { policy?: SlotPolicy; gate?: (id: string) => string | null } = {}): { step: string; detail: string } | null {
   const reader = opts.reader ?? (db ? ledgerPriorityReader(db) : null);
   if (!reader || reader.mode(task.project) === "off") return null;
   const queue = slotQueues.get(task.project) ?? [], at = queue.indexOf(task.id);
   if (at < 0 || at === queue.length - 1) return null;
-  const items = queue.slice(at);
-  const r = claimFirst(db, entry, items, (id) => ({ project: task.project, taskId: id }), () => null, { reader, now: opts.now });
+  const items = queue.slice(at), gate = opts.gate ?? slotGate(db, task.project, task.id, opts.policy, opts.now);
+  const r = claimFirst(db, entry, items, (id) => ({ project: task.project, taskId: id }), gate, { reader, now: opts.now });
   if (r.wouldChosen === task.id || !r.wouldChosen) return null;
   if (r.sort.rankOf(task.id)?.mode !== "on") return null;
   slotQueues.set(task.project, queue.filter((id) => id !== task.id));
   const ahead = r.sort.rankOf(r.wouldChosen)?.rank;
   return { step: "held", detail: `认领前重读工作优先级：${r.wouldChosen}（${ahead?.band ?? "next"}）现排在本卡前面，本轮让出名额` };
+}
+
+/**
+ * The autostart pick's candidates: every startable node of the project's features, in the old order (feature order, then lane
+ * order) where the project is off — read lazily, exactly as before — and otherwise ranked node by node by each node's effective
+ * band (the node's own explicit band, else its feature's) and the owner's order, so a `now` node of a `later` feature is not left
+ * behind a `later` node of a `now` feature. `lanesOf` applies the feature's existing gates (null = skipped) and reads its lanes.
+ */
+export function* autostartNodes<F extends { id: string }, L extends { startNow?: readonly string[] } | null, V>(db: Database, project: string,
+  features: readonly F[], lanesOf: (f: F) => { lanes: L; views: V } | null, opts: Pick<SortOptions<unknown>, "reader" | "record"> = {}): Generator<{ f: F; key: string; lanes: L; views: V }> {
+  const nodes = (f: F) => { const x = lanesOf(f); return x ? (x.lanes?.startNow ?? []).map((key) => ({ f, key, ...x })) : []; };
+  if ((opts.reader ?? ledgerPriorityReader(db)).mode(project) === "off") {
+    for (const f of features) yield* nodes(f);
+    return;
+  }
+  yield* sortByPriority(db, "autostart", features.flatMap(nodes), (x) => ({ project, taskId: null, featureId: x.f.id, nodeKey: x.key }), opts).applied;
 }
 
 /** Tests only: forget the remembered pass. */
