@@ -28,11 +28,27 @@ describe("共用的有界 fetch", () => {
     const net = async (a: string[]) => { calls.push(a); here = true; return { code: 0, out: "" }; };
     expect(await peerPrHeadMissing(task, H1, git, read)).toContain("不在本地仓库");
     expect(calls).toEqual([]);
-    expect(await peerPrHeadMissing(task, H1, git, read, net)).toBeNull();
+    expect(await peerPrHeadMissing(task, H1, git, read, net, policy("on"))).toBeNull();
     expect(calls).toEqual([["-C", "/repo", "fetch", "--no-tags", "-q", "origin", "refs/pull/7/head"]]);
     here = false;
     const down = async () => ({ code: 128, out: "fatal: couldn't find remote ref" });
-    expect(await peerPrHeadMissing(task, H1, git, read, down)).toContain("重取也没取到：refs/pull/7/head：fatal");
+    expect(await peerPrHeadMissing(task, H1, git, read, down, policy("on"))).toContain("重取也没取到：refs/pull/7/head：fatal");
+  });
+
+  test("off / observe：生产调用照样传 net，也不取（与改前一致：缺就交 PM）；策略每次现读", async () => {
+    const task = { id: "PR7", project: "p", assigneeKind: "peer_agent", assignee: "fp/agent-x",
+      extra: { peerPr: { peer: "team", fp: "fp", agent: "agent-x", login: "x", url: "https://github.com/o/r/pull/7", base: "main", number: 7 } } } as unknown as LedgerTask;
+    const read = () => ({ projects: { p: { repoDir: "/repo" } } }) as unknown as SchedulerConfig;
+    const calls: string[][] = [];
+    let reads = 0;
+    const git = async () => ({ code: 1, out: "" });
+    const net = async (a: string[]) => { calls.push(a); return { code: 0, out: "" }; };
+    for (const m of ["off", "observe"] as const) {
+      const port: RecoveryPolicyPort = () => { reads++; return policy(m)("p", "selfHealBeforeManual"); };
+      expect(await peerPrHeadMissing(task, H1, git, read, net, port)).toBe(`PR head ${H1.slice(0, 12)} 不在本地仓库（peer tick 还没取到），不派审，交 PM`);
+    }
+    expect(calls).toEqual([]);
+    expect(reads).toBe(2);
   });
 
   test("fetchHeadVia：取到但不含该 commit 也算没取到", async () => {
@@ -85,19 +101,35 @@ describe("[验收线 4] 派审时 head 不在本地", () => {
       const first = notes(f)[0]!;
       expect(first.data).toMatchObject({ mode: "on", attempt: 1, head: H1 });
       // the hold is read from the ledger only: a fresh process sees the same rhythm
-      expect(headRefetchHold(f.db, f.task(), first.ts + 30_000)).toContain("已取 1 次");
-      expect(headRefetchHold(f.db, f.task(), first.ts + MIN)).toBeNull();
-      expect(headRefetchHold(f.db, { ...f.task(), headSHA: "f".repeat(40) }, first.ts)).toBeNull();
+      expect(headRefetchHold(f.db, f.task(), first.ts + 30_000, policy("on"))).toContain("已取 1 次");
+      expect(headRefetchHold(f.db, f.task(), first.ts + MIN, policy("on"))).toBeNull();
+      expect(headRefetchHold(f.db, { ...f.task(), headSHA: "f".repeat(40) }, first.ts, policy("on"))).toBeNull();
 
       f.advance(MIN + 1);
       expect(await f.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("第 2 次") });
       const second = notes(f)[1]!;
-      expect(headRefetchHold(f.db, f.task(), second.ts + MIN)).toContain("已取 2 次"); // 2 minutes after the second miss
-      expect(headRefetchHold(f.db, f.task(), second.ts + 2 * MIN)).toBeNull();
+      expect(headRefetchHold(f.db, f.task(), second.ts + MIN, policy("on"))).toContain("已取 2 次"); // 2 minutes after the second miss
+      expect(headRefetchHold(f.db, f.task(), second.ts + 2 * MIN, policy("on"))).toBeNull();
 
       f.advance(REFETCH_GIVE_UP_MS);
       expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("连续 6 小时取不到") });
       expect(getWorkflow(f.db, "T1")!.mode).toBe("manual");
+    } finally { f.close(); }
+  });
+
+  test("on 退避中切回 off / observe：下一轮立即不再按旧记录扣卡，退避只在 on 下生效", async () => {
+    const f = await atReviewDispatch("on");
+    try {
+      expect(await f.tick()).toMatchObject({ step: "waiting" });
+      const first = notes(f)[0]!;
+      expect(headRefetchHold(f.db, f.task(), first.ts + 30_000, policy("on"))).toContain("已取 1 次");
+      expect(headRefetchHold(f.db, f.task(), first.ts + 30_000, policy("off"))).toBeNull();
+      expect(headRefetchHold(f.db, f.task(), first.ts + 30_000, policy("observe"))).toBeNull();
+      f.advance(31_000); // past the 30s dispatch backoff, still inside the 1-minute refetch backoff
+      expect(await f.tick()).toMatchObject({ step: "held", detail: expect.stringContaining("PR head 还没取到，下一轮重取") }); // the tick reads its policy
+      f.tickDeps.recoveryPolicy = policy("off"); // rollback mid-backoff: the old manual path, right away
+      expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("不在本地仓库") });
+      expect(notes(f)).toHaveLength(1);
     } finally { f.close(); }
   });
 

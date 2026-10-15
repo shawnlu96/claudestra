@@ -8,12 +8,17 @@
  *   waits. headRefetchHold (asked before planning, through peerPrHold) holds it for 1, 2, 4, 8 … minutes after the latest miss, at
  *   most 30; the next plan fetches again. Six hours after this head's first miss the old escalation goes out, with that said.
  * Backoff state is only the ledger's attempt notes (keyed card + head + attempt number), so a restart keeps the rhythm and a new
- * head starts afresh. tests/scheduler-head-refetch.test.ts.
+ * head starts afresh. The switch is read on every use: the peer refs/pull fetch (peer-pr-hold.ts) and the hold below only run under on,
+ * so turning it off (or observe) mid-backoff releases the card on the next pass and the old behaviour comes back unchanged.
+ * observeFixSelfHeal: the execution side of scheduler-fix-selfheal.ts's observe mode (the planner stays pure; the sample is written
+ * here, through the same note writer, right before the auto tick escalates). tests/scheduler-head-refetch.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { SELF_HEAL_OBSERVE } from "./scheduler-fix-selfheal.js";
+import type { PlannerDecision } from "./scheduler-plan.js";
 
 const KEY = "selfHealBeforeManual";
 const MIN = 60_000;
@@ -25,7 +30,7 @@ const UNFETCHED = /交付 head ([0-9a-f]{12}) 从项目仓库 origin 取不到|P
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface RefetchCard { db: Database; task: LedgerTask; deps: { manager: Manager; now(): number; recoveryPolicy?: RecoveryPolicyPort } }
 
-const modeOf = (project: string, policy: RecoveryPolicyPort = recoveryPolicy): RecoveryMode => {
+export const selfHealModeOf = (project: string, policy: RecoveryPolicyPort = recoveryPolicy): RecoveryMode => {
   try { const p = policy(project, KEY); return p.source === "error" ? "off" : p.mode; } catch { return "off"; }
 };
 
@@ -38,12 +43,12 @@ export function refetchAttempts(events: readonly LedgerEvent[], head: string): L
     e.data.kind === "head_refetch" && e.data.mode === "on" && e.data.head === head);
 }
 
-/** Before planning: a review-stage card whose current head missed less than its backoff ago waits; null = plan as usual. */
-export function headRefetchHold(db: Database, task: LedgerTask, now: number): string | null {
+/** Before planning: under on, a review-stage card whose current head missed less than its backoff ago waits; null = plan as usual. */
+export function headRefetchHold(db: Database, task: LedgerTask, now: number, policy?: RecoveryPolicyPort): string | null {
   if (task.stage !== "review" || !task.headSHA) return null;
   const tries = refetchAttempts(listEvents(db, { project: task.project, target: task.id }), task.headSHA);
   const last = tries.at(-1);
-  if (!last) return null;
+  if (!last || selfHealModeOf(task.project, policy) !== "on") return null; // switched off / observe mid-backoff: no hold
   const left = last.ts + refetchBackoffMs(tries.length) - now;
   return left > 0 ? `PR head 还没取到，下一轮重取：head ${task.headSHA.slice(0, 12)} 已取 ${tries.length} 次，${Math.ceil(left / 1000)}s 后再取` : null;
 }
@@ -62,7 +67,7 @@ async function note(c: RefetchCard, actionKey: string, action: string, data: Rec
 export async function headRefetch(c: RefetchCard, reason: string): Promise<{ wait: string } | { reason: string }> {
   const head = c.task.headSHA;
   if (!head || !UNFETCHED.test(reason)) return { reason };
-  const mode = modeOf(c.task.project, c.deps.recoveryPolicy);
+  const mode = selfHealModeOf(c.task.project, c.deps.recoveryPolicy);
   if (mode === "off") return { reason };
   if (mode === "observe") {
     await note(c, `head-refetch:${head}:observe`, `自救：PR head ${head.slice(0, 12)} 下一轮重取（1、2、4… 分钟退避，最多 30 分钟一次，6 小时后退人工）`, { mode });
@@ -77,4 +82,18 @@ export async function headRefetch(c: RefetchCard, reason: string): Promise<{ wai
   const ok = await note(c, `head-refetch:${head}:${n}`, `自救：PR head ${head.slice(0, 12)} 第 ${n} 次没取到，${refetchBackoffMs(n) / MIN} 分钟后重取`, { mode, attempt: n });
   // An unrecorded attempt has no backoff to wait on; the next pass simply tries again (bounded by the dispatch backoff).
   return { wait: `PR head 还没取到，下一轮重取（第 ${n} 次${ok ? "" : "，记录没写上"}）：${reason}` };
+}
+
+/**
+ * Auto tick, right before escalating a plan: a `fix_report` that scheduler-fix-selfheal.ts annotated under observe gets its one
+ * recovery_observe sample (card + head + round, deduped by the action key). Every other plan: nothing. A failed write is logged and
+ * the escalation goes on as before.
+ */
+export async function observeFixSelfHeal(c: RefetchCard, plan: PlannerDecision): Promise<void> {
+  if (plan.kind !== "escalate" || plan.code !== "fix_report") return;
+  const at = plan.reason.indexOf(SELF_HEAL_OBSERVE);
+  if (at < 0) return;
+  const head = c.task.headSHA ?? "-", what = plan.reason.slice(at + SELF_HEAL_OBSERVE.length).replace(/）$/, "");
+  await note(c, `fix-selfheal:${head}:r${c.task.round}`, `自救：${what}`, { kind: "fix_selfheal", mode: "observe", round: c.task.round,
+    basis: plan.reason.includes("缺上一轮完整审查报告") ? "report_missing" : "no_p1" });
 }

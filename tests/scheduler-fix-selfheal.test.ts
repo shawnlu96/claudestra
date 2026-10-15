@@ -167,6 +167,29 @@ describe("整轮（真台账 + 真 CLI）", () => {
     } finally { f.close(); }
   });
 
+  test("observe：真 tick 照旧退人工，且经执行侧写恰好一条 recovery_observe 样本（卡 + head + 轮次去重）", async () => {
+    mode("observe");
+    const f = await atFix([P2]);
+    try {
+      expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("恢复观察 selfHealBeforeManual") });
+      const samples = () => listEvents(f.db, { project: "p", target: "T1" })
+        .filter((e) => e.kind === "note" && e.data.op === "recovery_observe" && e.data.mechanism === "selfHealBeforeManual");
+      expect(samples()).toHaveLength(1);
+      expect(samples()[0]!.data).toMatchObject({ kind: "fix_selfheal", mode: "observe", head: H1, round: 1, basis: "no_p1", actionKey: `fix-selfheal:${H1}:r1` });
+      expect(samples()[0]!.text).toContain(SELF_HEAL_MARK);
+      expect(f.task().stage).toBe("fix");
+    } finally { f.close(); }
+  });
+
+  test("off：真 tick 退人工，不写样本", async () => {
+    mode("off");
+    const f = await atFix([P2]);
+    try {
+      expect(await f.tick()).toMatchObject({ step: "manual" });
+      expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "recovery_observe")).toEqual([]);
+    } finally { f.close(); }
+  });
+
   test("有新交付（head 变了）就不回审：照常进 review 新 head，不走自救", async () => {
     mode("on");
     const f = await atFix([P1]);

@@ -31,13 +31,19 @@ into review, so the next pass dispatches a fresh review of the same head through
 report is never reused as this round's verdict. The planner stays pure: the "already healed" fact is read from snapshot events,
 the switch from the recovery policy (as `nearMarker` does).
 
+Under `observe` the planner appends 「恢复观察 selfHealBeforeManual：本会自救（…）」 to the `fix_report` reason; right before the auto tick
+escalates it, `observeFixSelfHeal` (`scheduler-head-refetch.ts`, the same `scheduler-recovery-observe` writer) records exactly one
+`recovery_observe` sample (`kind: fix_selfheal`, action key `fix-selfheal:<head>:r<round>`). The planner itself writes nothing.
+
 ## 2. Review head not fetched → retry later (`src/lib/scheduler-head-refetch*.ts`)
 
 - `fetchHeadVia` is the one bounded fetch (`boundedGit` timeout, no prompt), shared by `prepareReviewHead` (lend cards) and
-  `peerPrHeadMissing`, which now fetches `refs/pull/<n>/head` once before declaring the head missing (`pinReview` hands it `env.net`).
+  `peerPrHeadMissing`, which under `on` (policy read on every call) fetches `refs/pull/<n>/head` once before declaring the head
+  missing (`pinReview` hands it `env.net`); `off` / `observe` never run this new fetch, so the old fallback stays as it was.
 - Still missing: the auto tick (`scheduler-auto-tick.ts`, reviewer creation and review pin) has already cancelled the intent; under
   `on` it records an attempt note (`scheduler-recovery-observe`, key card + head + attempt) and the card waits instead of escalating.
-  `headRefetchHold` (asked via `peerPrHold` before planning) holds a review-stage card 1, 2, 4, 8 … minutes after its latest miss,
+  `headRefetchHold` (asked via `peerPrHold` before planning, with the tick's policy; anything but `on` = no hold, so switching off
+  mid-backoff releases the card on its next pass) holds a review-stage card 1, 2, 4, 8 … minutes after its latest miss,
   at most 30. Six hours after the head's first miss the old escalation goes out, saying so. State is only ledger notes: a restart
   keeps the rhythm, a new head starts afresh. Other refusals (dirty checkout, wrong head …) escalate as before.
 
