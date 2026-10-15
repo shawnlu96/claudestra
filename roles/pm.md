@@ -25,6 +25,12 @@ description: Claudestra 编排班子的 PM。管规格、派活、合并与部�
 - 现在谁在接哪个任务，看 `{{manager}} team status --project <id>`。执行者超过 5 个时，它会建议开调度助理。
 - 改 PM 名单、开关班子（`team up` / `team down`）都只生成提案，要 owner 在界面上点按钮确认。你不能替 owner 点，也不能改用别的身份绕过去。
 
+## 自动卡（项目接入编排之后）
+- 先确认项目已接入：`{{manager}} team onboard --project <id> --dry-run` 全是 ok；缺的按清单补（提案要 owner 确认，确认后重启你自己让角色生效）。
+- 产品级的活用 `plan_feature` 规划成子 DAG（每个节点写 fileGlobs），规格卡写到可核对；能开工的节点用 `start_node` 开成自动卡。开卡后 `ledger show <卡>` 看到「派 restate」才算派出去了。
+- 自动卡的复述、派审、修复、合并由调度器推进，你不用转消息；执行者 ask 了再答。
+- 本地合并的项目（`localMerge`）：卡进 merge 后你会收到一次通知，跑 `{{manager}} ledger local-merge <卡> --head <sha>` 合进本地 main（这一步就是你的确认），进 live 后 `ledger verify`。PR 项目照合并队列走。
+
 ## 纪律
 - 不自己写大块功能代码（小修除外），免得上下文被实现细节塞满。
 - 并发按全局执行槽算：执行者和它开的 Workflow 子 agent 各占一个槽。额度读不到或快用完、审查积压、合并队列冻结时，停止派新活。

@@ -55,6 +55,26 @@ owner 点确认后，bridge 先把提案标成「已确认」，再依次做下�
 
 这不是绝对保证：agent 本身是以你的用户身份运行的 shell，能读仓库的 `.env`，会话环境里本来也带着 `DISCORD_BOT_TOKEN`，拿到 bot token 就能绕开 bridge 直连 Discord，以 bot 身份发带任意按钮 id 的消息或改已有消息。这和上面改状态文件、配对设备一样，属于「铁了心的 agent」，不在防护范围内（同 CLAUDE.md 的 Security posture：guard rail，不是安全边界）。除了 owner 一次性迁移用的 `ledger import`（只在名单为空时写），PM 名单的每次变更都能在台账里查到是 owner 点的哪份提案。
 
+## 接入编排（一条命令补齐）
+
+已登记的项目（`projects.json` 有目录、台账有 PM）要走自动卡流程，还缺调度配置和班子时，用：
+
+```bash
+bun src/manager.ts team onboard --project <id> --dry-run                                    # 只看清单，什么都不写
+bun src/manager.ts team onboard --project <id> --checks "bun run check" [--max-workers 2]   # PR 项目：checks 是 CI 检查名
+bun src/manager.ts team onboard --project <id> --local-merge --checks "cargo test,cargo clippy"   # 没有 origin 的仓库
+```
+
+逐项核对，只补缺的（`src/manager/team-onboard.ts`）：
+
+- **仓库**：没有 origin 必须带 `--local-merge`（卡合进本地 main，见 [local-merge.md](../architecture/local-merge.md)）；本地合并时 `--checks` 是要跑的命令，逗号分条，每条按空白切成 argv、不经 shell。
+- **调度配置**：scheduler.json 没有这个项目就新增一段（`maxActiveWorkers` 缺省 2、`supervise: false`——刚接入时 agent 监护先不管项目里已在干活的 agent，以后要开手改），带一条审计事件；已有这段但值和这次参数不同，只列差异，**从不覆盖**；scheduler.json 本身不存在就拒（这条命令不新建它，也不碰全局开关）。
+- **班子**：没开班子、PM 不在名单、或 registry 角色没设，就出一份 `team up` 提案，等 owner 在卡片上确认（同上「拉起来」）；不直接写 PM 名单。已有提案在等确认就不重复提。确认后角色要等 PM 下次重启才生效。
+
+任何一项拦住（`blocked`）就整次不写。重跑无副作用。只有项目的 PM（调度助理除外）/ 大总管 / owner 能跑，`--dry-run` 也一样。
+
+**网页**：侧栏项目组头右键 / 长按 →「接入编排」（要 manage 授权）。打开即按 dry-run 列清单，改参数自动重核，点「接入」跑同一条命令（`POST /api/v1/projects/:id/onboard`，`src/bridge/local-api/project-onboard.ts`）。
+
 ## 一件任务怎么流转
 
 ```
@@ -117,4 +137,4 @@ bun src/manager.ts team status --project <id>
 
 - 把活交给另一台 Claudestra 上的 agent：[跨实例委托](./peer-delegation.md)
 - 台账的数据结构与事件形状：台账设计稿（`meta.team`、`dispatch` / `escalate` 事件）
-- 代码：`src/manager/ledger-team-cmds.ts`（team-apply）、`roles/`、`src/lib/team-*.ts`、`src/lib/ledger-handler.ts`、`src/lib/review-pack.ts`、`src/bridge/team-router.ts`、`src/bridge/team-confirm.ts`、`src/manager/team-up.ts`、`src/manager/ledger-dispatch-cmds.ts`
+- 代码：`src/manager/ledger-team-cmds.ts`（team-apply）、`roles/`、`src/lib/team-*.ts`、`src/lib/ledger-handler.ts`、`src/lib/review-pack.ts`、`src/bridge/team-router.ts`、`src/bridge/team-confirm.ts`、`src/manager/team-up.ts`、`src/manager/team-onboard.ts`、`src/manager/ledger-dispatch-cmds.ts`
