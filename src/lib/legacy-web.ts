@@ -18,9 +18,13 @@ import { migrateWebState, sessionIdHash } from "./web-state-migrate.js";
 import { publishWebOut } from "./web-build.js";
 import { migrateStaticDirToReleases } from "./web-releases.js";
 import { refuseInSandbox } from "./sandbox.js";
+import { LEGACY_SESSION_COOKIE_NAME } from "./floka-browser-protocol/names.js";
 
-/** 旧 web 的会话 cookie 名（web/lib/services/auth.service.ts，已删） */
-export const LEGACY_SESSION_COOKIE = "cstra_session";
+/** 旧 web 的会话 cookie 名（web/lib/services/auth.service.ts，已删）。只有旧族：新品牌从没签发过它，换名不加新名字 */
+export const LEGACY_SESSION_COOKIE = LEGACY_SESSION_COOKIE_NAME;
+
+/** 兑换后删掉旧会话 cookie 的 Set-Cookie（与旧 web 签发时同 Path） */
+export const legacySessionClearCookie = (): string => `${LEGACY_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`;
 const LEGACY_WEB_PORT_DEFAULT = 3333;
 
 /** 旧 plist 的 `next start -p <port>`；读不出来 = 旧 web 的默认 3333 */

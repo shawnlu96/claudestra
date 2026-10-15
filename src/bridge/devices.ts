@@ -8,10 +8,12 @@ import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import {
-  Approvals, attachCredential, canAdministerPairing, canManage, capGrant, ChallengeStore, checkGuestAgents, cookieValueFrom, DEVICE_HEADER, deviceCookieHeader, effectivePrincipal,
+  Approvals, attachCredential, canAdministerPairing, canManage, capGrant, ChallengeStore, checkGuestAgents, cookieValueFrom, csrfOkFor, DEVICE_HEADER, deviceCookieHeaders, effectivePrincipal,
   ensureOwnerPrincipal, fullGrant, guestGrant, newGuestPrincipal, normalizeGrant, type Approval, type Grant,
 } from "../lib/devices.js";
-import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js";
+import { LEGACY_SESSION_COOKIE, legacySessionClearCookie, redeemLegacySession } from "../lib/legacy-web.js";
+import { cookieWritePlan, readBrowserCookie } from "../lib/floka-browser-protocol/credentials.js";
+import { browserPolicy } from "../lib/floka-browser-protocol/policy.js";
 import { webDb } from "./local-api/db.js";
 import { readPrincipalsStrict, reservedNameError, secretEquals, updatePrincipals, type Principal, type PrincipalsFile } from "../lib/principals.js";
 import { canonicalAgentName, REGISTRY_PATH, readRegistryAgentsSync } from "../lib/registry.js";
@@ -77,14 +79,17 @@ function noticePaired(deviceName: string, guest?: string): void {
     .catch((e) => console.error(`⚠️ 新设备配对提醒没发出去: ${(e as Error).message}`));
 }
 
-/** 直托管 Path=/；经中继 Path 写成 /m/<fp>/（中继还会再钉一次） */
-function cookieFor(ctx: RequestContext, token: string | null): string {
-  return deviceCookieHeader(token, { path: ctx.pathPrefix ? `${ctx.pathPrefix}/` : "/", secure: ctx.https || ctx.source === "relay" });
+/** 直托管 Path=/；经中继 Path 写成 /m/<fp>/（中继还会再钉一次）。rename.browserProtocol write=on 时两族同值一起种，off / observe 只有旧族 */
+function cookiesFor(ctx: RequestContext, token: string | null): string[] {
+  return deviceCookieHeaders(token, { path: ctx.pathPrefix ? `${ctx.pathPrefix}/` : "/", secure: ctx.https || ctx.source === "relay" });
 }
+
+/** 设备端点的 CSRF 门（这些端点全是 POST）：两族头按档位认，on 档两族同时出现算没带 */
+const csrfMissing = (req: Request) => !csrfOkFor("POST", req.headers);
 
 function pairedResponse(ctx: RequestContext, out: PairOutcome): Response {
   const res = apiJson(200, { ok: true, fp: machineFp(), machineName: hostname(), principalId: out.principalId, credentialId: out.credentialId, grant: out.grant, expiresAt: out.expiresAt });
-  res.headers.append("set-cookie", cookieFor(ctx, out.token));
+  for (const c of cookiesFor(ctx, out.token)) res.headers.append("set-cookie", c);
   res.headers.set("cache-control", "no-store");
   return res;
 }
@@ -118,7 +123,7 @@ export async function handleDevicesPublic(req: Request, url: URL): Promise<Respo
  * 会话 id 是 nanoid(32)（≈190 位）且只能换一次，不另设限流。
  */
 async function legacySession(req: Request): Promise<Response> {
-  if (!req.headers.get(DEVICE_HEADER)) return forbidden(`${DEVICE_HEADER} header required`);
+  if (csrfMissing(req)) return forbidden(`${DEVICE_HEADER} header required`);
   const ctx = requestContextOf(req);
   const sid = cookieValueFrom(req.headers.get("cookie"), LEGACY_SESSION_COOKIE);
   if (!sid || !sourceAllows(req, "legacy")) return apiJson(404, { ok: false, error: "no legacy session", code: "no_legacy_session" });
@@ -126,7 +131,7 @@ async function legacySession(req: Request): Promise<Response> {
   const body = await readJsonBody(req);
   const deviceName = str((body === INVALID_JSON || !body ? {} : (body as Body)).deviceName) ?? "升级前已登录的浏览器";
   const res = pairedResponse(ctx, await grantCredential(deviceName, fullGrant(), undefined, ctx.clientIp));
-  res.headers.append("set-cookie", `${LEGACY_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`); // 旧 cookie 用过即清
+  res.headers.append("set-cookie", legacySessionClearCookie()); // 旧 cookie 用过即清
   return res;
 }
 
@@ -166,7 +171,7 @@ function pairStatus(req: Request, url: URL): Response {
   const res = t.state !== "approved"
     ? apiJson(410, { ok: false, state: t.state, error: t.state === "denied" ? "pairing denied on the machine" : "approval expired" })
     : pairedResponse(requestContextOf(req), { ...t.result, grant: t.approval.grant });
-  if (local) res.headers.append("set-cookie", localClaimCookie(null));
+  if (local) for (const c of localClaimCookies(null)) res.headers.append("set-cookie", c);
   return res;
 }
 
@@ -193,11 +198,16 @@ export function hasPairingApprover(file: PrincipalsFile, now = Date.now()): bool
 const LOCAL_PENDING_MAX = 3;
 
 /** 本机待批的领取凭据 `<approvalId>.<秘密>`：只种在发起的浏览器（HttpOnly），取结果 / 取消都要对上——编号在批准横幅里看得到，不当秘密 */
-const LOCAL_CLAIM_COOKIE = "cstra_local_claim";
-function localClaimCookie(value: string | null): string {
-  return `${LOCAL_CLAIM_COOKIE}=${value ?? ""}; Path=/api/v1/devices/; Max-Age=${value ? 600 : 0}; HttpOnly; SameSite=Strict`;
+/** 两族同 rename.browserProtocol：write=on 同值一起种，删时 receive=on 一起删，receive=on 没开新写入时种旧族顺手删残留新族；off / observe 只有旧族 */
+function localClaimCookies(value: string | null): string[] {
+  return cookieWritePlan("localClaimCookie", browserPolicy(), value === null)
+    .map(({ name, clear }) => `${name}=${clear ? "" : value}; Path=/api/v1/devices/; Max-Age=${clear ? 0 : 600}; HttpOnly; SameSite=Strict`);
 }
-const localClaimOf = (req: Request) => (cookieValueFrom(req.headers.get("cookie"), LOCAL_CLAIM_COOKIE) ?? "").split(".");
+/** on 档两族值不同 = 冲突，当没带：领取 / 取消都对不上 */
+function localClaimOf(req: Request): string[] {
+  const r = readBrowserCookie(req.headers.get("cookie"), "localClaimCookie", browserPolicy());
+  return (r.status === "ok" ? r.value ?? "" : "").split(".");
+}
 function ownsLocalClaim(req: Request, a: Approval): boolean {
   const [id, secret] = localClaimOf(req);
   return !!a.local && id === a.id && !!secret && secretEquals(secret, a.local.claim);
@@ -229,7 +239,7 @@ function controlTokenOk(req: Request, url: URL): boolean {
 async function pairLocal(req: Request, url: URL): Promise<Response> {
   const ctx = requestContextOf(req);
   if (ctx.source !== "loopback") return forbidden("local pairing is only available from this machine");
-  if (!req.headers.get(DEVICE_HEADER)) return forbidden(`${DEVICE_HEADER} header required`);
+  if (csrfMissing(req)) return forbidden(`${DEVICE_HEADER} header required`);
   const origin = req.headers.get("origin");
   if (origin && origin !== url.origin) return forbidden("cross-origin local pairing refused");
   const body = await readJsonBody(req);
@@ -246,14 +256,14 @@ async function pairLocal(req: Request, url: URL): Promise<Response> {
     .catch((e) => console.error(`⚠️ 本机配对待批提醒没发出去: ${(e as Error).message}`));
   const approver = hasPairingApprover(await readPrincipalsStrict(principalsPath));
   const res = apiJson(202, { ok: true, pending: true, approvalId: a.id, code: a.code, approver, expiresAt: new Date(a.expiresAt).toISOString(), machineName: hostname() });
-  res.headers.append("set-cookie", localClaimCookie(`${a.id}.${claim}`));
+  for (const c of localClaimCookies(`${a.id}.${claim}`)) res.headers.append("set-cookie", c);
   return res;
 }
 
 /** 网页点「取消」/ 离开配对页：作废这条本机待批（带领取 cookie 才行）；已批准没取走的就地丢掉，那张 cookie 不再发出 */
 async function cancelLocal(req: Request): Promise<Response> {
   if (requestContextOf(req).source !== "loopback") return forbidden("local pairing is only available from this machine");
-  if (!req.headers.get(DEVICE_HEADER)) return forbidden(`${DEVICE_HEADER} header required`);
+  if (csrfMissing(req)) return forbidden(`${DEVICE_HEADER} header required`);
   const body = await readJsonBody(req);
   const a = approvals.get(str((body === INVALID_JSON || !body ? {} : (body as Body)).approval) ?? "");
   if (!a || !ownsLocalClaim(req, a)) return forbidden("only the browser that asked can cancel this request");
@@ -263,7 +273,7 @@ async function cancelLocal(req: Request): Promise<Response> {
     await revokeUnclaimed(a.result.credentialId);
   }
   const res = apiJson(200, { ok: true });
-  res.headers.append("set-cookie", localClaimCookie(null));
+  for (const c of localClaimCookies(null)) res.headers.append("set-cookie", c);
   return res;
 }
 
@@ -318,7 +328,7 @@ async function revokeDevice(req: Request, principal: Principal, id: string): Pro
   if (!holderId) return apiJson(404, { ok: false, error: "device not found" });
   emitCredentialRevoked(id); // 在途的 SSE / 终端流随之中止
   const res = apiJson(200, { ok: true, revoked: id, principal: holderId });
-  if (own) res.headers.append("set-cookie", cookieFor(requestContextOf(req), null));
+  if (own) for (const c of cookiesFor(requestContextOf(req), null)) res.headers.append("set-cookie", c);
   return res;
 }
 

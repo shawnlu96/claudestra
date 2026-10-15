@@ -19,7 +19,7 @@ import { relayMark, takeRelayFrom, TUNNEL_MARK_HEADER } from "./relay-inbound.js
 import { PEER_ENTRANCE_ONLY, setRequestContext } from "./request-context.js";
 import { drainingFetch } from "./unread-body.js";
 import { isLoopbackAddress } from "../lib/same-host.js";
-import { DEVICE_HEADER } from "../lib/devices.js";
+import { BROWSER_FAMILIES, BROWSER_NAMES } from "../lib/floka-browser-protocol/names.js";
 import { HTTP_IDLE_TIMEOUT_S } from "../lib/esc-guard.js";
 import { MAX_HTTP_BODY, MAX_PEER_BODY, readBoundedRequestBody, RequestBodyError } from "../lib/request-body.js";
 import { E2E_BODY_MAX, isE2eFrame } from "../lib/peer-e2e-wire.js";
@@ -151,7 +151,7 @@ export async function ingressRequest(req: Request, handleApi: ApiHandler, addr: 
   const e2eFrame = isE2eFrame(req.method, url.pathname + url.search);
   if (!localProxy) {
     headers.delete("cookie");
-    headers.delete(DEVICE_HEADER);
+    for (const f of BROWSER_FAMILIES) headers.delete(BROWSER_NAMES[f].deviceHeader); // 两族都剥，不看 rename 档位
     if (!secret && !publicRoute) return json(403, PEER_ENTRANCE_ONLY);
   }
   const hasBody = req.method !== "GET" && req.method !== "HEAD";

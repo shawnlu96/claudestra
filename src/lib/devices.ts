@@ -8,11 +8,14 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Principal, PrincipalsFile } from "./principals.js";
 import { canonicalAgentName, isLiteralMaster, isMasterAgent } from "./registry.js";
+import { BROWSER_NAMES } from "./floka-browser-protocol/names.js";
+import { browserPolicy, type BrowserPolicy } from "./floka-browser-protocol/policy.js";
+import { cookieWritePlan, csrfPasses, rawCookie, readBrowserCookie } from "./floka-browser-protocol/credentials.js";
 
 export const OWNER_PRINCIPAL_ID = "owner:self";
-export const DEVICE_COOKIE = "cstra_dev";
+export const DEVICE_COOKIE = BROWSER_NAMES.claudestra.deviceCookie;
 /** 非 GET/HEAD 必须带的头：cookie 会被浏览器自动附上，这个头浏览器不会——跨站表单打不进来 */
-export const DEVICE_HEADER = "x-cstra-device";
+export const DEVICE_HEADER = BROWSER_NAMES.claudestra.deviceHeader;
 /** 90 天不用就失效；每次使用往后滑 */
 const CREDENTIAL_TTL_MS = 90 * 24 * 60 * 60_000;
 /** lastSeenAt 至少隔这么久才落盘一次：每个请求都写 principals.json 是自找麻烦 */
@@ -261,24 +264,39 @@ export function touchCredential(c: DeviceCredential, now: Date, ip: string | nul
   return true;
 }
 
-export function cookieValueFrom(header: string | null, name: string = DEVICE_COOKIE): string | null {
-  for (const part of (header ?? "").split(";")) {
-    const i = part.indexOf("=");
-    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
-  }
-  return null;
+/**
+ * 不给 name = 设备凭据：按 rename.browserProtocol 读两族（lib/floka-browser-protocol），off / observe 只认旧族；
+ * on 档两族值不同 = 冲突，当没带（null）——不替请求挑一把。给了 name 就只读那一个。
+ */
+export function cookieValueFrom(header: string | null, name?: string, policy: BrowserPolicy = browserPolicy()): string | null {
+  if (name !== undefined) return rawCookie(header, name);
+  const r = readBrowserCookie(header, "deviceCookie", policy);
+  return r.status === "ok" ? r.value : null;
 }
 
 /** 签发 / 删除 cookie 的 Set-Cookie 值。经中继时中继会把 Path 钉成 /m/<fp>/ 并补 Secure（lib/relay-machine-path.ts） */
-export function deviceCookieHeader(token: string | null, opts: { path?: string; secure: boolean; maxAgeSec?: number }): string {
+export function deviceCookieHeader(token: string | null, opts: { path?: string; secure: boolean; maxAgeSec?: number }, name: string = DEVICE_COOKIE): string {
   const maxAge = token ? (opts.maxAgeSec ?? Math.floor(CREDENTIAL_TTL_MS / 1000)) : 0;
-  return [`${DEVICE_COOKIE}=${token ?? ""}`, `Path=${opts.path ?? "/"}`, `Max-Age=${maxAge}`, "HttpOnly", "SameSite=Strict", ...(opts.secure ? ["Secure"] : [])].join("; ");
+  return [`${name}=${token ?? ""}`, `Path=${opts.path ?? "/"}`, `Max-Age=${maxAge}`, "HttpOnly", "SameSite=Strict", ...(opts.secure ? ["Secure"] : [])].join("; ");
+}
+
+/**
+ * 要种的全部设备 cookie：旧族永远在（回滚期旧版本照认最新配对），write=on 再加同值的新族；删除时 receive=on 两族一起删；
+ * receive=on 但没开新写入时，种旧族的同时删掉残留的新族（不然它带着旧 token 与新旧族冲突）
+ */
+export function deviceCookieHeaders(token: string | null, opts: { path?: string; secure: boolean; maxAgeSec?: number }, policy: BrowserPolicy = browserPolicy()): string[] {
+  return cookieWritePlan("deviceCookie", policy, token === null).map((w) => deviceCookieHeader(w.clear ? null : token, opts, w.name));
 }
 
 /** CSRF：cookie 鉴权的非 GET/HEAD 必须带自定义头 */
 export function csrfOk(method: string, headerValue: string | null): boolean {
   const m = method.toUpperCase();
   return m === "GET" || m === "HEAD" || headerValue !== null;
+}
+
+/** 同上，按两族读头：on 档两族头同时出现算没带，不降级成只看旧族 */
+export function csrfOkFor(method: string, headers: Pick<Headers, "get">, policy: BrowserPolicy = browserPolicy()): boolean {
+  return csrfPasses(method, headers, policy);
 }
 
 // ── 配对用的两个内存状态机 ───────────────────────────────────────────────
