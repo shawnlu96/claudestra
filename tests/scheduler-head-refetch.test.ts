@@ -9,8 +9,9 @@ import { listEvents } from "../src/lib/ledger-store.js";
 import { peerPrHeadMissing } from "../src/lib/peer-pr-hold.js";
 import type { RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { fetchHeadVia } from "../src/lib/scheduler-head-refetch-git.js";
-import { headRefetchHold, refetchAttempts, refetchBackoffMs, REFETCH_GIVE_UP_MS } from "../src/lib/scheduler-head-refetch.js";
+import { headRefetch, headRefetchHold, refetchAttempts, refetchBackoffMs, REFETCH_GIVE_UP_MS } from "../src/lib/scheduler-head-refetch.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
+import { prepareReviewHead } from "../src/lib/scheduler-review-head.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 const MIN = 60_000;
@@ -149,6 +150,50 @@ describe("[验收线 4] 派审时 head 不在本地", () => {
       f.refusePin("审查 worktree 有已跟踪文件被改过（审查员不该改被审代码），不取远端、不覆盖：M x");
       expect(await f.tick()).toMatchObject({ step: "manual" });
       expect(notes(f)).toEqual([]);
+    } finally { f.close(); }
+  });
+});
+
+describe("[验收线 4] peer PR 首次派审（还没有审查 session，走 createReviewer → prepareReviewHead）", () => {
+  const peer = { id: "PR7", project: "p", stage: "review", round: 1, headSHA: H1, assigneeKind: "peer_agent", assignee: "fp/agent-x",
+    extra: { peerPr: { peer: "team", fp: "fp", agent: "agent-x", login: "x", url: "https://github.com/o/r/pull/7", base: "main", number: 7 } } } as unknown as LedgerTask;
+  const readConfig = () => ({ projects: { p: { repoDir: "/repo" } } }) as unknown as SchedulerConfig;
+  const card = (db: ReturnType<typeof autoFixture>["db"]) => ({ db, task: peer,
+    deps: { manager: async () => ({ ok: true }), now: () => Date.now(), recoveryPolicy: policy("on") } });
+
+  test("建审查目录前先取 refs/pull/<PR号>/head；取到就照常建（返回 null）", async () => {
+    const f = autoFixture();
+    try {
+      let here = false;
+      const calls: string[][] = [];
+      const env = { db: f.db, readConfig, recoveryPolicy: policy("on"),
+        git: async () => ({ code: here ? 0 : 1, out: "" }),
+        net: async (a: string[]) => { calls.push(a); here = true; return { code: 0, out: "" }; } };
+      expect(await prepareReviewHead(env, peer, H1, "/repo", false)).toBeNull(); // 改前：直接 null、不取，建 worktree 时才在缺 commit 上失败
+      expect(calls).toEqual([["-C", "/repo", "fetch", "--no-tags", "-q", "origin", "refs/pull/7/head"]]);
+    } finally { f.close(); }
+  });
+
+  test("取不到 → 返回已分类的缺 head 原因，headRefetch 认得、转成 wait 退避（不再是通用的『建审查 worktree 失败』直接退人工）", async () => {
+    const f = autoFixture();
+    try {
+      const env = { db: f.db, readConfig, recoveryPolicy: policy("on"), git: async () => ({ code: 1, out: "" }),
+        net: async () => ({ code: 128, out: "fatal: couldn't find remote ref" }) };
+      const reason = await prepareReviewHead(env, peer, H1, "/repo", false);
+      expect(reason).toContain(`PR head ${H1.slice(0, 12)} 不在本地仓库`);
+      expect(reason).toContain("重取也没取到：refs/pull/7/head：fatal");
+      expect(await headRefetch(card(f.db), reason!)).toMatchObject({ wait: expect.stringContaining("PR head 还没取到，下一轮重取（第 1 次") });
+    } finally { f.close(); }
+  });
+
+  test("off：首次派审也不取，原因照旧是缺 head（交 PM）", async () => {
+    const f = autoFixture();
+    try {
+      const calls: string[][] = [];
+      const env = { db: f.db, readConfig, recoveryPolicy: policy("off"), git: async () => ({ code: 1, out: "" }),
+        net: async (a: string[]) => { calls.push(a); return { code: 0, out: "" }; } };
+      expect(await prepareReviewHead(env, peer, H1, "/repo", false)).toBe(`PR head ${H1.slice(0, 12)} 不在本地仓库（peer tick 还没取到），不派审，交 PM`);
+      expect(calls).toEqual([]);
     } finally { f.close(); }
   });
 });

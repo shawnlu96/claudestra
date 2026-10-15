@@ -40,6 +40,9 @@ escalates it, `observeFixSelfHeal` (`scheduler-head-refetch.ts`, the same `sched
 - `fetchHeadVia` is the one bounded fetch (`boundedGit` timeout, no prompt), shared by `prepareReviewHead` (lend cards) and
   `peerPrHeadMissing`, which under `on` (policy read on every call) fetches `refs/pull/<n>/head` once before declaring the head
   missing (`pinReview` hands it `env.net`); `off` / `observe` never run this new fetch, so the old fallback stays as it was.
+- A peer card's first review (no reviewer session yet, `createReviewer`) goes through the same check: `prepareReviewHead` hands a
+  peer card to `peerPrHeadMissing` (with `env.net`) before the worktree is added, so a missing head is fetched there, or comes back
+  as the classified missing-head reason the tick turns into a wait — not as a generic worktree-creation failure.
 - Still missing: the auto tick (`scheduler-auto-tick.ts`, reviewer creation and review pin) has already cancelled the intent; under
   `on` it records an attempt note (`scheduler-recovery-observe`, key card + head + attempt) and the card waits instead of escalating.
   `headRefetchHold` (asked via `peerPrHold` before planning, with the tick's policy; anything but `on` = no hold, so switching off
