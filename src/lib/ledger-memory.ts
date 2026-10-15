@@ -98,6 +98,23 @@ export interface MemoryInput {
   decisionOf?: { origin: string; originSeq: number };
   /** 调用方额外认定为内部内容的词（如 peers.json 里的 peer 名），命中即 home */
   internalTerms?: readonly string[];
+  /**
+   * PMEMTUNE1：只给自动总结。随写入事件落 costUsd（数值 = 这次模型调用的花费；null = 没有可算的数）与 costReason
+   * （no_model_call = 没调模型；cost_unknown = 调了但算不出），memory-metrics 的成本口径读它。
+   */
+  cost?: SummaryCost;
+}
+
+export interface SummaryCost { costUsd: number | null; reason: "no_model_call" | "cost_unknown" | null; detail?: string }
+
+/** 只收结构对的 cost：数值要有限非负，null 要带原因；其它一律当没给（不挡写入） */
+function costData(kind: MemoryKind, cost: SummaryCost | undefined): Record<string, unknown> {
+  if (kind !== "summary" || !cost) return {};
+  if (typeof cost.costUsd === "number" && Number.isFinite(cost.costUsd) && cost.costUsd >= 0) return { costUsd: Number(cost.costUsd.toFixed(8)) };
+  if (cost.costUsd === null && (cost.reason === "no_model_call" || cost.reason === "cost_unknown")) {
+    return { costUsd: null, costReason: cost.reason, ...(cost.detail ? { costDetail: String(cost.detail).slice(0, 80) } : {}) };
+  }
+  return {};
 }
 
 export interface MemoryWrite {
@@ -374,7 +391,7 @@ export function recordMemory(db: Database, ctx: MemoryCtx, input: MemoryInput): 
       ).run(id, origin, originSeq, project, kind, anchor.featureId, anchor.nodeKey, anchor.taskId, JSON.stringify(files), family, title, body,
         input.fixable === undefined ? null : input.fixable ? 1 : 0, JSON.stringify(sources), sourceNote, via, ctx.actor, authorRole, head, specRev,
         visibility, MEMORY_REDACTION_VERSION, digest, now);
-      const event = insertMemoryEvent(db, ctx, project, anchor.taskId ?? anchor.featureId ?? "", { memoryId: id, kind }, now);
+      const event = insertMemoryEvent(db, ctx, project, anchor.taskId ?? anchor.featureId ?? "", { memoryId: id, kind, ...costData(kind, input.cost) }, now);
       return { memory: getMemory(db, id) as Memory, event, duplicate: false, homeReason };
     }).immediate(),
   );

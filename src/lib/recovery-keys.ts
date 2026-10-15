@@ -64,6 +64,8 @@ export const RECOVERY_KEYS = [
   "manualRecovery",
   "manualStall",
   "materials",
+  "memoryDirectInjection",
+  "memoryLendInjection",
   "mergeContentReview",
   "mergeContentUi",
   "mergeDeployDetach",

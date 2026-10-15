@@ -27,6 +27,7 @@ import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { p2DiffNotice } from "./p2-backlog-notice.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
+import { sendWithMemory } from "./memory-inject-dispatch.js";
 import { paceCards, rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeFirst } from "./scheduler-merge-order.js";
 import { peerPrHold } from "./peer-pr-hold.js";
@@ -261,7 +262,7 @@ class Card {
       const late = ref.role === "reviewer" ? await this.refusalLapse({ intent, plan }) : null;
       return late ? { status: "rejected" as const, route: w.route, reason: late } : w.submit(...args);
     } };
-    return this.fromDrive(await driveDispatch(this.ops(), guarded, ref, { ...order, delivery }));
+    return this.fromDrive(await sendWithMemory(this.db, this.task, { ...order, delivery }, (o) => driveDispatch(this.ops(), guarded, ref, o)));
   }
 
   fromDrive(r: DriveOutcome): CardOutcome {
