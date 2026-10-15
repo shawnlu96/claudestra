@@ -54,6 +54,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "effect-count-refresh.ts": "ledger=1", // EFFAUTO1: `ledger scheduler-recovery-observe` for effCountRefresh notes, through the pass manager
     "fix-strategy-tick.ts": "ledger=10",
     "ledger-pool-refusal-tick.ts": "ledger=1",
+    "ledger-priority-stall-tick.ts": "ledger=1 notice=2",
     "lend-author-retire-tick.ts": "ledger=2",
     "lend-fix-reassign-tick.ts": "ledger=2",
     "lend-pr-takeover-refusal-request.ts": "ledger=1",
@@ -93,6 +94,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1",
     "scheduler-post-verify.ts": "ledger=2",
+    "scheduler-priority-now-tick.ts": "ledger=1",
     "scheduler-recovery-ports.ts": "ledger=5",
     "scheduler-review-pm-tick.ts": "ledger=1",
     "scheduler-review-seat-wait.ts": "ledger=1",
@@ -212,6 +214,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-pool-refusal.ts": "sql=2 stmt=2",
     "ledger-priority-lifecycle.ts": "sql=8 stmt=8",
     "ledger-priority-schema.ts": "sql=1 stmt=2",
+    "ledger-priority-stall-store.ts": "sql=1 stmt=1",
     "ledger-priority-write.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
