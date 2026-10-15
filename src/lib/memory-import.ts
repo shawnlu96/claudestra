@@ -134,7 +134,10 @@ function writeRow(db: Database, ctx: MemoryCtx, key: string, input: MemoryInput)
 function unexpectedReason(e: unknown): string {
   const name = e instanceof Error ? e.constructor.name || e.name : typeof e;
   const first = (e instanceof Error ? e.message : String(e)).split(/\r?\n/)[0]!.trim();
-  return redactForPeer(`字段结构不合法（${name}${first ? `: ${first}` : ""}）`.slice(0, 200)).text;
+  // Redact the whole detail before truncating: a cut can shorten a secret below the redactor's match length, and placeholders can grow the text.
+  const detail = redactForPeer(`${name}${first ? `: ${first}` : ""}`).text;
+  const head = "字段结构不合法（", tail = "）";
+  return `${head}${detail.slice(0, 200 - head.length - tail.length)}${tail}`;
 }
 
 function inspectRow(db: Database, ctx: MemoryCtx, project: string, raw: string, line: number, vectors: ImportVectors): ImportRow | ImportIssue {

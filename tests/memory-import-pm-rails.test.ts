@@ -79,3 +79,17 @@ test("[验收线 3] 计划阶段的非 LedgerError 带原始类名与首行消�
   expect(issue.reason).not.toContain(secret);
   expect(issue.reason.length).toBeLessThanOrEqual(200);
 });
+
+test("[验收线 3] 先脱敏再截断：跨 200 字边界的密钥不漏片段，占位符扩张后总长仍 ≤200", () => {
+  const reasonFor = (message: string) => {
+    const boom: ImportVectors = { size: 1, get: () => { throw new Error(message); } } as unknown as ImportVectors;
+    return planMemoryImport(db, ctx, "demo", JSON.stringify(row()), boom).issues[0]!.reason;
+  };
+  const key = ["AKIA", "QWERTYUIOPASDFGH"].join("");
+  for (let pad = 160; pad <= 200; pad++) {
+    const reason = reasonFor(`${"x".repeat(pad)} ${key}`);
+    expect(reason.length).toBeLessThanOrEqual(200);
+    expect(reason).not.toContain(key.slice(0, 6));
+  }
+  for (let pad = 160; pad <= 200; pad++) expect(reasonFor(`${"x".repeat(pad)} a@b.co`).length).toBeLessThanOrEqual(200);
+});
