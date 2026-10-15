@@ -2,7 +2,7 @@
  * Full reruns start before merge driving, including cards waiting without the merge slot. Claims survive daemon restarts.
  * Fairness (CIQFAIR1): the slot holder waiting on CI is read first; a card whose PR settled ineligible (full marker, no light,
  * red, not an open main PR) is not read again for ten minutes at the same head, and a card inside its rerun window is not read,
- * so neither spends one of the four reads a pass may make.
+ * so neither spends one of the four reads a pass may make. All of this applies in on mode only; observe reads as before.
  */
 import type { Database } from "bun:sqlite";
 import { CI_SCOPE_LIGHT, CI_SCOPE_FULL, lightOnly } from "./ci-queue-full.js";
@@ -41,7 +41,7 @@ export async function ciQueueFullStep(db: Database, config: SchedulerConfig, io:
   let times = readTimes.get(db), judged = judgedTimes.get(db);
   if (!times) readTimes.set(db, times = new Map());
   if (!judged) judgedTimes.set(db, judged = new Map());
-  const holders = slotHolders(db);
+  const holders = slotHolders(db, io);
   const cards = mergeFirst(db, db.query("SELECT id AS taskId FROM tasks WHERE stage='merge' AND pr IS NOT NULL AND headSHA IS NOT NULL ORDER BY id")
     .all() as { taskId: string }[]);
   cards.sort((a, b) => Number(holders.has(b.taskId)) - Number(holders.has(a.taskId))); // stable: holders first, mergeFirst otherwise
@@ -52,7 +52,7 @@ export async function ciQueueFullStep(db: Database, config: SchedulerConfig, io:
     const mode = modeOf(io, task.project), readKey = `${taskId}@${task.headSHA}`;
     if (mode === "off" || now - (times.get(readKey) ?? -Infinity) < 60_000) continue;
     // The holder is always re-read (a manual rerun may have turned it green); the judged cache only ever skips an inspect.
-    if (!holders.has(taskId) && now - (judged.get(readKey) ?? -Infinity) < JUDGED_MS) continue;
+    if (mode === "on" && !holders.has(taskId) && now - (judged.get(readKey) ?? -Infinity) < JUDGED_MS) continue;
     if (mode === "on" && rerunWithin(db, task, now)) continue;
     if (reads >= 4 || io.pace?.yieldNow()) break;
     reads++;
@@ -67,7 +67,7 @@ export async function ciQueueFullStep(db: Database, config: SchedulerConfig, io:
       if (mode === "observe" && lightOnly(pr.checks)) await note(io, task, `disabled:${task.headSHA.slice(0, 12)}`,
         "ciQueueFull 不是 on，不会自动补跑，卡会一直等", { head: task.headSHA });
       const run = eligible(task, pr, cfg.requiredChecks);
-      if (!run && settled(pr)) judged.set(readKey, now);
+      if (mode === "on" && !run && settled(pr)) judged.set(readKey, now);
       if (!run || !current(db, task)) continue;
       await request(db, task, run, mode, io, now);
     } catch (e) {
@@ -84,11 +84,11 @@ function current(db: Database, t: LedgerTask): boolean {
     && (!gate || decide(gate, t.project, t.id, t.headSHA!) === "go");
 }
 
-/** Cards holding their project's merge slot while the merge journal waits on CI. */
-function slotHolders(db: Database): Set<string> {
-  const rows = db.query(`SELECT r.taskId FROM scheduler_resources r JOIN scheduler_merges m ON m.intentId = r.intentId
-    WHERE r.resource = 'merge:' || r.project AND m.project = r.project AND m.phase = 'await_ci'`).all() as { taskId: string }[];
-  return new Set(rows.map((r) => r.taskId));
+/** Cards holding their on-mode project's merge slot while the merge journal waits on CI. */
+function slotHolders(db: Database, io: QueueFullIo): Set<string> {
+  const rows = db.query(`SELECT r.taskId, r.project FROM scheduler_resources r JOIN scheduler_merges m ON m.intentId = r.intentId
+    WHERE r.resource = 'merge:' || r.project AND m.project = r.project AND m.phase = 'await_ci'`).all() as { taskId: string; project: string }[];
+  return new Set(rows.filter((r) => modeOf(io, r.project) === "on").map((r) => r.taskId));
 }
 
 /** A PR whose ineligibility will not change without a new head or a human: anything still pending (or nothing reported yet) is not. */

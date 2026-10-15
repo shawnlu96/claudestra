@@ -7,17 +7,18 @@ import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-drive
 
 const H = "a".repeat(40), H2 = "b".repeat(40), ROUND = 200_000;
 const config = { enabled: true, pollMs: 1000, autoDispatch: false, projects: { p: { repoDir: ".", maxActiveWorkers: 1, requiredChecks: ["check"] } } };
-type Kind = "light" | "full" | "pending";
+type Kind = "light" | "full" | "pending" | "fail";
 const pr = (i: number) => `https://github.com/o/r/pull/${i}`;
 function checks(i: number, kind: Kind): PrSnapshot["checks"] {
   const light = { name: "ci scope light", bucket: "pass" as const, link: `https://github.com/o/r/actions/runs/${100 + i}/job/7` };
+  if (kind === "fail") return [{ name: "check", bucket: "fail" }, light];
   if (kind === "pending") return [{ name: "check", bucket: "pending" }, { ...light, bucket: "pending" }];
   return kind === "full" ? [{ name: "check", bucket: "pass" }, light, { name: "ci scope full", bucket: "pass" }] : [{ name: "check", bucket: "pass" }, light];
 }
 
 /** Six merge cards T1..T6 in mergeFirst order (no entry events → id order), each with its own PR and light run 10i. */
-function fixture(kinds: Kind[]) {
-  const db = openLedger(":memory:"), heads = kinds.map(() => H), reads = kinds.map(() => 0), commands: string[] = [];
+function fixture(kinds: Kind[], mode: "on" | "observe" = "on") {
+  const db = openLedger(":memory:"), heads = kinds.map(() => H), reads = kinds.map(() => 0), commands: string[] = [], actions: string[] = [];
   kinds.forEach((_, n) => {
     createTask(db, { actor: "owner", now: n + 1 }, { project: "p", id: `T${n + 1}`, title: "card", kind: "code" });
     db.query("UPDATE tasks SET stage='merge', headSHA=?, pr=?, branch='task/T' WHERE id=?").run(H, pr(n + 1), `T${n + 1}`);
@@ -26,16 +27,16 @@ function fixture(kinds: Kind[]) {
   const snapshot = (n: number): PrSnapshot => ({ state: "OPEN", head: heads[n]!, base: "main", branch: "task/T", draft: false, crossRepository: false,
     mergeState: "CLEAN", mergeSha: null, checks: checks(n + 1, kinds[n]!) });
   const io = {
-    manager: async (...args: string[]) => ({ ok: true, ...recordObserved(db, { project: "p", target: args[2]!, mechanism: "ciQueueFull" as never,
+    manager: async (...args: string[]) => (actions.push(args[args.indexOf("--action") + 1]!), { ok: true, ...recordObserved(db, { project: "p", target: args[2]!, mechanism: "ciQueueFull" as never,
       actionKey: args[args.indexOf("--action-key") + 1]!, action: args[args.indexOf("--action") + 1]!, data: JSON.parse(args[args.indexOf("--data") + 1]!) }, now) }),
     external: () => ({ inspect: async (ref: string) => { const n = Number(ref.split("/").pop()) - 1; reads[n]!++; return snapshot(n); },
       freshness: async () => ({ behindBy: 0, mainHead: H }), carryReview: async () => ({ ok: false, reason: "no" }),
       updateBranch: async () => {}, merge: async () => H }) satisfies MergeExternal,
     command: async (args: string[]) => { commands.push(args[3]!); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
-    active: () => {}, policy: () => ({ mode: "on" as const, source: "config" as const, manualAfterMs: null }), now: () => now,
+    active: () => {}, policy: () => ({ mode, source: "config" as const, manualAfterMs: null }), now: () => now,
   };
   return {
-    db, reads, commands, kinds, tick: async () => { expect(await ciQueueFullStep(db, config, io)).toEqual([]); },
+    db, reads, commands, actions, kinds, tick: async () => { expect(await ciQueueFullStep(db, config, io)).toEqual([]); },
     advance: (ms: number) => { now += ms; },
     move: (n: number, kind: Kind) => { heads[n - 1] = H2; kinds[n - 1] = kind; db.query("UPDATE tasks SET headSHA=? WHERE id=?").run(H2, `T${n}`); },
     hold: (n: number, phase = "await_ci") => {
@@ -94,5 +95,24 @@ test("pending checks are never judged: re-read after sixty seconds", async () =>
     expect(f.reads).toEqual([2, 1]); expect(f.commands).toEqual([]);
     f.kinds[0] = "light"; f.advance(60_001); await f.tick();
     expect(f.commands).toEqual(["101"]);
+  } finally { closeLedger(":memory:"); }
+});
+
+test("[验收线 4] observe keeps the sixty-second re-read: same head going from red to green is observed on the next pass", async () => {
+  const f = fixture(["fail"], "observe");
+  try {
+    await f.tick(); f.kinds[0] = "light"; f.advance(ROUND); await f.tick();
+    expect(f.reads).toEqual([2]); expect(f.commands).toEqual([]);
+    expect(f.actions).toContain("本会重跑 101");
+  } finally { closeLedger(":memory:"); }
+});
+
+test("[验收线 4] observe neither caches judged cards nor moves the slot holder ahead", async () => {
+  const f = fixture(["full", "full", "full", "full", "light", "light"], "observe");
+  try {
+    f.hold(6);
+    await f.tick(); expect(f.reads).toEqual([1, 1, 1, 1, 0, 0]);
+    f.advance(ROUND); await f.tick(); expect(f.reads).toEqual([2, 2, 2, 2, 0, 0]);
+    expect(f.commands).toEqual([]);
   } finally { closeLedger(":memory:"); }
 });
