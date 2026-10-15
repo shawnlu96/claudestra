@@ -136,6 +136,9 @@ export function observeWrite(db: Database, ctx: WriteCtx, input: { taskId: strin
     if (task.headSHA === input.head) return hold("head 没变");
     const inFlight = openRedelivery(db, task);
     if (inFlight) return hold(`补发 ${inFlight} 已认领、还没有结果：它绑的是现在这个 head，出了结果再换`);
+    // PEERHEAD1 item 7 (on only; off / observe keep the old drift): a freeze / hold / pause / open ask / safety hold stops the registration here too
+    const block = input.lineage && headReviewMode(task.project) === "on" ? flowBlock(db, task, listEvents(db, { project: task.project, target: task.id })) : null;
+    if (block) return hold(block);
     if (task.stage === "review") {
       if (!hasRoundVerdict(db, task)) return hold("本轮结论还没出：先审完旧 head");
       task = moveStage(db, ctx, { taskId: task.id, from: "review", to: "fix", asPm: true, text: "PR head 在结论之后变了：改审新 head" }).row;

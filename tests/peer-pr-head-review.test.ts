@@ -238,6 +238,22 @@ describe("自动卡：到顶判定读结论（验收线 1 / 7）", () => {
     expect(w.card()).toMatchObject({ stage: "fix", round: 2, headSHA: H2 });
     w.f.close();
   });
+
+  test("自动卡冻结（on）：作者新推不换 head、不进轮、不登记；off 照旧收新 head（验收线 6 / 7）", async () => {
+    for (const mode of ["on", "off"] as const) {
+      setModes(mode, mode);
+      const w = world();
+      await firstRound(w, "changes");
+      setFrozen(w.f.db, pm(w), { project: "p", frozen: true, reason: "冻一下" });
+      await w.push(H2);
+      await w.settle();
+      expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("auto");
+      if (mode === "on") expect(w.card()).toMatchObject({ stage: "fix", round: 1, headSHA: H1 });
+      else expect(w.card()).toMatchObject({ stage: "review", round: 2, headSHA: H2 });
+      expect(registrations(w)).toEqual([]);
+      w.f.close();
+    }
+  });
 });
 
 describe("manual 卡：受限自动复审 → 代排（验收线 2–8）", () => {
