@@ -7,7 +7,7 @@ import { fail, parseAuthorizationBind, parseCommand, V2ContractError, v2ObjectDi
   type V2AuthorizationBind, type V2Command, type V2Fence } from "../lib/shared-ledger-contract-v2.js";
 import type { SharedLedgerExecClient } from "../lib/shared-ledger-exec-client.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
-import { answerMigrationAsk, migrationAskRecord } from "../lib/shared-ledger-v2-migration-ask-answer.js";
+import { answerMigrationAsk, migrationAskRecord, syncMigrationAsk } from "../lib/shared-ledger-v2-migration-ask-answer.js";
 import type { AnswerInput } from "./asks.js";
 import { sharedAnswerValue, sharedAskMapping, sharedAskOptions, sharedAskView, type SharedAskMapping } from "./shared-ledger-v2-asks-mapping.js";
 
@@ -143,10 +143,12 @@ async function query(a: Ask, principal?: string) {
 
 /** All three answer entry points arrive here; no local decision or answer is persisted. */
 export async function sharedAskAnswer(input: AnswerInput): Promise<Ask | null> {
-  try { return migrationAskRecord(input.ask) ? await migrationAnswer(input) : await runSharedAnswer(input); } catch (error) {
+  let migration = false;
+  try { migration = !!migrationAskRecord(input.ask); return migration ? await migrationAnswer(input) : await runSharedAnswer(input); } catch (error) {
     if (!(error instanceof V2ContractError)) throw error;
-    if (error.status === 409) throw new LedgerError("conflict", error.code);
-    const status = error.status >= 500 ? 503 : error.status === 400 ? 400 : 403;
+    // A migration refusal keeps the center's 409 code: LedgerError("conflict") is rendered by ask-entry as "already answered".
+    if (error.status === 409 && !migration) throw new LedgerError("conflict", error.code);
+    const status = error.status >= 500 ? 503 : error.status === 400 || error.status === 409 ? error.status : 403;
     throw runtime?.rejected(status, error.code, error.message) ?? error;
   }
 }
@@ -171,9 +173,29 @@ async function runSharedAnswer(input: AnswerInput): Promise<Ask | null> {
 /** A migration authorization card (peer-MIGASK1) is answered only at the center, and only by the owner. */
 async function migrationAnswer(input: AnswerInput): Promise<Ask> {
   if (!runtime) fail("unavailable");
-  const a = await answerMigrationAsk({ ...input, owner: isOwnerSource(input.from) }, runtime.db());
-  runtime.publish(a);
-  return a;
+  const db = runtime.db();
+  try {
+    const a = await answerMigrationAsk({ ...input, owner: isOwnerSource(input.from) }, db);
+    runtime.publish(a);
+    return a;
+  } catch (error) {
+    const now = getAsk(db, input.ask.id); // a refusal can still have closed the card to the center's terminal state
+    if (now && now.state !== input.ask.state) runtime.publish(now);
+    throw error;
+  }
+}
+/** `ledger shared-exec migration-ask` opens the owner's card from the CLI process, which has no publish path: the bridge sends
+ * each such card's ask event once (push, Discord digest, web SSE) and marks it, so a bridge restart only repeats unmarked ones. */
+export function publishMigrationAsks(): number {
+  if (!runtime) return 0;
+  const db = runtime.db(), rows = db.query(`SELECT id FROM asks WHERE state = 'open' AND kind = 'authorize'
+    AND json_extract(extra, '$.migrationAsk') IS NOT NULL AND json_extract(extra, '$.migrationAskPublishedAt') IS NULL`).all() as { id: string }[];
+  for (const { id } of rows) {
+    const a = getAsk(db, id);
+    if (a) runtime.publish(a);
+    patchAsk(db, id, { extra: { migrationAskPublishedAt: Date.now() } });
+  }
+  return rows.length;
 }
 export async function readSharedAsk(a: Ask, principal?: string): Promise<Ask> {
   const ctx = await query(a, principal);
@@ -183,6 +205,7 @@ export async function readSharedAsk(a: Ask, principal?: string): Promise<Ask> {
 export async function displaySharedAsk(a: Ask, principal?: string): Promise<Ask> {
   const stale = () => ({ ...a, extra: { ...a.extra, displayStale: true } });
   try {
+    if (Object.hasOwn(a.extra, "migrationAsk") && runtime) return await syncMigrationAsk(a, runtime.db());
     if (sharedAskMapping(a) && (!ready() || port!.mode(a.project) !== "on" || port!.route!(a.taskId!) !== "central")) return stale();
     const view = await readSharedAsk(a, principal);
     displayFailures.delete(a.id);

@@ -20,7 +20,10 @@ import { frozenManifestPath, readFrozenManifest } from "../src/lib/shared-ledger
 import { configureMigrationAsks } from "../src/lib/shared-ledger-v2-migration-ask-answer.js";
 import { LedgerCli } from "../src/manager/ledger-context.js";
 import { sharedExecRun } from "../src/manager/ledger-shared-exec-cmds.js";
-import { commitAnswer, setAsksForTest } from "../src/bridge/asks.js";
+import { commitAnswer, onAsk, setAsksForTest } from "../src/bridge/asks.js";
+import { answerFromCard } from "../src/bridge/ask-entry.js";
+import { displaySharedAsk, publishMigrationAsks } from "../src/bridge/shared-ledger-v2-asks.js";
+import { owner as ownerPrincipal } from "./asks-test-kit.js";
 import { initSharedAskWiring } from "../src/bridge/shared-ledger-v2-asks-wiring.js";
 import type { Endpoint } from "../src/bridge/router.js";
 
@@ -135,10 +138,14 @@ async function world(edit: (m: Obj) => void = () => {}) {
 }
 const owner: Endpoint = { kind: "user", userId: "owner-discord", channelId: "123" };
 const pmApi: Endpoint = { kind: "api", tokenId: "tok-pm", name: "agent-claudestra" };
-function answer(w: Awaited<ReturnType<typeof world>>, a: Ask, wire: string, from: Endpoint) {
+/** The bridge side: ask database, shared-ask runtime and the owner transport port. */
+function bridge(w: Awaited<ReturnType<typeof world>>) {
   setAsksForTest({ path: w.ledgerPath, registry: [] });
   initSharedAskWiring();
   configureMigrationAsks({ transportFor: () => w.center.transport });
+}
+function answer(w: Awaited<ReturnType<typeof world>>, a: Ask, wire: string, from: Endpoint) {
+  bridge(w);
   return commitAnswer({ ask: getAsk(w.ledger, a.id)!, picks: [{ wire, label: wire, group: "0" }], text: "", from,
     principal: from.kind === "user" ? "owner:self" : "guest:pm", via: "web_card" });
 }
@@ -272,17 +279,76 @@ describe("验收线 3：owner 批准经 bridge 转发到中心", () => {
     expect(getAsk(w.ledger, card.id)!.state).toBe("open");
   });
 
-  test("中心那边已答过 / 中心拒绝作答：原样报错，本机不记批准", async () => {
+  test("中心拒绝作答：原样报错，本机不记批准、卡保持 open", async () => {
+    const w = await world();
+    await w.ask();
+    const card = localCard(w), transport = w.center.transport as unknown as { call: unknown };
+    transport.call = async () => fail("authorization_mismatch");
+    await expect(answer(w, card, "[button:approve]", owner)).rejects.toMatchObject({ status: 403, code: "authorization_mismatch" });
+    expect(getAsk(w.ledger, card.id)!.state).toBe("open");
+  });
+
+  test("中心 409（stale_epoch）经网页作答入口仍是中心的码，不显示成「已处理」", async () => {
+    const w = await world();
+    await w.ask();
+    const card = localCard(w), transport = w.center.transport as unknown as { call: unknown };
+    transport.call = async () => fail("stale_epoch");
+    bridge(w);
+    const res = await answerFromCard(PROJECT, card.id, { choices: ["[button:approve]"] }, ownerPrincipal());
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, code: "stale_epoch" });
+    expect(getAsk(w.ledger, card.id)!.state).toBe("open");
+  });
+
+  test("中心已结案（别处答过 / 撤回）：作答报 409，本机卡跟到中心的终态（只作展示）", async () => {
     const w = await world();
     await w.ask();
     const card = localCard(w), a = w.center.asks.get("center-ask-1")!;
     w.center.asks.set(a.id, { ...a, state: "cancelled" });
-    await expect(answer(w, card, "[button:approve]", owner)).rejects.toMatchObject({ code: "conflict" });
-    w.center.asks.set(a.id, a);
-    const transport = w.center.transport as unknown as { call: unknown };
-    transport.call = async () => fail("authorization_mismatch");
-    await expect(answer(w, card, "[button:approve]", owner)).rejects.toMatchObject({ status: 403, code: "authorization_mismatch" });
+    await expect(answer(w, card, "[button:approve]", owner)).rejects.toMatchObject({ status: 409, code: "conflict" });
+    expect(getAsk(w.ledger, card.id)).toMatchObject({ state: "cancelled", answer: null, extra: { migrationAskCenter: { state: "cancelled" } } });
+  });
+});
+
+describe("中心批准后回包丢失：本机卡能恢复", () => {
+  test("owner 再点同一个批准：报 409，本机卡跟到中心的 answered / approved，不再停在 open", async () => {
+    const w = await world();
+    await w.ask();
+    const card = localCard(w), transport = w.center.transport as unknown as { call: (...a: unknown[]) => Promise<unknown> };
+    const send = transport.call;
+    transport.call = async (...args) => { await send(...args); return fail("unavailable"); };
+    await expect(answer(w, card, "[button:approve]", owner)).rejects.toMatchObject({ status: 503 });
+    expect(w.center.asks.get("center-ask-1")).toMatchObject({ state: "answered", decision: "approved" });
     expect(getAsk(w.ledger, card.id)!.state).toBe("open");
+    await expect(answer(w, card, "[button:approve]", owner)).rejects.toMatchObject({ status: 409 });
+    expect(getAsk(w.ledger, card.id)).toMatchObject({ state: "answered", extra: { migrationAskCenter: { state: "answered", decision: "approved" } } });
+    expect(w.center.commands.filter(c => c.type === "ask.answer")).toHaveLength(1);
+  });
+
+  test("不再点：列表展示读中心，本机卡同步成 answered", async () => {
+    const w = await world();
+    await w.ask();
+    const card = localCard(w), transport = w.center.transport as unknown as { call: (...a: unknown[]) => Promise<unknown> };
+    const send = transport.call;
+    transport.call = async (...args) => { await send(...args); return fail("unavailable"); };
+    await expect(answer(w, card, "[button:approve]", owner)).rejects.toMatchObject({ status: 503 });
+    expect((await displaySharedAsk(getAsk(w.ledger, card.id)!)).state).toBe("answered");
+    expect(getAsk(w.ledger, card.id)!.state).toBe("answered");
+  });
+});
+
+describe("验收线 3：owner 收到授权卡", () => {
+  test("命令在 CLI 进程建卡后，bridge 补发一次 ask 事件（推送 / Discord / 网页都订 onAsk），再扫不重复", async () => {
+    const w = await world();
+    const out = await w.ask();
+    bridge(w);
+    const seen: Ask[] = [], off = onAsk(a => { seen.push(a); });
+    try {
+      expect(publishMigrationAsks()).toBe(1);
+      expect(seen.map(a => [a.id, a.state, a.kind, a.fromAgent])).toEqual([[out.localAskId, "open", "authorize", null]]);
+      expect(publishMigrationAsks()).toBe(0);
+      expect(seen).toHaveLength(1);
+    } finally { off(); }
   });
 });
 

@@ -10,7 +10,7 @@ import {
   array, digest, fail, id, integer, literal, object, parseCommand, positive, scope, v2ObjectDigest, V2_MIGRATION_FEATURE_IDS_MAX,
   type V2Ask,
 } from "./shared-ledger-contract-v2.js";
-import { answerAsk, type Ask, type AskVia } from "./ledger-asks.js";
+import { answerAsk, getAsk, patchAsk, type Ask, type AskVia } from "./ledger-asks.js";
 import type { Stage2Transport } from "./shared-ledger-v2-transport.js";
 
 export const MIGRATION_APPROVE = "approve";
@@ -43,10 +43,32 @@ function decisionOf(picks: MigrationAnswerInput["picks"]): "approved" | "rejecte
 }
 /** The center's current view of the ask must still be the one this card was opened for. */
 function assertSameAsk(center: V2Ask, r: MigrationAskRecord): void {
-  if (center.state === "expired") fail("authorization_expired");
-  if (center.state !== "open") fail("conflict");
-  if (center.kind !== "authorize" || center.taskId !== null || center.featureId !== r.centerFeatureId
+  if (center.id !== r.centerAskId || center.kind !== "authorize" || center.taskId !== null || center.featureId !== r.centerFeatureId
     || center.bind?.actionDigest !== r.actionDigest || !center.bind.actions.includes("migration")) fail("authorization_mismatch");
+}
+function centerTransport(a: Ask, r: MigrationAskRecord) {
+  const transport = port?.transportFor(a.project) ?? fail("unavailable");
+  if (transport.scope.teamId !== r.teamId || transport.scope.projectId !== r.projectId) fail("forbidden");
+  return transport;
+}
+/** A center-terminal ask closes the local card as display only (state + extra.migrationAskCenter, no answer or decision
+ * event): an answer whose response was lost, or one given elsewhere, must not leave the card open forever. Returns the row
+ * when this call changed it. */
+function recordCenterState(db: Database, a: Ask, center: V2Ask): Ask | null {
+  if (center.state === "open") return null;
+  const changed = db.query("UPDATE asks SET state = ?, updatedAt = ? WHERE id = ? AND state = 'open'").run(center.state, Date.now(), a.id).changes;
+  if (!changed) return null;
+  patchAsk(db, a.id, { extra: { migrationAskCenter: { state: center.state, decision: center.decision, answeredAt: center.answeredAt } } });
+  return getAsk(db, a.id);
+}
+/** List / display path: an open migration card follows the center's terminal state. Throws when the center is unreachable;
+ * display callers keep the local row then. */
+export async function syncMigrationAsk(a: Ask, db: Database): Promise<Ask> {
+  const r = migrationAskRecord(a);
+  if (!r || a.state !== "open") return a;
+  const center = await centerTransport(a, r).ask(r.centerAskId);
+  assertSameAsk(center, r);
+  return recordCenterState(db, a, center) ?? a;
 }
 
 /** Owner answer → center ask.answer → local display answer. Throws V2ContractError (the bridge maps it to 403 / 409 / 503). */
@@ -56,10 +78,12 @@ export async function answerMigrationAsk(input: MigrationAnswerInput, db: Databa
   if (input.ask.state !== "open") fail("conflict");
   if (input.ask.expiresAt <= now) fail("authorization_expired");
   const decision = decisionOf(input.picks);
-  const transport = port?.transportFor(input.ask.project) ?? fail("unavailable");
-  if (transport.scope.teamId !== r.teamId || transport.scope.projectId !== r.projectId) fail("forbidden");
-  const center = await transport.ask(r.centerAskId);
+  const transport = centerTransport(input.ask, r), center = await transport.ask(r.centerAskId);
   assertSameAsk(center, r);
+  if (center.state !== "open") {
+    recordCenterState(db, input.ask, center);
+    fail(center.state === "expired" ? "authorization_expired" : "conflict");
+  }
   await transport.call("commands", {}, parseCommand({ teamId: r.teamId, projectId: r.projectId, ...r.fence,
     requestId: `migration-answer-${randomUUID()}`, type: "ask.answer", payload: { askId: r.centerAskId, expectedRev: center.rev,
       bindDigest: v2ObjectDigest(center.bind), answer: { kind: "option", optionId: decision === "approved" ? MIGRATION_APPROVE : MIGRATION_REJECT },

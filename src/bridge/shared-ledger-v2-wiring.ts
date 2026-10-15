@@ -21,7 +21,7 @@ import { resolveSharedLedgerCredential } from "../lib/shared-ledger-mode.js";
 import { fail, parseAuthorizationBind, v2ObjectDigest, type V2AuthorizationBind, type V2Command } from "../lib/shared-ledger-contract-v2.js";
 import { OWNER_PRINCIPAL, Stage2Wiring, type ExecFeatureRef, type Stage2Principal, type Stage2WiringOptions } from "../lib/shared-ledger-v2-wiring.js";
 import { configureMigrationAsks } from "../lib/shared-ledger-v2-migration-ask-answer.js";
-import { configureSharedAsks, type SharedAskCommandContext } from "./shared-ledger-v2-asks.js";
+import { configureSharedAsks, publishMigrationAsks, type SharedAskCommandContext } from "./shared-ledger-v2-asks.js";
 import { configureSharedExecEntry } from "./shared-ledger-v2-entry.js";
 import { configureLendCentral, configureLendCentralRouting } from "./shared-ledger-v2-lend.js";
 import { sharedExecWebContext } from "./shared-ledger-v2-web-context.js";
@@ -122,7 +122,14 @@ function configureAsks(c: Ctx): void {
   });
   // Migration authorization answers sign with the same owner Principal as the business asks above.
   configureMigrationAsks({ transportFor: (p) => wiring.transportFor(p, OWNER_PRINCIPAL) });
+  // Cards opened by the migration-ask CLI reach the owner within one tick; an unwired bridge has no center to answer them anyway.
+  migrationSweep = setInterval(() => {
+    try { publishMigrationAsks(); } catch (e) { console.warn(`[stage2 bridge] migration ask publish failed, retried next tick: ${(e as Error).message}`); }
+  }, MIGRATION_SWEEP_MS);
+  migrationSweep.unref?.();
 }
+const MIGRATION_SWEEP_MS = 5_000;
+let migrationSweep: ReturnType<typeof setInterval> | null = null;
 
 /** S2L (E1): both the central port and the routing port; bindings and results from trusted home records (wiring-lend). */
 function configureLend(c: Ctx): void {
@@ -218,6 +225,7 @@ export function initSharedLedgerV2(opts: SharedLedgerV2Options = {}): SharedLedg
   const stop = () => {
     configureSharedAsks(null); configureMigrationAsks(null); configureLendCentral(null); configureLendCentralRouting(null); configureSharedExecEntry(null);
     configureSchedulerV2Pass(null);
+    if (migrationSweep) clearInterval(migrationSweep), migrationSweep = null;
     reader?.close();
     active = null;
   };
