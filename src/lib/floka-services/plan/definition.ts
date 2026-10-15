@@ -11,7 +11,7 @@ export function createServicePlan(id: string, input: Omit<DaemonPlistInput, "dae
     legacyLabels: [...LEGACY],
     services: NAMES.map((name) => ({
       name, oldLabel: `com.claudestra.${name}`, newLabel: `ai.floka.${name}`,
-      plist: renderDaemonPlist({ ...input, daemon: { label: `ai.floka.${name}`, script: `src/${name}.ts`, stem: name } }),
+      plist: renderDaemonPlist({ ...input, escapeXml: true, daemon: { label: `ai.floka.${name}`, script: `src/${name}.ts`, stem: name } }),
     })),
   };
 }
