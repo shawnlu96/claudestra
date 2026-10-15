@@ -1,14 +1,14 @@
 /** Scheduler reclaim is a capability of one current cross-family fix intent, never a substitute for PM identity. */
 import type { Database } from "bun:sqlite";
 import { mustTask, resolveAssignee, type WriteCtx } from "./ledger-checks.js";
-import { getWorkflow } from "./ledger-scheduler.js";
+import { getIntent, getWorkflow } from "./ledger-scheduler.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { convergeReview } from "./review-converge.js";
 import { fixStrategy } from "./fix-strategy.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
-import { endWriteLease, heldLease, type WriteLease } from "./ledger-lend-lease.js";
+import { endWriteLease, getWriteLease, heldLease, type WriteLease } from "./ledger-lend-lease.js";
 import { listLendOrders } from "./ledger-lend.js";
 import { isWriteStep } from "./lend-git.js";
 import { insertEvent, tx } from "./ledger-tx.js";
@@ -19,6 +19,8 @@ import { leaseRestore } from "./lend-send-back-restore.js";
 import { recordStoppedExits, stoppedReportSeq } from "./lend-reclaim-stopped.js";
 import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 import { localSwapAuthority, localSwapEvidenceOf, localSwapTrigger } from "./recovery-fix-local-swap-run.js";
+import type { LedgerEvent } from "./ledger-stages.js";
+import { selfHealMode, selfHealSample } from "./fix-swap-halfbuilt-sample.js";
 
 function reclaimAuthority(db: Database, ctx: WriteCtx, id: string) {
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), task = mustTask(db, intent.taskId);
@@ -65,7 +67,7 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
   const gone = lapse();
   if (gone) return gone;
   const lease = heldLease(db, task);
-  if (!lease) throw new LedgerError("conflict", "remote author has no held write lease");
+  if (!lease) return resumeAfterReclaim(db, ctx, id, context, active, lapse);
   const running = leaseWriters(db, task.id, lease).filter((o) => o.status !== "cancelled" ||
     (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen) && !getEventByDedup(db, `scheduler:${id}:cancel:${o.orderId}`)));
   const revoked = running.length && tx(db, () => {
@@ -129,6 +131,62 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
       kind: "scheduler", text: reason, data: { op: "fix_strategy_reclaim", intentId: id, round: task.round, specRev: task.specRev,
         head: task.headSHA, reason, peer: lease.peer, unpinned: back?.unpinned ?? null, family: current.strategy.family, taskRev: mustTask(db, task.id).rev,
         ...(swap ? { source: swap.source } : {}) } }, true);
+    return null;
+  });
+}
+
+const NO_LEASE = "remote author has no held write lease";
+
+/**
+ * SWAPFIX1 9b: the facts a retry (a new intent of the same swap) may resume on when the lease is already gone. All must hold: the
+ * lease row is ended and is the projection of a formal earlier `fix_strategy_reclaim` (its own dedup key, same card / spec / round /
+ * head, same peer and reason); that earlier intent is cancelled and bound no replacement author; no write order is pooled, claimed or
+ * unknown. Read again inside the commit transaction; the string is the refusal.
+ */
+function priorReclaim(db: Database, ctx: WriteCtx, id: string): { reclaim: LedgerEvent; lease: WriteLease } | string {
+  const { task } = reclaimAuthority(db, ctx, id);
+  if (getWorkflow(db, task.id)?.mode !== "auto") return "卡不在 auto，不自愈";
+  if (heldLease(db, task)) return "写租约又被持有";
+  const lease = getWriteLease(db, task.id);
+  if (!lease || lease.state !== "ended") return "没有已结束的写租约";
+  const reclaim = listEvents(db, { project: task.project, target: task.id }).findLast((e) => e.kind === "scheduler" &&
+    e.data.op === "fix_strategy_reclaim" && e.data.round === task.round && e.data.specRev === task.specRev && e.data.head === task.headSHA);
+  const prev = typeof reclaim?.data.intentId === "string" ? reclaim.data.intentId : null;
+  if (!reclaim || !prev || prev === id || getEventByDedup(db, `scheduler:${prev}:reclaim`)?.seq !== reclaim.seq) return "没有同卡同规格同轮同 head 的正式前次收回";
+  if (lease.peer !== reclaim.data.peer || lease.reason !== reclaim.data.reason) return "已结束的写租约不是前次收回结束的那一份";
+  const before = getIntent(db, prev);
+  if (!before || before.action !== "fix_swap" || before.taskId !== task.id || before.status !== "cancelled") return "前次收回的意图没有正规结清（不是 cancelled）";
+  if (getEventByDedup(db, `scheduler:${prev}:replacement`) ||
+    db.query("SELECT 1 FROM scheduler_sessions WHERE taskId = ? AND createIntentId = ?").get(task.id, prev)) return "前次意图已绑过替换作者";
+  if (listLendOrders(db, task.id).some((o) => isWriteStep(o.step) && ["pooled", "claimed", "unknown"].includes(o.status))) return "仍有挂着 / 在跑 / 待核的写单";
+  return { reclaim, lease };
+}
+
+/**
+ * No held lease: under lendReclaimIntent=on a proven earlier reclaim of this round is resumed — never a second reclaim, never a
+ * reclaim event of this intent — after the remote branch is read back at the card head, re-proving every fact in the transaction
+ * that retires the stale peer author (retireReclaimedPeerAuthor). off / observe / any failed fact refuse as before.
+ */
+async function resumeAfterReclaim(db: Database, ctx: WriteCtx, id: string, context: RemoteConvergenceContext, active: () => void,
+  lapse: () => string | null): Promise<null> {
+  const task = mustTask(db, convergenceIntent(db, ctx, id, "fix_swap").taskId), mode = selfHealMode(db, task.project, "lendReclaimIntent");
+  if (mode === "off") throw new LedgerError("conflict", NO_LEASE);
+  const refuse = (why: string) => new LedgerError("conflict", mode === "on" ? `${NO_LEASE}（不续用前次收回：${why}）` : NO_LEASE);
+  const first = priorReclaim(db, ctx, id);
+  if (typeof first === "string") throw refuse(first);
+  const head = await context.remoteHead(first.lease.repo, first.lease.branch); active();
+  if (!head.ok || head.head !== task.headSHA) throw refuse("远端分支 head 已不是卡 head 或无法核实");
+  const sample = { project: task.project, key: "lendReclaimIntent" as const, taskId: task.id, head: task.headSHA!, action: "reclaim-resume" as const,
+    text: `续用前次收回（事件 #${first.reclaim.seq}，意图 ${String(first.reclaim.data.intentId)}），退役旧 peer 作者后由 ${id} 在本机建作者`,
+    data: { intentId: id, reclaimSeq: first.reclaim.seq, prevIntentId: first.reclaim.data.intentId, peer: first.lease.peer } };
+  if (mode === "observe") { selfHealSample(db, "observe", sample, ctx.now ?? Date.now()); throw refuse(""); }
+  return tx(db, () => {
+    const again = priorReclaim(db, ctx, id), lapsed = lapse();
+    if (typeof again === "string" || lapsed) throw refuse(typeof again === "string" ? again : lapsed!);
+    if (again.reclaim.seq !== first.reclaim.seq || again.lease.repo !== first.lease.repo || again.lease.branch !== first.lease.branch ||
+      mustTask(db, task.id).headSHA !== head.head) throw refuse("前次收回或卡 head 在核实远端时已变");
+    retireReclaimedPeerAuthor(db, ctx, id, task.id);
+    selfHealSample(db, "on", sample, ctx.now ?? Date.now());
     return null;
   });
 }

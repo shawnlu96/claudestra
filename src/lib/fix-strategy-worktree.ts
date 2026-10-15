@@ -10,10 +10,23 @@ import { addAuthorWorktree, reusableAuthorWorktree } from "./scheduler-create-re
 import { buildArtifactOwner, type ConvArtifactContext } from "./conv-ignored-build-artifacts.js";
 import { convArtifactMode, convArtifactProof, quarantineConvArtifacts } from "./conv-ignored-build-artifacts-quarantine.js";
 import type { Git, Pinned } from "./scheduler-review-worktree.js";
+import { foreignTreeRefusal } from "./fix-tree-proof.js";
+import type { RecoveryMode } from "./recovery-policy.js";
 
 const START_FILE = "scheduler-author-start.json"; // addAuthorWorktree's saved start (scheduler-create-retry-worktree.ts)
 
-export interface FixTreeTarget { taskId: string; branch: string | null; head: string | null; root: string; artifacts?: ConvArtifactContext }
+export interface FixTreeTarget { taskId: string; branch: string | null; head: string | null; root: string; artifacts?: ConvArtifactContext; foreign?: ForeignTreePort }
+/**
+ * SWAPFIX1 9a: another old local author's tree at the target (neither this intent's nor the source) may be taken over as it is when
+ * fix-tree-proof.ts's foreignTreeRefusal (GATESWAP1's judgment plus linked / branch / no live session) passes. Switch fixLocalSwap:
+ * off (or no port) = the old refusal; observe = record the would-be takeover, the old refusal; on = take it over and record it.
+ */
+export interface ForeignTreePort {
+  mode(): RecoveryMode;
+  /** a live registry session working in `dir`, or null */
+  live(dir: string): string | null;
+  sample(mode: "observe" | "on", dir: string): void;
+}
 /** The branch head on the real origin as seen from `cwd`; never fetches into it. */
 export type OriginHead = (cwd: string, branch: string) => Promise<RemoteHead>;
 /** The tracking ref this open fast-forwarded (from = before, null when there was none; to = the reviewed head). */
@@ -111,12 +124,12 @@ async function openTree(g: Git, source: string, t: FixTreeTarget, recorded: stri
     if (absent && !(await present())) return { manual: `单分支抓取后来源仓库里仍没有已审修复 head ${head}，不建作者工作树` };
     refreshed = fresh;
   }
-  const tree = await buildTree(g, at, source, { dir, branch: t.branch, head: t.head, repo: top.out }, recorded, origin, t.artifacts);
+  const tree = await buildTree(g, at, source, { dir, branch: t.branch, head: t.head, repo: top.out }, recorded, origin, t.artifacts, t.foreign);
   return refreshed ? { ...tree, refreshed } : tree;
 }
 
 async function buildTree(g: Git, at: Git, source: string, { dir, branch, head, repo }: { dir: string; branch: string; head: string; repo: string },
-  recorded: string | null, origin: OriginHead, artifacts?: ConvArtifactContext): Promise<Pinned> {
+  recorded: string | null, origin: OriginHead, artifacts?: ConvArtifactContext, foreign?: ForeignTreePort): Promise<Pinned> {
   artifacts = artifacts && convArtifactMode(artifacts) !== "off" ? artifacts : undefined;
   const actual = () => originDrift(origin, repo, branch, head);
   const early = await actual();
@@ -137,7 +150,15 @@ async function buildTree(g: Git, at: Git, source: string, { dir, branch, head, r
     const own = recorded && await createdHere(g, dir) ? await ownCheck() : "不是本意图建的";
     if (!own) return ready(ownCheck);
     const adopted = await adoptCheck();
-    return adopted ? { manual: adopted.slice(0, 400) } : ready(adoptCheck);
+    if (!adopted) return ready(adoptCheck);
+    const mode = foreign && real(source) !== real(dir) ? foreign.mode() : "off";
+    const foreignCheck = () => foreignTreeRefusal(g, { source, dir, branch, head }, dirty, foreign!.live);
+    if (mode === "off" || await foreignCheck()) return { manual: adopted.slice(0, 400) };
+    const late = foreign!.mode(); // read again after the proof's awaits
+    if (late !== "on") { if (late === "observe") foreign!.sample("observe", dir); return { manual: adopted.slice(0, 400) }; }
+    const taken = await ready(foreignCheck);
+    if ("dir" in taken) foreign!.sample("on", dir);
+    return taken;
   }
   const local = await at(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
   if (local.code === 0 && local.out !== head) return { manual: `本地分支 ${branch} 在 ${local.out}，不是已审修复 head（可能有旧 WIP），保留等待核对` };

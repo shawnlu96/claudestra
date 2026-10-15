@@ -21,10 +21,13 @@ import { chunkInputs } from "./order-wire-chunks.js";
 import { localWriterCount } from "./scheduler-pool-facts.js";
 import { explicitLocal } from "./scheduler-local-pin.js";
 import { localSwapAuthority, localSwapCreate, localSwapOf, localSwapReady, localSwapReclaimEdge, localSwapWait, reclaimedBefore, retireLocalAuthor } from "./recovery-fix-local-swap-run.js";
-import { getIntent } from "./ledger-scheduler.js";
 import type { LocalSwapEvidence } from "./recovery-fix-local-swap.js";
 import { reclaimLocalFixEdge, reclaimLocalFixGate } from "./recovery-reclaim-local-fix.js";
 import type { SwapGate } from "./fix-strategy-guard.js";
+import { getIntent, getWorkflow } from "./ledger-scheduler.js";
+import type { ForeignTreePort } from "./fix-strategy-worktree.js";
+import { liveSessionAt } from "./fix-tree-proof.js";
+import { selfHealMode, selfHealSample } from "./fix-swap-halfbuilt-sample.js";
 
 type Material = { path: string; family: AuthorFamily };
 type MaterialReader = (db: Database, ctx: WriteCtx, intent: SchedulerIntent, source: string, deps: ConvergenceLifecycle) => Promise<Material>;
@@ -120,6 +123,22 @@ type AfterReclaim = { claim: string; bound: string; gate?: SwapGate };
 const OTHER_FAMILY: AfterReclaim = { claim: "peer family swap", bound: "收回后新家族本机会话已绑定" };
 
 /**
+ * SWAPFIX1 9a: the replacement author's tree open may take over another old local author's clean tree at the target (fixLocalSwap,
+ * never on a manual card), sampled once per card + head; the judgment itself is fix-tree-proof.ts's.
+ */
+function withForeignTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, deps: ConvergenceLifecycle): ConvergenceLifecycle {
+  const open = deps.authorTree, head = intent.head;
+  if (!open || !head) return deps;
+  const foreign: ForeignTreePort = {
+    mode: () => getWorkflow(db, task.id)?.mode === "auto" ? selfHealMode(db, task.project, "fixLocalSwap") : "off",
+    live: (dir) => liveSessionAt(deps.registry(), dir),
+    sample: (mode, dir) => selfHealSample(db, mode, { project: task.project, key: "fixLocalSwap", taskId: task.id, head, action: "tree-adopt",
+      text: `收回旧树 ${dir}（干净、在本卡分支、HEAD 是已审修复 head、无活会话）交给新作者`, data: { intentId: intent.id, dir } }, ctx.now ?? Date.now()),
+  };
+  return { ...deps, authorTree: (source, target, recorded) => open(source, { ...target, foreign }, recorded) };
+}
+
+/**
  * After the write lease is gone (one reclaim, never two): claim, build the local author with the material's family and bind it.
  * label.gate (no swap) is re-read at the create, bind and remote-fallback edges, the way a swap's localSwapGate / localSwapAuthority are.
  */
@@ -134,8 +153,8 @@ async function localAfterReclaim(db: Database, ctx: WriteCtx, intent: SchedulerI
   const edge = swap && localSwapCreate(db, intent, swap, deps, retired.gate, () => ctx.now ?? Date.now(), source);
   const local = localWriterCount(db, task.project, task.id) >= context.maxWorkers ? { wait: "本机写槽已满或不接新写者" }
     : edge ? await createConvergenceWorker(db, ctx, getIntent(db, intent.id)!, mustTask(db, task.id), material.family, source, "author",
-      edge.lifecycle, edge.gate)
-    : await createConvergenceWorker(db, ctx, intent, mustTask(db, task.id), material.family, source, "author", deps, label.gate);
+      withForeignTree(db, ctx, intent, task, edge.lifecycle), edge.gate)
+    : await createConvergenceWorker(db, ctx, intent, mustTask(db, task.id), material.family, source, "author", withForeignTree(db, ctx, intent, task, deps), label.gate);
   if ("tree" in local) return { ok: true, step: "manual" in local ? "manual" : "waiting", detail: local.wait };
   if (swap && "wait" in local) return localSwapWait(db, ctx, intent, local.wait);
   const halt = swap && !("wait" in local) ? localSwapAuthority(db, mustTask(db, task.id), swap) : null;

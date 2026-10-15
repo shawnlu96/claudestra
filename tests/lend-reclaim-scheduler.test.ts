@@ -4,7 +4,10 @@ import { remoteProbe, peerAuthor, runningOrder, resultDeps, hello } from "./fix-
 import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
 import { reclaimForFamilySwap } from "../src/lib/lend-reclaim-scheduler.js";
 import { getLendOrder, reclaimLend, cancelLend } from "../src/lib/ledger-lend.js";
-import { heldLease } from "../src/lib/ledger-lend-lease.js";
+import { getWriteLease, heldLease, holdWriteLease } from "../src/lib/ledger-lend-lease.js";
+import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
+import { setSelfHealPolicy } from "../src/lib/fix-swap-halfbuilt-sample.js";
 import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
 import { writeLendResult } from "../src/lib/ledger-lend-result.js";
 import type { ResultRequest } from "../src/lib/lend-wire.js";
@@ -110,4 +113,125 @@ test("a previously claimed cancelled writer appearing during the remote-head che
     expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting" });
     expect(heldLease(f.db, f.task())?.state).toBe("held");
   } finally { f.close(); }
+});
+
+// SWAPFIX1 9b: a retry after a formal earlier reclaim, with the lease already ended.
+const policy = (mode: "on" | "observe" | "off") => () => ({ mode, manualAfterMs: null, source: "config" as const });
+
+/** The first family-swap intent reclaims the lease, its author tree is refused (unknown), PM cancels it; a new intent is planned. */
+async function reclaimedThenCancelled(mode: "on" | "observe" | "off" = "on") {
+  const f = await fourRoundFix(), p = remoteProbe(f); peerAuthor(f, "claude");
+  setSelfHealPolicy(f.db, policy(mode));
+  const first = p.plan(), open = p.deps.authorTree!;
+  p.deps.authorTree = async () => ({ manual: "首轮作者工作树不可用" });
+  expect(await fixSwapStep(f.db, f.at("scheduler"), first.id, p.deps)).toMatchObject({ step: "manual" });
+  expect(heldLease(f.db, f.task())).toBeNull();
+  settleIntent(f.db, f.at("pm"), { id: first.id, from: "unknown", to: "cancelled", receipt: "PM 核对：工作树已处理" });
+  p.deps.authorTree = open;
+  return { f, p, first, second: p.plan() };
+}
+const reclaims = (f: Awaited<ReturnType<typeof fourRoundFix>>) =>
+  listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "fix_strategy_reclaim");
+const refusal = (f: Awaited<ReturnType<typeof fourRoundFix>>, p: ReturnType<typeof remoteProbe>, id: string) =>
+  fixSwapStep(f.db, f.at("scheduler"), id, p.deps).then(() => "acted", (e: Error) => e.message);
+
+test("cancelled family swap after reclaim retries with a new intent and creates codex without reclaiming twice", async () => {
+  const { f, p, first, second } = await reclaimedThenCancelled();
+  try {
+    expect(second.id).not.toBe(first.id);
+    expect(await fixSwapStep(f.db, f.at("scheduler"), second.id, p.deps)).toMatchObject({ step: "session" }); // [验收线 1]
+    expect(reclaims(f).length).toBe(1);
+    expect(getEventByDedup(f.db, `scheduler:${second.id}:reclaim`)).toBeNull();
+    const created = p.effects.filter((s) => s.startsWith("create:"));
+    expect(created.length).toBe(1);
+    expect(p.raw().agents[created[0].slice(7)].runtime).toBe("codex");
+    expect(getIntent(f.db, second.id)?.status).toBe("done");
+    const sample = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "fix_swap_selfheal");
+    expect(sample.map((e) => e.data)).toMatchObject([{ mechanism: "lendReclaimIntent", action: "reclaim-resume", head: f.task().headSHA, intentId: second.id }]);
+  } finally { f.close(); }
+});
+
+test("ended lease without formal matching reclaim refuses family swap", async () => {
+  for (const broken of ["pm-reclaim", "forged", "lease-reason"] as const) {
+    const f = await fourRoundFix(), p = remoteProbe(f); peerAuthor(f, "claude");
+    try {
+      setSelfHealPolicy(f.db, policy("on"));
+      const id = broken !== "lease-reason" ? p.plan().id : (await reclaimedThenCancelledOn(f, p)).id;
+      if (broken !== "lease-reason") reclaimLend(f.db, f.at("pm"), { taskId: "T1", reason: "manual" }); // ended by PM, no scheduler reclaim
+      if (broken !== "lease-reason") f.db.run("UPDATE scheduler_intents SET taskRev = ? WHERE id = ?", [f.task().rev, id]); // keep the intent current
+      if (broken === "lease-reason") f.db.run("UPDATE lend_write_leases SET reason = 'PM 手动收回' WHERE taskId = 'T1'");
+      if (broken === "forged") { // a reclaim-shaped event that is not the earlier intent's own formal reclaim record
+        const t = f.task(), lease = getWriteLease(f.db, "T1")!;
+        insertEvent(f.db, { ...f.at("scheduler"), dedupKey: "forged:reclaim" }, { project: "p", target: "T1", kind: "scheduler", text: "x",
+          data: { op: "fix_strategy_reclaim", intentId: "fake-intent", round: t.round, specRev: t.specRev, head: t.headSHA, reason: lease.reason, peer: lease.peer } }, true);
+      }
+      expect(await refusal(f, p, id)).toContain("remote author has no held write lease（不续用前次收回："); // [验收线 1]
+      expect(p.effects.some((s) => s.startsWith("create:"))).toBe(false);
+    } finally { f.close(); }
+  }
+});
+
+/** The reclaimedThenCancelled steps on an existing fixture; returns the second intent. */
+async function reclaimedThenCancelledOn(f: Awaited<ReturnType<typeof fourRoundFix>>, p: ReturnType<typeof remoteProbe>) {
+  const first = p.plan(), open = p.deps.authorTree!;
+  p.deps.authorTree = async () => ({ manual: "首轮作者工作树不可用" });
+  await fixSwapStep(f.db, f.at("scheduler"), first.id, p.deps);
+  settleIntent(f.db, f.at("pm"), { id: first.id, from: "unknown", to: "cancelled", receipt: "PM 核对：工作树已处理" });
+  p.deps.authorTree = open;
+  return p.plan();
+}
+
+test("ended lease with live or unknown writer refuses replacement", async () => {
+  for (const status of ["pooled", "claimed", "unknown", "prev-unknown"] as const) {
+    const f = await fourRoundFix(), p = remoteProbe(f); peerAuthor(f, "claude");
+    try {
+      setSelfHealPolicy(f.db, policy("on"));
+      const id = (await reclaimedThenCancelledOn(f, p)).id;
+      const prev = reclaims(f)[0].data.intentId;
+      if (status === "prev-unknown") f.db.run("UPDATE scheduler_intents SET status = 'unknown' WHERE id = ?", [prev]);
+      else runningOrder(f, status);
+      expect(await refusal(f, p, id)).toContain("remote author has no held write lease（不续用前次收回："); // [验收线 1]
+      expect(p.effects.filter((s) => s.startsWith("create:")).length).toBe(0);
+    } finally { f.close(); }
+  }
+});
+
+test("lease reacquired or remote head changed during retry refuses local author creation", async () => {
+  for (const race of ["lease", "head"] as const) {
+    const { f, p, second } = await reclaimedThenCancelled();
+    try {
+      p.context.remoteHead = async () => {
+        if (race === "lease") { holdWriteLease(f.db, f.task(), { peer: "Peer", fp: "abcd-bbbb-cccc-dddd", repo: "o/r", branch: "feat/T1" }, 1); return { ok: true, head: f.task().headSHA! }; }
+        return { ok: true, head: "9".repeat(40) };
+      };
+      expect(await refusal(f, p, second.id)).toContain("不续用前次收回"); // [验收线 1]
+      expect(p.effects.some((s) => s.startsWith("create:"))).toBe(false);
+      expect(reclaims(f).length).toBe(1);
+      expect(getIntent(f.db, second.id)?.status).toBe("pending");
+    } finally { f.close(); }
+  }
+});
+
+test("retry retires stale peer author before binding the replacement", async () => {
+  const { f, p, second } = await reclaimedThenCancelled();
+  try {
+    f.db.run("UPDATE scheduler_sessions SET state = 'active', retireIntentId = NULL WHERE taskId = 'T1' AND transport = 'peer'");
+    expect(await fixSwapStep(f.db, f.at("scheduler"), second.id, p.deps)).toMatchObject({ step: "session" }); // [验收线 1]
+    const rows = f.db.query("SELECT transport, state, retireIntentId, createIntentId FROM scheduler_sessions WHERE taskId = 'T1' AND role = 'author'").all() as Record<string, unknown>[];
+    expect(rows.find((r) => r.transport === "peer")).toMatchObject({ state: "retired", retireIntentId: second.id });
+    expect(rows.find((r) => r.createIntentId === second.id)).toMatchObject({ state: "active", transport: "acp" });
+  } finally { f.close(); }
+});
+
+test("off and observe keep the old refusal; observe records the would-be resume once", async () => {
+  for (const mode of ["off", "observe"] as const) {
+    const { f, p, second } = await reclaimedThenCancelled(mode);
+    try {
+      for (let n = 0; n < 2; n++) expect(await refusal(f, p, second.id)).toBe("remote author has no held write lease"); // [验收线 4]
+      const notes = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "lendReclaimIntent");
+      expect(notes.length).toBe(mode === "observe" ? 1 : 0);
+      expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "fix_swap_selfheal")).toBe(false);
+      expect(p.effects.some((s) => s.startsWith("create:"))).toBe(false);
+    } finally { f.close(); }
+  }
 });
