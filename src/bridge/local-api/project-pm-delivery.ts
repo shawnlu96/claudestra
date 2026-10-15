@@ -1,8 +1,12 @@
 import { principalView } from "../../lib/devices.js";
 import { getMeta } from "../../lib/ledger-store.js";
-import { pmRedirect } from "../../lib/pm-role.js";
+import { activeProjectPm, pmRedirect } from "../../lib/pm-role.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "../../lib/registry.js";
-import { agentInScope, readPrincipalsStrict, tokenIdOf, type PrincipalsFile } from "../../lib/principals.js";
+import { agentInScope, readPrincipalsStrict, readPrincipalsStrictSync, tokenIdOf, type PrincipalsFile } from "../../lib/principals.js";
+import { peerInboxDispatcher, peerInboxHeader } from "../../lib/peer-inbox-route.js";
+import { pmPeerInbox } from "../../lib/pm-route-mode.js";
+import { statePath } from "../../lib/paths.js";
+import { blockReplyFiles } from "../api-reply-files.js";
 import { ledgerDb } from "../ledger-feed.js";
 import type { AgentCallBook } from "../agent-calls.js";
 import type { Envelope, Delivery, LocalEndpoint } from "../router.js";
@@ -10,8 +14,14 @@ import { pmDirectedVerdict, type CallerOf } from "../pm-directed-agent.js";
 import { isCallerPushback, isHumanDirect, markPmTransfer, pmTargetDrift, retryLater, setPmRoleRoute, undoPmTransfer, type PmTarget } from "../pm-held-transfer.js";
 import { pmDigest } from "../pm-digest.js";
 
-interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string }
-interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile>; callerOf?: CallerOf }
+interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string; acceptsFiles?: boolean }
+interface RouteFacts {
+  db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile>; callerOf?: CallerOf;
+  /** 单测注入：DPR-1 开关（缺省读 pm-digest-mode.json）、同步读 principals（押后归属判定是同步的） */
+  peerInbox?(project: string): boolean; principalsSync?(): PrincipalsFile;
+  /** 押后归属判定看调度助理在不在线；缺省用 deliverPmLocal 最近拿到的连接表 */
+  online?(channelId: string): boolean;
+}
 type Client = { ws: LocalEndpoint["ws"]; cwd?: string };
 type Send = (env: Envelope, to: LocalEndpoint) => Promise<Delivery>;
 
@@ -33,6 +43,14 @@ export async function deliverPmLocal<P extends Receipt>(
   const pushback = isCallerPushback(env), own = original.channelId ? clients.get(original.channelId) : undefined;
   const direct = isHumanDirect(env);
   const name = (pushback && own) || direct || directed ? null : pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
+  liveClients = clients;
+  const inbox = name || directed ? null : peerInboxAgent(env, original, facts, (ch) => clients.has(ch));
+  if (inbox) {
+    const target = endpointOf(inbox, clients.get(inbox.channelId)!);
+    return pmTargetDrift(env, target.channelId) ?? handOff(env, { to, former: original.name, target, sessionId: inbox.sessionId, noFiles: true,
+      header: peerInboxHeader({ peer: (env.from as ApiFrom).peer!, messageId: env.meta.messageId, pm: original.name, dispatcher: inbox.name, project: original.projectId }) },
+    book, receipts, send);
+  }
   if (!name) {
     // pmClientFor may have lent another PM's socket under an older pointer; never deliver this channel's message through it.
     const borrowed = agents.some((a) => a.projectId === original.projectId && a.channelId && a.channelId !== to.channelId
@@ -57,12 +75,25 @@ export async function deliverPmLocal<P extends Receipt>(
   const agent = agents.find((a) => a.name === name && a.projectId === original.projectId);
   const client = agent?.channelId ? clients.get(agent.channelId) : undefined;
   if (!agent?.channelId || !client) return retryLater({ envelope: env, outcome: { kind: "dropped", reason: `active PM ${name} is offline` } });
-  const target: LocalEndpoint = { kind: "local", agentName: name, channelId: agent.channelId, ws: client.ws, cwd: client.cwd };
+  const target = endpointOf({ ...agent, channelId: agent.channelId }, client);
   const drift = pmTargetDrift(env, target.channelId); // before any receipt / return slot moves: flush checked this recipient's turn
   if (drift) return drift;
   // A drifted target is caught above, so the refusal notice can only reach the PM flush checked.
   if (env.from.kind === "api" && !(await apiScopeAllows(env.from, name, facts))) return refuseOutOfScope(env, env.from, original.name, target, send);
-  const before = to.channelId;
+  return handOff(env, { to, former: original.name, target, sessionId: agent.sessionId, header: pushback
+    ? `[系统转交：这是回复前任 PM ${original.name} 的问题；当班 PM ${name}]` : `[系统转交：原收件人 ${original.name}；当班 PM ${name}]` }, book, receipts, send);
+}
+
+const endpointOf = (a: { name: string; channelId: string }, c: Client): LocalEndpoint =>
+  ({ kind: "local", agentName: a.name, channelId: a.channelId, ws: c.ws, cwd: c.cwd });
+
+interface HandOff { to: LocalEndpoint; former: string; target: LocalEndpoint; sessionId?: string; header: string; noFiles?: boolean }
+
+/** Moves this request's return slot / API receipt to the new recipient, swaps the transfer header and sends; a failed send moves them back. */
+async function handOff<P extends Receipt>(
+  env: Envelope, h: HandOff, book: AgentCallBook, receipts: Map<string, P[]>, send: Send,
+): Promise<Delivery> {
+  const { target, former: formerName } = h, name = target.agentName!, before = h.to.channelId;
   // Move only this request's receipt; unrelated old-PM conversations remain with their original target.
   const caller = env.from.kind === "local" ? env.from.channelId : null;
   let moved: { slot: Parameters<AgentCallBook["add"]>[1]; messageId?: string } | undefined;
@@ -74,7 +105,7 @@ export async function deliverPmLocal<P extends Receipt>(
       book.dropRequest(before, caller, env.meta.messageId);
     }
   }
-  let movedReceipt: P | undefined;
+  let movedReceipt: P | undefined, accepts: boolean | undefined;
   if (env.from.kind === "api") {
     const oldKey = `${env.from.tokenId}|${before}`, queue = receipts.get(oldKey);
     const index = queue?.findIndex((p) => p.messageId === env.meta.messageId) ?? -1;
@@ -82,17 +113,21 @@ export async function deliverPmLocal<P extends Receipt>(
       movedReceipt = queue.splice(index, 1)[0]!;
       movedReceipt.agentChannelId = target.channelId;
       movedReceipt.agentName = name;
+      accepts = movedReceipt.acceptsFiles;
+      if (h.noFiles) {
+        movedReceipt.acceptsFiles = false; // the dispatcher answers in words only; files never reach the peer (api-reply-files.ts)
+        blockReplyFiles(movedReceipt);
+      }
       const key = `${env.from.tokenId}|${target.channelId}`;
       receipts.set(key, [...(receipts.get(key) ?? []), movedReceipt]);
       if (!queue.length) receipts.delete(oldKey);
     }
   }
   // Replayed held letters reach here again on every flush: the header is replaced via its trusted meta record, never stacked.
-  markPmTransfer(env, before, target.channelId, pushback ? `[系统转交：这是回复前任 PM ${original.name} 的问题；当班 PM ${name}]`
-    : `[系统转交：原收件人 ${original.name}；当班 PM ${name}]`);
+  markPmTransfer(env, before, target.channelId, h.header);
   env.to = target;
   // The previous recipient's session pin is not the new PM's session; pin to the live replacement instead.
-  if (env.meta.expectSession) env.meta.expectSession = agent.sessionId;
+  if (env.meta.expectSession) env.meta.expectSession = h.sessionId;
   const delivery = await send(env, target);
   if (delivery.outcome.kind === "sent") return delivery;
   if (caller) book.dropRequest(target.channelId, caller, env.meta.messageId);
@@ -105,7 +140,8 @@ export async function deliverPmLocal<P extends Receipt>(
   if (delivery.outcome.kind !== "error") return delivery;
   if (caller && moved) book.add(before, moved.slot, moved.messageId);
   if (movedReceipt) {
-    Object.assign(movedReceipt, { agentChannelId: before, agentName: original.name });
+    Object.assign(movedReceipt, { agentChannelId: before, agentName: formerName, acceptsFiles: accepts });
+    if (h.noFiles) blockReplyFiles(movedReceipt, false);
     receipts.set(`${movedReceipt.tokenId}|${before}`, [...(receipts.get(`${movedReceipt.tokenId}|${before}`) ?? []), movedReceipt]);
   }
   return delivery;
@@ -114,7 +150,10 @@ export async function deliverPmLocal<P extends Receipt>(
 type ApiFrom = Extract<Envelope["from"], { kind: "api" }>;
 /** The final recipient is re-checked against the exact token / device credential, not the principal's broad scope. */
 async function apiScopeAllows(from: ApiFrom, name: string, facts: RouteFacts): Promise<boolean> {
-  const file = await (facts.principals ?? readPrincipalsStrict)();
+  return scopeAllowsIn(await (facts.principals ?? readPrincipalsStrict)(), from, name);
+}
+
+function scopeAllowsIn(file: PrincipalsFile, from: ApiFrom, name: string): boolean {
   const stored = file.principals.find((p) => tokenIdOf(p) === from.tokenId);
   const p = stored && principalView(file, stored.id, from.credential);
   return !!p && p.peer === from.peer && agentInScope(p, name);
@@ -141,6 +180,33 @@ async function finalScopeRefusal(env: Envelope, name: string, facts: RouteFacts)
   return { envelope: env, outcome: { kind: "dropped", reason: `API credential scope excludes ${name}` } };
 }
 
+/** 押后归属判定没有入参带连接表：用 deliverPmLocal 最近一次拿到的 bridge 连接表（同一个对象，随连接增删）；还没投过信按不在线 */
+let liveClients: ReadonlyMap<string, unknown> | undefined;
+
+/**
+ * DPR-1：这一封 peer 机器消息该先投调度助理（lib/peer-inbox-route.ts 判开关 / 来源 / 收件人是当班 PM）。调度助理没在册、
+ * 不是 active、不在线，或令牌范围没有它，都返回 null，照旧投当班 PM（不拒收）。投递与押后归属用同一个判断，不会一边转一边留
+ */
+function peerInboxAgent(env: Envelope, original: RegistryAgent, facts: RouteFacts, online: (channelId: string) => boolean)
+  : (RegistryAgent & { channelId: string }) | null {
+  const project = original.projectId;
+  if (env.from.kind !== "api" || !env.from.peer || !project || !facts.db) return null;
+  const db = facts.db, transfer = (env as Envelope & { pmTransfer?: { header?: string } }).pmTransfer;
+  const body = transfer?.header && env.content.startsWith(`${transfer.header}\n`) ? env.content.slice(transfer.header.length + 1) : env.content;
+  const name = peerInboxDispatcher({ on: (facts.peerInbox ?? peerInboxOn)(project), peer: env.from.peer, intent: env.intent,
+    pushback: isCallerPushback(env), human: isHumanDirect(env), body, recipient: original.name,
+    activePm: activeProjectPm(db, project), dispatcher: getMeta(db, project).team?.dispatcher ?? undefined });
+  const agent = name ? facts.agents.find((a) => a.name === name && a.projectId === project) : undefined;
+  if (!agent?.channelId || (agent.status !== undefined && agent.status !== "active") || !online(agent.channelId)) return null;
+  try {
+    return scopeAllowsIn((facts.principalsSync ?? readPrincipalsStrictSync)(), env.from, agent.name) ? { ...agent, channelId: agent.channelId } : null;
+  } catch (e) {
+    console.error("[peer-inbox] principals unreadable, keeping it with the PM:", (e as Error).message);
+    return null;
+  }
+}
+const peerInboxOn = (project: string): boolean => pmPeerInbox(statePath("pm-digest-mode.json"), project) === "on";
+
 /**
  * 押后队列的归属判定（收件箱领取 / 计数、flush 交给当班 PM）：同 deliverPmLocal 的转交规则，但前任自己请求的回程不看在不在线——
  * 押着的就留给它本人，不从正文猜身份。台账读不出来按「留在原频道」，和改动前一样
@@ -157,6 +223,8 @@ export function pmRoleRoute(facts?: RouteFacts): (channelId: string) => (env: En
         if (directed === "refused") return { agentName: original?.name ?? ((env.to.kind === "local" && env.to.agentName) || channelId), channelId };
         if (directed === "directed" || !db || !original?.projectId) return null; // stays with the named agent
         const name = pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
+        const inbox = name ? null : peerInboxAgent(env, original, { ...facts, db, agents }, facts?.online ?? ((ch) => !!liveClients?.has(ch)));
+        if (inbox) return { agentName: inbox.name, channelId: inbox.channelId };
         return name ? { agentName: name, channelId: agents.find((a) => a.name === name && a.projectId === original.projectId)?.channelId } : null;
       } catch (e) {
         console.error("[pm-role] held ownership check failed", (e as Error).message);

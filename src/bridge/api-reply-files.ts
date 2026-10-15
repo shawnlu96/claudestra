@@ -28,6 +28,18 @@ export interface StageOpts {
   lookup?: (tokenId: string) => Promise<PeerInfo>;
   /** 对方发请求那一刻钉住的 peer 名与指纹（pending.fileOwner，bridge/api-files.ts peerFileOwner）；没有就只认原 token */
   owner?: FileOwner;
+  /** 这条回复认领到的 API 回执（pending）：上面两项没单独给就取它的；被 blockReplyFiles 标过的不外发附件 */
+  receipt?: { acceptsFiles?: boolean; fileOwner?: FileOwner };
+}
+
+/**
+ * 经调度助理转交的 peer 请求（DPR-1，local-api/project-pm-delivery.ts）：调度助理只回文字，附件一律不登记、不外发。
+ * 按回执对象记（进程内，回执本身也只在内存里）；转交没送到、回执退回原收件人时撤掉
+ */
+const filesBlocked = new WeakSet<object>();
+export function blockReplyFiles(receipt: object, blocked = true): void {
+  if (blocked) filesBlocked.add(receipt);
+  else filesBlocked.delete(receipt);
 }
 
 export interface Staged {
@@ -57,6 +69,7 @@ const defaultLookup = async (tokenId: string): Promise<PeerInfo> => findByTokenI
 
 export async function stageApiReplyFiles(paths: string[], o: StageOpts): Promise<Staged> {
   const out: Staged = { files: [], sent: [] };
+  if (o.receipt && filesBlocked.has(o.receipt) && paths.length) return { ...out, warning: "附件没有发出：这条请求经调度助理转交，回复只外发文字，文字照常送达" };
   const failed: string[] = [];
   const who = paths.length ? await (o.lookup ?? defaultLookup)(o.tokenId) : null;
   for (const p of paths) {
@@ -68,13 +81,13 @@ export async function stageApiReplyFiles(paths: string[], o: StageOpts): Promise
     const abs = join(attachmentDirs().inboxDirs[0]!, copy.attachment);
     const id = `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const name = basename(p) || "file";
-    o.table.set(id, { path: abs, tokenId: o.tokenId, name, agent: o.agent, ...o.owner });
+    o.table.set(id, { path: abs, tokenId: o.tokenId, name, agent: o.agent, ...(o.owner ?? o.receipt?.fileOwner) });
     out.sent.push(copy);
     const media = `/api/v1/media?agent=${encodeURIComponent(o.agent)}&dir=out&name=${encodeURIComponent(copy.attachment)}`;
     out.files.push({ name, url: `/api/v1/files/${id}`, media, size: Bun.file(abs).size, sha256: await sha256Of(abs) });
   }
   const why = failed.length ? [`${failed.join("、")} 拷贝失败，没有登记，对方收不到`] : [];
-  if (out.files.length) why.push(...peerReasons(who, out.files, o.acceptsFiles));
+  if (out.files.length) why.push(...peerReasons(who, out.files, o.acceptsFiles ?? o.receipt?.acceptsFiles));
   if (why.length) out.warning = `附件可能没送达：${why.join("；")}`;
   return out;
 }
