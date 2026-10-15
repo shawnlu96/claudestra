@@ -201,6 +201,6 @@ type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export async function settleMergedDeploy(db: Database, run: MergeRun, manager: Manager): Promise<void> {
   if (getIntent(db, run.intentId)?.status === "done" && getDeployPending(db, run.intentId)) return;
   const result = await manager("ledger", "scheduler-settle", run.intentId, "--from", "submitted", "--to", "done",
-    "--receipt", `merge:${run.mergeSha}; 待 PM 部署`);
+    "--receipt", `merge:${run.mergeSha}; ${(await import("./center-deploy-wording.js")).deployWording(run.project, "待 PM 部署", run.prRef)}`);
   if (result.ok !== true) throw new Error(`settle merge intent: ${String(result.error ?? "manager failed")}`);
 }

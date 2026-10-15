@@ -14,6 +14,7 @@ import { CollabPaneBoundary } from "@/components/boundaries";
 import { CollabView } from "./collab-view";
 import { closeCollab, takeReleasedReads, useCollabNav } from "./collab-nav";
 import { CollabSidebarRail } from "./collab-sidebar";
+import { NowPage, TODAY_KEY } from "../now/now-home";
 
 const subscribeMachines = (cb: () => void) => machines.subscribe(cb);
 const currentFp = () => machines.currentFp();
@@ -53,10 +54,14 @@ export function CollabSwitch() {
   if (!project) return null;
   return (
     <div className="absolute inset-0 z-[45] flex bg-base-100">
-      <CollabSidebarRail />
-      <CollabPaneBoundary key={project} onClose={closeCollab}>
-        <SharedCollabContent project={project} fallback={<CollabView project={project} />} />
-      </CollabPaneBoundary>
+      {project === TODAY_KEY ? <NowPage /> : (
+        <>
+          <CollabSidebarRail />
+          <CollabPaneBoundary key={project} onClose={closeCollab}>
+            <SharedCollabContent project={project} fallback={<CollabView project={project} />} />
+          </CollabPaneBoundary>
+        </>
+      )}
     </div>
   );
 }
