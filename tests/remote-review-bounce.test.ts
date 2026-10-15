@@ -34,7 +34,6 @@ function book(f: F, head: string, counts: { verdict?: "pass" | "changes" | "bloc
 function harness(f: F) {
   let pr: HandoffPr | null = null, reads = 0; // default: the PR open at the card's head
   const hand = async () => {
-    f.advance(HANDOFF_POLL_MS); // a handed-over PR is read at most once a minute: every call here is a fresh read
     const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps,
       prState: async () => { reads++; return pr ?? { state: "OPEN", head: f.task().headSHA!, mergeSha: null }; } });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
