@@ -40,8 +40,10 @@ describe("ONB-2 自动 tick：本地项目停在 merge 等 PM", () => {
   test("记一条 local_merge_ready、通知 PM 一次；再跑和重启都不重发；不建合并意图、不占槽、不读 PR", async () => {
     const h = await atMerge(), { f } = h;
     try {
-      const notices = f.notices.length;
-      expect(await h.local()).toMatchObject({ step: "local_ready", detail: `审查通过，等 PM 跑 ledger local-merge T1 --head ${H1}` });
+      const notices = f.notices.length, levels: string[] = [];
+      expect(await h.local((t, text, level) => { levels.push(level); return f.tickDeps.notifyPm(t, text, level); }))
+        .toMatchObject({ step: "local_ready", detail: `审查通过，等 PM 跑 ledger local-merge T1 --head ${H1}` });
+      expect(levels).toEqual(["action"]); // the PM has to act
       expect(h.readyEvents()).toMatchObject([{ actor: "scheduler", kind: "scheduler", data: { op: "local_merge_ready", head: H1 } }]);
       expect(f.notices.slice(notices)).toEqual([`[调度引擎] T1 审查通过，等 PM 跑 ledger local-merge T1 --head ${H1}（本地合并项目，没有 PR）`]);
       for (let i = 0; i < 3; i++) expect(await h.local()).toMatchObject({ step: "waiting" });

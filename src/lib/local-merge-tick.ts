@@ -20,7 +20,7 @@ export async function driveLocalReady<O>(c: HandoffCard<O>): Promise<O> {
   }
   // only a notice that went out gets its receipt: a failed one (or a lost receipt) is sent again next pass, also after a restart
   try {
-    await c.deps.notifyPm(task, `[调度引擎] ${task.id} ${wait}（本地合并项目，没有 PR）`);
+    await c.deps.notifyPm(task, `[调度引擎] ${task.id} ${wait}（本地合并项目，没有 PR）`, "action"); // the PM has to run local-merge
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     console.error(`⚠️ [scheduler] ${task.id} 本地合并就绪通知没发出去（就绪已记，下轮重发）：${(e as Error).message}`);
