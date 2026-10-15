@@ -11,7 +11,8 @@ const WORDS: Record<string, string> = {
   "这台设备读不到位子": "This device cannot read seats", "没有本机项目": "No local project",
   "没有借入他的机器": "No borrowed machines from this member", "没有团队目录，按机器显示": "No team directory; grouped by machine",
   "没有名册数据": "Roster unavailable", "没有团队目录": "Team directory unavailable", "部分机器读不到": "Some machines could not be read",
-  "正在读取团队目录": "Loading team directory", "团队目录读取失败": "Team directory could not be read", "正在读取位子": "Loading seats", "读取中": "Loading", "暂无进行中的卡": "No active cards",
+  "正在读取团队目录": "Loading team directory", "团队目录读取失败": "Team directory could not be read", "正在读取位子": "Loading seats",
+  "正在确认位子权限": "Checking seat permission", "读取中": "Loading", "暂无进行中的卡": "No active cards",
   "在用": "Running", "心跳停": "Silent", "待开工": "Pending", "其他项目": "Other project", "额度到线": "Quota held", "空闲": "Empty",
   "roster.slot.unreadable": "This device cannot read seats", "roster.slot.noMachines": "No borrowed machines from this member",
 };

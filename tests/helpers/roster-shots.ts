@@ -6,7 +6,9 @@ import { rosterFixture, rosterSnapshotFixture } from "@/features/collab/team/ros
 /** Cold-start conditions: per-route delays (ms) and the first N reads of a route answering 500. */
 export interface RosterServeOpts {
   delay?: Partial<Record<"config" | "contacts" | "context" | "roster" | "snapshot", number>>;
-  fail?: Partial<Record<"roster" | "snapshot", number>>;
+  fail?: Partial<Record<"roster" | "snapshot" | "context", number>>;
+  /** unavailable = the center answers but its team directory read is unavailable; unbound = no binding in the context at all. */
+  directory?: "unavailable" | "unbound";
   /** Center project id in the binding context; differs from the local project id to catch reads on the wrong one. */
   centerProject?: string;
 }
@@ -16,15 +18,21 @@ const ROUTES = { "/app-config.json": "config", "/api/v1/peers/contacts": "contac
 /** The binding port first reads context; the fixture must supply that authorization hint before its snapshot. */
 export function serveRoster(home: HomeFixture, team: TeamFromHome, bundle: string, status = 200, opts: RosterServeOpts = {}) {
   const base = serve(home, team, bundle);
-  const seen = { roster: 0, snapshot: 0 };
+  const seen = { roster: 0, snapshot: 0, context: 0 };
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 60, async fetch(req) {
     const url = new URL(req.url), path = url.pathname, route = ROUTES[path as keyof typeof ROUTES];
     if (route && opts.delay?.[route]) await Bun.sleep(opts.delay[route]!);
-    if ((route === "roster" || route === "snapshot") && ++seen[route] <= (opts.fail?.[route] ?? 0)) return Response.json({ error: "synthetic" }, { status: 500 });
+    if ((route === "roster" || route === "snapshot" || route === "context") && ++seen[route] <= (opts.fail?.[route] ?? 0)) {
+      return Response.json({ error: "synthetic" }, { status: 500 });
+    }
     if (route === "roster") return Response.json(rosterFixture(home.now, home.project), { status });
+    if (route === "context" && opts.directory === "unbound") return Response.json({ identities: [] });
     if (route === "context") return Response.json({ identities: [{ center: "center", team: home.team,
       person: "person-a", project: opts.centerProject ?? home.project, localProjectId: home.project, homeInstanceId: home.sourceInstanceId }] });
-    if (route === "snapshot") return Response.json(rosterSnapshotFixture(home.project, home.team, home.sourceInstanceId));
+    if (route === "snapshot") {
+      const snapshot = rosterSnapshotFixture(home.project, home.team, home.sourceInstanceId);
+      return Response.json(opts.directory === "unavailable" ? { ...snapshot, teamDirectory: { available: false } } : snapshot);
+    }
     url.host = new URL(base.server.url).host;
     return fetch(new Request(url.toString(), req));
   } });

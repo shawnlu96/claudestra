@@ -114,3 +114,49 @@ test.skipIf(!enabled)("[3] failed first reads retry within 10s at most three tim
     } finally { await p.close(); }
   } finally { await browser.close(); }
 }, 90_000);
+
+test.skipIf(!enabled)("[1] a failed first context read is not a mapping: no read on the center id, the local project once the binding recovers", async () => {
+  const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  try {
+    const p = await open(browser, { project: "shared" }, { fail: { context: 2 }, centerProject: CENTER }, true);
+    try {
+      await p.page.waitForTimeout(2_000);
+      expect(rosterReads(p.calls)).toEqual([]);
+      await p.page.clock.fastForward(15_001);
+      expect(await until(() => rosterReads(p.calls).length > 0, 5_000)).toBe(true);
+      await p.page.waitForTimeout(300);
+      expect(rosterReads(p.calls)).toEqual([`GET /api/v1/team/roster?project=${p.home.project}`]);
+    } finally { await p.close(); }
+  } finally { await browser.close(); }
+}, 60_000);
+
+test.skipIf(!enabled)("[3] a slow directory does not hold back the failed seat read's retry", async () => {
+  const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  try {
+    const p = await open(browser, {}, { fail: { roster: 1 }, delay: { snapshot: 8_000 } }, true);
+    try {
+      expect(await until(() => rosterReads(p.calls).length === 1, 5_000)).toBe(true);
+      await p.page.waitForTimeout(300);
+      await p.page.clock.fastForward(5_001);
+      expect(await until(() => rosterReads(p.calls).length === 2, 2_000)).toBe(true);
+      expect(p.calls.filter(c => c.includes("/shared-projects/snapshot")).length).toBe(1);
+    } finally { await p.close(); }
+  } finally { await browser.close(); }
+}, 60_000);
+
+test.skipIf(!enabled)("[2] an unavailable team directory (team present) is not 'no team directory'; an unbound project still is", async () => {
+  const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  try {
+    const p = await open(browser, { view: "roster" }, { directory: "unavailable" });
+    try {
+      await p.page.waitForFunction("document.body.innerText.includes('团队目录读取失败')", undefined, { timeout: 5_000 });
+      await p.page.waitForFunction("document.querySelectorAll('[data-roster-state=seats-loading]').length === 0", undefined, { timeout: 5_000 });
+      expect((await texts(p.page)).filter(t => /没有团队目录|未认领的机器/.test(t))).toEqual([]);
+    } finally { await p.close(); }
+    const q = await open(browser, { view: "roster" }, { directory: "unbound" });
+    try {
+      await q.page.waitForFunction("document.body.innerText.includes('没有团队目录，按机器显示')", undefined, { timeout: 5_000 });
+      expect((await texts(q.page)).filter(t => t.includes("团队目录读取失败"))).toEqual([]);
+    } finally { await q.close(); }
+  } finally { await browser.close(); }
+}, 60_000);
