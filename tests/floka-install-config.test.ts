@@ -199,9 +199,9 @@ test("[验收线 2] fake hook：旧名 / 新名环境落同一临时状态根，
   writeFileSync(join(state, "mcp-family", "sessions", `${UUID_NEW}.json`), JSON.stringify({ family: "floka", agent: "a", at: "x" }));
   const legacy = { CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: run };
   const renamed = { FLOKA_STATE_DIR: state, FLOKA_RUNTIME_DIR: run, FLOKA_RENAME_ENV: "on" };
-  expect((await runHook(legacy, UUID_OLD)).mcpFamily).toBe("claudestra");
+  expect((await runHook(legacy, UUID_OLD)).mcpFamily).toBeUndefined(); // 旧族不带字段：旧会话请求体逐字不变
   expect((await runHook(legacy, UUID_NEW)).mcpFamily).toBe("floka");
-  expect((await runHook(renamed, UUID_OLD)).mcpFamily).toBe("claudestra");
+  expect((await runHook(renamed, UUID_OLD)).mcpFamily).toBeUndefined();
   expect((await runHook(renamed, UUID_NEW)).mcpFamily).toBe("floka");
   expect(readdirSync(join(state, "mcp-family", "sessions"))).toEqual([`${UUID_NEW}.json`]); // hook 只读，不新增记录
 }, 30_000);
