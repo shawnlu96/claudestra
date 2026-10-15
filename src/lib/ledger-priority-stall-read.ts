@@ -69,7 +69,7 @@ function taskBasis(db: Database, project: string, taskId: string, facts: Facts):
   const why = ask ? `等 PM 答 ask ${ask.id}` : frozen ? "项目合并队列冻结" : f?.status !== undefined && f.status !== "active"
     ? `feature 是 ${f.status}` : deps.length ? `依赖没满足：${deps.map((d) => d.from).join(", ")}` : `阶段 ${t.stage} 无有效推进`;
   return { project, key: record?.id ?? `task:${taskId}`, label: taskId, taskId, featureId: t.featureId ?? null, stage: t.stage, why, pm, ask, frozen,
-    eligible: effective.effective === "now" && !["done", "cancelled"].includes(t.stage),
+    eligible: effective.effective === "now" && !["done", "cancelled", "verified"].includes(t.stage),
     since: progress?.ts ?? t.createdAt, progress: `event:${progress?.seq ?? 0}`,
     nowSince: nowEpoch(facts.priority, record?.id ?? null, t.featureId ?? null, t.createdAt) };
 }

@@ -1,4 +1,4 @@
-import { ASK_SCOPE_REGISTRY, scopeProtected, type ScopeGrant } from "./ask-scope-registry.js";
+import { ASK_SCOPE_REGISTRY, scopeProtected, scopeWireProtected, type ScopeGrant } from "./ask-scope-registry.js";
 
 export interface ScopeContext {
   globs: string[];
@@ -37,7 +37,7 @@ export function planScope(q: ScopeQuestion, ctx: ScopeContext): ScopeGrant[] | n
       grants.push({ path, kind: entry.kind, check: entry.check });
       continue;
     }
-    if (!ctx.exists(path) || ctx.locked(path) || sources.length !== 1 || sources[0] === path) return null;
+    if (scopeWireProtected(path) || !ctx.exists(path) || ctx.locked(path) || sources.length !== 1 || sources[0] === path) return null;
     if (!/import\s*(?:一|1)\s*行/i.test(text) || !/(?:调用\s*(?:≤|<=|不超过)\s*3\s*行|calls?\s*<=\s*3\s*lines?)/i.test(text)) return null;
     if (!/(?:判定逻辑|logic)/i.test(text) || !/(?:本卡新文件|new file)/i.test(text)) return null;
     grants.push({ path, kind: "wire", source: sources[0], check: "已有 src 文件；import 一行 + 调用 ≤3 行；判定逻辑在本卡新文件；card 锁核对" });

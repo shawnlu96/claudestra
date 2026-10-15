@@ -105,21 +105,39 @@ test.each(["job", "wrapper"])("[验收线 1] relocated %s uses real paths with s
   const lib = join(repo, "src/lib"), install = join(lib, "floka-services/install");
   cpSync(join(import.meta.dir, "../src/lib"), lib, { recursive: true });
   symlinkSync(join(import.meta.dir, "../node_modules"), join(repo, "node_modules"));
-  const load = (name: string) => import(pathToFileURL(join(install, `${name}.ts`)).href);
+  // Resolve literal imports inside the relocated checkout so the repository's import graph stays complete.
+  const code = `
+    import { readFileSync } from "node:fs";
+    import { submitPartJob } from "./src/lib/floka-services/install/job.ts";
+    import { serviceWrapperScript } from "./src/lib/floka-services/install/cli.ts";
+    import { WRAPPER_POLICY_PATH } from "./src/lib/floka-services/install/wrapper-policy.ts";
+    const f = ${JSON.stringify({ root: f.root, home: f.input.home, bun: f.input.bunPath, labels: f.plan.services.map(s => s.oldLabel) })};
+    if (${JSON.stringify(kind)} === "job") {
+      await submitPartJob(f.root, "b".repeat(32), async cmd => {
+        console.log(JSON.stringify({ plist: readFileSync(cmd[3], "utf8") }));
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      });
+    } else {
+      console.log(JSON.stringify({ policy: WRAPPER_POLICY_PATH,
+        script: serviceWrapperScript(process.cwd(), f.bun, f.labels, {
+          root: f.root, stateDir: f.home, runtimeDir: f.home + "/runtime",
+        }) }));
+    }
+  `;
+  const child = Bun.spawnSync([process.execPath, "--no-env-file", "--config=/dev/null", "-e", code], {
+    cwd: repo, env: testChildEnv({ HOME: f.input.home }),
+  });
+  expect(child.stderr.toString()).toBe("");
+  expect(child.exitCode).toBe(0);
+  const relocated = JSON.parse(child.stdout.toString());
   if (kind === "job") {
-    const { submitPartJob: submit } = await load("job");
-    const id = "b".repeat(32), runner = join(install, "runner.ts");
-    await submit(f.root, id, async (cmd: string[]) => {
-      const plist = readFileSync(cmd[3]!, "utf8");
-      expect(existsSync(runner)).toBe(true);
-      expect(plist).toContain(`<string>${runner}</string>`);
-      expect(plist).not.toContain("%20");
-      return { code: 0, stdout: "", stderr: "", timedOut: false };
-    });
+    const runner = join(install, "runner.ts");
+    expect(existsSync(runner)).toBe(true);
+    expect(relocated.plist).toContain(`<string>${runner}</string>`);
+    expect(relocated.plist).not.toContain("%20");
     return;
   }
-  const { serviceWrapperScript: wrapper } = await load("cli");
-  const { WRAPPER_POLICY_PATH: policy } = await load("wrapper-policy");
+  const policy = relocated.policy;
   expect(policy).toBe(join(install, "wrapper-policy.ts"));
   expect(existsSync(policy)).toBe(true);
   writeFileSync(join(f.input.home, "config.json"), JSON.stringify({ rename: { services: "off", cli: "on" } }));
@@ -127,9 +145,7 @@ test.each(["job", "wrapper"])("[验收线 1] relocated %s uses real paths with s
   writeFileSync(fake, '#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n[[ "$1" == list && "$2" == com.claudestra.* ]]\n');
   chmodSync(fake, 0o755);
   const script = join(f.input.home, "relocated-cli");
-  writeFileSync(script, wrapper(repo, f.input.bunPath, f.plan.services.map(s => s.oldLabel), {
-    root: f.root, stateDir: f.input.home, runtimeDir: join(f.input.home, "runtime"),
-  }).replaceAll("/bin/launchctl", `"${fake}"`));
+  writeFileSync(script, relocated.script.replaceAll("/bin/launchctl", `"${fake}"`));
   const result = Bun.spawnSync(["bash", script], { env: testChildEnv({ HOME: f.input.home, TMUX: "fake", CALL_LOG: log }) });
   expect(result.exitCode).toBe(0);
   expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(

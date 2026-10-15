@@ -16,13 +16,19 @@ export function autoUpdateValue(raw: unknown, fallback: boolean): boolean {
   return next ?? old ?? fallback;
 }
 
-/** Readers stay available after an old client edits one spelling; all writers still use strict validation. */
-export function readAutoUpdateValue(raw: unknown, fallback: boolean): boolean {
-  try { return autoUpdateValue(raw, fallback); } catch (e) {
-    console.error(`[floka-config] ${(e as Error).message}; reading legacy value when valid`);
-    const au = object(raw);
-    return typeof au.claudestra === "boolean" ? au.claudestra : typeof au.floka === "boolean" ? au.floka : fallback;
+export interface ConfigConflict { keys: readonly string[]; message: string }
+
+/** Key names only: neither reports nor logs may contain credential values. */
+export function configConflicts(raw: unknown): ConfigConflict[] {
+  try { autoUpdateValue(object(raw).autoUpdate, true); return []; } catch (e) {
+    return [{ keys: ["autoUpdate.claudestra", "autoUpdate.floka"], message: (e as Error).message }];
   }
+}
+
+/** Readers keep legacy precedence; configView exposes and logs the accompanying diagnostic. */
+export function readAutoUpdateValue(raw: unknown, fallback: boolean): boolean {
+  const au = object(raw);
+  return typeof au.claudestra === "boolean" ? au.claudestra : typeof au.floka === "boolean" ? au.floka : fallback;
 }
 
 /** The public skills API keeps its legacy vocabulary until its consumers migrate together. */

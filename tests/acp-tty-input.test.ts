@@ -132,6 +132,19 @@ describe("斜杠命令", () => {
     expect(r.printed.some((l) => l.startsWith("终端命令：") && l.includes("/compact"))).toBe(true);
     expect(r.printed.filter((l) => l === "✅ 好了")).toHaveLength(4);
   });
+  test("/log 本地打印连接日志在哪（顶部提示不再放本机路径），不打扰 bridge；没有日志路径时照实说", async () => {
+    const r = rig();
+    expect(parseTerminalLine("/log")).toEqual({ log: true } as never);
+    r.input.feed("/log\r");
+    await flush();
+    expect(r.ops).toEqual([]);
+    expect(r.printed).toEqual(["这个窗口没有连接日志"]);
+    const withLog = createTtyInput({
+      busy: () => false, permission: () => null, request: async () => ({ ok: true }), print: (l) => void r.printed.push(l), redraw: () => {}, exit: () => {}, logPath: "/x/host.log",
+    });
+    withLog.feed("/log\r");
+    expect(r.printed.at(-1)).toBe("连接日志：/x/host.log");
+  });
 });
 
 describe("打断与退出", () => {

@@ -24,6 +24,7 @@ import { MobileDag } from "./dag-mobile";
 import { ownerOf, progressRows, type AgentLite } from "./dag-progress";
 import { WorkBoardContent } from "../work/work-board-view";
 import { useTeamWorkBoard, useWorkBoard } from "../work/use-work-board";
+import { workFactsOf } from "../work/task-work-facts";
 import { countBoardOf } from "../count-words";
 import { CountContext, useCountState, useRoundFresh, type CountInput } from "../use-count-source";
 import { teamWorkBoard } from "../team-work-model";
@@ -166,5 +167,5 @@ export function useDagPanes(a: DagPanesArgs) {
     return card && <NodeCardSection card={card} owner={ownerOf(rows, card.feature.id, card.node)}
       onOwner={agent => jumpRowFromPage(agent, card.node.taskId)} onNode={key => onNode(card.feature.id, key)} tr={tr} />;
   };
-  return { center, mobile, page, nodeSec, counts };
+  return { center, mobile, page, nodeSec, counts, workFacts: workFactsOf(work, a.project) };
 }

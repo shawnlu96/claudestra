@@ -322,12 +322,14 @@ test("MAN2 CLI rereads mode/fingerprint and all task/workflow fences; refusals p
     if (a[1] === "scheduler-manual-resume") writeFileSync(join(f.root, "recovery-policy.json"),
       JSON.stringify({ projects: { p: { keys: { manualStall: "off", manualCaseOwnership: "off", manualCaseSla: "off" } } } }));
   });
+  const resumes = () => f.calls.filter((c) => c.args[1] === "scheduler-manual-resume"), fenced = resumes().length;
   const refused = await f.pass();
   expect(refused.failed).toEqual([]);
   expect(events()).toEqual(before);
   expect(getWorkflow(f.db(), "T1")).toEqual(wf);
   expect(f.prepare.notices).toEqual([]);
-  expect(f.calls.at(-1)?.result).toMatchObject({ ok: false, code: "forbidden" });
+  // the pass may run other ledger children after this one (slow runners hit time-based mechanisms), so pick the resume call itself
+  expect(resumes().slice(fenced).map((c) => c.result)).toEqual([expect.objectContaining({ ok: false, code: "forbidden" })]);
 }, 30_000);
 
 for (const mode of ["on", "observe"] as const) for (const limit of [20, 32]) {

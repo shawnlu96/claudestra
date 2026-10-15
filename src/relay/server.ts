@@ -54,7 +54,7 @@ class RelayServer implements Relay {
       online: () => this.onlineMap.size, pending: () => this.router.size, router: this.router,
       send: (c, f) => this.send(c, centerTunnel(f, this.opts)), lookupCode: (code) => this.directory.lookupCode(code), staticDir: opts.staticDir,
       bySlug: (slug) => this.located(this.directory.bySlug(slug)), byFp: (fp) => this.located(this.directory.byFp(fp)),
-      upgrade: (req, srv, ip) => this.upgrade(req, srv, ip), log: this.log,
+      upgrade: (req, srv, ip) => this.upgrade(req, srv, ip), log: this.log, center: opts,
     });
     // 定时扫 auth 超时、心跳判死、last_seen 落盘。不用 Bun 的 idleTimeout 是为了关闭码可控（4408）
     this.sweepTimer = setInterval(() => this.sweep(), opts.sweepMs ?? 5_000);

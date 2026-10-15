@@ -4,6 +4,7 @@
  * 响应逐字节沿用原写法（状态码、文案、JSON 键序），tests/api-route-parity.test.ts 钉住。
  * 叶子模块：只依赖 src/lib，import 时零副作用；api-routes（hub）与 bridge.ts 从这里取。
  */
+import { ConfigChangedError } from "../lib/floka-config/retry.js";
 import { agentInScope, type Principal } from "../lib/principals.js";
 import { canManage, canSeeQuota } from "../lib/devices.js";
 import { wallWaitRefusal, type WallWait } from "../lib/wall-screen.js";
@@ -80,6 +81,7 @@ export function invalidJsonBody(): Response {
  * 否则 Bun 在没设 NODE_ENV 时（launchd 就不设）回 67KB 的 HTML 调试页。
  */
 export function apiErrorResponse(e: unknown): Response {
+  if (e instanceof ConfigChangedError) return apiJson(409, { ok: false, error: e.message });
   if (e instanceof URIError) return apiJson(400, { ok: false, error: "bad path encoding" });
   if (e instanceof ListUnavailableError) return listUnavailable(e);
   console.error("❌ HTTP handler 异常:", e);

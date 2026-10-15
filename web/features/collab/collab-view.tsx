@@ -20,7 +20,7 @@ import { useAsks } from "../asks/asks-store";
 import { homeView, type LineView } from "./collab-model";
 import { openCollabTask, useCollabNav } from "./collab-nav";
 import { useCollab } from "./use-collab";
-import { ownerWaits, subscribeViewBinding, viewLocalProject } from "./owner-waits";
+import { ownerWaits, subscribeViewBinding, viewLocalProject, type AsksRead } from "./owner-waits";
 import { cachedOverview } from "./collab-cache";
 import { applyReviewers, reviewersByTask, type RunningReviewer } from "./collab-reviewers";
 import { sinceDigest } from "./collab-since";
@@ -93,11 +93,12 @@ function useSheetSelection(openTask: string | null, narrow: boolean) {
 }
 
 /** 待你处理（口径在 owner-waits.ts）：团队键视图订本机绑定，解析出本机项目后才数得到；解析不出 = unknown，显示「暂无」 */
-function useOwnerWaits(asks: readonly WebAsk[], project: string) {
+function useOwnerWaits(asks: readonly WebAsk[], project: string, list: AsksRead) {
   const sub = useCallback((cb: () => void) => subscribeViewBinding(project, cb), [project]);
   const read = useCallback(() => viewLocalProject(project), [project]);
   const local = useSyncExternalStore(sub, read, read);
-  return useMemo(() => ownerWaits(asks, project, local), [asks, project, local]);
+  const { loaded, full } = list;
+  return useMemo(() => ownerWaits(asks, project, local, { loaded, full }), [asks, project, local, loaded, full]);
 }
 
 export function CollabView({ project }: { project: string }) {
@@ -117,8 +118,8 @@ export function CollabView({ project }: { project: string }) {
   const off = source.unavailable;
   const lastSeen = useLastSeen(project, off?.has("lastSeen"));
   const ov = load.status === "ok" ? load.ov : null;
-  const { asks, open: inboxOpen } = useAsks();
-  const { waits, unknown: waitsUnknown } = useOwnerWaits(asks, project);
+  const { asks, open: inboxOpen, loaded: asksLoaded, full: asksFull } = useAsks();
+  const { waits, unknown: waitsUnknown } = useOwnerWaits(asks, project, { loaded: asksLoaded, full: asksFull });
   const byTask = useMemo(() => reviewersByTask(reviewers), [reviewers]);
   const view = useMemo(() => {
     if (!ov) return null;
@@ -154,12 +155,12 @@ export function CollabView({ project }: { project: string }) {
     ops={source.ops?.(null, now)} selected={sel?.kind === "member" ? sel.id : null} onSelect={(n) => select(memberSel(n))} />;
   const detail = openTask && (
     <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null} onClose={closeTask}
-      action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} extra={<>{dag.nodeSec(openTask)}{source.ops?.(openTask, now)}
+      action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} work={dag.workFacts(openTask)} extra={<>{dag.nodeSec(openTask)}{source.ops?.(openTask, now)}
         <TeamFactsSec project={project} id={openTask} ov={o} now={now} tr={tr} /><CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} /></>} />
   );
   const page = dag.page || (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
-    || (resolved?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
+    || (resolved?.kind === "waits" && <WaitsPage waits={waits} unknown={waitsUnknown} project={project} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "member" && <MemberPage m={resolved} project={project} onClose={close} tr={tr} />)
     || (resolved?.kind === "team" && <TeamPage onClose={close} tr={tr}>{team}</TeamPage>)
     || (resolved?.kind === "attention" && <AttentionPage which={resolved.which} lines={hv.lines} active={snapOf(dag.counts)?.active} onPick={pickTask} onClose={close} tr={tr} />);

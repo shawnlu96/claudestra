@@ -4,10 +4,11 @@
  */
 import { expect, test } from "bun:test";
 import {
-  awaySayText, canStopRound, detailGoal, nowFactsOf, nowSentence, runningReviewerOf, stageTimes, type NowFacts,
+  awaySayText, detailGoal, nowFactsOf, nowSentence, runningReviewerOf, staleText, stageTimes, stopTarget, type NowFacts,
 } from "../web/features/collab/detail-now-model";
 import type { LedgerEventView, LedgerTaskView, LineView, Stage } from "../web/features/collab/collab-model";
 import type { RunningReviewer } from "../web/features/collab/collab-reviewers";
+import type { TaskWorkFacts } from "../web/features/collab/work/task-work-facts";
 
 const NOW = 1_800_000_000_000;
 const MIN = 60_000;
@@ -16,6 +17,9 @@ const facts = (p: Partial<NowFacts>): NowFacts => ({
   stage: "build", round: 1, executor: "dev", pm: "claudestra", reviewer: null, dwellMs: 23 * MIN, reason: "", now: NOW, awayMachine: null, ...p,
 });
 const BAD = /未知|第 0 轮|0分|不到 1分|undefined|null|NaN/;
+const facts0 = (p: Partial<TaskWorkFacts>): TaskWorkFacts => ({
+  column: "working", who: "agent-dev", lent: false, machine: null, family: null, step: "write", round: null, since: null, reason: null, code: null, stage: null, team: false, ...p,
+});
 
 test("[验收线 1] 八个阶段各一例：谁 · 在做什么 · 多久 + 下一步归谁", () => {
   const cases: [Partial<NowFacts>, string, string][] = [
@@ -136,15 +140,91 @@ test("[验收线 3] 阶段格时长：全无时整行不写；部分有时没数
   expect(some.join("")).not.toContain("—");
 });
 
-test("[验收线 5] 叫停出现条件：主场本机 + 执行者在线 + 卡没结束", () => {
-  expect(canStopRound({ homeLocal: true, executorOnline: true, stage: "build" })).toBe(true);
-  expect(canStopRound({ homeLocal: false, executorOnline: true, stage: "build" })).toBe(false);
-  expect(canStopRound({ homeLocal: true, executorOnline: false, stage: "build" })).toBe(false);
-  for (const stage of ["done", "verified", "cancelled"] as Stage[]) expect(canStopRound({ homeLocal: true, executorOnline: true, stage })).toBe(false);
+test("[验收线 5] 叫停出现条件（UXCARD3 起读快照）：主场本机 + 快照在干活 + 不是出借 + 没过期 + 执行者在线 + 卡没结束", () => {
+  const w = facts0({ column: "working", who: "agent-dev" });
+  const on = (a: string) => a === "dev";
+  const stop = (p: Partial<Parameters<typeof stopTarget>[0]>) => stopTarget({ homeLocal: true, work: w, homeRead: false, stage: "build", online: on, ...p });
+  expect(stop({})).toBe("dev");
+  expect(stop({ homeLocal: false })).toBeNull();
+  expect(stop({ online: () => false })).toBeNull();
+  for (const stage of ["done", "verified", "cancelled"] as Stage[]) expect(stop({ stage })).toBeNull();
 });
 
 test("[验收线 6] 别的机器为主场「对它说」写机器名和原因；名字像 id 时写其他成员的机器", () => {
   expect(awaySayText("alice-mac")).toBe("这张卡在 alice-mac 上执行，对它说要那台机器授权，暂不支持");
   expect(awaySayText(HEX)).toBe("这张卡在 其他成员的机器 上执行，对它说要那台机器授权，暂不支持");
   expect(awaySayText(null)).not.toMatch(/[0-9a-f]{16,}/i);
+});
+
+// ———— followup-reliability-UXCARD3：句子取「谁在干活」快照 ————
+const LENT = facts0({ who: "peer:alice · codex", lent: true, machine: "alice", family: "codex" });
+
+test("[验收线 4] 快照在干活：本机写 / 修 / 审、出借写 / 审；时长从快照开始时刻算，轮次用快照的", () => {
+  const at = NOW - 23 * MIN;
+  const cases: [Partial<NowFacts>, TaskWorkFacts, string, string][] = [
+    [{ stage: "build", executor: "placeholder" }, facts0({ step: "write", since: at }), "执行者 dev 在写 · 已 23分", "下一步：执行者送审"],
+    [{ stage: "fix", round: 5 }, facts0({ step: "fix", round: 2, since: at }), "执行者 dev 在改第 2 轮意见 · 已 23分", "下一步：执行者改完再送审"],
+    [{ stage: "review" }, facts0({ who: "agent-rv-x", step: "review", round: 3, since: at }), "审查员 rv-x 在审第 3 轮 · 已 23分", "下一步：审查员给结论（通过进合并，不通过回执行者）"],
+    [{ stage: "build", executor: "placeholder" }, { ...LENT, step: "write", since: at }, "alice 上的 codex 在写 · 已 23分", "下一步：执行者送审"],
+    [{ stage: "review" }, { ...LENT, step: "review", round: 1, since: at }, "alice 上的 codex 在审第 1 轮 · 已 23分", "下一步：审查员给结论（通过进合并，不通过回执行者）"],
+    [{ stage: "build" }, { ...LENT, family: null, step: "write", since: at }, "alice 上的执行者 在写 · 已 23分", "下一步：执行者送审"],
+    [{ stage: "restate" }, facts0({ step: "restate", since: at }), "执行者 dev 在复述 · 已 23分", "下一步：PM 放行后执行者开写"],
+    [{ stage: "build" }, facts0({ step: "publishing", since: at }), "执行者 dev 在交付 · 已 23分", "下一步：执行者送审"],
+    [{ stage: "merge" }, facts0({ step: "deploy", since: at }), "已合并，在部署 · 已 23分", "下一步：合并后上线"],
+  ];
+  for (const [p, work, who, next] of cases) {
+    const s = nowSentence(facts({ ...p, work }));
+    expect(s.who).toBe(who);
+    expect(s.next).toBe(next);
+    expect(s.usedReason).toBe(true);
+  }
+  // 出借审查不写「等审查员领单」
+  expect(nowSentence(facts({ stage: "review", reviewer: null, work: { ...LENT, step: "review", round: 1, since: at } })).who).not.toContain("等审查员领单");
+});
+
+test("[验收线 4] 快照在等 / 在等合并 / 老卡：原因 · 已等 时长；manual 下一步归 PM；退回人工不出「在改第 N 轮」；老卡不出时长", () => {
+  const at = NOW - 90 * MIN;
+  const manual = nowSentence(facts({ stage: "fix", round: 5, work: facts0({ column: "waiting", step: "fix", code: "manual", reason: "退回人工（manual）：缺凭据", since: at }) }));
+  expect(manual).toEqual({ who: "退回人工（manual）：缺凭据 · 已等 1小时30分", next: "下一步：PM 接手", usedReason: true });
+  expect(manual.who).not.toMatch(/在改第 \d+ 轮/);
+  const pooled = nowSentence(facts({ stage: "review", work: facts0({ column: "waiting", step: "review", code: "pooled", reason: "等审查员领单", since: at }) }));
+  expect(pooled).toEqual({ who: "等审查员领单 · 已等 1小时30分", next: "下一步：审查员给结论（通过进合并，不通过回执行者）", usedReason: true });
+  const ask = nowSentence(facts({ stage: "build", work: facts0({ column: "waiting", code: "ask", reason: "等 owner", since: at }) }));
+  expect(ask).toEqual({ who: "等 owner · 已等 1小时30分", next: "下一步：执行者送审", usedReason: true });
+  const queue = nowSentence(facts({ stage: "merge", work: facts0({ column: "merging", code: "merge_queue", reason: "合并排队：前面是 X9", since: at }) }));
+  expect(queue).toEqual({ who: "合并排队：前面是 X9 · 已等 1小时30分", next: "下一步：合并后上线", usedReason: true });
+  for (const code of ["quota", "executor_missing"]) {
+    expect(nowSentence(facts({ stage: "build", work: facts0({ column: "waiting", code, reason: "x", since: at }) })).next).toBe("下一步：PM 接手");
+  }
+  // 团队行（别的机器为主场）在等、快照没写原因：句子按阶段，卡的镜像提示（阻塞提问 / 过期）照旧另起一行
+  const away = nowSentence(facts({ stage: "review", awayMachine: "alice-mac", dwellMs: null, work: facts0({ column: "waiting", team: true, who: "peer-dev" }) }));
+  expect(away).toEqual({ who: "等审查员领单 · 在 alice-mac", next: "下一步：审查员给结论（通过进合并，不通过回执行者）", usedReason: false });
+  const old = nowSentence(facts({ stage: "review", dwellMs: 336 * 60 * MIN, work: facts0({ column: "legacy", who: null, step: null, stage: "review" }) }));
+  expect(old).toEqual({ who: "老卡（没有调度记录）· 停在审查，调度器不派活", next: "下一步：PM 收尾或补调度记录", usedReason: true });
+  expect(old.who).not.toMatch(/已等|超过 30 分钟|\d+分/);
+});
+
+test("[验收线 4] 快照没有这张卡（null / 不给）：输出和旧逻辑逐字一致；暂停态仍优先", () => {
+  for (const stage of ["build", "review", "fix", "merge"] as Stage[]) {
+    expect(nowSentence(facts({ stage, work: null }))).toEqual(nowSentence(facts({ stage })));
+  }
+  const pause = { mode: "on", paused: true, actor: "owner", at: NOW - 5 * MIN, reason: "看一下" } as unknown as NowFacts["pause"];
+  expect(nowSentence(facts({ pause, work: facts0({ since: NOW }) })).who).toContain("已暂停");
+});
+
+test("[验收线 1] 叫停可见性：出借 / 退回人工（在等）/ 老卡 / 过期 / 快照没到 → 不出；本机在干活且在线 → 打到快照里的执行者", () => {
+  const base = { homeLocal: true, homeRead: false, stage: "build" as Stage, online: () => true };
+  expect(stopTarget({ ...base, work: { ...LENT, who: "peer:alice · codex" } })).toBeNull();
+  expect(stopTarget({ ...base, work: facts0({ who: "dev@alice-mac", lent: true }) })).toBeNull();
+  expect(stopTarget({ ...base, stage: "fix", work: facts0({ column: "waiting", code: "manual" }) })).toBeNull();
+  expect(stopTarget({ ...base, stage: "review", work: facts0({ column: "legacy", who: null }) })).toBeNull();
+  expect(stopTarget({ ...base, homeRead: true, work: facts0({}) })).toBeNull();
+  expect(stopTarget({ ...base, work: undefined })).toBeNull();
+  expect(stopTarget({ ...base, work: null })).toBeNull();
+  expect(stopTarget({ ...base, work: facts0({ who: "agent-dev-2" }) })).toBe("dev-2");
+});
+
+test("过期一行写本机详情最后读到的时:分", () => {
+  const at = new Date(2026, 9, 14, 9, 5).getTime();
+  expect(staleText(at)).toBe("数据可能过期（本机详情最后读到 09:05）");
 });

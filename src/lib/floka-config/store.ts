@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { readJsonState, writeJsonStateGuarded } from "../state-file.js";
-import { autoUpdateValue, object } from "./values.js";
+import { autoUpdateValue, configConflicts, object } from "./values.js";
+import { ConfigChangedError } from "./retry.js";
 import type { AppConfig } from "../config-store.js";
 import { barrierActive } from "../state-maintenance/barrier.js";
 
@@ -10,6 +11,11 @@ const sources = new WeakMap<object, { raw: Record<string, any>; view: Record<str
 
 export function configView(raw: unknown, view: AppConfig): AppConfig {
   const source = object(raw);
+  const conflicts = configConflicts(raw);
+  if (conflicts.length) {
+    Object.defineProperty(view, "configConflicts", { value: conflicts, enumerable: false });
+    console.error(`[floka-config] ${conflicts.map(c => c.message).join("; ")}; reading legacy value when valid`);
+  }
   if (object(source.autoUpdate).floka !== undefined) {
     Object.defineProperty(view.autoUpdate, "floka", {
       enumerable: true, configurable: true,
@@ -42,7 +48,7 @@ export async function writeCompatibleConfig(path: string, cfg: AppConfig): Promi
   const value = autoUpdateValue(cfg.autoUpdate, true);
   const source = sources.get(cfg.autoUpdate);
   if (source && disk.status === "ok" && !isDeepStrictEqual(source.raw, raw)) {
-    throw new Error("config changed since read; refusing stale automatic overwrite");
+    throw new ConfigChangedError();
   }
   const out = edited(raw, source?.view ?? {}, cfg);
   const previous = object(raw.autoUpdate);

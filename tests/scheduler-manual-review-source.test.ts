@@ -13,6 +13,7 @@ import { ADOPT_OP, adoptedReviewSource } from "../src/lib/scheduler-manual-revie
 import { beginMergeRun, mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
 import { adopted, events, H2, mcpReview, PEER, peerReview, plan, resume, sideTables, toManual, toRound2, withPr, writeMerge, type Fx } from "./scheduler-manual-review-source-fixture.test.js";
+import { HANDBACK_REVIEW_TAG } from "../src/lib/pm-handback.js";
 
 let f: Fx;
 afterEach(() => f?.close());
@@ -38,7 +39,7 @@ describe("AUTOACK1 adoption on the PM hand-back", () => {
     expect(ev.filter((e) => e.data.op === "session_bind").map((e) => e.data.agent)).toEqual(["agent-task-one", "agent-rv-t1"]);
     expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE recipient = ?").get(reviewer)).toEqual({ n: 0 });
     // old path (same ledger, adoption ignored): no engine dispatch proof for the peer ticket
-    expect(plan(f, true)).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+    expect(plan(f, true)).toMatchObject({ kind: "intent", action: "review", reason: expect.stringContaining(HANDBACK_REVIEW_TAG) }); // PMHAND1 11a: a pre-hand-back verdict is re-reviewed
     expect(plan(f)).toMatchObject({ kind: "intent", action: "stage", targetStage: "merge" });
     expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
     // old path at merge: merge_review_unproven; with the adoption the planner asks for the merge, and the real writer accepts it
@@ -65,7 +66,7 @@ describe("AUTOACK1 adoption on the PM hand-back", () => {
     expect(ev.findLast((e) => e.data.op === "workflow_resume")!.data.reviewSource).toMatchObject({ refused: expect.stringMatching(/领单与独立检出/) });
     expect(sideTables(f)).toEqual(before);
     expect(adoptedReviewSource(f.db, f.task(), getWorkflow(f.db, "T1")!)).toBeNull();
-    expect(plan(f)).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+    expect(plan(f)).toMatchObject({ kind: "intent", action: "review", reason: expect.stringContaining(HANDBACK_REVIEW_TAG) }); // PMHAND1 11a: a pre-hand-back verdict is re-reviewed
     f.db.query("UPDATE tasks SET stage = 'merge' WHERE id = 'T1'").run();
     expect(plan(f)).toMatchObject({ kind: "escalate", code: "merge_review_unproven" });
     expect(() => writeMerge(f)).toThrow("合并前缺本轮审查派单回执");

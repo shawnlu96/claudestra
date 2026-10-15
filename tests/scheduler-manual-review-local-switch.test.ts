@@ -10,6 +10,7 @@ import { rmSync } from "node:fs";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
+import { HANDBACK_REVIEW_TAG } from "../src/lib/pm-handback.js";
 import { adoptedReviewSource } from "../src/lib/scheduler-manual-review-source.js";
 import { beginMergeRun, mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
@@ -60,7 +61,7 @@ describe("AUTOACK2 [验收线 3] the localReviewAdopt switch", () => {
     expect(await resume(f)).toMatchObject({ ok: true });
     expect(adoptEvent(f)).toBeUndefined();
     expect(source()).toEqual({ refused: NOT_POOL, reviewSeq: verdictEvent(f).seq });
-    expect(plan(f)).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+    expect(plan(f)).toMatchObject({ kind: "intent", action: "review", reason: expect.stringContaining(HANDBACK_REVIEW_TAG) }); // PMHAND1 11a: a pre-hand-back verdict is re-reviewed
   });
 
   test("observe (default, no policy file): full evidence still not adopted; refused is the original, localObserve 「会承接」", async () => {
