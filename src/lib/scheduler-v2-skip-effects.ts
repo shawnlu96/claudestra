@@ -55,6 +55,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-author-retire-tick.ts": "ledger=2",
     "lend-fix-reassign-tick.ts": "ledger=2",
     "lend-pr-takeover-refusal-request.ts": "ledger=1",
+    "main-red-fix-tick.ts": "ledger=1", // MAINRED1: `ledger scheduler-main-red-fix` through the leased pass manager
     // merge-arch-SLA1: the one PM message of a batch, sent only for episodes whose `ledger scheduler-manual-case-sla <task> --phase claim` passed the manager gate
     "manual-case-sla-tick.ts": "notice=3",
     "manual-merge-queue-pass.ts": "ledger=1",
@@ -288,6 +289,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-store.ts": "sql=5 stmt=8 fs=1",
     "ledger-tx.ts": "sql=1",
     "log-paths.ts": "fs=4",
+    "main-red-fix-gh.ts": "vcs=3", // MAINRED1: bounded gh reads of main's runs and the one `gh run rerun --failed` the ledger claimed
     "media-outbound.ts": "sql=2 stmt=4 fs=4",
     "memory-retrieve-head.ts": "proc=1 vcs=1",
     "notify.ts": "notice=1",

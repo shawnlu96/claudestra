@@ -26,7 +26,8 @@ export function claimMainCiNotice(db: Database, ctx: WriteCtx, project: string, 
   return !r.duplicate;
 }
 
-export function recordMainCiRepair(db: Database, ctx: WriteCtx, input: { project: string; taskId: string; head: string; mainSha: string; faultKey: string; reason: string }) {
+export function recordMainCiRepair(db: Database, ctx: WriteCtx, input: { project: string; taskId: string; head: string; mainSha: string; faultKey: string; reason: string },
+  extra: Record<string, unknown> = {}) {
   const digest = createHash("sha256").update(input.faultKey).digest("hex").slice(0, 16);
   // generation = the card's latest revoke: a retry of the same request replays its event, a binding after a revoke is a new event
   // (mainCiApprovals drops every approval before a revoke, so replaying the pre-revoke one would bind nothing)
@@ -35,7 +36,14 @@ export function recordMainCiRepair(db: Database, ctx: WriteCtx, input: { project
   const dedupKey = `${REPAIR_PREFIX}${input.taskId}:${input.head.toLowerCase()}:${input.mainSha.toLowerCase()}:${digest}${gen ? `:r${gen}` : ""}`;
   return appendEvent(db, { ...ctx, dedupKey }, { project: input.project, target: input.taskId, kind: "decision",
     text: `主线 CI 修复绑定：head ${input.head.slice(0, 12)}，main ${input.mainSha.slice(0, 12)}（${input.reason}）`,
-    data: { op: REPAIR_OP, taskId: input.taskId, head: input.head.toLowerCase(), mainSha: input.mainSha.toLowerCase(), faultKey: input.faultKey, reason: input.reason } });
+    data: { op: REPAIR_OP, taskId: input.taskId, head: input.head.toLowerCase(), mainSha: input.mainSha.toLowerCase(), faultKey: input.faultKey, reason: input.reason, ...extra } });
+}
+
+/** MAINRED1: the same binding for a card main-red-fix wrote itself (main-red-fix-write.ts proves that), recorded for the feature PM. */
+export function recordMainRedRepair(db: Database, ctx: WriteCtx, input: { project: string; taskId: string; head: string; mainSha: string; faultKey: string;
+  reason: string; pm: string; source: string }) {
+  if (ctx.actor !== "scheduler" || input.source !== "mainRedFix") throw new LedgerError("forbidden", "调度代记的修复绑定只给 mainRedFix 写的卡");
+  return recordMainCiRepair(db, { ...ctx, actor: input.pm }, { ...input, reason: `调度代记：${input.reason}` }, { source: input.source, by: ctx.actor });
 }
 
 export function revokeMainCiRepair(db: Database, ctx: WriteCtx, input: { project: string; taskId: string; reason: string }) {
