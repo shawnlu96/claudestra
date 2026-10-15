@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { mustTask, resolveAssignee, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow } from "./ledger-scheduler.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
-import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { convergeReview } from "./review-converge.js";
 import { fixStrategy } from "./fix-strategy.js";
@@ -20,6 +20,7 @@ import { recordStoppedExits, stoppedReportSeq } from "./lend-reclaim-stopped.js"
 import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 import { localSwapAuthority, localSwapEvidenceOf, localSwapTrigger } from "./recovery-fix-local-swap-run.js";
 import type { LedgerEvent } from "./ledger-stages.js";
+import type { SwapGate } from "./fix-strategy-guard.js";
 import { selfHealMode, selfHealSample } from "./fix-swap-halfbuilt-sample.js";
 
 function reclaimAuthority(db: Database, ctx: WriteCtx, id: string) {
@@ -164,14 +165,15 @@ function priorReclaim(db: Database, ctx: WriteCtx, id: string): { reclaim: Ledge
 
 /**
  * No held lease: under lendReclaimIntent=on a proven earlier reclaim of this round is resumed — never a second reclaim, never a
- * reclaim event of this intent — after the remote branch is read back at the card head, re-proving every fact in the transaction
- * that retires the stale peer author (retireReclaimedPeerAuthor). off / observe / any failed fact refuse as before.
+ * reclaim event of this intent — after the remote branch is read back at the card head, re-proving every fact and the switch itself
+ * in the transaction that retires the stale peer author (retireReclaimedPeerAuthor). off / observe / any failed fact refuse as before.
+ * The awaits that follow (tree, codex slot, create) are covered by resumedReclaimGate at the create and bind edges.
  */
 async function resumeAfterReclaim(db: Database, ctx: WriteCtx, id: string, context: RemoteConvergenceContext, active: () => void,
   lapse: () => string | null): Promise<null> {
   const task = mustTask(db, convergenceIntent(db, ctx, id, "fix_swap").taskId), mode = selfHealMode(db, task.project, "lendReclaimIntent");
   if (mode === "off") throw new LedgerError("conflict", NO_LEASE);
-  const refuse = (why: string) => new LedgerError("conflict", mode === "on" ? `${NO_LEASE}（不续用前次收回：${why}）` : NO_LEASE);
+  const refuse = (why: string, as = mode) => new LedgerError("conflict", as === "on" ? `${NO_LEASE}（不续用前次收回：${why}）` : NO_LEASE);
   const first = priorReclaim(db, ctx, id);
   if (typeof first === "string") throw refuse(first);
   const head = await context.remoteHead(first.lease.repo, first.lease.branch); active();
@@ -179,16 +181,41 @@ async function resumeAfterReclaim(db: Database, ctx: WriteCtx, id: string, conte
   const sample = { project: task.project, key: "lendReclaimIntent" as const, taskId: task.id, head: task.headSHA!, action: "reclaim-resume" as const,
     text: `续用前次收回（事件 #${first.reclaim.seq}，意图 ${String(first.reclaim.data.intentId)}），退役旧 peer 作者后由 ${id} 在本机建作者`,
     data: { intentId: id, reclaimSeq: first.reclaim.seq, prevIntentId: first.reclaim.data.intentId, peer: first.lease.peer } };
-  if (mode === "observe") { selfHealSample(db, "observe", sample, ctx.now ?? Date.now()); throw refuse(""); }
-  return tx(db, () => {
+  const observed = tx(db, () => {
+    // the switch is part of the permission: read again after the await, never the value taken before it
+    const now = selfHealMode(db, task.project, "lendReclaimIntent");
+    if (now === "off") throw new LedgerError("conflict", NO_LEASE);
     const again = priorReclaim(db, ctx, id), lapsed = lapse();
-    if (typeof again === "string" || lapsed) throw refuse(typeof again === "string" ? again : lapsed!);
+    if (typeof again === "string" || lapsed) throw refuse(typeof again === "string" ? again : lapsed!, now);
     if (again.reclaim.seq !== first.reclaim.seq || again.lease.repo !== first.lease.repo || again.lease.branch !== first.lease.branch ||
-      mustTask(db, task.id).headSHA !== head.head) throw refuse("前次收回或卡 head 在核实远端时已变");
+      mustTask(db, task.id).headSHA !== head.head) throw refuse("前次收回或卡 head 在核实远端时已变", now);
+    if (now === "observe") { selfHealSample(db, "observe", sample, ctx.now ?? Date.now()); return true; } // recorded, then refused outside
     retireReclaimedPeerAuthor(db, ctx, id, task.id);
     selfHealSample(db, "on", sample, ctx.now ?? Date.now());
-    return null;
+    return false;
   });
+  if (observed) throw new LedgerError("conflict", NO_LEASE);
+  return null;
+}
+
+/**
+ * The create / bind edge of a resumed reclaim (P1 resume-writer-race / resume-policy-race): this intent wrote no reclaim of its own,
+ * so the local author it builds stands on the earlier reclaim alone, and every fact of it — the switch at on, the auto card, the ended
+ * lease that reclaim ended, the earlier intent settled with no replacement, no pooled / claimed / unknown write order — is read again
+ * synchronously right before the create and before the bind. undefined = the intent reclaimed for itself (nothing to resume).
+ */
+export function resumedReclaimGate(db: Database, ctx: WriteCtx, id: string): SwapGate | undefined {
+  if (getEventByDedup(db, `scheduler:${id}:reclaim`)) return undefined;
+  const pinned = priorReclaim(db, ctx, id);
+  const seq = typeof pinned === "string" ? null : pinned.reclaim.seq;
+  return () => {
+    const task = getTask(db, getIntent(db, id)?.taskId ?? "");
+    if (!task || selfHealMode(db, task.project, "lendReclaimIntent") !== "on") return { halted: "drift", reason: "lendReclaimIntent 不在 on，不续用前次收回" };
+    let now: ReturnType<typeof priorReclaim>;
+    try { now = priorReclaim(db, ctx, id); } catch (e) { return { halted: "drift", reason: (e as Error).message }; }
+    if (typeof now === "string") return { halted: now === "卡不在 auto，不自愈" ? "takeover" : "drift", reason: `不续用前次收回：${now}` };
+    return now.reclaim.seq === seq ? null : { halted: "drift", reason: "前次收回已不是续用时核过的那一条" };
+  };
 }
 
 async function notifyOldHolder(db: Database, ctx: WriteCtx, id: string, reason: string, context: RemoteConvergenceContext, active: () => void) {

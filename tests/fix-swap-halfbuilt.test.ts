@@ -121,3 +121,55 @@ test("only bare shells with no child process count as a half-built window", () =
   expect(shellOnlyVerdict([100], "300 1 -zsh\n")).toBe("unknown");
   expect(shellOnlyVerdict([], "")).toBe("unknown");
 });
+
+// SWAPFIX1 r1 review: the cleanup's permission is read again after the tmux / ps awaits, right before the kill and the settle.
+test("authorRebuild turned off or a PM takeover during the window probe leaves the half-built session alone", async () => {
+  for (const flip of ["off", "observe", "manual", "rebuilt-off-during-kill"] as const) {
+    const h = await halfBuilt();
+    try {
+      const { intent, name } = await h.start();
+      await h.create(intent);
+      const base = io(() => name, () => "shell");
+      const turn = () => {
+        if (flip === "manual") h.f.db.run("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'T1'");
+        else setSelfHealPolicy(h.f.db, () => ({ mode: flip === "observe" ? "observe" : "off", manualAfterMs: null, source: "config" }));
+      };
+      setHalfBuiltIo(h.f.db, { ...base, windows: async () => { if (flip !== "rebuilt-off-during-kill") turn(); return base.windows(); } });
+      if (flip === "rebuilt-off-during-kill") {
+        const manager = h.p.deps.manager;
+        h.p.deps.manager = async (...args) => { const r = await manager(...args); if (args[0] === "kill") turn(); return r; };
+      }
+      expect(await healHalfBuilt(h.f.db, h.at(CLAIM_LEASE_MS), getIntent(h.f.db, intent.id)!, h.f.task(), name, "author", h.p.deps)).toBeNull(); // [验收线 4]
+      expect(getIntent(h.f.db, intent.id)?.status).toBe("submitted");
+      if (flip !== "rebuilt-off-during-kill") expect(h.p.effects).not.toContain(`kill:${name}`);
+      const events = listEvents(h.f.db, { project: "p", target: "T1" });
+      expect(events.some((e) => e.data.op === "fix_swap_selfheal")).toBe(false);
+      expect(events.some((e) => e.data.op === "recovery_observe" && e.data.mechanism === "authorRebuild")).toBe(false);
+    } finally { h.f.close(); }
+  }
+});
+
+test("a half-built session whose window and registry placeholder are both already gone is a finished cleanup", async () => {
+  const h = await halfBuilt();
+  try {
+    const { intent, name } = await h.start();
+    await h.create(intent);
+    h.p.edit((r) => { delete r.agents[name]; });
+    h.setWindow("gone");
+    h.p.deps.manager = async (cmd, agent) => { h.p.effects.push(`${cmd}:${agent}`); return { ok: false, error: `${agent} 不存在` }; }; // runKill's strict nothing-there answer
+    const out = await h.create(intent, CLAIM_LEASE_MS);
+    expect(out).toMatchObject({ wait: expect.stringContaining(HALF_BUILT_MARK), tree: true }); // [验收线 3]
+    expect(getIntent(h.f.db, intent.id)?.status).toBe("cancelled");
+  } finally { h.f.close(); }
+});
+
+test("a failed kill other than strictly nothing-there stays unknown", async () => {
+  const h = await halfBuilt();
+  try {
+    const { intent, name } = await h.start();
+    await h.create(intent);
+    h.p.deps.manager = async (cmd, agent) => { h.p.effects.push(`${cmd}:${agent}`); return { ok: false, error: `${agent} 正在 restart（窗口在重建），等它结束再 kill` }; };
+    await h.create(intent, CLAIM_LEASE_MS);
+    expect(getIntent(h.f.db, intent.id)?.status).toBe("unknown"); // [验收线 3]
+  } finally { h.f.close(); }
+});

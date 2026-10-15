@@ -157,7 +157,12 @@ async function buildTree(g: Git, at: Git, source: string, { dir, branch, head, r
     const late = foreign!.mode(); // read again after the proof's awaits
     if (late !== "on") { if (late === "observe") foreign!.sample("observe", dir); return { manual: adopted.slice(0, 400) }; }
     const taken = await ready(foreignCheck);
-    if ("dir" in taken) foreign!.sample("on", dir);
+    if (!("dir" in taken)) return taken;
+    // ready() awaits the origin (and isolation) after the proof: the switch and the registry are read again here, with no await
+    // before the hand-over; the caller's create / bind gate reads them once more at its own edges (fix-strategy-remote.ts)
+    const holder = foreign!.live(dir);
+    if (foreign!.mode() !== "on" || holder) return { manual: holder ? `旧作者工作树 ${dir} 已是活会话 ${holder} 的工作目录，不交给新作者` : adopted.slice(0, 400) };
+    foreign!.sample("on", dir);
     return taken;
   }
   const local = await at(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);

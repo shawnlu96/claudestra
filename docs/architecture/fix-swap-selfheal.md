@@ -22,7 +22,7 @@
 
 GATESWAP1 的 `treeRefusal` / `treeProofSync` 与本处共用 `fix-tree-proof.ts` 的同一判定（一个 git 询问生成器，分别以 await / 同步驱动，步骤与文字逐字相同）：树干净（调用方的完整脏检查）、HEAD 是已审修复 head、来源仓库的本地卡分支不在别的提交上。`foreignTreeRefusal` 在它之上再要求：不是软链、是来源仓库的 linked worktree、在本卡分支上、registry 里没有未 stopped 的会话以它为 cwd。全部成立才接手（不删除、不 reset，隔离 / 复核仍走原 `ready`）；任一不成立照旧 tree-refused 交 PM。
 
-只接在远端换家族路径（`localAfterReclaim` 给 lifecycle 的 `authorTree` 包一层端口）；本机换家族路径 `fix-strategy-runtime.ts` 不在本卡范围，行为不变。
+本机换家族（`fix-strategy-runtime.ts` `fixSwapStep`，PM 补的一处调用例外）与远端换家族（`localAfterReclaim`）共用 `withForeignTree`：给 lifecycle 的 `authorTree` 包一层端口，并返回一个门。接手的许可在三处读：`foreignTreeRefusal` 证明时；`ready()` 的 origin / 隔离 await 之后、交出目录之前同步再读一次（恢复键仍 on、registry 里没有别的活会话以它为 cwd），通过才记 on 样本；之后 create 与 bind 边缘经返回的门再同步读一次（排除本意图自己的作者名）。off 时端口不接手、门只是原来的门，行为逐字不变。
 
 ## 9b 续用已证明的前次收回
 
@@ -33,11 +33,13 @@ GATESWAP1 的 `treeRefusal` / `treeProofSync` 与本处共用 `fix-tree-proof.ts
 3. 没有 pooled / claimed / unknown 写单；
 4. 远端分支 head 仍是卡 head（唯一的 await）。
 
-await 之后在一个事务里重读授权、租约与以上全部事实（以及 fixLocalSwap 的 lapse），再调用 `retireReclaimedPeerAuthor()` 退役旧 peer 作者。不写本意图的 reclaim 事件，不碰 CONV reborrow 的证明白名单。
+await 之后在一个事务里重读恢复键（off 照旧原文拒绝；observe 只记观察后拒绝）、授权、租约与以上全部事实（以及 fixLocalSwap 的 lapse），再调用 `retireReclaimedPeerAuthor()` 退役旧 peer 作者。不写本意图的 reclaim 事件，不碰 CONV reborrow 的证明白名单。
+
+续用之后建树、等 codex 槽、create 还有 await：`resumedReclaimGate` 作为 `localAfterReclaim` 的 label.gate，在 create 边缘（lifecycle 的 create 闸）与 bind 之前同步重读恢复键为 on 与上面第 1–3 条（含出现新的 pooled / claimed / unknown 写单、租约又被持有），任一不成立就等待，不建、不绑。
 
 ## 2 半建会话自动收拾重建
 
-`createConvergenceWorker` 在 creating 超过 `CLAIM_LEASE_MS` 仍无 session id、要判 unknown 之前调用 `healHalfBuilt`：仅 fix_swap 作者、auto 卡；registry 该名字仍无 sessionId；窗口不在，或每个 pane 都是没有子进程的裸 shell（`worker-liveness.ts` 的严格 tmux / ps 读）。然后 `manager kill`（runManager，create-guard 清占位与窗口），确认 registry 已无该名字，意图结清为 cancelled（回执「半建会话已清理」）。规划器重新规划的换家族在建会话入口按 `createRetryDelay` 等退避（2 → 4 → 8 → 15 分钟）。同卡作者连续第 3 次半建、tmux 读不到、窗口有别的进程、registry 有 sessionId，一律照旧 unknown。
+`createConvergenceWorker` 在 creating 超过 `CLAIM_LEASE_MS` 仍无 session id、要判 unknown 之前调用 `healHalfBuilt`：仅 fix_swap 作者、auto 卡；registry 该名字仍无 sessionId；窗口不在，或每个 pane 都是没有子进程的裸 shell（`worker-liveness.ts` 的严格 tmux / ps 读）。然后 `manager kill`（runManager，create-guard 清占位与窗口），确认 registry 已无该名字，意图结清为 cancelled（回执「半建会话已清理」）。tmux / ps 读取之后，kill 之前和结清之前各同步重读一次完整许可（auto 卡、authorRebuild 仍 on、意图仍 submitted 且卡未变、creating 认领仍是这个名字、registry 仍无 session id）；kill 按名字、没有 session，manager 子进程没有 `--fix-stop` 那样可带的会话授权，所以许可在派出子进程前同步读、子进程回来后再读，后读不成立就不结清（照旧 unknown）。kill 回「<名字> 不存在」（runKill 只在 registry 与窗口都没有时这样答）且 registry 无该名字，视同清理完成。规划器重新规划的换家族在建会话入口按 `createRetryDelay` 等退避（2 → 4 → 8 → 15 分钟）。同卡作者连续第 3 次半建、tmux 读不到、窗口有别的进程、registry 有 sessionId，一律照旧 unknown。
 
 ## 测试
 

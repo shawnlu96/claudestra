@@ -13,6 +13,7 @@ import type { Database } from "bun:sqlite";
 import { basename } from "node:path";
 import type { WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
+import { getEventByDedup, getTask } from "./ledger-store.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { RegistryAgent } from "./registry.js";
@@ -70,8 +71,28 @@ export function halfBuiltBackoff(db: Database, taskId: string, now: number): str
 }
 
 /**
+ * The whole permission the cleanup acts on, read synchronously with no await before the effect it guards (the kill, the settle):
+ * auto card, authorRebuild still on, the card still where the intent pins it, the intent still submitted with this name's creating
+ * claim, and the registry row (if any) still without a session id. A permission read before the tmux / ps awaits proves nothing here.
+ */
+function healRefusal(db: Database, intent: SchedulerIntent, name: string, deps: Lifecycle): string | null {
+  deps.active();
+  const task = getTask(db, intent.taskId), now = getIntent(db, intent.id);
+  if (!task || getWorkflow(db, task.id)?.mode !== "auto") return "卡不在 auto";
+  if (selfHealMode(db, task.project, "authorRebuild") !== "on") return "authorRebuild 不在 on";
+  if (!now || now.status !== "submitted" || now.head !== intent.head || task.headSHA !== now.head || task.specRev !== now.specRev || task.rev !== now.taskRev) {
+    return "意图或卡已变化";
+  }
+  if (getEventByDedup(db, `scheduler:${intent.id}:creating`)?.data.agent !== name) return "建会话认领已不是这个名字";
+  return deps.registry().find((r) => r.name === name)?.sessionId ? "registry 已有 session id" : null;
+}
+
+/** The kill found neither a registry row nor a window under the name: strictly nothing left, the same as a cleanup (P2 halfbuilt-gone). */
+const alreadyGone = (killed: Record<string, unknown>, name: string): boolean => killed.ok !== true && killed.error === `${name} 不存在`;
+
+/**
  * Called once the creating claim is past CLAIM_LEASE_MS with no session id. Returns the wait text after the cleanup cancelled the
- * intent, or null = the old path (unknown for PM).
+ * intent, or null = the old path (unknown for PM). The permission is read again right before the kill and right before the settle.
  */
 export async function healHalfBuilt(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, name: string,
   role: "author" | "reviewer", deps: Lifecycle): Promise<string | null> {
@@ -87,10 +108,15 @@ export async function healHalfBuilt(db: Database, ctx: WriteCtx, intent: Schedul
   const sample = { project: task.project, key: "authorRebuild" as const, taskId: task.id, head: intent.head, action: "halfbuilt-rebuild" as const, nth,
     text: `清理重建半建的换家族作者会话 ${name}（窗口${window === "gone" ? "已不在" : "只剩 shell"}，registry 无 session id，第 ${nth} 次）`,
     data: { intentId: intent.id, agent: name, window } };
-  if (mode === "observe") { selfHealSample(db, "observe", sample, now); return null; }
-  if (!unbound() || getIntent(db, intent.id)?.status !== "submitted") return null;
+  if (mode === "observe") {
+    // the observation, too, stands on the current card: a takeover or a switch flip during the tmux read records nothing
+    if (getWorkflow(db, task.id)?.mode === "auto" && selfHealMode(db, task.project, "authorRebuild") === "observe" && unbound()) selfHealSample(db, "observe", sample, now);
+    return null;
+  }
+  if (healRefusal(db, intent, name, deps)) return null;
   const killed = await deps.manager("kill", name); deps.active();
-  if (killed.ok !== true || deps.registry().some((r) => r.name === name) || getIntent(db, intent.id)?.status !== "submitted") return null;
+  if ((killed.ok !== true && !alreadyGone(killed, name)) || deps.registry().some((r) => r.name === name)) return null;
+  if (healRefusal(db, intent, name, deps)) return null;
   const wait = createRetryDelay(nth);
   const receipt = `${HALF_BUILT_MARK}（${name} 第 ${nth} 次；${wait / 60_000} 分钟后重新规划换家族）`;
   settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "cancelled", receipt });

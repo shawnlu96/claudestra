@@ -10,7 +10,7 @@ import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
 import { getIntent } from "../src/lib/ledger-scheduler.js";
 import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
 import { setSelfHealPolicy } from "../src/lib/fix-swap-halfbuilt-sample.js";
-import { fourRoundFix } from "./fix-strategy-helpers.js";
+import { convergenceProbe, fourRoundFix } from "./fix-strategy-helpers.js";
 import { peerAuthor, remoteProbe } from "./fix-strategy-remote-helpers.js";
 
 const ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t",
@@ -102,5 +102,59 @@ test("the family-swap replacement author is created in the old author's tree und
     expect(getEventByDedup(f.db, `scheduler:${intent.id}:tree-refused`)).toBeNull();
     const samples = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "fix_swap_selfheal");
     expect(samples.map((e) => e.data)).toMatchObject([{ mechanism: "fixLocalSwap", action: "tree-adopt", head: r.head, dir: r.dir }]);
+  } finally { f.close(); r.close(); }
+});
+
+// SWAPFIX1 r1 review (tree-final-proof): the takeover's permission is read again after ready()'s origin await, before the hand-over.
+test("a live session or the switch turning off during the final origin read keeps the old tree refused", async () => {
+  for (const race of ["live", "off", "observe"] as const) {
+    const r = repo();
+    try {
+      let reads = 0, live: string | null = null, mode: RecoveryMode = "on";
+      const samples: string[] = [];
+      const p: ForeignTreePort = { mode: () => mode, live: () => live, sample: (m, d) => void samples.push(`${m}:${d}`) };
+      const origin = async (_cwd: string, _branch: string) => {
+        if (++reads === 2) { if (race === "live") live = "agent-another-author"; else mode = race; } // ready()'s read, after the proof
+        return { ok: true as const, head: r.head };
+      };
+      expect(await openFixWorktree(realGit, r.main, target(r, p), r.dir, origin)).toMatchObject({ manual: expect.any(String) }); // [验收线 2]
+      expect(reads).toBeGreaterThanOrEqual(2);
+      expect(samples.filter((s) => s.startsWith("on:"))).toEqual([]);
+    } finally { r.close(); }
+  }
+});
+
+// SWAPFIX1 r1 review (local-tree-port): the local family swap (fixSwapStep, no peer) gets the same port; off is the old refusal.
+async function localSwap(mode: "on" | "off") {
+  const r = repo(), f = await fourRoundFix(r.heads), p = convergenceProbe(f);
+  setSelfHealPolicy(f.db, () => ({ mode, manualAfterMs: null, source: "config" }));
+  p.deps.worktreeRoot = r.wt;
+  p.edit((reg) => { for (const a of Object.values(reg.agents) as { cwd?: string }[]) a.cwd = r.main; });
+  f.db.run("UPDATE tasks SET branch = 'feat/T1' WHERE id = 'T1'"); // the card's formal branch, as a pushed fix card has // the old author works in the main checkout
+  p.deps.authorTree = (source, t, recorded) => openFixWorktree(realGit, source, t, recorded, async () => ({ ok: true, head: r.head }));
+  return { r, f, p, intent: p.plan() };
+}
+
+test("the local family swap takes over a clean old author tree under fixLocalSwap=on", async () => {
+  const { r, f, p, intent } = await localSwap("on");
+  try {
+    let out: Awaited<ReturnType<typeof fixSwapStep>> = { ok: true, step: "waiting", detail: "" };
+    for (let n = 0; n < 4 && out.step !== "session"; n++) out = await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
+    expect(out).toMatchObject({ step: "session" }); // [验收线 2]
+    expect(getEventByDedup(f.db, `scheduler:${intent.id}:creating`)?.data.dir).toBe(r.dir);
+    expect(getEventByDedup(f.db, `scheduler:${intent.id}:tree-refused`)).toBeNull();
+    const samples = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "fix_swap_selfheal");
+    expect(samples.map((e) => e.data)).toMatchObject([{ mechanism: "fixLocalSwap", action: "tree-adopt", dir: r.dir }]);
+  } finally { f.close(); r.close(); }
+});
+
+test("the local family swap under fixLocalSwap=off still refuses the old author tree word for word", async () => {
+  const { r, f, p, intent } = await localSwap("off");
+  try {
+    for (let n = 0; n < 4 && getIntent(f.db, intent.id)?.status !== "unknown"; n++) await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
+    expect(getIntent(f.db, intent.id)).toMatchObject({ status: "unknown", receipt: expect.stringContaining("已被占用") }); // [验收线 4]
+    expect(getEventByDedup(f.db, `scheduler:${intent.id}:tree-refused`)).not.toBeNull();
+    expect(p.effects.some((s) => s.startsWith("create:"))).toBe(false);
+    expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "fix_swap_selfheal" || e.data.op === "recovery_observe")).toBe(false);
   } finally { f.close(); r.close(); }
 });

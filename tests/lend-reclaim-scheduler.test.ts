@@ -188,7 +188,7 @@ test("ended lease with live or unknown writer refuses replacement", async () => 
       setSelfHealPolicy(f.db, policy("on"));
       const id = (await reclaimedThenCancelledOn(f, p)).id;
       const prev = reclaims(f)[0].data.intentId;
-      if (status === "prev-unknown") f.db.run("UPDATE scheduler_intents SET status = 'unknown' WHERE id = ?", [prev]);
+      if (status === "prev-unknown") f.db.run("UPDATE scheduler_intents SET status = 'unknown' WHERE id = ?", [String(prev)]);
       else runningOrder(f, status);
       expect(await refusal(f, p, id)).toContain("remote author has no held write lease（不续用前次收回："); // [验收线 1]
       expect(p.effects.filter((s) => s.startsWith("create:")).length).toBe(0);
@@ -232,6 +232,42 @@ test("off and observe keep the old refusal; observe records the would-be resume 
       expect(notes.length).toBe(mode === "observe" ? 1 : 0);
       expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "fix_swap_selfheal")).toBe(false);
       expect(p.effects.some((s) => s.startsWith("create:"))).toBe(false);
+    } finally { f.close(); }
+  }
+});
+
+// SWAPFIX1 r1 review: the resumed reclaim's permission is read again at the create and bind edges, not only after remoteHead.
+test("an unknown writer or a switch flip during the author tree await refuses the resumed local author", async () => {
+  for (const race of ["unknown", "pooled", "off", "observe"] as const) {
+    const { f, p, second } = await reclaimedThenCancelled();
+    try {
+      const open = p.deps.authorTree!;
+      p.deps.authorTree = async (source, t, recorded) => {
+        if (race === "unknown" || race === "pooled") runningOrder(f, race);
+        else setSelfHealPolicy(f.db, policy(race));
+        return open(source, t, recorded);
+      };
+      const out = await fixSwapStep(f.db, f.at("scheduler"), second.id, p.deps).catch((e: Error) => ({ error: e.message }));
+      expect(out).not.toMatchObject({ step: "session" }); // [验收线 1]
+      expect(p.effects.some((s) => s.startsWith("create:"))).toBe(false);
+      expect(getIntent(f.db, second.id)?.status).not.toBe("done");
+      expect(reclaims(f).length).toBe(1);
+    } finally { f.close(); }
+  }
+});
+
+test("lendReclaimIntent turned off or observe during the remote-head await keeps the old refusal and retires nothing", async () => {
+  for (const flip of ["off", "observe"] as const) {
+    const { f, p, second } = await reclaimedThenCancelled();
+    try {
+      p.context.remoteHead = async () => { setSelfHealPolicy(f.db, policy(flip)); return { ok: true, head: f.task().headSHA! }; };
+      f.db.run("UPDATE scheduler_sessions SET state = 'active', retireIntentId = NULL WHERE taskId = 'T1' AND transport = 'peer'");
+      expect(await refusal(f, p, second.id)).toBe("remote author has no held write lease"); // [验收线 4]
+      expect(p.effects.some((s) => s.startsWith("create:"))).toBe(false);
+      expect(f.db.query("SELECT state FROM scheduler_sessions WHERE taskId = 'T1' AND transport = 'peer'").get()).toMatchObject({ state: "active" });
+      const events = listEvents(f.db, { project: "p", target: "T1" });
+      expect(events.some((e) => e.data.op === "fix_swap_selfheal")).toBe(false);
+      expect(events.filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "lendReclaimIntent").length).toBe(flip === "observe" ? 1 : 0);
     } finally { f.close(); }
   }
 });
