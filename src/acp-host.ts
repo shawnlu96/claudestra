@@ -18,6 +18,7 @@ import { AcpHost } from "./lib/acp/host.js";
 import { ACP_RUNTIME_ENV, acpRuntime } from "./lib/acp/host-runtime.js";
 import { startToolProxy } from "./lib/acp/tool-proxy.js";
 import { stampTranscript } from "./lib/acp/transcript.js";
+import { showReplay, tuiHeader } from "./lib/acp/transcript-replay.js";
 import { createTtyScreen, type TtyScreen } from "./lib/acp/tty-screen.js";
 import { attachTtyInput } from "./lib/acp/tty-input-attach.js";
 import type { TtyInput } from "./lib/acp/tty-input.js";
@@ -27,6 +28,7 @@ import { createTuiScreen, type TuiScreen } from "./lib/acp/tui/screen.js";
 import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { redactSecrets } from "./lib/redact-secrets.js";
 import { SRC_DIR } from "./lib/repo-root.js";
+import { createLineTranslator, findSessionJsonlBySessionId, sessionJsonlPath } from "./lib/session-source.js";
 import { runManagerProcess } from "./lib/run-manager.js";
 import { readRegistryAgents } from "./lib/registry.js";
 import { CLEAN_ENV_FLAG, makeWorkerRoot } from "./lib/runtimes/clean-env.js";
@@ -182,7 +184,7 @@ const shutdown = (why: string) => {
   setTimeout(() => process.exit(0), 1_500);
 };
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => shutdown(`收到 ${sig}`));
-if (tty && typing) input = attachTtyInput(process.stdin, host, tty, () => shutdown("窗口里连按两次 Ctrl-C"));
+if (tty && typing) input = attachTtyInput(process.stdin, host, tty, () => shutdown("窗口里连按两次 Ctrl-C"), hostLogFile);
 
 // 切换适配器（manager codex-adapter）：空闲才退出、manager 随后按新开关重起；在跑就不动，切换记成 deferred（manager/acp-adapter.ts）
 process.on("SIGUSR2", () => {
@@ -206,5 +208,9 @@ if (process.env[CLEAN_ENV_FLAG] === "1") {
 
 const adapterName = agent.stub ? `stub（${agent.cmd.join(" ")}）` : pick?.adapter === "self" ? "自研 Codex 适配器" : runtime.logLabel;
 log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${adapterName} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
-show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（${typing ? "底部输入行可直接发消息，/help 看命令" : "只看"}；连接日志在 ${hostLogFile}）`);
+if (!tty) show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（${typing ? "底部输入行可直接发消息，/help 看命令" : "只看"}；连接日志在 ${hostLogFile}）`);
+else {
+  tty.show(tuiHeader(agentName, sessionId, typing));
+  showReplay(tty, () => sessionJsonlPath(runtime.id, process.cwd(), sessionId) ?? findSessionJsonlBySessionId(runtime.id, sessionId), createLineTranslator(runtime.id), log);
+}
 host.start();

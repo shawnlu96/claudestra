@@ -140,7 +140,15 @@ export function createPiEventMapper() {
   let seq = 0;
   let messageId = "";
   let streamed = false;
+  /** 本条消息已发过的思考块（contentIndex）：有的 provider 流结束才发 thinking_end，正文一开头就先把已攒好的思考发出去 */
+  let sentThoughts = new Set<number>();
   let outcome: TurnOutcome = {};
+  const earlyThoughts = (content: unknown): Rec[] =>
+    (Array.isArray(content) ? content : []).flatMap((c, i) => {
+      if (c?.type !== "thinking" || !str(c.thinking).trim() || sentThoughts.has(i)) return [];
+      sentThoughts = new Set([...sentThoughts, i]);
+      return [thought(messageId, c.thinking)];
+    });
   return {
     push(ev: Rec): Rec[] {
       const m = obj(ev.message);
@@ -149,17 +157,21 @@ export function createPiEventMapper() {
           if (m.role === "assistant") {
             messageId = `msg-${++seq}`;
             streamed = false;
+            sentThoughts = new Set();
           }
           return [];
         case "message_update": {
           const d = obj(ev.assistantMessageEvent);
           if (d.type === "thinking_end") {
             streamed = true;
-            return str(d.content).trim() ? [thought(messageId, d.content)] : [];
+            const i = typeof d.contentIndex === "number" ? d.contentIndex : -1;
+            if (sentThoughts.has(i) || !str(d.content).trim()) return [];
+            sentThoughts = new Set([...sentThoughts, i]);
+            return [thought(messageId, d.content)];
           }
           if (d.type !== "text_delta" || !str(d.delta)) return [];
           streamed = true;
-          return [chunk(messageId, d.delta)];
+          return [...earlyThoughts(m.content), chunk(messageId, d.delta)];
         }
         case "message_end": {
           if (m.role !== "assistant") return [];

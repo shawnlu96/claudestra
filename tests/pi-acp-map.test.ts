@@ -91,6 +91,20 @@ describe("Pi 适配器 · 事件映射", () => {
     expect([...ups.flatMap((u) => t.push(u)), ...t.flush()].map((e) => e.message.content[0])).toEqual([{ type: "thinking", thinking: "先看看目录" }, { type: "text", text: "好的" }]);
   });
 
+  test("provider 流结束才发 thinking_end（openai-completions）：正文第一个 delta 前先发已攒好的思考，之后的 thinking_end 不重发", () => {
+    const m = createPiEventMapper();
+    const partial = { content: [{ type: "thinking", thinking: "先看看目录" }, { type: "text", text: "" }] };
+    const ups = [
+      assistantStart, { type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "先看看目录" }, message: partial },
+      { ...delta("好的"), message: partial }, { ...delta("。"), message: partial },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "先看看目录" }, message: partial },
+      assistantEnd({ content: partial.content }),
+    ].flatMap((e) => m.push(e));
+    expect(ups.map((u) => [u.sessionUpdate, u.content.text])).toEqual([
+      ["agent_thought_chunk", "先看看目录"], ["agent_message_chunk", "好的"], ["agent_message_chunk", "。"],
+    ]);
+  });
+
   test("provider 不流式：message_end 里的思考先于正文补出", () => {
     const m = createPiEventMapper();
     m.push(assistantStart);
