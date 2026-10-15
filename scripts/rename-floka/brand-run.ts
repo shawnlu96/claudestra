@@ -60,7 +60,7 @@ function tally<T extends { file: string; rule: string; count?: number }>(rows: T
 }
 
 /** 计划摘要：按规则数文件和命中，拒绝按类型数 */
-export function summarize(plan: Plan) {
+function summarize(plan: Plan) {
   const edits = plan.files.flatMap((f) => f.edits.map((e) => ({ file: f.file, rule: e.rule })));
   const rejections: Record<string, number> = {};
   for (const r of plan.rejections) rejections[r.kind] = (rejections[r.kind] ?? 0) + 1;
