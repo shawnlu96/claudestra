@@ -42,8 +42,9 @@ export async function rosterBundle(out: string, baseline?: string) {
 
 /**
  * Minimal shell mounts the real roster hook twice; no React module is imported into the Bun test process.
- * The shell probes full scope only after its first frame (the sidebar mounts later in the app), so the hook's first frame reads it passively.
- * view=roster mounts the real TeamRoster instead of the two bare readers; window.__machines exposes the store for switch cases.
+ * The machine is recorded after the app config loads; the shell probes full scope only after its first frame
+ * (the sidebar mounts later in the app), so the hook's first frame reads it passively.
+ * view=roster mounts the real TeamRoster instead of the two bare readers.
  */
 export async function dualRosterBundle(out: string) {
   const { writeFileSync, mkdirSync } = await import("node:fs");
@@ -57,8 +58,11 @@ export async function dualRosterBundle(out: string) {
     import { TeamRoster } from ${path("features/collab/team/team-roster.tsx")};
     import { useFullScope } from ${path("features/chat/contacts-data.ts")};
     import { machines } from ${path("lib/machines.ts")};
+    import { loadAppConfig } from ${path("lib/app-config.ts")};
     const q = new URLSearchParams(location.search), project = q.get("project");
-    window.__machines = machines;
+    // Like MachineGate in direct mode: the machine is recorded after the app config arrives (delayable), then the app mounts.
+    // late=1 mounts first, so the hook meets the machine, permission and binding all arriving after its first frame.
+    const recorded = loadAppConfig().then(() => machines.load()).then(() => machines.add({ fp: "local", name: "fixture" })).then(() => machines.setCurrent("local"));
     function Reader() { const data = useTeamRoster(project); return React.createElement("output", null, data.roster ? "known" : "unknown"); }
     function Probe() { useFullScope(); return null; }
     function Shell() {
@@ -68,7 +72,8 @@ export async function dualRosterBundle(out: string) {
         : React.createElement(React.Fragment, null, React.createElement(Reader), React.createElement(Reader));
       return React.createElement(React.Fragment, null, probe && React.createElement(Probe), body);
     }
-    createRoot(document.getElementById("root")).render(React.createElement(Shell));`);
+    const mount = () => createRoot(document.getElementById("root")).render(React.createElement(Shell));
+    if (q.get("late") === "1") mount(); else void recorded.then(mount);`);
   const child = Bun.spawn([process.execPath, "build", entry, "--target", "browser", "--outdir", bundle,
     "--tsconfig-override", resolve("web/tsconfig.json")], { stdout: "pipe", stderr: "pipe" });
   const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);

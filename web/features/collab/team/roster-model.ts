@@ -146,12 +146,16 @@ export function quotaState(q: RosterQuota | null, now: number): QuotaState {
 
 // ---------- 归人 ----------
 
+/** Read state of one source: loading = not answered yet, error = the read failed (neither means "none"). */
+export type LoadStatus = "loading" | "ready" | "error";
 export interface RosterTask { id: string; title: string; stage: string; assigneeCode: string | null; executorInstanceId: string | null }
 export interface RosterInput {
   /** null = 这台设备读不到（非全权 / 没有本机项目 / 404） */
   roster: Roster | null;
   /** 本机项目没绑团队时为 null */
   directory: TeamDirectoryMember[] | null;
+  /** 缺省 ready；不是 ready 时 directory 为 null 只表示还不知道，机器不归「未认领」 */
+  directoryStatus?: LoadStatus;
   selfPersonId: string | null;
   /** ROSTER2a 之前一律 null */
   instances: { instanceId: string; personId: string }[] | null;
@@ -173,6 +177,8 @@ export interface PersonView {
 }
 export interface RosterView {
   people: PersonView[]; unclaimed: MachineView[]; selfPersonId: string | null;
+  /** 目录还没读到 / 读失败时的机器：归不了人也不算未认领，只进指标 */
+  ungrouped: MachineView[];
   /** 目录长度；没绑团队为 null */
   memberCount: number | null;
   /** 同一 worker id 出现在多台机器上的次数（取后一台） */
@@ -237,10 +243,11 @@ export function rosterOf(input: RosterInput): RosterView {
   const directory = input.directory;
   const members = new Set((directory ?? []).map(d => d.personId));
   const owned = new Map<string, MachineView[]>();
-  const unclaimed: MachineView[] = [];
+  const unclaimed: MachineView[] = [], ungrouped: MachineView[] = [];
+  const known = (input.directoryStatus ?? "ready") === "ready";
   machines.forEach((m, i) => {
     const pid = directory ? ownerOf(m, input, members) : null;
-    if (pid === null) unclaimed.push(views[i]!);
+    if (pid === null) (known ? unclaimed : ungrouped).push(views[i]!);
     else owned.set(pid, [...(owned.get(pid) ?? []), views[i]!]);
   });
   const taskById = new Map(input.tasks.map(t => [t.id, t]));
@@ -261,7 +268,7 @@ export function rosterOf(input: RosterInput): RosterView {
       machines: ms, cards: [...(cards.get(d.personId)?.values() ?? [])], slotNote,
     };
   });
-  return { people, unclaimed, selfPersonId: input.selfPersonId, memberCount: directory ? directory.length : null, conflicts };
+  return { people, unclaimed, ungrouped, selfPersonId: input.selfPersonId, memberCount: directory ? directory.length : null, conflicts };
 }
 
 // ---------- 就绪没派 ----------
@@ -302,7 +309,7 @@ export interface RosterMetrics {
 }
 
 const OCCUPIED = new Set<CellState>(["running", "silent", "pending", "other"]);
-const allMachines = (view: RosterView): MachineView[] => [...view.people.flatMap(p => p.machines), ...view.unclaimed];
+const allMachines = (view: RosterView): MachineView[] => [...view.people.flatMap(p => p.machines), ...view.unclaimed, ...view.ungrouped];
 
 function usageOf(machines: MachineView[], raw: RosterMachine[], family: RosterFamily): SlotUsage | null {
   const known = raw.filter(m => m.slots[family] !== null);

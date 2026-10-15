@@ -45,7 +45,7 @@ const texts = (page: Page) => page.evaluate<string[]>("[...window.__texts]");
 test.skipIf(!enabled)("[1] cold team key: fp, permission and binding arrive late; the first seat read follows at once on the local project", async () => {
   const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   try {
-    const p = await open(browser, { project: "shared" }, { delay: { config: 700, contacts: 1200, context: 1800 }, centerProject: CENTER });
+    const p = await open(browser, { project: "shared", late: "1" }, { delay: { config: 700, contacts: 1200, context: 1800 }, centerProject: CENTER });
     try {
       expect(await until(() => rosterReads(p.calls).length > 0, 8_000)).toBe(true);
       const elapsed = Date.now() - p.started;
