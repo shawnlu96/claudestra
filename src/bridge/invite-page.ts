@@ -67,7 +67,7 @@ h1{font-size:19px;margin:0 0 6px;text-wrap:balance}p{margin:6px 0;color:var(--mu
 </script></body></html>`;
 
 /** 脚本里的 scheme 只来自固定表（inviteSchemes）；JSON 编码，缺省档生成的那一句与改名前逐字相同 */
-export function invitePageHtml(s: InviteSchemes): string {
+function invitePageHtml(s: InviteSchemes): string {
   return HTML.split(SCHEMES).join(`(mobile ? ${JSON.stringify(s.app)} : ${JSON.stringify(s.web)})`);
 }
 

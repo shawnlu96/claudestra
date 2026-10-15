@@ -6,7 +6,7 @@
  */
 import { readConfigSync } from "../config-store.js";
 
-export type BrowserMode = "off" | "observe" | "on";
+type BrowserMode = "off" | "observe" | "on";
 export interface BrowserPolicy { receive: BrowserMode; write: BrowserMode }
 export const BROWSER_OFF: BrowserPolicy = { receive: "off", write: "off" };
 
