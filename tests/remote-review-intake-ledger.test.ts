@@ -7,7 +7,7 @@ import { listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { renderRedeliveryPush } from "../src/lib/peer-pr-retry.js";
 import { sanitizeForeign } from "../src/lib/order-wire-render.js";
-import { lateRemoteMatches, remoteHeadMatch, remoteP1At, unsentRemoteNotices } from "../src/lib/remote-review-read.js";
+import { lateRemoteMatches, remoteCurrentAt, remoteHeadMatch, remoteP1At, unsentRemoteNotices } from "../src/lib/remote-review-read.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { CAP_TEXT, HEAD, HEAD2, handoffConfig, INJECT, P0_TEXT, P1_TEXT, pushText, REPORT, remoteFixture } from "./helpers/remote-review-fixture.js";
 
@@ -174,12 +174,74 @@ describe("RRL-1 review findings r1", () => {
     expect(lateRemoteMatches(fx.db, "p")).toEqual([]);
   });
 
-  test("[验收线 8] redelivery-cap-lost: a redelivered P1 cannot show the owner's round cap, so an aligned auto card goes to PM", async () => {
+});
+
+describe("RRL-1 review findings r2", () => {
+  const atHead = () => listEvents(fx.db, { project: "p", target: "T1" });
+  const r1P1 = pushText({ verdict: "changes", p1: 1 }, { maxRounds: 4 });
+
+  test("[验收线 6/8] redelivery-normal-p1-escalated: a redelivered P1 below the cap arriving first leaves the auto card as it is, PM is told", async () => {
+    fx = remoteFixture();
+    const r = await fx.book(renderRedeliveryPush(r1P1, 1, { stage: "build" })!);
+    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", conclusion: "p1", action: "notify" });
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    expect(fx.task().stage).toBe("merge");
+    expect(String(r.notice)).toContain("看不出仓库方轮次是否到上限");
+    expect(String(r.notice)).toContain("卡没动");
+    expect(String(r.notice)).not.toContain(INJECT);
+    expect(remoteP1At(atHead(), HEAD)).toBeNull(); // nothing fixes it automatically
+    expect(remoteCurrentAt(atHead(), HEAD)?.data.reportId).toBe("PR1600-r1");
+  });
+
+  test("[验收线 8] the redelivery of a capped P1 arriving first is not left silently on auto: card untouched, PM told once", async () => {
     fx = remoteFixture();
     const r = await fx.book(renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" })!);
-    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", conclusion: "p1", action: "manual" });
+    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", conclusion: "p1", action: "notify" });
     expect(String(r.notice)).toContain("补发");
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    expect(unsentRemoteNotices(fx.db, "p").length).toBe(1);
+    expect(remoteP1At(atHead(), HEAD)).toBeNull();
+  });
+
+  test("a redelivered P0 still sends the auto card to PM (P0 is readable from the title)", async () => {
+    fx = remoteFixture();
+    await fx.book(renderRedeliveryPush(P0_TEXT, 1, { stage: "build" })!);
+    expect(fx.remoteEvents()[0]!.data).toMatchObject({ format: "redelivery", conclusion: "p0", action: "manual" });
     expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
+  });
+
+  test("late-review-superseded-stop: an early P0 for a head, then a later round's pass on it: the P0 is marked superseded, nothing happens", async () => {
+    fx = remoteFixture({ head: HEAD2, stage: "build" });
+    await fx.book(P0_TEXT);
+    const seq = fx.remoteEvents()[0]!.seq;
+    fx.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T1'").run(HEAD);
+    await fx.book(pushText({}, { counts: { verdict: "pass", p0: 0, p1: 0, p2: 0, round: 2 } }));
+    expect(lateRemoteMatches(fx.db, "p")).toEqual([{ taskId: "T1", seq }]);
+    const r = await fx.cli("scheduler", "T1", "--apply", String(seq));
+    expect(r).toMatchObject({ ok: true, duplicate: false, notice: null });
+    expect((r.event as { data: Record<string, unknown> }).data).toMatchObject({ op: "remote_review_applied", action: null, supersededBy: fx.remoteEvents()[1]!.seq });
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    expect(lateRemoteMatches(fx.db, "p")).toEqual([]);
+    expect(unsentRemoteNotices(fx.db, "p")).toEqual([]);
+  });
+
+  test("an older round arriving after a newer one for the same head is booked superseded and does not act", async () => {
+    fx = remoteFixture();
+    await fx.book(pushText({}, { counts: { verdict: "pass", p0: 0, p1: 0, p2: 0, round: 2 } }));
+    const r = await fx.book(P0_TEXT);
+    expect(r).toMatchObject({ ok: true, notice: null });
+    expect(fx.remoteEvents()[1]!.data).toMatchObject({ conclusion: "p0", action: null, supersededBy: fx.remoteEvents()[0]!.seq });
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+  });
+
+  test("superseded-p1-lookup: remoteP1At on a head with a P1 and then a later round's pass gives no P1; remoteCurrentAt gives the pass", async () => {
+    fx = remoteFixture();
+    await fx.book(P1_TEXT);
+    expect(remoteP1At(atHead(), HEAD)?.data.reportId).toBe("PR1600-r1");
+    await fx.book(pushText({}, { counts: { verdict: "pass", p0: 0, p1: 0, p2: 0, round: 2 } }));
+    expect(remoteP1At(atHead(), HEAD)).toBeNull();
+    expect(remoteCurrentAt(atHead(), HEAD)?.data).toMatchObject({ reportId: "PR1600-r2", conclusion: "pass" });
+    expect(remoteCurrentAt(atHead(), HEAD2)).toBeNull();
   });
 });
 

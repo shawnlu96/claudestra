@@ -35,7 +35,7 @@ describe("RRL-1 parse: the six shapes round-trip", () => {
       const text = renderRedeliveryPush(CASES.p1, 2, { stage })!;
       expect(parseRemoteReview(text)).toMatchObject({ format: "redelivery", conclusion: "p1", p1: 2, reportId: "PR1600-r2", report: REPORT });
     }
-    // the redelivery drops 下一步, so a capped P1 comes back as a P1 of format redelivery (booking treats that as a stop)
+    // the redelivery drops 下一步, so a capped P1 comes back as a P1 of format redelivery (booking leaves the card alone and tells PM: capUnknown)
     expect(parseRemoteReview(renderRedeliveryPush(CASES.p1_cap, 4, { stage: "build" })!)).toMatchObject({ conclusion: "p1", format: "redelivery" });
   });
 

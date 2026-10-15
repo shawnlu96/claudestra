@@ -68,6 +68,12 @@ export function parseRemoteReview(text: string): RemoteReview | null {
     conclusion: capped ? "p1_cap" : read.conclusion, p1: read.counts.p1, p2: read.counts.p2, masked: Number(masked[1]), report };
 }
 
+/**
+ * A redelivered P1: the redelivery drops the next-step line, so whether the owner's rounds were used up cannot be read from it.
+ * Nothing acts on it by itself (no manual, no fix): it is booked and PM decides. A redelivered P0 / pass reads as it is.
+ */
+export const capUnknown = (r: Pick<RemoteReview, "conclusion" | "format">): boolean => r.conclusion === "p1" && r.format === "redelivery";
+
 /** One line for logs, mirrors and notices; built only from parsed fields, never from the peer's free text. */
 export function remoteConclusionText(r: Pick<RemoteReview, "conclusion" | "p1" | "p2">): string {
   switch (r.conclusion) {

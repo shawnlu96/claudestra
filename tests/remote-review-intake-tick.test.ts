@@ -89,19 +89,36 @@ describe("RRL-1 tick", () => {
     expect(h.notices.length).toBe(1);
   });
 
-  test("[验收追加 9] the redelivery of a capped P1 arriving first: card back to manual, PM told exactly once", async () => {
+  test("[验收追加 9/11] the redelivery of a capped P1 arriving first: card untouched (not silently), PM told exactly once", async () => {
     fx = remoteFixture();
     fx.stash(renderRedeliveryPush(CAP_TEXT, 3, { stage: "build" })!);
     const h = harness();
     expect(await h.step()).toEqual([]);
-    expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    expect(fx.task().stage).toBe("merge");
     expect(h.notices.length).toBe(1);
     expect(h.notices[0]!.text).toContain("补发");
+    expect(h.notices[0]!.text).toContain("请 PM 定");
     fx.stash(CAP_TEXT); // the original arriving later is the same report id + head: duplicate, no second notice
     await h.step();
     await h.step();
     expect(h.notices.length).toBe(1);
     expect(fx.remoteEvents().length).toBe(1);
+  });
+
+  test("[验收追加 12] an early redelivered P1, then a later round's pass on that head: after the pass the card is still auto, no old notice", async () => {
+    fx = remoteFixture({ head: HEAD2, stage: "build" });
+    const h = harness();
+    fx.stash(renderRedeliveryPush(pushText({ verdict: "changes", p1: 1 }), 1, { stage: "build" })!);
+    await h.step();
+    fx.db.query("UPDATE tasks SET headSHA = ?, stage = 'merge' WHERE id = 'T1'").run(HEAD);
+    fx.stash(pushText({}, { counts: { verdict: "pass", p0: 0, p1: 0, p2: 0, round: 2 } }));
+    expect(await h.step()).toEqual([]);
+    expect(getWorkflow(fx.db, "T1")!.mode).toBe("auto");
+    expect(h.notices).toEqual([]);
+    expect(fx.remoteEvents().length).toBe(2);
+    await h.step();
+    expect(h.notices).toEqual([]);
   });
 
   test("a held card keeps its file for a later pass", async () => {
