@@ -397,7 +397,7 @@ describe("i28-M12b r3 (PM 10-02 02:4x): a refused update-branch re-reads once an
       expect(b).toMatchObject({ cause: "update_fail", prHead: H, error: REFUSED });
       expect(bounceWork(b).inputs[0]).toContain(`更新分支失败：PR head ${H}`);
       expect(bounceWork(b).acceptance[0]).toContain("合入最新 origin/main");
-      expect(bounceReviewLine(b)).toContain("只看合入 main 的合并提交");
+      expect(bounceReviewLine(b)).toContain("合并提交只核合入 main 的部分");
       const counted = f.db.query("SELECT data FROM events WHERE target=? AND kind='scheduler' AND json_extract(data,'$.op')='merge_conflict'").get(ID) as { data: string };
       expect(JSON.parse(counted.data)).toMatchObject({ cause: "update_fail", prHead: H, count: 1, escalated: false });
     });
