@@ -136,9 +136,12 @@ export function transcriptOfEntry(e: Rec): string[] {
   return Array.isArray(blocks) ? blocks.flatMap(blockLines) : [];
 }
 
-/** 收到的消息：只显示正文（不含宿主包的 channel 标签和前言；bridge 的来源头、它真加的打断抬头按历史解析的规则剥掉，来源看 > 后的名字） */
-export function transcriptOfInbound(content: string, meta: Record<string, string>): string {
-  const body = hasInboundHeader(content) ? stripChannelHeader(content, meta.interrupt_note === "true") : content.trim();
+/**
+ * 收到的消息：只显示正文（不含宿主包的 channel 标签和前言；bridge 的来源头、它真加的打断抬头按历史解析的规则剥掉，来源看 > 后的名字）。
+ * raw：来源核不了的原文（重启回放里 Pi / Codex 的 user 记录），头也是正文、一个字不剥（lib/cc-own-records.ts）
+ */
+export function transcriptOfInbound(content: string, meta: Record<string, string>, raw = false): string {
+  const body = !raw && hasInboundHeader(content) ? stripChannelHeader(content, meta.interrupt_note === "true") : content.trim();
   return `${INBOUND}${oneLine(meta.user || meta.chat_id || "?")}：${indentRest(clip(body, Number.MAX_SAFE_INTEGER, USER_CHARS))}`; // 来源标签也是外来的，同样打码
 }
 
