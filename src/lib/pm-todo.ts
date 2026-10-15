@@ -4,11 +4,12 @@
  * due = 规格第一行写的观察期已过（没写或写错按已到期）；这里只读，不写台账、不发消息。
  */
 import type { Database } from "bun:sqlite";
+import { mergeObservationTodos } from "./pm-todo-observation.js";
 import { getEventByDedup, listTasks } from "./ledger-store.js";
 import { parseObservation } from "./scheduler-post-verify-defer.js";
 import { postVerifyDoneKey, postVerifySection, verifiedAt } from "./scheduler-post-verify-ledger.js";
 
-export interface PmTodo { task: string; verifiedAt: number; hours: number | null; due: boolean; dueAt: number; what: string }
+export interface PmTodo { task: string; verifiedAt: number; hours: number | null; due: boolean; dueAt: number; what: string; kind?: string; dedupKey?: string }
 
 const HOUR_MS = 3600_000;
 const WHAT_MAX = 120;
@@ -30,5 +31,5 @@ export function pmTodos(db: Database, project: string, readSpec: (taskId: string
     const hours = o && o !== "bad" ? o.hours : null, dueAt = at + (hours ?? 0) * HOUR_MS;
     out.push({ task: t.id, verifiedAt: at, hours, due: now >= dueAt, dueAt, what: firstPoint(section) });
   }
-  return out.sort((a, b) => Number(b.due) - Number(a.due) || a.dueAt - b.dueAt);
+  return mergeObservationTodos(db, project, out, now, readSpec);
 }
