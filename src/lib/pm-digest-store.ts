@@ -2,7 +2,7 @@
  * PM 摘要的落盘状态（agents-PMDIG1）：statePath("pm-digest.json") 存摘要队列与最近 24 小时的归类记录，只有 bridge 写；
  * statePath("pm-digest-mode.json") 存各项目开关（缺省 observe），只有 manager 的 `ledger pm-digest-mode` 写。重启读回队列照常送出。
  */
-import { pmDigestPull, pmRouteMode, setPmDigestPull, setPmRouteMode, type PullMode } from "./pm-route-mode.js";
+import { pmDigestPull, pmRouteMode, setPmDigestPull, setPmRouteMode, withModeLock, type PullMode } from "./pm-route-mode.js";
 import { tagPmRouteRecord, validPmRouteRecord } from "./pm-route-record.js";
 import type { PmRouteRecord } from "./pm-route-types.js";
 import { statePath } from "./paths.js";
@@ -79,15 +79,18 @@ export class PmDigestStore {
 
   routeMode(project: string): DigestMode { return pmRouteMode(this.modePath, project); }
 
-  setRouteMode(project: string, mode: DigestMode): void { setPmRouteMode(this.modePath, project, mode); }
+  setRouteMode(project: string, mode: DigestMode): Promise<void> { return setPmRouteMode(this.modePath, project, mode); }
 
   pullMode(project: string): PullMode { return pmDigestPull(this.modePath, project); }
 
-  setPullMode(project: string, mode: PullMode): void { setPmDigestPull(this.modePath, project, mode); }
+  setPullMode(project: string, mode: PullMode): Promise<void> { return setPmDigestPull(this.modePath, project, mode); }
 
-  setMode(project: string, mode: DigestMode): void {
-    const v = forWrite(this.modePath, readJsonStateSync(this.modePath, validModes)) as { projects?: Record<string, DigestMode> } | undefined;
-    writeJsonAtomicSync(this.modePath, { ...v, projects: { ...v?.projects, [project]: mode } });
+  /** 与 setRouteMode / setPullMode 同一把锁（pm-route-mode.ts withModeLock） */
+  setMode(project: string, mode: DigestMode): Promise<void> {
+    return withModeLock(this.modePath, () => {
+      const v = forWrite(this.modePath, readJsonStateSync(this.modePath, validModes)) as { projects?: Record<string, DigestMode> } | undefined;
+      writeJsonAtomicSync(this.modePath, { ...v, projects: { ...v?.projects, [project]: mode } });
+    });
   }
 
   /** 记一条归类；enqueue 给了就同时入队（同 id 不重复入队） */

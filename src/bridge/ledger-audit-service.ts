@@ -1,14 +1,19 @@
 /**
  * 台账巡检的定时器（T29，docs/architecture/ledger-audit.md）：每 15 分钟经 runManager 跑 `ledger audit --json`，
- * 把新出现、还没推过的异常按收件人合成一条通知，投递成功（含押后）再 `--ack`。bridge 对台账只读，写全在 CLI；
+ * 把新出现、还没推过的异常按收件人合成一条通知，投递成功（含押后）再 `--ack`。bridge 对巡检结果只读，写全在 CLI（PULLTODO1 的 pm_todo / 观察记录例外，见下）；
  * 去重靠 audit_findings 的 notifiedAt，所以 bridge 重启不重推、收件人不在线下一轮再推。
  * 不抢占：收件人主回合在跑 / 压缩中就放进押后队列，回合结束随其它排队消息一起到（bridge 通知本身不押，回合开头有丢弃窗口）。
+ * PULLTODO1（恢复键 pmTodoPull，lib/pm-todo-audit.ts）：发给当班 PM 的发现 on 时只记 pm-todo 条目（经 recordPmTodo 写本机台账）再 ack，不 deliver；
+ * observe 照旧推送并记一条观察；off 与改前一致。升级（AUDESC1）与巡检自身失败照旧推送（action 级）。
  */
 import type { ServerWebSocket } from "bun";
 import { join } from "node:path";
 import { auditNoticeText } from "../lib/ledger-audit.js";
 import { auditResult, readAuditFailureTargets, type AuditFailureKind, type AuditFailureTarget } from "../lib/ledger-audit-failure.js";
 import { ackRefArg, type StoredFinding } from "../lib/ledger-audit-store.js";
+import { openLedger } from "../lib/ledger-store.js";
+import { pmNoticeLevel } from "../lib/pm-notice-level.js";
+import { auditTodoPort, type AuditTodoPort } from "../lib/pm-todo-audit.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { agentMsgMustWait } from "../lib/turn-state.js";
@@ -38,6 +43,8 @@ export interface LedgerAuditDeps {
   channelOf?: (agent: string) => string | undefined;
   /** 单测注入：当前受巡检项目及当班 PM；生产从规范只读台账解析 */
   failureTargets?: () => AuditFailureTarget[];
+  /** 单测注入：pmTodoPull 开关与 pm-todo 写口；不给 = 恢复策略 + 本机台账 */
+  pmTodo?: AuditTodoPort;
 }
 
 type Pending = StoredFinding & { fallback?: string };
@@ -120,6 +127,18 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
     const to = f.notify as string;
     return f.fallback && (misses.get(to) ?? 0) >= FALLBACK_AFTER ? f.fallback : to;
   };
+  const todo = d.pmTodo ?? auditTodoPort(() => openLedger());
+  /** 项目 → 当班 PM（与巡检失败告警同一口径）；读不了 = 空，全按改前推送 */
+  const pmsOf = (): Map<string, string> => {
+    try { return new Map((d.failureTargets ?? readAuditFailureTargets)().map((t) => [t.project, t.to])); }
+    catch (e) { console.error(`⚠️ 台账巡检：读不到当班 PM，本轮照旧推送：${(e as Error).message}`); return new Map(); }
+  };
+  /** 发给当班 PM 的发现按 pmTodoPull 分：on 只进 pm-todo，observe 照推并记观察；其余（调度助理、PM 读不到）照旧 */
+  const pullMode = (f: Pending, to: string, pms: Map<string, string>, modes: Map<string, string>) => {
+    if (pms.get(f.project) !== to) return "off";
+    if (!modes.has(f.project)) modes.set(f.project, todo.mode(f.project));
+    return modes.get(f.project);
+  };
   return async () => {
     if (running) return;
     running = true;
@@ -133,8 +152,28 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
       logSkipped(r.projects ?? []);
       for (const to of [...misses.keys()]) if (online(d, to)) misses.delete(to); // 调度助理回来了：审查类的推回给它
       const byTo = new Map<string, Pending[]>();
-      for (const f of (r.pending ?? []) as Pending[]) if (f.notify) byTo.set(recipientOf(f), [...(byTo.get(recipientOf(f)) ?? []), f]);
+      const add = (f: Pending) => byTo.set(recipientOf(f), [...(byTo.get(recipientOf(f)) ?? []), f]);
+      const pending = ((r.pending ?? []) as Pending[]).filter((f) => f.notify);
+      const pms = pending.length ? pmsOf() : new Map<string, string>(), modes = new Map<string, string>();
+      const pulled: Pending[] = [], watched: Pending[] = [];
+      for (const f of pending) {
+        const mode = pullMode(f, recipientOf(f), pms, modes);
+        if (mode === "on") pulled.push(f);
+        else (mode === "observe" && watched.push(f), add(f));
+      }
       let n = 0;
+      if (pulled.length) {
+        let recorded = false;
+        try { todo.record(pulled), recorded = true; }
+        catch (e) { console.error(`⚠️ 台账巡检：${pulled.length} 条没记进 pm-todo，照旧推送：${(e as Error).message}`); pulled.forEach(add); }
+        if (recorded) {
+          const k = await ack(d, pulled);
+          console.log(`🔎 台账巡检：${k} 条只进 pm-todo（${[...new Set(pulled.map((f) => f.project))].join(", ")}）`);
+        }
+      }
+      if (watched.length) {
+        try { todo.observe(watched); } catch (e) { console.error(`⚠️ 台账巡检：pmTodoPull 观察没记上：${(e as Error).message}`); }
+      }
       for (const [to, list] of byTo) {
         const res = await notify(d, to, list);
         if (res.kind === "failed") {
@@ -147,14 +186,14 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
         n += await ack(d, list, res.kind === "queued" ? res.messageId : undefined);
       }
       if (n) console.log(`🔎 台账巡检：推出 ${n} 条（${[...byTo.keys()].join(", ")}）`);
-      await escalate(raw); // AUDESC1：调度助理 60 分钟没处理的升级给 PM（不抛）
+      await pmNoticeLevel.run("action", () => escalate(raw)); // AUDESC1：调度助理 60 分钟没处理的升级给 PM（不抛）；action 级，不进 pm-todo
       if (failing) console.log("🔎 台账巡检恢复");
       failing = false;
       failures.ok();
     } catch (e) {
       if (!failing) console.error(`⚠️ 台账巡检出错（恢复前不再重复报）: ${(e as Error).message}`);
       failing = true;
-      await failures.fail(failureKind);
+      await pmNoticeLevel.run("action", () => failures.fail(failureKind)); // 巡检自身失败：action 级，照旧推送
     } finally {
       running = false;
     }
