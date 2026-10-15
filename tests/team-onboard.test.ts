@@ -4,14 +4,16 @@
  */
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { Database as RawDb } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { setMeta } from "../src/lib/ledger-write.js";
+import { closeLedger, getMeta, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { readSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { readProposals, updateProposals, type TeamProposal } from "../src/lib/team-proposal.js";
-import { planOnboard, runOnboard, splitChecks, type OnboardFacts, type OnboardInput } from "../src/manager/team-onboard.js";
+import { onboardDb, planOnboard, runOnboard, splitChecks, type OnboardFacts, type OnboardInput } from "../src/manager/team-onboard.js";
 import { planUp, propose, repost } from "../src/manager/team-up.js";
 
 const team = { planUp, propose, repost };
@@ -162,6 +164,50 @@ describe("team onboard", () => {
     const r = await runOnboard(input(), { db, now: NOW, schedulerPath: missing, team, proposals: { path: proposalsPath, post: async () => null } });
     expect(r).toMatchObject({ ok: false, code: "blocked" });
     expect(existsSync(missing)).toBe(false);
+  });
+});
+
+describe("dry-run 只读打开台账（CLI 路径 onboardDb）", () => {
+  /** 落后一版 schema + 一行负责人列偏移：openLedger 打开会迁移、纠正，都是写 */
+  function staleLedger(): string {
+    const path = tempLedgerPath("team-onboard-stale-");
+    const w = openLedger(path);
+    setMeta(w, { actor: "owner", now: 1 }, { project: P, key: "pms", value: ["agent-dn-pm"] });
+    createTask(w, { actor: "owner", now: 2 }, { project: P, id: "T1", title: "x", kind: "code", agent: "agent-exec" });
+    closeLedger(path);
+    const raw = new RawDb(path);
+    raw.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    raw.exec("UPDATE tasks SET assigneeKind = NULL, assignee = NULL");
+    raw.exec(`PRAGMA user_version = ${LEDGER_SCHEMA_VERSION - 1}`);
+    raw.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    raw.close();
+    return path;
+  }
+  /** 目录里每个文件的字节与修改时间、有哪些子目录（迁移前的备份）（-shm 是只读连接也会映射的共享内存索引，不算台账内容） */
+  const files = (path: string) => Object.fromEntries(readdirSync(dirname(path)).filter((f) => !f.endsWith("-shm")).map((f) => {
+    const full = join(dirname(path), f), st = statSync(full);
+    return [f, st.isDirectory() ? "dir" : { bytes: readFileSync(full).toString("base64"), mtime: st.mtimeMs }];
+  }));
+
+  test("r2 dry-run-ledger-write：旧 schema + 负责人列偏移的台账，dry-run 不改台账字节 / mtime / user_version，也不出备份", async () => {
+    const path = staleLedger();
+    const before = files(path);
+    const ro = onboardDb(true, path);
+    const r = await runOnboard(input({ dryRun: true }), { db: ro, now: NOW, schedulerPath, team, proposals: { path: proposalsPath, post } });
+    ro.close();
+    expect(r.ok).toBe(true);
+    expect(files(path)).toEqual(before);
+    const check = new RawDb(path, { readonly: true });
+    expect((check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LEDGER_SCHEMA_VERSION - 1);
+    check.close();
+  });
+
+  test("对照：不带 dry-run 走 openLedger，同一份台账会被改（探针有效）", () => {
+    const path = staleLedger();
+    const before = files(path);
+    onboardDb(false, path);
+    closeLedger(path);
+    expect(files(path)).not.toEqual(before);
   });
 });
 

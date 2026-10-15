@@ -13,6 +13,7 @@ import { roleOf } from "../lib/ledger-stages.js";
 import { isRealPmRole } from "../lib/ledger-team-config.js";
 import { parseRequiredChecks, SCHEDULER_CONFIG_PATH } from "../lib/scheduler-config.js";
 import { addProject, type NewProjectSegment } from "../lib/scheduler-config-write.js";
+import { openLedgerReadOnly } from "../lib/shared-ledger-center-replica-pull-wiring.js";
 import { readProposals, type ProposalDraft, type TeamProposal } from "../lib/team-proposal.js";
 import { normalizeName, output } from "./core.js";
 import { intFlag } from "./ledger-identity.js";
@@ -203,6 +204,14 @@ function gitState(dir: string | null): GitState {
   return r.stdout.toString().split("\n").map((s) => s.trim()).includes("origin") ? "origin" : "no-origin";
 }
 
+/**
+ * --dry-run 只读打开台账：openLedger 会切 WAL、迁移旧 schema（先备份）、纠正负责人列，都是写，dry-run 不许碰。
+ * 只读连接读不出（schema 太旧缺表）由调用方报错，不替它迁移。tests/team-onboard.test.ts「dry-run 只读打开」。
+ */
+export function onboardDb(dryRun: boolean, path = LEDGER_PATH): Database {
+  return dryRun ? openLedgerReadOnly(path) : openLedger(path);
+}
+
 export async function cmdOnboard(args: string[], team: TeamUpOps): Promise<void> {
   const c = await team.teamContext(args, ["project", "pm", "checks", "max-workers"], ["local-merge", "dry-run"]);
   if ("error" in c) return output({ ok: false, error: c.error });
@@ -213,5 +222,12 @@ export async function cmdOnboard(args: string[], team: TeamUpOps): Promise<void>
   const flags: OnboardFlags = { localMerge: c.p.bools.has("local-merge"), pm: c.p.flags.pm,
     ...(c.p.flags.checks !== undefined ? { checks: splitChecks(c.p.flags.checks) } : {}), ...(max !== undefined ? { maxWorkers: max } : {}) };
   const input: OnboardInput = { project: c.project, dir: c.dir, git: gitState(c.dir), actor: c.actor, agents: c.agents, flags, dryRun: c.p.bools.has("dry-run") };
-  output(await runOnboard(input, { db: openLedger(), now: Date.now(), team }));
+  const db = onboardDb(input.dryRun);
+  try {
+    output(await runOnboard(input, { db, now: Date.now(), team }));
+  } catch (e) {
+    output({ ok: false, error: `${input.dryRun ? "只读读台账失败（台账可能要先升级：跑一次不带 --dry-run 的 ledger 命令）：" : ""}${(e as Error).message}` });
+  } finally {
+    if (input.dryRun) db.close(); // 只读连接是这里开的；写连接归 openLedger 的进程级缓存，不关
+  }
 }
