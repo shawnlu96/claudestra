@@ -149,7 +149,9 @@ test("[验收线 1] the actual deploy tick consumes a deferred worker result wit
       }
       return { code: 113, timedOut: false, stdout: "", stderr: "" };
     } });
-    const manager = async (...args: string[]) => args[1] === "verify" ? { ok: true, result: "fail" } : runLedger(args.slice(1), {
+    // Finish the fake verify so its process-wide retry throttle cannot escape this fixture.
+    const verifies: string[] = [];
+    const manager = async (...args: string[]) => args[1] === "verify" ? (verifies.push(args.slice(2).join(" ")), { ok: true, result: "pass" }) : runLedger(args.slice(1), {
       db: f.db, actor: "scheduler", projectIds: ["p"], now: () => 1000, assertLease() {},
       loadRegistry: async () => ({ socket: "s", agents: {} }), saveRegistry: async () => {} });
     const cfg = { enabled: true, autoDispatch: true, pollMs: 5000, projects: { p: { repoDir: "/repo", maxActiveWorkers: 2,
@@ -159,6 +161,7 @@ test("[验收线 1] the actual deploy tick consumes a deferred worker result wit
     holder.handle.release(); await deployTick(f.db, cfg, d);
     expect(submits).toBe(2); expect(getMeta(f.db, "p").queueFrozen.frozen).toBe(false);
     await deployTick(f.db, cfg, d); expect(getDeployRun(f.db, f.intent)?.phase).toBe("deployed");
+    expect(verifies).toEqual(["T9 --dry-run", "T9 --dedup deploy-verify:m9"]);
     expect(f.db.query("SELECT count(*) AS n FROM scheduler_deploys").get()).toEqual({ n: 1 });
   } finally {
     holder.handle.release(); f.close(); rmSync(dir, { recursive: true, force: true });
