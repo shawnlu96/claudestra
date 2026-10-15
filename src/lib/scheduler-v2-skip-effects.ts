@@ -22,6 +22,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-fix-reassign-pr.ts": "proc=1 vcs=4",
     "lend-git.ts": "vcs=1",
     "pool-review-proof-raw.ts": "fs=2",
+    "pm-handback-verify.ts": "ledger=2", // PMHAND1: the deploy tick's resolved-done verify (dry-run + verify), per card under pace.skipTask / schedulerV2SkipTask
     "private-merge-gh.ts": "vcs=6", // MERGEAUTO1: the merge driver's private-repo gh reads + head-pinned merge, under the merge tick's skipTask
     "private-merge-ledger.ts": "sql=1 stmt=1", // MERGEAUTO1: the private bounce's run check-list write, inside the merge driver under the merge tick's skipTask
     "recovery-fix-local-swap-run.ts": "proc=1 vcs=1", // GATESWAP1: the commit-edge author-tree proof's synchronous git (treeProofSync)

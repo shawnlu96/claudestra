@@ -50,5 +50,6 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   uiOwnerCarry: { class: "permission", reason: "继承 owner 的视觉批准" },
   uiOwnerReask: { class: "permission", reason: "重发 owner 视觉验收请求" },
   uiReviewCarry: { class: "safety", reason: "继承 UI 审查证明" },
+  verifyAfterResolve: { class: "permission", reason: "对人工结清为 done 的部署由调度器跑完成检查" },
 };
 export const highRiskRecoveryKey = (key: RecoveryKey): boolean => HIGH_RISK_RECOVERY_KEYS[key] !== undefined;

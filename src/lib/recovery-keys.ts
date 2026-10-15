@@ -103,6 +103,7 @@ export const RECOVERY_KEYS = [
   "uiReviewCarry",
   "unifiedMergeQueue",
   "updateGap",
+  "verifyAfterResolve",
   "wakeStopped",
   "writeLocalEqual",
 ] as const;
