@@ -68,16 +68,18 @@ function sessionSteps(): Step[] {
 }
 
 /** 照宿主的顺序把整轮喂给视图；flush 在回合结束前（host.ts 收尾时吐攒着的正文）。steps：只放前几步（截「回合进行中」的样子） */
-/** 回合进行中：读完一个文件、git diff 还在跑、思考到一半 */
+/** 回合进行中：收到消息后一段 Pi 风格的长思考、读完一个文件、git diff 还在跑、思考到一半 */
 export function playBusy(view: ViewSink): void {
-  playSession(view, undefined, 5);
+  playSession(view, undefined, 1);
+  playPiThought(view);
+  playSession(view, undefined, 5, 1);
   const u = thought("diff 只动了一个文件，等它跑完再看测试。\n");
   view.update(u);
 }
 
-export function playSession(view: ViewSink, compact: CompactSource = { from: "claudestra-meta" }, steps = Infinity): void {
+export function playSession(view: ViewSink, compact: CompactSource = { from: "claudestra-meta" }, steps = Infinity, from = 0): void {
   const t = createAcpTranslator(() => "T", compact);
-  for (const step of sessionSteps().slice(0, steps)) {
+  for (const step of sessionSteps().slice(from, steps)) {
     if (step.item?.startsWith("──")) for (const e of t.flush()) for (const i of transcriptOfEntry(e)) view.show(i, step.at);
     if (step.item) view.show(step.item, step.at);
     for (const u of step.updates ?? []) {
@@ -85,4 +87,31 @@ export function playSession(view: ViewSink, compact: CompactSource = { from: "cl
       view.update(u, step.at);
     }
   }
+}
+
+/** Pi 风格的思考（适配器标了 display，翻成 ✻ 段进滚动记录）：多行、超过一行的字数上限，照宿主顺序喂 */
+const PI_THOUGHT = [
+  "先确认放锁路径：lease-sync.ts 在比较 diff 时少传了 relative 参数，导致同一个文件的两次快照被判成不同，锁一直不放。",
+  "再看测试为什么没抓到：lease.test.ts 只覆盖了绝对路径，相对路径的分支没有用例。",
+  "顺带确认重试：退避 3 秒、最多 5 次，失败后把锁的持有者和最后一次比较的两边快照写进日志，方便下次排查时直接对上是哪一边变了。",
+  "结论：补参数 + 补一条相对路径用例，重试逻辑不动。",
+].join("\n");
+
+function playPiThought(view: ViewSink, text = PI_THOUGHT): void {
+  const t = createAcpTranslator(() => "T", { from: "claudestra-meta" });
+  const u = { sessionUpdate: "agent_thought_chunk", content: { type: "text", text }, _meta: { claudestra: { display: true } } };
+  for (const e of t.push(u)) for (const i of transcriptOfEntry(e)) view.show(i, at(4));
+  view.update(u, at(4));
+}
+
+/** 「刚重启」要回放的会话文件：整轮会话照真翻译器翻成 Claude Code 形状的行（会话文件 → session-source 翻译后就是这个形状），收到的消息是 user 行 */
+export function replayLines(): string[] {
+  const t = createAcpTranslator(() => "2026-10-15T11:03:00.000Z", { from: "claudestra-meta" });
+  const lines = [JSON.stringify({ type: "user", timestamp: "2026-10-15T11:02:00.000Z", message: { role: "user", content: "审一下 LCK-1 的放锁改动" } })];
+  const piThought = { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: PI_THOUGHT },
+    _meta: { claudestra: { display: true } } };
+  for (const step of [{ updates: [piThought] }, ...sessionSteps().slice(2, 6), { updates: [chunk("m1", "结论：放锁条件少了 `relative` 参数，补参数 + 补一条相对路径用例。")] }]) {
+    for (const u of step.updates ?? []) for (const e of t.push(u)) lines.push(JSON.stringify(e));
+  }
+  return [...lines, ...t.flush().map((e) => JSON.stringify(e))];
 }

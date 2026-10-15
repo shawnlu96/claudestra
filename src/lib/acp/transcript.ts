@@ -49,6 +49,19 @@ export const TEXT_LIMITS = { lines: TEXT_LINES, chars: TEXT_CHARS, scan: SCAN_CH
 
 const oneLine = (s: unknown): string => clip(String(s ?? "").replace(/\s*\n\s*/g, " "), 1, ONE_LINE);
 
+/** 思考的多行版（只给 TTY 终端视图：tui/screen.ts 拿 agent_thought_chunk 原文重排；纯文本窗口仍是 oneLine）：
+ * 先脱敏再截，字数上限和 oneLine 一样；截了就注明原本几行（只有一行时注明几个字），续行缩进两格对齐在 ✻ 后面 */
+const THOUGHT_LINES = 4;
+export function clipThought(raw: string): string {
+  const s = redactSecrets(scanHead(raw)).trim();
+  const all = s.split("\n").filter((l) => l.trim());
+  let out = all.slice(0, THOUGHT_LINES).join("\n");
+  if (out.length > ONE_LINE) out = out.slice(0, ONE_LINE);
+  const total = raw.trim().split("\n").filter((l) => l.trim()).length;
+  const cut = out.length < all.join("\n").length || raw.length > SCAN_CHARS;
+  return indentRest(cut ? `${out}…（${total > 1 ? `共 ${total} 行` : `共 ${raw.trim().length} 字`}）` : out);
+}
+
 /** 交给 formatTool 之前逐个字段先打码：它会在 80 / 200 字处截断，截剩的半个密钥匹配不上规则 */
 const redactDeep = (v: unknown): unknown =>
   typeof v === "string" ? redactSecrets(scanHead(v))

@@ -1,0 +1,38 @@
+.viewport [data-pd-right] { top: 12px; transform: none; }
+.viewport:has([data-pd-legend]) [data-pd-right] { top: 48px; }
+.world [data-pd-detail], .world [data-pd-label] {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 120ms ease, visibility 0s;
+}
+.world[data-zoom='far'] [data-pd-detail], .world[data-zoom='far'] [data-pd-label] {
+  /* 明细退出卡片排版，给两行大标题和进度条留出高度。 */
+  position: absolute;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms ease, visibility 0s 120ms;
+}
+.world[data-zoom='far'] [data-pd-title] {
+  font-size: calc(13px / var(--pd-k));
+  line-height: 1.2;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-height: 2.4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 卡片标题现在位于独立的固定高度行；远景让它随标题长高，空间不足时先裁标题，保住进度条。 */
+.world[data-zoom='far'] [data-pd-card] :has(> [data-pd-title]) {
+  height: auto;
+  min-height: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+}
+.world[data-zoom='far'] [data-pd-card] [role='progressbar'] { flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .world [data-pd-detail], .world [data-pd-label],
+  .world[data-zoom='far'] [data-pd-detail], .world[data-zoom='far'] [data-pd-label] { transition: none; }
+}
