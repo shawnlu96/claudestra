@@ -45,7 +45,7 @@ export async function remoteContext(db: Database, task: LedgerTask, deps: Conver
   return { remote: config?.remote ?? null, borrow, source: config?.repoDir ?? null, spec, maxWorkers: config?.maxActiveWorkers ?? 0,
     notify: async (text) => {
       if (deps.registryPath) throw new Error("isolated convergence lifecycle needs an injected PM notification port");
-      deps.active(); await notifyProjectPm(db, task.project, text, { fromName: "scheduler" }); deps.active();
+      deps.active(); await notifyProjectPm(db, task.project, text, { fromName: "scheduler", level: "action" }); deps.active();
     },
     remoteHead: (repo, branch) => remoteHeadAt(repo, branch, runBounded) };
 }

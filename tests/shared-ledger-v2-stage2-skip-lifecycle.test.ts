@@ -103,10 +103,10 @@ describe("lifecycle: the route is re-checked right before every effect", () => {
     await expect(deps.git(["-C", join(root, "tm"), "worktree", "remove", join(root, "tm")])).rejects.toThrow("V2Held");
     await expect(deps.git(["-C", join(root, "rv-tm"), "status"])).rejects.toThrow("V2Held");
     await expect(deps.tmp!.rm(claudeTmpDirFor(join(root, "tm"), tmp))).rejects.toThrow("V2Held");
-    await expect(deps.notifyPm!(aTM, "x")).rejects.toThrow("V2Held");
+    await expect(deps.notifyPm!(aTM, "x", "action")).rejects.toThrow("V2Held");
     await deps.git(["-C", join(root, "tl"), "worktree", "remove", join(root, "tl")]);
     await deps.tmp!.rm(claudeTmpDirFor(join(root, "tl"), tmp));
-    await deps.notifyPm!(aTL, "x");
+    await deps.notifyPm!(aTL, "x", "action");
     expect(sent).toEqual([`-C ${join(root, "tl")} worktree remove ${join(root, "tl")}`, `rm ${claudeTmpDirFor(join(root, "tl"), tmp)}`, "pm TL"]);
   });
 });

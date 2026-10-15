@@ -226,7 +226,7 @@ export function schedulerV2SkipAutoDeps(db: Database | null, deps: AutoTickDeps)
       };
       return { ...w, submit: (r, intentId, order) => pauseGated<SubmitReceipt>(db, ref.taskId, "submit", () => held(intentId), () => w.submit(r, intentId, order)) };
     },
-    notifyPm: (task, text) => pauseGated(db, task.id, "notifyPm", () => { throw new Error(`卡 ${task.id} 已暂停，提醒留到继续后再发`); },
-      () => deps.notifyPm(task, text)),
+    notifyPm: (task, text, level) => pauseGated(db, task.id, "notifyPm", () => { throw new Error(`卡 ${task.id} 已暂停，提醒留到继续后再发`); },
+      () => deps.notifyPm(task, text, level)),
   };
 }

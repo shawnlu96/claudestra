@@ -22,6 +22,7 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export const SEC_REVIEW_NO_ROOM = "安全卡审查放不下";
 const CODE = "sec_review_no_room";
@@ -152,7 +153,7 @@ function handoff(c: AlarmCommand, ctx: WriteCtx, task: LedgerTask, family: Autho
   return { ok: true, duplicate: false, event, text };
 }
 
-interface NoticeDeps { notifyPm(task: LedgerTask, text: string): Promise<void>; manager(...args: string[]): Promise<Record<string, unknown>> }
+interface NoticeDeps { notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>; manager(...args: string[]): Promise<Record<string, unknown>> }
 const lost = (what: string) => (e: unknown): void => {
   if (e instanceof SchedulerStopped) throw e;
   console.error(`⚠️ [scheduler] ${what}：${(e as Error).message}`);
@@ -182,7 +183,7 @@ const step = (deps: NoticeDeps, task: LedgerTask, ...extra: string[]) =>
 async function alarmNotice(task: LedgerTask, key: string, ask: Ask, wait: { reason: string }, deps: NoticeDeps, db: Database): Promise<void> {
   if (getEventByDedup(db, `${key}:sent`)) return;
   try {
-    await deps.notifyPm(task, `[调度引擎] ${task.id} ${wait.reason}。提问卡 ${ask.id} 已开，default a 要 PM 确认才执行`);
+    await deps.notifyPm(task, `[调度引擎] ${task.id} ${wait.reason}。提问卡 ${ask.id} 已开，default a 要 PM 确认才执行`, "action");
   } catch (e) { lost("安全卡审查报警通知失败（台账已记、提问卡已开，下轮重发）")(e); return; }
   const sent = await step(deps, task, "--phase", "alarm-sent");
   if (sent.ok !== true) console.error(`⚠️ [scheduler] 安全卡审查报警已通知 PM 但标记未记账，下轮可能重发：${String(sent.error)}`);
@@ -193,7 +194,7 @@ async function handOffAnswer(task: LedgerTask, key: string, ask: Ask, deps: Noti
   const phase = (p: string) => step(deps, task, "--phase", p, "--ask", ask.id);
   const r = await phase("handoff");
   if (r.ok !== true) { console.error(`⚠️ [scheduler] 安全卡审查提问卡答复未记账，下轮重试：${String(r.error)}`); return; }
-  try { await deps.notifyPm(task, String(r.text)); } catch (e) { lost("安全卡审查答复交给 PM 失败（台账已记，下轮重发）")(e); return; }
+  try { await deps.notifyPm(task, String(r.text), "action"); } catch (e) { lost("安全卡审查答复交给 PM 失败（台账已记，下轮重发）")(e); return; }
   const sent = await phase("handoff-sent");
   if (sent.ok !== true) console.error(`⚠️ [scheduler] 安全卡审查答复已交 PM 但标记未记账，下轮可能重发：${String(sent.error)}`);
 }

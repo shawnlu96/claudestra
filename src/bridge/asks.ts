@@ -26,6 +26,7 @@ import { ownerChatIds } from "./push/dispatcher.js";
 import { newMessageId, newThreadId, parseChatId, type Delivery, type Endpoint, type Envelope, type TriggerKind } from "./router.js";
 import { sharedAskAnswer } from "./shared-ledger-v2-asks.js";
 import { turnCuts } from "./turn-cuts.js";
+import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
 
 export interface AsksDeps {
   clients: Map<string, { ws: ServerWebSocket<unknown>; cwd?: string }>;
@@ -211,7 +212,8 @@ export async function answerTarget(a: Ask): Promise<Target> {
 const echoOf = (askId: string, e: { text: string; wire?: string }) => ({ askId, echo: e.text, ...(e.wire ? { wire: e.wire } : {}) });
 
 /** bridge 发给 agent 的一封不抢占的消息：在线就 deliver，不在线或出错进押后队列。trigger：owner 的答复是 ask_answer，其余是 bridge_synth */
-export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["intent"], content: string, askId: string, trigger: TriggerKind): Promise<string> {
+export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["intent"], content: string, askId: string, trigger: TriggerKind,
+  pmLevel?: PmNoticeLevel): Promise<string> {
   const d = deps!;
   const live = d.clients.get(to.channelId);
   const env: Envelope = {
@@ -220,7 +222,7 @@ export async function sendCalm(from: Endpoint, to: Target, intent: Envelope["int
     intent,
     content,
     meta: { messageId: newMessageId("ask"), triggerKind: trigger, ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, askId, skipInterAgentWatchdog: true,
-      ...(trigger === "ask_answer" ? { askEcho: echoOf(askId, answerEcho(content)) } : {}) },
+      ...(trigger === "ask_answer" ? { askEcho: echoOf(askId, answerEcho(content)) } : {}), ...(pmLevel ? { pmLevel } : {}) },
   };
   if (live) {
     const r = await d.deliver(env);

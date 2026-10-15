@@ -144,6 +144,6 @@ export function withSchedulerV2Intents(deps: AutoTickDeps): AutoTickDeps {
       return guardedEnsure(port, deps, task, role, family);
     },
     pinReview: async (task, ref, head) => port.route(task.id) === "skip" ? { manual: skip(task.id) } : deps.pinReview(task, ref, head),
-    notifyPm: async (task, text) => { if (port.route(task.id) === "skip") skip(task.id); else await deps.notifyPm(task, text); },
+    notifyPm: async (task, text, level) => { if (port.route(task.id) === "skip") skip(task.id); else await deps.notifyPm(task, text, level); },
   };
 }

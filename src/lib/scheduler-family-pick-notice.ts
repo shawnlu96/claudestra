@@ -8,8 +8,9 @@ import { appendEvent } from "./ledger-write.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
-interface NoticeDeps { notifyPm(task: LedgerTask, text: string): Promise<void>; manager(...args: string[]): Promise<Record<string, unknown>> }
+interface NoticeDeps { notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>; manager(...args: string[]): Promise<Record<string, unknown>> }
 const noticeKey = (t: LedgerTask): string => `family-wait:${t.id}:s${t.specRev}:r${t.round}:${t.headSHA}`;
 
 /** Structural CLI port keeps lib independent of manager; only the scheduler can record this narrow notice. */
@@ -47,7 +48,7 @@ export async function informFamilyWait(db: Database, task: LedgerTask, wait: Ext
   const pending = await mark("pending");
   if (pending.ok !== true) { console.error(`⚠️ [scheduler] 审查等待通知未记账，下轮重试：${String(pending.error)}`); return; }
   try {
-    await deps.notifyPm(task, text);
+    await deps.notifyPm(task, text, "info"); // 等跨家族 peer、保持自动调度：仅供知悉
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     console.error(`⚠️ [scheduler] 跨家族审查等待通知失败，下轮重试：${(e as Error).message}`);

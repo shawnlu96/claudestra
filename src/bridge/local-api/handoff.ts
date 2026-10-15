@@ -4,14 +4,16 @@
  *   GET  /api/v1/handoff/:id                    → {entries}  本机页面配对后取一次（取完即删）
  * 放 bridge 而不是塞进跳转链接：链接里的数据谁都能伪造（一条恶意链接就能往本机页面写偏好），这里只有已配对的同一个身份才存得进、取得出。
  * 纯内存、2 分钟过期、一次性；只收 cstra_ 开头的键（前端的键名空间），本机页面写入时还会再按白名单过一遍。
+ * rename.browserProtocol 接收 on 时另收 floka_ 键（lib/floka-browser-protocol/handoff.ts）；同后缀两族值不同 = 冲突，整份拒。
  */
 import { tokenIdOf, type Principal } from "../../lib/principals.js";
+import { handoffConflict, handoffKeyAllowed } from "../../lib/floka-browser-protocol/handoff.js";
+import { browserPolicy, type BrowserPolicy } from "../../lib/floka-browser-protocol/policy.js";
 import { apiJson, INVALID_JSON, invalidJsonBody, readJsonBody } from "../api-respond.js";
 
 const TTL_MS = 2 * 60_000;
 const MAX_PENDING = 32;
 const MAX_BYTES = 256 * 1024;
-const KEY_RE = /^cstra_[\w.:-]{1,120}$/;
 
 interface Pending {
   owner: string;
@@ -24,13 +26,14 @@ function sweep(now: number): void {
   for (const [id, p] of pending) if (p.expiresAt <= now) pending.delete(id);
 }
 
-/** 只留 cstra_ 键、字符串值；总量超限 → null */
-export function cleanEntries(raw: unknown): Record<string, string> | null {
+/** 只留 cstra_ 键（接收 on 再加 floka_）、字符串值；总量超限或两族冲突 → null */
+export function cleanEntries(raw: unknown, policy: BrowserPolicy = browserPolicy()): Record<string, string> | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (handoffConflict(raw as Record<string, unknown>, policy) !== null) return null;
   const out: Record<string, string> = {};
   let bytes = 0;
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (!KEY_RE.test(k) || typeof v !== "string") continue;
+    if (!handoffKeyAllowed(k, policy) || typeof v !== "string") continue;
     bytes += k.length + v.length;
     if (bytes > MAX_BYTES) return null;
     out[k] = v;

@@ -12,9 +12,10 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { p2BacklogMode } from "./p2-backlog-mode.js";
 import { p2TodoInstead, type P2Todo, type P2TodoDeps } from "./pm-todo-p2.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export interface P2NoticeDeps extends P2TodoDeps {
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
 }
 
 const TODO_MAX = 3800;
@@ -51,5 +52,5 @@ export async function p2NoticeText(db: Database, task: LedgerTask, original: str
 export async function p2DiffNotice(db: Database, task: LedgerTask, original: string, deps: P2NoticeDeps): Promise<void> {
   const n = await p2Notice(db, task, original, deps.manager);
   if (await p2TodoInstead(task, n.todo, deps)) return;
-  await deps.notifyPm(task, n.text);
+  await deps.notifyPm(task, n.text, "action"); // 审查通过的 diff 通知（可能带要 PM 判断的 P2）
 }
