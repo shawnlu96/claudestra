@@ -28,6 +28,44 @@ export interface StageOpts {
   lookup?: (tokenId: string) => Promise<PeerInfo>;
   /** 对方发请求那一刻钉住的 peer 名与指纹（pending.fileOwner，bridge/api-files.ts peerFileOwner）；没有就只认原 token */
   owner?: FileOwner;
+  /** 这条回复认领到的 API 回执（pending）：上面两项没单独给就取它的 */
+  receipt?: { acceptsFiles?: boolean; fileOwner?: FileOwner };
+  /** 这条回复记到的请求 thread（在等的认领，或空回合结算后 reply_to 晚到认领）：被 blockReplyFiles 标过的不外发附件 */
+  threadId?: string;
+}
+
+/**
+ * 经调度助理转交的 peer 请求（DPR-1，local-api/project-pm-delivery.ts）：调度助理只回文字，附件一律不登记、不外发。
+ * 按请求 thread 记，不按回执对象：空回合 Stop 结算后回执已从队列拿走，对方还在轮询时 reply_to 晚到认领只剩 threadId
+ * （lib/pending-reply-scope.ts claimApiReply），按对象记那条路就漏了（tests/peer-inbox-late-reply.test.ts）。
+ * 进程内，和 apiThreadResults 一样随 bridge 重启清空（重启后晚到认领也找不到那条结算记录，peer 回复直接报错不投）；
+ * 记满 BLOCK_KEEP_MS 的顺手清掉（比结算记录留得久）。转交没送到、回执退回原收件人时撤掉
+ */
+const blockedThreads = new Map<string, number>();
+const BLOCK_KEEP_MS = 24 * 3600_000;
+export function blockReplyFiles(threadId: string, blocked = true, now = Date.now()): void {
+  for (const [t, at] of blockedThreads) if (now - at > BLOCK_KEEP_MS) blockedThreads.delete(t);
+  if (blocked) blockedThreads.set(threadId, now);
+  else blockedThreads.delete(threadId);
+}
+
+type ApiWaiting = { messageId?: string; threadId: string };
+type ApiSettledRow = { messageId?: string; tokenId?: string; agentChannelId?: string };
+
+/**
+ * 出站回复认领之前的附件检查（deliverToApi 第一步）：这条回复只会记到不外发附件的 thread 上时，附件反正不发，
+ * 路径失效也不该拒掉整条文字。reply_to 按在等的、再按已结算的找那条；没带 reply_to 时这个调用方在等的全都被拦才算。
+ * 预判和真正认领之间队列可能变：认领后 stageApiReplyFiles 按实际 thread 再核，拷不了的附件只进警告、文字照发。
+ * 队列 key 同 bridge/api-routes.ts apiReqKey（这里不能 import 那个 hub）
+ */
+export async function replyFilesRefusal(env: { from: { kind: string; channelId?: string }; meta: { files?: string[]; replyTo?: string } },
+  tokenId: string, queues: ReadonlyMap<string, readonly ApiWaiting[]>, settled: ReadonlyMap<string, ApiSettledRow>): Promise<string | null> {
+  const channelId = env.from.kind === "local" ? env.from.channelId ?? "" : "", queue = queues.get(`${tokenId}|${channelId}`) ?? [];
+  const id = env.meta.replyTo, live = id ? queue.find((p) => p.messageId === id) : undefined;
+  const done = id && !live ? [...settled].find(([, s]) => s.messageId === id && s.tokenId === tokenId && s.agentChannelId === channelId) : undefined;
+  const threads = live ? [live.threadId] : done ? [done[0]] : id ? [] : queue.map((p) => p.threadId);
+  if (threads.length && threads.every((t) => blockedThreads.has(t))) return null;
+  return missingReplyFiles(env.meta.files || []);
 }
 
 export interface Staged {
@@ -57,6 +95,7 @@ const defaultLookup = async (tokenId: string): Promise<PeerInfo> => findByTokenI
 
 export async function stageApiReplyFiles(paths: string[], o: StageOpts): Promise<Staged> {
   const out: Staged = { files: [], sent: [] };
+  if (o.threadId && blockedThreads.has(o.threadId) && paths.length) return { ...out, warning: "附件没有发出：这条请求经调度助理转交，回复只外发文字，文字照常送达" };
   const failed: string[] = [];
   const who = paths.length ? await (o.lookup ?? defaultLookup)(o.tokenId) : null;
   for (const p of paths) {
@@ -68,13 +107,13 @@ export async function stageApiReplyFiles(paths: string[], o: StageOpts): Promise
     const abs = join(attachmentDirs().inboxDirs[0]!, copy.attachment);
     const id = `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const name = basename(p) || "file";
-    o.table.set(id, { path: abs, tokenId: o.tokenId, name, agent: o.agent, ...o.owner });
+    o.table.set(id, { path: abs, tokenId: o.tokenId, name, agent: o.agent, ...(o.owner ?? o.receipt?.fileOwner) });
     out.sent.push(copy);
     const media = `/api/v1/media?agent=${encodeURIComponent(o.agent)}&dir=out&name=${encodeURIComponent(copy.attachment)}`;
     out.files.push({ name, url: `/api/v1/files/${id}`, media, size: Bun.file(abs).size, sha256: await sha256Of(abs) });
   }
   const why = failed.length ? [`${failed.join("、")} 拷贝失败，没有登记，对方收不到`] : [];
-  if (out.files.length) why.push(...peerReasons(who, out.files, o.acceptsFiles));
+  if (out.files.length) why.push(...peerReasons(who, out.files, o.acceptsFiles ?? o.receipt?.acceptsFiles));
   if (why.length) out.warning = `附件可能没送达：${why.join("；")}`;
   return out;
 }
