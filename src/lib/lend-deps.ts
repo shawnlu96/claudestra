@@ -18,6 +18,7 @@ import { instanceKeySync, keyFingerprint, verifyPurpose } from "./instance-key.j
 import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
 import { sweepTrash } from "./lend-trash.js";
 import { reapOrder, reapOrphans, systemProcPorts } from "./lend-proc-reap.js";
+import { fileActionSink, guardReap, systemGuardSources } from "./worktree-orphan-guard.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
@@ -212,7 +213,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const registryRow = (name: string) => readRegistryAgentsSync().find((a) => a.name === name);
   const send = sendVia(registryRow, alive);
   const lendLog = (m: string) => console.error(`[lend] ${m}`);
-  const procPorts = systemProcPorts();
+  const procPorts = guardReap(systemProcPorts(), systemGuardSources(), fileActionSink(), lendLog).ports; // RTO2-1 护栏 + 动作台账
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, shot, env: process.env, footer, verifyReceipt,
     sandbox: { owners: sandboxOwnersDir(journal.filename), active, mode: () => readSchedulerConfig().lifecycle?.mode ?? "observe", card: (worker) => {
