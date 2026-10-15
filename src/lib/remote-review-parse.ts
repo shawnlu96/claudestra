@@ -10,7 +10,7 @@ import { nextStepOf, PUSH_MAX_BYTES, renderReviewPush, type VerdictCounts } from
 import { renderRedeliveryPush } from "./peer-pr-retry.js";
 
 /** p1_cap = P1 with the owner's rounds used up (only a first delivery says so; a redelivery drops the next-step line). */
-export type RemoteConclusion = "pass" | "p2" | "p1" | "p1_cap" | "p0";
+type RemoteConclusion = "pass" | "p2" | "p1" | "p1_cap" | "p0";
 
 export interface RemoteReview {
   format: "review" | "redelivery";
