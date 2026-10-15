@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { setPriority, setPriorityMode } from "../src/lib/ledger-priority-write.js";
 import { priorityStallTick } from "../src/lib/ledger-priority-stall-tick.js";
@@ -67,7 +67,7 @@ test("removed pending target does not reset progress to the front", async () => 
   expect(seen).toEqual([ids[0], ids[2]]);
 });
 
-test.each([5, 1000])("budget %i finishes the current target including notification receipt", async (budgetMs) => {
+test.each([5, 1000])("budget %i finishes the current target including its card note", async (budgetMs) => {
   const { ids, config } = setup([2]);
   const commands: string[] = [], notices: string[] = [];
   const ports = { budgetMs, active: () => {}, now: () => now,
@@ -81,8 +81,9 @@ test.each([5, 1000])("budget %i finishes the current target including notificati
     } };
   expect(await priorityStallTick(db, config, ports)).toEqual([]);
   const processed = budgetMs === 5 ? ids.slice(0, 1) : ids;
-  expect(notices).toEqual(processed);
-  expect(commands).toEqual(processed.flatMap((id) => ["claim", "heal", "claim", "check", "finish"].map((op) => `${id}:${op}`)));
+  const noted = () => listEvents(db).filter((e) => e.data.namespace === "priority-stall-note").map((e) => e.target);
+  expect(notices).toEqual([]); expect(noted()).toEqual(processed);
+  expect(commands).toEqual(processed.flatMap((id) => ["claim", "heal", "claim", "note"].map((op) => `${id}:${op}`)));
   if (budgetMs === 5) expect(await priorityStallTick(db, config, ports)).toEqual([]);
-  expect(notices).toEqual(ids);
+  expect(notices).toEqual([]); expect(noted()).toEqual(ids);
 });
