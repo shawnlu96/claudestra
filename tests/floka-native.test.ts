@@ -252,7 +252,7 @@ describe("[验收线 4] 静态配置校验;无设备 / 签名 / 推送操作", (
     const dir = join(ROOT, "scripts/rename-floka/native");
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
       const src = readFileSync(join(dir, f), "utf8");
-      expect(src).not.toMatch(/\b(?:spawn|spawnSync|exec|fetch)\s*\(|xcrun|devicectl|codesign|notarytool/);
+      expect(src).not.toMatch(/child_process|Bun\.(?:spawn|\$)|\bfetch\s*\(|node:(?:net|http|https|tls)\b/);
     }
   });
 });
