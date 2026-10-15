@@ -3,12 +3,14 @@
  * 复用对象写「无，新界面」时还要引用一条 owner 记的授权 ask（`ask_<id>`），同项目、针对本卡且 owner 已点批准按钮。
  * start_node 的预检调它（dag-tools-start.ts），自动开卡复用同一个预检：预检拒了 claim 结为 failed、按 arm 只通知 PM 一次，改了规格重新武装。
  * 只看卡首模板行：code / security 规格、没写模板行的规格这里一律放行；三种模板共有的「## 上线后 PM」观察期首行另由 spec-lint-observation.ts 核。tests/spec-lint.test.ts。
+ * ASKDEF1 精准例外（lintSpecExceptions）：非阻断，只出提示给 PM，不拦开卡。
  */
 import type { Database } from "bun:sqlite";
 import { getAsk, hasAsksTable, ownerAnswered } from "./ledger-asks.js";
 import { scanSpecHead } from "./spec-lint-head.js";
 import { join } from "node:path";
 import { uiSpecSection } from "./spec-lint-section.js";
+import { parseSpecExceptions } from "./spec-exceptions.js";
 import { readTextSoft } from "./task-spec.js";
 
 const UI_REQUIRED_SECTIONS = ["复用对象", "对照基准"] as const;
@@ -52,4 +54,20 @@ export function lintUiSpec(text: string, isOwnerApproval: (askId: string) => boo
 export function uiSpecGate(db: Database, ledgerDir: string, taskId: string, inline?: string, project?: string): string | null {
   const text = inline ?? readTextSoft(join(ledgerDir, "docs", "tasks", `${taskId}.md`));
   return text ? lintUiSpec(text, (askId) => ownerApproval(db, askId, project, taskId)) : null;
+}
+
+/**
+ * 规格「精准例外」的非阻断检查（ASKDEF1）：例外里的文件又落在本卡 fileGlobs 里（例外就失去意义，提示 PM 二选一），
+ * 以及解析不出文件路径 / 写了通配的条目。返回提示行；空 = 没有要说的。从不拦开卡。
+ */
+export function lintSpecExceptions(text: string, fileGlobs: readonly string[]): string[] {
+  const ex = parseSpecExceptions(text);
+  const globs = fileGlobs.map((g) => ({ g, m: new Bun.Glob(g) }));
+  const out: string[] = [];
+  for (const file of [...new Set(ex.entries.map((e) => e.file))]) {
+    const hit = globs.find(({ g, m }) => g === file || m.match(file));
+    if (hit) out.push(`精准例外 ${file} 已在本卡 fileGlobs（${hit.g}）里：要么从 fileGlobs 去掉，要么删掉这条例外`);
+  }
+  for (const e of ex.errors) out.push(`精准例外第 ${e.line} 行没解析出来（${e.why}）：${[...e.text].slice(0, 120).join("")}`);
+  return out;
 }

@@ -10,6 +10,11 @@
  * （superseded_assertion / new_test），按同一 15 分钟自动批准——不看问题原文、不看执行者标的 class（design 除外），只看这两个结构化字段；
  * 有一个非 tests/ 文件、没填、PM 先答了都不定。结案、把文件追加进卡的 extra.fileGlobs 同一事务；规格照样追加「自动定」一节；
  * 结论经 deps.tell 发给远端执行者（bridge/ask-default-tell.ts），没发出去下次扫描重发。tests/order-ask-test-scope.test.ts。
+ *
+ * ASKDEF1（askDefaultAll=on 时开出、extra.defaultAll = true 的提问，order-ask.ts）：远端写单的 design / scope、带 default 的 blocker
+ * 同样 15 分钟按默认定、追加「自动定」一节；精准例外命中的不等 15 分钟、不通知 PM，下一次扫描就结案。结论转告执行者：远端经 deps.tell，
+ * 本机执行者经 deps.notify（blocker 的执行者在等）；每次自动定 / 自动答卡上记一条 note（op ask_default_all）。是否 defaultAll 只在开出时按档位定，
+ * 扫描不再看档位；标了 risk 的永远不在这里定。tests/order-ask-default-all.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import type { CallerIdentity } from "./caller-identity.js";
@@ -17,9 +22,11 @@ import { answerAsk, getAsk, hasAsksTable, patchAsk, type Ask } from "./ledger-as
 import { getMeta, getTask } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
 import { appendDefaultSpec, prepareDefaultSpec, SpecBusy, SpecReplan, testScopeFiles } from "./order-ask-default-spec.js";
-import { askNoticeText } from "./order-ask.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
+import { askNoticeText, specExceptionAnswer } from "./order-ask.js";
 import { agentName, isPmParentAsk, pmStandsFor } from "./order-ask-pm-reply.js";
 import { ASK_SCOPE_REASONS, type AskScopeReason } from "./order-wire.js";
+import { quoteExternal } from "./quote-text.js";
 
 export const ASK_DEFAULT_MS = 15 * 60_000;
 /** 追加连续失败这么多次（每分钟一次）就投递给 PM 一次，之后退避重试（翻倍，最长一小时）：任务一直留着，文件恢复了就补上 */
@@ -29,9 +36,12 @@ const APPEND_BACKOFF_MAX_MS = 60 * 60_000;
 export interface SweepDeps {
   /** 状态变了发 SSE（bridge publishAsk） */
   publish?: (ask: Ask) => void;
-  /** 通知没交出去的补投（bridge sendLedgerNotice；同一 messageId 幂等） */
-  notify?: (to: string, text: string, messageId: string) => Promise<{ handed: boolean; note: string }>;
-  /** 测试类扩围自动批准后把结论发给提问的执行者（远端 worker@peer）；true = 对方收下了 */
+  /**
+   * 通知没交出去的补投（bridge sendLedgerNotice；同一 messageId 幂等）。level：补投的不阻塞提问、自动定的结论 = info；
+   * blocker / risk 提问、追加失败的告警 = action
+   */
+  notify?: (to: string, text: string, messageId: string, level: PmNoticeLevel) => Promise<{ handed: boolean; note: string }>;
+  /** 自动批准 / 自动定后把结论发给提问的远端执行者（worker@peer）；true = 对方收下了 */
   tell?: (a: Ask, text: string) => Promise<boolean>;
 }
 /** 结论连续这么多次没发给执行者就不再重发，卡上记一条 note 让 PM 自己转告 */
@@ -57,7 +67,12 @@ export function isTestScopeAsk(db: Database, a: Ask): boolean {
   return ["write", "fix"].includes(lendStepOf(db, String(a.extra.orderId ?? "")) ?? "");
 }
 
-const autoAsk = (db: Database, a: Ask): boolean => isDefaultAsk(a) || isTestScopeAsk(db, a);
+/** ASKDEF1：askDefaultAll=on 时开出的扩围提问；标了 risk 的不算（开出时已不会标 defaultAll，这里再挡一次） */
+const isDefaultAllAsk = (a: Ask): boolean => a.extra.via === "mcp_ask" && a.extra.defaultAll === true && !a.extra.risk &&
+  (Array.isArray(a.extra.specException) ? a.extra.specException.length > 0 : typeof a.extra.default === "string" && !!a.extra.default.trim());
+const isExceptionAsk = (a: Ask): boolean => isDefaultAllAsk(a) && Array.isArray(a.extra.specException);
+
+const autoAsk = (db: Database, a: Ask): boolean => isDefaultAsk(a) || isTestScopeAsk(db, a) || isDefaultAllAsk(a);
 
 /** 批准的测试文件追加进卡的 fileGlobs（已在的不重复）；在结案的事务里调 */
 function addTestGlobs(db: Database, a: Ask, now: number): void {
@@ -70,13 +85,26 @@ function addTestGlobs(db: Database, a: Ask, now: number): void {
     { id: task.id, rev: task.rev, patch: { extra: { ...task.extra, fileGlobs: [...cur, ...add] } } });
 }
 
-const tellText = (a: Ask): string => `【自动定】${a.taskId} 你的提问（ask ${a.id}）PM 15 分钟没回，测试类扩围已自动批准：`
-  + `${(testScopeFiles(a) ?? []).join("、")} 已追加进本卡范围（fileGlobs），规格末尾追加了「自动定」一节。照常继续，交付报告里写明。`;
+const tellText = (a: Ask): string => testScopeFiles(a)
+  ? `【自动定】${a.taskId} 你的提问（ask ${a.id}）PM 15 分钟没回，测试类扩围已自动批准：`
+    + `${(testScopeFiles(a) ?? []).join("、")} 已追加进本卡范围（fileGlobs），规格末尾追加了「自动定」一节。照常继续，交付报告里写明。`
+  : isExceptionAsk(a)
+    ? `【自动答】${a.taskId} 你的提问（ask ${a.id}）：${specExceptionAnswer((a.extra.specException as unknown[]).map(String))}。`
+    : `【自动定】${a.taskId} 你的提问（ask ${a.id}）PM 15 分钟没回，已按你的默认做法定：${quoteExternal(String(a.extra.default ?? ""), 600)}。`
+      + "按默认继续，规格末尾追加了「自动定」一节，交付说明里写明。";
+
+/** 本机执行者（没有 @peer）：经 notify 投给它本人；远端的经 deps.tell */
+const isRemote = (a: Ask): boolean => /^[^@]+@.+$/.test(a.fromAgent ?? "");
 
 /** 结论发给执行者：发出去记 told；连续 TELL_TRIES 次没发出去就停，卡上记 note */
-async function tellIfPending(db: Database, id: string, tell: NonNullable<SweepDeps["tell"]>, now: number): Promise<void> {
+async function tellIfPending(db: Database, id: string, deps: SweepDeps, now: number): Promise<void> {
   const a = getAsk(db, id);
   if (!a || a.extra.tell !== "pending") return;
+  const { notify } = deps;
+  const tell = !isRemote(a) && isDefaultAllAsk(a) && notify
+    ? async (x: Ask, text: string) => (await notify(x.fromAgent as string, text, `ask-default-told:${x.id}`, "info")).handed
+    : deps.tell;
+  if (!tell) return;
   const ok = await tell(a, tellText(a)).catch((e: Error) => (console.error(`⚠️ ask ${id} 自动批准的结论没发给执行者：${e.message}`), false));
   if (ok) return void patchAsk(db, id, { extra: { tell: "told", toldAt: now } }, now);
   const tries = (Number(a.extra.tellTries) || 0) + 1;
@@ -94,8 +122,8 @@ async function renotify(db: Database, a: Ask, notify: NonNullable<SweepDeps["not
   if (!a.taskId || !a.assignee || !a.fromAgent) return;
   const text = askNoticeText({ taskId: a.taskId, orderId: String(a.extra.orderId ?? ""), from: a.fromAgent, askId: a.id, question: a.body,
     options: Array.isArray(a.extra.options) ? a.extra.options.map(String) : [], ...(a.extra.default ? { default: String(a.extra.default) } : {}),
-    class: a.extra.class as "design" | "scope" | "blocker" });
-  const sent = await notify(a.assignee, text, `ledger-ask:${a.id}`);
+    class: a.extra.class as "design" | "scope" | "blocker", ...(isDefaultAllAsk(a) && a.extra.class === "blocker" ? { autoDefault: true } : {}) });
+  const sent = await notify(a.assignee, text, `ledger-ask:${a.id}`, a.blocking === false ? "info" : "action");
   if (sent.handed) patchAsk(db, a.id, { extra: { notice: "handed", handedAt: now } }, now);
 }
 
@@ -105,12 +133,24 @@ function closeIfDue(db: Database, id: string, now: number): Ask | null {
     const cur = getAsk(db, id);
     if (!cur) return null;
     const scope = cur.state === "open" && isTestScopeAsk(db, cur);
-    if (!scope && !isDefaultAsk(cur) && cur.extra.autoScope !== true) return null;
-    if (cur.state === "open" && cur.extra.notice === "handed" && clockOf(cur) + ASK_DEFAULT_MS <= now) {
+    const all = isDefaultAllAsk(cur), exception = isExceptionAsk(cur);
+    if (!scope && !all && !isDefaultAsk(cur) && cur.extra.autoScope !== true) return null;
+    // 精准例外命中：开出时就没通知 PM，不等 15 分钟
+    const due = exception || (cur.extra.notice === "handed" && clockOf(cur) + ASK_DEFAULT_MS <= now);
+    if (cur.state === "open" && due) {
       if (scope) addTestGlobs(db, cur, now);
-      answerAsk(db, id, { choices: [], labels: [], text: scope ? "测试类扩围自动批准（文件全在 tests/）" : "按执行者默认做法定",
+      const files = exception ? (cur.extra.specException as unknown[]).map(String) : [];
+      answerAsk(db, id, { choices: [], labels: [], text: scope ? "测试类扩围自动批准（文件全在 tests/）" : exception ? specExceptionAnswer(files) : "按执行者默认做法定",
         principal: "system:ask-default", via: "terminal", at: now, final: true });
-      patchAsk(db, id, { extra: { defaultAppend: "pending", defaultAt: now, ...(scope ? { autoScope: true, tell: "pending" } : {}) } }, now);
+      // 精准例外的本机执行者当场已拿到答复，不再转告；其余自动定都转告执行者
+      const tell = scope || (all && (!exception || isRemote(cur))) ? { tell: "pending" } : {};
+      patchAsk(db, id, { extra: { ...(exception ? {} : { defaultAppend: "pending" }), defaultAt: now, ...(scope ? { autoScope: true } : {}), ...tell } }, now);
+      if (all && cur.taskId) {
+        appendEvent(db, { actor: "system:ask-default", dedupKey: `ask-default-all:${id}`, now }, { project: cur.project, target: cur.taskId, kind: "note",
+          text: `${cur.taskId} 提问 ask ${id}（${String(cur.extra.class)}）${exception ? `按规格精准例外自动答：${files.join("、")}` : "PM 15 分钟没回，按执行者默认做法定"}`,
+          data: { op: "ask_default_all", askId: id, orderId: cur.extra.orderId ?? null, class: cur.extra.class ?? null, auto: exception ? "spec_exception" : "default",
+            ...(exception ? { files } : {}) } });
+      }
     }
     const a = getAsk(db, id);
     return a && a.state === "answered" && a.extra.defaultAppend === "pending" ? a : null;
@@ -141,7 +181,7 @@ async function alertPm(db: Database, id: string, notify: SweepDeps["notify"], no
   try {
     const a = getAsk(db, id);
     if (!notify || !a?.assignee || a.extra.defaultAppendAlerted || (Number(a.extra.defaultAppendTries) || 0) < APPEND_ALERT_TRIES) return;
-    const sent = await notify(a.assignee, failText(a, String(a.extra.defaultAppendError ?? "")), `ask-default-failed:${a.id}`);
+    const sent = await notify(a.assignee, failText(a, String(a.extra.defaultAppendError ?? "")), `ask-default-failed:${a.id}`, "action");
     if (sent.handed) patchAsk(db, a.id, { extra: { defaultAppendAlerted: true } }, now);
   } catch (e) {
     console.error(`⚠️ ask ${id} 追加失败的 PM 告警没发出去（下次扫描再发，追加照常进行）：${(e as Error).message}`);
@@ -165,15 +205,19 @@ export async function sweepAskDefaults(db: Database, now = Date.now(), deps: Swe
   if (!hasAsksTable(db)) return 0;
   const rows = db.query(`SELECT id FROM asks WHERE (state = 'open' AND blocking = 0 AND json_extract(extra, '$.via') = 'mcp_ask')
     OR (state = 'open' AND json_extract(extra, '$.via') = 'mcp_ask' AND json_extract(extra, '$.files') IS NOT NULL)
+    OR (state = 'open' AND json_extract(extra, '$.via') = 'mcp_ask' AND json_extract(extra, '$.defaultAll') = 1)
     OR (state = 'answered' AND (json_extract(extra, '$.defaultAppend') = 'pending' OR json_extract(extra, '$.tell') = 'pending'))`).all() as { id: string }[];
   let count = 0;
   for (const { id } of rows) {
     try {
       const open = getAsk(db, id);
-      if (deps.notify && open?.state === "open" && autoAsk(db, open) && open.extra.notice !== "handed") await renotify(db, open, deps.notify, now);
+      if (deps.notify && open?.state === "open" && autoAsk(db, open) && !isExceptionAsk(open) && open.extra.notice !== "handed") await renotify(db, open, deps.notify, now);
       const a = closeIfDue(db, id, now);
-      if (deps.tell) await tellIfPending(db, id, deps.tell, now);
-      if (!a) continue;
+      await tellIfPending(db, id, deps, now);
+      if (!a) {
+        if (open?.state === "open" && isExceptionAsk(open)) deps.publish?.(getAsk(db, id) as Ask);
+        continue;
+      }
       await alertPm(db, id, deps.notify, now);
       if (Number(a.extra.defaultAppendNextAt) > now) continue;
       try {
