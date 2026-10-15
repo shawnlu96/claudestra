@@ -360,7 +360,7 @@ export class RelayClient {
     if (ts !== null && Math.abs(Date.now() / 1000 - ts) > 300) {
       this.log("warn", `本机时钟与中继相差超过 300 秒（${Math.round(Date.now() / 1000 - ts)} s），签名请求会被对方判过期`);
     }
-    const sig = this.center.sign(this.ws?.protocol ?? "", String(f.nonce), this.o.name, this.o.slug);
+    const sig = this.center.sign(typeof f.subprotocol === "string" ? f.subprotocol : "", String(f.nonce), this.o.name, this.o.slug);
     this.send({ t: "auth", v: PROTOCOL_VERSION, key: this.o.key.publicKey, name: this.o.name, slug: this.o.slug, sig });
   }
 

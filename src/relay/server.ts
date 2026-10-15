@@ -9,15 +9,16 @@ import {
   asAuth, asCode, asContacts, asData, asEndOrCancel, asPeerError, asReq, asRes, CLOSE, isPublicKey, isRedeemRequest,
   keyFingerprint, LIMITS, NAME_RE, parseFrame, PROTOCOL_VERSION, RELAY_FROM, SLUG_RE, slugify, type PeerRecord, type ResFrame,
 } from "../lib/relay-protocol.js";
-import { centerForward, centerSubprotocol, centerVerifyAuth, centerWelcome } from "../lib/floka-center/center.js";
+import { centerForward, centerHello, centerSubprotocol, centerTunnel, centerVerifyAuth, centerWelcome, type CenterOptions } from "../lib/floka-center/center.js";
 import { Directory, type InstanceRecord } from "./directory.js";
 import { Front } from "./front.js";
 import { ipLimitKey, KeyedWindows, SlidingWindow } from "./limiter.js";
 import { pushGatewayFor, type PushGateway } from "./push.js";
 import { Router, type Pending } from "./router.js";
-import type { Conn, ConnData, Limits, Logger, Relay, RelayOptions } from "./types.js";
+import type { Conn, ConnData, Limits, Logger, Relay, RelayOptions as BaseRelayOptions } from "./types.js";
 
-export type { Relay, RelayOptions } from "./types.js";
+export type { Relay } from "./types.js";
+export type RelayOptions = BaseRelayOptions & CenterOptions; // rename：中心双认两档（floka-center/gear.ts），缺省 off
 type Obj = Record<string, unknown>;
 
 const errorFrame = (code: string, message?: string, id?: string) => ({ t: "error", ...(id ? { id } : {}), code, ...(message ? { message } : {}), origin: "relay" });
@@ -51,7 +52,7 @@ class RelayServer implements Relay {
       base: opts.base, trustProxy: Number(opts.trustProxy ?? 0), version: opts.version ?? "dev", commit: opts.commit, vapidPublicKey: opts.push?.vapid?.publicKey,
       headTimeoutMs: opts.frontHeadTimeoutMs ?? 120_000, maxChunkBytes: this.lim.maxChunkBytes, limits: this.lim,
       online: () => this.onlineMap.size, pending: () => this.router.size, router: this.router,
-      send: (c, f) => this.send(c, f), lookupCode: (code) => this.directory.lookupCode(code), staticDir: opts.staticDir,
+      send: (c, f) => this.send(c, centerTunnel(f, this.opts)), lookupCode: (code) => this.directory.lookupCode(code), staticDir: opts.staticDir,
       bySlug: (slug) => this.located(this.directory.bySlug(slug)), byFp: (fp) => this.located(this.directory.byFp(fp)),
       upgrade: (req, srv, ip) => this.upgrade(req, srv, ip), log: this.log,
     });
@@ -124,6 +125,7 @@ class RelayServer implements Relay {
     this.send(ws, {
       t: "hello", v: PROTOCOL_VERSION, nonce: ws.data.nonce, ts: Math.floor(Date.now() / 1000),
       limits: { maxFrameBytes: this.lim.maxFrameBytes, maxChunkBytes: this.lim.maxChunkBytes, maxReqTimeoutMs: this.lim.maxReqTimeoutMs, heartbeatMs: this.lim.heartbeatMs },
+      ...centerHello(ws.data),
     });
   }
 

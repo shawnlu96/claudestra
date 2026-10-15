@@ -14,7 +14,7 @@ import { instanceKeySync, type InstanceKey } from "../src/lib/instance-key.ts";
 import { authSignature, keyFingerprint, SUBPROTOCOL, verifyAuthSignature } from "../src/lib/relay-protocol.ts";
 import { signRelayAuth } from "../src/lib/floka-compat/relay/handshake.ts";
 import { CENTER_CAPABILITY_TTL_MS, admitCenterCapability, issueCenterCapability } from "../src/lib/floka-center/capability.ts";
-import { centerForward, centerSubprotocol, centerVerifyAuth, centerWelcome } from "../src/lib/floka-center/center.ts";
+import { centerForward, centerHello, centerSubprotocol, centerTunnel, centerVerifyAuth, centerWelcome } from "../src/lib/floka-center/center.ts";
 import { CenterLink } from "../src/lib/floka-center/client.ts";
 import { parseCenterRename } from "../src/lib/floka-center/gear.ts";
 
@@ -43,7 +43,7 @@ afterAll(() => {
 });
 
 function center(rename?: object, extra: Partial<RelayOptions> = {}): Relay {
-  const r = createRelay({ base: BASE, port: 0, db: ":memory:", log: quiet, ...extra, ...(rename ? { rename } : {}) } as RelayOptions);
+  const r = createRelay({ base: BASE, port: 0, db: ":memory:", log: quiet, ...extra, ...(rename ? { rename } : {}) });
   cleanup.push(() => r.stop());
   return r;
 }
@@ -136,6 +136,7 @@ describe("[验收线 1] 旧 / 新客户端 × 旧 / 新中心", () => {
     expect(c.ws.protocol).toBe(SUBPROTOCOL);
     await waitFor(() => !!c.find("welcome"));
     expect(c.find("welcome")).toMatchObject({ t: "welcome", v: 2, fp: fpOf(key), slug: "raw" });
+    expect(c.find("hello")!.subprotocol).toBeUndefined(); // 旧族连接的 hello 一字不变
     expect(relay.online()).toEqual([fpOf(key)]);
   });
 
@@ -152,6 +153,7 @@ describe("[验收线 1] 旧 / 新客户端 × 旧 / 新中心", () => {
 // ── 验收线 2：冲突头、伪来源、验签失败、未知能力 ─────────────────────────
 
 describe("[验收线 2] 不降级、不切新", () => {
+  // 中心这一侧（centerSubprotocol）on 档认单独的新族提议，见验收线 3 的单元用例；front 的 426 闸在 src/relay/front.ts，不在本卡范围
   test("只提议新族子协议：front 照旧 426，中心不因此切新", async () => {
     const relay = center(NEW);
     const c = await raw(relay.port, newKey(), [FLOKA]);
@@ -162,8 +164,8 @@ describe("[验收线 2] 不降级、不切新", () => {
   test("新族连接用旧用途签名：拒（auth_failed），不降级到旧族", async () => {
     const relay = center(NEW);
     const c = await raw(relay.port, newKey(), [FLOKA, SUBPROTOCOL], "legacy");
-    expect(c.ws.protocol).toBe(FLOKA);
     await c.closed;
+    expect(c.find("hello")!.subprotocol).toBe(FLOKA); // 客户端按 hello 报的族签，不读 ws.protocol
     expect(c.find("error")).toMatchObject({ code: "auth_failed" });
     expect(c.find("welcome")).toBeUndefined();
   });
@@ -211,6 +213,33 @@ describe("[验收线 2] 不降级、不切新", () => {
     expect(seenB[0].from).toBe(fpOf(keyA));
     for (const k of Object.keys(forged)) expect(seenB[0].headers[k]).toBeUndefined();
     expect(seenB[0].headers).toMatchObject(keep);
+  });
+
+  test("隧道请求夹带新族中继头 / 两族标记头：新中心转给实例前去掉，front 盖的旧族头留着", async () => {
+    const relay = center(NEW, { trustProxy: true });
+    const key = newKey();
+    const seen: Seen[] = [];
+    const c = client(relay.port, key, "beta", NEW, seen);
+    await online(c);
+    await reconnect(relay, c, key);
+    expect(c.family).toBe("floka");
+    const forged = { "x-floka-relay-from": fpOf(newKey()), "x-floka-relay-mark": "m", "x-floka-relay-base": "evil.test", "x-claudestra-tunnel-mark": "t" };
+    const res = await fetch(`http://127.0.0.1:${relay.port}/api/v1/ping`, { headers: { "x-forwarded-host": `beta.${BASE}`, ...forged, accept: "*/*" } });
+    expect(res.status).toBe(200);
+    expect(seen.at(-1)!.from).toBe("relay");
+    for (const k of Object.keys(forged)) expect(seen.at(-1)!.headers[k]).toBeUndefined();
+    expect(seen.at(-1)!.headers).toMatchObject({ "x-claudestra-relay-base": BASE, accept: "*/*" });
+  });
+
+  test("centerTunnel：只动 from relay 的 req；off / observe 原样", () => {
+    const headers: Record<string, string> = { "X-Floka-Relay-Base": "evil.test", "x-claudestra-relay-base": BASE, "x-floka-tunnel-mark": "t", accept: "*/*" };
+    const req = { t: "req", id: "1", from: "relay", headers };
+    expect(centerTunnel(req, { rename: NEW }).headers).toEqual({ "x-claudestra-relay-base": BASE, accept: "*/*" });
+    const peer = { ...req, from: fpOf(newKey()) };
+    expect(centerTunnel(peer, { rename: NEW })).toBe(peer);
+    const data = { t: "data", id: "1", from: "relay", b64: "" };
+    expect(centerTunnel(data, { rename: NEW })).toBe(data);
+    for (const rename of [undefined, { centerReceive: "observe" }]) expect(centerTunnel(req, { rename, log: quiet })).toBe(req);
   });
 
   test("centerForward：大小写不同的伪来源头同样去掉", () => {
@@ -261,9 +290,63 @@ describe("[验收线 2] 不降级、不切新", () => {
   });
 });
 
-/** 只给客户端喂能力的假中心：第 n 次连接按 script[n] 在 hello 或 welcome 里附 capability，子协议总选旧族 */
-function fakeCenter(script: { hello?: unknown; welcome?: unknown }[]) {
+describe("[验收线 2] 已切新之后：坏能力不降级，认证前的能力不切新", () => {
+  test("先收到有效能力，再收到含未知族的声明：照留有效能力，下次仍提议新族；不带能力字段才撤回", async () => {
+    const key = newKey();
+    const good = issueCenterCapability(fpOf(key));
+    const fake = fakeCenter([{ welcome: good }, { welcome: { ...good, families: ["legacy", "floka", "floka2"] } }, { welcome: { ...good, fp: fpOf(newKey()) } }, {}, {}]);
+    const c = client(fake.port, key, "alpha", NEW);
+    await online(c);
+    for (let i = 1; i <= 4; i++) {
+      fake.drop();
+      await waitFor(() => fake.offers.length === i + 1);
+      await online(c);
+    }
+    expect(fake.offers).toEqual([[SUBPROTOCOL], [FLOKA, SUBPROTOCOL], [FLOKA, SUBPROTOCOL], [FLOKA, SUBPROTOCOL], [SUBPROTOCOL]]);
+  });
+
+  test("中心不发 hello、直接发带匹配指纹与有效能力的 welcome：不收，下次仍只提议旧族", async () => {
+    const key = newKey();
+    const good = issueCenterCapability(fpOf(key));
+    const fake = fakeCenter([{ early: good }, { early: good }]);
+    const c = client(fake.port, key, "alpha", NEW);
+    await online(c);
+    fake.drop();
+    await waitFor(() => fake.offers.length === 2);
+    await online(c);
+    expect(fake.offers).toEqual([[SUBPROTOCOL], [SUBPROTOCOL]]);
+    expect(fake.auths).toBe(0);
+  });
+
+  test("CenterLink：能力只认本连接发出 auth 之后的第一个 welcome", () => {
+    const key = newKey();
+    const fp = fpOf(key);
+    const good = issueCenterCapability(fp);
+    const link = new CenterLink(NEW, key, quiet);
+    link.offer();
+    link.welcome({ capability: good }); // 还没签 auth
+    expect(link.offer()).toEqual([SUBPROTOCOL]);
+    link.sign(SUBPROTOCOL, "n", "a", "a");
+    link.welcome({ capability: good });
+    expect(link.offer()).toEqual([FLOKA, SUBPROTOCOL]);
+    link.welcome({}); // 新连接还没认证：撤回也不算
+    expect(link.offer()).toEqual([FLOKA, SUBPROTOCOL]);
+    link.sign(FLOKA, "n", "a", "a");
+    link.welcome({ capability: { ...good, families: ["legacy", "x"] } });
+    expect(link.offer()).toEqual([FLOKA, SUBPROTOCOL]);
+    link.sign(FLOKA, "n", "a", "a");
+    link.welcome({});
+    expect(link.offer()).toEqual([SUBPROTOCOL]);
+  });
+});
+
+/**
+ * 只给客户端喂能力的假中心：第 n 次连接按 script[n] 在 hello 或 welcome 里附 capability，子协议总选旧族；
+ * early：不发 hello，open 后直接发 welcome（带匹配指纹与 capability）。
+ */
+function fakeCenter(script: { hello?: unknown; welcome?: unknown; early?: unknown }[], fp?: string) {
   const offers: string[][] = [];
+  let auths = 0;
   const conns = new Set<Bun.ServerWebSocket<{ n: number }>>();
   const srv: Server<{ n: number }> = Bun.serve<{ n: number }>({
     port: 0, hostname: "127.0.0.1",
@@ -276,11 +359,16 @@ function fakeCenter(script: { hello?: unknown; welcome?: unknown }[]) {
       open(ws) {
         conns.add(ws);
         const s = script[ws.data.n] ?? {};
+        if ("early" in s) {
+          const cap = s.early as { fp: string };
+          return void ws.send(JSON.stringify({ t: "welcome", v: 2, fp: fp ?? cap.fp, slug: "alpha", name: "alpha", base: BASE, capability: s.early }));
+        }
         ws.send(JSON.stringify({ t: "hello", v: 2, nonce: "n", ts: Math.floor(Date.now() / 1000), ...("hello" in s ? { capability: s.hello } : {}) }));
       },
       message(ws, m) {
         const f = JSON.parse(String(m));
         if (f.t !== "auth") return;
+        auths++;
         const s = script[ws.data.n] ?? {};
         const welcome = { t: "welcome", v: 2, fp: keyFingerprint(f.key), slug: f.slug, name: f.name, base: BASE };
         ws.send(JSON.stringify({ ...welcome, ...("welcome" in s ? { capability: s.welcome } : {}) }));
@@ -291,7 +379,7 @@ function fakeCenter(script: { hello?: unknown; welcome?: unknown }[]) {
     },
   });
   cleanup.push(() => srv.stop(true));
-  return { port: srv.port!, offers, drop: () => conns.forEach((ws) => ws.close(4500, "drop")) };
+  return { port: srv.port!, offers, get auths() { return auths; }, drop: () => conns.forEach((ws) => ws.close(4500, "drop")) };
 }
 
 // ── 验收线 3：off / observe 不变，回切旧发送不中断身份 ───────────────────
@@ -312,6 +400,7 @@ describe("[验收线 3] off / observe 与原接受结果相同", () => {
       for (const o of offers) {
         const conn = {};
         expect(centerSubprotocol(req(o), conn, opts)).toBe(SUBPROTOCOL);
+        expect(centerHello(conn)).toEqual({});
         for (const sig of [legacySig, flokaSig, "garbage"]) {
           expect(centerVerifyAuth(conn, a, sig, opts)).toBe(verifyAuthSignature(a.key, a.nonce, a.name, a.slug, sig));
         }
@@ -323,12 +412,13 @@ describe("[验收线 3] off / observe 与原接受结果相同", () => {
     });
   }
 
-  test("中心 on：两族都提议才选新族，只按选定的族验签", () => {
+  test("中心 on：提议了新族（单独或与旧族并提）就选新族，只按选定的族验签", () => {
     const opts = { rename: NEW, log: quiet };
     for (const o of offers) {
       const conn = {};
-      const both = o.includes(FLOKA) && o.includes(SUBPROTOCOL);
+      const both = o.includes(FLOKA);
       expect(centerSubprotocol(req(o), conn, opts)).toBe(both ? FLOKA : SUBPROTOCOL);
+      expect(centerHello(conn)).toEqual(both ? { subprotocol: FLOKA } : {});
       expect(centerVerifyAuth(conn, a, legacySig, opts)).toBe(!both);
       expect(centerVerifyAuth(conn, a, flokaSig, opts)).toBe(both);
     }
@@ -338,6 +428,8 @@ describe("[验收线 3] off / observe 与原接受结果相同", () => {
   for (const rename of [undefined, { centerReceive: "observe", centerSend: "observe" }, { centerReceive: "on" }, { centerSend: "on" }]) {
     test(`客户端 ${JSON.stringify(rename)}：有合格能力也只提议旧族，签名与现行逐字节相同`, () => {
       const link = new CenterLink(rename, key, quiet);
+      link.offer();
+      link.sign(SUBPROTOCOL, a.nonce, a.name, a.slug);
       link.welcome({ capability: issueCenterCapability(fp) });
       expect(link.offer()).toEqual([SUBPROTOCOL]);
       expect(link.sign(FLOKA, a.nonce, a.name, a.slug)).toBe(legacySig); // 没提议过的子协议不认
@@ -349,10 +441,13 @@ describe("[验收线 3] off / observe 与原接受结果相同", () => {
   test("客户端 on：能力过期后回到只提议旧族；welcome 不再带能力就清掉", () => {
     const link = new CenterLink(NEW, key, quiet);
     const now = Date.now();
+    link.offer(now);
+    link.sign(SUBPROTOCOL, a.nonce, a.name, a.slug);
     link.welcome({ capability: issueCenterCapability(fp, now) }, now);
     expect(link.offer(now)).toEqual([FLOKA, SUBPROTOCOL]);
     expect(link.sign(FLOKA, a.nonce, a.name, a.slug)).toBe(flokaSig);
     expect(link.offer(now + CENTER_CAPABILITY_TTL_MS)).toEqual([SUBPROTOCOL]);
+    link.sign(SUBPROTOCOL, a.nonce, a.name, a.slug);
     link.welcome({}, now);
     expect(link.offer(now)).toEqual([SUBPROTOCOL]);
   });
@@ -385,7 +480,7 @@ describe("[验收线 3] 回切旧发送不中断身份", () => {
 
   test("中心回切：同一端口同一库换成旧中心，持能力的新客户端自动落到旧族，指纹与 slug 不变", async () => {
     const db = join(mkdtempSync(join(tmpdir(), "floka-center-db-")), "relay.db");
-    const first = createRelay({ base: BASE, port: 0, db, log: quiet, rename: NEW } as RelayOptions);
+    const first = createRelay({ base: BASE, port: 0, db, log: quiet, rename: NEW });
     const port = first.port;
     const key = newKey();
     const c = client(port, key, "alpha", NEW);
