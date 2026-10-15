@@ -7,6 +7,7 @@
 export const RECOVERY_KEYS = [
   "askDefaultAll",
   "askReminder",
+  "askScopeAuto",
   "audit",
   "auditEscalate",
   "auditIdleFacts",
