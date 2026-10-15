@@ -6,8 +6,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { orderOf, type LendRow } from "./lend-journal.js";
-import type { LedgerGear } from "./floka-ledger/gear.js";
-import { verifyLedgerUse } from "./floka-ledger/uses.js";
+import { receiveLedgerUse, type LedgerReceive } from "./floka-ledger/uses.js";
 import { statePath } from "./paths.js";
 
 const LEND_RECEIPTS_PATH = statePath("lend", "receipts.jsonl");
@@ -77,6 +76,6 @@ export function appendReceipt(r: LendReceipt, path = LEND_RECEIPTS_PATH): boolea
 export interface LendAck { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string; purpose?: string }
 export const lendAckFields = (r: LendAck): string[] => [r.orderId, r.sha256, String(r.eventSeq), r.taskId];
 
-/** rename-floka-LEDGER1：回执按 rename.ledgerReceive 双族验；没有 purpose 的历史回执照旧族原字节验，收据里的 ackSig 从不改写 */
-export const verifyLendAck = (r: LendAck, pinnedKey: string, gear: LedgerGear): boolean =>
-  verifyLedgerUse("lend-receipt", r, lendAckFields(r), gear, pinnedKey).ok;
+/** rename-floka-LEDGER1：回执按 rename.ledgerReceive 双族验（lend-deps.ts verifyReceipt 调）；没有 purpose 的历史回执照旧族原字节验，收据里的 ackSig 从不改写 */
+export const verifyLendAck = (r: LendAck, pinnedKey: string, rx: LedgerReceive = {}): boolean =>
+  receiveLedgerUse("lend-receipt", r, lendAckFields(r), rx, pinnedKey).ok;

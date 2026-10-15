@@ -3,16 +3,17 @@
  * 新族请求多带一个 purpose（HTTP 头 LEDGER_PURPOSE_HEADER）；不带的就是旧请求，验法与改动前一字不差。
  * 防重放键不分族：同一把钥匙的同一 nonce 用过一次，换族也再用不了。
  */
-import type { LedgerGear } from "./gear.js";
-import { verifyLedgerUse, type LedgerObservation, type LedgerSigned } from "./uses.js";
+import { receiveLedgerUse, type LedgerReceive, type LedgerSigned } from "./uses.js";
 
 export const LEDGER_PURPOSE_HEADER = "x-shared-ledger-purpose";
 
-/** 接收方的档位与 observe 报告出口；都不给 = off */
-export interface LedgerReceive { receive?: LedgerGear; report?: (o: LedgerObservation) => void }
+export type { LedgerReceive };
 
 export function verifyLedgerSignature(signed: LedgerSigned, fields: string[], rx: LedgerReceive = {}): boolean {
-  const c = verifyLedgerUse("shared-ledger", signed, fields, rx.receive ?? "off");
-  if (!c.ok && c.observed) rx.report?.(c.observed);
-  return c.ok;
+  return receiveLedgerUse("shared-ledger", signed, fields, rx).ok;
+}
+
+/** 发送方：新族请求多带用途头；旧族（没有 purpose）不加任何头，与改动前逐字一致 */
+export function ledgerPurposeHeaders(signed: { purpose?: string }): Record<string, string> {
+  return signed.purpose ? { [LEDGER_PURPOSE_HEADER]: signed.purpose } : {};
 }

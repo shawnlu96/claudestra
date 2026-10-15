@@ -1,7 +1,8 @@
 /** rename-floka-LEDGER1: shared ledger + receipt/ticket purposes across both families. Temp ledgers and synthetic Ed25519 keys only; no production state is read. */
-import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { signPurpose, verifyPurpose, type InstanceKey } from "../src/lib/instance-signature.js";
@@ -14,8 +15,15 @@ import { SHARED_LEDGER_COMMAND_FIXTURES } from "../src/lib/shared-ledger-contrac
 import { formatSharedLedgerJoinCode, SHARED_LEDGER_JOIN_PURPOSE, sharedLedgerJoinFields } from "../src/lib/shared-ledger-join-protocol.js";
 import { signSharedLedgerJoin } from "../src/lib/shared-ledger-join.js";
 import { appendReceipt, lendAckFields, verifyLendAck, type LendAck, type LendReceipt } from "../src/lib/lend-receipts.js";
-import { issueReviewTicket, REVIEW_TICKET_PURPOSE, ticketProblem } from "../src/lib/pool-review-proof-ticket.js";
-import { inviteUrlKey, signInviteProof } from "../src/lib/invite-proof.js";
+import { issueReviewTicket, parseReviewTicket, REVIEW_TICKET_PURPOSE, ticketProblem, type ReviewTicket } from "../src/lib/pool-review-proof-ticket.js";
+import { checkInviteProof, inviteUrlKey, signInviteProof } from "../src/lib/invite-proof.js";
+import { ledgerReceive, ledgerSendFamilyFor, ledgerSigner, setLedgerCapabilitySource } from "../src/lib/floka-ledger/config.js";
+import { requestSharedLedger } from "../src/lib/shared-ledger-client-transport.js";
+import { SHARED_LEDGER_AUTH_HEADERS } from "../src/lib/shared-ledger-auth.js";
+import { lendDeps } from "../src/lib/lend-deps.js";
+import { lendRequest } from "../src/lib/lend-remote.js";
+import { writePeers } from "../src/lib/peers.js";
+import { CONFIG_PATH } from "../src/lib/paths.js";
 import { issueSignatureCapability } from "../src/lib/floka-compat/signature/capability.js";
 import { PURPOSE_MAP, type SignatureFamily, type SignatureUse } from "../src/lib/floka-compat/signature/families.js";
 import { parseLedgerRename, type LedgerGear } from "../src/lib/floka-ledger/gear.js";
@@ -133,8 +141,8 @@ describe("[验收线 1] fake center, four directions", () => {
     const ack: LendAck = { orderId: "lend:x:s1:r0:a0", sha256: "e".repeat(64), eventSeq: 7, taskId: "t1", ...signLedgerUse("lend-receipt", ["lend:x:s1:r0:a0", "e".repeat(64), "7", "t1"], A)! };
     const ackNew: LendAck = { ...ack, ...signLedgerUse("lend-receipt", lendAckFields(ack), A, "floka")! };
     for (const g of GEARS) {
-      expect(verifyLendAck(ack, A.publicKey, g)).toBe(true);
-      expect(verifyLendAck(ackNew, A.publicKey, g)).toBe(g === "on");
+      expect(verifyLendAck(ack, A.publicKey, { receive: g })).toBe(true);
+      expect(verifyLendAck(ackNew, A.publicKey, { receive: g })).toBe(g === "on");
     }
     // Ticket: the old signer path is untouched; the floka family signs the very same fields.
     let fields: string[] = [];
@@ -240,8 +248,139 @@ describe("[验收线 3] off / observe write nothing and keep history byte-identi
       const line = readFileSync(path, "utf8");
       expect(line).toBe(`${JSON.stringify(r)}\n`);
       const stored = JSON.parse(line).ackSig as LendAck;
-      for (const g of GEARS) expect(verifyLendAck(stored, A.publicKey, g)).toBe(true);
+      for (const g of GEARS) expect(verifyLendAck(stored, A.publicKey, { receive: g })).toBe(true);
       expect(readFileSync(path, "utf8")).toBe(line);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+/** Real entry points read rename.* from config.json in the test's temp state dir; each case restores the file and the capability source. */
+function withRename<T>(rename: Record<string, string> | null, fn: () => T): T {
+  const before = existsSync(CONFIG_PATH) ? readFileSync(CONFIG_PATH, "utf8") : null;
+  writeFileSync(CONFIG_PATH, JSON.stringify(rename ? { rename } : {}));
+  const restore = () => { if (before === null) rmSync(CONFIG_PATH, { force: true }); else writeFileSync(CONFIG_PATH, before); };
+  try {
+    const r = fn();
+    if (r instanceof Promise) return r.finally(restore) as T;
+    restore();
+    return r;
+  } catch (e) { restore(); throw e; }
+}
+const ON = { ledgerReceive: "on", ledgerSend: "on" };
+/** Entry points pick the family at wall-clock time, so their capability is issued now (capA is pinned to NOW for the pure cases). */
+const capable = () => { const capability = issueSignatureCapability("instance-a", A); setLedgerCapabilitySource(() => ({ capability, pinned: pinnedA })); };
+
+describe("[验收线 1] real entry points", () => {
+  afterEach(() => setLedgerCapabilitySource(null));
+  const take = { orderId: "o1", gen: 1, agent: "w", session: "s", at: 5 };
+  const base = { v: 1 as const, orderId: "o1", gen: 1, taskId: "t", head: "f".repeat(40), specRev: 1, round: 0, family: "claude",
+    worker: "w", session: "s", payloadSha: "a".repeat(64), take };
+  const want = { orderId: "o1", gen: 1, taskId: "t", head: "f".repeat(40), specRev: 1, round: 0, family: "claude", worker: "w", session: "s", payloadSha: "a".repeat(64) };
+  const legacyTicket = (f: string[]) => signPurpose(REVIEW_TICKET_PURPOSE, f, A);
+  const wire = (t: ReviewTicket | null) => parseReviewTicket(JSON.parse(JSON.stringify(t)));
+
+  test("review ticket: issue → parse → ticketProblem; floka only with on + capability; old tickets unchanged", () => {
+    const neu = withRename(ON, () => { capable(); return issueReviewTicket(base, ledgerSigner("lend-review-ticket", "pa", legacyTicket, () => A)); })!;
+    expect(neu.purpose).toBe("floka-lend-review-ticket-v1");
+    const parsed = wire(neu)!;
+    expect(parsed).not.toBeNull();
+    expect(ticketProblem(parsed, want, A.publicKey, { receive: "on" })).toBeNull();
+    expect(withRename(ON, () => ticketProblem(parsed, want, A.publicKey, ledgerReceive()))).toBeNull();
+    expect(ticketProblem(parsed, want, A.publicKey)).toBe("票据签名不对");
+    const reports: LedgerObservation[] = [];
+    expect(ticketProblem(parsed, want, A.publicKey, { receive: "observe", report: (o) => reports.push(o) })).toBe("票据签名不对");
+    expect(reports).toEqual([{ use: "lend-review-ticket", family: "floka", wouldAccept: true }]);
+    // No capability (the default source): the very same old ticket, byte for byte, whatever the gear.
+    setLedgerCapabilitySource(null);
+    const old = withRename(ON, () => issueReviewTicket(base, ledgerSigner("lend-review-ticket", "pa", legacyTicket, () => A)))!;
+    expect(JSON.stringify(old)).toBe(JSON.stringify(issueReviewTicket(base, legacyTicket)));
+    for (const g of GEARS) expect(ticketProblem(wire(old)!, want, A.publicKey, { receive: g })).toBeNull();
+    // Purpose must be this use's floka name; relabelled or stripped tickets fail the signature.
+    expect(wire({ ...neu, purpose: "claudestra-lend-review-ticket-v1" })).toBeNull();
+    expect(wire({ ...neu, purpose: "floka-lend-receipt-v1" })).toBeNull();
+    expect(ticketProblem(wire({ ...old, purpose: "floka-lend-review-ticket-v1" })!, want, A.publicKey, { receive: "on" })).toBe("票据签名不对");
+    const { purpose: _p, ...stripped } = neu;
+    expect(ticketProblem(wire(stripped)!, want, A.publicKey, { receive: "on" })).toBe("票据签名不对");
+    expect(ticketProblem(parsed, want, B.publicKey, { receive: "on" })).toBe("票据不是用钉住的对方钥匙签的");
+  });
+
+  test("invite proof: floka proof passes checkInviteProof only under receive on; old proofs pass on every gear", () => {
+    const f = { nonce: "n0", join: "j", redeemerFp: "abcd", inviterIid: "iid", inviteUrl: "https://h.example/" };
+    const neu = signInviteProof(f, A, "floka")!;
+    expect(neu.purpose).toBe("floka-invite-pop-v1");
+    const wireNeu = JSON.parse(JSON.stringify(neu));
+    expect(checkInviteProof(wireNeu, f, { receive: "on" })).toMatchObject({ key: A.publicKey });
+    expect(withRename(ON, () => checkInviteProof(wireNeu, f, ledgerReceive()))).toMatchObject({ key: A.publicKey });
+    expect(checkInviteProof(wireNeu, f)).toBe("bad");
+    expect(checkInviteProof(wireNeu, f, { receive: "observe" })).toBe("bad");
+    const old = signInviteProof(f, A)!;
+    expect(Object.keys(old)).toEqual(["key", "sig"]);
+    for (const g of GEARS) expect(checkInviteProof(old, f, { receive: g })).toMatchObject({ key: A.publicKey });
+    expect(checkInviteProof({ ...neu, purpose: "floka-lend-receipt-v1" }, f, { receive: "on" })).toBe("bad");
+    expect(checkInviteProof({ ...old, purpose: "floka-invite-pop-v1" }, f, { receive: "on" })).toBe("bad");
+    const otherUse = signLedgerUse("lend-receipt", [f.nonce, f.join, f.redeemerFp, f.inviterIid, inviteUrlKey(f.inviteUrl)], A, "floka")!;
+    expect(checkInviteProof({ ...otherUse, purpose: "floka-invite-pop-v1" }, f, { receive: "on" })).toBe("bad");
+    expect(checkInviteProof({ ...neu, sig: signInviteProof({ ...f, nonce: "n1" }, A, "floka")!.sig }, f, { receive: "on" })).toBe("bad");
+  });
+
+  test("lend receipts: A signs floka only with on + capability; B parses and lend-deps verifies by ledgerReceive", async () => {
+    const fields = ["lend:x:s1:r0:a0", "e".repeat(64), "7", "t1"];
+    const base = { orderId: fields[0]!, sha256: fields[1]!, eventSeq: 7, taskId: "t1" };
+    const legacy = (f: string[]) => signPurpose("claudestra-lend-receipt-v1", f, A);
+    // A side, no capability: exactly deps.sign's output, so an old B's exact-key parser still takes it.
+    const old = withRename(ON, () => ledgerSigner("lend-receipt", "pb", legacy, () => A)(fields))!;
+    expect(old).toEqual(legacy(fields)!);
+    const neu = withRename(ON, () => { capable(); return ledgerSigner("lend-receipt", "pb", legacy, () => A)(fields); })!;
+    expect(neu.purpose).toBe("floka-lend-receipt-v1");
+    const reply = (receipt: unknown) => async () => ({ status: 200, body: { ok: true, v: 1, receipt } });
+    const parsedOld = await lendRequest(reply({ ...base, ...old }), "pa", "result", {});
+    const parsedNeu = await lendRequest(reply({ ...base, ...neu }), "pa", "result", {});
+    expect(parsedOld).toMatchObject({ ok: true });
+    expect(parsedOld.ok && "purpose" in parsedOld.value).toBe(false);
+    expect(parsedNeu).toMatchObject({ ok: true, value: { purpose: "floka-lend-receipt-v1" } });
+    expect(await lendRequest(reply({ ...base, ...neu, purpose: "floka-invite-pop-v1" }), "pa", "result", {})).toMatchObject({ ok: false, code: "bad_response" });
+    expect(await lendRequest(reply({ ...base, ...old, purpose: "claudestra-lend-receipt-v1" }), "pa", "result", {})).toMatchObject({ ok: false, code: "bad_response" });
+    // B side: lend-deps verifyReceipt against the peer's recorded key.
+    await writePeers({ httpPeers: [{ name: "pa", baseUrl: "https://pa.invalid", publicKey: A.publicKey, addedAt: new Date(NOW).toISOString() }] } as never);
+    const dir = mkdtempSync(join(tmpdir(), "floka-ledger-deps-"));
+    const db = new Database(join(dir, "journal.db"));
+    try {
+      const verify = lendDeps(db, { get: () => null } as never, () => {}, undefined).verifyReceipt;
+      const rOld = parsedOld.ok ? parsedOld.value : null, rNeu = parsedNeu.ok ? parsedNeu.value : null;
+      for (const rename of [null, { ledgerReceive: "observe" }, { ledgerReceive: "on" }]) {
+        expect(await withRename(rename, () => verify("pa", rOld!))).toBe(true);
+        expect(await withRename(rename, () => verify("pa", rNeu!))).toBe(rename?.ledgerReceive === "on");
+      }
+      expect(await withRename({ ledgerReceive: "on" }, () => verify("nobody", rNeu!))).toBe(false);
+    } finally { db.close(); rmSync(dir, { recursive: true, force: true }); await writePeers({ httpPeers: [] } as never); }
+  });
+
+  test("shared-ledger send: floka + purpose header only with on + capability; otherwise the old request, header for header", async () => {
+    const connection = { centerId: "c", baseUrl: "https://center.invalid", teamId: "team-a", personId: "person-a", instanceId: "instance-a", bearer: SECRET };
+    const send = async () => {
+      let seen: Headers | null = null;
+      const fetcher = (async (_u: URL, init: RequestInit) => { seen = new Headers(init.headers); return Response.json({}); }) as unknown as typeof fetch;
+      await requestSharedLedger(connection, A, { fetch: fetcher, now: () => NOW }, "GET", "/v1/teams/team-a/features");
+      const h = seen! as Headers, H = SHARED_LEDGER_AUTH_HEADERS;
+      const req: SharedLedgerSignedRequest = { method: "GET", path: "/v1/teams/team-a/features", body: "", bearer: SECRET, publicKey: h.get(H.key)!, instanceId: h.get(H.instance)!,
+        ts: h.get(H.ts)!, signature: h.get(H.sig)!, attemptNonce: h.get(H.nonce)!, ...(h.has(LEDGER_PURPOSE_HEADER) ? { purpose: h.get(LEDGER_PURPOSE_HEADER)! } : {}) };
+      return { names: [...h.keys()].sort(), req };
+    };
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const off = await withRename(null, send);
+      expect(off.names).not.toContain(LEDGER_PURPOSE_HEADER);
+      expect(fakeCenter().accept(off.req, "off").principal.instanceId).toBe("instance-a");
+      const noCap = await withRename(ON, send);
+      expect(noCap.names).toEqual(off.names);
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("没有能力证明"))).toBe(true);
+      const neu = await withRename(ON, () => { capable(); return send(); });
+      expect(neu.names).toEqual([...off.names, LEDGER_PURPOSE_HEADER].sort());
+      expect(neu.req.purpose).toBe("floka-shared-ledger-v1");
+      expect(fakeCenter().accept(neu.req, "on").principal.instanceId).toBe("instance-a");
+      expect(refused(() => fakeCenter().accept(neu.req, "off"))).toBe("bad_signature");
+      // observe sends old and only reports what on would pick.
+      expect(withRename({ ledgerReceive: "on", ledgerSend: "observe" }, () => { capable(); return ledgerSendFamilyFor("shared-ledger", "https://center.invalid"); })).toBe("claudestra");
+    } finally { warn.mockRestore(); }
   });
 });

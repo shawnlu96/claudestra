@@ -18,6 +18,9 @@ export interface LedgerSigned { key: string; sig: string; purpose?: string }
 /** observe 档的报告：这份新族签名若开到 on 会不会被认 */
 export interface LedgerObservation { use: SignatureUse; family: SignatureFamily; wouldAccept: boolean }
 
+/** 接收方的档位与 observe 报告出口；都不给 = off */
+export interface LedgerReceive { receive?: LedgerGear; report?: (o: LedgerObservation) => void }
+
 export type LedgerCheck =
   | { ok: true; family: SignatureFamily }
   | { ok: false; reason: string; observed?: LedgerObservation };
@@ -34,6 +37,16 @@ export function verifyLedgerUse(
   if (c.status === "unsigned") return { ok: false, reason: "unsigned" };
   return { ok: false, reason: c.reason, ...(c.observed !== undefined ? { observed: { use, family, wouldAccept: c.observed } } : {}) };
 }
+
+/** 带 report 的验法：observe 档的新族结论交给 rx.report，接受与否与 verifyLedgerUse 相同 */
+export function receiveLedgerUse(use: SignatureUse, signed: LedgerSigned, fields: string[], rx: LedgerReceive = {}, pinnedKey?: string): LedgerCheck {
+  const c = verifyLedgerUse(use, signed, fields, rx.receive ?? "off", pinnedKey);
+  if (!c.ok && c.observed) rx.report?.(c.observed);
+  return c;
+}
+
+/** 载荷格式（票据、邀请证明、回执）里的 purpose：要么不带（旧族历史载荷），要么正是本用途的新族名；别的一律算格式不对 */
+export const ledgerPurposeShape = (use: SignatureUse, v: unknown): boolean => v === undefined || v === PURPOSE_MAP[use].floka;
 
 /** 旧族走原来的 signPurpose，产出与改动前逐字节相同、不带 purpose；新族带上自报的 purpose */
 export function signLedgerUse(use: SignatureUse, fields: string[], key: InstanceKey | null, family: SignatureFamily = "claudestra"): LedgerSigned | null {

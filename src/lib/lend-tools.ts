@@ -19,6 +19,7 @@ import { getOrder, liveOrders, orderOf, recordTake, WORKER_STATES, type LendRow 
 import { LEND_ORDER_TOOLS } from "./lend-mcp-profile.js";
 import { signedFor, signPurpose } from "./instance-key.js";
 import { REVIEW_TICKET_PURPOSE, type TicketSigner } from "./pool-review-proof-ticket.js";
+import { ledgerSigner } from "./floka-ledger/config.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import { commitLendResult, payloadSha, readReportIn } from "./lend-submit.js";
 import { refuse, type OrderToolResult } from "./order-tool-route.js";
@@ -151,7 +152,7 @@ async function submitVerdict(row: LendRow, args: unknown, d: LendToolDeps): Prom
   if (w.value.head !== orderOf(row)?.head) return refuse("head_mismatch", "head 不是这张审查单的 head");
   const report = readReportIn(row.dir ?? "", w.value.reportPath);
   if (!report.ok) return refuse("bad_report", report.error);
-  const sign = d.signTicket ?? ((f: string[]) => signPurpose(REVIEW_TICKET_PURPOSE, f));
+  const sign = d.signTicket ?? ledgerSigner("lend-review-ticket", row.peer, (f: string[]) => signPurpose(REVIEW_TICKET_PURPOSE, f));
   const done = commitLendResult(d.db!, row, { verdict: w.value.verdict, findings: w.value.findings, report: report.text }, d.now(), sign);
   if (!done.ok) return refuse("submit_refused", done.error);
   const cur = getOrder(d.db!, row.orderId);

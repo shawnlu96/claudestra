@@ -7,6 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
 import { signSharedLedgerRequest, SHARED_LEDGER_AUTH_HEADERS } from "./shared-ledger-auth.js";
+import { ledgerPurposeHeaders, ledgerSendFamilyFor } from "./floka-ledger/config.js";
 import { sharedLedgerCenterUrl, sharedLedgerNotBefore, sharedLedgerRetryAfter, sharedLedgerRateLimited, sharedLedgerSucceeded, SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
 import type { SharedLedgerConnection } from "./shared-ledger-client.js";
 import type { InstanceKey } from "./instance-key.js";
@@ -60,13 +61,13 @@ async function signedAttempt(conn: Stage2Connection, method: "GET" | "POST", pat
     } catch (e) { if (e instanceof V2ContractError || e instanceof SharedLedgerRemoteError) throw e; return fail("unavailable"); } // never echo a URL with secrets
     const attemptNonce = randomBytes(24).toString("hex");
     const signed = signSharedLedgerRequest({ method, path, body, bearer, instanceId, ts: String(Math.floor(now() / 1000)), attemptNonce },
-      { ...conn.key });
+      { ...conn.key }, ledgerSendFamilyFor("shared-ledger", url.origin)); // LEDGER1: off / no capability = old family
     const h = SHARED_LEDGER_AUTH_HEADERS;
     let response: Response;
     try {
       response = await (conn.fetch ?? fetch)(url, { method, redirect: "error", signal: controller.signal,
         headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", [h.key]: signed.publicKey,
-          [h.ts]: signed.ts, [h.sig]: signed.signature, [h.instance]: instanceId, [h.nonce]: attemptNonce },
+          [h.ts]: signed.ts, [h.sig]: signed.signature, [h.instance]: instanceId, [h.nonce]: attemptNonce, ...ledgerPurposeHeaders(signed) },
         ...(method === "GET" ? {} : { body }) });
     } catch { return fail("unavailable"); } // fetch errors may carry bodies or credentials; keep none of it
     if (response.status === 429) {
