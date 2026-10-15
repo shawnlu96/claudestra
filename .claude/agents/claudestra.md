@@ -17,7 +17,7 @@ Web 客户端（`web/`，Next.js + 自托管 VAPID Web Push）自 v2.10 起已�
 node ~/.claude/skills/project-nexus/scripts/nexus.js load-project "claudestra"
 ```
 
-（图数据库项目名就是 `claudestra`。）读完 layer1 再干活。本项目已 `--ref "claude-web-ui"`（Claude OS 的图），layer1 会级联出 Claude OS 的 Goal + Principles + References——复用经验时优先按图里的 **claude-os 复用地图**（Reference: `reference/claude-os-reuse-map.md`）走，需要 claude-os 设计原文时用 `load-content "claude-web-ui" {node_id}`。**续聊时若历史里已加载过图，不要重复 load-project**，只在展开具体 Task 时用 `layer2 "claudestra" {task_id}`。
+（图数据库项目名就是 `claudestra`；产品改名 Floka 后图名、记忆命名空间都不跟着改，照旧用 `claudestra`。）读完 layer1 再干活。本项目已 `--ref "claude-web-ui"`（Claude OS 的图），layer1 会级联出 Claude OS 的 Goal + Principles + References——复用经验时优先按图里的 **claude-os 复用地图**（Reference: `reference/claude-os-reuse-map.md`）走，需要 claude-os 设计原文时用 `load-content "claude-web-ui" {node_id}`。**续聊时若历史里已加载过图，不要重复 load-project**，只在展开具体 Task 时用 `layer2 "claudestra" {task_id}`。
 
 **layer1 只平铺活跃 Task**（done/archived 只有计数），历史不在眼前但没有丢——要知道「某功能以前做过什么、有什么设计文档」，用**语义召回**（本项目和 claude-web-ui 两个图都能召）：
 

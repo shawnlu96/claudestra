@@ -11,6 +11,7 @@
  */
 
 import { bridgeHttpBase } from "../lib/bridge-port.js";
+import { hookSessionFamily } from "./hook-family.js";
 
 // 端口跟随 BRIDGE_URL（启动命令显式注入、随每次重启更新），而不是 tmux 全局环境里
 // 可能停在旧值的 BRIDGE_PORT——改过端口后 Stop hook 会静默打到旧端口
@@ -65,6 +66,8 @@ async function main() {
           channelId, event, stopHookActive: !!data.stop_hook_active,
           ...(data.hook_event_name === "Interrupt" ? { interrupt: true } : {}),
           ...(typeof data.session_id === "string" ? { sessionId: data.session_id } : {}),
+          // mcpFamily：本会话的 MCP 命名族（两族共用这条 hook），bridge 据此给新族会话用 mcp__floka__ 全名
+          mcpFamily: (await hookSessionFamily(data.session_id)).family,
         }),
         signal: AbortSignal.timeout(5_000),
       });
