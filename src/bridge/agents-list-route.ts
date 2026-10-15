@@ -106,7 +106,8 @@ function baseRow(a: Row, principal: Principal): Row {
  */
 async function attachBusyFlags(a: Row, runtime: string | undefined): Promise<void> {
   const st = getAgentStatus(a.name) ?? getAgentStatus(a.name.replace(/^agent-/, ""));
-  a.busy = isBusyStatus(st) || a.idle === false;
+  // idle 来自共享名单缓存（最多晚 30s）：hook 状态已知就以它为准，免得旧的 idle:false 把收尾后的会话钉在「忙」
+  a.busy = isBusyStatus(st) || (st === undefined && a.idle === false);
   a.archived = existsSync(`${USER_ARCHIVE_ROOT}/${a.name.replace(/^agent-/, "")}`); // 归档区里有它的目录 ⇒ 网页把它从工作列表隐藏
   a.compacting = st === "compacting"; // 正在压缩上下文（侧栏/列表可区分于普通忙碌）
   // 画面兜底只对 CC 窗口成立：Codex / Pi（含 ACP 宿主）屏上留着「✻ 正在压缩上下文…」也会命中 CC 的 spinner 正则，恒判忙

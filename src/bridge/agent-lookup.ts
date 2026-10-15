@@ -22,6 +22,14 @@ export const agentListCache = createListCache({
  */
 export const ROUTE_LIST_BUDGET_MS = 6_000;
 
+/** 不会改 agent 名单的命令：跑完不用作废名单缓存（其余一律作废，多读一次 list 的代价远小于名单晚一拍） */
+const LIST_PRESERVING = new Set(["sessions", "version", "cost", "doctor", "ledger", "project-list", "cron-list", "cron-history", "peer-http-list", "peer-invite-list"]);
+
+/** manager 命令跑完（成败都算）作废名单缓存：create / kill / restart / rename 之后下一次读拿新名单 */
+export function invalidateAfter<T>(cmd: string | undefined, run: Promise<T>): Promise<T> {
+  return LIST_PRESERVING.has(cmd ?? "") ? run : run.finally(() => agentListCache.invalidate());
+}
+
 /** 等共享缓存最多 ROUTE_LIST_BUDGET_MS；超了按「不可用」拒，子进程照跑完、结果留给下一次 */
 export function listForRoute(list: () => Promise<unknown> = agentListCache.result, budgetMs = ROUTE_LIST_BUDGET_MS): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined;

@@ -15,7 +15,7 @@ import { confirmDeps, handleTeamButton } from "./team-confirm.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent } from "./event-bus.js";
 import { runManagerProcess } from "../lib/run-manager.js";
-import { agentListCache } from "./agent-lookup.js";
+import { agentListCache, invalidateAfter } from "./agent-lookup.js";
 import { handleSwmodelButton, isSwmodelButton } from "./swmodel-button.js";
 import { handleStatuslineConsentButton, SLWRAP_PREFIX } from "./account-usage-statusline-consent.js";
 
@@ -31,17 +31,10 @@ const MANAGER_TIMEOUT_MS: Record<string, number> = {
 };
 const MANAGER_TIMEOUT_DEFAULT_MS = 120_000; // create / resume / restart 要等 CC 启动
 
-/** 不会改 agent 名单的命令：跑完不用作废名单缓存（其余一律作废，多读一次 list 的代价远小于名单晚一拍） */
-const LIST_PRESERVING = new Set(["sessions", "version", "cost", "doctor", "ledger", "project-list", "cron-list", "cron-history", "peer-http-list", "peer-invite-list"]);
-
 export async function runManager(...args: string[]): Promise<any> {
   if (args.length === 1 && args[0] === "list") return agentListCache.result(); // 全 bridge 共用一份名单（watcher / 按钮 / API / route_to_agent）
   const budget = MANAGER_TIMEOUT_MS[args[0] ?? ""] ?? MANAGER_TIMEOUT_DEFAULT_MS;
-  try {
-    return await runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: budget });
-  } finally {
-    if (!LIST_PRESERVING.has(args[0] ?? "")) agentListCache.invalidate(); // create / kill / restart / rename 后下一次读拿新名单
-  }
+  return invalidateAfter(args[0], runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: budget }));
 }
 
 export async function buildStatusPanel(): Promise<{

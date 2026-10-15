@@ -1,4 +1,7 @@
-/** LSC-1：bridge 共享 manager list 缓存的单元行为（保底 TTL、并发合并、registry 变 / 显式作废、失败兜底窗口、深拷贝）；接口层见 tests/api-routes-agent-lookup.test.ts */
+/**
+ * LSC-1：bridge 共享 manager list 缓存的单元行为（保底 TTL、并发合并、registry 变 / 显式作废、失败兜底窗口、深拷贝）。
+ * 接口层见 tests/api-routes-agent-lookup.test.ts。
+ */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
