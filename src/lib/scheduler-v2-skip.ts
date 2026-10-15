@@ -92,7 +92,7 @@ function autostartTargets(db: Database, rest: readonly string[], out: Targets): 
   const [verb, arg] = rest;
   if (!arg) return;
   if (verb === "claim" || verb === "spec-wait") out.features.add(arg);
-  else if (verb === "post-verify" || verb === "merge-pm" || verb === "review-pm") out.tasks.add(arg);
+  else if (verb === "post-verify" || verb === "merge-pm" || verb === "review-pm" || verb === "manual-merge") out.tasks.add(arg);
   else if ((verb === "settle" || verb === "step") && /^\d+$/.test(arg)) {
     const claim = row<{ target: string; data: string }>(db, "SELECT target, data FROM events WHERE seq = ?", Number(arg));
     if (!claim) return;

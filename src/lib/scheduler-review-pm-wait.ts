@@ -29,10 +29,10 @@ export interface ReviewPmCandidate {
 }
 
 /**
- * 新一轮审查在跑（旧结论不压它）：卡上有未结调度意图、活着的出借审查单，或本机 review / final_review 步骤在这条结论之后又派过人
+ * 新一轮审查在跑（旧结论不压它；MANAUTOQ1 scheduler-manual-merge-ready.ts 同用）：卡上有未结调度意图、活着的出借审查单，或本机 review / final_review 步骤在这条结论之后又派过人
  * （manual 本机派审只落 task_steps；同 head 重派也算，派出去的人还没交结论）
  */
-function reviewRunning(db: Database, taskId: string, events: readonly LedgerEvent[], reviewSeq: number): boolean {
+export function reviewRunning(db: Database, taskId: string, events: readonly LedgerEvent[], reviewSeq: number): boolean {
   const assigned = events.some((e) => e.seq > reviewSeq && e.kind === "step" && e.data.op === "assign" &&
     (e.data.step === "review" || e.data.step === "final_review"));
   if (assigned) return true;
@@ -42,8 +42,8 @@ function reviewRunning(db: Database, taskId: string, events: readonly LedgerEven
   return !!db.query(`SELECT 1 FROM lend_orders WHERE taskId = ? AND step = 'review' AND status IN (${live}) LIMIT 1`).get(taskId, ...LEND_LIVE);
 }
 
-/** 结论的入账来源按各自原规则可核：出借池要签名回执链，本机 MCP 要本人按单入账，调度身份写的非出借结论没有可核来源 */
-function sourceHolds(db: Database, task: LedgerTask, wf: TaskWorkflow, ev: LedgerEvent, f: ReviewFacts): boolean {
+/** 结论的入账来源按各自原规则可核（MANAUTOQ1 同用）：出借池要签名回执链，本机 MCP 要本人按单入账，调度身份写的非出借结论没有可核来源 */
+export function sourceHolds(db: Database, task: LedgerTask, wf: TaskWorkflow, ev: LedgerEvent, f: ReviewFacts): boolean {
   if (ev.data.lend !== undefined || claimsPoolReview({ reviewer: f.reviewer, session: f.reviewerSessionId })) {
     return !poolReviewRefusal(db, task, wf, f) || !poolReviewRefusal(db, task, wf, f, { pmOffered: true });
   }

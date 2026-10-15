@@ -61,6 +61,7 @@ export const RECOVERY_KEYS = [
   "mainRedRepairBind",
   "manualCaseOwnership",
   "manualCaseSla",
+  "manualMergeAuto",
   "manualMergeQueue",
   "manualRecovery",
   "manualStall",

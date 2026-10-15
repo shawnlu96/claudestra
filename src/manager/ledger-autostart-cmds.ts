@@ -22,6 +22,7 @@ import { specWaitCli } from "../lib/scheduler-spec-wait-ledger.js";
 import { postVerifyCli } from "../lib/scheduler-post-verify-ledger.js";
 import { mergePmCli } from "../lib/scheduler-merge-pm-ledger.js";
 import { reviewPmCli } from "../lib/scheduler-review-pm-ledger.js";
+import { manualMergeAutoCli } from "../lib/scheduler-manual-merge-ledger.js";
 import { wipGateConfig } from "../lib/scheduler-wip-gate-config.js";
 import {
   currentViews, featureGate, isStop, nodeCandidate, readSwitch, TEMPLATE_VERSION, weeklyLine, type AutostartTemplate, type ServiceFacts, type SpecFile,
@@ -86,6 +87,7 @@ const AUTOSTART_SUBS: Record<string, (c: LedgerCli) => Result> = {
 AUTOSTART_SUBS["post-verify"] = (c) => postVerifyCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 AUTOSTART_SUBS["merge-pm"] = (c) => mergePmCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 AUTOSTART_SUBS["review-pm"] = (c) => reviewPmCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
+AUTOSTART_SUBS["manual-merge"] = (c) => manualMergeAutoCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 
 function autoResumeCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
