@@ -20,6 +20,7 @@ import { useLayoutMode, useFlowKeyboard } from "../use-keyboard-viewport";
 import { useT } from "@/lib/i18n";
 import { isNativeShell, installNativeKeyboardPadding, installNativeStatusBarSync } from "@/lib/native";
 import { hopThenOpen } from "@/features/machines/notification-hop";
+import { onSwOpen } from "@/lib/sw-inbox";
 import { installTapRescue } from "@/lib/tap-rescue";
 import { postClientLog } from "@/lib/client-log";
 import { reportRuntimeError } from "@/lib/runtime-error";
@@ -425,12 +426,10 @@ function ChatInner({ notices }: { notices?: ReactNode }) {
       });
     }
     if (!("serviceWorker" in navigator)) return;
-    const onMsg = (e: MessageEvent) => {
-      const d = e.data as { type?: string; agent?: string; fp?: string };
-      if (d?.type !== "cstra-open-agent" || !d.agent) return;
+    const onMsg = (e: MessageEvent) => onSwOpen("agent", e.data, (o) => { // 两族类型都认，同一条只处理一次（lib/sw-inbox.ts）
       closingCollab(toContent)(); // 通知直达：先收起协作视图（恢复已读回执），再开会话
-      void hopThenOpen(d.fp, () => store.resetForMachine(), () => store.openAgent(String(d.agent))); // 别的机器发的通知：先切机器再开会话
-    };
+      void hopThenOpen(o.fp, () => store.resetForMachine(), () => store.openAgent(o.value)); // 别的机器发的通知：先切机器再开会话
+    });
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);
   }, [store, toContent]);

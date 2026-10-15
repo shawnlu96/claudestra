@@ -23,11 +23,12 @@ import { readBrowserCookie, readCsrfHeader, relayCookieNames } from "../src/lib/
 import { inviteSchemes, parseInviteLink } from "../src/lib/floka-browser-protocol/invite.js";
 import { BROWSER_NAMES, LEGACY_SESSION_COOKIE_NAME } from "../src/lib/floka-browser-protocol/names.js";
 import { BROWSER_OFF, parseBrowserProtocol, setBrowserPolicyForTest, type BrowserPolicy } from "../src/lib/floka-browser-protocol/policy.js";
-import { SwMessageInbox, notificationTag, swOpenMessage } from "../src/lib/floka-browser-protocol/sw.js";
+import { notificationTag, swOpenMessage } from "../src/lib/floka-browser-protocol/sw.js";
 import { LEGACY_SESSION_COOKIE } from "../src/lib/legacy-web.js";
 import type { Principal, PrincipalsFile } from "../src/lib/principals.js";
 import { filterMachineRequestHeaders, filterMachineResponseHeaders, pinDeviceCookie } from "../src/lib/relay-machine-path.js";
 import { dropForPeer, forwardHeaders, SET_COOKIE_SEP } from "../src/lib/relay-stream.js";
+import { createSwInbox, onSwOpen, SW_OPEN_TYPES, type SwOpen } from "../web/lib/sw-inbox";
 
 const OLD = BROWSER_NAMES.claudestra, NEW = BROWSER_NAMES.floka;
 const OBSERVE: BrowserPolicy = { receive: "observe", write: "off" };
@@ -91,6 +92,8 @@ describe("名字只定义一处：bridge / relay / web 同值", () => {
     for (const f of [OLD, NEW]) expect(sw).toContain(`{ openAgent: "${f.openAgent}", openAsk: "${f.openAsk}", tag: "${f.notificationTag}" }`);
     expect(sw).toContain(`const DEVICE_HEADER = "${OLD.deviceHeader}";`);
     expect(sw).not.toMatch(/\bcaches\b/);
+    // 页面侧收件箱（web/lib/sw-inbox.ts）的类型名与 names.ts 同值
+    expect(SW_OPEN_TYPES as Record<string, readonly string[]>).toEqual({ agent: [OLD.openAgent, NEW.openAgent], ask: [OLD.openAsk, NEW.openAsk] });
   });
 
   test("rename.browserProtocol：缺省 / 写错 = off；字符串只开接收；write 要 receive=on 才算", () => {
@@ -261,7 +264,18 @@ describe("[验收线 2] SW 旧新混搭：消息各处理一次，旧邀请链�
   const BASE_SW = execFileSync("git", ["show", "a9ce220db6645b2a49ecd2f860ec8cccf2d984df:web/public/sw.js"], { cwd: ROOT, encoding: "utf8" });
   /** 旧页面（chat.tsx / asks-store.ts 现行写法）：只认旧族 type */
   const oldPage = (msgs: Posted) => msgs.filter((d) => (d as { type?: string }).type === OLD.openAgent || (d as { type?: string }).type === OLD.openAsk).length;
-  const newPage = (msgs: Posted) => { const inbox = new SwMessageInbox(); return msgs.map((m) => inbox.accept(m)).filter(Boolean); };
+  /**
+   * 新页面 = 两个真实监听器的写法：chat.tsx `onSwOpen("agent", e.data, (o) => …hopThenOpen)`、asks-store.ts `onSwOpen("ask", e.data, (o) => enter(o.value))`。
+   * 每条消息两个监听器都收到（与 navigator.serviceWorker 的 message 事件相同）
+   */
+  const newPage = (msgs: Posted) => {
+    const handled: SwOpen[] = [];
+    for (const data of msgs) {
+      onSwOpen("agent", data, (o) => handled.push(o));
+      onSwOpen("ask", data, (o) => handled.push(o));
+    }
+    return handled;
+  };
 
   test("新 SW / 旧页：proto=floka 的推送点开只发一条，旧页面处理一次；同 id 再点不重发", async () => {
     const sw = bootSw(NEW_SW);
@@ -271,7 +285,7 @@ describe("[验收线 2] SW 旧新混搭：消息各处理一次，旧邀请链�
     await sw.click();
     expect(sw.posted).toEqual([swOpenMessage({ kind: "agent", agent: "web", fp: "" }, "floka", "n1")]);
     expect(oldPage(sw.posted)).toBe(1);
-    expect(newPage(sw.posted)).toEqual([{ kind: "agent", agent: "web", fp: "" }]);
+    expect(newPage(sw.posted)).toEqual([{ kind: "agent", value: "web", fp: "" }]);
   });
 
   test("旧 SW / 新页：基线 sw.js 发的旧消息，新页面处理一次（重复投递去重）", async () => {
@@ -279,8 +293,34 @@ describe("[验收线 2] SW 旧新混搭：消息各处理一次，旧邀请链�
     await sw.push({ title: "t", ask: "a1", agent: "web", fp: "" });
     await sw.click();
     expect(sw.posted).toEqual([{ type: OLD.openAsk, ask: "a1", fp: "" }]);
-    expect(newPage([...sw.posted, ...sw.posted])).toEqual([{ kind: "ask", ask: "a1", fp: "" }]);
+    expect(newPage([...sw.posted, ...sw.posted])).toEqual([{ kind: "ask", value: "a1", fp: "" }]);
     expect(oldPage(sw.posted)).toBe(1);
+  });
+
+  test("页面收件箱：只发新族 type 的消息也认；同 id 只处理一次；agent / ask 互不吞；无关消息不理", () => {
+    const msgs = [
+      { type: NEW.openAgent, agent: "solo", fp: "" },
+      { type: OLD.openAgent, alias: NEW.openAgent, agent: "dup", fp: "", id: "n9" },
+      { type: NEW.openAgent, agent: "dup", fp: "", id: "n9" },
+      { type: OLD.openAsk, ask: "solo", fp: "" }, // 同一个值、不同 kind：ask 监听器照处理
+      { type: "other", agent: "x" }, { type: OLD.openAgent }, null, "str",
+    ];
+    expect(newPage(msgs)).toEqual([
+      { kind: "agent", value: "solo", fp: "" }, { kind: "agent", value: "dup", fp: "" }, { kind: "ask", value: "solo", fp: "" },
+    ]);
+  });
+
+  test("页面收件箱：没 id 的同一条 2 秒内只处理一次，超过 2 秒再来照常处理；换机器（fp 不同）不算同一条", () => {
+    let t = 1_000;
+    const inbox = createSwInbox("agent", () => t);
+    const m = { type: OLD.openAgent, agent: "web", fp: "" };
+    expect(inbox(m)).toEqual({ kind: "agent", value: "web", fp: "" });
+    t += 1_500;
+    expect(inbox(m)).toBeNull();
+    expect(inbox({ ...m, fp: "aaaa-bbbb-cccc-dddd" })).not.toBeNull();
+    t += 2_001; // 距第一次 3.5 秒
+    expect(inbox(m)).toEqual({ kind: "agent", value: "web", fp: "" });
+    expect(createSwInbox("ask", () => t)(m)).toBeNull(); // agent 消息进 ask 收件箱不算
   });
 
   test("不带 proto 的推送：新 SW 的通知与消息与基线 SW 逐项相同", async () => {
