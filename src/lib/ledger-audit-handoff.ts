@@ -75,16 +75,18 @@ function verdict(ev: LedgerEvent, events: readonly LedgerEvent[], pr: HandoffPrF
 }
 
 /**
- * 交接卡的 ship_stalled；返回 false = 不是交接卡，调用方照原规则判。parked = 冻结 / 列车排队（与原规则同口径：不报、keep 住）。
+ * 交接卡的 ship_stalled；返回 false = 不是交接卡，调用方照原规则判。与原规则同口径：parked = 冻结 / 列车排队，不报、keep 住；
+ * cleared = 最近一次解冻 / 依赖放行 / 列车空出，计时从它与交接口径起点里晚的那个算（缓冲期里同样 keep，不先 resolve 再重发）。
  */
 export function handoffStall(t: { task: LedgerTask; events: readonly LedgerEvent[]; stageSince: number }, pr: HandoffPrFact | null | undefined,
-  o: { mergeStallMs: number; parked: boolean; now: number }, out: Out): boolean {
+  o: { mergeStallMs: number; parked: boolean; cleared: number; now: number }, out: Out): boolean {
   const ev = handoffEvent(t.events);
   if (!ev) return false;
   const { task } = t, keyParts = [task.id, task.stage, t.stageSince, "handoff", ev.seq];
   const v = verdict(ev, t.events, pr, o.mergeStallMs, task.pr ?? "PR", o.now);
-  if (o.parked || o.now - v.since <= v.limit) { out.keep("ship_stalled", keyParts); return true; }
-  out.emit({ rule: "ship_stalled", taskId: task.id, since: v.since, keyParts, detail: `${task.id} ${v.detail}`, suggestion: v.suggestion });
+  const since = Math.max(v.since, o.cleared);
+  if (o.parked || o.now - since <= v.limit) { out.keep("ship_stalled", keyParts); return true; }
+  out.emit({ rule: "ship_stalled", taskId: task.id, since, keyParts, detail: `${task.id} ${v.detail}`, suggestion: v.suggestion });
   return true;
 }
 

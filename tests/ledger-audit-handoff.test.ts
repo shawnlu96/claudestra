@@ -85,6 +85,21 @@ describe("AUDH2-1 交接后巡检", () => {
     }
   });
 
+  test("验收追加 6：①PR OPEN、交接 24 小时、queueFrozen → 不报；②PR MERGED 60 分钟、5 分钟前解冻 → 缓冲期内不报；两种都 keep 同一 key", () => {
+    const frozen = snap([card(NOW - 24 * 60 * MIN, true)], open, { queueFrozen: true });
+    expect(rules(frozen)).toEqual([]);
+    expect(kept(frozen)).toBe(true);
+    const t = card(NOW - 2 * 60 * MIN, true), mergedHour = { ...merged, mergedAt: NOW - 60 * MIN };
+    const buffer = snap([t], mergedHour, { unfrozenAt: NOW - 5 * MIN });
+    expect(rules(buffer)).toEqual([]);
+    expect(kept(buffer)).toBe(true);
+    // 缓冲期过了照报，且就是缓冲期里 keep 的那个 key（不重发新 key）
+    const key = run(buffer).keep.find((k) => k.includes("|handoff|"))!;
+    const after = rules(snap([t], mergedHour, { unfrozenAt: NOW - 5 * MIN }), NOW + 26 * MIN);
+    expect(after.map((f) => f.key)).toEqual([key]);
+    expect(after[0]!.suggestion).toContain("需要部署");
+  });
+
   test("审查 P1：只有合进 main、head 对得上、本机 main 证实含合并提交才提示部署；证不了只提示核查", () => {
     const t = card(NOW - 2 * 60 * MIN, true);
     for (const [pr, why] of [[{ ...merged, base: "release" }, "合进的是 release"], [{ ...merged, base: null }, "读不出的分支"],
