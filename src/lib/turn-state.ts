@@ -9,6 +9,7 @@ import { controlFor } from "./runtimes/index.js";
 import { CC_BUSY_RE, paneIdleVerdict, probeTuiContract } from "./tmux-helper.js";
 import { inputBox } from "./input-box.js";
 import { paneTail } from "./pane-tail.js";
+import { piStuckThinkingIdle } from "./pi-stuck-thinking.js";
 export { inputBox };
 
 type MainTurn = "busy" | "idle" | "compacting" | "unknown";
@@ -98,7 +99,7 @@ function mainTurn(i: TurnInput): MainTurn {
   // 压缩先于 thinking 判：回合中途的自动压缩事件态还是 thinking，手动 /compact 到 watcher 置态之间事件态是 done——
   // 这两段只有画面知道；判成 busy 的话人类消息会 C-c 掉压缩
   if (cc && i.pane !== null && paneShowsCompacting(i.pane)) return "compacting";
-  if (i.status === "thinking") return cc && stuckThinkingIdle(i) ? "idle" : "busy";
+  if (i.status === "thinking") return (cc ? stuckThinkingIdle(i) : i.runtime === "pi" && piStuckThinkingIdle(i)) ? "idle" : "busy";
   // Codex / Pi 的忙闲靠 hook 上报；它们的窗口套 CC 的屏幕正则会误命中（Pi 恒判忙），只看事件态
   if (!cc) return "idle";
   if (i.pane === null) return "unknown";
@@ -119,7 +120,7 @@ export const STUCK_THINKING_QUIET_MS = 8_000;
 /**
  * 事件态卡在 thinking（从终端打断不发 Stop、回合结束后又被点亮）而画面明确空闲：以画面为准。
  * 条件全要：相隔约 1 秒的两帧都明确空闲，且这段时间足够安静。压缩中、重试中、认不出画面一律不算，保持判忙。
- * 只对 CC（画面判据）有效，Codex / Pi 的忙闲只看事件态。单测 tests/turn-state.test.ts。
+ * 只对 CC（画面判据）有效；Pi 走自己的画面判据（lib/pi-stuck-thinking.ts），Codex 只看事件态。单测 tests/turn-state.test.ts。
  */
 function stuckThinkingIdle(i: Pick<TurnInput, "pane" | "paneAgain" | "quietMs">): boolean {
   return paneClearlyIdle(i.pane) && paneClearlyIdle(i.paneAgain) && (i.quietMs ?? 0) >= STUCK_THINKING_QUIET_MS;
