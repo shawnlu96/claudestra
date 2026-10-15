@@ -10,6 +10,7 @@ import { teamBodyTransport, type TeamBodyTransport } from "@/lib/api/shared-ledg
 import { fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
 import { localProjectOf } from "@/lib/collab-source-binding";
 import { rememberDetailTarget } from "./detail-pause-target";
+import { markHomeRead } from "./detail-home-read";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
@@ -259,6 +260,17 @@ export function homeCardOf(got: Pick<Got, "team" | "details">, id: string, local
   return d.tasks.find((t) => t.taskId === at.taskId)?.sourceTaskId ?? null;
 }
 
+interface HomeGood { d: TaskDetail; at: number; local: string; card: string }
+/** 主场本机卡读本机详情失败、之前读成功过：返回上次本机详情的副本挂过期标记，仍按主场本机走（homeOnly 空集、真实卡号照旧登记） */
+function keptHome(last: HomeGood, details: WeakSet<TaskDetail>, e: Error): TaskDetail {
+  console.warn(`[team] 主场本机读详情失败，保留上次本机详情：${e.message}`);
+  const kept: TaskDetail = { ...last.d };
+  rememberDetailTarget(kept, last.local, last.card);
+  details.add(kept);
+  markHomeRead(kept, { kind: "stale", at: last.at });
+  return kept;
+}
+
 /**
  * 主场本机卡（TEAMVIS0）的本机那一半：读本机台账详情、订本机 /events、筛执行者此刻动作。
  * 没读过主场本机卡就什么都不订，非主场请求边界不变。
@@ -271,6 +283,8 @@ function homeMirror(project: string) {
   let homeProject: string | null = null;
   /** 主场本机卡上次读本机台账失败、退回了中心占位：下一轮轮询补一次刷新 */
   let stale = false;
+  /** UXCARD3：good = 按团队卡号记上次成功的本机详情（同卡刷新读失败返回它、标过期）；failed = 从没读成功、退回的中心详情 */
+  const good = new Map<string, HomeGood>(), failed = new WeakSet<TaskDetail>();
   /** 读过的主场本机卡上的执行者 / PM（前端会话名）：本机 /events 里只有它们的动作进 acts，别的本机 agent 不借给团队视图 */
   const agents = new Set<string>();
   /** 本机流里所有 agent 的此刻动作（只在内存，不外给）：执行者身份要等本机详情返回才定，详情在路上时先到的动作留着，身份定了再筛 */
@@ -302,14 +316,18 @@ function homeMirror(project: string) {
       const out: TaskDetail = { ...own, task: { ...own.task, id, itemId: d.task.itemId } };
       rememberDetailTarget(out, local, card);
       details.add(out);
+      good.set(id, { d: out, at: Date.now(), local, card });
       for (const n of [own.task.agent, own.task.pm]) { const b = bareAgent(n); if (b) agents.add(b); }
       syncActs(); // 详情返回前就到了的执行者动作，此刻放出来
       stale = false;
       return out;
     } catch (e) {
       if (signal.aborted) throw e;
-      console.warn(`[team] 主场本机读详情失败，按中心详情显示：${(e as Error).message}`);
       stale = true;
+      const last = good.get(id);
+      if (last) return keptHome(last, details, e as Error);
+      console.warn(`[team] 主场本机读详情失败，按中心详情显示：${(e as Error).message}`);
+      failed.add(d);
       return d;
     }
   };
@@ -344,6 +362,8 @@ function homeMirror(project: string) {
 
   return {
     homeOnlyOf: (d: TaskDetail) => (details.has(d) ? NONE : HOME_ONLY),
+    /** 这份中心详情是主场本机读失败退回来的 */
+    failed: (d: TaskDetail) => failed.has(d),
     homeActions: {
       subscribe: (cb: () => void) => { actSubs.add(cb); return () => { actSubs.delete(cb); }; },
       get: () => acts,
@@ -392,7 +412,9 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       // 非主场卡：读中心正文（主场传上来的脱敏原文）；还没开卡的计划节点没有正文可读，按同步中
       const at = got.team.index.get(id);
       const load = at?.taskId ? await body.load(at.featureId, at.taskId, signal) : { status: "syncing" as const };
-      return teamTaskDetail(got.team, id, now, load, localInstance)!;
+      const out = teamTaskDetail(got.team, id, now, load, localInstance)!;
+      if (home.failed(d)) markHomeRead(out, { kind: "failed" });
+      return out;
     },
     follow: async ({ signal, onOpen, onEvent }: FollowOpts) => {
       let seq = r.st.last?.list.serverSeq ?? null;

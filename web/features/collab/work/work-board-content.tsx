@@ -84,6 +84,8 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, lo
   // 机器名原样，只有本机看板的 local 写「本机」；团队看板的键已由 team-work-merge.ts 命名
   function machine(m: string) { return t(team ? m : localMachine(m)); }
   const local = team ? null : board as WorkBoard | null, shared = team ? board as TeamWorkBoard | null : null;
+  // 老卡折叠：本机板 = /work 的 legacy；团队板 = 主场本机、本机判老卡的团队行（team-work-merge.ts），同一处、同一写法
+  const legacy = (local ?? shared)?.legacy;
   const num = (key: string) => !board || loading ? <span className={v.skel} aria-hidden /> : counts[key as keyof typeof counts];
   return <div className={s.board} data-work-board={team ? 'team' : 'local'}>
     <div className={s.summary}>
@@ -103,9 +105,9 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, lo
         {board.todo[group].map((row: Row) => rowView(row, key))}</div>)}</> : cols![key as Col].length ?
         cols![key as Col].map((row: Row) => rowView(row, key)) : <div className={s.empty}>{t('暂无')}</div>}
     </section>)}</div>
-    {!!local?.legacy?.length && <details className={s.legacy}>
-      <summary className={s.group}><Icon kind="chevron" />{t('老卡')} · {local.legacyTotal ?? local.legacy.length}</summary>
-      {local.legacy.map(row => <button type="button" className={s.row} key={row.taskId} onClick={() => onTask(row.taskId)}>
+    {!!legacy?.length && <details className={s.legacy}>
+      <summary className={s.group}><Icon kind="chevron" />{t('老卡')} · {local?.legacyTotal ?? legacy.length}</summary>
+      {legacy.map(row => <button type="button" className={s.row} key={row.taskId} onClick={() => onTask(row.taskId)}>
         <div className={s.title}><span className={s.key}>{row.taskId}</span>{row.title}</div>
         <div className={s.meta}>{t(stageWord(row.stage))}</div>
       </button>)}

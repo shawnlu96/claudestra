@@ -67,10 +67,11 @@ function project(home: LedgerOverview): { list: FeatureList; detail: FeatureDeta
 
 const row = (id: string, patch: Partial<WorkRow>): WorkRow => ({ taskId: id, featureId: "F1", nodeKey: id, title: `${id} 本机`, who: null, machine: "local",
   step: "write", round: 1, since: NOW - 25 * MIN, normalMinutes: 60, remainingMinutes: 35, overMinutes: 0, reason: null, code: null, estimate: "", ...patch });
-const localBoard: WorkBoard = { now: NOW, asOfSeq: 1, machines: { local: 2 }, completionHours: 2, availableSlots: 2,
+const BOARD: WorkBoard = { now: NOW, asOfSeq: 1, machines: { local: 2 }, completionHours: 2, availableSlots: 2,
   working: [row("B1", { who: "agent-dev-b1" }), row("R1", { who: "agent-rv-1", step: "review", round: 2, since: NOW - 10 * MIN })],
   waiting: [row("M1", { who: "agent-dev-m1", step: "merge", reason: "合并排队：前面是 X9", code: "merge_queue" })], todo: { ready: [], blocked: [] } };
 
+let localBoard: WorkBoard = BOARD;
 /** 本机 shared-projects 快照：HOME 这台是 peer-mac（本机实例换成别的时才用得上） */
 let localInstance = "";
 const calls: string[] = [];
@@ -141,7 +142,7 @@ async function workTab(identity: Identity) {
   await tick(300);
   // 可见文字 = textContent（title 属性不在里面，实例 id 只放那里）
   const shown = () => board()?.textContent ?? "";
-  return { shown, column: (l: string) => column(l)?.textContent ?? "", work: () => calls.filter((c) => /\/work$/.test(c)),
+  return { shown, column: (l: string) => column(l)?.textContent ?? "", host, work: () => calls.filter((c) => /\/work$/.test(c)),
     unmount: async () => { await React.act(async () => root.unmount()); host.remove(); } };
 }
 
@@ -174,4 +175,21 @@ test("[验收线 2] 团队键里没有本机实例：同样不请求本机 /work
   expect(v.work()).toEqual([]);
   expect(HEX.test(v.shown())).toBe(false);
   await v.unmount();
+});
+
+test("[验收线 2] UXCARD3 本机判老卡的主场本机卡（团队行在审查）：团队板在干活栏没有它，在「老卡 · 1」折叠里，在干活计数不含它", async () => {
+  localBoard = { ...BOARD, working: [BOARD.working[0]!], legacy: [{ taskId: "R1", title: "R1 本机", stage: "review" }], legacyTotal: 1 };
+  try {
+    const v = await workTab({ ...BASE, homeInstanceId: HOME });
+    await until(() => v.shown().includes("老卡"), "legacy fold", v.shown);
+    expect(v.column("在干活")).not.toContain("R1");
+    expect(v.column("在干活")).toContain("B1");
+    const fold = v.host.querySelector("details");
+    expect(fold?.querySelector("summary")?.textContent).toBe("老卡 · 1");
+    expect(fold?.textContent).toContain("R1");
+    expect(fold?.textContent).toContain("审查");
+    const tab = Array.from(v.host.querySelectorAll("[role=tab]")).find((x) => (x.textContent ?? "").startsWith("在干活"));
+    expect(tab?.textContent).toBe("在干活 1");
+    await v.unmount();
+  } finally { localBoard = BOARD; }
 });

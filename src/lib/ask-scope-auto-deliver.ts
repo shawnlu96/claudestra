@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getTask, listEvents } from "./ledger-store.js";
@@ -17,9 +18,10 @@ interface Candidate { askId: string; grant: ScopeGrant }
 
 function grantsFor(db: Database, task: LedgerTask): Candidate[] {
   return listEvents(db, { target: task.id }).filter((e) => e.data.op === "ask_scope_auto" && e.data.rule === ASK_SCOPE_RULE
-    && e.data.specRev === task.specRev && e.project === task.project).flatMap((e) => {
+    && e.data.specRev === task.specRev && e.project === task.project && e.target === task.id && e.actor === "system:ask-scope-auto").flatMap((e) => {
     const askId = String(e.data.askId), ask = getAsk(db, askId);
-    if (ask?.state !== "answered" || ask.extra.askScopeAuto !== true || !Array.isArray(e.data.grants)) return [];
+    if (ask?.state !== "answered" || ask.taskId !== task.id || ask.extra.askScopeAuto !== true || !Array.isArray(e.data.grants)
+      || !isDeepStrictEqual(e.data.grants, ask.extra.scopeGrants)) return [];
     return (e.data.grants as ScopeGrant[]).map((grant) => ({ askId, grant }));
   });
 }
@@ -36,7 +38,7 @@ async function proofOf(diff: ScopeDiff, task: LedgerTask, head: string, mergeBas
     const text = await objects.show(next.has(path) ? head : mergeBase, path);
     bytes += Buffer.byteLength(text);
     if (bytes > 4 * 1024 * 1024) throw new Error("本卡定义超过核对上限");
-    sources.set(path, text);
+    if (next.has(path)) sources.set(path, text);
     if (old.has(path)) {
       const prior = next.has(path) ? await objects.show(mergeBase, path) : text;
       bytes += Buffer.byteLength(prior);
@@ -70,7 +72,7 @@ async function checkCandidates(diff: ScopeDiff, task: LedgerTask, head: string, 
   return out;
 }
 
-/** Called beside SKIPAUTO1. Only verified files leave outside; the same deliver_scope event keeps every line count and verdict. */
+/** Called beside SKIPAUTO1. Keep the original file list so a later policy rollback cannot hide delivered changes. */
 export async function checkDeliveredScope(db: Database, task: LedgerTask, head: string, diff: ScopeDiff, files: ScopeFile[], policy: RecoveryPolicyPort):
   Promise<{ askScopeAuto?: { rule: string; head: string; base: string; files: CheckedFile[] } }> {
   const candidates = grantsFor(db, task).filter((c) => files.some((f) => f.path === c.grant.path));
@@ -86,12 +88,12 @@ export async function checkDeliveredScope(db: Database, task: LedgerTask, head: 
     const current = getTask(db, task.id);
     if (!current || current.specRev !== task.specRev || policy(task.project, "askScopeAuto").mode !== "on") throw new Error("核对期间规格或开关已变化");
     const active = grantsFor(db, current);
-    if (candidates.some((c) => !active.some((a) => a.askId === c.askId && a.grant.path === c.grant.path))) throw new Error("核对期间自动答已撤回");
+    if (candidates.some((c) => !active.some((a) => a.askId === c.askId && isDeepStrictEqual(a.grant, c.grant)))) throw new Error("核对期间自动答已撤回");
   } catch (e) {
     checked = candidates.map(({ askId, grant }) => ({ ...files.find((f) => f.path === grant.path)!, askId,
       kind: grant.kind, check: grant.check, granted: false, reason: (e as Error).message.slice(0, 300) }));
   }
-  const approved = new Set(checked.filter((f) => f.granted).map((f) => f.path));
-  for (let i = files.length - 1; i >= 0; i--) if (approved.has(files[i]!.path)) files.splice(i, 1);
   return { askScopeAuto: { rule: ASK_SCOPE_RULE, head, base: diff.base, files: checked } };
 }
+
+export { describeDeliveredScope } from "./ask-scope-auto-display.js";

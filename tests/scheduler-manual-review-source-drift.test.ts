@@ -15,6 +15,7 @@ import { adoptedReviewSource } from "../src/lib/scheduler-manual-review-source.j
 import { beginMergeRun, mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
 import { adopted, events, type Fx, plan, toRound2, withPr, writeMerge } from "./scheduler-manual-review-source-fixture.test.js";
+import { HANDBACK_REVIEW_TAG } from "../src/lib/pm-handback.js";
 
 let f: Fx;
 afterEach(() => f?.close());
@@ -102,7 +103,7 @@ describe("AUTOACK1: the adoption lapses with its window", () => {
     rmSync(path);
     allRefuse(f, /报告读不到/);
     f.db.query("UPDATE tasks SET stage = 'review' WHERE id = 'T1'").run();
-    expect(plan(f)).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+    expect(plan(f)).toMatchObject({ kind: "intent", action: "review", reason: expect.stringContaining(HANDBACK_REVIEW_TAG) }); // PMHAND1 11a: a pre-hand-back verdict is re-reviewed
   });
 });
 

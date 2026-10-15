@@ -46,6 +46,7 @@ import type { AdapterDeps } from "./worker-ports.js";
 import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSession, type WorkOrder } from "./worker-session.js";
 import { ghPrState } from "./scheduler-merge-handoff-tick.js";
 import { withSchedulerV2Intents } from "./scheduler-v2-intent.js";
+import { handbackReviewDir } from "./pm-handback-review-dir.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -74,7 +75,8 @@ const checkoutOf = (env: Env, taskId: string): string => reviewCheckoutDir(env.w
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
   const author = boundRef(db, task.id, "author");
-  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? lendProjectDir(env, task); // no network: a reused checkout is checked for tracked edits before any fetch
+  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? lendProjectDir(env, task)
+    ?? handbackReviewDir(env, task); // PMHAND1 9补2: own-repo card → project repoDir. no network: a reused checkout is checked for tracked edits before any fetch
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
   const checkout = checkoutOf(env, task.id), reuse = existsSync(checkout);
   const absent = task.headSHA ? await prepareReviewHead(env, task, task.headSHA, reuse ? checkout : authorDir, reuse) : null;

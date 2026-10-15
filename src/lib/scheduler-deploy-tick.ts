@@ -20,6 +20,7 @@ import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { schedulerV2Held } from "./scheduler-v2-skip-card.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { ciProofDeploy } from "./scheduler-ci-proof-gate.js";
+import { handbackCards } from "./pm-handback-verify.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /** notifyPm: the PM notice port (tests); the pass leaves it out and the project's PM is told through the bridge. */
@@ -201,6 +202,7 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
     } };
   }
   for (const [k, [project, policy]] of Object.entries(config.projects).entries()) {
+    yield* handbackCards(db, project, policy, `1/${pad(k, 4)}`, d, pace); // PMHAND1: PM 结清为 done 的部署进 verify 候选 + 样本（pm-handback-verify.ts）
     if (!policy.deploy) continue;
     const intents = db.query(`SELECT id, eventSeq FROM scheduler_intents WHERE project=? AND action='merge' AND status='submitted' ORDER BY eventSeq, id`)
       .all(project) as { id: string; eventSeq: number }[];

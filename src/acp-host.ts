@@ -27,6 +27,7 @@ import { guardScreen } from "./lib/acp/tui/guard.js";
 import { createTuiScreen, type TuiScreen } from "./lib/acp/tui/screen.js";
 import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { redactSecrets } from "./lib/redact-secrets.js";
+import { plainUserText } from "./lib/cc-own-records.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { createLineTranslator, findSessionJsonlBySessionId, sessionJsonlPath } from "./lib/session-source.js";
 import { runManagerProcess } from "./lib/run-manager.js";
@@ -211,6 +212,10 @@ log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${ada
 if (!tty) show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（${typing ? "底部输入行可直接发消息，/help 看命令" : "只看"}；连接日志在 ${hostLogFile}）`);
 else {
   tty.show(tuiHeader(agentName, sessionId, typing));
-  showReplay(tty, () => sessionJsonlPath(runtime.id, process.cwd(), sessionId) ?? findSessionJsonlBySessionId(runtime.id, sessionId), createLineTranslator(runtime.id), log);
+  showReplay(tty, {
+    path: () => sessionJsonlPath(runtime.id, process.cwd(), sessionId) ?? findSessionJsonlBySessionId(runtime.id, sessionId),
+    translate: createLineTranslator(runtime.id),
+    userText: (rec, text) => plainUserText(rec, text, runtime.id) ?? text, // 入站来源核不了：只去包装、原文照登（cc-own-records.ts）
+  }, log);
 }
 host.start();
