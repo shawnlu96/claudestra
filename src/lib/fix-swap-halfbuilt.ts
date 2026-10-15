@@ -10,7 +10,7 @@
  * record「本会清理重建」, then the old unknown; on = clear and rebuild). A manual card never heals. tests/fix-swap-halfbuilt*.test.ts.
  *
  * The kill runs in a manager child that reads the registry after this process did. It is only sent for a placeholder whose creating
- * process is dead (round-2 P1 halfbuilt-session-race): nothing can still turn that placeholder into a running session, and runKill
+ * process is dead: nothing can still turn that placeholder into a running session, and runKill
  * hands exactly such a marker to create-guard.ts clearCreateResidue (marker re-checked, recorded window id or a bare shell only).
  */
 import type { Database } from "bun:sqlite";
@@ -132,7 +132,7 @@ export async function healHalfBuilt(db: Database, ctx: WriteCtx, intent: Schedul
   const before = unbound() ? placeholderOf(db, name, deps) : null;
   if (!before) return null;
   const window = await windowVerdict(name, probeOf(db).io); deps.active();
-  // a shell window no placeholder owns is not provably this create's (P2 halfbuilt-gone: no entry and no window = nothing left)
+  // a shell window no placeholder owns is not provably this create's (no entry and no window = nothing left)
   if (window !== "gone" && (window !== "shell" || before === "absent")) return null;
   const now = ctx.now ?? Date.now();
   const sample = { project: task.project, key: "authorRebuild" as const, taskId: task.id, head: intent.head, action: "halfbuilt-rebuild" as const, nth,

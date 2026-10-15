@@ -199,7 +199,7 @@ async function resumeAfterReclaim(db: Database, ctx: WriteCtx, id: string, conte
 }
 
 /**
- * The create / bind edge of a resumed reclaim (P1 resume-writer-race / resume-policy-race): this intent wrote no reclaim of its own,
+ * The create / bind edge of a resumed reclaim: this intent wrote no reclaim of its own,
  * so the local author it builds stands on the earlier reclaim alone, and every fact of it — the switch at on, the auto card, the ended
  * lease that reclaim ended, the earlier intent settled with no replacement, no pooled / claimed / unknown write order — is read again
  * synchronously right before the create and before the bind. undefined = the intent reclaimed for itself (nothing to resume).

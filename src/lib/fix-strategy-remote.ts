@@ -131,8 +131,8 @@ const NO_STOP_GATE: SwapGate = () => ({ halted: "drift", reason: "缺旧作者�
  * sampled once per card + head; the judgment itself is fix-tree-proof.ts's. The returned gate is `base` plus, once a tree was taken
  * over, the takeover's own permission read again synchronously at the create and bind edges: the switch still on and no live
  * session but this intent's own author in the tree (the tree's proof was taken before awaits that can outlive it). The takeover is
- * journaled on the intent (`tree-adopt`), so a later tick that skips the tree open (creating already claimed) still re-proves it
- * (round-2 P1 tree-adoption-resume); `bound` applies it to a created session right before the caller binds it (tree-final-proof).
+ * journaled on the intent (`tree-adopt`), so a later tick that skips the tree open (creating already claimed) still re-proves it;
+ * `bound` applies it to a created session right before the caller binds it.
  */
 export function withForeignTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, deps: ConvergenceLifecycle,
   base?: SwapGate): { deps: ConvergenceLifecycle; gate?: SwapGate; adoption(): SwapHalt | null; bound<T extends object>(ref: T): T | { wait: string; tree: true } } {
