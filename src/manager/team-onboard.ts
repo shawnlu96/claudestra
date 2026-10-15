@@ -82,7 +82,8 @@ function schedulerItem(f: OnboardFacts, flags: OnboardFlags): { item: OnboardIte
   // supervise:false：刚接入时 agent 监护先不管这个项目里已经在干活的 agent（PM 缺省定）；以后要开改 scheduler.json
   const segment: NewProjectSegment = { maxActiveWorkers: max, requiredChecks: flags.checks, repoDir: f.dir, supervise: false,
     ...(wanted(f, flags).localMerge ? { localMerge: true } : {}) };
-  return { item: { key: "scheduler", status: "todo", text: `新增调度项目段：${JSON.stringify(segment)}` }, segment };
+  const text = `新增调度项目段：${segment.localMerge ? "本地合并，" : ""}检查 ${flags.checks.join(" / ")}，并发 ${max}，agent 监护先关`;
+  return { item: { key: "scheduler", status: "todo", text }, segment };
 }
 
 function teamItem(f: OnboardFacts, flags: OnboardFlags): { item: OnboardItem; draft: ProposalDraft | null } {
@@ -98,7 +99,7 @@ function teamItem(f: OnboardFacts, flags: OnboardFlags): { item: OnboardItem; dr
 }
 
 export function planOnboard(f: OnboardFacts, flags: OnboardFlags): OnboardPlan {
-  const project: OnboardItem = { key: "project", status: f.dir ? "ok" : "blocked", text: f.dir ? `目录 ${f.dir}` : "projects.json 里没有目录" };
+  const project: OnboardItem = { key: "project", status: f.dir ? "ok" : "blocked", text: f.dir ?? "projects.json 里没有目录" };
   const sched = schedulerItem(f, flags);
   const team = teamItem(f, flags);
   return { items: [project, gitItem(f, flags), sched.item, team.item], segment: sched.segment, draft: team.draft };
