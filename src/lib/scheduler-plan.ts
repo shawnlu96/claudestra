@@ -32,7 +32,7 @@ import { ciProofAdmits } from "./scheduler-ci-proof-gate.js";
 import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./review-source-proof.js";
 import { ownerFreshStep } from "./scheduler-ui-owner-fresh.js";
 import { fixSelfHeal } from "./scheduler-fix-selfheal.js";
-import { handbackReviewDispatch, handbackSnapshot, reviewBeforeHandback } from "./pm-handback.js";
+import { handbackReview } from "./pm-handback.js";
 
 export interface WorkerRef {
   agent: string;
@@ -318,12 +318,13 @@ function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
 
 function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const found = epochReviewFacts(s);
+  // PMHAND1 11a：PM 交回前手派审查的结论（含旧式无结构结论）不算本轮，对当前 head 照常派审（pm-handback.ts）
+  const back = handbackReview(s, node.id, found, (f) => adoptedReview(s, f) || centerReviewed(s, f) || reviewDispatchProof(s, f), (h) => reviewDispatch(h, node));
+  if (back) return back;
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
   const { facts: f, downgrade } = convergeReview(s.events, found.facts, s.fixDiff);
   const adopted = adoptedReview(s, f) || centerReviewed(s, f); // AUTOACK1 adopted manual verdict / S2F9 central center review: no home proof / binding
-  // PMHAND1 11a：PM 交回前手派审查的结论不算本轮，对当前 head 照常派审（pm-handback.ts）
-  if (!adopted && reviewBeforeHandback(s.events, f.eventSeq) && !reviewDispatchProof(s, f)) return handbackReviewDispatch(reviewDispatch(handbackSnapshot(s, node.id), node));
   if (!adopted && !reviewDispatchProof(s, f)) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
   const transition = s.intents.filter((i) => i.node === node.id && i.causalSeq >= f.eventSeq &&
     i.action === "stage").at(-1);

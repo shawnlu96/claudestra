@@ -33,12 +33,13 @@ function jobs() {
 }
 
 /** The scheduler's manager child: `ledger verify` goes through the real write path and its scheduler gate (facts collection skipped). */
-function deps(db: Database, j: DeployJobs, verify: string[], o: { now?: number; dry?: "pass" | "fail"; formal?: "pass" | "fail" } = {}) {
+function deps(db: Database, j: DeployJobs, verify: string[],
+  o: { now?: number; dry?: "pass" | "fail"; formal?: "pass" | "fail"; duringDry?: () => void } = {}) {
   const now = () => o.now ?? 1000, ledger = ledgerAs(db, "scheduler", now);
   const manager = async (...args: string[]) => {
     if (args[1] !== "verify") return ledger(...args);
     verify.push(args.slice(2).join(" "));
-    if (args.includes("--dry-run")) return { ok: true, result: o.dry ?? "pass" };
+    if (args.includes("--dry-run")) { o.duringDry?.(); return { ok: true, result: o.dry ?? "pass" }; }
     if (!schedulerCanVerify(db, args[2]!, args[4])) return { ok: false, code: "forbidden", error: "调度服务只可核对自己部署过的本卡" };
     const result = o.formal ?? "pass"; // the formal run collects the facts again: it may turn red after a green dry-run
     const r = recordVerify(db, { actor: "scheduler", now: now(), dedupKey: args[4] }, { taskId: args[2]!, result,
@@ -150,5 +151,18 @@ describe("[验收线 5] verifyAfterResolve", () => {
       expect(notes(f, "recovery_observe")).toEqual([]);
       expect(stage(f)).toBe("live");
     } finally { f.close(); }
+  });
+
+  test("on: the key switched to off / observe while the dry-run ran → no recorded verify (observe: one note)", async () => {
+    for (const [i, to] of (["off", "observe"] as const).entries()) {
+      policy("on");
+      const f = await resolvedCard("done"), verify: string[] = [];
+      try {
+        await deployTick(f.db, config, deps(f.db, jobs().j, verify, { now: 200_000_000 * (i + 1), duringDry: () => policy(to) }));
+        expect({ to, verify, stage: stage(f) }).toEqual({ to, verify: ["T9 --dry-run"], stage: "live" });
+        expect(listEvents(f.db, { project: "p", target: "T9" }).filter((e) => e.kind === "verify")).toEqual([]);
+        expect(notes(f, "recovery_observe").map((e) => e.data.mechanism)).toEqual(to === "observe" ? ["verifyAfterResolve"] : []);
+      } finally { f.close(); }
+    }
   });
 });

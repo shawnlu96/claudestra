@@ -79,6 +79,19 @@ describe("[验收线 3] review verdicts before / after the PM hand-back", () => 
     expect(planScheduler(after)).toMatchObject({ kind: "wait", code: "in_flight" });
   });
 
+  test("a legacy hand-written verdict (no structured head / session / findings) older than the hand-back: dispatch, not review_invalid", () => {
+    const legacy = (seq: number) => event(seq, "review", { round: 1, verdict: "pass", p0: 0, p1: 0, p2: 0, path: "reviews/T1-r1/manual.md" }, "agent-pm");
+    const d = planScheduler(snapshot(legacy(20), handback(25)));
+    expect(d).toMatchObject({ kind: "intent", action: "review", recipient: reviewer.agent });
+    expect(d.kind === "intent" && d.reason.startsWith(HANDBACK_REVIEW_TAG)).toBe(true);
+    // a structured hand-dispatched verdict by another reviewer is not the card's prior reviewer either: no reviewer_replaced
+    const other = event(20, "review", { ...review(20).data, reviewer: "agent-hand", reviewerSessionId: "session-hand" }, "agent-pm");
+    expect(planScheduler(snapshot(other, handback(25)))).toMatchObject({ kind: "intent", action: "review", recipient: reviewer.agent });
+    // written after the hand-back, or with no hand-back at all: review_invalid as before
+    expect(planScheduler(snapshot(handback(18), legacy(20)))).toMatchObject({ kind: "escalate", code: "review_invalid" });
+    expect(planScheduler(snapshot(legacy(20)))).toMatchObject({ kind: "escalate", code: "review_invalid" });
+  });
+
   test("strict seq order: a verdict equal to or after the hand-back's seq is this round's", () => {
     const evs = [handback(25)];
     expect([24, 25, 26].map((seq) => reviewBeforeHandback(evs, seq))).toEqual([true, false, false]);

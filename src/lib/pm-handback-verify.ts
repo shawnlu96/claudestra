@@ -3,7 +3,8 @@
  * - the 11a / 11b sample notes found since the last tick (pm-handback-sample.ts);
  * - 12 verifyAfterResolve: a deploy run a PM / master / owner resolved as `done` whose card is live on the reviewed head and the
  *   run's spec (RESOLVED_DONE_SQL). on: the same checklist as driveVerify, dry-run first and only a pass is recorded (never a
- *   failure, nothing waived; the gate is schedulerCanVerify); observe: one note "would verify"; off: no card at all.
+ *   failure, nothing waived; the gate is schedulerCanVerify); observe: one note "would verify"; off: no card at all. The mode is
+ *   read again after the dry-run, right before the recorded verify: a key switched to off / observe meanwhile stops it.
  * Each recorded try has its own dedup key (`deploy-verify:<intent>:<try>`): the formal `ledger verify` collects the facts again, so a
  * check that turns red between the dry-run and it is written as that try's result but never takes a key a later try needs; tries
  * go on while the card is live, and a pass (or a PM's own `ledger verify`) moves it on and ends them.
@@ -59,15 +60,19 @@ async function driveResolvedVerify(d: DeployTickDeps, db: Database, run: DeployR
   const at = d.now();
   lastTry.set(run.intentId, at);
   const head = getTask(db, run.taskId)?.headSHA ?? null;
-  const mode = verifyAfterResolveMode(run.project, policy);
-  if (mode === "observe") {
-    recordObserved(db, { project: run.project, mechanism: VERIFY_AFTER_RESOLVE, target: run.taskId, actionKey: `verify:${run.intentId}`,
-      action: `对人工结清为 done 的部署 ${run.intentId} 跑完成检查（先 dry-run，只记通过）`, data: { intentId: run.intentId, head } }, d.now());
-    return;
-  }
-  if (mode !== "on") return;
+  /** The mode at an action boundary: on goes ahead; observe records the would-be verify once; off does nothing. */
+  const allowed = (): boolean => {
+    const mode = verifyAfterResolveMode(run.project, policy);
+    if (mode === "observe") {
+      recordObserved(db, { project: run.project, mechanism: VERIFY_AFTER_RESOLVE, target: run.taskId, actionKey: `verify:${run.intentId}`,
+        action: `对人工结清为 done 的部署 ${run.intentId} 跑完成检查（先 dry-run，只记通过）`, data: { intentId: run.intentId, head } }, d.now());
+    }
+    return mode === "on";
+  };
+  if (!allowed()) return;
   const dry = await d.manager("ledger", "verify", run.taskId, "--dry-run");
   if (dry.ok !== true || dry.result !== "pass") return;
+  if (!allowed()) return; // a permission key: read again right before the recorded verify, the dry-run may have taken a while
   const r = await d.manager("ledger", "verify", run.taskId, "--dedup", dedupOf(run, at));
   if (r.code === "invalid" || r.code === "forbidden") throw new Error(`ledger verify ${run.taskId}: ${String(r.error)}`);
   if (r.ok !== true) { // red since the dry-run: the next try comes after RESOLVED_VERIFY_EVERY_MS, as after a red dry-run
