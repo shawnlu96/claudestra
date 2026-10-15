@@ -278,7 +278,7 @@ describe("自动卡：到顶判定读结论（验收线 1 / 7）", () => {
 });
 
 describe("manual 卡：登记新 head → peerPrHeadResume 交回自动（验收线 2–8）", () => {
-  test("on：merge + queued 请求 + 最近 pass + 后继提交：结清旧请求、登记、交回 auto、派增量审；pass 走自动合并绑新 head；不推送（验收线 2 / 3 / 8）", async () => {
+  test("on：merge + queued 请求 + 最近 pass + 后继提交：结清、登记、交回 auto、派增量审；pass 自动合并绑新 head；不推送（验收线 2 / 3 / 8）", async () => {
     setModes("on", "on");
     const w = world();
     await requeueKey(w, "on");

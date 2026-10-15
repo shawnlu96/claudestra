@@ -97,7 +97,8 @@ async function roundsSpent(c: PeerPrCtx, card: LedgerTask): Promise<boolean> {
   if (mode === "on") return spent >= c.cfg.maxRounds;
   if (spent < c.cfg.maxRounds) {
     const r = await c.deps.manager("ledger", "scheduler-recovery-observe", card.id, "--mechanism", HEAD_REVIEW_KEY, "--action-key", `rounds:${card.round}:${(card.headSHA ?? "-").slice(0, 40)}`,
-      "--action", `第 ${card.round} 轮不判到顶（连续未解决 P1 只有 ${spent} 轮 < maxRounds ${c.cfg.maxRounds}）`, "--data", JSON.stringify({ round: card.round, spent, head: card.headSHA }));
+      "--action", `第 ${card.round} 轮不判到顶（连续未解决 P1 只有 ${spent} 轮 < maxRounds ${c.cfg.maxRounds}）`,
+      "--data", JSON.stringify({ round: card.round, spent, head: card.headSHA }));
     if (r.ok !== true) console.error(`⚠️ [peer-pr] ${card.id} 到顶判定样本没记上：${String(r.error)}`);
   }
   return old;
@@ -152,7 +153,8 @@ async function wouldResumeNotice(c: PeerPrCtx, card: LedgerTask): Promise<void> 
   });
   if (!seen) return;
   // project level: a note on the card would be a new fact, so the registry would record one more "would resume" sample
-  await noticeOnce(c, "", `resume:${card.id}:${head.slice(0, 12)}`, `[peer PR] ${card.id} 作者审查通过后又推了 ${head.slice(0, 12)}：新 head 已登记到 review（第 ${card.round} 轮），` +
+  await noticeOnce(c, "", `resume:${card.id}:${head.slice(0, 12)}`,
+    `[peer PR] ${card.id} 作者审查通过后又推了 ${head.slice(0, 12)}：新 head 已登记到 review（第 ${card.round} 轮），` +
     "本会交回 auto 走增量复审（peerPrRequeue 在 observe，没交回）。卡留在人工：请 PM 手动派审，或把 peerPrRequeue 切 on");
 }
 

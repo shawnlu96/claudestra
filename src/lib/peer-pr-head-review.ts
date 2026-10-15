@@ -95,7 +95,9 @@ export interface Registration {
 export function registrationScope(lineage: Lineage, priorSpecRev: number | null, specRev: number): Pick<Registration, "scope" | "why"> {
   if (priorSpecRev !== null && priorSpecRev !== specRev) return { scope: "full", why: "规格变了" };
   if (lineage === "successor") return { scope: "incremental", why: null };
-  return { scope: "full", why: lineage === "force" ? "新 head 不是旧 head 的后继（force-push）" : lineage === "missing" ? "增量对象缺失，读不到旧 / 新 head 的关系" : "新 head 是合 main，不是作者改动" };
+  const why = lineage === "force" ? "新 head 不是旧 head 的后继（force-push）"
+    : lineage === "missing" ? "增量对象缺失，读不到旧 / 新 head 的关系" : "新 head 是合 main，不是作者改动";
+  return { scope: "full", why };
 }
 
 /** The specRev the round that reviewed `reviewSeq` ran under (the stage event that entered it), null when unknown. */
@@ -117,7 +119,7 @@ export function writeRegistration(db: Database, ctx: WriteCtx, task: Pick<Ledger
 }
 
 /** The registration that put `head` into `round`, if this flow put it there. */
-export function registrationOf(events: readonly LedgerEvent[], round: number, head: string | null, flow?: Registration["flow"]): (Registration & { seq: number }) | null {
+function registrationOf(events: readonly LedgerEvent[], round: number, head: string | null, flow?: Registration["flow"]): (Registration & { seq: number }) | null {
   const e = events.findLast((x) => x.kind === "note" && x.data.op === HEAD_REVIEW_OP && x.data.round === round && x.data.newHead === head &&
     (flow === undefined || x.data.flow === flow));
   return e ? { ...(e.data as unknown as Registration), seq: e.seq } : null;

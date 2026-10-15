@@ -70,7 +70,8 @@ export const PEER_PR_CMDS: Record<string, CommandSpec> = {
   },
   "peer-pr-observe": {
     valued: ["head"], bools: [],
-    usage: "peer-pr-observe <task> --head <sha>（peer PR 的新 head 稳定后交给卡：fix 直接复验，review 有结论时先转 fix；manual 卡在审查通过后作者新推：登记新 head 进 review，peerPrHeadReview）",
+    usage: "peer-pr-observe <task> --head <sha>（peer PR 的新 head 稳定后交给卡：fix 直接复验，review 有结论时先转 fix；" +
+      "manual 卡在审查通过后作者新推：登记新 head 进 review，peerPrHeadReview）",
     async run(c) {
       const task = c.task(c.p.pos[1]);
       allow(c, task.project, "记 peer PR 新 head ");

@@ -234,7 +234,8 @@ export function headWrite(db: Database, ctx: WriteCtx, input: { taskId: string; 
     const r = deliver(db, { actor: `peer:${meta.peer}`, now: ctx.now }, {
       taskId: task.id, headSHA: input.head, moveFrom: "fix", evidence: `${meta.url}@${input.head}`, text: "调度器按 GitHub PR head 代记" });
     register(db, ctx, from, r.row, prior, input.lineage, settled);
-    return { task: r.row, moved: true, reason: `新 head ${input.head.slice(0, 12)} 进第 ${r.row.round} 轮审查${settled.requests.length ? `，结清请求 #${settled.requests.join("、#")}` : ""}` };
+    const cleared = settled.requests.length ? `，结清请求 #${settled.requests.join("、#")}` : "";
+    return { task: r.row, moved: true, reason: `新 head ${input.head.slice(0, 12)} 进第 ${r.row.round} 轮审查${cleared}` };
   });
 }
 
