@@ -36,7 +36,8 @@ import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus }
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
 import { liveAnswerText, liveUserText, resolveDeltaClicks, resolvePendingClicks } from "./delta-clicks";
-import { agentsSignature } from "./agents-signature";
+import { rosterPlan } from "./agents-signature";
+import { ProjectsRefresh } from "./projects-refresh";
 import { AgentListLoader } from "./agent-list-loader";
 import { INITIAL_AGENT_LIST, keepRosterOrder, type AgentListReason, type AgentListStatus } from "./agent-list-state";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
@@ -371,7 +372,10 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     }
     if (reason === "poll" || reason === "event") this.checkStreamHealth(cur);
     const explicit = reason === "action" || reason === "manual";
-    if (!explicit && agentsSignature(next) === agentsSignature(this.state.agents)) return;
+    // /projects：显式刷新、成员结构变了、或失败重试 / 低频刷新到点（projects-refresh.ts）才拉；只是忙闲变了不拉
+    const plan = rosterPlan(this.state.agents, next, explicit, this.projectsRefresh.due());
+    if (plan.projects) void this.loadProjects();
+    if (!plan.update) return;
     // v2.17.2 交互期冻结顺序(peer 补刀:pointerdown 意图捕获只覆盖「按下→click」的后半窗口,
     // 「视觉锁定→手指落下」这段更长的窗口里重排照样让手指落在错行上)。侧栏 2s 内有过触碰/滚动 →
     // 本拍只更新字段不重排,顺序等下一拍(≤15s)再应用;成员增删仍立即生效(新增排尾)。操作后的拉取不冻结。
@@ -379,7 +383,6 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       s.agents = frozen ? keepRosterOrder(s.agents, next) : next;
     });
-    void this.loadProjects();
   }
 
   /** 轮询 / 回前台节拍上的流健康检查(操作后的拉取不算一拍:「连续两拍」按 15s 粒度算)。 */
@@ -424,22 +427,25 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   /**
-   * v2.21+ project 元数据（侧栏组头的 emoji/显示名 + 管理弹窗）。失败静默——
-   * 分组渲染对 projects 缺失有兜底（组头退化为裸 id）。仅内容变化才 produce。
+   * v2.21+ project 元数据（侧栏组头的 emoji/显示名 + 管理弹窗）。失败不报错——分组渲染对 projects 缺失有兜底（组头退化为裸 id），
+   * 由 projects-refresh.ts 有界重试。仅内容变化才 produce。
    */
-  public async loadProjects() {
+  public loadProjects(): Promise<void> {
+    return this.projectsRefresh.run();
+  }
+
+  private readonly projectsRefresh = new ProjectsRefresh(async () => {
     try {
       const json = await projectsList<{ ok?: boolean; projects?: ProjectMeta[] }>();
-      if (!json.ok || !Array.isArray(json.projects)) return;
+      if (!json.ok || !Array.isArray(json.projects)) return "skip";
       const next = json.projects;
-      if (JSON.stringify(next) === JSON.stringify(this.state.projects)) return;
-      this.produce((s) => {
-        s.projects = next;
-      });
-    } catch {
-      /* 静默 */
+      if (JSON.stringify(next) !== JSON.stringify(this.state.projects)) this.produce((s) => void (s.projects = next));
+      return "ok";
+    } catch (e) {
+      // 403 之类请求方的错重试也没用；503 / 断网 / 超时才退避重试（ProjectsRefresh）
+      return e instanceof ApiError && e.status >= 400 && e.status < 500 ? "skip" : "fail";
     }
-  }
+  });
 
   // ─── 会话生命周期（新建 / kill / restart）──────────────────
 

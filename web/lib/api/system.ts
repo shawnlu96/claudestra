@@ -3,6 +3,7 @@
  * 会话清单与归档、后台任务（升级 / 全体重启）、语音转写、client-log。BFF 时代的 {data} 包装在这里还原成组件既有形状。
  */
 import { api, apiRaw, DEVICE_HEADER, type ApiError } from "./client";
+import { apiCached } from "@/lib/etag-cache";
 
 // ── 主机 / 打开目录 ──
 export interface HostInfo {
@@ -122,7 +123,7 @@ export function cronAction<T>(body: Record<string, unknown> & { action?: string;
 
 // ── projects：GET 清单；POST {action:add|edit|remove|assign, …} 委托 manager CLI ──
 export function projectsList<T>(): Promise<T> {
-  return api<T>("/projects", { timeoutMs: 10_000 });
+  return apiCached<T>("/projects", { timeoutMs: 10_000 }); // 没变回 304（lib/etag-cache.ts）
 }
 export function projectsAction<T>(body: Record<string, unknown>): Promise<T> {
   return api<T>("/projects", { method: "POST", json: body });
