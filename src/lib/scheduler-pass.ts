@@ -39,6 +39,7 @@ import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
 import { peerPrStep } from "./peer-pr-tick.js";
+import { remoteReviewStep } from "./remote-review-tick.js";
 import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.js";
 import { lendTakeoverStep } from "./lend-pr-takeover.js";
 import { takeoverGh } from "./lend-pr-takeover-gh.js";
@@ -144,7 +145,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable"); failed.push(...await priorityStallTick(db, config, { manager, active }));
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
-      if (cut("peerPr")) return done();
+      failed.push(...await remoteReviewStep(db, config, { manager, active })); if (cut("peerPr")) return done(); // 仓库方审查结论入账（RRL-1）
       // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
       const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护

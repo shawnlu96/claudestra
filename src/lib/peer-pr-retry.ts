@@ -22,6 +22,7 @@ import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-stor
 import { isRealPmRole } from "./ledger-team-config.js";
 import { appendEvent } from "./ledger-write.js";
 import type { PeerPrConfig } from "./peer-pr-config.js";
+import { P1_STEP } from "./peer-pr-message.js";
 import { peerPrOf, peerPrWrite, pushDedupKey, recordPeerPrNote, REDELIVER_PREFIX, SHA_RE } from "./peer-pr-ledger.js";
 
 export interface ReportDigest { sha256: string; bytes: number }
@@ -213,10 +214,22 @@ export const sameReport = (binding: Redelivery, text: string): boolean =>
  * The redelivered text: the normal review push (same title, head, report number, reply line, report) with its "next step" line
  * replaced by what this message is. null = the normal push no longer has that line where this expects it; nothing is sent then.
  */
-export function renderRedeliveryPush(reviewPush: string, round: number, task: Pick<LedgerTask, "stage">): string | null {
+/** Prefix of the line a P1 redelivery keeps in place of the dropped next step: whether the owner's rounds were used up then. */
+export const CAP_MARK = "复验轮次（原审查当时）：";
+function capLine(next: string): string[] {
+  const step = next.slice("下一步：".length);
+  return step === P1_STEP.cap ? [`${CAP_MARK}已到上限`] : step === P1_STEP.fix ? [`${CAP_MARK}未到上限`] : [];
+}
+
+/**
+ * The next step is replaced by 现状 (the author must not act on the old one); a P1 keeps the cap line so the receiver's strict
+ * parse (remote-review-parse.ts) books it as the original. `legacy` renders the format before the cap line, which that parser
+ * still accepts from a peer not upgraded yet; nothing sends it.
+ */
+export function renderRedeliveryPush(reviewPush: string, round: number, task: Pick<LedgerTask, "stage">, legacy = false): string | null {
   const [title, head, id, next, ...rest] = reviewPush.split("\n");
   if (!title || !id?.startsWith("报告编号：") || !next?.startsWith("下一步：")) return null;
   const state = MERGED.has(task.stage) ? "该 PR 已合并，这条不需要你做任何动作。" : "这条不要求你动作；下一步以调度器之后的消息为准。";
   return [title, `投递补发：这是第 ${round} 轮原审查报告的补发（原投递当时没有送达），不是新的审查结论；结论、head 与报告都是原审查当时的。`,
-    head, id, `现状：${state}`, ...rest].join("\n");
+    head, id, `现状：${state}`, ...(legacy ? [] : capLine(next)), ...rest].join("\n");
 }
