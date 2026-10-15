@@ -113,7 +113,7 @@ async function bounce(c: Ctx, cause: "conflict" | "ci_fail", failed: string[] = 
   if (cause === "ci_fail") {
     const db = privateMergePorts().ledger();
     // over 20 checks seen without protection: only the failed ones are carried (each is a verified required check either way)
-    const undo = db && (privateBounceChecks(db, c.run, verified) ?? privateBounceChecks(db, c.run, failed));
+    const undo = db && (privateBounceChecks(db, c.run, verified, c) ?? privateBounceChecks(db, c.run, failed, c));
     if (!undo) return toPm(c, `私仓必过检查失败（${failed.join("、").slice(0, 200)}），检查名无法记入合并退回`);
     ghFails.delete(c.run.intentId);
     note(c, "bounce-ci", `必过检查失败，退回 fix：${failed.join("、").slice(0, 200)}`);

@@ -20,6 +20,7 @@ import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { setPrivateMergePortsForTest } from "../src/lib/private-merge-gate.js";
 import { privateGh } from "../src/lib/private-merge-gh.js";
 import { privateMergeDrive, resetPrivateMergeForTest } from "../src/lib/private-merge.js";
+import { privateBounceChecks } from "../src/lib/private-merge-ledger.js";
 import { ledgerAs } from "./deploy-test-kit.js";
 
 const HEAD = "c".repeat(40), NEW_HEAD = "e".repeat(40), MERGE_SHA = "f".repeat(40), MAIN = "9".repeat(40);
@@ -460,9 +461,10 @@ describe("privateMergeNarrow kept under on", () => {
     { resource: string }[]).map((r) => r.resource);
   const narrowEvents = (db: Database) => db.query("SELECT text, data FROM events WHERE target='T1' AND json_extract(data,'$.op')='merge_private_narrow'").all() as
     { text: string; data: string }[];
-  function withGit(k: Kit, gh: FakeGh, diff: () => { code: number; stdout: string }) {
+  function withGit(k: Kit, gh: FakeGh, diff: () => { code: number; stdout: string }, merge: () => RecoveryMode = () => "on") {
     const command = ghCommand(gh);
-    setPrivateMergePortsForTest({ ...currentPorts(k), policy: (_p: string, key: RecoveryKey) => ({ mode: "on" as RecoveryMode, manualAfterMs: null, source: "config" as const }),
+    setPrivateMergePortsForTest({ ...currentPorts(k), policy: (_p: string, key: RecoveryKey) =>
+      ({ mode: key === "privateRepoMerge" ? merge() : "on" as RecoveryMode, manualAfterMs: null, source: "config" as const }),
       command: async (argv: string[]) => {
         if (argv[0] !== "git") return command(argv);
         if (argv[1] === "config") return { code: 0, stdout: `https://github.com/${REPO}.git\n`, stderr: "", timedOut: false };
@@ -499,5 +501,35 @@ describe("privateMergeNarrow kept under on", () => {
     expect(JSON.parse(ev!.data).skipped).toBe("git diff 失败（exit 128）");
     expect(leaks(ev!.text + ev!.data, false)).toBe(false);
     expect(run(k.db).phase).toBe("merged");
+  });
+
+  test("privateRepoMerge turned off while the PR's files are read: the write transaction rechecks it and writes nothing", async () => {
+    const gh = fakeGh(), k = open("on", gh);
+    let merge: RecoveryMode = "on";
+    withGit(k, gh, () => { merge = "off"; return { code: 0, stdout: "src/a.ts\0" }; }, () => merge);
+    await tick(k);
+    expect(locks(k.db)).toHaveLength(2);
+    expect(narrowEvents(k.db)).toEqual([]);
+  });
+});
+
+describe("privateBounceChecks rechecks in its own transaction (lease, switch, card)", () => {
+  const live = () => {};
+  test("on, card still at this merge and head: the run's list becomes the names read from GitHub; the undo puts it back", () => {
+    const k = open("on", fakeGh());
+    const undo = privateBounceChecks(k.db, run(k.db), ["build"], { head: HEAD, assertActive: live });
+    expect(run(k.db).requiredChecks).toBe("build");
+    undo!();
+    expect(run(k.db).requiredChecks).toBe("ci");
+  });
+  test("switch off, card off this head or PR, or the lease lost: nothing written", () => {
+    const k = open("off", fakeGh());
+    expect(privateBounceChecks(k.db, run(k.db), ["build"], { head: HEAD, assertActive: live })).toBeNull();
+    current!.close();
+    const k2 = open("on", fakeGh());
+    expect(privateBounceChecks(k2.db, run(k2.db), ["build"], { head: NEW_HEAD, assertActive: live })).toBeNull();
+    expect(privateBounceChecks(k2.db, { ...run(k2.db), prRef: `https://github.com/${REPO}/pull/13` }, ["build"], { head: HEAD, assertActive: live })).toBeNull();
+    expect(() => privateBounceChecks(k2.db, run(k2.db), ["build"], { head: HEAD, assertActive: () => { throw new Error("lease lost"); } })).toThrow("lease lost");
+    expect(run(k2.db).requiredChecks).toBe("ci");
   });
 });

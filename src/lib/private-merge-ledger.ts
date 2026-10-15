@@ -25,7 +25,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { narrowTarget, privateNarrowKey, type PrFiles } from "./scheduler-merge-handoff.js";
 import { GitStepFailed, handoffFiles } from "./scheduler-merge-handoff-tick.js";
 import type { MergeRun } from "./scheduler-merge.js";
-import { privateMergePorts } from "./private-merge-gate.js";
+import { privateMergeMode, privateMergePorts } from "./private-merge-gate.js";
 
 const OPEN_PHASES = ["ready", "updating", "await_ci", "merging"];
 
@@ -41,18 +41,33 @@ export function privateMergeTurn(db: Database, repo: string): Pick<MergeRun, "in
 const BOUNCE_PHASES = ["ready", "updating", "await_ci"];
 
 /**
- * The run's required checks become the private repository's verified ones (`names`, the ledger's 1–20 name rule) while it still has
- * not sent a merge and is at the rev the driver holds. Returns the undo (puts the old list back if the run is still that open run),
- * or null when the names or the run do not fit: the caller then goes to PM.
+ * Rechecked inside each write's own immediate transaction, before anything is written: the scheduler's lease (`assertActive`),
+ * privateRepoMerge still on, and the card still at this merge (stage merge, head = the reviewed head, same PR). False = write nothing.
  */
-export function privateBounceChecks(db: Database, run: MergeRun, names: readonly string[]): (() => void) | null {
+function stillOurs(db: Database, at: { project: string; taskId: string; head: string; pr: string }, assertActive: () => void): boolean {
+  assertActive();
+  if (privateMergeMode(at.project) !== "on") return false;
+  const task = mustTask(db, at.taskId);
+  return task.stage === "merge" && task.headSHA === at.head && task.pr === at.pr;
+}
+
+/**
+ * Just before a red-CI bounce, the run's check list becomes the names this pass read from GitHub for the reviewed head (`names`,
+ * the ledger's 1–20 name rule), so the bounce can name them for the fix; only while the run has not sent a merge and is at the rev
+ * the driver holds, and only after stillOurs. The bounce then ends the run: no merge is ever judged on this list, and the card's own
+ * merge requirements are not touched. Returns the undo (puts the old list back if the run is still that open run), or null when the
+ * names, the run or the card do not fit: the caller then goes to PM.
+ */
+export function privateBounceChecks(db: Database, run: MergeRun, names: readonly string[],
+  at: { head: string; assertActive: () => void }): (() => void) | null {
   const checks = parseRequiredChecks([...names]);
   if (!checks) return null;
   const list = checks.join(","), marks = BOUNCE_PHASES.map(() => "?").join(",");
-  const set = (to: string, from: string) => tx(db, () => db.query(`UPDATE scheduler_merges SET requiredChecks=?
-    WHERE intentId=? AND rev=? AND requiredChecks=? AND phase IN (${marks})`).run(to, run.intentId, run.rev, from, ...BOUNCE_PHASES).changes);
-  if (list !== run.requiredChecks && set(list, run.requiredChecks) !== 1) return null;
-  return () => { if (list !== run.requiredChecks) set(run.requiredChecks, list); };
+  const update = (to: string, from: string) => db.query(`UPDATE scheduler_merges SET requiredChecks=?
+    WHERE intentId=? AND rev=? AND requiredChecks=? AND phase IN (${marks})`).run(to, run.intentId, run.rev, from, ...BOUNCE_PHASES).changes;
+  const ours = { project: run.project, taskId: run.taskId, head: at.head, pr: run.prRef };
+  if (list !== run.requiredChecks && tx(db, () => stillOurs(db, ours, at.assertActive) ? update(list, run.requiredChecks) : 0) !== 1) return null;
+  return () => { if (list !== run.requiredChecks) tx(db, () => update(run.requiredChecks, list)); };
 }
 
 const NARROW_KEY = "privateMergeNarrow" as const;
@@ -70,10 +85,11 @@ async function prFiles(dir: string, pr: string, head: string, command: typeof ru
 }
 
 /** on: the card's locks down to PR ∩ fileGlobs, or one record of why not, once per (card, head), while its merge intent is open. */
-function narrowLocks(db: Database, input: { taskId: string; head: string; pr: string; files: PrFiles }, now: number): void {
+function narrowLocks(db: Database, input: { taskId: string; head: string; pr: string; files: PrFiles }, now: number,
+  assertActive: () => void): void {
   tx(db, () => {
     const task = mustTask(db, input.taskId), key = privateNarrowKey(task.id, input.head);
-    if (task.stage !== "merge" || task.headSHA !== input.head || task.pr !== input.pr || getEventByDedup(db, key)) return;
+    if (!stillOurs(db, { project: task.project, ...input }, assertActive) || getEventByDedup(db, key)) return;
     const held = cardFileLocks(db, task.id);
     const target = "refused" in input.files ? { skipped: input.files.refused } : narrowTarget(task, held, input.files, input.pr);
     const repo = prCoordinates(input.pr)?.repo.toLowerCase() ?? null;
@@ -98,7 +114,7 @@ export async function narrowPrivateOnce(db: Database, task: LedgerTask, dir: str
     assertActive();
     const files = await prFiles(dir, pr, head, command);
     assertActive();
-    if (mode === "on") return narrowLocks(db, { taskId: task.id, head, pr, files }, now());
+    if (mode === "on") return narrowLocks(db, { taskId: task.id, head, pr, files }, now(), assertActive);
     const target = "refused" in files ? { skipped: files.refused } : narrowTarget(task, cardFileLocks(db, task.id), files, pr);
     recordObserved(db, { ...note, action: "skipped" in target ? `不收窄：${target.skipped}` : `收窄 ${target.from.length} → ${target.to.length} 把`,
       data: "skipped" in target ? { head, skipped: target.skipped } : { head, from: target.from, to: target.to } }, now());
