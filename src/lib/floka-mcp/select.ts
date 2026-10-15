@@ -1,6 +1,7 @@
 /**
  * 一次启动该用哪个 MCP 服务名（纯函数，不读写文件；落盘见 store.ts，接线见 launch.ts）。
  * - 显式 MCP_NAME 永远生效（与改造前同一语义）；旧族名与从本系统启动前缀继承来的族名不算显式（explicitMcpName）。
+ *   显式的若是新族 floka，同样按会话记下（含续接），覆盖去掉后续接仍认 floka；自定义名不属于任何族，不记。
  * - 续接 / 分叉：沿用该会话记下的族，没记过的（rename.mcp 打开前就有的会话）一律旧族——不随档位变，回滚也不改。
  * - 全新会话：on 用新族，off / observe 用旧族（observe 另报 on 会用什么）。
  * - 新族而启动前不知道会话 id 的（分叉、无 id 的全新启动）：launch.ts 现取一个 id 用 --session-id 钉住再记，
@@ -66,7 +67,11 @@ function withRecord(c: McpChoice, sessionId?: string): McpChoice {
 }
 
 export function selectMcpName(i: McpSelectInput): McpChoice {
-  if (i.explicit) return { name: i.explicit, family: isMcpFamily(i.explicit) ? i.explicit : null, source: "explicit" };
+  if (i.explicit) {
+    // 显式 floka 起的也是新族工具目录：照样按会话记下（分叉的新 id 现取），去掉覆盖后续接不会掉回旧族，bridge 也据此认前缀
+    const c: McpChoice = { name: i.explicit, family: isMcpFamily(i.explicit) ? i.explicit : null, source: "explicit" };
+    return withRecord(c, i.kind === "fork" ? undefined : i.sessionId);
+  }
   if (i.mode === "on") return decide(i, "on");
   const actual = decide(i, "off");
   return i.mode === "observe" ? { ...actual, would: decide(i, "on").family ?? undefined } : actual;

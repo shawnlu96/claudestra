@@ -91,7 +91,7 @@ describe("[验收线 1] 新 / 旧 / 恢复会话的命名族", () => {
     expect(o.recordSession).toBeUndefined();
   });
 
-  test("显式 MCP_NAME 在三个档位都生效，且不碰会话记录", () => {
+  test("显式自定义 MCP_NAME 在三个档位都生效，且不碰会话记录", () => {
     for (const mode of ["off", "observe", "on"] as const) {
       const c = sel({ mode, explicit: "myorch", sessionId: S1, kind: "resume", stored: "floka" });
       expect(c).toEqual({ name: "myorch", family: null, source: "explicit" });
@@ -104,6 +104,25 @@ describe("[验收线 1] 新 / 旧 / 恢复会话的命名族", () => {
     expect(explicitMcpName({ ...AGENT_ENV, MCP_NAME: "floka", MCP_NAME_SOURCE: "family" })).toBeNull(); // 新族会话前缀继承来的
     expect(explicitMcpName({ MCP_NAME: "claudestra", MCP_NAME_SOURCE: "explicit" })).toBe("claudestra"); // 钉住族名
     expect(explicitMcpName({ MCP_NAME: " ", MCP_NAME_SOURCE: "explicit" })).toBeNull();
+  });
+
+  test("复现 explicit-floka-family-unrecorded：显式 floka 的新 / 无 id / 分叉 / 续接会话都记成 floka，去掉覆盖后续接仍是 floka", () => {
+    for (const mode of ["off", "observe", "on"] as const) {
+      rmSync(join(root, "fam"), { recursive: true, force: true });
+      const env: Record<string, string | undefined> = { MCP_NAME: "floka" };
+      const d = deps({ v: mode }, env, [], [S2, S3]);
+      expect(planMcpLaunch({ agent: "a1", sessionId: S1 }, d)).toMatchObject({ name: "floka", source: "explicit" });
+      const noId = planMcpLaunch({ agent: "master" }, d);
+      expect(noId).toMatchObject({ name: "floka", source: "explicit", assignedSessionId: S2 });
+      expect(mcpSessionIdArgs(noId)).toEqual(["--session-id", S2]);
+      expect(planMcpLaunch({ agent: "a1", resumeId: S1, forkSession: true }, d)).toMatchObject({ name: "floka", assignedSessionId: S3 });
+      expect(hasFamilyRecords(join(root, "fam"))).toBe(true); // bridge 由此认 floka 前缀
+      delete env.MCP_NAME; // 临时覆盖去掉
+      for (const id of [S1, S2, S3]) expect(planMcpLaunch({ agent: "a1", resumeId: id }, d)).toMatchObject({ name: "floka", source: "session" });
+    }
+    const legacy = deps({ v: "on" }, { MCP_NAME: "floka" });
+    planMcpLaunch({ agent: "a1", resumeId: "44444444-4444-4444-8444-444444444444" }, legacy); // 显式 floka 续接旧会话：本次工具目录是 floka，也记下
+    expect(readSessionFamily("44444444-4444-4444-8444-444444444444", join(root, "fam"))).toBe("floka");
   });
 
   test("会话 id 启动前未知（无 id 全新 / 分叉）：现取 id 用 --session-id 钉住，记录只绑在那个会话上", () => {
