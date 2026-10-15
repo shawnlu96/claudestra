@@ -8,6 +8,7 @@
  * docs/architecture/observation-plan.md；tests/observation-plan*.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { closeObservationTodos } from "./pm-todo-observation.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { acquireLock, type LockHandle } from "./file-lock.js";
@@ -77,6 +78,9 @@ export interface ObservationPlan {
   judge?: PlanJudge;
   /** 转正成功的一行摘要是否已送达 */
   digestSentAt?: number;
+  authorization?: { source: "spec"; path: string; digest: string; pm: string };
+  extensions?: number;
+  extensionSentAt?: number;
 }
 export interface PlansDoc { v: 1; seq: number; plans: ObservationPlan[] }
 
@@ -258,6 +262,7 @@ export async function cancelObservation(db: Database, ctx: WriteCtx, id: string,
     if (plan.status !== "active") throw new LedgerError("conflict", `登记 ${id} 已是 ${plan.status}，撤不了`);
     if (plan.receipt && plan.receipt.phase !== "failed") throw new LedgerError("conflict", `登记 ${id} 正在转正（回执 ${plan.receipt.phase}），撤不了；要关该机制用它自己的开关`);
     audit(db, ctx, plan, "cancel", 0, `观察期登记 ${id} 撤销，不再自动转正：${reason}`);
+    if (plan.authorization) closeObservationTodos(db, ctx, plan);
     plan.status = "cancelled";
     plan.cancelled = { by: ctx.actor, at: ctx.now ?? Date.now(), reason };
     save();
