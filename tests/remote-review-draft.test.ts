@@ -38,7 +38,8 @@ describe("exec prompt: draft only on handoff projects", () => {
 
   test("the scheduler's start env reads mergeHandoff from scheduler.json", () => {
     const env = (handoff: boolean) => startIo({ db: null, ledger: async () => ({ ok: true }), active: () => {}, lease: undefined } as never,
-      parseSchedulerConfig({ enabled: true, autoDispatch: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: "/repo", ...(handoff ? { mergeHandoff: true } : {}) } } })).startEnv();
+      parseSchedulerConfig({ enabled: true, autoDispatch: true,
+        projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: "/repo", ...(handoff ? { mergeHandoff: true } : {}) } } })).startEnv();
     expect(env(true).mergeHandoff?.("p")).toBe(true);
     expect(env(false).mergeHandoff?.("p")).toBe(false);
     expect(env(true).mergeHandoff?.("__proto__")).toBe(false);
