@@ -3,9 +3,10 @@
  * for the scheduler instead of starting a PM turn. It is taken only when all three hold — the sender is a peer token whose peer is
  * the project's scheduler.json `handoffPeer`, the text parses strictly (lib/remote-review-parse.ts), and the read-only ledger has
  * exactly one card with that PR number whose PM is the addressee. Then the raw text goes to the inbox, the PM channel gets one
- * mirror line and the peer gets 202. An old-format redelivered P1 (capUnknown: the cap cannot be read) is stashed to be booked
- * but still returns null. Anything else — including any error on the way — returns null and the message is delivered to PM
- * exactly as before. tests/remote-review-intake-hook.test.ts.
+ * mirror line and the peer gets 202. An old-format redelivered P1 (capUnknown: the cap cannot be read) is never taken: every
+ * copy returns null, so a retry after a failed PM delivery reaches PM again; only the first is stashed, to be booked. Anything
+ * else — including any error on the way — returns null and the message is delivered to PM exactly as before.
+ * tests/remote-review-intake-hook.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { LedgerReader } from "../lib/ledger-read.js";
@@ -61,7 +62,8 @@ export async function interceptRemoteReview(input: IntakeInput, mirror: (line: s
     const r = hit.review;
     const key = { taskId: hit.taskId, reportId: r.reportId, head12: r.head12 };
     if (!hit.duplicate) deps.stash({ peer: hit.peer, agent: input.agent, taskId: hit.taskId, receivedAt: deps.now(), text: input.text }, key);
-    if (!hit.duplicate && capUnknown(r)) return null; // booked for the record; PM gets it the normal way and decides
+    // PM gets every copy the normal way and decides; the inbox only keeps one for the record
+    if (capUnknown(r)) return null;
   } catch (e) {
     console.warn(`⚠️ [remote-review] 拦截判定出错，按原路投给 PM：${(e as Error).message}`);
     return null;

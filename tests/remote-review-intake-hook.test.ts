@@ -109,13 +109,26 @@ describe("RRL-1 hook: duplicate-http-ack (review finding r1)", () => {
     expect(listInbox(fx.inbox).length).toBe(1);
     expect(readInbox(listInbox(fx.inbox)[0]!, fx.inbox).text).toBe(legacy);
     expect(h.mirrored).toEqual([]);
-    // the same report id + head again (any format) is a duplicate: nothing more to PM
-    expect(await (await h.call({ text: legacy }))!.json()).toMatchObject({ duplicate: true });
+    // the original of the same report id + head after it is a duplicate (booked once)
     expect(await (await h.call())!.json()).toMatchObject({ duplicate: true });
     expect(listInbox(fx.inbox).length).toBe(1);
     const next = await h.call({ text: renderRedeliveryPush(pushText({ verdict: "changes", p1: 1, round: 2 }), 2, { stage: "build" })! });
     expect(next!.status).toBe(202);
     expect(listInbox(fx.inbox).length).toBe(2);
+  });
+
+  test("[r4] ambiguous-retry-swallowed: every copy of an old-format redelivered P1 goes to PM (a failed delivery retried is not swallowed), stashed once", async () => {
+    fx = remoteFixture();
+    const h = harness();
+    const legacy = renderRedeliveryPush(P1_TEXT, 1, { stage: "build" }, true)!;
+    expect(await h.call({ text: legacy })).toBeNull(); // PM delivery fails → the route answers 502 → the sender retries the same text
+    expect(await h.call({ text: legacy })).toBeNull();
+    expect(listInbox(fx.inbox).length).toBe(1);
+    expect(await fx.cli("scheduler", "T1", "--inbox", listInbox(fx.inbox)[0]!)).toMatchObject({ ok: true, duplicate: false });
+    rmSync(listInbox(fx.inbox)[0]!);
+    expect(await h.call({ text: legacy })).toBeNull(); // booked: still to PM, nothing stashed again
+    expect(listInbox(fx.inbox)).toEqual([]);
+    expect(h.mirrored).toEqual([]);
   });
 });
 
