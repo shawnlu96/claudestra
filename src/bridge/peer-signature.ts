@@ -76,7 +76,7 @@ export async function checkPeerSignature(req: Request, url: URL, peer: string): 
   const check = (pk: string) => verifyPeerRequest(pk, req.headers, { method: req.method, path, body });
   const next = judgeSignature(prev, hdr, check, new Date().toISOString(), recordFp, rec?.publicKey ?? null);
   const result = next.lastCheck!.result;
-  const verdict = peerSignatureVerdict(result, hdr.present, !!(recordFp || prev?.publicKey || rec?.publicKey), Date.now());
+  const verdict = peerSignatureVerdict(result, hdr, !!(recordFp || prev?.publicKey || rec?.publicKey), Date.now());
   if (!verdict.allow) return rejected(peer, verdict, next.lastCheck);
   if (verdict.legacy && Date.now() - (legacyWarnedAt.get(peer) ?? 0) > LEGACY_WARN_EVERY_MS) {
     legacyWarnedAt.set(peer, Date.now());

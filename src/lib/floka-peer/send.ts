@@ -6,9 +6,11 @@ import { peerForUrl, readHttpPeers } from "../peer-e2e-local.js";
 import type { HttpPeer } from "../peers.js";
 import { peerCapabilities, pinOf, type PeerCapabilities } from "./capability.js";
 import { peerPolicy } from "./policy.js";
+export { recoverPeerSend } from "./recovery.js";
 
 interface SendDeps { key?: InstanceKey | null; peers?: HttpPeer[]; config?: unknown; now?: number; capabilities?: PeerCapabilities; path?: string }
 export async function preparePeerSend<T extends { method?: string; body?: string | Uint8Array; headers?: Record<string, string> }>(url: string, init: T): Promise<T> {
+  if (peerPolicy().send !== "on") return init;
   const rec = peerForUrl(url, await readHttpPeers());
   if (peerCapabilities.family(rec ? pinOf(rec) : null) !== "floka") return init;
   return { ...init, headers: await signPeerTransport(url, init.method ?? "GET", init.body ?? "", init.headers) };

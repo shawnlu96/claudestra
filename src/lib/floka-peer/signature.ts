@@ -12,7 +12,7 @@ export function peerHeaders(input: HeaderInput) {
   const old = REQUEST_HEADERS.claudestra, neu = REQUEST_HEADERS.floka;
   const names = Object.values(old).some(k => h.has(k)) ? old : neu;
   const key = h.get(names.key), ts = h.get(names.ts), sig = h.get(names.sig);
-  return { key, ts, sig, present: [...Object.values(old), ...Object.values(neu)].some(k => h.has(k)) };
+  return { key, ts, sig, newFamily: Object.values(neu).some(k => h.has(k)), present: [...Object.values(old), ...Object.values(neu)].some(k => h.has(k)) };
 }
 
 export function peerHeader(headers: HeaderInput, canonicalName: string): string {
@@ -20,8 +20,17 @@ export function peerHeader(headers: HeaderInput, canonicalName: string): string 
   return peerHeaders(headers)[canonicalName === names.key ? "key" : canonicalName === names.ts ? "ts" : "sig"] ?? "";
 }
 
-export function peerSignatureVerdict(result: string, present: boolean, anchored: boolean, now: number) {
-  return present && result !== "ok" ? { allow: false as const, reason: result } : peerSigVerdict(result, anchored, now);
+/** Off/observe retain legacy exceptions until the original deadline; new-family failures never use them. */
+export function rejectInvalidPeerSignature(headers: Pick<ReturnType<typeof peerHeaders>, "present" | "newFamily">, config?: unknown): boolean {
+  if (!headers.present) return false;
+  const mode = peerPolicy(config).signature;
+  if (headers.newFamily || mode === "on") return true;
+  if (mode === "observe") observePeer("signature", "on would reject invalid legacy signature");
+  return false;
+}
+
+export function peerSignatureVerdict(result: string, headers: ReturnType<typeof peerHeaders>, anchored: boolean, now: number) {
+  return result !== "ok" && rejectInvalidPeerSignature(headers) ? { allow: false as const, reason: result } : peerSigVerdict(result, anchored, now);
 }
 
 /** After SIGN1 succeeds, expose the key to the existing contact/token gate only. Never forward these aliases on the wire. */
@@ -46,14 +55,14 @@ export function verifyPeerRequest(
   return v.status === "ok" && v.publicKey === key ? "ok" : v.status === "reject" && v.reason === "stale" ? "stale" : "bad";
 }
 
-/** Legacy anonymous exceptions apply only when no signature family is present. */
+/** Legacy invitation-token exceptions survive off/observe only for the old family. */
 export async function invalidSignedRequest(req: Request, peer: string): Promise<boolean> {
   if (!peer.startsWith("invite:") || !peerHeaders(req.headers).present) return false;
   try {
     const u = new URL(req.url), body = req.body ? new Uint8Array(await req.clone().arrayBuffer()) : new Uint8Array();
-    return checkRequest(req.headers, { method: req.method, path: u.pathname + u.search, body }).status !== "ok";
+    return checkRequest(req.headers, { method: req.method, path: u.pathname + u.search, body }).status !== "ok" && rejectInvalidPeerSignature(peerHeaders(req.headers));
   } catch {
-    return true; // An unreadable signed request cannot become an unsigned legacy request.
+    return rejectInvalidPeerSignature(peerHeaders(req.headers)); // On and new-family failures never become anonymous.
   }
 }
 

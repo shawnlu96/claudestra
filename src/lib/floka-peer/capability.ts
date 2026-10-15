@@ -13,6 +13,7 @@ const cacheKey = (pin: E2ePin) => JSON.stringify([pin.instanceId, pin.idk, pin.e
 
 export class PeerCapabilities {
   private readonly values = new Map<string, Capabilities>();
+  forget(pin: E2ePin): void { this.values.delete(cacheKey(pin)); }
   admit(raw: unknown, pin: E2ePin, now = Date.now()): boolean {
     if (!raw || typeof raw !== "object") return false;
     const c = raw as Capabilities;

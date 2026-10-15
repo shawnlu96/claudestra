@@ -1,3 +1,4 @@
+import { recoverPeerSend } from "../lib/floka-peer/recovery.js";
 /**
  * bridge 主端口上的回环控制路由（只有本机能到，bridge.ts 的闸门已保证），给 manager CLI 与本机 Web 用：
  *   POST /peer-ingress/sync             manager 生成直连邀请前让 peer 入口立刻对外（peer-ingress.ts）
@@ -93,7 +94,8 @@ async function relayRequest(req: Request): Promise<Response> {
   // 对方按 §4.1 验签：签名要盖住实际发出的方法、路径（含查询串）与正文，manager 那头没有实例私钥，只能在这里签
   const headers = await signPeerTransport(`relay://${to}${path}`, method, bytes, normalizeHeaders(body.headers), { path });
   try {
-    const r = await c.request(to, { method, path, headers, body: bytes.length ? bytes : null }, { timeoutMs, maxResponseBytes: MAX_CLI_RESPONSE });
+    const r = await recoverPeerSend(`relay://${to}${path}`, headers,
+      () => c.request(to, { method, path, headers, body: bytes.length ? bytes : null }, { timeoutMs, maxResponseBytes: MAX_CLI_RESPONSE }));
     const out = await collectBody(r.body, MAX_CLI_RESPONSE);
     return json(200, { ok: true, status: r.status, headers: r.headers, body: b64.enc(out) });
   } catch (e) {

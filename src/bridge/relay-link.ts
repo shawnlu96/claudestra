@@ -1,3 +1,4 @@
+import { recoverPeerSend } from "../lib/floka-peer/recovery.js";
 import { preparePeerSend } from "../lib/floka-peer/send.js";
 /**
  * 中继链路（bridge 侧，docs/relay/protocol.md）：.env 配了 RELAY_URL 就在启动时连上中继（lib/relay-client.ts），
@@ -268,6 +269,9 @@ export async function peerFetch(url: string, init: PeerFetchInit, opts: PeerFetc
  * 路径取 URL 的 pathname + search——与 instance-key.ts 的 signedFor 同一口径，对方按同一串验签。
  */
 async function rawPeerFetch(url: string, init: PeerFetchInit, opts: PeerFetchOpts): Promise<Response> {
+  return recoverPeerSend(url, init.headers, () => rawPeerTransport(url, init, opts));
+}
+async function rawPeerTransport(url: string, init: PeerFetchInit, opts: PeerFetchOpts): Promise<Response> {
   if (!url.startsWith("relay://")) return (opts.fetchImpl ?? fetch)(url, init as RequestInit);
   const u = new URL(url);
   if (!client) throw new Error(`relay 未启用：本机 .env 没配 RELAY_URL，调不了 ${u.hostname}`);

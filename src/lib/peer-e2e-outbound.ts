@@ -1,3 +1,4 @@
+import { recoverPeerSend } from "./floka-peer/recovery.js";
 import { peerCapabilities, pinOf, learnPeerCapabilities, type PeerCapabilities } from "./floka-peer/capability.js";
 import { peerPolicy } from "./floka-peer/policy.js";
 import { signRequestFamily } from "./floka-compat/signature/request.js";
@@ -9,7 +10,7 @@ import { readJsonCapped } from "./body-reader.js";
  * 目标是 required peer 却走不了加密（本机钥匙读不到、对方记录坏了）→ 抛错，绝不退回明文。
  * 外层传输（中继 / 直连、外层签名）由调用方以 raw 注入；这里只管会话。
  */
-import { E2eInnerError, E2eLocalError, markE2eResponse, PeerE2eClient, type E2ePost } from "./peer-e2e-client.js";
+import { E2eOuterError, E2eInnerError, E2eLocalError, markE2eResponse, PeerE2eClient, type E2ePost } from "./peer-e2e-client.js";
 import { e2ePeerOf, localE2e, peerForUrl, pinPeerE2eKey, readHttpPeers, type LocalE2e } from "./peer-e2e-local.js";
 import type { HttpPeer } from "./peers.js";
 
@@ -78,7 +79,11 @@ export function createE2eOutbound(d: OutboundDeps) {
         const u = new URL(url);
         const signed = family === "claudestra" && d.sign ? d.sign("POST", u.pathname + u.search, bytes)
           : signRequestFamily(family, { method: "POST", path: u.pathname + u.search, body: bytes }, local.key);
-        const response = await raw(url, { method: "POST", body: bytes, headers: { "content-type": contentType, ...signed } });
+        const response = await recoverPeerSend(url, signed,
+          () => raw(url, { method: "POST", body: bytes, headers: { "content-type": contentType, ...signed } }),
+          { pin, cache: capabilities, rejected: code => {
+            throw new E2eOuterError(code, "peer rejected the selected family; capability retired for future calls", path !== E2E_HELLO_PATH);
+          } });
         if (path === E2E_HELLO_PATH && response.ok && pin && peerPolicy(d.rename).e2e.receive !== "off") {
           const reply = await readJsonCapped(new Response(response.clone().body), 8192) as { capabilities?: unknown } | null;
           learnPeerCapabilities(reply?.capabilities, pin, capabilities, d.rename);

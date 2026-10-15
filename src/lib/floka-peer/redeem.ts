@@ -1,6 +1,6 @@
 /** The canonical invitation transaction stays unchanged. Only authenticated encryption labels vary. */
 import { keyFingerprint } from "../instance-key.js";
-import { checkRequest, peerHeaders } from "./signature.js";
+import { checkRequest, peerHeaders, rejectInvalidPeerSignature } from "./signature.js";
 import { peerPolicy } from "./policy.js";
 import { peerCapabilities } from "./capability.js";
 import type { E2eFamily } from "../floka-compat/e2e/families.js";
@@ -16,7 +16,7 @@ export { peerHeaders } from "./signature.js";
 export function trustedRelaySender(req: Request, relayFrom: string) {
   return relayFrom && !peerHeaders(req.headers).present ? { fp: relayFrom, pk: "" } : null;
 }
-export const invalidRedeemer = (req: Request, sender: { fp: string }): boolean => peerHeaders(req.headers).present && !sender.fp;
+export const invalidRedeemer = (req: Request, sender: { fp: string }): boolean => !sender.fp && rejectInvalidPeerSignature(peerHeaders(req.headers));
 
 const verified = new WeakMap<Request, E2eFamily>();
 export function verifyRedeemer(key: string, req: Request, body: Uint8Array, relayFrom = ""): boolean {

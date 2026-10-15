@@ -1,4 +1,4 @@
-import { signPeerTransport } from "../lib/floka-peer/send.js";
+import { signPeerTransport, recoverPeerSend } from "../lib/floka-peer/send.js";
 /**
  * manager 侧的中继相关（bridge/relay-routes.ts 的回环路由是它的后端）：
  *   - `claudestra pair` 在 manager/pair.ts（签码、打印 grant、等手输短码的确认）；
@@ -63,7 +63,10 @@ export async function peerE2eOnlyFetch(url: string, init: CliFetchInit): Promise
 export async function rawCliFetch(url: string, init: CliFetchInit): Promise<Response> {
   const m = /^relay:\/\/([^/]+)(\/.*)?$/i.exec(url);
   const to = m ? relayPeerFingerprint(`relay://${m[1]}`) : null;
-  if (!m || !to) return fetch(url, { ...init, headers: await signPeerTransport(url, init.method ?? "GET", init.body ?? "", init.headers) } as RequestInit);
+  if (!m || !to) {
+    const headers = await signPeerTransport(url, init.method ?? "GET", init.body ?? "", init.headers);
+    return recoverPeerSend(url, headers, () => fetch(url, { ...init, headers } as RequestInit));
+  }
   const bytes = typeof init.body === "string" ? new TextEncoder().encode(init.body) : (init.body ?? new Uint8Array(0));
   const r = await fetch(`${bridgeHttpBase()}/relay/request`, {
     method: "POST",
@@ -75,6 +78,7 @@ export async function rawCliFetch(url: string, init: CliFetchInit): Promise<Resp
   const j = (await r.json().catch(() => null)) as Relayed | null; // bridge 回的不是 JSON（起了别的东西在这个端口）：下面按失败处理，状态码照样带出
   if (!r.ok || !j?.ok) {
     const err = new Error(`relay ${j?.code ?? r.status}: ${j?.error ?? "bridge 拒绝代调"}`);
+    Object.assign(err, { code: j?.code });
     if (j?.code && TIMEOUT_CODES.has(j.code)) err.name = "TimeoutError";
     throw err;
   }
