@@ -193,3 +193,58 @@ test("[验收线 2] deadline SIGTERM remains failed even with a waiting PM", asy
   const lock = await schedulerMachineLock(f.job, f.request, { path: f.path, enabled: true, waiting: () => ["deploy-full"] });
   try { expect(lock.term()).toBeNull(); } finally { lock.release(); }
 });
+
+test("[验收线 3] observe never calls the machine lock port, notes what on would do, and keeps the deploy running", async () => {
+  const { machineLockMode } = await import("../src/lib/scheduler-deploy-lock.js");
+  const f = fixture(), events = () => JSON.parse(readFileSync(`${f.root}.machine-events.json`, "utf8")) as Record<string, unknown>[];
+  const port = async () => { throw new Error("observe must not take the lock"); };
+  const idle = await schedulerMachineLock(f.job, f.request, { path: f.path, mode: "observe", acquireMachine: port, waiting: () => [] });
+  expect(idle.blocked).toBeNull(); expect(idle.term()).toBeNull(); idle.release();
+  expect(events()).toMatchObject([{ status: "observed", would: "acquire", label: "scheduler-deploy" }]);
+  const holder = await acquireDeployLock({ path: f.path, label: "deploy-full", waitMs: 0 });
+  if (holder.kind !== "acquired") throw new Error("lock missing");
+  try {
+    const busy = await schedulerMachineLock(f.job, f.request, { path: f.path, mode: "observe", acquireMachine: port, waiting: () => [] });
+    expect(busy.blocked).toBeNull(); expect(busy.term()).toBeNull(); busy.release();
+  } finally { holder.handle.release(); }
+  expect(events().slice(1)).toMatchObject([{ status: "observed", would: "defer", label: "deploy-full" }, { status: "observed", would: "defer", label: "deploy-full" }]);
+  expect(readDeployLock(f.path).status).toBe("missing");
+  const path = join(f.root, "policy.json");
+  writeJsonAtomicSync(path, { projects: { p: { keys: { deployMachineLock: "observe" } } } });
+  expect(machineLockMode("p", path)).toBe("observe");
+  expect(machineLockMode("p", join(f.root, "none.json"))).toBe("on");
+});
+
+test("[验收线 3] observe matches the on verdict for a corrupt lock and a dead holder", async () => {
+  const f = fixture(), events = () => JSON.parse(readFileSync(`${f.root}.machine-events.json`, "utf8")) as Record<string, unknown>[];
+  const port = async () => { throw new Error("observe must not take the lock"); };
+  writeFileSync(f.path, "{not json");
+  const corrupt = await schedulerMachineLock(f.job, f.request, { path: f.path, mode: "observe", acquireMachine: port, waiting: () => [] });
+  expect(corrupt.blocked).toBeNull(); corrupt.release();
+  expect((await acquireDeployLock({ path: f.path, label: "probe", waitMs: 0 })).kind).toBe("timeout");
+  const dead = Bun.spawnSync(["true"]).pid;
+  writeFileSync(f.path, JSON.stringify({ v: 1, token: "d".repeat(32), label: "deploy-full", uid: process.getuid?.() ?? -1,
+    holder: { pid: dead, startId: "gone" }, acquiredAt: new Date().toISOString() }));
+  const reaped = await schedulerMachineLock(f.job, f.request, { path: f.path, mode: "observe", acquireMachine: port, waiting: () => [] });
+  expect(reaped.blocked).toBeNull(); reaped.release();
+  expect(readDeployLock(f.path).status).toBe("ok");
+  expect(events()).toMatchObject([{ status: "observed", would: "defer", label: "unknown" }, { status: "observed", would: "acquire", label: "scheduler-deploy" }]);
+  const real = await acquireDeployLock({ path: f.path, label: "probe", waitMs: 0 });
+  expect(real.kind).toBe("acquired"); if (real.kind === "acquired") real.handle.release();
+});
+
+test("[验收线 3] observe SIGTERM ignores a dead holder that on would have reaped", async () => {
+  const f = fixture(), events = () => JSON.parse(readFileSync(`${f.root}.machine-events.json`, "utf8")) as Record<string, unknown>[];
+  const port = async () => { throw new Error("observe must not take the lock"); };
+  const dead = Bun.spawnSync(["true"]).pid;
+  writeFileSync(f.path, JSON.stringify({ v: 1, token: "e".repeat(32), label: "deploy-full", uid: process.getuid?.() ?? -1,
+    holder: { pid: dead, startId: "gone" }, acquiredAt: new Date().toISOString() }));
+  const lock = await schedulerMachineLock(f.job, f.request, { path: f.path, mode: "observe", acquireMachine: port, waiting: () => [] });
+  expect(lock.blocked).toBeNull(); expect(lock.term()).toBeNull(); lock.release();
+  expect(events()).toMatchObject([{ status: "observed", would: "acquire", label: "scheduler-deploy" }]);
+  expect(events()).toHaveLength(1);
+  const waited = await schedulerMachineLock(f.job, f.request, { path: f.path, mode: "observe", acquireMachine: port, waiting: () => ["deploy-full"] });
+  expect(waited.term()).toBeNull(); waited.release();
+  expect(events().slice(1)).toMatchObject([{ status: "observed", would: "acquire" }, { status: "observed", would: "defer", label: "deploy-full" }]);
+  expect(readDeployLock(f.path).status).toBe("ok");
+});

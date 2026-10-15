@@ -70,7 +70,7 @@ const cleanPath = (p: unknown): p is string => typeof p === "string" && !!p && !
 /** 这条 ask 处理员接不接：执行者经 ask 工具开的、挂卡、还开着的 blocker 提问；带默认做法的和测试类扩围有自己的 15 分钟自动定，不碰 */
 function eligible(db: Database, a: Ask | null): a is Ask & { taskId: string; fromAgent: string } {
   return !!a && a.state === "open" && a.source === "reply" && a.kind === "decide" && a.extra.via === "mcp_ask" && a.blocking !== false
-    && a.extra.class === "blocker" && !!a.taskId && !!a.fromAgent && typeof a.extra.orderId === "string" && !isTestScopeAsk(db, a);
+    && a.extra.askScopeAuto !== true && a.extra.class === "blocker" && !!a.taskId && !!a.fromAgent && typeof a.extra.orderId === "string" && !isTestScopeAsk(db, a);
 }
 
 export class PmJobBridge {

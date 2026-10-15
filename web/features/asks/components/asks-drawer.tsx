@@ -90,8 +90,9 @@ export function AsksDrawer({ onOpenChat }: { onOpenChat: (ask: WebAsk) => void }
           {section(t("等你处理"), waiting.rest)}
           {section(t("待验收"), g.accept)}
           {section(t("最近处理过"), recent)}
-          {!moreRecent && g.recent.length > RECENT_PREVIEW && (
-            <button type="button" className="btn btn-ghost btn-sm self-center" onClick={() => setMoreRecent(true)}>
+          {/* bridge 默认只给 24 小时内结案的：点「更多」才拉 3 天内的（asks-store loadHistory），所以少于 5 张也给这个入口 */}
+          {!moreRecent && (
+            <button type="button" className="btn btn-ghost btn-sm self-center" onClick={() => (setMoreRecent(true), void asksStore.loadHistory())}>
               {t("更多")}
             </button>
           )}

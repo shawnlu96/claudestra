@@ -45,3 +45,24 @@ test("[验收线 6] result writer selects phase metadata and excludes stdout, st
     expect(events[1].data).toEqual({ op: "center_deploy", sha, code: 0, ms: 20, dryRun: false });
   } finally { f.close(); rmSync(dir, { recursive: true, force: true }); rmSync(statePath("center-deploy", "p.json"), { force: true }); }
 });
+
+test("[验收线 3] machine op turns observe samples into deployMachineLock recovery samples, once per request and action", async () => {
+  const { writeJsonAtomicSync } = await import("../src/lib/state-file.js");
+  const { deployJobDir } = await import("../src/lib/scheduler-deploy-lock-jobs.js");
+  const { rmSync } = await import("node:fs");
+  const { beginDeployRun } = await import("../src/lib/scheduler-deploy.js");
+  const f = mergedCard(), run = beginDeployRun(f.db, { actor: "scheduler" }, f.intent).run, file = `${deployJobDir(run)}.machine-events.json`;
+  const deps = { db: f.db, actor: "scheduler", projectIds: ["p"], now: () => 1000, assertLease() {},
+    loadRegistry: async () => ({ socket: "s", agents: {} }), saveRegistry: async () => {} };
+  const observed = () => listEvents(f.db, { project: "p" }).filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "deployMachineLock");
+  try {
+    writeJsonAtomicSync(file, [{ status: "observed", would: "defer", label: "deploy-full", at: 1 }, { status: "observed", would: "defer", label: "deploy-full", at: 2 }]);
+    const args = ["scheduler-center-deploy", "T9", "--op", "machine", "--intent", f.intent];
+    expect(await runLedger(args, deps)).toMatchObject({ ok: true });
+    expect(observed()).toHaveLength(1); expect(observed()[0]).toMatchObject({ target: "T9", data: { label: "deploy-full" } });
+    writeJsonAtomicSync(file, [{ status: "observed", would: "defer", label: "deploy-full", at: 1 }, { status: "observed", would: "acquire", label: "scheduler-deploy", at: 3 }]);
+    expect(await runLedger(args, deps)).toMatchObject({ ok: true }); expect(await runLedger(args, deps)).toMatchObject({ ok: true });
+    expect(observed().map((e) => String(e.data.actionKey).split(":")[0]).sort()).toEqual(["acquire", "defer"]);
+    expect(listEvents(f.db, { project: "p" }).filter((e) => e.data.op === "deploy_machine_lock")).toHaveLength(0);
+  } finally { f.close(); rmSync(file, { force: true }); }
+});

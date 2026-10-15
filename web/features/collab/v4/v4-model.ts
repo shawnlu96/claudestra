@@ -45,12 +45,14 @@ export function metricsOf(ov: Pick<LedgerOverview, "tasks" | "doneRest" | "unkno
 export const FILTERS = ["active", "done", "all", "p0"] as const;
 export type Filter = (typeof FILTERS)[number];
 export const FILTER_LABEL: Record<Filter, string> = { active: "进行中", done: "已完成", all: "全部", p0: "P0" };
+/** 计数源没载完时这几枚芯片一起显示骨架、出数时一起出（CNTGATE1）：已完成 / 全部按总览算，团队总览逐轮增长，不能先出半截数；P0 不在闸门内 */
+export const GATED_FILTERS: ReadonlySet<Filter> = new Set<Filter>(["active", "done", "all"]);
 /** 一进来只看进行中（在干活 + 在等）的卡，规格排队和已结案的不挡眼 */
 export const DEFAULT_FILTER: Filter = "active";
 
 /**
  * 筛选芯片上的数：进行中 = 看板的在干活 + 在等（count-words.ts，和顶栏同一个数）；已完成同 doneCount；其余 = 总览里的 + 窗口外的。
- * 进行中在计数源没载完时为 null（芯片显示骨架）
+ * 进行中在计数源没载完时为 null；大纲在没载完时对 GATED_FILTERS 一律出骨架，不调这里
  */
 export function filterCount(ov: Pick<LedgerOverview, "tasks" | "doneRest">, f: Filter, snap: CountSnap | null): number | null {
   if (f === "active") return snap ? snap.words.working + snap.words.waiting : null;

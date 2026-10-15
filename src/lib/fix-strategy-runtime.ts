@@ -18,7 +18,7 @@ import { specReviewStart } from "./fix-strategy-review-range.js";
 import { convergenceEvent, convergenceLifecycle, createConvergenceWorker, stopConvergenceAuthor, type ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
 import type { SessionRef } from "./worker-session.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
-import { remoteAuthorFix, remoteFixFallback, hasRemoteFix } from "./fix-strategy-remote.js";
+import { remoteAuthorFix, remoteFixFallback, hasRemoteFix, withForeignTree } from "./fix-strategy-remote.js";
 import { reboundHalt, sameAuthor, swapGate, type SwapHalt } from "./fix-strategy-guard.js";
 import { isLocalSwapIntent, localSwapPorts } from "./recovery-fix-local-swap.js";
 import { remoteContext } from "./fix-strategy-remote-context.js";
@@ -86,7 +86,8 @@ export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, given
   const wait = await stopConvergenceAuthor(db, ctx, intent, old, deps, gate);
   if ((halt = gate())) return halted(halt);
   if (wait) return { ok: true, step: "waiting", detail: wait };
-  const ref = await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", deps, gate);
+  const tree = withForeignTree(db, ctx, intent, task, deps, gate); // SWAPFIX1 9a: the local swap takes over a clean old tree too
+  const ref = tree.bound(await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", tree.deps, tree.gate));
   deps.active();
   if ((halt = gate("stopped"))) return halted(halt); // the binding below retires the old author: it must still be the pinned one, and stopped
   if ("tree" in ref) return { ok: true, step: "waiting", detail: ref.wait };

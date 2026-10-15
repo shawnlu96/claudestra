@@ -3,8 +3,10 @@ import type { RecoveryKey } from "./recovery-policy.js";
 type RecoveryRiskClass = "safety" | "permission" | "delete-data" | "schema";
 const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRiskClass; reason: string }>> = {
   askDefaultAll: { class: "permission", reason: "按默认方案自动批准提问与规格文件扩围" },
+  askScopeAuto: { class: "permission", reason: "调度器自动批机械类扩围" },
   authorRebuild: { class: "permission", reason: "依据退役证明重建作者并重新指派" },
   cardProcReap: { class: "delete-data", reason: "回收卡片进程及其运行资源" },
+  centerDeployAuto: { class: "permission", reason: "按 owner 授权卡自动部署私仓中心" },
   ciCoverageGate: { class: "safety", reason: "决定合并所需 CI 证据是否齐全" },
   ciIoMapFuse: { class: "safety", reason: "熔断 CI 输入输出映射的不可信证据" },
   ciManualResume: { class: "permission", reason: "按 CI 证明把人工卡交回自动调度" },
@@ -22,6 +24,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   localReviewAdopt: { class: "permission", reason: "接管本机人工审查的授权来源" },
   mainCarry: { class: "safety", reason: "将旧 head 的审查证据沿用到新 head" },
   mainCarryMerge: { class: "safety", reason: "以纯 main 合并证明沿用审查结论" },
+  mainRedRepairBind: { class: "permission", reason: "修复卡自动拿 main-ci 修复绑定" },
   manualCaseOwnership: { class: "permission", reason: "决定人工事项的处理责任人" },
   manualMergeQueue: { class: "permission", reason: "凭 PM 人工请求授权进入合并队列" },
   manualRecovery: { class: "permission", reason: "按证据把人工工作流交回自动调度" },

@@ -11,7 +11,7 @@ import { bindFixReplacement } from "./scheduler-sessions.js";
 import { remoteContext, convergencePlacement, type RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { placeFor } from "./scheduler-family-pick.js";
 import { heldLease, writeOrderWire, lastReviewOf } from "./ledger-lend-lease.js";
-import { reclaimForFamilySwap, retireReclaimedPeerAuthor } from "./lend-reclaim-scheduler.js";
+import { reclaimForFamilySwap, resumedReclaimGate, retireReclaimedPeerAuthor } from "./lend-reclaim-scheduler.js";
 import { remoteOrder, offerConvergence } from "./fix-strategy-remote-order.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { getLendPeer } from "./ledger-lend-peers.js";
@@ -21,10 +21,13 @@ import { chunkInputs } from "./order-wire-chunks.js";
 import { localWriterCount } from "./scheduler-pool-facts.js";
 import { explicitLocal } from "./scheduler-local-pin.js";
 import { localSwapAuthority, localSwapCreate, localSwapOf, localSwapReady, localSwapReclaimEdge, localSwapWait, reclaimedBefore, retireLocalAuthor } from "./recovery-fix-local-swap-run.js";
-import { getIntent } from "./ledger-scheduler.js";
 import type { LocalSwapEvidence } from "./recovery-fix-local-swap.js";
 import { reclaimLocalFixEdge, reclaimLocalFixGate } from "./recovery-reclaim-local-fix.js";
-import type { SwapGate } from "./fix-strategy-guard.js";
+import type { SwapGate, SwapHalt } from "./fix-strategy-guard.js";
+import { getIntent, getWorkflow } from "./ledger-scheduler.js";
+import type { ForeignTreePort } from "./fix-strategy-worktree.js";
+import { liveSessionAt } from "./fix-tree-proof.js";
+import { selfHealMode, selfHealSample } from "./fix-swap-halfbuilt-sample.js";
 
 type Material = { path: string; family: AuthorFamily };
 type MaterialReader = (db: Database, ctx: WriteCtx, intent: SchedulerIntent, source: string, deps: ConvergenceLifecycle) => Promise<Material>;
@@ -119,6 +122,60 @@ export const hasRemoteFix = (db: Database, id: string): boolean => !!remoteOrder
 type AfterReclaim = { claim: string; bound: string; gate?: SwapGate };
 const OTHER_FAMILY: AfterReclaim = { claim: "peer family swap", bound: "收回后新家族本机会话已绑定" };
 
+/** The isolation gate an author tree had before the wrap: none = authorTree's own「缺旧作者停止执行门」refusal, word for word. */
+const NO_STOP_GATE: SwapGate = () => ({ halted: "drift", reason: "缺旧作者停止执行门，不隔离" });
+
+/**
+ * SWAPFIX1 9a, shared by the local swap (fix-strategy-runtime.ts fixSwapStep) and the remote one (localAfterReclaim): the replacement
+ * author's tree open may take over another old local author's clean tree at the target (fixLocalSwap, never on a manual card),
+ * sampled once per card + head; the judgment itself is fix-tree-proof.ts's. The returned gate is `base` plus, once a tree was taken
+ * over, the takeover's own permission read again synchronously at the create and bind edges: the switch still on and no live
+ * session but this intent's own author in the tree (the tree's proof was taken before awaits that can outlive it). The takeover is
+ * journaled on the intent (`tree-adopt`), so a later tick that skips the tree open (creating already claimed) still re-proves it;
+ * `bound` applies it to a created session right before the caller binds it.
+ */
+export function withForeignTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, deps: ConvergenceLifecycle,
+  base?: SwapGate): { deps: ConvergenceLifecycle; gate?: SwapGate; adoption(): SwapHalt | null; bound<T extends object>(ref: T): T | { wait: string; tree: true } } {
+  const open = deps.authorTree, head = intent.head;
+  if (!open || !head) return { deps, gate: base, adoption: () => null, bound: (ref) => ref };
+  const own = `agent-cv-${task.id.toLowerCase()}-fix-${intent.eventSeq}`; // createConvergenceWorker's name for this intent's author
+  let adopted: string | null = null;
+  const mode = () => getWorkflow(db, task.id)?.mode === "auto" ? selfHealMode(db, task.project, "fixLocalSwap") : "off";
+  const foreign: ForeignTreePort = {
+    mode,
+    live: (dir) => liveSessionAt(deps.registry().filter((r) => r.name !== own), dir),
+    sample: (at, dir) => {
+      if (at === "on") { adopted = dir; convergenceEvent(db, ctx, intent, "tree-adopt", { dir }); }
+      selfHealSample(db, at, { project: task.project, key: "fixLocalSwap", taskId: task.id, head, action: "tree-adopt",
+        text: `收回旧树 ${dir}（干净、在本卡分支、HEAD 是已审修复 head、无活会话）交给新作者`, data: { intentId: intent.id, dir } }, ctx.now ?? Date.now());
+    },
+  };
+  const adoption = (): SwapHalt | null => {
+    const dir = adopted ?? getEventByDedup(db, `scheduler:${intent.id}:tree-adopt`)?.data.dir;
+    if (typeof dir !== "string") return null;
+    if (mode() !== "on") return { halted: "drift", reason: `fixLocalSwap 已不在 on，不把旧作者工作树 ${dir} 交给新作者` };
+    const holder = foreign.live(dir);
+    return holder ? { halted: "drift", reason: `旧作者工作树 ${dir} 已是活会话 ${holder} 的工作目录，不交给新作者` } : null;
+  };
+  // a created session is bound only while the takeover still holds; read with no await before the caller's bind
+  const bound = <T extends object>(ref: T): T | { wait: string; tree: true } => {
+    const halt = "sessionId" in ref ? adoption() : null;
+    return halt ? { wait: halt.reason, tree: true } : ref;
+  };
+  const gate: SwapGate = (after) => base?.(after) ?? adoption();
+  if (base?.stopWire !== undefined) gate.stopWire = base.stopWire;
+  return { gate, adoption, bound, deps: { ...deps, artifactGate: deps.artifactGate ?? base ?? NO_STOP_GATE,
+    authorTree: (source, target, recorded) => { adopted = null; return open(source, { ...target, foreign }, recorded); } } };
+}
+
+/** Both gates at one edge, the first refusal winning; the swap gate's stop wire rides on. */
+function bothGates(a?: SwapGate, b?: SwapGate): SwapGate | undefined {
+  if (!a || !b) return a ?? b;
+  const gate: SwapGate = (after) => a(after) ?? b(after);
+  if (a.stopWire !== undefined) gate.stopWire = a.stopWire;
+  return gate;
+}
+
 /**
  * After the write lease is gone (one reclaim, never two): claim, build the local author with the material's family and bind it.
  * label.gate (no swap) is re-read at the create, bind and remote-fallback edges, the way a swap's localSwapGate / localSwapAuthority are.
@@ -132,16 +189,16 @@ async function localAfterReclaim(db: Database, ctx: WriteCtx, intent: SchedulerI
   const retired: { wait: string } | { gate?: SwapGate } = swap ? await retireLocalAuthor(db, ctx, intent.id, swap, deps) : {};
   if ("wait" in retired) return { ok: true, step: "waiting", detail: retired.wait };
   const edge = swap && localSwapCreate(db, intent, swap, deps, retired.gate, () => ctx.now ?? Date.now(), source);
+  // a resumed reclaim's gate (label.gate) rides the swap's create edge too; the tree takeover's permission rides both
+  const tree = withForeignTree(db, ctx, intent, task, edge ? edge.lifecycle : deps, edge ? bothGates(edge.gate, label.gate) : label.gate);
   const local = localWriterCount(db, task.project, task.id) >= context.maxWorkers ? { wait: "本机写槽已满或不接新写者" }
-    : edge ? await createConvergenceWorker(db, ctx, getIntent(db, intent.id)!, mustTask(db, task.id), material.family, source, "author",
-      edge.lifecycle, edge.gate)
-    : await createConvergenceWorker(db, ctx, intent, mustTask(db, task.id), material.family, source, "author", deps, label.gate);
+    : await createConvergenceWorker(db, ctx, edge ? getIntent(db, intent.id)! : intent, mustTask(db, task.id), material.family, source, "author", tree.deps, tree.gate);
   if ("tree" in local) return { ok: true, step: "manual" in local ? "manual" : "waiting", detail: local.wait };
   if (swap && "wait" in local) return localSwapWait(db, ctx, intent, local.wait);
   const halt = swap && !("wait" in local) ? localSwapAuthority(db, mustTask(db, task.id), swap) : null;
   if (halt) return localSwapWait(db, ctx, intent, halt);
   // also before a refused local build falls back remote: a fresh peer order would take a held lease the switch no longer allows
-  const drift = label.gate?.("stopped");
+  const drift = label.gate?.("stopped") ?? tree.adoption();
   if (drift) return { ok: true, step: "waiting", detail: drift.reason };
   if (!("wait" in local)) {
     bindFixReplacement(db, ctx, intent.id, local, material.path, deps.registryPath);
@@ -162,10 +219,13 @@ export async function remoteAuthorFix(db: Database, ctx: WriteCtx, intent: Sched
     const swap = localSwapOf(db, intent);
     const ready = swap && await localSwapReady(db, ctx, intent, swap, context, deps);
     if (ready) return ready;
-    const wait = swap && reclaimedBefore(db, task) ? null : await reclaimForFamilySwap(db, ctx, intent.id, context, deps.active,
+    const skip = !!swap && !!reclaimedBefore(db, task);
+    const wait = skip ? null : await reclaimForFamilySwap(db, ctx, intent.id, context, deps.active,
       swap ? () => localSwapReclaimEdge(db, ctx, intent, swap, context, deps) : undefined);
     if (wait) return { ok: true, step: "waiting", detail: wait };
-    return localAfterReclaim(db, ctx, intent, task, material, context.source, context, deps, swap, OTHER_FAMILY);
+    // SWAPFIX1 9b: no reclaim of this intent's own = it resumed an earlier one, whose every fact is read again at create and bind
+    const resumed = skip ? undefined : resumedReclaimGate(db, ctx, intent.id);
+    return localAfterReclaim(db, ctx, intent, task, material, context.source, context, deps, swap, resumed ? { ...OTHER_FAMILY, gate: resumed } : OTHER_FAMILY);
   }
   if (!heldLease(db, task)) {
     const gate = reclaimLocalFixGate(db, ctx, intent, task, material.family);

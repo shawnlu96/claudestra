@@ -68,6 +68,17 @@ describe("输入与发送", () => {
     expect(r.ops).toEqual([{ op: "message", text: "第一行\n第二行\n第三行" }]);
   });
 
+  test("粘贴 Bearer 换行接值：输入行先整段打码再换 ⏎，不露明文；发出去的仍是原文（PR1546-r3 fallback-input-newline-redaction）", () => {
+    const value = ["syn", "TOKEN", "abcd1234", "EFGH5678", "ijkl"].join("");
+    const r = rig();
+    r.input.feed(`\x1b[200~Bearer\r\n${value}\x1b[201~`);
+    const shown = r.input.line(120);
+    expect(shown).not.toContain(value);
+    expect(shown).toContain("[redacted]");
+    r.input.feed("\r");
+    expect(r.ops).toEqual([{ op: "message", text: `Bearer\n${value}` }]);
+  });
+
   test("方向键的 ESC 和 [A 被拆到两次 data：不算 Esc、不打断，也不进正文（r1 split-escape-aborts 复现）", async () => {
     const r = rig({ busy: true });
     r.input.feed("\x1b");

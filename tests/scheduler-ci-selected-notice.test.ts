@@ -15,10 +15,10 @@ function store() {
 }
 const msg = { requestId: "r1", project: "p", key: "a".repeat(16), runUrl: "https://github.com/org/failover/actions/runs/11" };
 
-test("intake queues a non-urgent repair regardless of text and modes; full long URL survives rendering", () => {
+test("intake queues a non-urgent repair regardless of text and modes; full long URL survives rendering", async () => {
   const s = store(), runUrl = `https://github.com/org/${"a".repeat(100)}/actions/runs/11`;
-  s.setMode("p", "off");
-  s.setRouteMode("p", "off");
+  await s.setMode("p", "off");
+  await s.setRouteMode("p", "off");
   enqueueSelectedRepair({ ...msg, runUrl }, s, 100);
   expect(s.queued("p")).toHaveLength(1);
   expect(digestText(s.queued("p"))).toContain(runUrl);

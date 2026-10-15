@@ -18,6 +18,7 @@ export const machines={currentFp:()=>fp,onSwitch:cb=>switches.push(cb)};
 export function switchMachine(next){const prev=fp;fp=next;for(const cb of switches)cb(prev,next)}
 export class ApiError extends Error {}
 export const api=async()=>({ok:true,agents:[{name:'agent-a'},{name:'b'},{name:'master',runtime:'claude'}]});
+export const apiCached=api;
 export const fetchUnread=()=>new Promise(resolve=>requests.push(resolve));
 `;
 const harnessDirs: string[] = [];
@@ -38,7 +39,7 @@ async function harness(): Promise<Harness> {
         export {clearUnreadCounts,unreadSnapshot} from '${resolve("web/lib/push/unread-counts.ts")}';
         export {requests,switchMachine} from 'unread-fixture';
       ` }));
-      b.onResolve({ filter: /^(unread-fixture|@\/lib\/(api\/(client|push)|machines))$/ }, () => ({ path: "transport", namespace: "fixture" }));
+      b.onResolve({ filter: /^(unread-fixture|@\/lib\/(api\/(client|push)|machines|etag-cache))$/ }, () => ({ path: "transport", namespace: "fixture" }));
       b.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: fixture, loader: "js" }));
     },
   }] });

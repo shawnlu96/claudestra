@@ -1,3 +1,4 @@
+import { priorityStallTick } from "./ledger-priority-stall-tick.js";
 /**
  * One service pass = merge + observe + auto under a single maintenance lease, the same one `update` takes: while an
  * update holds it the whole pass is skipped, never just the merge part. The lease, the stop signal and the singleton lock
@@ -141,7 +142,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   const done = (): PassResult => { (opts.log ?? console.log)(clock.line(waits.note())); return { ran: true, failed }; };
   try {
     if (config.enabled) {
-      if (!db) throw new Error("scheduler enabled but ledger is unavailable");
+      if (!db) throw new Error("scheduler enabled but ledger is unavailable"); failed.push(...await priorityStallTick(db, config, { manager, active }));
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
       if (cut("peerPr")) return done();
       // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)

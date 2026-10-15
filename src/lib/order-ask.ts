@@ -14,6 +14,7 @@
  * 标了 risk、卡首「模板：security」、读不到规格的永远等 PM（结构化判断，不看正文）。observe 照旧，只按提问记一条「本会…」；
  * off 与改前逐字一致。tests/order-ask-default-all.test.ts。
  */
+import { tryScopeAuto } from "./ask-scope-auto.js";
 import type { PmNoticeLevel } from "./pm-notice-level.js";
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -199,6 +200,8 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
   }
   const ask = opened.ask;
   const askee = ask.assignee ?? pm;
+  const scopeAuto = tryScopeAuto(db, deps, src, q, opened);
+  if (scopeAuto) return scopeAuto;
   if (mode === "observe" && plan?.kind && !opened.existed) observeAll(deps, src, ask.id, plan.kind);
   if (plan?.lint?.length && !opened.existed) lintNote(deps, src, plan.lint);
   if (opened.existed && (ask.state !== "open" || ask.extra.notice !== "pending")) {

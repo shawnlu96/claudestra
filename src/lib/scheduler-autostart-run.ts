@@ -1,3 +1,4 @@
+import { priorityNowAttempted, priorityNowStarts } from "./scheduler-priority-now-tick.js";
 import { autostartSnapshot, type AutostartReads } from "./scheduler-autostart-snapshot.js";
 import { notifyAutostartQuotaWait } from "./scheduler-autostart-quota.js";
 import { localAutostartNode, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
@@ -110,6 +111,7 @@ function pickCandidate(env: StartTickEnv, reads: AutostartReads): Pick | null {
   projects: for (const project of [...env.svc.projects].sort()) {
     for (const { f, key, lanes, views } of autostartNodes(env.db, project, activeFeatures(env.db, project), (f) => // PRIO2: nodes by effective priority
       featureGate(env.db, f, env.svc) || schedulerV2SkipFeature(env.db, f.id) ? null : reads.feature(f))) { // S2D2: no local card for migrating / execution
+      if (priorityNowAttempted(env, f.id, key)) continue;
       const r = nodeCandidate(env.db, f, key, lanes, views, (id) => env.readSpec(id), env.now());
       if (isStop(r)) continue;
       if (wipGateNode(env.db, project, r.taskId)) continue projects;
@@ -232,6 +234,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
       try { return await env.ledger(...args); } finally { snapshot.invalidate(); }
     } };
     for (const wake of pmWakeTicks) failed.push(...await wake(readEnv));
+    await priorityNowStarts(readEnv, failed, { openCard, inFlight, quotaBlocked });
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(readEnv, snapshot.reads);
     snapshot.invalidate(); // 选完就丢弃：后续额度等待、claim 和开卡不再持有项目快照。

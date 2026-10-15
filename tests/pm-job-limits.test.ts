@@ -175,7 +175,7 @@ test("pm-job-mode switches the project mode for the real PM only and bumps the g
   expect(await cmds["pm-job-mode"]!.run(cli("on", true))).toMatchObject({ ok: true, from: "observe", jobMode: "on", modeGen: 1 });
   expect(w.digest.mode(P)).toBe("on"); // PMDIG / PMROUTE 的开关原样
   expect(w.digest.routeMode(P)).toBe("observe");
-  w.digest.setRouteMode(P, "on");
+  await w.digest.setRouteMode(P, "on");
   expect(w.store.mode(P)).toBe("on");
   const { askId } = await w.ask("验收线 1 的行数上限是多少？");
   w.advance(4000);
