@@ -12,6 +12,9 @@
  *   reason in the state file (`skipped`). One sync run at a time (sync lock); dryRun reads the center, takes no lock, writes
  *   nothing (pass it a read-only ledger connection; the instance key is only read, never generated) and runs land()'s checks up to the first write, then predicts the writer's
  *   answer (the background pull's observe mode, shared-ledger-center-replica-pull.ts).
+ * - REPLFAIR1: details are read new-first, then least recently synced (shared-ledger-center-replica-order.ts), at least
+ *   REPLICA_DETAIL_GAP_MS apart. A 429 ends the scope's round: the unread ids are skipped and their replicas get lastErrorAt, so
+ *   the next round starts with them; the scope error names the phase (list / detail), the counts and a local-cooldown 429.
  */
 import type { Database } from "bun:sqlite";
 import { createPrivateKey, createPublicKey } from "node:crypto";
@@ -34,6 +37,7 @@ import { readSharedLedgerMode, writeSharedLedgerMode, type SharedLedgerLocalCred
 import { checkReplicaNodes, REPLICA_ACTOR, REPLICA_ID_CLAIMED, replicaBoundNodes, writeCenterReplica, type CenterNode, type ReplicaWrite } from "./shared-ledger-center-replica-write.js";
 import { readCenterClaims } from "./shared-ledger-center-claims.js";
 import { readCenterReplicas, scopeKey, updateCenterReplicas, withCenterReplicaLock, withCenterReplicaSyncLock, type ReplicaScope } from "./shared-ledger-center-replica-state.js";
+import { orderReplicaIds, paceDetailRead } from "./shared-ledger-center-replica-order.js";
 
 const CENTER_TIMEOUT_MS = 5000;
 /** Fixed texts only: center bodies and exception messages never reach state files or CLI output. */
@@ -99,6 +103,8 @@ export interface CenterReplicaSyncOptions {
   /** Only this center feature (start_node / rewrite in N7X2 / N7X3). */
   centerFeatureId?: string;
   now?: () => number;
+  /** REPLFAIR1: the wait between detail reads (tests: advance a fake clock instead of waiting). */
+  sleep?: (ms: number) => Promise<void>;
   /** Transport for the real clients (tests: a fake center). Never a snapshot. */
   fetch?: typeof fetch;
   key?: () => InstanceKey | null;
@@ -112,6 +118,12 @@ export type ReplicaResult =
   | { centerFeatureId: string; result: "created" | "replayed" | "unchanged"; localFeatureId: string; version: number }
   | { centerFeatureId: string; result: "skipped" | "refused" | "failed"; reason: string; localFeatureId?: string };
 interface ScopeResult extends ReplicaScope { localProject: string; error: string | null }
+
+/** REPLFAIR1: a rate-limited scope's error, fixed text plus counts; `local` = the transport's own cooldown, not a center 429. */
+const limitedText = (phase: "list" | "detail", local: boolean, done = 0, skipped = 0) => `${REPLICA_REASONS.rateLimited}（${phase === "list"
+  ? "读列表时" : `读详情时；本轮成功 ${done} 个、跳过 ${skipped} 个`}；${local ? "本机冷却未到期，未发请求" : "中心回 429"}）`;
+const localCooldown = (e: unknown) => (e as { synthetic?: unknown } | null)?.synthetic === true;
+const LANDED = new Set<ReplicaResult["result"]>(["created", "replayed", "unchanged"]);
 
 const errorText = (e: unknown) => e instanceof SharedLedgerRemoteError && [401, 403].includes(e.status)
   ? REPLICA_REASONS.credentialRejected : e instanceof SharedLedgerRemoteError && e.status === 429
@@ -130,6 +142,8 @@ export async function syncCenterReplicas(db: Database, opts: CenterReplicaSyncOp
 
 async function syncAll(db: Database, opts: CenterReplicaSyncOptions) {
   const dir = opts.stateDir ?? STATE_DIR, now = opts.now ?? Date.now, dryRun = opts.dryRun === true;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let lastDetail: number | null = null;
   const scopes: ScopeResult[] = [], features: ReplicaResult[] = [];
   const bindings = readSharedLedgerBindings(dir).map((b) => ({ centerId: b.centerId, teamId: b.teamId, projectId: b.projectId,
     localProject: b.localProjectId ?? b.projectId })).filter((b) => !opts.localProject || b.localProject === opts.localProject);
@@ -149,17 +163,39 @@ async function syncAll(db: Database, opts: CenterReplicaSyncOptions) {
       const list = await new SharedLedgerFeatureProposalClient(credential, key, transport).listProject(scope);
       ids = [...new Set(list.proposals.flatMap((r) => r.proposal.kind === "new" && r.operation.state === "published" && r.operation.featureId
         ? [r.operation.featureId] : []))].filter((id) => !opts.centerFeatureId || id === opts.centerFeatureId);
-    } catch (e) { await fail(errorText(e)); if (errorText(e) === REPLICA_REASONS.rateLimited) break; continue; }
-    const client = new SharedLedgerClient(credential, key, transport);
-    let limited = false;
-    for (const id of ids) {
-      const result: ReplicaResult = limited ? { centerFeatureId: id, result: "skipped", reason: REPLICA_REASONS.rateLimited }
-        : await syncOne(db, dir, now, client, credential, { ...scope, localProject: b.localProject }, id, dryRun);
-      features.push(result);
-      if ("reason" in result && result.reason === REPLICA_REASONS.rateLimited) limited = true;
-      if (limited && result.result === "skipped" && !dryRun) await noteSkip(dir, now, scope, id, REPLICA_REASONS.rateLimited, null);
+    } catch (e) {
+      if (errorText(e) === REPLICA_REASONS.rateLimited) { await fail(limitedText("list", localCooldown(e))); break; }
+      await fail(errorText(e)); continue;
     }
-    if (limited) { await fail(REPLICA_REASONS.rateLimited); break; }
+    ids = orderReplicaIds(ids, readCenterReplicas(dir).replicas);
+    const client = new SharedLedgerClient(credential, key, transport);
+    let limited: { local: boolean } | null = null;
+    const unread: string[] = [];
+    let done = 0;
+    for (const id of ids) {
+      let result: ReplicaResult;
+      if (limited) result = { centerFeatureId: id, result: "skipped", reason: REPLICA_REASONS.rateLimited };
+      else {
+        lastDetail = await paceDetailRead(lastDetail, now, sleep);
+        const read: { error?: unknown } = {};
+        result = await syncOne(db, dir, now, client, credential, { ...scope, localProject: b.localProject }, id, dryRun, read);
+        if ("reason" in result && result.reason === REPLICA_REASONS.rateLimited) limited = { local: localCooldown(read.error) };
+      }
+      features.push(result);
+      if (LANDED.has(result.result)) done++;
+      if (limited && result.result === "skipped") {
+        unread.push(id);
+        if (!dryRun) await noteSkip(dir, now, scope, id, REPLICA_REASONS.rateLimited, null);
+      }
+    }
+    if (limited) {
+      // Unread replicas keep their old syncedAt and get lastErrorAt: the next round reads them before the ones read this round.
+      const landed = readCenterReplicas(dir).replicas;
+      if (!dryRun && unread.some((id) => landed[id])) await updateCenterReplicas(dir, (s) => {
+        for (const id of unread) { const e = s.replicas[id]; if (e) s.replicas[id] = { ...e, lastError: REPLICA_REASONS.rateLimited, lastErrorAt: now() }; }
+      });
+      await fail(limitedText("detail", limited.local, done, unread.length)); break;
+    }
     scopes.push({ ...scope, localProject: b.localProject, error: null });
     if (!dryRun) await updateCenterReplicas(dir, (s) => { s.scopes[scopeKey(scope)] = { syncedAt: now(), lastError: null, lastErrorAt: null }; });
   }
@@ -251,7 +287,7 @@ function boundScopesRefused(db: Database, f: Feature, next: readonly DagNode[]):
 }
 
 async function syncOne(db: Database, dir: string, now: () => number, client: SharedLedgerClient, credential: SharedLedgerLocalCredential,
-  scope: ReplicaScope & { localProject: string }, centerFeatureId: string, dryRun: boolean): Promise<ReplicaResult> {
+  scope: ReplicaScope & { localProject: string }, centerFeatureId: string, dryRun: boolean, read: { error?: unknown } = {}): Promise<ReplicaResult> {
   const { localProject, ...where } = scope;
   const prior = readCenterReplicas(dir).replicas[centerFeatureId];
   const skipped = async (reason: string): Promise<ReplicaResult> => {
@@ -270,7 +306,7 @@ async function syncOne(db: Database, dir: string, now: () => number, client: Sha
   };
   let detail: SharedLedgerFeatureDetail;
   try { detail = await client.feature(centerFeatureId); }
-  catch (e) { return failed(errorText(e)); }
+  catch (e) { read.error = e; return failed(errorText(e)); }
   if (detail.feature.projectId !== scope.projectId) return skipped(REPLICA_REASONS.otherProject);
   if (detail.feature.authorityMode !== "planning") return skipped(REPLICA_REASONS.notPlanned);
   if (detail.feature.homeInstanceId !== credential.instanceId) return skipped(REPLICA_REASONS.notHome);
