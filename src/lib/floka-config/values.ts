@@ -16,6 +16,15 @@ export function autoUpdateValue(raw: unknown, fallback: boolean): boolean {
   return next ?? old ?? fallback;
 }
 
+/** Readers stay available after an old client edits one spelling; all writers still use strict validation. */
+export function readAutoUpdateValue(raw: unknown, fallback: boolean): boolean {
+  try { return autoUpdateValue(raw, fallback); } catch (e) {
+    console.error(`[floka-config] ${(e as Error).message}; reading legacy value when valid`);
+    const au = object(raw);
+    return typeof au.claudestra === "boolean" ? au.claudestra : typeof au.floka === "boolean" ? au.floka : fallback;
+  }
+}
+
 /** The public skills API keeps its legacy vocabulary until its consumers migrate together. */
 export function legacyManager(value: "claudestra" | "floka" | "cc-switch" | null): "claudestra" | "cc-switch" | null {
   return value === "floka" ? "claudestra" : value;

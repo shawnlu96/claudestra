@@ -2,11 +2,31 @@
  * Keep this entire import graph node-only: Pi loads state-dir through Node/Jiti.
  */
 import { createHash, createPrivateKey } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { object, renameMode } from "./values.ts";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+// Cache parsed content, never resolved paths. Recheck metadata on every call, including rollback and in-place edits.
+const memo = new Map<string, { stamp: string; value: unknown }>();
+function stamp(path: string): string {
+  try {
+    // Follow config symlinks as readFile does; target edits must invalidate an unchanged link's cache too.
+    const s = statSync(path, { bigint: true });
+    return [s.dev, s.ino, s.size, s.mode, s.mtimeNs, s.ctimeNs].join(":");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw e;
+  }
+}
+function cached<T>(key: string, version: string, read: () => T): T {
+  const hit = memo.get(key);
+  if (hit?.stamp === version) return hit.value as T;
+  const value = read();
+  if (memo.size >= 2048) memo.clear(); // Bound memory across many homes or long-running maintenance histories.
+  memo.set(key, { stamp: version, value });
+  return value;
+}
 function stat(path: string) {
   try { return lstatSync(path); } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -14,28 +34,40 @@ function stat(path: string) {
   }
 }
 function json(path: string): Record<string, any> {
-  try { return object(JSON.parse(readFileSync(path, "utf8"))); } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT" || e instanceof SyntaxError) return {};
-    throw e;
-  }
+  return cached(`json:${path}`, stamp(path), () => {
+    try { return object(JSON.parse(readFileSync(path, "utf8"))); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT" || e instanceof SyntaxError) return {};
+      throw e;
+    }
+  });
 }
 function names(path: string): string[] {
-  try { return readdirSync(path); } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw e;
-  }
+  return cached(`names:${path}`, stamp(path), () => {
+    try { return readdirSync(path); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw e;
+    }
+  });
+}
+
+/** STATE2 keeps this barrier outside both roots, including a crash before its atomic rename. */
+export function maintenanceBarrierPresent(home: string): boolean {
+  const path = join(home, ".claudestra-maintenance", "state", "control", "barrier.json");
+  return !!(stat(path) || stat(`${path}.tmp`));
 }
 
 /** Same byte-level anchor as STATE1, without importing its asynchronous migration graph. */
 function identity(root: string): string | null {
   const files = ["instance-id", "instance-key.pem"].map(n => join(root, n));
   if (!files.every(p => stat(p)?.isFile())) return null;
-  const [id, key] = files.map(p => readFileSync(p));
-  if (!/^[\w-]{1,64}$/.test(id!.toString().trim())) return null;
-  try {
-    if (createPrivateKey(key!).asymmetricKeyType !== "ed25519") return null;
-  } catch { return null; } // Invalid keys cannot prove an existing identity; never print their contents.
-  return hash(Buffer.concat([id!, key!].map(b => Buffer.from(hash(b), "hex")))).slice(0, 24);
+  return cached(`identity:${root}`, files.map(stamp).join("/"), () => {
+    const [id, key] = files.map(p => readFileSync(p));
+    if (!/^[\w-]{1,64}$/.test(id!.toString().trim())) return null;
+    try {
+      if (createPrivateKey(key!).asymmetricKeyType !== "ed25519") return null;
+    } catch { return null; } // Invalid keys cannot prove an existing identity; never print their contents.
+    return hash(Buffer.concat([id!, key!].map(b => Buffer.from(hash(b), "hex")))).slice(0, 24);
+  });
 }
 
 /** Only checksum-valid, complete STATE1 journals can authorize the new default. */
@@ -66,7 +98,7 @@ function hasCommit(home: string, oldRoot: string, newRoot: string, anchor: strin
       // A subsequent interrupted/rolled-back state transaction supersedes an older successful proof.
       // Tied timestamps are conservative: every tied journal must prove a committed forward move.
       if (file.mtimeMs < latest) continue;
-      const valid = committedJournal(path, oldRoot, newRoot, anchor);
+      const valid = cached(`proof:${path}`, `${stamp(path)}:${oldRoot}:${newRoot}:${anchor}`, () => committedJournal(path, oldRoot, newRoot, anchor));
       committed = file.mtimeMs === latest ? committed && valid : valid;
       latest = file.mtimeMs;
     }
@@ -80,12 +112,17 @@ export function defaultStateRoot(home: string, oldRoot: string): string {
   const oldStat = stat(oldRoot), newStat = stat(next);
   if (!newStat) return oldRoot;
   if (!newStat.isDirectory()) throw new Error("floka state root is not a plain directory; refusing default resolution");
-  const oldId = oldStat ? identity(oldRoot) : null;
-  const newId = identity(next);
-  if (oldId && newId && oldId !== newId) throw new Error("legacy and floka state identities conflict; refusing default resolution");
   const alias = oldStat?.isSymbolicLink() && realpathSync(oldRoot) === realpathSync(next);
+  const newId = identity(next);
+  const oldId = alias ? newId : oldStat ? identity(oldRoot) : null;
+  if (oldId && newId && oldId !== newId) throw new Error("legacy and floka state identities conflict; refusing default resolution");
   if (oldStat && !oldStat.isDirectory() && !alias) throw new Error("unknown legacy state alias; refusing default resolution");
-  if (!oldStat) throw new Error("legacy state root missing without its committed alias; recover the interrupted migration first");
+  if (!oldStat) {
+    // Only the persistent STATE2 barrier makes this safe: identity generators refuse under that barrier.
+    // paths additionally gates startup so ordinary log/config writers cannot recreate the missing root.
+    if (maintenanceBarrierPresent(home)) return oldRoot;
+    throw new Error("legacy state root missing without its committed alias; recover the interrupted migration first");
+  }
   if (!alias && !oldId) throw new Error("legacy state root has no valid identity while a new root exists; refusing identity generation");
   if (!alias) return oldRoot; // Includes an empty new root. Existing identity always stays on the legacy root.
   if (!newId) throw new Error("floka state alias has no valid identity; refusing identity generation");

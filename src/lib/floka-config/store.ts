@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { readJsonState, writeJsonStateGuarded } from "../state-file.js";
 import { autoUpdateValue, object } from "./values.js";
 import type { AppConfig } from "../config-store.js";
+import { barrierActive } from "../state-maintenance/barrier.js";
 
 // Keep the source document separate from the sanitized public view. A setter must not erase
 // unknown fields or rewrite unrelated values merely because the old schema did not expose them.
@@ -34,6 +35,7 @@ function edited(raw: Record<string, any>, before: Record<string, any>, after: Re
 }
 
 export async function writeCompatibleConfig(path: string, cfg: AppConfig): Promise<void> {
+  if (barrierActive()) throw new Error("state root maintenance in progress; refusing configuration write");
   const disk = await readJsonState(path);
   const raw = disk.status === "ok" ? object(disk.data) : {};
   autoUpdateValue(raw.autoUpdate, true); // Recheck disk too, even if the caller supplied a replacement object.

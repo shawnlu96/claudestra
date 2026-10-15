@@ -9,7 +9,7 @@ import { normalizeCompactKeep } from "./ctx-boundary-policy.js";
 import { CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
 import { readJsonState, readJsonStateSync, reportCorrupt, type StateRead } from "./state-file.js";
 
-import { autoUpdateValue } from "./floka-config/values.js";
+import { readAutoUpdateValue as autoUpdateValue } from "./floka-config/values.js";
 import { configView, writeCompatibleConfig } from "./floka-config/store.js";
 const CONFIG_PATH = STATE_CONFIG_PATH;
 

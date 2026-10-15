@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { nodeStateFs } from "../src/lib/floka-migration/state/fs-adapter.ts";
-import { migrateState, rollbackState } from "../src/lib/floka-migration/state/migrate.ts";
+import { migrateState, rollbackState, recoverState } from "../src/lib/floka-migration/state/migrate.ts";
 import { testChildEnv } from "./test-env.ts";
 
 const roots: string[] = [];
@@ -22,12 +22,13 @@ function fixture() {
   writeFileSync(join(oldRoot, "config.json"), JSON.stringify({ rename: { state: "on" }, autoUpdate: { claudestra: false } }));
   return { home, oldRoot, newRoot, journalDir, txId: "run-1", fs: nodeStateFs, mode: "on", writers: { activeWriters: async () => [] } };
 }
-function child(home: string, code: string, override?: string) {
+function child(home: string, code: string | string[], override?: string) {
   const env = testChildEnv({ HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "run"), BRIDGE_PORT: "9" });
   delete env.CLAUDESTRA_STATE_DIR;
   delete env.FLOKA_STATE_DIR;
   if (override) env.CLAUDESTRA_STATE_DIR = override;
-  return spawnSync(process.execPath, ["--no-env-file", "--config=/dev/null", "-e", code], { env, encoding: "utf8", cwd: import.meta.dir + "/.." });
+  const argv = typeof code === "string" ? ["-e", code] : code;
+  return spawnSync(process.execPath, ["--no-env-file", "--config=/dev/null", ...argv], { env, encoding: "utf8", timeout: 20_000, cwd: import.meta.dir + "/.." });
 }
 function resolved(f: ReturnType<typeof fixture>) {
   const r = child(f.home, 'import {stateDir} from "./src/lib/state-dir.ts"; console.log(stateDir());');
@@ -80,6 +81,30 @@ test("[验收线 2] conflicting config refuses automatic overwrite", () => {
   expect(r.status).not.toBe(0);
   expect(r.stderr).toContain("autoUpdate");
   expect(readFileSync(path, "utf8")).toBe(raw);
+});
+
+test("[验收线 2] conflicting brand values remain readable with legacy precedence and a value-free diagnostic", () => {
+  const f = fixture(), path = join(f.oldRoot, "config.json");
+  const raw = JSON.stringify({ autoUpdate: { claudestra: false, floka: true }, lang: "en", groqApiKey: "fixture-secret" });
+  writeFileSync(path, raw);
+  const r = child(f.home, `import {readConfig,readConfigSync} from './src/lib/config-store.ts';
+    console.log(JSON.stringify([(await readConfig()).autoUpdate.claudestra, readConfigSync().lang]));`, f.oldRoot);
+  expect(r.status).toBe(0);
+  expect(JSON.parse(r.stdout)).toEqual([false, "en"]);
+  expect(r.stderr).toContain("autoUpdate.claudestra conflicts with autoUpdate.floka");
+  expect(r.stderr).not.toContain("fixture-secret");
+  expect(readFileSync(path, "utf8")).toBe(raw);
+});
+
+test("[验收线 2] stale writers refuse overwriting newer unrelated settings", () => {
+  const f = fixture(), path = join(f.oldRoot, "config.json");
+  const r = child(f.home, `import {readConfig,writeConfig,setLang} from './src/lib/config-store.ts';
+    const stale=await readConfig(); await setLang('en'); stale.pushAllAsks=true;
+    try { await writeConfig(stale); process.exit(3); } catch (e) { console.log(e.message); }`, f.oldRoot);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("config changed since read");
+  expect(JSON.parse(readFileSync(path, "utf8")).lang).toBe("en");
+  expect(JSON.parse(readFileSync(path, "utf8")).pushAllAsks).toBeUndefined();
 });
 
 test("[验收线 3] custom roots remain explicit and require approval to move", async () => {
@@ -290,4 +315,95 @@ test("[验收线 1] interruption between move and alias refuses startup until re
   expect(existsSync(f.oldRoot)).toBe(false);
   expect((await migrateState(f)).status).toBe("committed");
   expect(resolved(f)).toBe(f.newRoot);
+});
+
+for (const point of ["committed:state-move", "rollback_failed", "committed:state-unalias"]) {
+  test(`[验收线 1] STATE2 entries load behind the persistent barrier after ${point}`, async () => {
+    const f = fixture();
+    const { maintenanceRoot, prepareMaintenanceRoot } = await import("../src/lib/state-maintenance/paths.ts");
+    const { raiseBarrier } = await import("../src/lib/state-maintenance/barrier.ts");
+    const root = maintenanceRoot(f.home);
+    prepareMaintenanceRoot(root, [f.oldRoot, f.newRoot]);
+    raiseBarrier(root, { runId: f.txId, since: Date.now(), reason: "interrupted fixture" });
+    if (point === "rollback_failed") renameSync(join(root, "control/barrier.json"), join(root, "control/barrier.json.tmp"));
+    if (point.includes("unalias")) expect((await migrateState(f)).status).toBe("committed");
+    const action = point.includes("unalias") ? rollbackState : migrateState;
+    if (point === "rollback_failed") {
+      let asks = 0;
+      const writers = { activeWriters: async () => ++asks > 4 ? ["late fixture writer"] : [] };
+      expect((await migrateState({ ...f, writers })).status).toBe("rollback_failed");
+    } else {
+      await expect(action({ ...f, txId: point.includes("unalias") ? "rollback-1" : f.txId,
+        crashAt: p => { if (p === point) throw Error("crash"); } })).rejects.toThrow("crash");
+    }
+    expect(existsSync(f.oldRoot)).toBe(false);
+    for (const entry of ["state-maintenance-runner", "manager"]) {
+      const args = entry === "manager" ? ["state-maintenance", "status"] : ["recover", f.txId];
+      const r = child(f.home, `process.argv=[process.execPath,'src/${entry}.ts',...${JSON.stringify(args)}];
+        await import('./src/${entry}.ts'); console.log('import-ok');`);
+      expect(r.stderr).toBe("");
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("import-ok");
+      expect(existsSync(f.oldRoot)).toBe(false);
+    }
+    const status = child(f.home, ["src/manager.ts", "state-maintenance", "status"]);
+    expect(status.status).toBe(0);
+    expect(JSON.parse(status.stdout).ok).toBe(true);
+    expect(existsSync(f.oldRoot)).toBe(false);
+    for (const body of [
+      `const {instanceIdSync}=await import('./src/lib/instance-id.ts'); instanceIdSync();`,
+      `const {instanceKeySync}=await import('./src/lib/instance-key.ts'); instanceKeySync();`,
+      `const {setLang}=await import('./src/lib/config-store.ts'); await setLang('en');`,
+    ]) {
+      const r = child(f.home, body);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toMatch(/maintenance|维护/);
+      expect(existsSync(f.oldRoot)).toBe(false);
+    }
+    for (const entry of ["bridge", "launcher", "cron", "scheduler", "channel-server", "manager"]) {
+      const r = child(f.home, [`src/${entry}.ts`, ...(entry === "manager" ? ["auto-update", "claudestra", "on"] : [])]);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr.trim()).toBe("状态迁移维护未完成，请到维护页恢复");
+      expect(existsSync(f.oldRoot)).toBe(false);
+    }
+    expect(readFileSync(join(f.newRoot, "instance-id"), "utf8")).toBe("fixture-instance\n");
+    // The existing STATE1 compensation can still return the data: no startup writer recreated its destination.
+    expect((await recoverState({ ...f, txId: point.includes("unalias") ? "rollback-1" : f.txId },
+      point.includes("unalias") ? "rollback" : "migrate")).status).toBe("rolled_back");
+
+  });
+}
+
+test("[验收线 1] warm resolution avoids content reads and observes in-process config, journal and identity changes", async () => {
+  const f = fixture();
+  expect((await migrateState(f)).status).toBe("committed");
+  for (let i = 0; i < 80; i++) writeFileSync(join(f.journalDir, `config-${i}.journal.json`), JSON.stringify({ plan: ["config.brand"] }));
+  const r = child(f.home, `
+    const fs=require('node:fs'), crypto=require('node:crypto');
+    const counts={read:0,list:0,key:0};
+    for (const [obj,key,counter] of [[fs,'readFileSync','read'],[fs,'readdirSync','list'],[crypto,'createPrivateKey','key']]) {
+      const original=obj[key]; obj[key]=(...args)=>{ counts[counter]++; return original(...args); };
+    }
+    const {defaultStateRoot}=await import('./src/lib/floka-config/default-root.ts');
+    const home=${JSON.stringify(f.home)}, old=${JSON.stringify(f.oldRoot)}, next=${JSON.stringify(f.newRoot)};
+    const root=()=>defaultStateRoot(home,old), results=[root()];
+    counts.read=counts.list=counts.key=0;
+    for(let i=0;i<10;i++) results.push(root());
+    const warm={...counts};
+    const config=next+'/config.json', journal=${JSON.stringify(join(f.journalDir, "run-1.journal.json"))};
+    const original=fs.readFileSync(journal,'utf8');
+    fs.renameSync(config,config+'.target'); fs.symlinkSync(config+'.target',config);
+    fs.writeFileSync(config,JSON.stringify({rename:{state:'off'}})); results.push(root());
+    fs.writeFileSync(config,JSON.stringify({rename:{state:'on'}})); results.push(root());
+    fs.writeFileSync(journal,original.replace('"committed"','"running"')); results.push(root());
+    fs.writeFileSync(journal,original); results.push(root());
+    const extra=${JSON.stringify(join(f.journalDir, "later.journal.json"))};
+    fs.writeFileSync(extra,'{}'); results.push(root()); fs.unlinkSync(extra); results.push(root());
+    fs.writeFileSync(next+'/instance-id','changed-instance'); results.push(root());
+    console.log(JSON.stringify({warm,results}));`);
+  expect(r.stderr).toBe("");
+  expect(r.status).toBe(0);
+  const out = JSON.parse(r.stdout);
+  expect(out.warm).toEqual({ read: 0, list: 0, key: 0 });
+  expect(out.results).toEqual([...Array(11).fill(f.newRoot), f.oldRoot, f.newRoot, f.oldRoot, f.newRoot, f.oldRoot, f.newRoot, f.oldRoot]);
 });
