@@ -93,6 +93,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1",
     "scheduler-post-verify.ts": "ledger=2",
+    "scheduler-priority-order-record.ts": "ledger=1", // PRIO2: `ledger scheduler-priority-sample` (queued sort samples) through the pass manager
     "scheduler-recovery-ports.ts": "ledger=5",
     "scheduler-review-pm-tick.ts": "ledger=1",
     "scheduler-review-seat-wait.ts": "ledger=1",

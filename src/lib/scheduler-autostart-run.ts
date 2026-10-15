@@ -25,6 +25,7 @@ import { pmWakeTicks } from "./scheduler-merge-pm-tick.js";
 import type { TickPace } from "./scheduler-yield.js";
 import { schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 import { wipGateNode } from "./scheduler-wip-gate.js";
+import { sortByPriority } from "./scheduler-priority-order.js";
 
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
 type Failed = { taskId: string; error: string }[];
@@ -107,7 +108,7 @@ interface Pick { cand: Candidate; maxWorkers: number }
 /** 按项目、feature、车道顺序挑第一个过了全部门的节点；项目合并队列拥堵（WIP 闸 on）就跳过这个项目，claim 前不写任何东西 */
 function pickCandidate(env: StartTickEnv, reads: AutostartReads): Pick | null {
   projects: for (const project of [...env.svc.projects].sort()) {
-    for (const f of activeFeatures(env.db, project)) {
+    for (const f of sortByPriority(env.db, "autostart", activeFeatures(env.db, project), (x) => ({ project, taskId: null, featureId: x.id })).applied) { // PRIO2
       if (featureGate(env.db, f, env.svc) || schedulerV2SkipFeature(env.db, f.id)) continue; // S2D2: no local card for migrating / execution
       const { lanes, views } = reads.feature(f);
       for (const key of lanes?.startNow ?? []) {

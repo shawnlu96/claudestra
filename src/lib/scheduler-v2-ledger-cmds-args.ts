@@ -12,6 +12,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-plan": rule("task", "mixed"),
   "scheduler-center-deploy": rule("task", "unmapped"),
   "scheduler-pm-todo": rule("task", "unmapped"),
+  "scheduler-priority-sample": rule("task", "unmapped"),
   "scheduler-deploy-reconcile": rule("task", "unmapped"),
   "scheduler-settle": rule("intent", "mixed"),
   "scheduler-stage": rule("intent", "central"),

@@ -28,6 +28,7 @@ import { ciIoMapFuse } from "./ci-io-map-fuse-wiring.js";
 import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { schedulerV2SkipAny, schedulerV2Unskipped } from "./scheduler-v2-skip.js";
+import { sortByPriority } from "./scheduler-priority-order.js";
 import { mainCiTrainPause } from "./scheduler-main-ci-wiring-gate.js";
 import { ciProofAdmits, ciProofTrain } from "./scheduler-ci-proof-gate.js";
 import { formingSave, memberCheck, unifiedFiles, unifiedTrainCandidates } from "./merge-queue-candidates-member.js";
@@ -177,7 +178,8 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
         } };
       const voided = live && live.phase !== "done" ? mainCiTrainPause(db, live, train) : null; if (voided) await train.notify(live!, voided, false); // MAINCIW
       if (live && live.phase !== "done") { if (!schedulerV2SkipAny(db, live.members)) await stepTrain(live, train); } // S2D2: skip members hold the train
-      else await formTrain(project, schedulerV2Unskipped(db, unifiedTrainCandidates(db, project, trainCandidates(db, project), deps.now())),
+      else await formTrain(project, sortByPriority(db, "train_boarding", // PRIO2: the next train only
+        schedulerV2Unskipped(db, unifiedTrainCandidates(db, project, trainCandidates(db, project), deps.now())), (c) => ({ project, taskId: c.taskId })).applied,
         { ...train, store: fenced(ctx.store, project, deps.formFence) }, (c) => cachedFiles(ctx.gh, c), nextSkip(live));
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;

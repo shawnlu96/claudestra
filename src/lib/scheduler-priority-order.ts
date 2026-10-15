@@ -10,14 +10,20 @@
 import type { Database } from "bun:sqlite";
 import { readPriority, readPriorityModes } from "./ledger-priority-read.js";
 import { PRIORITY_BANDS, type PriorityBand, type PriorityMode } from "./ledger-priority-types.js";
-import { recordPrioritySort } from "./scheduler-priority-order-record.js";
+import { getTask } from "./ledger-store.js";
+import { recordPrioritySort, type SampleInput } from "./scheduler-priority-order-record.js";
 
 /** The competing entries; each records under its own name so PM can check that all of them are covered. */
 export type PrioritySortEntry = "author" | "review" | "local_slot" | "lend_slot" | "autostart" | "manual_merge" | "merge_contest"
   | "train_boarding";
+/** One list can hold several entries (the auto tick's cards: author steps and review dispatches); samples are kept per entry. */
+type EntryOf<T> = PrioritySortEntry | ((item: T) => PrioritySortEntry);
 
-/** What the module needs to know about one candidate. taskId null = no work identity: system default `next`, never registered. */
-export interface PriorityKey { project: string; taskId: string | null }
+/**
+ * What the module needs to know about one candidate. taskId null = no work identity: the feature's band when `featureId` is given
+ * (an autostart node whose card is not opened yet), else the system default `next`, never registered.
+ */
+export interface PriorityKey { project: string; taskId: string | null; featureId?: string }
 
 /** A band as read right now. `order` is the owner's explicit place inside the band (null = not listed). */
 interface PriorityRank { band: PriorityBand; source: string; rev: number; order: number | null }
@@ -25,7 +31,7 @@ interface PriorityRank { band: PriorityBand; source: string; rev: number; order:
 /** Reads stay injectable for tests; the default reads the ledger fresh on every call (no snapshot outlives one sort). */
 export interface PriorityReader {
   mode(project: string): PriorityMode;
-  rank(project: string, taskId: string | null, queue: string): PriorityRank;
+  rank(project: string, taskId: string | null, queue: string, featureId?: string): PriorityRank;
 }
 
 const SYSTEM: PriorityRank = { band: "next", source: "system", rev: 0, order: null };
@@ -38,10 +44,10 @@ function ledgerPriorityReader(db: Database): PriorityReader {
         return m?.mode === "on" || m?.mode === "off" ? m.mode : "observe";
       } catch { return "off"; } // an unreadable switch is no switch: the old order runs
     },
-    rank(project, taskId, queue) {
-      if (!taskId) return SYSTEM;
+    rank(project, taskId, queue, featureId) {
+      if (!taskId && !featureId) return SYSTEM;
       try {
-        const v = readPriority(db, project, { kind: "task", id: taskId }, queue);
+        const v = readPriority(db, project, taskId ? { kind: "task", id: taskId } : { kind: "feature", id: featureId! }, queue);
         return { band: v.effective, source: v.source, rev: v.rev, order: v.order };
       } catch { return { ...SYSTEM, source: "unreadable" }; } // unknown card: system default, never a promotion
     },
@@ -109,7 +115,7 @@ function rankCandidates<T>(reader: PriorityReader, items: readonly T[], keyOf: (
     if (!modes.has(key.project)) modes.set(key.project, reader.mode(key.project));
     const mode = modes.get(key.project)!;
     return { item, key, index, mode, pinned: opts.pinned?.(item) ?? false,
-      rank: mode === "off" ? null : reader.rank(key.project, key.taskId, queue) };
+      rank: mode === "off" ? null : reader.rank(key.project, key.taskId, queue, key.featureId) };
   });
 }
 
@@ -117,7 +123,7 @@ function rankCandidates<T>(reader: PriorityReader, items: readonly T[], keyOf: (
  * The single ordering entry. Call it right where the competing list is read; the returned `applied` replaces the list. Under
  * observe `applied` is the caller's list itself (same items, same order), so budgets, cursors and slots keep the old behavior.
  */
-export function sortByPriority<T>(db: Database | null, entry: PrioritySortEntry, items: readonly T[], keyOf: (item: T) => PriorityKey,
+export function sortByPriority<T>(db: Database | null, entry: EntryOf<T>, items: readonly T[], keyOf: (item: T) => PriorityKey,
   opts: SortOptions<T> = {}): SortResult<T> {
   const reader = opts.reader ?? (db ? ledgerPriorityReader(db) : null);
   const legacy = [...items];
@@ -126,8 +132,16 @@ export function sortByPriority<T>(db: Database | null, entry: PrioritySortEntry,
   if (ranked.every((r) => r.mode === "off")) return passThrough(legacy, ranked);
   const on = refill(ranked, movable((m) => m === "on")), would = refill(ranked, movable((m) => m !== "off"));
   const result = finish(legacy, on.map((r) => r.item), would.map((r) => r.item), ranked);
-  if (opts.record !== false && db) recordPrioritySort(db, entry, { ranked, would, opts, now: opts.now });
+  if (opts.record !== false) {
+    recordByEntry(entry, ranked, (part) => ({ ranked: part, would: would.filter((r) => part.includes(r)), opts, now: opts.now, ledger: db?.filename }));
+  }
   return result;
+}
+
+function recordByEntry<T>(entry: EntryOf<T>, ranked: Ranked<T>[], input: (part: Ranked<T>[]) => SampleInput<T>): void {
+  if (typeof entry === "string") { recordPrioritySort(entry, input(ranked)); return; }
+  const live = ranked.filter((r) => r.mode !== "off"), of = new Map(live.map((r) => [r, entry(r.item)]));
+  for (const e of new Set(of.values())) recordPrioritySort(e, input(live.filter((r) => of.get(r) === e)));
 }
 
 function passThrough<T>(legacy: T[], ranked: Ranked<T>[] = []): SortResult<T> {
@@ -181,35 +195,85 @@ export function claimFirst<T>(db: Database | null, entry: PrioritySortEntry, ite
     const r = sort.rankOf(x), w = why(x);
     if (r?.rank && w !== null) blocked.push({ project: r.key.project, taskId: r.key.taskId, band: r.rank.band, why: w });
   }
-  if (opts.record !== false && db && sort.ranked.some((r) => r.mode !== "off")) {
-    recordPrioritySort(db, entry, { ranked: sort.ranked, would: refill(sort.ranked, movable((m) => m !== "off")), opts, now: opts.now,
+  if (opts.record !== false && sort.ranked.some((r) => r.mode !== "off")) {
+    recordPrioritySort(entry, { ranked: sort.ranked, would: refill(sort.ranked, movable((m) => m !== "off")), opts, now: opts.now, ledger: db?.filename,
       claim: { legacy: legacyChosen, would: wouldChosen, blocked } });
   }
   return { chosen, blocked, legacyChosen, wouldChosen, sort };
 }
 
 type ContestWinner = "manual" | "auto" | "tie";
-export interface ContestResult { winner: ContestWinner; would: ContestWinner; manual: PriorityBand | null; auto: PriorityBand | null }
+export interface ContestResult { winner: ContestWinner; would: ContestWinner; manual: PriorityBand | null; auto: PriorityBand | null; autoTaskId?: string }
 
 /**
  * Manual request head vs the auto merge candidates for the one merge slot. The owner's ranking (band, then explicit order inside
  * the band) decides; only when it cannot tell the manual head from the best auto candidate (or the project is not on) is it `tie`,
- * and the existing manual/auto fairness (owedToAuto, eventSeq order) decides exactly as before.
+ * and the existing manual/auto fairness (owedToAuto, eventSeq order) decides exactly as before. The auto list may be given lazily:
+ * an off project never reads it.
  */
-export function mergeContest(db: Database | null, project: string, manualTaskId: string | null, autoTaskIds: readonly string[],
-  opts: Pick<SortOptions<string>, "reader" | "record" | "now"> = {}): ContestResult {
+export function mergeContest(db: Database | null, project: string, manualTaskId: string | null,
+  autoList: readonly string[] | (() => readonly string[]), opts: Pick<SortOptions<string>, "reader" | "record" | "now"> = {}): ContestResult {
   const none: ContestResult = { winner: "tie", would: "tie", manual: null, auto: null };
   const reader = opts.reader ?? (db ? ledgerPriorityReader(db) : null);
-  if (!reader || !manualTaskId || !autoTaskIds.length) return none;
+  if (!reader || !manualTaskId) return none;
   const mode = reader.mode(project);
   if (mode === "off") return none;
+  const autoTaskIds = typeof autoList === "function" ? autoList() : autoList;
+  if (!autoTaskIds.length) return none;
   const manual = reader.rank(project, manualTaskId, "project");
-  const auto = autoTaskIds.map((id) => reader.rank(project, id, "project")).sort(ownerAhead)[0]!;
-  const cmp = ownerAhead(manual, auto), would: ContestWinner = cmp < 0 ? "manual" : cmp > 0 ? "auto" : "tie";
-  if (opts.record !== false && db) {
+  const best = autoTaskIds.map((id) => ({ id, r: reader.rank(project, id, "project") })).sort((a, b) => ownerAhead(a.r, b.r))[0]!;
+  const cmp = ownerAhead(manual, best.r), would: ContestWinner = cmp < 0 ? "manual" : cmp > 0 ? "auto" : "tie";
+  if (opts.record !== false) {
     const items = [`manual:${manualTaskId}`, ...autoTaskIds.map((id) => `auto:${id}`)];
-    const ranked = rankCandidates(reader, items, (s) => ({ project, taskId: s.slice(s.indexOf(":") + 1) }));
-    recordPrioritySort(db, "merge_contest", { ranked, would: refill(ranked, () => true), opts: {}, now: opts.now, contest: would });
+    const ranked = rankCandidates(reader, items, (x) => ({ project, taskId: x.slice(x.indexOf(":") + 1) }));
+    recordPrioritySort("merge_contest", { ranked, would: refill(ranked, () => true), opts: {}, now: opts.now, contest: would, ledger: db?.filename });
   }
-  return { winner: mode === "on" ? would : "tie", would, manual: manual.band, auto: auto.band };
+  return { winner: mode === "on" ? would : "tie", would, manual: manual.band, auto: best.r.band, autoTaskId: best.id };
 }
+
+/**
+ * manualTurn's owed decision with the contest in front: the owner's ranking puts the manual head first → not owed; puts an auto
+ * candidate first → owed to it; cannot tell → the legacy owedToAuto rule, untouched.
+ */
+export function contestOwed(c: ContestResult, legacy: () => string | null): string | null {
+  if (c.winner === "manual") return null;
+  if (c.winner === "auto") return `自动卡 ${c.autoTaskId} 的工作优先级（${c.auto}）排在人工合并请求（${c.manual}）前面，先轮自动`;
+  return legacy();
+}
+
+/** The auto tick's cards in the order the not-yet-stepped ones were handed out, per non-off project (claimSlot re-reads them). */
+const slotQueues = new Map<string, string[]>();
+
+/** The auto tick's card list: author steps and review dispatches share it; remembered for the pool claim's re-read. */
+export function slotOrder<T extends { project: string; taskId: string }>(db: Database, cards: readonly T[], opts: SortOptions<T> = {}): SortResult<T> {
+  const r = sortByPriority(db, (c) => (getTask(db, c.taskId)?.stage === "review" ? "review" : "author"), cards, (c) => c, opts);
+  slotQueues.clear();
+  for (const project of new Set(r.ranked.filter((x) => x.mode !== "off").map((x) => x.key.project))) {
+    slotQueues.set(project, r.applied.filter((c) => c.project === project).map((c) => c.taskId));
+  }
+  return r;
+}
+
+/**
+ * Right before `ledger scheduler-pool` takes a seat (PM 定 3): re-read the bands of this card and of the cards still behind it in
+ * this pass. A card behind that now ranks ahead (a band or owner order changed after the sort) gets the seat: on → this card is held
+ * with the hold-up recorded; observe → only "would yield" is recorded and the claim goes on; off → nothing read beyond the mode.
+ * The other cards' own gates are judged when the loop reaches them, so a held card waits one pass at most.
+ */
+export function claimSlot(db: Database | null, entry: "local_slot" | "lend_slot", task: { project: string; id: string },
+  opts: Pick<SortOptions<string>, "reader" | "now"> = {}): { step: string; detail: string } | null {
+  const reader = opts.reader ?? (db ? ledgerPriorityReader(db) : null);
+  if (!reader || reader.mode(task.project) === "off") return null;
+  const queue = slotQueues.get(task.project) ?? [], at = queue.indexOf(task.id);
+  if (at < 0 || at === queue.length - 1) return null;
+  const items = queue.slice(at);
+  const r = claimFirst(db, entry, items, (id) => ({ project: task.project, taskId: id }), () => null, { reader, now: opts.now });
+  if (r.wouldChosen === task.id || !r.wouldChosen) return null;
+  if (r.sort.rankOf(task.id)?.mode !== "on") return null;
+  slotQueues.set(task.project, queue.filter((id) => id !== task.id));
+  const ahead = r.sort.rankOf(r.wouldChosen)?.rank;
+  return { step: "held", detail: `认领前重读工作优先级：${r.wouldChosen}（${ahead?.band ?? "next"}）现排在本卡前面，本轮让出名额` };
+}
+
+/** Tests only: forget the remembered pass. */
+export const resetSlotQueues = (): void => slotQueues.clear();

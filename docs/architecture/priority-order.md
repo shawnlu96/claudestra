@@ -29,7 +29,12 @@ off / observe 项目的卡原位不动。
 
 样本是项目级 `note` 事件，`data.op=priority-sort-sample`，含入口名、候选的档位/来源/版本/显式位置、
 旧次序、新次序、认领结果（旧认领 / 本会认领 / 卡点）及合并竞争结论。去重键是这些内容的哈希：
-重复 tick 不刷记录；候选、档位版本或结果变了才新记一条。写失败只打日志，不影响调度。
+重复 tick 不刷记录；候选、档位版本或结果变了才新记一条。每个入口第一次真实竞争（两张及以上候选）必记一条，
+供 PM 确认入口都覆盖；之后只记新旧有差异的。只有一张候选的列表不记。
+
+排序与认领本身从不写台账（调度整轮用只读句柄，`manualTurn`、开卡挑选都是纯读）：样本先进进程内缓冲，
+auto tick 之后由 `flushPrioritySamples(manager)` 经调度身份的 `ledger scheduler-priority-sample --project P --dedup K --data JSON`
+（只认 scheduler 身份，同一 dedup 只记一次）写出，每轮最多 20 条，超出丢最旧的并打一行日志。写失败只打日志，不影响调度。
 
 ## API
 
@@ -41,9 +46,13 @@ off / observe 项目的卡原位不动。
 - `liftWithinBand(result, item)`：既有提升（预算补偿欠的卡、公平队首）的替代。
   on 项目的卡只在 owner 排序（档位 + 同档显式顺序）分不出先后的范围内提前：不越过更高档的卡，
   也不越过 owner 在同档显式排在它前面的卡；off / observe 照旧直接提到队首。
-- `mergeContest(db, project, manualTaskId, autoTaskIds)`：人工队首与自动候选争合并槽。
+- `mergeContest(db, project, manualTaskId, autoTaskIds | () => ids)`：人工队首与自动候选争合并槽。
   先比档位，同档再比 owner 显式顺序；两者都分不出先后才返回 `tie`，交回现有人工/自动公平规则（owedToAuto、eventSeq）。
-  observe 下 `winner` 恒为 `tie`，`would` 记本会的结论。
+  observe 下 `winner` 恒为 `tie`，`would` 记本会的结论。`contestOwed` 把结论接到 `manualTurn` 的 owed 判断上。
+- `slotOrder(db, cards)`：auto tick 的卡列表（作者派单与审查派单同一列表，样本按卡所在阶段分记 `author` / `review`），
+  并记下各 on/observe 项目尚未推进的卡次序，供认领前重读。
+- `claimSlot(db, "local_slot" | "lend_slot", task)`：`drivePool` 调 `ledger scheduler-pool` 之前重读本卡与本轮排在它后面的卡：
+  后面的卡现在排到前面了，on 返回 held 记卡点、本轮让出；observe 只记「本会让出」照旧认领；off 只读开关不读档位。
 
 入口名：`author`、`review`、`local_slot`、`lend_slot`、`autostart`、`manual_merge`、`merge_contest`、`train_boarding`。
 
@@ -53,19 +62,19 @@ off / observe 项目的卡原位不动。
 - 恢复、结果对账、必须完成的收尾不进新派单名额竞争，继续走现有保底份额。
 - scheduler 不会自动升档；低档长期等待由 PM 看样本后找 owner。
 
-## 接线（每处一行调用，待 PM 精准例外）
+## 接线（PM 精准例外，每处一行调用或包一层）
 
-本单 globs 只含新模块、测试与本文档。以下接线点需 PM 逐项登记精准例外后各加一行，不整文件重排：
-
-| 文件 | 函数 | 调用 |
+| 文件 | 位置 | 调用 |
 | --- | --- | --- |
-| `src/lib/scheduler-auto-tick.ts` | `schedulerAutoTick`：`ordered = mergeFirst(...)` 之后；`fair` 提升改走 `liftWithinBand` | `sortByPriority(db, "author", ordered, (c) => ({ project: c.project, taskId: c.taskId }))` |
-| `src/lib/scheduler-autostart-run.ts` | 自动开工候选列表读出处 | `sortByPriority(db, "autostart", …)` |
-| `src/lib/scheduler-pool-tick.ts` / 本机名额入口 | 名额认领前 | `claimFirst(db, "local_slot" / "lend_slot", …)` |
-| `src/lib/manual-merge-queue.ts` | `manualTurn`：`queued` 取队首前；`owedToAuto` 之前 | `sortByPriority(db, "manual_merge", queued, …)`、`mergeContest(...)` |
-| `src/lib/scheduler-merge-train-tick.ts` | `trainCandidates` 返回值交给 `formTrain` 前 | `sortByPriority(db, "train_boarding", cands, …)` |
+| `src/lib/scheduler-auto-tick.ts` | `schedulerAutoTick`：`mergeFirst(...)` 外包一层；预算补偿的提升与单卡名额 | `slotOrder(db, …)`、`liftWithinBand(sorted, fair)` |
+| `src/lib/scheduler-pool-tick.ts` | `drivePool`：`ledger scheduler-pool` 之前（不排序） | `claimSlot(db, …)` |
+| `src/lib/scheduler-autostart-run.ts` | `pickCandidate`：项目内 feature 列表（卡未开，按 feature 档位） | `sortByPriority(db, "autostart", …)` |
+| `src/lib/manual-merge-queue.ts` | `manualTurn`：`queued`；`owedToAuto` 之前 | `sortByPriority(db, "manual_merge", …)`、`contestOwed(mergeContest(…), …)` |
+| `src/lib/scheduler-merge-train-tick.ts` | 组新车的候选（在途列车不经过这里） | `sortByPriority(db, "train_boarding", …)` |
+| `src/lib/scheduler-pass.ts` | auto tick 之后 | `flushPrioritySamples(manager)` |
 
-审查派单（`review`）与作者派单共用 auto tick 的卡列表；按 `plan.action` 区分入口名时同样一行。
+写口登记：`src/manager/ledger-scheduler-recovery-cmds.ts`（`...priorityOrderCmds`）、`shared-ledger-gate-cli-services.ts`（调度身份白名单）、
+`scheduler-v2-skip-paths.ts`（`SKIP_LEDGER_COMMANDS` 与 `SCHEDULER_PASS_PATHS`）、`scheduler-v2-ledger-cmds-args.ts`、`scheduler-v2-skip-effects.ts`。
 
 ## 上线
 
