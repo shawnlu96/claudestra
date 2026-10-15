@@ -129,17 +129,28 @@ function closePipesOnExit(child: childProcess.ChildProcess) {
   child.once("exit", () => { for (const stream of child.stdio) stream?.destroy(); });
 }
 
+let chrome: childProcess.ChildProcess | undefined;
 async function launchBrowser() {
   const spawn = childProcess.spawn;
   const hook = spyOn(childProcess, "spawn").mockImplementation(((...args: unknown[]) => {
     const child = Reflect.apply(spawn, childProcess, args) as childProcess.ChildProcess;
-    if (Array.isArray(args[1]) && args[1].includes("--remote-debugging-pipe")) closePipesOnExit(child);
+    if (Array.isArray(args[1]) && args[1].includes("--remote-debugging-pipe")) { closePipesOnExit(child); chrome = child; }
     return child;
   }) as typeof childProcess.spawn);
   try {
     return await chromium.launch({ headless: true,
       ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   } finally { hook.mockRestore(); }
+}
+
+/** CI 慢机上 browser.close() 偶尔等不到 Chromium 退出、把 afterAll 拖满 60s；限时没关掉就 SIGKILL 它，再给 close() 一次收尾的机会。 */
+async function closeBrowser(b: Browser) {
+  const within = (p: Promise<unknown>, ms: number) => Promise.race([p.then(() => true, () => true), Bun.sleep(ms).then(() => false)]);
+  if (await within(b.close(), 15_000)) return;
+  console.error("[collab-unified] browser.close() 15s 未返回，强杀 Chromium");
+  chrome?.kill("SIGKILL");
+  for (const stream of chrome?.stdio ?? []) stream?.destroy();
+  await within(b.close(), 5_000);
 }
 
 beforeAll(async () => {
@@ -178,7 +189,7 @@ afterAll(async () => {
       testSha256: createHash("sha256").update(readFileSync("tests/web-collab-unified-browser.test.ts")).digest("hex"), shots: manifest }, null, 2), { mode: 0o600 });
   } finally {
     try {
-      await browser?.close();
+      if (browser) await closeBrowser(browser);
     } finally {
       server?.stop(true);
       if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true });
