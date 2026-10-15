@@ -57,31 +57,34 @@ export async function runCenterDeployJob(request: string, deps: WorkerDeps = {})
   const r: CenterResult = { status: "failed", code: null, ms: 0, dryRun: true, timedOut: false };
   let lock: Awaited<ReturnType<typeof acquireDeployLock>> | undefined;
   let checkout: Awaited<ReturnType<typeof centerCheckout>> | undefined;
-  const term = () => {
-    r.ms = now() - start;
-    try { write(r); } finally { if (lock?.kind === "acquired") lock.handle.release(); }
-    process.exit(143);
-  };
-  process.once("SIGTERM", term);
+  let terminated = false;
+  const term = () => { terminated = true; };
+  const running = () => { if (terminated) throw new Error("中心部署收到 SIGTERM"); };
+  process.on("SIGTERM", term);
   try {
     if (!(deps.centerAuthorized ?? centerWorkerAuthorized)(job, now())) { r.status = "stale"; return write(r); }
     const fresh = await centerProof(c.proof.project, c.config, c.proof.cards, { run: deps.run, repoDir: () => job.repoDir });
+    running();
     if (canonicalJson(fresh) !== canonicalJson(c.proof)) { r.status = "stale"; return write(r); }
     checkout = await centerCheckout(job.repoDir, dir, c.proof.sha, deps.run);
     const check = async () => {
+      running();
       if (!(deps.centerAuthorized ?? centerWorkerAuthorized)(job, now())) throw new Error("授权已失效");
       const git = await (deps.run ?? runBounded)(["git", "-C", checkout!.dir, "rev-parse", "HEAD"], { timeoutMs: 30_000 });
       if (git.code !== 0 || git.stdout.trim() !== c.proof.sha) throw new Error("中心部署检出版本已变");
+      running();
       verifyCenterScript(checkout!.dir, c.config.script, c.proof.scriptDigest);
     };
     await check();
     const exec = async (dryRun: boolean) => {
+      running();
       r.dryRun = dryRun;
       const log = join(LOG_DIR, "center-deploy", `${job.label}.${dryRun ? "dry" : "deploy"}.${start}.log`);
       const started = now();
       const outcome = await (deps.centerRun ?? centerScriptRunner(log))([`./${c.config.script}`, ...(dryRun ? c.config.dryRunArgs : [])], {
         cwd: checkout!.dir, env: { ...job.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "" },
         timeoutMs: dryRun ? 300_000 : c.config.timeoutMinutes * 60_000 });
+      running();
       phases.push({ status: outcome.code === 0 && !outcome.timedOut ? "success" : "failed",
         code: outcome.code, ms: now() - started, dryRun, timedOut: outcome.timedOut });
       return outcome;
@@ -90,13 +93,22 @@ export async function runCenterDeployJob(request: string, deps: WorkerDeps = {})
     r.code = result.code; r.timedOut = result.timedOut;
     if (result.code !== 0 || result.timedOut) return write({ ...r, ms: now() - start });
     lock = await (deps.machine?.acquireMachine ?? acquireDeployLock)({ label: "scheduler-center-deploy", waitMs: 0, path: deps.machine?.path });
+    running();
     if (lock.kind !== "acquired") return write({ ...r, status: "deferred", ms: now() - start });
     const finalProof = await centerProof(c.proof.project, c.config, c.proof.cards, { run: deps.run, repoDir: () => job.repoDir });
+    running();
     if (canonicalJson(finalProof) !== canonicalJson(c.proof)) return write({ ...r, status: "stale", ms: now() - start });
     await check();
     result = await exec(false);
     return write({ ...r, status: result.code === 0 && !result.timedOut ? "success" : "failed", code: result.code,
       timedOut: result.timedOut, ms: now() - start });
   } catch { return write({ ...r, ms: now() - start }); /* All private diagnostics stay out of public results. */ }
-  finally { process.off("SIGTERM", term); if (lock?.kind === "acquired") lock.handle.release(); await checkout?.release(); }
+  finally {
+    try { await checkout?.release(); }
+    finally {
+      if (lock?.kind === "acquired") lock.handle.release();
+      process.off("SIGTERM", term);
+      if (terminated) { write({ ...r, code: null, ms: now() - start }); process.exit(143); }
+    }
+  }
 }

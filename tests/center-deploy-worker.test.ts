@@ -60,3 +60,34 @@ test("[验收线 5] main moving during dry-run prevents the formal command after
     centerRun: async () => { scripts++; moved = true; return { code: 0, timedOut: false, stdout: "", stderr: "" }; } });
   expect(scripts).toBe(1); expect(f.result().status).toBe("stale");
 });
+
+for (const phase of ["dry", "formal"] as const) test(`[验收线 5] SIGTERM during ${phase} releases the checkout before exit`, async () => {
+  const f = setup();
+  const source = `
+    import { runDeployJob } from ${JSON.stringify(new URL("../src/lib/scheduler-deploy-worker.ts", import.meta.url).pathname)};
+    import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+    const dir = ${JSON.stringify(f.dir)}, sha = ${JSON.stringify(f.sha)};
+    let scripts = 0;
+    await runDeployJob(${JSON.stringify(f.path)}, {
+      centerAuthorized: () => true, machine: { path: dir + '/machine.lock' },
+      run: async (a) => {
+        if (a.includes('add')) { mkdirSync(dir + '/checkout'); writeFileSync(dir + '/checkout/deploy.sh', readFileSync(dir + '/deploy.sh')); }
+        if (a.includes('remove')) writeFileSync(dir + '/released', 'yes');
+        return { code: 0, timedOut: false, stderr: '', stdout: a.includes('rev-parse') ? sha :
+          a.includes('ls-tree') ? '100755 blob b\\tdeploy.sh' : a.includes('show') ? readFileSync(dir + '/deploy.sh', 'utf8') : '' };
+      },
+      centerRun: async () => {
+        scripts++; writeFileSync(dir + '/scripts', String(scripts));
+        if (scripts === ${phase === "dry" ? 1 : 2}) { process.kill(process.pid, 'SIGTERM'); await Bun.sleep(30); }
+        return { code: 0, timedOut: false, stdout: '', stderr: '' };
+      }
+    });
+  `;
+  const child = Bun.spawn([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" });
+  expect(await child.exited).toBe(143);
+  expect(readFileSync(join(f.dir, "released"), "utf8")).toBe("yes");
+  expect(readFileSync(join(f.dir, "scripts"), "utf8")).toBe(phase === "dry" ? "1" : "2");
+  expect(f.result().status).toBe("failed");
+  const { readDeployLock } = await import("../src/lib/pm-deploy-lock.js");
+  expect(readDeployLock(join(f.dir, "machine.lock")).status).toBe("missing");
+});

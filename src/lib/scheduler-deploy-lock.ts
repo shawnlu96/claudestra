@@ -55,7 +55,7 @@ export async function schedulerMachineLock(job: DeployJob, request: string, deps
     blocked,
     release: () => { if (result?.kind === "acquired") result.handle.release(); },
     term: (): MachineOutcome | null => {
-      if (!active) return null;
+      if (!active || Date.now() >= job.createdAt + job.timeoutMs) return null;
       const held = readDeployLock(path), waiting = (deps.waiting ?? (() => waitingDeployLabels(path)))().find((l) => l !== "scheduler-deploy");
       const label = held.status === "ok" && held.record.label !== "scheduler-deploy" ? held.record.label : waiting;
       if (!label) return null;

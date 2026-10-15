@@ -4,7 +4,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { getDeployRun } from "./scheduler-deploy.js";
 import { deployJobDir } from "./scheduler-deploy-lock-jobs.js";
 import { readJsonStateSync } from "./state-file.js";
-import { centerCards } from "./center-deploy-candidates.js";
+import { centerCardKeys, centerCards } from "./center-deploy-candidates.js";
 import { readCenterDeployConfig } from "./center-deploy-config.js";
 import { centerConfigVersion, centerProof } from "./center-deploy-proof.js";
 import { openCenterDeployAsk } from "./center-deploy-asks.js";
@@ -59,16 +59,20 @@ export const CENTER_DEPLOY_COMMANDS = {
       if (op === "result") return result(c, task);
       const cfg = readCenterDeployConfig()?.[task.project];
       if (!cfg) throw new LedgerError("invalid", "中心部署未配置");
-      const cards = centerCards(c.db, task.project, cfg.repo);
-      if (!cards.includes(task.id)) throw new LedgerError("invalid", "没有已合并的中心部署卡");
-      const proof = await centerProof(task.project, cfg, cards);
+      const s = readCenterState(task.project);
+      const cardKeys = centerCardKeys(c.db, task.project, cfg.repo);
+      const cards = centerCards(c.db, task.project, cfg.repo, s.successfulCards);
+      const pending = cards.length ? cards : s.proof?.cards ?? [];
+      if (!pending.includes(task.id)) throw new LedgerError("invalid", "没有已合并的中心部署卡");
+      const proof = await centerProof(task.project, cfg, pending);
+      if (s.proof?.sha === proof.sha) proof.cards = s.proof.cards;
       c.deps.assertLease();
       if (op === "observe" && policy.mode === "observe") {
         return { ok: true, ...recordObserved(c.db, { project: task.project, mechanism: "centerDeployAuto", target: task.id,
           actionKey: proof.sha, action: `为 ${proof.sha.slice(0, 12)} 开授权卡` }, now) };
       }
       if (op !== "open" || recoveryPolicy(task.project, "centerDeployAuto").mode !== "on") throw new LedgerError("forbidden", "中心部署没有开卡权限");
-      return { ok: true, ask: openCenterDeployAsk(c.db, proof, centerConfigVersion(cfg), now), proof };
+      return { ok: true, ask: openCenterDeployAsk(c.db, proof, centerConfigVersion(cfg), now), proof, cardKeys: s.proof?.sha === proof.sha ? s.cardKeys ?? cardKeys : cardKeys };
     },
   },
 };

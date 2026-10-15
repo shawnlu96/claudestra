@@ -6,6 +6,9 @@ import type { CenterProof } from "./center-deploy-proof.js";
 import type { CenterResult } from "./center-deploy-worker.js";
 
 export interface CenterState {
+  observedSha?: string;
+  successfulCards?: Record<string, string[]>; cardKeys?: Record<string, string>; proofVersion?: string;
+  probe?: { at: number; version: string; cards: string; proof: CenterProof };
   successSha?: string; terminalSha?: string; proof?: CenterProof; askId?: string; run?: DeployRun;
   result?: CenterResult; noticeClaimed?: boolean; attempt?: number;
 }

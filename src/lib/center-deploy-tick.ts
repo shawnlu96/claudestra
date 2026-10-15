@@ -5,7 +5,7 @@ import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { DeployRun } from "./scheduler-deploy.js";
 import { repoDirFor } from "./card-repo.js";
-import { centerCards } from "./center-deploy-candidates.js";
+import { centerCardKeys, centerCards } from "./center-deploy-candidates.js";
 import { readCenterDeployConfig, type CenterDeployConfig } from "./center-deploy-config.js";
 import { centerConfigVersion, centerProof, type CenterProof } from "./center-deploy-proof.js";
 import { readCenterState, writeCenterState, type CenterState } from "./center-deploy-state.js";
@@ -56,7 +56,10 @@ function runFor(project: string, proof: CenterProof, attempt: number, now: numbe
 async function finish(db: Database, d: Deps, project: string, s: CenterState, save: (s: CenterState) => void): Promise<void> {
   const proof = s.proof!, r = s.result!;
   await call(d, proof.cards[0], "result");
-  if (r.status === "success") s.successSha = proof.sha;
+  if (r.status === "success") {
+    s.successSha = proof.sha; s.successfulCards ??= {};
+    for (const [id, key] of Object.entries(s.cardKeys ?? {})) s.successfulCards[id] = [...new Set([...(s.successfulCards[id] ?? []), key])];
+  }
   else {
     await todo(d, proof.cards[0], `center-deploy-failed:${project}:${proof.sha}`, `中心部署失败：${proof.cards.join("、")} ${proof.sha.slice(0, 12)} exit ${r.code ?? "null"}`);
     if (!s.noticeClaimed) {
@@ -85,33 +88,48 @@ async function observeJob(db: Database, d: Deps, project: string, cfg: CenterDep
   if (r.status === "deferred" || r.status === "stale") { s.run = undefined; s.attempt = (s.attempt ?? 0) + 1; save(s); return false; }
   s.result = r; save(s); await finish(db, d, project, s, save); return true;
 }
-async function driveProject(db: Database, d: Deps, project: string, cfg: CenterDeployConfig): Promise<void> {
+async function driveProject(db: Database, d: Deps, project: string, cfg: CenterDeployConfig, stage: (s: string) => void): Promise<void> {
+  stage("state");
   const p = d.center ?? {}, s = (p.read ?? readCenterState)(project), save = (v: CenterState) => { d.assertActive(); (p.write ?? writeCenterState)(project, v); };
-  const cards = (p.cards ?? centerCards)(db, project, cfg.repo);
-  if (!cards.length || cards.some((id) => schedulerV2SkipTask(db, id))) return;
+  const cards = (p.cards ?? centerCards)(db, project, cfg.repo, s.successfulCards);
+  const pending = cards.length ? cards : s.proof?.cards ?? [];
+  if (!pending.length || pending.some((id) => schedulerV2SkipTask(db, id))) return;
   if (s.proof?.cards.some((id) => schedulerV2SkipTask(db, id))) return;
+  stage("job");
   if (await observeJob(db, d, project, cfg, s, save)) return;
-  const proof = await (p.proof ?? centerProof)(project, cfg, cards);
+  if (!cards.length && s.successSha === s.proof?.sha) return;
+  stage("proof");
+  const ask = s.askId ? (p.ask ?? getAsk)(db, s.askId) : null, version = centerConfigVersion(cfg), key = canonicalJson(cards);
+  const approved = ask?.state === "answered" && ask.answer?.choices.includes("[button:scheduler_center_deploy_approve]") && s.terminalSha !== s.proof?.sha;
+  const cached = s.probe && s.probe.version === version && s.probe.cards === key && d.now() - s.probe.at < 60_000;
+  const proof = cached && !approved ? structuredClone(s.probe!.proof) : await (p.proof ?? centerProof)(project, cfg, pending);
+  if (!cached || approved) { s.probe = { at: d.now(), version, cards: key, proof }; save(s); }
   if (s.successSha === proof.sha || s.terminalSha === proof.sha) return;
+  if (s.proof?.sha === proof.sha) proof.cards = s.proof.cards;
+  stage("authorization");
   if ((p.policy ?? recoveryPolicy)(project, "centerDeployAuto").mode === "observe") {
-    await call(d, cards[0], "observe"); return;
+    if (s.observedSha !== proof.sha) { await call(d, pending[0], "observe"); s.observedSha = proof.sha; save(s); }
+    return;
   }
-  if (!s.askId || !s.proof || s.proof.sha !== proof.sha) {
-    const opened = await call(d, cards[0], "open");
-    s.askId = (opened.ask as Ask).id; s.proof = opened.proof as CenterProof; s.result = undefined; s.noticeClaimed = false; s.attempt = 0; save(s); return;
+  if (!s.askId || !s.proof || canonicalJson(s.proof) !== canonicalJson(proof) || (s.proofVersion ?? ask?.bind?.version) !== version) {
+    const opened = await call(d, pending[0], "open");
+    s.askId = (opened.ask as Ask).id; s.proof = opened.proof as CenterProof; s.proofVersion = version;
+    const keys = opened.cardKeys as Record<string, string> | undefined ?? centerCardKeys(db, project, cfg.repo);
+    s.cardKeys = Object.fromEntries(s.proof.cards.filter((id) => keys[id]).map((id) => [id, keys[id]]));
+    s.terminalSha = undefined; s.result = undefined; s.noticeClaimed = false; s.attempt = 0; save(s); return;
   }
-  const ask = (p.ask ?? getAsk)(db, s.askId), hash = bindHash({ action: "center_deploy", params: proof, version: centerConfigVersion(cfg) }, "scheduler");
+  const hash = bindHash({ action: "center_deploy", params: s.proof, version }, "scheduler");
   const checked = checkAsk(ask, hash, "scheduler", d.now());
   if (!checked.ok || !ownerAnswered(ask?.answer)) {
     if (ask?.state === "open" && ask.expiresAt > d.now()) return;
-    await todo(d, cards[0], `center-deploy-unapproved:${project}:${proof.sha}`, `中心部署未获有效授权：${proof.sha.slice(0, 12)}`);
+    await todo(d, pending[0], `center-deploy-unapproved:${project}:${proof.sha}`, `中心部署未获有效授权：${proof.sha.slice(0, 12)}`);
     s.terminalSha = proof.sha; save(s); return;
   }
-  if (canonicalJson(s.proof) !== canonicalJson(proof)) return;
   const dir = (p.repoDir ?? repoDirFor)(project, cfg.repo);
   if (!dir) return;
   const jobs = (p.jobs ?? jobsFor)(proof, cfg, s.askId), run = runFor(project, proof, s.attempt ?? 0, d.now());
   if (proof.cards.some((id) => schedulerV2SkipTask(db, id))) return;
+  stage("submit");
   run.label = jobs.label(run); s.run = run; save(s); d.assertActive();
   await jobs.submit(run, dir, { restartLabels: ["center-deploy"], timeoutMs: Math.min(3_600_000, cfg.timeoutMinutes * 60_000 + 360_000) });
 }
@@ -120,18 +138,21 @@ export async function centerDeployTick(db: Database, config: SchedulerConfig, d:
   const p = d.center ?? {};
   for (const [project, policy] of Object.entries(config.projects)) {
     if ((p.policy ?? recoveryPolicy)(project, "centerDeployAuto").mode === "off") continue;
+    let phase = "config";
     try {
       const cfg = (p.config ?? readCenterDeployConfig)()?.[project];
-      if (cfg) { await driveProject(db, d, project, cfg); continue; }
+      if (cfg) { await driveProject(db, d, project, cfg, (s) => { phase = s; }); continue; }
       const own = projectRepo(policy);
       const task = own && listTasks(db, project).find((t) => cardRepo(t) && cardRepo(t) !== own && !schedulerV2SkipTask(db, t.id)
         && (["live", "verified"].includes(t.stage) || !!db.query("SELECT 1 FROM scheduler_merges WHERE taskId=? AND phase='merged' LIMIT 1").get(t.id)));
       if (task && !getEventByDedup(db, `center-deploy-config:${project}`)) await todo(d, task.id, `center-deploy-config:${project}`, "中心部署缺少配置");
-    } catch (e) {
+    } catch {
       d.assertActive();
       const task = listTasks(db, project).find((t) => !schedulerV2SkipTask(db, t.id));
-      if (task) await todo(d, task.id, `center-deploy-config-error:${project}`, "中心部署配置或版本核对失败，请检查本机配置");
-      console.error(`[center-deploy] ${project}: stopped`); // Private errors and command output must not escape to the scheduler log.
+      try {
+        if (task) await todo(d, task.id, `center-deploy-error:${project}:${phase}:${Math.floor(d.now() / 3_600_000)}`, `中心部署 ${phase} 失败，请检查本机记录`);
+      } catch { d.assertActive(); console.error(`[center-deploy] ${project}: ${phase} todo failed`); /* An unavailable ledger must not stop ordinary deployment. */ }
+      console.error(`[center-deploy] ${project}: ${phase} failed`); // Private errors and command output must not escape to the scheduler log.
     }
   }
 }

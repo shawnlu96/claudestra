@@ -183,3 +183,10 @@ test("[验收线 1] a crash during deferred resubmission cannot rerun a new atte
     expect(await deferredDeployTick(d, run, { label: run.label!, liveness: "dead", result: null, deadline: 0 }, root)).toBe(false);
   } finally { f.close(); }
 });
+
+
+test("[验收线 2] deadline SIGTERM remains failed even with a waiting PM", async () => {
+  const f = fixture(); f.job.createdAt = Date.now() - f.job.timeoutMs - 60_000;
+  const lock = await schedulerMachineLock(f.job, f.request, { path: f.path, enabled: true, waiting: () => ["deploy-full"] });
+  try { expect(lock.term()).toBeNull(); } finally { lock.release(); }
+});
