@@ -13,23 +13,23 @@ export type FileList = ChangedFile[] | null;
 
 export const MAX_FILES = 300;
 
-const DIRS = [
+export const DIRS = [
   ".github/", "scripts/", "deploy/", "native/", "desktop/", "master/", "roles/", "skills/", "src/hooks/", "src/cli/", "src/relay/",
   "src/bridge/local-api/", "src/bridge/fleet/", "src/lib/acp/", "src/lib/runtimes/", "src/lib/e2e/", "web/lib/api/",
 ];
 const ROOT_FILES = ["package.json", "bun.lock", "bunfig.toml", "tsconfig.json", "install.sh", "ecosystem.config.cjs", "AGENTS.md"];
-const FILES = [
+export const FILES = [
   "web/package.json", "web/package-lock.json", "web/bun.lock", "web/pnpm-lock.yaml", "web/yarn.lock",
   "tests/preload.ts", "tests/test-env.ts", "src/bridge.ts", "src/relay.ts", "src/setup.ts", "src/launcher.ts", "src/acp-host.ts", "src/channel-server.ts", "src/scheduler.ts", "src/manager.ts",
   ...["api-routes", "api-auth", "web-terminal", "term-viewer", "term-fit", "web-shell", "web-gateway", "caller-identity", "order-tools", "devices", "credential-revocation", "http-peer"]
     .map((f) => `src/bridge/${f}.ts`),
 ];
-const FILE_PATTERNS: readonly (readonly [string, RegExp])[] = [
+export const FILE_PATTERNS: readonly (readonly [string, RegExp])[] = [
   ["根目录 CLAUDE*.md", /^CLAUDE[^/]*\.md$/],
   ["web/next.config.*", /^web\/next\.config\.[^/]+$/],
   ["web/public 的 service worker", /^web\/public\/(?:[^/]+\/)*(?:sw|service-worker|workbox-[^/]*)\.[cm]?js$/i],
 ];
-const KEYWORDS = [
+export const KEYWORDS = [
   "auth", "token", "key", "trust", "secret", "credential", "principal", "scope", "signature", "sandbox", "permission", "invite", "pair",
   "e2e", "relay", "peer", "lend", "redact", "guard", "deploy", "merge", "update", "install", "launch", "ingress", "cors",
 ];
