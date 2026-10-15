@@ -151,7 +151,7 @@ test("[验收线 5] limited rounds name the phase and counts; a local-cooldown 4
   // Same instant: the transport's own cooldown answers the list read without a request.
   const sent = k.center.requests.length;
   const r2 = await syncCenterReplicas(k.f.db, h.opts);
-  expect(r2.scopes[0]!.error).toBe(`${REPLICA_REASONS.rateLimited}（读列表时；本机冷却未到期，未发请求）`);
+  expect(r2.scopes[0]!.error).toBe(`${REPLICA_REASONS.rateLimited}（读列表时；本轮成功 0 个、跳过个数未知（未取得列表）；本机冷却未到期，未发请求）`);
   expect(k.center.requests.length).toBe(sent);
   expect(readCenterReplicas().scopes).toMatchObject({ [Object.keys(readCenterReplicas().scopes)[0]!]: { lastError: r2.scopes[0]!.error } });
   // The background pull logs the scope error line.
@@ -163,6 +163,17 @@ test("[验收线 5] limited rounds name the phase and counts; a local-cooldown 4
     log: (l) => lines.push(l), stateDir: k.dir, fetch: limited });
   expect(lines).toHaveLength(1);
   expect(lines[0]).toContain("读详情时；本轮成功 1 个、跳过 4 个；中心回 429");
+  // A real center 429 on the list read: phase, counts (none landed, skipped unknown) and source, in state and in the log.
+  rmSync(join(k.dir, "shared-ledger-cooldowns"), { recursive: true, force: true });
+  const listSent = k.center.requests.length;
+  const listLimited = (async () => new Response(BODY, { status: 429 })) as unknown as typeof fetch;
+  await runCenterReplicaPull({ db: () => k.f.db, readDb: () => openLedgerReadOnly(k.f.db.filename), policy: () => ({ mode: "on" }),
+    log: (l) => lines.push(l), stateDir: k.dir, fetch: listLimited });
+  const listText = `${REPLICA_REASONS.rateLimited}（读列表时；本轮成功 0 个、跳过个数未知（未取得列表）；中心回 429）`;
+  expect(lines).toHaveLength(2);
+  expect(lines[1]).toContain(listText);
+  expect(Object.values(readCenterReplicas().scopes)[0]).toMatchObject({ lastError: listText });
+  expect(k.center.requests.length).toBe(listSent);
   const raw = readFileSync(join(k.dir, "shared-center-replicas.json"), "utf8");
   for (const text of [raw, ...lines]) { expect(text).not.toContain(BODY); expect(text).not.toContain("bearer-for-tests-only"); }
 });

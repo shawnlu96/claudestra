@@ -119,9 +119,10 @@ export type ReplicaResult =
   | { centerFeatureId: string; result: "skipped" | "refused" | "failed"; reason: string; localFeatureId?: string };
 interface ScopeResult extends ReplicaScope { localProject: string; error: string | null }
 
-/** REPLFAIR1: a rate-limited scope's error, fixed text plus counts; `local` = the transport's own cooldown, not a center 429. */
+/** REPLFAIR1: a rate-limited scope's error, fixed text plus counts; `local` = the transport's own cooldown, not a center 429.
+ * A list-phase limit read no detail (0 landed) and has no list yet, so how many it skipped is unknown — said as such. */
 const limitedText = (phase: "list" | "detail", local: boolean, done = 0, skipped = 0) => `${REPLICA_REASONS.rateLimited}（${phase === "list"
-  ? "读列表时" : `读详情时；本轮成功 ${done} 个、跳过 ${skipped} 个`}；${local ? "本机冷却未到期，未发请求" : "中心回 429"}）`;
+  ? "读列表时；本轮成功 0 个、跳过个数未知（未取得列表）" : `读详情时；本轮成功 ${done} 个、跳过 ${skipped} 个`}；${local ? "本机冷却未到期，未发请求" : "中心回 429"}）`;
 const localCooldown = (e: unknown) => (e as { synthetic?: unknown } | null)?.synthetic === true;
 const LANDED = new Set<ReplicaResult["result"]>(["created", "replayed", "unchanged"]);
 
