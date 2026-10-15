@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyFailedLog } from "../src/lib/ci-failure-class.js";
-import { firstRedSha, fixGlobs, fixSpec, keyBase, knownFlakyOnly, latestDecided, nextKey, redRun, snippetOf, type MainRedFacts, type MainRedRun }
+import { firstRedSha, fixGlobs, fixSpec, greenBefore, keyBase, logPaths, knownFlakyOnly, latestDecided, nextKey, redRun, snippetOf, type MainRedFacts, type MainRedRun }
   from "../src/lib/main-red-fix.js";
 import { mainRedGh } from "../src/lib/main-red-fix-gh.js";
 import { specRefusal } from "../src/lib/main-red-fix-place.js";
@@ -22,7 +22,7 @@ const run = (id: number, conclusion: string | null, status = "completed", headSh
 const scrub = { identity: { username: "mrf-tester-user", hostname: "mrf-tester-host" }, commits: new Set([sha("b")]) };
 const facts: MainRedFacts = { workflow: "push", runId: 77, attempt: 1, mainSha: sha("b"), url: "https://github.com/o/r/actions/runs/77",
   checks: ["test shard 2 of 4"], cases: ["tests/a.test.ts > race > case"], files: ["tests/a.test.ts"], snippet: snippetOf("(fail) race > case"),
-  responsibleTask: "agents-OBSAUTO1", faultKey: null, rerun: false };
+  responsibleTask: "agents-OBSAUTO1", faultKey: null, rerun: false, greenBefore: 0 };
 
 describe("[验收线 1] only a completed failure counts, and a later green covers it", () => {
   test("latest decided run: in-progress / cancelled / skipped are passed over", () => {
@@ -65,9 +65,22 @@ describe("node key and scope", () => {
     expect(nextKey("X", () => true)).toBeNull();
   });
   test("globs: test files plus the card's globs when they meet; only the test files when they do not", () => {
-    expect(fixGlobs(["tests/a.test.ts"], ["tests/a*.test.ts", "src/lib/a.ts"])).toEqual(["tests/a.test.ts", "tests/a*.test.ts", "src/lib/a.ts"]);
-    expect(fixGlobs(["tests/a.test.ts"], ["src/lib/b.ts"])).toEqual(["tests/a.test.ts"]);
-    expect(fixGlobs(["../x.test.ts"], [])).toEqual([]);
+    expect(fixGlobs(["tests/a.test.ts"], ["tests/a*.test.ts", "src/lib/a.ts"], "ci.yml")).toEqual(["tests/a.test.ts", "tests/a*.test.ts", "src/lib/a.ts"]);
+    expect(fixGlobs(["tests/a.test.ts"], ["src/lib/b.ts"], "ci.yml")).toEqual(["tests/a.test.ts"]);
+  });
+  test("[验收线 2] no failing file: the card's globs, else the workflow file; never an empty scope", () => {
+    expect(fixGlobs([], ["src/lib/b.ts"], "ci.yml")).toEqual(["src/lib/b.ts"]);
+    expect(fixGlobs(["../x.test.ts"], [], "nightly.yml")).toEqual([".github/workflows/nightly.yml"]);
+  });
+  test("[验收线 2] files a non-test failure names: repo-relative only, no absolute path, no node_modules", () => {
+    const log = ["typecheck\tTypecheck\t2026-10-12T09:00:00.1Z src/lib/a.ts(3,5): error TS2322: Type 'x' is not assignable.",
+      "typecheck\tTypecheck\t2026-10-12T09:00:00.1Z /home/runner/work/r/r/src/lib/abs.ts:1 node_modules/x/index.d.ts(1,1): error",
+      "guard\tGuard\t2026-10-12T09:00:00.1Z ✗ tests/b.test.ts: 行宽超限 https://github.com/o/r/blob/main/src/c.ts"].join("\n");
+    expect(logPaths(log)).toEqual(["src/lib/a.ts", "tests/b.test.ts"]);
+  });
+  test("the newest green run before the red one bounds the fault's cycle", () => {
+    expect(greenBefore([run(5, "failure"), run(4, "success"), run(3, "failure"), run(2, "success")], run(5, "failure"))).toBe(4);
+    expect(greenBefore([run(5, "failure"), run(4, "cancelled")], run(5, "failure"))).toBe(0);
   });
 });
 

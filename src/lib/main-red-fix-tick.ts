@@ -11,7 +11,7 @@ import { activeKnownFlaky } from "./ci-known-flaky.js";
 import { prCoordinates } from "./card-repo.js";
 import { realScrub } from "./dag-write-scrub.js";
 import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
-import { firstRedSha, handledKey, knownFlakyOnly, latestDecided, MAIN_RED_READ_EVERY_MS, MAIN_RED_WORKFLOWS, rerunKey, snippetOf, todoKey,
+import { firstRedSha, greenBefore, handledKey, knownFlakyOnly, latestDecided, logPaths, MAIN_RED_READ_EVERY_MS, MAIN_RED_WORKFLOWS, rerunKey, snippetOf, todoKey,
   type MainRedFacts, type MainRedRun } from "./main-red-fix.js";
 import { mainRedGh, type MainRedGh } from "./main-red-fix-gh.js";
 import { mainRedNodes, nodeState, placeFix } from "./main-red-fix-place.js";
@@ -78,9 +78,11 @@ async function judge(r: Round, w: Workflow, runs: readonly MainRedRun[], red: Ma
   const log = await r.gh.failedLog(r.repo, red.id, red.attempt);
   const cls: FailureClass = log === null ? { kind: "unknown", why: "失败日志太长" } : classifyFailedLog(log, new Set());
   const failures = (log && parseFailedLog(log)) || [];
+  // no bun test failed (a type error, a guard, an install fault): the files the log names, or none (the writer then scopes otherwise)
+  const files = failures.length ? [...new Set(failures.map((f) => f.file))].sort().slice(0, 50) : log ? logPaths(log) : [];
   const facts: MainRedFacts = { workflow: w.id, runId: red.id, attempt: red.attempt, mainSha: red.headSha, url: red.url, checks: checks.slice(0, 50),
-    cases: [...new Set(failures.map((f) => `${f.file} > ${f.name}`))].slice(0, 50), files: [...new Set(failures.map((f) => f.file))].sort().slice(0, 50),
-    snippet: log ? snippetOf(cutFailedJobLog(log)) : [], responsibleTask: null, faultKey: null, rerun: rerunSpent };
+    cases: [...new Set(failures.map((f) => `${f.file} > ${f.name}`))].slice(0, 50), files,
+    snippet: log ? snippetOf(cutFailedJobLog(log)) : [], responsibleTask: null, faultKey: null, rerun: rerunSpent, greenBefore: greenBefore(runs, red) };
   if (!rerunSpent && knownFlakyOnly(cls, new Set(activeKnownFlaky(db, r.project).keys()))) {
     if (r.mode === "observe") {
       await cli(r, "observe", { workflow: w.id, mainSha: red.headSha, action: "rerun", text: `重跑 ${w.label} 失败的 job（run ${red.id}）` });

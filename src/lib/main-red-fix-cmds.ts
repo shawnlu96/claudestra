@@ -57,9 +57,10 @@ function fixFacts(o: Obj): MainRedFacts {
   const responsible = o.responsibleTask === null ? null : str(o, "responsibleTask", /^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$/);
   const faultKey = o.faultKey === null ? null : str(o, "faultKey", LINE, 4000);
   if (typeof o.rerun !== "boolean") bad("rerun 要是布尔");
+  if (!Number.isSafeInteger(o.greenBefore) || (o.greenBefore as number) < 0) bad("greenBefore 要是非负整数");
   return { workflow: workflow(o), runId: int(o, "runId"), attempt: int(o, "attempt"), mainSha: str(o, "mainSha", SHA), url: str(o, "url", URL_RE),
     checks: list(o, "checks", 50), cases: list(o, "cases", 50), files: list(o, "files", 50, /^[\w./-]{1,200}$/), snippet: list(o, "snippet", 40),
-    responsibleTask: responsible, faultKey, rerun: o.rerun as boolean };
+    responsibleTask: responsible, faultKey, rerun: o.rerun as boolean, greenBefore: o.greenBefore as number };
 }
 
 function gate(c: Cli): string {

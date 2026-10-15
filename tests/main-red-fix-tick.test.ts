@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addKnownFlaky } from "../src/lib/ci-known-flaky.js";
@@ -133,6 +133,50 @@ test("a ledger write failing inside the fix transaction leaves no orphan spec an
   expect(nodesOf(agentsF).map((n) => n.key)).not.toContain("OBSAUTO1R1");
 });
 
+test("a spec file write failing (docs/tasks blocked): node rolled back, the reason reaches pm-todo once, the next round retries", async () => {
+  mkdirSync(join(dir, "ledger", "docs"), { recursive: true });
+  writeFileSync(join(dir, "ledger", "docs", "tasks"), "not a directory");
+  gh.state.runs["ci.yml"] = [run(77, "failure")];
+  expect(await tick()).toEqual([expect.objectContaining({ taskId: `main-red-fix:${P}:push` })]);
+  expect(nodesOf(agentsF).map((n) => n.key)).not.toContain("OBSAUTO1R1");
+  expect(ops("pm_todo").map((e) => e.text)).toEqual([expect.stringContaining("修复规格没写成（E")]);
+  expect(ops("pm_todo")[0]!.text).not.toContain(dir);
+  expect(await tick()).toHaveLength(1);
+  expect(ops("pm_todo")).toHaveLength(1);
+  rmSync(join(dir, "ledger", "docs", "tasks"));
+  expect(await tick()).toEqual([]);
+  expect(existsSync(specPath("agents-OBSAUTO1R1"))).toBe(true);
+});
+
+describe("[验收线 2] a red with no failed bun test still gets a scoped fix node", () => {
+  const typeLog = ["typecheck\tTypecheck\t2026-10-12T09:00:00.1Z src/lib/obs.ts(3,5): error TS2322: Type 'x' is not assignable.",
+    "typecheck\tTypecheck\t2026-10-12T09:00:00.1Z ##[error]Process completed with exit code 2."].join("\n");
+  const installLog = ["test shard 2 of 4\tInstall dependencies\t2026-10-12T09:00:00.1Z error: ConnectionRefused downloading tarball zod@4.6.5",
+    "test shard 2 of 4\tInstall dependencies\t2026-10-12T09:00:00.1Z ##[error]Process completed with exit code 1."].join("\n");
+  test("a type error: the files the log names plus the responsible card's globs", async () => {
+    gh.state.log = typeLog;
+    gh.state.runs["ci.yml"] = [run(77, "failure")];
+    expect(await tick()).toEqual([]);
+    expect(nodesOf(agentsF).find((n) => n.key === "OBSAUTO1R1")?.fileGlobs).toEqual(["src/lib/obs.ts", "tests/a*.test.ts"]);
+    expect(lintObservation(readFileSync(specPath("agents-OBSAUTO1R1"), "utf8"))).toBeNull();
+    expect(ops("main_red_fix_handled").map((e) => e.data.outcome)).toEqual(["node"]);
+  });
+  test("an environment fault re-run once and still red: push → the card's globs, Nightly → the workflow file", async () => {
+    gh.state.log = installLog;
+    gh.state.runs["ci.yml"] = [run(90, "failure")];
+    gh.state.runs["nightly.yml"] = [run(91, "failure", 1, sha("c"))];
+    await tick();
+    expect(gh.state.reruns).toEqual([90, 91]);
+    gh.state.runs["ci.yml"] = [run(90, "failure", 2)];
+    gh.state.runs["nightly.yml"] = [run(91, "failure", 2, sha("c"))];
+    expect(await tick()).toEqual([]);
+    expect(gh.state.reruns).toEqual([90, 91]);
+    expect(nodesOf(agentsF).find((n) => n.key === "OBSAUTO1R1")?.fileGlobs).toEqual(["src/lib/obs.ts", "tests/a*.test.ts"]);
+    expect(nodesOf(mergeF).find((n) => n.key === "NIGHTLY1")?.fileGlobs).toEqual([".github/workflows/nightly.yml"]);
+    expect(readFileSync(specPath("merge-arch-NIGHTLY1"), "utf8")).toContain("已知偶发重跑一次仍红");
+  });
+});
+
 describe("[验收线 2] known flaky failures re-run once first", () => {
   beforeEach(() => {
     addKnownFlaky(db, { actor: "agent-pm" }, { project: P, file: "tests/flaky.test.ts", featureId: mergeF, node: "BASE1", reason: "竞态" });
@@ -209,6 +253,35 @@ test("the same fault's fix cards failed twice: the third node pushes one action 
   await tick();
   expect(nodesOf(agentsF).map((n) => n.key)).toContain("OBSAUTO1R3");
   expect(notices).toEqual([expect.stringContaining("同一故障修复卡已失败 2 次")]);
+});
+
+describe("only failed fixes of the current fault count toward the action notice", () => {
+  const card = (key: string, stage: string) => {
+    createTask(db, owner, { project: P, id: `agents-${key}`, title: "fix", kind: "code" });
+    bindNode(db, owner, { id: agentsF, rev: getFeature(db, agentsF)!.rev, key, taskId: `agents-${key}` });
+    db.query("UPDATE tasks SET stage = ? WHERE id = ?").run(stage, `agents-${key}`);
+  };
+  beforeEach(() => { gh.state.pulls[sha("c")] = [12]; gh.state.pulls[sha("d")] = [12]; });
+  test("two verified fixes, each followed by green: a later red is not reported as failed twice", async () => {
+    gh.state.runs["ci.yml"] = [run(77, "failure")];
+    await tick(); card("OBSAUTO1R1", "verified");
+    gh.state.runs["ci.yml"] = [run(79, "failure", 1, sha("c")), run(78, "success", 1, sha("c"))];
+    await tick(); card("OBSAUTO1R2", "verified");
+    gh.state.runs["ci.yml"] = [run(81, "failure", 1, sha("d")), run(80, "success", 1, sha("d"))];
+    await tick();
+    expect(nodesOf(agentsF).map((n) => n.key)).toContain("OBSAUTO1R3");
+    expect(notices).toEqual([]);
+  });
+  test("two cancelled fixes before main went green: the next red is a new fault, no notice", async () => {
+    for (const [id, key] of [[77, "OBSAUTO1R1"], [78, "OBSAUTO1R2"]] as const) {
+      gh.state.runs["ci.yml"] = [run(id, "failure")];
+      await tick(); card(key, "cancelled");
+    }
+    gh.state.runs["ci.yml"] = [run(80, "failure", 1, sha("c")), run(79, "success", 1, sha("c"))];
+    await tick();
+    expect(nodesOf(agentsF).map((n) => n.key)).toContain("OBSAUTO1R3");
+    expect(notices).toEqual([]);
+  });
 });
 
 describe("[验收线 5] mainRedRepairBind", () => {

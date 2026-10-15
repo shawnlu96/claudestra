@@ -105,6 +105,21 @@ function placeAndWrite(db: Database, ctx: WriteCtx, project: string, f: MainRedF
 /** One red run: the fix node and its spec, or the reason there is none. */
 export function writeMainRedFix(db: Database, ctx: WriteCtx, project: string, f: MainRedFacts, deps: MainRedWriteDeps): MainRedFixResult {
   mustOn(deps.policy ?? recoveryPolicy, project);
+  try { return writeInTx(db, ctx, project, f, deps); }
+  catch (e) {
+    // the spec file write failed and the transaction rolled back: the reason still reaches pm-todo (once per attempt); the run stays
+    // unhandled, so the next round tries again (a full disk or a permission fault can clear up)
+    const { code, syscall } = e as NodeJS.ErrnoException;
+    if (typeof code === "string" && /^E[A-Z]+$/.test(code)) {
+      const why = syscall ? `${code} ${syscall}` : code;
+      recordPmTodo(db, ctx, { project, target: "", kind: PM_TODO_KIND, dedupKey: todoKey(project, f.runId, `a${f.attempt}-write-error`),
+        text: `main ${workflowOf(f.workflow).label} 红（run ${f.runId}）的修复规格没写成（${why}），节点已回滚，下一轮重试：${f.url}` });
+    }
+    throw e;
+  }
+}
+
+function writeInTx(db: Database, ctx: WriteCtx, project: string, f: MainRedFacts, deps: MainRedWriteDeps): MainRedFixResult {
   return tx(db, () => {
     const prior = getEventByDedup(db, handledKey(project, f.runId, f.attempt));
     if (prior) return { outcome: "duplicate", text: prior.text, notify: null };
@@ -123,7 +138,12 @@ export function writeMainRedFix(db: Database, ctx: WriteCtx, project: string, f:
       handled(db, ctx, project, f, "same", text, { featureId: open.featureId, key: open.key });
       return { outcome: "same", text, notify: null };
     }
-    const failedBefore = same.filter((n) => nodeState(db, n).state !== "open").length;
+    // the same fault's failed fixes: newest first, cancelled / gone ones written since main was last green, until one that ended verified
+    let failedBefore = 0;
+    for (const n of same.filter((x) => x.runId > f.greenBefore).reverse()) {
+      if (nodeState(db, n).state !== "failed") break;
+      failedBefore++;
+    }
     const { placed, misses: miss, content } = placeAndWrite(db, ctx, project, f, deps);
     if (placed) {
       insertEvent(db, { ...ctx, dedupKey: nodeKey(project, f.runId, f.attempt) }, { project, target: "", kind: "scheduler",

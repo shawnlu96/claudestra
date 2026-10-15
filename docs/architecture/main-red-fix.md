@@ -29,20 +29,24 @@ main 上 CI（`ci.yml` 的 push run）或 Nightly（`nightly.yml`）红了，不
      查不到、feature 不是 active / 没 DAG / 有待批改版，或是 Nightly 红 → 兜底 feature（缺省 `merge-arch`）。
    - 键：责任卡键 + `R` + 序号（键不是纯大写字母数字时用 `CIRED`），Nightly 用 `NIGHTLY` + 序号；跳过已有节点、已占卡号、已有规格文件；
      卡号过 `cardIdGate`。
-   - 范围：失败测试文件 + 责任卡节点的 globs；两者没交集时只给失败测试文件；一个失败测试文件都没有 → 不写，记 pm-todo。
+   - 范围：失败文件 + 责任卡节点的 globs；两者没交集时只给失败文件。失败文件 = 失败的 bun 测试文件；没有测试失败（类型检查、guard）
+     时取日志里点名的仓库相对路径（绝对路径、node_modules 不算）。日志里一个文件都没有（安装 / 环境故障重跑仍红、日志解析不出）→
+     责任卡的 globs，再没有 → 本 workflow 文件（`.github/workflows/<file>`）；范围不会为空，执行者要扩范围走提问。
    - 规格写到 `<ledger>/docs/tasks/<卡号>.md`（自动开卡的正式路径，静置 60 秒后接走），过 spec-lint（`lintObservation`、`lintUiSpec`、
      卡首模板 code）和 dag-write-scrub 的同一文本检查（本地路径 / 主机名 / 敏感串；main SHA 是该仓库的提交）；日志片段经
      `scheduler-merge-ci-log-cut.ts` 截取、绝对路径只留相对尾巴、逐行 `quoteExternal`。过不了不写，记 pm-todo。
    - 节点经 `composeRewrite` / `rewriteDag` 写入（review-converge-followup.ts 的写法：feature PM 代记）；改版、节点事件与 handled 同按
      run id + attempt 去重（同一 run 后来再红的 attempt 是一次新的写入）。规格文件在事务里的台账写都过了之后最后写，写失败整个事务回滚，
-     台账写失败也不会留下孤立规格。
+     台账写失败也不会留下孤立规格。规格写盘失败（目录被占、权限、磁盘）→ 回滚后另记一条 pm-todo（错误码，不带本地路径，每个 attempt
+     一次），该 run 不标 handled，下一轮重试。
    - 跳过：PM 已为同一 faultKey 绑定修复卡；同一 workflow 已有本机制写的、未 verified 的节点且失败 check 集合相同 → 不写，原卡记一条 note。
    - 作者家族：现有派单没有按卡指定家族的口子，照常由派单选。
 4. **修复绑定**（`--op bind`）：本机制写的卡到 merge、main 读出的 faultKey 与写节点时记下的相同 → on 档写一条与 `ledger main-ci-repair`
    同格式的绑定（feature PM 代记，事件带 `source=mainRedFix, by=scheduler`），`ledger main-ci-repair <卡> --revoke` 照样撤销；撤销过的卡
    不再自动绑。不是本机制写的卡一律拒。observe 档的「本会绑定」记录只给 observe 去重；转 on 后按真实绑定去重，已在 merge 的卡照样绑上。
 5. **结论改拉取**：重跑结果、写了哪个节点、为什么没写都只经 `recordPmTodo`（kind `main_red_fix`）进 `ledger pm-todo`；只有「兜底 feature
-   也写不进」和「同一故障修复卡已失败 2 次」（同 workflow、同失败集合的本机制节点已取消 / 已 verified 仍复发）推一条 action 级通知。
+   也写不进」和「同一故障修复卡已失败 2 次」推一条 action 级通知。「失败」只数同 workflow、同失败集合、写于本次红之前最近一次绿 run
+   之后的本机制节点里，从新到旧连续取消 / 已从 DAG 消失的；遇到 verified / done 的就停（成功修复不算失败）。
 
 ## 写口与接线
 

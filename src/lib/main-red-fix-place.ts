@@ -72,8 +72,7 @@ function placeIn(db: Database, project: string, featureId: string, facts: MainRe
   const key = nextKey(keyBase(facts.workflow, f.id === responsible?.featureId ? own?.key ?? null : null), (k) => cur.some((n) => n.key === k) ||
     !!getTask(db, idOf(k)) || deps.exists(specPathIn(deps.ledgerDir, idOf(k))));
   if (!key) return miss(`feature ${f.id} 的修复节点键已用满`);
-  const taskId = idOf(key), globs = fixGlobs(facts.files, own?.fileGlobs ?? []);
-  if (!globs.length) return miss("日志里没解析出失败测试文件，也就没有可写的文件范围", true);
+  const taskId = idOf(key), globs = fixGlobs(facts.files, own?.fileGlobs ?? [], workflowOf(facts.workflow).file);
   const gate = cardIdGate(taskId, deps.scrub);
   if (gate) return miss(gate, true);
   const spec = fixSpec({ taskId, facts, globs, responsible: responsible?.id ?? null, featureId: f.id });
