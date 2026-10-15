@@ -2,6 +2,7 @@
  * Scheduler-only CLI for the deploy journal (T68g; the exit from a deploy `unknown` is `scheduler-merge-resolve`) and for the
  * other exit from `merge`, the repository-owner handoff (MHO1, lib/scheduler-merge-handoff.ts).
  */
+import { CENTER_DEPLOY_COMMANDS } from "../lib/center-deploy-command.js";
 import { advanceDeployRun, beginDeployRun } from "../lib/scheduler-deploy.js";
 import { landMergeHandoff, recordHandoffCarry, recordMergeHandoff } from "../lib/scheduler-merge-handoff.js";
 import { DEPLOY_PHASES, type DeployPhase } from "../lib/ledger-deploy-schema.js";
@@ -16,6 +17,7 @@ const oneOf = <T extends string>(v: string | undefined, xs: readonly T[], flag: 
 };
 
 export const SCHEDULER_DEPLOY_CMDS: Record<string, CommandSpec> = {
+  ...CENTER_DEPLOY_COMMANDS,
   "scheduler-merge-handoff": {
     valued: ["head", "pr", "merged", "base", "pr-head", "carry", "from", "main-parent", "main-head", "diff-hash", "basis"], bools: [],
     usage: "scheduler-merge-handoff <task> --head <sha> --pr <url> [--merged <合并提交> --base main --pr-head <合并时 PR head> --main-head <含合并提交的 main> " +

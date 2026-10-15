@@ -10,7 +10,7 @@
  *   光有 env 不够,出了组(detached / setsid)的嵌套调用明确拒绝。
  * 持锁不是授权:这里不提供任何远程 / HTTP 入口,只在本机串行。
  */
-import { linkSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { acquireLock } from "./file-lock.js";
@@ -124,7 +124,7 @@ function validIdentity(p: unknown): p is ProcIdentity {
 
 function validRecord(d: unknown): boolean {
   const r = d as DeployLockRecord;
-  return !!r && r.v === 1 && typeof r.token === "string" && r.token.length >= 16 && LABEL_RE.test(r.label)
+  return !!r && r.v === 1 && typeof r.token === "string" && r.token.length >= 16 && (r.label === undefined || typeof r.label === "string" && LABEL_RE.test(r.label))
     && Number.isSafeInteger(r.uid) && validIdentity(r.holder) && (r.child === undefined || validIdentity(r.child))
     && typeof r.acquiredAt === "string";
 }
@@ -140,7 +140,7 @@ export function readDeployLock(path: string): LockRead {
     return { status: "corrupt", error: `读取失败: ${(e as Error).message}` };
   }
   const r = parseState(raw, validRecord);
-  return r.status === "ok" ? { status: "ok", record: r.data as DeployLockRecord } : r;
+  return r.status === "ok" ? { status: "ok", record: { ...r.data as DeployLockRecord, label: (r.data as DeployLockRecord).label ?? "unknown" } } : r;
 }
 
 /** 完整记录先写排他临时文件再 link:目标已存在 → false;其它文件系统错误照抛 */
@@ -254,12 +254,18 @@ export async function acquireDeployLock(opts: AcquireOpts): Promise<AcquireResul
   const path = opts.path ?? deployLockPath();
   const probe = opts.probe ?? realProbe;
   const deadline = Date.now() + Math.max(0, opts.waitMs);
+  let waiter: string | undefined;
   let announced = "";
   let last: { holder: DeployLockRecord | null; state: Liveness | "corrupt" } = { holder: null, state: "unknown" };
   try {
     const rec = selfRecord(opts.label, probe);
     if (typeof rec === "string") return { kind: "error", message: rec };
     mkdirSync(dirname(path), { recursive: true });
+    if (opts.waitMs > 0) {
+      mkdirSync(`${path}.waiters`, { recursive: true, mode: 0o700 });
+      waiter = join(`${path}.waiters`, rec.token);
+      writeFileSync(waiter, JSON.stringify(rec), { mode: 0o600, flag: "wx" });
+    }
     for (;;) {
       if (opts.aborted?.()) return { kind: "aborted" };
       if (tryCreate(path, rec)) return { kind: "acquired", handle: makeHandle(path, rec, probe) };
@@ -280,7 +286,15 @@ export async function acquireDeployLock(opts: AcquireOpts): Promise<AcquireResul
     }
   } catch (e) {
     return { kind: "error", message: `部署锁出错(${path}):${(e as Error).message}` };
-  }
+  } finally { if (waiter) rmSync(waiter, { force: true }); }
+}
+
+/** Only live, valid waiters count; old or malformed records cannot turn a signal into a retry. */
+export function waitingDeployLabels(path = deployLockPath(), probe: ProcProbe = realProbe): string[] {
+  try { return readdirSync(`${path}.waiters`).flatMap((name) => {
+    const r = readDeployLock(join(`${path}.waiters`, name));
+    return r.status === "ok" && r.record.label !== "unknown" && holderLiveness(r.record, probe) === "live" ? [r.record.label] : [];
+  }); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error("部署等待记录不可读"); return []; }
 }
 
 export type Reentry =

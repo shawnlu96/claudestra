@@ -5,6 +5,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   askDefaultAll: { class: "permission", reason: "按默认方案自动批准提问与规格文件扩围" },
   authorRebuild: { class: "permission", reason: "依据退役证明重建作者并重新指派" },
   cardProcReap: { class: "delete-data", reason: "回收卡片进程及其运行资源" },
+  centerDeployAuto: { class: "permission", reason: "按 owner 授权卡自动部署私仓中心" },
   ciCoverageGate: { class: "safety", reason: "决定合并所需 CI 证据是否齐全" },
   ciIoMapFuse: { class: "safety", reason: "熔断 CI 输入输出映射的不可信证据" },
   ciManualResume: { class: "permission", reason: "按 CI 证明把人工卡交回自动调度" },
