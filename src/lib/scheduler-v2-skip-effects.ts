@@ -91,7 +91,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-lock-yield-deps.ts": "ledger=2",
     "scheduler-main-ci-wiring.ts": "ledger=3 notice=4",
     "scheduler-merge-ci-log-read.ts": "ledger=1 vcs=3", // merge tick's CI reads; observation through the guarded pass manager
-    "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2",
+    "scheduler-merge-handoff-tick.ts": "ledger=4 vcs=2",
     "scheduler-merge-pipe.ts": "ledger=2", // MRGPIPE1: `ledger scheduler-merge-step` (slot yield) and `scheduler-recovery-observe` through the pass manager
     "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1",
@@ -246,6 +246,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     // PMAUTO1 observation-plan: mkdir of the plans file's directory, only inside withPlans (the `ledger observation-*` writers); the tick imports its read side
     "observation-plan.ts": "fs=1",
     "recovery-peer-lease-handover.ts": "sql=3 stmt=3", // PEERLEASE1: peer-handover / peer-head-block UPDATEs inside the ledger scheduler-fix-relay transaction
+    "remote-review-bounce.ts": "sql=1 stmt=1", // RRL-2: merge → fix inside the `ledger scheduler-merge-handoff --remote-bounce` transaction
     "review-count-carry-ledger.ts": "sql=2 stmt=2", // CARRYCNT1: the count carry's writes inside the `ledger scheduler-merge-step` transaction
     "scheduler-deploy.ts": "sql=6 stmt=6",
     "scheduler-merge-ci-behind.ts": "sql=1 stmt=1 vcs=1",
