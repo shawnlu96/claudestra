@@ -91,6 +91,7 @@ function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> 
         // 拉取模式下摘要队列不再推给 PM，这里带上条数，PM 拉待办时顺带看到（oneShot 进度同步里偶有要处理的）
         const digest = store.queued(project).length;
         return { ok: true, project, due: all.filter((t) => t.due).length, waiting: all.filter((t) => !t.due).length, todos,
+          ...(todos.some((t) => t.dedupKey) ? { todoDoneHint: "ledger note <卡> --dedup pm-todo-done:<dedupKey> --text 已处理" } : {}),
           ...(digest ? { digest, digestHint: "ledger pm-digest --list" } : {}) };
       } },
   };

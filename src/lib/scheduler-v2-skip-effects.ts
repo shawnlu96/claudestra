@@ -22,6 +22,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-fix-reassign-pr.ts": "proc=1 vcs=4",
     "lend-git.ts": "vcs=1",
     "pool-review-proof-raw.ts": "fs=2",
+    "private-merge-gh.ts": "vcs=6", // MERGEAUTO1: the merge driver's private-repo gh reads + head-pinned merge, under the merge tick's skipTask
+    "private-merge-ledger.ts": "sql=1 stmt=1", // MERGEAUTO1: the private bounce's run check-list write, inside the merge driver under the merge tick's skipTask
     "recovery-fix-local-swap-run.ts": "proc=1 vcs=1", // GATESWAP1: the commit-edge author-tree proof's synchronous git (treeProofSync)
     "review-converge-followup.ts": "proc=1 fs=2 vcs=1",
     "review-converge-scope.ts": "proc=1 vcs=1",
@@ -62,6 +64,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "merge-content-review-sink.ts": "ledger=1", // merge-arch-REVIEW1: `ledger scheduler-content-review` from the merge driver's carry, through the pass manager
     "merge-deploy-outbox.ts": "ledger=1",
     "merge-queue-candidates.ts": "ledger=1", // CAND1: `ledger scheduler-recovery-observe` for mergeUnifiedCandidates notes, through the pass manager
+    "observation-auto-register-tick.ts": "ledger=1", // Spec registration through the leased pass manager
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
     "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
@@ -75,6 +78,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-ci-selected-gate.ts": "ledger=1 notice=3", // CISEL2: observe / repair notes via `ledger scheduler-recovery-observe` through the pass manager; info notice to PM
     "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1",
+    "scheduler-head-refetch.ts": "ledger=1", // SELFHEAL1: `ledger scheduler-recovery-observe` head-refetch attempt notes, through the pass manager
     "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5",
     "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2",
@@ -108,11 +112,17 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "proc=1 fs=3",
     "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3",
+    "center-deploy-checkout.ts": "vcs=2",
+    "center-deploy-proof.ts": "vcs=1",
+    "center-deploy-run.ts": "proc=1 fs=1",
+    "center-deploy-tick.ts": "ledger=2 notice=1",
+    "center-deploy-worker.ts": "fs=1 vcs=1",
     "ledger-scheduler-lease-finished.ts": "sql=7 stmt=7",
     "lend-pr-takeover-gh.ts": "vcs=4",
     "lend-pr-takeover.ts": "ledger=1",
     "scheduler-autostart-deps.ts": "ledger=2 proc=2 fs=2 notice=1 vcs=1",
     "scheduler-autostart-run.ts": "ledger=3 notice=4",
+    "scheduler-deploy-lock-jobs.ts": "ledger=2 fs=3",
     "scheduler-deploy-reconcile-facts.ts": "vcs=1",
     "scheduler-deploy-reconcile.ts": "ledger=1 notice=1",
     "scheduler-merge-train-gh.ts": "fs=1 vcs=1",
@@ -289,6 +299,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "media-outbound.ts": "sql=2 stmt=4 fs=4",
     "memory-retrieve-head.ts": "proc=1 vcs=1",
     "notify.ts": "notice=1",
+    "pm-deploy-lock.ts": "proc=1 fs=8",
     "pm-notice-level.ts": "stmt=1",
     "pm-notify.ts": "notice=2",
     "pm-slim.ts": "fs=1",

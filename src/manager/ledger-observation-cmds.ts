@@ -8,6 +8,7 @@
  * - `observation-plans`：只读列表。
  * paths 只给测试指向临时文件。
  */
+import { autoRegisterObservation } from "../lib/observation-auto-register.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import {
   cancelObservation, markObservation, observationHours, OBSERVATION_PLANS_PATH, OBSERVATION_RULE_VERSION, OBSERVATION_SOURCE, autoMode, parseTarget, planById,
@@ -23,6 +24,7 @@ export interface ObservationCmdOpts extends DueOpts { readSpec?(taskId: string):
 
 const view = (p: ObservationPlan) => ({ id: p.id, task: p.taskId, project: p.project, target: targetLabel(p.target), status: p.status, hours: p.hours,
   startAt: new Date(p.startAt).toISOString(), dueAt: new Date(p.dueAt).toISOString(), ruleVersion: p.ruleVersion, source: p.source, specRev: p.specRev,
+  authorization: p.authorization ?? null, extensions: p.extensions ?? 0,
   generation: p.generation, configRev: p.configRev ?? null, by: p.by, misjudged: p.misjudged, ...(p.dryRun ? { dryRun: p.dryRun } : {}), ...(p.receipt ? { receipt: p.receipt } : {}),
   ...(p.judge ? { judge: { code: p.judge.code, reason: p.judge.reason, sent: !!p.judge.sentAt } } : {}), ...(p.cancelled ? { cancelled: p.cancelled } : {}) });
 
@@ -48,6 +50,19 @@ const planId = (c: LedgerCli): string => {
 export function observationCmds(o: ObservationCmdOpts = {}): Record<string, CommandSpec> {
   const paths: PlanPaths = { plans: o.plans ?? OBSERVATION_PLANS_PATH, ...(o.recovery ? { recovery: o.recovery } : {}), ...(o.lockMs ? { lockMs: o.lockMs } : {}) };
   return {
+    "scheduler-observation-register": {
+      valued: [], bools: [], usage: "scheduler-observation-register <卡>（调度身份按规格自动登记）",
+      async run(c) {
+        if (c.deps.actor !== "scheduler" || !c.deps.assertLease) throw new LedgerError("forbidden", "自动登记要有租约的调度身份");
+        const task = c.task(c.p.pos[1]);
+        const active = () => {
+          c.deps.assertLease!();
+          if (c.deps.autoDispatch?.() !== true || !c.deps.autoProjects?.().includes(task.project)) throw new LedgerError("forbidden", "本项目未启用自动调度");
+        };
+        active();
+        return { ok: true, plans: (await autoRegisterObservation(c.db, c.ctx(), task.id, { ...paths, readSpec: o.readSpec, active })).map(view) };
+      },
+    },
     "observation-register": {
       valued: ["target", "project", "rule", "source", "hours", "start", "reason", "dedup"],
       usage: "observation-register <卡> --target recovery:<恢复键>|autostart:<字段> --project <id> "

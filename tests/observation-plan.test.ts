@@ -199,13 +199,13 @@ describe("[验收线 2] 不满足只交 PM 一次，误判持久", () => {
     });
   }
 
-  test("没有证据适配器的机制（nearMarker 等）到期判不可核，不拿别的东西冒充证据", async () => {
+  test("通用适配器只认 recovery_observe，不拿旧机制自有事件冒充样本", async () => {
     mode("on");
     await register(PM, "recovery:nearMarker");
     ev(T0 + H, "scheduler", { op: "review_near_marker", mode: "observe" }, "T1");
     const r = await due(DUE);
-    expect(r).toMatchObject({ outcome: "judge", plan: { judge: { code: "evidence_incomplete" } } });
-    expect(r.text).toContain("没有证据适配器");
+    expect(r).toMatchObject({ outcome: "judge", plan: { judge: { code: "no_samples" } } });
+    expect(r.text).toContain("一条观察记录都没有");
     expect(policy("nearMarker")).toBe("observe");
   });
 

@@ -9,4 +9,4 @@ import { p2BacklogCmds } from "./ledger-p2-backlog-cmds.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
 export const PMAUTO_CMDS: Record<string, CommandSpec> = { ...observationCmds(), ...p2BacklogCmds() };
-export const PMAUTO_SERVICE: ReadonlySet<string> = new Set(["observation-due", "p2-backlog-record"]);
+export const PMAUTO_SERVICE: ReadonlySet<string> = new Set(["observation-due", "p2-backlog-record", "scheduler-observation-register", "scheduler-pm-todo"]);

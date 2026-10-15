@@ -24,12 +24,14 @@ import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
+import { privateRepoMergeAdmits } from "./private-merge-gate.js";
 import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
 import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
 import { centerReviewed } from "./scheduler-center-facts.js";
 import { ciProofAdmits } from "./scheduler-ci-proof-gate.js";
 import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./review-source-proof.js";
 import { ownerFreshStep } from "./scheduler-ui-owner-fresh.js";
+import { fixSelfHeal } from "./scheduler-fix-selfheal.js";
 
 export interface WorkerRef {
   agent: string;
@@ -216,10 +218,10 @@ const bouncePackage = (bounce: MergeBounce | null): WorkOrderFacts | null => bou
 
 function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
   const read = fixStartReviewFacts(s.task, s.events);
-  if (read.kind !== "facts") return escalate("fix_report", "修复阶段缺上一轮完整审查报告");
+  if (read.kind !== "facts") return fixSelfHeal(s, null, escalate("fix_report", "修复阶段缺上一轮完整审查报告")); // SELFHEAL1
   const facts = convergeReview(s.events, read.facts, s.fixDiff).facts;
   const p1 = facts.findings.filter((f) => f.severity === "P1");
-  if (!p1.length) return escalate("fix_report", "修复阶段没有 P1，需 PM 核对为什么退回");
+  if (!p1.length) return fixSelfHeal(s, facts, escalate("fix_report", "修复阶段没有 P1，需 PM 核对为什么退回")); // SELFHEAL1
   const minRound = reviewStartRound(s);
   const streaks = p1.map((f) => p1FindingStreak(s.events, f, facts.round, minRound));
   const total = p1AnyStreak(s.events, facts.round, minRound);
@@ -337,7 +339,8 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (node.gate === "ci_and_review") {
     const inFlight = liveIntent(s, node, "merge");
     if (inFlight) return inFlight;
-    const foreign = foreignRepoEscalation(s); if (foreign) return foreign; // i28-SECPOOL4: another repository's card goes to PM (scheduler-foreign-repo.ts)
+    // i28-SECPOOL4: another repository's card goes to PM; MERGEAUTO1: a private one checked out here merges (private-merge-gate.ts)
+    const foreign = foreignRepoEscalation(s); if (foreign && !privateRepoMergeAdmits(s)) return foreign;
     const since = latestSeq(s.events, s.task);
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
