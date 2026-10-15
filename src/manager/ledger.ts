@@ -1,3 +1,4 @@
+import { PRIORITY_STALL_CMDS } from "./ledger-priority-stall-cmds.js";
 import { PRIORITY_CMDS } from "./ledger-priority-cmds.js";
 import { PM_SWITCH_CMDS } from "./pm-switch.js";
 import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledger-resource-scope-cmds.js";
@@ -81,6 +82,7 @@ import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
 import { MAIN_CI_CMDS } from "./ledger-main-ci-cmds.js";
 import { LEND_AUTHOR_RETIRE_CMDS } from "../lib/lend-author-retire-cmds.js";
+import { MAIN_RED_FIX_CMDS, MAIN_RED_FIX_SERVICE } from "../lib/main-red-fix-cmds.js";
 import { AUTHOR_REBUILD_CMDS } from "../lib/scheduler-author-rebuild-cmds.js";
 import { PMAUTO_CMDS, PMAUTO_SERVICE } from "./ledger-observation-wiring.js";
 import { DRY_RUN_READS, isLedgerWrite, READER_ONLY_SUBS } from "./write-commands.js";
@@ -88,7 +90,8 @@ import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
-const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub) || PMAUTO_SERVICE.has(sub);
+const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub) ||
+  PMAUTO_SERVICE.has(sub) || MAIN_RED_FIX_SERVICE.has(sub);
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
@@ -114,6 +117,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS, ...UI_PAGE_BATCH_CMDS,
   ...VERDICT_CMDS, ...MEMORY_CMDS, ...MEMORY_IMPORT_CMDS, ...MEMORY_METRICS_CMDS,
+  ...PRIORITY_STALL_CMDS,
   ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
   ...RECOVERY_CMDS, ...MANUAL_MERGE_CMDS, ...REVIEW_EXPORT_CMDS,
   ...MAIN_CARRY_CMDS, // MAINP2 正式沿用审查（ledger-main-carry-cmds.ts）
@@ -129,6 +133,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...CI_KNOWN_FLAKY_CMDS, // 已知偶发测试清单（CIF8）
   ...MAIN_CI_CMDS, // 主线 CI 暂停的状态 / 修复绑定 / 调度写口（MAINCIW）
   ...LEND_AUTHOR_RETIRE_CMDS,
+  ...MAIN_RED_FIX_CMDS, // main / Nightly 红的重跑、修复节点与自动修复绑定（agents-MAINRED1）
   ...AUTHOR_REBUILD_CMDS, // 作者重建的观察 / 等待说明写口（AREB2）
   ...CARD_PAUSE_CMDS, // 卡级暂停 / 继续（UXPAUSE1）
   ...PMAUTO_CMDS, // 观察期登记与普通 P2 积压（PMAUTO1）

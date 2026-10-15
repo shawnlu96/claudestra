@@ -24,6 +24,8 @@ export interface SchedulerPassPath {
 }
 
 export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
+  { step: "priorityStallTick", file: "ledger-priority-stall-tick.ts", fn: "priorityStallTick", effects: ["ledger", "notice"], gates: ["hook"],
+    why: "now targets exclude skip cards/features before reading bases and again in the leased writer before effects" },
   { step: "acquireMaintenance", file: "scheduler-maintenance.ts", fn: "acquireMaintenance", effects: [], gates: ["none"],
     why: "the service's own maintenance lease" },
   { step: "opts.peerPr", file: "peer-pr-tick.ts", fn: "peerPrStep", effects: ["ledger", "gh", "git", "notice"], gates: ["featureless", "manager"],
@@ -92,11 +94,14 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "scheduler-manual-resume": "task", "scheduler-merge-begin": "intent", "scheduler-merge-handoff": "task", "scheduler-merge-step": "intent",
   "scheduler-model-inform": "task", "scheduler-model-outcome": "intent", "scheduler-observe": "task", "scheduler-plan": "task", "scheduler-plan-rejected": "task",
   "scheduler-pool": "intent", "scheduler-pool-refusal": "task", "scheduler-refusal-epoch": "task", "scheduler-retire": "task", "scheduler-review-downgrade": "task",
+  "scheduler-priority-now": "project",
+  "scheduler-priority-stall": "task-or-none",
   "scheduler-recovery-observe": "task", "scheduler-manual-case-default": "task", "scheduler-manual-case-sla": "task",
   "scheduler-review-hold": "task", "scheduler-review-snapshot": "intent", "scheduler-review-swap": "intent", "scheduler-sec-review-alarm": "task",
   "scheduler-session-bind": "task", "scheduler-session-retire": "task", "scheduler-settle": "intent", "scheduler-spec-place": "task", "scheduler-stage": "intent",
   "scheduler-supervise": "supervise", "scheduler-ui-ask": "intent", "scheduler-unclaimed": "intent", "scheduler-unclaimed-sent": "intent",
   "scheduler-lend-author-retire": "task",
+  "scheduler-main-red-fix": "project",
   "scheduler-content-review": "task", // merge-arch-REVIEW1 (merge-content-review-sink.ts)
   "scheduler-worker-retire": "worker-retire", "verify": "task",
 };
