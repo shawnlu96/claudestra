@@ -135,6 +135,8 @@ export function Composer() {
   const hasContent = !!text.trim() || files.length > 0;
   // 流式中也可发（插入会话）——不再要求 !streaming。
   const canSend = !disabled && hasContent;
+  // 选择文件与粘贴共用：先归一化（补类型 / 拦空壳和超限）再进待发列表（lib/chat/attachment-normalize-intake.ts）
+  const { addFiles, clearFiles, notice: attachNotice, dismissNotice } = useAttachmentIntake({ disabled, max: MAX_FILES, taRef, setFiles });
 
   // ── 草稿持久化（2026-07-13 owner）：未发送文字按 agent 存 localStorage（../drafts.ts，
   //    侧栏【草稿】标同一数据源），切走会话 / 退出 App 再回来原样恢复；发送成功即清。 ──
@@ -146,7 +148,7 @@ export function Composer() {
     // v2.21.1+ 切会话清空待发附件(owner 2026-09-02:「粘贴文件后切到别的对话,
     // 文件还挂在框上」)。文字草稿是 per-agent 持久化的,附件不是——File 对象
     // 存不进 localStorage,留在 state 里就等于跟着你串台,一不留神发错人。
-    setFiles([]);
+    clearFiles(); // 连同在途的附件归一化一起作废
     const onHide = () => {
       if (document.visibilityState === "hidden") saveDraft(active, textRef.current);
     };
@@ -389,12 +391,9 @@ export function Composer() {
     if (target === false) return;
     sendComposed(store, cur, files.length ? files : undefined, target ?? undefined); // 表单同步行 → [select:…]；@ → 末尾加委托指令
     setText("");
-    setFiles([]);
+    clearFiles(); // 连同在途的附件归一化一起作废
     if (active) clearDraft(active);
   };
-
-  // 选择文件与粘贴共用：先归一化（补类型 / 拦空壳和超限）再进待发列表（lib/chat/attachment-normalize-intake.ts）
-  const { addFiles, notice: attachNotice, dismissNotice } = useAttachmentIntake({ disabled, max: MAX_FILES, taRef, setFiles });
 
   const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
     addFiles(Array.from(e.target.files || []));

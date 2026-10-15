@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { isPreviewableImage } from "@/lib/chat/attachment-normalize";
-import type { AttachNotice } from "@/lib/chat/attachment-normalize-intake";
+import type { AttachNotice } from "@/lib/chat/attachment-normalize-queue";
 
 /**
  * 缩略图的 blob URL：同一个 File 只建一次，移出待发列表就 revoke（D8-3）。

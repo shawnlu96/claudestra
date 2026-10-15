@@ -8,6 +8,7 @@ import {
   MAX_ATTACHMENT_BYTES, NO_CONTENT_HINT, decideAttachment, isPreviewableImage, normalizeAttachment, sniffHead,
 } from "@/lib/chat/attachment-normalize";
 import { formatPasteDiag, imagesFromHtml, readClipboard } from "@/lib/chat/attachment-normalize-paste";
+import { AttachmentIntake, type AttachNotice } from "@/lib/chat/attachment-normalize-queue";
 
 const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52];
 const JPEG = [0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46];
@@ -165,5 +166,52 @@ describe("[验收线 1] 诊断行只记类型 / 大小 / 嗅探 / 可读", () =>
     expect(line).toContain("html-img=0/refused1/big0");
     expect(line).not.toContain("私密名字");
     expect(line).not.toMatch(/file:\/\/|https?:|<img|base64/);
+  });
+});
+
+/** 文件头读取挂起、由测试放行的 PNG（模拟大文件 / 慢盘上的读取还没回来） */
+function deferredPng(name: string): { file: File; release: () => void } {
+  const f = new File([bytes(PNG)], name, { type: "" });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const orig = (f as unknown as { slice(a?: number, b?: number): Blob }).slice.bind(f); // 先取原 slice 再覆盖；根 tsc 的 Bun File 类型没声明 slice
+  const read = async (a?: number, b?: number) => {
+    await gate;
+    return (orig(a, b) as unknown as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer();
+  };
+  Object.defineProperty(f, "slice", { value: (a?: number, b?: number) => ({ arrayBuffer: () => read(a, b) }) });
+  return { file: f, release };
+}
+
+describe("[回归 intake-cross-chat-race] 代次：切会话 / 发送清空后，在途的归一化不写回", () => {
+  const sink = () => {
+    const s = { added: [] as File[][], notices: [] as (AttachNotice | null)[], logs: [] as string[] };
+    return { s, intake: new AttachmentIntake({ addFiles: (f) => s.added.push(f), setNotice: (n) => s.notices.push(n), log: (l) => s.logs.push(l) }) };
+  };
+  test("A 会话粘贴、读取未完成时切到 B（invalidate）→ 读完也不进待发列表、不出提示；诊断行照记", async () => {
+    const { s, intake } = sink();
+    const { file, release } = deferredPng("a");
+    const pending = intake.run([file], { types: ["Files"], items: [{ kind: "file", type: "" }], clip: readClipboard({ types: ["Files"], items: [], files: [file], getData: () => "" }) });
+    intake.invalidate(); // composer 切会话 / 发送清空待发列表时调
+    release();
+    await pending;
+    expect(s.added).toEqual([]);
+    expect(s.notices).toEqual([]);
+    expect(s.logs.length).toBe(1);
+  });
+  test("对照：没作废就照常写回；作废之后新发起的不受影响", async () => {
+    const { s, intake } = sink();
+    const one = deferredPng("a");
+    const p1 = intake.run([one.file], null);
+    one.release();
+    await p1;
+    expect(s.added.map((f) => f.map((x) => [x.name, x.type]))).toEqual([[["a.png", "image/png"]]]);
+    intake.invalidate();
+    const two = deferredPng("b");
+    const p2 = intake.run([two.file], null);
+    two.release();
+    await p2;
+    expect(s.added.length).toBe(2);
+    expect(s.notices).toEqual([null, null]);
   });
 });
