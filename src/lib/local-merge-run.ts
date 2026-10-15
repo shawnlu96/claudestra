@@ -17,7 +17,7 @@ import { checkArgv, type LocalMergeProject } from "./scheduler-config.js";
 import { localMergeGate, localMergeRecord, recordLocalMerge, type CheckResult, type LocalMergeMode } from "./local-merge.js";
 
 /** Each check gets this long (PM default, 2026-10-15); a hung check fails the merge instead of holding the project lock forever. */
-export const CHECK_TIMEOUT_MS = 30 * 60_000;
+const CHECK_TIMEOUT_MS = 30 * 60_000;
 const GIT_TIMEOUT_MS = 120_000;
 const MAIN = "refs/heads/main";
 

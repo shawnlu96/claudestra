@@ -91,6 +91,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-main-ci-wiring.ts": "ledger=3 notice=4",
     "scheduler-merge-ci-log-read.ts": "ledger=1 vcs=3", // merge tick's CI reads; observation through the guarded pass manager
     "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2",
+    "local-merge-tick.ts": "ledger=1", // ONB-2: `ledger scheduler-local-merge-ready` through the pass manager, per card in the auto tick
     "scheduler-merge-pipe.ts": "ledger=2", // MRGPIPE1: `ledger scheduler-merge-step` (slot yield) and `scheduler-recovery-observe` through the pass manager
     "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1",
@@ -250,6 +251,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-ci-rerun.ts": "sql=2 stmt=2 vcs=1",
     "scheduler-merge-conflict.ts": "sql=3 stmt=3",
     "scheduler-merge-handoff.ts": "sql=1 stmt=1",
+    "local-merge.ts": "sql=1 stmt=1", // ONB-2: merge → live inside the `ledger local-merge` / `scheduler-local-merge-ready` transactions
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3",
     "scheduler-merge.ts": "sql=11 stmt=11",
     "scheduler-review-stale.ts": "sql=1 stmt=1",

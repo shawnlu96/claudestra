@@ -41,7 +41,7 @@ export const localReviewRule = (checks: readonly string[]): string => `全量测
 const localEnvironment = (checks: readonly string[]) => ENVIRONMENT.replace("全量以 PR head 的 CI 为准", `本项目没有 PR CI，全量以必过检查为准：${checksText(checks)}`);
 const LOCAL_DUTIES = DUTIES.replace("CI 由合并闸核对", "必过检查由 PM 本机合并时再跑一遍");
 /** 本地项目没有 run 链接、也没有合并闸重跑：写清哪条检查没过、怎么复现，PM 合并时自己再跑 */
-export const LOCAL_OUT_OF_SCOPE_RED = "范围外测试红：不推空提交，在证据报告里列明失败的检查和复现方法，由 PM 本地合并时核对";
+const LOCAL_OUT_OF_SCOPE_RED = "范围外测试红：不推空提交，在证据报告里列明失败的检查和复现方法，由 PM 本地合并时核对";
 
 /**
  * 并进派单 inputs 的那一项；uiBasis = ui 卡审查单的对照基准一节（ui-acceptance.ts uiReviewBasis），带上时多一条 UI_BASIS_RULE；

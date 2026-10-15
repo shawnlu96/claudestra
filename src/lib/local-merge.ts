@@ -15,8 +15,8 @@ import { mergeReviewProof } from "./scheduler-merge.js";
 import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
-export const LOCAL_MERGE_OP = "local_merge";
-export const LOCAL_READY_OP = "local_merge_ready";
+const LOCAL_MERGE_OP = "local_merge";
+const LOCAL_READY_OP = "local_merge_ready";
 const SHA = /^[a-f0-9]{40}$/i;
 
 /** How the commit that lands on main was made; `backfill` = the head was already on main, only the record was missing. */
