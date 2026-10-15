@@ -46,6 +46,15 @@ const liveMcpLaunchDeps: McpLaunchDeps = {
   log: (line) => console.error(line),
 };
 
+/** 清掉上一次留的待认领：清不掉只告警——它只会让该 agent 下一次续接未记录的会话时多认一次（不影响本次） */
+function clearPending(d: McpLaunchDeps, agent: string): void {
+  try {
+    d.writePending(agent, null);
+  } catch (e) {
+    d.log(`⚠ [rename.mcp] ${agent} 的待认领记录没清掉：${(e as Error).message}`);
+  }
+}
+
 const kindOf = (r: McpLaunchRequest): LaunchKind => (r.resumeId ? (r.forkSession ? "fork" : "resume") : "new");
 
 /** 选名并落盘。新族记不下来就退回旧族：不能起了新名、下次续接却认不出它 */
@@ -59,17 +68,19 @@ export function planMcpLaunch(r: McpLaunchRequest, d: McpLaunchDeps = liveMcpLau
     stored: kind === "new" || explicit ? null : d.readSession(sessionId),
     pending: kind === "resume" && !explicit ? d.readPending(r.agent) : null,
   });
+  // 会话记录与待认领记录不会同时要写（select.ts）：哪个写不成都退回旧族，此时磁盘上也没留下新族记录
   try {
     if (c.recordSession) d.writeSession(c.recordSession.sessionId, c.recordSession.family, r.agent);
-    if (c.pending !== undefined && r.agent) d.writePending(r.agent, c.pending);
-    else if (c.pending && !r.agent) throw new Error("没有 agent 名，分叉 / 无 id 启动的族没处记");
-  } catch (e) {
-    if (c.family !== LEGACY_FAMILY && c.source !== "explicit") {
-      d.log(`⚠ [rename.mcp] ${r.agent ?? "?"} 的命名族记不下来，本次按 ${LEGACY_FAMILY} 启动：${(e as Error).message}`);
-      return { mode, name: LEGACY_FAMILY, family: LEGACY_FAMILY, source: "legacy" };
+    if (c.pending) {
+      if (!r.agent) throw new Error("没有 agent 名，分叉 / 无 id 启动的族没处记");
+      d.writePending(r.agent, c.pending);
     }
-    d.log(`⚠ [rename.mcp] ${r.agent ?? "?"} 清待认领记录失败（本次照常按 ${c.name}）：${(e as Error).message}`);
+  } catch (e) {
+    d.log(`⚠ [rename.mcp] ${r.agent ?? "?"} 的命名族记不下来，本次按 ${LEGACY_FAMILY} 启动：${(e as Error).message}`);
+    if (r.agent) clearPending(d, r.agent); // 旧的待认领不能留给下一次
+    return { mode, name: LEGACY_FAMILY, family: LEGACY_FAMILY, source: "legacy" };
   }
+  if (c.pending === null && r.agent) clearPending(d, r.agent);
   if (mode === "observe" && r.agent) {
     try {
       d.observe(r.agent, { kind, session: sessionId ?? null, actual: c.name, source: c.source, would: c.would ?? c.name });
@@ -83,9 +94,13 @@ export function planMcpLaunch(r: McpLaunchRequest, d: McpLaunchDeps = liveMcpLau
 /** 这次是否由本模块接管服务配置（新族且不是显式名）；否则命令与改造前相同 */
 const ownsServer = (c: McpChoice): boolean => c.source !== "explicit" && c.family !== null && c.family !== LEGACY_FAMILY;
 
-/** 启动前缀里 MCP_NAME 之后追加的一截：on 档的显式名带上来源，会话里再起的 manager 才认得出它是显式的 */
+/**
+ * 启动前缀里 MCP_NAME 之后追加的来源（explicitMcpName 认它）：新族会话标 family，会话里再起的 manager 不把继承的 floka 当显式；
+ * on 档的显式名标 explicit，钉住的族名传给子启动。旧族 / off 档的显式名不加，命令与改造前相同。
+ */
 export function mcpEnvSuffix(c: McpChoice & { mode: RenameMcpMode }): string {
-  return c.source === "explicit" && c.mode === "on" ? " MCP_NAME_SOURCE=explicit" : "";
+  if (c.source === "explicit") return c.mode === "on" ? " MCP_NAME_SOURCE=explicit" : "";
+  return ownsServer(c) ? " MCP_NAME_SOURCE=family" : "";
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);

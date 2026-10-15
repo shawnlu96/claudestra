@@ -96,11 +96,13 @@ describe("[验收线 1] 新 / 旧 / 恢复会话的命名族", () => {
       expect(c).toEqual({ name: "myorch", family: null, source: "explicit" });
     }
     expect(explicitMcpName({ MCP_NAME: "myorch" })).toBe("myorch");
-    expect(explicitMcpName({ MCP_NAME: "claudestra" })).toBe("claudestra"); // 运维 shell / launchd 里显式设的
-    expect(explicitMcpName(AGENT_ENV)).toBeNull(); // 会话前缀继承来的族名
-    expect(explicitMcpName({ ...AGENT_ENV, MCP_NAME: "floka" })).toBeNull();
-    expect(explicitMcpName({ ...AGENT_ENV, MCP_NAME_SOURCE: "explicit" })).toBe("claudestra");
     expect(explicitMcpName({ DISCORD_CHANNEL_ID: "1", MCP_NAME: "myorch" })).toBe("myorch");
+    expect(explicitMcpName({ MCP_NAME: "floka" })).toBe("floka"); // 运维自己注册了 floka
+    expect(explicitMcpName({ MCP_NAME: "claudestra" })).toBeNull(); // setup 向导写进 .env 的缺省值
+    expect(explicitMcpName(AGENT_ENV)).toBeNull(); // 旧会话前缀继承来的
+    expect(explicitMcpName({ ...AGENT_ENV, MCP_NAME: "floka", MCP_NAME_SOURCE: "family" })).toBeNull(); // 新族会话前缀继承来的
+    expect(explicitMcpName({ MCP_NAME: "claudestra", MCP_NAME_SOURCE: "explicit" })).toBe("claudestra"); // 钉住族名
+    expect(explicitMcpName({ MCP_NAME: " ", MCP_NAME_SOURCE: "explicit" })).toBeNull();
   });
 
   test("会话 id 启动前未知（无 id 全新 / 分叉）：记在 agent 名下，下一次续接认领一次", () => {
@@ -128,13 +130,15 @@ describe("[验收线 1] 新 / 旧 / 恢复会话的命名族", () => {
     expect(readSessionFamily(S2, join(root, "fam"))).toBeNull();
   });
 
-  test("会话里再起的 manager（继承 MCP_NAME=claudestra）on 档仍按会话选；显式名带来源标记传下去", () => {
+  test("会话里再起的 manager 与 .env 缺省值不挡 on 档；前缀带来源，子启动认得出", () => {
     const mode = { v: "on" as RenameMcpMode };
-    expect(launchArgs({ agent: "a1", sessionId: S1 }, deps(mode, AGENT_ENV)).env).toBe("MCP_NAME=floka");
-    const ex = launchArgs({ agent: "a2", sessionId: S2 }, deps(mode, { MCP_NAME: "claudestra" }));
-    expect(ex.env).toBe("MCP_NAME=claudestra MCP_NAME_SOURCE=explicit");
-    expect(explicitMcpName({ ...AGENT_ENV, MCP_NAME_SOURCE: "explicit" })).toBe("claudestra");
-    expect(launchArgs({ agent: "a3", sessionId: S2 }, deps({ v: "off" }, { MCP_NAME: "claudestra" })).env).toBe("MCP_NAME=claudestra");
+    const child = launchArgs({ agent: "a1", sessionId: S1 }, deps(mode, AGENT_ENV));
+    expect(child.env).toBe("MCP_NAME=floka MCP_NAME_SOURCE=family");
+    expect(explicitMcpName({ ...AGENT_ENV, MCP_NAME: "floka", MCP_NAME_SOURCE: "family" })).toBeNull(); // 这个会话里再起的 manager
+    expect(launchArgs({ agent: "a2", sessionId: S2 }, deps(mode, { MCP_NAME: "claudestra" })).c.name).toBe("floka");
+    const pinned = launchArgs({ agent: "a2", sessionId: S2 }, deps(mode, { MCP_NAME: "claudestra", MCP_NAME_SOURCE: "explicit" }));
+    expect(pinned.env).toBe("MCP_NAME=claudestra MCP_NAME_SOURCE=explicit");
+    expect(launchArgs({ agent: "a3", sessionId: S2 }, deps({ v: "off" }, { MCP_NAME: "myorch" })).env).toBe("MCP_NAME=myorch"); // off：与改造前同
   });
 
   test("新族记不下来就退回 claudestra（不能起了新名却续接认不出）", () => {
@@ -160,7 +164,7 @@ describe("[验收线 2] 每个 agent 只起一个可注册的 channel-server", (
     ["on 无 id 全新大总管", { agent: "master" }, "on", {}],
     ["off 新会话", { agent: "a1", sessionId: S1 }, "off", {}],
     ["observe 新会话", { agent: "a1", sessionId: S1 }, "observe", {}],
-    ["on 显式名", { agent: "a1", sessionId: S1 }, "on", { MCP_NAME: "claudestra" }],
+    ["on 钉住旧族名", { agent: "a1", sessionId: S1 }, "on", { MCP_NAME: "claudestra", MCP_NAME_SOURCE: "explicit" }],
   ];
   for (const [label, req, mode, env] of cases) {
     for (const cred of [undefined, "/tmp/cred-file"]) {
@@ -170,6 +174,13 @@ describe("[验收线 2] 每个 agent 只起一个可注册的 channel-server", (
       });
     }
   }
+
+  test("回滚到 off 后续接 floka 会话：仍只起 floka 一个", () => {
+    writeSessionFamily(S1, "floka", "a1", join(root, "fam"));
+    const { c, args } = launchArgs({ agent: "a1", resumeId: S1 }, deps({ v: "off" }));
+    expect(c.name).toBe("floka");
+    expect(fakeCcServers(USER_LEVEL, args)).toEqual(["floka"]);
+  });
 
   test("floka 会话：拒掉 claudestra、自带 floka 一项、允许 floka 工具；已有的 settings 键保留", () => {
     const c = planMcpLaunch({ agent: "a1", sessionId: S1 }, deps({ v: "on" }));

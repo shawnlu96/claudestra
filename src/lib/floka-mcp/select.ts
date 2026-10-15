@@ -1,6 +1,6 @@
 /**
  * 一次启动该用哪个 MCP 服务名（纯函数，不读写文件；落盘见 store.ts，接线见 launch.ts）。
- * - 显式 MCP_NAME 永远生效（与改造前同一语义）；从本系统启动前缀继承来的族名不算显式（explicitMcpName）。
+ * - 显式 MCP_NAME 永远生效（与改造前同一语义）；旧族名与从本系统启动前缀继承来的族名不算显式（explicitMcpName）。
  * - 续接 / 分叉：沿用该会话记下的族，没记过的（rename.mcp 打开前就有的会话）一律旧族——不随档位变，回滚也不改。
  * - 全新会话：on 用新族，off / observe 用旧族（observe 另报 on 会用什么）。
  * - 会话 id 启动前不知道的（分叉、无 id 的全新启动）记在 agent 名下，只给该 agent 下一次启动认领一次。
@@ -38,12 +38,16 @@ export interface McpChoice {
   pending?: McpFamily | null;
 }
 
-/** 本系统的启动前缀给每个会话带 DISCORD_CHANNEL_ID 与 MCP_NAME；会话里再起的 manager 继承到的族名不是运维意图 */
+/**
+ * 运维显式指定的服务名。旧族名 claudestra 不算：setup 向导把这个缺省值写进 .env（Bun 自动加载），旧会话的启动前缀也带它，
+ * 算显式就等于 on 档永远不生效。新族会话的前缀带 MCP_NAME_SOURCE=family，会话里再起的 manager 继承到 floka 也不算；
+ * 真要钉住某个族名，另设 MCP_NAME_SOURCE=explicit。其余自定义名照旧生效（与改造前同一语义）。
+ */
 export function explicitMcpName(env: Record<string, string | undefined>): string | null {
   const v = (env.MCP_NAME || "").trim();
-  if (!v) return null;
+  if (!v || env.MCP_NAME_SOURCE === "family") return null;
   if (env.MCP_NAME_SOURCE === "explicit") return v;
-  return env.DISCORD_CHANNEL_ID && isMcpFamily(v) ? null : v;
+  return v === LEGACY_FAMILY ? null : v;
 }
 
 function decide(i: McpSelectInput, mode: "on" | "off"): McpChoice {
