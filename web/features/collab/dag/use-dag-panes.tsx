@@ -22,7 +22,7 @@ import { compareOverlay } from "./dag-diff";
 import { drawable, layoutDag, nodeId, type DagCanvas, type DNode } from "./dag-layout";
 import { MobileDag } from "./dag-mobile";
 import { ownerOf, progressRows, type AgentLite } from "./dag-progress";
-import { WorkBoardContent } from "../work/work-board-view";
+import { PriorityWorkBoard } from "../priority/priority-work-board";
 import { useTeamWorkBoard, useWorkBoard } from "../work/use-work-board";
 import { countBoardOf } from "../count-words";
 import { CountContext, useCountState, useRoundFresh, type CountInput } from "../use-count-source";
@@ -137,7 +137,7 @@ export function useDagPanes(a: DagPanesArgs) {
   // useDagBoard 在 rev 变后重拉期间留着上一轮的快照：团队看板由总览 + 快照合成，不同轮就先按旧快照出数、新快照到了再跳
   const dagFresh = useRoundFresh(load, load.status !== "loading", a.rev);
   const { work, counts } = useBoard(a, board, load.status === "loading", dagFresh);
-  const progress = <WorkBoardContent team={work.kind === "team"} board={work.board} retrying={work.retrying} loading={counts.status === "loading"}
+  const progress = <PriorityWorkBoard project={a.project} onPriorityNode={onNode} team={work.kind === "team"} board={work.board} retrying={work.retrying} loading={counts.status === "loading"}
     onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
   const drawCanvas: DrawCanvas = (c: DagCanvas, onFold, sh = shelf) => (
