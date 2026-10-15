@@ -37,6 +37,13 @@ describe("replayOfLines", () => {
     expect(items).toEqual(["✻ 先看 diff。\n  再看测试。"]);
   });
 
+  test("Pi 的 <channel> 包装解开：不显示标签和注入头，来源取 user 属性；bridge 内部注入不回放", () => {
+    const wrapped = '<channel source="claudestra" user="owner" api="true">\n[🌐 来自 Web 端用户「owner」]\n\n请检查代码\n</channel>';
+    const nudge = '<channel source="claudestra" user="bridge:watchdog">\n继续干活\n</channel>';
+    const items = replayOfLines(cc, [user(wrapped), user([{ type: "text", text: wrapped }]), user(nudge)]).map((r) => r.item);
+    expect(items).toEqual(["> owner：请检查代码", "> owner：请检查代码"]);
+  });
+
   test(`只留最后 ${REPLAY_ITEMS} 段`, () => {
     const lines = Array.from({ length: 50 }, (_, i) => assistant([{ type: "text", text: `第 ${i} 条` }]));
     const items = replayOfLines(cc, lines);
@@ -81,13 +88,30 @@ describe("showReplay", () => {
     }
   });
 
-  test("新会话（没文件）不画；读不了只记日志、不抛", () => {
+  test("已有会话文件但尾巴里没有可显示的（最后一条记录超过读取窗口、没有换行）：仍画接续提示", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acp-replay-"));
+    try {
+      const f = join(dir, "s.jsonl");
+      writeFileSync(f, assistant([{ type: "text", text: "长".repeat(1_200_000) }]));
+      const { shown, screen } = sink();
+      showReplay(screen, () => f, cc, () => {});
+      expect(shown).toHaveLength(1);
+      expect(shown[0]).toContain("已接续会话");
+      expect(shown[0]).toContain("网页");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("新会话（没文件）不画；有路径但读不了：记日志、不抛、仍提示已接续", () => {
     const { shown, screen } = sink();
     const logs: string[] = [];
     showReplay(screen, () => null, cc, (m) => void logs.push(m));
-    showReplay(screen, () => "/nonexistent/acp-replay.jsonl", cc, (m) => void logs.push(m));
     expect(shown).toEqual([]);
+    showReplay(screen, () => "/nonexistent/acp-replay.jsonl", cc, (m) => void logs.push(m));
     expect(logs).toHaveLength(1);
+    expect(shown).toHaveLength(1); // 宿主找到了路径（已有会话）却读不了：照样提示已接续
+    expect(shown[0]).toContain("已接续会话");
   });
 });
 

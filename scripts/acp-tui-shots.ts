@@ -10,7 +10,7 @@
  * --phase <名>：文件名前缀换成它（默认用 variant）。同一个脚本放进旧代码树的副本里跑，就能拍「改之前的新视图」做对照。
  */
 import { chromium, type Browser } from "playwright-core";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTuiScreen } from "../src/lib/acp/tui/screen.ts";
@@ -61,7 +61,9 @@ const SID = "01a138d1-91d8-72db-b1a0-ee2807fe5971";
 
 /** 刚重启：宿主的顶部提示 + 历史回放（acp-host.ts 的接线照搬）；旧代码树没有回放模块，照旧宿主只显示长提示 */
 async function playRestart(screen: TtyScreen): Promise<void> {
-  const mod = await import("../src/lib/acp/transcript-replay.ts").catch(() => null);
+  // 只有「旧代码树里没这个文件」才退回旧提示；文件在却加载出错照常抛，免得静默拍出旧版截图污染对照
+  const replayPath = join(import.meta.dir, "..", "src", "lib", "acp", "transcript-replay.ts");
+  const mod = existsSync(replayPath) ? await import(replayPath) : null;
   if (!mod) return screen.show(`ACP 会话 agent-demo · 线程 ${SID.slice(0, 8)}（底部输入行可直接发消息，/help 看命令；连接日志在 /Users/owner/<状态目录>/logs/acp/agent-demo/host.log）`);
   const file = join(mkdtempSync(join(tmpdir(), "acp-tui-shots-")), "session.jsonl");
   writeFileSync(file, `${replayLines().join("\n")}\n`);

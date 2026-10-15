@@ -1,11 +1,11 @@
 /**
- * 宿主重启 / 迁移后接着原会话时，窗口先回放最近一段历史（src/acp-host.ts 只在 TTY 上调一次）：session/resume 不回放历史，
- * 不回放的话窗口整屏空白，看着像对话丢了。读的是 agent 的会话文件尾巴（宿主按运行时交来路径和 session-source.ts 的翻译器，
- * 和网页历史同一份翻译；这里不认运行时），
- * 每条照常经 transcriptOfEntry / transcriptOfInbound（先打码再截断，上限不变），只取最后 REPLAY_ITEMS 段。
- * 只读文件末尾 REPLAY_BYTES：长会话几百 MB，整读会卡住启动；窗口截在半行上，那行整行不要。tests/acp-transcript-replay.test.ts。
+ * 宿主重启 / 迁移后窗口先回放最近一段历史（src/acp-host.ts 在 TTY 上调一次）：session/resume 不回放，不回放窗口就是整屏空白。
+ * 读会话文件末尾 REPLAY_BYTES（宿主按运行时交来路径和 session-source.ts 的翻译器，这里不认运行时），每段照常先打码再截断，
+ * 只取最后 REPLAY_ITEMS 段；入站消息解 <channel> 包装、bridge 内部注入不回放（同历史面板 session-history-parse.ts）。
+ * 有文件就一定画「已接续会话」（没取到可显示的也画），没文件是新会话、不画。tests/acp-transcript-replay.test.ts。
  */
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { unwrapChannelMessage } from "../session-history-parse.js";
 import type { LineTranslator } from "../session-source.js";
 import type { TtyScreen } from "./tty-screen.js";
 import { clipThought, transcriptOfEntry, transcriptOfInbound } from "./transcript.js";
@@ -34,6 +34,14 @@ export function tailLines(path: string, max = REPLAY_BYTES): string[] {
   }
 }
 
+/** 收到的消息：<channel> 包装解开、来源取 user 属性，bridge 内部注入（看门狗催办等）不是对话、不回放；没包装的照原文 */
+function inboundOf(text: string): string[] {
+  if (!text.trim()) return [];
+  const un = unwrapChannelMessage(text.trim());
+  if (!un) return [transcriptOfInbound(text, { user: "消息" })];
+  return un.from && /^bridge(:|$)/.test(un.from) ? [] : [transcriptOfInbound(un.text, { user: un.from ?? "消息" })];
+}
+
 /** 收到的消息（会话文件里是 user 的文字块）按「> 来源：」显示；思考用终端视图的多行版（clipThought）；其余块照 transcriptOfEntry */
 function itemsOf(e: Rec): string[] {
   const c = e.message?.content;
@@ -42,10 +50,10 @@ function itemsOf(e: Rec): string[] {
       ? [`✻ ${clipThought(b.thinking)}`] : transcriptOfEntry({ ...e, message: { ...e.message, content: [b] } })));
   }
   if (e.type !== "user") return transcriptOfEntry(e);
-  if (typeof c === "string") return c.trim() ? [transcriptOfInbound(c, { user: "消息" })] : [];
+  if (typeof c === "string") return inboundOf(c);
   const text = Array.isArray(c) ? c.filter((b: Rec) => b?.type === "text" && typeof b.text === "string").map((b: Rec) => b.text).join("\n") : "";
   const rest = (Array.isArray(c) ? c : []).filter((b: Rec) => b?.type !== "text");
-  return [...(text.trim() ? [transcriptOfInbound(text, { user: "消息" })] : []), ...transcriptOfEntry({ ...e, message: { content: rest } })];
+  return [...inboundOf(text), ...transcriptOfEntry({ ...e, message: { content: rest } })];
 }
 
 /** 会话文件的行 → 最近 max 段（翻译器有状态，同一次读一个实例） */
@@ -60,17 +68,18 @@ export function replayOfLines(translate: LineTranslator, lines: readonly string[
   return out.slice(-max);
 }
 
-/** 回放进窗口：没有文件 / 读不了 / 没有可显示的就什么都不画（新会话），窗口照常起 */
+/** 回放进窗口：没有文件 = 新会话，不画；有文件但读不了 / 尾巴里没有可显示的（最后一条记录比读取窗口还长），只画接续提示 */
 export function showReplay(screen: Pick<TtyScreen, "show">, path: () => string | null, translate: LineTranslator, log: (m: string) => void): void {
-  let items: ReplayItem[];
+  let p: string | null = null, items: ReplayItem[] = [];
   try {
-    const p = path();
-    items = p ? replayOfLines(translate, tailLines(p)) : [];
+    p = path();
+    if (p) items = replayOfLines(translate, tailLines(p));
   } catch (e) {
-    return log(`读会话历史回放失败（窗口照常起，不回放）：${String(e)}`);
+    log(`读会话历史回放失败（窗口照常起${p ? "，只提示已接续" : ""}）：${String(e)}`);
   }
-  if (!items.length) return;
+  if (!p) return; // 找不到文件（含找文件时出错）当新会话
   const { head, foot } = replayFrame(items.length);
+  if (!items.length) return screen.show(head);
   screen.show(head);
   for (const r of items) screen.show(r.item, r.at);
   screen.show(foot);
@@ -83,5 +92,6 @@ export function tuiHeader(agentName: string, sessionId: string, typing: boolean)
 
 /** 回放的前后两行：说清这是接续前的记录、更早的去网页看 */
 export function replayFrame(n: number): { head: string; foot: string } {
-  return { head: `⏹ 已接续会话 · 下面是最近 ${n} 条（更早的见网页）`, foot: "── 以上是接续前的记录 ──" };
+  const head = n ? `⏹ 已接续会话 · 下面是最近 ${n} 条（更早的见网页）` : "⏹ 已接续会话 · 最近记录见网页";
+  return { head, foot: "── 以上是接续前的记录 ──" };
 }
