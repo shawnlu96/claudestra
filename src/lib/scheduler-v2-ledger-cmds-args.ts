@@ -52,6 +52,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-review-swap": rule("intent", "unmapped"),
   "scheduler-review-hold": rule("task", "unmapped"),
   "scheduler-recovery-observe": rule("task", "unmapped"),
+  "scheduler-remote-review": rule("task", "unmapped"), // RRL-1: <task> is the card the repository owner's review is booked on
   "scheduler-review-downgrade": rule("task", "unmapped"),
   "scheduler-manual-resume": rule("task", "unmapped"),
   "scheduler-manual-case-default": rule("task", "unmapped"),

@@ -4,58 +4,34 @@
  * which in one transaction keeps the report as quoted data under ledger/reviews, writes one `remote_review` event whose data holds
  * parsed fields only (never the peer's text), and acts: P0 / P1 with the owner's rounds used up → an auto card goes manual and PM
  * hears once; a P1 on a card that is not auto → PM hears once (card and report path, no report text). A P1 on an auto card is left
- * to the bounce step, which looks it up by head with remoteP1At. The head counts only as a prefix of the card's head (in merge also
+ * to the bounce step, which looks it up by head with remoteP1At (remote-review-read.ts). The head counts only as a prefix of the card's head (in merge also
  * of the head the handoff follows): a stale or early review is recorded `matched: false` and does nothing now.
  * tests/remote-review-intake-ledger.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, LedgerError, listTasks } from "./ledger-store.js";
+import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
-import { prCoordinates } from "./card-repo.js";
 import { statePath } from "./paths.js";
 import { sanitizeForeign } from "./order-wire-render.js";
 import { quoteExternal } from "./quote-text.js";
 import { remoteConclusionText, type RemoteReview } from "./remote-review-parse.js";
 import { fallbackToManual } from "./scheduler-fallback.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
 import { handoffOf } from "./scheduler-merge-handoff.js";
+import { NOTIFIED_OP, notifiedKey, REMOTE_REVIEW_OP, remoteReviewKey } from "./remote-review-read.js";
 import { writeTextAtomicSync } from "./state-file.js";
 
-export const REMOTE_REVIEW_OP = "remote_review";
-const NOTIFIED_OP = "remote_review_notified";
 const LINE_CAP = 4000;
-
-/** Projects whose scheduler.json names this peer as the repository owner. */
-export const handoffProjects = (cfg: SchedulerConfig, peer: string): string[] =>
-  Object.entries(cfg.projects).filter(([, p]) => p.handoffPeer === peer).map(([id]) => id);
-
-/** The one card of these projects whose PR has this number; none or several = null (the push then goes to PM as before). */
-export function matchRemoteCard(db: Database, projects: readonly string[], number: number): LedgerTask | null {
-  const hits = projects.flatMap((p) => listTasks(db, p)).filter((t) => prCoordinates(t.pr)?.pr === number);
-  return hits.length === 1 ? hits[0]! : null;
-}
 
 /** The full head the review is about, if head12 starts it: the card's head, or in merge the PR head the handoff follows now. */
 export function remoteHeadMatch(db: Database, task: LedgerTask, head12: string): string | null {
   const heads = [task.headSHA, task.stage === "merge" ? handoffOf(db, task)?.head : null];
   return heads.find((h): h is string => typeof h === "string" && h.toLowerCase().startsWith(head12)) ?? null;
 }
-
-const isRemote = (e: LedgerEvent): boolean => e.kind === "scheduler" && e.actor === "scheduler" && e.data.op === REMOTE_REVIEW_OP;
-
-/** The latest remote review with P1 for this head (prefix match), whatever head the card had when it arrived. */
-export function remoteP1At(events: readonly LedgerEvent[], head: string | null): LedgerEvent | null {
-  if (!head) return null;
-  return events.findLast((e) => isRemote(e) && Number(e.data.p1) > 0 && typeof e.data.head12 === "string" && head.toLowerCase().startsWith(e.data.head12)) ?? null;
-}
-
-export const remoteReviewKey = (taskId: string, r: Pick<RemoteReview, "reportId" | "head12">): string =>
-  `scheduler:${REMOTE_REVIEW_OP}:${taskId}:${r.reportId}:${r.head12}`;
-const notifiedKey = (seq: number): string => `scheduler:${NOTIFIED_OP}:${seq}`;
 
 /** Every line quoted under a heading written here: an instruction inside the report can only ever appear as a quoted line. */
 export function remoteReportBody(task: LedgerTask, r: RemoteReview, peer: string): string {
@@ -70,8 +46,8 @@ export function remoteReportBody(task: LedgerTask, r: RemoteReview, peer: string
 }
 
 /** Write once; a different body under the same report id (another head) goes next to it instead of over it. */
-function keepReport(task: LedgerTask, r: RemoteReview, body: string): string {
-  const base = statePath("ledger", "reviews", `${task.id}-remote-${r.reportId}`);
+function keepReport(task: LedgerTask, r: RemoteReview, body: string, dir = statePath("ledger", "reviews")): string {
+  const base = join(dir, `${task.id}-remote-${r.reportId}`);
   for (const path of [`${base}.md`, `${base}-${r.head12}.md`]) {
     if (existsSync(path) && readFileSync(path, "utf8") !== body) continue;
     if (!existsSync(path)) writeTextAtomicSync(path, body, { mode: 0o600 });
@@ -96,7 +72,7 @@ function noticeOf(task: LedgerTask, r: RemoteReview, action: Action, path: strin
 
 export interface RecordedRemoteReview { event: LedgerEvent; duplicate: boolean; notice: string | null }
 
-export function recordRemoteReview(db: Database, ctx: WriteCtx, input: { taskId: string; review: RemoteReview; peer: string }): RecordedRemoteReview {
+export function recordRemoteReview(db: Database, ctx: WriteCtx, input: { taskId: string; review: RemoteReview; peer: string; reportDir?: string }): RecordedRemoteReview {
   const { review: r, peer } = input;
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
@@ -105,7 +81,7 @@ export function recordRemoteReview(db: Database, ctx: WriteCtx, input: { taskId:
     if (seen) return { event: seen, duplicate: true, notice: null };
     const head = remoteHeadMatch(db, task, r.head12), auto = getWorkflow(db, task.id)?.mode === "auto";
     const action = actionOf(task, r, !!head, auto);
-    const reportPath = keepReport(task, r, remoteReportBody(task, r, peer));
+    const reportPath = keepReport(task, r, remoteReportBody(task, r, peer), input.reportDir);
     const notice = noticeOf(task, r, action, reportPath);
     const text = `仓库方审查 ${r.reportId}：${remoteConclusionText(r)}，head ${r.head12}${head ? "" : "（不是卡上的 head，不生效）"}`;
     const event = insertEvent(db, { ...ctx, dedupKey }, { project: task.project, target: task.id, kind: "scheduler", text,
@@ -129,13 +105,4 @@ export function markRemoteNotified(db: Database, ctx: WriteCtx, input: { taskId:
       data: { op: NOTIFIED_OP, remoteSeq: input.seq } }, true);
     return { event, duplicate: false };
   });
-}
-
-/** remote_review events of this project with a notice PM has not been marked as having received (a range on the dedupKey index, no scan). */
-export function unsentRemoteNotices(db: Database, project: string): { taskId: string; seq: number; text: string }[] {
-  const lo = `scheduler:${REMOTE_REVIEW_OP}:`, hi = `scheduler:${REMOTE_REVIEW_OP};`;
-  const rows = db.query(`SELECT seq, target, json_extract(data, '$.notice') AS notice FROM events WHERE dedupKey >= ? AND dedupKey < ?
-    AND project = ? AND kind = 'scheduler' AND actor = 'scheduler' AND json_extract(data, '$.notice') IS NOT NULL ORDER BY seq`)
-    .all(lo, hi, project) as { seq: number; target: string; notice: string }[];
-  return rows.filter((x) => !getEventByDedup(db, notifiedKey(x.seq))).map((x) => ({ taskId: x.target, seq: x.seq, text: x.notice }));
 }

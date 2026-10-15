@@ -30,6 +30,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
     why: "the service's own maintenance lease" },
   { step: "opts.peerPr", file: "peer-pr-tick.ts", fn: "peerPrStep", effects: ["ledger", "gh", "git", "notice"], gates: ["featureless", "manager"],
     why: "peer PR cards are created by peer-pr-intake with no feature; their ledger writes still pass the gate" },
+  { step: "remoteReviewStep", file: "remote-review-tick.ts", fn: "remoteReviewStep", effects: ["ledger", "notice"], gates: ["manager"],
+    why: "RRL-1: each inbox file is booked through the pass manager first; a held card keeps its file, notices exist only for booked events" },
   { step: "mainCiPass", file: "scheduler-main-ci-wiring.ts", fn: "mainCiPass", effects: [], gates: ["none"],
     why: "MAINCIW: project level only (main / check reads, its own meta / notice claim / observe note, the PM notice); no card is named" },
   { step: "trainTick", file: "scheduler-merge-train-tick.ts", fn: "mergeTrainPass", effects: ["gh", "notice"], gates: ["hook"],
@@ -103,6 +105,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "scheduler-lend-author-retire": "task",
   "scheduler-main-red-fix": "project",
   "scheduler-content-review": "task", // merge-arch-REVIEW1 (merge-content-review-sink.ts)
+  "scheduler-remote-review": "task-or-none", // RRL-1 (remote-review-tick.ts): `-` when the inbox file could not be read
   "scheduler-worker-retire": "worker-retire", "verify": "task",
 };
 

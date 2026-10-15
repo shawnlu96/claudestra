@@ -11,7 +11,7 @@ import { basename, join } from "node:path";
 import { notifyProjectPm } from "./pm-notify.js";
 import { quoteExternal } from "./quote-text.js";
 import { listInbox, readInbox, REMOTE_INBOX_DIR } from "./remote-review-inbox.js";
-import { unsentRemoteNotices } from "./remote-review-ledger.js";
+import { unsentRemoteNotices } from "./remote-review-read.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 

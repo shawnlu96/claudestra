@@ -7,7 +7,8 @@
  */
 import { LedgerError } from "../lib/ledger-store.js";
 import { readInbox, REMOTE_INBOX_DIR } from "../lib/remote-review-inbox.js";
-import { handoffProjects, markRemoteNotified, matchRemoteCard, recordRemoteReview } from "../lib/remote-review-ledger.js";
+import { markRemoteNotified, recordRemoteReview } from "../lib/remote-review-ledger.js";
+import { handoffProjects, matchRemoteCard } from "../lib/remote-review-read.js";
 import { parseRemoteReview } from "../lib/remote-review-parse.js";
 import { readSchedulerConfig, type SchedulerConfig } from "../lib/scheduler-config.js";
 import { intFlag } from "./ledger-identity.js";
@@ -16,7 +17,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 
 export const REMOTE_REVIEW_SERVICE = new Set(["scheduler-remote-review"]);
 
-function book(c: LedgerCli, taskId: string, file: string, readConfig: () => SchedulerConfig, dir: string) {
+function book(c: LedgerCli, taskId: string, file: string, readConfig: () => SchedulerConfig, dir: string, reportDir?: string) {
   let entry;
   try { entry = readInbox(file, dir); } catch (e) { throw new LedgerError("invalid", `收件读不成：${(e as Error).message}`); }
   if (entry.taskId !== taskId) throw new LedgerError("conflict", `收件记的是 ${entry.taskId}，不是 ${taskId}`);
@@ -26,10 +27,11 @@ function book(c: LedgerCli, taskId: string, file: string, readConfig: () => Sche
   if (!review) throw new LedgerError("invalid", "收件正文不是仓库方审查推送的格式");
   if (matchRemoteCard(c.db, projects, review.number)?.id !== task.id) throw new LedgerError("conflict", `PR #${review.number} 现在对不上唯一的 ${task.id}`);
   c.deps.assertLease?.();
-  return recordRemoteReview(c.db, c.ctx(), { taskId: task.id, review, peer: entry.peer });
+  return recordRemoteReview(c.db, c.ctx(), { taskId: task.id, review, peer: entry.peer, reportDir });
 }
 
-export function remoteReviewCmds(readConfig: () => SchedulerConfig = readSchedulerConfig, dir = REMOTE_INBOX_DIR): Record<string, CommandSpec> {
+/** readConfig / dir / reportDir are for tests (the real ones: scheduler.json, the state-dir inbox, ledger/reviews). */
+export function remoteReviewCmds(readConfig: () => SchedulerConfig = readSchedulerConfig, dir = REMOTE_INBOX_DIR, reportDir?: string): Record<string, CommandSpec> {
   return {
     "scheduler-remote-review": {
       valued: ["inbox", "notified"], bools: [],
@@ -40,7 +42,7 @@ export function remoteReviewCmds(readConfig: () => SchedulerConfig = readSchedul
         const seq = intFlag(c.p, "notified"), inbox = c.p.flags.inbox;
         if ((seq === undefined) === (inbox === undefined)) throw new LedgerError("invalid", "--inbox 和 --notified 二选一");
         if (seq !== undefined) return { ok: true, ...markRemoteNotified(c.db, c.ctx(), { taskId: task.id, seq }) };
-        const r = book(c, task.id, inbox!, readConfig, dir);
+        const r = book(c, task.id, inbox!, readConfig, dir, reportDir);
         return { ok: true, duplicate: r.duplicate, event: r.event, notice: r.notice };
       },
     },

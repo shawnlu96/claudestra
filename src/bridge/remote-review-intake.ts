@@ -10,7 +10,7 @@ import type { Database } from "bun:sqlite";
 import { LedgerReader } from "../lib/ledger-read.js";
 import { getMeta } from "../lib/ledger-store.js";
 import { writeInbox } from "../lib/remote-review-inbox.js";
-import { handoffProjects, matchRemoteCard } from "../lib/remote-review-ledger.js";
+import { handoffProjects, matchRemoteCard } from "../lib/remote-review-read.js";
 import { parseRemoteReview, remoteConclusionText } from "../lib/remote-review-parse.js";
 import { readSchedulerConfig, type SchedulerConfig } from "../lib/scheduler-config.js";
 import { apiJson } from "./api-respond.js";
