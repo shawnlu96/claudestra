@@ -1,3 +1,6 @@
+import { observeMergeQueueOwner } from "./merge-queue-owner-pass.js";
+import { pickMergeQueueOwner } from "./merge-queue-owner.js";
+import { queueOwnerMode } from "./merge-queue-owner-context.js";
 /**
  * MTR1: a run that lent its merge slot to a train takes it back before a fresh merge plan can. The pass order is
  * train → mergeTick → deployTick → … → auto tick: a member's deploy frees `merge:<project>` in deployTick, after mergeTick
@@ -32,11 +35,13 @@ export async function reclaimLentSlots(db: Database, projects: readonly string[]
   const out: ReclaimResult = { reclaimed: [], failed: [] };
   if (!store || !db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return out;
   for (const project of projects) {
+    await observeMergeQueueOwner(db, manager, project, store, now);
     let train;
     try { train = store.load(project); } catch { continue; } // the train tick reports a corrupt file; never guess past it
     if (train && trainHolds(train, now)) continue;
     if (db.query("SELECT 1 FROM scheduler_resources WHERE project = ? AND resource = ?").get(project, `merge:${project}`)) continue;
-    const run = lenders(db, project).find((r) => !mergeRunDrift(db, r, now));
+    const pick = queueOwnerMode(db, project) === "on" ? pickMergeQueueOwner(db, project, now) : null;
+    const run = lenders(db, project).find((r) => (!pick || pick.intentId === r.intentId) && !mergeRunDrift(db, r, now));
     if (!run) continue;
     const r = await manager("ledger", "scheduler-merge-step", run.intentId, "--from", run.phase, "--to", run.phase, "--rev", String(run.rev),
       "--receipt", SLOT_RECLAIM);

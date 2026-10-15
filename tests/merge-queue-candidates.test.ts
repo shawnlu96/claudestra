@@ -24,7 +24,7 @@ afterEach(() => { w?.close(); rmSync(RECOVERY_POLICY_PATH, { force: true }); set
 const as = (actor: string, ...args: string[]) => ledgerAs(w, actor, ...args);
 /** The dependency tiers on (MQ1's queue, UI1's content carry) unless a test lowers one; OWN1 off as in MQ1's own train tests. */
 const policy = (mode: Mode, keys: Record<string, Mode> = {}) => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys:
-  { manualMergeQueue: "on", mergeContentUi: "on", manualCaseOwnership: "off", [UNIFIED_CANDIDATES_KEY]: mode, ...keys } } } }));
+  { mergeQueueOwner: "off", manualMergeQueue: "on", mergeContentUi: "on", manualCaseOwnership: "off", [UNIFIED_CANDIDATES_KEY]: mode, ...keys } } } }));
 function setup(mode: Mode, opts: Partial<WorldOpts> = {}, keys: Record<string, Mode> = {}) {
   w = reclaimWorld({ store: "memory", ...opts });
   setMeta(w.db, { actor: "owner", now: 1 }, { project: "p", key: "pms", value: [PM] });

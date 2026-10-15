@@ -1,3 +1,4 @@
+import { ownerMainCiDecision } from "./merge-queue-owner-hooks.js";
 /**
  * MAINCIW, the per-pass gate (filled by scheduler-main-ci-wiring.ts mainCiPass) and every question asked of it later in the pass:
  * mergeTick (mainCiHolds, scheduler-main-ci-wiring.ts), the merge driver through MergeExternal.mainCi (withMainCi, assembled in scheduler-merge-external.ts) and the
@@ -75,6 +76,7 @@ function runDecision(policy: ProjectSchedule, run: MergeRun): MainCiDecision {
   if (!gate) return "go";
   try {
     if (decide(gate, run.project, run.taskId, run.reviewedHead) === "go") return "go";
+    const owner = ownerMainCiDecision(gate, run); if (owner) return owner;
     return unsentAuto(gate.db, run, listEvents(gate.db, { project: run.project, target: run.taskId })) ? { cancel: pauseReceipt(gate, run) } : "wait";
   } catch (e) {
     warnMainCi(run.project, "主线 CI 判定失败，本轮不动", e);

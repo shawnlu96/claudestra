@@ -1,3 +1,4 @@
+import { ownerManualTurn } from "./merge-queue-owner-hooks.js";
 /**
  * Manual merge queue (dispatch-recovery-MQ1): PM's explicit requests to merge workflow-manual cards wait in event-seq order and
  * get the project merge slot (`merge:<project>`) through one authoritative decision, manualTurn, read by both sides of the race:
@@ -137,7 +138,7 @@ export function claimManualMerge(db: Database, ctx: WriteCtx, input: { project: 
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "人工合并占槽只由调度服务做（它同时读列车状态）");
   const now = ctx.now ?? Date.now();
   return tx(db, () => {
-    const turn = manualTurn(db, input.project, input.train, now);
+    const turn = ownerManualTurn(db, input.project, input.train, now) ?? manualTurn(db, input.project, input.train, now);
     if (turn.kind !== "due" || turn.wait) {
       return { claimed: false, turn: turn.kind, why: turn.kind === "due" ? turn.wait : turn.kind === "owed" ? turn.why : null };
     }
