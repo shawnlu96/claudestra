@@ -11,7 +11,7 @@ import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
 import { isSandbox } from "./sandbox.js";
 import { sandboxLaunchArgs } from "./sandbox-env.js";
-import { mcpConfigArgs, mcpEnvSuffix, planMcpLaunch, withMcpFamilySettings } from "./floka-mcp/launch.js";
+import { mcpConfigArgs, mcpEnvSuffix, mcpSessionIdArgs, planMcpLaunch, withMcpFamilySettings } from "./floka-mcp/launch.js";
 import { launchSettingsFor, settingsLaunchArgs } from "./agent-settings.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
@@ -355,11 +355,9 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
 
   if (opts.resumeId) {
     parts.push("--resume", shellEscape(opts.resumeId));
-    if (opts.forkSession) parts.push("--fork-session");
+    if (opts.forkSession) parts.push("--fork-session", ...mcpSessionIdArgs(mcp)); // 新族分叉：钉住新会话 id 才能记下它的族
     if (opts.displayName) parts.push("--name", shellEscape(opts.displayName));
-  } else if (opts.sessionId) {
-    parts.push("--session-id", shellEscape(opts.sessionId));
-  }
+  } else parts.push(...(opts.sessionId ? ["--session-id", shellEscape(opts.sessionId)] : mcpSessionIdArgs(mcp)));
 
   if (opts.effort && opts.effort.trim() && opts.effort !== "default") {
     // ultracode 是 session-only 的运行时档,启动 flag 传它语义不明——防御性降到

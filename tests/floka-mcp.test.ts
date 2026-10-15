@@ -9,13 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { familyOfTool, parseRenameMcpMode, type RenameMcpMode } from "../src/lib/floka-mcp/families.ts";
 import { explicitMcpName, selectMcpName, type McpSelectInput } from "../src/lib/floka-mcp/select.ts";
-import { hasFamilyRecords, readPendingFamily, readSessionFamily, writePendingFamily, writeSessionFamily, writeObserveReport } from "../src/lib/floka-mcp/store.ts";
-import { mcpConfigArgs, mcpEnvSuffix, planMcpLaunch, withMcpFamilySettings, type McpLaunchDeps, type McpLaunchRequest } from "../src/lib/floka-mcp/launch.ts";
+import { hasFamilyRecords, readSessionFamily, writeSessionFamily, writeObserveReport } from "../src/lib/floka-mcp/store.ts";
+import { mcpConfigArgs, mcpEnvSuffix, mcpSessionIdArgs, planMcpLaunch, withMcpFamilySettings, type McpLaunchDeps, type McpLaunchRequest } from "../src/lib/floka-mcp/launch.ts";
 import { isOwnMcpTool } from "../src/lib/floka-mcp/recognize.ts";
 import { buildClaudeCommand } from "../src/lib/claude-launch.ts";
 
 const S1 = "11111111-1111-4111-8111-111111111111";
 const S2 = "22222222-2222-4222-8222-222222222222";
+const S3 = "33333333-3333-4333-8333-333333333333";
 const AGENT_ENV = { DISCORD_CHANNEL_ID: "123", MCP_NAME: "claudestra" }; // 会话里再起的 manager 继承到的前缀
 
 let root: string;
@@ -26,16 +27,15 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-/** 真落盘（临时目录）的依赖；mode 可变，模拟切档 / 回滚 */
-function deps(mode: { v: RenameMcpMode }, env: Record<string, string | undefined> = {}, logs: string[] = []): McpLaunchDeps {
+/** 真落盘（临时目录）的依赖；mode 可变，模拟切档 / 回滚；新会话 id 依次取 ids */
+function deps(mode: { v: RenameMcpMode }, env: Record<string, string | undefined> = {}, logs: string[] = [], ids: string[] = []): McpLaunchDeps {
   const fam = join(root, "fam");
   return {
     mode: () => mode.v,
     env,
     readSession: (id) => readSessionFamily(id, fam),
-    readPending: (a) => readPendingFamily(a, fam),
     writeSession: (id, f, a) => writeSessionFamily(id, f, a, fam),
-    writePending: (a, f) => writePendingFamily(a, f, fam),
+    newSessionId: () => ids.shift() ?? crypto.randomUUID(),
     observe: (a, r) => writeObserveReport(a, r, observeRoot),
     log: (l) => void logs.push(l),
   };
@@ -45,7 +45,8 @@ function deps(mode: { v: RenameMcpMode }, env: Record<string, string | undefined
 function launchArgs(r: McpLaunchRequest, d: McpLaunchDeps, cred?: string) {
   const c = planMcpLaunch(r, d);
   const own = withMcpFamilySettings({}, c);
-  const args = ["--dangerously-load-development-channels", `server:${c.name}`, ...(Object.keys(own).length ? ["--settings", JSON.stringify(own)] : []), ...mcpConfigArgs(c, cred, false)];
+  const settings = Object.keys(own).length ? ["--settings", JSON.stringify(own)] : [];
+  const args = ["--dangerously-load-development-channels", `server:${c.name}`, ...settings, ...mcpConfigArgs(c, cred, false), ...mcpSessionIdArgs(c)];
   return { c, args, env: `MCP_NAME=${c.name}${mcpEnvSuffix(c)}` };
 }
 
@@ -65,7 +66,7 @@ function fakeCcServers(userLevel: Record<string, boolean>, args: string[]): stri
 }
 const USER_LEVEL = { claudestra: true, mem0: false };
 
-const sel = (p: Partial<McpSelectInput>) => selectMcpName({ mode: "off", explicit: null, kind: "new", stored: null, pending: null, ...p });
+const sel = (p: Partial<McpSelectInput>) => selectMcpName({ mode: "off", explicit: null, kind: "new", stored: null, ...p });
 
 describe("[验收线 1] 新 / 旧 / 恢复会话的命名族", () => {
   test("开关：缺省、写错、非字符串一律 off", () => {
@@ -77,14 +78,14 @@ describe("[验收线 1] 新 / 旧 / 恢复会话的命名族", () => {
   });
 
   test("on：新会话 floka 并记下；未记录的旧会话续接 / 分叉保留 claudestra", () => {
-    expect(sel({ mode: "on", sessionId: S1 })).toMatchObject({ name: "floka", recordSession: { sessionId: S1, family: "floka" }, pending: null });
+    expect(sel({ mode: "on", sessionId: S1 })).toEqual({ name: "floka", family: "floka", source: "default", recordSession: { sessionId: S1, family: "floka" } });
     expect(sel({ mode: "on", kind: "resume", sessionId: S1 })).toMatchObject({ name: "claudestra", source: "legacy" });
-    expect(sel({ mode: "on", kind: "fork", sessionId: S1 })).toMatchObject({ name: "claudestra", pending: null });
+    expect(sel({ mode: "on", kind: "fork", sessionId: S1 })).toEqual({ name: "claudestra", family: "claudestra", source: "legacy" });
     expect(sel({ mode: "on", kind: "resume", sessionId: S1, stored: "floka" })).toMatchObject({ name: "floka", source: "session" });
   });
 
   test("off / observe：新会话仍是 claudestra；observe 只报 on 会用 floka，不记会话", () => {
-    expect(sel({ sessionId: S1 })).toEqual({ name: "claudestra", family: "claudestra", source: "default", pending: null });
+    expect(sel({ sessionId: S1 })).toEqual({ name: "claudestra", family: "claudestra", source: "default" });
     const o = sel({ mode: "observe", sessionId: S1 });
     expect(o).toMatchObject({ name: "claudestra", would: "floka" });
     expect(o.recordSession).toBeUndefined();
@@ -105,19 +106,29 @@ describe("[验收线 1] 新 / 旧 / 恢复会话的命名族", () => {
     expect(explicitMcpName({ MCP_NAME: " ", MCP_NAME_SOURCE: "explicit" })).toBeNull();
   });
 
-  test("会话 id 启动前未知（无 id 全新 / 分叉）：记在 agent 名下，下一次续接认领一次", () => {
-    const mode = { v: "on" as RenameMcpMode };
-    const d = deps(mode);
-    expect(planMcpLaunch({ agent: "master" }, d).name).toBe("floka");
-    expect(readPendingFamily("master", join(root, "fam"))).toBe("floka");
-    expect(planMcpLaunch({ agent: "master", resumeId: S2 }, d)).toMatchObject({ name: "floka", source: "pending" });
+  test("会话 id 启动前未知（无 id 全新 / 分叉）：现取 id 用 --session-id 钉住，记录只绑在那个会话上", () => {
+    const d = deps({ v: "on" }, {}, [], [S2, S1]);
+    const master = launchArgs({ agent: "master" }, d);
+    expect(master.c).toMatchObject({ name: "floka", assignedSessionId: S2 });
+    expect(master.args.slice(-2)).toEqual(["--session-id", S2]);
     expect(readSessionFamily(S2, join(root, "fam"))).toBe("floka");
-    expect(readPendingFamily("master", join(root, "fam"))).toBeNull();
-    // 分叉一个新族会话：新会话沿用 floka，续接时认领
-    expect(planMcpLaunch({ agent: "a1", resumeId: S2, forkSession: true }, d).name).toBe("floka");
+    expect(planMcpLaunch({ agent: "master", resumeId: S2 }, d)).toMatchObject({ name: "floka", source: "session" });
+    // 分叉一个新族会话：新会话的 id 也先钉住、记成 floka；原会话不动
+    const fork = planMcpLaunch({ agent: "a1", resumeId: S2, forkSession: true }, d);
+    expect(fork).toMatchObject({ name: "floka", assignedSessionId: S1 });
     expect(planMcpLaunch({ agent: "a1", resumeId: S1 }, d).name).toBe("floka");
-    // 待认领只管下一次：再续接一个没记录的旧会话 → claudestra
-    expect(planMcpLaunch({ agent: "a1", resumeId: "33333333-3333-4333-8333-333333333333" }, d).name).toBe("claudestra");
+    // 同一 agent 再续接一个没记录的旧会话 → claudestra
+    expect(planMcpLaunch({ agent: "a1", resumeId: S3 }, d).name).toBe("claudestra");
+    // 旧族的分叉 / 无 id 启动不取 id，命令与改造前相同
+    expect(planMcpLaunch({ agent: "a1", resumeId: S3, forkSession: true }, d).assignedSessionId).toBeUndefined();
+    expect(planMcpLaunch({ agent: "master" }, deps({ v: "off" })).assignedSessionId).toBeUndefined();
+  });
+
+  test("复现 pending-family-unbound：无 id 全新启动后续接任一未记录的旧会话，仍是 claudestra 且不记 floka", () => {
+    const d = deps({ v: "on" });
+    expect(planMcpLaunch({ agent: "master" }, d).name).toBe("floka");
+    expect(planMcpLaunch({ agent: "master", resumeId: S2 }, d)).toMatchObject({ name: "claudestra", source: "legacy" });
+    expect(readSessionFamily(S2, join(root, "fam"))).toBeNull();
   });
 
   test("回滚新默认（on → off）不改变已有会话：floka 会话续接仍是 floka，新会话回 claudestra", () => {
@@ -146,12 +157,13 @@ describe("[验收线 1] 新 / 旧 / 恢复会话的命名族", () => {
     const d = { ...deps({ v: "on" }, {}, logs), writeSession: () => { throw new Error("disk full"); } };
     expect(planMcpLaunch({ agent: "a1", sessionId: S1 }, d)).toMatchObject({ name: "claudestra", source: "legacy" });
     expect(logs.join("\n")).toContain("disk full");
-    expect(planMcpLaunch({ resumeId: S1, forkSession: true }, deps({ v: "on" }))).toMatchObject({ name: "claudestra" }); // 没 agent 名：分叉的族没处记
+    const noId = planMcpLaunch({ agent: "master" }, { ...deps({ v: "on" }, {}, logs, ["not-a-uuid"]) });
+    expect(noId).toMatchObject({ name: "claudestra", source: "legacy" }); // 取到的 id 不合法也退回，且不带 --session-id
+    expect(mcpSessionIdArgs(noId)).toEqual([]);
   });
 
   test("会话 id / agent 名不合法不落盘、不逃出目录", () => {
     expect(() => writeSessionFamily("../x", "floka", "a", root)).toThrow();
-    expect(() => writePendingFamily("../x", "floka", root)).toThrow();
     expect(readSessionFamily("../x", root)).toBeNull();
     expect(readdirSync(root)).toEqual([]);
   });
@@ -174,6 +186,15 @@ describe("[验收线 2] 每个 agent 只起一个可注册的 channel-server", (
       });
     }
   }
+
+  test("复现 explicit-floka-double-server：显式 MCP_NAME=floka 也只起 floka 一个（三档、带不带凭据）", () => {
+    for (const mode of ["off", "observe", "on"] as const)
+      for (const cred of [undefined, "/tmp/cred-file"]) {
+        const { c, args } = launchArgs({ agent: "a1", sessionId: S1 }, deps({ v: mode }, { MCP_NAME: "floka" }), cred);
+        expect(c).toMatchObject({ name: "floka", source: "explicit" });
+        expect(fakeCcServers(USER_LEVEL, args)).toEqual(["floka"]);
+      }
+  });
 
   test("回滚到 off 后续接 floka 会话：仍只起 floka 一个", () => {
     writeSessionFamily(S1, "floka", "a1", join(root, "fam"));
@@ -202,12 +223,11 @@ describe("[验收线 2] 每个 agent 只起一个可注册的 channel-server", (
     const spy: McpLaunchDeps = {
       ...d,
       writeSession: (...a) => { calls.push("writeSession"); d.writeSession(...a); },
-      writePending: (...a) => { calls.push(`pending:${a[1]}`); d.writePending(...a); },
     };
     const old = launchArgs({ agent: "a1", resumeId: S2 }, spy);
     expect(old.args).toEqual(["--dangerously-load-development-channels", "server:claudestra"]); // 与 off 档 / 改造前同一组参数
     expect(old.env).toBe("MCP_NAME=claudestra");
-    expect(calls).toEqual(["pending:null"]); // 只清待认领；不发信号、不重启、不改别的会话
+    expect(calls).toEqual([]); // 不写记录、不发信号、不重启、不改别的会话
   });
 
   test("buildClaudeCommand（off，缺省）：服务名、--settings、--mcp-config 都与改造前相同", () => {
@@ -217,6 +237,10 @@ describe("[验收线 2] 每个 agent 只起一个可注册的 channel-server", (
     expect(cmd).not.toContain("deniedMcpServers");
     expect(cmd).not.toContain("--mcp-config");
     expect(cmd).not.toContain("MCP_NAME_SOURCE");
+    const fork = buildClaudeCommand({ channelId: "c1", bridgeUrl: "ws://localhost:3847", resumeId: S1, forkSession: true });
+    expect(fork).toContain(`--resume ${S1} --fork-session`);
+    expect(fork).not.toContain("--session-id");
+    expect(buildClaudeCommand({ channelId: "c1", bridgeUrl: "ws://localhost:3847" })).not.toContain("--session-id");
   });
 });
 
@@ -234,10 +258,11 @@ describe("[验收线 3] 两族工具输出各显示一次；off / observe 不变
     expect(shown).toEqual(["mcp__floka__reply", "mcp__floka__send_to_agent", "Read", "mcp__mem0__memory_search"]);
   });
 
-  test("observe 只写报告：不建会话 / 待认领记录，bridge 的前缀识别不被打开", () => {
+  test("observe 只写报告：不建会话记录、不取会话 id，bridge 的前缀识别不被打开", () => {
     const d = deps({ v: "observe" });
     expect(planMcpLaunch({ agent: "a1", sessionId: S1 }, d).name).toBe("claudestra");
-    expect(planMcpLaunch({ agent: "master" }, d).name).toBe("claudestra");
+    expect(planMcpLaunch({ agent: "master" }, d)).toMatchObject({ name: "claudestra", would: "floka" });
+    expect(planMcpLaunch({ agent: "master" }, d).assignedSessionId).toBeUndefined();
     expect(hasFamilyRecords(join(root, "fam"))).toBe(false);
     expect(readdirSync(observeRoot).sort()).toEqual(["a1.json", "master.json"]);
     expect(existsSync(join(root, "fam"))).toBe(false);

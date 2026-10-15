@@ -3,7 +3,8 @@
  * - 显式 MCP_NAME 永远生效（与改造前同一语义）；旧族名与从本系统启动前缀继承来的族名不算显式（explicitMcpName）。
  * - 续接 / 分叉：沿用该会话记下的族，没记过的（rename.mcp 打开前就有的会话）一律旧族——不随档位变，回滚也不改。
  * - 全新会话：on 用新族，off / observe 用旧族（observe 另报 on 会用什么）。
- * - 会话 id 启动前不知道的（分叉、无 id 的全新启动）记在 agent 名下，只给该 agent 下一次启动认领一次。
+ * - 新族而启动前不知道会话 id 的（分叉、无 id 的全新启动）：launch.ts 现取一个 id 用 --session-id 钉住再记，
+ *   记录永远绑在真正起出来的那个会话上；不按 agent 名「待认领」，续接别的旧会话不会被认成新族。
  */
 import { LEGACY_FAMILY, NEW_FAMILY, isMcpFamily, type McpFamily, type RenameMcpMode } from "./families.js";
 
@@ -18,11 +19,9 @@ export interface McpSelectInput {
   sessionId?: string;
   /** sessionId 记过的族（new 时不看） */
   stored: McpFamily | null;
-  /** 该 agent 名下待认领的族（上一次启动不知道会话 id） */
-  pending: McpFamily | null;
 }
 
-type McpSource = "explicit" | "session" | "pending" | "legacy" | "default";
+type McpSource = "explicit" | "session" | "legacy" | "default";
 
 export interface McpChoice {
   /** 本次真正用的服务名 */
@@ -34,8 +33,8 @@ export interface McpChoice {
   would?: McpFamily;
   /** 要落盘的：会话记录（只记新族；旧族是没记录时的缺省，不用记） */
   recordSession?: { sessionId: string; family: McpFamily };
-  /** agent 名下待认领：族 = 写新的；null = 清掉旧的；undefined = 不动（显式名的启动不碰） */
-  pending?: McpFamily | null;
+  /** 新族但会话 id 要等 CC 起来才知道（分叉、无 id 全新）：由 launch.ts 先取 id 钉住再记 */
+  needsSessionId?: true;
 }
 
 /**
@@ -52,21 +51,18 @@ export function explicitMcpName(env: Record<string, string | undefined>): string
 
 function decide(i: McpSelectInput, mode: "on" | "off"): McpChoice {
   if (i.kind === "resume") {
-    if (i.stored) return { name: i.stored, family: i.stored, source: "session", pending: null };
-    if (i.pending) return { name: i.pending, family: i.pending, source: "pending", pending: null, ...rec(i.sessionId, i.pending) };
-    return { name: LEGACY_FAMILY, family: LEGACY_FAMILY, source: "legacy", pending: null };
+    return i.stored ? { name: i.stored, family: i.stored, source: "session" } : { name: LEGACY_FAMILY, family: LEGACY_FAMILY, source: "legacy" };
   }
-  if (i.kind === "fork") {
-    const f = i.stored ?? LEGACY_FAMILY;
-    return { name: f, family: f, source: i.stored ? "session" : "legacy", pending: f === LEGACY_FAMILY ? null : f };
-  }
+  // 分叉出来的是新会话，id 由 CC 现取：新族要先钉住 id
+  if (i.kind === "fork") return withRecord({ name: i.stored ?? LEGACY_FAMILY, family: i.stored ?? LEGACY_FAMILY, source: i.stored ? "session" : "legacy" });
   const f = mode === "on" ? NEW_FAMILY : LEGACY_FAMILY;
-  const known = !!i.sessionId;
-  return { name: f, family: f, source: "default", pending: known || f === LEGACY_FAMILY ? null : f, ...rec(i.sessionId, f) };
+  return withRecord({ name: f, family: f, source: "default" }, i.sessionId);
 }
 
-function rec(sessionId: string | undefined, family: McpFamily): Pick<McpChoice, "recordSession"> {
-  return sessionId && family !== LEGACY_FAMILY ? { recordSession: { sessionId, family } } : {};
+/** 新族才要记：知道 id 就记它，不知道就让 launch.ts 取一个 */
+function withRecord(c: McpChoice, sessionId?: string): McpChoice {
+  if (c.family === LEGACY_FAMILY || c.family === null) return c;
+  return sessionId ? { ...c, recordSession: { sessionId, family: c.family } } : { ...c, needsSessionId: true };
 }
 
 export function selectMcpName(i: McpSelectInput): McpChoice {
