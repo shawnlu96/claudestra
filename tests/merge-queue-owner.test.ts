@@ -11,13 +11,15 @@ import { claimManualMerge } from "../src/lib/manual-merge-queue.js";
 import { openMergeQueueOwner } from "../src/lib/merge-queue-owner-context.js";
 import { pickMergeQueueOwner } from "../src/lib/merge-queue-owner.js";
 import { observeMergeQueueOwner } from "../src/lib/merge-queue-owner-pass.js";
+import { setPrivateMergePortsForTest } from "../src/lib/private-merge-gate.js";
+import { reclaimLentSlots } from "../src/lib/scheduler-merge-reclaim.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { SLOT_RECLAIM, SLOT_YIELD } from "../src/lib/scheduler-merge-train-hold.js";
 import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
 import { testChildEnv } from "./test-env.js";
 import { setFrozen, setMeta } from "../src/lib/ledger-write.js";
 import { RECOVERY_KEYS, RECOVERY_POLICY_PATH, recoveryPolicy } from "../src/lib/recovery-policy.js";
-import { setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
+import { projectRepo, setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
 import { reclaimWorld, type ReclaimWorld } from "./scheduler-merge-reclaim-world.js";
 import { ledgerAs, manualCard, requestArgs } from "./manual-merge-queue-world.test.js";
 
@@ -25,7 +27,8 @@ let w: ReclaimWorld;
 afterEach(() => {
   resetSchedulerLeaseForTest(); w?.close();
   rmSync(RECOVERY_POLICY_PATH, { force: true }); rmSync(SCHEDULER_CONFIG_PATH, { force: true });
-  setForeignRepoLookupForTest({ project: null });
+  setForeignRepoLookupForTest({ project: null, origin: null });
+  setPrivateMergePortsForTest(null);
 });
 function setup(mode?: "off" | "observe" | "on") {
   mkdirSync(dirname(RECOVERY_POLICY_PATH), { recursive: true });
@@ -270,4 +273,96 @@ test("[验收线 3] planner, real inspect, candidates and deploy retain their ga
     expect(w.hub.calls.filter((c) => c === `deploy:${id}`)).toHaveLength(id === "M" ? 0 : 1);
   }
   expect(w.db.query("SELECT mode FROM task_workflows WHERE taskId = 'M'").get()).toEqual({ mode: "manual" });
+});
+
+
+/** Keep the PR in the fixture repository while the project's public checkout belongs elsewhere. */
+function privateProject(id: string) {
+  const repo = /github\.com\/([^/]+\/[^/]+)\//.exec(getTask(w.db, id)!.pr!)![1]!;
+  w.config.projects.p!.remote = { ...w.config.projects.p!.remote!, repo: "example/public", roles: ["review", "write"] };
+  setForeignRepoLookupForTest({ project: () => "example/public" });
+  writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify(w.config));
+  w.db.query("UPDATE tasks SET extra = json_set(extra, '$.fileGlobs', json(?)) WHERE id = ?")
+    .run(JSON.stringify([`repo:${repo}/src/**`]), id);
+  setPrivateMergePortsForTest({ policy: recoveryPolicy, ledger: () => w.db, handoff: () => false,
+    repoDirs: { dirs: () => [dirname(w.db.filename)], exists: () => true, origin: () => repo } });
+  openMergeQueueOwner(w.db, w.config);
+}
+function fallbackPolicy(keys: Record<string, string> = {}) {
+  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: {
+    manualMergeQueue: "on", manualCaseOwnership: "off", mergeDirect: "off", privateRepoMerge: "on", ...keys,
+  } } } }));
+}
+const ownerNotes = () => listEvents(w.db, { project: "p" }).filter((e) => e.data.mechanism === "mergeQueueOwner");
+
+test("[验收线 3] default on admits a private auto card through the real pass and planIntent", async () => {
+  setup(); auto("P"); privateProject("P"); fallbackPolicy();
+  await w.pass();
+  expect(w.slot()).toBe("P");
+  expect(w.intentOf("P")).not.toBeNull();
+  expect(w.hub.calls.filter((x) => x.startsWith("failed:"))).toEqual([]);
+  expect(ownerNotes().some((e) => /foreign repository/.test(String(e.data.reason)))).toBe(true);
+});
+
+test("[验收线 3] default on preserves the private manual request's legacy claim and sample dedup", async () => {
+  setup(); await request("P"); privateProject("P"); fallbackPolicy();
+  await observeMergeQueueOwner(w.db, w.manager, "p", w.store);
+  await observeMergeQueueOwner(w.db, w.manager, "p", w.store);
+  expect(ownerNotes()).toHaveLength(1);
+  await w.pass();
+  expect(w.slot()).toBe("P");
+  expect(w.phase("P")).toBe("ready");
+  expect(claim().claimed).toBe(false);
+  expect(w.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE action='merge'").get()).toEqual({ n: 1 });
+});
+
+test("[验收线 3] a private yielded intent reclaims through MTR1 and resumes through mergeSlotTurn", async () => {
+  setup(); auto("P"); const id = await yieldRun("P"); privateProject("P"); fallbackPolicy();
+  expect(await reclaimLentSlots(w.db, ["p"], w.manager, w.store)).toEqual({ reclaimed: ["P"], failed: [] });
+  expect(w.slot()).toBe("P");
+  const run = getMergeRun(w.db, id)!;
+  expect(await w.manager("ledger", "scheduler-merge-step", id, "--from", run.phase, "--to", run.phase, "--rev", String(run.rev),
+    "--receipt", `${SLOT_YIELD}retest slot turn`)).toMatchObject({ ok: true });
+  // The fixture driver handles the PR; the real slot-turn path still has to reclaim before it can drive it.
+  setPrivateMergePortsForTest(null);
+  await w.pass();
+  expect(w.slot()).toBe("P");
+  expect(w.turns("P")).toEqual(["yield", "reclaim", "yield", "reclaim"]);
+  expect(w.intentOf("P")).toBe(id);
+});
+
+test("[验收线 4] disabling QUEUE1 alone restores manual-first legacy passes with one fallback sample per version", async () => {
+  setup(); auto("A"); await request("M"); fallbackPolicy({ unifiedMergeQueue: "off" });
+  await observeMergeQueueOwner(w.db, w.manager, "p", w.store);
+  await observeMergeQueueOwner(w.db, w.manager, "p", w.store);
+  expect(ownerNotes()).toHaveLength(1);
+  expect(ownerNotes()[0]!.data.reason).toMatch(/unifiedMergeQueue/);
+  await w.pass();
+  expect(w.slot()).toBe("M");
+  for (let n = 0; n < 14 && (w.phase("M") !== "merged" || w.phase("A") !== "merged"); n++) await w.pass();
+  expect(w.phase("M")).toBe("merged"); expect(w.phase("A")).toBe("merged");
+});
+
+for (const kind of ["manual", "auto"] as const) test(`[验收线 4] unreadable QUEUE1 policy restores the ${kind} write path`, async () => {
+  setup(); auto("A"); await request("M");
+  openMergeQueueOwner(w.db, w.config, (project, key) => {
+    if (key === "unifiedMergeQueue") throw new Error("dependency unreadable");
+    return recoveryPolicy(project, key);
+  });
+  if (kind === "manual") expect(claim()).toMatchObject({ claimed: true, taskId: "M" });
+  else expect(plan("A").intent.taskId).toBe("A");
+});
+
+test("[验收线 5] final owner writes reuse the origin cache instead of spawning git under the write lock", () => {
+  setup(); const c = auto("A");
+  const repo = /github\.com\/([^/]+\/[^/]+)\//.exec(c.prRef)![1]!;
+  let reads = 0;
+  setForeignRepoLookupForTest({ project: null, origin: () => { reads++; return repo; } });
+  w.config.projects.p!.repoDir = dirname(w.db.filename);
+  writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify(w.config));
+  openMergeQueueOwner(w.db, w.config);
+  projectRepo(w.config.projects.p); // scheduler snapshot warms the ordinary repository cache
+  const before = reads;
+  expect(plan("A").intent.taskId).toBe("A");
+  expect(reads).toBe(before);
 });

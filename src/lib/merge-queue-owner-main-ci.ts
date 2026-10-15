@@ -14,7 +14,7 @@ export function ownerMainCiPaused(db: Database, project: string, taskId: string,
 }
 /** The slot hook yields before the driver. Keep the same manual intent; never cancel/requeue it on a pause. */
 export function ownerMainCiDecision(gate: MainCiGate, run: MergeRun): MainCiDecision | null {
-  return queueOwnerMode(gate.db, run.project) === "on" && run.intentId.startsWith("mmq:") &&
+  return queueOwnerMode(gate.db, run.project, run.taskId) === "on" && run.intentId.startsWith("mmq:") &&
     ownerMainCiPaused(gate.db, run.project, run.taskId, run.reviewedHead) ? "wait" : null;
 }
 

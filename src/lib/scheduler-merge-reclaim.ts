@@ -41,7 +41,7 @@ export async function reclaimLentSlots(db: Database, projects: readonly string[]
     if (train && trainHolds(train, now)) continue;
     if (db.query("SELECT 1 FROM scheduler_resources WHERE project = ? AND resource = ?").get(project, `merge:${project}`)) continue;
     const pick = queueOwnerMode(db, project) === "on" ? pickMergeQueueOwner(db, project, now) : null;
-    const run = lenders(db, project).find((r) => (!pick || pick.intentId === r.intentId) && !mergeRunDrift(db, r, now));
+    const run = lenders(db, project).find((r) => (queueOwnerMode(db, project, r.taskId) !== "on" || pick?.intentId === r.intentId) && !mergeRunDrift(db, r, now));
     if (!run) continue;
     const r = await manager("ledger", "scheduler-merge-step", run.intentId, "--from", run.phase, "--to", run.phase, "--rev", String(run.rev),
       "--receipt", SLOT_RECLAIM);

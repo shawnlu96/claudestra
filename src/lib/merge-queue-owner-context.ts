@@ -1,8 +1,9 @@
 /** Pass policy/config injection; no decision is cached across a write. */
+import { getTask } from "./ledger-store.js";
 import type { Database } from "bun:sqlite";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
-import { projectRepo, projectRepoFor } from "./scheduler-foreign-repo.js";
+import { foreignRepoOf, projectRepo, projectRepoFor } from "./scheduler-foreign-repo.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 
 const MERGE_QUEUE_OWNER_KEY = "mergeQueueOwner";
@@ -23,10 +24,20 @@ export function ownerPorts(db: Database): Ports {
 export const ownerReadConnection = (db: Database): Database => passes.get(db.filename)?.db ?? db;
 export const configuredOwnerMode = (db: Database, project: string): RecoveryMode => ownerMode(project, passes.get(db.filename)?.policy);
 
-/** Missing local ownership mapping retains the legacy path; the pass records this fallback separately. */
+/** Reuse the snapshot origin cache; inspect still verifies the actual repository before sending a merge. */
 export const ownerRepository = (db: Database, project: string): string | null =>
-  projectRepo(ownerPorts(db).config.projects[project], { fresh: true }) ?? projectRepoFor(project);
-export function queueOwnerMode(db: Database, project: string): RecoveryMode {
+  projectRepo(ownerPorts(db).config.projects[project]) ?? projectRepoFor(project);
+/** Fallback changes only arbitration; the existing private/manual eligibility and slot CAS still apply. */
+export function ownerFallbackReason(db: Database, project: string, taskId?: string): string | null {
+  const repo = ownerRepository(db, project);
+  if (!repo) return "缺 repository";
+  try {
+    if (ownerPorts(db).policy(project, "unifiedMergeQueue").mode === "off") return "unifiedMergeQueue 未就绪";
+  } catch { return "unifiedMergeQueue 策略不可读"; } // An unavailable queue dependency retains the old writer, never halts all merges.
+  const task = taskId ? getTask(db, taskId) : null;
+  return task && foreignRepoOf(task, repo) ? "foreign repository：沿用原仓库合并准入" : null;
+}
+export function queueOwnerMode(db: Database, project: string, taskId?: string): RecoveryMode {
   const mode = configuredOwnerMode(db, project);
-  return mode === "on" && !ownerRepository(db, project) ? "off" : mode;
+  return mode === "on" && ownerFallbackReason(db, project, taskId) ? "off" : mode;
 }

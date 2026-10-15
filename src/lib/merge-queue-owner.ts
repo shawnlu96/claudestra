@@ -6,7 +6,7 @@ import { getIntent, type SchedulerIntent } from "./ledger-scheduler.js";
 import { getMeta, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { mergeQueueFacts, unifiedQueueMode, type QueueEntry } from "./merge-queue-facts.js";
 import { manualQueueMode, requestAt, type ManualRequest } from "./manual-merge-queue-facts.js";
-import type { TrainSignal, Turn } from "./manual-merge-queue.js";
+import { manualTurn, type TrainSignal, type Turn } from "./manual-merge-queue.js";
 import { cardRepo, projectRepo, projectRepoFor } from "./scheduler-foreign-repo.js";
 import { getMergeRun, mergeRunDrift } from "./scheduler-merge.js";
 import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
@@ -22,10 +22,10 @@ const none = (reason: string): OwnerPick => ({ entry: null, intentId: null, reas
 function ownership(project: string, p: ReturnType<typeof ownerPorts>): { repo: string | null; why: string | null } {
   const cfg = p.config.projects[project];
   if (cfg?.mergeHandoff) return { repo: null, why: "mergeHandoff：由仓库方合并" };
-  const repo = projectRepo(cfg, { fresh: true }) ?? projectRepoFor(project);
+  const repo = projectRepo(cfg) ?? projectRepoFor(project);
   if (!repo) return { repo: null, why: "项目 repository 未核实" };
   const owners = Object.entries(p.config.projects).filter(([name, c]) => !c.mergeHandoff &&
-    (projectRepo(c, { fresh: true }) ?? projectRepoFor(name))?.toLowerCase() === repo.toLowerCase()).map(([name]) => name);
+    (projectRepo(c) ?? projectRepoFor(name))?.toLowerCase() === repo.toLowerCase()).map(([name]) => name);
   return { repo: repo.toLowerCase(), why: owners.length > 1 ? `repository ${repo} 多项目出口冲突：${owners.sort().join("、")}` : null };
 }
 const liveIntents = (db: Database, project: string): SchedulerIntent[] => db.query(`SELECT * FROM scheduler_intents WHERE project = ?
@@ -84,6 +84,7 @@ export function requireMergeQueueOwner(db: Database, taskId: string, action: str
   const task = getTask(db, taskId);
   if (!task || queueOwnerMode(db, task.project) !== "on") return;
   if (schedulerV2SkipTask(db, taskId)) throw new LedgerError("conflict", "shared-ledger skip：不认领合并槽");
+  if (queueOwnerMode(db, task.project, taskId) !== "on") return;
   const pick = pickMergeQueueOwner(db, task.project, now);
   // UI refreshes use this slot to update a review-stage PR, never to merge; they may use an otherwise idle queue.
   const refresh = (node ?? (intentId ? getIntent(db, intentId)?.node : null)) === OWNER_FRESH_NODE;
@@ -97,6 +98,10 @@ export function requireMergeQueueOwner(db: Database, taskId: string, action: str
 /** Replaces only the claim's decision, never manualTurn's read-only queue view (which QUEUE1 itself uses). */
 export function ownerManualTurn(db: Database, project: string, train: TrainSignal, now: number): Turn | null {
   if (queueOwnerMode(db, project) !== "on" || manualQueueMode(project) !== "on") return null;
+  const legacy = manualTurn(db, project, train, now);
+  if (legacy.kind !== "none" && queueOwnerMode(db, project, legacy.req.taskId) !== "on") {
+    return schedulerV2SkipTask(db, legacy.req.taskId) ? { kind: "none" } : legacy;
+  }
   const pick = pickMergeQueueOwner(db, project, now), e = pick.entry;
   if (!e || e.source !== "manual" || e.manualRequestSeq === null || pick.intentId) return { kind: "none" };
   const req: ManualRequest | null = requestAt(db, e.manualRequestSeq);
