@@ -153,12 +153,13 @@ describe("[验收线 1] 旧 / 新客户端 × 旧 / 新中心", () => {
 // ── 验收线 2：冲突头、伪来源、验签失败、未知能力 ─────────────────────────
 
 describe("[验收线 2] 不降级、不切新", () => {
-  // 中心这一侧（centerSubprotocol）on 档认单独的新族提议，见验收线 3 的单元用例；front 的 426 闸在 src/relay/front.ts，不在本卡范围
-  test("只提议新族子协议：front 照旧 426，中心不因此切新", async () => {
-    const relay = center(NEW);
-    const c = await raw(relay.port, newKey(), [FLOKA]);
-    expect(c.opened).toBe(false);
-    expect(relay.online()).toEqual([]);
+  // 中心这一侧（centerSubprotocol）on 档认单独的新族提议，见验收线 3 的单元用例；front 的握手按接收档，on 档放行新族见 tests/floka-center-wire.test.ts（CENTER2）
+  test("只提议新族子协议：接收 off / observe 时 front 照旧 426，中心不因此切新", async () => {
+    for (const relay of [center(), center({ centerReceive: "observe" })]) {
+      const c = await raw(relay.port, newKey(), [FLOKA]);
+      expect(c.opened).toBe(false);
+      expect(relay.online()).toEqual([]);
+    }
   });
 
   test("新族连接用旧用途签名：拒（auth_failed），不降级到旧族", async () => {

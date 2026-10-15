@@ -8,7 +8,8 @@
  * 标准 Response 后那两处各改一行；中继错误映射成同名异常（超时类 name=TimeoutError），结局分类照用。
  */
 import { hostname } from "node:os";
-import { connect, RelayError, type RelayClient } from "../lib/relay-client.js";
+import { connect, RelayError, type ConnectOptions, type RelayClient } from "../lib/relay-client.js";
+import { readConfigSync, type AppConfig } from "../lib/config-store.js";
 import { relayCallError } from "../lib/peer-auth-hints.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import { instanceKeySync, signedHeaders } from "../lib/instance-key.js";
@@ -127,9 +128,18 @@ function stopRelayLink(): void {
 
 function connectClient(relayUrl: string, key: NonNullable<ReturnType<typeof instanceKeySync>>, ingressPort: number | null, webPort: number,
   deps: { handleApi?: ApiHandler }): RelayClient {
+  return connect(relayConnectOptions(relayUrl, key, ingressPort, webPort, deps));
+}
+
+/**
+ * 交给 connect 的参数。rename 取实例配置（config.json）的 `rename` 一节原样交给客户端库（floka-center/gear.ts 解析）：
+ * 读不到、读不懂一律两档 off，配置问题经下面的 log 打到 bridge 日志
+ */
+export function relayConnectOptions(relayUrl: string, key: NonNullable<ReturnType<typeof instanceKeySync>>, ingressPort: number | null, webPort: number,
+  deps: { handleApi?: ApiHandler }, cfg: Pick<AppConfig, "rename"> = readConfigSync(),
+  log: NonNullable<ConnectOptions["log"]> = (level, msg) => (level === "info" ? console.log : console.error)(`🛰 中继: ${msg}`)): ConnectOptions {
   const webBase = `http://127.0.0.1:${webPort}`;
-  const log = (level: "info" | "warn" | "error", msg: string) => (level === "info" ? console.log : console.error)(`🛰 中继: ${msg}`);
-  return connect({
+  return {
     relayUrl,
     key,
     name: hostname(),
@@ -146,7 +156,8 @@ function connectClient(relayUrl: string, key: NonNullable<ReturnType<typeof inst
       void refreshRelayContacts();
     },
     log,
-  });
+    ...(cfg.rename !== undefined ? { rename: cfg.rename } : {}),
+  };
 }
 
 export type EnableRelayResult =
