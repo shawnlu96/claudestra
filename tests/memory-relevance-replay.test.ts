@@ -1,0 +1,141 @@
+/**
+ * PMEMTUNE2 [验收线 5]：只读回放——TMPDIR 里的夹具库上逐数核对新旧每单平均条数、旧 applied 保留率、按类型 / 路由拆分；库文件前后字节不变。
+ */
+import { createHash } from "node:crypto";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
+import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { createTask } from "../src/lib/ledger-write.js";
+import { replayRelevance, replaySweep } from "../src/lib/memory-relevance-replay.js";
+import { memoryCandidates, rankMemories, type MemoryRoute } from "../src/lib/memory-retrieve.js";
+import { getTask } from "../src/lib/ledger-store.js";
+
+const P = "demo";
+const DAY = 86_400_000;
+const NOW = 1_800_000_000_000;
+const M = (n: number) => `ab12-m${n}`;
+let dir: string;
+let path: string;
+
+/** 库文件和 WAL 的 sha256（-shm 是 SQLite 的共享内存索引，任何读者都会碰，不是数据） */
+const digests = () => Object.fromEntries(readdirSync(dir).filter((f) => !f.endsWith("-shm")).sort().map((f) => [f, createHash("sha256").update(readFileSync(join(dir, f))).digest("hex")]));
+
+beforeAll(() => {
+  dir = mkdtempSync(join(tmpdir(), "mem-replay-"));
+  path = join(dir, "ledger.sqlite");
+  const db = openLedger(path);
+  db.prepare("INSERT INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
+  for (const t of ["T1", "T2"]) createTask(db, { actor: "owner", now: 1 }, { project: P, id: t, title: t, kind: "code" });
+  db.prepare("UPDATE tasks SET stage = 'build', extra = ? WHERE project = ?").run(JSON.stringify({ fileGlobs: ["src/lib/x*.ts"] }), P);
+  // m1 坑最老；m2..m5 决定越来越新 → 文件路名次 m5 m4 m3 m2 m1
+  const at = (n: number) => ({ actor: "pm", now: NOW - n * DAY });
+  recordMemory(db, at(20), { project: P, kind: "pitfall", title: "老坑", symptom: "症状", rule: "规矩", files: ["src/lib/x.ts"], fixable: false, via: "tool", authorRole: "reviewer" } as MemoryInput);
+  for (let i = 2; i <= 5; i++) recordMemory(db, at(20 - i), { project: P, kind: "decision", title: `决定${i}`, body: "b", files: ["src/lib/x.ts"], via: "tool", authorRole: "owner" } as MemoryInput);
+
+  const ev = (ts: number, target: string, kind: string, data: unknown): number =>
+    (db.prepare("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'scheduler', ?, ?, ?, '', ?) RETURNING seq")
+      .get(ts, P, target, kind, JSON.stringify(data)) as { seq: number }).seq;
+  const file = (n: number, score: number) => ({ id: M(n), routes: ["file"], why: "同文件 src/lib/x.ts", score });
+
+  // 单 1（T1）：旧规则让坑位，m1 顶掉 m2
+  const r1 = ev(NOW - 3 * DAY, "T1", "scheduler", { op: "memory_rank", order: "write", items: [file(5, 1 / 61), file(4, 1 / 62), file(3, 1 / 63), file(1, 1 / 65)],
+    dropped: [{ id: M(2), score: 1 / 64, reason: `让坑位 ${M(1)}` }] });
+  ev(NOW - 3 * DAY, "T1", "scheduler", { op: "memory_retrieve", order: "write", memoryIds: [M(5), M(4), M(3), M(1)], rankingSeq: r1 });
+  ev(NOW - 3 * DAY + 1000, "T1", "memory", { op: "refs", refs: [{ id: M(4), use: "applied" }, { id: M(3), use: "applied" }, { id: M(1), use: "irrelevant" }, { id: M(5), use: "irrelevant" }] });
+  // 别的卡把 m5 标了 4 次无关（连同上面 T1 那次共 5 次）
+  for (let i = 0; i < 4; i++) ev(NOW - 2 * DAY, `X${i}`, "memory", { op: "refs", refs: [{ id: M(5), use: "irrelevant" }] });
+  // 单 2（T2）：m5 被降权低于相对阈值；m1 只靠相邻 feature 的图命中
+  const r2 = ev(NOW - DAY, "T2", "scheduler", { op: "memory_rank", order: "write",
+    items: [file(5, 1 / 61), { id: M(1), routes: ["graph"], why: "相邻 feature", score: 1 / 61 }, file(4, 1 / 62)], dropped: [] });
+  ev(NOW - DAY, "T2", "scheduler", { op: "memory_retrieve", order: "write", memoryIds: [M(5), M(1), M(4)], rankingSeq: r2 });
+  ev(NOW - DAY + 1000, "T2", "memory", { op: "refs", refs: [{ id: M(4), use: "applied" }, { id: M(1), use: "irrelevant" }] });
+  // 窗口外的一单不算
+  ev(NOW - 30 * DAY, "T2", "scheduler", { op: "memory_retrieve", order: "write", memoryIds: [M(5)], rankingSeq: r2 });
+  closeLedger(path);
+});
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+describe("只读回放 [验收线 5]", () => {
+  test("数字逐条可核对；库文件前后字节不变", () => {
+    const before = digests();
+    expect(Object.keys(before)).toContain("ledger.sqlite");
+    const r = replayRelevance(path, P, NOW - 7 * DAY, NOW);
+    expect(digests()).toEqual(before);
+    expect(r.skipped).toBe(0);
+    // 旧：4 + 3 条；新：单 1 m5 m4 m3 m2（不再让坑位），单 2 m4 m5
+    // 单 2 m5：T1 同文件全权，四张缺失卡各 0.25，总权约 2，先验约 0.5，仍过相对门槛；m1 只靠远邻图命中
+    expect(r.old).toEqual({ orders: 2, items: 7, avgPerOrder: 3.5, byKind: { decision: 5, pitfall: 2 }, byRoute: { graph: 1, file: 6, vector: 0 } });
+    expect(r.new).toEqual({ orders: 2, items: 6, avgPerOrder: 3, byKind: { decision: 6 }, byRoute: { graph: 0, file: 6, vector: 0 } });
+    expect(r.appliedKept).toEqual({ total: 3, kept: 3, rate: 1 });
+    // 单 1 的 m5 新规则下还在（当时别的卡还没标）、m1 拿掉；单 2 的 m1 拿掉
+    expect(r.irrelevantRemoved).toEqual({ total: 3, removed: 2, rate: 0.6667 });
+  });
+
+  test("空窗口：0 单不报错", () => {
+    const r = replayRelevance(path, P, NOW, NOW + DAY);
+    expect(r.old).toMatchObject({ orders: 0, items: 0, avgPerOrder: 0 });
+    expect(r.appliedKept.rate).toBeNull();
+  });
+});
+
+describe("回放平局与生产同序 [验收线 5]", () => {
+  test("同分卡在第 4 / 5 名：回放和 rankMemories 一样留新的那条，applied 保留率按生产算", () => {
+    const tdir = mkdtempSync(join(tmpdir(), "mem-replay-tie-"));
+    const tpath = join(tdir, "ledger.sqlite");
+    try {
+      const db = openLedger(tpath);
+      db.prepare("INSERT INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
+      createTask(db, { actor: "owner", now: 1 }, { project: P, id: "T1", title: "T1", kind: "code" });
+      db.prepare("UPDATE tasks SET stage = 'build' WHERE id = 'T1'").run();
+      // m1..m5 决定越来越新
+      for (let i = 1; i <= 5; i++) {
+        recordMemory(db, { actor: "pm", now: NOW - (10 - i) * DAY },
+          { project: P, kind: "decision", title: `决定${i}`, body: "b", files: [], via: "tool", authorRole: "owner" } as MemoryInput);
+      }
+      const g = (ns: number[]) => ns.map((n) => ({ id: M(n), hop: 2 as const, via: "同 feature" }));
+      // 图 5 4 3 1 2；文件 3 5 4 2 1；语义 4 3 5 → m1、m2 同分 1/64 + 1/65
+      const routes = {
+        graph: g([5, 4, 3, 1, 2]),
+        file: [3, 5, 4, 2, 1].map((n) => ({ id: M(n), hits: 1, total: 1, first: "x" })),
+        vector: [4, 3, 5].map((n, i) => ({ memoryId: M(n), score: 0.9 - i / 100 })),
+      };
+      const ranked = rankMemories(memoryCandidates(db, getTask(db, "T1")!), routes, { kind: "write", now: NOW, modes: { pitfallRelevance: "off", feedbackPrior: "off" } });
+      expect(ranked.selected.map((s) => s.id)).toEqual([M(5), M(4), M(3), M(2)]);
+      expect(ranked.dropped.map((d) => d.id)).toEqual([M(1)]);
+      expect(ranked.dropped[0]!.score).toBe(ranked.selected[3]!.score);
+
+      const ev = (ts: number, target: string, kind: string, data: unknown): number =>
+        (db.prepare("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'scheduler', ?, ?, ?, '', ?) RETURNING seq")
+          .get(ts, P, target, kind, JSON.stringify(data)) as { seq: number }).seq;
+      const order: MemoryRoute[] = ["graph", "file", "vector"];
+      const r = ev(NOW - DAY, "T1", "scheduler", { op: "memory_rank", order: "write",
+        items: ranked.selected.map((s) => ({ id: s.id, routes: order.filter((x) => s.ranks[x] !== undefined), why: "同 feature", score: Number(s.score.toFixed(6)) })),
+        dropped: ranked.dropped.map((d) => ({ id: d.id, score: Number(d.score.toFixed(6)), reason: "超条数" })) });
+      ev(NOW - DAY, "T1", "scheduler", { op: "memory_retrieve", order: "write", memoryIds: ranked.selected.map((s) => s.id), rankingSeq: r });
+      ev(NOW - DAY + 1000, "T1", "memory", { op: "refs", refs: [{ id: M(2), use: "applied" }] });
+      closeLedger(tpath);
+
+      const out = replayRelevance(tpath, P, NOW - 7 * DAY, NOW);
+      expect(out.appliedKept).toEqual({ total: 1, kept: 1, rate: 1 });
+      expect(out.new.items).toBe(4);
+    } finally {
+      closeLedger(tpath);
+      rmSync(tdir, { recursive: true, force: true });
+    }
+  });
+});
+
+ test("网格复用只读准备；每组与单跑一致，覆盖条数及先验参数", () => {
+  const before = digests();
+  const grid = [{}, { relativeFloor: 0, feedbackFloor: 0.7, unrelatedWeight: 0.1, count: 1 }, { count: 0 }];
+  const rows = replaySweep(path, P, NOW - 7 * DAY, NOW, grid);
+  rows.forEach((row, i) => expect(row.result).toEqual(replayRelevance(path, P, NOW - 7 * DAY, NOW, grid[i])));
+  expect(rows[1]!.result.new.items).toBe(2);
+  expect(replayRelevance(path, P, NOW - 7 * DAY, NOW, { unrelatedWeight: 1 }).new.items).toBe(5);
+  expect(rows[2]!.result.new.items).toBe(0);
+  expect(digests()).toEqual(before);
+  expect(() => replaySweep(path, P, NOW - DAY, NOW, [{ count: -1 }])).toThrow("Invalid count");
+});

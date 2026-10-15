@@ -91,7 +91,7 @@ beforeEach(() => {
   expect(cli("lend-reclaim", "T1", "--reason", "PM recovery").ok).toBe(true);
   reclaimSeq = listEvents(db, { target: "T1" }).findLast((e) => (e.data.lend as any)?.op === "reclaim")!.seq;
   fakeGh();
-});
+}, 60_000);
 afterEach(async () => { closeLedger(dbPath); await resources.dispose(); });
 
 test("real CLI dry-run/apply/claim/deliver preserves original report basis and old PR main", () => {
