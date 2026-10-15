@@ -1,0 +1,41 @@
+/* The first 75px hold the summary; task rows start at 81px and each occupy exactly 21px. */
+.card { position: absolute; z-index: 2; border-radius: 10px; color: var(--text); --state: var(--muted); }
+.card[data-pd-state="run"] { --state: var(--s-run); }
+.card[data-pd-state="blocked"] { --state: var(--err); }
+.card[data-pd-state="stale"] { --state: var(--warn); }
+.card[data-pd-state="ready"], .card[data-pd-state="done"] { --state: var(--ok); }
+.main { position: absolute; inset: 0; width: 100%; height: 100%; padding: 9px 11px; text-align: left; display: flex; flex-direction: column; align-items: stretch;
+  border: 1px solid var(--line); border-radius: inherit; background: var(--panel); color: inherit; cursor: pointer; }
+.main:hover { border-color: var(--accent); }
+.main:focus-visible, .task:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.header { display: flex; align-items: center; gap: 5px; height: 18px; flex-shrink: 0; }
+.dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--state); }
+.title { min-width: 0; flex: 1; font-size: 13px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { display: inline-flex; align-items: center; gap: 3px; flex: 0 1 auto; max-width: 55%; min-width: 0; font-size: 10px;
+  line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.blocked { color: var(--err); }
+.stale { color: var(--warn); }
+.numbers { display: block; height: 11px; line-height: 11px; margin-top: 2px; font-size: 10px; color: var(--muted); }
+.progress { display: flex; width: 100%; height: 5px; margin-top: 3px; overflow: hidden; border-radius: 3px; background: var(--line); }
+.progress > span { display: block; flex: none; height: 100%; }
+.completed { background: var(--ok); }
+.active { background: var(--s-run); }
+.blocked:is(.progress > span) { background: var(--err); }
+.ready { background: color-mix(in srgb, var(--ok) 28%, var(--panel)); }
+.waiting { background: repeating-linear-gradient(135deg, var(--line) 0 2px, var(--bg-2) 2px 5px); }
+.rest { background: var(--line); }
+.main .stats { height: 14px; line-height: 14px; margin-top: 2px; flex-wrap: nowrap; font-size: 10px; gap: 5px; overflow: hidden; white-space: nowrap; }
+.task { position: absolute; z-index: 1; left: 12px; pointer-events: none; display: flex; align-items: center; gap: 4px; width: calc(100% - 24px); height: 21px; padding: 0; border: 0;
+  background: transparent; color: var(--text-2); font-size: 10px; line-height: 21px; text-align: left; white-space: nowrap; overflow: hidden; }
+button.task { pointer-events: auto; cursor: pointer; }
+button.task:hover { background: var(--bg-2); border-radius: 3px; }
+.taskBlocked::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 2px; background: var(--err); }
+.taskBlocked { padding-left: 5px; }
+.frozen { color: var(--muted); }
+.stage { flex: none; color: var(--muted); }
+.taskKey { flex: 0 1 auto; min-width: 0; max-width: 48px; font: 9px ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; }
+.taskTitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.member { flex: 0 1 auto; max-width: 43%; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 9px; }
+.more { position: absolute; left: 12px; right: 12px; pointer-events: none; height: 17px; line-height: 17px; color: var(--muted); font-size: 10px; }
+.meta { position: absolute; right: 12px; top: 29px; max-width: 70%; overflow: hidden; white-space: nowrap; font-size: 10px; }
+.unclosed { width: 4px; height: 4px; border-radius: 50%; background: var(--ok); flex: none; }

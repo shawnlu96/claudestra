@@ -6,13 +6,12 @@
 import { useMemo, useState } from 'react';
 import type { ProductBoard, ProductFeature } from '@/lib/api/product-board';
 import type { Tr } from '../collab-model';
-import { Icon } from '../collab-icons';
 import { usePort, useViewport } from '../v4/use-viewport';
 import { ViewportTools } from '../v4/viewport-tools';
 import v from '../v4/v4.module.css';
 import d from '../dag/dag.module.css';
 import { productLayout, type ProductChip, type ProductNode, type ProductZone } from './product-layout';
-import { ProductCard } from './product-card';
+import { ProductCard, ProductChipContent } from './product-card';
 import { ProductEdgeLegend, ProductEdges } from './product-edges';
 import { ProductSide, type ProductPick } from './product-side';
 import { ProductToolbar, useMapPrefs } from './product-toolbar';
@@ -30,8 +29,7 @@ function Chip({ id, feature, tag, box, onFeature, tr }: { id: string; feature: P
   onFeature: (id: string) => void; tr: Tr }) {
   return <button type="button" className={`${m.chip} ${tag === 'done' ? m.chipDone : m.chipPaused}`} data-pd-chip={id}
     style={{ left: box.x, top: box.y, width: box.w, height: box.h }} title={feature.title} onClick={() => onFeature(feature.id)}>
-    {tag === 'done' && <Icon name="check" size={12} />}<span className={m.chipTitle}>{feature.title || feature.id}</span>
-    {TAG[tag] && <span className={m.chipTag}>{pdText(tr, TAG[tag])}</span>}
+    <ProductChipContent feature={feature} label={TAG[tag]} tr={tr} />
   </button>;
 }
 
