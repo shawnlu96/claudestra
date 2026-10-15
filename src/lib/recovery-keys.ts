@@ -82,6 +82,7 @@ export const RECOVERY_KEYS = [
   "reviewLocalFirst",
   "reviewSeatIdle",
   "roleModel",
+  "selfHealBeforeManual",
   "skipEffectsAutoScope",
   "specObservationHours",
   "staleReplacement",

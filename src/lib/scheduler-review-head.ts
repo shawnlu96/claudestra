@@ -14,6 +14,7 @@ import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import type { Git } from "./scheduler-review-worktree.js";
+import { fetchHeadVia } from "./scheduler-head-refetch-git.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
 const REVIEW_FETCH_TIMEOUT_MS = 60_000;
@@ -92,11 +93,6 @@ export async function prepareReviewHead(env: ReviewHeadEnv, task: LedgerTask, he
   const repoDir = repo.dir;
   const mine = await commonDir(env.git, dir), project = await commonDir(env.git, repoDir);
   if (!mine || mine !== project) return `${dir} 与项目仓库 ${repoDir} 不共用对象库，不从别处取交付 head ${short}`;
-  const tried: string[] = [];
-  for (const ref of refs) {
-    const f = await env.net(["-C", repoDir, "fetch", "--no-tags", "-q", "origin", ref]);
-    if (f.code === 0 && await has()) return null;
-    tried.push(f.code === 0 ? `${ref}：取到了但不含该 commit（引用已移动？）` : `${ref}：${cut(f.out)}`);
-  }
-  return `交付 head ${short} 从项目仓库 origin 取不到，不派审：${tried.join("；")}`.slice(0, 600);
+  const tried = await fetchHeadVia(env.net, repoDir, refs, has);
+  return tried && `交付 head ${short} 从项目仓库 origin 取不到，不派审：${tried.join("；")}`.slice(0, 600);
 }

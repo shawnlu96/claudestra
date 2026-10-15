@@ -150,7 +150,7 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   if ("manual" in first) return first;
   const dir = first.dir;
   if (!head) return { manual: "派审意图没有 head" };
-  const missing = await peerPrHeadMissing(task, head, env.git);
+  const missing = await peerPrHeadMissing(task, head, env.git, undefined, env.net); // SELFHEAL1: one bounded refs/pull fetch first
   if (missing) return { manual: missing };
   const absent = await prepareReviewHead(env, task, head, dir, true);
   if (absent) return { manual: absent };

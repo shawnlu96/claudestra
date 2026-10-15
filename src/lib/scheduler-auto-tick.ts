@@ -195,7 +195,8 @@ class Card {
     }
     if (got.kind === "manual") {
       await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`);
-      return this.escalate(`${role} session：${got.reason}`, intent.id);
+      const refetch = await (await import("./scheduler-head-refetch.js")).headRefetch(this, got.reason); if ("wait" in refetch) return this.out("waiting", refetch.wait); // SELFHEAL1
+      return this.escalate(`${role} session：${refetch.reason}`, intent.id);
     }
     const ref = got.ref;
     const b = await this.deps.manager("ledger", "scheduler-session-bind", this.task.id, "--role", role, "--intent", intent.id,
@@ -234,7 +235,8 @@ class Card {
       const pinned = await this.deps.pinReview(this.task, ref, intent.head);
       if ("manual" in pinned) {
         await this.settle(intent.id, "pending", "cancelled", `未投递：${oneLine(pinned.manual)}`);
-        return this.escalate(staleReplacementObservation(this.db, this.task, { ...ref, source: "local" }, pinned.manual), intent.id);
+        const refetch = await (await import("./scheduler-head-refetch.js")).headRefetch(this, pinned.manual); if ("wait" in refetch) return this.out("waiting", refetch.wait); // SELFHEAL1
+        return this.escalate(staleReplacementObservation(this.db, this.task, { ...ref, source: "local" }, refetch.reason), intent.id);
       }
       checkout = pinned.dir;
     }

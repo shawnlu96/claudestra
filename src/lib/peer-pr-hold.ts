@@ -11,6 +11,8 @@ import { readSchedulerConfig } from "./scheduler-config.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
 import { listEvents } from "./ledger-store.js";
 import type { Git } from "./scheduler-review-worktree.js";
+import { fetchHeadVia } from "./scheduler-head-refetch-git.js";
+import { headRefetchHold } from "./scheduler-head-refetch.js";
 
 const checked = new WeakMap<Database, Map<string, { seq: number; head: string }>>();
 
@@ -27,7 +29,9 @@ export function headChecked(db: Database, task: LedgerTask, verdictSeq: number):
 }
 
 /** Why the planner must not run for this card this pass; null = plan as usual (every non-peer card). */
-export function peerPrHold(db: Database, task: LedgerTask): string | null {
+export function peerPrHold(db: Database, task: LedgerTask, now = Date.now()): string | null {
+  const refetch = headRefetchHold(db, task, now); // SELFHEAL1: any card whose review head is in its refetch backoff
+  if (refetch) return refetch;
   if (!peerPrOf(task)) return null;
   if (task.stage === "fix") {
     const bounce = fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage);
@@ -49,11 +53,18 @@ export function peerPrRepoDir(task: LedgerTask, read = readSchedulerConfig): str
   }
 }
 
-/** Before pinning a peer card's reviewer: the head must already be a local commit (the peer tick fetched it). No fetch here. */
-export async function peerPrHeadMissing(task: LedgerTask, head: string, git: Git, read = readSchedulerConfig): Promise<string | null> {
-  if (!peerPrOf(task)) return null;
+/**
+ * Before pinning a peer card's reviewer: the head must be a local commit (the peer tick normally fetched it). With `net`
+ * (SELFHEAL1, the bounded network git) a missing head is first fetched once through refs/pull/<n>/head; still missing = the
+ * reason, which the auto tick turns into a backed-off wait (scheduler-head-refetch.ts). Without `net`: no fetch, as before.
+ */
+export async function peerPrHeadMissing(task: LedgerTask, head: string, git: Git, read = readSchedulerConfig, net?: Git): Promise<string | null> {
+  const meta = peerPrOf(task);
+  if (!meta) return null;
   const dir = peerPrRepoDir(task, read);
   if (!dir) return `${task.id} 是 peer PR 卡，但 scheduler.json 里没有项目 ${task.project} 的 repoDir`;
-  const r = await git(["-C", dir, "cat-file", "-e", `${head}^{commit}`]);
-  return r.code === 0 ? null : `PR head ${head.slice(0, 12)} 不在本地仓库（peer tick 还没取到），不派审，交 PM`;
+  const has = async () => (await git(["-C", dir, "cat-file", "-e", `${head}^{commit}`])).code === 0;
+  if (await has()) return null;
+  const tried = net && /^[0-9a-f]{40}$/.test(head) ? await fetchHeadVia(net, dir, [`refs/pull/${meta.number}/head`], has) : [];
+  return tried && `PR head ${head.slice(0, 12)} 不在本地仓库（peer tick 还没取到${tried.length ? `，重取也没取到：${tried.join("；")}` : ""}），不派审，交 PM`;
 }
