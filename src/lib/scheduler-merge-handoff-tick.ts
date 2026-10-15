@@ -14,6 +14,7 @@ import { readSchedulerConfig } from "./scheduler-config.js";
 import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
 import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
+import { pendingRemoteBounce, remoteBounceRefusal } from "./remote-review-bounce.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 /**
@@ -269,10 +270,27 @@ async function landAfterHandoff(c: HandoffCard<unknown>, follow: HandoffFollow, 
   return r.ok === true ? null : String(r.error);
 }
 
+/**
+ * An owner P1 booked on this stay's head (before or after the handoff) comes first: back to fix (RRL-2), or PM when a lender wrote
+ * the head or the owner's bounces are used up. Null = none pending, the handoff goes on as before.
+ */
+async function remoteBounce<O>(c: HandoffCard<O>, pr: string, head: string): Promise<O | null> {
+  const p = pendingRemoteBounce(c.db, c.task);
+  if (!p) return null;
+  const refused = remoteBounceRefusal(c.db, c.task, p);
+  if (refused) return c.escalate(refused);
+  const r = await c.deps.manager("ledger", "scheduler-merge-handoff", c.task.id, "--head", head, "--pr", pr, "--remote-bounce", String(p.remote.seq));
+  if (r.ok !== true) return c.out("held", `仓库方 P1 打回没记上：${String(r.error)}`);
+  if (r.duplicate !== true) await tell(c, `[调度引擎] ${c.task.id} 仓库方审查 ${p.remote.reportId} 有 P1，已退回 fix 给作者（报告：${p.remote.reportPath}）`, true);
+  return c.out("remote_bounce", `仓库方审查 ${p.remote.reportId} 有 ${p.remote.p1} 个 P1，退回 fix`);
+}
+
 /** First call hands the card over (PR open at the card's head, or PM); later calls follow the PR until merged / closed. */
 export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const { task } = c;
   if (!task.pr || !task.headSHA) return c.escalate("合并要交给仓库方，但卡上没有 PR 或 head");
+  const bounced = await remoteBounce(c, task.pr, task.headSHA);
+  if (bounced) return bounced;
   if (!c.deps.prState) return c.out("held", "没有读 PR 状态的通道，合并交接暂停");
   const follow = handoffOf(c.db, task), handed = follow?.evidence;
   // the evidence is bound to the PR it was handed with: a card whose PR was changed since then cannot borrow another PR's merge

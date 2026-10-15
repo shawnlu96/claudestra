@@ -21,6 +21,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
+import { remoteFixWork } from "./remote-review-current.js";
 import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
 import { localAuthorAcceptance, standardAnswers } from "./order-standard-answers.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
@@ -125,6 +126,11 @@ const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
  * 唤醒派单时执行者只看得到 take_order 的单，缺了它就只知道「要修」不知道修什么。写单 / 结论不完整时不带。
  */
 function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null; bounce?: ReturnType<typeof bounceWork> } {
+  const own = ownFixContext(db, t, step), remote = own.bounce ? null : remoteFixWork(db, t); // 仓库方 P1 随单带上（RRL-2）
+  return remote ? { ...own, bounce: { inputs: remote.inputs, acceptance: ["规格里的验收线逐条自查", ...remote.acceptance] } } : own;
+}
+
+function ownFixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null; bounce?: ReturnType<typeof bounceWork> } {
   if (step !== "fix") return { findings: [], report: null };
   const events = listEvents(db, { project: t.project, target: t.id });
   const bounce = fixBounce(events, t.stage); // 合并退回（冲突 / CI 红）不是修 P1：不带审查报告（scheduler-merge-conflict.ts）

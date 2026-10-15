@@ -7,11 +7,12 @@ import type { Database } from "bun:sqlite";
 import { prCoordinates } from "./card-repo.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
-import { capUnknown, type RemoteReview } from "./remote-review-parse.js";
+import type { RemoteReview } from "./remote-review-parse.js";
+import { REMOTE_REVIEW_OP } from "./remote-review-current.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { handoffOf } from "./scheduler-merge-handoff.js";
 
-export const REMOTE_REVIEW_OP = "remote_review";
+export { REMOTE_REVIEW_OP, remoteCurrentAt, remoteP1At } from "./remote-review-current.js";
 export const NOTIFIED_OP = "remote_review_notified";
 /** A review that did not match the card's head when it arrived, applied once the card reached that head. */
 export const APPLIED_OP = "remote_review_applied";
@@ -30,26 +31,6 @@ export function matchRemoteCard(db: Database, projects: readonly string[], numbe
 export function remoteHeadMatch(db: Database, task: LedgerTask, head12: string): string | null {
   const heads = [task.headSHA, task.stage === "merge" ? handoffOf(db, task)?.head : null];
   return heads.find((h): h is string => typeof h === "string" && h.toLowerCase().startsWith(head12)) ?? null;
-}
-
-const isRemote = (e: LedgerEvent): boolean => e.kind === "scheduler" && e.actor === "scheduler" && e.data.op === REMOTE_REVIEW_OP;
-
-const atHead = (e: LedgerEvent, head: string): boolean => typeof e.data.head12 === "string" && head.toLowerCase().startsWith(e.data.head12);
-const outranks = (a: LedgerEvent, b: LedgerEvent): boolean => Number(a.data.round) > Number(b.data.round) || (Number(a.data.round) === Number(b.data.round) && a.seq > b.seq);
-
-/**
- * The owner's current word on this head (prefix match), whatever head the card had when it arrived: the booking with the highest
- * round, the later one on a tie. Everything else booked for that head is superseded and never acts.
- */
-export function remoteCurrentAt(events: readonly LedgerEvent[], head: string | null): LedgerEvent | null {
-  if (!head) return null;
-  return events.filter((e) => isRemote(e) && atHead(e, head)).reduce<LedgerEvent | null>((best, e) => (!best || outranks(e, best) ? e : best), null);
-}
-
-/** The current word on this head when it is a P1 to fix; an old-format redelivered P1 (capUnknown) is left to PM, so it is not returned. */
-export function remoteP1At(events: readonly LedgerEvent[], head: string | null): LedgerEvent | null {
-  const e = remoteCurrentAt(events, head);
-  return e && Number(e.data.p1) > 0 && !capUnknown(e.data) ? e : null;
 }
 
 export const remoteReviewKey = (taskId: string, r: Pick<RemoteReview, "reportId" | "head12">): string =>

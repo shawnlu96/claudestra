@@ -93,6 +93,28 @@ instead of starting a PM turn:
 
 A refused inbox file moves to `remote-review-inbox/failed/` and PM is told where it is. Tests: `tests/remote-review-intake-*.test.ts`.
 
+Known limits of the booking: an old-format redelivered P1 (no cap mark) cannot tell whether the owner's rounds are used up, so it
+always goes to PM through the normal delivery, is only booked and never changes the card; when the sender retries a failed delivery,
+PM may see the same raw text a few times (it is never booked twice, never moves the card, never raises an owner card). Once both
+sides run the cap-marked format, old-format pushes no longer occur.
+
+## The owner's P1 sends the card back to fix (RRL-2)
+
+| Card | What happens |
+|---|---|
+| auto, in `merge` (before or after the handoff) | `driveHandoff` first asks `pendingRemoteBounce` (`lib/remote-review-bounce.ts`): the current owner word on the head the handoff follows, else the card's head, when it is a P1 (`remoteP1At`) not bounced yet. Then `ledger scheduler-merge-handoff <task> --head --pr --remote-bounce <seq>` moves merge → fix in one transaction: a stage event whose `mergeBounce` is `{cause: "remote_review", prHead, remote: {seq, reportId, reportPath, p1}}` and one `remote_bounce` event (dedup per booking, so a replay is a duplicate). PM gets one info-level line. |
+| — the head was written by a lender, or this would be the owner's 4th bounce | no bounce: the card goes manual (`scheduler-fallback-manual`) with one PM notice naming the report path. Owner bounces are counted on their own (stage events), apart from the merge queue's `merge_conflict` count. |
+| in `fix` after such a bounce | the planner's bounce package carries it, so the dispatch and `take_order` name the report and P1 count; acceptance: fix each P1 in the report, push to this PR branch, deliver the new head. Not a review P1: no findingIds, so it never counts toward P1 streaks or fix_swap. |
+| in `review` after that fix | the review order gets one line: targeted re-review of whether the owner's report's P1 are fixed. Passing goes to `merge` and hands over again (a new `merge_handoff` record for the new stay). |
+| in `build` / `fix` otherwise (incl. a local review P1, or a manual card PM moved to fix) | the order only carries the report (`remoteFixWork`): next to the local report if there is one. Local review P1 + owner P1 = both reports. |
+| in `review` with a local pass | nothing until `merge`, where the row above bounces it before any handoff. |
+| manual | the booking's one short PM notice (card + report path, no report text); once PM moves it to fix, `take_order` carries the report. |
+
+P0 and a P1 at the owner's cap are handled at booking (above). A pass changes nothing: the handoff waits for the owner as before, and a
+ui card still needs PM's screenshot approval at handoff (`uiMergeRefusal`). Known limit: a report booked for the same head while the
+card is already in fix only shows up in the next `take_order`; a lent fix order names the local report path only, so a lender
+gets no report text (left to a later card). Tests: `tests/remote-review-bounce.test.ts`.
+
 ## The local merge paths a handoff project never reaches
 
 - **Merge intent**: the auto tick never plans one (`driveHandoff` replaces it); an open one is escalated, not queued.
