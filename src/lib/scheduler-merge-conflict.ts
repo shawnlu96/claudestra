@@ -76,7 +76,9 @@ const fitUnits = (text: string, max: number): string => {
   }
   return out;
 };
+/** A merge run's receipt; remote_review never comes from a merge run (remote-review-bounce.ts writes it), so it has none. */
 export function bounceReceipt(b: MergeBounce): string {
+  if (b.cause === "remote_review") throw new LedgerError("invalid", "仓库方审查退回不走合并运行回执");
   const head = `${PREFIX}（${b.cause}）：PR head ${b.prHead}`;
   if (b.cause === "conflict") return `${head}，main head ${b.mainHead}`;
   if (b.cause === "update_fail") {

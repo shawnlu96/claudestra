@@ -18,16 +18,16 @@ import { handoffCard, handoffOf } from "./scheduler-merge-handoff.js";
 const BOUNCE_OP = "remote_bounce";
 const bounceKey = (taskId: string, seq: number): string => `scheduler:${BOUNCE_OP}:${taskId}:${seq}`;
 
-/** An owner P1 on the head this merge stay is about (the head the handoff follows first, then the card's) that has not bounced it yet. */
+/**
+ * An owner P1 on the head this merge stay is about that has not bounced it yet: once handed over, only the head the handoff follows
+ * now (after a carry the card's own head is an old PR head, and a late review of it never acts); before, the card's head.
+ */
 export interface PendingRemoteBounce { head: string; remote: RemoteBounce }
 export function pendingRemoteBounce(db: Database, task: LedgerTask): PendingRemoteBounce | null {
   if (task.stage !== "merge" || !task.headSHA) return null;
   const events = listEvents(db, { project: task.project, target: task.id });
-  for (const head of [handoffOf(db, task)?.head, task.headSHA]) {
-    const e = head ? remoteP1At(events, head) : null;
-    if (e && !getEventByDedup(db, bounceKey(task.id, e.seq))) return { head: head!, remote: remoteP1Of(e) };
-  }
-  return null;
+  const head = handoffOf(db, task)?.head ?? task.headSHA, e = remoteP1At(events, head);
+  return e && !getEventByDedup(db, bounceKey(task.id, e.seq)) ? { head, remote: remoteP1Of(e) } : null;
 }
 
 /** Why this P1 goes to PM instead of bouncing (null = bounce): a lender wrote the head, or the owner's bounces are used up. */
