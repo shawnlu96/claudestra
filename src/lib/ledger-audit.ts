@@ -326,11 +326,12 @@ function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: numb
     if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
     // merge 停着是预期的：依赖上还在等前置任务上线（T8h：code 上线才算满足）
     if (task.stage === "merge" && (blockedBy?.length ?? 0) > 0) continue;
-    // AUDH2-1：已交给仓库方合并的卡另按交接口径判（ledger-audit-handoff.ts）
-    if (task.stage === "merge" && handoffStall({ task, events, stageSince }, handoffPr?.[task.id], AUDIT_THRESHOLDS.mergeStallMs, now, { emit, keep })) continue;
     // 从最后一个障碍消失时算：进 merge 之后才解冻 / 前置才上线，停着的时间不算它的
     // AUDTRAIN1（ledger-audit-train.ts）：排队等列车的卡与冻结同样不报、keep 住原 key；列车空着时从它最近一次空出起算
     const slot = train(task), parked = frozen || slot.parked;
+    // AUDH2-1：已交给仓库方合并的卡另按交接口径判（ledger-audit-handoff.ts），冻结 / 排队同样不报
+    if (task.stage === "merge" && handoffStall({ task, events, stageSince }, handoffPr?.[task.id], { mergeStallMs: AUDIT_THRESHOLDS.mergeStallMs, parked, now },
+      { emit, keep })) continue;
     const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity, slot.freedAt ?? -Infinity) : -Infinity;
     const moved = Math.max(stageSince, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
     const since = Math.max(moved, cleared), limit = task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs;

@@ -52,7 +52,7 @@ export interface SnapshotSources {
   heldPath: string;
   mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number, db: Database): Promise<Record<string, MergeCiFact> | null>; // MAINP2 CI + merge gates
   /** AUDH2-1：交接卡 PR 现读（ledger-audit-handoff.ts）；测试不给 = 不读，交接卡按「没读到」判 */
-  handoffPr?(prUrl: string): Promise<HandoffPrFact | null>;
+  handoffPr?(prUrl: string, project: string): Promise<HandoffPrFact | null>;
   /** AUDLEND1：这个执行者有没有后台 shell 还在跑（ledger-audit-idle.ts）；测试不给 = 不查 */
   bgShell?(agent: RegistryAgent): Promise<boolean>;
   /** N8B7：共享镜像状态文件所在的状态目录（ledger-audit-mirror.ts）；测试不给 = 不读 */

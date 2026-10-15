@@ -4,6 +4,7 @@ import { auditLedger, type AuditSnapshot } from "../src/lib/ledger-audit.js";
 import { collectHandoffPr, HANDOFF_STALL_MS, readHandoffPr, type HandoffInputs, type HandoffPrFact } from "../src/lib/ledger-audit-handoff.js";
 import type { MergeCiFact, MergeReadyInputs } from "../src/lib/ledger-audit-merge-ready.js";
 import type { EventKind, LedgerEvent, LedgerTask } from "../src/lib/ledger-stages.js";
+import type { MergeTrainInputs } from "../src/lib/ledger-audit-train.js";
 import type { RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 
 const MIN = 60_000, NOW = 100_000 * MIN, PM = "agent-pm", H = "a".repeat(40), M = "d".repeat(40);
@@ -21,14 +22,18 @@ const card = (stageAt: number, handoff: boolean, over: Partial<LedgerTask> = {})
   ev(0, "task", { op: "new" }), review(stageAt - MIN), ev(stageAt, "stage", { from: "review", to: "merge" }),
   ...(handoff ? [ev(stageAt, "scheduler", { op: "merge_handoff", evidence: { pr: PR_URL, head: H } })] : [])] });
 const ci: MergeCiFact = { head: H, state: "green", source: "live", checkedAt: NOW, blockers: [] };
-type Snap = AuditSnapshot & MergeReadyInputs & HandoffInputs;
-const snap = (tasks: AuditSnapshot["tasks"], pr?: HandoffPrFact | null): Snap =>
+type Snap = AuditSnapshot & MergeReadyInputs & HandoffInputs & MergeTrainInputs;
+const snap = (tasks: AuditSnapshot["tasks"], pr?: HandoffPrFact | null, over: Partial<Snap> = {}): Snap =>
   ({ project: "p", pms: [PM], tasks, agents: [], reviewers: [], held: [], ownerInbox: [], mergeCi: { T1: ci },
-    ...(pr === undefined ? {} : { handoffPr: { T1: pr } }) });
-const policy: RecoveryPolicyPort = () => ({ mode: "observe", manualAfterMs: null, source: "config" });
+    ...(pr === undefined ? {} : { handoffPr: { T1: pr } }), ...over });
+let trainMode: "on" | "observe" = "observe";
+const policy: RecoveryPolicyPort = (_p, key) => ({ mode: key === "auditTrainQueue" ? trainMode : "observe", manualAfterMs: null, source: "config" });
 const run = (s: Snap, now = NOW) => auditLedger(s, now, policy);
 const rules = (s: Snap, now = NOW) => run(s, now).findings.filter((f) => f.rule === "ship_stalled" || f.rule === "merge_ready_idle");
-const open: HandoffPrFact = { state: "OPEN", mergeSha: null, mergedAt: null };
+const open: HandoffPrFact = { state: "OPEN", mergeSha: null, mergedAt: null, base: "main", head: H };
+/** 合进 main、合并时 head 就是交接的 head、本机 main 证实含合并提交：调度器能落 live 的那组事实 */
+const merged: HandoffPrFact = { state: "MERGED", mergeSha: M, mergedAt: NOW - 40 * MIN, base: "main", head: H, landing: { ok: true } };
+const kept = (s: Snap) => run(s).keep.some((k) => k.startsWith("p|ship_stalled|T1|merge|") && k.includes("|handoff|"));
 
 describe("AUDH2-1 交接后巡检", () => {
   test("SYN-2 形状：交接后 40 分钟、PR 开着 → 不报 ship_stalled / merge_ready，key keep 住", () => {
@@ -56,7 +61,6 @@ describe("AUDH2-1 交接后巡检", () => {
   });
 
   test("FUP-1 形状：PR 已合并、本机未部署 → 不出现「走正式合并入口」，提示需要部署 / manager update 后推 live", () => {
-    const merged: HandoffPrFact = { state: "MERGED", mergeSha: M, mergedAt: NOW - 40 * MIN };
     const f = rules(snap([card(NOW - 2 * 60 * MIN, true)], merged));
     expect(f.map((x) => x.rule)).toEqual(["ship_stalled"]);
     expect(f[0]!.detail).toContain(`已由仓库方合并 ${M.slice(0, 12)}`);
@@ -65,6 +69,48 @@ describe("AUDH2-1 交接后巡检", () => {
     expect(f.some((x) => x.suggestion.includes("走正式合并入口"))).toBe(false);
     // 刚合并（未满 mergeStallMs）：等调度器自己落 live，不报
     expect(rules(snap([card(NOW - 2 * 60 * MIN, true)], { ...merged, mergedAt: NOW - 5 * MIN }))).toEqual([]);
+  });
+
+  test("审查 P1：冻结 / 列车排队中照原规则不报、keep 住（PR 开着满 12 小时、已合并满 30 分钟都一样）", () => {
+    for (const pr of [open, merged]) {
+      const t = card(NOW - HANDOFF_STALL_MS - MIN, true);
+      expect(rules(snap([t], pr, { queueFrozen: true }))).toEqual([]);
+      expect(kept(snap([t], pr, { queueFrozen: true }))).toBe(true);
+      trainMode = "on";
+      const train = { mergeTrain: { active: [], freedAt: null }, trainFacts: { holder: { taskId: "T9", intentId: "i", phase: "ci", merged: false },
+        cards: { T1: { stage: "merge", merged: false, phase: "ready" } } } };
+      expect(rules(snap([t], pr, train))).toEqual([]);
+      expect(kept(snap([t], pr, train))).toBe(true);
+      trainMode = "observe";
+    }
+  });
+
+  test("审查 P1：只有合进 main、head 对得上、本机 main 证实含合并提交才提示部署；证不了只提示核查", () => {
+    const t = card(NOW - 2 * 60 * MIN, true);
+    for (const [pr, why] of [[{ ...merged, base: "release" }, "合进的是 release"], [{ ...merged, base: null }, "读不出的分支"],
+      [{ ...merged, head: "e".repeat(40) }, "不是交接后跟的"], [{ ...merged, landing: undefined }, "没核对本机 main"],
+      [{ ...merged, landing: { ok: false, reason: "main（x）还不含合并提交 y" } }, "还不含合并提交"]] as const) {
+      const f = rules(snap([t], pr));
+      expect(f).toHaveLength(1);
+      expect(f[0]!.detail).toContain(why);
+      expect(f[0]!.suggestion).toContain("证实前不要部署、不要推 live");
+      expect(f[0]!.suggestion).not.toContain("manager update");
+    }
+    // 交接后 PR 只合入了 main（调度器记的 carry）：跟的 head 前移，合并时 head 对上 carry 后的就算对得上
+    const C = "c".repeat(40), first = card(NOW - 2 * 60 * MIN, true);
+    const carried = { ...first, events: [...first.events, ev(NOW - 90 * MIN, "scheduler", { op: "merge_handoff_carry", handoffSeq: first.events[3]!.seq, from: H, to: C })] };
+    expect(rules(snap([carried], { ...merged, head: C }))[0]!.suggestion).toContain("需要部署");
+    expect(rules(snap([carried], merged))[0]!.suggestion).toContain("证实前不要部署");
+  });
+
+  test("审查 P2：PR 被关掉没合并 → 30 分钟就报，说关闭了、要退回或作废，不说合并队列停了", () => {
+    const closed: HandoffPrFact = { ...open, state: "CLOSED" };
+    expect(rules(snap([card(NOW - 20 * MIN, true)], closed))).toEqual([]);
+    const f = rules(snap([card(NOW - 40 * MIN, true)], closed));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.detail).toContain("被关闭、没有合并");
+    expect(f[0]!.detail).not.toContain("合并队列停了");
+    expect(f[0]!.suggestion).toContain("退回 fix");
   });
 
   test("推进到 live 之后交接口径的 key 不再出现（live 照原规则另算）", () => {
@@ -102,12 +148,12 @@ describe("AUDH2-1 交接卡 PR 取数", () => {
     expect(got).toEqual({ T1: open, T3: null });
   });
 
-  test("gh 输出解析：MERGED 带合并提交与时刻；失败 / 不合规 = null", async () => {
+  test("gh 输出解析：MERGED 带合并提交、时刻、base、head；失败 / 不合规 = null", async () => {
     const out = (stdout: string, code = 0) => async () => ({ code, stdout, stderr: "", timedOut: false } as never);
-    expect(await readHandoffPr(PR_URL, out(JSON.stringify({ state: "MERGED", mergeCommit: { oid: M }, mergedAt: "2026-10-15T12:00:00Z" }))))
-      .toEqual({ state: "MERGED", mergeSha: M, mergedAt: Date.parse("2026-10-15T12:00:00Z") });
-    expect(await readHandoffPr(PR_URL, out(JSON.stringify({ state: "OPEN", mergeCommit: null, mergedAt: null }))))
-      .toEqual({ state: "OPEN", mergeSha: null, mergedAt: null });
+    expect(await readHandoffPr(PR_URL, out(JSON.stringify({ state: "MERGED", mergeCommit: { oid: M }, mergedAt: "2026-10-15T12:00:00Z",
+      baseRefName: "main", headRefOid: H })))).toEqual({ state: "MERGED", mergeSha: M, mergedAt: Date.parse("2026-10-15T12:00:00Z"), base: "main", head: H });
+    expect(await readHandoffPr(PR_URL, out(JSON.stringify({ state: "OPEN", mergeCommit: null, mergedAt: null, baseRefName: "dev", headRefOid: "zz" }))))
+      .toEqual({ state: "OPEN", mergeSha: null, mergedAt: null, base: "dev", head: null });
     expect(await readHandoffPr(PR_URL, out("", 1))).toBeNull();
     expect(await readHandoffPr(PR_URL, out("not json"))).toBeNull();
     expect(await readHandoffPr(PR_URL, out(JSON.stringify({ state: "DRAFT" })))).toBeNull();
