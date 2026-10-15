@@ -14,6 +14,8 @@ import {
   type ObservedAction, type RecoveryDecision, type RecoveryKey, type RecoveryPolicy, type RecoveryPolicyPort,
 } from "../src/lib/recovery-policy.js";
 import { appendEvent, createItem } from "../src/lib/ledger-write.js";
+import { highRiskRecoveryKey } from "../src/lib/recovery-key-class.js";
+import { LEGACY_OBSERVE_KEYS } from "../src/lib/recovery-key-defaults.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const H = 3_600_000;
@@ -29,11 +31,12 @@ describe("recoveryPolicy(project, key): reading the file", () => {
     expect(new Set(RECOVERY_KEYS).size).toBe(RECOVERY_KEYS.length);
   });
 
-  test("missing file / missing project = observe, manualAfterMs null, for every key (old installs need nothing)", () => {
+  test("missing file / missing project = observe for old and high-risk keys, on for later others; manualAfterMs null (old installs need nothing)", () => {
     const none = join(tmpdir(), "nope-recovery", "x.json"), other = file({ projects: { a: { mode: "on" } } });
     for (const k of RECOVERY_KEYS) {
-      expect(recoveryPolicy("a", k, none)).toEqual(DEFAULT);
-      expect(recoveryPolicy("b", k, other)).toEqual(DEFAULT);
+      const want: RecoveryPolicy = LEGACY_OBSERVE_KEYS.includes(k) || highRiskRecoveryKey(k) ? DEFAULT : { ...DEFAULT, mode: "on" };
+      expect(recoveryPolicy("a", k, none)).toEqual(want);
+      expect(recoveryPolicy("b", k, other)).toEqual(want);
     }
     expect(recoveryPolicy("constructor", "audit", other)).toEqual(DEFAULT); // no prototype keys read as projects
   });
