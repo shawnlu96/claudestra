@@ -26,6 +26,7 @@ import { handleHost } from "./host.js";
 import { handleLastSeen } from "./last-seen.js";
 import { handleTalkApi } from "./talk.js";
 import { handleTeamApi } from "./team.js";
+import { handlePriorityPanelApi } from "./ledger-priority-panel.js";
 import { handleLedgerApi } from "./ledger.js";
 import { handleWorkBoardApi } from "./work-board.js";
 import { handleLedgerDagApi } from "./ledger-dag.js";
@@ -54,6 +55,7 @@ import { versionResponse } from "./version.js";
 
 type Family = (req: Request, path: string, principal: Principal, url: URL) => Promise<Response | null> | Response | null;
 const FAMILIES: Family[] = [
+  handlePriorityPanelApi,
   handleSharedExecApi,
   handleTeamBodyApi,
   (req, path, principal) => sharedLedgerGateProxy(req, path, principal, handleSharedLedgerApi),
