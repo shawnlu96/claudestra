@@ -69,7 +69,7 @@ describe("ghPrState: a followed draft is turned ready", () => {
   test("a refused ready never throws: the read goes on with the reason, still a draft", async () => {
     const g = gh(open(H1, true), { code: 1, stderr: "GraphQL: rate limited\nmore" });
     const r = await ghPrState(g.command, none, none, none)(PR, { project: "p", head: H1 });
-    expect(r).toMatchObject({ state: "OPEN", draft: true, readyError: "gh pr ready 失败：GraphQL: rate limited" });
+    expect(r).toMatchObject({ state: "OPEN", draft: true, flipError: "gh pr ready 失败：GraphQL: rate limited" });
   });
 
   test("before the handoff, off the followed head, not a draft, or not open: no ready", async () => {
@@ -83,7 +83,7 @@ describe("ghPrState: a followed draft is turned ready", () => {
       const g = gh(view);
       const r = await ghPrState(g.command, none, none, none)(PR, follow);
       expect(g.readies()).toEqual([]);
-      expect(r.readyError).toBeUndefined();
+      expect(r.flipError).toBeUndefined();
     }
     const g = gh(open(H1, true));
     expect((await ghPrState(g.command, none, none, none)(PR)).draft).toBe(true); // isDraft is read
@@ -133,7 +133,7 @@ describe("driveHandoff: ready in the handoff pass", () => {
     const f = autoFixture();
     try {
       await toMerge(f);
-      const h = hand(f, (follow) => ({ state: "OPEN", head: H1, mergeSha: null, draft: true, ...(follow ? { readyError: "gh pr ready 失败：x" } : {}) }));
+      const h = hand(f, (follow) => ({ state: "OPEN", head: H1, mergeSha: null, draft: true, ...(follow ? { flipError: "gh pr ready 失败：x" } : {}) }));
       const out = await h.tick();
       expect(out).toMatchObject({ step: "handoff" });
       expect(out.detail).toContain("草稿没转成 ready，下轮再试：gh pr ready 失败：x");
