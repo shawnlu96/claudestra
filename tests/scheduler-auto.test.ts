@@ -66,7 +66,7 @@ describe("T68f auto mode: the full code flow on mock workers", () => {
       const moves = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.kind === "stage").map((e) => `${e.actor}:${e.data.from}>${e.data.to}`);
       expect(moves).toEqual(["agent-task-one:spec>restate", "scheduler:restate>build", "agent-task-one:build>review", "scheduler:review>fix",
         "agent-task-one:fix>review", "scheduler:review>merge"]);
-      expect(f.notices).toEqual([expect.stringContaining(`T1 审查通过但留有 P2，已进合并队列，请看 diff：head ${H2}`)]);
+      expect(f.notices).toEqual([expect.stringContaining("[P2 积压] T1 第 2 轮")]);
       expect(f.pins).toEqual([H1, H2]);
     } finally { f.close(); }
   });

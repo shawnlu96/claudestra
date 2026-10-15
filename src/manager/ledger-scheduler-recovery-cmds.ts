@@ -9,6 +9,7 @@ import type { LedgerCli } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { DEPLOY_RECONCILE_CMD } from "./ledger-scheduler-deploy-reconcile-cmd.js";
+import { priorityOrderCmds } from "../lib/scheduler-priority-order-cmd.js";
 
 const FENCE_FLAGS = ["rev", "workflow-rev", "head", "round", "spec-rev"];
 
@@ -71,6 +72,7 @@ async function manualRecovery(c: LedgerCli, f: RecoveryFence, id: string, mode: 
 
 export const SCHEDULER_RECOVERY_CMDS: Record<string, CommandSpec> = {
   "scheduler-deploy-reconcile": DEPLOY_RECONCILE_CMD,
+  ...priorityOrderCmds, // PRIO2 排序样本写口
   "scheduler-pm-todo": {
     valued: ["kind", "text", "dedup"], bools: [], usage: "scheduler-pm-todo <卡> --kind K --text T --dedup K（调度身份只写 pm_todo）",
     run(c) {

@@ -4,6 +4,7 @@
  * - 团队看板（team-work-model.ts）里执行实例 = 本机实例（团队键 homeInstanceId）且本机看板有同卡号的行，换上本机看板的工作事实
  *   （执行者、步骤、轮次、已持续、等待原因、执行机器），坐标与标题留团队的（点了跳团队 DAG）；栏见 teamColumn；
  *   卡号带 `~2` 这类去重后缀的对不上就保留团队行，不猜；
+ * - 同样主场在本机、本机看板判老卡（legacy，没有调度流程记录）的团队行移出四栏，进团队板的「老卡」（和本机板同一处折叠，UXCARD3）；
  * - 其余团队行的机器写成员机器名（team-instance-names.ts），成员代号像原始 id 的不显示。
  */
 import { hexFree, instanceName, LOCAL_MACHINE, OTHER_MACHINE, type InstanceNames } from '../team-instance-names';
@@ -54,21 +55,28 @@ function teamColumn(teamCol: Column, hit: { col: Column; row: WorkRow }): Column
 
 export function mergeTeamWork(team: TeamWorkBoard, local: WorkBoard | null, localInstance: string | null, names: InstanceNames): TeamWorkBoard {
   const at = new Map<string, { col: Column; row: WorkRow }>();
+  const legacy = new Map<string, string>();
   if (local && localInstance) {
     const cols = localColumns(local);
     for (const col of COLUMNS) for (const row of cols[col]) if (row.taskId) at.set(row.taskId, { col, row });
+    for (const row of local.legacy ?? []) legacy.set(row.taskId, row.stage);
   }
   const named = (r: TeamWorkRow): TeamWorkRow => ({ ...r, who: hexFree(r.who), machine: instanceName(r.instance, names, localInstance) });
+  const olds = [...team.legacy ?? []];
   const out: TeamWorkBoard = { ...team, working: [], merging: [], waiting: [], machines: {},
     todo: { ready: team.todo.ready.map(named), blocked: team.todo.blocked.map(named) } };
   for (const col of COLUMNS) for (const r of team[col]) {
-    const hit = !isLocalRow(r) && r.taskId !== null && r.instance === localInstance ? at.get(r.taskId) : undefined;
+    const home = !isLocalRow(r) && r.taskId !== null && r.instance === localInstance;
+    const old = home ? legacy.get(r.taskId!) : undefined;
+    if (old !== undefined) { olds.push({ taskId: r.taskId!, title: r.title, stage: old }); continue; }
+    const hit = home ? at.get(r.taskId!) : undefined;
     if (hit && !isLocalRow(r)) {
       out[teamColumn(col, hit)].push({ ...hit.row, featureId: r.featureId, nodeKey: r.nodeKey, title: r.title, reason: hit.row.reason ?? r.reason,
         who: hexFree(hit.row.who), machine: localMachine(hit.row.machine) });
     }
     else out[col].push(isLocalRow(r) ? r : named(r));
   }
+  if (olds.length) out.legacy = olds;
   for (const r of out.working) if (r.machine) out.machines[r.machine] = (out.machines[r.machine] ?? 0) + 1;
   return out;
 }

@@ -25,7 +25,14 @@ card's existing globs. Its target must be an existing regular `src/` file within
 the configured repository. A different card's overlapping `scope='card'` lock
 blocks wiring until that card is `live`, `verified`, `done`, or `cancelled`;
 `resourcesOverlap` compares the paths. A merge-queued card still blocks. Intent
-locks and the same card's locks do not block. Locks and the card's specification
+locks and the same card's locks do not block. `SCOPE_PERMISSION_FILES` lists
+permission targets that cannot receive automatic wiring grants, including the
+peer gates, identity/router, bridge authentication/gateway, and local control
+files. Any filename containing `-gate`, `-auth`, or `auth-`, and any
+`src/lib/ledger-checks*.ts` path is also excluded. Both the ask and the exact-diff
+judge enforce this rule. Explicit rows in `ASK_SCOPE_REGISTRY` retain their
+registered operations even when their filename matches the wiring exclusion.
+Locks and the card's specification
 are checked again under the write transaction before answering.
 
 ## Answer and observation
@@ -33,7 +40,11 @@ are checked again under the write transaction before answering.
 An answer leaves `fileGlobs` unchanged. The ask is answered with
 `extra.askScopeAuto=true`, its notice is skipped, and the card receives an
 `ask_scope_auto` event containing rule `ask-scope-auto/v1`, specification revision,
-ask ID, and per-file grants. The PM handler excludes these asks.
+ask ID, and per-file grants. Delivery accepts that event only when its actor is
+`system:ask-scope-auto`, its target and the answered ask's `taskId` equal this
+card, and its grants equal `ask.extra.scopeGrants` item by item (including their
+order and every field). These bindings are checked again after Git reads.
+The PM handler excludes these asks.
 
 The answer includes the registry/check names and is appended to `## 自动定` using
 the existing durable ask-default append protocol. A failed append stays pending
@@ -65,15 +76,24 @@ unrecognized syntax remains outside scope. Off and observe never grant delivery
 exceptions, including for questions answered while the key was on.
 
 The `deliver_scope` event contains `askScopeAuto.files`: paths, addition/deletion
-counts, ask IDs, check names, and a granted/reason verdict. Verified files leave
-`files` (the outside list); all failed files remain there for review/PM handling.
+counts, ask IDs, check names, and a granted/reason verdict. The original `files`
+and their body lines remain intact. A historical note is appended as
+`已自动核准:<path>(登记项 / 小接线)` with the applicable label for each file.
+At review time, the current mode decides the presentation: `on` puts verified
+paths and line counts in an `已自动核准` section; `off` and `observe` list them
+as ordinary outside files, including when the same head reuses an earlier event.
+SKIPAUTO1's current-mode rendering continues independently. Old events that
+removed paths can recover their line counts from the recorded proof.
 No new file locks or broader globs are acquired.
 
 Checks use these deliberately narrow source forms:
 
-- Recovery entries: literal key lines, own exported key definitions, sorted and
-  unique by `recoveryKeysOrderProblem`; the rest of the file is byte-identical.
-  An exported constant such as `export const KEY = "myKey";` defines a key.
+- Recovery entries: literal key lines, sorted and unique by
+  `recoveryKeysOrderProblem`; the rest of the file is byte-identical. Only an
+  exported string literal such as `export const KEY = "myKey";` in a scoped source
+  defines a key. Exported function or variable names do not establish ownership.
+  Additions use head definitions; deletions require base definitions, so adding
+  a definition now cannot authorize deleting someone else's existing key.
 - Effect entries: only scoped implementation filenames, with existing gate and
   comments retained. Own lines can move into alphabetical order. The complete
   inventory must equal `headScan`/`parseInventory`, shared with `skip-effects`.
@@ -99,3 +119,7 @@ read-only ledger connections, observe deduplication, and delivery failures.
 Run those alongside the existing ASKDEF1, ASK4, specification-exception,
 SKIPAUTO1, recovery sample-sink, and PM-job suites, then `bun run check` and
 `GUARD_STRICT=1 bun run guard` before committing.
+
+Before promoting `askScopeAuto` from observe, the PM deploys ASKSCOPE2. It adds
+no observation delay. If the ASKSCOPE1 observation is due before deployment,
+the PM extends its observation registration and promotes only after deployment.

@@ -23,6 +23,8 @@ import { countText } from "../count-words-i18n";
 import { MACHINE_WORDS } from "@/lib/owner-words";
 import { instanceName } from "../team-instance-names";
 import { sharedIdentity } from "../team-source-key";
+import { refreshBindings } from "@/lib/collab-source-binding";
+import { waitsText } from "../owner-waits";
 import { useInstanceNames } from "../work/use-work-board";
 import { useTeamTab } from "../collab-page-head";
 import { attentionAria } from "./attention-page";
@@ -200,10 +202,22 @@ export function FoldPage({ fold, ov, onPick, onClose, tr }: { fold: CFold; ov: L
   );
 }
 
-export function WaitsPage({ waits, ov, onPick, onClose, tr }: { waits: readonly OwnerWait[]; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr }) {
+/** 「待你处理」读不到时的重试（UXCARD3）：重读待办列表和这台机器的团队绑定，不整页刷新 */
+function retryWaits(project: string) {
+  void asksStore.refresh();
+  const machine = sharedIdentity(project)?.machine;
+  if (machine) void refreshBindings(machine);
+}
+
+export function WaitsPage({ waits, unknown, project, ov, onPick, onClose, tr }: {
+  waits: readonly OwnerWait[]; unknown?: boolean; project: string; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr;
+}) {
   return (
     <Shell title={tr("待你处理")} sub={tr("这个项目上开着、等你的")} onClose={onClose} tr={tr}>
-      {waits.length ? waits.map((w) => (
+      {unknown ? (
+        <div className={v.muted} data-waits="unknown">{waitsText(tr, "读不到")}{" "}
+          <button type="button" className={s.btn} onClick={() => retryWaits(project)}>{waitsText(tr, "重试")}</button></div>
+      ) : waits.length ? waits.map((w) => (
         <div key={w.id} className={v.row}>{w.taskId && <TaskLink id={w.taskId} ov={ov} onPick={onPick} />}<div>{w.title}</div><WaitGo w={w} /></div>
       )) : <div className={v.muted}>{tr("没有")}</div>}
     </Shell>

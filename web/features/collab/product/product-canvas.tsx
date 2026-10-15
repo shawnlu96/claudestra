@@ -17,6 +17,8 @@ import { ProductSide, type ProductPick } from './product-side';
 import { ProductToolbar, useMapPrefs } from './product-toolbar';
 import { pdText } from './product-i18n';
 import m from './product-map.module.css';
+import { PRODUCT_MIN_K, productInitialView, singlesOffRight, zoomTier } from './product-zoom';
+import z from './product-zoom.module.css';
 
 export interface CanvasProps {
   board: ProductBoard; now: number; onFeature: (id: string) => void; onTask?: (id: string) => void; tr: Tr; project?: string;
@@ -55,8 +57,6 @@ export function ProductCanvas(p: CanvasProps) {
   const [pick, setPick] = useState<ProductPick | null>(null);
   const canvas = useMemo(() => productLayout(p.board, { mode: prefs.mode, doneOpen: prefs.doneOpen, pausedOpen, laneDone }),
     [p.board, prefs.mode, prefs.doneOpen, pausedOpen, laneDone]);
-  const { box, port } = usePort();
-  const vp = useViewport(canvas, port, null, () => {});
   const toggleLane = (key: string) => setLaneDone(ks => (ks.includes(key) ? ks.filter(k => k !== key) : [...ks, key]));
   const card = (n: ProductNode) => <ProductCard key={n.id} node={n} now={p.now} tr={p.tr} featureMeta={p.featureMeta} activeUnknown={p.activeUnknown}
     onFeature={p.onFeature} onTask={p.onTask} />;
@@ -65,17 +65,29 @@ export function ProductCanvas(p: CanvasProps) {
     <ProductToolbar mode={canvas.mode} lanesOk={canvas.lanesOk} onMode={prefs.setMode} done={canvas.done.length} doneOpen={prefs.doneOpen}
       onDone={() => prefs.setDoneOpen(!prefs.doneOpen)} paused={canvas.paused.length} pausedOpen={pausedOpen} onPaused={() => setPausedOpen(o => !o)}
       summary={canvas.summary} tr={p.tr} />
-    <div ref={box} className={v.canvas} {...vp.handlers}>
-      <div className={`${v.world} ${vp.glide ? v.glide : ''}`} data-pd-mode={canvas.mode}
-        style={{ transform: `translate(${vp.view.x}px, ${vp.view.y}px) scale(${vp.view.k})` }}>
-        {canvas.zones.map(z => <Zone key={z.id} z={z} tr={p.tr} onLane={toggleLane} />)}
-        <ProductEdges canvas={canvas} onPick={setPick} pick={pick} tr={p.tr} />
-        {canvas.nodes.map(n => (n.chip ? chip(n, 'done') : card(n)))}
-        {canvas.chips.map(c => chip(c, c.tag))}
-      </div>
-      <ProductEdgeLegend canvas={canvas} tr={p.tr} />
-      <ViewportTools vp={vp} tr={p.tr} />
-    </div>
+    {/* 模式换了就重建视口：新布局有独立的初始摆放；数据刷新仍保留用户平移缩放。 */}
+    <ProductViewport key={canvas.mode} canvas={canvas} tr={p.tr} onLane={toggleLane} onPick={setPick} pick={pick}>
+      {canvas.nodes.map(n => (n.chip ? chip(n, 'done') : card(n)))}
+      {canvas.chips.map(c => chip(c, c.tag))}
+    </ProductViewport>
     <ProductSide pick={pick} board={p.board} onClose={() => setPick(null)} onFeature={p.onFeature} onTask={p.onTask} now={p.now} tr={p.tr} />
+  </div>;
+}
+
+function ProductViewport({ canvas, tr, onLane, onPick, pick, children }: {
+  canvas: ReturnType<typeof productLayout>; tr: Tr; onLane: (key: string) => void; onPick: (p: ProductPick) => void; pick: ProductPick | null; children: React.ReactNode;
+}) {
+  const { box, port } = usePort();
+  const vp = useViewport(canvas, port, null, () => {}, { minK: PRODUCT_MIN_K, initial: productInitialView(canvas, canvas.mode) });
+  const n = singlesOffRight(canvas, vp.view, port.w);
+  return <div ref={box} className={`${v.canvas} ${z.viewport}`} {...vp.handlers}>
+    <div className={`${v.world} ${z.world} ${vp.glide ? v.glide : ''}`} data-pd-mode={canvas.mode} data-zoom={zoomTier(vp.view.k)}
+      style={{ transform: `translate(${vp.view.x}px, ${vp.view.y}px) scale(${vp.view.k})`, '--pd-k': vp.view.k } as React.CSSProperties}>
+      {canvas.zones.map(zone => <Zone key={zone.id} z={zone} tr={tr} onLane={onLane} />)}
+      <ProductEdges canvas={canvas} onPick={onPick} pick={pick} tr={tr} />
+      {children}
+    </div>
+    <ProductEdgeLegend canvas={canvas} tr={tr} />
+    <ViewportTools vp={vp} tr={tr} right={canvas.mode === 'dep' && n > 0 ? { n, text: '还有 {n} 个独立推进' } : undefined} />
   </div>;
 }

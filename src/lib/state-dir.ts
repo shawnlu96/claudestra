@@ -9,8 +9,9 @@
  *   2. 测试会在运行中途改 `CLAUDESTRA_STATE_DIR` ⇒ 缓存过目录常量的模块会把快照写到旧目录
  *      （同轮 P2：组合运行 ENOENT）。
  * lib/paths.ts 的 STATE_DIR 复用这里，保持"定义处唯一"（tests/paths-guard.test.ts 白名单）。
- * 新名 FLOKA_STATE_DIR 按 rename.env 档位认（lib/floka-env/，同样只依赖 node: 内置）。
+ * 新名环境变量和默认根证明读取（floka-env / floka-config/default-root）也只依赖 node: 内置。
  */
+import { defaultStateRoot } from "./floka-config/default-root.ts";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readRenamedEnv } from "./floka-env/read.ts";
@@ -20,8 +21,8 @@ export function stateDirIn(home: string): string {
   return join(home, ".claude-orchestrator");
 }
 
-/** 当前进程该用的状态目录：override（`CLAUDESTRA_STATE_DIR`，on 档 `FLOKA_STATE_DIR` 优先）否则 `~/.claude-orchestrator`。每次调用现算。 */
+/** override 按 rename.env 解析；默认根仅在 rename.state=on 且有已提交事务证明时转向新根。每次现算，不迁移。 */
 export function stateDir(env: Record<string, string | undefined> = process.env): string {
   const v = (readRenamedEnv("STATE_DIR", env) || "").trim();
-  return v || stateDirIn(homedir());
+  return v || defaultStateRoot(homedir(), stateDirIn(homedir()));
 }

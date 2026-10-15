@@ -18,7 +18,7 @@ import { makeInboundHandler, verifyPeerSignature } from "../src/bridge/relay-inb
 import { ReplayCache, relayPeerRefusal, peerSigVerdict } from "../src/lib/peer-trust.js";
 import type { HttpPeer } from "../src/lib/peers.js";
 import { readPeers, writePeers } from "../src/lib/peers.js";
-import { readConfig, writeConfig } from "../src/lib/config-store.js";
+import { readConfig, writeConfig, type AppConfig } from "../src/lib/config-store.js";
 import { readPrincipals, writePrincipals, newTokenPrincipal } from "../src/lib/principals.js";
 import { handlePeerRedeem, resetRedeemLimitsForTest } from "../src/bridge/peer-redeem.js";
 import { setRequestContext } from "../src/bridge/request-context.js";
@@ -40,6 +40,13 @@ import { createE2eRoute } from "../src/bridge/peer-e2e-route.js";
 const ON = { rename: { signature: "on", peerRequestSend: "on", peerRelayInbound: "on", e2e: { receive: "on", send: "on" } } };
 const OFF = { rename: {} };
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+async function writeRename(rename: AppConfig["rename"]) {
+  // Each mode change and cleanup must use a fresh view; config writes reject stale snapshots.
+  const config = await readConfig();
+  config.rename = rename;
+  await writeConfig(config);
+}
 
 async function machine() {
   const { privateKey } = generateKeyPairSync("ed25519");
@@ -264,7 +271,7 @@ test("[验收线 2] production redemption rejects wrong labels, conflicting sign
     expect((await readRedeemResponse(sealed.session, response.status, await response.json())).ok).toBe(success);
   }
   try {
-    await writeConfig({ ...config, ...ON });
+    await writeRename(ON.rename);
     await writePeers({ httpPeers: [], pendingInvites: [invitation] });
     resetRedeemLimitsForTest();
     await send("claudestra"); // authentic new signature over ciphertext encrypted with the wrong label
@@ -291,7 +298,7 @@ test("[验收线 2] production redemption rejects wrong labels, conflicting sign
     await send("floka");
     expect(executions).toBe(2);
   } finally {
-    await writeConfig(config); await writePeers(peers); await writePrincipals(principals);
+    await writeRename(config.rename); await writePeers(peers); await writePrincipals(principals);
     resetRedeemLimitsForTest();
   }
 });
@@ -307,7 +314,7 @@ test("[验收线 2] conflicting source marks cannot acquire the loopback cookie 
   const config = await readConfig(), a = await machine();
   let called = 0;
   try {
-    await writeConfig({ ...config, ...ON });
+    await writeRename(ON.rename);
     for (const headers of [
       { "x-floka-relay-mark": "forged", "x-floka-relay-from": a.fp },
       { "x-floka-relay-mark": relayMark(), "x-floka-relay-from": a.fp, "x-claudestra-relay-from": a.fp },
@@ -325,7 +332,7 @@ test("[验收线 2] conflicting source marks cannot acquire the loopback cookie 
       expect(inner.headers.has("x-floka-relay-mark")).toBe(false);
       return Response.json({ ok: true });
     }, "127.0.0.1");
-  } finally { await writeConfig(config); }
+  } finally { await writeRename(config.rename); }
 });
 
 test("[验收线 3] off and observe never retain capabilities or mutate identity/peer records", async () => {
@@ -345,7 +352,7 @@ test("[验收线 2] production E2E route applies both live config gates before c
   const config = await readConfig(), net = await network(), [a, b] = net.nodes;
   try {
     for (const receive of ["off", "observe", "on"]) for (const signature of ["off", "observe", "on"]) {
-      await writeConfig({ ...config, rename: { ...ON.rename, signature, e2e: { receive, send: "off" } } });
+      await writeRename({ ...ON.rename, signature, e2e: { receive, send: "off" } });
       const route = createE2eRoute({ local: async () => b.local, peers: async () => [a.rec],
         pin: async () => { throw new Error("unexpected pin update"); } });
       const ephemeral = await generateEcdh(), path = E2E_HELLO_PATH;
@@ -356,7 +363,7 @@ test("[验收线 2] production E2E route applies both live config gates before c
       const response = await route.route(req, new URL(req.url), async () => { throw new Error("hello cannot dispatch"); });
       expect(response?.status).toBe(receive === "on" && signature === "on" ? 200 : 401);
     }
-  } finally { await writeConfig(config); }
+  } finally { await writeRename(config.rename); }
 });
 
 test("[验收线 1] real rawCliFetch and relayControlRoutes keep exactly one signature family", async () => {
@@ -381,7 +388,7 @@ test("[验收线 1] real rawCliFetch and relayControlRoutes keep exactly one sig
       return answer();
     }) as unknown as typeof fetch;
     for (const mode of ["off", "observe", "on"] as const) {
-      await writeConfig({ ...config, rename: { ...ON.rename, peerRequestSend: mode } });
+      await writeRename({ ...ON.rename, peerRequestSend: mode });
       for (const url of [`${remote.rec.baseUrl}${path}`, `relay://${remote.fp}${path}`]) {
         expect((await rawCliFetch(url, { method: "GET" })).status).toBe(200);
         const headers = captured.at(-1)!;
@@ -407,7 +414,7 @@ test("[验收线 1] real rawCliFetch and relayControlRoutes keep exactly one sig
   } finally {
     globalThis.fetch = originalFetch; setRelayClientForTest(null);
     peerCapabilities.forget(pinOf(remote.rec)!);
-    await writeConfig(config); await writePeers(peers);
+    await writeRename(config.rename); await writePeers(peers);
   }
 });
 
@@ -444,7 +451,7 @@ for (const mode of ["off", "observe", "on"] as const) {
     const now = Date.parse("2026-10-15T12:00:00Z"), req = { method: "GET", path: "/api/v1/agents", body: "" };
     const headers = signRequestFamily("claudestra", req, a.key, now - 600_000);
     try {
-      await writeConfig({ ...config, rename: { ...ON.rename, signature: mode } });
+      await writeRename({ ...ON.rename, signature: mode });
       for (const result of ["bad", "stale"]) {
         expect(peerSignatureVerdict(result, peerHeaders(headers), false, now).allow).toBe(mode !== "on");
         expect(peerSignatureVerdict(result, peerHeaders(headers), true, now).allow).toBe(false);
@@ -477,7 +484,7 @@ for (const mode of ["off", "observe", "on"] as const) {
       expect(calls).toBe(mode === "on" ? 0 : 1);
       expect(log.mock.calls.some(c => String(c[0]).includes("would reject"))).toBe(mode === "observe");
     } finally {
-      log.mockRestore(); await writeConfig(config); await writePeers(peers); resetRedeemLimitsForTest();
+      log.mockRestore(); await writeRename(config.rename); await writePeers(peers); resetRedeemLimitsForTest();
     }
   });
 }
@@ -519,11 +526,11 @@ test("[验收线 3] off/observe preparePeerSend returns the original init withou
   const init = { method: "POST", body: "unchanged", headers: { authorization: "synthetic" } };
   try {
     for (const mode of ["off", "observe"]) {
-      await writeConfig({ ...config, rename: { ...ON.rename, peerRequestSend: mode } });
+      await writeRename({ ...ON.rename, peerRequestSend: mode });
       expect(await preparePeerSend("https://unused.invalid", init)).toBe(init);
     }
     expect(read).not.toHaveBeenCalled();
-  } finally { read.mockRestore(); await writeConfig(config); }
+  } finally { read.mockRestore(); await writeRename(config.rename); }
 });
 
 test("[验收线 3] malformed or oversized refusal bodies leave capabilities and caller response intact", async () => {

@@ -38,6 +38,18 @@ const EN: Record<string, string> = {
   "叫停失败": "Stop failed",
   "只打断执行者当前这一轮，卡不退回、调度照常；5 秒内再点一次才发出": "Only interrupts the worker's current turn; the card is not sent back and scheduling continues. Click again within 5 seconds to send",
   "文件范围 · {n} 个": "File scope · {n}",
+  "{m} 上的 {f}": "{f} on {m}",
+  "{m} 上的执行者": "Worker on {m}",
+  "{who} 在复述": "{who} is restating",
+  "{who} 在交付": "{who} is publishing",
+  "已合并，在部署": "Merged, deploying",
+  "正在合并": "Merging now",
+  "老卡（没有调度记录）· 停在{s}，调度器不派活": "Legacy card (no scheduler record) · stuck at {s}; the scheduler won't dispatch it",
+  "下一步：PM 接手": "Next: PM takes over",
+  "下一步：PM 收尾或补调度记录": "Next: PM closes it out or adds a scheduler record",
+  "数据可能过期（本机详情最后读到 {t}）": "Data may be stale (local detail last read at {t})",
+  "执行者在伙伴机器上，从这里发不到": "The worker is on a partner machine; messages can't be sent from here",
+  "本机详情暂时读不到，恢复后可用": "Local detail is unavailable right now; available once it recovers",
   "这张卡在 {m} 上执行，对它说要那台机器授权，暂不支持": "This card runs on {m}; talking to it needs that machine's authorization, not supported yet",
 };
 

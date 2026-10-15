@@ -85,7 +85,9 @@ describe("协议核心 import 图：runtime 与 type 分报", () => {
   test("纯入口的完整闭包只有协议核心自己（type 图）", () => {
     const all = new Set(PURE_ENTRIES.flatMap((e) => closure(e, "type").files));
     expect([...all].sort()).toEqual([
-      "src/lib/canonical-json.ts", "src/lib/instance-signature.ts", "src/lib/shared-ledger-auth.ts",
+      "src/lib/canonical-json.ts", "src/lib/floka-compat/signature/capability.ts", "src/lib/floka-compat/signature/families.ts",
+      "src/lib/floka-compat/signature/purpose.ts", "src/lib/floka-ledger/gear.ts", "src/lib/floka-ledger/request.ts", "src/lib/floka-ledger/uses.ts",
+      "src/lib/instance-signature.ts", "src/lib/shared-ledger-auth.ts",
       "src/lib/shared-ledger-contract-schema.ts", "src/lib/shared-ledger-contract-source-dag.ts", "src/lib/shared-ledger-contract-transfer.ts",
       "src/lib/shared-ledger-contract-v2-integrity.ts", "src/lib/shared-ledger-contract-v2-validation.ts",
       "src/lib/shared-ledger-contract-validation.ts", "src/lib/shared-ledger-contract.ts", "src/lib/shared-ledger-join-protocol.ts",

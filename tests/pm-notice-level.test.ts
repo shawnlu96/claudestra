@@ -41,12 +41,12 @@ test("asInfo carries the level across awaits to the notice sender", async () => 
   expect(pmNoticeLevel.getStore()).toBeUndefined();
 });
 
-test("an info push with route on is only recorded: not delivered, not queued for a digest; an action push is delivered", () => {
+test("an info push with route on is only recorded: not delivered, not queued for a digest; an action push is delivered", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pm-level-"));
   dirs.push(dir);
   const store = new PmDigestStore(join(dir, "pm-digest.json"), join(dir, "pm-digest-mode.json"));
-  store.setMode("p", "on");
-  store.setRouteMode("p", "on");
+  await store.setMode("p", "on");
+  await store.setRouteMode("p", "on");
   const env = (pmLevel: "action" | "info", id: string) => ({ from: { kind: "local" as const }, intent: "request", content: "[engine] please look",
     meta: { messageId: id, triggerKind: "agent_tool", skipInterAgentWatchdog: true, pmLevel } });
   const deps = { store, now: () => 1 };

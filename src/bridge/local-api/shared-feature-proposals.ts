@@ -17,6 +17,7 @@ import { readSharedLedgerProjects } from "../../lib/shared-ledger-project-link.j
 import { sharedLedgerBindingLocalId } from "../../lib/shared-ledger-project-link-target.js";
 import { instanceIdSync } from "../../lib/instance-id.js";
 import { FEATURE_PROPOSAL_SCHEMA_VERSION, parseFeatureProposal } from "../../lib/shared-ledger-contract-v2-feature-proposals.js";
+import { centerReplicaLimitReason } from "../../lib/shared-ledger-center-replica.js";
 import { FeatureProposalRejected, FeatureProposalUnsupported } from "../../lib/shared-ledger-feature-proposals.js";
 import {
   forwardDecision, listCenterProposals, PROPOSAL_DEFAULT_TTL_MS, readPendingProposals, resumeProposals, stageProposal, syncProposal,
@@ -63,11 +64,12 @@ export function boundTeamProject(localProjectId: string, dir: string): SharedLed
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 interface DraftInput { title: string; description?: unknown; ownerWords?: unknown; homeInstanceId?: unknown; nodes: NodeInput[] }
-function draftOf(r: ProposalRuntime, b: SharedLedgerBinding, input: DraftInput): ProposalDraft | null {
+/** 草稿或拒因（固定文本）：本机副本限制先于中心契约，过不了就是批下来也落不了本机副本，提交前就拒 */
+function draftOf(r: ProposalRuntime, b: SharedLedgerBinding, input: DraftInput): ProposalDraft | string {
   const home = input.homeInstanceId === undefined ? (r.instanceId ?? (() => instanceIdSync(r.stateDir)))() : input.homeInstanceId;
-  if (typeof home !== "string" || !ID.test(home)) return null;
-  if (input.description !== undefined && typeof input.description !== "string") return null;
-  if (input.ownerWords !== undefined && input.ownerWords !== null && typeof input.ownerWords !== "string") return null;
+  if (typeof home !== "string" || !ID.test(home)) return PROPOSAL_TEXT.invalid;
+  if (input.description !== undefined && typeof input.description !== "string") return PROPOSAL_TEXT.invalid;
+  if (input.ownerWords !== undefined && input.ownerWords !== null && typeof input.ownerWords !== "string") return PROPOSAL_TEXT.invalid;
   const draft: ProposalDraft = {
     schemaVersion: FEATURE_PROPOSAL_SCHEMA_VERSION, centerId: b.centerId, teamId: b.teamId, projectId: b.projectId, kind: "new",
     title: input.title, description: (input.description as string | undefined) ?? "",
@@ -75,9 +77,11 @@ function draftOf(r: ProposalRuntime, b: SharedLedgerBinding, input: DraftInput):
     nodes: input.nodes.map(n => ({ key: n.key, oneLine: n.oneLine, deps: [...n.deps], fileGlobs: [...(n.fileGlobs ?? [])], estimate: n.estimate ?? "" })),
     homeInstanceId: home,
   };
+  const limit = centerReplicaLimitReason({ feature: draft, dag: draft });
+  if (limit) return limit;
   const now = r.now();
   try { parseFeatureProposal({ ...draft, operationId: "op-check", expiresAt: now + Math.min(r.ttlMs, 7 * 24 * 3_600_000) }, now); }
-  catch { return null; }
+  catch { return PROPOSAL_TEXT.invalid; }
   return draft;
 }
 
@@ -111,7 +115,7 @@ export async function proposeBoundFeature(_call: VerifiedCall, localProjectId: s
   catch { return refuse("shared_ledger", PROPOSAL_TEXT.bindings); }
   if (!binding) return null;
   const draft = draftOf(r, binding, { title, description: args.description, ownerWords: args.ownerWords, homeInstanceId: args.homeInstanceId, nodes });
-  if (!draft) return refuse("invalid", PROPOSAL_TEXT.invalid);
+  if (typeof draft === "string") return refuse("invalid", draft);
   try { return (await submit(r, binding, draft, "service")).body; }
   catch { return refuse("pending_sync", PROPOSAL_TEXT.pending_sync); } // 本机记录写失败等：固定文本，不当成功
 }
@@ -132,7 +136,7 @@ export function stopFeatureProposalResume(): void {
 }
 
 const ROOT = "/api/v1/shared-feature-proposals";
-class ApiError extends Error { constructor(readonly status: number, readonly code: string) { super(code); } }
+class ApiError extends Error { constructor(readonly status: number, readonly code: string, readonly text?: string) { super(code); } }
 function body(v: unknown, allowed: string[]): Record<string, unknown> {
   if (!v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).some(k => !allowed.includes(k))) throw new ApiError(400, "invalid_body");
   return v as Record<string, unknown>;
@@ -175,7 +179,7 @@ async function route(req: Request, path: string, r: ProposalRuntime): Promise<Re
     const nodes = parseToolNodes(b.nodes);
     if (typeof b.title !== "string" || !b.title.trim() || !nodes.ok) throw new ApiError(400, "invalid_body");
     const draft = draftOf(r, binding, { title: b.title, description: b.description, ownerWords: b.ownerWords, homeInstanceId: b.homeInstanceId, nodes: nodes.value });
-    if (!draft) throw new ApiError(400, "invalid_proposal");
+    if (typeof draft === "string") throw new ApiError(400, "invalid_proposal", draft);
     const record = await stageProposal(r, draft, sharedLedgerBindingLocalId(binding), "person");
     const synced = await syncProposal(r, record.operationId);
     return respond(proposalOutcome(synced), synced);
@@ -221,7 +225,7 @@ export async function handleSharedFeatureProposalsApi(req: Request, url: URL, d:
     return await route(req, url.pathname, rt());
   } catch (e) {
     // 中心 / 传输 / 解析异常里可能带凭据或原文：只回固定 code
-    if (e instanceof ApiError) return apiJson(e.status, { ok: false, code: e.code });
+    if (e instanceof ApiError) return apiJson(e.status, { ok: false, code: e.code, ...(e.text ? { error: e.text } : {}) });
     if (e instanceof RequestBodyError) return apiJson(e.status, { ok: false, code: e.code });
     if (e instanceof SyntaxError) return apiJson(400, { ok: false, code: "invalid_json" });
     if (e instanceof FeatureProposalUnsupported) return apiJson(502, { ok: false, code: "unsupported", error: PROPOSAL_TEXT.unsupported });

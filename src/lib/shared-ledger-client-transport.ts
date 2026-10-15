@@ -6,6 +6,7 @@ import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
 import { canonicalJson } from "./ask-bind.js";
 import { signSharedLedgerRequest, SHARED_LEDGER_AUTH_HEADERS } from "./shared-ledger-auth.js";
+import { ledgerPurposeHeaders, ledgerSendFamilyFor } from "./floka-ledger/config.js";
 import type { InstanceKey } from "./instance-key.js";
 import type { SharedLedgerConnection } from "./shared-ledger-client.js";
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
@@ -147,13 +148,13 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     const attemptNonce = randomBytes(24).toString("hex");
     const body = encodeBody ? encodeBody(attemptNonce) : payload === undefined ? "" : canonicalJson({ attemptNonce, payload });
     const signed = signSharedLedgerRequest({ method, path, body, bearer, instanceId,
-      ts: String(Math.floor(now() / 1000)), attemptNonce }, signingKey);
+      ts: String(Math.floor(now() / 1000)), attemptNonce }, signingKey, ledgerSendFamilyFor("shared-ledger", base.origin)); // LEDGER1: off / no capability = old family
     const h = SHARED_LEDGER_AUTH_HEADERS;
     let response: Response;
     try {
       response = await fetcher(url, { method, redirect: "error", signal: controller.signal,
         headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", [h.key]: signed.publicKey,
-          [h.ts]: signed.ts, [h.sig]: signed.signature, [h.instance]: instanceId, [h.nonce]: attemptNonce },
+          [h.ts]: signed.ts, [h.sig]: signed.signature, [h.instance]: instanceId, [h.nonce]: attemptNonce, ...ledgerPurposeHeaders(signed) },
         ...(method === "GET" ? {} : { body }) });
     } catch { throw new SharedLedgerUnavailable(); } // Fetch implementations may throw errors carrying response bodies or credentials.
     if (response.status === 429) {

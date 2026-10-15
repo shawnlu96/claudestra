@@ -15,3 +15,14 @@ export interface ScopeGrant { path: string; kind: ScopeKind; check: string; sour
 /** These files define the authority boundary, rather than wiring a new implementation into a caller. */
 export const scopeProtected = (path: string): boolean => /(?:^|\/)(?:recovery-key-(?:class|defaults)|ask-scope-[^/]*|order-ask[^/]*|order-deliver-scope[^/]*)\.ts$/.test(path)
   || path.startsWith("scripts/guard/");
+
+/** Permission decisions require a human scope answer even when the proposed edit is only wiring. */
+const SCOPE_PERMISSION_FILES = [
+  "src/lib/peer-scope-gate.ts", "src/lib/peer-secret-gate.ts", "src/lib/order-tool-route.ts", "src/lib/caller-identity.ts",
+  "src/bridge/api-auth.ts", "src/bridge/terminal-auth.ts", "src/bridge/interrupt-gate.ts", "src/bridge/web-gateway.ts",
+  "src/bridge/local-api/control.ts", "src/bridge/local-api/shared-projects-auth.ts",
+] as const;
+
+export const scopeWireProtected = (path: string): boolean => scopeProtected(path)
+  || (SCOPE_PERMISSION_FILES as readonly string[]).includes(path)
+  || /(?:-gate|-auth|auth-)/.test(path.slice(path.lastIndexOf("/") + 1)) || /^src\/lib\/ledger-checks[^/]*\.ts$/.test(path);

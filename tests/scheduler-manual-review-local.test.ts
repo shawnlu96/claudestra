@@ -9,6 +9,7 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { recordTaken } from "../src/lib/order-mark.js";
 import { submitVerdict } from "../src/lib/review-verdict.js";
+import { HANDBACK_REVIEW_TAG } from "../src/lib/pm-handback.js";
 import { adoptedReviewSource } from "../src/lib/scheduler-manual-review-source.js";
 import { beginMergeRun, mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
@@ -53,7 +54,7 @@ describe("AUTOACK2 local manual review adoption", () => {
       orderId: "T1:review:r2", reviewer: RV, sessionId: RV_SESSION, family: "codex", head: H2, round: 2, specRev: 1 } });
     expect(resumeEvent(f).data.reviewSource).toMatchObject({ adopted: adopt.seq, reviewSeq: verdict.seq, kind: "manual_local" });
     // old path (adoption ignored) vs. the adopted planner
-    expect(plan(f, true)).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+    expect(plan(f, true)).toMatchObject({ kind: "intent", action: "review", reason: expect.stringContaining(HANDBACK_REVIEW_TAG) }); // PMHAND1 11a: a pre-hand-back verdict is re-reviewed
     expect(plan(f)).toMatchObject({ kind: "intent", action: "stage", targetStage: "merge" });
     expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
     expect(plan(f)).toMatchObject({ kind: "intent", action: "merge" });

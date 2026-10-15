@@ -12,6 +12,7 @@ import { readPeers } from "./peers.js";
 import type { ResultRequest } from "./lend-wire.js";
 import type { RawRef } from "./pool-review-proof-raw.js";
 import { logicalSha, ticketProblem } from "./pool-review-proof-ticket.js";
+import { ledgerReceive } from "./floka-ledger/config.js";
 
 export interface PinnedKey { publicKey: string; pinnedAt: string }
 /** What the lend-write entry got besides the parsed request: the received text and the peer's pinned key, both optional. */
@@ -46,7 +47,7 @@ function ticketRefusal(db: Database, o: LendOrder, req: ResultRequest, body: Rec
   const claimed = claimTs(db, o), at = Date.parse(pinned.pinnedAt);
   if (claimed === null || !Number.isFinite(at) || at > claimed) return "钉住的钥匙晚于这一单的领单（换过钥匙或没有领单记录）";
   return ticketProblem(t, { orderId: o.orderId, gen: o.leaseGen, taskId: o.taskId, head: o.head, specRev: o.specRev, round: o.round, family: o.family,
-    worker: o.worker ?? "", session: req.session.id, payloadSha: logicalSha(body) }, pinned.publicKey);
+    worker: o.worker ?? "", session: req.session.id, payloadSha: logicalSha(body) }, pinned.publicKey, ledgerReceive());
 }
 
 export function admitPoolEvidence(db: Database, o: LendOrder, req: ResultRequest, bodySha: string, received: ReceivedResult,

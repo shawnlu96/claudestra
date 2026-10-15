@@ -106,7 +106,7 @@ test("[验收线 2] 全仓只有 collab-source-binding.ts 定义团队键 → �
   expect(shared).not.toMatch(/bindingState/);
   // 协作视图各处用同一份结果，不再按团队源的 ownerWaits 声明一刀切成「暂无」
   const view = src("web/features/collab/collab-view.tsx");
-  expect(view).toMatch(/const \{ waits, unknown: waitsUnknown \} = useOwnerWaits\(asks, project\)/);
+  expect(view).toMatch(/const \{ waits, unknown: waitsUnknown \} = useOwnerWaits\(asks, project, \{ loaded: asksLoaded, full: asksFull \}\)/);
   expect(view).not.toMatch(/off\?\.has\("ownerWaits"\)|a\.project === project/);
 });
 
@@ -159,7 +159,20 @@ test("[验收线 3] 「去处理」调 asksStore.openDrawer(这张卡的 id)：�
 
 test("[验收线 3] 手机上全站收件箱开着时整屏页先收起：它的层级在抽屉之上，不收「去处理」点了像没反应", () => {
   const src = readFileSync(resolve(import.meta.dir, "../web/features/collab/collab-view.tsx"), "utf8");
-  expect(src).toMatch(/const \{ asks, open: inboxOpen \} = useAsks\(\);/);
+  expect(src).toMatch(/const \{ asks, open: inboxOpen, loaded: asksLoaded, full: asksFull \} = useAsks\(\);/);
   // 只是不渲染整屏页；选中（sel）与它的历史条目不动，从收件箱返回还在「待你处理」页（真点击在 tests/web-collab-owner-waits-browser.test.ts）
   expect(src).toMatch(/pane !== "detail" && page && !inboxOpen && createPortal\(/);
+});
+
+test("[验收线 6] UXCARD3 不知道 ≠ 没有：绑定解析不出、待办没读到、不完整且为空，三种都 unknown；有数据时照旧列出", async () => {
+  await bind([BINDING]);
+  expect(ownerWaits(ASKS, KEY, null, { loaded: true, full: true })).toEqual({ waits: [], unknown: true });
+  expect(ownerWaits(ASKS, KEY, LOCAL, { loaded: false })).toEqual({ waits: [], unknown: true });
+  expect(ownerWaits([], KEY, LOCAL, { loaded: true, full: false })).toEqual({ waits: [], unknown: true });
+  expect(ownerWaits([ask("other", { project: "another" })], KEY, LOCAL, { loaded: true })).toEqual({ waits: [], unknown: true });
+  // 不完整但有数据：照旧列出；读全了、一条没有：就是没有
+  const partial = ownerWaits(ASKS, KEY, LOCAL, { loaded: true, full: false });
+  expect(partial.unknown).toBe(false);
+  expect(partial.waits.map((a) => a.id)).toEqual(["ask-prop", "ask-plain"]);
+  expect(ownerWaits([], KEY, LOCAL, { loaded: true, full: true })).toEqual({ waits: [], unknown: false });
 });

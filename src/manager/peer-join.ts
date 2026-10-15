@@ -12,6 +12,7 @@ import { resolveMyBridgeUrl, scanTailnetBridges } from "./peers-net.js";
 import { instanceIdSync, isInstanceId } from "../lib/instance-id.js";
 import { INVITE_MAX_REFUSALS, isPeerBaseUrl, relayPeerFingerprint, relayUrlOf, type HttpPeer, type PeerInviteV2, type PendingInvite } from "../lib/peers.js";
 import { checkInviteProof, inviteUrlKey, judgeJoin, newInviteNonce, signInviteProof, type JoinVerdict } from "../lib/invite-proof.js";
+import { ledgerReceive, ledgerSendFamilyFor } from "../lib/floka-ledger/config.js";
 import { legacyStillOpen, peerAnchorOf } from "../lib/peer-trust.js";
 import { uniquePeerName } from "./peer-names.js";
 import { myFingerprint, peerCliFetch, rawCliFetch, relayStatus } from "./relay.js";
@@ -141,7 +142,7 @@ export async function cmdPeerInviteRedeem(a: RedeemArgs) {
   });
   await removePendingInvite(inv.id);
   const myIid = instanceIdSync() || "";
-  const proof = signInviteProof({ nonce: a.nonce, join: a.join, redeemerFp: a.fp, inviterIid: myIid, inviteUrl: a.inviteUrl });
+  const proof = signInviteProof({ nonce: a.nonce, join: a.join, redeemerFp: a.fp, inviterIid: myIid, inviteUrl: a.inviteUrl }, undefined, ledgerSendFamilyFor("invite-pop", finalName));
   output({
     ok: true, peer: finalName, agents: inv.agents, oneWay: !rec.outToken, inviteId: inv.id,
     ...(superseded.length ? { revokedTokens: superseded.map(tokenIdOf) } : {}),
@@ -207,7 +208,7 @@ async function postRedeem(hs: PeerInviteV2, rev: Reverse, x: { nonce: string; in
 async function settleJoin(hs: PeerInviteV2, name: string, before: { name: string; publicKey?: string } | null, anchor: string | null, res: RedeemRes, x: { nonce: string; inviteUrl: string }) {
   const { readPeers } = await import("../lib/peers.js");
   const inviterIid = isInstanceId(res?.iid) ? res.iid : "";
-  const proof = checkInviteProof(res?.proof, { ...x, join: hs.join, redeemerFp: myFingerprint() ?? "", inviterIid });
+  const proof = checkInviteProof(res?.proof, { ...x, join: hs.join, redeemerFp: myFingerprint() ?? "", inviterIid }, ledgerReceive());
   const v = judgeJoin({ before, anchor, claimedFp: hs.fp, relayFp: relayPeerFingerprint(hs.url), proof, inviterIid, legacyOpen: legacyStillOpen() });
   if ("error" in v) return v;
   const iid = v.fields.instanceId;

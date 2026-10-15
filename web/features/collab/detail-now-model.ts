@@ -3,6 +3,8 @@
  * （docs/team/collab-view-v4.md）。名字 / 轮次 / 时长不知道就整段不写，不写「未知」「第 0 轮」「0 分」；
  * 别的机器为主场的卡执行者写成员代号，另写「在 <机器名>」，可见文字里不放长十六进制（team-instance-names.ts hexFree）。
  * 标题下的灰字（detailGoal）、「阶段与用时」每格的时长（stageTimes）也在这里。纯函数；单测 tests/web-collab-detail-now.test.ts。
+ * UXCARD3：「谁在干活」快照（work/task-work-facts.ts）有这张卡时，事实（栏位、执行者、出借、步骤、轮次、开始时刻、原因）全取快照，
+ * 这里只按事实拼句子（workMain）；快照没有这张卡才走下面按阶段的旧判定。叫停出现条件也读快照（stopTarget）。
  */
 import { fillParams } from "@/lib/i18n-fill";
 import type { TaskDetail } from "./collab-detail-model";
@@ -10,6 +12,9 @@ import { bareAgent, fmtDuration, stageSince, type LedgerEventView, type LedgerTa
 import type { RunningReviewer } from "./collab-reviewers";
 import { hexFree } from "./team-instance-names";
 import type { CardPauseView } from "@/lib/api/card-pause";
+import { stageWord } from "@/lib/owner-words";
+import type { TaskWorkFacts } from "./work/task-work-facts";
+import { workText } from "./work/work-i18n";
 
 const zh: Tr = fillParams;
 
@@ -32,6 +37,8 @@ export interface NowFacts {
   /** 别的机器为主场的卡：主场机器的名字（已经换成人看的名字）；主场本机为 null */
   awayMachine: string | null;
   pause?: CardPauseView | null;
+  /** 「谁在干活」快照里这张卡的事实（UXCARD3）；没有 / 快照没到为 null 或不给，走按阶段的旧判定 */
+  work?: TaskWorkFacts | null;
 }
 
 export interface NowSentence {
@@ -93,6 +100,49 @@ function mainOf(f: NowFacts, tr: Tr): { text: string; ms: number | null; waiting
   }
 }
 
+/** 快照里执行者怎么称呼：出借写「<机器> 上的 <家族>」（没有家族写「<机器> 上的执行者」），否则「执行者 / 审查员 <名>」 */
+function workWho(w: TaskWorkFacts, role: string, tr: Tr): string {
+  if (w.lent) {
+    const m = hexFree(w.machine) ?? tr("其他成员的机器");
+    return w.family ? tr("{m} 上的 {f}", { m, f: w.family }) : tr("{m} 上的执行者", { m });
+  }
+  return named(role, hexFree(bareAgent(w.who)), tr);
+}
+
+const STAGE_STEP: Partial<Record<Stage, TaskWorkFacts["step"]>> = { build: "write", review: "review", fix: "fix", restate: "restate", merge: "merge" };
+/** 等待码：这几种下一步归 PM（退回人工、额度到线、执行者不在了） */
+const PM_TAKES: ReadonlySet<string> = new Set(["manual", "quota", "executor_missing"]);
+
+/** 快照给了事实时的主句、时长和下一步：时长从快照的开始时刻算到现在，轮次用快照的 */
+function workMain(f: NowFacts, w: TaskWorkFacts, tr: Tr): { text: string; ms: number | null; waiting: boolean; next: string | null } {
+  const ms = w.since === null ? null : Math.max(0, f.now - w.since);
+  const next = NEXT[f.stage] ?? null;
+  if (w.column === "legacy") {
+    return { text: tr("老卡（没有调度记录）· 停在{s}，调度器不派活", { s: tr(stageWord(w.stage ?? f.stage)) }), ms: null, waiting: false, next: "下一步：PM 收尾或补调度记录" };
+  }
+  if (w.column !== "working") {
+    const reason = w.reason?.trim() ? workText(tr, w.reason.trim()) : w.column === "merging" ? tr("等合并") : mainOf(f, tr).text;
+    return { text: reason, ms, waiting: true, next: w.code && PM_TAKES.has(w.code) ? "下一步：PM 接手" : next };
+  }
+  const n = roundOf(w.round);
+  const exec = workWho(w, "执行者", tr);
+  const text = (() => {
+    switch (w.step ?? STAGE_STEP[f.stage] ?? "write") {
+      case "review": {
+        const who = workWho(w, "审查员", tr);
+        return n ? tr("{who} 在审第 {n} 轮", { who, n }) : tr("{who} 在审", { who });
+      }
+      case "fix": return n ? tr("{who} 在改第 {n} 轮意见", { who: exec, n }) : tr("{who} 在改审查意见", { who: exec });
+      case "restate": return tr("{who} 在复述", { who: exec });
+      case "publishing": return tr("{who} 在交付", { who: exec });
+      case "deploy": return tr("已合并，在部署");
+      case "merge": return tr("正在合并");
+      default: return tr("{who} 在写", { who: exec });
+    }
+  })();
+  return { text, ms, waiting: false, next };
+}
+
 export function nowSentence(f: NowFacts, tr: Tr = zh): NowSentence {
   if (f.awayMachine === null && f.pause?.mode === "on" && f.pause.paused) {
     const p = f.pause;
@@ -101,8 +151,16 @@ export function nowSentence(f: NowFacts, tr: Tr = zh): NowSentence {
     const who = tr("{who} {time} 暂停", { who: hexFree(p.actor) ?? "owner", time });
     return { who: [tr("已暂停"), who, p.reason?.trim()].filter(Boolean).join(" · "), next: tr("你点继续后，调度器接着派"), usedReason: true };
   }
-  const m = mainOf(f, tr);
   const where = f.awayMachine ? tr("在 {m}", { m: hexFree(f.awayMachine) ?? tr("其他成员的机器") }) : "";
+  if (f.work) {
+    const w = workMain(f, f.work, tr);
+    const lent = f.work.lent ? "" : where;
+    // 本机快照给了事实：原因已在句子里（在等），或快照没说原因（在干活 / 老卡），界面都不再另起一行停留原因；
+    // 团队行只在句子里用了快照原因时才算用过，卡的镜像提示（teamNote：过期、阻塞提问）照旧另起一行
+    const used = !f.work.team || (f.work.column !== "working" && !!f.work.reason?.trim());
+    return { who: [w.text, lent, since(w.ms, false, w.waiting, tr)].filter(Boolean).join(" · "), next: w.next && tr(w.next), usedReason: used };
+  }
+  const m = mainOf(f, tr);
   const long = since(m.ms, f.dwellApprox === true && m.ms === f.dwellMs, m.waiting, tr);
   const next = NEXT[f.stage];
   return { who: [m.text, where, long].filter(Boolean).join(" · "), next: next ? tr(next) : null, usedReason: m.usedReason };
@@ -168,9 +226,25 @@ export function stageTimes(segs: readonly { ms: number }[], tr: Tr = zh): (strin
 
 const CLOSED: ReadonlySet<Stage> = new Set(["done", "verified", "cancelled"]);
 
-/** 「叫停这一轮」出现条件：主场本机（能对它说）、执行者会话在线、卡没结束 */
-export function canStopRound(p: { homeLocal: boolean; executorOnline: boolean; stage: Stage }): boolean {
-  return p.homeLocal && p.executorOnline && !CLOSED.has(p.stage);
+/**
+ * 「叫停这一轮」出现条件（UXCARD3 起是正向条件，全部满足才出）：主场本机、快照里这张卡在「在干活」、执行者不是出借 worker、
+ * 详情没有过期 / 主场本机读失败标记、卡没结束、快照里的执行者在本机会话列表里在线。快照没到或没有这张卡不出，宁可少一个按钮。
+ * 返回要打断的本机会话名（快照里的执行者），不出为 null
+ */
+export function stopTarget(p: {
+  homeLocal: boolean; work: TaskWorkFacts | null | undefined; homeRead: boolean; stage: Stage; online: (agent: string) => boolean;
+}): string | null {
+  const w = p.work;
+  if (!p.homeLocal || !w || w.column !== "working" || w.lent || p.homeRead || CLOSED.has(p.stage)) return null;
+  const agent = bareAgent(w.who);
+  return agent && p.online(agent) ? agent : null;
+}
+
+/** 详情过期（本机读失败、保留上次本机详情）的一行：时:分 取那次本机成功的时刻 */
+export function staleText(at: number, tr: Tr = zh): string {
+  const d = new Date(at);
+  const t = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return tr("数据可能过期（本机详情最后读到 {t}）", { t });
 }
 
 /** 别的机器为主场的卡「对它说」的占位：写清在哪台机器、为什么不行 */
