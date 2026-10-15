@@ -8,15 +8,21 @@
  * half-built create of the card's author is left unknown as before, and so is anything uncertain (tmux unreadable, an unknown
  * process in the window, a session id in the registry). Switch: recovery key authorRebuild (off = the old unknown; observe =
  * record「本会清理重建」, then the old unknown; on = clear and rebuild). A manual card never heals. tests/fix-swap-halfbuilt*.test.ts.
+ *
+ * The kill runs in a manager child that reads the registry after this process did. It is only sent for a placeholder whose creating
+ * process is dead (round-2 P1 halfbuilt-session-race): nothing can still turn that placeholder into a running session, and runKill
+ * hands exactly such a marker to create-guard.ts clearCreateResidue (marker re-checked, recorded window id or a bare shell only).
  */
 import type { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import type { WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import type { RegistryAgent } from "./registry.js";
+import { REGISTRY_PATH, type RegistryAgent } from "./registry.js";
+import { pidAlive } from "./pending-ops.js";
 import { createRetryDelay } from "./scheduler-create-retry.js";
 import { isShellCommand } from "./tmux-send-guard.js";
 import { defaultIo, type LivenessIo } from "./worker-liveness.js";
@@ -26,11 +32,34 @@ export const HALF_BUILT_MARK = "半建会话已清理";
 /** the third half-built create of one card's author stays unknown for PM */
 const HALF_BUILT_LIMIT = 3;
 
-type Lifecycle = { manager(...args: string[]): Promise<Record<string, unknown>>; registry(): RegistryAgent[]; active(): void };
+type Lifecycle = { manager(...args: string[]): Promise<Record<string, unknown>>; registry(): RegistryAgent[]; active(): void; registryPath?: string };
 
-const windowIo = new WeakMap<Database, LivenessIo>();
-/** Tests inject the tmux / ps reads; the service reads them the way worker-liveness.ts does (strict tmux, checked ps). */
-export const setHalfBuiltIo = (db: Database, io: LivenessIo): void => void windowIo.set(db, io);
+type Probe = { io: LivenessIo; alive(pid: number): boolean };
+const probes = new WeakMap<Database, Probe>();
+/** Tests inject the tmux / ps reads and the pid check; the service reads them the way worker-liveness.ts / pending-ops.ts do. */
+export const setHalfBuiltIo = (db: Database, io: LivenessIo, alive: (pid: number) => boolean = pidAlive): void => void probes.set(db, { io, alive });
+const probeOf = (db: Database): Probe => probes.get(db) ?? { io: defaultIo, alive: pidAlive };
+
+/** A create placeholder's identity (create-guard.ts sameMarker), or "absent" = no registry entry under the name at all. */
+type Placeholder = { pid: number; startedAt: string } | "absent";
+
+/**
+ * The raw registry entry under `name` (the normalized view drops `pending`), read synchronously. Only two shapes may be cleared:
+ * no entry at all, or a create placeholder without a session id whose creating process is dead (checked by pid, never by the
+ * staleness timeout: a slow create past it is still alive). null = anything else, an unreadable registry included.
+ */
+function placeholderOf(db: Database, name: string, deps: Lifecycle): Placeholder | null {
+  let entry: Record<string, unknown> | undefined;
+  try { entry = (JSON.parse(readFileSync(deps.registryPath ?? REGISTRY_PATH, "utf8")) as { agents: Record<string, Record<string, unknown>> }).agents[name]; }
+  catch { return null; }
+  if (!entry) return "absent";
+  const p = entry.pending as { op?: unknown; pid?: unknown; startedAt?: unknown } | undefined;
+  if (entry.sessionId || p?.op !== "create" || typeof p.pid !== "number" || typeof p.startedAt !== "string") return null;
+  return probeOf(db).alive(p.pid) ? null : { pid: p.pid, startedAt: p.startedAt };
+}
+
+const samePlaceholder = (a: Placeholder | null, b: Placeholder): boolean =>
+  a === "absent" || b === "absent" ? a === b : !!a && a.pid === b.pid && a.startedAt === b.startedAt;
 
 type WindowVerdict = "gone" | "shell" | "busy" | "unknown";
 
@@ -47,7 +76,7 @@ export function shellOnlyVerdict(panePids: readonly number[], psOut: string): "s
   return panePids.every((p) => isShellCommand(basename(cmd.get(p)!.split(/\s+/)[0] ?? "")) && !parents.has(p)) ? "shell" : "busy";
 }
 
-async function windowVerdict(name: string, io: LivenessIo = defaultIo): Promise<WindowVerdict> {
+async function windowVerdict(name: string, io: LivenessIo): Promise<WindowVerdict> {
   let names: string[];
   try { names = await io.windows(); } catch { return "unknown"; }
   if (!names.includes(name)) return "gone";
@@ -73,9 +102,10 @@ export function halfBuiltBackoff(db: Database, taskId: string, now: number): str
 /**
  * The whole permission the cleanup acts on, read synchronously with no await before the effect it guards (the kill, the settle):
  * auto card, authorRebuild still on, the card still where the intent pins it, the intent still submitted with this name's creating
- * claim, and the registry row (if any) still without a session id. A permission read before the tmux / ps awaits proves nothing here.
+ * claim, and the registry entry still exactly `expect` (the dead creator's placeholder before the kill, no entry after it). A permission
+ * read before the tmux / ps awaits proves nothing here.
  */
-function healRefusal(db: Database, intent: SchedulerIntent, name: string, deps: Lifecycle): string | null {
+function healRefusal(db: Database, intent: SchedulerIntent, name: string, deps: Lifecycle, expect: Placeholder): string | null {
   deps.active();
   const task = getTask(db, intent.taskId), now = getIntent(db, intent.id);
   if (!task || getWorkflow(db, task.id)?.mode !== "auto") return "卡不在 auto";
@@ -84,11 +114,9 @@ function healRefusal(db: Database, intent: SchedulerIntent, name: string, deps: 
     return "意图或卡已变化";
   }
   if (getEventByDedup(db, `scheduler:${intent.id}:creating`)?.data.agent !== name) return "建会话认领已不是这个名字";
-  return deps.registry().find((r) => r.name === name)?.sessionId ? "registry 已有 session id" : null;
+  if (deps.registry().find((r) => r.name === name)?.sessionId) return "registry 已有 session id";
+  return samePlaceholder(placeholderOf(db, name, deps), expect) ? null : "registry 占位已变化或建会话进程还活着";
 }
-
-/** The kill found neither a registry row nor a window under the name: strictly nothing left, the same as a cleanup (P2 halfbuilt-gone). */
-const alreadyGone = (killed: Record<string, unknown>, name: string): boolean => killed.ok !== true && killed.error === `${name} 不存在`;
 
 /**
  * Called once the creating claim is past CLAIM_LEASE_MS with no session id. Returns the wait text after the cleanup cancelled the
@@ -101,22 +129,27 @@ export async function healHalfBuilt(db: Database, ctx: WriteCtx, intent: Schedul
   const nth = streak(db, task.id).n + 1;
   if (mode === "off" || nth >= HALF_BUILT_LIMIT) return null;
   const unbound = () => !deps.registry().find((r) => r.name === name)?.sessionId;
-  if (!unbound()) return null;
-  const window = await windowVerdict(name, windowIo.get(db)); deps.active();
-  if (window !== "gone" && window !== "shell") return null;
+  const before = unbound() ? placeholderOf(db, name, deps) : null;
+  if (!before) return null;
+  const window = await windowVerdict(name, probeOf(db).io); deps.active();
+  // a shell window no placeholder owns is not provably this create's (P2 halfbuilt-gone: no entry and no window = nothing left)
+  if (window !== "gone" && (window !== "shell" || before === "absent")) return null;
   const now = ctx.now ?? Date.now();
   const sample = { project: task.project, key: "authorRebuild" as const, taskId: task.id, head: intent.head, action: "halfbuilt-rebuild" as const, nth,
     text: `清理重建半建的换家族作者会话 ${name}（窗口${window === "gone" ? "已不在" : "只剩 shell"}，registry 无 session id，第 ${nth} 次）`,
     data: { intentId: intent.id, agent: name, window } };
   if (mode === "observe") {
     // the observation, too, stands on the current card: a takeover or a switch flip during the tmux read records nothing
-    if (getWorkflow(db, task.id)?.mode === "auto" && selfHealMode(db, task.project, "authorRebuild") === "observe" && unbound()) selfHealSample(db, "observe", sample, now);
+    if (getWorkflow(db, task.id)?.mode === "auto" && selfHealMode(db, task.project, "authorRebuild") === "observe" && unbound()
+      && samePlaceholder(placeholderOf(db, name, deps), before)) selfHealSample(db, "observe", sample, now);
     return null;
   }
-  if (healRefusal(db, intent, name, deps)) return null;
-  const killed = await deps.manager("kill", name); deps.active();
-  if ((killed.ok !== true && !alreadyGone(killed, name)) || deps.registry().some((r) => r.name === name)) return null;
-  if (healRefusal(db, intent, name, deps)) return null;
+  if (healRefusal(db, intent, name, deps, before)) return null;
+  if (before !== "absent") { // nothing under the name at all needs no kill
+    const killed = await deps.manager("kill", name); deps.active();
+    if (killed.ok !== true) return null;
+  }
+  if (healRefusal(db, intent, name, deps, "absent")) return null;
   const wait = createRetryDelay(nth);
   const receipt = `${HALF_BUILT_MARK}（${name} 第 ${nth} 次；${wait / 60_000} 分钟后重新规划换家族）`;
   settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "cancelled", receipt });

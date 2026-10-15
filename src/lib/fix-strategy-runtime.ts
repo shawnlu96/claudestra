@@ -87,7 +87,7 @@ export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, given
   if ((halt = gate())) return halted(halt);
   if (wait) return { ok: true, step: "waiting", detail: wait };
   const tree = withForeignTree(db, ctx, intent, task, deps, gate); // SWAPFIX1 9a: the local swap takes over a clean old tree too
-  const ref = await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", tree.deps, tree.gate);
+  const ref = tree.bound(await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", tree.deps, tree.gate));
   deps.active();
   if ((halt = gate("stopped"))) return halted(halt); // the binding below retires the old author: it must still be the pinned one, and stopped
   if ("tree" in ref) return { ok: true, step: "waiting", detail: ref.wait };

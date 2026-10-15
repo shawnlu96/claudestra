@@ -158,3 +158,53 @@ test("the local family swap under fixLocalSwap=off still refuses the old author 
     expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "fix_swap_selfheal" || e.data.op === "recovery_observe")).toBe(false);
   } finally { f.close(); r.close(); }
 });
+
+// SWAPFIX1 r2 review: the takeover is re-proved at the final bind (tree-final-proof) and on a later tick that skips the tree open
+// because the create was already claimed (tree-adoption-resume); the takeover is journaled on the intent for that.
+test("the switch turning off while the local swap's create runs leaves the new session unbound", async () => {
+  const { r, f, p, intent } = await localSwap("on");
+  try {
+    const manager = p.deps.manager;
+    p.deps.manager = async (...args) => {
+      const out = await manager(...args);
+      if (args[0] === "create") setSelfHealPolicy(f.db, () => ({ mode: "off", manualAfterMs: null, source: "config" }));
+      return out;
+    };
+    let out: Awaited<ReturnType<typeof fixSwapStep>> = { ok: true, step: "waiting", detail: "" };
+    for (let n = 0; n < 4 && !p.effects.some((e) => e.startsWith("create:")); n++) out = await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
+    expect(out).toMatchObject({ step: "waiting", detail: expect.stringContaining("fixLocalSwap 已不在 on") }); // [验收线 4]
+    expect(getIntent(f.db, intent.id)?.status).toBe("submitted");
+    expect(getEventByDedup(f.db, `scheduler:${intent.id}:replacement`)).toBeNull();
+  } finally { f.close(); r.close(); }
+});
+
+test("a later tick that only confirms the claimed create re-proves the journaled takeover before binding", async () => {
+  for (const late of ["live", "off", "still"] as const) {
+    const { r, f, p, intent } = await localSwap("on");
+    try {
+      const manager = p.deps.manager;
+      p.deps.manager = async (...args) => { // the first create leaves only the placeholder, no session id yet
+        const out = await manager(...args);
+        if (args[0] === "create") p.edit((reg) => { delete reg.agents[args[1]].sessionId; });
+        return out;
+      };
+      for (let n = 0; n < 4 && !p.effects.some((e) => e.startsWith("create:")); n++) await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
+      const name = p.effects.find((e) => e.startsWith("create:"))!.slice("create:".length);
+      expect(getEventByDedup(f.db, `scheduler:${intent.id}:tree-adopt`)?.data.dir).toBe(r.dir);
+      p.edit((reg) => {
+        reg.agents[name].sessionId = `session:${name}`; // the create is confirmed on the next tick
+        if (late === "live") reg.agents["agent-another-author"] = { cwd: r.dir, sessionId: "s-other", status: "active" };
+      });
+      if (late === "off") setSelfHealPolicy(f.db, () => ({ mode: "off", manualAfterMs: null, source: "config" }));
+      const out = await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
+      if (late === "still") {
+        expect(out).toMatchObject({ step: "session" }); // [验收线 2]
+        expect(getIntent(f.db, intent.id)?.status).toBe("done");
+      } else {
+        expect(out).toMatchObject({ step: "waiting", detail: expect.stringContaining(late === "live" ? "agent-another-author" : "fixLocalSwap 已不在 on") }); // [验收线 2]
+        expect(getIntent(f.db, intent.id)?.status).toBe("submitted");
+        expect(getEventByDedup(f.db, `scheduler:${intent.id}:replacement`)).toBeNull();
+      }
+    } finally { f.close(); r.close(); }
+  }
+});

@@ -129,13 +129,15 @@ const NO_STOP_GATE: SwapGate = () => ({ halted: "drift", reason: "缺旧作者�
  * SWAPFIX1 9a, shared by the local swap (fix-strategy-runtime.ts fixSwapStep) and the remote one (localAfterReclaim): the replacement
  * author's tree open may take over another old local author's clean tree at the target (fixLocalSwap, never on a manual card),
  * sampled once per card + head; the judgment itself is fix-tree-proof.ts's. The returned gate is `base` plus, once a tree was taken
- * over in this pass, the takeover's own permission read again synchronously at the create and bind edges: the switch still on and
- * no live session but this intent's own author in the tree (the tree's proof was taken before awaits that can outlive it).
+ * over, the takeover's own permission read again synchronously at the create and bind edges: the switch still on and no live
+ * session but this intent's own author in the tree (the tree's proof was taken before awaits that can outlive it). The takeover is
+ * journaled on the intent (`tree-adopt`), so a later tick that skips the tree open (creating already claimed) still re-proves it
+ * (round-2 P1 tree-adoption-resume); `bound` applies it to a created session right before the caller binds it (tree-final-proof).
  */
 export function withForeignTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, deps: ConvergenceLifecycle,
-  base?: SwapGate): { deps: ConvergenceLifecycle; gate?: SwapGate; adoption(): SwapHalt | null } {
+  base?: SwapGate): { deps: ConvergenceLifecycle; gate?: SwapGate; adoption(): SwapHalt | null; bound<T extends object>(ref: T): T | { wait: string; tree: true } } {
   const open = deps.authorTree, head = intent.head;
-  if (!open || !head) return { deps, gate: base, adoption: () => null };
+  if (!open || !head) return { deps, gate: base, adoption: () => null, bound: (ref) => ref };
   const own = `agent-cv-${task.id.toLowerCase()}-fix-${intent.eventSeq}`; // createConvergenceWorker's name for this intent's author
   let adopted: string | null = null;
   const mode = () => getWorkflow(db, task.id)?.mode === "auto" ? selfHealMode(db, task.project, "fixLocalSwap") : "off";
@@ -143,20 +145,26 @@ export function withForeignTree(db: Database, ctx: WriteCtx, intent: SchedulerIn
     mode,
     live: (dir) => liveSessionAt(deps.registry().filter((r) => r.name !== own), dir),
     sample: (at, dir) => {
-      if (at === "on") adopted = dir;
+      if (at === "on") { adopted = dir; convergenceEvent(db, ctx, intent, "tree-adopt", { dir }); }
       selfHealSample(db, at, { project: task.project, key: "fixLocalSwap", taskId: task.id, head, action: "tree-adopt",
         text: `收回旧树 ${dir}（干净、在本卡分支、HEAD 是已审修复 head、无活会话）交给新作者`, data: { intentId: intent.id, dir } }, ctx.now ?? Date.now());
     },
   };
   const adoption = (): SwapHalt | null => {
-    if (!adopted) return null;
-    if (mode() !== "on") return { halted: "drift", reason: `fixLocalSwap 已不在 on，不把旧作者工作树 ${adopted} 交给新作者` };
-    const holder = foreign.live(adopted);
-    return holder ? { halted: "drift", reason: `旧作者工作树 ${adopted} 已是活会话 ${holder} 的工作目录，不交给新作者` } : null;
+    const dir = adopted ?? getEventByDedup(db, `scheduler:${intent.id}:tree-adopt`)?.data.dir;
+    if (typeof dir !== "string") return null;
+    if (mode() !== "on") return { halted: "drift", reason: `fixLocalSwap 已不在 on，不把旧作者工作树 ${dir} 交给新作者` };
+    const holder = foreign.live(dir);
+    return holder ? { halted: "drift", reason: `旧作者工作树 ${dir} 已是活会话 ${holder} 的工作目录，不交给新作者` } : null;
+  };
+  // a created session is bound only while the takeover still holds; read with no await before the caller's bind
+  const bound = <T extends object>(ref: T): T | { wait: string; tree: true } => {
+    const halt = "sessionId" in ref ? adoption() : null;
+    return halt ? { wait: halt.reason, tree: true } : ref;
   };
   const gate: SwapGate = (after) => base?.(after) ?? adoption();
   if (base?.stopWire !== undefined) gate.stopWire = base.stopWire;
-  return { gate, adoption, deps: { ...deps, artifactGate: deps.artifactGate ?? base ?? NO_STOP_GATE,
+  return { gate, adoption, bound, deps: { ...deps, artifactGate: deps.artifactGate ?? base ?? NO_STOP_GATE,
     authorTree: (source, target, recorded) => { adopted = null; return open(source, { ...target, foreign }, recorded); } } };
 }
 

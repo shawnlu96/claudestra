@@ -1,5 +1,8 @@
 /** SWAPFIX1 2: a half-built family-swap author session is cleared through manager kill and re-planned; anything uncertain stays unknown. */
 import { expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { runKill } from "../src/manager/agent-kill.js";
+import { makeWorld } from "./resumable-world.js";
 import { createConvergenceWorker } from "../src/lib/fix-strategy-lifecycle.js";
 import { getIntent, type SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
@@ -17,16 +20,20 @@ const io = (name: () => string, w: () => Window): LivenessIo => ({
   ps: async () => w() === "busy" ? "  100     1 -zsh\n  200   100 node /x/codex\n" : "  100     1 -zsh\n",
 });
 
+/** The create placeholder create-guard.ts writes; its creating process (pid 4242) was killed at 90 s unless a test says otherwise. */
+const MARKER = { op: "create", pid: 4242, startedAt: "2026-10-15T00:00:00.000Z", channelName: "x", windowId: "@100" };
+const dead = () => false;
+
 /** A local four-round card: create leaves only a placeholder (no session id), kill removes it, like a create killed at 90 s. */
 async function halfBuilt(mode: "on" | "observe" | "off" = "on") {
   const f = await fourRoundFix(), p = convergenceProbe(f);
   let window: Window = "shell", current = "";
   setSelfHealPolicy(f.db, () => ({ mode, manualAfterMs: null, source: "config" }));
-  setHalfBuiltIo(f.db, io(() => current, () => window));
+  setHalfBuiltIo(f.db, io(() => current, () => window), dead);
   p.deps.manager = async (cmd, name, dir) => {
     p.effects.push(`${cmd}:${name}`);
     p.edit((r) => {
-      if (cmd === "create") r.agents[name] = { cwd: dir, status: "active" };
+      if (cmd === "create") r.agents[name] = { cwd: dir, status: "active", pending: MARKER };
       if (cmd === "kill") delete r.agents[name];
     });
     return { ok: true };
@@ -86,7 +93,7 @@ test("an unknown process in the window, unreadable tmux, a registry session id o
         await h.create(intent, CLAIM_LEASE_MS);
         expect(getIntent(h.f.db, intent.id)?.status).toBe("unknown"); // [验收线 3]
       } else {
-        if (broken === "session") h.p.edit((r) => { r.agents[name].sessionId = "late-session"; });
+        if (broken === "session") h.p.edit((r) => { r.agents[name].sessionId = "late-session"; delete r.agents[name].pending; });
         if (broken === "manual") h.f.db.run("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'T1'");
         expect(await healHalfBuilt(h.f.db, h.at(CLAIM_LEASE_MS), getIntent(h.f.db, intent.id)!, h.f.task(), name, "author", h.p.deps)).toBeNull(); // [验收线 3]
         expect(getIntent(h.f.db, intent.id)?.status).toBe("submitted");
@@ -134,7 +141,7 @@ test("authorRebuild turned off or a PM takeover during the window probe leaves t
         if (flip === "manual") h.f.db.run("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'T1'");
         else setSelfHealPolicy(h.f.db, () => ({ mode: flip === "observe" ? "observe" : "off", manualAfterMs: null, source: "config" }));
       };
-      setHalfBuiltIo(h.f.db, { ...base, windows: async () => { if (flip !== "rebuilt-off-during-kill") turn(); return base.windows(); } });
+      setHalfBuiltIo(h.f.db, { ...base, windows: async () => { if (flip !== "rebuilt-off-during-kill") turn(); return base.windows(); } }, dead);
       if (flip === "rebuilt-off-during-kill") {
         const manager = h.p.deps.manager;
         h.p.deps.manager = async (...args) => { const r = await manager(...args); if (args[0] === "kill") turn(); return r; };
@@ -172,4 +179,77 @@ test("a failed kill other than strictly nothing-there stays unknown", async () =
     await h.create(intent, CLAIM_LEASE_MS);
     expect(getIntent(h.f.db, intent.id)?.status).toBe("unknown"); // [验收线 3]
   } finally { h.f.close(); }
+});
+
+// SWAPFIX1 r2 review (halfbuilt-session-race): the manager kill child reads the registry after this process did. The kill is only sent
+// for a placeholder whose creating process is dead, which runKill hands to create-guard's marker-checked clearCreateResidue.
+async function killWorld() {
+  const h = await halfBuilt();
+  const { intent, name } = await h.start();
+  await h.create(intent);
+  const world = makeWorld({ windows: [name] });
+  world.deps.alive = (pid) => pid !== MARKER.pid; // the child's own pid check: the 90 s-killed creator is gone
+  let entry: (() => void) | null = null;
+  h.p.deps.manager = async (cmd, agent) => {
+    h.p.effects.push(`${cmd}:${agent}`);
+    entry?.(); // what happens between this process's last read and the child's first one
+    world.st.reg = { socket: "s", agents: h.p.raw().agents };
+    const out = await runKill(agent, world.deps);
+    writeFileSync(h.p.deps.registryPath!, JSON.stringify({ ...h.p.raw(), agents: world.st.reg.agents }));
+    return out;
+  };
+  const heal = () => healHalfBuilt(h.f.db, h.at(CLAIM_LEASE_MS), getIntent(h.f.db, intent.id)!, h.f.task(), name, "author", h.p.deps);
+  return { h, intent, name, world, heal, onEntry: (f: () => void) => { entry = f; } };
+}
+
+test("halfbuilt-session-race: a create still running past the claim lease is never killed, even if it finishes as the kill starts", async () => {
+  const k = await killWorld();
+  try {
+    setHalfBuiltIo(k.h.f.db, io(() => k.name, () => "shell"), (pid) => pid === MARKER.pid); // the creator is alive, only slow
+    k.onEntry(() => { // the late create completes: a real session in a busy window
+      k.h.p.edit((r) => { r.agents[k.name] = { cwd: k.h.f.dir, status: "active", sessionId: "late-session" }; });
+      k.world.st.busyWindows.push(k.name);
+    });
+    expect(await k.heal()).toBeNull(); // [验收线 3]
+    expect(k.h.p.effects).not.toContain(`kill:${k.name}`);
+    expect(k.world.st.windows).toEqual([k.name]);
+    expect(k.world.st.archived).toEqual([]);
+    expect(getIntent(k.h.f.db, k.intent.id)?.status).toBe("submitted");
+  } finally { k.h.f.close(); }
+});
+
+test("a dead creator's placeholder goes through runKill's marker-checked residue cleanup; a fresh create taking the name is left alone", async () => {
+  for (const race of [false, true]) {
+    const k = await killWorld();
+    try {
+      if (race) k.onEntry(() => { // another create took the name between the checks: its live marker is not ours
+        k.h.p.edit((r) => { r.agents[k.name] = { cwd: k.h.f.dir, status: "active", pending: { ...MARKER, pid: process.pid, startedAt: new Date(k.world.deps.now()).toISOString() } }; });
+      });
+      const out = await k.heal();
+      if (!race) {
+        expect(out).toContain(HALF_BUILT_MARK); // [验收线 3]
+        expect(k.world.st.windows).toEqual([]);
+        expect(k.h.p.raw().agents[k.name]).toBeUndefined();
+        expect(getIntent(k.h.f.db, k.intent.id)?.status).toBe("cancelled");
+      } else {
+        expect(out).toBeNull(); // [验收线 3]
+        expect(k.world.st.windows).toEqual([k.name]);
+        expect(k.h.p.raw().agents[k.name].pending.pid).toBe(process.pid);
+        expect(getIntent(k.h.f.db, k.intent.id)?.status).toBe("submitted");
+      }
+      expect(k.world.st.archived).toEqual([]);
+    } finally { k.h.f.close(); }
+  }
+});
+
+test("a registry entry that is not a create placeholder, or a shell window no entry owns, is not cleared", async () => {
+  for (const shape of ["no-marker", "orphan-window"] as const) {
+    const k = await killWorld();
+    try {
+      k.h.p.edit((r) => { if (shape === "no-marker") delete r.agents[k.name].pending; else delete r.agents[k.name]; });
+      setHalfBuiltIo(k.h.f.db, io(() => k.name, () => "shell"), dead);
+      expect(await k.heal()).toBeNull(); // [验收线 3]
+      expect(k.h.p.effects).not.toContain(`kill:${k.name}`);
+    } finally { k.h.f.close(); }
+  }
 });
