@@ -7,7 +7,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFi
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { ENV_FAMILIES, RENAMED_SUFFIXES, UNBRANDED_STEMS } from "../src/lib/floka-env/names.ts";
-import { enforceSandboxBridgeUrl, isSandbox, sandboxBridgeEnvProblems, sandboxDirProblems } from "../src/lib/sandbox.ts";
+import { applyRenamedEnv, readIsolationEnv } from "../src/lib/floka-env/read.ts";
+import { enforceSandboxBridgeUrl, isSandbox, sandboxBridgeEnvProblems, sandboxDirProblems, sandboxRelayUrlProblem } from "../src/lib/sandbox.ts";
 import { productionDeny, sandboxEnv, sandboxLayout } from "../src/lib/sandbox-env.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -122,11 +123,53 @@ describe("[验收线 1] 新 / 旧 / 双名 / 冲突矩阵", () => {
     expect([lone.out.tokOld, lone.out.tokNew]).toEqual([SECRET_A, undefined]); // off 不往 env 里加新名
   });
 
+  test("on 档运行中只改 / 只删旧名：以旧名为准，不被同步时的新名副本翻回", () => {
+    const [a, b] = [tmp("floka-env-run-a-"), tmp("floka-env-run-b-")];
+    const set = child({ ...PROD_LIKE, FLOKA_RENAME_ENV: "on", CLAUDESTRA_STATE_DIR: a }, `process.env.CLAUDESTRA_STATE_DIR = ${JSON.stringify(b)};`);
+    expect(set.out.again).toBe(b);
+    const del = child({ ...PROD_LIKE, FLOKA_RENAME_ENV: "on", FLOKA_STATE_DIR: a }, `delete process.env.CLAUDESTRA_STATE_DIR;`);
+    expect(del.out.again).toBe(join(del.home, ".claude-orchestrator"));
+    expect(set.err + del.err).not.toContain(a);
+  });
+
+  test("on 档父子进程：子进程启动处只覆盖 / 删除旧名（pi-acp 前缀、adapter-proc 的 hostEnvBase），子进程拿到的是新值，不还原成父值", () => {
+    const home = tmp("floka-env-parent-");
+    const probe = [
+      `await import(${JSON.stringify(join(LIB, "paths.ts"))});`,
+      `const e = process.env, k = ["AGENT", "ACP_RUNTIME", "ACP_AGENT", "PM_DEPLOY_LOCK_TOKEN"];`,
+      `console.log(JSON.stringify(Object.fromEntries(k.map((s) => [s, [e["CLAUDESTRA_" + s] ?? null, e["FLOKA_" + s] ?? null]]))));`,
+    ].join("\n");
+    const parent = [
+      `await import(${JSON.stringify(join(LIB, "paths.ts"))});`,
+      `const { hostEnvBase } = await import(${JSON.stringify(join(LIB, "acp/adapter-proc.ts"))});`,
+      `const last = (r) => JSON.parse(r.stdout.toString().trim().split("\\n").pop());`,
+      `const probe = ${JSON.stringify(probe)};`,
+      // runtimes/pi-acp.ts 的写法：shell 前缀只带旧名
+      `const prefix = Bun.spawnSync(["sh", "-c", 'CLAUDESTRA_AGENT=child CLAUDESTRA_ACP_RUNTIME=pi exec "$0" --no-env-file -e "$1"', process.execPath, probe], { env: process.env, stderr: "pipe" });`,
+      // acp/adapter-proc.ts 的写法：拷一份 env、删旧名 CLAUDESTRA_ACP_AGENT，再覆盖旧名
+      `const base = { ...hostEnvBase({ base: process.env, logsDir: "/x" }), CLAUDESTRA_AGENT: "child" };`,
+      `const adapter = Bun.spawnSync([process.execPath, "--no-env-file", "-e", probe], { env: base, stderr: "pipe" });`,
+      `console.log(JSON.stringify({ prefix: last(prefix), adapter: last(adapter), err: prefix.stderr.toString() + adapter.stderr.toString() }));`,
+    ].join("\n");
+    const r = Bun.spawnSync([process.execPath, "--no-env-file", "-e", parent], {
+      env: testChildEnv({ ...PROD_LIKE, HOME: home, FLOKA_RENAME_ENV: "on", CLAUDESTRA_AGENT: "parent", CLAUDESTRA_ACP_RUNTIME: "codex",
+        CLAUDESTRA_ACP_AGENT: "codex-acp", FLOKA_PM_DEPLOY_LOCK_TOKEN: SECRET_A }),
+      cwd: home, stdout: "pipe", stderr: "pipe",
+    });
+    expect(r.stderr.toString()).not.toContain("Error");
+    expect(r.exitCode).toBe(0);
+    const got = JSON.parse(r.stdout.toString().trim().split("\n").pop()!);
+    expect(got.prefix).toEqual({ AGENT: ["child", "child"], ACP_RUNTIME: ["pi", "pi"], ACP_AGENT: ["codex-acp", "codex-acp"], PM_DEPLOY_LOCK_TOKEN: [SECRET_A, SECRET_A] });
+    expect(got.adapter).toEqual({ AGENT: ["child", "child"], ACP_RUNTIME: ["codex", "codex"], ACP_AGENT: [null, null], PM_DEPLOY_LOCK_TOKEN: [SECRET_A, SECRET_A] });
+    expect(got.err + r.stderr.toString()).not.toContain(SECRET_A);
+  });
+
   test("登记表覆盖规格列的各族，且不生出 BRIDGE / MCP_NAME / RELAY / DISCORD 的同义名", () => {
     for (const s of ["STATE_DIR", "RUNTIME_DIR", "ACP_AGENT", "PI_ARGS", "CODEX_BIN", "CALLER_CRED_FILE", "MCP_PROFILE", "AGENT", "SESSION_ID", "RUNTIME",
-      "SANDBOX", "SANDBOX_LAB", "LAB_ROOT", "SCHEDULER_SERVICE", "LEND_WORKER", "PM_DEPLOY_LOCK_TOKEN", "TEST"]) expect(RENAMED_SUFFIXES).toContain(s);
+      "SANDBOX", "SANDBOX_LAB", "LAB_ROOT", "LAB_RELAY_PORT", "SCHEDULER_SERVICE", "LEND_WORKER", "PM_DEPLOY_LOCK_TOKEN", "TEST"]) expect(RENAMED_SUFFIXES).toContain(s);
     expect(Object.keys(ENV_FAMILIES)).toEqual(expect.arrayContaining(["state-runtime", "acp-pi-codex", "caller", "profile", "agent-session", "sandbox-lab", "scheduler-lend", "deploy-lock", "test"]));
     expect(RENAMED_SUFFIXES.filter((s) => UNBRANDED_STEMS.test(s))).toEqual([]);
+    for (const s of ["BRIDGE_URL", "MCP_NAME", "RELAY_URL", "DISCORD_CHANNEL_ID"]) expect(UNBRANDED_STEMS.test(s)).toBe(true);
     expect(new Set(RENAMED_SUFFIXES).size).toBe(RENAMED_SUFFIXES.length);
   });
 });
@@ -175,6 +218,40 @@ describe("[验收线 2] 隔离闸认两套生产根与端口，不看档位", ()
     expect(check(env, join(sbx, "a"), okRun).join()).toContain("FLOKA_STATE_DIR");
     const off = { CLAUDESTRA_SANDBOX: "1", FLOKA_STATE_DIR: join(sbx, "a"), CLAUDESTRA_RUNTIME_DIR: okRun };
     expect(check(off, prodOld, okRun).join()).toContain("重叠");
+  });
+
+  const LAB = { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_LAB: "1" };
+  for (const gear of GEARS) {
+    test(`${gear}：lab 中继端口两名都认（只新名 / 双名一致放行，冲突拒绝），经 lab 实际入口 sandboxRelayUrlProblem`, () => {
+      const url = "ws://127.0.0.1:4200";
+      expect(sandboxRelayUrlProblem(url, { ...LAB, FLOKA_RENAME_ENV: gear, FLOKA_LAB_RELAY_PORT: "4200" })).toBeNull();
+      expect(sandboxRelayUrlProblem(url, { FLOKA_SANDBOX: "1", FLOKA_SANDBOX_LAB: "1", FLOKA_RENAME_ENV: gear, FLOKA_LAB_RELAY_PORT: "4200" })).toBeNull();
+      expect(sandboxRelayUrlProblem(url, { ...LAB, FLOKA_RENAME_ENV: gear, CLAUDESTRA_LAB_RELAY_PORT: "4200", FLOKA_LAB_RELAY_PORT: "4200" })).toBeNull();
+      expect(sandboxRelayUrlProblem(url, { ...LAB, FLOKA_RENAME_ENV: gear })).toContain("没有 lab 中继");
+      const conflict = { ...LAB, FLOKA_RENAME_ENV: gear, CLAUDESTRA_LAB_RELAY_PORT: "4100", FLOKA_LAB_RELAY_PORT: "4200" };
+      expect(() => sandboxRelayUrlProblem(url, conflict)).toThrow("FLOKA_LAB_RELAY_PORT");
+      expect(() => applyRenamedEnv({ ...conflict })).toThrow("FLOKA_LAB_RELAY_PORT");
+    });
+  }
+
+  test("on 档只设新名的 lab 中继端口：入口写回旧名，直接读旧名的 lab 代码也看得到", () => {
+    const env: Record<string, string | undefined> = { ...LAB, FLOKA_RENAME_ENV: "on", FLOKA_LAB_RELAY_PORT: "4200" };
+    applyRenamedEnv(env);
+    expect(env.CLAUDESTRA_LAB_RELAY_PORT).toBe("4200");
+  });
+
+  test("隔离变量的同步副本：同步后只改旧名取旧名（同 off 档）；只删旧名不算删；没同步过或两边都改了照样冲突拒绝", () => {
+    const parent: Record<string, string | undefined> = { FLOKA_RENAME_ENV: "on", CLAUDESTRA_SANDBOX_ROOT: "/sbx/a" };
+    applyRenamedEnv(parent);
+    expect(parent.FLOKA_SANDBOX_ROOT).toBe("/sbx/a");
+    expect(readIsolationEnv("SANDBOX_ROOT", { ...parent, CLAUDESTRA_SANDBOX_ROOT: "/sbx/b" })).toBe("/sbx/b");
+    const dropped: Record<string, string | undefined> = { ...parent, CLAUDESTRA_SANDBOX_ROOT: undefined };
+    expect(readIsolationEnv("SANDBOX_ROOT", dropped)).toBe("/sbx/a");
+    applyRenamedEnv(dropped);
+    expect([dropped.CLAUDESTRA_SANDBOX_ROOT, dropped.FLOKA_SANDBOX_ROOT]).toEqual(["/sbx/a", "/sbx/a"]);
+    expect(() => readIsolationEnv("SANDBOX_ROOT", { ...parent, CLAUDESTRA_SANDBOX_ROOT: "/sbx/b", FLOKA_SANDBOX_ROOT: "/sbx/c" })).toThrow("FLOKA_SANDBOX_ROOT");
+    expect(() => readIsolationEnv("SANDBOX_ROOT", { CLAUDESTRA_SANDBOX_ROOT: "/sbx/b", FLOKA_SANDBOX_ROOT: "/sbx/a" })).toThrow("FLOKA_SANDBOX_ROOT");
+    expect(parent.FLOKA_RENAME_ENV_SYNC).not.toContain("/sbx/a"); // 指纹不含值
   });
 
   test("生产配置里的 FLOKA_ 目录进拒绝清单", () => {

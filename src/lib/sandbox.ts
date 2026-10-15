@@ -11,7 +11,7 @@ import { dirname, join, relative, resolve, isAbsolute, basename } from "path";
 import { installOutboundGuard } from "./sandbox-outbound.js";
 import { piStateDirProblem } from "./sandbox-pi-fs.js";
 import { FlokaIsolationConflict, readIsolationEnv } from "./floka-env/read.js";
-import { suffixOf } from "./floka-env/names.js";
+import { ENV_FAMILIES, legacyName, suffixOf } from "./floka-env/names.js";
 import { productionRoots } from "./floka-env/roots.js";
 import {
   isLab, LAB_FLAG, labConfigProblems, labInstancePortsOf, labOutboundPorts, labPeerUrlProblem, labPushEndpointProblem, labRelayUrl, labRelayUrlProblem, LAB_ROOT_ENV,
@@ -45,6 +45,20 @@ function iso(key: string, env: Env): string {
     if (e instanceof FlokaIsolationConflict) throw new SandboxViolation([e.message]);
     throw e;
   }
+}
+
+/**
+ * 交给 lib/sandbox-lab.ts 的 env（它只读旧名）：沙箱 / lab 变量换成两名合一的值（iso：FLOKA_ 新名也认，冲突拒）。
+ * 两名本来一致就原样返回；否则包一层只改这几个键的视图（不拷 env：Bun 运行时写进去的代理变量不可枚举，拷了就丢）
+ */
+function labEnv(env: Env): Env {
+  const fix = new Map<string, string>();
+  for (const s of ENV_FAMILIES["sandbox-lab"]) {
+    const k = legacyName(s), v = iso(k, env);
+    if (v !== (env[k] || "").trim()) fix.set(k, v);
+  }
+  if (!fix.size) return env;
+  return new Proxy(env, { get: (t, k) => (typeof k === "string" && fix.has(k) ? fix.get(k) : Reflect.get(t, k)) });
 }
 
 /**
@@ -181,15 +195,16 @@ export function enforceSandboxProcess(c: DirCheck & { bridgeUrl: () => string; d
   const port = portOf(new URL(c.bridgeUrl()));
   const envPort = (c.env.BRIDGE_PORT || "").trim();
   if (envPort && Number(envPort) !== port) problems.push(`BRIDGE_PORT=${envPort} 与 BRIDGE_URL 的端口 ${port} 不一致`);
+  const lab = labEnv(c.env);
   try {
-    problems.push(...labConfigProblems(c.env, port, productionPorts(c.defaultPort, c.env)));
+    problems.push(...labConfigProblems(lab, port, productionPorts(c.defaultPort, c.env)));
     // lab 多开了端口：生产改过的端口清单（scripts/sandbox.ts 从生产配置里读出来）缺了就不知道还要避开哪些，不启动
-    if (isLab(c.env) && !denyPorts(c.env).length) problems.push(`lab 模式要带生产端口清单 ${SANDBOX_DENY_PORTS_ENV}（用 scripts/sandbox.ts 起）`);
+    if (isLab(lab) && !denyPorts(c.env).length) problems.push(`lab 模式要带生产端口清单 ${SANDBOX_DENY_PORTS_ENV}（用 scripts/sandbox.ts 起）`);
   } catch (e) {
     problems.push((e as Error).message); // lab 开关写法不认识：同沙箱开关，报错不启动
   }
   if (problems.length) throw new SandboxViolation(problems);
-  installOutboundGuard(new Set([port, ...labOutboundPorts(c.env)]));
+  installOutboundGuard(new Set([port, ...labOutboundPorts(lab)]));
 }
 
 /**
@@ -242,7 +257,8 @@ export function sandboxBridgeEnvProblems(defaultPort: number, env: Env = process
  * lab 模式下这两个键可以有，但只能指向 lab 自己：RELAY_URL = lab 中继，PEER_INGRESS_PORT = lab 端口之一（不是 bridge 端口）；
  * 两者都不许落在生产端口上（进程总闸已经查过 lab 端口，这里不依赖它再查一遍）
  */
-function labAllowsEnv(key: string, value: string, bridgePort: number, prod: number[], env: Env): boolean {
+function labAllowsEnv(key: string, value: string, bridgePort: number, prod: number[], raw: Env): boolean {
+  const env = labEnv(raw);
   if (!isLab(env)) return false;
   if (key === "RELAY_URL") return labRelayUrlProblem(value, env) === null && !prod.some((p) => labRelayUrl(env) === `ws://127.0.0.1:${p}`);
   const n = Number(value);
@@ -265,13 +281,14 @@ export function sandboxDisabled(feature: string, env: Env = process.env): string
  * 打开之后每个出口还要各自过 lab 的闸（sandboxRelayUrlProblem / sandboxPeerUrlProblem / sandboxPushEndpointProblem）。
  */
 export function sandboxDisabledOutsideLab(feature: string, env: Env = process.env): string | null {
-  return isSandbox(env) && !isLab(env) ? `沙箱模式下「${feature}」已关闭（lab 模式才开，docs/architecture/sandbox.md）` : null;
+  return isSandbox(env) && !isLab(labEnv(env)) ? `沙箱模式下「${feature}」已关闭（lab 模式才开，docs/architecture/sandbox.md）` : null;
 }
 
 /** 沙箱里要连的中继地址：非 lab 一律拒，lab 只认 lab 中继。非沙箱 null */
 export function sandboxRelayUrlProblem(url: string, env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
-  return isLab(env) ? labRelayUrlProblem(url, env) : "沙箱不连中继";
+  const lab = labEnv(env);
+  return isLab(lab) ? labRelayUrlProblem(url, lab) : "沙箱不连中继";
 }
 
 /**
@@ -280,14 +297,15 @@ export function sandboxRelayUrlProblem(url: string, env: Env = process.env): str
  */
 export function sandboxPeerUrlProblem(url: string | undefined, env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
-  if (!isLab(env)) return "沙箱不建 peer";
+  if (!isLab(labEnv(env))) return "沙箱不建 peer";
   return url ? labPeerUrlProblem(url, readLabInstances(iso(LAB_ROOT_ENV, env), SANDBOX_MARKER)) : null;
 }
 
 /** 沙箱里收的推送订阅 endpoint：非 lab 一律拒，lab 只认假推送端点。非沙箱 null（生产照旧按 lib/push-endpoint.ts） */
 export function sandboxPushEndpointProblem(endpoint: string, env: Env = process.env): string | null {
   if (!isSandbox(env)) return null;
-  return isLab(env) ? labPushEndpointProblem(endpoint, env) : "沙箱不收推送订阅";
+  const lab = labEnv(env);
+  return isLab(lab) ? labPushEndpointProblem(endpoint, lab) : "沙箱不收推送订阅";
 }
 
 /**

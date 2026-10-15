@@ -18,7 +18,7 @@ export const ENV_FAMILIES = {
   "agent-session": ["AGENT", "SESSION_ID", "RUNTIME", "TAKEOVER"],
   "sandbox-lab": [
     "SANDBOX", "SANDBOX_ROOT", "SANDBOX_DENY_PORTS", "SANDBOX_DENY_DIRS", "SANDBOX_LAB", "SANDBOX_PORT", "SANDBOX_PARENT_PID",
-    "LAB_ROOT", "LAB_PORTS", "LAB_PUSH_PORT", "LAB_APNS_PORT",
+    "LAB_ROOT", "LAB_PORTS", "LAB_RELAY_PORT", "LAB_PUSH_PORT", "LAB_APNS_PORT",
   ],
   "scheduler-lend": ["SCHEDULER_SERVICE", "SCHEDULER_LEASE", "LEND_WORKER", "LEND_ORDER", "AUTO_SHARE_PASS_LOCK", "MERGE_SHA"],
   "deploy-lock": ["PM_DEPLOY_LOCK_TOKEN"],
@@ -34,8 +34,11 @@ export const RENAMED_SUFFIXES: readonly string[] = Object.values(ENV_FAMILIES).f
 export const ISOLATION_SUFFIXES: readonly string[] = [...ENV_FAMILIES["sandbox-lab"], ...ENV_FAMILIES.test];
 export const ISOLATED_DIRS = ["STATE_DIR", "RUNTIME_DIR"] as const;
 
-/** 无品牌变量的词根：登记表里不许出现（不新增它们的 FLOKA_ 同义名） */
-export const UNBRANDED_STEMS = /(?:^|_)(?:BRIDGE|MCP_NAME|RELAY|DISCORD)(?:_|$)/;
+/**
+ * 无品牌变量（BRIDGE_URL、MCP_NAME、RELAY_URL、DISCORD_* …）的词根：登记的后缀不许以它们开头（不新增它们的 FLOKA_ 同义名）。
+ * 只看开头：LAB_RELAY_PORT 本来就是 CLAUDESTRA_ 族（lab 中继端口），要登记。
+ */
+export const UNBRANDED_STEMS = /^(?:BRIDGE|MCP_NAME|RELAY|DISCORD)(?:_|$)/;
 
 export const legacyName = (suffix: string): string => LEGACY_PREFIX + suffix;
 export const flokaName = (suffix: string): string => FLOKA_PREFIX + suffix;
