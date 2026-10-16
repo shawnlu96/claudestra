@@ -23,10 +23,10 @@ import { setStaleLeasePolicy, STALE_LEASE_KEY } from "../src/lib/lend-local-cont
 import { autoFixture, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
 export const E2E_MS = 30_000;
-export const FP = "abcd-ef01-2345-6789";
+const FP = "abcd-ef01-2345-6789";
 export const LEND_BRANCH = "lend/T1-abcd";
 export const CARD_BRANCH = "feat/t1";
-export const WRITE: RemotePolicy = { mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "o/r" };
+const WRITE: RemotePolicy = { mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "o/r" };
 const borrow: BorrowEntry[] = [{ peer: "mate", projects: ["p"], roles: ["review", "write"], maxOpen: 3 }];
 const ok = (stdout: string) => ({ code: 0, stdout, stderr: "", timedOut: false });
 
