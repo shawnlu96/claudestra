@@ -89,11 +89,15 @@ export function writeMdnState(state: MdnState, now: number, path = MDN_STATE_PAT
 const BACK_STAGES: readonly string[] = ["spec", "restate", "build", "fix"];
 
 /**
- * 这次交付之后有人把阶段退回去了（没记审查）：执行者已经在改，不算「没人派审」；巡检同一判定。
+ * 这次交付之后卡现在处在被退回的状态（没记审查）：执行者已经在改，不算「没人派审」；巡检同一判定。
+ * 只看交付之后最后一个阶段事件，进出 blocked 的不算（同 ledger-metrics.ts reworkCount）：blocked 恢复到 build / fix 不是退回，
+ * 退回后卡又回到 review（执行者 stage fix→review、PM 撤回）就重新算在等审。
  * 「之后」要 seq 和时刻都不早于交付：台账里两者同向，只按 seq 会把手搭的、先进 fix 后交付的事件序列误判成退回（tests/ledger-audit-audq1.test.ts）
  */
-export const rolledBackAfter = (events: readonly LedgerEvent[], d: LedgerEvent): boolean =>
-  events.some((e) => e.kind === "stage" && e.seq > d.seq && e.ts >= d.ts && BACK_STAGES.includes(String(e.data.to)));
+export function rolledBackAfter(events: readonly LedgerEvent[], d: LedgerEvent): boolean {
+  const last = events.findLast((e) => e.kind === "stage" && e.seq > d.seq && e.ts >= d.ts && e.data.from !== "blocked" && e.data.to !== "blocked");
+  return !!last && BACK_STAGES.includes(String(last.data.to));
+}
 
 /**
  * 正在等派审的那次交付：非 auto、在 build / review / fix、最后一次交付之后（按 seq）没有 dispatch / review、也没被退回；否则 null。
@@ -125,7 +129,7 @@ export interface MdnTeam {
 export function mdnPm(task: Pick<LedgerTask, "pm">, t: Pick<MdnTeam, "pms" | "isDispatcher" | "alive" | "onDuty">): string | null {
   const base = task.pm || t.pms.find((p) => !t.isDispatcher(p)) || t.pms[0] || null;
   if (!base || !t.alive || t.alive(base)) return base;
-  const others = [t.onDuty, ...t.pms.filter((p) => !t.isDispatcher(p))].filter((p): p is string => !!p && p !== base);
+  const others = [t.onDuty, ...t.pms].filter((p): p is string => !!p && p !== base && !t.isDispatcher(p)); // 当班 PM 也不能是调度助理
   return others.find((p) => t.alive!(p)) ?? base;
 }
 

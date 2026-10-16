@@ -1,7 +1,7 @@
 /**
  * RVF-2：人工卡交付提醒（lib/manual-deliver-notice.ts + bridge/manual-deliver-notice.ts）。真 SQLite 台账 + 假投递 / 假 owner 卡。
  * 交付即通知 PM、N 分钟升级 PM、再 M 分钟进 owner、派审后撤销、自动卡不触发、去重（重跑 / 巡检已推 / 巡检读到已升级）；
- * 第 1 / 2 轮对抗审查（reviews/RVF-2-r1-adv.md、RVF-2-r2-adv.md）的回归在「审查回归」两节。
+ * 第 1 / 2 / 3 轮对抗审查（reviews/RVF-2-r1-adv.md、r2、r3）的回归在「审查回归」几节。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
@@ -393,5 +393,60 @@ describe("审查回归（RVF-2 r2）", () => {
     expect(perCard).toHaveLength(3);
     await at(T0 + 61 * MIN, tick);
     expect(logs.filter((l) => l.includes("这一轮没处理完"))).toHaveLength(6);
+  });
+});
+
+describe("审查回归（RVF-2 r3）", () => {
+  /** 交付时不带 --from：卡留在原阶段（build；fix 先经一轮退回） */
+  function deliveredInPlace(stage: "build" | "fix") {
+    deliveredCard();
+    if (stage === "fix") {
+      moveStage(db, ctx(T0 + 1000, PM), { taskId: ID, from: "review", to: "fix" });
+      return deliver(db, ctx(T0 + 2000, EXE), { taskId: ID }).event;
+    }
+    return null;
+  }
+
+  test.each([["build"], ["fix"]] as const)("S1 blocked 恢复到 %s 不是退回：照常升级、开 owner 卡，巡检照报", async (stage) => {
+    if (stage === "build") {
+      createTask(db, ctx(0), { project: P, id: ID, title: ID, kind: "code", stage: "spec", agent: EXE });
+      setWorkflow(db, ctx(MIN), { taskId: ID, taskRev: 1, workflowRev: 0, template: "code", templateVersion: 2, mode: "manual",
+        authorFamily: "claude", fallback: "PM 核对", reason: "pm_hold: PM 留人工" });
+      moveStage(db, ctx(2 * MIN), { taskId: ID, from: "spec", to: "restate" });
+      moveStage(db, ctx(3 * MIN), { taskId: ID, from: "restate", to: "build" });
+      deliver(db, ctx(T0, EXE), { taskId: ID });
+    } else deliveredInPlace("fix");
+    moveStage(db, ctx(T0 + 3000, PM), { taskId: ID, from: stage, to: "blocked" });
+    moveStage(db, ctx(T0 + 4000, PM), { taskId: ID, from: "blocked", to: stage });
+    const tick = ticker();
+    for (const m of [1, 11, 41]) await at(T0 + m * MIN, tick); // fix 那次交付在 T0 + 2s
+    expect(kinds()).toEqual(["notify", "pm"]);
+    expect(cards).toHaveLength(1);
+    setMdnAuditPort({ config: () => ({ pmAfterMs: 10 * MIN, ownerAfterMs: 30 * MIN }), pushedAt: () => null });
+    expect(auditLedger(snapOf([PM]), T0 + 11 * MIN, observe).findings.filter((x) => x.rule === "manual_deliver_no_review")).toHaveLength(1);
+  });
+
+  test("S2 PM 退回后执行者 stage fix→review（不走 deliver）：重新算在等审，照常升级、开 owner 卡", async () => {
+    deliveredCard();
+    moveStage(db, ctx(T0 + 1000, PM), { taskId: ID, from: "review", to: "fix" });
+    const tick = ticker();
+    await at(T0 + MIN, tick);
+    expect(kinds()).toEqual([]); // 退回中：不算等审
+    moveStage(db, ctx(T0 + 2 * MIN, EXE), { taskId: ID, from: "fix", to: "review" });
+    for (const m of [3, 10, 40]) await at(T0 + m * MIN, tick);
+    expect(kinds()).toEqual(["notify", "pm"]);
+    expect(cards).toHaveLength(1);
+  });
+
+  test("S3 回落当班 PM 也不能落到调度助理：没开班子、真 PM 不在岗、没当班指针 → 仍给真 PM（投不出去走 owner），巡检同", async () => {
+    setMeta(db, ctx(0), { project: P, key: "pms", value: ["agent-x-dispatch", PM] });
+    deliveredCard();
+    const tick = ticker({ activeAgents: () => new Set(["agent-x-dispatch", EXE]) });
+    for (const m of [1, 10]) await at(T0 + m * MIN, tick);
+    expect(sends.map((x) => x.to)).toEqual([PM, PM]);
+    setMdnAuditPort({ config: () => ({ pmAfterMs: 10 * MIN, ownerAfterMs: 30 * MIN }), pushedAt: () => null });
+    const agent = (name: string, status: string) => ({ name, projectId: P, windowAlive: true, turn: "idle" as const, lastWriteAt: null, status });
+    const f = auditLedger({ ...snapOf(["agent-x-dispatch", PM]), agents: [agent("agent-x-dispatch", "active"), agent(PM, "stopped")] }, T0 + 10 * MIN, observe).findings;
+    expect(f.filter((x) => x.rule === "manual_deliver_no_review")).toEqual([expect.objectContaining({ notify: PM })]);
   });
 });
