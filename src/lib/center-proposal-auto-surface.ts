@@ -5,7 +5,8 @@ import { REPO_ROOT } from "./repo-root.js";
 import type { AutoHit, AutoReason } from "./center-proposal-auto.js";
 
 const KNOWN_ROOTS = ["src/", "tests/", "docs/", "web/", "scripts/"];
-const nameExempt = (g: string) => ["tests/", "docs/"].some(r => g.startsWith(r));
+const nameExempt = (g: string) => ["tests/", "docs/"].some(r => g.toLowerCase().startsWith(r));
+const AUTO_FILE_PATTERNS = FILE_PATTERNS.map(([, re]) => new RegExp(re.source, re.flags.includes("i") ? re.flags : `${re.flags}i`));
 const DATA_SCHEMA = /ledger-store|ledger-schema|migrat|\.sql(?:$|[^a-z])|shared-ledger-contract|recovery-key-(?:class|defaults)|(?:^|\/)scripts\/guard\//i;
 const PERMISSION_FILES = [
   "src/lib/peer-scope-gate.ts", "src/lib/peer-secret-gate.ts", "src/lib/order-tool-route.ts", "src/lib/caller-identity.ts",
@@ -70,10 +71,10 @@ function reachesDir(g: string, dir: string): boolean {
 }
 
 function literalReasons(g: string): AutoReason[] {
-  const reasons: AutoReason[] = [], name = g.slice(g.lastIndexOf("/") + 1).toLowerCase();
-  if (g.split("/").includes(".claude") || FILE_PATTERNS.some(([, re]) => re.test(g))
+  const folded = g.toLowerCase(), reasons: AutoReason[] = [], name = folded.slice(folded.lastIndexOf("/") + 1);
+  if (folded.split("/").includes(".claude") || AUTO_FILE_PATTERNS.some(re => re.test(g))
     || (!nameExempt(g) && KEYWORDS.some(k => name.includes(k)))) reasons.push("glob_security_surface");
-  if (!nameExempt(g) && scopeWireProtected(g)) reasons.push("glob_permission_gate");
+  if (!nameExempt(g) && scopeWireProtected(folded)) reasons.push("glob_permission_gate");
   if (!nameExempt(g) && DATA_SCHEMA.test(g)) reasons.push("glob_data_schema");
   return reasons;
 }
@@ -89,35 +90,39 @@ export function repoFiles(): readonly string[] | null {
   return repoFilesCache;
 }
 
-/** 范围可指文件或目录；匹配保护文件任一祖先同样包含该文件。 */
-function covers(glob: Bun.Glob, path: string): boolean {
+/** 保护匹配统一忽略大小写，避免在不区分大小写的文件系统漏判；目录也包含其子文件。 */
+function covers(globs: readonly Bun.Glob[], path: string): boolean {
   const parts = path.split("/");
-  return parts.some((_, i) => glob.match(parts.slice(0, i + 1).join("/")));
+  return parts.some((_, i) => {
+    const prefix = parts.slice(0, i + 1).join("/");
+    return globs[0]!.match(prefix) || globs[1]!.match(prefix.toLowerCase());
+  });
 }
 
 /** 固定保护路径 + 保护目录 + 已跟踪名字命中；通配本身不算风险。 */
 export function globDetails(raw: string, files: readonly string[] | null = repoFiles()): AutoHit[] {
-  const g = raw.replace(/^\.\//, ""), hits: AutoHit[] = [];
+  const g = raw.replace(/^\.\//, ""), folded = g.toLowerCase(), hits: AutoHit[] = [];
   const add = (reason: AutoReason, path = "") => {
     if (!hits.some(h => h.reason === reason && h.path === path)) hits.push({ reason, source: raw, path });
   };
   if (!g.trim()) { add("glob_empty"); return hits; }
   if (malformed(g)) { add("glob_invalid"); return hits; }
-  if (!KNOWN_ROOTS.some(r => g.startsWith(r))) add("glob_outside_roots");
+  if (!KNOWN_ROOTS.some(r => folded.startsWith(r))) add("glob_outside_roots");
   const wild = WILD.test(g), prefix = g.split("/").findIndex(s => WILD.test(s));
-  if (!wild) for (const why of literalReasons(g)) add(why, g);
+  // 新文件还没进 git 也不能靠加通配绕过明确的安全名字；普通通配本身不触发名字保护。
+  for (const why of literalReasons(g)) add(why, g);
   if (!reliable(g)) { add("glob_unresolved"); return hits; }
   if (wild && files === null) add("glob_unresolved");
   if (wild && !nameExempt(g) && /^(?:(?:src|scripts|web)\/)?\*\*(?:\/\*)?$/.test(g)) add("glob_unresolved");
-  const glob = new Bun.Glob(g.replace(/\/$/, ""));
+  const globs = [g, folded].map(pattern => new Bun.Glob(pattern.replace(/\/$/, "")));
   const covered = (path: string, why: AutoReason) => {
     add(why, path);
     if (wild && path.split("/").length - 1 > prefix) add("glob_wide", path);
   };
-  for (const [dir, why] of PROTECTED_DIRS) if (wild ? reachesDir(g, dir) : `${g}/`.startsWith(dir) || dir.startsWith(`${g}/`)) covered(dir, why);
-  for (const [path, why] of CONCRETE) if (covers(glob, path)) covered(path, why);
+  for (const [dir, why] of PROTECTED_DIRS) if (wild ? reachesDir(g, dir) || reachesDir(folded, dir) : `${folded}/`.startsWith(dir) || dir.startsWith(`${folded}/`)) covered(dir, why);
+  for (const [path, why] of CONCRETE) if (covers(globs, path)) covered(path, why);
   for (const path of files ?? []) {
-    if (!covers(glob, path)) continue;
+    if (!covers(globs, path)) continue;
     for (const why of literalReasons(path)) covered(path, why);
   }
   return hits;

@@ -441,7 +441,7 @@ test("PROPAUTO2 [验收线 2] 目录前缀、字符类、brace、递归 glob 与
   for (const g of ["scripts/foo-*/**", "src/lib/acp/retry-*/**", "src/lib/runtimes/opencode*/**", "web/features/new/**"])
     expect(globHits(g, [])).toEqual([]);
   expect(globHits("tests/fixtures/x?.json", null)).toContain("glob_unresolved");
-  expect(globHits("src/lib/new-auth-*.ts", [])).toEqual([]);
+  expect(globHits("src/lib/new-auth-*.ts", [])).toContain("glob_permission_gate");
   expect(globHits("src/lib/new-auth-*.ts", ["src/lib/new-auth-cache.ts"])).toContain("glob_permission_gate");
 });
 
@@ -462,4 +462,33 @@ test("PROPAUTO2 [验收线 4] 卡与占位同限十条，另 N 条准确，文�
   expect(JSON.stringify(word.hits)).not.toContain(SECRET);
   const card = inboxCard(LOCAL, secretProposal, SELF, reasonText(word.reasons, undefined, word.hits), word.hits);
   expect(JSON.stringify(card)).not.toContain(SECRET);
+});
+
+
+test("[验收线 2] wild-name-1: 未跟踪的保护名字加通配仍判 owner", async () => {
+  const paths = ["src/lib/new-secret*.ts", "src/lib/peer-token-*.ts", "src/bridge/new-auth-*.ts",
+    "src/lib/ledger-schema-v?.ts", "src/lib/new-migrat?.ts", "src/lib/shared-ledger-contract-new-*.ts"];
+  for (const path of paths) {
+    expect(globHits(path, [])).not.toEqual([]);
+    expect(globHits(path)).not.toEqual([]);
+  }
+  for (const path of ["tests/new-secret*.ts", "docs/ledger-schema-v?.md", "tests/fixtures/new-auth-*.json"])
+    expect(globHits(path, [])).toEqual([]);
+  const h = harness(paths.map((path, i) => rec(`wild-name-${i}`, { nodes: [node("x", [path])] })));
+  h.deps.auto!.files = () => [];
+  await pollCenterProposals(h.deps);
+  expect(h.decided).toEqual([]);
+  expect(h.asks).toHaveLength(paths.length);
+  for (const [i, path] of paths.entries()) expect(h.asks[i]!.context).toContain(path);
+});
+
+test("[验收线 2] case-1: 大小写变体通配仍命中规范保护路径", () => {
+  for (const path of ["src/bridge/API-AUT?.ts", "SRC/LIB/ACP/MIGRATIO?.TS", "scripts/GUA?D/*.ts", "src/lib/NEW-SECRET*.ts"])
+    expect(globHits(path, [])).not.toEqual([]);
+  const v = classifyProposal(rec("case-hit", { nodes: [node("x", ["src/bridge/API-AUT?.ts"])] }), []);
+  expect(v.hits).toContainEqual({ reason: "glob_permission_gate", source: "src/bridge/API-AUT?.ts", path: "src/bridge/api-auth.ts" });
+  expect(globHits("src/lib/NEW-?OLICY.ts", ["src/lib/new-policy.ts"])).toEqual([]);
+  expect(globHits("src/lib/NEW-?EYS.ts", ["src/lib/new-keys.ts"])).toContain("glob_security_surface");
+  // 大小写归一只增加保护覆盖；[A-z] 原本含下划线，不能因变成 [a-z] 而漏掉原匹配。
+  expect(globHits("src/lib/new[A-z]s?cret.ts", ["src/lib/new_secret.ts"])).toContain("glob_security_surface");
 });
