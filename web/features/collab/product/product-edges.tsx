@@ -4,10 +4,11 @@ import { useId } from 'react';
 import type { Tr } from '../collab-model';
 import { edgePath, pointAt } from '../v4/canvas-view';
 import type { ProductCanvas, ProductEdgeView } from './product-layout';
-import type { ProductPick } from './product-side';
+import type { ProductPick } from './product-focus';
 import { LockIcon } from './product-edge-icons';
 import { pdText } from './product-i18n';
 import s from './product-edges.module.css';
+import fx from './product-focus.module.css';
 
 interface Box { x: number; y: number; w: number; h: number }
 interface Label extends Box { id: string; text: string; dot: boolean }
@@ -56,11 +57,17 @@ function labelsOf(canvas: ProductCanvas, tr: Tr): Label[] {
   });
 }
 
-interface Props { canvas: ProductCanvas; onPick: (p: ProductPick) => void; pick?: ProductPick | null; tr: Tr }
-export function ProductEdges({ canvas, onPick, pick, tr }: Props) {
+const NONE: ReadonlySet<string> = new Set();
+interface Props {
+  canvas: ProductCanvas; onPick: (p: ProductPick) => void; pick?: ProductPick | null; tr: Tr;
+  /** PDFOCUS1：变暗的边、加粗的边（选中的上下游 / 关键路径） */
+  dim?: ReadonlySet<string>; strong?: ReadonlySet<string>;
+}
+export function ProductEdges({ canvas, onPick, pick, tr, dim = NONE, strong = NONE }: Props) {
   const uid = useId();
   const labels = labelsOf(canvas, tr);
   const selected = (id: string) => pick?.kind === 'edge' && pick.id === id;
+  const focus = (id: string) => `${fx.fade} ${dim.has(id) ? fx.edgeDim : ''} ${strong.has(id) ? fx.edgeStrong : ''}`;
   const choose = (id: string) => onPick({ kind: 'edge', id });
   return <>
     <svg className={s.edges} width={canvas.w} height={canvas.h}>
@@ -70,7 +77,8 @@ export function ProductEdges({ canvas, onPick, pick, tr }: Props) {
       </marker>)}</defs>
       {canvas.edges.map(e => {
         const state = stateOf(e), path = e.loopY === null ? edgePath(e) : loopPath(e);
-        return <g key={e.id} className={`${s[state]} ${selected(e.id) ? s.selected : ''}`}>
+        return <g key={e.id} className={`${s[state]} ${selected(e.id) ? s.selected : ''} ${focus(e.id)}`}
+          data-pd-edge-dim={dim.has(e.id) || undefined} data-pd-edge-strong={strong.has(e.id) || undefined}>
           <path d={path} data-pd-edge={e.id} data-pd-edge-state={state} data-pd-back={e.back || undefined}
             className={s.line} markerEnd={`url(#${uid}-${state})`} />
           <path d={path} data-pd-hit={e.id} className={s.hit} strokeWidth={14} role="button" tabIndex={0}
@@ -83,7 +91,7 @@ export function ProductEdges({ canvas, onPick, pick, tr }: Props) {
     {labels.map(l => {
       const e = canvas.edges.find(e => e.id === l.id)!;
       return <button type="button" key={l.id} data-pd-label={l.id} aria-label={l.text} aria-pressed={selected(l.id)}
-        className={`${s.label} ${s[stateOf(e)]} ${selected(l.id) ? s.selected : ''} ${l.dot ? s.dot : ''}`}
+        className={`${s.label} ${s[stateOf(e)]} ${selected(l.id) ? s.selected : ''} ${l.dot ? s.dot : ''} ${focus(l.id)}`}
         style={{ left: l.x, top: l.y, width: l.w, height: l.h }} onClick={() => choose(l.id)}>
         {!l.dot && <>{e.kinds.includes('lock') && <LockIcon />}<span>{l.text}</span></>}
       </button>;
