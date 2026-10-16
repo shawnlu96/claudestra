@@ -96,6 +96,15 @@ export async function readCiSelectedRunReceipt(port: CiSelectedPort, repo: strin
   return bind(port, repo, await port.runById(repo, runId), async (sha) => lower(sha) === lower(checkout));
 }
 
+/** Archive reads must pin a completed PR run and attempt on both sides of downloading mutable artifact names. */
+export async function readCiSelectedArchiveRun(port: CiSelectedPort, repo: string, id: number, head: string, attempt: number): Promise<CiSelectedRun> {
+  const run = await port.runById(repo, id);
+  if (run.id !== id || run.attempt !== attempt || lower(run.headSha) !== lower(head) || run.event !== "pull_request" || run.status !== "completed") {
+    throw new Error("归档期间 run / attempt / head 改变，或 CI 尚未结束");
+  }
+  return run;
+}
+
 type Command = typeof runBounded;
 const text = (v: unknown): string => (typeof v === "string" ? v : "");
 const runRow = (r: Obj): CiSelectedRun => ({ id: Number(r.id), attempt: Number(r.run_attempt), headSha: text(r.head_sha), event: text(r.event),
