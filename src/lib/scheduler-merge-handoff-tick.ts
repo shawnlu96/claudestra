@@ -32,7 +32,7 @@ export interface HandoffPr {
   draft?: boolean;
   /** Why `gh pr ready` (or `--undo`) refused to move the PR to the draft state asked for this time: tried again on a later read. */
   flipError?: string;
-  /** This read itself ran `gh pr ready [--undo]`: apart from `draft`, every field is the view from before it (read again to act). */
+  /** This read itself ran `gh pr ready [--undo]`; after an undo every field is the fresh view taken right after it. */
   flipped?: true;
 }
 /** `mainHead` = the main commit, read from the PR repository's main, that was found to contain the merge commit. */
@@ -89,16 +89,14 @@ export function ghPrState(command: typeof runBounded = runBounded,
     return dir ? handoffOnMain(dir, command) : null;
   }): ReadPr {
   return async (prRef, follow, handing, want) => {
-    const read = await ghPrRead(prRef, command, 30_000);
-    if (!read.ok) throw new Error(read.message);
-    const { pr } = read, { mergeSha } = pr;
+    const seen = await viewPr(prRef, command);
     // a PR retargeted off main goes to PM: neither its files, its carry nor its landing are worth a git read
-    if (offMain(pr)) return pr;
+    if (offMain(seen)) return seen;
+    const { pr, flip } = await draftAsWanted(prRef, command, seen, follow, want);
+    if (offMain(pr)) return { ...pr, ...flip };
+    const { mergeSha } = pr;
     const files = handing && pr.state === "OPEN" ? { files: await prFiles(filesOf(handing.project), prRef, pr.head) } : {};
     const landing = follow && pr.state === "MERGED" && mergeSha ? { landing: await mainLanding(mainOf(follow.project), prRef, pr.base, mergeSha) } : {};
-    // only the head that was handed over: a PR moved off it goes to PM or is carried first, never readied on a guess
-    const at = follow && pr.state === "OPEN" && same(pr.head, follow.head);
-    const flip = !at ? {} : want === "draft" ? (pr.draft === false ? await setDraft(prRef, command, true) : {}) : pr.draft ? await setDraft(prRef, command, false) : {};
     const full: HandoffPr = { ...pr, ...files, ...landing, ...flip };
     // CLOSED goes to PM anyway; MERGED without its merge commit is read again next round
     if (!follow || same(pr.head, follow.head) || pr.state === "CLOSED" || (pr.state === "MERGED" && !mergeSha)) return full;
@@ -126,6 +124,26 @@ export async function ghPrRead(prRef: string, command: typeof runBounded, timeou
   }
   return { ok: true, pr: { state: raw.state as HandoffPr["state"], head: raw.headRefOid, mergeSha,
     ...(typeof raw.baseRefName === "string" ? { base: raw.baseRefName } : {}), ...(typeof raw.isDraft === "boolean" ? { draft: raw.isDraft } : {}) } };
+}
+
+async function viewPr(prRef: string, command: typeof runBounded): Promise<HandoffPr> {
+  const read = await ghPrRead(prRef, command, 30_000);
+  if (!read.ok) throw new Error(read.message);
+  return read.pr;
+}
+
+/**
+ * Only the head that was handed over is moved to the draft state asked for: a PR moved off it goes to PM or is carried first, never
+ * readied on a guess. An undo that went through is followed by a fresh view, returned instead of the one from before it: a PR closed
+ * or moved between gh's view and the undo is never sent back to fix on its old head (tests/remote-review-draft-r4.test.ts).
+ */
+async function draftAsWanted(prRef: string, command: typeof runBounded, pr: HandoffPr, follow: { head: string } | undefined, want: "draft" | undefined):
+  Promise<{ pr: HandoffPr; flip: Pick<HandoffPr, "draft" | "flipError" | "flipped"> }> {
+  if (!follow || pr.state !== "OPEN" || !same(pr.head, follow.head)) return { pr, flip: {} };
+  if (want !== "draft") return { pr, flip: pr.draft ? await setDraft(prRef, command, false) : {} };
+  if (pr.draft !== false) return { pr, flip: {} };
+  const undo = await setDraft(prRef, command, true);
+  return undo.flipped ? { pr: await viewPr(prRef, command), flip: { flipped: true } } : { pr, flip: undo };
 }
 
 /** `gh pr ready [--undo]` of a full PR URL: the PR's new draft state, or why not (stderr's first line, as ghPrRead's refusal carries it). */
@@ -331,12 +349,12 @@ async function readyNow(c: HandoffCard<unknown>, pr: string, head: string): Prom
 /**
  * A PR going back to fix is made a draft again first (RRL-3): the owner's queue skips drafts, so it cannot review the fix's heads
  * before this machine has; the next handoff turns it ready again. Refused: the bounce waits (a pending P1 skips the poll pace, so
- * it is tried on every pass). A PR whose draft state gh did not report is left as it is. Null = a draft, go on. A PR the read
- * after the undo finds closed or on another head is not bounced on the earlier view: the next pass takes it through the
- * handoff's own roads. An undo the pass's first read ran is read again too: that view predates the undo.
+ * it is tried on every pass). A PR whose draft state gh did not report is left as it is. Null = a draft, go on. Every read after an
+ * undo is a fresh view (ghPrState): one finding the PR closed or on another head bounces nothing, the next pass takes it through
+ * the handoff's own roads.
  */
 async function backToDraft(c: HandoffCard<unknown>, pr: string, head: string, read: HandoffPr): Promise<string | null> {
-  if (read.draft !== false && !read.flipped) return null;
+  if (read.draft !== false) return null;
   // driveHandoff's read already asked for the draft (a P1 pending on the followed head): one refused undo a pass is enough
   if (read.flipError) return `仓库方 P1 退回前没把 PR 转回草稿，下轮再试：${read.flipError}`;
   try {

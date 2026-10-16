@@ -126,10 +126,11 @@ pass. A refusal never holds the handoff: it shows in the tick detail and every l
 An owner P1 sending the card back to fix first makes the PR a draft again (`want: "draft"` → `gh pr ready --undo`), so the
 owner's queue cannot review the fix's heads before this machine has; a refused undo holds the bounce (the card stays in `merge`,
 retried on every pass while the P1 is pending) and the next handoff turns it ready again. While that P1 is pending the handed-over
-PR's first read of a pass already asks for the draft, so a pass retrying a refused bounce write never turns it ready first. A read
-that ran `gh pr ready [--undo]` says so (`flipped`; its other fields predate the command), so an undo is always followed by a fresh
-read that must still find the PR `OPEN` at that head: closed or moved, nothing is bounced on the earlier view and the next pass
-takes the PR through the handoff's own roads. A PR whose draft state gh did not report is bounced as before, untouched.
+PR's first read of a pass already asks for the draft, so a pass retrying a refused bounce write never turns it ready first. Inside
+`ghPrState` every successful undo is followed by a fresh `gh pr view`, returned (`flipped`) instead of the view from before it, so
+no caller acts on a pre-undo snapshot: the bounce needs that fresh view `OPEN` at the P1's head; closed or moved, nothing is bounced
+on the old head and the PR goes through the handoff's own roads (at once when the pass's first read undid, else the next pass).
+A PR whose draft state gh did not report is bounced as before, untouched.
 
 ## The local merge paths a handoff project never reaches
 

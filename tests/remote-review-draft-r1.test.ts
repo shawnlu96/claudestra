@@ -4,33 +4,13 @@
  * very next pass. A PR merged at a head with an unhandled owner P1 goes to PM even while the landing proof is still missing.
  */
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
-import { recordRemoteReview } from "../src/lib/remote-review-ledger.js";
-import { parseRemoteReview } from "../src/lib/remote-review-parse.js";
 import type { runBounded } from "../src/lib/run-bounded.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { ghPrState, HANDOFF_POLL_MS, type HandoffPr, type ReadPr } from "../src/lib/scheduler-merge-handoff-tick.js";
-import { autoFixture, H1, H2, P2, toBuild } from "./scheduler-auto-helpers.js";
-import { pushText } from "./helpers/remote-review-fixture.js";
-
-const PR = "https://github.com/example/repo/pull/7";
-type F = ReturnType<typeof autoFixture>;
-
-const book = (f: F, head: string) => recordRemoteReview(f.db, f.at("scheduler"), { taskId: "T1",
-  review: parseRemoteReview(pushText({ verdict: "changes", p1: 1 }, { head }))!, peer: "Shawn", reportDir: join(f.dir, "reviews") });
-
-async function toMerge(f: F) {
-  await toBuild(f);
-  await f.tick();
-  await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1, "--pr", PR);
-  await f.tick();
-  await f.tick();
-  await f.review("pass", H1, [P2]);
-  await f.tick();
-  expect(f.task().stage).toBe("merge");
-}
+import { autoFixture, H1, H2, P2 } from "./scheduler-auto-helpers.js";
+import { book, type F, PR, toMerge } from "./helpers/remote-review-draft-fixture.js";
 
 /**
  * A GitHub PR as ghPrState moves it (tests/remote-review-draft.test.ts pins the gh argv): OPEN at the followed head, a draft turns
@@ -145,7 +125,10 @@ describe("draft-after-remote-bounce", () => {
     let code = 0;
     const command = (async (argv: string[]) => {
       calls.push(argv);
-      if (argv[2] === "ready") return { code, stdout: "", stderr: code ? "HTTP 502\nmore" : "", timedOut: false };
+      if (argv[2] === "ready") {
+        if (code === 0) view = { ...view, isDraft: true };
+        return { code, stdout: "", stderr: code ? "HTTP 502\nmore" : "", timedOut: false };
+      }
       return { code: 0, stdout: JSON.stringify(view), stderr: "", timedOut: false };
     }) as unknown as typeof runBounded;
     let view: Record<string, unknown> = { state: "OPEN", headRefOid: H1, mergeCommit: null, baseRefName: "main", isDraft: false };
@@ -153,6 +136,7 @@ describe("draft-after-remote-bounce", () => {
     expect(await read(PR, { project: "p", head: H1 }, undefined, "draft")).toMatchObject({ draft: true });
     expect(calls.filter((a) => a[2] === "ready")).toEqual([["gh", "pr", "ready", PR, "--undo"]]);
     code = 1;
+    view = { ...view, isDraft: false };
     expect(await read(PR, { project: "p", head: H1 }, undefined, "draft")).toMatchObject({ draft: false, flipError: "gh pr ready --undo 失败：HTTP 502" });
     calls.length = 0;
     expect(await read(PR, { project: "p", head: H1 })).toMatchObject({ draft: false }); // handed over and ready: nothing to do
@@ -217,34 +201,6 @@ describe("bounce-second-read-stale", () => {
         expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "remote_bounce")).toBe(false);
         expect((await tick()).cards[0]).toMatchObject({ step: "manual", detail: expect.stringContaining("不交接") });
         expect(f.task().stage).toBe("merge");
-      } finally { f.close(); }
-    });
-  }
-
-  const undone: [string, Record<string, unknown>, string][] = [
-    ["closed", { state: "CLOSED" }, "被关闭"],
-    ["moved to another head", { headRefOid: H2 }, "交接后 PR head 变了"],
-  ];
-  for (const [why, after, road] of undone) {
-    test(`handed over: the PR is ${why} by the time gh's undo succeeds — read again, no bounce on the view from before it`, async () => {
-      const f = autoFixture();
-      let view: Record<string, unknown> = { state: "OPEN", headRefOid: H1, mergeCommit: null, baseRefName: "main", isDraft: true }, onUndo = {};
-      const command = (async (argv: string[]) => {
-        if (argv[2] === "ready") view = argv.includes("--undo") ? { ...view, ...onUndo, isDraft: true } : { ...view, isDraft: false };
-        return { code: 0, stdout: argv[2] === "view" ? JSON.stringify(view) : "", stderr: "", timedOut: false };
-      }) as unknown as typeof runBounded;
-      const none = () => null, prState = ghPrState(command, none, none, none);
-      const tick = async () => (await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps, prState })).cards[0];
-      try {
-        await toMerge(f);
-        expect(await tick()).toMatchObject({ step: "handoff" });
-        expect(view.isDraft).toBe(false);
-        book(f, H1);
-        onUndo = after;
-        expect(await tick()).toMatchObject({ step: "held", detail: expect.stringContaining("PR 变了") });
-        expect(f.task().stage).toBe("merge");
-        expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "remote_bounce")).toBe(false);
-        expect(await tick()).toMatchObject({ step: "manual", detail: expect.stringContaining(road) });
       } finally { f.close(); }
     });
   }
