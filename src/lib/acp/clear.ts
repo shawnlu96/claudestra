@@ -1,9 +1,12 @@
 /** ACP /clear：新线程先完成引导（运行时要的话，host-runtime.ts），再原子换 registry；失败时由宿主接回旧线程。 */
-import { RpcError } from "./rpc.js";
+import { RpcError, RpcLostError } from "./rpc.js";
 import type { AcpSession } from "./session.js";
 import { isValidOpId, type AcpTurnLoop } from "./turn.js";
 
 type ClearResult = { ok: true; sessionId: string } | { ok: false; error: string; changed: boolean };
+
+/** session/new 的等待：Pi 带包多时起一次要一分钟上下；加上引导 60s、registry 30s、重绑 30s 仍在 bridge 的 225s 之内 */
+const CREATE_TIMEOUT_MS = 90_000;
 
 async function createClearedSession(
   session: AcpSession, oldSessionId: string, cwd: string,
@@ -12,7 +15,7 @@ async function createClearedSession(
   bootstrap: string | undefined,
 ): Promise<ClearResult> {
   try {
-    const fresh = await session.create(cwd, 50_000);
+    const fresh = await session.create(cwd, CREATE_TIMEOUT_MS);
     if (fresh === oldSessionId) throw new Error("session/new 没生成新的线程 id");
     await configure(session);
     const outcome = bootstrap ? await session.prompt(bootstrap, 60_000) : { kind: "done" as const };
@@ -22,8 +25,10 @@ async function createClearedSession(
     return { ok: true, sessionId: fresh };
   } catch (error) {
     // Pi 适配器先停旧会话再起新的：新的起不来时它在错误里标 previousSessionClosed，适配器手上已没有旧会话，要按「变了」重起接回
+    // 发出后没等到回包（超时 / 断线）：对端可能已换了线程（Pi 适配器会先停旧的），按「变了」重起接回，否则宿主拿旧 id 发的每一轮都被拒
     const closedOld = error instanceof RpcError && (error.data as { previousSessionClosed?: unknown } | undefined)?.previousSessionClosed === true;
-    return { ok: false, error: error instanceof Error ? error.message : String(error), changed: closedOld || session.sessionId !== oldSessionId };
+    const unknown = error instanceof RpcLostError && error.sent;
+    return { ok: false, error: error instanceof Error ? error.message : String(error), changed: closedOld || unknown || session.sessionId !== oldSessionId };
   }
 }
 
