@@ -80,19 +80,24 @@ interface Target {
   relay: boolean;
 }
 
+/** 中继模式下能用的机器 fp：LOCAL_FP 只属于直托管，在中继上按「没选机器」处理（否则拼出 `/m/local` → machine_unknown） */
+export function relayFp(fp: string | null | undefined): string | null {
+  return fp && fp !== LOCAL_FP ? fp : null;
+}
+
 async function resolveTarget(machine?: MachineRef): Promise<Target> {
   const cfg = await loadAppConfig();
   if (cfg.mode === "direct") return { fp: cfg.fp || LOCAL_FP, base: "", relay: false };
-  const fp = machine?.fp ?? machines.currentFp();
+  const fp = relayFp(machine?.fp ?? machines.currentFp());
   if (!fp) throw new ApiError("no machine selected — pair one first", 0, {}, "no_machine");
   return { fp, base: machineBase(cfg, fp), relay: true };
 }
 
-/** 同步版基址（`<a download>`、SW 注册前等已知配置已加载的地方）；配置没到就按直托管 */
+/** 同步版基址（`<a download>`、SW 注册前等已知配置已加载的地方）；配置没到就按直托管；中继模式没选机器（含 LOCAL_FP）不加 `/m/` */
 export function apiUrlSync(path: string, fp?: string): string {
   const cfg = appConfigSync();
-  const target = fp ?? machines.currentFp() ?? LOCAL_FP;
-  return `${cfg ? machineBase(cfg, target) : ""}${API_PREFIX}${path}`;
+  const target = cfg?.mode === "relay" ? relayFp(fp ?? machines.currentFp()) : null;
+  return `${cfg && target ? machineBase(cfg, target) : ""}${API_PREFIX}${path}`;
 }
 
 const inflight = new Map<string, Set<AbortController>>();
