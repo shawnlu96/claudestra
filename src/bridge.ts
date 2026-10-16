@@ -583,7 +583,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait } from "./lib/turn-state.js"; import { afterInsertSend, configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
-import { dropInserts, insertUnseenFrom, settleInsertReply } from "./bridge/steer-insert.js";
+import { dropInserts, insertIdsFrom, insertUnseenFrom, settleInsertReply } from "./bridge/steer-insert.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
@@ -1064,6 +1064,7 @@ async function forwardReplyToAgentClaude(
   // 这条正是 target 在答复等它的 caller(直接 reply 到 caller 的频道,codex 常这么答):按答复送、带上 expecting,
   // 并消化回程——否则回程一直挂着,target 之后在自己频道随便说一句都会被当成答复再推一次
   const answering = exactPac(fromEndpoint.channelId, targetChannelId);
+  const insertSnap = insertIdsFrom(fromEndpoint.channelId, targetChannelId); // 投到了只销这几条插队账（await 期间新插进来的不动）
   const text = content.replace(/<@!?\d+>\s*/g, "").trim();
   const fwdEnv = withLocalAttachments({
     from: { kind: "local", agentName: fromAgentName, channelId: fromEndpoint.channelId, ws: fromEndpoint.ws },
@@ -1080,7 +1081,7 @@ async function forwardReplyToAgentClaude(
   const fwd = await deliver(fwdEnv);
   if (fwd.outcome.kind === "sent") {
     if (answering) pendingAgentCalls.consume(fromEndpoint.channelId, targetChannelId, answering);
-    settleInsertReply(fromEndpoint.channelId, targetChannelId); // 明确回给插队方、投到了：插队确认（bridge/steer-insert.ts）
+    settleInsertReply(fromEndpoint.channelId, insertSnap); // 明确回给插队方、投到了：插队确认（bridge/steer-insert.ts）
     lastMessageSource.set(targetChannelId, "agent");
     console.log(`📨 reply→别agent频道: ${fromAgentName || "?"} 的消息同时 forward 给 ${targetAgentName || targetChannelId} 的 claude`);
     recordMetric("reply_cross_agent_forward", { channelId: targetChannelId, meta: { from: fromAgentName || "" } });
@@ -2266,6 +2267,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
         // 发的正是在答复一个正在等我的 caller(target 回发 send_to_agent 给问它的人)→ 投出去之后那条回程算答完了
         const answering = fromChannelId ? exactPac(fromChannelId, target.channelId) : undefined;
+        const insertSnap = fromChannelId ? insertIdsFrom(fromChannelId, target.channelId) : []; // 投到了只销这几条插队账（await 期间新插进来的不动）
 
         // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
         // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
@@ -2303,7 +2305,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
 
         if (answering && fromChannelId) pendingAgentCalls.consume(fromChannelId, target.channelId, answering);
-        if (fromChannelId) settleInsertReply(fromChannelId, target.channelId); // 明确回给插队方、投到了：插队确认（bridge/steer-insert.ts）
+        settleInsertReply(fromChannelId, insertSnap); // 明确回给插队方、投到了：插队确认（bridge/steer-insert.ts）
         recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, targetName, msg.text); // 投出去之后：PM 带 ask id 答了默认做法提问（不抛）
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");

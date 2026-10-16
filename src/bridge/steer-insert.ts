@@ -48,14 +48,19 @@ export function insertUnseenFrom(target: string, exceptCaller?: string): { fromK
     .filter((u) => !exceptCaller || u.fromChannelId !== exceptCaller);
 }
 
+/** 发起明确回复那一刻，这个插队方在 replier 手上还没确认的插队（message_id 快照）：投递成功后只销这几条 */
+export const insertIdsFrom = (replierChannel: string, callerChannel: string): string[] =>
+  insertUnseenFrom(replierChannel).filter((u) => u.fromChannelId === callerChannel).map((u) => u.messageId!);
+
 /**
- * 目标（replier 频道）明确回给插队方（caller 频道）、而且这次投递成功了：销它的插队账。只在投递成功、和消化回程槽同一刻调
- * （bridge.ts route_to_agent / reply 到 caller 频道两处）；回别人（含在自己频道回 owner）的不算
+ * 目标（replier 频道）明确回给插队方、而且这次投递成功了：只销发起回复时快照里的那几条（insertIdsFrom）。投递 await 期间插队方又插进来的
+ * 新请求不在快照里、照旧没确认——它的回程槽也还在，销了它就又能被隐式答复。只在投递成功、和消化回程槽同一刻调
+ * （bridge.ts route_to_agent / reply 到 caller 频道两处）
  */
-export function settleInsertReply(replierChannel: string, callerChannel: string): void {
+export function settleInsertReply(replierChannel: string, ids: readonly string[]): void {
   const b = book.get(replierChannel);
-  if (!b) return;
-  const keep = Object.entries(b).filter(([, { env }]) => !(env.from.kind === "local" && env.from.channelId === callerChannel));
+  if (!b || !ids.length) return;
+  const keep = Object.entries(b).filter(([id]) => !ids.includes(id));
   if (keep.length !== Object.keys(b).length) put(replierChannel, keep);
 }
 

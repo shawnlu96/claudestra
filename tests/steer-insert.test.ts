@@ -11,7 +11,7 @@ import { AgentCallBook } from "../src/bridge/agent-calls.js";
 import { afterInsertSend, configureInboundRoute } from "../src/bridge/inbound-route.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { answerableUnmixed, noteDelivered, settleStopTurn } from "../src/bridge/stop-settle.js";
-import { configureSteerInsert, dropInserts, insertUnseenFrom, noteInsert, openInsertBook, settleInsertReply } from "../src/bridge/steer-insert.js";
+import { configureSteerInsert, dropInserts, insertIdsFrom, insertUnseenFrom, noteInsert, openInsertBook, settleInsertReply } from "../src/bridge/steer-insert.js";
 import { requestStillHeld } from "../src/lib/held-pac.js";
 
 let seq = 0, clock = 1_000_000;
@@ -49,15 +49,16 @@ function world() {
     await stop("owner 的 A 件事做完了");
   };
   /**
-   * T 明确回给 X（bridge.ts route_to_agent / reply 到 X 频道两处的先后）：显式视图取精确回程槽（不撤插队保护）→ 投递（期间可插一段，比如 Stop）
-   * → 投到了才一起消化回程槽并销插队账；没投到什么都不动
+   * T 明确回给 X（bridge.ts route_to_agent / reply 到 X 频道两处的先后）：显式视图取精确回程槽（不撤插队保护）+ 插队快照 → 投递（期间可插
+   * 一段，比如 Stop / X 又插进来一条）→ 投到了才一起消化回程槽并销快照里的插队账；没投到什么都不动
    */
   const explicitReply = async (outcome: "sent" | "error" | "dropped", during?: () => Promise<unknown>) => {
     const answering = book.exact(T, X, (r) => requestStillHeld(r, insertUnseenFrom(T, X)));
+    const snap = insertIdsFrom(T, X);
     await during?.();
     if (outcome !== "sent") return answering;
     if (answering) book.consume(T, X, answering);
-    settleInsertReply(T, X);
+    settleInsertReply(T, snap);
     return answering;
   };
   return { T, X, Y, to, book, stillHeld, pushed, stop, steerEnv, turnA, explicitReply, ambiguous: () => ambiguous };
@@ -108,15 +109,15 @@ describe("没确认的插队不被隐式答复（第 2 轮 P1-A）", () => {
     expect(w.book.waiting(w.T, w.stillHeld)).toHaveLength(0);
   });
 
-  test("销账只认回给插队方本人：回别人不动；同一个 X 发的几条一起销", () => {
+  test("快照只取这个插队方的；销账只销快照里的 message_id", () => {
     const w = world();
     noteInsert(w.steerEnv("a"), w.T);
     noteInsert(w.steerEnv("b"), w.T);
-    settleInsertReply(w.T, "c-owner");
-    settleInsertReply(w.T, w.Y);
-    expect(ids(w.T).sort()).toEqual(["a", "b"]);
-    settleInsertReply(w.T, w.X);
-    expect(ids(w.T)).toEqual([]);
+    expect(insertIdsFrom(w.T, w.Y)).toEqual([]);
+    expect(insertIdsFrom(w.T, w.X).sort()).toEqual(["a", "b"]);
+    settleInsertReply(w.T, []);
+    settleInsertReply(w.T, ["a"]);
+    expect(ids(w.T)).toEqual(["b"]);
   });
 });
 
@@ -152,6 +153,28 @@ describe("明确回复：投递成功才确认（Shawn PR1689-r1 premature-inser
     });
     expect(w.book.slot(w.T, w.X)).toBeUndefined();
     expect(ids(w.T)).toEqual([]);
+  });
+
+  test("A 投递 await 期间 X 又插进来 B：A 投到后只销 A，B 的确认账和回程槽都还在，owner 回合的 drain 不推给 X（PR1689-r2）", async () => {
+    const w = world();
+    await w.turnA("pA");
+    await w.explicitReply("sent", async () => {
+      w.book.add(w.T, { callerChannelId: w.X, callerName: "agent-x", targetName: "agent-t", ts: clock + 5 }, "pB");
+      noteInsert(w.steerEnv("pB"), w.T);
+    });
+    expect(ids(w.T)).toEqual(["pB"]);
+    expect(w.book.slot(w.T, w.X)).toBeDefined(); // A 消化了，B 那条请求还挂着
+    noteDelivered(w.T, { kind: "user", owner: true, channelId: w.T }, clock + 60_000, true);
+    await w.stop("owner 的 D 件事");
+    expect(w.pushed).toHaveLength(0);
+    expect(w.book.slot(w.T, w.X)).toBeDefined();
+  });
+
+  test("没有回程槽（answering 为空）时投到了：也只销快照里的，await 期间新插的保留", async () => {
+    const w = world();
+    noteInsert(w.steerEnv("q1"), w.T); // X 的插队没有挂回程槽（oneShot 等）
+    await w.explicitReply("sent", async () => void noteInsert(w.steerEnv("q2"), w.T));
+    expect(ids(w.T)).toEqual(["q2"]);
   });
 
   test("reply 到 X 频道那条路转发失败：同样保留保护（answering 不消化、不销账）", async () => {
