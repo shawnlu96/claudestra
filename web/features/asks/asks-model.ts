@@ -51,7 +51,7 @@ export interface WebAsk {
   extra?: { files?: { name: string; attachment: string }[]; dismissed?: unknown; hidden?: unknown; quota?: unknown; acp?: unknown; failure?: unknown;
     /** 中心待批提案的授权卡（bridge lib/center-proposal-inbox.ts）：卡挂在大总管上，这里记它是为哪个本机项目开的 */
     centerProposal?: { localProjectId?: unknown };
-    /** 调度器的 now 停滞提醒（mechanism = priorityStall）：老数据没写 assignee，按 pm 收件（ask-audience.ts askRecipient） */
+    /** 调度器的 now 停滞提醒（mechanism = priorityStall）：老数据没写 assignee，按 pm 收件（ask-audience.ts） */
     mechanism?: unknown; pm?: unknown };
 }
 
