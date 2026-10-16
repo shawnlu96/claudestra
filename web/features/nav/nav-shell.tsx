@@ -39,7 +39,7 @@ function RailTabs({ tab, counts, items, version }: { tab: NavTab; counts: NavCou
   );
 }
 
-/** unread = Sidebar 算好的会话未读合计（entriesUnread(activeEntries)）；version = Sidebar 拉过的版本，「我的」页底部那行用 */
+/** unread = Sidebar 算好的会话未读合计（memberUnread(全部会话)：不随搜索与列表分组变，大总管卡、历史里的也算）；version = Sidebar 拉过的版本，「我的」页底部那行用 */
 export function NavShell({ me, unread, version }: { me: MeActions; unread: number; version: VersionInfo | null }) {
   const narrow = useNarrow();
   const tab = useNavTab(narrow);

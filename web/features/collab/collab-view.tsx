@@ -45,7 +45,7 @@ import { useWeekQuota } from "./use-count-source";
 import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
 import v from "./v4/v4.module.css";
-import { peekCollabTab } from "../nav/collab-tab-hint";
+import { peekCollabTab, useCollabTabHint } from "../nav/collab-tab-hint";
 
 /** 模块级稳定引用：详情里的 effect 依赖它，每次渲染换新函数会白跑 */
 const closeTask = () => openCollabTask(null);
@@ -90,9 +90,10 @@ function useSheetSelection(openTask: string | null, narrow: boolean) {
     if (x && x.kind !== "task" && !openTask) prepare(`~${x.kind}`);
     s.select(x);
   };
-  // 团队页「成员与位子」「规划与提案」直达（nav/collab-tab-hint.ts）：手机团队在整屏页里，挂上就经 select 打开（压了历史，系统返回先回首页）
+  // 团队页「成员与位子」「规划与提案」直达（nav/collab-tab-hint.ts）：手机团队在整屏页里，挂上（或已挂着收到 live 提示）就经 select 打开（压了历史，系统返回先回首页）
   // eslint-disable-next-line react-hooks/exhaustive-deps -- 只看挂载那一刻的提示
   useEffect(() => { if (narrow && peekCollabTab()) select({ kind: "team" }); }, []);
+  useCollabTabHint(() => { if (narrow && s.sel?.kind !== "team") select({ kind: "team" }); });
   return { ...s, select };
 }
 

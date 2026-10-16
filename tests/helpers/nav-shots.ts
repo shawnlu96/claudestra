@@ -163,7 +163,8 @@ export async function navDom(o: NavOptions, load: () => NavDomModules) {
     for (let i = 0; i < 200; i++) { if (ok()) return; await tick(); }
     throw new Error(`timeout waiting for ${what}`);
   };
-  async function mount(width: number): Promise<NavDomView> {
+  /** extra = 与 Sidebar 并排挂的组件（在同一个 store / nav 上下文里），例如协作视图的标签探针 */
+  async function mount(width: number, extra?: () => unknown): Promise<NavDomView> {
     win.happyDOM.setViewport({ width, height: width < 640 ? 844 : 800 });
     setContextRequestForTest(null);
     await React.act(async () => mods.collab.closeCollab());
@@ -185,7 +186,7 @@ export async function navDom(o: NavOptions, load: () => NavDomModules) {
     live.add(unmount);
     const nav = { showContent: false, toContent: () => { seen.toContent++; }, toList: () => { seen.toList++; } };
     await React.act(async () => root.render(h(mods.store.ChatStoreProvider, null, h(mods.nav.ChatNavContext.Provider, { value: nav }, h(Probe),
-      h(mods.sidebar.Sidebar, { onSelect: nav.toContent })))));
+      h(mods.sidebar.Sidebar, { onSelect: nav.toContent }), extra ? h(extra) : null))));
     await React.act(async () => { await Promise.all([seen.store!.loadAgents(), seen.store!.loadProjects(), mods.asks.asksStore.refresh()]); });
     const all = (sel: string) => Array.from(doc.body.querySelectorAll(sel));
     return {

@@ -7,7 +7,7 @@ import { badgeText, type NavEntry } from "./nav-entries";
 import { NavIcon } from "./nav-icons";
 import { useNavT } from "./use-nav-t";
 
-/** waits = 等你处理的 asks 件数（同 TODAY1 收起行的 M），unread = 会话未读合计（sidebar-unread.ts entriesUnread） */
+/** waits = 等你处理的 asks 件数（同 TODAY1 收起行的 M），unread = 会话未读合计（全部会话，同标签页标题与 App 角标的口径） */
 export interface NavCounts { waits: number; unread: number }
 
 const TONE = { waits: "bg-warning text-warning-content", unread: "bg-accent text-white" } as const;
