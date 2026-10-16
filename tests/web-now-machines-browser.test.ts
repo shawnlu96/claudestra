@@ -76,7 +76,8 @@ test.skipIf(!out)("XMACH1：今天页团队与额度（借入收起 / 展开）�
           }
           await shot("team-borrowed-open");
           // 设置：主区滚回顶再开（弹窗遮罩下的主区改前改后一致）；侧栏顶的伙伴入口（改前改后都是这颗按钮）直达 peers 页
-          await g.page.evaluate(`document.querySelectorAll("main [data-now=page]").forEach((el) => { el.scrollTop = 0; }); document.querySelector("[data-now=strip]")?.scrollIntoView({ block: "start", behavior: "instant" })`);
+          await g.page.evaluate(`document.querySelectorAll("main [data-now=page]").forEach((el) => { el.scrollTop = 0; });
+            document.querySelector("[data-now=strip]")?.scrollIntoView({ block: "start", behavior: "instant" })`);
           await g.page.locator("button[aria-label^='Peer 协作']").first().click();
           await g.page.getByText("借别人的电脑跑我的活").waitFor();
           await g.page.getByText("把我的电脑借给别人").waitFor();

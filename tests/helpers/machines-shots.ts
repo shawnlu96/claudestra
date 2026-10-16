@@ -58,7 +58,7 @@ export function machinesBorrow(now = TODAY_NOW) {
 }
 
 /** /lend/quota-lines 的完整回包（today-shots 那份只够今天页额度行；设置页额度线卡要重置时刻与名额）：百分比同 today-shots */
-export function machinesQuotaLines(now = TODAY_NOW) {
+function machinesQuotaLines(now = TODAY_NOW) {
   const fam = (family: string, weekUsedPct: number) => ({ family, warnPct: 80, stopPct: 95, weekUsedPct, resetAt: now + 3 * 86_400_000, observedAt: now - MIN,
     source: "live", freshness: "fresh", state: "below", mode: "auto", limit: "none", wouldLimit: "none", granted: 2, lineCap: 2, available: 2, slots: 2 });
   return { ok: true, config: { status: "ok", error: null, mode: "auto" }, at: now, families: [fam("claude", 62), fam("codex", 18)] };
