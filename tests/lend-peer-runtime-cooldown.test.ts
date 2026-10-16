@@ -163,14 +163,18 @@ test("[验收线 5] [验收线 8] off restores today's behaviour: no rows, no st
   expect(samples()).toEqual([]);
 });
 
-test("[验收线 5] [验收线 8] observe writes no row, keeps review unknown, one sample per order id and action", () => {
+test("[验收线 5] [验收线 8] observe writes no row, keeps review unknown, one sample per order id carrying cooldown and release", () => {
   setMode("observe");
   const r = held("T1", { review: true });
   stopped(r, "x", auth());
   expect(status(r.orderId)).toBe("unknown");
   expect(rows()).toEqual([]);
   runtimeStopCooldown(db, ctx(), r as never, { reason: "stopped", detail: "x", failure: auth() }, NOW + MIN);
-  expect(samples().map((e) => e.data.actionKey).sort()).toEqual([`cooldown:${r.orderId}`, `release:${r.orderId}`]);
+  expect(samples()).toHaveLength(1);
+  expect(samples()[0]!.data).toMatchObject({ actionKey: `stop:${r.orderId}`, cooldown: { reason: "runtime:auth", until: NOW + RUNTIME_COOLDOWN_MS }, release: true });
+  const w = held("T2");
+  stopped(w, "x", auth());
+  expect(samples().filter((e) => e.data.actionKey === `stop:${w.orderId}`).map((e) => e.data.release)).toEqual([false]);
 });
 
 test("[验收线 5] default (no policy file) is on", () => {

@@ -36,22 +36,26 @@ function decide(db: Database, o: Order, now: number, policy: RecoveryPolicyPort)
   return decideRecovery(noteDefaultOn(db, a, policy(o.project, RUNTIME_COOLDOWN_KEY), now)).kind;
 }
 
-/** One sample per order id and action; an id the observe key cannot hold is logged rather than failing the lease. */
-function observe(db: Database, o: Order, kind: "cooldown" | "release", action: string, now: number): void {
+/**
+ * One sample per order id: an auth review release always comes with an auth cooldown, so both ride on the cooldown's sample.
+ * An id the observe key cannot hold is logged rather than failing the lease.
+ */
+function observe(db: Database, o: Order, cooldown: { until: number; reason: string }, release: boolean, now: number): void {
+  const action = `冷却 ${o.peer} 的 ${o.family} 到 ${new Date(cooldown.until).toISOString()}（${cooldown.reason}）`
+    + (release ? `，并释放登录失效的审查单 ${o.orderId}（不置 unknown）` : "");
   try {
-    recordObserved(db, { project: o.project, mechanism: RUNTIME_COOLDOWN_KEY, target: o.taskId, actionKey: `${kind}:${o.orderId}`, action,
-      data: { lend: { orderId: o.orderId, peer: o.peer, family: o.family } } }, now);
+    recordObserved(db, { project: o.project, mechanism: RUNTIME_COOLDOWN_KEY, target: o.taskId, actionKey: `stop:${o.orderId}`, action,
+      data: { lend: { orderId: o.orderId, peer: o.peer, family: o.family }, cooldown, release } }, now);
   } catch (e) {
     console.error(`[lend] ${RUNTIME_COOLDOWN_KEY} 观察样本没记上（${(e as Error).message}）`);
   }
 }
 
+const releasable = (o: Order, req: Stop): boolean => !isWriteStep(o.step) && stoppedForAuth(req);
+
 /** Called before leaseLend parks the order: true = treat this stopped review order like not_started (released, step unbound). */
 export function authReviewReleases(db: Database, o: Order, req: Stop, now: number, policy: RecoveryPolicyPort = recoveryPolicy): boolean {
-  if (isWriteStep(o.step) || !stoppedForAuth(req)) return false;
-  const d = decide(db, o, now, policy);
-  if (d === "observe") observe(db, o, "release", `释放 ${o.peer} 登录失效的审查单 ${o.orderId}（不置 unknown）`, now);
-  return d === "act";
+  return releasable(o, req) && decide(db, o, now, policy) === "act";
 }
 
 const stopsKey = (o: Order): string => `lend:runtime-stops:${JSON.stringify([o.peer, o.family])}`;
@@ -83,7 +87,7 @@ export function runtimeStopCooldown(db: Database, ctx: WriteCtx, o: Order, req: 
   const reason = stoppedForAuth(req) ? "runtime:auth" : repeatedStop(db, o, now) ? "runtime:stopped×2" : null;
   if (!reason) return;
   const until = now + RUNTIME_COOLDOWN_MS;
-  if (d === "observe") return observe(db, o, "cooldown", `冷却 ${o.peer} 的 ${o.family} 到 ${new Date(until).toISOString()}（${reason}）`, now);
+  if (d === "observe") return observe(db, o, { until, reason }, releasable(o, req), now);
   const cur = db.query("SELECT until, reason FROM lend_peer_cooldowns WHERE peer = ? AND family = ?").get(o.peer, o.family) as
     { until: number; reason: string } | null;
   if (cur && cur.until >= until) return;
