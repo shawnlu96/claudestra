@@ -144,6 +144,13 @@ describe("进程树观察（进程组 + 脱组后代）", () => {
     writeTree("v", running(tree));
     expect(observeTree(root, "v", () => [orphan(300, 1021, 1020)])).toBe("present");
     expect(observeTree(root, "v", () => [orphan(301, 990, 980)])).toBe("absent");
+    // 只剩 unclaimed：从第一次看到（quietAt 落盘）起只在宽限内算 present，过了按 absent（它可能是本机别的程序）
+    expect(JSON.parse(readFileSync(join(root, "trees", "v.json"), "utf8")).quietAt).toBeNumber();
+    writeTree("q", running({ ...tree, quietAt: Date.now() - 61_000 }));
+    expect(observeTree(root, "q", () => [orphan(300, 1021, 1020)])).toBe("absent");
+    expect(observeTree(root, "q", () => [orphan(300, 1021, 1020)], 120_000)).toBe("present");
+    // 认得出的成员还在：不受宽限影响
+    expect(observeTree(root, "q", () => [orphan(201, 1011, 1010), orphan(300, 1021, 1020)])).toBe("present");
     // 环境里有本次标记 = 成员；读得到环境、没标记 = 外人
     expect(live([orphan(300, 1021, 1020)], marked([300]))).toEqual({ members: [300], unclaimed: [] });
     expect(live([orphan(77, 1021, 1020)])).toEqual({ members: [], unclaimed: [] });

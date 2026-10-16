@@ -50,7 +50,8 @@ beforeEach(() => {
     // 在 spawn 之后第一次扫进程表时把自己 SIGKILL：模拟持有者死在「已起子进程、还没登记进程树」的窗口
     const scan = process.env.KILL_AT_SCAN ? () => { process.kill(process.pid, "SIGKILL"); return null; } : undefined;
     process.exit(await runFullTestGate({ scan, args, command: [process.execPath, ${JSON.stringify(join(root, "fake.ts"))}, name], env: process.env, dir,
-      pollMs: 50, noticeMs: Number(process.env.NOTICE_MS ?? 30000), drainMs: 2000, minuteMs: Number(process.env.MINUTE_MS ?? 60000) }));
+      pollMs: 50, noticeMs: Number(process.env.NOTICE_MS ?? 30000), drainMs: Number(process.env.DRAIN_MS ?? 2000),
+      orphanGraceMs: process.env.GRACE_MS ? Number(process.env.GRACE_MS) : undefined, minuteMs: Number(process.env.MINUTE_MS ?? 60000) }));
   `);
 });
 
@@ -253,6 +254,51 @@ describe("[验收线 4] 信号与回收", () => {
     expect(started()).toEqual(["a"]);
     go("x");
     await until(() => started().includes("b"), "末端退出后 b 开始");
+    go("b");
+    expect(await b.child.exited).toBe(0);
+  }, 30_000);
+
+  // 本机别的程序在测试期间起的脱组进程（不来自假 bun test）：进程表上和血缘断了的后代一样认不出归属，只在宽限内扣住名额
+  const outsider = async () => {
+    const loop = `while [ -d '${root}' ]; do sleep 0.05; done`;
+    const sh = Bun.spawn(["/bin/sh", "-c", `/bin/sh -c "${loop}" & echo $! > '${root}/outside'; exit 0`], { stdio: ["ignore", "ignore", "inherit"] });
+    expect(await sh.exited).toBe(0);
+    const pid = Number(readFileSync(join(root, "outside"), "utf8").trim());
+    expect(alive(pid)).toBe(true);
+    return pid;
+  };
+
+  test("本次测试没有后代、外部独立孤儿仍活着：宽限过后名额照常释放，下一全量启动", async () => {
+    on(1);
+    const a = drive("a", [], { GRACE_MS: "1000", DRAIN_MS: "5000" });
+    await until(() => started().includes("a"), "a 开始");
+    await Bun.sleep(800); // 监管进程至少扫到一次
+    const pid = await outsider();
+    go("a");
+    expect(await a.child.exited).toBe(0);
+    expect(alive(pid)).toBe(true);
+    expect(runLog().find((r) => r.event === "end")).toMatchObject({ code: 0, released: true });
+    expect(await a.stderr).toContain("不再算作本次测试");
+    expect(readPermitEntries(dir)).toEqual([]);
+    const b = drive("b");
+    await until(() => started().includes("b"), "b 直接开始");
+    go("b");
+    expect(await b.child.exited).toBe(0);
+    expect(alive(pid)).toBe(true);
+  }, 30_000);
+
+  test("持有者已退出、只剩外部独立孤儿：下一个申请者在宽限过后回收，不等到 maxWaitMin", async () => {
+    on(1, { maxWaitMin: 1 });
+    const a = drive("a");
+    await until(() => started().includes("a"), "a 开始");
+    await Bun.sleep(800);
+    const pid = await outsider();
+    go("a");
+    expect(await a.child.exited).toBe(0);
+    expect(runLog().find((r) => r.event === "end")).toMatchObject({ code: 0, released: false }); // 默认宽限 60s > drain 2s
+    const b = drive("b", [], { GRACE_MS: "1500", MINUTE_MS: "20000" });
+    await until(() => started().includes("b"), "宽限过后 b 开始");
+    expect(alive(pid)).toBe(true);
     go("b");
     expect(await b.child.exited).toBe(0);
   }, 30_000);

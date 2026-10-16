@@ -23,6 +23,7 @@ export const NOT_STARTED_EXIT = 75;
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 const SIGNAL_NO: Record<string, number> = { SIGHUP: 1, SIGINT: 2, SIGKILL: 9, SIGTERM: 15 };
 const MINUTE = 60_000;
+export const ORPHAN_GRACE_MS = 60_000;
 
 type Env = Record<string, string | undefined>;
 type Tree = "absent" | "present" | "unknown";
@@ -40,6 +41,8 @@ export type GateRunOptions = {
   noticeMs?: number;
   /** bun test 退出后等整树后代退出的上限；超时不释放，进程退出后由下一个申请者经进程树确认回收 */
   drainMs?: number;
+  /** 认得出的成员都没了、只剩认不出归属的孤儿（unclaimed）时，名额最多再保留多久（见 observeTree） */
+  orphanGraceMs?: number;
   /** 运行期间扫进程表、把活成员落盘的间隔 */
   scanMs?: number;
   /** maxWaitMin 的一分钟有多长；只给测试缩短用 */
@@ -56,7 +59,8 @@ const memberSchema = z.object({ pid: z.number().int().positive(), start: z.strin
 const treeSchema = z.union([
   z.object({ state: z.literal("spawning") }).strict(),
   z.object({ state: z.literal("running"), pgid: z.number().int().positive(), start: z.string().nullable(), uniq: z.string().nullable(),
-    ver: z.number().int().nullable(), uid: z.number().int().nullable(), members: z.array(memberSchema) }).strict(),
+    ver: z.number().int().nullable(), uid: z.number().int().nullable(), members: z.array(memberSchema),
+    quietAt: z.number().optional() }).strict(),
 ]);
 
 /**
@@ -80,8 +84,10 @@ function readTree(dir: string, id: string): z.infer<typeof treeSchema> | "missin
 /**
  * 某个名额的检查树还在不在。没有记录 = 获准后还没走到起进程就没了；spawning = 放行行还没发出，测试没开始也不会再开始
  * （见 GO_GATE；名额只在持有者已死时才被回收，所以这时子进程只可能读到 EOF 退出）；坏记录、读不出进程表 = unknown（保留名额）。
+ * 认得出的成员都没了、只剩认不出归属的孤儿：它可能是血缘断了的后代，也可能是本机别的程序（两者从进程表上分不出来），
+ * 所以只从「成员都没了」那一刻（quietAt，落盘）起再保留 graceMs，之后按 absent——不拿外人当本次测试的永久存活证据。
  */
-export function observeTree(dir: string, id: string, scan: Scan = scanProcesses): Tree {
+export function observeTree(dir: string, id: string, scan: Scan = scanProcesses, graceMs = ORPHAN_GRACE_MS): Tree {
   const tree = readTree(dir, id);
   if (tree === "missing") return "absent";
   if (tree === null) return "unknown";
@@ -89,7 +95,15 @@ export function observeTree(dir: string, id: string, scan: Scan = scanProcesses)
   const procs = scan();
   if (!procs) return "unknown";
   const live = liveTree(tree, id, procs);
-  return live.members.length || live.unclaimed.length ? "present" : "absent";
+  if (live.members.length) return "present";
+  if (!live.unclaimed.length) return "absent";
+  let quietAt = tree.quietAt;
+  if (quietAt === undefined) {
+    quietAt = Date.now();
+    try { writeJsonAtomicSync(treePath(dir, id), { ...tree, quietAt }); }
+    catch (e) { console.error(`[full-test-gate] 写进程树记录失败：${String(e)}`); }
+  }
+  return Date.now() - quietAt < graceMs ? "present" : "absent";
 }
 
 function signalPid(pid: number, sig: NodeJS.Signals): void {
@@ -216,7 +230,10 @@ class GateRun {
     if (!tree || !procs) return null;
     const live = liveTree(tree, this.id, procs);
     const members = live.members.filter((p) => p.pid !== tree.pgid).map((p) => ({ pid: p.pid, start: p.start, uniq: p.uniq, ver: p.ver }));
-    if (JSON.stringify(members) !== JSON.stringify(tree.members)) {
+    // 认得出的成员（含根）都没了、只剩认不出归属的孤儿：记下这一刻，孤儿最多再扣住名额 orphanGraceMs（见 observeTree）
+    const quiet = live.members.length === 0 && live.unclaimed.length > 0 && tree.quietAt === undefined;
+    if (quiet) tree.quietAt = Date.now();
+    if (quiet || JSON.stringify(members) !== JSON.stringify(tree.members)) {
       tree.members = members;
       if (this.registered) {
         try { writeJsonAtomicSync(treePath(this.o.dir, this.id), { state: "running", ...tree }); }
@@ -232,7 +249,8 @@ class GateRun {
       orderId: this.worktree.slice(-1024) || "unknown",
       workerId: (this.o.env.CLAUDESTRA_AGENT || this.o.env.USER || "unknown").slice(0, 1024),
     };
-    const deps = { verifyOwnerApproval: approvalVerifier(policy), observeCheckTree: (e: { id: string }) => observeTree(this.o.dir, e.id, this.scan) };
+    const deps = { verifyOwnerApproval: approvalVerifier(policy),
+      observeCheckTree: (e: { id: string }) => observeTree(this.o.dir, e.id, this.scan, this.o.orphanGraceMs ?? ORPHAN_GRACE_MS) };
     return lendCheckPermit({ directory: this.o.dir, config: permitConfig(policy), action, request }, this.probe, deps);
   }
 
@@ -376,18 +394,25 @@ class GateRun {
   /** bun test 退出后等整树（含脱组后代）退出再释放；等不到就不释放，本进程退出后由下一个申请者经进程树确认回收 */
   private async finish(policy: GatePolicy): Promise<boolean> {
     const deadline = Date.now() + (this.o.drainMs ?? 10_000);
-    const gone = (t: LiveTree | null) => t !== null && t.members.length === 0 && t.unclaimed.length === 0;
+    const grace = this.o.orphanGraceMs ?? ORPHAN_GRACE_MS;
+    const orphansExpired = () => this.tree?.quietAt !== undefined && Date.now() - this.tree.quietAt >= grace;
+    const gone = (t: LiveTree | null) => t !== null && t.members.length === 0 && (t.unclaimed.length === 0 || orphansExpired());
     let live = this.track();
     while (!gone(live) && Date.now() < deadline) {
       await sleep(100);
       live = this.track();
+    }
+    if (live?.unclaimed.length && gone(live)) {
+      this.err(`[full-test-gate] bun test 及认得出的后代都已退出；认不出归属的孤儿进程 ${live.unclaimed.map((p) => p.pid).join(",")} ` +
+        `超过 ${Math.round(grace / 1000)}s 仍在，不再算作本次测试，名额释放`);
     }
     if (!gone(live)) {
       const which = live === null ? "读不出进程表" : [
         live.members.length ? `还有后代进程 ${live.members.map((p) => p.pid).join(",")}` : "",
         live.unclaimed.length ? `有认不出归属、可能是它脱组后代的孤儿进程 ${live.unclaimed.map((p) => p.pid).join(",")}` : "",
       ].filter(Boolean).join("、");
-      this.err(`[full-test-gate] bun test 已退出，但${which}；名额保留到进程树确认退出后回收`);
+      const until = live !== null && live.members.length === 0 ? `进程树确认退出（或认不出归属的孤儿超过 ${Math.round(grace / 1000)}s）后回收` : "进程树确认退出后回收";
+      this.err(`[full-test-gate] bun test 已退出，但${which}；名额保留到${until}`);
       return false;
     }
     const r = await this.settle("release", policy);

@@ -9,8 +9,9 @@
  * - 环境变量里带着本次许可标记（CLAUDESTRA_FULL_TEST_PERMIT=<许可 ID>）。macOS 读不到系统自带程序（/bin/*）的环境，Linux 都能读。
  * 监管进程在测试运行期间定时扫、把活着的成员落盘，监管进程被 SIGKILL 后别的申请者凭这份记录接着认。
  * 血缘断了的（中间一环在两次扫描之间生灭）不当成没有：macOS 上根启动之后、同一用户、已被过继（现父进程不是原始父进程）、
- * 原始父进程比根晚出生，而环境又读不到（或是空的）的进程，认不出归属，记作 unclaimed，整树按「还在」处理（名额保留到它退出；
- * 不给它转发信号，它可能不是我们的）。读得到环境、没有本次标记的孤儿按外人处理（残余：故意换成不带标记的非空环境、脱组、
+ * 原始父进程比根晚出生，而环境又读不到（或是空的）的进程，认不出归属，记作 unclaimed（不给它转发信号，它可能不是我们的）。
+ * 这类孤儿和本机别的程序在测试期间起的脱组进程从进程表上分不出来，所以它只在一段宽限内扣住名额（full-test-gate.ts 的 observeTree），
+ * 不当成永久存活证据。读得到环境、没有本次标记的孤儿按外人处理（残余：故意换成不带标记的非空环境、脱组、
  * 父进程又在两次扫描之间退出的后代；Linux 没有原始父进程字段，只靠环境标记）。读不出进程表 = unknown（保留名额），
  * 从不当成已退出。tests/full-test-gate.test.ts。
  */
@@ -22,8 +23,9 @@ import { FULL_TEST_PERMIT_ENV } from "./full-test-gate-args.js";
 export type Proc = { pid: number; ppid: number; pgid: number; start: string; uid: number | null; uniq: string | null; puniq: string | null;
   ver: number | null; opv: number | null };
 type Member = { pid: number; start: string | null; uniq: string | null; ver: number | null };
-/** 登记的树：根（bun test，pgid = 它的 PID）+ 上次扫到的活成员 */
-export type TreeRoot = { pgid: number; start: string | null; uniq: string | null; ver: number | null; uid: number | null; members: Member[] };
+/** 登记的树：根（bun test，pgid = 它的 PID）+ 上次扫到的活成员；quietAt：认得出的成员都没了、只剩 unclaimed 的那一刻（full-test-gate.ts 的宽限） */
+export type TreeRoot = { pgid: number; start: string | null; uniq: string | null; ver: number | null; uid: number | null; members: Member[];
+  quietAt?: number };
 /** members：认得出的成员（含根）；unclaimed：认不出归属、但可能是这棵树的孤儿（见文件头） */
 export type LiveTree = { members: Proc[]; unclaimed: Proc[] };
 export type Scan = () => Proc[] | null;
