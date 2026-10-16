@@ -38,6 +38,7 @@ beforeAll(() => {
       if (key) cfg.jevApiKey = key;
       else delete cfg.jevApiKey;
     },
+    setInboundRouteMode: async (mode) => { cfg = { ...cfg, inboundRoute: { mode } }; },
   });
 });
 afterAll(() => {
@@ -61,7 +62,7 @@ describe("/api/v1/settings", () => {
     const res = await call("GET", "/api/v1/settings", GUEST);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, lang: "zh", groqApiKeyHint: null, jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false,
-      "steer.queueWhenBusy": true });
+      "steer.queueWhenBusy": true, inboundRouteMode: "off" });
   });
   test("PUT 要 manage grant：guest 403，什么都没改", async () => {
     expect((await call("PUT", "/api/v1/settings", GUEST, { lang: "en" })).status).toBe(403);
@@ -79,12 +80,12 @@ describe("/api/v1/settings", () => {
     const key = "gsk_abcdefghijklmnopqrstuvwxyz1234";
     const res = await call("PUT", "/api/v1/settings", OWNER, { lang: "en", groqApiKey: key });
     expect(await res.json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: "····1234", jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false,
-      "steer.queueWhenBusy": true });
+      "steer.queueWhenBusy": true, inboundRouteMode: "off" });
     expect(cfg.groqApiKey).toBe(key);
     expect(JSON.stringify(await (await call("GET", "/api/v1/settings", GUEST)).json())).not.toContain("gsk_");
     const cleared = await (await call("PUT", "/api/v1/settings", OWNER, { groqApiKey: "" })).json();
     expect(cleared).toEqual({ ok: true, lang: "en", groqApiKeyHint: null, jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false,
-      "steer.queueWhenBusy": true });
+      "steer.queueWhenBusy": true, inboundRouteMode: "off" });
     expect(cfg.groqApiKey).toBeUndefined();
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { lang: "zh" })).json()).toMatchObject({ lang: "zh" });
   });
@@ -103,6 +104,15 @@ describe("/api/v1/settings", () => {
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushAllAsks: true })).json()).toMatchObject({ pushAllAsks: true, pushNoContent: false });
     expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ pushAllAsks: true });
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushAllAsks: false })).json()).toMatchObject({ pushAllAsks: false });
+  });
+  test("入站路由开关：缺省 off，guest 改不了也读得到；owner 切 observe / on / off；别的值 400", async () => {
+    expect((await call("PUT", "/api/v1/settings", GUEST, { inboundRouteMode: "on" })).status).toBe(403);
+    expect((await call("PUT", "/api/v1/settings", OWNER, { inboundRouteMode: "yes" })).status).toBe(400);
+    expect(cfg.inboundRoute).toBeUndefined();
+    for (const m of ["observe", "on", "off"]) {
+      expect(await (await call("PUT", "/api/v1/settings", OWNER, { inboundRouteMode: m })).json()).toMatchObject({ inboundRouteMode: m });
+      expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ inboundRouteMode: m });
+    }
   });
   test("Chat 入口（T50）：缺省关，guest 改不了也读得到；owner 打开 / 关上；不是布尔 400", async () => {
     expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ talkEnabled: false,
