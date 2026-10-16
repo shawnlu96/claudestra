@@ -166,7 +166,7 @@ test.skipIf(!!baseline)("entry adds no request; stack opens the team page; back,
       const text = await teamPage(page).innerText();
       expect(text).toContain("Fixture team");
       expect(text).not.toMatch(/[0-9a-f]{16,}|\p{Extended_Pictographic}/u);
-      expect(await page.evaluate("(() => { const el = document.querySelector(\"[data-collab-view='team']\"); return el.scrollWidth <= el.clientWidth; })()")).toBe(true);
+      expect(await page.evaluate<boolean>("(() => { const el = document.querySelector(\"[data-collab-view='team']\"); return el.scrollWidth <= el.clientWidth; })()")).toBe(true);
       await shot(page, "team-page", width, external, errors);
 
       // [3] The dropdown lists only this team's bound projects; switching moves the roster read and stops the old poll.
