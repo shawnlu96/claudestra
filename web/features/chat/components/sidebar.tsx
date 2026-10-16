@@ -28,7 +28,8 @@ import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
 import { AgentListNotice } from "./agent-list-status";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch"; import { ChipLegend } from "./chip-legend";
-import { NowStrip } from "../../now/now-home"; import { NavShell } from "../../nav/nav-shell"; import { V2Shell } from "../../nav/v2-host"; import { useNavV2 } from "../../nav/nav-v2"; import { RAIL_W } from "../../nav/nav-rail"; import { memberUnread } from "../sidebar-unread";
+import { NowStrip } from "../../now/now-home"; import { NavShell } from "../../nav/nav-shell";
+import { V2Shell } from "../../nav/v2-host"; import { useNavV2 } from "../../nav/nav-v2"; import { RAIL_W } from "../../nav/nav-rail"; import { memberUnread } from "../sidebar-unread";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。

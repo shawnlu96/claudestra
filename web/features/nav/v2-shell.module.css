@@ -10,6 +10,8 @@
 
 /* 页头：安全区自垫（同侧栏顶栏），长标题单行截断不顶走右侧机器切换 */
 .head { flex-shrink: 0; display: flex; align-items: center; gap: 4px; min-height: 44px; padding: calc(var(--cstra-quota-pane-safe-top, env(safe-area-inset-top)) + 0.5rem) 12px 8px 16px; }
+/* 电脑主区：页头与下面 max-w-3xl 的内容同一列 */
+.inMain .head { width: 100%; max-width: 48rem; margin: 0 auto; padding-top: 1.5rem; }
 .back { margin-left: -8px; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 10px; color: var(--color-base-content); }
 .back:hover { background: color-mix(in srgb, var(--color-base-content) 8%, transparent); }
 .title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; outline: none; }

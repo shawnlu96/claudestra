@@ -102,6 +102,7 @@ beforeAll(async () => {
     if (path === "/app-config.json") return json({ mode: "direct", fp: FP, machineName: "fixture", version: "" });
     if (path === "/api/v1/agents") return json({ ok: true, agents: AGENTS });
     if (path === "/api/v1/projects") return json({ ok: true, projects: PROJECTS });
+    if (path === "/api/v1/settings") return json({ ok: true, navV2: false }); // NAVBAR1 旧布局；新版宿主在 web-dom-nav-v2.test.ts
     if (path === "/api/v1/asks") return json({ ok: true, asks: ASKS, now: NOW, canAnswer: true });
     if (path === "/api/v1/shared-ledger/context") return world.identities === "fail" ? json({ ok: false }, 503) : json({ identities: world.identities });
     if (path === "/api/v1/shared-projects/snapshot") return json(SNAPSHOT);

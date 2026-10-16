@@ -23,7 +23,8 @@ export interface GlobalSettings {
   /** 新版整页宿主（nav/v2-host.tsx）开没开：缺省开（老 bridge 没这个字段 → true） */
   navV2: boolean;
 }
-type RawSettings = { navV2?: unknown; lang?: unknown; groqApiKeyHint?: unknown; jevApiKeyHint?: unknown; pushNoContent?: unknown; pushAllAsks?: unknown; talkEnabled?: unknown; "steer.queueWhenBusy"?: unknown };
+type RawSettings = {
+  navV2?: unknown; lang?: unknown; groqApiKeyHint?: unknown; jevApiKeyHint?: unknown; pushNoContent?: unknown; pushAllAsks?: unknown; talkEnabled?: unknown; "steer.queueWhenBusy"?: unknown };
 const shapeSettings = (j: RawSettings): GlobalSettings => {
   const hint = typeof j.groqApiKeyHint === "string" ? j.groqApiKeyHint : "";
   const jev = typeof j.jevApiKeyHint === "string" ? j.jevApiKeyHint : "";
@@ -38,7 +39,8 @@ export function getSettings(): Promise<GlobalSettings> {
   return api("/settings", { timeoutMs: 8000 }).then(shapeSettings);
 }
 /** 空串 groqApiKey / jevApiKey = 清除 */
-type SettingsPatch = { lang?: "zh" | "en"; groqApiKey?: string; jevApiKey?: string; pushNoContent?: boolean; pushAllAsks?: boolean; talkEnabled?: boolean; "steer.queueWhenBusy"?: boolean; navV2?: boolean };
+type SettingsPatch = {
+  lang?: "zh" | "en"; groqApiKey?: string; jevApiKey?: string; pushNoContent?: boolean; pushAllAsks?: boolean; talkEnabled?: boolean; "steer.queueWhenBusy"?: boolean; navV2?: boolean };
 export function putSettings(patch: SettingsPatch): Promise<GlobalSettings> {
   return api("/settings", { method: "PUT", json: patch, timeoutMs: 8000 }).then(shapeSettings);
 }
