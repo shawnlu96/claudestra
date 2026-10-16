@@ -26,7 +26,8 @@ async function drag(page: Page, dx: number) {
   await page.mouse.up();
 }
 const nudge = (page: Page) => drag(page, 48);
-const LEFT = -330;
+/** 选中截图多拖 30：右侧页右缘外不留半张变暗的卡（否则卡上的字和页里的字被 shotIssues 记成重叠） */
+const LEFT = -330, SELECT_LEFT = -360;
 
 test.skipIf(!out)("project-map focus: select / filter / critical path at 1280, unchanged phone, no external requests", async () => {
   if (!out) return;
@@ -77,7 +78,7 @@ test.skipIf(!out)("project-map focus: select / filter / critical path at 1280, u
         }
         await shot("cp-select");
         if (!before) { await page.keyboard.press("Escape"); await page.locator("[data-pd-cp-toggle]").click(); await reset(); }
-        await drag(page, LEFT);
+        await drag(page, SELECT_LEFT);
         // 同一处单击：改前进子 DAG，改后是选中 + 模块页
         await teamCard(page).click(HEAD);
         if (!before) {
