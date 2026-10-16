@@ -12,7 +12,7 @@ import { getTask, listEvents, openLedger } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import type { ModelActualRecord } from "./lend-wire-types.js";
 
-export const TIER_LAUNCH_OP = "task_tier_launch";
+const TIER_LAUNCH_OP = "task_tier_launch";
 const UNKNOWN: ModelActualRecord = { model: null, effort: null, source: "unknown" };
 
 /** 一次建会话尝试：suggested = 类型解析出的值；final = 实际交给 create 的 --model / --effort（没带 = null） */
