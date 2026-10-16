@@ -67,7 +67,9 @@ const CLAIMS: Readonly<Record<Exclude<RetireItem, "legacy-read">, (r: ExitReason
   "receive-browser": receive("browser"),
   "browser-storage": (r) => clients(r, ["browser", "sw"]) || payload(r, ["device-credential"])
     || traffic(r, "receive", "browser") || infra(r, ["domain", "vapid"]),
-  scheme: (r) => clients(r, ["browser", "native"]) || infra(r, ["installCopies"]),
+  /** 旧 scheme 链接带邀请码（floka-browser-protocol/invite.ts），浏览器流量含 scheme 打开：存着的有效邀请、浏览器接收旧流量 / unknown 都挡 */
+  scheme: (r) => clients(r, ["browser", "native"]) || infra(r, ["installCopies"])
+    || payload(r, ["invite"]) || traffic(r, "receive", "browser"),
   env: (r) => sessions(r) || infra(r, ["systemd", "nginx", "installCopies"]),
 };
 

@@ -30,7 +30,7 @@ bun scripts/rename-floka/retirement/cli.ts --sample s.json --config c.json \
 | 1 | `install-alias` | 旧 MCP 会话 0；`infra.installCopies`、`infra.systemd` 为 done |
 | 2 | `receive-<区>` | 该区 `receive/*` 格实测 0；该区存量载荷全过期 / 实测无存活；待处理旧调用 0；relay / ledger 另要中心观察；browser 另要浏览器 / SW 客户端 0 |
 | 2 | `browser-storage` | 浏览器 / SW 旧客户端与离线客户端 0；设备凭据过期；`receive/browser` 0；domain、vapid done |
-| 2 | `scheme` | 浏览器 / native 旧客户端与离线客户端 0；installCopies done |
+| 2 | `scheme` | 浏览器 / native 旧客户端与离线客户端 0；installCopies done；invite 载荷存活 0 且已过期（含 unknown 都挡）；receive/browser 旧流量 0、无 unknown |
 | 2 | `env` | 旧 MCP 会话 0；systemd、nginx、installCopies done |
 | 2 | `legacy-read` | **全部**退出理由清零；旧读兼容可以长期保留，不为旧名归零提前收 |
 

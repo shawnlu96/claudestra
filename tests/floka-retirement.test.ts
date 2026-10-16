@@ -98,13 +98,35 @@ describe("[验收线 1] 旧客户端 / 旧会话 / 未过期邀请 / unknown / �
     expect(plan(s)["install-alias"].reasons).toEqual([{ code: "legacy_sessions" }]);
   });
 
-  test("未过期邀请只挡签名接收", () => {
+  test("未过期邀请只挡签名接收与 scheme", () => {
     const s = evidence();
     s.payloads.find((p: any) => p.kind === "invite").maxExpiresAt = NOW + DAY;
     const p = plan(s, phase1Retired());
     expect(p["receive-signature"].reasons).toEqual([{ code: "payload_unexpired", subject: "invite" }]);
+    expect(p.scheme.reasons).toEqual([{ code: "payload_unexpired", subject: "invite" }]);
     expect(p["receive-e2e"].retirable).toBe(true);
     expect(p["legacy-read"].retirable).toBe(false);
+  });
+
+  test("阶段 1 已收、其余证据齐全时：存着的邀请 / 邀请未知 / 浏览器接收旧流量或 unknown 各自挡 scheme", () => {
+    const invite = (s: any) => s.payloads.find((p: any) => p.kind === "invite");
+    for (const [mutate, reason] of [
+      [(s: any) => { invite(s).maxExpiresAt = NOW + DAY; }, { code: "payload_unexpired", subject: "invite" }],
+      [(s: any) => { invite(s).maxExpiresAt = "unknown"; }, { code: "payload_unexpired_unknown", subject: "invite" }],
+      [(s: any) => { invite(s).legacyLive = 1; }, { code: "payload_live", subject: "invite" }],
+      [(s: any) => { invite(s).legacyLive = "unknown"; }, { code: "payload_live_unknown", subject: "invite" }],
+      [(s: any) => { cell(s, "receive", "browser").legacy = 3; }, { code: "legacy_traffic", subject: "receive/browser/machine" }],
+      [(s: any) => { cell(s, "receive", "browser").legacy = "unknown"; }, { code: "legacy_traffic_unknown", subject: "receive/browser/machine" }],
+      [(s: any) => { cell(s, "receive", "browser").floka = "unknown"; }, { code: "floka_traffic_unknown", subject: "receive/browser/machine" }],
+    ] as const) {
+      const s = evidence();
+      mutate(s);
+      const p = plan(s, phase1Retired());
+      expect(p.scheme.retirable).toBe(false);
+      expect(p.scheme.reasons).toContainEqual(reason);
+      expect(p["receive-e2e"].retirable).toBe(true);
+      expect(reasonsFor("scheme", [reason])).toEqual([reason]);
+    }
   });
 
   test("unknown 与旧流量同样挡；外部安装副本未知挡别名 / env / scheme", () => {
@@ -250,6 +272,22 @@ describe("[验收线 3] 一项失败不越权收其他兼容；退出计划与�
     const r = on(["legacy-send", "install-alias", "receive-e2e"]);
     if (r.gear !== "on" || !r.executed) throw new Error("on 没执行");
     expect(r.executed.retired).toEqual(["legacy-send", "install-alias", "receive-e2e"]);
+  });
+
+  test("阶段 1 已收时，存着的有效邀请或浏览器接收 unknown 让 on 拒收 scheme，一个文件都不写", () => {
+    for (const mutate of [
+      (s: any) => { s.payloads.find((p: any) => p.kind === "invite").maxExpiresAt = NOW + DAY; },
+      (s: any) => { cell(s, "receive", "browser").legacy = "unknown"; },
+    ]) {
+      const s = evidence();
+      mutate(s);
+      const written: string[] = [];
+      expect(() => on(["scheme"], s, phase1Retired(), written)).toThrow(/拒绝执行.*scheme\(/);
+      expect(written).toEqual([]);
+    }
+    const r = on(["scheme"], evidence(), phase1Retired());
+    if (r.gear !== "on" || !r.executed) throw new Error("on 没执行");
+    expect(r.executed.retired).toEqual(["scheme"]);
   });
 
   test("on 不点名、点名未知项、点名已收的项都拒", () => {
