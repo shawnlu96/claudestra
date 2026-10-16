@@ -16,10 +16,10 @@ import { latestReviewerSwap, refusalEpoch } from "./scheduler-review-swap.js";
 import { getSchedulerSession, type SchedulerSession } from "./scheduler-sessions.js";
 import type { SessionRef } from "./worker-session.js";
 
-export type ReplacementTag = "" | "-ex" | "-re";
+export type ReplacementTag = "" | "-ex" | "-re" | "-fb";
 
 /** The replacement's tag, from the reviewer_swap event it follows: refusal epoch → -ex, legacy retirement → -re, family swap → none. */
-export const replacementTag = (swap: LedgerEvent): ReplacementTag => swap.data.refusal ? "-ex" : swap.data.legacy === true ? "-re" : "";
+export const replacementTag = (swap: LedgerEvent): ReplacementTag => swap.data.refusal ? "-ex" : swap.data.fallback ? "-fb" : swap.data.legacy === true ? "-re" : ""; // -fb: RVF-1 fallback
 
 export const reviewCheckoutDir = (root: string, taskId: string, tag: ReplacementTag = ""): string => join(root, `rv-${taskId.toLowerCase()}${tag}`);
 
@@ -36,7 +36,7 @@ export function boundReviewSource(db: Database, task: LedgerTask, binding: Sched
   if (!swap || !created || created.taskId !== task.id || created.action !== "ensure_session" || created.node !== "adversarial_review" ||
     created.eventSeq <= swap.seq) return null;
   const tag = replacementTag(swap);
-  return { created, swap, tag, inWindow: inWindow(swap, task) && (tag !== "-ex" || refusalEpoch(events, task)?.seq === swap.seq) };
+  return { created, swap, tag, inWindow: inWindow(swap, task) && ((tag !== "-ex" && tag !== "-fb") || refusalEpoch(events, task)?.seq === swap.seq) };
 }
 
 /**
@@ -55,7 +55,7 @@ export function boundReviewCheckout(db: Database, task: LedgerTask, ref: Session
   if (!source) return ordinary;
   const { tag } = source;
   if (tag && !source.inWindow) {
-    return { manual: `${ref.agent} 的${tag === "-ex" ? "拒审" : "旧单退休"}替代来源已不是本卡当前 head/规格/轮次的，不派审` };
+    return { manual: `${ref.agent} 的${tag === "-ex" ? "拒审" : tag === "-fb" ? "跨族降级" : "旧单退休"}替代来源已不是本卡当前 head/规格/轮次的，不派审` };
   }
   return { dir: reviewCheckoutDir(root, task.id, tag) };
 }

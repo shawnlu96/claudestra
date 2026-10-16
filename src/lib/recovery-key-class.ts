@@ -46,6 +46,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   privateMergeNarrow: { class: "permission", reason: "限制私仓合并目标与执行范围" },
   privateStartPlacement: { class: "permission", reason: "私仓任务跨机放置范围" },
   reclaimLocalFix: { class: "permission", reason: "租约回收后重新指派本机修复执行者" },
+  reviewFallback: { class: "safety", reason: "跨族审查员不可用时降级同族对抗审查并豁免跨族" },
   skipEffectsAutoScope: { class: "permission", reason: "自动批准副作用清单的范围例外" },
   staleLeaseHandover: { class: "permission", reason: "结束跨机写租约、改由本机原作者修复" },
   staleReplacement: { class: "delete-data", reason: "退役过时执行者并创建替代者" },

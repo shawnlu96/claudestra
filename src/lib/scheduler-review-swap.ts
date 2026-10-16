@@ -16,6 +16,7 @@ import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import type { reviewPlacement } from "./scheduler-placement-plan.js";
 import type { SchedulerSession } from "./scheduler-sessions.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
+import { fallbackBindMarks, fallbackBound, fallbackLapse, fallbackOf } from "./scheduler-review-fallback.js";
 
 export const latestReviewerSwap = (events: readonly LedgerEvent[]): LedgerEvent | undefined =>
   events.findLast((e) => e.kind === "scheduler" && e.data.op === "reviewer_swap");
@@ -98,7 +99,7 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
   const rebuild = swap && (swap.data.legacy === true || refusalEpoch(s.events, s.task)) ? privateRebuild(s) : null; // PRIVPLACE1
   if (rebuild) return rebuild;
   if (!swap || s.reviewer) return null;
-  if (swap.data.refusal || swap.data.legacy === true) return null; // a refusal epoch's / legacy retirement's reviewer is created locally by sessionGate, never pooled
+  if (swap.data.refusal || swap.data.fallback || swap.data.legacy === true) return null; // a refusal / fallback epoch's or legacy retirement's reviewer is created locally, never pooled
   const intent = s.intents.find((i) => i.id === swap.data.intentId);
   if (intent?.status !== "done") return { kind: "wait", code: "reviewer_swap", reason: "旧审查会话正在归档、停止，完成后再派跨家族审查" };
   const since = s.events.findLast((e) => e.kind === "stage" && e.data.to === s.task.stage)?.seq ?? 0;
@@ -261,7 +262,7 @@ const inWindow = (e: LedgerEvent, t: Window): boolean => e.data.head === t.headS
 /** The refusal epoch ruling this head / spec / round: the latest reviewer_swap, if it carries a refusal; else null. */
 export function refusalEpoch(events: readonly LedgerEvent[], task: Window): LedgerEvent | null {
   const swap = latestReviewerSwap(events);
-  return swap && refusalOf(swap) && inWindow(swap, task) ? swap : null;
+  return swap && (refusalOf(swap) || fallbackOf(swap)) && inWindow(swap, task) ? swap : null; // RVF-1: a fallback epoch rules its round the same way
 }
 
 /** The epoch's exemption as written: the fixed text with its approval id, never counted cross-model. */
@@ -274,6 +275,7 @@ function exemption(epoch: LedgerEvent): { approvalId: string; family: AuthorFami
 /** The session bound under this round's exemption epoch (bind event after it, marked with it and its approval id). */
 function exemptBind(events: readonly LedgerEvent[], task: Window, sessionId: string, family: AuthorFamily): { epoch: LedgerEvent; approvalId: string } | null {
   const epoch = refusalEpoch(events, task), mark = epoch && exemption(epoch);
+  if (epoch && fallbackOf(epoch)) return fallbackBound(events, epoch, sessionId, family) ? { epoch, approvalId: "" } : null; // RVF-1: no approval
   if (!epoch || !mark || mark.family !== family) return null;
   const bound = events.some((e) => e.seq > epoch.seq && e.kind === "scheduler" && e.data.op === "session_bind" && e.data.role === "reviewer" &&
     e.data.sessionId === sessionId && e.data.family === family && e.data.refusalEpoch === epoch.seq && e.data.approvalId === mark.approvalId);
@@ -300,6 +302,7 @@ export function exemptVerdict(db: Database, task: LedgerTask, f: VerdictFacts): 
   if (poolExemptVerdict(db, task, f, approvalLapse)) return true; // MODELXP2：池单拒审豁免（ledger-pool-refusal-gate.ts，与池审查回执同一谓词）；不成立则下面原样
   const events = listEvents(db, { project: task.project, target: task.id });
   if (!exemptFacts(events, task, f)) return false;
+  if (fallbackOf(refusalEpoch(events, task))) return true; // RVF-1: the round's fallback epoch bound this session; nothing to revoke
   const want = exemption(refusalEpoch(events, task)!)!.approvalId;
   try {
     const a = createRefusalApprovalPort(db)(task.project, task.id);
@@ -434,6 +437,7 @@ export function refusalEpochLapse(db: Database, task: LedgerTask, opts: { check:
   const legacy = legacyReviewLapse(db, task, events, opts.families);
   if (legacy) return legacy;
   const epoch = refusalEpoch(events, task), r = refusalOf(epoch ?? undefined);
+  if (epoch && fallbackOf(epoch) && !events.some((e) => e.seq > epoch.seq && e.kind === "review")) return fallbackLapse(db, task, epoch, opts.families); // RVF-1
   if (!epoch || !r || events.some((e) => e.seq > epoch.seq && (e.kind === "review" || e.data.op === HOLD_OP))) return null;
   const workflow = getWorkflow(db, task.id);
   if (workflow?.mode !== "auto" || workflow.specRev !== task.specRev || task.stage !== "review") return "卡已不在本轮自动审查";
@@ -452,7 +456,7 @@ export function refusalEpochLapse(db: Database, task: LedgerTask, opts: { check:
 export function refusalRebind(db: Database, prior: SchedulerSession, intentId: string, check: MaterialCheck | undefined): LedgerEvent | null {
   if (prior.role !== "reviewer" || prior.state !== "retired" || !prior.retireIntentId) return null;
   const intent = getIntent(db, intentId), epoch = intent && latestReviewerSwap(listEvents(db, { project: intent.project, target: intent.taskId }));
-  if (!epoch || !refusalOf(epoch) || epoch.data.intentId !== prior.retireIntentId || epoch.data.sessionId !== prior.sessionId ||
+  if (!epoch || !(refusalOf(epoch) || fallbackOf(epoch)) || epoch.data.intentId !== prior.retireIntentId || epoch.data.sessionId !== prior.sessionId ||
     intent.eventSeq <= epoch.seq) return null;
   const task = mustTask(db, intent.taskId);
   if (!inWindow(epoch, task)) return null;
@@ -464,6 +468,7 @@ export function refusalRebind(db: Database, prior: SchedulerSession, intentId: s
 
 /** The bind event's marks under a refusal epoch: the exemption text and approval id when it binds the author's family. */
 export function refusalBindMarks(epoch: LedgerEvent): Record<string, unknown> {
+  if (fallbackOf(epoch)) return fallbackBindMarks(epoch); // RVF-1
   const r = refusalOf(epoch)!;
   return { refusalEpoch: epoch.seq, approvalId: r.approvalId, crossModel: r.crossModel, ...(r.crossModel ? {} : { exemption: r.exemption }) };
 }

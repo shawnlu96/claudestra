@@ -98,6 +98,7 @@ export const RECOVERY_KEYS = [
   "privateRepoMerge",
   "privateStartPlacement",
   "reclaimLocalFix",
+  "reviewFallback",
   "reviewLocalFirst",
   "reviewSeatIdle",
   "roleModel",

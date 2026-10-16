@@ -2,15 +2,15 @@
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
-import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
-import type { LedgerTask } from "./ledger-stages.js";
+import { getIntent, getWorkflow, type AuthorFamily, type TaskWorkflow } from "./ledger-scheduler.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { resumeAutoWorkflow, resumeCore } from "./ledger-scheduler-resume.js";
 import { getEventByDedup, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { extensionMode, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
 import { manualRecoveryMechanism, PROOF_OP, proofKey, proofReason, proveRecovery, type ExternalSnapshot, type RecoveryProof } from "./manual-recovery-release.js";
 import { manualResumeReason, manualResumeVerdict } from "./manual-resume.js";
-import { recordObserved, recoveryPolicy, type RecoveryKey } from "./recovery-policy.js";
+import { gateRecovery, recordObserved, recoveryPolicy, type RecoveryKey, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { convergeFollowUp, escalationFollowUp } from "./review-converge-followup.js";
 import { roundCapText } from "./review-converge-notice.js";
 import { convergeReview, ROUND_CAP_CODE } from "./review-converge.js";
@@ -18,6 +18,11 @@ import { fixDiffOf } from "./review-converge-scope.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { planScheduler } from "./scheduler-plan.js";
 import { currentReviewFacts } from "./scheduler-review.js";
+import { cleanCreateReceipt, createFailStreak } from "./scheduler-create-retry.js";
+import { classifyModelOutcome } from "./scheduler-model-outcome.js";
+import { fallbackAction, fallbackEpochEvent, fallbackFacts, fallbackKey, type FallbackFacts, type FallbackInput } from "./scheduler-review-fallback.js";
+import { openRefusal } from "./scheduler-review-swap.js";
+import { getSchedulerSession, preserveSessionHistory } from "./scheduler-sessions.js";
 
 export interface RecoveryFence { taskId: string; taskRev: number; workflowRev: number; head: string | null; round: number; specRev: number }
 export interface ReviewRecoveryInput extends RecoveryFence { reviewSeq: number }
@@ -178,4 +183,66 @@ export function writeReviewDowngrade(db: Database, ctx: WriteCtx, input: ReviewR
     escalationFollowUp(db, task, plan);
     return { ok: true };
   });
+}
+
+type Placement = { family: AuthorFamily; machine: string };
+/** A failed review order as the service saw it: a review turn (its session), or a reviewer ensure_session (the receipt is re-read). */
+export interface ReviewFallbackInput {
+  intentId: string;
+  failure: { kind: "error" | "quota" | "auth"; message: string };
+  failed: Placement & { agent: string };
+  authorized: readonly Placement[];
+  sessionId?: string;
+}
+export type ReviewFallbackResult = { outcome: "acted"; event: LedgerEvent; duplicate: boolean } | { outcome: "observed"; recorded: boolean; action: string }
+  | { outcome: "skipped"; reason: string };
+
+/** Every fallback fact read now from the ledger (the create's receipt and streak, the binding, holds); a string says why not. */
+function fallbackRead(db: Database, input: ReviewFallbackInput): { facts: FallbackFacts; fi: FallbackInput } | string {
+  const intent = getIntent(db, input.intentId);
+  if (!intent) return "缺原调度意图";
+  const create = intent.action === "ensure_session", message = create ? intent.receipt ?? "" : input.failure.message;
+  const c = classifyModelOutcome({ failure: create ? { kind: "error", message } : input.failure });
+  const fi: FallbackInput = { intent, failed: input.failed, authorized: input.authorized, message, cls: c?.cls ?? null, recoverable: c?.recoverable ?? false,
+    row: getSchedulerSession(db, intent.taskId, "reviewer"), ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(create ? { cleanCreate: cleanCreateReceipt(intent.receipt), createStreak: createFailStreak(db, intent.taskId, "reviewer") } : {}) };
+  const facts = fallbackFacts(db, fi);
+  if (typeof facts === "string") return facts;
+  const hold = openRefusal(listEvents(db, { project: facts.task.project, target: facts.task.id }));
+  return hold ? `本卡有未处置的模型安全拒绝或拒审接续（#${hold.seq}）` : { facts, fi };
+}
+
+/** One transaction: re-read every fact, write the epoch (dedup per failed order) and retire the failed binding if there was one. */
+function applyFallback(db: Database, ctx: WriteCtx, input: ReviewFallbackInput): { event: LedgerEvent; duplicate: boolean } {
+  return tx(db, () => {
+    const done = getEventByDedup(db, fallbackKey(input.intentId));
+    if (done) return { event: done, duplicate: true };
+    const read = fallbackRead(db, input);
+    if (typeof read === "string") throw new LedgerError("conflict", `不降级：${read}`);
+    const { facts, fi } = read, e = fallbackEpochEvent(facts, fi), now = ctx.now ?? Date.now();
+    preserveSessionHistory(db);
+    const event = insertEvent(db, { ...ctx, now, dedupKey: fallbackKey(fi.intent.id) }, { project: facts.task.project, target: facts.task.id, kind: "scheduler", ...e }, true);
+    const retired = facts.row?.state === "active" ? facts.row.sessionId : null; // the failed binding; a create failure had none
+    if (retired) db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE sessionId = ?").run(fi.intent.id, now, retired);
+    return { event, duplicate: false };
+  });
+}
+
+/**
+ * RVF-1 · the reviewer fallback's only writer, under recovery key reviewFallback: off = nothing, observe = one note of where the
+ * review would go (the card escalates / backs off as before), on = the epoch. Reached through `ledger scheduler-model-outcome`
+ * (scheduler-model-wiring.ts), for a failed review turn and for a reviewer create that failed and cleaned up.
+ */
+export async function writeReviewFallback(db: Database, ctx: WriteCtx, input: ReviewFallbackInput, policy?: RecoveryPolicyPort): Promise<ReviewFallbackResult> {
+  if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "审查降级只由调度服务记录");
+  const done = getEventByDedup(db, fallbackKey(input.intentId));
+  if (done) return { outcome: "acted", event: done, duplicate: true };
+  const read = fallbackRead(db, input);
+  if (typeof read === "string") return { outcome: "skipped", reason: read };
+  const { facts, fi } = read, action = fallbackAction(facts, fi);
+  const g = await gateRecovery(db, { project: facts.task.project, mechanism: "reviewFallback", target: facts.task.id, actionKey: `fallback:${fi.intent.id}`, action,
+    data: { reviewFallback: { intentId: fi.intent.id, trigger: facts.trigger, from: input.failed, to: facts.to, reason: fi.message.slice(0, 600) } } },
+    () => applyFallback(db, ctx, input), { now: ctx.now ?? Date.now(), ...(policy ? { policy } : {}) });
+  if (g.outcome === "skipped") return { outcome: "skipped", reason: g.reason };
+  return g.outcome === "observed" ? { outcome: "observed", recorded: g.recorded, action } : { outcome: "acted", ...g.value };
 }
