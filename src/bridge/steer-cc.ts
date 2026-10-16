@@ -1,21 +1,28 @@
 /**
- * CC 的插队「至少送达一次」：回合中直投的 channel 通知，工具间隙到的会被 CC 包成不可信外部消息插进回合、出队后不再投，
- * 模型可能不理（实测 3/3 没照做）。所以投出去先记账，目标对发送方 reply / send_to_agent 就销账；回合 Stop 时还没销的，
- * 看 CC 会话记录：作为附件插进来的、或根本没落盘的，按普通消息补投原文一次（按 message_id 去重）；还排在 CC 自己队列里的不补
- * （CC 马上另起一轮正常投，补了就是两份）。另管版本闸：只有实测过的 CC 版本才直投（判据在 lib/steer-cc.ts）。
- * 单测 tests/steer-cc.test.ts；设计 docs/architecture/inbound-route.md「CC 实测」
+ * 插队（insert）的确认账：回合中送进去的请求，在目标明确回给插队方（reply 到它的频道 / send_to_agent 给它）之前都算「没确认」。
+ * - 没确认的按「目标还没看到」算（bridge.ts heldFromOf 带上 insertUnseenFrom）：目标回 owner 的话、这一轮的收尾文字都不会被当成
+ *   对插队方的答复推回去，也不消化它的回程槽（tests/steer-cc.test.ts「误认答复」）；
+ * - CC 的 channel 插队要「至少送达一次」：工具间隙到的会被包成不可信外部消息、出队后不再投。Stop 时看 CC 会话记录：作为附件插进来的、
+ *   没落盘的，把原文压进押后队列补投（随押后队列落盘、24 小时老化、叫停抬头、同一发送方的先后顺序都照押后队列的规矩）；还排在 CC
+ *   自己队列里的 / 已作为正常一轮投过的不补，也不催看门狗（CC 正要处理它）。Pi / ACP 的 steer 是真送进了回合，Stop 时只销账。
+ * 账落盘（bridge 重启还在），有效期同押后队列；StopFailure / 叫停中止 / owner 打字都不销，只在目标被 kill 时销。版本闸也在这里（判据 lib/steer-cc.ts）。
+ * 设计 docs/architecture/inbound-route.md「插队」「CC 实测」
  */
 import { readRegistryAgents } from "../lib/registry.js";
+import { statePath } from "../lib/paths.js";
 import { sessionJsonlPath } from "../lib/session-source.js";
-import { CC_INSERT_MIN_VERSION, ccInsertState, ccVersionOf, needsRedeliver, REDELIVER_HEAD, versionAtLeast } from "../lib/steer-cc.js";
+import { CC_INSERT_MIN_VERSION, ccInsertState, ccInToolWindow, ccVersionOf, isRedeliverText, needsRedeliver, redeliverHead, versionAtLeast } from "../lib/steer-cc.js";
+import { HELD_GIVE_UP_MS, type HeldQueue } from "./held-queue.js";
+import { PersistedMap } from "./persisted-map.js";
 import type { Envelope, LocalEndpoint } from "./router.js";
 
 /** 会话记录只读尾部这么多：版本每条记录都带，插队那条只会在当前回合附近 */
 const TAIL_BYTES = 1_000_000;
-/** 记账超过这么久还没 Stop（会话挂了 / 被重启）就不补了：那时补投的原文多半已过时 */
-const PENDING_TTL_MS = 30 * 60_000;
-/** 补投过的 message_id 记最近这么多条（去重 + 补投那封不再问 Jev） */
-const REDELIVERED_KEEP = 500;
+
+interface Entry { env: Envelope; at: number; via: "steer" | "channel" }
+type Book = Record<string, Entry>; // message_id → 那封
+const isBook = (v: unknown): boolean =>
+  !!v && typeof v === "object" && Object.values(v as object).every((e) => !!e && typeof e === "object" && typeof (e as Entry).at === "number" && !!(e as Entry).env);
 
 interface Deps {
   /** 这个频道的 CC 会话记录尾部；找不到 = null */
@@ -36,68 +43,81 @@ let deps: Deps = {
 };
 export const configureSteerCc = (d: Partial<Deps>): void => void (deps = { ...deps, ...d });
 
-const pending = new Map<string, Map<string, { env: Envelope; at: number }>>(); // 目标频道 → message_id → 那封
-const redelivered = new Set<string>();
+/** 目标频道 → 它手上还没确认的插队（落盘：ws 剥掉，补投时用 Stop 那一刻的连接） */
+let book = new PersistedMap<Book>(statePath("insert-pending.json"), "插队待确认", isBook);
+/** 单测换一本（path = null 只在内存；同一个 path 再开一次 = 模拟 bridge 重启） */
+export const openInsertBook = (path: string | null): void => void (book = new PersistedMap<Book>(path, "插队待确认", isBook));
 
-/** 版本闸：读得到运行中 CC 的版本、且不低于实测过的最低版本才直投；读不到 / 更低 = 插不进（insert 按排队） */
+/**
+ * CC 现在能不能插：版本闸（读得到运行中 CC 的版本、不低于实测过的最低版本，预发布版不算）+ 正在执行工具（只有这时会插进当前回合；
+ * 推理 / 出字时到的进 CC 自己的队列，owner 一按 Escape 就被当新一轮立刻投）。任一不满足 = 插不进（insert 按排队，走押后队列）
+ */
 export async function ccInsertAllowed(channelId: string): Promise<boolean> {
   const tail = await deps.tail(channelId).catch((e: Error) => (console.warn(`⚠️ 插队版本闸：读会话记录失败，按插不进: ${e.message}`), null));
-  return versionAtLeast(tail ? ccVersionOf(tail) : null, CC_INSERT_MIN_VERSION);
+  return !!tail && versionAtLeast(ccVersionOf(tail), CC_INSERT_MIN_VERSION) && ccInToolWindow(tail);
 }
 
-/** 回合中经 channel 插队送出去了：记账，等回复或 Stop */
-export function noteChannelInsert(env: Envelope, channelId: string): void {
-  const book = pending.get(channelId) ?? new Map();
-  book.set(env.meta.messageId, { env, at: deps.now() });
-  pending.set(channelId, book);
+const live = (b: Book | undefined, now: number): [string, Entry][] => Object.entries(b ?? {}).filter(([, e]) => now - e.at < HELD_GIVE_UP_MS);
+function put(channelId: string, b: Book): void {
+  if (Object.keys(b).length) book.set(channelId, b);
+  else book.delete(channelId);
+}
+
+/** 插队送进回合了（afterInsertSend）：记一笔，等目标回给插队方或 Stop */
+export function noteInsert(env: Envelope, channelId: string): void {
+  const via = env.meta.inboundRoute?.via;
+  if (!via || env.from.kind !== "local") return;
+  const now = deps.now();
+  put(channelId, { ...Object.fromEntries(live(book.get(channelId), now)), [env.meta.messageId]: { env, at: now, via } });
+}
+
+/** 没确认的插队，形状同押后队列的 unseenFrom：回程簿据此不把目标别的输出当成对插队方的答复 */
+export function insertUnseenFrom(target: string): { fromKind: string; fromChannelId?: string; messageId?: string }[] {
+  return live(book.get(target), deps.now()).map(([id, e]) => ({ fromKind: "local", fromChannelId: e.env.from.kind === "local" ? e.env.from.channelId : undefined, messageId: id }));
 }
 
 const bare = (n: string | undefined): string => (n ?? "").replace(/^agent-/, "");
-/** 目标（replier 频道）回了发送方：reply 到发送方频道，或 send_to_agent 给发送方。回别人的不算 */
+/** 目标（replier 频道）明确回了插队方：reply 到它的频道，或 send_to_agent 给它。回别人（含在自己频道回 owner）的不算 */
 export function settleInsertReply(replierChannel: string, to: { chatId?: unknown; target?: unknown }): void {
-  const book = pending.get(replierChannel);
-  if (!book) return;
-  for (const [id, { env }] of book) {
-    if (env.from.kind !== "local") continue;
-    if (to.chatId === env.from.channelId || (typeof to.target === "string" && to.target && bare(to.target) === bare(env.from.agentName))) book.delete(id);
-  }
-  if (!book.size) pending.delete(replierChannel);
+  const b = book.get(replierChannel);
+  if (!b) return;
+  const keep = Object.entries(b).filter(([, { env }]) => {
+    if (env.from.kind !== "local") return true;
+    return !(to.chatId === env.from.channelId || (typeof to.target === "string" && !!to.target && bare(to.target) === bare(env.from.agentName)));
+  });
+  if (keep.length !== Object.keys(b).length) put(replierChannel, Object.fromEntries(keep));
 }
 
-/** owner 叫停 / 在频道里打字 / agent 被 kill：它作为目标或发送方的账一起销（同 bridge.ts clearInterAgentPendingsForChannel） */
-export function dropInserts(channelId: string): void {
-  pending.delete(channelId);
-  for (const [ch, book] of pending) {
-    for (const [id, { env }] of book) if (env.from.kind === "local" && env.from.channelId === channelId) book.delete(id);
-    if (!book.size) pending.delete(ch);
-  }
-}
+/** 目标被 kill（/agent/cleanup）：它的账销掉。owner 打字 / 叫停不销——那条还要补投，叫停后的抬头由押后队列加 */
+export const dropInserts = (channelId: string): void => void book.delete(channelId);
 
-/** 补投的那封：投递时不再问 Jev（否则目标又忙时可能再插一次，又进这本账） */
-export const isInsertRedelivery = (env: Envelope): boolean => redelivered.has(env.meta.messageId) && env.content.startsWith(REDELIVER_HEAD);
+/** 补投的那封：投递时不再问 Jev（否则目标又忙时可能再插一次）。按正文抬头认，bridge 重启后从押后队列放出来也认得 */
+export const isInsertRedelivery = (env: Envelope): boolean => isRedeliverText(env.content);
 
+export interface StopSettle { redelivered: number; quiet: boolean }
 /**
- * 目标这一轮正常结束（Stop）时调：还没销的账逐条看 CC 那边的状态，该补的按普通消息补投原文（新抬头，去掉插队结论，同一个 message_id、
- * 回程归属不变），返回补投了几条（调用方据此不再发看门狗那句催促：补投的这封自己会重新挂看门狗）。读不到会话记录按没落盘补（宁可多送一次）
+ * 目标这一轮正常结束（Stop）时调（StopFailure / 叫停中止不调，账留到之后一次正常 Stop）。逐笔销账：steer 的直接销；
+ * channel 的看 CC 那边的状态，该补的把原文压进押后队列（新抬头、去掉插队结论、同一个 message_id 回程归属不变）并安排 flush。
+ * 返回补投几条、有没有「CC 正要处理」的（quiet）：两者任一为真调用方就不发看门狗那句催促——补投那封投出时自己会重新挂看门狗
  */
-export async function redeliverInserts(channelId: string, send: (env: Envelope) => Promise<unknown>, to: LocalEndpoint | undefined): Promise<number> {
-  const book = pending.get(channelId);
-  pending.delete(channelId);
-  if (!book || !to) return 0;
-  const now = deps.now();
-  const live = [...book.values()].filter((p) => now - p.at < PENDING_TTL_MS && !redelivered.has(p.env.meta.messageId));
-  if (!live.length) return 0;
+export async function settleInsertsAtStop(channelId: string, d: { held: Pick<HeldQueue, "holdEnv">; flush: () => void; to: LocalEndpoint }): Promise<StopSettle> {
+  const entries = live(book.get(channelId), deps.now());
+  book.delete(channelId);
+  const out: StopSettle = { redelivered: 0, quiet: false };
+  const cc = entries.filter(([, e]) => e.via === "channel");
+  if (!cc.length) return out;
   const tail = await deps.tail(channelId).catch((e: Error) => (console.warn(`⚠️ 插队补投：读会话记录失败，按没落盘补投: ${e.message}`), null));
-  let n = 0;
-  for (const { env } of live) {
-    const state = tail === null ? "absent" : ccInsertState(tail, env.meta.messageId);
-    if (!needsRedeliver(state)) continue;
-    redelivered.add(env.meta.messageId);
-    if (redelivered.size > REDELIVERED_KEEP) redelivered.delete(redelivered.values().next().value!);
+  for (const [id, { env }] of cc) {
+    const state = tail === null ? "absent" : ccInsertState(tail, id);
+    if (!needsRedeliver(state)) {
+      out.quiet = true;
+      continue;
+    }
     const { inboundRoute: _route, ...meta } = env.meta;
-    console.log(`↩︎ 插队补投：${to.agentName ?? channelId} 没回 ${env.meta.messageId}（CC 那边 ${state}），按普通消息再投一次原文`);
-    await send({ ...env, to, content: `${REDELIVER_HEAD}\n\n${env.content}`, meta });
-    n++;
+    console.log(`↩︎ 插队补投：${d.to.agentName ?? channelId} 没回 ${id}（CC 那边 ${state}），原文进押后队列再投一次`);
+    d.held.holdEnv({ ...env, to: d.to, content: `${redeliverHead(state)}\n\n${env.content}`, meta });
+    out.redelivered++;
   }
-  return n;
+  if (out.redelivered) d.flush();
+  return out;
 }

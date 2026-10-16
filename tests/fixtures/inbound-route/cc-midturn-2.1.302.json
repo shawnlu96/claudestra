@@ -23,6 +23,7 @@
       "content": [
        {
         "type": "tool_use",
+        "id": "toolu_01NeFBUmKSasf2KRAXvMm2WQ",
         "name": "Bash",
         "input": {
          "command": "python3 -c \"import time; time.sleep(25); print('slept')\"",
@@ -51,6 +52,7 @@
       "role": "user",
       "content": [
        {
+        "tool_use_id": "toolu_01NeFBUmKSasf2KRAXvMm2WQ",
         "type": "tool_result",
         "content": "slept",
         "is_error": false
@@ -209,6 +211,7 @@
       "content": [
        {
         "type": "tool_use",
+        "id": "toolu_01AjVMpwr8g3d9qSjhzxK233",
         "name": "Bash",
         "input": {
          "command": "python3 -c \"import time; time.sleep(25); print('slept')\"",
@@ -237,6 +240,7 @@
       "role": "user",
       "content": [
        {
+        "tool_use_id": "toolu_01AjVMpwr8g3d9qSjhzxK233",
         "type": "tool_result",
         "content": "slept",
         "is_error": false

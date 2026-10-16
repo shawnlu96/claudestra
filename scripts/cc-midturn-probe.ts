@@ -6,7 +6,7 @@
  * --strict-mcp-config 只挂本脚本的假 channel 服务（不拉起线上 channel-server）、disableAllHooks（Stop 等 hook 不打到线上 bridge）。
  * 会真花模型额度（每个场景一两个小回合）。结论与版本号记在 docs/architecture/inbound-route.md。
  *
- *   bun scripts/cc-midturn-probe.ts [--model sonnet] [--effort high] [--only idle,reason,tool,tail,box-tool,box-reason] [--repeat 1] [--keep]
+ *   bun scripts/cc-midturn-probe.ts [--model sonnet] [--effort high] [--only idle,reason,tool,tail,box-tool,box-reason,esc-queued] [--repeat 1] [--keep]
  *   bun scripts/cc-midturn-probe.ts serve <dir>     # 内部用：假 channel MCP 服务（CC 拉起）
  */
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -132,6 +132,7 @@ const viaBox: Deliver = async (c, token) => typeLine(c, `${token}: please reply 
 /** 原回合：发 prompt → 等到 when 说可以投 → 投 → 等两轮都结束 → 判 */
 async function scenario(
   c: Ctx, name: string, channel: Outcome["channel"], prompt: string, endMark: string | null, when: (rs: Rec[]) => string | false,
+  after?: (c: Ctx, token: string) => Promise<Partial<Outcome>>,
 ): Promise<Outcome> {
   const token = `T${Date.now().toString(36).toUpperCase()}`;
   const from = records(c.sid).length;
@@ -140,8 +141,9 @@ async function scenario(
   await (channel === "notify" ? viaNotify : viaBox)(c, token);
   await sleep(1_500);
   const queuedHint = channel === "inputbox" ? /Press up to edit queued messages/.test(await pane(c)) : undefined;
+  const extra = after ? await after(c, token) : {};
   await settle(c);
-  return { scenario: name, token, channel, at, ...classify(c, from, token, endMark), ...(queuedHint === undefined ? {} : { queuedHint }) };
+  return { scenario: name, token, channel, at, ...classify(c, from, token, endMark), ...(queuedHint === undefined ? {} : { queuedHint }), ...extra };
 }
 
 const REASON_PROMPT = "ultrathink. Without using any tools, reason carefully in your head before writing anything: count the lattice paths from (0,0) to (7,7) " +
@@ -174,6 +176,12 @@ const SCENARIOS: Record<string, (c: Ctx) => Promise<Outcome>> = {
     (rs) => (rs.some((r) => isAssistant(r) && text(r).includes("END-TAIL")) ? "最后一条 assistant 文本已落盘（回合尾）" : false)),
   "box-tool": (c) => scenario(c, "box-tool", "inputbox", TOOL_PROMPT("END-BOXTOOL"), "END-BOXTOOL", inTool({})),
   "box-reason": (c) => scenario(c, "box-reason", "inputbox", REASON_PROMPT, "END-REASON", inReasoning({})),
+  // 插队排在 CC 自己队列里时 owner 按 Escape（bridge 抢占 / 叫停发的就是这个键）：这条被丢，还是叫停后 CC 自己接着投（2.1.302：接着投）。
+  // 原回合被取消、没有 END 标记，所以 where 恒为 n/a；看 landed / acked
+  "esc-queued": (c) => scenario(c, "esc-queued", "notify", REASON_PROMPT, null, inReasoning({}), async (cx) => {
+    await cx.tmux(["send-keys", "-t", SESSION, "Escape"]);
+    return {};
+  }),
 };
 
 async function launch(c: Ctx, model: string, effort: string, bun: string): Promise<void> {

@@ -462,7 +462,8 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
 }
 
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
-const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target)]; // 守门判定 / 隔离 / 放行中的同押后：target 没看到
+// 守门判定 / 隔离 / 放行中的同押后：target 没看到；没确认的插队也算（bridge/steer-cc.ts：别把 target 别的输出当成对插队方的答复）
+const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target), ...insertUnseenFrom(target)];
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
@@ -557,7 +558,6 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
   let n = 0;
   n += pendingAgentCalls.dropChannel(channelId); // 它作为 target 或 caller 的回程槽
   if (pendingInterAgentMsg.delete(channelId)) n++;
-  dropInserts(channelId); // CC 插队的补投账（bridge/steer-cc.ts）
   // v2.11: 在飞的 HTTP peer 调用一并取消——迟到的 peer 回复不再 pushback
   // (Discord 时代 pendingPeerCalls 的同款保障,review 2026-07-20 #3)
   try {
@@ -582,7 +582,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait } from "./lib/turn-state.js"; import { afterInsertSend, configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
-import { dropInserts, redeliverInserts, settleInsertReply } from "./bridge/steer-cc.js";
+import { dropInserts, insertUnseenFrom, settleInsertReply, settleInsertsAtStop } from "./bridge/steer-cc.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
@@ -2776,9 +2776,11 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // inter-agent 看门狗: 这一轮结束时 cid 还挂着 inter-agent 消息（agent 既没 reply 也没 send_to_agent），
             // 注一条 nudge 提醒处理 + reply() 报告。最多 nudge 1 次：多了会和 drain 兜底的 push 叠加，agent 反复被叫醒「聊不停」。
             // StopFailure(API 错误 / 额度用完 / 打断)不是「收到了没理」:催它只会再撞一次同样的错；Pi 叫停之后那次 Stop 也不催
-            const cc = clients.get(cid); // CC 插队没回复的补投原文（bridge/steer-cc.ts）；补投了就不再发下面那句催促，补投那封自己会挂看门狗
-            const redone = ownTurn && event !== "StopFailure" && !afterAbort && cc ? await redeliverInserts(cid, deliver, { kind: "local", channelId: cid, ws: cc.ws, cwd: cc.cwd }) : 0;
-            const iaPending = ownTurn && event !== "StopFailure" && !afterAbort && !redone ? pendingInterAgentMsg.get(cid) : undefined;
+            const cc = clients.get(cid); // 插队的确认账在正常 Stop 时结（bridge/steer-cc.ts）：补投了 / CC 正要处理时不发下面那句催促
+            const ins = ownTurn && event !== "StopFailure" && !afterAbort && cc ? await settleInsertsAtStop(cid, {
+              held: heldLocalMsgs, flush: () => void setTimeout(() => void flushHeldLocalMsgs(cid, "stop"), 2000), to: { kind: "local", channelId: cid, ws: cc.ws, cwd: cc.cwd },
+            }) : undefined;
+            const iaPending = ownTurn && event !== "StopFailure" && !afterAbort && !ins?.redelivered && !ins?.quiet ? pendingInterAgentMsg.get(cid) : undefined;
             if (iaPending) {
               if (iaPending.retries >= 1) {
                 pendingInterAgentMsg.delete(cid);
@@ -3059,7 +3061,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           });
         }
         const n = clearInterAgentPendingsForChannel(body.channelId) + dropPendingsForChannel(pendingReplies, pendingThreads, pendingInterAgentMsg, body.channelId);
-        dropHeldOnKill(heldLocalMsgs, body.channelId), turnCuts.forget(body.channelId); // 押给它的消息丢掉(ask 答复放回「待你处理」),打断 / 叫停记录也删
+        dropHeldOnKill(heldLocalMsgs, body.channelId), turnCuts.forget(body.channelId), dropInserts(body.channelId); // 押给它的消息丢掉(ask 答复放回「待你处理」),打断 / 叫停记录、插队确认账也删
         // agent 被永久 kill —— 顺手丢掉它在事件总线里的环形缓冲和回合态。
         // 那 500 条事件（含未截断的 assistant_text）不会再有人订阅，留着只是占内存，
         // 建了又删的 agent 会一路堆积。

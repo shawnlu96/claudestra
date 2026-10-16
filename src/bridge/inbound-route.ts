@@ -11,11 +11,12 @@ import { statePath } from "../lib/paths.js";
 import { ownerStopOf } from "../lib/stop-words.js";
 import { holdsUntilIdle, type TurnState } from "../lib/turn-state.js";
 import {
-  admitsWhileBusy, buildRouteState, decideRoute, holdsWhileBusy, insertsWhileBusy, insertVia, mergeDue, mergeOrder, parseRouteMode, pullable, QUEUE_KEEP, queueEntry,
+  admitsWhileBusy, buildRouteState, decideRoute, holdsWhileBusy, insertsWhileBusy, insertVia, mayInsert, mergeDue, mergeOrder, parseRouteMode, pullable, QUEUE_KEEP, queueEntry,
   ROUTE_TIMEOUT_MS, routeEligible, routeQuestions, routeRole, ruleAction, senderName, type InsertVia, type QueueEntry, type RouteEnv, type RouteMode,
 } from "../lib/inbound-route.js";
 import { controlFor } from "../lib/runtimes/index.js";
-import { ccInsertAllowed, isInsertRedelivery, noteChannelInsert } from "./steer-cc.js";
+import { readRegistryAgents } from "../lib/registry.js";
+import { ccInsertAllowed, isInsertRedelivery, noteInsert } from "./steer-cc.js";
 import { isHeldIdleCarrier } from "../lib/held-idle-batch.js";
 import { heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
 import { leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
@@ -34,8 +35,13 @@ interface Deps {
   /** 这个频道押着的消息（排队摘要）；没接线 = 空 */
   queue: (channelId: string) => readonly HeldItem[] | undefined;
   doing: (agent: string, channelId: string) => Promise<string>;
-  /** 目标运行时的插法（RuntimeControl.insertVia；CC 再过版本闸，没实测过的版本 = 插不进） */
-  insertDecl: (channelId: string) => Promise<"steer" | "channel" | undefined>;
+  /**
+   * 目标运行时的插法（RuntimeControl.insertVia；CC 再过版本闸 + 工具窗口）。declared = 只是声明值、bridge 核实不了：ACP 宿主支不支持
+   * steering 只有宿主自己知道（不支持时它原位改回 prompt，不丢），日志记 steer(declared)
+   */
+  insertDecl: (channelId: string) => Promise<{ via?: "steer" | "channel"; declared?: boolean }>;
+  /** 发送方频道是不是 registry 里登记着的 agent（插队只给它们） */
+  senderRegistered: (channelId: string) => Promise<boolean>;
   readMode: () => RouteMode;
   log: (entry: Record<string, unknown>) => void;
   now: () => number;
@@ -49,8 +55,10 @@ let deps: Deps = {
   insertDecl: async (ch) => {
     const w = await resolveTurnWindow(ch, control());
     const v = controlFor(w.runtime, w.transport).insertVia;
-    return v === "channel" && !(await ccInsertAllowed(ch)) ? undefined : v;
+    if (v === "channel") return { via: (await ccInsertAllowed(ch)) ? v : undefined };
+    return { via: v, declared: w.transport === "acp" };
   },
+  senderRegistered: async (ch) => (await readRegistryAgents()).some((a) => a.channelId === ch && a.status === "active"),
   readMode: () => parseRouteMode(readConfigSync().inboundRoute?.mode),
   log: (e) => void appendLogLine(ROUTE_LOG_PATH, JSON.stringify(e)),
   now: () => Date.now(),
@@ -87,7 +95,7 @@ export const routeHolds = (env: Envelope, turn: TurnState): boolean => {
 };
 /**
  * 回合中插队 ws.send 之后（bridge.ts deliverToLocal 一行）：没送到（回 0 = 连接已断、这条被丢了）→ 退回押后队列，回合结束 / 重连后照常投，
- * 返回 true = 已押回；送到了且是 CC 的 channel 插队 → 记账，Stop 时没回复就补投原文（bridge/steer-cc.ts）。
+ * 返回 true = 已押回；送到了 → 记一笔「没确认」：目标明确回给插队方之前不把它别的输出当答复，CC 的 channel 插队 Stop 时没回复就补投原文（bridge/steer-cc.ts）。
  * 只管 insert 这条路——改动前 agent 消息忙时根本不 ws.send，空闲投递的老行为不动
  */
 export function afterInsertSend(env: Envelope, turn: TurnState, sent: unknown, held: Pick<HeldQueue, "holdEnv">): boolean {
@@ -96,7 +104,7 @@ export function afterInsertSend(env: Envelope, turn: TurnState, sent: unknown, h
     console.warn(`⚠️ 入站路由：插队送出失败（连接已断），${env.meta.messageId} 退回押后队列，${held.holdEnv(env)} 条`);
     return true;
   }
-  if (env.meta.inboundRoute?.via === "channel") noteChannelInsert(env, (env.to as LocalEndpoint).channelId);
+  noteInsert(env, (env.to as LocalEndpoint).channelId);
   return false;
 }
 export const routeOrder = <T extends HeldItem>(items: readonly T[]): T[] => mergeOrder(items, routeMode());
@@ -141,28 +149,41 @@ export async function routeProbeFor(env: Envelope, to: LocalEndpoint, agent: str
   const doing = await deps.doing(agent, to.channelId).catch((e: Error) => (console.warn(`⚠️ 入站路由：取「在做什么」失败，按不知道: ${e.message}`), ""));
   const actual = ruleAction(isHumanRequest(env), holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn));
   const role = routeRole(env);
-  // 只有本机 agent 的消息给 Jev 插队这个选项；插不插得进看目标运行时（取不到按插不进：insert 退成排队，就是改动前的行为）
-  const insert = role === "agent" ? insertVia(await deps.insertDecl(to.channelId).catch((e: Error) => (console.warn(`⚠️ 入站路由：取目标运行时失败，按插不进: ${e.message}`), undefined)),
-    !!env.meta.skipInterAgentWatchdog) : null;
+  const ins = await insertCtx(env, to.channelId);
   let settled = false;
   const base = { msg: env.meta.messageId, agent, from: senderName(env.from), role, preview: env.content.slice(0, PREVIEW), queued: entries.length, rule: actual };
   return {
     state: buildRouteState({ env, agent, doing, queue: entries }),
-    questions: routeQuestions(entries.length, role === "agent"),
+    questions: routeQuestions(entries.length, ins.agentSender),
     settle: (answers, info) => {
       if (settled) return; // 守门那次拿到答案后自己判定又抛错，会再报一次失败：只认第一次
       settled = true;
-      settle(env, mode, { entries, insert }, answers, { ...base, via: info.via, ms: info.ms, ...(info.error ? { error: info.error } : {}) });
+      settle(env, mode, { entries, ...ins }, answers, { ...base, via: info.via, ms: info.ms, ...(info.error ? { error: info.error } : {}) });
     },
   };
 }
 
-function settle(env: Envelope, mode: RouteMode, ctx: { entries: QueueEntry[]; insert: InsertVia }, answers: Record<string, unknown> | null, base: Record<string, unknown>): void {
+interface InsertCtx { insert: InsertVia; agentSender: boolean; senderQueued: boolean; declared?: boolean }
+/**
+ * 插队的前提：发送方是登记过的本机 agent（才给 Jev 这个选项）、目标运行时插得进（取不到按插不进：insert 退成排队，就是改动前的行为）、
+ * 同一发送方在这个目标的押后队列里没有排着的（不然后发的先到）
+ */
+async function insertCtx(env: Envelope, target: string): Promise<InsertCtx> {
+  const warn = (what: string) => (e: Error) => (console.warn(`⚠️ 入站路由：${what}失败，按不能插队: ${e.message}`), undefined);
+  const ch = env.from.kind === "local" ? env.from.channelId : "";
+  const agentSender = mayInsert(env) && !!(await deps.senderRegistered(ch).catch(warn("查发送方登记")));
+  if (!agentSender) return { insert: null, agentSender, senderQueued: false };
+  const senderQueued = (deps.queue(target) ?? []).some((i) => i.env.from.kind === "local" && i.env.from.channelId === ch);
+  const decl = await deps.insertDecl(target).catch(warn("取目标运行时"));
+  return { insert: insertVia(decl?.via, !!env.meta.skipInterAgentWatchdog), agentSender, senderQueued, declared: decl?.declared };
+}
+
+function settle(env: Envelope, mode: RouteMode, ctx: { entries: QueueEntry[] } & InsertCtx, answers: Record<string, unknown> | null, base: Record<string, unknown>): void {
   const ts = new Date(deps.now()).toISOString();
   if (!answers) return deps.log({ ts, mode, ...base, jev: "error", actual: base.rule });
   let d: ReturnType<typeof decideRoute>;
   try {
-    d = decideRoute(answers, { env, queue: ctx.entries, insert: ctx.insert });
+    d = decideRoute(answers, { env, queue: ctx.entries, insert: ctx.insert, agentSender: ctx.agentSender, senderQueued: ctx.senderQueued });
   } catch (e) {
     return deps.log({ ts, mode, ...base, jev: "error", error: (e as Error).message, actual: base.rule });
   }
@@ -173,9 +194,11 @@ function settle(env: Envelope, mode: RouteMode, ctx: { entries: QueueEntry[]; in
   const pick = (answers.route_action as { choice?: string }).choice;
   const aboutInsert = pick === "insert" || d.route.action === "insert" || (pick === "interrupt" && d.downgraded === "not_owner");
   deps.log({ ts, mode, ...base, pick, jev: d.route.action, p: +d.route.p.toFixed(2), ...(d.route.mergeWith ? { mergeWith: d.route.mergeWith } : {}),
-    ...(d.downgraded ? { downgraded: d.downgraded } : {}), ...(aboutInsert ? { insertVia: ctx.insert ?? "none" } : {}), actual: applied ? d.route.action : base.rule });
+    ...(d.downgraded ? { downgraded: d.downgraded } : {}), ...(aboutInsert ? { insertVia: insertLabel(ctx) } : {}), actual: applied ? d.route.action : base.rule });
   if (applied) console.log(`🧭 入站路由：${base.agent} 忙，${base.from} 的消息（${env.meta.messageId}）按 Jev 判 ${d.route.action}${d.downgraded ? `（代码兜底：${d.downgraded}）` : ""}`);
 }
+
+const insertLabel = (c: InsertCtx): string => (!c.insert ? "none" : c.declared ? `${c.insert}(declared)` : c.insert);
 
 async function askSolo(p: RouteProbe): Promise<void> {
   const t0 = deps.now();

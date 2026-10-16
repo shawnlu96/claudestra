@@ -67,8 +67,11 @@ export function routeRole(env: Pick<RouteEnv, "from" | "meta">): string {
 }
 /** 能打断的只有 owner 本人：Jev 判了 interrupt 也由这里兜底 */
 const mayInterrupt = (env: Pick<RouteEnv, "from" | "meta">): boolean => isOwnerSource(env.from) && !env.meta.forwarded;
-/** 能插队的只有本机 agent 发给本机 agent 的 request（role 和给 Jev 看的同一个认证结论）：peer、bridge 通知、guest、owner 都不插队 */
-const mayInsert = (env: Pick<RouteEnv, "from" | "meta">): boolean => routeRole(env) === "agent";
+/**
+ * 能插队的只有本机 agent 发给本机 agent 的 request（role 和给 Jev 看的同一个认证结论）：peer、bridge 通知、guest、owner 都不插队；
+ * 没有发送方频道的（调度器 / 系统帧 route_to_agent 的 fromName）也不算。频道是不是登记过的 agent 由调用方再核（ctx.agentSender）
+ */
+export const mayInsert = (env: Pick<RouteEnv, "from" | "meta">): boolean => routeRole(env) === "agent" && env.from.kind === "local" && !!env.from.channelId;
 
 /**
  * 目标运行时能不能把 insert 真插进回合（运行时声明 RuntimeControl.insertVia）。CC 的 channel 是回合中直接投：工具间隙到的会被 CC 包成
@@ -146,7 +149,7 @@ export function routeQuestions(queueLen: number, canInsert = false): Record<stri
 }
 
 export type RouteDecision =
-  | { ok: true; route: StoredRoute; downgraded?: "not_owner" | "merge_target" | "not_agent" | "no_insert" }
+  | { ok: true; route: StoredRoute; downgraded?: "not_owner" | "merge_target" | "not_agent" | "no_insert" | "sender_queued" }
   | { ok: false; reason: "unsure" };
 
 interface ChoiceLike { choice: string; probabilities: Record<string, number> }
@@ -164,10 +167,14 @@ const pOf = (c: ChoiceLike): number => {
 
 /**
  * Jev 的答案 → 结论。拿不准（低于 ROUTE_MIN_P）→ ok:false，调用方按现有规则走；答案格式不对 → 抛 JevError（同失败）。
- * 代码兜底：非 owner 判了 interrupt → 本机 agent 改插队、别人排队；insert 只给本机 agent、且目标运行时插得进（ctx.insert）→ 否则排队；
+ * 代码兜底：非 owner 判了 interrupt → 本机 agent 改插队、别人排队；insert 只给登记过的本机 agent（mayInsert + ctx.agentSender）、目标运行时插得进
+ * （ctx.insert）、同一发送方没有押着的消息（ctx.senderQueued，否则后发的先到）→ 否则排队；
  * merge 说不清并到哪条、或那条不能合并（不同发送人）→ 排队
  */
-export function decideRoute(answers: Record<string, unknown>, ctx: { env: Pick<RouteEnv, "from" | "meta">; queue: readonly QueueEntry[]; insert?: InsertVia }): RouteDecision {
+export function decideRoute(
+  answers: Record<string, unknown>,
+  ctx: { env: Pick<RouteEnv, "from" | "meta">; queue: readonly QueueEntry[]; insert?: InsertVia; agentSender?: boolean; senderQueued?: boolean },
+): RouteDecision {
   const a = choiceOf(answers.route_action);
   const p = pOf(a);
   const picked = a.choice as RouteAction;
@@ -177,8 +184,10 @@ export function decideRoute(answers: Record<string, unknown>, ctx: { env: Pick<R
     ({ ok: true, route: { action, p, ...extra }, ...(downgraded ? { downgraded } : {}) });
   if (picked === "interrupt" && mayInterrupt(ctx.env)) return done("interrupt");
   if (picked === "interrupt" || picked === "insert") {
-    const why = picked === "interrupt" ? "not_owner" : !mayInsert(ctx.env) ? "not_agent" : !ctx.insert ? "no_insert" : undefined;
-    return mayInsert(ctx.env) && ctx.insert ? done("insert", why, { via: ctx.insert }) : done("queue", why);
+    const agent = mayInsert(ctx.env) && ctx.agentSender !== false;
+    const blocked = !agent ? "not_agent" : !ctx.insert ? "no_insert" : ctx.senderQueued ? "sender_queued" : undefined;
+    const why = picked === "interrupt" ? "not_owner" : blocked;
+    return blocked || !ctx.insert ? done("queue", why) : done("insert", why, { via: ctx.insert });
   }
   if (picked === "queue") return done("queue");
   const w = answers.route_merge_with === undefined ? undefined : choiceOf(answers.route_merge_with);

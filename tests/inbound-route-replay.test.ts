@@ -47,7 +47,7 @@ describe("回放：合成例（调研 12 + 4，JRT-3 加 6 例 agent→agent）"
       const queue: HeldItem[] = c.queued.map((m) => ({ env: envOf(m), to, heldAt: 1 }));
       configureInboundRoute({
         readMode: () => "on", probe: async () => ({ main: "busy", bg: false }), queue: () => queue, doing: async () => c.current, log: () => {}, now: () => 0,
-        insertDecl: async () => "steer",
+        insertDecl: async () => ({ via: "steer" }), senderRegistered: async () => true,
         ask: (async (state: unknown, questions: Record<string, unknown>, opts: unknown) => {
           const replay = !RECORD || (!RECORD_ALL && Object.keys(c.answers).length > 0);
           if (replay) return { model: fixture.model, answers: c.answers, usage: { input_tokens: 0, output_tokens: 0 }, latencyMs: 0, costUsd: 0 };

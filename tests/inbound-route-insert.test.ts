@@ -42,6 +42,8 @@ describe("判定与权限兜底（lib decideRoute，不信 Jev）", () => {
   });
   test("peer / guest / owner / bridge 判了 insert：一律排队（not_agent）", () => {
     for (const f of [PEER, GUEST, OWNER, BRIDGE]) expect(d(f, ans("insert"))).toEqual({ ok: true, route: { action: "queue", p: 0.95 }, downgraded: "not_agent" });
+    expect(decideRoute(ans("insert"), { env: env("x"), queue: [], insert: "steer", agentSender: false })).toMatchObject({ route: { action: "queue" }, downgraded: "not_agent" });
+    expect(decideRoute(ans("insert"), { env: env("x"), queue: [], insert: "steer", senderQueued: true })).toMatchObject({ route: { action: "queue" }, downgraded: "sender_queued" });
   });
   test("agent 判了 interrupt：不打断，改插队（插不进就排队），仍记 not_owner", () => {
     expect(d(AGENT, ans("interrupt"))).toEqual({ ok: true, route: { action: "insert", p: 0.95, via: "steer" }, downgraded: "not_owner" });
@@ -88,18 +90,20 @@ describe("开关下的押不押（lib）", () => {
 });
 
 // ── 运行时（bridge/inbound-route.ts） ─────────────────────────────────────
-let mode: RouteMode = "on", turn: TurnState = BUSY, decl: "steer" | "channel" | undefined = "steer";
+let mode: RouteMode = "on", turn: TurnState = BUSY, decl: "steer" | "channel" | undefined = "steer", registered = true;
+let queued: { env: Envelope }[] = [];
 let asks: { questions: Record<string, unknown> }[] = [], logs: Record<string, unknown>[] = [];
 let answer: Record<string, unknown> = ans("insert");
 let clock = 0;
 beforeEach(() => {
-  mode = "on"; turn = BUSY; decl = "steer"; asks = []; logs = []; answer = ans("insert"); clock += 10_000;
+  mode = "on"; turn = BUSY; decl = "steer"; registered = true; queued = []; asks = []; logs = []; answer = ans("insert"); clock += 10_000;
   configureInboundRoute({
     ask: (async (_s: unknown, questions: Record<string, unknown>) => {
       asks.push({ questions });
       return { model: "jev-test", answers: answer, usage: { input_tokens: 1, output_tokens: 0 }, latencyMs: 5, costUsd: 0 };
     }) as unknown as typeof jevAsk,
-    probe: async () => turn, queue: () => [], doing: async () => "在等 agent-exec 回报 CI 结果", insertDecl: async () => decl, readMode: () => mode,
+    probe: async () => turn, queue: () => queued as never, doing: async () => "在等 agent-exec 回报 CI 结果", insertDecl: async () => ({ via: decl }),
+    senderRegistered: async () => registered, readMode: () => mode,
     log: (e) => logs.push(e), now: () => clock,
   });
 });
@@ -129,6 +133,14 @@ describe("运行时：on 档", () => {
     expect(routeHolds(b, BUSY)).toBe(true);
   });
 
+  test("ACP 目标：插法只是声明值，日志记 steer(declared)", async () => {
+    configureInboundRoute({ insertDecl: async () => ({ via: "steer", declared: true }) });
+    const e = env("答复：用方案 B");
+    await routeInbound(e, to, "agent-pm");
+    expect(e.meta.inboundRoute).toEqual({ action: "insert", p: 0.95, via: "steer" });
+    expect(logs[0]).toMatchObject({ insertVia: "steer(declared)", actual: "insert" });
+  });
+
   test("运行时插不进（Codex tmux）：insert 退成排队，忙时照押", async () => {
     decl = undefined;
     const e = env("答复：用方案 B");
@@ -154,6 +166,31 @@ describe("运行时：on 档", () => {
     await routeInbound(p, to, "agent-pm");
     expect(p.meta.inboundRoute?.action).toBe("queue");
     expect(logs[1]).toMatchObject({ role: "peer", downgraded: "not_agent" });
+  });
+
+  test("发送方不是登记过的 agent（调度器 / 系统帧没有频道、频道没登记）：没有插队选项，硬选也不插", async () => {
+    const sched = env("系统通知：有新单", { kind: "local", channelId: "", agentName: "scheduler" });
+    await routeInbound(sched, to, "agent-pm");
+    expect(Object.keys((asks[0]!.questions.route_action as { criteria: object }).criteria)).not.toContain("insert");
+    expect(sched.meta.inboundRoute).toEqual({ action: "queue", p: 0.95 });
+    expect(logs[0]).toMatchObject({ downgraded: "not_agent" });
+    registered = false;
+    const ghost = env("答复：用方案 B");
+    await routeInbound(ghost, to, "agent-pm");
+    expect(ghost.meta.inboundRoute?.action).toBe("queue");
+    expect(logs[1]).toMatchObject({ downgraded: "not_agent" });
+  });
+
+  test("同一发送方在这个目标还有押着的：insert 降级排队（不让后发的先到）；别人押着的不影响", async () => {
+    queued = [{ env: env("先发的那条"), to, heldAt: 1 } as never];
+    const e = env("后发的答复");
+    await routeInbound(e, to, "agent-pm");
+    expect(e.meta.inboundRoute).toEqual({ action: "queue", p: 0.95 });
+    expect(logs[0]).toMatchObject({ pick: "insert", downgraded: "sender_queued" });
+    queued = [{ env: env("别人的", { kind: "local", channelId: "c-other", agentName: "agent-other" }), to, heldAt: 1 } as never];
+    const f = env("答复");
+    await routeInbound(f, to, "agent-pm");
+    expect(f.meta.inboundRoute?.action).toBe("insert");
   });
 
   test("纯进度 Jev 判 queue：照旧押到回合结束", async () => {
