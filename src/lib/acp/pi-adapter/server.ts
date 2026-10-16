@@ -418,13 +418,13 @@ export class PiAcpServer {
    * 等超时按失败报——没投出去，宿主可以照常重发。
    */
   private async sendInput(g: Gen, cmd: Rec, timeoutMs: number): Promise<any> {
+    const cancels = g.cancels; // 发出之后、被拒之前的叫停也算（tests/pi-acp-compaction-abort.test.ts）
     try {
       return await g.link.command(cmd, timeoutMs);
     } catch (e) {
       if (lostAfterWrite(e) || !COMPACTING_RE.test(errText(e))) throw e;
       const ms = this.deps.compactionWaitMs ?? COMPACTION_WAIT_MS;
       this.deps.log(`pi 在压缩上下文、拒收了输入：等压完（最多 ${ms / 1000}s）再投一次`);
-      const cancels = g.cancels;
       const ended = await this.compactionDone(g, ms);
       this.stillLive(g);
       if (g.cancels !== cancels) return CANCELLED_WHILE_COMPACTING;
@@ -436,8 +436,12 @@ export class PiAcpServer {
   private compactionDone(g: Gen, ms: number): Promise<boolean> {
     if (!g.compacting) return Promise.resolve(true);
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), ms);
-      g.compactionEnded.push(() => (clearTimeout(timer), resolve(true)));
+      const wake = () => (clearTimeout(timer), resolve(true));
+      const timer = setTimeout(() => {
+        g.compactionEnded = g.compactionEnded.filter((w) => w !== wake); // 超时的别留在队里
+        resolve(false);
+      }, ms);
+      g.compactionEnded.push(wake);
     });
   }
 

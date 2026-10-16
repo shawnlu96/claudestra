@@ -10,8 +10,8 @@ import { join } from "node:path";
 import { abortedLike, createPiEventMapper, stopReasonOf, turnEnd } from "../src/lib/acp/pi-adapter/map.ts";
 import type { PiLink } from "../src/lib/acp/pi-adapter/pi-link.ts";
 import { PiAcpServer } from "../src/lib/acp/pi-adapter/server.ts";
-import { createRpcPeer, type RpcWire } from "../src/lib/acp/rpc.ts";
-import { CWD, harness, type Line, type Rec, until } from "./acp-contract/pi-replay.ts";
+import { createRpcPeer } from "../src/lib/acp/rpc.ts";
+import { CWD, harness, type Line, pipePair, type Rec, until } from "./acp-contract/pi-replay.ts";
 
 const FIXTURE_1053: Line[] = readFileSync(join(import.meta.dir, "fixtures", "pi-acp", "compaction-abort-1053.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
 const ABORTED = { stopReason: "error", errorMessage: "This operation was aborted" };
@@ -62,17 +62,6 @@ describe("回放 10:53：save-compact 收尾的 request_compact", () => {
     expect(h.logs.filter((l) => l.includes("等压完"))).toHaveLength(1);
   });
 });
-
-/** 内存里的一对 RpcWire */
-function pipePair(): [RpcWire, RpcWire] {
-  const side = () => ({ data: (_: string) => {}, close: (_: string) => {} });
-  const a = side(), b = side();
-  const wire = (me: ReturnType<typeof side>, peer: ReturnType<typeof side>): RpcWire => ({
-    write: (line) => peer.data(line), onData: (cb) => void (me.data = cb as (c: string) => void), onClose: (cb) => void (me.close = cb),
-    close: (why) => (peer.close(why), me.close(why)),
-  });
-  return [wire(a, b), wire(b, a)];
-}
 
 const COMPACTING = new Error("pi prompt 失败：Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.");
 
@@ -196,6 +185,21 @@ describe("server：压缩中被拒的输入", () => {
     await Bun.sleep(5);
     turn(h, { stopReason: "stop" });
     expect(await next).toEqual({ stopReason: "end_turn" });
+  });
+
+  test("叫停先于拒收到达（prompt 在途时叫停、随后才被拒）→ 压完也不重投", async () => {
+    let reject!: (e: Error) => void;
+    const h = rig(async (_c, n) => (n === 1 ? new Promise((_r, rj) => (reject = rj)) : { disposition: "started" }));
+    await h.open();
+    h.emit({ type: "compaction_start", reason: "manual" });
+    const p = h.prompt("hi");
+    await accepted(h, "hi");
+    await h.cancel();
+    reject(COMPACTING);
+    await until(() => h.logs.some((l) => l.includes("等压完")), "进入等待");
+    h.emit({ type: "compaction_end", reason: "manual", aborted: true });
+    expect(await p).toEqual({ stopReason: "cancelled" });
+    expect(h.sent.filter((c) => c.type === "prompt")).toHaveLength(1);
   });
 
   test("steer 被拒 → 压完重投一次；别的拒绝原因照旧直接报错", async () => {
