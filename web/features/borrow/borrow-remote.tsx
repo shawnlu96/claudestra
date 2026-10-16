@@ -1,10 +1,10 @@
 "use client";
 /**
  * 远端行：放在 peer 上还没结的单（lend_orders 里 pooled / claimed / unknown），以及这张卡此刻放哪、为什么
- * （bridge 给的 explainPlacement 原文，与 `ledger lend-orders` 同一份）。只读，没有可点的东西。
+ * （bridge 给的 explainPlacement 原文，与 `ledger lend-orders` 同一份）。只读；传了 onOpen（今天页，XMACH1）整行可点、去打开那个任务，不传（设置页）同原来。
  */
 import { useT } from "@/lib/i18n";
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import type { PlacementView, RemoteRow } from "./borrow-api";
 import { placementKind, sortRemote, type PlacementKind } from "./borrow-model";
 import { AgeTag } from "./borrow-bits";
@@ -42,14 +42,18 @@ function Placement({ p }: { p: PlacementView | undefined }) {
   );
 }
 
-export function RemoteRows({ rows, serverNow, receivedAt, tick }: { rows: RemoteRow[]; serverNow: number; receivedAt: number; tick: number }) {
+export function RemoteRows({ rows, serverNow, receivedAt, tick, onOpen }: {
+  rows: RemoteRow[]; serverNow: number; receivedAt: number; tick: number; onOpen?: (row: RemoteRow) => void;
+}) {
   const t = useT();
   return (
     <ul className="divide-y divide-base-content/5 rounded-lg bg-base-100">
       {sortRemote(rows).map((r) => {
         const [label, cls] = STATUS[r.status] ?? [r.status, "badge-ghost"];
         return (
-          <li key={r.orderId} className="space-y-0.5 px-3 py-2 select-text">
+          <li key={r.orderId} className={`space-y-0.5 px-3 py-2 ${onOpen ? "cursor-pointer transition-colors hover:bg-base-300/50" : "select-text"}`}
+            {...(onOpen && { role: "button", tabIndex: 0, "data-remote-row": r.orderId, onClick: () => onOpen(r),
+              onKeyDown: (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(r); } } })}>
             <div className="flex min-w-0 items-center gap-2 text-[12px]">
               <span className="shrink-0 font-mono text-base-content/70">{r.taskId}</span>
               <span className="min-w-0 truncate text-base-content/85">{r.title ?? ""}</span>

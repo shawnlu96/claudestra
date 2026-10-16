@@ -204,7 +204,7 @@ test("[验收线 2] 桌面没选会话时主区是『今天』页，三块齐全
   expect(calls.filter((c) => today.includes(c)).sort()).toEqual([...today].sort());
   expect(calls.filter((c) => /\/quota$/.test(c))).toEqual([]);
   const shell = calls.filter((c) => !today.includes(c));
-  expect(shell.filter((c) => !/^GET \/(app-config\.json|api\/v1\/(agents|unread|projects|asks|shared-ledger\/context))$/.test(c))).toEqual([]);
+  expect(shell.filter((c) => !/^GET \/(app-config\.json|api\/v1\/(agents|unread|projects|asks|shared-ledger\/context|peers\/contacts))$/.test(c))).toEqual([]);
   await v.unmount();
 });
 
