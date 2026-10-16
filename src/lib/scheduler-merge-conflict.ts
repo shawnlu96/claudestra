@@ -14,6 +14,7 @@ import { insertEvent } from "./ledger-tx.js";
 import { ciBehindClaim, ciBehindOrRerun } from "./scheduler-merge-ci-behind.js";
 import { ciCancelGate, ciCancelStep } from "./scheduler-merge-ci-cancel.js";
 import { markWaitMain, waitMainLine } from "./ci-main-fix-retry.js";
+import { sourceWaitGate, sourceWaitHeld, sourceWaitRoute } from "./ci-main-source-wait.js";
 import { redCheck } from "./scheduler-merge-ci-cancel-judge.js";
 import { gateReceipt, RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
@@ -121,9 +122,11 @@ type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
 export async function bounceStep(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, only?: BounceCause): Promise<MergeRun | null> {
   const cause = bounceOf(run, pr, only);
   if (!cause) return null;
-  if (cause === "ci_fail") { // CICANCEL1 (only cancelled) → i28-CIF1 → CIF2
-    const checks = failedRequired(run, pr.checks);
-    return (await ciCancelStep(run, pr, external, step, checks)) ?? ciBehindOrRerun(run, pr, external, step, checks, bounceReceipt);
+  if (cause === "ci_fail") { // CICANCEL1 (only cancelled) → i28-CIF1 → CIF2 → CIMAINSRC1 (same red on main: wait, ci-main-source-wait.ts)
+    const checks = failedRequired(run, pr.checks), bounce = bounceReceipt({ cause, prHead: pr.head, mainHead: null, checks });
+    const held = sourceWaitHeld(run, pr, external, step, checks, bounce, bounceReceipt); if (held) return held;
+    const routed = sourceWaitRoute(run, pr, external, step, checks, bounce, bounceReceipt);
+    return (await ciCancelStep(run, pr, external, step, checks)) ?? ciBehindOrRerun(run, pr, external, routed, checks, bounceReceipt);
   }
   const { mainHead } = await external.freshness(run.prRef, pr.head);
   return step("resolved", bounceReceipt({ cause, prHead: pr.head, mainHead, checks: [] }));
@@ -193,7 +196,8 @@ export function cancelMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, recei
  */
 export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawReceipt: string | undefined, drift: string | null): void {
   const now = ctx.now ?? Date.now();
-  const receipt = gateReceipt(rawReceipt);
+  const receipt = sourceWaitGate(db, ctx, row, gateReceipt(rawReceipt), drift, bounceReceipt, insertEvent); // CIMAINSRC1: same red on main → wait / retry / bounce
+  if (receipt === null) return;
   // null: a CI re-run was claimed (the run keeps its phase, i28-CIF1) or update-branch was claimed (→ updating, i28-CIF2)
   const own = ciCancelGate(db, ctx, row, receipt, drift, (r) => ciBehindClaim(db, ctx, row, r, drift, bounceReceipt, insertEvent), cancelMergeRun);
   if (own === null) return;
