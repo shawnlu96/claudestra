@@ -110,6 +110,18 @@ describe("usage-cache-write.sh 多写者合并", () => {
     expect([c.sessionPct, c.sessionResets]).toEqual([30, 1787846400]);
   });
 
+  test("QFA-1 ② reset 缺失 / ISO 更早 / 认不出:已有可比窗口时都不算轮转;同时刻的 ISO 算同窗口", async () => {
+    await run(input(30, 18, 1787846400, 1788296400));
+    const before = cache();
+    const idle = (resetsAt: unknown) => ({ rate_limits: { seven_day: { used_percentage: 97, ...(resetsAt === undefined ? {} : { resets_at: resetsAt }) } } });
+    for (const r of [undefined, "2026-05-01T00:00:00Z", "garbage"]) await run(idle(r));
+    expect([cache().weekPct, cache().weekResets, cache().weekObservedAt]).toEqual([18, 1788296400, before.weekObservedAt]);
+    await run(idle(new Date(1788296400 * 1000).toISOString())); // 同一时刻的 ISO = 同窗口,闲置写者仍不收
+    expect(cache().weekPct).toBe(18);
+    await run(idle(new Date((1788296400 + 7 * 86400) * 1000).toISOString())); // 更晚的 ISO = 轮转
+    expect(cache().weekPct).toBe(97);
+  });
+
   test("QFA-1 ③ 带 five_hour 的写者:同周升、同周降、新周轮转都收", async () => {
     await run(input(30, 50, 1787846400, 1788296400));
     await run(input(31, 60, 1787846400, 1788296400));

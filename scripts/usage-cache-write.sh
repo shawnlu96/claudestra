@@ -20,6 +20,7 @@ input=$(cat)
 
 python3 - "$input" <<'PYEOF'
 import json, math, os, sys, time
+from datetime import datetime
 
 try:
     d = json.loads(sys.argv[1])
@@ -60,7 +61,7 @@ cache_path = os.path.join(cache_dir, "usage-cache.json")
 #   旧值/旧 reset 缺失    → 直接写新
 #   reset 变了(窗口轮转) → 无条件写新(该清零/换周期了)
 #   同窗口               → 新 pct ≥ 旧 pct 才写(窗口内用量单调递增,更小 = 陈旧快照,丢弃)
-#   reset 比旧的早       → 上一个窗口的陈旧快照,丢弃(窗口只进不退)
+#   reset 比旧的早/缺失/认不出(旧的可比时) → 陈旧快照,丢弃(窗口只进不退;秒与 ISO 按时刻比)
 #   7d 同窗口只听**带 five_hour 的写者**(升降都收);没 5h 的写者同窗口一律丢弃。
 #     依据:CC 只给活跃 session five_hour,长期空闲的 session 整个不给——有 5h =
 #     新鲜快照凭证。7d 在窗口内不单调(Claude 免费重置会把 97 打回 18),所以空闲
@@ -85,6 +86,17 @@ def window_time(key):
 def is_num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
+def reset_ms(v):
+    """与 lib/usage-cache.ts resetTsMs 同口径:Unix 秒 / ISO 字符串 → epoch ms,识别不了 None。"""
+    if is_num(v) and v > 1e9:
+        return v * 1000
+    if isinstance(v, str) and v:
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000
+        except ValueError:
+            return None
+    return None
+
 def merge(new_pct, new_reset, old_pct, old_reset, old_at, same_window_ok=None):
     """same_window_ok: None = 同窗口单调(≥ 才写);True/False = 同窗口是否收这个写者。"""
     # Clock rollback must not relabel an existing observation as a new one.
@@ -92,9 +104,15 @@ def merge(new_pct, new_reset, old_pct, old_reset, old_at, same_window_ok=None):
         return old_pct, old_reset, False
     if old_pct is None or old_reset is None:
         return new_pct, new_reset, True
-    if is_num(new_reset) and is_num(old_reset) and new_reset < old_reset:
-        return old_pct, old_reset, False
-    if new_reset != old_reset:
+    old_ms, new_ms = reset_ms(old_reset), reset_ms(new_reset)
+    if old_ms is not None:
+        # 已有可比的窗口:新 reset 缺失 / 认不出 / 更早都不算轮转,当陈旧快照丢弃
+        if new_ms is None or new_ms < old_ms:
+            return old_pct, old_reset, False
+        same = new_ms == old_ms
+    else:
+        same = new_reset == old_reset
+    if not same:
         return new_pct, new_reset, True
     if new_pct >= old_pct if same_window_ok is None else same_window_ok:
         return new_pct, new_reset, True
