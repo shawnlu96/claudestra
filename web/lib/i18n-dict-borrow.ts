@@ -54,4 +54,11 @@ export const BORROW_DICT: Record<string, string> = {
   "{n} 天后重置": "Resets in {n} day|Resets in {n} days",
   "{n} 小时后重置": "Resets in {n} hour|Resets in {n} hours",
   "审查先给": "Reviews first",
+  // 今天 · 团队与额度的机器行、设置 · 伙伴机器（XMACH1）
+  "伙伴机器": "Partner machines",
+  "伙伴机器 {n}/{total} 在线": "Partner machines {n}/{total} online",
+  "借出在跑 {n} 单": "{n} lent order running|{n} lent orders running",
+  "借入在跑 {n} 单": "{n} borrowed order running|{n} borrowed orders running",
+  "其中 {n} 单停住": "{n} stalled",
+  "在跑的单在『今天 · 团队与额度』": "Running orders are under Today · Team & quota",
 };

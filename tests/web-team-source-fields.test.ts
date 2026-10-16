@@ -152,11 +152,11 @@ test("复现测试：reason 追加进度可能不是最新的 / 阻塞提问，�
   // 读到时新鲜、显示时已过 10 分钟：同样报过期（走表的 now，不是读到时的判定）
   expect(teamNote(one(d).ov.tasks.find((x) => x.id === key)!, fx.now + 11 * 60_000)).toBe("11 分钟没收到任务所在机器的更新 · 任务所在的机器上有 1 个问题在等回答");
   expect(teamNote(t, fx.now + 11 * 60_000)).toBe("11 分钟没收到任务所在机器的更新 · 任务所在的机器上有 1 个问题在等回答");
-  const withReview = { ...t, lastReview: { round: 1, verdict: "changes", p0: 0, p1: 1, p2: 0, text: "P1：边页出 1970", ts: fx.now } };
+  const withReview = { ...t, stageSince: fx.now - 3 * 60 * 60_000, lastReview: { round: 1, verdict: "changes", p0: 0, p1: 1, p2: 0, text: "P1：边页出 1970", ts: fx.now } };
   expect(lineOf(withReview, ov, new Map(), fx.now + 11 * 60_000).reason).toBe("P1：边页出 1970 · 11 分钟没收到任务所在机器的更新 · 任务所在的机器上有 1 个问题在等回答");
   const local = fx.local.tasks.find((x) => x.stage === "fix")!;
   expect(local.team).toBeUndefined();
-  expect(lineOf({ ...local, lastReview: withReview.lastReview }, fx.local, new Map(), fx.now).reason).toBe("P1：边页出 1970");
+  expect(lineOf({ ...local, stageSince: withReview.stageSince, lastReview: withReview.lastReview }, fx.local, new Map(), fx.now).reason).toBe("P1：边页出 1970");
   // 本机首页（同一份夹具）没有任何团队句子
   expect(JSON.stringify(homeView(fx.local, fx.now))).not.toMatch(/主场镜像|阻塞提问/);
 });

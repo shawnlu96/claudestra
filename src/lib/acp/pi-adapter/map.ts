@@ -7,6 +7,7 @@
  *   另在 _meta.claudestra.toolUse 带上与 tmux 版同一个转换（pi-session.ts mapPiToolCall）的 CC 工具名和入参：Edit 的 diff、Write 的内容。
  *   tool_execution_update 不转：宿主只在结束时展示结果，bash 的中间结果每次都是整段，转了就是反复重发全文。
  * - 自动压缩 / 自动重试：_meta.claudestra.compacted（宿主翻成 compact_boundary）/ notice（一行进度句）。
+ * - 被压缩打断的回合（TurnOutcome.compaction）以中止收尾不算失败：压缩会先 abort 在跑的回合，活其实做完了（tests/pi-acp-compaction-abort.test.ts）。
  * - 忙闲用中性的 _meta.claudestra.threadStatus（不冒充 _meta.codex）；配置项的 id 沿用宿主认的 model / reasoning_effort。
  * tests/pi-acp-map.test.ts。
  */
@@ -23,7 +24,13 @@ const str = (v: unknown): string => (typeof v === "string" ? v : "");
 export interface TurnOutcome {
   stopReason?: string;
   errorMessage?: string;
+  /** 回合里（或停稳后紧接着，见 server.ts settle）出现了压缩 */
+  compaction?: boolean;
 }
+
+/** 以中止收尾：pi 的 abort 有时落成 stopReason=aborted，有时是 error「This operation was aborted」（在途请求被掐） */
+export const abortedLike = (o: TurnOutcome): boolean =>
+  o.stopReason === "aborted" || (o.stopReason === "error" && /\babort/i.test(o.errorMessage ?? ""));
 
 /** 中性的 _meta.claudestra 记号，宿主（lib/acp/updates.ts）认 */
 const info = (claudestra: Rec): Rec => ({ sessionUpdate: "session_info_update", _meta: { claudestra } });
@@ -143,6 +150,7 @@ export function createPiEventMapper() {
   /** 本条消息已发过的思考块（contentIndex）：有的 provider 流结束才发 thinking_end，正文一开头就先把已攒好的思考发出去 */
   let sentThoughts = new Set<number>();
   let outcome: TurnOutcome = {};
+  let compaction = false;
   const earlyThoughts = (content: unknown): Rec[] =>
     (Array.isArray(content) ? content : []).flatMap((c, i) => {
       if (c?.type !== "thinking" || !str(c.thinking).trim() || sentThoughts.has(i)) return [];
@@ -184,7 +192,11 @@ export function createPiEventMapper() {
           return [toolCall(ev)];
         case "tool_execution_end":
           return [toolDone(ev)];
+        case "agent_start":
+          compaction = false;
+          return [];
         case "compaction_start":
+          compaction = true;
           return ev.reason === "manual" ? [] : [notice("正在自动压缩上下文…")];
         case "compaction_end":
           return compactionEnd(ev);
@@ -196,8 +208,9 @@ export function createPiEventMapper() {
     },
     /** 取走本回合的结局并清空（下一回合从头记） */
     takeOutcome(): TurnOutcome {
-      const o = outcome;
+      const o = compaction ? { ...outcome, compaction } : outcome;
       outcome = {};
+      compaction = false;
       return o;
     },
   };
@@ -273,7 +286,9 @@ export function dialogCancel(req: Rec): Rec | null {
 
 /** 回合结局 → session/prompt 的 stopReason；error 返回 null（调用方回 JSON-RPC 错误，宿主据此出失败卡） */
 export function stopReasonOf(o: TurnOutcome, cancelled: boolean): string | null {
-  if (cancelled || o.stopReason === "aborted") return "cancelled";
+  if (cancelled) return "cancelled";
+  if (o.compaction && abortedLike(o)) return "end_turn";
+  if (o.stopReason === "aborted") return "cancelled";
   if (o.stopReason === "error") return null;
   return o.stopReason === "length" ? "max_tokens" : "end_turn";
 }

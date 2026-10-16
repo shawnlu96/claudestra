@@ -1,9 +1,11 @@
 /**
- * QWARN1_BROWSER=1 bun test tests/web-quota-warning-browser.test.ts — 顶部额度提醒条的真实浏览器渲染（390px + 桌面），隔离夹具、不连真 bridge。
- * 页面骨架模拟聊天页（56px 顶栏 + 对话 + 底部输入框），挂的是真组件 QuotaWarningBanner，GET /api/v1/lend/quota-lines 由路由按场景回。
- * 覆盖：停接 + 提醒两族同时、unknown 不出、403 / 404 不出且不再拉、只读（零写请求）、关掉后刷新不再出、跨新线（提醒→停接）再出、
- * 跨 tab 同步关掉、英文与本地时区、移动端不遮输入框；读到后 401 清空、存储写不进时两族先后关掉都生效、慢的旧回包不覆盖新状态、portal 到 body、
- * 存不下的旧代关掉不顶掉别的 tab 落盘的新代（dismiss-memory-1，含八代有界合并）、实际设置改回旧值再出现（settings-return-1）。截图写到 .playwright-mcp/qwarn1/（已 gitignore，只私存）；有 web/.next 构建时用生产样式。
+ * QWARN1_BROWSER=1 bun test tests/web-quota-warning-browser.test.ts — 顶部额度卡里「提醒线 / 不再接新活」两种行的真实浏览器渲染（390px + 桌面），隔离夹具、不连真 bridge。
+ * 页面骨架模拟聊天页（56px 顶栏 + 对话 + 底部输入框），挂的是真组件 QuotaNotice（QUOTA1 起额度提醒条并进这张卡），GET /api/v1/lend/quota-lines 由路由按场景回，
+ * /quota/wall 一律 404（闸那一行见 tests/web-dom-quota-notice.test.ts）。
+ * 覆盖：不再接新活 + 提醒两族同一张卡、unknown 不出、403 / 404 不出且不再拉、只读（零写请求）、关掉后刷新不再出、升级（提醒→不再接新活）再出、
+ * 跨 tab 同步关掉、英文、移动端不遮输入框；存储写不进时关掉仍在本页生效、portal 到 body（401 清空、回包乱序在 tests/web-dom-quota-notice.test.ts）。
+ * 关掉按「族 + 严重度 + 重置时刻」记（QUOTA1），改线 / 改模式不再算新的一代（旧 dismiss-memory-1 / settings-return-1 的情形由新规则替代）。
+ * 截图写到 .playwright-mcp/qwarn1/（已 gitignore，只私存）；有 web/.next 构建时用生产样式。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -27,7 +29,7 @@ const fixture = `
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { I18nInit } from "../../lib/i18n";
-import { QuotaWarningBanner } from "../../features/lend/quota-warning-banner";
+import { QuotaNotice } from "../../features/quota/quota-notice";
 const msgs = Array.from({ length: 30 }, (_, i) => i);
 createRoot(document.getElementById("root")).render(
   <div style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
@@ -35,7 +37,7 @@ createRoot(document.getElementById("root")).render(
     <header style={{ height: 56, flexShrink: 0 }} className="flex items-center border-b border-base-300 px-4 font-semibold">chat</header>
     <main style={{ flex: 1, overflow: "auto" }} className="space-y-2 p-4">{msgs.map((i) => <div key={i} className="rounded-xl bg-base-200 p-3 text-sm">message {i}</div>)}</main>
     <footer data-testid="input" style={{ flexShrink: 0 }} className="border-t border-base-300 p-3"><textarea className="textarea textarea-bordered w-full" rows={2} defaultValue="" /></footer>
-    <QuotaWarningBanner />
+    <QuotaNotice />
   </div>);
 `;
 
@@ -72,11 +74,13 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => { await browser?.close(); server?.closeAllConnections(); server?.close(); });
 
+/** 页面时钟钉在重置前两天（夹具的重置时刻是固定日期；已过重置的读数按规则不出） */
+const pin = (p: Page) => p.clock.setFixedTime(new Date(RESET - 2 * 86_400_000));
 /** 一个浏览器上下文 = 一台设备（localStorage 共享）；reply 可在测试中途换（模拟 bridge 状态变化），gets / writes 计数 */
 interface Device { ctx: BrowserContext; reply: { status: number; json: unknown }; hold: Promise<void> | null; gets: number; writes: string[]; open: () => Promise<Page> }
 async function device(reply: Device["reply"], opts: { width?: number; height?: number; locale?: string; timezoneId?: string } = {}): Promise<Device> {
   const ctx = await browser.newContext({ viewport: { width: opts.width ?? 390, height: opts.height ?? 844 }, locale: opts.locale ?? "zh-CN", timezoneId: opts.timezoneId ?? "Asia/Shanghai" });
-  const d: Device = { ctx, reply, hold: null, gets: 0, writes: [], open: async () => { const p = await ctx.newPage(); await p.goto(url); return p; } };
+  const d: Device = { ctx, reply, hold: null, gets: 0, writes: [], open: async () => { const p = await ctx.newPage(); await pin(p); await p.goto(url); return p; } };
   await ctx.route("**/api/v1/**", async (route) => {
     const r = route.request();
     if (r.method() !== "GET") { d.writes.push(`${r.method()} ${r.url()}`); return route.fulfill({ status: 500, json: {} }); }
@@ -90,22 +94,28 @@ async function device(reply: Device["reply"], opts: { width?: number; height?: n
   });
   return d;
 }
-const bar = (p: Page, family: string) => p.locator(`[data-quota-warning="${family}"]`);
+const bar = (p: Page, family: string) => p.locator(`[data-quota-notice-row="${family}"]`);
+const card = (p: Page) => p.getByTestId("quota-notice");
+const close = (p: Page) => p.locator('[data-quota-notice] button[aria-label="关闭"]').click();
 const settle = (p: Page) => p.waitForTimeout(600);
+const visible = (p: Page) => p.evaluate(`document.dispatchEvent(new Event("visibilitychange"))`);
+/** 轮询周期是 60 秒：「下一轮」靠刷新页面模拟（模块级读数源随页面重建） */
+const nextRead = async (p: Page) => { await p.reload(); await settle(p); };
 
-test.skipIf(!enabled)("停接 + 提醒两族同时、只读、移动端不遮输入框", async () => {
+test.skipIf(!enabled)("不再接新活 + 提醒两族同一张卡、只读、移动端不遮输入框", async () => {
   const d = await device({ status: 200, json: view(STOP, WARN) });
   const p = await d.open();
   await bar(p, "codex").waitFor();
+  expect(await p.locator("[data-quota-notice]").count()).toBe(1);
   const codex = await bar(p, "codex").innerText();
-  expect(codex).toContain("Codex 本周已用 82%，到了不再接新活的线");
+  expect(codex).toContain("Codex 本周已用 82%，不再接新活");
   expect(codex).toContain("已不再接新活，在跑的活照常做完");
-  expect(codex).toContain("重置 10/9 09:41"); // Asia/Shanghai 本地时区
+  expect(codex).toContain("10/9 09:41 重置"); // Asia/Shanghai 本地时区
   expect(await bar(p, "codex").getAttribute("data-level")).toBe("stop");
   const claude = await bar(p, "claude").innerText();
-  expect(claude).toContain("Claude 本周已用 74%，达到提醒线");
+  expect(claude).toContain("Claude 本周已用 74%，到提醒线了");
   expect(claude).toContain("仍在接新活，能同时跑的数量已减半");
-  const banner = (await p.getByTestId("quota-warning").boundingBox())!;
+  const banner = (await card(p).boundingBox())!;
   const input = (await p.getByTestId("input").boundingBox())!;
   expect(banner.y).toBeGreaterThanOrEqual(56); // 顶栏下方
   expect(banner.y + banner.height).toBeLessThan(input.y); // 不遮输入框
@@ -120,11 +130,10 @@ test.skipIf(!enabled)("unknown 不出肯定提醒；另一族照出", async () =
   const p = await d.open();
   await bar(p, "claude").waitFor();
   expect(await bar(p, "codex").count()).toBe(0);
-  expect(await p.getByTestId("quota-warning").innerText()).not.toContain("0%");
-  await p.screenshot({ path: resolve(out, "qwarn1-390-unknown-codex.png") });
+  expect(await card(p).innerText()).not.toContain("0%");
   d.reply = { status: 200, json: view(UNKNOWN, UNKNOWN) };
-  await p.reload(); await settle(p);
-  expect(await p.getByTestId("quota-warning").count()).toBe(0);
+  await nextRead(p);
+  expect(await card(p).count()).toBe(0);
   await d.ctx.close();
 }, 30_000);
 
@@ -132,27 +141,26 @@ test.skipIf(!enabled)("403 / 404（缩权 / 老 bridge）：不显示，且这�
   for (const status of [403, 404]) {
     const d = await device({ status, json: { ok: false, error: "forbidden" } });
     const p = await d.open(); await settle(p);
-    expect(await p.getByTestId("quota-warning").count()).toBe(0);
+    expect(await card(p).count()).toBe(0);
     const gets = d.gets;
-    await p.evaluate(`document.dispatchEvent(new Event("visibilitychange"))`); await settle(p);
+    await visible(p); await settle(p);
     expect(d.gets).toBe(gets);
     await d.ctx.close();
   }
 }, 30_000);
 
-test.skipIf(!enabled)("关掉：刷新后同一条线不再出；跨新线（提醒→停接）再出；跨 tab 同步", async () => {
+test.skipIf(!enabled)("关掉：刷新后同级不再出；升级（提醒→不再接新活）再出；跨 tab 同步", async () => {
   const d = await device({ status: 200, json: view({}, WARN) });
   const a = await d.open();
   const b = await d.open();
   await bar(a, "claude").waitFor(); await bar(b, "claude").waitFor();
-  await bar(a, "claude").getByRole("button", { name: "关闭" }).click();
-  expect(await bar(a, "claude").count()).toBe(0);
+  await close(a);
+  await bar(a, "claude").waitFor({ state: "detached" });
   await bar(b, "claude").waitFor({ state: "detached" }); // 另一个 tab 经 storage 事件收起
   d.reply = { status: 200, json: view({}, { ...WARN, weekUsedPct: 78 }) }; // 仍在提醒区
-  await a.reload(); await settle(a);
+  await nextRead(a);
   expect(await bar(a, "claude").count()).toBe(0);
-  await a.screenshot({ path: resolve(out, "qwarn1-390-dismissed.png") });
-  d.reply = { status: 200, json: view({}, { ...STOP, weekUsedPct: 81 }) }; // 跨过停接线
+  d.reply = { status: 200, json: view({}, { ...STOP, weekUsedPct: 81 }) }; // 跨过不再接新活的线
   await a.reload();
   await bar(a, "claude").waitFor();
   expect(await bar(a, "claude").innerText()).toContain("已不再接新活");
@@ -165,197 +173,38 @@ test.skipIf(!enabled)("桌面 + 英文 + 只观察 + 上次读数", async () => 
   const observe = view({ ...STOP, limit: "none", mode: "observe", freshness: "last_known", source: "live_stale" }, { ...WARN, limit: "none", mode: "observe" }, "observe");
   const d = await device({ status: 200, json: observe }, { width: 1280, height: 800, locale: "en-US", timezoneId: "America/New_York" });
   const p = await d.ctx.newPage();
+  await pin(p);
   await p.addInitScript('localStorage.setItem("cstra_lang", "en")');
   await p.goto(url);
   await bar(p, "codex").waitFor();
-  await p.waitForFunction(`document.querySelector('[data-quota-warning="codex"]')?.textContent?.includes("this week")`);
+  await p.waitForFunction(`document.querySelector('[data-quota-notice-row="codex"]')?.textContent?.includes("this week")`);
   const codex = await bar(p, "codex").innerText();
-  expect(codex).toContain("Codex used 82% this week — stop line reached");
+  expect(codex).toContain("Codex used 82% this week — taking no new work");
   expect(codex).toContain("Observe only: still accepting new work");
-  expect(codex).toContain("Last known reading");
-  expect(codex).toMatch(/Resets 10\/8,? 21:41/); // America/New_York 本地时区
+  expect(codex).toContain("last known reading");
+  expect(codex).toContain("resets 10/8 21:41"); // America/New_York 本地时区
   expect(await bar(p, "claude").innerText()).toContain("Observe only: still accepting, concurrent runs unchanged");
   await p.screenshot({ path: resolve(out, "qwarn1-desktop-en-observe.png") });
   await d.ctx.close();
 }, 30_000);
 
-test.skipIf(!enabled)("桌面 · 中文两族", async () => {
-  const d = await device({ status: 200, json: view(STOP, WARN) }, { width: 1280, height: 800 });
-  const p = await d.open();
-  await bar(p, "claude").waitFor();
-  await p.screenshot({ path: resolve(out, "qwarn1-desktop-stop-warn.png") });
-  await d.ctx.close();
-}, 30_000);
-
-const visible = (p: Page) => p.evaluate(`document.dispatchEvent(new Event("visibilitychange"))`);
-
-test.skipIf(!enabled)("先读到提醒、再 401（凭据失效）：已显示的读数清掉，且不再拉；横幅 portal 在 body 下", async () => {
+test.skipIf(!enabled)("独立展示时卡片 portal 在 body 下（401 清空见 tests/web-dom-quota-notice.test.ts）", async () => {
   const d = await device({ status: 200, json: view(STOP, WARN) });
   const p = await d.open();
   await bar(p, "codex").waitFor();
-  expect(await p.evaluate<boolean>(`document.querySelector('[data-testid="quota-warning"]').parentElement === document.body`)).toBe(true);
-  d.reply = { status: 401, json: { ok: false, error: "unauthorized" } };
-  await visible(p); await settle(p);
-  expect(await p.getByTestId("quota-warning").count()).toBe(0);
-  const gets = d.gets;
-  d.reply = { status: 200, json: view(STOP, WARN) };
-  await visible(p); await settle(p);
-  expect(d.gets).toBe(gets);
-  expect(await p.getByTestId("quota-warning").count()).toBe(0);
+  expect(await p.evaluate<boolean>(`document.querySelector('[data-testid="quota-notice"]').parentElement === document.body`)).toBe(true);
   await d.ctx.close();
 }, 30_000);
 
-test.skipIf(!enabled)("存储写不进（QuotaExceeded）：两族先后关掉，前一族不会被后一次关掉抹回来", async () => {
+test.skipIf(!enabled)("存储写不进（QuotaExceeded）：关掉仍在本页生效，同一份读数再判也不再出", async () => {
   const d = await device({ status: 200, json: view(WARN, WARN) });
   await d.ctx.addInitScript(`{ const set = Storage.prototype.setItem;
-    Storage.prototype.setItem = function (k, v) { if (k === "cstra_quota_warning_dismissed") throw new DOMException("full", "QuotaExceededError"); return set.call(this, k, v); }; }`);
+    Storage.prototype.setItem = function (k, v) { if (k === "cstra_quota_notice_dismissed") throw new DOMException("full", "QuotaExceededError"); return set.call(this, k, v); }; }`);
   const p = await d.open();
   await bar(p, "codex").waitFor(); await bar(p, "claude").waitFor();
-  await bar(p, "codex").getByRole("button", { name: "关闭" }).click();
-  expect(await bar(p, "codex").count()).toBe(0);
-  await bar(p, "claude").getByRole("button", { name: "关闭" }).click();
-  expect(await bar(p, "claude").count()).toBe(0);
-  expect(await bar(p, "codex").count()).toBe(0);
-  await visible(p); await settle(p); // 同一条线再读一次也不再出
-  expect(await p.getByTestId("quota-warning").count()).toBe(0);
-  await d.ctx.close();
-}, 30_000);
-
-test.skipIf(!enabled)("回包乱序：慢的旧 GET（提醒）晚到，不覆盖已显示的新状态（停接）", async () => {
-  const d = await device({ status: 200, json: view({}, WARN) });
-  const p = await d.open();
-  await bar(p, "claude").waitFor();
-  let release!: () => void;
-  d.hold = new Promise<void>((done) => { release = done; });
-  await visible(p); // 旧请求：回提醒，暂挂
-  await p.waitForTimeout(200);
-  d.hold = null;
-  d.reply = { status: 200, json: view({}, { ...STOP, weekUsedPct: 81 }) };
-  await visible(p); // 新请求：回停接
-  await p.waitForFunction(`document.querySelector('[data-quota-warning="claude"]')?.dataset.level === "stop"`);
-  release(); await settle(p);
-  expect(await bar(p, "claude").getAttribute("data-level")).toBe("stop");
-  expect(await bar(p, "claude").innerText()).toContain("已不再接新活");
-  await d.ctx.close();
-}, 30_000);
-
-test.skipIf(!enabled)("dismiss-memory-1 跨代：A 存不下关掉 warn → 同周升停接 → B 落盘关掉 stop → A 恢复写入关掉另一族：两边 stop 都不再出", async () => {
-  const d = await device({ status: 200, json: view(WARN, WARN) });
-  const a = await d.open();
-  await a.evaluate(`{ const set = Storage.prototype.setItem; window.__failDismiss = true;
-    Storage.prototype.setItem = function (k, v) {
-      if (window.__failDismiss && k === "cstra_quota_warning_dismissed") throw new DOMException("full", "QuotaExceededError");
-      return set.call(this, k, v);
-    }; }`);
-  await bar(a, "codex").waitFor();
-  await bar(a, "codex").getByRole("button", { name: "关闭" }).click(); // 只在 A 的内存里（warn key）
-  expect(await bar(a, "codex").count()).toBe(0);
-  d.reply = { status: 200, json: view(STOP, WARN) }; // 同周窗口 / 阈值 / 实例，Codex 升停接
-  const b = await d.open();
-  await visible(a);
-  await bar(a, "codex").waitFor(); await bar(b, "codex").waitFor();
-  await bar(b, "codex").getByRole("button", { name: "关闭" }).click(); // B 落盘 stop key
-  expect(await bar(b, "codex").count()).toBe(0);
-  await bar(a, "codex").waitFor({ state: "detached", timeout: 3000 }); // A 经 storage 事件跟着收起
-  await visible(a); await settle(a);
-  expect(await bar(a, "codex").count()).toBe(0);
-  await a.evaluate(`window.__failDismiss = false`);
-  await bar(a, "claude").getByRole("button", { name: "关闭" }).click(); // A 写回共享存储
-  await settle(b); await visible(b); await settle(b);
-  expect(await bar(b, "codex").count()).toBe(0); // 不能被 A 旧的 warn key 撤销
-  expect(await bar(b, "claude").count()).toBe(0);
-  await b.reload(); await settle(b);
-  expect(await b.getByTestId("quota-warning").count()).toBe(0);
-  await d.ctx.close();
-}, 30_000);
-
-test.skipIf(!enabled)("dismiss-memory-1 有界合并：A 内存里八代 warn（60…67）→ 升停接 B 落盘关掉 stop → A 收起，A 写回后 B 的 stop 不复现", async () => {
-  const d = await device({ status: 200, json: view({ ...WARN, warnPct: 60 }, WARN) });
-  const a = await d.open();
-  await a.evaluate(`{ const set = Storage.prototype.setItem; window.__failDismiss = true;
-    Storage.prototype.setItem = function (k, v) {
-      if (window.__failDismiss && k === "cstra_quota_warning_dismissed") throw new DOMException("full", "QuotaExceededError");
-      return set.call(this, k, v);
-    }; }`);
-  for (let i = 0; i < 8; i++) {
-    d.reply = { status: 200, json: view({ ...WARN, warnPct: 60 + i }, WARN) };
-    await visible(a);
-    await bar(a, "codex").waitFor();
-    await bar(a, "codex").getByRole("button", { name: "关闭" }).click();
-    expect(await bar(a, "codex").count()).toBe(0);
-  }
-  d.reply = { status: 200, json: view({ ...STOP, warnPct: 70 }, WARN) };
-  const b = await d.open();
-  await visible(a);
-  await bar(a, "codex").waitFor(); await bar(b, "codex").waitFor();
-  await bar(b, "codex").getByRole("button", { name: "关闭" }).click();
-  expect(await bar(b, "codex").count()).toBe(0);
-  await bar(a, "codex").waitFor({ state: "detached", timeout: 3000 });
-  await visible(a); await settle(a);
-  expect(await bar(a, "codex").count()).toBe(0);
-  await a.evaluate(`window.__failDismiss = false`);
-  await bar(a, "claude").getByRole("button", { name: "关闭" }).click();
-  await settle(b); await visible(b); await settle(b);
-  expect(await bar(b, "codex").count()).toBe(0);
-  expect(d.writes).toEqual([]);
-  await d.ctx.close();
-}, 60_000);
-
-test.skipIf(!enabled)("settings-return-1：70/80 关掉 → 实际设置改 60/80 再出、关掉 → 改回 70/80：再出现", async () => {
-  const d = await device({ status: 200, json: view({ ...WARN, warnPct: 70 }, {}) });
-  const p = await d.open();
-  await bar(p, "codex").waitFor();
-  await bar(p, "codex").getByRole("button", { name: "关闭" }).click();
-  d.reply = { status: 200, json: view({ ...WARN, warnPct: 60 }, {}) };
-  await visible(p);
-  await bar(p, "codex").waitFor();
-  await bar(p, "codex").getByRole("button", { name: "关闭" }).click();
+  await close(p);
+  await card(p).waitFor({ state: "detached" });
   await visible(p); await settle(p);
-  expect(await bar(p, "codex").count()).toBe(0);
-  d.reply = { status: 200, json: view({ ...WARN, warnPct: 70 }, {}) };
-  await visible(p);
-  await bar(p, "codex").waitFor();
-  await p.reload(); await bar(p, "codex").waitFor(); // 刷新后照样按真实状态显示
-  expect(d.writes).toEqual([]);
-  await d.ctx.close();
-}, 30_000);
-
-test.skipIf(!enabled)("settings-return-1 r4：中间设置不关闭，恢复旧值及刷新都再出现", async () => {
-  const d = await device({ status: 200, json: view(WARN, {}) });
-  const p = await d.open();
-  await bar(p, "codex").waitFor();
-  await bar(p, "codex").getByRole("button", { name: "关闭" }).click();
-  d.reply = { status: 200, json: view({ ...WARN, warnPct: 60 }, {}) };
-  await visible(p); await bar(p, "codex").waitFor(); await settle(p);
-  d.reply = { status: 200, json: view(WARN, {}) };
-  await visible(p); await settle(p);
-  expect(await bar(p, "codex").count()).toBe(1);
-  await p.reload(); await settle(p);
-  expect(await bar(p, "codex").count()).toBe(1);
-  expect(d.writes).toEqual([]);
-  await d.ctx.close();
-}, 30_000);
-
-test.skipIf(!enabled)("dismiss-memory-1 r4：B stop 关闭写失败，A 旧 warn 稍后落盘不能抹掉 stop", async () => {
-  const d = await device({ status: 200, json: view(WARN, {}) });
-  const a = await d.open(), b = await d.open();
-  await bar(a, "codex").waitFor(); await bar(b, "codex").waitFor();
-  await b.evaluate(`{ const set = Storage.prototype.setItem;
-    Storage.prototype.setItem = function(k, v) {
-      if (k === "cstra_quota_warning_dismissed") throw new DOMException("full", "QuotaExceededError");
-      return set.call(this, k, v);
-    }; }`);
-  d.reply = { status: 200, json: view(STOP, {}) };
-  await visible(b); await settle(b);
-  expect(await bar(b, "codex").getAttribute("data-level")).toBe("stop");
-  await bar(b, "codex").getByRole("button", { name: "关闭" }).click();
-  expect(await bar(b, "codex").count()).toBe(0);
-  expect(await bar(a, "codex").getAttribute("data-level")).toBe("warn");
-  await bar(a, "codex").getByRole("button", { name: "关闭" }).click();
-  await settle(b);
-  expect(await bar(b, "codex").count()).toBe(0);
-  await visible(b); await settle(b);
-  expect(await bar(b, "codex").count()).toBe(0);
-  expect(d.writes).toEqual([]);
+  expect(await card(p).count()).toBe(0);
   await d.ctx.close();
 }, 30_000);

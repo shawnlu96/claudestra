@@ -2,7 +2,7 @@
  * 协作视图首页纯逻辑（web/features/collab/collab-model.ts、collab-action.ts）：排序、停留时长、卡住判定、一句话状态、此刻动作。
  */
 import { describe, expect, test } from "bun:test";
-import { dwellMs, dwellText, fmtDuration, homeView, isStuck, STUCK_MS, type LedgerOverview, type LedgerTaskView, type Stage } from "../web/features/collab/collab-model";
+import { dwellMs, dwellText, fmtDuration, homeView, FIX_STUCK_MS, isStuck, STUCK_MS, type LedgerOverview, type LedgerTaskView, type Stage } from "../web/features/collab/collab-model";
 
 const MIN = 60_000;
 const NOW = new Date(2026, 8, 28, 18, 0).getTime();
@@ -57,7 +57,7 @@ describe("首页排序与一句话状态", () => {
     task("W", "review", { round: 2, stageSince: NOW - 7 * MIN }),
     task("M1", "merge", { stageSince: NOW - 42 * MIN }),
     task("M2", "merge", { stageSince: NOW - 10 * MIN }),
-    task("F", "fix", { round: 1, stageSince: NOW - 3 * MIN, lastReview: { round: 1, verdict: "changes", p0: 0, p1: 2, p2: 1, text: "位置没恢复\n第二行", ts: NOW - 4 * MIN } }),
+    task("F", "fix", { round: 1, stageSince: NOW - FIX_STUCK_MS - 3 * MIN, lastReview: { round: 1, verdict: "changes", p0: 0, p1: 2, p2: 1, text: "位置没恢复\n第二行", ts: NOW - 4 * MIN } }),
     task("Q", "spec", { agent: null }),
     task("D1", "done", { metrics: { ...task("x", "done").metrics, endTs: NOW - 60 * MIN } }),
     task("D0", "verified", { metrics: { ...task("x", "done").metrics, endTs: NOW - 26 * 60 * MIN } }),
@@ -71,7 +71,7 @@ describe("首页排序与一句话状态", () => {
 
   test("阶段短语、原因、合并队列按进入先后排位", () => {
     const by = new Map(v.lines.map((l) => [l.id, l]));
-    expect(by.get("F")!).toMatchObject({ stageLabel: "返工中 · 第 1 轮意见", reason: "位置没恢复", tone: "red", column: 3, agent: "task-f" });
+    expect(by.get("F")!).toMatchObject({ stageLabel: "返工中 · 第 1 轮意见 · 已停 2小时3分", reason: "位置没恢复", tone: "red", column: 3, agent: "task-f" });
     expect(by.get("M1")!).toMatchObject({ stageLabel: "等合并 · 队列第 1 位", reason: "已经等了 42分，超过 30 分钟", stuck: true });
     expect(by.get("M2")!.stageLabel).toBe("等合并 · 队列第 2 位");
     expect(by.get("W")!.stageLabel).toBe("等审查 · 第 2 轮");
@@ -124,7 +124,7 @@ describe("等你（T11a：features/asks 的开着的 ask 喂进来）", () => {
 
   test("挂在任务上的、或执行者发的没挂任务的 ask → 这条线归「等你」，排在出问题之后、卡住之前，原因是 ask 标题", () => {
     const tasks = [
-      task("P", "fix"),
+      task("P", "fix", { stageSince: NOW - FIX_STUCK_MS - MIN }),
       task("S", "review", { stageSince: NOW - STUCK_MS - MIN }),
       task("O", "build"),
       task("A", "build"),
@@ -136,7 +136,7 @@ describe("等你（T11a：features/asks 的开着的 ask 喂进来）", () => {
   });
 
   test("出问题的线不被「等你」盖掉；没有 ask 时和原来一样", () => {
-    const v = homeView(overview([task("P", "fix")]), NOW, undefined, [wait("ask_1", "P", "agent-task-p")]);
+    const v = homeView(overview([task("P", "fix", { stageSince: NOW - FIX_STUCK_MS - MIN })]), NOW, undefined, [wait("ask_1", "P", "agent-task-p")]);
     expect(v.lines[0].attention).toBe("problem");
     expect(homeView(overview([task("B", "build")]), NOW).headline.owner).toBe(0);
     // 标题栏数的是归到「等你」的线：挂不到线上的 ask（别的 agent 发的）不算，和各条线对得上
@@ -202,12 +202,41 @@ describe("冻结卡与观察期内的上线卡不算卡住（STUCKVIEW1）", () 
         expect(line.stageLabel).toBe(result === "unknown" ? "线上验证查不到结果" : "线上验证失败");
       }
     }
-    const fix = lineFor(task("X", "fix", { attentionFacts: { frozen: true } }));
+    // 返工停满 2 小时（STUCKVIEW2）才算出问题，冻结照样盖不住；不满 2 小时的冻结返工卡照旧写返工，不写「已冻结」
+    const fix = lineFor(task("X", "fix", { stageSince: NOW - FIX_STUCK_MS - MIN, attentionFacts: { frozen: true } }));
     expect(fix.attention).toBe("problem");
-    expect(fix.stageLabel).toBe("返工中 · 第 1 轮意见");
+    expect(fix.stageLabel).toBe("返工中 · 第 1 轮意见 · 已停 2小时1分");
+    expect(lineFor(task("X", "fix", { attentionFacts: { frozen: true } }))).toMatchObject({ attention: "progress", stageLabel: "返工中 · 第 1 轮意见" });
   });
 
   test("observationUntil 只对 live 生效：别的阶段带了也照 30 分钟算", () => {
     expect(isStuck(task("R", "review", { stageSince: NOW - STUCK_MS - MIN, attentionFacts: { observationUntil: NOW + DAY } }), NOW)).toBe(true);
+  });
+});
+
+describe("返工按停留时长分两档（STUCKVIEW2）", () => {
+  const view = (ts: LedgerTaskView[]) => homeView(overview(ts), NOW);
+  const fixAt = (id: string, ms: number | null) => task(id, "fix", { round: 1, stageSince: ms === null ? null : NOW - ms });
+
+  test("[验收线 1] 进入 fix 5 分钟：进行中、不计入出问题；2 小时 1 分：出问题、计入，阶段短语带已停时长", () => {
+    const fresh = view([fixAt("F", 5 * MIN)]);
+    expect(fresh.lines[0]).toMatchObject({ attention: "progress", tone: "neutral", stuck: false, stageLabel: "返工中 · 第 1 轮意见" });
+    expect(fresh.headline).toMatchObject({ problem: 0, stuck: 0 });
+    const stalled = view([fixAt("F", FIX_STUCK_MS + MIN)]);
+    expect(stalled.lines[0]).toMatchObject({ attention: "problem", tone: "red", stageLabel: "返工中 · 第 1 轮意见 · 已停 2小时1分" });
+    expect(stalled.headline.problem).toBe(1);
+    // 两档的分界就是 FIX_STUCK_MS：差 1 分钟不算，到点就算
+    expect(view([fixAt("F", FIX_STUCK_MS - MIN)]).lines[0]!.attention).toBe("progress");
+    expect(view([fixAt("F", FIX_STUCK_MS)]).lines[0]!.attention).toBe("problem");
+  });
+
+  test("[验收线 2] 停留时长读不到（stageSince 为空 / 导入推断）按进行中；blocked、verify 不过的 live 仍是出问题", () => {
+    expect(view([fixAt("N", null)]).lines[0]).toMatchObject({ attention: "progress", stageLabel: "返工中 · 第 1 轮意见" });
+    expect(view([task("A", "fix", { stageSince: NOW - 10 * FIX_STUCK_MS, stageSinceApprox: true })]).lines[0]!.attention).toBe("progress");
+    expect(view([task("B", "blocked", { stageSince: null })]).lines[0]!.attention).toBe("problem");
+    const lastEvent = { seq: 9, ts: NOW - MIN, actor: "x", target: "V", kind: "verify", text: "检查单没过", data: { result: "fail" } };
+    expect(view([task("V", "live", { lastEvent })]).lines[0]!.attention).toBe("problem");
+    const all = view([fixAt("F", 5 * MIN), fixAt("S", FIX_STUCK_MS + MIN), fixAt("N", null), task("B", "blocked")]);
+    expect(all.headline.problem).toBe(2);
   });
 });

@@ -2,7 +2,7 @@
  * UXTERM1 A 段截图与 DOM 断言（opt-in，截图不进 git）：
  *   OWNER_WORDS_SHOTS_DIR=<仓库外目录> [OWNER_WORDS_BASE_REPO=<基线 main 的检出目录>] bun --no-env-file test tests/web-owner-words-browser.test.ts
  * 页面是合成夹具，内联在本文件里、打包到截图目录：
- *   sidebar = 三个会话行（简化行 + 真 LpBadge），分别是 low-priority 开着、用完、额度用完在等；
+ *   sidebar = 三个会话行（简化行 + 真 LpBadge），分别是低优先级开着、用完、额度用完在等；
  *   lend    = 真 LendPanel（设置 → 借出）：一条授权（Codex 同时 3 个、每天 50 个）、两条借出中的活、额度线处在提醒态。
  * 1280 与 390、浅色；中文各拍一张，英文只断言不拍。给了 OWNER_WORDS_BASE_REPO 就用同一份数据再拍一套「改前」（只断言改前的现状）。
  * 改后每页的 document.body.innerText 不含 BANNED_OWNER_WORDS，英文下不出现 LP / feature；shotIssues 为空。
@@ -25,7 +25,7 @@ type View = (typeof VIEWS)[number];
 /** 每页必须出现的词：改前是旧词，改后是词表里的新词 */
 const EXPECT: Record<"before" | "after", Record<View, string[]>> = {
   before: { sidebar: ["LP→15:00", "LP 已用完", "撞墙中"], lend: ["借出中的单", "停接线", "codex 3 · 50/d", "该家族"] },
-  after: { sidebar: ["排队→15:00", "低优先级用完", "额度用完，等重置"],
+  after: { sidebar: ["低优先级", "低优先级用完", "额度用完，等重置"],
     lend: ["借出中的活", "不再接新活", "同时 Codex 3 个 · 每天 50 个", "能同时跑的数量减半"] },
 };
 

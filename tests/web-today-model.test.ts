@@ -30,7 +30,7 @@ function input(over: Partial<TodayInput> = {}): TodayInput {
 test("[验收线 1] 卡住了 3 条：出问题在前，其余按停留时长倒序；每行 任务标题 · 项目名 · 原因 · 停留时长", () => {
   const v = todayView(input(), deps);
   expect(v.stuck.map((r) => [r.project, r.id, r.problem])).toEqual([["proj-a", "A3", true], ["proj-a", "A2", false], ["proj-b", "B1", false]]);
-  expect(v.stuck[0]).toMatchObject({ title: "导出预览", projectName: "合成项目 A", reason: "窄屏下预览溢出", dwell: "50分" });
+  expect(v.stuck[0]).toMatchObject({ title: "导出预览", projectName: "合成项目 A", reason: "窄屏下预览溢出", dwell: "2小时10分" });
   expect(v.stuck[1]).toMatchObject({ title: "导出格式校验", reason: "已经等了 3小时，超过 30 分钟", dwell: "3小时" });
   expect(v.stuck[2]).toMatchObject({ title: "同步失败重试", projectName: "合成项目 B", dwell: "2小时" });
   expect(v.stuckMore).toEqual([]);
@@ -114,14 +114,14 @@ test("[验收线 1] 要你处理：带 taskId 的写出『项目 · 模块 · �
 
 test("团队与额度：活着按 status=active、在干活按 busy 数", () => {
   const agents = [...todayAgents(), { name: "gone", displayName: "gone", purpose: "", cwd: "/repo", status: "stopped", projectId: null }];
-  expect(todayView(input({ agents: agents as AgentSession[] }), deps).team).toEqual({ alive: 4, busy: 3 });
+  expect(todayView(input({ agents: agents as AgentSession[] }), deps).team).toEqual({ alive: 4, busy: 3, remote: 0 });
 });
 
 test("什么都没在做：idle；新词不出内部词，英文表齐", () => {
   const quiet = todayView(input({ agents: [], overviews: new Map(), boards: new Map() }), deps);
   expect([quiet.idle, quiet.doing.every((p) => !p.doing)]).toEqual([true, true]);
   const words = ["今天", "要你处理", "没有要你处理的", "卡住了", "正在做", "今天完成", "团队与额度", "{n} 件要你处理", "{n} 个在做", "其余 {n} 个项目", "今天完成 {n} 个任务",
-    "有 {n} 个项目没有完成时间，未计入", "{n} 个 agent 活着 · {m} 个在干活", "{f} 本周 {n}%", "整页", "去处理", "看任务"];
+    "有 {n} 个项目没有完成时间，未计入", "本机 {n} 个 agent 活着 · {m} 个在干活", "{f} 本周 {n}%", "整页", "去处理", "看任务"];
   const en = nowTr("en", (s) => `MISSING:${s}`);
   for (const w of words) {
     const zhw = t(w, { n: 2, m: 1, f: "Claude" });

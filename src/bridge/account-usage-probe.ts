@@ -18,11 +18,13 @@ import { envIPrefix, workerPrivateDirs } from "../lib/runtimes/clean-env.js";
 import { runtimePath } from "../lib/paths.js";
 import { detectBypassConsentPrompt, isClaudeReady, sandboxTmuxArgv, TMUX_SOCK, tmuxRaw, tmuxRawStrict } from "../lib/tmux-helper.js";
 import {
-  implausibleSessionReset, parseUsagePanel, typedRecheckOk, usagePanelVisible, type AccountUsage,
+  implausibleSessionReset, parseUsagePanel, typedRecheckOk, usagePanelLoading, usagePanelVisible, type AccountUsage,
 } from "../lib/account-usage-panel.js";
 import type { ProbeResource, ProbeResult, ProbeRunner } from "../lib/account-usage-refresh.js";
 
 export const PROBE_SESSION_PREFIX = "cstra-usage-probe-";
+/** Usage tab 显示「Loading usage data…」时原地等的次数上限（每次 1 秒） */
+const USAGE_LOAD_WAITS = 15;
 const PROBE_TOOLS_DENY = "Bash Edit Write MultiEdit NotebookEdit Read Glob Grep WebFetch WebSearch Task Agent TodoWrite Skill";
 
 /** 探测只用到的 tmux 动作；目标一律是自己建的 session id（$N） */
@@ -170,10 +172,15 @@ async function readUsageTab(tmux: ProbeTmux, id: string, d: Required<Pick<ProbeD
   await d.sleep(500);
   let panel = "";
   let found = false;
+  let loadWaits = 0;
   for (let i = 0; i < 6 && !found; i++) {
     panel = await tmux.capture(id).catch(() => "");
     if (usagePanelVisible(panel)) found = true;
-    else {
+    else if (usagePanelLoading(panel) && loadWaits < USAGE_LOAD_WAITS) {
+      loadWaits++; // 已在 Usage tab、数据还在异步加载：原地等，不能再按 → 翻走
+      i--;
+      await d.sleep(1000);
+    } else {
       await tmux.sendKey(id, "Right");
       await d.sleep(300);
     }

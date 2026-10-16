@@ -11,18 +11,24 @@
  * AUDTRAIN3：「排队中」只认真实的项目合并槽（ledger-audit-train-facts.ts）——当前 head 已合并（含等部署）的卡一律原规则；
  * 槽在别卡手里、自己当前 head 没合并、自己没有记录或记录在 ready / await_ci，才算在等槽；没人持槽不算排队（on 仍按列车空出起算）。
  * 持槽卡已合并在等部署时，说明写它在等部署而不是在合。槽事实缺失 / 读不了 = 按 off。tests/ledger-audit-train-recovery*.test.ts。
+ * AUDTRAIN5：foreign_repo 的卡（foreignRepoOf：卡的 PR / extra.repo 与项目仓库不同）不参加项目列车，私仓接管也一样（私仓串行是私仓机制）——
+ * 一律 PLAIN。项目仓库在取数层每项目读一次（projectRepoFor），未知 / 读不了 = 不判 foreign，照原规则。tests/ledger-audit-train-foreign-repo.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { readTrainFacts, type TrainFacts } from "./ledger-audit-train-facts.js";
+import type { LedgerTask } from "./ledger-stages.js";
 import type { RecoveryMode, RecoveryPolicyPort } from "./recovery-policy.js";
+import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 
 const HOLDING_PHASES: readonly string[] = ["ready", "updating", "await_review", "await_ci", "merging"];
 
 interface TrainRun { taskId: string; phase: string; createdAt: number }
 /** active = 占着列车的记录（createdAt 升序）；freedAt = 列车最近一次空出的时刻，没有过 = null */
 export interface MergeTrainFact { active: readonly TrainRun[]; freedAt: number | null }
-/** undefined = 没有 scheduler_merges 表 / 快照没带：ship_stalled 按原规则；trainFacts 缺 = 按 off（AUDTRAIN3） */
-export interface MergeTrainInputs { mergeTrain?: MergeTrainFact; trainFacts?: TrainFacts }
+/** undefined = 没有 scheduler_merges 表 / 快照没带：ship_stalled 按原规则；trainFacts 缺 = 按 off（AUDTRAIN3）；projectRepo 缺 / null = 项目仓库未知（AUDTRAIN5） */
+export interface MergeTrainInputs { mergeTrain?: MergeTrainFact; trainFacts?: TrainFacts; projectRepo?: string | null }
+/** trainSlots 认的卡：pr / extra 给 foreignRepoOf 判仓库（真实调用传完整任务） */
+type TrainCard = { id: string; stage: string } & Partial<Pick<LedgerTask, "pr" | "extra">>;
 
 /** 一张卡在列车上的处境：parked = 排队中且不报（on）；freedAt = 停滞改从这一刻起算（on、列车空着）；note = 加在 detail 末尾的说明（observe） */
 export interface TrainSlot { parked: boolean; freedAt: number | null; note: string }
@@ -47,25 +53,37 @@ function trainMode(policy: RecoveryPolicyPort, project: string): RecoveryMode {
   }
 }
 
-/** 快照取数（ledger-audit-snapshot.ts）：列车记录与合并槽事实在同一个只读事务里读 */
-export function readAuditTrain(db: Database, project: string, tasks: readonly { task: { id: string; stage: string } }[]): MergeTrainInputs {
+/** 项目仓库（AUDTRAIN5）：读不了 = 未知，不影响列车与槽事实 */
+function projectRepoSafe(project: string): string | null {
   try {
-    return db.transaction(() => ({ mergeTrain: readMergeTrain(db, project, tasks), trainFacts: readTrainFacts(db, project) }))();
+    return projectRepoFor(project);
+  } catch {
+    return null;
+  }
+}
+
+/** 快照取数（ledger-audit-snapshot.ts）：列车记录与合并槽事实在同一个只读事务里读；项目仓库在事务外每项目读一次 */
+export function readAuditTrain(db: Database, project: string, tasks: readonly { task: { id: string; stage: string } }[]): MergeTrainInputs {
+  let train: MergeTrainInputs;
+  try {
+    train = db.transaction(() => ({ mergeTrain: readMergeTrain(db, project, tasks), trainFacts: readTrainFacts(db, project) }))();
   } catch {
     return {}; // 读不了：两样都缺，按原规则
   }
+  return train.mergeTrain && train.trainFacts ? { ...train, projectRepo: projectRepoSafe(project) } : train; // 缺事实时 trainSlots 本就按 off
 }
 
 /** 自己在等槽时可以有的最新记录：没有、旧 head 已合 / 已结，或已登记但还没发合并（ready / await_ci，含让过槽的） */
 const WAITING_PHASES: readonly (string | null)[] = [null, "merged", "resolved", "ready", "await_ci"];
 
-/** 给 shipStalled 用：一张卡 → 它在列车上的处境。没带列车 / 槽事实、off、不在 merge 阶段、当前 head 已合并、自己持槽 = PLAIN（原规则） */
-export function trainSlots(s: { project: string } & MergeTrainInputs, policy: RecoveryPolicyPort): (task: { id: string; stage: string }) => TrainSlot {
+/** 给 shipStalled 用：一张卡 → 它在列车上的处境。没带列车 / 槽事实、off、foreign_repo、不在 merge 阶段、当前 head 已合并、自己持槽 = PLAIN（原规则） */
+export function trainSlots(s: { project: string } & MergeTrainInputs, policy: RecoveryPolicyPort): (task: TrainCard) => TrainSlot {
   const train = s.mergeTrain, facts = s.trainFacts;
   const mode = train && facts ? trainMode(policy, s.project) : "off";
   if (!train || !facts || mode === "off") return () => PLAIN;
-  const holder = facts.holder;
+  const holder = facts.holder, repo = s.projectRepo ?? null;
   return (task) => {
+    if (foreignRepoOf({ pr: task.pr ?? null, extra: task.extra ?? {} }, repo)) return PLAIN; // AUDTRAIN5：不参加项目列车（含私仓接管）
     const self = facts.cards[task.id];
     if (task.stage !== "merge" || !self || self.stage !== "merge" || self.merged) return PLAIN; // 已合并等部署：不是排队
     if (!WAITING_PHASES.includes(self.phase) || holder?.taskId === task.id) return PLAIN;

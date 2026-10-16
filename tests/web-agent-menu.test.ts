@@ -9,22 +9,28 @@ const pj = (id: string, name = id, emoji?: string): ProjectMeta => ({ id, name, 
 const ids = (xs: { id: string }[]) => xs.map((x) => x.id);
 
 describe("buildAgentMenu（侧栏右键 / 长按菜单内容）", () => {
-  test("运行中：详情 / Autopilot / 重启 / 停止 / 清空 / 移动到 / 归档，停止标红，移动到带二级", () => {
+  test("运行中：详情 / 重启 / 停止 / 清空 / 移动到 / 归档，停止标红，移动到带二级；网页没有「开启 Autopilot」", () => {
     const items = buildAgentMenu(ag("w"))!;
-    expect(ids(items)).toEqual(["info", "mission", "restart", "kill", "clear", "move", "archive"]);
+    expect(ids(items)).toEqual(["info", "restart", "kill", "clear", "move", "archive"]);
     expect(items.find((i) => i.id === "kill")?.danger).toBe(true);
     expect(items.find((i) => i.id === "move")?.submenu).toBe(true);
   });
   test("已停止：启动 / 移动到 / 归档——没有停止和清空", () => {
     expect(ids(buildAgentMenu(ag("w", { status: "stopped" }))!)).toEqual(["info", "start", "move", "archive"]);
   });
-  test("Autopilot 项随状态切换：没开 Autopilot =「开启 Autopilot…」，Autopilot 中 =「关闭 Autopilot」", () => {
-    expect(buildAgentMenu(ag("w"))!.find((i) => i.id === "mission")?.label).toBe("开启 Autopilot…");
+  test("Autopilot 中仍能关：只有「关闭 Autopilot」，开启入口已下架（10-16）", () => {
     const on = ag("w", { mission: { goal: "g", until: "2026-09-28T02:00:00Z", nudges: 3 } });
-    expect(buildAgentMenu(on)!.find((i) => i.id === "mission")?.label).toBe("关闭 Autopilot");
+    const items = buildAgentMenu(on)!;
+    expect(ids(items)).toEqual(["info", "mission", "restart", "kill", "clear", "move", "archive"]);
+    expect(items.find((i) => i.id === "mission")?.label).toBe("关闭 Autopilot");
+    expect(buildAgentMenu(ag("w"))!.some((i) => i.label.includes("开启 Autopilot"))).toBe(false);
   });
-  test("大总管运行中只有 Autopilot（外加本机打开类）；停了没有菜单；mock 没有菜单", () => {
-    expect(ids(buildAgentMenu(ag("m", { pinnedMaster: true }))!)).toEqual(["mission"]);
+  test("大总管运行中：没有 mission、没有打开类 = null，Autopilot 中只有关闭；停了没有菜单；mock 没有菜单", () => {
+    expect(buildAgentMenu(ag("m", { pinnedMaster: true }))).toBeNull();
+    const openers = [{ id: "finder", label: "Finder", kind: "files" as const }];
+    expect(ids(buildAgentMenu(ag("m", { pinnedMaster: true }), openers)!)).toEqual(["open:finder"]);
+    const on = ag("m", { pinnedMaster: true, mission: { goal: "g", until: "2026-09-28T02:00:00Z", nudges: 3 } });
+    expect(ids(buildAgentMenu(on)!)).toEqual(["mission"]);
     expect(buildAgentMenu(ag("m", { pinnedMaster: true, status: "stopped" }))).toBeNull();
     expect(buildAgentMenu(ag("k", { mock: true }))).toBeNull();
   });

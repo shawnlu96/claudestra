@@ -1,6 +1,6 @@
 /**
  * web/lib/owner-words.ts（UXTERM1 A 段）：给 owner 看的词表。阶段未知键 → 「其他」；步骤词覆盖 token 账的全部步骤键；
- * low-priority 徽章 / 批量面板 / 借出页的文案都从词表来，中英文都不含禁用词；按钮 id、lpBadgeText 返回 null 的条件不变。
+ * 低优先级徽章 / 批量面板 / 借出页 / 额度（QUOTA1）的文案都从词表来，中英文都不含禁用词；按钮 id、lpBadgeText 返回 null 的条件不变。
  * STAGE_NAME === STAGE_WORD 属于 B 段（collab-detail-model.ts，UXTERM2），不在本文件里断言。
  */
 import { describe, expect, test } from "bun:test";
@@ -10,19 +10,19 @@ import { STEP_LABELS, AGENT_USAGE_WORDS } from "../web/features/chat/agent-usage
 import { stageChipView } from "../web/features/chat/ledger-stage";
 import { ACTION_META, MORE_ACTIONS, PRIMARY_ACTIONS } from "../web/features/fleet/fleet-meta";
 import { stateBadge, draftProblem } from "../web/features/lend/lend-quota-model";
-import { warnTexts, type WarnItem } from "../web/features/lend/quota-warning-model";
-import { lpBadgeText, type LpState } from "../web/lib/api/fleet";
+import { warnStatus } from "../web/features/lend/quota-warning-model";
+import { lpBadgeText, lpBadgeTitle, type LpState } from "../web/lib/api/fleet";
 import { DICT } from "../web/lib/i18n-dict";
 import { fillParams } from "../web/lib/i18n-fill";
 import {
-  BANNED_OWNER_WORDS, LEND_WORDS, LP_WORDS, MACHINE_WORDS, READY_WORD, STAGE_WORD, STEP_WORD, ownerWordEn, ownerWordsTr, stageWord,
+  BANNED_OWNER_WORDS, LEND_WORDS, LP_WORDS, MACHINE_WORDS, QUOTA_WORDS, READY_WORD, STAGE_WORD, STEP_WORD, ownerWordEn, ownerWordsTr, stageWord,
 } from "../web/lib/owner-words";
 
 const STAGES = {
   spec: "规格", restate: "确认需求", build: "开发", review: "审查", fix: "返工", merge: "合并",
   live: "上线", verified: "验证", done: "完成", blocked: "受阻", cancelled: "取消",
 };
-const TABLES = [STAGE_WORD, STEP_WORD, MACHINE_WORDS, LP_WORDS, LEND_WORDS, { ready: READY_WORD }];
+const TABLES = [STAGE_WORD, STEP_WORD, MACHINE_WORDS, LP_WORDS, LEND_WORDS, QUOTA_WORDS, { ready: READY_WORD }];
 const allZh = TABLES.flatMap((table) => Object.values(table));
 const banned = (text: string) => BANNED_OWNER_WORDS.filter((w) => text.includes(w));
 
@@ -68,11 +68,10 @@ describe("词表不含禁用词，英文齐全", () => {
   });
 });
 
-describe("low-priority", () => {
+describe("低优先级", () => {
   const lp = (over: Partial<LpState>): LpState => ({ lowPriority: "off", walled: false, ...over } as LpState);
   test("徽章文案换词，返回 null 的条件和改前一样", () => {
-    expect(lpBadgeText(lp({ lowPriority: "on", resetsAt: "15:00" }))).toBe("排队→15:00");
-    expect(lpBadgeText(lp({ lowPriority: "on" }))).toBe("排队→?");
+    expect(lpBadgeText(lp({ lowPriority: "on", resetsAt: "15:00" }))).toBe("低优先级");
     expect(lpBadgeText(lp({ lowPriority: "exhausted", walled: true }))).toBe("低优先级用完");
     expect(lpBadgeText(lp({ walled: true }))).toBe("额度用完，等重置");
     for (const none of [null, undefined, lp({}), lp({ lowPriority: "unknown" as LpState["lowPriority"] })]) expect(lpBadgeText(none)).toBeNull();
@@ -80,7 +79,14 @@ describe("low-priority", () => {
   test("英文徽章不出现 LP", () => {
     const en = ownerWordsTr("en");
     const texts = [lp({ lowPriority: "on", resetsAt: "15:00" }), lp({ lowPriority: "exhausted" }), lp({ walled: true })].map((s) => lpBadgeText(s, en));
-    expect(texts).toEqual(["Queued→15:00", "Low priority used up", "Limit hit, waiting for reset"]);
+    expect(texts).toEqual(["Low priority", "Low priority used up", "Limit hit, waiting for reset"]);
+  });
+  test("徽章 title 用额度那套说法，不报百分比（QUOTA1）", () => {
+    const titles = [lp({ lowPriority: "on", resetsAt: "15:00", allowancePct: 40 }), lp({ lowPriority: "exhausted" }), lp({ walled: true, resetsAt: "15:00" })].map((s) => lpBadgeTitle(s));
+    expect(titles).toEqual(["低优先级开着，到 15:00", "低优先级额度用完", "额度用完，到 15:00 自动继续"]);
+    const en = [lp({ lowPriority: "on", resetsAt: "15:00" }), lp({ lowPriority: "exhausted" })].map((s) => lpBadgeTitle(s, ownerWordsTr("en")));
+    expect(en).toEqual(["Low priority on until 15:00", "Low priority allowance used up"]);
+    for (const t of titles) expect(t).not.toMatch(/%|low-priority/);
   });
   test("批量面板：动作 id 与分组不变，label / hint 换词", () => {
     expect(Object.keys(ACTION_META)).toEqual(["lp-compact", "lp-off", "compact", "lp-on", "save-compact", "text"]);
@@ -105,13 +111,13 @@ describe("low-priority", () => {
 });
 
 describe("借出", () => {
-  test("额度线状态、表单提示、提醒条状态句都不含禁用词", () => {
+  test("额度线状态、表单提示、额度卡状态句都不含禁用词", () => {
     const badges = [stateBadge({ state: "stop", limit: "zero", mode: "on" }), stateBadge({ state: "stop", limit: "none", mode: "observe" })].map((b) => b.text);
     expect(badges).toEqual(["已不再接新活", "超过不再接新活的线（未执行）"]);
     expect(draftProblem({ warn: "90", stop: "80" })).toBe("提醒线要低于不再接新活的线");
-    const item = (over: Partial<WarnItem>): WarnItem => ({ family: "codex", key: "k", level: "stop", usedPct: 82, resetAt: 1, stopped: true, enforced: true, lastKnown: false, ...over });
-    const all = [item({}), item({ stopped: false }), item({ level: "warn", stopped: false }), item({ level: "warn", stopped: false, enforced: false })].map(warnTexts);
-    expect(all.map((x) => x.status)).toEqual(["已不再接新活，在跑的活照常做完", "只观察：没停，仍在接新活", "仍在接新活，能同时跑的数量已减半", "只观察：仍在接新活，能同时跑的数量没减"]);
+    const item = (over: Partial<Parameters<typeof warnStatus>[0]>) => ({ level: "stop" as const, stopped: true, enforced: true, ...over });
+    const all = [item({}), item({ stopped: false }), item({ level: "warn", stopped: false }), item({ level: "warn", stopped: false, enforced: false })].map(warnStatus);
+    expect(all).toEqual(["已不再接新活，在跑的活照常做完", "只观察：没停，仍在接新活", "仍在接新活，能同时跑的数量已减半", "只观察：仍在接新活，能同时跑的数量没减"]);
     expect(banned(JSON.stringify(all))).toEqual([]);
   });
 });
@@ -119,11 +125,12 @@ describe("借出", () => {
 describe("A 段文件里没有第二份叫法", () => {
   const FILES = ["chat/ledger-stage.ts", "chat/agent-usage-i18n.ts", "fleet/fleet-meta.ts", "fleet/lp-badge.tsx", "lend/lend-panel.tsx", "lend/lent-orders.tsx",
     "lend/grant-form.tsx", "lend/lend-i18n.ts", "lend/lend-quota-settings.tsx", "lend/lend-quota-model.ts", "lend/lend-quota-i18n.ts",
-    "lend/quota-warning-model.ts", "lend/quota-warning-i18n.ts", "borrow/borrow-alloc.tsx", "borrow/borrow-bits.tsx"];
+    "lend/quota-warning-model.ts", "borrow/borrow-alloc.tsx", "borrow/borrow-bits.tsx",
+    "quota/quota-notice.tsx", "quota/quota-notice-model.ts", "quota/quota-summary.tsx", "quota-wall/wall-banner-model.ts", "now/now-team-quota.tsx"];
   /** 去掉注释后的源码：注释里讲 bridge 侧概念的旧词不算界面文案 */
   const code = (file: string) => readFileSync(resolve(import.meta.dir, "../web/features", file), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
   test("字符串字面量里不再有旧词", () => {
-    const old = /["'`][^"'`\n]*(复述|名额|停接线|家族|撞墙|新单|借出[中的]*单|开 LP|关 LP|LP 已用完|LP→)[^"'`\n]*["'`]/;
+    const old = /["'`][^"'`\n]*(复述|名额|停接线|家族|撞墙|新单|借出[中的]*单|开 LP|关 LP|LP 已用完|LP→|low-priority|订阅额度|账号用量)[^"'`\n]*["'`]/;
     for (const file of FILES) expect({ file, hit: code(file).match(old)?.[0] ?? null }).toEqual({ file, hit: null });
   });
 });
