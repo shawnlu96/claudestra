@@ -5,7 +5,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { WebAsk } from "@/features/asks/asks-model";
+import { askCounts, groupAsks, waitsOnOwner, type WebAsk } from "@/features/asks/asks-model";
 import { isProposalWait, ownerWaits, proposalProjectOf, subscribeViewBinding, viewLocalProject } from "@/features/collab/owner-waits";
 import { sharedCollabProject } from "@/features/collab/team-source-key";
 import { localProjectOf, refreshBindings, setContextRequestForTest } from "@/lib/collab-source-binding";
@@ -175,4 +175,20 @@ test("[验收线 6] UXCARD3 不知道 ≠ 没有：绑定解析不出、待办�
   expect(partial.unknown).toBe(false);
   expect(partial.waits.map((a) => a.id)).toEqual(["ask-prop", "ask-plain"]);
   expect(ownerWaits([], KEY, LOCAL, { loaded: true, full: true })).toEqual({ waits: [], unknown: false });
+});
+
+test("[验收线 2][验收线 3] now 停滞提醒归 PM：项目待办、收件箱「等你」、角标都不算；owner 能代答也不收，普通 owner 卡照旧", () => {
+  const stallExtra = { mechanism: "priorityStall", pm: "agent-claudestra" } as WebAsk["extra"];
+  const legacy = ask("stall-legacy", { kind: "owner_action", source: "system", canAnswer: true, extra: stallExtra });
+  const assigned = ask("stall-new", { kind: "owner_action", source: "system", canAnswer: true, assignee: "agent-claudestra", extra: stallExtra });
+  const toPm = ask("pm-ask", { fromAgent: "agent-exec", canAnswer: true, assignee: "agent-claudestra" });
+  const ownerCard = ask("owner-action", { kind: "owner_action", source: "system" });
+  const authorize = ask("authorize", { kind: "authorize" });
+  const explicit = ask("explicit-owner", { assignee: "local:owner:self" });
+  const all = [legacy, assigned, toPm, ownerCard, authorize, explicit];
+  const mine = ["owner-action", "authorize", "explicit-owner"];
+  expect(all.filter(waitsOnOwner).map((a) => a.id)).toEqual(mine);
+  expect(ownerWaits(all, LOCAL, LOCAL).waits.map((a) => a.id)).toEqual(mine);
+  expect(groupAsks(all).waiting.map((a) => a.id).sort()).toEqual([...mine].sort());
+  expect(askCounts(all).waiting).toBe(3);
 });
