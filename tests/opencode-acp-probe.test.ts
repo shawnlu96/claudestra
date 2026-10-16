@@ -17,6 +17,20 @@ describe("sanitize", () => {
   test("token / key 形状的值整段打码", () => {
     expect(sanitize('{"apiKey":"sk-123","token":"t","other":"v"}', [])).toBe('{"apiKey":"<redacted>","token":"<redacted>","other":"v"}');
   });
+  test("值里有转义引号：整值打码，后半段不漏、输出仍是合法 JSON", () => {
+    const out = sanitize(JSON.stringify({ token: 'ab"cd-SECRET-TAIL', other: "v" }), []);
+    expect(out).not.toContain("SECRET-TAIL");
+    expect(JSON.parse(out)).toEqual({ token: "<redacted>", other: "v" });
+  });
+  test("字段值是一段字符串化的 JSON（嵌套）：里面的敏感字段也打码，外层仍是合法 JSON", () => {
+    const inner = JSON.stringify({ apiKey: "sk-NESTED-SECRET", model: "m" });
+    const out = sanitize(JSON.stringify({ msg: { params: { raw: inner } } }), []);
+    expect(out).not.toContain("NESTED-SECRET");
+    expect(JSON.parse(JSON.parse(out).msg.params.raw)).toEqual({ apiKey: "<redacted>", model: "m" });
+  });
+  test("不是 JSON 的行退回文本打码，也认转义引号", () => {
+    expect(sanitize('log: "token":"ab\\"cd-TAIL" end', [])).toBe('log: "token":"<redacted>" end');
+  });
 });
 
 describe("夹具", () => {

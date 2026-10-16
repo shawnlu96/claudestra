@@ -320,11 +320,35 @@ async function runEchoServer(): Promise<void> {
   await server.connect(new StdioServerTransport());
 }
 
-/** 夹具脱敏：本机路径、用户名、会话目录换成占位符；token / key 形状的值整段打码 */
+const SECRET_KEY = /^(?:apiKey|api_key|token|authorization|key)$/i;
+const SECRET_TEXT_RE = /("(?:apiKey|api_key|token|authorization|key)"\s*:\s*")(?:[^"\\]|\\.)*"/gi;
+
+/** 按 JSON 结构打码：敏感字段整值换掉；字符串值本身是一段 JSON（嵌套的字符串化 JSON）就解析后递归再序列化回去 */
+function redact(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(redact);
+  if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, SECRET_KEY.test(k) && x !== null ? "<redacted>" : redact(x)]));
+  if (typeof v === "string" && /^\s*[[{]/.test(v)) {
+    try {
+      return JSON.stringify(redact(JSON.parse(v)));
+    } catch {
+      return v; // 只是以括号开头的普通文本，不是 JSON：没有结构可打码，原样留着
+    }
+  }
+  return v;
+}
+
+/** 夹具脱敏：本机路径、用户名、会话目录换成占位符；每行按 JSON 结构给 token / key 字段打码，不是 JSON 的行退回按文本打码（认转义引号） */
 export function sanitize(text: string, subs: Array<[string, string]>): string {
   let s = text;
   for (const [from, to] of [...subs].sort((a, b) => b[0].length - a[0].length)) if (from) s = s.split(from).join(to);
-  return s.replace(/("(?:apiKey|api_key|token|authorization|key)"\s*:\s*")[^"]+"/gi, '$1<redacted>"');
+  return s.split("\n").map((line) => {
+    if (!line.trim()) return line;
+    try {
+      return JSON.stringify(redact(JSON.parse(line)));
+    } catch {
+      return line.replace(SECRET_TEXT_RE, '$1<redacted>"'); // 不是一行完整 JSON（日志 / 半截帧）：退回文本打码
+    }
+  }).join("\n");
 }
 
 /** --root：探针的临时根目录（隔离 HOME 和 cwd 都在它下面），整段换成 <tmp>；家目录和带用户名的 slug 也换掉 */
