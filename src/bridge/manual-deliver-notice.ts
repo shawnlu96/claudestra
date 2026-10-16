@@ -10,7 +10,10 @@ import { auditDispatcherTest } from "../lib/ledger-audit.js";
 import { LedgerReader } from "../lib/ledger-read.js";
 import { getWorkflow } from "../lib/ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "../lib/ledger-stages.js";
+import { closeAsk, openAskFull, type Ask } from "../lib/ledger-asks.js";
 import { getMeta, getTask, listEvents } from "../lib/ledger-store.js";
+import { activeProjectPm } from "../lib/pm-role.js";
+import { readRegistryAgentsSync } from "../lib/registry.js";
 import {
   escalateText, immediateTarget, MDN_CONFIG_PATH, MDN_STATE_PATH, mdnAuditKey, mdnKey, mdnPm, nextAction, noticeText, ownerCardText,
   pendingDelivery, readMdnConfig, readMdnState, reopenRecord, writeMdnState, type MdnConfig, type MdnRecord, type MdnState, type MdnTeam,
@@ -27,16 +30,20 @@ export interface OwnerCard {
   title: string;
   context: string;
   dedupKey: string;
+  /** 这次交付所有 owner 卡共用的 dedupKey 前缀（manual-deliver:<key>#）：还有开着的就认回来，撤销时一并关 */
+  prefix: string;
 }
 
 export interface MdnDeps {
   reader: Pick<LedgerReader, "get">;
   /** action 级通知；handed = 已送达或已进押后队列 */
   send(to: string, text: string, messageId: string): Promise<{ handed: boolean; note: string }>;
-  /** 开 owner「待你处理」，返回 askId */
+  /** 开 owner「待你处理」，返回 askId；同前缀还有开着的卡（状态文件丢过）就返回那张，不开第二张 */
   openOwnerCard(c: OwnerCard): string;
-  /** 撤销：按开卡时的 dedupKey 找卡，还开着才关；抛错 = 没关掉，下一轮再关 */
-  closeOwnerCard(dedupKey: string, reason: string): void;
+  /** 撤销：关掉 dedupKey 以 prefix 开头、还开着的 owner 卡；抛错 = 没关掉，下一轮再关 */
+  closeOwnerCards(prefix: string, reason: string): void;
+  /** registry 里 active 的 agent；不给 / null = 不知道（卡上的 PM 不在岗也不换人） */
+  activeAgents?(): ReadonlySet<string> | null;
   managerCmd: string;
   log(msg: string): void;
   now(): number;
@@ -85,6 +92,15 @@ function auditTold(db: Database, key: string): number | null {
 
 /** 没投出去的每条消息只记一次日志（PM 不在 registry 时每分钟重试，别刷屏） */
 const failedOnce = new Set<string>();
+const ownerPrefix = (key: string) => `manual-deliver:${key}#`;
+/** 当班 PM；指针坏了 / 读不了按没有（只在名单里找在岗的） */
+function onDutyPm(db: Database, project: string): string | null {
+  try {
+    return activeProjectPm(db, project);
+  } catch {
+    return null; // activePm 指针不合法：退回名单里找在岗的，不让一张卡卡住
+  }
+}
 
 interface Step {
   deps: MdnDeps;
@@ -107,11 +123,12 @@ async function sendStep(s: Step, prev: MdnRecord, next: MdnRecord, to: string, t
 }
 
 /** 一次交付往下走到做不动为止；每一步都经 save 落盘 */
-async function advance(db: Database, s: Step, c: Card, start: MdnRecord, cfg: MdnConfig, now: number): Promise<void> {
+async function advance(db: Database, s: Step, c: Card, start: MdnRecord, cfg: MdnConfig, now: number, active: ReadonlySet<string> | null): Promise<void> {
   const { task, d, mode } = c;
   const key = mdnKey(task.project, task.id, d.seq), cmd = s.deps.managerCmd;
   const meta = getMeta(db, task.project);
-  const team: MdnTeam = { pms: meta.pms, team: meta.team, isDispatcher: auditDispatcherTest(meta.team?.dispatcher) };
+  const team: MdnTeam = { pms: meta.pms, team: meta.team, isDispatcher: auditDispatcherTest(meta.team?.dispatcher),
+    ...(active ? { alive: (n: string) => active.has(n), onDuty: onDutyPm(db, task.project) } : {}) };
   const commit = (r: MdnRecord) => (s.save(r), r);
   let rec = start;
   for (let action = nextAction(rec, now, cfg); action; action = nextAction(rec, now, cfg)) {
@@ -135,7 +152,7 @@ async function advance(db: Database, s: Step, c: Card, start: MdnRecord, cfg: Md
       const prev = rec;
       rec = commit({ ...rec, owner: now, ownerKey }); // 先记再开：开卡后崩溃也不会重开
       try {
-        rec = commit({ ...rec, askId: s.deps.openOwnerCard({ project: task.project, taskId: task.id, ...card, dedupKey: ownerKey }) });
+        rec = commit({ ...rec, askId: s.deps.openOwnerCard({ project: task.project, taskId: task.id, ...card, dedupKey: ownerKey, prefix: ownerPrefix(key) }) });
       } catch (e) {
         s.save(prev);
         throw e;
@@ -145,23 +162,39 @@ async function advance(db: Database, s: Step, c: Card, start: MdnRecord, cfg: Md
   }
 }
 
-/** 不再等派审的记录：开过 owner 卡的先关卡，关掉了才记撤销（没关掉下一轮再来） */
-function resolveGone(deps: MdnDeps, state: MdnState, live: ReadonlySet<string>, now: number, save: (key: string, rec: MdnRecord) => void): void {
+type Throttled = (key: string, e: unknown, msg: string) => void;
+
+/** 不再等派审的记录：这次交付的 owner 卡（按前缀，含状态文件丢过时留下的）先关，关掉了才记撤销（没关掉下一轮再来） */
+function resolveGone(deps: MdnDeps, state: MdnState, live: ReadonlySet<string>, now: number, save: (key: string, rec: MdnRecord) => void, warn: Throttled): void {
   for (const [key, rec] of Object.entries(state)) {
     if (live.has(key) || rec.resolvedAt !== undefined) continue;
     try {
-      if (rec.ownerKey) deps.closeOwnerCard(rec.ownerKey, "已派审 / 已记审查，或卡不再等审");
+      deps.closeOwnerCards(ownerPrefix(key), "已派审 / 已记审查，或卡不再等审");
       save(key, { ...rec, resolvedAt: now });
     } catch (e) {
-      deps.log(`⚠️ 人工卡提醒：${key} 撤销没做完（owner 卡 ${rec.askId ?? "?"}）：${(e as Error).message}，下一轮再来`);
+      warn(key, e, `${key} 撤销没做完（owner 卡 ${rec.askId ?? "?"}）`);
     }
   }
+}
+
+/** 逐卡出错日志按「卡 + 错误类型」每小时一条（磁盘满时每分钟每卡一行会刷屏） */
+const LOG_EVERY_MS = 3_600_000;
+function throttledWarn(deps: MdnDeps): Throttled {
+  const last = new Map<string, number>();
+  return (key, e, msg) => {
+    const err = e instanceof Error ? e : new Error(String(e));
+    const id = `${key}|${err.name}|${err.message.slice(0, 80)}`, now = deps.now();
+    if (now - (last.get(id) ?? -Infinity) < LOG_EVERY_MS) return;
+    last.set(id, now);
+    deps.log(`⚠️ 人工卡提醒：${msg}：${err.message}，下一轮再来（同类错误一小时内不再打）`);
+  };
 }
 
 export function manualDeliverTicker(deps: MdnDeps): () => Promise<void> {
   const statePath = deps.statePath ?? MDN_STATE_PATH, configPath = deps.configPath ?? MDN_CONFIG_PATH;
   let lastErr = "";
   const once = (msg: string) => { if (msg && msg !== lastErr) deps.log(`⚠️ 人工卡提醒：${msg}`); lastErr = msg; };
+  const warn = throttledWarn(deps);
   return async () => {
     const db = deps.reader.get();
     if (!db) return;
@@ -176,19 +209,45 @@ export function manualDeliverTicker(deps: MdnDeps): () => Promise<void> {
       writeMdnState(next, now, statePath);
       state = next;
     };
-    const live = new Set<string>();
+    const live = new Set<string>(), active = deps.activeAgents?.() ?? null;
     for (const c of pendingCards(db)) {
       const key = mdnKey(c.task.project, c.task.id, c.d.seq);
       live.add(key);
       try {
         const rec = reopenRecord(state[key] ?? { deliverTs: c.d.ts });
         save(key, rec);
-        await advance(db, { deps, save: (r) => save(key, r) }, c, rec, config, now);
+        await advance(db, { deps, save: (r) => save(key, r) }, c, rec, config, now, active);
       } catch (e) {
-        deps.log(`⚠️ 人工卡提醒：${c.task.id} 这一轮没处理完（${(e as Error).message}），不影响别的卡，下一轮再来`);
+        warn(key, e, `${c.task.id} 这一轮没处理完（不影响别的卡）`);
       }
     }
-    resolveGone(deps, state, live, now, save);
+    resolveGone(deps, state, live, now, save, warn);
+  };
+}
+
+/** 这次交付还开着的 owner 卡：dedupKey 以 prefix 开头（按前缀比较，不用 LIKE：卡号 / 项目名里可能有 _ %） */
+const openByPrefix = (db: Database, prefix: string): { id: string }[] =>
+  db.query("SELECT id FROM asks WHERE state = 'open' AND substr(dedupKey, 1, length(?1)) = ?1 ORDER BY createdAt").all(prefix) as { id: string }[];
+
+/** owner 卡的开 / 关（真 asks 库）；publish = 推给网页（bridge/asks.ts publishAsk） */
+export function ownerCardPort(db: () => Database, publish: (a: Ask) => void): Pick<MdnDeps, "openOwnerCard" | "closeOwnerCards"> {
+  return {
+    openOwnerCard: (c) => {
+      const open = openByPrefix(db(), c.prefix)[0];
+      if (open) return open.id;
+      const r = openAskFull(db(), {
+        source: "system", createdBy: MDN_CREATOR, kind: "owner_action", project: c.project, taskId: c.taskId, title: c.title, context: c.context,
+        options: [{ type: "buttons", buttons: [{ id: "mdn_ack", label: "知道了", style: "secondary" }] }], allowText: true, blocking: false, dedupKey: c.dedupKey,
+      });
+      if (!r.existed) publish(r.ask);
+      return r.ask.id;
+    },
+    closeOwnerCards: (prefix, reason) => {
+      for (const { id } of openByPrefix(db(), prefix)) {
+        const a = closeAsk(db(), id, "cancelled", reason);
+        if (a) publish(a);
+      }
+    },
   };
 }
 
@@ -198,20 +257,12 @@ let started = false;
 export function startManualDeliverNotice(managerCmd: string): void {
   if (started) return;
   started = true;
-  void Promise.all([import("./team-router.js"), import("./asks.js"), import("../lib/ledger-asks.js")]).then(([router, asks, store]) => {
+  void Promise.all([import("./team-router.js"), import("./asks.js")]).then(([router, asks]) => {
     const tick = manualDeliverTicker({
       reader: new LedgerReader(),
       send: (to, text, messageId) => router.sendLedgerNotice({ to, text, messageId, pmLevel: "action" }),
-      openOwnerCard: (c) => asks.createAsk({
-        source: "system", createdBy: MDN_CREATOR, kind: "owner_action", project: c.project, taskId: c.taskId, title: c.title, context: c.context,
-        options: [{ type: "buttons", buttons: [{ id: "mdn_ack", label: "知道了", style: "secondary" }] }], allowText: true, blocking: false, dedupKey: c.dedupKey,
-      }).id,
-      closeOwnerCard: (dedupKey, reason) => {
-        const db = asks.askDb();
-        const row = db.query("SELECT id FROM asks WHERE dedupKey = ?").get(dedupKey) as { id: string } | null;
-        const a = row ? store.closeAsk(db, row.id, "cancelled", reason) : null;
-        if (a) asks.publishAsk(a);
-      },
+      ...ownerCardPort(asks.askDb, asks.publishAsk),
+      activeAgents: () => new Set(readRegistryAgentsSync().filter((a) => a.status === "active").map((a) => a.name)),
       managerCmd,
       log: (m) => console.log(m),
       now: Date.now,

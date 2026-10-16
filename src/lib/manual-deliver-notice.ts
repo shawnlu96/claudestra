@@ -85,11 +85,24 @@ export function writeMdnState(state: MdnState, now: number, path = MDN_STATE_PAT
   writeJsonAtomicSync(path, Object.fromEntries(kept));
 }
 
-/** 正在等派审的那次交付：非 auto、在 build / review / fix、最后一次交付之后（按 seq）没有 dispatch / review；否则 null */
+/** 回退到的阶段：交付自己带的推进是 → review，PM 不记审查直接退回（review → fix、改规格退回 spec / restate / build）才落到这些 */
+const BACK_STAGES: readonly string[] = ["spec", "restate", "build", "fix"];
+
+/**
+ * 这次交付之后有人把阶段退回去了（没记审查）：执行者已经在改，不算「没人派审」；巡检同一判定。
+ * 「之后」要 seq 和时刻都不早于交付：台账里两者同向，只按 seq 会把手搭的、先进 fix 后交付的事件序列误判成退回（tests/ledger-audit-audq1.test.ts）
+ */
+export const rolledBackAfter = (events: readonly LedgerEvent[], d: LedgerEvent): boolean =>
+  events.some((e) => e.kind === "stage" && e.seq > d.seq && e.ts >= d.ts && BACK_STAGES.includes(String(e.data.to)));
+
+/**
+ * 正在等派审的那次交付：非 auto、在 build / review / fix、最后一次交付之后（按 seq）没有 dispatch / review、也没被退回；否则 null。
+ * 退回后执行者再交付是新的一次交付，重新算。
+ */
 export function pendingDelivery(task: Pick<LedgerTask, "stage">, events: readonly LedgerEvent[], workflowMode: string | null): LedgerEvent | null {
   if (workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return null;
   const d = events.findLast((e) => e.kind === "deliver");
-  if (!d || events.some((e) => (e.kind === "dispatch" || e.kind === "review") && e.seq > d.seq)) return null;
+  if (!d || events.some((e) => (e.kind === "dispatch" || e.kind === "review") && e.seq > d.seq) || rolledBackAfter(events, d)) return null;
   return d;
 }
 
@@ -98,14 +111,23 @@ export interface MdnTeam {
   team: TeamConfig | null;
   /** 认调度助理（ledger-audit.ts auditDispatcherTest：配了班子只认 team.dispatcher，没配按名字里的 dispatch 认） */
   isDispatcher(name: string): boolean;
+  /** 还在岗（registry 里 active）；不给 = 不知道，不按在不在岗换人 */
+  alive?(name: string): boolean;
+  /** 当班 PM（lib/pm-role.ts activeProjectPm）；不给 = 只在名单里找在岗的 */
+  onDuty?: string | null;
 }
 
 /**
  * 卡的 PM：任务上记的优先，其次名单里第一个不是调度助理的；名单里只有调度助理（PM 兼调度助理）时就是它。
  * 与巡检 auditRecipient 同一口径，没开班子时名字带 dispatch 的不会被当成 PM。
+ * 选中的人已经不在岗（pm-switch 后旧 PM 被 kill，卡上的 pm 没改）：换当班 PM，再换名单里第一个在岗的；都不在岗就还是原人（投不出去走 owner）。
  */
-export const mdnPm = (task: Pick<LedgerTask, "pm">, t: Pick<MdnTeam, "pms" | "isDispatcher">): string | null =>
-  task.pm || t.pms.find((p) => !t.isDispatcher(p)) || t.pms[0] || null;
+export function mdnPm(task: Pick<LedgerTask, "pm">, t: Pick<MdnTeam, "pms" | "isDispatcher" | "alive" | "onDuty">): string | null {
+  const base = task.pm || t.pms.find((p) => !t.isDispatcher(p)) || t.pms[0] || null;
+  if (!base || !t.alive || t.alive(base)) return base;
+  const others = [t.onDuty, ...t.pms.filter((p) => !t.isDispatcher(p))].filter((p): p is string => !!p && p !== base);
+  return others.find((p) => t.alive!(p)) ?? base;
+}
 
 /**
  * 「交付即通知」发给谁；null = 不发：没有 PM、PM 自己交付的、或班子路由（lib/team-route.ts）已经把这条交付直推给了 PM
@@ -114,8 +136,10 @@ export const mdnPm = (task: Pick<LedgerTask, "pm">, t: Pick<MdnTeam, "pms" | "is
 export function immediateTarget(task: Pick<LedgerTask, "pm">, d: LedgerEvent, t: MdnTeam): string | null {
   const pm = mdnPm(task, t);
   if (!pm || pm === d.actor) return null;
-  const routed = !!t.team && d.seq > t.team.sinceSeq;
-  return routed && (!t.team!.dispatcher || t.team!.dispatcher === pm) ? null : pm;
+  if (!t.team || d.seq <= t.team.sinceSeq) return pm;
+  // 班子路由投给的人（team-route.ts：调度助理，没配就 pmOf）就是 pm 时不重复；卡上的旧 PM 不在岗时它投给旧 PM，这里照样补给在岗的
+  const routedTo = t.team.dispatcher ?? (task.pm || t.pms[0] || null);
+  return routedTo === pm ? null : pm;
 }
 
 export type MdnAction = "notify" | "notify-late" | "pm" | "owner";

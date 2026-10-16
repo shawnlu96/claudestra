@@ -5,7 +5,7 @@
  * 这样取数失败不会把上一轮还开着的异常误标成「已解决」。
  */
 import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
-import { mdnAudit, mdnKey } from "./manual-deliver-notice.js";
+import { mdnAudit, mdnKey, mdnPm, rolledBackAfter } from "./manual-deliver-notice.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
@@ -295,6 +295,7 @@ function manualDeliver(t: TaskFacts, reviewing: Reviewing, pm: string | null, no
   const d = lastOf(events, ["deliver"]);
   // 按 seq 判「交付之后」：同一毫秒里更早写的旧审查不是这次交付的结论
   if (!d || events.some((e) => e.kind === "review" && e.seq > d.seq) || t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return;
+  if (rolledBackAfter(events, d)) return; // PM 不记审查直接退回：执行者在改，同提醒（RVF-2）
   if (now - d.ts < mdnAudit.config().pmAfterMs) return; // 满 N 分钟（≥）起推，与 bridge 提醒同一比较
   if (reviewing(t) || mdnAudit.pushedAt(mdnKey(task.project, task.id, d.seq)) !== null) return keep("manual_deliver_no_review", [task.id, d.seq]);
   emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq], ...(pm ? { notify: pm } : {}),
@@ -563,7 +564,10 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   const reviewing: Reviewing = (t) => !s.reviewers
     || s.reviewers.some((r) => r.taskId.toLowerCase() === t.task.id.toLowerCase() && (r.round === null || r.round === t.task.round))
     || (t.reviewStep?.executorKind === "agent" && turnBusy(agents.get(t.reviewStep.executor), now));
-  for (const t of ts) manualDeliver(t, reviewing, t.task.pm || null, now, emit, keep); // 卡上记了 PM 推它，否则按 auditRecipient（不落到调度助理）
+  // 收件人与人工卡提醒同一选法（mdnPm）：卡上的 PM 优先、不落到调度助理，选中的人不在岗（registry 不是 active）换名单里在岗的
+  const alive = s.agents ? (n: string) => { const a = agents.get(n); return !!a && (a.status === undefined || a.status === "active"); } : undefined;
+  const pmTeam = { pms: s.pms, isDispatcher: auditDispatcherTest(s.team?.dispatcher), ...(alive ? { alive } : {}) };
+  for (const t of ts) manualDeliver(t, reviewing, mdnPm(t.task, pmTeam), now, emit, keep);
   evaluated.push("manual_deliver_no_review");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）

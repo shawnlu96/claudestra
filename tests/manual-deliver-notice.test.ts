@@ -1,14 +1,14 @@
 /**
  * RVF-2：人工卡交付提醒（lib/manual-deliver-notice.ts + bridge/manual-deliver-notice.ts）。真 SQLite 台账 + 假投递 / 假 owner 卡。
  * 交付即通知 PM、N 分钟升级 PM、再 M 分钟进 owner、派审后撤销、自动卡不触发、去重（重跑 / 巡检已推 / 巡检读到已升级）；
- * 第 1 轮对抗审查（reviews/RVF-2-r1-adv.md）的回归在「审查回归」一节。
+ * 第 1 / 2 轮对抗审查（reviews/RVF-2-r1-adv.md、RVF-2-r2-adv.md）的回归在「审查回归」两节。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { manualDeliverTicker, serialMdn, type MdnDeps, type OwnerCard } from "../src/bridge/manual-deliver-notice.js";
+import { manualDeliverTicker, ownerCardPort, serialMdn, type MdnDeps, type OwnerCard } from "../src/bridge/manual-deliver-notice.js";
 import { auditLedger } from "../src/lib/ledger-audit.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -18,7 +18,7 @@ import type { RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 
 const MIN = 60_000, T0 = 1_000 * MIN, P = "mdn", PM = "agent-pm", DISP = "agent-disp", EXE = "agent-task-m1", ID = "M1";
 let dir: string, path: string, db: Database, clock: number, statePath: string;
-let sends: { to: string; text: string; id: string }[], cards: OwnerCard[], closed: string[];
+let sends: { to: string; text: string; id: string }[], cards: OwnerCard[], closed: string[], openCards: Map<string, string>, logs: string[];
 const ctx = (now: number, actor = "owner") => ({ actor, now });
 const kinds = () => sends.map((s) => s.id.split("-").at(-1));
 const observe: RecoveryPolicyPort = () => ({ mode: "observe", manualAfterMs: null, source: "config" });
@@ -27,17 +27,23 @@ function ticker(over: Partial<MdnDeps> = {}) {
   return manualDeliverTicker({
     reader: { get: () => db },
     send: async (to, text, id) => (sends.push({ to, text, id }), { handed: true, note: "已送达" }),
-    openOwnerCard: (c) => (cards.push(c), `ask_${cards.length}`),
-    closeOwnerCard: (key) => void closed.push(key),
-    managerCmd: "bun m.ts", log: () => {}, now: () => clock,
+    openOwnerCard: (c) => { // 同真 ownerCardPort：同前缀还开着就认回来
+      const hit = [...openCards].find(([k]) => k.startsWith(c.prefix));
+      if (hit) return hit[1];
+      cards.push(c);
+      openCards.set(c.dedupKey, `ask_${cards.length}`);
+      return `ask_${cards.length}`;
+    },
+    closeOwnerCards: (prefix) => { for (const k of [...openCards.keys()]) if (k.startsWith(prefix)) (openCards.delete(k), closed.push(k)); },
+    managerCmd: "bun m.ts", log: (m) => void logs.push(m), now: () => clock,
     statePath, configPath: join(dir, "config.json"), ...over,
   });
 }
 const at = async (t: number, tick = ticker()) => { clock = t; await tick(); };
 
 /** 建一张卡交付一次（交付时刻 T0）；mode = workflow 模式，actor = 交付的人 */
-function deliveredCard(mode: "manual" | "auto" | null = "manual", actor = EXE, id = ID) {
-  createTask(db, ctx(0), { project: P, id, title: id, kind: "code", stage: "spec", agent: EXE });
+function deliveredCard(mode: "manual" | "auto" | null = "manual", actor = EXE, id = ID, pm?: string) {
+  createTask(db, ctx(0), { project: P, id, title: id, kind: "code", stage: "spec", agent: EXE, ...(pm ? { pm } : {}) });
   if (mode) setWorkflow(db, ctx(MIN), { taskId: id, taskRev: 1, workflowRev: 0, template: "code", templateVersion: 2, mode,
     authorFamily: "claude", fallback: "PM 核对", reason: "pm_hold: PM 留人工" });
   moveStage(db, ctx(2 * MIN), { taskId: id, from: "spec", to: "restate" });
@@ -53,7 +59,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "mdn-"));
   path = join(dir, "ledger.sqlite"); db = openLedger(path); statePath = join(dir, "state.json");
   setMeta(db, ctx(0), { project: P, key: "pms", value: [PM] });
-  sends = []; cards = []; closed = [];
+  sends = []; cards = []; closed = []; openCards = new Map(); logs = [];
 });
 afterEach(() => { setMdnAuditPort(); closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
 
@@ -293,5 +299,99 @@ describe("审查回归（RVF-2 r1）", () => {
     const t = ownerCardText({ id: ID, project: P }, d, null, { deliverTs: T0, pmFail: { at: T0, note: "项目没有 PM" } }, T0 + 40 * MIN, "m");
     expect(t.context).toContain("项目没有 PM");
     expect(t.context).not.toContain("已给 PM 发过升级");
+  });
+});
+
+describe("审查回归（RVF-2 r2）", () => {
+  const OLD = "agent-pm-old", NEW = "agent-pm-new";
+  /** pm-switch 之后：旧 PM 还在名单里、卡上记的是旧 PM，当班指针指向新 PM，旧 PM 已被 kill（registry 不是 active） */
+  const switched = () => {
+    setMeta(db, ctx(0), { project: P, key: "pms", value: [OLD, NEW] });
+    db.query("INSERT INTO meta (project, key, value) VALUES (?, 'activePm', ?) ON CONFLICT(project, key) DO UPDATE SET value = excluded.value").run(P, JSON.stringify(NEW));
+  };
+
+  test("P2-2 PM 切换后旧 PM 被 kill：交付通知、升级都给当班 PM；巡检收件人也是当班 PM", async () => {
+    switched();
+    deliveredCard("manual", EXE, ID, OLD);
+    const tick = ticker({ activeAgents: () => new Set([NEW, EXE]) });
+    await at(T0 + MIN, tick);
+    await at(T0 + 10 * MIN, tick);
+    expect(sends.map((x) => [x.to, x.id.split("-").at(-1)])).toEqual([[NEW, "notify"], [NEW, "pm"]]);
+    setMdnAuditPort({ config: () => ({ pmAfterMs: 10 * MIN, ownerAfterMs: 30 * MIN }), pushedAt: () => null });
+    const agent = (name: string, status: string) => ({ name, projectId: P, windowAlive: status === "active", turn: "idle" as const, lastWriteAt: null, status });
+    const f = auditLedger({ ...snapOf([OLD, NEW]), agents: [agent(OLD, "stopped"), agent(NEW, "active")] }, T0 + 10 * MIN, observe).findings;
+    expect(f.filter((x) => x.rule === "manual_deliver_no_review")).toEqual([expect.objectContaining({ notify: NEW })]);
+  });
+
+  test("P2-2 卡上的 PM 还在岗：照旧给它；registry 读不到（不知道）也不换人", async () => {
+    switched();
+    deliveredCard("manual", EXE, ID, OLD);
+    await at(T0 + MIN, ticker({ activeAgents: () => new Set([OLD, NEW]) }));
+    await at(T0 + 10 * MIN, ticker({ activeAgents: () => null }));
+    expect(sends.map((x) => x.to)).toEqual([OLD, OLD]);
+  });
+
+  const backs = { fix: [["review", "fix"]], spec: [["review", "spec"], ["spec", "restate"], ["restate", "build"]] } as const;
+  test.each([["fix"], ["spec"]] as const)("P2-5 交付后 PM 不记审查直接退回（review → %s，改规格退回后又回到 build）：不发通知 / 升级、不开 owner 卡，巡检也不报", async (k) => {
+    deliveredCard();
+    for (const [from, to] of backs[k]) moveStage(db, ctx(T0 + 30_000, PM), { taskId: ID, from, to });
+    const tick = ticker();
+    for (const m of [1, 10, 40, 100]) await at(T0 + m * MIN, tick);
+    expect([sends, cards]).toEqual([[], []]);
+    setMdnAuditPort({ config: () => ({ pmAfterMs: 10 * MIN, ownerAfterMs: 30 * MIN }), pushedAt: () => null });
+    expect(auditLedger(snapOf([PM]), T0 + 60 * MIN, observe).findings.filter((x) => x.rule === "manual_deliver_no_review")).toEqual([]);
+  });
+
+  test("P2-5 退回后通知已发过、升级途中退回：之后不再升级；执行者再交付是新的一次，重新通知", async () => {
+    deliveredCard();
+    const tick = ticker();
+    await at(T0 + MIN, tick);
+    moveStage(db, ctx(T0 + 2 * MIN, PM), { taskId: ID, from: "review", to: "fix" });
+    for (const m of [10, 40]) await at(T0 + m * MIN, tick);
+    expect(kinds()).toEqual(["notify"]);
+    deliver(db, ctx(T0 + 50 * MIN, EXE), { taskId: ID, moveFrom: "fix" });
+    await at(T0 + 51 * MIN, tick);
+    expect(kinds()).toEqual(["notify", "notify"]);
+  });
+
+  test("P2-1 owner 卡开着时删了状态文件：不开第二张，派审后按前缀全关（真 asks 库）", async () => {
+    deliveredCard();
+    const published: string[] = [];
+    const port = ownerCardPort(() => db, (a) => void published.push(`${a.id}:${a.state}`));
+    const tick = ticker(port);
+    for (const m of [1, 10, 40]) await at(T0 + m * MIN, tick);
+    const openRows = () => db.query("SELECT id, dedupKey FROM asks WHERE state = 'open' AND dedupKey LIKE 'manual-deliver:%'").all() as { id: string }[];
+    expect(openRows()).toHaveLength(1);
+    rmSync(statePath);
+    for (const m of [41, 80]) await at(T0 + m * MIN, tick);
+    expect(openRows()).toHaveLength(1); // 认回原卡
+    expect(kinds()).toEqual(["notify", "pm", "pm"]); // 状态丢了，升级多发一次（已知限制）
+    dispatched(T0 + 81 * MIN);
+    await at(T0 + 82 * MIN, tick);
+    expect(openRows()).toEqual([]);
+    expect(published.filter((x) => x.endsWith(":cancelled"))).toHaveLength(1);
+  });
+
+  test("P2-1 状态文件丢过、留下一张孤儿卡：撤销时按前缀把它也关掉", async () => {
+    const d = deliveredCard();
+    const port = ownerCardPort(() => db, () => {});
+    const key = mdnKey(P, ID, d.seq);
+    port.openOwnerCard({ project: P, taskId: ID, title: "t", context: "c", dedupKey: `manual-deliver:${key}#1`, prefix: `manual-deliver:${key}#` });
+    await at(T0 + MIN, ticker(port)); // 新状态，没开过卡
+    dispatched(T0 + 2 * MIN);
+    await at(T0 + 3 * MIN, ticker(port));
+    expect(db.query("SELECT state FROM asks WHERE dedupKey = ?").get(`manual-deliver:${key}#1`)).toEqual({ state: "cancelled" });
+  });
+
+  test("P2-7 逐卡出错日志按「卡 + 错误类型」每小时一条", async () => {
+    for (const id of ["A1", "B1", "C1"]) deliveredCard("manual", EXE, id);
+    statePath = join(dir, "state-dir");
+    mkdirSync(statePath);
+    const tick = ticker();
+    for (let m = 1; m <= 10; m++) await at(T0 + m * MIN, tick);
+    const perCard = logs.filter((l) => l.includes("这一轮没处理完"));
+    expect(perCard).toHaveLength(3);
+    await at(T0 + 61 * MIN, tick);
+    expect(logs.filter((l) => l.includes("这一轮没处理完"))).toHaveLength(6);
   });
 });
