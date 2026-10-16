@@ -39,7 +39,6 @@ let onRead: (() => void) | null;
 let reviewProof: NoChangeDeps["reviewProof"];
 let reviewSeq: number;
 let files: Record<string, string>;
-let ancestor: boolean;
 
 const green = (): CheckRow[] => [{ name: "test", status: "completed", conclusion: "success" }, { name: "guard", status: "completed", conclusion: "success" }];
 const port: CiNoChangePort = {
@@ -50,14 +49,13 @@ const port: CiNoChangePort = {
   mainRuns: async () => mainRuns,
   tree: async () => Object.keys(files),
   fileText: async (_r, _h, f) => { if (!(f in files)) throw new Error(`没有 ${f}`); return files[f]!; },
-  isAncestor: async () => ancestor,
 };
 const policy = (): RecoveryPolicy => ({ mode, manualAfterMs: null, source: "config" });
 const deps = (): Partial<NoChangeDeps> => ({ port, policy, reviewProof });
 const OOS: NoChange = { kind: "out_of_scope_ci", reason: "范围外时序波动，和本卡改动无关", run: RUN, files: ["tests/flaky.test.ts"] };
 
 const events = (target = "T1") => listEvents(db, { project: P, target });
-const ORDER: Record<string, string> = { T1: "T1:fix:r1", T2: "T2:write:r0" };
+const ORDER: Record<string, string> = { T1: "fx1", T2: "w2" };
 const deliverLocal = (nc: NoChange = OOS, more: Record<string, string> = {}, target = "T1", actor = "agent-dev") =>
   deliverNoChangeLocal(db, { actor, now: NOW }, getTask(db, target)!, { "no-change": JSON.stringify(nc), head: H, evidence: "e.md", order: ORDER[target]!, ...more },
     () => NOW, deps());
@@ -81,9 +79,17 @@ function bounce(cause = "ci_fail", intentId = "mi1"): void {
   db.query("INSERT OR REPLACE INTO task_steps (taskId,step,round,executor,executorKind,state,createdAt,updatedAt) VALUES ('T1','fix',1,'agent-dev','agent','assigned',1,1)").run();
 }
 
+/** 调度派单：意图行 + 同笔的 plan 事件（ledger-scheduler-write.ts 的形状，本机单的原始快照） */
+function dispatch(taskId: string, node: "write" | "fix", id: string, head: string | null, round: number): void {
+  const seq = insertEvent(db, { actor: "scheduler", now: 2_100, dedupKey: `scheduler:${id}` }, { project: P, target: taskId, kind: "scheduler", text: "派单",
+    data: { op: "plan", id, node, action: "dispatch", recipient: "agent-dev", specRev: 1, round, head } }, true).seq;
+  db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,recipient,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
+    VALUES (?,?,?,?,'dispatch','agent-dev',1,?,1,1,?,1,'submitted','dispatch',1,1)`).run(id, taskId, P, node, seq, head);
+}
+
 beforeEach(() => {
   db = openLedger(":memory:");
-  mode = "on"; checks = green(); prFiles = ["src/lib/x.ts"]; onRead = null; mainHead = M; ancestor = true;
+  mode = "on"; checks = green(); prFiles = ["src/lib/x.ts"]; onRead = null; mainHead = M;
   files = { "tests/flaky.test.ts": 'import { y } from "../src/lib/y.js";', "src/lib/y.ts": 'export const y = 1; import "./z";', "src/lib/z.ts": "", "src/lib/x.ts": "" };
   run = { headSha: H, attempt: 1, status: "completed", conclusion: "failure", log: failedLog("tests/flaky.test.ts") };
   mainRuns = [{ id: 900, attempt: 1, status: "completed", conclusion: "success", headSha: M, url: `https://github.com/${REPO}/actions/runs/900`, createdAt: 3 },
@@ -98,6 +104,7 @@ beforeEach(() => {
   reviewProof = (_db, task) => ({ eventSeq: reviewSeq, round: task.round, head: H, verdict: "pass", reviewer: "agent-rev", reviewerSessionId: "s",
     reviewerFamily: "codex", reportPath: "r.md", findings: [{ findingId: "p2-1", family: "style", severity: "P2", probe: "x" }] } as ReviewFacts);
   bounce();
+  dispatch("T1", "fix", "fx1", H, 1);
 });
 afterEach(() => closeLedger(":memory:"));
 
@@ -181,7 +188,8 @@ describe("out_of_scope_ci：同轮恢复", () => {
 
   test("拒：最近的退回不是 CI 失败（冲突）", async () => {
     bounce("conflict", "mi3");
-    await reject(deliverLocal(), "invalid", /ci_fail/);
+    dispatch("T1", "fix", "fx3", H, 1);
+    await reject(deliverLocal(OOS, { order: "fx3" }), "invalid", /ci_fail/);
   });
 
   test("拒：退回之后已有别的交付；卡转 manual；有结果未知的调度意图", async () => {
@@ -245,6 +253,24 @@ describe("out_of_scope_ci：同轮恢复", () => {
     expect(await dependencyImpact(port, REPO, H, ["tests/flaky.test.ts"], ["src/lib/x.ts"])).toEqual({ ok: true, facts: { reached: 3 } });
   });
 
+  test("r2-P1 dependency-proof：tsconfig 别名 @/* 解析进闭包；解析不了的说明符 / 非字面量动态导入 / 没声明的包 → 拒；内置模块与声明的包放行", async () => {
+    const T = "tests/flaky.test.ts", impact = (changed = ["web/lib/changed.ts"]) => dependencyImpact(port, REPO, H, [T], changed);
+    files = { [T]: 'import { h } from "@/lib/helper";', "web/lib/helper.ts": 'export { c } from "./changed";', "web/lib/changed.ts": "" };
+    expect(await impact()).toMatchObject({ ok: false, code: "invalid", why: expect.stringMatching(/导入闭包包含 PR 改动的 web\/lib\/changed\.ts/) });
+    prFiles = ["web/lib/changed.ts"];
+    await reject(deliverLocal(), "invalid", /web\/lib\/changed\.ts/);
+    expect(getTask(db, "T1")).toMatchObject({ stage: "fix" });
+    const pkg = JSON.stringify({ devDependencies: { "@types/bun": "1" } }), web = JSON.stringify({ dependencies: { react: "19", postcss: "8" } });
+    for (const [src, re] of [['import x from "~/lib/q";', /~\/lib\/q.*解析不了/], ['import p from "left-pad";', /left-pad.*解析不了/],
+      ["const m = await import(path);", /动态/], ['import { q } from "./missing";', /\.\/missing.*解析不了/]] as const) {
+      files = { [T]: src, "package.json": pkg, "web/package.json": web, "src/lib/x.ts": "" };
+      expect(await impact(["src/lib/x.ts"])).toMatchObject({ ok: false, code: "invalid", why: expect.stringMatching(re) });
+    }
+    files = { [T]: 'import { a } from "node:fs"; import "bun:test"; import { useState } from "react"; import p from "../web/node_modules/postcss/lib/postcss";' +
+      ' import t from "@types/bun"; import { h } from "@/lib/helper";', "web/lib/helper.ts": "export const h = 1;", "package.json": pkg, "web/package.json": web, "src/lib/x.ts": "" };
+    expect(await impact(["src/lib/x.ts"])).toEqual({ ok: true, facts: { reached: 2 } });
+  });
+
   test("r1-P1 local-nochange-unbound：没有待交的修复步骤 / 单号不对 / 会话不是绑定的那个 → 拒，零写入", async () => {
     const n = events().length;
     await reject(deliverLocal(OOS, { order: "T1:fix:r2" }), "invalid", /当前的单/);
@@ -292,16 +318,15 @@ describe("out_of_scope_ci：同轮恢复", () => {
 describe("main_already_resolved：MAINRED1 已解决的卡取消", () => {
   const MR: NoChange = { kind: "main_already_resolved", reason: "main 已被别的提交修好", sourceRun: `https://github.com/${REPO}/actions/runs/800`, mainHead: M,
     mainRun: `https://github.com/${REPO}/actions/runs/900` };
-  function mainCard(withSource = true): void {
+  function mainCard(withSource = true, start: string | null = H): void {
     createTask(db, OWNER, { project: P, id: "T2", title: "T2", kind: "code", agent: "agent-dev" } as never);
     db.query("INSERT INTO features (id,project,title,status,currentVersion,createdBy,createdAt,updatedAt) VALUES ('F1',?,'merge','active',1,'owner',1,1)").run(P);
-    db.query("UPDATE tasks SET stage = 'build', round = 0, featureId = 'F1', extra = ? WHERE id = 'T2'").run(JSON.stringify({ repo: REPO }));
+    db.query("UPDATE tasks SET stage = 'build', round = 0, featureId = 'F1', headSHA = ?, extra = ? WHERE id = 'T2'").run(start, JSON.stringify({ repo: REPO }));
     db.query(`INSERT INTO task_workflows (taskId,project,template,templateVersion,mode,authorFamily,fallback,specRev,rev,createdAt,updatedAt)
       VALUES ('T2',?,'code',1,'auto','claude','x',1,1,1,1)`).run(P);
     db.query("INSERT INTO dag_versions (featureId,version,reasonKind,proposedBy,createdAt,nodes) VALUES ('F1',1,'initial','owner',1,?)")
       .run(JSON.stringify([{ key: "main-red-ci", taskId: "T2" }]));
-    db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
-      VALUES ('w2','T2',?,'main-red-ci','write',1,0,1,1,NULL,1,'submitted','write',1,1)`).run(P);
+    dispatch("T2", "write", "w2", start, 0);
     db.query("INSERT INTO task_steps (taskId,step,round,executor,executorKind,state,createdAt,updatedAt) VALUES ('T2','write',0,'agent-dev','agent','assigned',1,1)").run();
     insertEvent(db, { actor: "scheduler", now: 1_000 }, { project: P, target: "", kind: "scheduler", text: "main 红",
       data: { op: "main_red_fix_node", source: withSource ? "mainRedFix" : "pm", workflow: "push", checks: "[]", featureId: "F1", key: "main-red-ci", taskId: "T2",
@@ -312,7 +337,7 @@ describe("main_already_resolved：MAINRED1 已解决的卡取消", () => {
   test("真实来源 + 当前 main 同 workflow 最新 run 绿：原子取消卡、结算步骤与意图、记证据；不进 review / merge", async () => {
     mainCard();
     expect(await resolve()).toMatchObject({ ok: true, noChange: { outcome: "cancelled" } });
-    expect(getTask(db, "T2")).toMatchObject({ stage: "cancelled", round: 0, headSHA: null });
+    expect(getTask(db, "T2")).toMatchObject({ stage: "cancelled", round: 0, headSHA: H });
     const ev = events("T2");
     expect(ev.find((e) => e.kind === "stage")!.data).toMatchObject({ from: "build", to: "cancelled", noChangeResolved: { mainHead: M, mainRunId: 900 } });
     expect(ev.some((e) => e.kind === "deliver" || e.kind === "review")).toBe(false);
@@ -353,11 +378,29 @@ describe("main_already_resolved：MAINRED1 已解决的卡取消", () => {
     expect(events("T2").some((e) => e.kind === "stage")).toBe(false);
   });
 
-  test("r1-P1 local-nochange-unbound：卡没记起点时交付 head 不在当前 main 历史里拒；不是自己当前的单 / 步骤被删拒", async () => {
+  test("r2-P1 local-nochange-unbound-order：派单起点与当前卡 head 不同（交哪个都拒）；派单时没有起点 / 手动单 / 快照与意图不一致 → 拒，零写入", async () => {
     mainCard();
-    ancestor = false;
-    await reject(resolve(), "invalid", /历史/);
-    ancestor = true;
+    const n = events("T2").length;
+    db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T2'").run(M2); // 真实派单 w2.head = H，卡后来换了 head
+    await reject(deliverLocal(MR, { head: M2 }, "T2"), "invalid", /派单起点/);
+    await reject(resolve(), "invalid", /派单起点/);
+    db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T2'").run(H);
+    db.query("UPDATE scheduler_intents SET head = ? WHERE id = 'w2'").run(M2);
+    await reject(resolve(), "invalid", /不一致/);
+    db.run("DELETE FROM scheduler_intents WHERE id = 'w2'");
+    await reject(deliverLocal(MR, { order: "T2:write:r0" }, "T2"), "invalid", /手动派/);
+    expect(events("T2").length).toBe(n);
+    expect(getTask(db, "T2")).toMatchObject({ stage: "build" });
+  });
+
+  test("r2-P1 local-nochange-unbound-order：派单时卡上没有 head（build、head 为空）→ 拒，不拿 main 历史顶替起点", async () => {
+    mainCard(true, null);
+    await reject(resolve(), "invalid", /没有起点 head/);
+    expect(getTask(db, "T2")).toMatchObject({ stage: "build", headSHA: null });
+  });
+
+  test("r1-P1 local-nochange-unbound：不是自己当前的单 / 步骤被删拒", async () => {
+    mainCard();
     await reject(deliverLocal(MR, {}, "T2", "agent-other"), "invalid", /当前的单/);
     await reject(deliverLocal(MR, { order: "T2:write:r9" }, "T2"), "invalid", /当前的单/);
     onRead = () => db.run("DELETE FROM task_steps WHERE taskId = 'T2'");
@@ -372,6 +415,6 @@ describe("main_already_resolved：MAINRED1 已解决的卡取消", () => {
     db.query("INSERT INTO task_steps (taskId,step,round,executor,executorKind,state,createdAt,updatedAt) VALUES ('T1','write',1,'agent-dev','agent','assigned',1,1)").run();
     const e = await deliverLocal(OOS, { order: "T1:write:r1" }).then(() => null, (x: Error) => x.message);
     expect(e).toMatch(/修复单/);
-    await reject(deliverLocal(MR, { order: "T1:write:r1" }), "invalid", /MAINRED1|fix/);
+    await reject(deliverLocal(MR, { order: "T1:write:r1" }), "invalid", /MAINRED1|fix|派单快照/);
   });
 });

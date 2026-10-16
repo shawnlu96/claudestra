@@ -125,7 +125,7 @@ describe("接收端：ledger lend-write 独立再核", () => {
   const borrow: BorrowEntry[] = [{ peer: "mate", projects: [P], roles: ["review", "write"], maxOpen: 2 }];
   const port: CiNoChangePort = { headChecks: async () => [], run: async () => { throw new Error("不该读"); }, prFiles: async () => [], mainHead: async () => M,
     mainRuns: async () => [{ id: 900, attempt: 1, status: "completed", conclusion: "success", headSha: M, url: `https://github.com/${REPO}/actions/runs/900`, createdAt: 2 }],
-    tree: async () => [], fileText: async () => "", isAncestor: async () => { throw new Error("起点已记，不该读"); } };
+    tree: async () => [], fileText: async () => "" };
   const deps = (actor: string) => ({ db, actor, projectIds: [P], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => 1_000_000,
     lend: { borrow: async () => borrow, notifyPm: async () => {}, result: { reportDir: () => dir, writeReport: (p: string, b: string) => writeFileSync(p, b),
       sign: (f: string[]) => signPurpose(RECEIPT_PURPOSE, f, key), remoteHead: async (_r: string, b: string) => remote[b] ?? { ok: false, error: "无" },

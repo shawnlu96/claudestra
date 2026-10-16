@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { defaultNoChangePort, readMainResolved, readOutOfScope, type CiNoChangePort, type Evidence } from "./ci-no-change-evidence.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { stepAtStage, stepsOf } from "./ledger-steps.js";
-import { currentOrders } from "./order-take.js";
+import { currentOrders, type CurrentOrder } from "./order-take.js";
 import { refuse } from "./ledger-lend.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
@@ -51,11 +51,11 @@ export interface NoChangeDeps {
 interface NoChangeStep { step: "write" | "fix"; round: number; executor: string }
 
 /**
- * 调用方（出借单 / 本机单）绑定的那一单；start = 订单起点 head（没记 = null，只有 main_already_resolved 能凭「在 main 历史里」收）；
+ * 调用方（出借单 / 本机单）绑定的那一单；start = 订单原始快照里的起点 head（出借单 lend_orders.head、本机单派单 plan 事件的 head；没有起点证据的单调用方就拒）；
  * recheck 在写事务里重核调用方自己的身份、会话、租约、撤单、订单仍是当前的单等，不过就抛
  */
 export interface NoChangeBinding {
-  orderId: string; taskId: string; head: string; start: string | null; step: NoChangeStep; specRev: number; round: number; repo: string; evidence: string;
+  orderId: string; taskId: string; head: string; start: string; step: NoChangeStep; specRev: number; round: number; repo: string; evidence: string;
   recheck(db: Database): void;
 }
 
@@ -130,7 +130,7 @@ function ciPlan(db: Database, task: LedgerTask, b: NoChangeBinding, nc: OutOfSco
 function mainPlan(db: Database, task: LedgerTask, b: NoChangeBinding): MainPlan {
   cardCommon(db, task, b);
   if (task.stage !== "build" && task.stage !== "fix") refuse("invalid", "main_already_resolved 只收 build / fix 阶段的卡");
-  if ((task.headSHA && task.headSHA !== b.head) || (b.start !== null && b.start !== b.head)) refuse("invalid", "交付 head 不是订单起点 / 卡的当前 head（有新增改动）");
+  if ((task.headSHA && task.headSHA !== b.head) || b.start !== b.head) refuse("invalid", "交付 head 不是订单起点 / 卡的当前 head（有新增改动）");
   const node = mainRedNodes(db, task.project).findLast((n) => n.taskId === task.id) as (ReturnType<typeof mainRedNodes>[number] & { source?: unknown }) | undefined;
   if (!node || node.source !== SOURCE || task.featureId !== node.featureId || nodeState(db, node).node?.taskId !== task.id) {
     refuse("invalid", "本卡没有仍然有效的 MAINRED1 来源（main_red_fix_node / source=mainRedFix / 节点绑定）");
@@ -251,18 +251,37 @@ const repoOfTask = (task: LedgerTask): string | null => {
 };
 
 /** 本机的「当前的单」（order-take.ts 同一口径：步骤派给调用方、会话绑定、派单意图 / 手动单号、没借出去）；不是就抛 */
-function localOrder(db: Database, taskId: string, actor: string, session: string | null, orderId: string): { task: LedgerTask; step: NoChangeStep } {
+function localOrder(db: Database, taskId: string, actor: string, session: string | null, orderId: string): { order: CurrentOrder; step: NoChangeStep } {
   const cur = currentOrders(db, { agent: actor, sessionId: session, family: null, channelId: "" }).find((o) => o.orderId === orderId && o.task.id === taskId);
   if (!cur) refuse("invalid", `${orderId} 不是 ${actor} 在 ${taskId} 上当前的单（会话 / 步骤 / 派单不对，或卡已被收回）`);
   const at = stepAtStage(stepsOf(db, cur!.task), cur!.task);
   if (!at || at.derived || at.state !== "assigned" || at.step !== cur!.step) refuse("invalid", "这一单没有待交的步骤行，不收 noChange");
-  return { task: cur!.task, step: { step: cur!.step, round: at!.round, executor: at!.executor } };
+  return { order: cur!, step: { step: cur!.step, round: at!.round, executor: at!.executor } };
+}
+
+/**
+ * 本机单的原始快照 = 调度派单意图的 plan 事件（ledger-scheduler-write.ts 落意图时同笔写、按 `scheduler:<意图>` 去重，之后不改）：起点 head、规格版本、轮次
+ * 都取它，再与意图行、当前卡逐项比较；手动单（没有派单快照）、派单时卡上没有 head（证明不了执行副本没有新增改动）都拒，不拿当前卡 head 或 main 祖先顶替。
+ * 本机单的规格材料随 specRev 走（改规格 = 回 spec、specRev+1），所以 specRev 一致即材料与派单时一致。返回起点 head。
+ */
+function orderStart(db: Database, o: CurrentOrder, actor: string): string {
+  if (!o.intent) refuse("invalid", "这一单是手动派的，没有派单快照（起点 head / 规格版本），不收 noChange：请 PM 处置");
+  const i = o.intent!, plan = getEventByDedup(db, `scheduler:${i.id}`);
+  const d = plan?.kind === "scheduler" && plan.target === o.task.id && plan.data.op === "plan" && plan.data.id === i.id ? plan.data : null;
+  if (!d || i.recipient !== actor) refuse("invalid", `找不到 ${i.id} 派给 ${actor} 的派单快照，不收 noChange`);
+  if (typeof d!.head !== "string" || !SHA.test(d!.head)) refuse("invalid", "派单时卡上没有起点 head：证明不了执行副本没有新增改动，不收 noChange");
+  const start = d!.head as string;
+  if (i.head !== start || i.specRev !== d!.specRev || d!.specRev !== o.task.specRev || d!.round !== o.task.round) {
+    refuse("invalid", "派单快照的起点 / 规格版本 / 轮次与意图或当前卡不一致，不收 noChange");
+  }
+  if (o.task.headSHA !== start) refuse("invalid", `卡的当前 head 已不是派单起点 ${start.slice(0, 12)}（有新增改动），不收 noChange`);
+  return start;
 }
 
 /**
  * 本机入口（`ledger deliver <task> --no-change <json> --head <sha> --order <单号> [--session <id>]`；MCP deliver 带 noChange 时由 bridge 以执行者身份、
- * 用调用方的单号与会话调它）：必须是调用方本人当前的单，起点 = 接单时卡的 head；单号、会话、步骤、起点与 --rev / --branch 在写事务里重核。
- * 同单已入账的先按单号回放（卡已到 merge / cancelled，当前单核对会误拒原样重试）。
+ * 用调用方的单号与会话调它）：必须是调用方本人当前的、调度派出的单，起点 = 派单快照的 head（orderStart）；单号、会话、步骤、快照起点与 --rev / --branch
+ * 在写事务里重核。同单已入账的先按单号回放（卡已到 merge / cancelled，当前单核对会误拒原样重试）。
  */
 export async function deliverNoChangeLocal(db: Database, ctx: WriteCtx, task: LedgerTask, flags: Record<string, string | undefined>, now: () => number,
   deps: Partial<NoChangeDeps> = {}): Promise<Record<string, unknown>> {
@@ -277,8 +296,10 @@ export async function deliverNoChangeLocal(db: Database, ctx: WriteCtx, task: Le
   if (done) return { ok: true, task: mustTask(db, task.id), duplicate: true, eventSeq: done.eventSeq, noChange: { outcome: done.outcome, eventSeq: done.eventSeq } };
   const session = flags.session ?? null;
   const bound = localOrder(db, task.id, ctx.actor, session, orderId);
-  const start = bound.task.headSHA ?? null;
-  const bad = noChangeStepRefusal(bound.step.step, nc.value) ?? (start === null && nc.value.kind === "main_already_resolved" ? null : noChangeHeadRefusal(start, head, nc.value));
+  const stepBad = noChangeStepRefusal(bound.step.step, nc.value);
+  if (stepBad) throw new LedgerError("invalid", stepBad);
+  const start = orderStart(db, bound.order, ctx.actor);
+  const bad = noChangeHeadRefusal(start, head, nc.value);
   if (bad) throw new LedgerError("invalid", bad);
   const repo = repoOfTask(task);
   if (!repo) throw new LedgerError("invalid", "卡上没有完整 PR 链接或 extra.repo，核不了外部 CI");
@@ -287,8 +308,8 @@ export async function deliverNoChangeLocal(db: Database, ctx: WriteCtx, task: Le
   const binding: NoChangeBinding = { orderId, taskId: task.id, head, start, step: bound.step, specRev: task.specRev, round: task.round,
     repo, evidence: flags.evidence ?? "", recheck: (d) => {
       const again = localOrder(d, task.id, ctx.actor, session, orderId);
-      if (JSON.stringify(again.step) !== JSON.stringify(bound.step) || (again.task.headSHA ?? null) !== start) refuse("unavailable", "核对期间这一单的步骤或起点变了，未恢复");
-      if ((rev !== undefined && again.task.rev !== rev) || (flags.branch !== undefined && again.task.branch !== flags.branch)) refuse("unavailable", "卡在核对之后被改过，重新核对后再交");
+      if (JSON.stringify(again.step) !== JSON.stringify(bound.step) || orderStart(d, again.order, ctx.actor) !== start) refuse("unavailable", "核对期间这一单的步骤或起点变了，未恢复");
+      if ((rev !== undefined && again.order.task.rev !== rev) || (flags.branch !== undefined && again.order.task.branch !== flags.branch)) refuse("unavailable", "卡在核对之后被改过，重新核对后再交");
     } };
   const r = await admitNoChange(db, { actor: ctx.actor, now: ctx.now }, binding, nc.value,
     { port: deps.port ?? defaultNoChangePort(), policy: deps.policy, reviewProof: deps.reviewProof, now }, () => null);

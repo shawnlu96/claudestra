@@ -2,13 +2,15 @@
  * CINOOP1 · noChange 交付的外部证据：接收端自己读 GitHub，不信交付方的自述。
  * - out_of_scope_ci：原失败 run 必须跑在交付 head 上且确实失败；失败日志按 ci-failure-class.ts 对 PR 实际改动分类，只认 known_flaky / timeout，
  *   且分类出的失败文件与交付方报的逐个相等（不凭 fileGlobs 或自述认定范围外）；文件范围外不等于无依赖影响，再按交付 head 的源码
- *   保守地走失败测试的导入闭包（dependencyImpact）：闭包碰到 PR 改动、PR 改了全局输入或闭包过大都拒；最后看同 head 最新的 required 检查是否全绿。
+ *   保守地走失败测试的导入闭包（dependencyImpact，含 tsconfig 别名 @/*）：闭包碰到 PR 改动、有解析不了的依赖、PR 改了全局输入或闭包过大都拒；
+ *   最后看同 head 最新的 required 检查是否全绿。
  * - main_already_resolved：当前 main 的准确 head、同一 workflow 最新的那一个 run（不跳过还在跑 / 取消的）必须跑在这个 head 上、完成且 success，
- *   且就是交付方给的那个 run；卡上没记起点 head 时，交付 head 还要在当前 main 的历史里（没有新增改动）。
+ *   且就是交付方给的那个 run；交付 head 必须就是订单原始快照里的起点。
  * 读失败 / 不全 / pending 一律「未定」（unavailable），对不上的是 invalid；这里只读不写。端口可注入，测试进程不碰真实 gh。
  * tests/ci-no-change-recovery.test.ts。
  */
 import { classifyFailedLog } from "./ci-failure-class.js";
+import { builtinModules } from "node:module";
 import { posix } from "node:path";
 import type { MainRedRun } from "./main-red-fix.js";
 import { mainRedGh } from "./main-red-fix-gh.js";
@@ -32,8 +34,6 @@ export interface CiNoChangePort {
   tree(repo: string, head: string): Promise<string[]>;
   /** 这个 commit 上一个文件的正文 */
   fileText(repo: string, head: string, path: string): Promise<string>;
-  /** ancestor 是否就是 head 或在 head 的历史里 */
-  isAncestor(repo: string, ancestor: string, head: string): Promise<boolean>;
 }
 
 export type Evidence<T> = { ok: true; facts: T } | { ok: false; code: "unavailable" | "invalid"; why: string };
@@ -94,30 +94,71 @@ export async function readOutOfScope(port: CiNoChangePort, want: OutOfScopeWant,
 }
 
 /** 改了这些就可能影响任何测试（依赖、配置、测试公共件、CI 本身）：不再逐个追导入，直接证明不了 */
-const DEP_GLOBAL = /^(?:package\.json|bun\.lockb?|bunfig\.toml|tsconfig[^/]*\.json|\.github\/|web\/package\.json|tests\/(?:setup|helpers?|fixtures|support|_)[^/]*)/;
+const DEP_GLOBAL = /^(?:package\.json|bun\.lockb?|bunfig\.toml|tsconfig[^/]*\.json|\.github\/|web\/package\.json|web\/tsconfig[^/]*\.json|tests\/(?:setup|helpers?|fixtures|support|_)[^/]*)/;
 /** import / export from / 动态 import / require 的说明符，以及源码里写成字面量的仓库路径（spawn 子进程、读夹具） */
 const SPEC = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)["'`]([^"'`\n]+)["'`]/g;
+/** 说明符不是字面量的动态导入（import(x) / require(x)）：闭包追不到，证明不了 */
+const DYNAMIC = /\b(?:import|require)\s*\(\s*(?!["'`\s])/;
 const PATH_LIT = /["'`]((?:\.{1,2}\/|(?:src|tests|web|scripts)\/)[^"'`\s$]+?\.(?:[cm]?[jt]sx?|json))["'`]/g;
 const DEP_FILES_MAX = 400;
 const DEP_BATCH = 8;
+/** 仓库支持的内部别名：tsconfig.json paths 的 "@/*" → "./web/*"（web/tsconfig.json 同一写法）；改 tsconfig 本身由 DEP_GLOBAL 拦 */
+const ALIASES: readonly (readonly [string, string])[] = [["@/", "web/"]];
+const INTERNAL = /^(?:src|tests|web|scripts)\//;
+const BUILTIN = new Set(builtinModules);
+/** 声明了外部包的 package.json：说明符要么解析到树里的文件，要么是这里声明的包 / 内置模块，否则一律当解析不了 */
+const PACKAGE_FILES = ["package.json", "web/package.json"];
 
-/** 说明符 → 文件树里实际的那个文件（.js 写法对应 .ts 源码）；包名 / 树外 = null（包由 DEP_GLOBAL 管） */
-function resolveSpec(from: string, spec: string, have: ReadonlySet<string>): string | null {
-  const rel = spec.startsWith("./") || spec.startsWith("../");
-  if (!rel && !/^(?:src|tests|web|scripts)\//.test(spec)) return null;
-  const base = posix.normalize(rel ? posix.join(posix.dirname(from), spec) : spec);
+/** 树里实际的那个文件（.js 写法对应 .ts 源码）；没有 = null */
+function inTree(base: string, have: ReadonlySet<string>): string | null {
   const stem = base.replace(/\.(?:[cm]?js|jsx)$/, "");
-  return [base, `${stem}.ts`, `${stem}.tsx`, `${stem}.js`, `${base}/index.ts`].find((f) => have.has(f)) ?? null;
+  return [base, `${stem}.ts`, `${stem}.tsx`, `${stem}.js`, `${base}/index.ts`, `${base}/index.tsx`, `${base}/index.js`].find((f) => have.has(f)) ?? null;
 }
 
-function depsOf(from: string, text: string, have: ReadonlySet<string>): string[] {
-  const specs = [...text.matchAll(SPEC), ...text.matchAll(PATH_LIT)].map((m) => m[1]!);
-  return specs.map((s) => resolveSpec(from, s, have)).filter((f): f is string => f !== null);
+/** 说明符 → 内部文件 / external（内置模块、package.json 声明的包）/ null（解析不了：可能是漏掉的内部依赖或动态拼的，调用方保守拒） */
+function resolveSpec(from: string, spec: string, have: ReadonlySet<string>, pkgs: ReadonlySet<string>): string | "external" | null {
+  if (spec.includes("${")) return null;
+  const alias = ALIASES.find(([a]) => spec.startsWith(a));
+  if (alias) return inTree(posix.normalize(alias[1] + spec.slice(alias[0].length)), have);
+  const nm = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(spec); // 直接按路径引用包内文件（tests 读 web/node_modules/postcss）：仍要是声明的包
+  if (nm) return pkgs.has(nm[1]!) ? "external" : null;
+  if (spec.startsWith("./") || spec.startsWith("../")) return inTree(posix.normalize(posix.join(posix.dirname(from), spec)), have);
+  if (INTERNAL.test(spec)) return inTree(posix.normalize(spec), have);
+  if (spec === "bun" || /^(?:node|bun):/.test(spec) || BUILTIN.has(spec)) return "external";
+  const name = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
+  return pkgs.has(name) ? "external" : null;
+}
+
+/** 一个文件的内部依赖；有解析不了的说明符 / 非字面量动态导入 = { unresolved }（路径字面量只是补充线索，解析不到不算） */
+function depsOf(from: string, text: string, have: ReadonlySet<string>, pkgs: ReadonlySet<string>): string[] | { unresolved: string } {
+  if (DYNAMIC.test(text)) return { unresolved: "非字面量的动态 import / require" };
+  const out: string[] = [];
+  for (const m of text.matchAll(SPEC)) {
+    const r = resolveSpec(from, m[1]!, have, pkgs);
+    if (r === null) return { unresolved: m[1]! };
+    if (r !== "external") out.push(r);
+  }
+  for (const m of text.matchAll(PATH_LIT)) { const r = resolveSpec(from, m[1]!, have, pkgs); if (r && r !== "external") out.push(r); }
+  return out;
+}
+
+/** package.json 里声明的包名（dependencies / devDependencies / peer / optional）；树里有却读不到 / 不是 JSON = 抛（未定） */
+async function declaredPackages(port: CiNoChangePort, repo: string, head: string, have: ReadonlySet<string>): Promise<Set<string>> {
+  const names = new Set<string>();
+  for (const f of PACKAGE_FILES.filter((p) => have.has(p))) {
+    const pkg = JSON.parse(await port.fileText(repo, head, f)) as Record<string, unknown>;
+    for (const k of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+      const v = pkg[k];
+      if (v && typeof v === "object") for (const n of Object.keys(v)) names.add(n);
+    }
+  }
+  return names;
 }
 
 /**
- * 「文件范围外」之外的依赖证明（保守）：从失败的测试文件出发，按交付 head 的源码走导入闭包；闭包里有 PR 改动的文件、或任一闭包文件的正文
- * 提到了改动文件的文件名（spawn / 拼路径读到它）都算可能有影响；PR 改了全局输入、闭包超过上限都证明不了。读不到 = 未定。
+ * 「文件范围外」之外的依赖证明（保守）：从失败的测试文件出发，按交付 head 的源码走导入闭包（相对路径、仓库前缀、tsconfig 别名 @/*）；闭包里有 PR 改动的
+ * 文件、或任一闭包文件的正文提到了改动文件的文件名（spawn / 拼路径读到它）都算可能有影响；有解析不了的说明符（既不是树里的文件、也不是内置模块或
+ * package.json 声明的包）或非字面量动态导入、PR 改了全局输入、闭包超过上限都证明不了。读不到 = 未定。
  */
 export async function dependencyImpact(port: CiNoChangePort, repo: string, head: string, roots: readonly string[], changed: readonly string[]):
   Promise<Evidence<{ reached: number }>> {
@@ -128,6 +169,8 @@ export async function dependencyImpact(port: CiNoChangePort, repo: string, head:
   const have = new Set(tree), touched = new Set(changed);
   const missing = roots.find((f) => !have.has(f));
   if (missing) return invalid(`失败文件 ${missing} 不在交付 head 的文件树里`);
+  const pkgs = await guarded("package.json 的依赖声明", () => declaredPackages(port, repo, head, have));
+  if (failed(pkgs)) return pkgs;
   const seen = new Set<string>(), queue = [...roots], texts: string[] = [];
   while (queue.length) {
     const batch: string[] = [];
@@ -138,7 +181,12 @@ export async function dependencyImpact(port: CiNoChangePort, repo: string, head:
     if (seen.size > DEP_FILES_MAX) return invalid(`失败测试的依赖闭包超过 ${DEP_FILES_MAX} 个文件，证明不了无依赖影响`);
     const read = await guarded("依赖文件", () => Promise.all(batch.map((f) => port.fileText(repo, head, f))));
     if (failed(read)) return read;
-    batch.forEach((f, i) => { texts.push(read[i]!); queue.push(...depsOf(f, read[i]!, have)); });
+    for (const [i, f] of batch.entries()) {
+      const deps = depsOf(f, read[i]!, have, pkgs);
+      if (!Array.isArray(deps)) return invalid(`${f} 的依赖 ${deps.unresolved.slice(0, 120)} 解析不了（不是仓库里的文件，也不是声明的包）：依赖图不完整，证明不了无依赖影响`);
+      texts.push(read[i]!);
+      queue.push(...deps);
+    }
   }
   const hit = [...seen].find((f) => touched.has(f));
   if (hit) return invalid(`失败测试的导入闭包包含 PR 改动的 ${hit}：可能是改动引起的，不算范围外`);
@@ -148,8 +196,8 @@ export async function dependencyImpact(port: CiNoChangePort, repo: string, head:
 }
 
 export interface MainResolvedFacts { mainHead: string; mainRunId: number; mainRun: string; workflow: string }
-/** start = 卡 / 订单记下的起点 head；null（没记）时交付 head 必须在当前 main 的历史里 */
-export interface MainResolvedWant { repo: string; workflowFile: string; event: string | null; sourceRunId: number; head: string; start: string | null }
+/** start = 订单原始快照里的起点 head（出借单 lend_orders.head、本机单派单 plan 事件的 head）；没有起点证据的单在调用方就拒，不拿 main 祖先顶替 */
+export interface MainResolvedWant { repo: string; workflowFile: string; event: string | null; sourceRunId: number; head: string; start: string }
 /** 最新的那一个 run（按创建时间，同时刻按 id）：还在跑 / 取消 / 跳过的也算，不往回找更旧的绿 */
 const newestRun = (runs: readonly MainRedRun[]): MainRedRun | null => [...runs].sort((a, b) => b.createdAt - a.createdAt || b.id - a.id)[0] ?? null;
 
@@ -168,11 +216,7 @@ export async function readMainResolved(port: CiNoChangePort, want: MainResolvedW
   if (latest.conclusion === "failure") return invalid(`${want.workflowFile} 在当前 main 上最新的结论是 failure`);
   if (latest.conclusion !== "success") return pending(`${want.workflowFile} 最新的 run ${latest.id} 结论是 ${latest.conclusion ?? "空"}，不是绿`);
   if (latest.id !== green.runId) return invalid(`当前 main 上最新的绿 run 是 ${latest.id}，不是交付给的 ${green.runId}`);
-  if (want.start === null) {
-    const inMain = await guarded("交付 head 与 main 的关系", () => port.isAncestor(want.repo, want.head, head));
-    if (failed(inMain)) return inMain;
-    if (!inMain) return invalid(`交付 head ${want.head.slice(0, 12)} 不在当前 main 的历史里：有新增改动，不是无需改码`);
-  } else if (want.start !== want.head) return invalid("交付 head 不是订单起点");
+  if (want.start !== want.head) return invalid("交付 head 不是订单起点");
   return { ok: true, facts: { mainHead: head, mainRunId: latest.id, mainRun: latest.url, workflow: want.workflowFile } };
 }
 
@@ -220,11 +264,6 @@ function ghNoChangePort(command: Command = runBounded): CiNoChangePort {
       if (r.code !== 0 || r.timedOut || r.truncated) throw new Error(`读不到 ${path}：${r.stderr.trim().split("\n")[0]?.slice(0, 200) ?? ""}`);
       return r.stdout;
     },
-    async isAncestor(repo, ancestor, head) {
-      const raw = await json(["api", `repos/${repo}/compare/${ancestor}...${head}`]);
-      if (typeof raw.status !== "string") throw new Error("gh api compare 没给出 status");
-      return raw.status === "identical" || raw.status === "ahead";
-    },
   };
 }
 
@@ -232,5 +271,5 @@ function ghNoChangePort(command: Command = runBounded): CiNoChangePort {
 export function defaultNoChangePort(): CiNoChangePort {
   if (!isTestProcess()) return ghNoChangePort();
   const no = async (): Promise<never> => { throw new Error("测试进程没有注入 CI 读口"); };
-  return { headChecks: no, run: no, prFiles: no, mainHead: no, mainRuns: no, tree: no, fileText: no, isAncestor: no };
+  return { headChecks: no, run: no, prFiles: no, mainHead: no, mainRuns: no, tree: no, fileText: no };
 }
