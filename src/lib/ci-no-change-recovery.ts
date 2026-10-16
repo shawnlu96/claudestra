@@ -13,6 +13,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
 import { defaultNoChangePort, readMainResolved, readOutOfScope, type CiNoChangePort, type Evidence } from "./ci-no-change-evidence.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { stepAtStage, stepsOf } from "./ledger-steps.js";
@@ -22,7 +23,7 @@ import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { parseExtraRepo } from "./ledger-probes.js";
-import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { NO_CHANGE_WRITE_PORTS } from "./ledger-write.js";
 import { mainRedNodes, nodeState } from "./main-red-fix-place.js";
 import { SOURCE, workflowOf } from "./main-red-fix.js";
@@ -31,6 +32,7 @@ import { NO_CHANGE_DELIVER_OP, noChangeDedupKey, noChangeDigest, noChangeHeadRef
 import { noteDefaultOn } from "./recovery-key-defaults.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
+import { specPathFor } from "./task-spec.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
 import { getMergeRun, mergeReviewProof } from "./scheduler-merge.js";
 
@@ -51,11 +53,12 @@ export interface NoChangeDeps {
 interface NoChangeStep { step: "write" | "fix"; round: number; executor: string }
 
 /**
- * 调用方（出借单 / 本机单）绑定的那一单；start = 订单原始快照里的起点 head（出借单 lend_orders.head、本机单派单 plan 事件的 head；没有起点证据的单调用方就拒）；
+ * 调用方（出借单 / 本机单）绑定的那一单；start = 订单原始快照里的起点 head（出借单 lend_orders.head、本机单派单 plan 事件的 head；没有起点证据的单调用方就拒；
+ * null 只给本机 MAINRED1 卡：派单时卡上就没有 head，交付 head 必须等于当前 main，卡 head 保持为空）；
  * recheck 在写事务里重核调用方自己的身份、会话、租约、撤单、订单仍是当前的单等，不过就抛
  */
 export interface NoChangeBinding {
-  orderId: string; taskId: string; head: string; start: string; step: NoChangeStep; specRev: number; round: number; repo: string; evidence: string;
+  orderId: string; taskId: string; head: string; start: string | null; step: NoChangeStep; specRev: number; round: number; repo: string; evidence: string;
   recheck(db: Database): void;
 }
 
@@ -130,7 +133,7 @@ function ciPlan(db: Database, task: LedgerTask, b: NoChangeBinding, nc: OutOfSco
 function mainPlan(db: Database, task: LedgerTask, b: NoChangeBinding): MainPlan {
   cardCommon(db, task, b);
   if (task.stage !== "build" && task.stage !== "fix") refuse("invalid", "main_already_resolved 只收 build / fix 阶段的卡");
-  if ((task.headSHA && task.headSHA !== b.head) || b.start !== b.head) refuse("invalid", "交付 head 不是订单起点 / 卡的当前 head（有新增改动）");
+  if (b.start === null ? !!task.headSHA : b.start !== b.head || (task.headSHA && task.headSHA !== b.head)) refuse("invalid", "交付 head 不是订单起点 / 卡的当前 head（有新增改动）");
   const node = mainRedNodes(db, task.project).findLast((n) => n.taskId === task.id) as (ReturnType<typeof mainRedNodes>[number] & { source?: unknown }) | undefined;
   if (!node || node.source !== SOURCE || task.featureId !== node.featureId || nodeState(db, node).node?.taskId !== task.id) {
     refuse("invalid", "本卡没有仍然有效的 MAINRED1 来源（main_red_fix_node / source=mainRedFix / 节点绑定）");
@@ -259,22 +262,47 @@ function localOrder(db: Database, taskId: string, actor: string, session: string
   return { order: cur!, step: { step: cur!.step, round: at!.round, executor: at!.executor } };
 }
 
+const MATERIAL_FIELDS = ["spec", "extra"];
+
+/**
+ * 本机单的规格材料与派单时一致：plan 事件之后没有改规格指针 / extra（文件范围）的 task set 事件；规格文件的原字节在派单之后没被写过
+ * （内核维护的 ctime / mtime 都不晚于 plan 事件；文件新建、改写、换内容都会推后 ctime）。规格指针在、文件却读不到也拒。只拒不猜。
+ */
+function localMaterialProblem(db: Database, task: LedgerTask, plan: LedgerEvent): string | null {
+  const set = listEvents(db, { project: task.project, target: task.id }).find((e) => e.seq > plan.seq && e.kind === "task" && e.data.op === "set"
+    && MATERIAL_FIELDS.some((k) => k in ((e.data.patch as Record<string, unknown> | undefined) ?? {})));
+  if (set) return `派单之后 #${set.seq} 改过规格指针 / 文件范围，材料与派单时不一致`;
+  const path = specPathFor(task, getMeta(db, task.project).docsDir);
+  if (!path) return task.spec ? "规格文件读不到，证明不了材料与派单时一致" : null;
+  try {
+    const st = statSync(path);
+    if (Math.max(st.ctimeMs, st.mtimeMs) > plan.ts) return "规格文件在派单之后被写过，材料与派单时不一致";
+  } catch { return "规格文件读不到，证明不了材料与派单时一致"; }
+  return null;
+}
+
 /**
  * 本机单的原始快照 = 调度派单意图的 plan 事件（ledger-scheduler-write.ts 落意图时同笔写、按 `scheduler:<意图>` 去重，之后不改）：起点 head、规格版本、轮次
- * 都取它，再与意图行、当前卡逐项比较；手动单（没有派单快照）、派单时卡上没有 head（证明不了执行副本没有新增改动）都拒，不拿当前卡 head 或 main 祖先顶替。
- * 本机单的规格材料随 specRev 走（改规格 = 回 spec、specRev+1），所以 specRev 一致即材料与派单时一致。返回起点 head。
+ * 都取它，再与意图行、当前卡逐项比较；规格材料按 localMaterialProblem 核派单之后没变。手动单（没有派单快照）拒。派单时卡上没有 head 的，只有
+ * main_already_resolved 且卡上至今没有 head 才收（返回 null：交付 head 须等于当前 main，见 readMainResolved），别的拒，不拿 main 祖先顶替起点。
  */
-function orderStart(db: Database, o: CurrentOrder, actor: string): string {
+function orderStart(db: Database, o: CurrentOrder, actor: string, nc: NoChange): string | null {
   if (!o.intent) refuse("invalid", "这一单是手动派的，没有派单快照（起点 head / 规格版本），不收 noChange：请 PM 处置");
   const i = o.intent!, plan = getEventByDedup(db, `scheduler:${i.id}`);
   const d = plan?.kind === "scheduler" && plan.target === o.task.id && plan.data.op === "plan" && plan.data.id === i.id ? plan.data : null;
   if (!d || i.recipient !== actor) refuse("invalid", `找不到 ${i.id} 派给 ${actor} 的派单快照，不收 noChange`);
-  if (typeof d!.head !== "string" || !SHA.test(d!.head)) refuse("invalid", "派单时卡上没有起点 head：证明不了执行副本没有新增改动，不收 noChange");
-  const start = d!.head as string;
-  if (i.head !== start || i.specRev !== d!.specRev || d!.specRev !== o.task.specRev || d!.round !== o.task.round) {
+  const empty = d!.head === null || d!.head === undefined;
+  if (!empty && (typeof d!.head !== "string" || !SHA.test(d!.head))) refuse("invalid", "派单快照里的起点 head 不是完整 SHA，不收 noChange");
+  if (empty && (nc.kind !== "main_already_resolved" || o.task.headSHA)) {
+    refuse("invalid", "派单时卡上没有起点 head：只有卡上至今仍无 head 的 MAINRED1 已解决卡可按当前 main 取消，别的证明不了执行副本没有新增改动");
+  }
+  const start = empty ? null : d!.head as string;
+  if ((i.head ?? null) !== start || i.specRev !== d!.specRev || d!.specRev !== o.task.specRev || d!.round !== o.task.round) {
     refuse("invalid", "派单快照的起点 / 规格版本 / 轮次与意图或当前卡不一致，不收 noChange");
   }
-  if (o.task.headSHA !== start) refuse("invalid", `卡的当前 head 已不是派单起点 ${start.slice(0, 12)}（有新增改动），不收 noChange`);
+  if ((o.task.headSHA || null) !== start) refuse("invalid", `卡的当前 head 已不是派单起点 ${start?.slice(0, 12) ?? "（空）"}（有新增改动），不收 noChange`);
+  const material = localMaterialProblem(db, o.task, plan!);
+  if (material) refuse("invalid", `${material}，不收 noChange`);
   return start;
 }
 
@@ -298,8 +326,9 @@ export async function deliverNoChangeLocal(db: Database, ctx: WriteCtx, task: Le
   const bound = localOrder(db, task.id, ctx.actor, session, orderId);
   const stepBad = noChangeStepRefusal(bound.step.step, nc.value);
   if (stepBad) throw new LedgerError("invalid", stepBad);
-  const start = orderStart(db, bound.order, ctx.actor);
-  const bad = noChangeHeadRefusal(start, head, nc.value);
+  const start = orderStart(db, bound.order, ctx.actor, nc.value);
+  const bad = start === null ? (nc.value.kind === "main_already_resolved" && head === nc.value.mainHead ? null : "派单时卡上没有 head：交付 head 必须就是给的当前 main")
+    : noChangeHeadRefusal(start, head, nc.value);
   if (bad) throw new LedgerError("invalid", bad);
   const repo = repoOfTask(task);
   if (!repo) throw new LedgerError("invalid", "卡上没有完整 PR 链接或 extra.repo，核不了外部 CI");
@@ -308,7 +337,7 @@ export async function deliverNoChangeLocal(db: Database, ctx: WriteCtx, task: Le
   const binding: NoChangeBinding = { orderId, taskId: task.id, head, start, step: bound.step, specRev: task.specRev, round: task.round,
     repo, evidence: flags.evidence ?? "", recheck: (d) => {
       const again = localOrder(d, task.id, ctx.actor, session, orderId);
-      if (JSON.stringify(again.step) !== JSON.stringify(bound.step) || orderStart(d, again.order, ctx.actor) !== start) refuse("unavailable", "核对期间这一单的步骤或起点变了，未恢复");
+      if (JSON.stringify(again.step) !== JSON.stringify(bound.step) || orderStart(d, again.order, ctx.actor, nc.value) !== start) refuse("unavailable", "核对期间这一单的步骤或起点变了，未恢复");
       if ((rev !== undefined && again.order.task.rev !== rev) || (flags.branch !== undefined && again.order.task.branch !== flags.branch)) refuse("unavailable", "卡在核对之后被改过，重新核对后再交");
     } };
   const r = await admitNoChange(db, { actor: ctx.actor, now: ctx.now }, binding, nc.value,

@@ -5,6 +5,9 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { admitNoChange, deliverNoChangeLocal, orderSnapshotProblem, type NoChangeBinding, type NoChangeDeps } from "../src/lib/ci-no-change-recovery.js";
 import type { CheckRow, CiNoChangePort, RunRead } from "../src/lib/ci-no-change-evidence.js";
 import { ciGreen, dependencyImpact, failureFilesMatch } from "../src/lib/ci-no-change-evidence.js";
@@ -12,7 +15,7 @@ import { deliverOrder } from "../src/lib/order-deliver.js";
 import { listSteps } from "../src/lib/ledger-steps.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
-import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
+import { createTask, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
 import type { MainRedRun } from "../src/lib/main-red-fix.js";
 import type { NoChange } from "../src/lib/order-no-change.js";
 import type { RecoveryMode, RecoveryPolicy } from "../src/lib/recovery-policy.js";
@@ -80,8 +83,8 @@ function bounce(cause = "ci_fail", intentId = "mi1"): void {
 }
 
 /** 调度派单：意图行 + 同笔的 plan 事件（ledger-scheduler-write.ts 的形状，本机单的原始快照） */
-function dispatch(taskId: string, node: "write" | "fix", id: string, head: string | null, round: number): void {
-  const seq = insertEvent(db, { actor: "scheduler", now: 2_100, dedupKey: `scheduler:${id}` }, { project: P, target: taskId, kind: "scheduler", text: "派单",
+function dispatch(taskId: string, node: "write" | "fix", id: string, head: string | null, round: number, now = 2_100): void {
+  const seq = insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${id}` }, { project: P, target: taskId, kind: "scheduler", text: "派单",
     data: { op: "plan", id, node, action: "dispatch", recipient: "agent-dev", specRev: 1, round, head } }, true).seq;
   db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,recipient,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
     VALUES (?,?,?,?,'dispatch','agent-dev',1,?,1,1,?,1,'submitted','dispatch',1,1)`).run(id, taskId, P, node, seq, head);
@@ -304,6 +307,38 @@ describe("out_of_scope_ci：同轮恢复", () => {
     expect(await deliverOrder({ ...call, agent: "agent-x" }, wire(OOS), dd)).toMatchObject({ ok: false, code: "dedup_conflict" });
   });
 
+  test("r3-P1 local-nochange-unbound-order：派单后经 setTask 改规格指针 / 文件范围（specRev 不变）→ 拒，零写入", async () => {
+    for (const [i, patch] of [{ spec: "different-spec.md" }, { extra: { fileGlobs: ["src/other.ts"] } }].entries()) {
+      db.run("DELETE FROM scheduler_intents WHERE taskId = 'T1' AND action = 'dispatch'");
+      dispatch("T1", "fix", `fm${i}`, H, 1, 2_100 + i * 200); // 第二轮重新派单：前一轮的改动在派单之前，只算这一轮之后的
+      setTask(db, { actor: "agent-pm", now: 2_150 + i * 200 }, { id: "T1", rev: getTask(db, "T1")!.rev, patch } as never);
+      expect(getTask(db, "T1")).toMatchObject({ specRev: 1 });
+      const before = events().length;
+      await reject(deliverLocal(OOS, { order: `fm${i}` }), "invalid", /改过规格指针/);
+      expect(events().length).toBe(before);
+      expect(getTask(db, "T1")).toMatchObject({ stage: "fix" });
+    }
+  });
+
+  test("r3-P1 local-nochange-unbound-order：规格文件原字节在派单之后被写过 → 拒；派单前写好、之后没动 → 收", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cinoop1-spec-"));
+    try {
+      mkdirSync(join(dir, "tasks"));
+      setMeta(db, OWNER, { project: P, key: "docsDir", value: dir });
+      const spec = join(dir, "tasks", "T1.md");
+      writeFileSync(spec, "# 原规格\n");
+      utimesSync(spec, 1, 1); // mtime 改回去也瞒不过 ctime
+      const written = statSync(spec).ctimeMs;
+      db.run("DELETE FROM scheduler_intents WHERE id = 'fx1'");
+      dispatch("T1", "fix", "fx2", H, 1, written - 1); // 派单在写文件之前：材料在派单后变过
+      await reject(deliverLocal(OOS, { order: "fx2" }), "invalid", /派单之后被写过/);
+      expect(getTask(db, "T1")).toMatchObject({ stage: "fix" });
+      db.run("DELETE FROM scheduler_intents WHERE id = 'fx2'");
+      dispatch("T1", "fix", "fx3", H, 1, written + 1); // 派单在写文件之后、之后没动
+      expect(await deliverLocal(OOS, { order: "fx3" })).toMatchObject({ ok: true, noChange: { outcome: "recovered" } });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   test("规格材料：订单原文摘要变了、持单期间有规格追加 → 不一致", () => {
     const text = "规格原文";
     const sha = new Bun.CryptoHasher("sha256").update(text).digest("hex");
@@ -393,10 +428,23 @@ describe("main_already_resolved：MAINRED1 已解决的卡取消", () => {
     expect(getTask(db, "T2")).toMatchObject({ stage: "build" });
   });
 
-  test("r2-P1 local-nochange-unbound-order：派单时卡上没有 head（build、head 为空）→ 拒，不拿 main 历史顶替起点", async () => {
+  test("r3-P1 local-nochange-unbound-order：派单时卡上没有 head（build、round 0）→ 交付 head 等于当前 main 才取消，卡 head 仍为空；别的拒", async () => {
     mainCard(true, null);
-    await reject(resolve(), "invalid", /没有起点 head/);
-    expect(getTask(db, "T2")).toMatchObject({ stage: "build", headSHA: null });
+    expect(await resolve().then(() => null, (x: Error) => x.message)).toMatch(/当前 main/); // 交的是 H，不是当前 main M
+    expect(events("T2").some((e) => e.kind === "stage")).toBe(false);
+    db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T2'").run(M); // 卡后来有了 head：派单起点证明不了
+    await reject(deliverLocal(MR, { head: M }, "T2"), "invalid", /没有起点 head/);
+    db.run("UPDATE tasks SET headSHA = NULL WHERE id = 'T2'");
+    expect(await deliverLocal(MR, { head: M }, "T2")).toMatchObject({ ok: true, noChange: { outcome: "cancelled" } });
+    expect(getTask(db, "T2")).toMatchObject({ stage: "cancelled", round: 0, headSHA: null });
+    expect(listSteps(db, "T2").find((s) => s.step === "write")).toMatchObject({ state: "done" });
+  });
+
+  test("r3-P1 local-nochange-unbound-order：空 head 的派单不开放给 out_of_scope_ci", async () => {
+    db.run("DELETE FROM scheduler_intents WHERE id = 'fx1'");
+    dispatch("T1", "fix", "fx2", null, 1);
+    await reject(deliverLocal(OOS, { order: "fx2" }), "invalid", /没有起点 head/);
+    expect(getTask(db, "T1")).toMatchObject({ stage: "fix" });
   });
 
   test("r1-P1 local-nochange-unbound：不是自己当前的单 / 步骤被删拒", async () => {

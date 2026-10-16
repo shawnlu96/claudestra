@@ -197,7 +197,8 @@ export async function dependencyImpact(port: CiNoChangePort, repo: string, head:
 
 export interface MainResolvedFacts { mainHead: string; mainRunId: number; mainRun: string; workflow: string }
 /** start = 订单原始快照里的起点 head（出借单 lend_orders.head、本机单派单 plan 事件的 head）；没有起点证据的单在调用方就拒，不拿 main 祖先顶替 */
-export interface MainResolvedWant { repo: string; workflowFile: string; event: string | null; sourceRunId: number; head: string; start: string }
+/** start = 订单起点；null = 派单时卡上没有 head（本机 MAINRED1 build 卡），交付 head 就必须是当前 main 本身（执行副本没有新增提交） */
+export interface MainResolvedWant { repo: string; workflowFile: string; event: string | null; sourceRunId: number; head: string; start: string | null }
 /** 最新的那一个 run（按创建时间，同时刻按 id）：还在跑 / 取消 / 跳过的也算，不往回找更旧的绿 */
 const newestRun = (runs: readonly MainRedRun[]): MainRedRun | null => [...runs].sort((a, b) => b.createdAt - a.createdAt || b.id - a.id)[0] ?? null;
 
@@ -216,7 +217,9 @@ export async function readMainResolved(port: CiNoChangePort, want: MainResolvedW
   if (latest.conclusion === "failure") return invalid(`${want.workflowFile} 在当前 main 上最新的结论是 failure`);
   if (latest.conclusion !== "success") return pending(`${want.workflowFile} 最新的 run ${latest.id} 结论是 ${latest.conclusion ?? "空"}，不是绿`);
   if (latest.id !== green.runId) return invalid(`当前 main 上最新的绿 run 是 ${latest.id}，不是交付给的 ${green.runId}`);
-  if (want.start !== want.head) return invalid("交付 head 不是订单起点");
+  if (want.start === null ? want.head !== head : want.start !== want.head) {
+    return invalid(want.start === null ? "派单时卡上没有 head：交付 head 必须就是当前 main（执行副本没有新增提交）" : "交付 head 不是订单起点");
+  }
   return { ok: true, facts: { mainHead: head, mainRunId: latest.id, mainRun: latest.url, workflow: want.workflowFile } };
 }
 
