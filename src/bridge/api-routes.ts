@@ -84,7 +84,6 @@ import { handleAgentsList } from "./agents-list-route.js";
 import { findListedAgent } from "./agent-lookup.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
-import { lendScopeAllows } from "./lend-scope.js";
 import { firstFlagLikeField, textFieldsProblem } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { handleCronRoutes } from "./cron-routes.js";

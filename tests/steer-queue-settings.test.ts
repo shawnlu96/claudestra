@@ -50,7 +50,7 @@ test("[验收线 2] wire validation is strict and rollback affects only ingress,
 
 test("[验收线 3] queue setter replays its intent once on a stale config and preserves the concurrent edit", async () => {
   const path = new URL("../src/lib/floka-config/store.ts", import.meta.url).pathname;
-  const real = await import(path);
+  const real = await import("../src/lib/floka-config/store.js");
   const write = real.writeCompatibleConfig;
   let attempts = 0;
   mock.module(path, () => ({ ...real, writeCompatibleConfig: async (file: string, cfg: Parameters<typeof write>[1]) => {

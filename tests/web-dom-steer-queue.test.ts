@@ -5,7 +5,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
-const requireWeb = createRequire(new URL("../web/package.json", import.meta.url));
+const require = createRequire(new URL("../web/package.json", import.meta.url));
 interface El {
   value: string; checked: boolean; disabled: boolean; textContent: string | null; click(): void; dispatchEvent(e: unknown): boolean;
   querySelector(s: string): El | null; querySelectorAll(s: string): ArrayLike<El>; remove(): void;
@@ -43,11 +43,11 @@ beforeAll(async () => {
   GlobalRegistrator.register({ url: "http://fixture/" });
   globalThis.fetch = fakeFetch as typeof fetch;
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  React = requireWeb("react") as ReactNS;
-  ({ createRoot } = requireWeb("react-dom/client") as ReactDomClient);
-  ({ CollabSay } = await import(new URL("../web/features/collab/collab-say.tsx", import.meta.url).href));
-  ({ SteerQueueSection } = await import(new URL("../web/features/chat/components/settings/steer-queue-section.tsx", import.meta.url).href));
-  ({ sendMessage } = await import(new URL("../web/lib/api/chat.ts", import.meta.url).href));
+  React = require("react") as ReactNS;
+  ({ createRoot } = require("react-dom/client") as ReactDomClient);
+  ({ CollabSay } = require("../web/features/collab/collab-say.tsx"));
+  ({ SteerQueueSection } = require("../web/features/chat/components/settings/steer-queue-section.tsx"));
+  ({ sendMessage } = require("../web/lib/api/chat.ts"));
 });
 afterAll(async () => {
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;

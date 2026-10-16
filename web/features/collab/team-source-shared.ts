@@ -12,7 +12,7 @@ import { localProjectOf } from "@/lib/collab-source-binding";
 import { rememberDetailTarget } from "./detail-pause-target";
 import { markHomeRead } from "./detail-home-read";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
-import { sharedProductBoard } from './dag/shared-product-model';
+import { sharedProductBoard, teamFeatureDeps } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
 import { listAhead, teamOverview, teamTaskDetail, type TeamOverview } from "./team-source-adapter";
 import { bareAgent, type UnknownMetric } from "./collab-model";
@@ -397,7 +397,8 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       feature: async (_project, id, version) => teamDagFeature(await board(), id, version),
       diff: async () => { throw new Error('Shared version comparisons are unavailable'); },
     },
-    product: async (_project, signal) => { const got = await abortable(current(), signal); return sharedProductBoard(got.list, got.team.ov.now, got.team.ov.tasks, got.details); },
+    product: async (_project, signal) => { const [got, deps] = await Promise.all([abortable(current(), signal), teamFeatureDeps(session, signal)]);
+      return sharedProductBoard(got.list, got.team.ov.now, got.team.ov.tasks, got.details, deps); },
     last: () => r.st.last,
     poke,
     // 点进一个还没详情的 feature：立刻重拉一轮（它排最前），不等台账下一次变化
