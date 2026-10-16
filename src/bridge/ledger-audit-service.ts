@@ -21,6 +21,7 @@ import { newMessageId, newThreadId, type Envelope } from "./router.js";
 import { probeTurn } from "./turn-probe.js";
 import { ledgerAuditEscalator } from "./ledger-audit-escalate.js";
 import { ledgerAuditFailures, type AuditNoticeIdentity, type AuditNoticeReceipt } from "./ledger-audit-failure.js";
+import { startManualDeliverNotice } from "./manual-deliver-notice.js";
 
 const INTERVAL_MS = 15 * 60_000;
 /** 启动后多久跑第一轮：给 channel-server 重连留时间，否则收件人都算不在线 */
@@ -207,6 +208,7 @@ export function startLedgerAudit(d: LedgerAuditDeps): void {
   if (started) return;
   started = true;
   const tick = ledgerAuditTicker(d);
+  startManualDeliverNotice(`bun ${join(REPO_ROOT, "src/manager.ts")}`); // RVF-2：人工卡交付提醒，与巡检 manual_deliver_no_review 共用阈值和去重
   setTimeout(() => {
     void tick();
     setInterval(() => void tick(), INTERVAL_MS).unref?.();

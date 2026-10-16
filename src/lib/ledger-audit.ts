@@ -4,7 +4,8 @@
  * 快照里某个来源为 null = 这一轮没取到（tmux 出错、文件坏了）：依赖它的规则不跑、也不列进 evaluated，
  * 这样取数失败不会把上一轮还开着的异常误标成「已解决」。
  */
-import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
+import { owesAdversarial, pmOf, type SpecPolicy } from "./ledger-handler.js";
+import { mdnAudit, mdnKey } from "./manual-deliver-notice.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
@@ -282,20 +283,21 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
 }
 
 /**
- * 非 auto 卡交付后没有审查结论（MDN 方向 A）：没有调度器 tick 读它，CLI 交付也不叫醒任何人，所以直接推 PM（不进 DISPATCH_RULES）。
+ * 非 auto 卡交付后没有审查结论（MDN 方向 A）：没有调度器 tick 读它，CLI 交付也不叫醒任何人，所以直接推卡的 PM（不进 DISPATCH_RULES）。
+ * 阈值与去重同人工卡交付提醒（RVF-2，lib/manual-deliver-notice.ts）：交付后 N 分钟；bridge 已给 PM 发过升级的不再推（keep 住）。
  * 有人在审（子审查员在跑、显式绑定的本机审查员主回合在跑）或审查员名单取不到时不推，但 keep 住同一 key：
  * 审查员跑一阵停一阵时，已推过的交付不被关掉再重开重推（tests/ledger-audit-audq1.test.ts）。key = 卡 + 交付 seq，一次交付只推一次。
  */
 const AWAITS_REVIEW: readonly LedgerTask["stage"][] = ["build", "review", "fix"];
 type Reviewing = (t: TaskFacts) => boolean;
-function manualDeliver(t: TaskFacts, reviewing: Reviewing, now: number, emit: Emit, keep: Keep): void {
+function manualDeliver(t: TaskFacts, reviewing: Reviewing, pm: string | null, now: number, emit: Emit, keep: Keep): void {
   const { task, events } = t;
   const d = lastOf(events, ["deliver"]);
   // 按 seq 判「交付之后」：同一毫秒里更早写的旧审查不是这次交付的结论
   if (!d || events.some((e) => e.kind === "review" && e.seq > d.seq) || t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return;
-  if (now - d.ts <= AUDIT_THRESHOLDS.deliverNoReviewMs) return;
-  if (reviewing(t)) return keep("manual_deliver_no_review", [task.id, d.seq]);
-  emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq],
+  if (now - d.ts <= mdnAudit.config().pmAfterMs) return;
+  if (reviewing(t) || mdnAudit.pushedAt(mdnKey(task.project, task.id, d.seq)) !== null) return keep("manual_deliver_no_review", [task.id, d.seq]);
+  emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq], ...(pm ? { notify: pm } : {}),
     detail: `${task.id}（${t.workflowMode ?? "无 workflow"}，${task.stage}）第 ${task.round} 轮交付 #${d.seq} 已 ${mins(now - d.ts)}，还没有审查结论`,
     suggestion: "manual 卡没有调度器接手：派审查员，或 workflow-resume 交回调度器" });
 }
@@ -561,7 +563,7 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   const reviewing: Reviewing = (t) => !s.reviewers
     || s.reviewers.some((r) => r.taskId.toLowerCase() === t.task.id.toLowerCase() && (r.round === null || r.round === t.task.round))
     || (t.reviewStep?.executorKind === "agent" && turnBusy(agents.get(t.reviewStep.executor), now));
-  for (const t of ts) manualDeliver(t, reviewing, now, emit, keep);
+  for (const t of ts) manualDeliver(t, reviewing, pmOf(t.task, { pms: s.pms, dispatcher: s.team?.dispatcher ?? null }), now, emit, keep);
   evaluated.push("manual_deliver_no_review");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
