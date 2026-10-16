@@ -20,6 +20,7 @@ input=$(cat)
 
 python3 - "$input" <<'PYEOF'
 import json, math, os, sys, time
+from datetime import datetime
 
 try:
     d = json.loads(sys.argv[1])
@@ -60,12 +61,14 @@ cache_path = os.path.join(cache_dir, "usage-cache.json")
 #   旧值/旧 reset 缺失    → 直接写新
 #   reset 变了(窗口轮转) → 无条件写新(该清零/换周期了)
 #   同窗口               → 新 pct ≥ 旧 pct 才写(窗口内用量单调递增,更小 = 陈旧快照,丢弃)
-#   7d 例外(peer 实报 2026-09-02:7d 卡在历史峰值 31%,活跃 agent 一致报 22%)
-#     → 7d 允许**下降**,但只接受**带 five_hour 的写者**。依据:CC 只给活跃 session
-#       five_hour,长期空闲的 session 整个不给(本机 16 个 pane 实测:只有 2 个活跃
-#       agent 有 5h,其余全无)——有 5h = 新鲜快照凭证;没 5h 的写者报的 7d 更小,
-#       仍按陈旧丢弃。peer 提的「按写入时间取胜」不行:陈旧 session 一重绘,写入
-#       时间就是现在,照样把真值盖掉。
+#   reset 比旧的早/缺失/认不出(旧的可比时) → 陈旧快照,丢弃(窗口只进不退;秒与 ISO 按时刻比)
+#   7d 同窗口只听**带 five_hour 的写者**(升降都收);没 5h 的写者同窗口一律丢弃。
+#     依据:CC 只给活跃 session five_hour,长期空闲的 session 整个不给——有 5h =
+#     新鲜快照凭证。7d 在窗口内不单调(Claude 免费重置会把 97 打回 18),所以空闲
+#     会话报的更大值同样是陈旧的,收了就会以「刚观测」的时刻把重置前读数写回来。
+#     「按写入时间取胜」不行:陈旧 session 一重绘,写入时间就是现在。
+#     已知天花板:重置前刚活跃、five_hour 还没过期的会话仍可能带旧 7d(5h 窗口是
+#     账号级同一个,凭它判不出新旧);它一闲下来就失去 5h,随后活跃写者会降回真值。
 old = {}
 try:
     with open(cache_path) as f:
@@ -80,21 +83,47 @@ def window_time(key):
         return old[key]
     return old.get("scrapedAt")
 
-def merge(new_pct, new_reset, old_pct, old_reset, old_at, allow_decrease=False):
-    valid_pct = isinstance(new_pct, (int, float)) and not isinstance(new_pct, bool) and math.isfinite(new_pct) and new_pct >= 0
+def is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+def reset_ms(v):
+    """与 lib/usage-cache.ts resetTsMs 同口径:Unix 秒 / ISO 字符串 → epoch ms,识别不了 None。"""
+    if is_num(v) and v > 1e9:
+        return v * 1000
+    if isinstance(v, str) and v:
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000
+        except ValueError:
+            return None
+    return None
+
+def merge(new_pct, new_reset, old_pct, old_reset, old_at, same_window_ok=None):
+    """same_window_ok: None = 同窗口单调(≥ 才写);True/False = 同窗口是否收这个写者。"""
     # Clock rollback must not relabel an existing observation as a new one.
-    if not valid_pct or (isinstance(old_at, (int, float)) and old_at > now_ms):
+    if not (is_num(new_pct) and new_pct >= 0) or (isinstance(old_at, (int, float)) and old_at > now_ms):
         return old_pct, old_reset, False
-    if old_pct is None or old_reset is None or new_reset != old_reset or new_pct >= old_pct or allow_decrease:
+    if old_pct is None or old_reset is None:
+        return new_pct, new_reset, True
+    old_ms, new_ms = reset_ms(old_reset), reset_ms(new_reset)
+    if old_ms is not None:
+        # 已有可比的窗口:新 reset 缺失 / 认不出 / 更早都不算轮转,当陈旧快照丢弃
+        if new_ms is None or new_ms < old_ms:
+            return old_pct, old_reset, False
+        same = new_ms == old_ms
+    else:
+        same = new_reset == old_reset
+    if not same:
+        return new_pct, new_reset, True
+    if new_pct >= old_pct if same_window_ok is None else same_window_ok:
         return new_pct, new_reset, True
     return old_pct, old_reset, False
 
 sess_at = window_time("sessionObservedAt")
 week_at = window_time("weekObservedAt")
 sess_pct, sess_reset, sess_updated = merge(five, five_reset, old.get("sessionPct"), old.get("sessionResets"), sess_at)
-# Preserve the existing same-window week decrease rule: only a writer with five_hour can decrease it.
+# Same week window: only a writer with five_hour (a live session) may move 7d, up or down.
 week_pct, week_reset_out, week_updated = merge(week, week_reset, old.get("weekPct"), old.get("weekResets"), week_at,
-                                              allow_decrease=(five is not None))
+                                              same_window_ok=(five is not None))
 sess_at = now_ms if sess_updated else sess_at
 week_at = now_ms if week_updated else week_at
 def qualification(key, updated):
