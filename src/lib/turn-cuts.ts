@@ -107,15 +107,15 @@ function toolOf(e: CutEvent): CutTool {
   return { toolId: str(e.data.toolId), name, summary: str(e.data.summary), ...(command !== undefined ? { command } : {}), startedAt: Date.parse(e.ts) || 0 };
 }
 
+/** 本回合第一条事件的下标：最后一次 agent_status done 之后（没有 done 就是 0） */
+export function turnStart(events: readonly CutEvent[]): number {
+  for (let i = events.length - 1; i >= 0; i--) if (events[i].type === "agent_status" && events[i].data.status === "done") return i + 1;
+  return 0;
+}
+
 /** 本回合（最后一次 done 之后）有 tool_start、没有 tool_done 的工具，以及最后一个正常做完的工具 */
 export function inflightFrom(events: readonly CutEvent[]): { inflight: CutTool[]; lastDone?: { name: string; summary: string } } {
-  let start = 0;
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i].type === "agent_status" && events[i].data.status === "done") {
-      start = i + 1;
-      break;
-    }
-  }
+  const start = turnStart(events);
   const open = new Map<string, CutTool>();
   let lastDone: { name: string; summary: string } | undefined;
   for (const e of events.slice(start)) {

@@ -116,6 +116,11 @@ export class TurnCuts {
     this.inbound.set(channelId, (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId));
   }
 
+  /** 本回合（上次 Stop / 打断之后）送到的消息，按先后（bridge/turn-brief.ts 取「开启本回合的那条」） */
+  turnInbound(channelId: string): readonly TurnTrigger[] {
+    return this.inbound.get(channelId) ?? [];
+  }
+
   /** 这个频道最后一次投递是给哪个 agent 的（送达记录里的那条被挤掉了也查得到） */
   agentOn(channelId: string): string | undefined {
     return this.agentOf.get(channelId);
