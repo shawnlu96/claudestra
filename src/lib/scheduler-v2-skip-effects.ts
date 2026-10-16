@@ -58,6 +58,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-priority-stall-tick.ts": "ledger=1",
     "lend-author-retire-tick.ts": "ledger=2",
     "lend-fix-reassign-tick.ts": "ledger=2",
+    "lend-local-continuity-tick.ts": "ledger=2", // i28-STALELEASE1: observe sample / `scheduler-fix-relay --op stale-lease-handover` through the pass manager
     "lend-pr-takeover-refusal-request.ts": "ledger=1",
     "local-merge-tick.ts": "ledger=1", // ONB-2: `ledger scheduler-local-merge-ready` through the pass manager, per card in the auto tick
     "main-red-fix-tick.ts": "ledger=1", // MAINRED1: `ledger scheduler-main-red-fix` through the leased pass manager
@@ -237,6 +238,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-config-failure-pool.ts": "sql=2 stmt=2",
     "lend-fix-reassign-start.ts": "sql=1 stmt=1",
     "lend-fix-start.ts": "sql=1 stmt=1 proc=1 vcs=3",
+    "lend-local-continuity-apply.ts": "sql=1 stmt=1", // i28-STALELEASE1: the card UPDATE inside the ledger scheduler-fix-relay transaction
     "lend-peer-cooldown.ts": "sql=7 stmt=7",
     "lend-pr-takeover-ledger.ts": "sql=1 stmt=1",
     "lend-reclaim-scheduler.ts": "sql=5 stmt=5 notice=1",
