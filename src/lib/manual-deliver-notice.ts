@@ -4,7 +4,6 @@
  * ③ 再过 M 分钟仍没有 → owner「待你处理」。之后一有 dispatch / review、或卡不再等审，升级撤销。
  * 巡检 manual_deliver_no_review 用同一份阈值（mdnAudit.config）和同一份去重状态（mdnAudit.pushedAt），同一次交付只推 PM 一次。
  */
-import { pmOf } from "./ledger-handler.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import type { TeamConfig } from "./ledger-team-config.js";
 import { statePath } from "./paths.js";
@@ -41,12 +40,17 @@ export function readMdnConfig(path = MDN_CONFIG_PATH): { config: MdnConfig; erro
   return { config: { pmAfterMs: pm, ownerAfterMs: owner } };
 }
 
-/** 一次交付一条记录；key = 项目|卡|交付 seq */
+/** 一次交付一条记录；key = 项目|卡|交付 seq。记录被撤销后又回到等审时清掉 resolvedAt 接着用（reopenRecord） */
 export interface MdnRecord {
   deliverTs: number;
   notified?: number;
+  /** 升级已送到 PM（或巡检已推过）的时刻 */
   pm?: number;
+  /** 升级 PM 没送到（不在 registry / 不活跃 / 项目没有 PM）：第一次没送到的时刻与原因；owner 照样按它计时 */
+  pmFail?: { at: number; note: string };
   owner?: number;
+  /** owner 卡的 dedupKey（开卡前先记，带开卡时刻：撤销后再开不会撞上已结案的旧卡）；撤销时按它关卡 */
+  ownerKey?: string;
   askId?: string;
   resolvedAt?: number;
 }
@@ -65,6 +69,17 @@ export function readMdnState(path = MDN_STATE_PATH): { state: MdnState; missing:
   return { state: {}, missing: r.status === "missing", ...(r.status === "corrupt" ? { error: r.error } : {}) };
 }
 
+/**
+ * 撤销过的交付又回到等审（blocked → review、交回 auto 又退回人工，中间没有新交付）：清掉撤销时刻；已关掉的 owner 卡作废，
+ * 到点再开一张新的（ownerKey 带开卡时刻，不撞旧卡）。已升级过 PM 的不再升级。没撤销过的原样返回
+ */
+export function reopenRecord(rec: MdnRecord): MdnRecord {
+  if (rec.resolvedAt === undefined) return rec;
+  const { resolvedAt: _r, ...rest } = rec;
+  return rec.owner === undefined ? rest : (({ owner: _o, ownerKey: _k, askId: _a, ...r }) => r)(rest);
+}
+
+/** 只删撤销满 7 天的记录；还在等审的记录不带 resolvedAt（回到等审时已清），永远不删 */
 export function writeMdnState(state: MdnState, now: number, path = MDN_STATE_PATH): void {
   const kept = Object.entries(state).filter(([, r]) => r.resolvedAt === undefined || now - r.resolvedAt < RESOLVED_KEEP_MS);
   writeJsonAtomicSync(path, Object.fromEntries(kept));
@@ -81,11 +96,16 @@ export function pendingDelivery(task: Pick<LedgerTask, "stage">, events: readonl
 export interface MdnTeam {
   pms: readonly string[];
   team: TeamConfig | null;
+  /** 认调度助理（ledger-audit.ts auditDispatcherTest：配了班子只认 team.dispatcher，没配按名字里的 dispatch 认） */
+  isDispatcher(name: string): boolean;
 }
 
-/** 卡的 PM（任务上记的优先，其次名单里第一个不是调度助理的）；名单里只有调度助理（PM 兼调度助理）时就是它 */
-export const mdnPm = (task: Pick<LedgerTask, "pm">, t: MdnTeam): string | null =>
-  pmOf(task, { pms: t.pms, dispatcher: t.team?.dispatcher ?? null }) ?? t.pms[0] ?? null;
+/**
+ * 卡的 PM：任务上记的优先，其次名单里第一个不是调度助理的；名单里只有调度助理（PM 兼调度助理）时就是它。
+ * 与巡检 auditRecipient 同一口径，没开班子时名字带 dispatch 的不会被当成 PM。
+ */
+export const mdnPm = (task: Pick<LedgerTask, "pm">, t: Pick<MdnTeam, "pms" | "isDispatcher">): string | null =>
+  task.pm || t.pms.find((p) => !t.isDispatcher(p)) || t.pms[0] || null;
 
 /**
  * 「交付即通知」发给谁；null = 不发：没有 PM、PM 自己交付的、或班子路由（lib/team-route.ts）已经把这条交付直推给了 PM
@@ -102,13 +122,15 @@ export type MdnAction = "notify" | "notify-late" | "pm" | "owner";
 
 /**
  * 这次交付下一步该做什么；null = 现在不用做。按顺序一步一步走（调用方做完一步更新记录再问）：
- * 还没通知过 → N 分钟内 notify，超过了（bridge 停过）notify-late 只记不发、直接看升级；N 分钟到 → pm；升级 PM 之后满 M 分钟 → owner。
+ * 还没通知过 → N 分钟内 notify，超过了（bridge 停过、首次运行）notify-late 只记不发、直接看升级；满 N 分钟（≥）→ pm（没送到下一轮重试）；
+ * 升级送到或第一次没送到之后满 M 分钟 → owner，开了 owner 就不再重试升级。
  */
 export function nextAction(rec: MdnRecord, now: number, cfg: MdnConfig): MdnAction | null {
   if (rec.notified === undefined) return now - rec.deliverTs < cfg.pmAfterMs ? "notify" : "notify-late";
-  if (rec.pm === undefined) return now - rec.deliverTs >= cfg.pmAfterMs ? "pm" : null;
-  if (rec.owner === undefined) return now - rec.pm >= cfg.ownerAfterMs ? "owner" : null;
-  return null;
+  if (rec.owner !== undefined) return null;
+  const escalated = rec.pm ?? rec.pmFail?.at; // 升级没送到也从第一次尝试算 M：PM 不在时更要 owner 兜底
+  if (escalated !== undefined && now - escalated >= cfg.ownerAfterMs) return "owner";
+  return rec.pm === undefined && now - rec.deliverTs >= cfg.pmAfterMs ? "pm" : null;
 }
 
 const tid = (id: string): string => (refLike(id) ? id : quoteExternal(id, 40));
@@ -140,13 +162,16 @@ export function escalateText(task: Pick<LedgerTask, "id">, d: LedgerEvent, now: 
   ].join("\n");
 }
 
+const pmLine = (rec: MdnRecord): string =>
+  rec.pm !== undefined ? `${mdnClock(rec.pm)} 已给 PM 发过升级。` : rec.pmFail ? `升级提醒当时没送到 PM（${rec.pmFail.note}）。` : "";
+
 export function ownerCardText(task: Pick<LedgerTask, "id" | "project">, d: LedgerEvent, pm: string | null, rec: MdnRecord, now: number, cmd: string):
   { title: string; context: string } {
   return {
     title: `人工卡 ${tid(task.id)} 交付后没人派审`,
     context: [
       `卡 ${tid(task.id)}（项目 ${tid(task.project)}）第 ${round(d)} 轮 ${mdnClock(d.ts)} 交付，已 ${mins(now - d.ts)}没有派审 / 审查记录。`,
-      `该谁派审：PM ${pm ?? "（项目没有 PM）"}；${rec.pm !== undefined ? `${mdnClock(rec.pm)} 已给 PM 发过升级。` : ""}`,
+      pm ? `该谁派审：PM ${pm}；${pmLine(rec)}` : "该谁派审：项目没有 PM（找不到可通知的人），请 owner 指派。",
       `派审命令：${cmd} ledger dispatch ${tid(task.id)}`,
       "派审或记了审查之后这张卡自动撤销。",
     ].join("\n"),

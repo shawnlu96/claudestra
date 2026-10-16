@@ -4,7 +4,7 @@
  * 快照里某个来源为 null = 这一轮没取到（tmux 出错、文件坏了）：依赖它的规则不跑、也不列进 evaluated，
  * 这样取数失败不会把上一轮还开着的异常误标成「已解决」。
  */
-import { owesAdversarial, pmOf, type SpecPolicy } from "./ledger-handler.js";
+import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
 import { mdnAudit, mdnKey } from "./manual-deliver-notice.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import type { ExecutorKind } from "./ledger-steps.js";
@@ -295,7 +295,7 @@ function manualDeliver(t: TaskFacts, reviewing: Reviewing, pm: string | null, no
   const d = lastOf(events, ["deliver"]);
   // 按 seq 判「交付之后」：同一毫秒里更早写的旧审查不是这次交付的结论
   if (!d || events.some((e) => e.kind === "review" && e.seq > d.seq) || t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return;
-  if (now - d.ts <= mdnAudit.config().pmAfterMs) return;
+  if (now - d.ts < mdnAudit.config().pmAfterMs) return; // 满 N 分钟（≥）起推，与 bridge 提醒同一比较
   if (reviewing(t) || mdnAudit.pushedAt(mdnKey(task.project, task.id, d.seq)) !== null) return keep("manual_deliver_no_review", [task.id, d.seq]);
   emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq], ...(pm ? { notify: pm } : {}),
     detail: `${task.id}（${t.workflowMode ?? "无 workflow"}，${task.stage}）第 ${task.round} 轮交付 #${d.seq} 已 ${mins(now - d.ts)}，还没有审查结论`,
@@ -563,7 +563,7 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   const reviewing: Reviewing = (t) => !s.reviewers
     || s.reviewers.some((r) => r.taskId.toLowerCase() === t.task.id.toLowerCase() && (r.round === null || r.round === t.task.round))
     || (t.reviewStep?.executorKind === "agent" && turnBusy(agents.get(t.reviewStep.executor), now));
-  for (const t of ts) manualDeliver(t, reviewing, pmOf(t.task, { pms: s.pms, dispatcher: s.team?.dispatcher ?? null }), now, emit, keep);
+  for (const t of ts) manualDeliver(t, reviewing, t.task.pm || null, now, emit, keep); // 卡上记了 PM 推它，否则按 auditRecipient（不落到调度助理）
   evaluated.push("manual_deliver_no_review");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）

@@ -117,7 +117,7 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
     const reviewed = delivered("review");
     reviewed.events.push(ev(NOW - 10 * MIN, "review", { verdict: "changes" })); // 交付之后（seq 更大）的审查结论
     expect(rule(base([reviewed]), "manual_deliver_no_review")).toEqual([]);
-    expect(rule(base([delivered("review", [], NOW - 10 * MIN)]), "manual_deliver_no_review")).toEqual([]); // RVF-2：阈值 = 交付提醒的 N（缺省 10 分钟）
+    expect(rule(base([delivered("review", [], NOW - 10 * MIN + 1)]), "manual_deliver_no_review")).toEqual([]); // RVF-2：满 N（缺省 10 分钟，≥）才报
     expect(rule(base([delivered("merge")]), "manual_deliver_no_review")).toEqual([]);
   });
   const RV = "agent-rv-local";
