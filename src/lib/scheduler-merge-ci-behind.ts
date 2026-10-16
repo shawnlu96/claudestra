@@ -16,7 +16,8 @@ import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 import { parseFailedLog } from "./scheduler-merge-ci-rerun-log.js";
 import { ciClaimJournal, ciClaimSendStart, settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
-import { ciRerunClaim, ciRerunGh, ciRerunOrBounce, parseRerunReceipt, type CiRerunGh } from "./scheduler-merge-ci-rerun.js";
+import { ciRerunClaim, ciRerunGh, ciRerunOrBounce, ciRerunSpent, parseRerunReceipt, type CiRerunGh } from "./scheduler-merge-ci-rerun.js";
+import { ciDecisionClaim, DecisionTrail, sendDecision } from "./ci-main-fix-retry-decision.js";
 import type { MergeBounce } from "./scheduler-merge-conflict.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
@@ -86,7 +87,7 @@ export interface BehindPlan { repo: string; pull: string; link: string; prHead: 
   files: Record<string, string[]> }
 
 /** Every failing test file is outside the PR and was changed on main since the merge-base; anything else is the reason to bounce. */
-async function planBehind(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[], log: CiRerunGh, gh: CiBehindGh): Promise<BehindPlan | string> {
+async function planBehind(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[], log: CiRerunGh, gh: CiBehindGh, trail: DecisionTrail): Promise<BehindPlan | string> {
   const pull = PULL.exec(run.prRef);
   if (!pull) return "PR URL 不合法";
   const runs = checks.map((c) => RUN_LINK.exec(c.link));
@@ -94,15 +95,18 @@ async function planBehind(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[], 
   if (new Set(runs.map((m) => `${m![1]}/${m![2]}`)).size !== 1) return "失败检查分属多个 run";
   const [repo, runId] = [runs[0]![1]!, runs[0]![2]!];
   if (repo.toLowerCase() !== pull[1]!.toLowerCase()) return "run 与 PR 不在同一仓库";
-  return judgeCiLog(run, repo, runId, async () => (await log.runAttempt(repo, runId)).attempt, log, "cif2", (text) => judgeBehindLog(text, run, pr, checks, log, gh, repo, runId, pull[2]!),
+  trail.run ??= `https://github.com/${repo}/actions/runs/${runId}`;
+  const attempt = async () => { const a = (await log.runAttempt(repo, runId)).attempt; trail.attempt ??= a; return a; };
+  return judgeCiLog(run, repo, runId, attempt, log, "cif2", (text) => judgeBehindLog(text, run, pr, checks, log, gh, repo, runId, pull[2]!, trail),
     (p) => typeof p === "string" ? { wouldKind: "bounce", why: p } : { wouldKind: "behind", why: "main 已改过失败测试", files: Object.keys(p.files) });
 }
 
 async function judgeBehindLog(text: string, run: MergeRun, pr: PrSnapshot, checks: FailedCheck[], log: CiRerunGh, gh: CiBehindGh,
-  repo: string, runId: string, pull: string): Promise<BehindPlan | string> {
+  repo: string, runId: string, pull: string, trail: DecisionTrail): Promise<BehindPlan | string> {
   const failures = parseFailedLog(text);
   if (!failures) return "失败日志解析不出 bun test 的失败用例";
   const files = [...new Set(failures.map((f) => f.file))];
+  trail.files ??= [...files].sort();
   if (files.length > MAX_FILES) return `失败的测试文件超过 ${MAX_FILES} 个`;
   const touched = new Set(await log.prFiles(run.prRef));
   const own = files.find((f) => touched.has(f));
@@ -113,7 +117,10 @@ async function judgeBehindLog(text: string, run: MergeRun, pr: PrSnapshot, check
   const byFile: Record<string, string[]> = {};
   for (const file of files) {
     const hits = (await gh.fileCommits(repo, file, since.mainHead)).filter((c) => onMain.has(c.toLowerCase()));
-    if (!hits.length) return `main 在 merge-base 之后没改过 ${file}`;
+    if (!hits.length) {
+      trail.mainHead = since.mainHead; // item 3: the main the wait is registered against
+      return `main 在 merge-base 之后没改过 ${file}`;
+    }
     byFile[file] = hits.map(short);
   }
   return { repo, pull, link: `https://github.com/${repo}/actions/runs/${runId}`, prHead: pr.head, mainHead: since.mainHead,
@@ -130,22 +137,28 @@ export async function ciBehindOrRerun(run: MergeRun, pr: PrSnapshot, external: M
   const bounceReceipt = toReceipt({ cause: "ci_fail", prHead: pr.head, mainHead: null, checks });
   const pending = run.phase === "updating" && run.reason ? parseBehindReceipt(run.reason) : null;
   if (pending && sameSha(pending.prHead, pr.head)) return step("resolved", run.reason!); // GitHub has not moved the head yet
+  const trail = new DecisionTrail(); // CIUNREL1: every layer's verdict on this red, sent to the ledger once before the outcome
   const routed: Step = (to, receipt) => to === "resolved" && receipt === bounceReceipt && run.phase !== "updating"
-    ? behindOrBounce(run, pr, external, step, checks, bounceReceipt) : step(to, receipt);
-  return ciRerunOrBounce(run, pr, external, routed, checks, toReceipt);
+    ? behindOrBounce(run, pr, external, step, checks, bounceReceipt, trail) : step(to, receipt);
+  return ciRerunOrBounce(run, pr, external, routed, checks, toReceipt, trail);
 }
 
 async function behindOrBounce(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, checks: FailedCheck[],
-  bounceReceipt: string): Promise<MergeRun> {
-  const bounce = (why: string) => {
+  bounceReceipt: string, trail: DecisionTrail): Promise<MergeRun> {
+  const bounce = async (why: string) => {
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动合入 main，退回 fix：${why}`);
+    trail.note("cif2", false, why);
+    await sendDecision(pr.head, trail, step);
     return step("resolved", bounceReceipt);
   };
   const ghs = ghsOf(external);
-  if (!ghs) return step("resolved", bounceReceipt);
+  if (!ghs) {
+    await sendDecision(pr.head, trail, step);
+    return step("resolved", bounceReceipt);
+  }
   let plan: BehindPlan | string;
   try {
-    plan = await planBehind(run, pr, checks, ghs.log, ghs.gh);
+    plan = await planBehind(run, pr, checks, ghs.log, ghs.gh, trail);
   } catch (e) {
     rethrowCiLogStop(e);
     plan = `读 CI / main 失败：${oneLine((e as Error).message)}`;
@@ -153,13 +166,16 @@ async function behindOrBounce(run: MergeRun, pr: PrSnapshot, external: MergeExte
   if (typeof plan === "string") return bounce(plan);
   const receipt = behindReceipt(plan);
   if (receipt.length > RECEIPT_MAX) return bounce("证据超过回执长度");
+  trail.note("cif2", true, "失败测试本卡没碰、main 已改过");
+  await sendDecision(pr.head, trail, step);
   const claimed = await step("resolved", receipt);
   if (claimed.phase !== "updating") return claimed; // the ledger bounced it: this run / head already merged main in once
   try {
     await ghs.gh.updateBranch(plan.repo, plan.pull, plan.prHead);
     return claimed;
   } catch (e) {
-    return bounce(`update-branch 失败：${oneLine((e as Error).message)}`);
+    console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动合入 main，退回 fix：update-branch 失败：${oneLine((e as Error).message)}`);
+    return step("resolved", bounceReceipt);
   }
 }
 
@@ -203,6 +219,8 @@ export const behindUpdating = (run: MergeRun): boolean => run.phase === "updatin
 export function ciBehindClaim(db: Database, ctx: WriteCtx, row: MergeRun, raw: string, drift: string | null, toReceipt: ToReceipt,
   writeEvent: WriteEvent): string | null {
   if (ciClaimSendStart(db, ctx, row, raw, writeEvent)) return null; // CLAIMSPENT1: sendEffect's write-ahead step, the run untouched
+  const decided = ciDecisionClaim(db, ctx, row, raw, drift, () => ({ rerun: !!ciRerunSpent(db, row.taskId, row.reviewedHead), behind: !!behindOf(db, row) }), writeEvent);
+  if (decided !== undefined) return decided; // CIUNREL1: the layers' decision (and a wait registration), the run untouched
   const rerun = parseRerunReceipt(raw);
   const receipt = rerun && behindOf(db, row, false)
     ? toReceipt({ cause: "ci_fail", prHead: rerun.prHead, mainHead: null, checks: rerun.checks.map((name) => ({ name, link: rerun.link })) })

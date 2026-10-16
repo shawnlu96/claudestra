@@ -53,6 +53,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** `ledger <sub>` calls through the pass manager, held by schedulerV2SkipManager */
   manager: {
+    // merge-arch-CIUNREL1: the retry sample through the pass manager first; the pinned update-branch only after it was recorded
+    "ci-main-fix-retry-tick.ts": "ledger=1 vcs=1",
     "effect-count-refresh.ts": "ledger=1", // EFFAUTO1: `ledger scheduler-recovery-observe` for effCountRefresh notes, through the pass manager
     "fix-strategy-tick.ts": "ledger=10",
     "ledger-pool-refusal-tick.ts": "ledger=1",

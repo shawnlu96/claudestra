@@ -33,6 +33,8 @@ export const COLLAB_DICT: Record<string, string> = {
   "已用时 {d}": "{d} total",
   "在此阶段 {d}": "{d} in this stage",
   "已经等了 {d}，超过 30 分钟": "Waiting {d}, over 30 min",
+  "观察中 · 还剩 {d}": "Observing · {d} left",
+  "观察期已过 {d}": "Observation ended {d} ago",
   "今日完成 {n}": "{n} done today",
   "第 {r} 轮": "round {r}",
   "上线 {v}": "Deployed {v}",

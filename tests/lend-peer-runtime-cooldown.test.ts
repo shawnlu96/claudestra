@@ -182,3 +182,115 @@ test("[验收线 5] default (no policy file) is on", () => {
   expect(rows().map((r) => r.reason)).toEqual(["runtime:auth"]);
   expect(listEvents(db, { project: "p" }).some((e) => e.data.op === "recovery_default_on" && e.data.mechanism === "lendRuntimeCooldown")).toBe(true);
 });
+
+// NETCOOL1: a lender whose worker cannot fetch the card's commit cools too, and the write card's pin on that peer comes off.
+const NET = "取不到 0123456789ab：fatal: unable to access 'https://github.com/org/repo/': Failure when receiving data from the peer";
+const PUSH = "没有推送权限：出借人的 GitHub 登录推不了这个仓库（推到自己 fork 再发 PR 的路径 v1 不支持，只检测）：403";
+const MISMATCH = "PR 分支的 head 不是这一单的起点";
+function notStarted(o: { orderId: string; peer: string }, detail: string, failure?: LeaseRequest["failure"], now = NOW) {
+  return leaseLend(db, ctx(now), o.peer, { v: 1, orderId: o.orderId, gen: 1, action: "release", reason: "not_started", detail, ...(failure ? { failure } : {}) });
+}
+const forget = () => db.run("DELETE FROM meta WHERE key LIKE 'lend:runtime-stops:%'");
+const pin = (id: string, placement: string) => db.run("UPDATE tasks SET extra = json_set(extra, '$.placement', ?) WHERE id = ?", [placement, id]);
+const card = (id: string) => {
+  const t = db.query("SELECT agent, assigneeKind, assignee, extra FROM tasks WHERE id = ?").get(id) as { agent: string | null; assigneeKind: string | null; assignee: string | null; extra: string };
+  return { ...t, extra: JSON.parse(t.extra) as Record<string, unknown> };
+};
+
+test("[验收线 1] not_started over the network cools 30 minutes; permission, start mismatch and non-fetch texts do not", () => {
+  notStarted(held("T1"), "x", { class: "network", sessionId: "thr-1", failedAt: NOW });
+  expect(rows()).toEqual([{ peer: "sekai", family: "claude", until: NOW + RUNTIME_COOLDOWN_MS, reason: "runtime:network" }]);
+  const legacy = [NET, "取不到 0123456789ab：fatal: unable to access 'https://github.com/o/r/': SSL connection timeout",
+    "取不到 0123456789ab：fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com"];
+  for (const [i, detail] of legacy.entries()) {
+    db.run("DELETE FROM lend_peer_cooldowns");
+    notStarted(held(`L${i}`, { peer: "he", family: "codex" }), detail);
+    expect(rows()).toEqual([{ peer: "he", family: "codex", until: NOW + RUNTIME_COOLDOWN_MS, reason: "runtime:network" }]);
+    forget();
+  }
+  db.run("DELETE FROM lend_peer_cooldowns");
+  const quiet = [PUSH, MISMATCH, "取不到推送权限：unable to access", "clone 失败：fatal: unable to access 'https://github.com/o/r/'",
+    "取不到 0123456789ab：fatal: remote error: upload-pack: not our ref"];
+  for (const [i, detail] of quiet.entries()) {
+    notStarted(held(`Q${i}`), detail);
+    forget(); // one each: the second-order rule is its own test
+  }
+  notStarted(held("Q9"), NET, { class: "other", sessionId: "thr-1", failedAt: NOW }); // a structured class decides alone
+  expect(rows()).toEqual([]);
+});
+
+test("[验收线 2] a second not_started of the same (peer, family) in 30 minutes cools; done in between, a stop, or a start mismatch do not pair", () => {
+  notStarted(held("T1"), PUSH);
+  expect(rows()).toEqual([]);
+  notStarted(held("T2", { now: NOW + 10 * MIN }), PUSH, undefined, NOW + 10 * MIN);
+  expect(rows()).toEqual([{ peer: "sekai", family: "claude", until: NOW + 10 * MIN + RUNTIME_COOLDOWN_MS, reason: "runtime:not_started×2" }]);
+
+  db.run("DELETE FROM lend_peer_cooldowns");
+  const t = NOW + 60 * MIN;
+  notStarted(held("T3", { now: t }), PUSH, undefined, t);
+  done(held("T4", { now: t }).orderId, t + 5 * MIN);
+  notStarted(held("T5", { now: t + 10 * MIN }), PUSH, undefined, t + 10 * MIN);
+  expect(rows()).toEqual([]);
+  stopped(held("T6", { now: t + 11 * MIN }), "worker 存活探测否定 2/2", undefined, t + 11 * MIN); // a stop keeps its own list
+  expect(rows()).toEqual([]);
+  notStarted(held("T7", { now: t + 12 * MIN }), MISMATCH, undefined, t + 12 * MIN); // ours, never counted
+  expect(rows()).toEqual([]);
+  notStarted(held("T8", { now: t + 13 * MIN }), PUSH, undefined, t + 13 * MIN);
+  expect(rows().map((r) => r.reason)).toEqual(["runtime:not_started×2"]);
+});
+
+test("[验收线 3] a write order that cools its peer comes back unpinned with its assignee; no cooldown keeps the pin", () => {
+  const o = held("T1");
+  pin("T1", "peer:sekai");
+  const before = card("T1");
+  notStarted(o, NET);
+  const after = card("T1");
+  expect(after.extra).not.toHaveProperty("placement");
+  expect(after.agent).toBe("agent-dev");
+  expect(after.assigneeKind === "peer_agent").toBe(false);
+  expect(before.extra.placement).toBe("peer:sekai");
+  const lend = (e: { data: Record<string, unknown> }) => e.data.lend as Record<string, unknown> | undefined;
+  expect(listEvents(db, { project: "p", target: "T1" }).map(lend).find((l) => l?.op === "send_back")?.unpinned).toBe("peer:sekai");
+
+  const kept = held("T2", { peer: "he" });
+  pin("T2", "peer:he");
+  notStarted(kept, "clone failed"); // grant valid, first plain not_started: pinned as before
+  expect(card("T2").extra.placement).toBe("peer:he");
+
+  const other = held("T3", { peer: "he" });
+  pin("T3", "peer:sekai"); // only a pin on the cooled peer comes off
+  notStarted(other, PUSH, undefined, NOW + MIN);
+  expect(rows().find((r) => r.peer === "he")?.reason).toBe("runtime:not_started×2");
+  expect(card("T3").extra.placement).toBe("peer:sekai");
+});
+
+test("[验收线 4] observe writes no row and keeps the pin, one sample per order across two rounds", () => {
+  setMode("observe");
+  const o = held("T1");
+  pin("T1", "peer:sekai");
+  notStarted(o, NET);
+  expect(rows()).toEqual([]);
+  expect(card("T1").extra.placement).toBe("peer:sekai");
+  runtimeStopCooldown(db, ctx(), o as never, { reason: "not_started", detail: NET }, NOW + MIN);
+  expect(samples().filter((e) => e.data.actionKey === `stop:${o.orderId}`).map((e) => e.data.cooldown))
+    .toEqual([{ reason: "runtime:network", until: NOW + RUNTIME_COOLDOWN_MS }]);
+});
+
+test("[验收线 2] not_started kinds another mechanism owns never pair: model config failure, its refusal, a quota wall", () => {
+  const config = "起 worker 失败：创建失败: 400 {\"error\":{\"code\":\"model_not_enabled\",\"message\":\"The model `gpt-9` is not enabled for this account.\"}}";
+  const refusal = "配置故障未恢复，没有再启动（第 1 代，单 o-1）";
+  for (const [i, detail] of [config, config, refusal, refusal, QUOTA, QUOTA].entries()) notStarted(held(`C${i}`, { family: "codex" }), detail);
+  expect(rows().filter((r) => r.reason.startsWith("runtime:"))).toEqual([]);
+});
+
+test("[验收线 2] a network not_started counts toward the window: a plain failure 5 minutes later cools as the second (mixed-start-count)", () => {
+  for (const failure of [{ class: "network", sessionId: "thr-1", failedAt: NOW } as const, undefined]) {
+    db.run("DELETE FROM lend_peer_cooldowns"); forget();
+    notStarted(held(`M${failure ? 1 : 3}`), failure ? "x" : NET, failure);
+    const second = held(`M${failure ? 2 : 4}`, { now: NOW + 5 * MIN });
+    pin(second.taskId, "peer:sekai");
+    notStarted(second, "起 worker 失败：临时启动错误", undefined, NOW + 5 * MIN);
+    expect(rows()).toEqual([{ peer: "sekai", family: "claude", until: NOW + 5 * MIN + RUNTIME_COOLDOWN_MS, reason: "runtime:not_started×2" }]);
+    expect(card(second.taskId).extra).not.toHaveProperty("placement");
+  }
+});

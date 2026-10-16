@@ -4,7 +4,11 @@
  * cost a re-run, never wave a real failure through. tests/scheduler-merge-ci-rerun.test.ts.
  */
 
-export interface CiFailure { file: string; name: string; timedOut: boolean }
+/**
+ * `strays`: bun's "Unhandled error between tests" blocks this timed-out test left behind in its own file (merge-arch-CIUNREL1):
+ * the test's promise is abandoned at the timeout and rejects later. Only on a timed-out failure; absent when there are none.
+ */
+export interface CiFailure { file: string; name: string; timedOut: boolean; strays?: number }
 
 /** gh prefixes each line with `job<TAB>step<TAB>`, then the runner's ISO timestamp. */
 export const PREFIX = /^([^\t]*)\t([^\t]*)\t/;
@@ -14,6 +18,13 @@ export const GROUP = /^##\[group\](\S+\.test\.[cm]?[jt]sx?):\s*$/;
 export const FAIL = /^\(fail\) (.+?)(?: \[[\d.]+m?s\])?\s*$/;
 export const TIMED_OUT = /^\s*\^ this test timed out after \d+ms\.?\s*$/;
 export const FAIL_COUNT = /^\s*(\d+) fail\s*$/;
+/** bun's total of errors outside any test (unhandled errors between tests). */
+const ERROR_COUNT = /^\s*(\d+) errors?\s*$/;
+/** bun's frame around one unhandled error between tests: the title line, then a rule, the error, a closing rule. */
+const UNHANDLED = /^# Unhandled error between tests\s*$/;
+const RULE = /^-{10,}\s*$/;
+/** One stack frame with its source path: `at fn (path:line:col)` or `at path:line:col`. */
+const FRAME = /^\s*at (?:.*? \(([^()\s]+):\d+:\d+\)|([^()\s]+):\d+:\d+)\s*$/;
 /** Errors outside any test (a crashed file, an unhandled rejection) are red without a `(fail)` line of their own. */
 export const OUTSIDE_TEST = /error between tests|Unhandled error|^error: .*(?:Cannot find module|SyntaxError)/i;
 /**
@@ -61,7 +72,11 @@ function stepLines(log: string): FailedStep[] | null {
   return real.length ? real : null;
 }
 
+/** gh prints this step name when it cannot split a job's log by step (seen 10-15 on PR1593): the whole job is one "step". */
+const UNKNOWN_STEP = "UNKNOWN STEP";
+
 function isGateVerdict(s: FailedStep): boolean {
+  if (s.job === GATE.job && s.step === UNKNOWN_STEP) return isWholeGateJob(s.lines);
   if (s.job !== GATE.job || s.step !== GATE.step) return false;
   let inEcho = false;
   let verdict = false;
@@ -80,6 +95,48 @@ function isGateVerdict(s: FailedStep): boolean {
     if (line.trim() && !STEP_EXIT.test(line)) return false;
   }
   return verdict && !inEcho;
+}
+
+/**
+ * The gate job read whole (UNKNOWN STEP): the runner's set-up and tear-down text around the gate step is allowed, but the gate
+ * step's Run echo must read exactly as in the named step, then exactly one verdict and one step exit (one failed step in the job),
+ * and no other error, failure, test result or failure total anywhere in the job (merge-arch-CIUNREL1).
+ */
+function isWholeGateJob(lines: string[]): boolean {
+  let inEcho = false, echoes = 0, verdicts = 0, exits = 0;
+  for (const line of lines) {
+    if (inEcho) {
+      if (line.startsWith("##[endgroup]")) inEcho = false;
+      else if (!isGateEcho(line)) return false;
+      continue;
+    }
+    if (line.startsWith(RUN_ECHO) && GATE_COMMAND.test(line.slice(RUN_ECHO.length))) { echoes++; inEcho = true; continue; }
+    if (GATE_VERDICT.test(line)) { if (echoes !== 1) return false; verdicts++; continue; }
+    if (STEP_EXIT.test(line)) { exits++; continue; }
+    if (ERROR.test(line) || isResultLine(line) || OUTSIDE_TEST.test(line) || UNHANDLED.test(line) || FAIL_COUNT.test(line) ||
+      ERROR_COUNT.test(line) || GROUP.test(line) || /^\s*error\b|::error::/i.test(line)) return false;
+  }
+  return !inEcho && echoes === 1 && verdicts === 1 && exits === 1;
+}
+
+/**
+ * The end (closing rule) of an unhandled-error block starting at `at` that belongs to `file`, else null: the block is closed
+ * before anything else of bun's starts, holds no test result or group, and every stack frame in it (at least one) is in `file`.
+ */
+function strayEnd(lines: string[], at: number, file: string): number | null {
+  if (!RULE.test(lines[at + 1] ?? "")) return null;
+  let frames = 0;
+  for (let j = at + 2; j < lines.length; j++) {
+    const line = lines[j]!;
+    if (RULE.test(line)) return frames ? j : null;
+    if (isResultLine(line) || UNHANDLED.test(line) || GROUP.test(line) || line.startsWith("##[endgroup]") || FAIL_COUNT.test(line)) return null;
+    if (!/^\s*at /.test(line)) continue;
+    const m = FRAME.exec(line);
+    const path = m?.[1] ?? m?.[2];
+    if (!path || (path !== file && !path.endsWith(`/${file}`))) return null;
+    frames++;
+  }
+  return null; // cut before its closing rule
 }
 
 const nextText = (lines: string[], from: number): string => lines.slice(from).find((l) => l.trim()) ?? "";
@@ -106,19 +163,33 @@ export function parseFailedLog(log: string): CiFailure[] | null {
  * outside any test, an `error:` in a file group that no `(fail)` of that group claims, any error line outside the file groups
  * other than the step's exit code, no `N fail` total, or a total that differs from the failures found.
  * A `(fail)` with an `error:` printed for it is not a timeout, whatever follows it.
+ * The one error outside a test that is accounted (merge-arch-CIUNREL1, PR1593): an "Unhandled error between tests" block in a
+ * file group after a timed-out `(fail)` of that group, closed, every stack frame in that same test file, counted on that timeout;
+ * bun's `N error` total must then equal the blocks so accounted. Anywhere else, cut, or with a frame elsewhere, it stays null.
  */
 function parseStep(lines: string[]): CiFailure[] | null {
   const found: CiFailure[] = [];
-  const totals: number[] = [];
+  const totals: number[] = [], errorTotals: number[] = [];
   let file: string | null = null;
   let errored = false; // an error line in this group not yet claimed by a `(fail)`
+  let strays = 0, groupFrom = 0; // groupFrom: the first failure of the current file group
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
+    if (UNHANDLED.test(line)) {
+      const timedOut = file && !errored ? found.slice(groupFrom).findLast((f) => f.timedOut) : undefined;
+      const end = timedOut ? strayEnd(lines, i, file!) : null;
+      if (!timedOut || end === null) return null;
+      timedOut.strays = (timedOut.strays ?? 0) + 1;
+      strays++;
+      i = end;
+      continue;
+    }
     if (!isResultLine(line) && OUTSIDE_TEST.test(line)) return null;
     const group = GROUP.exec(line);
     if (group) {
       if (errored) return null;
       file = group[1]!;
+      groupFrom = found.length;
       continue;
     }
     if (line.startsWith("##[endgroup]")) {
@@ -134,6 +205,8 @@ function parseStep(lines: string[]): CiFailure[] | null {
     if (file && line.startsWith("(pass) ")) { errored = false; continue; } // a passing test's own console output
     const total = FAIL_COUNT.exec(line);
     if (total) { totals.push(Number(total[1])); continue; }
+    const errorTotal = ERROR_COUNT.exec(line);
+    if (errorTotal && !file) { errorTotals.push(Number(errorTotal[1])); continue; }
     const fail = FAIL.exec(line);
     if (!fail) continue;
     const name = fail[1]!;
@@ -145,5 +218,7 @@ function parseStep(lines: string[]): CiFailure[] | null {
     errored = false;
   }
   if (errored || !found.length || totals.length !== 1 || totals[0] !== found.length) return null;
+  // bun prints `N error` only when there were errors outside tests: it must be exactly the strays accounted above
+  if (errorTotals.length > 1 || (errorTotals[0] ?? 0) !== strays) return null;
   return found;
 }

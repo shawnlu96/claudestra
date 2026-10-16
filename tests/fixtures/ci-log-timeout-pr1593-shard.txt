@@ -1,0 +1,91 @@
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:58.9493488Z ##[group]tests/lend-pr-takeover-preflight.test.ts:
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.0100673Z (pass) old create-before-CLI refuses after an external PR; new preflight is 0 create / 0 takeover with one persistent diagnostic [47.83ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.0400386Z (pass) observe preserves original PR / takeover route [30.04ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.0723582Z (pass) off preserves original PR / takeover route [32.26ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.1036826Z (pass) code preserves original PR / takeover route [31.33ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.1366605Z (pass) existing PR is recorded as existing; unknown lookup never claims not sent or attempts takeover [32.86ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.1781495Z (pass) policy changes resume; spec / head changes have distinct diagnostics and no stale retries [41.47ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.2104602Z (pass) unreadable policy and thrown pre-read conservatively block [32.33ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.2541514Z (pass) diagnostic storage retries bounded; changed material is re-read before retry [43.68ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.2909273Z (pass) pre-read is no authorization: policy drifts after it and final CLI rejects with zero writes [36.79ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:17:59.3202006Z (pass) ownership and ancestry still prevent creation; no author identity bypass [29.26ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.5977447Z (pass) real LedgerReader plus leased manager CLI: blocked UI records once and final takeover refusal is all-table zero-write [1277.49ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.6291209Z (pass) diagnostic lock recheck drops a stale policy refusal without creating or delivering [31.43ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.6639772Z (pass) production query_only scheduler connection records through CLI, never writes its read connection [34.74ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.6938032Z (pass) diagnostic CLI independently refuses obsolete remote head without a stale note [29.83ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.7250961Z (pass) ui-takeover-diag-pm-identity: agent-lead forbidden with all-table zero writes [31.28ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.7535151Z (pass) ui-takeover-diag-pm-identity: master forbidden with all-table zero writes [28.49ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.7815038Z (pass) ui-takeover-diag-pm-identity: owner forbidden with all-table zero writes [27.99ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.8088520Z (pass) ui-takeover-diag-pm-identity: agent-writer forbidden with all-table zero writes [27.32ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:00.8461422Z (pass) ui-takeover-diag-retry-drop-reason: exhausted budget keeps original refusal and stops CLI retries [37.23ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:01.3247684Z (pass) real CLI identity: agent-lead forbidden and every table unchanged [478.62ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:01.8036564Z (pass) real CLI identity: master forbidden and every table unchanged [478.84ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:02.2786514Z (pass) real CLI identity: owner forbidden and every table unchanged [474.97ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:02.7533034Z (pass) real CLI identity: agent-writer forbidden and every table unchanged [474.61ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:03.2483817Z (pass) real CLI direct refusal: cross-project has all-table zero writes [495.07ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:03.5628868Z (pass) real CLI direct refusal: missing-lease has all-table zero writes [314.51ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:03.8781296Z (pass) real CLI direct refusal: lost-lease has all-table zero writes [315.24ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:04.3731574Z (pass) real CLI direct refusal: terminal has all-table zero writes [494.96ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:04.8722422Z (pass) real CLI direct refusal: bad-head has all-table zero writes [499.13ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:05.3961029Z (pass) real CLI direct refusal: base-head has all-table zero writes [523.88ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:05.9110327Z (pass) real CLI rejects text injection with all-table zero writes [514.85ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:06.4128094Z (pass) real CLI rejects action injection with all-table zero writes [501.82ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:06.9116472Z (pass) real CLI rejects dedup injection with all-table zero writes [498.77ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:07.4214789Z (pass) real CLI rejects project injection with all-table zero writes [509.86ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:07.9177322Z (pass) real CLI rejects pm injection with all-table zero writes [496.21ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:08.4631076Z (pass) real CLI rereads lease after remote await and writes no stale diagnostic [545.33ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:08.9831144Z (pass) real CLI rereads project after remote await and writes no stale diagnostic [520.00ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:09.5395829Z (pass) real CLI rereads terminal after remote await and writes no stale diagnostic [556.51ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:10.0632159Z (pass) real CLI rereads rev after remote await and writes no stale diagnostic [523.54ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:25.0888610Z killed 1 dangling process
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:25.0930923Z (fail) real CLI rereads spec after remote await and writes no stale diagnostic [15025.83ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:25.0932175Z   ^ this test timed out after 15000ms.
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:26.7630732Z (pass) real CLI rereads round after remote await and writes no stale diagnostic [1674.03ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:27.3618608Z (pass) real CLI rereads worker after remote await and writes no stale diagnostic [598.76ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:27.9695451Z (pass) real CLI rereads order_head after remote await and writes no stale diagnostic [607.62ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:28.5642868Z (pass) real CLI rereads repo after remote await and writes no stale diagnostic [594.77ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.1609817Z (pass) real CLI rereads mode after remote await and writes no stale diagnostic [596.66ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.1914349Z (pass) transaction's final prewrite lease check refuses with every table unchanged [30.46ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.2198558Z (pass) actual stop is propagated (lease-lost response) with no diagnostic or PR [28.44ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.2597948Z (pass) actual stop is propagated (thrown stop) with no diagnostic or PR [39.81ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3088022Z 
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3096334Z # Unhandled error between tests
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3097507Z -------------------------------
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3098823Z 347 |       if (effect === "spec") f.copy.run("UPDATE tasks SET specRev=specRev-1");
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3100301Z 348 |       if (effect === "round") f.copy.run("UPDATE tasks SET round=round-1");
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3101931Z 349 |       if (effect === "worker") f.copy.run("UPDATE lend_orders SET worker='agent-testworker'");
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3103879Z 350 |       if (effect === "order_head") f.copy.run("UPDATE lend_orders SET head=?", [base]);
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3105292Z 351 |       if (effect === "repo") f.copy.run("UPDATE lend_orders SET repo='example/test'");
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3106512Z 352 |       const r = await f.cli(diagnosticArgs(), { effect });
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3107447Z                               ^
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3108476Z SyntaxError: JSON Parse error: Unexpected EOF
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3109898Z       at async <anonymous> (/home/runner/work/claudestra/claudestra/tests/lend-pr-takeover-preflight.test.ts:352:25)
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3110960Z 
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3117810Z ##[error]
+test shard 7 of 8	UNKNOWN STEP	      at async <anonymous> (/home/runner/work/claudestra/claudestra/tests/lend-pr-takeover-preflight.test.ts:352:25)
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3120429Z -------------------------------
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.3120918Z 
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.7791051Z (pass) real CLI rejects positional body injection without touching any table [519.42ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.8103613Z (pass) retry cap preserves known PR facts (not excluded) and makes no fourth diagnostic call [31.10ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.8414883Z (pass) retry cap preserves known PR facts (existing) and makes no fourth diagnostic call [31.27ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.8723115Z (pass) writer transaction rechecks a changed actor before even replaying a diagnostic [30.80ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.8723918Z 
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:18:29.8724303Z ##[endgroup]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5294103Z 
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5294262Z 2 tests skipped:
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5295061Z (skip) [验收线 2] 真进程（macOS）：ppid=1 的 sleep，cwd 目录删掉后 lsof 仍报原路径，巡检收掉它
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5295777Z (skip) snapshot 拒绝系统 symlink > /tmp 下的目标被拒，/private/tmp 下的同一目录可以
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5296062Z 
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5296069Z 
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5296412Z 1 tests failed:
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5296953Z (fail) real CLI rereads spec after remote await and writes no stale diagnostic [15025.83ms]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5297497Z   ^ this test timed out after 15000ms.
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5297704Z 
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5297803Z  2975 pass
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5298016Z  2 skip
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5298214Z  1 fail
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5298413Z  1 error
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5298634Z  36654 expect() calls
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.5298954Z Ran 2978 tests across 217 files. [555.75s]
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.7127127Z ci-selected: shard=7 mode=observe allow=0 applied=0 responsibility=sha256:76852ef8073cd1cb407510723f97a51ec3b2a8d49d9e4bb678b2f87093269047 out_of_scope=0 reason=失败日志解析不全
+test shard 7 of 8	UNKNOWN STEP	2026-10-15T14:26:20.7175125Z ##[error]Process completed with exit code 1.
