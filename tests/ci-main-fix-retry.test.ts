@@ -265,6 +265,77 @@ describe("[验收线 4] what must not be retried is not", () => {
   });
 });
 
+describe("[验收线 4][验收线 5] authority is read again after every await before update-branch", () => {
+  const freeze = (c: ReturnType<typeof card>, frozen: boolean) => c.db.query("INSERT OR REPLACE INTO meta (project, key, value) VALUES ('p', 'queueFrozen', ?)")
+    .run(JSON.stringify({ frozen, reason: "test", since: 1 }));
+  /** A tick whose GitHub file read (`during: "read"`) or sample write (`during: "record"`) lets `change` land at that await. */
+  const racing = (c: ReturnType<typeof card>, during: "read" | "record", change: () => void, now = NOW + 1000) => {
+    const gh = retryGh(fakeGh(c.gh) as never);
+    const raced: RetryGh = { ...gh, fileCommits: async (...a) => { const r = await gh.fileCommits(...a); if (during === "read") change(); return r; } };
+    return ciMainFixRetryTick(c.db, ["p"], { gh: raced, now: () => now,
+      record: async (a) => { const r = recordObserved(c.db, a, now); if (during === "record" && a.actionKey.startsWith("retry:")) change(); return r; } });
+  };
+  const registered = async (body: (c: ReturnType<typeof card>) => Promise<void>) => {
+    policy("on");
+    await withCard({}, true, async (c) => {
+      await c.tick();
+      expect(c.notes(WAIT_OP).length).toBe(1);
+      mainFixed(c);
+      await body(c);
+    });
+  };
+  for (const during of ["read", "record"] as const) {
+    test(`a queue freeze during the ${during} → no update-branch; once thawed, exactly one`, async () => {
+      await registered(async (c) => {
+        expect(await racing(c, during, () => freeze(c, true))).toEqual([]);
+        expect(c.updates()).toEqual([]);
+        await c.retry();
+        expect(c.updates()).toEqual([]);
+        freeze(c, false);
+        await c.retry();
+        await c.retry();
+        expect(c.updates().length).toBe(1);
+        expect(c.samples().filter((s) => s.data.executed === true).length).toBe(during === "record" ? 2 : 1);
+      });
+    });
+    test(`the switch rolled back to off during the ${during} → no update-branch`, async () => {
+      await registered(async (c) => {
+        await racing(c, during, () => policy("off"));
+        expect(c.updates()).toEqual([]);
+        await c.retry();
+        expect(c.updates()).toEqual([]);
+      });
+    });
+    test(`the switch moved to observe during the ${during} → no update-branch, only the would-retry sample`, async () => {
+      await registered(async (c) => {
+        await racing(c, during, () => policy("observe"));
+        await c.retry();
+        expect(c.updates()).toEqual([]);
+        expect(c.samples().some((s) => s.data.executed === false && !s.data.released)).toBe(true);
+      });
+    });
+    test(`an open ask or the card leaving fix during the ${during} → no update-branch`, async () => {
+      await registered(async (c) => {
+        await racing(c, during, () => c.db.query(`INSERT INTO asks (id, project, taskId, source, kind, title, expiresAt, state, createdAt, updatedAt)
+          VALUES ('a1', 'p', 'T9', 'system', 'decide', 'q', 9e12, 'open', 1, 1)`).run());
+        expect(c.updates()).toEqual([]);
+        c.db.query("UPDATE asks SET state='answered' WHERE id='a1'").run();
+        await racing(c, during, () => c.db.query("UPDATE tasks SET stage='merge' WHERE id='T9'").run());
+        await c.retry();
+        expect(c.updates()).toEqual([]);
+      });
+    });
+  }
+  test("a released sample is not a retry: the same file set is still registered after a later red", async () => {
+    await registered(async (c) => {
+      await racing(c, "record", () => freeze(c, true));
+      expect(c.samples().map((s) => [s.data.executed, s.data.released ?? null])).toEqual([[true, null], [false, `retry:${HEAD}:77`]]);
+      const { retriedFiles } = await import("../src/lib/ci-main-fix-retry.js");
+      expect(retriedFiles(c.db, "T9")).toEqual([]);
+    });
+  });
+});
+
 describe("[验收线 5] the ciMainFixRetry switch", () => {
   test("unset → on (OBSGATE1 new-key rule)", () => {
     expect(defaultRecoveryMode(CI_MAIN_FIX_RETRY_KEY)).toBe("on");

@@ -4,7 +4,9 @@
  * pause, safety hold, open ask), its retry sample is not written yet, GitHub's PR head is still the registered one, and main has a
  * commit after the registered main head that changed one of the failing test files. Then one recordObserved sample per registration
  * (written first: the write-ahead mark), and only under on and only for a peer PR card one update-branch with expected_head_sha =
- * the registered head. GitHub refusing it (422: the head moved) is logged, never a failure. The new head is PEERHEAD1's from there.
+ * the registered head. Switch, card and flow blocks are read again after the GitHub reads and after the sample write (no await between
+ * that last read and the send); stopped there, a release sample hands the registration its next attempt. GitHub refusing it (422:
+ * the head moved) is logged, never a failure. The new head is PEERHEAD1's from there.
  * A restart re-reads the same facts: the sample is there and the PR head moved, so nothing is sent twice.
  * tests/ci-main-fix-retry*.test.ts.
  */
@@ -16,8 +18,8 @@ import { runBounded } from "./run-bounded.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { ciBehindGh } from "./scheduler-merge-ci-behind.js";
 import { isTestProcess } from "./test-guard.js";
-import { CI_MAIN_FIX_RETRY_KEY, isPeerPrCard, ledgerJudge, liveRegistrations, retryActionKey, retryMode, retryPlan, retrySampled,
-  type Registration } from "./ci-main-fix-retry.js";
+import { CI_MAIN_FIX_RETRY_KEY, isPeerPrCard, ledgerJudge, liveRegistrations, releaseActionKey, retryActionKey, retryAttempt, retryMode, retryPlan,
+  retrySampled, type Registration } from "./ci-main-fix-retry.js";
 
 /** GitHub reads and the one write this step needs; a test puts its own. */
 export interface RetryGh {
@@ -67,33 +69,64 @@ async function mainFixes(gh: RetryGh, repo: string, reg: Registration): Promise<
   return out;
 }
 
-async function retryOne(db: Database, reg: Registration, ports: RetryPorts): Promise<string | null> {
+type Authority = { ok: true; mode: "on" | "observe"; peer: boolean; repo: string; pull: string } | { ok: false; why: string };
+/**
+ * Everything that allows this registration now, read fresh each time (never carried over an await): the switch, the card (stage,
+ * head), every flow block (freeze, hold, pause, safety hold, open ask), whether the current attempt is sampled (`sampleFree`), the PR.
+ */
+function authority(db: Database, reg: Registration, ports: RetryPorts, sampleFree: boolean): Authority {
   const mode = retryMode(reg.project, ports.policy);
-  if (mode === "off") return null;
+  if (mode === "off") return { ok: false, why: "开关是 off" };
   const task = getTask(db, reg.taskId);
   const block = task ? flowBlock(db, task, listEvents(db, { project: task.project, target: task.id })) : null;
-  const ledger = ledgerJudge(task, reg, block, retrySampled(db, reg.taskId, reg));
-  if (!ledger.ok) return null;
+  const ledger = ledgerJudge(task, reg, block, sampleFree && retrySampled(db, reg.taskId, reg));
+  if (!ledger.ok) return ledger;
   const pull = PULL.exec(task!.pr ?? reg.pr);
-  if (!pull) return null;
-  const repo = pull[1]!, peer = isPeerPrCard(task!);
-  const plan = retryPlan(reg, mode, peer, await ports.gh.prHead(repo, pull[2]!), await mainFixes(ports.gh, repo, reg));
+  if (!pull) return { ok: false, why: "卡上没有 PR 链接" };
+  return { ok: true, mode, peer: isPeerPrCard(task!), repo: pull[1]!, pull: pull[2]! };
+}
+
+async function retryOne(db: Database, reg: Registration, ports: RetryPorts): Promise<string | null> {
+  const first = authority(db, reg, ports, true);
+  if (!first.ok) return null;
+  const prHead = await ports.gh.prHead(first.repo, first.pull);
+  const fixes = await mainFixes(ports.gh, first.repo, reg);
+  // The GitHub reads awaited: a freeze, hold, switch change or card move may have landed meanwhile.
+  const now = authority(db, reg, ports, true);
+  if (!now.ok || now.repo !== first.repo || now.pull !== first.pull) return null;
+  const plan = retryPlan(reg, now.mode, now.peer, prHead, fixes);
   if (plan.kind === "void" || plan.kind === "wait") return null;
   ports.assertActive?.();
-  const executed = plan.kind === "update";
+  const executed = plan.kind === "update", attempt = retryAttempt(db, reg.taskId, reg), key = retryActionKey(reg, attempt);
   const fixed = Object.entries(plan.commits).filter(([, c]) => c.length).map(([f, c]) => `${f}（${c.join("、")}）`).join("、");
-  const { recorded } = await ports.record({ project: reg.project, mechanism: CI_MAIN_FIX_RETRY_KEY, target: reg.taskId, actionKey: retryActionKey(reg),
+  const { recorded } = await ports.record({ project: reg.project, mechanism: CI_MAIN_FIX_RETRY_KEY, target: reg.taskId, actionKey: key,
     action: `${executed ? "已" : ""}按 main 的修复重试：合入 main 更新 PR（expected_head_sha ${reg.prHead.slice(0, 12)}），main 改过 ${fixed}`.slice(0, 400),
-    data: { registrationSeq: reg.seq, prHead: reg.prHead, run: reg.run, files: reg.files, mainHead: reg.mainHead, commits: plan.commits, peer, mode, executed,
-      ...(executed ? {} : { why: peer ? "开关是 observe：只记样本" : "本机执行者的卡：只记样本，不自动 update-branch" }) } });
+    data: { registrationSeq: reg.seq, prHead: reg.prHead, run: reg.run, files: reg.files, mainHead: reg.mainHead, commits: plan.commits, peer: now.peer,
+      mode: now.mode, executed, ...(attempt ? { attempt } : {}),
+      ...(executed ? {} : { why: now.peer ? "开关是 observe：只记样本" : "本机执行者的卡：只记样本，不自动 update-branch" }) } });
   if (!executed || !recorded) return null;
+  // The sample write awaited too: read it all once more, then send with no await in between.
+  const last = authority(db, reg, ports, false);
+  const stop = !last.ok ? last.why : last.mode !== "on" ? "开关已不是 on" : !last.peer ? "已不是 peer PR 卡"
+    : last.repo !== now.repo || last.pull !== now.pull ? "卡上的 PR 变了" : null;
+  if (stop) return release(reg, ports, attempt, key, stop);
   try {
-    await ports.gh.updateBranch(repo, pull[2]!, reg.prHead);
+    await ports.gh.updateBranch(now.repo, now.pull, reg.prHead);
     console.error(`🔁 [merge] ${reg.taskId} main 已修好失败测试，已合入 main 更新 PR（expected_head_sha ${reg.prHead.slice(0, 12)}），新 head 交 PEERHEAD1`);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     console.error(`⚠️ [merge] ${reg.taskId} main 修好后的 update-branch 没成（不算失败，交正常流程）：${oneLine(e)}`);
   }
+  return null;
+}
+
+/** Nothing was sent after the executed sample: a release sample gives the registration its next attempt once the stop clears. */
+async function release(reg: Registration, ports: RetryPorts, attempt: number, key: string, why: string): Promise<null> {
+  console.error(`⏸️ [merge] ${reg.taskId} main 修好后的重试在发 update-branch 前被拦下（${why}），没发，登记留给下一轮`);
+  const { recorded } = await ports.record({ project: reg.project, mechanism: CI_MAIN_FIX_RETRY_KEY, target: reg.taskId,
+    actionKey: releaseActionKey(reg, attempt), action: `重试样本 ${key} 没执行就撤回：${why}`.slice(0, 400),
+    data: { registrationSeq: reg.seq, prHead: reg.prHead, run: reg.run, files: reg.files, executed: false, released: key, why } });
+  if (!recorded) console.error(`⚠️ [merge] ${reg.taskId} 撤回重试样本 ${key} 没记上，这条登记按已用掉处理（不会再发）`);
   return null;
 }
 

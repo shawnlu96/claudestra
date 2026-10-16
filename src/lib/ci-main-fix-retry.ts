@@ -43,22 +43,38 @@ export function retryMode(project: string, policy: RecoveryPolicyPort = policyPo
 export const sameFiles = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && [...a].sort().every((f, i) => f === [...b].sort()[i]);
 
-/** The retry sample's action key: one per registration (card + head + run). */
-export const retryActionKey = (reg: Pick<Registration, "prHead" | "runId">): string => `retry:${reg.prHead}:${reg.runId}`;
+/**
+ * The retry sample's action key: one per registration (card + head + run) and attempt. Attempt n > 0 exists only after attempt n − 1's
+ * executed sample was released: the tick wrote it, then a re-read right before update-branch (freeze, hold, switch, card) said no.
+ */
+export const retryActionKey = (reg: Pick<Registration, "prHead" | "runId">, attempt = 0): string =>
+  `retry:${reg.prHead}:${reg.runId}${attempt ? `:r${attempt}` : ""}`;
+/** The release sample of attempt n's executed sample (recordObserved, executed false, `released` = that sample's key). */
+export const releaseActionKey = (reg: Pick<Registration, "prHead" | "runId">, attempt: number): string => `release:${reg.prHead}:${reg.runId}:r${attempt}`;
 
 const json = (raw: unknown): Record<string, unknown> => {
   try { return typeof raw === "string" ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { return {}; }
 };
-/** File sets this card was already retried for (an executed retry sample): such a set is not registered again. */
+const samplesOf = (db: Database, taskId: string): Record<string, unknown>[] => (db.query(`SELECT data FROM events WHERE target=? AND kind='note'
+  AND json_extract(data,'$.op')=? AND json_extract(data,'$.mechanism')=? ORDER BY seq`).all(taskId, OBSERVE_OP, CI_MAIN_FIX_RETRY_KEY) as { data: string }[])
+  .map((r) => json(r.data));
+const releasedKeys = (samples: Record<string, unknown>[]): Set<unknown> => new Set(samples.map((d) => d.released).filter((k) => typeof k === "string"));
+/** File sets this card was already retried for (an executed retry sample not released): such a set is not registered again. */
 export function retriedFiles(db: Database, taskId: string): string[][] {
-  const rows = db.query(`SELECT data FROM events WHERE target=? AND kind='note' AND json_extract(data,'$.op')=? AND json_extract(data,'$.mechanism')=?`)
-    .all(taskId, OBSERVE_OP, CI_MAIN_FIX_RETRY_KEY) as { data: string }[];
-  return rows.map((r) => json(r.data)).filter((d) => d.executed === true && Array.isArray(d.files)).map((d) => d.files as string[]);
+  const samples = samplesOf(db, taskId), released = releasedKeys(samples);
+  return samples.filter((d) => d.executed === true && Array.isArray(d.files) && !released.has(d.actionKey)).map((d) => d.files as string[]);
 }
-/** Whether this registration already has its retry sample (observe: "would retry" written; on: retried). */
+/** This registration's current attempt: how many of its executed samples were released before update-branch. */
+export function retryAttempt(db: Database, taskId: string, reg: Registration): number {
+  const keys = releasedKeys(samplesOf(db, taskId));
+  let n = 0;
+  while (keys.has(retryActionKey(reg, n))) n++;
+  return n;
+}
+/** Whether this registration's current attempt already has its sample (observe: "would retry" written; on: retried). */
 export const retrySampled = (db: Database, taskId: string, reg: Registration): boolean => !!db.query(`SELECT 1 FROM events WHERE target=? AND kind='note'
   AND json_extract(data,'$.op')=? AND json_extract(data,'$.mechanism')=? AND json_extract(data,'$.actionKey')=? LIMIT 1`)
-  .get(taskId, OBSERVE_OP, CI_MAIN_FIX_RETRY_KEY, retryActionKey(reg));
+  .get(taskId, OBSERVE_OP, CI_MAIN_FIX_RETRY_KEY, retryActionKey(reg, retryAttempt(db, taskId, reg)));
 
 export interface Registration { seq: number; ts: number; taskId: string; project: string; pr: string; prHead: string; run: string; runId: string;
   files: string[]; mainHead: string; peer: boolean; mode: string }

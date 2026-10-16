@@ -28,6 +28,7 @@ note 的 data 包括：卡、PR、head、run / attempt、失败测试文件，�
   满足时先写一条 `recordObserved` 样本（键为卡 + head + run，同时起预写标记的作用）：
   - on 档的 peer PR 卡：样本标 `executed: true`，然后带 `expected_head_sha` = 登记的 head 做一次 update-branch。GitHub 拒绝（422）只打日志。之后的新 head 交给 PEERHEAD1：自动卡登记新 head，round+1 后审查；manual 卡照旧受 peerPrRequeue 约束（headWrite 对纯合 main 的新 head 照旧不动，交给 PM）。
   - 本机执行者的卡，或开关为 observe：只记“本会重试”样本（`executed: false`），不做 update-branch。
+- **授权逐次重读**：开关档位、卡（阶段、head、是不是 peer 卡）和 `flowBlock` 不跨 await 沿用。在 GitHub 读完之后重读一次；样本写完之后、发 update-branch 之前再读一次，这次读和发送之间没有 await。读 GitHub 期间冻结了、hold 了，或开关切到 off / observe，就不发。写完样本才被拦下时，补记一条撤回样本（`release:<head>:<run>:r<n>`，`released` = 那条样本的键），这条登记的下一次尝试换用键 `retry:<head>:<run>:r<n+1>`，拦截解除后仍能重试一次。撤回的样本不算“真正重试过”。撤回样本没记上的，按已用掉处理（不会再发）。
 - **防重复**：靠 head 绑定。PR head 变了（已经重试过，或者作者推了新提交），登记就算用掉或作废；重启后再 tick 也因为样本已在、head 已变而不会再发。
 - **开关**：缺省为 on（OBSGATE1 新键规则，不是高风险类）。observe 只登记并记样本；off 不登记、不改作者消息、tick 什么也不做，逐字回到现状。
 
