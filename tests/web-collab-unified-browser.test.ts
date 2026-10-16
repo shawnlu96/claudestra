@@ -460,14 +460,14 @@ test("1280：打开它的项目组折叠期间改绑 A→B，旧视图照样关�
   await entryOf(page, "claudestra").click();
   await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
   expect(await opened(page)).toBe(n5Key("mac-a"));
-  await group(page, "claudestra").locator("> button").click(); // 折叠：claudestra 的入口卸载
+  await group(page, "claudestra").locator("button[aria-expanded]").click(); // 折叠：claudestra 的入口卸载
   expect(await entryOf(page, "claudestra").count()).toBe(0);
   world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a", { project: "demo-c" })] } };
   const refreshed = page.waitForResponse((r) => r.url().endsWith("/shared-ledger/context"));
   await page.evaluate("window.dispatchEvent(new Event('focus'))");
   await refreshed;
   await page.waitForFunction("document.body.dataset.open === ''");
-  await group(page, "claudestra").locator("> button").click(); // 展开后新入口开 demo-c
+  await group(page, "claudestra").locator("button[aria-expanded]").click(); // 展开后新入口开 demo-c
   await entryOf(page, "claudestra").click();
   expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
 }, 60_000);
@@ -479,12 +479,12 @@ test("1280：全部项目组折叠（没有任何入口挂着）期间改绑 A�
   await entryOf(page, "claudestra").click();
   await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
   expect(await opened(page)).toBe(n5Key("mac-a"));
-  for (const p of PROJECTS["mac-a"]) await group(page, p.name).locator("> button").click(); // 全部折叠：所有入口卸载
+  for (const p of PROJECTS["mac-a"]) await group(page, p.name).locator("button[aria-expanded]").click(); // 全部折叠：所有入口卸载
   expect(await page.locator("nav[aria-label='侧栏'] > ul").getByRole("button", { name: "协作视图" }).count()).toBe(0);
   world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a", { project: "demo-c" })] } };
   await page.evaluate("window.dispatchEvent(new Event('focus'))");
   await page.waitForFunction("document.body.dataset.open === ''", undefined, { timeout: 20_000 });
-  await group(page, "claudestra").locator("> button").click();
+  await group(page, "claudestra").locator("button[aria-expanded]").click();
   await entryOf(page, "claudestra").click();
   expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
 }, 60_000);

@@ -6,6 +6,8 @@ import { useEffect, useRef } from "react";
  * 触摸端长按 450ms 唤出（比 iOS 原生 callout ≈500ms 稍早，抢在它前面）、手指挪超过
  * 12px 视为滚动 / 左滑则作废、桌面右键直接唤出。consumedClick() 给调用方判断
  * 「这次 click 只是长按松手的尾巴」，否则松手会顺带触发行 / 气泡的单击语义。
+ * open 是显式打开（行尾 / 组头的常显 ⋯ 按钮用，row-more-button.tsx）：同样受 enabled / blocked 约束，
+ * enabled=false 时为 undefined（调用方据此不渲染按钮）；不记长按时间，不吞下一次点行。
  */
 export const LONG_PRESS_MS = 450;
 export const MOVE_TOLERANCE = 12;
@@ -30,9 +32,13 @@ export function useLongPressMenu(opts: {
     opts.open(x, y);
   };
   const consumedClick = () => Date.now() - firedAt.current < 700;
-  if (opts.enabled === false) return { consumedClick, handlers: {} };
+  if (opts.enabled === false) return { consumedClick, open: undefined, handlers: {} };
+  const open = (x: number, y: number) => {
+    if (!opts.blocked?.()) opts.open(x, y);
+  };
   return {
     consumedClick,
+    open,
     handlers: {
       onTouchStart: (e: React.TouchEvent) => {
         if (opts.blocked?.()) return;
