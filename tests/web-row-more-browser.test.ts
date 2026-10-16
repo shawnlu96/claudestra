@@ -281,8 +281,8 @@ for (const width of [390, 1280]) {
       await s.page.mouse.move(0, 400);
       await s.page.waitForTimeout(400); // Let daisyUI's dropdown closing transition finish while the request is pending.
       const pendingVisible = await item.isVisible();
-      const pendingFocused = await item.evaluate("el => document.activeElement === el");
-      await item.evaluate("el => { el.click(); el.click(); }");
+      const pendingFocused = await s.page.evaluate<boolean>(`document.activeElement === document.querySelector('[data-interrupt-item]')`);
+      await item.evaluate((el) => { const button = el as unknown as { click(): void }; button.click(); button.click(); });
       release();
       const alert = s.page.locator('header [role="alert"]');
       await alert.waitFor({ state: "attached" });
