@@ -26,6 +26,7 @@ import { mainCiPass } from "./scheduler-main-ci-wiring.js";
 import { ciQueueFullStep } from "./scheduler-ci-queue-full.js";
 import { openCiProofGate } from "./scheduler-ci-proof-gate.js";
 import { openCiLogPerJob } from "./scheduler-merge-ci-log-read.js";
+import { ciMainFixRetryStep } from "./ci-main-fix-retry-tick.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
@@ -164,6 +165,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       failed.push(...await ciQueueFullStep(db, config, { manager, external, active, command: guard(active, runBounded), policy: opts.recoveryPolicy, pace: pace.phase() }));
       if (cut("ciQueueFull")) return done(); await mergeTick(db, config, manager, external, active, pace.phase(), trains);
       if (cut("merge")) return done();
+      failed.push(...await ciMainFixRetryStep(db, Object.keys(config.projects), { manager, command: opts.external ? undefined : guard(active, runBounded), policy: opts.recoveryPolicy, active })); // CIUNREL1 main 修好后重试
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());
