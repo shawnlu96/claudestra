@@ -140,6 +140,27 @@ describe("[验收线 2] 支持新族但没全部切新发送不算完成", () =>
   });
 });
 
+describe("r1 复现：审查 P1", () => {
+  test("复现 fleet-self-declared-shrink：样本自报 1 台机器不能把三机验收缩成一机", () => {
+    const s = passing();
+    s.fleet.machines = 1;
+    s.nodes = s.nodes.filter((n: any) => n.id !== "m-b" && n.id !== "m-c");
+    expect(judge(s).ok).toBe(false);
+    expect(codes(s)).toEqual(["fleet_below_minimum", "fleet_incomplete:machine"]);
+  });
+
+  test("复现 unknown-new-family-count-accepted：新族计数 unknown 或缺字段都拒，实测 0 放行", () => {
+    const s = passing();
+    s.traffic[0].floka = "unknown";
+    delete s.traffic[1].floka;
+    expect(judge(s).ok).toBe(false);
+    expect(codes(s)).toEqual(["floka_traffic_unknown:receive/signature/machine", "floka_traffic_unknown:receive/relay/machine"]);
+    const zero = passing();
+    zero.traffic[0].floka = 0;
+    expect(judge(zero)).toEqual({ ok: true, reasons: [] });
+  });
+});
+
 describe("[验收线 3] 报告脱敏、observe 零写入、回滚窗口未满拒绝退出", () => {
   test("回滚期未满拒；回滚期未知也拒", () => {
     const s = passing();

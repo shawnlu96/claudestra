@@ -21,11 +21,11 @@ bun scripts/rename-floka/observe.ts --sample <样本.json> [--config <config.jso
 
 样本只认下面这些字段，多一个键整份拒；原文里出现 `tok_` / `dev_` 前缀、`cstra_*=` / `floka_*=` cookie 赋值、
 PEM、40 位以上 base64 或 32 位以上 hex 也整份拒，报错不回显内容。节点 id 只许 `[a-z0-9-]`（写不进域名、IP、URL）。
-**缺的格子补成 `"unknown"`，判定里与有旧流量同等拒绝——没观测到不是零。**
+**缺的格子补成 `"unknown"`，判定里与有旧流量同等拒绝——没观测到不是零；同一格的新族计数（`floka`）没观测到也拒，实测 0 放行。**
 
 | 字段 | 含义 |
 |---|---|
-| `fleet.machines` | 应有几台主机（目前 3） |
+| `fleet.machines` | 应有几台主机；下限 3（规格三机），自报小于 3 记 `fleet_below_minimum` 并仍按 3 台核 |
 | `nodes[]` | `{id, kind: machine/relay/ledger, version, receiveFloka, sendFamily: legacy/floka}`；三类都要有 |
 | `allNewSendAt` | 最后一个节点切到新族发送的时刻；`null` = 还没全部切 |
 | `window` | 零旧流量窗口 `{start, end}`，start 不得早于 `allNewSendAt` |

@@ -1,6 +1,6 @@
 /**
  * 收兼容的退出判定：所有条件都由样本里的实测证明才放行，任何一格 "unknown" 都记一条拒绝理由。
- * 顺序：节点全认新族且全发新族 → 切新之后的完整窗口里每格旧计数都是实测 0 → 存量载荷全过期 / 实测无存活
+ * 顺序：至少三机且节点全认新族、全发新族 → 切新之后的完整窗口里每格旧计数实测 0、新族计数有实测 → 存量载荷全过期 / 实测无存活
  * → 回滚期已满 → 基础设施（域名、VAPID、systemd/nginx、安装副本）完成。只产出理由列表，不做任何写入。
  */
 import { requiredWindowMs } from "./lifetimes.js";
@@ -10,6 +10,9 @@ import {
 } from "./types.js";
 
 type Push = (code: string, subject?: string) => void;
+
+/** 规格定的三机下限：样本自报的机器数只能往上加，不能把待验范围缩小（缩了就拒，缺机照样按 3 台核） */
+const MIN_MACHINES = 3;
 
 /** 旧计数必须是实测 0：>0 是有旧流量，"unknown" 是没观测到，两者都拒 */
 function zero(c: Count, push: Push, code: string, subject?: string): void {
@@ -24,10 +27,12 @@ function expired(at: Instant, now: number, push: Push, code: string, subject?: s
 }
 
 function nodes(s: ObservationSample, push: Push): void {
-  if (s.fleet.machines === "unknown" || s.fleet.machines === 0) push("fleet_unknown");
+  const declared = s.fleet.machines;
+  if (declared === "unknown" || declared === 0) push("fleet_unknown");
+  else if (declared < MIN_MACHINES) push("fleet_below_minimum");
   for (const kind of NODE_KINDS) {
     const have = s.nodes.filter((n) => n.kind === kind).length;
-    const want = kind === "machine" && typeof s.fleet.machines === "number" ? s.fleet.machines : 1;
+    const want = kind === "machine" ? Math.max(MIN_MACHINES, typeof declared === "number" ? declared : 0) : 1;
     if (have < want) push("fleet_incomplete", kind);
   }
   for (const n of s.nodes) {
@@ -45,6 +50,8 @@ function traffic(s: ObservationSample, push: Push): void {
         const subject = `${direction}/${area}/${source}`;
         const cell = s.traffic.find((t) => t.direction === direction && t.area === area && t.source === source);
         zero(cell ? cell.legacy : "unknown", push, "legacy_traffic", subject);
+        // 新族计数实测 0 可以放行（该区确实没流量）；格子在但新族没观测到，说明这格的观测不完整，同样拒
+        if (cell && cell.floka === "unknown") push("floka_traffic_unknown", subject);
       }
     }
   }
