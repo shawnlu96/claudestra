@@ -71,6 +71,33 @@ describe("loadAppConfig 首次加载", () => {
     expect(await loadAppConfig()).toMatchObject({ mode: "relay" });
     expect(slept).toEqual([1000]);
   });
+  // 审查 P1 config-body-network-fallback：响应头到了、读响应体时连接断了，是网络错误不是「不是 JSON」
+  const truncated = () =>
+    Promise.resolve(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('{"mode":"rel'));
+            c.error(new TypeError("connection terminated"));
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  test("[验收线 1] 响应体读到一半断网：按网络错误重试，拿到 relay 配置", async () => {
+    fakeSleep();
+    const count = script([truncated, relay]);
+    expect(await loadAppConfig()).toMatchObject({ mode: "relay" });
+    expect(slept).toEqual([1000]);
+    expect(count()).toBe(2);
+  });
+  test("[验收线 1] 响应体每次都读断：重试用完 → AppConfigUnreachableError，不是 direct", async () => {
+    fakeSleep();
+    const count = script([truncated]);
+    expect(await loadAppConfig().catch((e: unknown) => e)).toBeInstanceOf(AppConfigUnreachableError);
+    expect(slept).toEqual([1000, 2000, 4000]);
+    expect(count()).toBe(4);
+  });
   test("200 但不是 JSON（next dev 的 HTML）→ direct，不重试", async () => {
     fakeSleep();
     script([() => Promise.resolve(new Response("<html></html>", { status: 200 }))]);

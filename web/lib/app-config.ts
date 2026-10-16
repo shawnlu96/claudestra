@@ -113,15 +113,23 @@ export class AppConfigUnreachableError extends Error {
 }
 
 async function fetchConfig(): Promise<ConfigFetchResult> {
+  const networkError = (): ConfigFetchResult => ({ kind: (globalThis as { location?: unknown }).location ? "network-error" : "no-host" });
   let r: Response;
   try {
     r = await fetch("/app-config.json", { cache: "no-store", credentials: "omit" });
   } catch {
-    return { kind: (globalThis as { location?: unknown }).location ? "network-error" : "no-host" };
+    return networkError();
   }
   if (!r.ok) return { kind: "status", status: r.status };
+  // 先读完再解析：响应头到了、读响应体时连接断了是网络错误（重试），只有读完了解析不了才是 not-json（CONTRACT 的 direct）
+  let text: string;
   try {
-    return { kind: "json", body: await r.json() };
+    text = await r.text();
+  } catch {
+    return networkError();
+  }
+  try {
+    return { kind: "json", body: JSON.parse(text) };
   } catch {
     return { kind: "not-json" };
   }
