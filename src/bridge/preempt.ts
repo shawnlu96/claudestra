@@ -26,9 +26,6 @@ const controlChannelId = () => process.env.CONTROL_CHANNEL_ID || "";
 let clearAgentPendings: (channelId: string) => unknown = () => undefined;
 export const setStopHooks = (h: { clearAgentPendings: typeof clearAgentPendings }) => void (clearAgentPendings = h.clearAgentPendings);
 
-/** 消息到达时刻（meta.ts）早于 at；时间戳读不出按刚到算 */
-const arrivedBefore = (env: Envelope, at: number | undefined): boolean => at !== undefined && Date.parse(env.meta.ts) < at;
-
 function senderName(env: Envelope): string {
   return env.from.kind === "user" ? (env.from.username ?? "用户") : env.from.kind === "api" ? env.from.name : "用户";
 }
@@ -77,8 +74,11 @@ export function noteHeldStop(env: Envelope, channelId: string, agent: string, ru
  */
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<"wall_wait" | void> {
   const { owner, stop } = env.meta.forwarded ? { owner: false, stop: false } : ownerStopOf(env);
-  // 押在叫停之前、叫停之后才投出的 owner 旧消息不算 owner 又开口了：不解除「停」（否则 Autopilot 随后替人续上）
-  if (owner && (stop || !arrivedBefore(env, turnCuts.stoppedAt(channelId)))) turnCuts.noteHuman(channelId, stop);
+  // Jev 判过排队的消息只在第一次到达时算 owner 开口：押着、叫停之后才投出的那次不再解除「停」（否则 Autopilot 随后替人续上）。
+  // 不比时间：叫停记录的时刻晚于停字到达、押着的停字放出时还会刷新，拿它比会把停字之后 owner 新说的话也当成旧消息（tests/inbound-route-stop.test.ts）
+  const route = env.meta.inboundRoute;
+  if (owner && (stop || !route?.noted)) turnCuts.noteHuman(channelId, stop);
+  if (route && !route.noted) env.meta.inboundRoute = { ...route, noted: true };
   if (!routeAdmitsWhileBusy(env)) return; // 开关 on、Jev 判了排队 / 合并：不打断，deliverToLocal 押到回合结束（bridge/inbound-route.ts）
   // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）。
   // 押在撞墙画面上时已经清过（noteHeldStop）：最终送达不再清，否则停之后才来的回程槽也一起没了

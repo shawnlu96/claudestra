@@ -49,7 +49,9 @@ bun src/manager.ts inbound-route status|off|observe|on
 
 ## 叫停
 
-owner 的「停」之后，押在叫停**之前**到达（`meta.ts` 早于 `stoppedAt`）、叫停之后才投出的 owner 旧消息不算 owner 又开口，不解除「停」（`bridge/preempt.ts`）——否则 Autopilot 随后替人续上。叫停之后 owner 新发的消息照旧解除。
+Jev 判过排队 / 合并的 owner 消息只在**第一次到达**时算 owner 开口（`bridge/preempt.ts` noteHuman，信封上记 `noted`）；押着、叫停之后才投出的那一次不再解除「停」——否则 Autopilot 随后替人续上。不拿时间戳比：叫停记录的时刻晚于停字到达（打断闸要等），押着的停字放出时还会刷新，比时间会把停字之后 owner 新说的话也当成旧消息。没有结论的消息（off 档全部）和改动前一样，每次投递都算开口。
+
+转交（`forward_to_agent`）出去的信封不带原目标的结论，到新目标那里按它的忙闲重新判。
 
 ## 已知限制
 

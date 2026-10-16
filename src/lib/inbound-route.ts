@@ -22,6 +22,8 @@ export interface StoredRoute {
   p: number;
   /** 判了排队的 owner 消息押满时限（held-flush ownerLate）：回合中直接送进去，不再押、也不抢占（不能晚几分钟再 C-c 掉 owner 后来开的回合） */
   release?: true;
+  /** 第一次到达时已经算过 owner 开口（bridge/preempt.ts noteHuman）：之后押着投出不再算，叫停之后投出的旧消息不解除「停」 */
+  noted?: true;
 }
 
 export interface RouteFrom {
