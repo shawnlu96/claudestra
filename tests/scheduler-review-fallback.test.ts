@@ -75,7 +75,8 @@ const swapDeps = (): ReviewSwapDeps => ({
 async function tick() {
   const manager = (...a: string[]) => a[1] === "scheduler-review-swap"
     ? reviewSwapStep(f.db, f.at("scheduler"), a[2], Number(a[4]), swapDeps()).catch((e: Error) => ({ ok: false, error: e.message })) : f.tickDeps.manager(...a);
-  const r = await schedulerAutoTick(f.db, projects, { ...f.tickDeps, manager });
+  // the service's read-only handle, as in production: every fallback write must go through the ledger CLI (writer process)
+  const r = await schedulerAutoTick(f.reader.get()!, projects, { ...f.tickDeps, manager });
   if (r.failed.length) throw new Error(JSON.stringify(r.failed));
   return r.cards[0];
 }
@@ -368,5 +369,19 @@ describe("no fallback epoch: unchanged; a fresh epoch never binds the author (re
     expect(epochs()).toEqual([]);
     const swap = (data: Record<string, unknown>) => ({ seq: 1, kind: "scheduler", data: { op: "reviewer_swap", ...data } }) as never;
     expect([replacementTag(swap({})), replacementTag(swap({ refusal: {} })), replacementTag(swap({ legacy: true }))]).toEqual(["", "-ex", "-re"]);
+  });
+});
+
+describe("the pass never writes the fallback itself (scheduler-model-outcome writer, PM evidence 2)", () => {
+  test("the tick's handle is query_only; the epoch still lands, written by the ledger CLI as the scheduler", async () => {
+    await reviewSent();
+    expect(() => f.reader.get()!.run("UPDATE scheduler_sessions SET state = 'retired'")).toThrow(); // what the pass holds refuses any write
+    const calls: string[] = [];
+    const manager = f.tickDeps.manager;
+    f.tickDeps.manager = async (...a) => { calls.push(a[1]!); return manager(...a); };
+    failTurns("codex", QUOTA_TURN);
+    expect(await tick()).toMatchObject({ step: "review_fallback" });
+    expect(calls.filter((c) => c === "scheduler-model-outcome")).toHaveLength(1);
+    expect(epochs()).toMatchObject([{ actor: "scheduler", data: { fallback: { trigger: "review_capacity" } } }]);
   });
 });
