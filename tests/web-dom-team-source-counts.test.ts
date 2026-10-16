@@ -5,6 +5,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { generateTeamFixture } from "../web/features/collab/shared/team-fixture-gen";
 import { sharedCollabSource } from "../web/features/collab/team-source-shared";
 import { SharedLedgerSession } from "../web/lib/api/shared-ledger";
+import { setAppConfigForTest } from "../web/lib/app-config";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
@@ -25,6 +26,7 @@ let components: { Shelf: unknown; MobileDag: unknown; ProductPanes: unknown; use
 const realFetch = globalThis.fetch;
 const realWarn = console.warn;
 const requests: string[] = [];
+const depsReads: string[] = [];
 const noop = () => {};
 
 beforeAll(async () => {
@@ -33,7 +35,10 @@ beforeAll(async () => {
   React = requireWeb("react") as ReactNS;
   ({ createRoot } = requireWeb("react-dom/client") as ReactDomClient);
   documentView = (globalThis as unknown as { document: DocumentView }).document;
+  setAppConfigForTest({ mode: "direct", fp: "fixture", machineName: "fixture", version: "" });
   globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0]) => {
+    // TEAMDEPS1: the product board also reads feature-deps; answer like an old center (404 → deps: []), nothing else may hit the network.
+    if (String(input).endsWith("/api/v1/shared-ledger/feature-deps")) { depsReads.push(String(input)); return new Response("{}", { status: 404 }); }
     requests.push(String(input)); throw new Error("network forbidden in counts fixture");
   }, { preconnect: () => { throw new Error("preconnect forbidden in counts fixture"); } });
   console.warn = () => {}; // Expected synthetic detail errors; assertions cover user-visible behavior instead of console text.
@@ -46,6 +51,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   globalThis.fetch = realFetch;
+  setAppConfigForTest(null);
   console.warn = realWarn;
   setLang("zh");
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
@@ -71,6 +77,7 @@ function fixture() {
 }
 async function snapshot(absent = false) {
   const fx = fixture();
+  depsReads.length = 0;
   if (absent) fx.list.features = [fx.details[0]!.feature];
   const identity = { center: "synthetic", team: fx.team, person: "fixture", project: fx.project, machine: "fixture" };
   const session = new SharedLedgerSession(identity, {
@@ -148,5 +155,7 @@ for (const lang of ["zh", "en"] as const) for (const width of [1200, 390]) {
       expect(dag.features[i]!.counts).not.toHaveProperty("activeUnknown"); expect(product.features[i]!.counts).not.toHaveProperty("activeUnknown");
     }
     expect(requests).toEqual([]);
+    expect(depsReads).toEqual(["/api/v1/shared-ledger/feature-deps"]);
+    expect(product.deps).toEqual([]);
   });
 }
