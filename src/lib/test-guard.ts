@@ -108,6 +108,33 @@ export function testSafeRuntimeDir(dir: string, defaultDir: string, env: Env = p
   return redirectToTemp("RUNTIME_DIR", "rt", dir, env, Boolean(named));
 }
 
+/** 与 tests/test-tmp-root.ts 的 PREFIX 同值：那边的过期清扫按这个前缀 + 属主 pid 认领，兜底建的根也归它清 */
+const TEST_RUN_ROOT_PREFIX = "cstra-test-run-";
+
+/**
+ * 没加载 tests/preload.ts 的 bun test 进程（仓库外 cwd、绝对路径、--config=/dev/null 跑）也把 TMPDIR 换成运行临时根
+ * （merge-arch-TMPLEAK2）：否则 recovery-* / ledger-* 之类用例自己 mkdtemp(tmpdir()) 的目录和本文件的 cstra-test-state/rt-、
+ * state-maintenance 的 cstra-test-maint- 全落在系统临时目录顶层、没人删（实测一次 68 个文件就留下 650 多个）。
+ * 做法同 tests/test-tmp-root.ts 的 installTestTmpRoot（src 不许依赖 tests/，只抄建根与子进程继承两步）：只管 runner 本身，
+ * preload 先装好根（tmpdir() 已在 cstra-test-run-* 里）、或继承了根的子进程都跳过；子进程显式给的 TMPDIR 照旧。
+ * runner 收尾不发 exit 事件（preload 靠 afterAll），这个根跑完留下一个，由之后带 preload 的运行按过期 + 属主已退出清掉。
+ */
+function installFallbackTestTmpRoot(env: Env = process.env): void {
+  const runner = /\.test\.[cm]?[jt]sx?$/.test((globalThis as { Bun?: { main?: string } }).Bun?.main ?? "");
+  if (!runner || !isTestProcess(env) || canonical(tmpdir()).split("/").some((s) => s.startsWith(TEST_RUN_ROOT_PREFIX))) return;
+  const root = mkdtempSync(join(canonical(tmpdir()), `${TEST_RUN_ROOT_PREFIX}${process.pid}-`));
+  for (const key of ["TMPDIR", "TMP", "TEMP"]) env[key] = root;
+  // Bun 不传 env 起的子进程用启动时的环境，补上当前的（同 tests/test-tmp-root.ts 的 inheritEnv）
+  const inherit = <T extends (...args: any[]) => any>(spawn: T): T => ((command: string[] | { env?: Env }, options?: { env?: Env }) => {
+    const config = Array.isArray(command) ? options : command;
+    const inherited = { ...config, env: config?.env ?? process.env };
+    return Array.isArray(command) ? spawn(command, inherited) : spawn(inherited);
+  }) as T;
+  Bun.spawn = inherit(Bun.spawn);
+  Bun.spawnSync = inherit(Bun.spawnSync);
+}
+installFallbackTestTmpRoot();
+
 /** 只由 tests/isolated-state.ts 设在独立状态目录的 bun test 子进程 env 里：必须走默认出借 journal 的用例（路由 / pushWork）在那里跑 */
 export const DEFAULT_LEND_JOURNAL_OK = "CLAUDESTRA_TEST_DEFAULT_LEND_JOURNAL";
 
