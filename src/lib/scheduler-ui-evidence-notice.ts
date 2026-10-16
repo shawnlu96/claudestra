@@ -20,12 +20,12 @@ import { appendEvent } from "./ledger-write.js";
 /** The fix order's one P1 after an automatic return: the code passed review, only the screenshots are re-taken. */
 export const UI_EVIDENCE_REDO_TEXT = "代码不用改，在当前 head 重拍同一组前后截图随交付带上";
 /** data.by of the scheduler's own rejection: the only non-manager rejection the PM gate reads (ledger-ui-approve-verdict.ts). */
-export const UI_EVIDENCE_REDO_BY = "scheduler";
+const UI_EVIDENCE_REDO_BY = "scheduler";
 
-export interface UiEvidenceDrift { code: string; why: string }
+interface UiEvidenceDrift { code: string; why: string }
 
 /** A known evidence conflict, or null when the evidence is valid or was never formally registered (legacy: notify as before). */
-export function uiEvidenceDrift(task: LedgerTask, events: readonly LedgerEvent[]): UiEvidenceDrift | null {
+function uiEvidenceDrift(task: LedgerTask, events: readonly LedgerEvent[]): UiEvidenceDrift | null {
   try {
     recheckUiEvidence(task, events);
     return null;
