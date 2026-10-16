@@ -1,11 +1,15 @@
 /**
- * 看板刷新提示（web/features/chat/components/stats-panel.tsx）：账号接口的 Claude 卡是实时读数时，
+ * 看板刷新提示（web/features/chat/refresh-note.ts，stats-panel.tsx 渲染）：账号接口的 Claude 卡是实时读数时，
  * /status 探测失败不再说「读取账号用量失败，显示的是上次读数或未知」——那句只在卡片不是实时的时候出（含冷却时刻）。
  */
 import { describe, expect, test } from "bun:test";
-import { claudeAccountLive, refreshNoteMessage, type RefreshNote } from "../web/features/chat/components/stats-panel";
+import { claudeAccountLive, refreshNoteMessage, type RefreshNote } from "../web/features/chat/refresh-note";
 import { quotaPanelData } from "../web/features/chat/quota-view";
-import { t } from "../web/lib/i18n";
+import { DICT } from "../web/lib/i18n-dict";
+import { fillParams } from "../web/lib/i18n-fill";
+
+/** 中英两种语言都过一遍（同 web/lib/i18n.tsx 的 t：中文原文 / 英文查表） */
+const both = (key: string, params?: Record<string, string>) => [fillParams(key, params), fillParams(DICT[key] ?? key, params)];
 
 const FAIL = "读取账号用量失败，显示的是上次读数或未知；{time} 前不再重试";
 const next = new Date(2026, 9, 16, 10, 30).getTime();
@@ -30,15 +34,19 @@ describe("refreshNoteMessage", () => {
     test(`${note.outcome} + 账号卡实时 → 不出「读取账号用量失败…」，也不暗示上面的数是旧的`, () => {
       const m = refreshNoteMessage(note, claudeAccountLive(sub("live")));
       expect(m?.key).not.toBe(FAIL);
-      const text = t(m!.key, m!.params);
-      expect(text).toContain("实时");
-      expect(text).not.toMatch(/失败|上次读数/);
+      const [zh, en] = both(m!.key, m!.params);
+      expect(zh).toContain("实时");
+      expect(zh).not.toMatch(/失败|上次读数/);
+      expect(en).toMatch(/live/);
+      expect(en).not.toMatch(/last reading|Couldn't read account usage/);
     });
 
     test(`${note.outcome} + 账号卡非实时 → 照旧出失败提示，含冷却时刻`, () => {
       const m = refreshNoteMessage(note, claudeAccountLive(sub("live_stale")));
       expect(m?.key).toBe(FAIL);
-      expect(t(m!.key, m!.params)).toContain(`${time} 前不再重试`);
+      const [zh, en] = both(m!.key, m!.params);
+      expect(zh).toContain(`${time} 前不再重试`);
+      expect(en).toContain(`No retry before ${time}`);
     });
   }
 
