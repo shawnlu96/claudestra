@@ -90,6 +90,38 @@ describe("usage-cache-write.sh 多写者合并", () => {
     expect(c.weekPct).toBe(50); // week 窗口没动
   });
 
+  test("QFA-1 ① 同周窗口:没 five_hour 的写者报更大的 7d(免费重置前的旧读数)不收,观测时刻不动", async () => {
+    await run(input(30, 18, 1787846400, 1788296400)); // 活跃会话:重置后 18
+    const before = cache();
+    await run(input(null, 97, null, 1788296400));     // 闲置会话:状态栏还是重置前的 97
+    const c = cache();
+    expect(c.weekPct).toBe(18);
+    expect(c.weekObservedAt).toBe(before.weekObservedAt);
+    expect(c.weekObservationQualification).toBe("observed");
+  });
+
+  test("QFA-1 ② 上一周的 resets_at 不让周窗口倒退(5h 同理)", async () => {
+    await run(input(30, 18, 1787846400, 1788296400));
+    const before = cache();
+    await run(input(null, 97, null, 1788296400 - 7 * 86400));
+    await run(input(90, 97, 1787846400 - 5 * 3600, 1788296400 - 7 * 86400)); // 带 5h 但两窗口都是旧的
+    const c = cache();
+    expect([c.weekPct, c.weekResets, c.weekObservedAt]).toEqual([18, 1788296400, before.weekObservedAt]);
+    expect([c.sessionPct, c.sessionResets]).toEqual([30, 1787846400]);
+  });
+
+  test("QFA-1 ③ 带 five_hour 的写者:同周升、同周降、新周轮转都收", async () => {
+    await run(input(30, 50, 1787846400, 1788296400));
+    await run(input(31, 60, 1787846400, 1788296400));
+    expect(cache().weekPct).toBe(60);
+    await run(input(32, 18, 1787846400, 1788296400)); // 免费重置后真降
+    expect(cache().weekPct).toBe(18);
+    await run(input(1, 2, 1787864400, 1788296400 + 7 * 86400));
+    expect([cache().weekPct, cache().weekResets]).toEqual([2, 1788296400 + 7 * 86400]);
+    await run(input(null, 40, null, 1788296400 + 14 * 86400)); // 没 5h 的写者报新一周:轮转照收
+    expect(cache().weekPct).toBe(40);
+  });
+
   test("旧缓存缺字段(peer 早期手抄格式)→ 直接写新", async () => {
     writeFileSync(cachePath, JSON.stringify({ sessionPct: 22, scrapedAt: 1, source: "statusline" }));
     await run(input(5, 60, 1787846400, 1788296400));
