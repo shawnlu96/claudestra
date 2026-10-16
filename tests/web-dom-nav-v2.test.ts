@@ -35,7 +35,8 @@ const current = (v: NavDomView, at: "aside" | "main") => {
 const section = (v: NavDomView, id: string) => v.host.querySelector(`[data-v2-section=${id}]:not([hidden])`);
 /** 弹窗 portal 在 host 外：从整个 body 找（根 tsc 没有 DOM 类型，经 v.all 取） */
 const inBody = (v: NavDomView, sel: string) => v.all(sel)[0] ?? null;
-const CollabSwitch = () => web<{ CollabSwitch: () => unknown }>("collab/collab-switch.tsx").CollabSwitch();
+/** 主区协作层；notices 用探针代替真的同步条 / 更新提示（那两个要构建时生成的 build-info） */
+const CollabSwitch = () => web<{ CollabSwitch(p: { notices: unknown }): unknown }>("collab/collab-switch.tsx").CollabSwitch({ notices: dom.React.createElement("i", { "data-notice-probe": "" }) });
 
 test("[验收线 2] 读取规则：读到就用、读失败保留上次值、从没读到按缺省开", () => {
   const { resolveNavV2 } = web<{ resolveNavV2(r: boolean | null, l: boolean | null): boolean }>("nav/nav-v2.ts");
@@ -104,12 +105,14 @@ test("[验收线 1][验收线 4] 1280 新版：侧栏常驻会话列表，今天
   expect(current(v, "main")).toBe("today");
   expect(v.host.querySelector("[data-nav-pages]")).toBeNull();
   expect(v.host.querySelector("aside input[type=search]")).not.toBeNull(); // 会话列表没被撤
+  expect(v.all("[data-v2-host=main] [data-v2-notices] [data-notice-probe]")).toHaveLength(1); // 同步 / 更新提示跟着宿主上来（E02 / E03）
   await v.click(tab(v, "rail", "projects"), "projects");
   await v.until(() => v.all("[data-v2-host=main] [data-v2-section=projects] [data-now-project]").length === 4, "main projects");
   const { closingCollab } = web<{ closingCollab(fn: () => void): () => void }>("collab/collab-switch.tsx");
   let opened = 0;
   await dom.React.act(async () => closingCollab(() => { opened++; })());
   expect([opened, current(v, "main"), tab(v, "rail", "sessions")?.getAttribute("aria-current")]).toEqual([1, null, "page"]);
+  expect(v.all("[data-v2-notices]")).toHaveLength(0); // 不盖就不挂第二份
   await v.unmount();
 });
 

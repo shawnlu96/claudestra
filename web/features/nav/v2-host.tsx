@@ -6,7 +6,7 @@
  * - 电脑：侧栏常驻会话列表（会话与项目永久平级），今天 / 项目 / 团队画在主区、盖住聊天但不卸载它（草稿、滚动不丢），点会话 / 通知直达就退回「会话」。
  * 页面一律从 V2_PAGES 静态注册表取；去过的页面隐藏而不卸载，切回来滚动位置还在。navV2 关掉 = Sidebar 换回 NavShell，本文件整套不渲染。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from "react";
 import type { VersionInfo } from "@/lib/api/version";
 import { machines } from "@/lib/machines";
 import { useAsks } from "../asks/asks-store";
@@ -101,10 +101,10 @@ function useSubFocus(host: React.RefObject<HTMLDivElement | null>, current: V2Pa
   }, [back]);
 }
 
-interface HostProps { at: "aside" | "main"; tab: NavTab; narrow: boolean; items: MeItem[]; version: VersionInfo | null }
+interface HostProps { at: "aside" | "main"; tab: NavTab; narrow: boolean; items: MeItem[]; version: VersionInfo | null; notices?: ReactNode }
 
 /** 页面层：当前页可见，去过的页隐藏常挂；「会话」与电脑上的「我的」不盖 */
-export function V2Host({ at, tab, narrow, items, version }: HostProps) {
+export function V2Host({ at, tab, narrow, items, version, notices }: HostProps) {
   const fp = useSyncExternalStore(subscribeFp, currentFp, noFp);
   const { project } = useCollabNav();
   const { current, from, back, open } = useSubPage(tab);
@@ -122,6 +122,8 @@ export function V2Host({ at, tab, narrow, items, version }: HostProps) {
   const props: V2PageProps = { fp, project, from, narrow, onBack: back, open, items, version };
   return (
     <div ref={host} className={`${css.host} ${at === "main" ? css.inMain : css.inAside}`} hidden={!covers} data-v2-host={at} data-v2-current={current}>
+      {/* 电脑主区盖住了聊天顶上的同步 / 更新提示：盖着期间在这里挂 chat.tsx 传来的同一对组件（零高度锚点，同 ChatMain），不盖就卸掉 */}
+      {notices && covers && <div className="relative" data-v2-notices>{notices}</div>}
       {seen.map((id) => {
         const e = V2_PAGES[id], on = id === current;
         const { Page } = e;
@@ -137,7 +139,7 @@ export function V2Host({ at, tab, narrow, items, version }: HostProps) {
 }
 
 /** 电脑主区（collab-switch.tsx 挂一行）：今天 / 项目 / 团队盖在聊天上；从这些页里开会话要先退回「会话」，开项目就留着当返回落点 */
-function MainHost() {
+function MainHost({ notices }: { notices: ReactNode }) {
   const tab = useNavTab(false);
   const nav = useChatNav();
   const { project } = useCollabNav();
@@ -166,14 +168,15 @@ function MainHost() {
   }, [active]);
   return (
     <ChatNavContext.Provider value={value}>
-      <V2Host at="main" tab={tab} narrow={false} items={[]} version={null} />
+      <V2Host at="main" tab={tab} narrow={false} items={[]} version={null} notices={notices} />
     </ChatNavContext.Provider>
   );
 }
 
-export function V2MainHost({ on }: { on: boolean }) {
+/** notices = 聊天顶上的同步条与更新提示（chat.tsx 经 CollabSwitch 传来；本文件不 import 它们，免得测试与截图入口牵进构建时生成的 build-info） */
+export function V2MainHost({ on, notices }: { on: boolean; notices?: ReactNode }) {
   const narrow = useNarrow();
-  return on && !narrow ? <MainHost /> : null;
+  return on && !narrow ? <MainHost notices={notices} /> : null;
 }
 
 const useWaits = (): number => useAsks().asks.filter(waitsOnOwner).length;

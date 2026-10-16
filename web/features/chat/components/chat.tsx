@@ -615,7 +615,7 @@ function ChatInner({ notices }: { notices?: ReactNode }) {
           <CollabSidebarGate><SidebarBoundary><Sidebar onSelect={closingCollab(toContent)} /></SidebarBoundary></CollabSidebarGate>
 
           <main className="relative flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
-            <CollabSwitch />
+            <CollabSwitch notices={<><SyncBanner /><UpdateToast /></>} />
             <ChatMain />
           </main>
         </div>
