@@ -2,6 +2,7 @@
  * 点「批准 / 驳回」由系统用 owner:self 的 person 凭据转发给中心（仍算 owner 本人批）。
  * 卡上只放审批要看的：提案人、标题、新建 / 修订、节点、说明前 300 字（过外发闸同款脱敏 redactForPeer）、到期；中心原文 / 凭据不进卡、不进日志。
  */
+import { hitEvidence, type AutoHit, type AutoHitEvidence } from "./center-proposal-auto.js";
 import { bindHash } from "./ask-bind.js";
 import { redactForPeer } from "./dispatch-redact.js";
 import { MASTER_PROJECT, ownerAnswered, type Ask, type AskBind, type NewAsk } from "./ledger-asks.js";
@@ -51,7 +52,7 @@ const when = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T"
 
 /** owner 卡的内容（CreateAskInput 同形，createdBy 固定）；selfPersonId = 本机 owner 在中心的 personId，提案人是他本人时换标题和提案人行；
  * ownerReason = 自动批准开着时、需要 owner 批的原因（PROPAUTO1，中文），不给就是原样 */
-export function inboxCard(localProjectId: string, r: ProposalRecord, selfPersonId = "", ownerReason = ""): NewAsk & { source: "system"; createdBy: string } {
+export function inboxCard(localProjectId: string, r: ProposalRecord, selfPersonId = "", ownerReason = "", hits?: AutoHit[]): NewAsk & { source: "system"; createdBy: string } {
   const p = r.proposal, params = paramsOf(localProjectId, r), bind = bindOf(params);
   const own = !!selfPersonId && r.proposer.personId === selfPersonId;
   const kind = p.kind === "revise" ? `修订（${p.featureId} v${p.baseVersion} → v${p.baseVersion + 1}）` : "新建 feature";
@@ -77,7 +78,7 @@ export function inboxCard(localProjectId: string, r: ProposalRecord, selfPersonI
       { id: APPROVE_BUTTON, label: "批准", style: "success" }, { id: REJECT_BUTTON, label: "驳回", style: "danger" }] }],
     allowText: false, blocking: true, expiresAt: p.expiresAt, askKey: inboxAskKey(r.proposalId), dedupKey: inboxDedupKey(params),
     bind: { ...bind, paramsHash: bindHash(bind, PROPOSAL_INBOX_CREATOR) },
-    extra: { centerProposal: { ...params } },
+    extra: { centerProposal: { ...params }, ...(hits ? { centerProposalAuto: hitEvidence(hits) } : {}) },
   };
 }
 
@@ -204,4 +205,11 @@ export function decisionResultText(title: string, p: InboxParams, out:
   if (op.state === "approved") return `${head}：已批准，等中心发布。`;
   if (op.state === "rejected") return `${head}：已驳回。`;
   return `${head}：已提交${out.decision === "approve" ? "批准" : "驳回"}，中心当前状态 ${op.state}。`;
+}
+
+
+/** 执行时沿用卡上脱敏且限量的分类证据；旧卡没有这个字段，保持空明细。 */
+export function cardHitEvidence(card: Ask): AutoHitEvidence {
+  const value = card.extra.centerProposalAuto as AutoHitEvidence | undefined;
+  return value && Array.isArray(value.hits) ? value : hitEvidence([]);
 }
