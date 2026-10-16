@@ -18,6 +18,8 @@ import { readProjectMode, setProjectMode, type SecurityPoolMode } from "./securi
 export type SentinelPilotMode = SecurityPoolMode;
 const LABEL = "sentinel-pilot";
 const MINUTE_MS = 60_000;
+/** cron 收尾可能先于最后回复落盘；只给结果行宽限，不扩大工具审计窗口。 */
+const RESULT_GRACE_MS = 60_000;
 /** 截止点 = 应检时刻 + maxRuntime + 这么久：cron 自己的超时收尾、恢复扫描都在这之前落定 */
 const REPORT_SLACK_MS = 30 * MINUTE_MS;
 
@@ -148,11 +150,18 @@ export function classifySlot(slot: number, record: CronRunRecord | undefined, se
 export const recordForSlot = (runs: readonly CronRunRecord[], jobId: string, slot: number): CronRunRecord | undefined =>
   runs.find((r) => r.jobId === jobId && r.epochMinute === Math.floor(slot / MINUTE_MS));
 
-/** 时间窗：dispatchAttemptedAt → finishedAt（没有 finishedAt 用截止时间） */
-export function runWindow(r: CronRunRecord): { from: number; to: number } | null {
+export interface RunWindow { from: number; to: number; resultTo?: number; nextDispatchAt?: number }
+
+/** 工具窗口保持原样；结果行宽限不能读进同任务下一次应检（包括次日）的回复。 */
+export function runWindow(r: CronRunRecord, runs: readonly CronRunRecord[] = []): RunWindow | null {
   const from = Date.parse(r.dispatchAttemptedAt ?? "");
   const to = Date.parse(r.finishedAt ?? r.deadlineAt ?? "");
-  return Number.isFinite(from) && Number.isFinite(to) ? { from, to } : null;
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  const next = runs.filter((n) => n.jobId === r.jobId && n.epochMinute > r.epochMinute)
+    .map((n) => Date.parse(n.dispatchAttemptedAt ?? "")).filter(Number.isFinite);
+  const nextDispatchAt = next.length ? Math.min(...next) : undefined;
+  const resultTo = Math.min(to + (r.finishedAt ? RESULT_GRACE_MS : 0), nextDispatchAt ?? Infinity);
+  return { from, to, resultTo, nextDispatchAt };
 }
 
 // ── 日报 ──
