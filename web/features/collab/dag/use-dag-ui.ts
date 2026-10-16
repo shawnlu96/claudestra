@@ -17,12 +17,13 @@ import { defaultOpen, donePageOf, drawable, openWith } from "./dag-layout";
 import { layoutFocus } from "./dag-focus-layout";
 import { jumpToNode } from "./dag-progress";
 import type { FeatureCard } from "./dag-types";
+import { peekCollabTab } from "../../nav/collab-tab-hint";
 
 export type DagTab = "product" | "dag" | "progress" | "team";
 export type DagView = "list" | "graph" | "full";
 
 export function useDagUi(features: readonly FeatureCard[]) {
-  const [tab, setTabRaw] = useState<DagTab>("product");
+  const [tab, setTabRaw] = useState<DagTab>(() => (peekCollabTab() ? "team" : "product")); // 团队页「成员与位子」直达（nav/collab-tab-hint.ts）
   const [featureId, setFeatureId] = useState<string | null>(null);
   const [manual, setManual] = useState<string[] | null>(null);
   const [doneOpen, setDoneOpen] = useState<ReadonlySet<string>>(() => new Set());

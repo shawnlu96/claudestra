@@ -6,7 +6,7 @@
  * 手机没有画布：分段「子 DAG / 谁在干活」列表，点开是全屏详情。
  * 底部时间轴放第二期。计数口径在 count-words.ts（看板模型），顶栏在 metrics-bar.tsx；没数据的指标整格不出。
  */
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useDagPanes } from "./dag/use-dag-panes";
 import { useCollabT } from "./collab-i18n";
@@ -45,6 +45,7 @@ import { useWeekQuota } from "./use-count-source";
 import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
 import v from "./v4/v4.module.css";
+import { peekCollabTab } from "../nav/collab-tab-hint";
 
 /** 模块级稳定引用：详情里的 effect 依赖它，每次渲染换新函数会白跑 */
 const closeTask = () => openCollabTask(null);
@@ -89,6 +90,9 @@ function useSheetSelection(openTask: string | null, narrow: boolean) {
     if (x && x.kind !== "task" && !openTask) prepare(`~${x.kind}`);
     s.select(x);
   };
+  // 团队页「成员与位子」「规划与提案」直达（nav/collab-tab-hint.ts）：手机团队在整屏页里，挂上就经 select 打开（压了历史，系统返回先回首页）
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- 只看挂载那一刻的提示
+  useEffect(() => { if (narrow && peekCollabTab()) select({ kind: "team" }); }, []);
   return { ...s, select };
 }
 

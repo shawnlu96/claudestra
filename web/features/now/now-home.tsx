@@ -180,3 +180,7 @@ function StripBody({ source, fp }: { source: Source; fp: string | null }) {
 export const NowPage = () => <WithSource render={(s) => <PageBody {...s} />} />;
 /** 侧栏列表最上方的一条（两种宽度都有） */
 export const NowStrip = () => <WithSource render={(s) => <StripBody {...s} />} />;
+
+const CompactBody = ({ source, fp }: { source: Source; fp: string | null }) => <Blocks view={useTodayView(source, true)} fp={fp} page={false} live />;
+/** 电脑图标栏「今天」入口（NAVBAR1）：侧栏条展开后那五块，不带收起行 */
+export const NowBlocksCompact = () => <WithSource render={(s) => <CompactBody {...s} />} />;
