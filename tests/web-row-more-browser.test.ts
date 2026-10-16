@@ -58,7 +58,8 @@ function Bar() { const a = useChatStore((s) => s.state.agents.find((x) => x.name
   return <header className="@container relative z-40 flex min-h-12 shrink-0 items-center gap-2 border-b border-base-300 bg-base-100 px-3 sm:px-4">
     <span className="truncate text-sm font-medium">dev-alpha</span>{a && <TopBarActions agent={a} busy={false} onManage={() => {}} />}</header>; }
 const App = () => <ChatStoreProvider><Load /><div className="flex h-screen w-full bg-base-100 text-base-content">
-  {top ? <main className="flex min-w-0 flex-1 flex-col"><Bar /></main> : <><Sidebar onSelect={() => {}} /><main className="hidden min-w-0 flex-1 flex-col sm:flex"><Bar /></main></>}</div></ChatStoreProvider>;
+  {top ? <main className="flex min-w-0 flex-1 flex-col"><Bar /></main>
+    : <><Sidebar onSelect={() => {}} /><main className="hidden min-w-0 flex-1 flex-col sm:flex"><Bar /></main></>}</div></ChatStoreProvider>;
 void machines.add({ fp: "mac-a", name: "mac-a" }).then(() => machines.setCurrent("mac-a")).then(() => createRoot(document.getElementById("root")).render(<App />));
 `;
 

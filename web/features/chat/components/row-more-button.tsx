@@ -23,6 +23,7 @@ export function MoreDotsIcon({ size = 15 }: { size?: number }) {
 }
 
 const stop = (e: SyntheticEvent) => e.stopPropagation();
+const FOCUS = "hover:bg-base-content/10 hover:text-base-content/80 focus-visible:outline-2 focus-visible:outline-primary";
 
 /** 常显 ⋯ 按钮本体。open = trigger 暴露的显式打开（undefined 时调用方就别渲染）。 */
 export function RowMoreButton({ open, className = "" }: { open: (x: number, y: number) => void; className?: string }) {
@@ -41,7 +42,7 @@ export function RowMoreButton({ open, className = "" }: { open: (x: number, y: n
       title={t("更多操作")}
       aria-haspopup="menu"
       draggable={false}
-      className={`grid size-7 shrink-0 place-items-center rounded-md text-base-content/40 transition-colors hover:bg-base-content/10 hover:text-base-content/80 focus-visible:outline-2 focus-visible:outline-primary sm:size-6 ${className}`}
+      className={`grid size-7 shrink-0 place-items-center rounded-md text-base-content/40 transition-colors sm:size-6 ${FOCUS} ${className}`}
       onClick={onClick}
       onPointerDown={stop}
       onTouchStart={stop}

@@ -245,7 +245,7 @@ test("[验收线 1][验收线 3] 项目组头：⋯ 与右键 / 长按同一个 
   const head = u.host.querySelector("li button")!;
   const btn = more(u.host)!;
   expect(btn).not.toBeNull();
-  expect(head.contains?.(btn as never)).toBeFalsy();
+  expect(head.querySelector("[data-row-more]")).toBeNull(); // ⋯ 不在折叠按钮里面
   await act(() => btn.click());
   await tick();
   const viaMore = menuShape();
