@@ -354,6 +354,7 @@ class Card {
       if (typeof plan !== "string") return this.out("refusal_epoch", plan.epoch); // MODELX：拒审已按豁免开新审查 epoch，不退人工
       return this.escalate(m.failedReason(`${ref.agent} ${what}`, failure.message, plan), sent.id);
     }
+    const resent = await (await import("./worker-submit-confirm.js")).confirmStart(this, sent, ref, w, seen); if (resent) return this.out(...resent); // RESTATEGO1
     const alarm = await this.unclaimed(sent, ref, pre?.kind === "suspected" ? pre.note : "");
     if (alarm) return alarm;
     if (seen.state === "unknown") return this.out("held", `${wait.reason}；${seen.reason}`);
@@ -444,6 +445,7 @@ class Card {
     if (back) return this.out("manual", back);
     await (await import("./scheduler-merge-handoff-private.js")).narrowPrivateMerge(this, plan); // PRIVLOCK2：私仓卡退回人工前收窄锁
     await (await import("./scheduler-review-seat-wait.js")).trackReviewSeatWait(this.db, this.task, snap, plan, this.deps);
+    await (await import("./scheduler-start-gap.js")).trackStartGap(this, snap, plan); // RESTATEGO1：在 build 却没开工单，记等待原因 / 重规划
     if (plan.kind === "escalate") await (await import("./scheduler-head-refetch.js")).observeFixSelfHeal(this, plan); // SELFHEAL1 observe sample
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
