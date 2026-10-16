@@ -205,9 +205,10 @@ async function sidebarViewsOnce(v: Variant) {
   for (const width of [390, 1280]) {
     const s = await open(v, width);
     out[`expanded-${width}`] = { m: await s.page.evaluate<Measure>(MEASURE), issues: await shot(s.page, v, s.size, "sidebar-expanded") };
-    await s.page.evaluate(`[...document.querySelectorAll("aside li button")].find((b) => b.innerText.trim().startsWith("网页改版")).click()`);
+    await s.page.locator("aside button:not([data-now-project])").filter({ has: s.page.getByText("网页改版", { exact: true }) }).click();
     await s.page.waitForTimeout(300);
     out[`collapsed-${width}`] = { m: await s.page.evaluate<Measure>(MEASURE), issues: await shot(s.page, v, s.size, "sidebar-collapsed") };
+    expect(out[`collapsed-${width}`].m.rows).toBe(out[`expanded-${width}`].m.rows - 3);
     expect(s.blocked).toEqual([]);
     expect(s.errors).toEqual([]);
     await s.ctx.close();
