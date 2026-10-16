@@ -14,13 +14,15 @@ import type { LedgerEvent, LedgerTask, Stage } from "../src/lib/ledger-stages.js
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { beginMergeRun } from "../src/lib/scheduler-merge.js";
+import { configurePmQuietMode } from "../src/lib/scheduler-ui-evidence-repair.js";
 import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/scheduler-plan.js";
 import type { PoolFacts } from "../src/lib/scheduler-pool-plan.js";
 import { FLOW_TEMPLATES, LATEST_TEMPLATE_VERSION, nodeAt, templateFor } from "../src/lib/scheduler-template.js";
 import { autoFixture, H2 } from "./scheduler-auto-helpers.js";
 
 let f: ReturnType<typeof autoFixture>;
-afterEach(() => f?.close());
+const restore: (() => void)[] = [];
+afterEach(() => { while (restore.length) restore.pop()!(); f?.close(); });
 
 const setTemplate = async (template: WorkflowTemplate, version: string) => {
   const w = getWorkflow(f.db, "T1")!;
@@ -61,12 +63,22 @@ describe("ui v3: restate like code v3, merge still behind the owner screenshot g
   });
 
   test("no screenshots and no digest: the pass escalates ui_missing_screenshots instead of moving to merge", async () => {
+    restore.push(configurePmQuietMode(() => "off")); // PMQUIET1: pmQuiet=off keeps the old escalation verbatim
     await v3Card("ui");
     f.db.query("UPDATE tasks SET extra = ? WHERE id = 'T1'").run(JSON.stringify({ fileGlobs: ["src/lib/x.ts"] }));
     await toPassedReview();
     expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("ui_missing_screenshots") });
     expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
     expect(f.task().stage).toBe("review");
+  });
+
+  test("pmQuiet on (default): the same pass goes back to fix for the screenshots, stays auto, no manual", async () => {
+    await v3Card("ui");
+    f.db.query("UPDATE tasks SET extra = ? WHERE id = 'T1'").run(JSON.stringify({ fileGlobs: ["src/lib/x.ts"] }));
+    await toPassedReview();
+    expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
+    expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+    expect(f.task().stage).toBe("fix");
   });
 
   test("restate-hold stops a ui v3 card until PM releases it", async () => {
