@@ -103,7 +103,9 @@ test("N8A8 r1：点开首轮 429 没拿到详情的 feature → 立刻重拉，�
   await tick(1_100); // Retry-After 1 秒过去；5 秒轮询还没到
   expect(details.length).toBe(firstRound);
   const t0 = Date.now();
-  await React.act(async () => card()!.click());
+  // PDFOCUS1：单击卡 = 选中，双击才进子 DAG
+  const Mouse = (globalThis as unknown as { MouseEvent: new (t: string, i: { bubbles: boolean }) => unknown }).MouseEvent;
+  await React.act(async () => (card() as unknown as { dispatchEvent(e: unknown): void }).dispatchEvent(new Mouse("dblclick", { bubbles: true })));
   await until(() => details.length > firstRound, "detail read after opening the feature");
   expect(details[firstRound]).toBe(TARGET.id);
   // 子 DAG 里出现这个 feature 的在跑 / 计划节点（夹具节点键 i28-C*；没详情时只有中心 counts，没有节点）

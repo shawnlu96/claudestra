@@ -135,8 +135,10 @@ describe("maintenance fairness and the pass budget", () => {
       const cursor: Record<string, string | undefined> = {};
       const maintenance = { path: join(f.dir, "m.lock"), marker: join(f.dir, "u.marker"), request: join(f.dir, "m.req") };
       const cfg = { ...config, autoDispatch: true };
+      // 让锁不归这条测：真的 lockYieldStep 读状态目录的 registry.json，同分片前面的测试留下一份就把 T1 判成停滞、多一次调用
+      const lockYield = async () => [];
       for (let i = 0; i < 3; i++) {
-        const r = await schedulerPass(f.db, cfg, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: 25, autoDeps: () => f.tickDeps });
+        const r = await schedulerPass(f.db, cfg, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: 25, autoDeps: () => f.tickDeps, lockYield });
         expect(r).toEqual({ ran: true, failed: [] });
       }
       expect(calls).toEqual(["scheduler-observe O1", "scheduler-observe O1", "scheduler-observe O1"]);
