@@ -37,9 +37,8 @@ let ui: {
 
 // mock.module 对整个 bun test 进程生效：同片里排在前面的文件（如 web-dom-agent-list-recovery 把 useFullScope 换成 () => false）
 // 会让设置弹窗按非全权设备只列本地页、没有伙伴机器页。本文件按 owner 设备挂，钉成 true（单跑时真实现也是 true），afterAll 换回原样。
-const CONTACTS = "../web/features/chat/contacts-data";
-const contactsBefore = { ...(await import(CONTACTS)) };
-mock.module(CONTACTS, () => ({ ...contactsBefore, useFullScope: () => true }));
+const contactsBefore = { ...require("../web/features/chat/contacts-data.ts") };
+mock.module("../web/features/chat/contacts-data", () => ({ ...contactsBefore, useFullScope: () => true }));
 
 const NOW = Date.now();
 const fresh = () => ({ ...todayWorld(NOW), fp: "mac-a", m: machinesWorld(NOW) });
@@ -103,7 +102,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  mock.module(CONTACTS, () => contactsBefore);
+  mock.module("../web/features/chat/contacts-data", () => contactsBefore);
   globalThis.fetch = realFetch;
   machines.currentFp = realFp;
   setContextRequestForTest(null);
