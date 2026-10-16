@@ -6,8 +6,9 @@
  * 借入读今天页共用的那份 useSharedBorrowView（「在干活」计数也读它，同一条 15 秒轮询，后台自停）。
  * 纯计算在 now-machines-model.ts。也导出设置页两处原位置的那行链接（RunningElsewhereLink）。
  */
-import { useEffect, useState, useSyncExternalStore, type MouseEvent } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore, type MouseEvent } from "react";
 import { useT } from "@/lib/i18n";
+import { machines } from "@/lib/machines";
 import { usePeerOnline } from "../chat/components/contacts-lines";
 import { useChatNav } from "../chat/components/nav-context";
 import { Icon } from "../collab/collab-icons";
@@ -29,30 +30,41 @@ const visibleNow = () => document.visibilityState !== "hidden";
 const visibleSsr = () => true;
 
 /*
- * 今天页看到的停止起点（observeStopping）：模块级，团队块卸下再挂（切后台、收起侧栏条）也不丢，起点不会被重新算晚。
+ * 今天页看到的停止起点（observeStopping）：模块级，按机器 fp 分表（订单号不含机器，跨机器可能同号）；当前机器只读写自己那张表。
+ * 团队块卸下再挂（切后台、收起侧栏条、切到别的机器再回来）也不丢，起点不会被重新算晚。
  * 换页刷新即清空，之后从头一次看到算起——只会晚报停住，不会早报。
  */
-let seenStopping: ReadonlyMap<string, number> = new Map();
+const machineKey = (fp: string | null) => fp ?? "";
+const NO_SEEN: ReadonlyMap<string, number> = new Map();
+let seenByFp: ReadonlyMap<string, ReadonlyMap<string, number>> = new Map();
 const seenSubs = new Set<() => void>();
 const subscribeSeen = (cb: () => void) => {
   seenSubs.add(cb);
   return () => void seenSubs.delete(cb);
 };
-const getSeen = () => seenStopping;
-function setSeen(m: ReadonlyMap<string, number>) {
-  if (m === seenStopping) return;
-  seenStopping = m;
+const seenOf = (fp: string) => seenByFp.get(fp) ?? NO_SEEN;
+function setSeen(fp: string, m: ReadonlyMap<string, number>) {
+  if (m === seenOf(fp)) return;
+  seenByFp = new Map(seenByFp).set(fp, m);
   seenSubs.forEach((f) => f());
 }
-/** 测试用：预置 / 清空看到的停止起点 */
-export const setSeenStoppingForTest = (m: ReadonlyMap<string, number> = new Map()) => setSeen(m);
+/** 测试用：预置当前机器（不给 fp 时）看到的停止起点；不给 m = 所有机器全清空 */
+export function setSeenStoppingForTest(m?: ReadonlyMap<string, number>, fp: string = machineKey(machines.currentFp())) {
+  seenByFp = m ? new Map([[fp, m]]) : new Map();
+  seenSubs.forEach((f) => f());
+}
+const subscribeMachines = (cb: () => void) => machines.subscribe(cb);
+const currentFp = () => machines.currentFp();
+const noFp = () => null;
 
 export function NowTeamMachines() {
   const tr = useNowT();
   const peers = usePeerOnline();
   const visible = useSyncExternalStore(subscribeVis, visibleNow, visibleSsr);
+  const fp = machineKey(useSyncExternalStore(subscribeMachines, currentFp, noFp));
   if (!peers?.total || !visible) return null;
-  return <MachineRows peers={peers} tr={tr} />;
+  // 按机器重挂：useLendState 的数据只属于这台机器，停止起点也只记进这台的表
+  return <MachineRows key={fp} fp={fp} peers={peers} tr={tr} />;
 }
 
 /** 一行可展开的：图标 + 「借出在跑 N 单」+ 警示色「其中 K 单停住」+ 箭头；展开的内容走 Fold 的高度动效 */
@@ -75,14 +87,15 @@ function FoldLine({ hook, icon, text, stuck, tr, children }: {
   );
 }
 
-function MachineRows({ peers, tr }: { peers: PeerOnline; tr: Translate }) {
+function MachineRows({ fp, peers, tr }: { fp: string; peers: PeerOnline; tr: Translate }) {
   const lend = useLendState();
   const borrow = useSharedBorrowView();
   const open = useOpeners();
   const tick = useTick(5000);
+  const getSeen = useCallback(() => seenOf(fp), [fp]);
   const seen = useSyncExternalStore(subscribeSeen, getSeen, getSeen);
   const { data, orders } = lend;
-  useEffect(() => setSeen(observeStopping(seenStopping, { data, orders }, Date.now())), [data, orders]);
+  useEffect(() => setSeen(fp, observeStopping(seenOf(fp), { data, orders }, Date.now())), [fp, data, orders]);
   const view = machinesView(peers, lend, borrow, seen);
   if (!view) return null;
   const { lent, borrowed } = view;

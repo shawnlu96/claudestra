@@ -281,3 +281,39 @@ test("借入行的心跳年龄跟着时钟走：/borrow 暂时拉不到（保留
   expect(v.text("[data-remote-row=r-a1]")).toContain("5 分钟前");
   await v.unmount();
 }, 20_000);
+
+/** 换到另一台机器：改当前 fp 再重挂（同 WithSource 按 fp 重挂子树） */
+async function onMachine(fp: string, lend: object, at: number) {
+  world.fp = fp;
+  world.m = { ...world.m, lend };
+  Date.now = () => at;
+  const v = await mount("main");
+  await until(() => calls.includes("GET /api/v1/lend/grants") && v.all("[data-now-borrowed]").length === 1, `rows on ${fp}`);
+  await tick(50);
+  calls.length = 0;
+  return v;
+}
+
+test("[验收线 2] 停止起点按机器分开记：A 看到收回 → 切到没有借出单的 B → 回 A，超时的照样写停住", async () => {
+  ui.setSeenStopping();
+  const lendA = world.m.lend, lendB = { ...(lendA as object), orders: [] };
+  let v = await onMachine("mac-a", lendA, NOW);
+  expect(v.text("[data-now-team] [data-now-lent] button")).toBe("借出在跑 2 单");
+  await v.unmount();
+  v = await onMachine("mac-b", lendB, NOW + 90_000);
+  expect(v.all("[data-now-lent]")).toHaveLength(0);
+  await v.unmount();
+  v = await onMachine("mac-a", lendA, NOW + 90_000);
+  expect(v.text("[data-now-team] [data-now-lent] button")).toBe("借出在跑 2 单其中 1 单停住");
+  await v.unmount();
+});
+
+test("[验收线 2] 停止起点按机器分开记：B 上同号的单刚看到收回，不继承 A 的起点，是停止中", async () => {
+  ui.setSeenStopping();
+  const lendA = world.m.lend;
+  let v = await onMachine("mac-a", lendA, NOW);
+  await v.unmount();
+  v = await onMachine("mac-b", lendA, NOW + 90_000);
+  expect(v.text("[data-now-team] [data-now-lent] button")).toBe("借出在跑 2 单");
+  await v.unmount();
+});
