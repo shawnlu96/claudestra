@@ -100,8 +100,35 @@ function StripSummary({ view, tr }: { view: TodayView; tr: Translate }) {
   );
 }
 
-function PageBody({ source, fp }: { source: Source; fp: string | null }) {
+/** 盖在整页之上的弹层：原生 / daisy 模态；公共外壳 CenteredModal、ResponsiveShell、底部抽屉都带 .overlay-in（用量看板就是这种，自己不拦 Esc）；
+ *  待办 / 未托管会话抽屉是 fixed inset-0 z-50，菜单遮罩是 fixed inset-0 z-[997] */
+const OVERLAY_SELECTOR = "dialog[open], .modal-open, [aria-modal=true], .overlay-in, .fixed.inset-0.z-50, .fixed.inset-0.z-\\[997\\]";
+
+/** 这次 Esc 归别人：输入框里（含输入法组字）、已被处理过、或上面还开着别的弹层 */
+function escTakenElsewhere(e: KeyboardEvent): boolean {
+  if (e.defaultPrevented || e.isComposing) return true;
+  const el = e.target instanceof HTMLElement ? e.target : null;
+  if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return true;
+  return !!document.querySelector(OVERLAY_SELECTOR);
+}
+
+/** 整页层的 Esc：只在这层挂着时监听，卸载即移除 */
+function useEscClose(onClose: (() => void) | undefined) {
+  useEffect(() => {
+    if (!onClose) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || escTakenElsewhere(e)) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+}
+
+/** onClose 只有侧栏条「整页」盖出来的那层才给（collab-switch）；空状态主区底下没有可回去的，不给就没有返回按钮、不听 Esc */
+function PageBody({ source, fp, onClose }: { source: Source; fp: string | null; onClose?: () => void }) {
   const tr = useNowT();
+  useEscClose(onClose);
   const view = useTodayView(source, true);
   const ref = useRef<HTMLDivElement>(null);
   // 整页是 openToday 盖出来的：挂上时取走那次请求滚过去；开着时再来的请求（「看额度」）也滚
@@ -119,6 +146,13 @@ function PageBody({ source, fp }: { source: Source; fp: string | null }) {
     <div className="h-full w-full min-w-0 flex-1 overflow-y-auto" data-now="page" ref={ref}>
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 px-4 py-6 sm:px-6">
         <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1">
+          {onClose && (
+            <button type="button" className="-ml-2 inline-flex shrink-0 items-center gap-1 self-center rounded-lg px-2 py-1 text-[13px] text-base-content/65 transition-colors hover:bg-base-300/50"
+              title={tr("返回（Esc）")} data-now-back onClick={onClose}>
+              <Icon name="arrowLeft" size={14} />
+              <span>{tr("返回")}</span>
+            </button>
+          )}
           <h2 className="text-lg font-semibold">{tr("今天")}</h2>
           <p className="text-sm text-base-content/55" data-now-summary>{`${waitsText(view, tr)} · ${busyText(view, tr)}`}</p>
         </header>
@@ -176,7 +210,7 @@ function StripBody({ source, fp }: { source: Source; fp: string | null }) {
   );
 }
 
-/** 桌面没选会话时的主区；侧栏条「整页」盖出来的那层 */
-export const NowPage = () => <WithSource render={(s) => <PageBody {...s} />} />;
+/** 桌面没选会话时的主区；侧栏条「整页」盖出来的那层（传 onClose：带返回按钮、Esc 关） */
+export const NowPage = ({ onClose }: { onClose?: () => void } = {}) => <WithSource render={(s) => <PageBody {...s} onClose={onClose} />} />;
 /** 侧栏列表最上方的一条（两种宽度都有） */
 export const NowStrip = () => <WithSource render={(s) => <StripBody {...s} />} />;

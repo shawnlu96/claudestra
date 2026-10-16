@@ -55,7 +55,7 @@ export function CollabSwitch() {
   if (!project) return null;
   return (
     <div className="absolute inset-0 z-[45] flex bg-base-100">
-      {project === TODAY_KEY ? <NowPage /> : (
+      {project === TODAY_KEY ? <NowPage onClose={closeCollab} /> : (
         <>
           <CollabSidebarRail />
           <CollabPaneBoundary key={`${view ?? ""}:${project}`} onClose={closeCollab}>
