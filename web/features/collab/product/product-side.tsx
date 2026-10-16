@@ -38,12 +38,17 @@ export function ProductSide(p: ProductSideProps): React.ReactNode {
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
   }, [open, onClose]);
-  // 只有边页抢焦点：模块页要让焦点留在卡上，第二次 Enter 才能进模块
+  // 只有边页抢焦点：模块页要让焦点留在卡上，第二次 Enter 才能进模块。
+  // 关边页时只在焦点还在边页里（或随边页一起没了）才还回去；用户已经把焦点移到别处（如卡的主按钮）就不动
   useEffect(() => {
     if (!edgeId) return;
-    const previous = document.activeElement;
-    ref.current?.querySelector('button')?.focus({ preventScroll: true });
-    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true }); };
+    const previous = document.activeElement, box = ref.current;
+    box?.querySelector('button')?.focus({ preventScroll: true });
+    return () => {
+      const now = document.activeElement;
+      const lost = !now || now === document.body || !!box?.contains(now);
+      if (lost && previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true });
+    };
   }, [edgeId]);
   if (edge) {
     return <div ref={ref} className={s.side} data-pd-side={edge.id}>

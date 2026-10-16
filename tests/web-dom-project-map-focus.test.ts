@@ -182,3 +182,26 @@ test("选中 + 过滤叠加：选中的卡不豁免过滤；选中边后端点�
   await click(main(host, "f-team"), 0);
   expect(features).toEqual(["f-team"]);
 });
+
+test("键盘：从边页把焦点移到端点卡，Enter 选中后焦点留在卡上，再按 Enter（对真实焦点）进入", async () => {
+  const { host, features } = await render();
+  const doc = () => (globalThis as unknown as { document: { activeElement: unknown } }).document;
+  const focus = (e: El) => react.act(async () => (e as unknown as { focus(): void }).focus());
+  const label = one(host, '[data-pd-label="dep:f-private>f-team"]');
+  await focus(label);
+  await click(label, 0);
+  expect(side(host)?.getAttribute("data-pd-side")).toBe("dep:f-private>f-team");
+  await focus(main(host, "f-team"));
+  await click(main(host, "f-team"), 0);
+  expect(side(host)?.getAttribute("data-pd-side")).toBe("f-team");
+  expect(doc().activeElement === main(host, "f-team")).toBe(true);
+  await click(doc().activeElement as El, 0);
+  expect(features).toEqual(["f-team"]);
+  // 真关掉边页（Esc）时，焦点照旧还给打开前的元素
+  await focus(label);
+  await click(label, 0);
+  expect(side(host)?.getAttribute("data-pd-side")).toBe("dep:f-private>f-team");
+  await esc();
+  expect(side(host)).toBeUndefined();
+  expect(doc().activeElement === one(host, '[data-pd-label="dep:f-private>f-team"]')).toBe(true);
+});
