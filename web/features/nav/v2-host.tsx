@@ -1,6 +1,6 @@
 "use client";
 /**
- * 新版整页宿主（NAVV2-SHELLA1）：navV2 开着时替 NAVBAR1 的 NavShell 挂在 Sidebar 里（V2Shell），电脑另在主区挂一层（V2MainHost，collab-switch.tsx）。
+ * 新版整页宿主（NAVV2-SHELLA1）：navV2 开着时替 NAVBAR1 的 NavShell 挂在 Sidebar 里（V2Shell），电脑另在主区挂一层（V2MainHost，经 nav-v2 登记给 collab-switch.tsx）。
  * 五个入口仍是同一个 nav-tab.ts store、同一组底部栏 / 图标栏 / 「我的」条目；变的只是页面画在哪：
  * - 手机：盖在 aside 原列表上（同 NAVBAR1，底部栏随列表一起滑走），子页（我的 → 设置）带返回；
  * - 电脑：侧栏常驻会话列表（会话与项目永久平级），今天 / 项目 / 团队画在主区、盖住聊天但不卸载它（草稿、滚动不丢），点会话 / 通知直达就退回「会话」。
@@ -20,8 +20,8 @@ import { useMeItems, type MeActions, type MeItem } from "./me-menu";
 import { MineV2Page } from "./mine-v2-page";
 import type { NavCounts } from "./nav-button";
 import { NavRail, RAIL_W } from "./nav-rail";
-import { setTab, useNavTab, type NavTab } from "./nav-tab";
-import { useV2T, type V2PageId, type V2PageProps } from "./nav-v2";
+import { useNavTab, type NavTab } from "./nav-tab";
+import { leaveV2Main, registerV2MainHost, setV2MainCovers, useV2T, type V2PageId, type V2PageProps } from "./nav-v2";
 import { PhoneNav, PHONE_NAV_H } from "./phone-nav";
 import { ProjectsV2Page } from "./project-v2-page";
 import { SessionV2Page } from "./session-v2-page";
@@ -53,12 +53,6 @@ export const V2_PAGES: Readonly<Record<V2PageId, V2Entry>> = {
 const subscribeFp = (cb: () => void) => machines.subscribe(cb);
 const currentFp = () => machines.currentFp();
 const noFp = () => null;
-
-/** 电脑主区宿主此刻盖没盖着聊天：点会话 / 通知直达（collab-switch 的 closingCollab）据此退回「会话」 */
-let mainCovers = false;
-export function leaveV2Main(): void {
-  if (mainCovers) setTab("sessions");
-}
 
 const ChevronLeft = () => (
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -116,8 +110,8 @@ export function V2Host({ at, tab, narrow, items, version, notices }: HostProps) 
   useSubFocus(host, current, back);
   useEffect(() => {
     if (at !== "main") return;
-    mainCovers = covers;
-    return () => { mainCovers = false; };
+    setV2MainCovers(covers);
+    return () => setV2MainCovers(false);
   }, [at, covers]);
   const props: V2PageProps = { fp, project, from, narrow, onBack: back, open, items, version };
   return (
@@ -178,6 +172,7 @@ export function V2MainHost({ on, notices }: { on: boolean; notices?: ReactNode }
   const narrow = useNarrow();
   return on && !narrow ? <MainHost notices={notices} /> : null;
 }
+registerV2MainHost(V2MainHost);
 
 const useWaits = (): number => useAsks().asks.filter(waitsOnOwner).length;
 

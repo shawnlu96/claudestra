@@ -16,8 +16,7 @@ import { closeCollab, takeReleasedReads, useCollabNav } from "./collab-nav";
 import { CollabSidebarRail } from "./collab-sidebar";
 import { NowPage, TODAY_KEY } from "../now/now-home";
 import { RosterPage } from "./team/roster-page";
-import { leaveV2Main, V2MainHost } from "../nav/v2-host";
-import { useNavV2 } from "../nav/nav-v2";
+import { leaveV2Main, useNavV2, v2MainHost } from "../nav/nav-v2";
 import { ProjectV2Page } from "./project-v2-page";
 
 const subscribeMachines = (cb: () => void) => machines.subscribe(cb);
@@ -69,10 +68,11 @@ export function CollabSwitch({ notices }: { notices?: ReactNode } = {}) {
     return () => clearTimeout(timer);
   }, [project, store]);
   const v2 = useNavV2();
+  const V2MainHost = v2MainHost();
   const content = project && <SharedCollabContent project={project} fallback={<CollabView project={project} />} />;
   return (
     <>
-      <V2MainHost on={v2} notices={notices} />
+      {V2MainHost && <V2MainHost on={v2} notices={notices} />}
       {project && (
         <div className="absolute inset-0 z-[45] flex bg-base-100">
           {project === TODAY_KEY ? <NowPage onClose={closeCollab} /> : (

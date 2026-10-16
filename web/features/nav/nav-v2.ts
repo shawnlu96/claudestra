@@ -4,7 +4,7 @@
  * 每台机器各一份，读 GET /settings（复用 lib/api/settings.ts），挂载与回前台时刷新；读失败保留上次值（内存 + localStorage），
  * 从没读到过就按缺省开。写只在设置里（nav-v2-section.tsx 经 useSettingsFlag，要 manage），成功后经 onSettingsFlagWrite 当场跟上。
  */
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore, type ComponentType, type ReactNode } from "react";
 import { getSettings } from "@/lib/api/settings";
 import { useLang } from "@/lib/i18n";
 import { fillParams } from "@/lib/i18n-fill";
@@ -13,7 +13,7 @@ import { onSettingsFlagWrite } from "../chat/components/settings/settings-flag";
 import { useNavT } from "./use-nav-t";
 import type { VersionInfo } from "@/lib/api/version";
 import type { MeItem } from "./me-menu";
-import type { NavTab } from "./nav-tab";
+import { setTab, type NavTab } from "./nav-tab";
 
 /** 宿主里的页：五个入口 + 「我的」下的设置页（v2-host.tsx 的静态注册表按它取） */
 export type V2PageId = NavTab | "settings";
@@ -113,4 +113,20 @@ const EN: Record<string, string> = {
 export function useV2T(): ReturnType<typeof useNavT> {
   const lang = useLang(), base = useNavT();
   return useMemo(() => (s: string, p?: Parameters<typeof base>[1]) => (lang === "en" && Object.hasOwn(EN, s) ? fillParams(EN[s]!, p) : base(s, p)), [lang, base]);
+}
+
+/**
+ * 电脑主区宿主（v2-host.tsx V2MainHost）在 v2-host 加载时登记到这里（Sidebar 引它，应用壳里总在）；协作层 collab-switch.tsx 只经这里取，
+ * 不静态 import v2-host——那边牵着机器切换、终端等整套 UI（含 next/*），只挂协作层的页面 / 测试台会被一起拖进来。
+ */
+export type V2MainHostSlot = ComponentType<{ on: boolean; notices?: ReactNode }>;
+let mainHost: V2MainHostSlot | null = null;
+export const registerV2MainHost = (host: V2MainHostSlot): void => { mainHost = host; };
+export const v2MainHost = (): V2MainHostSlot | null => mainHost;
+
+/** 电脑主区宿主此刻盖没盖着聊天（V2Host 维护）：点会话 / 通知直达（collab-switch 的 closingCollab）据此退回「会话」 */
+let mainCovers = false;
+export const setV2MainCovers = (on: boolean): void => { mainCovers = on; };
+export function leaveV2Main(): void {
+  if (mainCovers) setTab("sessions");
 }
