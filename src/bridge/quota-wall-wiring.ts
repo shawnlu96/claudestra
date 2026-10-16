@@ -6,8 +6,8 @@
 import { MASTER_DIR } from "./config.js";
 import { latestSessionIdForCwd } from "./session-ids.js";
 import { existsSync, unlinkSync } from "fs";
-import { countsAsActivity, dueForResume, giveUpText, loadResumeStates, markResumed, noteActivity, noteApiError, noteOverload, noteTurnOk, onTurnOk, resumeDelayMs,
-  resumeText, saveResumeStates, dropOffline, type ApiErrorState } from "../lib/api-error-resume.js";
+import { countsAsActivity, dropStale, dueForResume, endStreak, giveUpText, loadResumeStates, markResumed, noteActivity, noteApiError, noteOverload, noteTurnOk, onChannelTurnOk,
+  resumeDelayMs, resumeText, saveResumeStates, dropOffline, type ApiErrorState } from "../lib/api-error-resume.js";
 import { isModelLimitHit, paneShowsLowPriority } from "../lib/quota-wall-text.js";
 import { windowWallWait } from "../lib/wall-screen.js";
 import { noticeOncePerState } from "../lib/quota-wall-notice.js";
@@ -15,7 +15,7 @@ import { recordMetric } from "../lib/metrics.js";
 import { countsAsWallActivity, emptyWallState, gatesAsHuman, isWallState, QUOTA_WALL_CLEAR_PATH, QUOTA_WALL_PATH, type WallState } from "../lib/quota-wall.js";
 import { readQuotaResumeTarget } from "../lib/quota-resume-state-identity.js";
 import { quotaResumeIdentity, quotaResumeMessageId, sameResumeIdentity, type ResumeDeps, type ResumeTarget } from "../lib/quota-resume-state.js";
-import { readRegistryAgents } from "../lib/registry.js";
+import { readRegistryAgents, readRegistryAgentsSync } from "../lib/registry.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { readJsonStateSync, reportCorrupt, writeJsonAtomicSync } from "../lib/state-file.js";
 import { ensurePaneInteractive, tmuxCapture, tmuxSendEscape, windowTarget } from "../lib/tmux-helper.js";
@@ -213,6 +213,17 @@ export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: st
   return { envelope: env, outcome: { kind: "sent", note: "queued", heldBy: "wall_menu" } };
 }
 
+/** 这个频道的 agent 还在不在（master 不在 registry 里也算在）：已经收掉的，到点没连着就不往它频道报续跑作废 */
+function agentKept(cid: string): boolean {
+  if (cid === bridge?.controlChannelId) return true;
+  try {
+    return readRegistryAgentsSync().some((a) => a.channelId === cid);
+  } catch (e) {
+    console.error(`续跑作废前查 registry 失败，按还在算（最多多报一次）: ${(e as Error).message}`);
+    return true;
+  }
+}
+
 const RESUME_LABEL = "api-error-resume";
 const isResume = (env: Envelope) => env.from.kind === "bridge" && env.from.label === RESUME_LABEL;
 /**
@@ -252,13 +263,15 @@ export function cancelResumePlan(held: HeldQueue, cid: string): string | null {
  * 撞额度（CC 的 api_error_turn 进闸 / 模型额度、Codex 的 rateLimited 条目）：删计划、撤掉已经交给投递的那份，
  * 被「它又动了」挪走待 rearm 的那份也作废——不然外人回合的 Stop 会把旧计划挂回来（第 5 轮 P2-2）
  */
-function cancelResume(b: WallBridgeDeps, states: Map<string, ApiErrorState>, cid: string): void {
-  states.delete(cid);
+function cancelResume(b: WallBridgeDeps, states: Map<string, ApiErrorState>, cid: string, why: string): void {
+  endStreak(states, cid, Date.now(), { failed: false, why });
   saveResumeStates(states);
   cancelledResume.delete(cid);
   const plan = cancelResumePlan(b.held, cid);
   if (plan) console.log(`⏸ ${cid}：撞额度，撤掉续跑 ${plan}`);
 }
+
+const WALL_END = "撞了额度，续跑交给额度闸（出闸后续跑）";
 
 /** 被「它又动了」取消掉的续跑（60 秒续跑 / 闸的续跑名单）：那一轮要是外人触发的、不算接着做，stop-settle 调 rearmResume 放回去 */
 const cancelledResume = new Map<string, { agent: string; error: string }>();
@@ -298,12 +311,12 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       saveResumeStates(states);
       void (async () => {
         if (await w.noteApiError({ channelId: evt.chatId, agent: evt.agent, at: ts, error: err, text: String(data.text ?? "") })) {
-          cancelResume(b, states, evt.chatId);
+          cancelResume(b, states, evt.chatId, WALL_END);
           recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: "quota_wall" } });
           return;
         }
         const model = isModelLimitHit(err, String(data.text ?? "")); // 模型额度：续跑只会再撞，直接告诉人换模型
-        if (model) cancelResume(b, states, evt.chatId);
+        if (model) cancelResume(b, states, evt.chatId, "它撞了单个模型的额度，要 owner 在它窗口里换模型后才会接着做");
         const act = model ? "model_limit" : r;
         const next = act === "track" && wait ? `${resumeDelayMs(wait) / 1000}s 后自动续跑${wait.net ? `（网络类，第 ${wait.net.n + 1} 次）` : ""}` : "";
         console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${next || (act === "model_limit" ? "模型额度，不续跑" : "续跑用完，升级到频道")}`);
@@ -321,7 +334,7 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       return;
     }
     // Codex 的额度条目不带 isApiErrorMessage、不生成 api_error_turn（lib/codex-session.ts），watcher 标成 rateLimited 的结构化条目：同样撤续跑
-    if (evt.type === "assistant_text" && (evt.data as { rateLimited?: unknown }).rateLimited === true) cancelResume(b, states, evt.chatId);
+    if (evt.type === "assistant_text" && (evt.data as { rateLimited?: unknown }).rateLimited === true) cancelResume(b, states, evt.chatId, WALL_END);
     const gone = countsAsActivity(evt.type, evt.data) ? noteActivity(states, evt.chatId, ts) : undefined;
     if (gone) cancelledResume.set(evt.chatId, { agent: agentOf.get(evt.chatId) ?? evt.agent, error: gone.error });
     const moved = countsAsWallActivity(evt.type, evt.data as Record<string, unknown>);
@@ -343,8 +356,8 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       saveResumeStates(states);
     }
   };
-  onTurnOk((agent, at) => { // 续跑后正常结束了一轮：网络类连败清零
-    for (const [cid, a] of agentOf) if (a === agent) noteTurnOk(states, cid, at);
+  onChannelTurnOk((cid, at) => { // 续跑后正常结束了一轮：网络类连败清零
+    noteTurnOk(states, cid, at);
     saveResumeStates(states);
   });
   setInterval(() => {
@@ -372,16 +385,17 @@ async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, Ap
     const st = states.get(cid);
     const target = b.clients.get(cid);
     if (!st) continue;
-    if (!target) { // 没连着（刚重启还没连回来 / 窗口没了）：留着等，撞错满半小时作废、频道报一次
-      const why = dropOffline(states, cid, now);
+    if (!target) { // 没连着（刚重启还没连回来 / 窗口没了）：网络类且 agent 还在的留着等，撞错满半小时作废、频道报一次
+      const why = dropOffline(states, cid, now, agentKept(cid));
       const agent = agentOf.get(cid) ?? cid;
       if (why) emitEvent({ agent, chatId: cid, type: "chat_message", data: { direction: "out", from: "bridge", text: `⛔ ${agent} ${why}`, notice: true } });
       if (why && /^\d+$/.test(cid)) await b.escalate(cid, `⛔ ${agent} ${why}`).catch((e) => console.error("api-error 续跑作废通知失败:", (e as Error).message));
       continue;
     }
+    if (dropStale(states, cid, now)) continue; // 机器睡了很久醒来：不投陈旧的「继续」
     // 60 秒里闸开了（别的 agent 撞墙）：这一次也交给闸，出闸再续
     if (w.active() && (await w.noteApiError({ channelId: cid, agent: agentOf.get(cid) ?? cid, at: st.errorAt, error: st.error, text: "" }))) {
-      states.delete(cid);
+      endStreak(states, cid, Date.now(), { failed: false, why: WALL_END });
       continue;
     }
     markResumed(states, cid, now);

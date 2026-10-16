@@ -198,17 +198,10 @@ export function failureCardQuiet(agent: string, message: string, now: number, vi
 export function cardsToClose(db: Database, agent: string, projectId: string | undefined, before: number, config: SchedulerConfig | null,
   path = OVERLOAD_PATH): Ask[] {
   clearOverloadCount(agent, before, path);
-  for (const cb of turnOkListeners) {
-    try { cb(agent, before); } catch (e) { console.error(`⚠️ ${agent} 正常结束的回合没通知到续跑计数（网络类连败按 10 分钟窗口清）：${(e as Error).message}`); }
-  }
   if (!config || exemptAgent(agent) || !superviseOn(config, projectId)) return [];
   return listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] })
     .filter((a) => a.extra.failure === "error" && a.extra.deliveryUnknown !== true && a.createdAt <= before);
 }
-
-/** 正常结束了一轮的 agent（cardsToClose 每个正常结束的回合调一次）：quota-wall-wiring 据此把网络类连败清零（api-error-resume noteTurnOk） */
-const turnOkListeners: ((agent: string, at: number) => void)[] = [];
-export const onTurnOk = (cb: (agent: string, at: number) => void): void => void turnOkListeners.push(cb);
 
 // ── 4. cyber 截断：推不推 owner、会话收掉后关卡（dispatch-recovery-CYBRETRY1） ──
 

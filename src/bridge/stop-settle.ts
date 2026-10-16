@@ -20,7 +20,8 @@ import { armGoneCardSweep, cardsToClose, productionView } from "../lib/agent-sup
 import { closeAsk } from "../lib/ledger-asks.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { askDbIfExists, publishAsk } from "./asks.js";
-import { noteRetryingCaller, spokenBefore, takeTurnFailure, turnFailureNotice, type TurnFailure } from "./turn-failure.js";
+import { channelTurnOk } from "../lib/api-error-resume.js";
+import { noteCallerAnswered, noteRetryingCaller, spokenBefore, takeTurnFailure, turnFailureNotice, useRetryPort, type RetryPort, type TurnFailure } from "./turn-failure.js";
 
 export interface StopTurn {
   /** 要结算的频道（channelsToClear 里的一个） */
@@ -82,6 +83,7 @@ type Sender = { kind: string; owner?: boolean; peer?: string; channelId?: string
 export const senderTrigger = (from: Sender): TurnTrigger =>
   from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
 export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle = false, asks = false): void {
+  if (asks && from.kind === "local" && from.channelId) noteCallerAnswered(from.channelId, cid, now); // 它给收到过「正在重试」的请求方发了请求（turn-failure.ts）
   const who = senderTrigger(from);
   const caller = from.kind === "local" && from.channelId ? [from.channelId] : [];
   const asker = asks ? caller : [];
@@ -169,12 +171,16 @@ export function markRepeat<T extends StopTurn>(t: T): T {
 
 /** bridge 的 Stop 处理每个频道调一次：判这一轮算不算 cid 答完、算就结算回程簿。返回判定，看门狗照它走 */
 export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
+  useRetryPort(retryPort(d));
   if (t.repeated) return false;
   const mine = isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
   try {
     return await settleOwn(d, t, mine);
   } finally {
-    if (mine && t.event === "Stop" && !ranIntoApiError(t)) (d.recovered ?? closeRecoveredCards)(t.cid); // 正常结束的一轮 = 恢复了（i28-S1 监护关卡）
+    if (mine && t.event === "Stop" && !ranIntoApiError(t)) {
+      channelTurnOk(t.cid, Date.now()); // 网络类连败清零：按频道，不经关卡（没卡、没 ledger 库、master 不在 registry 都要清）
+      (d.recovered ?? closeRecoveredCards)(t.cid); // 正常结束的一轮 = 恢复了（i28-S1 监护关卡）
+    }
     if (mine) {
       const rec = { at: 0, callers: [], askers: [], ...recOf(t), who: triggerOf(t) };
       if (ranIntoApiError(t)) errTrigger.set(t.cid, rec);
@@ -227,22 +233,30 @@ async function failedTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
   const said = sole ? spokenBefore(t.drain.text, f) : undefined;
   for (const caller of askers) {
     const slot = waiting.find((p) => p.callerChannelId === caller);
-    // 网络类：续跑用完补最终说明（在这一条「正在重试」之后登记，结局早到了会当场补发）
-    const later = (): void => void (f.retrying && noteRetryingCaller(t.cid, f.agent, (body) => d.notify(slot ?? stubCall(caller, t.cid, f), t.cid, body)));
+    const pac = slot ?? stubCall(caller, t.cid, f);
+    // 网络类：这一串的结局补一句说明（在这一条「正在重试」之后登记，结局早到了会当场补发）
+    const later = (): void => void (f.retrying &&
+      noteRetryingCaller(t.cid, { agent: f.agent, at: f.at, caller, callerName: pac.callerName, replyTo: pac.originalReplyChannel, slot: !!slot }));
     if (slot && ranIntoApiError(t)) {
       later();
       continue;
     }
-    const pac = slot ?? stubCall(caller, t.cid, f);
     const r = await d.notify(pac, t.cid, turnFailureNotice(f, !slot, said)).catch((e: Error) => ({ kind: "error", error: e }));
     const kind = (r as { kind?: string } | undefined)?.kind;
     if (kind === "error" || kind === "dropped") console.error(`⚠️ ${f.agent} 回合失败的说明没推到 ${pac.callerName}（${kind}），回程照旧留着`);
-    else if (slot && !stranger) d.consume(t.cid, slot);
+    else if (slot && !stranger && !f.retrying) d.consume(t.cid, slot); // 网络类的槽留着：续跑成功后的答复还要从它推回去
     console.log(`⚠️ ${f.agent} 这一轮以不可重试的错误中止 → 告诉请求方 ${pac.callerName}${slot ? "" : "（回程已被更早的回复消化）"}`);
     later();
   }
   return true;
 }
+
+/** 推「正在重试」请求方结局说明的通道：重启后按落盘的名单现拼推回地址（同 stubCall） */
+const retryPort = (d: CallerSettleDeps): RetryPort => ({
+  notify: (cid, r, body) => d.notify({ callerChannelId: r.caller, callerName: r.callerName, targetName: r.agent, targetChannelId: cid,
+    ...(r.replyTo ? { originalReplyChannel: r.replyTo } : {}), ts: r.at }, cid, body),
+  slotGone: (cid, r) => r.slot && !d.waiting(cid).some((p) => p.callerChannelId === r.caller),
+});
 
 /** 回程槽已经被这一轮更早的回复消化了：按频道现拼一个推回地址（名字查 registry，查不到就用频道号，只影响显示） */
 function stubCall(caller: string, cid: string, f: TurnFailure): PendingAgentCall {

@@ -21,20 +21,22 @@ const clock = spyOn(Date, "now").mockImplementation(() => NOW);
 afterAll(() => clock.mockRestore());
 beforeEach(() => rmSync(P, { force: true }));
 
-function wiring(connected: () => boolean = () => true) {
+function wiring(connected: () => boolean = () => true, kept = true) {
   let handler!: (e: unknown) => void, tick!: () => void, seq = 0;
   const sends: number[] = [];
   const notices: string[] = [];
+  const escalated: string[] = [];
   const w = { onExit: () => {}, noteApiError: async () => false, active: () => false, noteActivity: () => null, tick: async () => {} };
   const b = {
     held: new HeldQueue(null), calls: { values: () => [] }, clients: { get: () => (connected() ? { ws: {} } : undefined) }, flush: async () => {},
-    deliver: async (e: unknown) => (sends.push(NOW), { envelope: e, outcome: { kind: "sent" } }), markAgentSource: () => {}, escalate: async () => {},
+    deliver: async (e: unknown) => (sends.push(NOW), { envelope: e, outcome: { kind: "sent" } }), markAgentSource: () => {}, escalate: async (_: string, t: string) => void escalated.push(t),
   };
   const deps: Record<string, unknown> = {
     ...rules, isModelLimitHit, countsAsWallActivity, isHumanSender, productionWall: () => w,
     subscribeEvents: (_: unknown, f: (e: unknown) => void) => { handler = f; }, recordMetric: () => {}, noteTurnCut: () => {},
     emitEvent: (e: { data?: { notice?: boolean; text?: string } }) => void (e.data?.notice && notices.push(String(e.data.text))),
     setInterval: (f: () => void) => { tick = f; }, newMessageId: () => `m${++seq}`, newThreadId: () => `t${++seq}`, TICK_MS: 15_000,
+    agentKept: () => kept,
   };
   const mod = new Function(...Object.keys(deps), `let bridge, wall; const earlyExitListeners = [];\n${js}\nreturn { startQuotaWall };`)(...Object.values(deps));
   mod.startQuotaWall(b);
@@ -55,7 +57,7 @@ function wiring(connected: () => boolean = () => true) {
     for (const end = NOW + maxMs; sends.length === n && NOW < end;) await run(15_000);
     return sends.length > n;
   };
-  return { sends, notices, event, run, untilResume, err: () => event("api_error_turn", { error: MSG, text: `API Error: ${MSG}` }) };
+  return { sends, notices, escalated, event, run, untilResume, err: (error = MSG) => event("api_error_turn", { error, text: `API Error: ${error}` }) };
 }
 
 test("撞错后有人发消息取消了续跑，15 秒那拍落盘之前重启：不再注入「继续」", async () => {
@@ -111,4 +113,50 @@ test("黑洞式断网：每次续跑后要 11 分钟才失败，仍然续 4 次�
   expect(f.notices[0]).toContain(`连续 ${TRANSIENT_BACKOFF_MS.length + 1} 次网络类错误`);
   await f.run(30 * 60_000);
   expect(f.notices).toHaveLength(1);
+});
+
+// ── NRT-2 ──
+
+test("turn-ok-depends-on-card-close：孤立的网络错误隔 40 分钟各撞一次，每次续跑后正常结束（stop-settle → channelTurnOk，不经关卡）→ 每次都 60 秒续、不报", async () => {
+  const f = wiring();
+  for (let i = 0; i < 5; i++) {
+    await f.err();
+    const at = NOW;
+    expect(await f.untilResume()).toBe(true);
+    expect(f.sends.at(-1)! - at).toBeLessThanOrEqual(TRANSIENT_BACKOFF_MS[0] + 15_000);
+    NOW += 30_000;
+    rules.channelTurnOk("123456", NOW); // 续跑那一轮正常结束
+    NOW += 40 * 60_000;
+  }
+  expect(f.sends).toHaveLength(5);
+  expect(f.notices).toEqual([]);
+});
+
+test("stale-resume-after-sleep：同一进程里机器睡了 9 小时醒来，到期的续跑不投、不报", async () => {
+  const f = wiring();
+  await f.err();
+  NOW += 9 * 3600_000;
+  await f.run(60_000);
+  expect(f.sends).toEqual([]);
+  expect(f.notices).toEqual([]);
+  expect(JSON.parse(readFileSync(P, "utf8"))).toEqual({});
+});
+
+test("offline-drop-noise：到点没连着、agent 已被收掉 → 当场丢，不往频道报", async () => {
+  const f = wiring(() => false, false);
+  await f.err();
+  await f.run(60 * 60_000);
+  expect(f.sends).toEqual([]);
+  expect(f.notices).toEqual([]);
+  expect(f.escalated).toEqual([]);
+  expect(JSON.parse(readFileSync(P, "utf8"))).toEqual({});
+});
+
+test("offline-drop-noise：到点没连着的非网络类错误照旧当场丢，不等半小时、不报", async () => {
+  const f = wiring(() => false);
+  await f.err("Prompt is too long");
+  await f.run(61_000 + 15_000);
+  expect(JSON.parse(readFileSync(P, "utf8"))).toEqual({});
+  await f.run(60 * 60_000);
+  expect(f.notices).toEqual([]);
 });
