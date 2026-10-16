@@ -1,5 +1,5 @@
 {
- "about": "JRT 调研的 12 + 4 个合成例（不含真实消息）。answers 是录下来的 Jev 答案：前 12 例录自 PM 调研探针（jev-1.13.0，2026-10-16，措辞与 lib/inbound-route.ts 的问题略不同、没带权限规则）；后 4 例录自带权限规则的策略探针，设计稿只记了 interrupt 概率，余量记在 queue。merge 例只有一条排队，route_merge_with 记为 q1（探针没问这一题）。重录：TYPESAFE_API_KEY=… INBOUND_ROUTE_RECORD=1 bun test tests/inbound-route-replay.test.ts",
+ "about": "JRT 调研的 12 + 4 个合成例（不含真实消息）。answers 是录下来的 Jev 答案：前 12 例录自 PM 调研探针（jev-1.13.0，2026-10-16，措辞与 lib/inbound-route.ts 的问题略不同、没带权限规则）；后 4 例录自带权限规则的策略探针，设计稿只记了 interrupt 概率，余量记在 queue。merge 例只有一条排队，route_merge_with 记为 q1（探针没问这一题）。重录：TYPESAFE_API_KEY=… INBOUND_ROUTE_RECORD=1 bun test tests/inbound-route-replay.test.ts。人的两条不合并（只有本机 agent 消息能并进一封合批载体），所以 owner 的两个 merge 例按代码兜底改成排队",
  "model": "jev-1.13.0",
  "cases": [
   {
@@ -70,7 +70,7 @@
   },
   {
    "name": "补充同一件事",
-   "expect": "merge",
+   "expect": "queue",
    "current": "正在按规格卡 QFA-1 修改 scripts/usage-cache-write.sh，刚跑完一轮测试，准备改第二处",
    "queued": [
     {
@@ -230,7 +230,7 @@
   },
   {
    "name": "排队里有同话题更正",
-   "expect": "merge",
+   "expect": "queue",
    "current": "正在按规格卡 QFA-1 修改 scripts/usage-cache-write.sh，刚跑完一轮测试，准备改第二处",
    "queued": [
     {

@@ -45,16 +45,17 @@ const INCOMING_TEXT_MAX = 2_000;
 
 export const parseRouteMode = (v: unknown): RouteMode => (v === "observe" || v === "on" ? v : "off");
 
-/** 同一个发送人（同一个 token / Discord 用户 / agent 频道）：merge 只在同一个人之间、或本机 agent 之间做 */
-function senderKey(f: RouteFrom): string {
-  return f.kind === "api" ? `api:${f.tokenId}` : f.kind === "user" ? `user:${f.userId}` : f.kind === "local" ? `local:${f.channelId}` : f.kind;
-}
 export const senderName = (f: RouteFrom): string => f.name ?? f.username ?? f.agentName ?? f.tokenId ?? f.kind;
 
-/** 给 Jev 和日志看的身份。转交来的 owner 原话不算 owner 在这里开口（同 bridge/preempt.ts 停字的口径） */
+/**
+ * 给 Jev 和日志看的身份，和代码兜底（mayInterrupt）同一个认证结论：owner 只认入口写好的 isOwnerSource（Discord 用户、from.owner=true 的 API 凭据，
+ * 含 token:* 形式的老 owner 凭据），不看 token 前缀；转交来的 owner 原话不算 owner 在这里开口（同 bridge/preempt.ts 停字的口径）
+ */
 export function routeRole(env: Pick<RouteEnv, "from" | "meta">): string {
-  const r = env.from.kind === "api" && env.from.peer ? "peer" : trustOf(env.from, env.meta.triggerKind);
-  return r === "owner" && env.meta.forwarded ? "forwarded" : r;
+  if (isOwnerSource(env.from)) return env.meta.forwarded ? "forwarded" : "owner";
+  if (env.from.kind === "api" && env.from.peer) return "peer";
+  const r = trustOf(env.from, env.meta.triggerKind);
+  return r === "owner" ? "unknown" : r; // 前缀像 owner、入口却没认证成 owner 的：不给 Jev 看成 owner
 }
 /** 能打断的只有 owner 本人：Jev 判了 interrupt 也由这里兜底 */
 const mayInterrupt = (env: Pick<RouteEnv, "from" | "meta">): boolean => isOwnerSource(env.from) && !env.meta.forwarded;
@@ -73,14 +74,17 @@ export interface QueueEntry {
   from: string;
   role: string;
   text: string;
-  /** 和这条新消息能不能真的合并（同一个发送人，或都是本机 agent）；不能的 Jev 选了也改成排队 */
+  /** 和这条新消息能不能真的一起投（见 queueEntry）；不能的 Jev 选了也改成排队 */
   mergeable: boolean;
 }
 
-/** 押后队列里的一条 → 排队摘要；incoming 用来判能不能合并 */
-export function queueEntry(item: Pick<RouteEnv, "from" | "content" | "meta">, incoming: RouteFrom): QueueEntry {
-  const same = senderKey(item.from) === senderKey(incoming) || (item.from.kind === "local" && incoming.kind === "local");
-  return { id: item.meta.messageId, from: senderName(item.from), role: routeRole(item), text: clip(item.content, QUEUE_TEXT_MAX), mergeable: same };
+/**
+ * 押后队列里的一条 → 排队摘要。mergeable 只给「真能并进一封投递」的：两条都是本机 agent 消息、都进得了 HMB-1 的合批载体（batchable 由调用方按
+ * lib/held-agent-batch.ts 判好）。人的消息不合并：逐条投递时同伴一开回合、后一条就被押到下一轮（并不在一起），拼进载体又丢了逐条的回程登记
+ */
+export function queueEntry(item: Pick<RouteEnv, "from" | "content" | "meta">, incoming: RouteFrom, batchable: boolean): QueueEntry {
+  const mergeable = batchable && item.from.kind === "local" && incoming.kind === "local";
+  return { id: item.meta.messageId, from: senderName(item.from), role: routeRole(item), text: clip(item.content, QUEUE_TEXT_MAX), mergeable };
 }
 
 /** 给 Jev 的 state：发送人是 bridge 认证过的身份（role），正文里自称的身份不算；queue 用 q1… 编号，mergeable 不发给模型 */
@@ -181,6 +185,20 @@ export function mergeOrder<T extends Held>(items: readonly T[], mode: RouteMode)
   for (const i of items) if (!follows(i)) place(i, seen);
   for (const i of items) place(i, seen); // 互相指着的（不该有）也别丢
   return out;
+}
+
+/**
+ * 到期过滤之后再筛一遍（held-flush）：merge 的那条，同伴还在队里却这一趟放不出来（check_inbox 租约中 / 闸里 / 忙时不到期），它也先不放——
+ * 整组一起等，不先单独投出去。开关不是 on 原样返回
+ */
+export function mergeDue<T extends Held>(due: readonly T[], queue: readonly T[], mode: RouteMode): T[] {
+  if (mode !== "on") return [...due];
+  const dueIds = new Set(due.map((i) => i.env.meta.messageId));
+  const queued = new Set(queue.map((i) => i.env.meta.messageId));
+  return due.filter((i) => {
+    const w = i.env.meta.inboundRoute?.action === "merge" ? i.env.meta.inboundRoute.mergeWith : undefined;
+    return !w || !queued.has(w) || dueIds.has(w);
+  });
 }
 
 /**

@@ -8,7 +8,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
 import { clearOpenedBy, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
 import { HeldQueue, unseenFrom, type HeldItem } from "../src/bridge/held-queue.js";
-import { configureInboundRoute, routeAdmitsWhileBusy, routeHolds } from "../src/bridge/inbound-route.js";
+import { configureInboundRoute, routeAdmitsWhileBusy, routeHolds, routeInbound } from "../src/bridge/inbound-route.js";
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
 import { isHumanRequest, type Envelope, type LocalEndpoint } from "../src/bridge/router.js";
 import { noteDelivered, settleStopTurn, type CallerSettleDeps } from "../src/bridge/stop-settle.js";
@@ -26,7 +26,7 @@ beforeEach(() => {
   clearOpenedBy();
   configureInboundRoute({ readMode: () => mode, now: () => 0 });
 });
-afterAll(() => configureInboundRoute({ readMode: () => "off", now: () => Date.now() }));
+afterAll(() => configureInboundRoute({ readMode: () => "off", now: () => Date.now(), queue: () => undefined }));
 
 let n = 0;
 function held(who: "owner" | "A" | "B" | "peer", route?: StoredRoute, id = `m${++n}`): HeldItem {
@@ -157,6 +157,34 @@ describe("merge：顺序与回复归属", () => {
     calls.consume(ME, "c-A", pa);
     expect(calls.waiting(ME, stillHeld).map((c) => c.callerName)).toEqual(["agent-B"]);
     expect(calls.exact(ME, "c-B", stillHeld)?.callerName).toBe("agent-B");
+  });
+
+  test("jrt-merge-split（同伴在租约里）：[A(check_inbox 领走未确认), B→A] 目标空闲也不单独投 B；A 确认出队后 B 照投", async () => {
+    const a = held("A"), b = held("B", { action: "merge", mergeWith: "", p: 0.98 });
+    b.env.meta.inboundRoute!.mergeWith = a.env.meta.messageId;
+    a.lease = { batchId: "inbox_x", at: Date.now() };
+    const q = new HeldQueue(null);
+    q.set(ME, [a, b]);
+    const log: string[] = [];
+    await flushHeld(flushDeps(q, () => false, log, { agentBatch: () => true }), ME, "stop");
+    expect(log).toEqual([]);
+    q.remove(ME, a);
+    await flushHeld(flushDeps(q, () => false, log, { agentBatch: () => true }), ME, "stop");
+    expect(log).toEqual([b.env.meta.messageId]);
+  });
+
+  test("jrt-merge-split（人的消息）：owner 补充排队里自己那条，Jev 判 merge 也按排队（不承诺并不到一起的合并）", async () => {
+    const a = held("owner", { action: "queue", p: 0.98 });
+    const q = new HeldQueue(null);
+    q.set(ME, [a]);
+    configureInboundRoute({
+      readMode: () => "on", probe: async () => BUSY, queue: () => q.get(ME), doing: async () => "", log: () => {},
+      ask: (async () => ({ model: "t", answers: { route_action: { type: "choice", choice: "merge", probabilities: { merge: 1 } },
+        route_merge_with: { type: "choice", choice: "q1", probabilities: { q1: 1 } } }, usage: { input_tokens: 0, output_tokens: 0 }, latencyMs: 0, costUsd: 0 })) as never,
+    });
+    const b = held("owner").env;
+    await routeInbound(b, to, "agent-me");
+    expect(b.meta.inboundRoute).toMatchObject({ action: "queue" });
   });
 
   test("对照（开关 off）：B 不越过 peer，A 单独一轮", async () => {

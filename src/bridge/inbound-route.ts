@@ -11,10 +11,11 @@ import { statePath } from "../lib/paths.js";
 import { ownerStopOf } from "../lib/stop-words.js";
 import { holdsUntilIdle, type TurnState } from "../lib/turn-state.js";
 import {
-  admitsWhileBusy, buildRouteState, decideRoute, holdsWhileBusy, mergeOrder, parseRouteMode, pullable, QUEUE_KEEP, queueEntry, ROUTE_TIMEOUT_MS, routeEligible,
+  admitsWhileBusy, buildRouteState, decideRoute, holdsWhileBusy, mergeDue, mergeOrder, parseRouteMode, pullable, QUEUE_KEEP, queueEntry, ROUTE_TIMEOUT_MS, routeEligible,
   routeQuestions, routeRole, ruleAction, senderName, type QueueEntry, type RouteEnv, type RouteMode,
 } from "../lib/inbound-route.js";
 import { isHeldIdleCarrier } from "../lib/held-idle-batch.js";
+import { heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
 import type { HeldItem } from "./held-queue.js";
 import { isHumanRequest, type Envelope, type LocalEndpoint } from "./router.js";
 import { turnBrief } from "./turn-brief.js";
@@ -74,6 +75,7 @@ export const routeAdmitsWhileBusy = (env: Envelope, human: Human = isHumanReques
 export const routeHolds = (env: Envelope, turn: TurnState): boolean =>
   holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn) || (turn.main === "busy" && holdsWhileBusy(env, routeMode()));
 export const routeOrder = <T extends HeldItem>(items: readonly T[]): T[] => mergeOrder(items, routeMode());
+export const routeDue = <T extends HeldItem>(due: readonly T[], queue: readonly T[]): T[] => mergeDue(due, queue, routeMode());
 export const routePullable = (item: HeldItem, queue: readonly HeldItem[], base: (i: HeldItem) => boolean): boolean => pullable(item, queue, base, routeMode());
 
 /** 已经判过（守门那次带着判了 / 本次投递判过）的信封：同一次投递不再问 */
@@ -89,7 +91,9 @@ export interface RouteProbe {
 /** 排队摘要：同一目标押着的、最近 QUEUE_KEEP 条（批次载体不算） */
 function queueOf(channelId: string, incoming: Envelope): { items: HeldItem[]; entries: QueueEntry[] } {
   const items = (deps.queue(channelId) ?? []).filter((i) => !isHeldIdleCarrier(i) && i.env.meta.messageId !== incoming.meta.messageId).slice(-QUEUE_KEEP);
-  return { items, entries: items.map((i) => queueEntry(i.env, incoming.from)) };
+  // 新来的这条也得进得了合批载体（带附件的不行）、开关开着，才谈得上和谁一起投
+  const canBatch = heldAgentBatchOn() && isAgentBatchable({ env: incoming, to: incoming.to as LocalEndpoint });
+  return { items, entries: items.map((i) => queueEntry(i.env, incoming.from, canBatch && isAgentBatchable(i))) };
 }
 
 /**

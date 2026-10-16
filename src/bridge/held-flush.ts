@@ -24,7 +24,7 @@ import {
 } from "../lib/inbox-batch.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { agentBatchMembers, heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
-import { routeAdmitsWhileBusy, routeOrder } from "./inbound-route.js";
+import { routeAdmitsWhileBusy, routeDue, routeOrder } from "./inbound-route.js";
 import { adoptStrandedTransfers, currentPmTarget, expectPmTarget, handedOver, roleHandoffs, shouldRetry, type PmTarget } from "./pm-held-transfer.js";
 
 export interface FlushDeps {
@@ -350,8 +350,8 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     const now = (d.now ?? Date.now)();
     const q = routeOrder(d.held.get(channelId) ?? []); // Jev 判了合并的紧跟同伴（bridge/inbound-route.ts）
     const late = new Set(q.filter((i) => ownerLate(i, now)));
-    const due = q.filter((i) => !leaseActive(i) && (away.has(i)
-      || ((!walled || gatesAsHuman(i.env)) && (!working || routeAdmitsWhileBusy(i.env, d.isHumanRequest) || late.has(i)))));
+    const due = routeDue(q.filter((i) => !leaseActive(i) && (away.has(i)
+      || ((!walled || gatesAsHuman(i.env)) && (!working || routeAdmitsWhileBusy(i.env, d.isHumanRequest) || late.has(i))))), q); // 合并的那条等同伴一起放
     const mine = due.filter((i) => !away.has(i));
     // 内部通知的批次：目标空闲才组（忙时它们本来就不投）；observe 只记「本来会一次送出」，照旧逐条
     const mode = working ? "off" : d.held.idleMode();
