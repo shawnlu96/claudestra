@@ -70,13 +70,20 @@ export function usagePanelVisible(pane: string): boolean {
   return /Current session/.test(pane) && /Current week/.test(pane) && /%\s*used/.test(pane);
 }
 
+/** 已切到 Usage tab、账号用量还在加载（CC 2.1.3xx 起异步拉取，切过去先显示「Loading usage data…」） */
+export function usagePanelLoading(pane: string): boolean {
+  return /Loading usage data/i.test(pane);
+}
+
 /**
  * 敲入 /status 之后、按 Enter 之前的反向复核：回合已开（esc to interrupt）或输入行不是纯我方敲入就撤退。
  * 补全菜单在场是敲入的预期结果，不是危险信号（正向 idle 判据会被它自我否决）。
+ * 输入行的 ❯ 顶格；CC 2.1.3xx 起补全菜单的选中项也用缩进的「  ❯ /status  说明」标，不能当输入行
+ * （否则取到菜单行、内容带说明文字，探测恒报 probe_input_unexpected）。夹具 tests/fixtures/account-usage/。
  */
 export function typedRecheckOk(pane: string, typed: string): boolean {
   if (/esc to interrupt/i.test(pane)) return false;
-  const promptLines = pane.split("\n").filter((l) => l.includes("❯"));
+  const promptLines = pane.split("\n").filter((l) => /^\s?❯/.test(l));
   if (!promptLines.length) return false; // 输入行都找不到,保守撤退
   const last = promptLines[promptLines.length - 1]!;
   const content = last.slice(last.indexOf("❯") + 1).replace(/[▎█]/g, "").trim();
