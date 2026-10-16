@@ -28,7 +28,7 @@ import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
 import { AgentListNotice } from "./agent-list-status";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch"; import { ChipLegend } from "./chip-legend";
-import { NowStrip } from "../../now/now-home"; import { NavShell } from "../../nav/nav-shell"; import { RAIL_W } from "../../nav/nav-rail"; import { memberUnread } from "../sidebar-unread";
+import { NowStrip } from "../../now/now-home"; import { NavShell } from "../../nav/nav-shell"; import { V2Shell } from "../../nav/v2-host"; import { useNavV2 } from "../../nav/nav-v2"; import { RAIL_W } from "../../nav/nav-rail"; import { memberUnread } from "../sidebar-unread";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。
@@ -116,6 +116,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const [settingsPage, setSettingsPage] = useSettingsPageState(); // 也响应别处的 openSettings(page)（features/chat/settings-open.ts）
   // 左下角版本徽标(owner 2026-07-31):当前机器的版本+commit,挂载时拉一次
   const verInfo = useVersionInfo();
+  const Shell = useNavV2() ? V2Shell : NavShell; // 新版整页宿主 / NAVBAR1 旧布局，同一组 props（设置里一键回退）
   const [showStats, setShowStats] = useState(false);
   const q = query.trim().toLowerCase();
   // 多选管理(owner 2026-07-16:「agent 页面做管理功能,多选删除」)
@@ -475,7 +476,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       <AgentMenu />
       <ProjectMenu />
       <InviteIntake />
-      <NavShell me={{ manage, onSettings: () => setSettingsPage("general"), onProjects: () => setShowProjects(true), onToggleManage: () => (manage ? exitManage() : setManage(true)),
+      <Shell me={{ manage, onSettings: () => setSettingsPage("general"), onProjects: () => setShowProjects(true), onToggleManage: () => (manage ? exitManage() : setManage(true)),
         onPeers: () => setSettingsPage("peers"), onStats: () => setShowStats(true) }} unread={memberUnread(agents)} version={verInfo} />
     </aside>
   );

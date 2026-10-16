@@ -74,6 +74,8 @@ export interface AppConfig {
   pushAllAsks?: boolean;
   /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
   talkEnabled?: boolean;
+  /** 网页新版整页宿主（nav/v2-host.tsx）：缺省开；false = 回到五入口旧布局。全局一份，PUT /settings 要 manage */
+  navV2?: boolean;
   /** Ordinary messages can request non-preempting delivery; disabling affects new requests only. */
   steer?: Record<string, unknown> & { queueWhenBusy?: boolean };
   /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
@@ -139,6 +141,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...fleetOf(raw.fleet),
     ...(raw.steer && typeof raw.steer === "object" && !Array.isArray(raw.steer) ? { steer: { ...raw.steer } } : {}),
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
+    ...(typeof raw.navV2 === "boolean" ? { navV2: raw.navV2 } : {}),
     ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
     ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
     ...(raw.bridgeWatchdogDiag === "on" || raw.bridgeWatchdogDiag === "observe" || raw.bridgeWatchdogDiag === "off" ? { bridgeWatchdogDiag: raw.bridgeWatchdogDiag } : {}),
@@ -309,6 +312,10 @@ export async function setPushAllAsks(enabled: boolean): Promise<AppConfig> {
 
 export async function setTalkEnabled(enabled: boolean): Promise<AppConfig> {
   return editConfig(cfg => { cfg.talkEnabled = enabled; });
+}
+
+export async function setNavV2(enabled: boolean): Promise<AppConfig> {
+  return editConfig(cfg => { cfg.navV2 = enabled; });
 }
 
 export async function setPeerRelayJoinStrict(enabled: boolean): Promise<AppConfig> {

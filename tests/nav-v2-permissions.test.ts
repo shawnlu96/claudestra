@@ -1,6 +1,6 @@
 /**
- * navV2（新版整页宿主的全局开关）：缺省开、manage 才能写、写了落盘重读一致；读失败前端保留上次值（resolveNavV2）。
- * 后端走真的 handleSettings + config-store（隔离状态目录）；前端的取值规则是 nav-v2.ts 里的纯函数。
+ * navV2（新版整页宿主的全局开关）：缺省开、manage 才能写、写了落盘重读一致。走真的 handleSettings + config-store（隔离状态目录）。
+ * 前端读失败保留上次值、两种外壳切换在 tests/web-dom-nav-v2.test.ts。
  */
 import { expect } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -16,9 +16,6 @@ const guest: Principal = { id: "guest:x", role: "external", agents: ["agent-calm
 const call = (method: string, principal: Principal, body?: unknown) => handleSettings(new Request("http://fixture/settings", {
   method, ...(body === undefined ? {} : { body: JSON.stringify(body), headers: { "Content-Type": "application/json" } }),
 }), "/settings", principal);
-// nav-v2.ts 带 react 与 api 客户端：运行时加载，不进根 tsc
-const resolveNavV2 = (read: boolean | null, last: boolean | null) =>
-  (require("../web/features/nav/nav-v2.ts") as { resolveNavV2(r: boolean | null, l: boolean | null): boolean }).resolveNavV2(read, last);
 
 test("[验收线 2] navV2 defaults on when config has no value, for any credential", async () => {
   writeFileSync(CONFIG_PATH, JSON.stringify({ lang: "zh" }));
@@ -45,12 +42,4 @@ test("[验收线 2] manage write persists, survives reread and other setters, st
   expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).unrelated).toEqual({ keep: 1 });
   await setNavV2(true);
   expect(await (await call("GET", owner))!.json()).toMatchObject({ navV2: true, lang: "en" });
-});
-
-test("[验收线 2] web keeps the last value when a read fails, first read without value is on", () => {
-  expect(resolveNavV2(null, null)).toBe(true);
-  expect(resolveNavV2(null, false)).toBe(false);
-  expect(resolveNavV2(null, true)).toBe(true);
-  expect(resolveNavV2(false, true)).toBe(false);
-  expect(resolveNavV2(true, false)).toBe(true);
 });

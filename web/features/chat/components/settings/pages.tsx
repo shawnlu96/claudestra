@@ -26,6 +26,7 @@ import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
 import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevModeSection } from "./interface-sections";
 import { ThemeVarsSection } from "./theme-vars-section";
 import { SteerQueueSection } from "./steer-queue-section";
+import { NavV2Section } from "./nav-v2-section";
 import { TalkToggleSection } from "./talk-toggle-section";
 import { FontSection } from "./font-section";
 import { ChatPrefsSection } from "./chat-prefs-section";
@@ -54,12 +55,13 @@ export interface SettingsState {
   openCron: () => void;
 }
 
-/** 通用：App 服务器地址（仅原生壳）/ 个人资料 / 语言 / 版本与更新（推送的开关在「通知」页） */
+/** 通用：App 服务器地址（仅原生壳）/ 个人资料 / 新版导航回退 / 语言 / 版本与更新（推送的开关在「通知」页） */
 function GeneralPage({ s }: { s: SettingsState }) {
   return (
     <>
       {isNativeShell() && <ShellServerSection />}
       {s.full && <ProfileSection draft={s.profile} busy={s.busy} />}
+      {s.full && <NavV2Section />}
       <LanguageSection />
       {s.full && <BackendUpdateSection />}
     </>
