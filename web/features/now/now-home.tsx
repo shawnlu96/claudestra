@@ -94,7 +94,8 @@ function StripSummary({ view, tr }: { view: TodayView; tr: Translate }) {
       data-now-summary>
       <span className="hidden @[22rem]:inline">· </span>
       <span className="whitespace-nowrap font-medium text-base-content/75">{waitsText(view, tr)}</span>
-      <span className="whitespace-nowrap"> · {busyText(view, tr)}</span>
+      {/* 「· 其中 M 个在别的机器」单独一段：窄条里整段换行，不被截掉 */}
+      {busyText(view, tr).split(" · ").map((part, i) => <span key={i} className="whitespace-nowrap"> · {part}</span>)}
     </span>
   );
 }
