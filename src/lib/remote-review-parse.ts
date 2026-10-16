@@ -71,11 +71,8 @@ export function parseRemoteReview(text: string): RemoteReview | null {
     conclusion: capped ? "p1_cap" : read.conclusion, p1: read.counts.p1, p2: read.counts.p2, masked: Number(masked[1]), report };
 }
 
-/**
- * A P1 redelivered in the format before the cap line: whether the owner's rounds were used up cannot be read from it. The hook
- * lets it through to PM as before and it is only booked: no manual, no fix. A redelivery with the cap line reads as the original.
- */
-export const capUnknown = (r: { ambiguous?: unknown }): boolean => r.ambiguous === true;
+/** A P1 redelivered in the format before the cap line (defined with the other lookups in remote-review-current.ts). */
+export { capUnknown } from "./remote-review-current.js";
 
 /** One line for logs, mirrors and notices; built only from parsed fields, never from the peer's free text. */
 export function remoteConclusionText(r: Pick<RemoteReview, "conclusion" | "p1" | "p2">): string {

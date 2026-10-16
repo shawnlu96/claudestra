@@ -1,8 +1,8 @@
 {
-  "name": "claudestra-desktop",
+  "name": "floka-desktop",
   "private": true,
   "version": "0.1.0",
-  "description": "Claudestra menu-bar app (experimental, macOS only)",
+  "description": "Floka menu-bar app (experimental, macOS only)",
   "scripts": {
     "build:ui": "bun build ui/main.ts --outdir dist --target browser --minify && cp ui/index.html ui/style.css dist/",
     "dev": "bun run build:ui && tauri dev",

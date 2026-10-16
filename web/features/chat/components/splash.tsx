@@ -67,7 +67,7 @@ export function Splash() {
           <span className="splash-mark relative text-[56px] leading-none text-primary">✦</span>
         </div>
         <div className="-mr-[0.3em] mt-7 text-[21px] font-semibold tracking-[0.3em] text-base-content">
-          CLAUDESTRA
+          FLOKA
         </div>
         <div className="-mr-[0.14em] mt-2 text-xs tracking-[0.14em] text-base-content/40">
           {t("你的 Claude Code 指挥台")}

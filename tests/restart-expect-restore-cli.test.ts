@@ -17,6 +17,8 @@ function fakeTmux(mode: string, paths: Record<string, string>): string {
   const { count, replacement, state, drift, log, ready, modelEntered, modelLiteral, applied, prompt, settings, beat } = paths;
   return `#!/bin/sh
 printf . >> '${beat}'
+# 只按子命令匹配：-S 后面是随机临时路径，里面碰巧有 Up / -120 会把回车当成方向键，等不到就绪跑满 HARD_MS
+while [ "$1" = -f ] || [ "$1" = -S ]; do shift 2; done
 case "$*" in
   *list-windows*window_id*)
     n=$(cat '${count}'); n=$((n + 1)); printf '%s' "$n" > '${count}'
@@ -84,7 +86,7 @@ for (const mode of ["recovered", "late-window", "late-session", "late-recovery",
   "literal-session", "literal-recovery", "literal-unknown", "enter-session", "enter-recovery", "enter-unknown", "lock-unknown",
   "model-before-session", "model-before-window", "model-between-session", "model-between-window", "model-capture-fail", "model-valid"] as const) {
 test(`LSTGUARD1 real manager ${mode}: safe mutations and correct gate accounting`, async () => {
-  const dir = mkdtempSync(join(tmpdir(), "lstguard1-cli-"));
+  const dir = mkdtempSync(join(tmpdir(), "lstguard1-cli-Up-")); // 路径故意带 Up：假 tmux 不能拿 socket 路径匹配按键
   const bin = join(dir, "bin"), state = join(dir, "state"), run = join(dir, "run");
   for (const path of [bin, state, run]) mkdirSync(path);
   const log = join(dir, "mutations");

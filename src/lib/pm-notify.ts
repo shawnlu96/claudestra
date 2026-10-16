@@ -17,5 +17,5 @@ export async function notifyProjectPm(db: Database, project: string, text: strin
   const level = opts.level ?? pmNoticeLevel.getStore(); // 签名必填；没过类型检查的 JS 调用方才落到 asInfo 的隐式级别
   const req = { type: "route_to_agent", targetName: pm, text, fromName: opts.fromName, oneShot: true, ...(level ? { pmLevel: level } : {}) } as const;
   const r = await bridgeSend(req, { timeoutMs: 30_000, stillActive: opts.stillActive });
-  if (!r.ok) throw new Error(`发给 ${pm} 失败：${r.error}`);
+  if (!r.ok) throw Object.assign(new Error(`发给 ${pm} 失败：${r.error}`), { sent: r.sent }); // sent=false: provably never delivered
 }

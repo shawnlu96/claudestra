@@ -184,7 +184,8 @@ test("[验收线 2] UXCARD3 本机判老卡的主场本机卡（团队行在审�
     await until(() => v.shown().includes("老卡"), "legacy fold", v.shown);
     expect(v.column("在干活")).not.toContain("R1");
     expect(v.column("在干活")).toContain("B1");
-    const fold = v.host.querySelector("details");
+    // 板上还有别的折叠（PRIO4「当前现在做」面板），按摘要找老卡那一个
+    const fold = Array.from(v.host.querySelectorAll("details")).find((d) => (d.querySelector("summary")?.textContent ?? "").startsWith("老卡"));
     expect(fold?.querySelector("summary")?.textContent).toBe("老卡 · 1");
     expect(fold?.textContent).toContain("R1");
     expect(fold?.textContent).toContain("审查");

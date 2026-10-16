@@ -1,4 +1,4 @@
-# 在 Claudestra 里调用 Jev（TypeSafe System One）
+# 在 Floka 里调用 Jev（TypeSafe System One）
 
 > 给想在自己功能里用 Jev 的开发者（含 Shawn 侧）。背景与候选场景见 [design-jev-integration.md](./design-jev-integration.md)。
 

@@ -118,7 +118,8 @@ export function boundRef(db: Database, taskId: string, role: SessionRole): Sessi
   return s && s.state === "active" ? { taskId, role, agent: s.agent, sessionId: s.sessionId, family: s.family, transport: s.transport } : null;
 }
 class Card {
-  constructor(readonly db: Database, readonly task: LedgerTask, readonly opts: SnapshotOpts, readonly deps: AutoTickDeps, readonly handoff = false) {}
+  constructor(readonly db: Database, readonly task: LedgerTask, readonly opts: SnapshotOpts, readonly deps: AutoTickDeps, readonly handoff = false,
+    readonly local = false) {}
 
   out(step: string, detail: string): CardOutcome { return { taskId: this.task.id, step, detail: oneLine(detail) }; }
 
@@ -419,6 +420,7 @@ class Card {
     const stall = await resumeStallFallback(this, open, sendNotice); if (stall) return stall; // CONVREPO1：本机制记的 unknown 只续退回人工
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
     if (open?.action === "merge") {
+      if (this.local) return this.escalate(`本项目是本地合并（localMerge），不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id);
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
         : this.out("merge_queue", `合并意图 ${open.status}`);
     }
@@ -442,6 +444,7 @@ class Card {
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     if (plan.action === "merge" && this.handoff) return driveHandoff(this); // 交仓库方合并：不计划合并意图、不占合并槽（MHO1）
+    if (plan.action === "merge" && this.local) return (await import("./local-merge-tick.js")).driveLocalReady(this); // ONB-2：PM 本地合并
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
       : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
       : plan.action === "merge" ? mergeSlotHold(this.task) ?? mergePipeHold(this.db, this.task) : null;
@@ -454,7 +457,7 @@ class Card {
 }
 /** A pace that can tell a budget cut-off apart (passPace's phases); a bare TickPace cannot, and never owes a card. */
 const reportsBudgetEnd = (pace?: TickPace): pace is TickPace & { budgetEnded(): boolean } => typeof pace?.budgetEnded === "function";
-export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
+export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean; localMerge?: boolean }>, deps: AutoTickDeps,
   pace?: TickPace, afterMerges?: () => Promise<void>): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
   const poolIdleObservation = { candidates: 0, idle: 0, mismatches: 0 }, authorBudget = lendAuthorBudget();
@@ -512,7 +515,8 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
       const pool = await poolOf(policy.remote);
       const prepared = await deps.prepareAuthor?.(task, authorBudget) ?? task;
       if ("deferred" in prepared) { out.cards.push({ taskId, step: "held", detail: prepared.reason }); continue; }
-      out.cards.push(await new Card(db, prepared, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
+      out.cards.push(await new Card(db, prepared, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true,
+        policy.localMerge === true).step());
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });

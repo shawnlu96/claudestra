@@ -22,7 +22,7 @@ describe("邀请链接 / 转发文案", () => {
   });
   test("转发文案带名字、可找的 agent、链接和退路", () => {
     const m = inviteMessage(CODE, ["claudestra"])!;
-    expect(m).toContain("小明 邀请你的 Claudestra");
+    expect(m).toContain("小明 邀请你的 Floka");
     expect(m).toContain("claudestra");
     expect(m).toContain(`/api/v1/invite#${CODE}`);
     expect(findInviteCode(m)).toBe(CODE);

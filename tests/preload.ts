@@ -1,3 +1,7 @@
+// merge-arch-TIMERPRE1：必须是第一条语句。Bun 的 node:timers 首次加载时绑定当时的 globalThis.setInterval；
+// web-dom-* 测试注册 happy-dom 后才首次加载的话绑到的是 happy-dom 计时器（没有 unref），unregister 也还不回去，
+// 同进程后面 discord.js 的 `setInterval(...).unref()` 就报错。挪到后面或删掉会坏，见 tests/node-timers-preload.test.ts
+import "node:timers";
 /**
  * 测试一律用临时状态目录：lib/paths.ts 在加载时读 CLAUDESTRA_STATE_DIR，不隔离的话 recordMetric、
  * cron、config 之类会往真实的 ~/.claude-orchestrator 里写（用量统计、交接记录都会被测试数据污染）。

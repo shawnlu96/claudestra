@@ -4,6 +4,20 @@
 export const SESSIONS_DICT: Record<string, string> = {
   "全部已读": "Mark all as read",
   "主管 PM": "Lead PM",
+  "接入编排": "Onboard to orchestration",
+  "仓库": "Repository",
+  "调度配置": "Scheduler config",
+  "编排班子": "Team",
+  "逐项核对，只补缺的：没有调度配置就新增，已有的只列差异不覆盖；班子要 owner 在卡片上确认。":
+    "Checks each item and only fills gaps: adds the scheduler config if missing, lists differences without overwriting, and the team needs the owner's confirmation on a card.",
+  "本地合并（仓库没有 origin 时必选）": "Local merge (required when the repository has no origin)",
+  "检查命令（逗号分隔；新增调度配置时必填）": "Check commands (comma-separated; required when adding the scheduler config)",
+  "并发上限": "Max workers",
+  "检查中…": "Checking…",
+  "接入中…": "Onboarding…",
+  "接入": "Onboard",
+  "已接入；班子提案确认后，重启 PM 让角色生效。": "Onboarded. Once the team proposal is confirmed, restart the PM so its role takes effect.",
+  "都已就绪，不用再接入。": "Everything is already in place.",
   "切到 {name}": "Switch to {name}",
   "主管 PM 已切到 {name}": "Lead PM switched to {name}",
   "体检中…": "Checking…",
@@ -34,8 +48,8 @@ export const SESSIONS_DICT: Record<string, string> = {
   "← 返回": "← Back",
   "这个会话没有纳管，现在收不到消息。收编后会建窗口、能对话、进 agent 列表。":
     "This session isn't managed, so it can't receive messages. Adopting it opens a window for it, lets you chat with it and adds it to the agent list.",
-  "这种运行时的会话只读：历史能看能搜，但收编不了——Claudestra 还没法往这种会话里发消息。":
-    "Sessions from this runtime are read-only: you can browse and search the history but can't adopt them — Claudestra can't send messages into them yet.",
+  "这种运行时的会话只读：历史能看能搜，但收编不了——Floka 还没法往这种会话里发消息。":
+    "Sessions from this runtime are read-only: you can browse and search the history but can't adopt them — Floka can't send messages into them yet.",
   "刷新": "Refresh",
   "归档是空的": "The archive is empty",
   "恢复": "Restore",

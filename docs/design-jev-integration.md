@@ -1,4 +1,4 @@
-# Jev（TypeSafe System One）接入 Claudestra——探索稿
+# Jev（TypeSafe System One）接入 Floka——探索稿
 
 > 状态：**探索中**（owner 2026-09-28「新建一个分支，主要用来集成 Jev，探索相关功能」）。分支 `feat/jev-integration`。
 > 参考：`typesafe-ai/skills` 的 SKILL.md（已按官网指引装成 Claude Code 插件 `typesafe@typesafe-ai`）、https://docs.typesafe.ai/llms.txt。
@@ -14,7 +14,7 @@
   **英文最好，CJK「能处理但不等同」**——我们的会话几乎全中文，必须在自家数据上测 confidence 后再依赖。
 - **安全**：key 只放服务端（bridge `.env`），不进浏览器。Jev 不用客户数据训练。
 
-## 2. Claudestra 里哪些地方缺「一块语义判断」
+## 2. Floka 里哪些地方缺「一块语义判断」
 
 按「代码掌握流程，Jev 只给判断」的原则，候选如下（★ 为推荐先做）：
 

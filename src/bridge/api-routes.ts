@@ -1,4 +1,4 @@
-import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.js";
+import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.js"; import { peerPmLevel, settleDigestedPeerInfo } from "./api-message-policy.js";
 import { ApiFileTable, peerFileOwner, serveApiFile, type FileOwner } from "./api-files.js";
 /**
  * v2.9.2+ /api/v1 HTTP 路由 —— 从 bridge.ts 拆出的独立模块（多前端架构 §5）。
@@ -81,8 +81,7 @@ import { restartAllLabel } from "../lib/restart-all-caller.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleAgentInfoRoutes } from "./agent-info-routes.js";
-import { handleAgentsList, type AgentsListIo } from "./agents-list-route.js";
-import { createListCache } from "../lib/agent-lookup-cache.js";
+import { handleAgentsList } from "./agents-list-route.js";
 import { findListedAgent } from "./agent-lookup.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
@@ -101,7 +100,7 @@ import { revocable } from "./credential-revocation.js";
 import { rememberSwitchOverride } from "./switch-override.js";
 import { invitePageResponse } from "./invite-page.js";
 import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
-import { saveUploadToInbox } from "./local-api/media-refresh.js";
+import { saveUploadToInbox, uploadFailureStage } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
 import { conditionalJson } from "../lib/etag.js";
 import { restoreAgentArchiveFiles } from "./archive-restore.js";
@@ -226,11 +225,6 @@ const slashDeps = (d: ApiDeps): SlashDeps => ({
 /** Bearer 或设备 cookie 鉴权 + 限流，逻辑在 api-auth.ts（web-terminal 也用它，只是不限流） */
 const authApi = (req: Request, url: URL): Promise<Principal | Response> => authenticateApi(req, url, { rateLimit: true });
 
-/** 按名找人与 GET /agents 共用的 manager list 短缓存（≤3s、并发合并、registry 变即作废，lib/agent-lookup-cache.ts） */
-const agentListCache = createListCache({ list: () => runManager("list") });
-/** GET /agents 的 io.runManager：只有裸 `list` 走缓存，别的命令照旧现起 manager（不会拿 list 的缓存冒充） */
-const agentsListRunManager: AgentsListIo["runManager"] = (...args) => (args.length === 1 && args[0] === "list" ? agentListCache.result() : runManager(...args));
-
 /** registry 名双向兼容（"worker" ↔ "agent-worker"），返回 manager list 里的条目 */
 async function findApiAgent(name: string): Promise<{ name: string; channelId: string; idle?: boolean; status?: string; purpose?: string; cwd?: string; sessionId?: string } | null> {
   // master 特判：master 不在 registry。channelId = CONTROL_CHANNEL_ID，
@@ -250,7 +244,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       sessionId: latestSessionIdForCwd(cwd, "claude-code"),
     };
   }
-  return findListedAgent(agentListCache.result, name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
+  return findListedAgent(() => runManager("list"), name); // runManager 的 list 走全 bridge 共享缓存；list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
 }
 
 /**
@@ -312,7 +306,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   // GET /api/v1/agents —— scope 内的 agent 快照（热点逻辑在 bridge/agents-list-route.ts：先 scope 后尾读、已停 worker 不读尾、有界并发 + 短缓存）
   if (path === "/agents" && req.method === "GET") {
     const ifNoneMatch = req.headers.get("if-none-match");
-    return handleAgentsList(url, principal, { runManager: agentsListRunManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID, ifNoneMatch });
+    return handleAgentsList(url, principal, { runManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID, ifNoneMatch });
   }
 
   // v2.7+ GET /api/v1/sessions —— 全机器 Claude 会话清单（agents 模式适配，
@@ -945,7 +939,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
     // body：JSON {text, wait} 或 multipart（text 字段 + files，R5 入站附件）
     let text = "";
-    let waitSec = 0; let acceptsFiles = false;
+    let waitSec = 0; let acceptsFiles = false; let level: unknown; // level：peer 标的 PM 级别（api-message-policy.ts）
     const attachments: string[] = [];
     const contentType = req.headers.get("Content-Type") || "";
     try {
@@ -962,12 +956,18 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           .slice(0, 5) as unknown as File[];
         for (const f of files) {
           if (f.size > 10 * 1024 * 1024) return apiJson(413, { ok: false, error: `file "${f.name}" exceeds 10MB` });
-          attachments.push(await saveUploadToInbox(f, agent.name)); // 原子占名 + 记归属（local-api/media-refresh.ts）
+          if (f.size === 0) return apiJson(400, { ok: false, error: `file "${f.name || "(unnamed)"}" is empty` }); // Bun 解析空分片会丢文件名
+          const saved = await saveUploadToInbox(f, agent.name).catch((e: unknown) => e as Error); // 原子占名 + 记归属（local-api/media-refresh.ts）
+          if (typeof saved !== "string") { // 报错只带客户端给的文件名，不回显落盘路径
+            const stage = uploadFailureStage(saved); console.error(`[api] 附件${stage === "read" ? "读取" : "落盘"}失败 agent=${agent.name}:`, saved?.message);
+            return apiJson(stage === "read" ? 400 : 500, { ok: false, error: `could not ${stage} file "${f.name}"` });
+          }
+          attachments.push(saved);
         }
       } else {
-        const body = (await req.json()) as { text?: string; wait?: number; acceptsReplyFiles?: unknown };
+        const body = (await req.json()) as { text?: string; wait?: number; acceptsReplyFiles?: unknown; level?: unknown };
         text = String(body.text || "");
-        waitSec = Number(body.wait || 0); acceptsFiles = body.acceptsReplyFiles === true;
+        waitSec = Number(body.wait || 0); acceptsFiles = body.acceptsReplyFiles === true; level = body.level;
       }
     } catch {
       return apiJson(400, { ok: false, error: "invalid body (JSON {text, wait?} or multipart with text/files)" });
@@ -998,7 +998,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         threadId,
         attachments: attachments.length ? attachments : undefined,
         // API 请求不需要 inter-agent watchdog（有自己的 wait/轮询语义）
-        skipInterAgentWatchdog: true,
+        skipInterAgentWatchdog: true, ...peerPmLevel(principal, level), // 只有已认证 peer 的 info 进 meta（降级，不能升级）
       },
     };
 
@@ -1025,14 +1025,14 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(502, { ok: false, error: `delivery failed: ${reason || "unknown"}` });
     }
 
-    followPmDelivery(agent, delivery); // 转交给当班 PM 时，typing / 来源 / 交接记录都记在实际收件人名下
-    if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
+    followPmDelivery(agent, delivery); const quiet = settleDigestedPeerInfo(delivery, pendingApiRequests, entry); // 转交给当班 PM 时，typing / 来源 / 交接记录都记在实际收件人名下；quiet = 摘要收下的 peer info，没有回合
+    if (principal.peer && !quiet) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
-    if (!delivery.outcome.heldBy && delivery.outcome.note !== "guarded") deps.startTypingWithSafety(agent.channelId); // 押住了 / 被守门隔离了就没有回合
-    deps.lastMessageSource.set(agent.channelId, "agent"); // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
+    if (!quiet && !delivery.outcome.heldBy && delivery.outcome.note !== "guarded") deps.startTypingWithSafety(agent.channelId); // 押住了 / 被守门隔离了就没有回合
+    if (!quiet) deps.lastMessageSource.set(agent.channelId, "agent"); // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
 
-    if (waitSec === 0 || delivery.outcome.heldBy || delivery.outcome.note === "guarded") { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
+    if (quiet || waitSec === 0 || delivery.outcome.heldBy || delivery.outcome.note === "guarded") { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
       const held = { ...heldFields(delivery.outcome.heldBy, principal), ...(delivery.outcome.note === "guarded" ? { guarded: true, messageId: env.meta.messageId } : {}) };
       return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
     }

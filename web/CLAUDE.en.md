@@ -1,8 +1,8 @@
-# Claudestra Web Client
+# Floka Web Client
 
 **English** · [简体中文](./CLAUDE.md)
 
-Claudestra's Next.js web front door (the second entry point beside Discord). It is a **pure static export** (`output: "export"`) hosted by the relay (`RELAY_STATIC_DIR`) or by the bridge itself (`BRIDGE_STATIC_DIR`); the browser talks straight to the bridge's `/api/v1/*`. There is no server, no BFF and no login system — signing in means pairing a device (`docs/design-hosted-frontend.md`).
+Floka's Next.js web front door (the second entry point beside Discord). It is a **pure static export** (`output: "export"`) hosted by the relay (`RELAY_STATIC_DIR`) or by the bridge itself (`BRIDGE_STATIC_DIR`); the browser talks straight to the bridge's `/api/v1/*`. There is no server, no BFF and no login system — signing in means pairing a device (`docs/design-hosted-frontend.md`).
 
 ## Stack
 

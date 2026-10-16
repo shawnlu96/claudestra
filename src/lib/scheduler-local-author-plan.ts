@@ -40,7 +40,8 @@ export async function localAuthorPlan(db: Database, task: LedgerTask, worktreeRo
   const local = policy.localMerge === true; // ONB-1：localMerge 项目没有 origin，起点是本机 main，说明按本地口径
   const base = task.headSHA ?? (local ? "main" : "origin/main"), pm = task.pm ?? projectPm(db, task.project) ?? "scheduler";
   const promptText = renderExecPrompt({ task: task.id, title: task.title, pm, branch: task.branch,
-    base, worktree, spec: specPath, ledgerDir, template: workflow.template, ...(local ? { localMerge: true } : {}) },
+    base, worktree, spec: specPath, ledgerDir, template: workflow.template,
+      ...(local ? { localMerge: true } : policy.mergeHandoff === true ? { mergeHandoff: true } : {}) },
     existsSync(templatePath) ? readFileSync(templatePath, "utf8") : undefined);
   return { feature: { id: binding?.featureId ?? `task:${task.id}` }, key: binding?.nodeKey ?? task.id,
     taskId: task.id, title: task.title, project: task.project, item: task.itemId,

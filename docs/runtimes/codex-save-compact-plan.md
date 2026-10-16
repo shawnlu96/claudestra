@@ -2,7 +2,7 @@
 
 本文只做核对和规划，**不改产品代码，也没有压缩任何真实会话**。核对基线：main `a538824a`。
 结论先说：
-- 今天 Claudestra **没有** Codex 版的 save-compact。fleet 对非 claude-code 运行时的 `compact` / `save-compact` 一律跳过。
+- 今天 Floka **没有** Codex 版的 save-compact。fleet 对非 claude-code 运行时的 `compact` / `save-compact` 一律跳过。
 - 网页 `/compact` 发给 Codex ACP agent 时，拿到的 202 只表示「宿主收下了」，不表示压缩已经完成。
 - 宿主现在也收不到 Codex 压缩完成的信号。
 

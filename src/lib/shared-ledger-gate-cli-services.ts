@@ -22,4 +22,5 @@ export const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-priority-sample", // PRIO2 (lib/scheduler-priority-order-cmd.ts)
   "scheduler-manual-case-default", // OWN1 (manager/ledger-manual-case-cmds.ts)
   "scheduler-manual-case-sla", // SLA1 (manager/ledger-manual-case-cmds.ts)
+  "scheduler-local-merge-ready", // ONB-2 (manager/ledger-local-merge-cmds.ts)
 ]);

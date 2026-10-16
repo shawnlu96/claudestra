@@ -44,7 +44,7 @@ function usePanel(host: RefObject<HTMLDivElement | null>, open: boolean, store: 
   useEffect(() => {
     const el = host.current;
     if (!el || !open) return;
-    const gui = new GUI({ container: el, title: "Claudestra Dev", width: el.clientWidth || 320 });
+    const gui = new GUI({ container: el, title: "Floka Dev", width: el.clientWidth || 320 });
     const tickFns: ((now: number) => void)[] = [];
     const onTick = (fn: (now: number) => void) => {
       tickFns.push(fn);

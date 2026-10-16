@@ -190,7 +190,7 @@ function TopBar() {
           面板一起切掉。cwd 用 basis-0 grow：只吃剩余空间、永不触发换行，没地方就截断到看不见 */}
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 py-1">
         <div className="flex min-w-0 basis-full items-center gap-2 @xl:basis-auto">
-          <AgentTitle info={info} fallback={active || "Claudestra"} />
+          <AgentTitle info={info} fallback={active || "Floka"} />
           {/* 回合进行中的显眼标识(owner 2026-07-24:「只显示在聊天框里太不明显」)——
               顶栏脉冲徽章,streaming(本会话流式)或 agent busy 都亮 */}
           {busy && (
@@ -451,13 +451,13 @@ function ChatInner({ notices }: { notices?: ReactNode }) {
     return () => clearInterval(id);
   }, [store]);
 
-  // 未读总数 → 标签页标题「(3) Claudestra」+ App 图标角标(Badging API:iOS 16.4+
+  // 未读总数 → 标签页标题「(3) Floka」+ App 图标角标(Badging API:iOS 16.4+
   // 主屏 PWA / 桌面 Chrome;原生壳的角标由 APNs badge 字段驱动,这里调了也无害)。
   // agents 每 15s 轮询刷新,总数随之变化;为 0 时清掉。(2026-09-16 未读功能)
   const agentsForBadge = useChatStore((s) => s.state.agents);
   useEffect(() => {
     const total = agentsForBadge.reduce((n, a) => n + (a.unread || 0), 0);
-    document.title = total > 0 ? `(${total > 99 ? "99+" : total}) Claudestra` : "Claudestra";
+    document.title = total > 0 ? `(${total > 99 ? "99+" : total}) Floka` : "Floka";
     const nav = navigator as Navigator & {
       setAppBadge?: (n?: number) => Promise<void>;
       clearAppBadge?: () => Promise<void>;

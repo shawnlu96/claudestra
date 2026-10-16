@@ -46,6 +46,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-fix-relay": rule("task", "unmapped"),
   "scheduler-lock-yield": rule("task", "unmapped"),
   "scheduler-merge-handoff": rule("task", "unmapped"),
+  "scheduler-local-merge-ready": rule("task", "unmapped"),
   "scheduler-observe": rule("task", "unmapped"),
   "scheduler-plan-rejected": rule("task", "unmapped"),
   "scheduler-pool": rule("intent", "unmapped"),

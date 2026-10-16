@@ -5,6 +5,7 @@
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 import { prevReviewedHead, SCOPE_ROUND } from "./review-converge-basis.js";
+import { headReviewLines } from "./peer-pr-head-review-scope.js";
 import { rebaseScopeLines } from "./scheduler-review-rebase.js";
 
 export const BASIS_LINE = "P1 带 basis=\"acceptance:<N>\"（违反规格验收线 N）或 \"regression\"（本卡 diff 引入的正确性/安全 bug，含上轮修复）；" +
@@ -27,8 +28,10 @@ export function scopeLine(round: number, events: readonly LedgerEvent[], head: s
     "新 P1 的 probe 文件在 diff 外且 basis 非 regression，自动降 P2；probe 写明路径。";
 }
 
-/** Lines a review order carries, in order: the basis rule, the short-hash rule, then (from SCOPE_ROUND) the scope. */
+/** Lines a review order carries, in order: the basis rule, the short-hash rule, then the scope (an author push's own round, else from SCOPE_ROUND). */
 export function convergeOrderLines(round: number, events: readonly LedgerEvent[], head: string): string[] {
+  const pushed = headReviewLines(round, events, head); // merge-arch-PEERHEAD1: the author pushed after a review; scope = the increment
+  if (pushed) return [BASIS_LINE, HASH_LINE, ...pushed];
   const rebase = rebaseScopeLines(round, events, head); // merge driver moved the head: scope = PR vs main (i28-RH1)
   if (rebase) return [BASIS_LINE, HASH_LINE, ...rebase];
   const scope = scopeLine(round, events, head);
