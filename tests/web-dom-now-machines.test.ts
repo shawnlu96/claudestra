@@ -3,7 +3,7 @@
  * 真的 Sidebar + SettingsModal + CollabSwitch、真的 chat store / collab-nav / 联系人 store。fetch 全在这里拦下按合成数据答
  * （tests/helpers/machines-shots.ts 叠在 today-shots 上），夹具之外一律 404，不连任何 bridge。happy-dom 只在本文件注册、afterAll 注销。
  */
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { setAppConfigForTest } from "../web/lib/app-config";
@@ -34,6 +34,12 @@ let ui: {
   useCollabNav: () => { project: string | null; task: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
   openSettings: (p: string) => void; TODAY_KEY: string; resetLedgers: () => void; setSeenStopping: (m?: ReadonlyMap<string, number>) => void;
 };
+
+// mock.module 对整个 bun test 进程生效：同片里排在前面的文件（如 web-dom-agent-list-recovery 把 useFullScope 换成 () => false）
+// 会让设置弹窗按非全权设备只列本地页、没有伙伴机器页。本文件按 owner 设备挂，钉成 true（单跑时真实现也是 true），afterAll 换回原样。
+const CONTACTS = "../web/features/chat/contacts-data";
+const contactsBefore = { ...(await import(CONTACTS)) };
+mock.module(CONTACTS, () => ({ ...contactsBefore, useFullScope: () => true }));
 
 const NOW = Date.now();
 const fresh = () => ({ ...todayWorld(NOW), fp: "mac-a", m: machinesWorld(NOW) });
@@ -97,6 +103,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  mock.module(CONTACTS, () => contactsBefore);
   globalThis.fetch = realFetch;
   machines.currentFp = realFp;
   setContextRequestForTest(null);
