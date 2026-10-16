@@ -7,24 +7,25 @@
  *      且台账里有本卡那条发送意图（op review_pm_wait / merge_pm_wait，kind try，data.key 相同）。
  * 现状判定复用各自原候选函数（reviewPmCandidate / mergePmCandidate 的实例键还等不等于提醒的键）：阶段已前进（如进了 merge_deploy）、
  * 已有有效合并请求或未结意图、head / 规格 / 轮次 / 审查变了，候选就不再是这个键。补截图 PM 待办（ui_evidence_repair）按
- * scheduler-ui-evidence-repair.ts 的 uiRepairTodoCurrent。认不出的提醒、读台账出错：照旧投（宁可叫醒，不吞）。
+ * 下面的 uiRepairTodoCurrent。认不出的提醒、读台账出错：照旧投（宁可叫醒，不吞）。
  * 开关恢复键 pmQuiet（缺省 on）：off = 什么都不读不加，正文与投递逐字照旧；observe = 照常投，只记一条「本会跳过」样本；
  * on = 跳过并记 pm_quiet_skip（dedup = 卡 + 类型 + 键，重复 tick / 重启 / 重投只一条）。
  * 回退：`ledger scheduler-recovery claude-orchestrator off --key pmQuiet --reason ...`。tests/pm-notice-current.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 import { mergePmCandidate } from "./scheduler-merge-pm-wait.js";
 import { reviewPmCandidate } from "./scheduler-review-pm-wait.js";
-import { uiRepairTodoCurrent } from "./scheduler-ui-evidence-repair.js";
+import { DIGEST_RE } from "./scheduler-ui-merge-refusal.js";
 
-export const PM_QUIET_KEY = "pmQuiet";
+const PM_QUIET_KEY = "pmQuiet";
 /** 补截图超限后的 PM 待办类型（scheduler-ui-evidence-repair.ts 发） */
 export const UI_REPAIR_TODO = "ui_evidence_repair";
 /** 本模块认得的待办类型；别的类型照旧投 */
-export type PmNoticeKind = "review_pm_wait" | "merge_pm_wait" | typeof UI_REPAIR_TODO;
+type PmNoticeKind = "review_pm_wait" | "merge_pm_wait" | typeof UI_REPAIR_TODO;
 /** 可复核的提醒引用：卡号 + 待办类型 + 绑定窗口（实例键，或补图窗口键） */
 export interface PmNoticeRef { kind: PmNoticeKind; taskId: string; key: string }
 
@@ -69,12 +70,19 @@ export function pmNoticeRefOf(db: Database, project: string, text: string): PmNo
 }
 
 /** 引用的实例已不是现状的原因；仍是现状 = null */
-export function pmNoticeStale(db: Database, ref: PmNoticeRef, now: number): string | null {
+function pmNoticeStale(db: Database, ref: PmNoticeRef, now: number): string | null {
   const task = getTask(db, ref.taskId);
   if (!task) return `卡 ${ref.taskId} 已不在台账`;
   if (ref.kind === "review_pm_wait") return reviewPmCandidate(db, task.id, now)?.key === ref.key ? null : `审查已回提醒的实例已过期（卡现在 ${task.stage}）`;
   if (ref.kind === "merge_pm_wait") return mergePmCandidate(db, task.id, now)?.key === ref.key ? null : `合并待处置提醒的实例已过期（卡现在 ${task.stage}）`;
-  return uiRepairTodoCurrent(db, task, ref.key) ? null : `补截图待办的绑定窗口已过期（卡现在 ${task.stage}）`;
+  return uiRepairTodoCurrent(task, ref.key) ? null : `补截图待办的绑定窗口已过期（卡现在 ${task.stage}）`;
+}
+
+/** 补截图 PM 待办（scheduler-ui-evidence-repair.ts 发）是否仍是现状：同 head / specRev 窗口，截图仍缺，卡还停在 review / fix */
+function uiRepairTodoCurrent(task: LedgerTask, key: string): boolean {
+  const digest = task.extra.screenshotsDigest;
+  return `${task.headSHA}:s${task.specRev}` === key && (typeof digest !== "string" || !DIGEST_RE.test(digest)) &&
+    (task.stage === "review" || task.stage === "fix");
 }
 
 export type PmNoticeVerdict = { send: true } | { send: false; reason: string; ref: PmNoticeRef };

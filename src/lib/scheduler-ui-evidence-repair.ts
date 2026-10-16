@@ -10,7 +10,6 @@
  * 恢复键 pmQuiet（pm-notice-current.ts pmQuietMode）：off / observe = 原决定逐字不变（含 selfHealBeforeManual 自救）。
  * tests/scheduler-ui-evidence-repair.test.ts。
  */
-import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { UI_REJECTED } from "./ledger-ui-approve-verdict.js";
 import { pmNoticeTag, pmQuietMode, UI_REPAIR_TODO } from "./pm-notice-current.js";
@@ -19,7 +18,7 @@ import { currentReviewFacts, type ReviewFacts, type ReviewFinding } from "./sche
 import { DIGEST_RE } from "./scheduler-ui-merge-refusal.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
 
-export const UI_REPAIR_MAX = 2;
+const UI_REPAIR_MAX = 2;
 export const UI_REPAIR_FAMILY = "ui_evidence_repair";
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -28,7 +27,7 @@ export interface UiRepairOrder { reportPath: string; findings: ReviewFinding[]; 
 type Exhausted = { kind: "escalate"; code: string; reason: string };
 type RepairStep = { kind: "fix"; note: string; seq: number } | Exhausted;
 
-export const uiRepairWindow = (task: Pick<LedgerTask, "headSHA" | "specRev">): string => `${task.headSHA}:s${task.specRev}`;
+const uiRepairWindow = (task: Pick<LedgerTask, "headSHA" | "specRev">): string => `${task.headSHA}:s${task.specRev}`;
 const missingShots = (digest: unknown): boolean => typeof digest !== "string" || !DIGEST_RE.test(digest);
 const codeClean = (f: ReviewFacts): boolean => f.verdict !== "block" && !f.findings.some((x) => x.severity === "P0" || x.severity === "P1");
 
@@ -87,9 +86,4 @@ export function uiRepairFix(s: PlannerSnapshot, facts: ReviewFacts | null): UiRe
     probe: `补截图（${bind}）：代码已过审查 #${f.eventSeq}，不用改代码；在同一 head 拍前后截图，交付时带有效 uiEvidence（绑定本卡、该 head、` +
       `规格版本与交付后轮次）。截图只登记证据，视觉验收仍由 PM / owner 做`,
   }] };
-}
-
-/** PM 待办（ui_evidence_repair）是否仍是现状：同 head / specRev，截图仍缺，卡还停在 review / fix */
-export function uiRepairTodoCurrent(_db: Database, task: LedgerTask, key: string): boolean {
-  return uiRepairWindow(task) === key && missingShots(task.extra.screenshotsDigest) && (task.stage === "review" || task.stage === "fix");
 }

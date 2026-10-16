@@ -14,7 +14,8 @@ import type { PmNoticeRef } from "./pm-notice-current.js";
 
 /** 缺规格提醒经调度那一轮的 notifyPm（已带 stillActive）发给 feature PM：目标从这里带进来，不改 notifyPm 的签名 */
 export const pmNotifyTarget = new AsyncLocalStorage<string>();
-export async function notifyProjectPm(db: Database, project: string, text: string, opts: { fromName: string; stillActive?: () => boolean; to?: string; level: PmNoticeLevel; current?: PmNoticeRef }): Promise<void> {
+export async function notifyProjectPm(db: Database, project: string, text: string,
+  opts: { fromName: string; stillActive?: () => boolean; to?: string; level: PmNoticeLevel; current?: PmNoticeRef }): Promise<void> {
   const quiet = await import("./pm-notice-current.js");
   if (quiet.pmQuietMode(project) !== "off") {
     if (opts.current) text = `${text}${quiet.pmNoticeTag(opts.current)}`;
