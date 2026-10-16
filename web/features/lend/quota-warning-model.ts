@@ -1,11 +1,12 @@
 /**
- * 网页顶部额度提醒条的纯模型（QWARN1）：输入是 QLINE1 的 GET /lend/quota-lines 回包（lend-quota-model.ts QuotaLinesView），
- * 输出「哪几族要提醒、提醒什么、关掉记什么」。状态只看 bridge 判好的 state / limit，不按百分比自己猜、不算 slots。
+ * 出借额度线提醒的纯模型（QWARN1，QUOTA1 起并进顶部额度卡 features/quota/quota-notice-model.ts）：输入是 QLINE1 的
+ * GET /lend/quota-lines 回包（lend-quota-model.ts QuotaLinesView），输出「哪几族到了提醒线 / 不再接新活」。状态只看 bridge 判好的
+ * state / limit，不按百分比自己猜、不算 slots。
  * - 只有 warn / stop 出提醒；unknown（读不到、已过重置）不出肯定提醒，也不当 0 或「已恢复」；below 不出。
  * - 模式 off = 没有生效的线，不出；observe 照出但写明「只观察、未执行」。
- * - 两族各一条，互不顶替。
- * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记，只认最近一个线世代（周窗口 resetAt + 两条线 + 模式，带观察世代）里
- * 关掉过的状态 + 收窄档：同一条线不再弹；提醒→停接、改线 / 改模式（改回旧值也算新一代）、新的一周就再出现。tests/web-quota-warning-*.test.ts。
+ * 旧的关掉记录（DISMISS_KEY）只剩迁移要读：parseDismissed 把它读成每个实例 / 家族一份 { gen, states }，新卡读一次后不再写。
+ * Claude 的周重置时刻每次观测都带几百毫秒抖动（同一周 …399963 / …400347），所以比较 resetAt 用 RESET_JITTER_MS 容差，不按全等。
+ * tests/web-quota-warning-model.test.ts、tests/web-quota-warning-reset-jitter.test.ts。
  */
 import { LEND_WORDS } from "@/lib/owner-words";
 import type { FamilyLine, QuotaFamily, QuotaLinesView } from "./lend-quota-model";
@@ -46,28 +47,35 @@ export function warningItems(view: QuotaLinesView | null | undefined, now: numbe
   return out;
 }
 
-/** 一条提醒的文案（中文原文 + 变量，渲染处经 quota-warning-i18n 翻译） */
-export function warnTexts(it: WarnItem): { title: string; status: string } {
-  const title = it.level === "stop" ? LEND_WORDS.warnTitleStop : "{family} 本周已用 {pct}%，达到提醒线";
-  const status = it.stopped ? LEND_WORDS.statusStopped
+/** 一条提醒在接活上的状态句（中文原文，渲染处 t() 翻译） */
+export function warnStatus(it: Pick<WarnItem, "level" | "stopped" | "enforced">): string {
+  return it.stopped ? LEND_WORDS.statusStopped
     : it.level === "stop" ? LEND_WORDS.statusObserveStop
     : it.enforced ? LEND_WORDS.statusHalved : LEND_WORDS.statusObserveWarn;
-  return { title, status };
 }
 
-// ── 关掉记录（本设备 localStorage；跨 tab 经 storage 事件同步） ──
+// ── 旧的关掉记录（只读，迁移用） ──
 
 export const DISMISS_KEY = "cstra_quota_warning_dismissed";
-const MAX_SCOPES = 32;
 /** 同一世代里记几种关掉过的状态（实际只有 warn / stop 各一种，留余量） */
 const MAX_STATES = 8;
 
-/** 每个实例/家族只保存当前配置窗口及关闭状态。epoch 只在观察到配置变化时推进；
- * since 是最近关闭或失效时间，不能把两个 tab 对同一配置的独立关闭误判为不同世代。空 states 也要持久化，防止设置改回后旧关闭复活。 */
+/** 旧格式：每个实例 / 家族一份当前配置窗口（gen）及关掉过的状态（states，如 "warn:half"）；epoch / since 是旧的跨 tab 合并用的时刻 */
 export interface DismissRec { gen: string; since: number; states: string[]; epoch?: number }
 export type DismissMap = Record<string, DismissRec>;
 
-const scopeOf = (instance: string, family: QuotaFamily) => `${instance}|${family}`;
+/** 同一周的 resetAt 观测抖动上限；跨周至少差一天，远大于它。按分钟取整不行：抖动正好跨分钟边界时会被打成两代 */
+export const RESET_JITTER_MS = 5 * 60_000;
+
+/** 世代 = resetAt|warn/stop|模式：线和模式全等，resetAt 两边都是数字时差在 RESET_JITTER_MS 内算同一周 */
+export function sameGen(a: string, b: string): boolean {
+  if (a === b) return true;
+  const [ra, ...ta] = a.split("|"), [rb, ...tb] = b.split("|");
+  if (ta.join("|") !== tb.join("|")) return false;
+  const x = Number(ra), y = Number(rb);
+  return ra !== "" && rb !== "" && Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) <= RESET_JITTER_MS;
+}
+
 /** key = resetAt|状态:收窄档|warn/stop|模式 → [世代, 状态] */
 const splitKey = (key: string): [string, string] => {
   const [reset, state, line, mode] = key.split("|");
@@ -96,7 +104,7 @@ export function parseDismissed(raw: string | null): DismissMap {
       const last = keys.at(-1);
       if (last) {
         const [gen] = splitKey(last);
-        const states = [...new Set(keys.map(splitKey).filter(([g]) => g === gen).map(([, state]) => state))].slice(-MAX_STATES);
+        const states = [...new Set(keys.map(splitKey).filter(([g]) => sameGen(g, gen)).map(([, state]) => state))].slice(-MAX_STATES);
         out[scope] = { gen, since: 0, states };
       }
     }
@@ -104,66 +112,4 @@ export function parseDismissed(raw: string | null): DismissMap {
   } catch {
     return {}; // 记录损坏 = 当没关过：最多多弹一次提醒，不会把该出的提醒吞掉
   }
-}
-
-export function isDismissed(m: DismissMap, instance: string, it: WarnItem): boolean {
-  const r = m[scopeOf(instance, it.family)];
-  if (!r) return false;
-  const [gen, state] = splitKey(it.key);
-  return r.gen === gen && r.states.includes(state);
-}
-
-const capScopes = (entries: [string, DismissRec][]): DismissMap => Object.fromEntries(entries.slice(-MAX_SCOPES));
-
-/** 同配置的关闭取并集，但早于最近一次配置失效的关闭不复活；不同配置保留最新观察/关闭。 */
-function mergeRec(x: DismissRec, y: DismissRec): DismissRec {
-  if (x.gen === y.gen) {
-    const epoch = Math.max(x.epoch ?? 0, y.epoch ?? 0);
-    const states = [x, y].flatMap((r) => r.since >= epoch ? r.states : []);
-    return { gen: x.gen, since: Math.max(x.since, y.since), ...(epoch ? { epoch } : {}),
-      states: [...new Set(states)].sort().slice(-MAX_STATES) };
-  }
-  const xt = x.epoch ?? x.since, yt = y.epoch ?? y.since;
-  if (xt !== yt) return xt > yt ? x : y;
-  return x.gen > y.gen ? x : y;
-}
-
-/** 成功 GET 的真实配置/窗口变化立即作废旧关闭，含 below/unknown/off；无需关闭中间提醒。 */
-export function observeDismissed(m: DismissMap, instance: string, view: QuotaLinesView, at: number = Date.now()): DismissMap {
-  let out = m;
-  for (const f of view.families) {
-    const scope = scopeOf(instance, f.family);
-    const cur = out[scope];
-    // unknown 不提供窗口时不凭空制造新周；阈值/模式仍按真实设置推进失效。
-    const resetAt = f.resetAt ?? (cur ? cur.gen.split("|")[0] : "noreset");
-    const gen = [resetAt, `${f.warnPct}/${f.stopPct}`, view.config.mode].join("|");
-    if (!cur || cur.gen === gen) continue;
-    const epoch = Math.max(at, (cur.epoch ?? cur.since) + 1);
-    out = capScopes([...Object.entries(out).filter(([k]) => k !== scope), [scope, { gen, since: epoch, epoch, states: [] }]]);
-  }
-  return out;
-}
-
-/** 两份关掉记录合并（b 动过的 scope 排后），总数封顶 */
-export function mergeDismissed(a: DismissMap, b: DismissMap): DismissMap {
-  const out = new Map<string, DismissRec>(Object.entries(a));
-  for (const [scope, r] of Object.entries(b)) {
-    const prev = out.get(scope);
-    out.delete(scope);
-    out.set(scope, prev ? mergeRec(prev, r) : r);
-  }
-  return capScopes([...out.entries()]);
-}
-
-/** 记下这一条被关掉：当前就是这一代则追加状态，否则以 at 开新一代（旧代作废）；最近动过的 scope 排最后，总数封顶 */
-export function withDismissed(m: DismissMap, instance: string, it: WarnItem, at: number = Date.now()): DismissMap {
-  const scope = scopeOf(instance, it.family);
-  const [gen, state] = splitKey(it.key);
-  const cur = m[scope];
-  const rec: DismissRec = cur && cur.gen === gen ? { ...cur, since: Math.max(at, cur.since), states: [...cur.states.filter((k) => k !== state), state].slice(-MAX_STATES) }
-    : { gen, since: Math.max(at, cur ? cur.since + 1 : at), ...(cur ? { epoch: Math.max(at, (cur.epoch ?? cur.since) + 1) } : {}), states: [state] };
-  const out = new Map<string, DismissRec>(Object.entries(m));
-  out.delete(scope);
-  out.set(scope, rec);
-  return capScopes([...out.entries()]);
 }

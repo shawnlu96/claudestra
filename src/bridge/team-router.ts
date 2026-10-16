@@ -10,6 +10,7 @@
  * 消息来源（回合结束 @ 不 @ owner）只在真正送达时才标。
  * 硬规则（P0、第 3 轮不通过）：用 runManager 调 `ledger escalate --auto` 由 CLI 记账（dedup 按 review 的 seq），PM 下一轮经 escalate 收到。
  */
+import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
 import type { ServerWebSocket } from "bun";
 import { LedgerReader } from "../lib/ledger-read.js";
 import { getMeta, getTask, listEvents } from "../lib/ledger-store.js";
@@ -165,7 +166,8 @@ export function teamRouterTicker(d: TickerDeps): () => Promise<void> {
   };
 }
 
-type Notice = Pick<RouteNotice, "to" | "text" | "messageId">;
+/** pmLevel 必填（agents-NOTICETYPE1）：收件人是当班 PM 时分流只认它；发给执行者的也照填，收件方不是 PM 就不看 */
+type Notice = Pick<RouteNotice, "to" | "text" | "messageId"> & { pmLevel: PmNoticeLevel };
 
 function envelopeOf(n: Notice, channelId: string, client: Client | undefined): Envelope {
   return {
@@ -175,7 +177,7 @@ function envelopeOf(n: Notice, channelId: string, client: Client | undefined): E
     intent: "notification",
     content: n.text,
     // waitForIdle：目标主回合在跑就押到 Stop、永不抢占（bridge.ts deliverToLocal 判忙）；不带的话回合开头投进去会被静默丢掉
-    meta: { messageId: n.messageId, triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true },
+    meta: { messageId: n.messageId, triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true, ...(n.pmLevel ? { pmLevel: n.pmLevel } : {}) },
   };
 }
 
@@ -223,7 +225,7 @@ export function initTeamRouter(deps: TeamRouterDeps): void {
   const log = (m: string) => console.log(m);
   sender = makeSender(deps);
   void import("./pm-digest.js").then((m) => m.pmDigest.start({ clients: deps.clients, deliver: deps.deliver })); // PM 推送摘要的稳定发送入口与定时器（PMDIG1）
-  void import("./pm-job.js").then((m) => m.pmJob.start((to, text, messageId) => sendLedgerNotice({ to, text, messageId }))); // PM 处理员：启动就扫未完成的单并定时扫，不靠新流量（PMJOB1）
+  void import("./pm-job.js").then((m) => m.pmJob.start((to, text, messageId) => sendLedgerNotice({ to, text, messageId, pmLevel: "action" }))); // PM 处理员：启动就扫未完成的单并定时扫，不靠新流量（PMJOB1）
   onHeldDelivered((channelId, env) => {
     if (isLedgerNotice(env)) deps.markBridgeSource?.(channelId);
   });
@@ -231,7 +233,7 @@ export function initTeamRouter(deps: TeamRouterDeps): void {
     reader: new LedgerReader(),
     cursorPath: CURSOR_PATH,
     channelOf: activeChannelOf,
-    send: sender,
+    send: (n, channelId) => sender!({ ...n, pmLevel: "action" }, channelId), // 交付 / 审查结果 / 退修 / 升级：收件人要动手
     escalate: async (a) => {
       const args = ["ledger", "escalate", a.taskId, "--reason", a.reason, "--auto", "--dedup", a.dedup];
       const r = await runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: 30_000 }).catch((e: Error) => ({ ok: false, error: e.message }));

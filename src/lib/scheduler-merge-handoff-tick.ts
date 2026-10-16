@@ -4,6 +4,7 @@
  * Every road here either writes through the scheduler CLI or gives the card to PM; nothing merges, updates a branch, forms a
  * train or plans a merge intent. tests/scheduler-merge-handoff.test.ts, tests/scheduler-merge-handoff-carry.test.ts.
  */
+import { asInfo } from "./pm-notice-level.js";
 import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { ghEnv } from "./peer-pr-github.js";
@@ -13,7 +14,9 @@ import { readSchedulerConfig } from "./scheduler-config.js";
 import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
 import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
+import { pendingRemoteBounce, remoteBounceRefusal } from "./remote-review-bounce.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 /**
  * `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in.
@@ -25,6 +28,12 @@ export interface HandoffPr {
   base?: string;
   /** MERGED after the handoff: whether the configured clone's main holds the merge commit (only then may the card go live). */
   landing?: MainLanding;
+  /** GitHub's isDraft (absent = not reported: neither turned ready nor back to a draft). */
+  draft?: boolean;
+  /** Why `gh pr ready` (or `--undo`) refused to move the PR to the draft state asked for this time: tried again on a later read. */
+  flipError?: string;
+  /** This read itself ran `gh pr ready [--undo]`; after an undo every field is the fresh view taken right after it. */
+  flipped?: true;
 }
 /** `mainHead` = the main commit, read from the PR repository's main, that was found to contain the merge commit. */
 type MainLanding = { ok: true; mainHead: string } | { ok: false; reason: string };
@@ -32,8 +41,12 @@ type MainLanding = { ok: true; mainHead: string } | { ok: false; reason: string 
 export type HandoffOnMain = (prRef: string, mergeSha: string) => Promise<MainLanding>;
 /** `refused`: reading this head again gives the same answer (the list is too long to vouch for); recorded once, locks stay whole. */
 type PrFiles = string[] | { refused: string };
-/** `follow` = the PR head this machine follows after the handoff (absent before it). A failed read or git step throws. */
-export type ReadPr = (prRef: string, follow?: { project: string; head: string }, handing?: { project: string }) => Promise<HandoffPr>;
+/**
+ * `follow` = the PR head this machine follows after the handoff (absent before it). A failed read or git step throws. A PR read
+ * OPEN at the followed head is moved to the draft state its stage wants (RRL-3: the owner's queue skips drafts): ready once
+ * handed over, back to a draft with `want: "draft"` (an owner P1 sending it back to fix).
+ */
+export type ReadPr = (prRef: string, follow?: { project: string; head: string }, handing?: { project: string }, want?: "draft") => Promise<HandoffPr>;
 /** The PR's net changed paths (merge-base with main → head, renames as both sides); null when the clone cannot tell this time. */
 export type HandoffFiles = (prRef: string, head: string) => Promise<PrFiles | null>;
 /** `mergeSha` set = the PR is merged: its main parent must be on main before that merge, not on the main that now holds the PR. */
@@ -42,7 +55,7 @@ type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface HandoffCard<O> {
   db: Database;
   task: LedgerTask;
-  deps: { manager: Manager; notifyPm(task: LedgerTask, text: string): Promise<void>; now(): number; prState?: ReadPr };
+  deps: { manager: Manager; notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>; now(): number; prState?: ReadPr };
   out(step: string, detail: string): O;
   escalate(reason: string): Promise<O>;
 }
@@ -75,15 +88,16 @@ export function ghPrState(command: typeof runBounded = runBounded,
     const dir = readSchedulerConfig().projects[project]?.repoDir;
     return dir ? handoffOnMain(dir, command) : null;
   }): ReadPr {
-  return async (prRef, follow, handing) => {
-    const read = await ghPrRead(prRef, command, 30_000);
-    if (!read.ok) throw new Error(read.message);
-    const { pr } = read, { mergeSha } = pr;
+  return async (prRef, follow, handing, want) => {
+    const seen = await viewPr(prRef, command);
     // a PR retargeted off main goes to PM: neither its files, its carry nor its landing are worth a git read
-    if (offMain(pr)) return pr;
+    if (offMain(seen)) return seen;
+    const { pr, flip } = await draftAsWanted(prRef, command, seen, follow, want);
+    if (offMain(pr)) return { ...pr, ...flip };
+    const { mergeSha } = pr;
     const files = handing && pr.state === "OPEN" ? { files: await prFiles(filesOf(handing.project), prRef, pr.head) } : {};
     const landing = follow && pr.state === "MERGED" && mergeSha ? { landing: await mainLanding(mainOf(follow.project), prRef, pr.base, mergeSha) } : {};
-    const full: HandoffPr = { ...pr, ...files, ...landing };
+    const full: HandoffPr = { ...pr, ...files, ...landing, ...flip };
     // CLOSED goes to PM anyway; MERGED without its merge commit is read again next round
     if (!follow || same(pr.head, follow.head) || pr.state === "CLOSED" || (pr.state === "MERGED" && !mergeSha)) return full;
     const carry = carryOf(follow.project);
@@ -97,19 +111,47 @@ export function ghPrState(command: typeof runBounded = runBounded,
  */
 export type GhPrRead = { ok: true; pr: HandoffPr } | { ok: false; kind: "timeout" | "failed" | "malformed"; code: number | null; message: string };
 export async function ghPrRead(prRef: string, command: typeof runBounded, timeoutMs: number): Promise<GhPrRead> {
-  const r = await command(["gh", "pr", "view", prRef, "--json", "state,headRefOid,mergeCommit,baseRefName"], { env: ghEnv(), timeoutMs });
+  const r = await command(["gh", "pr", "view", prRef, "--json", "state,headRefOid,mergeCommit,baseRefName,isDraft"], { env: ghEnv(), timeoutMs });
   if (r.code !== 0 || r.timedOut) {
     return { ok: false, kind: r.timedOut ? "timeout" : "failed", code: r.code ?? null,
       message: `gh pr view 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}` };
   }
-  let raw: { state?: unknown; headRefOid?: unknown; mergeCommit?: { oid?: unknown } | null; baseRefName?: unknown };
+  let raw: { state?: unknown; headRefOid?: unknown; mergeCommit?: { oid?: unknown } | null; baseRefName?: unknown; isDraft?: unknown };
   try { raw = JSON.parse(r.stdout); } catch (e) { return { ok: false, kind: "malformed", code: 0, message: (e as Error).message }; }
   const mergeSha = typeof raw?.mergeCommit?.oid === "string" && SHA.test(raw.mergeCommit.oid) ? raw.mergeCommit.oid : null;
   if (!["OPEN", "MERGED", "CLOSED"].includes(String(raw?.state)) || typeof raw.headRefOid !== "string" || !SHA.test(raw.headRefOid)) {
     return { ok: false, kind: "malformed", code: 0, message: "gh pr view 输出不合规" };
   }
   return { ok: true, pr: { state: raw.state as HandoffPr["state"], head: raw.headRefOid, mergeSha,
-    ...(typeof raw.baseRefName === "string" ? { base: raw.baseRefName } : {}) } };
+    ...(typeof raw.baseRefName === "string" ? { base: raw.baseRefName } : {}), ...(typeof raw.isDraft === "boolean" ? { draft: raw.isDraft } : {}) } };
+}
+
+async function viewPr(prRef: string, command: typeof runBounded): Promise<HandoffPr> {
+  const read = await ghPrRead(prRef, command, 30_000);
+  if (!read.ok) throw new Error(read.message);
+  return read.pr;
+}
+
+/**
+ * Only the head that was handed over is moved to the draft state asked for: a PR moved off it goes to PM or is carried first, never
+ * readied on a guess. An undo that went through is followed by a fresh view, returned instead of the one from before it: a PR closed
+ * or moved between gh's view and the undo is never sent back to fix on its old head (tests/remote-review-draft-r4.test.ts).
+ */
+async function draftAsWanted(prRef: string, command: typeof runBounded, pr: HandoffPr, follow: { head: string } | undefined, want: "draft" | undefined):
+  Promise<{ pr: HandoffPr; flip: Pick<HandoffPr, "draft" | "flipError" | "flipped"> }> {
+  if (!follow || pr.state !== "OPEN" || !same(pr.head, follow.head)) return { pr, flip: {} };
+  if (want !== "draft") return { pr, flip: pr.draft ? await setDraft(prRef, command, false) : {} };
+  if (pr.draft !== false) return { pr, flip: {} };
+  const undo = await setDraft(prRef, command, true);
+  return undo.flipped ? { pr: await viewPr(prRef, command), flip: { flipped: true } } : { pr, flip: undo };
+}
+
+/** `gh pr ready [--undo]` of a full PR URL: the PR's new draft state, or why not (stderr's first line, as ghPrRead's refusal carries it). */
+async function setDraft(prRef: string, command: typeof runBounded, draft: boolean): Promise<Pick<HandoffPr, "draft" | "flipError" | "flipped">> {
+  const argv = ["gh", "pr", "ready", prRef, ...(draft ? ["--undo"] : [])];
+  const r = await command(argv, { env: ghEnv(), timeoutMs: 30_000 });
+  if (r.code === 0 && !r.timedOut) return { draft, flipped: true };
+  return { flipError: `gh pr ready${draft ? " --undo" : ""} 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}` };
 }
 
 /** `owner/repo` (lowercased) of an origin on exactly github.com — scp form `git@github.com:o/r`, `https://` or `ssh://` — else null. */
@@ -216,11 +258,17 @@ async function prFiles(files: HandoffFiles | null, prRef: string, head: string):
   }
 }
 
-/** Best effort: the ledger event is the durable record; a stop still ends the pass. */
-const tell = (c: HandoffCard<unknown>, text: string): Promise<void> => c.deps.notifyPm(c.task, text).catch((e) => {
-  if (e instanceof SchedulerStopped) throw e;
-  console.error(`⚠️ [scheduler] ${c.task.id} 合并交接通知没发出去（台账已记）：${(e as Error).message}`);
-});
+/**
+ * Best effort: the ledger event is the durable record; a stop still ends the pass. `routine` = 只记卡片不送 PM（交接进度）；
+ * 合并落地要 PM 本机跟上 main 再 verify，没人推就停在 live，所以那条不能标常规（tests/pm-notice-level.test.ts）。
+ */
+const tell = (c: HandoffCard<unknown>, text: string, routine = false): Promise<void> => {
+  const send = () => c.deps.notifyPm(c.task, text, routine ? "info" : "action");
+  return (routine ? asInfo(send) : send()).catch((e) => {
+    if (e instanceof SchedulerStopped) throw e;
+    console.error(`⚠️ [scheduler] ${c.task.id} 合并交接通知没发出去（台账已记）：${(e as Error).message}`);
+  });
+};
 
 /**
  * The owner merged main into the PR after the handoff: record the move when only main came in (the review still covers the
@@ -262,6 +310,63 @@ async function landAfterHandoff(c: HandoffCard<unknown>, follow: HandoffFollow, 
   return r.ok === true ? null : String(r.error);
 }
 
+/**
+ * An owner P1 booked on this stay's head (before or after the handoff) sends the card back to fix (RRL-2), or to PM when a lender
+ * wrote the head or the owner's bounces are used up — only on a PR just read OPEN at that very head, since no fix can be delivered
+ * to a merged or closed one. Merged at that head with the P1 unhandled: PM, never a silent live. Closed / moved: the handoff's own
+ * roads. Null = nothing to do here, the handoff goes on.
+ */
+async function remoteBounce<O>(c: HandoffCard<O>, pr: string, head: string, read: HandoffPr): Promise<O | null> {
+  const p = pendingRemoteBounce(c.db, c.task);
+  if (!p || !same(read.head, p.head)) return null;
+  const report = `仓库方审查 ${p.remote.reportId} 的 ${p.remote.p1} 个 P1；报告：${p.remote.reportPath}`;
+  if (read.state === "MERGED") return c.escalate(`仓库方已合并 PR（${short(read.mergeSha)}），但这个 head 上还有没处理的${report}。不自动进 live，请 PM 接手`);
+  if (read.state !== "OPEN") return null;
+  const refused = remoteBounceRefusal(c.db, c.task, p);
+  if (refused) return c.escalate(refused);
+  const ready = await backToDraft(c, pr, p.head, read);
+  if (ready) return c.out("held", ready);
+  const r = await c.deps.manager("ledger", "scheduler-merge-handoff", c.task.id, "--head", head, "--pr", pr, "--remote-bounce", String(p.remote.seq));
+  if (r.ok !== true) return c.out("held", `仓库方 P1 打回没记上：${String(r.error)}`);
+  if (r.duplicate !== true) await tell(c, `[调度引擎] ${c.task.id} 仓库方审查 ${p.remote.reportId} 有 P1，已退回 fix 给作者（报告：${p.remote.reportPath}）`, true);
+  return c.out("remote_bounce", `仓库方审查 ${p.remote.reportId} 有 ${p.remote.p1} 个 P1，退回 fix`);
+}
+
+/**
+ * A draft PR just handed over is read once more as handed over, which turns it ready (ghPrState, RRL-3): the owner's queue skips
+ * drafts, so until then nobody there reviews it. A miss only delays that: every later poll of a handed-over draft tries again.
+ */
+async function readyNow(c: HandoffCard<unknown>, pr: string, head: string): Promise<string> {
+  try {
+    const r = await c.deps.prState!(pr, { project: c.task.project, head });
+    return r.flipError ? `；草稿没转成 ready，下轮再试：${r.flipError}` : "";
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    return `；草稿转 ready 前读 PR 失败，下轮再试：${(e as Error).message}`;
+  }
+}
+
+/**
+ * A PR going back to fix is made a draft again first (RRL-3): the owner's queue skips drafts, so it cannot review the fix's heads
+ * before this machine has; the next handoff turns it ready again. Refused: the bounce waits (a pending P1 skips the poll pace, so
+ * it is tried on every pass). A PR whose draft state gh did not report is left as it is. Null = a draft, go on. Every read after an
+ * undo is a fresh view (ghPrState): one finding the PR closed or on another head bounces nothing, the next pass takes it through
+ * the handoff's own roads.
+ */
+async function backToDraft(c: HandoffCard<unknown>, pr: string, head: string, read: HandoffPr): Promise<string | null> {
+  if (read.draft !== false) return null;
+  // driveHandoff's read already asked for the draft (a P1 pending on the followed head): one refused undo a pass is enough
+  if (read.flipError) return `仓库方 P1 退回前没把 PR 转回草稿，下轮再试：${read.flipError}`;
+  try {
+    const r = await c.deps.prState!(pr, { project: c.task.project, head }, undefined, "draft");
+    if (r.state !== "OPEN" || !same(r.head, head)) return `仓库方 P1 退回前 PR 变了（${r.state} @ ${short(r.head)}），不按旧读数退回，下轮按新状态处理`;
+    return r.draft === true ? null : `仓库方 P1 退回前没把 PR 转回草稿，下轮再试：${r.flipError ?? "gh 没报出草稿状态"}`;
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    return `仓库方 P1 退回前读 PR 失败，下轮再试：${(e as Error).message}`;
+  }
+}
+
 /** First call hands the card over (PR open at the card's head, or PM); later calls follow the PR until merged / closed. */
 export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const { task } = c;
@@ -271,13 +376,16 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   // the evidence is bound to the PR it was handed with: a card whose PR was changed since then cannot borrow another PR's merge
   if (handed && handed.pr !== task.pr) return c.escalate(`卡上的 PR 已不是交接的那个（${handed.pr} → ${task.pr}），交接证据不覆盖新 PR`);
   const seen = polled.get(c.db) ?? polled.set(c.db, new Map()).get(c.db)!;
-  const last = seen.get(task.id);
-  if (handed && last !== undefined && c.deps.now() - last < HANDOFF_POLL_MS) return c.out("waiting", "已交仓库方合并，等 PR 结果");
+  const last = seen.get(task.id), pending = pendingRemoteBounce(c.db, task);
+  // an owner P1 waiting on this head is acted on this pass (RRL-2): the PR is read now instead of at the next minute
+  if (handed && last !== undefined && c.deps.now() - last < HANDOFF_POLL_MS && !pending) return c.out("waiting", "已交仓库方合并，等 PR 结果");
   let pr: HandoffPr;
   try {
     // files until this handoff's narrowing is settled: a busy ledger or a failed git read is tried again on the next poll
     const handing = follow && handoffNarrowSettled(c.db, task.id, follow.event.seq) ? undefined : { project: task.project };
-    pr = await c.deps.prState(handed?.pr ?? task.pr, follow ? { project: task.project, head: follow.head } : undefined, handing);
+    // a P1 pending on the followed head (pendingRemoteBounce's head) keeps the PR a draft on this very read: turned ready first, the
+    // owner's queue could pick up a head about to go back to fix (last pass undone, its bounce write refused)
+    pr = await c.deps.prState(handed?.pr ?? task.pr, follow ? { project: task.project, head: follow.head } : undefined, handing, follow && pending ? "draft" : undefined);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return c.out("held", `读 PR 状态失败，下轮再试：${(e as Error).message}`);
@@ -288,20 +396,29 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
     if (pr.state !== "OPEN" || !same(pr.head, task.headSHA)) {
       return c.escalate(`不交接：PR ${pr.state}，PR head ${short(pr.head)}，台账 head ${short(task.headSHA)}，两边要一致且 PR 开着`);
     }
+    const bounced = await remoteBounce(c, task.pr, task.headSHA, pr);
+    if (bounced) return bounced;
     const r = await c.deps.manager("ledger", "scheduler-merge-handoff", task.id, "--head", task.headSHA, "--pr", task.pr);
     if (r.ok !== true) return c.out("held", `交接没记上：${String(r.error)}`);
-    if (r.duplicate !== true) await tell(c, `[调度引擎] ${task.id} 审查通过，合并交给仓库方：${task.pr} @ ${short(task.headSHA)}（证据见台账 merge_handoff）`);
-    return c.out("handoff", `已交仓库方合并 ${task.pr}${narrowAfterHandoff(c, pr.files)}`);
+    if (r.duplicate !== true) await tell(c, `[调度引擎] ${task.id} 审查通过，合并交给仓库方：${task.pr} @ ${short(task.headSHA)}（证据见台账 merge_handoff）`, true);
+    const ready = pr.draft ? await readyNow(c, task.pr, task.headSHA) : "";
+    return c.out("handoff", `已交仓库方合并 ${task.pr}${ready}${narrowAfterHandoff(c, pr.files)}`);
   }
   if (pr.state === "CLOSED") return c.escalate(`交给仓库方的 PR 被关闭、没有合并：${task.pr}`);
   if (offMain(pr)) return c.escalate(`交给仓库方的 PR 被改投到 ${pr.base}（${pr.state}），交接只认合进 main：不进 live`);
+  // merged with an owner P1 unhandled on that head goes to PM now: it can never be fixed, waiting for the landing proof changes nothing
+  const merged = pr.state === "MERGED" ? await remoteBounce(c, task.pr, task.headSHA, pr) : null;
+  if (merged) return merged;
   if (pr.state === "MERGED" && !pr.mergeSha) return c.out("held", "PR 已合并但还读不到合并提交，下轮再看");
   if (pr.state === "MERGED" && pr.landing && !pr.landing.ok) return c.out("held", `PR 已合并但没证实进了 main，下轮再看：${pr.landing.reason}`);
   const moved = !same(pr.head, follow.head);
   const stop = moved ? await followMoved(c, follow, pr) : null;
   if (stop) return stop;
+  const bounced = await remoteBounce(c, task.pr, task.headSHA, pr); // after a recorded carry: the head followed now
+  if (bounced) return bounced;
   if (pr.state === "OPEN") {
-    return c.out("waiting", `${moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果"}${narrowAfterHandoff(c, pr.files)}`);
+    const ready = pr.flipError ? `；草稿没转成 ready，下轮再试：${pr.flipError}` : "";
+    return c.out("waiting", `${moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果"}${ready}${narrowAfterHandoff(c, pr.files)}`);
   }
   // a read that never said whether main holds the merge commit proves nothing: held, never live (a moved head still went to PM above)
   if (!pr.landing?.ok) return c.out("held", "PR 已合并但没证实进了 main，下轮再看：读 PR 没给出 main 是否含合并提交");

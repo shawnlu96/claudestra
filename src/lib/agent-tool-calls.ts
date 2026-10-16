@@ -33,6 +33,7 @@ export async function sendToAgentTool(bridgeRequest: BridgeRequest, args: any) {
     text: args.text,
     expecting: typeof args?.expecting === "string" ? args.expecting : undefined,
     oneShot,
+    ...(args?.level === "action" || args?.level === "info" ? { pmLevel: args.level } : {}), // 发给 PM 的级别（agents-NOTICETYPE1）
   });
   // bridge 会把对方的下一条 reply push 回来（oneShot 不会）；queued = 对方在回合中、已排队落盘，这一轮结束才收到（它也可以用 check_inbox 提前取），别当成没发出去重发
   const sent = result.queued ? (heldText[result.heldBy as string]?.(result.targetName) ?? `${result.targetName} 正在忙，消息已排队（bridge 重启也不丢），它这一轮结束就会收到。`) : "";

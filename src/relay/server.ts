@@ -7,16 +7,18 @@ import type { Server } from "bun";
 import { randomBytes } from "node:crypto";
 import {
   asAuth, asCode, asContacts, asData, asEndOrCancel, asPeerError, asReq, asRes, CLOSE, isPublicKey, isRedeemRequest,
-  keyFingerprint, LIMITS, NAME_RE, parseFrame, PROTOCOL_VERSION, RELAY_FROM, SLUG_RE, slugify, verifyAuthSignature, type PeerRecord, type ResFrame,
+  keyFingerprint, LIMITS, NAME_RE, parseFrame, PROTOCOL_VERSION, RELAY_FROM, SLUG_RE, slugify, type PeerRecord, type ResFrame,
 } from "../lib/relay-protocol.js";
+import { centerForward, centerHello, centerSubprotocol, centerTunnel, centerVerifyAuth, centerWelcome, type CenterOptions } from "../lib/floka-center/center.js";
 import { Directory, type InstanceRecord } from "./directory.js";
 import { Front } from "./front.js";
 import { ipLimitKey, KeyedWindows, SlidingWindow } from "./limiter.js";
 import { pushGatewayFor, type PushGateway } from "./push.js";
 import { Router, type Pending } from "./router.js";
-import type { Conn, ConnData, Limits, Logger, Relay, RelayOptions } from "./types.js";
+import type { Conn, ConnData, Limits, Logger, Relay, RelayOptions as BaseRelayOptions } from "./types.js";
 
-export type { Relay, RelayOptions } from "./types.js";
+export type { Relay } from "./types.js";
+export type RelayOptions = BaseRelayOptions & CenterOptions; // rename：中心双认两档（floka-center/gear.ts），缺省 off
 type Obj = Record<string, unknown>;
 
 const errorFrame = (code: string, message?: string, id?: string) => ({ t: "error", ...(id ? { id } : {}), code, ...(message ? { message } : {}), origin: "relay" });
@@ -50,9 +52,9 @@ class RelayServer implements Relay {
       base: opts.base, trustProxy: Number(opts.trustProxy ?? 0), version: opts.version ?? "dev", commit: opts.commit, vapidPublicKey: opts.push?.vapid?.publicKey,
       headTimeoutMs: opts.frontHeadTimeoutMs ?? 120_000, maxChunkBytes: this.lim.maxChunkBytes, limits: this.lim,
       online: () => this.onlineMap.size, pending: () => this.router.size, router: this.router,
-      send: (c, f) => this.send(c, f), lookupCode: (code) => this.directory.lookupCode(code), staticDir: opts.staticDir,
+      send: (c, f) => this.send(c, centerTunnel(f, this.opts)), lookupCode: (code) => this.directory.lookupCode(code), staticDir: opts.staticDir,
       bySlug: (slug) => this.located(this.directory.bySlug(slug)), byFp: (fp) => this.located(this.directory.byFp(fp)),
-      upgrade: (req, srv, ip) => this.upgrade(req, srv, ip), log: this.log,
+      upgrade: (req, srv, ip) => this.upgrade(req, srv, ip), log: this.log, center: opts,
     });
     // 定时扫 auth 超时、心跳判死、last_seen 落盘。不用 Bun 的 idleTimeout 是为了关闭码可控（4408）
     this.sweepTimer = setInterval(() => this.sweep(), opts.sweepMs ?? 5_000);
@@ -111,7 +113,7 @@ class RelayServer implements Relay {
       ip, openedAt: now, lastFrameAt: now, lastTouch: 0, nonce: null, fp: null, key: null, slug: "", name: "",
       contacts: new Set(), reqWindow: new SlidingWindow(this.lim.reqPerMinute), badFrames: 0,
     };
-    return srv.upgrade(req, { data, headers: { "Sec-WebSocket-Protocol": "claudestra-relay.v2" } }) ? undefined : new Response("upgrade failed", { status: 400 });
+    return srv.upgrade(req, { data, headers: { "Sec-WebSocket-Protocol": centerSubprotocol(req, data, this.opts) } }) ? undefined : new Response("upgrade failed", { status: 400 });
   }
 
   // ── 连接生命周期 ───────────────────────────────────────────────────────
@@ -123,6 +125,7 @@ class RelayServer implements Relay {
     this.send(ws, {
       t: "hello", v: PROTOCOL_VERSION, nonce: ws.data.nonce, ts: Math.floor(Date.now() / 1000),
       limits: { maxFrameBytes: this.lim.maxFrameBytes, maxChunkBytes: this.lim.maxChunkBytes, maxReqTimeoutMs: this.lim.maxReqTimeoutMs, heartbeatMs: this.lim.heartbeatMs },
+      ...centerHello(ws.data),
     });
   }
 
@@ -199,7 +202,7 @@ class RelayServer implements Relay {
     if (f.v !== PROTOCOL_VERSION) return this.reject(ws, "protocol_version", CLOSE.PROTOCOL, `expected v${PROTOCOL_VERSION}`);
     if (!nonce || Date.now() - ws.data.openedAt > this.lim.nonceTtlMs) return this.reject(ws, "nonce_expired", CLOSE.AUTH);
     if (!isPublicKey(f.key) || !NAME_RE.test(f.name) || !SLUG_RE.test(f.slug)) return this.reject(ws, "frame_invalid", CLOSE.PROTOCOL, "bad key, name or slug");
-    if (!verifyAuthSignature(f.key, nonce, f.name, f.slug, f.sig)) return this.reject(ws, "auth_failed", CLOSE.AUTH);
+    if (!centerVerifyAuth(ws.data, { key: f.key, nonce, name: f.name, slug: f.slug }, f.sig, this.opts)) return this.reject(ws, "auth_failed", CLOSE.AUTH);
     const fp = keyFingerprint(f.key);
     const reg = this.directory.register(fp, f.key, slugify(f.slug), f.name);
     if (reg === "fingerprint_conflict") return this.reject(ws, reg, CLOSE.DIRECTORY);
@@ -211,7 +214,7 @@ class RelayServer implements Relay {
     }
     Object.assign(ws.data, { fp, key: f.key, slug: reg.slug, name: f.name, lastTouch: Date.now() });
     this.onlineMap.set(fp, ws);
-    this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, fp, slug: reg.slug, name: f.name, base: this.opts.base, push: this.push.capabilities() });
+    this.send(ws, { t: "welcome", v: PROTOCOL_VERSION, fp, slug: reg.slug, name: f.name, base: this.opts.base, push: this.push.capabilities(), ...centerWelcome(fp, this.opts) });
     this.log("info", `${fp}「${f.name}」上线 slug=${reg.slug} ip=${ws.data.ip}`);
   }
 
@@ -280,7 +283,7 @@ class RelayServer implements Relay {
       },
     });
     const { to: _to, ...rest } = f;
-    this.send(target, { ...rest, from, timeoutMs });
+    this.send(target, { ...centerForward(rest, this.opts), from, timeoutMs });
     this.log("info", `req ${from} → ${f.to} id=${f.id} ${f.method} ${f.path.split("?")[0].slice(0, 60)} ${bytes}B timeout=${timeoutMs}`);
   }
 

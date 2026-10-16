@@ -2,8 +2,10 @@
  * Scheduler-only CLI for the deploy journal (T68g; the exit from a deploy `unknown` is `scheduler-merge-resolve`) and for the
  * other exit from `merge`, the repository-owner handoff (MHO1, lib/scheduler-merge-handoff.ts).
  */
+import { CENTER_DEPLOY_COMMANDS } from "../lib/center-deploy-command.js";
 import { advanceDeployRun, beginDeployRun } from "../lib/scheduler-deploy.js";
 import { landMergeHandoff, recordHandoffCarry, recordMergeHandoff } from "../lib/scheduler-merge-handoff.js";
+import { recordRemoteBounce } from "../lib/remote-review-bounce.js";
 import { DEPLOY_PHASES, type DeployPhase } from "../lib/ledger-deploy-schema.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
@@ -16,15 +18,18 @@ const oneOf = <T extends string>(v: string | undefined, xs: readonly T[], flag: 
 };
 
 export const SCHEDULER_DEPLOY_CMDS: Record<string, CommandSpec> = {
+  ...CENTER_DEPLOY_COMMANDS,
   "scheduler-merge-handoff": {
-    valued: ["head", "pr", "merged", "base", "pr-head", "carry", "from", "main-parent", "main-head", "diff-hash", "basis"], bools: [],
+    valued: ["head", "pr", "merged", "base", "pr-head", "carry", "from", "main-parent", "main-head", "diff-hash", "basis", "remote-bounce"], bools: [],
     usage: "scheduler-merge-handoff <task> --head <sha> --pr <url> [--merged <合并提交> --base main --pr-head <合并时 PR head> --main-head <含合并提交的 main> " +
       "| --carry <新 PR head> --from <原 PR head> --main-parent <sha> " +
-      "--main-head <sha> --diff-hash <sha256> --basis auto-merge|net-diff]（调度服务专用：合并交给仓库方；--carry = 交接后 PR 只合入 main，继续跟；--merged = 仓库方已合并，进 live）",
+      "--main-head <sha> --diff-hash <sha256> --basis auto-merge|net-diff | --remote-bounce <远端审查事件号>]" +
+      "（调度服务专用：合并交给仓库方；--carry = 交接后 PR 只合入 main，继续跟；--merged = 仓库方已合并，进 live；--remote-bounce = 仓库方 P1 打回，退回 fix）",
     run(c) {
       const input = { taskId: c.task(c.p.pos[1]).id, head: c.need("head"), pr: c.need("pr") };
-      const { merged, carry } = c.p.flags;
-      if (merged !== undefined && carry !== undefined) throw new LedgerError("invalid", "--merged 和 --carry 不能同时给");
+      const { merged, carry } = c.p.flags, remoteSeq = intFlag(c.p, "remote-bounce");
+      if ([merged, carry, remoteSeq].filter((v) => v !== undefined).length > 1) throw new LedgerError("invalid", "--merged、--carry、--remote-bounce 只能给一个");
+      if (remoteSeq !== undefined) return { ok: true, ...recordRemoteBounce(c.db, c.ctx(), { ...input, remoteSeq }) };
       if (carry !== undefined) {
         return { ok: true, ...recordHandoffCarry(c.db, c.ctx(), { ...input, to: carry, from: c.need("from"), mainParent: c.need("main-parent"),
           mainHead: c.need("main-head"), diffHash: c.need("diff-hash"), basis: c.need("basis") }) };

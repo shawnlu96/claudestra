@@ -9,6 +9,12 @@ import { appConfigSync, loadAppConfig, LOCAL_FP, machineBase } from "@/lib/app-c
 import { machines, type MachineRef } from "@/lib/machines";
 
 export const DEVICE_HEADER = "x-cstra-device";
+/**
+ * 新品牌的 CSRF 头（与 src/lib/floka-browser-protocol/names.ts 同值，web 不 import src；tests/floka-browser-protocol.test.ts 钉住）。
+ * 网页不知道机器的 rename.browserProtocol 档位，所以只写旧族：新旧 bridge 各档都认它。调用方自己带了新族的就不再补旧族——
+ * 两族同发在 on 档算冲突被拒。
+ */
+export const FLOKA_DEVICE_HEADER = "x-floka-device";
 export const API_PREFIX = "/api/v1";
 
 export class ApiError extends Error {
@@ -74,19 +80,24 @@ interface Target {
   relay: boolean;
 }
 
+/** 中继模式下能用的机器 fp：LOCAL_FP 只属于直托管，在中继上按「没选机器」处理（否则拼出 `/m/local` → machine_unknown） */
+export function relayFp(fp: string | null | undefined): string | null {
+  return fp && fp !== LOCAL_FP ? fp : null;
+}
+
 async function resolveTarget(machine?: MachineRef): Promise<Target> {
   const cfg = await loadAppConfig();
   if (cfg.mode === "direct") return { fp: cfg.fp || LOCAL_FP, base: "", relay: false };
-  const fp = machine?.fp ?? machines.currentFp();
+  const fp = relayFp(machine?.fp ?? machines.currentFp());
   if (!fp) throw new ApiError("no machine selected — pair one first", 0, {}, "no_machine");
   return { fp, base: machineBase(cfg, fp), relay: true };
 }
 
-/** 同步版基址（`<a download>`、SW 注册前等已知配置已加载的地方）；配置没到就按直托管 */
+/** 同步版基址（`<a download>`、SW 注册前等已知配置已加载的地方）；配置没到就按直托管；中继模式没选机器（含 LOCAL_FP）不加 `/m/` */
 export function apiUrlSync(path: string, fp?: string): string {
   const cfg = appConfigSync();
-  const target = fp ?? machines.currentFp() ?? LOCAL_FP;
-  return `${cfg ? machineBase(cfg, target) : ""}${API_PREFIX}${path}`;
+  const target = cfg?.mode === "relay" ? relayFp(fp ?? machines.currentFp()) : null;
+  return `${cfg && target ? machineBase(cfg, target) : ""}${API_PREFIX}${path}`;
 }
 
 const inflight = new Map<string, Set<AbortController>>();
@@ -108,7 +119,7 @@ machines.onSwitch((prev) => {
 });
 
 /** 2xx 正文坏了 = 服务端已执行、只是回包丢了：只有 GET / HEAD 标 retryable；POST 等标了会被 chat-store 发送循环自动重发（tests/web-ledger-meta-guard.test.ts） */
-async function parseBody(res: Response, method: string): Promise<Record<string, unknown>> {
+export async function parseBody(res: Response, method: string): Promise<Record<string, unknown>> {
   const retryable = method === "GET" || method === "HEAD";
   const hint = retryable ? "please retry" : "the request may already have been applied";
   const text = await res.text().catch(() => {
@@ -129,7 +140,8 @@ async function send(path: string, init: ApiInit, machine: MachineRef | undefined
   const method = (init.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = { ...(init.headers ?? {}) };
   if (accept) headers.Accept = accept;
-  if (method !== "GET" && method !== "HEAD") headers[DEVICE_HEADER] = "1";
+  const ownDevice = Object.keys(headers).some((k) => k.toLowerCase() === FLOKA_DEVICE_HEADER);
+  if (method !== "GET" && method !== "HEAD" && !ownDevice) headers[DEVICE_HEADER] = "1";
   let body = init.body;
   if (init.json !== undefined) {
     headers["Content-Type"] = "application/json";

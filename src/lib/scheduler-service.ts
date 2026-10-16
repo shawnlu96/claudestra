@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { prMergeOff, type SchedulerConfig } from "./scheduler-config.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
@@ -19,6 +19,7 @@ import { bindContentCarrySink, unsentAware } from "./merge-content-review-sink.j
 import { bindMergeUnionSink } from "./scheduler-merge-union.js";
 import { bindEffCountRefreshSink } from "./effect-count-refresh.js";
 import { bindCountCarrySink } from "./review-count-carry.js";
+import { bindCiSelectedSink } from "./scheduler-ci-selected-gate.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -61,9 +62,10 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
   using _unionSink = bindMergeUnionSink(manager, assertActive); // KEYUNION1: mergeUnion notes → `ledger scheduler-recovery-observe`, this tick only
   using _effCountSink = bindEffCountRefreshSink(manager, assertActive); // EFFAUTO1: effCountRefresh notes → `ledger scheduler-recovery-observe`, this tick only
   using _countCarrySink = bindCountCarrySink(manager, assertActive); // CARRYCNT1: effCountCarry notes → `ledger scheduler-recovery-observe`, this tick only
-  // the repository owner merges a mergeHandoff project: no merge run is begun or driven here (MHO1)
+  using _ciSelectedSink = bindCiSelectedSink(manager, assertActive); // CISEL2
+  // no PR merges here for a mergeHandoff (the repository owner, MHO1) or localMerge (the PM, ONB-2) project: no merge run is begun or driven
   // MTRBUD2: keys follow the config's project order (position taken before the mergeHandoff filter, as deployCards does), then eventSeq
-  const all = Object.entries(config.projects).map(([project, policy], k) => ({ project, policy, k })).filter(({ policy }) => !policy.mergeHandoff)
+  const all = Object.entries(config.projects).map(([project, policy], k) => ({ project, policy, k })).filter(({ policy }) => !prMergeOff(policy))
     .flatMap(({ project, policy, k }) => (db.query(`SELECT id, status, taskId, eventSeq FROM scheduler_intents WHERE project=? AND action='merge'
       AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string; taskId: string; eventSeq: number }[])
       .map((intent) => ({ project, policy, intent, key: `${String(k).padStart(4, "0")}/${String(intent.eventSeq).padStart(12, "0")}` })));

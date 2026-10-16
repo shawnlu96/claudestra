@@ -49,9 +49,13 @@ const at = (line: string) => `ci\tRun tests\t2026-10-14T03:02:03.1234567Z ${line
 const COUNT_ONLY = [at("##[group]tests/skip-effects.test.ts:"), at("(fail) EFFCNT1 real inventory end to end > the real inventory matches the scan [9.00ms]"),
   at("##[endgroup]"), at(" 1 fail"), at("Ran 2 tests across 1 files. [1.00s]"), at("##[error]Process completed with exit code 1.")].join("\n");
 const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
+/** The head the red run tested: the drive's own H0 (run view reports it; CIF1 only acts on a run of the reviewed head). */
+let ciRunHead = "";
 const ciGh = async (argv: string[]): Promise<BoundedResult> => {
   const cmd = argv.slice(1).join(" ");
-  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion") return ok(JSON.stringify({ attempt: 1, status: "completed", conclusion: "failure" }));
+  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion,headSha") {
+    return ok(JSON.stringify({ attempt: 1, status: "completed", conclusion: "failure", headSha: ciRunHead }));
+  }
   if (cmd === "run view 77 --repo example/repo --log-failed") return ok(COUNT_ONLY);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: [{ path: TARGET }] }));
   return { code: 1, stdout: "", stderr: `unexpected gh ${cmd}`, timedOut: false };
@@ -127,6 +131,7 @@ const OK_TRIAL = (sha: string): RefreshTrial => ({ ok: true, sha, files: [INVENT
 /** CI red only on counts at H0 → EFFAUTO1 (on) claims and pushes H1 → the next pass reads H1; then what the ledger holds. */
 async function drive(o: Drive, after?: (c: Card) => Promise<void>) {
   const h0 = o.h0 ?? H0, h1 = o.h1 ?? H1, c = cardAt(h0, o.privateRepo), notes: CountCarryNote[] = [], refreshNotes: RefreshNote[] = [];
+  ciRunHead = h0;
   const effPorts = () => useEffCountRefreshPorts({ mode: () => "on", repoDir: () => "/repo", trial: async () => OK_TRIAL(h1), remoteHead: async () => h0,
     push: async () => ({ ok: true }), note: async (n) => { refreshNotes.push(n); } });
   const carryPorts = () => useCountCarryPorts({ mode: () => o.mode, repoDir: () => work, privateRepo: (id) => !!privateCardRepo(getTask(c.db, id)), prove: (i) => countCarryProof(i, io(h1, o.proof)),

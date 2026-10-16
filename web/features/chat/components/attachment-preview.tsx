@@ -159,7 +159,7 @@ function NoShareBody() {
     <div className="flex flex-col items-center gap-2 px-6 py-8 text-center">
       <FileIcon size={32} className="text-base-content/50" />
       <div className="text-sm font-medium text-base-content">{t("这台设备不能从应用内分享这个文件")}</div>
-      <p className="max-w-xs text-xs text-base-content/70">{t("系统没有提供文件分享。可以在电脑上打开 Claudestra 下载它。")}</p>
+      <p className="max-w-xs text-xs text-base-content/70">{t("系统没有提供文件分享。可以在电脑上打开 Floka 下载它。")}</p>
     </div>
   );
 }

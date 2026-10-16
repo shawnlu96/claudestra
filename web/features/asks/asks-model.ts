@@ -50,7 +50,9 @@ export interface WebAsk {
   /** files = 原消息带的附件（bridge 拷进 inbox 后的名字）；loc = 原消息在会话里的位置（定位过才有）；dismissed / hidden = owner 删掉了（不显示） */
   extra?: { files?: { name: string; attachment: string }[]; dismissed?: unknown; hidden?: unknown; quota?: unknown; acp?: unknown; failure?: unknown;
     /** 中心待批提案的授权卡（bridge lib/center-proposal-inbox.ts）：卡挂在大总管上，这里记它是为哪个本机项目开的 */
-    centerProposal?: { localProjectId?: unknown } };
+    centerProposal?: { localProjectId?: unknown };
+    /** 调度器的 now 停滞提醒（mechanism = priorityStall）：老数据没写 assignee，按 pm 收件（ask-audience.ts） */
+    mechanism?: unknown; pm?: unknown };
 }
 
 /** 原消息带的附件 → 聊天附件条的形状（卡片上直接点开，走 T37 的预览层） */
@@ -66,8 +68,8 @@ export interface WebAskAtt {
   mime?: string;
 }
 
-/** 协作视图的「等你」：开着、非验收、没指给别人的（指给 guest 的指派事项是在等那个 guest，不是等 owner） */
-export const waitsOnOwner = (a: Pick<WebAsk, "state" | "kind" | "assignee">): boolean =>
+/** 协作视图的「等你」：开着、非验收、收件人是 owner 的（指给 guest / PM 的是在等他们，不是等 owner；收件口径同 groupAsks） */
+export const waitsOnOwner = (a: Pick<WebAsk, "state" | "kind" | "assignee" | "extra">): boolean =>
   a.state === "open" && a.kind !== "accept" && isAskForAudience(a);
 
 export interface AskGroups {
@@ -209,8 +211,11 @@ export const isMgmtButtonId = isReservedButtonId;
 /** 整行只有管理按钮 */
 export const isMgmtRow = (row: WebComponentRow): boolean => row.type === "buttons" && row.buttons.length > 0 && row.buttons.every((b) => isMgmtButtonId(b.id));
 
-/** bridge 的「待你处理」列表只带开着的和 3 天内结案的（bridge/asks.ts 列表的 closedSince），两边一致 */
-export const ASK_LIST_CLOSED_MS = 3 * 24 * 3600_000;
+/**
+ * bridge 的「待你处理」默认列表只带开着的和 24 小时内结案的（bridge/asks.ts CLOSED_RECENT_MS），两边必须一致：
+ * 这边比那边长，结案 1～3 天的老气泡就查不到 ask、又不够老，按钮会被重新放开（tests/web-asks-closed-window.test.ts）
+ */
+export const ASK_LIST_CLOSED_MS = 24 * 3600_000;
 
 /** 列表状态：loading = 还没拉到；full = 完整列表；partial = 过滤过的（guest、部分 scope 只拿到指给自己的，或 403 恒空），不能拿「查不到」当结案 */
 export type AskListState = "loading" | "full" | "partial";

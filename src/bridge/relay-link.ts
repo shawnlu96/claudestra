@@ -1,3 +1,5 @@
+import { recoverPeerSend } from "../lib/floka-peer/recovery.js";
+import { preparePeerSend } from "../lib/floka-peer/send.js";
 /**
  * 中继链路（bridge 侧，docs/relay/protocol.md）：.env 配了 RELAY_URL 就在启动时连上中继（lib/relay-client.ts），
  * 之后三件事经它走：浏览器打 https://<slug>.<base> 的隧道流量 → 本机 Web；peers.json 里 baseUrl 为
@@ -8,7 +10,7 @@
  * 标准 Response 后那两处各改一行；中继错误映射成同名异常（超时类 name=TimeoutError），结局分类照用。
  */
 import { hostname } from "node:os";
-import { connect, RelayError, type RelayClient } from "../lib/relay-client.js";
+import { connect, RelayError, type ConnectOptions, type RelayClient } from "../lib/relay-client.js";
 import { relayCallError } from "../lib/peer-auth-hints.js";
 import type { RelayLinkInfo } from "../lib/relay-client-types.js";
 import { instanceKeySync, signedHeaders } from "../lib/instance-key.js";
@@ -17,7 +19,8 @@ import { E2E_RESPONSE_WIRE_MAX } from "../lib/peer-e2e-wire.js";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { ensurePeerIngressPort, resolveWebPort, saveEnvText, writeEnvKeys } from "../lib/peer-ingress-config.js";
 import { acquireLock } from "../lib/file-lock.js";
-import { statePath } from "../lib/paths.js";
+import { CONFIG_PATH, statePath } from "../lib/paths.js";
+import { readJsonStateSync } from "../lib/state-file.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { DEFAULT_RELAY_URL, normalizeRelayUrl } from "../lib/setup-remote-access.js";
 import { configuredPeerIngressPort, DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
@@ -127,9 +130,28 @@ function stopRelayLink(): void {
 
 function connectClient(relayUrl: string, key: NonNullable<ReturnType<typeof instanceKeySync>>, ingressPort: number | null, webPort: number,
   deps: { handleApi?: ApiHandler }): RelayClient {
+  return connect(relayConnectOptions(relayUrl, key, ingressPort, webPort, deps));
+}
+
+/**
+ * 实例配置（config.json）的 `rename` 一节，不经 readConfigSync：那边的合并只留对象，`"on"` / 数组之类的错值会被
+ * 静默丢掉，parseCenterRename 就报不出 problems 原文。这里原样取出交给客户端库判；文件不在 / 读不了按没写（两档 off）
+ */
+function instanceRenameConfig(path = CONFIG_PATH): { rename?: unknown } {
+  const r = readJsonStateSync(path);
+  if (r.status !== "ok" || !r.data || typeof r.data !== "object" || !("rename" in r.data)) return {};
+  return { rename: (r.data as { rename: unknown }).rename };
+}
+
+/**
+ * 交给 connect 的参数。rename 取实例配置（config.json）的 `rename` 一节原样交给客户端库（floka-center/gear.ts 解析）：
+ * 读不到、读不懂一律两档 off，配置问题经下面的 log 打到 bridge 日志
+ */
+export function relayConnectOptions(relayUrl: string, key: NonNullable<ReturnType<typeof instanceKeySync>>, ingressPort: number | null, webPort: number,
+  deps: { handleApi?: ApiHandler }, cfg: { rename?: unknown } = instanceRenameConfig(),
+  log: NonNullable<ConnectOptions["log"]> = (level, msg) => (level === "info" ? console.log : console.error)(`🛰 中继: ${msg}`)): ConnectOptions {
   const webBase = `http://127.0.0.1:${webPort}`;
-  const log = (level: "info" | "warn" | "error", msg: string) => (level === "info" ? console.log : console.error)(`🛰 中继: ${msg}`);
-  return connect({
+  return {
     relayUrl,
     key,
     name: hostname(),
@@ -146,7 +168,8 @@ function connectClient(relayUrl: string, key: NonNullable<ReturnType<typeof inst
       void refreshRelayContacts();
     },
     log,
-  });
+    ...(cfg.rename !== undefined ? { rename: cfg.rename } : {}),
+  };
 }
 
 export type EnableRelayResult =
@@ -256,6 +279,7 @@ type PeerFetchOpts = { fetchImpl?: typeof fetch; timeoutMs?: number; e2eOnly?: b
  * 调用方的 signal / 超时一并带进会话里的每一次外层请求。
  */
 export async function peerFetch(url: string, init: PeerFetchInit, opts: PeerFetchOpts = {}): Promise<Response> {
+  init = await preparePeerSend(url, init);
   const viaE2e = await e2eOutbound.fetch(url, init, (u, outer) => rawPeerFetch(u, { ...outer, ...(init.signal ? { signal: init.signal } : {}) }, opts));
   if (!viaE2e && opts.e2eOnly) throw new Error("目标不是端到端加密的 peer（可能刚被禁用或地址变了），不发明文");
   return viaE2e ?? rawPeerFetch(url, init, opts);
@@ -266,6 +290,9 @@ export async function peerFetch(url: string, init: PeerFetchInit, opts: PeerFetc
  * 路径取 URL 的 pathname + search——与 instance-key.ts 的 signedFor 同一口径，对方按同一串验签。
  */
 async function rawPeerFetch(url: string, init: PeerFetchInit, opts: PeerFetchOpts): Promise<Response> {
+  return recoverPeerSend(url, init.headers, () => rawPeerTransport(url, init, opts));
+}
+async function rawPeerTransport(url: string, init: PeerFetchInit, opts: PeerFetchOpts): Promise<Response> {
   if (!url.startsWith("relay://")) return (opts.fetchImpl ?? fetch)(url, init as RequestInit);
   const u = new URL(url);
   if (!client) throw new Error(`relay 未启用：本机 .env 没配 RELAY_URL，调不了 ${u.hostname}`);

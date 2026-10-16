@@ -9,6 +9,9 @@
  * 不再看登记人此刻的权限（那是已经发生的事实）；没发布的才重核授权。切失败不记成功。tests/observation-plan*.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { specAuthorizationStale, riskVerdict, mayExtendObservation, extendObservation, finishAutomaticObservation } from "./observation-auto-register-outcome.js";
+import type { ObservationSpecReader } from "./observation-auto-register-spec.js";
+import { closeObservationTodos, recordObservationTodo } from "./pm-todo-observation.js";
 import { setAutostartSwitch } from "./ledger-autostart.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
@@ -55,6 +58,7 @@ const observationWriters: ObservationWriters = {
 };
 
 export interface DueOpts extends PlanPaths {
+  readSpec?: ObservationSpecReader;
   adapters?: AdapterPort;
   writers?: Partial<ObservationWriters>;
   /** 只给测试：在指定位置抛错，模拟进程在那里死掉（错误原样冒出去，登记停在当时已落盘的状态） */
@@ -64,13 +68,16 @@ export type DueOutcome = { plan: ObservationPlan; to: string | null } & (
   | { outcome: "idle"; why: string }
   | { outcome: "dry-run"; wouldPromote: boolean; reason: string }
   | { outcome: "promoted"; text: string }
+  | { outcome: "extended"; text: string }
   | { outcome: "judge"; text: string });
 
 /** 登记之后变了的东西：任何一条都让这条登记作废，不转正。 */
-function staleReason(db: Database, plan: ObservationPlan, recoveryPath?: string, authOnly = false): Verdict | null {
+function staleReason(db: Database, plan: ObservationPlan, recoveryPath?: string, authOnly = false, readSpec?: ObservationSpecReader): Verdict | null {
   if (!actorMayConfigure(db, plan.by, plan.project)) return { code: "authorization_changed", reason: `登记人 ${plan.by} 现在已无权配置项目 ${plan.project}` };
   if (authOnly) return null;
   if (plan.ruleVersion !== OBSERVATION_RULE_VERSION) return { code: "rule_changed", reason: `核对口径已是 ${OBSERVATION_RULE_VERSION}，登记时是 ${plan.ruleVersion}` };
+  const specStale = specAuthorizationStale(db, plan, readSpec);
+  if (specStale) return specStale;
   const task = getTask(db, plan.taskId);
   if (!task) return { code: "task_missing", reason: `任务 ${plan.taskId} 不在了` };
   if (task.specRev !== plan.specRev) return { code: "spec_changed", reason: `规格已改到 specRev ${task.specRev}，登记时是 ${plan.specRev}` };
@@ -110,6 +117,9 @@ class Run {
   private judge(v: Verdict, evidence: PlanEvidence | null): DueOutcome {
     this.plan.status = "judged";
     this.plan.judge = { ...v, at: this.ctx.now, evidence };
+    if (this.plan.authorization) this.note(`observation-judge:${this.plan.id}:${this.plan.attempt ?? 0}`,
+      `观察期判定：${v.reason}`, { op: "observation_plan", action: "judged", plan: this.plan.id, code: v.code });
+    if (this.plan.authorization) recordObservationTodo(this.db, this.ctx, this.plan, "observation_judged", judgeText(this.plan));
     this.store.save();
     return this.out({ outcome: "judge" as const, text: judgeText(this.plan) });
   }
@@ -122,6 +132,7 @@ class Run {
         window: { from: evidence.from, to: evidence.to }, source: evidence.source, records: evidence.records.slice(0, 50), recordCount: evidence.records.length });
     r.phase = "noted";
     p.status = "promoted";
+    finishAutomaticObservation(this.db, this.ctx, p, this.store.doc, this.opts.readSpec);
     this.store.save();
     return this.out({ outcome: "promoted" as const, text: digestText(p) });
   }
@@ -144,7 +155,7 @@ class Run {
     try {
       p.receipt!.audit = await this.switchTarget(() => {
         // 这段在目标 writer 的锁 / 事务里、它写任何东西之前跑；replay = 审计已在、只等原 writer 核定，只看锁和授权
-        stale = (replay ? null : haltReason(this.db, p, this.store)) ?? staleReason(this.db, p, this.opts.recovery, replay);
+        stale = (replay ? null : haltReason(this.db, p, this.store)) ?? staleReason(this.db, p, this.opts.recovery, replay, this.opts.readSpec);
         if (!this.store.lock.held()) throw new LedgerError("busy", "登记文件的锁已被回收，这次没切，下一轮重核");
         if (stale) throw new LedgerError("conflict", stale.reason);
       });
@@ -213,16 +224,22 @@ class Run {
     const mode = autoMode(db, p.project);
     if (mode === "off") return this.idle("autoMode off");
     if (this.ctx.now < p.dueAt) return this.idle("未到期");
-    const verdict = staleReason(db, p, this.opts.recovery) ?? evidenceVerdict(evidence);
+    const verdict = staleReason(db, p, this.opts.recovery, false, this.opts.readSpec) ?? evidenceVerdict(evidence) ?? riskVerdict(p, evidence);
+    const extend = mayExtendObservation(p, verdict?.code);
     if (mode === "observe") {
       if (p.dryRun) return this.idle("observe：已记过预演");
       const reason = verdict?.reason ?? "四条口径全满足";
       const note = this.note(`observation-dry:${p.id}:${p.attempt ?? 0}`,
-        `观察期核对（autoMode observe，未切）：${targetLabel(p.target)} ${verdict ? `本会交 PM 判断：${reason}` : "本会转正"}；${evidenceLine(evidence)}`,
+        `观察期核对（autoMode observe，未切）：${targetLabel(p.target)} ${verdict ? (extend ? `本会顺延：${reason}` : `本会交 PM 判断：${reason}`) : "本会转正"}；${evidenceLine(evidence)}`,
         { op: "observation_dry_run", plan: p.id, target: targetLabel(p.target), wouldPromote: !verdict, code: verdict?.code ?? null });
       p.dryRun = { at: this.ctx.now, wouldPromote: !verdict, reason, note };
       this.store.save();
       return this.out({ outcome: "dry-run" as const, wouldPromote: !verdict, reason });
+    }
+    if (extend) {
+      const text = extendObservation(db, this.ctx, p, verdict!.reason);
+      this.store.save();
+      return this.out({ outcome: "extended" as const, text });
     }
     return verdict ? this.judge(verdict, evidence) : this.promote(evidence, false);
   }
@@ -239,6 +256,7 @@ export async function ackObservation(now: number, id: string, paths: PlanPaths =
     const p = planById(doc, id);
     if (p.status === "judged" && p.judge && !p.judge.sentAt) p.judge.sentAt = now;
     else if (p.status === "promoted" && !p.digestSentAt) p.digestSentAt = now;
+    else if (p.status === "active" && p.extensions && !p.extensionSentAt) p.extensionSentAt = now;
     else return p;
     save();
     return p;
@@ -254,6 +272,7 @@ export async function recheckObservation(db: Database, ctx: WriteCtx, id: string
     const attempt = (p.attempt ?? 0) + 1;
     appendEvent(db, { actor: ctx.actor, now: ctx.now, dedupKey: `observation-plan:${id}:recheck:${attempt}` },
       { project: p.project, target: p.taskId, kind: "decision", text: `观察期登记 ${id} 放回重核：${reason}`, data: { op: "observation_plan", action: "recheck", plan: id, attempt } });
+    if (p.authorization) closeObservationTodos(db, ctx, p);
     Object.assign(p, { status: "active", attempt });
     delete p.judge; delete p.receipt; delete p.dryRun;
     save();

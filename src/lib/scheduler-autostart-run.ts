@@ -1,3 +1,4 @@
+import { priorityNowAttempted, priorityNowStarts } from "./scheduler-priority-now-tick.js";
 import { autostartSnapshot, type AutostartReads } from "./scheduler-autostart-snapshot.js";
 import { notifyAutostartQuotaWait } from "./scheduler-autostart-quota.js";
 import { localAutostartNode, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
@@ -25,6 +26,8 @@ import { pmWakeTicks } from "./scheduler-merge-pm-tick.js";
 import type { TickPace } from "./scheduler-yield.js";
 import { schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 import { wipGateNode } from "./scheduler-wip-gate.js";
+import { autostartNodes } from "./scheduler-priority-order.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
 type Failed = { taskId: string; error: string }[];
@@ -41,7 +44,7 @@ export interface StartTickEnv {
   readSpec(taskId: string): SpecFile | null;
   /** Claude 的额度快照（只读、不联网）；读不到抛错或给 unknown 都不拦 */
   quota(): Promise<InventoryQuota>;
-  notifyPm(project: string, text: string): Promise<void>;
+  notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
   /** 进程内去重（额度到线按窗口只通知一次） */
   memo: Set<string>;
   now(): number;
@@ -52,7 +55,7 @@ const short = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").slice
 
 async function notify(env: StartTickEnv, project: string, text: string, failed: Failed, taskId: string): Promise<void> {
   try {
-    await env.notifyPm(project, text);
+    await env.notifyPm(project, text, "action"); // 三处调用都是开卡中断 / 失败 / 额度暂停
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     failed.push({ taskId, error: `通知 PM 失败：${(e as Error).message}` });
@@ -107,15 +110,13 @@ interface Pick { cand: Candidate; maxWorkers: number }
 /** 按项目、feature、车道顺序挑第一个过了全部门的节点；项目合并队列拥堵（WIP 闸 on）就跳过这个项目，claim 前不写任何东西 */
 function pickCandidate(env: StartTickEnv, reads: AutostartReads): Pick | null {
   projects: for (const project of [...env.svc.projects].sort()) {
-    for (const f of activeFeatures(env.db, project)) {
-      if (featureGate(env.db, f, env.svc) || schedulerV2SkipFeature(env.db, f.id)) continue; // S2D2: no local card for migrating / execution
-      const { lanes, views } = reads.feature(f);
-      for (const key of lanes?.startNow ?? []) {
-        const r = nodeCandidate(env.db, f, key, lanes, views, (id) => env.readSpec(id), env.now());
-        if (isStop(r)) continue;
-        if (wipGateNode(env.db, project, r.taskId)) continue projects;
-        return { cand: r, maxWorkers: env.svc.maxWorkers(project) };
-      }
+    for (const { f, key, lanes, views } of autostartNodes(env.db, project, activeFeatures(env.db, project), (f) => // PRIO2: nodes by effective priority
+      featureGate(env.db, f, env.svc) || schedulerV2SkipFeature(env.db, f.id) ? null : reads.feature(f))) { // S2D2: no local card for migrating / execution
+      if (priorityNowAttempted(env, f.id, key)) continue;
+      const r = nodeCandidate(env.db, f, key, lanes, views, (id) => env.readSpec(id), env.now());
+      if (isStop(r)) continue;
+      if (wipGateNode(env.db, project, r.taskId)) continue projects;
+      return { cand: r, maxWorkers: env.svc.maxWorkers(project) };
     }
   }
   return null;
@@ -234,6 +235,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
       try { return await env.ledger(...args); } finally { snapshot.invalidate(); }
     } };
     for (const wake of pmWakeTicks) failed.push(...await wake(readEnv));
+    await priorityNowStarts(readEnv, failed, { openCard, inFlight, quotaBlocked });
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(readEnv, snapshot.reads);
     snapshot.invalidate(); // 选完就丢弃：后续额度等待、claim 和开卡不再持有项目快照。

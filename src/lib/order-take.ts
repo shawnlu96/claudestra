@@ -1,3 +1,4 @@
+import { localMergeOf, type LocalMergeProject } from "./scheduler-config.js";
 import { convergenceOrderLines } from "./fix-strategy-order.js";
 /**
  * 执行者「当前的单」（M2 take_order / deliver 共用，只读台账）：阶段在 build / fix、这一阶段在干活的那一步（stepAtStage）派给了
@@ -14,13 +15,15 @@ import { stepAtStage, stepsOf } from "./ledger-steps.js";
 import { isFullSha, parseOrderWire, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
+import { liveBinding } from "./pm-handback.js";
 import type { VerifiedCall } from "./order-tool-route.js";
 import { SRC_DIR } from "./repo-root.js";
 import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
+import { remoteFixWork, withRemoteWork } from "./remote-review-current.js";
 import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
-import { standardAnswers } from "./order-standard-answers.js";
+import { localAuthorAcceptance, standardAnswers } from "./order-standard-answers.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { lentAwayText } from "./ledger-lend-relay.js";
 import { withMemory } from "./memory-retrieve-order.js";
@@ -56,8 +59,8 @@ function currentIntent(db: Database, task: LedgerTask, step: "write" | "fix"): S
 
 /** 卡上的作者会话绑定（没退役的）要是调用方本人本会话；没有绑定 = 手动派的卡，只看步骤执行者 */
 function bindingAllows(db: Database, taskId: string, call: VerifiedCall): boolean {
-  const s = getSchedulerSession(db, taskId, "author");
-  if (!s || s.state === "retired") return true;
+  const s = liveBinding(getSchedulerSession(db, taskId, "author"));
+  if (!s) return true;
   return s.agent === call.agent && !!call.sessionId && s.sessionId === call.sessionId;
 }
 
@@ -123,6 +126,13 @@ const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
  * 唤醒派单时执行者只看得到 take_order 的单，缺了它就只知道「要修」不知道修什么。写单 / 结论不完整时不带。
  */
 function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null; bounce?: ReturnType<typeof bounceWork> } {
+  // 仓库方 P1 随单带上（RRL-2）：已有合并退回时追加在后，当前远端退回已写明的那份不重复
+  const own = ownFixContext(db, t, step), named = fixBounce(listEvents(db, { project: t.project, target: t.id }), t.stage)?.remote?.seq;
+  const bounce = withRemoteWork(own.bounce ?? null, remoteFixWork(db, t, named), ["规格里的验收线逐条自查"]);
+  return bounce ? { ...own, bounce } : own;
+}
+
+function ownFixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null; bounce?: ReturnType<typeof bounceWork> } {
   if (step !== "fix") return { findings: [], report: null };
   const events = listEvents(db, { project: t.project, target: t.id });
   const bounce = fixBounce(events, t.stage); // 合并退回（冲突 / CI 红）不是修 P1：不带审查报告（scheduler-merge-conflict.ts）
@@ -134,19 +144,22 @@ function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findi
 }
 
 /** 给执行者的单：字段按 T87 OrderWire，交出去之前过一遍 parseOrderWire（台账里的脏值宁可报错，不发半张单） */
-export function orderWireFor(db: Database, o: CurrentOrder, recordMemory = false): { ok: true; order: OrderWire } | { ok: false; error: string } {
+export function orderWireFor(db: Database, o: CurrentOrder, recordMemory = false,
+  localOf: (project: string) => LocalMergeProject | null = localMergeOf): { ok: true; order: OrderWire } | { ok: false; error: string } {
   const t = o.task;
   const head = t.headSHA && isFullSha(t.headSHA) ? t.headSHA : null;
   const fix = fixContext(db, t, o.step);
+  const local = localOf(t.project); // localMerge 项目没有 origin / PR CI（lib/scheduler-config.ts），其余项目逐字不变
   const fallback = getWorkflow(db, t.id)?.fallback ?? null;
   const wire = {
     v: 1, orderId: o.orderId, taskId: t.id, specRev: t.specRev, dagVersion: dagVersionOf(db, t), node: o.intent?.node ?? o.step, step: o.step, round: t.round,
     head, repo: null, pr: null,
     inputs: [`规格与验收：${CLI} show ${t.id}`, ...(t.spec ? [`规格卡：${t.spec}`] : []), ...(t.branch ? [`分支：${t.branch}`] : []),
-      ...(fix.report ? [`上一轮审查报告：${fix.report}`] : []), ...(fix.bounce?.inputs ?? []), ...convergenceOrderLines(db, t), standardAnswers("author")],
-    outputs: ["分支上的提交，已推到 origin（完整 head SHA）", "证据报告路径"],
-    acceptance: fix.bounce?.acceptance ?? ["规格里的验收线逐条自查"],
-    writeBack: `用 deliver 工具回写：orderId ${o.orderId}，head = 本卡分支在 origin 上的完整 SHA（bridge 会核对）。CLI 仍可用：${CLI} deliver ${t.id} --from ${o.stage} --head <完整 SHA> --evidence <报告路径>`,
+      ...(fix.report ? [`上一轮审查报告：${fix.report}`] : []), ...(fix.bounce?.inputs ?? []), ...convergenceOrderLines(db, t), standardAnswers("author", undefined, local?.checks)],
+    outputs: [local ? "分支上的提交，只在本机、不 push（完整 head SHA）" : "分支上的提交，已推到 origin（完整 head SHA）", "证据报告路径"],
+    acceptance: local ? [...localAuthorAcceptance(local.checks).map((l) => clipWire(l, WIRE_LIMITS.line)), ...(fix.bounce?.acceptance ?? ["规格里的验收线逐条自查"])]
+      .slice(0, WIRE_LIMITS.items) : fix.bounce?.acceptance ?? ["规格里的验收线逐条自查"],
+    writeBack: `用 deliver 工具回写：orderId ${o.orderId}，head = 本卡分支在${local ? "本机" : " origin 上"}的完整 SHA（bridge 会核对）。CLI 仍可用：${CLI} deliver ${t.id} --from ${o.stage} --head <完整 SHA> --evidence <报告路径>`,
     findings: fix.findings, fallback: fallback ? clipWire(`再不行退到：${fallback}`, WIRE_LIMITS.fallback) : null,
   };
   // 项目记忆一节最后放、只用剩余预算（memory-retrieve-order.ts）

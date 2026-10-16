@@ -13,8 +13,10 @@ import s from "./collab.module.css";
 
 const TONE = { red: s.red, amber: s.amber, neutral: s.neutral, green: s.green } as const;
 
-export function NowSec({ line, total, now, action, tr }: {
+export function NowSec({ line, total, now, action, stale, tr }: {
   line: LineView; total: number | undefined; now: NowSentence; action: string | null; tr: Tr;
+  /** 本机详情读失败、显示的是上次的（UXCARD3）：「数据可能过期（本机详情最后读到 时:分）」 */
+  stale?: string | null;
 }) {
   const reason = !now.usedReason && line.reason ? line.reason : "";
   const meta = [now.next, typeof total === "number" && total >= 60_000 ? tr("已用时 {d}", { d: fmtDuration(total, tr) }) : ""].filter(Boolean);
@@ -29,6 +31,7 @@ export function NowSec({ line, total, now, action, tr }: {
         {action && <div className={s.r} data-now="action">{action}</div>}
         {reason && <div className={s.r}>{reason}</div>}
         {meta.length > 0 && <div className={s.m} data-now="next">{meta.join(" · ")}</div>}
+        {stale && <div className={s.m} data-now="stale">{stale}</div>}
       </div>
     </div>
   );

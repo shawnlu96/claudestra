@@ -297,10 +297,11 @@ describe("T68e observe mode", () => {
       expect((await f.observe()).decision).toMatchObject({ action: "stage", targetStage: "merge" });
       answer(ask(H1).id, "no");
       expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_rejected" });
+      // UIASK1: the current binding H1 already has a scheduler ask, so that one decides (PM 定 4).
       answer(ask(H2).id, "ok");
-      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_stale" });
+      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_rejected" });
       answer(ask(H1, "agent-one").id, "ok");
-      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_stale" });
+      expect((await f.observe()).decision).toMatchObject({ kind: "escalate", code: "ui_rejected" });
     } finally { f.close(); }
   });
 

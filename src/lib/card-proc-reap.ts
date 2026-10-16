@@ -10,6 +10,7 @@
  * observe 只记台账（state 目录下的 JSON）并推 PM 摘要（同一进程只推一次），不发任何信号；摘要发出前重新枚举进程表、重核全部资格
  * （REAPALIVE1），只报复查时还在的。off 不枚举、不记、不推、不发信号。
  */
+import { asInfo } from "./pm-notice-level.js";
 import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
@@ -22,6 +23,8 @@ import { cwdLinkFree, dirOf, errMsg, isLink, mayTouch, noLinks, procLine, termTh
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { RETIRE_STAGES } from "./scheduler-sessions.js";
 import { writeJsonAtomicSync } from "./state-file.js";
+import { fileActionSink, guardReap, systemGuardSources } from "./worktree-orphan-guard.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 export type { CardReapMode };
 /** observe 台账最多留这么多条（只为「同一进程只推一次」去重） */
@@ -45,7 +48,7 @@ export interface CardProcDeps {
 /** 调用方（scheduler-retire.ts）手里的东西：worktree 根、PM 通知、本模块的依赖（null = 关掉） */
 export interface CardReapHost {
   worktreeRoot: string;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   procs?: CardProcDeps | null;
   /** registry + tmux 现状（scheduler-retire.ts 的 LiveAgent）：活 agent 还在里面工作的 worktree 不碰 */
   agents?: () => Promise<HostAgent[]>;
@@ -75,7 +78,8 @@ function defaultCardProcs(host: CardReapHost): CardProcDeps | null {
   if (resolve(host.worktreeRoot) !== resolve(statePath("worktrees"))) return null;
   const agents = host.agents;
   const log = (m: string) => console.log(`[scheduler] ${m}`);
-  return { mode: cardReapModeReader(log), ports: systemProcPorts(), log, observed: fileObserveLedger(),
+  const g = guardReap(systemProcPorts(), systemGuardSources(), fileActionSink(), log); // RTO2-1：不碰带 tty / daemon，动作落台账
+  return { mode: cardReapModeReader(log), ports: g.ports, log, observed: g.observed(fileObserveLedger()),
     now: Date.now, active: agents ? async () => void (await agents()) : undefined }; // agents() 走 whileOwned：失租即抛
 }
 
@@ -163,7 +167,7 @@ async function observe(first: Found[], rescan: Scan, host: CardReapHost, d: Card
       const text = `[调度引擎] 卡 worktree 下有 ${alive.length} 个残留进程（observe 模式：只记录，没发信号；这是发送前刚复查进程表的快照，`
         + `你查看时可能已经退出；要回收：ledger scheduler-recovery ${project} on --key ${CARD_REAP_KEY} --reason <为什么>）：\n${lines.join("\n")}`;
       step = "摘要没推出去";
-      await host.notifyPm(alive[0].task, text);
+      await asInfo(() => host.notifyPm(alive[0].task, text, "info")); // 只记录的观察报告：常规
       d.observed.add(alive.map(({ p, task, why }) => ({ key: procKey(p), card: task.id, pid: p.pid, comm: basename(p.comm).slice(0, 40), at: d.now(), why })));
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;

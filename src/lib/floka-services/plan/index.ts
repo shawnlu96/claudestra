@@ -1,7 +1,7 @@
 import { validatePlan } from "./definition.ts";
 import { inventory, legacy, port, type Context } from "./safety.ts";
 import { execute, steps } from "./steps.ts";
-import type { Journal, Options, Result } from "./types.ts";
+import type { Journal, Options, Result, ServicePlan } from "./types.ts";
 export { createServicePlan } from "./definition.ts";
 
 function validateJournal(j: Journal, key: string, c: Context): void {
@@ -16,14 +16,22 @@ function validateJournal(j: Journal, key: string, c: Context): void {
 }
 
 async function underLock(c: Context, action: Options["action"]): Promise<Result> {
-  const key = JSON.stringify(c.plan);
   let j = await port(c, () => c.controller.readJournal());
-  if (j) validateJournal(j, key, c);
+  if (j) {
+    const snapshot: ServicePlan = structuredClone(j.snapshot ?? JSON.parse(j.planKey));
+    validatePlan(snapshot);
+    if (snapshot.id !== c.plan.id || snapshot.services.some((s, i) =>
+      s.oldLabel !== c.plan.services[i]?.oldLabel || s.newLabel !== c.plan.services[i]?.newLabel)) {
+      throw new Error("Journal transaction/labels do not match this service plan");
+    }
+    c.plan = snapshot;
+    validateJournal(j, JSON.stringify(snapshot), c);
+  }
   else {
     if (action === "rollback") throw new Error("No service journal to roll back");
     await legacy(c);
     await inventory(c, "new");
-    j = { version: 1, planKey: key, direction: "forward", cursor: 0, status: "running" };
+    j = { version: 1, planKey: JSON.stringify(c.plan), snapshot: c.plan, direction: "forward", cursor: 0, status: "running" };
     await port(c, () => c.controller.saveJournal(j!));
   }
   if (action === "rollback" && j.direction === "forward") {

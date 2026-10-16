@@ -7,6 +7,7 @@
  */
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
+import { attentionCtx, withAttentionFacts, type AttentionCtx } from "./ledger-attention-facts.js";
 import { depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
 import { stageTimeline, type StageEntry } from "./ledger-metrics.js";
 import { compactStage, doneCard, eventsByTarget, liveCard, overviewCard, taskView, type OverviewItem, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
@@ -110,12 +111,12 @@ export interface ProjectView {
   doneRest: DoneRest;
 }
 
-/** GET /ledger/:project：事项 + 任务（每个带最近一条事件与指标）+ 最近的项目级事件；整个项目的事件只查一次 */
-export function projectView(db: Database, project: string, now: number, clientDayStart: number | null = null): ProjectView {
-  return db.transaction(() => projectViewSnapshot(db, project, now, dayStartOf(now, clientDayStart))).deferred();
+/** GET /ledger/:project：事项 + 任务（每个带最近一条事件与指标）+ 最近的项目级事件；整个项目的事件只查一次。facts 只给测试注入 */
+export function projectView(db: Database, project: string, now: number, clientDayStart: number | null = null, facts?: AttentionCtx): ProjectView {
+  return db.transaction(() => projectViewSnapshot(db, project, now, dayStartOf(now, clientDayStart), facts ?? attentionCtx(project))).deferred();
 }
 
-function projectViewSnapshot(db: Database, project: string, now: number, dayStart: number): ProjectView {
+function projectViewSnapshot(db: Database, project: string, now: number, dayStart: number, facts: AttentionCtx): ProjectView {
   const byTarget = eventsByTarget(listEvents(db, { project }));
   // ask 族事件不进项目级列表（isAskEvent 同一口径）：25 条没挂任务的 ask 就能把这 20 条挤满
   const recent = db
@@ -125,7 +126,7 @@ function projectViewSnapshot(db: Database, project: string, now: number, dayStar
   const tasks = listTasks(db, project);
   const deps = depViews(listDeps(db, project), tasks);
   const rows = stepsByTask(db);
-  const views = tasks.map((t) => taskView(t, byTarget.get(t.id) ?? [], now, deps));
+  const views = tasks.map((t) => withAttentionFacts(taskView(t, byTarget.get(t.id) ?? [], now, deps), byTarget.get(t.id) ?? [], facts));
   const win = doneWindow(views.filter((v) => compactStage(v.stage)), deps, dayStart);
   const visible = new Set(views.filter((v) => !compactStage(v.stage) || win.keep.has(v.id)).map((v) => v.id));
   const line = (v: TaskView) => stepLineInfo(v, rows.get(v.id) ?? [], byTarget.get(v.id) ?? []);
@@ -164,13 +165,13 @@ export interface TaskDetail {
   sessions: ReturnType<typeof taskSessionLinks>;
 }
 
-/** GET /ledger/:project/tasks/:id：任务不在这个项目下 → null（任务 id 全局唯一，但不许借别的项目名读到） */
-export function taskDetail(db: Database, project: string, id: string, now: number): TaskDetail | null {
+/** GET /ledger/:project/tasks/:id：任务不在这个项目下 → null（任务 id 全局唯一，但不许借别的项目名读到）；facts 只给测试注入 */
+export function taskDetail(db: Database, project: string, id: string, now: number, facts?: AttentionCtx): TaskDetail | null {
   const task = getTask(db, id);
   if (!task || task.project !== project) return null;
   const events = listEvents(db, { project, target: id });
   const deps = depViews(listDeps(db, project), listTasks(db, project));
-  const view = taskView(task, events, now, deps);
+  const view = withAttentionFacts(taskView(task, events, now, deps), events, facts ?? attentionCtx(project));
   return {
     task: view,
     events,

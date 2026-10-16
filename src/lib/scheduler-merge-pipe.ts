@@ -17,7 +17,7 @@ import { requestSeqOf } from "./manual-merge-queue-facts.js";
 import { peerPrHold } from "./peer-pr-hold.js";
 import { recoveryPolicy, type RecoveryKey, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { prMergeOff, type SchedulerConfig } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { mainCiGateOf, mainCiTrainPaused } from "./scheduler-main-ci-wiring-gate.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
@@ -98,7 +98,7 @@ export async function mergePipeStep(db: Database, config: SchedulerConfig, io: M
   if (!hasMerges(db)) return out;
   const policy = io.policy ?? recoveryPolicy;
   for (const [project, cfg] of Object.entries(config.projects)) {
-    if (cfg.mergeHandoff || modeOf(policy, project, MERGE_PIPE_KEY) === "off") continue; // off: no read at all
+    if (prMergeOff(cfg) || modeOf(policy, project, MERGE_PIPE_KEY) === "off") continue; // off: no read at all
     try {
       const lent = await projectStep(db, config, project, cfg, io, policy);
       if (lent) out.lent.push(lent);

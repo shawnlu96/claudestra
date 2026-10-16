@@ -1,3 +1,4 @@
+import { requireMergeQueueOwner } from "./merge-queue-owner.js";
 /** Scheduler-only ledger writes: every decision and resource claim is one compare-and-swap transaction. */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -28,6 +29,7 @@ import { unsentRetryPlan } from "./scheduler-merge-unsent-plan.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
 import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
 import { isManualReasonCode, manualReasonRecord, MANUAL_REASON_CODES } from "./manual-reason.js";
+import { OWNER_FRESH_NODE, requireOwnerFresh } from "./scheduler-ui-owner-fresh.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -42,7 +44,7 @@ const FROZEN_STAGES: readonly string[] = ["spec", "build", "fix", "merge"];
 export const frozenBlocks = (stage: string, action: IntentAction): boolean => FROZEN_STAGES.includes(stage) || action === "merge";
 
 function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, workflow: TaskWorkflow, node: string, now: number): void {
-  if (task.stage !== "merge" || node !== "merge_deploy") throw new LedgerError("invalid", "merge 意图只许在 merge_deploy 节点");
+  if (node === OWNER_FRESH_NODE) requireOwnerFresh(db, task); else if (task.stage !== "merge" || node !== "merge_deploy") throw new LedgerError("invalid", "merge 意图只许在 merge_deploy 节点");
   const read = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
   if (read.kind !== "facts" || read.facts.verdict === "block" ||
     read.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1") ||
@@ -70,7 +72,7 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     return ack !== null && ack > i.eventSeq && ack < read.facts.eventSeq;
   });
   if (!prior && !held) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
-  const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
+  const ui = workflow.template === "ui" && node !== OWNER_FRESH_NODE ? uiMergeRefusal(db, task, now) : null;
   if (ui) throw new LedgerError("conflict", ui);
 }
 
@@ -214,6 +216,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")
       .get(task.id) as { id: string } | null;
     if (live) throw new LedgerError("conflict", `任务已有未结调度意图 ${live.id}`);
+    requireMergeQueueOwner(db, task.id, input.action, ctx.now ?? Date.now(), undefined, node);
     releaseIdleWriteSlots(db, task.project);
     const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
     const slots = new Set([...cardWorkerSlots(held, task.id), ...resources.filter((r) => r?.startsWith("slot:"))]);

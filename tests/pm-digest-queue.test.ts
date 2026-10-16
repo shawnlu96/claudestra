@@ -25,14 +25,17 @@ const env = (from: Envelope["from"], content: string, oneShot = true, to = pmTo)
 });
 const sched = (card: string) => env({ kind: "local", agentName: "scheduler", channelId: "", ws }, `[上线后待办] ${card} 已上线，规格要求 PM 接着做：\n- x`);
 const owner = (text = "owner 问进度") => env({ kind: "user", userId: "u", channelId: "ch-pm" }, text, false);
+/** 推送摘要能搭的立即送：执行者等回复的消息（owner / peer 的消息不搭，见 push-mode 用例） */
+const execMsg = (text = "执行者问 PM") => env({ kind: "local", agentName: "agent-x", channelId: "ch-x", ws }, text, false);
 const sync = (text = "agents-A1 进度：写完了一半") => env({ kind: "local", agentName: "agent-w", channelId: "ch-w", ws }, text);
 
-function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(), "pm-digest-"))) {
+async function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(), "pm-digest-")), pull: "on" | "off" = "off") {
   dirs.push(dir);
   const db = openLedger(join(dir, "ledger.sqlite"));
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM] });
   const store = new PmDigestStore(join(dir, "pm-digest.json"), join(dir, "pm-digest-mode.json"));
-  if (mode) store.setMode(P, mode);
+  if (mode) await store.setMode(P, mode);
+  await store.setPullMode(P, pull);
   let clock = 1_000_000;
   const sent: { content: string; to: string; id: string }[] = [];
   let outcome: Delivery["outcome"] = { kind: "sent" };
@@ -59,26 +62,26 @@ function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(),
 }
 
 test("on: mergeable is not delivered; the next immediate message carries the digest first, then the body, and empties the queue", async () => {
-  const w = world("on");
+  const w = await world("on");
   const r1 = await w.send(sched("T1")), r2 = await w.send(sync());
   expect(r1.outcome).toEqual({ kind: "sent", note: "digest" });
   expect(r2.outcome).toEqual({ kind: "sent", note: "digest" });
   expect(w.sent).toEqual([]);
   expect(w.store.queued(P)).toHaveLength(2);
-  const o = owner();
+  const o = execMsg();
   await w.send(o);
   expect(w.sent).toHaveLength(1);
   const c = w.sent[0]!.content;
   expect(c.startsWith("[📨 PM 摘要] 2 条")).toBe(true);
-  expect(c.indexOf("T1")).toBeLessThan(c.indexOf("owner 问进度"));
-  expect(c.endsWith("owner 问进度")).toBe(true);
+  expect(c.indexOf("T1")).toBeLessThan(c.indexOf("执行者问 PM"));
+  expect(c.endsWith("执行者问 PM")).toBe(true);
   expect(w.store.queued(P)).toEqual([]);
-  await w.send(owner("第二条"));
+  await w.send(execMsg("第二条"));
   expect(w.sent[1]!.content).toBe("第二条");
 });
 
 test("on: only mergeable → one standalone digest once the oldest has waited a full window", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS - 1000);
   await w.send(sync());
@@ -94,10 +97,10 @@ test("on: only mergeable → one standalone digest once the oldest has waited a 
 });
 
 test("on: repeated reminders for the same card from the same source collapse to one line with a count", async () => {
-  const w = world("on");
+  const w = await world("on");
   for (let i = 0; i < 3; i++) await w.send(sched("T1"));
   await w.send(sched("T2"));
-  await w.send(owner());
+  await w.send(execMsg());
   const lines = w.sent[0]!.content.split("\n");
   expect(lines[0]).toContain("4 条");
   expect(lines[1]).toContain("scheduler · T1 · ");
@@ -107,25 +110,25 @@ test("on: repeated reminders for the same card from the same source collapse to 
 });
 
 test("on: a failed / offline immediate delivery keeps the queue and leaves the body untouched", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   for (const o of [{ kind: "error", error: new Error("x") }, { kind: "dropped", reason: "offline" }] as Delivery["outcome"][]) {
     w.setOutcome(o);
-    const e = owner("正文");
+    const e = execMsg("正文");
     await w.send(e);
     expect(e.content).toBe("正文");
     expect(w.store.queued(P)).toHaveLength(1);
   }
   w.setOutcome({ kind: "sent" });
-  await w.send(owner("正文"));
+  await w.send(execMsg("正文"));
   expect(w.sent[0]!.content).toContain("T1");
   expect(w.store.queued(P)).toEqual([]);
 });
 
 test("digest goes after the PM transfer header and is never stacked on a replayed envelope", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
-  const e = owner("正文") as Envelope & { pmTransfer?: { header: string } };
+  const e = execMsg("正文") as Envelope & { pmTransfer?: { header: string } };
   e.pmTransfer = { header: "[系统转交：原收件人 agent-old；当班 PM agent-pm]" };
   e.content = `${e.pmTransfer.header}\n正文`;
   w.setOutcome({ kind: "sent", note: "queued" });
@@ -142,11 +145,11 @@ test("digest goes after the PM transfer header and is never stacked on a replaye
 });
 
 test("observe: delivery sequence identical to no digest at all, only records added; off: no records, no queue", async () => {
-  const inputs = () => [sched("T1"), sync(), owner(), sched("T1"), env({ kind: "bridge", label: "ledger-audit" }, "[🔎 台账巡检] 新发现 1 条", false), owner("2")];
+  const inputs = () => [sched("T1"), sync(), execMsg(), sched("T1"), env({ kind: "bridge", label: "ledger-audit" }, "[🔎 台账巡检] 新发现 1 条", false), execMsg("2")];
   const plain: unknown[] = [];
   for (const e of inputs()) plain.push(JSON.stringify(e));
   for (const mode of ["observe", "off"] as const) {
-    const w = world(mode), envs = inputs(), got: Delivery[] = [];
+    const w = await world(mode), envs = inputs(), got: Delivery[] = [];
     for (const e of envs) got.push(await w.send(e));
     expect(got.map((d) => d.outcome)).toEqual(envs.map(() => ({ kind: "sent" })));
     expect(w.sent.map((s) => s.content)).toEqual(envs.map((e) => e.content));
@@ -160,7 +163,7 @@ test("observe: delivery sequence identical to no digest at all, only records add
 });
 
 test("messages to anyone but the active PM pass through untouched and unrecorded", async () => {
-  const w = world("on");
+  const w = await world("on");
   const e = sched("T1");
   e.to = workerTo;
   await w.send(e);
@@ -169,17 +172,17 @@ test("messages to anyone but the active PM pass through untouched and unrecorded
 });
 
 test("bridge restart: queued entries survive and are delivered exactly once (with the next immediate, or by the window)", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   await w.send(sync());
   w.restart();
-  await w.send(owner());
+  await w.send(execMsg());
   expect(w.sent).toHaveLength(1);
   expect(w.sent[0]!.content).toContain("2 条");
-  await w.send(owner("again"));
+  await w.send(execMsg("again"));
   expect(w.sent[1]!.content).toBe("again");
 
-  const v = world("on");
+  const v = await world("on");
   await v.send(sched("T9"));
   v.restart();
   await v.tick(); // 窗口没到：不送也不丢
@@ -193,7 +196,7 @@ test("bridge restart: queued entries survive and are delivered exactly once (wit
 });
 
 test("a standalone digest held in the PM's queue blocks new ones for a window; an empty replay is dropped", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS);
   w.setOutcome({ kind: "sent", note: "queued" });
@@ -201,7 +204,7 @@ test("a standalone digest held in the PM's queue blocks new ones for a window; a
   w.setOutcome({ kind: "sent" });
   await w.tick();
   expect(w.sent).toEqual([]);
-  await w.send(owner());
+  await w.send(execMsg());
   expect(w.sent).toHaveLength(1);
   const replay = env({ kind: "bridge", label: "pm-digest" }, "", true);
   const r = await w.send(replay);
@@ -210,39 +213,39 @@ test("a standalone digest held in the PM's queue blocks new ones for a window; a
 });
 
 test("switching away from on flushes what is left right away", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
-  w.store.setMode(P, "off");
+  await w.store.setMode(P, "off");
   await w.tick();
   expect(w.sent.some((s) => s.content.includes("T1"))).toBe(true);
   expect(w.store.queued(P)).toEqual([]);
 });
 
 test("stats: last 24h counts of immediate vs mergeable with source distribution", async () => {
-  const w = world("observe");
+  const w = await world("observe");
   await w.send(sched("T1"));
   await w.send(sched("T2"));
-  await w.send(owner());
+  await w.send(execMsg());
   const s = pmDigestStats(w.store, P, 1_000_000);
-  expect(s).toMatchObject({ mode: "observe", now: 1, digest: 2, queued: 0, bySource: { digest: { scheduler: 2 }, now: { user: 1 } } });
+  expect(s).toMatchObject({ mode: "observe", now: 1, digest: 2, queued: 0, bySource: { digest: { scheduler: 2 }, now: { "agent-x": 1 } } });
   expect(pmDigestStats(w.store, P, 1_000_000 + 25 * 3600_000)).toMatchObject({ now: 0, digest: 0 });
 });
 
 test("concurrent immediates (and a window tick racing them) carry the digest exactly once", async () => {
-  const w = world("on"), order = createKeyedSerial();
+  const w = await world("on"), order = createKeyedSerial();
   const slow = (e: Envelope, t: LocalEndpoint) => order(t.channelId, async () => { await Bun.sleep(5); return w.raw(e, t); });
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS);
-  await Promise.all([w.send(owner("a"), slow), w.send(owner("b"), slow), w.tick()]);
+  await Promise.all([w.send(execMsg("a"), slow), w.send(execMsg("b"), slow), w.tick()]);
   expect(w.sent.filter((s) => s.content.includes("[📨 PM 摘要]"))).toHaveLength(1);
   expect(w.sent.map((s) => s.content.replace(/^[\s\S]*\n\n/, ""))).toEqual(expect.arrayContaining(["a", "b"]));
   expect(w.store.queued(P)).toEqual([]);
 });
 
 test("the window digest uses the startup sender, not a held replay's withdrawn closure", async () => {
-  const w = world("on");
+  const w = await world("on");
   const withdrawn = async (e: Envelope): Promise<Delivery> => ({ envelope: e, outcome: { kind: "dropped", reason: "已从押后队列撤下" } });
-  await w.send(owner("押后重投"), withdrawn); // 最近一次投递是一条已撤下的押后条目
+  await w.send(execMsg("押后重投"), withdrawn); // 最近一次投递是一条已撤下的押后条目
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS);
   await w.tick();
@@ -252,7 +255,7 @@ test("the window digest uses the startup sender, not a held replay's withdrawn c
 });
 
 test("the digest envelope is never queued again even in on mode (no self loop)", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.advance(PM_DIGEST_WINDOW_MS);
   await w.tick();
@@ -262,7 +265,7 @@ test("the digest envelope is never queued again even in on mode (no self loop)",
 });
 
 test("corrupt state: writers refuse to overwrite, the message goes out immediately instead of being swallowed", async () => {
-  const w = world("on");
+  const w = await world("on");
   const path = join(w.dir, "pm-digest.json");
   writeFileSync(path, "{not json");
   const r = await w.send(sched("T1"));
@@ -270,7 +273,7 @@ test("corrupt state: writers refuse to overwrite, the message goes out immediate
   expect(w.sent).toHaveLength(1);
   expect(readFileSync(path, "utf-8")).toBe("{not json");
   writeFileSync(join(w.dir, "pm-digest-mode.json"), "[]");
-  expect(() => w.store.setMode(P, "on")).toThrow("拒绝覆盖");
+  await expect(w.store.setMode(P, "on")).rejects.toThrow("拒绝覆盖");
   expect(readFileSync(join(w.dir, "pm-digest-mode.json"), "utf-8")).toBe("[]");
 });
 
@@ -282,10 +285,10 @@ function inboxAck(held: HeldQueue): Envelope[] {
 }
 
 test("held-inbox: a held immediate carries its digest on disk; after a restart the inbox ack settles it and the window never resends", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
-  await w.send(owner("正文"));
+  await w.send(execMsg("正文"));
   w.setOutcome({ kind: "sent" });
   w.restart();
   const seen = inboxAck(w.held());
@@ -300,10 +303,10 @@ test("held-inbox: a held immediate carries its digest on disk; after a restart t
 });
 
 test("held-inbox: entries added while the carrier was re-held in memory only (not on disk) go back to the queue on settle", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
-  const e = owner("正文");
+  const e = execMsg("正文");
   await w.send(e); // 第一次押下落盘：带 T1
   await w.send(sched("T2"));
   await w.send(e); // Stop 重投又押回同一封：hold 认出同一封不落盘，盘上仍只带 T1
@@ -325,10 +328,10 @@ function inboxAckOne(held: HeldQueue, threadId: string): void {
 }
 
 test("carrier-id: two held clicks sharing a messageId each settle only their own digest, across a restart", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
-  const a = owner("点击 A"), b = { ...owner("点击 B"), meta: { ...a.meta, threadId: "click-b" } };
+  const a = execMsg("点击 A"), b = { ...execMsg("点击 B"), meta: { ...a.meta, threadId: "click-b" } };
   await w.send(a);
   await w.send(sched("T2"));
   await w.send(b);
@@ -347,10 +350,10 @@ test("carrier-id: two held clicks sharing a messageId each settle only their own
 });
 
 test("pm-switch-inbox: the former PM acking its own held chat hands the carried digest back to the on-duty PM", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
-  await w.send(owner("给 A 的直聊"));
+  await w.send(execMsg("给 A 的直聊"));
   w.setOutcome({ kind: "sent" });
   setMeta(w.db, { actor: "owner" }, { project: P, key: "pms", value: ["agent-b", PM] }); // 切当班到 B
   w.restart();
@@ -363,21 +366,21 @@ test("pm-switch-inbox: the former PM acking its own held chat hands the carried 
 });
 
 test("held-inbox: a held carrier that is discarded or vanished returns its entries to the queue (never swallowed)", async () => {
-  const w = world("on");
+  const w = await world("on");
   await w.send(sched("T1"));
   w.setOutcome({ kind: "sent", note: "queued" });
-  await w.send(owner("正文"));
+  await w.send(execMsg("正文"));
   w.setOutcome({ kind: "sent" });
   expect(w.store.queued(P)).toEqual([]);
-  await w.send(owner("别的")); // 被带走的条目不再拼进别的摘要
+  await w.send(execMsg("别的")); // 被带走的条目不再拼进别的摘要
   expect(w.sent.map((s) => s.content)).toEqual(["别的"]);
   w.held().discard("ch-pm");
   expect(w.store.queued(P)).toHaveLength(1);
 
-  const v = world("on");
+  const v = await world("on");
   await v.send(sched("T9"));
   v.setOutcome({ kind: "sent", note: "queued" });
-  await v.send(owner("正文"));
+  await v.send(execMsg("正文"));
   v.setOutcome({ kind: "sent" });
   writeFileSync(join(v.dir, "held.json"), "{}"); // 押后队列里没了、也没报结局（如崩溃）：窗口 tick 时放回队再送
   v.advance(PM_DIGEST_WINDOW_MS);
@@ -386,13 +389,43 @@ test("held-inbox: a held carrier that is discarded or vanished returns its entri
 });
 
 test("corrupt-state: malformed queue elements count as corrupt — the message still goes out immediately", async () => {
-  const w = world("on");
+  const w = await world("on");
   const path = join(w.dir, "pm-digest.json");
   writeFileSync(path, JSON.stringify({ queue: [null], log: [] }));
-  const r = await w.send(owner("正文"));
+  const r = await w.send(execMsg("正文"));
   expect(r.outcome).toEqual({ kind: "sent" });
   expect(w.sent.map((s) => s.content)).toEqual(["正文"]);
   await w.send(sched("T1"));
   expect(w.sent).toHaveLength(2);
   expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({ queue: [null], log: [] });
+});
+
+test("pull (default): mergeable stays queued for ledger pm-digest --list; immediates go out untouched; the window never sends; 24h later it expires", async () => {
+  const w = await world("on", undefined, "on");
+  await w.store.setPullMode(P, "on");
+  await w.send(sched("T1"));
+  const o = owner("开发咋样了"), x = execMsg("执行者问 PM");
+  await w.send(o);
+  await w.send(x);
+  expect(w.sent.map((s) => s.content)).toEqual(["开发咋样了", "执行者问 PM"]);
+  expect(o.content).toBe("开发咋样了"); // 信封本身没被改：网页按它显示 owner 自己的消息
+  w.advance(PM_DIGEST_WINDOW_MS);
+  await w.tick();
+  expect(w.sent).toHaveLength(2);
+  expect(w.store.queued(P).map((e) => e.card)).toEqual(["T1"]);
+  w.advance(24 * 3600_000);
+  await w.tick();
+  expect(w.store.queued(P)).toEqual([]);
+});
+
+test("push mode: an owner / peer message never carries the digest; the next executor message does", async () => {
+  const w = await world("on");
+  await w.send(sched("T1"));
+  const o = owner("开发咋样了");
+  await w.send(o);
+  await w.send(env({ kind: "api", tokenId: "tok", name: "peer", peer: "He" } as never, "peer 问一句", false));
+  expect(w.sent.map((s) => s.content)).toEqual(["开发咋样了", "peer 问一句"]);
+  expect(o.content).toBe("开发咋样了");
+  await w.send(execMsg("执行者问 PM"));
+  expect(w.sent[2]!.content).toContain("[📨 PM 摘要] 1 条");
 });

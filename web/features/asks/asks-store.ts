@@ -14,6 +14,7 @@ import { askFromLink, hashBase, leavePlan, shouldPush } from "@/lib/hash-nav";
 import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
 import { applyPending, ASK_EVENT_REFRESH_MS, ASK_LIST_WAIT_MS, PENDING_MAX_MS, type PendingAnswer, type WebAsk } from "./asks-model";
 import { isAskForViewer } from "./ask-viewer";
+import { onSwOpen } from "@/lib/sw-inbox";
 
 export interface AsksSnap {
   asks: WebAsk[];
@@ -76,7 +77,8 @@ const note = (id: string, n: AskNote | null) => {
  * 出错不再往外抛：原因记在 notes 里由卡片显示；返回成没成。删卡（dismiss）走同一套，只是盖上去的是「删了」
  */
 async function optimistic(id: string, over: Omit<PendingAnswer, "at" | "inFlight">, submit: () => Promise<unknown>, words: { ok: string; fail: (e: unknown) => string }): Promise<boolean> {
-  const mine = { ...over, at: Date.now(), inFlight: true } as PendingAnswer;
+  const startedAt = Date.now();
+  const mine = { ...over, at: startedAt, inFlight: true } as PendingAnswer;
   pending.set(id, mine);
   show({ notes: note(id, null) });
   try {
@@ -85,14 +87,14 @@ async function optimistic(id: string, over: Omit<PendingAnswer, "at" | "inFlight
     if (pending.get(id) === mine) pending.set(id, { ...over, at: Date.now() } as PendingAnswer);
     setTimeout(() => show(), PENDING_MAX_MS + 1);
     set({ notes: note(id, { ok: true, text: words.ok }) });
+    expectSettled(id, startedAt, over.dismiss === true);
     return true;
   } catch (e) {
     // 只撤自己这一笔：请求在飞时又点了一次，那一笔的覆盖不能被这次的失败带走
     if (pending.get(id) === mine) pending.delete(id);
     show({ notes: note(id, { ok: false, text: words.fail(e) }) });
+    soon(); // 以服务端为准
     return false;
-  } finally {
-    void refresh();
   }
 }
 
@@ -103,14 +105,73 @@ const dismiss = (id: string, submit: () => Promise<unknown>, fail: (e: unknown) 
 /** 拉取序号：先发后到的旧结果（例如写库前发出的 30 秒轮询）不能盖掉后发先到的新结果 */
 let fetchSeq = 0;
 let appliedSeq = 0;
+/** 抽屉里点了「更多」：要 3 天内结案的（默认 bridge 只给 24 小时内的），收起抽屉就回到默认 */
+let withHistory = false;
+let lastFetchAt = 0;
+/** 最近一次成功落地的拉取是什么时候发出的 */
+let lastOkStart = 0;
+/** 在路上的拉取：序号 → 发出时间。只有提交开始之后发出的才可能带回这次变更（提交前发出、卡住的不能让补拉一直等） */
+const flying = new Map<number, number>();
+const flyingSince = (t: number) => [...flying.values()].some((at) => at >= t);
+let soonTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** ask 事件 / 作答后：去抖 ASK_EVENT_REFRESH_MS，一串变化只拉一次 */
+function soon(): void {
+  if (soonTimer) clearTimeout(soonTimer);
+  soonTimer = setTimeout(() => {
+    soonTimer = null;
+    void refresh();
+  }, ASK_EVENT_REFRESH_MS);
+}
+
+/**
+ * 作答 / 删卡提交成功、还没被确认的。确认 = 一次在提交开始之后发出、成功落地、看到它已处理（作答：不再 open；删卡：不在列表里）的拉取。
+ * 没确认（拉取失败、回来的是提交前发的、回来还是 open）就再排一次去抖拉取，最多 CONFIRM_TRIES 次。只看「拉过没有」的话，
+ * 失败的那次也算数，20 秒覆盖到点后卡片会回到待办（tests/web-asks-store.test.ts「SYN-2」）
+ */
+const confirming = new Map<string, { since: number; dismiss: boolean; tries: number }>();
+const CONFIRM_TRIES = 3;
+
+function settledOnServer(id: string, dismiss: boolean): boolean {
+  const a = server.find((x) => x.id === id);
+  return dismiss ? !a : !a || a.state !== "open";
+}
+
+function expectSettled(id: string, since: number, dismiss: boolean): void {
+  if (lastOkStart >= since && settledOnServer(id, dismiss)) return; // ask 事件那次拉取已经拿到了：不再补拉
+  confirming.set(id, { since, dismiss, tries: CONFIRM_TRIES });
+  if (!flyingSince(since) && !soonTimer) soon();
+}
+
+/** 一次拉取结束：ok = 成功落地，null = 被更新的结果盖过、不算数。核对待确认的，没确认、又没有别的拉取在路上就再排一次 */
+function settleConfirming(startedAt: number, ok: boolean | null): void {
+  for (const [id, c] of confirming) {
+    if (ok === null || startedAt < c.since) continue; // 被更新的结果盖过的不核对，但下面照样看要不要补拉——不然没人在路上的确认项就搁住了
+    if (ok && settledOnServer(id, c.dismiss)) confirming.delete(id);
+    else if (c.tries <= 1) confirming.delete(id);
+    else confirming.set(id, { ...c, tries: c.tries - 1 });
+  }
+  if (!soonTimer && [...confirming.values()].some((c) => !flyingSince(c.since))) soon();
+}
+
+/** 回前台和事件流重连常常前后脚到：1 秒内已经拉过就不再拉（去抖里排着的那次照常） */
+const WAKE_DEDUPE_MS = 1000;
+function refreshOnWake(): void {
+  if (Date.now() - lastFetchAt >= WAKE_DEDUPE_MS) void refresh();
+}
 
 async function refresh(): Promise<void> {
   if (denied) return;
   const my = ++fetchSeq;
+  const startedAt = (lastFetchAt = Date.now());
+  let ok: boolean | null = false;
+  flying.set(my, startedAt);
   try {
-    const r = await fetchAsks();
-    if (my < appliedSeq) return;
+    const r = await fetchAsks(undefined, withHistory);
+    if (my < appliedSeq) return void (ok = null);
     appliedSeq = my;
+    ok = true;
+    lastOkStart = Math.max(lastOkStart, startedAt);
     const audience = r.asks.filter(isAskForViewer);
     const fresh = audience.filter((a) => a.state === "open" && !seen.has(a.id));
     // 第一次拉到的不算「新来的」；之后新来的卡活 ask 在前台就弹横幅
@@ -120,13 +181,16 @@ async function refresh(): Promise<void> {
     const banner = bannerAsk ?? audience.find((a) => a.id === snap.banner?.id && a.state === "open") ?? null;
     show({ loaded: true, full: r.full === true, banner });
   } catch (e) {
-    if (my < appliedSeq) return; // 上一台机器的、或已被更新的结果盖过的失败，不作数
+    if (my < appliedSeq) return void (ok = null); // 上一台机器的、或已被更新的结果盖过的失败，不作数
     const status = e instanceof ApiError ? e.status : 0;
     if (status === 403) denied = true;
     // 403 / 老 bridge 没有 /asks（404、405）= 没有待办；其余（503、断网）还没拿到过列表也先当 partial，都不能让聊天气泡一直「正在核对」
     if (status === 403 || status === 404 || status === 405) server = [];
     if (status === 403 || status === 404 || status === 405 || !snap.loaded) show({ loaded: true, full: false });
     // 拿到过列表的：保留上一份，下次刷新再来
+  } finally {
+    flying.delete(my);
+    settleConfirming(startedAt, ok);
   }
 }
 
@@ -147,6 +211,7 @@ function leave(): void {
   if (plan === "wait") return;
   if (plan === "back") return backGuard.back(); // popstate 收起
   if (plan === "strip") stripHash();
+  withHistory = false;
   set({ open: false, focus: null });
 }
 
@@ -161,6 +226,11 @@ export const asksStore = {
     return () => void subs.delete(f);
   },
   refresh,
+  /** 抽屉「最近处理过 → 更多」：拉 3 天内结案的，直到收起抽屉 */
+  loadHistory(): Promise<void> {
+    withHistory = true;
+    return refresh();
+  },
   answer,
   dismiss,
   openDrawer: (focus: string | null = null) => enter(focus),
@@ -176,17 +246,13 @@ export const asksStore = {
       denied = false;
       seen.clear();
       pending.clear();
+      confirming.clear();
       server = [];
       snap = EMPTY;
     }
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const soon = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => void refresh(), ASK_EVENT_REFRESH_MS);
-    };
     const onVis = () => {
       presence(visible());
-      if (visible()) void refresh();
+      if (visible()) refreshOnWake();
     };
     const poll = setInterval(() => visible() && void refresh(), 30_000);
     const beat = setInterval(() => visible() && presence(true), 60_000);
@@ -194,19 +260,17 @@ export const asksStore = {
     void (async () => {
       // 断了就退避重连（5s → 60s）；连上先重拉一次，断线期间的变化不会丢
       for (let wait = 5_000; !ctrl.signal.aborted; wait = Math.min(wait * 2, 60_000)) {
-        await followAskEvents({ signal: ctrl.signal, onOpen: () => ((wait = 2_500), void refresh()), onAsk: soon }).catch(() => undefined); // 断线 / 403：等一会儿再连
+        await followAskEvents({ signal: ctrl.signal, onOpen: () => ((wait = 2_500), refreshOnWake()), onAsk: soon }).catch(() => undefined); // 断线 / 403：等一会儿再连
         if (denied) return;
         await new Promise((r) => setTimeout(r, wait));
       }
     })();
-    // 已有窗口时点「待你处理」推送：SW 发 cstra-open-ask（web/public/sw.js），直接打开抽屉定位；别的机器发的先不管（按当前机器显示）
-    const onSw = (e: MessageEvent) => {
-      const d = e.data as { type?: string; ask?: string };
-      if (d?.type === "cstra-open-ask" && d.ask) enter(d.ask);
-    };
+    // 已有窗口时点「待你处理」推送：SW 发 cstra-open-ask（web/public/sw.js；两族都认、同一条只处理一次，lib/sw-inbox.ts），直接打开抽屉定位；别的机器发的先不管（按当前机器显示）
+    const onSw = (e: MessageEvent) => onSwOpen("ask", e.data, (o) => enter(o.value));
     // 左滑 / 返回键落到 #asks 就开（含从「回到对话」的会话页退回来），离开就关
     const onPop = () => {
       const on = onAsksPage();
+      if (!on) withHistory = false;
       if (on !== snap.open) set({ open: on, focus: null });
     };
     navigator.serviceWorker?.addEventListener("message", onSw);
@@ -225,7 +289,8 @@ export const asksStore = {
       enter(deep);
     } else if (onAsksPage()) set({ open: true });
     return () => {
-      if (timer) clearTimeout(timer);
+      if (soonTimer) clearTimeout(soonTimer);
+      soonTimer = null;
       clearTimeout(slow);
       clearInterval(poll);
       clearInterval(beat);

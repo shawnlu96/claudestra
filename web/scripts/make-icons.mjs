@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /*
- * 生成 Claudestra PWA 安装图标（public/icons/*.png）。
+ * 生成 Floka PWA 安装图标（public/icons/*.png）。
  *
- * 设计语义 = Claudestra 架构本身：中心 hub（Bridge）向 5 个卫星节点「扇出」（一 token
+ * 设计语义 = Floka 架构本身：中心 hub（Bridge）向 5 个卫星节点「扇出」（一 token
  * 扇出多会话），卫星排成开口朝右的「C」（Claude），右上一颗 sparkle 呼应 "astra/星"。
  * 珊瑚色 #EC5A72（前端 accent）on 近黑底 #171819（dark 主题 base-100）。全出血方底，
  * iOS 自动加圆角；glyph 收在 maskable 安全区内（内容半径 <40% 宽），一张图兼做 any+maskable。

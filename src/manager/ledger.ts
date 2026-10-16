@@ -1,3 +1,4 @@
+import { PRIORITY_STALL_CMDS } from "./ledger-priority-stall-cmds.js";
 import { PRIORITY_CMDS } from "./ledger-priority-cmds.js";
 import { PM_SWITCH_CMDS } from "./pm-switch.js";
 import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledger-resource-scope-cmds.js";
@@ -30,7 +31,8 @@ import { DAG_CMDS } from "./ledger-dag-cmds.js";
 import { FEATURE_SPLIT_CMDS } from "./ledger-feature-split-cmds.js";
 import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
 import { FEATURE_MIGRATE_CMDS } from "./ledger-feature-migrate-cmd.js";
-import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
+import { parseLedgerArgs, resolveActor, type ParsedArgs } from "./ledger-identity.js";
+import { START_NODE_ATTEMPT_ENV } from "../lib/ledger-autostart-grant.js";
 import { AUDIT_CMDS } from "./ledger-audit-cmd.js";
 import { importCmd } from "./ledger-import.js";
 import { DISPATCH_CMDS } from "./ledger-dispatch-cmds.js";
@@ -67,6 +69,7 @@ import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { MERGE_QUEUE_CMDS } from "./ledger-merge-queue-cmds.js";
 import { MANUAL_CASE_CMDS } from "./ledger-manual-case-cmds.js";
 import { MANUAL_MERGE_CMDS, MANUAL_MERGE_SERVICE_COMMANDS } from "./ledger-manual-merge-cmds.js";
+import { LOCAL_MERGE_CMDS } from "./ledger-local-merge-cmds.js";
 import { WORKER_CMDS } from "./ledger-worker-cmds.js";
 import { REVIEW_EXPORT_CMDS } from "./ledger-review-export-cmd.js";
 import { MODEL_CMDS } from "./ledger-model-cmds.js";
@@ -74,19 +77,23 @@ import { POOL_REFUSAL_CMDS } from "./ledger-pool-refusal-cmds.js";
 import { SCHEDULER_RECOVERY_CMDS } from "./ledger-scheduler-recovery-cmds.js";
 import { LOCK_YIELD_CMDS, LOCK_YIELD_SERVICE_COMMANDS } from "./ledger-lock-yield-cmds.js";
 import { PM_DIGEST_CMDS } from "./pm-digest-cmds.js";
+import { PM_RAILS_CMDS, withPmRails } from "./pm-rails-cmds.js";
 import { SECURITY_POOL_CMDS } from "./security-pool-cmds.js";
 import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
 import { MAIN_CI_CMDS } from "./ledger-main-ci-cmds.js";
 import { LEND_AUTHOR_RETIRE_CMDS } from "../lib/lend-author-retire-cmds.js";
+import { MAIN_RED_FIX_CMDS, MAIN_RED_FIX_SERVICE } from "../lib/main-red-fix-cmds.js";
 import { AUTHOR_REBUILD_CMDS } from "../lib/scheduler-author-rebuild-cmds.js";
 import { PMAUTO_CMDS, PMAUTO_SERVICE } from "./ledger-observation-wiring.js";
-import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
+import { REMOTE_REVIEW_CMDS, REMOTE_REVIEW_SERVICE } from "./ledger-remote-review-cmds.js";
+import { DRY_RUN_READS, isLedgerWrite, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
-const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub) || PMAUTO_SERVICE.has(sub);
+const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub) ||
+  PMAUTO_SERVICE.has(sub) || MAIN_RED_FIX_SERVICE.has(sub) || REMOTE_REVIEW_SERVICE.has(sub);
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
@@ -112,8 +119,9 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS, ...UI_PAGE_BATCH_CMDS,
   ...VERDICT_CMDS, ...MEMORY_CMDS, ...MEMORY_IMPORT_CMDS, ...MEMORY_METRICS_CMDS,
+  ...PRIORITY_STALL_CMDS,
   ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
-  ...RECOVERY_CMDS, ...MANUAL_MERGE_CMDS, ...REVIEW_EXPORT_CMDS,
+  ...RECOVERY_CMDS, ...MANUAL_MERGE_CMDS, ...LOCAL_MERGE_CMDS, ...REVIEW_EXPORT_CMDS,
   ...MAIN_CARRY_CMDS, // MAINP2 正式沿用审查（ledger-main-carry-cmds.ts）
   ...MERGE_CONTENT_REVIEW_CMDS, // merge-arch-REVIEW1 内容身份沿用审查
   ...WORKER_CMDS, // 卡 worker 生命周期（LIFE1）
@@ -121,15 +129,18 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...POOL_REFUSAL_CMDS, // 池单拒审的调度服务写口（MODELXP2）
   ...LOCK_YIELD_CMDS, // 停滞卡让锁（RLOCK2）
   ...PM_DIGEST_CMDS, // PM 推送摘要（PMDIG1）
+  ...PM_RAILS_CMDS, // 人工干预推 owner（PMR-2）
   ...SECURITY_POOL_CMDS, // security 卡审查进统一池开关（SECPOOL1）
   ...PRIVATE_POOL_CMDS, // 私仓卡进统一池开关（SECPOOL2）
   ...CI_KNOWN_FLAKY_CMDS, // 已知偶发测试清单（CIF8）
   ...MAIN_CI_CMDS, // 主线 CI 暂停的状态 / 修复绑定 / 调度写口（MAINCIW）
   ...LEND_AUTHOR_RETIRE_CMDS,
+  ...MAIN_RED_FIX_CMDS, // main / Nightly 红的重跑、修复节点与自动修复绑定（agents-MAINRED1）
   ...AUTHOR_REBUILD_CMDS, // 作者重建的观察 / 等待说明写口（AREB2）
   ...CARD_PAUSE_CMDS, // 卡级暂停 / 继续（UXPAUSE1）
   ...PMAUTO_CMDS, // 观察期登记与普通 P2 积压（PMAUTO1）
   ...MANUAL_CASE_CMDS, // 人工处置段只读视图（VIEW1）
+  ...REMOTE_REVIEW_CMDS, // 仓库方审查结论入账（RRL-1）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 export function ledgerUsage(): string {
@@ -148,7 +159,7 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
   if ("error" in p) return { ok: false, code: "invalid", error: p.error, usage: `ledger ${spec.usage}` };
   try {
     deps.assertLease?.(); // 写锁、registry / projects 这些 await 都过了：台账事务是同步的，核完直接跑
-    return await spec.run(new LedgerCli(deps, p));
+    return await withPmRails(deps, args, p, async () => spec.run(new LedgerCli(deps, p)));
   } catch (e) {
     if (e instanceof SchedulerLeaseLost) return { ok: false, code: "lease-lost", error: e.message };
     if (e instanceof LedgerError) return { ok: false, code: e.code, error: e.message, ...(e.current ? { current: e.current } : {}), usage: `ledger ${spec.usage}` };
@@ -160,7 +171,7 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
  * 真实依赖：registry、projects.json、环境里的频道号 → actor。认不出的频道只许读（actor 记 "unknown"，没有任何角色）；
  * 读写的划分与 manager 的认主守卫同一张表（write-commands.ts），不另列一份。
  */
-async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }> {
+async function realDeps(args: string[], p: ParsedArgs | null): Promise<LedgerDeps | { error: string }> {
   const fileScope = args[0] === "scheduler-file-scope", reg = fileScope ? fileScopeRegistry() : await loadRegistry();
   const service = process.env.CLAUDESTRA_SCHEDULER_SERVICE === "1";
   if (service && (process.env.DISCORD_CHANNEL_ID || process.env[LEND_WORKER_MARK])) return { error: "agent 频道 / 出借 worker 不能冒用调度服务身份" };
@@ -169,11 +180,11 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   }
   const who = service ? { ok: true as const, actor: "scheduler" }
     : resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, reg.agents);
-  if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
+  if (!who.ok && isLedgerWrite(args, p)) return { error: who.error };
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
   // audit / feature-migrate 的 --dry-run、pm-status 与 merge-queue 只读：不走 openLedger（它会建表 / 迁移 / 修负责人列，分支代码对线上库跑一次就把版本号抬上去）
-  const readInvocation = args[0] === "pm-status" || READER_ONLY_SUBS.has(args[0] ?? "") || (DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run"));
+  const readInvocation = args[0] === "pm-status" || READER_ONLY_SUBS.has(args[0] ?? "") || (DRY_RUN_READS.has(args[0] ?? "") && !isLedgerWrite(args, p));
   const readOnly = readInvocation ? new LedgerReader().get() : undefined;
   if (readOnly === null) return { error: "台账库还不存在（或正在建），只读命令没东西可看" };
   return {
@@ -191,10 +202,12 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     autoProjects: () => { const s = readSchedulerConfig(); return s.enabled ? Object.keys(s.projects) : []; },
     autoDispatch: () => readSchedulerConfig().autoDispatch,
     notifyOwner: (text) => notify({ source: "ledger", chatId: repoEnvVar("CONTROL_CHANNEL_ID"), text }),
+    startNodeAttempt: process.env[START_NODE_ATTEMPT_ENV] || undefined,
   };
 }
 export async function cmdLedger(args: string[]): Promise<void> {
-  const deps = await withFileScopeErrors(args, () => realDeps(args));
+  const spec = COMMANDS[args[0] ?? ""], p = spec ? parseLedgerArgs(args, spec.valued, spec.bools) : null;
+  const deps = await withFileScopeErrors(args, () => realDeps(args, p && !("error" in p) ? p : null));
   if ("error" in deps) return output({ ok: false, code: "code" in deps ? deps.code : "forbidden", error: deps.error });
   const r = await runLedger(args, deps);
   output(r);

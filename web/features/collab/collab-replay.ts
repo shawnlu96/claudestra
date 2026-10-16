@@ -3,7 +3,7 @@
  * 阶段条就画成那一刻的样子。只用 GET /ledger/:project/tasks/:id 已有的 events + timeline，不新增接口；
  * agent 间消息、工具历史没有持久化（data-gaps 第 8、9 项），不在回放里。单测在 tests/web-collab-since.test.ts 的「回放」一节。
  */
-import { eventLine, isRedacted, STAGE_NAME, stageSegments, type Segment, type StageEntryView } from "./collab-detail-model";
+import { eventLine, isIntervention, isRedacted, STAGE_NAME, stageSegments, type Segment, type StageEntryView } from "./collab-detail-model";
 import type { LedgerEventView, Stage, Tr } from "./collab-model";
 import { fillParams } from "@/lib/i18n-fill";
 
@@ -19,6 +19,8 @@ export interface ReplayFrame {
   /** stage 为 blocked 时受阻前的阶段（阶段条落列用）；blocked 而这里为 null = 受阻前阶段没有证据（stageUnknownAt 为 "before"） */
   stageBefore: Stage | null;
   approx: boolean;
+  /** 只在是人工干预时出现（true） */
+  intervention?: true;
 }
 
 /** 只认合法阶段名：任意文本不是阶段证据 */
@@ -72,7 +74,10 @@ export function replayFrames(events: readonly LedgerEventView[], tr: Tr = zh): R
       }
       text = eventLine(e, tr);
     }
-    if (text) out.push({ seq: e.seq, ts: e.ts, kind: e.kind, text, stage, stageBefore: before, approx: !isRedacted(e) && e.data.approxTime === true });
+    if (text) {
+      out.push({ seq: e.seq, ts: e.ts, kind: e.kind, text, stage, stageBefore: before, approx: !isRedacted(e) && e.data.approxTime === true,
+        ...(isIntervention(e) ? { intervention: true as const } : {}) });
+    }
   }
   return out;
 }

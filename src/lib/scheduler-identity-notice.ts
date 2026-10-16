@@ -10,8 +10,9 @@ import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { registryTaskLabel } from "./registry-task-label.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
-export type IdentityNotify = (task: LedgerTask, text: string) => Promise<void>;
+export type IdentityNotify = (task: LedgerTask, text: string, level: PmNoticeLevel) => Promise<void>;
 
 const told = new WeakMap<Database, Set<string>>();
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim().slice(0, 400);
@@ -35,7 +36,7 @@ export async function noticeIdentityConflict(db: Database, task: LedgerTask, age
   const seen = told.get(db) ?? told.set(db, new Set()).get(db)!;
   if (seen.has(intentId)) return;
   seen.add(intentId);
-  try { await notify(task, identityNoticeText(task, agent, intentId, reason)); }
+  try { await notify(task, identityNoticeText(task, agent, intentId, reason), "action"); } // 身份冲突：PM 要核对
   catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     console.error(`⚠️ [scheduler] 身份冲突通知没发出去（意图 ${intentId} 已落 unknown，台账可查）：${(e as Error).message}`);

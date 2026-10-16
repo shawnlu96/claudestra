@@ -3,7 +3,7 @@
  * 只有 owner 本人的全 scope manage 凭据能用，其余 403（面板直接显示错误）。
  */
 import { machines } from "@/lib/machines";
-import { LP_WORDS, ownerWordsTr } from "@/lib/owner-words";
+import { LP_WORDS, QUOTA_WORDS, ownerWordsTr } from "@/lib/owner-words";
 import { api, ApiError } from "./client";
 import { followEventStream } from "./ledger";
 
@@ -97,11 +97,19 @@ export function followLpEvents(opts: { signal: AbortSignal; onEvent: (agent: str
   });
 }
 
-/** 徽章文案（词在 lib/owner-words）：开 → 「排队→3:20am」；用完 → 「低优先级用完」；额度用完在等 → 「额度用完，等重置」；其余不显示。tr 默认中文原文 */
+/** 徽章文案（词在 lib/owner-words）：开 → 「低优先级」；用完 → 「低优先级用完」；额度用完在等 → 「额度用完，等重置」；其余不显示。tr 默认中文原文 */
 export function lpBadgeText(lp: LpState | null | undefined, tr = ownerWordsTr("zh")): string | null {
   if (!lp) return null;
-  if (lp.lowPriority === "on") return tr(LP_WORDS.badgeOn, { t: lp.resetsAt ?? "?" });
+  if (lp.lowPriority === "on") return tr(QUOTA_WORDS.lpLabel);
   if (lp.lowPriority === "exhausted") return tr(LP_WORDS.badgeExhausted);
   if (lp.walled) return tr(LP_WORDS.badgeWalled);
   return null;
+}
+
+/** 徽章的 title：额度那套说法（QUOTA1），不报百分比——额度在「今天 · 团队与额度」看 */
+export function lpBadgeTitle(lp: LpState, tr = ownerWordsTr("zh")): string {
+  const time = lp.resetsAt ?? "?";
+  if (lp.lowPriority === "on") return tr(QUOTA_WORDS.lpOn, { time });
+  if (lp.lowPriority === "exhausted") return tr(QUOTA_WORDS.lpOut);
+  return tr(LP_WORDS.walledTitle, { time });
 }

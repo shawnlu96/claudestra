@@ -6,7 +6,7 @@
  * - 句中片段（如「重置」「已重启」）英文故意小写、无句号。
  * - 带变量的句子整句做 key，变量写 {name}（t(s, { name })）；译文保留同名占位，tests/web-i18n.test.ts 查。
  * - 英文要分单复数的写成「单数|复数」，按 {n} 选（lib/i18n-fill.ts）；中文原文里别用 |。
- * - 品牌名（Claudestra）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
+ * - 品牌名（Floka）、模型名、工具名（Read/Edit/Bash）、agent 名不进字典。
  */
 import { ATTACH_DICT } from "./i18n-dict-attach";
 import { TOOLS_DICT } from "./i18n-dict-tools";
@@ -85,10 +85,10 @@ export const DICT: Record<string, string> = {
   "或者把对方发来的那段话 / 链接粘贴到这里": "Or paste the message / link they sent you here",
   "现在你的 agent 可以直接找对方开放给你的 agent 了。": "Your agents can now reach the agents they shared with you.",
   "对方还没开放任何 agent 给你": "They haven't shared any agents with you yet",
-  "对方点开链接，在他自己的 Claudestra 里点一下「加入」就完成。": "They open the link and tap Join in their own Claudestra. That's it.",
-  "允许用这个 Claudestra 打开协作邀请链接？以后别人发来的邀请点一下就能直接到这里确认。":
-    "Let this Claudestra open collaboration invite links? Invites people send you will open right here in one tap.",
-  "回到 Claudestra": "Back to Claudestra",
+  "对方点开链接，在他自己的 Floka 里点一下「加入」就完成。": "They open the link and tap Join in their own Floka. That's it.",
+  "允许用这个 Floka 打开协作邀请链接？以后别人发来的邀请点一下就能直接到这里确认。":
+    "Let this Floka open collaboration invite links? Invites people send you will open right here in one tap.",
+  "回到 Floka": "Back to Floka",
   "查看": "View",
   "检测到": "Found",
   "以后再说": "Later",
@@ -98,7 +98,7 @@ export const DICT: Record<string, string> = {
   "没认出邀请：请复制对方发来的整段话或完整链接": "No invite found. Copy the whole message or the full link they sent",
   "剪贴板里没有邀请。先复制对方发来的那段话或链接。": "No invite on the clipboard. Copy the message or link they sent first.",
   "链接里的邀请码缺了或被截断了。请让对方重新复制整条链接发给你。": "The invite code in the link is missing or cut off. Ask them to copy the whole link again.",
-  "Claudestra 协作邀请": "Claudestra collaboration invite",
+  "Floka 协作邀请": "Floka collaboration invite",
   "能连到对方": "You can reach them",
   "连不上对方": "Can't reach them",
   "已加入": "Joined",
@@ -207,7 +207,6 @@ export const DICT: Record<string, string> = {
   "经你自己的反向代理": "Through your own reverse proxy",
   "高级：自己的域名 + Caddy / nginx，见 web/SETUP.md「Public reverse proxy」": "Advanced: your own domain with Caddy / nginx — see \"Public reverse proxy\" in web/SETUP.md",
   "Tailscale 入口": "Tailscale entry",
-  "开启 Autopilot…": "Start Autopilot…",
   "关闭 Autopilot": "Stop Autopilot",
   "关闭 Autopilot 失败:": "Failed to stop Autopilot: ",
   "Autopilot 中": "On Autopilot",
@@ -216,18 +215,6 @@ export const DICT: Record<string, string> = {
   "等到": "waiting until",
   "今天": "today",
   "明天": "tomorrow",
-  "开启 Autopilot": "Start Autopilot",
-  "目标": "Goal",
-  "截止时间": "Deadline",
-  "+2 小时": "+2 h",
-  "+4 小时": "+4 h",
-  "+8 小时": "+8 h",
-  "写一句 Autopilot 要推进的目标": "Describe what Autopilot should push forward",
-  "开启失败：": "Couldn't start: ",
-  "请稍后再试": "please try again",
-  "Autopilot（自动推进）：它每干完一轮，停一会儿确认你没在跟它说话，就自动接着推进；做完它自己宣告结束，到截止时间就收尾。Claude Code、Codex、Pi 都能用。": "Autopilot: after each turn it waits a moment, and if you are not talking to it, it keeps going on its own. It turns Autopilot off itself when the work is done, and wraps up at the deadline. Works with Claude Code, Codex and Pi.",
-  "比如：按台账一件件推进，能做的直接做，要拍板的记下来跳过": "e.g. work through the ledger item by item; do what you can, note decisions for me and skip them",
-  "也可以填 11:00（已过就算明天）或 +90m": "Or type 11:00 (tomorrow if already past) or +90m",
   "访问": "Access",
   "集成": "Integrations",
   "设置": "Settings",
@@ -244,6 +231,13 @@ export const DICT: Record<string, string> = {
   "Claude 全局默认": "Claude global defaults",
   "影响所有未单独钉模型/effort 的新会话（含终端里直接开的 claude）。已钉的 agent 不受影响。":
     "Applies to new sessions without a pinned model/effort (including claude started in a terminal). Pinned agents are unaffected.",
+  "Codex 全局默认": "Codex global defaults",
+  "影响所有未单独钉模型/推理档的新 Codex 会话（含终端里直接开的 codex）。已钉的 agent 和正在运行的会话不受影响。":
+    "Applies to new Codex sessions without a pinned model/reasoning level (including codex started in a terminal). Pinned agents and running sessions are unaffected.",
+  "Codex 默认": "Codex default",
+  "推理档": "Reasoning",
+  "已保存；新模型不支持原来的推理档，已改回该模型的默认档": "Saved; the new model doesn't support the previous reasoning level, so it was reset to that model's default",
+  "读不到 Codex 模型目录（codex 没装或出错），暂时只能清空推理档（改回 Codex 默认）。": "Can't read the Codex model list (codex missing or failing); for now the reasoning level can only be cleared (back to the Codex default).",
   "推送通知": "Push notifications",
   "推送不带正文": "Hide content in notifications",
   "推送里看不到内容，点开才看得到：打开后，这台电脑发出的推送只写「有新消息」，不带 agent 名和消息内容，点开进会话列表。推送要经过中继和 Apple / Google 的推送服务，打开后它们看不到内容。对这台电脑配对的所有设备都生效。":
@@ -381,6 +375,7 @@ export const DICT: Record<string, string> = {
   "用独立临时会话读取账号用量（最长约 90 秒；失败后 30 分钟内不再读取）": "Read account usage in a temporary session (up to ~90s; no retry for 30 min after a failure)",
   "账号用量未知（没有状态栏缓存），可点右上角刷新读取一次": "Account usage unknown (no statusline cache). Tap refresh (top right) to read it once",
   "读取账号用量失败，显示的是上次读数或未知；{time} 前不再重试": "Couldn't read account usage; showing the last reading or unknown. No retry before {time}",
+  "账号用量已是实时读数；备用读法（/status）这次没读到，{time} 前不再重试": "Account usage above is live; the backup read (/status) failed this time. No retry before {time}",
   "账号用量抓取中…约几秒后自动显示，也可点右上角刷新强制重抓": "Fetching account usage… it will show in a few seconds, or tap refresh (top right) to force a re-scrape",
   "本时段用量": "Current period usage", "本周用量": "Weekly usage",
   "成本为 API 牌价折算（订阅制实际不按此扣费）": "Cost estimated at API list prices (subscriptions aren't billed this way)",
@@ -538,7 +533,7 @@ export const DICT: Record<string, string> = {
   "展开已完成的后台任务": "Show completed background tasks",
   "{n} 个已完成": "{n} completed",
   "回到底部": "Scroll to bottom",
-  "这台机器需要升级 Claudestra 才能配合这个版本的网页": "This machine needs a Claudestra update to work with this version of the web app",
+  "这台机器需要升级 Floka 才能配合这个版本的网页": "This machine needs a Floka update to work with this version of the web app",
   "xhigh + 动态 workflow 编排;仅本 session,需 CC 开启 dynamic workflows":
     "xhigh + dynamic workflow orchestration; this session only, needs dynamic workflows enabled in Claude Code",
   "ultracode = xhigh + 动态编排,仅本 session(重启回落);需 CC /config 开启 dynamic workflows":
@@ -704,8 +699,8 @@ export const DICT: Record<string, string> = {
   "给": "for",
   "已拒绝这次配对": "Pairing denied",
   "再配一台": "Pair another",
-  "配对 Claudestra": "Pair with Claudestra",
-  "10 分钟内打开这个链接，就能用这台电脑上的 Claudestra": "Open this link within 10 minutes to use Claudestra on this computer",
+  "配对 Floka": "Pair with Floka",
+  "10 分钟内打开这个链接，就能用这台电脑上的 Floka": "Open this link within 10 minutes to use Floka on this computer",
   "分享…": "Share…",
   "新设备扫码或打开链接就配好了；在配对页手输短码的，会在这里等你允许。10 分钟内有效，只能用一次。": "The new device is paired as soon as it scans the code or opens the link; if someone types the short code instead, it waits here for you to allow it. Valid 10 minutes, single use.",
   "拿到它的人就有这台电脑的全部权限，只发给你自己。": "Whoever gets it has full access to this computer — send it only to yourself.",
@@ -877,7 +872,7 @@ export const DICT: Record<string, string> = {
 
   // ── HTTP peer 管理 ───────────────────────────────────
   "Peer 协作": "Peers",
-  "跨 Claudestra 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。":
+  "跨 Floka 实例互访：双方互签 token，send_to_agent(\"<agent>@<peer>\") 直达对方。移除即吊销。":
     "Each side issues the other a scoped token; send_to_agent(\"<agent>@<peer>\") reaches remote agents. Removing revokes instantly.",
   "握手完成": "Connected",
   "等待对方回执": "Awaiting receipt",
@@ -947,7 +942,7 @@ export const DICT: Record<string, string> = {
     "Updates the server and the web client together: fetch the new version → install dependencies → " +
     "rebuild the web client if it changed → restart the web client, bridge, launcher and cron in turn. " +
     "No manual build needed; the page disconnects briefly while it runs.",
-  "升级 Claudestra": "Update Claudestra",
+  "升级 Floka": "Update Floka",
   "当前": "Current",
   "检查失败": "Check failed",
   "正在检查新版本…": "Checking for updates…",
@@ -960,7 +955,7 @@ export const DICT: Record<string, string> = {
   "正式版": "Release",
   "Beta：跟着 main 的每个提交，修复来得最快，但没经过发版验证。": "Beta: follows every commit on main — fixes arrive first, but haven't been through a release.",
   "正式版：只升到 GitHub 上正式发布的版本（推荐）。": "Release: only updates to versions published as GitHub releases (recommended).",
-  "自动升级 Claudestra": "Auto-update Claudestra",
+  "自动升级 Floka": "Auto-update Floka",
   "每 30 分钟检查一次，所有 agent 都空闲时才升；关掉后只提醒不升级。": "Checks every 30 minutes and updates only when every agent is idle; when off, it only notifies you.",
   "自动升级 Claude Code": "Auto-update Claude Code",
   "每周检查一次，同样只在所有 agent 都空闲时才升。": "Checks weekly and likewise updates only when every agent is idle.",

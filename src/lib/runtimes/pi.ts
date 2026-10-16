@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { piAvailable, type PiEnvProfile } from "../pi-env.js";
-import { buildPiCommand, type PiLaunchOptions } from "../pi-launch.js";
+import { buildPiCommand, PI_LOCKED_EFFORT, PI_LOCKED_MODEL, type PiLaunchOptions } from "../pi-launch.js";
 import { isAtShell, PI_READY_OPTION } from "../tmux-helper.js";
 import { resetReadyOption } from "./ready-option.js";
 import {
@@ -55,8 +55,8 @@ export function piLaunchOptions(spec: LaunchSpec): PiLaunchOptions {
     agentName: spec.agentName,
     purpose: spec.purpose,
     projectContext: spec.projectContext,
-    model: spec.model,
-    effort: spec.effort,
+    model: PI_LOCKED_MODEL,
+    effort: PI_LOCKED_EFFORT,
     piEnv: spec.extras?.piEnv as PiEnvProfile | undefined,
   };
 }

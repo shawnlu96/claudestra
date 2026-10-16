@@ -19,6 +19,8 @@ import { agentRuntime, readActiveAgents, type AgentRuntime } from "./registry.js
 import { REPO_ROOT } from "./repo-root.js";
 import { readSkillMd } from "./skills.js";
 
+import { legacyManager } from "./floka-config/values.js";
+
 type SkillRuntime = AgentRuntime;
 type SkillScope = "personal" | "project" | "plugin" | "synced" | "system" | "shared";
 
@@ -43,7 +45,7 @@ export interface LibrarySkill {
   /** 目录是软链时指向哪（真实路径） */
   linkTarget: string | null;
   /** 谁在管这个技能：软链进本仓库 skills/ = claudestra；进 CC Switch / ~/.agents 的主副本 = cc-switch */
-  managedBy: "claudestra" | "cc-switch" | null;
+  managedBy: "claudestra" | "floka" | "cc-switch" | null;
   userInvocable: boolean;
   modelInvocable: boolean;
   /** 同名被谁盖过（只按 Claude Code 官方规则判）；undefined = 生效 */
@@ -153,6 +155,7 @@ const CC_RANK: Partial<Record<SkillScope, number>> = { personal: 3, project: 2 }
 export function markShadowing(skills: LibrarySkill[]): LibrarySkill[] {
   const groups = new Map<string, LibrarySkill[]>();
   for (const s of skills) {
+    s.managedBy = legacyManager(s.managedBy);
     const k = `${s.runtime}|${s.name}`;
     groups.set(k, [...(groups.get(k) ?? []), s]);
   }

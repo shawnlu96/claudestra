@@ -46,6 +46,8 @@ import type { AdapterDeps } from "./worker-ports.js";
 import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSession, type WorkOrder } from "./worker-session.js";
 import { ghPrState } from "./scheduler-merge-handoff-tick.js";
 import { withSchedulerV2Intents } from "./scheduler-v2-intent.js";
+import { handbackReviewDir } from "./pm-handback-review-dir.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -68,13 +70,16 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * git subprocess runs through `git` (checked before the spawn and after the exit), and a bridge frame asks `alive` in the
  * same synchronous block as the send.
  */
-interface Env extends LocalAuthorEnv, ReviewHeadEnv { lendAuthor?: LendAuthorDeps; alive: StillActive; rebuild?: AuthorRebuildDeps; notify: (task: LedgerTask, text: string) => Promise<void> }
+interface Env extends LocalAuthorEnv, ReviewHeadEnv {
+  lendAuthor?: LendAuthorDeps; alive: StillActive; rebuild?: AuthorRebuildDeps; notify: (task: LedgerTask, text: string, level: PmNoticeLevel) => Promise<void>;
+}
 const checkoutOf = (env: Env, taskId: string): string => reviewCheckoutDir(env.worktreeRoot, taskId);
 
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
   const author = boundRef(db, task.id, "author");
-  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? lendProjectDir(env, task); // no network: a reused checkout is checked for tracked edits before any fetch
+  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? lendProjectDir(env, task)
+    ?? handbackReviewDir(env, task); // PMHAND1 9补2: own-repo card → project repoDir. no network: a reused checkout is checked for tracked edits before any fetch
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
   const checkout = checkoutOf(env, task.id), reuse = existsSync(checkout);
   const absent = task.headSHA ? await prepareReviewHead(env, task, task.headSHA, reuse ? checkout : authorDir, reuse) : null;
@@ -150,7 +155,7 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   if ("manual" in first) return first;
   const dir = first.dir;
   if (!head) return { manual: "派审意图没有 head" };
-  const missing = await peerPrHeadMissing(task, head, env.git);
+  const missing = await peerPrHeadMissing(task, head, env.git, undefined, env.net); // SELFHEAL1: under selfHealBeforeManual on, one bounded refs/pull fetch first
   if (missing) return { manual: missing };
   const absent = await prepareReviewHead(env, task, head, dir, true);
   if (absent) return { manual: absent };
@@ -230,7 +235,7 @@ export interface AutoDepsOpts {
   /** Tests only: the author rebuild's policy / swap reading (scheduler-author-rebuild.ts). */ rebuild?: AuthorRebuildDeps;
   lendAuthor?: LendAuthorDeps;
   /** Tests only: `manager create` in place of the real child process (still behind localCreateGuard). */ create?: Manager;
-  /** Tests only: the PM notice channel in place of the bridge (notifyProjectPm). */ notifyPm?: (task: LedgerTask, text: string) => Promise<void>;
+  /** Tests only: the PM notice channel in place of the bridge (notifyProjectPm). */ notifyPm?: (task: LedgerTask, text: string, level: PmNoticeLevel) => Promise<void>;
 }
 
 export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDeps {
@@ -240,7 +245,7 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
-  const notify = opts.notifyPm ?? ((task: LedgerTask, text: string) => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive }));
+  const notify = opts.notifyPm ?? ((task: LedgerTask, text: string, level: PmNoticeLevel) => notifyProjectPm(db, task.project, text, { fromName: "scheduler", level, stillActive: alive }));
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
     net: (args) => whileOwned(active, () => netGit(args)), readConfig,
     create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild, lendAuthor: opts.lendAuthor, notify };

@@ -1,3 +1,5 @@
+import { openMergeQueueOwner } from "./merge-queue-owner-context.js";
+import { priorityStallTick } from "./ledger-priority-stall-tick.js";
 /**
  * One service pass = merge + observe + auto under a single maintenance lease, the same one `update` takes: while an
  * update holds it the whole pass is skipped, never just the merge part. The lease, the stop signal and the singleton lock
@@ -11,7 +13,7 @@
 import type { Database } from "bun:sqlite";
 import { autoTickDeps } from "./scheduler-auto-deps.js";
 import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { prMergeOff, type SchedulerConfig } from "./scheduler-config.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
 import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
@@ -24,6 +26,7 @@ import { mainCiPass } from "./scheduler-main-ci-wiring.js";
 import { ciQueueFullStep } from "./scheduler-ci-queue-full.js";
 import { openCiProofGate } from "./scheduler-ci-proof-gate.js";
 import { openCiLogPerJob } from "./scheduler-merge-ci-log-read.js";
+import { ciMainFixRetryStep } from "./ci-main-fix-retry-tick.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
@@ -38,6 +41,7 @@ import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
 import { peerPrStep } from "./peer-pr-tick.js";
+import { remoteReviewStep } from "./remote-review-tick.js";
 import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.js";
 import { lendTakeoverStep } from "./lend-pr-takeover.js";
 import { takeoverGh } from "./lend-pr-takeover-gh.js";
@@ -47,6 +51,7 @@ import { lifecycleStep } from "./agent-lifecycle-deps.js";
 import { lockYieldStep } from "./scheduler-lock-yield-deps.js";
 import { schedulerV2PassManager, schedulerV2PassPace } from "./scheduler-v2-pass.js";
 import { schedulerV2SkipAutoDeps, schedulerV2SkipManager } from "./scheduler-v2-skip.js";
+import { flushPrioritySamples } from "./scheduler-priority-order-record.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -140,13 +145,13 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   const done = (): PassResult => { (opts.log ?? console.log)(clock.line(waits.note())); return { ran: true, failed }; };
   try {
     if (config.enabled) {
-      if (!db) throw new Error("scheduler enabled but ledger is unavailable");
+      if (!db) throw new Error("scheduler enabled but ledger is unavailable"); failed.push(...await priorityStallTick(db, config, { manager, active }));
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
-      if (cut("peerPr")) return done();
-      // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
-      const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
+      failed.push(...await remoteReviewStep(db, config, { manager, active })); if (cut("peerPr")) return done(); // 仓库方审查结论入账（RRL-1）
+      // mergeHandoff (MHO1) and localMerge (ONB-2) projects merge no PR here: they never reach the train or the slot reclaim
+      const trains = opts.train?.store, prMerging = Object.keys(config.projects).filter((p) => !prMergeOff(config.projects[p]!));
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
-      const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
+      openMergeQueueOwner(db, config, opts.recoveryPolicy, trains); const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
       await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
       // GATE1 证明闸：本轮的模式、只读 GitHub 端口与观察记录写口；合并 external 被替换时（测试世界）不接真 gh，闸不开
       openCiProofGate(db, config, opts.recoveryPolicy, opts.external ? undefined : guard(active, runBounded), manager, active);
@@ -154,12 +159,12 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (cut("mainCi")) return done();
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
-      await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
+      await trainTick(db, trainProjects(db, prMerging, trains, manual.blocks), active, manual.formFence);
       if (cut("train")) return done();
       const external = opts.external ?? ((p: SchedulerConfig["projects"][string]) => mergeExternal(p, guard(active, runBounded)));
       failed.push(...await ciQueueFullStep(db, config, { manager, external, active, command: guard(active, runBounded), policy: opts.recoveryPolicy, pace: pace.phase() }));
       if (cut("ciQueueFull")) return done(); await mergeTick(db, config, manager, external, active, pace.phase(), trains);
-      if (cut("merge")) return done();
+      if (cut("merge")) return done(); failed.push(...await ciMainFixRetryStep(db, config, manager, active, opts.recoveryPolicy, !opts.external && guard(active, runBounded)));
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());
@@ -167,14 +172,14 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       failed.push(...(await deployReconcileTick(db, config, { manager, assertActive: active, now: Date.now, policy: opts.recoveryPolicy }, pace.phase())));
       if (cut("reconcile")) return done();
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
-      const reclaim = await reclaimLentSlots(db, localMerge, manager, trains); failed.push(...reclaim.failed);
+      const reclaim = await reclaimLentSlots(db, prMerging, manager, trains); failed.push(...reclaim.failed);
       if (cut("reclaim")) return done();
       // MERGEFAST2/3：直接合开着时，本轮 mergeTick 之后才拿到槽的卡同轮再推一次，每轮最多一次：取回的、人工认领的（都记进 late，
       // 认领时运行已 begin，查询看不到）、auto tick 刚计划的（意图还没有运行，mergeAgain 自己查）
       let again = false;
       const late = [...reclaim.reclaimed];
       const mergeNow = async () => {
-        if (again || !mergeAgain(db, localMerge, late, opts.recoveryPolicy ?? recoveryPolicy)) return;
+        if (again || !mergeAgain(db, prMerging, late, opts.recoveryPolicy ?? recoveryPolicy)) return;
         again = true;
         await mergeTick(db, config, manager, external, active, pace.phase(), trains);
       };
@@ -203,7 +208,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         failed.push(...(await (opts.lockYield ?? lockYieldStep)(db, config, manager, deps.notifyPm, opts.recoveryPolicy))); // RLOCK2：先于 auto tick，让出的锁同轮可拿
         if (cut("lockYield")) return done();
         const autoPace = pace.phase();
-        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace, mergeNow)).failed); // 合并卡计划完当场推（mergeNow）
+        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace, mergeNow)).failed); await flushPrioritySamples(manager, db); // mergeNow 当场推；PRIO2 样本
         if (cut("auto")) return done();
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
         if (cut("autostart")) return done();

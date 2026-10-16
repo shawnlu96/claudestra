@@ -109,7 +109,7 @@ async function check(page: Page, scene: string) {
     expect(await page.getByText("已发布", { exact: true }).count()).toBe(0);
     await page.getByText("缓存状态：已提交，待项目 owner 批准").waitFor();
   }
-  if (scene === "published") await page.getByText("中心 feature feature-7f3a · v1").waitFor();
+  if (scene === "published") await page.getByText("中心模块 feature-7f3a · v1").waitFor();
   if (scene === "owner" || scene === "reject") {
     expect(await approve(page, "网页提案表单与审批卡").isEnabled()).toBe(true);
     for (const t of ["已漂移的提案", "已过期的提案"]) expect(await approve(page, t).isDisabled()).toBe(true);

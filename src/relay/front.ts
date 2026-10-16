@@ -14,6 +14,10 @@ import {
   filterMachineRequestHeaders, filterMachineResponseHeaders, MACHINE_PREFIX, parseMachinePath, RELAY_MODE_API, RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, RELAY_SAME_NET_HEADER, type MachinePath,
 } from "../lib/relay-machine-path.js";
 import { readBuildInfo, resolveExportedPath, staticResponse } from "../lib/static-site.js";
+import type { CenterOptions } from "../lib/floka-center/center.js";
+import { parseCenterRename } from "../lib/floka-center/gear.js";
+import { RELAY_FAMILIES } from "../lib/floka-compat/relay/families.js";
+import type { RelayGear } from "../lib/floka-compat/relay/gear.js";
 import type { InstanceRecord } from "./directory.js";
 import { forwardedClientIp, ipLimitKey, KeyedWindows } from "./limiter.js";
 import { homePage, invitePage, offlinePage, tooManyPage } from "./pages.js";
@@ -49,6 +53,8 @@ export interface FrontDeps {
   staticDir?: string;
   upgrade(req: Request, srv: Server<ConnData>, ip: string): Response | undefined;
   log: Logger;
+  /** 中心的启动参数（rename 两档，floka-center/gear.ts）：握手只看接收档；缺省 off，与没有兼容层时逐字相同 */
+  center?: CenterOptions;
 }
 
 const HSTS = "max-age=31536000";
@@ -80,8 +86,11 @@ export class Front {
   private readonly codeWindows: KeyedWindows;
   private readonly tunnelWindows: KeyedWindows;
   private lastSweep = 0;
+  /** 握手按的接收档；配置问题由 floka-center/center.ts 报（同一份启动参数只报一次），这里不重复报 */
+  private readonly receive: RelayGear;
 
   constructor(private readonly d: FrontDeps) {
+    this.receive = parseCenterRename(d.center?.rename).rename.receive;
     this.codeWindows = new KeyedWindows(d.limits.codeLookupPerIpPerMinute);
     this.tunnelWindows = new KeyedWindows(d.limits.tunnelPerIpPerMinute);
   }
@@ -133,9 +142,19 @@ export class Front {
     return withHsts(Response.json(body, { headers: { "cache-control": "no-store" } }));
   }
 
+  /**
+   * 握手按中心的接收档：off 只认旧族（与没有兼容层时逐字相同）；observe 接受范围不变，只提新族的照样 426、另记一条；
+   * on 两族都认。回选哪一族由 upgrade 里的 centerSubprotocol 定（一条连接只属于一族，两族并提时按它的协商规则）。
+   */
   private ws(req: Request, srv: Server<ConnData>): Response | undefined {
     const protos = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map((s) => s.trim());
-    if (!protos.includes(SUBPROTOCOL)) return text(426, `subprotocol ${SUBPROTOCOL} required`);
+    if (!protos.includes(SUBPROTOCOL)) {
+      const floka = protos.includes(RELAY_FAMILIES.floka.subprotocol);
+      if (!floka || this.receive !== "on") {
+        if (floka && this.receive === "observe") this.d.log("info", "center observe: 客户端只提议了新族子协议，开到 on 会认成 floka（现在仍按 426 拒）");
+        return text(426, `subprotocol ${SUBPROTOCOL} required`);
+      }
+    }
     return this.d.upgrade(req, srv, this.clientIp(req, srv));
   }
 

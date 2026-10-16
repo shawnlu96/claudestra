@@ -9,6 +9,7 @@ import { listEvents } from "../src/lib/ledger-store.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { HANDOFF_POLL_MS, type HandoffPr } from "../src/lib/scheduler-merge-handoff-tick.js";
+import { pmNoticeLevel } from "../src/lib/pm-notice-level.js";
 import { autoFixture, H1, H2, P2, toBuild } from "./scheduler-auto-helpers.js";
 
 const PR = "https://github.com/example/repo/pull/7";
@@ -25,9 +26,10 @@ async function handoffFixture() {
   await f.review("pass", H1, [P2]);
   expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   let pr: HandoffPr | Error = { state: "OPEN", head: H1, mergeSha: null };
-  const reads: string[] = [];
+  const reads: string[] = [], levels: string[] = [];
   const hand = async () => {
     const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps,
+      notifyPm: async (t, text, level) => { levels.push(pmNoticeLevel.getStore() ?? "none"); await f.tickDeps.notifyPm(t, text, level); },
       prState: async (ref) => { reads.push(ref); if (pr instanceof Error) throw pr; return pr; } });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
@@ -35,7 +37,7 @@ async function handoffFixture() {
   const handoffs = () => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "merge_handoff");
   const mergeIntents = () => f.intents().filter((i) => i.action === "merge");
   const mergeSlot = () => f.db.query("SELECT * FROM scheduler_resources WHERE resource = 'merge:p'").all();
-  return { f, hand, reads, handoffs, mergeIntents, mergeSlot, setPr: (p: HandoffPr | Error) => { pr = p; } };
+  return { f, hand, reads, levels, handoffs, mergeIntents, mergeSlot, setPr: (p: HandoffPr | Error) => { pr = p; } };
 }
 
 describe("MHO1 merge handoff (auto tick)", () => {
@@ -49,6 +51,7 @@ describe("MHO1 merge handoff (auto tick)", () => {
       expect(ev!.data).toEqual({ op: "merge_handoff", evidence: { v: 1, pr: PR, head: H1, specRev: 1, template: "code", authorFamily: "claude",
         review: { round: 1, verdict: "pass", reviewerFamily: "codex", reportPath: "reviews/T1-r1/report.md", p2: 1, reviewSeq: review.seq } } });
       expect(f.notices.at(-1)).toContain(`T1 审查通过，合并交给仓库方：${PR}`);
+      expect(h.levels.at(-1)).toBe("info"); // 交接进度只记卡片
       expect(h.mergeIntents()).toEqual([]);
       expect(h.mergeSlot()).toEqual([]);
 
@@ -67,6 +70,7 @@ describe("MHO1 merge handoff (auto tick)", () => {
       const moved = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.kind === "stage")!;
       expect(moved).toMatchObject({ actor: "scheduler", data: { from: "merge", to: "live", head: H1, mergeSha: M, handoffSeq: ev!.seq } });
       expect(f.notices.at(-1)).toContain("已由仓库方合并");
+      expect(h.levels.at(-1)).toBe("none"); // 落地要 PM 本机跟上 main 再 verify：照常推送
       expect(await h.hand()).toMatchObject({ step: "waiting", detail: "verify 由合并队列 / 收尾步骤（scheduler-retire.ts）处理" });
       expect(h.mergeIntents()).toEqual([]);
       expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");

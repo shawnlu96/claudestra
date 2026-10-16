@@ -71,9 +71,9 @@ function restartButton(onDone: () => void): HTMLButtonElement {
 
 function notInstalled(inst: Install): HTMLElement {
   const why = inst.has_checkout
-    ? t(`在 ${inst.repo} 找到了 Claudestra，但还没装好后台服务，或者版本比这个小程序旧。`,
-      `Found Claudestra at ${inst.repo}, but its services aren't set up yet, or it's older than this app.`)
-    : t("这台电脑上还没有 Claudestra。", "Claudestra isn't installed on this Mac yet.");
+    ? t(`在 ${inst.repo} 找到了 Floka，但还没装好后台服务，或者版本比这个小程序旧。`,
+      `Found Floka at ${inst.repo}, but its services aren't set up yet, or it's older than this app.`)
+    : t("这台电脑上还没有 Floka。", "Floka isn't installed on this Mac yet.");
   return h("section", { class: "card empty-state" }, h("h3", {}, t("还没装好", "Not set up yet")), h("p", {}, why),
     button(t("去安装", "Go to setup"), "download", () => show("setup"), "primary"));
 }
@@ -95,7 +95,7 @@ function buildStatusView(): { list: HTMLElement; facts: HTMLElement } {
   pages.status.replaceChildren(
     h("section", { class: "card" }, h("h3", {}, t("后台服务", "Services")), list),
     h("div", { class: "actions" },
-      button(t("打开 Claudestra 网页", "Open Claudestra"), "globe", () => act("open_web"), "primary"),
+      button(t("打开 Floka 网页", "Open Floka"), "globe", () => act("open_web"), "primary"),
       restartButton(() => void refreshStatus()),
       button(t("打开日志目录", "Open log folder"), "folder", () => act("open_logs")),
       button(t("体检", "Health check"), "stethoscope", () => show("doctor"))),
@@ -148,7 +148,7 @@ async function boot(): Promise<void> {
     return b;
   }));
   document.body.replaceChildren(
-    h("header", { class: "top" }, h("h1", {}, "Claudestra"), pill, h("span", { class: "version" }, `v${info.version}`)),
+    h("header", { class: "top" }, h("h1", {}, "Floka"), pill, h("span", { class: "version" }, `v${info.version}`)),
     nav,
     notice,
     h("main", {}, ...Object.values(pages)));

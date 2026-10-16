@@ -77,6 +77,61 @@ large to compare or a project without `repoDir` go to PM as before.
 The owner's own approval of the new head is not read: merging is that approval, and GitHub reviews / checks would not say
 whether this machine's review still covers the PR — the merge check does.
 
+## The owner's review pushes (RRL-1)
+
+The owner's scheduler reviews a handed-over PR too and pushes the result to our PM as a plain message (`renderReviewPush`,
+or its redelivery). With `"handoffPeer": "<peers.json name>"` on the project, those pushes are booked by the scheduler
+instead of starting a PM turn:
+
+| Step | Where | What |
+|---|---|---|
+| Intake | `bridge/remote-review-intake.ts` (hook in `api-routes.ts` messages route) | Taken only if the peer token's peer is `handoffPeer`, the text parses strictly and the read-only ledger has exactly one card with that PR number whose PM is the addressee. Raw text → `ledger/remote-review-inbox/`, one mirror line, 202. The same report id + head already booked or still waiting → 202 `duplicate: true`, nothing stashed. An `ambiguous` (old-format redelivered) P1 is never taken: every copy is delivered to PM as before (a retry after a failed delivery too); the first is also stashed for the record. Anything else (or any error) → delivered to PM as before. |
+| Parse | `lib/remote-review-parse.ts` | Round trip: parsed fields are rendered again with the same render code and must equal the text byte for byte; ≤ 64 KiB. The reply-to line is never read; the report is kept whole as data. A redelivery (`renderRedeliveryPush`) replaces the next step with 现状; a P1 keeps a cap line (`CAP_MARK`) so it reads as the original. The old format without it still parses; a P1 in it is `ambiguous`. |
+| Book | `remote-review-tick.ts` → `ledger scheduler-remote-review <card> --inbox <file>` | Re-reads and re-checks everything, then in one transaction: report copy `ledger/reviews/<card>-remote-PR<n>-r<r>.md` (sanitised, every line quoted), one `remote_review` event (parsed fields only; dedup = report id + head12, so a resend is a duplicate). |
+| Head | `remoteHeadMatch` | Counts only as a prefix of the card's head (in merge also of the head the handoff follows); otherwise `matched: false`, no effect yet. When the card later reaches that head the tick applies it once (`--apply`, a `remote_review_applied` event, same actions); Only the current word on a head acts (`remoteCurrentAt`: highest round, later on a tie); an outranked booking — at intake or before a late apply, rechecked inside the write — is marked `supersededBy` and never runs its action. P1 consumers use `remoteP1At` (the current word when it is a P1 to fix). A stale review never applies. |
+| Act | `recordRemoteReview` / `applyLateRemote` | P0 / P1 with the owner's rounds used up → an auto card goes manual + one PM notice (report path); P1 on a non-auto card → one short notice; an `ambiguous` P1 (`capUnknown`) → booked only (PM already has it), the card is not touched and `remoteP1At` leaves it out; P1 on an auto card → left to the bounce step; pass → event only. Notices are sent by the tick and marked (`--notified`). |
+
+A refused inbox file moves to `remote-review-inbox/failed/` and PM is told where it is. Tests: `tests/remote-review-intake-*.test.ts`.
+
+Known limits of the booking: an old-format redelivered P1 (no cap mark) cannot tell whether the owner's rounds are used up, so it
+always goes to PM through the normal delivery, is only booked and never changes the card; when the sender retries a failed delivery,
+PM may see the same raw text a few times (it is never booked twice, never moves the card, never raises an owner card). Once both
+sides run the cap-marked format, old-format pushes no longer occur.
+
+## The owner's P1 sends the card back to fix (RRL-2)
+
+| Card | What happens |
+|---|---|
+| auto, in `merge` (before or after the handoff) | `driveHandoff` first asks `pendingRemoteBounce` (`lib/remote-review-bounce.ts`): the current owner word, when it is a P1 (`remoteP1At`) not bounced yet, on the head the handoff follows once handed over (after a carry the card's own head is an old PR head: a late review of it never acts), or on the card's head before — and only on a PR just read `OPEN` at that very head. While such a P1 waits, the once-a-minute poll pace is skipped, so it is read and acted on in the very next pass. A `MERGED` PR at that head with the P1 unhandled goes to PM with the report path (never a silent `live`), before any wait for the merge commit or the landing proof; `CLOSED`, or a PR that moved off the head, escalates through the rows above — no fix could be delivered to either. Then `ledger scheduler-merge-handoff <task> --head --pr --remote-bounce <seq>` moves merge → fix in one transaction: a stage event whose `mergeBounce` is `{cause: "remote_review", prHead, remote: {seq, reportId, reportPath, p1}}` and one `remote_bounce` event (dedup per booking, so a replay is a duplicate). PM gets one info-level line. |
+| — the head was written by a lender, or this would be the owner's 4th bounce | no bounce: the card goes manual (`scheduler-fallback-manual`) with one PM notice naming the report path. Owner bounces are counted on their own (stage events), apart from the merge queue's `merge_conflict` count. |
+| in `fix` after such a bounce | the planner's bounce package carries it, so the dispatch and `take_order` name the report and P1 count; acceptance: fix each P1 in the report, push to this PR branch, deliver the new head. Not a review P1: no findingIds, so it never counts toward P1 streaks or fix_swap. |
+| in `review` after that fix | the review order gets one line: targeted re-review of whether the owner's report's P1 are fixed. Passing goes to `merge` and hands over again (a new `merge_handoff` record for the new stay). |
+| in `build` / `fix` otherwise (incl. a local review P1, a manual card PM moved to fix, or a fix already in a conflict / CI / older remote bounce) | the order carries the current owner report on the card's head (`remoteFixWork`, `lib/remote-review-current.ts`) after whatever it already has; the report a remote bounce already names is not repeated. Local review P1 + owner P1 = both reports. |
+| in `review` with a local pass | nothing until `merge`, where the row above bounces it before any handoff. |
+| manual | the booking's one short PM notice (card + report path, no report text); once PM moves it to fix, `take_order` carries the report. |
+
+P0 and a P1 at the owner's cap are handled at booking (above). A pass changes nothing: the handoff waits for the owner as before, and a
+ui card still needs PM's screenshot approval at handoff (`uiMergeRefusal`). Known limit: a report booked for the same head while the
+card is already in fix only shows up in the next `take_order`; a lent fix order names the local report path only, so a lender
+gets no report text (left to a later card). The ledger cannot see GitHub: a PR merged in the moment between the read and the bounce write still goes to fix (known limit: nothing reads the PR of a card in fix, so the author finds it merged and asks PM). Tests: `tests/remote-review-bounce.test.ts`.
+
+## Draft until the handoff (RRL-3)
+
+On a `mergeHandoff` project the exec prompt (`lib/dag-tools-prompt.ts`, rendered by `start_node`, the scheduler's autostart and the
+author rebuild) asks for a **draft** PR (`gh pr create --draft`); other PR projects are unchanged, since our own merge train's
+`gh pr merge` cannot merge a draft. The owner's queue skips drafts, so it does not review heads this machine has not reviewed yet.
+`ghPrRead` reads `isDraft`; `ghPrState` runs `gh pr ready` on a draft read `OPEN` at the followed head (handed over only, never
+on a moved head). `driveHandoff` reads a draft once more right after the `merge_handoff` record, so it turns ready in the same
+pass. A refusal never holds the handoff: it shows in the tick detail and every later poll of a handed-over draft tries again.
+An owner P1 sending the card back to fix first makes the PR a draft again (`want: "draft"` → `gh pr ready --undo`), so the
+owner's queue cannot review the fix's heads before this machine has; a refused undo holds the bounce (the card stays in `merge`,
+retried on every pass while the P1 is pending) and the next handoff turns it ready again. While that P1 is pending the handed-over
+PR's first read of a pass already asks for the draft, so a pass retrying a refused bounce write never turns it ready first. Inside
+`ghPrState` every successful undo is followed by a fresh `gh pr view`, returned (`flipped`) instead of the view from before it, so
+no caller acts on a pre-undo snapshot: the bounce needs that fresh view `OPEN` at the P1's head; closed or moved, nothing is bounced
+on the old head and the PR goes through the handoff's own roads (at once when the pass's first read undid, else the next pass).
+A PR whose draft state gh did not report is bounced as before, untouched.
+
 ## The local merge paths a handoff project never reaches
 
 - **Merge intent**: the auto tick never plans one (`driveHandoff` replaces it); an open one is escalated, not queued.

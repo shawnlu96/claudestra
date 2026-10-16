@@ -19,12 +19,15 @@ export function conclusionOf(v: VerdictCounts): string {
   return v.p2 > 0 ? `通过，留 ${v.p2} 个 P2` : "通过";
 }
 
+/** The two next steps of a P1 push: below the owner's round cap / at it. The redelivery keeps which one it was (peer-pr-retry.ts). */
+export const P1_STEP = {
+  fix: "修在本 PR 的分支上直接 push，调度器看到新 head 会自动派原审查会话复验。",
+  cap: "复验轮次已到上限，已转 PM；先别推，等 PM 联系。",
+} as const;
+
 export function nextStepOf(v: VerdictCounts, maxRounds: number): string {
   if (v.p0 > 0 || v.verdict === "block") return "已转 PM，先别推。";
-  if (v.p1 > 0) {
-    return v.round < maxRounds ? "修在本 PR 的分支上直接 push，调度器看到新 head 会自动派原审查会话复验。"
-      : "复验轮次已到上限，已转 PM；先别推，等 PM 联系。";
-  }
+  if (v.p1 > 0) return v.round < maxRounds ? P1_STEP.fix : P1_STEP.cap;
   return "已进合并队列，CI 绿了自动合并并部署；别再往这个分支推，P2 另开 PR。";
 }
 
@@ -60,12 +63,12 @@ export function renderBouncePush(n: number, b: BounceFacts, replyTo: string): st
   const head = b.prHead.slice(0, 12);
   const body = b.cause === "update_fail"
     ? [`[Claudestra 调度器 · PR #${n}] 合并前更新分支失败，没能自动合入 main，请合入最新 main 后推送（head ${head}）`,
-      "推到本 PR 的分支后，调度器会派审查会话定向复验，只看合入 main 的合并提交。"]
+      "推到本 PR 分支即可。顺带的代码改动会一并复验，不用另外告知，也不用回复。"]
     : b.cause === "conflict"
     ? [`[Claudestra 调度器 · PR #${n}] 和 main 冲突，请合入最新 main 后推送（head ${head}）`,
-      "推到本 PR 的分支后，调度器会派审查会话定向复验，只看解冲突的合并提交。"]
+      "推到本 PR 分支即可。顺带的代码改动会一并复验，不用另外告知，也不用回复。"]
     : [`[Claudestra 调度器 · PR #${n}] 合并前 PR 头 CI 失败（head ${head}），请看日志修好后推送`,
       ...(b.checks.length ? b.checks.map((c) => `失败的检查：${c.name}${c.link ? `（${c.link}）` : ""}`) : ["失败的检查：（回执里没写名字，请看 PR 的检查页）"]),
-      "推到本 PR 的分支后，调度器会派审查会话定向复验，只看修 CI 的改动。"];
-  return [...body, `有问题回：${replyTo}`].join("\n");
+      "推到本 PR 分支即可。顺带的代码改动会一并复验，不用另外告知，也不用回复。"];
+  return [...body, `卡住了再回：${replyTo}`].join("\n");
 }

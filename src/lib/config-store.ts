@@ -6,10 +6,13 @@
  */
 
 import { normalizeCompactKeep } from "./ctx-boundary-policy.js";
-import { STATE_DIR, CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
-import { readJsonState, readJsonStateSync, reportCorrupt, writeJsonStateGuarded, type StateRead } from "./state-file.js";
+import { CONFIG_PATH as STATE_CONFIG_PATH } from "./paths.js";
+import { readJsonState, readJsonStateSync, reportCorrupt, type StateRead } from "./state-file.js";
 
-const CONFIG_DIR = STATE_DIR;
+import { readAutoUpdateValue as autoUpdateValue } from "./floka-config/values.js";
+import { configView, writeCompatibleConfig } from "./floka-config/store.js";
+import { retryConfigWrite } from "./floka-config/retry.js";
+import type { ConfigConflict } from "./floka-config/values.js";
 const CONFIG_PATH = STATE_CONFIG_PATH;
 
 export type AppLang = "zh" | "en";
@@ -17,8 +20,10 @@ export type AppLang = "zh" | "en";
 export type UpdateChannel = "release" | "beta";
 
 export interface AppConfig {
+  /** Read diagnostics only; non-enumerable and never persisted by a setter. */
+  readonly configConflicts?: readonly ConfigConflict[];
   autoUpdate: {
-    claudestra: boolean;
+    claudestra: boolean; floka?: boolean;
     claudeCode: boolean;
     /** Codex（npm 全局）：缺省（不写）= 关，别的安装不会被突然动到；开了由 launcher 轮询，兼容且全员空闲才升（lib/codex-auto-update.ts） */
     codex?: boolean;
@@ -71,7 +76,7 @@ export interface AppConfig {
   talkEnabled?: boolean;
   /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
   peerRelayJoinStrict?: boolean;
-  /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 observe）；launcher 每轮现读 */
+  /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 on；observe / off 要显式设置）；launcher 每轮现读 */
   bridgeWatchdog?: "on" | "observe" | "off";
   bridgeWatchdogDiag?: "on" | "observe" | "off"; // 卡住时抓现场，缺省 on（lib/bridge-watchdog-diag.ts）
   bridgeWatchdogOob?: "on" | "observe" | "off"; // 卡住 / 恢复的带外通知，缺省 on（lib/bridge-watchdog-oob.ts）
@@ -81,7 +86,12 @@ export interface AppConfig {
   jevApiKey?: string;
   /** Chat Guard（bridge/chat-guard.ts）：mode 缺省 on（没配 Jev key 时自然不生效）；blockAt 缺省 0.85 */
   chatGuard?: { mode?: "off" | "on"; blockAt?: number };
+  /** floka 改名的分项开关；state = 状态根迁移维护档位（lib/state-maintenance），只认 off / observe / on，缺省和未知值按 off。
+   *  其余子键原样保留：set* 是读改写，在这里过滤会把别的分项抹掉 */
+  rename?: Record<string, unknown> & { state?: unknown };
 }
+
+export type RenameStateMode = "off" | "observe" | "on";
 
 /** 归档保留天数缺省值（设置里可改） */
 export const DEFAULT_ARCHIVE_RETENTION_DAYS = 90;
@@ -97,9 +107,9 @@ const DEFAULT_CONFIG: AppConfig = {
 function merge(base: AppConfig, raw: any): AppConfig {
   if (!raw || typeof raw !== "object") return base;
   const au = raw.autoUpdate || {};
-  return {
+  return configView(raw, {
     autoUpdate: {
-      claudestra: typeof au.claudestra === "boolean" ? au.claudestra : base.autoUpdate.claudestra,
+      claudestra: autoUpdateValue(au, base.autoUpdate.claudestra),
       claudeCode: typeof au.claudeCode === "boolean" ? au.claudeCode : base.autoUpdate.claudeCode,
       ...(typeof au.codex === "boolean" ? { codex: au.codex } : {}),
       channel: au.channel === "beta" ? "beta" : "release",
@@ -130,6 +140,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(raw.bridgeWatchdogOob === "on" || raw.bridgeWatchdogOob === "observe" || raw.bridgeWatchdogOob === "off" ? { bridgeWatchdogOob: raw.bridgeWatchdogOob } : {}),
     ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
     ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
+    ...(raw.rename && typeof raw.rename === "object" && !Array.isArray(raw.rename) ? { rename: { ...raw.rename } } : {}),
     ...(raw.chatGuard && typeof raw.chatGuard === "object"
       ? {
           chatGuard: {
@@ -138,7 +149,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
           },
         }
       : {}),
-  };
+  });
 }
 
 function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
@@ -219,131 +230,104 @@ export function readConfigSync(): AppConfig {
  * 0600：里面有 API key（Groq / Jev），不给本机其他用户读；rename 覆盖后旧文件的 0644 也随之收紧。
  */
 export async function writeConfig(cfg: AppConfig): Promise<void> {
-  await writeJsonStateGuarded(CONFIG_PATH, cfg, { mode: 0o600 });
+  await writeCompatibleConfig(CONFIG_PATH, cfg);
+}
+
+/** Replay only the requested edit, so concurrent unrelated settings survive the single retry. */
+function editConfig(edit: (cfg: AppConfig) => void): Promise<AppConfig> {
+  return retryConfigWrite(async () => {
+    const cfg = await readConfig();
+    edit(cfg);
+    await writeConfig(cfg);
+    return cfg;
+  });
 }
 
 /** 设置归档保留天数（0 = 永不自动清理） */
 export async function setArchiveRetention(days: number): Promise<AppConfig> {
-  const cfg = await readConfig();
-  const n = Number.isFinite(days) && days >= 0 ? Math.floor(days) : DEFAULT_ARCHIVE_RETENTION_DAYS;
-  cfg.archiveRetentionDays = n;
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => {
+    const n = Number.isFinite(days) && days >= 0 ? Math.floor(days) : DEFAULT_ARCHIVE_RETENTION_DAYS;
+    cfg.archiveRetentionDays = n;
+  });
 }
 
 /** Codex 子线程自动归档开关（manager codex-sub-archive on|off） */
 export async function setAutoArchiveCodexSubs(enabled: boolean): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.autoArchiveCodexSubs = enabled;
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.autoArchiveCodexSubs = enabled; });
 }
 
 export async function setUpdateChannel(channel: UpdateChannel): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.autoUpdate.channel = channel;
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.autoUpdate.channel = channel; });
 }
 
-export async function setAutoUpdate(target: "claudestra" | "claudeCode" | "codex", enabled: boolean): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.autoUpdate[target] = enabled;
-  await writeConfig(cfg);
-  return cfg;
+export async function setAutoUpdate(target: "claudestra" | "floka" | "claudeCode" | "codex", enabled: boolean): Promise<AppConfig> {
+  return editConfig(cfg => { cfg.autoUpdate[target === "floka" ? "claudestra" : target] = enabled; });
 }
 
 export async function setLang(lang: AppLang): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.lang = lang;
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.lang = lang; });
 }
 
 export async function setStatsDashboard(channelId: string, messageId: string): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.statsDashboard = { channelId, messageId };
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.statsDashboard = { channelId, messageId }; });
 }
 
 export async function setAutoCompactIdleHours(hours: number): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.autoCompact = { ...cfg.autoCompact, idleHours: hours };
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.autoCompact = { ...cfg.autoCompact, idleHours: hours }; });
 }
 
 /** v2.20.2+ 设置界面写入口:一次可改阈值/闲置时长任意子集。 */
 export async function setAutoCompact(patch: { window?: number; idleHours?: number; emergency?: boolean; inject?: boolean }): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.autoCompact = {
-    ...cfg.autoCompact,
-    ...(typeof patch.window === "number" ? { window: patch.window } : {}),
-    ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
-    ...(typeof patch.emergency === "boolean" ? { emergency: patch.emergency } : {}),
-    ...(typeof patch.inject === "boolean" ? { inject: patch.inject } : {}),
-  };
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => {
+    cfg.autoCompact = {
+      ...cfg.autoCompact,
+      ...(typeof patch.window === "number" ? { window: patch.window } : {}),
+      ...(typeof patch.idleHours === "number" ? { idleHours: patch.idleHours } : {}),
+      ...(typeof patch.emergency === "boolean" ? { emergency: patch.emergency } : {}),
+      ...(typeof patch.inject === "boolean" ? { inject: patch.inject } : {}),
+    };
+  });
 }
 
 export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.quotaLive = enabled;
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.quotaLive = enabled; });
 }
 
 export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.pushNoContent = enabled;
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.pushNoContent = enabled; });
 }
 
 export async function setPushAllAsks(enabled: boolean): Promise<AppConfig> {
-  const cfg = { ...(await readConfig()), pushAllAsks: enabled };
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.pushAllAsks = enabled; });
 }
 
 export async function setTalkEnabled(enabled: boolean): Promise<AppConfig> {
-  const cfg = { ...(await readConfig()), talkEnabled: enabled };
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.talkEnabled = enabled; });
 }
 
 export async function setPeerRelayJoinStrict(enabled: boolean): Promise<AppConfig> {
-  const cfg = { ...(await readConfig()), peerRelayJoinStrict: enabled };
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.peerRelayJoinStrict = enabled; });
 }
 
 /** 空串 = 清除 */
 export async function setGroqApiKey(key: string): Promise<AppConfig> {
-  const cfg = await readConfig();
-  if (key) cfg.groqApiKey = key;
-  else delete cfg.groqApiKey;
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => {
+    if (key) cfg.groqApiKey = key;
+    else delete cfg.groqApiKey;
+  });
 }
 
 /** 空串 = 清除（Jev / TypeSafe） */
 export async function setJevApiKey(key: string): Promise<AppConfig> {
-  const cfg = await readConfig();
-  if (key) cfg.jevApiKey = key;
-  else delete cfg.jevApiKey;
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => {
+    if (key) cfg.jevApiKey = key;
+    else delete cfg.jevApiKey;
+  });
 }
 
 /** Chat Guard 开关 / 阈值（设置 → 安全） */
 export async function setChatGuard(patch: { mode?: "off" | "on"; blockAt?: number }): Promise<AppConfig> {
-  const cfg = await readConfig();
-  cfg.chatGuard = { ...cfg.chatGuard, ...patch };
-  await writeConfig(cfg);
-  return cfg;
+  return editConfig(cfg => { cfg.chatGuard = { ...cfg.chatGuard, ...patch }; });
 }
 
 /**
@@ -351,16 +335,29 @@ export async function setChatGuard(patch: { mode?: "off" | "on"; blockAt?: numbe
  * （lang 有缺省值，所以按磁盘上的原始 JSON 判「设过没有」，不能看合并后的配置）。返回哪几项真的搬了。
  */
 export async function adoptWebSettings(web: { groqApiKey?: unknown; lang?: unknown }): Promise<{ groqApiKey: boolean; lang: boolean }> {
-  const r = await readJsonState(CONFIG_PATH);
-  if (r.status === "corrupt") throw new Error(`${CONFIG_PATH} 已损坏，先修好再迁移: ${r.error}`);
-  const raw = (r.status === "ok" && r.data && typeof r.data === "object" ? r.data : {}) as Record<string, unknown>;
-  const cfg = merge(defaults(), raw);
-  const takeKey = typeof web.groqApiKey === "string" && !!web.groqApiKey && typeof raw.groqApiKey !== "string";
-  const takeLang = (web.lang === "zh" || web.lang === "en") && raw.lang !== "zh" && raw.lang !== "en";
-  if (takeKey) cfg.groqApiKey = web.groqApiKey as string;
-  if (takeLang) cfg.lang = web.lang as AppLang;
-  if (takeKey || takeLang) await writeConfig(cfg);
-  return { groqApiKey: takeKey, lang: takeLang };
+  return retryConfigWrite(async () => {
+    const r = await readJsonState(CONFIG_PATH);
+    if (r.status === "corrupt") throw new Error(`${CONFIG_PATH} 已损坏，先修好再迁移: ${r.error}`);
+    const raw = (r.status === "ok" && r.data && typeof r.data === "object" ? r.data : {}) as Record<string, unknown>;
+    const cfg = merge(defaults(), raw);
+    const takeKey = typeof web.groqApiKey === "string" && !!web.groqApiKey && typeof raw.groqApiKey !== "string";
+    const takeLang = (web.lang === "zh" || web.lang === "en") && raw.lang !== "zh" && raw.lang !== "en";
+    if (takeKey) cfg.groqApiKey = web.groqApiKey as string;
+    if (takeLang) cfg.lang = web.lang as AppLang;
+    if (takeKey || takeLang) await writeConfig(cfg);
+    return { groqApiKey: takeKey, lang: takeLang };
+  });
+}
+
+/** rename.state 的生效档位：缺省、未知值、坏文件一律 off（打错字不能变成执行） */
+export function renameStateMode(cfg: AppConfig = readConfigSync()): RenameStateMode {
+  const v = cfg.rename?.state;
+  return v === "observe" || v === "on" ? v : "off";
+}
+
+/** 受控写入：只由 manager state-maintenance mode（核过单次授权与角色）调用；切档本身不触发任何迁移 */
+export async function setRenameStateMode(mode: RenameStateMode): Promise<AppConfig> {
+  return editConfig(cfg => { cfg.rename = { ...cfg.rename, state: mode }; });
 }
 
 export { CONFIG_PATH, DEFAULT_CONFIG };

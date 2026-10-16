@@ -18,6 +18,7 @@ import {
 } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { privatePoolMode } from "./card-repo.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Failed = { taskId: string; error: string }[];
 
@@ -30,14 +31,14 @@ export interface SpecWaitEnv {
   readSpec(taskId: string): SpecFile | null;
   now(): number;
   /** 这一轮的 PM 通知（生产 = notifyProjectPm 带本轮 stillActive：bridge 发帧的同一同步段核存活，停服 / 失租时什么都不发） */
-  notifyPm(project: string, text: string): Promise<void>;
+  notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
   /** 发送：缺省走 notifyPm、目标经 pmNotifyTarget 换成 featurePm；测试替换 */
-  specWaitSend?(db: Database, project: string, to: string, text: string): Promise<void>;
+  specWaitSend?(db: Database, project: string, to: string, text: string, level: PmNoticeLevel): Promise<void>;
 }
 
 /** 也给上线后 PM 提醒（scheduler-post-verify.ts）用 */
-export const sendToPm = (env: SpecWaitEnv, project: string, to: string, text: string) =>
-  env.specWaitSend ? env.specWaitSend(env.db, project, to, text) : pmNotifyTarget.run(to, () => env.notifyPm(project, text));
+export const sendToPm = (env: SpecWaitEnv, project: string, to: string, text: string, level: PmNoticeLevel) =>
+  env.specWaitSend ? env.specWaitSend(env.db, project, to, text, level) : pmNotifyTarget.run(to, () => env.notifyPm(project, text, level));
 
 /** 项目级开关 autostart.specWait（缺省 observe）；上线后 PM 提醒共用 */
 export const specWaitMode = (db: Database, project: string): "on" | "observe" | "off" => readSwitch(db, project).specWait ?? "observe";
@@ -74,7 +75,7 @@ export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
           }
           if (rec.due !== true || mode !== "on") continue;
           try {
-            await sendToPm(env, project, pm, text);
+            await sendToPm(env, project, pm, text, "action"); // 待写规格要 PM 写规格才能往下走
           } catch (e) {
             if (e instanceof SchedulerStopped) throw e;
             failed.push({ taskId: `${f.id}/${key}`, error: `缺规格提醒发给 ${pm} 失败：${(e as Error).message}` });

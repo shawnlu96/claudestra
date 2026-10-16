@@ -2,12 +2,14 @@
  * GitHub Release 工具 — 查询最新 release、版本比较
  */
 
+import { releaseApiUrl, releaseSlugOf } from "./floka-repo/url.ts";
+
 const REPO_ROOT = `${import.meta.dir}/../..`;
 
-/** 从 git remote 解析 GitHub owner/repo */
-export async function getGitHubRepo(): Promise<string | null> {
+/** 从 git remote 解析 GitHub owner/repo（每次现读 origin：仓库转移、origin 迁到新地址后自动跟上，不缓存） */
+export async function getGitHubRepo(cwd = REPO_ROOT): Promise<string | null> {
   const proc = Bun.spawn(["git", "remote", "get-url", "origin"], {
-    cwd: REPO_ROOT,
+    cwd,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -18,10 +20,10 @@ export async function getGitHubRepo(): Promise<string | null> {
   //   https://github.com/owner/repo.git                   (HTTPS)
   //   ssh://git@github.com/owner/repo.git                 (SSH 长)
   //   ssh://git@ssh.github.com:443/owner/repo.git         (SSH over 443，gh CLI 默认配)
-  // 注意：`(?::\d+)?` 必须放在 host 跟分隔符之间，否则 [:/] 会先匹配 ':' 把 port
+  // 注意：端口必须放在 host 跟分隔符之间，否则 [:/] 会先匹配 ':' 把 port
   // 当成 owner（v2.4.6 之前 autoUpdate 在 SSH-443 环境永远失效就栽在这）。
-  const match = url.match(/github\.com(?::\d+)?[:/]([^/]+\/[^/.]+)/);
-  return match ? match[1] : null;
+  // 解析在 floka-repo/url.ts，install.sh 的 sed 与它同义（tests/floka-repo.test.ts 逐条对）。
+  return releaseSlugOf(url);
 }
 
 export interface ReleaseInfo {
@@ -31,13 +33,13 @@ export interface ReleaseInfo {
   body: string;
 }
 
-/** 从 GitHub API 获取最新 release */
-export async function getLatestRelease(): Promise<ReleaseInfo | null> {
-  const repo = await getGitHubRepo();
+/** 从 GitHub API 获取最新 release（cwd / fetchImpl 只给测试注入） */
+export async function getLatestRelease(opts: { cwd?: string; fetchImpl?: typeof fetch } = {}): Promise<ReleaseInfo | null> {
+  const repo = await getGitHubRepo(opts.cwd);
   if (!repo) return null;
   try {
-    const res = await fetch(
-      `https://api.github.com/repos/${repo}/releases/latest`,
+    const res = await (opts.fetchImpl ?? fetch)(
+      releaseApiUrl(repo),
       { signal: AbortSignal.timeout(10000) }
     );
     if (!res.ok) return null;

@@ -268,10 +268,12 @@ describe("三档开关与部署", () => {
 });
 
 describe("解析", () => {
-  test("开关缺省 / 坏值 = observe", () => {
-    expect(parseWatchdogMode(undefined)).toBe("observe");
-    expect(parseWatchdogMode("ON")).toBe("observe");
+  test("开关缺省 / 坏值 = on；显式值原样", () => {
+    expect(parseWatchdogMode(undefined)).toBe("on");
+    expect(parseWatchdogMode("ON")).toBe("on");
+    expect(parseWatchdogMode(42)).toBe("on");
     expect(parseWatchdogMode("on")).toBe("on");
+    expect(parseWatchdogMode("observe")).toBe("observe");
     expect(parseWatchdogMode("off")).toBe("off");
   });
 
@@ -288,10 +290,10 @@ describe("解析", () => {
 });
 
 describe("开关持久", () => {
-  test("setLang 等 set*（读改写）之后 on / off 仍保持；缺省仍按 observe", async () => {
+  test("setLang 等 set*（读改写）之后 on / observe / off 仍保持；缺省按 on；config.json 坏了按 on", async () => {
     mkdirSync(dirname(CONFIG_PATH), { recursive: true });
     try {
-      for (const mode of ["on", "off"] as const) {
+      for (const mode of ["on", "observe", "off"] as const) {
         writeFileSync(CONFIG_PATH, JSON.stringify({ lang: "zh", bridgeWatchdog: mode }));
         await setLang("en");
         expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).bridgeWatchdog).toBe(mode);
@@ -300,7 +302,9 @@ describe("开关持久", () => {
       writeFileSync(CONFIG_PATH, JSON.stringify({ lang: "zh" }));
       await setLang("en");
       expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).bridgeWatchdog).toBeUndefined();
-      expect(readWatchdogMode()).toBe("observe");
+      expect(readWatchdogMode()).toBe("on");
+      writeFileSync(CONFIG_PATH, "{not json");
+      expect(readWatchdogMode()).toBe("on");
     } finally {
       rmSync(CONFIG_PATH, { force: true });
     }

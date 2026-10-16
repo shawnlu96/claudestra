@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
 import { memoryState } from "./ledger-memory.js";
+import type { MemoryVisibility } from "./ledger-memory-schema.js";
 import { getDagVersion, getFeature, effectiveNodes } from "./ledger-feature.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getMeta } from "./ledger-store.js";
@@ -20,6 +21,7 @@ import { clipWire } from "./order-findings.js";
 import { parseOrderWire, WIRE_LIMITS, WIRE_MAX_BYTES } from "./order-wire.js";
 import { memoryHeadFiles } from "./memory-retrieve-head.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
+import { recordMemoryAttempt, type MemoryAttemptResult, type MemoryChannel } from "./memory-inject-attempt.js";
 
 const OP = "memory_retrieve";
 const WRITER_BUSY_MS = 2_000;
@@ -47,10 +49,17 @@ export interface RetrieveOpts {
   /** HEAD 的文件列表（glob 对 glob 求交、「文件都不在了」先验用）；不给 = 按目录前缀判、不扣分 */
   headFiles?: readonly string[] | null;
   pairCosine?: (a: string, b: string) => number | null;
+  /** PMEMTUNE1：只收这种可见性的候选（出借单 = team，home 一条都不出本机）；排名另记一份，不和本机排名混用 */
+  visibility?: MemoryVisibility;
+  /** 检索开始时刻（Date.now）；memory_rank.elapsedMs = 选完 − 它。不给 = 从算排名开始计 */
+  startedAt?: number;
 }
 
 export const memoryDedupKey = (task: Pick<LedgerTask, "id" | "specRev">, head: string | null, kind: MemoryOrderKind): string =>
   `scheduler:memory:${task.id}:${task.specRev}:${head ?? "-"}:${kind}`;
+/** 排名缓存的键：按可见性过滤的排名（出借）另起一份，推出记录仍用 memoryDedupKey（同一套口径） */
+const rankKey = (task: Pick<LedgerTask, "id" | "specRev">, head: string | null, kind: MemoryOrderKind, visibility?: MemoryVisibility): string =>
+  `${memoryDedupKey(task, head, kind)}${visibility ? `:${visibility}` : ""}`;
 
 /** fix / 审查单再并上 PR 已改的范围外文件（order-deliver-scope.ts 登记的 deliver_scope 事件；范围内的已被 fileGlobs 盖住） */
 function prFiles(db: Database, task: LedgerTask, head: string | null): string[] {
@@ -62,7 +71,7 @@ function prFiles(db: Database, task: LedgerTask, head: string | null): string[] 
 /** 三路 → RRF → 去重 → 上限；只读 */
 export function retrieveMemories(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts = {}):
   { candidates: Candidate[]; ranked: Ranked } {
-  const candidates = memoryCandidates(db, task);
+  const candidates = candidatesOf(db, task, opts.visibility);
   if (!candidates.length) return { candidates, ranked: { selected: [], dropped: [] } };
   const extra = kind === "review" || task.stage === "fix" ? prFiles(db, task, head) : [];
   const routes = {
@@ -106,6 +115,7 @@ function record(db: Database, task: LedgerTask, key: string, text: string, data:
 /** 只算排名数据，预览 cache miss 与真实领取共用同一套排名规则。 */
 function retrievalData(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts) {
   const now = opts.now ?? Date.now();
+  const startedAt = opts.startedAt ?? Date.now();
   const { candidates, ranked } = retrieveMemories(db, task, kind, head, { ...opts, now });
   if (!candidates.length) return null;
   const items: RetrievedItem[] = ranked.selected.map((s) => ({
@@ -114,14 +124,15 @@ function retrievalData(db: Database, task: LedgerTask, kind: MemoryOrderKind, he
   }));
   const used = ["graph", "file", ...(opts.vector ? ["vector"] : [])];
   return {
-    op: "memory_rank", order: kind, specRev: task.specRev, head, routes: used, items,
+    op: "memory_rank", order: kind, specRev: task.specRev, head, routes: used, items, selectionVersion: ranked.selectionVersion,
     dropped: ranked.dropped.slice(0, DROPPED_MAX).map((d) => ({ id: d.id, score: Number(d.score.toFixed(6)), reason: dropText(d.reason) })),
+    elapsedMs: Math.max(0, Date.now() - startedAt), ...(opts.visibility ? { visibility: opts.visibility } : {}),
   };
 }
 
 /** 算一次并登记（没有候选就不登记、返回 null）；仅真实领取的准备 / 同步降级入口调用。 */
 function registerRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts = {}, prepared = false): LedgerEvent | null {
-  const key = `${memoryDedupKey(task, head, kind)}:${prepared ? "prepared" : "fallback"}`;
+  const key = `${rankKey(task, head, kind, opts.visibility)}:${prepared ? "prepared" : "fallback"}`;
   const prior = getEventByDedup(db, key);
   if (prior) return prior;
   const data = retrievalData(db, task, kind, head, opts);
@@ -135,11 +146,15 @@ export interface EnsureDeps {
   embedder?: Embedder | null;
   /** 向量库连接；不给 = 打开本机 memory-vectors.sqlite（用完关） */
   vectors?: Database;
+  /** 出借准备必须感知失败；本机领单继续图 + 文件降级。 */
+  throwOnError?: boolean;
   headFiles?: readonly string[] | null;
   /** 测试可指定仓库；生产从本卡项目配置 / 作者工作目录取。 */
   repoDir?: string;
   now?: number;
   timeoutMs?: number;
+  /** 出借单：只排 team 记忆（另一份排名缓存） */
+  visibility?: MemoryVisibility;
 }
 
 /** 查询文本 = 卡标题 + 节点 oneLine + 规格正文前 2KB。含内部内容，按 home 处理（不发远端模型） */
@@ -166,43 +181,63 @@ function pairCosines(vdb: Database, model: string, cands: readonly Candidate[]):
   };
 }
 
+/** 语义路：补嵌入缺的记忆向量、嵌入查询文本搜一遍，顺带两两余弦。没有模型 = 空（两路）。出错照抛。只写向量库，不写台账。 */
+async function semanticInputs(db: Database, task: LedgerTask, cands: readonly Candidate[], deps: EnsureDeps): Promise<Pick<RetrieveOpts, "vector" | "pairCosine">> {
+  const embedder = deps.embedder !== undefined ? deps.embedder : await pickEmbedder(readEmbedConfig());
+  if (!embedder) return {};
+  const vdb = deps.vectors ?? openVectorStore();
+  try {
+    const sources = cands.map((c) => vectorSource(c.memory));
+    // 全部批次共用截止时间，避免大候选池把每批超时累加成数分钟。
+    const deadline = Date.now() + (deps.timeoutMs ?? EMBED_TIMEOUT_MS);
+    for (let at = 0; at < sources.length && Date.now() < deadline; at += 16) {
+      await refreshVectors(vdb, embedder, sources.slice(at, at + 16), { now: deps.now, timeoutMs: Math.max(1, deadline - Date.now()) });
+    }
+    const vector = Date.now() >= deadline ? [] : await semanticSearch(vdb, embedder, { text: queryText(db, task), visibility: "home" }, {
+      candidates: new Map(sources.map((s) => [s.id, s.digest])), threshold: VECTOR_THRESHOLD, limit: VECTOR_LIMIT, timeoutMs: Math.max(1, deadline - Date.now()),
+    });
+    return { vector, pairCosine: pairCosines(vdb, embedder.model, cands) };
+  } finally {
+    if (vdb !== deps.vectors) vdb.close();
+  }
+}
+
+const candidatesOf = (db: Database, task: LedgerTask, visibility?: MemoryVisibility) => memoryCandidates(db, task, visibility);
+
 /**
  * 派单前（事务外）调：补嵌入缺的记忆向量、嵌入查询文本走语义路，再算一次并登记。已登记过、没有候选、没有模型都照常（没模型 = 两路）。
- * 永不抛出。
+ * 默认失败时降级；throwOnError 供出借准备保留错误结果。
  */
 async function prepareRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null = task.headSHA,
   deps: EnsureDeps = {}): Promise<void> {
-  let vdb: Database | null = null;
   let headFiles = deps.headFiles;
+  const startedAt = Date.now(), visibility = deps.visibility;
   try {
-    if (getEventByDedup(db, `${memoryDedupKey(task, head, kind)}:prepared`)) return;
-    const cands = memoryCandidates(db, task);
+    if (getEventByDedup(db, `${rankKey(task, head, kind, visibility)}:prepared`)) return;
+    const cands = candidatesOf(db, task, visibility);
     if (!cands.length) return;
     headFiles = deps.headFiles !== undefined ? deps.headFiles : await memoryHeadFiles(db, task, head, deps.repoDir);
-    const embedder = deps.embedder !== undefined ? deps.embedder : await pickEmbedder(readEmbedConfig());
-    let vector: VectorHit[] | undefined;
-    let pairCosine: RetrieveOpts["pairCosine"];
-    if (embedder) {
-      vdb = deps.vectors ?? openVectorStore();
-      const sources = cands.map((c) => vectorSource(c.memory));
-      // 全部批次共用截止时间，避免大候选池把每批超时累加成数分钟。
-      const deadline = Date.now() + (deps.timeoutMs ?? EMBED_TIMEOUT_MS);
-      for (let at = 0; at < sources.length && Date.now() < deadline; at += 16) {
-        await refreshVectors(vdb, embedder, sources.slice(at, at + 16), { now: deps.now, timeoutMs: Math.max(1, deadline - Date.now()) });
-      }
-      vector = Date.now() >= deadline ? [] : await semanticSearch(vdb, embedder, { text: queryText(db, task), visibility: "home" }, {
-        candidates: new Map(sources.map((s) => [s.id, s.digest])), threshold: VECTOR_THRESHOLD, limit: VECTOR_LIMIT, timeoutMs: Math.max(1, deadline - Date.now()),
-      });
-      pairCosine = pairCosines(vdb, embedder.model, cands);
-    }
-    registerRetrieval(db, task, kind, head, { now: deps.now, vector, headFiles, pairCosine }, true);
+    const semantic = await semanticInputs(db, task, cands, deps);
+    registerRetrieval(db, task, kind, head, { now: deps.now, ...semantic, headFiles, visibility, startedAt }, true);
   } catch (e) {
+    if (deps.throwOnError) throw e;
     console.error(`⚠️ ${task.id} 项目记忆检索失败，按图 + 文件两路补：${(e as Error).message}`);
-    try { registerRetrieval(db, task, kind, head, { now: deps.now, headFiles }, true); }
+    try { registerRetrieval(db, task, kind, head, { now: deps.now, headFiles, visibility, startedAt }, true); }
     catch (fallbackError) { console.error(`⚠️ ${task.id} 记忆降级登记失败，派单照常：${(fallbackError as Error).message}`); }
-  } finally {
-    if (vdb && vdb !== deps.vectors) vdb.close();
   }
+}
+
+/**
+ * 同一份准备，只算不记（全文直发用：发送成功之前台账上不能多出事件）：HEAD 文件 + 语义路，交给 fitMemory 现算排名。
+ * 已有排名缓存或没有候选 = 空（fitMemory 照用缓存 / 照空）。出错照抛，由调用方按无记忆照发。
+ */
+export async function retrievalInputs(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, deps: EnsureDeps = {}): Promise<RetrieveOpts> {
+  const key = rankKey(task, head, kind, deps.visibility);
+  if (getEventByDedup(db, `${key}:prepared`) ?? getEventByDedup(db, `${key}:fallback`)) return {};
+  const cands = candidatesOf(db, task, deps.visibility);
+  if (!cands.length) return {};
+  const headFiles = deps.headFiles !== undefined ? deps.headFiles : await memoryHeadFiles(db, task, head, deps.repoDir);
+  return { now: deps.now, headFiles, visibility: deps.visibility, ...await semanticInputs(db, task, cands, deps) };
 }
 
 /** 并发领同一张单共用一次外部计算；只在本连接上合并，不把数据库寿命绑到全局缓存。 */
@@ -210,7 +245,7 @@ const preparing = new WeakMap<Database, Map<string, Promise<void>>>();
 export async function ensureMemoryRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null = task.headSHA,
   deps: EnsureDeps = {}): Promise<void> {
   if (db.inTransaction) throw new Error("项目记忆外部检索不能持有台账事务");
-  const key = memoryDedupKey(task, head, kind);
+  const key = `${rankKey(task, head, kind, deps.visibility)}:${!!deps.throwOnError}`;
   let pending = preparing.get(db);
   if (!pending) preparing.set(db, pending = new Map());
   const prior = pending.get(key);
@@ -233,10 +268,11 @@ const HEADER: Record<MemoryOrderKind, string> = {
 const FOOTER = "全文：show_memory <id>";
 
 /** 一条的原始行（不截） */
-function lineOf(db: Database, item: RetrievedItem): string | null {
+function lineOf(db: Database, item: RetrievedItem, visibility?: MemoryVisibility): string | null {
   const state = memoryState(db, item.id);
   if (!state || state.disputed || (state.status !== "open" && state.status !== "fixing")) return null;
   const m = state.memory;
+  if (visibility && m.visibility !== visibility) return null; // 排名之后可见性也再核一次：出借单绝不画进 home
   if (m.kind !== "pitfall" && state.status !== "open") return null;
   const why = item.why ? ` · ${item.why}` : "";
   if (m.kind === "pitfall" && typeof m.body !== "string") {
@@ -260,7 +296,7 @@ type RetrievalRanking = Pick<LedgerEvent, "data"> & { seq?: number };
 
 /** 优先取异步排名；预览 cache miss 只在内存算，不开写连接或事务。 */
 function rankedEvent(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts, persist = false): RetrievalRanking | null {
-  const key = memoryDedupKey(task, head, kind);
+  const key = rankKey(task, head, kind, opts.visibility);
   const cached = getEventByDedup(db, `${key}:prepared`) ?? getEventByDedup(db, `${key}:fallback`);
   if (cached) return cached;
   if (persist) return registerRetrieval(db, task, kind, head, opts);
@@ -268,10 +304,10 @@ function rankedEvent(db: Database, task: LedgerTask, kind: MemoryOrderKind, head
   return data ? { data } : null;
 }
 
-function liveLines(db: Database, e: RetrievalRanking | null): { item: RetrievedItem; line: string }[] {
+function liveLines(db: Database, e: RetrievalRanking | null, visibility?: MemoryVisibility): { item: RetrievedItem; line: string }[] {
   const items = Array.isArray(e?.data.items) ? e.data.items as RetrievedItem[] : [];
   return items.flatMap((item) => {
-    const line = lineOf(db, item);
+    const line = lineOf(db, item, visibility);
     return line ? [{ item, line }] : [];
   });
 }
@@ -279,13 +315,13 @@ function liveLines(db: Database, e: RetrievalRanking | null): { item: RetrievedI
 /** 排名只作缓存；预览不记推出事件，每次渲染重查生命周期。 */
 export function memorySection(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, maxItems = MEMORY_CAPS[kind].count,
   bytes = MEMORY_CAPS[kind].bytes, opts: RetrieveOpts = {}): string {
-  const lines = liveLines(db, rankedEvent(db, task, kind, head, opts)).slice(0, maxItems);
+  const lines = liveLines(db, rankedEvent(db, task, kind, head, opts), opts.visibility).slice(0, maxItems);
   return sectionOf(kind, lines.map((x) => x.line), Math.min(bytes, WIRE_LIMITS.input));
 }
 
 /** 事件不可改写：同一实际报文去重，预算 / 状态改变时另记一条，保留过去确实推出过的记录。 */
 function recordInjection(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, e: RetrievalRanking | null,
-  ids: string[], wire: unknown, now: number): void {
+  ids: string[], wire: unknown, now: number, channel?: MemoryChannel): void {
   if (e?.seq === undefined) return;
   const base = memoryDedupKey(task, head, kind);
   const fingerprint = createHash("sha256").update(JSON.stringify(wire)).digest("hex");
@@ -296,37 +332,78 @@ function recordInjection(db: Database, task: LedgerTask, kind: MemoryOrderKind, 
   if (prior?.data.fingerprint === fingerprint) return;
   const key = prior ? `${base}:injected:${prior.seq}:${fingerprint}` : base;
   record(db, task, key, `项目记忆：${kind === "review" ? "审查单" : "写单"}推 ${ids.length} 条`, {
-    op: OP, order: kind, specRev: task.specRev, head, memoryIds: ids, fingerprint, rankingSeq: e.seq,
+    op: OP, order: kind, specRev: task.specRev, head, memoryIds: ids, fingerprint, rankingSeq: e.seq, ...(channel ? { channel } : {}),
   }, now);
 }
 
+/** 拼好的一节：单子、实际放进的 id、排名事件，和这次尝试的结果（未覆盖原因）。 */
+export interface MemoryFit<W> {
+  wire: W;
+  ids: string[];
+  ranking: RetrievalRanking | null;
+  result: MemoryAttemptResult;
+  /** 放进的那一节（没放 = ""） */
+  section: string;
+}
+
 /**
- * 拼单的最后一步：inputs 末尾加「项目记忆」一节。整单（JSON）要留在 WIRE_MAX_BYTES 内——放不下就少放几条，一条都放不下就不加；
- * inputs 已满 20 项也不加。没有可推的记忆 / 出错：单子原样返回（逐字不变）。
+ * 拼单的最后一步（只算不记）：inputs 末尾加「项目记忆」一节。整单（JSON）要留在 WIRE_MAX_BYTES 内——放不下就少放几条，一条都放不下就不加；
+ * inputs 已满 20 项也不加。opts.visibility 给了 = 只排、只画这种可见性的记忆。出错照抛，由调用方决定（withMemory 吞掉、单子照发）。
+ */
+export function fitMemory<W extends { inputs: string[] }>(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, wire: W,
+  opts: RetrieveOpts & { persist?: boolean } = {}): MemoryFit<W> {
+  const e = rankedEvent(db, task, kind, head, opts, opts.persist);
+  const lines = liveLines(db, e, opts.visibility);
+  for (let n = Math.min(MEMORY_CAPS[kind].count, lines.length); wire.inputs.length < WIRE_LIMITS.items && n > 0; n--) {
+    const selected = lines.slice(0, n);
+    const section = sectionOf(kind, selected.map((x) => x.line), MEMORY_CAPS[kind].bytes);
+    if (!section) break;
+    const next = { ...wire, inputs: [...wire.inputs, section] };
+    if (Buffer.byteLength(JSON.stringify(next)) <= WIRE_MAX_BYTES) return { wire: next, ids: selected.map((x) => x.item.id), ranking: e, result: "injected", section };
+  }
+  const filtered = !lines.length && !!opts.visibility && memoryCandidates(db, task).length > 0;
+  return { wire, ids: [], ranking: e, result: lines.length ? "budget_drop" : filtered ? "filtered_visibility" : "empty", section: "" };
+}
+
+/** 单子实际写进 / 发出之后才调：按现有口径记一条推出（同一实际报文去重）。永不抛。 */
+export function recordMemoryInjection<W>(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, fit: MemoryFit<W>,
+  sent: unknown, channel: MemoryChannel, now = Date.now(), visibility?: MemoryVisibility): void {
+  try {
+    // 现算没登记的排名（fitMemory persist = false）：发出去之后才把那份排名原样登记成 fallback，推出事件指向它
+    const ranking = fit.ranking && fit.ranking.seq === undefined
+      ? record(db, task, `${rankKey(task, head, kind, visibility)}:fallback`, `项目记忆排名：${fit.ids.length} 条`, fit.ranking.data, now) : fit.ranking;
+    recordInjection(db, task, kind, head, ranking, fit.ids, sent, now, channel);
+  }
+  catch (e) { console.error(`⚠️ ${task.id} 项目记忆推出没记上：${(e as Error).message}`); }
+}
+
+const orderIdOf = (w: unknown): string | null => {
+  const o = w as { orderId?: unknown; dedupKey?: unknown };
+  return typeof o.orderId === "string" ? o.orderId : typeof o.dedupKey === "string" ? o.dedupKey : null;
+};
+
+/**
+ * 拼单的最后一步：fitMemory + 真实领取时记推出（local_take 渠道）。没有可推的记忆 / 出错：单子原样返回（逐字不变）。
+ * 真实领取另记一条检索尝试（memory-inject-attempt.ts，同一单号只一条）。
  */
 export function withMemory<W extends { inputs: string[] }>(db: Database | null | undefined, task: LedgerTask, kind: MemoryOrderKind,
   head: string | null, wire: W, opts: RetrieveOpts = {}): W {
   if (!db) return wire;
+  const startedAt = Date.now(), orderId = opts.recordInjection ? orderIdOf(wire) : null;
+  const attempt = (result: MemoryAttemptResult, count: number, reason?: string) => {
+    if (orderId) recordMemoryAttempt(db, task, { orderId, channel: "local_take", order: kind, result, count, elapsedMs: Date.now() - startedAt, reason }, opts.now);
+  };
   try {
-    const e = rankedEvent(db, task, kind, head, opts, opts.recordInjection);
-    const lines = liveLines(db, e);
-    let result = wire, ids: string[] = [];
-    for (let n = Math.min(MEMORY_CAPS[kind].count, lines.length); wire.inputs.length < WIRE_LIMITS.items && n > 0; n--) {
-      const selected = lines.slice(0, n);
-      const section = sectionOf(kind, selected.map((x) => x.line), MEMORY_CAPS[kind].bytes);
-      if (!section) break;
-      const next = { ...wire, inputs: [...wire.inputs, section] };
-      if (Buffer.byteLength(JSON.stringify(next)) <= WIRE_MAX_BYTES) {
-        result = next;
-        ids = selected.map((x) => x.item.id);
-        break;
-      }
-    }
+    const fit = fitMemory(db, task, kind, head, wire, { ...opts, persist: opts.recordInjection, startedAt });
     // 坏单会被入口拒绝，不把其中的候选误记成已经发出。
-    if (opts.recordInjection && (!("orderId" in result) || parseOrderWire(result).ok)) recordInjection(db, task, kind, head, e, ids, result, opts.now ?? Date.now());
-    return result;
+    if (opts.recordInjection && (!("orderId" in fit.wire) || parseOrderWire(fit.wire).ok)) {
+      recordInjection(db, task, kind, head, fit.ranking, fit.ids, fit.wire, opts.now ?? Date.now(), "local_take");
+      attempt(fit.result, fit.ids.length);
+    }
+    return fit.wire;
   } catch (e) {
     console.error(`⚠️ ${task.id} 项目记忆没写进单子（单子照发）：${(e as Error).message}`);
+    attempt("error", 0, (e as Error).message);
   }
   return wire;
 }

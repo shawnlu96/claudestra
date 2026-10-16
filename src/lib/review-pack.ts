@@ -7,6 +7,7 @@
  * 骨架里不写任何本机路径——仓库是公开的。tests/review-pack.test.ts。
  */
 import { pathQuote, quoteExternal, refLike, shaLike } from "./quote-text.js";
+import { localMergeOf, type LocalMergeProject } from "./scheduler-config.js";
 
 export interface PrevReview {
   round: number | null;
@@ -23,7 +24,8 @@ export interface PrevReview {
 }
 
 export interface ReviewPackInput {
-  task: { id: string; title: string; branch: string | null; pr: string | null; headSHA: string | null };
+  /** project：调用方传的是整张台账卡，按它认 localMerge 项目（localMergeOf）；没有 project = 当普通 PR 项目 */
+  task: { id: string; title: string; branch: string | null; pr: string | null; headSHA: string | null; project?: string };
   round: number;
   adversarial: boolean;
   /** 执行者 worktree 绝对路径；定位不到为 null（prompt 里提示审查员向派发者要） */
@@ -38,6 +40,8 @@ export interface ReviewPackInput {
   workDir: string;
   /** 线上（不许碰的）东西：状态目录、tmux socket、bridge 端口 */
   prod: { stateDir: string; tmuxSocket: string; bridgePort: number };
+  /** localMerge 项目的必过检查；不给 = 按 task.project 读 scheduler.json（null = 普通 PR 项目，diff 对 origin/main） */
+  local?: LocalMergeProject | null;
 }
 
 export interface ReviewPack {
@@ -129,13 +133,16 @@ export function prevBlockers(md: string | null): string[] {
     .slice(0, MAX_PREV_LINES);
 }
 
+/** localMerge 项目的分支从本机 main 起、没有 origin；其余项目原样对 origin/main */
+const localOf = (i: ReviewPackInput): LocalMergeProject | null => (i.local !== undefined ? i.local : i.task.project ? localMergeOf(i.task.project) : null);
+
 function objectLines(i: ReviewPackInput): string[] {
   const raw = i.deliver?.headSHA ?? i.task.headSHA;
   const head = shaLike(raw) ? raw : raw ? "（台账记的 head 不像 sha，以 worktree 当前 HEAD 为准）" : "（台账没记，以 worktree 当前 HEAD 为准）";
   const wt = i.worktree ?? "（没定位到，向派发者要）";
   return [
     `- worktree：${wt}（分支 ${refLike(i.task.branch) ? i.task.branch : "?"}，HEAD ${head}）。以你开审时的 HEAD 为准，并写进报告。`,
-    `- 改动：git -C ${wt} diff origin/main...HEAD`,
+    `- 改动：git -C ${wt} diff ${localOf(i) ? "main" : "origin/main"}...HEAD`,
     `- 规格卡：${i.specPath ?? "（台账没记规格卡路径）"}（只读，重点与判定标准以它为准）`,
   ];
 }
@@ -147,7 +154,9 @@ function focusLines(i: ReviewPackInput): string[] {
   if (acc.length > MAX_FOCUS) out.push(`- （验收项还有 ${acc.length - MAX_FOCUS} 条，见规格卡「验收」一节）`);
   if (!acc.length) out.push("- 规格卡里没找到「验收」一节：按规格卡的范围与目标逐条核对");
   if (i.prev) out.push("- 上一轮的 P0 / P1 逐条复验（见文末参考资料），标「已修对 / 没修对 / 修出回退」");
-  out.push("- 全量 bun run check（负载高时计时类用例单独重跑确认）；涉及 web 的加跑 tsc / eslint / next build --webpack；各入口各 bun build 一次。");
+  const local = localOf(i);
+  out.push(local ? `- 逐条跑本项目的必过检查（按空白切参数，不经 shell）：${local.checks.map((c) => `\`${c}\``).join("；")}。`
+    : "- 全量 bun run check（负载高时计时类用例单独重跑确认）；涉及 web 的加跑 tsc / eslint / next build --webpack；各入口各 bun build 一次。");
   return out;
 }
 
@@ -175,7 +184,8 @@ function boundaryLines(i: ReviewPackInput): string[] {
   ];
 }
 
-export function buildReviewPack(i: ReviewPackInput): ReviewPack {
+export function buildReviewPack(input: ReviewPackInput): ReviewPack {
+  const i = { ...input, local: localOf(input) };
   const kind = i.adversarial ? "对抗式审查员" : "代码审查员";
   const pr = refLike(i.task.pr) ? ` PR ${i.task.pr}` : "";
   const lines = [

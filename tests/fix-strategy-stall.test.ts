@@ -164,7 +164,7 @@ test("[验收线 6] a notice that fails to send is resent next tick and arrives 
   try {
     let attempts = 0;
     const deliver = w.f.tickDeps.notifyPm;
-    w.f.tickDeps.notifyPm = async (task, text) => { if (++attempts === 1) throw new Error("PM port offline"); return deliver(task, text); };
+    w.f.tickDeps.notifyPm = async (task, text, level) => { if (++attempts === 1) throw new Error("PM port offline"); return deliver(task, text, level); };
     await w.at(1); await w.at(5);
     expect(await w.at(10)).toMatchObject({ step: "manual" });
     expect(w.f.notices).toHaveLength(0);

@@ -14,6 +14,7 @@ import { parseV2Response, type LendV2Endpoint } from "./lend-wire-v2.js";
 import { claimBranch } from "./lend-arbiter-wire.js";
 import type { ModelActual, ModelSuggest } from "./lend-wire-types.js";
 import { parseModelActual, parseModelSuggest, suggestDigest } from "./role-model-settings-wire.js";
+import { ledgerPurposeShape } from "./floka-ledger/uses.js";
 
 const LEND_WIRE_V = 1;
 const V2_OPS: readonly string[] = ["hello", "beat", "ask"] satisfies LendV2Endpoint[];
@@ -36,7 +37,7 @@ export interface PolledOrder {
 }
 /** 写单（i28-R6）另带订单分支与基线；审查单没有这一项 */
 interface Claimed { order: OrderWire; text: string; sha256: string; lease: Lease; write: { branch: string; base: string } | null; suggest: ModelSuggest | null }
-export interface Receipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string; actual?: ModelActual }
+export interface Receipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string; actual?: ModelActual; purpose?: string }
 
 class Bad extends Error {}
 const bad = (why: string): never => { throw new Bad(why); };
@@ -114,12 +115,14 @@ const PARSE = {
   result: (r: unknown): Receipt => {
     const o = obj(r, ["ok", "v", "receipt"], "result 响应");
     const told = !!o.receipt && typeof o.receipt === "object" && "actual" in o.receipt;
-    const c = obj(o.receipt, ["orderId", "sha256", "eventSeq", "taskId", "key", "sig", ...(told ? ["actual"] : [])], "receipt");
+    const tagged = !!o.receipt && typeof o.receipt === "object" && "purpose" in o.receipt; // LEDGER1: floka-lend-receipt-v1 only
+    const c = obj(o.receipt, ["orderId", "sha256", "eventSeq", "taskId", "key", "sig", ...(told ? ["actual"] : []), ...(tagged ? ["purpose"] : [])], "receipt");
+    if (!ledgerPurposeShape("lend-receipt", c.purpose)) bad("receipt.purpose 格式不对");
     const actual = told ? parseModelActual(c.actual) : null;
     if (typeof actual === "string") bad(`receipt.${actual}`);
     return { orderId: str(c.orderId, ID, "receipt.orderId"), sha256: str(c.sha256, HEX64, "receipt.sha256").toLowerCase(),
       eventSeq: int(c.eventSeq, "receipt.eventSeq"), taskId: str(c.taskId, NAME, "receipt.taskId"), key: str(c.key, B64URL, "receipt.key"),
-      sig: str(c.sig, B64URL, "receipt.sig"), ...(actual ? { actual: actual as ModelActual } : {}) };
+      sig: str(c.sig, B64URL, "receipt.sig"), ...(actual ? { actual: actual as ModelActual } : {}), ...(tagged ? { purpose: c.purpose as string } : {}) };
   },
   hello: (r: unknown) => v2(parseV2Response("hello", r)),
   beat: (r: unknown) => v2(parseV2Response("beat", r)),

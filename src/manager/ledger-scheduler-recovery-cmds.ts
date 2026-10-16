@@ -1,4 +1,5 @@
 /** Scheduler-only recovery commands; the canonical library writers own transaction fences and event contents. */
+import { recordPmTodo } from "../lib/pm-todo-note.js";
 import { getWorkflow } from "../lib/ledger-scheduler.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { extensionMode } from "../lib/manual-recovery-policy.js";
@@ -8,6 +9,7 @@ import type { LedgerCli } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { DEPLOY_RECONCILE_CMD } from "./ledger-scheduler-deploy-reconcile-cmd.js";
+import { priorityOrderCmds } from "../lib/scheduler-priority-order-cmd.js";
 
 const FENCE_FLAGS = ["rev", "workflow-rev", "head", "round", "spec-rev"];
 
@@ -70,6 +72,15 @@ async function manualRecovery(c: LedgerCli, f: RecoveryFence, id: string, mode: 
 
 export const SCHEDULER_RECOVERY_CMDS: Record<string, CommandSpec> = {
   "scheduler-deploy-reconcile": DEPLOY_RECONCILE_CMD,
+  ...priorityOrderCmds, // PRIO2 排序样本写口
+  "scheduler-pm-todo": {
+    valued: ["kind", "text", "dedup"], bools: [], usage: "scheduler-pm-todo <卡> --kind K --text T --dedup K（调度身份只写 pm_todo）",
+    run(c) {
+      if (c.deps.actor !== "scheduler" || !c.deps.assertLease) throw new LedgerError("forbidden", "PM 待办写口要有租约的调度身份");
+      const task = c.task(c.p.pos[1]); active(c)();
+      return { ok: true, ...recordPmTodo(c.db, c.ctx(), { project: task.project, target: task.id, kind: c.need("kind"), text: c.need("text"), dedupKey: c.need("dedup") }) };
+    },
+  },
   "scheduler-manual-resume": {
     valued: [...FENCE_FLAGS, "mode", "reason", "max-workers", "mechanism"], bools: [],
     usage: "scheduler-manual-resume <task> --rev N --workflow-rev N --head SHA|- --round N --spec-rev N --mode on|observe (--reason R | --mechanism M) --max-workers N",

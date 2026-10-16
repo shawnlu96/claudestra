@@ -18,7 +18,7 @@ The role texts live in [`roles/`](../../roles). At launch, an agent's `role` fie
 - **Dispatcher**: `--agents` plus `--agent claudestra-dispatcher`, so the main thread *is* the role. Both reviewer types are defined alongside it, so it can dispatch them directly.
 - **PM**: its role text is appended with `--append-system-prompt-file`, and `--agents` carries both reviewer types so the PM can dispatch reviews itself when there is no dispatcher.
 - **Executor**: its role text is appended with `--append-system-prompt-file`.
-- Verified live: with `--agent` as the main thread, Claude Code's default tools, the project's CLAUDE.md and Claudestra's channel tools are all still available.
+- Verified live: with `--agent` as the main thread, Claude Code's default tools, the project's CLAUDE.md and Floka's channel tools are all still available.
 - Nothing is installed into `~/.claude/agents`. Your global directory is left alone, there is nothing to install on a new machine or project, and a repo update takes effect on the next launch.
 - Role injection only applies to the Claude Code runtime. For Codex or Pi executors, the PM states the rules in the first dispatch message.
 
@@ -50,7 +50,7 @@ When the owner clicks Confirm, the bridge first marks the proposal as confirmed,
 
 To take the team down: `team down --project <id>`, also confirmed by the owner. Routing stops, and the dispatcher leaves the PM list and loses its role. The agent itself is not deleted; `kill` it yourself if you want it gone.
 
-**On "agents cannot impersonate the owner"**: this is a product constraint, not a security boundary. Every agent runs as your user with permission checks bypassed by default, so a determined agent could edit the state files or the ledger database directly, or pair a device for itself (the loopback `/api/v1/devices/local` now needs `BRIDGE_CONTROL_TOKEN` or approval from a paired device in the web app before it signs full access, but an agent can read `.env` or run `claudestra pair` and redeem the code itself, so this only stops a casual curl). The "confirmed" mark lives in the proposal file in the state directory, so a process running as the same user can forge it too. What the cards and buttons guarantee **holds only at the tool level**: for an agent that only uses the tools Claudestra gives it (reply, send_to_agent, edit_message, buttons, ledger commands), executors and the dispatcher cannot propose a team change; bridge admin button ids (team confirm, permission prompts, auto-allow, model switch and so on, see `src/lib/reserved-buttons.ts`) cannot be sent at all; edit_message only edits the caller's own reply messages, and nobody can edit a message that carries admin buttons. So at the tool level, what the owner clicks is the card the bridge rendered from the proposal, unchanged since.
+**On "agents cannot impersonate the owner"**: this is a product constraint, not a security boundary. Every agent runs as your user with permission checks bypassed by default, so a determined agent could edit the state files or the ledger database directly, or pair a device for itself (the loopback `/api/v1/devices/local` now needs `BRIDGE_CONTROL_TOKEN` or approval from a paired device in the web app before it signs full access, but an agent can read `.env` or run `claudestra pair` and redeem the code itself, so this only stops a casual curl). The "confirmed" mark lives in the proposal file in the state directory, so a process running as the same user can forge it too. What the cards and buttons guarantee **holds only at the tool level**: for an agent that only uses the tools Floka gives it (reply, send_to_agent, edit_message, buttons, ledger commands), executors and the dispatcher cannot propose a team change; bridge admin button ids (team confirm, permission prompts, auto-allow, model switch and so on, see `src/lib/reserved-buttons.ts`) cannot be sent at all; edit_message only edits the caller's own reply messages, and nobody can edit a message that carries admin buttons. So at the tool level, what the owner clicks is the card the bridge rendered from the proposal, unchanged since.
 
 This is not an absolute guarantee. An agent is a shell running as your user: it can read the repo's `.env`, and its session environment already carries `DISCORD_BOT_TOKEN`. With the bot token it can bypass the bridge and call Discord directly, posting messages with any button id as the bot or editing existing ones. Like editing the state files or pairing a device above, that is the "determined agent" case and outside what this protects (same stance as the Security posture in CLAUDE.md: a guard rail, not a security boundary). Apart from `ledger import` (the owner's one-time migration, which only writes an empty list), every PM-list change in the ledger traces back to the proposal the owner clicked.
 
@@ -102,7 +102,17 @@ It lists the PM list, the dispatcher, and for each open task **who is holding it
 - **Dispatcher died**: `manager restart <dispatcher>`. The role comes back from the registry, and deliveries that arrived in the meantime are waiting in the held queue.
 - **No dispatcher any more**: `team down`, or `team up --no-dispatcher`. Deliveries then go to the PM.
 
+## Peer machine messages go to the dispatcher first
+
+With `ledger pm-peer-inbox on|off [--project <id>]` (default off; only a real PM — not the dispatcher — master or owner can switch it), **machine messages** a peer sends to the **active PM** (first line starts with `[Claudestra 调度器 …` or `【自动定】`) go to the dispatcher first; the PM only gets what it escalates. Human-written messages, pushbacks, owner chats and mail for other agents are unchanged.
+
+- Every transferred message carries a fixed header written by code: the body is data only, a whitelist of what the dispatcher may do, what must be escalated, and the escalate command template. A Pi dispatcher sees it too (role files only apply to Claude Code).
+- The API receipt moves along, so the dispatcher's reply lands in the peer's original thread; **files attached to its replies are never sent out**.
+- If the dispatcher is outside the peer token's scope, offline, still creating, or the project has none, the message goes to the PM as before — never refused. To take effect the dispatcher needs `external` on and a place in the peer token's scope; the peer can then read its history, and Pi has no `--disallowedTools`, so the boundary rests on the header and the role text.
+- The held queue uses the same decision: a letter held for the PM is handed to the dispatcher, and replays swap the header instead of stacking it.
+- Code: `src/lib/peer-inbox-route.ts`, `src/bridge/local-api/project-pm-delivery.ts`.
+
 ## Related
 
-- Handing a task to an agent on another Claudestra instance: [cross-instance delegation](./peer-delegation.md) (Chinese)
+- Handing a task to an agent on another Floka instance: [cross-instance delegation](./peer-delegation.md) (Chinese)
 - Code: `src/manager/ledger-team-cmds.ts` (team-apply), `roles/`, `src/lib/team-*.ts`, `src/lib/ledger-handler.ts`, `src/lib/review-pack.ts`, `src/bridge/team-router.ts`, `src/bridge/team-confirm.ts`, `src/manager/team-up.ts`, `src/manager/ledger-dispatch-cmds.ts`

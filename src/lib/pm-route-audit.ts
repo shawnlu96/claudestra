@@ -1,4 +1,4 @@
-import { classifyPmPush, type DigestInput } from "./pm-digest.js";
+import { pmBodyUrgent, type DigestInput } from "./pm-digest.js";
 import { isPmReadyAuditItem, matchPmAuditRule, type PmAuditItem } from "./pm-route-rules.js";
 import type { PmRoutePlan, PmRouteTag } from "./pm-route-types.js";
 
@@ -23,8 +23,7 @@ function tag(item: PmAuditItem, input: DigestInput): PmRouteTag {
   const rule = matchPmAuditRule(item);
   const body = isPmReadyAuditItem(item)
     ? item.raw.replace(` — ${item.detail}`, ` — ${item.detail.replace("；实际阻塞：", "；")}`) : item.raw;
-  const important = classifyPmPush({ ...input, fromKind: "local", sender: "pm-route-protection", oneShot: true, body });
-  if (important.send === "now" || /alarm|告警|报警|需(?:要)?回应/i.test(body)) return { route: "judge", rule: "protect.audit", reason: "巡检条目含要紧事或需要回应", item: item.n };
+  if (pmBodyUrgent(body) || /alarm|告警|报警|需(?:要)?回应/i.test(body)) return { route: "judge", rule: "protect.audit", reason: "巡检条目含要紧事或需要回应", item: item.n };
   return rule ? { route: "auto", rule: rule.id, reason: rule.reason, item: item.n, type: rule.type }
     : { route: "judge", rule: "audit.unknown", reason: "未核实为批准的巡检事实", item: item.n, ...(item.declared ? { type: item.declared } : {}) };
 }

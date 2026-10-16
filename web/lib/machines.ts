@@ -1,3 +1,7 @@
+import { browserBackend } from "./floka-storage/browser";
+import { browserStorage } from "./floka-storage/config";
+import { writeCompatible } from "./floka-storage/local";
+
 /**
  * 已配对机器清单（docs/design-hosted-frontend.md §5、§8.5）：IndexedDB 只存 `{fp, name, addedAt, lastUsedAt, principalId?}`，
  * **绝不存凭据**——凭据是 bridge 发的 HttpOnly cookie（Path=/m/<fp>/），JS 拿不到也不该拿。
@@ -59,65 +63,6 @@ export function memoryBackend(seed: MachineRecord[] = []): MachinesBackend {
     delete: async (fp) => void map.delete(fp),
     getCurrent: async () => current,
     setCurrent: async (cur) => void (current = cur),
-  };
-}
-
-/** 根 tsconfig 无 dom lib（tests/ 直接编译本文件）：IndexedDB 只按用到的成员做结构声明，从 globalThis 取 */
-interface IdbRequest<T = unknown> {
-  result: T;
-  error: { message?: string } | null;
-  onsuccess: (() => void) | null;
-  onerror: (() => void) | null;
-}
-interface IdbStore {
-  getAll(): IdbRequest<MachineRecord[]>;
-  get(key: string): IdbRequest<unknown>;
-  put(value: unknown, key?: string): IdbRequest;
-  delete(key: string): IdbRequest;
-}
-interface IdbDatabase {
-  objectStoreNames: { contains(name: string): boolean };
-  createObjectStore(name: string, opts?: { keyPath: string }): unknown;
-  transaction(name: string, mode: "readonly" | "readwrite"): { objectStore(name: string): IdbStore };
-}
-interface IdbFactory {
-  open(name: string, version: number): IdbRequest<IdbDatabase> & { onupgradeneeded: (() => void) | null };
-}
-const idb = (globalThis as unknown as { indexedDB?: IdbFactory }).indexedDB;
-
-function openDb(): Promise<IdbDatabase> {
-  return new Promise((resolve, reject) => {
-    if (!idb) return reject(new Error("indexedDB unavailable"));
-    const req = idb.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(MACHINES_STORE)) db.createObjectStore(MACHINES_STORE, { keyPath: "fp" });
-      if (!db.objectStoreNames.contains(META_STORE)) db.createObjectStore(META_STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(new Error(req.error?.message ?? "indexedDB open failed"));
-  });
-}
-
-function tx<T>(store: string, mode: "readonly" | "readwrite", run: (s: IdbStore) => IdbRequest<T>): Promise<T> {
-  return openDb().then(
-    (db) =>
-      new Promise<T>((resolve, reject) => {
-        const req = run(db.transaction(store, mode).objectStore(store));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(new Error(req.error?.message ?? `indexedDB ${store} ${mode} failed`));
-      }),
-  );
-}
-
-function idbBackend(): MachinesBackend {
-  return {
-    getAll: () => tx<MachineRecord[]>(MACHINES_STORE, "readonly", (s) => s.getAll()),
-    put: (rec) => tx(MACHINES_STORE, "readwrite", (s) => s.put(rec)).then(() => undefined),
-    delete: (fp) => tx(MACHINES_STORE, "readwrite", (s) => s.delete(fp)).then(() => undefined),
-    getCurrent: () => tx(META_STORE, "readonly", (s) => s.get(CURRENT_KEY)).then((v) => (v as { fp: string; base: string } | undefined) ?? null),
-    setCurrent: (cur) =>
-      (cur ? tx(META_STORE, "readwrite", (s) => s.put(cur, CURRENT_KEY)) : tx(META_STORE, "readwrite", (s) => s.delete(CURRENT_KEY))).then(() => undefined),
   };
 }
 
@@ -203,8 +148,7 @@ export class MachineStore {
     const cur = next ? { fp: next.fp, base: this.baseOf(next.fp) } : null;
     await this.backend.setCurrent(cur).catch(() => undefined); // SW 读不到就退回 payload 里的 fp（sw.js）
     try {
-      if (cur) localStorage.setItem(API_BASE_LS_KEY, cur.base);
-      else localStorage.removeItem(API_BASE_LS_KEY);
+      writeCompatible(browserStorage(), API_BASE_LS_KEY, cur?.base ?? null);
     } catch {
       /* 隐私模式没有 localStorage：boot.js 的打点会少基址，只影响排障日志 */
     }
@@ -230,4 +174,4 @@ export class MachineStore {
   }
 }
 
-export const machines = new MachineStore(idb ? idbBackend() : memoryBackend());
+export const machines = new MachineStore(browserBackend() ?? memoryBackend());

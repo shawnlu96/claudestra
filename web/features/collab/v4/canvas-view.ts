@@ -101,13 +101,13 @@ const boxesOf = (c: ViewCanvas) => c.groups.flatMap((g) => [...g.nodes.map((n) =
  * 打开时的视口：整张能在 MIN_K 以上放下就整张放下；放不下就用 MIN_K，
  * 把有在跑节点（full）的那几个框对齐到左上角——它们是打开这页最想看的，剩下的由 offscreen 提示
  */
-export function initialView(c: ViewCanvas, vw: number, vh: number): View {
+export function initialView(c: ViewCanvas, vw: number, vh: number, minK = MIN_K): View {
   const fit = Math.min(1, (vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h);
-  if (!c.w || fit >= MIN_K) return { x: VIEW_PAD, y: VIEW_PAD, k: fit || 1 };
+  if (!c.w || fit >= minK) return { x: VIEW_PAD, y: VIEW_PAD, k: fit || 1 };
   const live = c.groups.filter((g) => g.nodes.some((n) => n.kind === "full"));
   const hot = live.length ? live : c.groups; // 对齐到框的左上角，框标题和边框不被切掉
   const x0 = Math.min(...hot.map((g) => g.x)), y0 = Math.min(...hot.map((g) => g.y));
-  return { x: VIEW_PAD - x0 * MIN_K, y: VIEW_PAD - y0 * MIN_K, k: MIN_K };
+  return { x: VIEW_PAD - x0 * minK, y: VIEW_PAD - y0 * minK, k: minK };
 }
 
 /** 视口外（含被截掉一截）的任务数，按方向；折叠组按里面的件数算 */
@@ -124,10 +124,10 @@ export function offscreen(c: ViewCanvas, v: View, vw: number, vh: number): { rig
 }
 
 /** 「适配全部」：整张放进视口，最大 1、最小 MIN_K；到下限还放不下就从左上角看起，其余靠拖 */
-export function fitAllView(c: ViewCanvas, vw: number, vh: number): View {
+export function fitAllView(c: ViewCanvas, vw: number, vh: number, minK = MIN_K): View {
   if (!c.w || !c.h) return { x: VIEW_PAD, y: VIEW_PAD, k: 1 };
   const k = Math.min(1, (vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h);
-  return { x: VIEW_PAD, y: VIEW_PAD, k: Math.max(MIN_K, k) };
+  return { x: VIEW_PAD, y: VIEW_PAD, k: Math.max(minK, k) };
 }
 
 /** 任务所在的框（自己的节点，或折叠它的那一组）平移到视口中间，缩放不变 */
@@ -139,10 +139,10 @@ function centerOn(v: View, b: Box, vw: number, vh: number): View {
  * 每次数据刷新 / 量到新尺寸 / 外面要求居中时调：第一次有图有尺寸就按 initialView 摆；Focus.seq 没处理过就居中一次
  * （框不在画布上也记为处理过，免得它后来出现时突然跳过去）；其余情况原样返回——刷新不动用户的视口
  */
-export function reconcileView(st: ViewState, c: ViewCanvas, vw: number, vh: number, focus: Focus | null): ViewState {
+export function reconcileView(st: ViewState, c: ViewCanvas, vw: number, vh: number, focus: Focus | null, initial = initialView): ViewState {
   if (!vw) return st;
   let next = st;
-  if (!st.placed && c.w > 0) next = { ...next, view: initialView(c, vw, vh), placed: true };
+  if (!st.placed && c.w > 0) next = { ...next, view: initial(c, vw, vh), placed: true };
   if (focus && focus.seq !== next.centered) {
     const id = c.boxOf.get(focus.id);
     const b = id ? boxesOf(c).find((x) => x.id === id)?.box : undefined;
@@ -163,4 +163,5 @@ export function panView(c: ViewCanvas, v: View, vw: number, vh: number, dir: Dir
 }
 
 /** 整张在文字下限（MIN_K）以上装得下吗；装不下时「适配全部」从左上角看起，并用动效示意到底了 */
-export const fitsAll = (c: ViewCanvas, vw: number, vh: number) => !c.w || Math.min((vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h) >= MIN_K;
+export const fitsAll = (c: ViewCanvas, vw: number, vh: number, minK = MIN_K) =>
+  !c.w || Math.min((vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h) >= minK;

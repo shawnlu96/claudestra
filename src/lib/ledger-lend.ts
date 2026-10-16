@@ -13,6 +13,7 @@ import { legacyLendOrders, legacyLendRoute } from "./ledger-lend-central-home.js
  * See docs/design/remote-capacity.md and tests/ledger-lend{,-write}.test.ts.
  */
 import { clearPeerCooldown, cooldownReleaseNotices } from "./lend-peer-cooldown.js"; import { createHash } from "node:crypto";
+import { authReviewReleases, pinnedPeerCooled, runtimeStopCooldown } from "./lend-peer-runtime-cooldown.js";
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry, LendFamily } from "./lend-config.js";
 import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type LeaseRequest, type LeaseState, type LendReceipt, type LendRefusal,
@@ -52,6 +53,7 @@ import { bounceReviewLine, bounceWork, fixBounce, reviewAfterBounce } from "./sc
 import { claimSuggest, notedSuggest } from "./role-model-settings-lend.js";
 import { withSuggest } from "./role-model-settings-wire.js";
 import type { ModelSuggest } from "./lend-wire-types.js";
+import { lendMemory } from "./memory-retrieve-lend.js";
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
   repo: string; pr: number | null; wire: OrderWire; text: string; sha256: string; status: LendOrderStatus; worker: string | null; leaseGen: number;
@@ -210,9 +212,13 @@ function peerRewrite<M extends { wire: OrderWire; whole?: OrderWire }>(db: Datab
  * aliased, secrets refused) and the wire check included. It writes no lend row; forPeer's own sha_cut / finding_alias notes are the only
  * events, as before. S2F6: a central card's home row (ledger-lend-central-pool.ts) is rendered with `notes: false`, under the center's
  * order id: the same rewrites, no event at all (finding ids needing an alias refused).
+ * PMEMTUNE1: on the local (notes) path the team-only project memory section is added before the gate (memory-retrieve-lend.ts);
+ * `memory.commit` records the push once the order row is written. memoryLendInjection off = null, byte-for-byte as before.
  */
 export function renderLendOffer(db: Database, ctx: WriteCtx, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput, opts: { notes?: boolean } = {}) {
-  const raw = orderFor(db, task, step, orderId, input);
+  const plain = orderFor(db, task, step, orderId, input);
+  const memory = opts.notes === false ? null : lendMemory(db, task, step, orderId, plain, { now: ctx.now });
+  const raw = memory ? { ...plain, wire: memory.wire, whole: memory.whole } : plain;
   const made = opts.notes === false ? peerRewrite(db, task, raw) : forPeer(db, ctx, task, raw); // card heads shortened, refused finding ids aliased (i28-GATE2)
   const head = made.wire.head as string;
   let wire: OrderWire;
@@ -228,7 +234,7 @@ export function renderLendOffer(db: Database, ctx: WriteCtx, task: LedgerTask, s
   }
   const parsed = parseOrderWire(JSON.parse(JSON.stringify(wire)));
   if (!parsed.ok) throw new LedgerError("invalid", `派单格式不合格：${parsed.error}`);
-  return { made, head, wire: parsed.value, text, sha256: sha256(text) };
+  return { made, head, wire: parsed.value, text, sha256: sha256(text), memory };
 }
 
 /** PM puts the card's current round in the pool for one peer; the order text is fixed here and never rebuilt. */
@@ -260,13 +266,14 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     if (live) throw new LedgerError("conflict", `这张卡已有未结的出借单 ${live.orderId}（先 lend-cancel，或 lend-reoffer）`);
     const n = (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE taskId = ? AND round = ?").get(task.id, task.round) as { n: number }).n;
     const orderId = `lend:${task.id}:s${task.specRev}:r${task.round}:a${n}`;
-    const { made, head, wire: parsed, text } = renderLendOffer(db, ctx, task, step, orderId, input);
+    const { made, head, wire: parsed, text, memory } = renderLendOffer(db, ctx, task, step, orderId, input);
     const now = ctx.now ?? Date.now();
     db.prepare(`INSERT INTO lend_orders (orderId, taskId, project, peer, family, step, specRev, round, head, repo, pr, wire, text, sha256, status, leaseMs,
       supersedes, createdBy, createdAt, updatedAt, branch, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pooled', ?, ?, ?, ?, ?, ?, ?)`).run(
       orderId, task.id, task.project, input.peer, input.family, step, task.specRev, task.round, head, input.repo, input.pr, JSON.stringify(parsed),
       text, sha256(text), LEASE_MS_DEFAULT, input.supersedes ?? null, ctx.actor, now, now, made.branch, made.base,
     );
+    memory?.commit(parsed); // the push is recorded only once the order row holds the wire (same transaction)
     if (made.branch) holdWriteLease(db, task, { peer: input.peer, fp: input.write!.fp.toLowerCase(), branch: made.branch, repo: input.repo }, now);
     markRelayBaseline(db, task, { orderId, taskId: task.id, project: task.project, peer: input.peer, step, specRev: task.specRev }, input.spec, now);
     note(db, ctx, { project: task.project, taskId: task.id, orderId, peer: input.peer }, `出借：${LABEL[step]}挂给 ${input.peer}（${input.family}）`,
@@ -323,8 +330,9 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
   const beforeBasis = lendAuthorBasis(db, o.taskId);
   if (LEND_LIVE.includes(o.status)) setStatus(db, o, "cancelled", now, why);
   unbindStep(db, o);
-  // 钉位只在台账记着该 peer 的授权已失效（lend_peers.grant 被收回置空 / 到期 / 不再含 write 或本仓库）时解除；授权仍在或没有 hello 记录就保留，照旧再挂给它
-  const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") || !g.repos.includes(o.repo));
+  // 钉位在该 peer 的授权已失效（grant 收回置空 / 到期 / 不再含 write 或本仓库）或它这一家族处于 runtime 冷却（NETCOOL1）时解除；否则保留，照旧再挂给它
+  const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") || !g.repos.includes(o.repo))
+    || pinnedPeerCooled(db, o, now);
   const task = mustTask(db, o.taskId), r = leaseRestore(task, endWriteLease(db, o.taskId, why, now), unpin ? o.peer : undefined);
   if (r) setTask(db, ctx, { id: task.id, rev: task.rev, patch: r.patch as never });
   note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status, ...(r ? { restored: r.restored, unpinned: r.unpinned } : {}) });
@@ -462,11 +470,12 @@ export function leaseLend(db: Database, ctx: WriteCtx, peer: string, req: LeaseR
       return { lease: lease({ ...o, leaseUntil: now + o.leaseMs }), notices: [] };
     }
     const why = req.detail ? `：${req.detail}` : "";
-    const started = req.reason === "stopped";
+    const started = req.reason === "stopped" && !authReviewReleases(db, o, req, now); // 登录失效的审查单按 not_started 释放（AUTHCOOL1）
     setStatus(db, o, started ? "unknown" : "released", now, `${req.reason}${why}`);
     if (!started) unbindStep(db, o);
     note(db, ctx, o, `出借：${peer} 报 ${req.reason}${why}`, { op: "release", reason: req.reason, gen: o.leaseGen,
       ...(req.failure ? { failure: req.failure, detail: req.detail } : {}) }); // MODELXP2：出借方结构化类别原样入账（parseLease 已严格校验）
+    runtimeStopCooldown(db, ctx, o, req, now); // AUTHCOOL1：登录失效 / 连续报停冷却这个 (peer, family)
     const retry = started ? null : fixStartRetry(db, ctx, o, req.detail, now); // i28-FB1：起点不符本轮第一次不结束写租约，调度刷新起点重挂
     if (retry) return { lease: null, notices: [retry] };
     // 写单没起得来（没有推送权限、clone 不下来…）= 派不回这个出借方：写租约结束，卡退回本机

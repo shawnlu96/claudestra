@@ -21,6 +21,7 @@ import { plannerPmUiGate } from "./ledger-ui-approve-verdict.js";
 import { ownerVisualOf, projectUiGate } from "./scheduler-ui-gate.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import { newLocalWriteRoom, returnedFix } from "./scheduler-slot-hold.js";
+import { ownerFreshFact, type MainContains, type OwnerFreshSnapshot } from "./scheduler-ui-owner-fresh.js";
 
 export interface SnapshotOpts {
   registry: readonly RegistryAgent[];
@@ -29,6 +30,8 @@ export interface SnapshotOpts {
   now?: number;
   /** Shared-pool policy and the effective borrow list (auto cards only; absent = never pool). */
   pool?: { remote: RemotePolicy; borrow: readonly BorrowEntry[] };
+  /** UIOWNCARRY2: whether a head contains main (absent = local git in the project's repoDir, scheduler-ui-owner-fresh.ts). */
+  mainContains?: MainContains;
 }
 
 const familyOf = (a: RegistryAgent): AuthorFamily | null =>
@@ -81,7 +84,7 @@ function slotFacts(db: Database, task: LedgerTask, events: readonly LedgerEvent[
 }
 
 /** Current state only: registry sessions, steps, bindings, asks and resources have no history, so no past replay. */
-export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts): PlannerSnapshot {
+export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts): PlannerSnapshot & OwnerFreshSnapshot {
   const workflow = getWorkflow(db, task.id);
   const events = listEvents(db, { project: task.project, target: task.id });
   const steps = stepsOf(db, task);
@@ -95,12 +98,14 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
   const slots = opts.pool?.remote.agents ? poolSnapshotSlots(db, task, opts.pool.remote.agents) : slotFacts(db, task, events, opts.maxWorkers);
   const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
   const digest = typeof task.extra.screenshotsDigest === "string" ? task.extra.screenshotsDigest : null;
+  const ownerVisual = ownerVisualOf(db, task, events), fresh = ownerFreshFact(task, workflow?.template, ownerVisual, { contains: opts.mainContains });
   return {
     task, workflow, events, intents: [...real, ...shadow.intents].sort((a, b) => a.eventSeq - b.eventSeq),
     blockedBy: blockedBy(task.id, depViews(listDeps(db, task.project), listTasks(db, task.project))).map((d) => d.from),
     queueFrozen: getMeta(db, task.project).queueFrozen.frozen, fileGlobs: globs,
     heldResources: slots.held, workerCount: slots.workerCount, maxWorkers: opts.maxWorkers, freeWorkerSlot: slots.freeWorkerSlot,
     author, reviewer, reviewDispatches: shadow.proofs, uiGate: projectUiGate(db, task, opts.now ?? Date.now()), screenshotsDigest: digest,
-    pmUiGate: plannerPmUiGate(db, task, events), ownerVisual: ownerVisualOf(db, task, events), gate: gateInputs(db, task),
+    pmUiGate: plannerPmUiGate(db, task, events), ownerVisual, gate: gateInputs(db, task),
+    ...(fresh ? { ownerFresh: fresh } : {}), // UIOWNCARRY2: review-stage ownerVisual UI cards only, switch not off
   };
 }

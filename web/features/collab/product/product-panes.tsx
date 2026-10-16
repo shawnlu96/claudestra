@@ -47,7 +47,7 @@ export function ProductPanes(p: Props) {
     : p.narrow ? ['dag', 'progress'] : ['dag', 'progress', 'team'];
   const content = tab === 'team' ? <div className={v.teamPane}>{p.team}</div> : tab === 'progress' ? p.progress
     : loading && tab === 'product' ? <div className={s.loading} role="status">{p.tr('加载中…')}</div>
-    : board && tab === 'product' ? <ProductView board={board} narrow={p.narrow} now={p.now} onFeature={p.onFeature} tr={p.tr} />
+    : board && tab === 'product' ? <ProductView board={board} narrow={p.narrow} now={p.now} onFeature={p.onFeature} tr={p.tr} onTask={p.onTask} />
       : board && feature ? <>
         <FeatureTrail title={feature.title} onBack={() => p.setTab('product')} tr={p.tr} />
         <div key={hasFeatureSnapshot(p.dagBoard, feature.id) ? 'snapshot' : 'fallback'} className={s.recovery}>

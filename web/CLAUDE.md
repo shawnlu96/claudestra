@@ -1,8 +1,8 @@
-# Claudestra Web 客户端
+# Floka Web 客户端
 
 [English](./CLAUDE.en.md) · **简体中文**
 
-Claudestra 的 Next.js Web 前门（Discord 之外的第二入口）：**纯静态导出**（`output: "export"`），由中继（`RELAY_STATIC_DIR`）或 bridge（`BRIDGE_STATIC_DIR`）托管，浏览器直接打 bridge 的 `/api/v1/*`。没有服务端、没有 BFF、没有登录体系——登录 = 设备配对（`docs/design-hosted-frontend.md`）。
+Floka 的 Next.js Web 前门（Discord 之外的第二入口）：**纯静态导出**（`output: "export"`），由中继（`RELAY_STATIC_DIR`）或 bridge（`BRIDGE_STATIC_DIR`）托管，浏览器直接打 bridge 的 `/api/v1/*`。没有服务端、没有 BFF、没有登录体系——登录 = 设备配对（`docs/design-hosted-frontend.md`）。
 
 ## 技术栈
 
@@ -41,7 +41,7 @@ public/sw.js          Web Push：点通知向发通知那台机器回 read
 
 打开 agent：`fetchHistory`（bridge `/agents/:name/history[/:sid]`）→ `openAgentEventStream`（订阅 `/events`，本地按 agent 过滤 + 翻译 + 连流补拉 `/pending` `/bg-tasks`）；`send` fire-and-forget，输出经流回来。完整说明见 [docs/web/data-flow.md](../docs/web/data-flow.md)。必须守住：
 
-- **唤醒对齐 = cursor 差量**：游标 `{sessionId, lastSeq}`，先差量后开流（串行），流不带 `since`；轮转 / 超一页 / 连败回退全量。
+- **唤醒对齐 = cursor 差量**：游标 `{sessionId, lastSeq}`，流不带 `since`；流先开、事件排队到历史落地；轮转/超页/连败退全量。
 - **直播 ↔ 历史判重按 seq**（`features/chat/live-merge.ts`），别用时间戳猜。
 - **重复发送闸**（`send-dedupe.ts`）：同 agent 同载荷 1.5s 内只发一次。
 - 中断 / 权限卡 / AUQ：事件下行 → 卡片 → `POST /agents/:name/{interrupt,answer}` → tmux 按键。权限卡下行暂缺（permission-watcher 只面向 Discord）。

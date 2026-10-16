@@ -48,8 +48,8 @@ async function checkout(env: LocalAuthorEnv, p: LocalAuthorPlan, guard: () => vo
   if (left === undefined) {
     const existing = (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${p.branch}`])).code === 0;
     if (existing && !rebuild) return `分支 ${p.branch} 已存在，保留并等待核对`;
-    const fetch = await git(["fetch", "-q", "origin"]);
-    if (fetch.code !== 0) return `更新仓库失败：${fetch.out}`;
+    const fetch = p.localMerge ? null : await git(["fetch", "-q", "origin"]); // localMerge 项目没有 origin，起点在本机
+    if (fetch && fetch.code !== 0) return `更新仓库失败：${fetch.out}`;
     if ((await git(["check-ref-format", "--branch", p.branch])).code !== 0) return "卡上分支名不合法";
     const add = rebuild ? await rebuild.add(git, p, existing) : await addAuthorWorktree(git, p); // AREB1: swap, PR head, old branch, drift
     if (typeof add !== "object" || "kind" in add) return add;

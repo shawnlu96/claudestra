@@ -32,8 +32,10 @@ side. Launcher is last within each stage. Rollback never re-enters forward work.
 - One machine/service-set lock and journal must cover all transaction IDs. Other
   installers and restart actors must honor the same lock and active journal. A real implementation
   should reuse the repository lock helper; its lease must cover in-flight calls.
-- Journal saves are atomic and durable. The plan identity includes all rendered
-  bytes. Changed plans, corrupt cursors and unknown versions are refused. A
+- Journal saves are atomic and durable. The original rendered input is retained
+  in `snapshot` (older journals recover it from `planKey`). Resume/rollback use
+  that snapshot after checking transaction ID and labels; a Bun upgrade or moved
+  checkout cannot strand recovery. Corrupt cursors and unknown versions are refused. A
   different transaction cannot replace the journal, even after completion;
   retiring it is a separate operation outside this package.
 - All mutations must be idempotent by transaction/service. A rejected promise
@@ -44,6 +46,9 @@ side. Launcher is last within each stage. Rollback never re-enters forward work.
   merely killing a PID. It retains configurations even if prepare did not finish,
   so an early rollback can reload untouched old settings. Inspect includes tracked processes even
   when a registration is absent. Unknown observations are explicit `null`.
+- `pids` includes descendants/orphans for exit confirmation. `instances` counts
+  only launchd job main processes. Existing adapters that already report only
+  main PIDs may omit `instances`; new adapters must provide both sets.
 - Preparing/restoring configurations never loads them. Commit retains backups
   and recovery metadata. A real controller must validate staged plist identity
   against the supplied label before making it eligible to load.

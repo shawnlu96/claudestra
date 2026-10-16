@@ -5,8 +5,10 @@
  * `observe` keeps two answers apart: the outcome (result.json) and whether the job may still be alive (launchd + the job's
  * maintenance lease). Only a checked "not alive" ends a deploy. Tests: tests/scheduler-deploy-job.test.ts.
  */
+import { machineResult } from "./scheduler-deploy-lock.js";
+import { validateCenterJob, type CenterJobData } from "./center-deploy-worker.js";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { lockOwnedBy } from "./file-lock.js";
 import { statePath } from "./paths.js";
@@ -14,10 +16,12 @@ import { SRC_DIR } from "./repo-root.js";
 import { resolveBunPath } from "./bun-path.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { runBounded } from "./run-bounded.js";
+import { claimLaunchdJob, launchdJobEnv, submitLaunchdJob, removeLaunchdJob } from "./launchd-oneshot.js";
 import { DEPLOY_LABEL_PREFIX, type DeployRun } from "./scheduler-deploy.js";
 import type { DeployTarget } from "./scheduler-config.js";
 
 export interface DeployJob {
+  kind?: "center"; center?: CenterJobData;
   intentId: string; mergeSha: string; taskId: string; prRef: string; label: string;
   repoDir: string; relayArgv: string[] | null; restartLabels: string[]; timeoutMs: number; createdAt: number;
   env: Record<string, string>;
@@ -26,7 +30,7 @@ export interface DeployJob {
   deploySha?: string;
 }
 type Liveness = "alive" | "dead" | "unreadable";
-type JobView = { label: string; liveness: Liveness; result: { ok: boolean; summary: string } | null; corrupt?: string; deadline: number };
+type JobView = { label: string; liveness: Liveness; result: { ok: boolean; summary: string; status?: "deferred" } | null; corrupt?: string; deadline: number };
 export interface DeployJobs {
   /** The intent's launchd label, fixed before anything is written (it follows from the job directory path). */
   label(run: DeployRun): string;
@@ -44,17 +48,6 @@ export interface DeployJobs {
 const LEASE_FRESH_MS = 90_000;
 const GRACE_MS = 60_000;
 const safeText = (s: unknown): s is string => typeof s === "string" && s.length > 0 && s.length <= 500 && !/[\p{Cc}\p{Cf}]/u.test(s);
-const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-/** Persist only execution context, never inherited tokens or credentials. */
-function deployEnv(env: NodeJS.ProcessEnv): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const key of ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SSH_AUTH_SOCK", "BRIDGE_PORT",
-    "CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR", "CLAUDESTRA_SANDBOX", "CLAUDESTRA_SANDBOX_ROOT",
-    "CLAUDESTRA_SANDBOX_DENY_DIRS", "CLAUDESTRA_SANDBOX_DENY_PORTS"]) if (env[key]) out[key] = env[key]!;
-  return out;
-}
-
 const argvOk = (v: unknown, max: number): v is string[] => Array.isArray(v) && v.length >= 1 && v.length <= max && v.every(safeText);
 
 export function readDeployJob(path: string): DeployJob {
@@ -67,29 +60,8 @@ export function readDeployJob(path: string): DeployJob {
     !Number.isInteger(r.timeoutMs) || r.timeoutMs < 1000 || r.timeoutMs > 3_600_000 || !Number.isFinite(r.createdAt) ||
     !r.env || Object.values(r.env).some((v) => typeof v !== "string") ||
     (r.deploySha !== undefined && (typeof r.deploySha !== "string" || !/^[a-f0-9]{40}$/i.test(r.deploySha)))) throw new Error("invalid deployment request");
+  if (r.kind === "center") validateCenterJob(r); else if (r.kind !== undefined) throw new Error("invalid deployment kind");
   return r;
-}
-
-function plist(job: DeployJob, dir: string, requestPath: string): string {
-  const argv = [resolveBunPath(), "--no-env-file", join(SRC_DIR, "scheduler.ts"), "--deploy-job", requestPath];
-  const env = Object.entries(job.env).map(([k, v]) => `    <key>${xml(k)}</key><string>${xml(v)}</string>`).join("\n");
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>${job.label}</string>
-  <key>ProgramArguments</key><array>
-${argv.map((a) => `    <string>${xml(a)}</string>`).join("\n")}
-  </array>
-  <key>WorkingDirectory</key><string>${xml(job.repoDir)}</string>
-  <key>EnvironmentVariables</key><dict>
-${env}
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><false/>
-  <key>StandardOutPath</key><string>${xml(join(dir, "stdout.log"))}</string>
-  <key>StandardErrorPath</key><string>${xml(join(dir, "stderr.log"))}</string>
-</dict></plist>
-`;
 }
 
 /** Alive if the job holds a fresh maintenance lease or launchd runs it; dead only when both say no. */
@@ -134,22 +106,16 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
       const label = labelFor(dir);
       if (opts.v2 && existsSync(dir)) return label; // an existing claim is observed before the hook can hold or call out
       const job: DeployJob = { intentId: run.intentId, mergeSha: run.mergeSha, taskId: run.taskId, prRef: run.prRef, label, repoDir,
-        relayArgv: target.relayArgv ?? null, restartLabels: target.restartLabels, timeoutMs: target.timeoutMs, createdAt: now(), env: deployEnv(process.env),
+        relayArgv: target.relayArgv ?? null, restartLabels: target.restartLabels, timeoutMs: target.timeoutMs, createdAt: now(), env: launchdJobEnv(process.env),
         ...(deploySha ? { deploySha } : {}) };
       const extra = opts.v2 ? await opts.v2.prepare(run, job) : {};
       opts.v2?.confirm?.(run, extra);
-      mkdirSync(root, { recursive: true, mode: 0o700 });
-      try { mkdirSync(dir, { mode: 0o700 }); }
-      catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        return label; // An existing claim is observed, never submitted a second time.
-      }
-      const requestPath = join(dir, "request.json"), plistPath = join(dir, "job.plist");
+      if (!claimLaunchdJob(dir)) return label; // An existing claim is observed, never submitted a second time.
+      const requestPath = join(dir, "request.json");
       writeJsonAtomicSync(requestPath, { ...job, ...extra }, { mode: 0o600 });
       readDeployJob(requestPath);
-      writeFileSync(plistPath, plist(job, dir, requestPath), { mode: 0o600 });
-      const r = await command(["/bin/launchctl", "bootstrap", domain, plistPath], { timeoutMs: 15_000 });
-      if (r.code !== 0 || r.timedOut) throw new Error(`launchctl bootstrap ${r.timedOut ? "timeout" : `exit ${r.code}`}: ${r.stderr.trim().slice(0, 200)}`);
+      await submitLaunchdJob({ label: job.label, dir, cwd: job.repoDir, env: job.env,
+        argv: [resolveBunPath(), "--no-env-file", join(SRC_DIR, "scheduler.ts"), "--deploy-job", requestPath] }, domain, command);
       return label;
     },
     async observe(run) {
@@ -175,17 +141,15 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
       const settled = first.status === "missing" && live === "dead" ? read() : first;
       if (settled.status === "missing") return { label: request.label, liveness: live, result: null, deadline, ...(badRequest ? { corrupt: badRequest } : {}) };
       if (settled.status !== "ok") return { label: request.label, liveness: live, result: null, corrupt: `result.json ${settled.status}`, deadline };
-      const r = settled.data as { intentId?: unknown; mergeSha?: unknown; ok?: unknown; summary?: unknown };
+      const r = settled.data as { intentId?: unknown; mergeSha?: unknown; ok?: unknown; summary?: unknown; status?: unknown };
       if (r.intentId !== run.intentId || r.mergeSha !== run.mergeSha || typeof r.ok !== "boolean") {
         return { label: request.label, liveness: live, result: null, corrupt: "result.json identity or format invalid", deadline };
       }
-      return { label: request.label, liveness: live, result: { ok: r.ok, summary: String(r.summary ?? "").slice(0, 400) }, deadline };
+      return { label: request.label, liveness: live, result: { ...machineResult(r), ok: r.ok, summary: String(r.summary ?? "").slice(0, 400) }, deadline };
     },
     async remove(label) {
       if (!label.startsWith(DEPLOY_LABEL_PREFIX)) throw new Error("refusing to remove a non-deploy label");
-      const r = await command(["/bin/launchctl", "bootout", `${domain}/${label}`], { timeoutMs: 30_000 });
-      // 3 / 113 = no such service: already gone, which is the goal.
-      return !r.timedOut && (r.code === 0 || r.code === 3 || r.code === 113 || /could not find|no such process/i.test(r.stderr));
+      return removeLaunchdJob(label, domain, command);
     },
   };
 }

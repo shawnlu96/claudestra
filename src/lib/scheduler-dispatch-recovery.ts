@@ -47,11 +47,13 @@ import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { planScheduler, type PlannerDecision, type PlannerSnapshot } from "./scheduler-plan.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { workOrderFor } from "./scheduler-work-order.js";
+import { sendWithMemory } from "./memory-inject-dispatch.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { deliveryFor, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { specHolds } from "./recovery-plan-gap.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
@@ -76,7 +78,7 @@ export interface TakeoverDeps {
    * and once more after the claim; absent / null / throwing = no_grant.
    */
   grant?(project: string): LiveGrant | null;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   /**
    * observe mode's one record per would-be action (recovery-policy.ts recordObserved; production: `ledger scheduler-recovery-observe`);
    * absent = nothing recorded. Throwing = the record was not written: the card still ends as observe, PM told once per process, no retry.
@@ -155,7 +157,7 @@ class Takeover {
   async tell(code: string, text: string, once?: string): Promise<void> {
     const key = once ?? `${this.task.id}\n${code}\n${text}`;
     if (this.deps.told?.has(key)) return;
-    try { await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 本机接管：${text}`); this.deps.told?.add(key); }
+    try { await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 本机接管：${text}`, "action"); this.deps.told?.add(key); }
     catch (e) { if (e instanceof SchedulerStopped) throw e; console.error(`⚠️ [scheduler] 本机接管通知没发出去（下轮重发）：${(e as Error).message}`); }
   }
 
@@ -386,7 +388,7 @@ class Takeover {
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.deps.db, ref, intent) : null;
     if (unpullable) delivery = { mode: "text", reason: `领单工具拿不到这张单（${oneLine(unpullable)}），改发全文` };
-    const r = await driveDispatch(this.ops(guard), w, ref, { ...order, delivery });
+    const r = await sendWithMemory(this.deps.db, task, { ...order, delivery }, (o) => driveDispatch(this.ops(guard), w, ref, o));
     if (r.kind === "sent") return this.out("sent", `本机 Codex 接管已派 ${order.step}：${r.receipt.route}`);
     if (r.kind === "held") await this.tell("unknown", `本机接管派单未定：${r.reason}`);
     return this.out(r.kind === "settled" ? "settled" : r.kind, "reason" in r ? r.reason : r.kind === "settled" ? r.status : "");
@@ -472,7 +474,7 @@ export interface TakeoverWire {
 }
 
 /** Production step, after autostart in the same budget and on its pace (yield per card); no policy port / auto dispatch off = nothing. */
-export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pace: TickPace, notifyPm: (project: string, text: string) => Promise<unknown>):
+export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pace: TickPace, notifyPm: (project: string, text: string, level: PmNoticeLevel) => Promise<unknown>):
   Promise<{ taskId: string; error: string }[]> {
   if (!o.takeoverPolicy || !config.enabled || config.autoDispatch !== true) return [];
   const auto = autoTickDeps(o.db, { active: o.active, lease: o.lease });
@@ -481,7 +483,7 @@ export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pac
     worker: auto.worker, grant: liveGrant, authorRuntime: (task) => {
       const agents = config.projects[task.project]?.agents;
       return agents ? poolAuthorRuntime(task.project, agents, o.db.filename) : localAuthorRuntime(task.project);
-    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: observeByCli(o.ledger, o.active),
+    }, notifyPm: async (task, text, level) => { await notifyPm(task.project, text, level); }, observe: observeByCli(o.ledger, o.active),
     codexQuota: async () => (await readInventoryQuota()).codex, borrow: readEffectiveBorrow, now: Date.now, told: TOLD,
   }, config.projects, pace)).failed;
 }

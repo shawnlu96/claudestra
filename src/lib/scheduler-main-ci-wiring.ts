@@ -16,6 +16,7 @@
  * - the train tick (scheduler-merge-train-tick.ts): a testing / settling train is voided (no culprit, no bounce), then cleans up.
  * A PM repair binding (`ledger main-ci-repair`, planMainCi's approval) lets exactly that card / head / main / fault through the serial path.
  */
+import { asInfo } from "./pm-notice-level.js";
 import { readFailureResponse } from "./ci-main-failure-response-runtime.js";
 import type { Database } from "bun:sqlite";
 import { getWorkflow } from "./ledger-scheduler.js";
@@ -23,7 +24,7 @@ import { getTask, listEvents } from "./ledger-store.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { runBounded } from "./run-bounded.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { prMergeOff, type SchedulerConfig } from "./scheduler-config.js";
 import { projectRepo } from "./scheduler-foreign-repo.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MainCiTarget } from "./scheduler-main-ci.js";
@@ -36,6 +37,7 @@ import type { TrainStore } from "./scheduler-merge-train.js";
 import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
 import { trainCandidates } from "./scheduler-merge-train-tick.js";
 import { isTestProcess } from "./test-guard.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type ProjectSchedule = SchedulerConfig["projects"][string];
@@ -44,6 +46,7 @@ export interface MainCiPassDeps { manager: Manager; command: typeof runBounded; 
 /** MQ1's gate (manual-merge-queue-pass.ts); the main CI gate is composed into these two in place. */
 interface TrainFence { blocks(project: string): boolean; formFence(project: string, save: () => void): void }
 const stopped = (e: unknown) => e instanceof SchedulerStopped;
+const OBSERVE_CLAIM = ":observe";
 
 function modeOf(policy: RecoveryPolicyPort, project: string): RecoveryMode {
   try { return policy(project, "mainCiPause").mode; }
@@ -67,11 +70,11 @@ async function ledger(m: Manager, project: string, op: string, ...args: string[]
   return r;
 }
 
-async function notify(gate: MainCiGate, project: string, text: string, active?: () => void): Promise<void> {
+async function notify(gate: MainCiGate, project: string, text: string, level: PmNoticeLevel, active?: () => void): Promise<void> {
   if (mainCiTestPorts.notify) return mainCiTestPorts.notify(project, text);
   const alive = () => { try { active?.(); return true; } catch { return false; } };
   active?.();
-  try { await notifyProjectPm(gate.db, project, text, { fromName: "scheduler", stillActive: alive }); } finally { active?.(); }
+  try { await notifyProjectPm(gate.db, project, text, { fromName: "scheduler", level, stillActive: alive }); } finally { active?.(); }
 }
 
 /** One read of one project, then its durable state, its observe note and its PM notice; the gate keeps the read for this pass. */
@@ -86,7 +89,10 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
   }
   const response = await readFailureResponse(gate.db, { project, health, currentMainSha: current, now: gate.now() },
     { ...deps, command: mainCiTestPorts.command ?? deps.command, policy: deps.policy ?? recoveryPolicy, cwd: policy.repoDir });
-  const plan = mainCiPlanFor(gate, project, { taskId: "", head: "" }, mainCiClaims(gate.db, project))!;
+  // observe 的通知只记卡片、不送 PM，领的键带 OBSERVE_CLAIM：切 on 时同一 main 的暂停告警不被它挡住；observe 下两种键都算已领
+  const claimed = mainCiClaims(gate.db, project);
+  const plan = mainCiPlanFor(gate, project, { taskId: "", head: "" },
+    mode === "on" ? claimed : claimed.map((k) => (k.endsWith(OBSERVE_CLAIM) ? k.slice(0, -OBSERVE_CLAIM.length) : k)))!;
   // MAINCIW2: a sample per push run id / attempt of the current SHA, under observe and on, so a failed attempt and its successful
   // rerun each keep the judgement of their time. reason = this mode's own plan reason (observe: the original rule, unchanged);
   // data.evidence = the run-aware reason and runs. With no push run listed only observe's original pause note, byte for byte.
@@ -99,15 +105,17 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
   const n = plan.notification;
   if (!n) return;
   // claim first, durably; a lost claim (another process, an earlier run) means no send, and a send that fails after it is not retried
-  const claim = await ledger(deps.manager, project, "claim", "--key", n.key, "--kind", n.kind, "--sha", n.mainSha ?? "none");
-  if (claim.claimed === true) await notify(gate, project, mainCiNoticeText(target, health, n, mode) + response, deps.active);
+  const claim = await ledger(deps.manager, project, "claim", "--key", mode === "on" ? n.key : `${n.key}${OBSERVE_CLAIM}`, "--kind", n.kind,
+    "--sha", n.mainSha ?? "none");
+  const send = (level: PmNoticeLevel) => notify(gate, project, mainCiNoticeText(target, health, n, mode) + response, level, deps.active);
+  if (claim.claimed === true) await (mode === "on" ? send("action") : asInfo(() => send("info"))); // 没开暂停只是观察：常规
 }
 
 /** The pass's one call (scheduler-pass.ts). Never throws for a project's read or write, only for a stop. */
 export async function mainCiPass(db: Database, config: SchedulerConfig, manual: TrainFence, deps: MainCiPassDeps): Promise<void> {
   const gate = openMainCiGate(db, config);
   for (const [project, policy] of Object.entries(config.projects)) {
-    if (policy.mergeHandoff) continue; // the repository owner merges (MHO1): no train, no merge driver here
+    if (prMergeOff(policy)) continue; // the repository owner (MHO1) or the PM locally (ONB-2) merges: no train, no merge driver here
     const mode = modeOf(deps.policy ?? recoveryPolicy, project);
     gate.modes.set(project, mode);
     // off: no GitHub read, no note, no notice; a test process has no live default (as the train's context): only an injected gh reads

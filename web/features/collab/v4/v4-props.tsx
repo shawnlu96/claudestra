@@ -23,8 +23,12 @@ import { countText } from "../count-words-i18n";
 import { MACHINE_WORDS } from "@/lib/owner-words";
 import { instanceName } from "../team-instance-names";
 import { sharedIdentity } from "../team-source-key";
+import { refreshBindings } from "@/lib/collab-source-binding";
+import { waitsText } from "../owner-waits";
 import { useInstanceNames } from "../work/use-work-board";
 import { useTeamTab } from "../collab-page-head";
+import { attentionAria } from "./attention-page";
+import type { AttentionWhich } from "./attention-list";
 import v from "./v4.module.css";
 
 export const hhmm = (ms: number) => new Date(ms).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -87,6 +91,8 @@ export function Overview(props: {
   since?: React.ReactNode;
   /** 走表的现在（use-collab）：镜像新鲜度随它重判；不给按 ov.now */
   now?: number;
+  /** 点「其中 N 条出问题 / 卡住」里的数：打开那一类的列表页（attention-page.tsx）；不给 = 数照旧是纯文字 */
+  onAttention?: (which: AttentionWhich) => void;
 }) {
   const { ov, view, waits, projectName, onPick, tr } = props;
   const counts = props.counts ?? NO_COUNTS;
@@ -94,7 +100,7 @@ export function Overview(props: {
     <Shell title={projectName} sub={tr("项目概览")} tr={tr}>
       {props.since}
       <Sec title={tr("现在")}>
-        <NowLine counts={counts} view={view} tr={tr} />
+        <NowLine counts={counts} view={view} tr={tr} onAttention={props.onAttention} />
       </Sec>
       <Sec title={tr("要你定的")}>
         {waits.length ? waits.map((w) => (
@@ -114,13 +120,26 @@ export function Overview(props: {
   );
 }
 
-/** 右栏「现在」：在干活 a · 在等 b，其中 N 条出问题 / 卡住（attention 只是标注）；20 秒后仍缺 feature 时下面一句提示 */
-function NowLine({ counts, view, tr }: { counts: CountState; view: HomeView; tr: Tr }) {
+const NUM = "\u0000";
+/** 「其中 N 条出问题」里的 N 做成按钮（虚下划线、颜色随外层、能 Tab 聚焦）；没给 onAttention 时原样是文字 */
+function FlagText({ word, n, which, tr, onAttention }: { word: string; n: number; which: AttentionWhich; tr: Tr; onAttention?: (which: AttentionWhich) => void }) {
+  if (!onAttention) return <>{countText(tr, word, { n })}</>;
+  const [pre = "", post = ""] = countText(tr, word, { n: NUM }).split(NUM);
+  return (
+    <>{pre}<button type="button" data-attention={which} aria-label={attentionAria(tr, which, n)} onClick={() => onAttention(which)}
+      style={{ color: "inherit", padding: 0, textDecoration: "underline dashed", textUnderlineOffset: 3 }}>{n}</button>{post}</>
+  );
+}
+
+/** 右栏「现在」：在干活 a · 在等 b，其中 N 条出问题 / 卡住（attention 只是标注，数能点开列出是哪几个）；20 秒后仍缺 feature 时下面一句提示 */
+function NowLine({ counts, view, tr, onAttention }: { counts: CountState; view: HomeView; tr: Tr; onAttention?: (which: AttentionWhich) => void }) {
   const frozen = view.pm.frozen && <span className={v.warn}> · {tr("合并队列冻结：{r}", { r: view.pm.frozen })}</span>;
   if (counts.status !== "ready") return <div className={v.kv} data-now>{counts.status === "loading" && <b className={v.skel} aria-hidden />}{frozen}</div>;
   const { words } = counts.snap, a = attentionOf(counts.snap, view.lines);
-  const flags = [a.problem > 0 && <span key="p" className={v.bad}>{countText(tr, "其中 {n} 条出问题", { n: a.problem })}</span>,
-    a.stuck > 0 && <span key="s" className={v.warn}>{countText(tr, "{n} 条卡住", { n: a.stuck })}</span>].filter(Boolean);
+  const flags = [
+    a.problem > 0 && <span key="p" className={v.bad}><FlagText word="其中 {n} 条出问题" n={a.problem} which="problem" tr={tr} onAttention={onAttention} /></span>,
+    a.stuck > 0 && <span key="s" className={v.warn}><FlagText word="{n} 条卡住" n={a.stuck} which="stuck" tr={tr} onAttention={onAttention} /></span>,
+  ].filter(Boolean);
   return (
     <>
       <div className={v.kv} data-now>
@@ -183,10 +202,22 @@ export function FoldPage({ fold, ov, onPick, onClose, tr }: { fold: CFold; ov: L
   );
 }
 
-export function WaitsPage({ waits, ov, onPick, onClose, tr }: { waits: readonly OwnerWait[]; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr }) {
+/** 「待你处理」读不到时的重试（UXCARD3）：重读待办列表和这台机器的团队绑定，不整页刷新 */
+function retryWaits(project: string) {
+  void asksStore.refresh();
+  const machine = sharedIdentity(project)?.machine;
+  if (machine) void refreshBindings(machine);
+}
+
+export function WaitsPage({ waits, unknown, project, ov, onPick, onClose, tr }: {
+  waits: readonly OwnerWait[]; unknown?: boolean; project: string; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: Tr;
+}) {
   return (
     <Shell title={tr("待你处理")} sub={tr("这个项目上开着、等你的")} onClose={onClose} tr={tr}>
-      {waits.length ? waits.map((w) => (
+      {unknown ? (
+        <div className={v.muted} data-waits="unknown">{waitsText(tr, "读不到")}{" "}
+          <button type="button" className={s.btn} onClick={() => retryWaits(project)}>{waitsText(tr, "重试")}</button></div>
+      ) : waits.length ? waits.map((w) => (
         <div key={w.id} className={v.row}>{w.taskId && <TaskLink id={w.taskId} ov={ov} onPick={onPick} />}<div>{w.title}</div><WaitGo w={w} /></div>
       )) : <div className={v.muted}>{tr("没有")}</div>}
     </Shell>

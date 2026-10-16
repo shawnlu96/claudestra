@@ -2,7 +2,7 @@
 // 旧实现每次重连都调 client.login()：@discordjs/ws 销毁旧 shard 时，正在 500ms 空闲里等自重连的 shard 销毁不掉，
 // 移出 map 后还在后台重连，恢复后各自 IDENTIFY → 同一次按钮点击被处理 N 次。接线与 src/bridge.ts 相同。
 import { afterAll, expect, spyOn, test } from "bun:test";
-import { Client, GatewayIntentBits } from "discord.js";
+import { Client, GatewayIntentBits, Routes } from "discord.js";
 import { createDiscordConnector, createStatusWatchdog, gatewayConnected, LOGIN_TIMEOUT_MS } from "../src/bridge/discord-login.ts";
 import { createShardReaper } from "../src/bridge/discord-login-shards.ts";
 import { startFakeDiscord, type FakeDiscord } from "./helpers/fake-discord.ts";
@@ -57,4 +57,40 @@ test("已连上 → 断网超过 5 分钟 → 恢复：只有 1 个网关会话�
   await Bun.sleep(500);
   expect(clicks).toBe(1);
   warn.mockRestore();
+}, 60_000);
+
+// DNF-1 r4 P2-1：login 失败后 discord.js 的 client.destroy() 只在第一次真销毁 shard（ws.destroyed 不复位），之后漏下的 shard
+// 在退避中途自己连上 → connector 以为已连上不再 login → token 已被清空：收得到发不出，看门狗也救不回。guard 换成透传这条就红。
+test("恢复落在退避中途：token 还在，REST 能用", async () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  const port = (() => { const s = Bun.serve({ port: 0, fetch: () => new Response() }); const p = s.port!; s.stop(true); return p; })();
+  const f = startFakeDiscord(port, () => {}, 3_600_000);
+  const reaper = createShardReaper();
+  const c = new Client({
+    intents: [GatewayIntentBits.Guilds], ws: { buildStrategy: reaper.buildStrategy },
+    rest: { api: `http://127.0.0.1:${port}/api`, retries: 0, timeout: 2_000 },
+  });
+  try {
+    const quiet = { log: () => {}, warn: () => {}, error: () => {} };
+    const connector = createDiscordConnector({
+      login: () => reaper.guard(c.login("MTAw.stub.token")), isConnected: () => gatewayConnected(c), log: quiet,
+      setTimer: (fn, ms) => setTimeout(fn, ms === LOGIN_TIMEOUT_MS ? ms : 3_000), // 退避够长，漏下的 shard 有时间先连上
+    });
+    connector.start();
+    await waitFor(() => gatewayConnected(c), 10_000, "首次连上");
+    f.setDown(true);
+    await Bun.sleep(500);
+    connector.reconnect("测试：看门狗");
+    await waitFor(() => connector.failures >= 3, 20_000, "断网期间失败 3 次");
+    await Bun.sleep(300); // 第 3 次失败后的退避中途恢复
+    f.setDown(false);
+    await waitFor(() => gatewayConnected(c), 15_000, "恢复后连上");
+    await Bun.sleep(3_500); // 等过那次退避到点：已在线就不再 login
+    expect(c.token).not.toBeNull();
+    await c.rest.get(Routes.gatewayBot());
+  } finally {
+    await c.destroy();
+    f.server.stop(true);
+    warn.mockRestore();
+  }
 }, 60_000);

@@ -2,6 +2,7 @@
  * 总览里每张卡的形状（GET /ledger/:project 的 tasks[]、已完成分页 /done 的 tasks[]）与拼它们要的任务视图。
  * 只读：输入是 ledger-store 读出来的行和事件，不碰连接；ledger-read.ts（总览 / 详情）和 ledger-read-done.ts（已完成窗口 / 分页）共用。
  */
+import type { AttentionFacts } from "./ledger-attention-facts.js";
 import { blockedBy, type DepView } from "./ledger-deps.js";
 import { currentStageMark, stageTimeline, taskMetrics, type TaskMetrics } from "./ledger-metrics.js";
 import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
@@ -35,6 +36,8 @@ export interface TaskView extends LedgerTask {
   blockedBy: string[];
   /** 不是终态且依赖上不挡（runnableTasks 的口径） */
   runnable: boolean;
+  /** 冻结 / 观察期截止（ledger-attention-facts.ts）：网页判卡住用；都没有时不设 */
+  attentionFacts?: AttentionFacts;
 }
 /**
  * 总览只带网页协作视图读到的字段（web/features/collab/collab-model.ts 的 LedgerOverview）；全量在 taskDetail。
@@ -98,6 +101,7 @@ export function liveCard(v: TaskView, line: StepLineInfo): OverviewTask {
     agent: v.agent, pm: v.pm, pr: v.pr, assignee: v.assignee, assigneeKind: v.assigneeKind, updatedAt: v.updatedAt, extra: extraSummary(v.extra),
     lastEvent: eventSummary(v.lastEvent), stageSince: v.stageSince, stageSinceApprox: v.stageSinceApprox, lastReview: v.lastReview,
     metrics: metricsSummary(v.metrics), blockedBy: v.blockedBy, runnable: v.runnable, stepLine: dotLine(line),
+    ...(v.attentionFacts ? { attentionFacts: v.attentionFacts } : {}),
   };
 }
 
@@ -111,6 +115,7 @@ export function doneCard(v: TaskView, dots: StepLineInfo | null): OverviewTask {
     blockedBy: v.blockedBy, runnable: v.runnable, metrics: metricsSummary(v.metrics),
   };
   for (const k of ["itemId", "agent", "pm", "pr"] as const) if (v[k]) card[k] = v[k];
+  if (v.attentionFacts) card.attentionFacts = v.attentionFacts; // 与详情同一口径（冻结名单里的已完成卡也带）
   if (!dots) return card;
   return { ...card, stageSinceApprox: v.stageSinceApprox, lastEvent: eventSummary(v.lastEvent), stepLine: dotLine(dots) };
 }

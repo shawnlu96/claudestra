@@ -147,7 +147,7 @@ export function ShareDock() {
   const messages = useChatStore((s) => s.state.messages);
   const active = useChatStore((s) => s.state.activeAgent);
   const agents = useChatStore((s) => s.state.agents);
-  const title = agents.find((a) => a.name === active)?.displayName || active || "Claudestra";
+  const title = agents.find((a) => a.name === active)?.displayName || active || "Floka";
   const order = useMemo(() => messages.map((m) => m.id), [messages]);
   const range = selRange(sel, order);
   const count = range ? range.hi - range.lo + 1 : 0;

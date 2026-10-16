@@ -106,10 +106,14 @@ const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.trim() ?? 
  */
 export const isRedacted = (e: LedgerEventView): boolean => e.data.redacted === true;
 
+/** 自动卡上 PM / master 的手工写入（PMR-2，src/lib/pm-rails.ts 打的标记）：界面上挂「人工干预」徽标 */
+export const isIntervention = (e: LedgerEventView): boolean => !isRedacted(e) && !!e.data.intervention && typeof e.data.intervention === "object";
+
 /** 脱敏事件只说类型：会上「最近 3 件事」/ 回放的那几类；其余（建任务、改字段、调度等）脱敏后不说 */
 const REDACTED_LINE: Record<string, string> = {
-  stage: "推进阶段（目标阶段仅主场）", review: "审查（结论仅主场）", verify: "线上验证（结果仅主场）", deliver: "交付（详情仅主场）",
-  deploy: "上线（详情仅主场）", rollback: "回滚（详情仅主场）", decision: "拍板（详情仅主场）", note: "备注（详情仅主场）",
+  stage: "推进阶段（目标阶段在任务所在的机器上）", review: "审查（结论在任务所在的机器上）", verify: "线上验证（结果在任务所在的机器上）",
+  deliver: "交付（详情在任务所在的机器上）", deploy: "上线（详情在任务所在的机器上）", rollback: "回滚（详情在任务所在的机器上）",
+  decision: "拍板（详情在任务所在的机器上）", note: "备注（详情在任务所在的机器上）",
 };
 
 /** 一条事件的一句话；返回 null = 这类事件不上「最近 3 件事」（建任务 / 改字段 / 事项 / meta） */
@@ -185,6 +189,8 @@ export interface RecentItem {
   kind: string;
   text: string;
   approx: boolean;
+  /** 只在是人工干预时出现（true） */
+  intervention?: true;
 }
 
 /** 解释现状的最近 3 件事，新的在上 */
@@ -193,7 +199,7 @@ export function recentThree(events: readonly LedgerEventView[], tr: Tr = zh): Re
   for (let i = events.length - 1; i >= 0 && out.length < 3; i--) {
     const e = events[i];
     const text = eventLine(e, tr);
-    if (text) out.push({ seq: e.seq, ts: e.ts, kind: e.kind, text, approx: !isRedacted(e) && e.data.approxTime === true });
+    if (text) out.push({ seq: e.seq, ts: e.ts, kind: e.kind, text, approx: !isRedacted(e) && e.data.approxTime === true, ...(isIntervention(e) ? { intervention: true as const } : {}) });
   }
   return out;
 }

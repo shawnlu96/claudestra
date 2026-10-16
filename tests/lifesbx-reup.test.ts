@@ -1,5 +1,5 @@
 /**
- * LIFESBX1：on 模式同一订单同一代次 up → down → clean → 同根再 up。clean 删根后重建的根是新 inode，
+ * LIFESBX1：on 模式同一订单同一代次 up → down → clean → 同根再 up。clean 删根后重建的根是新 inode 或（ext4 复用 inode 时）新出生时间，
  * restartSandboxOwner（sandbox-order-owner.ts）在旧进程全退、新根没有沙箱标记时只重新采集根的身份；根外登记目录换了照旧拒。
  * 前半是属主记录层的条件，后半经原入口 scripts/sandbox.ts 真的起、停、删、再起一遍。
  */
@@ -10,7 +10,7 @@ import { lendDeps } from "../src/lib/lend-deps.ts";
 import { openLendJournal, patchOrder } from "../src/lib/lend-journal.ts";
 import { sandboxOwnersDir } from "../src/lib/lend-sandbox.ts";
 import { SANDBOX_MARKER } from "../src/lib/sandbox.ts";
-import { listSandboxOwners, readSandboxOwner, registerSandboxOwner, restartSandboxOwner, type SandboxOwnerKey } from "../src/lib/sandbox-order-owner.ts";
+import { dirIdentity, listSandboxOwners, readSandboxOwner, registerSandboxOwner, restartSandboxOwner, type SandboxOwnerKey } from "../src/lib/sandbox-order-owner.ts";
 import { sandboxOrderOwnership } from "../src/lib/sandbox-order-cleanup.ts";
 import { harness, toStarted } from "./lend-harness.ts";
 import { Fleet, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
@@ -186,7 +186,8 @@ test("on 同单同代经原入口 up → down → clean → 同根再 up：登�
     expect(second.pid).not.toBe(first.pid);
     expect(after.key).toEqual(before.key);
     expect(after.dirs[0]!.path).toBe(before.dirs[0]!.path);
-    expect(after.dirs[0]!.ino).not.toBe(before.dirs[0]!.ino);
+    // 重建的根可能复用旧 inode（ext4）：不要求 ino 变，只要求登记的就是此刻的根（出生时间可得时含 birth）
+    expect(after.dirs[0]).toEqual(dirIdentity(root)!);
     expect(after.resources.map((r) => r.pid)).toContain(second.pid);
     expect(after.resources.map((r) => r.pid)).not.toContain(first.pid);
     expect(after.cleanup).toBeUndefined();

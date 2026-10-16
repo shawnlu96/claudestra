@@ -49,6 +49,19 @@ export const TEXT_LIMITS = { lines: TEXT_LINES, chars: TEXT_CHARS, scan: SCAN_CH
 
 const oneLine = (s: unknown): string => clip(String(s ?? "").replace(/\s*\n\s*/g, " "), 1, ONE_LINE);
 
+/** 思考的多行版（只给 TTY 终端视图：tui/screen.ts 拿 agent_thought_chunk 原文重排；纯文本窗口仍是 oneLine）：
+ * 先脱敏再截，字数上限和 oneLine 一样；截了就注明原本几行（只有一行时注明几个字），续行缩进两格对齐在 ✻ 后面 */
+const THOUGHT_LINES = 4;
+export function clipThought(raw: string): string {
+  const s = redactSecrets(scanHead(raw)).trim();
+  const all = s.split("\n").filter((l) => l.trim());
+  let out = all.slice(0, THOUGHT_LINES).join("\n");
+  if (out.length > ONE_LINE) out = out.slice(0, ONE_LINE);
+  const total = raw.trim().split("\n").filter((l) => l.trim()).length;
+  const cut = out.length < all.join("\n").length || raw.length > SCAN_CHARS;
+  return indentRest(cut ? `${out}…（${total > 1 ? `共 ${total} 行` : `共 ${raw.trim().length} 字`}）` : out);
+}
+
 /** 交给 formatTool 之前逐个字段先打码：它会在 80 / 200 字处截断，截剩的半个密钥匹配不上规则 */
 const redactDeep = (v: unknown): unknown =>
   typeof v === "string" ? redactSecrets(scanHead(v))
@@ -123,9 +136,12 @@ export function transcriptOfEntry(e: Rec): string[] {
   return Array.isArray(blocks) ? blocks.flatMap(blockLines) : [];
 }
 
-/** 收到的消息：只显示正文（不含宿主包的 channel 标签和前言；bridge 的来源头、它真加的打断抬头按历史解析的规则剥掉，来源看 > 后的名字） */
-export function transcriptOfInbound(content: string, meta: Record<string, string>): string {
-  const body = hasInboundHeader(content) ? stripChannelHeader(content, meta.interrupt_note === "true") : content.trim();
+/**
+ * 收到的消息：只显示正文（不含宿主包的 channel 标签和前言；bridge 的来源头、它真加的打断抬头按历史解析的规则剥掉，来源看 > 后的名字）。
+ * raw：来源核不了的原文（重启回放里 Pi / Codex 的 user 记录），头也是正文、一个字不剥（lib/cc-own-records.ts）
+ */
+export function transcriptOfInbound(content: string, meta: Record<string, string>, raw = false): string {
+  const body = !raw && hasInboundHeader(content) ? stripChannelHeader(content, meta.interrupt_note === "true") : content.trim();
   return `${INBOUND}${oneLine(meta.user || meta.chat_id || "?")}：${indentRest(clip(body, Number.MAX_SAFE_INTEGER, USER_CHARS))}`; // 来源标签也是外来的，同样打码
 }
 

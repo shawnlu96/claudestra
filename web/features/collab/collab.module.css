@@ -203,6 +203,9 @@
 /* 手机全屏详情：「对它说」钉在底部（ux.md §4），内容在它上面滚 */
 .full .sayDock { position: sticky; bottom: 0; margin: 0 -18px -28px; padding: 12px 18px max(env(safe-area-inset-bottom), 12px); background: var(--panel); border-top: 1px solid var(--line); }
 .approx { color: var(--faint); }
+/* PMR-2「人工干预」：自动卡上 PM / master 的手工写入 */
+.manualBadge { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px; font-size: var(--fs-3); line-height: 18px; vertical-align: 1px;
+  color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--line-2)); white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   .root *, .root *::before, .root *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }

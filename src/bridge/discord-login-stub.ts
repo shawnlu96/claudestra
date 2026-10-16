@@ -2,7 +2,7 @@
 // discord.js 在 bridge 装出站闸之前就抓住了 fetch / undici，它的请求沙箱闸拦不到 —— 所以目标只能在建 client 前由这里放行：
 // 只认本沙箱自己端口段里的固定一位（BRIDGE_PORT + 10）、回环 http、不在生产端口（默认 + CLAUDESTRA_SANDBOX_DENY_PORTS）里，否则抛错不启动。
 // 测试：tests/discord-login-stub.test.ts
-import { DefaultRestOptions, type RESTOptions } from "discord.js";
+import { DefaultRestOptions, type RESTOptions, type SimpleShardingStrategy } from "discord.js";
 
 type Env = Record<string, string | undefined>;
 const DISCORD_STUB_PORT_OFFSET = 10;
@@ -26,6 +26,8 @@ export function sandboxDiscordStubApi(env: Env, defaultPort: number): string | u
 }
 
 type MakeRequest = RESTOptions["makeRequest"];
+/** stubRestOptions 给 makeRequest 打的标：值是桩的 host。ws 层据此认出桩模式，不另传参数 */
+const STUB_HOST = Symbol("claudestra.discordStubHost");
 
 /**
  * 桩模式的 discord.js REST 选项。只核对初始地址不够：REST 默认跟随重定向，假 Discord 回个 307 就能把请求带到别的端口；
@@ -45,5 +47,30 @@ export function stubRestOptions(api: string, base: MakeRequest = DefaultRestOpti
     }
     return res as unknown as Awaited<ReturnType<MakeRequest>>;
   };
-  return { api, makeRequest };
+  return { api, makeRequest: Object.assign(makeRequest, { [STUB_HOST]: stub.host }) };
+}
+
+type WsManager = ConstructorParameters<typeof SimpleShardingStrategy>[0];
+type UpdateSession = WsManager["options"]["updateSessionInfo"];
+
+/**
+ * 桩模式下丢掉 READY 里的异源 resume_gateway_url，恢复退回 /gateway/bot 给的、已由 stubRestOptions 核对过指回桩的地址。
+ * @discordjs/ws 恢复时直接拿它建 WebSocket（构造器在装闸前就被抓住），假 Discord 给个别的端口就能把连接带出去。
+ * 在写入处洗：discord.js 的会话信息只经 updateSessionInfo 存进去。只在 client.rest 是 stubRestOptions 建的时候生效，
+ * 真 Discord 的恢复地址不动。测试：tests/discord-login-resume.test.ts
+ */
+export function refuseForeignResume(manager: WsManager): void {
+  const host = (manager.options.rest.options.makeRequest as { [STUB_HOST]?: string })[STUB_HOST];
+  if (!host) return;
+  const update = manager.options.updateSessionInfo;
+  const pinned: UpdateSession = (shardId, info) => {
+    if (!info || sameStub(info.resumeURL, host)) return update(shardId, info);
+    console.warn(`⚠️ 沙箱 Discord 桩：拒绝异源恢复地址 ${info.resumeURL}（只认 ${host}），恢复改走桩的 gateway`);
+    return update(shardId, { ...info, resumeURL: undefined as unknown as string }); // 连接处是 resumeURL ?? gateway url
+  };
+  (manager.options as { updateSessionInfo: UpdateSession }).updateSessionInfo = pinned;
+}
+
+function sameStub(url: string, host: string): boolean {
+  try { const u = new URL(url); return u.protocol === "ws:" && u.host === host; } catch { return false; } // 不合法 = 异源，交给调用方告警丢掉
 }

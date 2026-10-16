@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { assertExecView, type ExecTransport, type ExecView } from '../../../../lib/api/shared-ledger-v2';
 import { sharedExecTr } from '../../../../lib/i18n-dict-shared-ledger-v2';
 import { sharedLedgerTr } from '../../../../lib/i18n-dict-shared-ledger';
+import { MACHINE_WORDS } from '../../../../lib/owner-words';
 import { TaskEditor } from '../task/task-forms';
 import { createDraft, editDraft, isDataStale, type TaskCapabilities, type TaskDraft } from '../task/task-model';
 import { ApprovalPanel } from '../approve/approve-panel';
@@ -116,7 +117,7 @@ export function ExecPanel(p: ExecPanelProps) {
   const tasks = p.taskId ? view.tasks.filter(t => t.id === p.taskId) : view.tasks;
   return <section aria-label={tr('共享执行')}>
     <div className={s.head}>{tr('共享执行')}</div>
-    <div className={s.line}><span>{tr('主场')} · {p.context.instanceNames[view.feature.homeInstanceId] ?? view.feature.homeInstanceId}</span>
+    <div className={s.line}><span>{tr(MACHINE_WORDS.machine)} · {p.context.instanceNames[view.feature.homeInstanceId] ?? view.feature.homeInstanceId}</span>
       <span>{tr('中心 serverSeq')} · {view.serverSeq}</span>
       <button className={c.btn} type="button" onClick={() => void load()}><Icon name="rotateCcw" /> {tr('刷新')}</button></div>
     {stale && <div role="status" className={s.conflict}>{tr('数据已过期，请刷新')}</div>}

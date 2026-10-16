@@ -15,6 +15,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import { V2_DTO_FIXTURES, V2_FIXTURE_SCOPE } from "../src/lib/shared-ledger-contract-v2-fixtures.js";
 import { readSharedLedgerMode, writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { migrationCenter, runExecutionMigration, type MigrationPlan } from "../src/lib/shared-ledger-v2-migration.js";
+import { writeFrozenManifest } from "../src/lib/shared-ledger-v2-migration-ask-frozen.js";
 import { approvedAsk, featureRows } from "./helpers/shared-ledger-v2-fake-center-kit.js";
 import { claimedWrite, cleanupLendApi, expectStartedOnce, legacyClaimed, startsOf } from "./shared-ledger-v2-e2e-executor.test.js";
 import {
@@ -173,7 +174,11 @@ describe("X15 演练 · 迁移过程中有活单", () => {
 
   test("显式导入并核对租约（gen 1 / 头）：整组切到 execution、中心领租；订单不重发，peer B 的在途单原样保留", async () => {
     const { w, center, mode, startedOnce } = await migrationWorld(), from = w.k.center.log.length;
-    const out = await runExecutionMigration({ root: w.root, plan: plan(w, { [ORDER]: { disposition: "import", leaseGen: 1, head: H0 } }), center, mode: "commit" });
+    const p = plan(w, { [ORDER]: { disposition: "import", leaseGen: 1, head: H0 } });
+    // dry-run / commit 只发冻结清单（peer-MIGASK1）：先 prepare 冻结，ask id 用夹具里已批准的 "ask"
+    const prepared = await runExecutionMigration({ root: w.root, plan: p, center, mode: "prepare" });
+    if (prepared.status === "prepared") writeFrozenManifest(w.root, prepared.manifest, "ask");
+    const out = await runExecutionMigration({ root: w.root, plan: p, center, mode: "commit" });
     expect(out).toMatchObject({ status: "switched", epochs: { feature: 2 }, leases: ["task"] });
     expect(w.served(from)).toEqual(["lease.acquire 200"]);
     expect(w.k.center.log.slice(from).filter(e => e.route === "migrations").map(e => e.status)).toEqual([200]);
@@ -187,7 +192,11 @@ describe("X15 演练 · 迁移过程中有活单", () => {
   test("切换回包丢失：全组冻结在 migrating 门后，按批次回执留证（committed），迁移命令不重试", async () => {
     const { w, center, mode, startedOnce } = await migrationWorld(), from = w.k.center.log.length;
     w.k.center.inject({ kind: "drop", route: "migrations" });
-    const out = await runExecutionMigration({ root: w.root, plan: plan(w, { [ORDER]: { disposition: "import", leaseGen: 1, head: H0 } }), center, mode: "commit" });
+    const p = plan(w, { [ORDER]: { disposition: "import", leaseGen: 1, head: H0 } });
+    // dry-run / commit 只发冻结清单（peer-MIGASK1）：先 prepare 冻结，ask id 用夹具里已批准的 "ask"
+    const prepared = await runExecutionMigration({ root: w.root, plan: p, center, mode: "prepare" });
+    if (prepared.status === "prepared") writeFrozenManifest(w.root, prepared.manifest, "ask");
+    const out = await runExecutionMigration({ root: w.root, plan: p, center, mode: "commit" });
     expect(out).toMatchObject({ status: "frozen", step: "switch", batch: { status: "committed", batchId: "batch-x15" } });
     expect(w.k.center.log.slice(from).map(e => `${e.route} ${e.status}`)).toEqual(["migrations dropped", "migration 200"]);
     for (const i of w.all) expect(mode(i).migrating).toEqual({ batchId: "batch-x15", kind: "execute" });

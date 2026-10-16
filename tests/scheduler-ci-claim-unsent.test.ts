@@ -24,7 +24,7 @@ function rig(w: MainCiWorld, route: Route, mode: RecoveryMode, send: (what: stri
   const effects: string[] = [], fix = w.newSha();
   const timed = route === "timeout";
   w.ci.ports.ciRerun = {
-    runAttempt: async () => ({ attempt: 1, status: "completed", conclusion: "failure" }),
+    runAttempt: async () => ({ attempt: 1, status: "completed", conclusion: "failure", headSha: c.head }),
     failedLog: async () => ["##[group]tests/stale.test.ts:", ...(timed ? [] : ["error: expect(received).toBe(expected)"]), "(fail) stale [0.40ms]",
       ...(timed ? ["  ^ this test timed out after 5000ms."] : []), "##[endgroup]", " 1 fail"].join("\n"),
     prFiles: async () => ["src/own.ts"],

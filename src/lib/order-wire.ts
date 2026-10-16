@@ -233,11 +233,20 @@ export interface AskWire {
   question: string;
   options: string[];
   default?: string;
-  class?: "design" | "scope" | "blocker";
+  class?: AskClass;
+  /** ASKDEF1：执行者标的风险类（结构化，不看正文）；标了就永远等 PM，不按默认定 */
+  risk?: AskRisk;
   /** i28-ASK4 测试类扩围：申请加进本卡范围的文件（仓库相对路径）与理由；两个一起给才算，order-ask-default.ts 据此自动定 */
   files?: string[];
   reason?: AskScopeReason;
 }
+
+const ASK_CLASSES = ["design", "scope", "blocker"] as const;
+type AskClass = (typeof ASK_CLASSES)[number];
+const ASK_RISKS = ["delete_data", "permission", "security", "schema"] as const;
+type AskRisk = (typeof ASK_RISKS)[number];
+/** default 的长度上限（Unicode 码点） */
+const ASK_DEFAULT_MAX = 600;
 
 /** superseded_assertion = 被本规格替代的旧断言；new_test = 为本卡新行为补测试 */
 export const ASK_SCOPE_REASONS = ["superseded_assertion", "new_test"] as const;
@@ -245,37 +254,57 @@ export type AskScopeReason = (typeof ASK_SCOPE_REASONS)[number];
 
 const ASK_LIMITS = { question: 2000, options: 10, option: 200, files: 20 } as const;
 
-/** files / reason：都给或都不给；files 是不带通配、不带 .. 的仓库相对路径 */
+/**
+ * files / reason：都给或都不给；files 是不带通配、不带 .. 的仓库相对路径。
+ * ASKDEF1：class=scope 的提问可以只给 files（问能不能改这些文件，按规格精准例外自动答，order-ask.ts）
+ */
 function askScope(r: Record<string, unknown>): Pick<AskWire, "files" | "reason"> {
   if (!("files" in r) && !("reason" in r)) return {};
-  if (!("files" in r) || !("reason" in r)) fail("files", "files 与 reason 要一起给");
-  if (!ASK_SCOPE_REASONS.includes(r.reason as AskScopeReason)) fail("reason", `只认 ${ASK_SCOPE_REASONS.join(" / ")}`);
+  const scopeOnly = r.class === "scope" && !("reason" in r);
+  if (!scopeOnly && (!("files" in r) || !("reason" in r))) fail("files", "files 与 reason 要一起给");
+  if (!scopeOnly && !ASK_SCOPE_REASONS.includes(r.reason as AskScopeReason)) fail("reason", `只认 ${ASK_SCOPE_REASONS.join(" / ")}`);
   if (!Array.isArray(r.files) || !r.files.length || r.files.length > ASK_LIMITS.files) fail("files", `要是 1–${ASK_LIMITS.files} 项的数组`);
   const files = (r.files as unknown[]).map((f, i) => {
     const s = matching(text(f, `files[${i}]`, WIRE_LIMITS.path), `files[${i}]`, PATH);
     if (s.split("/").some((seg) => seg === ".." || seg === "." || !seg) || /[*?[\]{}]/.test(s)) fail(`files[${i}]`, "要是不带通配、不带 . / .. 的仓库相对路径");
     return s;
   });
-  return { files: [...new Set(files)], reason: r.reason as AskScopeReason };
+  return { files: [...new Set(files)], ...(scopeOnly ? {} : { reason: r.reason as AskScopeReason }) };
 }
 
-/** order-ask.ts 存进 ask.extra 的那两项（没给 = 空） */
-export const askScopeExtra = (q: Partial<Pick<AskWire, "files" | "reason">>): Pick<AskWire, "files" | "reason"> =>
-  q.files?.length && q.reason ? { files: q.files, reason: q.reason } : {};
+/** order-ask.ts 存进 ask.extra 的那两项（没给 = 空）；scope 提问只给 files 的也存 files */
+export const askScopeExtra = (q: Partial<Pick<AskWire, "files" | "reason" | "class">>): Pick<AskWire, "files" | "reason"> =>
+  q.files?.length && q.reason ? { files: q.files, reason: q.reason } : q.files?.length && q.class === "scope" ? { files: q.files } : {};
+
+/** askDefaultAll=on：blocker 也要写默认做法（到点按它定）；null = 不拒 */
+export const askBlockerDefaultRefusal = (q: Pick<AskWire, "class" | "default">): string | null =>
+  q.class === "blocker" && !q.default?.trim() ? "blocker 也要写你打算怎么做（default，≤600 字）：仍等 PM 回复，15 分钟没回按它定" : null;
+
+/**
+ * 出借方收远端提问时宽松取 class / default / risk（ASKDEF1 PM 补）：不认识的值丢掉当没写，default 按上限截断，
+ * 从不因为这三项把整条提问拒掉；旧版对方不带 = 没写 class 的旧版
+ */
+export function lenientAskFields(r: Record<string, unknown>): Pick<AskWire, "class" | "default" | "risk"> {
+  const d = typeof r.default === "string" ? [...r.default.replace(new RegExp(BAD_MULTI.source, "g"), "")].slice(0, ASK_DEFAULT_MAX).join("").trim() : "";
+  return { ...(ASK_CLASSES.includes(r.class as AskClass) ? { class: r.class as AskClass } : {}), ...(d ? { default: d } : {}),
+    ...(ASK_RISKS.includes(r.risk as AskRisk) ? { risk: r.risk as AskRisk } : {}) };
+}
 
 export function parseAskWire(raw: unknown): WireResult<AskWire> {
   return guarded(raw, () => {
     const given = raw && typeof raw === "object" && !Array.isArray(raw) && !("options" in raw) ? { ...raw, options: [] } : raw;
     const r = record(given, "$", ["v", "orderId", "question", "options",
-      ...(given && typeof given === "object" ? ["default", "class", "files", "reason"].filter((k) => k in given) : [])]);
-    if ("class" in r && !["design", "scope", "blocker"].includes(r.class as string)) fail("class", "只认 design / scope / blocker");
-    if ("default" in r && (typeof r.default !== "string" || !r.default.trim() || [...r.default].length > 600)) fail("default", "默认做法要非空且不超过 600 字");
+      ...(given && typeof given === "object" ? ["default", "class", "risk", "files", "reason"].filter((k) => k in given) : [])]);
+    if ("class" in r && !ASK_CLASSES.includes(r.class as AskClass)) fail("class", `只认 ${ASK_CLASSES.join(" / ")}`);
+    if ("risk" in r && !ASK_RISKS.includes(r.risk as AskRisk)) fail("risk", `只认 ${ASK_RISKS.join(" / ")}`);
+    if ("default" in r && (typeof r.default !== "string" || !r.default.trim() || [...r.default].length > ASK_DEFAULT_MAX)) fail("default", "默认做法要非空且不超过 600 字");
     if (!Array.isArray(r.options) || r.options.length > ASK_LIMITS.options) fail("options", `要是不超过 ${ASK_LIMITS.options} 项的数组`);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), question: text(r.question, "question", ASK_LIMITS.question, true),
       options: (r.options as unknown[]).map((o, i) => text(o, `options[${i}]`, ASK_LIMITS.option)),
       ...("default" in r ? { default: text(r.default, "default", 2400, true) } : {}),
-      ...("class" in r ? { class: r.class as AskWire["class"] } : {}),
+      ...("class" in r ? { class: r.class as AskClass } : {}),
+      ...("risk" in r ? { risk: r.risk as AskRisk } : {}),
       ...askScope(r),
     };
   });

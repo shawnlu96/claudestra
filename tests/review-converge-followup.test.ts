@@ -72,7 +72,8 @@ test.each([1, 200])("maximum-length key with %i DAG nodes builds or informs PM",
     createTask(db, ctx, { project: "p", id: "T1", title: "task", kind: "code", pm: "pm" });
     db.query("INSERT OR REPLACE INTO ledger_instance (key, value) VALUES ('origin', 'abcd')").run();
     const f = createFeature(db, ctx, { project: "p", slug: "long", title: "feature" }).row;
-    const key = "A".repeat(40);
+    // 小写：后续节点 key 带十六进制哈希，大写 + 哈希的卡号会被开卡闸当随机串拒（shared-ledger-mirror-skip-id.ts）
+    const key = "a".repeat(40);
     initDag(db, ctx, { id: f.id, rev: f.rev, nodes: [{ key, taskId: "T1", fileGlobs: ["src/a.ts"] },
       ...Array.from({ length: size - 1 }, (_, i) => ({ key: `N${i}`, oneLine: "planned", fileGlobs: ["src/a.ts"] }))] });
     const report = join(dir, "report.md"); writeFileSync(report, "Finding F1");

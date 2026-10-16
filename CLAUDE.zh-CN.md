@@ -1,4 +1,4 @@
-# Claudestra — 架构文档
+# Floka — 架构文档
 
 [English](./CLAUDE.md) · **简体中文**
 
@@ -23,7 +23,7 @@
 
 ## 系统概览
 
-Claudestra 是基于 Claude Code 原生 **Channel 协议**（MCP 的扩展）的多会话编排器。一个 Bridge 进程把单个 Discord bot token（以及 HTTP/Web API）扇出到多个 Claude Code / Pi 会话，每个会话注册为独立的 channel 监听者。
+Floka 是基于 Claude Code 原生 **Channel 协议**（MCP 的扩展）的多会话编排器。一个 Bridge 进程把单个 Discord bot token（以及 HTTP/Web API）扇出到多个 Claude Code / Pi 会话，每个会话注册为独立的 channel 监听者。
 
 ```
  Discord (一个 bot, 一个 token)
@@ -89,6 +89,7 @@ master/                大总管指令模板（由 setup.ts 渲染）
 - **上下文边界** — 按项目 / 名字模式的压缩线：[context-boundary.md](./docs/architecture/context-boundary.md)。
 - **子 DAG 工具** — PM 用的 MCP 工具 `plan_feature` / `rewrite_dag` / `start_node` / `show_dag`：[dag-tools.md](./docs/architecture/dag-tools.md)。
 - **网页「新终端」** — 侧栏开持久的宿主登录 shell（tmux session `webshell`，要覆盖 master 的终端授予）：[features.zh-CN.md](./docs/architecture/features.zh-CN.md)。
+- **PM 干预留痕** — 自动卡上 PM / master 的写入打 `intervention` 标记并推 owner；不修的上限：[pm-rails.md](./docs/architecture/pm-rails.md)。
 
 ## 安全姿态
 
@@ -130,7 +131,7 @@ bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# 跨 Claudestra HTTP peers（docs/design-http-peers.md）。v2.15+ 一键邀请：A 生成（连着中继是链接，否则邀请串）、
+# 跨 Floka HTTP peers（docs/design-http-peers.md）。v2.15+ 一键邀请：A 生成（连着中继是链接，否则邀请串）、
 # B 点开或粘贴，B 的 bridge 自动回调 A 兑换；一次性、24h 过期，撤销连带吊销内嵌 token；默认单向授权，对称 = B 也发一张。
 # scope 只收已开 external 的 agent，"*"/大总管一律拒（lib/peer-scope-gate.ts）
 bun src/manager.ts peer-invite-new --agents <a,b> [--url <我方bridge地址>]   # A: 打印一键邀请（中继优先，否则 HTTPS 入口/peer 端口）
@@ -158,7 +159,7 @@ bun src/manager.ts retire-web          # 卸旧 com.claudestra.web、备份 plis
 
 # 自动更新开关（两者默认开；launcher 定期轮询，只在所有 agent 空闲时才升级）
 bun src/manager.ts auto-update status
-bun src/manager.ts auto-update claudestra on|off   # Claudestra 自更新（30 分钟轮询）
+bun src/manager.ts auto-update claudestra on|off   # Floka 自更新（30 分钟轮询）
 bun src/manager.ts auto-update claude on|off       # Claude Code CLI（每周轮询）
 
 # 多前端 API token（v2.6.0+；scope = 按 agent 的白名单，"*" = 除 master 外全部）

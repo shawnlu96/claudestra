@@ -36,14 +36,14 @@ function JoinInner() {
   return (
     <main className="flex min-h-screen items-start justify-center bg-base-200 px-4 pb-8 pt-[calc(env(safe-area-inset-top)+48px)]">
       <div className="w-full max-w-md rounded-2xl bg-base-100 p-5 shadow-sm">
-        <div className="mb-3 text-xs font-medium tracking-wide text-base-content/50">{t("Claudestra 协作邀请")}</div>
+        <div className="mb-3 text-xs font-medium tracking-wide text-base-content/50">{t("Floka 协作邀请")}</div>
         {code === undefined ? null : code ? (
           <JoinConfirm code={code} />
         ) : (
           <div className="text-sm text-error">{t("链接里的邀请码缺了或被截断了。请让对方重新复制整条链接发给你。")}</div>
         )}
         <Link href="/" className="btn btn-ghost btn-sm mt-4 w-full">
-          {t("回到 Claudestra")}
+          {t("回到 Floka")}
         </Link>
       </div>
     </main>

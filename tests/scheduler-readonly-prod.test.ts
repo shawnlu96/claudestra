@@ -272,8 +272,8 @@ async function manualDependent(id: string) {
 
 async function manualCard(mode: "on" | "observe" | "off") {
   f = await readonlyFixture({ stateDir: STATE_DIR });
-  // OWN1 夹具：这些用例只测 MAN2，manualCaseOwnership 显式关掉
-  writeFileSync(join(f.root, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualStall: mode, manualCaseOwnership: "off" } } } }));
+  // OWN1 / SLA1 夹具：这些用例只测 MAN2，manualCaseOwnership、manualCaseSla 显式关掉
+  writeFileSync(join(f.root, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualStall: mode, manualCaseOwnership: "off", manualCaseSla: "off" } } } }));
   createTask(f.prepare.db, f.prepare.at("owner"), { project: "p", id: "T0", title: "dependency", kind: "code" });
   await manualDependent("T1");
   for (const [from, to] of [["spec", "restate"], ["restate", "build"], ["build", "review"], ["review", "merge"], ["merge", "live"]] as const) {
@@ -319,14 +319,17 @@ test("MAN2 CLI rereads mode/fingerprint and all task/workflow fences; refusals p
     expect(getWorkflow(f.db(), "T1")).toEqual(wf);
   }
   f.beforeChild((a) => {
-    if (a[1] === "scheduler-manual-resume") writeFileSync(join(f.root, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualStall: "off", manualCaseOwnership: "off" } } } }));
+    if (a[1] === "scheduler-manual-resume") writeFileSync(join(f.root, "recovery-policy.json"),
+      JSON.stringify({ projects: { p: { keys: { manualStall: "off", manualCaseOwnership: "off", manualCaseSla: "off" } } } }));
   });
+  const resumes = () => f.calls.filter((c) => c.args[1] === "scheduler-manual-resume"), fenced = resumes().length;
   const refused = await f.pass();
   expect(refused.failed).toEqual([]);
   expect(events()).toEqual(before);
   expect(getWorkflow(f.db(), "T1")).toEqual(wf);
   expect(f.prepare.notices).toEqual([]);
-  expect(f.calls.at(-1)?.result).toMatchObject({ ok: false, code: "forbidden" });
+  // the pass may run other ledger children after this one (slow runners hit time-based mechanisms), so pick the resume call itself
+  expect(resumes().slice(fenced).map((c) => c.result)).toEqual([expect.objectContaining({ ok: false, code: "forbidden" })]);
 }, 30_000);
 
 for (const mode of ["on", "observe"] as const) for (const limit of [20, 32]) {
@@ -425,7 +428,7 @@ for (const cap of [true, false]) test(`real review ${cap ? "cap" : "block"}: CLI
   }
   const notify = f.deps.notifyPm;
   const seenAtNotify: number[] = [];
-  f.deps.notifyPm = async (task, text) => { seenAtNotify.push(events("review_downgrade").length); await notify(task, text); };
+  f.deps.notifyPm = async (task, text, level) => { seenAtNotify.push(events("review_downgrade").length); await notify(task, text, level); };
   expect(await f.pass()).toEqual({ ran: true, failed: [] });
   expect(seenAtNotify.length).toBeGreaterThan(0);
   expect(seenAtNotify.every((n) => n === 1)).toBe(true);

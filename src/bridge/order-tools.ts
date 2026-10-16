@@ -9,7 +9,8 @@ import { openAskFull, patchAsk } from "../lib/ledger-asks.js";
 import { appendEvent } from "../lib/ledger-write.js";
 import { isLendCaller } from "../lib/lend-tools.js";
 import { askOrder } from "../lib/order-ask.js";
-import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
+import { deliverOrder, localBranchHead, remoteBranchHead } from "../lib/order-deliver.js";
+import { localMergeOf } from "../lib/scheduler-config.js";
 import { confirmOrderDelivery } from "../lib/ledger-autostart-resume.js";
 import { openLedger } from "../lib/ledger-store.js";
 import { findPrRows } from "../lib/order-deliver-pr.js";
@@ -58,9 +59,10 @@ const HANDLERS: Record<string, OrderToolHandler> = {
   deliver: async (call, args) => await sharedExecDeliver(call, args, { db: ledgerDb() }) ?? deliverOrder(call, args, {
     db: ledgerDb(), run: ledgerRun, confirmSource: (c, input) => confirmOrderDelivery(openLedger(), c, input), remoteHead: (c, branch) => remoteBranchHead(cwdOf(c.agent), branch, runBounded),
     findPr: (c, branch) => findPrRows(cwdOf(c.agent), branch, runBounded),
+    localMerge: (project) => localMergeOf(project), localHead: (dir, branch) => localBranchHead(dir, branch, runBounded),
   }),
   ask: (call, args) => askOrder(call, args, {
-    db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
+    db: ledgerDb(), open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId, pmLevel) => sendLedgerNotice({ to, text, messageId, pmLevel }),
     // handedAt：默认做法提问的 15 分钟从这里算（order-ask-default.ts）
     markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed", handedAt: Date.now() } }), record: (ctx, input) => void appendEvent(askDb(), ctx, input),
   }),

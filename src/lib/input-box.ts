@@ -5,6 +5,8 @@
 
 /** 输入框边框：顶格、整行只有 ─（去掉行尾空白后至少 3 个）。对话里「─── 小标题」这类混了文字的行不算，窄窗口里短的整行边框算 */
 const isBoxRule = (l: string | undefined): boolean => l !== undefined && /^─{3,}$/.test(l.replace(/\s+$/, ""));
+/** 上边框还可能嵌着会话名（`--name` 启动 / resume 的会话：「────── agent-x ─」）；认不出它，重启过的 agent 就找不到输入框（tests/turn-zone.test.ts） */
+const isTopRule = (l: string | undefined): boolean => isBoxRule(l) || (l !== undefined && /^─{3,} [^─]+ ─+$/.test(l.replace(/\s+$/, "")));
 
 /**
  * 真输入框在画面里的上下边框行号，按框的形状认、不看 ❯ 后面的字（草稿首行可以是「1. 先修测试」「2.1.283 …」）：
@@ -14,7 +16,7 @@ const isBoxRule = (l: string | undefined): boolean => l !== undefined && /^─{3
  */
 export function inputBox(lines: string[]): { top: number; bottom: number } | null {
   for (let i = lines.length - 1; i > 0; i--) {
-    if (!/^[❯!](\s|$)/.test(lines[i]!) || !isBoxRule(lines[i - 1])) continue;
+    if (!/^[❯!](\s|$)/.test(lines[i]!) || !isTopRule(lines[i - 1])) continue;
     let j = i + 1;
     while (j < lines.length && !isBoxRule(lines[j]) && (lines[j] === "" || /^\s/.test(lines[j]!))) j++;
     if (j < lines.length && isBoxRule(lines[j]) && !lines.slice(j + 1).some((l) => /^\S/.test(l))) return { top: i - 1, bottom: j };

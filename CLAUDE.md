@@ -1,4 +1,4 @@
-# Claudestra — Architecture
+# Floka — Architecture
 
 **English** · [简体中文](./CLAUDE.zh-CN.md)
 
@@ -23,7 +23,7 @@ Architecture map, invariants and rules for contributors and agents working in th
 
 ## System overview
 
-Claudestra is a multi-session orchestrator built on Claude Code's native **Channel protocol** (an MCP extension). One Bridge process fans a single Discord bot token (and the HTTP/web API) out to many Claude Code / Pi sessions, each registered as an independent channel listener.
+Floka is a multi-session orchestrator built on Claude Code's native **Channel protocol** (an MCP extension). One Bridge process fans a single Discord bot token (and the HTTP/web API) out to many Claude Code / Pi sessions, each registered as an independent channel listener.
 
 ```
  Discord (one bot, one token)
@@ -93,6 +93,7 @@ One line each; full descriptions in [docs/architecture/features.md](./docs/archi
 - **Context boundaries** — per-project / name-pattern compaction lines: [context-boundary.md](./docs/architecture/context-boundary.md).
 - **Sub-DAG tools** — PM MCP tools `plan_feature` / `rewrite_dag` / `start_node` / `show_dag`: [dag-tools.md](./docs/architecture/dag-tools.md).
 - **Web host shell** — sidebar 「新终端」 opens a persistent host login shell (tmux session `webshell`, master-level terminal grant): [features.md](./docs/architecture/features.md).
+- **PM intervention rails** — PM / master writes on auto cards get `intervention` marks + owner pushes; the limits left unfixed: [pm-rails.md](./docs/architecture/pm-rails.md).
 
 ## Security posture
 
@@ -134,7 +135,7 @@ bun src/manager.ts cron-remove  <name|id>
 bun src/manager.ts cron-toggle  <name|id>
 bun src/manager.ts cron-history [name|id]
 
-# Cross-Claudestra HTTP peers (design: docs/design-http-peers.md). v2.15+ one-click invite: A generates (a link on the
+# Cross-Floka HTTP peers (design: docs/design-http-peers.md). v2.15+ one-click invite: A generates (a link on the
 # relay, else a string), B opens/pastes it, B's bridge redeems at A. Single-use, 24h TTL, revoke kills the embedded token;
 # joining exposes nothing of B (one-way grant) — symmetric = B sends an invite back.
 # Scopes only take agents with `external` on (lib/peer-scope-gate.ts): "*" and master are always refused, --force no longer overrides.
@@ -163,7 +164,7 @@ bun src/manager.ts retire-web          # unload + back up old com.claudestra.web
 
 # Auto-update toggles (launcher polls, upgrades only when agents are idle; post-CC-upgrade binary probe: lib/claude-binary.ts)
 bun src/manager.ts auto-update status
-bun src/manager.ts auto-update claudestra on|off   # Claudestra self-update (30 min poll)
+bun src/manager.ts auto-update claudestra on|off   # Floka self-update (30 min poll)
 bun src/manager.ts auto-update claude on|off       # Claude Code CLI (weekly poll)
 bun src/manager.ts auto-update codex on|off        # Codex npm, default off (docs/runtimes/codex-acp.md)
 

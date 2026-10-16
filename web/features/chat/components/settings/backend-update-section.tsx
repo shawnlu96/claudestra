@@ -7,7 +7,7 @@ import { UpdatePrefsPanel, UpdateTarget, useUpdateCheck, useUpdatePrefs } from "
 import { fetchMachineVersion } from "@/lib/api/version";
 
 /**
- * 版本与更新：一键升级 Claudestra（前后端一起）+ 能升到哪个版本 + 通道 / 自动更新开关。
+ * 版本与更新：一键升级 Floka（前后端一起）+ 能升到哪个版本 + 通道 / 自动更新开关。
  *
  * 按钮跑的是 `manager update`：按通道切到最新正式版 tag 或 main → bun install → web 依赖
  * 变了就 npm install、构建过期就重建（失败换回旧构建）→ 重启 web 与 bridge / launcher / cron。
@@ -68,7 +68,7 @@ export function BackendUpdateSection() {
       aside={
         <button className="btn btn-sm" disabled={busy} onClick={start}>
           {busy && <span className="loading loading-spinner loading-xs" />}
-          {busy ? t("升级中…") : t("升级 Claudestra")}
+          {busy ? t("升级中…") : t("升级 Floka")}
         </button>
       }
     >

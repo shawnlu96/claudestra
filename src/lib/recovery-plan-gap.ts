@@ -25,6 +25,7 @@ import { borrowPeers } from "./scheduler-pool-facts.js";
 import type { SlotPool } from "./scheduler-slot-hold-autostart.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import { scanSpecHead } from "./spec-lint-head.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type RecoveryMode = "on" | "observe" | "off";
 /** CFG's minimal policy value; manualAfterMs null = the owner has not set a threshold yet. */
@@ -385,7 +386,7 @@ export interface PlanGapDeps {
   projects: readonly string[];
   policy?: PlanGapPolicyPort;
   facts(project: string): ProjectFacts;
-  notifyPm(project: string, text: string): Promise<void>;
+  notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
   /** first time each project's current fingerprint was seen (process memory; a restart only delays a notice) */
   seen: Map<string, { fp: string; since: number }>;
 }
@@ -455,7 +456,7 @@ export async function planGapTick(d: PlanGapDeps): Promise<PlanGapOutcome[]> {
       { project, target: "", kind: "note", text: n === 1 ? "计划不足提醒" : `计划不足提醒（第 ${n} 次发送）`, data: { recovery } });
     if (claim.duplicate) { done("deduped", `另一路已认领这次发送（seq ${claim.event.seq}）`); continue; }
     try {
-      await d.notifyPm(project, text);
+      await d.notifyPm(project, text, "action"); // 计划不足：PM 要补计划
     } catch (e) {
       // No sent marker: the claim only spaces the next attempt (planGapRetryAfter), it never stands for a delivered notice.
       done("failed", e instanceof Error ? e.message : String(e)); continue;

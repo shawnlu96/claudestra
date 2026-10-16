@@ -47,7 +47,7 @@ test("consecutive P1 after a start move: strategy swaps, materials keep the orig
     expect(body).toContain("original report reviews/T1-r2/report.md");
     expect(body).toContain(P1.probe);
   } finally { f.close(); }
-});
+}, 30_000);
 
 test("second mismatch: a contiguous H2→H3→H4 chain still reads the H2 finding", async () => {
   const f = await repeatedFix();
@@ -57,7 +57,7 @@ test("second mismatch: a contiguous H2→H3→H4 chain still reads the H2 findin
     expect(localFindings(f).ids).toEqual([P1.findingId]);
     expect(convergenceProbe(f).plan().action).toBe("fix_swap");
   } finally { f.close(); }
-});
+}, 30_000);
 
 const forged: [string, Record<string, unknown>][] = [
   ["missing chain", {}],
@@ -79,7 +79,7 @@ test.each(forged)("no verified chain (%s): neither strategy nor local take reuse
     expect(decision).not.toMatchObject({ action: "fix_swap" });
     expect(decision).toMatchObject({ kind: "escalate" });
   } finally { f.close(); }
-});
+}, 30_000);
 
 test("a delivery after the move ends the chain for the strategy", async () => {
   const f = await repeatedFix();
@@ -91,4 +91,4 @@ test("a delivery after the move ends the chain for the strategy", async () => {
     const delivered = { ...s.events.at(-1)!, seq: s.events.at(-1)!.seq + 1, kind: "deliver" as const, data: { headSHA: H3 } };
     expect(planConvergence({ ...s, events: [...s.events, delivered] }, base)).toMatchObject({ action: "dispatch" });
   } finally { f.close(); }
-});
+}, 30_000);

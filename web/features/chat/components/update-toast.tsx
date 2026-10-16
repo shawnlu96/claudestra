@@ -33,7 +33,7 @@ export function UpdateToast() {
     return (
       <div className="pointer-events-none absolute inset-x-0 top-2 z-30 flex justify-center">
         <span className="pointer-events-auto rounded-full bg-warning px-4 py-1.5 text-[12.5px] font-semibold text-warning-content shadow-lg">
-          ⚠️ {t("这台机器需要升级 Claudestra 才能配合这个版本的网页")}
+          ⚠️ {t("这台机器需要升级 Floka 才能配合这个版本的网页")}
         </span>
       </div>
     );

@@ -2,7 +2,7 @@
 /** v4 左区大纲：固定的「待你处理 N」入口、筛选、事项 → 任务（状态点 + 阶段）。点任务 = 选中并让画布平移过去 */
 import type { LedgerOverview, LineView, OwnerWait, Tr } from "../collab-model";
 import { DoneMoreButton, useDonePages } from "../collab-done";
-import { FILTER_LABEL, FILTERS, filterCount, outlineOf, type Filter } from "./v4-model";
+import { FILTER_LABEL, FILTERS, filterCount, GATED_FILTERS, outlineOf, type Filter } from "./v4-model";
 import { snapOf, type CountState } from "../count-words";
 import { countText } from "../count-words-i18n";
 import v from "./v4.module.css";
@@ -20,7 +20,7 @@ export function Outline(props: {
   onWaits: () => void;
   selected: string | null;
   onPick: (id: string) => void;
-  /** 进行中芯片的数与列出的卡（count-words.ts，顶栏同一份）；没载完时只有「进行中」是骨架，已完成 / 全部 / P0 从总览出数（TEAMCNT1） */
+  /** 进行中芯片的数与列出的卡（count-words.ts，顶栏同一份）；没载完时进行中 / 已完成 / 全部同一个闸门出骨架，P0 从总览出数（CNTGATE1） */
   counts: CountState;
   tr: Tr;
 }) {
@@ -39,7 +39,7 @@ export function Outline(props: {
       <div className={v.filters} role="tablist">
         {FILTERS.map((f) => (
           <button key={f} type="button" role="tab" aria-selected={filter === f} className={`${v.chip} ${filter === f ? v.chipOn : ""}`} onClick={() => props.onFilter(f)}>
-            {countText(tr, FILTER_LABEL[f])} {loading && f === "active" ? <span className={v.skel} aria-hidden /> : <span className={v.cnt}>{filterCount(ov, f, snap)}</span>}
+            {countText(tr, FILTER_LABEL[f])} {loading && GATED_FILTERS.has(f) ? <span className={v.skel} aria-hidden /> : <span className={v.cnt}>{filterCount(ov, f, snap)}</span>}
           </button>
         ))}
       </div>

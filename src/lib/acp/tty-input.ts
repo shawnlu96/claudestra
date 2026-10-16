@@ -5,6 +5,7 @@
  * Ctrl-C：raw 模式下不再变成 SIGINT——回合中 = 打断，空闲时 2 秒内连按两次才退出（manager 收宿主改发 SIGTERM，runtimes/acp-control.ts）。
  * tests/acp-tty-input.test.ts。
  */
+import { redactSecrets } from "../redact-secrets.js";
 import type { PermissionCard } from "./permissions.js";
 
 export type TerminalOp =
@@ -26,6 +27,8 @@ export interface TtyInputDeps {
   /** 输入行变了：重画底栏 */
   redraw(): void;
   exit(): void;
+  /** /log 显示的连接日志路径（顶部提示里不放本机路径） */
+  logPath?: string;
   now?(): number;
   /** 单独一个 ESC 等多久没有后文才算 Esc 键（方向键的 ESC [ A 可能被拆到两次 data 里）；缺省 ESC_WAIT_MS */
   escMs?: number;
@@ -35,6 +38,8 @@ export interface TtyInput {
   feed(data: string): void;
   /** 底栏输入行的内容（已按宽度截好） */
   line(cols: number): string;
+  /** 新视图的多行输入框要的原文（tui/footer.ts）：permission = 有审批在等且还没打字时的作答提示 */
+  draft(): { text: string; permission: string | null };
 }
 
 const EXIT_WINDOW_MS = 2_000;
@@ -48,13 +53,14 @@ const TERMINAL_HELP = [
   "  /effort <级>    换推理强度（不重启；/thinking 同义）",
   "  /clear          清上下文（换新线程）",
   "  /compact        压缩上下文",
+  "  /log            连接日志在哪",
   "  /help           本帮助",
   "  其它 /xxx 照普通消息发，和网页一样",
   "按键：回车发送（粘贴进来的换行留在正文里）· Esc 回合中打断、空闲时清空输入 · Ctrl-C 回合中打断、空闲时 2 秒内连按两次退出 · Ctrl-U 清空输入",
   "审批：整行只打 y 允许 / n 拒绝 / 序号选第几个，再按回车（别的内容回车照常当消息发；网页卡片也能答，谁先答算谁的）",
 ].join("\n");
 
-type Parsed = TerminalOp | { help: true } | { error: string };
+type Parsed = TerminalOp | { help: true } | { log: true } | { error: string };
 
 /** 一行输入 → 动作；不是终端命令的 /xxx 照消息发（网页对不认识的斜杠也是这样） */
 export function parseTerminalLine(text: string): Parsed {
@@ -63,6 +69,7 @@ export function parseTerminalLine(text: string): Parsed {
   const arg = (m[2] ?? "").trim();
   switch (m[1]) {
     case "help": return { help: true };
+    case "log": return { log: true };
     case "clear": return { op: "clear" };
     case "compact": return { op: "compact" };
     case "model": return arg ? { op: "config", configId: "model", value: arg } : { error: "用法：/model <模型名>" };
@@ -123,6 +130,7 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     if (answer(text.trim())) return;
     const p = parseTerminalLine(text);
     if ("help" in p) return deps.print(TERMINAL_HELP);
+    if ("log" in p) return deps.print(deps.logPath ? `连接日志：${deps.logPath}` : "这个窗口没有连接日志");
     if ("error" in p) return deps.print(`❌ ${p.error}`);
     if (p.op === "message") return run(p, (r) => (r.note ? `· ${r.note}` : null), text); // 正文回来时宿主会显示这条入站，这里不重复
     deps.print(`❯ ${text.trim()}`);
@@ -164,6 +172,10 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     if (ch < " ") return; // 其它控制键不认
     buf += ch;
   };
+  const permissionHint = (): string | null => {
+    const pending = deps.permission();
+    return pending && !buf ? `审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/序号 + 回车）` : null;
+  };
   const decode = createKeyDecoder({
     key,
     paste: (ch) => void (buf += ch),
@@ -175,11 +187,11 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
       decode(data);
       deps.redraw();
     },
-    line(cols) {
-      const pending = deps.permission();
-      if (pending && !buf) return fitTail(`审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/序号 + 回车）❯ `, cols);
-      return fitTail(`❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`, cols);
+    line(cols) { // 只改显示：先对原文整段打码、再换 ⏎ 截尾（先换 ⏎ 会让 Bearer\n<值> 这类跨行规则漏掉），发出去的还是原文
+      const hint = permissionHint();
+      return fitTail(redactSecrets(hint ? `${hint}❯ ` : `❯ ${buf}`).replace(/\r\n?|\n/g, "⏎"), cols);
     },
+    draft: () => ({ text: buf, permission: permissionHint() }),
   };
 }
 

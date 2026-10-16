@@ -2325,7 +2325,7 @@ switch (cmd) {
   case "project-add": case "project-list": case "project-edit": case "project-remove": case "project-assign": case "project-merge":
     await runProjectCommand(cmd, args);
     break;
-  case "project-migrate": await cmdProjectMigrate(); break;
+  case "project-migrate": await cmdProjectMigrate(); break; case "state-maintenance": await (await import("./manager/state-maintenance.js")).cmdStateMaintenance(args); break; // 维护按钮的内部入口
   case "external": case "guard": { const m = await import("./manager/agent-external.js"); await (cmd === "guard" ? m.cmdAgentGuard : m.cmdAgentExternal)(args[0] || "", args[1] || ""); break; }
   case "transport": case "acp-install": case "codex-adapter": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // ACP：切 transport / 装适配器 / 选适配器
 
@@ -2457,12 +2457,15 @@ switch (cmd) {
 
   case "kill": {
     const at = args.indexOf("--session"), session = at >= 0 ? args[at + 1] : undefined, guardAt = args.indexOf("--fix-stop");
-    const [name] = args.filter((a, i) => !a.startsWith("--") && (guardAt < 0 || i !== guardAt + 1) && (at < 0 || i !== at + 1)); // `kill --force x` 也认得出名字
-    if (!name || (at >= 0 && !session) || (guardAt >= 0 && (!session || !args[guardAt + 1]))) {
-      output({ ok: false, error: "usage: kill <name> [--session <id>]" });
+    const ecAt = args.indexOf("--expect-create"), ec = ecAt >= 0 ? /^(\d+)@(.+)$/.exec(args[ecAt + 1] ?? "") : null; // <pid>@<startedAt>：只清这个半建占位
+    const values = new Set([at, guardAt, ecAt].filter((i) => i >= 0).map((i) => i + 1));
+    const [name] = args.filter((a, i) => !a.startsWith("--") && !values.has(i)); // `kill --force x` 也认得出名字
+    if (!name || (at >= 0 && !session) || (guardAt >= 0 && (!session || !args[guardAt + 1])) || (ecAt >= 0 && (!ec || at >= 0))) {
+      output({ ok: false, error: "usage: kill <name> [--session <id>] [--expect-create <pid>@<startedAt>]" });
       break;
     }
-    await cmdKill(name, { force: args.includes("--force"), session, fixStop: guardAt >= 0 ? args[guardAt + 1] : undefined }); // --force：频道删不掉时放弃这一步
+    const expectCreate = ec ? { pid: Number(ec[1]), startedAt: ec[2] } : undefined;
+    await cmdKill(name, { force: args.includes("--force"), session, fixStop: guardAt >= 0 ? args[guardAt + 1] : undefined, expectCreate }); // --force：频道删不掉时放弃这一步
     break;
   }
 

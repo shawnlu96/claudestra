@@ -19,10 +19,11 @@ import { getOrder, liveOrders, orderOf, recordTake, WORKER_STATES, type LendRow 
 import { LEND_ORDER_TOOLS } from "./lend-mcp-profile.js";
 import { signedFor, signPurpose } from "./instance-key.js";
 import { REVIEW_TICKET_PURPOSE, type TicketSigner } from "./pool-review-proof-ticket.js";
+import { ledgerSigner } from "./floka-ledger/config.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import { commitLendResult, payloadSha, readReportIn } from "./lend-submit.js";
 import { refuse, type OrderToolResult } from "./order-tool-route.js";
-import { askScopeExtra, parseAskWire, parseVerdictWire } from "./order-wire.js";
+import { askScopeExtra, lenientAskFields, parseAskWire, parseVerdictWire } from "./order-wire.js";
 import { isE2eResponse } from "./peer-e2e-client.js";
 import type { HttpPeer } from "./peers.js";
 import { isLendWorkerName } from "./runtimes/clean-env.js";
@@ -151,7 +152,7 @@ async function submitVerdict(row: LendRow, args: unknown, d: LendToolDeps): Prom
   if (w.value.head !== orderOf(row)?.head) return refuse("head_mismatch", "head 不是这张审查单的 head");
   const report = readReportIn(row.dir ?? "", w.value.reportPath);
   if (!report.ok) return refuse("bad_report", report.error);
-  const sign = d.signTicket ?? ((f: string[]) => signPurpose(REVIEW_TICKET_PURPOSE, f));
+  const sign = d.signTicket ?? ledgerSigner("lend-review-ticket", row.peer, (f: string[]) => signPurpose(REVIEW_TICKET_PURPOSE, f));
   const done = commitLendResult(d.db!, row, { verdict: w.value.verdict, findings: w.value.findings, report: report.text }, d.now(), sign);
   if (!done.ok) return refuse("submit_refused", done.error);
   const cur = getOrder(d.db!, row.orderId);
@@ -168,8 +169,10 @@ async function askPeer(row: LendRow, args: unknown, d: LendToolDeps): Promise<Or
   const noAsk = refuse("peer_no_ask", "对方（发起方）的版本不支持 ask，问题没有发出去：把疑问写进报告，或按规格自行判断");
   if (peerProto(d.db!, row.peer) !== 2) return noAsk;
   if (row.leaseGen === null) return refuse("not_started", `${row.orderId} 还没有租约代数，不能提问`);
-  const r = await lendRequest(d.call, row.peer, "ask", { orderId: row.orderId, gen: row.leaseGen, question: w.value.question, options: w.value.options,
-    ...askScopeExtra(w.value) }); // files / reason 只在有值时发（旧版发起方不认）
+  const base = { orderId: row.orderId, gen: row.leaseGen, question: w.value.question, options: w.value.options, ...askScopeExtra(w.value) }; // files / reason 只在有值时发（旧版发起方不认）
+  const asked = lenientAskFields({ ...w.value }); // ASKDEF1 class / default / risk 同样只在有值时发
+  let r = await lendRequest(d.call, row.peer, "ask", { ...base, ...asked });
+  if (!r.ok && r.code === "invalid" && Object.keys(asked).length) r = await lendRequest(d.call, row.peer, "ask", base); // 旧版发起方不认这三项：去掉重发
   if (notV2(r)) return noAsk;
   if (r.ok) return { ok: true, askId: r.value.askId };
   const unknown = r.code === "transport" || r.code === "bad_response";

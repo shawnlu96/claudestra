@@ -39,7 +39,7 @@ export interface InboxDeps {
 let deps: InboxDeps | null = null;
 export function initInbox(d: InboxDeps): void {
   deps = d;
-  setHeldRender(d.render); // 押后批次投递（held-flush.ts）逐条用同一个渲染
+  setHeldRender(d.render, d.emitIn); // 押后批次投递（held-flush.ts）逐条用同一个渲染；合批送达的 agent 消息同样画入站气泡
 }
 
 /**

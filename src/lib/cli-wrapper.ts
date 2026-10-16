@@ -25,8 +25,8 @@ export const DAEMONS: DaemonSpec[] = [
 ];
 
 /** `claudestra` 包装脚本的内容（纯函数，单测做 bash -n 语法检查） */
-export function cliWrapperScript(repoRoot: string, bunPath = "bun"): string {
-  const daemonLabels = DAEMONS.map((d) => `"${d.label}"`).join(" ");
+export function cliWrapperScript(repoRoot: string, bunPath = "bun", labels?: readonly string[], resumeActive = false): string {
+  const daemonLabels = (labels ?? DAEMONS.map(d => d.label)).map(label => `"${label}"`).join(" ");
   return `#!/usr/bin/env bash
 # claudestra — one-shot launcher (Claudestra-installed, v2.4.1+)
 # 用法：
@@ -110,7 +110,7 @@ done
 if [ \${#missing[@]} -eq 0 ]; then
   echo "$CO launchd daemon 都在 (\${DAEMONS[*]})"
 else
-  echo "$CI daemon 缺 \${#missing[@]}/\${#DAEMONS[@]}（\${missing[*]}），bootstrap…"
+${labels && !resumeActive ? '  echo "服务未就绪，请通过维护批准入口恢复；普通启动不会切换服务" >&2; exit 1' : `  echo "$CI daemon 缺 \${#missing[@]}/\${#DAEMONS[@]}（\${missing[*]}），bootstrap…"
   fail=0
   for d in "\${missing[@]}"; do
     plist="$PLIST_DIR/$d.plist"
@@ -121,7 +121,7 @@ else
     fi
   done
   [ "$fail" -eq 1 ] && exit 1
-  echo "$CO daemon 都起来了"
+  echo "$CO daemon 都起来了"`}
 fi
 
 # 已在 tmux 里：不嵌套 attach

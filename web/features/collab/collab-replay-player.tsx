@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fmtDuration, type Tr } from "./collab-model";
 import { fmtEventTime, type TaskDetail } from "./collab-detail-model";
+import { MACHINE_WORDS } from "@/lib/owner-words";
 import { Icon, type IconName } from "./collab-icons";
 import { hasReplay, nextIndex, replayFrames, segmentsAt, stageUnknownAt } from "./collab-replay";
 import base from "./collab.module.css";
@@ -27,7 +28,7 @@ export function CollabReplay({ d, tr, homeOnly = false }: { d: TaskDetail; tr: T
     return homeOnly ? (
       <button type="button" className={`${base.btn} ${s.rpOpen}`} disabled data-home-only="replay">
         <Icon name="play" size={12} />
-        {tr("回放仅主场")}
+        {tr(MACHINE_WORDS.replayThere)}
       </button>
     ) : null;
   if (!open)
@@ -117,6 +118,7 @@ function Player({ d, tr, onClose }: { d: TaskDetail; tr: Tr; onClose: () => void
             {cur.approx && "≈"}
             {fmtEventTime(cur.ts, d.now, tr)}
           </span>
+          {cur.intervention && <span className={base.manualBadge} data-intervention>{tr("人工干预")}</span>}
           {cur.text}
         </div>
       </div>
@@ -126,7 +128,7 @@ function Player({ d, tr, onClose }: { d: TaskDetail; tr: Tr; onClose: () => void
         {frames.map((f, k) => (
           <button key={f.seq} type="button" data-i={k} className={`${s.rpItem} ${k === i ? s.cur : k > i ? s.fut : ""}`} onClick={() => (setPlaying(false), setI(k))}>
             <span className={s.tm}>{fmtEventTime(f.ts, d.now, tr)}</span>
-            <span>{f.text}</span>
+            <span>{f.intervention && <span className={base.manualBadge} data-intervention>{tr("人工干预")}</span>}{f.text}</span>
           </button>
         ))}
       </div>

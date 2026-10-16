@@ -3,6 +3,11 @@
 状态：讨论稿（已撤回合并资格），待 owner 与 Shawn 评审；本稿不改代码、不开实现。卡：PMR-1。依据：`docs/design/scheduler-engine.md`（T68）、
 `docs/team/orchestration-team.md`、`src/lib/manual-reason.ts`，以及 2026-10-07 当天的台账事件。行号以写稿时的 origin/main（`af3c493a`）为准。
 
+> **P0 已实现（PMR-2）**：自动卡（含当过 auto、被切 manual 接管 / 引擎退回人工的卡）上 PM / master 的写入在 `insertEvent` 统一补 `manual:true` + `intervention{cmd,by,role,mode}`（`src/lib/pm-rails.ts`，作用域由 `ledger` CLI 开）；
+> 豁免靠角色（执行者 / 审查员 / peer / scheduler 不是 PM 角色）加 ask、纯备注、escalate。开关是恢复策略键 `pmRails`（按项目，缺省 observe：只标不推），
+> 只推 `mode=on` 时打的标（observe 期的切 on 后不补推）；`ledger pm-rails-tick`（bridge 每 5 分钟）经本机 owner 通知推：同卡 10 分钟合并一条、意图停在 unknown 满 30 分钟推一次、每天 10:00 后汇总前 24 小时。
+> 台账详情的事件挂「人工干预」徽标。P1–P3 未开始。
+
 owner 的要求（10-07 23:21 / 23:25）：自动流程像 dynamic workflow 一样由代码约束，**进了流程就不能中途手工干预，直到达到设计预期**；中间只允许「停止、放弃、重启」这一类动作。
 
 T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操作保留真实 actor，并在事件里标 manual；每张卡带 `fallback: manual`。
@@ -168,7 +173,7 @@ T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操
    由引擎（或在引擎的事务里）落地。其他写入口在 auto 卡上一律拒绝。
 2. **其余干预只能在「接管」状态下做**。接管要 owner 在界面上 authorize 批准，有时限，每一步都推送给 owner，结束时交还引擎并对账。
 3. **引擎没覆盖的情况停卡，不退给 PM 手工走完**。停卡时写明原因并进 owner 收件箱，修好引擎后用「重启」接着走。
-4. **只看工具面**：本模型约束的是 Claudestra 给的 CLI / MCP / HTTP；同一 OS 用户直接改库不在防护范围内，见第 6 节。
+4. **只看工具面**：本模型约束的是 Floka 给的 CLI / MCP / HTTP；同一 OS 用户直接改库不在防护范围内，见第 6 节。
 
 ### 3.2 新增的卡状态
 
@@ -378,7 +383,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
   - 可以读 `.env` 拿到 bot token 伪造按钮（`docs/team/orchestration-team.md:54`）。
 
   所以这里的保证**只在工具面上成立**：
-  - **保证**（P2 起，且引擎退回口已同期堵上，见第 5 节；P0/P1 只有审计和推送）：只用 Claudestra 工具的 agent，在 auto 卡上除了四个动作以外改不了状态；接管必须有 owner 在认证入口点过的批准；每次接管写入都推给 owner。审计只覆盖正规写入口。
+  - **保证**（P2 起，且引擎退回口已同期堵上，见第 5 节；P0/P1 只有审计和推送）：只用 Floka 工具的 agent，在 auto 卡上除了四个动作以外改不了状态；接管必须有 owner 在认证入口点过的批准；每次接管写入都推给 owner。审计只覆盖正规写入口。
   - **不保证**：直接写库不一定留下事件（UPDATE 可以不插事件，也能伪造带 `takeoverId` 的事件或改审计记录）；独立对账（台账状态 vs PR / registry / 意图）可能发现部分状态差异，但不保证发现直接写库；防不住铁了心的本机 agent；不能让 CLI 上的「owner」等于 owner 本人；不能阻止 GitHub 侧的人工操作（比如仓库方手动合并，这类只能由引擎识别和停卡）。
 - **规格变更被当成逃生口**。PM 可能为了把卡推回 fix 而去改规格。这一点由三条约束限制：规格卡必须真的有改动；delta 由服务端 diff 出来；每次规格变更都推给 owner。
 - **实现成本**：P1–P2 要动 `ledger-write-cmds.ts` 和 `ledger-scheduler-cmds.ts` 这两个在基线里的大文件。按防腐规则，逻辑放进新模块，大文件里只加一行调用。

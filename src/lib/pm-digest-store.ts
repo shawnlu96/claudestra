@@ -2,12 +2,12 @@
  * PM 摘要的落盘状态（agents-PMDIG1）：statePath("pm-digest.json") 存摘要队列与最近 24 小时的归类记录，只有 bridge 写；
  * statePath("pm-digest-mode.json") 存各项目开关（缺省 observe），只有 manager 的 `ledger pm-digest-mode` 写。重启读回队列照常送出。
  */
-import { pmRouteMode, setPmRouteMode } from "./pm-route-mode.js";
+import { pmDigestPull, pmPeerInbox, pmRouteMode, setPmDigestPull, setPmPeerInbox, setPmRouteMode, withModeLock, type PullMode } from "./pm-route-mode.js";
 import { tagPmRouteRecord, validPmRouteRecord } from "./pm-route-record.js";
 import type { PmRouteRecord } from "./pm-route-types.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, reportCorrupt, StateCorruptError, writeJsonAtomicSync, type StateRead } from "./state-file.js";
-import type { DigestEntry, DigestKind, DigestMode } from "./pm-digest.js";
+import type { DigestEntry, DigestKind, DigestMode, LevelSource } from "./pm-digest.js";
 
 /** 归类记录只留这么久（只读统计看最近 24 小时） */
 export const PM_DIGEST_LOG_MS = 24 * 3600_000;
@@ -23,6 +23,8 @@ export interface DigestRecord {
   mode: DigestMode;
   route?: PmRouteRecord;
   routeOnly?: boolean;
+  /** 归类依据（agents-NOTICETYPE1 样本记录口）：structured = 发送方标的级别，regex = 正文字样；其余判定不记 */
+  levelSource?: LevelSource;
 }
 interface DigestState { queue: DigestEntry[]; log: DigestRecord[] }
 
@@ -32,9 +34,10 @@ const num = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v)
 /** 元素也查：坏一条就整份按损坏处理（读者按空、写者拒写），不让 queue:[null] 之类在投递路径上抛错 */
 const validEntry = (e: unknown): boolean => isObj(e) && str(e.id) && str(e.project) && str(e.kind) && str(e.source) && str(e.firstLine) && num(e.at)
   && (e.card === undefined || str(e.card)) && (e.carriedBy === undefined || str(e.carriedBy))
-  && (e.detail === undefined || (Array.isArray(e.detail) && e.detail.every(str)));
+  && (e.detail === undefined || (Array.isArray(e.detail) && e.detail.every(str))) && (e.unleveled === undefined || e.unleveled === true);
 const validRecord = (r: unknown): boolean => isObj(r) && num(r.at) && str(r.project) && (r.send === "now" || r.send === "digest") && str(r.source)
-  && validPmRouteRecord(r.route) && (r.routeOnly === undefined || typeof r.routeOnly === "boolean");
+  && validPmRouteRecord(r.route) && (r.routeOnly === undefined || typeof r.routeOnly === "boolean")
+  && (r.levelSource === undefined || r.levelSource === "structured" || r.levelSource === "regex");
 const validState = (v: unknown): boolean => isObj(v) && Array.isArray(v.queue) && v.queue.every(validEntry) && Array.isArray(v.log) && v.log.every(validRecord);
 const validModes = (v: unknown): boolean => isObj(v) && (v.projects === undefined || isObj(v.projects));
 
@@ -79,11 +82,22 @@ export class PmDigestStore {
 
   routeMode(project: string): DigestMode { return pmRouteMode(this.modePath, project); }
 
-  setRouteMode(project: string, mode: DigestMode): void { setPmRouteMode(this.modePath, project, mode); }
+  setRouteMode(project: string, mode: DigestMode): Promise<void> { return setPmRouteMode(this.modePath, project, mode); }
 
-  setMode(project: string, mode: DigestMode): void {
-    const v = forWrite(this.modePath, readJsonStateSync(this.modePath, validModes)) as { projects?: Record<string, DigestMode> } | undefined;
-    writeJsonAtomicSync(this.modePath, { ...v, projects: { ...v?.projects, [project]: mode } });
+  pullMode(project: string): PullMode { return pmDigestPull(this.modePath, project); }
+
+  setPullMode(project: string, mode: PullMode): Promise<void> { return setPmDigestPull(this.modePath, project, mode); }
+
+  peerInbox(project: string): PullMode { return pmPeerInbox(this.modePath, project); }
+
+  setPeerInbox(project: string, mode: PullMode): Promise<void> { return setPmPeerInbox(this.modePath, project, mode); }
+
+  /** 与 setRouteMode / setPullMode 同一把锁（pm-route-mode.ts withModeLock） */
+  setMode(project: string, mode: DigestMode): Promise<void> {
+    return withModeLock(this.modePath, () => {
+      const v = forWrite(this.modePath, readJsonStateSync(this.modePath, validModes)) as { projects?: Record<string, DigestMode> } | undefined;
+      writeJsonAtomicSync(this.modePath, { ...v, projects: { ...v?.projects, [project]: mode } });
+    });
   }
 
   /** 记一条归类；enqueue 给了就同时入队（同 id 不重复入队） */
@@ -123,6 +137,11 @@ export class PmDigestStore {
       if (n) queue.push(n);
     }
     if (changed) this.write({ ...s, queue }, now);
+  }
+
+  /** 拉取模式的项目里放满 PM_DIGEST_LOG_MS 还没人拉的条目出队：来源（卡片、台账、处理员草稿）里都还在，队列不无限长 */
+  expire(pull: (project: string) => boolean, now: number): void {
+    this.update(now, (e) => (!e.carriedBy && now - e.at >= PM_DIGEST_LOG_MS && pull(e.project) ? null : e));
   }
 
   /** 已经随某次投递送到的条目出队 */

@@ -1,6 +1,7 @@
 /**
  * ACP 宿主入口（transport=acp 的 Codex / Pi agent）：在 agent 的 tmux 窗口里代替运行时的 TUI，窗口显示可读的会话
- * （lib/acp/transcript.ts；TTY 上多一行状态、一行输入和正文流式续写，lib/acp/tty-screen.ts / tty-input.ts），连接 / 生命周期日志只写 host.log。
+ * （lib/acp/transcript.ts；TTY 上是 lib/acp/tui/ 的终端视图：Markdown、工具块、输入框、状态栏，出错退回 tty-screen.ts 的逐行视图，
+ * 见 docs/architecture/acp-terminal.md），连接 / 生命周期日志只写 host.log。
  * 逻辑都在 lib/acp/host.ts，按运行时不同的几处在 lib/acp/host-runtime.ts，这里只读环境变量、接真实依赖、处理信号。
  * 启动命令由 lib/runtimes/codex-acp.ts / pi-acp.ts 生成；排障：连接日志看 host.log，会话看这个窗口（`tmux -S … attach`）。
  */
@@ -17,12 +18,18 @@ import { AcpHost } from "./lib/acp/host.js";
 import { ACP_RUNTIME_ENV, acpRuntime } from "./lib/acp/host-runtime.js";
 import { startToolProxy } from "./lib/acp/tool-proxy.js";
 import { stampTranscript } from "./lib/acp/transcript.js";
-import { createTtyScreen } from "./lib/acp/tty-screen.js";
+import { showReplay, tuiHeader } from "./lib/acp/transcript-replay.js";
+import { createTtyScreen, type TtyScreen } from "./lib/acp/tty-screen.js";
 import { attachTtyInput } from "./lib/acp/tty-input-attach.js";
+import type { TtyInput } from "./lib/acp/tty-input.js";
 import type { TurnState } from "./lib/acp/tty-status.js";
+import { guardScreen } from "./lib/acp/tui/guard.js";
+import { createTuiScreen, type TuiScreen } from "./lib/acp/tui/screen.js";
 import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { redactSecrets } from "./lib/redact-secrets.js";
+import { plainUserText } from "./lib/cc-own-records.js";
 import { SRC_DIR } from "./lib/repo-root.js";
+import { createLineTranslator, findSessionJsonlBySessionId, sessionJsonlPath } from "./lib/session-source.js";
 import { runManagerProcess } from "./lib/run-manager.js";
 import { readRegistryAgents } from "./lib/registry.js";
 import { CLEAN_ENV_FLAG, makeWorkerRoot } from "./lib/runtimes/clean-env.js";
@@ -52,13 +59,15 @@ const hostLogFile = join(logsDir, "host.log");
 // TTY（tmux 窗口）才画状态行；不是 TTY（测试、重定向到文件）照旧一段一行纯文本，不出任何控制序列
 // 输入行要 stdin 也是 TTY；出借 worker（干净环境）的窗口不给 owner 打字，bridge 那边也不放 host_terminal 帧（lib/lend-tools.ts）
 const typing = !!process.stdout.isTTY && !!process.stdin.isTTY && process.env[CLEAN_ENV_FLAG] !== "1";
-let inputLine: ((cols: number) => string) | undefined;
+let input: TtyInput | undefined;
 // manager 把整条启动命令（几 KB 的 base64 前言）打进窗口 shell，回显会一直留在屏上和 tmux 滚动记录里；画面开画前清掉（3J = 清滚动记录）
 if (process.stdout.isTTY) process.stdout.write("\x1b[H\x1b[2J\x1b[3J");
-const tty = process.stdout.isTTY
-  ? createTtyScreen({ write: (s) => void process.stdout.write(s), columns: () => process.stdout.columns || 80 }, () => turnState(), Date.now,
-    typing ? (cols) => inputLine?.(cols) ?? "❯ " : undefined)
-  : null;
+const ttyIo = { write: (s: string) => void process.stdout.write(s), columns: () => process.stdout.columns || 80, rows: () => process.stdout.rows || 40 };
+const lineView = () => createTtyScreen(ttyIo, () => turnState(), Date.now, typing ? (cols) => input?.line(cols) ?? "❯ " : undefined);
+// CLAUDESTRA_ACP_TUI=0：直接用逐行视图（新视图出问题时 owner 的退路）
+const tty: (TtyScreen & Partial<Pick<TuiScreen, "config">>) | null = !process.stdout.isTTY ? null : process.env.CLAUDESTRA_ACP_TUI === "0" ? lineView()
+  : guardScreen(() => createTuiScreen(ttyIo, () => turnState(), Date.now, typing ? () => input?.draft() ?? { text: "", permission: null } : undefined), lineView,
+    (m) => void appendLogLine(hostLogFile, `${new Date().toISOString()} ${m}`)); // 不经 log()：它要用 tty，构造时出错那一刻还没有
 let turnState = (): TurnState => ({ busy: false, queued: 0, permissions: 0 }); // 宿主建好前（启动日志写不进盘时）按空闲画
 const out = (line: string) => (tty ? tty.print(line) : console.log(line));
 const log = (msg: string) => {
@@ -127,7 +136,13 @@ const host = new AcpHost(
     spawn: (cmd, env, cwd) => spawnAdapter(cmd, env, cwd, log, runtime.logLabel),
     beforeSpawn: runtime.id === "codex" ? noteCodex : undefined, // Pi 的适配器在仓库里，没有要对账的外部版本
     fallback: pick ? (why, kind) => pick.fallback(why, kind) : undefined,
-    makeLink: (deps) => new BridgeLink({ ...deps, url: bridgeUrl, registerFrame: () => ({ ...deps.registerFrame(), ...(callerCred ? { callerCred } : {}) }) }),
+    makeLink: (deps) => {
+      const link = new BridgeLink({ ...deps, url: bridgeUrl, registerFrame: () => ({ ...deps.registerFrame(), ...(callerCred ? { callerCred } : {}) }) });
+      // 状态栏的模型 / effort：宿主每次出给 bridge 的 configOptions 顺手给窗口一份（只读，不改帧）
+      const send = link.send.bind(link);
+      link.send = (frame) => (frame.type === "acp_config" && tty?.config?.(frame.configOptions), send(frame));
+      return link;
+    },
     startProxy: (deps) => startToolProxy(deps),
     postHook: async (body) => {
       const res = await fetch(`${bridgeUrl.replace(/^ws/, "http").replace(/\/+$/, "")}/hook`, {
@@ -170,7 +185,7 @@ const shutdown = (why: string) => {
   setTimeout(() => process.exit(0), 1_500);
 };
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => shutdown(`收到 ${sig}`));
-if (tty && typing) inputLine = attachTtyInput(process.stdin, host, tty, () => shutdown("窗口里连按两次 Ctrl-C"));
+if (tty && typing) input = attachTtyInput(process.stdin, host, tty, () => shutdown("窗口里连按两次 Ctrl-C"), hostLogFile);
 
 // 切换适配器（manager codex-adapter）：空闲才退出、manager 随后按新开关重起；在跑就不动，切换记成 deferred（manager/acp-adapter.ts）
 process.on("SIGUSR2", () => {
@@ -194,5 +209,13 @@ if (process.env[CLEAN_ENV_FLAG] === "1") {
 
 const adapterName = agent.stub ? `stub（${agent.cmd.join(" ")}）` : pick?.adapter === "self" ? "自研 Codex 适配器" : runtime.logLabel;
 log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${adapterName} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
-show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（${typing ? "底部输入行可直接发消息，/help 看命令" : "只看"}；连接日志在 ${hostLogFile}）`);
+if (!tty) show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（${typing ? "底部输入行可直接发消息，/help 看命令" : "只看"}；连接日志在 ${hostLogFile}）`);
+else {
+  tty.show(tuiHeader(agentName, sessionId, typing));
+  showReplay(tty, {
+    path: () => sessionJsonlPath(runtime.id, process.cwd(), sessionId) ?? findSessionJsonlBySessionId(runtime.id, sessionId),
+    translate: createLineTranslator(runtime.id),
+    userText: (rec, text) => plainUserText(rec, text, runtime.id) ?? text, // 入站来源核不了：只去包装、原文照登（cc-own-records.ts）
+  }, log);
+}
 host.start();

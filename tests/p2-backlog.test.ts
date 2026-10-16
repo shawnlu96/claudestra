@@ -156,10 +156,14 @@ describe("[验收线 5] 普通 P2 入积压，通知只剩一行摘要", () => {
     const owner = { route: "owner" as const, rule: "protect.decision", reason: "明确需要 owner 决策" };
     for (const bad of [`${line}，需 owner 决策`, `${dir} 需owner拍板`, `${ORIGINAL}；需 owner 拍板`, "[P2 积压] owner决策-1 第 2 轮：降级 F9 关联跟进 #7",
       "[P2 积压] T1 第 2 轮：降级 owner拍板.F9 关联跟进 #7"]) expect([bad, route(bad)]).toEqual([bad, owner]);
-    for (const from of [{ sender: "agent-exec" }, { oneShot: false }, { fromKind: "bridge" as const }]) {
+    for (const from of [{ oneShot: false }, { fromKind: "bridge" as const }]) {
       const m = { fromKind: "local" as const, sender: "scheduler", intent: "notification" as const, oneShot: true, triggerKind: "agent_tool" as const, body: line, ...from };
       expect([from, classifyPmRoute(m)]).toEqual([from, { tags: [owner], immediate: true }]);
     }
+    // 其他 agent 的 oneShot 不看正文，只认发送方标的级别（agents-NOTICETYPE1）：没标的进摘要 / pm-todo，要 owner 拍板的由发送方标 action
+    const exec = { fromKind: "local" as const, sender: "agent-exec", intent: "notification" as const, oneShot: true, triggerKind: "agent_tool" as const, body: line };
+    expect(classifyPmRoute(exec).tags[0]!.rule).toBe("oneshot.unleveled");
+    expect(classifyPmRoute({ ...exec, level: "action" })).toMatchObject({ immediate: true });
   });
 
   test("降级却找不到跟进记录 → 那一条交 PM，不凭空关联", async () => {
@@ -276,7 +280,8 @@ describe("[验收线 6] 越界仍交 PM，坏结构不吞，off / observe 不改
     expect([calls, listEvents(db, {}).length, existsSync(drafts)]).toEqual([[], before, false]);
   });
 
-  test("observe（也是旧配置缺省）：原通知照发，卡上只多一条「本会入积压」，不入积压、不动卡的阶段与合并资格", async () => {
+  test("observe：原通知照发，卡上只多一条「本会入积压」，不入积压、不动卡的阶段与合并资格", async () => {
+    mode("observe"); // PULLTODO1 起缺省 on
     review([p2("F1"), p2("S1", "scope")]);
     const before = getTask(db, "T1");
     expect([await text(), await text()]).toEqual([ORIGINAL, ORIGINAL]);

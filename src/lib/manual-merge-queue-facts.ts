@@ -20,6 +20,7 @@ import { readSchedulerConfig } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
+import { standingHold } from "./pm-handback.js";
 import { UI_ASK_ACTION, uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 export const MANUAL_MERGE_NODE = "manual_merge";
@@ -52,6 +53,17 @@ export const configHandoff: HandoffPort = (project) => {
     return false;
   }
 };
+/** Whether a project merges into local main through `ledger local-merge` (scheduler.json localMerge, ONB-2); same read rule. */
+export const configLocal: HandoffPort = (project) => {
+  try {
+    return readSchedulerConfig().projects[project]?.localMerge === true;
+  } catch (e) {
+    console.error(`⚠️ [manual-merge] 读 scheduler.json 失败，按非本地合并项目：${(e as Error).message}`);
+    return false;
+  }
+};
+export const localWhy = (project: string): string =>
+  `项目 ${project} 是本地合并（localMerge）：没有 PR、不排合并队列，改用 ledger local-merge <task> --head <sha>`;
 /** The reason a handoff project's request never queues here (the pass never claims for it either: manual-merge-queue-pass.ts). */
 export const handoffWhy = (project: string): string =>
   `项目 ${project} 是仓库方交接（mergeHandoff）：PR 由仓库方在 GitHub 合并，本机不排人工合并、不占合并槽、不发合并`;
@@ -210,12 +222,6 @@ function authorizationRefusal(db: Database, taskId: string, head: string, now: n
   return null;
 }
 
-/** A workflow event that switched the card to manual on purpose to keep it there (PM / owner hold). */
-const holdOf = (events: readonly LedgerEvent[]): LedgerEvent | null => {
-  const t = events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow");
-  return t?.data.hold ? t : null;
-};
-
 /** A run of this request carried the review to the card's current head (scheduler-merge.ts carryReview, scheduler identity only). */
 const carriedTo = (events: readonly LedgerEvent[], intentId: string, head: string | null): boolean =>
   !!head && events.some((e) => e.kind === "scheduler" && e.actor === "scheduler" && e.data.op === "review_carry" && e.data.intentId === intentId && e.data.to === head);
@@ -225,11 +231,13 @@ const carriedTo = (events: readonly LedgerEvent[], intentId: string, head: strin
  * intent is not "another open intent", and a head its run carried counts as the bound head. Re-read on every call. A mergeHandoff
  * project's request is void with that reason (refused at request time, shown in merge-queue in every mode): never silent.
  */
-export function requestRefusal(db: Database, req: ManualRequest, now: number, run = false, handoff: HandoffPort = configHandoff): Refusal | null {
+export function requestRefusal(db: Database, req: ManualRequest, now: number, run = false, handoff: HandoffPort = configHandoff,
+  local: HandoffPort = configLocal): Refusal | null {
   const task = getTask(db, req.taskId), wf = task ? getWorkflow(db, task.id) : null;
   if (!task || task.project !== req.project) return { kind: "void", why: "卡不存在或已换项目" };
   if (revokeOf(db, req)) return { kind: "void", why: "请求已撤销" };
   if (handoff(task.project)) return { kind: "void", why: handoffWhy(task.project) };
+  if (local(task.project)) return { kind: "void", why: localWhy(task.project) };
   if (!wf || wf.mode !== "manual") return { kind: "void", why: `流程是 ${wf?.mode ?? "缺流程"}，不是 manual（自动卡走自动合并闸）` };
   if (task.kind !== "code" || task.stage !== "merge") return { kind: "void", why: `卡在 ${task.stage}（${task.kind}），不在 merge` };
   const events = listEvents(db, { project: task.project, target: task.id });
@@ -246,7 +254,7 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
   }
   const frozen = getMeta(db, task.project).queueFrozen;
   if (frozen.frozen) return { kind: "wait", why: `项目合并队列已冻结：${frozen.reason || "无原因"}` };
-  const hold = holdOf(events);
+  const hold = standingHold(events, req); // PMHAND1 11b: lifted by a later request of whoever set it (pm-handback.ts)
   if (hold) return { kind: "wait", why: `卡被明确留在人工（#${hold.seq}）` };
   const safety = openSafetyHold(events);
   if (safety) return { kind: "wait", why: `安全留证 #${safety.seq} 未处置` };

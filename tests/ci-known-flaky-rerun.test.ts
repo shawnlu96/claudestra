@@ -29,7 +29,8 @@ const logOf = (...files: string[]) => [
   " 1999 pass", ` ${files.length} fail`, "##[error]Process completed with exit code 1.",
 ].map((l) => `ci\tRun tests\t2026-10-10T11:02:03.1234567Z ${l}`).join("\n");
 
-interface Over { mode?: RecoveryMode; log?: string | Error; files?: string[] | Error; rerun?: Error }
+/** `runHead`: the commit run 77 tested (default the reviewed head). */
+interface Over { mode?: RecoveryMode; log?: string | Error; files?: string[] | Error; rerun?: Error; runHead?: string }
 function card(over: Over = {}) {
   const c = mergedCard();
   c.db.query("UPDATE scheduler_merges SET phase='await_ci', mergeSha=NULL WHERE intentId=?").run(c.intent);
@@ -43,9 +44,9 @@ function card(over: Over = {}) {
     bindNode(c.db, owner, { id: featureId, rev: getFeature(c.db, featureId)!.rev, key: "UPDFLAKY1", taskId: "rel-UPDFLAKY1" });
     c.db.query("UPDATE tasks SET stage=? WHERE id='rel-UPDFLAKY1'").run(stage);
   };
-  const gh = { attempt: 1, status: "completed", conclusion: "failure", calls: [] as string[] };
+  const gh = { attempt: 1, status: "completed", conclusion: "failure", runHead: over.runHead ?? HEAD, calls: [] as string[] };
   const ciRerun: CiRerunGh = {
-    runAttempt: async () => ({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion }),
+    runAttempt: async () => ({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion, headSha: gh.runHead }),
     failedLog: async () => { gh.calls.push("log"); if (over.log instanceof Error) throw over.log; return over.log ?? logOf(FLAKY); },
     prFiles: async () => { gh.calls.push("files"); if (over.files instanceof Error) throw over.files; return over.files ?? ["src/lib/x.ts"]; },
     rerunFailed: async () => { gh.calls.push("rerun"); if (over.rerun) throw over.rerun; gh.attempt++; gh.status = "queued"; gh.conclusion = ""; },
@@ -94,6 +95,17 @@ describe("CIF8 on: failures only in valid listed files outside the PR → one re
       expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
       expect(c.events("merge_ci_rerun")).toHaveLength(1);
       expect(c.events("merge_conflict")).toEqual([expect.objectContaining({ cause: "ci_fail" })]);
+    });
+  });
+
+  test("[验收线 4] the check links a run of another head: no rerun and no bounce, the gate waits; on this head's run, the one rerun", async () => {
+    await withCard({ runHead: "9".repeat(40) }, async (c) => {
+      c.add();
+      await c.tick();
+      expect([c.state(), c.reruns(), c.events("merge_ci_rerun"), c.events("merge_conflict")]).toEqual([WAITING, 0, [], []]);
+      c.gh.runHead = HEAD;
+      await c.tick();
+      expect([c.state(), c.reruns()]).toEqual([WAITING, 1]);
     });
   });
 

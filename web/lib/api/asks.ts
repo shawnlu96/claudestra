@@ -3,6 +3,7 @@
  * 谁能看见在 bridge lib/ask-access.ts：guest 只拿得到指给自己的；peer / 老 token 403，调用方按「没有待办」处理。
  */
 import type { WebAsk, WebAskAtt } from "@/features/asks/asks-model";
+import { apiCached } from "@/lib/etag-cache";
 import { api } from "./client";
 import { followEventStream } from "./ledger";
 
@@ -10,8 +11,9 @@ import { followEventStream } from "./ledger";
  * 每行带 canAnswer（这个凭据能不能答这一条）；guest 只拿得到指给自己的。
  * 老 bridge 只给顶层一个 canAnswer：行上没有就用它（托管前端先升级时，guest 不该看到一点就 403 的按钮）
  */
-export async function fetchAsks(signal?: AbortSignal): Promise<{ ok: boolean; asks: WebAsk[]; full?: boolean; presence?: string; now: number }> {
-  const r = await api<{ ok: boolean; asks: WebAsk[]; full?: boolean; presence?: string; now: number; canAnswer?: boolean }>("/asks", { signal, timeoutMs: 10_000 });
+/** 没变回 304、交还上次的正文（lib/etag-cache.ts）；history = 抽屉点了「更多」，要 3 天内结案的（默认只给 24 小时内） */
+export async function fetchAsks(signal?: AbortSignal, history = false): Promise<{ ok: boolean; asks: WebAsk[]; full?: boolean; presence?: string; now: number }> {
+  const r = await apiCached<{ ok: boolean; asks: WebAsk[]; full?: boolean; presence?: string; now: number; canAnswer?: boolean }>(history ? "/asks?history=1" : "/asks", { signal, timeoutMs: 10_000 });
   return typeof r.canAnswer === "boolean" ? { ...r, asks: r.asks.map((a) => ({ ...a, canAnswer: a.canAnswer ?? r.canAnswer })) } : r;
 }
 

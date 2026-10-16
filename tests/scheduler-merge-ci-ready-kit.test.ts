@@ -79,7 +79,7 @@ function readyNetwork(hub: ReadyHub): typeof runBounded {
     }
     if (verb === "run view" && tail.includes("--log-failed")) return hub.log === null
       ? { code: 1, timedOut: false, stdout: "", stderr: "fixture unreadable log" } : good(hub.log);
-    if (verb === "run view") return good({ attempt: hub.attempt, status: hub.status, conclusion: hub.conclusion });
+    if (verb === "run view") return good({ attempt: hub.attempt, status: hub.status, conclusion: hub.conclusion, headSha: hub.snapshot.head });
     if (verb === "run rerun") { hub.onRerun?.(); hub.attempt++; hub.status = "queued"; hub.conclusion = ""; return good(""); }
     if (verb === "pr update-branch") return good("");
     if (tail[0] === "api" && tail[1]?.startsWith("repos/example/repo/compare/main...")) return good({ behind: hub.behind, main: READY_MAIN });

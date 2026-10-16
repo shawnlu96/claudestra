@@ -32,6 +32,8 @@ export interface AutostartClaim {
 export const AUTOSTART_DEDUP_PREFIX = "autostart:";
 /** start_node 各步的 dedupKey 前缀（dag-tools-steps.ts、dag-start-settle.ts 拼 key，快照 starts 查询圈区间）；放在这里是因为本文件依赖轻，查询侧引用不会带出环 */
 export const DAG_START_DEDUP_PREFIX = "dag-start:";
+/** start_node 起 ledger 子进程时带的出处（值 = 本次 attempt）：pm-rails 只豁免带着它、且等于 dedup 里 attempt 的步骤（manager/pm-rails-cmds.ts） */
+export const START_NODE_ATTEMPT_ENV = "CLAUDESTRA_START_NODE_ATTEMPT";
 /** 前缀区间的开上界：末尾的 ':' 换成 ';'（ASCII 紧随其后），`k >= prefix AND k < dedupRangeEnd(prefix)` 等价于区分大小写的 `k LIKE 'prefix%'` */
 export function dedupRangeEnd(prefix: string): string {
   if (!prefix.endsWith(":")) throw new Error(`dedup 前缀须以 ':' 结尾：${prefix}`);

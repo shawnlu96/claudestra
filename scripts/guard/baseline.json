@@ -123,8 +123,8 @@
     "deps:watcher-no-watcher: src/bridge/model-drift.ts -> src/bridge/permission-watcher.ts": 1,
     "deps:watcher-no-watcher: src/bridge/permission-watcher.ts -> src/bridge/bg-activity-watcher.ts": 1,
     "deps:web-src-split: web/scripts/tls-proxy.ts -> src/lib/tailscale.ts": 1,
-    "doc:CLAUDE.md": 25079,
-    "doc:CLAUDE.zh-CN.md": 22811,
+    "doc:CLAUDE.md": 25241,
+    "doc:CLAUDE.zh-CN.md": 22979,
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1038,
@@ -515,6 +515,18 @@
       "from": 0,
       "to": 0,
       "why": "MOCKLEAK1 r4 修复换行 case 表达式被当作方法：换行成员边界只在类体内成立；默认上限仍为 0，limits 不变，不放宽已有项，check / guard 脚本与 CI Guard 步骤不变"
+    },
+    {
+      "key": "doc:CLAUDE.md",
+      "from": 25079,
+      "to": 25241,
+      "why": "PMR-2 验收追加 18（Shawn PR1548-r6 收口条件）：按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 的 Features 加一行文档指针（→ docs/architecture/pm-rails.md，写明 pm-rails 不修的两类上限及理由）；细节全在 docs"
+    },
+    {
+      "key": "doc:CLAUDE.zh-CN.md",
+      "from": 22811,
+      "to": 22979,
+      "why": "PMR-2 验收追加 18（Shawn PR1548-r6 收口条件）：按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 的 Features 加一行文档指针（→ docs/architecture/pm-rails.md，写明 pm-rails 不修的两类上限及理由）；细节全在 docs"
     }
   ]
 }

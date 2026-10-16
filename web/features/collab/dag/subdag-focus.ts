@@ -125,7 +125,7 @@ function cardOf(n: BoardNode, found: Found | undefined, g: Graph): FocusCard {
     state: stateOf(n, found), reason: n.missing ? "卡不在本项目" : found?.row.reason ?? null,
     step: stepOf(n, found), rounds: roundsOf(n),
     who: found ? found.row.who : n.handler?.agent ?? null, family: familyOf(found), machine: found ? found.row.machine : null,
-    since: local ? local.since : team ? null : n.since,
+    since: local ? local.since : n.since,
     normalMinutes: local ? local.normalMinutes : null, overMinutes: local ? local.overMinutes : null,
     lastEvent: ev ? { at: ev.at, kind: ev.kind, text: ev.text } : null,
     up: n.deps.map((d) => ({ nodeKey: d, done: g.byKey.get(d)?.phase === "done" })),

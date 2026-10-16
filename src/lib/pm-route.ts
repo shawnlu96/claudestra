@@ -1,4 +1,4 @@
-import { classifyPmPush, PM_DIGEST_LABEL, type DigestInput } from "./pm-digest.js";
+import { agentOneShot, classifyPmPush, peerInfo, PM_DIGEST_LABEL, pmBodyUrgent, type DigestInput } from "./pm-digest.js";
 import { matchPmLineRule, matchPmTrainRule, pmLineFixedText } from "./pm-route-rules.js";
 import { routePmAudit } from "./pm-route-audit.js";
 import type { PmRouteClass, PmRoutePlan, PmRouteTag } from "./pm-route-types.js";
@@ -8,15 +8,26 @@ const verdict = (route: PmRouteClass, rule: string, reason: string, immediate = 
 
 /** 复用 PMDIG3 的整段保护 helper，避免复制或渐渐分叉它的停单 / 重派规则。 */
 function protectedBody(m: DigestInput): boolean {
-  return classifyPmPush({ ...m, fromKind: "local", sender: "pm-route-protection", oneShot: true }).send === "now";
+  return pmBodyUrgent(m.body);
 }
 
 export function classifyPmRoute(m: DigestInput): PmRoutePlan {
+  if (peerInfo(m)) return verdict("digest", "level.info", "peer 标为常规：进摘要"); // 与本机 agent 的 info 同走摘要；其余 API 消息照旧受保护（agents-PEERLEVEL1）
   if (m.fromKind === "user" || m.fromKind === "api") return verdict("owner", "protect.owner", "人类或 peer 对话", true);
   if (m.triggerKind === "user_discord") return verdict("owner", "protect.human", "人类消息触发", true);
   if (m.triggerKind === "peer_http") return verdict("judge", "protect.peer", "peer 回程沿用投递", true);
   if (m.triggerKind === "ask_answer" || m.intent === "response") return verdict("judge", "protect.answer", "卡片答复或回程", true);
   if (m.fromKind === "bridge" && m.sender === PM_DIGEST_LABEL) return verdict("judge", "protect.digest", "摘要自身不分流");
+  // 系统发送方在代码里标了级别（pm-notice-level.ts）就只认它，不再拿正文字样猜：常规只记在卡片 / 台账里、不送 PM（PM 用 `ledger pm-todo` 按需拉），要动手的立即送。
+  // 只认调度器（与下面受信行规则同一口径）和 bridge 合成的台账通知；普通 agent 帧带的级别不认，免得把要紧消息压进摘要
+  const levelTrusted = (m.fromKind === "local" && m.sender === "scheduler" && !!m.oneShot) || (m.fromKind === "bridge" && m.sender === "ledger");
+  if (levelTrusted && m.level === "info") return { tags: [{ route: "auto", rule: "level.info", reason: "发送方标为常规：只记卡片，不送 PM" }], body: "" };
+  if (levelTrusted && m.level === "action") return verdict("judge", "level.action", "发送方标为要 PM 动手", true);
+  // 其他 agent 的 oneShot 只认 send_to_agent 上标的级别，不看正文（agents-NOTICETYPE1）：action 立即送；info 与没标的都走摘要（没标的另在 pm-todo 列出）
+  if (agentOneShot(m)) {
+    if (m.level === "action") return verdict("judge", "level.action", "发送方标为要 PM 动手", true);
+    return m.level === "info" ? verdict("digest", "level.info", "发送方标为常规：进摘要") : verdict("digest", "oneshot.unleveled", "oneShot 没标级别：进摘要、列 pm-todo");
+  }
   if (m.fromKind === "bridge" && m.sender === "ledger-audit") {
     return routePmAudit(m) ?? verdict("judge", "audit.unparsed", "巡检格式未核实，整封沿用旧路");
   }

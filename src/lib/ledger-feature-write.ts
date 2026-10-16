@@ -12,6 +12,7 @@ import type { Database } from "bun:sqlite";
 import { cardContext, pinNodes } from "./ledger-card-names.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { guardDagWrite } from "./dag-write-scrub.js";
+import { rejectBlockedNodeIds } from "./shared-ledger-mirror-skip-id.js";
 import { DAG_REASON_KINDS, FEATURE_STATUSES, type FeatureStatus } from "./ledger-feature-schema.js";
 import { dropPageCheck, requirePageCheckOrBatch, withPageCheck } from "./ui-acceptance-batch-wiring.js";
 import { getDagVersion, getFeature, PLANNED, type DagNode, type DagVersion, type Feature } from "./ledger-feature.js";
@@ -216,7 +217,7 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     }
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
     // 兄弟校验 + 给未开卡节点固化前缀（初版推断就是 feature id）；已开卡的卡号由 taskId 定，不动
-    const built = withPageCheck(db, cur, buildNodes(db, cur, dropPageCheck(input.nodes)), null), pinned = pinNodes(cardContext(db, cur), built, () => true);
+    const built = withPageCheck(db, cur, buildNodes(db, cur, dropPageCheck(input.nodes)), null), pinned = rejectBlockedNodeIds(pinNodes(cardContext(db, cur), built, () => true), () => true);
     const nodes = built.map((n, i) => (n.taskId ? n : pinned[i]));
     const reasonText = input.reasonText === undefined ? "" : String(input.reasonText);
     const now = ctx.now ?? Date.now();

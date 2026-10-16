@@ -170,8 +170,8 @@ test("豁免单再被拒 → manual：不撤单、不再换家族，owner 收一
   expect(s.orders()).toHaveLength(2);
 });
 
-test("反例：旧对端不带类别 / usage / auth → 不动，单变 unknown 交 PM（同旧代码）", async () => {
-  for (const failure of [undefined, policyFailure({ class: "usage" }), policyFailure({ class: "auth" })]) {
+test("反例：旧对端不带类别 / usage → 不动，单变 unknown 交 PM（同旧代码）", async () => {
+  for (const failure of [undefined, policyFailure({ class: "usage" })]) {
     const s = await setup();
     expect((await s.release(HE, failure)).ok).toBe(true);
     expect(await s.tick()).toMatchObject({ step: "pool_unknown" });
@@ -181,6 +181,14 @@ test("反例：旧对端不带类别 / usage / auth → 不动，单变 unknown 
     expect(s.calls).not.toContain("scheduler-pool-refusal");
     for (const c of cleanup.splice(0).reverse()) c();
   }
+});
+
+test("[验收线 8] auth 的审查单 stopped → 直接释放（AUTHCOOL1），不走 pool_refusal 换家族", async () => {
+  const s = await setup();
+  expect((await s.release(HE, policyFailure({ class: "auth" }))).ok).toBe(true);
+  expect(s.orders()[0].status).toBe("released");
+  expect(s.ops("pool_refusal_plan")).toEqual([]);
+  expect(s.calls).not.toContain("scheduler-pool-refusal");
 });
 
 test("反例：畸形类别 → 借入方整条 invalid，不入账，不撤单不换家族", async () => {

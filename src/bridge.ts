@@ -1,5 +1,5 @@
 import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
-import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
+import { deliverPmLocal, pmClientFor, setPmDeliveryClients } from "./bridge/local-api/project-pm-delivery.js";
 import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 /**
  * Discord Bridge Service — 主入口
@@ -10,12 +10,13 @@ import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { requestStillHeld } from "./lib/held-pac.js";
-import { missingReplyFiles, stageApiReplyFiles } from "./bridge/api-reply-files.js";
+import { replyFilesRefusal, stageApiReplyFiles } from "./bridge/api-reply-files.js";
 import { stageLocalReplyFiles, withLocalAttachments } from "./bridge/local-reply-files.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
+import { frameLevel } from "./lib/pm-notice-level.js";
 import { CODEX_SLOT_MAX, withCodexSlot } from "./lib/pm-job-slots.js"; // ask_codex 并发护栏:配额是 owner 的订阅;与 PM 处理员共用槽位(PMJOB1)
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
@@ -465,7 +466,7 @@ const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ??
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
 const stillHeldFor = (target: string) => (r: { messageId?: string; callerChannelId: string }) => requestStillHeld(r, heldFromOf(target));
-const answerablePac = (target: string): PendingAgentCall | undefined => pendingAgentCalls.answerable(target, stillHeldFor(target));
+const answerablePac = (target: string): PendingAgentCall | undefined => answerableUnmixed(pendingAgentCalls, target, stillHeldFor(target)); // 混了几个请求方的一轮不认
 /** target 明确答给 caller(回发 send_to_agent / reply 到 caller 的频道):精确取那一槽,请求还押着的不算 */
 const exactPac = (target: string, caller: string) => pendingAgentCalls.exact(target, caller, stillHeldFor(target));
 /** 好几个 caller 同时在等、target 又没指明答给谁:谁都不推,提醒它用 send_to_agent 分别回(同一批只提醒一次) */
@@ -580,7 +581,7 @@ import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard,
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
+import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -707,7 +708,7 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
-  const target = await import("./lib/api-reply-target.js"), refused = await target.deadApiTarget(to.tokenId) ?? await missingReplyFiles(env.meta.files || []);
+  const target = await import("./lib/api-reply-target.js"), refused = await target.deadApiTarget(to.tokenId) ?? await replyFilesRefusal(env, to.tokenId, pendingApiRequests, apiThreadResults);
   if (refused) return { envelope: env, outcome: { kind: "error", error: new Error(refused) } }; // token 已删 / 已停用或附件不在：整条报错、请求不出队
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
@@ -727,7 +728,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
   // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
-  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles, owner: pending?.fileOwner });
+  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, receipt: pending, threadId });
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
@@ -2133,6 +2134,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "peer_pr_push": void (await import("./bridge/peer-pr-send.js")).answerPeerPrPush(ws, msg, [...clients.values()].some((c) => c.ws === ws)); break; // i28-A2
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "save_handoff": void (await import("./bridge/handoff-route.js")).answerSaveHandoff(ws, msg, callerOf); break; // codex-compact N3：只写本连接 agent 的交接
+    case "ci_selected_repair": (await import("./bridge/scheduler-ci-selected-notice.js")).answerSelectedRepair(ws, msg); break;
     case "route_to_agent": {
       try {
         let fromChannelId = "";
@@ -2147,7 +2149,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             console.log(`✅ inter-agent 看门狗清掉（${chId} 调了 send_to_agent）`);
           }
         }
-
         // 解析 target:"future_data" → 本地 agent-future_data;"peer:ahh.future_data" → 跨 peer（HTTP transport）
         //   "future_data@ahh" → 同上（短格式）
         const rawTarget = (msg.targetName as string) || "";
@@ -2167,7 +2168,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               const result = msg.lendSupplement === true ? await sendLendRelay(httpPeer, peerAgentName, String(msg.text || "")) : routeToHttpPeer(
                 ws, fromChannelId, fromName, httpPeer, peerAgentName, String(msg.text || ""),
                 typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
-                msg.oneShot === true, // v2.17.2 任务#85:FYI 不挂 2h 轮询/超时推回
+                frameLevel(msg, true) ?? msg.oneShot === true, // v2.17.2 任务#85:FYI 不挂 2h 轮询/超时推回；oneShot 带合法级别就传级别（agents-PEERLEVEL1）
                 () => recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, `${peerAgentName}@${httpPeer.name}`, msg.text), // 对方收下后：PM 带 ask id 回远端执行者（i28-ASK4）
               );
               ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
@@ -2228,8 +2229,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws: targetClient.ws,
           cwd: targetClient.cwd,
         };
-        // v2.4.16+ oneShot=true：fire-and-forget，跳 pushback 和 watchdog。
-        const oneShot = msg.oneShot === true;
+        const oneShot = msg.oneShot === true, pmLevel = frameLevel(msg, !!fromChannelId); // v2.4.16+ oneShot：跳 pushback / watchdog。pmLevel 见 frameLevel：调度器帧照旧认，agent 帧只认 oneShot 的
         const env: RouterEnvelope = {
           from: fromEnv,
           to: toEnv,
@@ -2241,7 +2241,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             ts: new Date().toISOString(),
             threadId: newThreadId(),
             skipInterAgentWatchdog: oneShot || undefined,
-            expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined,
+            expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined, pmLevel,
           },
         };
         // v2.24+: 给某个 agent 发消息 = 回了它的消息。它之前发来的那条
@@ -3194,6 +3194,7 @@ const server = Bun.serve({
 
 console.log(`🚀 Bridge WebSocket 启动: ws://localhost:${BRIDGE_PORT}`);
 initPeerIngress(serveApiRequest); startLegacyWebPort(drainingFetch(bridgeFetch)); // 旧 web 端口由 bridge 接管（BRIDGE_LEGACY_WEB_PORT，bridge/legacy-web-port.ts）
+setPmDeliveryClients(clients); // 押后归属判调度助理在不在线看这张表（重启后还没投过信也要认得出已连上的）
 initForward({ clients, deliver, pendingReplies, pendingThreads, emitEvent, controlChannelId: CONTROL_CHANNEL_ID, discord: WEB_ONLY ? null : discord });
 initInbox({
   clients, held: heldLocalMsgs, calls: pendingAgentCalls, render: renderContentForLocal,
@@ -3214,6 +3215,7 @@ void import("./bridge/ask-entry.js").then((m) => m.initAskWiring({ // 待你处�
 }));
 void import("./bridge/fleet/service.js").then((m) => m.initFleet({ clients, deliver, controlChannelId: CONTROL_CHANNEL_ID })); // 批量管理：LP 状态轮询 + fleet 动作（bridge/fleet/）
 void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource, runManager })); // 台账巡检
+void import("./bridge/pm-rails-service.js").then((m) => m.startPmRails({ runManager })); // 人工干预推 owner（PMR-2）
 void import("./bridge/bg-killed-notice.js").then((m) => m.initBgKilledNotice({ clients, deliver, hold: (e) => void heldLocalMsgs.holdEnv(e), lastMessageSource })); // 后台任务被杀提醒执行者（BGW-1）
 // 清扫上次崩溃 / 被杀残留的 webterm-* viewer session（grouped session 视图，kill 不伤 master 本体）；Discord 与 Web-only 模式都要
 sweepStaleTerminalSessions().catch(() => {});

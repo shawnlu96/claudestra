@@ -219,6 +219,7 @@ async function verify(c: LedgerCli): Promise<Result> {
   if (dryRun) return { ok: true, dryRun: true, task: task.id, ...out };
 
   const data = { checks: v.checks, checklistSource: pl.source, incomplete: pl.incomplete, ...(pl.incompleteReason ? { incompleteReason: pl.incompleteReason } : {}), evidence, ...noteOut };
+  if (c.p.bools.has("pass-only") && v.result !== "pass") return { ok: false, code: "unverified", recorded: false, ...out }; // PMHAND1 12：结清后自动 verify 只记通过
   const r = recordVerify(c.db, c.ctx(), { taskId: task.id, result: v.result, data, text: c.p.flags.text });
   if (r.duplicate) return { ok: r.event.data.result === "pass", task: r.row, event: r.event, duplicate: true }; // 并发重放：结论以当时记下的为准
   if (v.result === "pass") return { ok: true, moved: true, task: r.row, event: r.event, ...out };
@@ -227,7 +228,7 @@ async function verify(c: LedgerCli): Promise<Result> {
 
 export const VERIFY_CMD: CommandSpec = {
   valued: ["evidence", "waive", "text", "dedup"],
-  bools: ["dry-run"],
-  usage: "verify <task> [--evidence <path>] [--waive <probe,...> --text <理由>] [--dry-run]",
+  bools: ["dry-run", "pass-only"],
+  usage: "verify <task> [--evidence <path>] [--waive <probe,...> --text <理由>] [--dry-run] [--pass-only]",
   run: verify,
 };

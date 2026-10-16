@@ -9,7 +9,12 @@ const rule = (target: Target, handling: Handling): Readonly<CommandRule> => Obje
 
 /** Explicit classification makes a new scheduler CLI call require a routing decision in the inventory test. */
 export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<CommandRule>>> = Object.freeze({
+  "scheduler-priority-stall": rule("task", "unmapped"),
+  "scheduler-priority-now": rule("task", "unmapped"),
   "scheduler-plan": rule("task", "mixed"),
+  "scheduler-center-deploy": rule("task", "unmapped"),
+  "scheduler-pm-todo": rule("task", "unmapped"),
+  "scheduler-priority-sample": rule("task", "unmapped"),
   "scheduler-deploy-reconcile": rule("task", "unmapped"),
   "scheduler-settle": rule("intent", "mixed"),
   "scheduler-stage": rule("intent", "central"),
@@ -41,6 +46,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-fix-relay": rule("task", "unmapped"),
   "scheduler-lock-yield": rule("task", "unmapped"),
   "scheduler-merge-handoff": rule("task", "unmapped"),
+  "scheduler-local-merge-ready": rule("task", "unmapped"),
   "scheduler-observe": rule("task", "unmapped"),
   "scheduler-plan-rejected": rule("task", "unmapped"),
   "scheduler-pool": rule("intent", "unmapped"),
@@ -48,6 +54,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-review-swap": rule("intent", "unmapped"),
   "scheduler-review-hold": rule("task", "unmapped"),
   "scheduler-recovery-observe": rule("task", "unmapped"),
+  "scheduler-remote-review": rule("task", "unmapped"), // RRL-1: <task> is the card the repository owner's review is booked on
   "scheduler-review-downgrade": rule("task", "unmapped"),
   "scheduler-manual-resume": rule("task", "unmapped"),
   "scheduler-manual-case-default": rule("task", "unmapped"),

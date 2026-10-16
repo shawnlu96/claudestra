@@ -31,7 +31,7 @@ What `migrate --pi` does:
 
 Differences after the move:
 
-- `reply` and the other Claudestra tools come from the channel-server over MCP (`mcp__claudestra__reply`) instead of the TUI extension's native `reply`. Old turns in the session still show the old tool names.
+- `reply` and the other Floka tools come from the channel-server over MCP (`mcp__claudestra__reply`) instead of the TUI extension's native `reply`. Old turns in the session still show the old tool names.
 - A capability profile's `--tools` allowlist filters MCP tools too (pi 0.99.2); `reply` is appended to it automatically (`keepReplyTool` in `lib/runtimes/pi-acp.ts`).
 - Extension dialogs are always cancelled (owner decision): an extension that asks for confirmation, such as a safety-net package, now blocks the action instead of asking.
 - The web command list shows extension / package commands and `/compact` only; the TUI built-ins (`/reload`, `/session`, `/copy` …) and the TUI extension's `/claudestra-*` commands are gone. `/compact [instructions]` is mapped to pi's rpc `compact`; `/clear` and `/new` rotate the session through the host. Typed in the web chat, `/model <id>`, `/thinking <level>` and `/effort <level>` change the session's config options through the host (same path as the model switcher; `409` while the agent is running but its host is reconnecting, never typed into the window; a stopped agent only gets the registry updated, applied on next start), and `/reload` restarts the agent. Other Claude Code commands / skills and Pi's TUI built-ins get a "not supported" `409` instead of being sent to the model as text (`src/bridge/api-slash.ts`).
