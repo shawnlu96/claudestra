@@ -92,7 +92,8 @@ const RUN = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/(\d+)$/;
 /** The scheduler's own registration, complete; anything else is none. */
 function registrationOf(e: Pick<LedgerEvent, "seq" | "ts" | "kind" | "actor" | "project" | "target" | "data">): Registration | null {
   const d = e.data;
-  if (e.kind !== "note" || e.actor !== "scheduler" || d.op !== WAIT_OP) return null;
+  // `source`: another mechanism's registration on the same op (ci-main-source-wait.ts, a card still in merge), never this tick's
+  if (e.kind !== "note" || e.actor !== "scheduler" || d.op !== WAIT_OP || d.source !== undefined) return null;
   const run = typeof d.run === "string" ? RUN.exec(d.run) : null;
   if (!run || typeof d.pr !== "string" || typeof d.prHead !== "string" || !SHA.test(d.prHead) || typeof d.mainHead !== "string" || !SHA.test(d.mainHead) ||
     !Array.isArray(d.files) || !d.files.length || !d.files.every((f) => typeof f === "string" && f)) return null;

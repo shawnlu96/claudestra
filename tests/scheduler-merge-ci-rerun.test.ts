@@ -2,7 +2,7 @@
  * i28-CIF1: red required CI that only timed out in tests the PR does not touch is re-run once per head instead of bouncing
  * to fix; every other red (or any doubt) still bounces. Fixture logs and a fake gh argv runner, no network.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { getMergeRun, advanceMergeRun } from "../src/lib/scheduler-merge.js";
 import { bounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
 import { ciRerunGh, parseRerunReceipt, RERUN_SETTLE_MS, RERUN_WAIT, rerunReceipt } from "../src/lib/scheduler-merge-ci-rerun.js";
@@ -12,6 +12,12 @@ import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { ledgerAs, mergedCard } from "./deploy-test-kit.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const HEAD = "c".repeat(40), PR = "https://github.com/example/repo/pull/7", RUN = "https://github.com/example/repo/actions/runs/77";
 const SLOW = "tests/local-api-last-seen.test.ts";

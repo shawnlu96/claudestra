@@ -1,9 +1,10 @@
 /**
  * 「今天」整页的入口（TODAY1）。桌面：借协作视图那层覆盖（collab-nav）盖在主区上，键是保留的 TODAY_KEY，CollabSwitch 见到它就画今天页；
- * 点任何会话照旧由 closingCollab 收起。手机：回到列表页、把侧栏条展开（NAVBAR1 合入后改为切到「今天」入口）。
+ * 点任何会话照旧由 closingCollab 收起。手机：回到列表页、切到底部栏「今天」入口（NAVBAR1，nav/nav-tab.ts showToday），由那一页滚到 section。
  * section 让页面平滑滚到那一块（QUOTA1 / XMACH1 的「看额度」「看在跑的单」用 "team"）。
  */
 import { openCollab } from "../collab/collab-nav";
+import { showToday } from "../nav/nav-tab";
 
 /** 不会是项目 id 的键（项目 id 不带 @） */
 export const TODAY_KEY = "@today";
@@ -18,10 +19,14 @@ const subs = new Set<() => void>();
 const narrow = () => typeof matchMedia === "function" && matchMedia("(max-width: 639.98px)").matches;
 
 export function openToday(section?: TodaySection, nav?: { toList(): void }): void {
-  const strip = narrow();
-  request = { seq: request.seq + 1, section: section ?? null, strip };
-  if (strip) nav?.toList();
-  else openCollab(TODAY_KEY);
+  // 手机不发 request：列表页的侧栏条和主区空状态的整页都还挂着，谁先取走都不是底部栏那一页
+  if (narrow()) {
+    showToday(section ?? null);
+    nav?.toList();
+    return;
+  }
+  request = { seq: request.seq + 1, section: section ?? null, strip: false };
+  openCollab(TODAY_KEY);
   for (const cb of subs) cb();
 }
 

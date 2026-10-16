@@ -51,8 +51,15 @@ test('three task buttons and two extra nodes; task and main button call their ow
     expect(card.textContent).toContain('返工 第 2 轮');
     await click(tasks[0]!);
     expect(taskCalls).toEqual(['t-tp-5']); expect(featureCalls).toEqual([]);
-    await click(all(card, 'button').find(b => all(b, 'strong').length > 0)!);
-    expect(featureCalls).toEqual(['f-team']); expect(taskCalls).toHaveLength(1);
+    // PDFOCUS1：单击 / 第一次 Enter 只选中；已选中再按 Enter（click 的 detail 为 0）或双击才进入
+    const main = all(card, 'button').find(b => all(b, 'strong').length > 0)!;
+    await click(main);
+    expect(featureCalls).toEqual([]); expect(card.getAttribute('data-pd-selected')).toBe('true');
+    await click(main);
+    expect(featureCalls).toEqual(['f-team']);
+    const Mouse = (globalThis as unknown as { MouseEvent: new (t: string, o: object) => unknown }).MouseEvent;
+    await React.act(async () => (main as unknown as { dispatchEvent(e: unknown): void }).dispatchEvent(new Mouse('dblclick', { bubbles: true })));
+    expect(featureCalls).toEqual(['f-team', 'f-team']); expect(taskCalls).toHaveLength(1);
     expect(all(host, 'button button')).toHaveLength(0);
     expect(all(host, '[data-pd-card=f-lend] div[data-pd-task]')).toHaveLength(1);
   } finally { await unmount(); }

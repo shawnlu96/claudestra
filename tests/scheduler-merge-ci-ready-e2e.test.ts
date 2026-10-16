@@ -1,9 +1,15 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { parseBounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
 import { MERGE_NOT_SENT } from "../src/lib/manual-merge-queue-facts.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { getTask } from "../src/lib/ledger-store.js";
 import { readyChecks, readyLog, withReady, READY_GATE, READY_HEAD, READY_PR, READY_RUN, READY_SLOW } from "./scheduler-merge-ci-ready-kit.test.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const WAIT = { phase: "ready", stage: "merge", frozen: false } as const, FIX = { phase: "resolved", stage: "fix", frozen: false } as const;
 function expectFix(f: Parameters<Parameters<typeof withReady>[0]>[0]) {

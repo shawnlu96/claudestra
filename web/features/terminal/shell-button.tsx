@@ -1,14 +1,12 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { ApiError } from "@/lib/api/client";
 import { machines } from "@/lib/machines";
 import { createShell, listShells, shortPath, type ShellInfo, type ShellList } from "@/lib/api/terminal";
 import { CenteredModal } from "../chat/components/centered-modal";
-import { TerminalIcon } from "./terminal-button";
 import { useShellView } from "./use-shell-view";
 
-const SIDEBAR_ICON_BTN = "flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content";
 /** 上次选的起始目录（本设备的便利项，丢了就回到第一项） */
 const DIR_KEY = "cstra_shell_dir";
 
@@ -92,11 +90,11 @@ function ShellPicker({ list, onClose, onOpen }: { list: ShellList; onClose: () =
 }
 
 /**
- * 侧栏头部的「新终端」：在这台机器上开宿主 shell（bridge/web-shell.ts），手机上粘贴命令直接跑。
- * 入口只在 GET /shells 答 200 时出现：403（没有覆盖 master 的终端授予）、404（bridge 太老）都不给入口。
+ * 「我的」里的「新终端」（NAVBAR1 起从侧栏顶栏的图标按钮挪进去）：在这台机器上开宿主 shell（bridge/web-shell.ts），手机上粘贴命令直接跑。
+ * available 只在 GET /shells 答 200 时为真：403（没有覆盖 master 的终端授予）、404（bridge 太老）都不给入口。
+ * node = 选目录面板与终端页，调用方常挂（菜单收起后终端还要在）。
  */
-export function SidebarShellButton() {
-  const t = useT();
+export function useShellEntry(): { available: boolean; open: () => void; node: ReactNode } {
   const [list, setList] = useState<ShellList | null>(null);
   const [picker, setPicker] = useState(false);
 
@@ -126,13 +124,8 @@ export function SidebarShellButton() {
   }, [refresh]);
 
   const { show, view } = useShellView(list?.home ?? "", refresh);
-  return (
+  const node = (
     <>
-      {list && (
-        <button className={SIDEBAR_ICON_BTN} title={t("新终端（在这台机器上开 shell）")} aria-label={t("新终端")} onClick={() => (setPicker(true), refresh())}>
-          <TerminalIcon />
-        </button>
-      )}
       {picker && list && (
         <ShellPicker
           list={list}
@@ -147,4 +140,5 @@ export function SidebarShellButton() {
       {view}
     </>
   );
+  return { available: list !== null, open: () => (setPicker(true), refresh()), node };
 }

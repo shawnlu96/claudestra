@@ -17,6 +17,7 @@ import { peerRefusal } from "./scheduler-placement.js";
 import { placementHistory, placeWithRetries as placeFor, type RetryPlacementFacts as PlacementFacts } from "./scheduler-placement-tried.js";
 import { isPoolIntent, POOL_RECIPIENT, poolRefusalEpoch, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
+import { seatLendAway } from "./scheduler-review-seat-lend.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { relayAway } from "./lend-fix-reassign.js";
 import { localFixOwner } from "./lend-fix-start.js";
@@ -99,6 +100,9 @@ function placeReview(s: PlannerSnapshot, since: number): Exclude<Away, { escalat
 
 function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Away, { escalate: string }> {
   if (!p.remote.roles.includes("review")) return localReviewFallback(s);
+  const lent = s.workflow ? seatLendAway(s, otherFamily(s.workflow.authorFamily), () => !!localReviewFallback(s) || p.remote.localPriority === "off" ||
+    (!s.reviewer && placeFor(snapshotPlacementFacts(s, since, "review"), "review", otherFamily(s.workflow!.authorFamily)).kind !== "local"), () => seatPeers(s, p, since)) : null;
+  if (lent) return lent; // REVSEAT1: a continuity-pinned review waiting 30 minutes goes to a peer (scheduler-review-seat-lend.ts)
   if (!s.workflow || securityReviewLocalOnly(s.workflow, s.securityPool) || keepsReviewer(s) || !s.task.headSHA) return localReviewFallback(s);
   const family = otherFamily(s.workflow.authorFamily);
   const placed = placeFor(snapshotPlacementFacts(s, since, "review"), "review", family);
@@ -106,6 +110,14 @@ function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Aw
   const legacy = allowLegacyReview(family) ? legacyPool(s, p, since) : null;
   if (placed.kind === "wait") return legacy ?? { wait: placed.reason };
   return legacy && p.remote.reviewFirst?.length ? { ...legacy, reason: `${legacy.reason}（${placed.reason}）` } : legacy;
+}
+
+/** REVSEAT1's peers-only placement on this path: a v2 peer, else the proto-1 overflow with the bound reviewer set aside (as privateReview). */
+function seatPeers(s: PlannerSnapshot, p: PoolFacts, since: number): { peer: string; reason: string } | null {
+  const family = otherFamily(s.workflow!.authorFamily);
+  const placed = placeFor(peersOnly(snapshotPlacementFacts(s, since, "review")), "review", family);
+  if (placed.kind === "peer") return { peer: placed.peer, reason: placed.reason };
+  return allowLegacyReview(family) ? legacyPool({ ...s, reviewer: null }, { ...p, remote: { ...p.remote, localPriority: "off" } }, since) : null;
 }
 
 /**

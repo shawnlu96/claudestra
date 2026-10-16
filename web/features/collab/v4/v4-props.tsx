@@ -1,10 +1,10 @@
 "use client";
 /**
- * v4 右区「属性」：选中任务时是现成的任务详情（collab-detail.tsx，多挂一段「它的因果线」）；其余几页在这里——
- * 没选中 = 项目概览，边 = 条件原文与判定依据，折叠组 = 成员，「待你处理」= 挂在这个项目上的那几条，
- * 团队成员 = 他在本项目手上的卡（team-panel-cards.tsx）+ 本机的打开会话；手机上团队面板本身也用这里的外框整屏打开。
+ * 详情各页（桌面在右侧抽屉 project-tabs/task-drawer.tsx 里，手机整屏）：选中任务时是现成的任务详情（collab-detail.tsx，多挂一段「它的因果线」）；
+ * 其余几页在这里——边 = 条件原文与判定依据，折叠组 = 成员，「待你处理」= 挂在这个项目上的那几条，
+ * 团队成员 = 他在本项目手上的卡（team-panel-cards.tsx）+ 本机的打开会话。项目总览在 project-tabs/overview-tab.tsx，从这里取 TaskLink / WaitGo。
  */
-import { mirrorAt, type HomeView, type LedgerDepView, type LedgerOverview, type OwnerWait, type Tr } from "../collab-model";
+import { mirrorAt, type LedgerDepView, type LedgerOverview, type OwnerWait, type Tr } from "../collab-model";
 import { useChatStoreApi } from "../../chat/chat-store";
 import { useChatNav } from "../../chat/components/nav-context";
 import { uiAgentName } from "@/lib/chat/agents";
@@ -17,18 +17,13 @@ import { useLang } from "@/lib/i18n";
 import { featureProposalsTr } from "@/lib/i18n-dict-feature-proposals";
 import s from "../collab.module.css";
 import type { CFold } from "./causal-model";
-import { causeOf, edgeBasis, STATE_WORD, stageCounts } from "./v4-model";
-import { attentionOf, type CountState } from "../count-words";
-import { countText } from "../count-words-i18n";
+import { causeOf, edgeBasis, STATE_WORD } from "./v4-model";
 import { MACHINE_WORDS } from "@/lib/owner-words";
 import { instanceName } from "../team-instance-names";
 import { sharedIdentity } from "../team-source-key";
 import { refreshBindings } from "@/lib/collab-source-binding";
 import { waitsText } from "../owner-waits";
 import { useInstanceNames } from "../work/use-work-board";
-import { useTeamTab } from "../collab-page-head";
-import { attentionAria } from "./attention-page";
-import type { AttentionWhich } from "./attention-list";
 import v from "./v4.module.css";
 
 export const hhmm = (ms: number) => new Date(ms).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -62,7 +57,7 @@ export function Sec({ title, children }: { title: string; children: React.ReactN
   );
 }
 
-function TaskLink({ id, ov, onPick }: { id: string; ov: LedgerOverview; onPick: (id: string) => void }) {
+export function TaskLink({ id, ov, onPick }: { id: string; ov: LedgerOverview; onPick: (id: string) => void }) {
   const t = ov.tasks.find((x) => x.id === id);
   return (
     <button type="button" className={v.link} onClick={() => onPick(id)}>
@@ -72,82 +67,12 @@ function TaskLink({ id, ov, onPick }: { id: string; ov: LedgerOverview; onPick: 
 }
 
 /** 每一行都给一个「去处理」：打开全站收件箱并定位到这张卡（作答只在那里做，协作视图里不另做一套）；有卡号的行卡号照旧点进任务详情 */
-function WaitGo({ w }: { w: OwnerWait }) {
+export function WaitGo({ w }: { w: OwnerWait }) {
   const tr = featureProposalsTr(useLang());
   return (
     <button type="button" className={s.btn} style={{ alignSelf: "flex-start" }} aria-label={`${tr("去处理")} ${w.title}`} onClick={() => asksStore.openDrawer(w.id)}>
       {tr("去处理")} <Icon name="chevronRight" size={13} />
     </button>
-  );
-}
-
-const NO_COUNTS: CountState = { status: "none" };
-
-export function Overview(props: {
-  ov: LedgerOverview; view: HomeView; waits: readonly OwnerWait[]; projectName: string; onPick: (id: string) => void; tr: Tr;
-  /** 在干活 / 在等与各阶段（count-words.ts，顶栏同一份）；没载完时两段都是骨架；不给（单独挂概览）= 两段不出数 */
-  counts?: CountState;
-  /** 「上次来之后」（collab-since-card.tsx），没有上次记录时不给 */
-  since?: React.ReactNode;
-  /** 走表的现在（use-collab）：镜像新鲜度随它重判；不给按 ov.now */
-  now?: number;
-  /** 点「其中 N 条出问题 / 卡住」里的数：打开那一类的列表页（attention-page.tsx）；不给 = 数照旧是纯文字 */
-  onAttention?: (which: AttentionWhich) => void;
-}) {
-  const { ov, view, waits, projectName, onPick, tr } = props;
-  const counts = props.counts ?? NO_COUNTS;
-  return (
-    <Shell title={projectName} sub={tr("项目概览")} tr={tr}>
-      {props.since}
-      <Sec title={tr("现在")}>
-        <NowLine counts={counts} view={view} tr={tr} onAttention={props.onAttention} />
-      </Sec>
-      <Sec title={tr("要你定的")}>
-        {waits.length ? waits.map((w) => (
-          <div key={w.id} className={v.row}>{w.taskId ? <TaskLink id={w.taskId} ov={ov} onPick={onPick} /> : null} {w.title}<WaitGo w={w} /></div>
-        )) : <div className={v.muted}>{tr("没有")}</div>}
-      </Sec>
-      <Sec title={tr("各阶段")}>
-        <div className={v.counts} data-stage-counts>
-          {counts.status === "loading" ? <span className={v.count}><b className={v.skel} aria-hidden /></span>
-            : counts.status === "ready" && stageCounts(counts.snap).map((c) => (
-              <span key={c.label} className={v.count}><b>{c.n}</b> {tr(c.label)}</span>
-            ))}
-        </div>
-      </Sec>
-      {view.pm.pm && <Sec title="PM"><div className={v.kv}>{view.pm.pm} · {tr("在管")} {view.pm.managing} · {tr("排队")} {view.pm.queued.length}</div></Sec>}
-    </Shell>
-  );
-}
-
-const NUM = "\u0000";
-/** 「其中 N 条出问题」里的 N 做成按钮（虚下划线、颜色随外层、能 Tab 聚焦）；没给 onAttention 时原样是文字 */
-function FlagText({ word, n, which, tr, onAttention }: { word: string; n: number; which: AttentionWhich; tr: Tr; onAttention?: (which: AttentionWhich) => void }) {
-  if (!onAttention) return <>{countText(tr, word, { n })}</>;
-  const [pre = "", post = ""] = countText(tr, word, { n: NUM }).split(NUM);
-  return (
-    <>{pre}<button type="button" data-attention={which} aria-label={attentionAria(tr, which, n)} onClick={() => onAttention(which)}
-      style={{ color: "inherit", padding: 0, textDecoration: "underline dashed", textUnderlineOffset: 3 }}>{n}</button>{post}</>
-  );
-}
-
-/** 右栏「现在」：在干活 a · 在等 b，其中 N 条出问题 / 卡住（attention 只是标注，数能点开列出是哪几个）；20 秒后仍缺 feature 时下面一句提示 */
-function NowLine({ counts, view, tr, onAttention }: { counts: CountState; view: HomeView; tr: Tr; onAttention?: (which: AttentionWhich) => void }) {
-  const frozen = view.pm.frozen && <span className={v.warn}> · {tr("合并队列冻结：{r}", { r: view.pm.frozen })}</span>;
-  if (counts.status !== "ready") return <div className={v.kv} data-now>{counts.status === "loading" && <b className={v.skel} aria-hidden />}{frozen}</div>;
-  const { words } = counts.snap, a = attentionOf(counts.snap, view.lines);
-  const flags = [
-    a.problem > 0 && <span key="p" className={v.bad}><FlagText word="其中 {n} 条出问题" n={a.problem} which="problem" tr={tr} onAttention={onAttention} /></span>,
-    a.stuck > 0 && <span key="s" className={v.warn}><FlagText word="{n} 条卡住" n={a.stuck} which="stuck" tr={tr} onAttention={onAttention} /></span>,
-  ].filter(Boolean);
-  return (
-    <>
-      <div className={v.kv} data-now>
-        {countText(tr, "在干活")} <b>{words.working}</b> · {countText(tr, "在等")} <b>{words.waiting}</b>
-        {flags.length > 0 && <> · {flags.flatMap((f, i) => (i ? [" / ", f] : [f]))}</>}{frozen}
-      </div>
-      {counts.missing > 0 && <div className={v.warn}>{countText(tr, "另有 {k} 个 feature 还没读到，数字不含它们", { k: counts.missing })}</div>}
-    </>
   );
 }
 
@@ -203,7 +128,7 @@ export function FoldPage({ fold, ov, onPick, onClose, tr }: { fold: CFold; ov: L
 }
 
 /** 「待你处理」读不到时的重试（UXCARD3）：重读待办列表和这台机器的团队绑定，不整页刷新 */
-function retryWaits(project: string) {
+export function retryWaits(project: string) {
   void asksStore.refresh();
   const machine = sharedIdentity(project)?.machine;
   if (machine) void refreshBindings(machine);
@@ -284,10 +209,4 @@ export function MemberPage({ m, project, onClose, tr }: { m: Member; project: st
       <TeamPanelCards key={m.id} project={project} peer={m.peer ?? ""} agent={m.name} />
     </Shell>
   );
-}
-
-/** 手机：团队面板整屏（桌面在中区「团队」标签里）；团队源下叫「规划与提案」（collab-page-head.tsx useTeamTab） */
-export function TeamPage({ onClose, tr, children }: { onClose: () => void; tr: Tr; children: React.ReactNode }) {
-  const tab = useTeamTab(tr);
-  return <Shell title={tab.label} sub={tab.sub} onClose={onClose} tr={tr}>{children}</Shell>;
 }

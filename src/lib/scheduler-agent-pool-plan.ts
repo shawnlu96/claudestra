@@ -6,6 +6,7 @@ import { placeAgentPool } from "./scheduler-agent-pool.js";
 import { peerFacts } from "./scheduler-agent-pool-peer.js";
 import { placementHistory, placeWithRetries } from "./scheduler-placement-tried.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
+import { seatLendAway } from "./scheduler-review-seat-lend.js";
 import type { Away } from "./scheduler-placement-plan.js";
 import { LOCAL_LEASE_WAIT, LOCAL_PLACEMENT, placementPin } from "./scheduler-local-pin.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
@@ -42,6 +43,8 @@ export function agentPoolReview(s: PlannerSnapshot, since: number): Exclude<Away
     if (placed.kind !== "peer") return { wait: `${privateReviewWait(priv)}（${placed.reason}）` };
     return { peer: placed.peer, reason: `挂池：跨模型审查给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
   }
+  const lent = seatLendAway(s, family, () => placeAgentPool({ ...facts, peers: [] }, "review", family).kind === "wait", () => placeWithRetries(peersOnly(facts), "review", family));
+  if (lent) return lent; // REVSEAT1: a continuity-pinned review waiting 30 minutes goes to a peer (scheduler-review-seat-lend.ts)
   // Security stays local unless its pool switch is on; a local session's continuity remains a hard rule, not a load preference.
   const localOnly = securityReviewLocalOnly(s.workflow, s.securityPool) || (keepsReviewer(s) && s.reviewer?.source === "local");
   const placed = localOnly ? placeAgentPool({ ...facts, peers: [] }, "review", family) : placeWithRetries(facts, "review", family);

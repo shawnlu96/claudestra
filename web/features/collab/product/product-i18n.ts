@@ -1,5 +1,5 @@
 /**
- * 项目地图这一批（PDLAYOUT1 / PDCARD1 / PDEDGEUI1 / PDVIEW1）的局部词表：一次放齐，并行的卡不用再改这个文件。
+ * 项目地图这一批（PDLAYOUT1 / PDCARD1 / PDEDGEUI1 / PDVIEW1 / PDFOCUS1）的局部词表：一次放齐，并行的卡不用再改这个文件。
  * 写法同 count-words-i18n.ts：中文原样，英文查本表，查不到退回 tr。不进共享字典（collab-i18n.ts / i18n-dict-collab.ts 归 UXTERM2）。
  * 「在等前置」不简写成「在等」：「在等」是看板上等审查、等合并的活（count-words.ts），同一张卡上不能有两种意思。
  */
@@ -24,6 +24,12 @@ const WORDS: Record<string, string> = {
   '关闭': 'Close',
   // PDVIEW1
   '还有 {n} 个独立推进': '{n} more standalone',
+  // PDFOCUS1
+  '全部': 'All', '关键路径': 'Critical path', '关键路径 · 约 {n} 小时': 'Critical path · ~{n} h', '约 {n} 天': '~{n} d',
+  '现在没有能连起来的关键路径': 'No connected critical path right now', '被挡着': 'Blocked by', '挡着谁': 'Blocking',
+  '没有前置': 'No prerequisites', '没有谁在等它': 'Nothing is waiting on it', '看模块进度': 'View module progress',
+  '最近动静 {t}': 'Last activity {t}', '{n} 个节点等锁': '{n} nodes waiting on locks', '关键链 · 约 {n} 小时': 'Critical chain · ~{n} h',
+  '完成': 'done', '关键链': 'Critical chain',
 };
 
 /** 中文界面原样（带参数填好）；其他语言查本表，查不到退回调用方的 tr */
@@ -31,4 +37,9 @@ export function pdText(tr: Tr, word: string, params?: I18nParams): string {
   if (tr('子 DAG') === '子 DAG') return fillParams(word, params);
   const en = WORDS[word];
   return en ? fillParams(en, params) : tr(word, params);
+}
+
+/** 「关键路径 · 约 N 小时」/「关键链 · 约 N 小时」；超过 48 小时换成「约 N 天」 */
+export function cpText(tr: Tr, lead: '关键路径' | '关键链', span: { word: 'h' | 'd'; n: number }): string {
+  return span.word === 'h' ? pdText(tr, `${lead} · 约 {n} 小时`, { n: span.n }) : `${pdText(tr, lead)} · ${pdText(tr, '约 {n} 天', { n: span.n })}`;
 }

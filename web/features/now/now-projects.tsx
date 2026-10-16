@@ -2,6 +2,7 @@
 /**
  * 项目行（UXHOME1 的「各项目」行，TODAY1 拆出来）：项目名 + 团队小标 + 在干活 / 待你处理；点了按 resolveCollabSource 选源打开协作视图，
  * 绑定停用的行不可点、title 写原因。「正在做」的项目头用 ProjectRow；NAVBAR1 的「项目」入口直接用 NowProjectList。
+ * 窄容器（侧栏今天条、电脑「今天」入口，@container 不到 20rem）藏「在干活 N 个」：不藏的话右边几段不收缩，项目名被挤成零宽。
  */
 import { useMemo, useState } from "react";
 import type { CollabSourceChoice } from "@/lib/collab-source-binding";
@@ -18,9 +19,9 @@ function ProjectLine({ p, tr }: { p: NowProject; tr: Translate }) {
   return (
     <>
       <Icon name="listTree" size={14} className="shrink-0 text-accent" />
-      <span className="min-w-0 flex-1 truncate font-medium">{p.name}</span>
+      <span className="min-w-[3em] flex-1 truncate font-medium">{p.name}</span>
       {p.team && <span className="shrink-0 rounded border border-base-300 px-1 text-[11px] leading-4 text-base-content/55">{tr("团队")}</span>}
-      {p.working > 0 && <span className="shrink-0 text-[11px] text-base-content/60" data-now-project-working>{tr("在干活 {n} 个 agent", { n: p.working })}</span>}
+      {p.working > 0 && <span className="shrink-0 text-[11px] text-base-content/60 @max-[20rem]:hidden" data-now-project-working>{tr("在干活 {n} 个 agent", { n: p.working })}</span>}
       {p.waits > 0 && <span className="shrink-0 text-[11px] font-medium text-warning" data-now-project-waits>{tr("待你处理 {n} 件", { n: p.waits })}</span>}
     </>
   );
