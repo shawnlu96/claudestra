@@ -130,9 +130,10 @@ async function mount(team: boolean) {
     await tick(60);
   };
   const board = () => host.querySelector("[data-work-board]");
-  /** 看板出数（计数从骨架换成数字）后的整块 HTML */
+  /** 看板出数（计数从骨架换成数字）后的整块 HTML；谁在干活 = 「模块进度」里的「按人」（PROJTABS1） */
   const workHtml = async () => {
-    await click(tab("谁在干活"), "谁在干活 tab");
+    await click(tab("模块进度"), "模块进度 tab");
+    if (tab("按人")) await click(tab("按人"), "按人 segment");
     await until(() => !!board() && !board()!.querySelector("[aria-hidden]:empty"), "work board", text);
     await tick(60);
     return board()!.innerHTML;
@@ -141,21 +142,22 @@ async function mount(team: boolean) {
 }
 const workCalls = (project: string) => calls.filter((c) => c === `GET /api/v1/ledger/${project}/work`).length;
 
-test("[验收线 1][验收线 2][验收线 4] 本机：产品 DAG → 谁在干活 → 子 DAG → 谁在干活，/work 只请求 1 次；谁在干活 DOM 来回切换前后逐字节相同", async () => {
+test("[验收线 1][验收线 2][验收线 4] 本机：项目地图 → 谁在干活 → 模块的子图 → 谁在干活，/work 只请求 1 次；谁在干活 DOM 来回切换前后逐字节相同", async () => {
   calls.length = 0;
   const v = await mount(false);
   const feature = homeProductBoard(home).features[0]!;
-  await until(() => !!v.tab("产品 DAG") && v.text().includes(feature.title), "product tab", v.text);
+  await v.click(v.tab("项目地图"), "项目地图 tab");
+  await until(() => v.text().includes(feature.title), "product tab", v.text);
   await tick(100);
   // 产品 DAG 标签：计数（顶栏 / 产品卡）要看板，读的就是共用的这一次，不另发
   expect(workCalls(LOCAL)).toBe(1);
   const first = await v.workHtml();
   expect(first).toContain(homeWorkBoard(home).working[0]!.title);
-  await v.click(v.tab("产品 DAG"), "产品 DAG tab");
+  await v.click(v.tab("项目地图"), "项目地图 tab");
   const card = Array.from(v.host.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(feature.title)) ?? null;
   await v.click(card, "product card");
-  await until(() => (v.tab("子 DAG")?.getAttribute("aria-selected") ?? "") === "true", "sub-DAG tab", v.text);
-  expect(v.tab("子 DAG")!.textContent).toContain(feature.title);
+  await until(() => (v.tab("模块进度")?.getAttribute("aria-selected") ?? "") === "true", "module tab", v.text);
+  expect(v.host.querySelector("[data-project-pane=module] nav")?.textContent).toContain(feature.title);
   await tick(100);
   const again = await v.workHtml();
   expect(again).toBe(first);
@@ -169,7 +171,7 @@ test("[验收线 3][验收线 4] 团队键（主场本机）：只读一次本�
   const first = await v.workHtml();
   expect(first).toContain("agent-dev-m1");
   expect(workCalls(TEAM_LOCAL)).toBe(1);
-  const other = v.tab("产品 DAG") ?? v.tab("子 DAG") ?? v.tab("因果线");
+  const other = v.tab("项目地图");
   await v.click(other, "another tab");
   expect(v.host.querySelector("[data-work-board]")).toBeNull();
   await tick(100);
