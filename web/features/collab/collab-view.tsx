@@ -175,7 +175,7 @@ export function CollabView({ project }: { project: string }) {
           {pane !== "detail" && page && !inboxOpen && createPortal(<div className={`${s.tokens} ${v.sheet} ${s.full}`}>{page}</div>, document.body)}
         </>
       ) : (
-        <PaneLayout drawer={<TaskDrawer open={!!(detail || page)} onClose={detail ? closeTask : close} esc={!detail} label={tr("详情")}>{detail || page}</TaskDrawer>}>
+        <PaneLayout drawer={<TaskDrawer open={!!(detail || page)} onClose={detail ? closeTask : dag.closePage} esc={!detail} label={tr("详情")}>{detail || page}</TaskDrawer>}>
           {dag.tabs({ overview, team, fallback: <CausalCanvas canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
             selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} /> })}
         </PaneLayout>

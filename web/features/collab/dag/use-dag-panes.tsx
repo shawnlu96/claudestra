@@ -120,11 +120,13 @@ export function useDagPanes(a: DagPanesArgs) {
   const s = a.sel;
   const sf = s && (s.kind === "dnode" || s.kind === "dver" || s.kind === "ddiff") ? featureOf(s.f) : undefined;
   const sn = s?.kind === "dnode" && sf ? findNode(sf.id, s.key) : null;
+  // 关差异页 = 退出对比：关闭按钮、抽屉的 Esc / 遮罩、手机底部抽屉的遮罩都走它，只清选中会留着叠图、模块进度仍是对比画布
+  const closePage = s?.kind === "ddiff" ? () => {
+    ui.setCompare(null);
+    a.close();
+  } : a.close;
   const diffPage = s?.kind === "ddiff" && sf && ui.compare?.featureId === sf.id && (
-    <DiffPage feature={sf} compare={ui.compare} data={cmp} onVersions={() => a.select({ kind: "dver", f: sf.id })} tr={tr} onClose={() => {
-      ui.setCompare(null);
-      a.close();
-    }} />
+    <DiffPage feature={sf} compare={ui.compare} data={cmp} onVersions={() => a.select({ kind: "dver", f: sf.id })} tr={tr} onClose={closePage} />
   );
   const page = (sn && sf && (
     <NodePage feature={sf} node={sn} owner={ownerOf(rows, sf.id, sn)} mark={overlay?.featureId === sf.id ? overlay.marks.get(sn.key) ?? null : null} now={a.now}
@@ -140,7 +142,9 @@ export function useDagPanes(a: DagPanesArgs) {
   const dagFresh = useRoundFresh(load, load.status !== "loading", a.rev);
   const { work, counts } = useBoard(a, board, load.status === "loading", dagFresh);
   // 列表里的卡要等看板到了才排得出来：跳早了闪烁落空
-  useEntryModule(ui, task, load.status === "loading" || counts.status === "loading", binding ? { featureId: binding.feature.id, key: binding.node.key } : null);
+  // 读失败（error）还会按退避重试，不算读完：入口留到重试成功再定；404 / 403 是定论，留在总览
+  const dagPending = load.status === "loading" || load.status === "error";
+  useEntryModule(ui, task, dagPending || counts.status === "loading", binding ? { featureId: binding.feature.id, key: binding.node.key } : null);
   const progress = <PriorityWorkBoard project={a.project} onPriorityNode={onNode} team={work.kind === "team"} board={work.board} retrying={work.retrying} loading={counts.status === "loading"}
     onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
@@ -167,7 +171,7 @@ export function useDagPanes(a: DagPanesArgs) {
             subdag={subdag} progress={progress} graph={graph} fallback={fallback} />,
           team: <div className={v.teamPane}>{t.team}</div>,
         }} />
-        {a.narrow && diffPage && <div className={d.backdrop} onClick={(e) => e.target === e.currentTarget && a.close()}><div className={d.drawer}>{diffPage}</div></div>}
+        {a.narrow && diffPage && <div className={d.backdrop} onClick={(e) => e.target === e.currentTarget && closePage()}><div className={d.drawer}>{diffPage}</div></div>}
       </CountContext.Provider>
     );
   };
@@ -176,19 +180,23 @@ export function useDagPanes(a: DagPanesArgs) {
     return card && <NodeCardSection card={card} owner={ownerOf(rows, card.feature.id, card.node)}
       onOwner={agent => jumpRowFromPage(agent, card.node.taskId)} onNode={key => onNode(card.feature.id, key)} tr={tr} />;
   };
-  return { tabs, page, nodeSec, counts, workFacts: workFactsOf(work, a.project) };
+  return { tabs, page, closePage, nodeSec, counts, workFacts: workFactsOf(work, a.project) };
 }
 
 /**
  * 带任务进入：挂载时就开着的任务（SESSTASK1、今天页、ask 卡、通知直达）等快照读完再定落点——属于某个模块就按「跳到节点」落到「模块进度」
- * 的这个模块（列表视图闪一次那张卡，图视图另有 selNode 常亮）；不属于就留在总览。有登记的标签请求时不管；用户先换了任务也不管。只定一次。
+ * 的这个模块（列表视图闪一次那张卡，图视图另有 selNode 常亮）；不属于就留在总览。有登记的标签请求时不管；等快照期间用户换了任务或
+ * 自己点了别的标签也不管（重试可能要等一阵，到了再把人拽走更糟）。只定一次。
  */
-function useEntryModule(ui: ReturnType<typeof useDagUi>, task: string | null, loading: boolean, node: { featureId: string; key: string } | null) {
+function useEntryModule(ui: ReturnType<typeof useDagUi>, task: string | null, pending: boolean, node: { featureId: string; key: string } | null) {
   const entry = useRef(ui.requested ? null : task);
-  const { jumpNode } = ui;
+  const tab0 = useRef(ui.tab);
+  const { jumpNode, tab } = ui;
   useEffect(() => {
-    if (!entry.current || loading) return;
-    if (entry.current === task && node) jumpNode(node.featureId, node.key);
+    if (!entry.current) return;
+    if (entry.current !== task || tab !== tab0.current) { entry.current = null; return; }
+    if (pending) return;
+    if (node) jumpNode(node.featureId, node.key);
     entry.current = null;
-  }, [task, loading, node, jumpNode]);
+  }, [task, tab, pending, node, jumpNode]);
 }

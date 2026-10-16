@@ -35,6 +35,8 @@ let ui: {
   tabs: { rememberTab(p: string, t: string): void; requestProjectTab(p: string, r: object): void; peekProjectTab(p: string): object | null; clearProjectTab(p: string): void };
 };
 const calls: string[] = [];
+/** 单条用例换掉某几个接口（故障注入 / 版本对比夹具）；返回 null 照常走 ptRoute。afterEach 清掉 */
+let override: ((path: string, search: URLSearchParams) => Promise<Response | null> | Response | null) | null = null;
 const scrolled: string[] = [];
 let addedCss = false;
 const realFetch = globalThis.fetch;
@@ -62,7 +64,8 @@ beforeAll(async () => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
     calls.push(`${(init?.method ?? "GET").toUpperCase()} ${decodeURIComponent(url.pathname + url.search)}`);
     if (url.pathname === "/app-config.json") return Response.json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
-    const hit = url.pathname.startsWith("/api/v1/") ? ptRoute(url.pathname.slice("/api/v1".length), url.searchParams) : null;
+    const path = url.pathname.slice("/api/v1".length);
+    const hit = url.pathname.startsWith("/api/v1/") ? (await override?.(path, url.searchParams)) ?? ptRoute(path, url.searchParams) : null;
     return hit ?? Response.json({ ok: false, error: "not in fixture" }, { status: 404 });
   }) as typeof fetch;
   const view = require("../web/features/collab/collab-view.tsx");
@@ -75,7 +78,10 @@ beforeAll(async () => {
 });
 
 const live = new Set<() => Promise<void>>();
-afterEach(async () => { for (const u of [...live]) await u(); });
+afterEach(async () => {
+  for (const u of [...live]) await u();
+  override = null;
+});
 afterAll(async () => {
   globalThis.fetch = realFetch;
   if (addedCss) delete (globalThis as { CSS?: unknown }).CSS;
@@ -85,8 +91,8 @@ afterAll(async () => {
 });
 
 const tick = (ms = 20) => React.act(() => new Promise<void>((r) => setTimeout(r, ms)));
-async function until(ok: () => boolean, what: string) {
-  for (let i = 0; i < 150; i++) { if (ok()) return; await tick(); }
+async function until(ok: () => boolean, what: string, tries = 150) {
+  for (let i = 0; i < tries; i++) { if (ok()) return; await tick(); }
   throw new Error(`timeout waiting for ${what}: ${(doc.body.textContent ?? "").slice(0, 400)}`);
 }
 const h = (...a: unknown[]) => (React.createElement as (...x: unknown[]) => unknown)(...a);
@@ -217,6 +223,72 @@ test("[验收线 5] 带任务进入：属于模块的任务落到「模块进度
   await tick(200);
   expect(o.selected()).toBe("overview");
   await o.unmount();
+});
+
+test("[验收线 5] 带任务进入时快照第一次读失败：按退避重试读到之后照样落到模块进度、节点闪一次", async () => {
+  scrolled.length = 0;
+  // 头 1.5 秒的读都失败（台账到达 rev 变会再读一次，也要失败）；useDagBoard 失败后 5 秒重试，那次成功
+  const t0 = performance.now();
+  let failed = 0, served = 0;
+  override = (path) => {
+    if (path !== `/ledger/${MAP}/dag`) return null;
+    if (performance.now() - t0 < 1500) return (failed++, Response.json({ ok: false, error: "unavailable" }, { status: 503 }));
+    served++;
+    return null;
+  };
+  const v = await mount(MAP, 1280, () => ui.openCollabTask("P2"));
+  await until(() => failed >= 1, "first dag read");
+  await tick(300);
+  expect(v.selected()).toBe("overview");
+  await until(() => v.selected() === "module" && !!v.host.querySelector("[data-focus-board=m-export]"), "entry module after retry", 400);
+  await until(() => scrolled.includes("d"), "node flash");
+  expect(served).toBeGreaterThanOrEqual(1);
+  await v.unmount();
+}, 15_000);
+
+/** m-export 有 v1、v2 两版：快照的当前版改成 2，版本列表 / v1 快照 / v1→v2 差异由这里答 */
+function compareRoutes(path: string, search: URLSearchParams): Response | null {
+  const base = `/ledger/${MAP}/dag`;
+  const meta = (version: number) => ({ version, reasonKind: version === 1 ? "initial" : "rewrite", reasonText: `第 ${version} 版`, proposedBy: "agent-pm", approvedBy: null,
+    createdAt: PT_NOW - (3 - version) * 3_600_000, cancels: [], scopeChange: false, askId: null });
+  if (path === `${base}/m-export`) {
+    const version = search.get("version");
+    return Response.json({ ok: true, project: MAP, now: PT_NOW, feature: { id: "m-export", title: "导出", currentVersion: 2 },
+      versions: [{ ...meta(1), delta: null }, { ...meta(2), delta: null }], snapshot: version ? { version: Number(version), meta: meta(Number(version)), nodes: [] } : null });
+  }
+  if (path === `${base}/m-export/diff`) return Response.json({ ok: true, project: MAP, featureId: "m-export", now: PT_NOW, from: 1, to: 2,
+    diff: { added: ["f"], removed: [], carried: [], cancelled: [] }, phaseNow: {}, rewrittenDone: [] });
+  return null;
+}
+
+test("[验收线 4] 差异页：关闭按钮、Esc、点遮罩三种关法都退出对比，模块进度回到原来的列表", async () => {
+  override = async (path, search) => {
+    if (path !== `/ledger/${MAP}/dag`) return compareRoutes(path, search);
+    const board = await ptRoute(path, search)!.json() as { features: { id: string; currentVersion: number }[] };
+    for (const f of board.features) if (f.id === "m-export") f.currentVersion = 2;
+    return Response.json(board);
+  };
+  const v = await mount(MAP);
+  await v.click(v.tab("module"), "module tab");
+  await until(() => !!v.host.querySelector("[data-module=m-export]"), "module list");
+  await v.click(v.host.querySelector("[data-module=m-export]"), "module row");
+  const board = () => !!v.host.querySelector("[data-focus-board=m-export]");
+  const ways: [string, () => Promise<void>][] = [
+    ["close button", () => v.click(drawer()!.querySelector('[role=dialog] button[aria-label="关闭"]'), "close button")],
+    ["esc", () => React.act(async () => { win.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape" })); })],
+    ["scrim", () => v.click(drawer()!.querySelector("[data-drawer-scrim]"), "scrim")],
+  ];
+  for (const [way, dismiss] of ways) {
+    await until(board, `focus board before ${way}`);
+    await v.click(v.host.querySelector('[data-project-pane=module] button[aria-label="版本"]'), "versions button");
+    await until(() => (drawer()?.textContent ?? "").includes("第 2 版"), "versions page");
+    await v.click(Array.from(drawer()!.querySelectorAll("button")).find((b) => b.textContent === "对比"), "compare");
+    await until(() => (drawer()?.textContent ?? "").includes("v1 → v2") && !board(), "diff page + compare canvas");
+    await dismiss();
+    await until(() => drawer() === null, `${way} closes drawer`);
+    await until(board, `${way} restores focus board`);
+  }
+  await v.unmount();
 });
 
 test("[验收线 6] requestProjectTab：项目页挂载时取一次，落到模块进度的该模块；今天页模块行点了先登记再打开项目", async () => {
