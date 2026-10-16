@@ -26,7 +26,7 @@ import { git, openReviewWorktree } from "./scheduler-review-worktree.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
 import { tierCreate } from "./card-role-definitions.js";
-import { bindTierSession } from "./task-tier-launch-events.js";
+import { bindTierSession } from "./task-tier-models.js";
 
 type Manager = AutoTickDeps["manager"];
 export interface ReviewSwapDeps {

@@ -13,7 +13,7 @@ import type { Principal } from "../src/lib/principals.js";
 import { useRoleModelPort } from "../src/lib/role-model-settings-local.js";
 import { saveRoleModels } from "../src/lib/role-model-settings-save.js";
 import { defaultRoleModels, parseRoleModelPatch, readRoleModels, type RoleModelPatch } from "../src/lib/role-model-settings.js";
-import { tierFloorProblem, useTaskTierPort, type TierLaunchCtx } from "../src/lib/task-tier-models.js";
+import { registerAuthorTierOverride, tierFloorProblem, useTaskTierPort, type TierLaunchCtx } from "../src/lib/task-tier-models.js";
 
 const SONNET = "claude-sonnet-5-5", OPUS = "claude-opus-5-5";
 const at = "2026-10-01T00:00:00Z";
@@ -22,7 +22,7 @@ const OWNER: Principal = effectivePrincipal({ principal: { id: "owner:self", rol
   credential: cred({ agents: ["*"], terminal: true, manage: true }) });
 
 const dirs: string[] = [];
-afterEach(() => { useTaskTierPort(); useRoleModelPort(); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+afterEach(() => { useTaskTierPort(); useRoleModelPort(); registerAuthorTierOverride(null); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "tier3-api-"));
   dirs.push(dir);
@@ -134,6 +134,24 @@ describe("[验收线 2] 显式参数与最终启动", () => {
     expect("args" in up && up.args).toEqual(codexAuthor("xhigh"));
     const same = applyCardRole(codexAuthor("high"), { tier: ctx("security", { baseEffort: "high" }) });
     expect("args" in same && same.args).toEqual(codexAuthor("high"));
+  });
+
+  test("security Codex 没给 baseEffort：原档回退到角色格（xhigh），显式 --effort low 与覆盖值 low 都过不了下限", () => {
+    const { path } = setup();
+    const t = defaultRoleModels();
+    t.roles.reviewer.codex = "xhigh";
+    t.roles.author.codex = "xhigh";
+    writeFileSync(path, JSON.stringify(t));
+    launchFrom(path);
+    expect(applyCardRole([...reviewer("--effort", "low"), ...CODEX], { tier: ctx("security") })).toMatchObject({ error: expect.stringContaining("不得低于原档 xhigh") });
+    const up = applyCardRole([...reviewer("--effort", "max"), ...CODEX], { tier: ctx("security") });
+    expect("args" in up && up.args).toEqual([...reviewer("--effort", "max"), ...CODEX]);
+    // 覆盖扩展点用同一原档：low 不用，照类型解析（角色格 xhigh）起并注明
+    registerAuthorTierOverride(() => "low");
+    const noBase = [...author(), ...CODEX].filter((x, i, all) => x !== "--effort" && all[i - 1] !== "--effort");
+    const ov = applyCardRole(noBase, { tier: ctx("security") });
+    expect("args" in ov && ov.args).toEqual([...noBase, "--effort", "xhigh"]);
+    expect(ov.tierLaunch).toMatchObject({ suggested: "xhigh", final: { effort: "xhigh" }, note: expect.stringContaining("覆盖值 low 低于安全下限") });
   });
 
   test("统一校验函数：最终值逐项过下限", () => {

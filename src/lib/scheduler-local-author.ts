@@ -22,8 +22,7 @@ import { handoverRuntime } from "./recovery-peer-lease-runtime.js";
 import type { Rebuild } from "./scheduler-author-rebuild-checkout.js";
 import { lendAuthorCheckout } from "./lend-author-retire-checkout.js";
 import type { EnsureResult } from "./worker-session.js";
-import { bindTierSession } from "./task-tier-launch-events.js";
-import type { TierLaunchCtx } from "./task-tier-models.js";
+import { bindTierSession, taskTierMode, type TierLaunchCtx } from "./task-tier-models.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface LocalAuthorEnv {
@@ -97,7 +96,7 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
     const failure = (await checkout(env, p, guard, rebuild)) ?? (await rebuild?.ready(p, guard)); // AREB1: swap and PR head again right before create
     if (failure) return typeof failure === "string" ? { kind: "unknown", reason: failure } : failure;
     const flags = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
-    const r = await whileOwned(guard, () => { made.agent = p.agent; return cardRoleCreate(localCreateGuard(env.create), { tier: tierCtx(env, task, p) })("create", p.agentName, p.worktree,
+    const r = await whileOwned(guard, () => { made.agent = p.agent; return cardRoleCreate(localCreateGuard(env.create), tierOpts(env, task, p))("create", p.agentName, p.worktree,
       "--purpose", p.purpose, "--task", p.taskId, "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project, ...flags); });
     if (r.code === "lease-lost") throw new SchedulerStopped(String(r.error));
     if (r.ok !== true) return { kind: "unknown", reason: `建 ${p.agent} 结果不明：${String(r.error ?? "")}` };
@@ -125,14 +124,18 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
   return family === "codex" || configuredAgentLimits(slotOpts) ? withCodexSlot(create, { ...slotOpts, checkQuota: true }) : create();
 }
 
-/** TIER3：作者的类型上下文——卡上存的流程模板与规格版本、现在的规格卡（启动核对）、argv 自带的 --effort high 是原档 */
-function tierCtx(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan): TierLaunchCtx {
+/**
+ * TIER3：作者的类型上下文——卡上存的流程模板与规格版本、现在的规格卡（启动核对）、argv 自带的 --effort high 是原档。
+ * taskTierModels off：不给上下文、不读规格卡，整段走旧角色路径。
+ */
+function tierOpts(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan): { tier?: TierLaunchCtx } {
+  if (taskTierMode(task.project).mode === "off") return {};
   const w = getWorkflow(env.db, task.id);
   let specText: string | null = p.specText;
   if (specText === null) {
     try { specText = readFileSync(p.specPath, "utf8"); } catch { specText = null; /* 读不到规格卡就只认已存流程（tierAtLaunch 的约定），不挡建会话 */ }
   }
-  return { db: env.db, project: task.project, card: task.id, tier: w?.template ?? "code", specText, specRev: w?.specRev, round: task.round, baseEffort: "high" };
+  return { tier: { db: env.db, project: task.project, card: task.id, tier: w?.template ?? "code", specText, specRev: w?.specRev, round: task.round, baseEffort: "high" } };
 }
 
 export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, opts: LocalStartOptions = {}, rebuild?: Rebuild): Promise<EnsureResult> {

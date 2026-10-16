@@ -13,8 +13,8 @@ import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { useRoleModelPort } from "../src/lib/role-model-settings-local.js";
 import { defaultRoleModels } from "../src/lib/role-model-settings.js";
-import { bindLaunchSession, bindTierSession, taskTierLaunchHistory } from "../src/lib/task-tier-launch-events.js";
-import { useTaskTierPort, type TierLaunchCtx } from "../src/lib/task-tier-models.js";
+import { bindLaunchSession, taskTierLaunchHistory } from "../src/lib/task-tier-launch-events.js";
+import { bindTierSession, useTaskTierPort, type TierLaunchCtx } from "../src/lib/task-tier-models.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { useTaskTierPort(); useRoleModelPort(); for (const c of cleanups.splice(0)) c(); });
@@ -73,6 +73,16 @@ describe("[验收线 3] 成功 / 失败 / unknown 可追溯", () => {
     expect(h[1].plan).toMatchObject({ source: "explicit", final: { model: "claude-sonnet-5-5" } });
     bindTierSession(db, { project: "p1", id: "T1" }, "t1", "late", "author");
     expect(taskTierLaunchHistory(db, "p1", "T1").every((f) => f.status === "failed")).toBe(true); // 失败的不被后来的会话翻案
+  });
+
+  test("create 抛错：记 failed（结果不明 + 原因），异常照旧抛出；之后同名会话不会被绑到这次尝试", async () => {
+    const { db } = ledger();
+    const boom: Create = async () => { throw new Error("create transport failed"); };
+    await expect(cardRoleCreate(boom, { tier: ctx(db, "code") })(...author())).rejects.toThrow("create transport failed");
+    const h = taskTierLaunchHistory(db, "p1", "T1");
+    expect(h.map((f) => [f.status, f.reason])).toEqual([["failed", expect.stringContaining("结果不明：create transport failed")]]);
+    bindTierSession(db, { project: "p1", id: "T1" }, "t1", "other", "author");
+    expect(taskTierLaunchHistory(db, "p1", "T1").map((f) => f.status)).toEqual(["failed"]);
   });
 
   test("调度器的只读连接也记得上；卡不在这本台账不记；卡的事件流不多一条", async () => {

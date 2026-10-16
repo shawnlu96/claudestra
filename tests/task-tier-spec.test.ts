@@ -5,7 +5,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { preflightStart } from "../src/lib/dag-tools-start.js";
 import { listEvents } from "../src/lib/ledger-store.js";
-import { useTaskTierPort } from "../src/lib/task-tier-models.js";
+import { WORKFLOW_TEMPLATES } from "../src/lib/ledger-scheduler.js";
+import { FLOW_TEMPLATES, templateFor } from "../src/lib/scheduler-template.js";
+import { decideTierLaunch, useTaskTierPort } from "../src/lib/task-tier-models.js";
 import { parseTaskTier, registerTierChecks, registerTierTemplate, tierAtLaunch, tierLaunchable } from "../src/lib/task-tier-spec.js";
 import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
 
@@ -58,6 +60,66 @@ describe("[验收线 1] docs 未注册不可达", () => {
       expect(r).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("docs 还没有注册流程模板") });
       expect(f.calls).toEqual([]);
     } finally { await f.close(); }
+  });
+});
+
+describe("[验收线 1] start_node 预检按卡首声明定类型", () => {
+  test("on：只给规格（模板：security），计划的流程就是 security，送进启动核对不冲突；显式 template 与声明不同拒", async () => {
+    const f = integrationFixture();
+    try {
+      mode("on");
+      const spec = card("模板：security");
+      const r = await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec });
+      if (!r.ok || !("plan" in r)) throw new Error(JSON.stringify(r));
+      expect(r.plan.workflow).toEqual({ template: "security", version: 3 });
+      const d = decideTierLaunch({ project: f.project, card: r.plan.taskId, tier: r.plan.workflow!.template, specText: spec }, "author", "claude", null, null);
+      expect(d).toMatchObject({ mode: "on", value: "claude-opus-5-5" });
+      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec, template: "security" })).toMatchObject({ ok: true });
+      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec, template: "ui" })).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("冲突") });
+      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：ui\n模板：code") })).toMatchObject({ ok: false, code: "invalid" });
+      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：docs") })).toMatchObject({ ok: false, error: expect.stringContaining("docs 还没有注册") });
+      const none = await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: "# scope" });
+      expect(none.ok && "plan" in none && none.plan.workflow?.template).toBe("code");
+    } finally { await f.close(); }
+  });
+
+  test("off / observe：与旧路径一样只看参数（缺省 code），卡首声明不改流程", async () => {
+    const f = integrationFixture();
+    try {
+      for (const m of ["off", "observe"] as const) {
+        mode(m);
+        const r = await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：security") });
+        expect(r.ok && "plan" in r && r.plan.workflow?.template).toBe("code");
+      }
+    } finally { await f.close(); }
+  });
+});
+
+describe("扩展点 2（模板注册）：新模块注册流程后开卡可达", () => {
+  test("registerTierTemplate 带流程定义：templateFor / 开卡校验 / 计划都认 docs；撤销后又不可达", async () => {
+    const f = integrationFixture();
+    try {
+      mode("on");
+      const { id: _id, version: _v, ...flow } = FLOW_TEMPLATES.code;
+      const undo = registerTierTemplate("docs", [{ ...flow, version: 3 }]);
+      cleanups.push(undo);
+      expect(templateFor("docs" as never, 3)).toMatchObject({ id: "docs", version: 3 });
+      expect(WORKFLOW_TEMPLATES).toContain("docs" as never);
+      const r = await preflightStart(f.startEnv, { featureId: f.id, key: "next", template: "docs", spec: "# scope" });
+      expect(r.ok && "plan" in r && r.plan.workflow).toEqual({ template: "docs", version: 3 });
+      const byDecl = await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：docs") });
+      expect(byDecl.ok && "plan" in byDecl && byDecl.plan.workflow?.template).toBe("docs");
+      undo();
+      expect(templateFor("docs" as never, 3)).toBeNull();
+      expect(WORKFLOW_TEMPLATES).not.toContain("docs" as never);
+      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", template: "docs", spec: "# scope" })).toMatchObject({ ok: false, code: "invalid" });
+    } finally { await f.close(); }
+  });
+
+  test("内建模板名不能被注册覆盖", () => {
+    expect(templateFor("code", 3)?.id).toBe("code");
+    expect(registerTierTemplate("code", [{ ...FLOW_TEMPLATES.code, version: 9 }])).toBeFunction(); // 内建类型：无副作用
+    expect(templateFor("code", 9)).toBeNull();
   });
 });
 

@@ -77,13 +77,6 @@ export function bindLaunchSession(reader: Database, o: { project: string; card: 
     { sessionId: o.sessionId, agent: o.agent, actual }, now);
 }
 
-/** 调用点用的那一层：会话已证实（有 session id）才绑；记不上只少一条事实，不改建会话的结论 */
-export function bindTierSession(db: Database, task: { project: string; id: string }, agent: string, sessionId: string, role: string): void {
-  try { bindLaunchSession(db, { project: task.project, card: task.id, role, agent, sessionId }); } catch (e) {
-    console.error(`[task-tier] ${task.id} ${role} 的启动事实没绑上会话：${(e as Error).message}`);
-  }
-}
-
 export interface LaunchFact {
   plan: LaunchPlan;
   status: "attempted" | "failed" | "bound";

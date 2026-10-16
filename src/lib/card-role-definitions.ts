@@ -242,7 +242,12 @@ async function launchRecorded(r: Applied, opts: CardRoleOptions, call: (args: st
     return { ok: false, error: r.error };
   }
   if (plan && db) fact("启动尝试", () => recordLaunchAttempt(db, plan));
-  const res = await call(r.args);
+  let res: any;
+  try { res = await call(r.args); } catch (e) {
+    // 抛错时 create 有没有发到 manager 说不准：记 failed（结果不明 + 原因）收住这次尝试，免得之后按 agent 名绑到别的会话；异常照旧往上抛
+    if (plan && db) fact("启动异常", () => recordLaunchFailed(db, plan, `create 抛错，结果不明：${(e as Error)?.message ?? String(e)}`.slice(0, 300)));
+    throw e;
+  }
   if (plan && db && res?.ok !== true) fact("启动失败", () => recordLaunchFailed(db, plan, String(res?.error ?? "create 没有成功").slice(0, 300)));
   return res;
 }

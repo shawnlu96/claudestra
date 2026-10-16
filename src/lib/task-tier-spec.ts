@@ -1,10 +1,11 @@
 /**
  * 任务类型（TIER3）：security / code / ui / docs。类型只认规格卡首唯一的「模板：」声明（spec-lint-head.ts scanSpecHead，与调度模板选择同一段），
  * 缺声明 = code，重复 / 不认识 = 明确诊断，不猜。开卡时类型与规格版本随 task_workflows（template + specRev）存下，启动时 tierAtLaunch 再核对。
- * docs 只在模型表里有：注册表（registerTierTemplate）里没有它之前，tierLaunchable 拒、dag-tools-start 也拒开卡（TIER3e 注册后才可达）。
+ * docs 只在模型表里有：注册表（registerTierTemplate）里没有它之前，tierLaunchable 拒、dag-tools-start 也拒开卡（TIER3e 带流程定义注册后才可达）。
  * 派单前 / 交付时的校验钩子（registerTierChecks）缺省为空；门控（taskTierModels off 不调用）在 task-tier-models.ts tierCheckGate。
  * tests/task-tier-spec.test.ts。
  */
+import { registerFlowTemplate, type FlowTemplate } from "./scheduler-template.js";
 import { scanSpecHead } from "./spec-lint-head.js";
 
 export const TASK_TIERS = ["security", "code", "ui", "docs"] as const;
@@ -27,11 +28,17 @@ export function parseTaskTier(text: string): TierDecl {
 const BUILTIN: readonly TaskTier[] = ["code", "ui", "security"];
 const registered = new Set<TaskTier>();
 
-/** 注册一个可开卡 / 可启动的类型；返回撤销函数（测试用）。内建的三种重复注册无副作用 */
-export function registerTierTemplate(tier: TaskTier): () => void {
+export type TierFlow = Omit<FlowTemplate, "id" | "version"> & { version: number };
+
+/**
+ * 注册一个可开卡 / 可启动的类型及其流程定义（各版本经 scheduler-template.ts registerFlowTemplate 接进 templateFor / 开卡校验）；
+ * 返回撤销函数（测试用）。内建的三种重复注册无副作用。不带流程只开启动核对，开卡仍因没有流程定义被拒。
+ */
+export function registerTierTemplate(tier: TaskTier, flows: readonly TierFlow[] = []): () => void {
   if (BUILTIN.includes(tier) || registered.has(tier)) return () => undefined;
+  const undo = flows.map((f) => registerFlowTemplate({ ...f, id: tier }));
   registered.add(tier);
-  return () => { registered.delete(tier); };
+  return () => { registered.delete(tier); for (const u of undo) u(); };
 }
 export const tierLaunchable = (tier: TaskTier): boolean => BUILTIN.includes(tier) || registered.has(tier);
 

@@ -1,7 +1,7 @@
 import { prepareLendAuthor, type LendAuthorDeps } from "./lend-author-retire-tick.js";
 import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author.js";
-import { bindTierSession } from "./task-tier-launch-events.js";
+import { bindTierSession } from "./task-tier-models.js";
 import { cardRoleCreate } from "./card-role-definitions.js";
 import { rebuildRetiredAuthor, type AuthorRebuildDeps } from "./scheduler-author-rebuild.js";
 /**

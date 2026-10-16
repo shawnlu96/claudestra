@@ -8,6 +8,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyCardRole, cardRoleCreate } from "../src/lib/card-role-definitions.js";
+import type { StartPlan } from "../src/lib/dag-tools-start.js";
+import type { StepIO } from "../src/lib/dag-tools-steps.js";
+import { runLocalStart } from "../src/lib/scheduler-local-runtime-start.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { RECOVERY_KEYS, recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
@@ -96,6 +99,43 @@ describe("[验收线 3] off：完整委托旧角色路径", () => {
     await cardRoleCreate(async (...a: string[]) => (sent.push(a), { ok: true }), { tier: { db, project: "p1", card: "T1", tier: "ui" } })(...author());
     expect(sent[1]).toEqual(sent[0]);
     expect(taskTierLaunchHistory(db, "p1", "T1")).toEqual([]);
+  });
+});
+
+describe("[验收线 3] off：start_node 不建上下文、不读、不绑", () => {
+  /** runLocalStart 的最小替身：Claude 本机、无槽位限制；registry 由测试写（有 session id 才会去绑） */
+  function startRig(db: ReturnType<typeof ledger>) {
+    const dir = tmp("tier3-start-"), configPath = join(dir, "scheduler.json"), registryPath = join(dir, "registry.json");
+    writeFileSync(configPath, JSON.stringify({ enabled: true, autoDispatch: true, projects: { p1: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: dir,
+      localAuthorRuntime: "claude" } } }));
+    writeFileSync(registryPath, JSON.stringify({ agents: {} }));
+    const plan = { project: "p1", taskId: "T1", peer: null, agent: "agent-task-t1", agentName: "task-t1", specPath: join(dir, "spec.md"), specText: "# 卡\n",
+      workflow: { template: "code", version: 3 } } as unknown as StartPlan;
+    const seen = { db: 0, read: 0 };
+    const io = { db: () => (seen.db++, db), read: () => (seen.read++, null), manager: async () => ({ ok: true }) } as unknown as StepIO;
+    const run = async (x: StepIO) => { await x.manager(author().map((a) => (a === "a1" ? "task-t1" : a))); return { ok: true } as never; };
+    const register = () => writeFileSync(registryPath, JSON.stringify({ agents: { "agent-task-t1": { cwd: dir, projectId: "p1", sessionId: "s-1", status: "active",
+      runtime: "claude-code", transport: "tmux" } } }));
+    return { go: () => runLocalStart(io, plan, run, { configPath, registryPath }), register, seen };
+  }
+
+  test("on 下留了一条未绑尝试；切 off 后会话出现在 registry，再跑启动也不绑、不多事件，台账与规格都不碰", async () => {
+    const db = ledger();
+    const rig = startRig(db);
+    ports("on", "observe");
+    await rig.go();
+    expect(taskTierLaunchHistory(db, "p1", "T1").map((f) => f.status)).toEqual(["attempted"]);
+    const before = listEvents(db, { project: "p1" }).length;
+    ports("off", "observe");
+    rig.register();
+    rig.seen.db = rig.seen.read = 0;
+    await rig.go();
+    expect(rig.seen).toEqual({ db: 0, read: 0 });
+    expect(taskTierLaunchHistory(db, "p1", "T1").map((f) => f.status)).toEqual(["attempted"]); // 历史照读，不翻成 bound
+    expect(listEvents(db, { project: "p1" }).length).toBe(before);
+    ports("on", "observe");
+    await rig.go(); // 回到 on：新尝试照常记、照常绑（最近一条未绑的）
+    expect(taskTierLaunchHistory(db, "p1", "T1").map((f) => f.status)).toEqual(["attempted", "bound"]);
   });
 });
 

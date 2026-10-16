@@ -6,6 +6,7 @@ import { requireSharedLedgerStart } from "./shared-ledger-gate.js";
  * 已经绑了卡的节点当成「开工过了」原样回（工具超时后重试不会再建第二张卡）。IO 全部注入，tests/dag-tools-start.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { computeLanes, laneNodes } from "./dag-tools-lanes.js";
 import { renderExecPrompt } from "./dag-tools-prompt.js";
@@ -16,9 +17,9 @@ import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from "./ledger-scheduler.js
 import { getItem, getTask } from "./ledger-store.js";
 import { canonicalTwinError } from "./registry.js";
 import { notePrivateStart, parseStartPlacement, PRIVATE_ONLY_PEER, privateStartMode, type StartPlacement } from "./scheduler-placement-start.js";
-import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
-import { tierCheckGate } from "./task-tier-models.js";
-import { isTaskTier, tierLaunchable } from "./task-tier-spec.js";
+import { latestTemplateVersion } from "./scheduler-template.js";
+import { tierCheckGate, tierStartTemplate } from "./task-tier-models.js";
+import { isTaskTier, tierLaunchable, type TaskTier } from "./task-tier-spec.js";
 import { uiSpecGate } from "./spec-lint.js";
 import { observationGate } from "./spec-lint-observation.js";
 import { cardIdGate } from "./shared-ledger-mirror-skip-id.js";
@@ -168,6 +169,22 @@ async function privateRepoDir(env: StartEnv, project: string, globs: readonly st
   return r.dir ? { repo: r.repo, dir: r.dir } : { error: noCloneReason(r.repo) };
 }
 
+/** 模板名不认识（含 docs 等没注册流程的类型）就给原因；认识 = null */
+function templateProblem(template: string): string | null {
+  // TIER3：docs 只在模型表里有，注册流程模板（TIER3e）之前不能开卡
+  if (isTaskTier(template) && !tierLaunchable(template)) return `类型 ${template} 还没有注册流程模板，不能开卡`;
+  if (!(WORKFLOW_TEMPLATES as readonly string[]).includes(template) || latestTemplateVersion(template) === null) {
+    return `template 只能是 ${WORKFLOW_TEMPLATES.join(" / ")}（收到 ${template.slice(0, 80)}）`;
+  }
+  return null;
+}
+
+/** 已有规格卡的正文（类型声明用）；没有 / 读不了 = null */
+function readSpec(env: StartEnv, specPath: string): string | null {
+  if (!env.exists(specPath)) return null;
+  try { return readFileSync(specPath, "utf8"); } catch { return null; }
+}
+
 export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Preflight> {
   let f: Feature;
   try {
@@ -178,10 +195,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   try { requireSharedLedgerStart(f.id, args.key, () => args.taskId ?? cardNames(env.db, f, args.key).taskId); } catch (e) { return no("forbidden", (e as Error).message); }
   const want = parseStartPlacement(args.placement);
   if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
-  const template = args.template ?? "code";
-  // TIER3：docs 只在模型表里有，注册流程模板（TIER3e）之前不能开卡
-  if (isTaskTier(template) && !tierLaunchable(template)) return no("invalid", `类型 ${template} 还没有注册流程模板，不能开卡`);
-  if (!(WORKFLOW_TEMPLATES as readonly string[]).includes(template)) return no("invalid", `template 只能是 code / ui / security（收到 ${template.slice(0, 80)}）`);
+  if (args.template !== undefined) { const bad = templateProblem(args.template); if (bad) return no("invalid", bad); }
   const r = nodeReady(env, f, args.key);
   if ("error" in r) return no("not_found", r.error as string);
   const { node, wait } = r;
@@ -191,7 +205,14 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const taskId = args.taskId ?? cardNames(env.db, f, node.key).taskId;
   if (!TASK_ID.test(taskId)) return no("invalid", `卡号 ${taskId} 不合法（字母数字开头，≤ 60 位，只含字母数字 _ . -）`);
   const idGate = cardIdGate(taskId); if (idGate) return no("invalid", idGate);
-  const tierRefused = tierCheckGate(env.db, "dispatch", { project: f.project, taskId, tier: template as WorkflowTemplate, fileGlobs: node.fileGlobs });
+  const specRel = `docs/tasks/${taskId}.md`;
+  const specPath = join(env.ledgerDir, specRel);
+  // TIER3：on 下类型按规格卡首唯一声明定（template 参数只核对），计划、流程、提示词与启动上下文都用这一个结果
+  const picked = tierStartTemplate(f.project, args.template, () => args.spec ?? readSpec(env, specPath));
+  if (!picked.ok) return no("invalid", picked.error);
+  const tplBad = templateProblem(picked.template); if (tplBad) return no("invalid", tplBad);
+  const template = picked.template as WorkflowTemplate;
+  const tierRefused = tierCheckGate(env.db, "dispatch", { project: f.project, taskId, tier: template as TaskTier, fileGlobs: node.fileGlobs });
   if (tierRefused) return no("tier_check", `类型校验拒绝开卡：${tierRefused}`);
   const lint = uiSpecGate(env.db, env.ledgerDir, taskId, args.spec, f.project); if (lint) return no("spec_lint", lint);
   const obs = observationGate({ ledgerDir: env.ledgerDir, project: f.project, taskId, inline: args.spec }, { policy: env.recoveryPolicy });
@@ -219,8 +240,6 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (await env.branchExists(repo, branch)) return no("conflict", `分支 ${branch} 已存在：换一个 branch`);
   const worktree = join(env.worktreeRoot, low);
   if (!pinned && env.exists(worktree)) return no("conflict", `worktree 目录 ${worktree} 已存在`);
-  const specRel = `docs/tasks/${taskId}.md`;
-  const specPath = join(env.ledgerDir, specRel);
   const hasSpec = env.exists(specPath);
   if (!hasSpec && !args.spec?.trim()) return no("no_spec", `规格卡 ${specPath} 还没有：先写好，或在 spec 参数里给正文`);
   if (hasSpec && args.spec !== undefined) return no("conflict", `规格卡 ${specPath} 已存在：不覆盖，去掉 spec 参数`);
@@ -234,7 +253,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const title = args.title ?? node.oneLine;
   const item = args.item ?? (getItem(env.db, f.project, featureSlug(f, storedOrigin(env.db))) ? featureSlug(f, storedOrigin(env.db)) : null);
   const promptPath = join(env.ledgerDir, "reviews", `${taskId}-exec-prompt.md`);
-  const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir, template: template as WorkflowTemplate,
+  const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir, template,
     ...(local ? { localMerge: true } : env.mergeHandoff?.(f.project) === true ? { mergeHandoff: true } : {}) };
   const promptText = renderExecPrompt(vars, env.template() ?? undefined);
   return {
@@ -245,7 +264,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       purpose: `${taskId} 执行者（自动卡）：${title}。先读 ${promptPath}`,
       ...(want === "local" ? { localOnly: true } : {}),
       peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason, reservation: placed.reservation } : null,
-      workflow: { template: template as WorkflowTemplate, version: LATEST_TEMPLATE_VERSION[template as WorkflowTemplate] },
+      workflow: { template, version: latestTemplateVersion(template)! },
       ...(priv ? { privateRepo: priv.repo } : {}), ...(local ? { localMerge: true as const } : {}),
     },
   };

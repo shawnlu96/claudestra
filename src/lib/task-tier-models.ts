@@ -1,10 +1,11 @@
 /**
  * 按任务类型选本机模型（TIER3）。同家族按「类型 × 角色格 → 角色格 → 产品默认」解析：tiers 里没写 = 用下面 TIER_DEFAULTS，写 inherit = 显式继承角色格。
  * 门 = RecoveryPolicyPort 的 taskTierModels 键（缺省 on，与旧 roleModel 键互不要求）：
- * - off：decideTierLaunch 一进来就回 off，调用方整段走旧角色路径，不读表、不记事件、不调扩展点。
+ * - off：decideTierLaunch 一进来就回 off，调用方整段走旧角色路径，不读表、不记事件、不调扩展点；调用点在建上下文 / 读规格卡之前就分流，bindTierSession 也不绑。
  * - observe：启动参数不变，只记一条 would-use（recordObserved）。
  * - on：按有效值传 --model / --effort；显式参数照旧优先，但 security 写、审不得低于 Opus，Codex 不降原档——冲突就拒绝并给原因。
- * 扩展点（缺省空、off 不调用）：registerAuthorTierOverride（建作者前按项目 + 卡号问覆盖值）、task-tier-spec.ts 的模板注册与校验钩子（tierCheckGate）。
+ * 开卡用哪个流程模板：tierStartTemplate（on 下按规格卡首声明，start_node 预检调用）。Codex 的 security 下限与类型解析同一原档：baseEffort 优先，缺省取角色格。
+ * 扩展点（缺省空、off 不调用）：registerAuthorTierOverride（建作者前按项目 + 卡号问覆盖值）、task-tier-spec.ts 的模板注册（带流程定义）与校验钩子（tierCheckGate）。
  * tests/task-tier-models.test.ts、tests/task-tier-recovery.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -15,8 +16,8 @@ import { getTask } from "./ledger-store.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readRoleModels, roleModelOf, type CardRole, type RoleModelRead } from "./role-model-settings.js";
 import { isOpusGrade, type CodexEffort } from "./task-tier-model-settings.js";
-import { isTaskTier, runTierChecks, tierAtLaunch, type TaskTier, type TierCheckCtx, type TierCheckPhase } from "./task-tier-spec.js";
-import { ledgerWriter, newLaunchId, type LaunchPlan } from "./task-tier-launch-events.js";
+import { isTaskTier, parseTaskTier, runTierChecks, tierAtLaunch, tierLaunchable, type TaskTier, type TierCheckCtx, type TierCheckPhase } from "./task-tier-spec.js";
+import { bindLaunchSession, ledgerWriter, newLaunchId, type LaunchPlan } from "./task-tier-launch-events.js";
 
 const TASK_TIER_KEY = "taskTierModels" as const;
 const TIER_MODELS = { opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5", haiku: "claude-haiku-5-5" } as const;
@@ -70,6 +71,12 @@ export function tierFloorProblem(tier: TaskTier, role: CardRole, family: Family,
   return isEffort(value) && rank(value) >= rank(baseEffort) ? null : `security 卡的 ${role}（Codex）不得低于原档 ${baseEffort}（要用 ${value ?? "Codex 自己的配置"}）`;
 }
 
+/** Codex 原档（security 下限的比较基准）：调用方自带的档优先，不给就用角色格——与 resolveTierModel 同一口径；Claude 不用 */
+function originalEffort(read: RoleModelRead, role: CardRole, family: Family, baseEffort: CodexEffort | null | undefined): CodexEffort | null | undefined {
+  if (family !== "codex") return undefined;
+  return baseEffort !== undefined ? baseEffort : roleModelOf(read, role, "codex").value as CodexEffort | null;
+}
+
 /** 扩展点 1：建作者会话前按项目 + 卡号问覆盖值（TIER3c 自动升档）；null = 不覆盖 */
 export type AuthorTierOverride = (q: { project: string; card: string; tier: TaskTier; family: Family }) => string | null;
 let override: AuthorTierOverride | null = null;
@@ -87,6 +94,26 @@ export function taskTierMode(project: string, p: TaskTierPort = port): { mode: "
   const d = decideRecovery(policy);
   const mode = d.kind === "act" ? "on" : d.kind === "observe" ? "observe" : "off";
   return { mode, ...(policy.diagnostic ? { diagnostic: policy.diagnostic } : {}) };
+}
+
+/**
+ * 开卡（start_node 预检）用哪个流程模板。on：按规格卡首唯一声明定类型，显式 template 参数只做核对（与声明不同 = 冲突拒）；
+ * 声明坏 / 类型未注册拒；两边都没有 = code。off / observe：与旧路径一样只看参数（缺省 code），不读规格卡。
+ * specText 是取规格正文的函数（只在 on 下调用；拿不到 = null，按没有声明）。
+ */
+export function tierStartTemplate(project: string, explicit: string | undefined, specText: () => string | null,
+  p: TaskTierPort = port): { ok: true; template: string } | { ok: false; error: string } {
+  if (taskTierMode(project, p).mode !== "on") return { ok: true, template: explicit ?? "code" };
+  const text = specText();
+  const decl = typeof text === "string" ? parseTaskTier(text) : null;
+  if (decl && !decl.ok) return { ok: false, error: `规格卡首类型声明不对：${decl.error}` };
+  const declared = decl?.ok && decl.source === "spec" ? decl.tier : null;
+  if (explicit !== undefined && declared && explicit !== declared) {
+    return { ok: false, error: `template 参数 ${explicit.slice(0, 40)} 与规格卡首声明 ${declared} 冲突，不按任何一边猜` };
+  }
+  const template = explicit ?? declared ?? "code";
+  if (isTaskTier(template) && !tierLaunchable(template)) return { ok: false, error: `类型 ${template} 还没有注册流程模板，不能开卡` };
+  return { ok: true, template };
 }
 
 /** 一次本机建会话的上下文：tier = 卡上存的流程模板；specText 给了就核对卡首声明；baseEffort = argv 里调用方自带的那一档（不当显式覆盖） */
@@ -113,12 +140,13 @@ export function decideTierLaunch(ctx: TierLaunchCtx, role: CardRole, family: Fam
   const read = p.read();
   const bad = read.status === "invalid" || read.status === "unreadable" ? `模型档位表${read.status === "invalid" ? "内容不合法" : "读不了"}：${read.error}` : null;
   const r = resolveTierModel(read, tier, role, family, ctx.baseEffort);
+  const base = originalEffort(read, role, family, ctx.baseEffort);
   if (gate.mode === "observe") {
     observe(ctx, role, family, tier, r, p);
     return { mode: "observe", ...(bad || !at.ok ? { diagnostic: bad ?? (at as { error: string }).error } : {}) };
   }
   const ov = role === "author" && override ? override({ project: ctx.project, card: ctx.card, tier, family }) : null;
-  const ovBlocked = ov !== null ? tierFloorProblem(tier, role, family, ov, ctx.baseEffort) : null;
+  const ovBlocked = ov !== null ? tierFloorProblem(tier, role, family, ov, base) : null;
   const pick: TierResolved = explicit !== null ? { value: explicit, source: "explicit" }
     : ov !== null && !ovBlocked ? { value: ov, source: "override" } : r;
   const note = [r.note, ovBlocked ? `覆盖值 ${ov} 低于安全下限，不用` : null, bad].filter(Boolean).join("；") || undefined;
@@ -127,7 +155,7 @@ export function decideTierLaunch(ctx: TierLaunchCtx, role: CardRole, family: Fam
     ...(note ? { note } : {}) };
   if (!at.ok) return { mode: "on", error: `类型核对不过：${at.error}`, plan };
   if (bad && tier === "security") return { mode: "on", error: `${bad}；security 卡核实不了下限，不启动`, plan };
-  const floor = tierFloorProblem(tier, role, family, pick.value, ctx.baseEffort);
+  const floor = tierFloorProblem(tier, role, family, pick.value, base);
   if (floor) return { mode: "on", error: floor, plan };
   return { mode: "on", value: pick.value, plan };
 }
@@ -163,4 +191,17 @@ export function tierCheckGate(db: Database | null, phase: TierCheckPhase, ctx: T
     } catch (e) { console.error(`[task-tier] 记 ${ctx.taskId} 的类型校验事件失败：${(e as Error).message}`); }
   }
   return mode === "on" ? why : null;
+}
+
+/**
+ * 调用点用的绑定层：会话已证实（有 session id）才绑；taskTierModels off 一律不绑（off 不增加事件，旧的未绑尝试留着，历史只读照查）。
+ * 记不上只少一条事实，不改建会话的结论。
+ */
+export function bindTierSession(db: Database, task: { project: string; id: string }, agent: string, sessionId: string, role: string, p: TaskTierPort = port): void {
+  try {
+    if (taskTierMode(task.project, p).mode === "off") return;
+    bindLaunchSession(db, { project: task.project, card: task.id, role, agent, sessionId });
+  } catch (e) {
+    console.error(`[task-tier] ${task.id} ${role} 的启动事实没绑上会话：${(e as Error).message}`);
+  }
 }

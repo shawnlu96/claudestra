@@ -1,6 +1,6 @@
 /** Data-only workflows: v2 and v3 for every template, v3 differing only at approve_restate. The interpreter in scheduler-plan.ts owns conditions and side effects. */
 import type { LedgerEvent, LedgerTask, Stage, StepName } from "./ledger-stages.js";
-import type { SchedulerIntent, WorkflowTemplate } from "./ledger-scheduler.js";
+import { WORKFLOW_TEMPLATES, type SchedulerIntent, type WorkflowTemplate } from "./ledger-scheduler.js";
 import { restateRecordOk } from "./scheduler-center-facts.js";
 
 type NodeAction = "dispatch" | "review" | "stage" | "ask" | "merge" | "verify" | "retire";
@@ -51,11 +51,47 @@ const FLOW_TEMPLATES_V3: Record<WorkflowTemplate, FlowTemplate> = {
 /** What a newly opened auto card gets (start_node, scheduler autostart): read the version here, never hard-code it. */
 export const LATEST_TEMPLATE_VERSION: Record<WorkflowTemplate, 3> = { code: 3, ui: 3, security: 3 };
 
+/** 新模块注册的流程（TIER3e docs 等）：模板名 → 版本 → 定义。内建三种不在这里，也不能被覆盖 */
+const REGISTERED = new Map<string, Map<number, FlowTemplate>>();
+
+/**
+ * 注册一个流程模板版本：之后 templateFor、latestTemplateVersion、WORKFLOW_TEMPLATES（开卡 / workflow-set 的校验）都认它。
+ * 返回撤销函数（测试用）。内建模板名拒绝（抛错），同名同版本重复注册以后一次为准。
+ * 注意：台账 task_workflows 的 template CHECK 仍只有内建三种，写进台账要注册方另行迁移 schema。
+ */
+export function registerFlowTemplate(def: Omit<FlowTemplate, "id" | "version"> & { id: string; version: number }): () => void {
+  if ((FLOW_TEMPLATES as Record<string, FlowTemplate>)[def.id]) throw new Error(`流程模板 ${def.id} 是内建的，不能注册覆盖`);
+  if (!/^[a-z][a-z0-9-]{0,39}$/.test(def.id) || !Number.isInteger(def.version) || def.version < 1) throw new Error(`流程模板名或版本不合法：${def.id} v${def.version}`);
+  const versions = REGISTERED.get(def.id) ?? new Map<number, FlowTemplate>();
+  versions.set(def.version, def as unknown as FlowTemplate);
+  REGISTERED.set(def.id, versions);
+  const names = WORKFLOW_TEMPLATES as string[];
+  if (!names.includes(def.id)) names.push(def.id);
+  return () => {
+    versions.delete(def.version);
+    if (versions.size) return;
+    REGISTERED.delete(def.id);
+    const i = names.indexOf(def.id);
+    if (i >= 0) names.splice(i, 1);
+  };
+}
+
+/** 新开卡用的版本：内建按 LATEST_TEMPLATE_VERSION，注册的取最高版；不认识 = null */
+export function latestTemplateVersion(template: string): number | null {
+  const builtin = (LATEST_TEMPLATE_VERSION as Record<string, number>)[template];
+  if (builtin !== undefined) return builtin;
+  const versions = REGISTERED.get(template);
+  return versions?.size ? Math.max(...versions.keys()) : null;
+}
+
 /** null = no such (template, version); callers treat that as drift / invalid, never as a default. */
 export function templateFor(template: WorkflowTemplate, version: number): FlowTemplate | null {
-  if (version === 2) return FLOW_TEMPLATES[template] ?? null;
-  if (version === 3) return FLOW_TEMPLATES_V3[template] ?? null;
-  return null;
+  if ((FLOW_TEMPLATES as Record<string, FlowTemplate>)[template]) {
+    if (version === 2) return FLOW_TEMPLATES[template];
+    if (version === 3) return FLOW_TEMPLATES_V3[template];
+    return null;
+  }
+  return REGISTERED.get(template)?.get(version) ?? null;
 }
 
 type GateDecision = { kind: "wait" | "escalate"; code: string; reason: string };
