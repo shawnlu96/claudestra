@@ -35,6 +35,7 @@ import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
+import { isPreviewableImage } from "@/lib/chat/attachment-normalize";
 import { liveAnswerText, liveUserText, resolveDeltaClicks, resolvePendingClicks } from "./delta-clicks";
 import { rosterPlan } from "./agents-signature";
 import { ProjectsRefresh } from "./projects-refresh";
@@ -1541,7 +1542,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 用户气泡内回显：图片给 objectURL 预览，其它给文件名 chip
     const attachments: ChatAttachmentView[] | undefined = hasFiles
       ? files!.map((f) => {
-          const isImg = f.type.startsWith("image/");
+          const isImg = isPreviewableImage(f.type); // 与待发缩略图同一判断（TIFF / HEIC 按文件）
           return {
             name: f.name,
             kind: isImg ? ("image" as const) : ("file" as const),

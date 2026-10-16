@@ -146,5 +146,8 @@ export async function copyOutboundToInbox(paths: string[], agent: string): Promi
 
 /** API 入站上传：原子占名写进 inbox 并记下属于哪个 agent；返回落盘路径（写进 attachments= 头） */
 export async function saveUploadToInbox(file: File, agent: string): Promise<string> {
-  return saveUpload(attachmentDirs().inboxDirs[0], file.name, new Uint8Array(await file.arrayBuffer()), agent, ledgerDb("入站上传"));
+  const bytes = await file.arrayBuffer().catch((e: unknown) => { throw Object.assign(new Error(`read: ${(e as Error)?.message}`), { stage: "read" }); });
+  return saveUpload(attachmentDirs().inboxDirs[0], file.name, new Uint8Array(bytes), agent, ledgerDb("入站上传"));
 }
+/** 上传失败出在读请求体（客户端交来的文件读不出）还是落盘：路由据此分开报错 */
+export const uploadFailureStage = (e: unknown): "read" | "save" => ((e as { stage?: string })?.stage === "read" ? "read" : "save");

@@ -185,41 +185,60 @@ const sameBinding = (a: ManualRequest, b: RequestInput): boolean => a.head === b
  * binding again answers the existing one; a different one is refused until the open one is revoked or has ended.
  */
 export function recordRequest(db: Database, ctx: WriteCtx, input: RequestInput): { request: ManualRequest; duplicate: boolean; status: RequestStatus } {
+  const { reason, now } = checkedInput(ctx, input);
+  return tx(db, () => {
+    const task = mustTask(db, input.taskId);
+    if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", `人工合并排队要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
+    if (configLocal(task.project)) throw new LedgerError("conflict", `不能排人工合并：${localWhy(task.project)}`); // before bindAndWrite's same-binding answer
+    return bindAndWrite(db, ctx, task, input, reason, now, false);
+  });
+}
+
+/**
+ * MANAUTOQ1 only (scheduler-manual-merge-ledger.ts, inside its own transaction): the scheduler's request after its review→merge move.
+ * Same binding, one-open-request rule and write as recordRequest; requester is `scheduler`; requestRefusal must be null, not only non-void.
+ */
+export function recordSchedulerRequest(db: Database, ctx: WriteCtx, input: RequestInput): { request: ManualRequest; duplicate: boolean; status: RequestStatus } {
+  if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "代排人工合并只走调度服务身份");
+  const { reason, now } = checkedInput(ctx, input);
+  return tx(db, () => bindAndWrite(db, ctx, mustTask(db, input.taskId), input, reason, now, true));
+}
+
+function checkedInput(ctx: WriteCtx, input: RequestInput): { reason: string; now: number } {
   const reason = textOneLine(input.reason, "原因", 600), now = ctx.now ?? Date.now();
   if (!SHA.test(input.head)) throw new LedgerError("invalid", "--head 要是完整 40 位 SHA");
   if (![input.specRev, input.round, input.reviewSeq].every((n) => Number.isSafeInteger(n) && n >= 0)) throw new LedgerError("invalid", "--spec-rev / --round / --review-seq 要是非负整数");
-  return tx(db, () => {
-    const task = mustTask(db, input.taskId), wf = getWorkflow(db, task.id);
-    if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", `人工合并排队要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
-    if (configLocal(task.project)) throw new LedgerError("conflict", `不能排人工合并：${localWhy(task.project)}`); // before the same-binding answer below
-    if (task.headSHA !== input.head || task.specRev !== input.specRev || task.round !== input.round) {
-      throw new LedgerError("conflict", `绑定与卡当前不一致：卡是 head ${task.headSHA?.slice(0, 12) ?? "空"} / specRev ${task.specRev} / 第 ${task.round} 轮`);
-    }
-    const ui = wf?.template === "ui";
-    if (ui !== (input.uiDigest !== undefined)) throw new LedgerError("invalid", ui ? "ui 卡要带 --ui-digest（PM 验收过的截图摘要）" : "非 ui 卡不带 --ui-digest");
-    const events = listEvents(db, { project: task.project, target: task.id });
-    const read = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project)), ev = eventAt(db, input.reviewSeq);
-    if (read.kind !== "facts" || read.facts.eventSeq !== input.reviewSeq || ev?.target !== task.id) {
-      throw new LedgerError("conflict", `--review-seq 要是本卡本轮当前的结构化审查事件${read.kind === "facts" ? `（现在是 #${read.facts.eventSeq}）` : "（本轮没有合格的）"}`);
-    }
-    const f = read.facts;
-    for (const old of listRequests(db, task.project, task.id)) {
-      const st = requestStatus(db, old, now);
-      if (!["queued", "waiting", "running", "unknown"].includes(st.state)) continue;
-      if (sameBinding(old, input)) return { request: old, duplicate: true, status: st };
-      throw new LedgerError("conflict", `卡已有未结人工合并请求 #${old.seq}（${st.state}），先 manual-merge-revoke 或等它结束`);
-    }
-    const draft: ManualRequest = { seq: 0, ts: now, project: task.project, taskId: task.id, requestedBy: ctx.actor, reason, head: input.head,
-      specRev: input.specRev, round: input.round, uiDigest: input.uiDigest ?? null,
-      review: { seq: f.eventSeq, actor: ev.actor, reviewer: f.reviewer, sessionId: f.reviewerSessionId, family: f.reviewerFamily, reportPath: f.reportPath, verdict: f.verdict } };
-    const refusal = requestRefusal(db, draft, now);
-    if (refusal?.kind === "void") throw new LedgerError("conflict", `不能排人工合并：${refusal.why}`);
-    const e = insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "decision", text: reason,
-      data: { op: REQUEST_OP, head: draft.head, specRev: draft.specRev, round: draft.round, uiDigest: draft.uiDigest, review: draft.review,
-        frozen: getMeta(db, task.project).queueFrozen.frozen } }, false);
-    const request = { ...draft, seq: e.seq, ts: e.ts };
-    return { request, duplicate: false, status: requestStatus(db, request, now) };
-  });
+  return { reason, now };
+}
+
+function bindAndWrite(db: Database, ctx: WriteCtx, task: ReturnType<typeof mustTask>, input: RequestInput, reason: string, now: number, strict: boolean) {
+  if (task.headSHA !== input.head || task.specRev !== input.specRev || task.round !== input.round) {
+    throw new LedgerError("conflict", `绑定与卡当前不一致：卡是 head ${task.headSHA?.slice(0, 12) ?? "空"} / specRev ${task.specRev} / 第 ${task.round} 轮`);
+  }
+  const ui = getWorkflow(db, task.id)?.template === "ui";
+  if (ui !== (input.uiDigest !== undefined)) throw new LedgerError("invalid", ui ? "ui 卡要带 --ui-digest（PM 验收过的截图摘要）" : "非 ui 卡不带 --ui-digest");
+  const events = listEvents(db, { project: task.project, target: task.id });
+  const read = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project)), ev = eventAt(db, input.reviewSeq);
+  if (read.kind !== "facts" || read.facts.eventSeq !== input.reviewSeq || ev?.target !== task.id) {
+    throw new LedgerError("conflict", `--review-seq 要是本卡本轮当前的结构化审查事件${read.kind === "facts" ? `（现在是 #${read.facts.eventSeq}）` : "（本轮没有合格的）"}`);
+  }
+  const f = read.facts;
+  for (const old of listRequests(db, task.project, task.id)) {
+    const st = requestStatus(db, old, now);
+    if (!["queued", "waiting", "running", "unknown"].includes(st.state)) continue;
+    if (sameBinding(old, input)) return { request: old, duplicate: true, status: st };
+    throw new LedgerError("conflict", `卡已有未结人工合并请求 #${old.seq}（${st.state}），先 manual-merge-revoke 或等它结束`);
+  }
+  const draft: ManualRequest = { seq: 0, ts: now, project: task.project, taskId: task.id, requestedBy: ctx.actor, reason, head: input.head,
+    specRev: input.specRev, round: input.round, uiDigest: input.uiDigest ?? null,
+    review: { seq: f.eventSeq, actor: ev.actor, reviewer: f.reviewer, sessionId: f.reviewerSessionId, family: f.reviewerFamily, reportPath: f.reportPath, verdict: f.verdict } };
+  const refusal = requestRefusal(db, draft, now);
+  if (refusal?.kind === "void" || (strict && refusal)) throw new LedgerError("conflict", `不能排人工合并：${refusal.why}`);
+  const e = insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "decision", text: reason,
+    data: { op: REQUEST_OP, head: draft.head, specRev: draft.specRev, round: draft.round, uiDigest: draft.uiDigest, review: draft.review,
+      frozen: getMeta(db, task.project).queueFrozen.frozen } }, false);
+  const request = { ...draft, seq: e.seq, ts: e.ts };
+  return { request, duplicate: false, status: requestStatus(db, request, now) };
 }
 
 /**

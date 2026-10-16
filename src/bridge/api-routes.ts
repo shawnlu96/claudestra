@@ -100,7 +100,7 @@ import { revocable } from "./credential-revocation.js";
 import { rememberSwitchOverride } from "./switch-override.js";
 import { invitePageResponse } from "./invite-page.js";
 import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
-import { saveUploadToInbox } from "./local-api/media-refresh.js";
+import { saveUploadToInbox, uploadFailureStage } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
 import { conditionalJson } from "../lib/etag.js";
 import { restoreAgentArchiveFiles } from "./archive-restore.js";
@@ -956,7 +956,13 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           .slice(0, 5) as unknown as File[];
         for (const f of files) {
           if (f.size > 10 * 1024 * 1024) return apiJson(413, { ok: false, error: `file "${f.name}" exceeds 10MB` });
-          attachments.push(await saveUploadToInbox(f, agent.name)); // 原子占名 + 记归属（local-api/media-refresh.ts）
+          if (f.size === 0) return apiJson(400, { ok: false, error: `file "${f.name || "(unnamed)"}" is empty` }); // Bun 解析空分片会丢文件名
+          const saved = await saveUploadToInbox(f, agent.name).catch((e: unknown) => e as Error); // 原子占名 + 记归属（local-api/media-refresh.ts）
+          if (typeof saved !== "string") { // 报错只带客户端给的文件名，不回显落盘路径
+            const stage = uploadFailureStage(saved); console.error(`[api] 附件${stage === "read" ? "读取" : "落盘"}失败 agent=${agent.name}:`, saved?.message);
+            return apiJson(stage === "read" ? 400 : 500, { ok: false, error: `could not ${stage} file "${f.name}"` });
+          }
+          attachments.push(saved);
         }
       } else {
         const body = (await req.json()) as { text?: string; wait?: number; acceptsReplyFiles?: unknown; level?: unknown };

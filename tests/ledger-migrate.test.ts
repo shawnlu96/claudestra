@@ -397,6 +397,6 @@ describe("写事件的底座只给写入模块", () => {
       "lib/scheduler-sessions.ts", "lib/scheduler-spec-wait-ledger.ts", "lib/scheduler-ui-carry.ts", "lib/scheduler-ui-review-carry.ts",
       "lib/shared-ledger-center-replica-write.ts", "lib/shared-ledger-v2-projection-write.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-autostart-step.ts", "lib/ledger-human.ts", "lib/scheduler-apply.ts",
-      "lib/scheduler-deploy-reconcile-write.ts", "lib/scheduler-spec-resume-write.ts"]);
+      "lib/scheduler-deploy-reconcile-write.ts", "lib/scheduler-manual-merge-ledger.ts", "lib/scheduler-spec-resume-write.ts"]);
   });
 });
