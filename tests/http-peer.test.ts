@@ -83,14 +83,15 @@ describe("extractReplyText — 对方 messages/threads 响应契约", () => {
 });
 
 // ── 轮询状态机(fake fetch + fake deliver 注入)──────────────────────────
-import { initHttpPeer, routeToHttpPeer } from "../src/bridge/http-peer";
+import { inflightHttpPeerCalls, initHttpPeer, routeToHttpPeer } from "../src/bridge/http-peer";
 import { RELAY_SIG_DETAIL, RelayCallError } from "../src/lib/peer-auth-hints";
 import { markE2eResponse } from "../src/lib/peer-e2e-client";
 import type { HttpPeer } from "../src/lib/peers";
 
 const PEER: HttpPeer = { name: "t", baseUrl: "http://x", outToken: "k".repeat(32), addedAt: "" };
 
-function makeHarness(responses: Array<() => Response>) {
+/** `latencyMs`: every fake response arrives that much later (a loaded CI runner), so a fixed sleep cannot be the wait. */
+function makeHarness(responses: Array<() => Response>, latencyMs = 0) {
   const pushed: string[] = [];
   let i = 0;
   initHttpPeer({
@@ -101,6 +102,7 @@ function makeHarness(responses: Array<() => Response>) {
     fetchImpl: (async () => {
       const r = responses[Math.min(i, responses.length - 1)];
       i++;
+      if (latencyMs) await sleep(latencyMs);
       return r();
     }) as unknown as typeof fetch,
     pollIntervalMs: 10,
@@ -116,6 +118,17 @@ const json = (status: number, body: unknown) =>
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 等到推回 caller 的第一句话（最多 2s）：定死 sleep(30) 在全量高负载下偶尔没等到，迟到的那句还会推进下一个 harness */
 const firstPush = async (h: { pushed: string[] }) => { for (let t = 0; t < 200 && !h.pushed.length; t++) await sleep(10); };
+/**
+ * Starts one outbound call and waits (at most 2s) until the call it registered left inflightHttpPeerCalls, i.e. its run settled.
+ * True = settled: nothing of it can still push into the next harness.
+ */
+async function settled(start: () => void): Promise<boolean> {
+  const before = new Set(inflightHttpPeerCalls);
+  start();
+  const mine = [...inflightHttpPeerCalls].filter((id) => !before.has(id));
+  for (let t = 0; t < 200 && mine.some((id) => inflightHttpPeerCalls.has(id)); t++) await sleep(10);
+  return mine.length > 0 && !mine.some((id) => inflightHttpPeerCalls.has(id));
+}
 
 describe("http-peer 出站状态机", () => {
   test("onDelivered 只在对方 2xx 收下后调：403 / 500 / 网络错误不调（i28-ASK4：PM 回话没送到不记已答）", async () => {
@@ -132,22 +145,21 @@ describe("http-peer 出站状态机", () => {
 
   test("wait 命中:回复推回 caller", async () => {
     const h = makeHarness([() => json(200, { ok: true, reply: "答案", threadId: "t1", agent: "x" })]);
-    routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题");
-    await sleep(50);
-    expect(h.pushed.length).toBe(1);
-    expect(h.pushed[0]).toBe("答案");
+    expect(await settled(() => routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题"))).toBe(true);
+    expect(h.pushed).toEqual(["答案"]);
   });
 
-  test("202 → 轮询 404 → 兑现", async () => {
-    const h = makeHarness([
-      () => json(202, { ok: true, accepted: true, threadId: "t2" }),
-      () => json(404, { ok: false, error: "not yet" }),
-      () => json(200, { ok: true, reply: "迟到的答案", threadId: "t2", agent: "x" }),
-    ]);
-    routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题");
-    await sleep(120);
-    expect(h.pushed.length).toBe(1);
-    expect(h.pushed[0]).toBe("迟到的答案");
+  // 每个响应晚到 60ms（3 拍 > 旧的固定 sleep(120)）：等的是这次调用自己收尾，不是墙钟
+  test("202 → 轮询 404 → 兑现（响应慢也等到调用收尾）", async () => {
+    for (const latency of [0, 60]) {
+      const h = makeHarness([
+        () => json(202, { ok: true, accepted: true, threadId: "t2" }),
+        () => json(404, { ok: false, error: "not yet" }),
+        () => json(200, { ok: true, reply: "迟到的答案", threadId: "t2", agent: "x" }),
+      ], latency);
+      expect(await settled(() => routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题"))).toBe(true);
+      expect(h.pushed).toEqual(["迟到的答案"]);
+    }
   });
 
   test("轮询遇 401 立即终止并报鉴权错误(不空转到超时)", async () => {
@@ -155,8 +167,7 @@ describe("http-peer 出站状态机", () => {
       () => json(202, { ok: true, accepted: true, threadId: "t3" }),
       () => json(401, { ok: false, error: "revoked" }),
     ]);
-    routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题");
-    await sleep(80);
+    expect(await settled(() => routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题"))).toBe(true);
     expect(h.pushed.length).toBe(1);
     expect(h.pushed[0]).toContain("拒绝了鉴权");
   });

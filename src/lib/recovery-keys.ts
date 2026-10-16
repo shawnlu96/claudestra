@@ -29,6 +29,7 @@ export const RECOVERY_KEYS = [
   "ciLogPerJob",
   "ciMainFixRetry",
   "ciManualResume",
+  "ciOutOfDiffRerun",
   "ciProofReuse",
   "ciQueueFull",
   "ciSelectedGate",
