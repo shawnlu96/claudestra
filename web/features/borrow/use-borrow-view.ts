@@ -8,6 +8,16 @@ import { machines } from "@/lib/machines";
 import { POLL_MS } from "./borrow-model";
 import { borrowFeed, EMPTY_FEED, type FeedState } from "./borrow-feed";
 
+/** 年龄的时钟：tick 从 0 开始（= 按服务端 now 算），之后每 ms 走一次（设置页借入面板与今天页借入行共用） */
+export function useTick(ms: number): number {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), ms);
+    return () => clearInterval(id);
+  }, [ms]);
+  return tick;
+}
+
 export function useBorrowView() {
   const [s, setS] = useState<FeedState>(EMPTY_FEED);
   const [feed] = useState(() => borrowFeed(setS));

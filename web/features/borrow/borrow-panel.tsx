@@ -16,18 +16,8 @@ import { visiblePeers } from "./borrow-feed";
 import { NewPeer } from "./borrow-new-peer";
 import { StaleEntry } from "./borrow-stale";
 import { PlusIcon } from "./icons";
-import { useBorrowView } from "./use-borrow-view";
+import { useBorrowView, useTick } from "./use-borrow-view";
 import { RunningElsewhereLink } from "../now/now-team-machines";
-
-/** 年龄的时钟：tick 从 0 开始（= 按服务端 now 算），之后每 5 秒走一次 */
-function useTick(ms: number): number {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick(Date.now()), ms);
-    return () => clearInterval(id);
-  }, [ms]);
-  return tick;
-}
 
 function useCanWrite(): boolean {
   const [ok, setOk] = useState(false);

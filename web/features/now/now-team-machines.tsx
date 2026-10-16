@@ -6,18 +6,18 @@
  * 借入读今天页共用的那份 useSharedBorrowView（「在干活」计数也读它，同一条 15 秒轮询，后台自停）。
  * 纯计算在 now-machines-model.ts。也导出设置页两处原位置的那行链接（RunningElsewhereLink）。
  */
-import { useState, useSyncExternalStore, type MouseEvent } from "react";
+import { useEffect, useState, useSyncExternalStore, type MouseEvent } from "react";
 import { useT } from "@/lib/i18n";
 import { usePeerOnline } from "../chat/components/contacts-lines";
 import { useChatNav } from "../chat/components/nav-context";
 import { Icon } from "../collab/collab-icons";
 import { RemoteRows } from "../borrow/borrow-remote";
-import { useSharedBorrowView } from "../borrow/use-borrow-view";
+import { useSharedBorrowView, useTick } from "../borrow/use-borrow-view";
 import { ServerIcon } from "../borrow/icons";
 import { LendIcon } from "../lend/lend-icons";
 import { useLendState } from "../lend/lend-state";
 import { LentOrders } from "../lend/lent-orders";
-import { machinesView, type PeerOnline } from "./now-machines-model";
+import { machinesView, observeStopping, type PeerOnline } from "./now-machines-model";
 import { Fold, ROW, ROW_ON, useNowT, useOpeners, type Translate } from "./now-ui";
 import { openToday } from "./today-nav";
 
@@ -27,6 +27,25 @@ const subscribeVis = (cb: () => void) => {
 };
 const visibleNow = () => document.visibilityState !== "hidden";
 const visibleSsr = () => true;
+
+/*
+ * 今天页看到的停止起点（observeStopping）：模块级，团队块卸下再挂（切后台、收起侧栏条）也不丢，起点不会被重新算晚。
+ * 换页刷新即清空，之后从头一次看到算起——只会晚报停住，不会早报。
+ */
+let seenStopping: ReadonlyMap<string, number> = new Map();
+const seenSubs = new Set<() => void>();
+const subscribeSeen = (cb: () => void) => {
+  seenSubs.add(cb);
+  return () => void seenSubs.delete(cb);
+};
+const getSeen = () => seenStopping;
+function setSeen(m: ReadonlyMap<string, number>) {
+  if (m === seenStopping) return;
+  seenStopping = m;
+  seenSubs.forEach((f) => f());
+}
+/** 测试用：预置 / 清空看到的停止起点 */
+export const setSeenStoppingForTest = (m: ReadonlyMap<string, number> = new Map()) => setSeen(m);
 
 export function NowTeamMachines() {
   const tr = useNowT();
@@ -60,7 +79,11 @@ function MachineRows({ peers, tr }: { peers: PeerOnline; tr: Translate }) {
   const lend = useLendState();
   const borrow = useSharedBorrowView();
   const open = useOpeners();
-  const view = machinesView(peers, lend, borrow);
+  const tick = useTick(5000);
+  const seen = useSyncExternalStore(subscribeSeen, getSeen, getSeen);
+  const { data, orders } = lend;
+  useEffect(() => setSeen(observeStopping(seenStopping, { data, orders }, Date.now())), [data, orders]);
+  const view = machinesView(peers, lend, borrow, seen);
   if (!view) return null;
   const { lent, borrowed } = view;
   return (
@@ -76,7 +99,7 @@ function MachineRows({ peers, tr }: { peers: PeerOnline; tr: Translate }) {
       )}
       {borrowed && borrow.view && (
         <FoldLine hook="borrowed" icon={<Icon name="zap" size={14} />} text={tr("借入在跑 {n} 单", { n: borrowed.rows.length })} stuck={borrowed.stuck} tr={tr}>
-          <RemoteRows rows={borrowed.rows} serverNow={borrow.view.now} receivedAt={borrow.receivedAt} tick={0} onOpen={(r) => open.task(r.project, r.taskId)} />
+          <RemoteRows rows={borrowed.rows} serverNow={borrow.view.now} receivedAt={borrow.receivedAt} tick={tick} onOpen={(r) => open.task(r.project, r.taskId)} />
         </FoldLine>
       )}
     </div>

@@ -2,7 +2,7 @@
  * XMACH1 截图（opt-in，截图不进 git）：
  *   MACHINES_SHOTS_DIR=<目录> [MACHINES_BASE_REPO=<基线 main 的检出目录>] bun --no-env-file test tests/web-now-machines-browser.test.ts
  * 入口与夹具同 TODAY1（tests/helpers/today-shots.ts，改前改后同一个入口、同一份数据），叠上 tests/helpers/machines-shots.ts 的联系人 / 借出 / 借入。
- * 时刻钉在 2026-10-14 12:00 Asia/Shanghai，真 Chromium，回环 Bun.serve，非回环请求一律拦掉并断言为 0。
+ * 时刻钉在 2026-10-14 12:00 Asia/Shanghai（改后在数据落地后拨过 80 秒，见下），真 Chromium，回环 Bun.serve，非回环请求一律拦掉并断言为 0。
  * 每个宽度四张：团队与额度块（借入收起）、团队与额度块（借入展开；改前同位置）、设置 · 伙伴机器页（改前 Peer 协作页）的出借块与借入块。
  */
 import { expect, test } from "bun:test";
@@ -55,7 +55,12 @@ test.skipIf(!out)("XMACH1：今天页团队与额度（借入收起 / 展开）�
             await g.page.waitForFunction(`document.querySelector("[data-now=strip]").dataset.nowOpen === "1"`);
           }
           await g.page.locator(`${scope} [data-now-quota]`).waitFor();
-          if (after) await g.page.locator(`${scope} [data-now-borrowed]`).waitFor();
+          if (after) {
+            await g.page.locator(`${scope} [data-now-borrowed]`).waitFor();
+            // 借出那单的停止起点从今天页看到它已收回算起：时钟拨过 70 秒，等 useLendState 的 30 秒时钟走一拍出「其中 1 单停住」
+            await g.page.clock.setFixedTime(new Date(TODAY_NOW + 80_000));
+            await g.page.waitForFunction(`document.querySelectorAll(${JSON.stringify(`${scope} [data-now-machines-stuck]`)}).length === 2`, null, { timeout: 40_000 });
+          }
           const team = g.page.locator(`${scope} section[data-now-team]`);
           const shot = async (view: string) => {
             await settle(g.page);

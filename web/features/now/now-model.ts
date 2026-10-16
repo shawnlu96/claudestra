@@ -223,10 +223,15 @@ function todayDone(input: TodayInput, t: Translate): Pick<TodayView, "done" | "d
 }
 
 /** 五块的数据：排序、截断、合计都在这里；项目行、在干活、等你的事的口径照 nowView */
+/** 借出 worker 落在这个项目里（src/lib/lend-deps.ts 的 LEND_PROJECT） */
+const LEND_PROJECT = "lend";
+
 export function todayView(input: TodayInput, deps: NowDeps): TodayView {
   const { lang, t } = deps;
   const base = nowView(input, deps);
   const remote = input.remoteRunning ?? 0;
+  // 借出单（别人在我机器上跑的，lend 项目里的会话）不算「在干活」，它们在团队与额度里单独列
+  const own = input.agents.filter((a) => a.busy && a.projectId !== LEND_PROJECT).length;
   const waiting = input.asks.filter(waitsOnOwner).sort((x, y) => y.createdAt - x.createdAt);
   const stuck: StuckRow[] = [];
   const doing: TodayProject[] = [];
@@ -250,9 +255,9 @@ export function todayView(input: TodayInput, deps: NowDeps): TodayView {
     stuckMore: stuck.slice(STUCK_LIMIT),
     doing: shown,
     rest: doing.filter((p) => !shown.includes(p)),
-    idle: base.workers.length === 0 && !remote && doing.every((p) => !p.doing),
+    idle: own === 0 && !remote && doing.every((p) => !p.doing),
     ...todayDone(input, t),
-    team: { alive: input.agents.filter((a) => a.status === "active").length, busy: base.workers.length + remote, remote },
+    team: { alive: input.agents.filter((a) => a.status === "active").length, busy: own + remote, remote },
   };
 }
 

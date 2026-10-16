@@ -32,7 +32,7 @@ let ui: {
   ChatStoreProvider: (p: { children: unknown }) => unknown; useChatStoreApi: () => Store;
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
   useCollabNav: () => { project: string | null; task: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
-  openSettings: (p: string) => void; TODAY_KEY: string; resetLedgers: () => void;
+  openSettings: (p: string) => void; TODAY_KEY: string; resetLedgers: () => void; setSeenStopping: (m?: ReadonlyMap<string, number>) => void;
 };
 
 const NOW = Date.now();
@@ -40,8 +40,10 @@ const fresh = () => ({ ...todayWorld(NOW), fp: "mac-a", m: machinesWorld(NOW) })
 let world = fresh();
 const calls: string[] = [];
 const scrolled: string[] = [];
+/** 借入接口暂时拉不到（503） */
+let borrowDown = false;
 const live = new Set<() => Promise<void>>();
-const realFetch = globalThis.fetch, realFp = machines.currentFp;
+const realFetch = globalThis.fetch, realFp = machines.currentFp, realNow = Date.now;
 
 beforeAll(async () => {
   GlobalRegistrator.register({ url: "http://localhost/", width: 1280, height: 900 });
@@ -60,6 +62,7 @@ beforeAll(async () => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
     const path = url.pathname.replace(/^\/m\/[^/]+/, "");
     calls.push(`${(init?.method ?? "GET").toUpperCase()} ${path}`);
+    if (borrowDown && path === "/api/v1/borrow") return new Response("down", { status: 503 });
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
     if (path === "/app-config.json") return json({ mode: "direct", fp: world.fp, machineName: "fixture", version: "" });
     if (path === "/api/v1/shared-ledger/context") return json({ identities: [] });
@@ -74,7 +77,10 @@ beforeAll(async () => {
   ui = { MessageList: list.MessageList, NowStrip: require("../web/features/now/now-home.tsx").NowStrip, Sidebar: side.Sidebar, CollabSwitch: sw.CollabSwitch, closingCollab: sw.closingCollab,
     ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi, ChatNavContext: nav.ChatNavContext,
     useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab, unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest,
-    openSettings: settings.openSettings, TODAY_KEY: today.TODAY_KEY, resetLedgers: require("../web/features/now/now-ledgers.ts").resetTodayLedgersForTest };
+    openSettings: settings.openSettings, TODAY_KEY: today.TODAY_KEY, resetLedgers: require("../web/features/now/now-ledgers.ts").resetTodayLedgersForTest,
+    setSeenStopping: require("../web/features/now/now-team-machines.tsx").setSeenStoppingForTest };
+  // 今天页 5 分钟前就看到机器 C 那单已收回（合成数据里它收回后超时还 live = 停住）
+  ui.setSeenStopping(new Map([["lend-2", NOW - 5 * 60_000]]));
 });
 
 afterEach(async () => {
@@ -82,6 +88,9 @@ afterEach(async () => {
   await React.act(async () => ui.unmountOpenViewGuard());
   await React.act(async () => ui.resetLedgers());
   await React.act(async () => ui.closeCollab());
+  ui.setSeenStopping(new Map([["lend-2", NOW - 5 * 60_000]]));
+  Date.now = realNow;
+  borrowDown = false;
   world = fresh();
   calls.length = 0;
   scrolled.length = 0;
@@ -237,3 +246,38 @@ test("[回归] 没有借入在跑：句子同原来，不带后半句", async ()
   expect(v.text("[data-now=strip] [data-now-summary]")).toBe("· 3 件要你处理 · 3 个 agent 在干活");
   await v.unmount();
 });
+
+test("[验收线 2] 收回时刻按今天页看到的算：刚看到已收回（不拿续租刷新的 updatedAt 倒推）是停止中，不写停住", async () => {
+  ui.setSeenStopping();
+  const v = await mount("main");
+  await until(() => ready(v), "machine rows");
+  await tick(50);
+  expect(v.text("[data-now-team] [data-now-lent] button")).toBe("借出在跑 2 单");
+  expect(v.text("[data-now-team] [data-now-borrowed] button")).toBe("借入在跑 3 单其中 1 单停住");
+  await v.unmount();
+});
+
+test("[验收线 2] 借出单不算『在干活』：自己的会话全空闲、只有给别人跑单的 lend worker 在忙、没有借入 → 0 个", async () => {
+  world.agents = [...world.agents.map((a) => ({ ...a, busy: false })),
+    { name: "lend-1", status: "active", projectId: "lend", cwd: "/repo", lastActivityTs: NOW - 60_000, busy: true }];
+  world.m = { ...world.m, borrow: { ...(world.m.borrow as object), remote: [] } };
+  const v = await mount("strip");
+  await until(() => calls.includes("GET /api/v1/borrow") && calls.includes("GET /api/v1/agents"), "reads");
+  await tick(50);
+  expect(v.text("[data-now=strip] [data-now-summary]")).toBe("· 3 件要你处理 · 0 个 agent 在干活");
+  await v.unmount();
+});
+
+test("借入行的心跳年龄跟着时钟走：/borrow 暂时拉不到（保留上次快照）时不停在上次的值", async () => {
+  const v = await mount("main");
+  await until(() => ready(v), "machine rows");
+  await v.click(v.host.querySelector("[data-now-borrowed] button"), "borrowed toggle");
+  await until(() => v.all("[data-remote-row]").length === 3, "remote rows");
+  expect(v.text("[data-remote-row=r-a1]")).toContain("30 秒前");
+  borrowDown = true;
+  Date.now = () => realNow() + 5 * 60_000;
+  // 年龄时钟每 5 秒走一次：等一拍
+  await tick(5_300);
+  expect(v.text("[data-remote-row=r-a1]")).toContain("5 分钟前");
+  await v.unmount();
+}, 20_000);
