@@ -1,8 +1,8 @@
 "use client";
 /**
- * 协作视图里子 DAG 那一块的接线（collab-view.tsx 只调这一个 hook）：同一份 L4 快照出两张图（子 DAG / 进度），中区三个标签，
- * 右区的节点 / 版本 / 差异页，以及手机的分段列表和底部抽屉。快照不可用（老 bridge 404、读失败）或本项目没有任何建了图的 feature
- * 时，第一个标签退回调用方给的因果线画布，手机退回原来的分组列表。
+ * 协作视图里子 DAG 那一块的接线（collab-view.tsx 只调这一个 hook）：同一份 L4 快照出两张图（模块的子图 / 谁在干活），项目页四个标签
+ * （project-tabs/project-tabs.tsx，总览和团队由调用方给），详情里的节点 / 版本 / 差异页，以及手机的底部抽屉。没有产品看板时「项目地图」
+ * 退回调用方给的因果线（桌面画布，手机分组列表）。带任务进入（挂载前已 openCollabTask）且任务属于某个模块时，落到「模块进度」并选中它。
  * 「谁在干活」的看板也在这里读一份（本机 /work；团队 = 团队看板 + 主场本机行的本机看板），标签和全站计数（count-words.ts）共用；
  * 计数状态 counts 返回给顶栏 / 大纲 / 右栏，并经 CountContext 递给产品卡与子 DAG 框头。
  */
@@ -10,12 +10,13 @@ import { useCollabNav } from "../collab-nav";
 import { useNodeCardOwner } from "./node-card-navigation";
 import { nodeCard, nodeTask } from "./node-card-model";
 import { NodeCardSection } from "./node-card-section";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import type { Tr } from "../collab-model";
 import { actionLine, type ActionMap } from "../collab-action";
 import type { Selection } from "../v4/v4-selection";
 import v from "../v4/v4.module.css";
-import { ProductPanes } from "../product/product-panes";
+import { MapPane, ModulePane } from "../product/product-panes";
+import { ProjectTabs } from "../project-tabs/project-tabs";
 import { useProductBoard } from "../product/use-product-board";
 import { DagCanvasView } from "./dag-canvas";
 import { compareOverlay } from "./dag-diff";
@@ -90,7 +91,8 @@ export function useDagPanes(a: DagPanesArgs) {
   const { task } = useCollabNav();
   const binding = nodeCard(features, task);
   const graph = drawable(features).length > 0;
-  const ui = useDagUi(features);
+  const ui = useDagUi(features, a.project, task);
+  useEntryModule(ui, task, load.status === "loading", binding?.feature.id ?? null);
   useFocusFeature(a.project, ui.featureId);
   const rows = useMemo(() => progressRows(board?.agents ?? [], a.agents, a.project), [board, a.agents, a.project]);
   const cmp = useDagCompare(a.project, ui.compare, board, a.rev);
@@ -115,7 +117,7 @@ export function useDagPanes(a: DagPanesArgs) {
   };
   // 正在对比的那个框：版本条点开的是差异页（关掉差异页 = 退出对比），否则是版本列表
   const onVersions = (f: string) => a.select(ui.compare?.featureId === f && !a.narrow ? { kind: "ddiff", f } : { kind: "dver", f });
-  const jumpRowFromPage = useNodeCardOwner(a.narrow, task, a.select, ui.jumpRow, ui.tab === "progress");
+  const jumpRowFromPage = useNodeCardOwner(a.narrow, task, a.select, ui.jumpRow, ui.tab === "module" && ui.by === "person");
   const s = a.sel;
   const sf = s && (s.kind === "dnode" || s.kind === "dver" || s.kind === "ddiff") ? featureOf(s.f) : undefined;
   const sn = s?.kind === "dnode" && sf ? findNode(sf.id, s.key) : null;
@@ -146,26 +148,46 @@ export function useDagPanes(a: DagPanesArgs) {
       onNode={onNode} onOwner={ui.jumpRow} onFold={onFold} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
   );
   const focusPane = useFocusPane({ now: a.now, narrow: a.narrow, hot: a.hot, tr, ui, board, hasProduct, work, onNode, onVersions, onOwner: jumpRowFromPage });
-  const paneProps = { board: hasProduct ? product.board : null, loading: product.status === "loading", featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
-    onTask: a.pickTask, graph, dagBoard: board, now: a.now, tr, progress };
-  const center = (causal: React.ReactNode, team: React.ReactNode) => (
-    <CountContext.Provider value={counts}>
-      <ProductPanes {...paneProps} narrow={false} team={team} subdag={focusPane(canvas, drawCanvas)} fallback={<div className={v.center}>{causal}</div>} />
-    </CountContext.Provider>
-  );
-  const mobile = (fallback: React.ReactNode) => (
-    <CountContext.Provider value={counts}>
-      <ProductPanes {...paneProps} narrow={true} fallback={fallback} subdag={focusPane.narrow(
-        <MobileDag features={drawable(shown)} open={ui.open} doneOpen={ui.doneOpen} look={(f, n) => lookOf(f.id, n)}
-          onFeature={ui.toggleFeature} onFold={ui.toggleDone} onVersions={onVersions} onNode={onNode} onOwner={ui.jumpRow} tr={tr} />
-      )} />
-      {a.narrow && diffPage && <div className={d.backdrop} onClick={(e) => e.target === e.currentTarget && a.close()}><div className={d.drawer}>{diffPage}</div></div>}
-    </CountContext.Provider>
-  );
+  const common = { board: hasProduct ? product.board : null, loading: product.status === "loading", onFeature: ui.selectFeature, onTask: a.pickTask, now: a.now, tr,
+    narrow: a.narrow };
+  const subdag = a.narrow ? focusPane.narrow(
+    <MobileDag features={drawable(shown)} open={ui.open} doneOpen={ui.doneOpen} look={(f, n) => lookOf(f.id, n)}
+      onFeature={ui.toggleFeature} onFold={ui.toggleDone} onVersions={onVersions} onNode={onNode} onOwner={ui.jumpRow} tr={tr} />
+  ) : focusPane(canvas, drawCanvas);
+  /** fallback：没有产品看板时的因果线（桌面画布 / 手机分组列表）；team：团队标签的内容 */
+  const tabs = (t: { overview: ReactNode; fallback: ReactNode; team: ReactNode }) => {
+    const fallback = a.narrow ? t.fallback : <div className={v.center}>{t.fallback}</div>;
+    return (
+      <CountContext.Provider value={counts}>
+        <ProjectTabs tab={ui.tab} setTab={ui.setTab} narrow={a.narrow} tr={tr} panes={{
+          overview: t.overview,
+          map: <MapPane {...common} project={a.project} fallback={fallback} />,
+          module: <ModulePane {...common} dagBoard={board} featureId={ui.featureId} by={ui.by} setBy={ui.setBy} onBack={ui.clearFeature}
+            subdag={subdag} progress={progress} graph={graph} fallback={fallback} />,
+          team: <div className={v.teamPane}>{t.team}</div>,
+        }} />
+        {a.narrow && diffPage && <div className={d.backdrop} onClick={(e) => e.target === e.currentTarget && a.close()}><div className={d.drawer}>{diffPage}</div></div>}
+      </CountContext.Provider>
+    );
+  };
   const nodeSec = (id: string) => {
     const card = nodeCard(features, id);
     return card && <NodeCardSection card={card} owner={ownerOf(rows, card.feature.id, card.node)}
       onOwner={agent => jumpRowFromPage(agent, card.node.taskId)} onNode={key => onNode(card.feature.id, key)} tr={tr} />;
   };
-  return { center, mobile, page, nodeSec, counts, workFacts: workFactsOf(work, a.project) };
+  return { tabs, page, nodeSec, counts, workFacts: workFactsOf(work, a.project) };
+}
+
+/**
+ * 带任务进入：挂载时就开着的任务（SESSTASK1、今天页、ask 卡、通知直达）等快照读完再定落点——属于某个模块就选中它（标签到「模块进度」，
+ * 节点高亮走 selNode）；不属于就留在总览。有登记的标签请求时不管；用户先换了任务也不管。只定一次。
+ */
+function useEntryModule(ui: ReturnType<typeof useDagUi>, task: string | null, loading: boolean, featureId: string | null) {
+  const entry = useRef(ui.requested ? null : task);
+  const { selectFeature } = ui;
+  useEffect(() => {
+    if (!entry.current || loading) return;
+    if (entry.current === task && featureId) selectFeature(featureId);
+    entry.current = null;
+  }, [task, loading, featureId, selectFeature]);
 }

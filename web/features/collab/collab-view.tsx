@@ -1,10 +1,9 @@
 "use client";
 /**
- * 协作视图 v4（docs/team/collab-view-v4.md）：顶上指标条；左大纲（待你处理、筛选、事项 → 任务）；中间三个标签——
- * 「子 DAG」「谁在干活」（接线在 dag/use-dag-panes.tsx；没有图时第一个标签退回 v4 因果线画布）和「团队」（T55）；
- * 右属性（没选中 = 项目概览，任务 = 任务详情 + 它的因果线，边 / 折叠组 / 待你处理 / DAG 节点 / 版本 / 差异各一页）。
- * 手机没有画布：分段「子 DAG / 谁在干活」列表，点开是全屏详情。
- * 底部时间轴放第二期。计数口径在 count-words.ts（看板模型），顶栏在 metrics-bar.tsx；没数据的指标整格不出。
+ * 协作视图 v4（docs/team/collab-view-v4.md）：页头下四个标签「总览 / 项目地图 / 模块进度 / 团队」，桌面手机同一套
+ * （接线在 dag/use-dag-panes.tsx，标签条 project-tabs/project-tabs.tsx，总览 project-tabs/overview-tab.tsx）。
+ * 详情（任务 = 任务详情 + 它的因果线，边 / 折叠组 / 成员 / 节点 / 版本 / 差异各一页）桌面从右侧抽屉滑入（project-tabs/task-drawer.tsx），手机整屏。
+ * 底部时间轴放第二期。计数口径在 count-words.ts（看板模型）。
  */
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -32,16 +31,12 @@ import type { Focus } from "./v4/canvas-view";
 import { edgeSel, memberSel, narrowPane, resolveSelection, type Selection } from "./v4/v4-selection";
 import { MobileList } from "./v4/v4-mobile";
 import { PaneLayout } from "./v4/side-pane";
-import { Outline } from "./v4/v4-outline";
-import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamPage, WaitsPage } from "./v4/v4-props";
-import { AttentionPage } from "./v4/attention-page";
-import { snapOf } from "./count-words";
+import { CauseSec, EdgePage, FoldPage, MemberPage, TeamFactsSec } from "./v4/v4-props";
+import { Overview } from "./project-tabs/overview-tab";
+import { TaskDrawer } from "./project-tabs/task-drawer";
 import { TeamPanel } from "./team-panel";
-import { DEFAULT_FILTER, metricsOf, type Filter } from "./v4/v4-model";
-import { MetricsBar } from "./metrics-bar";
 import { CollabPageHead, HEAD_WRAP } from "./collab-page-head";
 import { CollabTitle, LoadState } from "./collab-load-state";
-import { useWeekQuota } from "./use-count-source";
 import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
 import v from "./v4/v4.module.css";
@@ -92,7 +87,7 @@ function useSheetSelection(openTask: string | null, narrow: boolean) {
   return { ...s, select };
 }
 
-/** 待你处理（口径在 owner-waits.ts）：团队键视图订本机绑定，解析出本机项目后才数得到；解析不出 = unknown，显示「暂无」 */
+/** 待你处理（口径在 owner-waits.ts）：团队键视图订本机绑定，解析出本机项目后才数得到；解析不出 = unknown，总览写读不到 */
 function useOwnerWaits(asks: readonly WebAsk[], project: string, list: AsksRead) {
   const sub = useCallback((cb: () => void) => subscribeViewBinding(project, cb), [project]);
   const read = useCallback(() => viewLocalProject(project), [project]);
@@ -129,10 +124,8 @@ export function CollabView({ project }: { project: string }) {
   const lines = useMemo(() => new Map((view?.lines ?? []).map((l) => [l.id, l])), [view]);
   const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
-  const [filter, setFilter] = useState<Filter>(DEFAULT_FILTER);
   const { sel, setSel, focus, pickTask, select, close } = useSheetSelection(openTask, narrow);
   const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr, noWorkBoard: off?.has("workBoard"), ov, source });
-  const quota = useWeekQuota();
   const projectName = source.label ?? (projects.find((p) => p.id === project)?.name || project);
 
   const lineAction = (l: LineView) => {
@@ -147,9 +140,8 @@ export function CollabView({ project }: { project: string }) {
   if (load.status !== "ok" || !ov!.exists || ((ov?.tasks?.length ?? 0) === 0 && !source.ops)) return <LoadState load={load} projectName={projectName} refetch={refetch} tr={tr} />;
 
   const o = ov!, hv = view!;
-  const m = metricsOf(o, hv.todayDone.length, off?.has("presence") ? null : agents.filter((a) => members.has(a.name) && a.status === "active").length);
   const resolved = resolveSelection(sel, o, canvas);
-  if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，属性页回概览
+  if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，抽屉收起
   const pane = narrowPane(openTask, resolved);
   const team = <TeamPanel embedded unavailable={off?.has("teamPanel")} ov={o} project={project} agents={agents} now={now}
     ops={source.ops?.(null, now)} selected={sel?.kind === "member" ? sel.id : null} onSelect={(n) => select(memberSel(n))} />;
@@ -160,38 +152,32 @@ export function CollabView({ project }: { project: string }) {
   );
   const page = dag.page || (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
-    || (resolved?.kind === "waits" && <WaitsPage waits={waits} unknown={waitsUnknown} project={project} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
-    || (resolved?.kind === "member" && <MemberPage m={resolved} project={project} onClose={close} tr={tr} />)
-    || (resolved?.kind === "team" && <TeamPage onClose={close} tr={tr}>{team}</TeamPage>)
-    || (resolved?.kind === "attention" && <AttentionPage which={resolved.which} lines={hv.lines} active={snapOf(dag.counts)?.active} onPick={pickTask} onClose={close} tr={tr} />);
-  const right = detail || page || <Overview ov={o} view={hv} counts={dag.counts} waits={waits} projectName={projectName} onPick={pickTask} now={now} tr={tr}
-    onAttention={(which) => select({ kind: "attention", which })} since={lastSeen.state.since !== null && (
+    || (resolved?.kind === "member" && <MemberPage m={resolved} project={project} onClose={close} tr={tr} />);
+  const overview = <Overview project={project} ov={o} view={hv} counts={dag.counts} waits={waits} waitsUnknown={waitsUnknown} projectName={projectName} onPick={pickTask}
+    now={now} tr={tr} since={lastSeen.state.since !== null && (
     <SinceCard digest={digest} since={lastSeen.state.since} truncated={lastSeen.state.truncated} now={now} tr={tr} onOpen={pickTask} onDismiss={lastSeen.dismiss} />
   )} />;
 
   return (
     <div className={`${s.tokens} ${s.root} ${v.v4}`}>
       <div className={v.top} style={narrow ? HEAD_WRAP : undefined}>
-        <CollabTitle tr={tr}><CollabPageHead name={projectName} ov={o} now={now} tr={tr} onTeam={narrow ? () => select({ kind: "team" }) : undefined} /></CollabTitle>
-        {narrow && <button type="button" className={v.waitsM} title={waitsUnknown ? tr("暂无数据来源") : undefined} onClick={() => select({ kind: "waits" })}>
-          {tr("待你处理")} <b>{waitsUnknown ? tr("暂无") : waits.length}</b></button>}
-        {!narrow && <MetricsBar m={m} counts={dag.counts} quota={quota} waitUnknown={!!o.unknownMetrics?.includes("reviewWait")} connected={connected} tr={tr} />}
+        <CollabTitle tr={tr}><CollabPageHead name={projectName} ov={o} now={now} tr={tr} /></CollabTitle>
+        <span className={`${s.live} ${connected ? "" : s.off}`} style={{ marginLeft: "auto" }} title={tr(connected ? "实时" : "重连中")} />
       </div>
       {load.error && <div role="status" className={s.retry}><span>{tr("没取到，正在重试")}</span>
         <button type="button" className={s.ib} onClick={() => void refetch()}>{tr("重试")}</button>
       </div>}
       {narrow ? (
         <>
-          {dag.mobile(<MobileList project={project} ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}
+          {dag.tabs({ overview, team, fallback: <MobileList project={project} ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} /> })}
           {pane === "detail" && detail}
           {/* 全站收件箱开着时先收起整屏页：它的层级在抽屉之上，不收就把抽屉整个盖住（「去处理」点了像没反应）。选中与历史条目不动，从收件箱返回还在这一页 */}
           {pane !== "detail" && page && !inboxOpen && createPortal(<div className={`${s.tokens} ${v.sheet} ${s.full}`}>{page}</div>, document.body)}
         </>
       ) : (
-        <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline project={project} ov={o} lines={lines} filter={filter}
-          onFilter={setFilter} waits={waits} waitsUnknown={waitsUnknown} onWaits={() => select({ kind: "waits" })} selected={openTask} onPick={pickTask} counts={dag.counts} tr={tr} />}>
-          {dag.center(<CausalCanvas canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
-            selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />, team)}
+        <PaneLayout drawer={<TaskDrawer open={!!(detail || page)} onClose={detail ? closeTask : close} esc={!detail} label={tr("详情")}>{detail || page}</TaskDrawer>}>
+          {dag.tabs({ overview, team, fallback: <CausalCanvas canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
+            selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} /> })}
         </PaneLayout>
       )}
     </div>
