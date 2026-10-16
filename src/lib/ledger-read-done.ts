@@ -8,6 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { depViews, type DepView } from "./ledger-deps.js";
+import { attentionCtx, withAttentionFacts, type AttentionCtx } from "./ledger-attention-facts.js";
 import { compactStage, doneCard, eventsByTarget, taskView, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
 import type { Stage } from "./ledger-stages.js";
 import { listDeps, listEvents, listTasks } from "./ledger-store.js";
@@ -117,14 +118,15 @@ function donePageOf(done: readonly TaskView[], before: Cursor | null, limit: num
   return { tasks: page.map(card), nextCursor: rest.length > limit ? doneCursor(page.at(-1)!) : null };
 }
 
-/** GET /ledger/:project/done：同一个读事务里取任务、依赖、事件，和总览同一口径算视图 */
-export function donePage(db: Database, project: string, before: Cursor | null, limit: number, now: number): DonePage {
+/** GET /ledger/:project/done：同一个读事务里取任务、依赖、事件，和总览同一口径算视图（含 attentionFacts）；facts 只给测试注入 */
+export function donePage(db: Database, project: string, before: Cursor | null, limit: number, now: number, facts?: AttentionCtx): DonePage {
   return db.transaction(() => {
     const tasks = listTasks(db, project);
     const deps = depViews(listDeps(db, project), tasks);
     const done = tasks.filter((t) => compactStage(t.stage));
     const byTarget = eventsByTarget(listEvents(db, { project }), new Set(done.map((t) => t.id)));
-    const views = done.map((t) => taskView(t, byTarget.get(t.id) ?? [], now, deps));
+    const ctx = facts ?? attentionCtx(project);
+    const views = done.map((t) => withAttentionFacts(taskView(t, byTarget.get(t.id) ?? [], now, deps), byTarget.get(t.id) ?? [], ctx));
     return donePageOf(views, before, limit, (v) => doneCard(v, stepLineInfo(v, listSteps(db, v.id), byTarget.get(v.id) ?? [])));
   }).deferred();
 }

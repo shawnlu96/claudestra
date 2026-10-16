@@ -115,6 +115,7 @@ export function doneCard(v: TaskView, dots: StepLineInfo | null): OverviewTask {
     blockedBy: v.blockedBy, runnable: v.runnable, metrics: metricsSummary(v.metrics),
   };
   for (const k of ["itemId", "agent", "pm", "pr"] as const) if (v[k]) card[k] = v[k];
+  if (v.attentionFacts) card.attentionFacts = v.attentionFacts; // 与详情同一口径（冻结名单里的已完成卡也带）
   if (!dots) return card;
   return { ...card, stageSinceApprox: v.stageSinceApprox, lastEvent: eventSummary(v.lastEvent), stepLine: dotLine(dots) };
 }

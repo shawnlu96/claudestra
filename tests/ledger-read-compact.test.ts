@@ -8,6 +8,7 @@ import { closeLedger, LEDGER_SCHEMA_VERSION, listItems, listTasks, openLedger } 
 import { appendEvent, createItem, importTask } from "../src/lib/ledger-write";
 import { addDep } from "../src/lib/ledger-deps-write";
 import { PROJECT_EVENTS_LIMIT, projectView, taskDetail } from "../src/lib/ledger-read";
+import { donePage } from "../src/lib/ledger-read-done";
 import { schedulerProjectView } from "../src/lib/ledger-scheduler";
 import { homeView, lineOf, type LedgerOverview, type LedgerTaskView, type LineView } from "../web/features/collab/collab-model";
 import { stepLineView } from "../web/features/collab/collab-step-line-model";
@@ -178,14 +179,18 @@ test("[验收线 4] 总览与详情的 attentionFacts 同一口径（冻结 + li
   expect(live.length).toBeGreaterThan(0);
   for (const t of view.tasks) {
     const d = taskDetail(db, "p", t.id, NOW, facts)!.task;
-    if (DONE_STAGES.includes(t.stage as (typeof DONE_STAGES)[number])) expect(t).not.toHaveProperty("attentionFacts");
-    else expect(t.attentionFacts).toEqual(d.attentionFacts);
+    expect(t.attentionFacts).toEqual(d.attentionFacts); // 已完成卡（窗口内）也同一口径
     if (!DONE_STAGES.includes(t.stage as (typeof DONE_STAGES)[number])) expect(Object.keys(t.extra ?? {}).sort()).toEqual(["goal"]);
   }
   expect(view.tasks.find((t) => t.id === "l0")?.attentionFacts).toEqual({ frozen: true });
+  expect(view.tasks.find((t) => t.id === "d0")?.attentionFacts).toEqual({ frozen: true });
   for (const t of live) expect(t.attentionFacts?.observationUntil).toBe(t.stageSince! + 24 * 3_600_000);
-  expect(view.tasks.filter((t) => t.attentionFacts).map((t) => t.id).sort()).toEqual([...new Set(["l0", "l4", ...live.map((t) => t.id)])].sort());
+  expect(view.tasks.filter((t) => t.attentionFacts).map((t) => t.id).sort()).toEqual([...new Set(["l0", "l4", "d0", ...live.map((t) => t.id)])].sort());
   expect(view.tasks.find((t) => t.id === "l4")?.attentionFacts).toMatchObject({ frozen: true, observationUntil: expect.any(Number) }); // l4 是 live
+  // 窗口外的已完成卡走 /done 分页：同一口径
+  const paged = donePage(db, "p", null, 10_000, NOW, facts).tasks;
+  expect(paged.find((t) => t.id === "d0")?.attentionFacts).toEqual({ frozen: true });
+  for (const t of paged) expect(t.attentionFacts).toEqual(taskDetail(db, "p", t.id, NOW, facts)!.task.attentionFacts);
   // 不注入时按本机文件现读：测试状态目录里没有冻结名单和规格卡 = 都不给
   expect(projectView(db, "p", NOW).tasks.some((t) => "attentionFacts" in t)).toBe(false);
 });
