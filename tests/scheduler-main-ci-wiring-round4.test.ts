@@ -1,6 +1,12 @@
 /** Revoked repair bindings stop both update ports, including a claim returned as updating by CIF2. */
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { useMainCiWorld, writePolicy } from "./scheduler-main-ci-wiring-world.test.ts";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const world = useMainCiWorld();
 for (const route of ["behind", "ciBehind"] as const) {
