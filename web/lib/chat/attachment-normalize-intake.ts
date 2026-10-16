@@ -1,10 +1,10 @@
 /**
  * Composer 的附件入口：选择文件与粘贴共用，先过归一化（attachment-normalize.ts）再进待发列表；
- * 拦下的给一条提示（带同一行诊断文字，提示条「详情」展开）。每次粘贴 console.info 一行 [paste-diag]。
+ * 拦下的给一条提示（带同一行诊断文字，提示条「详情」展开）。每次粘贴记一行 [paste-diag]：console + bridge 的 client.log。
  */
 import { useEffect, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
-import { formatPasteDiag, readClipboard } from "./attachment-normalize-paste";
-import { AttachmentIntake, type AttachNotice, type PasteSource } from "./attachment-normalize-queue";
+import { postClientLog } from "@/lib/client-log";
+import { AttachmentIntake, handlePaste, type AttachNotice, type PasteSource } from "./attachment-normalize-queue";
 
 interface IntakeOpts {
   disabled: boolean;
@@ -19,11 +19,17 @@ function focusedOtherInput(ta: HTMLTextAreaElement | null): boolean {
   return !!ae && ae !== ta && (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || (ae as HTMLElement).isContentEditable);
 }
 
+/** 诊断行同时打 console 和回传 bridge 的 client.log（owner 机器上的 console 我们看不到） */
+function pasteLog(line: string): void {
+  console.info(line);
+  postClientLog(line);
+}
+
 export function useAttachmentIntake(opts: IntakeOpts) {
   const [notice, setNotice] = useState<AttachNotice | null>(null);
   const { max, taRef, setFiles } = opts; // 都是稳定引用 / 常量：只建一次的 core 和粘贴监听里的旧闭包读到的也是同一份
   const [core] = useState(
-    () => new AttachmentIntake({ addFiles: (ok) => setFiles((prev) => [...prev, ...ok].slice(0, max)), setNotice, log: (l) => console.info(l) }),
+    () => new AttachmentIntake({ addFiles: (ok) => setFiles((prev) => [...prev, ...ok].slice(0, max)), setNotice, log: pasteLog }),
   );
   const intake = (picked: File[], src: PasteSource | null) => core.run(picked, src);
 
@@ -31,20 +37,8 @@ export function useAttachmentIntake(opts: IntakeOpts) {
   // 纯文字粘贴不拦，照常进输入框；剪贴板 HTML 只用来取内嵌 data: 图片，从不插进输入框
   useEffect(() => {
     if (opts.disabled) return;
-    const onWindowPaste = (e: ClipboardEvent) => {
-      const dt = e.clipboardData;
-      if (!dt) return;
-      // DataTransfer 只在事件里可读：类型和条目先同步拍下来
-      const src: PasteSource = { types: [...dt.types], items: Array.from(dt.items, (i) => ({ kind: i.kind, type: i.type })), clip: readClipboard(dt) };
-      if (!src.clip.files.length && !src.clip.missing && !src.clip.html.tooLarge) {
-        console.info(formatPasteDiag({ types: src.types, items: src.items, files: [], html: { fromHtml: 0, refused: src.clip.html.refused, tooLarge: src.clip.html.tooLarge } }));
-        return;
-      }
-      if (focusedOtherInput(taRef.current)) return;
-      e.preventDefault();
-      void intake(src.clip.files, src);
-      taRef.current?.focus();
-    };
+    const ctx = { intake: core, log: pasteLog, otherInputFocused: () => focusedOtherInput(taRef.current), focusComposer: () => taRef.current?.focus() };
+    const onWindowPaste = (e: ClipboardEvent) => void handlePaste(e, ctx);
     window.addEventListener("paste", onWindowPaste);
     return () => window.removeEventListener("paste", onWindowPaste);
   }, [opts.disabled]); // eslint-disable-line react-hooks/exhaustive-deps -- intake 只用稳定引用（见上），不必跟着重挂
