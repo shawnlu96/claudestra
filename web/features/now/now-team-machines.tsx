@@ -2,7 +2,8 @@
 /**
  * 「团队与额度」里的机器行（XMACH1）：伙伴机器 n/total 在线、借出在跑 N 单、借入在跑 N 单（停住的写「其中 K 单停住」）。
  * 两行点开就地展开，列原组件 LentOrders / RemoteRows；点一单打开那个 agent / 那个任务。只看、只跳转，收回等操作留在设置 · 伙伴机器。
- * 只在 live（页面版或侧栏条展开）时由 now-team 挂上；页面切到后台整段卸下，useLendState / useBorrowView 的轮询随之停。
+ * 只在 live（页面版或侧栏条展开）时由 now-team 挂上；页面切到后台整段卸下，useLendState 的轮询随之停。
+ * 借入读今天页共用的那份 useSharedBorrowView（「在干活」计数也读它，同一条 15 秒轮询，后台自停）。
  * 纯计算在 now-machines-model.ts。也导出设置页两处原位置的那行链接（RunningElsewhereLink）。
  */
 import { useState, useSyncExternalStore, type MouseEvent } from "react";
@@ -11,7 +12,7 @@ import { usePeerOnline } from "../chat/components/contacts-lines";
 import { useChatNav } from "../chat/components/nav-context";
 import { Icon } from "../collab/collab-icons";
 import { RemoteRows } from "../borrow/borrow-remote";
-import { useBorrowView } from "../borrow/use-borrow-view";
+import { useSharedBorrowView } from "../borrow/use-borrow-view";
 import { ServerIcon } from "../borrow/icons";
 import { LendIcon } from "../lend/lend-icons";
 import { useLendState } from "../lend/lend-state";
@@ -57,7 +58,7 @@ function FoldLine({ hook, icon, text, stuck, tr, children }: {
 
 function MachineRows({ peers, tr }: { peers: PeerOnline; tr: Translate }) {
   const lend = useLendState();
-  const borrow = useBorrowView();
+  const borrow = useSharedBorrowView();
   const open = useOpeners();
   const view = machinesView(peers, lend, borrow);
   if (!view) return null;

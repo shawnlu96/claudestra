@@ -114,7 +114,7 @@ test("[验收线 1] 要你处理：带 taskId 的写出『项目 · 模块 · �
 
 test("团队与额度：活着按 status=active、在干活按 busy 数", () => {
   const agents = [...todayAgents(), { name: "gone", displayName: "gone", purpose: "", cwd: "/repo", status: "stopped", projectId: null }];
-  expect(todayView(input({ agents: agents as AgentSession[] }), deps).team).toEqual({ alive: 4, busy: 3 });
+  expect(todayView(input({ agents: agents as AgentSession[] }), deps).team).toEqual({ alive: 4, busy: 3, remote: 0 });
 });
 
 test("什么都没在做：idle；新词不出内部词，英文表齐", () => {

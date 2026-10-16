@@ -14,6 +14,7 @@ const ZH: Record<string, string> = {
 const EN: Record<string, string> = {
   "今天": "Today",
   "{n} 个 agent 在干活": "{n} agent working|{n} agents working",
+  "{n} 个 agent 在干活 · 其中 {m} 个在别的机器": "{n} agent working · {m} on other machines|{n} agents working · {m} on other machines",
   "{n} 件要你处理": "{n} needs you|{n} need you",
   "没有要你处理的": "Nothing needs you",
   "要你处理": "Needs you",

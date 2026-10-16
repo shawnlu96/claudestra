@@ -28,7 +28,7 @@ let createRoot: ReactDomClient["createRoot"];
 let doc: Doc;
 let win: Win;
 let ui: {
-  MessageList: () => unknown; Sidebar: (p: { onSelect: () => void }) => unknown; CollabSwitch: () => unknown; closingCollab: (fn: () => void) => () => void;
+  MessageList: () => unknown; NowStrip: () => unknown; Sidebar: (p: { onSelect: () => void }) => unknown; CollabSwitch: () => unknown; closingCollab: (fn: () => void) => () => void;
   ChatStoreProvider: (p: { children: unknown }) => unknown; useChatStoreApi: () => Store;
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
   useCollabNav: () => { project: string | null; task: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
@@ -71,7 +71,7 @@ beforeAll(async () => {
     require("../web/features/chat/components/nav-context.tsx"), require("../web/features/collab/collab-nav.ts"),
     require("../web/features/collab/team-view-entry.tsx"), require("../web/features/collab/collab-switch.tsx"), require("../web/features/chat/chat-store.ts"),
     require("../web/features/chat/settings-open.ts"), require("../web/features/now/today-nav.ts")];
-  ui = { MessageList: list.MessageList, Sidebar: side.Sidebar, CollabSwitch: sw.CollabSwitch, closingCollab: sw.closingCollab,
+  ui = { MessageList: list.MessageList, NowStrip: require("../web/features/now/now-home.tsx").NowStrip, Sidebar: side.Sidebar, CollabSwitch: sw.CollabSwitch, closingCollab: sw.closingCollab,
     ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi, ChatNavContext: nav.ChatNavContext,
     useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab, unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest,
     openSettings: settings.openSettings, TODAY_KEY: today.TODAY_KEY, resetLedgers: require("../web/features/now/now-ledgers.ts").resetTodayLedgersForTest };
@@ -102,8 +102,8 @@ async function until(ok: () => boolean, what: string) {
   throw new Error(`timeout waiting for ${what}`);
 }
 
-/** main = 只挂主区（今天页面版）；shell = 侧栏（含设置弹窗）+ 主区 + 协作覆盖层 */
-async function mount(part: "main" | "shell") {
+/** main = 只挂主区（今天页面版）；strip = 只挂侧栏条；shell = 侧栏（含设置弹窗）+ 主区 + 协作覆盖层 */
+async function mount(part: "main" | "strip" | "shell") {
   win.happyDOM.setViewport({ width: 1280, height: 900 });
   setContextRequestForTest(null);
   const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null } as { project: string | null; task: string | null } };
@@ -123,7 +123,7 @@ async function mount(part: "main" | "shell") {
   };
   live.add(unmount);
   const toContent = () => { seen.toContent++; };
-  const body = part === "main" ? h(ui.MessageList)
+  const body = part === "main" ? h(ui.MessageList) : part === "strip" ? h(ui.NowStrip)
     : h("div", null, h(ui.Sidebar, { onSelect: ui.closingCollab(toContent) }), h("main", null, h(ui.MessageList), h(ui.CollabSwitch)));
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null, h(ui.ChatNavContext.Provider, { value: { showContent: false, toContent, toList: () => {} } },
     h(Probe), body)) as never));
@@ -211,5 +211,29 @@ test("[验收线 2] 403（非 owner）：/lend/grants、/borrow、联系人都 4
   expect(v.all("[data-now-team]")).toHaveLength(1);
   expect(v.all("[data-now-machines]")).toHaveLength(0);
   expect(v.text("body")).not.toContain("伙伴机器");
+  await v.unmount();
+});
+
+test("[验收线 PM 补 15:5x] 本机 busy 0、借入在跑 4：侧栏条写『4 个 agent 在干活 · 其中 4 个在别的机器』，正在做同一句；借出单不算", async () => {
+  world.agents = world.agents.map((a) => ({ ...a, busy: false }));
+  const borrow = world.m.borrow as { remote: { orderId: string; status: string; leaseUntil: number | null }[] };
+  borrow.remote = [0, 1, 2, 3].map((i) => ({ ...borrow.remote[0]!, orderId: `r-${i}`, status: "claimed", leaseUntil: NOW + 600_000 }));
+  const v = await mount("strip");
+  await until(() => v.text("[data-now=strip] [data-now-summary]").includes("其中"), "strip summary with remote");
+  expect(v.text("[data-now=strip] [data-now-summary]")).toBe("· 3 件要你处理 · 4 个 agent 在干活 · 其中 4 个在别的机器");
+  await v.unmount();
+  const p = await mount("main");
+  await until(() => p.text("[data-now=page] section[data-now-doing] h3").includes("其中"), "doing count");
+  expect(p.text("[data-now=page] section[data-now-doing] h3")).toBe("正在做4 个 agent 在干活 · 其中 4 个在别的机器");
+  expect(p.all("[data-now=page] [data-now-idle]")).toHaveLength(0);
+  await p.unmount();
+});
+
+test("[回归] 没有借入在跑：句子同原来，不带后半句", async () => {
+  world.m = { ...world.m, borrow: { ...(world.m.borrow as object), remote: [] } };
+  const v = await mount("strip");
+  await until(() => calls.includes("GET /api/v1/borrow"), "borrow read");
+  await tick(50);
+  expect(v.text("[data-now=strip] [data-now-summary]")).toBe("· 3 件要你处理 · 3 个 agent 在干活");
   await v.unmount();
 });

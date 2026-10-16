@@ -137,7 +137,8 @@ export interface TodayView {
   done: TodayDone[];
   /** 没有完成时间（unknownMetrics 含 todayDone）、未计入的项目数 */
   doneUnknown: number;
-  team: { alive: number; busy: number };
+  /** busy = 本机在干活的会话 + 借入在别的机器上在跑的单（remote，XMACH1）；借出单不算 */
+  team: { alive: number; busy: number; remote: number };
 }
 export interface TodayInput extends NowInput {
   /** 读到的台账总览（本机项目 id → 总览）；没读到 / 读不了的不在里面 */
@@ -146,6 +147,8 @@ export interface TodayInput extends NowInput {
   boards: ReadonlyMap<string, ProductBoard>;
   /** 台账 403 / 404 的项目：只出项目行 */
   denied: ReadonlySet<string>;
+  /** 借入在别的机器上在跑的单数（GET /borrow 的 remote 里 claimed 的）；没读到 = 0 */
+  remoteRunning?: number;
   now: number;
 }
 
@@ -223,6 +226,7 @@ function todayDone(input: TodayInput, t: Translate): Pick<TodayView, "done" | "d
 export function todayView(input: TodayInput, deps: NowDeps): TodayView {
   const { lang, t } = deps;
   const base = nowView(input, deps);
+  const remote = input.remoteRunning ?? 0;
   const waiting = input.asks.filter(waitsOnOwner).sort((x, y) => y.createdAt - x.createdAt);
   const stuck: StuckRow[] = [];
   const doing: TodayProject[] = [];
@@ -246,8 +250,13 @@ export function todayView(input: TodayInput, deps: NowDeps): TodayView {
     stuckMore: stuck.slice(STUCK_LIMIT),
     doing: shown,
     rest: doing.filter((p) => !shown.includes(p)),
-    idle: base.workers.length === 0 && doing.every((p) => !p.doing),
+    idle: base.workers.length === 0 && !remote && doing.every((p) => !p.doing),
     ...todayDone(input, t),
-    team: { alive: input.agents.filter((a) => a.status === "active").length, busy: base.workers.length },
+    team: { alive: input.agents.filter((a) => a.status === "active").length, busy: base.workers.length + remote, remote },
   };
 }
+
+/** 「N 个 agent 在干活」：有借入在别的机器上跑时补「其中 M 个在别的机器」（侧栏条与「正在做」同一句） */
+export const busyLine = (team: Pick<TodayView["team"], "busy" | "remote">, tr: Translate): string => team.remote
+  ? tr("{n} 个 agent 在干活 · 其中 {m} 个在别的机器", { n: team.busy, m: team.remote })
+  : tr("{n} 个 agent 在干活", { n: team.busy });

@@ -12,12 +12,15 @@ import { useAsks } from "../asks/asks-store";
 import { useChatStore } from "../chat/chat-store";
 import { fmtAgo } from "../chat/fmt-time";
 import { useChatNav } from "../chat/components/nav-context";
+import { usePeerOnline } from "../chat/components/contacts-lines";
+import { useSharedBorrowView } from "../borrow/use-borrow-view";
+import { remoteRunning as countRemote } from "./now-machines-model";
 import { Chevron } from "../chat/components/project-group";
 import { Icon } from "../collab/collab-icons";
 import { NowDoing } from "./now-doing";
 import { NowDone } from "./now-done";
 import { useTodayLedgers } from "./now-ledgers";
-import { todayView, type TodayView } from "./now-model";
+import { busyLine, todayView, type TodayView } from "./now-model";
 import { NowStuck } from "./now-stuck";
 import { NowTeam } from "./now-team";
 import { FOLD, useNowT, WithSource, type Source, type Translate } from "./now-ui";
@@ -45,6 +48,8 @@ function writeOpen(open: boolean) {
   } catch { /* 隐私模式 / 存储被禁：这次照常展开收起，只是下次打开不记得 */ }
 }
 
+const useRemoteRunning = (enabled: boolean): number => countRemote(useSharedBorrowView(enabled).view);
+
 /** 五块的数据；live = 读各项目台账（页面版 / 侧栏条展开）。30 秒重算一次，「N 分钟前」与停留时长才不会停在打开那一刻 */
 function useTodayView(source: Source, live: boolean): TodayView {
   const agents = useChatStore((s) => s.state.agents);
@@ -53,14 +58,16 @@ function useTodayView(source: Source, live: boolean): TodayView {
   const lang = useLang(), tr = useNowT();
   const ids = useMemo(() => projects.map((p) => p.id), [projects]);
   const ledgers = useTodayLedgers(ids, live);
+  // 借入在别的机器上跑的单也算在干活（XMACH1）：有伙伴机器才读 GET /borrow（与团队与额度的借入行共用一份轮询）
+  const remoteRunning = useRemoteRunning(usePeerOnline() !== null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
   }, []);
   // now 只管停留时长与「今天」的零点；fmtAgo 自己取当前时刻，now 变了跟着重算
-  return useMemo(() => todayView({ agents, projects, asks, ...ledgers, now }, { lang, t: tr, ago: fmtAgo, source }),
-    [agents, projects, asks, ledgers, now, lang, tr, source]);
+  return useMemo(() => todayView({ agents, projects, asks, ...ledgers, now, remoteRunning }, { lang, t: tr, ago: fmtAgo, source }),
+    [agents, projects, asks, ledgers, now, remoteRunning, lang, tr, source]);
 }
 
 /** 五块，顺序固定；页面版和侧栏条都是单列 */
@@ -78,7 +85,7 @@ function Blocks({ view, fp, page, live }: { view: TodayView; fp: string | null; 
 }
 
 const waitsText = (view: TodayView, tr: Translate) => (view.waitTotal ? tr("{n} 件要你处理", { n: view.waitTotal }) : tr("没有要你处理的"));
-const busyText = (view: TodayView, tr: Translate) => tr("{n} 个 agent 在干活", { n: view.team.busy });
+const busyText = (view: TodayView, tr: Translate) => busyLine(view.team, tr);
 
 /** 侧栏条收起时那句（先说要你做的）：两段各自不折行；条宽不够一行（桌面侧栏默认 16rem）时整句换到「今天」下面一行，再窄就后一段另起一行，件数不被省略号吃掉 */
 function StripSummary({ view, tr }: { view: TodayView; tr: Translate }) {

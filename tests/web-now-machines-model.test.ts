@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import type { BorrowView } from "../web/features/borrow/borrow-api";
 import type { LendData } from "../web/features/lend/lend-model";
 import { borrowedLine, lendStopping, machinesView, remoteRunning, remoteStuck } from "../web/features/now/now-machines-model";
+import { busyLine } from "../web/features/now/now-model";
 import { machinesBorrow, machinesContacts, machinesLend } from "./helpers/machines-shots";
 import { TODAY_NOW } from "./helpers/today-shots";
 
@@ -58,4 +59,10 @@ test("远端停住：待 PM 或租约已过；在别的机器上真在跑的只�
   expect(remoteStuck({ status: "pooled", leaseUntil: null }, NOW)).toBe(false);
   expect(remoteRunning(machinesBorrow(NOW) as BorrowView)).toBe(2);
   expect(remoteRunning(null)).toBe(0);
+});
+
+test("『在干活』一句：有借入在跑时带『其中 M 个在别的机器』，没有时同原来", () => {
+  const tr = (s: string, p?: Record<string, string | number>) => s.replace(/\{(\w+)\}/g, (_, k: string) => String(p?.[k]));
+  expect(busyLine({ busy: 4, remote: 4 }, tr)).toBe("4 个 agent 在干活 · 其中 4 个在别的机器");
+  expect(busyLine({ busy: 3, remote: 0 }, tr)).toBe("3 个 agent 在干活");
 });
