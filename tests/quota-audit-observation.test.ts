@@ -75,19 +75,27 @@ test("[验收线 2] 真脚本 context-only 保留额度及观测时间，Invento
   expect(q.claude.windows[0]?.usedPct).toBe(10);
 });
 
-test("[验收线 2] session-only/week-only 更新各自时刻，另一窗原样", async () => {
-  for (const slot of ["five_hour", "seven_day"]) {
+test("[验收线 2] session-only 只更新 5h 时刻；同周 week-only（无 five_hour）丢弃，带 five_hour 的写者才更新周时刻", async () => {
+  const run = async (rate_limits: unknown) => {
     const root = temp();
     const path = join(root, "usage-cache.json");
     writeFileSync(path, JSON.stringify(seed()));
-    await writeStatus(root, { rate_limits: { [slot]: { used_percentage: 95,
-      resets_at: slot === "five_hour" ? seed().sessionResets : seed().weekResets } } });
-    const raw = JSON.parse(readFileSync(path, "utf8"));
-    const updated = slot === "five_hour" ? "sessionObservedAt" : "weekObservedAt";
-    const untouched = slot === "five_hour" ? "weekObservedAt" : "sessionObservedAt";
-    expect(raw[updated]).toBeGreaterThan(NOW - 1000);
-    expect(raw[untouched]).toBe(NOW - DAY);
-  }
+    await writeStatus(root, { rate_limits });
+    return JSON.parse(readFileSync(path, "utf8"));
+  };
+  const five = { used_percentage: 95, resets_at: seed().sessionResets };
+  const week = { used_percentage: 95, resets_at: seed().weekResets };
+  const s = await run({ five_hour: five });
+  expect(s.sessionObservedAt).toBeGreaterThan(NOW - 1000);
+  expect(s.weekObservedAt).toBe(NOW - DAY);
+  // 闲置会话不带 five_hour：同周 7d 读数是陈旧的（QFA-1），不改值也不改观测时刻
+  const w = await run({ seven_day: week });
+  expect(w.weekPct).toBe(90);
+  expect(w.weekObservedAt).toBe(NOW - DAY);
+  expect(w.sessionObservedAt).toBe(NOW - DAY);
+  const both = await run({ five_hour: five, seven_day: week });
+  expect(both.weekPct).toBe(95);
+  expect(both.weekObservedAt).toBeGreaterThan(NOW - 1000);
 });
 
 test("[验收线 3] 未来低快照不 live、不压正常本机90，保留诊断", async () => {
