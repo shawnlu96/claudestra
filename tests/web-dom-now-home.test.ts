@@ -199,7 +199,8 @@ test("[验收线 2] 桌面没选会话时主区是『今天』页，三块齐全
   // 不新增请求：除了外壳本来就读的会话 / 未读 / 项目 / 待办，只有团队绑定那一份（项目组入口读的同一个 store）
   // TODAY1 起页面版另读各项目台账 / 产品看板、事件流、额度（规格 PM 定 9）：逐条点名、恰好各一次，从外壳请求里拿出去，其余照原断言
   // 「不新增请求」这条被 PM 定 9 替代（规格「PM 定 · 10-14 19:3x」，答 ask_mv7z1jsx09c286a52a）：白名单正则原样，GET /quota 必须 0 次
-  const today = ["GET /api/v1/events", "GET /api/v1/lend/quota-lines", ...PROJECTS.flatMap((p) => [`GET /api/v1/ledger/${p.id}`, `GET /api/v1/ledger/${p.id}/product`])];
+  // QUOTA1：额度行的状态字（用完 · 时间重置）要读闸，另读 GET /quota/wall 一次（与顶部额度卡共用一份轮询）
+  const today = ["GET /api/v1/events", "GET /api/v1/lend/quota-lines", "GET /api/v1/quota/wall", ...PROJECTS.flatMap((p) => [`GET /api/v1/ledger/${p.id}`, `GET /api/v1/ledger/${p.id}/product`])];
   expect(calls.filter((c) => today.includes(c)).sort()).toEqual([...today].sort());
   expect(calls.filter((c) => /\/quota$/.test(c))).toEqual([]);
   const shell = calls.filter((c) => !today.includes(c));
