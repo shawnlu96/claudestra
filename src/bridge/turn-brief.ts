@@ -22,11 +22,11 @@ function openQuestions(channelId: string): string[] {
   }
 }
 
-/** ≤300 字；全空 = 不知道它在做什么（空闲 / bridge 刚重启） */
-export function turnBrief(agent: string, channelId: string): string {
+/** ≤300 字；全空 = 不知道它在做什么（空闲 / bridge 刚重启）。runtime 要传：Codex 的工具事件只在跑完才有，不能按「没收尾 = 进行中」算 */
+export function turnBrief(agent: string, channelId: string, runtime: string | undefined): string {
   return turnBriefText({
-    inbound: turnCuts.turnInbound(channelId),
-    tools: recentTools(replayEventsSince(0, { agent })),
+    opener: turnCuts.turnOpener(channelId),
+    tools: recentTools(replayEventsSince(0, { agent }), undefined, runtime === "codex"),
     questions: openQuestions(channelId),
   });
 }

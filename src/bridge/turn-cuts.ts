@@ -12,6 +12,7 @@ import {
   CUT_TTL_MS, lateInflight, makeCut, onStop, resumeBy, resumeNotice, settleBy,
   type Cut, type CutCause, type CutEvent, type CutTool, type ReplyState, type TurnTrigger,
 } from "../lib/turn-cuts.js";
+import { nextOpener } from "../lib/turn-brief.js";
 import { emitEvent, inflightTools, subscribeEvents } from "./event-bus.js";
 import { HELD_GIVE_UP_MS } from "./held-queue.js";
 import { isAcpChannel } from "./acp-state.js";
@@ -49,6 +50,8 @@ export class TurnCuts {
   private readonly stops: PersistedMap<{ at: number; goAt?: number }>;
   /** 频道 → 这一回合（上次 Stop / 打断之后）送到的消息，按先后；被打断时它们就是「在处理的」 */
   private readonly inbound = new Map<string, TurnTrigger[]>();
+  /** 频道 → 开启本回合的那条（inbound 只留最近几条，一回合消息多了第一条会被挤掉；和 inbound 同时清） */
+  private readonly opener = new Map<string, TurnTrigger>();
   private readonly agentOf = new Map<string, string>();
   /** Codex 频道：上次 Stop 之后经 codex queue（不是打进 TUI）投的消息摘录——Esc 之后它们会排在停字后面才跑 */
   private readonly codexQueued = new Map<string, string[]>();
@@ -100,6 +103,7 @@ export class TurnCuts {
     const t = { messageId: env.meta.messageId, fromKind: f.kind, fromName, excerpt: env.content.slice(0, 120), replyTo, at };
     if (env.to.kind === "local" && env.to.agentName) this.agentOf.set(channelId, env.to.agentName);
     this.inbound.set(channelId, [...(this.inbound.get(channelId) ?? []), t].slice(-INBOUND_KEEP));
+    this.opener.set(channelId, nextOpener(this.opener.get(channelId), t));
     if (this.codexTypeIn.has(channelId) && !typed && busy && (f.kind === "user" || f.kind === "api")) {
       this.codexQueued.set(channelId, [...(this.codexQueued.get(channelId) ?? []), t.excerpt].slice(-INBOUND_KEEP));
     }
@@ -113,12 +117,17 @@ export class TurnCuts {
 
   /** 这条其实没投进去（Codex 投递失败）：从送达记录里拿掉。回合在不在跑不在这里判（bridge/pi-abort.ts onCodexUndelivered 不替它宣告完成） */
   dropUndelivered(channelId: string, messageId: string): void {
-    this.inbound.set(channelId, (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId));
+    const left = (this.inbound.get(channelId) ?? []).filter((x) => x.messageId !== messageId);
+    this.inbound.set(channelId, left);
+    if (this.opener.get(channelId)?.messageId !== messageId) return;
+    const o = left.reduce<TurnTrigger | undefined>(nextOpener, undefined); // 被挤掉的更早几条找不回：退到还留着的里面挑
+    if (o) this.opener.set(channelId, o);
+    else this.opener.delete(channelId);
   }
 
-  /** 本回合（上次 Stop / 打断之后）送到的消息，按先后（bridge/turn-brief.ts 取「开启本回合的那条」） */
-  turnInbound(channelId: string): readonly TurnTrigger[] {
-    return this.inbound.get(channelId) ?? [];
+  /** 开启本回合（上次 Stop / 打断之后）的那条（bridge/turn-brief.ts） */
+  turnOpener(channelId: string): TurnTrigger | undefined {
+    return this.opener.get(channelId);
   }
 
   /** 这个频道最后一次投递是给哪个 agent 的（送达记录里的那条被挤掉了也查得到） */
@@ -149,7 +158,7 @@ export class TurnCuts {
    * 不删的话叫停记录一直留在盘上，日后复用这个频道的新 agent 还会被当成「owner 叫停了」，Autopilot 不推进。
    */
   forget(channelId: string): void {
-    for (const m of [this.cuts, this.stops, this.inbound, this.agentOf, this.codexQueued, this.deliveredAt, this.keySentAt]) m.delete(channelId);
+    for (const m of [this.cuts, this.stops, this.inbound, this.opener, this.agentOf, this.codexQueued, this.deliveredAt, this.keySentAt]) m.delete(channelId);
     for (const s of [this.noticePending, this.codexTypeIn, this.codexPaused, this.codexCutSinceStop]) s.delete(channelId);
     for (const k of [...this.replies.keys()]) if (k.startsWith(`${channelId}\n`)) this.replies.delete(k);
   }
@@ -173,6 +182,7 @@ export class TurnCuts {
     const real = all.filter((t) => t.fromKind !== "bridge");
     const [trig, ...alsoPending] = real.length ? real : all.slice(-1);
     this.inbound.set(i.channelId, []); // 插话回合从头记
+    this.opener.delete(i.channelId);
     const prev = this.cuts.get(i.channelId);
     // 提醒生成了还没投出去就又被打断：那一段还没收尾，挂进新的链里（旧提醒随之作废，见 noticeWanted）
     const chainable = prev && prev.state === "hinted" && this.noticePending.has(i.channelId) ? { ...prev, state: "open" as const } : prev;
@@ -248,7 +258,10 @@ export class TurnCuts {
       // 回合正常结束：Codex 的队列恢复了、排着的也会依次跑完（打断回报是 StopFailure，不算）；下一回合的消息从头记
       for (const m of [this.codexPaused, this.codexCutSinceStop]) m.delete(channelId);
       this.codexQueued.delete(channelId);
-      if (!afterAbort) this.inbound.delete(channelId);
+      if (!afterAbort) {
+        this.inbound.delete(channelId);
+        this.opener.delete(channelId);
+      }
     }
     const cut = this.cuts.get(channelId);
     if (!cut) return null;
