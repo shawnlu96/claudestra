@@ -7,7 +7,7 @@ import { MASTER_DIR } from "./config.js";
 import { latestSessionIdForCwd } from "./session-ids.js";
 import { existsSync, unlinkSync } from "fs";
 import { countsAsActivity, dueForResume, giveUpText, loadResumeStates, markResumed, noteActivity, noteApiError, noteOverload, noteTurnOk, onTurnOk, resumeDelayMs,
-  resumeText, saveResumeStates, type ApiErrorState } from "../lib/api-error-resume.js";
+  resumeText, saveResumeStates, dropOffline, type ApiErrorState } from "../lib/api-error-resume.js";
 import { isModelLimitHit, paneShowsLowPriority } from "../lib/quota-wall-text.js";
 import { windowWallWait } from "../lib/wall-screen.js";
 import { noticeOncePerState } from "../lib/quota-wall-notice.js";
@@ -254,6 +254,7 @@ export function cancelResumePlan(held: HeldQueue, cid: string): string | null {
  */
 function cancelResume(b: WallBridgeDeps, states: Map<string, ApiErrorState>, cid: string): void {
   states.delete(cid);
+  saveResumeStates(states);
   cancelledResume.delete(cid);
   const plan = cancelResumePlan(b.held, cid);
   if (plan) console.log(`⏸ ${cid}：撞额度，撤掉续跑 ${plan}`);
@@ -263,9 +264,6 @@ function cancelResume(b: WallBridgeDeps, states: Map<string, ApiErrorState>, cid
 const cancelledResume = new Map<string, { agent: string; error: string }>();
 let rearm: ((cid: string) => void) | null = null;
 export const rearmResume = (cid: string): void => rearm?.(cid);
-
-/** 重启后等 agent 重连的时间：这段里到期却还没连上的先留着，过了才当它没了 */
-const RECONNECT_GRACE_MS = 2 * 60_000;
 
 /** bridge 启动时调一次：起闸、接 api_error_turn、15 秒一拍（续跑到期 + 闸的 tick） */
 export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
@@ -278,8 +276,8 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
   w.onExit(() => {
     for (const c of [...b.calls.values()]) b.calls.touch(c.targetChannelId ?? "", c.callerChannelId);
   });
-  const startedAt = Date.now();
-  const states = loadResumeStates(); // 15 秒一拍、撞错时落盘（saveResumeStates）
+  // 撞错、取消（有人发消息 / 撞额度 / 正常结束清零）时当场落盘，15 秒一拍兜底：取消没落盘就重启会照样注入「继续」
+  const states = loadResumeStates();
   const agentOf = new Map<string, string>(); // 到期续跑时交给闸要带名字
   for (const [cid, s] of states) if (s.agent) agentOf.set(cid, s.agent);
   if (states.size) console.log(`🔁 恢复 API 错误续跑计划 ${states.size} 条`);
@@ -330,6 +328,7 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
     const hit = moved ? w.noteActivity(evt.chatId, ts) : null;
     if (hit) cancelledResume.set(evt.chatId, hit);
     if (moved) flushHumanSoon(b, evt.chatId, ts);
+    saveResumeStates(states);
   });
   rearm = (cid) => {
     const c = cancelledResume.get(cid);
@@ -341,13 +340,15 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
     else {
       agentOf.set(cid, c.agent);
       states.set(cid, { errorAt: now, error: c.error, agent: c.agent }); // 重新计 60 秒
+      saveResumeStates(states);
     }
   };
   onTurnOk((agent, at) => { // 续跑后正常结束了一轮：网络类连败清零
     for (const [cid, a] of agentOf) if (a === agent) noteTurnOk(states, cid, at);
+    saveResumeStates(states);
   });
   setInterval(() => {
-    void resumeDue(b, w, states, agentOf, startedAt).finally(() => saveResumeStates(states));
+    void resumeDue(b, w, states, agentOf).finally(() => saveResumeStates(states));
     void w.tick();
   }, TICK_MS);
   return w;
@@ -365,13 +366,19 @@ export function flushHumanSoon(b: WallBridgeDeps, cid: string, now: number): voi
   b.flush(cid, "wall_activity").catch((e) => console.error(`押着的人发消息补投出错（留在队里，Stop / 扫描再投）: ${(e as Error).message}`));
 }
 
-async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, ApiErrorState>, agentOf: Map<string, string>, startedAt = 0): Promise<void> {
+async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, ApiErrorState>, agentOf: Map<string, string>): Promise<void> {
   const now = Date.now();
   for (const cid of dueForResume(states, now)) {
     const st = states.get(cid);
     const target = b.clients.get(cid);
-    if (st && !target && now - startedAt < RECONNECT_GRACE_MS) continue; // 刚重启：从盘上恢复的计划等它连回来
-    if (!st || !target) { states.delete(cid); continue; }
+    if (!st) continue;
+    if (!target) { // 没连着（刚重启还没连回来 / 窗口没了）：留着等，撞错满半小时作废、频道报一次
+      const why = dropOffline(states, cid, now);
+      const agent = agentOf.get(cid) ?? cid;
+      if (why) emitEvent({ agent, chatId: cid, type: "chat_message", data: { direction: "out", from: "bridge", text: `⛔ ${agent} ${why}`, notice: true } });
+      if (why && /^\d+$/.test(cid)) await b.escalate(cid, `⛔ ${agent} ${why}`).catch((e) => console.error("api-error 续跑作废通知失败:", (e as Error).message));
+      continue;
+    }
     // 60 秒里闸开了（别的 agent 撞墙）：这一次也交给闸，出闸再续
     if (w.active() && (await w.noteApiError({ channelId: cid, agent: agentOf.get(cid) ?? cid, at: st.errorAt, error: st.error, text: "" }))) {
       states.delete(cid);

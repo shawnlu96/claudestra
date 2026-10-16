@@ -165,7 +165,7 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
     let routed: boolean | undefined;
     const dispatched = (): boolean => (routed ??= dispatchedFailureQuiet(channelId, at));
     // 这一轮 Stop 时告诉开这一轮的请求方（stop-settle）。网络类也告诉：回程槽可能早被一句「收到」消化了，续跑用完时的升级只发到它自己频道
-    noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName });
+    noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName, ...(isTransientAcpFailure(f) ? { retrying: true } : {}) });
     // 网络类（断网 / 代理抖 / 5xx）：失败条目照样触发续跑，按退避续、用完才在频道报一次（api-error-resume.ts）；派单会话照旧开卡交派活方
     if (isTransientAcpFailure(f) && !dispatched()) return void console.log(`🌐 ACP 网络类失败（${agentName}）：${f.message} → 不开卡，退避续跑`);
     // 策略拦截（cyber_policy）、请求被拒、上下文耗尽：回合已经停了，不会自己续跑。开卡留痕，调度器据此把这张单交 PM（scheduler-auto-ports.ts）

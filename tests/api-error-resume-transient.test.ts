@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cardsToClose } from "../src/lib/agent-supervisor-bridge.js";
 import {
-  ACTIVITY_GRACE_MS, loadResumeStates, RESUME_DELAY_MS, saveResumeStates, RESUME_WINDOW_MS, dueForResume, giveUpText, markResumed, noteActivity, noteApiError, noteTurnOk, onTurnOk,
+  ACTIVITY_GRACE_MS, loadResumeStates, STALE_RESUME_MS, STREAK_IDLE_MS, RESUME_DELAY_MS, saveResumeStates, RESUME_WINDOW_MS, dueForResume, giveUpText, markResumed, noteActivity, noteApiError, noteTurnOk, onTurnOk,
   resumeDelayMs, resumeText, type ApiErrorState,
 } from "../src/lib/api-error-resume.js";
 import { TRANSIENT_BACKOFF_MS } from "../src/lib/transient-error.js";
@@ -67,10 +67,14 @@ describe("网络类错误：静默退避续跑", () => {
     expect(seen).toEqual([["agent-x", T0]]);
   });
 
-  test("续跑后 10 分钟没再撞：窗口过期清零", () => {
+  test("续跑后隔了 10 分钟以上才又撞（黑洞式断网）：仍是同一串，接着数；1 小时既没撞也没正常结束才丢", () => {
     const m = new Map<string, ApiErrorState>();
     const r = outage(m, "c1", 2);
     dueForResume(m, r.now + RESUME_WINDOW_MS);
+    expect(noteApiError(m, "c1", NET, r.now + RESUME_WINDOW_MS + 60_000)).toBe("track");
+    expect(m.get("c1")?.net?.n).toBe(2);
+    markResumed(m, "c1", r.now + RESUME_WINDOW_MS + 5 * 60_000);
+    dueForResume(m, r.now + RESUME_WINDOW_MS + 5 * 60_000 + STREAK_IDLE_MS);
     expect(m.has("c1")).toBe(false);
   });
 
@@ -145,15 +149,32 @@ describe("退避中 bridge 重启：计划落盘，读回来到点照续、接�
       const r = outage(before, "c1", 1);
       expect(noteApiError(before, "c1", NET, r.now)).toBe("track"); // 第 2 次撞：进 2 分钟等待，这时重启
       saveResumeStates(before, path);
-      const after = loadResumeStates(path);
+      const after = loadResumeStates(path, r.now);
       expect(after.get("c1")?.net).toMatchObject({ n: 1, since: T0 });
       expect(dueForResume(after, r.now + TRANSIENT_BACKOFF_MS[1] - 1_000)).toEqual([]);
       expect(dueForResume(after, r.now + TRANSIENT_BACKOFF_MS[1])).toEqual(["c1"]);
       markResumed(after, "c1", r.now + TRANSIENT_BACKOFF_MS[1]);
       saveResumeStates(after, path);
-      const rest = outage(loadResumeStates(path), "c1", 3, r.now + TRANSIENT_BACKOFF_MS[1] + 5_000); // 再重启一次，接着撞
+      const rest = outage(loadResumeStates(path, r.now), "c1", 3, r.now + TRANSIENT_BACKOFF_MS[1] + 5_000); // 再重启一次，接着撞
       expect(rest.waits).toEqual(TRANSIENT_BACKOFF_MS.slice(2));
       expect(rest.last).toBe("escalate");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("单条字段坏了（net 空、resumedAt 非数字）：丢掉那条，别的照常读回；撞错过了半小时还没续的也丢", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nrt1-field-"));
+    try {
+      const path = join(dir, "api-error-resume.json");
+      writeFileSync(path, JSON.stringify({
+        bad1: { errorAt: T0, error: "x", net: {} },
+        bad2: { errorAt: T0, error: "x", resumedAt: "soon" },
+        bad3: { errorAt: T0, error: "x", net: { n: 9, since: T0, last: "" } },
+        old: { errorAt: T0 - STALE_RESUME_MS, error: "x" },
+        ok: { errorAt: T0, error: "x", net: { n: 1, since: T0, last: NET }, agent: "a" },
+      }));
+      expect([...loadResumeStates(path, T0).keys()]).toEqual(["ok"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

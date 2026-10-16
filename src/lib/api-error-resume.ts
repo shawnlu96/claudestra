@@ -6,7 +6,7 @@
  * 机制：jsonl-watcher 见到 `isApiErrorMessage:true` 的 assistant 条目 → 发 `api_error_turn`
  * 事件；bridge 记下时间。等一段时间该 agent 没有任何新活动（自己又开始跑了 / 有人发了消息）就注一条「继续」。
  * - 网络 / 服务端瞬时错误（transient-error.ts）：按 TRANSIENT_BACKOFF_MS 退避续跑（1、2、4、8 分钟），期间不报；
- *   第 5 次再撞才升级到频道、报一次。续跑后正常结束一个回合（noteTurnOk）或 10 分钟没再撞 = 清零。
+ *   第 5 次再撞才升级到频道、报一次。续跑后正常结束一个回合（noteTurnOk）= 清零（续跑后 1 小时没动静才丢）。
  * - 其它错误：60s 后续跑**一次**——续跑之后 10 分钟内再撞同类错误 ⇒ 不再续，升级到频道报错。
  * wedge watcher 盯的是「在动但不结束」，这里补的是「已结束但是被错误结束的」。
  * 纯逻辑，单测 tests/api-error-resume.test.ts、tests/api-error-resume-transient.test.ts。
@@ -33,20 +33,38 @@ export interface ApiErrorState {
   agent?: string;
 }
 
-const isApiErrorState = (v: unknown): boolean =>
-  !!v && typeof v === "object" && typeof (v as ApiErrorState).errorAt === "number" && typeof (v as ApiErrorState).error === "string";
-const isStateFile = (d: unknown): boolean => !!d && typeof d === "object" && !Array.isArray(d) && Object.values(d as object).every(isApiErrorState);
+const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isNetStreak = (v: unknown): boolean => {
+  const n = v as NetStreak;
+  return !!n && typeof n === "object" && Number.isInteger(n.n) && n.n >= 0 && n.n < TRANSIENT_BACKOFF_MS.length && num(n.since) && typeof n.last === "string";
+};
+/** 每个字段都核：net / resumedAt 坏了这条就永不到期、之后的网络错误永远静默（第 2 轮 P2-3） */
+const isApiErrorState = (v: unknown): boolean => {
+  const s = v as ApiErrorState;
+  return !!s && typeof s === "object" && num(s.errorAt) && typeof s.error === "string" && (s.resumedAt === undefined || num(s.resumedAt))
+    && (s.net === undefined || isNetStreak(s.net)) && (s.agent === undefined || typeof s.agent === "string");
+};
+const isStateFile = (d: unknown): boolean => !!d && typeof d === "object" && !Array.isArray(d);
 
 /**
  * 续跑计划落盘：网络类退避单步最长 8 分钟、整串约 15 分钟，期间 bridge 重启（beta 自动更新挑的正是全员空闲）丢了它，
- * ACP agent 不开卡就静默停住。读回来到点照续、次数接着数。坏文件不恢复、只报一次（不能让 bridge 起不来）
+ * ACP agent 不开卡就静默停住。读回来到点照续、次数接着数。坏文件不恢复、只报一次（不能让 bridge 起不来）；坏的单条丢掉记日志
  */
 export const RESUME_STATES_PATH = statePath("api-error-resume.json");
+/** 撞错后这么久还没续上的计划作废：开机不投陈旧的「继续」（停机一夜后它接着做的多半已经不是现在要的），等不回来的 agent 也到此为止 */
+export const STALE_RESUME_MS = 30 * 60_000;
 
-export function loadResumeStates(path = RESUME_STATES_PATH): Map<string, ApiErrorState> {
+export function loadResumeStates(path = RESUME_STATES_PATH, now = Date.now()): Map<string, ApiErrorState> {
   const r = readJsonStateSync(path, isStateFile);
   if (r.status === "corrupt") reportCorrupt(path, r.error, "api-error-resume", false);
-  return new Map(r.status === "ok" ? Object.entries(r.data as Record<string, ApiErrorState>) : []);
+  const m = new Map<string, ApiErrorState>();
+  for (const [cid, s] of Object.entries(r.status === "ok" ? (r.data as Record<string, unknown>) : {})) {
+    if (!isApiErrorState(s)) console.error(`🚨 API 错误续跑计划 ${cid} 字段坏了，丢掉：${JSON.stringify(s).slice(0, 200)}`);
+    else if ((s as ApiErrorState).resumedAt === undefined && now - (s as ApiErrorState).errorAt >= STALE_RESUME_MS) {
+      console.log(`🗑 API 错误续跑计划 ${cid} 撞错已过 ${Math.round((now - (s as ApiErrorState).errorAt) / 60_000)} 分钟，不再续`);
+    } else m.set(cid, s as ApiErrorState);
+  }
+  return m;
 }
 
 const savedJson = new Map<string, string>();
@@ -63,15 +81,30 @@ export function saveResumeStates(m: Map<string, ApiErrorState>, path = RESUME_ST
 }
 
 export const RESUME_DELAY_MS = 60_000;
-/** 续跑后这么久内再撞错 ⇒ 升级（网络类：接着数）；过了就当新一次 */
+/** 续跑后这么久内再撞错 ⇒ 升级；过了就当新一次（网络类不看它，见 STREAK_IDLE_MS） */
 export const RESUME_WINDOW_MS = 10 * 60_000;
+/**
+ * 网络类连败只靠正常结束一个回合清零：黑洞式断网每轮要等 10 分钟以上的超时才失败，按 10 分钟窗口算会每次都当新一串、永不升级。
+ * 续跑后这么久既没撞错也没正常结束（agent 没了 / 回合被打断）才丢掉这串
+ */
+export const STREAK_IDLE_MS = 60 * 60_000;
+
+/** 一串续跑的结局（text = 升级正文；null = 恢复了）：turn-failure 据此给先前收到「正在自动重试」的请求方补最终说明 */
+type StreakEnd = (cid: string, text: string | null, since: number, now: number) => void;
+let streakEnd: StreakEnd = () => {};
+export const onStreakEnd = (cb: StreakEnd): void => void (streakEnd = cb);
 
 export type NoteResult = "track" | "escalate";
 
 /** error = 错误码（CC）或失败原文（ACP）；text = 条目里那句原文（判网络类、报错时引用） */
 export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: string, now: number, text = ""): NoteResult {
   const prev = m.get(cid);
-  if (isTransientError(`${error}\n${text}`)) return noteTransient(m, cid, prev, error, firstLine(text) || error, now);
+  const r = isTransientError(`${error}\n${text}`) ? noteTransient(m, cid, prev, error, firstLine(text) || error, now) : noteOther(m, cid, prev, error, now);
+  if (r === "escalate") streakEnd(cid, giveUpText(prev, error, text), prev?.net?.since ?? now, now);
+  return r;
+}
+
+function noteOther(m: Map<string, ApiErrorState>, cid: string, prev: ApiErrorState | undefined, error: string, now: number): NoteResult {
   if (overloadEscalate(cid, now, prev, RESUME_WINDOW_MS, undefined, undefined, error)) {
     m.delete(cid);
     return "escalate";
@@ -83,7 +116,7 @@ export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: 
 const firstLine = (s: string): string => s.split("\n")[0].trim().slice(0, 300);
 
 /**
- * 网络类：上一次续过、窗口内又撞 = 同一串，次数接着数；续跑还没发出去又撞 = 同一次，只更新原文、重新计时。
+ * 网络类：上一次续过、还没正常结束一个回合又撞 = 同一串，次数接着数（不论隔多久）；续跑还没发出去又撞 = 同一次，只更新原文、重新计时。
  * 4 次续跑用完（或监护对象这件活的续跑次数用完）⇒ escalate，记录删掉：下次再撞是新的一串。
  */
 function noteTransient(m: Map<string, ApiErrorState>, cid: string, prev: ApiErrorState | undefined, error: string, last: string, now: number): NoteResult {
@@ -92,7 +125,7 @@ function noteTransient(m: Map<string, ApiErrorState>, cid: string, prev: ApiErro
     m.set(cid, { ...prev, errorAt: now, error, net: { ...prev.net!, last } });
     return "track";
   }
-  const live = prev?.net && now - prev.resumedAt! < RESUME_WINDOW_MS ? prev.net : undefined;
+  const live = prev?.net;
   const n = live?.n ?? 0;
   if (n >= TRANSIENT_BACKOFF_MS.length || overloadEscalate(cid, now, undefined, RESUME_WINDOW_MS, undefined, undefined, `${error}\n${last}`)) {
     m.delete(cid);
@@ -124,7 +157,9 @@ export function noteActivity(m: Map<string, ApiErrorState>, cid: string, ts: num
 /** 续跑后正常结束了一个回合（Stop 且不是 API 错误）：网络类连败清零。别的错误照旧按窗口判「又撞」 */
 export function noteTurnOk(m: Map<string, ApiErrorState>, cid: string, at: number): void {
   const s = m.get(cid);
-  if (s?.net && s.resumedAt !== undefined && at > s.resumedAt) m.delete(cid);
+  if (!s?.net || s.resumedAt === undefined || at <= s.resumedAt) return;
+  m.delete(cid);
+  streakEnd(cid, null, s.net.since, at);
 }
 
 /** 哪些事件算「它又动了」：错误条目自己的那句 "API Error: …" / 撞额度原文（rateLimited）不算 */
@@ -139,7 +174,7 @@ export function dueForResume(m: Map<string, ApiErrorState>, now: number): string
   const due: string[] = [];
   for (const [cid, s] of m) {
     if (s.resumedAt !== undefined) {
-      if (now - s.resumedAt >= RESUME_WINDOW_MS) m.delete(cid);
+      if (now - s.resumedAt >= (s.net ? STREAK_IDLE_MS : RESUME_WINDOW_MS)) m.delete(cid);
       continue;
     }
     if (now - s.errorAt >= resumeDelayMs(s)) due.push(cid);
@@ -150,6 +185,20 @@ export function dueForResume(m: Map<string, ApiErrorState>, now: number): string
 export function markResumed(m: Map<string, ApiErrorState>, cid: string, now: number): void {
   const s = m.get(cid);
   if (s) m.set(cid, { ...s, resumedAt: now, ...(s.net ? { net: { ...s.net, n: s.net.n + 1 } } : {}) });
+}
+
+/**
+ * 到点要续跑而 agent 没连着（重启后没连回来 / 窗口没了）：留着等它，撞错满 STALE_RESUME_MS 还没连上就作废、在频道报一次。
+ * 没到时候返回 null；作废时删掉这条、返回频道那句的原因
+ */
+export function dropOffline(m: Map<string, ApiErrorState>, cid: string, now: number): string | null {
+  const s = m.get(cid);
+  if (!s || now - s.errorAt < STALE_RESUME_MS) return null;
+  m.delete(cid);
+  const why = `${hhmm(s.errorAt)} 那一回合以 API 错误结束（${s.net?.last ?? s.error}），到点要续跑时它一直没连上 bridge（${Math.round((now - s.errorAt) / 60_000)} 分钟），` +
+    "续跑作废。需要人看一眼它的窗口后手动发一句继续。";
+  streakEnd(cid, why, s.net?.since ?? s.errorAt, now);
+  return why;
 }
 
 const hhmm = (t: number): string => new Date(t).toTimeString().slice(0, 5);
