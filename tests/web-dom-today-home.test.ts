@@ -332,6 +332,28 @@ test("[验收线 1] 整页层有『返回』：点了 project 回 null、原来�
   expect(v.seen.nav.project).toBeNull();
 });
 
+test("[验收线 1] 整页里点『看用量』弹出的用量看板（CenteredModal，.overlay-in）开着时，Esc 不关底下的今天页", async () => {
+  win.localStorage.clear();
+  const v = await mount("shell");
+  await until(() => !!v.host.querySelector("[data-now=strip] [data-now-full]"), "full button");
+  await v.click(v.host.querySelector("[data-now=strip] [data-now-full]"), "full page");
+  await until(() => !!v.host.querySelector("main [data-now=page] [data-now-usage]"), "usage button");
+  await v.click(v.host.querySelector("main [data-now=page] [data-now-usage]"), "usage");
+  const panel = () => doc.body.querySelector(".overlay-in .panel-pop");
+  await until(() => !!panel(), "usage modal");
+  await pressEsc(panel()!);
+  await pressEsc();
+  expect(v.seen.nav.project).toBe(ui.TODAY_KEY);
+  expect(panel()).not.toBeNull();
+  expect(v.host.querySelector("main [data-now=page]")).not.toBeNull();
+  // 弹窗收起后 Esc 照常关整页
+  await React.act(async () => (doc.body.querySelector(".overlay-in") as unknown as { click(): void }).click());
+  await until(() => !panel(), "usage modal closed");
+  await pressEsc();
+  expect(v.seen.nav.project).toBeNull();
+  await v.unmount();
+});
+
 test("[验收线 2] 空状态主区里的今天页没有返回按钮，Esc 也不改 collab 状态", async () => {
   const v = await mount("main");
   await until(() => !!v.host.querySelector("[data-now=page] h2"), "empty-state page");

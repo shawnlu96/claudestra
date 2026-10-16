@@ -100,12 +100,16 @@ function StripSummary({ view, tr }: { view: TodayView; tr: Translate }) {
   );
 }
 
+/** 盖在整页之上的弹层：原生 / daisy 模态；公共外壳 CenteredModal、ResponsiveShell、底部抽屉都带 .overlay-in（用量看板就是这种，自己不拦 Esc）；
+ *  待办 / 未托管会话抽屉是 fixed inset-0 z-50，菜单遮罩是 fixed inset-0 z-[997] */
+const OVERLAY_SELECTOR = "dialog[open], .modal-open, [aria-modal=true], .overlay-in, .fixed.inset-0.z-50, .fixed.inset-0.z-\\[997\\]";
+
 /** 这次 Esc 归别人：输入框里（含输入法组字）、已被处理过、或上面还开着别的弹层 */
 function escTakenElsewhere(e: KeyboardEvent): boolean {
   if (e.defaultPrevented || e.isComposing) return true;
   const el = e.target instanceof HTMLElement ? e.target : null;
   if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return true;
-  return !!document.querySelector("dialog[open], .modal-open, [aria-modal=true]");
+  return !!document.querySelector(OVERLAY_SELECTOR);
 }
 
 /** 整页层的 Esc：只在这层挂着时监听，卸载即移除 */
