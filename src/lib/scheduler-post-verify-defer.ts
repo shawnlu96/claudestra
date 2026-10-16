@@ -11,9 +11,9 @@
 import type { Database } from "bun:sqlite";
 import { localTime } from "./ledger-audit-lend-grant.js";
 import { readSwitch } from "./scheduler-autostart.js";
-import { observe, parseObservation, POST_VERIFY_DEFER_MAX_HOURS, type Observation } from "./post-verify-spec.js";
+import { observe, parseObservation, POST_VERIFY_DEFER_MAX_HOURS } from "./post-verify-spec.js";
 
-export { parseObservation, type Observation };
+export { parseObservation };
 
 const HOUR_MS = 3600_000;
 const BAD_NOTE = "（本节第一行的观察期格式没认出，照常提醒；只认「观察期：N 小时」，N 为 1 以上整数）";
