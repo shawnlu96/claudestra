@@ -91,3 +91,21 @@ export function judgeScopeFile(grant: ScopeGrant, base: string, head: string, pr
     return judgeCommandRegistry(grant, base, head, proof);
   } catch (e) { return `无法核对改动：${(e as Error).message}`; }
 }
+
+/** Opening lines of `describe(` / `test(` / `it(` blocks on executable lines (modifiers such as `.skip` / `.each(...)` included). */
+function testBlockOpenings(text: string): Map<string, number> {
+  const code = codeLines(text), out = new Map<string, number>();
+  text.split("\n").forEach((line, i) => {
+    if (!code.has(i) || !/^\s*(?:describe|test|it)(?:\.[\w$]+(?:\([^)]*\))?)*\(/.test(line)) return;
+    out.set(line.trim(), (out.get(line.trim()) ?? 0) + 1);
+  });
+  return out;
+}
+
+/** ASKSCOPE3: test blocks whose opening line is gone at head (a renamed block counts too; the reviewer judges). Exact blobs only. */
+export function removedTestBlocks(base: string, head: string): number {
+  const after = testBlockOpenings(head);
+  let removed = 0;
+  for (const [line, n] of testBlockOpenings(base)) removed += Math.max(0, n - (after.get(line) ?? 0));
+  return removed;
+}
