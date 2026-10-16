@@ -21,7 +21,7 @@ const out = process.env.COLLAB_ATTENTION_SHOTS_DIR, baseRepo = process.env.COLLA
 const MIN = 60_000;
 const REASON = { review: "审查不过：P0 接口没鉴权", ci: "CI 失败：web typecheck 报错" };
 
-/** 夹具的在途卡改成对照基准：A5 / B3 返工（出问题），A4 / B2 / A3 在等且分别停了 40 分钟 / 1 小时 / 3 小时（卡住），B4 刚进复述不算卡住 */
+/** 夹具的在途卡改成对照基准：A5 / B3 返工停过 2 小时（出问题），A4 / B2 / A3 在等且分别停了 40 分钟 / 1 小时 / 3 小时（卡住），B4 刚进复述不算卡住 */
 function shape(home: HomeFixture, cleared = false) {
   const set = (id: string, stage: Stage, sinceMin: number, review?: string) => {
     const t = home.overview.tasks.find((x) => x.id === id)!;
@@ -30,8 +30,8 @@ function shape(home: HomeFixture, cleared = false) {
     Object.assign(t, patch);
     if (home.details[id]) Object.assign(home.details[id]!.task, patch);
   };
-  set("i28-A5", cleared ? "build" : "fix", 20, REASON.review);
-  set("i28-B3", cleared ? "build" : "fix", 50, REASON.ci);
+  set("i28-A5", cleared ? "build" : "fix", 130, REASON.review);
+  set("i28-B3", cleared ? "build" : "fix", 160, REASON.ci);
   set("i28-A4", "review", 40);
   set("i28-B2", "review", 60);
   set("i28-A3", "merge", 180);

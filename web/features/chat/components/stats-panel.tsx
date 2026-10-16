@@ -13,6 +13,7 @@ import { Bar, UsageTable, type GlobalStats } from "./quota-cards";
 import { QuotaArea } from "./subscription-quota-cards";
 import { codexQuotas, usageTableData, type QuotaView, type StatAgent, type UsageTableData } from "../usage-view";
 import { useSubscriptionQuota } from "../use-subscription-quota";
+import { claudeAccountLive, refreshNoteMessage, type RefreshNote } from "../refresh-note";
 
 /**
  * 用量/上下文看板（2026-07-14 owner：context 要成体系,web 看板可以更详细）。
@@ -116,7 +117,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-5">
-          {refreshNote && <RefreshNoteLine note={refreshNote} />}
+          {refreshNote && <RefreshNoteLine note={refreshNote} claudeLive={claudeAccountLive(quotaState.sub)} />}
           <QuotaArea quota={quotaState} g={g} quotas={quotas} />
           {/* token 与花费按 runtime 分行（Claude Code / Codex / Pi 口径各不相同，混着看互相淹没） */}
           {(usage.agents.length > 0 || usage.machine) && <UsageTable {...usage} />}
@@ -162,21 +163,9 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   );
 }
 
-/** bridge POST /stats/refresh 的 refresh 字段；unknown = 打开面板时没有任何读数 */
-interface RefreshNote {
-  outcome: "refreshed" | "backoff" | "failed" | "busy" | "unknown";
-  nextAllowedAt: number | null;
-  reason: string | null;
-}
-
-function RefreshNoteLine({ note }: { note: RefreshNote }) {
+function RefreshNoteLine({ note, claudeLive }: { note: RefreshNote; claudeLive: boolean }) {
   const t = useT();
-  // busy = 别的请求正在读，结果很快就到；refreshed 卡片自己会显示新读数
-  if (note.outcome === "refreshed" || note.outcome === "busy") return null;
-  const time = note.nextAllowedAt ? new Date(note.nextAllowedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
-  return (
-    <div className="mb-3 rounded-xl bg-base-200 p-3 text-xs text-base-content/60">
-      {note.outcome === "unknown" ? t("账号用量未知（没有状态栏缓存），可点右上角刷新读取一次") : t("读取账号用量失败，显示的是上次读数或未知；{time} 前不再重试", { time })}
-    </div>
-  );
+  const msg = refreshNoteMessage(note, claudeLive);
+  if (!msg) return null;
+  return <div className="mb-3 rounded-xl bg-base-200 p-3 text-xs text-base-content/60">{t(msg.key, msg.params)}</div>;
 }

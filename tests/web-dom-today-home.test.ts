@@ -169,7 +169,7 @@ test("[验收线 2] 页面版：标题『今天』，五块按顺序；卡住了
   expect(v.host.querySelector("[data-now=page] header")?.textContent).not.toContain("现在");
   expect(v.host.querySelector("[data-now=page] [data-now-summary]")?.textContent).toBe("3 件要你处理 · 3 个 agent 在干活");
   expect(v.all("[data-now-stuck-row]").map((e) => e.getAttribute("data-now-stuck-row"))).toEqual(["proj-a/A3", "proj-a/A2", "proj-b/B1"]);
-  expect(v.texts("[data-now-stuck-row]")[0]).toBe("导出预览合成项目 A窄屏下预览溢出50分");
+  expect(v.texts("[data-now-stuck-row]")[0]).toBe("导出预览合成项目 A窄屏下预览溢出2小时10分");
   expect(v.all("[data-now-group=proj-a] [data-now-module]").map((e) => e.getAttribute("data-now-module"))).toEqual(["f-export", "f-notify"]);
   expect(v.texts("[data-now-group=proj-a] [data-now-module=f-export] [data-now-module-active]")).toEqual(["3 个在做"]);
   expect(v.all("[data-now-group=proj-a] [data-now-module=f-export] [data-now-face]").map((e) => e.getAttribute("title"))).toEqual(["导出开发 · A1 开发中", "通知开发 · A4 开发中"]);

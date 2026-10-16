@@ -1,0 +1,40 @@
+Permission deny rule "MultiEdit" matches no known tool — check for typos.
+ ▐▛███▛█   Claude Code v2.1.301
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   /tmp/usage-probe-XXXXXX
+
+
+❯ /status
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Settings  Status   Config   Usage   Stats
+
+  Session
+
+  Total cost:            $0.0000
+  Total duration (API):  0s
+  Total duration (wall): 2s
+  Total code changes:    0 lines added, 0 lines removed
+  Usage:                 0 input, 0 output, 0 cache read, 0 cache write
+
+  Current session
+  █████████████▌                                     27% used
+  Resets 5:10pm (Asia/Shanghai)
+
+  Current week (all models)
+  ███████████████▌                                   31% used
+  Resets Oct 19 at 10pm (Asia/Shanghai)
+
+  Current week (Fable)
+                                                     0% used
+  Resets Oct 19 at 10pm (Asia/Shanghai)
+
+  What's contributing to your limits usage?
+  Approximate, based on local sessions on this machine — does not include other devices or claude.ai
+
+  Scanning local sessions…
+
+  Usage credits
+  Usage credits are off · /usage-credits to turn them on
+
+  Esc to cancel

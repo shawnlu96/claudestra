@@ -30,7 +30,7 @@ function input(over: Partial<TodayInput> = {}): TodayInput {
 test("[验收线 1] 卡住了 3 条：出问题在前，其余按停留时长倒序；每行 任务标题 · 项目名 · 原因 · 停留时长", () => {
   const v = todayView(input(), deps);
   expect(v.stuck.map((r) => [r.project, r.id, r.problem])).toEqual([["proj-a", "A3", true], ["proj-a", "A2", false], ["proj-b", "B1", false]]);
-  expect(v.stuck[0]).toMatchObject({ title: "导出预览", projectName: "合成项目 A", reason: "窄屏下预览溢出", dwell: "50分" });
+  expect(v.stuck[0]).toMatchObject({ title: "导出预览", projectName: "合成项目 A", reason: "窄屏下预览溢出", dwell: "2小时10分" });
   expect(v.stuck[1]).toMatchObject({ title: "导出格式校验", reason: "已经等了 3小时，超过 30 分钟", dwell: "3小时" });
   expect(v.stuck[2]).toMatchObject({ title: "同步失败重试", projectName: "合成项目 B", dwell: "2小时" });
   expect(v.stuckMore).toEqual([]);

@@ -62,7 +62,7 @@ function replayPi(lines: Line[], preface: Rec[] = []) {
 }
 
 /** 内存里的一对 RpcWire：宿主一端、适配器一端 */
-function pipePair(): [RpcWire, RpcWire] {
+export function pipePair(): [RpcWire, RpcWire] {
   const side = () => ({ data: (_: string) => {}, close: (_: string) => {} });
   const a = side();
   const b = side();

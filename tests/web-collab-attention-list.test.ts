@@ -12,10 +12,10 @@ function task(id: string, stage: Stage, sinceMin: number, over: Partial<LedgerTa
     model: null, extra: {}, createdAt: 0, updatedAt: NOW, lastEvent: null, stageSince: NOW - sinceMin * MIN, metrics, ...over };
 }
 const review = (text: string) => ({ round: 1, verdict: "block", p0: 1, p1: 0, p2: 0, text, ts: NOW - 5 * MIN });
-/** 对照基准：在途 10 张，2 张出问题（审查不过 / CI 失败），3 张卡住（40 分钟 / 1 小时 / 3 小时），1 张在等你，其余在干活或刚进等待 */
+/** 对照基准：在途 10 张，2 张出问题（审查不过 / CI 失败，返工都停过 2 小时），3 张卡住（40 分钟 / 1 小时 / 3 小时），1 张在等你，其余在干活或刚进等待 */
 const TASKS = [
-  task("T1", "fix", 20, { lastReview: review("审查不过：P0 接口没鉴权\n细节……") }),
-  task("T2", "fix", 50, { lastReview: review("CI 失败：web typecheck") }),
+  task("T1", "fix", 130, { lastReview: review("审查不过：P0 接口没鉴权\n细节……") }),
+  task("T2", "fix", 160, { lastReview: review("CI 失败：web typecheck") }),
   task("T3", "review", 40), task("T4", "merge", 60), task("T5", "restate", 180),
   task("T6", "build", 90), task("T7", "build", 10), task("T8", "review", 5), task("T9", "build", 30), task("T10", "build", 15),
   task("D1", "done", 300),
@@ -36,13 +36,13 @@ describe("attentionRows", () => {
   test("按停留时长倒序（卡住：3 小时 → 1 小时 → 40 分钟），同长按 id 兜底，没有时长的排最后", () => {
     expect(attentionRows(hv.lines, "stuck").map((r) => r.id)).toEqual(["T5", "T4", "T3"]);
     expect(attentionRows(hv.lines, "problem").map((r) => r.id)).toEqual(["T2", "T1"]);
-    const same = homeView({ ...ov, tasks: [task("B", "fix", 20), task("A", "fix", 20), task("C", "fix", 0, { stageSince: null })] }, NOW).lines;
+    const same = homeView({ ...ov, tasks: [task("B", "fix", 130), task("A", "fix", 130), task("C", "blocked", 0, { stageSince: null })] }, NOW).lines;
     expect(attentionRows(same, "problem").map((r) => r.id)).toEqual(["A", "B", "C"]);
   });
   test("行带卡号、标题、阶段短语、原因、停留时长（原文取 LineView，不另算）", () => {
     const [t2] = attentionRows(hv.lines, "problem");
     const line = hv.lines.find((l) => l.id === "T2")!;
-    expect(t2).toEqual({ id: "T2", title: "T2 标题", stageLabel: line.stageLabel, reason: "CI 失败：web typecheck", dwellMs: 50 * MIN, dwellApprox: false });
+    expect(t2).toEqual({ id: "T2", title: "T2 标题", stageLabel: line.stageLabel, reason: "CI 失败：web typecheck", dwellMs: 160 * MIN, dwellApprox: false });
     expect(attentionRows(hv.lines, "problem")[1]!.reason).toBe("审查不过：P0 接口没鉴权");
     expect(attentionRows(hv.lines, "stuck")[0]!.reason).toContain("超过 30 分钟");
   });

@@ -15,6 +15,7 @@ import { heldKindOf, isDerivedCarrier, leaseActive, notifyHeldSettled, setHeldId
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { noteDelivered, senderTrigger, turnStartedAt } from "./stop-settle.js";
+import { turnCuts } from "./turn-cuts.js";
 import { getAgentStatus } from "./event-bus.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "../lib/registry.js";
 import { fitIdleBatch, HELD_IDLE_CARRIER_LABEL, heldIdleCarrierId, heldIdleMode, registryIdleScope, type HeldIdleBatch } from "../lib/held-idle-batch.js";
@@ -296,6 +297,7 @@ async function releaseIdleBatch(
   }
   const gone = all.filter((i) => d.held.get(channelId)?.includes(i));
   d.held.idleCarrierSent(carrier, gone); // Codex 打字投递被第二道闸退回时按它复原（held-queue.ts holdFirst）
+  turnCuts.noteCarried(channelId, id, gone.map((i) => i.env)); // 本回合起因记成员，不记载体（目标在做什么的摘要用）
   for (const item of gone) {
     // 先 touch 再出队落盘（同逐条投递）；本机 agent 的并进这一轮的 callers，发的是请求的也记进 askers（回合失败要告诉它）
     d.touch(channelId, item.env);
