@@ -100,8 +100,9 @@ test("matrix comparator: expectation hit, known gap, fixed gap and regressions a
   expect(ratchetViolations(MATRIX, MATRIX.filter((r) => r.section !== "审查"))).toEqual(["审查: removed"]);
   expect(ratchetViolations(MATRIX, MATRIX.map((r) => (r.section === "审查" ? { ...r, team: "absent" as const } : r)))).toEqual(["审查: team home_only→absent"]);
   expect(ratchetViolations(MATRIX, MATRIX.map((r) => (r.section === "阶段用时" ? { ...r, local: "absent" as const } : r)))).toEqual(["阶段用时: local present→absent"]);
-  // A 类（§3 一致项）两边都必须 present
-  for (const r of MATRIX.filter((x) => x.cls === "A")) expect([r.section, r.local, r.team]).toEqual([r.section, "present", "present"]);
+  // A 类（§3 一致项）两边都必须 present；周额度例外：PROJTABS1 规格把项目页的额度去掉了，两边一致地 absent（额度只在今天页）
+  for (const r of MATRIX.filter((x) => x.cls === "A" && x.section !== "周额度")) expect([r.section, r.local, r.team]).toEqual([r.section, "present", "present"]);
+  expect(MATRIX.find((r) => r.section === "周额度")).toMatchObject({ local: "absent", team: "absent" });
 });
 
 /** Cf1 之前（P1-A 合并前）登记的 P1-A 缺口：团队当时的实测值 */
@@ -135,7 +136,7 @@ test("team-parity-Cf1: only the P1-A gaps are dropped; a restored A fake value f
   // 剩下没修的 gap 照实列出；每一个在真修好时都还能判 stale_gap，没修时还是 known_gap
   expect(MATRIX.filter((r) => r.gap).map((r) => `${r.ref} ${r.section} → ${r.gap!.node}`)).toEqual([
     "T8 参与者 → P1-B", "G5 版本历史 → P1-F", "G8 两版对比 → P1-F", "G6 版本元数据（提出人/时间） → P1-F",
-    "G10 节点处理人/步骤 → P1-B", "G10 轮次（大纲行） → P1-B", "T11 阻塞提问 → P1-B", "T12 PR → 未分配（§3 记 A，实测投影丢 URL 形式 PR）",
+    "G10 节点处理人/步骤 → P1-B", "T11 阻塞提问 → P1-B", "T12 PR → 未分配（§3 记 A，实测投影丢 URL 形式 PR）",
   ]);
   for (const r of MATRIX.filter((x) => x.gap)) {
     expect([r.section, compareMatrix("team", { ...now, [r.section]: r.team }).find((x) => x.section === r.section)!.verdict]).toEqual([r.section, "stale_gap"]);

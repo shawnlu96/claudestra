@@ -102,7 +102,7 @@ function DoneFold({ project, ov, onPick, tr }: { project: string; ov: LedgerOver
       <div className={p.foldBody} style={{ gridTemplateRows: open ? "1fr" : "0fr" }}>
         <div className={v.og} inert={!open}>
           {rows.map((t) => (
-            <button key={t.id} type="button" className={v.ot} onClick={() => onPick(t.id)}>
+            <button key={t.id} type="button" className={v.ot} data-done-row={t.id} onClick={() => onPick(t.id)}>
               <span className={`${v.dot} ${v.green}`} />
               <span className={v.tid}>{t.id}</span>
               <span className={v.ott}>{t.title}</span>

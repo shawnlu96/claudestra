@@ -92,7 +92,6 @@ export function useDagPanes(a: DagPanesArgs) {
   const binding = nodeCard(features, task);
   const graph = drawable(features).length > 0;
   const ui = useDagUi(features, a.project, task);
-  useEntryModule(ui, task, load.status === "loading", binding?.feature.id ?? null);
   useFocusFeature(a.project, ui.featureId);
   const rows = useMemo(() => progressRows(board?.agents ?? [], a.agents, a.project), [board, a.agents, a.project]);
   const cmp = useDagCompare(a.project, ui.compare, board, a.rev);
@@ -140,6 +139,8 @@ export function useDagPanes(a: DagPanesArgs) {
   // useDagBoard 在 rev 变后重拉期间留着上一轮的快照：团队看板由总览 + 快照合成，不同轮就先按旧快照出数、新快照到了再跳
   const dagFresh = useRoundFresh(load, load.status !== "loading", a.rev);
   const { work, counts } = useBoard(a, board, load.status === "loading", dagFresh);
+  // 列表里的卡要等看板到了才排得出来：跳早了闪烁落空
+  useEntryModule(ui, task, load.status === "loading" || counts.status === "loading", binding ? { featureId: binding.feature.id, key: binding.node.key } : null);
   const progress = <PriorityWorkBoard project={a.project} onPriorityNode={onNode} team={work.kind === "team"} board={work.board} retrying={work.retrying} loading={counts.status === "loading"}
     onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
@@ -179,15 +180,15 @@ export function useDagPanes(a: DagPanesArgs) {
 }
 
 /**
- * 带任务进入：挂载时就开着的任务（SESSTASK1、今天页、ask 卡、通知直达）等快照读完再定落点——属于某个模块就选中它（标签到「模块进度」，
- * 节点高亮走 selNode）；不属于就留在总览。有登记的标签请求时不管；用户先换了任务也不管。只定一次。
+ * 带任务进入：挂载时就开着的任务（SESSTASK1、今天页、ask 卡、通知直达）等快照读完再定落点——属于某个模块就按「跳到节点」落到「模块进度」
+ * 的这个模块（列表视图闪一次那张卡，图视图另有 selNode 常亮）；不属于就留在总览。有登记的标签请求时不管；用户先换了任务也不管。只定一次。
  */
-function useEntryModule(ui: ReturnType<typeof useDagUi>, task: string | null, loading: boolean, featureId: string | null) {
+function useEntryModule(ui: ReturnType<typeof useDagUi>, task: string | null, loading: boolean, node: { featureId: string; key: string } | null) {
   const entry = useRef(ui.requested ? null : task);
-  const { selectFeature } = ui;
+  const { jumpNode } = ui;
   useEffect(() => {
     if (!entry.current || loading) return;
-    if (entry.current === task && featureId) selectFeature(featureId);
+    if (entry.current === task && node) jumpNode(node.featureId, node.key);
     entry.current = null;
-  }, [task, loading, featureId, selectFeature]);
+  }, [task, loading, node, jumpNode]);
 }
