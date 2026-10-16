@@ -59,7 +59,8 @@ function Body({ tab, narrow, items, version }: { tab: NavTab; narrow: boolean; i
   if (tab === "projects") return <NowProjectList fold={false} />;
   if (tab === "team") return <TeamPage />;
   if (tab === "me") return <MePage items={items} ver={version} />;
-  return narrow ? null : <NowBlocksCompact />;
+  // @container：五块里的行按侧栏宽度收起次要信息（now-projects.tsx / now-doing.tsx 的 @max-[20rem]），同侧栏今天条
+  return narrow ? null : <div className="@container"><NowBlocksCompact /></div>;
 }
 
 export function NavPages({ tab, narrow, items, version }: { tab: NavTab; narrow: boolean; items: MeItem[]; version: VersionInfo | null }) {

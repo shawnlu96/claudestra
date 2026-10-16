@@ -3,7 +3,7 @@
  *   NAV_SHOTS_DIR=<目录> [NAV_BASE_REPO=<基线 main 的检出目录>] bun --no-env-file test tests/web-phone-nav-browser.test.ts
  * 入口与外壳沿用 TODAY1 的截图入口（today-shots.ts bundleToday：真的 Sidebar + MessageList + CollabSwitch，窄屏照生产横滑），
  * 接口换成 nav-shots.ts（规格「对照基准」）；时刻钉在 2026-10-14 12:00，真 Chromium，回环 Bun.serve，非回环请求一律拦掉并断言为 0。
- * 390：冷开、「项目」「团队」「我的」（改前没有这些入口，截同一列表页）；1280：侧栏顶栏、「我的」菜单展开、「团队」页（改前截原顶栏与列表）。
+ * 390：五个入口各一张（冷开即「今天」；改前没有这些入口，截同一列表页）；1280：冷开「会话」（顶栏 + 竖向图标栏）、「我的」菜单展开、「今天」（改前截原顶栏与列表）。
  */
 import { expect, test } from "bun:test";
 import { chromium, type Page } from "playwright-core";
@@ -51,7 +51,7 @@ async function phone(page: Page, after: boolean, shot: (v: string) => Promise<vo
     await page.locator("[data-nav-pages=today] [data-now-wait]").first().waitFor();
     expect(await texts(page, "[data-nav=phone] [data-nav-tab]")).toEqual(TABS);
   }
-  await shot("cold");
+  await shot("today");
   for (const view of ["projects", "team", "me"] as const) {
     if (after) {
       await page.locator(`[data-nav=phone] [data-nav-tab=${view}]`).click();
@@ -70,6 +70,7 @@ async function phone(page: Page, after: boolean, shot: (v: string) => Promise<vo
     await page.waitForFunction(`!document.querySelector("[data-nav-pages]")`);
     expect(await lastRowReachable(page)).toBe(true);
   }
+  await shot("sessions");
 }
 
 async function desktop(page: Page, after: boolean, shot: (v: string) => Promise<void>) {
@@ -80,7 +81,7 @@ async function desktop(page: Page, after: boolean, shot: (v: string) => Promise<
       .filter((e) => e.offsetParent && !e.innerText.trim()).map((e) => e.outerHTML.slice(0, 160))`);
     expect(bare).toEqual([]);
   }
-  await shot("topbar");
+  await shot("sessions");
   if (after) {
     await page.locator("[data-nav=rail] [data-nav-tab=me]").click();
     await page.locator("[role=menu] [data-me-entry]").first().waitFor();
@@ -90,10 +91,10 @@ async function desktop(page: Page, after: boolean, shot: (v: string) => Promise<
   if (after) {
     await page.keyboard.press("Escape");
     await page.mouse.click(900, 400); // 点遮罩收菜单
-    await page.locator("[data-nav=rail] [data-nav-tab=team]").click();
-    await page.locator("[data-nav-pages=team] section[aria-label=团队项目] button", { hasText: TEAM_NAME }).waitFor();
+    await page.locator("[data-nav=rail] [data-nav-tab=today]").click();
+    await page.locator("[data-nav-pages=today] [data-now-blocks]").waitFor();
   }
-  await shot("team");
+  await shot("today");
 }
 
 test.skipIf(!out)("NAVBAR1：五个入口（手机底部栏 / 电脑图标栏 / 我的 / 团队），1280 与 390 改前改后", async () => {
