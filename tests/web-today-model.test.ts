@@ -114,14 +114,14 @@ test("[验收线 1] 要你处理：带 taskId 的写出『项目 · 模块 · �
 
 test("团队与额度：活着按 status=active、在干活按 busy 数", () => {
   const agents = [...todayAgents(), { name: "gone", displayName: "gone", purpose: "", cwd: "/repo", status: "stopped", projectId: null }];
-  expect(todayView(input({ agents: agents as AgentSession[] }), deps).team).toEqual({ alive: 4, busy: 3 });
+  expect(todayView(input({ agents: agents as AgentSession[] }), deps).team).toEqual({ alive: 4, busy: 3, remote: 0 });
 });
 
 test("什么都没在做：idle；新词不出内部词，英文表齐", () => {
   const quiet = todayView(input({ agents: [], overviews: new Map(), boards: new Map() }), deps);
   expect([quiet.idle, quiet.doing.every((p) => !p.doing)]).toEqual([true, true]);
   const words = ["今天", "要你处理", "没有要你处理的", "卡住了", "正在做", "今天完成", "团队与额度", "{n} 件要你处理", "{n} 个在做", "其余 {n} 个项目", "今天完成 {n} 个任务",
-    "有 {n} 个项目没有完成时间，未计入", "{n} 个 agent 活着 · {m} 个在干活", "{f} 本周 {n}%", "整页", "去处理", "看任务"];
+    "有 {n} 个项目没有完成时间，未计入", "本机 {n} 个 agent 活着 · {m} 个在干活", "{f} 本周 {n}%", "整页", "去处理", "看任务"];
   const en = nowTr("en", (s) => `MISSING:${s}`);
   for (const w of words) {
     const zhw = t(w, { n: 2, m: 1, f: "Claude" });
