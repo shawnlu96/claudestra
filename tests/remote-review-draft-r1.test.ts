@@ -46,7 +46,8 @@ function github(f: F) {
       s.undos++;
       if (s.undoFails > 0) { s.undoFails--; return { ...s.pr, flipError: "gh pr ready --undo 失败：HTTP 502" }; }
       s.pr = { ...s.pr, draft: true };
-    } else if (at && !want && s.pr.draft) { s.readies++; s.pr = { ...s.pr, draft: false }; }
+      return { ...s.pr, flipped: true };
+    } else if (at && !want && s.pr.draft) { s.readies++; s.pr = { ...s.pr, draft: false }; return { ...s.pr, flipped: true }; }
     return { ...s.pr };
   };
   // `bounceFails` refusals of the ledger's --remote-bounce write first (a busy ledger after gh already made the PR a draft)
@@ -216,6 +217,34 @@ describe("bounce-second-read-stale", () => {
         expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "remote_bounce")).toBe(false);
         expect((await tick()).cards[0]).toMatchObject({ step: "manual", detail: expect.stringContaining("不交接") });
         expect(f.task().stage).toBe("merge");
+      } finally { f.close(); }
+    });
+  }
+
+  const undone: [string, Record<string, unknown>, string][] = [
+    ["closed", { state: "CLOSED" }, "被关闭"],
+    ["moved to another head", { headRefOid: H2 }, "交接后 PR head 变了"],
+  ];
+  for (const [why, after, road] of undone) {
+    test(`handed over: the PR is ${why} by the time gh's undo succeeds — read again, no bounce on the view from before it`, async () => {
+      const f = autoFixture();
+      let view: Record<string, unknown> = { state: "OPEN", headRefOid: H1, mergeCommit: null, baseRefName: "main", isDraft: true }, onUndo = {};
+      const command = (async (argv: string[]) => {
+        if (argv[2] === "ready") view = argv.includes("--undo") ? { ...view, ...onUndo, isDraft: true } : { ...view, isDraft: false };
+        return { code: 0, stdout: argv[2] === "view" ? JSON.stringify(view) : "", stderr: "", timedOut: false };
+      }) as unknown as typeof runBounded;
+      const none = () => null, prState = ghPrState(command, none, none, none);
+      const tick = async () => (await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps, prState })).cards[0];
+      try {
+        await toMerge(f);
+        expect(await tick()).toMatchObject({ step: "handoff" });
+        expect(view.isDraft).toBe(false);
+        book(f, H1);
+        onUndo = after;
+        expect(await tick()).toMatchObject({ step: "held", detail: expect.stringContaining("PR 变了") });
+        expect(f.task().stage).toBe("merge");
+        expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "remote_bounce")).toBe(false);
+        expect(await tick()).toMatchObject({ step: "manual", detail: expect.stringContaining(road) });
       } finally { f.close(); }
     });
   }

@@ -32,6 +32,8 @@ export interface HandoffPr {
   draft?: boolean;
   /** Why `gh pr ready` (or `--undo`) refused to move the PR to the draft state asked for this time: tried again on a later read. */
   flipError?: string;
+  /** This read itself ran `gh pr ready [--undo]`: apart from `draft`, every field is the view from before it (read again to act). */
+  flipped?: true;
 }
 /** `mainHead` = the main commit, read from the PR repository's main, that was found to contain the merge commit. */
 type MainLanding = { ok: true; mainHead: string } | { ok: false; reason: string };
@@ -127,10 +129,10 @@ export async function ghPrRead(prRef: string, command: typeof runBounded, timeou
 }
 
 /** `gh pr ready [--undo]` of a full PR URL: the PR's new draft state, or why not (stderr's first line, as ghPrRead's refusal carries it). */
-async function setDraft(prRef: string, command: typeof runBounded, draft: boolean): Promise<Pick<HandoffPr, "draft" | "flipError">> {
+async function setDraft(prRef: string, command: typeof runBounded, draft: boolean): Promise<Pick<HandoffPr, "draft" | "flipError" | "flipped">> {
   const argv = ["gh", "pr", "ready", prRef, ...(draft ? ["--undo"] : [])];
   const r = await command(argv, { env: ghEnv(), timeoutMs: 30_000 });
-  if (r.code === 0 && !r.timedOut) return { draft };
+  if (r.code === 0 && !r.timedOut) return { draft, flipped: true };
   return { flipError: `gh pr ready${draft ? " --undo" : ""} 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}` };
 }
 
@@ -329,11 +331,12 @@ async function readyNow(c: HandoffCard<unknown>, pr: string, head: string): Prom
 /**
  * A PR going back to fix is made a draft again first (RRL-3): the owner's queue skips drafts, so it cannot review the fix's heads
  * before this machine has; the next handoff turns it ready again. Refused: the bounce waits (a pending P1 skips the poll pace, so
- * it is tried on every pass). A PR whose draft state gh did not report is left as it is. Null = a draft, go on. A PR this read
- * finds closed or on another head is not bounced on the first read: the next pass takes it through the handoff's own roads.
+ * it is tried on every pass). A PR whose draft state gh did not report is left as it is. Null = a draft, go on. A PR the read
+ * after the undo finds closed or on another head is not bounced on the earlier view: the next pass takes it through the
+ * handoff's own roads. An undo the pass's first read ran is read again too: that view predates the undo.
  */
 async function backToDraft(c: HandoffCard<unknown>, pr: string, head: string, read: HandoffPr): Promise<string | null> {
-  if (read.draft !== false) return null;
+  if (read.draft !== false && !read.flipped) return null;
   // driveHandoff's read already asked for the draft (a P1 pending on the followed head): one refused undo a pass is enough
   if (read.flipError) return `仓库方 P1 退回前没把 PR 转回草稿，下轮再试：${read.flipError}`;
   try {
