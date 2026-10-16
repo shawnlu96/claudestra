@@ -90,6 +90,8 @@ beforeAll(async () => {
     ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi, ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore,
     useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab, unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest, TODAY_KEY: now.TODAY_KEY,
     resetLedgers: require("../web/features/now/now-ledgers.ts").resetTodayLedgersForTest };
+  // 额度读数是模块级的：同一分片里前面的文件（web-dom-now-home）对同一台 mac-a 答过 404，不清就一直停拉，等不到额度行
+  require("../web/features/quota/quota-lines-store.ts").resetQuotaReadingsForTest();
 });
 
 afterEach(async () => {

@@ -23,6 +23,8 @@ interface Source<T> {
   subscribe(cb: () => void): () => void;
   get(): Reading<T>;
   reload(): void;
+  /** 测试用：回到刚建好的样子（清读数、解除停拉、忘掉上次拉取时刻） */
+  resetForTest(): void;
 }
 
 const fpNow = () => machines.currentFp() ?? "local";
@@ -114,6 +116,13 @@ function createSource<T>(name: string, load: () => Promise<T | null>, periodMs: 
     },
     get: () => snap,
     reload: fetchNow,
+    resetForTest() {
+      snap = { fp: fpNow(), value: undefined, at: 0, checkedAt: 0 };
+      stopped = false;
+      sent = 0;
+      landed = 0;
+      lastAt = 0;
+    },
   };
 }
 
@@ -155,4 +164,10 @@ export const reloadQuotaWall = (): void => wall.reload();
 /** 测试用：缩短两个轮询周期（只影响之后起的表） */
 export function setQuotaPollForTest(ms: Partial<typeof period>): void {
   Object.assign(period, ms);
+}
+
+/** 测试用：两份读数回到初始。读数是模块级的，同一进程里前一个测试文件对同一台机器答过 404 就会一直停拉（tests/web-dom-today-home.test.ts） */
+export function resetQuotaReadingsForTest(): void {
+  lines.resetForTest();
+  wall.resetForTest();
 }

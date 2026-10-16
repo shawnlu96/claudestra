@@ -130,6 +130,7 @@ afterAll(async () => {
   machines.currentFp = realFp;
   setContextRequestForTest(null);
   setAppConfigForTest(null); // 模块级缓存：别把夹具的 app-config 留给后面的测试文件
+  require("../web/features/quota/quota-lines-store.ts").resetQuotaReadingsForTest(); // 夹具对额度答 404 会让同一台机器停拉，同上
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   await GlobalRegistrator.unregister();
 });
