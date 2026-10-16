@@ -116,6 +116,12 @@ const opened = (page: Page) => page.evaluate("document.body.dataset.open ?? ''")
 const teamPage = (page: Page) => page.locator("[data-collab-view='team']");
 const stack = (page: Page, team: string) => page.locator(`[data-team-entry='${team}']`);
 const reads = (project: string) => log.filter((l) => l === `mac-a /team/roster?project=${project}`).length;
+async function until(ok: () => boolean, what: string, ms = 10_000) {
+  for (const end = Date.now() + ms; !ok();) {
+    if (Date.now() > end) throw new Error(`timeout waiting for ${what}`);
+    await Bun.sleep(50);
+  }
+}
 /** Distinct /api paths plus the snapshot read count, compared between the base and this commit after the same settle time. */
 const apiSummary = () => ({ paths: [...new Set(log.map((l) => l.replace(/\?.*$/, "")))].sort(),
   snapshots: log.filter((l) => l.endsWith("/shared-projects/snapshot")).length });
@@ -177,8 +183,9 @@ test.skipIf(!!baseline)("entry adds no request; stack opens the team page; back,
       await page.locator("[data-roster-member]").first().waitFor();
       const old = reads("alpha-app");
       await page.clock.runFor(61_000);
+      // runFor only fires the poll timer; the request reaches the fake server a moment later (real time).
+      await until(() => reads("beta-app") === 2, "second beta-app roster read");
       expect(reads("alpha-app")).toBe(old);
-      expect(reads("beta-app")).toBe(2);
       await shot(page, "team-page-switched", width, external, errors);
 
       // [2] Open in collab view: same project, center key, view back to null.
