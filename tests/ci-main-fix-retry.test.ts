@@ -17,9 +17,11 @@ import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { bounceWork, fixBounce } from "../src/lib/scheduler-merge-conflict.js";
 import { listEvents } from "../src/lib/ledger-store.js";
-import { recordObserved, type RecoveryMode } from "../src/lib/recovery-policy.js";
+import { recordObserved, type ObservedAction, type RecoveryMode } from "../src/lib/recovery-policy.js";
 import { defaultRecoveryMode } from "../src/lib/recovery-key-defaults.js";
-import { CI_MAIN_FIX_RETRY_KEY, configureRetryPolicy, WAIT_OP, WAIT_TTL_MS } from "../src/lib/ci-main-fix-retry.js";
+import { CI_MAIN_FIX_RETRY_KEY, configureRetryPolicy, RETRY_SETTLE_MS, WAIT_OP, WAIT_TTL_MS } from "../src/lib/ci-main-fix-retry.js";
+import { schedulerV2SkipManager } from "../src/lib/scheduler-v2-skip.js";
+import { configureCardPausePolicy } from "../src/lib/card-pause.js";
 import { ciDecisionClaim, DECISION_OP, DecisionTrail, decisionReceipt } from "../src/lib/ci-main-fix-retry-decision.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { ciMainFixRetryTick, retryGh, type RetryGh } from "../src/lib/ci-main-fix-retry-tick.js";
@@ -172,7 +174,7 @@ describe("[验收线 3] main fixed the failing file → one update-branch for a 
       expect(await c.retry()).toEqual([]);
       expect(c.updates()).toEqual([["gh", "api", "-X", "PUT", "repos/example/repo/pulls/7/update-branch", "-f", `expected_head_sha=${HEAD}`]]);
       expect(c.samples().map((s) => s.data)).toEqual([expect.objectContaining({ executed: true, peer: true, files: [STALE], prHead: HEAD,
-        commits: { [STALE]: [FIX.slice(0, 12)] } })]);
+        commits: { [STALE]: [FIX.slice(0, 12)] } }), expect.objectContaining({ actionKey: `sent:${HEAD}:77:r0`, sent: `retry:${HEAD}:77` })]);
       await c.retry(); // GitHub has not shown the new head yet: the sample stands for the one retry
       c.gh.prHead = NEW;
       await c.retry();
@@ -365,6 +367,81 @@ describe("[验收线 5] the ciMainFixRetry switch", () => {
       await c.retry();
       expect([c.updates(), c.samples()]).toEqual([[], []]);
       expect(c.gh.argv.filter((a) => a.join(" ").includes("pulls/7 --jq"))).toEqual([]);
+    });
+  });
+});
+
+describe("[验收线 3][验收线 4] an unsent retry is never used up: a pause during the sample write, through the production skip manager", () => {
+  const decide = (c: ReturnType<typeof card>, op: "card_pause" | "card_resume", now: number) =>
+    insertEvent(c.db, { actor: "pm", now }, { project: "p", target: "T9", kind: "decision", text: "test", data: { op } }, false);
+  /** ciMainFixRetryStep's record port, over schedulerV2SkipManager around a manager that writes the sample like the ledger command does. */
+  const skipRecord = (c: ReturnType<typeof card>, now: number, onSample: (key: string) => void = () => {}) => {
+    const manager = schedulerV2SkipManager(c.db, async (...args: string[]) => {
+      const flag = (f: string) => args[args.indexOf(f) + 1]!;
+      const r = recordObserved(c.db, { project: "p", target: args[2]!, mechanism: flag("--mechanism") as ObservedAction["mechanism"], actionKey: flag("--action-key"),
+        action: flag("--action"), data: JSON.parse(flag("--data")) as Record<string, unknown> }, now);
+      onSample(flag("--action-key"));
+      return { ok: true, recorded: r.recorded };
+    });
+    return async (a: ObservedAction) => {
+      const r = await manager("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey,
+        "--action", a.action, "--data", JSON.stringify(a.data ?? {}));
+      return { recorded: r.held !== true && r.recorded === true };
+    };
+  };
+  const tickVia = (c: ReturnType<typeof card>, now: number, record: (a: ObservedAction) => Promise<{ recorded: boolean }>) =>
+    ciMainFixRetryTick(c.db, ["p"], { gh: retryGh(fakeGh(c.gh) as never), record, now: () => now });
+  afterEach(() => configureCardPausePolicy(null));
+
+  test("card paused right after the retry sample commits → nothing sent, release held; after resume exactly one pinned update", async () => {
+    policy("on");
+    configureCardPausePolicy((_p, key) => ({ mode: key === "cardPause" ? "on" : "off", manualAfterMs: null, source: "config" }));
+    await withCard({}, true, async (c) => {
+      await c.tick();
+      mainFixed(c);
+      const now = NOW + 1000;
+      expect(await tickVia(c, now, skipRecord(c, now, (key) => { if (key.startsWith("retry:")) decide(c, "card_pause", now); }))).toEqual([]);
+      expect(c.updates()).toEqual([]);
+      const { retriedFiles } = await import("../src/lib/ci-main-fix-retry.js");
+      expect(retriedFiles(c.db, "T9")).toEqual([]); // nothing was sent: not a retry
+      await tickVia(c, now + 10, skipRecord(c, now + 10)); // still paused
+      expect(c.updates()).toEqual([]);
+      decide(c, "card_resume", now + 20);
+      await tickVia(c, now + 30, skipRecord(c, now + 30));
+      await tickVia(c, now + 40, skipRecord(c, now + 40));
+      await tickVia(c, now + 50, skipRecord(c, now + 50));
+      expect(c.updates()).toEqual([["gh", "api", "-X", "PUT", "repos/example/repo/pulls/7/update-branch", "-f", `expected_head_sha=${HEAD}`]]);
+      expect(retriedFiles(c.db, "T9")).toEqual([[STALE]]);
+    });
+  });
+
+  test("after a restart: a retry sample with neither release nor send mark is released once it is settled and the PR head never moved", async () => {
+    policy("on");
+    await withCard({}, true, async (c) => {
+      await c.tick();
+      mainFixed(c);
+      const reg = c.notes(WAIT_OP)[0]!;
+      // what a process stopped between the sample and the release leaves behind (its memory is gone)
+      recordObserved(c.db, { project: "p", target: "T9", mechanism: CI_MAIN_FIX_RETRY_KEY, actionKey: `retry:${HEAD}:77`, action: "x",
+        data: { registrationSeq: reg.seq, prHead: HEAD, run: RUN, files: [STALE], executed: true } }, NOW + 1000);
+      await c.retry(NOW + 2000);
+      expect(c.updates()).toEqual([]); // too fresh: a send may still be landing on GitHub
+      await c.retry(NOW + 1000 + RETRY_SETTLE_MS);
+      await c.retry(NOW + 1001 + RETRY_SETTLE_MS);
+      await c.retry(NOW + 1002 + RETRY_SETTLE_MS);
+      expect(c.updates().length).toBe(1);
+    });
+  });
+
+  test("a sent retry is never reconciled: the send mark (or a moved head) keeps it used up", async () => {
+    policy("on");
+    await withCard({ update: new Error("HTTP 502: bad gateway") }, true, async (c) => {
+      await c.tick();
+      mainFixed(c);
+      await c.retry();
+      expect(c.updates().length).toBe(1);
+      await c.retry(NOW + 1000 + RETRY_SETTLE_MS * 2);
+      expect(c.updates().length).toBe(1);
     });
   });
 });

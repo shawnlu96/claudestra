@@ -51,25 +51,51 @@ export const retryActionKey = (reg: Pick<Registration, "prHead" | "runId">, atte
   `retry:${reg.prHead}:${reg.runId}${attempt ? `:r${attempt}` : ""}`;
 /** The release sample of attempt n's executed sample (recordObserved, executed false, `released` = that sample's key). */
 export const releaseActionKey = (reg: Pick<Registration, "prHead" | "runId">, attempt: number): string => `release:${reg.prHead}:${reg.runId}:r${attempt}`;
+/** The send mark of attempt n's executed sample, written once update-branch was sent (whatever GitHub answered; `sent` = that sample's key). */
+export const sentActionKey = (reg: Pick<Registration, "prHead" | "runId">, attempt: number): string => `sent:${reg.prHead}:${reg.runId}:r${attempt}`;
+/**
+ * An executed sample with neither a release nor a send mark, older than this, whose PR head never moved, was not sent by a process
+ * that has since gone (a sent update-branch moves the head within seconds): the tick releases it (ci-main-fix-retry-tick.ts).
+ */
+export const RETRY_SETTLE_MS = 10 * 60_000;
+
+/** Executed samples this process sent, per ledger (`card\nkey`): never released, even while their send mark could not be written (held). */
+const sentHere = new WeakMap<Database, Set<string>>();
+export function markSentHere(db: Database, taskId: string, key: string): void {
+  const sent = sentHere.get(db) ?? new Set<string>();
+  sentHere.set(db, sent.add(`${taskId}\n${key}`));
+}
+export const sentHereHas = (db: Database, taskId: string, key: string): boolean => !!sentHere.get(db)?.has(`${taskId}\n${key}`);
 
 const json = (raw: unknown): Record<string, unknown> => {
   try { return typeof raw === "string" ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { return {}; }
 };
-const samplesOf = (db: Database, taskId: string): Record<string, unknown>[] => (db.query(`SELECT data FROM events WHERE target=? AND kind='note'
-  AND json_extract(data,'$.op')=? AND json_extract(data,'$.mechanism')=? ORDER BY seq`).all(taskId, OBSERVE_OP, CI_MAIN_FIX_RETRY_KEY) as { data: string }[])
-  .map((r) => json(r.data));
-const releasedKeys = (samples: Record<string, unknown>[]): Set<unknown> => new Set(samples.map((d) => d.released).filter((k) => typeof k === "string"));
-/** File sets this card was already retried for (an executed retry sample not released): such a set is not registered again. */
+const samplesOf = (db: Database, taskId: string): (Record<string, unknown> & { ts: number })[] => (db.query(`SELECT ts, data FROM events WHERE target=?
+  AND kind='note' AND json_extract(data,'$.op')=? AND json_extract(data,'$.mechanism')=? ORDER BY seq`).all(taskId, OBSERVE_OP, CI_MAIN_FIX_RETRY_KEY) as
+  { ts: number; data: string }[]).map((r) => ({ ...json(r.data), ts: r.ts }));
+const keysOf = (samples: Record<string, unknown>[], field: "released" | "sent"): Set<unknown> =>
+  new Set(samples.map((d) => d[field]).filter((k) => typeof k === "string"));
+/**
+ * File sets this card was already retried for: an executed sample actually sent (its send mark, or sent by this process). One stopped
+ * before the send, released or not yet, is no retry, so such a set is registered again after a later red.
+ */
 export function retriedFiles(db: Database, taskId: string): string[][] {
-  const samples = samplesOf(db, taskId), released = releasedKeys(samples);
-  return samples.filter((d) => d.executed === true && Array.isArray(d.files) && !released.has(d.actionKey)).map((d) => d.files as string[]);
+  const samples = samplesOf(db, taskId), sent = keysOf(samples, "sent");
+  return samples.filter((d) => d.executed === true && Array.isArray(d.files) && (sent.has(d.actionKey) || sentHereHas(db, taskId, String(d.actionKey))))
+    .map((d) => d.files as string[]);
 }
 /** This registration's current attempt: how many of its executed samples were released before update-branch. */
 export function retryAttempt(db: Database, taskId: string, reg: Registration): number {
-  const keys = releasedKeys(samplesOf(db, taskId));
+  const keys = keysOf(samplesOf(db, taskId), "released");
   let n = 0;
   while (keys.has(retryActionKey(reg, n))) n++;
   return n;
+}
+/** The current attempt's executed sample when it has no send mark (released ones are past attempts): stopped before the send, or unknown. */
+export function unsentRetry(db: Database, taskId: string, reg: Registration): { attempt: number; key: string; ts: number } | null {
+  const samples = samplesOf(db, taskId), attempt = retryAttempt(db, taskId, reg), key = retryActionKey(reg, attempt);
+  const sample = samples.find((d) => d.actionKey === key && d.executed === true);
+  return sample && !keysOf(samples, "sent").has(key) ? { attempt, key, ts: sample.ts } : null;
 }
 /** Whether this registration's current attempt already has its sample (observe: "would retry" written; on: retried). */
 export const retrySampled = (db: Database, taskId: string, reg: Registration): boolean => !!db.query(`SELECT 1 FROM events WHERE target=? AND kind='note'

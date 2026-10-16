@@ -28,7 +28,8 @@ note 的 data 包括：卡、PR、head、run / attempt、失败测试文件，�
   满足时先写一条 `recordObserved` 样本（键为卡 + head + run，同时起预写标记的作用）：
   - on 档的 peer PR 卡：样本标 `executed: true`，然后带 `expected_head_sha` = 登记的 head 做一次 update-branch。GitHub 拒绝（422）只打日志。之后的新 head 交给 PEERHEAD1：自动卡登记新 head，round+1 后审查；manual 卡照旧受 peerPrRequeue 约束（headWrite 对纯合 main 的新 head 照旧不动，交给 PM）。
   - 本机执行者的卡，或开关为 observe：只记“本会重试”样本（`executed: false`），不做 update-branch。
-- **授权逐次重读**：开关档位、卡（阶段、head、是不是 peer 卡）和 `flowBlock` 不跨 await 沿用。在 GitHub 读完之后重读一次；样本写完之后、发 update-branch 之前再读一次，这次读和发送之间没有 await。读 GitHub 期间冻结了、hold 了，或开关切到 off / observe，就不发。写完样本才被拦下时，补记一条撤回样本（`release:<head>:<run>:r<n>`，`released` = 那条样本的键），这条登记的下一次尝试换用键 `retry:<head>:<run>:r<n+1>`，拦截解除后仍能重试一次。撤回的样本不算“真正重试过”。撤回样本没记上的，按已用掉处理（不会再发）。
+- **授权逐次重读**：开关档位、卡（阶段、head、是不是 peer 卡）和 `flowBlock` 不跨 await 沿用。在 GitHub 读完之后重读一次；样本写完之后、发 update-branch 之前再读一次，这次读和发送之间没有 await。读 GitHub 期间冻结了、hold 了，或开关切到 off / observe，就不发。写完样本才被拦下时，补记一条撤回样本（`release:<head>:<run>:r<n>`，`released` = 那条样本的键），这条登记的下一次尝试换用键 `retry:<head>:<run>:r<n+1>`，拦截解除后仍能重试一次。撤回的样本不算“真正重试过”。
+- **没发出的重试不会被用掉**：撤回样本也走调度 pass 的 manager，卡在写样本期间被暂停（或被 v2 跳过）时，这条撤回会被拦下。这时不发 update-branch，撤回留在本进程里，等之后某一轮能写了再补记，补记以后下一次尝试照常带 `expected_head_sha` 发一次。真正发出 update-branch 以后（不管 GitHub 怎么回），补记一条发送记号（`sent:<head>:<run>:r<n>`，`sent` = 那条样本的键）。只有带发送记号（或本进程记得发过）的样本才算“重试过”，也只有这种样本会挡住同一组失败文件再次登记。进程重启后，如果当前尝试有执行样本，但既没有撤回也没有发送记号，要等样本写入满 10 分钟（`RETRY_SETTLE_MS`，update-branch 发出后几秒内就会换 head），并且 GitHub 上的 PR head 一直是登记的 head，才按“没发”补记撤回。PR head 变了就说明已经用掉或作废。这样本进程不会重复发送。剩下的窗口只有一种：发送记号被拦、进程又重启，GitHub 10 分钟后还没换 head；这时重发仍然钉在原 head 上。
 - **防重复**：靠 head 绑定。PR head 变了（已经重试过，或者作者推了新提交），登记就算用掉或作废；重启后再 tick 也因为样本已在、head 已变而不会再发。
 - **开关**：缺省为 on（OBSGATE1 新键规则，不是高风险类）。observe 只登记并记样本；off 不登记、不改作者消息、tick 什么也不做，逐字回到现状。
 

@@ -5,9 +5,11 @@
  * commit after the registered main head that changed one of the failing test files. Then one recordObserved sample per registration
  * (written first: the write-ahead mark), and only under on and only for a peer PR card one update-branch with expected_head_sha =
  * the registered head. Switch, card and flow blocks are read again after the GitHub reads and after the sample write (no await between
- * that last read and the send); stopped there, a release sample hands the registration its next attempt. GitHub refusing it (422:
- * the head moved) is logged, never a failure. The new head is PEERHEAD1's from there.
- * A restart re-reads the same facts: the sample is there and the PR head moved, so nothing is sent twice.
+ * that last read and the send); stopped there, a release sample hands the registration its next attempt. A release the pass manager
+ * holds (the card paused meanwhile) stays pending in this process and is written on a later tick; after a restart an executed sample
+ * with neither release nor send mark, settled (RETRY_SETTLE_MS) and with the PR head never moved, is released then. Once sent, a
+ * send mark (and the moved head) keeps it used up. GitHub refusing it (422: the head moved) is logged, never a failure. The new head
+ * is PEERHEAD1's from there. A restart re-reads the same facts: the sample is there and the PR head moved, so nothing is sent twice.
  * tests/ci-main-fix-retry*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -18,8 +20,8 @@ import { runBounded } from "./run-bounded.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { ciBehindGh } from "./scheduler-merge-ci-behind.js";
 import { isTestProcess } from "./test-guard.js";
-import { CI_MAIN_FIX_RETRY_KEY, isPeerPrCard, ledgerJudge, liveRegistrations, releaseActionKey, retryActionKey, retryAttempt, retryMode, retryPlan,
-  retrySampled, type Registration } from "./ci-main-fix-retry.js";
+import { CI_MAIN_FIX_RETRY_KEY, isPeerPrCard, ledgerJudge, liveRegistrations, markSentHere, releaseActionKey, RETRY_SETTLE_MS, retryActionKey,
+  retryAttempt, retryMode, retryPlan, retrySampled, sentActionKey, sentHereHas, unsentRetry, type Registration } from "./ci-main-fix-retry.js";
 
 /** GitHub reads and the one write this step needs; a test puts its own. */
 export interface RetryGh {
@@ -86,7 +88,33 @@ function authority(db: Database, reg: Registration, ports: RetryPorts, sampleFre
   return { ok: true, mode, peer: isPeerPrCard(task!), repo: pull[1]!, pull: pull[2]! };
 }
 
+/** Releases this process stopped before the send but could not write (held), per ledger: `card\nkey` → why. */
+const stoppedHere = new WeakMap<Database, Map<string, string>>();
+const stoppedOf = (db: Database): Map<string, string> => {
+  const m = stoppedHere.get(db) ?? new Map<string, string>();
+  stoppedHere.set(db, m);
+  return m;
+};
+
+/**
+ * The current attempt's executed sample has no send mark: sent by this process (its mark held) = used up; stopped by this process =
+ * write the pending release; neither (a restart) = release it once settled with the PR head unmoved. A release sends nothing, so it
+ * needs no authority; the next tick's attempt reads it all again.
+ */
+async function reconcile(db: Database, reg: Registration, ports: RetryPorts, unsent: { attempt: number; key: string; ts: number }): Promise<null> {
+  if (sentHereHas(db, reg.taskId, unsent.key)) return null;
+  const stopped = stoppedOf(db).get(`${reg.taskId}\n${unsent.key}`);
+  if (stopped !== undefined) return release(db, reg, ports, unsent.attempt, unsent.key, stopped);
+  if ((ports.now ?? Date.now)() - unsent.ts < RETRY_SETTLE_MS) return null;
+  const pull = PULL.exec(getTask(db, reg.taskId)?.pr ?? reg.pr);
+  if (!pull || (await ports.gh.prHead(pull[1]!, pull[2]!)) !== reg.prHead) return null; // moved: spent or void either way
+  return release(db, reg, ports, unsent.attempt, unsent.key, "重启后核对：没有发送记号，PR head 一直没变，按没发处理");
+}
+
 async function retryOne(db: Database, reg: Registration, ports: RetryPorts): Promise<string | null> {
+  if (retryMode(reg.project, ports.policy) === "off") return null;
+  const unsent = unsentRetry(db, reg.taskId, reg);
+  if (unsent) return reconcile(db, reg, ports, unsent);
   const first = authority(db, reg, ports, true);
   if (!first.ok) return null;
   const prHead = await ports.gh.prHead(first.repo, first.pull);
@@ -109,7 +137,8 @@ async function retryOne(db: Database, reg: Registration, ports: RetryPorts): Pro
   const last = authority(db, reg, ports, false);
   const stop = !last.ok ? last.why : last.mode !== "on" ? "开关已不是 on" : !last.peer ? "已不是 peer PR 卡"
     : last.repo !== now.repo || last.pull !== now.pull ? "卡上的 PR 变了" : null;
-  if (stop) return release(reg, ports, attempt, key, stop);
+  if (stop) return release(db, reg, ports, attempt, key, stop);
+  markSentHere(db, reg.taskId, key);
   try {
     await ports.gh.updateBranch(now.repo, now.pull, reg.prHead);
     console.error(`🔁 [merge] ${reg.taskId} main 已修好失败测试，已合入 main 更新 PR（expected_head_sha ${reg.prHead.slice(0, 12)}），新 head 交 PEERHEAD1`);
@@ -117,16 +146,25 @@ async function retryOne(db: Database, reg: Registration, ports: RetryPorts): Pro
     if (e instanceof SchedulerStopped) throw e;
     console.error(`⚠️ [merge] ${reg.taskId} main 修好后的 update-branch 没成（不算失败，交正常流程）：${oneLine(e)}`);
   }
+  await ports.record({ project: reg.project, mechanism: CI_MAIN_FIX_RETRY_KEY, target: reg.taskId, actionKey: sentActionKey(reg, attempt),
+    action: `重试样本 ${key} 已发出 update-branch`, data: { registrationSeq: reg.seq, prHead: reg.prHead, run: reg.run, files: reg.files, sent: key } })
+    .catch((e: Error) => console.error(`⚠️ [merge] ${reg.taskId} 重试 ${key} 的发送记号没记上（本进程记得已发；PR head 已变也不会再发）：${oneLine(e)}`));
   return null;
 }
 
-/** Nothing was sent after the executed sample: a release sample gives the registration its next attempt once the stop clears. */
-async function release(reg: Registration, ports: RetryPorts, attempt: number, key: string, why: string): Promise<null> {
+/**
+ * Nothing was sent after the executed sample: a release sample gives the registration its next attempt once the stop clears. Held
+ * (the card paused, a v2 skip) or failed, it stays pending here and the next tick writes it (reconcile).
+ */
+async function release(db: Database, reg: Registration, ports: RetryPorts, attempt: number, key: string, why: string): Promise<null> {
   console.error(`⏸️ [merge] ${reg.taskId} main 修好后的重试在发 update-branch 前被拦下（${why}），没发，登记留给下一轮`);
+  const pending = `${reg.taskId}\n${key}`;
+  stoppedOf(db).set(pending, why);
   const { recorded } = await ports.record({ project: reg.project, mechanism: CI_MAIN_FIX_RETRY_KEY, target: reg.taskId,
     actionKey: releaseActionKey(reg, attempt), action: `重试样本 ${key} 没执行就撤回：${why}`.slice(0, 400),
     data: { registrationSeq: reg.seq, prHead: reg.prHead, run: reg.run, files: reg.files, executed: false, released: key, why } });
-  if (!recorded) console.error(`⚠️ [merge] ${reg.taskId} 撤回重试样本 ${key} 没记上，这条登记按已用掉处理（不会再发）`);
+  if (recorded) stoppedOf(db).delete(pending);
+  else console.error(`⚠️ [merge] ${reg.taskId} 撤回重试样本 ${key} 这次没记上（卡暂停 / 被跳过），下一轮再记；记上之前不会发`);
   return null;
 }
 
