@@ -311,7 +311,8 @@ async function lendNoChange(db: Database, ctx: WriteCtx, peer: string, req: Deli
   }
   const actual = checkActual(db, o, req.actual);
   const path = join(deps.reportDir(o), deliverReportName(o));
-  const binding = { orderId: o.orderId, taskId: o.taskId, head: req.deliver.head, specRev: o.specRev, round: o.round, repo: o.repo, evidence: path,
+  const step = { step: o.step as "write" | "fix", round: o.round, executor: `${o.worker}@${peer}` }; // check() 核过的那一行（own），事务里按它结算
+  const binding = { orderId: o.orderId, taskId: o.taskId, head: req.deliver.head, start: o.head, step, specRev: o.specRev, round: o.round, repo: o.repo, evidence: path,
     recheck: (d: Database) => {
       const again = getLendOrder(d, req.orderId);
       if (again?.resultSha) refuse("conflict", "这一单已用另一份交付入账");

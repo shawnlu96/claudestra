@@ -27,7 +27,7 @@ import { deliverDedupKey, withMemoryRefs } from "./memory-tools-refs.js";
 import type { confirmOrderDelivery } from "./ledger-autostart-resume.js";
 import type { BoundedResult } from "./run-bounded.js";
 import { uiReplaySame } from "./ledger-deliver-ui.js";
-import type { NoChange } from "./order-no-change.js";
+import { noChangeReplay, type NoChange } from "./order-no-change.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
 
@@ -121,8 +121,16 @@ function replayed(db: Database, call: VerifiedCall, key: string, orderId: string
 /**
  * CINOOP1：带 noChange 的正式单交付（head = 卡的当前 head，不推空提交）。out_of_scope_ci 仍先核 origin 上分支 head；之后交给
  * `ledger deliver --no-change`（ci-no-change-recovery.ts 专用事务），不带 --from、不推 review；本地合并项目没有 PR CI，不走此出口。
- * 恢复 / 取消与否看回执里的 noChange.outcome；未恢复是拒绝（带原因），不是成功回执。
+ * 单号与会话（来自身份）作为 --order / --session 交给 CLI，在写事务里核「仍是调用方当前的单」。成功后卡已离开 build / fix，所以重试先按单号查
+ * noChange 回执（noChangeReceipt）：同一份返回原 outcome，换了理由 / 证据拒。恢复 / 取消与否看回执里的 noChange.outcome；未恢复是拒绝（带原因），不是成功回执。
  */
+function noChangeReplayed(db: Database, call: VerifiedCall, orderId: string, head: string, nc: NoChange): OrderToolResult | null {
+  const r = noChangeReplay(db, orderId, nc, { head, actor: call.agent });
+  if (r.kind === "none") return null;
+  if (r.kind === "conflict") return refuse("dedup_conflict", "这个单号已用另一份 noChange（或别人）入账，不覆盖");
+  return { ok: true, duplicate: true, orderId, taskId: r.event.target, noChange: { outcome: r.outcome, eventSeq: r.event.seq }, eventSeq: r.event.seq };
+}
+
 async function deliverNoChange(call: VerifiedCall, deps: DeliverDeps, task: { id: string; rev: number; headSHA: string | null },
   w: { orderId: string; head: string; evidence: string; noChange: NoChange; local: boolean; branch: string }, key: string): Promise<OrderToolResult> {
   if (w.local) return refuse("no_change_local", "本地合并项目没有 PR CI，noChange 不适用：按标准答复在证据报告里写明失败的检查");
@@ -133,7 +141,7 @@ async function deliverNoChange(call: VerifiedCall, deps: DeliverDeps, task: { id
     if (remote.head !== w.head) return refuse("head_mismatch", `origin 上 ${w.branch} 的 head 是 ${remote.head}，不是 ${w.head}`);
   }
   const r = await ledgerWrite(call, deps.run, "deliver", task.id, { head: w.head, evidence: w.evidence, "no-change": JSON.stringify(w.noChange),
-    rev: String(task.rev), branch: w.branch }, key);
+    order: w.orderId, ...(call.sessionId ? { session: call.sessionId } : {}), rev: String(task.rev), branch: w.branch }, key);
   if (!r.ok) return r;
   return { ok: true, duplicate: r.duplicate === true, orderId: w.orderId, taskId: task.id, noChange: r.noChange ?? null, eventSeq: r.eventSeq ?? null };
 }
@@ -145,6 +153,8 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   if (!SHA40.test(head)) return refuse("invalid_wire", "head 要是小写的完整 40 位 SHA");
   if (!deps.db) return refuse("no_ledger", "这台机器没有台账");
   const key = deliverDedupKey(orderId, head);
+  const ncAgain = noChange ? noChangeReplayed(deps.db, call, orderId, head, noChange) : null;
+  if (ncAgain) return ncAgain;
   const again = replayed(deps.db, call, key, orderId, uiEvidence);
   if (again) return withMemoryRefs(again, call, deps.run, orderId, head, memoryRefs); // 交付之后补记 memoryRefs（wrong → dispute），重放也补
   const cur = currentOrders(deps.db, call).find((o) => o.orderId === orderId);

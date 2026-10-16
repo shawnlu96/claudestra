@@ -361,10 +361,10 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
   deliver: {
-    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes", "ui-evidence", "no-change"],
+    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes", "ui-evidence", "no-change", "order", "session"],
     usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--disputes JSON] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]" +
       " [--ui-evidence JSON：ui 卡前后截图清单，只登记证据不批准]" +
-      " [--no-change JSON --head <当前 head>：核实无需改码，接收端核验、CI 全绿才同轮恢复到 merge / main 已解决的修复卡取消；不和 --from 同用]" +
+      " [--no-change JSON --head <当前 head> --order <当前单号> [--session <会话 id>]：核实无需改码，接收端核验、CI 全绿才同轮恢复到 merge / main 已解决的修复卡取消；不和 --from 同用]" +
       " [--pr <完整 PR URL>：卡上空或非完整时同一事务写入，已是另一个完整 URL 就拒]",
     run: deliverCmd,
   },

@@ -7,12 +7,16 @@
  *   每卡同 head + 规格最多成功一次（按台账里的恢复阶段事件数，重启 / 新订单不重置）。
  * - main_already_resolved：MAINRED1 生成的卡（main_red_fix_node、source=mainRedFix、节点仍绑本卡），当前 main 与同 workflow 最新 run 已绿：
  *   原子取消卡、结算步骤与未发出的意图、记解决证据；不进 review / merge，不算修好。
+ * 两个入口都要把真实订单交进来：单号、起点 head、这一单的步骤行（step / round / executor）与调用方自己的重核；写事务里步骤行必须恰好结一行。
+ * 同单的成功结果按 `no-change:<单号>` 去重键存一份（含摘要），同一份重放返回原 outcome，换理由 / 证据拒覆盖。
  * off：不收（普通交付照旧）；observe：只记一条拟动作，不推阶段、不结算。tests/ci-no-change-recovery.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { defaultNoChangePort, readMainResolved, readOutOfScope, type CiNoChangePort, type Evidence } from "./ci-no-change-evidence.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
+import { stepAtStage, stepsOf } from "./ledger-steps.js";
+import { currentOrders } from "./order-take.js";
 import { refuse } from "./ledger-lend.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
@@ -22,7 +26,7 @@ import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { NO_CHANGE_WRITE_PORTS } from "./ledger-write.js";
 import { mainRedNodes, nodeState } from "./main-red-fix-place.js";
 import { SOURCE, workflowOf } from "./main-red-fix.js";
-import { noChangeDigest, noChangeHeadRefusal, noChangeStepRefusal, parseNoChangeText, runRef, type MainAlreadyResolved, type NoChange,
+import { NO_CHANGE_DELIVER_OP, noChangeDedupKey, noChangeDigest, noChangeHeadRefusal, noChangeReplay, noChangeStepRefusal, parseNoChangeText, runRef, type MainAlreadyResolved, type NoChange,
   type OutOfScopeCi } from "./order-no-change.js";
 import { noteDefaultOn } from "./recovery-key-defaults.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
@@ -33,7 +37,6 @@ import { getMergeRun, mergeReviewProof } from "./scheduler-merge.js";
 const { transaction: tx, insert: insertEvent } = NO_CHANGE_WRITE_PORTS;
 
 const NO_CHANGE_KEY = "ciNoChangeRecovery" as const;
-const NO_CHANGE_DELIVER_OP = "no_change_deliver";
 const SHA = /^[0-9a-f]{40}$/;
 
 export interface NoChangeDeps {
@@ -44,9 +47,15 @@ export interface NoChangeDeps {
   now: () => number;
 }
 
-/** 调用方（出借单 / 本机单）绑定的那一单；recheck 在写事务里重核调用方自己的身份、租约、撤单等，不过就抛 */
+/** 这一单在 task_steps 里的那一行（写事务按它结算，结不到恰好一行整笔拒） */
+interface NoChangeStep { step: "write" | "fix"; round: number; executor: string }
+
+/**
+ * 调用方（出借单 / 本机单）绑定的那一单；start = 订单起点 head（没记 = null，只有 main_already_resolved 能凭「在 main 历史里」收）；
+ * recheck 在写事务里重核调用方自己的身份、会话、租约、撤单、订单仍是当前的单等，不过就抛
+ */
 export interface NoChangeBinding {
-  orderId: string; taskId: string; head: string; specRev: number; round: number; repo: string; evidence: string;
+  orderId: string; taskId: string; head: string; start: string | null; step: NoChangeStep; specRev: number; round: number; repo: string; evidence: string;
   recheck(db: Database): void;
 }
 
@@ -56,15 +65,21 @@ interface CiPlan { kind: "out_of_scope_ci"; bounceSeq: number; reviewSeq: number
 interface MainPlan { kind: "main_already_resolved"; nodeSeq: number; sourceRunId: number; workflowFile: string; event: string | null; workflow: string }
 type Plan = CiPlan | MainPlan;
 
-const dedupOf = (b: Pick<NoChangeBinding, "orderId">) => `no-change:${b.orderId}`;
+const dedupOf = (b: Pick<NoChangeBinding, "orderId">) => noChangeDedupKey(b.orderId);
 const PR_URL = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)$/;
 
-/** 同一单的 noChange 已入账：同一份 → 原事件；换了理由 / 证据 → 拒覆盖 */
-function replayed(db: Database, b: NoChangeBinding, nc: NoChange): LedgerEvent | null {
-  const prev = getEventByDedup(db, dedupOf(b));
-  if (!prev) return null;
-  if (prev.target !== b.taskId || prev.data.noChangeDigest !== noChangeDigest(nc)) refuse("conflict", "这一单已用另一份 noChange 入账，不覆盖");
-  return prev;
+/** 同一单已入账的 noChange（order-no-change.ts noChangeReplay）：同一份 → 原事件；换了理由 / 证据 → 拒覆盖 */
+function replayed(db: Database, orderId: string, nc: NoChange, who: { taskId?: string; head?: string; actor?: string }): (LedgerEvent & { outcome: "recovered" | "cancelled" }) | null {
+  const r = noChangeReplay(db, orderId, nc, who);
+  if (r.kind === "conflict") refuse("conflict", "这一单已用另一份 noChange 入账，不覆盖");
+  return r.kind === "same" ? { ...r.event, outcome: r.outcome } : null;
+}
+
+/** 正式单的 noChange 回执（本机入口在核「当前的单」之前先查它：成功后卡已离开 build / fix）；没入账 = null，换了份 = 抛 conflict */
+function noChangeReceipt(db: Database, orderId: string, nc: NoChange, who: { head: string; actor: string }):
+  { taskId: string; eventSeq: number; outcome: "recovered" | "cancelled" } | null {
+  const prev = replayed(db, orderId, nc, who);
+  return prev && { taskId: prev.target, eventSeq: prev.seq, outcome: prev.outcome };
 }
 
 /** 规格材料：订单原文摘要没变，且持单期间没有规格追加转给对方（lend_relays kind=spec） */
@@ -115,7 +130,7 @@ function ciPlan(db: Database, task: LedgerTask, b: NoChangeBinding, nc: OutOfSco
 function mainPlan(db: Database, task: LedgerTask, b: NoChangeBinding): MainPlan {
   cardCommon(db, task, b);
   if (task.stage !== "build" && task.stage !== "fix") refuse("invalid", "main_already_resolved 只收 build / fix 阶段的卡");
-  if (task.headSHA && task.headSHA !== b.head) refuse("invalid", "卡上已有别的 head（有新增改动）");
+  if ((task.headSHA && task.headSHA !== b.head) || (b.start !== null && b.start !== b.head)) refuse("invalid", "交付 head 不是订单起点 / 卡的当前 head（有新增改动）");
   const node = mainRedNodes(db, task.project).findLast((n) => n.taskId === task.id) as (ReturnType<typeof mainRedNodes>[number] & { source?: unknown }) | undefined;
   if (!node || node.source !== SOURCE || task.featureId !== node.featureId || nodeState(db, node).node?.taskId !== task.id) {
     refuse("invalid", "本卡没有仍然有效的 MAINRED1 来源（main_red_fix_node / source=mainRedFix / 节点绑定）");
@@ -134,7 +149,8 @@ async function evidenceOf(plan: Plan, b: NoChangeBinding, nc: NoChange, port: Ci
     const r = await readOutOfScope(port, { repo: b.repo, pr: plan.pr, head: b.head, required: plan.required }, nc as OutOfScopeCi);
     return r.ok ? { ok: true, facts: { ...r.facts, checks: r.facts.checks.map((c) => `${c.name}:${c.conclusion}`) } } : r;
   }
-  const r = await readMainResolved(port, { repo: b.repo, workflowFile: plan.workflowFile, event: plan.event, sourceRunId: plan.sourceRunId }, nc as MainAlreadyResolved);
+  const r = await readMainResolved(port, { repo: b.repo, workflowFile: plan.workflowFile, event: plan.event, sourceRunId: plan.sourceRunId, head: b.head, start: b.start },
+    nc as MainAlreadyResolved);
   return r.ok ? { ok: true, facts: { ...r.facts } } : r;
 }
 
@@ -147,8 +163,10 @@ const policyMode = (deps: NoChangeDeps, project: string) => (deps.policy ?? reco
 export async function admitNoChange<T>(db: Database, ctx: WriteCtx, b: NoChangeBinding, nc: NoChange, deps: NoChangeDeps,
   settle: (eventSeq: number, duplicate: boolean) => T): Promise<NoChangeOutcome<T>> {
   if (!SHA.test(b.head)) refuse("invalid", "noChange 交付的 head 要是小写完整 40 位 SHA");
-  const prev = replayed(db, b, nc);
-  if (prev) return { outcome: prev.data.op === NO_CHANGE_DELIVER_OP ? "recovered" : "cancelled", eventSeq: prev.seq, duplicate: true, settled: settle(prev.seq, true) };
+  const who = { taskId: b.taskId, head: b.head };
+  const prev = replayed(db, b.orderId, nc, who);
+  if (prev) return { outcome: prev.outcome, eventSeq: prev.seq, duplicate: true, settled: settle(prev.seq, true) };
+  if (nc.kind === "out_of_scope_ci" && b.start !== b.head) refuse("invalid", "out_of_scope_ci 的交付 head 必须就是订单起点");
   const now = deps.now();
   const task = mustTask(db, b.taskId);
   const policy = noteDefaultOn(db, { project: task.project, mechanism: NO_CHANGE_KEY }, policyMode(deps, task.project), now);
@@ -164,8 +182,8 @@ export async function admitNoChange<T>(db: Database, ctx: WriteCtx, b: NoChangeB
     refuse("unavailable", `${NO_CHANGE_KEY} 是 observe：只记了拟动作，卡未恢复`);
   }
   return tx(db, () => {
-    const again = replayed(db, b, nc);
-    if (again) return { outcome: again.data.op === NO_CHANGE_DELIVER_OP ? "recovered" : "cancelled", eventSeq: again.seq, duplicate: true, settled: settle(again.seq, true) };
+    const again = replayed(db, b.orderId, nc, who);
+    if (again) return { outcome: again.outcome, eventSeq: again.seq, duplicate: true, settled: settle(again.seq, true) };
     b.recheck(db);
     if (policyMode(deps, task.project).mode !== "on") refuse("unavailable", `${NO_CHANGE_KEY} 策略已变，未恢复`);
     const cur = mustTask(db, b.taskId);
@@ -184,15 +202,22 @@ function moveCard(db: Database, task: LedgerTask, to: "merge" | "cancelled", now
   if (r.changes !== 1) refuse("unavailable", "卡在写入时已变，未恢复");
 }
 
+/** 结算这一单的步骤行：必须恰好一行仍是 assigned（步骤被删 / 已结 / 换人都整笔拒，阶段不能脱离步骤单独推） */
+function settleStep(db: Database, task: LedgerTask, s: NoChangeStep, state: "delivered" | "done", head: string | null, now: number): void {
+  const r = db.prepare(`UPDATE task_steps SET state = ?, headFrom = COALESCE(?, headFrom), headTo = COALESCE(?, headTo), rev = rev + 1, updatedAt = ?
+    WHERE taskId = ? AND step = ? AND round = ? AND executor = ? AND state = 'assigned'`).run(state, head, head, now, task.id, s.step, s.round, s.executor);
+  if (r.changes !== 1) refuse("invalid", `这一单的 ${s.step} 步骤（第 ${s.round} 次、${s.executor}）已不是待交状态，未恢复`);
+}
+
 /** 记 noChange 交付 → 受控 fix→merge（轮次 / 规格 / head 不变）→ 修复步骤记为已交（head 不变）；返回交付事件号 */
 function writeRecovered(db: Database, ctx: WriteCtx & { now: number }, task: LedgerTask, b: NoChangeBinding, nc: OutOfScopeCi, plan: CiPlan, facts: Record<string, unknown>): number {
   const base = { project: task.project, target: task.id };
   const d = insertEvent(db, { ...ctx, dedupKey: dedupOf(b) }, { ...base, kind: "deliver", text: `无需改码交付（out_of_scope_ci，单号 ${b.orderId}）：${nc.reason.slice(0, 300)}`,
-    data: { op: NO_CHANGE_DELIVER_OP, round: task.round, headSHA: b.head, evidence: b.evidence, noChange: nc, noChangeDigest: noChangeDigest(nc), orderId: b.orderId } }, true);
+    data: { op: NO_CHANGE_DELIVER_OP, round: task.round, headSHA: b.head, evidence: b.evidence, noChange: nc, noChangeDigest: noChangeDigest(nc), noChangeHead: b.head,
+      orderId: b.orderId } }, true);
   moveCard(db, task, "merge", ctx.now);
-  db.prepare("UPDATE task_steps SET state = 'delivered', headFrom = ?, headTo = ?, rev = rev + 1, updatedAt = ? WHERE taskId = ? AND step = 'fix' AND round = ? AND state = 'assigned'")
-    .run(b.head, b.head, ctx.now, task.id, task.round);
-  insertEvent(db, ctx, { ...base, kind: "step", data: { op: "deliver", step: "fix", round: task.round, headFrom: b.head, headTo: b.head, noChange: true } }, false);
+  settleStep(db, task, b.step, "delivered", b.head, ctx.now);
+  insertEvent(db, ctx, { ...base, kind: "step", data: { op: "deliver", step: b.step.step, round: b.step.round, headFrom: b.head, headTo: b.head, noChange: true } }, false);
   insertEvent(db, ctx, { ...base, kind: "stage", text: "无需改码：原审查仍有效、同 head 最新 CI 全绿，同轮恢复到 merge（重新入队，合并仍由合并闸决定）",
     data: { from: "fix", to: "merge", round: task.round, specRev: task.specRev, head: b.head, noChangeRecovery: { deliverSeq: d.seq, bounceSeq: plan.bounceSeq,
       reviewSeq: plan.reviewSeq, intentId: plan.intentId, head: b.head, orderId: b.orderId, count: 1, ...facts } } }, false);
@@ -204,10 +229,9 @@ function writeRecovered(db: Database, ctx: WriteCtx & { now: number }, task: Led
 function writeCancelled(db: Database, ctx: WriteCtx & { now: number }, task: LedgerTask, b: NoChangeBinding, nc: MainAlreadyResolved, plan: MainPlan, facts: Record<string, unknown>): number {
   const base = { project: task.project, target: task.id };
   const n = insertEvent(db, { ...ctx, dedupKey: dedupOf(b) }, { ...base, kind: "note", text: `main 已解决（MAINRED1 run ${plan.sourceRunId}），无需改码，取消本卡：${nc.reason.slice(0, 300)}`,
-    data: { op: "no_change_resolved", noChange: nc, noChangeDigest: noChangeDigest(nc), orderId: b.orderId, nodeSeq: plan.nodeSeq, ...facts } }, true);
+    data: { op: "no_change_resolved", noChange: nc, noChangeDigest: noChangeDigest(nc), noChangeHead: b.head, orderId: b.orderId, nodeSeq: plan.nodeSeq, ...facts } }, true);
   moveCard(db, task, "cancelled", ctx.now);
-  const step = task.stage === "build" ? "write" : "fix";
-  db.prepare("UPDATE task_steps SET state = 'done', rev = rev + 1, updatedAt = ? WHERE taskId = ? AND step = ? AND round = ? AND state != 'done'").run(ctx.now, task.id, step, task.round);
+  settleStep(db, task, b.step, "done", null, ctx.now);
   const open = db.query("SELECT id, status FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted')").all(task.id) as { id: string; status: string }[];
   for (const i of open) {
     db.prepare("UPDATE scheduler_intents SET status = 'cancelled', receipt = ?, updatedAt = ? WHERE id = ?").run(`main 已解决，noChange 取消（#${n.seq}）`, ctx.now, i.id);
@@ -226,31 +250,46 @@ const repoOfTask = (task: LedgerTask): string | null => {
   try { return parseExtraRepo(task.extra?.repo); } catch { return null; /* 坏的 extra.repo 等于没有仓库坐标：下面按缺仓库拒，不猜 */ }
 };
 
+/** 本机的「当前的单」（order-take.ts 同一口径：步骤派给调用方、会话绑定、派单意图 / 手动单号、没借出去）；不是就抛 */
+function localOrder(db: Database, taskId: string, actor: string, session: string | null, orderId: string): { task: LedgerTask; step: NoChangeStep } {
+  const cur = currentOrders(db, { agent: actor, sessionId: session, family: null, channelId: "" }).find((o) => o.orderId === orderId && o.task.id === taskId);
+  if (!cur) refuse("invalid", `${orderId} 不是 ${actor} 在 ${taskId} 上当前的单（会话 / 步骤 / 派单不对，或卡已被收回）`);
+  const at = stepAtStage(stepsOf(db, cur!.task), cur!.task);
+  if (!at || at.derived || at.state !== "assigned" || at.step !== cur!.step) refuse("invalid", "这一单没有待交的步骤行，不收 noChange");
+  return { task: cur!.task, step: { step: cur!.step, round: at!.round, executor: at!.executor } };
+}
+
 /**
- * 本机入口（`ledger deliver <task> --no-change <json> --head <sha>`，MCP deliver 带 noChange 时由 bridge 以执行者身份调它）：调用方身份由 CLI 核过
- * （requireOwnOrManager / mcp-deliver 只给执行者本人）；head 必须就是卡的当前 head；--rev / --branch 前置条件在写事务里重核。
+ * 本机入口（`ledger deliver <task> --no-change <json> --head <sha> --order <单号> [--session <id>]`；MCP deliver 带 noChange 时由 bridge 以执行者身份、
+ * 用调用方的单号与会话调它）：必须是调用方本人当前的单，起点 = 接单时卡的 head；单号、会话、步骤、起点与 --rev / --branch 在写事务里重核。
+ * 同单已入账的先按单号回放（卡已到 merge / cancelled，当前单核对会误拒原样重试）。
  */
 export async function deliverNoChangeLocal(db: Database, ctx: WriteCtx, task: LedgerTask, flags: Record<string, string | undefined>, now: () => number,
   deps: Partial<NoChangeDeps> = {}): Promise<Record<string, unknown>> {
   const nc = parseNoChangeText(flags["no-change"] ?? "");
   if (!nc.ok) throw new LedgerError("invalid", nc.error);
   if (flags.from !== undefined || flags["ui-evidence"] !== undefined || flags.disputes !== undefined) throw new LedgerError("invalid", "--no-change 不和 --from / --ui-evidence / --disputes 同用");
-  const head = flags.head;
+  const { head, order: orderId } = flags;
   if (!head) throw new LedgerError("invalid", "--no-change 要带 --head（卡的当前 head，不推空提交）");
-  const orderId = `local:${task.id}:s${task.specRev}:r${task.round}`;
-  // 已入账的同一单先交给 admitNoChange 回放（卡已到 merge / cancelled，阶段核对会误拒原样重试）
-  const bad = getEventByDedup(db, dedupOf({ orderId })) ? null
-    : noChangeStepRefusal(task.stage === "build" ? "write" : task.stage, nc.value) ?? noChangeHeadRefusal(task.headSHA ?? head, head, nc.value);
+  if (!orderId) throw new LedgerError("invalid", "--no-change 要带 --order <你当前的单号>（take_order 给的 orderId）");
+  const done = noChangeReceipt(db, orderId, nc.value, { head, actor: ctx.actor });
+  if (done && done.taskId !== task.id) refuse("conflict", "这个单号已用在别的卡上");
+  if (done) return { ok: true, task: mustTask(db, task.id), duplicate: true, eventSeq: done.eventSeq, noChange: { outcome: done.outcome, eventSeq: done.eventSeq } };
+  const session = flags.session ?? null;
+  const bound = localOrder(db, task.id, ctx.actor, session, orderId);
+  const start = bound.task.headSHA ?? null;
+  const bad = noChangeStepRefusal(bound.step.step, nc.value) ?? (start === null && nc.value.kind === "main_already_resolved" ? null : noChangeHeadRefusal(start, head, nc.value));
   if (bad) throw new LedgerError("invalid", bad);
   const repo = repoOfTask(task);
   if (!repo) throw new LedgerError("invalid", "卡上没有完整 PR 链接或 extra.repo，核不了外部 CI");
   const rev = flags.rev === undefined ? undefined : Number(flags.rev);
-  const binding: NoChangeBinding = { orderId, taskId: task.id, head, specRev: task.specRev, round: task.round, repo,
-    evidence: flags.evidence ?? "", recheck: (d) => {
-      const cur = mustTask(d, task.id);
-      if ((rev !== undefined && cur.rev !== rev) || (flags.branch !== undefined && cur.branch !== flags.branch)) refuse("unavailable", "卡在核对之后被改过，重新核对后再交");
-    } };
   if (rev !== undefined && task.rev !== rev) refuse("unavailable", "卡已不是 --rev 给的版本，重新核对后再交");
+  const binding: NoChangeBinding = { orderId, taskId: task.id, head, start, step: bound.step, specRev: task.specRev, round: task.round,
+    repo, evidence: flags.evidence ?? "", recheck: (d) => {
+      const again = localOrder(d, task.id, ctx.actor, session, orderId);
+      if (JSON.stringify(again.step) !== JSON.stringify(bound.step) || (again.task.headSHA ?? null) !== start) refuse("unavailable", "核对期间这一单的步骤或起点变了，未恢复");
+      if ((rev !== undefined && again.task.rev !== rev) || (flags.branch !== undefined && again.task.branch !== flags.branch)) refuse("unavailable", "卡在核对之后被改过，重新核对后再交");
+    } };
   const r = await admitNoChange(db, { actor: ctx.actor, now: ctx.now }, binding, nc.value,
     { port: deps.port ?? defaultNoChangePort(), policy: deps.policy, reviewProof: deps.reviewProof, now }, () => null);
   return { ok: true, task: mustTask(db, task.id), duplicate: r.duplicate, eventSeq: r.eventSeq, noChange: { outcome: r.outcome, eventSeq: r.eventSeq } };

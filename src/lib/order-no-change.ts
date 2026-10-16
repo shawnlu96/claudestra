@@ -5,7 +5,10 @@
  * 解析严格：未知字段 / 未知 kind / 空理由 / 畸形链接一律拒，不丢不截（同 order-wire.ts 的口径）。旧调用不带 noChange 行为不变。
  * 判定与事务在 ci-no-change-recovery.ts，外部证据在 ci-no-change-evidence.ts。tests/order-no-change.test.ts。
  */
+import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { getEventByDedup } from "./ledger-store.js";
+import type { LedgerEvent } from "./ledger-stages.js";
 
 const NO_CHANGE_KINDS = ["out_of_scope_ci", "main_already_resolved"] as const;
 export interface OutOfScopeCi { kind: "out_of_scope_ci"; reason: string; run: string; files: string[] }
@@ -90,6 +93,20 @@ export function parseNoChangeText(text: string): NoChangeRead {
 }
 
 export const noChangeDigest = (nc: NoChange): string => createHash("sha256").update(JSON.stringify(nc)).digest("hex");
+
+/** 同一单 noChange 成功结果的去重键：两个入口（出借 / 本机 CLI / MCP）都按真实单号存、按单号查 */
+export const noChangeDedupKey = (orderId: string): string => `no-change:${orderId}`;
+export const NO_CHANGE_DELIVER_OP = "no_change_deliver";
+
+export type NoChangeReplay = { kind: "none" } | { kind: "conflict" } | { kind: "same"; event: LedgerEvent; outcome: "recovered" | "cancelled" };
+/** 同一单的 noChange 已入账：同一份（同摘要；给了卡 / head / actor 就也要同）→ 原事件与原 outcome；换了理由 / 证据 / 人 → conflict */
+export function noChangeReplay(db: Database, orderId: string, nc: NoChange, who: { taskId?: string; head?: string; actor?: string }): NoChangeReplay {
+  const prev = getEventByDedup(db, noChangeDedupKey(orderId));
+  if (!prev) return { kind: "none" };
+  const same = prev.data.noChangeDigest === noChangeDigest(nc) && (who.taskId === undefined || prev.target === who.taskId)
+    && (who.head === undefined || prev.data.noChangeHead === who.head) && (who.actor === undefined || prev.actor === who.actor);
+  return same ? { kind: "same", event: prev, outcome: prev.data.op === NO_CHANGE_DELIVER_OP ? "recovered" : "cancelled" } : { kind: "conflict" };
+}
 
 // ── DeliverWire wiring（order-wire.ts parseDeliverWire）：可省、严格，同 uiEvidence / disputes 的接法 ──
 

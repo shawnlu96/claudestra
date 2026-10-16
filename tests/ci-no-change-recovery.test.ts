@@ -7,7 +7,8 @@ import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { admitNoChange, deliverNoChangeLocal, orderSnapshotProblem, type NoChangeBinding, type NoChangeDeps } from "../src/lib/ci-no-change-recovery.js";
 import type { CheckRow, CiNoChangePort, RunRead } from "../src/lib/ci-no-change-evidence.js";
-import { ciGreen, failureFilesMatch } from "../src/lib/ci-no-change-evidence.js";
+import { ciGreen, dependencyImpact, failureFilesMatch } from "../src/lib/ci-no-change-evidence.js";
+import { deliverOrder } from "../src/lib/order-deliver.js";
 import { listSteps } from "../src/lib/ledger-steps.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
@@ -37,6 +38,8 @@ let mainRuns: MainRedRun[];
 let onRead: (() => void) | null;
 let reviewProof: NoChangeDeps["reviewProof"];
 let reviewSeq: number;
+let files: Record<string, string>;
+let ancestor: boolean;
 
 const green = (): CheckRow[] => [{ name: "test", status: "completed", conclusion: "success" }, { name: "guard", status: "completed", conclusion: "success" }];
 const port: CiNoChangePort = {
@@ -45,14 +48,20 @@ const port: CiNoChangePort = {
   prFiles: async () => prFiles,
   mainHead: async () => { onRead?.(); return mainHead; },
   mainRuns: async () => mainRuns,
+  tree: async () => Object.keys(files),
+  fileText: async (_r, _h, f) => { if (!(f in files)) throw new Error(`没有 ${f}`); return files[f]!; },
+  isAncestor: async () => ancestor,
 };
 const policy = (): RecoveryPolicy => ({ mode, manualAfterMs: null, source: "config" });
 const deps = (): Partial<NoChangeDeps> => ({ port, policy, reviewProof });
 const OOS: NoChange = { kind: "out_of_scope_ci", reason: "范围外时序波动，和本卡改动无关", run: RUN, files: ["tests/flaky.test.ts"] };
 
 const events = (target = "T1") => listEvents(db, { project: P, target });
-const deliverLocal = (nc: NoChange = OOS, more: Record<string, string> = {}, target = "T1") =>
-  deliverNoChangeLocal(db, { actor: "agent-dev", now: NOW }, getTask(db, target)!, { "no-change": JSON.stringify(nc), head: H, evidence: "e.md", ...more }, () => NOW, deps());
+const ORDER: Record<string, string> = { T1: "T1:fix:r1", T2: "T2:write:r0" };
+const deliverLocal = (nc: NoChange = OOS, more: Record<string, string> = {}, target = "T1", actor = "agent-dev") =>
+  deliverNoChangeLocal(db, { actor, now: NOW }, getTask(db, target)!, { "no-change": JSON.stringify(nc), head: H, evidence: "e.md", order: ORDER[target]!, ...more },
+    () => NOW, deps());
+const STEP = { step: "fix" as const, round: 1, executor: "agent-dev" };
 const reject = async (p: Promise<unknown>, code: string, re?: RegExp) => {
   const e = await p.then(() => null, (x: { message: string; current?: { lend?: string } }) => x);
   expect(e?.current?.lend).toBe(code);
@@ -74,7 +83,8 @@ function bounce(cause = "ci_fail", intentId = "mi1"): void {
 
 beforeEach(() => {
   db = openLedger(":memory:");
-  mode = "on"; checks = green(); prFiles = ["src/lib/x.ts"]; onRead = null; mainHead = M;
+  mode = "on"; checks = green(); prFiles = ["src/lib/x.ts"]; onRead = null; mainHead = M; ancestor = true;
+  files = { "tests/flaky.test.ts": 'import { y } from "../src/lib/y.js";', "src/lib/y.ts": 'export const y = 1; import "./z";', "src/lib/z.ts": "", "src/lib/x.ts": "" };
   run = { headSha: H, attempt: 1, status: "completed", conclusion: "failure", log: failedLog("tests/flaky.test.ts") };
   mainRuns = [{ id: 900, attempt: 1, status: "completed", conclusion: "success", headSha: M, url: `https://github.com/${REPO}/actions/runs/900`, createdAt: 3 },
     { id: 800, attempt: 1, status: "completed", conclusion: "failure", headSha: M2, url: `https://github.com/${REPO}/actions/runs/800`, createdAt: 2 }];
@@ -131,7 +141,8 @@ describe("out_of_scope_ci：同轮恢复", () => {
     await deliverLocal();
     bounce("ci_fail", "mi2");
     const t = getTask(db, "T1")!;
-    const binding: NoChangeBinding = { orderId: "lend:T1:s0:r1:a1", taskId: "T1", head: H, specRev: 1, round: 1, repo: REPO, evidence: "e", recheck: () => {} };
+    const binding: NoChangeBinding = { orderId: "lend:T1:s0:r1:a1", taskId: "T1", head: H, start: H, step: STEP, specRev: 1, round: 1, repo: REPO, evidence: "e",
+      recheck: () => {} };
     await reject(admitNoChange(db, { actor: "x", now: NOW }, binding, OOS, { ...deps(), port, now: () => NOW } as NoChangeDeps, () => 1), "conflict", /恢复过一次/);
     expect(getTask(db, "T1")).toMatchObject({ stage: "fix", rev: t.rev });
     expect(events().filter((e) => e.kind === "scheduler" && e.data.op === "merge_conflict").length).toBe(2);
@@ -189,7 +200,8 @@ describe("out_of_scope_ci：同轮恢复", () => {
     await reject(deliverLocal(), "unavailable", /被改过/);
     expect(events().length).toBe(n);
     onRead = null;
-    const b: NoChangeBinding = { orderId: "lend:T1:s0:r1:a0", taskId: "T1", head: H, specRev: 1, round: 1, repo: REPO, evidence: "e", recheck: () => {} };
+    const b: NoChangeBinding = { orderId: "lend:T1:s0:r1:a0", taskId: "T1", head: H, start: H, step: STEP, specRev: 1, round: 1, repo: REPO, evidence: "e",
+      recheck: () => {} };
     const fail = admitNoChange(db, { actor: "x", now: NOW }, b, OOS, { port, policy, reviewProof, now: () => NOW }, () => { throw new Error("签不了回执"); });
     expect(await fail.then(() => null, (e: Error) => e.message)).toBe("签不了回执");
     expect(events().length).toBe(n);
@@ -213,6 +225,57 @@ describe("out_of_scope_ci：同轮恢复", () => {
     expect(notes.length).toBe(1);
     expect(getTask(db, "T1")).toMatchObject({ stage: "fix", round: 1 });
     expect(() => moveStage(db, { actor: "agent-pm", now: NOW }, { taskId: "T1", from: "fix", to: "merge" })).toThrow();
+  });
+
+  test("r1-P1 dependency-proof：导入闭包碰到 PR 改动 / 改了全局输入 / 依赖里提到改动文件名 / 闭包读不到 → 不恢复", async () => {
+    const n = events().length;
+    prFiles = ["src/lib/z.ts"]; // 测试 → y.ts → z.ts
+    await reject(deliverLocal(), "invalid", /导入闭包包含 PR 改动的 src\/lib\/z\.ts/);
+    prFiles = ["package.json"];
+    await reject(deliverLocal(), "invalid", /全局输入/);
+    prFiles = ["src/manager.ts"];
+    files = { ...files, "src/manager.ts": "", "src/lib/z.ts": 'spawn(["bun", join(SRC, "manager.ts")]);' };
+    await reject(deliverLocal(), "invalid", /提到了 PR 改动的 src\/manager\.ts/);
+    prFiles = ["src/lib/x.ts"];
+    files = { ...files, "src/lib/z.ts": "" };
+    expect(events().length).toBe(n);
+    expect(getTask(db, "T1")).toMatchObject({ stage: "fix" });
+    const broken: CiNoChangePort = { ...port, fileText: async () => { throw new Error("gh 502"); } };
+    expect(await dependencyImpact(broken, REPO, H, ["tests/flaky.test.ts"], ["src/lib/x.ts"])).toMatchObject({ ok: false, code: "unavailable" });
+    expect(await dependencyImpact(port, REPO, H, ["tests/flaky.test.ts"], ["src/lib/x.ts"])).toEqual({ ok: true, facts: { reached: 3 } });
+  });
+
+  test("r1-P1 local-nochange-unbound：没有待交的修复步骤 / 单号不对 / 会话不是绑定的那个 → 拒，零写入", async () => {
+    const n = events().length;
+    await reject(deliverLocal(OOS, { order: "T1:fix:r2" }), "invalid", /当前的单/);
+    db.run(`INSERT INTO scheduler_sessions (taskId,role,agent,sessionId,family,transport,state,createIntentId,createdAt,updatedAt)
+      VALUES ('T1','author','agent-dev','s-1','claude','acp','active','mi1',1,1)`);
+    await reject(deliverLocal(OOS), "invalid", /当前的单/); // 绑了会话却不报会话
+    await reject(deliverLocal(OOS, { session: "s-2" }), "invalid", /当前的单/);
+    db.run("DELETE FROM scheduler_sessions");
+    db.run("DELETE FROM task_steps WHERE taskId = 'T1'");
+    await reject(deliverLocal(), "invalid", /待交的步骤/);
+    expect(events().length).toBe(n);
+    expect(getTask(db, "T1")).toMatchObject({ stage: "fix" });
+  });
+
+  test("r1-P1 local-nochange-unbound：查外部证据期间步骤被删 → 事务里重核拒，零写入", async () => {
+    onRead = () => db.run("DELETE FROM task_steps WHERE taskId = 'T1'");
+    const n = events().length;
+    await reject(deliverLocal(), "invalid", /待交的步骤/);
+    expect(events().length).toBe(n);
+    expect(getTask(db, "T1")).toMatchObject({ stage: "fix" });
+  });
+
+  test("r1-P1 mcp-replay：MCP deliver 成功后同单同份重试回原回执（不碰 CLI）；换理由拒", async () => {
+    const r = await deliverLocal();
+    const call = { agent: "agent-dev", sessionId: null, family: "claude-code", channelId: "c1" };
+    const dd = { db, remoteHead: async () => { throw new Error("不该查"); }, findPr: async () => { throw new Error("不该查"); },
+      run: async () => { throw new Error("不该跑 CLI"); } } as never;
+    const wire = (nc: NoChange) => ({ v: 1, orderId: ORDER.T1, head: H, evidence: "e.md", summary: "无需改码", selfCheck: "自查", noChange: nc });
+    expect(await deliverOrder(call, wire(OOS), dd)).toMatchObject({ ok: true, duplicate: true, taskId: "T1", noChange: { outcome: "recovered", eventSeq: r.eventSeq } });
+    expect(await deliverOrder(call, wire({ ...OOS, reason: "换了" }), dd)).toMatchObject({ ok: false, code: "dedup_conflict" });
+    expect(await deliverOrder({ ...call, agent: "agent-x" }, wire(OOS), dd)).toMatchObject({ ok: false, code: "dedup_conflict" });
   });
 
   test("规格材料：订单原文摘要变了、持单期间有规格追加 → 不一致", () => {
@@ -279,10 +342,36 @@ describe("main_already_resolved：MAINRED1 已解决的卡取消", () => {
     expect(getTask(db, "T2")).toMatchObject({ stage: "build" });
   });
 
+  test("r1-P1 main-latest-undecided：同 main head 上比绿 run 更新的 run 还在跑 / 被取消 → 未定，不取消", async () => {
+    mainCard();
+    for (const status of [["in_progress", null], ["completed", "cancelled"], ["completed", "skipped"]] as const) {
+      mainRuns = [{ ...mainRuns[0]!, id: 901, status: status[0], conclusion: status[1], createdAt: 4 }, ...mainRuns];
+      await reject(resolve(), "unavailable", /901/);
+      mainRuns = mainRuns.slice(1);
+    }
+    expect(getTask(db, "T2")).toMatchObject({ stage: "build" });
+    expect(events("T2").some((e) => e.kind === "stage")).toBe(false);
+  });
+
+  test("r1-P1 local-nochange-unbound：卡没记起点时交付 head 不在当前 main 历史里拒；不是自己当前的单 / 步骤被删拒", async () => {
+    mainCard();
+    ancestor = false;
+    await reject(resolve(), "invalid", /历史/);
+    ancestor = true;
+    await reject(deliverLocal(MR, {}, "T2", "agent-other"), "invalid", /当前的单/);
+    await reject(deliverLocal(MR, { order: "T2:write:r9" }, "T2"), "invalid", /当前的单/);
+    onRead = () => db.run("DELETE FROM task_steps WHERE taskId = 'T2'");
+    const n = events("T2").length;
+    await reject(resolve(), "invalid", /待交的步骤/);
+    expect(events("T2").length).toBe(n);
+    expect(getTask(db, "T2")).toMatchObject({ stage: "build" });
+  });
+
   test("普通卡（没有 MAINRED1 来源）不开放：out_of_scope_ci 不能用在 build，main_already_resolved 也拒", async () => {
     db.run("UPDATE tasks SET stage = 'build', headSHA = NULL WHERE id = 'T1'");
-    const e = await deliverLocal().then(() => null, (x: Error) => x.message);
+    db.query("INSERT INTO task_steps (taskId,step,round,executor,executorKind,state,createdAt,updatedAt) VALUES ('T1','write',1,'agent-dev','agent','assigned',1,1)").run();
+    const e = await deliverLocal(OOS, { order: "T1:write:r1" }).then(() => null, (x: Error) => x.message);
     expect(e).toMatch(/修复单/);
-    await reject(deliverLocal(MR), "invalid", /MAINRED1|fix/);
+    await reject(deliverLocal(MR, { order: "T1:write:r1" }), "invalid", /MAINRED1|fix/);
   });
 });
