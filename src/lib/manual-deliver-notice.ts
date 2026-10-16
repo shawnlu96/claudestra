@@ -48,9 +48,11 @@ export interface MdnRecord {
   pm?: number;
   /** 升级 PM 没送到（不在 registry / 不活跃 / 项目没有 PM）：第一次没送到的时刻与原因；owner 照样按它计时 */
   pmFail?: { at: number; note: string };
+  /** 打算开 owner 卡的时刻（开卡意图，先于开卡落盘） */
   owner?: number;
-  /** owner 卡的 dedupKey（开卡前先记，带开卡时刻：撤销后再开不会撞上已结案的旧卡）；撤销时按它关卡 */
+  /** owner 卡的 dedupKey（随意图一起记，带意图时刻：撤销后再开不会撞上已结案的旧卡；重启重试用同一个） */
   ownerKey?: string;
+  /** owner 卡开好并写回的 askId：有它 owner 这一级才算做完；只有意图没有它 = 开卡途中退出过，下一轮按前缀对账 */
   askId?: string;
   resolvedAt?: number;
 }
@@ -151,11 +153,12 @@ export type MdnAction = "notify" | "notify-late" | "pm" | "owner";
 /**
  * 这次交付下一步该做什么；null = 现在不用做。按顺序一步一步走（调用方做完一步更新记录再问）：
  * 还没通知过 → N 分钟内 notify，超过了（bridge 停过、首次运行）notify-late 只记不发、直接看升级；满 N 分钟（≥）→ pm（没送到下一轮重试）；
- * 升级送到或第一次没送到之后满 M 分钟 → owner，开了 owner 就不再重试升级。
+ * 升级送到或第一次没送到之后满 M 分钟 → owner（记了开卡意图、askId 还没写回的也是 owner），owner 卡开好就不再重试升级。
  */
 export function nextAction(rec: MdnRecord, now: number, cfg: MdnConfig): MdnAction | null {
   if (rec.notified === undefined) return now - rec.deliverTs < cfg.pmAfterMs ? "notify" : "notify-late";
-  if (rec.owner !== undefined) return null;
+  if (rec.askId !== undefined) return null;
+  if (rec.owner !== undefined) return "owner"; // 开卡意图已记、askId 没写回：对账（认回已开的卡或重开）
   const escalated = rec.pm ?? rec.pmFail?.at; // 升级没送到也从第一次尝试算 M：PM 不在时更要 owner 兜底
   if (escalated !== undefined && now - escalated >= cfg.ownerAfterMs) return "owner";
   return rec.pm === undefined && now - rec.deliverTs >= cfg.pmAfterMs ? "pm" : null;

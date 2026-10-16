@@ -450,3 +450,43 @@ describe("审查回归（RVF-2 r3）", () => {
     expect(f.filter((x) => x.rule === "manual_deliver_no_review")).toEqual([expect.objectContaining({ notify: PM })]);
   });
 });
+
+describe("验收追加 4（Shawn PR1683-r1 owner-create-crash-gap）", () => {
+  const openAsks = () => db.query("SELECT id, dedupKey FROM asks WHERE state = 'open' AND dedupKey LIKE 'manual-deliver:%'").all() as { id: string; dedupKey: string }[];
+
+  test("记了开卡意图、卡还没开就退出：重启后开出 1 张 owner 卡（同一个 dedupKey），askId 写回", async () => {
+    const d = deliveredCard();
+    const key = mdnKey(P, ID, d.seq), ownerKey = `manual-deliver:${key}#${T0 + 40 * MIN}`;
+    writeFileSync(statePath, JSON.stringify({ [key]: { deliverTs: T0, notified: T0 + MIN, pm: T0 + 10 * MIN, owner: T0 + 40 * MIN, ownerKey } }));
+    await at(T0 + 100 * MIN, ticker(ownerCardPort(() => db, () => {})));
+    const open = openAsks();
+    expect(open.map((a) => a.dedupKey)).toEqual([ownerKey]);
+    expect(readMdnState(statePath).state[key]!.askId).toBe(open[0]!.id);
+    expect(kinds()).toEqual([]); // 不重发通知 / 升级
+  });
+
+  test("卡已开好、askId 还没写回就退出：重启后认回原卡，不开第二张", async () => {
+    const d = deliveredCard();
+    const key = mdnKey(P, ID, d.seq), ownerKey = `manual-deliver:${key}#${T0 + 40 * MIN}`;
+    const port = ownerCardPort(() => db, () => {});
+    const id = port.openOwnerCard({ project: P, taskId: ID, title: "t", context: "c", dedupKey: ownerKey, prefix: `manual-deliver:${key}#` });
+    writeFileSync(statePath, JSON.stringify({ [key]: { deliverTs: T0, notified: T0 + MIN, pm: T0 + 10 * MIN, owner: T0 + 40 * MIN, ownerKey } }));
+    await at(T0 + 100 * MIN, ticker(port));
+    expect(openAsks()).toEqual([{ id, dedupKey: ownerKey }]);
+    expect(readMdnState(statePath).state[key]!.askId).toBe(id);
+    await at(T0 + 101 * MIN, ticker(port));
+    expect(openAsks()).toHaveLength(1);
+  });
+
+  test("开卡抛错：意图留着，下一轮重试开出", async () => {
+    deliveredCard();
+    let fail = true;
+    const real = ownerCardPort(() => db, () => {});
+    const tick = ticker({ ...real, openOwnerCard: (c) => { if (fail) throw new Error("busy"); return real.openOwnerCard(c); } });
+    for (const m of [1, 10, 40]) await at(T0 + m * MIN, tick);
+    expect(openAsks()).toEqual([]);
+    fail = false;
+    await at(T0 + 41 * MIN, tick);
+    expect(openAsks()).toHaveLength(1);
+  });
+});

@@ -44,7 +44,7 @@ owner 那一级从巡检推送的时刻起算。两边在 bridge 里经 `serialM
 - 定时器：`src/bridge/manual-deliver-notice.ts`，在 `startLedgerAudit` 里启动；启动 60 秒后首轮，之后每 60 秒。对台账只读（`LedgerReader`），
   通知走 `sendLedgerNotice`（与班子路由同一条押后投递），owner 卡经 `ownerCardPort`（`openAskFull` / `closeAsk` + `publishAsk`，dedupKey `manual-deliver:<项目>|<卡>|<交付 seq>#<开卡时刻>`）：同前缀还开着就认回来，撤销按前缀全关。
 - 状态：`~/.claude-orchestrator/manual-deliver-notice-state.json`，每次交付一条（`notified` / `pm` / `pmFail` / `owner` / `ownerKey` / `askId` / `resolvedAt`）。
-  每一步先记再投：投递没成功改回去、下一轮重投；状态写不下就什么都不发（不会每分钟重推）；owner 卡先记 `ownerKey` 再开，开卡后崩溃也不重开。
+  每一步先记再投：投递没成功改回去、下一轮重投；状态写不下就什么都不发（不会每分钟重推）；owner 卡的意图（`owner` + `ownerKey`）与完成（`askId` 写回）分开落盘，有 `askId` 才算这一级做完；开卡途中退出或开卡出错，下一轮按前缀对账：卡已开就认回来写 `askId`，没开就用同一个 dedupKey 重开。
   一张卡出错只跳过这张卡，别的卡照常。撤销的记录保留 7 天再删；还在等审的记录不带撤销时刻，不会被删。
 - 首次运行（状态文件不在）与平时一样：已在等的交付按真实交付时刻走升级链（超过 N 的不补发交付通知，直接升级），上线时在等审的卡至少收到一条提醒。
 - bridge 停过、超过 N 分钟才第一次看到的交付：不补发「交付即通知」，直接升级。

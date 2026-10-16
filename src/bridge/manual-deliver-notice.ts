@@ -148,15 +148,12 @@ async function advance(db: Database, s: Step, c: Card, start: MdnRecord, cfg: Md
       if (rec.pmFail?.note !== r.note) commit({ ...rec, pmFail: { at: rec.pmFail?.at ?? now, note: r.note } });
       return; // 下一轮重试升级；第一次没送到满 M 分钟就进 owner
     } else {
-      const card = ownerCardText(task, d, mdnPm(task, team), rec, now, cmd), ownerKey = `manual-deliver:${key}#${now}`;
-      const prev = rec;
-      rec = commit({ ...rec, owner: now, ownerKey }); // 先记再开：开卡后崩溃也不会重开
-      try {
-        rec = commit({ ...rec, askId: s.deps.openOwnerCard({ project: task.project, taskId: task.id, ...card, dedupKey: ownerKey, prefix: ownerPrefix(key) }) });
-      } catch (e) {
-        s.save(prev);
-        throw e;
-      }
+      // 意图和完成分开落盘：先记意图（owner + ownerKey），开好再写回 askId。中途退出 / 开卡抛错时意图留着，
+      // 下一轮按前缀对账——卡已开就认回来，没开就用同一个 dedupKey 重开（tests/manual-deliver-notice.test.ts「验收追加 4」）
+      const ownerKey = rec.ownerKey ?? `manual-deliver:${key}#${now}`;
+      if (rec.owner === undefined || rec.ownerKey === undefined) rec = commit({ ...rec, owner: rec.owner ?? now, ownerKey });
+      const card = ownerCardText(task, d, mdnPm(task, team), rec, now, cmd);
+      rec = commit({ ...rec, askId: s.deps.openOwnerCard({ project: task.project, taskId: task.id, ...card, dedupKey: ownerKey, prefix: ownerPrefix(key) }) });
       s.deps.log(`📮 人工卡提醒：${task.id} 交付 #${d.seq} 进 owner 待你处理（${rec.askId}）`);
     }
   }
