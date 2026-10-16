@@ -33,6 +33,7 @@ import { uiDeliverPort } from "../lib/ledger-deliver-ui-port.js";
 import { grantResume } from "../lib/ledger-autostart-resume.js";
 import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
 import { registryTaskIdError, registryTaskLabel } from "../lib/registry-task-label.js";
+import { deliverNoChangeLocal } from "../lib/ci-no-change-recovery.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -236,6 +237,7 @@ async function deliverCmd(c: LedgerCli): Promise<Result> {
   // 证据 / 结论只收路径：它们会进 bridge 通知和审查员 prompt（lib/quote-text.ts pathLike）
   if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", PATH_ONLY("--evidence"));
   checkTaskRefs({ head: c.p.flags.head });
+  if (c.p.flags["no-change"] !== undefined) return deliverNoChangeLocal(c.db, c.ctx(), task, c.p.flags, () => c.deps.now()); // CINOOP1：专用事务，不推 review
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
   const f = c.p.flags;
@@ -359,9 +361,10 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
   deliver: {
-    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes", "ui-evidence"],
+    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes", "ui-evidence", "no-change"],
     usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--disputes JSON] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]" +
       " [--ui-evidence JSON：ui 卡前后截图清单，只登记证据不批准]" +
+      " [--no-change JSON --head <当前 head>：核实无需改码，接收端核验、CI 全绿才同轮恢复到 merge / main 已解决的修复卡取消；不和 --from 同用]" +
       " [--pr <完整 PR URL>：卡上空或非完整时同一事务写入，已是另一个完整 URL 就拒]",
     run: deliverCmd,
   },

@@ -430,6 +430,7 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const t = pushTarget(row);
   const work = row.work!;
   const g = publishGuard(row, d);
+  if (work.noChange) return publishNoChange(row, d, g);
   // 端口失败后的记账 / 停单也只对开始发布时的那张单做：等待期间这一行换了代或被别处改了，旧请求的失败不算在新的一行头上
   const stop = (r: { reason: string; retry: boolean; denied?: PublishDenial }) => {
     const moved = r.denied ? null : g.drifted();
@@ -455,6 +456,25 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
     d.log(`${row.orderId} 截图不随交付：manifest_too_large`);
     payload = build();
   }
+  const raw = JSON.stringify(payload);
+  if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await publishFailed(row, { reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }, d), null);
+  clearPublishFail(d.db, row.orderId);
+  return patchOrder(d.db, row.orderId, ["result_pending"], { payload, payloadSha: payloadSha(raw) }, d.now());
+}
+
+/**
+ * CINOOP1：核实无需改码的交付（work.noChange）。head 就是订单起点：不推送、不开 PR、不带截图，不进要求新提交的普通发布路径；
+ * noChange 原样随交付正文转给 A，由 A 核验后决定恢复 / 取消（A 拒收照常按码收尾，unavailable 下轮原样重发）。
+ */
+async function publishNoChange(row: LendRow, d: LendDeps, g: ReturnType<typeof publishGuard>): Promise<LendRow | null> {
+  const o = orderOf(row), t = pushTarget(row), work = row.work!;
+  const late = await g.check("payload");
+  if (late) return haltPublish(row, late, d);
+  const pr = typeof o?.pr === "number" ? o.pr : null;
+  const payload = { v: 1, orderId: row.orderId, gen: row.leaseGen,
+    deliver: { v: 1, orderId: row.orderId, head: work.head, evidence: pr ? `https://github.com/${t.repo}/pull/${pr}` : t.branch, summary: work.summary,
+      selfCheck: work.selfCheck, noChange: work.noChange },
+    branch: t.branch, pr, session: { id: row.sessionId, family: row.family }, ...deliveredActual(d.db, row), ...lendUsageFor(d.db, row, { now: d.now }) };
   const raw = JSON.stringify(payload);
   if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await publishFailed(row, { reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }, d), null);
   clearPublishFail(d.db, row.orderId);

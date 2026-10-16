@@ -173,7 +173,7 @@ describe("写单 / 修复单的标准答复（dispatch-recovery-CIF8）", () => 
 
   test("多了「范围外测试红」那一句，整段不比之前长；审查单不带这句（上面的金样本字节不变）", () => {
     const author = standardAnswers("author");
-    expect(author.split("\n")).toContain("- 范围外测试红：不推空提交，交付说明写明并附 run 链接，由合并闸处理");
+    expect(author.split("\n")).toContain("- 范围外测试红：不推空提交；无需改码交 noChange（run 链接、失败文件、理由），核验、CI 全绿才同轮恢复；main 已绿的修复卡交它取消");
     expect(Buffer.byteLength(author)).toBeLessThanOrEqual(AUTHOR_BYTES_BEFORE);
     expect(author.length).toBeLessThanOrEqual(AUTHOR_CHARS_BEFORE);
     expect(standardAnswers("review")).not.toContain("范围外测试红");

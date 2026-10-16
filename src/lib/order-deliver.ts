@@ -27,6 +27,7 @@ import { deliverDedupKey, withMemoryRefs } from "./memory-tools-refs.js";
 import type { confirmOrderDelivery } from "./ledger-autostart-resume.js";
 import type { BoundedResult } from "./run-bounded.js";
 import { uiReplaySame } from "./ledger-deliver-ui.js";
+import type { NoChange } from "./order-no-change.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
 
@@ -117,10 +118,30 @@ function replayed(db: Database, call: VerifiedCall, key: string, orderId: string
   return receipt(true, orderId, e.target, e.seq);
 }
 
+/**
+ * CINOOP1：带 noChange 的正式单交付（head = 卡的当前 head，不推空提交）。out_of_scope_ci 仍先核 origin 上分支 head；之后交给
+ * `ledger deliver --no-change`（ci-no-change-recovery.ts 专用事务），不带 --from、不推 review；本地合并项目没有 PR CI，不走此出口。
+ * 恢复 / 取消与否看回执里的 noChange.outcome；未恢复是拒绝（带原因），不是成功回执。
+ */
+async function deliverNoChange(call: VerifiedCall, deps: DeliverDeps, task: { id: string; rev: number; headSHA: string | null },
+  w: { orderId: string; head: string; evidence: string; noChange: NoChange; local: boolean; branch: string }, key: string): Promise<OrderToolResult> {
+  if (w.local) return refuse("no_change_local", "本地合并项目没有 PR CI，noChange 不适用：按标准答复在证据报告里写明失败的检查");
+  if (task.headSHA && task.headSHA !== w.head) return refuse("invalid_wire", "带 noChange 的交付 head 必须就是卡的当前 head：无需改码就不该有新提交");
+  if (w.noChange.kind === "out_of_scope_ci") {
+    const remote = await deps.remoteHead(call, w.branch);
+    if (!remote.ok) return refuse("head_unverifiable", remote.error);
+    if (remote.head !== w.head) return refuse("head_mismatch", `origin 上 ${w.branch} 的 head 是 ${remote.head}，不是 ${w.head}`);
+  }
+  const r = await ledgerWrite(call, deps.run, "deliver", task.id, { head: w.head, evidence: w.evidence, "no-change": JSON.stringify(w.noChange),
+    rev: String(task.rev), branch: w.branch }, key);
+  if (!r.ok) return r;
+  return { ok: true, duplicate: r.duplicate === true, orderId: w.orderId, taskId: task.id, noChange: r.noChange ?? null, eventSeq: r.eventSeq ?? null };
+}
+
 export async function deliverOrder(call: VerifiedCall, args: unknown, deps: DeliverDeps): Promise<OrderToolResult> {
   const w = parseDeliverWire(args);
   if (!w.ok) return refuse("invalid_wire", w.error);
-  const { orderId, head, evidence, summary, selfCheck, disputes, memoryRefs, uiEvidence } = w.value;
+  const { orderId, head, evidence, summary, selfCheck, disputes, memoryRefs, uiEvidence, noChange } = w.value;
   if (!SHA40.test(head)) return refuse("invalid_wire", "head 要是小写的完整 40 位 SHA");
   if (!deps.db) return refuse("no_ledger", "这台机器没有台账");
   const key = deliverDedupKey(orderId, head);
@@ -131,6 +152,7 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   const { branch, rev } = cur.task;
   if (!branch) return refuse("no_branch", `台账里 ${cur.task.id} 没记分支，bridge 没法核对 head：请 PM 补 --branch，或走 CLI`);
   const local = deps.localMerge?.(cur.task.project) ?? null;
+  if (noChange) return deliverNoChange(call, deps, cur.task, { orderId, head, evidence, noChange, local: !!local, branch }, key);
   const checked = local ? await localChecked(deps, local.repoDir, branch, head) : await remoteChecked(call, deps, cur.task, branch, head);
   if (!checked.ok) return checked.refusal;
   const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch,

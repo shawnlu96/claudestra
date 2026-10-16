@@ -7,6 +7,7 @@
 import { DAG_TOOL_TIMEOUT_MS, DAG_TOOLS } from "./dag-tools.js";
 import { FINDING_PITFALL_SCHEMA, MEMORY_REFS_SCHEMA, MEMORY_TOOLS } from "./memory-tools-defs.js";
 import { UI_EVIDENCE_SCHEMA } from "./order-deliver-ui.js";
+import { NO_CHANGE_SCHEMA } from "./order-no-change.js";
 import { HASH_LINE } from "./review-converge-order.js";
 
 type BridgeRequest = (msg: any, timeoutMs?: number) => Promise<any>;
@@ -31,7 +32,8 @@ export const ORDER_TOOLS = [
     description:
       "Executor: deliver your current order (same effect as `ledger deliver --from build|fix --head`). head must be the full SHA the card's branch " +
       "has on origin right now — push first; the bridge checks it. Retrying with the same orderId + head returns the same result. " +
-      "Only this tool (your own current order, never a taskId) counts for a PM's one-time resume grant; a CLI or PM delivery never auto-returns the card to review dispatch.",
+      "Only this tool (your own current order, never a taskId) counts for a PM's one-time resume grant; a CLI or PM delivery never auto-returns the card to review dispatch. " +
+      "Verified no code change needed (out-of-scope CI red, or main already fixed)? Never push an empty commit: deliver the current head with noChange.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -45,6 +47,7 @@ export const ORDER_TOOLS = [
         selfCheck: { type: "string", description: "按验收线逐条自查的结果（≤4000 字节）" },
         memoryRefs: MEMORY_REFS_SCHEMA,
         uiEvidence: UI_EVIDENCE_SCHEMA,
+        noChange: NO_CHANGE_SCHEMA,
       },
       required: ["v", "orderId", "head", "evidence", "summary", "selfCheck"],
     },
