@@ -28,6 +28,7 @@ export const RECOVERY_KEYS = [
   "ciKnownFlaky",
   "ciLogPerJob",
   "ciMainFixRetry",
+  "ciMainSourceWait",
   "ciManualResume",
   "ciProofReuse",
   "ciQueueFull",
