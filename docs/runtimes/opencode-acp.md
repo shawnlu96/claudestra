@@ -190,3 +190,4 @@ OCR-2 开工前要先定的两件事：OpenCode agent 是否像 Codex 一样放�
 | `model-switch.jsonl` | 启动缺省模型、set_config_option 换模型、非法模型名的 -32602 |
 
 复现：`bun scripts/opencode-acp-probe.ts <场景> --home <隔离目录> --cwd <空目录> --out <输出目录>`，场景和参数见脚本文件头。
+夹具合不合规（四类都在、没有本机路径、initialize 过 `checkInitialize`、权限请求能出卡）由 `tests/opencode-acp-probe.test.ts` 守着。
