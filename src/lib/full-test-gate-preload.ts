@@ -12,7 +12,8 @@ export async function gateDirectBunTest(env: Record<string, string | undefined> 
   // 读不出命令行就按全量处理：宁可让带文件的调用多排一次队，也不漏闸
   const run = argv ? classifyBunArgv(argv) : { kind: "full" as const, args: [] };
   if (!argv) console.error("[full-test-gate] 读不出 bun test 的命令行，按全量处理");
-  if (run.kind === "focused" || run.kind === "worker") return;
+  // preload 也被脚本 / bun -e 复用；只有 bun test 才参与准入。
+  if (run.kind === "other" || run.kind === "focused" || run.kind === "worker") return;
   if (run.kind === "error") {
     console.error(`[full-test-gate] ${run.message}；测试未启动`);
     process.exit(2);

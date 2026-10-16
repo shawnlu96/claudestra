@@ -43,8 +43,10 @@ describe("[验收线 2] 全量判定", () => {
     expect(classifyBunArgv(["bun", "--no-env-file", "test", "-t", "x"])).toEqual({ kind: "full", args: ["--no-env-file", "-t", "x"] });
     expect(classifyBunArgv(["bun", "--env-file=e", "test", "a.test.ts"]).kind).toBe("focused");
     expect(classifyBunArgv(["bun", "test", "--test-worker"]).kind).toBe("worker");
-    expect(classifyBunArgv(["bun", "run", "test"]).kind).toBe("error");
-    expect(classifyBunArgv(["bun", "x.ts"]).kind).toBe("error");
+    expect(classifyBunArgv(["bun", "run", "test"]).kind).toBe("other");
+    expect(classifyBunArgv(["bun", "x.ts"]).kind).toBe("other");
+    expect(classifyBunArgv(["bun", "--preload", "p.ts", "-e", "test"]).kind).toBe("other");
+    expect(classifyBunArgv(["bun", "--unknown", "test"]).kind).toBe("error");
   });
 
   test("preload 能读到本进程逐词原样的命令行（process.argv 已被 bun test 改写）", async () => {

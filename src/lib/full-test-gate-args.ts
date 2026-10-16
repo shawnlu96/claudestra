@@ -51,7 +51,7 @@ export function classifyTestArgs(args: readonly string[]): BunTestRun {
 }
 
 /** 整条命令行（argv[0] 是 bun 本身）：`test` 之前只许出现选项，`test` 之后同 classifyTestArgs；去掉 `test` 后的参数原样保留 */
-export function classifyBunArgv(argv: readonly string[]): BunTestRun {
+export function classifyBunArgv(argv: readonly string[]): BunTestRun | { kind: "other" } {
   const tokens = argv.slice(1);
   for (let i = 0; i < tokens.length; i++) {
     const a = tokens[i]!;
@@ -60,10 +60,12 @@ export function classifyBunArgv(argv: readonly string[]): BunTestRun {
       if (before.kind === "error") return before;
       return classifyTestArgs([...tokens.slice(0, i), ...tokens.slice(i + 1)]);
     }
-    if (!a.startsWith("-")) return { kind: "error", message: `命令行不是 bun test：${JSON.stringify(a)}` };
+    if (!a.startsWith("-") || ["-e", "--eval", "-p", "--print", "-"].includes(a) || a.startsWith("--eval=") || a.startsWith("--print=")) {
+      return { kind: "other" };
+    }
     if (VALUE_OPTIONS.has(a)) i++;
   }
-  return { kind: "error", message: "命令行里没有 test 子命令" };
+  return { kind: "other" };
 }
 
 export function isCiEnv(env: Record<string, string | undefined>): boolean {
