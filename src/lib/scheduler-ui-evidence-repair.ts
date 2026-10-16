@@ -61,7 +61,8 @@ function screenshotOnly(s: PlannerSnapshot, facts: ReviewFacts | null): ReviewFa
   return reviewSourced(s, facts) ? facts : null;
 }
 
-const exhausted = (s: PlannerSnapshot): Exhausted => ({ kind: "escalate", code: "ui_repair_exhausted",
+// 理由码沿用缺截图那一支（manual-reason.ts 认它、UI 人工恢复按它接回），原因写明是补图超限
+const exhausted = (s: PlannerSnapshot): Exhausted => ({ kind: "escalate", code: "ui_missing_screenshots",
   reason: `作者已 ${UI_REPAIR_MAX} 次补截图仍未补齐（head ${s.task.headSHA}，规格第 ${s.task.specRev} 版）：请 PM 接手${pmNoticeTag({ kind: UI_REPAIR_TODO, taskId: s.task.id, key: uiRepairWindow(s.task) })}` });
 
 /** review 阶段（uiPassStep 缺图那一支）：on 时进 fix 交作者补图，超限退人工一次；null = 照旧 */

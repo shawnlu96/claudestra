@@ -57,7 +57,7 @@ describe("[验收线 1] review 阶段：同 head、本轮有效 pass，唯一缺
     const red = await reviewed();
     try {
       const notices = red.notices.length;
-      expect(await red.tick()).toMatchObject({ step: "manual", detail: "前后截图摘要缺失，不能请人看旧图" });
+      expect(await red.tick()).toMatchObject({ step: "manual", detail: "ui_missing_screenshots：前后截图摘要缺失，不能请人看旧图" });
       expect(red.notices.length).toBe(notices + 1);
       expect(getWorkflow(red.db, "T1")?.mode).toBe("manual");
     } finally { red.close(); }
@@ -175,17 +175,14 @@ describe("[验收线 5] 不误走补截图", () => {
     expect(d).toMatchObject({ kind: "intent", action: "stage", targetStage: "fix", reason: "P1 1 项，自动进入 fix" });
   });
 
-  test("审查证明不足（结论找不到派单回执）：照旧退人工", async () => {
+  test("审查证明不足（派审回执对不上）：fix 阶段不交补截图单", async () => {
     quiet("on");
-    const f = autoFixture({ template: "ui" });
+    const f = await reviewed();
     try {
-      await toBuild(f);
-      await f.tick();
-      await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H2);
-      await f.tick(); // 只建了审查 session，还没派审
-      dropShots(f);
-      await f.review("pass", H2, []);
-      expect(plan(f)).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+      await f.cli("pm", "stage", "T1", "--from", "review", "--to", "fix", "--text", "缺截图退回");
+      expect(plan(f)).toMatchObject({ kind: "intent", action: "dispatch", workOrder: { findings: [{ family: UI_REPAIR_FAMILY }] } });
+      const d = planScheduler({ ...snap(f), reviewDispatches: [] });
+      expect(d.kind === "intent" && d.workOrder?.findings.some((x) => x.family === UI_REPAIR_FAMILY)).toBeFalsy();
     } finally { f.close(); }
   });
 
