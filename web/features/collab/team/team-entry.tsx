@@ -7,12 +7,6 @@ import { rosterText } from "./roster-i18n";
 import { useEntryT } from "./entry-i18n";
 
 const SHOWN = 4;
-/**
- * Team display names by local project id, recorded when an avatar stack opens the team page: the page's own snapshot read
- * (use-team-roster) does not expose the team record, and a second snapshot read is what this entry must not add.
- */
-const teamNames = new Map<string, string | null>();
-export const teamNameOf = (project: string): string | null => teamNames.get(project) ?? null;
 
 /** This team's projects bound on this machine, in snapshot order (the same filter as use-team-roster's dropdown list). */
 const boundLocals = (snapshot: ProjectSnapshot, team: ProjectTeam) =>
@@ -44,7 +38,6 @@ function AvatarStack({ snapshot, team }: { snapshot: ProjectSnapshot; team: Proj
   const target = teamLocalProject(snapshot, team, open);
   const go = () => {
     if (!target) return;
-    for (const p of boundLocals(snapshot, team)) teamNames.set(p.local!.id, team.team?.name ?? null);
     showTeamView(target);
     nav.toContent();
   };

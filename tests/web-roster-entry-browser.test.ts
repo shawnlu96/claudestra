@@ -30,6 +30,9 @@ const manifest: unknown[] = [];
 let browser: Browser;
 let server: ReturnType<typeof Bun.serve>;
 let log: string[] = [];
+type Snapshot = Omit<NonNullable<ReturnType<typeof rosterEntrySnapshot>>, "team"> & { team: { available: boolean; value: { name: string; rev: number } } };
+/** Per-test rewrite of every snapshot answer (rename, unbind); identity by default. */
+let edit = (snap: Snapshot): Snapshot => snap;
 
 function api(fp: Fp, req: Request, path: string, query: URLSearchParams): Response {
   const json = (v: unknown, status = 200) => Response.json(v, { status });
@@ -38,7 +41,7 @@ function api(fp: Fp, req: Request, path: string, query: URLSearchParams): Respon
   if (path === "/shared-ledger/context") return json(rosterEntryContext());
   if (path === "/shared-projects/snapshot") {
     const snapshot = rosterEntrySnapshot(req.headers.get("x-shared-ledger-project") ?? "");
-    return snapshot ? json(snapshot) : json({ error: "no binding" }, 403);
+    return snapshot ? json(edit(snapshot)) : json({ error: "no binding" }, 403);
   }
   if (path === "/team/roster") return json(rosterFixture(NOW, query.get("project") ?? ""));
   if (path === "/peers/contacts") return json({ contacts: [] });
@@ -210,3 +213,42 @@ test.skipIf(!!baseline)("entry adds no request; stack opens the team page; back,
     } finally { await page.close(); }
   }
 }, 180_000);
+
+/** Drops this machine's binding of the given projects from the snapshot, as a later center read would after an unbind. */
+const unbind = (...ids: string[]) => (snap: Snapshot): Snapshot => ({ ...snap,
+  projects: snap.projects.map(p => ids.includes(p.projectId) ? { ...p, localProjectIds: [] } : p),
+  localProjects: snap.localProjects.filter(p => !ids.includes(p.id)) });
+
+test.skipIf(!!baseline)("later snapshots: the title follows a rename; an unbound project moves to a bound sibling, none left shows why", async () => {
+  const { page, errors, external } = await open(1280);
+  try {
+    const poll = async () => { const n = log.filter((l) => l.endsWith("/shared-projects/snapshot")).length;
+      await page.clock.runFor(61_000); await until(() => log.filter((l) => l.endsWith("/shared-projects/snapshot")).length > n, "snapshot re-read"); };
+    await stack(page, "team-alpha").click();
+    await teamPage(page).waitFor();
+    const select = teamPage(page).getByRole("combobox", { name: "项目" });
+    const titled = (name: string) => page.waitForFunction(`document.querySelector("[data-collab-view='team'] h1")?.textContent === ${JSON.stringify(name)}`);
+    await titled("Fixture team"); // "团队" until the page's own snapshot read lands
+
+    edit = (snap) => ({ ...snap, team: { available: true, value: { name: "Renamed team", rev: 2 } } });
+    await poll();
+    await titled("Renamed team");
+
+    // [3] The open project loses its binding: no made-up option for it, the page moves to the sibling still bound.
+    edit = unbind("alpha-app");
+    await poll();
+    await page.waitForFunction("document.body.dataset.open === 'beta-app'");
+    await select.waitFor();
+    expect(await select.locator("option").allInnerTexts()).toEqual(["Beta app"]);
+
+    edit = unbind("alpha-app", "beta-app");
+    await poll();
+    await teamPage(page).locator("[data-roster-page='unbound']").waitFor();
+    expect(await select.count()).toBe(0);
+    expect(await teamPage(page).getByRole("button", { name: "在协作视图打开" }).count()).toBe(0);
+    expect({ errors, external }).toEqual({ errors: [], external: [] });
+  } finally {
+    edit = (snap) => snap;
+    await page.close();
+  }
+}, 120_000);
