@@ -9,6 +9,7 @@ import {
 } from "@/lib/chat/attachment-normalize";
 import { formatPasteDiag, imagesFromHtml, readClipboard } from "@/lib/chat/attachment-normalize-paste";
 import { AttachmentIntake, type AttachNotice } from "@/lib/chat/attachment-normalize-queue";
+import type { ReadDeps } from "@/lib/chat/attachment-normalize-read";
 
 const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52];
 const JPEG = [0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46];
@@ -21,14 +22,10 @@ const PDF = [...Buffer.from("%PDF-1.7\n")];
 const bytes = (a: number[]) => new Uint8Array(a);
 const file = (a: number[], name: string, type = "") => new File([bytes(a)], name, { type });
 
-/** 读文件头会抛错的 File（微信缓存里的文件引用失效 / 无权限时 Chrome 的表现） */
-function unreadable(name: string, size: number, type = ""): File {
-  const f = new File([new Uint8Array(size)], name, { type });
-  const boom = () => Promise.reject(new DOMException("A requested file or directory could not be found", "NotReadableError"));
-  Object.defineProperty(f, "slice", { value: () => ({ arrayBuffer: boom }) });
-  Object.defineProperty(f, "arrayBuffer", { value: boom });
-  return f;
-}
+/** 四种读法全拒（微信缓存里的文件引用失效 / 无权限）；单种读法的用例在 tests/web-attachment-normalize-read.test.ts */
+const boom = () => Promise.reject(new DOMException("A requested file or directory could not be found", "NotReadableError"));
+const ALL_FAIL: ReadDeps = { fileReader: boom, whole: boom, blobUrl: boom, wait: async () => {} };
+const unreadable = (name: string, size: number, type = "") => new File([new Uint8Array(size)], name, { type });
 
 describe("[验收线 1] sniffHead：读前 32 字节认类型", () => {
   test("PNG / JPEG / GIF / WebP 可预览；HEIC / TIFF 认出来但不可预览；PDF 不是图片", () => {
@@ -67,10 +64,10 @@ describe("[验收线 1] decideAttachment / normalizeAttachment", () => {
     expect(r.ok && [r.file.type, r.file.name]).toEqual(["image/tiff", "微信图片.png"]);
     const doc = file([...Buffer.from("PK\x03\x04abc")], "报告.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     const d = await normalizeAttachment(doc);
-    expect(d.ok && d.file).toBe(doc); // 不需要改就是原 File，不复制
+    expect(d.ok && [d.file.name, d.file.type, d.file.size]).toEqual([doc.name, doc.type, doc.size]); // 名字类型照旧，字节用读出的那份
     const shot = file(PNG, "Screenshot.png", "image/png");
     const s = await normalizeAttachment(shot);
-    expect(s.ok && s.file).toBe(shot); // 系统截图（PNG）照旧
+    expect(s.ok && [s.file.name, s.file.type, new Uint8Array(await s.file.arrayBuffer())]).toEqual(["Screenshot.png", "image/png", bytes(PNG)]); // 系统截图（PNG）照旧
   });
   test("TIFF / HEIC 嗅探出来但标为不可预览（会作为文件发送）", async () => {
     for (const [head, mime] of [[TIFF, "image/tiff"], [HEIC, "image/heic"]] as const) {
@@ -87,10 +84,10 @@ describe("[验收线 1] decideAttachment / normalizeAttachment", () => {
     expect(r).toMatchObject({ ok: false, reason: "empty", hint: NO_CONTENT_HINT });
     expect(NO_CONTENT_HINT).toContain("另存为");
   });
-  test("读取抛错（文件引用失效 / 权限）→ 拒绝，同一条提示；诊断记 readable=false", async () => {
-    const r = await normalizeAttachment(unreadable("x", 2048, "image/png"));
+  test("读取抛错（文件引用失效 / 权限）→ 拒绝，同一条提示；诊断记 fail: 加四种读法的错误名", async () => {
+    const r = await normalizeAttachment(unreadable("x", 2048, "image/png"), ALL_FAIL);
     expect(r).toMatchObject({ ok: false, reason: "unreadable", hint: NO_CONTENT_HINT });
-    expect(r.diag).toEqual({ type: "image/png", size: 2048, sniff: null, readable: false });
+    expect(r.diag).toEqual({ type: "image/png", size: 2048, sniff: null, readable: "fail:NotReadableError,NotReadableError,NotReadableError,NotReadableError" });
   });
   test(">10 MiB → 拒绝（不读内容），提示带文件名和 10MB；恰好 10 MiB 放行", async () => {
     const big = decideAttachment({ name: "大图.png", type: "image/png", size: MAX_ATTACHMENT_BYTES + 1 }, null);
@@ -157,29 +154,25 @@ describe("[验收线 1] 诊断行只记类型 / 大小 / 嗅探 / 可读", () =>
     const r = await normalizeAttachment(file(PNG, "私密名字", ""));
     const line = formatPasteDiag({
       types: ["Files", "text/html"], items: [{ kind: "file", type: "" }, { kind: "string", type: "text/html" }],
-      files: [r.diag, { type: "", size: 3, sniff: null, readable: false }], html: { fromHtml: 0, refused: 1, tooLarge: 0 },
+      files: [r.diag, { type: "", size: 3, sniff: null, readable: "fail:NotReadableError" }], html: { fromHtml: 0, refused: 1, tooLarge: 0 },
     });
     expect(line.startsWith("[paste-diag] ")).toBe(true);
     expect(line).toContain("types=Files,text/html");
     expect(line).toContain("items=file:-,string:text/html");
-    expect(line).toContain("files=-/16/image/png/readable,-/3/?/unreadable");
+    expect(line).toContain("files=-/16/image/png/ok:b;-/3/?/fail:NotReadableError"); // Bun 没有 FileReader，a 不通、b 读通
     expect(line).toContain("html-img=0/refused1/big0");
     expect(line).not.toContain("私密名字");
     expect(line).not.toMatch(/file:\/\/|https?:|<img|base64/);
   });
 });
 
-/** 文件头读取挂起、由测试放行的 PNG（模拟大文件 / 慢盘上的读取还没回来） */
+/** 读取挂起、由测试放行的 PNG（模拟大文件 / 慢盘上的读取还没回来）；Bun 没有 FileReader，默认读法走到 b（arrayBuffer） */
 function deferredPng(name: string): { file: File; release: () => void } {
   const f = new File([bytes(PNG)], name, { type: "" });
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
-  const orig = (f as unknown as { slice(a?: number, b?: number): Blob }).slice.bind(f); // 先取原 slice 再覆盖；根 tsc 的 Bun File 类型没声明 slice
-  const read = async (a?: number, b?: number) => {
-    await gate;
-    return (orig(a, b) as unknown as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer();
-  };
-  Object.defineProperty(f, "slice", { value: (a?: number, b?: number) => ({ arrayBuffer: () => read(a, b) }) });
+  const orig = f.arrayBuffer.bind(f);
+  Object.defineProperty(f, "arrayBuffer", { value: async () => (await gate, orig()) });
   return { file: f, release };
 }
 

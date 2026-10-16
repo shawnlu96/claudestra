@@ -80,7 +80,7 @@ export function readClipboard(dt: ClipboardLike): ClipboardRead {
   return { files: html.files, fromHtml: html.files.length, missing, html };
 }
 
-/** 一行 [paste-diag]：只记 types、items 的 kind/type、每个文件的 type/size/嗅探/可读，不记文件名、路径、HTML、内容 */
+/** 一行 [paste-diag]：只记 types、items 的 kind/type、每个文件的 type/size/嗅探/可读状态，不记文件名、路径、HTML、内容 */
 export function formatPasteDiag(o: {
   types: readonly string[];
   items: ArrayLike<{ kind: string; type: string }>;
@@ -88,7 +88,7 @@ export function formatPasteDiag(o: {
   html: { fromHtml: number; refused: number; tooLarge: number };
 }): string {
   const items = Array.from(o.items, (i) => `${i.kind}:${i.type || "-"}`).join(",");
-  const files = o.files.map((f) => `${f.type || "-"}/${f.size}/${f.sniff ?? "?"}/${f.readable ? "readable" : "unreadable"}`).join(",");
+  const files = o.files.map((f) => `${f.type || "-"}/${f.size}/${f.sniff ?? "?"}/${f.readable}`).join(";"); // fail: 里各读法的错误名用逗号，文件之间改分号
   const html = `${o.html.fromHtml}/refused${o.html.refused}/big${o.html.tooLarge}`;
   return `[paste-diag] types=${o.types.join(",")} items=${items} files=${files} html-img=${html}`;
 }
