@@ -174,7 +174,8 @@ test("[验收线 5] off: no remote read, no extra output field, and the ledger e
     const at = (a.f.db.query("SELECT ts FROM events WHERE json_extract(data, '$.lend.op') = 'reclaim'").get() as { ts: number }).ts;
     const rb = reclaimLend(b.f.db, { actor: "pm", now: at }, { taskId: "T1", reason: "出借方掉线，核过没有成果", retire: undefined });
     expect(rb).toMatchObject({ intent: null, unpinned: false });
-    const strip = (s: string) => s.replace(/"(ts|createdAt|updatedAt)":\d+/g, "\"$1\":0");
+    // elapsedMs = 出借记忆 observe 样本的实测耗时（memory-retrieve-lend.ts），和 ts 一样是时钟读数；它在事件 data 的 JSON 串里，引号带转义
+    const strip = (s: string) => s.replace(/"(ts|createdAt|updatedAt)":\d+/g, "\"$1\":0").replace(/\\"elapsedMs\\":\d+/g, "\\\"elapsedMs\\\":0");
     expect(strip(dump(a))).toBe(strip(dump(b)));
   } finally { a.f.close(); b.f.close(); }
 });

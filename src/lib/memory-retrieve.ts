@@ -16,6 +16,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { memoryStatus, type MemoryState } from "./ledger-memory-fold.js";
 import type { Memory } from "./ledger-memory.js";
+import type { MemoryVisibility } from "./ledger-memory-schema.js";
 import { getMemory, listMarks } from "./ledger-memory.js";
 import { effectiveNodes, getDagVersion, getFeature, type DagNode } from "./ledger-feature.js";
 import { featureDeps } from "./ledger-feature-deps.js";
@@ -115,13 +116,15 @@ const KIND_ORDER: Record<Memory["kind"], number> = { pitfall: 0, decision: 1, su
  * 本项目可推的记忆：坑看 open / fixing，总结 / 决定看 open；带 disputed 的不推；本卡自己的总结不推（本卡的坑、决定照收）。
  * 库里还没有记忆表（老只读库）= 空。
  */
-export function memoryCandidates(db: Database, task: Pick<LedgerTask, "id" | "project"> & Partial<Pick<LedgerTask, "specRev">>): Candidate[] {
+/** visibility 给了 = 只收这种可见性（出借单只排 team）；在这里过滤，检索上下文才挂在 rankMemories 拿到的同一个数组上 */
+export function memoryCandidates(db: Database, task: Pick<LedgerTask, "id" | "project"> & Partial<Pick<LedgerTask, "specRev">>,
+  visibility?: MemoryVisibility): Candidate[] {
   if (!hasTable(db, "memories") || !hasTable(db, "memory_marks")) return [];
   const ids = db.query("SELECT id FROM memories WHERE project = ? ORDER BY id").all(task.project) as { id: string }[];
   const out: Candidate[] = [];
   for (const { id } of ids) {
     const memory = getMemory(db, id);
-    if (!memory) continue;
+    if (!memory || (visibility && memory.visibility !== visibility)) continue;
     const st = memoryStatus(memory, listMarks(db, id));
     if (st.disputed) continue;
     const live = memory.kind === "pitfall" ? st.status === "open" || st.status === "fixing" : st.status === "open";
