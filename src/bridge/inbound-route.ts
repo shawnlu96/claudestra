@@ -16,7 +16,7 @@ import {
 } from "../lib/inbound-route.js";
 import { isHeldIdleCarrier } from "../lib/held-idle-batch.js";
 import { heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
-import type { HeldItem } from "./held-queue.js";
+import { leaseActive, type HeldItem } from "./held-queue.js";
 import { isHumanRequest, type Envelope, type LocalEndpoint } from "./router.js";
 import { turnBrief } from "./turn-brief.js";
 import { probeTurn, resolveTurnWindow } from "./turn-probe.js";
@@ -75,6 +75,11 @@ export const routeAdmitsWhileBusy = (env: Envelope, human: Human = isHumanReques
 export const routeHolds = (env: Envelope, turn: TurnState): boolean =>
   holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn) || (turn.main === "busy" && holdsWhileBusy(env, routeMode()));
 export const routeOrder = <T extends HeldItem>(items: readonly T[]): T[] => mergeOrder(items, routeMode());
+/** 押满时限放出：判了排队 / 合并的结论记成「回合中直接送、不抢占」（没有结论的不动，按原规则） */
+export function routeRelease(env: Envelope): void {
+  const r = env.meta.inboundRoute;
+  if (r && r.action !== "interrupt") env.meta.inboundRoute = { ...r, release: true };
+}
 export const routeDue = <T extends HeldItem>(due: readonly T[], queue: readonly T[]): T[] => mergeDue(due, queue, routeMode());
 export const routePullable = (item: HeldItem, queue: readonly HeldItem[], base: (i: HeldItem) => boolean): boolean => pullable(item, queue, base, routeMode());
 
@@ -93,7 +98,8 @@ function queueOf(channelId: string, incoming: Envelope): { items: HeldItem[]; en
   const items = (deps.queue(channelId) ?? []).filter((i) => !isHeldIdleCarrier(i) && i.env.meta.messageId !== incoming.meta.messageId).slice(-QUEUE_KEEP);
   // 新来的这条也得进得了合批载体（带附件的不行）、开关开着，才谈得上和谁一起投
   const canBatch = heldAgentBatchOn() && isAgentBatchable({ env: incoming, to: incoming.to as LocalEndpoint });
-  return { items, entries: items.map((i) => queueEntry(i.env, incoming.from, canBatch && isAgentBatchable(i))) };
+  // 已被 check_inbox 领走（租约中）的不当合并目标：跟着它的那条要押到确认 / 租约过期（最长 15 分钟）才放得出来
+  return { items, entries: items.map((i) => queueEntry(i.env, incoming.from, canBatch && isAgentBatchable(i) && !leaseActive(i))) };
 }
 
 /**

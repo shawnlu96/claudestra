@@ -117,15 +117,13 @@ describe("merge：顺序与回复归属", () => {
     expect(order).toEqual([a, b, p].map((i) => i.env.meta.messageId));
   });
 
-  test("[A, peer, B→A]：A、B 并进一封载体送出，两个回程槽各自在等；精确答 A 只结 A，B 照旧能被答", async () => {
-    const a = held("A"), p = held("peer"), b = held("B", { action: "merge", mergeWith: a.env.meta.messageId, p: 0.98 });
+  test("[A1, peer, A2→A1]：同一个 agent 的两条并进一封载体送出，两条请求都登记在它的回程槽上；答复归它、答完不残留", async () => {
+    const a = held("A"), p = held("peer"), b = held("A", { action: "merge", mergeWith: a.env.meta.messageId, p: 0.98 });
     const q = new HeldQueue(null);
     q.configureIdleBatch(undefined);
     for (const i of [a, p, b]) q.hold(ME, i);
     const calls = new AgentCallBook(null);
-    for (const [who, it] of [["A", a], ["B", b]] as const) {
-      calls.add(ME, { callerChannelId: `c-${who}`, callerName: `agent-${who}`, targetName: "agent-me", targetChannelId: ME, ts: 1 }, it.env.meta.messageId);
-    }
+    for (const it of [a, b]) calls.add(ME, { callerChannelId: "c-A", callerName: "agent-A", targetName: "agent-me", targetChannelId: ME, ts: 1 }, it.env.meta.messageId);
     const stillHeld = (req: { messageId?: string; callerChannelId: string }) => requestStillHeld(req, unseenFrom(q, ME));
     const noop: CallerSettleDeps = {
       answerable: () => undefined, waiting: () => [], rearmResume: () => {}, consume: () => {}, pushBack: async () => {}, nudgeAmbiguous: () => {},
@@ -151,12 +149,11 @@ describe("merge：顺序与回复归属", () => {
     expect([...String(sent[0].content).matchAll(/"message_id":"(m\d+)"/g)].map((m) => m[1])).toEqual([a, b].map((i) => i.env.meta.messageId));
     expect(touched).toEqual([a, b].map((i) => i.env.meta.messageId));
     expect((q.get(ME) ?? []).map((i) => i.env.meta.messageId)).toEqual([p.env.meta.messageId]);
-    expect(calls.waiting(ME, stillHeld).map((c) => c.callerName).sort()).toEqual(["agent-A", "agent-B"]);
-    expect(calls.answerable(ME, stillHeld)).toBeUndefined(); // 没指明答给谁的不认给任何一个（不串话）
+    expect(calls.waiting(ME, stillHeld).map((c) => c.callerName)).toEqual(["agent-A"]); // 押着时不算在等，载体送达后才算
+    expect(calls.answerable(ME, stillHeld)?.callerName).toBe("agent-A"); // 只有它一个在等：自己频道 reply / Stop 兜底都归它
     const pa = calls.exact(ME, "c-A", stillHeld)!;
     calls.consume(ME, "c-A", pa);
-    expect(calls.waiting(ME, stillHeld).map((c) => c.callerName)).toEqual(["agent-B"]);
-    expect(calls.exact(ME, "c-B", stillHeld)?.callerName).toBe("agent-B");
+    expect(calls.waiting(ME, stillHeld)).toEqual([]);
   });
 
   test("jrt-merge-split（同伴在租约里）：[A(check_inbox 领走未确认), B→A] 目标空闲也不单独投 B；A 确认出队后 B 照投", async () => {
@@ -171,6 +168,54 @@ describe("merge：顺序与回复归属", () => {
     q.remove(ME, a);
     await flushHeld(flushDeps(q, () => false, log, { agentBatch: () => true }), ME, "stop");
     expect(log).toEqual([b.env.meta.messageId]);
+  });
+
+  test("jrt-merge-chain-split：[C(租约中), A→C, B→A] on 档整组等、一条都不先投；C 确认出队后 A、B 一封送出", async () => {
+    const c = held("A"), a = held("A", { action: "merge", mergeWith: c.env.meta.messageId, p: 0.98 }), b = held("A", { action: "merge", mergeWith: a.env.meta.messageId, p: 0.98 });
+    c.lease = { batchId: "inbox_x", at: Date.now() };
+    const q = new HeldQueue(null);
+    q.configureIdleBatch(undefined);
+    q.set(ME, [c, a, b]);
+    const log: string[] = [];
+    const deps = flushDeps(q, () => false, log, { agentBatch: () => true });
+    await flushHeld(deps, ME, "stop");
+    expect(log).toEqual([]);
+    q.remove(ME, c);
+    await flushHeld(deps, ME, "stop");
+    expect(log).toHaveLength(1); // 一封载体
+    expect((q.get(ME) ?? []).length).toBe(0);
+  });
+  test("jrt-merge-chain-split 对照（off 档）：C 租约中，A、B 照旧（HMB-1）并进一封送出", async () => {
+    mode = "off";
+    const c = held("A"), a = held("A", { action: "merge", mergeWith: c.env.meta.messageId, p: 0.98 }), b = held("A", { action: "merge", mergeWith: a.env.meta.messageId, p: 0.98 });
+    c.lease = { batchId: "inbox_x", at: Date.now() };
+    const q = new HeldQueue(null);
+    q.configureIdleBatch(undefined);
+    q.set(ME, [c, a, b]);
+    const log: string[] = [];
+    await flushHeld(flushDeps(q, () => false, log, { agentBatch: () => true }), ME, "stop");
+    expect(log).toHaveLength(1);
+    expect((q.get(ME) ?? []).map((i) => i.env.meta.messageId)).toEqual([c.env.meta.messageId]);
+  });
+
+  test("jrt-owner-late-preempt：判了排队的 owner 旧消息押满时限，回合中送进去、不发 C-c（不打断 owner 后来亲自开的那一回合）", async () => {
+    const old = held("owner", { action: "queue", p: 0.98 }); // 「辛苦了」：Jev 判排队
+    old.heldAt = 0;
+    const q = new HeldQueue(null);
+    q.set(ME, [old]);
+    const log: string[] = [];
+    // owner 后来又发了「改去做 X」（判打断，开了 X 这一回合），目标一直忙；旧消息押了 2 分 5 秒
+    await flushHeld(flushDeps(q, () => true, log, { now: () => 125_000 }), ME, "sweep");
+    expect(log).toEqual([old.env.meta.messageId]); // 送到了，没带 preempt
+    expect(old.env.meta.inboundRoute).toMatchObject({ action: "queue", release: true });
+    expect(routeAdmitsWhileBusy(old.env)).toBe(false);
+    // 不到时限：仍押着
+    const fresh = held("owner", { action: "queue", p: 0.98 });
+    fresh.heldAt = 100_000;
+    q.set(ME, [fresh]);
+    await flushHeld(flushDeps(q, () => true, log, { now: () => 125_000 }), ME, "sweep");
+    expect(log).toHaveLength(1);
+    expect(q.get(ME)?.length).toBe(1);
   });
 
   test("jrt-merge-split（人的消息）：owner 补充排队里自己那条，Jev 判 merge 也按排队（不承诺并不到一起的合并）", async () => {

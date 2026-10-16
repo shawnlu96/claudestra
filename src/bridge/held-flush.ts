@@ -24,7 +24,7 @@ import {
 } from "../lib/inbox-batch.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { agentBatchMembers, heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
-import { routeAdmitsWhileBusy, routeDue, routeOrder } from "./inbound-route.js";
+import { routeAdmitsWhileBusy, routeDue, routeOrder, routeRelease } from "./inbound-route.js";
 import { adoptStrandedTransfers, currentPmTarget, expectPmTarget, handedOver, roleHandoffs, shouldRetry, type PmTarget } from "./pm-held-transfer.js";
 
 export interface FlushDeps {
@@ -391,7 +391,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
         if (!d.held.get(channelId)?.includes(item)) continue;
       }
       if (late.has(item) && item.env.meta.waitForIdle) delete item.env.meta.waitForIdle; // 只有卡片答复走到这里（见 ownerLate）
-      if (late.has(item)) delete item.env.meta.inboundRoute; // Jev 判了排队的 owner 消息最多等这么久，之后按原规则投（一直忙的 PM 等不到回合结束）
+      if (late.has(item)) routeRelease(item.env); // Jev 判了排队的 owner 消息押满时限：回合中送进去、不抢占（一直忙的 PM 等不到回合结束）
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       markIfHeldAcrossStop(item, d.stoppedAt?.(channelId));
       if (pm) expectPmTarget(item.env, channelId); // 核的是本频道的分轮：投递时又被转给别的 PM 就留队（deliverPmLocal pmTargetDrift）

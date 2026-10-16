@@ -7,6 +7,7 @@ import {
   admitsWhileBusy, buildRouteState, decideRoute, holdsWhileBusy, mergeDue, mergeOrder, parseRouteMode, pullable, queueEntry, ROUTE_MIN_P, routeEligible, routeQuestions, routeRole,
   ruleAction, type RouteEnv, type StoredRoute,
 } from "../src/lib/inbound-route.js";
+import { isWriteInvocation } from "../src/manager/write-commands.js";
 
 const OWNER = { kind: "user", userId: "u1", username: "owner", channelId: "c-owner" };
 const GUEST = { kind: "api", tokenId: "guest:g1", name: "guest-g" };
@@ -62,8 +63,9 @@ describe("decideRoute：代码兜底", () => {
     expect(decideRoute({ route_action: action("merge") }, { env: a, queue: [] })).toMatchObject({ route: { action: "queue" } });
   });
   test("mergeable：只给两条都是本机 agent、都进得了合批载体的；人的消息（同一个 owner 也是）不合并", () => {
-    expect(queueEntry(env(AGENT("c-b"), "x"), AGENT("c-a"), true).mergeable).toBe(true); // 不同 agent 也行：HMB-1 载体按各自回程槽归属
-    expect(queueEntry(env(AGENT("c-b"), "x"), AGENT("c-a"), false).mergeable).toBe(false); // 合批关着 / 带附件
+    expect(queueEntry(env(AGENT("c-a"), "x"), AGENT("c-a"), true).mergeable).toBe(true);
+    expect(queueEntry(env(AGENT("c-b"), "x"), AGENT("c-a"), true).mergeable).toBe(false); // merge-cross-sender：不同 agent 不合并
+    expect(queueEntry(env(AGENT("c-a"), "x"), AGENT("c-a"), false).mergeable).toBe(false); // 合批关着 / 带附件 / 已被领走
     expect(queueEntry(env(OWNER, "看板显示 0"), OWNER, true).mergeable).toBe(false);
     expect(decideRoute({ route_action: action("merge"), route_merge_with: action("q2", 0.99) }, { env: env(OWNER, "补充：网页端也一样"), queue: q }))
       .toMatchObject({ route: { action: "queue" }, downgraded: "merge_target" });
@@ -114,6 +116,11 @@ describe("三处共用的判定", () => {
     expect(admitsWhileBusy(env(OWNER), "on", human)).toBe(true);
     expect(admitsWhileBusy(env(AGENT()), "on", human)).toBe(false);
   });
+  test("release（判了排队的 owner 消息押满时限）：不押、也不抢占", () => {
+    const r = routed({ action: "queue", p: 1, release: true });
+    expect(holdsWhileBusy(r, "on")).toBe(false);
+    expect(admitsWhileBusy(r, "on", human)).toBe(false);
+  });
   test("ruleAction：现有规则的结论", () => {
     expect([ruleAction(true, false), ruleAction(false, true), ruleAction(false, false)]).toEqual(["interrupt", "queue", "deliver"]);
   });
@@ -140,6 +147,15 @@ describe("mergeOrder / pullable", () => {
     expect(mergeDue([a, p, b], [a, p, b], "on").map((i) => i.env.meta.messageId)).toEqual(["A", "P", "B"]);
     expect(mergeDue([p, b], [p, b], "on").map((i) => i.env.meta.messageId)).toEqual(["P", "B"]);
     expect(mergeDue([p, b], [a, p, b], "off").map((i) => i.env.meta.messageId)).toEqual(["P", "B"]);
+  });
+  test("mergeDue 迭代到不动点：B→A→C，C 不到期，A、B 都扣下", () => {
+    const c = it("C"), a2 = it("A", { action: "merge", mergeWith: "C", p: 0.9 }), b2 = it("B", { action: "merge", mergeWith: "A", p: 0.9 });
+    expect(mergeDue([a2, b2], [c, a2, b2], "on")).toEqual([]);
+    expect(mergeDue([c, a2, b2], [c, a2, b2], "on").map((i) => i.env.meta.messageId)).toEqual(["C", "A", "B"]);
+  });
+  test("manager inbound-route 写命令不分大小写（认主守卫 + 写锁）", () => {
+    for (const sub of ["on", "ON", "Observe", "off"]) expect(isWriteInvocation("inbound-route", [sub])).toBe(true);
+    for (const sub of ["status", "STATUS", "get"]) expect(isWriteInvocation("inbound-route", [sub])).toBe(false);
   });
   test("parseRouteMode：未知值按 off", () => {
     expect([parseRouteMode("on"), parseRouteMode("observe"), parseRouteMode("ON"), parseRouteMode(undefined)]).toEqual(["on", "observe", "off", "off"]);

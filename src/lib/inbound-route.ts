@@ -20,6 +20,8 @@ export interface StoredRoute {
   mergeWith?: string;
   /** Jev 给所选项的概率 */
   p: number;
+  /** 判了排队的 owner 消息押满时限（held-flush ownerLate）：回合中直接送进去，不再押、也不抢占（不能晚几分钟再 C-c 掉 owner 后来开的回合） */
+  release?: true;
 }
 
 export interface RouteFrom {
@@ -79,11 +81,11 @@ export interface QueueEntry {
 }
 
 /**
- * 押后队列里的一条 → 排队摘要。mergeable 只给「真能并进一封投递」的：两条都是本机 agent 消息、都进得了 HMB-1 的合批载体（batchable 由调用方按
- * lib/held-agent-batch.ts 判好）。人的消息不合并：逐条投递时同伴一开回合、后一条就被押到下一轮（并不在一起），拼进载体又丢了逐条的回程登记
+ * 押后队列里的一条 → 排队摘要。mergeable 只给「真能并进一封投递」的：两条是同一个本机 agent 发的、都进得了 HMB-1 的合批载体（batchable 由调用方按
+ * lib/held-agent-batch.ts 判好，已被 check_inbox 领走的也不算）。人的消息不合并：逐条投递时同伴一开回合、后一条就被押到下一轮（并不在一起），拼进载体又丢了逐条的回程登记
  */
 export function queueEntry(item: Pick<RouteEnv, "from" | "content" | "meta">, incoming: RouteFrom, batchable: boolean): QueueEntry {
-  const mergeable = batchable && item.from.kind === "local" && incoming.kind === "local";
+  const mergeable = batchable && item.from.kind === "local" && incoming.kind === "local" && item.from.channelId === incoming.channelId; // 同一个 agent 发的
   return { id: item.meta.messageId, from: senderName(item.from), role: routeRole(item), text: clip(item.content, QUEUE_TEXT_MAX), mergeable };
 }
 
@@ -163,12 +165,15 @@ export function admitsWhileBusy(env: RouteEnv, mode: RouteMode, isHuman: (env: R
   return r ? r.action === "interrupt" : isHuman(env);
 }
 /** 开关 on 且 Jev 判了 queue / merge：目标主回合在跑就押着（人类消息本来不押，这里补上） */
-export const holdsWhileBusy = (env: RouteEnv, mode: RouteMode): boolean => mode === "on" && !!env.meta.inboundRoute && env.meta.inboundRoute.action !== "interrupt";
+export const holdsWhileBusy = (env: RouteEnv, mode: RouteMode): boolean => {
+  const r = mode === "on" ? env.meta.inboundRoute : undefined;
+  return !!r && r.action !== "interrupt" && !r.release;
+};
 
 interface Held { env: RouteEnv }
 /**
- * 投递 / 领取顺序：merge 的那条紧跟在它的同伴后面（同伴不在队里了就留在原位）。本机 agent 的两条因此是连着的一段，HMB-1 的合批载体
- * 一次送出；同一个人的两条在同一趟里先后投。开关不是 on 原样返回
+ * 投递 / 领取顺序：merge 的那条紧跟在它的同伴后面（同伴不在队里了就留在原位）。两条因此是连着的一段，HMB-1 的合批载体
+ * 一次送出（字数放不下的另说，见 docs/architecture/inbound-route.md 已知限制）。开关不是 on 原样返回
  */
 export function mergeOrder<T extends Held>(items: readonly T[], mode: RouteMode): T[] {
   if (mode !== "on" || !items.some((i) => i.env.meta.inboundRoute?.mergeWith)) return [...items];
@@ -193,12 +198,16 @@ export function mergeOrder<T extends Held>(items: readonly T[], mode: RouteMode)
  */
 export function mergeDue<T extends Held>(due: readonly T[], queue: readonly T[], mode: RouteMode): T[] {
   if (mode !== "on") return [...due];
-  const dueIds = new Set(due.map((i) => i.env.meta.messageId));
   const queued = new Set(queue.map((i) => i.env.meta.messageId));
-  return due.filter((i) => {
-    const w = i.env.meta.inboundRoute?.action === "merge" ? i.env.meta.inboundRoute.mergeWith : undefined;
-    return !w || !queued.has(w) || dueIds.has(w);
-  });
+  const mate = (i: T) => (i.env.meta.inboundRoute?.action === "merge" ? i.env.meta.inboundRoute.mergeWith : undefined);
+  // 迭代到不动点：链上一环被扣下，跟着它的下一环也扣（B→A→C，C 在租约里：A、B 都等）
+  let out = [...due];
+  for (;;) {
+    const ids = new Set(out.map((i) => i.env.meta.messageId));
+    const next = out.filter((i) => { const w = mate(i); return !w || !queued.has(w) || ids.has(w); });
+    if (next.length === out.length) return out;
+    out = next;
+  }
 }
 
 /**
