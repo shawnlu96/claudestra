@@ -78,9 +78,11 @@ export type NoticeDismiss = Record<string, DismissRec[]>;
 
 const scopeOf = (fp: string, family: QuotaFamily) => `${fp}|${family}`;
 
+/** 同一个重置窗口：两边都有重置时刻就只比时刻（闸保留 enteredAt 也会改 resetsAt，如先碰 5 小时、后碰更晚的周额度 = 新窗口）；
+ *  有一边缺时刻（旧闸横幅迁来的记录、恢复中的闸）才退回按同一道闸 enteredAt 认 */
 function sameWindow(a: Pick<DismissRec, "id" | "reset">, b: Pick<DismissRec, "id" | "reset">): boolean {
-  if (a.id === b.id && a.id.startsWith("wall:")) return true;
   if (a.reset !== null && b.reset !== null) return Math.abs(a.reset - b.reset) <= RESET_JITTER_MS;
+  if (a.id === b.id && a.id.startsWith("wall:")) return true;
   return a.reset === null && b.reset === null && a.id === b.id;
 }
 

@@ -324,3 +324,21 @@ test("回包乱序：慢的旧回包（提醒）晚到，不覆盖已显示的�
     ui.setPoll({ lines: 60_000 });
   }
 });
+
+test("轮询失败也推进时钟：读数停在旧提醒，失败跨过重置时刻后提醒收起", async () => {
+  setState(S1);
+  ui.setPoll({ lines: 80, wall: 80 });
+  const realNow = Date.now;
+  try {
+    const v = await mount(["notice", "today"]);
+    await until(() => v.q("[data-quota-notice]").length === 1, "card");
+    world = { lines: { status: 500, json: { ok: false } }, wall: { status: 500, json: { ok: false } } };
+    const skew = RESET - realNow() + 60_000;
+    Date.now = () => realNow() + skew; // 过了重置时刻
+    await until(() => v.q("[data-quota-notice]").length === 0, "expired after failed poll");
+    expect(v.text("[data-quota-summary-family=Claude]")).toEqual(["Claude 本周已用 82%"]); // 摘要同一套过期判定：不再挂「到提醒线」
+  } finally {
+    Date.now = realNow;
+    ui.setPoll({ lines: 60_000, wall: 30_000 });
+  }
+});

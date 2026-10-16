@@ -13,7 +13,7 @@ import { machines } from "@/lib/machines";
 import { QUOTA_WORDS as Q } from "@/lib/owner-words";
 import { useChatNav } from "../chat/components/nav-context";
 import { openToday } from "../now/today-nav";
-import { reloadQuotaWall, useQuotaLinesReading, useQuotaWallReading } from "./quota-lines-store";
+import { quotaNow, reloadQuotaWall, useQuotaLinesReading, useQuotaWallReading } from "./quota-lines-store";
 import {
   dismissRows, isRowDismissed, loadNoticeDismiss, mergeNoticeDismiss, noticeRows, NOTICE_DISMISS_KEY,
   type NoticeDismiss, type NoticeRow,
@@ -108,7 +108,7 @@ export function QuotaNotice({ embedded = false }: { embedded?: boolean }) {
     return () => window.removeEventListener("storage", onStorage);
   }, [fp]);
 
-  const all = noticeRows(lines.fp === fp ? lines.value : null, wall.fp === fp ? wall.value : null, Math.max(lines.at, wall.at));
+  const all = noticeRows(lines.fp === fp ? lines.value : null, wall.fp === fp ? wall.value : null, quotaNow(lines, wall));
   const rows = all.filter((r) => !isRowDismissed(dismissed, fp, r));
   const { shown, open } = useShown(rows);
 

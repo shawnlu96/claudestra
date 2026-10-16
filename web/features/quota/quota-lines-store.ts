@@ -15,8 +15,9 @@ import { fetchQuotaLines } from "../lend/lend-quota-api";
 import type { QuotaLinesView } from "../lend/lend-quota-model";
 import type { WallResponse } from "../quota-wall/wall-banner-model";
 
-/** value：undefined = 还没读到；null = 读不到（403 / 404 / 401）；at = 最近一次落地的时刻（模型判「已过重置」用） */
-export interface Reading<T> { fp: string; value: T | null | undefined; at: number }
+/** value：undefined = 还没读到；null = 读不到（403 / 404 / 401）；at = 最近一次读数落地的时刻；
+ *  checkedAt = 最近一次轮询结束（成功或失败）/ 回到前台的时刻，模型判「已过重置」用它当现在：接口失败读数不变，时钟照样往前走 */
+export interface Reading<T> { fp: string; value: T | null | undefined; at: number; checkedAt: number }
 
 interface Source<T> {
   subscribe(cb: () => void): () => void;
@@ -29,7 +30,7 @@ const visible = () => typeof document === "undefined" || document.visibilityStat
 
 function createSource<T>(name: string, load: () => Promise<T | null>, periodMs: () => number): Source<T> {
   const subs = new Set<() => void>();
-  let snap: Reading<T> = { fp: fpNow(), value: undefined, at: 0 };
+  let snap: Reading<T> = { fp: fpNow(), value: undefined, at: 0, checkedAt: 0 };
   let stopped = false;
   let sent = 0;
   let landed = 0;
@@ -38,7 +39,9 @@ function createSource<T>(name: string, load: () => Promise<T | null>, periodMs: 
   let offMachines: (() => void) | null = null;
 
   const emit = () => { for (const cb of subs) cb(); };
-  const land = (value: T | null) => { snap = { fp: snap.fp, value, at: Date.now() }; emit(); };
+  const land = (value: T | null) => { const t = Date.now(); snap = { fp: snap.fp, value, at: t, checkedAt: t }; emit(); };
+  /** 读数不变、只推进时钟（失败 / 回到前台）：已过重置的提醒随之收起 */
+  const tick = () => { snap = { ...snap, checkedAt: Date.now() }; emit(); };
 
   function fetchNow() {
     if (stopped || !visible()) return;
@@ -57,6 +60,7 @@ function createSource<T>(name: string, load: () => Promise<T | null>, periodMs: 
         return land(null);
       }
       console.debug(`[quota] ${name} 拉取失败（保持上次读数，下一轮再试）:`, e);
+      tick();
     });
   }
   const arm = () => {
@@ -64,14 +68,17 @@ function createSource<T>(name: string, load: () => Promise<T | null>, periodMs: 
     timer = visible() && !stopped ? setInterval(fetchNow, periodMs()) : null;
   };
   const onVisibility = () => {
-    if (visible() && Date.now() - lastAt >= periodMs()) fetchNow();
+    if (visible()) {
+      if (Date.now() - lastAt >= periodMs()) fetchNow();
+      tick();
+    }
     arm(); // 隐藏就停表，回前台重新起表
   };
   /** 换了机器：清空读数、解除停拉（新机器重新问）；返回是否换了 */
   const switchMachine = (): boolean => {
     const fp = fpNow();
     if (fp === snap.fp) return false;
-    snap = { fp, value: undefined, at: 0 };
+    snap = { fp, value: undefined, at: 0, checkedAt: 0 };
     stopped = false;
     lastAt = 0;
     return true;
@@ -123,10 +130,10 @@ async function fetchWall(): Promise<WallResponse | null> {
 
 const lines = createSource<QuotaLinesView>("/lend/quota-lines", fetchQuotaLines, () => period.lines);
 const wall = createSource<WallResponse>("/quota/wall", fetchWall, () => period.wall);
-const serverSnap = { fp: "local", value: undefined, at: 0 };
+const serverSnap = { fp: "local", value: undefined, at: 0, checkedAt: 0 };
 const serverReading = () => serverSnap as Reading<never>;
 
-/** /lend/quota-lines 的读数（整份 Reading：fp 用来丢掉别的机器的旧值，at 当「现在」） */
+/** /lend/quota-lines 的读数（整份 Reading：fp 用来丢掉别的机器的旧值，checkedAt 当「现在」，见 quotaNow） */
 export function useQuotaLinesReading(): Reading<QuotaLinesView> {
   return useSyncExternalStore(lines.subscribe, lines.get, serverReading);
 }
@@ -138,6 +145,9 @@ export function useQuotaWallReading(): Reading<WallResponse> {
 /** 只要值：undefined = 还没读到，null = 读不到 */
 export const useQuotaLines = (): QuotaLinesView | null | undefined => useQuotaLinesReading().value;
 export const useQuotaWall = (): WallResponse | null | undefined => useQuotaWallReading().value;
+
+/** 模型的「现在」：两个读数最近一次检查的时刻（失败也算），不用最近成功回包时间，接口一直失败也会判出已过重置 */
+export const quotaNow = (...rs: Reading<unknown>[]): number => Math.max(...rs.map((r) => r.checkedAt));
 
 /** 「已恢复」POST /quota/wall/clear 之后立刻重读一次闸 */
 export const reloadQuotaWall = (): void => wall.reload();

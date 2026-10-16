@@ -4,7 +4,7 @@
  * 的同一份读数，不另外轮询；读不到（403 / 404 / 失败）整行不出。「今天 · 团队与额度」的额度行与用量看板顶部共用。
  */
 import { useT } from "@/lib/i18n";
-import { useQuotaLinesReading, useQuotaWallReading } from "./quota-lines-store";
+import { quotaNow, useQuotaLinesReading, useQuotaWallReading } from "./quota-lines-store";
 import { summaryParts, usedPhrase } from "./quota-notice-model";
 
 const TONE = { warning: "text-warning", error: "text-error" } as const;
@@ -14,7 +14,7 @@ export function QuotaSummary({ className, hook, trailing }: { className?: string
   const t = useT();
   const lines = useQuotaLinesReading();
   const wall = useQuotaWallReading();
-  const parts = summaryParts(lines.value, wall.value, Math.max(lines.at, wall.at));
+  const parts = summaryParts(lines.value, wall.value, quotaNow(lines, wall));
   if (!parts) return null;
   return (
     <p className={className} data-quota-summary>

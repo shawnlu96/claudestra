@@ -105,6 +105,12 @@ describe("关掉", () => {
     expect(dismissedAfter(stop, rows(S1))).toEqual([true]);
     expect(dismissedAfter(rows(S1), rows({ ...S1, lines: view([line("claude", 82, "warn", { resetAt: RESET + 7 * 86_400_000 })]) }))).toEqual([false]);
   });
+  test("同一道闸（enteredAt 不变）换了重置时刻 = 新窗口再出；同一时刻 / 旧键迁来缺时刻的仍按这道闸认", () => {
+    const at = (resetsAt: number | null) => noticeRows(null, wallOut({ resetsAt }), NOW);
+    expect(dismissedAfter(at(NOW + 3_600_000), at(NOW + 24 * 3_600_000))).toEqual([false]); // 先碰 5 小时、后碰周额度：mergeReset 保留 enteredAt
+    expect(dismissedAfter(at(NOW + 3_600_000), at(NOW + 3_600_000))).toEqual([true]);
+    expect(dismissedAfter(at(null), at(NOW + 24 * 3_600_000))).toEqual([true]);
+  });
   test("关过「用完」，开始恢复照样出一次；同一道闸关过恢复中不再出", () => {
     expect(dismissedAfter(rows(S2), rows(S3))).toEqual([false]);
     expect(dismissedAfter(rows(S3), rows(S3))).toEqual([true]);
