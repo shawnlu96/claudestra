@@ -163,6 +163,23 @@ describe("退避中 bridge 重启：计划落盘，读回来到点照续、接�
     }
   });
 
+  test("restart-drops-final-retry：第 4 次续跑发出后重启，读回 n=4 不当坏数据，下一次撞错照样升级（不重开 4 次预算）", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nrt1-n4-"));
+    const path = join(dir, "api-error-resume.json");
+    try {
+      const before = new Map<string, ApiErrorState>();
+      const r = outage(before, "c1", TRANSIENT_BACKOFF_MS.length); // 撞 4 次、续 4 次
+      expect(r.last).toBe("track");
+      expect(before.get("c1")?.net?.n).toBe(TRANSIENT_BACKOFF_MS.length);
+      saveResumeStates(before, path);
+      const after = loadResumeStates(path, r.now);
+      expect(after.get("c1")?.net?.n).toBe(TRANSIENT_BACKOFF_MS.length);
+      expect(noteApiError(after, "c1", NET, r.now)).toBe("escalate");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("单条字段坏了（net 空、resumedAt 非数字）：丢掉那条，别的照常读回；撞错过了半小时还没续的也丢", () => {
     const dir = mkdtempSync(join(tmpdir(), "nrt1-field-"));
     try {
@@ -171,6 +188,7 @@ describe("退避中 bridge 重启：计划落盘，读回来到点照续、接�
         bad1: { errorAt: T0, error: "x", net: {} },
         bad2: { errorAt: T0, error: "x", resumedAt: "soon" },
         bad3: { errorAt: T0, error: "x", net: { n: 9, since: T0, last: "" } },
+        bad4: { errorAt: T0, error: "x", net: { n: 4, since: T0, last: "" } },
         old: { errorAt: T0 - STALE_RESUME_MS, error: "x" },
         ok: { errorAt: T0, error: "x", net: { n: 1, since: T0, last: NET }, agent: "a" },
       }));

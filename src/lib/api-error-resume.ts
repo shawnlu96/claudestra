@@ -36,13 +36,14 @@ export interface ApiErrorState {
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const isNetStreak = (v: unknown): boolean => {
   const n = v as NetStreak;
-  return !!n && typeof n === "object" && Number.isInteger(n.n) && n.n >= 0 && n.n < TRANSIENT_BACKOFF_MS.length && num(n.since) && typeof n.last === "string";
+  return !!n && typeof n === "object" && Number.isInteger(n.n) && n.n >= 0 && n.n <= TRANSIENT_BACKOFF_MS.length && num(n.since) && typeof n.last === "string";
 };
 /** 每个字段都核：net / resumedAt 坏了这条就永不到期、之后的网络错误永远静默（第 2 轮 P2-3） */
 const isApiErrorState = (v: unknown): boolean => {
   const s = v as ApiErrorState;
   return !!s && typeof s === "object" && num(s.errorAt) && typeof s.error === "string" && (s.resumedAt === undefined || num(s.resumedAt))
-    && (s.net === undefined || isNetStreak(s.net)) && (s.agent === undefined || typeof s.agent === "string");
+    && (s.net === undefined || isNetStreak(s.net)) && (s.agent === undefined || typeof s.agent === "string")
+    && !(s.net?.n === TRANSIENT_BACKOFF_MS.length && s.resumedAt === undefined); // n=4 只会出现在第 4 次续跑之后：没续过却 n=4 = 坏数据（否则退避间隔取不到、永不到期）
 };
 const isStateFile = (d: unknown): boolean => !!d && typeof d === "object" && !Array.isArray(d);
 
