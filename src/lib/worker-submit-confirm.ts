@@ -24,7 +24,7 @@ import { observeDedupKey, recoveryPolicy, type RecoveryMode, type RecoveryPolicy
 import { readRegistryAgents } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { stepOfNode } from "./scheduler-work-order.js";
-import { sentAsWake, type SessionRef, type WorkerObservation, type WorkerSession } from "./worker-session.js";
+import { deliveryFor, sentAsWake, type SessionRef, type WorkerObservation, type WorkerSession } from "./worker-session.js";
 
 export const START_DELIVERY_KEY = "startDeliveryConfirm";
 /** Below UNCLAIMED_ALARM_MS (10 min): the first resend goes out before PM hears that nobody took the order. */
@@ -171,9 +171,20 @@ async function note(c: ConfirmCard, actionKey: string, action: string, data: Rec
   return r.ok === true;
 }
 
-/** Only author orders over the channel; a wake line or a restate carries no plan-only content, so the same order rebuilds. */
-const resendable = (first: SchedulerIntent, w: WorkerSession) => w.route === "channel" && first.action === "dispatch"
-  && (sentAsWake(first.receipt) || stepOfNode(first.node) === "restate");
+/** A card on a center replica (S2Q's own test): its intents' results are X8's, projected back without a receipt. */
+const onCenter = (task: LedgerTask): boolean => typeof (task.featureId ?? task.extra.sharedFeatureId) === "string";
+/**
+ * Only author orders sent over the channel; a wake line or a restate carries no plan-only content, so the same order rebuilds.
+ * The send fact: locally the done receipt's delivery tag. On a center replica the projection has no receipt field, and X8 is
+ * the only result writer for the intent: it reports done only for the transport's own `sent` (a refusal or a doubt is unknown),
+ * so a projected done dispatch with no receipt is the durable send fact, its delivery the one this route gives the step.
+ */
+function resendable(task: LedgerTask, first: SchedulerIntent, w: WorkerSession): boolean {
+  if (w.route !== "channel" || first.action !== "dispatch") return false;
+  const step = stepOfNode(first.node);
+  if (sentAsWake(first.receipt) || step === "restate") return true;
+  return first.receipt === null && first.status === "done" && onCenter(task) && !!step && deliveryFor(w.route, step).mode === "wake";
+}
 const taken = (db: Database, ids: readonly string[]) => ids.some((id) => orderTakenSeq(db, id) !== null);
 const attemptList = (key: string, attempts: readonly SchedulerIntent[]) =>
   attempts.map((a) => `${a.id.slice(key.length + 1)} ${a.status}`).join("、");
@@ -197,7 +208,7 @@ export async function confirmStart(c: ConfirmCard, sent: SchedulerIntent, ref: S
   const mode = (c.deps.recoveryPolicy ?? recoveryPolicy)(c.task.project, START_DELIVERY_KEY).mode;
   if (mode === "off" || seen.state === "result") return null;
   const first = intentRow(c.db, deliveryKey(sent.id));
-  if (!first || first.taskId !== c.task.id || !resendable(first, w)) return null;
+  if (!first || first.taskId !== c.task.id || !resendable(c.task, first, w)) return null;
   const key = first.id, attempts = attemptsOf(c.db, c.task.id, key), mem = memoryOf(c.db);
   if (taken(c.db, [key, ...attempts.map((a) => a.id)]) || mem.confirmed.has(key)) return null;
   // the ledger decides first: the session file (up to 8 MB) is read only when a resend / escalation is actually due

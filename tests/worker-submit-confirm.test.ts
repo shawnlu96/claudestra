@@ -200,6 +200,56 @@ describe("[验收线 2] center replica: every resend is a real send under its ow
   });
 });
 
+/** A central card taken through approve_restate (the center's task.stage) to its write order, sent over X8 (receipt: none locally). */
+async function centralWrite() {
+  const c = centralCard();
+  let last: unknown;
+  for (let i = 0; i < 4 && c.f.sent.length === 0; i++) last = await c.h.tick();
+  expect(last).toMatchObject({ step: "sent" }); // the restate order
+  await c.f.cli("agent-task-one", "stage", "T1", "--from", "spec", "--to", "restate", "--text", "复述");
+  await c.f.cli("pm", "restate-approve", "T1");
+  for (let i = 0; i < 4 && c.f.task().stage !== "build"; i++) await c.h.tick();
+  expect(c.f.task().stage).toBe("build");
+  for (let i = 0; i < 4 && !c.f.sent.some((s) => s.key === firstOf(c.f.db, "write")?.id); i++) last = await c.h.tick();
+  const write = firstOf(c.f.db, "write");
+  expect(write).toMatchObject({ status: "done", receipt: null }); // X8 owns the result: the projection carries no receipt
+  expect(c.f.sent.at(-1)).toMatchObject({ key: write.id });
+  return { c, key: write.id };
+}
+
+describe("[验收线 2] center replica write order: X8's done is the send fact, resend / confirm / cap", () => {
+  test("复现测试 central write resend: no turn → two real resends under their own center intents, then PM told once", async () => {
+    const { c, key } = await centralWrite();
+    try {
+      const n = c.f.sent.length;
+      for (let i = 1; i <= MAX_RESENDS; i++) {
+        c.f.advance(CONFIRM_TIMEOUT_MS);
+        expect(await c.h.tick()).toMatchObject({ step: "resent", detail: expect.stringContaining("已送出") });
+        expect(c.f.sent).toHaveLength(n + i);
+        expect(c.f.sent.at(-1)).toMatchObject({ route: "channel", key: attemptId(key, i), text: expect.stringContaining(key) });
+        expect(getIntent(c.f.db, attemptId(key, i))).toMatchObject({ node: "write", status: "done" });
+      }
+      c.f.advance(CONFIRM_TIMEOUT_MS);
+      expect(await c.h.tick()).toMatchObject({ step: "held", detail: expect.stringContaining("已升级 PM 待办") });
+      for (let i = 0; i < 2; i++) { c.f.advance(CONFIRM_TIMEOUT_MS); await c.h.tick(); }
+      expect(c.f.sent).toHaveLength(n + MAX_RESENDS);
+      expect(c.f.notices.filter((t) => t.includes(`开工单 ${key}`) && t.includes("重投 2 次（r1 done、r2 done）"))).toHaveLength(1);
+    } finally { configureSchedulerV2Intents(null); }
+  });
+
+  test("central write confirmed by the session (the turn started on an attempt): no more resends", async () => {
+    const { c, key } = await centralWrite();
+    try {
+      c.f.advance(CONFIRM_TIMEOUT_MS);
+      expect(await c.h.tick()).toMatchObject({ step: "resent" });
+      const n = c.f.sent.length;
+      c.h.setSession([userLine(`【调度派单】有新单 ${attemptId(key, 1)}`), asstLine("领单")].join("\n"));
+      for (let i = 0; i < 3; i++) { c.f.advance(CONFIRM_TIMEOUT_MS); expect(await c.h.tick()).not.toMatchObject({ step: "resent" }); }
+      expect(c.f.sent).toHaveLength(n);
+    } finally { configureSchedulerV2Intents(null); }
+  });
+});
+
 describe("[验收线 2 / 回归] observe then on (with a restart): observe's would-notes use none of on's budget", () => {
   test("observe: three timeouts, notes only; on after a restart: two real resends, then the PM todo", async () => {
     const t = await sentWrite("observe");

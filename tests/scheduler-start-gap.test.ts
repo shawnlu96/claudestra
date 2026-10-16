@@ -7,6 +7,13 @@ import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { planScheduler, type PlannerDecision } from "../src/lib/scheduler-plan.js";
 import { START_GAP_ESCALATE_MS, START_GAP_MS, startGap } from "../src/lib/scheduler-start-gap.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
+import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
+import { configureSchedulerV2Intents, schedulerV2EnsureClaimFence, withSchedulerV2Intents } from "../src/lib/scheduler-v2-intent.js";
+import { withSchedulerV2LedgerCmds } from "../src/lib/scheduler-v2-ledger-cmds.js";
+import { getIntent } from "../src/lib/ledger-scheduler.js";
+import type { PmNoticeLevel } from "../src/lib/pm-notice-level.js";
+import { ledgercmdFixture } from "./shared-ledger-v2-stage2-ledgercmd-fixture.test.js";
+import { intentCenter } from "./shared-ledger-v2-stage2-intent-fixture.test.js";
 
 type F = ReturnType<typeof autoFixture>;
 const policy = (mode: RecoveryMode): RecoveryPolicyPort => () => ({ mode, manualAfterMs: null, source: "config" });
@@ -100,5 +107,84 @@ describe("startGap (pure)", () => {
       const after = autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 2, now: 0 });
       expect(startGap(after, placement, since + 10 * START_GAP_MS)).toEqual({ kind: "none" });
     } finally { f.close(); }
+  });
+});
+
+/**
+ * The same card under the real center wiring: S2I (withSchedulerV2Intents, X8 journal) and S2Q (withSchedulerV2LedgerCmds) over
+ * the fixture's recording center. S2Q holds this mechanism's ledger writes for a central card (v2_unmapped), so the wait
+ * reason and the escalation must reach PM another way.
+ */
+function centralGapCard(mode: RecoveryMode = "on") {
+  const s = ledgercmdFixture(), center = intentCenter(s.port.clientFor("p")!), f = s.f;
+  configureSchedulerV2Intents({
+    route: (id) => s.port.route(id), wrapManager: (mgr) => withSchedulerV2LedgerCmds(mgr, s.port),
+    fence: () => s.port.fence("feature-one"), claimFence: (taskId, role) => schedulerV2EnsureClaimFence(f.db, taskId, role),
+    central: (taskId, intentId) => center.bound(taskId, intentId, f.task().headSHA, "dispatch"),
+    settled: async (_taskId, intentId, to) => { await s.port.sync("p", "feature-one"); const intent = getIntent(f.db, intentId); return { ok: intent?.status === to, intent }; },
+  });
+  const levels: { text: string; level: PmNoticeLevel }[] = [];
+  f.tickDeps.recoveryPolicy = policy(mode);
+  f.tickDeps.manager = (...args) => f.cliWith({ assertLease: () => {} }, "scheduler", ...args.slice(1));
+  f.tickDeps.notifyPm = async (_task, text, level) => { levels.push({ text, level }); };
+  const tick = async () => {
+    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, withSchedulerV2Intents(f.tickDeps));
+    expect(r.failed).toEqual([]);
+    return r.cards[0];
+  };
+  return { s, f, tick, levels, gap: () => levels.filter((n) => n.text.includes("开工单") && n.text.includes(f.task().id)) };
+}
+
+async function centralToBuild(c: ReturnType<typeof centralGapCard>) {
+  for (let i = 0; i < 4 && c.f.sent.length === 0; i++) await c.tick(); // session, then the restate order
+  await c.f.cli("agent-task-one", "stage", "T1", "--from", "spec", "--to", "restate", "--text", "复述");
+  await c.f.cli("pm", "restate-approve", "T1");
+  for (let i = 0; i < 4 && c.f.task().stage !== "build"; i++) await c.tick(); // approve_restate: the center's task.stage
+  expect(c.f.task().stage).toBe("build");
+}
+
+describe("[验收线 1] center replica under S2Q: the wait reason and the escalation reach PM though the ledger writes are held", () => {
+  test("复现测试 central start gap: queue frozen past the threshold → one info notice with code / reason / time in build; an hour → one action notice; cleared → sent", async () => {
+    const c = centralGapCard();
+    try {
+      await centralToBuild(c);
+      await c.f.cli("pm", "freeze", "--reason", "测试：冻结队列", "--project", "p");
+      let last: unknown;
+      for (let i = 0; i < 3 && (last as { step?: string } | undefined)?.step !== "waiting"; i++) last = await c.tick(); // a planned write is cancelled first
+      expect(last).toMatchObject({ step: "waiting", detail: "项目队列已冻结，不派新活" });
+      expect(c.f.sent.some((x) => x.text.includes("write"))).toBe(false);
+      expect(c.gap()).toEqual([]); // inside the threshold
+      c.f.advance(START_GAP_MS);
+      await c.tick();
+      await c.tick();
+      expect(c.s.observations).toContain("v2_unmapped"); // S2Q held the ledger note, as for every central card
+      const waits = c.gap().filter((n) => n.level === "info");
+      expect(waits).toHaveLength(1); // one per code, not every pass
+      expect(waits[0]!.text).toMatch(/^\[调度引擎\] T1 记录：开工单等待原因 queue_frozen（在 build 1\d 分钟）：项目队列已冻结/);
+      expect(c.gap().filter((n) => n.level === "action")).toEqual([]);
+      c.f.advance(START_GAP_ESCALATE_MS);
+      await c.tick();
+      await c.tick();
+      const escalated = c.gap().filter((n) => n.level === "action");
+      expect(escalated).toHaveLength(1);
+      expect(escalated[0]!.text).toContain("还没有开工单：等 queue_frozen");
+      await c.f.cli("pm", "unfreeze", "--project", "p");
+      for (let i = 0; i < 3 && !c.f.intents().some((x) => x.node === "write" && x.status === "done"); i++) await c.tick();
+      expect(c.f.intents().find((x) => x.node === "write")).toMatchObject({ status: "done" });
+      expect(c.gap().filter((n) => n.text.includes("重新规划开工单"))).toHaveLength(1);
+      expect(c.gap().filter((n) => n.level === "action")).toHaveLength(1);
+    } finally { configureSchedulerV2Intents(null); }
+  });
+
+  test("[验收线 4] key off on a central card: no notice at all", async () => {
+    const c = centralGapCard("off");
+    try {
+      await centralToBuild(c);
+      await c.f.cli("pm", "freeze", "--reason", "测试：冻结队列", "--project", "p");
+      c.f.advance(START_GAP_ESCALATE_MS * 2);
+      await c.tick();
+      await c.tick();
+      expect(c.gap()).toEqual([]);
+    } finally { configureSchedulerV2Intents(null); }
   });
 });
