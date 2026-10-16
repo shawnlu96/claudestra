@@ -79,13 +79,12 @@ beforeAll(async () => {
     if (path === "/api/v1/quota/settings") return json({ enabled: true });
     return json({ ok: false, error: "not in fixture" }, 404);
   }) as typeof fetch;
-  const r = (p: string) => require(`../web/features/${p}`);
-  const store = r("quota/quota-lines-store.ts"), today = r("now/today-nav.ts"), nav = r("collab/collab-nav.ts");
-  ui = { QuotaNotice: r("quota/quota-notice.tsx").QuotaNotice, NowTeamQuota: r("now/now-team-quota.tsx").NowTeamQuota,
-    StatsPanel: r("chat/components/stats-panel.tsx").StatsPanel, QuotaLiveSection: r("chat/components/settings/quota-live-section.tsx").QuotaLiveSection,
-    ChatStoreProvider: r("chat/chat-store.ts").ChatStoreProvider, ChatNavContext: r("chat/components/nav-context.tsx").ChatNavContext,
+  const store = require("../web/features/quota/quota-lines-store.ts"), today = require("../web/features/now/today-nav.ts"), nav = require("../web/features/collab/collab-nav.ts");
+  ui = { QuotaNotice: require("../web/features/quota/quota-notice.tsx").QuotaNotice, NowTeamQuota: require("../web/features/now/now-team-quota.tsx").NowTeamQuota,
+    StatsPanel: require("../web/features/chat/components/stats-panel.tsx").StatsPanel, QuotaLiveSection: require("../web/features/chat/components/settings/quota-live-section.tsx").QuotaLiveSection,
+    ChatStoreProvider: require("../web/features/chat/chat-store.ts").ChatStoreProvider, ChatNavContext: require("../web/features/chat/components/nav-context.tsx").ChatNavContext,
     setPoll: store.setQuotaPollForTest, takeTodayRequest: today.takeTodayRequest, TODAY_KEY: today.TODAY_KEY,
-    useCollabNav: nav.useCollabNav, closeCollab: nav.closeCollab, useWeekQuota: r("collab/use-count-source.ts").useWeekQuota };
+    useCollabNav: nav.useCollabNav, closeCollab: nav.closeCollab, useWeekQuota: require("../web/features/collab/use-count-source.ts").useWeekQuota };
 });
 
 afterEach(async () => {
