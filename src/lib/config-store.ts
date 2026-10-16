@@ -74,6 +74,8 @@ export interface AppConfig {
   pushAllAsks?: boolean;
   /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
   talkEnabled?: boolean;
+  /** Ordinary messages can request non-preempting delivery; disabling affects new requests only. */
+  steer?: Record<string, unknown> & { queueWhenBusy?: boolean };
   /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
   peerRelayJoinStrict?: boolean;
   /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 on；observe / off 要显式设置）；launcher 每轮现读 */
@@ -133,6 +135,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.pushAllAsks === "boolean" ? { pushAllAsks: raw.pushAllAsks } : {}),
     // 批量管理（bridge/fleet）：白名单带 compactKeep 和 callers；漏在这里读不到，任何 set* 还会把它抹掉
     ...fleetOf(raw.fleet),
+    ...(raw.steer && typeof raw.steer === "object" && !Array.isArray(raw.steer) ? { steer: { ...raw.steer } } : {}),
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
     ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
     ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
@@ -361,3 +364,7 @@ export async function setRenameStateMode(mode: RenameStateMode): Promise<AppConf
 }
 
 export { CONFIG_PATH, DEFAULT_CONFIG };
+
+export async function setSteerQueueWhenBusy(enabled: boolean): Promise<AppConfig> {
+  return editConfig(cfg => { cfg.steer = { ...cfg.steer, queueWhenBusy: enabled }; });
+}
