@@ -91,6 +91,7 @@ export const RECOVERY_KEYS = [
   "peerPrRequeue",
   "placementReservations",
   "planGap",
+  "pmQuiet",
   "pmRails",
   "pmTodoPull",
   "poolIdleSkip",

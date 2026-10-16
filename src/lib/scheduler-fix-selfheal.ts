@@ -14,6 +14,7 @@ import { recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 import { nodeAt, templateFor } from "./scheduler-template.js";
 import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
+import { uiRepairFix, type UiRepairOrder } from "./scheduler-ui-evidence-repair.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 
 const SELF_HEAL_KEY = "selfHealBeforeManual";
@@ -70,8 +71,10 @@ export function selfHealRefusal(s: PlannerSnapshot, facts: ReviewFacts | null): 
  * fixPackage's `fix_report` escalation, passed in as `fallback`, comes back unchanged (off / refused), with the observe note
  * (observe), or replaced by the one fix→review stage intent (on). Nothing here reads outside the snapshot but the switch.
  */
-export function fixSelfHeal(s: PlannerSnapshot, facts: ReviewFacts | null, fallback: PlannerDecision): PlannerDecision {
+export function fixSelfHeal(s: PlannerSnapshot, facts: ReviewFacts | null, fallback: PlannerDecision): PlannerDecision | UiRepairOrder {
   if (fallback.kind !== "escalate") return fallback;
+  const repair = uiRepairFix(s, facts); // PMQUIET1：唯一缺项是截图 → 补截图工单，不回审
+  if (repair) return repair;
   const mode = selfHealMode(s.task.project);
   if (mode === "off" || selfHealRefusal(s, facts)) return fallback;
   const head = s.task.headSHA as string, basis = facts ? `依据修复报告 ${facts.reportPath}（收敛后无 P1）` : "依据：上一轮完整审查报告缺失，让审查重出一份";

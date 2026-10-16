@@ -7,6 +7,7 @@
  * - observe：照常逐条投（env 原样），只记「本来会合并」；off：不记不排。开关切走后队里剩的照常送出。
  * - 拉取（pm-route-mode.ts pmDigestPull，缺省 on）：上面的「随立即送带上 / 窗口单独送」都不做，队列只给 `ledger pm-digest --list` 看；
  *   off 才回到推送摘要，且 owner / peer 的消息永远不带（摘要拼进正文会显示在对方自己的消息气泡里）。
+ * - PMQUIET1：立即投、暂存整包、摘要搭车都先过 pm-notice-current.ts 的同一复核（pmNoticeGate / pmNoticeFilter），过期提醒不投、出队，全过期不发空包。
  */
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
@@ -22,6 +23,8 @@ import { onHeldSettled, type HeldOutcome } from "./held-queue.js";
 import { HELD_MESSAGES_PATH } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 import { ledgerDb } from "./ledger-feed.js";
+import { openLedger } from "../lib/ledger-store.js";
+import { pmNoticeFilter, pmNoticeGate } from "../lib/pm-notice-current.js";
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
 
 type Send = (env: Envelope, to: LocalEndpoint) => Promise<Delivery>;
@@ -36,7 +39,8 @@ const TICK_MS = 60_000;
 
 /** heldCarriers：押后队列盘上信封带着的载体号（带走条目的那封不在里面了就把条目放回队） */
 /** hold：PM 暂存（pm-hold.ts）；不给就没有暂存 */
-export interface PmDigestDeps { store: PmDigestStore; now(): number; agents(): RegistryAgent[]; db(): Database | null; heldCarriers(): Set<string>; hold?: PmHoldStore }
+/** ledger：记过期提醒跳过事件的可写台账（缺省 openLedger；读当前卡用 db()） */
+export interface PmDigestDeps { store: PmDigestStore; now(): number; agents(): RegistryAgent[]; db(): Database | null; heldCarriers(): Set<string>; hold?: PmHoldStore; ledger?: () => Database }
 /** 单独摘要的发送入口：bridge 启动时 initTeamRouter 交来的 router deliver（不带任何押后条目的撤销条件）与连接表 */
 export interface PmDigestRouter { clients: Map<string, Client>; deliver(env: Envelope): Promise<Delivery> }
 /** 这封信封自己的载体号：只认以本封 messageId 开头的（复制出来的别的信封带着也不算） */
@@ -117,6 +121,10 @@ export class PmDigest {
   private async deliver(env: Digested, to: LocalEndpoint, send: Send, db: Database, project: string): Promise<Delivery> {
     if (!to.agentName || activeProjectPm(db, project) !== to.agentName) return this.release(env), send(env, to); // 摘要只给当班 PM
     const own = env.from.kind === "bridge" && env.from.label === PM_DIGEST_LABEL;
+    const bundle = env.from.kind === "bridge" && env.from.label === PM_HOLD_LABEL; // 整包已逐条复核过
+    if (!own && !bundle && env.from.kind !== "user" && env.from.kind !== "api" && !pmNoticeGate(db, project, bodyOf(env), this.deps.now(), this.writer).send) {
+      return this.release(env), { envelope: env, outcome: { kind: "sent", note: "pm-quiet" } }; // PMQUIET1：过期提醒不投
+    }
     if (!own && this.held(env, project)) return { envelope: env, outcome: { kind: "sent", note: "pm-hold" } };
     if (!own) {
       try {
@@ -133,8 +141,10 @@ export class PmDigest {
     }
     // owner / peer 的消息不搭摘要：拼进正文会原样显示在对方自己的消息里
     if (env.from.kind === "user" || env.from.kind === "api") return this.release(env), send(env, to);
-    return this.serial(project, () => this.sendWithDigest(env, to, send, project, own));
+    return this.serial(project, () => this.sendWithDigest(env, to, send, project, own, db));
   }
+
+  private readonly writer = (): Database => (this.deps.ledger ?? openLedger)();
 
   /** PM 暂存开着就全文入队、不投（pm-hold.ts）；写不进就照常往下走，宁可叫醒也不吞 */
   private held(env: Digested, project: string): boolean {
@@ -179,7 +189,7 @@ export class PmDigest {
    * 立即送的一封：队里有就把摘要放在前面，投出前先把条目记成被这封带走。真送到出队；押在 PM 队里（盘上就是带摘要的这份，
    * 可能经 check_inbox 领走）就让它带着，等押后队列报结局（settled）；其余没送到的正文还原、条目回队
    */
-  private async sendWithDigest(env: Digested, to: LocalEndpoint, send: Send, project: string, own: boolean): Promise<Delivery> {
+  private async sendWithDigest(env: Digested, to: LocalEndpoint, send: Send, project: string, own: boolean, db: Database): Promise<Delivery> {
     const { store, now } = this.deps, id = carrierOf(env) ?? `${env.meta.messageId}#${randomUUID()}`; // 同一封重拼沿用载体号
     this.release(env);
     const queued = store.queued(project);
@@ -187,8 +197,16 @@ export class PmDigest {
       if (own) this.pending.delete(project);
       return own ? { envelope: env, outcome: { kind: "dropped", reason: "摘要队列已空" } } : send(env, to);
     }
-    const before = env.content, ids = new Set(queued.map((e) => e.id));
-    attach(env, digestText(queued), [...ids], id);
+    const fresh = pmNoticeFilter(db, queued, (e) => [e.firstLine, ...(e.detail ?? [])].join("\n"), now(), this.writer); // PMQUIET1
+    if (fresh.stale.size) {
+      store.remove(fresh.stale, now());
+      if (!fresh.live.length) {
+        if (own) this.pending.delete(project);
+        return own ? { envelope: env, outcome: { kind: "dropped", reason: "摘要队列只剩过期提醒" } } : send(env, to);
+      }
+    }
+    const before = env.content, ids = new Set(fresh.live.map((e) => e.id));
+    attach(env, digestText(fresh.live), [...ids], id);
     store.carry(ids, id, now());
     const d = await send(env, to);
     if (reallySent(d)) {
@@ -266,7 +284,10 @@ export class PmDigest {
     for (const project of new Set(queue.map((e) => e.project))) {
       const mine = queue.filter((e) => e.project === project), to = this.pmTo(router, db, project);
       if (!to || !pmHoldDue(hold.setting(project), mine, t)) continue;
-      const { text, ids } = pmHoldBundle(mine);
+      const fresh = pmNoticeFilter(db, mine, (e) => e.body, t, this.writer); // PMQUIET1：逐条复核，过期的出队不打包
+      if (fresh.stale.size) hold.remove(fresh.stale);
+      if (!fresh.live.length) continue; // 全过期：不发空包
+      const { text, ids } = pmHoldBundle(fresh.live);
       const d = await router.deliver({ from: { kind: "bridge", label: PM_HOLD_LABEL }, to, intent: "notification", content: text,
         meta: { messageId: newMessageId("pmhold"), threadId: newThreadId(), ts: new Date(t).toISOString(), triggerKind: "bridge_synth",
           skipInterAgentWatchdog: true, waitForIdle: true } });
