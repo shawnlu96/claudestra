@@ -7,12 +7,14 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { UI_REJECTED } from "../src/lib/ledger-ui-approve-verdict.js";
 import { appendEvent } from "../src/lib/ledger-write.js";
-import { configurePmQuietMode, pmNoticeGate, pmNoticeRefOf } from "../src/lib/pm-notice-current.js";
+import { pmNoticeGate, pmNoticeRefOf } from "../src/lib/pm-notice-current.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
+import { takeOrderResult } from "../src/lib/order-take.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { configureSelfHealMode } from "../src/lib/scheduler-fix-selfheal.js";
 import { planScheduler, type PlannerSnapshot } from "../src/lib/scheduler-plan.js";
-import { UI_REPAIR_FAMILY, uiRepairAttempts } from "../src/lib/scheduler-ui-evidence-repair.js";
+import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
+import { configurePmQuietMode, UI_REPAIR_FAMILY, uiRepairAttempts } from "../src/lib/scheduler-ui-evidence-repair.js";
 import { autoFixture, DIGEST, H2, P1, P2, toBuild } from "./scheduler-auto-helpers.js";
 
 type F = ReturnType<typeof autoFixture>;
@@ -83,6 +85,51 @@ describe("[验收线 1] review 阶段：同 head、本轮有效 pass，唯一缺
       expect(f.intents().filter((i) => i.action === "review").length).toBe(reviews);
       expect(stages(f).filter((s) => s === "fix>review")).toEqual([]); // 不走 SELFHEAL1 同 head 回审
     } finally { f.close(); }
+  });
+});
+
+describe("[验收线 1] 作者真实领单（复审 repair-pull）", () => {
+  const take = (f: F) => {
+    const author = getSchedulerSession(f.db, "T1", "author")!;
+    return takeOrderResult(f.db, { agent: author.agent, sessionId: author.sessionId!, family: "claude-code", channelId: "" });
+  };
+  test("wake 派出补截图单后 take_order 领到同一张补图工单（findingId / probe 与规划器一致）；off 照旧空列表", async () => {
+    quiet("on");
+    const f = await reviewed();
+    try {
+      await f.tick(); // review → fix
+      const d = plan(f), planned = d.kind === "intent" ? d.workOrder!.findings[0] : null;
+      expect(await f.tick()).toMatchObject({ step: "sent", detail: "channel" });
+      expect(f.sent.at(-1)?.text ?? "").toContain("take_order"); // wake：只叫作者去领
+      const r = take(f);
+      expect(r.ok && r.order).toMatchObject({ step: "fix", findings: [{ findingId: planned!.findingId, family: UI_REPAIR_FAMILY, severity: "P1" }] });
+      const probe = r.ok ? r.order?.findings[0]?.probe ?? "" : "";
+      for (const s of [H2, "规格第 1 版", "uiEvidence", "不用改代码"]) expect(probe).toContain(s);
+      quiet("off");
+      const old = take(f);
+      expect(old.ok && old.order?.findings).toEqual([]);
+    } finally { f.close(); }
+  });
+
+  test("有 P1 / 截图被拒：领单不出补图工单", async () => {
+    quiet("on");
+    const f = await reviewed([P1], "changes");
+    try {
+      await f.tick();
+      expect(f.task().stage).toBe("fix");
+      const r = take(f), fams = r.ok ? r.order?.findings.map((x) => x.family) ?? [] : [];
+      expect(fams.length).toBeGreaterThan(0);
+      expect(fams).not.toContain(UI_REPAIR_FAMILY);
+    } finally { f.close(); }
+    const g = await reviewed();
+    try {
+      await g.tick();
+      expect(g.task().stage).toBe("fix");
+      appendEvent(g.db, { actor: "pm", now: 20_000 }, { project: "p", target: "T1", kind: "decision", text: "截图不过",
+        data: { op: UI_REJECTED, head: H2, specRev: 1, round: g.task().round } });
+      const rej = take(g);
+      expect(rej.ok ? rej.order?.findings.map((x) => x.family) ?? [] : ["?"]).not.toContain(UI_REPAIR_FAMILY);
+    } finally { g.close(); }
   });
 });
 

@@ -10,11 +10,12 @@ import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js"
 import { listEvents } from "../src/lib/ledger-store.js";
 import { PmDigestStore } from "../src/lib/pm-digest-store.js";
 import { PM_HOLD_LABEL, PmHoldStore } from "../src/lib/pm-hold.js";
-import { configurePmQuietMode, PM_QUIET_SKIP_OP, pmNoticeGate, pmNoticeRefOf, pmNoticeTag } from "../src/lib/pm-notice-current.js";
+import { PM_QUIET_SKIP_OP, pmNoticeGate, pmNoticeRefOf } from "../src/lib/pm-notice-current.js";
 import { notifyProjectPm } from "../src/lib/pm-notify.js";
 import { activeProjectPm } from "../src/lib/pm-role.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 import { reviewPmCandidate } from "../src/lib/scheduler-review-pm-wait.js";
+import { configurePmQuietMode, pmNoticeTag } from "../src/lib/scheduler-ui-evidence-repair.js";
 import { FPM, PM, pooledManual, setMode, type World } from "./scheduler-review-pm-kit.test.js";
 
 let w: World & Awaited<ReturnType<typeof pooledManual>>;

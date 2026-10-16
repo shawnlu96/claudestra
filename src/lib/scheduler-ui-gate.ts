@@ -20,6 +20,7 @@ import { currentBindingGate, ownerReask } from "./scheduler-ui-reask.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { uiRepairPassStep } from "./scheduler-ui-evidence-repair.js";
+import { reviewSourced } from "./review-source-proof.js";
 
 export { DIGEST_RE, ownerVisualOf, UI_ASK_ACTION, uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
@@ -87,7 +88,7 @@ export type UiPassStep =
 /** After a passing review of a UI card: who looks at the screenshots, and what their current answer means. */
 export function uiPassStep(s: PlannerSnapshot, node: string, reviewSeq: number): UiPassStep {
   if (!s.screenshotsDigest || !DIGEST_RE.test(s.screenshotsDigest)) {
-    return uiRepairPassStep(s, reviewSeq) ?? { kind: "escalate", code: "ui_missing_screenshots", reason: "前后截图摘要缺失，不能请人看旧图" }; // PMQUIET1
+    return uiRepairPassStep(s, reviewSeq, reviewSourced) ?? { kind: "escalate", code: "ui_missing_screenshots", reason: "前后截图摘要缺失，不能请人看旧图" }; // PMQUIET1
   }
   const pm = pmBound(s, s.pmUiGate) ? s.pmUiGate : null;
   if (pm?.state === "rejected") return { kind: "fix", note: pm.note ?? "PM 未通过前后截图", seq: pm.seq ?? reviewSeq };

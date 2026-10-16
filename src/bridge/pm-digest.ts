@@ -25,7 +25,8 @@ import { HELD_MESSAGES_PATH } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { openLedger } from "../lib/ledger-store.js";
-import { pmNoticeFilter, pmNoticeGate, pmQuietMode } from "../lib/pm-notice-current.js";
+import { pmNoticeFilter, pmNoticeGate } from "../lib/pm-notice-current.js";
+import { pmQuietMode } from "../lib/scheduler-ui-evidence-repair.js";
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
 
 type Send = (env: Envelope, to: LocalEndpoint) => Promise<Delivery>;

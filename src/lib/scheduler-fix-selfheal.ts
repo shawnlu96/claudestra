@@ -15,6 +15,7 @@ import type { ReviewFacts } from "./scheduler-review.js";
 import { nodeAt, templateFor } from "./scheduler-template.js";
 import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
 import { uiRepairFix, type UiRepairOrder } from "./scheduler-ui-evidence-repair.js";
+import { reviewSourced } from "./review-source-proof.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 
 const SELF_HEAL_KEY = "selfHealBeforeManual";
@@ -73,7 +74,7 @@ export function selfHealRefusal(s: PlannerSnapshot, facts: ReviewFacts | null): 
  */
 export function fixSelfHeal(s: PlannerSnapshot, facts: ReviewFacts | null, fallback: PlannerDecision): PlannerDecision | UiRepairOrder {
   if (fallback.kind !== "escalate") return fallback;
-  const repair = uiRepairFix(s, facts); // PMQUIET1：唯一缺项是截图 → 补截图工单，不回审
+  const repair = uiRepairFix(s, facts, reviewSourced); // PMQUIET1：唯一缺项是截图 → 补截图工单，不回审
   if (repair) return repair;
   const mode = selfHealMode(s.task.project);
   if (mode === "off" || selfHealRefusal(s, facts)) return fallback;

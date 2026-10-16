@@ -23,6 +23,7 @@ import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
 import { remoteFixWork, withRemoteWork } from "./remote-review-current.js";
 import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
+import { uiRepairTakeOrder } from "./scheduler-ui-evidence-repair.js";
 import { localAuthorAcceptance, standardAnswers } from "./order-standard-answers.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { lentAwayText } from "./ledger-lend-relay.js";
@@ -139,6 +140,7 @@ function ownFixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { fi
   if (bounce) return { findings: [], report: null, bounce: bounceWork(bounce) };
   const ui = uiRejectFixFor(db, t, events, getWorkflow(db, t.id)?.template); // 同一退回来源的代码 findings / 报告与 PM 截图意见一起带上
   if (ui) return { findings: wireFindings(ui.findings), report: ui.reportPath };
+  const repair = uiRepairTakeOrder(db, t, events); if (repair) return repair; // PMQUIET1：wake 领单带上补截图工单
   const read = fixStartReviewFacts(t, events);
   return read.kind === "facts" ? { findings: wireFindings(read.facts.findings), report: read.facts.reportPath } : { findings: [], report: null };
 }

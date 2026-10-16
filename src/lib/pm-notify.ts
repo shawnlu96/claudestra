@@ -10,16 +10,15 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { bridgeSend } from "./bridge-client.js";
 import { getMeta } from "./ledger-store.js";
 import { pmNoticeLevel, type PmNoticeLevel } from "./pm-notice-level.js";
-import type { PmNoticeRef } from "./pm-notice-current.js";
+import { pmNoticeTag, pmQuietMode, type PmNoticeRef } from "./scheduler-ui-evidence-repair.js";
 
 /** 缺规格提醒经调度那一轮的 notifyPm（已带 stillActive）发给 feature PM：目标从这里带进来，不改 notifyPm 的签名 */
 export const pmNotifyTarget = new AsyncLocalStorage<string>();
 export async function notifyProjectPm(db: Database, project: string, text: string,
   opts: { fromName: string; stillActive?: () => boolean; to?: string; level: PmNoticeLevel; current?: PmNoticeRef }): Promise<void> {
-  const quiet = await import("./pm-notice-current.js");
-  if (quiet.pmQuietMode(project) !== "off") {
-    if (opts.current) text = `${text}${quiet.pmNoticeTag(opts.current)}`;
-    if (!quiet.pmNoticeGate(db, project, text, Date.now()).send) return; // 过期提醒：不投，台账已记跳过
+  if (pmQuietMode(project) !== "off") {
+    if (opts.current) text = `${text}${pmNoticeTag(opts.current)}`;
+    if (!(await import("./pm-notice-current.js")).pmNoticeGate(db, project, text, Date.now()).send) return; // 过期提醒：不投，台账已记跳过
   }
   const meta = getMeta(db, project);
   const pm = opts.to ?? pmNotifyTarget.getStore() ?? meta.pms.find((p) => p !== meta.team?.dispatcher) ?? "master";

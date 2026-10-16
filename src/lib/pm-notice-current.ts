@@ -2,7 +2,7 @@
  * PMQUIET1 · 统一 PM 提醒复核：一条推给 PM 的提醒在实际投出之前（notifyProjectPm 发送前、bridge 投给当班 PM 前、pm-hold 整包
  * 与摘要释放前）都过这里的 pmNoticeGate，重读当前卡与合并请求 / 意图，提醒绑定的实例已不是现状就不投，只记一条去重台账事件。
  * 提醒怎么认：只认它带着的结构化引用，不按正文字样猜阶段——
- *   ① 发送方显式带的引用（notifyProjectPm opts.current），开着时以尾行 PM_NOTICE_TAG 随正文走，暂存 / 摘要读回也认得；
+ *   ① 发送方显式带的引用（notifyProjectPm opts.current），开着时以尾行（scheduler-ui-evidence-repair.ts pmNoticeTag）随正文走，暂存 / 摘要读回也认得；
  *   ② 审查已回提醒（scheduler-review-pm-wait.ts）与合并待处置提醒（scheduler-merge-pm-wait.ts）正文末尾的实例键 / 阻塞键，
  *      且台账里有本卡那条发送意图（op review_pm_wait / merge_pm_wait，kind try，data.key 相同）。
  * 现状判定复用各自原候选函数（reviewPmCandidate / mergePmCandidate 的实例键还等不等于提醒的键）：阶段已前进（如进了 merge_deploy）、
@@ -16,39 +16,16 @@ import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
-import { recordObserved, recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
+import { PM_QUIET_KEY, pmQuietMode, UI_REPAIR_TODO, type PmNoticeKind, type PmNoticeRef } from "./scheduler-ui-evidence-repair.js";
+import { recordObserved, type RecoveryMode } from "./recovery-policy.js";
 import { mergePmCandidate } from "./scheduler-merge-pm-wait.js";
 import { reviewPmCandidate } from "./scheduler-review-pm-wait.js";
 import { DIGEST_RE } from "./scheduler-ui-merge-refusal.js";
 
-const PM_QUIET_KEY = "pmQuiet";
-/** 补截图超限后的 PM 待办类型（scheduler-ui-evidence-repair.ts 发） */
-export const UI_REPAIR_TODO = "ui_evidence_repair";
-/** 本模块认得的待办类型；别的类型照旧投 */
-type PmNoticeKind = "review_pm_wait" | "merge_pm_wait" | typeof UI_REPAIR_TODO;
-/** 可复核的提醒引用：卡号 + 待办类型 + 绑定窗口（实例键，或补图窗口键） */
-export interface PmNoticeRef { kind: PmNoticeKind; taskId: string; key: string }
-
 export const PM_QUIET_SKIP_OP = "pm_quiet_skip";
 const KINDS: readonly PmNoticeKind[] = ["review_pm_wait", "merge_pm_wait", UI_REPAIR_TODO];
 const PART = /^[\w.:@/-]{1,120}$/;
-const TAG_RE = /\s〔提醒复核 ([a-z_]+) (\S+) (\S+)〕$/; // 退人工原因会被压成一行：换行变空格也认
-/** 显式引用随正文走的尾行（只在 pmQuiet 不是 off 时加） */
-export const pmNoticeTag = (ref: PmNoticeRef): string => `\n〔提醒复核 ${ref.kind} ${ref.taskId} ${ref.key}〕`;
-
-export type PmQuietModePort = (project: string) => RecoveryMode;
-/** 读不了 / 未知键 = off（旧路） */
-const policyMode: PmQuietModePort = (project) => {
-  try { const p = recoveryPolicy(project, PM_QUIET_KEY); return p.source === "error" ? "off" : p.mode; } catch { return "off"; }
-};
-let modePort: PmQuietModePort = policyMode;
-/** Tests only: swap the mode reader; returns the restore. */
-export function configurePmQuietMode(port: PmQuietModePort | null): () => void {
-  const was = modePort;
-  modePort = port ?? policyMode;
-  return () => { modePort = was; };
-}
-export const pmQuietMode = (project: string): RecoveryMode => modePort(project);
+const TAG_RE = /\s〔提醒复核 ([a-z_]+) (\S+) (\S+)〕$/; // 退人工原因会被压成一行：换行变空格也认（尾签由 pmNoticeTag 加）
 
 /** 正文末尾的实例键 / 阻塞键，且台账有本卡这条发送意图 */
 function keyedRef(db: Database, project: string, text: string): PmNoticeRef | null {
