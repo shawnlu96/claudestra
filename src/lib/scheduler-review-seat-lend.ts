@@ -3,7 +3,7 @@
  * a 30-minute wait. The window is the card, head, specRev, round and reviewer session; its start is a durable recovery-observe
  * note the tick writes (trackSeatLend), so a restart keeps it and a changed window never matches an old one. A start runs only
  * while it is the task's latest seat-lend note's window: another window's note or an end interrupts it for good (A→B→A restarts).
- * A reviewer retired mid-wait (no longer in the snapshot) keeps its window from that running note, threshold included. The planner reads
+ * A retired reviewer (no longer in the snapshot) is recovered from the binding history (goneWindow) and waits the same threshold. The planner reads
  * that note against the snapshot clock (pool.now) and, for this window only, adds a peers-only placement in front of the pinned
  * local one (seatLendAway; both placement paths call it). No eligible peer = the pinned result exactly as before.
  * The lend is the usual pool review intent: scheduler-pool's offer re-plans it inside its transaction, and its verdict is judged
@@ -17,10 +17,10 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import { observeDedupKey, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { privateRepoOf } from "./scheduler-foreign-repo.js";
-import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
+import type { PlannerDecision, PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
 import type { Placement } from "./scheduler-placement.js";
 import { POOL_RECIPIENT, poolRefusalEpoch } from "./scheduler-pool-plan.js";
-import { independentReviewer, keepsReviewer, openRefusal, refusalEpoch } from "./scheduler-review-swap.js";
+import { independentReviewer, keepsReviewer, latestReviewerSwap, openRefusal, refusalEpoch } from "./scheduler-review-swap.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
 
 export const SEAT_LEND_KEY = "reviewSeatLend";
@@ -29,7 +29,7 @@ const SEAT_LEND_WAIT_MS = 30 * 60_000;
 /** local_full: the pinned local placement waits (plan wait "placement"); reviewer_gone: the bound session row is no longer active. */
 type SeatEvidence = "local_full" | "reviewer_gone";
 
-/** gone = recovered from the running note after the bound reviewer left the snapshot (a retired session). */
+/** gone = recovered from the binding history after the bound reviewer left the snapshot (a retired session). */
 interface SeatWindow { digest: string; head: string; specRev: number; round: number; reviewer: string; reviewerSessionId: string; gone?: true }
 
 const windowDigest = (taskId: string, head: string, specRev: number, round: number, agent: string, sessionId: string): string =>
@@ -64,15 +64,26 @@ export function seatWindow(s: PlannerSnapshot): SeatWindow | null {
 }
 
 /**
- * No reviewer in the snapshot (taskWorkerRefs drops a retired session): the running window of this head / specRev / round, its
- * binding taken from the scheduler's own note and checked against its digest. Its clock goes on; the unbound route waits for it.
+ * No reviewer in the snapshot (taskWorkerRefs drops a retired session): the original local reviewer comes from the card's own
+ * binding history, independent of any clock — the latest reviewer session_bind (bindSession writes one beside every row), else the
+ * latest scheduler seat-lend note whose digest matches its own fields. A reviewer_swap after it released that reviewer on purpose:
+ * no window, the unbound route as before. The window is this head / specRev / round's; with no start yet the unbound route waits
+ * (seatLendAway) while the tick writes one, so a reviewer gone before the first tick or across a head change still waits 30 minutes.
  */
 function goneWindow(s: PlannerSnapshot, head: string): SeatWindow | null {
-  const run = runningNote(s.events), d = run?.data;
-  if (!d || d.head !== head || d.specRev !== s.task.specRev || d.round !== s.task.round) return null;
-  if (typeof d.reviewer !== "string" || typeof d.reviewerSessionId !== "string") return null;
-  if (d.window !== windowDigest(s.task.id, head, s.task.specRev, s.task.round, d.reviewer, d.reviewerSessionId)) return null;
-  return { digest: d.window, head, specRev: s.task.specRev, round: s.task.round, reviewer: d.reviewer, reviewerSessionId: d.reviewerSessionId, gone: true };
+  const swap = latestReviewerSwap(s.events)?.seq ?? 0, after = s.events.filter((e) => e.seq > swap);
+  const bind = after.findLast((e) => e.kind === "scheduler" && e.data.op === "session_bind" && e.data.role === "reviewer")?.data;
+  const note = seatNotes(after).findLast((e) => typeof e.data.reviewer === "string" && typeof e.data.reviewerSessionId === "string" &&
+    e.data.window === windowDigest(s.task.id, String(e.data.head), Number(e.data.specRev), Number(e.data.round), String(e.data.reviewer),
+      String(e.data.reviewerSessionId)))?.data;
+  const other: AuthorFamily = s.workflow?.authorFamily === "claude" ? "codex" : "claude";
+  const ref = bind ? (bind.transport === "peer" ? null : { agent: bind.agent, sessionId: bind.sessionId, family: bind.family })
+    : note ? { agent: note.reviewer, sessionId: note.reviewerSessionId, family: other } : null;
+  if (!ref || typeof ref.agent !== "string" || typeof ref.sessionId !== "string") return null;
+  const reviewer: WorkerRef = { agent: ref.agent, sessionId: ref.sessionId, taskId: s.task.id, family: ref.family as AuthorFamily, source: "local" };
+  if (!independentReviewer({ ...s, reviewer })) return null;
+  const digest = windowDigest(s.task.id, head, s.task.specRev, s.task.round, reviewer.agent, reviewer.sessionId);
+  return { digest, head, specRev: s.task.specRev, round: s.task.round, reviewer: reviewer.agent, reviewerSessionId: reviewer.sessionId, gone: true };
 }
 
 /** gen = how many starts this window has had (each start is a new generation); start = the running wait's start note, if any. */

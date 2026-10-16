@@ -3,6 +3,7 @@
  * the pool facts, the production tick hook trackReviewSeatWait writing the window notes, and pure snapshots for the verdict side
  * (PMHAND1 control). End to end through scheduler-pool and B's real tools: tests/scheduler-review-seat-lend-proof.test.ts.
  */
+import type { Database } from "bun:sqlite";
 import { rmSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SchedulerIntent, TaskWorkflow } from "../src/lib/ledger-scheduler.js";
@@ -19,6 +20,11 @@ import { autoFixture, H2 } from "./scheduler-auto-helpers.js";
 import { addSeat, reviewEffect } from "./scheduler-review-seat-fixture.test.js";
 
 const MIN = 60_000;
+/** The session_bind event bindSession writes beside every reviewer row (scheduler-sessions.ts): T1's agent-rv-t1 / s-rv. */
+function bindEvent(db: Database) {
+  db.query(`INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (0,'scheduler','p','T1','scheduler','',?)`).run(JSON.stringify({
+    op: "session_bind", role: "reviewer", agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", transport: "acp", source: "registry_runtime", intentId: "earlier" }));
+}
 const MATE = { peer: "mate", open: 0, maxOpen: 1, v2: { why: null, roles: ["review"], repos: ["o/r"], slots: { claude: 0, codex: 1 } } };
 type Peer = typeof MATE | { peer: string; open: number; maxOpen: number; v2: { why: null; roles: string[]; repos: string[]; slots: { claude: number; codex: number } } };
 
@@ -33,6 +39,7 @@ function setup(remoteOver: Partial<RemotePolicy> = {}) {
   for (let n = 0; n < 8; n++) addSeat(f.db, `author${n}`, "author", "build");
   f.db.query(`INSERT INTO scheduler_sessions (taskId,role,agent,sessionId,family,transport,state,createIntentId,createdAt,updatedAt)
     VALUES ('T1','reviewer','agent-rv-t1','s-rv','codex','acp','active','earlier',0,0)`).run();
+  bindEvent(f.db);
   const remote: RemotePolicy = { agents: { claude: 0, codex: 8 }, mode: "balance", roles: ["review"], poolTimeoutMin: 15, ...remoteOver };
   const snapshot = (peers: readonly Peer[] = [MATE], edit?: (s: PlannerSnapshot) => void) => {
     const s = autoSnapshot(f.reader.get()!, f.task(), { registry: [], maxWorkers: 8, now: f.tickDeps.now(), pool: { remote, borrow: [] } });
@@ -50,6 +57,7 @@ function setup(remoteOver: Partial<RemotePolicy> = {}) {
   return { ...f, snapshot, run, notes, freeSeats };
 }
 const lent = { kind: "intent", action: "review", recipient: "peer:mate" };
+const retire = (f: ReturnType<typeof setup>) => f.db.query("UPDATE scheduler_sessions SET state='retired' WHERE taskId='T1' AND role='reviewer'").run();
 
 describe("[验收线 2] the window: reviewer gone, restart, head / specRev / round", () => {
   test("a bound reviewer whose session is retiring lends at 30 minutes even after a local seat frees", async () => {
@@ -92,6 +100,46 @@ describe("[验收线 2] the window: reviewer gone, restart, head / specRev / rou
       const plan = await f.run();
       expect(plan).toMatchObject(lent);
       expect(plan.kind === "intent" && plan.reason).toContain("原审查会话已不在");
+    } finally { f.close(); }
+  });
+
+  test("a reviewer already retired before the first tick: its binding comes from the session_bind history, 30 minutes from that tick", async () => {
+    const f = setup();
+    try {
+      retire(f);
+      expect(seatWindow(f.snapshot())).toMatchObject({ reviewer: "agent-rv-t1", reviewerSessionId: "s-rv", gone: true });
+      expect(await f.run()).toMatchObject({ kind: "wait", code: "placement" });
+      expect(f.notes("start")).toEqual([expect.objectContaining({ data: expect.objectContaining({ evidence: "reviewer_gone", reviewer: "agent-rv-t1" }) })]);
+      f.advance(29 * MIN);
+      expect(await f.run()).not.toMatchObject({ kind: "intent", action: "review" });
+      f.advance(MIN);
+      expect(await f.run()).toMatchObject(lent);
+    } finally { f.close(); }
+  });
+
+  test("retired mid-wait, then a head change: the new head's window starts its own 30 minutes, the old start never lends it", async () => {
+    const f = setup();
+    try {
+      await f.run(); f.advance(10 * MIN);
+      retire(f);
+      expect(await f.run()).toMatchObject({ kind: "wait", code: "placement" });
+      f.db.query("UPDATE tasks SET headSHA=? WHERE id='T1'").run("3".repeat(40));
+      expect(await f.run()).toMatchObject({ kind: "wait", code: "placement" });
+      expect(new Set(f.notes("start").map((e) => e.data.window)).size).toBe(2);
+      f.advance(29 * MIN);
+      expect(await f.run()).not.toMatchObject({ kind: "intent", action: "review" });
+      f.advance(MIN);
+      expect(await f.run()).toMatchObject(lent);
+    } finally { f.close(); }
+  });
+
+  test("a reviewer released by a reviewer swap is not waited for: the unbound route as before", () => {
+    const f = setup();
+    try {
+      retire(f);
+      f.db.query(`INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (0,'scheduler','p','T1','scheduler','',?)`)
+        .run(JSON.stringify({ op: "reviewer_swap", intentId: "swap", agent: "agent-rv-t1", sessionId: "s-rv", round: 2 }));
+      expect(seatWindow(f.snapshot())).toBeNull();
     } finally { f.close(); }
   });
 

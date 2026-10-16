@@ -25,6 +25,10 @@ import { recordHello } from "../src/lib/ledger-lend-peers.js";
 const AGENTS: RemotePolicy = { agents: { claude: 2, codex: 1 }, mode: "balance", roles: ["review"], poolTimeoutMin: 15 };
 const LEGACY: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15, localPriority: "off" };
 const MIN = 60_000;
+/** The session_bind event bindSession writes beside every reviewer row (scheduler-sessions.ts): T1's agent-rv-t1 / s-rv. */
+const bindEvent = (db: ReturnType<typeof autoFixture>["db"]) =>
+  db.query(`INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (0,'scheduler','p','T1','scheduler','',?)`).run(JSON.stringify({
+    op: "session_bind", role: "reviewer", agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", transport: "acp", source: "registry_runtime", intentId: "earlier" }));
 
 afterEach(() => { rmSync(RECOVERY_POLICY_PATH, { force: true }); });
 const seatLendOff = () => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { reviewSeatLend: "off" } } } }));
@@ -58,6 +62,7 @@ async function pinned(opts: { path?: "agents" | "legacy"; offerBorrow?: () => Bo
   f.db.run("PRAGMA foreign_keys=OFF"); // the bindings stand for earlier ensures, whose intents this fixture never ran
   f.db.query(`INSERT INTO scheduler_sessions (taskId,role,agent,sessionId,family,transport,state,createIntentId,createdAt,updatedAt)
     VALUES ('T1','reviewer','agent-rv-t1','s-rv','codex','acp','active','earlier',0,0)`).run();
+  bindEvent(f.db);
   if (agents) addSeat(f.db, "other", "author", "build"); // another card's codex author holds this machine's only codex seat
   f.db.run("PRAGMA foreign_keys=ON");
   const peer = (ep: string, body: unknown) => cli("owner", `lend-${ep}`, "--", "mate", JSON.stringify(body));
@@ -115,6 +120,41 @@ for (const path of ["agents", "legacy"] as const) {
       expect(listLendOrders(p.f.db, "T1")).toHaveLength(1);
       const offer = listEvents(p.f.db, { project: "p", target: "T1" }).find((e) => e.data.op === "pool_offer")!;
       expect(offer.data).toMatchObject({ seatLend: { evidence: "reviewer_gone", reviewer: "agent-rv-t1", reviewerSessionId: "s-rv" } });
+    } finally { p.f.close(); }
+  });
+
+  test(`[验收线 2] ${path} pool path, real ticks: a reviewer retired before the first tick waits 30 minutes from that tick`, async () => {
+    const p = await pinned({ path });
+    try {
+      p.f.db.query("UPDATE scheduler_sessions SET state='retired' WHERE taskId='T1' AND role='reviewer'").run();
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      expect(p.seat().filter((e) => e.data.seat === "start")).toHaveLength(1);
+      p.f.advance(29 * MIN);
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(0);
+      p.f.advance(MIN);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(1);
+      const offer = listEvents(p.f.db, { project: "p", target: "T1" }).find((e) => e.data.op === "pool_offer")!;
+      expect(offer.data).toMatchObject({ seatLend: { evidence: "reviewer_gone", reviewer: "agent-rv-t1", reviewerSessionId: "s-rv" } });
+    } finally { p.f.close(); }
+  });
+
+  test(`[验收线 2] ${path} pool path, real ticks: retired mid-wait then a new head waits a fresh 30 minutes`, async () => {
+    const p = await pinned({ path });
+    try {
+      await p.tick(); p.f.advance(10 * MIN);
+      p.f.db.query("UPDATE scheduler_sessions SET state='retired' WHERE taskId='T1' AND role='reviewer'").run();
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      p.f.db.query("UPDATE tasks SET headSHA=? WHERE id='T1'").run("3".repeat(40));
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(0);
+      p.f.advance(29 * MIN);
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(0);
+      p.f.advance(MIN);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(1);
     } finally { p.f.close(); }
   });
 
