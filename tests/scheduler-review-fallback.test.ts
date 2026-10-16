@@ -16,7 +16,8 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { createRetryBackoff } from "../src/lib/scheduler-create-retry.js";
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
-import { CREATE_FAIL_LIMIT, FALLBACK_EXEMPTION, fallbackHandoff } from "../src/lib/scheduler-review-fallback.js";
+import { CREATE_FAIL_LIMIT, FALLBACK_EXEMPTION, fallbackHandoff, freshFallbackEpoch } from "../src/lib/scheduler-review-fallback.js";
+import { replacementTag } from "../src/lib/scheduler-review-checkout.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import type { EnsureResult } from "../src/lib/worker-session.js";
@@ -319,5 +320,40 @@ describe("recovery: the next round tries the cross family again (acceptance 4)",
     expect(fell[1].data).toMatchObject({ round: 2, head: H2, sessionId: null, fallback: { trigger: "create_quota" } });
     for (let n = 0; n < 3 && created.length < 3; n++) await tick();
     expect(created.slice(1)).toEqual([{ family: "codex", tag: "", old: "s-1-fb" }, { family: "claude", tag: "-fb", old: null }]);
+  });
+});
+
+describe("no fallback epoch: unchanged; a fresh epoch never binds the author (review focus)", () => {
+  test("a fresh fallback epoch does not let the author's session be bound as the reviewer", async () => {
+    await delivered();
+    failCreates(NRT1_CREATE);
+    expect(await tick()).toMatchObject({ step: "review_fallback" });
+    swapCreate = () => ({ kind: "ready", created: true, ref: { taskId: "T1", role: "reviewer", agent: "agent-task-one", sessionId: "s-one", family: "claude",
+      transport: "tmux" } });
+    const r = (await tick())!;
+    expect(r.step).toBe("held");
+    expect(r.detail).toContain("session 与本卡作者或跨模型审查规则不符");
+    expect(reviewers()).toEqual([]);
+    expect(getSchedulerSession(f.db, "T1", "author")).toMatchObject({ agent: "agent-task-one", state: "active" });
+  });
+
+  test("an author ensure_session never reads a fallback epoch", async () => {
+    await delivered();
+    failCreates(NRT1_CREATE);
+    await tick();
+    const author = f.intents().find((i) => i.action === "ensure_session" && i.node !== "adversarial_review")!;
+    expect(freshFallbackEpoch(f.db, author.id)).toBeNull();
+  });
+
+  test("without any epoch: no fresh-epoch bind, the old tags, and a clean create failure still backs off with no fallback", async () => {
+    await delivered();
+    failCreates(CREATE_ERROR(1));
+    expect(await tick()).toMatchObject({ step: "waiting" });
+    const ensure = f.intents().findLast((i) => i.action === "ensure_session")!;
+    expect(freshFallbackEpoch(f.db, ensure.id)).toBeNull();
+    expect(createRetryBackoff(f.db, "T1", "reviewer", f.tickDeps.now())).toContain("连续 1 次失败");
+    expect(epochs()).toEqual([]);
+    const swap = (data: Record<string, unknown>) => ({ seq: 1, kind: "scheduler", data: { op: "reviewer_swap", ...data } }) as never;
+    expect([replacementTag(swap({})), replacementTag(swap({ refusal: {} })), replacementTag(swap({ legacy: true }))]).toEqual(["", "-ex", "-re"]);
   });
 });
