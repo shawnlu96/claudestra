@@ -86,7 +86,11 @@ describe("[验收线 1] slice() 被拒、FileReader 能读 → 收下", () => {
     const created: string[] = [];
     const revoked: string[] = [];
     const [origCreate, origRevoke] = [URL.createObjectURL, URL.revokeObjectURL];
-    URL.createObjectURL = (b: Blob) => (created.push(origCreate(b)), created[created.length - 1]);
+    URL.createObjectURL = (b: Blob) => {
+      const u = origCreate(b);
+      created.push(u);
+      return u;
+    };
     URL.revokeObjectURL = (u: string) => (revoked.push(u), origRevoke(u));
     try {
       const r = await normalizeAttachment(wechatFile(PNG, "图片", ""), browserReadDeps);
