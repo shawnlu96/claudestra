@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { addKnownFlaky, setKnownFlakyModeSource } from "../src/lib/ci-known-flaky.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { recordObserved, type RecoveryMode } from "../src/lib/recovery-policy.js";
@@ -15,6 +15,12 @@ import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { ciLogFixture, wholeLog, type FixtureJob } from "./scheduler-merge-ci-log-fixture.js";
 import { ledgerAs, mergedCard } from "./deploy-test-kit.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const HEAD = "c".repeat(40), FIX = "e".repeat(40), BASE = "b".repeat(40);
 const PR = "https://github.com/example/repo/pull/7", RUN = "https://github.com/example/repo/actions/runs/77";

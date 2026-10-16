@@ -20,21 +20,24 @@ import { defaultOpen, donePageOf, drawable, openWith } from "./dag-layout";
 import { layoutFocus } from "./dag-focus-layout";
 import { jumpToNode } from "./dag-progress";
 import type { FeatureCard } from "./dag-types";
+import { peekCollabTab, useCollabTabHint } from "../../nav/collab-tab-hint";
 
 export type DagTab = "overview" | "map" | "module" | "team";
 export type ModuleBy = "module" | "person";
 export type DagView = "list" | "graph" | "full";
 
-/** 挂载时的落点：登记的请求 > 带任务进入（先落总览）> 本项目上次的标签 > 总览 */
+/** 挂载时的落点：登记的请求 > 团队页「成员与位子」直达（nav/collab-tab-hint.ts）> 带任务进入（先落总览）> 本项目上次的标签 > 总览 */
 function initialOf(project: string, entryTask: string | null): { tab: DagTab; featureId: string | null; requested: boolean } {
   const req = peekProjectTab(project);
   if (req) return { tab: req.tab, featureId: req.featureId ?? null, requested: true };
+  if (peekCollabTab()) return { tab: "team", featureId: null, requested: false };
   return { tab: entryTask ? "overview" : rememberedTab(project) ?? "overview", featureId: null, requested: false };
 }
 
 export function useDagUi(features: readonly FeatureCard[], project = "", entryTask: string | null = null) {
   const [init] = useState(() => initialOf(project, entryTask));
   const [tab, setTabRaw] = useState<DagTab>(init.tab);
+  useCollabTabHint(() => setTabRaw("team")); // 同一项目已开着时团队页再点（live 提示）
   const [by, setBy] = useState<ModuleBy>("module");
   const [featureId, setFeatureId] = useState<string | null>(init.featureId);
   const [manual, setManual] = useState<string[] | null>(init.featureId ? [init.featureId] : null);

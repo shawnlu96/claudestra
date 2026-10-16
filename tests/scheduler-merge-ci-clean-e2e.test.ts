@@ -3,9 +3,15 @@
  * zero merge/update/rerun), then the gate's verdict goes through bounceStep (CIF1 rerun once / ci_fail back to fix) or, all green and
  * CLEAN, through the original final source/freshness gates. Real CLI + private ledger via tests/scheduler-merge-ci-ready-kit.test.ts.
  */
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { parseBounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
 import { readyChecks, readyLog, withReady, READY_GATE, READY_HEAD, READY_RUN, READY_SLOW } from "./scheduler-merge-ci-ready-kit.test.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 type Fixture = Parameters<Parameters<typeof withReady>[0]>[0];
 const WAIT = { phase: "await_ci", stage: "merge", frozen: false } as const;

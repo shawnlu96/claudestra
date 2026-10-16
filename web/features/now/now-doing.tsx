@@ -2,6 +2,7 @@
 /**
  * 正在做（UXHOME1「在干活」「各项目」并进来）：按项目分组，项目头是 UXHOME1 的项目行（点了照旧按 resolveCollabSource 选源打开）。
  * 有产品看板的项目下面每个在做模块一行：模块名、进度条（completed / total）、「N 个在做」、在做的人（最多 3 个首字头像，再多「+K」）；
+ * 窄容器（@container 不到 20rem）收起进度条与「N 个在做」，留 n/total，模块名才不被挤没（同 now-projects.tsx）；
  * 对不上模块的 agent 归到「其他」。没有看板 / 台账读不了的项目退回 UXHOME1 的 agent 行。没有在做事项、排在折叠数之外的项目折成「其余 K 个项目」。
  * 点模块行落到项目页「模块进度」的该模块（project-tabs/tab-request.ts 先登记，项目页挂载时取）；「其他」行只打开项目页。
  */
@@ -30,15 +31,15 @@ function ModuleRow({ m, tr, onOpen }: { m: TodayModule; tr: Translate; onOpen: (
   const pct = m.total ? Math.round((m.completed / m.total) * 100) : 0;
   const body = (
     <>
-      <span className="min-w-0 flex-1 truncate">{m.title}</span>
+      <span className="min-w-[3em] flex-1 truncate">{m.title}</span>
       {m.id !== null && (
         <>
-          <span className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-base-300" role="progressbar" aria-valuemin={0} aria-valuemax={m.total} aria-valuenow={m.completed}
+          <span className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-base-300 @max-[20rem]:hidden" role="progressbar" aria-valuemin={0} aria-valuemax={m.total} aria-valuenow={m.completed}
             aria-label={`${m.completed}/${m.total}`}>
             <span className="block h-full rounded-full bg-primary transition-[width] duration-300 ease-out motion-reduce:transition-none" style={{ width: `${pct}%` }} />
           </span>
           <span className="shrink-0 text-[11px] tabular-nums text-base-content/50">{m.completed}/{m.total}</span>
-          <span className="shrink-0 text-[11px] text-base-content/60" data-now-module-active>{tr("{n} 个在做", { n: m.active })}</span>
+          <span className="shrink-0 text-[11px] text-base-content/60 @max-[20rem]:hidden" data-now-module-active>{tr("{n} 个在做", { n: m.active })}</span>
         </>
       )}
       {m.faces.length > 0 && <Faces faces={m.faces} />}

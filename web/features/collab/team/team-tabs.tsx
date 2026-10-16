@@ -2,11 +2,13 @@
 import { useId, useState, type ReactNode } from "react";
 import { useRosterT } from "./roster-i18n";
 import s from "./team-roster.module.css";
+import { takeCollabTab, useCollabTabHint } from "../../nav/collab-tab-hint";
 interface Props { members: ReactNode; flow: ReactNode; ops: ReactNode }
 /** The host keys this container by project; moving to another project starts on members. */
 export function TeamTabs({ members, flow, ops }: Props) {
   const t = useRosterT(), id = useId();
-  const [selected, setSelected] = useState("members");
+  const [selected, setSelected] = useState<string>(() => takeCollabTab() ?? "members"); // 团队页「规划与提案」直达（nav/collab-tab-hint.ts）
+  useCollabTabHint((tab) => { takeCollabTab(); setSelected(tab); });
   const tabs = [{ key: "members", name: "成员", body: members }, { key: "ops", name: "规划与提案", body: ops }, { key: "flow", name: "往来", body: flow }]
     .filter(tab => tab.body != null);
   const active = tabs.find(tab => tab.key === selected) ?? tabs[0];

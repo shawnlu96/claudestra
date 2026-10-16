@@ -1,6 +1,6 @@
 /** Real manager processes plus isolated git and a fake network adapter connecting the provider to canonical borrower CLI. */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -54,7 +54,9 @@ function fakeGh() {
     `headRefName:${JSON.stringify(branch)},headRefOid:${JSON.stringify(remote)},baseRefName:'main',isCrossRepository:false}]));\nelse process.exit(1);\n`);
   chmodSync(file, 0o755); lab.env.PATH = `${bin}:${lab.env.PATH}`;
 }
-beforeEach(() => {
+/** The heavy preparation below (8 manager processes + git) builds the same state every time: built once per source shape. */
+function prepare(): Prepared {
+  builds.set(cvSeq, (builds.get(cvSeq) ?? 0) + 1);
   resources = writeResources(); lab = writeLab(resources);
   const state = lab.env.CLAUDESTRA_STATE_DIR, keyDir = join(lab.root, "peer-key"); mkdirSync(keyDir);
   const key = instanceKeySync(keyDir)!; fp = keyFingerprint(key.publicKey);
@@ -91,8 +93,40 @@ beforeEach(() => {
   expect(cli("lend-reclaim", "T1", "--reason", "PM recovery").ok).toBe(true);
   reclaimSeq = listEvents(db, { target: "T1" }).findLast((e) => (e.data.lend as any)?.op === "reclaim")!.seq;
   fakeGh();
+  const pristine = snapshot();
+  closeLedger(dbPath); // flushed, so the copy below is the whole ledger
+  const template = resources.temp();
+  cpSync(lab.root, template, { recursive: true, filter: copyable });
+  return { resources, lab, fp, reclaimSeq, reviewed, remote, branch, oldId, template, pristine };
+}
+interface Prepared { resources: typeof resources; lab: typeof lab; fp: string; reclaimSeq: number; reviewed: string; remote: string;
+  branch: string; oldId: string; template: string; pristine: string }
+/** A child's runtime socket cannot be copied and is not state. */
+const copyable = (src: string) => !lstatSync(src).isSocket();
+const prepared = new Map<number | null, Prepared>(), builds = new Map<number | null, number>();
+/**
+ * Every case gets its own copy of the prepared lab, at the same absolute paths (the ledger, git remotes and configs name them):
+ * whatever a case wrote (ledger rows, triggers, commits, pushes) is gone before the next one starts.
+ */
+beforeEach(() => {
+  const p = prepared.get(cvSeq);
+  if (!p) prepared.set(cvSeq, prepare());
+  else {
+    rmSync(p.lab.root, { recursive: true, force: true });
+    cpSync(p.template, p.lab.root, { recursive: true });
+    ({ resources, lab, fp, reclaimSeq, reviewed, remote, branch, oldId } = p);
+  }
+  dbPath = join(lab.env.CLAUDESTRA_STATE_DIR!, "ledger.sqlite"); db = openLedger(dbPath);
 }, 60_000);
-afterEach(async () => { closeLedger(dbPath); await resources.dispose(); });
+afterEach(() => closeLedger(dbPath));
+afterAll(async () => { for (const p of prepared.values()) await p.resources.dispose(); });
+
+/** Runs after cases that wrote to the ledger and git: the case still starts from the prepared state, built only once. */
+const startsPristine = () => {
+  const p = prepared.get(cvSeq)!;
+  expect([snapshot(), builds.get(cvSeq)]).toEqual([p.pristine, 1]);
+  expect(lab.git(lab.bare, "rev-parse", branch)).toBe(remote);
+};
 
 test("real CLI dry-run/apply/claim/deliver preserves original report basis and old PR main", () => {
   const before = snapshot();
@@ -201,6 +235,7 @@ test.each(["clean", "dirty", "unpublished", "unsubmitted-report"])("real provide
   }
 }, 30_000);
 
+test("[验收线 3] every case starts from the one prepared state, whatever the cases before it wrote", startsPristine);
 
 describe("historical cv source (MQ1 shape)", () => {
   beforeAll(() => { cvSeq = 35704; });
@@ -232,4 +267,6 @@ describe("historical cv source (MQ1 shape)", () => {
     expect(recovery("--apply").ok).toBe(false);
     expect(snapshot()).toBe(before);
   }, 30_000);
+
+  test("[验收线 3] cv cases start from their own prepared state too", startsPristine);
 });

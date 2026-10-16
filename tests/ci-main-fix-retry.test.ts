@@ -5,7 +5,7 @@
  * (PEERHEAD1 takes the new head), a local card only a "would retry" sample. Fixture logs (PR1593's real shard, PR1598's shape),
  * a fake gh argv runner, a temporary ledger; no network.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,6 +27,12 @@ import { ciDecisionClaim, DECISION_OP, DecisionTrail, decisionReceipt } from "..
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { ciMainFixRetryTick, retryGh, type RetryGh } from "../src/lib/ci-main-fix-retry-tick.js";
 import { ledgerAs, mergedCard } from "./deploy-test-kit.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const HEAD = "c".repeat(40), NEW = "a".repeat(40), PR = "https://github.com/example/repo/pull/7";
 const RUN = "https://github.com/example/repo/actions/runs/77";

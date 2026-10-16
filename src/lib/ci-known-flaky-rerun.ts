@@ -8,30 +8,35 @@
  *   names the entries and their fixing nodes. observe → one event saying what on would do. Anything else → nothing.
  *   A claim that does not go through leaves the run untouched (same rev), and the driver then bounces exactly as before, through
  *   the same call, so CIF2's layer still sees that bounce. Every doubt bounces (fail-closed).
- * tests/ci-known-flaky-rerun.test.ts.
+ * - Out-of-diff (merge-arch-CIRERUN1, ci-out-of-diff-rerun.ts): the same claim with WIDE_MARK lets the ledger re-run files no entry
+ *   excuses; a valid entry still wins the event. With its switch off nothing here differs from CIF8 alone.
+ * tests/ci-known-flaky-rerun.test.ts, tests/ci-out-of-diff-rerun.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { activeKnownFlaky, isKnownFlakyFile, knownFlakyMode, type KnownFlakyEntry } from "./ci-known-flaky.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import type { EventKind } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
+import { outOfDiffClaim, outOfDiffMode, outOfDiffReady } from "./ci-out-of-diff-rerun.js";
 import type { CiFailure } from "./scheduler-merge-ci-rerun-log.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 
 /** closeMergeRun refuses a longer receipt. */
 const RECEIPT_MAX = 600;
 const MARK = "，已知偶发 ";
-const SUFFIX = /，已知偶发 (\[[^\]]*\])$/;
+/** The driver vouches the run is a plain first-attempt failure (outOfDiffReady): the ledger may re-run unlisted files too. */
+const WIDE_MARK = "，范围外 ";
+const SUFFIX = /，(已知偶发|范围外) (\[[^\]]*\])$/;
 /** CIF1's receipt ends like this when it lists no cases; only such a base may carry the suffix. */
 const BASE_END = "超时用例 []";
 
-function split(receipt: string): { base: string; files: string[] } | null {
+function split(receipt: string): { base: string; files: string[]; wide: boolean } | null {
   const m = SUFFIX.exec(receipt);
   if (!m || !receipt.slice(0, m.index).endsWith(BASE_END)) return null;
   try {
-    const files = JSON.parse(m[1]!) as unknown;
+    const files = JSON.parse(m[2]!) as unknown;
     if (!Array.isArray(files) || !files.length || !files.every(isKnownFlakyFile)) return null;
-    return new Set(files).size === files.length ? { base: receipt.slice(0, m.index), files } : null;
+    return new Set(files).size === files.length ? { base: receipt.slice(0, m.index), files, wide: m[1] === "范围外" } : null;
   } catch {
     return null; // Not this module's suffix (a test name may end like one): the receipt is read as it always was.
   }
@@ -48,7 +53,7 @@ interface Driver {
   run: MergeRun;
   prHead: string;
   checks: string[];
-  gh: { prFiles(prRef: string): Promise<string[]>; rerunFailed(repo: string, runId: string): Promise<void> };
+  gh: { prFiles(prRef: string): Promise<string[]>; rerunFailed(repo: string, runId: string): Promise<void>; runAttempt?: Parameters<typeof outOfDiffReady>[0] };
   step: (to: MergePhase, receipt?: string) => Promise<MergeRun>;
   /** CIF1's rerunReceipt, passed in so this file imports nothing from the module that imports it */
   receiptOf: (prHead: string, plan: { link: string; checks: string[]; cases: string[] }) => string;
@@ -61,16 +66,23 @@ const oneLine = (e: unknown) => (e as Error).message.trim().split("\n")[0]?.slic
  * failed CIF1 rerun and the caller's bounce sends the card to fix.
  */
 export async function knownFlakyRerun(d: Driver, red: KnownFlakyRed): Promise<MergeRun | null> {
-  if (knownFlakyMode(d.run.project) === "off") return null;
+  const listed = knownFlakyMode(d.run.project) !== "off", wide = outOfDiffMode(d.run.project) !== "off"; // CIRERUN1
+  if (!listed && !wide) return null;
   const files = [...new Set(red.failures.map((f) => f.file))];
   if (!files.every(isKnownFlakyFile)) return null;
-  const receipt = `${d.receiptOf(d.prHead, { link: `https://github.com/${red.repo}/actions/runs/${red.runId}`, checks: d.checks, cases: [] })}${MARK}${JSON.stringify(files)}`;
-  if (receipt.length > RECEIPT_MAX || !split(receipt)) return null;
+  const claimOf = (mark: string): string | null => {
+    const r = `${d.receiptOf(d.prHead, { link: `https://github.com/${red.repo}/actions/runs/${red.runId}`, checks: d.checks, cases: [] })}${mark}${JSON.stringify(files)}`;
+    return r.length > RECEIPT_MAX || !split(r) ? null : r;
+  };
+  const [plain, wider] = [listed ? claimOf(MARK) : null, wide ? claimOf(WIDE_MARK) : null];
+  if (!plain && !wider) return null;
   const rev = d.run.rev;
   let claimed: MergeRun;
   try {
     const touched = new Set(await d.gh.prFiles(d.run.prRef));
     if (files.some((f) => touched.has(f))) return null;
+    const receipt = wider && await outOfDiffReady(d.gh.runAttempt, red, d.run, d.prHead) ? wider : plain;
+    if (!receipt) return null;
     claimed = await d.step("resolved", receipt);
   } catch (e) {
     console.error(`⚠️ [merge] ${d.run.taskId} 已知偶发重跑没有判成，按原路退回：${oneLine(e)}`);
@@ -102,19 +114,22 @@ const label = (e: KnownFlakyEntry): string => `${e.file}（${e.featureId}/${e.no
  */
 export function knownFlakyClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string, claim: { prHead: string; link: string }, spent: boolean,
   writeEvent: WriteEvent): { text: string; data: Record<string, unknown> } | null | undefined {
-  const files = split(receipt)?.files;
-  if (!files) return undefined;
+  const parts = split(receipt);
+  if (!parts) return undefined;
+  const { files, wide } = parts;
   const mode = knownFlakyMode(row.project);
-  if (spent || mode === "off" || mergedMain(db, row)) return null;
+  if (spent || (mode === "off" && !wide) || mergedMain(db, row)) return null;
   const list = activeKnownFlaky(db, row.project);
   const hits = files.map((f) => list.get(f));
-  if (!hits.every((e): e is KnownFlakyEntry => !!e)) return null;
+  if (!hits.every((e): e is KnownFlakyEntry => !!e)) return wide ? outOfDiffClaim(db, ctx, row, files, claim) : null;
   const knownFlaky = hits.map((e) => ({ file: e.file, featureId: e.featureId, node: e.node, entrySeq: e.seq }));
   const names = hits.map(label).join("、");
   if (mode === "on") {
     return { text: `合并队列：CI 只红在已知偶发测试（${names}），本卡没碰，自动重跑一次 ${claim.link}`,
       data: { cases: files, knownFlaky, reason: "失败的测试文件都在有效的已知偶发清单里，且都不在本 PR 改动里" } };
   }
+  const wider = wide ? outOfDiffClaim(db, ctx, row, files, claim) : null; // CIRERUN1: list not on, the out-of-diff switch decides
+  if (wider || mode === "off") return wider;
   const dedupKey = `scheduler:${row.intentId}:merge:ci_known_flaky_observe:${claim.prHead.toLowerCase()}`;
   if (!getEventByDedup(db, dedupKey)) {
     writeEvent(db, { actor: ctx.actor, now: ctx.now, dedupKey }, { project: row.project, target: row.taskId, kind: "scheduler",
