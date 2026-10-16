@@ -65,13 +65,13 @@ beforeAll(async () => {
     const hit = url.pathname.startsWith("/api/v1/") ? ptRoute(url.pathname.slice("/api/v1".length), url.searchParams) : null;
     return hit ?? Response.json({ ok: false, error: "not in fixture" }, { status: 404 });
   }) as typeof fetch;
-  const view = await import(new URL("../web/features/collab/collab-view.tsx", import.meta.url).href);
-  await (await import(new URL("../web/features/asks/asks-store.ts", import.meta.url).href)).asksStore.refresh();
-  const store = await import(new URL("../web/features/chat/chat-store.ts", import.meta.url).href);
-  const nav = await import(new URL("../web/features/collab/collab-nav.ts", import.meta.url).href);
-  const doing = await import(new URL("../web/features/now/now-doing.tsx", import.meta.url).href);
+  const view = require("../web/features/collab/collab-view.tsx");
+  await require("../web/features/asks/asks-store.ts").asksStore.refresh();
+  const store = require("../web/features/chat/chat-store.ts");
+  const nav = require("../web/features/collab/collab-nav.ts");
+  const doing = require("../web/features/now/now-doing.tsx");
   ui = { CollabView: view.CollabView, ChatStoreProvider: store.ChatStoreProvider, NowDoing: doing.NowDoing, openCollabTask: nav.openCollabTask,
-    closeCollab: nav.closeCollab, useCollabNav: nav.useCollabNav, tabs: await import(new URL("../web/features/collab/project-tabs/tab-request.ts", import.meta.url).href) };
+    closeCollab: nav.closeCollab, useCollabNav: nav.useCollabNav, tabs: require("../web/features/collab/project-tabs/tab-request.ts") };
 });
 
 const live = new Set<() => Promise<void>>();
