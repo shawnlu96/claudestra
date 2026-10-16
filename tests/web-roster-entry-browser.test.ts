@@ -30,7 +30,10 @@ const manifest: unknown[] = [];
 let browser: Browser;
 let server: ReturnType<typeof Bun.serve>;
 let log: string[] = [];
-type Snapshot = Omit<NonNullable<ReturnType<typeof rosterEntrySnapshot>>, "team"> & { team: { available: boolean; value: { name: string; rev: number } } };
+type RawSnapshot = NonNullable<ReturnType<typeof rosterEntrySnapshot>>;
+/** The fixture's literal names widened to string, so a test can rename the team or a project. */
+type Snapshot = Omit<RawSnapshot, "team" | "projects"> & { team: { available: boolean; value: { name: string; rev: number } };
+  projects: (Omit<RawSnapshot["projects"][number], "name"> & { name: string })[] };
 /** Per-test rewrite of every snapshot answer (rename, unbind); identity by default. */
 let edit = (snap: Snapshot): Snapshot => snap;
 
@@ -219,7 +222,7 @@ const unbind = (...ids: string[]) => (snap: Snapshot): Snapshot => ({ ...snap,
   projects: snap.projects.map(p => ids.includes(p.projectId) ? { ...p, localProjectIds: [] } : p),
   localProjects: snap.localProjects.filter(p => !ids.includes(p.id)) });
 
-test.skipIf(!!baseline)("later snapshots: the title follows a rename; an unbound project moves to a bound sibling, none left shows why", async () => {
+test.skipIf(!!baseline)("later snapshots: the title follows a rename and hides long hex; an unbound project moves to a bound sibling, none left shows why", async () => {
   const { page, errors, external } = await open(1280);
   try {
     const poll = async () => { const n = log.filter((l) => l.endsWith("/shared-projects/snapshot")).length;
@@ -233,6 +236,16 @@ test.skipIf(!!baseline)("later snapshots: the title follows a rename; an unbound
     edit = (snap) => ({ ...snap, team: { available: true, value: { name: "Renamed team", rev: 2 } } });
     await poll();
     await titled("Renamed team");
+
+    // [5] Long hex in a later snapshot's team or project name never reaches visible text; option values keep the real ids.
+    const hex = "a".repeat(32);
+    edit = (snap) => ({ ...snap, team: { available: true, value: { name: hex, rev: 3 } },
+      projects: snap.projects.map(p => p.projectId === "beta-app" ? { ...p, name: hex } : p) });
+    await poll();
+    await titled("团队");
+    expect(await select.locator("option").allInnerTexts()).toEqual(["Alpha app", "beta-app"]);
+    expect(await select.locator("option").evaluateAll((els) => els.map((el) => (el as unknown as { value: string }).value))).toEqual(["alpha-app", "beta-app"]);
+    expect(await teamPage(page).innerText()).not.toMatch(/[0-9a-f]{16,}/);
 
     // [3] The open project loses its binding: no made-up option for it, the page moves to the sibling still bound.
     edit = unbind("alpha-app");

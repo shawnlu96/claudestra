@@ -11,6 +11,7 @@ import { BLOCKED_REASON, useCollabChoice } from "../team-view-entry";
 import { TeamPanel } from "../team-panel";
 import { useTeamRoster } from "./use-team-roster";
 import { useEntryT } from "./entry-i18n";
+import { rosterText } from "./roster-i18n";
 import c from "../collab.module.css";
 import s from "./roster-page.module.css";
 
@@ -59,12 +60,12 @@ export function RosterPage({ project }: { project: string }) {
       <button type="button" className={s.back} aria-label={t("返回")} title={t("返回")} onClick={closeCollab}><Icon name="arrowLeft" size={16} /></button>
       <div className={s.title}>
         <span className={s.kicker}>{t("团队")}</span>
-        <h1>{data.teamName ?? t("团队")}</h1>
+        <h1>{rosterText(data.teamName, t("团队"))}</h1>
         {data.directory && <span className={s.count}>{data.directory.length} {t("人")}</span>}
       </div>
       <div className={s.actions}>
         {listed && <select className={s.select} aria-label={t("项目")} value={project} onChange={(e) => showTeamView(e.target.value)}>
-          {data.projects.map(p => <option key={p.localId} value={p.localId}>{p.name}</option>)}
+          {data.projects.map(p => <option key={p.localId} value={p.localId}>{rosterText(p.name, rosterText(p.localId, t("项目")))}</option>)}
         </select>}
         {fp && !gone ? <OpenInCollab key={fp + project} fp={fp} project={project} /> : null}
       </div>
