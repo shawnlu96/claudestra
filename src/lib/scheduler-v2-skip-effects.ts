@@ -59,6 +59,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-author-retire-tick.ts": "ledger=2",
     "lend-fix-reassign-tick.ts": "ledger=2",
     "lend-pr-takeover-refusal-request.ts": "ledger=1",
+    "local-merge-tick.ts": "ledger=1", // ONB-2: `ledger scheduler-local-merge-ready` through the pass manager, per card in the auto tick
     "main-red-fix-tick.ts": "ledger=1", // MAINRED1: `ledger scheduler-main-red-fix` through the leased pass manager
     // merge-arch-SLA1: the one PM message of a batch, sent only for episodes whose `ledger scheduler-manual-case-sla <task> --phase claim` passed the manager gate
     "manual-case-sla-tick.ts": "notice=3",
@@ -239,6 +240,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-peer-cooldown.ts": "sql=7 stmt=7",
     "lend-pr-takeover-ledger.ts": "sql=1 stmt=1",
     "lend-reclaim-scheduler.ts": "sql=5 stmt=5 notice=1",
+    "local-merge.ts": "sql=1 stmt=1", // ONB-2: merge → live inside the `ledger local-merge` / `scheduler-local-merge-ready` transactions
     "manual-merge-queue.ts": "sql=3 stmt=3",
     // CIRES1: the GitHub read of the leased `ledger scheduler-manual-resume --mechanism ci-manual-resume` (a skip card never reaches that call)
     "manual-recovery-ci-read.ts": "vcs=1",

@@ -20,7 +20,8 @@ import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import {
-  CLAIM_OP, configHandoff, eventAt, handoffWhy, intentOf, listRequests, manualIntentId, MANUAL_MERGE_NODE, manualQueueMode, REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
+  CLAIM_OP, configHandoff, configLocal, eventAt, handoffWhy, intentOf, listRequests, localWhy, manualIntentId, MANUAL_MERGE_NODE, manualQueueMode,
+  REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
   type ManualRequest,
 } from "./manual-merge-queue-facts.js";
 import { ridingRequests } from "./merge-queue-candidates-member.js";
@@ -188,6 +189,7 @@ export function recordRequest(db: Database, ctx: WriteCtx, input: RequestInput):
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", `人工合并排队要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
+    if (configLocal(task.project)) throw new LedgerError("conflict", `不能排人工合并：${localWhy(task.project)}`); // before bindAndWrite's same-binding answer
     return bindAndWrite(db, ctx, task, input, reason, now, false);
   });
 }

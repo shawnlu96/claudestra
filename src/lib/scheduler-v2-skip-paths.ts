@@ -96,7 +96,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "scheduler-pm-todo": "task",
   "scheduler-priority-sample": "project",
   "scheduler-family-wait": "task", "scheduler-fix-relay": "task", "scheduler-legacy-review-retire": "task", "scheduler-lock-yield": "task", "scheduler-main-ci": "project",
-  "scheduler-manual-resume": "task", "scheduler-merge-begin": "intent", "scheduler-merge-handoff": "task", "scheduler-merge-step": "intent",
+  "scheduler-manual-resume": "task", "scheduler-merge-begin": "intent", "scheduler-merge-handoff": "task", "scheduler-local-merge-ready": "task", "scheduler-merge-step": "intent",
   "scheduler-model-inform": "task", "scheduler-model-outcome": "intent", "scheduler-observe": "task", "scheduler-plan": "task", "scheduler-plan-rejected": "task",
   "scheduler-pool": "intent", "scheduler-pool-refusal": "task", "scheduler-refusal-epoch": "task", "scheduler-retire": "task", "scheduler-review-downgrade": "task",
   "scheduler-priority-now": "project",
