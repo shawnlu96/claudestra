@@ -6,6 +6,7 @@
  * a fake gh argv runner, a temporary ledger; no network.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { advanceMergeRun, getMergeRun } from "../src/lib/scheduler-merge.js";
@@ -19,7 +20,7 @@ import { bounceWork, fixBounce } from "../src/lib/scheduler-merge-conflict.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { recordObserved, type ObservedAction, type RecoveryMode } from "../src/lib/recovery-policy.js";
 import { defaultRecoveryMode } from "../src/lib/recovery-key-defaults.js";
-import { CI_MAIN_FIX_RETRY_KEY, configureRetryPolicy, RETRY_SETTLE_MS, WAIT_OP, WAIT_TTL_MS } from "../src/lib/ci-main-fix-retry.js";
+import { CI_MAIN_FIX_RETRY_KEY, configureRetryPolicy, retriedFiles, WAIT_OP, WAIT_TTL_MS } from "../src/lib/ci-main-fix-retry.js";
 import { schedulerV2SkipManager } from "../src/lib/scheduler-v2-skip.js";
 import { configureCardPausePolicy } from "../src/lib/card-pause.js";
 import { ciDecisionClaim, DECISION_OP, DecisionTrail, decisionReceipt } from "../src/lib/ci-main-fix-retry-decision.js";
@@ -271,11 +272,11 @@ describe("[验收线 4][验收线 5] authority is read again after every await b
   const freeze = (c: ReturnType<typeof card>, frozen: boolean) => c.db.query("INSERT OR REPLACE INTO meta (project, key, value) VALUES ('p', 'queueFrozen', ?)")
     .run(JSON.stringify({ frozen, reason: "test", since: 1 }));
   /** A tick whose GitHub file read (`during: "read"`) or sample write (`during: "record"`) lets `change` land at that await. */
-  const racing = (c: ReturnType<typeof card>, during: "read" | "record", change: () => void, now = NOW + 1000) => {
+  const racing = (c: ReturnType<typeof card>, during: "read" | "record", change: () => void, now = NOW + 1000, on = "retry:") => {
     const gh = retryGh(fakeGh(c.gh) as never);
     const raced: RetryGh = { ...gh, fileCommits: async (...a) => { const r = await gh.fileCommits(...a); if (during === "read") change(); return r; } };
     return ciMainFixRetryTick(c.db, ["p"], { gh: raced, now: () => now,
-      record: async (a) => { const r = recordObserved(c.db, a, now); if (during === "record" && a.actionKey.startsWith("retry:")) change(); return r; } });
+      record: async (a) => { const r = recordObserved(c.db, a, now); if (during === "record" && a.actionKey.startsWith(on)) change(); return r; } });
   };
   const registered = async (body: (c: ReturnType<typeof card>) => Promise<void>) => {
     policy("on");
@@ -297,7 +298,8 @@ describe("[验收线 4][验收线 5] authority is read again after every await b
         await c.retry();
         await c.retry();
         expect(c.updates().length).toBe(1);
-        expect(c.samples().filter((s) => s.data.executed === true).length).toBe(during === "record" ? 2 : 1);
+        // the intent and its one send mark; nothing released (no mark was written while frozen)
+        expect(c.samples().map((s) => [s.data.actionKey, s.data.executed])).toEqual([[`retry:${HEAD}:77`, true], [`sent:${HEAD}:77:r0`, true]]);
       });
     });
     test(`the switch rolled back to off during the ${during} → no update-branch`, async () => {
@@ -322,18 +324,33 @@ describe("[验收线 4][验收线 5] authority is read again after every await b
           VALUES ('a1', 'p', 'T9', 'system', 'decide', 'q', 9e12, 'open', 1, 1)`).run());
         expect(c.updates()).toEqual([]);
         c.db.query("UPDATE asks SET state='answered' WHERE id='a1'").run();
-        await racing(c, during, () => c.db.query("UPDATE tasks SET stage='merge' WHERE id='T9'").run());
+        // the intent is already there after a record race: the card leaves fix right after the send mark instead
+        await racing(c, during, () => c.db.query("UPDATE tasks SET stage='merge' WHERE id='T9'").run(), NOW + 1000, during === "record" ? "sent:" : "retry:");
         await c.retry();
         expect(c.updates()).toEqual([]);
       });
     });
   }
-  test("a released sample is not a retry: the same file set is still registered after a later red", async () => {
+  test("an intent without a send mark is not a retry: the same file set is still registered after a later red", async () => {
     await registered(async (c) => {
       await racing(c, "record", () => freeze(c, true));
-      expect(c.samples().map((s) => [s.data.executed, s.data.released ?? null])).toEqual([[true, null], [false, `retry:${HEAD}:77`]]);
-      const { retriedFiles } = await import("../src/lib/ci-main-fix-retry.js");
+      expect(c.samples().map((s) => [s.data.executed, s.data.sent ?? null])).toEqual([[true, null]]);
       expect(retriedFiles(c.db, "T9")).toEqual([]);
+    });
+  });
+  test("a freeze right after the send mark commits → its release, no update-branch; once thawed, attempt 1 sends exactly one", async () => {
+    await registered(async (c) => {
+      await racing(c, "record", () => freeze(c, true), NOW + 1000, "sent:");
+      expect(c.updates()).toEqual([]);
+      expect(c.samples().map((s) => [s.data.actionKey, s.data.released ?? null])).toEqual([[`retry:${HEAD}:77`, null], [`sent:${HEAD}:77:r0`, null],
+        [`release:${HEAD}:77:r0`, `sent:${HEAD}:77:r0`]]);
+      expect(retriedFiles(c.db, "T9")).toEqual([]);
+      freeze(c, false);
+      await c.retry();
+      await c.retry();
+      expect(c.updates().length).toBe(1);
+      expect(c.samples().map((s) => s.data.actionKey).slice(3)).toEqual([`sent:${HEAD}:77:r1`]);
+      expect(retriedFiles(c.db, "T9")).toEqual([[STALE]]);
     });
   });
 });
@@ -415,32 +432,81 @@ describe("[验收线 3][验收线 4] an unsent retry is never used up: a pause d
     });
   });
 
-  test("after a restart: a retry sample with neither release nor send mark is released once it is settled and the PR head never moved", async () => {
+  test("card paused right after the send mark commits → release held, nothing sent; after resume the release, then exactly one", async () => {
     policy("on");
+    configureCardPausePolicy((_p, key) => ({ mode: key === "cardPause" ? "on" : "off", manualAfterMs: null, source: "config" }));
     await withCard({}, true, async (c) => {
       await c.tick();
       mainFixed(c);
-      const reg = c.notes(WAIT_OP)[0]!;
-      // what a process stopped between the sample and the release leaves behind (its memory is gone)
-      recordObserved(c.db, { project: "p", target: "T9", mechanism: CI_MAIN_FIX_RETRY_KEY, actionKey: `retry:${HEAD}:77`, action: "x",
-        data: { registrationSeq: reg.seq, prHead: HEAD, run: RUN, files: [STALE], executed: true } }, NOW + 1000);
-      await c.retry(NOW + 2000);
-      expect(c.updates()).toEqual([]); // too fresh: a send may still be landing on GitHub
-      await c.retry(NOW + 1000 + RETRY_SETTLE_MS);
-      await c.retry(NOW + 1001 + RETRY_SETTLE_MS);
-      await c.retry(NOW + 1002 + RETRY_SETTLE_MS);
+      const now = NOW + 1000;
+      await tickVia(c, now, skipRecord(c, now, (key) => { if (key.startsWith("sent:")) decide(c, "card_pause", now); }));
+      expect(c.updates()).toEqual([]);
+      expect(c.samples().some((s) => s.data.released)).toBe(false); // the release is held by the pause
+      decide(c, "card_resume", now + 20);
+      await tickVia(c, now + 30, skipRecord(c, now + 30)); // the owed release
+      await tickVia(c, now + 40, skipRecord(c, now + 40));
+      await tickVia(c, now + 50, skipRecord(c, now + 50));
       expect(c.updates().length).toBe(1);
+      expect(retriedFiles(c.db, "T9")).toEqual([[STALE]]);
     });
   });
 
-  test("a sent retry is never reconciled: the send mark (or a moved head) keeps it used up", async () => {
+  /** The same ledger file through a new connection: this process's memory (owed releases) is gone. */
+  const restarted = (c: ReturnType<typeof card>) => new Database(c.path);
+  const tickOn = (db: Database, c: ReturnType<typeof card>, now: number) =>
+    ciMainFixRetryTick(db, ["p"], { gh: retryGh(fakeGh(c.gh) as never), record: async (a) => recordObserved(db, a, now), now: () => now });
+
+  test("a sent update-branch failing with 502 while the card gets paused, then a restart → never sent a second time", async () => {
+    policy("on");
+    configureCardPausePolicy((_p, key) => ({ mode: key === "cardPause" ? "on" : "off", manualAfterMs: null, source: "config" }));
+    await withCard({}, true, async (c) => {
+      await c.tick();
+      mainFixed(c);
+      const now = NOW + 1000, gh = retryGh(fakeGh(c.gh) as never);
+      const failing: RetryGh = { ...gh, updateBranch: async (...a) => {
+        c.gh.argv.push(["gh", "api", "-X", "PUT", `repos/${a[0]}/pulls/${a[1]}/update-branch`, "-f", `expected_head_sha=${a[2]}`]);
+        decide(c, "card_pause", now);
+        throw new Error("HTTP 502: bad gateway");
+      } };
+      expect(await ciMainFixRetryTick(c.db, ["p"], { gh: failing, record: skipRecord(c, now), now: () => now })).toEqual([]);
+      expect(c.updates().length).toBe(1);
+      decide(c, "card_resume", now + 20);
+      const db = restarted(c);
+      try {
+        await tickOn(db, c, now + 60 * 60_000);
+        await tickOn(db, c, now + 2 * 60 * 60_000);
+      } finally { db.close(); }
+      expect(c.updates().length).toBe(1); // the mark went in before the send: possibly sent = spent
+      expect(retriedFiles(c.db, "T9")).toEqual([[STALE]]);
+    });
+  });
+
+  test("a restart while a release is owed (paused after the mark) → the attempt stays spent, nothing sent", async () => {
+    policy("on");
+    configureCardPausePolicy((_p, key) => ({ mode: key === "cardPause" ? "on" : "off", manualAfterMs: null, source: "config" }));
+    await withCard({}, true, async (c) => {
+      await c.tick();
+      mainFixed(c);
+      const now = NOW + 1000;
+      await tickVia(c, now, skipRecord(c, now, (key) => { if (key.startsWith("sent:")) decide(c, "card_pause", now); }));
+      decide(c, "card_resume", now + 20);
+      const db = restarted(c);
+      try {
+        await tickOn(db, c, now + 60 * 60_000);
+        await tickOn(db, c, now + 2 * 60 * 60_000);
+      } finally { db.close(); }
+      expect(c.updates()).toEqual([]);
+    });
+  });
+
+  test("a sent retry is never reconciled: the send mark keeps it used up", async () => {
     policy("on");
     await withCard({ update: new Error("HTTP 502: bad gateway") }, true, async (c) => {
       await c.tick();
       mainFixed(c);
       await c.retry();
       expect(c.updates().length).toBe(1);
-      await c.retry(NOW + 1000 + RETRY_SETTLE_MS * 2);
+      await c.retry(NOW + 60 * 60_000);
       expect(c.updates().length).toBe(1);
     });
   });

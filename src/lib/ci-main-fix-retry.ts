@@ -44,63 +44,45 @@ export const sameFiles = (a: readonly string[], b: readonly string[]): boolean =
   a.length === b.length && [...a].sort().every((f, i) => f === [...b].sort()[i]);
 
 /**
- * The retry sample's action key: one per registration (card + head + run) and attempt. Attempt n > 0 exists only after attempt n − 1's
- * executed sample was released: the tick wrote it, then a re-read right before update-branch (freeze, hold, switch, card) said no.
+ * The registration's retry sample (one per card + head + run): under on for a peer card the intent (executed true, nothing sent yet);
+ * otherwise the "would retry" sample (executed false). `:observe` is the "would retry" written later for an intent whose send the
+ * switch or the card no longer allows.
  */
-export const retryActionKey = (reg: Pick<Registration, "prHead" | "runId">, attempt = 0): string =>
-  `retry:${reg.prHead}:${reg.runId}${attempt ? `:r${attempt}` : ""}`;
-/** The release sample of attempt n's executed sample (recordObserved, executed false, `released` = that sample's key). */
-export const releaseActionKey = (reg: Pick<Registration, "prHead" | "runId">, attempt: number): string => `release:${reg.prHead}:${reg.runId}:r${attempt}`;
-/** The send mark of attempt n's executed sample, written once update-branch was sent (whatever GitHub answered; `sent` = that sample's key). */
+export const retryActionKey = (reg: Pick<Registration, "prHead" | "runId">): string => `retry:${reg.prHead}:${reg.runId}`;
+/**
+ * The send mark of attempt n, written (and recorded) BEFORE update-branch is sent: no mark = known never sent; a mark = possibly sent,
+ * used up for good, whatever GitHub answered and whether or not this process survived. `sent` = the intent's key.
+ */
 export const sentActionKey = (reg: Pick<Registration, "prHead" | "runId">, attempt: number): string => `sent:${reg.prHead}:${reg.runId}:r${attempt}`;
 /**
- * An executed sample with neither a release nor a send mark, older than this, whose PR head never moved, was not sent by a process
- * that has since gone (a sent update-branch moves the head within seconds): the tick releases it (ci-main-fix-retry-tick.ts).
+ * The release of attempt n's send mark, written only by the process that wrote the mark and then, with no send in between, read a
+ * stop (freeze, hold, pause, switch, card). It is what lets attempt n + 1 exist; `released` = that mark's key.
  */
-export const RETRY_SETTLE_MS = 10 * 60_000;
-
-/** Executed samples this process sent, per ledger (`card\nkey`): never released, even while their send mark could not be written (held). */
-const sentHere = new WeakMap<Database, Set<string>>();
-export function markSentHere(db: Database, taskId: string, key: string): void {
-  const sent = sentHere.get(db) ?? new Set<string>();
-  sentHere.set(db, sent.add(`${taskId}\n${key}`));
-}
-export const sentHereHas = (db: Database, taskId: string, key: string): boolean => !!sentHere.get(db)?.has(`${taskId}\n${key}`);
+export const releaseActionKey = (reg: Pick<Registration, "prHead" | "runId">, attempt: number): string => `release:${reg.prHead}:${reg.runId}:r${attempt}`;
 
 const json = (raw: unknown): Record<string, unknown> => {
   try { return typeof raw === "string" ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { return {}; }
 };
-const samplesOf = (db: Database, taskId: string): (Record<string, unknown> & { ts: number })[] => (db.query(`SELECT ts, data FROM events WHERE target=?
+const samplesOf = (db: Database, taskId: string): Record<string, unknown>[] => (db.query(`SELECT data FROM events WHERE target=?
   AND kind='note' AND json_extract(data,'$.op')=? AND json_extract(data,'$.mechanism')=? ORDER BY seq`).all(taskId, OBSERVE_OP, CI_MAIN_FIX_RETRY_KEY) as
-  { ts: number; data: string }[]).map((r) => ({ ...json(r.data), ts: r.ts }));
-const keysOf = (samples: Record<string, unknown>[], field: "released" | "sent"): Set<unknown> =>
-  new Set(samples.map((d) => d[field]).filter((k) => typeof k === "string"));
-/**
- * File sets this card was already retried for: an executed sample actually sent (its send mark, or sent by this process). One stopped
- * before the send, released or not yet, is no retry, so such a set is registered again after a later red.
- */
+  { data: string }[]).map((r) => json(r.data));
+const releasedOf = (samples: Record<string, unknown>[]): Set<unknown> => new Set(samples.map((d) => d.released).filter((k) => typeof k === "string"));
+/** File sets this card was already retried for: a send mark nobody released (possibly sent). Intents without a mark are no retry. */
 export function retriedFiles(db: Database, taskId: string): string[][] {
-  const samples = samplesOf(db, taskId), sent = keysOf(samples, "sent");
-  return samples.filter((d) => d.executed === true && Array.isArray(d.files) && (sent.has(d.actionKey) || sentHereHas(db, taskId, String(d.actionKey))))
+  const samples = samplesOf(db, taskId), released = releasedOf(samples);
+  return samples.filter((d) => typeof d.sent === "string" && String(d.actionKey).startsWith("sent:") && !released.has(d.actionKey) && Array.isArray(d.files))
     .map((d) => d.files as string[]);
 }
-/** This registration's current attempt: how many of its executed samples were released before update-branch. */
-export function retryAttempt(db: Database, taskId: string, reg: Registration): number {
-  const keys = keysOf(samplesOf(db, taskId), "released");
-  let n = 0;
-  while (keys.has(retryActionKey(reg, n))) n++;
-  return n;
+/** Where this registration stands in the ledger: its sample, the current attempt (released marks before it), whether that attempt is marked. */
+export function retryState(db: Database, taskId: string, reg: Registration): { intent: boolean; sampled: boolean; attempt: number; marked: boolean } {
+  const samples = samplesOf(db, taskId), released = releasedOf(samples), key = retryActionKey(reg);
+  const keys = new Set(samples.map((d) => d.actionKey));
+  let attempt = 0;
+  while (released.has(sentActionKey(reg, attempt))) attempt++;
+  return { intent: samples.some((d) => d.actionKey === key && d.executed === true),
+    sampled: samples.some((d) => (d.actionKey === key || d.actionKey === `${key}:observe`) && d.executed === false),
+    attempt, marked: keys.has(sentActionKey(reg, attempt)) };
 }
-/** The current attempt's executed sample when it has no send mark (released ones are past attempts): stopped before the send, or unknown. */
-export function unsentRetry(db: Database, taskId: string, reg: Registration): { attempt: number; key: string; ts: number } | null {
-  const samples = samplesOf(db, taskId), attempt = retryAttempt(db, taskId, reg), key = retryActionKey(reg, attempt);
-  const sample = samples.find((d) => d.actionKey === key && d.executed === true);
-  return sample && !keysOf(samples, "sent").has(key) ? { attempt, key, ts: sample.ts } : null;
-}
-/** Whether this registration's current attempt already has its sample (observe: "would retry" written; on: retried). */
-export const retrySampled = (db: Database, taskId: string, reg: Registration): boolean => !!db.query(`SELECT 1 FROM events WHERE target=? AND kind='note'
-  AND json_extract(data,'$.op')=? AND json_extract(data,'$.mechanism')=? AND json_extract(data,'$.actionKey')=? LIMIT 1`)
-  .get(taskId, OBSERVE_OP, CI_MAIN_FIX_RETRY_KEY, retryActionKey(reg, retryAttempt(db, taskId, reg)));
 
 export interface Registration { seq: number; ts: number; taskId: string; project: string; pr: string; prHead: string; run: string; runId: string;
   files: string[]; mainHead: string; peer: boolean; mode: string }
@@ -134,12 +116,11 @@ export function liveRegistrations(db: Database, projects: readonly string[], now
 
 /** The ledger facts of judge(); GitHub facts are read only after these pass. */
 export type LedgerVerdict = { ok: true } | { ok: false; why: string };
-export function ledgerJudge(task: Pick<LedgerTask, "stage" | "headSHA"> | null, reg: Registration, block: string | null, sampled: boolean): LedgerVerdict {
+export function ledgerJudge(task: Pick<LedgerTask, "stage" | "headSHA"> | null, reg: Registration, block: string | null): LedgerVerdict {
   if (!task) return { ok: false, why: "卡不存在" };
   if (task.stage !== "fix") return { ok: false, why: `卡在 ${task.stage}，不在 fix` };
   if ((task.headSHA ?? "").toLowerCase() !== reg.prHead) return { ok: false, why: "台账 head 已变，登记作废" };
   if (block) return { ok: false, why: block };
-  if (sampled) return { ok: false, why: "这条登记已重试过（或已记过本会重试）" };
   return { ok: true };
 }
 
