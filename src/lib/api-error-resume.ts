@@ -1,31 +1,44 @@
 /**
  * 回合以 API 错误结束时的自动续跑（owner 2026-09-18 16:45 拍，起因：market-maker 15:50
  * 撞 UNKNOWN_CERTIFICATE_VERIFICATION_ERROR 回合静默终止，47 分钟没人接；该错误在其
- * 会话里 5 月起 33 次、当天 5 次）。
+ * 会话里 5 月起 33 次、当天 5 次）。规则与预算：docs/architecture/api-error-resume.md。
  *
  * 机制：jsonl-watcher 见到 `isApiErrorMessage:true` 的 assistant 条目 → 发 `api_error_turn`
- * 事件；bridge 记下时间。60s 内该 agent 没有任何新活动（自己又开始跑了 / 有人发了消息）
- * 就注一条「继续」；**最多一次**——续跑之后 10 分钟内再撞同类错误 ⇒ 不再续，升级到频道报错。
+ * 事件；bridge 记下时间。等一段时间该 agent 没有任何新活动（自己又开始跑了 / 有人发了消息）就注一条「继续」。
+ * - 网络 / 服务端瞬时错误（transient-error.ts）：按 TRANSIENT_BACKOFF_MS 退避续跑（1、2、4、8 分钟），期间不报；
+ *   第 5 次再撞才升级到频道、报一次。续跑后正常结束一个回合（noteTurnOk）或 10 分钟没再撞 = 清零。
+ * - 其它错误：60s 后续跑**一次**——续跑之后 10 分钟内再撞同类错误 ⇒ 不再续，升级到频道报错。
  * wedge watcher 盯的是「在动但不结束」，这里补的是「已结束但是被错误结束的」。
- * 纯逻辑，单测 tests/api-error-resume.test.ts。
+ * 纯逻辑，单测 tests/api-error-resume.test.ts、tests/api-error-resume-transient.test.ts。
  */
 import { overloadEscalate } from "./agent-supervisor-bridge.js";
-export { noteOverload } from "./agent-supervisor-bridge.js"; // 给 quota-wall-wiring 用：它的单测按本模块的导出注入依赖
+import { isTransientError, TRANSIENT_BACKOFF_MS } from "./transient-error.js";
+export { noteOverload, onTurnOk } from "./agent-supervisor-bridge.js"; // 给 quota-wall-wiring 用：它的单测按本模块的导出注入依赖
+
+/** 网络类连败：n = 这一串已经续过几次，since = 第一次撞的时刻，last = 最后一次的原文 */
+export interface NetStreak {
+  n: number;
+  since: number;
+  last: string;
+}
 
 export interface ApiErrorState {
   errorAt: number;
   error: string;
   resumedAt?: number;
+  net?: NetStreak;
 }
 
 export const RESUME_DELAY_MS = 60_000;
-/** 续跑后这么久内再撞错 ⇒ 升级；过了就当新一次 */
+/** 续跑后这么久内再撞错 ⇒ 升级（网络类：接着数）；过了就当新一次 */
 export const RESUME_WINDOW_MS = 10 * 60_000;
 
 export type NoteResult = "track" | "escalate";
 
-export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: string, now: number): NoteResult {
+/** error = 错误码（CC）或失败原文（ACP）；text = 条目里那句原文（判网络类、报错时引用） */
+export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: string, now: number, text = ""): NoteResult {
   const prev = m.get(cid);
+  if (isTransientError(`${error}\n${text}`)) return noteTransient(m, cid, prev, error, firstLine(text) || error, now);
   if (overloadEscalate(cid, now, prev, RESUME_WINDOW_MS, undefined, undefined, error)) {
     m.delete(cid);
     return "escalate";
@@ -33,6 +46,31 @@ export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: 
   m.set(cid, { errorAt: now, error });
   return "track";
 }
+
+const firstLine = (s: string): string => s.split("\n")[0].trim().slice(0, 300);
+
+/**
+ * 网络类：上一次续过、窗口内又撞 = 同一串，次数接着数；续跑还没发出去又撞 = 同一次，只更新原文、重新计时。
+ * 4 次续跑用完（或监护对象这件活的续跑次数用完）⇒ escalate，记录删掉：下次再撞是新的一串。
+ */
+function noteTransient(m: Map<string, ApiErrorState>, cid: string, prev: ApiErrorState | undefined, error: string, last: string, now: number): NoteResult {
+  const pending = prev?.net && prev.resumedAt === undefined;
+  if (pending) {
+    m.set(cid, { ...prev, errorAt: now, error, net: { ...prev.net!, last } });
+    return "track";
+  }
+  const live = prev?.net && now - prev.resumedAt! < RESUME_WINDOW_MS ? prev.net : undefined;
+  const n = live?.n ?? 0;
+  if (n >= TRANSIENT_BACKOFF_MS.length || overloadEscalate(cid, now, undefined, RESUME_WINDOW_MS, undefined, undefined, `${error}\n${last}`)) {
+    m.delete(cid);
+    return "escalate";
+  }
+  m.set(cid, { errorAt: now, error, net: { n, since: live?.since ?? now, last } });
+  return "track";
+}
+
+/** 这一条离撞错多久该续 */
+export const resumeDelayMs = (s: ApiErrorState): number => (s.net ? TRANSIENT_BACKOFF_MS[s.net.n] : RESUME_DELAY_MS);
 
 /**
  * 错误条目自己会在同一次 watcher 扫描里连带发出 assistant_text（那句 "API Error: …"）
@@ -50,6 +88,12 @@ export function noteActivity(m: Map<string, ApiErrorState>, cid: string, ts: num
   return s;
 }
 
+/** 续跑后正常结束了一个回合（Stop 且不是 API 错误）：网络类连败清零。别的错误照旧按窗口判「又撞」 */
+export function noteTurnOk(m: Map<string, ApiErrorState>, cid: string, at: number): void {
+  const s = m.get(cid);
+  if (s?.net && s.resumedAt !== undefined && at > s.resumedAt) m.delete(cid);
+}
+
 /** 哪些事件算「它又动了」：错误条目自己的那句 "API Error: …" / 撞额度原文（rateLimited）不算 */
 export function countsAsActivity(type: string, data: Record<string, unknown>): boolean {
   if (type === "tool_start" || type === "chat_message") return true;
@@ -65,20 +109,33 @@ export function dueForResume(m: Map<string, ApiErrorState>, now: number): string
       if (now - s.resumedAt >= RESUME_WINDOW_MS) m.delete(cid);
       continue;
     }
-    if (now - s.errorAt >= RESUME_DELAY_MS) due.push(cid);
+    if (now - s.errorAt >= resumeDelayMs(s)) due.push(cid);
   }
   return due;
 }
 
 export function markResumed(m: Map<string, ApiErrorState>, cid: string, now: number): void {
   const s = m.get(cid);
-  if (s) s.resumedAt = now;
+  if (s) m.set(cid, { ...s, resumedAt: now, ...(s.net ? { net: { ...s.net, n: s.net.n + 1 } } : {}) });
 }
 
-export function resumeText(error: string, errorAt: number): string {
-  const hhmm = new Date(errorAt).toTimeString().slice(0, 5);
+const hhmm = (t: number): string => new Date(t).toTimeString().slice(0, 5);
+const waitText = (ms: number): string => (ms < 120_000 ? `${ms / 1000} 秒` : `${ms / 60_000} 分钟`);
+
+export function resumeText(error: string, errorAt: number, delayMs = RESUME_DELAY_MS): string {
   return (
-    `[⚠️ api-error-resume] 你 ${hhmm} 那一回合以 API 错误结束（${error || "API Error"}），不是你自己结束的，` +
-    `之后 60 秒没有新活动。请从上一步接着做，不必复述已做的；如果确实没有未完的事，直接 end_turn。]`
+    `[⚠️ api-error-resume] 你 ${hhmm(errorAt)} 那一回合以 API 错误结束（${error || "API Error"}），不是你自己结束的，` +
+    `之后 ${waitText(delayMs)}没有新活动。请从上一步接着做，不必复述已做的；如果确实没有未完的事，直接 end_turn。]`
   );
+}
+
+/** 升级时频道里那句的原因。before = 这次撞错前的记录（网络类连败的次数与起点在它上面）；不是网络类连败照旧那句 */
+export function giveUpText(before: ApiErrorState | undefined, error: string, text: string): string {
+  const last = firstLine(text) || error || "API Error";
+  if (!isTransientError(`${error}\n${text}`)) {
+    return `连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${error || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`;
+  }
+  const tail = `最后一次：${last}。需要人看一眼网络/代理后手动发一句继续。`;
+  if (!before?.net) return `网络类错误，这件活的自动续跑次数已用完（不再续），${tail}`; // 监护对象：次数按整件活数，早于这一串就用完了
+  return `连续 ${before.net.n + 1} 次网络类错误（${hhmm(before.net.since)} 起，自动续跑 ${before.net.n} 次已用完，不再续），${tail}`;
 }

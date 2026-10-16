@@ -116,7 +116,7 @@ function bookedResumes(db: Database | null, agent: string, workKey: string, clea
  * 这件活是哪一件以台账为准（名单有缓存，刚领新单时还是旧单，不能拿旧单的次数判新单）；回合正常结束后从头数（clearOverloadCount）。
  * error = 这一次的错误码。是登录失效：不走 3 次这条线、不批次数——上一次撞的也是登录失效、为它续过（同一件活、同一会话，authMark）、
  * 窗口内又撞才升级，否则续一次。不是登录失效：只看这件活的续跑次数，之前撞过登录失效不影响。没给 error：按不是登录失效判。
- * 落盘失败 = 数不住：按改动前升级。
+ * 网络类错误也按这 3 次（另有 api-error-resume 的退避与连败上限，先到哪个算哪个）。落盘失败 = 数不住：按改动前升级。
  */
 export function overloadEscalate(cid: string, now: number, prev: { resumedAt?: number } | undefined, windowMs: number,
   view: BridgeView = productionView, path = OVERLOAD_PATH, error?: string): boolean {
@@ -198,10 +198,17 @@ export function failureCardQuiet(agent: string, message: string, now: number, vi
 export function cardsToClose(db: Database, agent: string, projectId: string | undefined, before: number, config: SchedulerConfig | null,
   path = OVERLOAD_PATH): Ask[] {
   clearOverloadCount(agent, before, path);
+  for (const cb of turnOkListeners) {
+    try { cb(agent, before); } catch (e) { console.error(`⚠️ ${agent} 正常结束的回合没通知到续跑计数（网络类连败按 10 分钟窗口清）：${(e as Error).message}`); }
+  }
   if (!config || exemptAgent(agent) || !superviseOn(config, projectId)) return [];
   return listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] })
     .filter((a) => a.extra.failure === "error" && a.extra.deliveryUnknown !== true && a.createdAt <= before);
 }
+
+/** 正常结束了一轮的 agent（cardsToClose 每个正常结束的回合调一次）：quota-wall-wiring 据此把网络类连败清零（api-error-resume noteTurnOk） */
+const turnOkListeners: ((agent: string, at: number) => void)[] = [];
+export const onTurnOk = (cb: (agent: string, at: number) => void): void => void turnOkListeners.push(cb);
 
 // ── 4. cyber 截断：推不推 owner、会话收掉后关卡（dispatch-recovery-CYBRETRY1） ──
 
