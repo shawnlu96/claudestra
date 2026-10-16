@@ -148,12 +148,12 @@ async function behindOrBounce(run: MergeRun, pr: PrSnapshot, external: MergeExte
   const bounce = async (why: string) => {
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动合入 main，退回 fix：${why}`);
     trail.note("cif2", false, why);
-    await sendDecision(run, pr.head, trail, step);
+    await sendDecision(pr.head, trail, step);
     return step("resolved", bounceReceipt);
   };
   const ghs = ghsOf(external);
   if (!ghs) {
-    await sendDecision(run, pr.head, trail, step);
+    await sendDecision(pr.head, trail, step);
     return step("resolved", bounceReceipt);
   }
   let plan: BehindPlan | string;
@@ -167,7 +167,7 @@ async function behindOrBounce(run: MergeRun, pr: PrSnapshot, external: MergeExte
   const receipt = behindReceipt(plan);
   if (receipt.length > RECEIPT_MAX) return bounce("证据超过回执长度");
   trail.note("cif2", true, "失败测试本卡没碰、main 已改过");
-  await sendDecision(run, pr.head, trail, step);
+  await sendDecision(pr.head, trail, step);
   const claimed = await step("resolved", receipt);
   if (claimed.phase !== "updating") return claimed; // the ledger bounced it: this run / head already merged main in once
   try {

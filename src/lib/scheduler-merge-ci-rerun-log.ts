@@ -19,9 +19,9 @@ export const FAIL = /^\(fail\) (.+?)(?: \[[\d.]+m?s\])?\s*$/;
 export const TIMED_OUT = /^\s*\^ this test timed out after \d+ms\.?\s*$/;
 export const FAIL_COUNT = /^\s*(\d+) fail\s*$/;
 /** bun's total of errors outside any test (unhandled errors between tests). */
-export const ERROR_COUNT = /^\s*(\d+) errors?\s*$/;
+const ERROR_COUNT = /^\s*(\d+) errors?\s*$/;
 /** bun's frame around one unhandled error between tests: the title line, then a rule, the error, a closing rule. */
-export const UNHANDLED = /^# Unhandled error between tests\s*$/;
+const UNHANDLED = /^# Unhandled error between tests\s*$/;
 const RULE = /^-{10,}\s*$/;
 /** One stack frame with its source path: `at fn (path:line:col)` or `at path:line:col`. */
 const FRAME = /^\s*at (?:.*? \(([^()\s]+):\d+:\d+\)|([^()\s]+):\d+:\d+)\s*$/;
@@ -73,7 +73,7 @@ function stepLines(log: string): FailedStep[] | null {
 }
 
 /** gh prints this step name when it cannot split a job's log by step (seen 10-15 on PR1593): the whole job is one "step". */
-export const UNKNOWN_STEP = "UNKNOWN STEP";
+const UNKNOWN_STEP = "UNKNOWN STEP";
 
 function isGateVerdict(s: FailedStep): boolean {
   if (s.job === GATE.job && s.step === UNKNOWN_STEP) return isWholeGateJob(s.lines);

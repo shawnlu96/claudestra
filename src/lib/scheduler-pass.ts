@@ -164,8 +164,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const external = opts.external ?? ((p: SchedulerConfig["projects"][string]) => mergeExternal(p, guard(active, runBounded)));
       failed.push(...await ciQueueFullStep(db, config, { manager, external, active, command: guard(active, runBounded), policy: opts.recoveryPolicy, pace: pace.phase() }));
       if (cut("ciQueueFull")) return done(); await mergeTick(db, config, manager, external, active, pace.phase(), trains);
-      if (cut("merge")) return done();
-      failed.push(...await ciMainFixRetryStep(db, Object.keys(config.projects), { manager, command: opts.external ? undefined : guard(active, runBounded), policy: opts.recoveryPolicy, active })); // CIUNREL1 main 修好后重试
+      if (cut("merge")) return done(); failed.push(...await ciMainFixRetryStep(db, config, manager, active, opts.recoveryPolicy, !opts.external && guard(active, runBounded)));
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());

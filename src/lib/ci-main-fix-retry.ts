@@ -66,7 +66,7 @@ const SHA = /^[a-f0-9]{40}$/;
 const RUN = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/(\d+)$/;
 
 /** The scheduler's own registration, complete; anything else is none. */
-export function registrationOf(e: Pick<LedgerEvent, "seq" | "ts" | "kind" | "actor" | "project" | "target" | "data">): Registration | null {
+function registrationOf(e: Pick<LedgerEvent, "seq" | "ts" | "kind" | "actor" | "project" | "target" | "data">): Registration | null {
   const d = e.data;
   if (e.kind !== "note" || e.actor !== "scheduler" || d.op !== WAIT_OP) return null;
   const run = typeof d.run === "string" ? RUN.exec(d.run) : null;

@@ -14,7 +14,6 @@ import type { WriteCtx } from "./ledger-checks.js";
 import type { EventKind } from "./ledger-stages.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
 import { recoveryPolicy, type RecoveryKey, type RecoveryMode } from "./recovery-policy.js";
-import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 import { CI_MAIN_FIX_RETRY_KEY, isPeerPrCard, retriedFiles, retryMode, sameFiles, WAIT_OP } from "./ci-main-fix-retry.js";
 
@@ -30,7 +29,7 @@ const CODES: readonly (readonly [RegExp, string])[] = [
   [/PR URL 不合法/, "bad_pr_url"], [/不在同一仓库/, "cross_repo"], [/update-branch 失败/, "update_failed"], [/rerun 失败/, "rerun_failed"],
   [/已知偶发/, "not_known_flaky"], [/已合入过 main|合并运行已/, "behind_spent"],
 ];
-export const reasonCode = (why: string): string => CODES.find(([re]) => re.test(why))?.[1] ?? "other";
+const reasonCode = (why: string): string => CODES.find(([re]) => re.test(why))?.[1] ?? "other";
 
 /** One red CI's walk through the layers, for one driver call. `sent`: the ledger already has it from this call. */
 export class DecisionTrail {
@@ -54,16 +53,19 @@ const RECEIPT_MAX = 600;
 const RUN_LINK = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/(\d+)$/;
 const SHA = /^[a-f0-9]{40}$/i;
 const LAYERS: readonly Layer[] = ["cif1", "cif8", "cif2"];
+const CONTROL = /[\p{Cc}\p{Cf}\u2028\u2029]/u, CONTROL_ALL = /[\p{Cc}\p{Cf}\u2028\u2029]/gu;
 
 /** `n`: how many failing files there were (`f` may be cut to fit; a cut list never registers a wait). */
 interface Wire { h: string; r: string; a: number; f: string[]; n: number; m: string | null; l: [Layer, 0 | 1, string, string][] }
 
 /** The trail as one receipt line under the gate, or null (no run read, nothing judged). Whys shrink first, then files are cut. */
 export function decisionReceipt(prHead: string, t: DecisionTrail): string | null {
-  if (!t.run || !RUN_LINK.test(t.run) || !t.layers.length) return null;
-  const render = (whyMax: number, files: string[]): string => LEAD + JSON.stringify({ h: prHead, r: t.run!, a: t.attempt ?? 0, f: files, n: (t.files ?? []).length, m: t.mainHead,
-    l: t.layers.map((l) => [l.layer, l.ok ? 1 : 0, l.code, [...l.why].slice(0, whyMax).join("")]) } satisfies Wire);
   const files = t.files ?? [];
+  // the ledger's receipt gate refuses control / format characters: whys lose them, a file name holding one sends nothing
+  if (!t.run || !RUN_LINK.test(t.run) || !t.layers.length || files.some((f) => CONTROL.test(f))) return null;
+  const why = (s: string, max: number) => [...s.replace(CONTROL_ALL, " ")].slice(0, max).join("");
+  const render = (whyMax: number, kept: string[]): string => LEAD + JSON.stringify({ h: prHead, r: t.run!, a: t.attempt ?? 0, f: kept, n: files.length,
+    m: t.mainHead, l: t.layers.map((l) => [l.layer, l.ok ? 1 : 0, l.code, why(l.why, whyMax)]) } satisfies Wire);
   for (const max of [120, 60, 20, 0]) {
     const r = render(max, files);
     if (r.length <= RECEIPT_MAX) return r;
@@ -75,7 +77,7 @@ export function decisionReceipt(prHead: string, t: DecisionTrail): string | null
   return null;
 }
 
-export function parseDecisionReceipt(receipt: string): Wire | null {
+function parseDecisionReceipt(receipt: string): Wire | null {
   if (!receipt.startsWith(LEAD)) return null;
   try {
     const w = JSON.parse(receipt.slice(LEAD.length)) as Wire;
@@ -92,20 +94,15 @@ export function parseDecisionReceipt(receipt: string): Wire | null {
 type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
 
 /**
- * Sends the trail once per driver call, before the outcome step. Never in the way of that outcome: a refusal or a failed write is
- * logged and the outcome goes on as before; only the pass's own stop is rethrown.
+ * Sends the trail once per driver call, before the outcome step, like CIF1's claim query: the ledger side answers null for every
+ * such receipt (malformed, drifted, another head, already recorded), so the step never moves the run and never refuses it.
  */
-export async function sendDecision(run: MergeRun, prHead: string, t: DecisionTrail | undefined, step: Step): Promise<void> {
+export async function sendDecision(prHead: string, t: DecisionTrail | undefined, step: Step): Promise<void> {
   if (!t || t.sent) return;
   const receipt = decisionReceipt(prHead, t);
   if (!receipt) return;
   t.sent = true;
-  try {
-    await step("resolved", receipt);
-  } catch (e) {
-    if (e instanceof SchedulerStopped) throw e;
-    console.error(`⚠️ [merge] ${run.taskId} CI 恢复判定没记下：${(e as Error).message.replace(/\s+/g, " ").slice(0, 300)}`);
-  }
+  await step("resolved", receipt);
 }
 
 type WriteEvent = (db: Database, ctx: WriteCtx, e: { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> },
@@ -115,6 +112,8 @@ const modeOf = (project: string, key: RecoveryKey): RecoveryMode | "unreadable" 
 };
 const SWITCHES: readonly RecoveryKey[] = ["ciKnownFlaky", "ciLogPerJob"];
 const CODE_TEXT: Record<string, string> = { accepted: "接受", main_not_changed: "main 没改过失败文件" };
+const verdictText = (l: { layer: string; verdict: string; code: string }): string =>
+  `${l.layer} ${l.verdict === "accept" ? "接受" : l.verdict === "reject" ? `拒（${CODE_TEXT[l.code] ?? l.code}）` : "未走到"}`;
 
 /**
  * Ledger side, first thing in ciBehindClaim. undefined = not this receipt. null = recorded (or already there, or the run drifted):
@@ -137,7 +136,7 @@ export function ciDecisionClaim(db: Database, ctx: WriteCtx, row: MergeRun, rece
   const switches: Record<string, string> = { ...Object.fromEntries(SWITCHES.map((k) => [k, modeOf(row.project, k)])), [CI_MAIN_FIX_RETRY_KEY]: retryMode(row.project) };
   const cif2 = layers.find((l) => l.layer === "cif2")!;
   writeEvent(db, { actor: ctx.actor, now, dedupKey }, { project: row.project, target: row.taskId, kind: "note",
-    text: `合并队列 CI 红的恢复判定（run ${runId} 第 ${w.a} 次）：${layers.map((l) => `${l.layer} ${l.verdict === "accept" ? "接受" : l.verdict === "reject" ? `拒（${CODE_TEXT[l.code] ?? l.code}）` : "未走到"}`).join("，")}`,
+    text: `合并队列 CI 红的恢复判定（run ${runId} 第 ${w.a} 次）：${layers.map(verdictText).join("，")}`,
     data: { op: DECISION_OP, intentId: row.intentId, task: row.taskId, pr: row.prRef, prHead: row.reviewedHead, run: w.r, attempt: w.a, files: w.f, layers,
       budget: { rerun: spent.rerun ? 0 : 1, behind: spent.behind ? 0 : 1 }, switches,
       scope: "只核对了失败测试文件是否在本 PR 改动里，没做依赖分析；超时只给重跑资格、main 改过只给更新后重试，都不豁免 CI" } }, true);

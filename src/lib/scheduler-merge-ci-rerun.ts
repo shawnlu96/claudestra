@@ -155,7 +155,7 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
     const flaky = decision.flaky && await knownFlakyRerun({ run, prHead: pr.head, checks: checks.map((c) => c.name), gh, step, receiptOf: rerunReceipt }, decision.flaky);
     if (decision.flaky) trail?.note("cif8", !!flaky, flaky ? "失败测试都在有效的已知偶发清单里" : "不按已知偶发重跑（开关没开、不在有效清单或判不成）");
     if (flaky) {
-      if (flaky.phase !== "resolved") await sendDecision(flaky, pr.head, trail, step);
+      if (flaky.phase !== "resolved") await sendDecision(pr.head, trail, step);
       return flaky;
     }
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：${decision.why}`);
@@ -168,7 +168,7 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
     return bounce();
   }
   trail?.note("cif1", true, "所有失败都是本卡没碰的测试超时");
-  await sendDecision(run, pr.head, trail, step);
+  await sendDecision(pr.head, trail, step);
   const rev = run.rev;
   const claimed = await step("resolved", receipt);
   if (claimed.phase === "resolved") return claimed; // this head was already re-run once: the ledger bounced it

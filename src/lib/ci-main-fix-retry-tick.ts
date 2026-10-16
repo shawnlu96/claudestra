@@ -11,7 +11,7 @@
 import type { Database } from "bun:sqlite";
 import { getTask, listEvents } from "./ledger-store.js";
 import { flowBlock } from "./peer-pr-head-review.js";
-import { recordObserved, type ObservedAction, type RecoveryPolicyPort } from "./recovery-policy.js";
+import type { ObservedAction, RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { ciBehindGh } from "./scheduler-merge-ci-behind.js";
@@ -113,20 +113,19 @@ export async function ciMainFixRetryTick(db: Database, projects: readonly string
 }
 
 /**
- * scheduler-pass.ts's call. Without a real command (a test world's injected external) and in a test process nothing is read;
- * the sample goes through the leased manager there, or straight to the ledger when no manager is given.
+ * scheduler-pass.ts's call (merge-arch-CIUNREL1, after the merge tick). Without a real command (a test world's injected external)
+ * and in a test process nothing is read. The sample goes through the leased pass manager; a held card (pause / v2 skip) records
+ * nothing and so sends nothing.
  */
-export async function ciMainFixRetryStep(db: Database, projects: readonly string[], o: { manager?: Manager; command?: typeof runBounded;
-  policy?: RecoveryPolicyPort; active?: () => void; gh?: RetryGh }): Promise<{ taskId: string; error: string }[]> {
-  const gh = o.gh ?? (o.command && !isTestProcess() ? retryGh(o.command) : null);
-  if (!gh) return [];
-  const manager = o.manager;
-  const record = manager ? async (a: ObservedAction) => {
+export async function ciMainFixRetryStep(db: Database, config: { projects: Record<string, unknown> }, manager: Manager, active: () => void,
+  policy: RecoveryPolicyPort | undefined, command: typeof runBounded | false): Promise<{ taskId: string; error: string }[]> {
+  if (!command || isTestProcess()) return [];
+  const record = async (a: ObservedAction) => {
     const r = await manager("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey,
       "--action", a.action, "--data", JSON.stringify(a.data ?? {}));
-    if (r.held === true) return { recorded: false }; // the card is held (pause / v2 skip): nothing written, nothing sent
+    if (r.held === true) return { recorded: false };
     if (r.ok !== true) throw new Error(String(r.error ?? "scheduler-recovery-observe 失败"));
     return { recorded: r.recorded === true };
-  } : async (a: ObservedAction) => ({ recorded: recordObserved(db, a, Date.now()).recorded });
-  return ciMainFixRetryTick(db, projects, { gh, record, policy: o.policy, assertActive: o.active });
+  };
+  return ciMainFixRetryTick(db, Object.keys(config.projects), { gh: retryGh(command), record, policy, assertActive: active });
 }
