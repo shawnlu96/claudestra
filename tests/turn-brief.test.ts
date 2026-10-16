@@ -1,5 +1,6 @@
 /** JRT-1：目标 agent「当前在做什么」短摘要——拼法（lib/turn-brief.ts）和 bridge 侧取数（bridge/turn-brief.ts）。 */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { noteAcpChannel } from "../src/bridge/acp-state.js";
 import { setAsksForTest } from "../src/bridge/asks.js";
 import { emitEvent, forgetAgent } from "../src/bridge/event-bus.js";
@@ -145,6 +146,15 @@ describe("turnBrief（bridge 取数）", () => {
     closeAsk(db, openAsk(db, { ...base, fromChannelId: CH, kind: "decide", title: "早答了" }).id, "cancelled", "");
     expect(turnBrief(AGENT, CH, "claude")).toBe("本回合起因：he（user）「把 JRT-1 做了」。最近工具：Bash bun test（进行中）。在等回答：「合并吗」");
     expect(turnBrief(AGENT, CH, "codex")).toContain("最近工具：Bash bun test。");
+  });
+
+  test("brief-db-open-escape：台账库打不开（不是 sqlite 文件）不抛，起因和工具照样返回、少掉在等的问题", () => {
+    const bad = `${tempLedgerPath("turn-brief-bad-")}.bad`;
+    writeFileSync(bad, "invalid sqlite data");
+    setAsksForTest({ path: bad });
+    deliver("m1", "把 JRT-1 做了");
+    emitEvent({ agent: AGENT, chatId: CH, type: "tool_start", data: { toolId: "b1", name: "Bash", summary: "bun test" } });
+    expect(turnBrief(AGENT, CH, "claude")).toBe("本回合起因：he（user）「把 JRT-1 做了」。最近工具：Bash bun test（进行中）");
   });
 
   test("codex-acp-running-false：Codex 走 ACP 时开头就有 tool_start、完成才有 tool_done，没完成的照样是进行中", () => {

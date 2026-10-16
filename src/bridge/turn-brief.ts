@@ -11,9 +11,10 @@ import { replayEventsSince } from "./event-bus.js";
 import { turnCuts } from "./turn-cuts.js";
 
 function openQuestions(channelId: string): string[] {
-  const db = askReadDb();
-  if (!db) return [];
   try {
+    // 开库、查 asks 表都可能抛（库坏 / 打不开 / 锁竞争）：和查询一起降级，别让可选的一段拖垮整份摘要
+    const db = askReadDb();
+    if (!db) return [];
     return listAsks(db, { states: ["open"] })
       .filter((a) => a.fromChannelId === channelId && a.kind !== "accept")
       .map((a) => a.title || a.body);
