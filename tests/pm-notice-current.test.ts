@@ -167,6 +167,24 @@ describe("[验收线 4] 串行等待与押后整包（复审 serial-stale / held
     } finally { k.digest.stop(); }
   });
 
+  test("收件人是 feature PM（不是项目当班 PM）：押后重投时卡已前进，同样不投、记一次跳过（复审 feature-pm-stale）", async () => {
+    quiet("on");
+    const k = await digestKit(await recorded());
+    try {
+      expect(w.sent[0].to).toBe(FPM); // 真实 tick 发给 feature PM
+      expect(activeProjectPm(w.db, "p")).not.toBe(FPM);
+      const to: LocalEndpoint = { ...k.to, agentName: FPM };
+      const send = (e: Envelope) => k.digest.wrap(async (x) => (k.out.push({ ...x }), { envelope: x, outcome: k.kit.reply(x) }), w.db, "p")(e, to);
+      k.kit.reply = () => ({ kind: "sent", note: "queued" });
+      const env = { ...k.sched(k.text), to };
+      expect((await send(env)).outcome).toEqual({ kind: "sent", note: "queued" }); // 仍是现状：照投（押在忙 PM 队里）
+      expect((await advance()).ok).toBe(true);
+      expect((await send(env)).outcome).toEqual({ kind: "sent", note: "pm-quiet" });
+      expect(k.out).toHaveLength(1);
+      expect(skips()).toHaveLength(1);
+    } finally { k.digest.stop(); }
+  });
+
   test("整包押在忙 PM 的队里后卡前进：重投时逐条重核，混合包重拼只带有效的，全过期不投", async () => {
     quiet("on");
     const k = await digestKit(await recorded());

@@ -131,9 +131,22 @@ function repairOrder(task: LedgerTask, f: ReviewFacts): UiRepairOrder {
   }] };
 }
 
+const hasIntents = (db: Database): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_intents'").get();
+/**
+ * 领单的来源依据：本段 fix（同轮、同规格）里规划器已正式派出、送达的 fix 派单，同 head、同规格版本。代码干净的 fix 段只有
+ * uiRepairFix 会规划派单（它已过 reviewSourced 来源证明），所以有这张派单就是同一判定；没有（来源证明不足 → 规划器退人工）不合成补图单
+ */
+function repairDispatched(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): boolean {
+  const entry = events.findLast((e) => e.kind === "stage" && e.data.to === "fix");
+  if (!entry || entry.data.round !== task.round || (entry.data.specRev !== undefined && entry.data.specRev !== task.specRev)) return false;
+  const row = hasIntents(db) && db.query(`SELECT 1 FROM scheduler_intents WHERE taskId = ? AND action = 'dispatch' AND node = 'fix' AND status IN ('submitted','done')
+    AND head = ? AND specRev = ? AND causalSeq >= ? LIMIT 1`).get(task.id, task.headSHA, task.specRev, entry.seq);
+  return !!row;
+}
+
 /**
  * take_order 领到的补截图单（order-take.ts ownFixContext）：pmQuiet on、ui 卡 auto、fix 阶段、截图仍缺，进 fix 的那轮同 head 审查
- * 无 P0/P1 且不是 block，本轮没有截图被拒；不是这种卡返回 null（领单逐字照旧）
+ * 无 P0/P1 且不是 block，本轮没有截图被拒，且本段 fix 已有规划器正式派出的补图派单（repairDispatched）；不是这种卡返回 null（领单逐字照旧）
  */
 export function uiRepairTakeOrder(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): { findings: ReviewFinding[]; report: string } | null {
   if (task.stage !== "fix" || pmQuietMode(task.project) !== "on" || !SHA.test(task.headSHA ?? "") || !missingShots(task.extra.screenshotsDigest)) return null;
@@ -142,6 +155,7 @@ export function uiRepairTakeOrder(db: Database, task: LedgerTask, events: readon
   if (events.some((x) => x.kind === "decision" && x.data.op === UI_REJECTED && x.data.round === task.round)) return null;
   const read = fixStartReviewFacts(task, events);
   if (read.kind !== "facts" || read.facts.head !== task.headSHA || read.facts.round !== task.round || !codeClean(read.facts)) return null;
+  if (!repairDispatched(db, task, events)) return null;
   const order = repairOrder(task, read.facts);
   return { findings: wireFindings(order.findings), report: order.reportPath };
 }

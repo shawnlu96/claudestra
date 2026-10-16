@@ -111,6 +111,19 @@ describe("[验收线 1] 作者真实领单（复审 repair-pull）", () => {
     } finally { f.close(); }
   });
 
+  test("审查来源证明失效（原派审意图作废）、规划器退人工：领单不合成补图单（复审 repair-proof）", async () => {
+    quiet("on");
+    const f = await reviewed();
+    try {
+      await f.cli("pm", "stage", "T1", "--from", "review", "--to", "fix", "--text", "缺截图退回");
+      f.db.run("UPDATE scheduler_intents SET status = 'cancelled' WHERE taskId = 'T1' AND action = 'review'");
+      expect(snap(f).reviewDispatches).toHaveLength(0);
+      expect(plan(f)).toMatchObject({ kind: "escalate" });
+      const r = take(f);
+      expect(r.ok ? r.order?.findings.map((x) => x.family) ?? [] : ["?"]).not.toContain(UI_REPAIR_FAMILY);
+    } finally { f.close(); }
+  });
+
   test("有 P1 / 截图被拒：领单不出补图工单", async () => {
     quiet("on");
     const f = await reviewed([P1], "changes");

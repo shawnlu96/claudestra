@@ -124,9 +124,9 @@ export class PmDigest {
   }
 
   private async deliver(env: Digested, to: LocalEndpoint, send: Send, db: Database, project: string): Promise<Delivery> {
+    if (!this.current(env, project, db)) return this.release(env), quietSkip(env); // PMQUIET1：过期提醒不投（feature PM 收的也核）
     if (!to.agentName || activeProjectPm(db, project) !== to.agentName) return this.release(env), send(env, to); // 摘要只给当班 PM
     const own = env.from.kind === "bridge" && env.from.label === PM_DIGEST_LABEL;
-    if (!this.current(env, project, db)) return this.release(env), quietSkip(env); // PMQUIET1：过期提醒不投
     if (!own && this.held(env, project)) return { envelope: env, outcome: { kind: "sent", note: "pm-hold" } };
     if (!own) {
       try {
