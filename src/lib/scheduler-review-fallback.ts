@@ -22,7 +22,7 @@ export const HANDOFF_NOTE = "本机跨族审查降级，跨族交仓库方队列
 export const CREATE_FAIL_LIMIT = 3;
 
 type Placement = { family: AuthorFamily; machine: string };
-export type FallbackTrigger = "review_capacity" | "review_host" | "create_quota" | "create_streak";
+type FallbackTrigger = "review_capacity" | "review_host" | "create_quota" | "create_streak";
 const TRIGGER_LABEL: Record<FallbackTrigger, string> = { review_capacity: "审查回合撞额度", review_host: "审查回合宿主 / 投递故障",
   create_quota: "建审查会话撞额度", create_streak: `建审查会话连续 ${CREATE_FAIL_LIMIT} 次失败` };
 const FALLBACK_TRIGGERS: readonly string[] = Object.keys(TRIGGER_LABEL);
