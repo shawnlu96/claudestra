@@ -60,6 +60,7 @@ export const RECOVERY_KEYS = [
   "mainCarryMerge",
   "mainCiPause",
   "mainRedFix",
+  "mainRedGreenRetire",
   "mainRedRepairBind",
   "manualCaseOwnership",
   "manualCaseSla",

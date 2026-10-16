@@ -5,6 +5,8 @@
  * - fix: per run id + attempt once (handled event), skip when the PM already bound the same fault or the same workflow has an
  *   unverified fix node of this mechanism with the same failed checks (one note on that card instead); else the node through
  *   composeRewrite / rewriteDag (the review-converge-followup.ts way: feature PM as the writer, dedup per run) and the spec file;
+ * - untriaged: a log too long to read whole that still names no failed test: no node (a scope from it would be a guess), the attempt
+ *   handled and one PM todo per run with the run link and failed checks, for the PM to decide;
  * - bind: mainRedRepairBind, only for a card this mechanism wrote and the same faultKey.
  * Results reach the PM through recordPmTodo (pull); only an unplaceable node or a fault whose fixes failed twice returns a notice.
  */
@@ -23,13 +25,14 @@ import { dagKey, faultSet, handledKey, HANDLED_OP, MAIN_RED_FAIL_LIMIT, nodeKey,
   type MainRedFacts, type MainRedWorkflow } from "./main-red-fix.js";
 import { mainRedNodes, nodeState, placeFix, type PlaceDeps, type Placement } from "./main-red-fix-place.js";
 import { recordPmTodo } from "./pm-todo-note.js";
+import { quoteExternal } from "./quote-text.js";
 import { recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { featurePm } from "./scheduler-autostart.js";
 import { mainCiApprovals, REVOKE_OP } from "./scheduler-main-ci-wiring-store.js";
 import { recordMainRedRepair } from "./scheduler-main-ci-wiring-write.js";
 
 export interface MainRedWriteDeps extends PlaceDeps { repo: string; policy?: RecoveryPolicyPort; now: number }
-export interface MainRedFixResult { outcome: "duplicate" | "node" | "same" | "bound" | "refused" | "unplaced"; text: string; notify: string | null; node?: string }
+export interface MainRedFixResult { outcome: "duplicate" | "node" | "same" | "bound" | "refused" | "unplaced" | "untriaged"; text: string; notify: string | null; node?: string }
 
 const PM_TODO_KIND = "main_red_fix";
 const mustOn = (policy: RecoveryPolicyPort, project: string) => {
@@ -68,6 +71,23 @@ function handled(db: Database, ctx: WriteCtx, project: string, f: MainRedFacts, 
   insertEvent(db, { ...ctx, dedupKey: handledKey(project, f.runId, f.attempt) }, { project, target: "", kind: "scheduler", text,
     data: { op: HANDLED_OP, outcome, workflow: f.workflow, runId: f.runId, attempt: f.attempt, mainSha: f.mainSha, checks: f.checks, ...extra } }, true);
   recordPmTodo(db, ctx, { project, target: "", kind: PM_TODO_KIND, text, dedupKey: todoKey(project, f.runId, `a${f.attempt}`) });
+}
+
+export interface MainRedUntriaged extends Pick<MainRedFacts, "workflow" | "runId" | "attempt" | "mainSha" | "url" | "checks"> { why: string }
+
+/** A truncated log naming no failed test: the attempt handled without a node, one PM todo per run whatever the attempt. */
+export function recordMainRedUntriaged(db: Database, ctx: WriteCtx, project: string, f: MainRedUntriaged, policy: RecoveryPolicyPort = recoveryPolicy): MainRedFixResult {
+  mustOn(policy, project);
+  return tx(db, () => {
+    const prior = getEventByDedup(db, handledKey(project, f.runId, f.attempt));
+    if (prior) return { outcome: "duplicate", text: prior.text, notify: null };
+    const checks = f.checks.map((c) => quoteExternal(c, 120)).join("、") || "（未列出）";
+    const text = `main ${workflowOf(f.workflow).label} 红（run ${f.runId}）认不出失败测试，没写修复节点，请 PM 定：${quoteExternal(f.why, 300)}；失败 check：${checks}；${f.url}`;
+    insertEvent(db, { ...ctx, dedupKey: handledKey(project, f.runId, f.attempt) }, { project, target: "", kind: "scheduler", text,
+      data: { op: HANDLED_OP, outcome: "untriaged", workflow: f.workflow, runId: f.runId, attempt: f.attempt, mainSha: f.mainSha, checks: f.checks } }, true);
+    recordPmTodo(db, ctx, { project, target: "", kind: PM_TODO_KIND, text, dedupKey: todoKey(project, f.runId, "untriaged") });
+    return { outcome: "untriaged", text, notify: null };
+  });
 }
 
 /** The node through the converge follow-up's write path; a refused or failed write is a miss, never a throw. */

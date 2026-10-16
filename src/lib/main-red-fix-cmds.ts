@@ -1,8 +1,8 @@
 /**
- * `ledger scheduler-main-red-fix <project> --op observe|rerun-claim|rerun-result|fix|bind --facts <JSON>`: main-red-fix's only write
+ * `ledger scheduler-main-red-fix <project> --op observe|rerun-claim|rerun-result|fix|untriaged|retire|bind --facts <JSON>`: main-red-fix's only write
  * door (manager/ledger.ts spreads MAIN_RED_FIX_CMDS and lets the scheduler identity run MAIN_RED_FIX_SERVICE, as PMAUTO1 does).
  * Scheduler identity with a live lease only, for a project under auto dispatch; every facts field is validated here and the writes
- * re-read the ledger in their own transaction (main-red-fix-write.ts). tests/main-red-fix-cmds.test.ts.
+ * re-read the ledger in their own transaction (main-red-fix-write.ts; retire: main-red-fix-retire.ts). tests/main-red-fix-cmds.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -10,7 +10,8 @@ import { realScrub } from "./dag-write-scrub.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
 import { MAIN_RED_WORKFLOWS, type MainRedFacts } from "./main-red-fix.js";
-import { bindMainRedRepair, claimMainRedRerun, recordMainRedObserve, recordMainRedRerunResult, writeMainRedFix } from "./main-red-fix-write.js";
+import { retireMainRedNode } from "./main-red-fix-retire.js";
+import { bindMainRedRepair, claimMainRedRerun, recordMainRedObserve, recordMainRedRerunResult, recordMainRedUntriaged, writeMainRedFix } from "./main-red-fix-write.js";
 import { statePath } from "./paths.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
@@ -19,7 +20,7 @@ import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 
 const CMD = "scheduler-main-red-fix";
 export const MAIN_RED_FIX_SERVICE: ReadonlySet<string> = new Set([CMD]);
-const USAGE = `${CMD} <project> --op observe|rerun-claim|rerun-result|fix|bind --facts <JSON>（调度身份 + 租约）`;
+const USAGE = `${CMD} <project> --op observe|rerun-claim|rerun-result|fix|untriaged|retire|bind --facts <JSON>（调度身份 + 租约）`;
 
 interface Cli {
   db: Database;
@@ -102,6 +103,16 @@ async function run(c: Cli): Promise<Record<string, unknown>> {
       const f = fixFacts(o), base = await (ports.scrub ?? realScrub)([f.mainSha]), scrub = { ...base, commits: new Set([...base.commits ?? [], f.mainSha]) };
       c.deps.assertLease?.();
       return { ok: true, ...writeMainRedFix(c.db, ctx, project, f, { ledgerDir: ports.ledgerDir ?? statePath("ledger"), scrub, exists: existsSync, repo: repoOf(project), policy, now }) };
+    }
+    case "untriaged": {
+      const r = recordMainRedUntriaged(c.db, ctx, project, { workflow: workflow(o), runId: int(o, "runId"), attempt: int(o, "attempt"), mainSha: str(o, "mainSha", SHA),
+        url: str(o, "url", URL_RE), checks: list(o, "checks", 50), why: str(o, "why", LINE, 400) }, policy);
+      return { ok: true, ...r };
+    }
+    case "retire": {
+      const r = retireMainRedNode(c.db, ctx, project, { workflow: workflow(o), featureId: str(o, "featureId", /^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$/),
+        key: str(o, "key", /^[A-Z][A-Z0-9]{0,39}$/), greenSha: str(o, "greenSha", SHA), greenRunId: int(o, "greenRunId"), url: str(o, "url", URL_RE) }, policy);
+      return { ok: true, ...r };
     }
     case "bind": {
       const r = bindMainRedRepair(c.db, ctx, { project, taskId: str(o, "taskId", /^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$/), head: str(o, "head", SHA),
