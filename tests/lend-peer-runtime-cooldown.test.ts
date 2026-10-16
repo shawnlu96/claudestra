@@ -193,7 +193,7 @@ function notStarted(o: { orderId: string; peer: string }, detail: string, failur
 const forget = () => db.run("DELETE FROM meta WHERE key LIKE 'lend:runtime-stops:%'");
 const pin = (id: string, placement: string) => db.run("UPDATE tasks SET extra = json_set(extra, '$.placement', ?) WHERE id = ?", [placement, id]);
 const card = (id: string) => {
-  const t = db.query("SELECT agent, assigneeKind, assignee, extra FROM tasks WHERE id = ?").get(id) as { agent: string | null; extra: string };
+  const t = db.query("SELECT agent, assigneeKind, assignee, extra FROM tasks WHERE id = ?").get(id) as { agent: string | null; assigneeKind: string | null; assignee: string | null; extra: string };
   return { ...t, extra: JSON.parse(t.extra) as Record<string, unknown> };
 };
 
