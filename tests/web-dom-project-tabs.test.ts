@@ -22,7 +22,6 @@ interface El {
 interface Doc { createElement(tag: string): El; body: El & { appendChild(c: El): void } }
 interface Win { happyDOM: { setViewport(v: { width: number; height: number }): void }; dispatchEvent(e: unknown): void; KeyboardEvent: new (t: string, o: object) => unknown }
 
-const mod = (p: string) => new URL(`../web/features/${p}`, import.meta.url).href;
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let doc: Doc, win: Win;
@@ -33,10 +32,11 @@ let ui: {
   openCollabTask: (t: string | null) => void;
   closeCollab: () => void;
   useCollabNav: () => { project: string | null; task: string | null };
-  tabs: { rememberTab(p: string, t: string): void; requestProjectTab(p: string, r: object): void; peekProjectTab(p: string): object | null };
+  tabs: { rememberTab(p: string, t: string): void; requestProjectTab(p: string, r: object): void; peekProjectTab(p: string): object | null; clearProjectTab(p: string): void };
 };
 const calls: string[] = [];
 const scrolled: string[] = [];
+let addedCss = false;
 const realFetch = globalThis.fetch;
 
 beforeAll(async () => {
@@ -47,8 +47,9 @@ beforeAll(async () => {
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
   doc = (globalThis as unknown as { document: Doc }).document;
   win = globalThis as unknown as Win;
-  // FocusBoard 闪卡时用 CSS.escape 找节点；happy-dom 没有 CSS 全局（卡号只有字母数字，原样即可）
-  (globalThis as { CSS?: { escape(s: string): string } }).CSS ??= { escape: (x: string) => x };
+  // FocusBoard 闪卡时用 CSS.escape 找节点；happy-dom 没有 CSS 全局（卡号只有字母数字，原样即可），afterAll 删掉
+  const g = globalThis as { CSS?: { escape(s: string): string } };
+  if (!g.CSS) { g.CSS = { escape: (x: string) => x }; addedCss = true; }
   // 闪一次 = 滚到那张卡再加 .flash；根测试进程里 CSS module 没有真类名，记 scrollIntoView 落在哪个节点上
   const proto = (globalThis as unknown as { HTMLElement: { prototype: { scrollIntoView(o?: unknown): void; getAttribute(n: string): string | null } } }).HTMLElement.prototype;
   const scroll = proto.scrollIntoView;
@@ -64,19 +65,20 @@ beforeAll(async () => {
     const hit = url.pathname.startsWith("/api/v1/") ? ptRoute(url.pathname.slice("/api/v1".length), url.searchParams) : null;
     return hit ?? Response.json({ ok: false, error: "not in fixture" }, { status: 404 });
   }) as typeof fetch;
-  const view = await import(mod("collab/collab-view.tsx"));
-  await (await import(mod("asks/asks-store.ts"))).asksStore.refresh();
-  const store = await import(mod("chat/chat-store.ts"));
-  const nav = await import(mod("collab/collab-nav.ts"));
-  const doing = await import(mod("now/now-doing.tsx"));
+  const view = await import(new URL("../web/features/collab/collab-view.tsx", import.meta.url).href);
+  await (await import(new URL("../web/features/asks/asks-store.ts", import.meta.url).href)).asksStore.refresh();
+  const store = await import(new URL("../web/features/chat/chat-store.ts", import.meta.url).href);
+  const nav = await import(new URL("../web/features/collab/collab-nav.ts", import.meta.url).href);
+  const doing = await import(new URL("../web/features/now/now-doing.tsx", import.meta.url).href);
   ui = { CollabView: view.CollabView, ChatStoreProvider: store.ChatStoreProvider, NowDoing: doing.NowDoing, openCollabTask: nav.openCollabTask,
-    closeCollab: nav.closeCollab, useCollabNav: nav.useCollabNav, tabs: await import(mod("collab/project-tabs/tab-request.ts")) };
+    closeCollab: nav.closeCollab, useCollabNav: nav.useCollabNav, tabs: await import(new URL("../web/features/collab/project-tabs/tab-request.ts", import.meta.url).href) };
 });
 
 const live = new Set<() => Promise<void>>();
 afterEach(async () => { for (const u of [...live]) await u(); });
 afterAll(async () => {
   globalThis.fetch = realFetch;
+  if (addedCss) delete (globalThis as { CSS?: unknown }).CSS;
   setSystemTime();
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   await GlobalRegistrator.unregister();
@@ -256,6 +258,6 @@ test("[验收线 6] requestProjectTab：项目页挂载时取一次，落到模�
   await React.act(async () => root.unmount());
   host.remove();
   ui.closeCollab();
-  ui.tabs.requestProjectTab(MAP, { tab: "overview" });
+  ui.tabs.clearProjectTab(MAP);
   ui.tabs.rememberTab(MAP, "overview");
 });
