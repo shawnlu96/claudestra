@@ -7,7 +7,11 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { navDom } from "./helpers/nav-shots";
 
 let dom: Awaited<ReturnType<typeof navDom>>;
-beforeAll(async () => { dom = await navDom({}); });
+beforeAll(async () => { dom = await navDom({}, () => ({
+  sidebar: require("../web/features/chat/components/sidebar.tsx"), store: require("../web/features/chat/chat-store.ts"),
+  nav: require("../web/features/chat/components/nav-context.tsx"), asks: require("../web/features/asks/asks-store.ts"),
+  collab: require("../web/features/collab/collab-nav.ts"), entry: require("../web/features/collab/team-view-entry.tsx"),
+})); });
 afterEach(async () => dom.cleanup());
 afterAll(async () => dom.dispose());
 

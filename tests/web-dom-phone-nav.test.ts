@@ -5,12 +5,17 @@
  */
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { meEntries } from "../web/features/nav/me-entries";
-import { resetNavTab } from "../web/features/nav/nav-tab";
 import { navDom, type NavDomView, type NavOptions, TEAM_NAME } from "./helpers/nav-shots";
 
 const opts: NavOptions = {};
+// nav-tab.ts 带 react 与 today-nav（DOM 类型）：运行时加载，不进根 tsc
+const { resetNavTab } = require("../web/features/nav/nav-tab.ts") as { resetNavTab(): void };
 let dom: Awaited<ReturnType<typeof navDom>>;
-beforeAll(async () => { dom = await navDom(opts); });
+beforeAll(async () => { dom = await navDom(opts, () => ({
+  sidebar: require("../web/features/chat/components/sidebar.tsx"), store: require("../web/features/chat/chat-store.ts"),
+  nav: require("../web/features/chat/components/nav-context.tsx"), asks: require("../web/features/asks/asks-store.ts"),
+  collab: require("../web/features/collab/collab-nav.ts"), entry: require("../web/features/collab/team-view-entry.tsx"),
+})); });
 afterEach(async () => {
   await dom.cleanup();
   await dom.React.act(async () => resetNavTab());

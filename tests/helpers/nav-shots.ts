@@ -14,9 +14,9 @@ import { PROJECTS as TODAY_PROJECTS, TODAY_NOW, todayRoute, todayWorld } from ".
 export { TODAY_NOW as NAV_NOW };
 const H = 3600_000;
 
-export const NAV_PROJECTS = [...TODAY_PROJECTS, { id: "proj-d", name: "合成项目 D", emoji: null, dirs: [] }];
+const NAV_PROJECTS = [...TODAY_PROJECTS, { id: "proj-d", name: "合成项目 D", emoji: null, dirs: [] }];
 /** 绑定了团队的本机项目，与中心项目名 */
-export const TEAM_LOCAL = "proj-a";
+const TEAM_LOCAL = "proj-a";
 export const TEAM_NAME = "合成团队项目";
 
 const f = createV2ProjectsFixtures();
@@ -46,7 +46,7 @@ export function navWorld() {
 }
 
 /** 2 个会话有未读：键是前端名（不带 agent- 前缀，lib/chat/agents.ts 按 mapped.name 取） */
-export const UNREAD = { "b-pm": 3, "d-dev": 1 };
+const UNREAD = { "b-pm": 3, "d-dev": 1 };
 
 function ports(): SharedProjectsPorts {
   const who = { ...f.person, ...f.requests.list, ...ME, subject: "owner:self" as const };
@@ -103,8 +103,15 @@ export interface NavDomView {
   unmount(): Promise<void>;
 }
 
+/**
+ * 挂载要用的 web 模块：由 tests/web-dom-*.test.ts 自己 require 了传进来（guard：只有登记过的 web-dom 测试能碰带 React 的 web 模块，helper 不行）。
+ * 组件模块在运行时由 bun 转译加载，根 tsc 没有 --jsx 看不到类型，所以是 any。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- 见上
+export interface NavDomModules { sidebar: any; store: any; nav: any; asks: any; collab: any; entry: any }
+
 /** beforeAll 里调一次：注册 happy-dom、拦 fetch（夹具 navRoute，之外 404）、返回挂载函数；o 可在用例之间改（contacts / shells / team） */
-export async function navDom(o: NavOptions) {
+export async function navDom(o: NavOptions, load: () => NavDomModules) {
   const { createRequire } = await import("node:module");
   const { GlobalRegistrator } = await import("@happy-dom/global-registrator");
   const { machines } = await import("../../web/lib/machines");
@@ -128,11 +135,7 @@ export async function navDom(o: NavOptions) {
     const api = path.startsWith("/api/v1/") ? path.slice("/api/v1".length) : null;
     return (api && await navRoute(api, world, o)) || Response.json({ ok: false, error: "not in fixture" }, { status: 404 });
   }) as typeof fetch;
-  const mods = {
-    sidebar: require("../../web/features/chat/components/sidebar.tsx"), store: require("../../web/features/chat/chat-store.ts"),
-    nav: require("../../web/features/chat/components/nav-context.tsx"), asks: require("../../web/features/asks/asks-store.ts"),
-    collab: require("../../web/features/collab/collab-nav.ts"), entry: require("../../web/features/collab/team-view-entry.tsx"),
-  };
+  const mods = load();
   const live = new Set<() => Promise<void>>();
   const tick = (ms = 20) => React.act(() => new Promise<void>((r) => setTimeout(r, ms)));
   const until = async (ok: () => boolean, what: string) => {

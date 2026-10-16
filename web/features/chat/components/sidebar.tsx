@@ -204,7 +204,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
 
   return (
     <aside
-      className="relative flex w-full shrink-0 flex-col border-r border-base-300 bg-base-200 pb-[var(--cstra-phone-nav-h,0px)] sm:w-[calc(var(--sb-w,16rem)+var(--cstra-rail-w,0px))] sm:pl-[var(--cstra-rail-w,0px)]"
+      className={"relative flex w-full shrink-0 flex-col border-r border-base-300 bg-base-200 pb-[var(--cstra-phone-nav-h,0px)] "
+        + "sm:w-[calc(var(--sb-w,16rem)+var(--cstra-rail-w,0px))] sm:pl-[var(--cstra-rail-w,0px)]"}
       style={sbWidth ? ({ "--sb-w": `${sbWidth}px` } as React.CSSProperties) : undefined}
     >
       {/* 桌面拖宽手柄:压住右缘 5px,悬停显色提示可拖 */}

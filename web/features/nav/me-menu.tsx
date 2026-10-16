@@ -87,8 +87,8 @@ export function MeMenu({ items }: { items: MeItem[] }) {
   };
   return (
     <>
-      <button ref={btn} type="button" className={`flex w-full flex-col items-center gap-0.5 rounded-lg py-1.5 text-[11px] transition-colors ${at ? "text-primary" : "text-base-content/60 hover:text-base-content"}`}
-        aria-haspopup="menu" aria-expanded={!!at} data-nav-tab="me" onClick={toggle}>
+      <button ref={btn} type="button" aria-haspopup="menu"
+        className={`flex w-full flex-col items-center gap-0.5 rounded-lg py-1.5 text-[11px] transition-colors ${at ? "text-primary" : "text-base-content/60 hover:text-base-content"}`} aria-expanded={!!at} data-nav-tab="me" onClick={toggle}>
         <NavIcon name="me" />
         <span>{tr("我的")}</span>
       </button>

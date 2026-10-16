@@ -27,7 +27,9 @@ async function settle(page: Page) {
   await page.waitForTimeout(400); // 淡入（150ms）、指示条（200ms）、侧栏条高度过渡走完
 }
 
-const texts = (page: Page, sel: string) => page.locator(sel).evaluateAll((els) => els.map((e) => (e as HTMLElement).innerText.replace(/\s+/g, " ").trim()));
+/** 浏览器里取字：写成字符串，避免 tests/ 的 tsconfig 去要 dom 类型（同 ui-shot-checks.ts） */
+const texts = (page: Page, sel: string): Promise<string[]> =>
+  page.evaluate(`[...document.querySelectorAll(${JSON.stringify(sel)})].map((e) => e.innerText.replace(/\\s+/g, " ").trim())`);
 
 /** 390「会话」：列表滚到底，最后一行的中心点要点得到它自己（没被底部栏盖住） */
 async function lastRowReachable(page: Page): Promise<boolean> {
@@ -74,8 +76,8 @@ async function desktop(page: Page, after: boolean, shot: (v: string) => Promise<
   if (after) {
     expect(await texts(page, "[data-nav=rail] [data-nav-tab]")).toEqual(TABS);
     // 顶栏（标题那一行）里看得见的按钮都有字（手机图例 ⓘ 在桌面 hidden，不算）
-    const bare = await page.locator("aside > div").nth(1).locator("button").evaluateAll((els) =>
-      els.filter((e) => (e as HTMLElement).offsetParent && !(e as HTMLElement).innerText.trim()).map((e) => e.outerHTML.slice(0, 160)));
+    const bare = await page.evaluate(`[...document.querySelectorAll("aside > div:nth-of-type(2) button")]
+      .filter((e) => e.offsetParent && !e.innerText.trim()).map((e) => e.outerHTML.slice(0, 160))`);
     expect(bare).toEqual([]);
   }
   await shot("topbar");
