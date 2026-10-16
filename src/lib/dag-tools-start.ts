@@ -59,6 +59,8 @@ export interface StartEnv {
   template(): string | null;
   /** scheduler.json 里是 localMerge 的项目（lib/scheduler-config.ts localMergeOf）：base 缺省 main、执行者不 push；不注入 = 都不是 */
   localMerge?(project: string): boolean;
+  /** scheduler.json 里是 mergeHandoff 的项目：执行者先开草稿 PR（dag-tools-prompt.ts）；不注入 = 都不是 */
+  mergeHandoff?(project: string): boolean;
   /** 槽池放置（lib/scheduler-placement-start.ts）；不注入 = 只能放本机，auto 即 local，peer:<名> 一律拒 */
   placement?(db: Database, q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}`; card?: string }): Promise<StartPlacement>;
   /** 私仓进池开关（card-repo.ts）；不注入 = 读 statePath("private-pool.json") */
@@ -227,7 +229,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const item = args.item ?? (getItem(env.db, f.project, featureSlug(f, storedOrigin(env.db))) ? featureSlug(f, storedOrigin(env.db)) : null);
   const promptPath = join(env.ledgerDir, "reviews", `${taskId}-exec-prompt.md`);
   const vars = { task: taskId, title, pm: env.caller, branch, base, worktree, spec: specPath, ledgerDir: env.ledgerDir, template: template as WorkflowTemplate,
-    ...(local ? { localMerge: true } : {}) };
+    ...(local ? { localMerge: true } : env.mergeHandoff?.(f.project) === true ? { mergeHandoff: true } : {}) };
   const promptText = renderExecPrompt(vars, env.template() ?? undefined);
   return {
     ok: true,

@@ -76,8 +76,7 @@ describe("RRL-2 r1", () => {
       expect(await tick()).toMatchObject({ step: "waiting" });
       expect(f.task().stage).toBe("merge");
       book(f, H2);
-      f.advance(HANDOFF_POLL_MS);
-      expect(await tick()).toMatchObject({ step: "remote_bounce" });
+      expect(await tick()).toMatchObject({ step: "remote_bounce" }); // the very next pass, inside the poll interval
       const moved = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.kind === "stage")!;
       expect(moved.data).toMatchObject({ to: "fix", mergeBounce: { cause: "remote_review", prHead: H2 } });
     } finally { f.close(); }
@@ -127,23 +126,24 @@ describe("RRL-2 r1", () => {
 describe("RRL-2 r2", () => {
   const M = "a".repeat(40);
   const ended: [string, HandoffPr, string][] = [
-    ["MERGED", { state: "MERGED", head: H1, mergeSha: M, base: "main", landing: { ok: true, mainHead: "e".repeat(40) } }, "landed"],
-    ["CLOSED", { state: "CLOSED", head: H1, mergeSha: null }, "manual"],
+    ["MERGED", { state: "MERGED", head: H1, mergeSha: M, base: "main", landing: { ok: true, mainHead: "e".repeat(40) } }, "仓库方已合并 PR"],
+    ["CLOSED", { state: "CLOSED", head: H1, mergeSha: null }, "被关闭、没有合并"],
   ];
-  for (const [name, read, step] of ended) {
-    test(`bounce-before-pr-state: after the handoff a ${name} PR ends the stay as before, an aligned P1 never sends it to fix`, async () => {
+  for (const [name, read, why] of ended) {
+    test(`bounce-before-pr-state / merged-pr-p1-unhandled: after the handoff a ${name} PR with an aligned P1 goes to PM, never to fix or a silent live`, async () => {
       const f = autoFixture();
       try {
         await toMerge(f);
         let pr: HandoffPr = { state: "OPEN", head: H1, mergeSha: null }, reads = 0;
         const tick = hand(f, () => { reads++; return pr; });
         expect(await tick()).toMatchObject({ step: "handoff" });
-        book(f, H1);
+        const path = String(book(f, H1).event.data.reportPath);
         pr = read;
-        f.advance(HANDOFF_POLL_MS);
-        expect(await tick()).toMatchObject({ step });
+        expect(await tick()).toMatchObject({ step: "manual", detail: expect.stringContaining(why) }); // the next pass, no clock moved
         expect(reads).toBe(2);
-        expect(f.task().stage).toBe(name === "MERGED" ? "live" : "merge");
+        expect(f.task().stage).toBe("merge");
+        expect(getWorkflow(f.db, "T1")!.mode).toBe("manual");
+        if (name === "MERGED") expect(f.notices.at(-1)).toContain(path);
         expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "remote_bounce")).toBe(false);
       } finally { f.close(); }
     });
@@ -173,6 +173,39 @@ describe("RRL-2 r2", () => {
       // the owner moved the PR in a way this machine cannot vouch for: PM, as before; never a fix on a head the PR left
       expect(await hand(f, () => ({ state: "OPEN", head: H2, mergeSha: null }))()).toMatchObject({ step: "manual" });
       expect(f.task().stage).toBe("merge");
+    } finally { f.close(); }
+  });
+});
+
+describe("RRL-2 r3", () => {
+  test("remote-bounce-throttled: right after the handoff, a P1 booked on that head bounces on the very next pass", async () => {
+    const f = autoFixture();
+    try {
+      await toMerge(f);
+      let reads = 0;
+      const tick = hand(f, () => { reads++; return { state: "OPEN", head: H1, mergeSha: null }; });
+      expect(await tick()).toMatchObject({ step: "handoff" });
+      expect(await tick()).toMatchObject({ step: "waiting" }); // nothing pending: the minute's poll pace holds, no read
+      expect(reads).toBe(1);
+      book(f, H1);
+      expect(await tick()).toMatchObject({ step: "remote_bounce" });
+      expect(reads).toBe(2);
+      expect(f.task().stage).toBe("fix");
+    } finally { f.close(); }
+  });
+
+  test("merged-pr-p1-unhandled: a merge without a P1 on that head still lands on live", async () => {
+    const f = autoFixture();
+    try {
+      await toMerge(f);
+      let pr: HandoffPr = { state: "OPEN", head: H1, mergeSha: null };
+      const tick = hand(f, () => pr);
+      expect(await tick()).toMatchObject({ step: "handoff" });
+      book(f, H2); // another head: not this one's
+      pr = { state: "MERGED", head: H1, mergeSha: "a".repeat(40), base: "main", landing: { ok: true, mainHead: "e".repeat(40) } };
+      f.advance(HANDOFF_POLL_MS);
+      expect(await tick()).toMatchObject({ step: "landed" });
+      expect(f.task().stage).toBe("live");
     } finally { f.close(); }
   });
 });
