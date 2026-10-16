@@ -11,34 +11,17 @@
 import type { Database } from "bun:sqlite";
 import { localTime } from "./ledger-audit-lend-grant.js";
 import { readSwitch } from "./scheduler-autostart.js";
+import { observe, parseObservation, POST_VERIFY_DEFER_MAX_HOURS, type Observation } from "./post-verify-spec.js";
 
-const POST_VERIFY_DEFER_MAX_HOURS = 168;
+export { parseObservation, type Observation };
+
 const HOUR_MS = 3600_000;
-const OBSERVATION_RE = /^观察期\s*[:：]\s*(\d+)\s*小时$/;
 const BAD_NOTE = "（本节第一行的观察期格式没认出，照常提醒；只认「观察期：N 小时」，N 为 1 以上整数）";
 
 export type PostVerifyDeferMode = "on" | "observe" | "off";
-export interface Observation { hours: number; capped: boolean }
 
 /** 项目级开关 autostart.postVerifyDefer，缺省 observe */
 export const postVerifyDeferMode = (db: Database, project: string): PostVerifyDeferMode => readSwitch(db, project).postVerifyDefer ?? "observe";
-
-/** written：规格里写的原数（封顶前），只用于说明文字 */
-function observe(section: string | null | undefined): (Observation & { written: string }) | "bad" | null {
-  if (!section) return null;
-  const line = section.split(/\r?\n/)[0].trim();
-  if (!line.includes("观察期")) return null;
-  const m = OBSERVATION_RE.exec(line);
-  const n = m ? Number(m[1]) : 0;
-  if (!(n >= 1)) return "bad";
-  return { hours: Math.min(n, POST_VERIFY_DEFER_MAX_HOURS), capped: n > POST_VERIFY_DEFER_MAX_HOURS, written: m![1] };
-}
-
-/** 该节第一行的观察期：认出 → { hours（已封顶）, capped }；含「观察期」但格式不对 → "bad"；第一行没写 → null */
-export function parseObservation(section: string | null | undefined): Observation | "bad" | null {
-  const o = observe(section);
-  return o === null || o === "bad" ? o : { hours: o.hours, capped: o.capped };
-}
 
 export interface DeferPlan {
   /** on 档认出的观察期小时数：超时分界与超时正文按它算；其余档不设 = 照旧从 verified 算 */
