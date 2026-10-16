@@ -7,7 +7,7 @@
  * 一旦出过数就不再退回骨架：之后的补拉 / 轮询只换数字，不闪。
  */
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { fetchQuotaLines } from "../lend/lend-quota-api";
+import { useQuotaLines } from "../quota/quota-lines-store";
 import { countSnap, missingFeatures, quotaPcts, unreadFeatures, type CountBoard, type CountState, type QuotaFamilyPct } from "./count-words";
 import type { LedgerOverview } from "./collab-model";
 
@@ -64,21 +64,9 @@ export function useRoundFresh(value: object, settled: boolean, rev: number): boo
 export const CountContext = createContext<CountState | null>(null);
 export const useCountContext = () => useContext(CountContext);
 
-const QUOTA_POLL_MS = 60_000;
-/** 看者这台机器 bridge 的 /lend/quota-lines（本机版、团队版同一份）；403 / 404 / 读失败 / 全空 = null */
+/** 看者这台机器 bridge 的 /lend/quota-lines（本机版、团队版同一份），读 quota-lines-store 的共享读数、不自己轮询；
+ * 403 / 404 / 读失败 / 全空 = null（这一格不出） */
 export function useWeekQuota(): QuotaFamilyPct[] | null {
-  const [got, setGot] = useState<QuotaFamilyPct[] | null>(null);
-  useEffect(() => {
-    let live = true;
-    const read = () => {
-      if (document.hidden) return;
-      fetchQuotaLines().then((v) => { if (live) setGot(quotaPcts(v)); },
-        // 读失败只是这一格不出（顶部黄条另有自己的提示），下一轮再读
-        (e: Error) => console.warn(`[collab] 读周额度失败：${e.message}`));
-    };
-    read();
-    const t = setInterval(read, QUOTA_POLL_MS);
-    return () => { live = false; clearInterval(t); };
-  }, []);
-  return got;
+  const view = useQuotaLines();
+  return useMemo(() => quotaPcts(view ?? null), [view]);
 }

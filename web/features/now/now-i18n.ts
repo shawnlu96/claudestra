@@ -14,6 +14,7 @@ const ZH: Record<string, string> = {
 const EN: Record<string, string> = {
   "今天": "Today",
   "{n} 个 agent 在干活": "{n} agent working|{n} agents working",
+  "{n} 个 agent 在干活 · 其中 {m} 个在别的机器": "{n} agent working · {m} on other machines|{n} agents working · {m} on other machines",
   "{n} 件要你处理": "{n} needs you|{n} need you",
   "没有要你处理的": "Nothing needs you",
   "要你处理": "Needs you",
@@ -33,7 +34,7 @@ const EN: Record<string, string> = {
   "今天完成 {n} 个任务": "{n} task done today|{n} tasks done today",
   "有 {n} 个项目没有完成时间，未计入": "{n} project has no finish times and is not counted|{n} projects have no finish times and are not counted",
   "团队与额度": "Team & quota",
-  "{n} 个 agent 活着 · {m} 个在干活": "{n} agents alive · {m} working",
+  "本机 {n} 个 agent 活着 · {m} 个在干活": "This machine: {n} agents alive · {m} working",
   "{f} 本周 {n}%": "{f} {n}% this week",
   "整页": "Full page",
   "打开今天整页": "Open Today as a full page",

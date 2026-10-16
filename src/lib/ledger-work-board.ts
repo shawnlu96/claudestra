@@ -11,6 +11,9 @@ import type { SnapshotOpts } from './scheduler-snapshot.js';
 import { taskWorkerRefs } from './scheduler-sessions.js';
 import { phaseSince } from './lend-pr-takeover.js';
 import { listDeps } from './ledger-store.js';
+import type { ActionState } from './action-state.js';
+import type { AttentionCtx } from './ledger-attention-facts.js';
+import { attachBoardActionStates, untaskedActionState } from './ledger-action-state.js';
 import { stepAtStage } from './ledger-steps.js';
 import type { LedgerTask } from './ledger-stages.js';
 import { completionHours, estimateMinutes, normalMinutes, remainingMinutes, stepSamples, workStep, type WorkStep } from './ledger-work-board-time.js';
@@ -19,19 +22,23 @@ interface WorkRow {
   taskId: string | null; featureId: string | null; nodeKey: string | null; title: string;
   who: string | null; machine: string; step: WorkStep | 'publishing' | null; round: number;
   since: number; normalMinutes: number; remainingMinutes: number; overMinutes: number;
-  reason: string | null; code: string | null; estimate: string;
+  reason: string | null; code: string | null; estimate: string; actionState?: ActionState;
 }
 export interface WorkBoard {
   now: number; asOfSeq: number; working: WorkRow[]; waiting: WorkRow[]; todo: { ready: WorkRow[]; blocked: WorkRow[] };
   legacyTotal: number;
-  legacy: { taskId: string; title: string; stage: string }[];
+  legacy: { taskId: string; title: string; stage: string; actionState?: ActionState }[];
   machines: Record<string, number>; completionHours: number | null; availableSlots: number;
 }
 interface Order { orderId: string; taskId: string; peer: string; family: string; step: string; status: string; createdAt: number; updatedAt: number; beat: string | null }
 interface Ask { taskId: string; assignee: string | null; kind: string; createdAt: number; title: string }
 interface Merge { intentId: string; taskId: string; phase: string; createdAt: number; updatedAt: number; reason: string | null }
 interface NodeRef { featureId: string; node: BoardNode }
-export interface WorkBoardOptions extends SnapshotOpts { availableSlots?: number; manualRegistry?: readonly RegistryAgent[]; specReady?: (taskId: string) => boolean }
+export interface WorkBoardOptions extends SnapshotOpts {
+  availableSlots?: number; manualRegistry?: readonly RegistryAgent[]; specReady?: (taskId: string) => boolean;
+  /** actionState 的冻结 / 观察期事实与暂停开关；缺省读真实配置（测试注入） */
+  attention?: AttentionCtx; canPause?: boolean;
+}
 function rows<T>(db: Database, table: string, project: string, where = ''): T[] {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return [];
   return db.query(`SELECT * FROM ${table} WHERE project=? ${where}`).all(project) as T[];
@@ -156,6 +163,7 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
     const specReady = task ? !!task.spec : opts.specReady?.(cardNames(db, feature, ref.node.key, ref.node).taskId) ?? false;
     row.reason = [blocked.length ? `被 ${blocked.join('、')} 挡住` : '', !specReady ? '缺规格' : ''].filter(Boolean).join('；') || null;
     row.remainingMinutes = estimateMinutes(row.estimate);
+    if (!task) row.actionState = untaskedActionState(blocked, specReady, now);
     board.todo[row.reason ? 'blocked' : 'ready'].push(row);
   }
   const allRows = [...board.working, ...board.waiting, ...board.todo.ready, ...board.todo.blocked];
@@ -171,5 +179,6 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
   board.working.sort((a, b) => (now - b.since) / Math.max(1, b.normalMinutes) - (now - a.since) / Math.max(1, a.normalMinutes));
   board.legacyTotal = board.legacy.length;
   board.legacy = board.legacy.sort((a, b) => a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0).slice(0, 50);
+  attachBoardActionStates(board, db, project, ctx.tasks, ctx.events, now, opts.attention, opts.canPause);
   return board;
 }

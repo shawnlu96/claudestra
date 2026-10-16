@@ -123,9 +123,13 @@ function fresh(): void {
 const notes = (mechanism: string) => listEvents(db, { target: "T9" }).filter((e) => e.kind === "note" && e.data.mechanism === mechanism);
 const delivers = () => listEvents(db, { target: "T9" }).filter((e) => e.kind === "deliver");
 const passStep = () => uiPassStep(observeSnapshot(db, getTask(db, "T9")!, { maxWorkers: 2, now } as never), "pm_ui", 0);
-/** 回执、卡、事件（含 note）、单的状态：两次交付「逐字一致」比的就是这一份 */
+/**
+ * 回执、卡、事件（含 note）、单的状态：两次交付「逐字一致」比的就是这一份。
+ * 挂单时 memoryLendInjection 的 observe 样本带实测 elapsedMs（memory-retrieve-lend.ts），每次不同，也和 UI 键无关，不比
+ */
 const facts = (receipt: unknown) => JSON.stringify({ receipt, tasks: db.query("SELECT * FROM tasks").all(), orders: db.query("SELECT orderId, status, resultSha, receipt FROM lend_orders").all(),
-  events: db.query("SELECT seq, kind, actor, target, text, data, dedupKey FROM events ORDER BY seq").all() });
+  events: (db.query("SELECT seq, kind, actor, target, text, data, dedupKey FROM events ORDER BY seq").all() as { data: string }[])
+    .filter((e) => (JSON.parse(e.data) as { mechanism?: string }).mechanism !== "memoryLendInjection") });
 
 beforeEach(fresh);
 afterEach(() => closeLedger(":memory:"));

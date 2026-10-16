@@ -1,6 +1,8 @@
 "use client";
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
+import { QUOTA_WORDS as Q } from "@/lib/owner-words";
+import { QuotaSummary } from "@/features/quota/quota-summary";
 import { codexResetAction, resetConfirmParams, type ResetAction, type ResetOutcome } from "../quota-reset";
 import { fmtTok, type QuotaView } from "../usage-view";
 import type { useSubscriptionQuota } from "../use-subscription-quota";
@@ -165,7 +167,7 @@ export function SubscriptionQuotaCards({ data, onRetry, retrying, reset }: {
   const t = useT();
   return (
     <div className="mb-3 space-y-2">
-      <div className="text-xs font-medium uppercase tracking-wide text-base-content/40">{t("订阅额度")}</div>
+      <div className="text-xs font-medium uppercase tracking-wide text-base-content/40">{t(Q.noun)}</div>
       {!data.enabled && <div className="text-[10.5px] text-base-content/45">{t("实时读取已关闭，只显示本机缓存（设置 · 集成里可打开）")}</div>}
       {data.entries.map((e) => (
         <EntryCard key={e.id} e={e} onRetry={onRetry} retrying={retrying} reset={reset} />
@@ -176,14 +178,19 @@ export function SubscriptionQuotaCards({ data, onRetry, retrying, reset }: {
 }
 
 /**
- * 看板顶部的额度区：有订阅额度数据就只画卡片组（本机缓存已作为 *.local 条目在里面）；拿不到（403 / 404 / 503）退回旧卡：
+ * 看板顶部的额度区：最上面一行额度摘要（QUOTA1，quota/quota-summary，和顶部额度卡、今天页同一份读数与说法）；
+ * 有订阅额度数据就只画卡片组（本机缓存已作为 *.local 条目在里面）；拿不到（403 / 404 / 503）退回旧卡：
  * Claude 订阅（/status 抓取 + 状态栏缓存）+ 最近一次 Codex 会话看到的（没有 Codex rollout 的机器没有这张）。
  */
 export function QuotaArea({ quota, g, quotas }: { quota: ReturnType<typeof useSubscriptionQuota>; g: GlobalStats | null; quotas: QuotaView[] }) {
   const t = useT();
-  if (quota.sub) return <SubscriptionQuotaCards data={quota.sub} onRetry={quota.retry} retrying={quota.retrying} reset={quota.reset} />;
+  const summary = <QuotaSummary className="mb-2 rounded-xl bg-base-200 px-3.5 py-2.5 text-[13px] text-base-content/80" />;
+  if (quota.sub) {
+    return <>{summary}<SubscriptionQuotaCards data={quota.sub} onRetry={quota.retry} retrying={quota.retrying} reset={quota.reset} /></>;
+  }
   return (
     <>
+      {summary}
       {/* 账号 gauge 还没到手（bridge 冷启动首抓中）——给占位而不是整块消失 */}
       {!g && (
         <div className="mb-3 rounded-xl bg-base-200 p-3.5 text-xs text-base-content/50">

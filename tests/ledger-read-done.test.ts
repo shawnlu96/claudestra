@@ -66,6 +66,7 @@ function fixture(done: number, live = 30): Database {
 }
 
 const wire = (v: object) => Buffer.byteLength(JSON.stringify({ ok: true, project: "p", exists: true, schema: LEDGER_SCHEMA_VERSION, projectEventsLimit: 20, ...v, now: NOW }));
+const stripAction = <T,>(v: T): T => JSON.parse(JSON.stringify(v, (k, x) => (k === "actionState" ? undefined : x))) as T;
 const compactIds = (db: Database) => (db.query("SELECT id FROM tasks WHERE stage IN ('verified', 'done', 'cancelled')").all() as { id: string }[]).map((r) => r.id).sort();
 
 /** 从总览的游标一路翻到底：每页的 id、和窗口并起来的全集 */
@@ -125,7 +126,11 @@ describe("总览窗口", () => {
       expect(detail.task.runnable).toBe(false);
       expect(detail.deps.in).toHaveLength(n);
       expect("blockedByMore" in detail.task).toBe(false);
-      expect(wire(view)).toBeLessThan(35_000);
+      // actionState（ACTIONSTATE1）按新增契约核算：旧字段的封顶不放宽，新增字段每张卡 ≤ 300 字节
+      expect(wire(stripAction(view))).toBeLessThan(35_000);
+      const cardMax = Math.max(...view.tasks.map((t) => Buffer.byteLength(JSON.stringify(t.actionState))));
+      expect(cardMax).toBeLessThanOrEqual(300);
+      console.log(`blocked overview n=${n}: old fields=${wire(stripAction(view))} actionState max/card=${cardMax}`);
       closeLedger(":memory:");
       return view;
     };

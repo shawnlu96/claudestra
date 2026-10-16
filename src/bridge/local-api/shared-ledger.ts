@@ -8,6 +8,7 @@ import { parseSharedLedgerImport, parseSharedLedgerProjection } from "../../lib/
 import { sharedLedgerBodyLimit } from "../../lib/shared-ledger-contract.js";
 import { parseActivityCursor } from "../../lib/shared-ledger-contract-reads.js";
 import { TASK_FACTS_RESOURCE } from "../../lib/shared-ledger-contract-task-facts.js";
+import { FEATURE_DEPS_RESOURCE } from "../../lib/shared-ledger-contract-feature-deps.js";
 import { cachedSharedLedgerRead, sharedLedgerReadClock } from "./shared-ledger-read-cache.js";
 
 export interface SharedLedgerProxyDeps {
@@ -32,7 +33,8 @@ function rateLimited(response: unknown, retryAfter: string | null): Response {
 }
 function actionFor(resource: string, method: string): SharedLedgerLocalCredential["projects"][number]["actions"][number] | null {
   if (method === "GET" && /^(?:features(?:\/[A-Za-z0-9_.:-]+)?|commands\/[A-Za-z0-9_.:-]+)$/.test(resource)) return "read";
-  if (method === "GET" && (resource === "ext-capabilities" || extRead(resource) || TASK_FACTS_RESOURCE.test(resource))) return "read";
+  if (method === "GET" && (resource === "ext-capabilities" || extRead(resource) || TASK_FACTS_RESOURCE.test(resource)
+    || FEATURE_DEPS_RESOURCE.test(resource))) return "read";
   if (method !== "POST") return null;
   return resource === "commands" ? "plan" : resource === "imports" ? "import" : resource === "projections" ? "project" : null;
 }
@@ -72,6 +74,11 @@ export async function handleSharedLedgerApi(req: Request, path: string, principa
       if (facts) {
         const read = await client.taskFacts(facts[1]!);
         return read.projectId === deps.projectId ? json(200, read) : json(403, { error: "project unavailable" });
+      }
+      // Team-wide edges; only this binding's project leaves the bridge (same as the features list). Uploads never come through here.
+      if (FEATURE_DEPS_RESOURCE.test(resource)) {
+        const read = await client.featureDeps();
+        return json(200, { ...read, edges: read.edges.filter((e) => e.projectId === deps.projectId) });
       }
       const slot = { get: () => retryAfter, set: (v: string) => { retryAfter = v; } };
       const result = resource === "features" ? await cachedSharedLedgerRead(deps.stateDir, credential, resource, () => client.features(), slot)

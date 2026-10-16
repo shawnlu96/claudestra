@@ -12,7 +12,7 @@ import { choice, digest, id, integer, literal, nullable, object, record } from "
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 import { EXT_CAPABILITIES_OFF, parseSharedLedgerReadResponse, type SharedLedgerExtCapabilities } from "./shared-ledger-contract-reads.js";
-import { parseFeatureDepsUpload, parseFeatureDepsReceipt, type FeatureDepsUpload } from "./shared-ledger-contract-feature-deps.js";
+import { parseFeatureDeps, parseFeatureDepsUpload, parseFeatureDepsReceipt, type FeatureDepsUpload } from "./shared-ledger-contract-feature-deps.js";
 import { parseSharedLedgerTaskFacts } from "./shared-ledger-contract-task-facts.js";
 import { scrubSharedLedger, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { parseSourceDagUpload, parseSourceDagUploadResponse, SOURCE_DAG_UPLOAD_RESOURCE, type SourceDagUpload, type SourceDagUploadOutcome } from "./shared-ledger-contract-source-dag.js";
@@ -91,6 +91,15 @@ export class SharedLedgerClient<P extends SharedLedgerProjectsProtocol = SharedL
     try { result = parseSharedLedgerTaskFacts(raw); }
     catch { throw new SharedLedgerUnavailable(); } // A body outside the closed contract is an unusable answer, same as a 5xx.
     if (result.teamId !== this.connection.teamId || result.featureId !== id) throw new SharedLedgerUnavailable();
+    return result;
+  }
+  /** Standalone read, same as taskFacts: an old center's 403 / 404 stay SharedLedgerRemoteError; a bad body or other team is Unavailable. */
+  async featureDeps(signal?: AbortSignal) {
+    const raw = await this.request("GET", "feature-deps", undefined, signal);
+    let result;
+    try { result = parseFeatureDeps(raw); }
+    catch { throw new SharedLedgerUnavailable(); } // A body outside the closed contract is an unusable answer, same as a 5xx.
+    if (result.teamId !== this.connection.teamId) throw new SharedLedgerUnavailable();
     return result;
   }
   async activity(id: string, afterServerSeq: number) {

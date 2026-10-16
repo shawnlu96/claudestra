@@ -31,6 +31,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   manualMergeQueue: { class: "permission", reason: "凭 PM 人工请求授权进入合并队列" },
   manualRecovery: { class: "permission", reason: "按证据把人工工作流交回自动调度" },
   manualStall: { class: "permission", reason: "强制恢复人工卡，仍保留原有禁止登记规则" },
+  memoryLendInjection: { class: "safety", reason: "把本机项目记忆文本随出借单发给 peer" },
   mergeContentReview: { class: "safety", reason: "以内容证明认定审查证据有效" },
   mergeContentUi: { class: "safety", reason: "以内容证明认定 UI 验收证据有效" },
   mergeDirect: { class: "safety", reason: "直接合并已核准的 PR" },

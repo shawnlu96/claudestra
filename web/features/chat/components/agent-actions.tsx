@@ -5,7 +5,7 @@ import type { AgentSession } from "../type";
 import { useT } from "@/lib/i18n";
 import { ClearAgentModal } from "./clear-agent-modal";
 import { stopMission } from "@/lib/api/agents";
-import { MissionIcon, MissionStopIcon, openMissionModal } from "./mission-ui";
+import { MissionStopIcon } from "./mission-ui";
 import { useFullScope } from "../contacts-data";
 
 /** 清空：橡皮擦（lucide eraser，比扫帚干净利落） */
@@ -200,20 +200,22 @@ export function AgentActions({ agent, menuLead }: { agent: AgentSession; menuLea
       {errorBadge}
       <MoreMenu busy={busy !== ""}>
         {menuLead}
-        <li>
-          <button
-            onClick={() => {
-              closeDropdown();
-              if (!agent.mission) return openMissionModal(agent);
-              void stopMission(agent.name)
-                .catch((e: Error) => setError(e.message))
-                .finally(() => void store.refreshAgents());
-            }}
-          >
-            {agent.mission ? <MissionStopIcon /> : <MissionIcon size={15} />}
-            {agent.mission ? t("关闭 Autopilot") : t("开启 Autopilot…")}
-          </button>
-        </li>
+        {/* 网页「开启 Autopilot」入口 2026-10-16 下架（CLI 仍可开），正在跑的照旧能在这里关 */}
+        {agent.mission && (
+          <li>
+            <button
+              onClick={() => {
+                closeDropdown();
+                void stopMission(agent.name)
+                  .catch((e: Error) => setError(e.message))
+                  .finally(() => void store.refreshAgents());
+              }}
+            >
+              <MissionStopIcon />
+              {t("关闭 Autopilot")}
+            </button>
+          </li>
+        )}
         <li>
           <button onClick={() => act("restart")} disabled={busy !== ""}>
             <RestartIcon />

@@ -8,6 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { depViews, type DepView } from "./ledger-deps.js";
+import { actionCtx, withActionState } from "./ledger-action-state.js";
 import { attentionCtx, withAttentionFacts, type AttentionCtx } from "./ledger-attention-facts.js";
 import { compactStage, doneCard, eventsByTarget, taskView, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
 import type { Stage } from "./ledger-stages.js";
@@ -126,7 +127,8 @@ export function donePage(db: Database, project: string, before: Cursor | null, l
     const done = tasks.filter((t) => compactStage(t.stage));
     const byTarget = eventsByTarget(listEvents(db, { project }), new Set(done.map((t) => t.id)));
     const ctx = facts ?? attentionCtx(project);
-    const views = done.map((t) => withAttentionFacts(taskView(t, byTarget.get(t.id) ?? [], now, deps), byTarget.get(t.id) ?? [], ctx));
+    const act = actionCtx(db, project, now);
+    const views = done.map((t) => ((own) => withActionState(withAttentionFacts(taskView(t, own, now, deps), own, ctx), own, act))(byTarget.get(t.id) ?? []));
     return donePageOf(views, before, limit, (v) => doneCard(v, stepLineInfo(v, listSteps(db, v.id), byTarget.get(v.id) ?? [])));
   }).deferred();
 }

@@ -11,7 +11,7 @@ import { featureProposalError, type ProposalDecision } from "../src/lib/shared-l
 import { APPROVE_BUTTON, inboxCard, PROPOSAL_INBOX_CREATOR } from "../src/lib/center-proposal-inbox.js";
 import { classifyProposal, globHits, PATTERN_PROBES, reasonText } from "../src/lib/center-proposal-auto.js";
 import { autoApproveMode, claimExec, execKey, execState, RESULT_OP, RETRY_AFTER_MS } from "../src/lib/center-proposal-auto-exec.js";
-import { FILE_PATTERNS } from "../src/lib/peer-pr-surface.js";
+import { DIRS, FILE_PATTERNS, peerPrSurface } from "../src/lib/peer-pr-surface.js";
 import { scopeWireProtected } from "../src/lib/ask-scope-registry.js";
 import { onCenterProposalAnswered, pollCenterProposals, type ProposalInboxDeps } from "../src/bridge/center-proposal-inbox.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
@@ -113,14 +113,14 @@ describe("PROPAUTO1 分类（纯函数）", () => {
     expect(globHits("", REPO)).toEqual(["glob_empty"]);
   });
 
-  test("[验收线 2] 通配遮住文件名也认得出：能匹配到的现有文件逐个套保护规则；? / [ ] 遮名字或读不到文件清单交 owner", () => {
-    expect(globHits("src/lib/scheduler-wip-?ate.ts", REPO)).toEqual(["glob_unresolved", "glob_permission_gate"]);
-    expect(globHits("src/lib/scheduler-wip-*ate.ts", REPO)).toEqual(["glob_unresolved", "glob_permission_gate"]);
-    expect(globHits("src/lib/recovery-?eys.ts", REPO)).toEqual(["glob_unresolved", "glob_security_surface"]);
-    expect(globHits("src/lib/recovery-*eys.ts", REPO)).toEqual(["glob_unresolved", "glob_security_surface"]);
-    expect(globHits("src/lib/sqlite-mig*.ts", REPO)).toEqual(["glob_unresolved", "glob_data_schema"]);
-    expect(globHits("src/lib/[p]lain-util.ts", REPO)).toEqual(["glob_unresolved"]);
-    expect(globHits("src/lib/plain-*.ts", REPO)).toEqual(["glob_unresolved"]);
+  test("[验收线 2] 通配遮住文件名也认得出：能匹配到的现有文件逐个套保护规则；普通通配放行，文件清单失败交 owner", () => {
+    expect(globHits("src/lib/scheduler-wip-?ate.ts", REPO)).toEqual(["glob_permission_gate"]);
+    expect(globHits("src/lib/scheduler-wip-*ate.ts", REPO)).toEqual(["glob_permission_gate"]);
+    expect(globHits("src/lib/recovery-?eys.ts", REPO)).toEqual(["glob_security_surface"]);
+    expect(globHits("src/lib/recovery-*eys.ts", REPO)).toEqual(["glob_security_surface"]);
+    expect(globHits("src/lib/sqlite-mig*.ts", REPO)).toEqual(["glob_data_schema"]);
+    expect(globHits("src/lib/[p]lain-util.ts", REPO)).toEqual([]);
+    expect(globHits("src/lib/plain-*.ts", REPO)).toEqual([]);
     expect(globHits("src/lib/plain-*.ts", null)).toEqual(["glob_unresolved"]);
     expect(globHits("src/lib/plain-util.ts", null)).toEqual([]); // 字面路径不靠文件清单
     // 默认核本仓 git ls-files：审查探针里的两条在真仓库上同样判 owner
@@ -135,7 +135,7 @@ describe("PROPAUTO1 分类（纯函数）", () => {
   });
 
   test("[验收线 2][验收线 6] 词表补判 owner；空 globs / 没有节点判 owner；修订按新的全量节点判", () => {
-    expect(classifyProposal(rec("a"), REPO)).toEqual({ route: "auto", reasons: [] });
+    expect(classifyProposal(rec("a"), REPO)).toEqual({ route: "auto", reasons: [], hits: [] });
     expect(classifyProposal(rec("a", { description: "把凭据存到别处" }), REPO).reasons).toEqual(["text_sensitive_word"]);
     expect(classifyProposal(rec("a", { ownerWords: "drop table x" }), REPO).route).toBe("owner");
     expect(classifyProposal(rec("a", { nodes: [node("x", ["docs/**"], "加 Token 校验")] }), REPO).reasons).toEqual(["text_sensitive_word"]);
@@ -351,7 +351,7 @@ describe("PROPAUTO1 接线", () => {
 });
 
 
-test("[验收线 2] protected-glob-name-intersection: new protected files never auto approve", async () => {
+test("[验收线 2] protected-glob-name-intersection: tracked protected files never auto approve", async () => {
   const cases = [
     ["src/lib/new-*ate.ts", "src/lib/new-gate.ts"],
     ["src/lib/new-*eys.ts", "src/lib/new-keys.ts"],
@@ -360,15 +360,135 @@ test("[验收线 2] protected-glob-name-intersection: new protected files never 
   ];
   for (const [g, concrete] of cases) {
     expect(new Bun.Glob(g!).match(concrete!)).toBe(true);
-    expect(globHits(g!, [])).not.toEqual([]);
+    expect(globHits(g!, [concrete!])).not.toEqual([]);
   }
  });
 
 test("[验收线 2] protected-glob-name-intersection: new-file polling creates owner cards only", async () => {
   const cases = ["src/lib/new-*ate.ts", "src/lib/new-*eys.ts", "web/features/new/**", "src/new-*/plain.ts"];
   const h = harness(cases.map((g, i) => rec(`new-file-${i}`, { nodes: [node("x", [g])] })));
+  h.deps.auto!.files = () => [...REPO, "src/lib/new-gate.ts", "src/lib/new-keys.ts", "web/features/new/new-auth.ts", "src/new-migration/plain.ts"];
   await pollCenterProposals(h.deps);
   expect(h.decided).toEqual([]);
   expect(h.asks.length).toBe(cases.length);
   for (const a of h.asks) expect(a.context).toContain("需要你批的原因：");
+});
+
+
+const PLAIN_AUTO2 = [
+  "scripts/usage-cache-write.sh", "scripts/foo-*.sh", "src/lib/runtimes/opencode*.ts", "src/lib/acp/retry-*.ts",
+  "src/lib/plain-*.ts", "tests/fixtures/opencode-acp/*.jsonl", "tests/fixtures/x?.json",
+];
+const PROTECTED_AUTO2 = [
+  "src/bridge/api-auth.ts", "src/lib/peer-credentials.ts", "src/lib/peer-secret.ts", "src/lib/acp/migration.ts",
+  "src/lib/ledger-schema.ts", "src/lib/sqlite-migrate.ts", "scripts/guard/config.ts",
+];
+test("PROPAUTO2 [验收线 1] 普通脚本、运行时、ACP 与测试夹具通配自动批", () => {
+  const files = [...REPO, "scripts/foo-cache.sh", "src/lib/runtimes/opencode.ts", "src/lib/acp/retry-connect.ts",
+    "tests/fixtures/opencode-acp/auth-migration.jsonl", "tests/fixtures/xa.json"];
+  for (const g of PLAIN_AUTO2) expect(globHits(g, files)).toEqual([]);
+  for (const g of ["tests/peer-auth-migration-gate.ts", "docs/ledger-schema.sql", "tests/fixtures/[am]*.json", "src/lib/[p]lain-util.ts"])
+    expect(globHits(g, files)).toEqual([]);
+});
+
+test("PROPAUTO2 [验收线 2] 普通范围混入任一保护路径仍出卡并带对应命中", () => {
+  for (const plain of PLAIN_AUTO2) for (const path of PROTECTED_AUTO2) {
+    const v = classifyProposal(rec("mixed", { nodes: [node("x", [plain, path])] }), REPO);
+    expect(v.route).toBe("owner");
+    expect(v).toMatchObject({ hits: expect.arrayContaining([expect.objectContaining({ source: path, path })]) });
+  }
+  for (const g of ["src/**", "scripts/**", "src/lib/acp/migratio[n].ts", "scripts/gua?d/*.ts", "src/lib/acp", "scripts/guard"])
+    expect(globHits(g, REPO)).not.toEqual([]);
+  expect(classifyProposal(rec("empty", { nodes: [node("x", [])] }), REPO).route).toBe("owner");
+});
+
+test("PROPAUTO2 [验收线 4] 新建、修订接线：普通只批一次；保护卡列文件；执行占位保存明细", async () => {
+  for (const kind of ["new", "revise"] as const) {
+    const ordinary = rec(`ordinary-${kind}`, { kind, nodes: [node("x", PLAIN_AUTO2)] });
+    const protectedProposal = rec(`protected-${kind}`, { kind, nodes: [node("x", [...PLAIN_AUTO2, "src/bridge/api-auth.ts"])] });
+    const h = harness([ordinary, protectedProposal]);
+    await pollCenterProposals(h.deps);
+    await pollCenterProposals(h.deps);
+    expect(h.decided.map(d => d.proposalId)).toEqual([ordinary.proposalId]);
+    expect(h.informed).toEqual([]);
+    expect(h.asks).toHaveLength(1);
+    expect(h.asks[0]!.context).toContain("改到 src/bridge/api-auth.ts（鉴权 / 权限闸）");
+    await onCenterProposalAnswered(h.answer(h.asks[0]!), h.deps);
+    const claims = listEvents(h.db, { project: LOCAL }).filter(e => e.data.op === "center_proposal_exec");
+    expect(claims.find(e => e.data.proposalId === ordinary.proposalId)!.data).toMatchObject({ hits: [], hitsOmitted: 0 });
+    expect(claims.find(e => e.data.proposalId === protectedProposal.proposalId)!.data).toMatchObject({
+      hits: expect.arrayContaining([{ reason: "glob_permission_gate", source: "src/bridge/api-auth.ts", path: "src/bridge/api-auth.ts" }]), hitsOmitted: 0,
+    });
+  }
+});
+
+
+test("PROPAUTO2 [验收线 5] 自动批专用范围不改变 peer PR 目录保护", () => {
+  expect(DIRS).toEqual(expect.arrayContaining(["scripts/", "src/lib/acp/", "src/lib/runtimes/"]));
+  for (const path of ["scripts/usage-cache-write.sh", "src/lib/acp/retry-connect.ts", "src/lib/runtimes/opencode.ts"]) {
+    expect(globHits(path, [])).toEqual([]);
+    expect(peerPrSurface([{ path }]).surface).toBe("security");
+  }
+});
+
+test("PROPAUTO2 [验收线 2] 目录前缀、字符类、brace、递归 glob 与未知语法保持保护优先", () => {
+  for (const g of ["src/[bl]ib/acp/migratio?.ts", "src/{lib,bridge}/api-auth.ts", "scripts/[fg]*/*", "src/**/api-auth.ts",
+    "src/lib/acp/*", "scripts/gua*d", "src/lib/new-*"]) {
+    expect(globHits(g, [...REPO, "src/lib/new-area/auth.ts"])).not.toEqual([]);
+  }
+  for (const g of ["src/lib/plain-[", "src/{lib/acp,bridge}/x.ts", "src/lib/!(migration).ts", "src/lib/@(plain).ts", "src/lib/a**.ts"])
+    expect(globHits(g, [])).toContain("glob_unresolved");
+  for (const g of ["scripts/foo-*/**", "src/lib/acp/retry-*/**", "src/lib/runtimes/opencode*/**", "web/features/new/**"])
+    expect(globHits(g, [])).toEqual([]);
+  expect(globHits("tests/fixtures/x?.json", null)).toContain("glob_unresolved");
+  expect(globHits("src/lib/new-auth-*.ts", [])).toContain("glob_permission_gate");
+  expect(globHits("src/lib/new-auth-*.ts", ["src/lib/new-auth-cache.ts"])).toContain("glob_permission_gate");
+});
+
+test("PROPAUTO2 [验收线 4] 卡与占位同限十条，另 N 条准确，文本命中只记录词", async () => {
+  const paths = Array.from({ length: 15 }, (_, i) => `src/lib/peer-extra-${i}.ts`);
+  const h = harness([rec("many", { nodes: [node("x", ["src/lib/peer-extra-*.ts"])] })]);
+  h.deps.auto!.files = () => paths;
+  await pollCenterProposals(h.deps);
+  const v = classifyProposal(rec("many", { nodes: [node("x", ["src/lib/peer-extra-*.ts"])] }), paths);
+  expect(h.asks[0]!.context).toContain(`另 ${v.hits.length - 10} 条`);
+  await onCenterProposalAnswered(h.answer(h.asks[0]!), h.deps);
+  const data = listEvents(h.db, { project: LOCAL }).find(e => e.data.op === "center_proposal_exec")!.data;
+  expect((data.hits as unknown[]).length).toBe(10);
+  expect(data.hitsOmitted).toBe(v.hits.length - 10);
+  const secretProposal = rec("word", { description: `凭据 ${SECRET}` });
+  const word = classifyProposal(secretProposal, REPO);
+  expect(word.hits).toContainEqual({ reason: "text_sensitive_word", source: "凭据", path: "" });
+  expect(JSON.stringify(word.hits)).not.toContain(SECRET);
+  const card = inboxCard(LOCAL, secretProposal, SELF, reasonText(word.reasons, undefined, word.hits), word.hits);
+  expect(JSON.stringify(card)).not.toContain(SECRET);
+});
+
+
+test("[验收线 2] wild-name-1: 未跟踪的保护名字加通配仍判 owner", async () => {
+  const paths = ["src/lib/new-secret*.ts", "src/lib/peer-token-*.ts", "src/bridge/new-auth-*.ts",
+    "src/lib/ledger-schema-v?.ts", "src/lib/new-migrat?.ts", "src/lib/shared-ledger-contract-new-*.ts"];
+  for (const path of paths) {
+    expect(globHits(path, [])).not.toEqual([]);
+    expect(globHits(path)).not.toEqual([]);
+  }
+  for (const path of ["tests/new-secret*.ts", "docs/ledger-schema-v?.md", "tests/fixtures/new-auth-*.json"])
+    expect(globHits(path, [])).toEqual([]);
+  const h = harness(paths.map((path, i) => rec(`wild-name-${i}`, { nodes: [node("x", [path])] })));
+  h.deps.auto!.files = () => [];
+  await pollCenterProposals(h.deps);
+  expect(h.decided).toEqual([]);
+  expect(h.asks).toHaveLength(paths.length);
+  for (const [i, path] of paths.entries()) expect(h.asks[i]!.context).toContain(path);
+});
+
+test("[验收线 2] case-1: 大小写变体通配仍命中规范保护路径", () => {
+  for (const path of ["src/bridge/API-AUT?.ts", "SRC/LIB/ACP/MIGRATIO?.TS", "scripts/GUA?D/*.ts", "src/lib/NEW-SECRET*.ts"])
+    expect(globHits(path, [])).not.toEqual([]);
+  const v = classifyProposal(rec("case-hit", { nodes: [node("x", ["src/bridge/API-AUT?.ts"])] }), []);
+  expect(v.hits).toContainEqual({ reason: "glob_permission_gate", source: "src/bridge/API-AUT?.ts", path: "src/bridge/api-auth.ts" });
+  expect(globHits("src/lib/NEW-?OLICY.ts", ["src/lib/new-policy.ts"])).toEqual([]);
+  expect(globHits("src/lib/NEW-?EYS.ts", ["src/lib/new-keys.ts"])).toContain("glob_security_surface");
+  // 大小写归一只增加保护覆盖；[A-z] 原本含下划线，不能因变成 [a-z] 而漏掉原匹配。
+  expect(globHits("src/lib/new[A-z]s?cret.ts", ["src/lib/new_secret.ts"])).toContain("glob_security_surface");
 });

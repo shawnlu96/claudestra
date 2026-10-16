@@ -54,7 +54,8 @@ function serviceDb(p: Fx): Database {
 }
 
 type Call = (...args: string[]) => Promise<Record<string, unknown>>;
-const notes = (p: Fx) => listEvents(p.f.db, { project: "p" }).filter((e) => e.data.op === OP);
+// 只数本机接管：fixture 建出借单时 memoryLendInjection 另记自己的 observe 样本（memory-retrieve-lend.ts），不归这里
+const notes = (p: Fx) => listEvents(p.f.db, { project: "p" }).filter((e) => e.data.op === OP && e.data.mechanism === "localFallback");
 const cliAsScheduler = (p: Fx, seen: string[] = []): Call => (...args) => { seen.push(args[1]!); return p.cli("scheduler", ...args.slice(1)); };
 
 /** The executor's ports with the production observe (observeByCli over `manager`); `ended` = the lease reads as formally ended. */
