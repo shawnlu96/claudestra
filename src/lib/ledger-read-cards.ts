@@ -2,6 +2,7 @@
  * 总览里每张卡的形状（GET /ledger/:project 的 tasks[]、已完成分页 /done 的 tasks[]）与拼它们要的任务视图。
  * 只读：输入是 ledger-store 读出来的行和事件，不碰连接；ledger-read.ts（总览 / 详情）和 ledger-read-done.ts（已完成窗口 / 分页）共用。
  */
+import type { ActionState } from "./action-state.js";
 import type { AttentionFacts } from "./ledger-attention-facts.js";
 import { blockedBy, type DepView } from "./ledger-deps.js";
 import { currentStageMark, stageTimeline, taskMetrics, type TaskMetrics } from "./ledger-metrics.js";
@@ -38,6 +39,8 @@ export interface TaskView extends LedgerTask {
   runnable: boolean;
   /** 冻结 / 观察期截止（ledger-attention-facts.ts）：网页判卡住用；都没有时不设 */
   attentionFacts?: AttentionFacts;
+  /** 统一状态投影（ledger-action-state.ts）：总览 / 详情 / 完成分页 / 工作行同一口径 */
+  actionState?: ActionState;
 }
 /**
  * 总览只带网页协作视图读到的字段（web/features/collab/collab-model.ts 的 LedgerOverview）；全量在 taskDetail。
@@ -101,7 +104,7 @@ export function liveCard(v: TaskView, line: StepLineInfo): OverviewTask {
     agent: v.agent, pm: v.pm, pr: v.pr, assignee: v.assignee, assigneeKind: v.assigneeKind, updatedAt: v.updatedAt, extra: extraSummary(v.extra),
     lastEvent: eventSummary(v.lastEvent), stageSince: v.stageSince, stageSinceApprox: v.stageSinceApprox, lastReview: v.lastReview,
     metrics: metricsSummary(v.metrics), blockedBy: v.blockedBy, runnable: v.runnable, stepLine: dotLine(line),
-    ...(v.attentionFacts ? { attentionFacts: v.attentionFacts } : {}),
+    ...(v.attentionFacts ? { attentionFacts: v.attentionFacts } : {}), ...(v.actionState ? { actionState: v.actionState } : {}),
   };
 }
 
@@ -116,6 +119,7 @@ export function doneCard(v: TaskView, dots: StepLineInfo | null): OverviewTask {
   };
   for (const k of ["itemId", "agent", "pm", "pr"] as const) if (v[k]) card[k] = v[k];
   if (v.attentionFacts) card.attentionFacts = v.attentionFacts; // 与详情同一口径（冻结名单里的已完成卡也带）
+  if (v.actionState) card.actionState = v.actionState;
   if (!dots) return card;
   return { ...card, stageSinceApprox: v.stageSinceApprox, lastEvent: eventSummary(v.lastEvent), stepLine: dotLine(dots) };
 }

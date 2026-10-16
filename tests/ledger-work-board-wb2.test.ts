@@ -20,6 +20,10 @@ function card(id: string, stage = 'build', manual = true, status: string | undef
     specRev,rev,createdAt,updatedAt) VALUES (?,'p','ui',3,'manual','codex','PM',1,1,0,0)`).run(id);
   registry.push({ name: `agent-${id}`, status });
 }
+/** actionState（ACTIONSTATE1）是新增契约：旧字段照原上限量，新增字段按每行预算另算 */
+const ACTION_ROW_MAX = 400;
+const stripAction = (v: unknown): unknown => JSON.parse(JSON.stringify(v, (k, x) => (k === 'actionState' ? undefined : x)));
+const actionBytes = (rows: { actionState?: unknown }[]) => rows.reduce((n, r) => n + Buffer.byteLength(JSON.stringify(r.actionState ?? null)), 0);
 function board() { return workBoard(db, 'p', 60000, { registry: [], manualRegistry: registry, maxWorkers: 2 }); }
 function fallback(id: string) {
   db.query(`INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (100,'scheduler','p',?,'scheduler','',?)`)
@@ -34,8 +38,9 @@ test('08:15 shape: eight frozen legacy cards and six manual local workers, with 
   expect(b.working.map(r => r.taskId).sort()).toEqual(Array.from({ length: 6 }, (_, i) => `manual-${i}`));
   expect(b.working.every(r => r.who === `agent-${r.taskId}` && r.machine === 'local')).toBe(true);
   expect(b.legacy).toHaveLength(8); expect(b.waiting).toEqual([]); expect(b.machines).toEqual({ local: 6 });
-  expect(Object.keys(b.legacy[0]).sort()).toEqual(['stage', 'taskId', 'title']);
-  expect(Buffer.byteLength(JSON.stringify(b))).toBeLessThan(30 * 1024);
+  expect(Object.keys(b.legacy[0]).sort()).toEqual(['actionState', 'stage', 'taskId', 'title']);
+  expect(Buffer.byteLength(JSON.stringify(stripAction(b)))).toBeLessThan(30 * 1024);
+  expect(actionBytes(b.legacy)).toBeLessThanOrEqual(b.legacy.length * ACTION_ROW_MAX);
   expect(db.query('SELECT total_changes() AS n').get()).toEqual(changes);
 });
 test('only active and creating workers are alive; stopped/dead/missing/unknown status do not occupy local slots', () => {
@@ -113,9 +118,12 @@ test('150 legacy cards expose the first 50 sorted IDs and total while keeping th
   expect(b.legacy.map(r => r.taskId)).toEqual(Array.from({ length: 50 }, (_, i) => `old-${String(i).padStart(3, '0')}`));
   expect(b.todo.ready).toEqual([]); expect(b.todo.blocked).toEqual([]);
   expect(b.machines).toEqual({ local: 1 });
-  const bytes = Buffer.byteLength(JSON.stringify({ ok: true, ...b }));
-  console.log(`[work-board legacy scale] 150 cards / 50 returned: ${bytes} bytes`);
+  const bytes = Buffer.byteLength(JSON.stringify({ ok: true, ...(stripAction(b) as object) }));
+  const extra = actionBytes([...b.legacy, ...b.working]);
+  console.log(`[work-board legacy scale] 150 cards / 50 returned: ${bytes} bytes + actionState ${extra} bytes`);
   expect(bytes).toBeLessThanOrEqual(30 * 1024);
+  expect(b.legacy.every(r => r.actionState?.group === 'queued')).toBe(true);
+  expect(extra).toBeLessThanOrEqual((b.legacy.length + b.working.length) * ACTION_ROW_MAX);
 });
 
 test('registry normalizes the one successfully read snapshot without reopening the file', () => {
