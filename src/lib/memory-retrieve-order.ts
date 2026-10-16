@@ -202,8 +202,7 @@ async function semanticInputs(db: Database, task: LedgerTask, cands: readonly Ca
   }
 }
 
-const candidatesOf = (db: Database, task: LedgerTask, visibility?: MemoryVisibility) =>
-  memoryCandidates(db, task).filter((c) => !visibility || c.memory.visibility === visibility);
+const candidatesOf = (db: Database, task: LedgerTask, visibility?: MemoryVisibility) => memoryCandidates(db, task, visibility);
 
 /**
  * 派单前（事务外）调：补嵌入缺的记忆向量、嵌入查询文本走语义路，再算一次并登记。已登记过、没有候选、没有模型都照常（没模型 = 两路）。

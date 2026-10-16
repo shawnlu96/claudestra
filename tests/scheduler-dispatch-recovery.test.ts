@@ -115,7 +115,8 @@ describe("FB2 policy: no port does nothing, observe only records, off does nothi
   test("observe records what on would do once (a repeated tick adds nothing): the lease block as it stands, the takeover once the lease is ended; off writes nothing", async () => {
     const p = await ready();
     try {
-      const notes = () => p.events().filter((e) => e.data.op === "recovery_observe");
+      // 只看本机接管：出借准备另有 memoryLendInjection 的 observe 样本（memory-retrieve-lend.ts），不归这里数
+      const notes = () => p.events().filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "localFallback");
       const before = state(p);
       const h = harness(p, observe);
       expect((await tick(p, h)).cards).toEqual([expect.objectContaining({ taskId: "T1", step: "observe", detail: expect.stringContaining("lease_held") })]);
