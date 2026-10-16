@@ -100,7 +100,8 @@ function placeReview(s: PlannerSnapshot, since: number): Exclude<Away, { escalat
 
 function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Away, { escalate: string }> {
   if (!p.remote.roles.includes("review")) return localReviewFallback(s);
-  const lent = s.workflow ? seatLendAway(s, otherFamily(s.workflow.authorFamily), () => !!localReviewFallback(s) || p.remote.localPriority === "off", () => seatPeers(s, p, since)) : null;
+  const lent = s.workflow ? seatLendAway(s, otherFamily(s.workflow.authorFamily), () => !!localReviewFallback(s) || p.remote.localPriority === "off" ||
+    (!s.reviewer && placeFor(snapshotPlacementFacts(s, since, "review"), "review", otherFamily(s.workflow!.authorFamily)).kind !== "local"), () => seatPeers(s, p, since)) : null;
   if (lent) return lent; // REVSEAT1: a continuity-pinned review waiting 30 minutes goes to a peer (scheduler-review-seat-lend.ts)
   if (!s.workflow || securityReviewLocalOnly(s.workflow, s.securityPool) || keepsReviewer(s) || !s.task.headSHA) return localReviewFallback(s);
   const family = otherFamily(s.workflow.authorFamily);

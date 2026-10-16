@@ -79,6 +79,51 @@ describe("[验收线 2] the window: reviewer gone, restart, head / specRev / rou
     } finally { f.close(); }
   });
 
+  test("a reviewer retired 10 minutes into the wait keeps the window: no pool before 30 minutes, then the lend", async () => {
+    const f = setup();
+    try {
+      await f.run(); f.advance(10 * MIN);
+      f.db.query("UPDATE scheduler_sessions SET state='retired' WHERE taskId='T1' AND role='reviewer'").run();
+      expect(await f.run()).toMatchObject({ kind: "wait", code: "placement" });
+      f.advance(19 * MIN);
+      expect(await f.run()).not.toMatchObject({ kind: "intent", action: "review" });
+      expect(f.notes("start")).toHaveLength(1);
+      f.advance(MIN);
+      const plan = await f.run();
+      expect(plan).toMatchObject(lent);
+      expect(plan.kind === "intent" && plan.reason).toContain("原审查会话已不在");
+    } finally { f.close(); }
+  });
+
+  test("head A → B → A: the interrupted A start never counts again, A waits a fresh 30 minutes", async () => {
+    const f = setup();
+    const head = (sha: string) => f.db.query("UPDATE tasks SET headSHA=? WHERE id='T1'").run(sha);
+    try {
+      await f.run(); f.advance(10 * MIN);
+      head("3".repeat(40)); await f.run(); f.advance(20 * MIN);
+      head(H2);
+      expect(await f.run()).not.toMatchObject(lent);
+      expect(f.notes("start")).toHaveLength(3);
+      f.advance(29 * MIN);
+      expect(await f.run()).not.toMatchObject(lent);
+      f.advance(MIN);
+      expect(await f.run()).toMatchObject(lent);
+    } finally { f.close(); }
+  });
+
+  test("head A → off-window → A: the end written while no window applied restarts A's clock", async () => {
+    const f = setup();
+    try {
+      await f.run(); f.advance(10 * MIN);
+      f.db.query("UPDATE tasks SET stage='fix' WHERE id='T1'").run(); await f.run();
+      expect(f.notes("end")).toHaveLength(1);
+      f.advance(20 * MIN);
+      f.db.query("UPDATE tasks SET stage='review' WHERE id='T1'").run();
+      expect(await f.run()).not.toMatchObject(lent);
+      expect(f.notes("start")).toHaveLength(2);
+    } finally { f.close(); }
+  });
+
   for (const [what, sql] of [["head", "headSHA='3333333333333333333333333333333333333333'"], ["specRev", "specRev=specRev+1"], ["round", "round=3"]] as const) {
     test(`a ${what} change starts a new window: the old start can never lend`, async () => {
       const f = setup();

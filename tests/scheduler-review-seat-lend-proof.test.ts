@@ -99,6 +99,43 @@ for (const path of ["agents", "legacy"] as const) {
   });
 }
 
+for (const path of ["agents", "legacy"] as const) {
+  test(`[验收线 2] ${path} pool path, real ticks: the reviewer retired 10 minutes in still waits the full 30 minutes`, async () => {
+    const p = await pinned({ path });
+    try {
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      p.f.advance(10 * MIN);
+      p.f.db.query("UPDATE scheduler_sessions SET state='retired' WHERE taskId='T1' AND role='reviewer'").run();
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      p.f.advance(19 * MIN);
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(0);
+      p.f.advance(MIN);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(1);
+      const offer = listEvents(p.f.db, { project: "p", target: "T1" }).find((e) => e.data.op === "pool_offer")!;
+      expect(offer.data).toMatchObject({ seatLend: { evidence: "reviewer_gone", reviewer: "agent-rv-t1", reviewerSessionId: "s-rv" } });
+    } finally { p.f.close(); }
+  });
+
+  test(`[验收线 2] ${path} pool path, real ticks: head A → B → A restarts A's 30 minutes`, async () => {
+    const p = await pinned({ path });
+    const head = (sha: string) => p.f.db.query("UPDATE tasks SET headSHA=? WHERE id='T1'").run(sha);
+    try {
+      await p.tick(); p.f.advance(10 * MIN);
+      head("3".repeat(40)); await p.tick(); p.f.advance(20 * MIN);
+      head(H1);
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      p.f.advance(29 * MIN);
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(0);
+      p.f.advance(MIN);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(1);
+    } finally { p.f.close(); }
+  });
+}
+
 test("[验收线 4] the peer's same-head pass with its full receipts moves the card on without a re-review and passes the merge proof", async () => {
   const p = await pinned();
   try {
