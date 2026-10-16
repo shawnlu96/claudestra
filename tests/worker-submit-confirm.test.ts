@@ -16,33 +16,52 @@ import { baselineAudit, tempLedgerPath } from "./ledger-test-helpers.js";
 import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import type { RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
-import { boundRef } from "../src/lib/scheduler-auto-tick.js";
-import { CONFIRM_TIMEOUT_MS, confirmDecision, confirmStart, MAX_RESENDS, startDeliveryState, turnStartedFor, type SessionText } from "../src/lib/worker-submit-confirm.js";
-import type { WorkerObservation } from "../src/lib/worker-session.js";
+import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
+import { attemptId, CONFIRM_TIMEOUT_MS, confirmDecision, MAX_RESENDS, startDeliveryState, turnStartedFor } from "../src/lib/worker-submit-confirm.js";
+import { configureSchedulerV2Intents, schedulerV2EnsureClaimFence, withSchedulerV2Intents, type SchedulerV2IntentPort } from "../src/lib/scheduler-v2-intent.js";
+import { withSchedulerV2LedgerCmds } from "../src/lib/scheduler-v2-ledger-cmds.js";
+import { getIntent } from "../src/lib/ledger-scheduler.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
+import { ledgercmdFixture } from "./shared-ledger-v2-stage2-ledgercmd-fixture.test.js";
+import { intentCenter } from "./shared-ledger-v2-stage2-intent-fixture.test.js";
 
 type F = ReturnType<typeof autoFixture>;
 const policy = (mode: RecoveryMode): RecoveryPolicyPort => () => ({ mode, manualAfterMs: null, source: "config" });
-const lastWrite = (f: F) => f.db.query("SELECT * FROM scheduler_intents WHERE node = 'write' ORDER BY eventSeq DESC LIMIT 1").get() as SchedulerIntent;
-const running: WorkerObservation = { state: "running", busy: false };
 const line = (rec: object) => JSON.stringify(rec);
 const userLine = (text: string) => line({ type: "user", timestamp: "2026-10-17T00:00:00Z", message: { role: "user", content: text } });
 const asstLine = (text: string) => line({ type: "assistant", timestamp: "2026-10-17T00:00:01Z", message: { role: "assistant", content: [{ type: "text", text }] } });
+const firstOf = (db: F["db"], node: string) =>
+  db.query("SELECT * FROM scheduler_intents WHERE node = ? AND action = 'dispatch' AND id NOT LIKE '%.r%' ORDER BY eventSeq LIMIT 1").get(node) as SchedulerIntent;
 
-/** A card past approve_restate with its write wake line sent; session text and policy are the test's. */
-async function sentWrite(mode: RecoveryMode = "on") {
-  const f = autoFixture();
-  await toBuild(f);
-  expect(await f.tick()).toMatchObject({ step: "sent" });
-  const sent = lastWrite(f), ref = boundRef(f.db, "T1", "author")!;
+/**
+ * The confirmation over the real schedulerAutoTick: the fixture's tick deps with the policy, the leased scheduler CLI the
+ * service runs (pm-todo needs that lease) and the session text under the test's control. `deps` lets the central case wrap them.
+ */
+function harness(f: F, mode: { current: RecoveryMode }, wrap: (d: AutoTickDeps) => AutoTickDeps = (d) => d) {
   let session = "";
-  const read: SessionText = async () => session;
-  // the service's ledger CLI runs under a leased scheduler identity; the fixture's manager has no lease, which the pm-todo writer needs
-  const manager = (...args: string[]) => f.cliWith({ assertLease: () => {} }, "scheduler", ...args.slice(1));
-  const card = () => ({ db: f.db, task: getTask(f.db, "T1")!, deps: { ...f.tickDeps, manager, recoveryPolicy: policy(mode) } });
-  const step = () => confirmStart(card(), sent, ref, f.tickDeps.worker(ref) as never, running, read);
-  const notes = (prefix: string) => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "recovery_observe" && String(e.data.actionKey).startsWith(prefix));
-  return { f, sent, ref, step, notes, setSession: (s: string) => { session = s; } };
+  f.tickDeps.recoveryPolicy = (...a) => policy(mode.current)(...a);
+  f.tickDeps.manager = (...args) => f.cliWith({ assertLease: () => {} }, "scheduler", ...args.slice(1));
+  f.tickDeps.sessionText = async () => session;
+  const deps = () => wrap(f.tickDeps);
+  const tick = async () => {
+    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, deps());
+    expect(r.failed).toEqual([]);
+    return r.cards[0];
+  };
+  const events = () => listEvents(f.db, { project: "p", target: "T1" });
+  const notes = (prefix: string) => events().filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "startDeliveryConfirm"
+    && String(e.data.actionKey).startsWith(prefix));
+  const todos = () => events().filter((e) => e.data.op === "pm_todo" && e.data.kind === "start_delivery_unconfirmed");
+  return { tick, notes, todos, setSession: (s: string) => { session = s; } };
+}
+
+/** A local card past approve_restate with its write wake line sent. */
+async function sentWrite(mode: RecoveryMode = "on") {
+  const f = autoFixture(), m = { current: mode };
+  await toBuild(f);
+  const h = harness(f, m);
+  expect(await h.tick()).toMatchObject({ step: "sent" });
+  return { f, h, m, key: firstOf(f.db, "write").id };
 }
 
 describe("confirmDecision (pure)", () => {
@@ -66,33 +85,33 @@ describe("confirmDecision (pure)", () => {
   });
 });
 
-describe("[验收线 2] resend once past the timeout, stop on confirmation, cap → PM todo", () => {
-  test("unconfirmed past the timeout: one resend over the channel under the same key; inside the next timeout nothing more", async () => {
+describe("[验收线 2] local card: resend once past the timeout, stop on confirmation, cap → PM todo", () => {
+  test("unconfirmed past the timeout: one more attempt as its own intent, over the channel, carrying the key; inside the next timeout nothing", async () => {
     const t = await sentWrite();
     try {
       const before = t.f.sent.length;
-      expect(await t.step()).toBeNull(); // inside the timeout
+      expect(await t.h.tick()).toMatchObject({ step: "waiting" }); // inside the timeout
       t.f.advance(CONFIRM_TIMEOUT_MS);
-      expect(await t.step()).toEqual(["resent", expect.stringContaining("第 1 次重投：已送出")]);
+      expect(await t.h.tick()).toMatchObject({ step: "resent", detail: expect.stringContaining("第 1 次重投") });
       expect(t.f.sent.length).toBe(before + 1);
-      expect(t.f.sent.at(-1)).toMatchObject({ route: "channel", key: t.sent.id, text: expect.stringContaining(t.sent.id) });
-      expect(t.notes("resend:")).toHaveLength(1);
-      expect(await t.step()).toBeNull(); // the timer restarted from the resend
+      expect(t.f.sent.at(-1)).toMatchObject({ route: "channel", key: attemptId(t.key, 1), text: expect.stringContaining(t.key) });
+      expect(getIntent(t.f.db, attemptId(t.key, 1))).toMatchObject({ node: "write", action: "dispatch", status: "done", recipient: "agent-task-one" });
+      expect(t.h.notes("resend:")).toHaveLength(1);
+      expect(await t.h.tick()).toMatchObject({ step: "waiting" }); // the timer restarted from the resend
       expect(t.f.sent.length).toBe(before + 1);
     } finally { t.f.close(); }
   });
 
-  test("once the session shows the turn started, no more resends", async () => {
+  test("once the session shows the turn started (any attempt carries the key), no more resends", async () => {
     const t = await sentWrite();
     try {
       t.f.advance(CONFIRM_TIMEOUT_MS);
-      await t.step();
+      await t.h.tick();
       const n = t.f.sent.length;
-      t.setSession([userLine(`【调度派单】有新单 ${t.sent.id}`), asstLine("领单")].join("\n"));
-      t.f.advance(10 * CONFIRM_TIMEOUT_MS);
-      expect(await t.step()).toBeNull();
+      t.h.setSession([userLine(`【调度派单】有新单 ${attemptId(t.key, 1)}`), asstLine("领单")].join("\n"));
+      for (let i = 0; i < 3; i++) { t.f.advance(CONFIRM_TIMEOUT_MS); expect(await t.h.tick()).not.toMatchObject({ step: "resent" }); }
       expect(t.f.sent.length).toBe(n);
-      expect(t.notes("resend:")).toHaveLength(1);
+      expect(t.h.notes("resend:")).toHaveLength(1);
     } finally { t.f.close(); }
   });
 
@@ -101,43 +120,120 @@ describe("[验收线 2] resend once past the timeout, stop on confirmation, cap 
     try {
       for (let i = 1; i <= MAX_RESENDS; i++) {
         t.f.advance(CONFIRM_TIMEOUT_MS);
-        expect((await t.step())?.[0]).toBe("resent");
+        expect(await t.h.tick()).toMatchObject({ step: "resent" });
       }
       const n = t.f.sent.length;
       t.f.advance(CONFIRM_TIMEOUT_MS);
-      expect(await t.step()).toEqual(["held", expect.stringContaining("已升级 PM 待办")]);
-      const todos = listEvents(t.f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "pm_todo");
-      expect(todos).toHaveLength(1);
-      expect(todos[0].data.kind).toBe("start_delivery_unconfirmed");
-      for (let i = 0; i < 3; i++) { t.f.advance(CONFIRM_TIMEOUT_MS); expect(await t.step()).toBeNull(); }
+      expect(await t.h.tick()).toMatchObject({ step: "held", detail: expect.stringContaining("已升级 PM 待办") });
+      expect(t.h.todos()).toHaveLength(1);
+      expect(t.h.todos()[0]!.text).toContain("重投 2 次（r1 done、r2 done）");
+      for (let i = 0; i < 3; i++) { t.f.advance(CONFIRM_TIMEOUT_MS); expect(await t.h.tick()).not.toMatchObject({ step: "resent" }); }
       expect(t.f.sent.length).toBe(n);
-      expect(t.notes("resend:")).toHaveLength(MAX_RESENDS);
-      expect(startDeliveryState(t.f.db, getTask(t.f.db, "T1")!, 0)).toContain(`已重投 ${MAX_RESENDS}/${MAX_RESENDS} 次，已升级 PM 待办`);
+      expect(t.h.todos()).toHaveLength(1);
+      expect(t.h.notes("resend:")).toHaveLength(MAX_RESENDS);
+      expect(startDeliveryState(t.f.db, getTask(t.f.db, "T1")!, 0)).toContain(`已重投 ${MAX_RESENDS}/${MAX_RESENDS} 次（r1 done、r2 done），已升级 PM 待办`);
     } finally { t.f.close(); }
   });
 
   test("an unreadable session is no evidence: nothing is resent on guesswork", async () => {
     const t = await sentWrite();
     try {
-      t.f.advance(10 * CONFIRM_TIMEOUT_MS);
+      t.f.tickDeps.sessionText = async () => null;
       const n = t.f.sent.length;
-      const ref = t.ref, card = { db: t.f.db, task: getTask(t.f.db, "T1")!, deps: { ...t.f.tickDeps, recoveryPolicy: policy("on") } };
-      expect(await confirmStart(card, t.sent, ref, t.f.tickDeps.worker(ref) as never, running, async () => null)).toBeNull();
+      t.f.advance(10 * CONFIRM_TIMEOUT_MS);
+      expect(await t.h.tick()).not.toMatchObject({ step: "resent" });
       expect(t.f.sent.length).toBe(n);
+      expect(t.h.notes("")).toHaveLength(0);
+    } finally { t.f.close(); }
+  });
+});
+
+/**
+ * Center replica: real schedulerAutoTick, S2I (withSchedulerV2Intents → centralSubmit with X8's persistent journal) and S2Q
+ * (withSchedulerV2LedgerCmds) over the fixture's recording center; the channel send is the fixture's. The first order is the
+ * restate (a central card's stage moves are the center's), the same delivery path as the write order.
+ */
+function centralCard() {
+  const s = ledgercmdFixture(), center = intentCenter(s.port.clientFor("p")!), m = { current: "on" as RecoveryMode };
+  const port: SchedulerV2IntentPort = {
+    route: (id) => s.port.route(id), wrapManager: (mgr) => withSchedulerV2LedgerCmds(mgr, s.port),
+    fence: () => s.port.fence("feature-one"), claimFence: (taskId, role) => schedulerV2EnsureClaimFence(s.f.db, taskId, role),
+    central: (taskId, intentId) => center.bound(taskId, intentId, s.f.task().headSHA, "dispatch"),
+    settled: async (_taskId, intentId, to) => { await s.port.sync("p", "feature-one"); const intent = getIntent(s.f.db, intentId); return { ok: intent?.status === to, intent }; },
+  };
+  configureSchedulerV2Intents(port);
+  const h = harness(s.f, m, withSchedulerV2Intents);
+  return { ...s, center, h, m, results: () => s.requests.filter((c) => c.type === "operation.result") };
+}
+
+describe("[验收线 2] center replica: every resend is a real send under its own center intent", () => {
+  test("first send, no turn; each timeout = intent.create + checks + one result + one channel send; capped → PM told once", async () => {
+    const c = centralCard();
+    try {
+      expect(await c.h.tick()).toMatchObject({ step: "session" });
+      let last: unknown;
+      for (let i = 0; i < 3 && c.f.sent.length === 0; i++) last = await c.h.tick();
+      expect(last).toMatchObject({ step: "sent" });
+      const key = firstOf(c.f.db, "restate").id;
+      expect(c.f.sent).toHaveLength(1);
+      for (let n = 1; n <= MAX_RESENDS; n++) {
+        c.f.advance(CONFIRM_TIMEOUT_MS);
+        const creates = c.requests.filter((r) => r.type === "intent.create").length;
+        expect(await c.h.tick()).toMatchObject({ step: "resent", detail: expect.stringContaining("已送出") });
+        expect(c.f.sent).toHaveLength(1 + n); // the transport really sent it (round 1 replayed the done intent: 0 sends)
+        expect(c.f.sent.at(-1)).toMatchObject({ key: attemptId(key, n), text: expect.stringContaining(key) });
+        const created = c.requests.filter((r) => r.type === "intent.create");
+        expect(created).toHaveLength(creates + 1);
+        expect(created.at(-1)!.type === "intent.create" && created.at(-1)!.payload.operationId).toBe(attemptId(key, n));
+        expect(getIntent(c.f.db, attemptId(key, n))?.status).toBe("done"); // projected back from X8's own report
+      }
+      expect(c.results()).toHaveLength(1 + MAX_RESENDS); // one result per operation, none replayed
+      expect(c.center.journal.read(c.center.bound("T1", attemptId(key, 1), c.f.task().headSHA, "dispatch").context)?.state).toBe("confirmed");
+      c.f.advance(CONFIRM_TIMEOUT_MS);
+      expect(await c.h.tick()).toMatchObject({ step: "held", detail: expect.stringContaining("已升级 PM 待办") });
+      for (let i = 0; i < 2; i++) { c.f.advance(CONFIRM_TIMEOUT_MS); await c.h.tick(); }
+      expect(c.f.sent).toHaveLength(1 + MAX_RESENDS);
+      // S2Q holds a central card's pm-todo (v2_unmapped): the same text reaches PM once as a notice instead
+      expect(c.h.todos()).toHaveLength(0);
+      expect(c.f.notices.filter((t) => t.includes(`开工单 ${key}`) && t.includes("重投 2 次（r1 done、r2 done）"))).toHaveLength(1);
+    } finally { configureSchedulerV2Intents(null); }
+  });
+});
+
+describe("[验收线 2 / 回归] observe then on (with a restart): observe's would-notes use none of on's budget", () => {
+  test("observe: three timeouts, notes only; on after a restart: two real resends, then the PM todo", async () => {
+    const t = await sentWrite("observe");
+    try {
+      const n = t.f.sent.length;
+      for (let i = 0; i < 3; i++) { t.f.advance(CONFIRM_TIMEOUT_MS); await t.h.tick(); }
+      expect(t.f.sent.length).toBe(n);
+      expect(t.h.notes("would-").map((e) => e.data.actionKey)).toEqual([`would-resend:${t.key}:1`, `would-resend:${t.key}:2`, `would-escalate:${t.key}`]);
+      expect(t.h.todos()).toHaveLength(0);
+      t.f.reader.close(); // a restart: everything below is read back from the ledger
+      t.m.current = "on";
+      for (let i = 1; i <= MAX_RESENDS; i++) { t.f.advance(CONFIRM_TIMEOUT_MS); expect(await t.h.tick()).toMatchObject({ step: "resent" }); }
+      expect(t.f.sent.length).toBe(n + MAX_RESENDS);
+      t.f.advance(CONFIRM_TIMEOUT_MS);
+      expect(await t.h.tick()).toMatchObject({ step: "held", detail: expect.stringContaining("已升级 PM 待办") });
+      expect(t.h.todos()).toHaveLength(1);
     } finally { t.f.close(); }
   });
 });
 
 describe("[验收线 4] recovery key off / observe", () => {
-  test("off: no read, no note, no resend; observe: notes only, nothing sent", async () => {
+  test("off: no read, no note, no resend, no new intent; observe: notes only, nothing sent or planned", async () => {
     for (const mode of ["off", "observe"] as const) {
       const t = await sentWrite(mode);
       try {
-        const n = t.f.sent.length;
-        for (let i = 0; i <= MAX_RESENDS + 1; i++) { t.f.advance(CONFIRM_TIMEOUT_MS); expect(await t.step()).toBeNull(); }
+        let reads = 0;
+        t.f.tickDeps.sessionText = async () => { reads++; return ""; };
+        const n = t.f.sent.length, intents = t.f.intents().length;
+        for (let i = 0; i <= MAX_RESENDS + 1; i++) { t.f.advance(CONFIRM_TIMEOUT_MS); expect(await t.h.tick()).not.toMatchObject({ step: "resent" }); }
         expect(t.f.sent.length).toBe(n);
-        expect(t.notes("")).toHaveLength(mode === "off" ? 0 : MAX_RESENDS + 1);
-        expect(listEvents(t.f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "pm_todo")).toHaveLength(0);
+        expect(t.f.intents().length).toBe(intents);
+        expect(reads).toBe(mode === "off" ? 0 : MAX_RESENDS + 1);
+        expect(t.h.notes("")).toHaveLength(mode === "off" ? 0 : MAX_RESENDS + 1);
+        expect(t.h.todos()).toHaveLength(0);
       } finally { t.f.close(); }
     }
   });

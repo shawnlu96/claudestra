@@ -74,6 +74,8 @@ export interface AutoTickDeps {
   /** CFG's RecoveryPolicyPort for MAN2's manual recovery (manual-resume.ts); absent = the file-backed recoveryPolicy. */
   recoveryPolicy?: RecoveryPolicyPort;
   poolIdleObservation?: PoolIdleObservation;
+  /** RESTATEGO1 start-order confirmation: the bound session's file tail; absent = worker-submit-confirm.ts readSessionText. */
+  sessionText?(agent: string, sessionId: string): Promise<string | null>;
 }
 
 interface CardOutcome { taskId: string; step: string; detail: string }
