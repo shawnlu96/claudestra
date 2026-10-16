@@ -98,6 +98,30 @@ describe("loadAppConfig 首次加载", () => {
     expect(slept).toEqual([1000, 2000, 4000]);
     expect(count()).toBe(4);
   });
+  // CI 回归：happy-dom 注销时清掉挂着的 setTimeout，前一个文件留下的退避永远醒不来，缓存的 pending 让后面所有调用方卡死
+  test("退避的计时器丢了（永远不响）：后来的调用方叫醒它马上再试，拿到配置不卡住", async () => {
+    setAppConfigSleepForTest(() => new Promise<void>(() => {}));
+    const count = script([offline, relay]);
+    const first = loadAppConfig();
+    while (count() < 1) await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    const second = loadAppConfig();
+    expect(await second).toMatchObject({ mode: "relay" });
+    expect(await first).toMatchObject({ mode: "relay" });
+    expect(count()).toBe(2);
+  });
+  test("退避中被叫醒：次数照算，重试上限不变（叫醒三次后仍连不上 → AppConfigUnreachableError）", async () => {
+    setAppConfigSleepForTest(() => new Promise<void>(() => {}));
+    const count = script([offline]);
+    const first = loadAppConfig().catch((e: unknown) => e);
+    for (let n = 1; n <= 3; n++) {
+      while (count() < n) await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 0));
+      void loadAppConfig().catch(() => {});
+    }
+    expect(await first).toBeInstanceOf(AppConfigUnreachableError);
+    expect(count()).toBe(4);
+  });
   test("200 但不是 JSON（next dev 的 HTML）→ direct，不重试", async () => {
     fakeSleep();
     script([() => Promise.resolve(new Response("<html></html>", { status: 200 }))]);

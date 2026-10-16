@@ -137,12 +137,25 @@ async function fetchConfig(): Promise<ConfigFetchResult> {
 
 let sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** 首次加载正在退避等待时：叫醒它马上再试一次（loadAppConfig 有新调用方时用）；不在等就是 null */
+let wakeRetry: (() => void) | null = null;
+
+/** 等 ms，或被 wakeRetry 提前叫醒（哪个先到算哪个） */
+function retryWait(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    wakeRetry = resolve;
+    void sleep(ms).then(resolve);
+  }).finally(() => {
+    wakeRetry = null;
+  });
+}
+
 async function firstLoad(): Promise<AppConfig> {
   for (let attempt = 0; ; attempt++) {
     const d = decideConfigLoad(await fetchConfig(), attempt);
     if (d.action === "fail") throw new AppConfigUnreachableError();
     if (d.action !== "retry") return d.cfg;
-    await sleep(d.delayMs);
+    await retryWait(d.delayMs);
   }
 }
 
@@ -158,10 +171,14 @@ let loaded: AppConfig | null = null;
 /**
  * 默认只拉一次；`refresh` 重新拉一次并更新缓存（版本检查用：中继模式下「前端有没有新版」看的是 app-config 的 webCommit，
  * 常驻的 PWA 只在启动时拉一次就永远发现不了新版）。刷新拉不到（离线）时保留已有配置，绝不让一次网络抖动把模式改成 direct。
- * 首次加载连不上时按 decideConfigLoad 重试，仍不行就 reject AppConfigUnreachableError（不缓存失败，下次调用重新拉）。
+ * 首次加载连不上时按 decideConfigLoad 重试，仍不行就 reject AppConfigUnreachableError（不缓存失败，下次调用重新拉）；
+ * 退避等待中的新调用会叫醒它立即重试。
  */
 export function loadAppConfig(opts: { refresh?: boolean } = {}): Promise<AppConfig> {
   if (loaded && !opts.refresh) return Promise.resolve(loaded);
+  // 首次加载在退避中又有人要配置：不干等，马上再试（次数照算，重试上限不变）。
+  // 也防计时器丢了（如 happy-dom 注销时清掉挂着的 setTimeout）时缓存的 pending 永远不落地、后来者全卡住。
+  wakeRetry?.();
   const prev = loaded;
   pending ??= (prev ? refreshLoad(prev) : firstLoad())
     .then((cfg) => (loaded = cfg))
