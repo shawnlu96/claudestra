@@ -279,6 +279,13 @@ const tree = (page: Page) => page.evaluate(`(() => {
     walk(f.child, next); } };
   walk(window.__fiberRoot?.current, []); return out; })()`) as Promise<string[]>;
 
+/** PROJTABS1：项目页冷开落「总览」，产品卡在「项目地图」标签里；同一页里同项目会记住上次的标签。没有标签（LoadState / 读失败）就不点 */
+async function toMap(page: Page) {
+  const tab = page.locator("main [data-project-tab=map]").first();
+  await tab.waitFor({ timeout: 10_000 }).catch(() => undefined); // 没出标签 = 整页状态（LoadState），照原来的等法往下走
+  if (await tab.count()) await tab.click();
+}
+
 async function productReady(page: Page, mobile: boolean) {
   // PDVIEW1 的远景隐藏卡片明细；桌面用仍可见的标题等候产品板，手机列表继续检查状态明细。
   const ready = mobile
@@ -291,7 +298,8 @@ async function productReady(page: Page, mobile: boolean) {
       const world = document.querySelector('main [data-pd-mode]');
       if (!world) return false;
       const m = new DOMMatrix(getComputedStyle(world).transform);
-      return m.a < 1 && (m.e !== 0 || m.f !== 0);
+      // PROJTABS1 起没有大纲和右栏，画布宽了，适配后可能不缩小（k = 1）：摆放过（矩阵不再是初始的单位矩阵）就算
+      return m.a !== 1 || m.e !== 0 || m.f !== 0;
     })()`);
     await page.evaluate(`Promise.allSettled([...document.querySelector('main [data-pd-mode]').getAnimations({ subtree: true })]
       .filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))`);
@@ -312,17 +320,20 @@ for (const width of [1280, 390]) {
     await shot(page, "1-unbound-sidebar", width);
     await entryOf(page, "未绑定项目").click();
     expect(await opened(page)).toBe("plain-app");
+    await toMap(page);
     await page.getByText("本机 plain-app ·", { exact: false }).first().waitFor();
     expect(await tree(page)).toEqual(["CollabSwitch>SharedCollabContent>CollabView"]);
     await shot(page, "1-unbound-view", width);
     if (mobile) await page.getByRole("button", { name: "返回", exact: true }).click();
     await entryOf(page, "个人笔记").click();
+    await toMap(page);
     await page.getByText("本机 notes ·", { exact: false }).first().waitFor();
     await shot(page, "4-personal-view", width);
     if (mobile) await page.getByRole("button", { name: "返回", exact: true }).click();
     // 已绑定（主场机 mac-a）：入口 → 中心 key，同 N5
     await entryOf(page, "claudestra").click();
     expect(await opened(page)).toBe(n5Key("mac-a"));
+    await toMap(page);
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await page.getByText("B 机的 feature", { exact: false }).first().waitFor();
     expect(await tree(page)).toEqual(["CollabSwitch>SharedCollabContent>TeamSource>CollabView"]);
@@ -332,6 +343,7 @@ for (const width of [1280, 390]) {
     if (mobile) await page.getByRole("button", { name: "返回", exact: true }).click();
     await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
     expect(await opened(page)).toBe(n5Key("mac-a"));
+    await toMap(page);
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await productReady(page, mobile);
     expect(await page.locator("main").innerText()).toBe(viaGroup);
@@ -349,6 +361,7 @@ for (const width of [1280, 390]) {
     release(); // mac-a 的 context 此刻才回来：不能进 mac-b
     await entryOf(page, "claude-orchestrator").click();
     expect(await opened(page)).toBe(n5Key("mac-b"));
+    await toMap(page);
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await page.getByText("B 机的 feature", { exact: false }).first().waitFor();
     expect([...new Set(ledgerHits("claude-orchestrator"))]).toEqual(["mac-b /ledger/claude-orchestrator/work"]); // UXNUM1：同上（B 机 feature 主场在 mac-b）
@@ -362,9 +375,11 @@ for (const width of [1280, 390]) {
     const { page } = await open(width);
     const back = () => mobile ? page.getByRole("button", { name: "返回", exact: true }).click() : Promise.resolve();
     await entryOf(page, "claudestra").click();
+    await toMap(page);
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await back();
     await entryOf(page, "未绑定项目").click(); // 换走：中心视图卸载，总览缓存留着
+    await toMap(page);
     await page.getByText("本机 plain-app ·", { exact: false }).first().waitFor();
     world.centerStatus = 503;
     await back();
@@ -406,6 +421,7 @@ for (const width of [1280, 390]) {
     const product = denied.page.waitForResponse((r) => r.url().endsWith("/ledger/claudestra/product"));
     await entryOf(denied.page, "claudestra").click();
     expect(await opened(denied.page)).toBe("claudestra");
+    await toMap(denied.page);
     await denied.page.getByText("本机 claudestra ·", { exact: false }).first().waitFor();
     await product; // 本机视图按设计读 product：落地后再关页，这条请求记在本段
     expect(ledgerHits("claudestra")).toContain("mac-a /ledger/claudestra/product");
@@ -422,6 +438,7 @@ for (const width of [1280, 390]) {
     world.center["demo-c"] = centerFixture("demo-c");
     const { page } = await open(width);
     await entryOf(page, "claudestra").click();
+    await toMap(page);
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     expect(await opened(page)).toBe(n5Key("mac-a"));
     world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a", { project: "demo-c" })] } };
@@ -431,6 +448,7 @@ for (const width of [1280, 390]) {
     const before = centerHits().length;
     await entryOf(page, "claudestra").click();
     expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
+    await toMap(page);
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     expect(centerHits().slice(before).every((l) => l.endsWith("[demo-c]"))).toBe(true);
   }, 90_000);
@@ -458,6 +476,7 @@ test("1280：打开它的项目组折叠期间改绑 A→B，旧视图照样关�
   world.center["demo-c"] = centerFixture("demo-c");
   const { page } = await open(1280);
   await entryOf(page, "claudestra").click();
+  await toMap(page);
   await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
   expect(await opened(page)).toBe(n5Key("mac-a"));
   await group(page, "claudestra").locator("button[aria-expanded]").click(); // 折叠：claudestra 的入口卸载
@@ -477,6 +496,7 @@ test("1280：全部项目组折叠（没有任何入口挂着）期间改绑 A�
   world.center["demo-c"] = centerFixture("demo-c");
   const { page } = await open(1280);
   await entryOf(page, "claudestra").click();
+  await toMap(page);
   await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
   expect(await opened(page)).toBe(n5Key("mac-a"));
   for (const p of PROJECTS["mac-a"]) await group(page, p.name).locator("button[aria-expanded]").click(); // 全部折叠：所有入口卸载
@@ -494,6 +514,7 @@ test("1280：N5 列表先打开中心视图、项目组入口的 context 后回�
   world.center["demo-c"] = centerFixture("demo-c");
   const { page } = await open(1280, "mac-a", { holdN8Context: "1" });
   await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
+  await toMap(page);
   await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
   expect(await opened(page)).toBe(n5Key("mac-a"));
   expect(await entryOf(page, "claudestra").count()).toBe(0); // 本节点 store 还没回包，项目组入口未出现
@@ -514,6 +535,7 @@ for (const change of ["改绑", "解绑"] as const) {
     world.center["demo-c"] = centerFixture("demo-c");
     const { page } = await open(1280, "mac-a", { holdN8Context: "1" });
     await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
+    await toMap(page);
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     expect(await opened(page)).toBe(n5Key("mac-a"));
     expect(await entryOf(page, "claudestra").count()).toBe(0);
@@ -551,6 +573,7 @@ test("390：移动端 菜单 → 入口 → 全屏视图 → 返回", async () =
   const { page } = await open(390);
   await shot(page, "8-mobile-menu", 390);
   await entryOf(page, "claudestra").click();
+  await toMap(page);
   await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
   expect(await page.locator("aside").isVisible()).toBe(false);
   await shot(page, "8-mobile-fullscreen", 390);

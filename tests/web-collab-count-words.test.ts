@@ -1,5 +1,5 @@
 /**
- * UXNUM1 [验收线 1]：同一份看板 + 总览，顶栏、大纲芯片、右栏「现在」与「各阶段」、产品卡（按 feature）、子 DAG 框头六处的
+ * UXNUM1 [验收线 1]：同一份看板 + 总览，顶栏、右栏「现在」与「各阶段」、产品卡（按 feature）、子 DAG 框头六处的
  * 在干活 / 在等 / 没开工 / 已完成一致；各阶段之和 = 在干活 + 在等；规格卡不进进行中；合并卡在「在等」。
  * 团队看板走真的 teamWorkBoard（UXWHO1 四栏），本机看板走 /work 形状经 localColumns。纯函数，不挂 React。
  */
@@ -7,19 +7,17 @@ import { describe, expect, test } from "bun:test";
 import { attentionOf, countBoardOf, countSnap, doneCount, featureWords, missingFeatures, quotaPcts, unreadFeatures } from "../web/features/collab/count-words";
 import { homeView } from "../web/features/collab/collab-model";
 import { teamWorkBoard } from "../web/features/collab/team-work-model";
-import { filterCount, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
+import { stageCounts } from "../web/features/collab/v4/v4-model";
 
 import type { WorkBoard, WorkRow } from "../web/features/collab/work/work-types";
 import type { QuotaLinesView } from "../web/features/lend/lend-quota-model";
 import { FEATURES, NOW, synthTeam } from "./web-collab-count-words-fixture.test";
 
 /** 六处各自读到的数（调用的就是界面用的那几个函数） */
-function sixPlaces(snap: ReturnType<typeof countSnap>, ov: Parameters<typeof filterCount>[0] & { items: { id: string; title: string; oneLine: string }[] }) {
+function sixPlaces(snap: ReturnType<typeof countSnap>) {
   const sum = (k: "working" | "waiting" | "notStarted") => FEATURES.reduce((s, f) => s + featureWords(snap, f)[k], 0);
   return {
     top: { working: snap.words.working, waiting: snap.words.waiting, notStarted: snap.words.notStarted, done: snap.words.done },
-    chips: { active: filterCount(ov, "active", snap), listed: outlineOf({ ...ov, tasks: ov.tasks }, "active", snap.active).flatMap((g) => g.tasks).length,
-      done: filterCount(ov, "done", snap) },
     now: { working: snap.words.working, waiting: snap.words.waiting, stages: stageCounts(snap).reduce((s, c) => s + c.n, 0) },
     product: { working: sum("working"), waiting: sum("waiting") },
     frame: { working: sum("working"), waiting: sum("waiting"), notStarted: sum("notStarted") },
@@ -41,9 +39,8 @@ describe("团队合成数据（12 feature）", () => {
   });
 
   test("六处同一组数；各阶段之和 = 在干活 + 在等；按 feature 加起来等于全站", () => {
-    const p = sixPlaces(snap, ov);
+    const p = sixPlaces(snap);
     const ww = p.top.working + p.top.waiting;
-    expect(p.chips).toEqual({ active: ww, listed: ww, done: p.top.done });
     expect(p.now).toEqual({ working: p.top.working, waiting: p.top.waiting, stages: ww });
     expect(p.product).toEqual({ working: p.top.working, waiting: p.top.waiting });
     expect(p.frame).toEqual({ working: p.top.working, waiting: p.top.waiting, notStarted: p.top.notStarted });

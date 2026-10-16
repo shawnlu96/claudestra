@@ -94,6 +94,10 @@ test("N8A8 r1：点开首轮 429 没拿到详情的 feature → 立刻重拉，�
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null,
     h(ui.TeamSource, { identity: IDENTITY }, h(ui.CollabView, { project: ui.sharedCollabProject(IDENTITY) }))) as never));
   const card = () => Array.from(host.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(TARGET.title)) ?? null;
+  // 冷开落总览（PROJTABS1）：产品卡在「项目地图」标签里
+  const mapTab = () => Array.from(host.querySelectorAll("[role=tab]")).find((b) => b.textContent === "项目地图") ?? null;
+  await until(() => mapTab() !== null, "project map tab");
+  await React.act(async () => mapTab()!.click());
   await until(() => card() !== null && details.includes(TARGET.id), "product board + first-round 429");
   await tick(200);
   // 首轮：TARGET 回 429 后本轮停发 → 详情请求不超过 TARGET 及之前的 + 已在途的 1 个
