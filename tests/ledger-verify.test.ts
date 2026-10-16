@@ -493,3 +493,19 @@ describe("进 verified 只有一条路", () => {
     expect(code(() => recordVerify(db, { actor: PM }, { taskId: "T9", result: "pass", data: { checks: clear } }))).toBe("conflict");
   });
 });
+
+describe("[验收线 1] pass-only never records failed or unknown checks", () => {
+  test.each(["fail", "unknown"])("%s leaves both events and the task unchanged", async (verdict) => {
+    if (verdict === "fail") sc.bridgeStart = MERGED - 1;
+    else sc.ghFails = true;
+    const before = listEvents(db, { project: P, target: "T9" });
+    const snapshot = getTask(db, "T9");
+    expect(await pm("verify", "T9", "--pass-only", "--dedup", "pass-only:retry")).toMatchObject({
+      ok: false, recorded: false, code: "unverified", result: verdict,
+    });
+    expect(listEvents(db, { project: P, target: "T9" })).toEqual(before);
+    expect(getTask(db, "T9")).toEqual(snapshot);
+    sc.bridgeStart = PULLED + 60_000; sc.ghFails = false;
+    expect(await pm("verify", "T9", "--pass-only", "--dedup", "pass-only:retry")).toMatchObject({ ok: true, moved: true });
+  });
+});

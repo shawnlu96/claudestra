@@ -3,7 +3,7 @@
  * 真的 Sidebar + SettingsModal + CollabSwitch、真的 chat store / collab-nav / 联系人 store。fetch 全在这里拦下按合成数据答
  * （tests/helpers/machines-shots.ts 叠在 today-shots 上），夹具之外一律 404，不连任何 bridge。happy-dom 只在本文件注册、afterAll 注销。
  */
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { setAppConfigForTest } from "../web/lib/app-config";
@@ -31,9 +31,14 @@ let ui: {
   MessageList: () => unknown; NowStrip: () => unknown; Sidebar: (p: { onSelect: () => void }) => unknown; CollabSwitch: () => unknown; closingCollab: (fn: () => void) => () => void;
   ChatStoreProvider: (p: { children: unknown }) => unknown; useChatStoreApi: () => Store;
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
-  useCollabNav: () => { project: string | null; task: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
+  useCollabNav: () => { project: string | null; task: string | null; view: "team" | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
   openSettings: (p: string) => void; TODAY_KEY: string; resetLedgers: () => void; setSeenStopping: (m?: ReadonlyMap<string, number>) => void;
 };
+
+// mock.module 对整个 bun test 进程生效：同片里排在前面的文件（如 web-dom-agent-list-recovery 把 useFullScope 换成 () => false）
+// 会让设置弹窗按非全权设备只列本地页、没有伙伴机器页。本文件按 owner 设备挂，钉成 true（单跑时真实现也是 true），afterAll 换回原样。
+const contactsBefore = { ...require("../web/features/chat/contacts-data.ts") };
+mock.module("../web/features/chat/contacts-data", () => ({ ...contactsBefore, useFullScope: () => true }));
 
 const NOW = Date.now();
 const fresh = () => ({ ...todayWorld(NOW), fp: "mac-a", m: machinesWorld(NOW) });
@@ -97,6 +102,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  mock.module("../web/features/chat/contacts-data", () => contactsBefore);
   globalThis.fetch = realFetch;
   machines.currentFp = realFp;
   setContextRequestForTest(null);
@@ -115,7 +121,7 @@ async function until(ok: () => boolean, what: string) {
 async function mount(part: "main" | "strip" | "shell") {
   win.happyDOM.setViewport({ width: 1280, height: 900 });
   setContextRequestForTest(null);
-  const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null } as { project: string | null; task: string | null } };
+  const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null, view: null } as { project: string | null; task: string | null; view: "team" | null } };
   const h = React.createElement as (...a: unknown[]) => unknown;
   function Probe() {
     seen.store = ui.useChatStoreApi();
@@ -170,7 +176,7 @@ test("[验收线 2] 点借入一行：collab-nav 是 {该项目, 该任务} 并�
   await until(() => v.all("[data-remote-row]").length === 3, "remote rows");
   expect(v.host.querySelector("[data-now-borrowed] button")?.getAttribute("aria-expanded")).toBe("true");
   await v.click(v.host.querySelector("[data-remote-row=r-b1]"), "remote row B1");
-  expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1" });
+  expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1", view: null });
   expect(v.seen.toContent).toBe(1);
   await React.act(async () => ui.closeCollab());
   await tick();

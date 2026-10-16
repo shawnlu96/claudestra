@@ -1,4 +1,4 @@
-/** Real session/source failure → existing DAG and ProductPanes consumers; synthetic transport, no network. */
+/** Real session/source failure → existing DAG and project-map (MapPane) consumers; synthetic transport, no network. */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
@@ -22,7 +22,7 @@ let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let documentView: DocumentView;
 let setLang: (lang: "zh" | "en") => void;
-let components: { Shelf: unknown; MobileDag: unknown; ProductPanes: unknown; useCollabT(): (text: string) => string };
+let components: { Shelf: unknown; MobileDag: unknown; MapPane: unknown; useCollabT(): (text: string) => string };
 const realFetch = globalThis.fetch;
 const realWarn = console.warn;
 const requests: string[] = [];
@@ -46,7 +46,7 @@ beforeAll(async () => {
     importUI("dag/dag-canvas.tsx"), importUI("dag/dag-mobile.tsx"), importUI("product/product-panes.tsx"),
     importUI("collab-i18n.ts"), import(new URL("../web/lib/i18n.tsx", import.meta.url).href),
   ]);
-  components = { Shelf: canvas.Shelf, MobileDag: mobile.MobileDag, ProductPanes: panes.ProductPanes, useCollabT: words.useCollabT };
+  components = { Shelf: canvas.Shelf, MobileDag: mobile.MobileDag, MapPane: panes.MapPane, useCollabT: words.useCollabT };
   setLang = language.setLang;
 });
 afterAll(async () => {
@@ -134,8 +134,8 @@ for (const lang of ["zh", "en"] as const) for (const width of [1200, 390]) {
       expect(rows[3]).toEqual(["Known busy", "0", "2", "0"]);
       expect(rows[4]).toEqual(["Known empty", "0", "0", "0"]);
     });
-    const Product = () => h(components.ProductPanes, { board: product, dagBoard: dag, featureId: null, tab: "product", setTab: noop,
-      onFeature: noop, onTask: noop, subdag: null, fallback: null, progress: null, graph: true, narrow: width === 390,
+    const Product = () => h(components.MapPane, { board: product,
+      onFeature: noop, onTask: noop, fallback: null, narrow: width === 390,
       now: dag.now, tr: components.useCollabT() });
     await mounted(width, lang, h(Product), host => {
       const cards = new Map(Array.from(host.querySelectorAll("button"), button => [textList(button, "strong")[0], button.textContent ?? ""]));

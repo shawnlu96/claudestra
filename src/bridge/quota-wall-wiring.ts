@@ -6,7 +6,8 @@
 import { MASTER_DIR } from "./config.js";
 import { latestSessionIdForCwd } from "./session-ids.js";
 import { existsSync, unlinkSync } from "fs";
-import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, noteOverload, resumeText, type ApiErrorState } from "../lib/api-error-resume.js";
+import { countsAsActivity, dueForResume, giveUpText, loadResumeStates, markResumed, noteActivity, noteApiError, noteOverload, noteTurnOk, onTurnOk, resumeDelayMs,
+  resumeText, saveResumeStates, dropOffline, type ApiErrorState } from "../lib/api-error-resume.js";
 import { isModelLimitHit, paneShowsLowPriority } from "../lib/quota-wall-text.js";
 import { windowWallWait } from "../lib/wall-screen.js";
 import { noticeOncePerState } from "../lib/quota-wall-notice.js";
@@ -253,6 +254,7 @@ export function cancelResumePlan(held: HeldQueue, cid: string): string | null {
  */
 function cancelResume(b: WallBridgeDeps, states: Map<string, ApiErrorState>, cid: string): void {
   states.delete(cid);
+  saveResumeStates(states);
   cancelledResume.delete(cid);
   const plan = cancelResumePlan(b.held, cid);
   if (plan) console.log(`⏸ ${cid}：撞额度，撤掉续跑 ${plan}`);
@@ -274,8 +276,11 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
   w.onExit(() => {
     for (const c of [...b.calls.values()]) b.calls.touch(c.targetChannelId ?? "", c.callerChannelId);
   });
-  const states = new Map<string, ApiErrorState>();
+  // 撞错、取消（有人发消息 / 撞额度 / 正常结束清零）时当场落盘，15 秒一拍兜底：取消没落盘就重启会照样注入「继续」
+  const states = loadResumeStates();
   const agentOf = new Map<string, string>(); // 到期续跑时交给闸要带名字
+  for (const [cid, s] of states) if (s.agent) agentOf.set(cid, s.agent);
+  if (states.size) console.log(`🔁 恢复 API 错误续跑计划 ${states.size} 条`);
   subscribeEvents({}, (evt) => {
     const ts = Date.parse(evt.ts) || Date.now();
     if (evt.type === "turn_interrupted") noteTurnCut(evt.chatId, Date.parse(String((evt.data as { ts?: unknown }).ts ?? "")) || ts); // 终端里 Esc / 抢占：这一轮没有 Stop，下一条送到的开新一轮（bridge/stop-settle.ts）
@@ -284,7 +289,13 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       const err = String(data.error ?? "");
       agentOf.set(evt.chatId, evt.agent);
       cancelledResume.delete(evt.chatId);
-      const r = noteApiError(states, evt.chatId, err, ts); // 同步先记：之后几毫秒内的活动事件要能对上它
+      const text = String(data.text ?? "");
+      const before = states.get(evt.chatId);
+      const r = noteApiError(states, evt.chatId, err, ts, text); // 同步先记：之后几毫秒内的活动事件要能对上它
+      const noted = states.get(evt.chatId);
+      const wait = noted && { ...noted, agent: evt.agent };
+      if (wait) states.set(evt.chatId, wait);
+      saveResumeStates(states);
       void (async () => {
         if (await w.noteApiError({ channelId: evt.chatId, agent: evt.agent, at: ts, error: err, text: String(data.text ?? "") })) {
           cancelResume(b, states, evt.chatId);
@@ -294,12 +305,13 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
         const model = isModelLimitHit(err, String(data.text ?? "")); // 模型额度：续跑只会再撞，直接告诉人换模型
         if (model) cancelResume(b, states, evt.chatId);
         const act = model ? "model_limit" : r;
-        console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${act === "track" ? "60s 后自动续跑" : act === "model_limit" ? "模型额度，不续跑" : "续跑后再撞，升级到频道"}`);
+        const next = act === "track" && wait ? `${resumeDelayMs(wait) / 1000}s 后自动续跑${wait.net ? `（网络类，第 ${wait.net.n + 1} 次）` : ""}` : "";
+        console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${next || (act === "model_limit" ? "模型额度，不续跑" : "续跑用完，升级到频道")}`);
         recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: act } });
         noteOverload(evt.chatId, evt.agent, err, act, ts); // 监护对象的撞错与处理留给调度服务记台账、到上限报派活方（lib/agent-supervisor-bridge.ts）
         const why = model
           ? `撞了单个模型的额度（${String(data.text ?? "").split("\n")[0].slice(0, 120)}），bridge 不自动续跑。在它的窗口里用 /model 换个模型（或 /usage-credits）后发一句继续。`
-          : `连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${err || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`;
+          : giveUpText(before, err, text);
         if (act !== "track") {
           // 频道里一条 bridge 通知（web 看得到，web-only 的 local-* 频道以前没人知道），Discord 频道另外发一条
           emitEvent({ agent: evt.agent, chatId: evt.chatId, type: "chat_message", data: { direction: "out", from: "bridge", text: `⛔ ${evt.agent} ${why}`, notice: true } });
@@ -316,6 +328,7 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
     const hit = moved ? w.noteActivity(evt.chatId, ts) : null;
     if (hit) cancelledResume.set(evt.chatId, hit);
     if (moved) flushHumanSoon(b, evt.chatId, ts);
+    saveResumeStates(states);
   });
   rearm = (cid) => {
     const c = cancelledResume.get(cid);
@@ -326,11 +339,16 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
     if (w.active()) void w.noteApiError({ channelId: cid, agent: c.agent, at: now, error: c.error, text: "" }); // 闸内：放回续跑名单，出闸续
     else {
       agentOf.set(cid, c.agent);
-      states.set(cid, { errorAt: now, error: c.error }); // 重新计 60 秒
+      states.set(cid, { errorAt: now, error: c.error, agent: c.agent }); // 重新计 60 秒
+      saveResumeStates(states);
     }
   };
+  onTurnOk((agent, at) => { // 续跑后正常结束了一轮：网络类连败清零
+    for (const [cid, a] of agentOf) if (a === agent) noteTurnOk(states, cid, at);
+    saveResumeStates(states);
+  });
   setInterval(() => {
-    void resumeDue(b, w, states, agentOf);
+    void resumeDue(b, w, states, agentOf).finally(() => saveResumeStates(states));
     void w.tick();
   }, TICK_MS);
   return w;
@@ -353,7 +371,14 @@ async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, Ap
   for (const cid of dueForResume(states, now)) {
     const st = states.get(cid);
     const target = b.clients.get(cid);
-    if (!st || !target) { states.delete(cid); continue; }
+    if (!st) continue;
+    if (!target) { // 没连着（刚重启还没连回来 / 窗口没了）：留着等，撞错满半小时作废、频道报一次
+      const why = dropOffline(states, cid, now);
+      const agent = agentOf.get(cid) ?? cid;
+      if (why) emitEvent({ agent, chatId: cid, type: "chat_message", data: { direction: "out", from: "bridge", text: `⛔ ${agent} ${why}`, notice: true } });
+      if (why && /^\d+$/.test(cid)) await b.escalate(cid, `⛔ ${agent} ${why}`).catch((e) => console.error("api-error 续跑作废通知失败:", (e as Error).message));
+      continue;
+    }
     // 60 秒里闸开了（别的 agent 撞墙）：这一次也交给闸，出闸再续
     if (w.active() && (await w.noteApiError({ channelId: cid, agent: agentOf.get(cid) ?? cid, at: st.errorAt, error: st.error, text: "" }))) {
       states.delete(cid);
@@ -367,7 +392,7 @@ async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, Ap
       from: { kind: "bridge", label: RESUME_LABEL },
       to: { kind: "local", channelId: cid, ws: target.ws, cwd: target.cwd },
       intent: "notification",
-      content: resumeText(st.error, st.errorAt),
+      content: resumeText(st.error, st.errorAt, resumeDelayMs(st)),
       meta: { messageId: plan, triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
     }).then((r) => {
       if (r.outcome.kind === "dropped" && !resumeStillWanted(r.envelope)) return void console.log(`⏸ ${cid}：续跑投递途中撞额度，没发`);

@@ -122,10 +122,11 @@ function render(page: "Overview" | "WaitsPage"): string {
   const script = `
     import { createElement } from 'react';
     import { renderToStaticMarkup } from 'react-dom/server';
-    import { Overview, WaitsPage } from './features/collab/v4/v4-props.tsx';
+    import { WaitsPage } from './features/collab/v4/v4-props.tsx';
+    import { Overview } from './features/collab/project-tabs/overview-tab.tsx';
     const tr = (s, v = {}) => s.replace(/\\{(\\w+)\\}/g, (_, k) => String(v[k]));
     const ov = { exists: true, now: 1, tasks: [{ id: 'i28-A7', title: '阻塞提问那张卡', stage: 'build' }], items: [], deps: [] };
-    const view = { headline: { advancing: 1, problem: 0, stuck: 0, owner: 1 }, pm: { pm: null, managing: 0, queued: [], frozen: null } };
+    const view = { lines: [], todayDone: [], headline: { advancing: 1, problem: 0, stuck: 0, owner: 1 }, pm: { pm: null, managing: 0, queued: [], frozen: null } };
     const waits = ${JSON.stringify([PROPOSAL, PLAIN])};
     const props = { ov, view, waits, projectName: 'P', onPick() {}, onClose() {}, tr };
     console.log(renderToStaticMarkup(createElement(${page}, props)));

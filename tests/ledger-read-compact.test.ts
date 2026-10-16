@@ -12,7 +12,7 @@ import { donePage } from "../src/lib/ledger-read-done";
 import { schedulerProjectView } from "../src/lib/ledger-scheduler";
 import { homeView, lineOf, type LedgerOverview, type LedgerTaskView, type LineView } from "../web/features/collab/collab-model";
 import { stepLineView } from "../web/features/collab/collab-step-line-model";
-import { metricsOf, mobileSections, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
+import { metricsOf, mobileSections, stageCounts } from "../web/features/collab/v4/v4-model";
 import { countSnap, type CountBoard } from "../web/features/collab/count-words";
 import { causalCanvas } from "../web/features/collab/v4/causal-model";
 
@@ -120,7 +120,7 @@ test("生产结构的 218 张卡：总览 ≤150KB（改前 >600KB），schedule
   }
 });
 
-test("首页、指标、大纲、因果画布、手机列表（含今日完成的小圆点）和改前算出来一样；详情仍是全量", () => {
+test("首页、指标、因果画布、手机列表（含今日完成的小圆点）和改前算出来一样；详情仍是全量", () => {
   const db = fixture();
   const view = projectView(db, "p", NOW);
   const details = new Map(view.tasks.map((t) => [t.id, taskDetail(db, "p", t.id, NOW)!]));
@@ -136,10 +136,6 @@ test("首页、指标、大纲、因果画布、手机列表（含今日完成�
   const board: CountBoard = { working: full.tasks.filter((t) => !["done", "verified", "cancelled"].includes(t.stage)).map((t) => ({ taskId: t.id, featureId: null })),
     merging: [], waiting: [], todo: { ready: [], blocked: [] } };
   expect(stageCounts(countSnap(board, slim))).toEqual(stageCounts(countSnap(board, full)));
-  for (const f of ["all", "active", "done", "p0"] as const) {
-    const ids = (ov: LedgerOverview) => outlineOf(ov, f, countSnap(board, ov).active).map((g) => [g.id, g.title, g.tasks.map((t) => [t.id, t.title, t.stage])]);
-    expect(ids(slim)).toEqual(ids(full));
-  }
   const geo = (ov: LedgerOverview) => {
     const c = causalCanvas(ov);
     const nodes = c.groups.map((g) => [g.id, g.done, g.folds, g.nodes.map(({ task, ...n }) => [n, task.title, task.stage, task.stageBefore ?? null, task.kind])]);

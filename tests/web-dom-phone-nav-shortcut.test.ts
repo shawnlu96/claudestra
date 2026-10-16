@@ -56,8 +56,8 @@ test("[验收线 2] team-shortcut：同一项目已开着时，连续点「成�
   await v.click(link(v, "ops"), "ops");
   expect(v.seen.open).toBe(opened); // 同一项目：视图没重挂
   expect(shown(v)).toEqual(["OPS_BODY"]);
-  await dom.React.act(async () => ui.current!.setTab("product"));
-  expect(probeTab(v)).toBe("product");
+  await dom.React.act(async () => ui.current!.setTab("overview"));
+  expect(probeTab(v)).toBe("overview");
   await v.click(link(v, "members"), "members again");
   expect([probeTab(v), shown(v)]).toEqual(["team", ["MEMBERS_BODY"]]);
   await v.unmount();
@@ -69,8 +69,9 @@ test("[验收线 1] team-shortcut：手机进了协作视图再返回列表（�
   await v.click(v.host.querySelector("[data-nav=phone] [data-nav-tab=team]"), "team tab");
   const row = () => v.host.querySelector(`[data-nav-pages=team] section[aria-label='团队项目'] button[aria-label='${TEAM_NAME}']`);
   await v.until(() => !!row() && !row()!.hasAttribute("aria-disabled") && !!link(v, "ops") && !link(v, "ops")!.hasAttribute("aria-disabled"), "team row");
-  await v.click(row(), "team row"); // 点行进协作视图：落在默认标签
-  expect(probeTab(v)).toBe("product");
+  await v.click(row(), "team row"); // 点行进协作视图；同一项目上次停的标签会被记住（PROJTABS1），先切回总览
+  await dom.React.act(async () => ui.current!.setTab("overview"));
+  expect(probeTab(v)).toBe("overview");
   const before = v.seen.toContent;
   await v.click(link(v, "ops"), "ops");
   expect(v.seen.toContent).toBe(before + 1);
