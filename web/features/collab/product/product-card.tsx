@@ -17,6 +17,7 @@ import { featureWords } from '../count-words';
 import { countText } from '../count-words-i18n';
 import { useCountContext } from '../use-count-source';
 import { pdText } from './product-i18n';
+import fx from './product-focus.module.css';
 
 export interface CardProps { now: number; tr: Tr; featureMeta?: (f: ProductFeature) => React.ReactNode; activeUnknown?: boolean }
 
@@ -81,7 +82,8 @@ function Progress({ feature: f, tr }: { feature: ProductFeature; tr: Tr }) {
   </span>;
 }
 
-function TaskRow({ row: r, top, now, tr, onTask }: { row: ProductFrontierItem; top: number; now: number; tr: Tr; onTask?: (id: string) => void }) {
+/** 卡上按 top 绝对定位；模块页（product-feature-page.tsx）不给 top，按 flow 排 */
+export function TaskRow({ row: r, top, now, tr, onTask }: { row: ProductFrontierItem; top?: number; now: number; tr: Tr; onTask?: (id: string) => void }) {
   const time = r.frozen ? null : elapsedTime(r.sinceMs, now);
   const details = [r.member, time && pdText(tr, time.word, { n: time.n })].filter(Boolean).join(' · ');
   const contents = <>
@@ -89,21 +91,41 @@ function TaskRow({ row: r, top, now, tr, onTask }: { row: ProductFrontierItem; t
     <span className={c.taskKey}>{r.key}</span><span className={c.taskTitle}>{r.title}</span>
     {details && <span className={c.member}>{details}</span>}
   </>;
-  const cls = `${c.task} ${r.frozen ? c.frozen : ''} ${r.stage === 'blocked' || r.stage === null ? c.taskBlocked : ''}`;
+  const cls = `${c.task} ${r.frozen ? c.frozen : ''} ${r.stage === 'blocked' || r.stage === null ? c.taskBlocked : ''} ${top === undefined ? fx.flowTask : ''}`;
   const title = [frontierStage(r, (word, params) => pdText(tr, word, params)), r.key, r.title, details].filter(Boolean).join(' · ');
-  return r.taskId === null ? <div className={cls} style={{ top }} data-pd-task={r.key} data-pd-detail title={title}>{contents}</div>
-    : <button type="button" className={cls} style={{ top }} data-pd-task={r.key} data-pd-detail title={title}
+  const style = top === undefined ? undefined : { top };
+  return r.taskId === null ? <div className={cls} style={style} data-pd-task={r.key} data-pd-detail title={title}>{contents}</div>
+    : <button type="button" className={cls} style={style} data-pd-task={r.key} data-pd-detail title={title}
       onClick={() => onTask?.(r.taskId!)}>{contents}</button>;
 }
 
-/** 主按钮和任务按钮是兄弟；主按钮覆盖整卡，任务区仅有按钮接收指针，留白仍能进入模块。 */
-export function ProductCard(p: CardProps & { node: ProductNode; onFeature: (id: string) => void; onTask?: (id: string) => void }) {
+export interface CardFocus {
+  /** 单击 / 第一次 Enter：选中或取消（PDFOCUS1）；不给就照旧单击进模块 */
+  onPick?: (id: string) => void;
+  /** selected = 描边（含选中边的两端）；picked = 这张卡就是当前选中的模块（aria-pressed、再按 Enter 进入只看它） */
+  selected?: boolean; picked?: boolean; dim?: boolean;
+  /** 关键路径小标（已经过词表） */
+  cp?: string;
+}
+
+/**
+ * 主按钮和任务按钮是兄弟；主按钮覆盖整卡，任务区仅有按钮接收指针，留白仍能选中模块。
+ * 有 onPick 时：鼠标单击 = 选中 / 再点取消，双击 = 进入；键盘（click 的 detail 为 0）Enter 先选中，已选中再按一次进入。
+ */
+export function ProductCard(p: CardProps & CardFocus & { node: ProductNode; onFeature: (id: string) => void; onTask?: (id: string) => void }) {
   const n = p.node, f = n.feature;
   const { rows, more } = cardTasks(f);
   const eta = ['run', 'blocked', 'ready'].includes(n.state) ? productEta(f.eta?.at, p.now, p.tr('今天')) : null;
-  return <div className={c.card} data-pd-card={n.id} data-pd-state={n.state}
-    style={{ left: n.x, top: n.y, width: n.w, height: n.h }}>
-    <button type="button" className={c.main} onClick={() => p.onFeature(n.id)}>
+  const click = (e: React.MouseEvent) => {
+    if (!p.onPick) return p.onFeature(n.id);
+    if (e.detail === 0) return p.picked ? p.onFeature(n.id) : p.onPick(n.id);
+    if (e.detail === 1) p.onPick(n.id);
+  };
+  return <div className={`${c.card} ${fx.fade} ${p.selected ? fx.selected : ''} ${p.dim ? fx.dim : ''}`} data-pd-card={n.id} data-pd-state={n.state}
+    data-pd-selected={p.selected || undefined} data-pd-dim={p.dim || undefined} style={{ left: n.x, top: n.y, width: n.w, height: n.h }}>
+    {p.cp && <span className={fx.cpTag} data-pd-cp>{p.cp}</span>}
+    <button type="button" className={c.main} aria-pressed={p.onPick ? !!p.picked : undefined} onClick={click}
+      onDoubleClick={p.onPick ? () => p.onFeature(n.id) : undefined}>
       <span className={c.header}><span className={c.dot} aria-hidden />
         <strong data-pd-title className={c.title} title={f.title}>{f.title || f.id}</strong><CardBadge node={n} now={p.now} tr={p.tr} /></span>
       <span className={c.numbers}>{f.counts.completed} / {f.counts.total}</span>
