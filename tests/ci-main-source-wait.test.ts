@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { failureTriples, mainSourceGh, matchSource, normalizeError, tripleDigest } from "../src/lib/ci-main-source-wait.js";
+import { errorFingerprint, failureTriples, mainSourceGh, matchSource, normalizeError, tripleDigest } from "../src/lib/ci-main-source-wait.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 
 const at = (line: string, job = "ci", step = "Run tests") => `${job}\t${step}\t2026-10-17T01:02:03.1234567Z ${line}`;
@@ -22,9 +22,30 @@ const assertion = (error: string, name = "capacity > 窗口未过期", ms = "0.4
 const PR1593 = readFileSync(join(import.meta.dir, "fixtures", "ci-log-timeout-pr1593-shard.txt"), "utf8");
 
 describe("[验收线 1] failure triples", () => {
-  test("an assertion: file + name + its error and Expected / Received lines, run time and stack frames left out", () => {
-    expect(failureTriples(log([assertion("error: expect(received).toBe(expected)")], 1))).toEqual([
-      { file: STALE, name: "capacity > 窗口未过期", fp: "error: expect(received).toBe(expected) | Expected: 1 | Received: 2" }]);
+  test("an assertion: file + name + its whole error block digested (error, Expected / Received), run time and stack frames left out", () => {
+    expect(failureTriples(log([assertion("error: expect(received).toBe(expected)")], 1))).toEqual([{ file: STALE, name: "capacity > 窗口未过期",
+      fp: errorFingerprint(["error: expect(received).toBe(expected)", "Expected: 1", "Received: 2"]) }]);
+    expect(errorFingerprint(["error: x", "", "      at <anonymous> (src/a.ts:1:2)"])).toBe(errorFingerprint(["error: x"]));
+    expect(errorFingerprint(["error: x"])).toMatch(/^error: x #[a-f0-9]{32}$/);
+  });
+
+  test("multi-line Expected / Received values are part of the fingerprint: same test, Received role guest vs owner never match", () => {
+    const received = (role: string) => [`##[group]${STALE}:`, "error: expect(received).toEqual(expected)", "", "  {", `-   "role": "admin",`,
+      `+   "role": "${role}",`, "  }", "", "- Expected  - 1", "+ Received  + 1", "", `      at <anonymous> (/home/runner/work/repo/repo/${STALE}:10:5)`,
+      "(fail) capacity > 窗口未过期 [0.40ms]", "##[endgroup]"];
+    const guest = failureTriples(log([received("guest")], 1))!, owner = failureTriples(log([received("owner")], 1))!;
+    expect(guest).not.toBeNull();
+    expect(owner).not.toBeNull();
+    expect(guest[0]!.fp).not.toBe(owner[0]!.fp);
+    expect(matchSource(guest, owner).ok).toBe(false);
+    expect(failureTriples(log([received("guest")], 1))).toEqual(guest);
+  });
+
+  test("a long error line is never cut before comparing: 310 equal characters, then A vs B, never match", () => {
+    const head = "error: " + "x".repeat(303);
+    const a = failureTriples(log([assertion(`${head}A`)], 1))!, b = failureTriples(log([assertion(`${head}B`)], 1))!;
+    expect(a[0]!.fp).not.toBe(b[0]!.fp);
+    expect(matchSource(a, b).ok).toBe(false);
   });
 
   test("the same failure on another run (other times, other durations, other temp dir) gives the same triple", () => {

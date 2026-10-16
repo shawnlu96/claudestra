@@ -52,9 +52,22 @@ function sourceWaitMode(project: string): RecoveryMode {
 export interface Triple { file: string; name: string; fp: string }
 const UNHANDLED = /^# Unhandled error between tests\s*$/;
 const RULE = /^-{10,}\s*$/;
-/** bun's assertion detail lines; with the error line they are the failure's meaning. */
-const DETAIL = /^\s*(?:Expected|Received)\b[^:]{0,40}:/;
-const FP_MAX = 300;
+/** A stack frame under the error: where, not what (line numbers move with any edit to the file). */
+const STACK = /^\s*at (?:.*:\d+(?::\d+)?\)?|<anonymous>|native|\[native code\])\s*$/;
+/** How much of the error line the fingerprint shows; equality is the digest of the whole block, never this text. */
+const FP_SHOW = 120;
+
+/**
+ * One failure's fingerprint: its whole error block, from the first error line to the `(fail)` line (the message, the matcher,
+ * every Expected / Received / diff line, multi-line values included), each line normalized, blank lines and stack frames left
+ * out, then digested whole. The leading error line is shown for people; two blocks differing anywhere differ in the digest.
+ */
+export function errorFingerprint(block: readonly string[]): string {
+  const lines = block.filter((l) => l && !STACK.test(l));
+  if (!lines.length) return "";
+  const digest = createHash("sha256").update(JSON.stringify(lines)).digest("hex").slice(0, 32);
+  return `${lines[0]!.slice(0, FP_SHOW)} #${digest}`;
+}
 
 /**
  * Only noise goes: run times, timestamps, epoch milliseconds, temp directories and the runner's checkout prefix. The message,
@@ -93,17 +106,18 @@ export function failureTriples(log: string): Triple[] | null {
   if (!failures?.length) return null;
   const found: { file: string; name: string; errs: string[] }[] = [];
   for (const lines of stepBodies(log)) {
-    let file: string | null = null, errs: string[] = [], skip = 0;
+    let file: string | null = null, errs: string[] = [], skip = 0, inError = false;
     for (const line of lines) {
       if (skip) { if (RULE.test(line)) skip--; continue; } // a timed-out test's stray block: parseFailedLog already accounted it
       if (UNHANDLED.test(line)) { skip = 2; continue; }
       const group = GROUP.exec(line);
-      if (group || line.startsWith("##[endgroup]")) { file = group?.[1] ?? null; errs = []; continue; }
+      if (group || line.startsWith("##[endgroup]")) { file = group?.[1] ?? null; errs = []; inError = false; continue; }
       if (!file) continue;
-      if (line.startsWith("(pass) ")) { errs = []; continue; }
+      if (line.startsWith("(pass) ")) { errs = []; inError = false; continue; }
       const fail = isResultLine(line) ? FAIL.exec(line) : null;
-      if (fail) { found.push({ file, name: fail[1]!, errs }); errs = []; continue; }
-      if (ERROR.test(line) || DETAIL.test(line)) errs.push(normalizeError(line));
+      if (fail) { found.push({ file, name: fail[1]!, errs }); errs = []; inError = false; continue; }
+      if (ERROR.test(line)) inError = true; // the code frame and console output before it are not the failure's meaning
+      if (inError) errs.push(normalizeError(line));
     }
   }
   if (found.length !== failures.length) return null;
@@ -111,7 +125,7 @@ export function failureTriples(log: string): Triple[] | null {
   for (const [i, f] of failures.entries()) {
     const seen = found[i]!;
     if (seen.file !== f.file || seen.name !== f.name) return null;
-    const fp = f.timedOut ? "timeout" : seen.errs.join(" | ").slice(0, FP_MAX);
+    const fp = f.timedOut ? "timeout" : errorFingerprint(seen.errs);
     if (!fp) return null;
     out.push({ file: f.file, name: f.name, fp });
   }
@@ -256,7 +270,9 @@ async function observe(pr: PrSnapshot, checks: readonly FailedCheck[], at: { rep
     [w.m, w.t] = [runs[0]?.headSha ?? null, Date.now()];
     if (!done) return { ...w, w: "main 没有已结束的 CI" };
     [w.mr, w.ma, w.ms] = [`https://github.com/${at.repo}/actions/runs/${done.id}`, done.attempt, done.headSha];
-    if (done.conclusion === "success") return { ...w, k: "green", w: "main CI 已绿" };
+    if (done.conclusion === "success") { // green counts only on main's newest head: an older head's green says nothing of what main is now
+      return done === runs[0] ? { ...w, k: "green", w: "main CI 已绿" } : { ...w, w: "main 最新 head 的 CI 还没出结果（只有旧 head 绿）" };
+    }
     w.k = "red";
     const theirs = await triplesOf(`${at.repo}/${done.id}/${done.attempt}`, () => ports.main.failedLog(at.repo, String(done.id), done.attempt));
     if (!theirs) return { ...w, w: "main 失败日志形不成 文件+用例+指纹" };
@@ -319,7 +335,8 @@ export function sourceWaitHeld(run: MergeRun, pr: PrSnapshot, external: MergeExt
 /** closeMergeRun's own event writer (only the ledger's write modules import ledger-tx). */
 type WriteEvent = (db: Database, ctx: WriteCtx, e: { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> },
   primary: boolean) => { seq: number };
-interface Registration { seq: number; ts: number; mainHead: string; mainRun: string; files: string[]; owner: string | null }
+interface Registration { seq: number; ts: number; run: string; digest: string | null; mainHead: string; mainRun: string; files: string[];
+  owner: string | null }
 const json = (raw: string): Record<string, unknown> => { try { return JSON.parse(raw) as Record<string, unknown>; } catch { return {}; } };
 const runNumber = (link: string | null): number => Number(link ? RUN_LINK.exec(link)?.[2] ?? 0 : 0);
 
@@ -330,7 +347,8 @@ function registrationOf(db: Database, row: MergeRun): Registration | null {
     .get(row.taskId, WAIT_OP, CI_MAIN_SOURCE_WAIT_KEY, row.intentId, row.reviewedHead.toLowerCase()) as { seq: number; ts: number; data: string } | null;
   if (!r) return null;
   const d = json(r.data), owner = d.owner as { card?: unknown } | undefined;
-  return { seq: r.seq, ts: r.ts, mainHead: String(d.mainHead), mainRun: String(d.mainRun), files: (d.files as string[]) ?? [],
+  return { seq: r.seq, ts: r.ts, run: String(d.run), digest: typeof d.digest === "string" ? d.digest : null, mainHead: String(d.mainHead),
+    mainRun: String(d.mainRun), files: (d.files as string[]) ?? [],
     owner: typeof owner?.card === "string" ? owner.card : null };
 }
 
@@ -356,7 +374,7 @@ function register(db: Database, ctx: WriteCtx, row: MergeRun, w: Wire, now: numb
     data: { op: WAIT_OP, source: CI_MAIN_SOURCE_WAIT_KEY, intentId: row.intentId, task: row.taskId, pr: row.prRef, prHead: w.h, run: w.r, attempt: w.a,
       checks: w.n, files: w.f, mainHead: w.ms, mainRun: w.mr, mainAttempt: w.ma, mainNewest: w.m, sampledAt: w.t, matches: w.c, digest: w.d, owner,
       basis: "逐条比对 测试文件+用例名+错误指纹（只规范化时间、临时路径），PR 每条失败在 main 同期 run 上都有" } }, true);
-  return { seq: e.seq, ts: now, mainHead: w.ms!, mainRun: w.mr!, files: w.f, owner: fix?.card ?? null };
+  return { seq: e.seq, ts: now, run: w.r, digest: w.d, mainHead: w.ms!, mainRun: w.mr!, files: w.f, owner: fix?.card ?? null };
 }
 
 function verdict(db: Database, ctx: WriteCtx, row: MergeRun, w: Wire, outcome: "retry_red" | "expired", text: string, insertEvent: WriteEvent): void {
@@ -367,9 +385,16 @@ function verdict(db: Database, ctx: WriteCtx, row: MergeRun, w: Wire, outcome: "
 }
 
 type Trigger = { kind: "main_green" | "fix_merged"; sha: string; card: string | null };
-/** main green on a newer head and a newer run than the red one registered, or the registered (or since written) fix card merged. */
+/**
+ * Only on this pass's PR evidence: the registered PR run read again on the reviewed head, finished, its failures parsed to the
+ * very triples registered (a fix card merging stands in for main's green, never for the PR's own evidence). Then: main green on
+ * its newest head, newer than the red one registered, or the registered (or since written) fix card merged.
+ */
 function triggerOf(db: Database, row: MergeRun, reg: Registration, w: Wire): Trigger | null {
-  if (w.k === "green" && w.ms && w.ms !== reg.mainHead && runNumber(w.mr) > runNumber(reg.mainRun)) return { kind: "main_green", sha: w.ms, card: null };
+  if (w.a < 1 || !w.d || w.d !== reg.digest || w.r !== reg.run) return null;
+  if (w.k === "green" && w.ms && w.ms === w.m && w.ms !== reg.mainHead && runNumber(w.mr) > runNumber(reg.mainRun)) {
+    return { kind: "main_green", sha: w.ms, card: null };
+  }
   const card = reg.owner ?? fixCardOf(db, row.project, reg.mainRun, reg.mainHead)?.card ?? null;
   const merged = card ? mergedSha(db, card) : null;
   return card && merged && SHA.test(merged) ? { kind: "fix_merged", sha: merged.toLowerCase(), card } : null;

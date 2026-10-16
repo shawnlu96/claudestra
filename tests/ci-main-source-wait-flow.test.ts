@@ -14,7 +14,7 @@ import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
-import { CI_MAIN_SOURCE_WAIT_KEY, configureSourceWaitPolicy, forgetSourceWait, RETRY_OP, VERDICT_OP, type MainRun, type MainSourceGh } from "../src/lib/ci-main-source-wait.js";
+import { CI_MAIN_SOURCE_WAIT_KEY, configureSourceWaitPolicy, errorFingerprint, forgetSourceWait, RETRY_OP, VERDICT_OP, type MainRun, type MainSourceGh } from "../src/lib/ci-main-source-wait.js";
 import { WAIT_OP } from "../src/lib/ci-main-fix-retry.js";
 import { NODE_OP } from "../src/lib/main-red-fix.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
@@ -36,7 +36,7 @@ const RED = ciLog("error: expect(received).toBeGreaterThan(expected)");
 const OTHER = ciLog("error: expect(received).toBe(expected)");
 const TYPECHECK = [at("src/lib/x.ts(3,7): error TS2322: Type 'string' is not assignable to type 'number'."), at("##[error]Process completed with exit code 2.")].join("\n");
 
-interface World { mainRuns: MainRun[]; mainLog: string; argv: string[][]; mainCalls: string[] }
+interface World { mainRuns: MainRun[]; mainLog: string; argv: string[][]; mainCalls: string[]; prRunFails?: boolean; prLog?: string; prAttempt?: number }
 const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 const no = (stderr: string): BoundedResult => ({ code: 1, stdout: "", stderr, timedOut: false });
 const mainRun = (id: number, headSha: string, conclusion: string, status = "completed"): MainRun =>
@@ -54,9 +54,10 @@ function card(opts: { port?: boolean } = {}) {
     w.argv.push(argv);
     const cmd = argv.slice(1).join(" ");
     if (/^run view \d+ --repo example\/repo --json attempt,status,conclusion,headSha$/.test(cmd)) {
-      return ok(JSON.stringify({ attempt: 1, status: "completed", conclusion: "failure", headSha: snap.head }));
+      if (w.prRunFails) return no("PR evidence unavailable");
+      return ok(JSON.stringify({ attempt: w.prAttempt ?? 1, status: "completed", conclusion: "failure", headSha: snap.head }));
     }
-    if (/^run view \d+ --repo example\/repo --log-failed$/.test(cmd)) return ok(RED);
+    if (/^run view \d+ --repo example\/repo --log-failed$/.test(cmd)) return ok(w.prLog ?? RED);
     if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: [{ path: "src/lib/x.ts" }] }));
     if (/^api repos\/example\/repo\/compare\/[a-f0-9]{40}\.\.\.main --jq /.test(cmd)) return ok(JSON.stringify({ base: BASE, commits: [OLD, FIX] }));
     if (/^api -X GET repos\/example\/repo\/commits /.test(cmd)) return ok(JSON.stringify([BASE])); // main never touched the test file
@@ -117,7 +118,7 @@ describe("[验收线 1] same red on main: the card stays in the merge recovery p
       const [reg, ...more] = sourceRegs(c);
       expect(more).toEqual([]);
       expect(reg).toMatchObject({ intentId: c.intent, prHead: HEAD, run: RUN, attempt: 1, checks: ["ci"], files: [STALE], mainHead: MAIN_RED, mainRun: MAIN_RUN,
-        mainAttempt: 1, mainNewest: MAIN_RED, matches: [[STALE, "capacity > 窗口未过期", "error: expect(received).toBeGreaterThan(expected)"]],
+        mainAttempt: 1, mainNewest: MAIN_RED, matches: [[STALE, "capacity > 窗口未过期", errorFingerprint(["error: expect(received).toBeGreaterThan(expected)"])]],
         owner: { kind: "main_red_fix", card: "FIX9", node: "merge-arch/MAINRED9" } });
       expect(typeof reg.sampledAt).toBe("number");
       expect(reg.text).toContain("修复卡 FIX9");
@@ -207,6 +208,52 @@ describe("[验收线 3] no false trigger, and no merge on a retry that is still 
       c.w.mainRuns = [mainRun(902, MAIN_GREEN, "failure"), mainRun(903, MAIN_GREEN, "success", "in_progress")];
       await c.tick();
       expect([c.state(), c.updates(), c.notes(RETRY_OP)]).toEqual([WAITING, [], []]);
+    });
+  });
+
+  test("an older main head green while main's newest head is still running, no fix card → wait, never an update-branch", async () => {
+    policy("on");
+    await withCard(async (c) => {
+      await c.tick();
+      expect(c.state()).toEqual(WAITING);
+      c.w.mainRuns = [mainRun(900, MAIN_RED, "failure"), mainRun(901, OLD, "success"), mainRun(902, MAIN_GREEN, "", "in_progress")];
+      await c.tick();
+      await c.tick();
+      expect([c.state(), c.updates(), c.notes(RETRY_OP)]).toEqual([WAITING, [], []]);
+      // the newest head's own CI goes green: now the one update-branch
+      c.w.mainRuns = [mainRun(900, MAIN_RED, "failure"), mainRun(901, OLD, "success"), mainRun(902, MAIN_GREEN, "success")];
+      await c.tick();
+      expect(c.updates()).toHaveLength(1);
+      expect(c.notes(RETRY_OP)).toEqual([expect.objectContaining({ trigger: "main_green", sha: MAIN_GREEN, mainNewest: MAIN_GREEN })]);
+    });
+  });
+
+  test("the fix card merged but the PR run cannot be read this pass → wait, no update-branch; once it reads again, the retry", async () => {
+    policy("on");
+    await withCard(async (c) => {
+      fixCard(c, false);
+      await c.tick();
+      expect(c.state()).toEqual(WAITING);
+      fixCard(c, true);
+      c.w.prRunFails = true;
+      await c.tick();
+      await c.tick();
+      expect([c.state(), c.updates(), c.notes(RETRY_OP)]).toEqual([WAITING, [], []]);
+      c.w.prRunFails = false;
+      await c.tick();
+      expect(c.updates()).toHaveLength(1);
+      expect(c.notes(RETRY_OP)).toEqual([expect.objectContaining({ trigger: "fix_merged", card: "FIX9" })]);
+    });
+  });
+
+  test("main green but the PR run now reads other failures than registered → no update-branch", async () => {
+    policy("on");
+    await withCard(async (c) => {
+      await c.tick();
+      c.w.mainRuns = [mainRun(901, MAIN_GREEN, "success")];
+      [c.w.prLog, c.w.prAttempt] = [OTHER, 2]; // the PR run re-attempted, failing another way
+      await c.tick();
+      expect([c.updates(), c.notes(RETRY_OP)]).toEqual([[], []]);
     });
   });
 
