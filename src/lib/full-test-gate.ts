@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { classifyTestArgs, FULL_TEST_PERMIT_ENV, isCiEnv } from "./full-test-gate-args.js";
 import { approvalVerifier, permitConfig, readGatePolicy, type GatePolicy } from "./full-test-gate-policy.js";
-import { identify, liveTree, scanProcesses, type LiveTree, type Scan, type TreeRoot } from "./full-test-gate-tree.js";
+import { identify, liveTree, rememberTree, scanProcesses, type LiveTree, type Scan, type TreeRoot } from "./full-test-gate-tree.js";
 import { observeLendCheckProcess } from "./lend-check-observation.js";
 import { lendCheckPermit, type LendCheckResult } from "./lend-check-permit.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
@@ -60,6 +60,7 @@ const treeSchema = z.union([
   z.object({ state: z.literal("spawning") }).strict(),
   z.object({ state: z.literal("running"), pgid: z.number().int().positive(), start: z.string().nullable(), uniq: z.string().nullable(),
     ver: z.number().int().nullable(), uid: z.number().int().nullable(), members: z.array(memberSchema),
+    pgids: z.array(z.number().int().positive()).optional(), sids: z.array(z.number().int().positive()).optional(),
     quietAt: z.number().optional() }).strict(),
 ]);
 
@@ -94,16 +95,16 @@ export function observeTree(dir: string, id: string, scan: Scan = scanProcesses,
   if (tree.state === "spawning") return "absent";
   const procs = scan();
   if (!procs) return "unknown";
-  const live = liveTree(tree, id, procs);
+  const live = liveTree(tree, procs);
+  const updated = rememberTree(tree, live);
+  try { writeJsonAtomicSync(treePath(dir, id), { state: "running", ...updated }); }
+  catch (e) { console.error(`[full-test-gate] 写进程树记录失败：${String(e)}`); return "unknown"; }
   if (live.members.length) return "present";
   if (!live.unclaimed.length) return "absent";
-  let quietAt = tree.quietAt;
-  if (quietAt === undefined) {
-    quietAt = Date.now();
-    try { writeJsonAtomicSync(treePath(dir, id), { ...tree, quietAt }); }
-    catch (e) { console.error(`[full-test-gate] 写进程树记录失败：${String(e)}`); }
-  }
-  return Date.now() - quietAt < graceMs ? "present" : "absent";
+  const quietAt = updated.quietAt!;
+  if (Date.now() - quietAt < graceMs) return "present";
+  console.error(`[full-test-gate] 有无法归属的进程仍在，按宽限释放 id=${id}`);
+  return "absent";
 }
 
 function signalPid(pid: number, sig: NodeJS.Signals): void {
@@ -228,15 +229,12 @@ class GateRun {
     const tree = this.tree;
     const procs = tree && this.scan();
     if (!tree || !procs) return null;
-    const live = liveTree(tree, this.id, procs);
-    const members = live.members.filter((p) => p.pid !== tree.pgid).map((p) => ({ pid: p.pid, start: p.start, uniq: p.uniq, ver: p.ver }));
-    // 认得出的成员（含根）都没了、只剩认不出归属的孤儿：记下这一刻，孤儿最多再扣住名额 orphanGraceMs（见 observeTree）
-    const quiet = live.members.length === 0 && live.unclaimed.length > 0 && tree.quietAt === undefined;
-    if (quiet) tree.quietAt = Date.now();
-    if (quiet || JSON.stringify(members) !== JSON.stringify(tree.members)) {
-      tree.members = members;
+    const live = liveTree(tree, procs);
+    const updated = rememberTree(tree, live);
+    if (JSON.stringify(updated) !== JSON.stringify(tree)) {
+      this.tree = updated;
       if (this.registered) {
-        try { writeJsonAtomicSync(treePath(this.o.dir, this.id), { state: "running", ...tree }); }
+        try { writeJsonAtomicSync(treePath(this.o.dir, this.id), { state: "running", ...updated }); }
         catch (e) { this.err(`[full-test-gate] 写进程树记录失败：${String(e)}`); }
       }
     }
@@ -381,7 +379,7 @@ class GateRun {
     let self = identify(child.pid, this.scan);
     for (let i = 0; !self && i < 100; i++) { await sleep(10); self = identify(child.pid, this.scan); }
     const tree: TreeRoot = { pgid: child.pid, start: self?.start ?? null, uniq: self?.uniq ?? null, ver: self?.ver ?? null,
-      uid: self?.uid ?? process.getuid?.() ?? null, members: [] };
+      uid: self?.uid ?? process.getuid?.() ?? null, members: [], pgids: [child.pid], sids: self?.sid ? [self.sid] : [] };
     if (registered) writeJsonAtomicSync(path, { state: "running", ...tree });
     this.tree = tree;
     const gate = child.stdio[3] as Writable;
@@ -404,7 +402,7 @@ class GateRun {
     }
     if (live?.unclaimed.length && gone(live)) {
       this.err(`[full-test-gate] bun test 及认得出的后代都已退出；认不出归属的孤儿进程 ${live.unclaimed.map((p) => p.pid).join(",")} ` +
-        `超过 ${Math.round(grace / 1000)}s 仍在，不再算作本次测试，名额释放`);
+        `超过 ${Math.round(grace / 1000)}s 仍在，有无法归属的进程仍在，按宽限释放（不再算作本次测试）`);
     }
     if (!gone(live)) {
       const which = live === null ? "读不出进程表" : [

@@ -24,9 +24,11 @@ beforeEach(() => {
       // 脱组的后代：系统自带的 sh（macOS 读不到它的环境）、detached（另起一组），等 go-x 才退出
       const { spawn } = await import("node:child_process");
       const loop = "while [ ! -e '${root}/go-x' ] && [ -d '${root}' ]; do sleep 0.05; done";
-      if (process.env.DETACH === "chain") {
+      if (["chain", "known-chain"].includes(process.env.DETACH)) {
         // 短命的中间一环：脱组的 sh 把末端放到后台、写下它的 PID 就退出，监管进程一次也扫不到它；假 bun test 等它退出后也退出
-        const mid = spawn("/bin/sh", ["-c", \`/bin/sh -c "\${loop}" & echo $! >> '${root}/desc'; exit 0\`], { detached: true, stdio: "ignore" });
+        const wait = process.env.DETACH === "known-chain" ? "while [ ! -e '${root}/go-mid' ] && [ -d '${root}' ]; do sleep 0.05; done; " : "";
+        const mid = spawn("/bin/sh", ["-c", \`\${wait}/bin/sh -c "\${loop}" & echo $! >> '${root}/desc'; exit 0\`], { detached: true, stdio: "ignore" });
+        appendFileSync(${JSON.stringify(join(root, "mid"))}, mid.pid + "\\n");
         await new Promise((r) => mid.once("exit", r));
         log("end");
         process.exit(0);
@@ -254,6 +256,41 @@ describe("[验收线 4] 信号与回收", () => {
     expect(started()).toEqual(["a"]);
     go("x");
     await until(() => started().includes("b"), "末端退出后 b 开始");
+    go("b");
+    expect(await b.child.exited).toBe(0);
+  }, 30_000);
+
+  test("不可归属的短命父节点脱组后代：宽限后释放并说明近似", async () => {
+    on(1);
+    const a = drive("a", [], { DETACH: "chain", GRACE_MS: "100", DRAIN_MS: "1000" });
+    expect(await a.child.exited).toBe(0);
+    expect(alive(descendant())).toBe(true);
+    expect(runLog().find((r) => r.event === "end")).toMatchObject({ code: 0, released: true });
+    expect(await a.stderr).toContain("有无法归属的进程仍在，按宽限释放");
+    go("x");
+  }, 30_000);
+
+  for (const mode of ["1", "known-chain"]) test(`被采样见过的脱组后代活过宽限（${mode}）：下一全量仍排队`, async () => {
+    on(1);
+    const a = drive("a", [], { DETACH: mode, GRACE_MS: "100", DRAIN_MS: "500" });
+    const sampledFile = mode === "known-chain" ? "mid" : "desc";
+    await until(() => existsSync(join(root, sampledFile)), "后代已启动");
+    const sampledPid = Number(readFileSync(join(root, sampledFile), "utf8").trim());
+    await until(() => readdirSync(join(dir, "trees")).some((f) => {
+      const t = JSON.parse(readFileSync(join(dir, "trees", f), "utf8"));
+      return t.members?.some((m: { pid: number }) => m.pid === sampledPid);
+    }), "后代已持久化");
+    go("mid");
+    go("a");
+    expect(await a.child.exited).toBe(0);
+    expect(alive(descendant())).toBe(true);
+    expect(runLog().find((r) => r.event === "end")).toMatchObject({ released: false });
+    const b = drive("b", [], { GRACE_MS: "100" });
+    await until(() => runLog().some((r) => r.event === "queued"), "b 排队");
+    await Bun.sleep(500);
+    expect(started()).toEqual(["a"]);
+    go("x");
+    await until(() => started().includes("b"), "后代退出后 b 开始");
     go("b");
     expect(await b.child.exited).toBe(0);
   }, 30_000);

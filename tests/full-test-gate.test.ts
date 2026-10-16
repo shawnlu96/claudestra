@@ -107,59 +107,63 @@ describe("进程树观察（进程组 + 脱组后代）", () => {
 
   test("成员：根、登记过的成员、根的进程组；组长 PID 换了人 = 原来的组已没了", () => {
     const tree: TreeRoot = { pgid: 100, start: "s100", uniq: null, ver: null, uid: null, members: [{ pid: 300, start: "s300", uniq: null, ver: null }] };
-    const pids = (procs: Proc[]) => liveTree(tree, "id", procs, () => null).members.map((p) => p.pid).sort();
+    const pids = (procs: Proc[]) => liveTree(tree, procs).members.map((p) => p.pid).sort();
     expect(pids([proc(100), proc(101, { pgid: 100 }), proc(300), proc(400)])).toEqual([100, 101, 300]);
     expect(pids([proc(300, { start: "reused" })])).toEqual([]); // 登记过的 PID 换了人
     expect(pids([proc(100, { start: "other" }), proc(101, { pgid: 100 })])).toEqual([]);
   });
 
-  test("脱组后代：macOS 按原始父进程唯一 ID、Linux 按父 PID、两边都认环境标记", () => {
+  test("脱组后代：macOS 按原始父进程唯一 ID、Linux 按父 PID", () => {
     const tree: TreeRoot = { pgid: 100, start: "s100", uniq: "1000", ver: null, uid: null, members: [{ pid: 200, start: "s200", uniq: "2000", ver: null }] };
-    const marker = (pids: number[]) => (pid: number) => (pids.includes(pid) ? ["A=1", "CLAUDESTRA_FULL_TEST_PERMIT=id"] : ["A=1"]);
-    const pids = (procs: Proc[], env = marker([])) => liveTree(tree, "id", procs, env).members.map((p) => p.pid).sort();
+    const pids = (procs: Proc[]) => liveTree(tree, procs).members.map((p) => p.pid).sort();
     // 根和登记过的 200 都已退出：200 的孩子（ppid=1，另一组）和孙子照样认得出
     expect(pids([proc(201, { uniq: "2001", puniq: "2000" }), proc(202, { uniq: "2002", puniq: "2001" }), proc(9, { uniq: "2003", puniq: "5" })]))
       .toEqual([201, 202]);
     // Linux：父 PID 是活成员
     expect(pids([proc(200), proc(210, { ppid: 200 }), proc(211, { ppid: 210 })])).toEqual([200, 210, 211]);
-    // 环境标记：认不出父进程的孤儿（macOS 只看根之后被过继的，见下一条）
-    expect(pids([proc(500, { uniq: "1500", puniq: "7" }), proc(501, { uniq: "1501", puniq: "1500" })], marker([500]))).toEqual([500, 501]);
-    expect(pids([proc(700)], marker([700]))).toEqual([700]);
-    expect(pids([proc(700)], marker([]))).toEqual([]);
+
   });
 
-  test("macOS：按原始父进程 PID 版本号认（过继后不变）；血缘断了、环境读不到的孤儿记作 unclaimed，整树按还在算", () => {
+  test("macOS：按原始父进程 PID 版本号认（过继后不变）；血缘断了且无归属键的孤儿记作 unclaimed，整树按还在算", () => {
     // 根 ver=1000（已退出），登记过的成员 200（ver=1010，已退出）；版本号全机递增
     const tree: TreeRoot = { pgid: 100, start: "s100", uniq: "1", ver: 1000, uid: 501, members: [{ pid: 200, start: "s200", uniq: "2", ver: 1010 }] };
-    const marked = (pids: number[]) => (pid: number) => (pids.includes(pid) ? ["A=1", "CLAUDESTRA_FULL_TEST_PERMIT=id"] : pid === 77 ? ["A=1"] : []);
     const orphan = (pid: number, ver: number, opv: number, extra: Partial<Proc> = {}) => proc(pid, { uid: 501, ver, opv, puniq: "1", ...extra });
-    const live = (procs: Proc[], env = marked([])) => {
-      const t = liveTree(tree, "id", procs, env);
+    const live = (procs: Proc[]) => {
+      const t = liveTree(tree, procs);
       return { members: t.members.map((p) => p.pid).sort(), unclaimed: t.unclaimed.map((p) => p.pid).sort() };
     };
     // 过继后 p_puniqueid 被改成 launchd 的 1：按原始父进程版本号照样认出 200 的孩子、孙子
     expect(live([orphan(201, 1011, 1010), orphan(202, 1012, 1011, { ppid: 201 })])).toEqual({ members: [201, 202], unclaimed: [] });
-    // 中间一环（ver=1020）没被扫到就退出了：末端认不出，环境读不到 → unclaimed；observeTree 按 present
+    // 中间一环（ver=1020）没被扫到就退出了：末端认不出 → unclaimed；observeTree 按 present
     expect(live([orphan(300, 1021, 1020)])).toEqual({ members: [], unclaimed: [300] });
     writeTree("v", running(tree));
     expect(observeTree(root, "v", () => [orphan(300, 1021, 1020)])).toBe("present");
-    expect(observeTree(root, "v", () => [orphan(301, 990, 980)])).toBe("absent");
     // 只剩 unclaimed：从第一次看到（quietAt 落盘）起只在宽限内算 present，过了按 absent（它可能是本机别的程序）
     expect(JSON.parse(readFileSync(join(root, "trees", "v.json"), "utf8")).quietAt).toBeNumber();
+    expect(observeTree(root, "v", () => [orphan(301, 990, 980)])).toBe("absent");
     writeTree("q", running({ ...tree, quietAt: Date.now() - 61_000 }));
     expect(observeTree(root, "q", () => [orphan(300, 1021, 1020)])).toBe("absent");
     expect(observeTree(root, "q", () => [orphan(300, 1021, 1020)], 120_000)).toBe("present");
-    // 认得出的成员还在：不受宽限影响
+    // 独立快照：认得出的成员还在，不受宽限影响
+    writeTree("q", running({ ...tree, quietAt: Date.now() - 61_000 }));
     expect(observeTree(root, "q", () => [orphan(201, 1011, 1010), orphan(300, 1021, 1020)])).toBe("present");
-    // 环境里有本次标记 = 成员；读得到环境、没标记 = 外人
-    expect(live([orphan(300, 1021, 1020)], marked([300]))).toEqual({ members: [300], unclaimed: [] });
-    expect(live([orphan(77, 1021, 1020)])).toEqual({ members: [], unclaimed: [] });
     // 不算：根之前就有的原始父进程、launchd 直接起的（原始父进程是 launchd，版本号很小）、别的用户、父进程还是原来那个（唯一 ID 对得上；它 exec 过、版本号变了也一样）
     expect(live([orphan(400, 1030, 990), orphan(401, 1031, 613), orphan(402, 1032, 1025, { uid: 0 }),
       proc(403, { uid: 501, ver: 1040, opv: 1039, ppid: 404, puniq: "u404" }), proc(404, { uid: 501, ver: 1041, opv: 900, uniq: "u404" })])).toEqual({ members: [], unclaimed: [] });
     // 版本号是 int32，回绕后仍按差值比
     const wrapped: TreeRoot = { ...tree, ver: 2147483600, members: [] };
-    expect(liveTree(wrapped, "id", [orphan(500, -2147483600, -2147483640)], () => null).unclaimed.map((p) => p.pid)).toEqual([500]);
+    expect(liveTree(wrapped, [orphan(500, -2147483600, -2147483640)]).unclaimed.map((p) => p.pid)).toEqual([500]);
+  });
+
+  test("归属键：已见成员退出后，同 pgid 或 sid 的漏采样后代活过宽限仍占槽", () => {
+    const tree = { pgid: 100, start: "s100", uniq: null, ver: null, uid: null, members: [],
+      pgids: [100, 200], sids: [100, 200], quietAt: Date.now() - 61_000 };
+    writeTree("keys", running(tree));
+    expect(observeTree(root, "keys", () => [proc(301, { pgid: 200 })])).toBe("present");
+    expect(observeTree(root, "keys", () => [proc(302, { sid: 200 })])).toBe("present");
+    // 回收者也要落盘新发现的成员：随后该成员换组、换会话仍按身份追踪，不按宽限过期。
+    expect(observeTree(root, "keys", () => [proc(302, { pgid: 999, sid: 999 })])).toBe("present");
+    expect(observeTree(root, "keys", () => [proc(303, { sid: 888 })])).toBe("absent");
   });
 
   test("真实进程：bun test 换组生出的后代在根退出、被过继之后仍算在树里，退出后才 absent", async () => {
