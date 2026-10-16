@@ -116,9 +116,14 @@ test('production-scale fixture: 80 cards, 30 sessions, 40 lend orders, response 
   const changes = db.query('SELECT total_changes() AS n').get();
   db.run('PRAGMA query_only=ON');
   const result = board();
-  const bytes = Buffer.byteLength(JSON.stringify({ ok: true, ...result }));
-  console.log(`[work-board scale] 80 cards / 30 sessions / 40 orders: ${bytes} bytes`);
+  // actionState（ACTIONSTATE1）是新增契约：旧字段照原 30KB 量，新增字段每行另给 400 字节预算
+  const bytes = Buffer.byteLength(JSON.stringify({ ok: true, ...result }, (k, v) => (k === 'actionState' ? undefined : v)));
+  const rows = [...result.working, ...result.waiting, ...result.todo.ready, ...result.todo.blocked];
+  const extra = rows.reduce((n, r) => n + Buffer.byteLength(JSON.stringify(r.actionState ?? null)), 0);
+  console.log(`[work-board scale] 80 cards / 30 sessions / 40 orders: ${bytes} bytes + actionState ${extra} bytes`);
   expect(bytes).toBeLessThanOrEqual(30 * 1024);
+  expect(rows.every(r => r.actionState)).toBe(true);
+  expect(extra).toBeLessThanOrEqual(rows.length * 400);
   expect(result.working.length + result.waiting.length + result.todo.ready.length + result.todo.blocked.length).toBe(80);
   expect(db.query('SELECT total_changes() AS n').get()).toEqual(changes);
 });
