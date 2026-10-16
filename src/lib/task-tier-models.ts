@@ -18,8 +18,8 @@ import { isOpusGrade, type CodexEffort } from "./task-tier-model-settings.js";
 import { isTaskTier, runTierChecks, tierAtLaunch, type TaskTier, type TierCheckCtx, type TierCheckPhase } from "./task-tier-spec.js";
 import { ledgerWriter, newLaunchId, type LaunchPlan } from "./task-tier-launch-events.js";
 
-export const TASK_TIER_KEY = "taskTierModels" as const;
-export const TIER_MODELS = { opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5", haiku: "claude-haiku-5-5" } as const;
+const TASK_TIER_KEY = "taskTierModels" as const;
+const TIER_MODELS = { opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5", haiku: "claude-haiku-5-5" } as const;
 type Family = "claude" | "codex";
 type DefaultCell = { claude: string; codex: "inherit" | "down1" };
 
@@ -37,9 +37,9 @@ export const TIER_DEFAULTS: Record<TaskTier, Record<CardRole, DefaultCell>> = {
 const isEffort = (v: unknown): v is CodexEffort => CODEX_EFFORT_LEVELS.includes(v as CodexEffort);
 const rank = (e: CodexEffort) => CODEX_EFFORT_LEVELS.indexOf(e);
 /** 已知档降一档；最低档不再降 */
-export const downgradeEffort = (e: CodexEffort): CodexEffort => CODEX_EFFORT_LEVELS[Math.max(0, rank(e) - 1)];
+const downgradeEffort = (e: CodexEffort): CodexEffort => CODEX_EFFORT_LEVELS[Math.max(0, rank(e) - 1)];
 
-export type TierSource = "tier-settings" | "tier-default" | "role-settings" | "role-default" | "override" | "explicit";
+type TierSource = "tier-settings" | "tier-default" | "role-settings" | "role-default" | "override" | "explicit";
 export interface TierResolved { value: string | null; source: TierSource; note?: string }
 
 /**

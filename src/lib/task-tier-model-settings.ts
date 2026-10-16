@@ -11,10 +11,10 @@ import type { CardRole, RoleModelCell } from "./role-model-settings.js";
 import { TASK_TIERS, isTaskTier, type TaskTier } from "./task-tier-spec.js";
 
 export type CodexEffort = (typeof CODEX_EFFORT_LEVELS)[number];
-export type TierClaudeCell = string;
-export type TierCodexCell = CodexEffort | null | "inherit" | "down1";
+type TierClaudeCell = string;
+type TierCodexCell = CodexEffort | null | "inherit" | "down1";
 /** 缺字段 = 缺省；claude 是完整模型 id 或 "inherit" */
-export interface TierCell { claude?: TierClaudeCell; codex?: TierCodexCell }
+interface TierCell { claude?: TierClaudeCell; codex?: TierCodexCell }
 export type TierTable = Partial<Record<TaskTier, Partial<Record<CardRole, TierCell>>>>;
 
 export const isClaudeModelId = (v: unknown): v is string => typeof v === "string" && /^claude-[a-z0-9][a-z0-9.-]*$/.test(v) && isCodexModel(v);
@@ -24,7 +24,7 @@ export const isOpusGrade = (model: unknown): boolean => typeof model === "string
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** security 一格的下限问题；roleCell = 显式继承时落到的那一格 */
-export function securityCellProblem(role: CardRole, cell: TierCell, roleCell: RoleModelCell | undefined): string | null {
+function securityCellProblem(role: CardRole, cell: TierCell, roleCell: RoleModelCell | undefined): string | null {
   if (cell.claude !== undefined) {
     const model = cell.claude === "inherit" ? roleCell?.claude : cell.claude;
     if (!isOpusGrade(model)) return `security 的 ${role} 不得低于 Opus（${cell.claude === "inherit" ? `继承的角色格是 ${model ?? "空"}` : `写的是 ${model}`}）`;
