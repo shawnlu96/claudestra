@@ -14,7 +14,7 @@ import type { BoardNode } from "../../web/features/collab/dag/dag-types";
 export const PT_NOW = Date.UTC(2026, 9, 14, 4, 0); // 2026-10-14 12:00 Asia/Shanghai
 const M = 60_000, H = 60 * M;
 export const MAP = "proj-map", PLAIN = "proj-plain";
-export const PROJECTS = [{ id: MAP, name: "合成项目", emoji: null, dirs: [] }, { id: PLAIN, name: "合成项目 · 无看板", emoji: null, dirs: [] }];
+const PROJECTS = [{ id: MAP, name: "合成项目", emoji: null, dirs: [] }, { id: PLAIN, name: "合成项目 · 无看板", emoji: null, dirs: [] }];
 /** 卡住了两行：P1 出问题（返工停满 2 小时），P2 卡住（审查停 2 小时） */
 export const STUCK_IDS = ["P1", "P2"];
 
@@ -27,7 +27,7 @@ const done = (id: string, title: string, endAgo: number, stage = "done") => task
 
 const EARLIER = ["导出模板整理", "通知渠道清单", "同步日志字段", "导出分页修正", "通知静默时段", "同步冲突提示", "导出字段排序", "通知频率限制",
   "同步进度条", "导出空态文案", "通知点击落点", "同步重试上限"];
-export function mapTasks() {
+function mapTasks() {
   return [
     live("P1", "导出预览窄屏溢出", "fix", "dev-1", 3 * H, { round: 1,
       lastReview: { round: 1, verdict: "changes", p0: 0, p1: 1, p2: 0, text: "窄屏下预览溢出", ts: PT_NOW - 3 * H } }),
@@ -42,7 +42,7 @@ export function mapTasks() {
   ];
 }
 /** 窗口外的 8 张：GET /ledger/proj-map/done?before=cursor-1 一页给完 */
-export const earlierPage = () => ({ tasks: EARLIER.slice(4).map((t, k) => done(`E${k + 5}`, t, (46 + k * 5) * H)), nextCursor: null });
+const earlierPage = () => ({ tasks: EARLIER.slice(4).map((t, k) => done(`E${k + 5}`, t, (46 + k * 5) * H)), nextCursor: null });
 const REST = { n: 8, byItem: {}, groups: [{ stage: "done", kind: "code", blocked: false, p0: false, n: 8, reviewRounds: 0, p0p1: 0 }] };
 
 export function ptLedgers(): Record<string, object> {
@@ -58,7 +58,7 @@ const bound = (key: string, taskId: string | null, title: string, phase: "active
     ...(phase === "active" ? { handler: { role: "executor" as const, agent: `agent-${agent}`, since: PT_NOW - H },
       stepLine: { active: { step, round: 1 }, steps: [{ step: "restate", round: 0, state: "done" }, { step, round: 1, state: "assigned" }] }, since: PT_NOW - H } : {}) });
 
-export function ptDag() {
+function ptDag() {
   const features = [
     feature("m-export", [bound("a", "E1", "导出模板整理", "done", []), bound("b", "D1", "导出入口文案", "done", ["a"]), bound("c", "P4", "导出按钮改版", "active", ["b"], "dev-4"),
       bound("d", "P2", "导出格式校验", "active", ["b"], "dev-2", "review"), bound("e", "P1", "导出预览窄屏溢出", "active", ["c"], "dev-1", "fix"),
@@ -69,7 +69,7 @@ export function ptDag() {
   return { ...board(features, rowsFor(features, ["agent-pm"])), project: MAP, now: PT_NOW };
 }
 
-export function ptProduct() {
+function ptProduct() {
   const f = (id: string, title: string, hasDag: boolean, counts: object, cards: [string, string, string][]) => ({ id, title, status: "active", hasDag, version: 1, counts,
     eta: null, cards: cards.map(([cid, t, stage]) => ({ id: cid, title: t, stage })), lastActivityAt: PT_NOW - H });
   return { deps: [], features: [
@@ -79,7 +79,7 @@ export function ptProduct() {
   ] };
 }
 
-export function ptWork(project: string) {
+function ptWork(project: string) {
   const row = (key: string, taskId: string, title: string, featureId: string | null, who: string, step: "write" | "review" | "fix" | "merge" | "restate", since: number) =>
     workRow(key, { taskId, title, featureId, who: `agent-${who}`, step, since: PT_NOW - since, machine: "local" });
   if (project === PLAIN) return { now: PT_NOW, asOfSeq: 1, working: [row("q1", "Q1", "同步脚本迁移", null, "dev-7", "write", 30 * M)], waiting: [row("q2", "Q2", "同步脚本验收", null, "dev-8", "review", 15 * M)],
@@ -93,7 +93,7 @@ export function ptWork(project: string) {
       blocked: [workRow("j", { taskId: null, featureId: "m-notify", title: "通知历史页", who: null, step: null, machine: "local" })] } };
 }
 
-export function ptAgents() {
+function ptAgents() {
   const row = (name: string, projectId: string, over: object = {}) => ({ name: `agent-${name}`, displayName: name, purpose: "", cwd: "/repo", status: "active", projectId,
     lastActivityTs: PT_NOW - 10 * M, busy: false, ...over });
   return [...["dev-1", "dev-2", "dev-3", "dev-4", "dev-5", "dev-6"].map((n) => row(n, MAP, { busy: true })), row("pm", MAP), row("dev-7", PLAIN, { busy: true }), row("dev-8", PLAIN)];
@@ -109,7 +109,7 @@ export function ptAsks() {
 }
 
 /** 上次来是 4 小时前：之后 P3 进了合并、D1 完成、P1 审查要返工 */
-export function ptLastSeen(project: string) {
+function ptLastSeen(project: string) {
   if (project !== MAP) return { lastSeen: null, now: PT_NOW, events: [] };
   const ev = (seq: number, target: string, kind: string, ago: number, data: object) => ({ seq, ts: PT_NOW - ago, actor: "agent-pm", target, kind, text: "", data });
   return { lastSeen: PT_NOW - 4 * H, now: PT_NOW, truncated: false, events: [
@@ -119,7 +119,7 @@ export function ptLastSeen(project: string) {
 }
 
 /** 团队名册（ROSTER4 的 /team/roster）：只有「本机」「机器 B」，卡号换成本夹具的 */
-export function ptRoster(project: string) {
+function ptRoster(project: string) {
   const r = rosterFixture(PT_NOW, project);
   const [local, peer] = r.machines;
   peer!.machineKey = "机器 B";
@@ -129,7 +129,7 @@ export function ptRoster(project: string) {
   return { ...r, machines: [local!, peer!] };
 }
 
-export function ptDetail(project: string, id: string) {
+function ptDetail(project: string, id: string) {
   const ov = ptLedgers()[project] as { tasks: { id: string }[] } | undefined;
   const t = ov?.tasks.find((x) => x.id === id) ?? earlierPage().tasks.find((x) => x.id === id);
   return t ? { ok: true, task: t, events: [], timeline: [], now: PT_NOW } : null;
