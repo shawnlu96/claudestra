@@ -81,7 +81,7 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
   },
   {
     id: "peers",
-    label: "Peer 协作",
+    label: "伙伴机器",
     icon: (
       <>
         <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />

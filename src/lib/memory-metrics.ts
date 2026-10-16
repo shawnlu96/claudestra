@@ -12,6 +12,7 @@ import { autoFiles } from "./memory-auto-common.js";
 import { deliverDedupKey } from "./memory-tools-refs.js";
 import { overlaps, type MemoryOrderKind, type MemoryRoute } from "./memory-retrieve.js";
 import { countsAsP1, normalizedFamily, type ReviewFinding } from "./scheduler-review.js";
+import { MEMORY_ATTEMPT_OP, MEMORY_CHANNELS, type MemoryChannel } from "./memory-inject-attempt.js";
 
 const WEEK_MS = 7 * 86_400_000;
 /** §9 同类 P1 复发率的对照窗口：上线前 8 周 */
@@ -272,6 +273,73 @@ export function costLatency(input: MetricsInput): CostLatency {
     retrievalP95Ms: ms.length ? ms[Math.ceil(0.95 * ms.length) - 1]! : null, retrievalSamples: ms.length };
 }
 
+/** PMEMTUNE1：成本样本拆开——有数的、没调模型的（no_model_call）、调了算不出的（cost_unknown）、老事件什么都没带的 */
+export interface SummaryCostSamples { priced: number; noModelCall: number; costUnknown: number; unmarked: number }
+
+/** 指标 8 的补充（只读、只加字段）：窗口内总结写入事件按成本口径分类 */
+export function summaryCostSamples(input: MetricsInput): SummaryCostSamples {
+  const summaries = new Set(input.memories.filter((m) => m.kind === "summary").map((m) => m.id));
+  const out: SummaryCostSamples = { priced: 0, noModelCall: 0, costUnknown: 0, unmarked: 0 };
+  for (const e of input.events) {
+    if (!inWindow(e.ts, input.since, input.until) || e.kind !== "memory" || e.data.mark !== undefined || !summaries.has(e.data.memoryId as string)) continue;
+    if (typeof e.data.costUsd === "number") out.priced++;
+    else if (e.data.costUsd === null && e.data.costReason === "no_model_call") out.noModelCall++;
+    else if (e.data.costUsd === null && e.data.costReason === "cost_unknown") out.costUnknown++;
+    else out.unmarked++;
+  }
+  return out;
+}
+
+/** 未覆盖的写单为什么没推：最后一次检索尝试的结果；observe = 出借渠道只记了观察样本；no_attempt = 这段时间没有任何检索尝试（没领单） */
+type UncoveredReason = "empty" | "budget_drop" | "filtered_visibility" | "error" | "observe" | "no_attempt";
+
+export interface ChannelCoverage {
+  /** 写单数（同 coverage 的分母） */
+  orders: number;
+  /** 各渠道：这段时间有过该渠道检索尝试（或推出）的写单数、其中该渠道推出了至少 1 条的写单数 */
+  byChannel: Record<MemoryChannel, { orders: number; covered: number; rate: number | null }>;
+  /** 未覆盖写单的原因分布 */
+  uncovered: Record<UncoveredReason, number>;
+}
+
+/**
+ * 覆盖率（指标 6）按渠道拆（只读，加字段）。推出事件不带 channel 的是改动前的本机领单（local_take）。
+ * 尝试 = note op = memory_inject_attempt（只数写单）；出借 observe 档的尝试是 memoryLendInjection 的恢复观察样本。
+ */
+export function channelCoverage(input: MetricsInput): ChannelCoverage {
+  const empty = () => ({ orders: 0, covered: 0, rate: null as number | null });
+  const out: ChannelCoverage = { orders: 0, byChannel: { local_take: empty(), lend: empty(), direct: empty() },
+    uncovered: { empty: 0, budget_drop: 0, filtered_visibility: 0, error: 0, observe: 0, no_attempt: 0 } };
+  const channelOf = (v: unknown): MemoryChannel => (MEMORY_CHANNELS.includes(v as MemoryChannel) ? v as MemoryChannel : "local_take");
+  for (const own of groupByTarget(observed(input)).values()) {
+    const stages = own.filter((e) => e.kind === "stage");
+    const pushes = own.filter((e) => e.kind === "scheduler" && e.data.op === "memory_retrieve" && e.data.order !== "review"
+      && Array.isArray(e.data.memoryIds) && e.data.memoryIds.length > 0);
+    const tries = own.filter((e) => e.kind === "note" && ((e.data.op === MEMORY_ATTEMPT_OP && e.data.order !== "review")
+      || (e.data.op === "recovery_observe" && e.data.mechanism === "memoryLendInjection" && e.data.order !== "review")));
+    stages.forEach((e, i) => {
+      if ((e.data.to !== "build" && e.data.to !== "fix") || e.data.from === "blocked" || !inWindow(e.ts, input.since, input.until)) return;
+      const end = stages.slice(i + 1).find((s) => s.data.from !== "blocked" && s.data.to !== "blocked")?.seq ?? Infinity;
+      const inside = (x: LedgerEvent) => x.seq > e.seq && x.seq < end;
+      const pushed = new Set(pushes.filter(inside).map((p) => channelOf(p.data.channel)));
+      const tried = tries.filter(inside);
+      const seen = new Set([...pushed, ...tried.map((t) => (t.data.op === MEMORY_ATTEMPT_OP ? channelOf(t.data.channel) : "lend" as const))]);
+      out.orders++;
+      for (const c of seen) {
+        out.byChannel[c].orders++;
+        if (pushed.has(c)) out.byChannel[c].covered++;
+      }
+      if (pushed.size) return;
+      const last = tried.at(-1);
+      const result = last?.data.op === MEMORY_ATTEMPT_OP ? last.data.result : last ? (last.data.result === "injected" ? "observe" : last.data.result) : "no_attempt";
+      const reason: UncoveredReason = typeof result === "string" && result in out.uncovered ? result as UncoveredReason : "error";
+      out.uncovered[reason]++;
+    });
+  }
+  for (const c of MEMORY_CHANNELS) out.byChannel[c].rate = ratio(out.byChannel[c].covered, out.byChannel[c].orders);
+  return out;
+}
+
 /** 指标 9 路由贡献（参考）：被 applied 的推出各来自哪几路（一条多路命中每路各计 1；排名事件缺失的记 unknown） */
 export function routeContribution(input: MetricsInput, pushed = pushedItems(observed(input))): Record<MemoryRoute | "unknown", number> & { applied: number } {
   const out = { graph: 0, file: 0, vector: 0, unknown: 0, applied: 0 };
@@ -301,6 +369,8 @@ export interface MemoryMetricsReport {
   since: number; until: number;
   recurrenceRate: RecurrenceRate; pitfallRecurrences: PitfallRecurrence[]; uses: UseRates;
   coverage: ReturnType<typeof coverage>; roundsDiff: RoundsDiff; costLatency: CostLatency; routeContribution: ReturnType<typeof routeContribution>;
+  /** PMEMTUNE1（只加字段）：按渠道的覆盖与未覆盖原因、总结成本样本的分类 */
+  channelCoverage: ChannelCoverage; summaryCost: SummaryCostSamples;
   specs: typeof METRIC_SPECS;
 }
 
@@ -311,7 +381,8 @@ export function memoryMetrics(input: MetricsInput): MemoryMetricsReport {
     since: input.since, until: input.until,
     recurrenceRate: recurrenceRate(input, pushed, hits), pitfallRecurrences: pitfallRecurrences(input, pushed, hits),
     uses: useRates(input, pushed), coverage: coverage(input, pushed), roundsDiff: roundsDiff(input, pushed),
-    costLatency: costLatency(input), routeContribution: routeContribution(input, pushed), specs: METRIC_SPECS,
+    costLatency: costLatency(input), routeContribution: routeContribution(input, pushed),
+    channelCoverage: channelCoverage(input), summaryCost: summaryCostSamples(input), specs: METRIC_SPECS,
   };
 }
 

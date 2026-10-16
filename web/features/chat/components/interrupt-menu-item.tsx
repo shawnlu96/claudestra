@@ -1,10 +1,8 @@
 "use client";
 /**
- * 顶栏 ⋮ 里的「立即打断」（agents-ROWMORE1）：composer 暂停按钮的同一个动作——store.interrupt()
- * （3s 冷却 + POST /agents/:name/interrupt，服务端按 scope 检查、空闲不发），不发消息、不碰 kill / restart。
- * 由 topbar-actions.tsx 注入 menuLead；不带 @xl:hidden，宽顶栏也在。请求中禁用防连点；成功收起下拉，
- * 失败把原因留在这一项上（下拉不收，看得见）。store.interrupt() 打的是当前会话：点下时当前会话已不是本项
- * 渲染时的那个（切会话后的旧菜单），就不发。topbar 以 key=agent.name 挂它，切会话即重置状态。
+ * 复用 composer 的 store.interrupt()，沿用冷却和服务端保护。topbar 按 agent.name 重挂，旧菜单不打断新会话。
+ * 请求期间用 aria-disabled + pending 闸防连点，保留按钮焦点；原生 disabled 会关闭依赖 focus-within 的菜单，
+ * 把失败提示藏起来。成功才主动失焦收起，失败留在原项（真浏览器覆盖见 web-row-more-browser.test.ts）。
  */
 import { useEffect, useState } from "react";
 import { useChatStoreApi } from "../chat-store";
@@ -56,7 +54,7 @@ export function InterruptMenuItem({ agent }: { agent: AgentSession }) {
   };
   return (
     <li>
-      <button type="button" data-interrupt-item="" disabled={pending} aria-busy={pending} onClick={() => void run()}>
+      <button type="button" data-interrupt-item="" aria-disabled={pending} aria-busy={pending} onClick={() => void run()}>
         {pending ? <span className="loading loading-spinner loading-xs" /> : <InterruptIcon />}
         {t("立即打断")}
       </button>

@@ -168,7 +168,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   webLoader("web-dom-peer-scope-filter"),
   webLoader("web-dom-product-panes-loading"),
   webLoader("web-dom-product-panes-narrow-team"),
-  webLoader("web-dom-project-pm"),
+  webLoader("web-dom-project-pm"), webLoader("web-dom-row-more"),
   webLoader("web-dom-quota-reset"),
   webLoader("web-dom-review-line"),
   webLoader("web-dom-settings-notify-page"),

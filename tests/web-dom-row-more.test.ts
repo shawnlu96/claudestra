@@ -352,7 +352,8 @@ test("[验收线 2] 请求中再点不重发；失败把原因留在菜单项上
   const u = await mountTop(AGENT);
   const item = topbar(u.host).item()!;
   await act(() => item.click());
-  expect(item.hasAttribute("disabled")).toBe(true);
+  expect(item.getAttribute("aria-disabled")).toBe("true");
+  expect(item.hasAttribute("disabled")).toBe(false);
   await act(() => item.click());
   expect(state.posts).toEqual(["dev-a"]);
   await act(() => state.release.forEach((r) => r()));
@@ -360,7 +361,7 @@ test("[验收线 2] 请求中再点不重发；失败把原因留在菜单项上
   expect(state.posts).toEqual(["dev-a"]);
   const alert = u.host.querySelector('[role="alert"]');
   expect(alert?.textContent).toContain("agent busy elsewhere");
-  expect(item.hasAttribute("disabled")).toBe(false);
+  expect(item.getAttribute("aria-disabled")).toBe("false");
   await u.unmount();
 });
 

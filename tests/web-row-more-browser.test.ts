@@ -53,7 +53,10 @@ import { machines } from "@/lib/machines"; import { setLang } from "@/lib/i18n";
 import { ChatStoreProvider, useChatStoreApi, useChatStore } from "../chat-store"; import { Sidebar } from "./sidebar"; import { TopBarActions } from "./topbar-actions";
 document.documentElement.dataset.theme = "light"; setLang("zh");
 const top = location.hash === "#top";
-function Load() { const s = useChatStoreApi(); useEffect(() => { void Promise.all([s.loadAgents("action"), s.loadProjects()]).then(() => { window.loaded = true; }); }, [s]); return null; }
+function Load() { const s = useChatStoreApi(); useEffect(() => {
+  s.produce((state) => { state.activeAgent = "dev-alpha"; });
+  void Promise.all([s.loadAgents("action"), s.loadProjects()]).then(() => { window.loaded = true; });
+}, [s]); return null; }
 function Bar() { const a = useChatStore((s) => s.state.agents.find((x) => x.name === "dev-alpha"));
   return <header className="@container relative z-40 flex min-h-12 shrink-0 items-center gap-2 border-b border-base-300 bg-base-100 px-3 sm:px-4">
     <span className="truncate text-sm font-medium">dev-alpha</span>{a && <TopBarActions agent={a} busy={false} onManage={() => {}} />}</header>; }
@@ -258,3 +261,42 @@ test.skipIf(!enabled)("after：每个会话行与组头都有 ⋯，不压未读
     expect([k, tb[k].items.filter((x) => x.includes("立即打断")).length]).toEqual([k, 1]);
   }
 }, 240_000);
+
+for (const width of [390, 1280]) {
+  test.skipIf(!enabled)(`interrupt failure stays visible at ${width}px and pending clicks send once`, async () => {
+    const s = await open("after", width, "#top");
+    let requests = 0;
+    let release!: () => void;
+    const response = new Promise<void>((resolve) => { release = resolve; });
+    await s.page.route("**/agents/dev-alpha/interrupt", async (route) => {
+      requests++;
+      await response;
+      await route.fulfill({ status: 500, json: { ok: false, error: "interrupt regression failure" } });
+    });
+    try {
+      await s.page.locator('header [aria-label="更多操作"]:visible').click();
+      const item = s.page.locator("header [data-interrupt-item]");
+      await item.click();
+      await s.page.waitForFunction(`document.querySelector('[data-interrupt-item]')?.getAttribute("aria-busy") === "true"`);
+      await s.page.mouse.move(0, 400);
+      await s.page.waitForTimeout(400); // Let daisyUI's dropdown closing transition finish while the request is pending.
+      const pendingVisible = await item.isVisible();
+      const pendingFocused = await item.evaluate("el => document.activeElement === el");
+      await item.evaluate("el => { el.click(); el.click(); }");
+      release();
+      const alert = s.page.locator('header [role="alert"]');
+      await alert.waitFor({ state: "attached" });
+      expect(await alert.innerText()).toContain("interrupt regression failure");
+      expect(await alert.isVisible()).toBe(true);
+      expect(pendingVisible).toBe(true);
+      expect(pendingFocused).toBe(true);
+      expect(await item.getAttribute("aria-busy")).toBe("false");
+      expect(requests).toBe(1);
+      expect(s.blocked).toEqual([]);
+      expect(s.errors).toEqual([]);
+    } finally {
+      release();
+      await s.ctx.close();
+    }
+  }, 30_000);
+}

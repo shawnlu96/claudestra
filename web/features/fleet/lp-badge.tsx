@@ -1,10 +1,10 @@
 "use client";
-import { lpBadgeText, type LpState } from "@/lib/api/fleet";
-import { useLang, useT } from "@/lib/i18n";
-import { LP_WORDS, ownerWordsTr } from "@/lib/owner-words";
+import { lpBadgeText, lpBadgeTitle, type LpState } from "@/lib/api/fleet";
+import { useLang } from "@/lib/i18n";
+import { ownerWordsTr } from "@/lib/owner-words";
 import { Svg } from "./icons";
 
-/** lucide snail：low-priority 开着 */
+/** lucide snail：低优先级开着 */
 export const SnailIcon = ({ className }: { className?: string }) => (
   <Svg className={className}>
     <path d="M2 13a6 6 0 1 0 12 0 4 4 0 1 0-8 0 2 2 0 0 0 4 0" />
@@ -25,7 +25,7 @@ const HourglassIcon = () => (
   </Svg>
 );
 
-/** lucide ban：本周 low-priority 额度用完 */
+/** lucide ban：低优先级额度用完 */
 const BanIcon = () => (
   <Svg>
     <circle cx="12" cy="12" r="10" />
@@ -33,23 +33,19 @@ const BanIcon = () => (
   </Svg>
 );
 
-/** 侧栏行与批量面板共用的 low-priority 徽章；关着且额度没用完 / 状态不明时不显示。徽章上的词中英文都从 lib/owner-words 取 */
+/** 侧栏行与批量面板共用的低优先级徽章：线性图标 + 文字，title 是额度那套说法；关着且额度没用完 / 状态不明时不显示。
+ * 不自己报额度百分比（额度在「今天 · 团队与额度」看）。词中英文都从 lib/owner-words 取 */
 export function LpBadge({ lp }: { lp?: LpState | null }) {
-  const t = useT();
   const words = ownerWordsTr(useLang());
   const text = lpBadgeText(lp, words);
   if (!lp || !text) return null;
   const on = lp.lowPriority === "on";
   const tone = on ? "text-info/80" : lp.lowPriority === "exhausted" ? "text-error/70" : "text-warning/80";
-  const title = on
-    ? t("low-priority 开着，到 {time}{pct}", { time: lp.resetsAt ?? "?", pct: lp.allowancePct !== undefined ? ` · ${lp.allowancePct}%` : "" })
-    : lp.lowPriority === "exhausted"
-      ? t("本周 low-priority 额度已用完")
-      : words(LP_WORDS.walledTitle, { time: lp.resetsAt ?? "?" });
+  const title = lpBadgeTitle(lp, words);
   return (
     <span className={`flex shrink-0 items-center gap-0.5 text-[11px] ${tone}`} title={title}>
       {on ? <SnailIcon /> : lp.lowPriority === "exhausted" ? <BanIcon /> : <HourglassIcon />}
-      <span className="font-mono tabular-nums">{text}</span>
+      <span className={on ? undefined : "font-mono tabular-nums"}>{text}</span>
     </span>
   );
 }
