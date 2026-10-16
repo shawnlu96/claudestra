@@ -157,7 +157,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "peer-pr-intake.ts": "ledger=1",
     "peer-pr-ledger.ts": "stmt=2",
     "peer-pr-notice.ts": "ledger=2",
-    "peer-pr-observe.ts": "ledger=1",
+    "peer-pr-observe.ts": "ledger=3",
     "peer-pr-tick.ts": "notice=2",
   },
   /** lent orders run for peers: their ledgers and the lend journal, not this ledger's feature cards */
