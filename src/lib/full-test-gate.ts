@@ -23,7 +23,7 @@ export const NOT_STARTED_EXIT = 75;
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 const SIGNAL_NO: Record<string, number> = { SIGHUP: 1, SIGINT: 2, SIGKILL: 9, SIGTERM: 15 };
 const MINUTE = 60_000;
-export const ORPHAN_GRACE_MS = 60_000;
+const ORPHAN_GRACE_MS = 60_000;
 
 type Env = Record<string, string | undefined>;
 type Tree = "absent" | "present" | "unknown";
