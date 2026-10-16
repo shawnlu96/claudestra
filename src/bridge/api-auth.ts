@@ -4,7 +4,8 @@
  * 非 GET/HEAD 必须带 x-cstra-device 头（cookie 浏览器会自动附上，这个头跨站表单附不上）。
  * 限流按 principal：owner 的所有设备共用 api:owner:self 一个身份，配额相应放大。api-routes 与 web-terminal 都调这里。
  */
-import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePrincipals, type Principal } from "../lib/principals.js";
+import { findByBearer, readPrincipals, SlidingWindowLimiter, updatePrincipals, type Principal } from "../lib/principals.js";
+import { API_RATE_LIMIT_PER_MIN, createApiRateLimiter } from "../lib/api-rate-bucket.js";
 import { csrfOkFor, DEVICE_HEADER, deviceCookieHeader, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
 import { readBrowserCookie, staleMirrorName } from "../lib/floka-browser-protocol/credentials.js";
 import { browserPolicy } from "../lib/floka-browser-protocol/policy.js";
@@ -16,11 +17,8 @@ import { peerE2eRefusal, readHttpPeers } from "../lib/peer-e2e-local.js";
 import { messagesOnlyAllows } from "../lib/peer-scope-gate.js";
 import { logDeviceRefusal, noteDeviceAuth } from "./device-cookie-renew.js";
 
-// 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
-// 手机 + 电脑 + 侧栏轮询共用一个身份
-const API_RATE_LIMIT_PER_MIN = 120;
-const OWNER_RATE_LIMIT_PER_MIN = 600;
-const limiters = new Map<string, SlidingWindowLimiter>();
+// 容量与选桶见 lib/api-rate-bucket.ts：owner 所有设备共用一个 600 的桶，与当次设备是否受限无关
+const rateLimiter = createApiRateLimiter();
 const sigFailures = new Map<string, SlidingWindowLimiter>();
 const SIG_FAILURE_KEYS = 2_000;
 const lastTouchWrite = new Map<string, number>();
@@ -96,11 +94,8 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   if (replay?.reject) return peerSigRejected(replay.reject);
   if (p.messagesOnly && !messagesOnlyAllows(req.method, url.pathname)) return apiJson(403, { ok: false, error: "this token may only deliver messages", code: "messages_only" });
   if (opts.rateLimit && replay?.charge !== false) {
-    const limit = p.role === "owner" ? OWNER_RATE_LIMIT_PER_MIN : API_RATE_LIMIT_PER_MIN;
-    const key = tokenIdOf(p);
-    let limiter = limiters.get(key);
-    if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
-    if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)`, code: "rate_limited", reason: "rate_limited" });
+    const limited = rateLimiter.charge(p, url.pathname);
+    if (limited) return apiJson(429, { ok: false, error: `rate limit exceeded (${limited.limit} req/min)`, code: "rate_limited", reason: "rate_limited" });
   }
   // 从只读重放判定到扣桶、记入缓存之间不 await；429 不占条目，也不会让重试绕过限速桶。
   if (sig?.once) peerReplayVerdict(sig.once, p.peer!);
