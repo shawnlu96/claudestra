@@ -1,11 +1,15 @@
 /** merge-arch-UNIONLANE1 · 有序并集登记文件（registry-order.ts ORDERED_UNION_FILES）不占车道、不拿也不等文件锁；unionLaneShare off 时逐字照旧 */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { computeLanes, type LaneNode } from "../src/lib/dag-tools-lanes.js";
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import type { TaskWorkflow } from "../src/lib/ledger-scheduler.js";
+import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { createTask } from "../src/lib/ledger-write.js";
+import { RECOVERY_POLICY_PATH, setRecovery, type RecoveryMode } from "../src/lib/recovery-policy.js";
 import { defaultRecoveryMode } from "../src/lib/recovery-key-defaults.js";
 import { isOrderedUnionFile } from "../src/lib/registry-order.js";
 import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/scheduler-plan.js";
@@ -62,6 +66,84 @@ const snapshot = (fileGlobs: string[], held: string[], share?: boolean): Planner
   intents: [], blockedBy: [], queueFrozen: false, fileGlobs, heldResources: held.map((resource) => ({ taskId: "A", resource })),
   workerCount: 0, maxWorkers: 2, freeWorkerSlot: "slot:p:0", author, reviewer: null,
   reviewDispatches: [], uiGate: { state: "none" }, screenshotsDigest: null, ...(share === undefined ? {} : { unionLaneShare: share }),
+});
+
+describe("pool-lock-gate 回归：真实统一池快照", () => {
+  const pooled = (files: string[], held: string[], share: boolean): PlannerSnapshot => ({
+    ...snapshot(files, held, share),
+    pool: { remote: { mode: "balance", roles: ["write"], poolTimeoutMin: 15, agents: { claude: 2, codex: 0 } },
+      localReviewers: 0, localWriters: 0, peers: [], repo: "o/r", lastPeer: null },
+  });
+  test("旧并集锁不挡派单；off 和普通文件冲突仍等", () => {
+    for (const files of [["src/lib/b.ts", KEYS], ["src/lib/recovery-*.ts"]]) {
+      expect(planScheduler(pooled(files, [], false))).toMatchObject({ kind: "intent", action: "dispatch" });
+      const on = planScheduler(pooled(files, [KEYS], true));
+      expect(on).toMatchObject({ kind: "intent", action: "dispatch" });
+      if (on.kind === "intent") expect(on.resources).not.toContain(KEYS);
+      expect(planScheduler(pooled(files, [KEYS], false))).toMatchObject({ kind: "wait", code: "placement" });
+    }
+    for (const share of [false, true]) {
+      expect(planScheduler(pooled([KEYS, "src/lib/a.ts"], [KEYS, "src/lib/a.ts"], share)))
+        .toMatchObject({ kind: "wait", code: "placement" });
+    }
+    // Sharing the requested exact file must also agree with planner when the held lock is an ordinary glob.
+    expect(planScheduler(pooled([KEYS], ["src/lib/*"], true))).toMatchObject({ kind: "intent", action: "dispatch" });
+  });
+});
+
+function writerFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "unionlane-writer-")), path = join(dir, "ledger.sqlite");
+  const db = openLedger(path), owner = { actor: "owner", now: 10 };
+  const policyBefore = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null;
+  const cards = ["A", "B"].map((id) => createTask(db, owner, { project: "p", id, title: id, kind: "code", agent: `agent-${id}` }).row);
+  const flows = cards.map((t) => setWorkflow(db, owner, { taskId: t.id, taskRev: t.rev, template: "code", templateVersion: 2,
+    mode: "auto", authorFamily: "claude", fallback: "收窄到只报错" }).workflow);
+  const seq = () => (db.query("SELECT MAX(seq) AS seq FROM events WHERE project = 'p'").get() as { seq: number }).seq;
+  const mode = (value: RecoveryMode) => setRecovery(db, owner, { project: "p", set: { key: "unionLaneShare", mode: value }, reason: "验证旧锁与派单事务一致" });
+  const plan = (ignoreHeld = false) => planScheduler({ ...snapshot(["src/lib/recovery-*.ts"], []), task: cards[1]!, workflow: flows[1]!,
+    author: { ...author, agent: "agent-B" }, events: listEvents(db, { project: "p", target: "B" }),
+    heldResources: ignoreHeld ? [] : db.query("SELECT taskId, resource FROM scheduler_resources WHERE project = 'p'").all() as { taskId: string; resource: string }[],
+  });
+  return { db, owner, cards, flows, seq, mode, plan, close() {
+    closeLedger(path); rmSync(dir, { recursive: true, force: true });
+    if (policyBefore === null) rmSync(RECOVERY_POLICY_PATH, { force: true }); else writeFileSync(RECOVERY_POLICY_PATH, policyBefore);
+  } };
+}
+
+test("writer-lock-gate 回归：planner 原样计划可取锁；off/observe/普通重叠照旧拒绝并回滚", async () => {
+  for (const ordinary of [false, true]) {
+    const f = writerFixture();
+    try {
+      await f.mode("off");
+      planIntent(f.db, f.owner, { id: "old:A", taskId: "A", taskRev: f.cards[0]!.rev, workflowRev: f.flows[0]!.rev,
+        causalSeq: f.seq(), node: "write", action: "dispatch", reason: "旧独占文件锁", resources: [KEYS, ...(ordinary ? ["src/lib/recovery-policy.ts"] : [])] });
+      await f.mode("on");
+      const current = f.plan();
+      if (ordinary) expect(current).toMatchObject({ kind: "wait", code: "resource_busy" });
+      const plan = ordinary ? f.plan(true) : current;
+      expect(plan).toMatchObject({ kind: "intent", action: "dispatch" });
+      if (plan.kind !== "intent") throw new Error(JSON.stringify(plan));
+      expect(plan.resources).toContain("src/lib/recovery-*.ts");
+      expect(plan.resources).not.toContain(KEYS);
+      const submit = () => planIntent(f.db, f.owner, { ...plan, taskId: "B", taskRev: f.cards[1]!.rev,
+        workflowRev: f.flows[1]!.rev, causalSeq: f.seq(), recipient: plan.recipient ?? undefined });
+      const exclusiveModes: RecoveryMode[] = ordinary ? ["off", "observe", "on"] : ["off", "observe"];
+      for (const mode of exclusiveModes) {
+        await f.mode(mode);
+        expect(f.plan()).toMatchObject({ kind: "wait", code: "resource_busy" });
+        const before = f.seq();
+        expect(submit).toThrow(/A 占用/);
+        expect(f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = 'B'").all()).toEqual([]);
+        expect(f.db.query("SELECT id FROM scheduler_intents WHERE taskId = 'B'").all()).toEqual([]);
+        expect(f.seq()).toBe(before);
+      }
+      if (ordinary) continue;
+      await f.mode("on");
+      expect(submit().intent).toMatchObject({ taskId: "B", action: "dispatch", status: "pending" });
+      expect(f.db.query("SELECT taskId FROM scheduler_resources WHERE resource = ?").get(KEYS)).toEqual({ taskId: "A" });
+      expect(f.db.query("SELECT taskId FROM scheduler_resources WHERE resource = 'src/lib/recovery-*.ts'").get()).toEqual({ taskId: "B" });
+    } finally { f.close(); }
+  }
 });
 
 describe("文件锁：不为有序并集文件拿锁，也不被别人对它的锁挡住", () => {

@@ -19,6 +19,10 @@ export function unionLaneShareMode(project: string, path?: string): RecoveryMode
 }
 export const unionLaneShareOn = (project: string, path?: string): boolean => unionLaneShareMode(project, path) === "on";
 
+/** Both planner gates honor the snapshot override; absent = re-read the project's recovery policy. */
+export const unionLanePlanMode = (s: { task: { project: string }; unionLaneShare?: boolean }): RecoveryMode =>
+  s.unionLaneShare === undefined ? unionLaneShareMode(s.task.project) : s.unionLaneShare ? "on" : "off";
+
 /** `resources` without the ordered union files when sharing is on; the same array otherwise. */
 export const sharedOut = <T extends string>(resources: readonly T[], on: boolean): readonly T[] =>
   on ? resources.filter((r) => !isOrderedUnionFile(r)) : resources;
@@ -28,7 +32,7 @@ export const touchesUnionFile = (resources: readonly string[]): boolean => resou
 
 type Held = { resource: string; taskId: string };
 /**
- * Planner side: the first of `resources` that another card's lock in `held` blocks (null = none). on skips locks on ordered union
+ * The first of `resources` that another card's lock in `held` blocks (null = none). on skips locks on ordered union
  * files; off / observe block as before, and observe queues a sample when only such locks block.
  */
 export function blockingLock(task: { id: string; project: string }, held: readonly Held[], resources: readonly string[],

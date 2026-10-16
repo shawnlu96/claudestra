@@ -33,7 +33,7 @@ import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./re
 import { ownerFreshStep } from "./scheduler-ui-owner-fresh.js";
 import { fixSelfHeal } from "./scheduler-fix-selfheal.js";
 import { handbackReview } from "./pm-handback.js";
-import { blockingLock, sharedOut, touchesUnionFile, unionLaneShareMode } from "./union-lane-share.js";
+import { blockingLock, sharedOut, touchesUnionFile, unionLanePlanMode } from "./union-lane-share.js";
 
 export interface WorkerRef {
   agent: string;
@@ -149,20 +149,18 @@ function liveIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["a
   return wait("in_flight", `等待 ${node.id} 的台账结果（${latest.status}）`);
 }
 
-const unionShare = (s: PlannerSnapshot) => s.unionLaneShare === undefined ? unionLaneShareMode(s.task.project) : s.unionLaneShare ? "on" : "off";
-
 /** Locks to take for the scope; an ordered union file takes none when unionLaneShare is on (scope still counts it). */
 function fileResources(s: PlannerSnapshot): string[] | null {
   const keys = s.fileGlobs.map(resourceKey);
   if (!keys.length || keys.includes(null)) return null;
   const files = [...new Set(keys as string[])].sort();
-  return touchesUnionFile(files) ? [...sharedOut(files, unionShare(s) === "on")] : files;
+  return touchesUnionFile(files) ? [...sharedOut(files, unionLanePlanMode(s) === "on")] : files;
 }
 
 function resourceGate(s: PlannerSnapshot, resources: readonly string[]): PlannerDecision | null {
   const others = s.heldResources.filter((h) => h.taskId !== s.task.id);
   const hit = blockingLock(s.task, others, resources, (resource, h) => resourcesOverlap(resource, resourceKey(h.resource) ?? h.resource.toLowerCase()),
-    touchesUnionFile(others.map((h) => h.resource)) ? unionShare(s) : "off");
+    touchesUnionFile(others.map((h) => h.resource)) ? unionLanePlanMode(s) : "off");
   return hit && wait("resource_busy", `资源 ${hit.resource} 与 ${hit.held.resource} 冲突，先等 ${hit.held.taskId}`);
 }
 
