@@ -19,24 +19,27 @@ export interface SendResult {
   ccText?: string;
   /** bridge 押住了、没有回合（额度闸 / 目标停在额度菜单，只给全权 owner 设备；别人只拿到 queued） */
   heldBy?: "quota_wall" | "wall_menu";
-  /** 押住了但不告诉原因（非全权设备 / guest：额度是 owner 的事）：同样没有回合 */
+  /** 等待当前回合空闲，或押住但不公开原因（非全权设备 / guest）：本条还没有启动回合 */
   queued?: boolean;
   /** 被 Chat Guard 隔离：没进 agent，等 owner 放行；messageId 供之后的 guard 事件认气泡 */
   guarded?: boolean;
   messageId?: string;
 }
 
+export interface SendOptions { waitForIdle?: boolean }
+
 /** 投递一条用户消息（fire-and-forget，wait=0）。带附件走 multipart（text + files[]，bridge 落 inbox 并注入路径）。 */
-export function sendMessage(agent: string, text: string, files: File[] | undefined, signal: AbortSignal): Promise<SendResult> {
+export function sendMessage(agent: string, text: string, files: File[] | undefined, signal: AbortSignal, options: SendOptions = {}): Promise<SendResult> {
   if (files?.length) {
     const fd = new FormData();
     fd.append("text", text);
     fd.append("wait", "0");
+    if (options.waitForIdle !== undefined) fd.append("waitForIdle", String(options.waitForIdle));
     for (const f of files) fd.append("files", f);
     return api<SendResult>(`/agents/${enc(agent)}/messages`, { method: "POST", body: fd, signal, timeoutMs: 0 });
   }
   const ask = takeAskHint(agent, text); // 气泡里点的按钮：告诉 bridge 答的是哪条「待你处理」
-  return api<SendResult>(`/agents/${enc(agent)}/messages${ask ? `?ask=${encodeURIComponent(ask)}` : ""}`, { method: "POST", json: { text, wait: 0 }, signal, timeoutMs: 0 });
+  return api<SendResult>(`/agents/${enc(agent)}/messages${ask ? `?ask=${encodeURIComponent(ask)}` : ""}`, { method: "POST", json: { text, wait: 0, ...options }, signal, timeoutMs: 0 });
 }
 
 /**

@@ -134,8 +134,8 @@ describe("RRL-1 hook: duplicate-http-ack (review finding r1)", () => {
 
 describe("RRL-1 wiring", () => {
   test("[验收线 3] the messages route asks the hook before any delivery to PM (and before ask / slash handling)", () => {
-    const src = readFileSync(join(import.meta.dir, "..", "src", "bridge", "api-routes.ts"), "utf8");
-    const route = src.slice(src.indexOf("const msgMatch = path.match("));
+    const src = readFileSync(join(import.meta.dir, "..", "src", "bridge", "api-messages.ts"), "utf8");
+    const route = src;
     const hook = route.indexOf("await interceptRemoteReview("), deliver = route.indexOf("await deps.deliver(env)");
     expect(hook).toBeGreaterThan(0);
     expect(hook).toBeLessThan(route.indexOf("answerFromChat("));

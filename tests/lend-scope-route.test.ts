@@ -160,15 +160,17 @@ describe("例外不扩散", () => {
     expect(JSON.stringify(await list.json())).not.toContain(WORKER.replace(/^agent-/, ""));
   }, 60_000);
 
-  test("源码：lendScopeAllows 在 api-routes 里只出现在消息路由那一行（外加 import）", () => {
-    const src = readFileSync(join(import.meta.dir, "../src/bridge/api-routes.ts"), "utf8").split("\n");
+  test("源码：出借 scope 例外只在 messages 委托处理器里", () => {
+    const routes = readFileSync(join(import.meta.dir, "../src/bridge/api-routes.ts"), "utf8");
+    const src = readFileSync(join(import.meta.dir, "../src/bridge/api-messages.ts"), "utf8").split("\n");
     const uses = src.map((l, i) => [l, i] as const).filter(([l]) => l.includes("lendScopeAllows"));
     expect(uses.map(([l]) => l.trim())).toEqual([
       'import { lendScopeAllows } from "./lend-scope.js";',
       "if (!inScopeEitherName(principal, agentParam) && !(await lendScopeAllows(req, principal, agentParam))) return notInScope(agentParam);",
     ]);
-    const routeLine = uses[1]![1];
-    expect(src.slice(routeLine - 3, routeLine).join("\n")).toContain('path.match(/^\\/agents\\/([^/]+)\\/messages$/)');
-    expect(src.length).toBeLessThanOrEqual(1892); // 1891 行 + 末尾换行
+    expect(routes).not.toContain("lendScopeAllows");
+    expect(routes).toContain('path.match(/^\\/agents\\/([^/]+)\\/messages$/)');
+    expect(routes).toContain('if (msgMatch && req.method === "POST") {\n    return handleApiMessages(');
+    expect(routes.split("\n").length).toBeLessThanOrEqual(1892); // Retain the hub size ceiling after extraction.
   });
 });
