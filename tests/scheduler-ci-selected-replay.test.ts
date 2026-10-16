@@ -5,11 +5,11 @@ import { bounceStep, closeMergeRun, bounceReceipt } from "../src/lib/scheduler-m
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
-import { saveReplayReceipt } from "../src/lib/ci-selected-replay-receipt.js";
+import { collectReplayEvidence, readReplayReceipt, replayRefs, saveReplayReceipt } from "../src/lib/ci-selected-replay-receipt.js";
 import { recoveryPolicy } from "../src/lib/recovery-policy.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
-import { HEAD, receipt, tempRoot } from "./ci-selected-replay-receipt.test.js";
+import { HEAD, evidence, replayCommand, receipt, tempRoot } from "./ci-selected-replay-receipt.test.js";
 
 const run: MergeRun = { project: "p", taskId: "T", intentId: "i", rev: 1, reviewedHead: HEAD, phase: "ready", prRef: "https://github.com/example/repo/pull/1",
   expectedBranch: "feat/t", requiredChecks: "check", createdAt: 100, updatedAt: 100, reason: null, mergeSha: null };
@@ -74,4 +74,45 @@ test("new archive key defaults on while ciSelectedGate defaults observe", () => 
   const root = tempRoot(), absent = join(root, "absent.json");
   expect(recoveryPolicy("p", "ciSelectedReplayReceipt", absent).mode).toBe("on");
   expect(recoveryPolicy("p", "ciSelectedGate", absent).mode).toBe("observe");
+});
+
+
+test("first red defers actual bounce across ticks until necessary jobs finish, without waiting for proof", async () => {
+  const root = tempRoot(), e = evidence(), io = replayCommand(e), calls: string[] = [];
+  e.run.status = "in_progress";
+  const web = e.jobs.find((j) => j.name === "web production build")!; web.status = "in_progress";
+  e.jobs.push({ name: "ci coverage proof", status: "queued", conclusion: null, steps: [] });
+  const step = async (to: string, text?: string) => { calls.push(to); expect(text).toBe(rawReceipt); return run; };
+  using ports = useReplayPorts({ mode: "on", root, now: () => 100, revision: () => ({ round: 1, specRev: 1 }), effectiveMode: async () => "observe",
+    collect: (repo, head, links, _cmd, _cwd, opts) => collectReplayEvidence(repo, head, links, io.command, undefined, opts) });
+  expect(await bounceStep(run, pr, external, step)).toBe(run);
+  expect(calls).toEqual([]);
+  expect(replayRefs(run, root)).toEqual([]);
+  expect(io.calls.some((a) => a[2] === "download")).toBe(false);
+  web.status = "completed";
+  await bounceStep(run, pr, external, step);
+  expect(calls).toEqual(["resolved"]);
+  const refs = replayRefs(run, root);
+  expect(refs).toHaveLength(1);
+  expect(readReplayReceipt(root, refs[0]!)).toMatchObject({ gaps: [], verdict: { allow: true }, evidence: { run: { status: "in_progress" } } });
+  await bounceStep(run, pr, external, step);
+  expect(io.calls.filter((a) => a[2] === "download")).toHaveLength(1);
+});
+
+test("readiness deadline persists across reconstructed ports and times out into an explicit attempt-bound gap", async () => {
+  const root = tempRoot(), e = evidence(), io = replayCommand(e), calls: string[] = [];
+  e.jobs[0]!.status = "queued";
+  const step = async (to: string) => { calls.push(to); return run; };
+  const base = { mode: "on" as const, root, waitMs: 100, revision: () => ({ round: 1, specRev: 1 }), effectiveMode: async () => "observe" as const,
+    collect: ((repo, head, links, _cmd, _cwd, opts) => collectReplayEvidence(repo, head, links, io.command, undefined, opts)) as typeof collectReplayEvidence };
+  { using ports = useReplayPorts({ ...base, now: () => 100 }); await bounceStep(run, pr, external, step); }
+  { using ports = useReplayPorts({ ...base, now: () => 199 }); await bounceStep(run, pr, external, step); }
+  expect(calls).toEqual([]);
+  { using ports = useReplayPorts({ ...base, now: () => 200 }); await bounceStep(run, pr, external, step); }
+  expect(calls).toEqual(["resolved"]);
+  const r = readReplayReceipt(root, replayRefs(run, root)[0]!);
+  expect(r.subject).toEqual({ id: 7, attempt: 1 });
+  expect(r.evidence).toBeNull();
+  expect(r.gaps.join("；")).toContain("超时");
+  expect(io.calls.some((a) => a[2] === "download")).toBe(false);
 });

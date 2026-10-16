@@ -70,9 +70,9 @@ describe("attempt archives", () => {
     expect(() => readReplayReceipt(root, ref)).toThrow();
     expect(readdirSync(root)).toHaveLength(1);
   });
-  test("reader rejects a changed attempt, head or unfinished run", async () => {
+  test("reader rejects a changed attempt, head or event", async () => {
     const run = evidence().run;
-    for (const change of [{ attempt: 2 }, { headSha: BASE }, { status: "in_progress" }, { event: "push" }]) {
+    for (const change of [{ attempt: 2 }, { headSha: BASE }, { event: "push" }]) {
       const port: CiSelectedPort = { runById: async () => ({ ...run, ...change }), prRun: async () => null,
         verdict: async () => ({ present: false, text: null }), commitParents: async () => [], variable: async () => null };
       expect(readCiSelectedArchiveRun(port, "example/repo", 7, HEAD, 1)).rejects.toThrow("归档期间");
@@ -121,22 +121,24 @@ describe("same-input judgments", () => {
   });
 });
 
-test("collector pins the real PR run, downloads necessary artifacts, and rejects a racing attempt", async () => {
-  const e = evidence(), calls: string[][] = [];
-  const names = [...new Set(["ci-related-plan", ...Object.keys(e.files).map((p) => p.split("/")[0]!)])];
+export function replayCommand(e: ReplayEvidence) {
+  const calls: string[][] = [], names = [...new Set(["ci-related-plan", ...Object.keys(e.files).map((p) => p.split("/")[0]!)])];
   let rereads = 0, racing = false;
   const command: typeof import("../src/lib/run-bounded.js").runBounded = async (argv) => {
     calls.push(argv);
     if (argv[1] === "run") {
-      const name = argv[argv.indexOf("-n") + 1]!, dir = argv[argv.indexOf("-D") + 1]!;
-      const file = name === "ci-related-plan" ? "plan.json" : Object.keys(e.files).find((p) => p.startsWith(`${name}/`))!.split("/")[1]!;
+      const selected = argv.flatMap((v, i) => v === "-n" ? [argv[i + 1]!] : []), dir = argv[argv.indexOf("-D") + 1]!;
       const { mkdirSync } = await import("node:fs");
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, file), name === "ci-related-plan" ? e.planText : e.files[`${name}/${file}`]!);
+      for (const name of selected) {
+        const file = name === "ci-related-plan" ? "plan.json" : Object.keys(e.files).find((p) => p.startsWith(`${name}/`))!.split("/")[1]!;
+        const out = selected.length === 1 ? dir : join(dir, name);
+        mkdirSync(out, { recursive: true });
+        writeFileSync(join(out, file), name === "ci-related-plan" ? e.planText : e.files[`${name}/${file}`]!);
+      }
       return { code: 0, stdout: "", stderr: "", timedOut: false };
     }
     const path = argv[2]!;
-    const row = { id: 7, run_attempt: racing && ++rereads > 1 ? 2 : 1, head_sha: HEAD, event: "pull_request", status: "completed",
+    const row = { id: 7, run_attempt: racing && ++rereads > 1 ? 2 : e.run.attempt, head_sha: HEAD, event: "pull_request", status: e.run.status,
       conclusion: "failure", html_url: e.run.url, path: ".github/workflows/ci.yml" };
     let value: unknown;
     if (path.includes("runs?head_sha=")) value = { workflow_runs: [row] };
@@ -150,13 +152,24 @@ test("collector pins the real PR run, downloads necessary artifacts, and rejects
     else throw new Error(`unexpected GET: ${path}`);
     return { code: 0, stdout: typeof value === "string" ? value : JSON.stringify(value), stderr: "", timedOut: false };
   };
-  const got = await collectReplayEvidence("example/repo", HEAD, [e.run.url], command);
+  return { command, calls, race: () => { racing = true; rereads = 0; } };
+}
+
+test("collector pins the real PR run, downloads necessary artifacts, and rejects a racing attempt", async () => {
+  const e = evidence(), io = replayCommand(e);
+  const got = await collectReplayEvidence("example/repo", HEAD, [e.run.url], io.command);
   expect(judgeReplayEvidence(got, HEAD)).toMatchObject({ replayable: true, verdict: { allow: true } });
-  expect(calls.every((a) => a[0] === "gh" && (a[1] === "api" || a[2] === "download") && !a.includes("--method"))).toBe(true);
-  racing = true; rereads = 0;
-  expect(collectReplayEvidence("example/repo", HEAD, [e.run.url], command)).rejects.toThrow("归档期间");
+  expect(io.calls.every((a) => a[0] === "gh" && (a[1] === "api" || a[2] === "download") && !a.includes("--method"))).toBe(true);
+  io.race();
+  expect(collectReplayEvidence("example/repo", HEAD, [e.run.url], io.command)).rejects.toThrow("归档期间");
 });
 
+test("early-capture: necessary jobs complete while proof is queued remains replayable", async () => {
+  const e = evidence(); e.run.status = "in_progress";
+  e.jobs.push({ name: "ci coverage proof", status: "queued", conclusion: null, steps: [] });
+  const io = replayCommand(e), got = await collectReplayEvidence("example/repo", HEAD, [e.run.url], io.command);
+  expect(judgeReplayEvidence(got, HEAD)).toMatchObject({ replayable: true, verdict: { allow: true } });
+});
 
 test.each(["related", "light"])("%s scope retains the frozen selection and rejects extra old shards", (scope) => {
   const e = evidence(), p = JSON.parse(e.planText), n = scope === "light" ? 1 : 8;
@@ -179,4 +192,36 @@ test.each(["related", "light"])("%s scope retains the frozen selection and rejec
     e.files["test-shard-8/shard.log"] = "old attempt";
     expect(judgeReplayEvidence(e, HEAD).replayable).toBe(false);
   }
+});
+
+
+test("capture uses one artifact batch and reuses only a bound same-attempt archive", async () => {
+  const e = evidence(), io = replayCommand(e);
+  const got = await collectReplayEvidence(e.repo, HEAD, [e.run.url], io.command);
+  expect(io.calls.filter((a) => a[2] === "download")).toHaveLength(1);
+  io.calls.length = 0;
+  expect(await collectReplayEvidence(e.repo, HEAD, [e.run.url], io.command, undefined, { reuse: () => got })).toBe(got);
+  expect(io.calls.some((a) => a[2] === "download" || a[2]!.includes("/jobs?"))).toBe(false);
+  e.run.attempt++;
+  await collectReplayEvidence(e.repo, HEAD, [e.run.url], io.command, undefined, { reuse: () => got });
+  expect(io.calls.filter((a) => a[2] === "download")).toHaveLength(1);
+});
+
+test("one wall-clock budget bounds the whole capture rather than every command separately", async () => {
+  let now = 0;
+  const timeouts: number[] = [], io = replayCommand(evidence());
+  const command: typeof io.command = async (args, opts) => {
+    timeouts.push(opts.timeoutMs); now += 40;
+    return io.command(args, opts);
+  };
+  await expect(collectReplayEvidence("example/repo", HEAD, [], command, undefined, { now: () => now, budgetMs: 90 })).rejects.toThrow("总时间预算");
+  expect(timeouts).toEqual([90, 50, 10]);
+  expect(io.calls.some((a) => a[2] === "download")).toBe(false);
+});
+
+test("mixed-attempt reruns are distinguished from missing evidence", () => {
+  const e = evidence(); e.run.attempt = 2;
+  const result = judgeReplayEvidence(e, HEAD);
+  expect(result.replayable).toBe(false);
+  expect(result.gaps.join("；")).toContain("混合 attempt");
 });

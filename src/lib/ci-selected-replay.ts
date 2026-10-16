@@ -2,7 +2,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { collectReplayEvidence, type ReplayEvidence, type ReplayReceipt, type ReplayRef, REPLAY_POLICY,
-  archiveSelectedMode, readReplayReceipt, replayRefs, replayRoot, saveReplayReceipt } from "./ci-selected-replay-receipt.js";
+  archiveSelectedMode, pendingReplayJobs, ReplayEvidencePending, replayWaitStarted, readReplayReceipt, replayRefs, replayRoot, saveReplayReceipt } from "./ci-selected-replay-receipt.js";
 import { judgeSelected, logDigest, parseReceipt, readResponsibility, shardComplete, shardLogFailures, type SelectedVerdict } from "./ci-selected-verdict.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { statePath } from "./paths.js";
@@ -18,12 +18,13 @@ const parse = (s: string): Record<string, any> => obj(JSON.parse(s));
 const ran = (log: string): string[] => log.split(/\r?\n/).flatMap((l) => /^::group::(.+):$/.exec(l)?.[1] ?? []).map((p) => p.replace(/^\.\//, ""));
 const sha = (s: string) => `sha256:${createHash("sha256").update(s).digest("hex")}`;
 const deny = (reason: string): SelectedVerdict => ({ allow: false, reason, outOfScope: [] });
-export interface ReplayJudgment { replayable: boolean; gaps: string[]; verdict: SelectedVerdict | null; failures: { file: string; name: string }[] }
+export interface ReplayJudgment { unverifiedNonTest: string[]; replayable: boolean; gaps: string[]; verdict: SelectedVerdict | null; failures: { file: string; name: string }[] }
 
 /** Non-test jobs and every non-test step must be known. A summary failure is explained only by its failed shards. */
 function stepsOf(e: ReplayEvidence): Record<string, string> {
   const steps: Record<string, string> = {};
   for (const j of e.jobs) {
+    if (j.name === "ci coverage proof") continue;
     if (j.status !== "completed") steps[`job:${j.name}`] = "pending-job";
     if (!/^test shard [1-8] of 8$/.test(j.name) && j.name !== "typecheck + test + guard") steps[`job:${j.name}`] = j.conclusion ?? "unknown";
     for (const s of j.steps) {
@@ -36,21 +37,26 @@ function stepsOf(e: ReplayEvidence): Record<string, string> {
 
 /** Reconstruct inputs from bound originals; receipt booleans are diagnostics, never the replay's authority. */
 export function judgeReplayEvidence(e: ReplayEvidence, head: string): ReplayJudgment {
-  const gaps = [...e.gaps], failures: ReplayJudgment["failures"] = [], verdicts: SelectedVerdict[] = [];
+  const gaps = [...e.gaps], unverifiedNonTest: string[] = [], failures: ReplayJudgment["failures"] = [], verdicts: SelectedVerdict[] = [];
   try {
     const p = parse(e.planText), n = p.scope === "light" ? 1 : 8, responsibility = readResponsibility(p.responsibility);
     if (p.version !== 1 || p.sha !== e.checkout || p.prHead !== head || p.event !== "pull_request"
       || e.parents.length !== 2 || e.parents[0] !== e.base || e.parents[1] !== head || e.run.headSha !== head
-      || e.run.event !== "pull_request" || e.run.status !== "completed") gaps.push("计划 / head / base / run 绑定不符");
+      || e.run.event !== "pull_request") gaps.push("计划 / head / base / run 绑定不符");
     if (!["full", "related", "light"].includes(p.scope) || !Array.isArray(p.shards) || p.shards.length !== n) gaps.push("执行分片计划缺失");
     if (Object.keys(e.files).some((key) => Number(/shard-(\d+)\//.exec(key)?.[1] ?? 0) > n)) gaps.push("工件包含执行计划之外的分片");
+    if (pendingReplayJobs(e.jobs).length) gaps.push("必要作业尚未结束或缺失");
     const allRan: string[] = [];
     for (let k = 1; k <= n; k++) {
       const log = e.files[`test-shard-${k}/shard.log`], f = parse(e.files[`ci-facts-shard-${k}/job-facts.json`] ?? "{}");
       if (typeof log !== "string") { gaps.push(`缺第 ${k} 片日志`); continue; }
       const got = ran(log); allRan.push(...got);
-      if (f.version !== 1 || f.job !== `test-shard-${k}` || f.runId !== e.run.id || f.attempt !== e.run.attempt
+      if (f.version !== 1 || f.job !== `test-shard-${k}` || f.runId !== e.run.id
         || f.head !== e.checkout || f.logDigest !== logDigest(log)) gaps.push(`第 ${k} 片事实 / attempt / 日志摘要不符`);
+      if (f.attempt !== e.run.attempt) gaps.push(`第 ${k} 片混合 attempt：事实 ${f.attempt}，run ${e.run.attempt}（旧片不沿用）`);
+      if (k === 1) for (const name of ["typecheck", "guard", "build"]) {
+        if (["skipped", "pending", "unknown"].includes(String(obj(f.core)[name]))) unverifiedNonTest.push(`core:${name}=${obj(f.core)[name]}`);
+      }
       if (!log.startsWith(`shard=${k}/${n}\nhead=${e.checkout}\n`)) gaps.push(`第 ${k} 片日志头不符`);
       const job = e.jobs.find((j) => j.name === `test shard ${k} of 8`);
       if (!job || !job.steps.some((s) => s.name === "Unit tests")) gaps.push(`第 ${k} 片作业或测试步骤缺失`);
@@ -85,16 +91,20 @@ export function judgeReplayEvidence(e: ReplayEvidence, head: string): ReplayJudg
     if (!["ci related plan", `ci scope ${p.scope}`, "web typecheck + lint", "web production build", "desktop scope", "desktop typecheck + cargo test"]
       .every((name) => e.jobs.some((j) => j.name === name))) gaps.push("必要作业清单缺失");
     if (!e.jobs.length || !e.jobs.some((j) => j.name === "typecheck + test + guard")) gaps.push("非测试步骤清单不完整");
-    if (gaps.length) return { replayable: false, gaps, verdict: null, failures };
+    if (gaps.length) return { unverifiedNonTest, replayable: false, gaps, verdict: null, failures };
     const no = verdicts.find((v) => !v.allow);
     const verdict = no ?? (verdicts.length ? { allow: true, reason: "所有失败均由责任选集判为范围外", outOfScope: verdicts.flatMap((v) => v.outOfScope) }
       : deny("没有可放行的测试失败"));
-    return { replayable: true, gaps, verdict, failures };
-  } catch { return { replayable: false, gaps: [...gaps, "必要证据结构或 JSON 无法解析"], verdict: null, failures }; } // malformed archives are reported, never guessed
+    return { unverifiedNonTest, replayable: true, gaps, verdict, failures };
+  } catch { return { unverifiedNonTest, replayable: false, gaps: [...gaps, "必要证据结构或 JSON 无法解析"], verdict: null, failures }; } // malformed archives are reported, never guessed
 }
 
 type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
-interface ReplayPorts { mode?: RecoveryMode; root?: string; capture?: (run: MergeRun, pr: PrSnapshot) => Promise<void> }
+interface ReplayPorts {
+  mode?: RecoveryMode; root?: string; capture?: (run: MergeRun, pr: PrSnapshot) => Promise<void | "wait">;
+  collect?: typeof collectReplayEvidence; revision?: typeof cardRevision; effectiveMode?: typeof archiveSelectedMode;
+  now?: () => number; waitMs?: number;
+}
 let injected: ReplayPorts | null = null;
 export function useReplayPorts(p: ReplayPorts): Disposable {
   const old = injected; injected = p;
@@ -113,33 +123,56 @@ function cardRevision(run: MergeRun): { round: number; specRev: number } {
   } finally { db.close(); }
 }
 
-async function captureBounce(run: MergeRun, pr: PrSnapshot): Promise<void> {
+/** Only a complete, attempt-bound archive can bypass expensive repeat downloads. */
+function reusableEvidence(run: MergeRun, subject: { id: number; attempt: number }, root?: string): ReplayEvidence | null {
+  for (const ref of replayRefs(run, root)) {
+    const r = readReplayReceipt(root ?? replayRoot(), ref), e = r.evidence;
+    if (!r.gaps.length && e && e.run.id === subject.id && e.run.attempt === subject.attempt
+      && e.run.headSha === run.reviewedHead) return e;
+  }
+  return null;
+}
+
+async function captureBounce(run: MergeRun, pr: PrSnapshot, ports: ReplayPorts | null): Promise<void | "wait"> {
   const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(run.prRef)?.[1];
-  let evidence: ReplayEvidence | null = null;
-  const gaps: string[] = [];
+  let evidence: ReplayEvidence | null = null, subject: ReplayReceipt["subject"];
+  const gaps: string[] = [], now = ports?.now ?? Date.now;
   let revision: { round: number | null; specRev: number | null } = { round: null, specRev: null };
-  try { revision = cardRevision(run); } catch (e) { gaps.push((e as Error).message); }
+  try { revision = (ports?.revision ?? cardRevision)(run); } catch (e) { gaps.push((e as Error).message); }
   try {
     if (!repo) throw new Error("PR 仓库无法识别");
-    evidence = await collectReplayEvidence(repo, pr.head, pr.checks.filter((c) => c.bucket === "fail" || c.bucket === "cancel").map((c) => c.link ?? ""));
+    evidence = await (ports?.collect ?? collectReplayEvidence)(repo, pr.head,
+      pr.checks.filter((c) => c.bucket === "fail" || c.bucket === "cancel").map((c) => c.link ?? ""), undefined, undefined,
+      { reuse: (s) => reusableEvidence(run, s, ports?.root) });
   } catch (e) {
+    if (e instanceof ReplayEvidencePending) {
+      subject = { id: e.run.id, attempt: e.run.attempt };
+      const started = await replayWaitStarted(run, e.run, now(), ports?.root);
+      if (now() - started < (ports?.waitMs ?? 300_000)) return "wait";
+      gaps.push("等待必要作业超时；未完成证据不用于假设放行");
+    }
     gaps.push((e as Error).message);
   }
   const judged = evidence ? judgeReplayEvidence(evidence, run.reviewedHead) : null;
   const r: ReplayReceipt = { version: 1, policyVersion: REPLAY_POLICY, project: run.project, taskId: run.taskId, intentId: run.intentId,
-    mergeRev: run.rev, head: run.reviewedHead, ...revision, capturedAt: Date.now(), effectiveMode: repo ? await archiveSelectedMode(repo, run.project) : "off",
-    checks: pr.checks.map((c) => ({ name: c.name, link: c.link ?? "" })), failures: judged?.failures ?? null, evidence, gaps: [...gaps, ...judged?.gaps ?? []], verdict: judged?.verdict ?? null };
-  if (archiveMode(run.project) === "on") await saveReplayReceipt(r, injected?.root);
+    mergeRev: run.rev, head: run.reviewedHead, ...revision, capturedAt: now(), subject,
+    effectiveMode: repo ? await (ports?.effectiveMode ?? archiveSelectedMode)(repo, run.project) : "off",
+    checks: pr.checks.map((c) => ({ name: c.name, link: c.link ?? "" })), failures: judged?.failures ?? null,
+    evidence, gaps: [...gaps, ...judged?.gaps ?? []], verdict: judged?.verdict ?? null };
+  if ((ports?.mode ?? archiveMode(run.project)) === "on") await saveReplayReceipt(r, ports?.root);
 }
 
-/** Wraps the existing callback, including rerun/source-wait routes; it never changes that callback's arguments or result. */
+/** Necessary evidence may defer the bounce across ticks for up to five minutes; the eventual callback and receipt stay unchanged. */
 export function replayBounceStep(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, ports = injected): Step {
   const mode = ports?.mode ?? archiveMode(run.project);
   if (mode !== "on" || (external.ciSelected !== true && !ports?.capture)) return step;
   return async (to, receipt) => {
     if (to === "resolved" && receipt?.startsWith(`退回 fix（ci_fail）：PR head ${run.reviewedHead}，`)
       && (ports?.mode ?? archiveMode(run.project)) === "on") {
-      try { await (ports?.capture ?? captureBounce)(run, pr); }
+      try {
+        const captured = ports?.capture ? await ports.capture(run, pr) : await captureBounce(run, pr, ports);
+        if (captured === "wait") return run;
+      }
       catch (e) {
         console.error(`⚠️ [ci-selected-replay] ${run.taskId} 归档失败，退回事件将记录缺口：${(e as Error).message}`);
       }
@@ -164,7 +197,7 @@ export function replayBounceEvent(db: Database, row: MergeRun, cause: string): R
 
 export interface ReplayRow {
   seq: number; taskId: string; head: string; replayable: boolean; hypothetical: "allow" | "deny" | "unreplayable";
-  reason: string; posterior: "confirmed_problem" | "confirmed_recovered" | "unknown";
+  unverifiedNonTest: string[]; reason: string; posterior: "confirmed_problem" | "confirmed_recovered" | "unknown";
   evidence: { seq: number; text: string; data: Record<string, unknown> }[]; receipts: ReplayRef[];
 }
 
@@ -213,7 +246,7 @@ export function replaySelectedHistory(db: Database, project: string, days: numbe
   const rows: ReplayRow[] = events.filter((e) => e.kind === "scheduler" && e.data.op === "merge_conflict" && e.data.cause === "ci_fail").map((event) => {
     const b = obj(event.data.ciSelectedReplay), refs = Array.isArray(b.refs) ? b.refs as ReplayRef[] : [];
     const base: ReplayRow = { seq: event.seq, taskId: event.target, head: String(event.data.prHead), replayable: false,
-      hypothetical: "unreplayable", reason: String(b.gap ?? "旧事件没有归档工件"), posterior: "unknown", evidence: [], receipts: refs };
+      hypothetical: "unreplayable", unverifiedNonTest: [], reason: String(b.gap ?? "旧事件没有归档工件"), posterior: "unknown", evidence: [], receipts: refs };
     try {
       if (!refs.length) return base;
       const archives = refs.map((ref) => readReplayReceipt(root, ref));
@@ -224,7 +257,7 @@ export function replaySelectedHistory(db: Database, project: string, days: numbe
       if (!r.evidence || r.gaps.length) throw new Error(r.gaps.join("；") || "没有原始证据");
       const j = judgeReplayEvidence(r.evidence, r.head);
       if (!j.replayable || !j.verdict) throw new Error(j.gaps.join("；"));
-      return { ...base, replayable: true, hypothetical: j.verdict.allow ? "allow" as const : "deny" as const, reason: j.verdict.reason,
+      return { ...base, replayable: true, hypothetical: j.verdict.allow ? "allow" as const : "deny" as const, reason: j.verdict.reason, unverifiedNonTest: j.unverifiedNonTest,
         ...(j.verdict.allow ? posterior(db, event, refs, events, root) : {}) };
     } catch (e) { return { ...base, reason: (e as Error).message }; }
   });
@@ -235,6 +268,8 @@ export function replaySelectedHistory(db: Database, project: string, days: numbe
     followupNote: 'ci-selected-replay-followup {"bounceSeq":123,"head":"<head>","receiptDigest":"<digest>",'
       + '"outcome":"confirmed_problem|confirmed_recovered","evidence":["<证据链接>"]}',
     totalBounces: rows.length, replayable: rows.filter((r) => r.replayable).length,
+    hypotheticalQualification: "假设放行沿用在线 judge 的 skipped 语义；未验证的 guard/build 单列，不能据此认定收益或真实恢复",
+    hypotheticalAllowedWithUnverifiedNonTest: allowed.filter((r) => r.unverifiedNonTest.length > 0).length,
     hypotheticalAllowed: allowed.length, hypotheticalDenied: rows.filter((r) => r.hypothetical === "deny").length,
     unreplayable: rows.filter((r) => !r.replayable).length,
     unknownIncludingUnreplayable: rows.filter((r) => !r.replayable || (r.hypothetical === "allow" && r.posterior === "unknown")).length,

@@ -26,6 +26,7 @@ export interface ReplayEvidence {
 export interface ReplayReceipt {
   version: 1; policyVersion: string; project: string; taskId: string; intentId: string; mergeRev: number;
   head: string; round: number | null; specRev: number | null; capturedAt: number; effectiveMode: CiSelectedMode;
+  subject?: { id: number; attempt: number };
   checks: { name: string; link: string }[]; failures: { file: string; name: string }[] | null; evidence: ReplayEvidence | null; gaps: string[]; verdict: SelectedVerdict | null;
 }
 export interface ReplayRef { file: string; digest: string }
@@ -35,23 +36,36 @@ const prefix = (b: ReplayBinding) => replayDigest([b.project, b.taskId, b.intent
 const directory = (root: string, b: ReplayBinding) => join(root, prefix(b));
 const bindingOf = (r: ReplayReceipt): ReplayBinding => ({ ...r, rev: r.mergeRev, reviewedHead: r.head });
 
-/** A lock plus the shared atomic writer keeps retries idempotent without overwriting an earlier attempt or a missing-evidence record. */
-export async function saveReplayReceipt(r: ReplayReceipt, root = replayRoot()): Promise<ReplayRef> {
-  const dir = directory(root, bindingOf(r));
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const key = replayDigest([r.evidence?.run.id, r.evidence?.run.attempt, r.checks, r.effectiveMode]).slice(7);
-  const file = `${prefix(bindingOf(r))}/${key}.json`, path = join(root, file);
+/** First-wins writes share locking for both receipts and durable readiness deadlines. */
+async function writeOnce(path: string, value: unknown): Promise<any> {
   const lock = await acquireLock(`${path}.lock`);
   if (!lock) throw new Error("回执文件锁不可用，未覆盖工件");
   try {
     if (!lock.held()) throw new Error("回执文件锁已失效");
-    if (existsSync(path)) {
-      const old = readReplayReceipt(root, { file, digest: "" }, false);
-      return { file, digest: replayDigest(old) };
-    }
-    writeTextAtomicSync(path, canonicalJson(r), { mode: 0o600 });
-    return { file, digest: replayDigest(r) };
+    if (!existsSync(path)) writeTextAtomicSync(path, canonicalJson(value), { mode: 0o600 });
+    return JSON.parse(readFileSync(path, "utf8"));
   } finally { lock.release(); }
+}
+
+/** Retries cannot overwrite earlier evidence, including explicit missing-evidence receipts. */
+export async function saveReplayReceipt(r: ReplayReceipt, root = replayRoot()): Promise<ReplayRef> {
+  const dir = directory(root, bindingOf(r));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const subject = r.subject ?? r.evidence?.run;
+  const key = replayDigest([subject?.id, subject?.attempt, r.checks, r.effectiveMode]).slice(7);
+  const file = `${prefix(bindingOf(r))}/${key}.json`;
+  const old = await writeOnce(join(root, file), r);
+  return { file, digest: replayDigest(old) };
+}
+
+/** The deadline survives scheduler restarts and is isolated by intent, revision, head, run and attempt. */
+export async function replayWaitStarted(b: ReplayBinding, subject: CiSelectedRun, now: number, root = replayRoot()): Promise<number> {
+  const dir = directory(root, b);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const key = replayDigest([subject.id, subject.attempt]).slice(7);
+  const saved = await writeOnce(join(dir, `waiting.${key}.json`), { startedAt: now });
+  if (!Number.isFinite(saved.startedAt)) throw new Error("证据等待起点损坏");
+  return saved.startedAt;
 }
 
 /** Paths are generated hashes; references from ledger data cannot escape the archive root. */
@@ -96,23 +110,58 @@ async function pages(api: (path: string) => Promise<any>, path: string, field: s
 async function downloadFiles(command: typeof runBounded, repo: string, runId: number, names: string[], cwd?: string): Promise<Record<string, string>> {
   const dir = mkdtempSync(join(tmpdir(), "ci-replay-")), files: Record<string, string> = {};
   try {
-    for (const name of names) {
-      const out = join(dir, name);
-      const r = await command(["gh", "run", "download", String(runId), "-R", repo, "-n", name, "-D", out], { cwd, timeoutMs: 60_000 });
-      if (r.code !== 0 || r.timedOut || r.truncated) throw new Error(`工件 ${name} 下载失败`);
-      files[`${name}/${fileOf(name)}`] = readFileSync(join(out, fileOf(name)), "utf8");
-    }
+    if (!names.length) return files;
+    const r = await command(["gh", "run", "download", String(runId), "-R", repo, ...names.flatMap((n) => ["-n", n]), "-D", dir],
+      { cwd, timeoutMs: 60_000 });
+    if (r.code !== 0 || r.timedOut || r.truncated) throw new Error("必要工件批量下载失败");
+    for (const name of names) files[`${name}/${fileOf(name)}`] = readFileSync(join(dir, ...(names.length > 1 ? [name] : []), fileOf(name)), "utf8");
     return files;
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
+export class ReplayEvidencePending extends Error {
+  constructor(public readonly run: CiSelectedRun, names: string[]) { super(`必要作业尚未结束：${names.join("、")}`); }
+}
+
+/** Proof only checks artifacts already produced by these jobs; waiting for it would discard otherwise complete first-red evidence. */
+export function pendingReplayJobs(jobs: ReplayJob[]): string[] {
+  const scope = jobs.find((j) => /^ci scope (full|related|light)$/.test(j.name));
+  const n = scope?.name === "ci scope light" ? 1 : 8;
+  const names = ["ci related plan", scope?.name ?? "ci scope", "typecheck + test + guard", "web typecheck + lint", "web production build",
+    "desktop scope", "desktop typecheck + cargo test", ...Array.from({ length: n }, (_, i) => `test shard ${i + 1} of 8`)];
+  return names.filter((name) => !jobs.some((j) => j.name === name && j.status === "completed"));
+}
+
+export interface ReplayCollectOptions { reuse?: (run: CiSelectedRun) => ReplayEvidence | null; now?: () => number; budgetMs?: number }
+
+/** One wall-clock budget covers every command, including pagination and the single artifact batch. */
+function budgetCommand(command: typeof runBounded, options: ReplayCollectOptions): typeof runBounded {
+  const now = options.now ?? Date.now, deadline = now() + (options.budgetMs ?? 90_000);
+  return (argv, opts) => {
+    const remaining = deadline - now();
+    if (remaining <= 0) throw new Error("证据采集总时间预算已耗尽");
+    return command(argv, { ...opts, timeoutMs: Math.min(opts.timeoutMs, remaining) });
+  };
+}
+
 /** Fetches immutable subjects only. The before/after run read rejects a rerun started during artifact collection. */
-export async function collectReplayEvidence(repo: string, head: string, links: string[], command = runBounded, cwd?: string): Promise<ReplayEvidence> {
+export async function collectReplayEvidence(repo: string, head: string, links: string[], command = runBounded,
+  cwd?: string, options: ReplayCollectOptions = {}): Promise<ReplayEvidence> {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !SHA.test(head)) throw new Error("仓库或 head 非法");
+  command = budgetCommand(command, options);
   const port = ghCiSelectedPort(command, cwd);
   const run = await port.prRun(repo, head);
   if (!run) throw new Error("没有当前 head 的 PR CI run");
   await readCiSelectedArchiveRun(port, repo, run.id, head, run.attempt);
+  const gaps: string[] = [];
+  if (links.some((link) => !link.startsWith(`https://github.com/${repo}/actions/runs/${run.id}/`)
+    && link !== `https://github.com/${repo}/actions/runs/${run.id}`)) gaps.push("失败检查未全部绑定当前 CI run");
+  const reused = options.reuse?.(run);
+  if (reused && !gaps.length && !reused.gaps.length && reused.repo === repo
+    && reused.run.id === run.id && reused.run.attempt === run.attempt && reused.run.headSha === head) {
+    await readCiSelectedArchiveRun(port, repo, run.id, head, run.attempt);
+    return reused;
+  }
   // This repo’s recursive GitHub tree exceeds the command runner’s 1 MiB default; larger evidence still has a hard cap.
   const api = async (path: string, diff = false): Promise<any> => {
     const r = await command(["gh", "api", path, ...(diff ? ["-H", "Accept: application/vnd.github.diff"] : [])],
@@ -120,12 +169,11 @@ export async function collectReplayEvidence(repo: string, head: string, links: s
     if (r.code !== 0 || r.timedOut || r.truncated) throw new Error("GitHub 证据读取失败");
     return diff ? r.stdout : JSON.parse(r.stdout);
   };
-  const gaps: string[] = [];
-  if (links.some((link) => !link.startsWith(`https://github.com/${repo}/actions/runs/${run.id}/`)
-    && link !== `https://github.com/${repo}/actions/runs/${run.id}`)) gaps.push("失败检查未全部绑定当前 CI run");
   const jobsRaw = await pages(api, `repos/${repo}/actions/runs/${run.id}/attempts/${run.attempt}/jobs`, "jobs");
   const jobs: ReplayJob[] = jobsRaw.map((j) => ({ name: j.name, status: j.status, conclusion: j.conclusion,
     steps: (j.steps ?? []).map((s: any) => ({ name: s.name, conclusion: s.conclusion })) }));
+  const pending = pendingReplayJobs(jobs);
+  if (pending.length) throw new ReplayEvidencePending(run, pending);
   const artifacts = await pages(api, `repos/${repo}/actions/runs/${run.id}/artifacts`, "artifacts");
   const selected = artifacts.filter((a) => ARTIFACT.test(a.name));
   if (selected.some((a) => a.expired)) gaps.push("必要工件已过期");
