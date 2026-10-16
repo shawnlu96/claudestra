@@ -3,7 +3,7 @@
  *   PROJTABS_SHOTS_DIR=<目录> [PROJTABS_BASE_REPO=<基线 main 的检出目录>] bun --no-env-file test tests/web-project-tabs-browser.test.ts
  * 入口与数据见 tests/helpers/project-tabs-shots.ts（改前改后同一个入口、同一份数据），时刻钉在 2026-10-14 12:00 Asia/Shanghai，浅色，
  * 真 Chromium，回环 Bun.serve，非回环请求一律拦掉并断言为 0；每张图跑 shotIssues。
- * 1280：冷开 / 项目地图 / 选中模块的模块进度 / 团队 / 点开任务（改前右栏详情，改后右侧抽屉）；390：冷开 / 模块进度 / 团队
+ * 基线取 PR base 的 main。1280：冷开 / 项目地图 / 选中模块的模块进度 / 团队 / 点开任务（改前右栏详情，改后右侧抽屉）；390：冷开 / 模块进度 / 团队
  * （390 改前冷开就是产品 DAG 列表，项目地图那张和它重复，不另拍）。另拍无看板项目的「项目地图」（改后）核对退回因果线，不进正规清单。
  */
 import { expect, test } from "bun:test";
@@ -35,7 +35,9 @@ async function after(page: Page, view: View, narrow: boolean) {
   if (view === "map" || view === "map-plain") await tab("项目地图").click();
   if (view === "module") {
     await tab("项目地图").click();
-    await moduleCard(page, "导出").click();
+    // PDFOCUS1：桌面画布单击卡 = 选中，双击才进模块；手机列表仍是单击
+    if (narrow) await moduleCard(page, "导出").click();
+    else await moduleCard(page, "导出").dblclick();
     await page.locator("[data-project-pane=module] nav").waitFor();
   }
   if (view === "team") {
@@ -53,7 +55,8 @@ async function after(page: Page, view: View, narrow: boolean) {
 async function before(page: Page, view: View, narrow: boolean) {
   if (view === "map") await page.locator("[role=tab]", { hasText: "产品 DAG" }).first().click();
   if (view === "module") {
-    await moduleCard(page, "导出").click();
+    if (narrow) await moduleCard(page, "导出").click();
+    else await moduleCard(page, "导出").dblclick(); // PDFOCUS1 起桌面单击只选中
     await page.locator(`nav[aria-label="返回产品 DAG"]`).waitFor(); // 进了子 DAG 的面包屑（手机分段名不变）
   }
   if (view === "team") {
