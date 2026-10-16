@@ -462,7 +462,7 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
 }
 
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
-// 守门判定 / 隔离 / 放行中的同押后：target 没看到；没确认的插队也算（bridge/steer-cc.ts：别把 target 别的输出当成对插队方的答复）
+// 守门判定 / 隔离 / 放行中的同押后：target 没看到；没确认的插队也算（bridge/steer-insert.ts：别把 target 别的输出当成对插队方的答复）
 const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target), ...insertUnseenFrom(target)];
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
@@ -582,7 +582,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait } from "./lib/turn-state.js"; import { afterInsertSend, configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
-import { dropInserts, insertUnseenFrom, settleInsertReply, settleInsertsAtStop } from "./bridge/steer-cc.js";
+import { dropInserts, insertUnseenFrom, settleInsertReply } from "./bridge/steer-insert.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
@@ -1731,7 +1731,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         if (!fromChannelId && typeof msg.fromChannelId === "string") {
           fromChannelId = msg.fromChannelId;
         }
-        if (fromChannelId) turnCuts.noteReplied(fromChannelId, msg.chatId), settleInsertReply(fromChannelId, { chatId: msg.chatId }); // 打断收尾提醒据此列「还没回复」；CC 插队回了发送方就不补投
+        if (fromChannelId) turnCuts.noteReplied(fromChannelId, msg.chatId), settleInsertReply(fromChannelId, { chatId: msg.chatId }); // 打断收尾提醒据此列「还没回复」；插队回了发送方才算确认
         if (!fromChannelId) {
           // 认不出来源就明确失败,绝不静默投给 "?"。
           ws.send(JSON.stringify({
@@ -2146,7 +2146,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         for (const [chId, info] of clients.entries()) {
           if (info.ws === ws) { fromChannelId = chId; break; }
         }
-        if (fromChannelId) settleInsertReply(fromChannelId, { target: msg.targetName }); // CC 插队：回了发送方就不补投（bridge/steer-cc.ts）
+        if (fromChannelId) settleInsertReply(fromChannelId, { target: msg.targetName }); // 插队：回了发送方才算确认（bridge/steer-insert.ts）
         // v2.0.16+: agent 调了 send_to_agent = 它在行动/回应，清掉 inter-agent 看门狗。
         // 清这个 ws 名下所有 channel key。
         for (const [chId, info] of clients.entries()) {
@@ -2776,11 +2776,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // inter-agent 看门狗: 这一轮结束时 cid 还挂着 inter-agent 消息（agent 既没 reply 也没 send_to_agent），
             // 注一条 nudge 提醒处理 + reply() 报告。最多 nudge 1 次：多了会和 drain 兜底的 push 叠加，agent 反复被叫醒「聊不停」。
             // StopFailure(API 错误 / 额度用完 / 打断)不是「收到了没理」:催它只会再撞一次同样的错；Pi 叫停之后那次 Stop 也不催
-            const cc = clients.get(cid); // 插队的确认账在正常 Stop 时结（bridge/steer-cc.ts）：补投了 / CC 正要处理时不发下面那句催促
-            const ins = ownTurn && event !== "StopFailure" && !afterAbort && cc ? await settleInsertsAtStop(cid, {
-              held: heldLocalMsgs, flush: () => void setTimeout(() => void flushHeldLocalMsgs(cid, "stop"), 2000), to: { kind: "local", channelId: cid, ws: cc.ws, cwd: cc.cwd },
-            }) : undefined;
-            const iaPending = ownTurn && event !== "StopFailure" && !afterAbort && !ins?.redelivered && !ins?.quiet ? pendingInterAgentMsg.get(cid) : undefined;
+            const iaPending = ownTurn && event !== "StopFailure" && !afterAbort ? pendingInterAgentMsg.get(cid) : undefined;
             if (iaPending) {
               if (iaPending.retries >= 1) {
                 pendingInterAgentMsg.delete(cid);

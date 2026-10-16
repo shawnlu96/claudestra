@@ -290,7 +290,6 @@ describe("control 声明", () => {
     expect(controlFor("claude-code")).toEqual({
       interruptKeys: ["Escape"],
       preemptOnHumanMessage: true,
-      insertVia: "channel",
       idleSource: "pane",
       modelEnforcement: "in-session",
       paneHeuristics: true,

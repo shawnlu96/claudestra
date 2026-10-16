@@ -16,7 +16,7 @@ import {
 } from "../lib/inbound-route.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { ccInsertAllowed, isInsertRedelivery, noteInsert } from "./steer-cc.js";
+import { noteInsert } from "./steer-insert.js";
 import { isHeldIdleCarrier } from "../lib/held-idle-batch.js";
 import { heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
 import { leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
@@ -36,10 +36,10 @@ interface Deps {
   queue: (channelId: string) => readonly HeldItem[] | undefined;
   doing: (agent: string, channelId: string) => Promise<string>;
   /**
-   * 目标运行时的插法（RuntimeControl.insertVia；CC 再过版本闸 + 工具窗口）。declared = 只是声明值、bridge 核实不了：ACP 宿主支不支持
-   * steering 只有宿主自己知道（不支持时它原位改回 prompt，不丢），日志记 steer(declared)
+   * 目标运行时的插法（RuntimeControl.insertVia）。declared = 只是声明值、bridge 核实不了：ACP 宿主支不支持 steering 只有宿主自己知道
+   * （不支持时它原位改回 prompt，不丢），日志记 steer(declared)
    */
-  insertDecl: (channelId: string) => Promise<{ via?: "steer" | "channel"; declared?: boolean }>;
+  insertDecl: (channelId: string) => Promise<{ via?: "steer"; declared?: boolean }>;
   /** 发送方频道是不是 registry 里登记着的 agent（插队只给它们） */
   senderRegistered: (channelId: string) => Promise<boolean>;
   readMode: () => RouteMode;
@@ -54,9 +54,7 @@ let deps: Deps = {
   doing: async (agent, ch) => turnBrief(agent, ch, (await resolveTurnWindow(ch, control())).runtime),
   insertDecl: async (ch) => {
     const w = await resolveTurnWindow(ch, control());
-    const v = controlFor(w.runtime, w.transport).insertVia;
-    if (v === "channel") return { via: (await ccInsertAllowed(ch)) ? v : undefined };
-    return { via: v, declared: w.transport === "acp" };
+    return { via: controlFor(w.runtime, w.transport).insertVia, declared: w.transport === "acp" };
   },
   senderRegistered: async (ch) => (await readRegistryAgents()).some((a) => a.channelId === ch && a.status === "active"),
   readMode: () => parseRouteMode(readConfigSync().inboundRoute?.mode),
@@ -95,7 +93,7 @@ export const routeHolds = (env: Envelope, turn: TurnState): boolean => {
 };
 /**
  * 回合中插队 ws.send 之后（bridge.ts deliverToLocal 一行）：没送到（回 0 = 连接已断、这条被丢了）→ 退回押后队列，回合结束 / 重连后照常投，
- * 返回 true = 已押回；送到了 → 记一笔「没确认」：目标明确回给插队方之前不把它别的输出当答复，CC 的 channel 插队 Stop 时没回复就补投原文（bridge/steer-cc.ts）。
+ * 返回 true = 已押回；送到了 → 记一笔「没确认」：目标明确回给插队方之前不把它别的输出当答复（bridge/steer-insert.ts）。
  * 只管 insert 这条路——改动前 agent 消息忙时根本不 ws.send，空闲投递的老行为不动
  */
 export function afterInsertSend(env: Envelope, turn: TurnState, sent: unknown, held: Pick<HeldQueue, "holdEnv">): boolean {
@@ -141,7 +139,7 @@ function queueOf(channelId: string, incoming: Envelope): { items: HeldItem[]; en
  */
 export async function routeProbeFor(env: Envelope, to: LocalEndpoint, agent: string): Promise<RouteProbe | null> {
   const mode = routeMode();
-  if (mode === "off" || decided.has(env) || isInsertRedelivery(env) || !routeEligible(env, ownerStopOf(env).stop && !env.meta.forwarded)) return null;
+  if (mode === "off" || decided.has(env) || !routeEligible(env, ownerStopOf(env).stop && !env.meta.forwarded)) return null;
   const turn = await deps.probe(to.channelId, agent);
   if (turn.main !== "busy") return null;
   decided.add(env);
@@ -175,7 +173,7 @@ async function insertCtx(env: Envelope, target: string): Promise<InsertCtx> {
   if (!agentSender) return { insert: null, agentSender, senderQueued: false };
   const senderQueued = (deps.queue(target) ?? []).some((i) => i.env.from.kind === "local" && i.env.from.channelId === ch);
   const decl = await deps.insertDecl(target).catch(warn("取目标运行时"));
-  return { insert: insertVia(decl?.via, !!env.meta.skipInterAgentWatchdog), agentSender, senderQueued, declared: decl?.declared };
+  return { insert: insertVia(decl?.via), agentSender, senderQueued, declared: decl?.declared };
 }
 
 function settle(env: Envelope, mode: RouteMode, ctx: { entries: QueueEntry[] } & InsertCtx, answers: Record<string, unknown> | null, base: Record<string, unknown>): void {

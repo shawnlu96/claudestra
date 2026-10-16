@@ -213,10 +213,10 @@ export interface RuntimeControl {
   abortVia?: "extension";
   /**
    * 入站路由判了 insert（本机 agent 的消息插进在跑的回合、不打断）时怎么插：steer = 运行时原生插话（Pi 扩展 deliverAs steer、ACP 宿主
-   * _session/steering，插不进它们自己改成回合结束再投）；channel = 回合中直接投 CC 的 channel 通知（实测见 docs/architecture/inbound-route.md）。
-   * 不声明 = 插不进，insert 按排队（Codex tmux）
+   * _session/steering，插不进它们自己改成回合结束再投）。不声明 = 插不进，insert 按排队：CC（没有真正的回合中注入接口，实测见
+   * docs/architecture/inbound-route.md「CC 实测」）、Codex tmux
    */
-  insertVia?: "steer" | "channel";
+  insertVia?: "steer";
   /** 斜杠命令（/compact 等）当普通 prompt 文本投进会话，不敲键（ACP 下由适配器自己认，比如 /compact 转成 thread/compact/start） */
   slashAsPrompt?: boolean;
 }

@@ -10,8 +10,8 @@ import { clip } from "./turn-brief.js";
 
 export type RouteMode = "off" | "observe" | "on";
 type RouteAction = "interrupt" | "insert" | "queue" | "merge";
-/** insert 在目标运行时上怎么插进回合：steer = Pi 扩展 / ACP 宿主原生插话；channel = CC 回合中直接投通知；null = 插不进（按排队） */
-export type InsertVia = "steer" | "channel" | null;
+/** insert 在目标运行时上怎么插进回合：steer = Pi 扩展 / ACP 宿主原生插话；null = 插不进（按排队，CC 和 Codex tmux 都是） */
+export type InsertVia = "steer" | null;
 /** 现有规则的结论多一种 deliver：不打断也不押，照常送进去（peer 的消息、目标空闲） */
 export type RuleAction = RouteAction | "deliver";
 
@@ -20,8 +20,8 @@ export interface StoredRoute {
   action: RouteAction;
   /** merge 的同伴（押后队列里那条的 message_id） */
   mergeWith?: string;
-  /** insert 判结论时目标运行时的插法（channel = CC 回合中直投，送出后记账、Stop 时没回复就补投原文，bridge/steer-cc.ts） */
-  via?: "steer" | "channel";
+  /** insert 判结论时目标运行时的插法 */
+  via?: "steer";
   /** Jev 给所选项的概率 */
   p: number;
   /** 判了排队的 owner 消息押满时限（held-flush ownerLate）：回合中直接送进去，不再押、也不抢占（不能晚几分钟再 C-c 掉 owner 后来开的回合） */
@@ -73,15 +73,8 @@ const mayInterrupt = (env: Pick<RouteEnv, "from" | "meta">): boolean => isOwnerS
  */
 export const mayInsert = (env: Pick<RouteEnv, "from" | "meta">): boolean => routeRole(env) === "agent" && env.from.kind === "local" && !!env.from.channelId;
 
-/**
- * 目标运行时能不能把 insert 真插进回合（运行时声明 RuntimeControl.insertVia）。CC 的 channel 是回合中直接投：工具间隙到的会被 CC 包成
- * 「不可信外部消息、做完手上的事再决定回不回」插进去且不再重投，没回复只能靠 Stop 时的 agent 间看门狗催——oneShot 不挂看门狗，所以不插。
- * 实测见 docs/architecture/inbound-route.md「CC 实测」
- */
-export function insertVia(declared: "steer" | "channel" | undefined, oneShot: boolean): InsertVia {
-  if (declared === "channel") return oneShot ? null : "channel";
-  return declared ?? null;
-}
+/** 目标运行时能不能把 insert 真插进回合（运行时声明 RuntimeControl.insertVia）。CC 不声明：为什么不插见 docs/architecture/inbound-route.md「CC 实测」 */
+export const insertVia = (declared: "steer" | undefined): InsertVia => declared ?? null;
 
 /**
  * 这条要不要问 Jev（目标忙才调）：bridge 自己的通知、答复 / 通知类、带 waitForIdle（承诺过不插队）、停字、空文本、已经判过的都不问。

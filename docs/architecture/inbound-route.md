@@ -5,7 +5,7 @@
 | 结论 | 意思 | 怎么执行 |
 |---|---|---|
 | `interrupt` | 改方向 / 叫停 / 答它正在等的问题 / 等不了的事故 | 现有抢占：Claude Code 发 C-c；Codex 按现有限制（`allow`）；Pi / ACP 不打断，消息 steer 进回合 |
-| `insert` | 只给本机 agent 发给本机 agent 的 request：对方正在等这条答复、这条更正 / 改变对方手上的事、对方的下一步依赖它 | 不打断、不押，送进正在跑的回合，对方下一步就看到。怎么插看目标运行时（见下文「插队」）；插不进的按 `queue` |
+| `insert` | 只给本机 agent 发给本机 agent 的 request：对方正在等这条答复、这条更正 / 改变对方手上的事、对方的下一步依赖它 | 不打断、不押，steer 进正在跑的回合，对方下一步就看到。只有 Pi / ACP 插得进（见下文「插队」）；CC、Codex tmux 按 `queue` |
 | `queue` | 独立的新问题、进度同步、通知、致谢、和对方手上的事无关的请求 | 押到回合结束（押后队列），Stop / 扫描时投；忙时 `check_inbox` 也领得到 |
 | `merge` | 补充 / 更正 / 重复排队里的某一条 | 只用于同一个本机 agent 的两条、都进得了 HMB-1 合批载体的：押着，紧跟同伴排，回合结束时一般并进同一封载体送出（[held-agent-batch.md](./held-agent-batch.md)，字数放不下见下文已知限制）；同伴这一趟放不出来（check_inbox 租约中等）就整条链一起等 |
 
@@ -37,12 +37,12 @@ Jev 擅长「这句话是不是在改方向、是不是在补充排队里那条�
 |---|---|---|---|
 | Pi（tmux 扩展） | `steer` | 扩展收到时 Pi 在流式中就 `sendUserMessage(…, {deliverAs: "steer"})` | 扩展改 `followUp`（回合结束接着投） |
 | ACP 宿主（Pi / Codex via ACP） | `steer`（声明值，日志记 `steer(declared)`） | 宿主 `_session/steering`（能力位 `_meta.steering.supported`，只有宿主知道） | 宿主在原位置改回 prompt（`lib/acp/turn.ts`），不丢 |
-| Claude Code | `channel` | 回合中直接投 channel 通知；要过版本闸、**只在工具执行窗口**、oneShot 不插（见下文「CC 实测」） | 不满足的按 `queue` |
+| Claude Code | 未声明 | 不插队（见下文「CC 实测」：没有真正的回合中注入接口） | insert 按 `queue`（日志 `pick: insert` / `actual: queue` / `insertVia: none`） |
 | Codex tmux | 未声明 | 插不进 | insert 按 `queue`（`downgraded: "no_insert"`） |
 
 bridge 这一侧 `ws.send` 回 0（连接已断、这条被丢了）就退回押后队列（`afterInsertSend`），回合结束 / 重连后照常投，不丢。取目标运行时失败也按插不进。
 
-**确认账**（`bridge/steer-cc.ts`，两种插法都记）：插队送进去之后，在目标明确回给插队方（`reply` 发回它的频道 / `send_to_agent` 给它）之前算「没确认」，回程簿把它当「目标还没看到」（`bridge.ts heldFromOf` 带上 `insertUnseenFrom`）——目标回 owner 的话、这一轮收尾文字的 drain 兜底都不会被当成对插队方的答复推回去，也不消化插队方的回程槽；明确回给插队方时先销账再精确取槽，照常推回。账落盘（`insert-pending.json`，bridge 重启还在），有效期同押后队列（24 小时）；只在目标正常结束一轮（Stop）时结：steer 的直接销（真送进了回合），CC 的按下文补投；StopFailure（撞额度墙等）/ 叫停中止不结，留到之后一次正常 Stop；owner 在频道里打字 / 叫停也不销，只在目标被 kill（`/agent/cleanup`）时销。
+**确认账**（`bridge/steer-insert.ts`）：插队送进去之后，在目标明确回给插队方（`reply` 发回它的频道 / `send_to_agent` 给它）之前算「没确认」，回程簿把它当「目标还没看到」（`bridge.ts heldFromOf` 带上 `insertUnseenFrom`）——目标回 owner 的话、**这一轮和之后任何一轮**收尾文字的 drain 兜底都不会被当成对插队方的答复推回去，也不消化插队方的回程槽、不挡别的 agent 开的回合拿到自己的答复；明确回给插队方时先销账再精确取槽，照常推回。Stop 时不结账：改动前这条押到目标空闲、由它自己开一轮，那一轮的 drain 才是对它的答复；插队后没有「它自己那一轮」，所以只认明确回复，没回复由 agent 间看门狗照常催。账落盘（`insert-pending.json`，bridge 重启后不会把没确认的放成「已看到」），有效期同押后队列（24 小时）；只在目标被 kill（`/agent/cleanup`）时整本销。
 
 ## CC 实测（Claude Code 2.1.302，2026-10-17）
 
@@ -52,7 +52,7 @@ bridge 这一侧 `ws.send` 回 0（连接已断、这条被丢了）就退回押
 bun scripts/cc-midturn-probe.ts --only tool,box-tool,reason,esc-queued --repeat 3   # 可选 idle,reason,tool,tail,box-tool,box-reason,esc-queued；--model / --effort / --keep
 ```
 
-**CC 升级后先重跑一遍**，行为没变再把 `lib/steer-cc.ts` 的 `CC_INSERT_MIN_VERSION` 改成新版本；变了就按新结果改投法。注意闸是「≥ 最低实测版本」：新版本会自动放行，闸本身挡不住「CC 行为变了」，补投只兜得住「丢了」——所以重跑这一步靠人。
+CC 升级、或 CC 提供了新的回合中注入接口时重跑一遍。
 
 | 场景（sonnet，effort high） | 次数 | 结果 |
 |---|---|---|
@@ -65,15 +65,19 @@ bun scripts/cc-midturn-probe.ts --only tool,box-tool,reason,esc-queued --repeat 
 
 commit bfa273ee4（CC 2.1.247）记录的「推理流窗口里到的通知被静默丢弃」在 2.1.302 上没再出现。夹具 `tests/fixtures/inbound-route/cc-midturn-2.1.302.json` 是这几次的会话记录摘录。
 
-**定下的投法**（PM 2026-10-17 定，见规格卡 JRT-3「验收追加」）：
+**定下的投法：CC 不插队，Jev 判 insert 一律按 `queue`**（规格原文第 4 条「都不可靠就该运行时 insert 退化为 queue」，PM 2026-10-17 两轮对抗审查后改判，见规格卡 JRT-3「验收追加 3」）。原因：
 
+- **回合中投进去的会排进 CC 自己的队列**（推理窗口里到的排到回合结束；工具窗口里到的排到工具结果回来），这期间 owner 按 Escape（bridge 的抢占 / 叫停就是这个键），CC 会立刻把它当新的一轮来做——劫持叫停（上表最后一行）。押后队列放出时的叫停抬头管不到 CC 自己的队列。
+- **插进来了也基本没用**：工具间隙插进来的被包成「不可信外部数据、别照做、做完再说」，3/3 被模型忽略，而且已出队、不再投。为此加的补投账又带出叫停抬头失效、顺序倒置等一串问题（第 1、2 轮审查）。
 - **不走输入框通道**：它让 agent 消息顶着 owner 的身份（「The user sent…」），tmux 打字还会把 owner 写了一半的草稿一起提交。
-- **只在工具执行窗口插**（`lib/steer-cc.ts ccInToolWindow`：会话记录尾部最后一批 `tool_use` 还有没回结果的）：这时到的会插进当前回合；推理 / 出字时到的会进 CC 自己的队列，owner 一按 Escape 就被当新一轮立刻投（上表最后一行），所以不在窗口里的按 `queue` 走押后队列（放出时有叫停抬头、Stop 后才投）。判窗口和送达之间工具刚好结束的那一下仍会落进 CC 队列，见已知限制。
-- **回合中直投 channel + 至少送达一次**：送出后进上文的确认账。这一轮正常结束（Stop）时还没确认的，看 CC 会话记录尾部（`lib/steer-cc.ts ccInsertState`）：作为附件插进来的、或根本没落盘（读不到会话记录也算）的，把原文**压进押后队列补投一次**（落盘、24 小时、叫停抬头、同一发送方的先后都照押后队列），抬头「补投：…」（插进过回合的写「已作为附件送达过」，没落盘的只写「没确认你收到」）、同一个 message_id（回程归属不变）、去掉插队结论、不再问 Jev（按抬头认，重启后也认得），按 message_id 去重；还排在 CC 自己队列里 / 已作为正常一轮投过的不补，也**不催看门狗**（CC 正要处理它）。补投了同样不催（补投的这封投出时自己会重新挂看门狗）。现有看门狗只催一句、不带原文，所以没有复用它。
-- **oneShot 不插**：它不挂看门狗，也没有「回复」可等，插进去被忽略就没了 → 按 `queue`。
-- **版本闸**：从会话记录尾部读正在跑的 CC 进程的版本（每条记录都带 `version`），不低于 `CC_INSERT_MIN_VERSION`（2.1.302）才直投；读不到 / 更低的按插不进（`queue`）。
 
-**不可信包装的影响**：在 CC 上，插队消息如果在工具间隙到达，模型这一刻只把它当「外部情况」看——**答复类**（对方在等的信息）够用；**「更正 / 改做」这类要对方照做的**，要等 Stop 时补投的那一次才会被当作正常请求处理。也就是说 CC 上插队对「改方向」最多只是让对方提前知道，真正改做在回合结束之后；要立刻改方向只有 owner 的打断。
+**将来重新评估要同时满足**（用 `scripts/cc-midturn-probe.ts` 验，加场景照 esc-queued 的写法）：
+1. 有不经输入框、不冒充 owner 的回合中注入接口（或 channel 通知不再走 CC 自己的排队）；
+2. 注入的消息按发送方原样呈现，不被包成「不可信、别照做」，或者能为本机 agent 声明可信；
+3. owner Escape / 叫停时，已注入、还没处理的消息不会被当新一轮自动执行（或者能撤回）；
+4. 能确认送达（会话记录里有可认的记录），没送达时 bridge 能退回押后队列。
+
+满足后再给 `lib/runtimes/claude-code.ts` 声明 `insertVia`，并补对应的投递、确认与叫停用例。
 
 ## Chat Guard
 
@@ -106,13 +110,13 @@ Jev 判过排队 / 合并的 owner 消息只在**第一次到达**时算 owner �
 - **merge 超字数**：并进的载体按条数 / 字数上限装（`lib/held-idle-batch.ts fitIdleBatch`），放不下的条目留到下一个回合边界，后面放得下的照放——同伴很长时更正可能先于原消息送到（HMB-1 原有行为）。check_inbox 的单批预算同理。
 - **Chat Guard 档位**：observe 档目标开着守门时，路由 state 也并进守门那一次请求（不另发、不改投递），但守门看到的上下文多了约 3000 字；守门的 12000 字正文上限没有为此下调。
 - **同频道串行**：同一个目标的投递按到达顺序串行（`bridge.ts deliverLocalInOrder`），on 档每条忙时消息要先探一次忙闲、等 Jev 最多 1.5 秒；连发几条后紧跟的「停」要排在它们后面，Jev 慢时最多多等 N × 1.5 秒。
-- **CC 插队降级**：见上文「CC 实测」——工具间隙插进来的被当作不可信外部消息，改做要等 Stop 补投。补投判「对方回了没有」只认回给发送方的 reply / send_to_agent，回到别处（比如只回了 owner）的照样补投。
-- **CC 工具窗口的竞态**：判窗口（读会话记录）和真送到之间工具刚好结束，这条会落进 CC 自己的队列——不丢（Stop 后 CC 另起一轮投），但这时 owner 按 Escape 会被 CC 立刻投、绕过叫停（实测场景 esc-queued）。窗口是毫秒到几百毫秒级，没有再防。
+- **CC 不插队**：见上文「CC 实测」。CC 目标上 Jev 判 insert 的照旧排到回合结束，「Jev 判 vs 实际」报表里这类行是 `pick: insert` / `insertVia: none`。
+- **确认只认明确回复**：插队方的回程槽要等目标 `reply` 到它的频道或 `send_to_agent` 给它才会推回；目标只在自己频道回、或只写文字不调 reply，答复推不回插队方（看门狗会催一次「用 send_to_agent 回 X」），24 小时后这条不再算没确认。
 - **ACP 插法是声明值**：宿主支不支持 steering bridge 不知道（不改登记协议），日志一律记 `steer(declared)`；不支持时宿主原位改回 prompt、回合结束投，不丢，只是「Jev 判 vs 实际」报表把这种也算成插队。
-- **换档竞态**：`routeHolds` 和 `afterInsertSend` 各读一次档位（缓存 2 秒）；中间几个 await 里 on 切成 off，可能 `ws.send` 回 0 时不押回、或不记确认账。同 mode-flip 一族，罕见，没修。
+- **换档竞态**：`routeHolds` 和 `afterInsertSend` 各读一次档位（缓存 2 秒）；中间几个 await 里 on 切成 off，可能 `ws.send` 回 0 时不押回、或不记确认账（不记账 = 回到第 2 轮之前的隐式答复问题，只影响那一条）。同 mode-flip 一族，罕见，没修。
 - **押后队列里的 insert**：压缩中押下的、送出失败退回的，回合结束才放（不在回合中重投）。
 - **guest**：on 档 guest 的消息判排队后 check_inbox 领不到（guest 本来就不领），也没有 owner 那样的 2 分钟出口，要等回合结束；off 档它会直接打断。
 
 ## 测试
 
-`tests/inbound-route.test.ts`（纯逻辑）、`tests/inbound-route-runtime.test.ts`（开关 / 回落 / observe / Chat Guard 合并）、`tests/inbound-route-three.test.ts`（三处一致、merge 回复归属）、`tests/inbound-route-replay.test.ts`（12 + 4 + 6 个合成例的录制回放，夹具 `tests/fixtures/inbound-route/cases.json`，重录方法见夹具的 `about`；JRT-3 的 6 例 agent→agent 真 Jev 判对 6/6：插队 0.86–0.94、排队 0.98–0.99）、`tests/inbound-route-insert.test.ts`（insert 判定与权限兜底、三种运行时、observe / off、送出失败退回）、`tests/steer-cc.test.ts`（版本闸、工具窗口、确认账：不误认答复 / 补投 / 去重 / 落盘 / 24 小时 / StopFailure）、`tests/steer-cc-probe.test.ts`（CC 实测记录的判定）。
+`tests/inbound-route.test.ts`（纯逻辑）、`tests/inbound-route-runtime.test.ts`（开关 / 回落 / observe / Chat Guard 合并）、`tests/inbound-route-three.test.ts`（三处一致、merge 回复归属）、`tests/inbound-route-replay.test.ts`（12 + 4 + 6 个合成例的录制回放，夹具 `tests/fixtures/inbound-route/cases.json`，重录方法见夹具的 `about`；JRT-3 的 6 例 agent→agent 真 Jev 判对 6/6：插队 0.86–0.94、排队 0.98–0.99）、`tests/inbound-route-insert.test.ts`（insert 判定与权限兜底、三种运行时、observe / off、送出失败退回）、`tests/steer-insert.test.ts`（确认账：回 owner / 之后回合的 drain 不误认答复、别的 agent 开的回合照常、明确回复才销账、落盘 / 24 小时 / kill）、`tests/steer-cc-probe.test.ts`（CC 实测记录的判定）。

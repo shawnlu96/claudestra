@@ -31,11 +31,10 @@ const IDLE: TurnState = { main: "idle", bg: false };
 const COMPACTING: TurnState = { main: "compacting", bg: false };
 
 describe("判定与权限兜底（lib decideRoute，不信 Jev）", () => {
-  const d = (from: Record<string, unknown>, a: Record<string, unknown>, insert: "steer" | "channel" | null = "steer") => decideRoute(a, { env: env("x", from), queue: [], insert });
+  const d = (from: Record<string, unknown>, a: Record<string, unknown>, insert: "steer" | null = "steer") => decideRoute(a, { env: env("x", from), queue: [], insert });
 
   test("本机 agent + 运行时插得进：insert", () => {
     expect(d(AGENT, ans("insert"))).toEqual({ ok: true, route: { action: "insert", p: 0.95, via: "steer" } });
-    expect(d(AGENT, ans("insert"), "channel")).toEqual({ ok: true, route: { action: "insert", p: 0.95, via: "channel" } });
   });
   test("本机 agent 但运行时插不进：排队（no_insert）", () => {
     expect(d(AGENT, ans("insert"), null)).toEqual({ ok: true, route: { action: "queue", p: 0.95 }, downgraded: "no_insert" });
@@ -64,17 +63,15 @@ describe("判定与权限兜底（lib decideRoute，不信 Jev）", () => {
 });
 
 describe("三种运行时怎么插（RuntimeControl.insertVia → lib insertVia）", () => {
-  test("Pi（tmux 扩展）与 ACP 宿主：原生 steer", () => {
-    expect(insertVia(controlFor("pi").insertVia, false)).toBe("steer");
-    expect(insertVia(controlFor("pi", "acp").insertVia, false)).toBe("steer");
-    expect(insertVia(controlFor("codex", "acp").insertVia, true)).toBe("steer");
+  test("Pi（tmux 扩展）与 ACP 宿主（pi-acp / codex-acp）：原生 steer", () => {
+    expect(insertVia(controlFor("pi").insertVia)).toBe("steer");
+    expect(insertVia(controlFor("pi", "acp").insertVia)).toBe("steer");
+    expect(insertVia(controlFor("codex", "acp").insertVia)).toBe("steer");
   });
-  test("CC：回合中直投 channel；oneShot（没有看门狗兜底）插不进", () => {
-    expect(insertVia(controlFor(undefined).insertVia, false)).toBe("channel");
-    expect(insertVia(controlFor("claude-code").insertVia, true)).toBeNull();
-  });
-  test("Codex tmux 没声明：插不进", () => {
-    expect(insertVia(controlFor("codex").insertVia, false)).toBeNull();
+  test("CC 不插队（没有真正的回合中注入接口，退化 queue）；Codex tmux 没声明：插不进", () => {
+    expect(insertVia(controlFor(undefined).insertVia)).toBeNull();
+    expect(insertVia(controlFor("claude-code").insertVia)).toBeNull();
+    expect(insertVia(controlFor("codex").insertVia)).toBeNull();
   });
 });
 
@@ -90,7 +87,7 @@ describe("开关下的押不押（lib）", () => {
 });
 
 // ── 运行时（bridge/inbound-route.ts） ─────────────────────────────────────
-let mode: RouteMode = "on", turn: TurnState = BUSY, decl: "steer" | "channel" | undefined = "steer", registered = true;
+let mode: RouteMode = "on", turn: TurnState = BUSY, decl: "steer" | undefined = "steer", registered = true;
 let queued: { env: Envelope }[] = [];
 let asks: { questions: Record<string, unknown> }[] = [], logs: Record<string, unknown>[] = [];
 let answer: Record<string, unknown> = ans("insert");
@@ -121,16 +118,19 @@ describe("运行时：on 档", () => {
     expect(logs[0]).toMatchObject({ mode: "on", pick: "insert", jev: "insert", insertVia: "steer", actual: "insert", rule: "queue", role: "agent" });
   });
 
-  test("CC 目标：channel；oneShot 的插不进，按排队", async () => {
-    decl = "channel";
+  test("CC 目标：Jev 判 insert 也按排队（日志 pick=insert / actual=queue / insertVia=none），忙时照押", async () => {
+    decl = controlFor("claude-code").insertVia;
     const a = env("答复：用方案 B");
     await routeInbound(a, to, "agent-pm");
-    expect(a.meta.inboundRoute?.action).toBe("insert");
+    expect(a.meta.inboundRoute).toEqual({ action: "queue", p: 0.95 });
+    expect(logs[0]).toMatchObject({ pick: "insert", jev: "queue", downgraded: "no_insert", insertVia: "none", actual: "queue" });
+    expect(routeHolds(a, BUSY)).toBe(true);
+  });
+
+  test("Pi / ACP 的 oneShot 照样插（steer 不靠看门狗兜底）", async () => {
     const b = env("进度：跑到第 3 步", AGENT, { skipInterAgentWatchdog: true });
     await routeInbound(b, to, "agent-pm");
-    expect(b.meta.inboundRoute).toEqual({ action: "queue", p: 0.95 });
-    expect(logs[1]).toMatchObject({ pick: "insert", jev: "queue", downgraded: "no_insert", insertVia: "none" });
-    expect(routeHolds(b, BUSY)).toBe(true);
+    expect(b.meta.inboundRoute?.action).toBe("insert");
   });
 
   test("ACP 目标：插法只是声明值，日志记 steer(declared)", async () => {
