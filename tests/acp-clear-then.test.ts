@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { AcpTurnLoop, type TurnIO } from "../src/lib/acp/turn.js";
 import { clearThen, rotateAcpHost } from "../src/lib/acp/clear.js";
+import { RpcLostError } from "../src/lib/acp/rpc.js";
 import type { AcpSession } from "../src/lib/acp/session.js";
 
 function rig(registryOk = true) {
@@ -63,6 +64,20 @@ describe("rotateAcpHost then", () => {
     await r.settled(1);
     expect(r.prompts).toEqual(["普通入站"]);
     expect(r.loop.slotStatus("restore-a")).toEqual({ state: "gone", opId: "restore-a" });
+  });
+
+  test("session/new 发出后超时：按「变了」处理（适配器可能已停掉旧线程，宿主要重起接回）", async () => {
+    for (const [err, want] of [[new RpcLostError("session/new 超时（90000ms）", true), true], [new RpcLostError("连接已断", false), false]] as const) {
+      const changed: boolean[] = [];
+      const loop = new AcpTurnLoop({ prompt: async () => ({ kind: "done" }), reportStop: async () => ({}), onFailure: () => {}, log: () => {} });
+      const session = { sessionId: "old", create: async () => { throw err; } };
+      const r = await rotateAcpHost({
+        session: session as unknown as AcpSession, ready: true, pending: false, loop, oldId: "old", cwd: "/tmp",
+        rotateRegistry: async () => ({ ok: true }), configure: async () => {}, begin() {}, failed: (c) => void changed.push(c), committed: async () => {}, end() {},
+      });
+      expect(r.ok).toBe(false);
+      expect(changed).toEqual([want]);
+    }
   });
 
   test("clearThen：形状不对就当没带（clear 照旧）", () => {

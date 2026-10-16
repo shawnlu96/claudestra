@@ -3,11 +3,12 @@
  * 正在做（UXHOME1「在干活」「各项目」并进来）：按项目分组，项目头是 UXHOME1 的项目行（点了照旧按 resolveCollabSource 选源打开）。
  * 有产品看板的项目下面每个在做模块一行：模块名、进度条（completed / total）、「N 个在做」、在做的人（最多 3 个首字头像，再多「+K」）；
  * 对不上模块的 agent 归到「其他」。没有看板 / 台账读不了的项目退回 UXHOME1 的 agent 行。没有在做事项、排在折叠数之外的项目折成「其余 K 个项目」。
- * 点模块行先落到项目页（PROJTABS1 合入后改为落到「模块进度」的该模块）。
+ * 点模块行落到项目页「模块进度」的该模块（project-tabs/tab-request.ts 先登记，项目页挂载时取）；「其他」行只打开项目页。
  */
 import { useState } from "react";
 import { busyLine, FACE_LIMIT, type NowWorker, type TodayFace, type TodayModule, type TodayProject, type TodayView } from "./now-model";
 import { ProjectRow } from "./now-projects";
+import { requestProjectTab } from "../collab/project-tabs/tab-request";
 import { Block, EMPTY, Fold, ROW, ROW_ON, useOpeners, type Translate } from "./now-ui";
 
 function Faces({ faces }: { faces: readonly TodayFace[] }) {
@@ -63,13 +64,17 @@ function WorkerRow({ w, onOpen }: { w: NowWorker; onOpen: (name: string) => void
 function ProjectGroup({ p, fp, tr }: { p: TodayProject; fp: string | null; tr: Translate }) {
   const open = useOpeners();
   const key = p.row.open;
+  const openModule = (project: string, featureId: string | null) => {
+    if (featureId) requestProjectTab(project, { tab: "module", featureId });
+    open.project(project);
+  };
   return (
     <li data-now-group={p.row.id}>
       <ProjectRow p={p.row} fp={fp} tr={tr} onOpen={open.project} />
       {p.modules
         ? p.modules.length > 0 && (
           <ul className="flex list-none flex-col p-0">
-            {p.modules.map((m) => <li key={m.id ?? ""}><ModuleRow m={m} tr={tr} onOpen={key ? () => open.project(key) : null} /></li>)}
+            {p.modules.map((m) => <li key={m.id ?? ""}><ModuleRow m={m} tr={tr} onOpen={key ? () => openModule(key, m.id) : null} /></li>)}
           </ul>
         )
         : p.workers.length > 0 && (

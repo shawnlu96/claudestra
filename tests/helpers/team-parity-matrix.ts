@@ -24,16 +24,20 @@ export interface MatrixRow {
   limit?: string;
 }
 
+const NO_METRICS = "PROJTABS1 起项目页不出这项指标（指标条已删，额度与指标在今天页）";
+
 /** 「…误调」行的 present = 发出了那条本机请求（看请求记录，不看界面） */
 export const MATRIX: readonly MatrixRow[] = [
   // UXNUM1（PM 10-13 放行）：下面五行团队期望 unknown → absent。owner 10-13 19:57 选 D『没数据的指标整项藏起来』，absent 与暂无同样诚实
-  { section: "在场 agent", ref: "M1", view: "home", cls: "F", local: "present", team: "absent" },
-  // present = 顶栏「在干活」「在等」两格都是数字（UXNUM1 去掉了「进行中」格，由这两格代替；口径 count-words.ts）
+  // PROJTABS1 起项目页没有指标条：在场 / 审查轮次 / P0P1 / 平均等复核在项目页没有显示位置，期望不动、记 limit（ask_mvb6wvbp51a12efc84）
+  { section: "在场 agent", ref: "M1", view: "home", cls: "F", local: "present", team: "absent", limit: NO_METRICS },
+  // present = 总览「合并队列」「审查中」两格都是数字（PROJTABS1 起由总览数格代替顶栏；口径 count-words.ts）
   { section: "进行中", ref: "M2", view: "home", cls: "A", local: "present", team: "present" },
+  // present = 总览「今天完成」数格有数
   { section: "今日完成", ref: "M3", view: "home", cls: "F", local: "present", team: "absent" },
-  { section: "审查轮次", ref: "M4", view: "home", cls: "D", local: "present", team: "absent" },
-  { section: "P0/P1 修掉", ref: "M4", view: "home", cls: "D", local: "present", team: "absent" },
-  { section: "平均等复核", ref: "M5", view: "home", cls: "D", local: "present", team: "absent" },
+  { section: "审查轮次", ref: "M4", view: "home", cls: "D", local: "present", team: "absent", limit: NO_METRICS },
+  { section: "P0/P1 修掉", ref: "M4", view: "home", cls: "D", local: "present", team: "absent", limit: NO_METRICS },
+  { section: "平均等复核", ref: "M5", view: "home", cls: "D", local: "present", team: "absent", limit: NO_METRICS },
   { section: "待你处理", ref: "W1", view: "home", cls: "F", local: "present", team: "unknown" },
   { section: "上次以来", ref: "W2", view: "home", cls: "C", local: "present", team: "absent" },
   { section: "上次以来·本机接口误调", ref: "W2", view: "home", cls: "F", local: "present", team: "absent" },
@@ -60,6 +64,7 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "团队标签·本机接口误调", ref: "W4", view: "team", cls: "F", local: "present", team: "absent" },
   { section: "团队规划", ref: "T13", view: "team", cls: "E", local: "absent", team: "present" },
   // ---- §3 其余各行（r1 补齐）：present 的口径见 tests/web-team-parity-browser.test.ts 对应检测器，值要和本机真值对上才算 present ----
+  // PROJTABS1 起左大纲删了：阶段 / 轮次两行到「模块进度」的节点卡上找（行名不改）
   { section: "节点阶段（大纲行）", ref: "G3", view: "versions", cls: "A", local: "present", team: "present" },
   // F：契约没有边元数据，团队显示出任何建立者 / 时间都是 feature 级冒充（present = 显示了），应是「未记录」
   { section: "依赖边·建立者/时间", ref: "G4", view: "task", cls: "F", local: "present", team: "unknown" },
@@ -68,8 +73,9 @@ export const MATRIX: readonly MatrixRow[] = [
     limit: "版本页要逐行点开快照；团队没有版本行（G5 已记缺口），本夹具只测 G5 / G8" },
   { section: "等批的重写", ref: "G9", view: "versions", cls: "E", local: "present", team: "absent", limit: "夹具里没有待批提案；V1 不接受提案（按设计不做）" },
   { section: "节点处理人/步骤", ref: "G10", view: "versions", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
-  // present = 显示的轮次等于本机真值（i28-B2 第 2 轮）；团队现在显示第 1 轮，按 absent（错值不算有）
-  { section: "轮次（大纲行）", ref: "G10", view: "versions", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
+  // present = 显示的轮次等于本机真值（i28-B2 第 2 轮）。原来大纲行团队显示第 1 轮（gap P1-B）；PROJTABS1 起改在模块进度节点卡上测，
+  // 团队节点卡的轮次取自子 DAG 投影，实测是第 2 轮，gap 删掉（只删 gap、期望不动，ratchet 允许）
+  { section: "轮次（大纲行）", ref: "G10", view: "versions", cls: "B", local: "present", team: "present" },
   { section: "head", ref: "G11", view: "task", cls: "B", local: "present", team: "present" },
   { section: "进度条 counts", ref: "G12", view: "home", cls: "A", local: "present", team: "present" },
   // 只看焦点卡的要你定的（i28-A7 阻塞提问）：投影 asks{blocking} 已给，团队现在显示「没有」
@@ -81,8 +87,8 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "台账变更触发重拉", ref: "E1", view: "home", cls: "A", local: "present", team: "present", limit: "夹具服务器不推实时事件，团队 5s 轮询没有在测试里计时" },
   { section: "此刻动作", ref: "E2", view: "home", cls: "E", local: "present", team: "absent", limit: "夹具里没有 tool_* / agent_status 事件流" },
   { section: "刚推进高亮", ref: "E3", view: "home", cls: "A", local: "present", team: "present", limit: "要两次快照之间推进阶段，夹具是静态的" },
-  // UXNUM1：看者本机 bridge 的 /lend/quota-lines（夹具给一族百分比），本机版和团队版同一份；「协作消息」没有数据来源，已去掉
-  { section: "周额度", ref: "M6", view: "home", cls: "A", local: "present", team: "present" },
+  // PROJTABS1（规格写明本卡唯一改期望的行）：项目页不再出额度，两边都 absent；额度只在今天页（QUOTA1）
+  { section: "周额度", ref: "M6", view: "home", cls: "A", local: "absent", team: "absent" },
   // present = 产品卡「在干活 a · 在等 b」等于看板口径的真值（count-words.ts，按看板行的 feature 归属数；UXNUM1 起不再显示 productNodeCounts 的进行中）
   { section: "产品卡·进行中计数", ref: "M7", view: "home", cls: "B", local: "present", team: "present" },
   { section: "产品卡·预计完成", ref: "M7", view: "home", cls: "D", local: "present", team: "absent" },
@@ -90,6 +96,7 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "镜像新鲜度", ref: "M9", view: "home", cls: "B", local: "absent", team: "present" },
   { section: "入口", ref: "N1", view: "home", cls: "A", local: "present", team: "present", limit: "截图入口直接挂 CollabView，不经过侧栏入口" },
   { section: "桌面中区标签", ref: "N2", view: "home", cls: "A", local: "present", team: "present" },
+  // PROJTABS1 起手机顶栏两个按钮由四个标签取代：present = 手机上四个标签都在
   { section: "手机顶栏按钮", ref: "N3", view: "home", cls: "A", local: "present", team: "present" },
   { section: "返回 / 切机器", ref: "N4", view: "home", cls: "A", local: "present", team: "present", limit: "截图入口没有会话外壳" },
   { section: "缓存隔离", ref: "N5", view: "home", cls: "A", local: "present", team: "present", limit: "缓存键是纯函数（collab-cache.ts keyOf），不在浏览器里测" },

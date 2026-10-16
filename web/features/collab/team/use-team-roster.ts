@@ -195,5 +195,5 @@ export function useTeamRoster(project: string) {
     .map(p => ({ localId: p.local!.id, name: p.name })) ?? [];
   return { roster: plan === "read" ? state.value : null, rosterLoading: state.status === "loading", directory: team?.directory ?? null,
     directoryStatus: fp ? directoryStatus(dir, team, bound) : "loading" as LoadStatus, selfPersonId: team?.personId ?? null,
-    instances: team?.instances ?? null, projects, reason };
+    instances: team?.instances ?? null, projects, reason, teamName: team?.team?.name ?? null, snapshotReady: dir.status === "ready" };
 }

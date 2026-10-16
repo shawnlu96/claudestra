@@ -9,8 +9,11 @@
  * SUBDAG7：graph = 聚焦图（dag-focus-layout.ts），full = 完整画布（从聚焦图的两枚小片进）。完整画布的已完成按 donePages 分页：
  * 点开 ✓N = 第 1 页，列底「还有 N」= 下一页，收起 = 删掉页数；doneOpen 照旧（手机用）。图 / 完整画布下跳转：目标在聚焦图里就地居中，
  * 不在就切到完整画布，已完成目标的页数开到 donePageOf。
+ * PROJTABS1：标签是项目页的四个（总览 / 项目地图 / 模块进度 / 团队），by = 模块进度里的「按模块 / 按人」。冷开落总览，
+ * 有登记的请求（project-tabs/tab-request.ts）按请求落，同一项目切走再回来回到上次的标签；带任务进入的落点由 use-dag-panes.tsx 定。
  */
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { clearProjectTab, peekProjectTab, rememberedTab, rememberTab } from "../project-tabs/tab-request";
 import type { Focus } from "../v4/canvas-view";
 import { compareAfterJump, type Compare } from "./dag-diff";
 import { defaultOpen, donePageOf, drawable, openWith } from "./dag-layout";
@@ -18,13 +21,25 @@ import { layoutFocus } from "./dag-focus-layout";
 import { jumpToNode } from "./dag-progress";
 import type { FeatureCard } from "./dag-types";
 
-export type DagTab = "product" | "dag" | "progress" | "team";
+export type DagTab = "overview" | "map" | "module" | "team";
+export type ModuleBy = "module" | "person";
 export type DagView = "list" | "graph" | "full";
 
-export function useDagUi(features: readonly FeatureCard[]) {
-  const [tab, setTabRaw] = useState<DagTab>("product");
-  const [featureId, setFeatureId] = useState<string | null>(null);
-  const [manual, setManual] = useState<string[] | null>(null);
+/** 挂载时的落点：登记的请求 > 带任务进入（先落总览）> 本项目上次的标签 > 总览 */
+function initialOf(project: string, entryTask: string | null): { tab: DagTab; featureId: string | null; requested: boolean } {
+  const req = peekProjectTab(project);
+  if (req) return { tab: req.tab, featureId: req.featureId ?? null, requested: true };
+  return { tab: entryTask ? "overview" : rememberedTab(project) ?? "overview", featureId: null, requested: false };
+}
+
+export function useDagUi(features: readonly FeatureCard[], project = "", entryTask: string | null = null) {
+  const [init] = useState(() => initialOf(project, entryTask));
+  const [tab, setTabRaw] = useState<DagTab>(init.tab);
+  const [by, setBy] = useState<ModuleBy>("module");
+  const [featureId, setFeatureId] = useState<string | null>(init.featureId);
+  const [manual, setManual] = useState<string[] | null>(init.featureId ? [init.featureId] : null);
+  useEffect(() => clearProjectTab(project), [project]);
+  useEffect(() => rememberTab(project, tab), [project, tab]);
   const [doneOpen, setDoneOpen] = useState<ReadonlySet<string>>(() => new Set());
   const [donePages, setDonePages] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [compare, setCompare] = useState<Compare | null>(null);
@@ -59,7 +74,7 @@ export function useDagUi(features: readonly FeatureCard[]) {
     if (v !== "list" && featureId && !open.includes(featureId)) ensureOpen(featureId);
   };
   return {
-    tab, featureId, open, doneOpen, donePages, compare, focus, flash, evicted, ensureOpen, view, setView,
+    tab, by, setBy, requested: init.requested, featureId, open, doneOpen, donePages, compare, focus, flash, evicted, ensureOpen, view, setView,
     /** 聚焦图的小片进完整画布：「其余 N 已完成」带已完成第 1 页，「更远 N」已完成收起 */
     enterFull: (id: string, withDone: boolean) => {
       setView("full");
@@ -74,7 +89,11 @@ export function useDagUi(features: readonly FeatureCard[]) {
     selectFeature: (id: string) => {
       setFeatureId(id); setManual([id]);
       setCompare(null); setFocus(null);
-      setTabRaw("dag");
+      setTabRaw("module"); setBy("module");
+    },
+    /** 模块进度的面包屑「模块」：回到模块列表 */
+    clearFeature: () => {
+      setFeatureId(null); setCompare(null); setFocus(null);
     },
     setTab: (t: DagTab) => {
       setTabRaw(t);
@@ -92,7 +111,7 @@ export function useDagUi(features: readonly FeatureCard[]) {
       if (!j) return;
       const seq = ++counter.current;
       setFeatureId(featureId);
-      setTabRaw("dag");
+      setTabRaw("module"); setBy("module");
       setFlash({ id: j.id, seq });
       if (view === "list" && listable.current && compare?.featureId !== featureId) return;
       setCompare((c) => compareAfterJump(c, features, featureId));
@@ -105,9 +124,9 @@ export function useDagUi(features: readonly FeatureCard[]) {
       if (j.expandDone && !inFocus && listable.current) setDonePages((m) => new Map(m).set(featureId, Math.max(m.get(featureId) ?? 0, donePageOf(f, key))));
       setFocus({ id: j.id, seq });
     },
-    /** DAG → 进度：切标签、滚到那一行并闪一次 */
+    /** DAG → 进度：切到模块进度的「按人」、滚到那一行并闪一次 */
     jumpRow: (agent: string) => {
-      setTabRaw("progress");
+      setTabRaw("module"); setBy("person");
       setFlash({ id: `row:${agent}`, seq: ++counter.current });
     },
   };

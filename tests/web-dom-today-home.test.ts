@@ -32,7 +32,7 @@ let ui: {
   ChatStoreProvider: (p: { children: unknown }) => unknown; useChatStoreApi: () => Store;
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
   asksStore: { refresh(): Promise<void>; closeDrawer(): void; get(): { open: boolean; focus: string | null } };
-  useCollabNav: () => { project: string | null; task: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
+  useCollabNav: () => { project: string | null; task: string | null; view: "team" | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
   TODAY_KEY: string; resetLedgers: () => void;
 };
 
@@ -90,6 +90,19 @@ beforeAll(async () => {
     ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi, ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore,
     useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab, unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest, TODAY_KEY: now.TODAY_KEY,
     resetLedgers: require("../web/features/now/now-ledgers.ts").resetTodayLedgersForTest };
+  // 额度读数是模块级的一份（quota-lines-store），同进程前面的文件（web-dom-now-home 也用 mac-a）刚拉过或停拉了就不会再拉：
+  // 先在一台丢弃用的机器上订一下再退订，下次订阅时换回本文件的 fp 就清空读数、重新拉
+  const quota = require("../web/features/quota/quota-lines-store.ts") as { useQuotaLinesReading(): unknown; useQuotaWallReading(): unknown };
+  machines.currentFp = () => "today-home-prime";
+  const host = doc.createElement("div");
+  const root = createRoot(host as never);
+  function Prime() { quota.useQuotaLinesReading(); quota.useQuotaWallReading(); return null; }
+  await React.act(async () => root.render(React.createElement(Prime)));
+  await React.act(async () => root.unmount());
+  await tick(30);
+  machines.currentFp = () => world.fp;
+  calls.length = 0;
+  fpCalls.length = 0;
 });
 
 afterEach(async () => {
@@ -124,7 +137,7 @@ async function mount(part: "main" | "strip" | "shell", width = 1280) {
   setContextRequestForTest(null);
   await React.act(async () => ui.closeCollab());
   ui.asksStore.closeDrawer();
-  const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null } as { project: string | null; task: string | null } };
+  const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null, view: null } as { project: string | null; task: string | null; view: "team" | null } };
   const h = React.createElement as (...a: unknown[]) => unknown;
   function Probe() {
     seen.store = ui.useChatStoreApi();
@@ -231,7 +244,7 @@ test("[验收线 4] 点『卡住了』一行：collab-nav 是 {该项目, 该任
   const v = await mount("main");
   await until(() => v.all("[data-now-stuck-row]").length === 3, "stuck rows");
   await v.click(v.host.querySelector("[data-now-stuck-row='proj-b/B1']"), "stuck row");
-  expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1" });
+  expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1", view: null });
   expect(v.seen.toContent).toBe(1);
   await React.act(async () => ui.closeCollab());
   await tick();
@@ -239,7 +252,7 @@ test("[验收线 4] 点『卡住了』一行：collab-nav 是 {该项目, 该任
   const w = await mount("main");
   await until(() => w.all("[data-now-wait-task]").length === 1, "wait task");
   await w.click(w.host.querySelector("[data-now-wait-task=A1]"), "view task");
-  expect(w.seen.nav).toEqual({ project: "proj-a", task: "A1" });
+  expect(w.seen.nav).toEqual({ project: "proj-a", task: "A1", view: null });
   await React.act(async () => ui.closeCollab());
   await tick();
   await w.unmount();

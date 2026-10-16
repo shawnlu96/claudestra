@@ -94,6 +94,10 @@ test("N8A8 r1：点开首轮 429 没拿到详情的 feature → 立刻重拉，�
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null,
     h(ui.TeamSource, { identity: IDENTITY }, h(ui.CollabView, { project: ui.sharedCollabProject(IDENTITY) }))) as never));
   const card = () => Array.from(host.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(TARGET.title)) ?? null;
+  // 冷开落总览（PROJTABS1）：产品卡在「项目地图」标签里
+  const mapTab = () => Array.from(host.querySelectorAll("[role=tab]")).find((b) => b.textContent === "项目地图") ?? null;
+  await until(() => mapTab() !== null, "project map tab");
+  await React.act(async () => mapTab()!.click());
   await until(() => card() !== null && details.includes(TARGET.id), "product board + first-round 429");
   await tick(200);
   // 首轮：TARGET 回 429 后本轮停发 → 详情请求不超过 TARGET 及之前的 + 已在途的 1 个
@@ -103,7 +107,9 @@ test("N8A8 r1：点开首轮 429 没拿到详情的 feature → 立刻重拉，�
   await tick(1_100); // Retry-After 1 秒过去；5 秒轮询还没到
   expect(details.length).toBe(firstRound);
   const t0 = Date.now();
-  await React.act(async () => card()!.click());
+  // PDFOCUS1：单击卡 = 选中，双击才进子 DAG
+  const Mouse = (globalThis as unknown as { MouseEvent: new (t: string, i: { bubbles: boolean }) => unknown }).MouseEvent;
+  await React.act(async () => (card() as unknown as { dispatchEvent(e: unknown): void }).dispatchEvent(new Mouse("dblclick", { bubbles: true })));
   await until(() => details.length > firstRound, "detail read after opening the feature");
   expect(details[firstRound]).toBe(TARGET.id);
   // 子 DAG 里出现这个 feature 的在跑 / 计划节点（夹具节点键 i28-C*；没详情时只有中心 counts，没有节点）

@@ -1,8 +1,8 @@
-/** 协作视图 v4 的指标条、大纲筛选、手机分组、因果线（web/features/collab/v4/v4-model.ts） */
+/** 协作视图 v4 的指标、手机分组、因果线（web/features/collab/v4/v4-model.ts）；PROJTABS1 起左大纲和它的筛选已删 */
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
-import { blockLine, causeOf, DEFAULT_FILTER, edgeBasis, filterCount, FILTERS, matchFilter, metricsOf, mobileSections, outlineOf, stageCounts, type Filter } from "../web/features/collab/v4/v4-model";
-import { countSnap, type CountBoard } from "../web/features/collab/count-words";
+import { blockLine, causeOf, edgeBasis, metricsOf, mobileSections, stageCounts } from "../web/features/collab/v4/v4-model";
+import { countSnap, doneCount, type CountBoard } from "../web/features/collab/count-words";
 import { causalCanvas } from "../web/features/collab/v4/causal-model";
 import { edgeSel, memberSel, narrowPane, resolveSelection } from "../web/features/collab/v4/v4-selection";
 
@@ -16,7 +16,7 @@ const dep = (from: string, to: string, over: Partial<LedgerDepView> = {}): Ledge
 });
 const tr = (s: string, p?: Record<string, unknown>) => s.replace(/\{(\w+)\}/g, (_, k) => String(p?.[k] ?? ""));
 
-describe("指标条", () => {
+describe("指标", () => {
   test("审查轮次累加；P0/P1 修掉只算过了审查的；平均等复核只算此刻在等的；进行中不在这里数（count-words.ts）", () => {
     const tasks = [
       task("A", "review", { metrics: { ...metrics, reviewRounds: 2, reviewWaitPendingMs: 60_000, p0: 1, p1: 1 } }),
@@ -35,32 +35,6 @@ const board: CountBoard = {
   working: [{ taskId: "A", featureId: "F1" }, { taskId: "D", featureId: "F1" }], merging: [{ taskId: "B", featureId: "F1" }], waiting: [],
   todo: { ready: [{ taskId: null, featureId: "F1" }], blocked: [] },
 };
-
-describe("大纲筛选", () => {
-  const p0Review = { round: 1, verdict: "changes", p0: 1, p1: 0, p2: 0, text: "", ts: 0 };
-  const tasks = [task("A", "build"), task("B", "merge"), task("C", "done"), task("D", "review", { lastReview: p0Review }),
-    task("E", "spec", { itemId: null }), task("F", "cancelled"), task("G", "verified")];
-  const snap = countSnap(board, { tasks });
-  test("芯片只有 进行中（默认、排第一）/ 已完成 / 全部 / P0；没有未完成 / 可执行 / 在等", () => {
-    expect([...FILTERS]).toEqual(["active", "done", "all", "p0"]);
-    expect(DEFAULT_FILTER).toBe("active");
-  });
-  test("进行中 = 看板的在干活 + 在等的卡，规格卡不进；已完成含 verified；P0 看累计或最近一轮；全部不含取消的", () => {
-    const ids = (f: Filter) => tasks.filter((t) => matchFilter(t, f, snap.active)).map((t) => t.id);
-    expect(ids("active")).toEqual(["A", "B", "D"]);
-    expect(ids("done")).toEqual(["C", "G"]);
-    expect(ids("p0")).toEqual(["D"]);
-    expect(ids("all")).not.toContain("F");
-    expect(filterCount({ tasks }, "active", snap)).toBe(snap.words.working + snap.words.waiting);
-    expect(filterCount({ tasks }, "active", null)).toBeNull();
-    expect(tasks.filter((t) => matchFilter(t, "active", null))).toEqual([]);
-  });
-  test("按事项分组，没归事项的放最后，空组不出", () => {
-    const g = outlineOf({ tasks, items: [{ id: "I1", title: "事项一", oneLine: "" }, { id: "I2", title: "空的", oneLine: "" }] }, "all");
-    expect(g.map((x) => [x.id, x.tasks.map((t) => t.id)])).toEqual([["I1", ["A", "B", "C", "D", "G"]], [null, ["E"]]]);
-    expect(outlineOf({ tasks, items: [] }, "active", snap.active).flatMap((x) => x.tasks.map((t) => t.id))).toEqual(["A", "B", "D"]);
-  });
-});
 
 describe("手机分组与因果线", () => {
   test("可执行 / 在跑 → 在等 → 今日完成；空的一组不出", () => {
@@ -89,11 +63,9 @@ describe("verified 算已完成，不算在途（UFL-2）", () => {
   const verified = Array.from({ length: 23 }, (_, k) => task(`V${k}`, "verified"));
   const tasks = [...verified, task("A", "build"), task("B", "review"), task("C", "spec", { blockedBy: ["A"] })];
   const doneRest = { n: 5, byItem: {}, groups: [{ stage: "verified" as const, kind: "code", blocked: false, p0: false, n: 5, reviewRounds: 0, p0p1: 0 }] };
-  test("已完成含窗口外的；全部 = 总览里的 + 窗口外的", () => {
-    expect(filterCount({ tasks }, "all", null)).toBe(26);
-    expect(filterCount({ tasks }, "done", null)).toBe(23);
-    expect(filterCount({ tasks, doneRest }, "done", null)).toBe(28);
-    expect(filterCount({ tasks, doneRest }, "all", null)).toBe(31);
+  test("已完成含窗口外的（总览「已完成 N」同一个数）", () => {
+    expect(doneCount({ tasks })).toBe(23);
+    expect(doneCount({ tasks, doneRest })).toBe(28);
   });
   test("手机分组、看板计数都不含 verified（窗口外的也不含）", () => {
     expect(mobileSections({ tasks }, ["V0"])).toEqual([{ key: "running", ids: ["A", "B"] }, { key: "waiting", ids: ["C"] }, { key: "done", ids: ["V0"] }]);

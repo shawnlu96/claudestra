@@ -6,7 +6,8 @@
  *
  * 旧红新绿：main 上团队视图会用团队键请求 /me/last-seen/shared-ledger:…、/ledger/shared-ledger:…/work、
  * /team/activity?project=shared-ledger:…、/peers/contacts、/team/quota，并把 observedAt 当完成时刻显示「今日完成 3」；
- * 修完这些请求为 0，指标显示「暂无」（带原因 title）。本机同数据的数字与请求路径保持不变。
+ * 修完这些请求为 0。PROJTABS1 起项目页没有指标条和大纲：总览只出有来源的数格（团队不知道的今天完成整格不出），
+ * 「要你定的」读不到时写读不到 + 重试；谁在干活在「模块进度 · 按人」。本机同数据的数字与请求路径保持不变。
  * happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
  */
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
@@ -32,6 +33,8 @@ let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let doc: Doc;
 let i18n: { setLang(l: "zh" | "en"): void };
+/** project-tabs/tab-request.ts：同一项目记住上次的标签（模块级），每个用例冷开前清回「总览」 */
+let rememberTab: (project: string, tab: string) => void;
 let ui: {
   CollabView: (p: { project: string }) => unknown;
   ChatStoreProvider: (p: { children: unknown }) => unknown;
@@ -110,6 +113,7 @@ beforeAll(async () => {
   const store = await import(mod("chat/chat-store.ts"));
   const ops = await import(mod("collab/shared/team-ops.tsx"));
   const nav = await import(mod("collab/dag/shared-navigation.tsx"));
+  ({ rememberTab } = await import(mod("collab/project-tabs/tab-request.ts")));
   ui = { CollabView: view.CollabView, ChatStoreProvider: store.ChatStoreProvider, TeamSource: ops.TeamSource, sharedCollabProject: nav.sharedCollabProject };
 });
 
@@ -129,7 +133,7 @@ afterAll(async () => {
 const tick = (ms = 20) => React.act(() => new Promise<void>((r) => setTimeout(r, ms)));
 async function until(ok: () => boolean, what: string) {
   for (let i = 0; i < 150; i++) { if (ok()) return; await tick(); }
-  throw new Error(`timeout waiting for ${what}`);
+  throw new Error(`timeout waiting for ${what}: ${(doc.body.textContent ?? "").slice(0, 400)}`);
 }
 
 async function mount(side: "local" | "team", width: number) {
@@ -145,13 +149,15 @@ async function mount(side: "local" | "team", width: number) {
   };
   live.add(unmount);
   const h = React.createElement as (...a: unknown[]) => unknown;
+  rememberTab(PROJECT, "overview");
+  rememberTab(ui.sharedCollabProject(IDENTITY), "overview");
   const collab = side === "team"
     ? h(ui.TeamSource, { identity: IDENTITY }, h(ui.CollabView, { project: ui.sharedCollabProject(IDENTITY) }))
     : h(ui.CollabView, { project: PROJECT });
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null, collab) as never));
-  // 手机团队首页是产品 DAG（列事项），本机没有产品看板退回分组列表（列卡）
+  // 冷开落总览：一句话状态出来、待办读完（要你定的写了「没有」或「读不到」）才算就绪
   const text = () => host.textContent ?? "";
-  await until(() => (text().includes("待你处理") || text().includes("For you")) && (text().includes("在等审查的卡") || text().includes("对照事项 parity")), `${side} view`);
+  await until(() => !!host.querySelector("[data-headline]") && (!!host.querySelector("[data-waits=unknown]") || /没有要你定的|Nothing needs your call/.test(text())), `${side} view`);
   const buttons = () => Array.from(host.querySelectorAll("button,[role=tab]"));
   const click = async (label: string) => {
     const b = buttons().find((x) => (x.textContent ?? "").trim().startsWith(label));
@@ -161,10 +167,16 @@ async function mount(side: "local" | "team", width: number) {
   };
   return {
     host, click,
-    /** 指标条一格：值与原因 title */
-    metric: (label: string) => {
-      const cell = Array.from(host.querySelectorAll("span")).find((s) => s.querySelector("b") && s.querySelector("span")?.textContent === label);
-      return cell ? { value: cell.querySelector("b")!.textContent, title: cell.getAttribute("title") } : null;
+    /** 总览数格（overview-tab.tsx data-cell）：值；整格不出 = null */
+    cell: (key: string) => host.querySelector(`[data-cell=${key}] b`)?.textContent ?? null,
+    /** 谁在干活：「模块进度」标签里的「按人」分段（没有可列的模块时直接就是按人） */
+    work: async () => {
+      const tab = buttons().find((x) => /^(模块进度|Module progress)$/.test((x.textContent ?? "").trim()));
+      if (!tab) throw new Error("no module tab");
+      await React.act(async () => tab.click());
+      await tick(200);
+      const person = buttons().find((x) => /^(按人|By person)$/.test((x.textContent ?? "").trim()));
+      if (person) { await React.act(async () => person.click()); await tick(200); }
     },
     button: (label: string) => buttons().find((x) => (x.textContent ?? "").trim().startsWith(label)) ?? null,
     unmount,
@@ -176,7 +188,7 @@ const LOCAL_ONLY = [/\/me\/last-seen\/shared-ledger:/, /\/ledger\/shared-ledger:
 
 test("复现测试:团队 CollabView 不再请求本机 last-seen / 谁在干活 / 团队标签接口", async () => {
   const v = await mount("team", 1200);
-  await v.click("谁在干活");
+  await v.work();
   await v.click("团队");
   await v.click("规划与提案");
   await tick(300);
@@ -194,43 +206,36 @@ test("复现测试:团队 CollabView 不再请求本机 last-seen / 谁在干活
 test("复现测试:团队 3 张 done、observedAt=now 不显示今日完成 3", async () => {
   const v = await mount("team", 1200);
   // 夹具 3 张 done 的镜像刚刷新（observedAt = 此刻）：observedAt 不是完成时刻，不能数成「今日完成 3」
-  // UXNUM1：不知道的指标整格不出（不是 3，也不是「暂无」）
-  expect(v.metric("今日完成")).toBeNull();
+  // UXNUM1：不知道的指标整格不出（不是 3，也不是「暂无」）；总览「今天完成」同一规则
+  expect(v.cell("todayDone")).toBeNull();
   await v.unmount();
 });
 
-test("复现测试:团队未知指标与待你处理显示暂无并给原因，区别于本机「—」", async () => {
+test("复现测试:团队未知指标整格不出；要你定的读不到时写读不到 + 重试，区别于本机「没有」", async () => {
   const v = await mount("team", 1200);
-  // UXNUM1：五项不知道的指标整格不出；「进行中」格由看板口径的「在干活」「在等」代替
-  for (const k of ["在场 agent", "今日完成", "审查轮次", "P0/P1 修掉", "平均等复核"]) expect({ k, cell: v.metric(k) }).toEqual({ k, cell: null });
-  expect(v.metric("进行中")).toBeNull();
-  expect([v.metric("在干活")?.value, v.metric("在等")?.value].every((x) => /^\d+$/.test(x ?? ""))).toBe(true);
-  const waits = v.button("待你处理");
-  expect(waits?.querySelector("b")?.textContent).toBe("暂无");
-  expect(waits?.title).toBeTruthy();
+  // PROJTABS1：项目页没有指标条，在场 / 审查轮次 / P0P1 / 平均等复核不再出；总览只出有来源的格
+  expect(v.host.querySelector("[data-metrics], [data-metric]")).toBeNull();
+  expect(v.cell("todayDone")).toBeNull();
+  expect([v.cell("merge"), v.cell("review")].every((x) => /^\d+$/.test(x ?? ""))).toBe(true);
+  expect(v.host.querySelector("[data-waits=unknown]")?.textContent).toBe("读不到 重试");
+  expect(v.host.textContent).not.toContain("暂无");
   await v.unmount();
 });
 
-test("复现测试:团队手机顶栏「待你处理」暂无，与桌面大纲一致", async () => {
+test("复现测试:团队手机同一套总览：要你定的读不到，不碰本机接口", async () => {
   const v = await mount("team", 390);
-  const waits = v.button("待你处理");
-  expect(waits?.querySelector("b")?.textContent).toBe("暂无");
-  expect(waits?.title).toBeTruthy();
+  expect(v.host.querySelector("[data-waits=unknown]")?.textContent).toBe("读不到 重试");
+  expect(v.button("待你处理")).toBeNull();
   expect(calls.filter((c) => LOCAL_ONLY.some((re) => re.test(c)))).toEqual([]);
   await v.unmount();
 });
 
 test("防回归:本机同一份台账数字、请求路径保持（last-seen / 谁在干活 / 团队标签照常读）", async () => {
   const v = await mount("local", 1200);
-  expect(v.metric("在场 agent")).toEqual({ value: "0", title: null });
-  expect(v.metric("今日完成")).toEqual({ value: "3", title: null });
-  expect(v.metric("审查轮次")).toEqual({ value: "5", title: null });
-  expect(v.metric("P0/P1 修掉")).toEqual({ value: "3", title: null });
-  expect(v.metric("平均等复核")?.value).toBe("2分");
-  expect(v.metric("平均等复核")?.title).toBeNull();
-  expect(v.button("待你处理")?.querySelector("b")?.textContent).toBe("0");
-  expect(v.button("待你处理")?.title ?? "").toBe("");
-  await v.click("谁在干活");
+  expect(v.cell("todayDone")).toBe("3");
+  expect(v.host.textContent).toContain("没有要你定的");
+  expect(v.host.querySelector("[data-waits=unknown]")).toBeNull();
+  await v.work();
   await v.click("团队");
   await tick(300);
   const paths = [...new Set(calls.map((c) => c.replace(/dayStart=\d+/, "dayStart=*").replace(/\?events=.*$/, "?events=*")))].sort();
@@ -241,19 +246,21 @@ test("防回归:本机同一份台账数字、请求路径保持（last-seen / �
 
 test("防回归:本机手机今日完成分组照旧列 3 张", async () => {
   const v = await mount("local", 390);
+  expect(v.cell("todayDone")).toBe("3");
+  // 本机没有产品看板：手机「项目地图」退回分组列表
+  await v.click("项目地图");
   const h = Array.from(v.host.querySelectorAll("h5")).map((x) => (x.textContent ?? "").replace(/\s+/g, " ").trim());
   expect(h).toContain("今日完成 3");
-  expect(v.button("待你处理")?.querySelector("b")?.textContent).toBe("0");
   await v.unmount();
 });
 
-test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英文词条（在场原因 / 桌面待你处理）；谁在干活是只读列表、手机待你处理不再说 V1", async () => {
+test("复现测试:英文模式团队谁在干活是只读列表、界面词不漏中文；要你定的读不到走英文", async () => {
   i18n.setLang("en");
   try {
     const EXEC = "View and plan only here; start and merge on the machine running the task";
     const v = await mount("team", 1200);
-    const desk = { presence: v.metric("Agents present")?.title, waits: v.button("For you")?.title };
-    await v.click("Who is working");
+    const waits = v.host.querySelector("[data-waits=unknown]")?.textContent;
+    await v.work();
     // 团队「谁在干活」是只读列表（PM 定 1）：栏名、分段、分组、镜像标注走英文词条，界面词不漏中文（卡标题是夹具数据，不在检查范围）
     const el = v.host.querySelector("[data-work-board=team]");
     const chrome = el ? Array.from(el.querySelectorAll("h3, [role=tab]")).map((x) => x.textContent ?? "").join("|") : "";
@@ -263,38 +270,25 @@ test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英�
     const zhLeft = (v.host.textContent ?? "").includes("执行操作仍在主场");
     await v.unmount();
     const m = await mount("team", 390);
-    const phone = m.button("For you")?.title;
+    const phone = m.host.querySelector("[data-waits=unknown]")?.textContent;
     await m.unmount();
-    // UXNUM1：在场 agent 整格不出，自然没有原因 title
-    expect({ ...desk, work, zhLeft, phone }).toEqual({ presence: undefined, waits: EXEC, work: { board: true, zhUi: false, hint: false }, zhLeft: false,
-      phone: "No data source yet" });
+    expect({ waits, work, zhLeft, phone }).toEqual({ waits: "Couldn't read Retry", work: { board: true, zhUi: false, hint: false }, zhLeft: false, phone: "Couldn't read Retry" });
   } finally {
     i18n.setLang("zh");
   }
 });
 
-test("复现测试:英文模式团队未知数值不回落中文「暂无」（五项指标 / 桌面与手机待你处理），本机已知 0 / 数字不变", async () => {
+test("复现测试:英文模式团队未知数值整格不出（不回落中文「暂无」），本机已知数字不变", async () => {
   i18n.setLang("en");
   try {
     const v = await mount("team", 1200);
-    const values = Object.fromEntries(["Agents present", "Done today", "Review rounds", "P0/P1 fixed", "Avg review wait"]
-      .map((k) => [k, v.metric(k)?.value]));
-    const deskWaits = v.button("For you")?.querySelector("b")?.textContent;
+    const team = { today: v.cell("todayDone"), zh: /暂无/.test(v.host.textContent ?? ""), tabs: tabs(v.host).slice(0, 4) };
     await v.unmount();
-    const m = await mount("team", 390);
-    const phoneWaits = m.button("For you")?.querySelector("b")?.textContent;
-    await m.unmount();
-    const NA = "Unknown";
-    // UXNUM1：五项指标整格不出（也就不会回落中文「暂无」）；待你处理照旧是 Unknown
-    expect({ values, deskWaits, phoneWaits }).toEqual({
-      values: { "Agents present": undefined, "Done today": undefined, "Review rounds": undefined, "P0/P1 fixed": undefined, "Avg review wait": undefined },
-      deskWaits: NA, phoneWaits: NA,
-    });
-    // 本机同数据：已知 0 / 数字照旧，不被未知短词替换
+    expect(team).toEqual({ today: null, zh: false, tabs: ["Overview", "Project map", "Module progress", "Team"] });
+    // 本机同数据：已知数字照旧，要你定的是「没有」
     const l = await mount("local", 1200);
-    expect(l.metric("Agents present")?.value).toBe("0");
-    expect(l.metric("Done today")?.value).toBe("3");
-    expect(l.button("For you")?.querySelector("b")?.textContent).toBe("0");
+    expect(l.cell("todayDone")).toBe("3");
+    expect(l.host.textContent).toContain("Nothing needs your call");
     await l.unmount();
   } finally {
     i18n.setLang("zh");
@@ -346,20 +340,19 @@ test("[验收线 5] 有过期：页头写过期个数（按钮），点开原地
   }
 });
 
-test("[验收线 5] 手机：团队源顶栏按钮与整屏页标题是『团队』、副标题『成员与位子』，页头同样写团队版", async () => {
+test("[验收线 5] 手机：团队源四个标签都在，「团队」标签直接是名册（不再走顶栏按钮整屏页），页头同样写团队版", async () => {
   const v = await mount("team", 390);
   await until(() => headLine(v.host) !== null, "page head line");
   expect(headLine(v.host)!.textContent).toBe("团队版 · 刚刚同步");
-  expect(v.button("团队")).not.toBeNull();
+  expect(tabs(v.host).slice(0, 4)).toEqual(["总览", "项目地图", "模块进度", "团队"]);
   expect(v.button("规划与提案")).toBeNull();
   await v.click("团队");
-  const sheet = (doc.body.textContent ?? "");
-  expect(sheet).toContain("团队成员与位子");
-  expect(sheet).not.toContain("最近 10 分钟的真实往来");
+  expect(v.host.querySelector("[data-project-pane=team]")).not.toBeNull();
+  expect(v.host.textContent ?? "").not.toContain("最近 10 分钟的真实往来");
   await v.unmount();
 });
 
-test("[验收线 5] 本机源请求不变：页头只有项目名，标签 / 手机按钮叫『团队』，副标题『成员与位子』，成员面板照常读本机接口", async () => {
+test("[验收线 5] 本机源请求不变：页头只有项目名，桌面手机标签都叫『团队』，成员面板照常读本机接口", async () => {
   const v = await mount("local", 1200);
   expect(headLine(v.host)).toBeNull();
   expect(v.host.textContent).not.toMatch(/团队版|规划与提案/);
@@ -372,7 +365,7 @@ test("[验收线 5] 本机源请求不变：页头只有项目名，标签 / 手
   expect(headLine(m.host)).toBeNull();
   expect(m.button("规划与提案")).toBeNull();
   await m.click("团队");
-  expect(doc.body.textContent ?? "").toContain("团队成员与位子");
-  expect(doc.body.textContent ?? "").not.toContain("规划与提案");
+  expect(m.host.querySelector("[data-project-pane=team]")).not.toBeNull();
+  expect(m.host.textContent ?? "").not.toContain("规划与提案");
   await m.unmount();
 });

@@ -1,7 +1,7 @@
 /**
  * team-project-N8B9 截图（opt-in）：N8B9_SHOTS_DIR=<目录> bun test tests/web-dom-product-panes-narrow-team-browser.test.ts
  * 同一份合成夹具（tests/web-team-source-n8b6.test.ts 的 n8b6Fixture），团队（?side=team）和本机（?side=local）各走一遍：
- * 1280 点「团队」→ 视口改成 390（产品 DAG 内容、「产品 DAG」选中）→ 改回 1280（还是「团队」）。浅色，过截图自动检查。
+ * 1280 点「团队」→ 视口改成 390 → 改回 1280。PROJTABS1 起四个标签桌面手机同一套：390 上「团队」照样在、照样选中，团队内容不空。浅色，过截图自动检查。
  * N8B9_BASELINE_WEB=<main 的 web 目录> 换成改前的构建、文件名前缀 before-，只截图不断言。纯 fixture，回环 Bun.serve，不连生产。
  */
 import { expect, test } from "bun:test";
@@ -47,8 +47,8 @@ function serve(bundle: string) {
   return { server, fx };
 }
 
-/** 字符串：根 tsconfig 不带 dom 类型。页面上还有别的 tablist，只看带「谁在干活」的那一条（ProductPanes 的） */
-const PANE_TABS = `[...([...document.querySelectorAll('[role=tablist]')].find((l) => l.textContent.includes('谁在干活'))?.querySelectorAll('[role=tab]') ?? [])]`;
+/** 字符串：根 tsconfig 不带 dom 类型。只看项目页的四个标签（project-tabs.tsx） */
+const PANE_TABS = `[...document.querySelectorAll('[data-project-tab]')]`;
 const SELECTED = `${PANE_TABS}.filter((b) => b.getAttribute('aria-selected') === 'true').map((b) => b.textContent)`;
 const TABS = `${PANE_TABS}.map((b) => b.textContent)`;
 
@@ -60,7 +60,6 @@ test.skipIf(!out)("N8B9: 1280 选「团队」→ 390 → 1280，团队 / 本机"
     "--outdir", bundle, "--tsconfig-override", `${webRoot}/tsconfig.json`], { stdout: "pipe", stderr: "pipe" });
   if (await build.exited) throw new Error(await new Response(build.stderr).text());
   const { server, fx } = serve(bundle);
-  const title = fx.list.features[0]!.title;
   const browser: Browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   const issues: Record<string, ShotIssue[]> = {}, shots: { file: string; sha256: string; selected: string[]; tabs: string[] }[] = [];
   const seen: Record<string, { selected: string[]; tabs: string[]; text: string }> = {};
@@ -83,12 +82,12 @@ test.skipIf(!out)("N8B9: 1280 选「团队」→ 390 → 1280，团队 / 本机"
         seen[name] = { selected, tabs, text: await page.locator("body").innerText() };
       };
       await page.goto(`${server.url}?side=${side}&theme=light&project=${fx.project}&team=${fx.team}`);
-      await page.getByText(title, { exact: true }).first().waitFor({ timeout: 15_000 });
-      await page.getByRole("tab", { name: "团队", exact: true }).click();
+      await page.locator("[data-project-tab=team]").waitFor({ timeout: 15_000 });
+      await page.locator("[data-project-tab=team]").click();
       await page.waitForFunction(`${SELECTED}.includes('团队')`, undefined, { timeout: 15_000 });
       await shoot("1-1280-team");
       await page.setViewportSize({ width: 390, height: 1100 });
-      await page.waitForFunction(`!${TABS}.includes('团队')`, undefined, { timeout: 15_000 });
+      await page.waitForFunction(`${SELECTED}.includes('团队')`, undefined, { timeout: 15_000 });
       await shoot("2-390-from-1280");
       await page.setViewportSize({ width: 1280, height: 1100 });
       await page.waitForFunction(`${TABS}.includes('团队')`, undefined, { timeout: 15_000 });
@@ -103,9 +102,9 @@ test.skipIf(!out)("N8B9: 1280 选「团队」→ 390 → 1280，团队 / 本机"
   for (const side of ["team", "local"]) {
     const wide = seen[`after-${side}-1-1280-team`]!, narrow = seen[`after-${side}-2-390-from-1280`]!, back = seen[`after-${side}-3-1280-back`]!;
     expect(wide.selected).toEqual(["团队"]);
-    expect(narrow.tabs).toEqual(["产品 DAG", "谁在干活"]);
-    expect(narrow.selected).toEqual(["产品 DAG"]);
-    expect(narrow.text).toContain(title);
+    expect(narrow.tabs).toEqual(["总览", "项目地图", "模块进度", "团队"]);
+    expect(narrow.selected).toEqual(["团队"]);
+    expect(narrow.text).toContain("成员"); // 团队标签的名册（TeamTabs），主区域不空
     expect(back.selected).toEqual(["团队"]);
     expect(back.text).toBe(wide.text);
   }
