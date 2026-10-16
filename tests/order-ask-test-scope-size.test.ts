@@ -87,6 +87,18 @@ describe("尺寸判定", () => {
     expect(removedTestBlocks(nested, nested.replace(/\n {2}/g, " "))).toBe(0);
     expect(removedTestBlocks(BASE, BASE.replace('test("a"', 'test.skip("a"').replace('test("b"', 'test.skip("b"'))).toBe(2);
   });
+
+  test("[验收线 3] removedTestBlocks：只改 .each 夹具数据不算删块；改修饰链结构（.each → .skip.each）仍算", () => {
+    const each = 'import { test, expect } from "bun:test";\ntest.each([1])("p %d", (x) => { expect(x).toBeGreaterThan(0); });\ntest.each([2])("q %d", (x) => { expect(x).toBeGreaterThan(0); });\n';
+    const fixtures = each.replace("[1]", "[3]").replace("[2]", "[4]");
+    expect(removedTestBlocks(each, fixtures)).toBe(0);
+    expect(judgeTestScopeSize(2, 2, removedTestBlocks(each, fixtures))).toBeNull();
+    expect(removedTestBlocks(each, fixtures.replace('"p %d"', '"p2 %d"'))).toBe(0);
+    expect(removedTestBlocks(each, 'import { test, expect } from "bun:test";\ntest.each([3])("p %d", (x) => { expect(x).toBeGreaterThan(0); });\n')).toBe(1);
+    expect(removedTestBlocks(each, each.replaceAll("test.each(", "test.skip.each("))).toBe(2);
+    const multi = 'describe.each([["a", 1]])("g %s", (n, v) => { it.each([v])("x", (y) => { expect(y).toBe(v); }); });\n';
+    expect(removedTestBlocks(multi, multi.replace('["a", 1]', '["b", 2]').replace("[v]", "[v, v]"))).toBe(0);
+  });
 });
 
 describe("交付登记", () => {
