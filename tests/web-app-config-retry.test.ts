@@ -1,5 +1,5 @@
 /** peer-WEBLOCAL1：首次读 /app-config.json 网络错误 / 5xx 不等于直托管——重试 1s/2s/4s，仍失败就报错；404 / 非 JSON 仍是 direct */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AppConfigUnreachableError, decideConfigLoad, loadAppConfig, setAppConfigForTest, setAppConfigSleepForTest } from "@/lib/app-config";
 
 const realFetch = globalThis.fetch;
@@ -13,8 +13,16 @@ const script = (steps: (() => Promise<Response>)[]) => {
 const offline = () => Promise.reject(new TypeError("Failed to fetch"));
 const relay = () => Promise.resolve(Response.json(relayBody));
 
+// 浏览器里才有 location；没有它时拉取抛错按 no-host 走 direct（见下面最后一条）
+const g = globalThis as { location?: unknown };
+const realLocation = g.location;
+beforeEach(() => {
+  g.location = { hostname: "relay.test" };
+});
+
 afterEach(() => {
   globalThis.fetch = realFetch;
+  g.location = realLocation;
   setAppConfigForTest(null);
   setAppConfigSleepForTest((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   slept = [];
@@ -34,6 +42,7 @@ describe("decideConfigLoad（纯判定）", () => {
     expect(decideConfigLoad({ kind: "status", status: 404 }, 0)).toMatchObject({ action: "direct", cfg: { mode: "direct", fp: "local" } });
     expect(decideConfigLoad({ kind: "not-json" }, 0)).toMatchObject({ action: "direct", cfg: { fp: "local" } });
     expect(decideConfigLoad({ kind: "json", body: "garbage" }, 0)).toMatchObject({ action: "direct" });
+    expect(decideConfigLoad({ kind: "no-host" }, 0)).toMatchObject({ action: "direct" });
     expect(decideConfigLoad({ kind: "json", body: relayBody }, 2)).toMatchObject({ action: "relay", cfg: { mode: "relay", relayBase: "relay.test" } });
   });
 });
@@ -68,4 +77,13 @@ describe("loadAppConfig 首次加载", () => {
     expect(await loadAppConfig()).toMatchObject({ mode: "direct", fp: "local" });
     expect(slept).toEqual([]);
   });
+});
+
+test("不在浏览器（没有 location）拉取抛错：不重试，按 direct（单测 / 非浏览器环境）", async () => {
+  fakeSleep();
+  g.location = undefined;
+  const count = script([offline]);
+  expect(await loadAppConfig()).toMatchObject({ mode: "direct", fp: "local" });
+  expect(count()).toBe(1);
+  expect(slept).toEqual([]);
 });

@@ -75,7 +75,9 @@ export type ConfigFetchResult =
   | { kind: "json"; body: unknown }
   | { kind: "status"; status: number }
   | { kind: "not-json" }
-  | { kind: "network-error" };
+  | { kind: "network-error" }
+  /** 拉取抛错且不在浏览器里（单测等，没有 location）：相对地址根本拉不了，没有可重试的对象 */
+  | { kind: "no-host" };
 
 export type ConfigLoadDecision = { action: "relay" | "direct"; cfg: AppConfig } | { action: "retry"; delayMs: number } | { action: "fail" };
 
@@ -115,7 +117,7 @@ async function fetchConfig(): Promise<ConfigFetchResult> {
   try {
     r = await fetch("/app-config.json", { cache: "no-store", credentials: "omit" });
   } catch {
-    return { kind: "network-error" };
+    return { kind: (globalThis as { location?: unknown }).location ? "network-error" : "no-host" };
   }
   if (!r.ok) return { kind: "status", status: r.status };
   try {
