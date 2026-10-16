@@ -5,6 +5,7 @@
  */
 import { listAsks } from "../lib/ledger-asks.js";
 import { recentTools, turnBriefText } from "../lib/turn-brief.js";
+import { isAcpChannel } from "./acp-state.js";
 import { askReadDb } from "./asks.js";
 import { replayEventsSince } from "./event-bus.js";
 import { turnCuts } from "./turn-cuts.js";
@@ -22,11 +23,11 @@ function openQuestions(channelId: string): string[] {
   }
 }
 
-/** ≤300 字；全空 = 不知道它在做什么（空闲 / bridge 刚重启）。runtime 要传：Codex 的工具事件只在跑完才有，不能按「没收尾 = 进行中」算 */
+/** ≤300 字；全空 = 不知道它在做什么（空闲 / bridge 刚重启）。runtime 要传：tmux 下 Codex 的工具事件只在跑完才有，不能按「没收尾 = 进行中」算 */
 export function turnBrief(agent: string, channelId: string, runtime: string | undefined): string {
   return turnBriefText({
     opener: turnCuts.turnOpener(channelId),
-    tools: recentTools(replayEventsSince(0, { agent }), undefined, runtime === "codex"),
+    tools: recentTools(replayEventsSince(0, { agent }), undefined, runtime === "codex" && !isAcpChannel(channelId)),
     questions: openQuestions(channelId),
   });
 }

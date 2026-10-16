@@ -1,8 +1,11 @@
 /** JRT-1：目标 agent「当前在做什么」短摘要——拼法（lib/turn-brief.ts）和 bridge 侧取数（bridge/turn-brief.ts）。 */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { noteAcpChannel } from "../src/bridge/acp-state.js";
 import { setAsksForTest } from "../src/bridge/asks.js";
 import { emitEvent, forgetAgent } from "../src/bridge/event-bus.js";
-import type { Envelope } from "../src/bridge/router.js";
+import { clearOpenedBy, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
+import { HeldQueue } from "../src/bridge/held-queue.js";
+import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { turnBrief } from "../src/bridge/turn-brief.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
 import { closeAsk, openAsk } from "../src/lib/ledger-asks.js";
@@ -77,6 +80,24 @@ describe("turnBriefText", () => {
     expect(s.startsWith("本回合起因：agent-claudestra-worker-1")).toBe(true);
   });
 
+  test("brief-tools-elided：发送人 / 起因 / 两个问题都顶满，工具标题照样在，三段都在、不超长", () => {
+    const s = turnBriefText({
+      opener: trig("local", "a".repeat(51), "起".repeat(120)),
+      tools: [{ title: "Bash deploy production", running: true }],
+      questions: ["问".repeat(60), "答".repeat(60)],
+    });
+    expect(Array.from(s).length).toBeLessThanOrEqual(BRIEF_MAX);
+    expect(s).toContain("最近工具：Bash deploy production（进行中）");
+    expect(s).toContain("本回合起因：");
+    expect(s).toContain("在等回答：「问");
+    expect(s).toContain("」、「答");
+  });
+
+  test("某段短，省下的字数让给别的段：只有起因时起因不截", () => {
+    const s = turnBriefText({ opener: trig("user", "he", "起".repeat(120)), tools: [], questions: [] });
+    expect(s).toBe(`本回合起因：he（user）「${"起".repeat(120)}」`);
+  });
+
   test("clip 不切半个 emoji", () => {
     expect(clip("😀😀😀", 2)).toBe("😀…");
     expect(clip("a  b", 10)).toBe("a b");
@@ -124,6 +145,50 @@ describe("turnBrief（bridge 取数）", () => {
     closeAsk(db, openAsk(db, { ...base, fromChannelId: CH, kind: "decide", title: "早答了" }).id, "cancelled", "");
     expect(turnBrief(AGENT, CH, "claude")).toBe("本回合起因：he（user）「把 JRT-1 做了」。最近工具：Bash bun test（进行中）。在等回答：「合并吗」");
     expect(turnBrief(AGENT, CH, "codex")).toContain("最近工具：Bash bun test。");
+  });
+
+  test("codex-acp-running-false：Codex 走 ACP 时开头就有 tool_start、完成才有 tool_done，没完成的照样是进行中", () => {
+    deliver("m1", "跑测试");
+    emitEvent({ agent: AGENT, chatId: CH, type: "tool_start", data: { toolId: "a1", name: "Bash", summary: "ls" } });
+    emitEvent({ agent: AGENT, chatId: CH, type: "tool_done", data: { toolId: "a1" } });
+    emitEvent({ agent: AGENT, chatId: CH, type: "tool_start", data: { toolId: "a2", name: "Bash", summary: "bun test" } });
+    noteAcpChannel(CH, "acp");
+    try {
+      expect(turnBrief(AGENT, CH, "codex")).toContain("最近工具：Bash ls；Bash bun test（进行中）");
+    } finally {
+      noteAcpChannel(CH, "tmux");
+    }
+    expect(turnBrief(AGENT, CH, "codex")).toContain("最近工具：Bash ls；Bash bun test");
+    expect(turnBrief(AGENT, CH, "codex")).not.toContain("进行中");
+  });
+
+  test("held-carrier-opener：押着的两条 agent 消息合成一封载体送达，起因是第一条成员（发送人 + 正文），不是 bridge 载体", async () => {
+    const ws = {} as never;
+    const to: LocalEndpoint = { kind: "local", channelId: CH, agentName: AGENT, ws };
+    const held = new HeldQueue(null);
+    held.configureIdleBatch(undefined);
+    for (const [n, name] of [[1, "agent-a"], [2, "agent-b"]] as const) {
+      const env = { from: { kind: "local", channelId: `c-${name}`, agentName: name, ws }, to, intent: "request", content: `第 ${n} 条正文`,
+        meta: { messageId: `h${n}`, threadId: `t${n}`, ts: new Date().toISOString(), triggerKind: "agent_tool" } } as Envelope;
+      held.hold(CH, { env, to, heldAt: n });
+    }
+    const sent: Envelope[] = [];
+    const deliverStub: FlushDeps["deliver"] = async (env): Promise<Delivery> => {
+      sent.push(env);
+      turnCuts.noteDelivered(env, CH); // bridge.ts deliverToLocal 同一处
+      return { envelope: env, outcome: { kind: "sent" } };
+    };
+    clearOpenedBy();
+    await flushHeld({
+      held, compacting: () => false, working: async () => false, isHumanRequest: () => false, client: () => ({ ws }), deliver: deliverStub,
+      touch: () => {}, settled: async () => true, turnAt: () => undefined, render: async (e) => e.content, agentBatch: () => true, mirror: () => {},
+    }, CH, "stop");
+    clearOpenedBy();
+    expect(sent.map((e) => e.from.kind)).toEqual(["bridge"]);
+    expect(turnCuts.turnOpener(CH)).toMatchObject({ fromKind: "local", fromName: "agent-a", excerpt: "第 1 条正文" });
+    expect(turnBrief(AGENT, CH, "claude")).toBe("本回合起因：agent-a（local）「第 1 条正文」");
+    turnCuts.dropUndelivered(CH, sent[0].meta.messageId); // 载体没投进去：起因跟着撤
+    expect(turnCuts.turnOpener(CH)).toBeUndefined();
   });
 
   test("turn-opener-evicted：一回合送到 9 条（超过最近 8 条的上限），起因仍是第一条", () => {

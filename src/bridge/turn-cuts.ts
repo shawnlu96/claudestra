@@ -41,6 +41,14 @@ export interface RecordCutInput {
   interrupted?: boolean;
 }
 
+/** 一条送达的信封 → 送达记录（发送人显示名、回复地址、正文开头） */
+function triggerOf(env: Envelope, at: number): TurnTrigger {
+  const f = env.from;
+  const fromName = f.kind === "user" ? (f.username ?? "用户") : f.kind === "api" ? f.name : f.kind === "local" ? (f.agentName ?? "agent") : `bridge${f.label ? `:${f.label}` : ""}`;
+  const replyTo = f.kind === "user" || f.kind === "local" ? f.channelId : f.kind === "api" ? `api:${f.tokenId}` : "";
+  return { messageId: env.meta.messageId, fromKind: f.kind, fromName, excerpt: env.content.slice(0, 120), replyTo, at };
+}
+
 export class TurnCuts {
   private readonly cuts: PersistedMap<Cut>;
   /**
@@ -98,15 +106,24 @@ export class TurnCuts {
     if (cut && cut.byMessageId === env.meta.messageId && cut.deliveredAt === undefined) this.cuts.set(channelId, { ...cut, deliveredAt: at });
     if (isCutNotice(env)) return void this.noticePending.delete(channelId);
     const f = env.from;
-    const fromName = f.kind === "user" ? (f.username ?? "用户") : f.kind === "api" ? f.name : f.kind === "local" ? (f.agentName ?? "agent") : `bridge${f.label ? `:${f.label}` : ""}`;
-    const replyTo = f.kind === "user" || f.kind === "local" ? f.channelId : f.kind === "api" ? `api:${f.tokenId}` : "";
-    const t = { messageId: env.meta.messageId, fromKind: f.kind, fromName, excerpt: env.content.slice(0, 120), replyTo, at };
+    const t = triggerOf(env, at);
     if (env.to.kind === "local" && env.to.agentName) this.agentOf.set(channelId, env.to.agentName);
     this.inbound.set(channelId, [...(this.inbound.get(channelId) ?? []), t].slice(-INBOUND_KEEP));
     this.opener.set(channelId, nextOpener(this.opener.get(channelId), t));
     if (this.codexTypeIn.has(channelId) && !typed && busy && (f.kind === "user" || f.kind === "api")) {
       this.codexQueued.set(channelId, [...(this.codexQueued.get(channelId) ?? []), t.excerpt].slice(-INBOUND_KEEP));
     }
+  }
+
+  /**
+   * 合批载体（bridge/held-flush.ts idleCarrier）送达后调：载体是 bridge 拼的，发送人和开头都只是批首说明，起因换成它带走的成员（取法同 nextOpener）。
+   * messageId 仍记载体的：载体没投进去时 dropUndelivered 按载体 id 撤
+   */
+  noteCarried(channelId: string, carrierId: string, members: readonly Envelope[]): void {
+    const cur = this.opener.get(channelId);
+    const base = cur?.messageId === carrierId ? undefined : cur;
+    const next = members.map((e) => triggerOf(e, this.now())).reduce(nextOpener, base);
+    if (next && next !== cur) this.opener.set(channelId, { ...next, messageId: carrierId });
   }
 
   /** 这一回合送到过的某条消息（Pi 停下后作废回显要找发送方），以及它是发给哪个 agent 的 */

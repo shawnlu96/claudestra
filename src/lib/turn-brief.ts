@@ -35,7 +35,8 @@ const shortName = (name: string) => name.replace(/^mcp__.+?__/, "");
 
 /**
  * 本回合（最后一次 done 之后）的工具，按开始先后取最后 n 个；没 tool_done 的算进行中。
- * completedOnly = Codex：它的会话记录只在命令跑完时才有一条 tool_use、没有 tool_done（见 lib/turn-cuts.ts completedOnlyFrom），全按已完成
+ * completedOnly = tmux 下的 Codex：它的会话记录只在命令跑完时才有一条 tool_use、没有 tool_done（见 lib/turn-cuts.ts completedOnlyFrom），全按已完成；
+ * 走 ACP 的 Codex 开头就有 tool_start、完成才有 tool_done（lib/acp/updates.ts），和 Claude Code 一样按「没收尾 = 进行中」
  */
 export function recentTools(events: readonly CutEvent[], n = TOOLS_KEEP, completedOnly = false): BriefTool[] {
   const order: string[] = [];
@@ -60,14 +61,41 @@ export function nextOpener(cur: TurnTrigger | undefined, t: TurnTrigger): TurnTr
   return !cur || (cur.fromKind === "bridge" && t.fromKind !== "bridge") ? t : cur;
 }
 
-/** 在等的问题先拼、先占字数：路由最需要知道「它在等人答」，起因和工具挤不下就截它们 */
+type Section = (budget: number) => string;
+const len = (s: string) => Array.from(s).length;
+
+/** total 按各段长度分：从短的起，每段拿 min(自己的长度, 剩下的平分)——短段用多少给多少，省下的归长段 */
+function fairShares(lens: readonly number[], total: number): number[] {
+  const order = lens.map((_, k) => k).sort((a, b) => lens[a] - lens[b]);
+  const out = new Array<number>(lens.length);
+  let left = total;
+  order.forEach((k, n) => {
+    out[k] = Math.min(lens[k], Math.floor(left / (order.length - n)));
+    left -= out[k];
+  });
+  return out;
+}
+
+/** 挤不下先丢最早的工具：最后一个（多半是进行中的那个）最要紧 */
+const toolsSection = (tools: readonly string[]): Section => (b) => {
+  const text = (k: number) => `最近工具：${tools.slice(k).join("；")}`;
+  const k = tools.findIndex((_, j) => len(text(j)) <= b);
+  return clip(text(k < 0 ? tools.length - 1 : k), b);
+};
+
+/**
+ * 起因 / 工具 / 在等的问题各算一段，三段按长度分 BRIEF_MAX：每段至少分到约三分之一（≥ 99 字），
+ * 单个工具（≤ 50）和第一个问题（≤ 67）一定完整在，哪段都不会被别的段挤没
+ */
 export function turnBriefText(i: BriefInput): string {
-  const qs = i.questions.filter((q) => q.trim()).slice(0, QUESTIONS_KEEP);
-  const wait = qs.length ? `在等回答：${qs.map((q) => `「${clip(q, QUESTION_MAX)}」`).join("、")}` : "";
-  const head: string[] = [];
   const o = i.opener;
-  if (o) head.push(`本回合起因：${clip(o.fromName, TOOL_MAX)}（${o.fromKind}）「${clip(o.excerpt, TRIGGER_MAX)}」`);
-  if (i.tools.length) head.push(`最近工具：${i.tools.map((t) => `${clip(t.title, TOOL_MAX)}${t.running ? "（进行中）" : ""}`).join("；")}`);
-  const headText = head.length ? clip(head.join("。"), BRIEF_MAX - (wait ? Array.from(wait).length + 1 : 0)) : "";
-  return [headText, wait].filter(Boolean).join("。");
+  const tools = i.tools.map((t) => `${clip(t.title, TOOL_MAX)}${t.running ? "（进行中）" : ""}`);
+  const qs = i.questions.filter((q) => q.trim()).slice(0, QUESTIONS_KEEP);
+  const sections: Section[] = [
+    ...(o ? [(b: number) => clip(`本回合起因：${clip(o.fromName, TOOL_MAX)}（${o.fromKind}）「${clip(o.excerpt, TRIGGER_MAX)}」`, b)] : []),
+    ...(tools.length ? [toolsSection(tools)] : []),
+    ...(qs.length ? [(b: number) => clip(`在等回答：${qs.map((q) => `「${clip(q, QUESTION_MAX)}」`).join("、")}`, b)] : []),
+  ];
+  const budgets = fairShares(sections.map((s) => len(s(Infinity))), BRIEF_MAX - Math.max(0, sections.length - 1));
+  return sections.map((s, k) => s(budgets[k])).join("。");
 }
