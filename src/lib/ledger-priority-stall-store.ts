@@ -145,8 +145,9 @@ export function priorityStallOwner(db: Database, ctx: WriteCtx, project: string,
     const { basis: b, cycle: c } = live, now = ctx.now ?? Date.now(), body = stallNotice(b, c, now);
     const existing = listAsks(db, { project, states: ["open"] }).find((a) => a.kind === "owner_action"
       && (a.extra.priorityStallKey === key || (b.taskId && a.taskId === b.taskId && a.extra.mechanism === "priorityStall")));
+    // The reminder is the scheduler's note to the PM: assigning it keeps it out of the owner's inbox (web ask-audience.ts).
     const ask = existing ?? openAskFull(db, { project, taskId: b.taskId, source: "system", kind: "owner_action", title: `now 停滞：${b.label}`,
-      body, createdBy: "system:priority-stall", dedupKey: `priority-stall-owner:${project}:${key}:${c.id}`,
+      body, createdBy: "system:priority-stall", dedupKey: `priority-stall-owner:${project}:${key}:${c.id}`, assignee: b.pm,
       extra: { mechanism: "priorityStall", priorityStallKey: key, cycle: c.id, pm: b.pm, featureId: b.featureId, label: b.label } }, now).ask;
     finishPriorityStall(db, ctx, project, key, token, "success", `${existing ? "关联" : "创建"} owner 待办 ${ask.id}\n${body}`);
     return ask.id;
