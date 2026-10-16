@@ -114,10 +114,11 @@ beforeAll(async () => {
   const ops = await import(mod("collab/shared/team-ops.tsx"));
   const nav = await import(mod("collab/dag/shared-navigation.tsx"));
   const props = await import(mod("collab/v4/v4-props.tsx"));
+  const overview = await import(mod("collab/project-tabs/overview-tab.tsx"));
   const cnav = await import(mod("collab/collab-nav.ts"));
   const fill = await import(new URL("../web/lib/i18n-fill.ts", import.meta.url).href);
   ui = { CollabView: view.CollabView, ChatStoreProvider: store.ChatStoreProvider, TeamSource: ops.TeamSource, sharedCollabProject: nav.sharedCollabProject,
-    EdgePage: props.EdgePage, hhmm: props.hhmm, TeamFactsSec: props.TeamFactsSec, Overview: props.Overview,
+    EdgePage: props.EdgePage, hhmm: props.hhmm, TeamFactsSec: props.TeamFactsSec, Overview: overview.Overview,
     homeView: (await import(mod("collab/collab-model.ts"))).homeView, openCollabTask: cnav.openCollabTask, zh: fill.fillParams };
 });
 
@@ -171,9 +172,9 @@ async function mountView(side: "local" | "team", width: number) {
   const v = await render(side === "team"
     ? h(ui.TeamSource, { identity: IDENTITY }, h(ui.CollabView, { project: ui.sharedCollabProject(IDENTITY) }))
     : h(ui.CollabView, { project: PROJECT }));
-  // 手机详情 portal 到 body：读整页文字
+  // 手机详情 portal 到 body：读整页文字。冷开落总览（PROJTABS1）：一句话状态出来就算就绪
   const text = () => doc.body.textContent ?? "";
-  await until(() => text().includes("待你处理") || text().includes("For you"), `${side} view`);
+  await until(() => !!doc.body.querySelector("[data-headline]"), `${side} view`);
   return { ...v, text };
 }
 

@@ -1,73 +1,103 @@
 import type { ReactNode } from 'react';
-import type { ProductBoard } from '@/lib/api/product-board';
+import type { ProductBoard, ProductFeature } from '@/lib/api/product-board';
 import type { Tr } from '../collab-model';
-import type { DagTab } from '../dag/use-dag-ui';
+import type { ModuleBy } from '../dag/use-dag-ui';
 import type { DagBoard } from '../dag/dag-types';
+import { Icon } from '../collab-icons';
+import { useProjectTabsT } from '../project-tabs/project-tabs-i18n';
+import p from '../project-tabs/project-tabs.module.css';
 import { hasFeatureSnapshot } from './dag-availability';
-import { FeatureCards, FeatureTrail, ProductView } from './product-view';
-import { useTeamTab } from '../collab-page-head';
-import v from '../v4/v4.module.css';
+import { FeatureCards, ProductView } from './product-view';
 import d from '../dag/dag.module.css';
 import s from './product.module.css';
 
-const LABELS: Record<DagTab, string> = { product: '产品 DAG', dag: '子 DAG', progress: '谁在干活', team: '团队' };
-interface Props {
+interface Common {
   board: ProductBoard | null;
   /** No answer yet: placeholder instead of the causal fallback (board null + !loading = definitely none). */
   loading?: boolean;
-  dagBoard: DagBoard | null;
-  featureId: string | null;
-  tab: DagTab;
-  setTab: (tab: DagTab) => void;
   onFeature: (id: string) => void;
   onTask: (id: string) => void;
-  subdag: ReactNode;
+  /** No product board: desktop causal canvas / phone grouped list (the caller decides which). */
   fallback: ReactNode;
-  progress: ReactNode;
-  team?: ReactNode;
-  graph: boolean;
   narrow: boolean;
   now: number;
   tr: Tr;
 }
 
+const Loading = ({ tr }: { tr: Tr }) => <div className={s.loading} role="status">{tr('加载中…')}</div>;
+
 /**
- * Product failure returns the existing grouped sub-DAG without moving its viewport or erasing the work board.
- * While the product board is still loading the tabs stay product-shaped and the pane is a placeholder, so the causal
- * fallback never flashes before the board arrives (tests/web-dom-product-panes-loading.test.ts).
+ * 项目地图标签：产品看板；没有产品看板的项目退回因果线（fallback）。看板还在读时是占位，因果线不先闪一下
+ * （tests/web-dom-product-panes-loading.test.ts）。project-map-* 卡只换这一块。
  */
-export function ProductPanes(p: Props) {
-  const { board, loading = false } = p;
-  const teamTab = useTeamTab(p.tr).label;
-  const has = !!board || loading;
-  const feature = board?.features.find(f => f.id === p.featureId);
-  const tab = p.narrow && p.tab === 'team' ? has ? 'product' : 'dag'
-    : !has && p.tab === 'product' ? 'dag' : has && p.tab === 'dag' && !feature ? 'product' : p.tab;
-  const keys: DagTab[] = has ? p.narrow ? ['product', 'progress'] : ['product', 'dag', 'progress', 'team']
-    : p.narrow ? ['dag', 'progress'] : ['dag', 'progress', 'team'];
-  const content = tab === 'team' ? <div className={v.teamPane}>{p.team}</div> : tab === 'progress' ? p.progress
-    : loading && tab === 'product' ? <div className={s.loading} role="status">{p.tr('加载中…')}</div>
-    : board && tab === 'product' ? <ProductView board={board} narrow={p.narrow} now={p.now} onFeature={p.onFeature} tr={p.tr} onTask={p.onTask} />
-      : board && feature ? <>
-        <FeatureTrail title={feature.title} onBack={() => p.setTab('product')} tr={p.tr} />
-        <div key={hasFeatureSnapshot(p.dagBoard, feature.id) ? 'snapshot' : 'fallback'} className={s.recovery}>
-          {feature.hasDag ? hasFeatureSnapshot(p.dagBoard, feature.id) ? p.subdag : p.fallback
-            : <FeatureCards feature={feature} onTask={p.onTask} tr={p.tr} />}
-        </div>
-      </> : p.graph ? p.subdag : p.fallback;
-  return <div className={p.narrow ? s.panes : v.center}>
-    <div className={p.narrow ? d.mseg : v.tabs} role="tablist">
-      {keys.map(k => {
-        const disabled = k === 'dag' && has && !feature;
-        const on = p.narrow && k === 'product' ? tab !== 'progress' : tab === k;
-        const label = k === 'dag' && feature ? `${p.tr(LABELS[k])} · ${feature.title}`
-          : k === 'team' ? teamTab : p.tr(k === 'dag' && !has && !p.graph ? '因果线' : LABELS[k]);
-        return <button key={k} type="button" role="tab" disabled={disabled} aria-selected={on}
-          title={disabled ? p.tr('先在产品 DAG 里选一个 feature') : label}
-          className={`${s.tab} ${p.narrow ? `${d.msegBtn} ${on ? d.msegOn : ''}` : `${v.tab} ${on ? v.tabOn : ''}`}`}
-          onClick={() => p.setTab(k)}>{label}</button>;
-      })}
-    </div>
+export function MapPane(props: Common & { project?: string }) {
+  const { board, loading = false } = props;
+  const body = loading ? <Loading tr={props.tr} />
+    : board ? <ProductView board={board} narrow={props.narrow} now={props.now} onFeature={props.onFeature} tr={props.tr} onTask={props.onTask} project={props.project} />
+      : props.fallback;
+  return <div className={props.narrow ? s.panes : p.fill}>{body}</div>;
+}
+
+function ModuleList({ modules, onFeature, tr }: { modules: readonly ProductFeature[]; onFeature: (id: string) => void; tr: Tr }) {
+  return <ul className={p.modules} aria-label={tr('模块')}>
+    {modules.map(f => <li key={f.id}>
+      <button type="button" className={p.moduleRow} data-module={f.id} onClick={() => onFeature(f.id)}>
+        <span className={p.moduleTitle}>{f.title}</span>
+        <span className={p.moduleMeta}>{tr('{d}/{t} 完成', { d: f.counts.completed, t: f.counts.total })}</span>
+        <Icon name="chevronRight" size={14} />
+      </button>
+    </li>)}
+  </ul>;
+}
+
+function ModuleTrail({ title, onBack, tr }: { title: string; onBack: () => void; tr: Tr }) {
+  return <nav className={s.trail} aria-label={tr('模块')}>
+    <button type="button" onClick={onBack}>{tr('模块')}</button><Icon name="chevronRight" size={14} /><strong>{title}</strong>
+  </nav>;
+}
+
+interface ModuleProps extends Common {
+  dagBoard: DagBoard | null;
+  featureId: string | null;
+  by: ModuleBy;
+  setBy: (by: ModuleBy) => void;
+  onBack: () => void;
+  /** 选中模块的子图（桌面 FocusBoard / 画布，手机 MobileDag） */
+  subdag: ReactNode;
+  /** 「按人」= 谁在干活看板 */
+  progress: ReactNode;
+  /** 老 bridge 没有产品看板但有子图：按模块直接是全部模块的子图 */
+  graph: boolean;
+}
+
+/**
+ * 模块进度标签：顶上「按模块 / 按人」。按模块 = 没选模块时是有子图的模块列表（点一行选中），选了是它的子图；
+ * 没有任何可列的模块时不出分段，直接是按人。
+ */
+export function ModulePane(props: ModuleProps) {
+  const tr = useProjectTabsT(props.tr);
+  const { board, loading = false } = props;
+  const modules = board?.features.filter(f => f.hasDag) ?? [];
+  const feature = board?.features.find(f => f.id === props.featureId);
+  const any = loading || modules.length > 0 || !!feature || (!board && props.graph);
+  const by: ModuleBy = any ? props.by : 'person';
+  const snapshot = !!feature && hasFeatureSnapshot(props.dagBoard, feature.id);
+  const content = by === 'person' ? props.progress
+    : loading ? <Loading tr={tr} />
+    : feature ? <>
+      <ModuleTrail title={feature.title} onBack={props.onBack} tr={tr} />
+      <div key={snapshot ? 'snapshot' : 'fallback'} className={s.recovery}>
+        {feature.hasDag ? snapshot ? props.subdag : props.fallback : <FeatureCards feature={feature} onTask={props.onTask} tr={props.tr} />}
+      </div>
+    </>
+    : board ? <ModuleList modules={modules} onFeature={props.onFeature} tr={tr} />
+    : props.subdag;
+  return <div className={props.narrow ? s.panes : p.fill} data-module-by={by}>
+    {any && <div className={props.narrow ? d.mseg : p.seg} role="tablist" aria-label={tr('模块进度')}>
+      {(['module', 'person'] as const).map(k => <button key={k} type="button" role="tab" aria-selected={by === k}
+        className={props.narrow ? `${d.msegBtn} ${by === k ? d.msegOn : ''}` : `${p.segBtn} ${by === k ? p.segOn : ''}`}
+        onClick={() => props.setBy(k)}>{tr(k === 'module' ? '按模块' : '按人')}</button>)}
+    </div>}
     {content}
   </div>;
 }
