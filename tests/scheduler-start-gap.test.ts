@@ -4,8 +4,9 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import type { RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
-import { planScheduler, type PlannerDecision } from "../src/lib/scheduler-plan.js";
-import { START_GAP_ESCALATE_MS, START_GAP_MS, startGap } from "../src/lib/scheduler-start-gap.js";
+import { planScheduler, type PlannerDecision, type PlannerSnapshot } from "../src/lib/scheduler-plan.js";
+import { START_GAP_ESCALATE_MS, START_GAP_MS, startGap, trackStartGap } from "../src/lib/scheduler-start-gap.js";
+import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { configureSchedulerV2Intents, schedulerV2EnsureClaimFence, withSchedulerV2Intents } from "../src/lib/scheduler-v2-intent.js";
@@ -186,5 +187,47 @@ describe("[验收线 1] center replica under S2Q: the wait reason and the escala
       await c.tick();
       expect(c.gap()).toEqual([]);
     } finally { configureSchedulerV2Intents(null); }
+  });
+});
+
+/** Two center-replica cards on one ledger: the in-process dedup of the PM notices is per card, not per action key. */
+describe("[验收线 1] center replica, two cards on one ledger: each card's wait notice and escalation reach PM", () => {
+  test("T1's notices never stand in for T2's; another wait code still escalates once per card", async () => {
+    const f = autoFixture();
+    try {
+      let now = 1_000_000;
+      const told: { id: string; text: string; level: PmNoticeLevel }[] = [];
+      const deps = {
+        now: () => now, recoveryPolicy: policy("on"),
+        manager: async () => ({ ok: false, code: "v2_unmapped" }), // S2Q holds every ledger write of a central card
+        notifyPm: async (task: LedgerTask, text: string, level: PmNoticeLevel) => { told.push({ id: task.id, text, level }); },
+      };
+      const card = (id: string) => ({ ...f.task(), id, stage: "build", specRev: 1 }) as LedgerTask;
+      const snap = (task: LedgerTask) => ({ task, workflow: { mode: "auto" }, events: [], intents: [] }) as unknown as PlannerSnapshot;
+      const pass = async (code: string) => {
+        for (const id of ["T1", "T2"]) {
+          const task = card(id);
+          await trackStartGap({ db: f.db, task, deps }, snap(task), { kind: "wait", code, reason: `等 ${code}` });
+        }
+      };
+      const of = (id: string, level: PmNoticeLevel) => told.filter((n) => n.id === id && n.level === level);
+      await pass("queue_frozen"); // first seen in build
+      now += START_GAP_MS;
+      await pass("queue_frozen");
+      await pass("queue_frozen");
+      for (const id of ["T1", "T2"]) {
+        expect(of(id, "info")).toHaveLength(1);
+        expect(of(id, "info")[0]!.text).toContain(`${id} 记录：开工单等待原因 queue_frozen`);
+        expect(of(id, "action")).toEqual([]);
+      }
+      now += START_GAP_ESCALATE_MS;
+      await pass("placement"); // a changed reason: a new note per card; the escalation is once per card, whatever the code
+      await pass("placement");
+      for (const id of ["T1", "T2"]) {
+        expect(of(id, "info").map((n) => n.text.includes("placement"))).toEqual([false, true]);
+        expect(of(id, "action")).toHaveLength(1);
+        expect(of(id, "action")[0]!.text).toContain(`${id} 在 build 已 70 分钟，还没有开工单：等 placement`);
+      }
+    } finally { f.close(); }
   });
 });

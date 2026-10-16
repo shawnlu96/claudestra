@@ -59,8 +59,9 @@ export function startGap(s: PlannerSnapshot, plan: PlannerDecision, now: number,
 const mins = (ms: number) => `${Math.floor(ms / 60_000)} 分钟`;
 const safeCode = (code: string) => code.replace(/[^\w.:@/-]/g, "_").slice(0, 60) || "unknown";
 /**
- * Action keys this process already carried to PM for a center replica, per ledger: S2Q holds this mechanism's ledger writes
+ * Dedup keys this process already carried to PM for a center replica, per ledger: S2Q holds this mechanism's ledger writes
  * for a central card (v2_unmapped), so the notice is the record there and this set its dedup (a restart repeats it once).
+ * Same key as the ledger's (`dedupOf`: project + task + actionKey), so one card's notice never stands in for another's.
  */
 const told = new WeakMap<Database, Set<string>>();
 const toldOf = (db: Database) => told.get(db) ?? told.set(db, new Set()).get(db)!;
@@ -72,14 +73,15 @@ function seenInBuild(c: StartGapCard): number | undefined {
   if (!m.has(k)) m.set(k, c.deps.now());
   return m.get(k);
 }
-const seen = (c: StartGapCard, actionKey: string) => toldOf(c.db).has(actionKey)
-  || !!getEventByDedup(c.db, observeDedupKey({ project: c.task.project, mechanism: START_GAP_KEY, target: c.task.id, actionKey }));
+const dedupOf = (c: StartGapCard, actionKey: string) => observeDedupKey({ project: c.task.project, mechanism: START_GAP_KEY, target: c.task.id, actionKey });
+const mark = (c: StartGapCard, actionKey: string) => { toldOf(c.db).add(dedupOf(c, actionKey)); };
+const seen = (c: StartGapCard, actionKey: string) => { const k = dedupOf(c, actionKey); return toldOf(c.db).has(k) || !!getEventByDedup(c.db, k); };
 
 /** Held by S2Q (a central card): the same line goes to PM instead, once per key; false = not delivered, the next pass retries. */
 async function tell(c: StartGapCard, actionKey: string, text: string, level: PmNoticeLevel): Promise<boolean> {
   try { await c.deps.notifyPm(c.task, text, level); } // info: 开工缺口的等待原因（中心副本卡台账写不了）；action: 超时升级
   catch (e) { console.error(`⚠️ [scheduler] ${c.task.id} 开工缺口通知没发出去（下轮重试）：${String((e as Error)?.message ?? e)}`); return false; }
-  toldOf(c.db).add(actionKey);
+  mark(c, actionKey);
   return true;
 }
 
@@ -89,7 +91,7 @@ async function note(c: StartGapCard, actionKey: string, action: string, data: Re
   const r = await c.deps.manager("ledger", "scheduler-recovery-observe", c.task.id, "--mechanism", START_GAP_KEY, "--action-key", actionKey,
     "--action", action, "--data", JSON.stringify(data));
   if (r.code === "v2_unmapped") {
-    if (quiet) toldOf(c.db).add(actionKey);
+    if (quiet) mark(c, actionKey);
     else await tell(c, actionKey, `[调度引擎] ${c.task.id} ${action}`, "info");
     return;
   }
