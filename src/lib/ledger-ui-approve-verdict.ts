@@ -14,15 +14,20 @@ import { sanitizeForeign } from "./order-wire-render.js";
 import { currentReviewFacts, type ReviewFinding, type ReviewRead } from "./scheduler-review.js";
 
 export const UI_APPROVED = "ui_approved", UI_REJECTED = "ui_rejected";
-export interface PmUiGate { state: "none" | "approved" | "rejected"; head?: string; specRev?: number; round?: number; screenshotsDigest?: string; seq?: number; note?: string }
+export interface PmUiGate { state: "none" | "approved" | "rejected"; head?: string; specRev?: number; round?: number; screenshotsDigest?: string; seq?: number; note?: string;
+  /** UIEVID2: the scheduler's own return for drifted screenshot evidence (scheduler-ui-evidence-notice.ts), not PM's verdict */
+  by?: "scheduler" }
+
+/** UIEVID2: besides a manager's verdict, only a rejection the scheduler wrote as itself (data.by) counts; never a scheduler approval. */
+const schedulerRedo = (x: LedgerEvent): boolean => x.actor === "scheduler" && x.data.by === "scheduler" && x.data.op === UI_REJECTED;
 
 /** PM's newest screenshot verdict on this card, from a manager; the planner checks its binding against the card. */
 export function projectPmUiGate(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): PmUiGate {
   const e = events.findLast((x) => x.kind === "decision" && (x.data.op === UI_APPROVED || x.data.op === UI_REJECTED) &&
-    actorMayConfigure(db, x.actor, task.project));
+    (actorMayConfigure(db, x.actor, task.project) || schedulerRedo(x)));
   if (!e) return { state: "none" };
   const d = e.data;
-  return { state: d.op === UI_APPROVED ? "approved" : "rejected", seq: e.seq,
+  return { state: d.op === UI_APPROVED ? "approved" : "rejected", seq: e.seq, ...(schedulerRedo(e) ? { by: "scheduler" as const } : {}),
     ...(typeof d.head === "string" ? { head: d.head } : {}), ...(typeof d.specRev === "number" ? { specRev: d.specRev } : {}),
     ...(typeof d.round === "number" ? { round: d.round } : {}),
     ...(typeof d.screenshotsDigest === "string" ? { screenshotsDigest: d.screenshotsDigest } : {}),
@@ -61,7 +66,7 @@ export function rejectFix(task: LedgerTask, template: string | undefined, events
   const entered = reviewFixEntry(task, events);
   if (!entered || entered.seq <= g.seq) return null;
   const code = read.kind === "facts" && read.facts.eventSeq < entered.seq && read.facts.findings.some((f) => f.severity === "P1") ? read.facts : null;
-  const source = `台账事件 #${g.seq}（PM 截图验收意见：${task.id}）`;
+  const source = g.by === "scheduler" ? `台账事件 #${g.seq}（调度器截图证据重核：${task.id}）` : `台账事件 #${g.seq}（PM 截图验收意见：${task.id}）`;
   return { reportPath: code ? `${code.reportPath}\n${source}` : source, fallbackWarning: null, ...(code ? { codeReportPath: code.reportPath } : {}),
     findings: [{ findingId: `ui-screenshot-${g.seq}`, family: "ui_screenshot", severity: "P1", probe: g.note ?? "PM 未通过前后截图" },
       ...(code?.findings ?? [])] };
@@ -89,6 +94,6 @@ export function uiRejectLend(db: Database, task: LedgerTask): { findings: Review
   const fix = uiRejectFixFor(db, task, listEvents(db, { project: task.project, target: task.id }), getWorkflow(db, task.id)?.template);
   if (!fix) return null;
   return { findings: wireFindings(fix.findings.map((f) => ({ ...f, probe: sanitizeForeign(f.probe) }))),
-    report: `# PM 截图验收未通过\n\n来源：${fix.reportPath}\n\n${fix.findings[0].probe}`,
+    report: `# ${fix.reportPath.includes("调度器截图证据重核") ? "截图证据需补交" : "PM 截图验收未通过"}\n\n来源：${fix.reportPath}\n\n${fix.findings[0].probe}`,
     ...(fix.codeReportPath ? { codeReportPath: fix.codeReportPath } : {}) };
 }

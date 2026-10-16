@@ -83,6 +83,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "review-count-carry.ts": "ledger=1", // CARRYCNT1: `ledger scheduler-recovery-observe` for effCountCarry notes, through the pass manager
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes
     "scheduler-auto-tick.ts": "ledger=8",
+    "scheduler-ui-evidence-notice.ts": "ledger=1", // UIEVID2: `ledger scheduler-ui-evidence-redo` through the pass manager, from auto-tick before the PM screenshot notice
     "scheduler-autostart-resume.ts": "ledger=1",
     "scheduler-ci-proof-gate.ts": "ledger=1", // GATE1: `ledger scheduler-recovery-observe` (the observe note) through the pass manager
     "scheduler-ci-selected-gate.ts": "ledger=1 notice=3", // CISEL2: observe / repair notes via `ledger scheduler-recovery-observe` through the pass manager; info notice to PM
