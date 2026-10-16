@@ -46,6 +46,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
   { step: "deployTick", file: "scheduler-deploy-tick.ts", fn: "deployTick", effects: ["ledger", "job"], gates: ["pace", "hook", "manager"], why: "S2D hook; in-flight rows ask the unified gate too" },
   { step: "deployReconcileTick", file: "scheduler-deploy-reconcile.ts", fn: "deployReconcileTick", effects: ["ledger", "git", "notice"],
     gates: ["hook", "manager"], why: "skip gate before git / ledger / notice; service-only writer rechecks deployment evidence" },
+  { step: "peerPrAutoVerify", file: "peer-pr-auto-verify.ts", fn: "peerPrAutoVerify", effects: ["ledger"], gates: ["pace", "manager"],
+    why: "PRVERIFY1: the loop and the claim ask skipTask (and the skip card gate) before the attempt note; verify goes through the pass manager" },
   { step: "reclaimLentSlots", file: "scheduler-merge-reclaim.ts", fn: "reclaimLentSlots", effects: ["ledger"], gates: ["manager"],
     why: "its only effect is scheduler-merge-step on the lender's intent" },
   { step: "manual.claim", file: "manual-merge-queue-pass.ts", fn: "manualMergeGate().claim", effects: ["ledger"], gates: ["manager"],
