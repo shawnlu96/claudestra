@@ -261,6 +261,10 @@ export function todayView(input: TodayInput, deps: NowDeps): TodayView {
   };
 }
 
+/** 团队块第一行只数本机：busy 里减去借入在别的机器上跑的单（那些归下面的机器行） */
+export const aliveLine = (team: TodayView["team"], tr: Translate): string =>
+  tr("本机 {n} 个 agent 活着 · {m} 个在干活", { n: team.alive, m: team.busy - team.remote });
+
 /** 「N 个 agent 在干活」：有借入在别的机器上跑时补「其中 M 个在别的机器」（侧栏条与「正在做」同一句） */
 export const busyLine = (team: Pick<TodayView["team"], "busy" | "remote">, tr: Translate): string => team.remote
   ? tr("{n} 个 agent 在干活 · 其中 {m} 个在别的机器", { n: team.busy, m: team.remote })

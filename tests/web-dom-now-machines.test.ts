@@ -238,6 +238,17 @@ test("[验收线 PM 补 15:5x] 本机 busy 0、借入在跑 4：侧栏条写『4
   await p.unmount();
 });
 
+test("[验收线 2] 本机 busy 3、借入在跑 2：团队块第一行只数本机『本机 ... 3 个在干活』，侧栏条仍算上别的机器", async () => {
+  const borrow = world.m.borrow as { remote: { orderId: string; status: string; leaseUntil: number | null }[] };
+  borrow.remote = [0, 1].map((i) => ({ ...borrow.remote[0]!, orderId: `r-${i}`, status: "claimed", leaseUntil: NOW + 600_000 }));
+  const v = await mount("main");
+  await until(() => ready(v), "machine rows");
+  expect(world.agents.filter((a) => (a as { busy?: boolean }).busy)).toHaveLength(3);
+  expect(v.text("[data-now-team] [data-now-agents]")).toMatch(/^本机 \d+ 个 agent 活着 · 3 个在干活$/);
+  expect(v.text("[data-now=page] section[data-now-doing] h3")).toBe("正在做5 个 agent 在干活 · 其中 2 个在别的机器");
+  await v.unmount();
+});
+
 test("[回归] 没有借入在跑：句子同原来，不带后半句", async () => {
   world.m = { ...world.m, borrow: { ...(world.m.borrow as object), remote: [] } };
   const v = await mount("strip");
