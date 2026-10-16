@@ -57,16 +57,28 @@ export function machinesBorrow(now = TODAY_NOW) {
   };
 }
 
+/** /lend/quota-lines 的完整回包（today-shots 那份只够今天页额度行；设置页额度线卡要重置时刻与名额）：百分比同 today-shots */
+export function machinesQuotaLines(now = TODAY_NOW) {
+  const fam = (family: string, weekUsedPct: number) => ({ family, warnPct: 80, stopPct: 95, weekUsedPct, resetAt: now + 3 * 86_400_000, observedAt: now - MIN,
+    source: "live", freshness: "fresh", state: "below", mode: "auto", limit: "none", wouldLimit: "none", granted: 2, lineCap: 2, available: 2, slots: 2 });
+  return { ok: true, config: { status: "ok", error: null, mode: "auto" }, at: now, families: [fam("claude", 62), fam("codex", 18)] };
+}
+
 export interface MachinesWorld { now: number; forbidden: boolean; contacts: object[]; lend: object; borrow: object }
 export const machinesWorld = (now = TODAY_NOW, forbidden = false): MachinesWorld =>
   ({ now, forbidden, contacts: machinesContacts(), lend: machinesLend(now), borrow: machinesBorrow(now) });
 
-/** 夹具接口（path 去掉 /api/v1）：只答这三个，其余 null 交给 todayRoute */
+/** 夹具接口（path 去掉 /api/v1）：只答这几个，其余 null 交给 todayRoute */
 export function machinesRoute(path: string, world: MachinesWorld): Response | null {
   const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
   const deny = () => json({ ok: false, error: "forbidden" }, 403);
   if (path === "/peers/contacts") return world.forbidden ? deny() : json({ ok: true, contacts: world.contacts });
   if (path === "/lend/grants") return world.forbidden ? deny() : json(world.lend);
   if (path === "/borrow") return world.forbidden ? deny() : json(world.borrow);
+  // 设置 · 伙伴机器页同页的其余面板（联系人与授权、中继、出借 Claude 登录）：给最小的正常回包，截图里不出「加载失败」
+  if (path === "/peers") return world.forbidden ? deny() : json({ ok: true, peers: [], localAgents: [], pendingInvites: [], tidy: [], self: null });
+  if (path === "/lend/quota-lines") return world.forbidden ? null : json(machinesQuotaLines(world.now));
+  if (path === "/relay/status") return json({ ok: true, enabled: false, connected: false });
+  if (path === "/lend/claude-token") return world.forbidden ? deny() : json({ loggedIn: true, reason: null, legacyTokenFile: null, legacyTokenEnv: false });
   return null;
 }
