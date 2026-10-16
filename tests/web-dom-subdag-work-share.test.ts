@@ -153,7 +153,10 @@ test("[验收线 1][验收线 2][验收线 4] 本机：产品 DAG → 谁在干�
   expect(first).toContain(homeWorkBoard(home).working[0]!.title);
   await v.click(v.tab("产品 DAG"), "产品 DAG tab");
   const card = Array.from(v.host.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(feature.title)) ?? null;
-  await v.click(card, "product card");
+  // PDFOCUS1：单击卡 = 选中，双击才进子 DAG
+  if (!card) throw new Error(`no product card: ${v.text().slice(0, 600)}`);
+  const Mouse = (globalThis as unknown as { MouseEvent: new (t: string, i: { bubbles: boolean }) => unknown }).MouseEvent;
+  await React.act(async () => (card as unknown as { dispatchEvent(e: unknown): void }).dispatchEvent(new Mouse("dblclick", { bubbles: true })));
   await until(() => (v.tab("子 DAG")?.getAttribute("aria-selected") ?? "") === "true", "sub-DAG tab", v.text);
   expect(v.tab("子 DAG")!.textContent).toContain(feature.title);
   await tick(100);
