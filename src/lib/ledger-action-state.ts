@@ -4,7 +4,8 @@
  * 同一张卡在同一时刻得到同一个结果。只读：只有 SELECT，不写库、不发事件；表不存在（老库）当没有这类事实。
  * - 心跳只认既有判定：claimed 单租约过期（leaseUntil < now，ledger-lend.ts 收租约同一口径）= stale；单子是 unknown（租约过期 / 对方报停交 PM）
  *   = disconnected；没有在途单 = 没有心跳记录（null），不凭缺字段判断联。
- * - CI 反复失败只认当前 head（最近一次合并运行审过的 head）上最近连续的 ci_fail 退回；旧 head、取消、别的结论都打断连续。
+ * - CI 反复失败只认当前 head（最近一次合并运行审过的 head，且必须等于卡上的 headSHA）上最近连续的 ci_fail 退回；旧 head、取消、别的结论都打断连续；
+ *   卡已换 head（返工后新 merge run 还没建）或卡没记 head 时，历史失败不算当前证据，连续数记 0。
  * - placement / instance：出借单的 peer + worker、写租约、调度会话、跨实例委托、本机 agent，按这个先后取；peer 昵称不当实例号。
  * tests/ledger-action-state*.test.ts。
  */
@@ -108,13 +109,14 @@ function safeMode(project: string): boolean {
 const sameSha = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 const OPEN_PHASES = new Set(["ready", "updating", "await_review", "await_ci", "merging", "unknown"]);
 
-/** 当前合并运行的 CI 事实：head = 最近一次运行审过的 head；从最近往前数这个 head 上连续的 ci_fail 退回，进行中的那次跳过 */
-function ciOf(runs: readonly MergeFact[] | undefined, latestId: string | undefined): ActionCi | null {
+/** 当前合并运行的 CI 事实：head = 最近一次运行审过的 head；从最近往前数这个 head 上连续的 ci_fail 退回，进行中的那次跳过；卡 head 不符则不数 */
+function ciOf(runs: readonly MergeFact[] | undefined, latestId: string | undefined, taskHead: string | null): ActionCi | null {
   if (!runs?.length) return null;
   const latest = runs.find((r) => r.intentId === latestId) ?? runs.at(-1)!;
+  const fresh = !!taskHead && sameSha(taskHead, latest.reviewedHead);
   let streak = 0;
   let open = true;
-  for (const r of [...runs].reverse()) {
+  for (const r of fresh ? [...runs].reverse() : []) {
     if (open && OPEN_PHASES.has(r.phase)) continue;
     open = false;
     const b = r.phase === "resolved" && r.reason ? parseBounceReceipt(r.reason) : null;
@@ -146,7 +148,7 @@ const pausedOf = (own: readonly LedgerEvent[]): boolean =>
 function taskActionInput(v: TaskView, own: readonly LedgerEvent[], ctx: ActionCtx): ActionInput {
   const intent = ctx.latestIntent.get(v.id);
   const session = ctx.sessions.get(v.id)?.find((s) => s.role === (v.stage === "review" ? "reviewer" : "author"));
-  const ci = ciOf(ctx.merges.get(v.id), ctx.latestMerge.get(v.id));
+  const ci = ciOf(ctx.merges.get(v.id), ctx.latestMerge.get(v.id), v.headSHA);
   const latestMerge = ctx.merges.get(v.id)?.find((m) => m.intentId === ctx.latestMerge.get(v.id));
   const e = v.lastEvent;
   return {

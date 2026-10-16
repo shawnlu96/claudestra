@@ -43,6 +43,7 @@ function mergeRun(taskId: string, head: string, phase: string, reason: string | 
   db.query(`INSERT INTO scheduler_merges (intentId,taskId,project,prRef,expectedBranch,reviewedHead,requiredChecks,phase,reason,createdAt,updatedAt)
     VALUES (?,?,'p','https://github.com/a/b/pull/1','b',?,'test',?,?,?,?)`).run(id, taskId, head, phase, reason, seq, NOW - MIN);
 }
+const setHead = (taskId: string, head: string) => db.query("UPDATE tasks SET headSHA = ? WHERE id = ?").run(head, taskId);
 const ciFail = (head: string) => `退回 fix（ci_fail）：PR head ${head}，失败检查 [{"name":"test","link":""}]`;
 const board = (opts = {}) => db.transaction(() => workBoard(db, "p", NOW, { registry: [], manualRegistry: [], maxWorkers: 2, now: NOW, attention: FACTS, canPause: false, ...opts })).deferred();
 const card = (id: string) => projectView(db, "p", NOW, null, FACTS).tasks.find((t) => t.id === id)!;
@@ -106,11 +107,25 @@ test("CI：当前 head 连续三败出问题；旧 head 的失败、取消打断
   mergeRun("cancel", H1, "resolved", ciFail(H1)); mergeRun("cancel", H1, "resolved", ciFail(H1));
   mergeRun("cancel", H1, "resolved", "CI 取消：手动处理"); mergeRun("cancel", H1, "resolved", ciFail(H1));
   mergeRun("once", H1, "resolved", ciFail(H1));
+  for (const id of ["three", "cancel", "once"]) setHead(id, H1);
+  setHead("old", H2);
   const s = (id: string) => card(id).actionState!;
   expect([s("three").group, s("three").ci?.failStreak, s("three").health]).toEqual(["problem", 3, "failed"]);
   expect([s("old").group, s("old").ci, s("old").waitingOn]).toEqual(["active", { phase: "await_ci", head: H2, failStreak: 0 }, "ci"]);
   expect([s("cancel").group, s("cancel").ci?.failStreak]).toEqual(["active", 1]);
   expect([s("once").group, s("once").ci?.failStreak]).toEqual(["active", 1]);
+});
+
+test("CI：旧 head 三败后卡换新 head、新 merge run 未建 → 不出问题；卡没记 head 也不数", () => {
+  task("redo", "fix", true, NOW - 1000); task("nohead", "merge", true, NOW - 5 * MIN);
+  for (let k = 0; k < 3; k++) { mergeRun("redo", H1, "resolved", ciFail(H1)); mergeRun("nohead", H1, "resolved", ciFail(H1)); }
+  setHead("redo", H1);
+  expect([card("redo").actionState?.group, card("redo").actionState?.ci?.failStreak]).toEqual(["problem", 3]);
+  setHead("redo", H2);
+  const s = card("redo").actionState!;
+  expect([s.group, s.health, s.ci?.failStreak]).toEqual(["active", "unknown", 0]);
+  expect(detail("redo").actionState).toEqual(s);
+  expect([card("nohead").actionState?.group, card("nohead").actionState?.ci?.failStreak]).toEqual(["active", 0]);
 });
 
 test("等待超时与暂停事件；没有合并运行时 ci 为 null", () => {
