@@ -169,15 +169,15 @@ test("[验收线 2] 页面版：标题『今天』，五块按顺序；卡住了
   expect(v.host.querySelector("[data-now=page] header")?.textContent).not.toContain("现在");
   expect(v.host.querySelector("[data-now=page] [data-now-summary]")?.textContent).toBe("3 件要你处理 · 3 个 agent 在干活");
   expect(v.all("[data-now-stuck-row]").map((e) => e.getAttribute("data-now-stuck-row"))).toEqual(["proj-a/A3", "proj-a/A2", "proj-b/B1"]);
-  expect(v.texts("[data-now-stuck-row]")[0]).toBe("导出预览合成项目 A窄屏下预览溢出50分");
+  expect(v.texts("[data-now-stuck-row]")[0]).toBe("导出预览合成项目 A窄屏下预览溢出2小时10分");
   expect(v.all("[data-now-group=proj-a] [data-now-module]").map((e) => e.getAttribute("data-now-module"))).toEqual(["f-export", "f-notify"]);
   expect(v.texts("[data-now-group=proj-a] [data-now-module=f-export] [data-now-module-active]")).toEqual(["3 个在做"]);
   expect(v.all("[data-now-group=proj-a] [data-now-module=f-export] [data-now-face]").map((e) => e.getAttribute("title"))).toEqual(["导出开发 · A1 开发中", "通知开发 · A4 开发中"]);
   expect(v.all("[data-now-group=proj-b] [data-now-worker]").map((e) => e.getAttribute("data-now-worker"))).toEqual(["b-dev"]);
   expect([v.all("[data-now-group=proj-c] [data-now-module]").length, v.all("[data-now-group=proj-c] [data-now-worker]").length, v.all("[data-now-project=proj-c]").length]).toEqual([0, 0, 1]);
   expect(v.texts("[data-now-done-toggle]")).toEqual(["今天完成 3 个任务"]);
-  expect(v.texts("[data-now-quota]")).toEqual(["Claude 本周 62% · Codex 18%"]);
-  expect(v.texts("[data-now-agents]")).toEqual(["5 个 agent 活着 · 3 个在干活"]);
+  expect(v.texts("[data-now-quota]")).toEqual(["Claude 本周已用 62% · Codex 本周已用 18%"]);
+  expect(v.texts("[data-now-agents]")).toEqual(["本机 5 个 agent 活着 · 3 个在干活"]);
   // 要你处理：两行字，带 taskId 的多一个「看任务」
   expect(v.texts("[data-now-wait-where]")).toEqual(["合成项目 A · 导出 · 导出按钮改版", "合成项目 B", "合成项目 C"]);
   expect(v.all("[data-now-wait-task]").map((e) => e.getAttribute("data-now-wait-task"))).toEqual(["A1"]);

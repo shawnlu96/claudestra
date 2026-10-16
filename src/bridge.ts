@@ -432,6 +432,7 @@ const pendingAgentCalls = new AgentCallBook();
  * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
 const heldLocalMsgs = new HeldQueue();
+configureInboundRoute({ queue: (c) => heldLocalMsgs.get(c) }); // 入站路由的排队摘要（bridge/inbound-route.ts）
 // 守门放行走原路；放行 / 丢弃后收拾挂在那条消息上的回程（bridge/guard-dropped.ts）
 configureChatGuard({
   client: (id) => clients.get(id), deliverLocal: (env, to) => deliverLocalInOrder(env, to),
@@ -579,7 +580,7 @@ import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
-import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
+import { agentMsgMustWait } from "./lib/turn-state.js"; import { configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
@@ -864,6 +865,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   const evAgent = to.agentName || agentLabelForChannel(to.channelId);
   // 停在额度菜单 / 撞墙等待:先押住、一个键都不发(菜单里有花钱的选项,停字也不发,bridge/quota-wall-wiring.ts)
   const atWallMenu = await holdAtWallWait(env, to, evAgent, stillWanted); if (atWallMenu) return atWallMenu;
+  await routeInbound(env, to, evAgent); // 目标忙：开关 on 时 Jev 判打断 / 排队 / 合并，结论记在信封上，下面两处判据都读它（bridge/inbound-route.ts）
   // 人类 request 到达、目标主回合在跑 → 先打断再投(后一条优先,随时补充);停字三种运行时都打断。记 cut、抬头见 bridge/preempt.ts。
   // agent↔agent、peer(对方实例的 agent 请求)、bridge 系统消息、response 不抢占;复核时画面刚变成撞墙等待(没发键)→ 同样押住
   if (isHumanRequest(env) && (await preemptForHuman(env, to.channelId, evAgent)) === "wall_wait") { const h = await holdAtWallWait(env, to, evAgent, stillWanted, true); if (h) return h; }
@@ -873,7 +875,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   // 压缩看 turnState(事件态或画面):permission-watcher 8 秒一扫才置 compacting,只看事件态会在压缩开头几秒把消息投进去
   const turn = await probeTurn(to.channelId, evAgent, CONTROL_CHANNEL_ID);
   const compactingNow = turn.main === "compacting";
-  const busy = holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn);
+  const busy = routeHolds(env, turn);
   // flush 投递途中(上面几处 await)这条已被别处从押后队列摘掉(kill 清理 / 24 小时放弃):既不押回(会复活)也不发
   // 押着的打断收尾提醒:之后又被打断 / 叫停过、那件事已续上、过了 30 分钟,就不投了(turnCuts.noticeWanted)
   const wallHold = await quotaWall()?.holds(env, to.channelId); // 额度闸：agent / bridge 消息押到出闸

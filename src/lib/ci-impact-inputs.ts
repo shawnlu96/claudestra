@@ -170,7 +170,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   webLoader("web-dom-product-panes-narrow-team"),
   webLoader("web-dom-project-pm"),
   webLoader("web-dom-quota-reset"),
-  webLoader("web-dom-review-line"),
+  webLoader("web-dom-review-line"), webLoader("web-dom-row-more"),
   webLoader("web-dom-settings-notify-page"),
   webLoader("web-dom-shared-ledger-v2-approve-ui"),
   webLoader("web-dom-shared-ledger-v2-stage2"),

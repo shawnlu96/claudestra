@@ -14,6 +14,7 @@ import { clearSafetyTimer } from "./discord-adapter.js";
 import { emitEvent, inflightTools } from "./event-bus.js";
 import type { PreemptResult } from "../lib/interrupt-gate.js";
 import { interruptGate } from "./interrupt-gate.js";
+import { routeAdmitsWhileBusy } from "./inbound-route.js";
 import { holdStopWait, lastAbortResult } from "./pi-abort.js";
 import type { HeldItem, HeldQueue } from "./held-queue.js";
 import type { Envelope } from "./router.js";
@@ -73,7 +74,12 @@ export function noteHeldStop(env: Envelope, channelId: string, agent: string, ru
  */
 export async function preemptForHuman(env: Envelope, channelId: string, agent: string): Promise<"wall_wait" | void> {
   const { owner, stop } = env.meta.forwarded ? { owner: false, stop: false } : ownerStopOf(env);
-  if (owner) turnCuts.noteHuman(channelId, stop);
+  // Jev 判过排队的消息只在第一次到达时算 owner 开口：押着、叫停之后才投出的那次不再解除「停」（否则 Autopilot 随后替人续上）。
+  // 不比时间：叫停记录的时刻晚于停字到达、押着的停字放出时还会刷新，拿它比会把停字之后 owner 新说的话也当成旧消息（tests/inbound-route-stop.test.ts）
+  const route = env.meta.inboundRoute;
+  if (owner && (stop || !route?.noted)) turnCuts.noteHuman(channelId, stop);
+  if (route && !route.noted) env.meta.inboundRoute = { ...route, noted: true };
+  if (!routeAdmitsWhileBusy(env)) return; // 开关 on、Jev 判了排队 / 合并：不打断，deliverToLocal 押到回合结束（bridge/inbound-route.ts）
   // owner 的停 = 接管：发键之前就清 agent 间的待回账。Pi 停下马上报 Stop，等打断返回再清就晚了，看门狗已拿旧账把它催起一轮（adv5 P1）。
   // 押在撞墙画面上时已经清过（noteHeldStop）：最终送达不再清，否则停之后才来的回程槽也一起没了
   if (stop && !env.meta.heldStopNoted) clearAgentPendings(channelId);

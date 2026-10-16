@@ -2654,6 +2654,7 @@ switch (cmd) {
   case "ai-inventory": await (await import("./manager/ai-inventory.js")).cmdAiInventory(args); break; // 本机 AI 能力清单（只读，T91）
   case "lend": case "borrow": await (await import("./manager/lend.js")).cmdLend(cmd, args); break; // 出借 / 借入声明 lend.json（lib/lend-config.ts）
   case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
+  case "inbound-route": await (await import("./manager/inbound-route.js")).cmdInboundRoute(args); break; // 忙时入站由 Jev 判打断 / 排队 / 合并（缺省 off）
   case "state-backup": await (await import("./manager/state-backup.js")).cmdStateBackup(args); break; // 关键状态文件快照 list|now|restore（lib/state-backup.ts）
 
   case "invite-link": await cmdInviteLink(args); break;
@@ -2897,6 +2898,7 @@ switch (cmd) {
         "auto-update claude on|off       — toggle Claude Code auto-update (default on)",
         "auto-update channel beta|release — beta follows every commit on origin/main (default: release)",
         "codex-sub-archive status|on|off — auto-archive Codex sub-threads idle 7 days (default off; the archive retention later deletes them)",
+        "inbound-route status|off|observe|on — Jev decides interrupt / queue / merge for messages to a busy agent (default off; observe only logs)",
         "cost [--agent <name>] [--today|--week]  — aggregate token usage per agent or overall",
         "quota-wall status|clear  — usage-limit wall: show state / confirm usage is back (bridge then closes menus, delivers the queue, resumes)",
         "invite-link                     — generate the Discord bot invite URL (owner perms, for your own server)",

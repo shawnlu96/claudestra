@@ -27,12 +27,12 @@ import type { FeatureProposalScope, ProposalList, ProposalRecord } from "../lib/
 import type { ProposalDecision } from "../lib/shared-ledger-contract-v2-feature-proposals.js";
 import { FeatureProposalRejected, FeatureProposalUnsupported } from "../lib/shared-ledger-feature-proposals.js";
 import type { RecoveryMode } from "../lib/recovery-policy.js";
-import { classifyProposal, reasonText, type AutoReason } from "../lib/center-proposal-auto.js";
+import { classifyProposal, reasonText, type AutoReason, type AutoHit } from "../lib/center-proposal-auto.js";
 import {
   autoApproveMode, claimExec, execKey, execState, MAX_AUTO_ATTEMPTS, observeAutoApprove, recordExecResult, RETRY_AFTER_MS, type ExecIdentity,
 } from "../lib/center-proposal-auto-exec.js";
 import {
-  canApprove, cardParams, decisionBody, decisionResultText, decisionSettled, handoffText, inboxCard, inboxDedupKey, inboxErrorCode, isDecisionConflict,
+  canApprove, cardParams, cardHitEvidence, decisionBody, decisionResultText, decisionSettled, handoffText, inboxCard, inboxDedupKey, inboxErrorCode, isDecisionConflict,
   NOT_APPROVER_REASON, paramsOf, pendingApproval, PROPOSAL_INBOX_CREATOR, PROPOSAL_RESULT_CREATOR, proposalTitleOf, resultAnswer, resultCard,
   verifiedAnswer, type InboxMember, type InboxParams, type ResultMeta,
 } from "../lib/center-proposal-inbox.js";
@@ -93,7 +93,7 @@ interface Pending { records: ProposalRecord[]; self: string; all: ProposalRecord
 const pendingOf = (list: ProposalList & { selfPersonId: string }): Pending => ({ records: pendingApproval(list), self: list.selfPersonId, all: list.proposals });
 
 /** 自动批准对一条待批提案的安排（按 paramsKey）：skip = 不建卡（已自动批 / 在等结果）；reason = 照旧建卡，卡上写原因；都没有 = 原样建卡 */
-interface Plan { skip?: true; reason?: string }
+interface Plan { skip?: true; reason?: string; hits?: AutoHit[] }
 
 /** 一个项目的一轮：开缺的卡，撤不再待批 / 已被新 rev 取代的卡 */
 function reconcile(project: InboxProject, { records: snapshot, self }: Pending, d: ProposalInboxDeps, plan: ReadonlyMap<string, Plan> = new Map()): Ask[] {
@@ -114,7 +114,8 @@ function reconcile(project: InboxProject, { records: snapshot, self }: Pending, 
   const opened: Ask[] = [];
   for (const [key, r] of want) {
     if (r.proposal.expiresAt <= d.now() || plan.get(key)?.skip) continue;
-    try { opened.push(d.openAsk(inboxCard(project.localProjectId, r, self, plan.get(key)?.reason) as CreateAskInput)); } // dedupKey：同一 rev 再轮询返回已有那张
+    // dedupKey：同一 rev 再轮询返回已有那张。
+    try { opened.push(d.openAsk(inboxCard(project.localProjectId, r, self, plan.get(key)?.reason, plan.get(key)?.hits) as CreateAskInput)); }
     catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 为 ${r.proposalId} rev ${r.proposalRev} 开卡失败：${(e as Error).name}`); }
   }
   return opened;
@@ -188,7 +189,7 @@ async function autoRoute(project: InboxProject, pending: Pending, mode: Recovery
         if (verdict.route === "auto") observeAutoApprove(a.db(), identityOf(project, params), d.now());
         continue;
       }
-      if (verdict.route === "owner") plan.set(paramsKey(params), { reason: reasonText(verdict.reasons) });
+      if (verdict.route === "owner") plan.set(paramsKey(params), { reason: reasonText(verdict.reasons, undefined, verdict.hits), hits: verdict.hits });
       else if (!a.hasCard(inboxDedupKey(params))) plan.set(paramsKey(params), await autoApprove(project, r, identityOf(project, params), d, a));
     } catch (e) { d.log(`[proposal-inbox] ${id} 自动批准 ${r.proposalId} rev ${r.proposalRev} 出错：${(e as Error).name}，照旧出卡`); }
   }
@@ -300,7 +301,7 @@ async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
   // 日志按真实结果写（PROPRESULT1）：办成「已执行」，报错「执行…失败：<错误码>」，conflict「conflict，已重拉」；code 也记到结果卡上
   let text: string, resultCard = true, code: string, outcome: string;
   const failed = (c: string) => { code = c; outcome = `执行 ${decision} 失败：${c}`; return decisionResultText(title, params, { kind: "error", code: c }); };
-  const held = project ? claimForOwner(project, params, d) : "ok";
+  const held = project ? claimForOwner(project, params, d, a) : "ok";
   if (!project) text = failed(unreadable ? "binding_state_unreadable" : "project_not_bound");
   else if (held === "error") text = failed("exec_claim_failed");
   else if (held === "held") {
@@ -323,9 +324,9 @@ async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
 }
 
 /** PROPAUTO1：开关 on 时人工答复发 decide 前也抢同一个执行占位；抢不到 = 已在执行（自动批准或另一次答复），不再发。写不进台账 → error，不发 */
-function claimForOwner(project: InboxProject, params: InboxParams, d: ProposalInboxDeps): "ok" | "held" | "error" {
+function claimForOwner(project: InboxProject, params: InboxParams, d: ProposalInboxDeps, card: Ask): "ok" | "held" | "error" {
   if (!d.auto || d.auto.mode(project.localProjectId) !== "on") return "ok";
-  try { return claimExec(d.auto.db(), identityOf(project, params), "owner", d.now()) ? "ok" : "held"; }
+  try { return claimExec(d.auto.db(), { ...identityOf(project, params), ...cardHitEvidence(card) }, "owner", d.now()) ? "ok" : "held"; }
   catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} ${params.proposalId} 抢执行占位失败：${(e as Error).name}`); return "error"; }
 }
 

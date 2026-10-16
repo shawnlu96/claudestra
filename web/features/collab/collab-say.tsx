@@ -1,10 +1,8 @@
 "use client";
-/**
- * 详情里的「对它说」。web 发的是人类消息：Claude Code 的 agent 忙时，bridge 会先 C-c 再投递（bridge.ts 的 preemptOnHumanMessage），
- * 等于打断它。所以第一版只在它空闲时能发，忙时按钮置灰、写明怎么办；「等这步做完再送达」的排队投递留给 T13a。
- * 能不能发的判定在 collab-action.ts 的 sayGate / liveIdle（有单测）：页面上的忙闲取保守值，点发送时再实时查一次。
- */
+/** Collab sends request calm delivery explicitly; the bridge owns busy checks and the existing held queue. */
 import { useRef, useState } from "react";
+import { getSettings } from "@/lib/api/settings";
+import { useSettingsFlag } from "@/features/chat/components/settings/settings-flag";
 import { sendMessage } from "@/lib/api/chat";
 import { agentPending } from "@/lib/api/ledger";
 import { liveIdle, sayGate } from "./collab-action";
@@ -12,7 +10,7 @@ import { Icon } from "./collab-icons";
 import type { Tr } from "./collab-model";
 import s from "./collab.module.css";
 
-type Receipt = { kind: "sent"; at: number } | { kind: "busy" } | { kind: "unknown" } | { kind: "error"; message: string } | null;
+type Receipt = { kind: "queued" } | { kind: "sent"; at: number } | { kind: "busy" } | { kind: "unknown" } | { kind: "error"; message: string } | null;
 
 const hhmm = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 
@@ -21,26 +19,32 @@ export function CollabSay({ agent, working, tr }: { agent: string; working: bool
   const [sending, setSending] = useState(false);
   const [receipt, setReceipt] = useState<Receipt>(null);
   const ctrl = useRef<AbortController | null>(null);
-  const gate = sayGate(working, text, sending);
+  const flag = useSettingsFlag("steer.queueWhenBusy");
+  const inFlight = useRef(false);
+  const gate = sayGate(working, text, sending || flag.on === null, flag.on === true);
 
   const send = async () => {
-    if (!gate.canSend) return;
+    if (!gate.canSend || inFlight.current) return;
+    inFlight.current = true;
     setSending(true);
     ctrl.current = new AbortController();
     try {
-      // 页面上的忙闲可能是十几秒前的：发之前再问一次 bridge（/pending 的 thinking），它此刻在回合里就不发（发了就是 C-c）。
-      // 这个空闲判定不含画面探测：回合刚开始、thinking 还没置上的那一小段仍可能被打断，由 T13a 的不抢占投递兜底。
-      const pending = await agentPending(agent);
-      if (!liveIdle(pending)) {
-        setReceipt({ kind: pending === null ? "unknown" : "busy" });
-        return;
+      const queueWhenBusy = (await getSettings())["steer.queueWhenBusy"];
+      if (!queueWhenBusy) {
+        const pending = await agentPending(agent);
+        if (!liveIdle(pending)) {
+          setReceipt({ kind: pending === null ? "unknown" : "busy" });
+          return;
+        }
       }
-      await sendMessage(agent, text.trim(), undefined, ctrl.current.signal);
+      const result = await sendMessage(agent, text.trim(), undefined, ctrl.current.signal, { waitForIdle: queueWhenBusy });
       setText("");
-      setReceipt({ kind: "sent", at: Date.now() });
+      setReceipt(result.queued || result.heldBy ? { kind: "queued" }
+        : result.guarded ? { kind: "error", message: tr("等待放行") } : { kind: "sent", at: Date.now() });
     } catch (e) {
       setReceipt({ kind: "error", message: (e as Error).message });
     } finally {
+      inFlight.current = false;
       setSending(false);
     }
   };
@@ -64,6 +68,8 @@ export function CollabSay({ agent, working, tr }: { agent: string; working: bool
           </button>
         </div>
       </div>
+      {flag.err && <div className={`${s.rcpt} ${s.err}`}>{flag.err}</div>}
+      {receipt?.kind === "queued" && <div className={s.rcpt}>{tr("排队中")}</div>}
       {receipt?.kind === "sent" && (
         <div className={`${s.rcpt} ${s.ok}`}>
           <Icon name="circleCheck" size={12} />

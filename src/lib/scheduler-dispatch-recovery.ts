@@ -47,6 +47,7 @@ import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { planScheduler, type PlannerDecision, type PlannerSnapshot } from "./scheduler-plan.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { workOrderFor } from "./scheduler-work-order.js";
+import { sendWithMemory } from "./memory-inject-dispatch.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { deliveryFor, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
@@ -387,7 +388,7 @@ class Takeover {
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.deps.db, ref, intent) : null;
     if (unpullable) delivery = { mode: "text", reason: `领单工具拿不到这张单（${oneLine(unpullable)}），改发全文` };
-    const r = await driveDispatch(this.ops(guard), w, ref, { ...order, delivery });
+    const r = await sendWithMemory(this.deps.db, task, { ...order, delivery }, (o) => driveDispatch(this.ops(guard), w, ref, o));
     if (r.kind === "sent") return this.out("sent", `本机 Codex 接管已派 ${order.step}：${r.receipt.route}`);
     if (r.kind === "held") await this.tell("unknown", `本机接管派单未定：${r.reason}`);
     return this.out(r.kind === "settled" ? "settled" : r.kind, "reason" in r ? r.reason : r.kind === "settled" ? r.status : "");

@@ -96,7 +96,7 @@ async function mount() {
   await React.act(async () => root.render(React.createElement(Harness)));
   const all = () => Array.from(host.querySelectorAll("button"));
   /** 组头按钮：文本以 project id 开头（无 meta 时显示 id）；第 0 个在活目录，第 1 个在历史目录 */
-  const heads = () => all().filter((b) => /^(📁|📂)p\d/.test((b.textContent ?? "").trim()));
+  const heads = () => all().filter((b) => b.getAttribute("aria-expanded") !== null && /^p\d/.test((b.textContent ?? "").trim()));
   const historyBtn = () => all().find((b) => (b.textContent ?? "").includes("历史"))!;
   const teamBtn = (name: string) => host.querySelector(`[data-agent="${name}"] button[aria-expanded]`);
   return {

@@ -1,4 +1,8 @@
-/** QWARN1_REAL_CHAT=1: final Next static /chat export, synthetic GETs and fresh storage only. */
+/**
+ * QWARN1_REAL_CHAT=1: final Next static /chat export, synthetic GETs and fresh storage only.
+ * QUOTA1 起顶部是一张额度卡（features/quota/quota-notice.tsx）：每族一行，闸开着时 Claude 那一行是「用完」（顶替提醒），一个关闭按钮。
+ * 读数 60 / 30 秒一轮（quota-lines-store），「下一轮」用页面时钟快进触发（clock.install 后时间照常走）。
+ */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -87,6 +91,7 @@ async function device(width: number, wall = false, list = false): Promise<Device
   })()`);
   const d: Device = { ctx, page: await ctx.newPage(), wall, crash: false, codex: "stop", claude: "warn", warnPct: 70, requests: [], forbidden: [], errors: [] };
   d.page.setDefaultTimeout(10_000);
+  await d.page.clock.install({ time: RESET - 2 * 86_400_000 }); // 夹具的重置时刻是固定日期：页面时间放在它之前（已过重置的读数按规则不出）
   d.page.on("pageerror", (error) => d.errors.push(error.message));
   await ctx.route("**/*", async (route) => {
     const r = route.request(), u = new URL(r.url());
@@ -119,13 +124,15 @@ async function device(width: number, wall = false, list = false): Promise<Device
   });
   await d.page.goto(`${origin}/chat${list ? "" : "?agent=qwarn-evidence#chat"}`);
   if (!list) await d.page.locator("[data-mid]").first().waitFor();
-  await d.page.locator('[data-quota-warning="codex"]').waitFor({ state: "attached" });
+  await d.page.locator('[data-quota-notice-row="codex"]').waitFor({ state: "attached" });
   await d.page.waitForTimeout(800);
   return d;
 }
 
 const scroller = (p: Page) => p.locator("div.touch-pan-y.overflow-y-auto").filter({ has: p.locator("[data-mid]") }).first();
-const poll = async (p: Page) => { await p.evaluate('document.dispatchEvent(new Event("visibilitychange"))'); await p.waitForTimeout(800); };
+/** 下一轮读数：快进过一个 /lend/quota-lines 周期（60 秒，/quota/wall 30 秒也随之到点） */
+const poll = async (p: Page) => { await p.clock.fastForward(61_000); await p.waitForTimeout(800); };
+const closeCard = (p: Page) => p.locator('[data-quota-notice] button[aria-label="关闭"]').click();
 
 /** Malformed effort data makes TopBar's actual ClaudeSwitcher render throw; no React internals or production test switch. */
 async function chatFallback(d: Device) {
@@ -139,9 +146,8 @@ async function chatFallback(d: Device) {
 async function captureSurface(d: Device, label: string) {
   const p = d.page;
   const measurement = await p.evaluate(`(() => {
-    const warnings = [...document.querySelectorAll("[data-quota-warning]")];
-    const walls = [...document.querySelectorAll('[role="status"]')].filter(e => e.textContent.includes("Claude Code 周额度已用完"));
-    return [...warnings, ...walls].map(e => {
+    const rows = [...document.querySelectorAll("[data-quota-notice-row]")];
+    return rows.map(e => {
       const r = e.getBoundingClientRect();
       return { text: e.textContent, rect: r.toJSON(), visible: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight,
         hit: e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) };
@@ -150,9 +156,10 @@ async function captureSurface(d: Device, label: string) {
   await p.screenshot({ path: join(out, `${label}.png`) });
   await Bun.write(join(out, `${label}.json`), JSON.stringify({ measurement, requests: d.requests, errors: d.errors, forbidden: d.forbidden }, null, 2));
   expect(d.errors).toEqual([]); expect(d.forbidden).toEqual([]);
-  expect(measurement).toHaveLength(3);
-  expect(await p.locator('[data-quota-warning="codex"]').count()).toBe(1);
-  expect(await p.locator('[data-quota-warning="claude"]').count()).toBe(1);
+  expect(measurement).toHaveLength(2);
+  expect(await p.locator("[data-quota-notice]").count()).toBe(1);
+  expect(await p.locator('[data-quota-notice-row="codex"]').count()).toBe(1);
+  expect(await p.locator('[data-quota-notice-row="claude"]').count()).toBe(1);
   expect(measurement.every(m => m.visible && m.hit)).toBe(true);
   for (let i = 1; i < measurement.length; i++) {
     const a = measurement[i - 1].rect, b = measurement[i].rect;
@@ -162,7 +169,7 @@ async function captureSurface(d: Device, label: string) {
 
 for (const width of [390, 1280]) {
   for (const surface of ["列表页", "协作视图", "兜底页"]) {
-    test.skipIf(!enabled)(`真实Chat ${width}：${surface}两族提醒和旧墙唯一且可读`, async () => {
+    test.skipIf(!enabled)(`真实Chat ${width}：${surface}一张额度卡（Claude 用完 + Codex 不再接新活）唯一且可读`, async () => {
       const d = await device(width, true, surface !== "兜底页");
       try {
         if (surface === "协作视图") {
@@ -174,8 +181,8 @@ for (const width of [390, 1280]) {
         // Switching surfaces must keep the same mounted readers; no remount/poll replay.
         expect(d.requests.filter(r => r.includes("/lend/quota-lines"))).toHaveLength(1);
         expect(d.requests.filter(r => r.endsWith("/quota/wall"))).toHaveLength(1);
-        for (const family of ["codex", "claude"]) await d.page.locator(`[data-quota-warning="${family}"] button`).click();
-        await d.page.getByRole("status").filter({ hasText: "Claude Code 周额度已用完" }).getByRole("button", { name: "关闭", exact: true }).click();
+        await closeCard(d.page);
+        await d.page.locator("[data-quota-notice]").waitFor({ state: "detached" });
         expect((await d.page.locator("#cstra-shell > div.absolute > div.shrink-0").boundingBox())!.height).toBe(0);
         await d.page.screenshot({ path: join(out, `${width}-${surface}-dismissed.png`) });
       } finally { await d.ctx.close(); }
@@ -200,14 +207,14 @@ for (const sheet of ["任务", "团队", "待你处理"]) {
         .filter(e => getComputedStyle(e).position === "fixed" && e.id !== "cstra-shell" && e.querySelector('button'))
         .map(e => e.getBoundingClientRect().top))`);
       const before = await panelTop();
-      await d.page.locator('[data-quota-warning="codex"] button').click();
+      d.codex = "unknown"; await poll(d.page); // Codex 那一行没了，卡变矮
       await settleSheet(d.page);
       expect(await panelTop()).toBeLessThan(before);
       await d.page.setViewportSize({ width: 320, height: 844 });
       await settleSheet(d.page);
       await captureSurfaceAfterDismiss(d, `320-sheet-${sheet}`);
-      await d.page.locator('[data-quota-warning="claude"] button').click();
-      await d.page.getByRole("status").filter({ hasText: "Claude Code 周额度已用完" }).getByRole("button", { name: "关闭", exact: true }).click();
+      await closeCard(d.page);
+      await d.page.locator("[data-quota-notice]").waitFor({ state: "detached" });
       await settleSheet(d.page);
       expect(await panelTop()).toBe(0);
     } finally { await d.ctx.close(); }
@@ -226,12 +233,12 @@ async function settleSheet(p: Page) {
 
 async function captureSurfaceAfterDismiss(d: Device, label: string) {
   await d.page.screenshot({ path: join(out, `${label}.png`) });
-  expect(await d.page.locator('[data-quota-warning="claude"]').count()).toBe(1);
-  const bar = await d.page.locator('[data-quota-warning="claude"]').boundingBox();
+  expect(await d.page.locator('[data-quota-notice-row="claude"]').count()).toBe(1);
+  const bar = await d.page.locator('[data-quota-notice-row="claude"]').boundingBox();
   expect(bar!.x).toBeGreaterThanOrEqual(0);
   expect(bar!.x + bar!.width).toBeLessThanOrEqual(320);
   const hit = await d.page.evaluate<boolean>(`(() => {
-    const e = document.querySelector('[data-quota-warning="claude"]'), r = e.getBoundingClientRect();
+    const e = document.querySelector('[data-quota-notice-row="claude"]'), r = e.getBoundingClientRect();
     return e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
   })()`);
   expect(hit).toBe(true);
@@ -253,8 +260,8 @@ test.skipIf(!enabled)("safe-area-double：47px 原生安全区只由非空通知
     await d.page.getByRole("button").filter({ hasText: "QWARN task" }).click();
     await d.page.waitForTimeout(500);
     await captureSurface(d, "390-safe-47-task");
-    for (const family of ["codex", "claude"]) await d.page.locator(`[data-quota-warning="${family}"] button`).click();
-    await d.page.getByRole("status").filter({ hasText: "Claude Code 周额度已用完" }).getByRole("button", { name: "关闭", exact: true }).click();
+    await closeCard(d.page);
+    await d.page.locator("[data-quota-notice]").waitFor({ state: "detached" });
     await d.page.waitForTimeout(100);
     expect(await padding("#cstra-shell aside > div.px-4.pb-2")).toBe("59px");
     expect(await padding("main header")).toBe("47px");
@@ -283,8 +290,9 @@ async function capture(d: Device, label: string, bottom?: boolean) {
       * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
     const scroll = [...document.querySelectorAll("div.touch-pan-y.overflow-y-auto")].find((e) => e.querySelector("[data-mid]"));
     const clip = rect(scroll);
-    const warning = [...document.querySelectorAll("[data-quota-warning]")].map((e) => ({ family: e.getAttribute("data-quota-warning"), rect: rect(e) }));
-    const wall = [...document.querySelectorAll('[role="status"]')].find((e) => e.textContent?.includes("Claude Code 周额度已用完"));
+    const rows = [...document.querySelectorAll("[data-quota-notice-row]")];
+    const warning = rows.map((e) => ({ family: e.getAttribute("data-quota-notice-row"), rect: rect(e) }));
+    const wall = rows.find((e) => e.getAttribute("data-level") === "out"); // 闸那一行（Claude 用完）
     const wallRect = wall ? rect(wall) : null;
     const textOverlaps = [];
     for (const message of document.querySelectorAll("[data-mid]")) {
@@ -296,7 +304,7 @@ async function capture(d: Device, label: string, bottom?: boolean) {
           const visible = { left: Math.max(r.left, clip.left), right: Math.min(r.right, clip.right),
             top: Math.max(r.top, clip.top), bottom: Math.min(r.bottom, clip.bottom) };
           if (visible.right <= visible.left || visible.bottom <= visible.top) continue;
-          const area = [...warning.map((w) => w.rect), ...(wallRect ? [wallRect] : [])].reduce((n, b) => n + overlap(visible, b), 0);
+          const area = warning.map((w) => w.rect).reduce((n, b) => n + overlap(visible, b), 0);
           if (area) textOverlaps.push({ id: message.dataset.mid, text: node.textContent.slice(0, 100), area });
         }
       }
@@ -306,12 +314,12 @@ async function capture(d: Device, label: string, bottom?: boolean) {
     return { scroll: { rect: clip, top: scroll.scrollTop, max: scroll.scrollHeight - scroll.clientHeight,
       clientHeight: scroll.clientHeight, scrollHeight: scroll.scrollHeight,
       atBottom: Math.abs(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop) < 2 }, warning, wall: wallRect, input, last,
-      textOverlaps, pairAreas: warning.map((w) => wallRect ? overlap(w.rect, wallRect) : 0),
-      inputAreas: [...warning.map((w) => w.rect), ...(wallRect ? [wallRect] : [])].map((r) => overlap(input, r)),
+      textOverlaps, pairAreas: warning.flatMap((w, i) => warning.slice(i + 1).map((x) => overlap(w.rect, x.rect))),
+      inputAreas: warning.map((w) => overlap(input, w.rect)),
       wallHit: wallRect ? document.elementFromPoint(wallRect.x + wallRect.width / 2, wallRect.y + wallRect.height / 2)
-        ?.closest('[role="status"]') === wall : null,
+        ?.closest("[data-quota-notice-row]") === wall : null,
       hitFamilies: warning.map((w) => document.elementFromPoint(w.rect.x + w.rect.width / 2, w.rect.y + w.rect.height / 2)
-        ?.closest("[data-quota-warning]")?.getAttribute("data-quota-warning") ?? null) };
+        ?.closest("[data-quota-notice-row]")?.getAttribute("data-quota-notice-row") ?? null) };
   })()`);
   await p.screenshot({ path: join(out, `${label}.png`) });
   await Bun.write(join(out, `${label}.html`), await p.content());
@@ -341,10 +349,10 @@ for (const width of [390, 1280]) {
       expect(bottom.scroll.atBottom).toBe(true); expect(bottom.last.bottom).toBeLessThanOrEqual(bottom.input.top);
     } finally { await d.ctx.close(); }
   }, 30_000);
-  test.skipIf(!enabled)(`真实Chat ${width}：旧墙与新两族同时完整可读`, async () => {
+  test.skipIf(!enabled)(`真实Chat ${width}：闸（Claude 用完）与 Codex 不再接新活同一张卡完整可读`, async () => {
     const d = await device(width, true);
     try {
-      await d.page.getByRole("status").filter({ hasText: "Claude Code 周额度已用完" }).waitFor();
+      await d.page.locator('[data-quota-notice-row="claude"][data-level="out"]').waitFor();
       const top = await capture(d, `${width}-both-top`, false); unobscured(top);
       expect(top.warning).toHaveLength(2); expect(top.wall).not.toBeNull();
       const bottom = await capture(d, `${width}-both-bottom`, true); unobscured(bottom);
@@ -355,8 +363,8 @@ for (const width of [390, 1280]) {
     const d = await device(width);
     try {
       const shown = await capture(d, `${width}-reflow-initial`, true);
-      await d.page.locator('[data-quota-warning="codex"] button').click();
-      await d.page.locator('[data-quota-warning="claude"] button').click();
+      await closeCard(d.page);
+      await d.page.locator("[data-quota-notice]").waitFor({ state: "detached" });
       const closed = await capture(d, `${width}-dismissed`); unobscured(closed);
       expect(closed.warning).toHaveLength(0); expect(closed.scroll.atBottom).toBe(true);
       expect(closed.scroll.rect.top).toBeLessThan(shown.scroll.rect.top);
@@ -366,10 +374,11 @@ for (const width of [390, 1280]) {
       d.claude = d.codex = "unknown"; await poll(d.page);
       const unknown = await capture(d, `${width}-unknown`); unobscured(unknown);
       expect(unknown.warning).toHaveLength(0); expect(unknown.scroll.rect.top).toBe(closed.scroll.rect.top);
+      // 闸开着 = Claude 升到「用完」再出；Codex 在同一窗口里关过「不再接新活」，改线也不再出（QUOTA1：按族 + 严重度 + 重置时刻记）
       d.claude = "warn"; d.codex = "stop"; d.wall = true; d.warnPct = 60; await poll(d.page);
       await d.page.setViewportSize({ width: width === 390 ? 320 : 1000, height: width === 390 ? 844 : 800 });
       const resized = await capture(d, `${width}-resized`); unobscured(resized);
-      expect(resized.warning).toHaveLength(2); expect(resized.wall).not.toBeNull();
+      expect(resized.warning.map((w) => w.family)).toEqual(["claude"]); expect(resized.wall).not.toBeNull();
       expect(resized.scroll.atBottom).toBe(true);
     } finally { await d.ctx.close(); }
   }, 30_000);

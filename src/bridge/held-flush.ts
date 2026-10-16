@@ -15,6 +15,7 @@ import { heldKindOf, isDerivedCarrier, leaseActive, notifyHeldSettled, setHeldId
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { noteDelivered, senderTrigger, turnStartedAt } from "./stop-settle.js";
+import { turnCuts } from "./turn-cuts.js";
 import { getAgentStatus } from "./event-bus.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "../lib/registry.js";
 import { fitIdleBatch, HELD_IDLE_CARRIER_LABEL, heldIdleCarrierId, heldIdleMode, registryIdleScope, type HeldIdleBatch } from "../lib/held-idle-batch.js";
@@ -23,6 +24,7 @@ import {
 } from "../lib/inbox-batch.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { agentBatchMembers, heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
+import { routeAdmitsWhileBusy, routeDue, routeOrder, routeRelease } from "./inbound-route.js";
 import { adoptStrandedTransfers, currentPmTarget, expectPmTarget, handedOver, roleHandoffs, shouldRetry, type PmTarget } from "./pm-held-transfer.js";
 
 export interface FlushDeps {
@@ -296,6 +298,7 @@ async function releaseIdleBatch(
   }
   const gone = all.filter((i) => d.held.get(channelId)?.includes(i));
   d.held.idleCarrierSent(carrier, gone); // Codex 打字投递被第二道闸退回时按它复原（held-queue.ts holdFirst）
+  turnCuts.noteCarried(channelId, id, gone.map((i) => i.env)); // 本回合起因记成员，不记载体（目标在做什么的摘要用）
   for (const item of gone) {
     // 先 touch 再出队落盘（同逐条投递）；本机 agent 的并进这一轮的 callers，发的是请求的也记进 askers（回合失败要告诉它）
     d.touch(channelId, item.env);
@@ -345,10 +348,10 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     // 拿 isHumanRequest 判闸的话它会被改记成额度闸、等到出闸(tests/held-flush.test.ts T64)
     // check_inbox 现在也领人类消息：租约内的一律不投（忙时也一样）。押满时限的 owner 答复忙时也投、排最前，不被前面等画面静止的外人挡住
     const now = (d.now ?? Date.now)();
-    const q = d.held.get(channelId) ?? [];
+    const q = routeOrder(d.held.get(channelId) ?? []); // Jev 判了合并的紧跟同伴（bridge/inbound-route.ts）
     const late = new Set(q.filter((i) => ownerLate(i, now)));
-    const due = q.filter((i) => !leaseActive(i) && (away.has(i)
-      || ((!walled || gatesAsHuman(i.env)) && (!working || d.isHumanRequest(i.env) || late.has(i)))));
+    const due = routeDue(q.filter((i) => !leaseActive(i) && (away.has(i)
+      || ((!walled || gatesAsHuman(i.env)) && (!working || routeAdmitsWhileBusy(i.env, d.isHumanRequest) || late.has(i))))), q); // 合并的那条等同伴一起放
     const mine = due.filter((i) => !away.has(i));
     // 内部通知的批次：目标空闲才组（忙时它们本来就不投）；observe 只记「本来会一次送出」，照旧逐条
     const mode = working ? "off" : d.held.idleMode();
@@ -368,7 +371,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       if (pm) {
         if ((await handOver(d, channelId, item, pm, late.has(item), handed, reason)) !== "home") continue;
         // 交接途中 PM 切回了这个频道：这封又归它自己，按它的规则走（闸 / 忙时只投人类消息 / 分轮），不按缓存的当班 PM 投
-        if (!d.held.get(channelId)?.includes(item) || !((!walled || gatesAsHuman(item.env)) && (!working || d.isHumanRequest(item.env) || late.has(item)))) continue;
+        if (!d.held.get(channelId)?.includes(item) || !((!walled || gatesAsHuman(item.env)) && (!working || routeAdmitsWhileBusy(item.env, d.isHumanRequest) || late.has(item)))) continue;
       }
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = d.client(channelId);
@@ -388,6 +391,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
         if (!d.held.get(channelId)?.includes(item)) continue;
       }
       if (late.has(item) && item.env.meta.waitForIdle) delete item.env.meta.waitForIdle; // 只有卡片答复走到这里（见 ownerLate）
+      if (late.has(item)) routeRelease(item.env); // Jev 判了排队的 owner 消息押满时限：回合中送进去、不抢占（一直忙的 PM 等不到回合结束）
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       markIfHeldAcrossStop(item, d.stoppedAt?.(channelId));
       if (pm) expectPmTarget(item.env, channelId); // 核的是本频道的分轮：投递时又被转给别的 PM 就留队（deliverPmLocal pmTargetDrift）
@@ -448,7 +452,7 @@ async function handOverTo(d: FlushDeps, channelId: string, item: HeldItem, pm: P
       if (!working) openedBy.delete(b);
       // 它在跑：它自己的 flush 这时也不投的（非人类请求、没押满时限），押进它的队、等它 Stop 按它的规则投。
       // 打 waitForIdle（本来就不抢占的才打）让 deliverToLocal 押而不是插进这一轮——API / peer 请求不带它时忙也照发（holdsUntilIdle）
-      if (working && !d.isHumanRequest(item.env) && !late) item.env.meta.waitForIdle = true;
+      if (working && !routeAdmitsWhileBusy(item.env, d.isHumanRequest) && !late) item.env.meta.waitForIdle = true;
       else if (!(await mayJoin(d, item, b, working, first, late))) return;
     }
     if (!d.held.get(channelId)?.includes(item)) return;

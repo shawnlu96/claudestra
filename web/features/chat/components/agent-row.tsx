@@ -16,6 +16,7 @@ import { SwipeActions } from "./agent-row-actions";
 import { RuntimeStatusIcon } from "./status-dot";
 import { useUpdateHintDismissed } from "./update-hint-banner";
 import { useAgentMenuTrigger } from "./agent-menu";
+import { AgentRowMore } from "./row-more-button";
 import { dragAllowed, dragHandlers, useAgentDrop } from "./agent-dnd";
 import { MissionBadge } from "./mission-ui";
 import { LedgerStageChip } from "./ledger-stage-chip";
@@ -357,6 +358,7 @@ export function AgentRow({
             )
           )}
         </button>
+        <AgentRowMore a={a} open={menu.open} />{/* 常显 ⋯ = 同一个长按 / 右键菜单（row-more-button.tsx）；多选 / master / mock 不渲染 */}
         </div>
       </div>
     </li>

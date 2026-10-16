@@ -12,6 +12,7 @@ import { InfoButton } from "./info-button"; import { GuardButton } from "./guard
 import { ImagesIcon } from "../../media/media-icons";
 import { MediaPanel } from "../../media/media-panel";
 import { useFullScope } from "../contacts-data";
+import { InterruptMenuItem, canInterrupt } from "./interrupt-menu-item";
 
 /** 管理：四宫格（lucide layout-grid），只在折叠菜单里用——平铺时仍是文字按钮 */
 function ManageIcon() {
@@ -47,6 +48,7 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
   // 每项都带 @xl:hidden：并进 AgentActions 下拉时，宽顶栏下它们已经平铺在外面
   const lead = (
     <>
+      <InterruptMenuItem key={agent.name} agent={agent} />{/* 不带 @xl:hidden：宽顶栏也在 ⋮ 里（interrupt-menu-item.tsx） */}
       <ShareMenuItem busy={busy} className="@xl:hidden" onPick={closeDropdown} />
       {manage && (
         <li className="@xl:hidden">
@@ -106,7 +108,7 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
         {term.available && <TerminalButton onClick={term.open} />}
       </span>
       {!merged && (
-        <span className="@xl:hidden">
+        <span className={canInterrupt(agent) ? "" : "@xl:hidden"}>
           <MoreMenu>{lead}</MoreMenu>
         </span>
       )}

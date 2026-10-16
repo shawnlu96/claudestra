@@ -27,6 +27,7 @@ export const COLLAB_DICT: Record<string, string> = {
   "已上线 · 等验证": "Live · awaiting verification",
   "等审查 · 第 {n} 轮": "Awaiting review · round {n}",
   "返工中 · 第 {n} 轮意见": "Fixing · round {n} findings",
+  "已停 {d}": "stalled {d}",
   "审查 · 第 {n} 轮：{v}": "Review · round {n}: {v}",
   "已送达 · {t}": "Delivered · {t}",
   "排队中 · {t}，它这步做完后送达": "Queued · {t}, delivered when this step finishes",

@@ -6,7 +6,7 @@
  * 点模块行先落到项目页（PROJTABS1 合入后改为落到「模块进度」的该模块）。
  */
 import { useState } from "react";
-import { FACE_LIMIT, type NowWorker, type TodayFace, type TodayModule, type TodayProject, type TodayView } from "./now-model";
+import { busyLine, FACE_LIMIT, type NowWorker, type TodayFace, type TodayModule, type TodayProject, type TodayView } from "./now-model";
 import { ProjectRow } from "./now-projects";
 import { Block, EMPTY, Fold, ROW, ROW_ON, useOpeners, type Translate } from "./now-ui";
 
@@ -85,7 +85,7 @@ export function NowDoing({ view, fp, tr }: { view: Pick<TodayView, "doing" | "re
   const [all, setAll] = useState(false);
   const empty = view.doing.length === 0 && view.rest.length === 0;
   return (
-    <Block title={tr("正在做")} count={view.team.busy ? tr("{n} 个 agent 在干活", { n: view.team.busy }) : undefined} hook="doing">
+    <Block title={tr("正在做")} count={view.team.busy ? busyLine(view.team, tr) : undefined} hook="doing">
       {view.idle && <p className={EMPTY} data-now-idle>{tr("现在没有 agent 在干活")}</p>}
       {empty ? <p className={EMPTY}>{tr("还没有项目")}</p> : (
         <ul className="flex list-none flex-col p-0" data-now-projects>

@@ -4,6 +4,7 @@ import { STAGES, type Stage } from "../lib/ledger-stages.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { appendEvent } from "../lib/ledger-write.js";
 import { applySchedulerStage, openSchedulerUiAsk } from "../lib/scheduler-apply.js";
+import { recordUiEvidenceRedo } from "../lib/scheduler-ui-evidence-notice.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -45,6 +46,14 @@ export const SCHEDULER_AUTO_CMDS: Record<string, CommandSpec> = {
     run(c) {
       const r = openSchedulerUiAsk(c.db, c.ctx(), { intentId: c.p.pos[1] ?? "" }, planOpts(c));
       return { ok: true, askId: r.ask.id, duplicate: r.duplicate };
+    },
+  },
+  "scheduler-ui-evidence-redo": {
+    valued: ["head", "digest"], bools: [],
+    usage: "scheduler-ui-evidence-redo <task> --head <完整 sha> --digest <截图摘要>（调度服务专用：截图证据重核不过，记 note 并以调度器身份退回 fix 重拍，不请 PM 看图）",
+    run(c) {
+      const r = recordUiEvidenceRedo(c.db, c.ctx(), { taskId: c.task(c.p.pos[1]).id, head: c.need("head"), digest: c.need("digest") });
+      return { ok: true, event: r.event, duplicate: r.duplicate, code: r.code };
     },
   },
 };

@@ -2,14 +2,19 @@
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { putQuotaSettings, quotaSettings } from "@/lib/api/system";
+import { QUOTA_WORDS as Q } from "@/lib/owner-words";
+import { openToday } from "@/features/now/today-nav";
+import { useChatNav } from "../nav-context";
 import { Section } from "./section";
 
 /**
- * 订阅额度的实时读取开关（bridge /api/v1/quota/settings，缺省开）。关了 bridge 不读 Keychain / auth.json、不调订阅接口，
+ * 额度的实时读取开关（bridge /api/v1/quota/settings，缺省开）。关了 bridge 不读 Keychain / auth.json、不调订阅接口，
  * 用量看板只显示本机缓存。只有本机 owner 拿得到（其它凭据 403）→ 整块不显示。
+ * 说明末尾一句「额度在『今天 · 团队与额度』看」带链接（QUOTA1）：点了打开今天页滚到那一块，并关掉设置弹窗。
  */
 export function QuotaLiveSection() {
   const t = useT();
+  const nav = useChatNav();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -28,10 +33,20 @@ export function QuotaLiveSection() {
       setBusy(false);
     }
   };
+  const goToday = (e: React.MouseEvent<HTMLButtonElement>) => {
+    // 设置弹窗的开关在 Sidebar 手里：点 CenteredModal 的遮罩（盒子的父元素）就是它自己的「关闭」
+    const overlay = e.currentTarget.closest(".panel-pop")?.parentElement;
+    openToday("team", nav);
+    overlay?.click();
+  };
   return (
     <Section
-      title={t("订阅额度实时读取")}
-      desc={t("用 Claude Code / codex 已登录的凭据，只读查询订阅额度和免费重置次数：看用量时实时查，后台每 6 小时查一次（快过期提醒靠它）。Pi 里配置的 DeepSeek / OpenCode Go / Kimi 也用各自的 API key 查余额和套餐用量（只在看用量时查）。关掉后只显示本机缓存。")}
+      title={t(Q.liveTitle)}
+      desc={<>
+        {t("用 Claude Code / codex 已登录的凭据，只读查询订阅额度和免费重置次数：看用量时实时查，后台每 6 小时查一次（快过期提醒靠它）。Pi 里配置的 DeepSeek / OpenCode Go / Kimi 也用各自的 API key 查余额和套餐用量（只在看用量时查）。关掉后只显示本机缓存。")}
+        {" "}
+        <button type="button" className="link link-primary" data-quota-live-today onClick={goToday}>{t(Q.liveWhere)}</button>
+      </>}
       aside={
         <input type="checkbox" className="toggle toggle-sm" checked={enabled} disabled={busy} onChange={(e) => void save(e.target.checked)} />
       }

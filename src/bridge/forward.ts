@@ -80,7 +80,7 @@ export async function handleForward(ws: ServerWebSocket<unknown>, msg: Record<st
     to,
     intent: "request",
     content: `${forwardHeader(short(fromName), String(msg.reason || ""))}\n\n${orig.env.content}`,
-    meta: { ...orig.env.meta, messageId: newMessageId("fwd"), threadId: newThreadId(), ts: new Date().toISOString(), forwarded: true, discordMsg: undefined },
+    meta: { ...orig.env.meta, messageId: newMessageId("fwd"), threadId: newThreadId(), ts: new Date().toISOString(), forwarded: true, discordMsg: undefined, inboundRoute: undefined },
   };
   if (from.kind === "user" && d.postDiscord) {
     await d.postDiscord(target.channelId, `↪ 由 <#${fromChannelId}> 转来（原本发给 ${short(fromName)}）：\n${withoutAttachmentLines(orig.env.content)}`, orig.env.meta.attachments)

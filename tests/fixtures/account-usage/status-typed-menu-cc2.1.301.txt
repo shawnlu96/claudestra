@@ -1,0 +1,15 @@
+Permission deny rule "MultiEdit" matches no known tool — check for typos.
+ ▐▛███▛█   Claude Code v2.1.301
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   /tmp/usage-probe-XXXXXX
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /status
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯ /status                     Show Claude Code status including version, model, account, API connectivity, and tool statuses
+    /statusline                 Set up Claude Code's status line UI
+    /usage                      Show session cost, plan usage, and activity stats
+    /plugin-authoring           Make a mod: a change to Claude's own interface or behaviour, such as a live pane or panel, a band above the prompt, a status
+                                line, a toast, a slash command, or a hook on tool calls or prompts. Use to make, change or debug a mod or its hooks module.
+    /ide                        Manage IDE integrations and show status

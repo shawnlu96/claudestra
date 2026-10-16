@@ -74,6 +74,8 @@ export interface AppConfig {
   pushAllAsks?: boolean;
   /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
   talkEnabled?: boolean;
+  /** Ordinary messages can request non-preempting delivery; disabling affects new requests only. */
+  steer?: Record<string, unknown> & { queueWhenBusy?: boolean };
   /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
   peerRelayJoinStrict?: boolean;
   /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 on；observe / off 要显式设置）；launcher 每轮现读 */
@@ -86,6 +88,8 @@ export interface AppConfig {
   jevApiKey?: string;
   /** Chat Guard（bridge/chat-guard.ts）：mode 缺省 on（没配 Jev key 时自然不生效）；blockAt 缺省 0.85 */
   chatGuard?: { mode?: "off" | "on"; blockAt?: number };
+  /** 入站路由（bridge/inbound-route.ts）：目标忙时新消息由 Jev 判打断 / 排队 / 合并。缺省 off；observe 只记日志；每 2 秒现读，改完不用重启 */
+  inboundRoute?: { mode?: "off" | "observe" | "on" };
   /** floka 改名的分项开关；state = 状态根迁移维护档位（lib/state-maintenance），只认 off / observe / on，缺省和未知值按 off。
    *  其余子键原样保留：set* 是读改写，在这里过滤会把别的分项抹掉 */
   rename?: Record<string, unknown> & { state?: unknown };
@@ -133,6 +137,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.pushAllAsks === "boolean" ? { pushAllAsks: raw.pushAllAsks } : {}),
     // 批量管理（bridge/fleet）：白名单带 compactKeep 和 callers；漏在这里读不到，任何 set* 还会把它抹掉
     ...fleetOf(raw.fleet),
+    ...(raw.steer && typeof raw.steer === "object" && !Array.isArray(raw.steer) ? { steer: { ...raw.steer } } : {}),
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
     ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
     ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
@@ -140,6 +145,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(raw.bridgeWatchdogOob === "on" || raw.bridgeWatchdogOob === "observe" || raw.bridgeWatchdogOob === "off" ? { bridgeWatchdogOob: raw.bridgeWatchdogOob } : {}),
     ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
     ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
+    ...(raw.inboundRoute?.mode === "observe" || raw.inboundRoute?.mode === "on" || raw.inboundRoute?.mode === "off" ? { inboundRoute: { mode: raw.inboundRoute.mode } } : {}),
     ...(raw.rename && typeof raw.rename === "object" && !Array.isArray(raw.rename) ? { rename: { ...raw.rename } } : {}),
     ...(raw.chatGuard && typeof raw.chatGuard === "object"
       ? {
@@ -349,6 +355,10 @@ export async function adoptWebSettings(web: { groqApiKey?: unknown; lang?: unkno
   });
 }
 
+export async function setInboundRouteMode(mode: "off" | "observe" | "on"): Promise<AppConfig> {
+  return editConfig(cfg => { cfg.inboundRoute = { mode }; });
+}
+
 /** rename.state 的生效档位：缺省、未知值、坏文件一律 off（打错字不能变成执行） */
 export function renameStateMode(cfg: AppConfig = readConfigSync()): RenameStateMode {
   const v = cfg.rename?.state;
@@ -361,3 +371,7 @@ export async function setRenameStateMode(mode: RenameStateMode): Promise<AppConf
 }
 
 export { CONFIG_PATH, DEFAULT_CONFIG };
+
+export async function setSteerQueueWhenBusy(enabled: boolean): Promise<AppConfig> {
+  return editConfig(cfg => { cfg.steer = { ...cfg.steer, queueWhenBusy: enabled }; });
+}

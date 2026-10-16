@@ -22,7 +22,7 @@ import { ClearAgentModal } from "./clear-agent-modal";
 import { AgentInfoModal } from "./agent-info-modal";
 import { openAgentInfo } from "../agent-info";
 import { stopMission } from "@/lib/api/agents";
-import { MissionIcon, MissionModal, MissionStopIcon, openMissionModal } from "./mission-ui";
+import { MissionStopIcon } from "./mission-ui";
 import { FolderIcon, menuItemIcon } from "./line-icons";
 import { LedgerReviewLine, LedgerStageLine } from "./ledger-stage-chip";
 import { useFullScope } from "../contacts-data";
@@ -88,7 +88,7 @@ function MenuPanel({ s, page, targets, openers, platform, onAction, onMove, onBa
               onClick={() => (arch.armed ? onAction("archive") : arch.arm())}
             />
           ) : (
-            <MenuItem key={it.id} icon={it.id !== "mission" ? menuItemIcon(it) : s.agent.mission ? <MissionStopIcon size={14} /> : <MissionIcon size={14} />} label={menuLabel(t, it.label, it.arg)} danger={it.danger} chevron={it.submenu} onClick={() => onAction(it.id)} />
+            <MenuItem key={it.id} icon={it.id !== "mission" ? menuItemIcon(it) : <MissionStopIcon size={14} />} label={menuLabel(t, it.label, it.arg)} danger={it.danger} chevron={it.submenu} onClick={() => onAction(it.id)} />
           ),
         )}
       {page !== "main" && <MenuItem icon="‹" label={t("返回")} onClick={onBack} />}
@@ -136,13 +136,12 @@ export function AgentMenu() {
     }
     closeAgentMenu();
     if (id === "info") openAgentInfo(name);
-    else if (id === "mission" && s.agent.mission) {
+    else if (id === "mission") {
       void stopMission(name)
         .then((r) => fail("关闭 Autopilot 失败:", r))
         .catch((e: Error) => fail("关闭 Autopilot 失败:", { ok: false, error: e.message }))
         .finally(() => void store.refreshAgents());
     }
-    else if (id === "mission") openMissionModal(s.agent);
     else if (id.startsWith("open:")) void openLocal("agent", name, id.slice(5)).then((r) => fail("打开失败:", r));
     else if (id === "clear") setClearFor(s.agent);
     else if (id === "kill") void store.killAgent(name).then((r) => fail("停止失败:", r));
@@ -179,7 +178,6 @@ export function AgentMenu() {
       {clearFor && <ClearAgentModal agent={clearFor} onClose={() => setClearFor(null)} />}
       {/* 会话详情弹窗也在这里挂单实例（侧栏文件只许缩）；顶栏 ⓘ 与 Peer 面板都通过 ../agent-info 打开它 */}
       <AgentInfoModal />
-      <MissionModal onStarted={() => void store.refreshAgents()} />
     </>,
     document.body,
   );

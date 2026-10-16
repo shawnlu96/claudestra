@@ -1,13 +1,12 @@
 "use client";
 /**
- * 出借方管理面（设置 → Peer 协作）：授权列表 + 授权表单 + 借出中的单。数据来自 bridge GET /lend/grants，
+ * 出借方管理面（设置 → 伙伴机器）：登录、额度线、授权列表 + 授权表单。借出中的单搬到「今天 · 团队与额度」（XMACH1），这里留一行链接。数据来自 bridge GET /lend/grants，
  * 403 / 404（非 owner 本人全权凭据、或 bridge 太旧）整个面板不渲染。
  * 一键收回点一下就发、不二次确认，这个 peer 的在跑单当场转「停止中」；数据、轮询与收回在 lend-state.useLendState。
  */
 import { useState } from "react";
 import { useLang } from "@/lib/i18n";
 import { LEND_WORDS, ownerWordsTr } from "@/lib/owner-words";
-import { useChatStoreApi } from "../chat/chat-store";
 import { GrantForm } from "./grant-form";
 import { useLendT, useRemainingText } from "./lend-i18n";
 import { LendIcon, type LendIconName } from "./lend-icons";
@@ -15,8 +14,8 @@ import { formDefaults, grantStatus, remainingMs, splitRemaining, type GrantForm 
 import { useLendState } from "./lend-state";
 import { LendClaudeLogin } from "./lend-claude-login";
 import { LendQuotaSettings } from "./lend-quota-settings";
-import { LentOrders } from "./lent-orders";
 import css from "./lend.module.css";
+import { RunningElsewhereLink } from "../now/now-team-machines";
 
 const STATUS_ICON: Partial<Record<GrantStatus, { icon: LendIconName; cls: string }>> = {
   paused: { icon: "pause", cls: "text-warning" },
@@ -66,8 +65,7 @@ function GrantRow({ g, now, fresh, leaving, busy, err, onRevoke, onRegrant }: {
 
 export function LendPanel() {
   const t = useLendT();
-  const store = useChatStoreApi();
-  const { data, loadErr, orders, stopping, now, leaving, busy, revokeErr, load, revoke } = useLendState();
+  const { data, loadErr, now, leaving, busy, revokeErr, load, revoke } = useLendState();
   const [form, setForm] = useState<Form | null>(null);
   const [fresh, setFresh] = useState<string | null>(null);
 
@@ -96,8 +94,7 @@ export function LendPanel() {
         ))}
         {!data.grants.length && !form && <div className="py-1 text-center text-xs text-base-content/40">{t("还没有授权")}</div>}
       </div>
-      <div className="pt-1 text-[11px] font-semibold uppercase tracking-wider text-base-content/40">{t(LEND_WORDS.lentWork)}</div>
-      <LentOrders orders={orders} stopping={stopping} now={now} onOpen={(agent) => void store.openAgent(agent)} />
+      <RunningElsewhereLink />
       {loadErr && <p className="text-[11px] text-error">{loadErr}</p>}
     </section>
   );

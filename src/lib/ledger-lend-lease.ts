@@ -113,7 +113,9 @@ export interface WriteOrderInput { orderId: string; step: LendStep; head: string
   resume?: boolean; reborrow?: ReborrowBinding;
   findings: ReviewFinding[]; repo: string; pr: number | null; bounce?: ReturnType<typeof bounceWork> | null;
   /** 开工单：复述已交、PM 还没答时的复述原文（i28-RS1）——随单带上，答复之后由 ledger-lend-relay.ts 推送 */
-  restate?: string | null }
+  restate?: string | null;
+  /** UIEVID2：ui 卡的出借截图指引（ui-delivery-guidance.ts uiLendLines），进验收；非 ui 卡为空 */
+  ui?: readonly string[] }
 
 /** 复述交了、PM 还没答就派出的开工单要写明的那一句（i28-RS1） */
 export const RESTATE_PENDING_LINE = "复述答复会随后推送，收到前遇到复述里列的待定点按复述里的默认做";
@@ -138,7 +140,7 @@ export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: Inpu
     outputs: ["分支上的提交（出借服务推送、开 / 更新 PR）", "一行摘要 + 自查（逐条对验收线）"],
     acceptance: [`${start}；工作副本里已检出好，只在这个分支上提交；${scope.acceptance}`, `只动这一个分支：推送由出借服务做，只推${LEND_BRANCH_TEXT}，不推 ${o.base}、不改别的分支`,
       ...(bounce?.acceptance ?? [o.step === "fix" ? "逐条修上一轮审查的问题，自查里写明每条怎么修的" : "按规格与验收线实现，自查逐条对验收线"]),
-      ...(restate ? [RESTATE_PENDING_LINE] : []), ...(o.reborrow ? [reborrowMarker(o.reborrow)] : [])],
+      ...(restate ? [RESTATE_PENDING_LINE] : []), ...(o.ui ?? []), ...(o.reborrow ? [reborrowMarker(o.reborrow)] : [])],
     writeBack: "提交后用 deliver（M2 前是 lend submit）交一行摘要和自查，单号见标题",
     findings: o.step === "fix" && !bounce ? o.findings : [],
   }, { repo: o.repo, pr: o.pr }), bounce, o.report);

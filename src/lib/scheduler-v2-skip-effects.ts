@@ -115,6 +115,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-service.ts": "ledger=6 proc=1",
     "scheduler-spec-resume.ts": "ledger=3",
     "scheduler-spec-wait.ts": "ledger=1 stmt=1",
+    "scheduler-ui-evidence-notice.ts": "ledger=1", // UIEVID2: `ledger scheduler-ui-evidence-redo` through the pass manager, from auto-tick before the PM screenshot notice
   },
   /** a ≤3-line S2D2 hook (or the module the hooked step drives) skips the card before the effect */
   hook: {

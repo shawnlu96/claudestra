@@ -35,7 +35,7 @@ export function todayLedgers(now = TODAY_NOW): Record<string, object> {
   const a = [
     task("A1", "导出按钮改版", "build", { agent: "agent-a-dev1", stageSince: now - 40 * 60_000 }),
     task("A2", "导出格式校验", "review", { agent: "agent-a-dev2", stageSince: now - 3 * H }),
-    task("A3", "导出预览", "fix", { agent: "agent-a-dev1", round: 1, stageSince: now - 50 * 60_000,
+    task("A3", "导出预览", "fix", { agent: "agent-a-dev1", round: 1, stageSince: now - 130 * 60_000,
       lastReview: { round: 1, verdict: "fix", p0: 0, p1: 1, p2: 0, text: "窄屏下预览溢出", ts: now - 50 * 60_000 } }),
     task("A4", "通知设置页", "build", { agent: "agent-a-dev2", stageSince: now - 20 * 60_000 }),
     task("A5", "导出入口文案", "done", { metrics: { endTs: now - H } }),

@@ -25,6 +25,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-merge-begin": rule("intent", "executor"),
   "scheduler-merge-step": rule("intent", "executor"),
   "scheduler-ui-ask": rule("intent", "unmapped"),
+  "scheduler-ui-evidence-redo": rule("task", "unmapped"),
   "scheduler-review-snapshot": rule("intent", "unmapped"),
   "scheduler-model-outcome": rule("intent", "unmapped"),
   "scheduler-model-inform": rule("task", "unmapped"),

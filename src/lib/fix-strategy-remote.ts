@@ -18,6 +18,7 @@ import { getLendPeer } from "./ledger-lend-peers.js";
 import { FIX_STRATEGY_RULE } from "./fix-strategy.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { chunkInputs } from "./order-wire-chunks.js";
+import { uiLendLines } from "./ui-delivery-guidance.js";
 import { localWriterCount } from "./scheduler-pool-facts.js";
 import { explicitLocal } from "./scheduler-local-pin.js";
 import { localSwapAuthority, localSwapCreate, localSwapOf, localSwapReady, localSwapReclaimEdge, localSwapWait, reclaimedBefore, retireLocalAuthor } from "./recovery-fix-local-swap-run.js";
@@ -107,7 +108,7 @@ export async function remoteFixFallback(db: Database, ctx: WriteCtx, intent: Sch
   offerConvergence(db, ctx, intent, context, peer, material.family, (current, orderId) => {
     const history = readFileSync(material.path, "utf8"), previous = lastReviewOf(db, current);
     const wire = writeOrderWire(current, { orderId, step: "fix", head: current.headSHA!, branch: current.branch!, base: "main",
-      spec: context.spec!, report: null, findings: previous.findings, repo: facts.repo!, pr: Number(current.pr?.match(/\/pull\/(\d+)/)?.[1]) || null });
+      spec: context.spec!, report: null, findings: previous.findings, ui: uiLendLines(db, current), repo: facts.repo!, pr: Number(current.pr?.match(/\/pull\/(\d+)/)?.[1]) || null });
     wire.inputs.push(...chunkInputs([["历轮报告、修复diff摘要、复现probe", shortHistoricalRefs(db, current, history)]]));
     wire.acceptance.push(FIX_STRATEGY_RULE);
     wire.convergence = { kind: "fix", intentId: intent.id, branch: current.branch!, peer, proto: 3, held: true };

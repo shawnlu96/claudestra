@@ -7,6 +7,7 @@
  */
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
+import { actionCtx, withActionState } from "./ledger-action-state.js";
 import { attentionCtx, withAttentionFacts, type AttentionCtx } from "./ledger-attention-facts.js";
 import { depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
 import { stageTimeline, type StageEntry } from "./ledger-metrics.js";
@@ -126,7 +127,8 @@ function projectViewSnapshot(db: Database, project: string, now: number, dayStar
   const tasks = listTasks(db, project);
   const deps = depViews(listDeps(db, project), tasks);
   const rows = stepsByTask(db);
-  const views = tasks.map((t) => withAttentionFacts(taskView(t, byTarget.get(t.id) ?? [], now, deps), byTarget.get(t.id) ?? [], facts));
+  const act = actionCtx(db, project, now);
+  const views = tasks.map((t) => ((own) => withActionState(withAttentionFacts(taskView(t, own, now, deps), own, facts), own, act))(byTarget.get(t.id) ?? []));
   const win = doneWindow(views.filter((v) => compactStage(v.stage)), deps, dayStart);
   const visible = new Set(views.filter((v) => !compactStage(v.stage) || win.keep.has(v.id)).map((v) => v.id));
   const line = (v: TaskView) => stepLineInfo(v, rows.get(v.id) ?? [], byTarget.get(v.id) ?? []);
@@ -171,7 +173,7 @@ export function taskDetail(db: Database, project: string, id: string, now: numbe
   if (!task || task.project !== project) return null;
   const events = listEvents(db, { project, target: id });
   const deps = depViews(listDeps(db, project), listTasks(db, project));
-  const view = withAttentionFacts(taskView(task, events, now, deps), events, facts ?? attentionCtx(project));
+  const view = withActionState(withAttentionFacts(taskView(task, events, now, deps), events, facts ?? attentionCtx(project)), events, actionCtx(db, project, now));
   return {
     task: view,
     events,

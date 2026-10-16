@@ -1,0 +1,83 @@
+/*
+ * 顶部额度卡（QUOTA1，由 lend/quota-warning.module.css 挪来）：顶栏下方居中、非模态（外层不吃点击，只有卡片本身可点）；两族上下叠在同一张卡里。
+ * Chat 通过 embedded 文流插槽预留实际空间，避免消息被覆盖；独立展示仍使用 body portal。
+ * 进出：高度（grid 行 0fr ↔ 1fr）+ 透明度 200ms；严重度变化时那一行颜色过渡 200ms；减弱动效下都不动。
+ */
+.wrap {
+  pointer-events: none;
+  position: fixed;
+  inset-inline: 0;
+  top: calc(env(safe-area-inset-top) + 56px);
+  z-index: 67;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 200ms ease-out, opacity 200ms ease-out, padding-block 200ms ease-out;
+}
+.wrap[data-open="1"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.embedded {
+  position: static;
+}
+.embedded[data-open="1"] {
+  padding-top: 6px;
+}
+.fold {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  padding: 0 12px 10px; /* 留出阴影（overflow 裁在 padding 外沿） */
+}
+.card {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  max-width: 560px;
+  border-radius: 14px;
+  padding: 4px;
+  font-size: 12px;
+  line-height: 1.35;
+  box-shadow: 0 3px 10px rgb(0 0 0 / 0.12);
+}
+.rows {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 6px 8px;
+  transition: background-color 200ms ease-out, color 200ms ease-out;
+}
+.icon {
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+.text {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+.side {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wrap,
+  .row {
+    transition: none;
+  }
+}
