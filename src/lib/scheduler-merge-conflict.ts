@@ -13,6 +13,7 @@ import { LedgerError } from "./ledger-store.js";
 import { insertEvent } from "./ledger-tx.js";
 import { ciBehindClaim, ciBehindOrRerun } from "./scheduler-merge-ci-behind.js";
 import { ciCancelGate, ciCancelStep } from "./scheduler-merge-ci-cancel.js";
+import { markWaitMain, waitMainLine } from "./ci-main-fix-retry.js";
 import { redCheck } from "./scheduler-merge-ci-cancel-judge.js";
 import { gateReceipt, RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
@@ -27,7 +28,7 @@ export type RemoteBounce = RemoteP1;
  * `error` (update_fail only): GitHub's refusal, one line, so the fixer sees why main could not be merged in.
  * `remote` (remote_review only): never from a merge-run receipt; the handoff's bounce writes it on the stage event.
  */
-export interface MergeBounce { cause: BounceCause; prHead: string; mainHead: string | null; checks: FailedCheck[]; error?: string; remote?: RemoteBounce }
+export interface MergeBounce { cause: BounceCause; prHead: string; mainHead: string | null; checks: FailedCheck[]; error?: string; remote?: RemoteBounce; waitMain?: "peer" | "local" }
 /** Bounces (conflict + CI failure together) a card gets back to fix automatically; the next one goes to the PM. */
 export const MAX_MERGE_BOUNCES = 3;
 export const BOUNCE_LIMIT_REASON = "反复冲突，可能和别的卡长期改同一处，需要 PM 排期";
@@ -202,6 +203,7 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
     return cancelMergeRun(db, ctx, row, receipt);
   }
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
+  markWaitMain(db, row, b); // CIUNREL1: this red registered a wait for main's fix → the fix order says so
   if (!sameSha(b.prHead, row.reviewedHead) || (b.cause === "conflict" && !SHA.test(b.mainHead ?? "")) ||
     (b.cause === "ci_fail" && b.checks.some((c) => !required(row).includes(c.name)))) {
     throw new LedgerError("invalid", "退回 fix 的回执缺证据，或 head / 检查名与本次合并不符");
@@ -284,7 +286,7 @@ export function bounceWork(b: MergeBounce): { inputs: string[]; acceptance: stri
   }
   const checks = b.checks.map((c) => `${c.name}${c.link ? `（${c.link}）` : ""}`).join("、");
   return {
-    inputs: [`PR 头 CI 失败：${checks}，看日志修好后推送`],
+    inputs: [`PR 头 CI 失败：${checks}，看日志修好后推送`, ...waitMainLine(b)],
     acceptance: ["PR 落后 main 时，先 git fetch 后合入最新 origin/main，再看 CI 红是否仍在", "看 CI 日志定位原因并修好", "本机 tsc、guard、相关测试通过", "推送后报新 head；这一轮不算 P1 修复"],
   };
 }
