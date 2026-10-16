@@ -108,9 +108,10 @@ function repeatedStop(db: Database, o: Order, kind: Stop["reason"], now: number)
 export function runtimeStopCooldown(db: Database, ctx: WriteCtx, o: Order, req: Stop, now: number, policy: RecoveryPolicyPort = recoveryPolicy): void {
   const d = req.reason === "stopped" || req.reason === "not_started" ? decide(db, o, now, policy) : "skip";
   if (d === "skip") return;
+  // A network not_started is recorded too (then network wins this reason), so a plain failure after it pairs as the second.
+  const second = req.reason === "not_started" && !ownedElsewhere(o, req.detail ?? "") && repeatedStop(db, o, "not_started", now);
   const reason = req.reason === "stopped" ? (stoppedForAuth(req) ? "runtime:auth" : repeatedStop(db, o, "stopped", now) ? "runtime:stopped×2" : null)
-    : notStartedForNetwork(req) ? "runtime:network"
-    : !ownedElsewhere(o, req.detail ?? "") && repeatedStop(db, o, "not_started", now) ? "runtime:not_started×2" : null;
+    : notStartedForNetwork(req) ? "runtime:network" : second ? "runtime:not_started×2" : null;
   if (!reason) return;
   const until = now + RUNTIME_COOLDOWN_MS;
   if (d === "observe") return observe(db, o, { until, reason }, releasable(o, req), now);

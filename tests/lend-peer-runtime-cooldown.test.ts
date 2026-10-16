@@ -282,3 +282,15 @@ test("[验收线 2] not_started kinds another mechanism owns never pair: model c
   for (const [i, detail] of [config, config, refusal, refusal, QUOTA, QUOTA].entries()) notStarted(held(`C${i}`, { family: "codex" }), detail);
   expect(rows().filter((r) => r.reason.startsWith("runtime:"))).toEqual([]);
 });
+
+test("[验收线 2] a network not_started counts toward the window: a plain failure 5 minutes later cools as the second (mixed-start-count)", () => {
+  for (const failure of [{ class: "network", sessionId: "thr-1", failedAt: NOW } as const, undefined]) {
+    db.run("DELETE FROM lend_peer_cooldowns"); forget();
+    notStarted(held(`M${failure ? 1 : 3}`), failure ? "x" : NET, failure);
+    const second = held(`M${failure ? 2 : 4}`, { now: NOW + 5 * MIN });
+    pin(second.taskId, "peer:sekai");
+    notStarted(second, "起 worker 失败：临时启动错误", undefined, NOW + 5 * MIN);
+    expect(rows()).toEqual([{ peer: "sekai", family: "claude", until: NOW + 5 * MIN + RUNTIME_COOLDOWN_MS, reason: "runtime:not_started×2" }]);
+    expect(card(second.taskId).extra).not.toHaveProperty("placement");
+  }
+});
