@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { machineBase, parseAppConfig, type DirectConfig } from "@/lib/app-config";
-import { ApiError, apiErrorFrom, DeviceInvalidError, linkSignals } from "@/lib/api/client";
+import { afterEach, describe, expect, test } from "bun:test";
+import { machineBase, parseAppConfig, setAppConfigForTest, type DirectConfig } from "@/lib/app-config";
+import { api, ApiError, apiErrorFrom, apiUrlSync, DeviceInvalidError, linkSignals, relayFp } from "@/lib/api/client";
 import { MachineStore, memoryBackend, pickCurrent, sortMachines, upsertRecord, type MachineRecord } from "@/lib/machines";
 
 const fallback: DirectConfig = { mode: "direct", fp: "local", machineName: "here", version: "" };
@@ -127,5 +127,36 @@ describe("MachineStore（内存后端）", () => {
     expect(second.addedAt).toBe(first.addedAt);
     expect(second.name).toBe("A renamed");
     expect(s.healthOf("a")).toBe("ok");
+  });
+});
+
+describe("[验收线 3] 中继模式下 LOCAL_FP 按「没选机器」处理，不产生 /m/local", () => {
+  const relayCfg = { mode: "relay", relayBase: "relay.test", version: "" } as const;
+  afterEach(() => setAppConfigForTest(null));
+  test("relayFp：LOCAL_FP / 空 → null，真实 fp 原样", () => {
+    expect(relayFp("local")).toBeNull();
+    expect(relayFp(null)).toBeNull();
+    expect(relayFp("ab12-cd34")).toBe("ab12-cd34");
+  });
+  test("apiUrlSync：中继 + LOCAL_FP 不拼 /m/local；真实 fp 照常；直托管不变", () => {
+    setAppConfigForTest(relayCfg);
+    expect(apiUrlSync("/version", "local")).toBe("/api/v1/version");
+    expect(apiUrlSync("/version", "ab12-cd34")).toBe("/m/ab12-cd34/api/v1/version");
+    setAppConfigForTest(fallback);
+    expect(apiUrlSync("/version", "local")).toBe("/api/v1/version");
+  });
+  test("resolveTarget：中继 + LOCAL_FP 抛 no_machine，不发请求", async () => {
+    setAppConfigForTest(relayCfg);
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (() => (calls++, Promise.resolve(Response.json({})))) as unknown as typeof fetch;
+    try {
+      const err = await api("/version", {}, { fp: "local" }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).code).toBe("no_machine");
+      expect(calls).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
