@@ -31,7 +31,7 @@ let ui: {
   MessageList: () => unknown; NowStrip: () => unknown; Sidebar: (p: { onSelect: () => void }) => unknown; CollabSwitch: () => unknown; closingCollab: (fn: () => void) => () => void;
   ChatStoreProvider: (p: { children: unknown }) => unknown; useChatStoreApi: () => Store;
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
-  useCollabNav: () => { project: string | null; task: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
+  useCollabNav: () => { project: string | null; task: string | null; view: "team" | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
   openSettings: (p: string) => void; TODAY_KEY: string; resetLedgers: () => void; setSeenStopping: (m?: ReadonlyMap<string, number>) => void;
 };
 
@@ -115,7 +115,7 @@ async function until(ok: () => boolean, what: string) {
 async function mount(part: "main" | "strip" | "shell") {
   win.happyDOM.setViewport({ width: 1280, height: 900 });
   setContextRequestForTest(null);
-  const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null } as { project: string | null; task: string | null } };
+  const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null, view: null } as { project: string | null; task: string | null; view: "team" | null } };
   const h = React.createElement as (...a: unknown[]) => unknown;
   function Probe() {
     seen.store = ui.useChatStoreApi();
@@ -170,7 +170,7 @@ test("[验收线 2] 点借入一行：collab-nav 是 {该项目, 该任务} 并�
   await until(() => v.all("[data-remote-row]").length === 3, "remote rows");
   expect(v.host.querySelector("[data-now-borrowed] button")?.getAttribute("aria-expanded")).toBe("true");
   await v.click(v.host.querySelector("[data-remote-row=r-b1]"), "remote row B1");
-  expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1" });
+  expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1", view: null });
   expect(v.seen.toContent).toBe(1);
   await React.act(async () => ui.closeCollab());
   await tick();
