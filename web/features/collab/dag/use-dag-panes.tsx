@@ -4,7 +4,7 @@
  * （project-tabs/project-tabs.tsx，总览和团队由调用方给），详情里的节点 / 版本 / 差异页，以及手机的底部抽屉。没有产品看板时「项目地图」
  * 退回调用方给的因果线（桌面画布，手机分组列表）。带任务进入（挂载前已 openCollabTask）且任务属于某个模块时，落到「模块进度」并选中它。
  * 「谁在干活」的看板也在这里读一份（本机 /work；团队 = 团队看板 + 主场本机行的本机看板），标签和全站计数（count-words.ts）共用；
- * 计数状态 counts 返回给顶栏 / 大纲 / 右栏，并经 CountContext 递给产品卡与子 DAG 框头。
+ * 计数状态 counts 返回给总览的数格，并经 CountContext 递给产品卡与子 DAG 框头。
  */
 import { useCollabNav } from "../collab-nav";
 import { useNodeCardOwner } from "./node-card-navigation";

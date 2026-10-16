@@ -76,7 +76,7 @@ for (const narrow of [false, true]) {
     const m = await mounted({ narrow, featureId: "f1", dagBoard, onBack: () => back.push(1) });
     expect(m.el.querySelector("[data-subdag]")).not.toBeNull();
     expect(m.el.querySelector("nav")?.textContent).toBe("模块合成模块甲");
-    await React.act(async () => { m.el.querySelector<El>("nav button")!.click(); });
+    await React.act(async () => { m.el.querySelector("nav button")!.click(); });
     expect(back).toEqual([1]);
     await m.done();
     const missing = await mounted({ narrow, featureId: "f2", dagBoard });
@@ -90,7 +90,7 @@ for (const narrow of [false, true]) {
     expect(m.el.querySelector("[data-progress]")).not.toBeNull();
     expect(m.el.querySelector("[data-module]")).toBeNull();
     expect(segs(m.el)).toEqual([["按模块", "false"], ["按人", "true"]]);
-    await React.act(async () => { m.el.querySelectorAll<El>('[role="tab"]')[0]!.click(); });
+    await React.act(async () => { m.el.querySelectorAll('[role="tab"]')[0]!.click(); });
     expect(calls).toEqual(["module"]);
     await m.done();
   });

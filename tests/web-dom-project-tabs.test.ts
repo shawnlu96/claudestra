@@ -247,12 +247,12 @@ test("[验收线 6] requestProjectTab：项目页挂载时取一次，落到模�
   const row = { id: MAP, name: "合成项目", open: MAP, busy: 1, agents: [], waits: 0, stuck: 0 };
   const view = { doing: [{ row, modules: [{ id: "m-export", title: "导出", completed: 2, total: 6, active: 3, faces: [] }], workers: [], doing: true }], rest: [], idle: false,
     team: { alive: 1, busy: 1, remote: 0 } };
-  let opened: string | null = null;
-  function Probe() { opened = ui.useCollabNav().project; return null; }
+  const seen = { project: null as string | null };
+  function Probe() { seen.project = ui.useCollabNav().project; return null; }
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null, h(ui.NowDoing, { view, fp: null, tr: fillParams }), h(Probe)) as never));
   await React.act(async () => host.querySelector("[data-now-module=m-export]")!.click());
   expect(ui.tabs.peekProjectTab(MAP)).toEqual({ tab: "module", featureId: "m-export" });
-  expect(opened).toBe(MAP);
+  expect(seen.project).toBe(MAP);
   await React.act(async () => root.unmount());
   host.remove();
   ui.closeCollab();
