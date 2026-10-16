@@ -100,7 +100,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1",
     "scheduler-merge-union.ts": "ledger=1", // KEYUNION1: `ledger scheduler-recovery-observe` for mergeUnion notes, through the pass manager
-    "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1",
+    "scheduler-model-wiring.ts": "ledger=9 sql=1 stmt=1",
     "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1",
     "scheduler-post-verify.ts": "ledger=2",
@@ -231,6 +231,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3",
+    "ledger-scheduler-resume.ts": "sql=3 stmt=3", // RVF-1: reached through scheduler-recovery-write.ts (writer-process code, never run by the pass)
     "ledger-scheduler-schema.ts": "sql=6 stmt=13",
     "ledger-scheduler-settle.ts": "sql=2 stmt=2",
     "ledger-scheduler-write.ts": "sql=7 stmt=7",
@@ -262,6 +263,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-handoff.ts": "sql=1 stmt=1",
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3",
     "scheduler-merge.ts": "sql=11 stmt=11",
+    "scheduler-recovery-write.ts": "sql=1 stmt=1", // RVF-1: writeReviewFallback, called only inside `ledger scheduler-model-outcome`
     "scheduler-review-stale.ts": "sql=1 stmt=1",
     "scheduler-review-swap.ts": "sql=3 stmt=3",
     "scheduler-sessions.ts": "sql=7 stmt=10",
