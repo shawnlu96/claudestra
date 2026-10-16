@@ -14,9 +14,11 @@
 ## 分类（`isTransientError`）
 
 错误码和原文拼在一起判。**先排除**：登录失效（`/login`、401/403、OAuth）、额度（`hit/reached your … limit`、quota、billing、spend limit）、
-内容策略（cyber、safeguards / AUP）、上下文耗尽（Prompt is too long）、模型不可用、无法解析——它们各走各的路，原文里带网络字样也不改道。
+套餐过期 / usage limit（`not your usage limit` 除外）、内容策略（cyber、safeguards / AUP）、上下文耗尽（Prompt is too long）、
+模型不可用、请求本身错（4xx、`invalid_request`、`not_found`）、本机钥匙串——它们各走各的路，原文里带网络字样也不改道。
 **网络 / 服务端瞬时**：连接失败 / 重置 / 中途断流、DNS（ENOTFOUND / EAI_AGAIN）、TLS / 证书（含 `UNKNOWN_CERTIFICATE_VERIFICATION_ERROR`）、
-超时、`terminated`、`This operation was aborted`、HTTP 500/502/503/504、529 overloaded、服务端临时限流（429 / rate limited，不含额度原文）。
+超时、`terminated`、`This operation was aborted`、断流（Codex `stream disconnected`、Pi `Stream ended without finish_reason`）、
+HTTP 500/502/503/504、529 overloaded / high demand、服务端临时限流（429 / rate limited，不含额度原文）。关键词带词边界（`bash_timeout`、`not_found_error` 不算）。
 500 也算：CC 的原文明说「server-side issue, usually temporary」。
 
 ACP 失败帧另要求：`kind=error`、适配器没说 `retry:false`、不是投递不明、不是 `newSession`（`isTransientAcpFailure`）。
@@ -34,6 +36,17 @@ ACP 失败帧另要求：`kind=error`、适配器没说 `retry:false`、不是�
 - 升级后记录删掉：同一串只报一次；之后有人让它接着做、又撞，是新的一串，从 1 分钟重新退避。
 - 监护对象（`agent-supervisor-bridge.ts`）：同一件活的续跑次数照旧最多 3 次（`SUPERVISE_RULES.overload`），与上面的退避先到哪个算哪个。
 - ACP 派单会话（`runtime-failure-audience`）：网络类也照旧开卡（不推 owner、交派活方），退避续跑同时进行，与改动前一致。
+- ACP 网络类失败照旧记给这一轮的请求方（`noteTurnFailure`）：回程槽被一句「收到」消化了也能收到失败说明，升级只发 agent 自己频道。
+- 续跑计划落盘（`STATE_DIR/api-error-resume.json`，`loadResumeStates` / `saveResumeStates`，撞错时和 15 秒一拍落）：退避中 bridge 重启，读回来到点照续、次数接着数；
+  重启后 2 分钟内到期而 agent 还没连回来的先留着。
+
+## 已知限制
+
+- 分类只看原文：AIR 的结构化类别（connection / service + retry）到不了 `api_error_turn`（watcher 只带错误码和原文），只用在 acp-link 会让两处判法不一致；
+  只认了 AIR 缺省标题里的「（connection）」。
+- 监护台账的续跑记录文案仍写「bridge 60 秒后同会话续跑」（`agent-supervisor.ts`，不在本卡范围）。
+- 第 4 次续跑后的长回合里再撞一次，按第 5 次升级（窗口从续跑时刻算，不从回合结束算）。
+- watcher 照旧把每次「API Error: …」转到频道，一串断网最多 5 行。
 
 ## 不归这里
 

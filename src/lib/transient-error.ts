@@ -6,22 +6,28 @@
  */
 import type { AcpFailure } from "./acp/failures.js";
 
-/** 先排除：登录 / 额度 / 策略 / 上下文 / 模型不可用。「not your usage limit」是服务端临时限流的原话，不当额度 */
+/**
+ * 先排除：登录 / 额度（含套餐过期）/ 策略 / 上下文 / 模型不可用 / 请求本身错（4xx、invalid_request、not_found）/ 本机钥匙串。
+ * 「not your usage limit」是服务端临时限流的原话，不当额度
+ */
 const NOT_TRANSIENT_RE = new RegExp([
-  String.raw`\/login|log ?in\b|authenticat|unauthori[sz]ed|\b40[13]\b|forbidden|invalid[ _-]?api[ _-]?key|oauth`,
-  String.raw`(hit|reached) your .{0,40}limit|usage-credits|insufficient[_ ]quota|billing|spend limit|payment required|\b402\b|credit balance`,
-  String.raw`cyber|safeguards flagged|content policy|usage policy|legal\/aup`,
-  String.raw`prompt is too long|context (length|window)|maximum context|too many tokens`,
-  String.raw`model_not_found|issue with the selected model|could not be parsed`,
+  String.raw`\/login|log ?in\b|authenticat|unauthori[sz]ed|forbidden|invalid[ _-]?api[ _-]?key|oauth|keychain`,
+  String.raw`(hit|reached) your .{0,40}limit|(?<!not your )usage limit|UsageLimit|usage-credits|\bquota\b|insufficient[_ ]quota|exceeded your`,
+  String.raw`billing|spend limit|payment required|credit balance|insufficient balance|(package|plan|subscription) has expired`,
+  String.raw`cyber|safeguards flagged|content (filtering )?policy|usage policy|legal\/aup`,
+  String.raw`prompt is too long|context (length|window|limit)|maximum context|too many tokens`,
+  String.raw`model_not_found|not_found|issue with the selected model|could not be parsed|\binvalid_request|extra inputs are not permitted`,
+  String.raw`\b40[0-7]\b|\b41\d\b`,
 ].join("|"), "i");
 
 /** 网络层（连接 / DNS / TLS / 超时 / 中途断流）与服务端瞬时（5xx、529 满载、临时限流） */
 const TRANSIENT_RE = new RegExp([
   String.raw`connection (error|dropped|lost|closed|refused|reset)|unable to connect|can't reach|socket hang up|fetch failed|network error`,
-  String.raw`ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|UND_ERR`,
+  String.raw`stream (disconnected|ended|closed)|premature close|other side closed|socket disconnected|no response body|dns error|failed to lookup address|\bsocks5? proxy`,
+  String.raw`（connection）|ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|\bUND_ERR`,
   String.raw`certificate|\bTLS\b|\bSSL\b|handshake`,
-  String.raw`timed? ?out|\btimeout\b|\bterminated\b|operation was aborted|mid-response|mid-stream|stopped arriving|stalled`,
-  String.raw`server_error|server-side issue|\b50[0234]\b|bad gateway|service unavailable|\b529\b|overloaded`,
+  String.raw`\btimed? ?out\b|\bterminated\b|operation was aborted|mid-response|mid-stream|stopped arriving|stalled`,
+  String.raw`server_error|server-side issue|\b50[0234]\b|bad gateway|service unavailable|\b529\b|overloaded|high demand`,
   String.raw`\b429\b|rate[ _-]?limited|too many requests|temporarily limiting`,
 ].join("|"), "i");
 

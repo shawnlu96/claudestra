@@ -110,7 +110,7 @@ function bookedResumes(db: Database | null, agent: string, workKey: string, clea
 }
 
 /**
- * 回合以 API 错误结束：这次是升级（true）还是 60 秒后续跑（false）。api-error-resume.ts noteApiError 一行调它。
+ * 回合以 API 错误结束：这次是升级（true）还是到点续跑（false；网络类按退避）。api-error-resume.ts noteApiError 一行调它。
  * 不在监护名单：同改动前——续过、窗口内又撞就升级。监护对象：同一件活（同一会话）一共最多续 SUPERVISE_RULES.overload.limit 次，
  * 次数落盘（bridge 重启、隔了很久再撞都接着数），用完以后一直升级，换了活才从头数；按批出去的算，被额度闸撤掉的也算（宁可少续）。
  * 这件活是哪一件以台账为准（名单有缓存，刚领新单时还是旧单，不能拿旧单的次数判新单）；回合正常结束后从头数（clearOverloadCount）。
@@ -156,7 +156,7 @@ function clearOverloadCount(agent: string, now: number, path = OVERLOAD_PATH): v
 }
 
 /**
- * 记一次撞错和 bridge 的处理（track = 60 秒后续跑；escalate = 续跑用完；其余照原样）：只记监护对象的，别的 agent 不落盘。
+ * 记一次撞错和 bridge 的处理（track = 到点续跑，网络类按退避；escalate = 续跑用完；其余照原样）：只记监护对象的，别的 agent 不落盘。
  * 登录失效（401）：入口没拿到错误码时刚为这次批的续跑次数退回去，不计进这件活的 3 次；为它续了就留下标记（哪件活、哪个会话），
  * 入口下一次撞的还是登录失效时凭它升级。这一次不是登录失效、或没续：标记去掉。
  */

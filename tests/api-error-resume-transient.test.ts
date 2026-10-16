@@ -1,11 +1,11 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cardsToClose } from "../src/lib/agent-supervisor-bridge.js";
 import {
-  ACTIVITY_GRACE_MS, RESUME_DELAY_MS, RESUME_WINDOW_MS, dueForResume, giveUpText, markResumed, noteActivity, noteApiError, noteTurnOk, onTurnOk,
+  ACTIVITY_GRACE_MS, loadResumeStates, RESUME_DELAY_MS, saveResumeStates, RESUME_WINDOW_MS, dueForResume, giveUpText, markResumed, noteActivity, noteApiError, noteTurnOk, onTurnOk,
   resumeDelayMs, resumeText, type ApiErrorState,
 } from "../src/lib/api-error-resume.js";
 import { TRANSIENT_BACKOFF_MS } from "../src/lib/transient-error.js";
@@ -108,7 +108,7 @@ describe("网络类错误：静默退避续跑", () => {
     const why = giveUpText(before, "server_error", "API Error: Connection dropped (ECONNRESET)\n后面的行");
     const hhmm = new Date(T0).toTimeString().slice(0, 5);
     expect(why).toContain(`连续 5 次网络类错误（${hhmm} 起，自动续跑 4 次已用完`);
-    expect(why).toContain("最后一次：API Error: Connection dropped (ECONNRESET)。");
+    expect(why).toContain("最后一次：Connection dropped (ECONNRESET)。需要人看");
   });
 });
 
@@ -133,5 +133,40 @@ describe("非网络类错误：照旧 60 秒续一次、再撞立即升级", () 
     const m = new Map<string, ApiErrorState>();
     const r = outage(m, "c1", 1);
     expect(noteApiError(m, "c1", "invalid_request", r.now, "Prompt is too long")).toBe("escalate");
+  });
+});
+
+describe("退避中 bridge 重启：计划落盘，读回来到点照续、接着数", () => {
+  test("第 2 次撞错后的 2 分钟等待里重启：到点仍续跑，断网不恢复照样走到第 5 次才报", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nrt1-restart-"));
+    const path = join(dir, "api-error-resume.json");
+    try {
+      const before = new Map<string, ApiErrorState>();
+      const r = outage(before, "c1", 1);
+      expect(noteApiError(before, "c1", NET, r.now)).toBe("track"); // 第 2 次撞：进 2 分钟等待，这时重启
+      saveResumeStates(before, path);
+      const after = loadResumeStates(path);
+      expect(after.get("c1")?.net).toMatchObject({ n: 1, since: T0 });
+      expect(dueForResume(after, r.now + TRANSIENT_BACKOFF_MS[1] - 1_000)).toEqual([]);
+      expect(dueForResume(after, r.now + TRANSIENT_BACKOFF_MS[1])).toEqual(["c1"]);
+      markResumed(after, "c1", r.now + TRANSIENT_BACKOFF_MS[1]);
+      saveResumeStates(after, path);
+      const rest = outage(loadResumeStates(path), "c1", 3, r.now + TRANSIENT_BACKOFF_MS[1] + 5_000); // 再重启一次，接着撞
+      expect(rest.waits).toEqual(TRANSIENT_BACKOFF_MS.slice(2));
+      expect(rest.last).toBe("escalate");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("落盘文件坏了：不恢复、不抛（bridge 照常起）", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nrt1-bad-"));
+    try {
+      const path = join(dir, "api-error-resume.json");
+      writeFileSync(path, '{"c1":{"errorAt":"x"}}');
+      expect(loadResumeStates(path).size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

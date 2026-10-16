@@ -10,6 +10,7 @@ import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
 import { listAsks } from "../src/lib/ledger-asks.ts";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.ts";
 import type { RegistryAgent } from "../src/lib/registry.ts";
+import { takeTurnFailure } from "../src/bridge/turn-failure.ts";
 import { tempLedgerPath } from "./ledger-test-helpers.ts";
 
 const CHANNELS = ["local-acp-net-1", "local-acp-net-2", "local-acp-net-3", "local-acp-net-4", "local-acp-net-5"];
@@ -43,6 +44,11 @@ test("网络类失败（Connection error. / terminated / 503）：不开卡", as
   await fail(CHANNELS[0], { kind: "error", key: "rpc:2", message: "Pi 回合失败：terminated" });
   await fail(CHANNELS[0], { kind: "error", key: "rpc:3", message: "Pi 回合失败：503 Service Unavailable" });
   expect(cards(CHANNELS[0])).toEqual([]);
+});
+
+test("网络类失败照旧记给这一轮的请求方：回程槽被「收到」消化了也能收到失败说明（stop-settle 取走推回）", async () => {
+  await fail(CHANNELS[0], { kind: "error", key: "rpc:9", message: "Pi 回合失败：Connection error." });
+  expect(takeTurnFailure(CHANNELS[0], 0)).toMatchObject({ key: "rpc:9", message: "Pi 回合失败：Connection error.", label: "Pi" });
 });
 
 test("非网络类失败：照旧当场开「回合失败」卡", async () => {

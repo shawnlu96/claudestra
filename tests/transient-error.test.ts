@@ -27,6 +27,16 @@ describe("网络 / 服务端瞬时错误", () => {
     ["Pi 回合失败：Client network socket disconnected before secure TLS connection was established"],
     ["Pi 回合失败：429 Too Many Requests, retry after 20s"],
     [cc("server_error", "")],
+    // Codex（自研适配器 / 上游原文）与 Pi 真实出现过的断流
+    ["Codex 回合失败：stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)"],
+    ["stream disconnected before completion: Transport error: error decoding response body"],
+    ["We’re currently experiencing high demand, which may cause temporary errors."],
+    ["client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known"],
+    ["Codex 回合失败（connection）"],
+    ["Pi 回合失败：Stream ended without finish_reason"],
+    ["Pi 回合失败：UND_ERR_HEADERS_TIMEOUT"],
+    ["Pi 回合失败：Premature close"],
+    ["Pi 回合失败：WebSocket idle timeout after 300000ms"],
   ])("瞬时：%s", (text) => expect(isTransientError(text)).toBe(true));
 
   test.each([
@@ -49,6 +59,17 @@ describe("网络 / 服务端瞬时错误", () => {
     [cc("model_not_found", "There's an issue with the selected model (claude-fable-5). It may not exist or you may not have access to it.")],
     [cc("unknown", 'API Error: 400 {"model":"deepseek-v4.1-flash"}')],
     ["e"],
+    // 带网络字样的永久错误：子串不算（not_found_error 里的 und_err、bash_timeout、参数名 timeout）
+    ["Pi 回合失败：404 {\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"model: claude-3-5-sonnet-20240620\"}}"],
+    [cc("invalid_request", "API Error: 400 tools.3.custom.name: String should match pattern (bash_timeout)")],
+    [cc("invalid_request", 'API Error: 400 {"type":"invalid_request_error","message":"timeout: Extra inputs are not permitted"}')],
+    [cc("keychain_error", "API Error: keychain timed out")],
+    [cc("invalid_request", "API Error: 500 Output blocked by content filtering policy")],
+    // 额度 / 套餐过期的 429（Pi 真实原文）
+    ['Pi 回合失败：429: {"code":"1309","message":"Your GLM Coding Plan package has expired and is temporarily unavailable."}'],
+    ['Pi 回合失败：429: {"type":"GoUsageLimitError","message":"Weekly usage limit reached. Resets in 22hr 20min."}'],
+    ["Pi 回合失败：Codex error: The usage limit has been reached"],
+    [cc("rate_limit", "Claude AI usage limit reached|1760000000")],
   ])("不是瞬时：%s", (text) => expect(isTransientError(text)).toBe(false));
 });
 

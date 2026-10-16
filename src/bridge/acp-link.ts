@@ -164,11 +164,12 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
   } else if (f?.kind === "error" && f.retry !== true) {
     let routed: boolean | undefined;
     const dispatched = (): boolean => (routed ??= dispatchedFailureQuiet(channelId, at));
+    // 这一轮 Stop 时告诉开这一轮的请求方（stop-settle）。网络类也告诉：回程槽可能早被一句「收到」消化了，续跑用完时的升级只发到它自己频道
+    noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName });
     // 网络类（断网 / 代理抖 / 5xx）：失败条目照样触发续跑，按退避续、用完才在频道报一次（api-error-resume.ts）；派单会话照旧开卡交派活方
     if (isTransientAcpFailure(f) && !dispatched()) return void console.log(`🌐 ACP 网络类失败（${agentName}）：${f.message} → 不开卡，退避续跑`);
     // 策略拦截（cyber_policy）、请求被拒、上下文耗尽：回合已经停了，不会自己续跑。开卡留痕，调度器据此把这张单交 PM（scheduler-auto-ports.ts）
     console.log(`⚠️ ACP 回合失败（${agentName}）：${f.message}`);
-    noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName }); // 这一轮 Stop 时告诉开这一轮的请求方（stop-settle）
     const quiet = cyberFailureCardQuiet(agentName, f.message, Date.now(), at, dispatched); // 监护在处置 / 派活方接手：不推 owner
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
       failure: "error", instance: f.key, ...at, ...(f.deliveryUnknown ? { deliveryUnknown: true as const } : {}), ...(quiet ? { quiet: true as const } : {}) });

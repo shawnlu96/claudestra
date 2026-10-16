@@ -12,6 +12,8 @@
  * 纯逻辑，单测 tests/api-error-resume.test.ts、tests/api-error-resume-transient.test.ts。
  */
 import { overloadEscalate } from "./agent-supervisor-bridge.js";
+import { statePath } from "./paths.js";
+import { readJsonStateSync, reportCorrupt, writeJsonAtomicSync } from "./state-file.js";
 import { isTransientError, TRANSIENT_BACKOFF_MS } from "./transient-error.js";
 export { noteOverload, onTurnOk } from "./agent-supervisor-bridge.js"; // 给 quota-wall-wiring 用：它的单测按本模块的导出注入依赖
 
@@ -27,6 +29,37 @@ export interface ApiErrorState {
   error: string;
   resumedAt?: number;
   net?: NetStreak;
+  /** 哪个 agent（bridge 落盘用：重启后到期续跑、交给闸、按名清零都要它） */
+  agent?: string;
+}
+
+const isApiErrorState = (v: unknown): boolean =>
+  !!v && typeof v === "object" && typeof (v as ApiErrorState).errorAt === "number" && typeof (v as ApiErrorState).error === "string";
+const isStateFile = (d: unknown): boolean => !!d && typeof d === "object" && !Array.isArray(d) && Object.values(d as object).every(isApiErrorState);
+
+/**
+ * 续跑计划落盘：网络类退避单步最长 8 分钟、整串约 15 分钟，期间 bridge 重启（beta 自动更新挑的正是全员空闲）丢了它，
+ * ACP agent 不开卡就静默停住。读回来到点照续、次数接着数。坏文件不恢复、只报一次（不能让 bridge 起不来）
+ */
+export const RESUME_STATES_PATH = statePath("api-error-resume.json");
+
+export function loadResumeStates(path = RESUME_STATES_PATH): Map<string, ApiErrorState> {
+  const r = readJsonStateSync(path, isStateFile);
+  if (r.status === "corrupt") reportCorrupt(path, r.error, "api-error-resume", false);
+  return new Map(r.status === "ok" ? Object.entries(r.data as Record<string, ApiErrorState>) : []);
+}
+
+const savedJson = new Map<string, string>();
+/** 和上次落的一样就不写；写失败只记日志（内存里还在，只是重启会丢） */
+export function saveResumeStates(m: Map<string, ApiErrorState>, path = RESUME_STATES_PATH): void {
+  const json = JSON.stringify(Object.fromEntries(m));
+  if (savedJson.get(path) === json) return;
+  try {
+    writeJsonAtomicSync(path, JSON.parse(json));
+    savedJson.set(path, json);
+  } catch (e) {
+    console.error(`🚨 API 错误续跑计划落盘失败（内存里还在，bridge 重启会丢）: ${(e as Error).message}`);
+  }
 }
 
 export const RESUME_DELAY_MS = 60_000;
@@ -131,7 +164,7 @@ export function resumeText(error: string, errorAt: number, delayMs = RESUME_DELA
 
 /** 升级时频道里那句的原因。before = 这次撞错前的记录（网络类连败的次数与起点在它上面）；不是网络类连败照旧那句 */
 export function giveUpText(before: ApiErrorState | undefined, error: string, text: string): string {
-  const last = firstLine(text) || error || "API Error";
+  const last = (firstLine(text) || error || "API Error").replace(/^API Error: /, "").replace(/[。.]+$/, "");
   if (!isTransientError(`${error}\n${text}`)) {
     return `连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${error || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`;
   }
