@@ -2,24 +2,28 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { LOCAL_FP } from "@/lib/app-config";
+import { AppConfigUnreachableError, LOCAL_FP } from "@/lib/app-config";
 import { ensureDirectCredential } from "@/lib/api/devices";
 import { machines } from "@/lib/machines";
 import { isLoopbackHost } from "@/lib/pairing";
 import { useT } from "@/lib/i18n";
 import { bootMachines, useMachines } from "./use-machines";
 import { leaveLegacySubdomain } from "./legacy-subdomain";
+import { planRelayHeal } from "./machine-heal";
 import { dismissLocalHop, hopToLocal, maybeHopToLocal, receiveHandoff, useLocalHopBanner } from "./local-hop";
 
 /**
  * /chat 的门：配置与机器清单就位后才渲染应用（否则 store 一开机就打没有基址的请求）。
  *   direct → 这台 bridge 就是唯一机器，没记录就补一条（名字用 app-config 的 machineName）；旧登录自动换凭据，本机没凭据去 /pair，收中继页面交过来的偏好；
- *   relay  → 一台机器都没有就去 /pair；渲染后探一次「是不是就在这台电脑上」，是就切到本机直连（local-hop.ts）。
+ *   relay  → 当前机器是 LOCAL_FP（老前端把网络错误当成 direct 留下的）先自愈（machine-heal.ts）；一台机器都没有就去 /pair；
+ *            渲染后探一次「是不是就在这台电脑上」，是就切到本机直连（local-hop.ts）。
+ *   配置连不上（重试用完）→ 显示「连不上 · 重试」，不写任何机器记录。
  * 当前机器的凭据被拒（401 device_invalid）时压一条「重新配对」横幅，不清机器、不整页跳转——别的机器还能用。
  */
 export function MachineGate({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [ready, setReady] = useState(false);
+  const [unreachable, setUnreachable] = useState(false);
   useEffect(() => {
     let dead = false;
     void bootMachines().then(async (cfg) => {
@@ -35,7 +39,7 @@ export function MachineGate({ children }: { children: ReactNode }) {
           return;
         }
         if (ok && (await receiveHandoff())) return; // 带着中继那边的偏好过来：写入后整页重载一次
-      } else if (!machines.currentFp()) {
+      } else if (!(await healRelayCurrent())) {
         // 带上来处：/join#<邀请码> 这类页面配完机器要回来（# 只在浏览器里，一起带走）
         const here = `${window.location.pathname}${window.location.search}${window.location.hash}`;
         router.replace(here === "/chat" ? "/pair" : `/pair?next=${encodeURIComponent(here)}`);
@@ -48,11 +52,15 @@ export function MachineGate({ children }: { children: ReactNode }) {
         if (fp) void maybeHopToLocal(fp);
       }
       if (!dead) setReady(true);
+    }, (e: unknown) => {
+      if (!(e instanceof AppConfigUnreachableError)) throw e;
+      if (!dead) setUnreachable(true);
     });
     return () => {
       dead = true;
     };
   }, [router]);
+  if (unreachable) return <Unreachable />;
   if (!ready) return <div className="fixed inset-0 bg-base-100" aria-hidden />;
   return (
     <>
@@ -60,6 +68,27 @@ export function MachineGate({ children }: { children: ReactNode }) {
       <RepairBanner />
       <LocalHopBanner />
     </>
+  );
+}
+
+/** 中继模式：当前机器是 LOCAL_FP 就删掉这条、切到别的机器；返回自愈后有没有当前机器（没有 → 调用方去 /pair） */
+async function healRelayCurrent(): Promise<boolean> {
+  const plan = planRelayHeal(machines.all(), machines.currentFp());
+  if (plan.action !== "keep") await machines.remove(plan.drop);
+  if (plan.action === "switch") await machines.setCurrent(plan.to);
+  return machines.currentFp() !== null;
+}
+
+/** 首次读 /app-config.json 重试用完仍连不上：整页重载再来（bootMachines 缓存了这次失败） */
+function Unreachable() {
+  const t = useT();
+  return (
+    <div className="fixed inset-0 flex flex-col items-center justify-center gap-3 bg-base-100 px-4 text-center">
+      <p className="text-sm text-base-content/70">{t("连不上")}</p>
+      <button type="button" className="btn btn-primary btn-sm" onClick={() => window.location.reload()}>
+        {t("重试")}
+      </button>
+    </div>
   );
 }
 
