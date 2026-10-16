@@ -15,6 +15,7 @@ import { emitEvent } from "./event-bus.js";
 import { markIfHeldAcrossStop, setHeldRender } from "./held-flush.js";
 import { inboundEventData } from "./inbound-event.js";
 import { ownedHeldItems } from "./pm-held-transfer.js";
+import { routeOrder, routePullable } from "./inbound-route.js";
 import { heldKindOf, INBOX_LEASE_MS, inboxTakeable, leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Envelope } from "./router.js";
 import {
@@ -48,8 +49,11 @@ export function initInbox(d: InboxDeps): void {
  * 给 PM 的执行者提问通知（lib/order-ask.ts 经 sendLedgerNotice 投的 ledger-ask:<askId>）：PM 在长回合里时它押到回合结束才到，
  * 远端执行者干等（i28-ASK4，C6 卡了约 20 分钟）。check_inbox 也领它，排在批首；别的 bridge 通知仍不领（班子通知要走送达回调）。
  */
-const takeable = (d: InboxDeps, i: HeldItem, now: number): boolean =>
+const baseTakeable = (d: InboxDeps, i: HeldItem, now: number): boolean =>
   d.held.idleInboxAllowed(i, now) ?? (inboxTakeable(i) || isAskNotice(i));
+/** 入站路由（开关 on）：Jev 判了合并的那条跟同伴一起领，同伴领不了它也先不领（bridge/inbound-route.ts routePullable） */
+const takeable = (d: InboxDeps, i: HeldItem, now: number): boolean =>
+  routePullable(i, d.held.get(i.to.channelId) ?? [], (x) => baseTakeable(d, x, now));
 
 /**
  * 领内部通知之前实时核一次额度闸，在闸里就照 flushHeld 把押着的非人类消息改记成额度闸（之后 idleInboxAllowed 不放行）：闸刚开时
@@ -268,7 +272,7 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
       for (const it of shown) mirrorLeased(d, channelId, it);
       return { result: { n: shown.length, text: batchText(batchId, texts, "这是你领过还没确认的一批，原样重给。", 0) } };
     }
-    const free = ownerFirst(q.filter((i) => takeable(d, i, now) && !leaseActive(i, now)));
+    const free = ownerFirst(routeOrder(q.filter((i) => takeable(d, i, now) && !leaseActive(i, now))));
     let pending = free;
     const picked: { it: HeldItem; text: string }[] = [];
     const previews: { it: HeldItem; text: string }[] = [];

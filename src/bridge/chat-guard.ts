@@ -16,6 +16,7 @@ import {
   type GuardDecision, type GuardSubject, type GuardThresholds,
 } from "../lib/chat-guard.js";
 import { emitEvent } from "./event-bus.js";
+import { routeProbeFor, type RouteProbe } from "./inbound-route.js";
 import { PersistedMap } from "./persisted-map.js";
 import { pushOwnerNotice } from "./push/init.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
@@ -70,6 +71,8 @@ interface Deps {
   onDropped: (item: QuarantineItem) => void;
   /** 放行投递成功之后：补回过期 / 重启丢掉的回程登记、重置送达计时（bridge/guard-dropped.ts） */
   onReleased: (item: QuarantineItem) => void;
+  /** 入站路由要问的话（目标忙、开关没关）：并进这一次 Jev，不另发（bridge/inbound-route.ts） */
+  routeProbe: typeof routeProbeFor;
 }
 const bare = (name: string): string => name.replace(/^agent-/, "");
 /** 目标会话的 registry 条目：先按 channelId（Discord 入站的 to 只有它），再按名字；开了 chatGuard 才返回名字 */
@@ -88,6 +91,7 @@ let deps: Deps = {
   guardAgent: async (to) => pickGuardAgent(await readRegistryAgents(), to),
   onDropped: () => {},
   onReleased: () => {},
+  routeProbe: routeProbeFor,
 };
 
 /** 早先版本建的文件是 0644：启动时收紧一次（之后的写入都带 0600）。文件不在 / 改不了只记日志 */
@@ -153,19 +157,23 @@ async function activeThresholds(): Promise<GuardThresholds | null> {
 }
 
 /** 判一段文本：超长 → OVERSIZE；Jev 失败 → null（fail-open，记日志）；否则汇总判定 */
-async function judge(subject: GuardSubject, t: GuardThresholds, logBase: Record<string, unknown>): Promise<GuardDecision | null> {
+async function judge(subject: GuardSubject, t: GuardThresholds, logBase: Record<string, unknown>, route?: RouteProbe | null): Promise<GuardDecision | null> {
   if (overBudget(subject)) {
     log({ ...logBase, verdict: "block", hits: OVERSIZE_DECISION.hits, chars: subject.text.length });
     return OVERSIZE_DECISION;
   }
   try {
-    const r = await deps.ask(buildGuardState(subject), guardQuestions(subject), { timeoutMs: 8000, retries: 1 });
+    // 路由的 state 键（agent / incoming / queue）和守门的（message / sender / target / recent）不重名，平铺在一起；问题键带 route_ 前缀
+    const state = route ? { ...(buildGuardState(subject) as Record<string, unknown>), ...(route.state as Record<string, unknown>) } : buildGuardState(subject);
+    const r = await deps.ask(state, { ...guardQuestions(subject), ...route?.questions }, { timeoutMs: 8000, retries: 1 });
+    route?.settle(r.answers as Record<string, unknown>, { ms: r.latencyMs, via: "guard" });
     const decision = judgeGuard(r.answers as Record<string, unknown>, subject, t);
     log({ ...logBase, verdict: decision.verdict, hits: decision.hits, ms: r.latencyMs, tokens: r.usage.input_tokens });
     return decision;
   } catch (e) {
     // fail-open：守门是减速带与审计，不是边界；Jev 不可用不能把 owner 自己锁在外面
     console.error(`⚠️ 守门：Jev 判定失败，照常投递: ${(e as Error).message}`);
+    route?.settle(null, { error: (e as Error).message, via: "guard" });
     log({ ...logBase, verdict: "error", error: (e as Error).message, ...(e instanceof JevError ? { code: e.code } : {}) });
     return null;
   }
@@ -207,10 +215,12 @@ export async function guardInbound(env: Envelope, to: LocalEndpoint): Promise<De
       target: { agent },
       recent: recent.get(key),
     };
-    const decision = await judge(subject, t, { id, agent, sender: subject.sender, preview: previewText(env.content, 80) });
+    const route = await deps.routeProbe(env, to, regName);
+    const decision = await judge(subject, t, { id, agent, sender: subject.sender, preview: previewText(env.content, 80) }, route);
     if (!decision) return null;
     recent.set(key, [...(recent.get(key) ?? []), previewText(env.content, RECENT_MAX_CHARS)].slice(-2));
     if (decision.verdict !== "block") return null;
+    delete env.meta.inboundRoute; // 隔离到放行可能隔了很久：那时的忙闲早变了，放行后按现有规则投
     quarantine({ id, agent, regName, env, to, subject, decision, at: new Date(deps.now()).toISOString(), status: "pending" });
     return { envelope: env, outcome: { kind: "sent", note: "guarded" } };
   } finally {

@@ -19,6 +19,7 @@
  */
 
 import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
+import type { StoredRoute } from "../lib/inbound-route.js";
 import type { ServerWebSocket } from "bun";
 import { isOwnerSource, neutralizeDelegateMarker } from "../lib/delegate-marker.js";
 import { PEER_DELEGATION_DOC } from "../lib/peer-ledger.js";
@@ -156,6 +157,7 @@ export interface Envelope {
      * - 永远不触发抢占：即使 from 是人类、intent 是 request，也不算 isHumanRequest（不打断、flush 时也不插队）。
      */
     waitForIdle?: boolean;
+    inboundRoute?: StoredRoute; // 开关 on 时 Jev 对「目标忙时怎么投」的结论（bridge/inbound-route.ts），随押后队列落盘
     expectSession?: string; // 调度派单只投给 registry 里仍跑这个 session 的目标：路由时、押后补投前都核（lib/route-session.ts）
     quotaGated?: boolean; // 过额度闸按非人算：只有 fleet 群发文字打，ask 答复不打（缘由见 lib/quota-wall.ts gatesAsHuman）
     /** 这条 reply 建出的 / 这条答复所答的「待你处理」id（bridge/asks.ts）；出站 chat_message 事件带上，网页据此把气泡和 ask 对上 */

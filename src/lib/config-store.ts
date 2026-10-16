@@ -86,6 +86,8 @@ export interface AppConfig {
   jevApiKey?: string;
   /** Chat Guard（bridge/chat-guard.ts）：mode 缺省 on（没配 Jev key 时自然不生效）；blockAt 缺省 0.85 */
   chatGuard?: { mode?: "off" | "on"; blockAt?: number };
+  /** 入站路由（bridge/inbound-route.ts）：目标忙时新消息由 Jev 判打断 / 排队 / 合并。缺省 off；observe 只记日志；每 2 秒现读，改完不用重启 */
+  inboundRoute?: { mode?: "off" | "observe" | "on" };
   /** floka 改名的分项开关；state = 状态根迁移维护档位（lib/state-maintenance），只认 off / observe / on，缺省和未知值按 off。
    *  其余子键原样保留：set* 是读改写，在这里过滤会把别的分项抹掉 */
   rename?: Record<string, unknown> & { state?: unknown };
@@ -140,6 +142,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(raw.bridgeWatchdogOob === "on" || raw.bridgeWatchdogOob === "observe" || raw.bridgeWatchdogOob === "off" ? { bridgeWatchdogOob: raw.bridgeWatchdogOob } : {}),
     ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
     ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
+    ...(raw.inboundRoute?.mode === "observe" || raw.inboundRoute?.mode === "on" || raw.inboundRoute?.mode === "off" ? { inboundRoute: { mode: raw.inboundRoute.mode } } : {}),
     ...(raw.rename && typeof raw.rename === "object" && !Array.isArray(raw.rename) ? { rename: { ...raw.rename } } : {}),
     ...(raw.chatGuard && typeof raw.chatGuard === "object"
       ? {
@@ -347,6 +350,10 @@ export async function adoptWebSettings(web: { groqApiKey?: unknown; lang?: unkno
     if (takeKey || takeLang) await writeConfig(cfg);
     return { groqApiKey: takeKey, lang: takeLang };
   });
+}
+
+export async function setInboundRouteMode(mode: "off" | "observe" | "on"): Promise<AppConfig> {
+  return editConfig(cfg => { cfg.inboundRoute = { mode }; });
 }
 
 /** rename.state 的生效档位：缺省、未知值、坏文件一律 off（打错字不能变成执行） */
