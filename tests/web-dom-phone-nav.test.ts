@@ -9,18 +9,20 @@ import { navDom, type NavDomView, type NavOptions, TEAM_NAME } from "./helpers/n
 
 const opts: NavOptions = {};
 // nav-tab.ts 带 react 与 today-nav（DOM 类型）：运行时加载，不进根 tsc
-const { resetNavTab } = require("../web/features/nav/nav-tab.ts") as { resetNavTab(): void };
+const resetNavTab = () => (require("../web/features/nav/nav-tab.ts") as { resetNavTab(): void }).resetNavTab();
 let dom: Awaited<ReturnType<typeof navDom>>;
 beforeAll(async () => { dom = await navDom(opts, () => ({
   sidebar: require("../web/features/chat/components/sidebar.tsx"), store: require("../web/features/chat/chat-store.ts"),
   nav: require("../web/features/chat/components/nav-context.tsx"), asks: require("../web/features/asks/asks-store.ts"),
   collab: require("../web/features/collab/collab-nav.ts"), entry: require("../web/features/collab/team-view-entry.tsx"),
+  contacts: require("../web/features/chat/contacts-data.ts"), collabEntry: require("../web/features/collab/collab-entry.tsx"),
 })); });
 afterEach(async () => {
   await dom.cleanup();
   await dom.React.act(async () => resetNavTab());
-  delete opts.contacts;
+  delete opts.full;
   delete opts.shells;
+  delete opts.team;
 });
 afterAll(async () => dom.dispose());
 
@@ -74,13 +76,25 @@ test("[验收线 1] 390「团队」列出全部团队项目（含本机已有分
   await v.unmount();
 });
 
+test("[验收线 1] 没有团队绑定时「团队」入口照样在，页面写空态，两条入口灰掉", async () => {
+  opts.team = false;
+  const v = await dom.mount(390);
+  await v.click(tab(v, "phone", "team"), "team tab");
+  await v.until(() => dom.calls.includes("GET /api/v1/shared-projects/snapshot"), "team snapshot read");
+  await dom.tick(100);
+  expect(v.host.querySelector("[data-nav-pages=team] section[aria-label='团队项目']")).toBeNull();
+  expect(v.texts("[data-team-empty]")).toEqual(["还没有团队项目，加入后会出现在这里"]);
+  expect(v.all("[data-team-link]").map((e) => e.getAttribute("aria-disabled"))).toEqual(["true", "true"]);
+  await v.unmount();
+});
+
 test("[验收线 1][验收线 3] 390「我的」：条目表 + 版本行；多选管理回到「会话」并进多选；设置打开设置弹窗", async () => {
   opts.shells = 200;
   const v = await dom.mount(390);
   await v.click(tab(v, "phone", "me"), "me tab");
   await v.until(() => meLabels(v, "[data-nav-pages=me]").length === 8, "me entries");
   expect(meLabels(v, "[data-nav-pages=me]")).toEqual(ALL_ME);
-  expect(v.texts("[data-nav-pages=me] [data-me-status]")).toEqual(["1/2 在线"]);
+  expect(v.texts("[data-nav-pages=me] [data-me-status]")).toEqual([]); // 夹具不带伙伴机器（navDom），在线数在浏览器测试里断言
   expect(v.texts("[data-me-version]")[0]).toContain("Floka Web");
   await v.click(v.host.querySelector("[data-nav-pages=me] [data-me-entry=manage]"), "manage");
   expect(page(v)).toBeNull();
@@ -135,7 +149,7 @@ test("[验收线 2][验收线 3] 1280「我的」菜单：条目与出现条件�
 });
 
 test("[验收线 2] 非全权设备不出管理类，shells 403 不出新终端", async () => {
-  opts.contacts = 403;
+  opts.full = false;
   opts.shells = 403;
   const v = await dom.mount(1280);
   await dom.tick(200);

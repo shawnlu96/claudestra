@@ -25,12 +25,20 @@ const IDENTITY = { center: f.identity.centerId, team: f.identity.teamId, person:
   localProjectId: TEAM_LOCAL, homeInstanceId: ME.instanceId };
 
 export interface NavOptions {
-  /** /peers/contacts 的状态码：200 = 全权设备，403 = 部分 scope */
-  contacts?: 200 | 403;
   /** /shells 的状态码：200 给新终端入口，403 不给 */
   shells?: 200 | 403;
+  /**
+   * false = 联系人回空表（仍是全权）。happy-dom 用：联系人 store 是进程级的，留着 2 台伙伴机器会让同进程后面文件的今天页去读 /borrow；
+   * 「n/total 在线」由 tests/web-phone-nav-browser.test.ts 的真页面断言
+   */
+  peers?: boolean;
   /** false = 本机没有任何团队绑定（/shared-projects/snapshot 403、context 为空） */
   team?: boolean;
+  /**
+   * 只给 happy-dom：false = 非全权设备。经 mock 的 useFullScope 切，不让真联系人 store 吃 403——它的 fullScopeNow() 是进程级的，
+   * 停在 false 会让同进程后面文件的 chat-store 不再请求 /projects（scoped-requests.ts）
+   */
+  full?: boolean;
 }
 
 export function navWorld() {
@@ -67,8 +75,7 @@ export async function navRoute(path: string, world = navWorld(), o: NavOptions =
   if (path === "/projects") return json({ ok: true, projects: NAV_PROJECTS });
   if (path === "/unread") return json({ counts: UNREAD });
   if (path === "/peers/contacts") {
-    return o.contacts === 403 ? json({ ok: false, error: "forbidden" }, 403)
-      : json({ contacts: [{ name: "机器 B", online: true, stale: false, agents: [] }, { name: "机器 C", online: false, stale: false, agents: [] }] });
+    return json({ contacts: o.peers === false ? [] : [{ name: "机器 B", online: true, stale: false, agents: [] }, { name: "机器 C", online: false, stale: false, agents: [] }] });
   }
   if (path === "/shells") {
     return o.shells === 403 ? json({ ok: false, error: "forbidden" }, 403) : json({ shells: [], dirs: [{ dir: "/synthetic/home", label: "~" }], home: "/synthetic/home", max: 4 });
@@ -108,9 +115,13 @@ export interface NavDomView {
  * 组件模块在运行时由 bun 转译加载，根 tsc 没有 --jsx 看不到类型，所以是 any。
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 见上
-export interface NavDomModules { sidebar: any; store: any; nav: any; asks: any; collab: any; entry: any }
+export interface NavDomModules { sidebar: any; store: any; nav: any; asks: any; collab: any; entry: any; contacts: any; collabEntry: any }
 
-/** beforeAll 里调一次：注册 happy-dom、拦 fetch（夹具 navRoute，之外 404）、返回挂载函数；o 可在用例之间改（contacts / shells / team） */
+const CONTACTS = "@/features/chat/contacts-data", COLLAB_ENTRY = "@/features/collab/collab-entry";
+
+let navDoms = 0;
+
+/** beforeAll 里调一次：注册 happy-dom、拦 fetch（夹具 navRoute，之外 404）、返回挂载函数；o 可在用例之间改（full / shells / team） */
 export async function navDom(o: NavOptions, load: () => NavDomModules) {
   const { createRequire } = await import("node:module");
   const { GlobalRegistrator } = await import("@happy-dom/global-registrator");
@@ -126,16 +137,26 @@ export async function navDom(o: NavOptions, load: () => NavDomModules) {
   const win = (globalThis as unknown as { window: { happyDOM: { setViewport(v: { width: number; height: number }): void } } }).window;
   const realFetch = globalThis.fetch, realFp = machines.currentFp;
   const world = navWorld(), calls: string[] = [];
-  machines.currentFp = () => "local";
+  // 同一进程里别的测试文件也用过 "local"：用本文件独有的 fp，按 fp 记的模块级结果（联系人 403 等）不串
+  const fp = `nav-${process.pid}-${++navDoms}`;
+  machines.currentFp = () => fp;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
     const path = url.pathname.replace(/^\/m\/[^/]+/, "");
     calls.push(`${(init?.method ?? "GET").toUpperCase()} ${path}`);
-    if (path === "/app-config.json") return Response.json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
+    if (path === "/app-config.json") return Response.json({ mode: "direct", fp: machines.currentFp(), machineName: "fixture", version: "" });
     const api = path.startsWith("/api/v1/") ? path.slice("/api/v1".length) : null;
-    return (api && await navRoute(api, world, o)) || Response.json({ ok: false, error: "not in fixture" }, { status: 404 });
+    return (api && await navRoute(api, world, { ...o, peers: false })) || Response.json({ ok: false, error: "not in fixture" }, { status: 404 });
   }) as typeof fetch;
   const mods = load();
+  // 同一进程里别的 web-dom 文件把全权判定、项目组「协作视图」行进程级 mock 掉且不还原（mock.module 进程级生效）：这里显式定成本夹具的口径，
+  // 全权 = o.full 不是 false；协作视图行换成探针（只记键和「团队」小标，同 web-dom-now-home.test.ts）。dispose 时换回挂载前的样子
+  const { mock } = await import("bun:test");
+  const contactsBefore = { ...mods.contacts }, entryBefore = { ...mods.collabEntry };
+  mock.module(CONTACTS, () => ({ ...contactsBefore, useFullScope: () => o.full !== false }));
+  mock.module(COLLAB_ENTRY, () => ({ ...entryBefore, CollabEntry: ({ projectId, team }: { projectId: string; team?: boolean }) =>
+    React.createElement("li", { "data-entry": projectId }, React.createElement("span", null, "协作视图"),
+      team ? React.createElement("span", { "data-collab-team-badge": "" }, "团队") : null) }));
   const live = new Set<() => Promise<void>>();
   const tick = (ms = 20) => React.act(() => new Promise<void>((r) => setTimeout(r, ms)));
   const until = async (ok: () => boolean, what: string) => {
@@ -185,6 +206,8 @@ export async function navDom(o: NavOptions, load: () => NavDomModules) {
   };
   /** afterAll：还原 fetch / machines / 模块级缓存，注销 happy-dom */
   const dispose = async () => {
+    mock.module(CONTACTS, () => contactsBefore);
+    mock.module(COLLAB_ENTRY, () => entryBefore);
     globalThis.fetch = realFetch;
     machines.currentFp = realFp;
     setContextRequestForTest(null);
