@@ -329,13 +329,17 @@ async function readyNow(c: HandoffCard<unknown>, pr: string, head: string): Prom
 /**
  * A PR going back to fix is made a draft again first (RRL-3): the owner's queue skips drafts, so it cannot review the fix's heads
  * before this machine has; the next handoff turns it ready again. Refused: the bounce waits (a pending P1 skips the poll pace, so
- * it is tried on every pass). A PR whose draft state gh did not report is left as it is. Null = a draft, go on.
+ * it is tried on every pass). A PR whose draft state gh did not report is left as it is. Null = a draft, go on. A PR this read
+ * finds closed or on another head is not bounced on the first read: the next pass takes it through the handoff's own roads.
  */
 async function backToDraft(c: HandoffCard<unknown>, pr: string, head: string, read: HandoffPr): Promise<string | null> {
   if (read.draft !== false) return null;
+  // driveHandoff's read already asked for the draft (a P1 pending on the followed head): one refused undo a pass is enough
+  if (read.flipError) return `仓库方 P1 退回前没把 PR 转回草稿，下轮再试：${read.flipError}`;
   try {
     const r = await c.deps.prState!(pr, { project: c.task.project, head }, undefined, "draft");
-    return r.draft === true ? null : `仓库方 P1 退回前没把 PR 转回草稿，下轮再试：${r.flipError ?? `PR ${r.state} @ ${short(r.head)}`}`;
+    if (r.state !== "OPEN" || !same(r.head, head)) return `仓库方 P1 退回前 PR 变了（${r.state} @ ${short(r.head)}），不按旧读数退回，下轮按新状态处理`;
+    return r.draft === true ? null : `仓库方 P1 退回前没把 PR 转回草稿，下轮再试：${r.flipError ?? "gh 没报出草稿状态"}`;
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return `仓库方 P1 退回前读 PR 失败，下轮再试：${(e as Error).message}`;
@@ -351,14 +355,16 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   // the evidence is bound to the PR it was handed with: a card whose PR was changed since then cannot borrow another PR's merge
   if (handed && handed.pr !== task.pr) return c.escalate(`卡上的 PR 已不是交接的那个（${handed.pr} → ${task.pr}），交接证据不覆盖新 PR`);
   const seen = polled.get(c.db) ?? polled.set(c.db, new Map()).get(c.db)!;
-  const last = seen.get(task.id);
+  const last = seen.get(task.id), pending = pendingRemoteBounce(c.db, task);
   // an owner P1 waiting on this head is acted on this pass (RRL-2): the PR is read now instead of at the next minute
-  if (handed && last !== undefined && c.deps.now() - last < HANDOFF_POLL_MS && !pendingRemoteBounce(c.db, task)) return c.out("waiting", "已交仓库方合并，等 PR 结果");
+  if (handed && last !== undefined && c.deps.now() - last < HANDOFF_POLL_MS && !pending) return c.out("waiting", "已交仓库方合并，等 PR 结果");
   let pr: HandoffPr;
   try {
     // files until this handoff's narrowing is settled: a busy ledger or a failed git read is tried again on the next poll
     const handing = follow && handoffNarrowSettled(c.db, task.id, follow.event.seq) ? undefined : { project: task.project };
-    pr = await c.deps.prState(handed?.pr ?? task.pr, follow ? { project: task.project, head: follow.head } : undefined, handing);
+    // a P1 pending on the followed head (pendingRemoteBounce's head) keeps the PR a draft on this very read: turned ready first, the
+    // owner's queue could pick up a head about to go back to fix (last pass undone, its bounce write refused)
+    pr = await c.deps.prState(handed?.pr ?? task.pr, follow ? { project: task.project, head: follow.head } : undefined, handing, follow && pending ? "draft" : undefined);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return c.out("held", `读 PR 状态失败，下轮再试：${(e as Error).message}`);

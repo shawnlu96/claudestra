@@ -37,7 +37,8 @@ async function toMerge(f: F) {
  * ready when handed over and back to a draft on `want: "draft"`; `undoFails` refusals of the undo first.
  */
 function github(f: F) {
-  const s = { pr: { state: "OPEN", head: H1, mergeSha: null, draft: true } as HandoffPr, undoFails: 0, reads: 0, undos: 0 };
+  const s = { pr: { state: "OPEN", head: H1, mergeSha: null, draft: true } as HandoffPr, undoFails: 0, reads: 0, undos: 0,
+    readies: 0, bounceFails: 0 };
   const read: ReadPr = async (_ref, follow, _handing, want) => {
     s.reads++;
     const at = follow && s.pr.state === "OPEN" && s.pr.head === follow.head;
@@ -45,11 +46,16 @@ function github(f: F) {
       s.undos++;
       if (s.undoFails > 0) { s.undoFails--; return { ...s.pr, flipError: "gh pr ready --undo 失败：HTTP 502" }; }
       s.pr = { ...s.pr, draft: true };
-    } else if (at && !want && s.pr.draft) s.pr = { ...s.pr, draft: false };
+    } else if (at && !want && s.pr.draft) { s.readies++; s.pr = { ...s.pr, draft: false }; }
     return { ...s.pr };
   };
+  // `bounceFails` refusals of the ledger's --remote-bounce write first (a busy ledger after gh already made the PR a draft)
+  const manager: typeof f.tickDeps.manager = async (...args) => {
+    if (args.includes("--remote-bounce") && s.bounceFails > 0) { s.bounceFails--; return { ok: false, error: "台账忙" }; }
+    return f.tickDeps.manager(...args);
+  };
   const tick = async () => {
-    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps, prState: read });
+    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps, manager, prState: read });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
@@ -97,6 +103,25 @@ describe("draft-after-remote-bounce", () => {
       expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "remote_bounce")).toBe(false);
       expect(await g.tick()).toMatchObject({ step: "remote_bounce" });
       expect(g.s.undos).toBe(2);
+      expect(g.s.pr.draft).toBe(true);
+      expect(f.task().stage).toBe("fix");
+    } finally { f.close(); }
+  });
+
+  test("undone but the bounce write refused: the retry reads the PR as a draft and never turns it ready first", async () => {
+    const f = autoFixture(), g = github(f);
+    try {
+      await toMerge(f);
+      expect(await g.tick()).toMatchObject({ step: "handoff" });
+      expect(g.s.readies).toBe(1);
+      book(f, H1);
+      g.s.bounceFails = 1;
+      expect(await g.tick()).toMatchObject({ step: "held", detail: expect.stringContaining("仓库方 P1 打回没记上：台账忙") });
+      expect(g.s.pr.draft).toBe(true);
+      expect(f.task().stage).toBe("merge");
+      expect(await g.tick()).toMatchObject({ step: "remote_bounce" });
+      expect(g.s.readies).toBe(1); // no ready → draft window the owner's queue could pick the PR up in
+      expect(g.s.undos).toBe(1);
       expect(g.s.pr.draft).toBe(true);
       expect(f.task().stage).toBe("fix");
     } finally { f.close(); }
@@ -171,4 +196,27 @@ describe("merged-pr-p1-landing-held", () => {
       expect(getWorkflow(f.db, "T1")!.mode).toBe("auto");
     } finally { f.close(); }
   });
+});
+
+describe("bounce-second-read-stale", () => {
+  const changed: [string, HandoffPr][] = [
+    ["closed (and a draft)", { state: "CLOSED", head: H1, mergeSha: null, draft: true }],
+    ["moved to another head (and a draft)", { state: "OPEN", head: H2, mergeSha: null, draft: true }],
+  ];
+  for (const [why, second] of changed) {
+    test(`the undo's read finds the PR ${why}: no bounce on the first read's head, the next pass takes the PR as it now is`, async () => {
+      const f = autoFixture(), replies: HandoffPr[] = [{ state: "OPEN", head: H1, mergeSha: null, draft: false }, second];
+      const read: ReadPr = async () => ({ ...(replies.length > 1 ? replies.shift()! : replies[0]!) });
+      const tick = () => schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps, prState: read });
+      try {
+        await toMerge(f);
+        book(f, H1); // before the handoff: PM had made the PR ready by hand
+        expect((await tick()).cards[0]).toMatchObject({ step: "held", detail: expect.stringContaining("PR 变了") });
+        expect(f.task().stage).toBe("merge");
+        expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "remote_bounce")).toBe(false);
+        expect((await tick()).cards[0]).toMatchObject({ step: "manual", detail: expect.stringContaining("不交接") });
+        expect(f.task().stage).toBe("merge");
+      } finally { f.close(); }
+    });
+  }
 });
