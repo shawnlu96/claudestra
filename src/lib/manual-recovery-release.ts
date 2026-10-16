@@ -13,8 +13,9 @@ import { ciLedgerGap, ciManualResume } from "./manual-recovery-ci.js";
 import { extensionBlock, factsFingerprint, lastFactSeq, manualBase, type ManualBase } from "./manual-recovery-facts.js";
 import { extensionMode, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
 import { uiManualResume } from "./manual-recovery-ui.js";
+import { peerPrHeadResume } from "./peer-pr-head-review-resume.js";
 import { fixLocalSwapManual } from "./recovery-fix-local-swap-manual.js";
-import { manualEntry, type ManualReasonCode } from "./manual-reason.js";
+import { manualEntry, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
 import type { RecoveryKey } from "./recovery-policy.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { PmNoticeLevel } from "./pm-notice-level.js";
@@ -52,6 +53,7 @@ export interface ManualRecoveryMechanism {
   releasesCancel?: boolean;
   /** run by the leased CLI only, before its transaction; throwing refuses the card */
   readEvidence?(task: LedgerTask): Promise<ExternalSnapshot>;
+  entryHead?(task: LedgerTask, events: readonly LedgerEvent[], entrySeq: number, rec: ManualReasonRecord): string | null; // PEERHEAD1: entry head it vouches for; null = the card's
   judge(input: MechanismInput): MechanismJudgement;
 }
 
@@ -60,6 +62,7 @@ const PART = /^[\w.:@/-]{1,120}$/;
 REGISTRY.set(uiManualResume.id, uiManualResume); // UIRES1: the one production mechanism (manual-recovery-ui.ts)
 REGISTRY.set(fixLocalSwapManual.id, fixLocalSwapManual); // GATESWAP1: manual fix cards past the owner threshold (recovery-fix-local-swap-manual.ts)
 REGISTRY.set(ciManualResume.id, ciManualResume); // CIRES1: reads GitHub through the leased CLI (manual-recovery-ci.ts)
+REGISTRY.set(peerPrHeadResume.id, peerPrHeadResume); // PEERHEAD1: a peer card the author pushed to after a pass, registered into review (peer-pr-head-review-resume.ts)
 
 /** Registers a mechanism (tests and future cards); returns its removal. A duplicate id is a programming error. */
 export function registerManualRecovery(m: ManualRecoveryMechanism): () => void {
@@ -71,7 +74,7 @@ export const manualRecoveryMechanism = (id: string): ManualRecoveryMechanism | u
 
 /** The card as the mechanism may see it: MAN1 entry it lists, no drift, no shared or extension refusal. */
 function recoveryBase(db: Database, task: LedgerTask, wf: TaskWorkflow | null, m: ManualRecoveryMechanism): ManualBase {
-  const base = manualBase(db, task, wf, (rec) => (m.codes.includes(rec.code) ? null : `${rec.code} 不归机制 ${m.id}`));
+  const base = manualBase(db, task, wf, (rec) => (m.codes.includes(rec.code) ? null : `${rec.code} 不归机制 ${m.id}`), m.entryHead);
   if (!base.ok) return base;
   const block = extensionBlock(db, task, base.entry);
   return block ? { ok: false, why: block } : base;

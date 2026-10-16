@@ -24,7 +24,7 @@ import { getTask, listEvents } from "./ledger-store.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { runBounded } from "./run-bounded.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { prMergeOff, type SchedulerConfig } from "./scheduler-config.js";
 import { projectRepo } from "./scheduler-foreign-repo.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MainCiTarget } from "./scheduler-main-ci.js";
@@ -115,7 +115,7 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
 export async function mainCiPass(db: Database, config: SchedulerConfig, manual: TrainFence, deps: MainCiPassDeps): Promise<void> {
   const gate = openMainCiGate(db, config);
   for (const [project, policy] of Object.entries(config.projects)) {
-    if (policy.mergeHandoff) continue; // the repository owner merges (MHO1): no train, no merge driver here
+    if (prMergeOff(policy)) continue; // the repository owner (MHO1) or the PM locally (ONB-2) merges: no train, no merge driver here
     const mode = modeOf(deps.policy ?? recoveryPolicy, project);
     gate.modes.set(project, mode);
     // off: no GitHub read, no note, no notice; a test process has no live default (as the train's context): only an injected gh reads

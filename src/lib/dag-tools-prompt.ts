@@ -62,6 +62,9 @@ const LOCAL_DELIVER = "「开工 / 修复」单：做完在分支 {BRANCH} 上 c
 const HANDOFF_DELIVER = PR_DELIVER.replace("开好 PR（base main，已开过的不用重开）",
   "开好 PR（草稿：\`gh pr create --draft\`；base main，已开过的不用重开；审查通过交给仓库方时调度器会转 ready，别自己转）");
 const PR_LINE = "push 分支和开 PR 可以。", LOCAL_LINE = "只 commit 到本卡分支，不 push、不开 PR。";
+/** 本地项目没有 CI 可等：检查就是本项目的必过检查，没过的写进证据由 PM 合并时核对（order-standard-answers.ts 同一说法） */
+const CI_WAIT = "（全量 check、CI 等待、monitor）不放后台", LOCAL_CHECK_WAIT = "（本项目的必过检查）不放后台";
+const LOCAL_RED = "- 检查没过又不归本卡的，在证据报告里列明失败的检查和复现方法，由 PM 本地合并时核对。\n";
 
 export function renderExecPrompt(v: PromptVars, template: string = DEFAULT_TEMPLATE): string {
   const map: Record<string, string> = {
@@ -69,7 +72,8 @@ export function renderExecPrompt(v: PromptVars, template: string = DEFAULT_TEMPL
   };
   // ledger/prompts/exec-template.md 是整机一份、按 PR 流程写的，正文可能允许 push / 开 PR：localMerge 项目不用它，只用默认正文的本地版
   const body = v.localMerge ? DEFAULT_TEMPLATE.replace(PR_LINE, LOCAL_LINE) : template;
-  const auto = AUTO_SECTION.replace("{DELIVER_LINE}", () => (v.localMerge ? LOCAL_DELIVER : v.mergeHandoff ? HANDOFF_DELIVER : PR_DELIVER));
+  const pr = AUTO_SECTION.replace("{DELIVER_LINE}", () => (v.localMerge ? LOCAL_DELIVER : v.mergeHandoff ? HANDOFF_DELIVER : PR_DELIVER));
+  const auto = v.localMerge ? pr.replace(CI_WAIT, LOCAL_CHECK_WAIT) + LOCAL_RED : pr;
   // 一次替换：值里恰好有 {TASK} 这类字样也不会被二次展开
   return (body.trimEnd() + "\n" + auto + (v.template === "ui" ? UI_SECTION : "")).replace(/\{(TASK|TITLE|PM|BRANCH|BASE|WORKTREE|SPEC|LEDGER)\}/g, (m) => map[m] ?? m);
 }
