@@ -9,6 +9,8 @@
  * - 回合结束后按 get_session_stats 发 usage_update；扩展弹框一律回取消，通知 / 状态栏进日志；pi 意外退出 = 适配器退出，由宿主重起。
  * - 挂 channel-server 的会话：起 pi 前后各查一次撞名 / reply 能否活下来（deps.mountProblem），pi 里的挂载扩展在 session_start
  *   再报一次（撞名、reply 进没进模型的工具表，MOUNT_STATUS_KEY）；任何一处不过就拒这个会话，不让宿主把没有 reply 的会话当成接通。
+ * - 压缩（扩展 ctx.compact / rpc compact）会先 abort 在跑的回合：不是我们叫停、以中止收尾的回合等一下 compaction_start，来了就按正常结束；
+ *   压缩中 pi 拒收的输入等压完重投一次（见 settle / sendInput，tests/pi-acp-compaction-abort.test.ts）。
  * - 用户输入写给 pi 之后拿不到确认（超时 / pi 退出）：steer 回 deliveredUnknown、prompt 的错误带 data.deliveryUnknown，宿主据此不重发
  *   （tests/pi-acp-steer-failure.test.ts）。写出之前的失败、pi 明确拒绝（success:false）照旧回错误，宿主照旧改回 prompt。
  * tests/pi-acp-replay.test.ts（录制的 pi 0.99.1 事件流回放）、tests/pi-acp-shell.test.ts。
@@ -17,7 +19,7 @@ import { redactSecrets } from "../../redact-secrets.js";
 import { ACP_PROTOCOL_VERSION } from "../protocol.js";
 import { createRpcPeer, RpcError, RpcLostError, type RpcPeer, type RpcWire } from "../rpc.js";
 import {
-  compactCommand, compactNotice, configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, textOf, threadStatus, turnEnd, usageUpdate,
+  abortedLike, compactCommand, compactNotice, configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, textOf, threadStatus, turnEnd, usageUpdate,
   type TurnOutcome,
 } from "./map.js";
 import { MOUNT_OK, MOUNT_STATUS_KEY, PI_MCP_SERVERS_ENV } from "./mcp-mount.js";
@@ -36,6 +38,11 @@ const COMPACT_TIMEOUT_MS = 600_000;
 const CLEAR_QUEUE_TIMEOUT_MS = 3_000;
 /** 叫停后最多这么久仍算「叫停中」（同 pi/abort-control.ts）：等不到 settle 就放开，别把之后的插话一直挡在 pi 外面 */
 const STOP_HOLD_MS = 60_000;
+/** pi 的 compact() 先 abort 回合、等停稳才发 compaction_start（同一串事件，毫秒级）：中止收尾的回合最多等这么久看是不是压缩 */
+const COMPACTION_LINK_MS = 3_000;
+/** 压缩中 pi 拒收输入时等它压完的上限；压缩要跑一次摘要调用，大上下文要几分钟 */
+const COMPACTION_WAIT_MS = 300_000;
+const COMPACTING_RE = /compaction is in progress/i;
 
 export interface PiServerDeps {
   openPi(o: { sessionId: string; cwd: string; env: Record<string, string> }): PiLink;
@@ -45,6 +52,9 @@ export interface PiServerDeps {
   log(msg: string): void;
   /** 一条插话等 pi 回包的上限（单测用），缺省 COMMAND_TIMEOUT_MS */
   steerTimeoutMs?: number;
+  /** COMPACTION_LINK_MS / COMPACTION_WAIT_MS（单测用） */
+  compactionLinkMs?: number;
+  compactionWaitMs?: number;
   /** 适配器该退出了：宿主关了 stdin（0），或 pi 意外退出（1） */
   exit(code: number): void;
 }
@@ -77,6 +87,13 @@ interface Gen {
   queueLen: number;
   appended: number;
   tail?: string;
+  /** pi 在压缩（compaction_start 到 compaction_end）；压完要叫醒的等待（见 sendInput） */
+  compacting: boolean;
+  compactionEnded: (() => void)[];
+  /** 叫停过几次：等压缩的输入据此知道期间有没有叫停（见 sendInput） */
+  cancels: number;
+  /** 停稳了、正等着看是不是压缩打断的那一轮（见 settle） */
+  held?: { settled: Settled; timer: ReturnType<typeof setTimeout> };
 }
 
 const STALE = "会话被换掉或关闭了（session/new、resume 或宿主断开），这一轮作废";
@@ -85,6 +102,7 @@ const CLOSED_OLD = { previousSessionClosed: true };
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** 命令已经写给 pi、却没拿到确认：pi 可能已经收下并执行了这条输入 */
 const lostAfterWrite = (e: unknown): e is RpcLostError => e instanceof RpcLostError && e.sent;
+const CANCELLED_WHILE_COMPACTING = Symbol("cancelled-while-compacting");
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 
 export class PiAcpServer {
@@ -160,7 +178,7 @@ export class PiAcpServer {
     const env: Record<string, string> = names.length ? { [PI_MCP_SERVERS_ENV]: JSON.stringify(mcp.servers) } : {};
     const link = this.deps.openPi({ sessionId: id, cwd, env });
     const g: Gen = { link, sessionId: id, mapper: createPiEventMapper(), waiters: [], options: [], running: false, inflight: 0, cancelRequested: false,
-      steered: [], steerChain: Promise.resolve(), queueLen: 0, appended: 0 };
+      steered: [], steerChain: Promise.resolve(), queueLen: 0, appended: 0, compacting: false, compactionEnded: [], cancels: 0 };
     this.gen = g;
     link.onRecord((rec) => {
       if (g === this.gen) this.onRecord(g, rec); // 被 /clear 换下的旧 pi 收尾时的输出不算
@@ -187,6 +205,8 @@ export class PiAcpServer {
     this.gen = null;
     if (!old) return;
     for (const w of old.waiters.splice(0)) w.reject(new RpcError(INTERNAL_ERROR, STALE));
+    if (old.held) clearTimeout(old.held.timer);
+    for (const wake of old.compactionEnded.splice(0)) wake(); // 醒来的 sendInput 过 stillLive 以 STALE 收尾
     old.link.stop();
     await old.link.exited;
   }
@@ -213,6 +233,12 @@ export class PiAcpServer {
       return g.link.send(reply);
     }
     if (rec.type === "extension_error") return this.deps.log(`pi 扩展出错（${rec.extensionPath} / ${rec.event}）：${rec.error}`);
+    if (rec.type === "compaction_start" || rec.type === "agent_start") this.release(g, rec.type === "compaction_start"); // idle 要先于新一轮的 active
+    if (rec.type === "compaction_start") g.compacting = true;
+    if (rec.type === "compaction_end") {
+      g.compacting = false;
+      for (const wake of g.compactionEnded.splice(0)) wake();
+    }
     for (const u of g.mapper.push(rec)) this.update(g, u);
     if (rec.type === "queue_update") this.queueChanged(g, strings(rec.steering));
     if (rec.type === "message_start" && rec.message?.role === "user") this.consumed(g, rec.message.content);
@@ -221,7 +247,7 @@ export class PiAcpServer {
       g.running = true;
       this.update(g, threadStatus("active"));
     }
-    if (rec.type === "agent_settled") this.settle(g);
+    if (rec.type === "agent_settled") this.settle(g, rec);
   }
 
   /** 扩展的通知 / 状态栏（不等回复）：脱敏后进日志（适配器 stderr → 宿主的 host.log）；状态栏同一个 key 文字没变就不重复记 */
@@ -256,12 +282,31 @@ export class PiAcpServer {
     g.queueLen = steering.length;
   }
 
-  private settle(g: Gen): void {
+  /**
+   * 不是我们叫停、以中止收尾的回合先不报：pi 的 compact() 先 abort 在跑的回合、停稳后才发 compaction_start。
+   * 等到它（release(true)）就按压缩打断、正常结束；等到别的回合开始或超时就照旧报（pi 明说没被 abort 的不等）。
+   */
+  private settle(g: Gen, rec: Rec): void {
     g.running = false;
     g.stoppedAt = undefined;
     g.steered = []; // 停稳时 pi 的队列已空；没对上 message_start 的不留到下一轮
     const s: Settled = { outcome: g.mapper.takeOutcome(), cancelled: g.cancelRequested };
     g.cancelRequested = false;
+    if (s.cancelled || s.outcome.compaction || rec.aborted === false || !abortedLike(s.outcome)) return this.finish(g, s);
+    g.held = { settled: s, timer: setTimeout(() => this.release(g, false), this.deps.compactionLinkMs ?? COMPACTION_LINK_MS) };
+  }
+
+  private release(g: Gen, compaction: boolean): void {
+    const h = g.held;
+    if (!h) return;
+    g.held = undefined;
+    clearTimeout(h.timer);
+    const cancelled = h.settled.cancelled || g.cancelRequested; // 等的这段里叫停了：按叫停报
+    if (!g.running && !g.waiters.length) g.cancelRequested = false;
+    this.finish(g, { outcome: compaction ? { ...h.settled.outcome, compaction } : h.settled.outcome, cancelled });
+  }
+
+  private finish(g: Gen, s: Settled): void {
     this.update(g, threadStatus("idle", turnEnd(s.outcome, s.cancelled))); // steering 另起的回合只能从这里知道结局
     for (const w of g.waiters.splice(0)) w.resolve(s);
     void this.reportUsage(g);
@@ -284,10 +329,14 @@ export class PiAcpServer {
     let wait: Promise<Settled> | null = null;
     g.inflight++;
     try {
-      const r = await g.link.command({ type: "prompt", message, streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS).catch((e) => {
+      const r = await this.sendInput(g, { type: "prompt", message, streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS).catch((e) => {
         throw lostAfterWrite(e) ? new RpcError(INTERNAL_ERROR, e.message, { message: e.message, deliveryUnknown: true }) : e;
       });
       this.stillLive(g); // 确认回来前被 /clear 换下了：等待既不该挂到新会话上，也不会再有人兑现
+      if (r === CANCELLED_WHILE_COMPACTING) {
+        if (!g.running && !g.waiters.length) g.cancelRequested = false; // 叫停记在这条上（它在途），别留给下一回合
+        return { stopReason: "cancelled" };
+      }
       // handled 但扩展当场开了一轮（agent_start 先于回包到）也等它停稳；回包之后才开的由宿主当自发回合跟（session.ts）
       if (r?.disposition !== "handled" || g.running) wait = new Promise((resolve, reject) => g.waiters.push({ resolve, reject }));
     } finally {
@@ -347,20 +396,49 @@ export class PiAcpServer {
     const text = textOf(p.prompt);
     const id = p?._meta?.claudestra?.deliveryId;
     const before = g.appended;
-    let r: Rec;
+    let r: Rec | typeof CANCELLED_WHILE_COMPACTING;
     try {
-      r = await g.link.command({ type: "prompt", message: text, streamingBehavior: "steer" }, this.deps.steerTimeoutMs ?? COMMAND_TIMEOUT_MS);
+      r = await this.sendInput(g, { type: "prompt", message: text, streamingBehavior: "steer" }, this.deps.steerTimeoutMs ?? COMMAND_TIMEOUT_MS);
     } catch (e) {
       if (lostAfterWrite(e)) return { outcome: "deliveredUnknown", message: e.message };
       throw e;
     }
     this.stillLive(g);
+    if (r === CANCELLED_WHILE_COMPACTING) throw new RpcError(INTERNAL_ERROR, "等压缩结束期间被叫停，这条没投给 pi");
     if (r?.disposition === "started") return { outcome: "startedNewTurn" };
     if (r?.disposition === "handled") return { outcome: "injected" };
     const added = g.appended - before;
     if (added === 1) g.steered.push({ text: g.tail!, ...(typeof id === "string" && id ? { id } : {}) });
     else this.deps.log(`插话入队期间 pi 的 steering 队列新增了 ${added} 条，认不出哪条是它：不记身份（叫停时清掉也不报作废）`);
     return { outcome: "injected" };
+  }
+
+  /**
+   * 用户输入发给 pi；压缩中被拒（明确拒收、没执行）就等压完重投一次，等的期间叫停过就不投；
+   * 等超时按失败报——没投出去，宿主可以照常重发。
+   */
+  private async sendInput(g: Gen, cmd: Rec, timeoutMs: number): Promise<any> {
+    try {
+      return await g.link.command(cmd, timeoutMs);
+    } catch (e) {
+      if (lostAfterWrite(e) || !COMPACTING_RE.test(errText(e))) throw e;
+      const ms = this.deps.compactionWaitMs ?? COMPACTION_WAIT_MS;
+      this.deps.log(`pi 在压缩上下文、拒收了输入：等压完（最多 ${ms / 1000}s）再投一次`);
+      const cancels = g.cancels;
+      const ended = await this.compactionDone(g, ms);
+      this.stillLive(g);
+      if (g.cancels !== cancels) return CANCELLED_WHILE_COMPACTING;
+      if (!ended) throw new Error(`等上下文压缩结束超时（${ms / 1000}s），这条没投给 pi：${errText(e)}`);
+      return g.link.command(cmd, timeoutMs);
+    }
+  }
+
+  private compactionDone(g: Gen, ms: number): Promise<boolean> {
+    if (!g.compacting) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms);
+      g.compactionEnded.push(() => (clearTimeout(timer), resolve(true)));
+    });
   }
 
   private async setOption(p: Rec): Promise<Rec> {
@@ -387,6 +465,7 @@ export class PiAcpServer {
   private async cancel(p: Rec): Promise<Rec> {
     const g = this.gen;
     if (!g || p?.sessionId !== g.sessionId) return { cleared: [], clearedIds: [] };
+    g.cancels++;
     if (g.running || g.waiters.length || g.inflight) g.cancelRequested = true;
     if (g.running) g.stoppedAt = Date.now();
     const q = await g.link.command({ type: "clear_queue" }, CLEAR_QUEUE_TIMEOUT_MS).catch((e) => (this.deps.log(`clear_queue 失败（排队的消息可能在停之后照跑）：${errText(e)}`), null));
