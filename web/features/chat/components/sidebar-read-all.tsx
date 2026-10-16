@@ -1,14 +1,12 @@
 "use client";
 import { useRef, useState } from "react";
-import { useT } from "@/lib/i18n";
 import { readAll } from "@/lib/api/push";
 import { clearUnreadCounts } from "@/lib/push/unread-counts";
 import { clearDeliveredNotifications } from "@/lib/push/client";
 import { useChatStoreApi } from "../chat-store";
-import { CheckCheckIcon } from "./line-icons";
 
-export function SidebarReadAll() {
-  const t = useT();
+/** 「全部已读」（NAVBAR1 起在「我的」里，只给全权设备）：服务端清零成功才清本机通知与角标；busy 期间再点不重发 */
+export function useReadAll(): { busy: boolean; clear: () => Promise<void> } {
   const store = useChatStoreApi();
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
@@ -25,11 +23,5 @@ export function SidebarReadAll() {
     } catch { /* Failed server request retains counts/notifications. Refresh failure after success keeps the cleared state. */ }
     finally { pending.current = false; setBusy(false); }
   };
-  return (
-    <button type="button" disabled={busy} onClick={() => void clear()} title={t("全部已读")} aria-label={t("全部已读")}
-      className={"flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors " +
-        "hover:bg-base-300 hover:text-base-content focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50"}>
-      <CheckCheckIcon />
-    </button>
-  );
+  return { busy, clear };
 }

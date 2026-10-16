@@ -1,5 +1,5 @@
 /**
- * UXHOME1：「今天」总览（TODAY1 改名）真挂到 happy-dom（React 19）——真的 MessageList（没选会话时的主区）、真的 Sidebar（侧栏条 + 项目组 + 团队区）、
+ * UXHOME1：「今天」总览（TODAY1 改名）真挂到 happy-dom（React 19）——真的 MessageList（没选会话时的主区）、真的 Sidebar（侧栏条 + 项目组；团队区在 NAVBAR1 起挪到「团队」入口页）、
  * 真的 chat store / 待办 store / 团队绑定 store。全部 fetch 在这里拦下按合成数据答，夹具之外一律 404，不连任何 bridge。
  * 数据照规格「对照基准」：4 个 agent 其中 2 个忙；3 件等 owner 的 asks（1 件团队提案卡）；4 个项目（两个绑定团队：一个成组一个单成员；
  * 一个本机成组；一个本机单成员）。happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
@@ -38,6 +38,7 @@ let ui: {
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
   asksStore: { get(): { open: boolean; focus: string | null; asks: unknown[] }; refresh(): Promise<void>; closeDrawer(): void };
   useCollabNav: () => { project: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
+  setTab: (t: string) => void; resetNavTab: () => void;
 };
 
 const FP = "mac-a";
@@ -115,13 +116,16 @@ beforeAll(async () => {
     require("../web/features/collab/collab-nav.ts"), require("../web/features/collab/team-view-entry.tsx")];
   ui = { MessageList: list.MessageList, Sidebar: side.Sidebar, NowStrip: now.NowStrip, ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi,
     ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore, useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab,
-    unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest };
+    unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest, ...pickNav(require("../web/features/nav/nav-tab.ts")) };
 });
+
+const pickNav = (m: { setTab: (t: string) => void; resetNavTab: () => void }) => ({ setTab: m.setTab, resetNavTab: m.resetNavTab });
 
 afterEach(async () => {
   for (const off of [...live]) await off();
   // 项目组入口起的常驻小根（team-view-entry.tsx）订着 machines、快照是本文件换过的 currentFp：不卸就留给后面的文件，一改 machines 就在注销后的 DOM 外重渲
   await React.act(async () => ui.unmountOpenViewGuard());
+  await React.act(async () => ui.resetNavTab()); // 入口选中是模块级的（nav-tab.ts）：用例之间回到冷开
 });
 
 afterAll(async () => {
@@ -302,23 +306,23 @@ test("[验收线 2] 绑定读不到时团队项目也不乱开本机：各项目
   }
 });
 
-test("[验收线 4] 侧栏：区头是『团队』；已成组的绑定项目不在团队区重复，单成员绑定项目的行仍在、点了开中心键；绑定项目组的协作视图行有『团队』小标，本机的没有", async () => {
+test("[验收线 4] 侧栏：会话列表里没有团队区（NAVBAR1 挪到「团队」入口）；绑定项目组的协作视图行有『团队』小标，本机的没有；「团队」页列出全部绑定项目，点了开中心键", async () => {
   win.localStorage.clear();
   const v = await mount("sidebar");
-  const area = () => v.host.querySelector("section[aria-label='团队项目']");
-  await until(() => !!area() && area()!.querySelectorAll("button[aria-label]").length > 0, "sidebar team area");
-  expect(area()!.querySelector("h2")?.textContent).toBe("团队");
-  expect(v.text()).not.toContain("全部 feature");
-  expect(Array.from(area()!.querySelectorAll("button[aria-label]")).map((b) => b.getAttribute("aria-label"))).toEqual(["团队单成员"]);
-  expect(Array.from(area()!.querySelectorAll("button")).some((b) => b.textContent === "项目设置")).toBe(true);
-  // 侧栏条在团队区之上
-  const order = v.all("[data-now=strip], section[aria-label='团队项目']").map((e) => e.getAttribute("data-now") ?? "team");
-  expect(order).toEqual(["strip", "team"]);
+  const area = () => v.host.querySelector("[data-nav-pages=team] section[aria-label='团队项目']");
   // 项目组里的「协作视图」行：绑定团队的要中心键、带小标；本机的要本机项目 id、不带（探针记下的就是真入口拿到的参数）
   await until(() => v.all("[data-entry]").length === 2, "collab entries");
   const entries = Object.fromEntries(v.all("[data-entry]").map((e) => [e.getAttribute("data-entry"), e.querySelector("[data-collab-team-badge]")?.textContent ?? null]));
   expect(entries).toEqual({ [keyOf("center-group")]: "团队", "local-group": null });
-  // 团队区保留行与项目组入口：同一个选源函数，开的是同一个拼法的中心键
+  expect(v.host.querySelector("section[aria-label='团队项目']")).toBeNull();
+  expect(v.text()).not.toContain("全部 feature");
+  await React.act(async () => ui.setTab("team"));
+  await until(() => !!area() && area()!.querySelectorAll("button[aria-label]").length === 2, "team page rows");
+  expect(area()!.querySelector("h2")?.textContent).toBe("团队");
+  // 已成组的绑定项目也列出（会话列表里它有协作视图行，团队页不再因此藏起来）
+  expect(Array.from(area()!.querySelectorAll("button[aria-label]")).map((b) => b.getAttribute("aria-label"))).toEqual(["团队成组", "团队单成员"]);
+  expect(Array.from(area()!.querySelectorAll("button")).some((b) => b.textContent === "项目设置")).toBe(true);
+  // 团队页的行与项目组入口：同一个选源函数，开的是同一个拼法的中心键
   await v.click(area()!.querySelector("button[aria-label='团队单成员']"), "team row");
   const solo = resolveCollabSource(IDENTITIES, "team-solo", FP);
   expect(v.seen.open).toBe(solo.kind === "center" ? solo.key : "");
@@ -326,24 +330,11 @@ test("[验收线 4] 侧栏：区头是『团队』；已成组的绑定项目不
   await v.unmount();
 });
 
-test("[验收线 4] 搜索时侧栏不成组，团队区列出全部行；选不出源的行变灰并带原因、点了不开", async () => {
-  const v = await mount("sidebar");
-  const area = () => v.host.querySelector("section[aria-label='团队项目']");
-  const names = () => Array.from(area()?.querySelectorAll("button[aria-label]") ?? []).map((b) => b.getAttribute("aria-label"));
-  await until(() => names().length === 1, "team area");
-  const input = v.host.querySelector("input[type=search]")!;
-  await React.act(async () => {
-    const set = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")!.set!;
-    set.call(input, "dev");
-    input.dispatchEvent(new win.Event("input", { bubbles: true }));
-  });
-  await until(() => names().length === 2, "all rows while searching");
-  expect(names()).toEqual(["团队成组", "团队单成员"]);
-  await v.unmount();
-
+test("[验收线 4] 「团队」页：选不出源的行变灰并带原因、点了不开", async () => {
   // 团队区自己的快照读到了，但选源用的那份绑定这一轮没读到（checking）：行还在，变灰、写原因，点了不开（以前是点了没反应也没说明）
   const b = await mount("sidebar", 1280, true);
-  const rowOf = () => b.host.querySelector("section[aria-label='团队项目'] button[aria-label='团队单成员']");
+  await React.act(async () => ui.setTab("team"));
+  const rowOf = () => b.host.querySelector("[data-nav-pages=team] section[aria-label='团队项目'] button[aria-label='团队单成员']");
   await until(() => rowOf()?.getAttribute("data-collab-blocked") === "checking", "blocked team row");
   expect([rowOf()!.getAttribute("aria-disabled"), rowOf()!.getAttribute("title")]).toEqual(["true", "团队单成员 · 团队绑定暂时读不到，稍后自动重试"]);
   await b.click(rowOf(), "blocked team row");
