@@ -8,7 +8,7 @@ import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { removedTestBlocks } from "../src/lib/ask-scope-auto-diff.js";
+import { removedTestBlocks } from "../src/lib/order-ask-test-scope-blocks.js";
 import { describeDeliveredScope, TEST_SCOPE_HEADER } from "../src/lib/ask-scope-auto-display.js";
 import { answerAsk, openAskFull, patchAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -66,6 +66,26 @@ describe("尺寸判定", () => {
     expect(removedTestBlocks(BASE, file(["a", "b"]))).toBe(2);
     expect(removedTestBlocks(`${BASE}// test("x", () => {});\nconst s = "it(1)";\n`, BASE)).toBe(0);
     expect(removedTestBlocks('describe("g", () => {\n  it.each([1])("x %d", () => {});\n});\n', "")).toBe(2);
+  });
+
+  test("[验收线 3] removedTestBlocks 按调用结构数：一行两个、行内嵌套、前面有别的语句都各算一个", () => {
+    const two = 'import { test } from "bun:test";\ntest("a", () => {}); test("b", () => {});\n';
+    expect(removedTestBlocks(two, 'import { test } from "bun:test";\n')).toBe(2);
+    expect(judgeTestScopeSize(0, 1, removedTestBlocks(two, 'import { test } from "bun:test";\n'))).toContain("2 个");
+    expect(removedTestBlocks(two, 'import { test } from "bun:test";\ntest("a", () => {});\n')).toBe(1);
+    expect(removedTestBlocks('describe("g", () => { test("x", () => { expect(1).toBe(1); }); });\n', "")).toBe(2);
+    expect(removedTestBlocks('const n = 1; test("a", () => {}); it("b", () => { const s = `${"test(1)"}`; expect(/it\\(/.test(s)).toBe(true); });\n', "")).toBe(2);
+    expect(removedTestBlocks('expect(x).test("a"); obj.it("b"); function test(a) {}\n', "")).toBe(0);
+  });
+
+  test("[验收线 3] removedTestBlocks：只改标题、只改体内断言、改格式不算删块；改成 .skip 算", () => {
+    expect(removedTestBlocks(BASE, BASE.replace('test("a"', 'test("a2"').replace('test("b"', 'test("b2"'))).toBe(0);
+    expect(removedTestBlocks(BASE, BASE.replace('toBe(1);', 'toBe(2);').replace('test("c"', 'test("c2"'))).toBe(0);
+    const nested = 'describe("g", () => {\n  test("a", () => { expect(1).toBe(1); });\n  test("b", () => {});\n});\n';
+    expect(removedTestBlocks(nested, nested.replace('describe("g"', 'describe("g2"'))).toBe(0);
+    expect(removedTestBlocks(nested, nested.replace('  test("b", () => {});\n', ""))).toBe(1);
+    expect(removedTestBlocks(nested, nested.replace(/\n {2}/g, " "))).toBe(0);
+    expect(removedTestBlocks(BASE, BASE.replace('test("a"', 'test.skip("a"').replace('test("b"', 'test.skip("b"'))).toBe(2);
   });
 });
 

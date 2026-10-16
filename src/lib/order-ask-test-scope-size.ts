@@ -5,7 +5,7 @@
  * 核不了（没有完整 diff / Git 对象、二进制、base 里没有这个文件）一律按超限标红，交审查员自己核。tests/order-ask-test-scope-size.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { removedTestBlocks } from "./ask-scope-auto-diff.js";
+import { removedTestBlocks } from "./order-ask-test-scope-blocks.js";
 import { hasAsksTable } from "./ledger-asks.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { ScopeDiff } from "./order-deliver-scope-git.js";
