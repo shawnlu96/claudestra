@@ -84,6 +84,7 @@ export const RECOVERY_KEYS = [
   "nearMarker",
   "peerInstanceInfo",
   "peerLeaseRecovery",
+  "peerPrAutoVerify",
   "peerPrHeadReview",
   "peerPrRequeue",
   "placementReservations",

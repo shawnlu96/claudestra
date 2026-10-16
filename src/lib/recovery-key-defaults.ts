@@ -44,7 +44,7 @@ export const LEGACY_NO_SAMPLE_KEYS: readonly string[] = Object.freeze([
   "unifiedMergeQueue", "updateGap",
 ]);
 
-/** The mode a key falls back to when neither keys[key] nor the project mode is set. Tests pass their own lists. */
+/** Permission keys (including peerPrAutoVerify) inherit observe from the classifier, never the frozen legacy snapshot. */
 export function defaultRecoveryMode(key: RecoveryKey, legacy: readonly string[] = LEGACY_OBSERVE_KEYS,
   highRisk: (key: RecoveryKey) => boolean = highRiskRecoveryKey): RecoveryMode {
   return legacy.includes(key) || highRisk(key) ? "observe" : "on";

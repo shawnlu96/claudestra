@@ -39,6 +39,7 @@ import { deployReconcileTick } from "./scheduler-deploy-reconcile.js";
 import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
+import { peerPrAutoVerify } from "./peer-pr-auto-verify.js";
 import { peerPrStep } from "./peer-pr-tick.js";
 import { remoteReviewStep } from "./remote-review-tick.js";
 import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.js";
@@ -170,7 +171,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (cut("deploy")) return done();
       failed.push(...(await deployReconcileTick(db, config, { manager, assertActive: active, now: Date.now, policy: opts.recoveryPolicy }, pace.phase())));
       if (cut("reconcile")) return done();
-      // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
+      failed.push(...await peerPrAutoVerify(db, config, { manager, assertActive: active, now: Date.now, policy: opts.recoveryPolicy }, pace.phase()));
       const reclaim = await reclaimLentSlots(db, prMerging, manager, trains); failed.push(...reclaim.failed);
       if (cut("reclaim")) return done();
       // MERGEFAST2/3：直接合开着时，本轮 mergeTick 之后才拿到槽的卡同轮再推一次，每轮最多一次：取回的、人工认领的（都记进 late，

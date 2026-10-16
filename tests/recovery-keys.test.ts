@@ -35,6 +35,7 @@ describe("recovery key table", () => {
   });
 
   test("KEYSORT1: the table is in JS default sort order", () => {
+    expect(RECOVERY_KEYS.indexOf("peerPrAutoVerify") + 1).toBe(RECOVERY_KEYS.indexOf("peerPrHeadReview"));
     expect([...RECOVERY_KEYS]).toEqual([...RECOVERY_KEYS].sort());
   });
 

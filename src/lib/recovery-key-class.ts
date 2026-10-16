@@ -40,6 +40,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   modelOutcome: { class: "permission", reason: "按已批准的豁免跨模型家族接续拒审" },
   nearMarker: { class: "safety", reason: "按验收线附近标记调整正式审查级别" },
   peerLeaseRecovery: { class: "permission", reason: "恢复跨机派单租约的控制权" },
+  peerPrAutoVerify: { class: "permission", reason: "对导入证据匹配的 peer PR 上线卡自动跑完成检查" },
   peerPrRequeue: { class: "permission", reason: "peer PR 作者审查通过后新推、登记进复审的人工卡交回自动（复审与合并）" },
   pmRails: { class: "permission", reason: "监督 PM 越权写入并通知 owner" },
   privateMergeNarrow: { class: "permission", reason: "限制私仓合并目标与执行范围" },
