@@ -150,9 +150,22 @@ describe("review turn on quota (acceptance 1, 2)", () => {
 
   test("a host / transport failure of the turn falls back too (trigger review_host)", async () => {
     await reviewSent();
-    failTurns("codex", "worker 不在线：socket closed", "error");
+    failTurns("codex", "ECONNRESET: socket hang up", "error");
     expect(await tick()).toMatchObject({ step: "review_fallback" });
     expect(epochs()[0].data.fallback).toMatchObject({ trigger: "review_host" });
+  });
+
+  test("the same host failure under observe: noted only, MODEL's manual record kept, the card goes to PM as before", async () => {
+    g.__rvfMode = "observe";
+    await reviewSent();
+    failTurns("codex", "ECONNRESET: socket hang up", "error");
+    expect(await tick()).toMatchObject({ step: "manual" });
+    expect(epochs()).toEqual([]);
+    expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
+    expect(ops("model_outcome")).toMatchObject([{ data: { cls: "host", plan: { kind: "manual", code: "model_recovery_manual" } } }]);
+    expect(ops("recovery_observe").filter((e) => e.data.mechanism === "reviewFallback").map((e) => e.data.reviewFallback))
+      .toMatchObject([{ trigger: "review_host", to: { family: "claude", machine: "local" } }]);
+    expect(ops("fallback_manual")).toHaveLength(1);
   });
 
   test("the fallback reviewer on quota too: no second switch in the round, the card goes to PM as before", async () => {
