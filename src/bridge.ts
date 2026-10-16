@@ -463,14 +463,15 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
 
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
 // 守门判定 / 隔离 / 放行中的同押后：target 没看到；没确认的插队也算（bridge/steer-insert.ts：别把 target 别的输出当成对插队方的答复）
-const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target), ...insertUnseenFrom(target)];
+// exceptCaller = 显式视图：target 正在明确回给这个 caller，它自己的插队不挡精确取槽（投递成功才销账，见 exactPac 两处调用）
+const heldFromOf = (target: string, exceptCaller?: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target), ...insertUnseenFrom(target, exceptCaller)];
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
 const stillHeldFor = (target: string) => (r: { messageId?: string; callerChannelId: string }) => requestStillHeld(r, heldFromOf(target));
 const answerablePac = (target: string): PendingAgentCall | undefined => answerableUnmixed(pendingAgentCalls, target, stillHeldFor(target)); // 混了几个请求方的一轮不认
 /** target 明确答给 caller(回发 send_to_agent / reply 到 caller 的频道):精确取那一槽,请求还押着的不算 */
-const exactPac = (target: string, caller: string) => pendingAgentCalls.exact(target, caller, stillHeldFor(target));
+const exactPac = (target: string, caller: string) => pendingAgentCalls.exact(target, caller, (r) => requestStillHeld(r, heldFromOf(target, caller)));
 /** 好几个 caller 同时在等、target 又没指明答给谁:谁都不推,提醒它用 send_to_agent 分别回(同一批只提醒一次) */
 function nudgeAmbiguousCallers(cid: string): void {
   const amb = pendingAgentCalls.takeAmbiguity(cid, stillHeldFor(cid));
@@ -1079,6 +1080,7 @@ async function forwardReplyToAgentClaude(
   const fwd = await deliver(fwdEnv);
   if (fwd.outcome.kind === "sent") {
     if (answering) pendingAgentCalls.consume(fromEndpoint.channelId, targetChannelId, answering);
+    settleInsertReply(fromEndpoint.channelId, targetChannelId); // 明确回给插队方、投到了：插队确认（bridge/steer-insert.ts）
     lastMessageSource.set(targetChannelId, "agent");
     console.log(`📨 reply→别agent频道: ${fromAgentName || "?"} 的消息同时 forward 给 ${targetAgentName || targetChannelId} 的 claude`);
     recordMetric("reply_cross_agent_forward", { channelId: targetChannelId, meta: { from: fromAgentName || "" } });
@@ -1731,7 +1733,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         if (!fromChannelId && typeof msg.fromChannelId === "string") {
           fromChannelId = msg.fromChannelId;
         }
-        if (fromChannelId) turnCuts.noteReplied(fromChannelId, msg.chatId), settleInsertReply(fromChannelId, { chatId: msg.chatId }); // 打断收尾提醒据此列「还没回复」；插队回了发送方才算确认
+        if (fromChannelId) turnCuts.noteReplied(fromChannelId, msg.chatId); // 打断收尾提醒据此列「还没回复」
         if (!fromChannelId) {
           // 认不出来源就明确失败,绝不静默投给 "?"。
           ws.send(JSON.stringify({
@@ -2146,7 +2148,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         for (const [chId, info] of clients.entries()) {
           if (info.ws === ws) { fromChannelId = chId; break; }
         }
-        if (fromChannelId) settleInsertReply(fromChannelId, { target: msg.targetName }); // 插队：回了发送方才算确认（bridge/steer-insert.ts）
         // v2.0.16+: agent 调了 send_to_agent = 它在行动/回应，清掉 inter-agent 看门狗。
         // 清这个 ws 名下所有 channel key。
         for (const [chId, info] of clients.entries()) {
@@ -2302,6 +2303,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
 
         if (answering && fromChannelId) pendingAgentCalls.consume(fromChannelId, target.channelId, answering);
+        if (fromChannelId) settleInsertReply(fromChannelId, target.channelId); // 明确回给插队方、投到了：插队确认（bridge/steer-insert.ts）
         recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, targetName, msg.text); // 投出去之后：PM 带 ask id 答了默认做法提问（不抛）
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");

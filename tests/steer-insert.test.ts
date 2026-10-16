@@ -45,11 +45,22 @@ function world() {
     book.add(T, { callerChannelId: X, callerName: "agent-x", targetName: "agent-t", ts: clock }, id);
     noteDelivered(T, { kind: "local", channelId: X }, clock + 1, false, true);
     noteInsert(steerEnv(id), T);
-    settleInsertReply(T, { chatId: T });
-    expect(answerableUnmixed(book, T, stillHeld)).toBeUndefined();
+    expect(answerableUnmixed(book, T, stillHeld)).toBeUndefined(); // T reply(chat_id=T) 回 owner：bridge.ts reply 分支 answerablePac 不认 X
     await stop("owner 的 A 件事做完了");
   };
-  return { T, X, Y, to, book, stillHeld, pushed, stop, steerEnv, turnA, ambiguous: () => ambiguous };
+  /**
+   * T 明确回给 X（bridge.ts route_to_agent / reply 到 X 频道两处的先后）：显式视图取精确回程槽（不撤插队保护）→ 投递（期间可插一段，比如 Stop）
+   * → 投到了才一起消化回程槽并销插队账；没投到什么都不动
+   */
+  const explicitReply = async (outcome: "sent" | "error" | "dropped", during?: () => Promise<unknown>) => {
+    const answering = book.exact(T, X, (r) => requestStillHeld(r, insertUnseenFrom(T, X)));
+    await during?.();
+    if (outcome !== "sent") return answering;
+    if (answering) book.consume(T, X, answering);
+    settleInsertReply(T, X);
+    return answering;
+  };
+  return { T, X, Y, to, book, stillHeld, pushed, stop, steerEnv, turnA, explicitReply, ambiguous: () => ambiguous };
 }
 
 afterAll(() => {
@@ -80,8 +91,9 @@ describe("没确认的插队不被隐式答复（第 2 轮 P1-A）", () => {
     await w.stop("owner 的 B 件事：生产库密码已改");
     expect(w.pushed).toHaveLength(0);
     expect(w.book.slot(w.T, w.X)).toBeDefined();
-    settleInsertReply(w.T, { target: "agent-x" }); // bridge.ts route_to_agent：先销账，再 exactPac 取槽推回
-    expect(w.book.exact(w.T, w.X, w.stillHeld)?.callerChannelId).toBe(w.X);
+    expect((await w.explicitReply("sent"))?.callerChannelId).toBe(w.X); // send_to_agent 给 X 投到了：精确取槽推回、消化、销账
+    expect(w.book.slot(w.T, w.X)).toBeUndefined();
+    expect(ids(w.T)).toEqual([]);
   });
 
   test("变体 2：另一个 agent Y 开回合 B：X 的旧槽不挡 Y，Y 照常收到 drain 答复，X 的槽还在", async () => {
@@ -96,18 +108,61 @@ describe("没确认的插队不被隐式答复（第 2 轮 P1-A）", () => {
     expect(w.book.waiting(w.T, w.stillHeld)).toHaveLength(0);
   });
 
-  test("明确回复才算：reply 到 X 的频道 / send_to_agent 给 X（带不带 agent- 前缀）销账；回别人不算", () => {
+  test("销账只认回给插队方本人：回别人不动；同一个 X 发的几条一起销", () => {
     const w = world();
     noteInsert(w.steerEnv("a"), w.T);
     noteInsert(w.steerEnv("b"), w.T);
-    settleInsertReply(w.T, { chatId: "c-owner" });
-    settleInsertReply(w.T, { target: "agent-other" });
+    settleInsertReply(w.T, "c-owner");
+    settleInsertReply(w.T, w.Y);
     expect(ids(w.T).sort()).toEqual(["a", "b"]);
-    settleInsertReply(w.T, { chatId: w.X }); // 同一个 X 发的两条都算回了
+    settleInsertReply(w.T, w.X);
     expect(ids(w.T)).toEqual([]);
-    noteInsert(w.steerEnv("c"), w.T);
-    settleInsertReply(w.T, { target: "x" });
+  });
+});
+
+describe("明确回复：投递成功才确认（Shawn PR1689-r1 premature-insert-ack）", () => {
+  test("显式视图：精确取得到 X 的槽，同时隐式答复的保护还在", async () => {
+    const w = world();
+    await w.turnA("p1");
+    expect(w.book.exact(w.T, w.X, (r) => requestStillHeld(r, insertUnseenFrom(w.T, w.X)))?.callerChannelId).toBe(w.X);
+    expect(answerableUnmixed(w.book, w.T, w.stillHeld)).toBeUndefined();
+    expect(ids(w.T)).toEqual(["p1"]);
+  });
+
+  test("send_to_agent 给 X 没投到（not_connected / X 不在 = error / dropped）：确认账保留，之后 owner 回合的 drain 不推给 X", async () => {
+    for (const outcome of ["error", "dropped"] as const) {
+      const w = world();
+      await w.turnA(`p2-${outcome}`);
+      await w.explicitReply(outcome);
+      expect(ids(w.T)).toEqual([`p2-${outcome}`]);
+      expect(w.book.slot(w.T, w.X)).toBeDefined();
+      noteDelivered(w.T, { kind: "user", owner: true, channelId: w.T }, clock + 60_000, true);
+      await w.stop("owner 的 C 件事：内部数据");
+      expect(w.pushed).toHaveLength(0);
+    }
+  });
+
+  test("投递途中碰上 Stop（deliver 的 await 里）：旧槽不被隐式结算；投到之后才确认", async () => {
+    const w = world();
+    await w.turnA("p3");
+    await w.explicitReply("sent", async () => {
+      await w.stop("owner 那件事的收尾");
+      expect(w.pushed).toHaveLength(0);
+      expect(w.book.slot(w.T, w.X)).toBeDefined();
+    });
+    expect(w.book.slot(w.T, w.X)).toBeUndefined();
     expect(ids(w.T)).toEqual([]);
+  });
+
+  test("reply 到 X 频道那条路转发失败：同样保留保护（answering 不消化、不销账）", async () => {
+    const w = world();
+    await w.turnA("p4");
+    const answering = await w.explicitReply("error");
+    expect(answering?.callerChannelId).toBe(w.X);
+    expect(w.book.slot(w.T, w.X)).toBeDefined();
+    expect(ids(w.T)).toEqual(["p4"]);
+    await w.stop("之后一轮的收尾");
+    expect(w.pushed).toHaveLength(0);
   });
 });
 

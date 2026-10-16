@@ -42,7 +42,7 @@ Jev 擅长「这句话是不是在改方向、是不是在补充排队里那条�
 
 bridge 这一侧 `ws.send` 回 0（连接已断、这条被丢了）就退回押后队列（`afterInsertSend`），回合结束 / 重连后照常投，不丢。取目标运行时失败也按插不进。
 
-**确认账**（`bridge/steer-insert.ts`）：插队送进去之后，在目标明确回给插队方（`reply` 发回它的频道 / `send_to_agent` 给它）之前算「没确认」，回程簿把它当「目标还没看到」（`bridge.ts heldFromOf` 带上 `insertUnseenFrom`）——目标回 owner 的话、**这一轮和之后任何一轮**收尾文字的 drain 兜底都不会被当成对插队方的答复推回去，也不消化插队方的回程槽、不挡别的 agent 开的回合拿到自己的答复；明确回给插队方时先销账再精确取槽，照常推回。Stop 时不结账：改动前这条押到目标空闲、由它自己开一轮，那一轮的 drain 才是对它的答复；插队后没有「它自己那一轮」，所以只认明确回复，没回复由 agent 间看门狗照常催。账落盘（`insert-pending.json`，bridge 重启后不会把没确认的放成「已看到」），有效期同押后队列（24 小时）；只在目标被 kill（`/agent/cleanup`）时整本销。
+**确认账**（`bridge/steer-insert.ts`）：插队送进去之后，在目标明确回给插队方（`reply` 发回它的频道 / `send_to_agent` 给它）之前算「没确认」，回程簿把它当「目标还没看到」（`bridge.ts heldFromOf` 带上 `insertUnseenFrom`）——目标回 owner 的话、**这一轮和之后任何一轮**收尾文字的 drain 兜底都不会被当成对插队方的答复推回去，也不消化插队方的回程槽、不挡别的 agent 开的回合拿到自己的答复；明确回给插队方时，精确回程槽用显式视图取（只忽略这个插队方自己的插队，不撤保护），**投递成功、消化回程槽的同一刻才销账**；投递失败（not_connected、对方不在等）或投递途中碰上 Stop，保护都还在（`bridge.ts exactPac`、route_to_agent / reply 到对方频道两处）。Stop 时不结账：改动前这条押到目标空闲、由它自己开一轮，那一轮的 drain 才是对它的答复；插队后没有「它自己那一轮」，所以只认明确回复，没回复由 agent 间看门狗照常催。账落盘（`insert-pending.json`，bridge 重启后不会把没确认的放成「已看到」），有效期同押后队列（24 小时）；只在目标被 kill（`/agent/cleanup`）时整本销。
 
 ## CC 实测（Claude Code 2.1.302，2026-10-17）
 
