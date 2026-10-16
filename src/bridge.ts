@@ -557,6 +557,7 @@ function clearInterAgentPendingsForChannel(channelId: string): number {
   let n = 0;
   n += pendingAgentCalls.dropChannel(channelId); // 它作为 target 或 caller 的回程槽
   if (pendingInterAgentMsg.delete(channelId)) n++;
+  dropInserts(channelId); // CC 插队的补投账（bridge/steer-cc.ts）
   // v2.11: 在飞的 HTTP peer 调用一并取消——迟到的 peer 回复不再 pushback
   // (Discord 时代 pendingPeerCalls 的同款保障,review 2026-07-20 #3)
   try {
@@ -580,7 +581,8 @@ import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
-import { agentMsgMustWait } from "./lib/turn-state.js"; import { configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
+import { agentMsgMustWait } from "./lib/turn-state.js"; import { afterInsertSend, configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
+import { dropInserts, redeliverInserts, settleInsertReply } from "./bridge/steer-cc.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
@@ -891,7 +893,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   try {
     const ledgerHold = await inboundLedgerGate(env, clients.get(to.channelId)?.runtime, evAgent, content, meta, heldLocalMsgs); if (ledgerHold) return ledgerHold; // Pi / Codex 入站账
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
-    to.ws.send(JSON.stringify({ type: "message", content, meta }));
+    if (afterInsertSend(env, turn, to.ws.send(JSON.stringify({ type: "message", content, meta })), heldLocalMsgs)) return { envelope: env, outcome: { kind: "sent", note: "queued" } }; // 插队没送到：押回
     noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle", env.intent === "request" && !env.meta.skipInterAgentWatchdog); // 谁开的这一轮（stop-settle）
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inboundEventData(env, meta) }); // 入站镜像给网页（bridge/inbound-event.ts）
@@ -1729,7 +1731,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         if (!fromChannelId && typeof msg.fromChannelId === "string") {
           fromChannelId = msg.fromChannelId;
         }
-        if (fromChannelId) turnCuts.noteReplied(fromChannelId, msg.chatId); // 打断收尾提醒据此列「还没回复」
+        if (fromChannelId) turnCuts.noteReplied(fromChannelId, msg.chatId), settleInsertReply(fromChannelId, { chatId: msg.chatId }); // 打断收尾提醒据此列「还没回复」；CC 插队回了发送方就不补投
         if (!fromChannelId) {
           // 认不出来源就明确失败,绝不静默投给 "?"。
           ws.send(JSON.stringify({
@@ -2144,6 +2146,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         for (const [chId, info] of clients.entries()) {
           if (info.ws === ws) { fromChannelId = chId; break; }
         }
+        if (fromChannelId) settleInsertReply(fromChannelId, { target: msg.targetName }); // CC 插队：回了发送方就不补投（bridge/steer-cc.ts）
         // v2.0.16+: agent 调了 send_to_agent = 它在行动/回应，清掉 inter-agent 看门狗。
         // 清这个 ws 名下所有 channel key。
         for (const [chId, info] of clients.entries()) {
@@ -2773,7 +2776,9 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // inter-agent 看门狗: 这一轮结束时 cid 还挂着 inter-agent 消息（agent 既没 reply 也没 send_to_agent），
             // 注一条 nudge 提醒处理 + reply() 报告。最多 nudge 1 次：多了会和 drain 兜底的 push 叠加，agent 反复被叫醒「聊不停」。
             // StopFailure(API 错误 / 额度用完 / 打断)不是「收到了没理」:催它只会再撞一次同样的错；Pi 叫停之后那次 Stop 也不催
-            const iaPending = ownTurn && event !== "StopFailure" && !afterAbort ? pendingInterAgentMsg.get(cid) : undefined;
+            const cc = clients.get(cid); // CC 插队没回复的补投原文（bridge/steer-cc.ts）；补投了就不再发下面那句催促，补投那封自己会挂看门狗
+            const redone = ownTurn && event !== "StopFailure" && !afterAbort && cc ? await redeliverInserts(cid, deliver, { kind: "local", channelId: cid, ws: cc.ws, cwd: cc.cwd }) : 0;
+            const iaPending = ownTurn && event !== "StopFailure" && !afterAbort && !redone ? pendingInterAgentMsg.get(cid) : undefined;
             if (iaPending) {
               if (iaPending.retries >= 1) {
                 pendingInterAgentMsg.delete(cid);

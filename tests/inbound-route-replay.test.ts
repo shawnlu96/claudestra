@@ -1,7 +1,8 @@
 /**
  * 回放夹具（JRT 验收 4）：调研的 12 + 4 个合成例，Jev 的答案是录好的（tests/fixtures/inbound-route/cases.json），CI 不打外网。
  * 走的是真的运行时路径（routeInbound → 该不该问 → decideRoute → 代码兜底），最后的投法和预期一致：peer 喊停那例录到的是
- * interrupt 0.97，由代码兜底改成排队。重录：TYPESAFE_API_KEY=… INBOUND_ROUTE_RECORD=1 bun test tests/inbound-route-replay.test.ts
+ * interrupt 0.97，由代码兜底改成排队。agent→agent 的例按目标插得进（steer）回放。重录没有答案的例：TYPESAFE_API_KEY=… INBOUND_ROUTE_RECORD=1 bun test tests/inbound-route-replay.test.ts
+ * （INBOUND_ROUTE_RECORD=all 全部重录）
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -13,12 +14,13 @@ import { jevAsk } from "../src/lib/jev.js";
 import { ruleAction } from "../src/lib/inbound-route.js";
 
 interface Case {
-  name: string; expect: "interrupt" | "queue" | "merge"; current: string;
+  name: string; expect: "interrupt" | "insert" | "queue" | "merge"; current: string;
   queued: { from: string; text: string }[]; incoming: { from: string; text: string }; answers: Record<string, unknown>;
 }
 const FIXTURE = join(import.meta.dir, "fixtures/inbound-route/cases.json");
 const fixture = JSON.parse(readFileSync(FIXTURE, "utf8")) as { model: string; cases: Case[] };
-const RECORD = process.env.INBOUND_ROUTE_RECORD === "1";
+const RECORD_ALL = process.env.INBOUND_ROUTE_RECORD === "all";
+const RECORD = process.env.INBOUND_ROUTE_RECORD === "1" || RECORD_ALL;
 
 const to = { kind: "local", channelId: "ch1", agentName: "agent-dev", ws: { send() {} } } as unknown as LocalEndpoint;
 /** 夹具里的发送人 → bridge 认证过的身份：owner = Discord 用户，peer:X = HTTP peer，其余是本机 agent（调度器也是） */
@@ -39,14 +41,16 @@ afterAll(() => {
   if (RECORD) writeFileSync(FIXTURE, `${JSON.stringify(fixture, null, 1)}\n`);
 });
 
-describe("回放：12 + 4 个合成例", () => {
+describe("回放：合成例（调研 12 + 4，JRT-3 加 6 例 agent→agent）", () => {
   for (const c of fixture.cases) {
     test(`${c.name} → ${c.expect}`, async () => {
       const queue: HeldItem[] = c.queued.map((m) => ({ env: envOf(m), to, heldAt: 1 }));
       configureInboundRoute({
         readMode: () => "on", probe: async () => ({ main: "busy", bg: false }), queue: () => queue, doing: async () => c.current, log: () => {}, now: () => 0,
+        insertDecl: async () => "steer",
         ask: (async (state: unknown, questions: Record<string, unknown>, opts: unknown) => {
-          if (!RECORD) return { model: fixture.model, answers: c.answers, usage: { input_tokens: 0, output_tokens: 0 }, latencyMs: 0, costUsd: 0 };
+          const replay = !RECORD || (!RECORD_ALL && Object.keys(c.answers).length > 0);
+          if (replay) return { model: fixture.model, answers: c.answers, usage: { input_tokens: 0, output_tokens: 0 }, latencyMs: 0, costUsd: 0 };
           const r = await jevAsk(state as never, questions as never, { ...(opts as object), timeoutMs: 20_000 });
           c.answers = r.answers as Record<string, unknown>;
           fixture.model = r.model;

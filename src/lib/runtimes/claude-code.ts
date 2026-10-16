@@ -42,6 +42,7 @@ export const CLAUDE_CODE_CONTROL: RuntimeControl = {
   // Esc 永远不碰后台 agent；主回合在跑时两者一样打断。事件态滞后把空闲误判成忙时，Esc 也是空操作。docs/architecture/interrupts.md
   interruptKeys: ["Escape"],
   preemptOnHumanMessage: true,
+  insertVia: "channel",
   idleSource: "pane",
   // --model 对 --resume 的会话经常不生效（会话保留原模型），启动后要会话内补发 /model
   modelEnforcement: "in-session",

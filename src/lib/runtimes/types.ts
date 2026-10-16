@@ -211,6 +211,12 @@ export interface RuntimeControl {
    * 扩展在注册帧里声明 abort:true 才发（老扩展会默默忽略）；接线见 bridge/interrupt-gate.ts。
    */
   abortVia?: "extension";
+  /**
+   * 入站路由判了 insert（本机 agent 的消息插进在跑的回合、不打断）时怎么插：steer = 运行时原生插话（Pi 扩展 deliverAs steer、ACP 宿主
+   * _session/steering，插不进它们自己改成回合结束再投）；channel = 回合中直接投 CC 的 channel 通知（实测见 docs/architecture/inbound-route.md）。
+   * 不声明 = 插不进，insert 按排队（Codex tmux）
+   */
+  insertVia?: "steer" | "channel";
   /** 斜杠命令（/compact 等）当普通 prompt 文本投进会话，不敲键（ACP 下由适配器自己认，比如 /compact 转成 thread/compact/start） */
   slashAsPrompt?: boolean;
 }

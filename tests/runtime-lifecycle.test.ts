@@ -290,6 +290,7 @@ describe("control 声明", () => {
     expect(controlFor("claude-code")).toEqual({
       interruptKeys: ["Escape"],
       preemptOnHumanMessage: true,
+      insertVia: "channel",
       idleSource: "pane",
       modelEnforcement: "in-session",
       paneHeuristics: true,
@@ -300,6 +301,7 @@ describe("control 声明", () => {
     expect(controlFor("pi")).toEqual({
       interruptKeys: ["C-c"],
       preemptOnHumanMessage: false,
+      insertVia: "steer",
       idleSource: "hook",
       modelEnforcement: "launch-flag",
       paneHeuristics: false,
