@@ -194,3 +194,17 @@ test("[验收线 4] 总览与详情的 attentionFacts 同一口径（冻结 + li
   // 不注入时按本机文件现读：测试状态目录里没有冻结名单和规格卡 = 都不给
   expect(projectView(db, "p", NOW).tasks.some((t) => "attentionFacts" in t)).toBe(false);
 });
+
+test("[验收线 5] actionState 不被 compact 裁剪：总览 / 完成分页与详情同一投影；旧字段仍 ≤150KB，新增字段每张 ≤300 字节另算", () => {
+  const db = fixture();
+  const facts = { frozen: new Set(["l0", "d0"]), spec: () => null };
+  const view = projectView(db, "p", NOW, null, facts);
+  for (const t of view.tasks) expect(t.actionState).toEqual(taskDetail(db, "p", t.id, NOW, facts)!.task.actionState);
+  for (const t of donePage(db, "p", null, 10_000, NOW, facts).tasks) expect(t.actionState).toEqual(taskDetail(db, "p", t.id, NOW, facts)!.task.actionState);
+  expect(view.tasks.find((t) => t.id === "l0")?.actionState).toMatchObject({ group: "queued", tag: "冻结" });
+  const old = bytes(JSON.parse(JSON.stringify(view, (k, v) => (k === "actionState" ? undefined : v))) as object);
+  const perCard = view.tasks.map((t) => Buffer.byteLength(JSON.stringify(t.actionState)));
+  console.log(`${view.tasks.length} cards: old fields=${old} bytes, actionState max/card=${Math.max(...perCard)} total=${perCard.reduce((a, b) => a + b, 0)}`);
+  expect(old).toBeLessThanOrEqual(150_000);
+  expect(Math.max(...perCard)).toBeLessThanOrEqual(300);
+});

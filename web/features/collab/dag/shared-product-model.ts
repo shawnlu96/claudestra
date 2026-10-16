@@ -1,6 +1,9 @@
 import type { FeatureDetail, FeatureList } from '../../../lib/api/shared-ledger';
 import type { LedgerTaskView } from '../collab-model';
 import type { ProductBoard } from '../../../lib/api/product-board';
+import type { ProductDep, ProductLink } from '../../../lib/api/product-board-types';
+import { featureDepsTransport, readFeatureDeps, type FeatureDeps } from '../../../lib/api/shared-ledger-reads';
+import type { SharedLedgerSession } from '../../../lib/api/shared-ledger';
 import { progress, stale } from '../shared/shared-model';
 import { rowsOf, stageOf } from '../team-source-adapter';
 import { deferredLine, productNodeCounts } from '../../../lib/product-node-counts';
@@ -25,9 +28,10 @@ function nodeCountsOf(d: FeatureDetail) {
 /** Task-backed progress uses the same stages as the sidebar, including stale snapshots; absence of updates does not undo completion.
  * With tasks, completion is cross-checked against the center's counts (center wins) and active comes from the mirrored stages.
  * With a DAG detail, completed / active / blocked use the same node counts as the local board (team-project-N8B1).
- * The shared contract has no feature dependency edges or ETA; never derive them from task dependencies. */
-export function sharedProductBoard(list: FeatureList, now: number, tasks?: readonly LedgerTaskView[], details?: ReadonlyMap<string, FeatureDetail>): ProductBoard {
-  return { features: list.features.map(f => {
+ * Dependency edges come from the home's feature-deps upload (TEAMDEPS1); still never derive them from task dependencies. No ETA. */
+export function sharedProductBoard(list: FeatureList, now: number, tasks?: readonly LedgerTaskView[], details?: ReadonlyMap<string, FeatureDetail>,
+  deps?: FeatureDeps | null): ProductBoard {
+  return { ...(deps ? edgesOf(list, deps) : { deps: [] }), features: list.features.map(f => {
     const found = tasks?.filter(t => t.itemId === f.id);
     // 真实源按详情可用性判断：中心 total=0 也不能证明详情已读到；完整空详情的 0 则是已知值。
     const mine = found && (details ? details.has(f.id) : found.length > 0 || f.counts.total === 0) ? found : undefined;
@@ -39,5 +43,22 @@ export function sharedProductBoard(list: FeatureList, now: number, tasks?: reado
         completed: mine ? completedOf(f, nodes ? nodes.completed : mine.filter(t => SETTLED.has(t.stage)).length) : found ? f.counts.completed : progress(f, now),
         active: nodes ? nodes.active : mine ? mine.filter(t => !IDLE.has(t.stage)).length : 0, blocked: nodes ? nodes.blocked : f.counts.blocked,
         ...(!mine ? { activeUnknown: true as const } : {}) }, eta: null };
-  }), deps: [] };
+  }) };
+}
+
+/** split / declared → deps, task → links; no note or evidence travels, so both stay empty. Edges to a feature not in the list are dropped. */
+function edgesOf(list: FeatureList, read: FeatureDeps): Pick<ProductBoard, 'deps' | 'links'> {
+  const ids = new Set(list.features.map(f => f.id)), deps: ProductDep[] = [], links: ProductLink[] = [];
+  for (const { from, to, kind, satisfied, count } of read.edges) {
+    if (!ids.has(from) || !ids.has(to)) continue;
+    if (kind === 'task') links.push({ from, to, note: '', kind, satisfied, count, evidence: [] });
+    else deps.push({ from, to, note: '', kind, satisfied, count });
+  }
+  return { deps, links };
+}
+
+/** Read alongside the product board (same cadence, no polling of its own); `null` on any failure keeps `deps: []`. */
+export function teamFeatureDeps(session: SharedLedgerSession, signal = new AbortController().signal): Promise<FeatureDeps | null> {
+  const { team, project, machine } = session.identity;
+  return readFeatureDeps({ team, project }, featureDepsTransport({ fp: machine }, project), signal);
 }

@@ -7,6 +7,8 @@ import { useAgentDrop } from "./agent-dnd";
 import { useProjectMenuTrigger } from "./project-menu";
 import { useHostInfo } from "../host-info";
 import { useFullScope } from "../contacts-data";
+import { RowMoreButton } from "./row-more-button";
+import { FolderIcon, FolderOpenIcon } from "./line-icons";
 import { UnifiedCollabEntry } from "@/features/collab/team-view-entry";
 
 type GroupEntry = Extract<SidebarEntry, { kind: "group" }>;
@@ -62,23 +64,28 @@ export function ProjectGroup({
       className={`rounded-xl p-1 transition-colors ${over ? "bg-primary/15 ring-1 ring-primary/40" : "bg-base-300/25"}`}
       {...handlers}
     >
-      <button
-        type="button"
-        className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
-        style={{ WebkitTouchCallout: "none" }}
-        onClick={() => {
-          if (menu.consumedClick()) return; // 长按松手的 click 不切换折叠
-          onToggle();
-        }}
-        {...menu.handlers}
-      >
-        <Chevron open={!collapsed} className="text-base-content/40" />
-        <span className="shrink-0 text-[13px] opacity-80">{e.meta?.emoji || (collapsed ? "📁" : "📂")}</span>
-        <span className="truncate">{e.meta?.name || e.id}</span>
-        <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">{e.items.length}</span>
-        {collapsed && <UnreadPill count={entryUnread(e)} />}
-        {collapsed && groupBusy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
-      </button>
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
+          style={{ WebkitTouchCallout: "none" }}
+          aria-expanded={!collapsed}
+          onClick={() => {
+            if (menu.consumedClick()) return; // 长按松手的 click 不切换折叠
+            onToggle();
+          }}
+          {...menu.handlers}
+        >
+          <Chevron open={!collapsed} className="text-base-content/40" />
+          {/* 线条文件夹（agents-ROWMORE1）：不再显示 project 自定义 emoji / 📁📂，数据不动 */}
+          {collapsed ? <FolderIcon size={13} className="shrink-0 opacity-80" /> : <FolderOpenIcon size={13} className="shrink-0 opacity-80" />}
+          <span className="truncate">{e.meta?.name || e.id}</span>
+          <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">{e.items.length}</span>
+          {collapsed && <UnreadPill count={entryUnread(e)} />}
+          {collapsed && groupBusy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
+        </button>
+        {menu.open && <RowMoreButton open={menu.open} />}
+      </div>
       {!collapsed && (
         <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">
           <UnifiedCollabEntry projectId={e.id} />

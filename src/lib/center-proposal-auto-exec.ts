@@ -4,7 +4,7 @@
  * 结果事件 center_proposal_auto_approve_result 占 <键>#result，同一键只写一次。凭据从不进这里。
  */
 import type { Database } from "bun:sqlite";
-import type { AutoReason } from "./center-proposal-auto.js";
+import { hitEvidence, type AutoHitEvidence, type AutoReason } from "./center-proposal-auto.js";
 import type { InboxParams } from "./center-proposal-inbox.js";
 import { getEventByDedup } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
@@ -33,8 +33,11 @@ const ownerKey = (key: string) => `${key}#owner`;
 const resultKey = (key: string) => `${key}#result`;
 
 /** 写事件用的身份（不含凭据） */
-export interface ExecIdentity { localProjectId: string; centerProject: string; params: InboxParams }
-const identityData = (id: ExecIdentity, key: string) => ({ key, centerProject: id.centerProject, ...id.params });
+export interface ExecIdentity extends Partial<AutoHitEvidence> { localProjectId: string; centerProject: string; params: InboxParams }
+const identityData = (id: ExecIdentity, key: string) => {
+  const evidence = hitEvidence(id.hits ?? []);
+  return { key, centerProject: id.centerProject, ...id.params, ...evidence, hitsOmitted: evidence.hitsOmitted + (id.hitsOmitted ?? 0) };
+};
 
 function claimOf(db: Database, k: string): ExecClaim | null {
   const e = getEventByDedup(db, k);
