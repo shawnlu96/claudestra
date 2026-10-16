@@ -156,9 +156,11 @@ export function skippedColumns(kind: string): number[] {
   return kind === "investigate" ? [4, 5, 6] : kind === "ops" ? [1] : [];
 }
 
-/** 在等别人的阶段：停太久就是卡住。build / fix 是在干活，spec 还没开工，时间长都不算卡住（PM 09-28 开工确认 c 条） */
+/** 在等别人的阶段：停太久就是卡住。build / fix 是在干活，spec 还没开工，都不按 30 分钟算卡住（PM 09-28 开工确认 c 条）；fix 停满 FIX_STUCK_MS 另算出问题 */
 const WAIT_STAGES: ReadonlySet<Stage> = new Set(["restate", "review", "merge", "live", "blocked"]);
 export const STUCK_MS = 30 * 60_000;
+/** 返工停满这么久才算出问题：和 owner 10-07 定的停滞让锁阈值（RLOCK2：2 小时无进展）保持一致；不满的是审查后正常返工 */
+export const FIX_STUCK_MS = 2 * 60 * 60_000;
 
 /** 关注度：数字小的排前面。owner（等你）= 这条线上有开着的「待你处理」（features/asks，homeView 的 waits） */
 export type Attention = "problem" | "owner" | "stuck" | "waiting" | "progress";
@@ -273,17 +275,27 @@ export function isStuck(t: LedgerTaskView, now: number): boolean {
   return WAIT_STAGES.has(t.stage) && d !== null && d > STUCK_MS;
 }
 
-function isProblem(t: LedgerTaskView): boolean {
-  if (t.stage === "fix" || t.stage === "blocked") return true;
+/** fix 停满 FIX_STUCK_MS：停留时长读不到（stageSince 为空 / 导入推断）按没满算，和 isStuck 一样不猜 */
+function fixStalled(t: LedgerTaskView, now: number): boolean {
+  if (t.stage !== "fix" || t.stageSinceApprox === true) return false;
+  const d = dwellMs(t, now);
+  return d !== null && d >= FIX_STUCK_MS;
+}
+
+/** 和时长无关的出问题：受阻、回滚、检查没过 */
+function hardProblem(t: LedgerTaskView): boolean {
+  if (t.stage === "blocked") return true;
   const e = t.lastEvent;
   // 检查单没过（fail）或有项查不到（unknown）都要人看：任务卡在 live，不会自己往前走
   return !!e && (e.kind === "rollback" || (e.kind === "verify" && e.data.result !== "pass"));
 }
 
+const isProblem = (t: LedgerTaskView, now: number): boolean => hardProblem(t) || fixStalled(t, now);
+
 export function attentionOf(t: LedgerTaskView, now: number): Attention {
-  if (isProblem(t)) return "problem";
+  if (isProblem(t, now)) return "problem";
   if (isStuck(t, now)) return "stuck";
-  return t.stage === "build" ? "progress" : "waiting";
+  return t.stage === "build" || t.stage === "fix" ? "progress" : "waiting";
 }
 
 /**
@@ -314,9 +326,12 @@ function reviewRound(t: LedgerTaskView): number {
   return t.lastReview?.round ?? Math.max(1, t.round);
 }
 
-/** 阶段短语：写的是「现在卡在哪 / 在等谁」，不是阶段名本身。出问题（返工 / 受阻 / 验证不过）的照旧写问题，冻结与观察期都盖不住；now 不给就不写观察期 */
+/**
+ * 阶段短语：写的是「现在卡在哪 / 在等谁」，不是阶段名本身。返工 / 出问题（受阻 / 验证不过）的照旧写本身，冻结与观察期都盖不住；
+ * now 不给就不写观察期，也不写返工已停多久
+ */
 export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], frozen: string | null, tr: Tr = zh, now?: number): string {
-  if (!isProblem(t)) {
+  if (t.stage !== "fix" && !hardProblem(t)) {
     if (t.attentionFacts?.frozen === true) return tr("已冻结");
     if (now !== undefined && observing(t, now)) return tr("观察中 · 还剩 {d}", { d: fmtDuration(t.attentionFacts!.observationUntil! - now, tr) });
   }
@@ -329,8 +344,10 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
       return tr("开发中");
     case "review":
       return t.roundUnknown ? tr("等审查") : tr("等审查 · 第 {n} 轮", { n: Math.max(1, t.round) });
-    case "fix":
-      return t.roundUnknown ? tr("返工中") : tr("返工中 · 第 {n} 轮意见", { n: reviewRound(t) });
+    case "fix": {
+      const word = t.roundUnknown ? tr("返工中") : tr("返工中 · 第 {n} 轮意见", { n: reviewRound(t) });
+      return now !== undefined && fixStalled(t, now) ? `${word} · ${tr("已停 {d}", { d: fmtDuration(dwellMs(t, now)!, tr) })}` : word;
+    }
     case "merge": {
       const n = mergeQueuePos(t, all);
       return frozen ? tr("合并队列冻结") : n === null ? workText(tr, "等合并") : tr("等合并 · 队列第 {n} 位", { n });
