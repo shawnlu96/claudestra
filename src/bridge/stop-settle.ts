@@ -20,7 +20,7 @@ import { armGoneCardSweep, cardsToClose, productionView } from "../lib/agent-sup
 import { closeAsk } from "../lib/ledger-asks.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { askDbIfExists, publishAsk } from "./asks.js";
-import { spokenBefore, takeTurnFailure, turnFailureNotice, type TurnFailure } from "./turn-failure.js";
+import { noteRetryingCaller, spokenBefore, takeTurnFailure, turnFailureNotice, type TurnFailure } from "./turn-failure.js";
 
 export interface StopTurn {
   /** 要结算的频道（channelsToClear 里的一个） */
@@ -227,13 +227,19 @@ async function failedTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
   const said = sole ? spokenBefore(t.drain.text, f) : undefined;
   for (const caller of askers) {
     const slot = waiting.find((p) => p.callerChannelId === caller);
-    if (slot && ranIntoApiError(t)) continue;
+    // 网络类：续跑用完补最终说明（在这一条「正在重试」之后登记，结局早到了会当场补发）
+    const later = (): void => void (f.retrying && noteRetryingCaller(t.cid, f.agent, (body) => d.notify(slot ?? stubCall(caller, t.cid, f), t.cid, body)));
+    if (slot && ranIntoApiError(t)) {
+      later();
+      continue;
+    }
     const pac = slot ?? stubCall(caller, t.cid, f);
     const r = await d.notify(pac, t.cid, turnFailureNotice(f, !slot, said)).catch((e: Error) => ({ kind: "error", error: e }));
     const kind = (r as { kind?: string } | undefined)?.kind;
     if (kind === "error" || kind === "dropped") console.error(`⚠️ ${f.agent} 回合失败的说明没推到 ${pac.callerName}（${kind}），回程照旧留着`);
     else if (slot && !stranger) d.consume(t.cid, slot);
     console.log(`⚠️ ${f.agent} 这一轮以不可重试的错误中止 → 告诉请求方 ${pac.callerName}${slot ? "" : "（回程已被更早的回复消化）"}`);
+    later();
   }
   return true;
 }
