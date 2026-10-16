@@ -1,7 +1,7 @@
 /**
  * TIER3 启动事实（src/lib/task-tier-launch-events.ts）经真实的 create 包装（cardRoleCreate）落到临时台账：每次尝试一行
  * （角色、类型、家族、轮次、启动标识、建议值、最终参数、来源），create 失败 / 被拒单列 failed，会话证实后 bound；实际没被运行时证实就是 unknown。
- * 调度器手里是只读连接也记得上（走同一文件的可写连接）；卡不在这本台账不记。create 是替身，不调真实模型。
+ * 记成项目级 note（卡自己的事件流不多一条）；调度器手里是只读连接也记得上（走同一文件的可写连接）；卡不在这本台账不记。create 是替身，不调真实模型。
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -77,13 +77,13 @@ describe("[验收线 3] 成功 / 失败 / unknown 可追溯", () => {
 
   test("调度器的只读连接也记得上；卡不在这本台账不记；卡的事件流不多一条", async () => {
     const { path, db } = ledger();
-    const before = db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number };
+    const before = db.query("SELECT COUNT(*) AS n FROM events WHERE target = 'T1'").get() as { n: number };
     const ro = new Database(path, { readonly: true });
     cleanups.push(() => ro.close());
     await cardRoleCreate(ok, { tier: ctx(ro, "code") })(...author());
     expect(taskTierLaunchHistory(db, "p1", "T1").length).toBe(1);
     await cardRoleCreate(ok, { tier: { ...ctx(db, "code"), card: "NOPE" } })(...author().map((a) => (a === "T1" ? "NOPE" : a)));
     expect(taskTierLaunchHistory(db, "p1", "NOPE")).toEqual([]);
-    expect(db.query("SELECT COUNT(*) AS n FROM events").get()).toEqual(before);
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE target = 'T1'").get()).toEqual(before);
   });
 });

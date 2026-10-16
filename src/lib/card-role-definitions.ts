@@ -249,14 +249,14 @@ async function launchRecorded(r: Applied, opts: CardRoleOptions, call: (args: st
 
 /** 变参 manager（scheduler-auto-deps / scheduler-local-author 的 env.create）外包一层：坏定义就不调 create */
 export function cardRoleCreate<T extends Create>(create: T, opts: CardRoleOptions = {}): T {
-  return ((...args: string[]) => launchRecorded(applyCardRole(args, opts), opts, (a) => create(...a))) as T;
+  return (async (...args: string[]) => launchRecorded(applyCardRole(args, opts), opts, (a) => create(...a))) as T;
 }
 
 /**
  * 不加载角色定义、只做类型模型选择的一层（审查换会话那条 create 原本就不带角色定义，不在这里改它的边界）。off / observe 原样放行。
  */
 export function tierCreate<T extends Create>(create: T, ctx: TierLaunchCtx, role: CardRole): T {
-  return ((...args: string[]) => launchRecorded(tierOnly(args, ctx, role), { tier: ctx }, (a) => create(...a))) as T;
+  return (async (...args: string[]) => launchRecorded(tierOnly(args, ctx, role), { tier: ctx }, (a) => create(...a))) as T;
 }
 
 function tierOnly(args: string[], ctx: TierLaunchCtx, role: CardRole): Applied {
@@ -273,7 +273,7 @@ function tierOnly(args: string[], ctx: TierLaunchCtx, role: CardRole): Applied {
 
 /** StepIO.manager（start_node 的 runStart）外包一层，语义同 cardRoleCreate */
 export function cardRoleManager<T extends (args: string[], timeoutMs?: number) => Promise<any>>(manager: T, opts: CardRoleOptions = {}): T {
-  return ((args: string[], timeoutMs?: number) => launchRecorded(applyCardRole(args, opts), opts, (a) => manager(a, timeoutMs))) as T;
+  return (async (args: string[], timeoutMs?: number) => launchRecorded(applyCardRole(args, opts), opts, (a) => manager(a, timeoutMs))) as T;
 }
 
 /** runLocalStart 的 io：manager 每次现取调用方 io 上的那个（排队重试时调用方换过 manager 也照用新的），其余字段照抄 */
