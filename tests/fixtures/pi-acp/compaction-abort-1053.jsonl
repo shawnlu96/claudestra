@@ -1,0 +1,48 @@
+{"d": "in", "r": {"type": "get_state", "id": "p1"}}
+{"d": "in", "r": {"type": "get_available_models", "id": "p2"}}
+{"d": "in", "r": {"type": "get_available_thinking_levels", "id": "p3"}}
+{"d": "out", "r": {"id": "p1", "type": "response", "command": "get_state", "success": true, "data": {"model": {"provider": "ds", "id": "v4", "name": "V4"}, "thinkingLevel": "high", "isCompacting": false}}}
+{"d": "out", "r": {"id": "p2", "type": "response", "command": "get_available_models", "success": true, "data": {"models": [{"provider": "ds", "id": "v4", "name": "V4"}]}}}
+{"d": "out", "r": {"id": "p3", "type": "response", "command": "get_available_thinking_levels", "success": true, "data": {"levels": ["off", "high"]}}}
+{"d": "in", "r": {"type": "prompt", "message": "<channel>复核 X-1 的修复，结论写进报告并回 PM</channel>", "streamingBehavior": "followUp", "id": "p4"}}
+{"d": "out", "r": {"id": "p4", "type": "response", "command": "prompt", "success": true, "data": {"disposition": "started"}}}
+{"d": "out", "r": {"type": "agent_start"}}
+{"d": "out", "r": {"type": "message_start", "message": {"role": "user", "content": [{"type": "text", "text": "<channel>复核 X-1 的修复，结论写进报告并回 PM</channel>"}]}}}
+{"d": "out", "r": {"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": "<channel>复核 X-1 的修复，结论写进报告并回 PM</channel>"}]}}}
+{"d": "out", "r": {"type": "message_start", "message": {"role": "assistant", "content": []}}}
+{"d": "out", "r": {"type": "message_update", "message": {"role": "assistant", "content": []}, "assistantMessageEvent": {"type": "text_delta", "delta": "报告已写好，回 PM。"}}}
+{"d": "out", "r": {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "报告已写好，回 PM。"}, {"type": "toolCall", "id": "c1", "name": "edit", "arguments": {"path": "/rec/work/reports/x-1.md"}}, {"type": "toolCall", "id": "c2", "name": "mcp__claudestra__send_to_agent", "arguments": {"target": "pm", "text": "X-1 复核通过"}}], "stopReason": "toolUse"}}}
+{"d": "out", "r": {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "edit", "args": {"path": "/rec/work/reports/x-1.md"}}}
+{"d": "out", "r": {"type": "tool_execution_start", "toolCallId": "c2", "toolName": "mcp__claudestra__send_to_agent", "args": {"target": "pm", "text": "X-1 复核通过"}}}
+{"d": "out", "r": {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "edit", "result": {"content": [{"type": "text", "text": "ok"}]}, "isError": false}}
+{"d": "out", "r": {"type": "tool_execution_end", "toolCallId": "c2", "toolName": "mcp__claudestra__send_to_agent", "result": {"content": [{"type": "text", "text": "sent"}]}, "isError": false}}
+{"d": "out", "r": {"type": "turn_end", "message": {"role": "assistant", "content": [], "stopReason": "toolUse"}, "toolResults": []}}
+{"d": "out", "r": {"type": "message_start", "message": {"role": "assistant", "content": []}}}
+{"d": "out", "r": {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "c3", "name": "request_compact", "arguments": {}}], "stopReason": "toolUse"}}}
+{"d": "out", "r": {"type": "tool_execution_start", "toolCallId": "c3", "toolName": "request_compact", "args": {}}}
+{"d": "out", "r": {"type": "tool_execution_end", "toolCallId": "c3", "toolName": "request_compact", "result": {"content": [{"type": "text", "text": "压缩已触发（后台执行，保留指令已注入）。"}]}, "isError": false}}
+{"d": "out", "r": {"type": "turn_end", "message": {"role": "assistant", "content": [], "stopReason": "toolUse"}, "toolResults": []}}
+{"d": "out", "r": {"type": "message_start", "message": {"role": "assistant", "content": []}}}
+{"d": "out", "r": {"type": "message_end", "message": {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "This operation was aborted"}}}
+{"d": "out", "r": {"type": "turn_end", "message": {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "This operation was aborted"}, "toolResults": []}}
+{"d": "out", "r": {"type": "agent_end", "messages": [], "willRetry": false}}
+{"d": "out", "r": {"type": "agent_settled", "aborted": true}}
+{"d": "out", "r": {"type": "compaction_start", "reason": "manual"}}
+{"d": "in", "r": {"type": "get_session_stats", "id": "p5"}}
+{"d": "out", "r": {"id": "p5", "type": "response", "command": "get_session_stats", "success": true, "data": {"contextUsage": {"tokens": null, "contextWindow": 1000000}}}}
+{"d": "in", "r": {"type": "prompt", "message": "<channel>X-2 也看一下</channel>", "streamingBehavior": "followUp", "id": "p6"}}
+{"d": "out", "r": {"id": "p6", "type": "response", "command": "prompt", "success": false, "error": "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry."}}
+{"d": "out", "r": {"type": "compaction_end", "reason": "manual", "result": {"summary": "…", "firstKeptEntryId": "e1", "tokensBefore": 787000, "estimatedTokensAfter": 41000}, "aborted": false, "willRetry": false}}
+{"d": "in", "r": {"type": "prompt", "message": "<channel>X-2 也看一下</channel>", "streamingBehavior": "followUp", "id": "p7"}}
+{"d": "out", "r": {"id": "p7", "type": "response", "command": "prompt", "success": true, "data": {"disposition": "started"}}}
+{"d": "out", "r": {"type": "agent_start"}}
+{"d": "out", "r": {"type": "message_start", "message": {"role": "user", "content": [{"type": "text", "text": "<channel>X-2 也看一下</channel>"}]}}}
+{"d": "out", "r": {"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": "<channel>X-2 也看一下</channel>"}]}}}
+{"d": "out", "r": {"type": "message_start", "message": {"role": "assistant", "content": []}}}
+{"d": "out", "r": {"type": "message_update", "message": {"role": "assistant", "content": []}, "assistantMessageEvent": {"type": "text_delta", "delta": "收到，开始看 X-2。"}}}
+{"d": "out", "r": {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "收到，开始看 X-2。"}], "stopReason": "stop"}}}
+{"d": "out", "r": {"type": "turn_end", "message": {"role": "assistant", "content": [], "stopReason": "stop"}, "toolResults": []}}
+{"d": "out", "r": {"type": "agent_end", "messages": [], "willRetry": false}}
+{"d": "out", "r": {"type": "agent_settled", "aborted": false}}
+{"d": "in", "r": {"type": "get_session_stats", "id": "p8"}}
+{"d": "out", "r": {"id": "p8", "type": "response", "command": "get_session_stats", "success": true, "data": {"contextUsage": {"tokens": 42000, "contextWindow": 1000000}}}}
