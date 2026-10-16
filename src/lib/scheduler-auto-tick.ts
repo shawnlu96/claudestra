@@ -21,6 +21,7 @@ import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerO
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
 import { isResourceWait } from "./scheduler-plan-refusal.js";
 import { pmNoticeResume, pmUiNotice } from "./scheduler-ui-gate.js";
+import { uiEvidenceNotice } from "./scheduler-ui-evidence-notice.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
@@ -284,6 +285,7 @@ class Card {
       return this.escalate(shots.missing, intent.id);
     }
     const uiNotify = (t: LedgerTask, x: string) => this.deps.notifyPm(t, x, "action"); // 截图验收要 PM 看
+    if (shots && plan?.pmNotice) { const redo = await uiEvidenceNotice(this, intent); if (redo) return this.out(...redo); } // UIEVID2：证据漂移不叫 PM，退回重拍
     if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, uiNotify, (f, t, r) => this.settle(intent.id, f, t, r)));
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
     if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice(plan.downgrade ? plan.reason : null);

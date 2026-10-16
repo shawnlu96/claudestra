@@ -26,3 +26,17 @@ export function uiAuthorDeliveryLines(db: Database | undefined, task: LedgerTask
   return db && (task.stage === "build" || task.stage === "fix") && getWorkflow(db, task.id)?.template === "ui"
     ? [UI_AUTHOR_REMINDER] : [];
 }
+
+/**
+ * UIEVID2: the peer's short version for lent write orders (first write, fix, PM-rejected fix, convergence, re-borrow). A peer
+ * cannot run this machine's `ledger deliver`, has no local artifact root and only uploads through `lend submit --ui-shots-file`
+ * (lend-ui-submit.ts), so none of UI_DELIVERY_SECTION's local paths / source=local steps go out; no path, no full SHA (peer gate).
+ */
+export const UI_LEND_GUIDANCE = "本卡是 ui 卡：每轮交付（初次写单、普通修复、截图验收退回的修复、收敛修复、返借）都要带前后截图；" +
+  "before 对照规格要求的基线，after 拍本次交付的 head，同一展示状态和尺寸前后成对；代码改过就重拍，不许沿用上一轮的截图清单；" +
+  "按出借服务的截图说明写好清单，交付命令 lend submit 末尾加 --ui-shots-file 上传";
+
+/** The lent write order's acceptance line for a ui card (same template test as uiAuthorDeliveryLines); none for code / security / review. */
+export function uiLendLines(db: Database, task: Pick<LedgerTask, "id">): string[] {
+  return getWorkflow(db, task.id)?.template === "ui" ? [UI_LEND_GUIDANCE] : [];
+}

@@ -24,6 +24,7 @@ import { LEND_LIVE, type LendOrderStatus } from "./ledger-lend-schema.js";
 import { markRelayBaseline, restateFacts } from "./ledger-lend-relay.js";
 import { queueTimeoutDue, sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
+import { uiLendLines } from "./ui-delivery-guidance.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
 import { LedgerError, listEvents, type LedgerErrorCode } from "./ledger-store.js";
 import { claimConvergenceStep } from "./lend-arbiter-claim.js";
@@ -185,7 +186,7 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const facts = step === "write" ? restateFacts(events, task.specRev) : null;
   const restate = facts && !facts.answered ? facts.text : null; // 复述交了、PM 还没答：复述随单带上，答复之后推（i28-RS1）
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings,
-    repo: input.repo, pr: input.pr, bounce, restate, resume: !!input.write.reborrow, reborrow: input.write.reborrow ? reborrowBindingOf(input.write.reborrow) : undefined };
+    repo: input.repo, pr: input.pr, bounce, restate, ui: uiLendLines(db, task), resume: !!input.write.reborrow, reborrow: input.write.reborrow ? reborrowBindingOf(input.write.reborrow) : undefined };
   const m = step === "fix" && !bounce ? input.write.materials : undefined; // on: structured items replace the report text (fix-materials.ts)
   if (sendsItems(m)) assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
   // whole (gate scan only) carries descriptions unquoted, as stored: a line prefix must not split a wrapped key the gate would join.
