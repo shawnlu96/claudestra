@@ -8,7 +8,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cardRoleCreate } from "../src/lib/card-role-definitions.js";
+import { applyCardRole, cardRoleCreate } from "../src/lib/card-role-definitions.js";
+import { extractEffortFlag, extractModelFlag } from "../src/manager/core.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { useRoleModelPort } from "../src/lib/role-model-settings-local.js";
@@ -95,5 +96,58 @@ describe("[验收线 3] 成功 / 失败 / unknown 可追溯", () => {
     await cardRoleCreate(ok, { tier: { ...ctx(db, "code"), card: "NOPE" } })(...author().map((a) => (a === "T1" ? "NOPE" : a)));
     expect(taskTierLaunchHistory(db, "p1", "NOPE")).toEqual([]);
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE target = 'T1'").get()).toEqual(before);
+  });
+});
+
+describe("[验收线 2] 最终启动参数按启动器口径核验 security 下限（重复参数、已装饰 argv）", () => {
+  const reviewer = (...extra: string[]) => ["create", "rv", "/w", "--purpose", "T1 审查", "--task", "T1 审查", "--card", "T1", "--card-role", "reviewer", "--project", "p1", ...extra];
+  const counting = () => { const seen: string[][] = []; const create: Create = async (...a) => (seen.push(a), { ok: true }); return { seen, create }; };
+
+  test("security Claude：--model Opus 后再跟 --model=Sonnet（启动器取最后一个）= 拒绝、记 failed、不调 create", async () => {
+    const { db } = ledger();
+    const { seen, create } = counting();
+    const r = await cardRoleCreate(create, { tier: ctx(db, "security") })(...author("--model", "claude-opus-5-5", "--model=claude-sonnet-5-5"));
+    expect(r).toMatchObject({ ok: false, error: expect.stringContaining("--model 出现了 2 次") });
+    expect(seen).toEqual([]);
+    expect(extractModelFlag(author("--model", "claude-opus-5-5", "--model=claude-sonnet-5-5")).model).toBe("claude-sonnet-5-5"); // 启动器口径
+    expect(taskTierLaunchHistory(db, "p1", "T1").map((f) => f.status)).toEqual(["failed"]);
+  });
+
+  test("security Codex 审查员（原格 xhigh）：--effort xhigh 后再跟 --effort=low = 拒绝、不调 create", async () => {
+    const { db } = ledger();
+    const t = defaultRoleModels(); t.roles.reviewer = { claude: "claude-opus-5-5", codex: "xhigh" };
+    useTaskTierPort({ policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }), read: () => ({ status: "ok", table: t }) });
+    const { seen, create } = counting();
+    const r = await cardRoleCreate(create, { tier: ctx(db, "security") })(...reviewer(...CODEX, "--effort", "xhigh", "--effort=low"));
+    expect(r).toMatchObject({ ok: false, error: expect.stringContaining("--effort 出现了 2 次") });
+    expect(seen).toEqual([]);
+    expect(extractEffortFlag(reviewer("--effort", "xhigh", "--effort=low")).effort).toBe("low");
+  });
+
+  test("已装饰的 argv（旧包装加过 Sonnet）再带 security 上下文：去重不跳核验，拒绝；已装饰 Opus 照放行且不重复记尝试", async () => {
+    const { db } = ledger();
+    const decorated = applyCardRole(author("--model", "claude-sonnet-5-5"));
+    if (!("args" in decorated)) throw new Error(decorated.error);
+    const { seen, create } = counting();
+    expect(await cardRoleCreate(create, { tier: ctx(db, "security") })(...decorated.args))
+      .toMatchObject({ ok: false, error: expect.stringContaining("不得低于 Opus") });
+    expect(seen).toEqual([]);
+    const opus = applyCardRole(author("--model", "claude-opus-5-5"));
+    if (!("args" in opus)) throw new Error(opus.error);
+    expect(await cardRoleCreate(create, { tier: ctx(db, "security") })(...opus.args)).toEqual({ ok: true });
+    expect(seen).toEqual([opus.args]);
+    expect(taskTierLaunchHistory(db, "p1", "T1").map((f) => f.status)).toEqual(["failed"]);
+  });
+
+  test("非 security 的重复参数同样拒（on 下核验值必须是启动值）；off 原样委托旧路径", async () => {
+    const { db } = ledger();
+    const { seen, create } = counting();
+    expect(await cardRoleCreate(create, { tier: ctx(db, "code") })(...author("--model", "claude-opus-5-5", "--model", "claude-haiku-5-5")))
+      .toMatchObject({ ok: false, error: expect.stringContaining("--model 出现了 2 次") });
+    useTaskTierPort({ policy: () => ({ mode: "off", manualAfterMs: null, source: "config" }), read: () => ({ status: "missing", table: defaultRoleModels() }) });
+    const args = author("--model", "claude-opus-5-5", "--model", "claude-haiku-5-5");
+    const old = applyCardRole(args);
+    expect(await cardRoleCreate(create, { tier: ctx(db, "code") })(...args)).toEqual({ ok: true });
+    expect(seen).toEqual(["args" in old ? old.args : []]);
   });
 });

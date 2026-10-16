@@ -106,6 +106,18 @@ function flagValue(args: string[], flag: string): { index: number; value: string
   return null;
 }
 
+/**
+ * manager 解析 --model / --effort 的口径（src/manager/core.ts extractModelFlag / extractEffortFlag）：不跳自由文本、同名取最后一个。
+ * 类型档 on 下同名出现不止一次就拒：flagValue 取第一个、manager 取最后一个，核验的值与实际启动的值可能不是同一个。
+ */
+function repeatedFlag(args: string[]): string | null {
+  for (const flag of ["--model", "--effort"]) {
+    const n = args.filter((a, i) => i > 0 && (a === flag || a.startsWith(`${flag}=`))).length;
+    if (n > 1) return `${flag} 出现了 ${n} 次（启动器取最后一个，核验不了实际值），只能给一个`;
+  }
+  return null;
+}
+
 /** start_node 的工作单指针：之后到结尾整段是路径（可含空格），不可分 */
 const POINTER = "。先读 ";
 
@@ -167,9 +179,16 @@ export function applyCardRole(args: string[], opts: CardRoleOptions = {}): Appli
   }
   const duties = dutiesOf(def), boundary = [...DISALLOWED_PRESETS.default, ...def.disallowedTools].join(" ");
   const purpose = flagValue(args, "--purpose");
-  // 嵌套的入口（runStart 里再套 runLocalStart）已经整套加过：模型、这份边界原文、职责原文都在才算，不重复追加
+  // 嵌套的入口（runStart 里再套 runLocalStart）已经整套加过：模型、这份边界原文、职责原文都在才算，不重复追加。
+  // 带类型上下文时去重不跳核验：已装饰的 --model 照样过重复参数与 security 下限（外层已记过启动尝试，这里通过只放行、拒绝才记）
   if (model && (purpose?.value === duties || purpose?.value?.endsWith(`\n\n${duties}`))
-    && (def.disallowedTools.length ? flagValue(args, "--disallowed")?.value === boundary : true)) return { args };
+    && (def.disallowedTools.length ? flagValue(args, "--disallowed")?.value === boundary : true)) {
+    if (!opts.tier) return { args };
+    const again = decideTierLaunch(opts.tier, role, "claude", model.value?.trim() ?? null, args[1] ?? null);
+    if (again.mode !== "on") return { args };
+    const why = "error" in again ? again.error : repeatedFlag(args);
+    return why ? { error: `${def.name}：${why}；没有建会话`, tierLaunch: again.plan } : { args };
+  }
   const taken = def.disallowedTools.length ? flagValue(args, "--preset") ?? flagValue(args, "--disallowed") : null;
   if (taken) return { error: `${def.name} 要用定义里的工具边界，这次 create 已带 ${args[taken.index]}，不覆盖也不放宽；没有建会话` };
   const text = purpose ? withDuties(purpose.value ?? "", duties) : duties;
@@ -179,6 +198,8 @@ export function applyCardRole(args: string[], opts: CardRoleOptions = {}): Appli
   const tier = opts.tier ? decideTierLaunch(opts.tier, role, "claude", model?.value?.trim() ?? null, args[1] ?? null) : null;
   if (tier && "error" in tier) return { error: `${def.name}：${tier.error}；没有建会话`, tierLaunch: tier.plan };
   const tierOn = tier?.mode === "on" ? tier : null;
+  const dup = tierOn ? repeatedFlag(args) : null;
+  if (tierOn && dup) return { error: `${def.name}：${dup}；没有建会话`, tierLaunch: tierOn.plan };
   const pick = model || tierOn ? null : pickReported({ ...cardOf(args), role, family: "claude", explicit: false }, opts);
   if (pick) out.push("--model", pick.inject ?? def.model);
   if (tierOn && !model) out.push("--model", tierOn.value ?? def.model);
@@ -219,6 +240,8 @@ function codexTier(args: string[], role: CardRole, ctx: TierLaunchCtx): Applied 
   const d = decideTierLaunch(ctx, role, "codex", explicit, args[1] ?? null);
   if ("error" in d) return { error: `${role}（codex）：${d.error}；没有建会话`, tierLaunch: d.plan };
   if (d.mode !== "on") return null;
+  const dup = repeatedFlag(args);
+  if (dup) return { error: `${role}（codex）：${dup}；没有建会话`, tierLaunch: d.plan };
   if (explicit !== null) return { args, tierLaunch: d.plan };
   // 原档就地换值（argv 顺序不变）；解析成 null = 照 Codex 自己的配置，去掉 --effort
   const span = eff ? (args[eff.index] === "--effort" ? 2 : 1) : 0;
@@ -271,6 +294,8 @@ function tierOnly(args: string[], ctx: TierLaunchCtx, role: CardRole): Applied {
   const d = decideTierLaunch(ctx, role, "claude", model, args[1] ?? null);
   if ("error" in d) return { error: `${role}：${d.error}；没有建会话`, tierLaunch: d.plan };
   if (d.mode !== "on") return { args };
+  const dup = repeatedFlag(args);
+  if (dup) return { error: `${role}：${dup}；没有建会话`, tierLaunch: d.plan };
   const out = model === null && d.value ? [...args, "--model", d.value] : args;
   d.plan.final.model = flagValue(out, "--model")?.value ?? null;
   return { args: out, tierLaunch: d.plan };

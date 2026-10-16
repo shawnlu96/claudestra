@@ -26,7 +26,7 @@ import { git, openReviewWorktree } from "./scheduler-review-worktree.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
 import { tierCreate } from "./card-role-definitions.js";
-import { bindTierSession } from "./task-tier-models.js";
+import { bindTierSession, reviewerTierCtx } from "./task-tier-models.js";
 
 type Manager = AutoTickDeps["manager"];
 export interface ReviewSwapDeps {
@@ -88,8 +88,8 @@ export async function createReplacement(db: Database, task: LedgerTask, family: 
   const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer",
     "--purpose", "作者家族变更后的独立复验"];
   if (family === "codex") args.push("--runtime", "codex", "--transport", "acp");
-  const w = getWorkflow(db, task.id); // TIER3：换会话的审查员同样按卡的类型选模型（off 原样）
-  const r = await tierCreate(agent, { db, project: task.project, card: task.id, tier: w?.template ?? "code", specRev: w?.specRev, round: task.round }, "reviewer")(...args);
+  const tier = reviewerTierCtx(db, task); // TIER3：换会话的审查员同样按卡的类型选模型、核对规格卡首声明（off = null，原样）
+  const r = await (tier ? tierCreate(agent, tier, "reviewer") : agent)(...args);
   if (r.ok !== true) return { kind: "unknown", reason: oneLine(`新审查会话创建未确认：${String(r.error)}`) };
   for (let n = 0; n < 20; n++) {
     active();

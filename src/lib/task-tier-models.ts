@@ -12,7 +12,10 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { CODEX_EFFORT_LEVELS } from "./codex-launch.js";
 import { appendEvent } from "./ledger-write.js";
-import { getTask } from "./ledger-store.js";
+import { getMeta, getTask } from "./ledger-store.js";
+import { getWorkflow } from "./ledger-scheduler.js";
+import type { LedgerTask } from "./ledger-stages.js";
+import { readTextSoft, specPathFor } from "./task-spec.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readRoleModels, roleModelOf, type CardRole, type RoleModelRead } from "./role-model-settings.js";
 import { isOpusGrade, type CodexEffort } from "./task-tier-model-settings.js";
@@ -119,6 +122,18 @@ export function tierStartTemplate(project: string, explicit: string | undefined,
 /** 一次本机建会话的上下文：tier = 卡上存的流程模板；specText 给了就核对卡首声明；baseEffort = argv 里调用方自带的那一档（不当显式覆盖） */
 export interface TierLaunchCtx {
   db?: Database; project: string; card: string; tier: string; specText?: string | null; specRev?: number; round?: number; baseEffort?: CodexEffort;
+}
+
+/**
+ * 审查员（调度建的普通审查员、换会话的审查员）的类型上下文：卡上存的流程模板与规格版本 + 现在的规格卡（统一定位入口 task-spec.ts specPathFor），
+ * 启动时照样核对卡首声明。taskTierModels off：返回 null，不读规格卡、不建上下文，调用方原样走旧路径。
+ */
+export function reviewerTierCtx(db: Database, task: Pick<LedgerTask, "id" | "project" | "spec" | "round">, p: TaskTierPort = port): TierLaunchCtx | null {
+  if (taskTierMode(task.project, p).mode === "off") return null;
+  const w = getWorkflow(db, task.id);
+  let specText: string | null = null;
+  try { specText = readTextSoft(specPathFor(task, getMeta(db, task.project).docsDir)); } catch { specText = null; /* 定位不了 = 只认已存流程（tierAtLaunch 的约定） */ }
+  return { db, project: task.project, card: task.id, tier: w?.template ?? "code", specText, specRev: w?.specRev, round: task.round };
 }
 
 export type TierDecision =

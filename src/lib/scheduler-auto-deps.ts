@@ -1,7 +1,7 @@
 import { prepareLendAuthor, type LendAuthorDeps } from "./lend-author-retire-tick.js";
 import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author.js";
-import { bindTierSession } from "./task-tier-models.js";
+import { bindTierSession, reviewerTierCtx } from "./task-tier-models.js";
 import { cardRoleCreate } from "./card-role-definitions.js";
 import { rebuildRetiredAuthor, type AuthorRebuildDeps } from "./scheduler-author-rebuild.js";
 /**
@@ -13,7 +13,7 @@ import { rebuildRetiredAuthor, type AuthorRebuildDeps } from "./scheduler-author
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { resolveBunPath } from "./bun-path.js";
-import { getWorkflow, type AuthorFamily } from "./ledger-scheduler.js";
+import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getTask } from "./ledger-store.js";
 import { statePath } from "./paths.js";
@@ -91,9 +91,8 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
   const dir = opened.dir;
   const name = reviewerName(task.id);
   const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
-  const w = getWorkflow(db, task.id); // TIER3：审查员按卡上存的流程模板（类型）选模型
-  const tier = { db, project: task.project, card: task.id, tier: w?.template ?? "code", specRev: w?.specRev, round: task.round };
-  const r = await whileOwned(env.active, () => cardRoleCreate(env.create, { tier })("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
+  const tier = reviewerTierCtx(db, task); // TIER3：审查员按卡上存的流程模板（类型）选模型，并核对现在的规格卡首声明；off = null 走旧路径
+  const r = await whileOwned(env.active, () => cardRoleCreate(env.create, tier ? { tier } : {})("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
     "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer", ...runtime));
   if (r.code === "lease-lost") throw new SchedulerStopped(`manager create: ${String(r.error)}`); // 服务在停，不是建失败：不交 PM
   if (r.ok !== true) return { kind: "unknown", reason: `建 ${name} 失败或结果不明：${String(r.error ?? "")}`.slice(0, 400) };
