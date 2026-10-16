@@ -278,6 +278,70 @@ test("[验收线 4] 桌面点侧栏条『整页』：主区盖出今天页；再
   await v.unmount();
 });
 
+/** 在 window 上按一下 Esc；target 给了就从那个元素冒泡上来（输入框里按） */
+type KeyEv = Event & { preventDefault(): void };
+const keyWin = () => globalThis as unknown as { window: EventTarget & { KeyboardEvent: new (t: string, i: object) => KeyEv } };
+const escEvent = () => new (keyWin().window.KeyboardEvent)("keydown", { key: "Escape", bubbles: true, cancelable: true });
+async function pressEsc(target?: El, ev: KeyEv = escEvent()) {
+  await React.act(async () => { (target as unknown as EventTarget | undefined)?.dispatchEvent(ev) ?? keyWin().window.dispatchEvent(ev); });
+  await tick(30);
+}
+
+test("[验收线 1] 整页层有『返回』：点了 project 回 null、原来的会话照旧；Esc 同样关；输入框里的 Esc 不关", async () => {
+  win.localStorage.clear();
+  const v = await mount("shell");
+  await until(() => !!v.host.querySelector("[data-now=strip] [data-now-full]"), "full button");
+  const master = () => v.all("button").find((b) => (b.textContent ?? "").includes("大总管") && !b.closest?.("[data-now]"));
+  await until(() => !!master(), "master row");
+  await v.click(master(), "master row");
+  await until(() => !!v.seen.store!.state.activeAgent, "open master");
+  const picked = v.seen.store!.state.activeAgent;
+  await until(() => !v.host.querySelector("[data-now=page]"), "chat main");
+  const open = async () => {
+    await v.click(v.host.querySelector("[data-now=strip] [data-now-full]"), "full page");
+    await until(() => !!v.host.querySelector("main [data-now=page] [data-now-back]"), "back button");
+  };
+  await open();
+  const back = v.host.querySelector("main [data-now=page] [data-now-back]")!;
+  expect((back.textContent ?? "").trim()).toBe("返回");
+  expect(back.querySelector("svg")).not.toBeNull();
+  await v.click(back, "back");
+  expect(v.seen.nav.project).toBeNull();
+  await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed by back");
+  expect(v.seen.store!.state.activeAgent).toBe(picked);
+  // Esc 关
+  await open();
+  await pressEsc();
+  expect(v.seen.nav.project).toBeNull();
+  await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed by esc");
+  // 输入框里的 Esc、已被别人处理过的 Esc：不关
+  await open();
+  const input = doc.createElement("input");
+  doc.body.appendChild(input);
+  await pressEsc(input);
+  input.remove();
+  const handled = escEvent();
+  handled.preventDefault();
+  await pressEsc(undefined, handled);
+  expect(v.seen.nav.project).toBe(ui.TODAY_KEY);
+  await React.act(async () => ui.closeCollab());
+  await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed");
+  await v.unmount();
+  // 卸载后不再听：Esc 不动 collab 状态
+  await pressEsc();
+  expect(v.seen.nav.project).toBeNull();
+});
+
+test("[验收线 2] 空状态主区里的今天页没有返回按钮，Esc 也不改 collab 状态", async () => {
+  const v = await mount("main");
+  await until(() => !!v.host.querySelector("[data-now=page] h2"), "empty-state page");
+  expect(v.host.querySelector("[data-now-back]")).toBeNull();
+  await pressEsc();
+  expect(v.seen.nav.project).toBeNull();
+  expect(v.host.querySelector("[data-now=page]")).not.toBeNull();
+  await v.unmount();
+});
+
 test("[回归] 页面版、整页、展开的侧栏条同时挂着也只跑一套读取：没选会话时点『整页』不重读，每项目各一次", async () => {
   win.localStorage.setItem("cstra_now_open", "1");
   const v = await mount("shell");
