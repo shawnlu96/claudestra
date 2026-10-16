@@ -121,6 +121,99 @@ describe("[验收线 4] 提醒生成后、发送前状态前进", () => {
   });
 });
 
+/** 真 PmDigest 包装器 + 可控末端：raw 的结果由 reply 决定（缺省真送到），gate 让第一封挂起占住项目串行 */
+async function digestKit(text: string) {
+  const pm = activeProjectPm(w.db, "p")!;
+  const ws = { send: () => {} } as unknown as LocalEndpoint["ws"];
+  const to: LocalEndpoint = { kind: "local", agentName: pm, channelId: "ch-pm", ws };
+  const store = new PmDigestStore(join(w.f.dir, "pm-digest.json"), join(w.f.dir, "pm-digest-mode.json"));
+  await store.setPullMode("p", "off");
+  const hold = new PmHoldStore(join(w.f.dir, "pm-hold-mode.json"), join(w.f.dir, "pm-hold.json"));
+  const out: Envelope[] = [];
+  const kit = { pm, to, store, hold, out, reply: (_e: Envelope): Delivery["outcome"] => ({ kind: "sent" }), gate: null as Promise<void> | null };
+  const raw = async (e: Envelope): Promise<Delivery> => {
+    const g = kit.gate;
+    kit.gate = null;
+    if (g) await g;
+    out.push({ ...e });
+    return { envelope: e, outcome: kit.reply(e) };
+  };
+  const digest = new PmDigest({ store, now, db: () => w.db, ledger: () => w.db, hold, heldCarriers: () => new Set(),
+    agents: () => [{ name: pm, projectId: "p", channelId: "ch-pm" } as never] });
+  const send = (e: Envelope) => digest.wrap(raw, w.db, "p")(e, to);
+  digest.start({ clients: new Map([["ch-pm", { ws }]]), deliver: send }, false);
+  let n = 0;
+  const sched = (content: string): Envelope => ({ from: { kind: "local", agentName: "scheduler", channelId: "", ws }, to, intent: "request", content,
+    meta: { messageId: `k${++n}`, threadId: `t${n}`, ts: "2026-10-16T00:00:00Z", triggerKind: "agent_tool", skipInterAgentWatchdog: true } });
+  return { ...kit, kit, digest, send, sched, text };
+}
+
+describe("[验收线 4] 串行等待与押后整包（复审 serial-stale / held-bundle）", () => {
+  test("过了 gate 在项目串行里排队的提醒，等待期间卡前进：实际 send 为零，台账一次跳过", async () => {
+    quiet("on");
+    const k = await digestKit(await recorded());
+    try {
+      let open!: () => void;
+      k.kit.gate = new Promise<void>((r) => { open = r; });
+      const first = k.send(k.sched("[调度引擎] T9 退回人工，请接手：占住串行"));
+      const second = k.send(k.sched(k.text)); // 此刻仍是现状：过 gate 进串行排队
+      expect((await advance()).ok).toBe(true);
+      open();
+      await first;
+      expect((await second).outcome).toEqual({ kind: "sent", note: "pm-quiet" });
+      expect(k.out.map((e) => e.content)).toEqual(["[调度引擎] T9 退回人工，请接手：占住串行"]);
+      expect(skips()).toHaveLength(1);
+    } finally { k.digest.stop(); }
+  });
+
+  test("整包押在忙 PM 的队里后卡前进：重投时逐条重核，混合包重拼只带有效的，全过期不投", async () => {
+    quiet("on");
+    const k = await digestKit(await recorded());
+    try {
+      k.hold.setSetting("p", { mode: "hold", everyMin: 60, since: 0 });
+      await k.send(k.sched(k.text));
+      await k.send(k.sched("[调度引擎] T9 退回人工，请接手：别的事"));
+      k.hold.setSetting("p", { mode: "off", everyMin: 60, since: 0 });
+      k.kit.reply = () => ({ kind: "sent", note: "queued" }); // PM 忙：押后队列收下整包
+      await k.digest.tick();
+      expect(k.out).toHaveLength(1);
+      expect(k.hold.queue()).toHaveLength(0);
+      const saved = structuredClone({ ...k.out[0], to: undefined }) as unknown as Envelope; // 押后队列落盘的那份
+      expect((await advance()).ok).toBe(true);
+      k.kit.reply = () => ({ kind: "sent" });
+      await k.send({ ...saved, to: k.to });
+      expect(k.out).toHaveLength(2);
+      expect(k.out[1].content).toContain("攒了 1 条");
+      expect(k.out[1].content).toContain("T9 退回人工");
+      expect(k.out[1].content).not.toContain("[审查已回]");
+      expect(skips()).toHaveLength(1);
+
+      // 只带过期条目的整包：不投
+      const stale = { ...saved, to: k.to, pmHold: { entries: (saved as { pmHold?: { entries: { body: string }[] } }).pmHold!.entries
+        .filter((e) => e.body.startsWith("[审查已回]")) } } as Envelope;
+      expect((await k.send(stale)).outcome).toEqual({ kind: "sent", note: "pm-quiet" });
+      expect(k.out).toHaveLength(2);
+    } finally { k.digest.stop(); }
+  });
+
+  test("pmQuiet=off：整包信封不带原条目，押后重投逐字照旧", async () => {
+    quiet("off");
+    const k = await digestKit(await recorded());
+    try {
+      k.hold.setSetting("p", { mode: "hold", everyMin: 60, since: 0 });
+      await k.send(k.sched(k.text));
+      k.hold.setSetting("p", { mode: "off", everyMin: 60, since: 0 });
+      await k.digest.tick();
+      expect(k.out).toHaveLength(1);
+      expect("pmHold" in k.out[0]).toBe(false);
+      await advance();
+      await k.send({ ...k.out[0], to: k.to });
+      expect(k.out[1].content).toBe(k.out[0].content);
+      expect(skips()).toEqual([]);
+    } finally { k.digest.stop(); }
+  });
+});
+
 describe("[验收线 6] pmQuiet=off / observe", () => {
   test("off：同一过期输入照投，不读不记；显式引用不加尾签", async () => {
     quiet("off");
