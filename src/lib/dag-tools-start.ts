@@ -17,6 +17,8 @@ import { getItem, getTask } from "./ledger-store.js";
 import { canonicalTwinError } from "./registry.js";
 import { notePrivateStart, parseStartPlacement, PRIVATE_ONLY_PEER, privateStartMode, type StartPlacement } from "./scheduler-placement-start.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
+import { tierCheckGate } from "./task-tier-models.js";
+import { isTaskTier, tierLaunchable } from "./task-tier-spec.js";
 import { uiSpecGate } from "./spec-lint.js";
 import { observationGate } from "./spec-lint-observation.js";
 import { cardIdGate } from "./shared-ledger-mirror-skip-id.js";
@@ -177,6 +179,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const want = parseStartPlacement(args.placement);
   if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
   const template = args.template ?? "code";
+  // TIER3：docs 只在模型表里有，注册流程模板（TIER3e）之前不能开卡
+  if (isTaskTier(template) && !tierLaunchable(template)) return no("invalid", `类型 ${template} 还没有注册流程模板，不能开卡`);
   if (!(WORKFLOW_TEMPLATES as readonly string[]).includes(template)) return no("invalid", `template 只能是 code / ui / security（收到 ${template.slice(0, 80)}）`);
   const r = nodeReady(env, f, args.key);
   if ("error" in r) return no("not_found", r.error as string);
@@ -187,6 +191,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const taskId = args.taskId ?? cardNames(env.db, f, node.key).taskId;
   if (!TASK_ID.test(taskId)) return no("invalid", `卡号 ${taskId} 不合法（字母数字开头，≤ 60 位，只含字母数字 _ . -）`);
   const idGate = cardIdGate(taskId); if (idGate) return no("invalid", idGate);
+  const tierRefused = tierCheckGate(env.db, "dispatch", { project: f.project, taskId, tier: template as WorkflowTemplate, fileGlobs: node.fileGlobs });
+  if (tierRefused) return no("tier_check", `类型校验拒绝开卡：${tierRefused}`);
   const lint = uiSpecGate(env.db, env.ledgerDir, taskId, args.spec, f.project); if (lint) return no("spec_lint", lint);
   const obs = observationGate({ ledgerDir: env.ledgerDir, project: f.project, taskId, inline: args.spec }, { policy: env.recoveryPolicy });
   if (obs) return no("spec_lint", obs);
