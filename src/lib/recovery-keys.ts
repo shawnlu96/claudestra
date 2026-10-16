@@ -101,6 +101,7 @@ export const RECOVERY_KEYS = [
   "selfHealBeforeManual",
   "skipEffectsAutoScope",
   "specObservationHours",
+  "staleLeaseHandover",
   "staleReplacement",
   "teamBody",
   "tmuxSockHeal",

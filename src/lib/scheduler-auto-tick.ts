@@ -433,6 +433,8 @@ class Card {
     }
     if (open) return this.drive(open, null);
     const peerHold = peerPrHold(this.db, this.task, this.deps.now(), this.deps.recoveryPolicy); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
+    const stale = await (await import("./lend-local-continuity-tick.js")).staleLeaseStep(this.db, this.task, this.opts, this.deps.manager); // i28-STALELEASE1
+    if (stale) return this.out("replan", stale);
     const snap = autoSnapshot(this.db, this.task, this.opts), plan = planScheduler(snap);
     await (await import("./lend-fix-reassign-tick.js")).trackLeaseWait(this.db, this.task, plan, this.deps.manager); // i28-RA1：等租约方计时
     const back = await (await import("./recovery-fix-local-swap-tick.js")).trackLocalSwap(this.db, this.task, snap, plan, this.deps); // GATESWAP1
