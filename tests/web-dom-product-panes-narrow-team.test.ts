@@ -1,14 +1,14 @@
 /**
- * team-project-N8B9：tab 停在「团队」时缩到窄屏，主区域不再整块空白。真 ProductPanes 挂到 happy-dom（React 19）。
- * 窄屏没有「团队」tab，渲染时按 product 换算（没有 board 按 dag），选中的按钮和内容一致；存下来的 tab 不动，回到宽屏还是「团队」。
- * 旧红新绿：main 上窄屏 + tab=team 仍渲染团队面板（窄屏下是空的），「产品 DAG」却显示选中。
- * 换算以外的渲染不变：窄屏 + team 的 HTML 和窄屏 + product（没有 board 时 dag）逐字节相同，宽屏 + team、窄屏其余 tab 照旧。
+ * PROJTABS1「模块进度」标签（product/product-panes.tsx ModulePane）真挂到 happy-dom（React 19），桌面 / 手机各跑一遍。
+ * [验收线 3] 没选模块时是有子图的模块列表（不是灰掉的标签），点一行 = onFeature(id)；选了模块是它的子图，面包屑「模块」回列表；
+ * 「按人」分段 = 调用方给的谁在干活看板；没有可列的模块时不出分段，直接是按人。
+ * 原 N8B9（窄屏没有「团队」标签时的换算）随四标签作废：团队在桌面手机都是一个标签（tests/web-dom-project-tabs.test.ts）。
  * happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { ProductBoard } from "../web/lib/api/product-board-types";
+import type { ProductBoard, ProductFeature } from "../web/lib/api/product-board-types";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
@@ -21,124 +21,93 @@ const doc = () => (globalThis as unknown as { document: { createElement(tag: str
 const webRequire = createRequire(new URL("../web/package.json", import.meta.url));
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
-let ProductPanes: (p: Record<string, unknown>) => unknown;
+let ModulePane: (p: Record<string, unknown>) => unknown;
 
 beforeAll(async () => {
   GlobalRegistrator.register({ url: "http://localhost/", width: 1200, height: 900 });
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   React = webRequire("react");
   ({ createRoot } = webRequire("react-dom/client"));
-  ({ ProductPanes } = await import(new URL("../web/features/collab/product/product-panes.tsx", import.meta.url).href));
+  ({ ModulePane } = await import(new URL("../web/features/collab/product/product-panes.tsx", import.meta.url).href));
 });
 afterAll(async () => { await GlobalRegistrator.unregister(); });
 
-const board: ProductBoard = {
-  features: [{ id: "f1", title: "真看板", status: "active", hasDag: false, version: 1, counts: { total: 1, completed: 0, active: 1 }, eta: null, cards: [] }],
-  deps: [],
-};
+const feature = (id: string, title: string, hasDag: boolean): ProductFeature =>
+  ({ id, title, status: "active", hasDag, version: 1, counts: { total: 4, completed: 1, active: 1 }, eta: null, cards: [] });
+const board: ProductBoard = { features: [feature("f1", "合成模块甲", true), feature("f2", "合成模块乙", true), feature("f3", "没有子图的模块", false)], deps: [] };
+const noDag: ProductBoard = { features: [feature("f3", "没有子图的模块", false)], deps: [] };
+const dagBoard = { now: 0, agents: [], features: [{ id: "f1", title: "合成模块甲", currentVersion: 1, nodes: [] }] };
 
 const h = (...a: unknown[]) => (React.createElement as (...x: unknown[]) => unknown)(...a);
 const base = () => ({
-  board: null as ProductBoard | null, dagBoard: null, featureId: null as string | null, tab: "team", setTab: (_: string) => {},
-  onFeature: () => {}, onTask: () => {}, subdag: h("i", { "data-subdag": "1" }, "子图"), fallback: h("i", { "data-causal": "1" }, "兜底"),
-  progress: h("i", { "data-progress": "1" }, "进度"), team: h("i", { "data-team": "1" }, "团队面板"),
-  graph: false, narrow: true, now: 0, tr: (s: string) => s,
+  board: board as ProductBoard | null, loading: false, dagBoard: null as unknown, featureId: null as string | null, by: "module", setBy: (_: string) => {},
+  onBack: () => {}, onFeature: (_: string) => {}, onTask: () => {}, subdag: h("i", { "data-subdag": "1" }, "子图"),
+  fallback: h("i", { "data-causal": "1" }, "兜底"), progress: h("i", { "data-progress": "1" }, "进度"), graph: false, narrow: false, now: 0, tr: (s: string) => s,
 });
 type PaneProps = ReturnType<typeof base>;
 
-function mounted() {
+async function mounted(over: Partial<PaneProps>) {
   const el = doc().createElement("div");
   doc().body.appendChild(el);
   const root = createRoot(el as never);
-  const show = (node: unknown) => React.act(async () => { root.render(node as never); });
-  const done = () => React.act(async () => { root.unmount(); el.remove(); });
-  return { el, show, done };
+  await React.act(async () => { root.render(h(ModulePane, { ...base(), ...over }) as never); });
+  return { el, done: () => React.act(async () => { root.unmount(); el.remove(); }) };
 }
-async function html(over: Partial<PaneProps>) {
-  const m = mounted();
-  await m.show(h(ProductPanes, { ...base(), ...over }));
-  const out = m.el.innerHTML, snap = { html: out, on: selected(m.el), tabs: tabs(m.el), has: (part: string) => out.includes(part) };
-  await m.done();
-  return snap;
+const segs = (el: El) => Array.from(el.querySelectorAll('[role="tab"]')).map(b => [b.textContent, b.getAttribute("aria-selected")]);
+
+for (const narrow of [false, true]) {
+  const size = narrow ? "390" : "1280";
+
+  test(`${size} [验收线 3] 没选模块：有子图的模块一行一个，不是灰标签；点一行选中它`, async () => {
+    const picked: string[] = [];
+    const m = await mounted({ narrow, onFeature: (id: string) => picked.push(id) });
+    const rows = Array.from(m.el.querySelectorAll("[data-module]"));
+    expect(rows.map(r => r.getAttribute("data-module"))).toEqual(["f1", "f2"]);
+    expect(m.el.querySelector("button[disabled]")).toBeNull();
+    expect(segs(m.el)).toEqual([["按模块", "true"], ["按人", "false"]]);
+    await React.act(async () => { rows[1]!.click(); });
+    expect(picked).toEqual(["f2"]);
+    expect(m.el.textContent).not.toMatch(/feature|子 DAG|产品 DAG/);
+    await m.done();
+  });
+
+  test(`${size} [验收线 3] 选了模块：面包屑「模块 › 名字」+ 子图；面包屑回列表；没有快照退回兜底`, async () => {
+    const back: number[] = [];
+    const m = await mounted({ narrow, featureId: "f1", dagBoard, onBack: () => back.push(1) });
+    expect(m.el.querySelector("[data-subdag]")).not.toBeNull();
+    expect(m.el.querySelector("nav")?.textContent).toBe("模块合成模块甲");
+    await React.act(async () => { m.el.querySelector<El>("nav button")!.click(); });
+    expect(back).toEqual([1]);
+    await m.done();
+    const missing = await mounted({ narrow, featureId: "f2", dagBoard });
+    expect(missing.el.querySelector("[data-causal]")).not.toBeNull();
+    await missing.done();
+  });
+
+  test(`${size} [验收线 3] 「按人」是谁在干活看板；点分段调 setBy`, async () => {
+    const calls: string[] = [];
+    const m = await mounted({ narrow, by: "person", setBy: (b: string) => calls.push(b) });
+    expect(m.el.querySelector("[data-progress]")).not.toBeNull();
+    expect(m.el.querySelector("[data-module]")).toBeNull();
+    expect(segs(m.el)).toEqual([["按模块", "false"], ["按人", "true"]]);
+    await React.act(async () => { m.el.querySelectorAll<El>('[role="tab"]')[0]!.click(); });
+    expect(calls).toEqual(["module"]);
+    await m.done();
+  });
+
+  test(`${size} 没有可列的模块：不出分段，直接按人；老 bridge 没有产品看板但有子图时按模块是子图`, async () => {
+    for (const over of [{ board: noDag }, { board: null }] as Partial<PaneProps>[]) {
+      const m = await mounted({ narrow, ...over });
+      expect(m.el.querySelector('[role="tablist"]')).toBeNull();
+      expect(m.el.querySelector("[data-progress]")).not.toBeNull();
+      await m.done();
+    }
+    const graph = await mounted({ narrow, board: null, graph: true });
+    expect(graph.el.querySelector("[data-subdag]")).not.toBeNull();
+    expect(segs(graph.el).length).toBe(2);
+    await graph.done();
+    const loading = await mounted({ narrow, board: null, loading: true });
+    expect(loading.el.querySelector('[role="status"]')?.textContent).toBe("加载中…");
+    await loading.done();
+  });
 }
-const tabs = (el: El) => Array.from(el.querySelectorAll('[role="tab"]')).map(b => b.textContent);
-const selected = (el: El) => Array.from(el.querySelectorAll('[role="tab"]')).filter(b => b.getAttribute("aria-selected") === "true").map(b => b.textContent);
-
-test("窄屏 + tab=team + 有 board：渲染产品 DAG 内容，「产品 DAG」选中，和窄屏 + product 逐字节相同", async () => {
-  const team = await html({ board });
-  expect(team.html).toContain("真看板");
-  expect(team.has("data-team")).toBe(false);
-  expect(team.tabs).toEqual(["产品 DAG", "谁在干活"]);
-  expect(team.on).toEqual(["产品 DAG"]);
-  expect(team.html).toBe((await html({ board, tab: "product" })).html);
-});
-
-test("窄屏 + tab=team + board 还在加载：占位，和窄屏 + product 逐字节相同", async () => {
-  const team = await html({ loading: true } as Partial<PaneProps>);
-  expect(team.has('role="status"')).toBe(true);
-  expect(team.on).toEqual(["产品 DAG"]);
-  expect(team.html).toBe((await html({ loading: true, tab: "product" } as Partial<PaneProps>)).html);
-});
-
-test("窄屏 + tab=team + 没有 board：渲染 dag 内容，dag 按钮选中，和窄屏 + dag 逐字节相同", async () => {
-  const causal = await html({});
-  expect(causal.has("data-causal")).toBe(true);
-  expect(causal.has("data-team")).toBe(false);
-  expect(causal.tabs).toEqual(["因果线", "谁在干活"]);
-  expect(causal.on).toEqual(["因果线"]);
-  expect(causal.html).toBe((await html({ tab: "dag" })).html);
-  const graph = await html({ graph: true });
-  expect(graph.has("data-subdag")).toBe(true);
-  expect(graph.on).toEqual(["子 DAG"]);
-  expect(graph.html).toBe((await html({ graph: true, tab: "dag" })).html);
-});
-
-test("宽屏 + tab=team 照旧：团队面板在，「团队」选中", async () => {
-  for (const over of [{ board }, {}] as Partial<PaneProps>[]) {
-    const wide = await html({ ...over, narrow: false });
-    expect(wide.has("data-team")).toBe(true);
-    expect(wide.html).not.toContain("真看板");
-    expect(wide.has("data-causal")).toBe(false);
-    expect(wide.on).toEqual(["团队"]);
-  }
-});
-
-test("窄屏其余 tab 照旧：progress / product / 选了 feature 的 dag", async () => {
-  const progress = await html({ board, tab: "progress" });
-  expect(progress.has("data-progress")).toBe(true);
-  expect(progress.html).not.toContain("真看板");
-  expect(progress.on).toEqual(["谁在干活"]);
-  const product = await html({ board, tab: "product" });
-  expect(product.html).toContain("真看板");
-  expect(product.on).toEqual(["产品 DAG"]);
-  const dag = await html({ board, tab: "dag", featureId: "f1" });
-  expect(dag.on).toEqual(["产品 DAG"]);
-  expect(dag.html).not.toBe(product.html);
-  const none = await html({ tab: "progress" });
-  expect(none.has("data-progress")).toBe(true);
-  expect(none.on).toEqual(["谁在干活"]);
-});
-
-test("只在渲染时换算：1280 选「团队」→ 缩到窄屏显示产品 DAG → 回到宽屏还是「团队」，期间 setTab 没被调用", async () => {
-  const calls: string[] = [];
-  function Host({ narrow }: { narrow: boolean }) {
-    const [tab, set] = React.useState("product");
-    return h(ProductPanes, { ...base(), board, narrow, tab, setTab: (t: string) => { calls.push(t); set(t); } });
-  }
-  const m = mounted();
-  await m.show(h(Host, { narrow: false }));
-  const teamTab = Array.from(m.el.querySelectorAll('[role="tab"]')).find(b => b.textContent === "团队")!;
-  await React.act(async () => { teamTab.click(); });
-  expect(calls).toEqual(["team"]);
-  expect(selected(m.el)).toEqual(["团队"]);
-  const wideBefore = m.el.innerHTML;
-  await m.show(h(Host, { narrow: true }));
-  expect(m.el.textContent).toContain("真看板");
-  expect(m.el.querySelector("[data-team]")).toBeNull();
-  expect(selected(m.el)).toEqual(["产品 DAG"]);
-  await m.show(h(Host, { narrow: false }));
-  expect(m.el.innerHTML).toBe(wideBefore);
-  expect(selected(m.el)).toEqual(["团队"]);
-  expect(calls).toEqual(["team"]);
-  await m.done();
-});

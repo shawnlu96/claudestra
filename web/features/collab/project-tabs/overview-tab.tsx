@@ -133,6 +133,9 @@ export function Overview(props: OverviewProps) {
           ))}
         </div>
       )}
+      {props.counts?.status === "ready" && props.counts.missing > 0 && (
+        <div className={v.warn} data-count-hint>{tr("另有 {k} 个模块还没读到，数字不含它们", { k: props.counts.missing })}</div>
+      )}
       {stuck.length > 0 && <Sec title={tr("卡住了")}>{stuck.map((r) => <StuckLine key={r.id} r={r} onPick={onPick} />)}</Sec>}
       <Sec title={tr("要你定的")}><Waits project={project} ov={ov} waits={props.waits} unknown={props.waitsUnknown} onPick={onPick} tr={tr} /></Sec>
       {props.since}
