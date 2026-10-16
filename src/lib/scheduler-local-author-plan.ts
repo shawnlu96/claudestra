@@ -37,13 +37,16 @@ export async function localAuthorPlan(db: Database, task: LedgerTask, worktreeRo
   const agentName = name?.slice("agent-".length) ?? `task-${task.id.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48); // name: AREB1 rebuildAgentName
   const worktree = join(worktreeRoot, task.id.toLowerCase()), ledgerDir = statePath("ledger");
   const promptPath = join(ledgerDir, "reviews", `${task.id}-exec-prompt.md`), templatePath = statePath("ledger", "prompts", "exec-template.md");
-  const base = task.headSHA ?? "origin/main", pm = task.pm ?? projectPm(db, task.project) ?? "scheduler";
+  const local = policy.localMerge === true; // ONB-1：localMerge 项目没有 origin，起点是本机 main，说明按本地口径
+  const base = task.headSHA ?? (local ? "main" : "origin/main"), pm = task.pm ?? projectPm(db, task.project) ?? "scheduler";
   const promptText = renderExecPrompt({ task: task.id, title: task.title, pm, branch: task.branch,
-    base, worktree, spec: specPath, ledgerDir, template: workflow.template }, existsSync(templatePath) ? readFileSync(templatePath, "utf8") : undefined);
+    base, worktree, spec: specPath, ledgerDir, template: workflow.template,
+      ...(local ? { localMerge: true } : policy.mergeHandoff === true ? { mergeHandoff: true } : {}) },
+    existsSync(templatePath) ? readFileSync(templatePath, "utf8") : undefined);
   return { feature: { id: binding?.featureId ?? `task:${task.id}` }, key: binding?.nodeKey ?? task.id,
     taskId: task.id, title: task.title, project: task.project, item: task.itemId,
     pm, base, branch: task.branch, repo, worktree, agentName, agent: `agent-${agentName}`,
     fileGlobs: Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs as string[] : [], specRel: `docs/tasks/${task.id}.md`,
     specPath, specText: null, promptPath, promptText, purpose: `${task.id} 执行者（自动卡）：${task.title}。先读 ${promptPath}`,
-    workflow: { template: workflow.template, version: workflow.templateVersion }, peer: null };
+    workflow: { template: workflow.template, version: workflow.templateVersion }, peer: null, ...(local ? { localMerge: true as const } : {}) };
 }

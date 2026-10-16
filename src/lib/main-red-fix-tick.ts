@@ -102,7 +102,7 @@ async function judge(r: Round, w: Workflow, runs: readonly MainRedRun[], red: Ma
   }
   if (r.mode === "observe") return observeNode(r, w, facts);
   const res = await cli(r, "fix", { ...facts });
-  if (typeof res.notify === "string" && res.notify) await r.env.notifyPm(r.project, res.notify);
+  if (typeof res.notify === "string" && res.notify) await r.env.notifyPm(r.project, res.notify, "action");
 }
 
 async function oneWorkflow(r: Round, w: Workflow): Promise<void> {

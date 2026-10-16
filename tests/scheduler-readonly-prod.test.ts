@@ -428,7 +428,7 @@ for (const cap of [true, false]) test(`real review ${cap ? "cap" : "block"}: CLI
   }
   const notify = f.deps.notifyPm;
   const seenAtNotify: number[] = [];
-  f.deps.notifyPm = async (task, text) => { seenAtNotify.push(events("review_downgrade").length); await notify(task, text); };
+  f.deps.notifyPm = async (task, text, level) => { seenAtNotify.push(events("review_downgrade").length); await notify(task, text, level); };
   expect(await f.pass()).toEqual({ ran: true, failed: [] });
   expect(seenAtNotify.length).toBeGreaterThan(0);
   expect(seenAtNotify.every((n) => n === 1)).toBe(true);

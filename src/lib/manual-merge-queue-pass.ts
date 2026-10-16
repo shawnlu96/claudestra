@@ -14,7 +14,7 @@ import { manualQueueMode } from "./manual-merge-queue-facts.js";
 import { boardingRefusal, headMayRide, observeUnifiedCandidates, openUnifiedCandidates } from "./merge-queue-candidates.js";
 import { formingCarries } from "./merge-queue-candidates-member.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { prMergeOff, type SchedulerConfig } from "./scheduler-config.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
 
@@ -58,10 +58,10 @@ export function manualMergeGate(db: Database, store: TrainStore | null | undefin
     async claim(manager: Manager, config: SchedulerConfig): Promise<{ claimed: string[]; failed: { taskId: string; error: string }[] }> {
       const out = { claimed: [] as string[], failed: [] as { taskId: string; error: string }[] };
       for (const [project, cfg] of Object.entries(config.projects)) {
-        if (!cfg.mergeHandoff) await observeMergeQueueOwner(db, manager, project, trains);
-        if (!cfg.mergeHandoff) await observeUnifiedCandidates(db, manager, project, trains, policy); // CAND1 observe: record only, never a failure
-        // the repository owner merges: never a claim here; requestRefusal shows such a request void with the handoff reason
-        if (cfg.mergeHandoff || !listOpenRequests(db, project).length) continue;
+        if (!prMergeOff(cfg)) await observeMergeQueueOwner(db, manager, project, trains);
+        if (!prMergeOff(cfg)) await observeUnifiedCandidates(db, manager, project, trains, policy); // CAND1 observe: record only, never a failure
+        // the repository owner or the PM locally merges: never a claim here; requestRefusal shows such a request void with the reason
+        if (prMergeOff(cfg) || !listOpenRequests(db, project).length) continue;
         const mode = manualQueueMode(project, policy);
         if (mode === "off") continue;
         const r = await manager("ledger", "manual-merge-claim", project, "--mode", mode, "--train", trainSignal(trains, project, Date.now()),

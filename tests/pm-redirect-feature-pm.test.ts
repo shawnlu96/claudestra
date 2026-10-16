@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { PmNoticeLevel } from "../src/lib/pm-notice-level.js";
 
 const bridged: { targetName: string; text: string }[] = [];
 let faking = false;
@@ -78,7 +79,7 @@ test("缺规格提醒端到端（缺省发送 = 本轮 notifyPm → notifyProjec
   expect((ro.query("PRAGMA query_only").get() as { query_only: number }).query_only).toBe(1);
   const ledger = (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: [PROJ], loadRegistry: async () => ({ socket: "", agents: {} }) as never,
     saveRegistry: async () => {}, now: () => now, autoDispatch: () => true, autoProjects: () => [PROJ] });
-  const notifyPm = (project: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: () => true });
+  const notifyPm = (project: string, text: string, level: PmNoticeLevel) => notifyProjectPm(db, project, text, { fromName: "scheduler", level, stillActive: () => true });
   const failed = await specWaitTick({ db: ro, ledger, svc: { autoDispatch: true, projects: [PROJ], maxWorkers: () => 3 }, readSpec: () => null, now: () => now, notifyPm });
   reader.close();
   expect(failed).toEqual([]);

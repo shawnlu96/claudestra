@@ -24,8 +24,10 @@ test("the sender's level decides, not the wording: info never wakes the PM, acti
   expect(rule(sched("[engine] 2 leftover processes under the card worktree, please have a look", "info"))).toBe("level.info");
 });
 
-test("a level is only trusted from the scheduler and bridge ledger notices, not from an ordinary agent frame", () => {
-  expect(rule({ ...sched("P0 事故，请 PM 立即处理", "info"), sender: "agent-x" })).toBe("protect.action");
+test("a level is trusted from the scheduler, bridge ledger notices and agent oneShots, not from a waiting agent frame", () => {
+  // agent 的 oneShot 按 send_to_agent 标的级别分流（agents-NOTICETYPE1）；等回复的帧带了级别也不认
+  expect(rule({ ...sched("P0 事故，请 PM 立即处理", "info"), sender: "agent-x" })).toBe("level.info");
+  expect(rule({ ...sched("P0 事故，请 PM 立即处理", "info"), sender: "agent-x", oneShot: false })).toBe("protect.action");
   expect(rule({ ...sched("x", "info"), oneShot: false })).not.toBe("level.info");
   expect(rule({ fromKind: "bridge", sender: "ledger", intent: "notification", triggerKind: "bridge_synth", oneShot: true, body: "question, default applies", level: "info" })).toBe("level.info");
 });
@@ -56,9 +58,10 @@ test("an info push with route on is only recorded: not delivered, not queued for
   expect(routePmPush(env("action", "m2"), "p", deps, () => false, "[engine] please look", "scheduler")).toBe(false);
 });
 
-test("sendToPm itself sets no level: merge, review and observation reminders reuse it and must still reach the PM", async () => {
-  let seen: unknown = "unset";
-  const env = { notifyPm: async () => { seen = pmNoticeLevel.getStore(); } } as unknown as SpecWaitEnv;
-  await sendToPm(env, "p", "agent-pm", "[合并] 请 PM 推进");
+test("sendToPm itself sets no implicit level: the caller's required level is passed through as is", async () => {
+  let seen: unknown = "unset", passed: unknown;
+  const env = { notifyPm: async (_p: string, _t: string, level: unknown) => { seen = pmNoticeLevel.getStore(); passed = level; } } as unknown as SpecWaitEnv;
+  await sendToPm(env, "p", "agent-pm", "[合并] 请 PM 推进", "action");
   expect(seen).toBeUndefined();
+  expect(passed).toBe("action");
 });

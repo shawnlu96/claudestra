@@ -9,7 +9,7 @@ import { CI_SCOPE_LIGHT, CI_SCOPE_FULL, lightOnly } from "./ci-queue-full.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { observeDedupKey, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { prMergeOff, type SchedulerConfig } from "./scheduler-config.js";
 import { mainCiGateOf, decide } from "./scheduler-main-ci-wiring-gate.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeFirst } from "./scheduler-merge-order.js";
@@ -48,7 +48,7 @@ export async function ciQueueFullStep(db: Database, config: SchedulerConfig, io:
   let reads = 0;
   for (const { taskId } of cards) {
     const task = getTask(db, taskId), cfg = task && config.projects[task.project];
-    if (!task || !cfg || cfg.mergeHandoff || !task.headSHA || !task.pr || io.pace?.skipTask?.(taskId)) continue;
+    if (!task || !cfg || prMergeOff(cfg) || !task.headSHA || !task.pr || io.pace?.skipTask?.(taskId)) continue;
     const mode = modeOf(io, task.project), readKey = `${taskId}@${task.headSHA}`;
     if (mode === "off" || now - (times.get(readKey) ?? -Infinity) < 60_000) continue;
     // The holder is always re-read (a manual rerun may have turned it green); the judged cache only ever skips an inspect.

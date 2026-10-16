@@ -18,9 +18,10 @@ import { localAgents, type AgentsOf } from "./scheduler-lock-yield-agents.js";
 import { lockYieldPolicy, mergeStaleMode } from "./scheduler-lock-yield-policy.js";
 import { readYieldFacts, releasedPending, resumedAfter } from "./scheduler-lock-yield-read.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
-type NotifyPm = (task: LedgerTask, text: string) => Promise<void>;
+type NotifyPm = (task: LedgerTask, text: string, level: PmNoticeLevel) => Promise<void>;
 export interface LockYieldIo { agents?: AgentsOf; now?: () => number }
 
 const lost = (what: string, e: unknown): void => {
@@ -72,7 +73,7 @@ async function contendProject(db: Database, project: string, manager: Manager, n
       text = String(w.text);
     }
     if (!text) continue;
-    try { await notifyPm(task, text); } catch (e) { lost(`${r.taskId} 拿不回锁的通知没送到（台账已记，下轮重发）`, e); continue; }
+    try { await notifyPm(task, text, "action"); } catch (e) { lost(`${r.taskId} 拿不回锁的通知没送到（台账已记，下轮重发）`, e); continue; }
     const sent = await step("contend-sent");
     if (sent.ok !== true) console.error(`⚠️ [lock-yield] ${r.taskId} 已通知 PM 但送达标记未记账，下轮可能重发：${String(sent.error)}`);
   }

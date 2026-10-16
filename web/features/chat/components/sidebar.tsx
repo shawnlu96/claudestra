@@ -477,7 +477,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             className="border-t border-base-300 px-4 pt-2 text-xs opacity-50"
             style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}
           >
-            Claudestra Web
+            Floka Web
             {verInfo?.version ? (
               <span className="ml-1 font-mono">
                 v{verInfo.version}

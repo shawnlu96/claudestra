@@ -137,7 +137,9 @@ test("归类不变：只有首行的推送没有 detail；非 supervise-watch �
   const one = classifyPmPush({ ...base, fromKind: "local", sender: "scheduler", body: "[上线后待办] agents-PV1 上线后 PM 步骤已过期，之后不再提醒" });
   const sync = classifyPmPush({ ...base, fromKind: "local", sender: "agent-w", body: "agents-AAA1 进度：写完了一半\n第二行\n第三行" });
   expect(one).toEqual({ send: "digest", reason: "调度器上线后待办提醒", kind: "post-verify", source: "scheduler", card: "agents-PV1", firstLine: "[上线后待办] agents-PV1 上线后 PM 步骤已过期，之后不再提醒" });
-  expect(sync).toEqual({ send: "digest", reason: "agent oneShot 进度同步", kind: "sync", source: "agent-w", card: "agents-AAA1", firstLine: "agents-AAA1 进度：写完了一半" });
+  expect(sync).toEqual({ send: "digest", reason: "oneShot 没标级别：不送，进 pm-todo 等 PM 拉", kind: "sync", source: "agent-w", card: "agents-AAA1", firstLine: "agents-AAA1 进度：写完了一半",
+    levelSource: "structured", unleveled: true }); // agents-NOTICETYPE1：没标级别的 oneShot 记成待拉取
+
   // 同卡、要点不同的两条上线后待办不合并
   const e = (id: string, detail: string[]): DigestEntry => ({ id, project: P, kind: "post-verify", source: "scheduler", card: "agents-PV1", firstLine: "[上线后待办] agents-PV1 已上线", detail, at: 1 });
   expect(digestText([e("a", ["- 甲"]), e("b", ["- 乙"]), e("c", ["- 甲"])]).split("\n").slice(1))

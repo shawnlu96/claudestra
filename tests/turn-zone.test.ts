@@ -168,6 +168,15 @@ describe("输入框判定（PM 09-29）：按框的形状认——上下两条�
     expect(inputBox(["─".repeat(40), "❯ 1. Yes", "2. No", "─".repeat(40)])).toBeNull();
     expect(inputBox(["─".repeat(40), "❯ 4. Chat about this", "─".repeat(40), "", "Enter to select · Esc to cancel"])).toBeNull();
   });
+  test("上边框嵌着会话名（--name / resume 的会话）也算；下边框、不以 ─ 收尾的小标题仍不算", () => {
+    const named = "─".repeat(33) + " claudestra-debug ─";
+    expect(inputBox([named, "❯ 可以了 快多了", "─".repeat(52), "  Ctx 100% · claudestra-debug"])).toEqual({ top: 0, bottom: 2 });
+    expect(inputBox(["─".repeat(20) + " 套利研究所 ──", "❯ ", "─".repeat(40)])).toEqual({ top: 0, bottom: 2 });
+    expect(inputBox(["─".repeat(40), "❯ ", named])).toBeNull();
+    expect(inputBox(["─── 小标题", "❯ ", "─".repeat(40)])).toBeNull();
+    const idle = ["✻ Sautéed for 1m 31s · done 12:05 PM", "", "◻ Compacted while idle, before the prompt cache expired", "", named, "❯ ", "─".repeat(52), "  Ctx 100%"].join("\n");
+    expect(thinkingLooksStuck(idle, "thinking", false)).toBe(true);
+  });
   test("只有上边框、没有下边框的不算", () => {
     expect(inputBox(["─".repeat(40), "❯ ", "  ⏵⏵ bypass permissions on"])).toBeNull();
   });

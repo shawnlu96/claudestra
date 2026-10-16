@@ -73,7 +73,8 @@ export const DAG_TOOLS = [
   {
     name: "start_node",
     description:
-      "PM / master: start one planned node as an auto card in one step — creates the ledger card (<feature slug>-<key>), a git worktree (base default origin/main, " +
+      "PM / master: start one planned node as an auto card in one step — creates the ledger card (<feature slug>-<key>), " +
+      "a git worktree (base default origin/main; main for a scheduler.json localMerge project, " +
       "node_modules symlinked), the executor brief, the executor agent, records its fileGlobs, turns the scheduler workflow to auto, and binds the node. " +
       "The scheduler then dispatches the restate order itself; do not message the executor. Needs the spec card at ledger/docs/tasks/<card>.md or pass spec. " +
       "Any failure rolls back what was done and reports failedStep. Slow (starts an agent): up to a few minutes. " +
@@ -86,7 +87,7 @@ export const DAG_TOOLS = [
       properties: {
         featureId: FEATURE_ID,
         key: { type: "string", description: "要开工的节点 key" },
-        base: { type: "string", description: "worktree 的起点，缺省 origin/main" },
+        base: { type: "string", description: "worktree 的起点，缺省 origin/main（localMerge 项目缺省 main）" },
         branch: { type: "string", description: "分支名，缺省 feat/<卡号小写>" },
         taskId: { type: "string", description: "卡号，缺省 <feature 短名>-<key>" },
         title: { type: "string", description: "卡标题，缺省节点的 oneLine" },

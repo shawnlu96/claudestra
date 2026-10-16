@@ -43,6 +43,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { preserveSessionHistory } from "./scheduler-sessions.js";
 import { approvalLapse, EXEMPT_OP, openSafetyHold, RETRY_OP, swapKey } from "./scheduler-review-swap.js";
 import { cfgReaderPath } from "./recovery-materials-wiring.js" with { type: "macro" };
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /** The slice of the auto tick's Card this step reads; structural so auto-tick keeps Card private. db is read-only in production. */
@@ -51,7 +52,7 @@ export interface ModelWiringCard {
   readonly task: LedgerTask;
   readonly opts: { pool?: { remote: LocalFamilies } };
   /** manager: the ledger CLI under the scheduler identity (the only write path); notifyPm: the auto tick's PM notice. */
-  readonly deps: { now(): number; manager: Manager; notifyPm(task: LedgerTask, text: string): Promise<void> };
+  readonly deps: { now(): number; manager: Manager; notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void> };
 }
 
 type Failure = NonNullable<OutcomeSignal["failure"]>;
@@ -137,7 +138,7 @@ async function unavailable(card: ModelWiringCard, what: WiringWrite, error: stri
   if (!rec.ok) diag(`${id} 「拒审接续不可用」也没记进台账（改为直接通知 PM）：${rec.error}`);
   if (!first) return;
   toldInMemory.add(mem);
-  try { await card.deps.notifyPm(card.task, text); } catch (e) {
+  try { await card.deps.notifyPm(card.task, text, "action"); } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     diag(`${id} 「拒审接续不可用」通知 PM 没发出去（台账${rec.ok ? "已记" : "也没记上"}）：${e instanceof Error ? e.message : String(e)}`);
   }

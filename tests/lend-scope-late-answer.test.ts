@@ -48,7 +48,7 @@ function seed(orderId: string, to: LendState[] = []): string {
   return agent;
 }
 
-/** manager create 收尾会写 registry.json，bridge 的名单缓存认它作废（lib/agent-lookup-cache.ts）；这里不起真 manager，只把 mtime 往后推 */
+/** manager create 收尾会写 registry.json，bridge 的名单缓存认它作废（lib/agent-list-cache.ts）；这里不起真 manager，只把 mtime 往后推 */
 function touchRegistry(): void {
   if (!existsSync(REGISTRY_PATH)) writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: {} }));
   const t = new Date(Date.now() + ++n * 1_000);

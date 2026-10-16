@@ -439,7 +439,7 @@ describe("teamRouterTicker：游标与重启", () => {
 });
 
 describe("makeSender：送达才标消息来源；没送到进押后队列", () => {
-  const notice = { seq: 1, project: "p", taskId: "T1", to: "agent-pm", kind: "deliver", text: "x", messageId: "ledger-1-agent-pm" } as RouteNotice;
+  const notice = { seq: 1, project: "p", taskId: "T1", to: "agent-pm", kind: "deliver", text: "x", messageId: "ledger-1-agent-pm", pmLevel: "action" as const } as RouteNotice & { pmLevel: "action" };
   function deps(outcome: Delivery["outcome"] | Error, working = false) {
     const held: Envelope[] = [];
     const marked: string[] = [];

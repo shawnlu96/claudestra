@@ -17,12 +17,16 @@ export interface StallCycle {
   owner?: StallStep;
   pending?: { action: StallAction; token: string; at: number; attempts: number };
 }
+/** Structured blocker: later decisions read this, never the `why` text. `on` names the unmet upstream task ids / node keys. */
+type StallBlockKind = "ask" | "frozen" | "feature" | "deps" | "files" | "no_globs" | "progress";
+export interface StallBlock { kind: StallBlockKind; on: string[] }
 export interface StallBasis {
   key: string;
   label: string;
   project: string;
   taskId: string | null;
   featureId: string | null;
+  nodeKey: string | null;
   stage: string;
   why: string;
   pm: string | null;
@@ -32,6 +36,11 @@ export interface StallBasis {
   eligible: boolean;
   frozen: boolean;
   ask?: { id: string; question: string };
+  block: StallBlock;
+  /** now objects waiting only on this upstream; listed in the note/owner text, one object however many reference it */
+  impact: string[];
+  /** Graph configuration problem (missing / cancelled upstream, unselected branch): note only, never an owner ask. */
+  config?: string;
 }
 
 const RESULT_KINDS = new Set(["deliver", "review", "deploy", "verify", "accept"]);
@@ -53,9 +62,10 @@ export function freshStallCycle(b: StallBasis, modeRev: number): StallCycle {
   return { id: crypto.randomUUID(), since: Math.max(b.since, b.nowSince), progress: b.progress, modeRev, epoch: b.nowSince };
 }
 
-/** Each stage has its own window. Unavailable/failed/unknown healing goes directly to PM for verification. */
-export function nextStallAction(c: StallCycle, now: number, threshold: number): StallAction | null {
+/** Each stage has its own window. Unavailable/failed/unknown healing goes directly to the PM step (a note on the card). */
+export function nextStallAction(c: StallCycle, now: number, threshold: number, noteOnly = false): StallAction | null {
   if (c.pending) return null;
+  if (noteOnly && c.pm) return null;
   if (!c.heal) return now - c.since >= threshold ? "heal" : null;
   if (!c.pm) return c.heal.result !== "success" || now - c.heal.at >= threshold ? "pm" : null;
   if (c.pm.result === "failed" && c.pm.attempts < PRIORITY_NOTICE_ATTEMPTS) return now - c.pm.at >= Math.min(threshold, 60_000) ? "pm" : null;
@@ -64,7 +74,9 @@ export function nextStallAction(c: StallCycle, now: number, threshold: number): 
 }
 
 export function stallNotice(b: StallBasis, c: StallCycle, now: number): string {
-  const first = b.ask ? `等 PM 答 ask ${b.ask.id}：${b.ask.question.split(/\r?\n/).find((s) => s.trim()) ?? ""}` : `now 停滞：${b.label}`;
+  const first = b.ask ? `等 PM 答 ask ${b.ask.id}：${b.ask.question.split(/\r?\n/).find((s) => s.trim()) ?? ""}`
+    : b.config ? `now 链图配置问题：${b.config}` : `now 停滞：${b.label}`;
   return [first, `对象：${b.label}；阶段：${b.stage}；卡点：${b.why}；连续停滞 ${Math.floor((now - c.since) / 60_000)} 分钟`,
-    `自愈：${c.heal?.result ?? "未尝试"} ${c.heal?.detail ?? ""}`, `PM 通知：${c.pm?.result ?? "未通知"} ${c.pm?.detail ?? ""}`].join("\n");
+    ...b.impact.length ? [`影响：${b.impact.join(", ")}`] : [],
+    `自愈：${c.heal?.result ?? "未尝试"} ${c.heal?.detail ?? ""}`, `卡上提醒：${c.pm?.result ?? "未记录"} ${c.pm?.detail ?? ""}`].join("\n");
 }

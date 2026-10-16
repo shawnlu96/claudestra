@@ -27,7 +27,7 @@
   时终端必须丢弃 working / blocked；done / error 留到终端自己决定清。
 - 非法上报：state 缺失或不认识、超任一长度限制、base64 解不开、解码后含控制字符 → **整条丢弃**，不应用其中任何内容。
   文本不得当 markup 解释，显示时要中和不可见格式字符。
-- 终端唯一回给程序的数据是探测回复：**记录本身没有读取接口**。所以 Claudestra 想拿到状态，必须站在字节流上。
+- 终端唯一回给程序的数据是探测回复：**记录本身没有读取接口**。所以 Floka 想拿到状态，必须站在字节流上。
 
 ## 1. 已知事实复核
 
@@ -132,7 +132,7 @@ DA1 在 tmux 解析输出时同步回出，外部进程再快也是毫秒级（�
 - piB：pty 中转、不设覆盖：`probe_answered`（ST 结尾）后 3 ms 收到 `state=idle:app=pi`。
 
 Pi 的 working / done / error / blocked（只覆盖扩展对话框和登录，没有权限弹窗）由它的 reporter 按 agent 事件发。Pi 本来就由
-Claudestra 扩展（`src/pi/claudestra-extension.ts`）按事件上报忙闲，7501 对 Pi 是锦上添花。
+Floka 扩展（`src/pi/claudestra-extension.ts`）按事件上报忙闲，7501 对 Pi 是锦上添花。
 
 ### 2.5 实验 5 / 6：解析健壮性（中转原型）
 
@@ -319,9 +319,9 @@ PID 文件 `sbx-pidfile.jsonl`（同一进程，pid 35041）：
 ### 3.3 方案 (c)：给 tmux 打补丁 / 等上游 —— 不推荐
 
 - 现状：tmux 3.6a 丢弃 7501（`tmux-vv-osc.txt`），上游 #5713 Waiting，维护者明确不急。
-- 规范本身不给程序读记录（只有探测回复），所以 tmux 光是「回答探测、按 pane 存」还不够，Claudestra 还需要读的途径。#5713 的
+- 规范本身不给程序读记录（只有探测回复），所以 tmux 光是「回答探测、按 pane 存」还不够，Floka 还需要读的途径。#5713 的
   提议里已经包含这部分：Suggestion 第 2 项提出按 pane 的 format（`pane_ps_state` / `pane_ps_kind` / `pane_ps_progress` /
-  `pane_ps_app` / `pane_ps_msg`，起初只存根记录），第 4 项提出 `pane-status-changed` hook。如果上游照此实现，Claudestra 就能用
+  `pane_ps_app` / `pane_ps_msg`，起初只存根记录），第 4 项提出 `pane-status-changed` hook。如果上游照此实现，Floka 就能用
   `display -p '#{pane_ps_state}'` 读、用 hook 收推送，不再需要中转（子记录除外）。
 - 但上游**尚未接受**：issue 仍是 Open / Waiting，维护者表示要先看别的终端和程序是否采用，没有排期。
 - 自维护 tmux 分支：要跟 Homebrew 升级、要给所有用户装，代价远大于中转。**本卡没有做补丁原型**，这里的「不推荐」是成本判断，
@@ -332,7 +332,7 @@ PID 文件 `sbx-pidfile.jsonl`（同一进程，pid 35041）：
 
 **(d1) 读 CC 的会话 PID 文件状态 —— 可行，且不碰终端。**
 CC 把 `status` / `waitingFor` / `statusUpdatedAt` 写进 `~/.claude/sessions/<pid>.json`，与 7501 的主记录同源（同一个 `blockedOn`
-映射：permission prompt / input needed / dialog open）。Claudestra 已经在读这个文件（`src/lib/cc-sessions.ts` 解析了 `status`），
+映射：permission prompt / input needed / dialog open）。Floka 已经在读这个文件（`src/lib/cc-sessions.ts` 解析了 `status`），
 但目前没用于忙闲。
 
 - 证据：实验 8（§2.6）在已登录的 CC 上抓到完整转换：idle → busy → idle（完成）、busy → `waiting` + `permission prompt`、

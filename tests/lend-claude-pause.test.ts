@@ -6,7 +6,8 @@ import { getMeta, getOrder, patchOrder, recordAsked } from "../src/lib/lend-jour
 import { claudeLendSlots, claudeReadiness, lendBlockedReason, lendPollCapacity, noteClaudeReadiness,
   probeClaudeLend, refreshClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
 import { loopClaudeReadiness, primeInboxClaude, syncClaudeReadiness } from "../src/lib/lend-claude-ready.js";
-import { claudeSessionSignal } from "../src/lib/lend-claude-pause-worker.js";
+import { CLAUDE_AUTH_STOP_LEAD, claudeSessionSignal } from "../src/lib/lend-claude-pause-worker.js";
+import { parseLendRequest } from "../src/lib/lend-wire.js";
 import { pauseClaude, refreshClaudePause } from "../src/lib/lend-claude-pause.js";
 import { CLAUDE_LEND_ROOT, RUN_RECORD_FILE } from "../src/lib/lend-claude-worker-session.js";
 import { helloBody } from "../src/lib/lend-hello.js";
@@ -51,7 +52,12 @@ test("首轮 authentication_error：下一轮停单、退租带原因、Claude �
   const release = h.calls.find((c) => c.op === "lease" && c.body.action === "release");
   expect(release?.body).toMatchObject({ reason: "stopped" });
   expect(String(release?.body.detail)).toContain("Claude 登录失效");
+  expect(String(release?.body.detail).startsWith(CLAUDE_AUTH_STOP_LEAD)).toBe(true);
   expect(String(release?.body.detail)).not.toContain("secret@");
+  // [验收线 4] the structured class rides the release and passes the borrower's strict parse
+  expect(release?.body.failure).toEqual({ class: "auth", sessionId: row.sessionId, failedAt: expect.any(Number) });
+  const parsed = parseLendRequest("lease", release?.body);
+  expect(parsed.ok && parsed.value.failure?.class).toBe("auth");
   expect(h.log.killed).toEqual([row.agent!]);
   expect(h.log.notices.at(-1)?.kind).toBe("stopped");
   expect(lendPollCapacity(h.lend.lend[0], h.db, h.d.now()).families).toEqual({ codex: 2, claude: 0 });
@@ -99,6 +105,7 @@ test("额度 API 错误：停单且按原文重置；hello 和新登录探测不
   emit(api(h.d.now(), "rate_limit", "You've hit your session limit · resets 1am (UTC)"));
   await h.tick();
   expect(getOrder(h.db, "o1")!.reason).toContain("try again at 1970-01-01T01:00:00.000Z");
+  expect(h.calls.find((c) => c.op === "lease" && c.body.action === "release")?.body.failure).toBeUndefined(); // quota branch unchanged
   expect(JSON.parse(getMeta(h.db, "pause:claude")!).quota.until).toBe(reset);
   expect(JSON.parse(getMeta(h.db, "status")!).blocked).toContain("额度已满");
   h.advanceTime(61_000);

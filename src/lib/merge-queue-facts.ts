@@ -22,7 +22,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, listEvents } from "./ledger-store.js";
 import { manualQueueView, type ManualQueueRow } from "./manual-merge-queue.js";
-import { configHandoff, listRequests, SHA, type HandoffPort, type ManualRequest } from "./manual-merge-queue-facts.js";
+import { configHandoff, configLocal, listRequests, localWhy, SHA, type HandoffPort, type ManualRequest } from "./manual-merge-queue-facts.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { getMergeRun } from "./scheduler-merge.js";
 import { mergeEntry } from "./scheduler-merge-order.js";
@@ -35,7 +35,7 @@ type QueueSource = "auto" | "manual";
 /** ready = the existing gate admits it now; running = its merge run holds the slot; blocked = waits in place; excluded = not queued. */
 type QueueState = "ready" | "running" | "blocked" | "excluded";
 type QueueReasonCode =
-  | "shared_ledger_skip" | "merge_handoff" | "foreign_repo" | "landed" | "missing_evidence" | "frozen" | "owner_hold" | "unknown_run"
+  | "shared_ledger_skip" | "merge_handoff" | "local_merge" | "foreign_repo" | "landed" | "missing_evidence" | "frozen" | "owner_hold" | "unknown_run"
   | "not_candidate" | "manual_no_request" | "manual_waiting" | "manual_void" | "withdrawn" | "manual_ended" | "duplicate_request";
 
 export interface QueueEntry {
@@ -58,6 +58,8 @@ export interface QueueEntry {
 
 export interface QueueFactsPorts {
   handoff?: HandoffPort;
+  /** localMerge project (ONB-2): the PM merges with `ledger local-merge`, never through this queue */
+  local?: HandoffPort;
   /** shared-ledger route: the card belongs to another authority this pass (S2D2 skip) */
   skip?: (db: Database, taskId: string) => boolean;
   repo?: (project: string) => string | null;
@@ -133,6 +135,7 @@ function cardExclusion({ db, ports, repo }: Read, task: LedgerTask): QueueEntry[
   }
   if (ports.skip(db, task.id)) return { code: "shared_ledger_skip", why: "共享台账路由：这张卡此刻不归本机调度" };
   if (ports.handoff(task.project)) return { code: "merge_handoff", why: `项目 ${task.project} 是仓库方交接（mergeHandoff），本机不排合并` };
+  if (ports.local(task.project)) return { code: "local_merge", why: localWhy(task.project) };
   const foreign = foreignRepoOf(task, repo);
   if (foreign) return { code: "foreign_repo", why: `卡在 ${foreign}，不是项目自动合并的仓库` };
   return null;
@@ -224,7 +227,7 @@ const compareEntries = (a: QueueEntry, b: QueueEntry): number =>
 /** The unified read-only queue of one project. Pure reads only. */
 export function mergeQueueFacts(db: Database, project: string, now: number, ports: QueueFactsPorts = {}): QueueEntry[] {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return [];
-  const p: Required<QueueFactsPorts> = { handoff: configHandoff, skip: schedulerV2SkipTask, repo: projectRepoFor, ...ports };
+  const p: Required<QueueFactsPorts> = { handoff: configHandoff, local: configLocal, skip: schedulerV2SkipTask, repo: projectRepoFor, ...ports };
   const repo = p.repo(project), r: Read = { db, ports: p, repo };
   const cards = db.query(`SELECT t.id, w.mode, w.template FROM tasks t JOIN task_workflows w ON w.taskId = t.id
     WHERE t.project = ? AND t.kind = 'code' AND t.stage = 'merge' ORDER BY t.id`).all(project) as { id: string; mode: string; template: string }[];

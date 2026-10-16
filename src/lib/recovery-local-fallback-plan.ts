@@ -27,6 +27,7 @@ import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
 import type { LedgerTask } from "./ledger-stages.js";
+import { continuityCheck, staleLeaseMode, type Continuity } from "./lend-local-continuity.js";
 
 /** CFG's recoveryPolicy(project, mechanism) narrowed to this mechanism; a function over every RecoveryKey is assignable. */
 export type LocalFallbackPolicyPort = (project: string, mechanism: "localFallback") => RecoveryPolicy;
@@ -77,10 +78,12 @@ export interface LocalFallbackFacts {
   /** Private-repo / project ban on sending this card's code out, if the caller knows one; spec 「本机限定：是」 counts too. */
   outboundBan?: string | null;
   unpushed?: readonly ArtifactRef[];
+  /** i28-STALELEASE1: the card's own local author continues it (lend-local-continuity.ts), read only while staleLeaseHandover is on. */
+  continuity?: Continuity | null;
 }
 
 type BlockCode = "policy_off" | "not_auto" | "stage" | "not_candidate" | "safety_hold" | "owner_hold" | "private_ban" | "spec_unreadable" |
-  "delivery_unproven" | "result_exists" | "lock_busy" | "no_grant" | "no_slot" | "no_quota" | "family_switch";
+  "delivery_unproven" | "result_exists" | "lock_busy" | "no_grant" | "no_slot" | "no_quota" | "family_switch" | "author_continuity";
 
 /** Everything whose change makes an old plan void (intent / head / spec / branch / session / any new event / orders / lease). */
 export interface PlanBasis {
@@ -226,6 +229,8 @@ export function assessLocalFallback(f: LocalFallbackFacts): Assessment {
   if (basis.locks.length) return block("lock_busy", `文件锁被别的卡占着：${basis.locks.join("、")}，本机接管同样受限`);
   const gap = deliveryGap(f, windowOf(s));
   if (gap) return block(gap.code, gap.why);
+  // Not a new Codex takeover: the stale lease's handover gives the fix back to the bound author, review stays cross-model as usual.
+  if (f.continuity?.ok) return block("author_continuity", `本机原作者 ${f.continuity.evidence.agent} 接着修，由 staleLeaseHandover 结束旧写租约，不是换家族`);
   const author = s.workflow.authorFamily;
   if (author !== "codex") return block("family_switch", `现任作者家族 ${author}，本机 Codex 接管会换模型`);
   const grant = grantGap(s.pool?.remote, s.maxWorkers);
@@ -279,5 +284,6 @@ export function readLocalFallbackFacts(db: Database, task: LedgerTask, opts: Sna
   proofs: Pick<LocalFallbackFacts, "slot" | "quota" | "outboundBan" | "unpushed">): LocalFallbackFacts {
   const snapshot = autoSnapshot(db, task, opts);
   const specText = readTextSoft(specPathFor(task, getMeta(db, task.project).docsDir));
-  return { snapshot, decision: planScheduler(snapshot), orders: listLendOrders(db, task.id), lease: getWriteLease(db, task.id), specText, ...proofs };
+  const continuity = task.stage === "fix" && staleLeaseMode(db, task.project) === "on" ? continuityCheck(db, task) : null;
+  return { snapshot, decision: planScheduler(snapshot), orders: listLendOrders(db, task.id), lease: getWriteLease(db, task.id), specText, continuity, ...proofs };
 }

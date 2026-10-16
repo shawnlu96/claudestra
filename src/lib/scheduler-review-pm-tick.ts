@@ -30,7 +30,7 @@ async function nudgeOne(env: SpecWaitEnv, project: string, taskId: string, mode:
   if (reviewPmMode(env.db, project) !== "on" || reviewPmCandidate(env.db, taskId, env.now())?.key !== seen.key) return null;
   let answer: unknown;
   try {
-    answer = await sendToPm(env, project, seen.pm, String(rec.text));
+    answer = await sendToPm(env, project, seen.pm, String(rec.text), "action");
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return `审查已回提醒发给 ${seen.pm} 失败：${(e as Error).message}`;

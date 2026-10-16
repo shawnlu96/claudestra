@@ -33,6 +33,7 @@ import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./schedul
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import type { TickPace } from "./scheduler-yield.js";
 import { writeTextAtomicSync } from "./state-file.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Failed = { taskId: string; error: string }[];
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -108,7 +109,7 @@ function grantPorts(o: WireOpts, config: SchedulerConfig): Required<Pick<ResumeT
 }
 
 /** start_node 要的读环境与执行 IO：路径、registry、项目目录从生产位置现读；git 套 whileOwned */
-function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "startEnv" | "stepIO" | "plain"> {
+export function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "startEnv" | "stepIO" | "plain"> {
   const git = ownedGit(o);
   const agentNames = () => readRegistryAgentsSync().map((a) => a.name);
   const execTemplate = statePath("ledger", "prompts", "exec-template.md");
@@ -124,6 +125,8 @@ function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "star
       projectDirs: async (id) => (await readProjects()).projects.find((p) => p.id === id)?.dirs ?? [],
       branchExists: async (repo, branch) => (await git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).ok,
       autoReady: (project) => (config.enabled && config.autoDispatch && Object.hasOwn(config.projects, project) ? null : `调度服务没对项目 ${project} 开自动派单`),
+      localMerge: (project) => Object.hasOwn(config.projects, project) && config.projects[project]!.localMerge === true, // ONB-1：base main、不 fetch
+      mergeHandoff: (project) => Object.hasOwn(config.projects, project) && config.projects[project]!.mergeHandoff === true, // RRL-3：先开草稿 PR
       placement: (db, q) => startPlacement(db, {
         reservations: (project) => placementReservationPort(project, recoveryPolicy),
         policy: (project) => { const p = config.projects[project]; return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null; },
@@ -161,7 +164,7 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
   const alive = () => {
     try { o.active(); return true; } catch { return false; /* 存活检查抛错 = 服务在停或丢了租约：什么都不发 */ }
   };
-  const notifyPm = (project: string, text: string) => notifyProjectPm(o.db, project, text, { fromName: "scheduler", stillActive: alive });
+  const notifyPm = (project: string, text: string, level: PmNoticeLevel) => notifyProjectPm(o.db, project, text, { fromName: "scheduler", level, stillActive: alive });
   return {
     // AUD：授予分支的 localDelivery 模式从 CFG 现读（off 不动、observe 记一行、on 先核 origin head 再经调度身份 CLI 交回）
     resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO, policy: recoveryPolicy,

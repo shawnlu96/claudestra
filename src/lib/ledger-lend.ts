@@ -13,6 +13,7 @@ import { legacyLendOrders, legacyLendRoute } from "./ledger-lend-central-home.js
  * See docs/design/remote-capacity.md and tests/ledger-lend{,-write}.test.ts.
  */
 import { clearPeerCooldown, cooldownReleaseNotices } from "./lend-peer-cooldown.js"; import { createHash } from "node:crypto";
+import { authReviewReleases, pinnedPeerCooled, runtimeStopCooldown } from "./lend-peer-runtime-cooldown.js";
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry, LendFamily } from "./lend-config.js";
 import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type LeaseRequest, type LeaseState, type LendReceipt, type LendRefusal,
@@ -329,8 +330,9 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
   const beforeBasis = lendAuthorBasis(db, o.taskId);
   if (LEND_LIVE.includes(o.status)) setStatus(db, o, "cancelled", now, why);
   unbindStep(db, o);
-  // 钉位只在台账记着该 peer 的授权已失效（lend_peers.grant 被收回置空 / 到期 / 不再含 write 或本仓库）时解除；授权仍在或没有 hello 记录就保留，照旧再挂给它
-  const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") || !g.repos.includes(o.repo));
+  // 钉位在该 peer 的授权已失效（grant 收回置空 / 到期 / 不再含 write 或本仓库）或它这一家族处于 runtime 冷却（NETCOOL1）时解除；否则保留，照旧再挂给它
+  const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") || !g.repos.includes(o.repo))
+    || pinnedPeerCooled(db, o, now);
   const task = mustTask(db, o.taskId), r = leaseRestore(task, endWriteLease(db, o.taskId, why, now), unpin ? o.peer : undefined);
   if (r) setTask(db, ctx, { id: task.id, rev: task.rev, patch: r.patch as never });
   note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status, ...(r ? { restored: r.restored, unpinned: r.unpinned } : {}) });
@@ -468,11 +470,12 @@ export function leaseLend(db: Database, ctx: WriteCtx, peer: string, req: LeaseR
       return { lease: lease({ ...o, leaseUntil: now + o.leaseMs }), notices: [] };
     }
     const why = req.detail ? `：${req.detail}` : "";
-    const started = req.reason === "stopped";
+    const started = req.reason === "stopped" && !authReviewReleases(db, o, req, now); // 登录失效的审查单按 not_started 释放（AUTHCOOL1）
     setStatus(db, o, started ? "unknown" : "released", now, `${req.reason}${why}`);
     if (!started) unbindStep(db, o);
     note(db, ctx, o, `出借：${peer} 报 ${req.reason}${why}`, { op: "release", reason: req.reason, gen: o.leaseGen,
       ...(req.failure ? { failure: req.failure, detail: req.detail } : {}) }); // MODELXP2：出借方结构化类别原样入账（parseLease 已严格校验）
+    runtimeStopCooldown(db, ctx, o, req, now); // AUTHCOOL1：登录失效 / 连续报停冷却这个 (peer, family)
     const retry = started ? null : fixStartRetry(db, ctx, o, req.detail, now); // i28-FB1：起点不符本轮第一次不结束写租约，调度刷新起点重挂
     if (retry) return { lease: null, notices: [retry] };
     // 写单没起得来（没有推送权限、clone 不下来…）= 派不回这个出借方：写租约结束，卡退回本机

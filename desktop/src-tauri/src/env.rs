@@ -1,4 +1,4 @@
-//! Where Claudestra lives on this machine, and which PATH to run it with.
+//! Where Floka lives on this machine, and which PATH to run it with.
 //!
 //! An app started from Finder gets launchd's bare PATH (/usr/bin:/bin:…), so bun / claude / tmux
 //! are invisible to it. We take the PATH the bridge daemon itself runs with (its plist), falling
@@ -27,7 +27,7 @@ pub struct Install {
     pub path_source: PathSource,
     /// launchd plist for the bridge exists (install-cli has run at least once)
     pub daemons_installed: bool,
-    /// a Claudestra checkout exists at `repo` (setup can run; otherwise the wizard runs install.sh)
+    /// a Floka checkout exists at `repo` (setup can run; otherwise the wizard runs install.sh)
     pub has_checkout: bool,
     /// the checkout has the desktop entry point, so status/doctor/restart can run
     pub cli_available: bool,

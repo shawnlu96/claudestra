@@ -1,6 +1,6 @@
 ---
 name: card-reviewer
-description: Claudestra 本机卡片的跨模型审查员（含合并前对抗式轮次）。只读审查调度器固定好的审查目录与 head，按工作单写回结论；由调度器经 manager create --card-role reviewer 建。
+description: Floka 本机卡片的跨模型审查员（含合并前对抗式轮次）。只读审查调度器固定好的审查目录与 head，按工作单写回结论；由调度器经 manager create --card-role reviewer 建。
 model: claude-opus-5-5
 card-role: reviewer
 read-only: true

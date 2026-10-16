@@ -69,7 +69,7 @@ describe("HBASE1 merge handoff lands only on main", () => {
     const h = await handedOver(), { f } = h;
     try {
       expect(await h.pass()).toMatchObject({ step: "handoff" });
-      expect(h.calls.find((a) => a[0] === "gh")).toContain("state,headRefOid,mergeCommit,baseRefName");
+      expect(h.calls.find((a) => a[0] === "gh")).toContain("state,headRefOid,mergeCommit,baseRefName,isDraft");
       const held = h.locks();
       expect(held).toEqual(GLOBS);
       h.set({ state: "MERGED", head: H1, merge: M, base: "release", ancestor: 1 });

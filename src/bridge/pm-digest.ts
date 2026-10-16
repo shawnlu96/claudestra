@@ -154,13 +154,13 @@ export class PmDigest {
     const { store, now } = this.deps, mode = store.mode(project), at = now();
     if (mode === "off") return false;
     const verdict = classifyPmPush({ fromKind: env.from.kind, sender: senderOf(env), intent: env.intent,
-      triggerKind: env.meta.triggerKind, oneShot: !!env.meta.skipInterAgentWatchdog, body: bodyOf(env) });
+      triggerKind: env.meta.triggerKind, oneShot: !!env.meta.skipInterAgentWatchdog, body: bodyOf(env), ...(env.meta.pmLevel ? { level: env.meta.pmLevel } : {}) });
     const rec = { at, project, send: verdict.send, reason: verdict.reason, source: senderOf(env) ?? env.from.kind, mode,
-      ...(verdict.send === "digest" ? { kind: verdict.kind } : {}) };
+      ...(verdict.send === "digest" ? { kind: verdict.kind } : {}), ...(verdict.levelSource ? { levelSource: verdict.levelSource } : {}) };
     if (mode !== "on" || verdict.send !== "digest") return store.record(rec), false;
     store.record(rec, { id: env.meta.messageId, project, kind: verdict.kind, source: verdict.source,
       ...(verdict.card ? { card: verdict.card } : {}), firstLine: verdict.firstLine,
-      ...(verdict.detail ? { detail: verdict.detail } : {}), at });
+      ...(verdict.detail ? { detail: verdict.detail } : {}), ...(verdict.unleveled ? { unleveled: true as const } : {}), at });
     return true;
   }
   /** 信封上这封带着的摘要摘掉、条目回队（重投时重拼 / 改投给了别人） */

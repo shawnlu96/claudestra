@@ -1,6 +1,6 @@
 # Codex 运行时
 
-Claudestra 可以把 OpenAI Codex CLI 的交互式会话当作 agent 托管，和 Claude Code、Pi 并列（v2.24+）。
+Floka 可以把 OpenAI Codex CLI 的交互式会话当作 agent 托管，和 Claude Code、Pi 并列（v2.24+）。
 Codex agent 同样有频道、能对话、能重启和收编，历史面板和工具流也能看到它。
 
 ```bash
@@ -108,7 +108,7 @@ shell。不要把 Codex agent 指向你不信任的仓库。
 
 启动参数里用内联表 `projects={"<cwd>"={trust_level="trusted"}}` 声明目录信任，我们自己不写文件。
 但 Codex 仍可能往 `~/.codex/config.toml` 追加 `[projects."<cwd>"] trust_level = "trusted"`，端到端
-实测时 config.toml 的 sha 确实变了。ChatGPT.app 内置的 app-server 也会并发写这个文件。Claudestra
+实测时 config.toml 的 sha 确实变了。ChatGPT.app 内置的 app-server 也会并发写这个文件。Floka
 不回滚这些改动；如果介意，可以定期清理这些记录。
 
 ## 验证

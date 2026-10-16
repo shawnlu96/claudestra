@@ -1,19 +1,16 @@
 import { schedulerV2SkipTask, schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 import type { StallClaim } from "./ledger-priority-stall-store.js";
-import { livePriorityStallClaim, priorityStallRevision, priorityStallDue } from "./ledger-priority-stall-store.js";
+import { priorityStallRevision, priorityStallDue } from "./ledger-priority-stall-store.js";
 import type { Database } from "bun:sqlite";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { readPriorityModes } from "./ledger-priority-read.js";
 import { priorityStallBases } from "./ledger-priority-stall-read.js";
-import { stallNotice } from "./ledger-priority-stall.js";
 import type { StallCommand } from "./ledger-priority-stall-command.js";
-import { notifyProjectPm } from "./pm-notify.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 interface Ports {
   manager(...args: string[]): Promise<Record<string, unknown>>;
   active(): void;
-  notify?(claim: StallClaim, text: string): Promise<void>;
   now?(): number;
   budgetMs?: number;
 }
@@ -22,14 +19,15 @@ const PRIORITY_STALL_BUDGET_MS = 60_000;
 // Keep identities, not stale facts: targets can finish or change mode between rounds.
 const pendingTargets = new WeakMap<Database, string[]>();
 
-/** All business writes go through manager; an off project is never scanned for cards or asks. */
+/** All business writes go through manager; an off project is never scanned for cards or asks. Nothing is pushed to the PM. */
 export async function priorityStallTick(db: Database, config: SchedulerConfig, ports: Ports): Promise<{ taskId: string; error: string }[]> {
   const failed: { taskId: string; error: string }[] = [];
   const clock = ports.now ?? (() => performance.now()), started = clock();
   const budgetMs = ports.budgetMs ?? PRIORITY_STALL_BUDGET_MS;
   const due = new Map(Object.keys(config.projects).flatMap((project) => {
     if (readPriorityModes(db, project).priorityStall.mode === "off") return [];
-    return priorityStallBases(db, project).filter((b) => priorityStallDue(db, b, ports.now?.() ?? Date.now()))
+    const now = ports.now?.() ?? Date.now();
+    return priorityStallBases(db, project, undefined, now).filter((b) => priorityStallDue(db, b, now))
       .map((b) => [JSON.stringify([project, b.key]), b] as const);
   }));
   const pending = (pendingTargets.get(db) ?? []).filter((key) => due.has(key));
@@ -68,26 +66,8 @@ export async function priorityStallTick(db: Database, config: SchedulerConfig, p
         }
         if (claim.action === "heal") { await command({ ...data, op: "heal" }); continue; }
         if (claim.action === "owner") { await command({ ...data, op: "owner" }); break; }
-        const checked = await command({ ...data, op: "check" });
-        if (!checked.claim) break;
-        const fresh = checked.claim as StallClaim;
-        if (!fresh.basis.pm) {
-          await command({ ...data, op: "finish", result: "failed", detail: "没有负责 PM" });
-          break;
-        }
-        try {
-          ports.active();
-          const text = stallNotice(fresh.basis, fresh.cycle, ports.now?.() ?? Date.now());
-          if (ports.notify) await ports.notify(fresh, text);
-          else await notifyProjectPm(db, project, text, { fromName: "scheduler", to: fresh.basis.pm, level: "action",
-            stillActive: () => { ports.active(); return !!livePriorityStallClaim(db, project, b.key, fresh.token); } });
-        } catch (e) {
-          if (e instanceof SchedulerStopped) throw e;
-          await command({ ...data, op: "finish", result: "unknown", detail: String(e) });
-          break;
-        }
-        // Receipt failures leave the send pending/unknown; they never authorize another delivery.
-        await command({ ...data, op: "finish", result: "success", detail: `已通知 ${fresh.basis.pm}` });
+        // The reminder is a note on the card, written and finished in the writer's transaction; the PM pulls it when needed.
+        await command({ ...data, op: "note" });
         break;
       }
     } catch (e) {

@@ -62,7 +62,7 @@ export function handoffOf(db: Database, task: LedgerTask): HandoffFollow | null 
 }
 
 /** Scheduler only, auto card in `merge` on this spec, at exactly this full head and PR. */
-function handoffCard(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string }): { task: LedgerTask; workflow: TaskWorkflow } {
+export function handoffCard(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string }): { task: LedgerTask; workflow: TaskWorkflow } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "合并交接只由调度服务记");
   const task = mustTask(db, input.taskId), workflow = getWorkflow(db, task.id);
   if (task.stage !== "merge" || workflow?.mode !== "auto" || workflow.specRev !== task.specRev) {

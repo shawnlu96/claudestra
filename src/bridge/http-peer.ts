@@ -23,6 +23,7 @@ import { startPeerPresence } from "./peer-presence.js";
 import { initPush } from "./push/init.js";
 import { peerFetch, startRelayLink } from "./relay-link.js";
 import { PEER_CALLS_PATH, PeerCallBook, currentPeer, peerIdOf, resumePeerCalls, type PendingPeerCall } from "./peer-call-book.js";
+import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
 
 export interface HttpPeerDeps {
   deliver: (env: Envelope) => Promise<Delivery>;
@@ -112,15 +113,18 @@ export function routeToHttpPeer(
   peerAgentName: string,
   text: string,
   expecting?: string,
-  oneShot = false,
+  // 传级别 = oneShot 且发送方标了级别（agents-PEERLEVEL1）：请求体带 level，对方当班 PM 按它分流；非 oneShot 不带
+  oneShotOrLevel: boolean | PmNoticeLevel = false,
   onDelivered?: () => void, // 对方 2xx 收下之后才调（PM 带 ask id 的回话记成已答）；POST 失败 / 被拒不调
 ): { ok: true; targetName: string; pushBack: boolean } {
+  const level = oneShotOrLevel === "info" || oneShotOrLevel === "action" ? oneShotOrLevel : undefined;
+  let oneShot = oneShotOrLevel === true || !!level;
   const caller: CallerRef = { ws, channelId: fromChannelId, name: fromName, onDelivered };
   const callId = `hp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   if (isLendWorkerName(peerAgentName)) oneShot = true; // 出借 worker 没有 reply，只走 ask 回话：不挂 2 小时轮询、不进调用簿（i28-W6）
   // oneShot 是 FYI 通知，不等回复，不算一次交接
   if (!oneShot) void handoffStart(callId, { dir: "out", peer: peer.name, localAgent: fromName, remoteAgent: peerAgentName }, text.length);
-  track(callId, fromChannelId, () => runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot));
+  track(callId, fromChannelId, () => runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot, level));
   return { ok: true, targetName: `peer:${peer.name}.${peerAgentName}`, pushBack: !oneShot };
 }
 
@@ -161,6 +165,7 @@ async function runCall(
   expecting?: string,
   // oneShot = fire-and-forget：wait:0 立即 202，不轮询、不推回复、不报超时；投递失败仍推回（失败绝不静默）
   oneShot = false,
+  level?: PmNoticeLevel,
 ) {
   const d = deps;
   if (!d) return;
@@ -173,7 +178,8 @@ async function runCall(
   let res: Response;
   try {
     const url = `${base}/api/v1/agents/${encodeURIComponent(peerAgentName)}/messages`;
-    const body = JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC, nonce: crypto.randomUUID(), acceptsReplyFiles: true }); // nonce：同一秒同样的正文签名也不同，不会被对方当成重放；acceptsReplyFiles：回复里的 files 会推给 caller
+    // nonce：同一秒同样的正文签名也不同，不会被对方当成重放；acceptsReplyFiles：回复里的 files 会推给 caller；level 只随 oneShot 带
+    const body = JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC, nonce: crypto.randomUUID(), acceptsReplyFiles: true, ...(oneShot && level ? { level } : {}) });
     res = await peerFetch(url, {
       method: "POST",
       headers: {

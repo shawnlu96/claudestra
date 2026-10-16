@@ -15,6 +15,7 @@ import { observationTick } from "./observation-plan-tick.js";
 import { mainRedFixTick } from "./main-red-fix-tick.js";
 import { postVerifyTick } from "./scheduler-post-verify.js";
 import { reviewPmTick } from "./scheduler-review-pm-tick.js";
+import { manualMergeAutoTick } from "./scheduler-manual-merge-tick.js";
 import { sendToPm, specWaitTick, type SpecWaitEnv } from "./scheduler-spec-wait.js";
 
 type Failed = { taskId: string; error: string }[];
@@ -36,7 +37,7 @@ async function remind(env: SpecWaitEnv, project: string, taskId: string, mode: "
   // 记录后状态变了（开关改 observe / off、新请求 / 新验收 / 离开 merge、换 PM）：不发陈旧动作
   if (mergePmMode(env.db, project) !== "on" || now?.key !== c.key || mergePmTarget(env.db, taskId) !== pm) return;
   try {
-    if ((await sendToPm(env, project, pm, String(rec.text))) as unknown === false) throw new Error("发送端回 false");
+    if ((await sendToPm(env, project, pm, String(rec.text), "action")) as unknown === false) throw new Error("发送端回 false");
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return void failed.push({ taskId, error: `合并待处置提醒发给 ${pm} 失败：${(e as Error).message}` });
@@ -61,4 +62,4 @@ async function mergePmTick(env: SpecWaitEnv): Promise<Failed> {
 }
 
 /** 自动开卡 tick 里按序跑的 PM 提醒：缺规格、上线后、合并待处置、审查已回待处置、观察期到期核对（observation-plan-tick.ts） */
-export const pmWakeTicks = [specWaitTick, postVerifyTick, mergePmTick, reviewPmTick, mainRedFixTick, observationAutoRegisterTick, observationTick] as const;
+export const pmWakeTicks = [specWaitTick, postVerifyTick, mergePmTick, manualMergeAutoTick, reviewPmTick, mainRedFixTick, observationAutoRegisterTick, observationTick] as const;

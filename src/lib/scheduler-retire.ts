@@ -23,6 +23,7 @@ import { agentWindowsOrNull } from "./agent-windows.js";
 import { cleanSessionTmp, type TmpCleaner, type TmpStepInput } from "./scheduler-retire-tmp.js";
 import { stopOwnExecutor } from "./scheduler-retire-owner.js";
 import { patrolCardProcs, reapCardProcs, type CardProcDeps } from "./card-proc-reap.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -34,7 +35,7 @@ export interface RetireDeps {
   git: Git;
   exists(path: string): boolean;
   worktreeRoot: string;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   /** The registry as it is now: kill skips an agent already stopped, and a checkout a live agent works in is kept. */
   agents(): Promise<LiveAgent[]>;
   /** Session temp folders (scheduler-retire-tmp.ts); absent = that step is skipped. */
@@ -306,7 +307,7 @@ async function notifyAndSettle(db: Database, deps: RetireDeps, owed: Owed[], out
   for (const group of byProject.values()) {
     const lines = group.map((o) => `- ${o.notice}`);
     const text = `[调度引擎] 卡收尾有 ${lines.length} 处要 PM 看（没删的 worktree 不加 --force、不 rm，原样留着）：\n${lines.join("\n")}`;
-    const failed = await deps.notifyPm(group[0].task, text).then(() => null, (e: unknown) => {
+    const failed = await deps.notifyPm(group[0].task, text, "action").then(() => null, (e: unknown) => {
       if (e instanceof SchedulerStopped) throw e;
       console.error(`⚠️ [scheduler] 收尾通知没发出去，下轮重发：${(e as Error).message}`);
       return oneLine((e as Error).message);

@@ -49,6 +49,7 @@ import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { wipGateCard } from "./scheduler-wip-gate.js";
 import { logPoolIdleObservation, type PoolIdleObservation } from "./scheduler-pool-idle.js";
 import { liftWithinBand, slotOrder } from "./scheduler-priority-order.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -63,7 +64,7 @@ export interface AutoTickDeps {
   pinReview(task: LedgerTask, ref: SessionRef, head: string | null): Promise<{ dir: string } | { manual: string }>;
   /** Uncommitted tracked edits in the reviewer's checkout (null = clean): the verdict is refused, so PM must take over. */
   reviewDirty(task: LedgerTask, ref: SessionRef): Promise<string | null>;
-  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  notifyPm(task: LedgerTask, text: string, level: PmNoticeLevel): Promise<void>;
   now(): number;
   /** Effective lend.json borrow list (i28-R9); absent = this service never pools. Read once per pass. */
   borrow?(): Promise<BorrowEntry[]>;
@@ -104,7 +105,7 @@ export async function sendNotice(db: Database, deps: AutoTickDeps, key: string, 
   if (pending) perDb(unsent, db).set(key, pending);
   const n = unsent.get(db)?.get(key);
   if (!n) return true;
-  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); await n.informed?.(); }
+  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text, "action"); await n.informed?.(); } // 计划拒收报警
   catch (e) { noticeLost("计划拒收报警没发出去或回执未落盘（台账已记，下轮重试）")(e); return false; }
   unsent.get(db)?.delete(key);
   return true;
@@ -118,7 +119,8 @@ export function boundRef(db: Database, taskId: string, role: SessionRole): Sessi
   return s && s.state === "active" ? { taskId, role, agent: s.agent, sessionId: s.sessionId, family: s.family, transport: s.transport } : null;
 }
 class Card {
-  constructor(readonly db: Database, readonly task: LedgerTask, readonly opts: SnapshotOpts, readonly deps: AutoTickDeps, readonly handoff = false) {}
+  constructor(readonly db: Database, readonly task: LedgerTask, readonly opts: SnapshotOpts, readonly deps: AutoTickDeps, readonly handoff = false,
+    readonly local = false) {}
 
   out(step: string, detail: string): CardOutcome { return { taskId: this.task.id, step, detail: oneLine(detail) }; }
 
@@ -131,7 +133,7 @@ class Card {
     const r = await this.deps.manager("ledger", "scheduler-fallback-manual", this.task.id, "--reason", oneLine(reason), ...(intentId ? ["--intent", intentId] : []));
     if (r.ok !== true) return this.out("held", `退回人工失败：${String(r.error)}`);
     if (r.duplicate !== true) {
-      await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 退回人工，请接手：${oneLine(reason)}`)
+      await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 退回人工，请接手：${oneLine(reason)}`, "action")
         .catch(noticeLost("通知 PM 失败（台账已记退回人工）"));
     }
     return this.out("manual", reason);
@@ -152,7 +154,7 @@ class Card {
   }
   /** Count a refused plan; on the threshold record it on the ledger, then tell PM once (see PLAN_REJECT_TICKS). */
   async refused(code: string, error: string): Promise<CardOutcome> {
-    if (isResourceWait(code, error)) { refusals.get(this.db)?.delete(this.task.id); return this.out("wait", error); }
+    if (isResourceWait(code, error, this.task.id)) { refusals.get(this.db)?.delete(this.task.id); return this.out("wait", error); }
     const text = planRejectedReason(error), now = this.deps.now(), detail = `计划没写进台账：${oneLine(error)}`;
     const seen = perDb(refusals, this.db), was = seen.get(this.task.id);
     const r: Refusal = was && was.code === code && was.text === text ? { ...was, ticks: was.ticks + 1 } : { code, text, ticks: 1, since: now, told: false };
@@ -281,7 +283,8 @@ class Card {
       await this.settle(intent.id, "pending", "cancelled", `未开 ask：${shots.missing}`);
       return this.escalate(shots.missing, intent.id);
     }
-    if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, this.deps.notifyPm, (f, t, r) => this.settle(intent.id, f, t, r)));
+    const uiNotify = (t: LedgerTask, x: string) => this.deps.notifyPm(t, x, "action"); // 截图验收要 PM 看
+    if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, uiNotify, (f, t, r) => this.settle(intent.id, f, t, r)));
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
     if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice(plan.downgrade ? plan.reason : null);
     if (r.ok === true) return this.out(intent.action, intent.action === "stage" ? `${this.task.stage}→${plan?.targetStage}` : `ask ${String(r.askId)}`);
@@ -379,7 +382,7 @@ class Card {
       text = typeof (r.event as { text?: unknown } | undefined)?.text === "string" ? (r.event as { text: string }).text : draft;
     }
     try {
-      await this.deps.notifyPm(this.task, text);
+      await this.deps.notifyPm(this.task, text, "action"); // 未领单报警
     } catch (e) {
       noticeLost("未领单报警没发出去（台账已记，稍后重发）")(e);
       failed.set(sent.id, this.deps.now());
@@ -418,6 +421,7 @@ class Card {
     const stall = await resumeStallFallback(this, open, sendNotice); if (stall) return stall; // CONVREPO1：本机制记的 unknown 只续退回人工
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
     if (open?.action === "merge") {
+      if (this.local) return this.escalate(`本项目是本地合并（localMerge），不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id);
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
         : this.out("merge_queue", `合并意图 ${open.status}`);
     }
@@ -430,6 +434,8 @@ class Card {
     }
     if (open) return this.drive(open, null);
     const peerHold = peerPrHold(this.db, this.task, this.deps.now(), this.deps.recoveryPolicy); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
+    const stale = await (await import("./lend-local-continuity-tick.js")).staleLeaseStep(this.db, this.task, this.opts, this.deps.manager); // i28-STALELEASE1
+    if (stale) return this.out("replan", stale);
     const snap = autoSnapshot(this.db, this.task, this.opts), plan = planScheduler(snap);
     await (await import("./lend-fix-reassign-tick.js")).trackLeaseWait(this.db, this.task, plan, this.deps.manager); // i28-RA1：等租约方计时
     const back = await (await import("./recovery-fix-local-swap-tick.js")).trackLocalSwap(this.db, this.task, snap, plan, this.deps); // GATESWAP1
@@ -441,6 +447,7 @@ class Card {
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     if (plan.action === "merge" && this.handoff) return driveHandoff(this); // 交仓库方合并：不计划合并意图、不占合并槽（MHO1）
+    if (plan.action === "merge" && this.local) return (await import("./local-merge-tick.js")).driveLocalReady(this); // ONB-2：PM 本地合并
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
       : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
       : plan.action === "merge" ? mergeSlotHold(this.task) ?? mergePipeHold(this.db, this.task) : null;
@@ -453,7 +460,7 @@ class Card {
 }
 /** A pace that can tell a budget cut-off apart (passPace's phases); a bare TickPace cannot, and never owes a card. */
 const reportsBudgetEnd = (pace?: TickPace): pace is TickPace & { budgetEnded(): boolean } => typeof pace?.budgetEnded === "function";
-export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
+export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean; localMerge?: boolean }>, deps: AutoTickDeps,
   pace?: TickPace, afterMerges?: () => Promise<void>): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
   const poolIdleObservation = { candidates: 0, idle: 0, mismatches: 0 }, authorBudget = lendAuthorBudget();
@@ -511,7 +518,8 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
       const pool = await poolOf(policy.remote);
       const prepared = await deps.prepareAuthor?.(task, authorBudget) ?? task;
       if ("deferred" in prepared) { out.cards.push({ taskId, step: "held", detail: prepared.reason }); continue; }
-      out.cards.push(await new Card(db, prepared, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
+      out.cards.push(await new Card(db, prepared, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true,
+        policy.localMerge === true).step());
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });

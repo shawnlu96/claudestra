@@ -97,7 +97,7 @@ export function isLoopbackHost(hostname: string): boolean {
   return h === "localhost" || h === "127.0.0.1" || h === "::1";
 }
 
-/** 等批准中的配对请求：离开配对页（「回到 Claudestra」、刷新、MachineGate 跳走再跳回）后凭它接着轮询，批准结果才有人领 */
+/** 等批准中的配对请求：离开配对页（「回到 Floka」、刷新、MachineGate 跳走再跳回）后凭它接着轮询，批准结果才有人领 */
 export interface SavedPending {
   fp: string;
   approvalId: string;

@@ -4,8 +4,11 @@
  * 非 GET/HEAD 必须带 x-cstra-device 头（cookie 浏览器会自动附上，这个头跨站表单附不上）。
  * 限流按 principal：owner 的所有设备共用 api:owner:self 一个身份，配额相应放大。api-routes 与 web-terminal 都调这里。
  */
-import { findByBearer, readPrincipals, SlidingWindowLimiter, tokenIdOf, updatePrincipals, type Principal } from "../lib/principals.js";
-import { cookieValueFrom, csrfOk, DEVICE_HEADER, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
+import { findByBearer, readPrincipals, SlidingWindowLimiter, updatePrincipals, type Principal } from "../lib/principals.js";
+import { API_RATE_LIMIT_PER_MIN, createApiRateLimiter } from "../lib/api-rate-bucket.js";
+import { csrfOkFor, DEVICE_HEADER, deviceCookieHeader, effectivePrincipal, findCredential, touchCredential } from "../lib/devices.js";
+import { readBrowserCookie, staleMirrorName } from "../lib/floka-browser-protocol/credentials.js";
+import { browserPolicy } from "../lib/floka-browser-protocol/policy.js";
 import { apiJson } from "./api-respond.js";
 import { checkPeerSignature, peerReplayVerdict, type PeerCheck } from "./peer-signature.js";
 import { PEER_ENTRANCE_ONLY, requestContextOf, sourceAllows } from "./request-context.js";
@@ -14,11 +17,8 @@ import { peerE2eRefusal, readHttpPeers } from "../lib/peer-e2e-local.js";
 import { messagesOnlyAllows } from "../lib/peer-scope-gate.js";
 import { logDeviceRefusal, noteDeviceAuth } from "./device-cookie-renew.js";
 
-// 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
-// 手机 + 电脑 + 侧栏轮询共用一个身份
-const API_RATE_LIMIT_PER_MIN = 120;
-const OWNER_RATE_LIMIT_PER_MIN = 600;
-const limiters = new Map<string, SlidingWindowLimiter>();
+// 容量与选桶见 lib/api-rate-bucket.ts：owner 所有设备共用一个 600 的桶，与当次设备是否受限无关
+const rateLimiter = createApiRateLimiter();
 const sigFailures = new Map<string, SlidingWindowLimiter>();
 const SIG_FAILURE_KEYS = 2_000;
 const lastTouchWrite = new Map<string, number>();
@@ -37,6 +37,17 @@ function bearerSecret(req: Request, url: URL): string | null {
   return (sseTokenOk && url.searchParams.get("token")) || null;
 }
 
+/**
+ * 两族设备 cookie 冲突：这一请求照拒；同时删掉新族镜像（旧族每次都写，冲突只可能是新族没跟上——回滚到旧版本 / 关了新写入后重新配对），
+ * 下一请求只剩旧族、按旧族认最新配对。Path / Secure 与签发时同一规则（bridge/devices.ts cookiesFor）
+ */
+function deviceConflict(req: Request): Response {
+  const res = apiJson(401, { ok: false, error: "conflicting device cookies", code: "device_conflict" });
+  const ctx = requestContextOf(req);
+  res.headers.append("set-cookie", deviceCookieHeader(null, { path: ctx.pathPrefix ? `${ctx.pathPrefix}/` : "/", secure: ctx.https || ctx.source === "relay" }, staleMirrorName("deviceCookie")));
+  return res;
+}
+
 /** peers: false = 这条路由不收 peer token（远程终端这类不限速的路由；peer 本来就不该碰终端） */
 export async function authenticateApi(req: Request, url: URL, opts: { rateLimit: boolean; peers?: false }): Promise<Principal | Response> {
   // 入口漏设来源时不认任何凭据（误拒而不是按某个来源放行）：Bearer 本身不看来源，只靠这一道
@@ -49,7 +60,11 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     p = findByBearer(file, secret);
     if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
   } else {
-    const token = cookieValueFrom(req.headers.get("cookie"));
+    // 两族设备 cookie（rename.browserProtocol）：off / observe 只认旧族；on 档两族值不同 = 冲突，拒，不替请求挑一把
+    const policy = browserPolicy();
+    const read = readBrowserCookie(req.headers.get("cookie"), "deviceCookie", policy);
+    if (read.status === "conflict") return deviceConflict(req);
+    const token = read.value;
     if (token && !sourceAllows(req, "device")) return apiJson(403, { ok: false, error: "no device credentials on this entrance", code: "device_via_peer_entrance" });
     if (!token) {
       logDeviceRefusal(req, url, "missing_cookie");
@@ -60,7 +75,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
       logDeviceRefusal(req, url, "credential_invalid");
       return apiJson(401, { ok: false, error: "device credential invalid, revoked or expired", code: "device_invalid" });
     }
-    if (!csrfOk(req.method, req.headers.get(DEVICE_HEADER))) return apiJson(403, { ok: false, error: `${DEVICE_HEADER} header required on non-GET requests from a device`, code: "csrf" });
+    if (!csrfOkFor(req.method, req.headers, policy)) return apiJson(403, { ok: false, error: `${DEVICE_HEADER} header required on non-GET requests from a device`, code: "csrf" });
     p = effectivePrincipal(hit);
     void touchLater(hit.credential.id, requestContextOf(req).clientIp);
     device = { id: hit.credential.id, token };
@@ -79,11 +94,8 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   if (replay?.reject) return peerSigRejected(replay.reject);
   if (p.messagesOnly && !messagesOnlyAllows(req.method, url.pathname)) return apiJson(403, { ok: false, error: "this token may only deliver messages", code: "messages_only" });
   if (opts.rateLimit && replay?.charge !== false) {
-    const limit = p.role === "owner" ? OWNER_RATE_LIMIT_PER_MIN : API_RATE_LIMIT_PER_MIN;
-    const key = tokenIdOf(p);
-    let limiter = limiters.get(key);
-    if (!limiter) limiters.set(key, (limiter = new SlidingWindowLimiter(limit)));
-    if (!limiter.tryAcquire()) return apiJson(429, { ok: false, error: `rate limit exceeded (${limit} req/min)`, code: "rate_limited", reason: "rate_limited" });
+    const limited = rateLimiter.charge(p, url.pathname);
+    if (limited) return apiJson(429, { ok: false, error: `rate limit exceeded (${limited.limit} req/min)`, code: "rate_limited", reason: "rate_limited" });
   }
   // 从只读重放判定到扣桶、记入缓存之间不 await；429 不占条目，也不会让重试绕过限速桶。
   if (sig?.once) peerReplayVerdict(sig.once, p.peer!);

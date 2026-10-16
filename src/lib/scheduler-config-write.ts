@@ -2,7 +2,7 @@ import { parseAgents, agentsPatch, type AgentPoolPolicy } from "./scheduler-agen
 import { hasLocalFamilies, localFamiliesPatch, type LocalFamiliesSet } from "./scheduler-local-families-config.js";
 /**
  * The only writer of scheduler.json: one project's `remote.mode` (i28-W5b, `ledger scheduler-remote`) and this machine's
- * `remote.localPriority` / `maxActiveWorkers` (i28-Q1, `ledger scheduler-local`). The scheduler re-reads
+ * `remote.localPriority` / `maxActiveWorkers` (i28-Q1, `ledger scheduler-local`), plus new project segments (`team onboard`). The scheduler re-reads
  * the file every pass and idles on a parse error, so a bad write stops every auto card: the whole file is validated before
  * anything touches disk. The edit is made on the raw JSON object, never on parseSchedulerConfig's result (that one fills
  * defaults, drops unknown keys and carries notes). Lock as lend-config.ts updateLend: no lock = no write. The audit event
@@ -23,6 +23,7 @@ export type SettableRemoteMode = "balance" | "off";
 const SETTABLE_REMOTE_MODES: readonly SettableRemoteMode[] = ["balance", "off"];
 const SCHEDULER_REMOTE_OP = "scheduler_remote";
 const SCHEDULER_LOCAL_OP = "scheduler_local";
+const SCHEDULER_PROJECT_ADD_OP = "scheduler_project_add";
 
 export interface RemoteModePatch {
   /** New file text; equals the input when nothing changed. */
@@ -46,15 +47,20 @@ function detectIndent(raw: string): string | number {
 
 /** The raw project object to edit (and the whole doc); throws LedgerError (invalid / not_found). */
 export function projectOf(raw: string, project: string): { doc: Record<string, unknown>; p: Record<string, unknown>; remote: Record<string, unknown> | undefined } {
-  let doc: unknown;
-  try { doc = JSON.parse(raw); } catch (e) { throw new LedgerError("invalid", `scheduler.json 不是合法 JSON：${(e as Error).message}`); }
-  if (!isObj(doc)) throw new LedgerError("invalid", "scheduler.json 顶层不是对象");
-  const projects = doc.projects;
-  if (!isObj(projects) || !Object.hasOwn(projects, project)) throw new LedgerError("not_found", `scheduler.json 里没有项目 ${project}`);
+  const { doc, projects } = docOf(raw);
+  if (!Object.hasOwn(projects, project)) throw new LedgerError("not_found", `scheduler.json 里没有项目 ${project}`);
   const p = projects[project];
   if (!isObj(p)) throw new LedgerError("invalid", `scheduler.json 里项目 ${project} 不是对象`);
   if (p.remote !== undefined && !isObj(p.remote)) throw new LedgerError("invalid", `scheduler.json 里项目 ${project} 的 remote 不是对象`);
   return { doc, p, remote: p.remote as Record<string, unknown> | undefined };
+}
+
+function docOf(raw: string): { doc: Record<string, unknown>; projects: Record<string, unknown> } {
+  let doc: unknown;
+  try { doc = JSON.parse(raw); } catch (e) { throw new LedgerError("invalid", `scheduler.json 不是合法 JSON：${(e as Error).message}`); }
+  if (!isObj(doc)) throw new LedgerError("invalid", "scheduler.json 顶层不是对象");
+  if (!isObj(doc.projects)) throw new LedgerError("invalid", "scheduler.json 的 projects 不是对象");
+  return { doc, projects: doc.projects };
 }
 
 /** Validate the whole edited doc, then serialize in the file's own indent; unchanged = the input text byte for byte. */
@@ -213,4 +219,33 @@ export async function setLocalSlots(
   const reason = textOneLine(input.reason, "原因", 600);
   checkLocalSlots(input.set); // before the permission check and the lock, as setRemoteMode checks the mode
   return writeProject(db, ctx, { op: SCHEDULER_LOCAL_OP, project: input.project, reason, what: "改本机档位 / 并发上限", patch: (raw) => patchLocalSlots(raw, input.project, input.set) }, opts);
+}
+
+/** A new project segment (`team onboard`); every other key of the file stays as it is. */
+export type NewProjectSegment = Record<string, unknown> & { maxActiveWorkers: number; requiredChecks: string[]; repoDir: string };
+export type AddProjectResult = WriteResult<Record<string, unknown> | null, NewProjectSegment>;
+
+/**
+ * Pure: append one project segment. An existing segment is never touched (changed=false, from = what the file has): a
+ * re-run is a no-op and a different existing value is for the caller to report, never to overwrite.
+ */
+export function patchAddProject(raw: string, project: string, seg: NewProjectSegment): Patch<Record<string, unknown> | null, NewProjectSegment> {
+  if (!/^[\w.-]{1,80}$/.test(project)) throw new LedgerError("invalid", `项目 id ${project} 不合法`);
+  const { doc, projects } = docOf(raw);
+  const cur = Object.hasOwn(projects, project) ? projects[project] : undefined;
+  if (cur !== undefined) return { ...finish(raw, doc, false), from: isObj(cur) ? cur : null, to: seg, changed: false };
+  projects[project] = structuredClone(seg);
+  return { ...finish(raw, doc, true), from: null, to: seg, changed: true };
+}
+
+/** Same lock, whole-file validation and audit as setRemoteMode; only adds, so the global switches and other projects stay. */
+export async function addProject(
+  db: Database,
+  ctx: WriteCtx,
+  input: { project: string; segment: NewProjectSegment; reason: string },
+  opts: { path?: string; lockMs?: number } = {},
+): Promise<AddProjectResult> {
+  const reason = textOneLine(input.reason, "原因", 600);
+  return writeProject(db, ctx, { op: SCHEDULER_PROJECT_ADD_OP, project: input.project, reason, what: "新增调度项目段",
+    patch: (raw) => patchAddProject(raw, input.project, input.segment) }, opts);
 }

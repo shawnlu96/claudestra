@@ -6,7 +6,7 @@
 
 ## 出借方升级
 
-1. 更新 Claudestra 到包含本改动的版本，确认 Claude CLI 可用，且出借方本机 Claude Code 已登录（平时能开 worker 就行）。
+1. 更新 Floka 到包含本改动的版本，确认 Claude CLI 可用，且出借方本机 Claude Code 已登录（平时能开 worker 就行）。
 2. 在面板授权表单设置 Claude 名额并提交。未更改的 Codex 名额、角色、模型和推理档沿用原授权。
 3. 下一次调度 hello 的 `slots.claude.total` 反映授权数，`busy` 仍仅统计已领单。无需重启服务、无需 setup-token。
 

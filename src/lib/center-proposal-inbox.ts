@@ -41,7 +41,7 @@ export const paramsOf = (localProjectId: string, r: ProposalRecord): InboxParams
   ({ localProjectId, proposalId: r.proposalId, proposalRev: r.proposalRev, proposalDigest: r.operation.proposalDigest });
 const bindOf = (p: InboxParams): Omit<AskBind, "paramsHash"> => ({ action: PROPOSAL_INBOX_ACTION, approve: [APPROVE_BUTTON], params: { ...p } });
 /** 同一提案同一 rev（同摘要）只开一张：撞上已有的（开着或已答）返回那张 */
-const inboxDedupKey = (p: InboxParams) => `center-proposal:${p.localProjectId}:${p.proposalId}:${p.proposalRev}:${p.proposalDigest.slice(0, 16)}`;
+export const inboxDedupKey = (p: InboxParams) => `center-proposal:${p.localProjectId}:${p.proposalId}:${p.proposalRev}:${p.proposalDigest.slice(0, 16)}`;
 /** 卡上的 proposalId 键：新 rev 取代旧卡由 bridge 撤旧卡（系统卡没有 fromAgent，ledger 的 askKey 取代不生效） */
 const inboxAskKey = (proposalId: string) => `center-proposal:${proposalId}`;
 
@@ -49,8 +49,9 @@ const clean = (s: string) => redactForPeer(s).text;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 const when = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 
-/** owner 卡的内容（CreateAskInput 同形，createdBy 固定）；selfPersonId = 本机 owner 在中心的 personId，提案人是他本人时换标题和提案人行 */
-export function inboxCard(localProjectId: string, r: ProposalRecord, selfPersonId = ""): NewAsk & { source: "system"; createdBy: string } {
+/** owner 卡的内容（CreateAskInput 同形，createdBy 固定）；selfPersonId = 本机 owner 在中心的 personId，提案人是他本人时换标题和提案人行；
+ * ownerReason = 自动批准开着时、需要 owner 批的原因（PROPAUTO1，中文），不给就是原样 */
+export function inboxCard(localProjectId: string, r: ProposalRecord, selfPersonId = "", ownerReason = ""): NewAsk & { source: "system"; createdBy: string } {
   const p = r.proposal, params = paramsOf(localProjectId, r), bind = bindOf(params);
   const own = !!selfPersonId && r.proposer.personId === selfPersonId;
   const kind = p.kind === "revise" ? `修订（${p.featureId} v${p.baseVersion} → v${p.baseVersion + 1}）` : "新建 feature";
@@ -66,6 +67,7 @@ export function inboxCard(localProjectId: string, r: ProposalRecord, selfPersonI
     ...nodes,
     ...(desc ? [`说明：${desc}`] : []),
     `到期：${when(p.expiresAt)}`,
+    ...(ownerReason ? [`需要你批的原因：${ownerReason}`] : []),
     "点「批准」由系统用你的凭据去中心批准（算你本人批）。",
   ].join("\n");
   return {
@@ -182,8 +184,11 @@ export function decisionResultText(title: string, p: InboxParams, out:
   /** fresh：重拉到的仍待批记录；card：按 fresh 那一 rev 的卡的真实状态（undefined = 没开出卡） */
   | { kind: "conflict"; fresh: ProposalRecord | null; card?: Ask["state"]; refetchError?: string }
   | { kind: "error"; code: string }
-  | { kind: "invalid" }): string {
+  | { kind: "invalid" }
+  /** PROPAUTO1：同一版本的执行占位已被占（系统已自动批准或另一次答复在执行），这次不再发 */
+  | { kind: "claimed" }): string {
   const head = `成员提案「${clean(title)}」（${p.proposalId} rev ${p.proposalRev}）`;
+  if (out.kind === "claimed") return `${head}：该版本已在执行（系统自动批准或另一次答复），未重复发送。`;
   if (out.kind === "invalid") return `${head}：未执行（不是 owner 本人答复或卡片参数不符）。`;
   if (out.kind === "error") return `${head}：中心未接受，错误码 ${out.code}；未重试，可在团队页重新处理。`;
   if (out.kind === "conflict") {

@@ -30,8 +30,25 @@ export const UI_BASIS_RULE = "ui 卡：和对照基准不一致（版式、组�
 /** 审查单上的 ask 当场得到的答复（不开 PM ask、不发通知） */
 export const REVIEW_ASK_REPLY = `${GRADING_RULE}。\n把你的判断和理由写进报告，交结论。`;
 
-/** 并进派单 inputs 的那一项；uiBasis = ui 卡审查单的对照基准一节（ui-acceptance.ts uiReviewBasis），带上时多一条 UI_BASIS_RULE */
-export function standardAnswers(kind: StandardAnswerFor, uiBasis?: string): string {
-  const items = [ENVIRONMENT, DUTIES, ...(kind === "review" ? [GRADING_RULE] : [ASK_DEFAULT_GUIDANCE, OUT_OF_SCOPE_RED]), ...(uiBasis ? [UI_BASIS_RULE] : []), SPEC_FIRST];
+/**
+ * scheduler.json localMerge 项目（lib/scheduler-config.ts localMergeOf）没有 PR CI：requiredChecks 是本项目要跑的命令（按空白切参数、不经 shell），
+ * 执行者单、审查单、调度派单都用这几行，说法只此一份。非本地项目不传 checks，整段逐字不变。
+ */
+const checksText = (checks: readonly string[]) => checks.map((c) => `\`${c}\``).join("；");
+export const localAuthorAcceptance = (checks: readonly string[]): string[] => [`交付前在本卡 worktree 逐条跑本项目的必过检查，全绿再交付：${checksText(checks)}`,
+  "本机负载造成的等待型超时、且在 base（本机 main）上同样复现的，不算不过；在证据报告里列出"];
+export const localReviewRule = (checks: readonly string[]): string => `全量测试按本项目的必过检查（${checksText(checks)}）在审查目录里跑；本机超时不判 P1`;
+const localEnvironment = (checks: readonly string[]) => ENVIRONMENT.replace("全量以 PR head 的 CI 为准", `本项目没有 PR CI，全量以必过检查为准：${checksText(checks)}`);
+const LOCAL_DUTIES = DUTIES.replace("CI 由合并闸核对", "必过检查由 PM 本机合并时再跑一遍");
+/** 本地项目没有 run 链接、也没有合并闸重跑：写清哪条检查没过、怎么复现，PM 合并时自己再跑 */
+const LOCAL_OUT_OF_SCOPE_RED = "范围外测试红：不推空提交，在证据报告里列明失败的检查和复现方法，由 PM 本地合并时核对";
+
+/**
+ * 并进派单 inputs 的那一项；uiBasis = ui 卡审查单的对照基准一节（ui-acceptance.ts uiReviewBasis），带上时多一条 UI_BASIS_RULE；
+ * localChecks = localMerge 项目的必过检查（换掉环境 / 职责里的 PR CI 说法）
+ */
+export function standardAnswers(kind: StandardAnswerFor, uiBasis?: string, localChecks?: readonly string[]): string {
+  const env = localChecks ? [localEnvironment(localChecks), LOCAL_DUTIES] : [ENVIRONMENT, DUTIES];
+  const items = [...env, ...(kind === "review" ? [GRADING_RULE] : [ASK_DEFAULT_GUIDANCE, localChecks ? LOCAL_OUT_OF_SCOPE_RED : OUT_OF_SCOPE_RED]), ...(uiBasis ? [UI_BASIS_RULE] : []), SPEC_FIRST];
   return [STANDARD_ANSWERS_HEAD, ...items.map((s) => `- ${s}`), ...(uiBasis ? [uiBasis] : [])].join("\n");
 }

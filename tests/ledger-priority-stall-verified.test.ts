@@ -26,9 +26,11 @@ afterEach(() => closeLedger(":memory:"));
 
 test.each(["verified", "build", "review", "merge"])("now %s card with unmet dependency has correct eligibility", (stage) => {
   db.query("UPDATE tasks SET stage=? WHERE id='target'").run(stage);
-  const basis = priorityStallBases(db, project)[0];
+  const bases = priorityStallBases(db, project), basis = bases[0];
   expect(basis.why).toContain("依赖没满足：upstream");
-  expect(basis.eligible).toBe(stage !== "verified");
+  // STALLVER2: waiting only on a dependency is never itself a stall; the live upstream is monitored instead (not for a verified card).
+  expect(basis.eligible).toBe(false);
+  expect(bases.find((b) => b.taskId === "upstream")?.eligible ?? false).toBe(stage !== "verified");
 });
 
 test("verified card emits no stall commands or notices across escalation windows", async () => {

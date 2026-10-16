@@ -31,6 +31,14 @@ function rememberUsage(db: Database, peer: string, family: LendFamily, used: num
     ON CONFLICT(project, key) DO UPDATE SET value = excluded.value WHERE value != excluded.value`, [quotaKey(peer, family), String(used)]);
 }
 const HOUR = 3600_000;
+/**
+ * Runtime cooldowns (lend-peer-runtime-cooldown.ts) share this table under this reason prefix. Claims and quota hellos must not
+ * clear them: a fresh hello still offers a Claude slot while OAuth is broken. They end on expiry or a later done order only.
+ */
+const RUNTIME_COOLDOWN_PREFIX = "runtime:";
+const RUNTIME_ROW = "substr(reason, 1, 8) = 'runtime:'";
+const QUOTA_ROW = `NOT (${RUNTIME_ROW})`;
+export const isRuntimeCooldown = (reason: string): boolean => reason.startsWith(RUNTIME_COOLDOWN_PREFIX);
 // A weekly reset hint may omit its timezone; one extra day keeps the actual reset reachable.
 const MAX_COOLDOWN = 8 * 24 * HOUR;
 
@@ -42,7 +50,7 @@ export function peerCooldownUntil(reason: string, now: number): number {
 /** Claims clear their target; an explicit reoffer clears only when it retries the same peer and family. */
 export function clearPeerCooldown(db: Database, peer: string, family: LendFamily, destination?: Pick<LendOrder, "peer" | "family">): void {
   if (destination && (destination.peer !== peer || destination.family !== family)) return;
-  db.run("DELETE FROM lend_peer_cooldowns WHERE peer = ? AND family = ?", [peer, family]);
+  db.run(`DELETE FROM lend_peer_cooldowns WHERE peer = ? AND family = ? AND ${QUOTA_ROW}`, [peer, family]);
 }
 
 /** A repeated failure inside this interval keeps the first reset and emits no second PM notice. */
@@ -50,9 +58,10 @@ export function cooldownReleaseNotices(db: Database, o: LendOrder, detail: strin
   // The existing classifier applies text detection to limit banners; retry prevents generic errors becoming quota.
   const quota = classifyAirFailure({ id: o.orderId, revision: 1, category: "limit", severity: "error", title: detail, actions: ["retry"] });
   if (quota.kind !== "quota") return notices;
-  const cur = db.query("SELECT until FROM lend_peer_cooldowns WHERE peer = ? AND family = ?").get(o.peer, o.family) as { until: number } | null;
-  if (cur && cur.until > now) return notices;
+  const cur = db.query("SELECT until, reason FROM lend_peer_cooldowns WHERE peer = ? AND family = ?").get(o.peer, o.family) as
+    { until: number; reason: string } | null;
   const until = peerCooldownUntil(detail, now);
+  if (cur && cur.until > now && (!isRuntimeCooldown(cur.reason) || cur.until >= until)) return notices; // a longer quota wall replaces a runtime row
   db.run(`INSERT INTO lend_peer_cooldowns (peer, family, until, reason, startedAt, baselineWeekUsedPct) VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(peer, family) DO UPDATE SET until = excluded.until, reason = excluded.reason,
     startedAt = excluded.startedAt, baselineWeekUsedPct = excluded.baselineWeekUsedPct`,
@@ -69,7 +78,7 @@ export function updatePeerCooldownHello(db: Database, peer: string, paused: Paus
     const familyPaused = paused && (paused.reason === `${family}_quota` || !paused.reason.endsWith("_quota"));
     // Compare before updating: a first reading seeds a NULL baseline but cannot prove a usage drop.
     if (!familyPaused && reading.weekUsedPct < 100) {
-      db.run(`DELETE FROM lend_peer_cooldowns WHERE peer = ? AND family = ?
+      db.run(`DELETE FROM lend_peer_cooldowns WHERE peer = ? AND family = ? AND ${QUOTA_ROW}
         AND (until < ? OR baselineWeekUsedPct > ?)`, [peer, family, reading.resetAt, reading.weekUsedPct]);
     }
     db.run(`UPDATE lend_peer_cooldowns SET baselineWeekUsedPct = ? WHERE peer = ? AND family = ? AND baselineWeekUsedPct IS NOT ?`,
@@ -77,14 +86,17 @@ export function updatePeerCooldownHello(db: Database, peer: string, paused: Paus
     rememberUsage(db, peer, family, reading.weekUsedPct);
   }
   if (!paused) return;
-  db.run(`UPDATE lend_peer_cooldowns SET until = MAX(until, ?) WHERE peer = ? AND until > ?
+  db.run(`UPDATE lend_peer_cooldowns SET until = MAX(until, ?) WHERE peer = ? AND until > ? AND ${QUOTA_ROW}
     AND (? = family || '_quota' OR substr(?, -6) != '_quota')`, [paused.until, peer, now, paused.reason, paused.reason]);
 }
 
 /** Old in-memory fixture databases lack this optional table; production migrates before planning. */
 export function cooldownPeerSlots(db: Database, peer: string, slots: Record<LendFamily, number>, now: number): Record<LendFamily, number> {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE name = 'lend_peer_cooldowns' AND type = 'table'").get()) return slots;
-  const rows = db.query("SELECT family FROM lend_peer_cooldowns WHERE peer = ? AND until > ?").all(peer, now) as { family: LendFamily }[];
+  // A runtime row ends once an order of that peer and family reaches done after it started (no write here: callers may be read-only).
+  const done = db.query("SELECT 1 FROM sqlite_master WHERE name = 'lend_orders' AND type = 'table'").get() ? `AND NOT (${RUNTIME_ROW}
+    AND EXISTS (SELECT 1 FROM lend_orders o WHERE o.peer = c.peer AND o.family = c.family AND o.status = 'done' AND o.updatedAt >= c.startedAt))` : "";
+  const rows = db.query(`SELECT family FROM lend_peer_cooldowns c WHERE peer = ? AND until > ? ${done}`).all(peer, now) as { family: LendFamily }[];
   const result = { ...slots };
   for (const row of rows) result[row.family] = 0;
   return result;

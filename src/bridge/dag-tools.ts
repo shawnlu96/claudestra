@@ -29,7 +29,7 @@ import { readProjects } from "../lib/projects.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { runBounded } from "../lib/run-bounded.js";
 import { runManagerProcess } from "../lib/run-manager.js";
-import { readSchedulerConfig } from "../lib/scheduler-config.js";
+import { localMergeOf, readSchedulerConfig } from "../lib/scheduler-config.js";
 import { startPlacement, type StartPlacementIO } from "../lib/scheduler-placement-start.js";
 import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { writeTextAtomicSync } from "../lib/state-file.js";
@@ -292,6 +292,8 @@ function liveDeps(): DagToolDeps {
         if (!c.enabled || !c.autoDispatch) return "调度服务没开自动派单（scheduler.json enabled + autoDispatch）：开了 auto 也没人推，先手动建卡";
         return Object.hasOwn(c.projects, project) ? null : `调度服务没列项目 ${project}（scheduler.json projects）`;
       },
+      localMerge: (project) => localMergeOf(project) !== null,
+      mergeHandoff: (project) => { const c = readSchedulerConfig(); return Object.hasOwn(c.projects, project) && c.projects[project]!.mergeHandoff === true; },
       template: () => (existsSync(statePath("ledger", "prompts", "exec-template.md")) ? readFileSync(statePath("ledger", "prompts", "exec-template.md"), "utf8") : null),
       placement: (db, q) => startPlacement(db, livePlacementIO(git), q),
     }),

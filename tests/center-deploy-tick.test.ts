@@ -26,7 +26,7 @@ function world(mode: "on" | "observe" | "off" = "on") {
   const ports: CenterTickPorts = { config: () => ({ p: currentCfg }), policy: () => ({ mode, source: "config", manualAfterMs: null }),
     read: () => structuredClone(s), write: (_, v) => { s = structuredClone(v); }, proof: async () => { probes++; return proof(); }, cards: () => [...cards],
     jobs: () => jobs, repoDir: () => "/fake", result: () => result };
-  const d = { center: ports, now: () => time, assertActive: () => {}, notifyPm: async (_: string, text: string) => {
+  const d = { center: ports, now: () => time, assertActive: () => {}, notifyPm: async (_: string, text: string, _level: "action" | "info") => {
     notice++; expect(text).not.toContain("secret"); expect(text).not.toContain("/fake");
   }, manager: async (...a: string[]) => {
     calls.push(a);

@@ -8,6 +8,7 @@ import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import type { runBounded } from "./run-bounded.js";
 import { readReconcileFacts, reconcileGitProof, reconcileTaskIds } from "./scheduler-deploy-reconcile-facts.js";
+import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 interface ReconcileDeps {
   manager: (...args: string[]) => Promise<Record<string, unknown>>;
@@ -15,7 +16,7 @@ interface ReconcileDeps {
   now: () => number;
   policy?: RecoveryPolicyPort;
   command?: typeof runBounded;
-  notifyPm?: (project: string, text: string) => Promise<void>;
+  notifyPm?: (project: string, text: string, level: PmNoticeLevel) => Promise<void>;
   log?: (text: string) => void;
 }
 const reported = new WeakMap<Database, Set<string>>();
@@ -33,8 +34,8 @@ function report(db: Database, deps: ReconcileDeps, taskId: string, reason: strin
 async function inform(db: Database, deps: ReconcileDeps, project: string, taskId: string, version: string): Promise<void> {
   deps.assertActive();
   const text = `[部署补记观察] ${taskId} 本会补记部署 ${version.slice(0, 12)} 并推到 live；请核部署来源及 git 祖先关系后启用 deployReconcile`;
-  if (deps.notifyPm) await deps.notifyPm(project, text);
-  else await notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: () => {
+  if (deps.notifyPm) await deps.notifyPm(project, text, "action");
+  else await notifyProjectPm(db, project, text, { fromName: "scheduler", level: "action", stillActive: () => {
     try { deps.assertActive(); return true; } catch { return false; /* lost lease: never send a late notice */ }
   } });
   deps.assertActive();

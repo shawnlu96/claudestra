@@ -2,7 +2,7 @@
 /**
  * 侧栏 project 组头的右键 / 长按菜单（owner 2026-09-25「在会话 / 项目右键能执行类似 Reveal in Finder」）。
  * 目前只有「打开目录」一类项：文件管理器 / 终端 / IDE，内容复用 ../agent-menu.ts 的 openItems；
- * project 有多个目录时先选目录（二级页）；有 manage 授权时再加「主管 PM」二级页（project-pm.tsx）。
+ * project 有多个目录时先选目录（二级页）；有 manage 授权时再加「主管 PM」二级页（project-pm.tsx）和「接入编排」弹窗（project-onboard.tsx）。
  * 手势、外壳与会话菜单同款（menu-gestures.ts / menu-shell.tsx）。
  */
 import { useEffect, useState } from "react";
@@ -16,6 +16,7 @@ import type { ProjectMeta } from "../type";
 import { useT } from "@/lib/i18n";
 import { useFullScope } from "../contacts-data";
 import { PmMainItem, ProjectPmPage, ProjectPmToast, useProjectPmMenu } from "./project-pm";
+import { openProjectOnboard, PlugIcon, ProjectOnboardHost } from "./project-onboard";
 
 type MenuState = { p: ProjectMeta; x: number; y: number } | null;
 type Page = { kind: "main" } | { kind: "list"; group: "terminal" | "ide" } | { kind: "dirs"; target: string } | { kind: "pm" };
@@ -43,7 +44,7 @@ function ProjectPanel({ s, openers, platform, manage }: { s: NonNullable<MenuSta
   const dirs = s.p.dirs ?? [];
   const items = openItems(openers, platform);
   const list = page.kind === "list" ? openers.filter((o) => o.kind === page.group) : [];
-  const rows = page.kind === "main" ? items.length + Number(manage) : page.kind === "pm" ? pm.rows : 1 + Math.max(1, page.kind === "list" ? list.length : dirs.length);
+  const rows = page.kind === "main" ? items.length + 2 * Number(manage) : page.kind === "pm" ? pm.rows : 1 + Math.max(1, page.kind === "list" ? list.length : dirs.length);
   const title = page.kind === "pm" ? t("主管 PM") : page.kind === "dirs" ? t("选择目录") : page.kind === "list" ? t(page.group === "terminal" ? "在终端打开" : "用 IDE 打开") : s.p.name || s.p.id;
   // 选定程序后：单目录直接开，多目录进目录页
   const pick = (target: string) => {
@@ -73,6 +74,9 @@ function ProjectPanel({ s, openers, platform, manage }: { s: NonNullable<MenuSta
       {page.kind === "main" &&
         items.map((it) => <MenuItem key={it.id} icon={menuItemIcon(it)} label={menuLabel(t, it.label, it.arg)} chevron={it.submenu} onClick={() => onMain(it.id)} />)}
       {page.kind === "main" && manage && <PmMainItem pm={pm} onClick={() => setPage({ kind: "pm" })} />}
+      {page.kind === "main" && manage && (
+        <MenuItem icon={<PlugIcon />} label={t("接入编排")} onClick={() => (closeProjectMenu(), openProjectOnboard(s.p))} />
+      )}
       {page.kind !== "main" && <MenuItem icon="‹" label={t("返回")} onClick={() => setPage({ kind: "main" })} />}
       {page.kind === "list" && list.map((o) => <MenuItem key={o.id} icon="›" label={o.label} onClick={() => pick(o.id)} />)}
       {page.kind === "pm" && <ProjectPmPage project={s.p.id} pm={pm} onClose={closeProjectMenu} />}
@@ -99,6 +103,7 @@ export function ProjectMenu() {
   return (
     <>
       <ProjectPmToast />
+      <ProjectOnboardHost />
       {panel && createPortal(panel, document.body)}
     </>
   );
