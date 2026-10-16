@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyCardRole, cardRoleCreate } from "../src/lib/card-role-definitions.js";
 import { extractEffortFlag, extractModelFlag } from "../src/manager/core.js";
+import { parseCreateArgs } from "../src/manager/create-args.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { useRoleModelPort } from "../src/lib/role-model-settings-local.js";
@@ -137,6 +138,32 @@ describe("[验收线 2] 最终启动参数按启动器口径核验 security 下�
     expect(await cardRoleCreate(create, { tier: ctx(db, "security") })(...opus.args)).toEqual({ ok: true });
     expect(seen).toEqual([opus.args]);
     expect(taskTierLaunchHistory(db, "p1", "T1").map((f) => f.status)).toEqual(["failed"]);
+  });
+
+  test("自由文本（--task / --purpose 的值）里形似 --model 的字样不算参数：与 parseCreateArgs 一致，唯一的 Opus 照放行", async () => {
+    for (const free of ["--task", "--purpose"]) {
+      const { db } = ledger();
+      const args = ["create", "rv", "/w", "--card", "T1", "--card-role", "reviewer", "--project", "p1", free, "--model=claude-sonnet-5-5", "--model", "claude-opus-5-5"];
+      const parsed = parseCreateArgs(args.slice(1));
+      if ("error" in parsed) throw new Error(parsed.error);
+      expect(parsed.model).toBe("claude-opus-5-5"); // 正式解析器口径
+      const { seen, create } = counting();
+      expect(await cardRoleCreate(create, { tier: ctx(db, "security") })(...args)).toEqual({ ok: true });
+      expect(seen.length).toBe(1);
+      const sent = parseCreateArgs(seen[0].slice(1));
+      expect("error" in sent ? sent.error : sent.model).toBe("claude-opus-5-5");
+      cleanups.splice(0).forEach((c) => c());
+    }
+  });
+
+  test("自由文本之外的值格里藏 --model（--project 的值）：核验值与启动器值对不上 = 拒，不调 create", async () => {
+    const { db } = ledger();
+    const { seen, create } = counting();
+    const args = ["create", "rv", "/w", "--card", "T1", "--card-role", "reviewer", "--project", "--model=claude-opus-5-5", "--model", "claude-sonnet-5-5"];
+    const parsed = parseCreateArgs(args.slice(1));
+    expect("error" in parsed ? null : parsed.model).toBe("claude-sonnet-5-5");
+    expect(await cardRoleCreate(create, { tier: ctx(db, "security") })(...args)).toMatchObject({ ok: false });
+    expect(seen).toEqual([]);
   });
 
   test("非 security 的重复参数同样拒（on 下核验值必须是启动值）；off 原样委托旧路径", async () => {
