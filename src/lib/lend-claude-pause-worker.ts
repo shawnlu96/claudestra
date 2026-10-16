@@ -6,11 +6,13 @@ import { claudeWorkerSessionPath } from "./lend-claude-worker-session.js";
 import { translateSessionLine } from "./session-source.js";
 import { liveOrders, type LendRow } from "./lend-journal.js";
 import type { LendDeps } from "./lend-drive.js";
-import type { LendWorkerFailure } from "./lend-health.js";
+import type { LenderFailure, LendWorkerFailure } from "./lend-health.js";
 import { parseWallText } from "./quota-wall-text.js";
 import { CLAUDE_AUTH_FAILURE, claudeWorkerRecovered, pauseClaude, type ClaudeFailure } from "./lend-claude-pause.js";
 
 const TAIL_BYTES = 256 * 1024;
+/** Borrowers without failure.class read an auth stop by this lead (lend-peer-runtime-cooldown.ts); rewording it hides those stops. */
+export const CLAUDE_AUTH_STOP_LEAD = "worker 的 Claude 登录失效";
 const AUTH = /authentication_(?:error|failed)|invalid api key|OAuth[^\n]{0,100}(?:expired|revoked|refresh[^\n]{0,60}fail)|(?:failed|unable) to refresh[^\n]{0,60}(?:token|auth)/i;
 
 /** A real assistant response after the error wins; user/tool text and synthetic bootstrap replies never do. */
@@ -74,7 +76,8 @@ export function lendWorkerFailureOf(db: Database, agent: string, codex: (row: Le
   return signal.failure;
 }
 
-type Finish = (row: LendRow, to: "stopped", why: string, d: LendDeps, notify: boolean) => Promise<void>;
+type Finish = (row: LendRow, to: "stopped", why: string, d: LendDeps, notify: boolean, extra?: Partial<Pick<LendRow, "receipt">>,
+  failure?: LenderFailure | null) => Promise<void>;
 
 /** Keep drive's existing Codex branch intact, and use the same stop/release settlement for Claude. */
 export async function leasedWorkerFailure(row: LendRow, d: LendDeps, finish: Finish): Promise<LendWorkerFailure | true | undefined> {
@@ -82,8 +85,10 @@ export async function leasedWorkerFailure(row: LendRow, d: LendDeps, finish: Fin
   if (row.family !== "claude" || !f || f.kind === "error") return f; // 回合失败没有 Claude 暂停可记，交 drive 的通用停单
   const until = pauseClaude(d.db, row, f, d.now());
   const message = f.kind === "quota" && until !== null ? `You've hit your usage limit. try again at ${new Date(until).toISOString()}` : f.message;
-  const reason = `worker 的 Claude ${f.kind === "auth" ? "登录失效" : "额度已满"}，没交结论：${message}`;
+  const reason = `${f.kind === "auth" ? CLAUDE_AUTH_STOP_LEAD : "worker 的 Claude 额度已满"}，没交结论：${message}`;
   d.log(`${row.orderId} ${reason}`);
-  await finish(row, "stopped", reason, d, true);
+  // The borrower cools this peer's Claude on a structured auth class; the quota branch keeps its text-only release.
+  const failure: LenderFailure | null = f.kind === "auth" && row.sessionId ? { class: "auth", sessionId: row.sessionId, failedAt: d.now() } : null;
+  await finish(row, "stopped", reason, d, true, {}, failure);
   return true;
 }
