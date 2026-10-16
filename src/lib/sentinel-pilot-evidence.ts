@@ -1,14 +1,15 @@
 /**
  * 哨兵试点（agents-T14b）的单次证据：目标 agent 的会话记录行 + 本次运行的时间窗（dispatchAttemptedAt → finishedAt）→ RunEvidence + 结果行。
- * 纯函数（tests/sentinel-pilot.test.ts）。只看时间窗内、带时间戳的行；发 prompt 之前、finishedAt 之后的工具调用和结果行都不算这一次。
- * 工具分类、按钮、撞额度的口径和 Autopilot 的事件侧（bridge/autopilot-evidence.ts）一致，只是这里从会话记录里读，不靠事件总线。
+ * 纯函数（tests/sentinel-pilot*.test.ts）。工具证据只看原时间窗；结果回复另有落盘宽限，不越过下次派发。
+ * 工具分类复用 Autopilot，唯独 ssh 只读命令在这里剥开判断；不改变 Autopilot 或执行权限。
  */
 import { emptyEvidence } from "./autopilot-run.js";
-import { countsAsTool, isMutatingTool } from "./autopilot-tools.js";
+import { bashCommandOf, countsAsTool, isMutatingTool } from "./autopilot-tools.js";
 import { parseInlineButtons } from "./inline-buttons.js";
 import { isLimitHitText } from "./quota-wall-text.js";
 import { translateSessionLine } from "./session-source.js";
-import type { ResultLine, RunSessionEvidence } from "./sentinel-pilot.js";
+import type { ResultLine, RunSessionEvidence, RunWindow } from "./sentinel-pilot.js";
+import { isReadOnlySentinelSsh } from "./sentinel-pilot-ssh.js";
 
 type AnyRecord = Record<string, any>;
 
@@ -27,6 +28,7 @@ export function parseResultLine(text: string): ResultLine | null {
 
 const REPLY_TOOL = /^(?:mcp__.+__)?reply$/;
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+const SHELL_TOOLS = new Set(["Bash", "bash", "exec_command", "shell"]);
 
 /** user 行的正文（tool_result 行返回 null） */
 function userText(rec: AnyRecord): string | null {
@@ -60,7 +62,7 @@ interface Acc {
 /** 一段回复：text 块带 message.id（同 id 相邻合并），reply 调用的 id 是 null（永远自成一条） */
 interface Segment { id: unknown; text: string }
 
-function onAssistant(rec: AnyRecord, acc: Acc): void {
+function onAssistant(rec: AnyRecord, acc: Acc, audit: boolean, result: boolean): void {
   const ev = acc.out.evidence;
   const content = Array.isArray(rec.message?.content) ? rec.message.content : [];
   const msgId = rec.message?.id;
@@ -72,18 +74,21 @@ function onAssistant(rec: AnyRecord, acc: Acc): void {
     if (REPLY_TOOL.test(b.name)) {
       const text = typeof input.text === "string" ? input.text : "";
       segs.push({ id: null, text });
-      if ((Array.isArray(input.components) && input.components.length > 0) || parseInlineButtons(text).length > 0) ev.buttonsSent += 1;
+      if (audit && ((Array.isArray(input.components) && input.components.length > 0) || parseInlineButtons(text).length > 0)) ev.buttonsSent += 1;
     }
+    if (!audit) continue;
     if (b.name === "AskUserQuestion" && typeof b.id === "string") acc.openQuestions.add(b.id);
     if (!countsAsTool(b.name)) continue;
     ev.tools += 1;
-    if (isMutatingTool(b.name, JSON.stringify(input))) ev.mutating += 1;
+    const detail = JSON.stringify(input);
+    if (isMutatingTool(b.name, detail) && !(SHELL_TOOLS.has(b.name) && isReadOnlySentinelSsh(bashCommandOf(detail)))) ev.mutating += 1;
   }
   const all = segs.map((x) => x.text).join("\n");
   if (rec.isApiErrorMessage === true ? /rate.?limit|usage.?limit/i.test(String(rec.error ?? "")) || isLimitHitText(all) : isLimitHitText(all)) {
-    ev.rateLimitText ??= all.trim() || "rate_limit（没有原文）";
+    if (audit) ev.rateLimitText ??= all.trim() || "rate_limit（没有原文）";
     return;
   }
+  if (!result) return;
   for (const seg of segs) {
     if (!seg.text.trim()) continue;
     const r = acc.reply;
@@ -102,10 +107,10 @@ function onUser(rec: AnyRecord, acc: Acc): void {
 
 /**
  * 时间窗内的行 → 证据。`prompt` 是 cron 任务发出去的原文（不算人工消息）；`runtime` 交给 translateSessionLine 认行格式。
- * 结果行只从时间窗内最后一条回复（assistant 文字或 reply 正文）里取：最后一条回复没有结果行就是没有，不沿用更早回复里的结论；撞额度那句不当回复。
+ * 结果行只从结果窗口内最后一条回复（assistant 文字或 reply 正文）里取：没有结果行就不沿用更早结论；撞额度那句不当回复。
  */
 export function collectRunEvidence(
-  lines: readonly string[], window: { from: number; to: number }, opts: { runtime?: string; prompt?: string } = {},
+  lines: readonly string[], window: RunWindow, opts: { runtime?: string; prompt?: string } = {},
 ): RunSessionEvidence {
   const acc: Acc = { out: { evidence: emptyEvidence(), result: null }, openQuestions: new Set(), prompt: { text: norm(opts.prompt ?? ""), seen: false }, reply: null };
   const scope = {};
@@ -113,9 +118,12 @@ export function collectRunEvidence(
     if (!line.trim()) continue;
     const rec = translateSessionLine(opts.runtime, line, scope);
     const ts = Date.parse(String(rec?.timestamp ?? ""));
-    if (!rec || !Number.isFinite(ts) || ts < window.from || ts > window.to) continue;
-    if (rec.type === "assistant") onAssistant(rec, acc);
-    else if (rec.type === "user") onUser(rec, acc);
+    if (!rec || !Number.isFinite(ts) || ts < window.from) continue;
+    const audit = ts <= window.to;
+    const result = ts <= (window.resultTo ?? window.to) && ts < (window.nextDispatchAt ?? Infinity);
+    if (rec.type === "assistant" && (audit || result)) {
+      onAssistant(rec, acc, audit, result);
+    } else if (rec.type === "user" && audit) onUser(rec, acc);
   }
   acc.out.evidence.questionOpen = acc.openQuestions.size > 0;
   acc.out.result = acc.reply ? parseResultLine(acc.reply.texts.join("\n")) : null;

@@ -66,8 +66,8 @@ export function defaultSentinelDeps(): SentinelTickDeps {
   };
 }
 
-async function sessionFor(r: CronRunRecord, job: CronJob, readSession: SentinelTickDeps["readSession"]): Promise<SessionRead | undefined> {
-  const w = runWindow(r);
+async function sessionFor(r: CronRunRecord, job: CronJob, readSession: SentinelTickDeps["readSession"], runs: readonly CronRunRecord[]): Promise<SessionRead | undefined> {
+  const w = runWindow(r, runs);
   if (!w) return undefined; // 定不出时间窗（没发出去 / 台账缺字段）：没有可审的会话段
   // 失败 / 没收尾的也读：classifySlot 照样判失败，但越界、人工回合要从这里审（审查 failed-run-audit-loss）
   if (!r.targetSessionId) return { kind: "no_session_id" };
@@ -84,7 +84,7 @@ export async function buildDayReport(
   const verdicts: SlotVerdict[] = [];
   for (const slot of dueSlots(job.schedule, day)) {
     const rec = recordForSlot(runs, job.id, slot);
-    verdicts.push(classifySlot(slot, rec, rec ? await sessionFor(rec, job, readSession) : undefined));
+    verdicts.push(classifySlot(slot, rec, rec ? await sessionFor(rec, job, readSession, runs) : undefined));
   }
   return { job, day, mode, verdicts, generatedAt: now, readyAt: reportReadyAt(job, day), dryRun };
 }
