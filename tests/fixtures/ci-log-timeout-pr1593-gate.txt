@@ -1,0 +1,22 @@
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.3452431Z Complete job name: typecheck + test + guard
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.4317940Z ##[group]Run [ "failure" = success ] || { echo "::error::分片没有全部成功：failure"; exit 1; }
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.4319056Z ^[[36;1m[ "failure" = success ] || { echo "::error::分片没有全部成功：failure"; exit 1; }^[[0m
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.4570229Z shell: /usr/bin/bash -e {0}
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.4571107Z ##[endgroup]
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.4757418Z ##[error]分片没有全部成功：failure
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.4770578Z ##[error]Process completed with exit code 1.
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5064083Z ##[group]Run actions/upload-artifact@v4
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5064706Z with:
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5065129Z   name: ci-selected-verdict
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5065733Z   path: /home/runner/work/_temp/ci-selected/verdict.json
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5066393Z   if-no-files-found: ignore
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5067227Z   overwrite: true
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5067706Z   retention-days: 14
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5068165Z   compression-level: 6
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5068639Z   include-hidden-files: false
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.5069132Z ##[endgroup]
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.6775639Z (node:2199) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.6777281Z (Use `node --trace-deprecation ...` to show where the warning was created)
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.6792466Z No files were found with the provided path: /home/runner/work/_temp/ci-selected/verdict.json. No artifacts will be uploaded.
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.7052082Z Cleaning up orphan processes
+typecheck + test + guard	UNKNOWN STEP	2026-10-15T14:31:27.7460727Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/upload-artifact@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

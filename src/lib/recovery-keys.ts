@@ -27,6 +27,7 @@ export const RECOVERY_KEYS = [
   "ciIoMapFuse",
   "ciKnownFlaky",
   "ciLogPerJob",
+  "ciMainFixRetry",
   "ciManualResume",
   "ciProofReuse",
   "ciQueueFull",

@@ -162,3 +162,52 @@ describe("跨实例委托（extra.delegate）", () => {
     expect([line.agent, line.delegate]).toEqual(["task-l", null]);
   });
 });
+
+describe("冻结卡与观察期内的上线卡不算卡住（STUCKVIEW1）", () => {
+  const DAY = 24 * 60 * MIN;
+  const lineFor = (t: LedgerTaskView) => homeView(overview([t]), NOW).lines[0];
+
+  test("[验收线 1] 冻结名单里的卡在 review / merge 停 16 天：不算卡住、显示「已冻结」；不在名单的同样卡照 30 分钟算", () => {
+    for (const s of ["review", "merge"] as Stage[]) {
+      const frozen = task("T13f", s, { stageSince: NOW - 16 * DAY, attentionFacts: { frozen: true } });
+      expect(isStuck(frozen, NOW)).toBe(false);
+      expect(lineFor(frozen)).toMatchObject({ attention: "waiting", stuck: false, stageLabel: "已冻结", reason: "" });
+      expect(isStuck(task("T99", s, { stageSince: NOW - 16 * DAY }), NOW)).toBe(true);
+      expect(isStuck(task("T99", s, { stageSince: NOW - STUCK_MS - MIN }), NOW)).toBe(true);
+    }
+    const v = homeView(overview([task("F", "review", { stageSince: NOW - 16 * DAY, attentionFacts: { frozen: true } }), task("N", "review", { stageSince: NOW - 16 * DAY })]), NOW);
+    expect(v.headline.stuck).toBe(1);
+  });
+
+  test("[验收线 2] live 卡「观察期：24 小时」：截止前不卡住、显示剩余；到点即卡住（不再加 30 分钟）", () => {
+    const since = NOW - 3 * 60 * MIN;
+    const obs = (over: Partial<LedgerTaskView> = {}) => task("O", "live", { stageSince: since, attentionFacts: { observationUntil: since + DAY }, ...over });
+    expect(isStuck(obs(), NOW)).toBe(false);
+    expect(lineFor(obs())).toMatchObject({ attention: "waiting", stageLabel: "观察中 · 还剩 21小时" });
+    expect(isStuck(obs(), since + DAY - 1)).toBe(false);
+    expect(isStuck(obs(), since + DAY)).toBe(true);
+    const late = homeView(overview([obs()]), since + DAY + 5 * MIN).lines[0];
+    expect(late).toMatchObject({ attention: "stuck", stageLabel: "已上线 · 等验证", reason: "观察期已过 5分" });
+    // 没有截止（首行是散文 / 没有该节 → bridge 不给）：照旧按 30 分钟
+    expect(isStuck(task("P", "live", { stageSince: NOW - STUCK_MS - MIN }), NOW)).toBe(true);
+    expect(isStuck(task("P", "live", { stageSince: NOW - STUCK_MS + MIN }), NOW)).toBe(false);
+  });
+
+  test("[验收线 3] live 卡验证不过（fail / unknown）仍是出问题，观察期和冻结都盖不住", () => {
+    for (const result of ["fail", "unknown"]) {
+      const lastEvent = { seq: 9, ts: NOW - MIN, actor: "x", target: "V", kind: "verify", text: "检查单没过", data: { result } };
+      for (const facts of [{ observationUntil: NOW + 10 * 60 * MIN }, { frozen: true as const }]) {
+        const line = lineFor(task("V", "live", { stageSince: NOW - 60 * MIN, lastEvent, attentionFacts: facts }));
+        expect(line.attention).toBe("problem");
+        expect(line.stageLabel).toBe(result === "unknown" ? "线上验证查不到结果" : "线上验证失败");
+      }
+    }
+    const fix = lineFor(task("X", "fix", { attentionFacts: { frozen: true } }));
+    expect(fix.attention).toBe("problem");
+    expect(fix.stageLabel).toBe("返工中 · 第 1 轮意见");
+  });
+
+  test("observationUntil 只对 live 生效：别的阶段带了也照 30 分钟算", () => {
+    expect(isStuck(task("R", "review", { stageSince: NOW - STUCK_MS - MIN, attentionFacts: { observationUntil: NOW + DAY } }), NOW)).toBe(true);
+  });
+});

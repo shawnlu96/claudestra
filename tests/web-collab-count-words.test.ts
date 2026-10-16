@@ -128,3 +128,20 @@ describe("周额度", () => {
     expect(quotaPcts(null)).toBeNull();
   });
 });
+
+describe("右栏「N 条卡住」不算冻结卡和观察期内的上线卡（STUCKVIEW1）", () => {
+  test("同样停了 16 天：冻结卡、观察期内的 live 卡不进卡住计数，普通卡照算；观察期过了才算", () => {
+    const H = 60 * 60_000, long = NOW - 16 * 24 * H;
+    const card = (id: string, stage: "review" | "live", attentionFacts?: { frozen?: true; observationUntil?: number }) =>
+      ({ id, title: id, kind: "code", stage, round: 1, agent: `agent-${id}`, updatedAt: NOW, stageSince: long, metrics: {}, ...(attentionFacts ? { attentionFacts } : {}) });
+    const tasks = [
+      card("FZ", "review", { frozen: true }), card("OB", "live", { observationUntil: NOW + H }), card("OV", "live", { observationUntil: NOW - H }),
+      card("N1", "review"), card("N2", "live"),
+    ];
+    const ov = { exists: true, now: NOW, meta: { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } }, items: [], tasks };
+    const board = { working: [], merging: [], waiting: tasks.map((t) => ({ taskId: t.id, featureId: null })), todo: { ready: [], blocked: [] } };
+    const stuck = attentionOf(countSnap(board, ov), homeView(ov, NOW).lines);
+    expect(stuck).toEqual({ problem: 0, stuck: 3 });
+    expect(homeView(ov, NOW).lines.filter((l) => l.attention === "stuck").map((l) => l.id).sort()).toEqual(["N1", "N2", "OV"]);
+  });
+});

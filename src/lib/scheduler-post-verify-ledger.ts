@@ -12,18 +12,18 @@
  * tests/scheduler-post-verify.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { readFileSync, statSync } from "node:fs";
 import type { WriteCtx } from "./ledger-checks.js";
 import { busyAsLedgerError, getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { appendEvent } from "./ledger-write.js";
-import { statePath } from "./paths.js";
 import { featurePm, projectPm, readSwitch, type ServiceFacts, type SpecFile } from "./scheduler-autostart.js";
 import { deferPlan, postVerifyDeferMode } from "./scheduler-post-verify-defer.js";
+import { postVerifySection, readPostVerifySpec } from "./post-verify-spec.js";
+
+export { postVerifySection, readPostVerifySpec };
 
 export const POST_VERIFY_REPEAT_MS = 30 * 60_000;
 export const POST_VERIFY_OVERDUE_MS = 72 * 3600_000;
-const POST_VERIFY_HEADING = "## 上线后 PM";
 const MAX_BYTES = 1200;
 
 export type PostVerifyKind = "remind" | "overdue";
@@ -31,44 +31,6 @@ type PostVerifyOp = PostVerifyKind | "overdue-sent";
 
 export const postVerifyDoneKey = (taskId: string) => `post-verify-done:${taskId}`;
 const postVerifyOverdueKey = (taskId: string, mode: string) => `post-verify-overdue:${taskId}:${mode}`;
-
-/** 规格卡正式路径（与自动开卡 specGate 同一路径：scheduler-autostart-deps.ts autostartSpecPath） */
-export function readPostVerifySpec(taskId: string): SpecFile | null {
-  const path = statePath("ledger", "docs", "tasks", `${taskId}.md`);
-  try {
-    return { mtimeMs: statSync(path).mtimeMs, text: readFileSync(path, "utf8") };
-  } catch {
-    return null;
-  }
-}
-
-/** CommonMark 围栏：≤3 空格缩进、≥3 个同字符；反引号围栏的 info 不许含反引号 */
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
-/**
- * `## 上线后 PM` 一级小节正文（到下一个 `#` / `##` 标题为止）；从头按代码围栏状态扫，代码块里的同名标题 / `#` 行都不算标题；没有该节或正文为空 → null。
- * 围栏记开围栏的字符与长度：只有同字符、不短于开围栏、后面只有空白的行才关块（四反引号块里的 ``` 、反引号块里的 ~~~ 都是正文）；没关的围栏到文末。
- */
-export function postVerifySection(text: string | null | undefined): string | null {
-  if (!text) return null;
-  let fence: { ch: string; len: number } | null = null, body: string[] | null = null;
-  for (const l of text.split(/\r?\n/)) {
-    if (fence) {
-      const m = /^ {0,3}(`+|~+)\s*$/.exec(l);
-      if (m && m[1][0] === fence.ch && m[1].length >= fence.len) fence = null;
-    } else {
-      const m = FENCE_OPEN.exec(l);
-      if (m && !(m[1][0] === "`" && m[2].includes("`"))) fence = { ch: m[1][0], len: m[1].length };
-      else if (body === null && l.trimEnd() === POST_VERIFY_HEADING) {
-        body = [];
-        continue;
-      } else if (body && /^#{1,2}\s/.test(l)) break;
-    }
-    body?.push(l);
-  }
-  const out = body?.join("\n").trim();
-  return out || null;
-}
 
 /** 按 UTF-8 字节截断，不切断字符 */
 function clipBytes(s: string, max: number): { text: string; cut: boolean } {

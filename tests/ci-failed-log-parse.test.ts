@@ -5,7 +5,9 @@
  * lines, bun's closing totals); test names are placeholders, only the triggering words are kept.
  */
 import { describe, expect, test } from "bun:test";
-import { classifyFailedLog } from "../src/lib/ci-failure-class.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { classifyFailedLog, firstAsserted, firstTouched } from "../src/lib/ci-failure-class.js";
 import { isResultLine, parseFailedLog } from "../src/lib/scheduler-merge-ci-rerun-log.js";
 
 const JOB = "test shard 3 of 4", STEP = "Unit tests";
@@ -80,5 +82,58 @@ describe("[验收线 3] the verdict end to end", () => {
   test("a timeout stays a timeout", () => {
     expect(classifyFailedLog(shardLog({ quiet: TITLES, red: TIMED_OUT, recap: ["(fail) suite > case one [5001.00ms]"] }), new Set()))
       .toEqual({ kind: "timeout", files: [RED_FILE], cases: [`${RED_FILE} > suite > case one`] });
+  });
+});
+
+/**
+ * merge-arch-CIUNREL1: PR1593's real red shard (run 38745600454 attempt 1, job 116466116858, shard 7), cut to the failing group,
+ * bun's recap and totals (tests/fixtures/ci-log-timeout-pr1593-*.txt; gh printed every step as `UNKNOWN STEP`). Two things made it
+ * unparseable: the timed-out test's abandoned promise rejected later as an "Unhandled error between tests" in the same file, and
+ * the gate job read whole (UNKNOWN STEP) was not recognized as the gate's verdict.
+ */
+describe("[验收线 1] PR1593: a timeout plus its own unhandled error parses as one timed-out failure", () => {
+  const fixture = (name: string) => readFileSync(join(import.meta.dir, "fixtures", `ci-log-timeout-pr1593-${name}.txt`), "utf8");
+  const SHARD = fixture("shard"), GATE_JOB = fixture("gate");
+  const FILE = "tests/lend-pr-takeover-preflight.test.ts", NAME = "real CLI rereads spec after remote await and writes no stale diagnostic";
+  const PR1593 = [{ file: FILE, name: NAME, timedOut: true, strays: 1 }];
+  const edit = (log: string, from: RegExp, to: string) => { expect(from.test(log)).toBe(true); return log.replace(from, to); };
+
+  test("the shard log: 1 failure, a timeout, its test file; the recap's repeat counts once; CIF1 would re-run it", () => {
+    const failures = parseFailedLog(SHARD);
+    expect(failures).toEqual(PR1593);
+    expect(firstAsserted(failures!)).toBeUndefined(); // CIF1: every failure timed out
+    expect(firstTouched(failures!, new Set(["src/lib/x.ts"]))).toBeUndefined();
+    expect(classifyFailedLog(SHARD, new Set())).toEqual({ kind: "timeout", files: [FILE], cases: [`${FILE} > ${NAME}`] });
+  });
+  test("the whole run's log: the gate job read whole (UNKNOWN STEP) is the gate's verdict, skipped", () => {
+    expect(parseFailedLog(`${SHARD}\n${GATE_JOB}`)).toEqual(PR1593);
+    expect(classifyFailedLog(`${SHARD}\n${GATE_JOB}`, new Set()).kind).toBe("timeout");
+  });
+  test("cut logs still refuse: no totals, the error block cut before its closing rule, or bun's error total missing", () => {
+    expect(parseFailedLog(SHARD.split("\n").filter((l) => !/Z +\d+ (?:fail|error)\s*$/.test(l)).join("\n"))).toBeNull();
+    const lines = SHARD.split("\n"), rules = lines.flatMap((l, i) => (/Z -{10,}\s*$/.test(l) ? [i] : []));
+    expect(rules.length).toBe(2);
+    expect(parseFailedLog(lines.slice(0, rules[1]).join("\n"))).toBeNull(); // cut inside the error block
+    expect(parseFailedLog(lines.filter((_, i) => i !== rules[1]).join("\n"))).toBeNull(); // the block never closes
+    expect(parseFailedLog(edit(SHARD, /Z  1 error\n/, "Z \n"))).toBeNull();
+    expect(parseFailedLog(edit(SHARD, /Z  1 error\n/, "Z  2 error\n"))).toBeNull();
+  });
+  test("a timeout mixed with an assertion stays mixed: CIF1 refuses, the class is not timeout", () => {
+    const row = (t: string) => `test shard 7 of 8\tUNKNOWN STEP\t2026-10-15T14:18:26.0000000Z ${t}`;
+    const mixed = edit(edit(edit(SHARD, /\n(?=[^\n]*\(pass\) real CLI rereads round)/, `\n${row("error: expect(received).toBe(expected)")}\n${row("(fail) real CLI asserted [1.00ms]")}\n`),
+      /Z  1 fail\n/, "Z  2 fail\n"), /Z 1 tests failed:\n/, `Z 2 tests failed:\n${row("(fail) real CLI asserted [1.00ms]")}\n`);
+    const failures = parseFailedLog(mixed);
+    expect(failures?.map((f) => f.timedOut)).toEqual([true, false]);
+    expect(firstAsserted(failures!)?.name).toBe("real CLI asserted");
+    expect(classifyFailedLog(mixed, new Set()).kind).toBe("known_flaky");
+  });
+  test("an unhandled error is only a timeout's own: no timeout before it, or a stack frame elsewhere → unparseable", () => {
+    expect(parseFailedLog(edit(SHARD, /\n[^\n]*\^ this test timed out after 15000ms\./, ""))).toBeNull(); // the group's failure is no timeout
+    expect(parseFailedLog(edit(SHARD, /tests\/lend-pr-takeover-preflight\.test\.ts:352:25\)/, "src/lib/elsewhere.ts:1:1)"))).toBeNull();
+    expect(parseFailedLog(edit(SHARD, /at async <anonymous> \(\/home[^\n]*/, "at processTicksAndRejections (native:7:39)"))).toBeNull();
+  });
+  test("the gate job read whole refuses any other failure in it", () => {
+    expect(parseFailedLog(`${SHARD}\n${GATE_JOB.replace("Cleaning up orphan processes", "##[error]Something else failed")}`)).toBeNull();
+    expect(parseFailedLog(`${SHARD}\n${GATE_JOB.replace(/(\t\S+ )##\[error\]Process completed with exit code 1\./, "$1(fail) a test here")}`)).toBeNull();
   });
 });

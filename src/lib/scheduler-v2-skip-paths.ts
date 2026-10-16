@@ -41,6 +41,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
   { step: "mergeTick", file: "scheduler-service.ts", fn: "mergeTick", effects: ["ledger", "gh"], gates: ["pace", "manager"], why: "S2D hook" },
   { step: "mergeNow", file: "scheduler-service.ts", fn: "mergeTick", effects: ["ledger", "gh"], gates: ["pace", "manager"],
     why: "MERGEFAST2/3: at most one more mergeTick in the same pass (also as the auto tick's afterMerges hook), same gates" },
+  { step: "ciMainFixRetryStep", file: "ci-main-fix-retry-tick.ts", fn: "ciMainFixRetryStep", effects: ["ledger", "gh"], gates: ["manager"],
+    why: "CIUNREL1: the sample goes through the pass manager's scheduler-recovery-observe (held = not recorded, nothing sent); update-branch only after it" },
   { step: "deployTick", file: "scheduler-deploy-tick.ts", fn: "deployTick", effects: ["ledger", "job"], gates: ["pace", "hook", "manager"], why: "S2D hook; in-flight rows ask the unified gate too" },
   { step: "deployReconcileTick", file: "scheduler-deploy-reconcile.ts", fn: "deployReconcileTick", effects: ["ledger", "git", "notice"],
     gates: ["hook", "manager"], why: "skip gate before git / ledger / notice; service-only writer rechecks deployment evidence" },

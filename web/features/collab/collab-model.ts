@@ -75,6 +75,8 @@ export interface LedgerTaskView {
   blockedBy?: string[];
   /** 团队数据才有（team-source-adapter.ts）；本机 bridge 不发 */
   team?: TeamTaskFacts;
+  /** src/lib/ledger-attention-facts.ts：冻结名单里的卡、live 卡规格写的观察期截止；老 bridge / 团队数据没有 = 照 30 分钟算 */
+  attentionFacts?: { frozen?: true; observationUntil?: number };
 }
 
 /**
@@ -256,8 +258,16 @@ export function dwellMs(t: LedgerTaskView, now: number): number | null {
   return since === null ? null : Math.max(0, now - since);
 }
 
+/** live 卡在规格写的观察期内（没到截止）：观察期就是该等的时间，不算卡住 */
+function observing(t: LedgerTaskView, now: number): boolean {
+  const until = t.attentionFacts?.observationUntil;
+  return t.stage === "live" && typeof until === "number" && now < until;
+}
+
 export function isStuck(t: LedgerTaskView, now: number): boolean {
-  if (t.stageSinceApprox === true) return false;
+  if (t.stageSinceApprox === true || t.attentionFacts?.frozen === true) return false; // 冻结 = owner 定的远期搁置，不是卡住
+  // 有观察期截止：到点即卡住，不再额外等 30 分钟
+  if (t.stage === "live" && typeof t.attentionFacts?.observationUntil === "number") return !observing(t, now);
   if (!t.agent && delegateOf(t)) return false; // 委托给别的实例：等对方 owner、对方合并门槛按天算，不算卡住
   const d = dwellMs(t, now);
   return WAIT_STAGES.has(t.stage) && d !== null && d > STUCK_MS;
@@ -304,8 +314,12 @@ function reviewRound(t: LedgerTaskView): number {
   return t.lastReview?.round ?? Math.max(1, t.round);
 }
 
-/** 阶段短语：写的是「现在卡在哪 / 在等谁」，不是阶段名本身 */
-export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], frozen: string | null, tr: Tr = zh): string {
+/** 阶段短语：写的是「现在卡在哪 / 在等谁」，不是阶段名本身。出问题（返工 / 受阻 / 验证不过）的照旧写问题，冻结与观察期都盖不住；now 不给就不写观察期 */
+export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], frozen: string | null, tr: Tr = zh, now?: number): string {
+  if (!isProblem(t)) {
+    if (t.attentionFacts?.frozen === true) return tr("已冻结");
+    if (now !== undefined && observing(t, now)) return tr("观察中 · 还剩 {d}", { d: fmtDuration(t.attentionFacts!.observationUntil! - now, tr) });
+  }
   switch (t.stage) {
     case "spec":
       return tr(unassigned(t) ? "排队 · 等派发" : "等开工");
@@ -339,12 +353,14 @@ function firstLine(s: string): string {
   return s.split("\n").find((l) => l.trim())?.trim() ?? "";
 }
 
-function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, frozen: string | null, tr: Tr): string {
+function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, frozen: string | null, tr: Tr, now: number): string {
   if (att === "problem") {
     if (t.stage === "fix") return firstLine(t.lastReview?.text ?? "");
     if (t.stage === "blocked") return t.lastEvent?.kind === "stage" ? firstLine(t.lastEvent.text) : "";
     return firstLine(t.lastEvent?.text ?? "");
   }
+  const until = t.stage === "live" ? t.attentionFacts?.observationUntil : undefined;
+  if (att === "stuck" && typeof until === "number") return tr("观察期已过 {d}", { d: fmtDuration(Math.max(0, now - until), tr) });
   if (att === "stuck" && dwell !== null) return tr("已经等了 {d}，超过 30 分钟", { d: fmtDuration(dwell, tr) }) + (frozen ? tr("（冻结：{r}）", { r: frozen }) : "");
   return "";
 }
@@ -396,11 +412,11 @@ export function lineOf(
     column: columnOf(t.stage, t.stageBefore),
     attention: att,
     tone: toneOf(att),
-    stageLabel: stageLabel(t, ov.tasks, frozen, tr),
+    stageLabel: stageLabel(t, ov.tasks, frozen, tr, now),
     dwellMs: dwell,
     dwellApprox: t.stageSinceApprox === true,
     stuck: att === "stuck",
-    reason: [att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr), teamNote(t, now, tr)].filter(Boolean).join(" · "),
+    reason: [att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr, now), teamNote(t, now, tr)].filter(Boolean).join(" · "),
     agent: bareAgent(t.agent),
     delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),
