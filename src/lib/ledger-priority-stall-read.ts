@@ -78,8 +78,10 @@ function graph(db: Database, facts: Facts, id: string): Graph | null {
   return g;
 }
 
+/** The scheduler's own stall reminder is assigned to the PM too; counting it would block the next cycle's heal on itself. */
 function askFor(facts: Facts, taskId: string | null, pm: string | null) {
-  const ask = facts.asks.find((a) => a.taskId === taskId && !!a.assignee && (facts.pms.has(a.assignee) || a.assignee === pm));
+  const ask = facts.asks.find((a) => a.taskId === taskId && !!a.assignee && (facts.pms.has(a.assignee) || a.assignee === pm)
+    && a.extra.mechanism !== "priorityStall");
   return ask ? { id: ask.id, question: ask.body || ask.title } : undefined;
 }
 
