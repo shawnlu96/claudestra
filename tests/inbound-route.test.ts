@@ -103,9 +103,12 @@ describe("三处共用的判定", () => {
   const human = (e: RouteEnv) => e.from.kind === "user" && e.intent === "request";
   const routed = (r: StoredRoute) => env(OWNER, "x", { inboundRoute: r });
 
-  test("开关不是 on：信封上的结论一律不认，回到 isHumanRequest", () => {
+  test("开关不是 on：不押、interrupt 结论回到 isHumanRequest；判过排队 / 合并的不抢占（只投不抢）", () => {
     for (const mode of ["off", "observe"] as const) {
-      expect(admitsWhileBusy(routed({ action: "queue", p: 1 }), mode, human)).toBe(true);
+      expect(admitsWhileBusy(routed({ action: "queue", p: 1 }), mode, human)).toBe(false);
+      expect(admitsWhileBusy(routed({ action: "merge", mergeWith: "m", p: 1 }), mode, human)).toBe(false);
+      expect(admitsWhileBusy(routed({ action: "interrupt", p: 1 }), mode, human)).toBe(true);
+      expect(admitsWhileBusy(env(AGENT(), "x", { inboundRoute: { action: "interrupt", p: 1 } }), mode, human)).toBe(false);
       expect(holdsWhileBusy(routed({ action: "queue", p: 1 }), mode)).toBe(false);
     }
   });

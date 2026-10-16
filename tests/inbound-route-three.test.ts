@@ -86,14 +86,23 @@ describe("三处一致：目标忙时 owner 消息按判定放 / 押", () => {
       }
     });
   }
-  test("开关切回 off：同一条立刻按现有规则（flush 放出来、抢占）", async () => {
-    mode = "off";
-    const it = held("owner", { action: "queue", p: 0.98 });
-    const q = new HeldQueue(null);
-    q.set(ME, [it]);
-    const log: string[] = [];
-    await flushHeld(flushDeps(q, () => true, log), ME, "sweep");
-    expect(log).toEqual([`preempt+${it.env.meta.messageId}`]);
+  test("jrt-mode-flip-stale-preempt：on 档判了排队的 owner 消息，切回 off 后不再抢占——忙时不放、押满时限回合中送进去、空闲照投", async () => {
+    for (const m of ["off", "observe"] as const) {
+      mode = m;
+      const it = held("owner", { action: "queue", p: 0.98 });
+      it.heldAt = 0;
+      const q = new HeldQueue(null);
+      q.set(ME, [it]);
+      const log: string[] = [];
+      await flushHeld(flushDeps(q, () => true, log, { now: () => 60_000 }), ME, "sweep");
+      expect(log).toEqual([]); // 不到时限：不放（以前 off 档会放出来并 C-c）
+      await flushHeld(flushDeps(q, () => true, log, { now: () => 125_000 }), ME, "sweep");
+      expect(log).toEqual([it.env.meta.messageId]); // 押满时限：送进去，不带 preempt
+      const it2 = held("owner", { action: "queue", p: 0.98 });
+      q.set(ME, [it2]);
+      await flushHeld(flushDeps(q, () => false, log), ME, "stop");
+      expect(log.at(-1)).toBe(it2.env.meta.messageId);
+    }
   });
   test("回合结束（空闲）：判了排队的照投", async () => {
     const it = held("owner", { action: "queue", p: 0.98 });

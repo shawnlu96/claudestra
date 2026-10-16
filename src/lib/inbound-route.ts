@@ -159,10 +159,14 @@ export const ruleAction = (human: boolean, holds: boolean): RuleAction => (human
 
 // ── 三处共用的判定（deliverToLocal / held-flush 到期过滤 / inbox 领取）：都只经这里读信封上的结论 ──────────────
 
-/** 目标主回合在跑时，这一封现在能不能送进去（必要时先打断）。只有开关 on 才认信封上的结论，否则就是现有的 isHumanRequest */
+/**
+ * 目标主回合在跑时，这一封现在能不能送进去（必要时先打断）。没有结论 = 现有的 isHumanRequest；判了 interrupt 只在 on 档认。
+ * 判过排队 / 合并的哪一档都不再抢占：on 档切回 off 后它按 release 只投不抢（不能晚几分钟再 C-c 掉 owner 后来开的回合）
+ */
 export function admitsWhileBusy(env: RouteEnv, mode: RouteMode, isHuman: (env: RouteEnv) => boolean): boolean {
-  const r = mode === "on" ? env.meta.inboundRoute : undefined;
-  return r ? r.action === "interrupt" : isHuman(env);
+  const r = env.meta.inboundRoute;
+  if (!r) return isHuman(env);
+  return r.action === "interrupt" ? mode === "on" || isHuman(env) : false;
 }
 /** 开关 on 且 Jev 判了 queue / merge：目标主回合在跑就押着（人类消息本来不押，这里补上） */
 export const holdsWhileBusy = (env: RouteEnv, mode: RouteMode): boolean => {

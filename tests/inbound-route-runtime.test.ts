@@ -54,13 +54,13 @@ describe("什么时候问 Jev", () => {
     expect(asks).toHaveLength(0);
     expect(routeAdmitsWhileBusy(e)).toBe(true);
   });
-  test("开关 off：不问；信封上即使有旧结论也不认", async () => {
+  test("开关 off：不问；on 档留下的排队结论不再押，但也不抢占（只投不抢）", async () => {
     mode = "off";
     const e = env("顺便问下");
     await routeInbound(e, to, "agent-dev");
     expect(asks).toHaveLength(0);
     e.meta.inboundRoute = { action: "queue", p: 1 };
-    expect(routeAdmitsWhileBusy(e)).toBe(true);
+    expect(routeAdmitsWhileBusy(e)).toBe(false);
     expect(routeHolds(e, BUSY)).toBe(false);
   });
 });

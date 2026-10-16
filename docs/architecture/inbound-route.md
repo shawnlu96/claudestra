@@ -25,7 +25,7 @@ Jev 擅长「这句话是不是在改方向、是不是在补充排队里那条�
 - `held-flush.ts`：忙时到期过滤（判了排队的人类消息不放出来，否则放出来又押回 / 抢占）、merge 的那条等同伴一起放（`routeDue`）、投递顺序（`routeOrder`）；
 - `inbox.ts`：领取顺序与 merge 跟同伴一起领（`routePullable`）。
 
-开关切回 `off` / `observe` 时信封上的结论一律不认，三处同时回到改动前（`isHumanRequest`）。owner 消息被判排队后押满 2 分钟（`OWNER_HELD_MAX_MS`）仍没投出去，结论记成 `release`：回合中直接送进去、**不抢占**（一直有后台在跑的 PM 等不到回合结束；也不能晚几分钟再 C-c 掉 owner 后来亲自开的回合）。被 Chat Guard 隔离的消息结论作废，放行后按现有规则投。
+开关切回 `off` / `observe` 时不再押、不再按结论排顺序，没有结论的消息回到改动前（`isHumanRequest`）；但 on 档已经判了排队 / 合并、还押着的那几条**不再抢占**（只投不抢：空闲或押满时限时送进去），不然切档后的下一次扫描会 C-c 掉 owner 后来开的回合。owner 消息被判排队后押满 2 分钟（`OWNER_HELD_MAX_MS`）仍没投出去，结论记成 `release`：回合中直接送进去、**不抢占**（一直有后台在跑的 PM 等不到回合结束；也不能晚几分钟再 C-c 掉 owner 后来亲自开的回合）。被 Chat Guard 隔离的消息结论作废，放行后按现有规则投。
 
 ## Chat Guard
 
@@ -46,6 +46,10 @@ bun src/manager.ts inbound-route status|off|observe|on
 ## 日志
 
 状态目录 `inbound-route.jsonl`（0600，满 32 MB 转 `.1`，只留一代）。一行一条：`mode`、`msg`（message_id）、`agent`、`from` / `role`、`preview`（正文前 80 字）、`queued`（排队条数）、`rule`（现有规则会怎么投：interrupt / queue / deliver）、`jev`（Jev 判的：interrupt / queue / merge / unsure / error）、`p`、`mergeWith`、`downgraded`、`actual`（实际怎么投）、`via`（solo / guard）、`ms`。observe 下 `actual` 恒等于 `rule`，对照 `jev` 和 `rule` 不一致的行就是开了 `on` 会变的地方。
+
+## 叫停
+
+owner 的「停」之后，押在叫停**之前**到达（`meta.ts` 早于 `stoppedAt`）、叫停之后才投出的 owner 旧消息不算 owner 又开口，不解除「停」（`bridge/preempt.ts`）——否则 Autopilot 随后替人续上。叫停之后 owner 新发的消息照旧解除。
 
 ## 已知限制
 
