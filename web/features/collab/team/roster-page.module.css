@@ -1,0 +1,23 @@
+/* Standalone team page (collab-nav view "team"): colours come from collab.module.css .tokens, the body is TeamPanel's own layout. */
+.page { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); color: var(--text-2); font-size: var(--fs-2); }
+.top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+.back { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex: none; border: 1px solid var(--line-2); border-radius: 8px; color: var(--text-2); }
+.back:hover { color: var(--text); border-color: var(--faint); }
+.title { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
+.title h1 { margin: 0; min-width: 0; color: var(--text); font-size: var(--fs-0); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kicker { flex: none; color: var(--muted); font-size: var(--fs-3); }
+.count { flex: none; color: var(--muted); font-size: var(--fs-3); font-variant-numeric: tabular-nums; }
+.actions { display: flex; align-items: center; gap: 8px; min-width: 0; margin-left: auto; }
+.select { min-width: 0; max-width: 220px; height: 32px; padding: 0 8px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel); color: var(--text); font-size: var(--fs-2); }
+.open { display: inline-flex; align-items: center; gap: 4px; height: 32px; padding: 0 10px; flex: none; border: 1px solid var(--line-2); border-radius: 8px; color: var(--text-2); white-space: nowrap; }
+.open:hover:not(:disabled) { color: var(--text); border-color: var(--faint); }
+.open:disabled { cursor: not-allowed; opacity: .5; }
+.body { flex: 1; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+
+@media (max-width: 639px) {
+  .top { padding: 10px 12px; }
+  .back, .select, .open { min-height: 44px; }
+  .back { width: 44px; }
+  .actions { flex: 1 1 100%; }
+  .select { flex: 1; max-width: none; }
+}

@@ -15,6 +15,7 @@ import { CollabView } from "./collab-view";
 import { closeCollab, takeReleasedReads, useCollabNav } from "./collab-nav";
 import { CollabSidebarRail } from "./collab-sidebar";
 import { NowPage, TODAY_KEY } from "../now/now-home";
+import { RosterPage } from "./team/roster-page";
 
 const subscribeMachines = (cb: () => void) => machines.subscribe(cb);
 const currentFp = () => machines.currentFp();
@@ -24,7 +25,7 @@ const noFp = () => null;
 const SETTLE_MS = 400;
 
 export function CollabSwitch() {
-  const { project } = useCollabNav();
+  const { project, view } = useCollabNav();
   const store = useChatStoreApi();
   // 会话从别处换了（通知直达、深链、⌘K）：别让它被盖在协作视图底下
   const active = useChatStore((st) => st.state.activeAgent);
@@ -57,8 +58,8 @@ export function CollabSwitch() {
       {project === TODAY_KEY ? <NowPage /> : (
         <>
           <CollabSidebarRail />
-          <CollabPaneBoundary key={project} onClose={closeCollab}>
-            <SharedCollabContent project={project} fallback={<CollabView project={project} />} />
+          <CollabPaneBoundary key={`${view ?? ""}:${project}`} onClose={closeCollab}>
+            {view === "team" ? <RosterPage project={project} /> : <SharedCollabContent project={project} fallback={<CollabView project={project} />} />}
           </CollabPaneBoundary>
         </>
       )}

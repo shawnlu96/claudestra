@@ -38,3 +38,27 @@ export function rosterSnapshotFixture(project: string, teamId: string, instanceI
     localProjects: [{ id: project, name: "Fixture project", dirs: [], personal: false, eligible: false }], peers: [],
   };
 }
+
+/** Sidebar team-entry fixture (ROSTER8): one team with two projects bound here, one team whose only project has no local binding. */
+export const ROSTER_ENTRY_TEAMS = [
+  { teamId: "team-alpha", name: "Fixture team", codes: ["Alpha", "Beta", "Gamma"], projects: [["alpha-app", "Alpha app"], ["beta-app", "Beta app"]], bound: true },
+  { teamId: "team-beta", name: "Second team", codes: ["Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India"], projects: [["gamma-app", "Gamma app"]], bound: false },
+] as const;
+const entryPerson = (teamId: string, i: number) => i === 0 ? "person-a" : `person-${teamId.slice(5)}-${i}`;
+/** GET /shared-ledger/context identities: one per center project, local id only where the team is bound on this machine. */
+export function rosterEntryContext(instanceId = "instance-local") {
+  return { identities: ROSTER_ENTRY_TEAMS.flatMap(t => t.projects.map(([id]) => ({ center: "center", team: t.teamId, person: "person-a",
+    project: id, ...(t.bound ? { localProjectId: id } : {}), homeInstanceId: instanceId }))) };
+}
+/** GET /shared-projects/snapshot for the binding of one center project (x-shared-ledger-project); null = not in the fixture. */
+export function rosterEntrySnapshot(project: string, instanceId = "instance-local") {
+  const t = ROSTER_ENTRY_TEAMS.find(t => t.projects.some(([id]) => id === project));
+  if (!t) return null;
+  const base = rosterSnapshotFixture(project, t.teamId, instanceId);
+  return { ...base, team: { available: true, value: { name: t.name, rev: 1 } },
+    teamDirectory: { available: true, members: t.codes.map((code, i) => ({ personId: entryPerson(t.teamId, i), code, teamRole: i ? "member" : "owner" })) },
+    teamInstances: { available: true, instances: [{ instanceId: "instance-peer", personId: entryPerson(t.teamId, 1) }] },
+    projects: t.projects.map(([id, name]) => ({ centerId: "center", teamId: t.teamId, projectId: id, name, rev: 1, status: "active",
+      projectRole: { available: true, value: "owner" }, localProjectIds: t.bound ? [id] : [] })),
+    localProjects: t.bound ? t.projects.map(([id, name]) => ({ id, name, dirs: [], personal: false, eligible: false })) : [] };
+}
