@@ -90,6 +90,19 @@ beforeAll(async () => {
     ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi, ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore,
     useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab, unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest, TODAY_KEY: now.TODAY_KEY,
     resetLedgers: require("../web/features/now/now-ledgers.ts").resetTodayLedgersForTest };
+  // 额度读数是模块级的一份（quota-lines-store），同进程前面的文件（web-dom-now-home 也用 mac-a）刚拉过或停拉了就不会再拉：
+  // 先在一台丢弃用的机器上订一下再退订，下次订阅时换回本文件的 fp 就清空读数、重新拉
+  const quota = require("../web/features/quota/quota-lines-store.ts") as { useQuotaLinesReading(): unknown; useQuotaWallReading(): unknown };
+  machines.currentFp = () => "today-home-prime";
+  const host = doc.createElement("div");
+  const root = createRoot(host as never);
+  function Prime() { quota.useQuotaLinesReading(); quota.useQuotaWallReading(); return null; }
+  await React.act(async () => root.render(React.createElement(Prime)));
+  await React.act(async () => root.unmount());
+  await tick(30);
+  machines.currentFp = () => world.fp;
+  calls.length = 0;
+  fpCalls.length = 0;
 });
 
 afterEach(async () => {
