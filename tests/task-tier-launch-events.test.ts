@@ -31,18 +31,20 @@ function ledger(): { path: string; db: Database } {
 const ctx = (db: Database, tier: string, extra: Partial<TierLaunchCtx> = {}): TierLaunchCtx => ({ db, project: "p1", card: "T1", tier, round: 2, ...extra });
 const author = (...extra: string[]) => ["create", "t1", "/w", "--purpose", "T1", "--task", "T1", "--card", "T1", "--card-role", "author", "--effort", "high", "--project", "p1", ...extra];
 const CODEX = ["--runtime", "codex", "--transport", "acp"];
+type Create = (...a: string[]) => Promise<Record<string, unknown>>;
+const ok: Create = async () => ({ ok: true });
 
 describe("[验收线 3] 成功 / 失败 / unknown 可追溯", () => {
   test("成功：attempt 带全字段，会话证实后 bound；actual 没被运行时证实 = unknown（不拿 argv 冒充）", async () => {
     const { db } = ledger();
     const sent: string[][] = [];
-    const r = await cardRoleCreate(async (...a: string[]) => (sent.push(a), { ok: true }), { tier: ctx(db, "ui") })(...author());
+    const r = await cardRoleCreate<Create>(async (...a) => (sent.push(a), { ok: true }), { tier: ctx(db, "ui") })(...author());
     expect(r).toEqual({ ok: true });
     const [f] = taskTierLaunchHistory(db, "p1", "T1");
     expect(f).toMatchObject({ status: "attempted", sessionId: null, actual: { model: null, effort: null, source: "unknown" },
       plan: { project: "p1", card: "T1", role: "author", tier: "ui", family: "claude", round: 2, agent: "t1", suggested: "claude-sonnet-5-5",
         final: { model: "claude-sonnet-5-5", effort: null }, source: "tier-default", launchId: expect.stringMatching(/^T1:author:r2:[0-9a-f]{8}$/) } });
-    expect(sent[0][sent[0].indexOf("--model") + 1]).toBe(f.plan.final.model);
+    expect(sent[0][sent[0].indexOf("--model") + 1]).toBe(f.plan.final.model!);
     bindTierSession(db, { project: "p1", id: "T1" }, "agent-t1", "sess-1", "author"); // registry 全名多一层 agent-
     expect(taskTierLaunchHistory(db, "p1", "T1")).toEqual([expect.objectContaining({ status: "bound", sessionId: "sess-1", actual: { model: null, effort: null, source: "unknown" } })]);
     expect(bindLaunchSession(db, { project: "p1", card: "T1", role: "author", agent: "t1", sessionId: "sess-2" })).toBe(false); // 已绑过不再绑
@@ -50,7 +52,7 @@ describe("[验收线 3] 成功 / 失败 / unknown 可追溯", () => {
 
   test("运行时证实的 actual 照记；Codex 尝试记最终 --effort", async () => {
     const { db } = ledger();
-    await cardRoleCreate(async () => ({ ok: true }), { tier: ctx(db, "ui", { baseEffort: "high" }) })(...author(), ...CODEX);
+    await cardRoleCreate(ok, { tier: ctx(db, "ui", { baseEffort: "high" }) })(...author(), ...CODEX);
     const [f] = taskTierLaunchHistory(db, "p1", "T1");
     expect(f.plan).toMatchObject({ family: "codex", suggested: "medium", final: { model: null, effort: "medium" } });
     bindLaunchSession(db, { project: "p1", card: "T1", role: "author", agent: "t1", sessionId: "s", actual: { model: null, effort: "medium", source: "suggest" } });
@@ -60,7 +62,7 @@ describe("[验收线 3] 成功 / 失败 / unknown 可追溯", () => {
   test("失败单列：create 没成记 failed 带原因；被下限拒的也记，且 create 没被调用", async () => {
     const { db } = ledger();
     let calls = 0;
-    const fail = async () => (calls++, { ok: false, error: "Selected model is at capacity." });
+    const fail: Create = async () => (calls++, { ok: false, error: "Selected model is at capacity." });
     await cardRoleCreate(fail, { tier: ctx(db, "code") })(...author());
     const refused = await cardRoleCreate(fail, { tier: ctx(db, "security") })(...author("--model", "claude-sonnet-5-5"));
     expect(refused).toMatchObject({ ok: false, error: expect.stringContaining("不得低于 Opus") });
@@ -78,9 +80,9 @@ describe("[验收线 3] 成功 / 失败 / unknown 可追溯", () => {
     const before = db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number };
     const ro = new Database(path, { readonly: true });
     cleanups.push(() => ro.close());
-    await cardRoleCreate(async () => ({ ok: true }), { tier: ctx(ro, "code") })(...author());
+    await cardRoleCreate(ok, { tier: ctx(ro, "code") })(...author());
     expect(taskTierLaunchHistory(db, "p1", "T1").length).toBe(1);
-    await cardRoleCreate(async () => ({ ok: true }), { tier: { ...ctx(db, "code"), card: "NOPE" } })(...author().map((a) => (a === "T1" ? "NOPE" : a)));
+    await cardRoleCreate(ok, { tier: { ...ctx(db, "code"), card: "NOPE" } })(...author().map((a) => (a === "T1" ? "NOPE" : a)));
     expect(taskTierLaunchHistory(db, "p1", "NOPE")).toEqual([]);
     expect(db.query("SELECT COUNT(*) AS n FROM events").get()).toEqual(before);
   });
