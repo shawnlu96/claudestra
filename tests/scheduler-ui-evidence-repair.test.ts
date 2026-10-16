@@ -124,6 +124,38 @@ describe("[验收线 1] 作者真实领单（复审 repair-pull）", () => {
     } finally { f.close(); }
   });
 
+  test("补图派单之后来源证明才失效：领单此刻重核来源，不再出补图单（复审 repair-proof 第 3 轮）", async () => {
+    quiet("on");
+    const f = await reviewed();
+    try {
+      await f.tick(); // review → fix
+      expect(await f.tick()).toMatchObject({ step: "sent", detail: "channel" });
+      expect(repairOrders(f)).toHaveLength(1);
+      const before = take(f);
+      expect(before.ok ? before.order?.findings.map((x) => x.family) : null).toEqual([UI_REPAIR_FAMILY]);
+      f.db.run("UPDATE scheduler_intents SET status = 'cancelled' WHERE taskId = 'T1' AND action = 'review'");
+      expect(snap(f).reviewDispatches).toHaveLength(0);
+      const r = take(f);
+      expect(r.ok ? r.order?.findings.map((x) => x.family) ?? [] : ["?"]).not.toContain(UI_REPAIR_FAMILY);
+    } finally { f.close(); }
+  });
+
+  test("wake 已送出、回执丢失（unknown）：领单仍带补图要求，不算一次尝试（复审 repair-receipt）", async () => {
+    quiet("on");
+    const f = await reviewed();
+    try {
+      await f.tick(); // review → fix
+      f.setSend("lost");
+      await f.tick();
+      const fix = f.intents().filter((i) => i.action === "dispatch" && i.node === "fix");
+      expect(fix.map((i) => i.status)).toEqual(["unknown"]);
+      expect(uiRepairAttempts(snap(f))).toBe(0);
+      const r = take(f);
+      expect(r.ok && r.order).toMatchObject({ step: "fix", findings: [{ family: UI_REPAIR_FAMILY, severity: "P1" }] });
+      expect(r.ok ? r.order?.findings[0]?.probe ?? "" : "").toContain("uiEvidence");
+    } finally { f.close(); }
+  });
+
   test("有 P1 / 截图被拒：领单不出补图工单", async () => {
     quiet("on");
     const f = await reviewed([P1], "changes");

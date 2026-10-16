@@ -10,7 +10,8 @@
  * 恢复键 pmQuiet（本模块 pmQuietMode，复核与出口也读它）：off / observe = 原决定逐字不变（含 selfHealBeforeManual 自救）。
  * 领单（take_order，order-take.ts 一行接线）：wake 派单时作者只看得到 take_order 的单，uiRepairTakeOrder 按台账同一口径给出与规划器
  * 同一张补截图工单（findingId / probe 一致），否则作者领到的是原 pass 审查的空修复列表。
- * 本模块是叶子（领单 order-take.ts 也引它）：不引复核 / 调度服务模块，审查来源证明（review-source-proof.ts reviewSourced）由规划器调用方传进来。
+ * 本模块是叶子（领单 order-take.ts 也引它）：不引复核 / 调度服务模块，审查来源证明（review-source-proof.ts reviewSourced）由规划器调用方传进来，
+ * 领单时的来源重核由 scheduler-fix-selfheal.ts 注入（configureUiRepairTakeSource）。
  * tests/scheduler-ui-evidence-repair.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -133,20 +134,37 @@ function repairOrder(task: LedgerTask, f: ReviewFacts): UiRepairOrder {
 
 const hasIntents = (db: Database): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_intents'").get();
 /**
- * 领单的来源依据：本段 fix（同轮、同规格）里规划器已正式派出、送达的 fix 派单，同 head、同规格版本。代码干净的 fix 段只有
- * uiRepairFix 会规划派单（它已过 reviewSourced 来源证明），所以有这张派单就是同一判定；没有（来源证明不足 → 规划器退人工）不合成补图单
+ * 领单的工单身份：本段 fix（同轮、同规格）里规划器派出的 fix 派单，同 head、同规格版本、没被取消（与 order-take.ts currentIntent 同口径）。
+ * 只认身份不认投递回执：wake 已送出、回执丢了（unknown）的作者照样要领到补图要求；计次仍只数已送达（uiRepairAttempts）
  */
 function repairDispatched(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): boolean {
   const entry = events.findLast((e) => e.kind === "stage" && e.data.to === "fix");
   if (!entry || entry.data.round !== task.round || (entry.data.specRev !== undefined && entry.data.specRev !== task.specRev)) return false;
-  const row = hasIntents(db) && db.query(`SELECT 1 FROM scheduler_intents WHERE taskId = ? AND action = 'dispatch' AND node = 'fix' AND status IN ('submitted','done')
+  const row = hasIntents(db) && db.query(`SELECT 1 FROM scheduler_intents WHERE taskId = ? AND action = 'dispatch' AND node = 'fix' AND status != 'cancelled'
     AND head = ? AND specRev = ? AND causalSeq >= ? LIMIT 1`).get(task.id, task.headSHA, task.specRev, entry.seq);
   return !!row;
 }
 
 /**
+ * 领单时重核审查来源（规划器同一份快照 + review-source-proof.ts reviewSourced）：派单之后来源失效，领单就不再出补图单。
+ * 快照与来源证明模块都经调度服务绕回 order-take，本叶子静态引不了，由 scheduler-fix-selfheal.ts 注入；没注入 / 出错 = 不出补图单
+ */
+export type TakeSourcePort = (db: Database, task: LedgerTask, facts: ReviewFacts) => boolean;
+let takeSource: TakeSourcePort | null = null;
+/** 注入领单来源重核；返回恢复函数 */
+export function configureUiRepairTakeSource(port: TakeSourcePort | null): () => void {
+  const was = takeSource;
+  takeSource = port;
+  return () => { takeSource = was; };
+}
+const takeSourced = (db: Database, task: LedgerTask, facts: ReviewFacts): boolean => {
+  try { return !!takeSource && takeSource(db, task, facts); } catch { return false; }
+};
+
+/**
  * take_order 领到的补截图单（order-take.ts ownFixContext）：pmQuiet on、ui 卡 auto、fix 阶段、截图仍缺，进 fix 的那轮同 head 审查
- * 无 P0/P1 且不是 block，本轮没有截图被拒，且本段 fix 已有规划器正式派出的补图派单（repairDispatched）；不是这种卡返回 null（领单逐字照旧）
+ * 无 P0/P1 且不是 block，本轮没有截图被拒，本段 fix 有规划器派出的补图派单（repairDispatched，不看回执），且领单此刻审查来源仍成立
+ * （takeSourced）；不是这种卡返回 null（领单逐字照旧）
  */
 export function uiRepairTakeOrder(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): { findings: ReviewFinding[]; report: string } | null {
   if (task.stage !== "fix" || pmQuietMode(task.project) !== "on" || !SHA.test(task.headSHA ?? "") || !missingShots(task.extra.screenshotsDigest)) return null;
@@ -155,7 +173,7 @@ export function uiRepairTakeOrder(db: Database, task: LedgerTask, events: readon
   if (events.some((x) => x.kind === "decision" && x.data.op === UI_REJECTED && x.data.round === task.round)) return null;
   const read = fixStartReviewFacts(task, events);
   if (read.kind !== "facts" || read.facts.head !== task.headSHA || read.facts.round !== task.round || !codeClean(read.facts)) return null;
-  if (!repairDispatched(db, task, events)) return null;
+  if (!repairDispatched(db, task, events) || !takeSourced(db, task, read.facts)) return null;
   const order = repairOrder(task, read.facts);
   return { findings: wireFindings(order.findings), report: order.reportPath };
 }

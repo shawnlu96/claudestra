@@ -14,8 +14,9 @@ import { recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 import { nodeAt, templateFor } from "./scheduler-template.js";
 import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
-import { uiRepairFix, type UiRepairOrder } from "./scheduler-ui-evidence-repair.js";
+import { configureUiRepairTakeSource, uiRepairFix, type UiRepairOrder } from "./scheduler-ui-evidence-repair.js";
 import { reviewSourced } from "./review-source-proof.js";
+import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 
 const SELF_HEAL_KEY = "selfHealBeforeManual";
@@ -38,6 +39,9 @@ export function configureSelfHealMode(port: SelfHealModePort | null): () => void
   return () => { modePort = was; };
 }
 const selfHealMode = (project: string): RecoveryMode => modePort(project);
+
+// PMQUIET1：take_order 领补图单时按规划器同一份快照重核审查来源（补图叶子模块静态引不了快照 / 来源证明，这里注入）
+configureUiRepairTakeSource((db, task, facts) => reviewSourced(autoSnapshot(db, task, { registry: [], maxWorkers: 2, now: Date.now() }), facts));
 
 const fixEntry = (events: readonly LedgerEvent[]): LedgerEvent | undefined =>
   events.findLast((e) => e.kind === "stage" && e.data.to === "fix");
