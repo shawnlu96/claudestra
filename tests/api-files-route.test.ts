@@ -207,7 +207,7 @@ describe("别人拿到 id 也取不到（与没有这个 id 同一个 404）", (
 describe("钉指纹接在真路径上（消息路由单测走不到，按源码核）", () => {
   const src = (f: string) => readFileSync(join(import.meta.dir, "../src", f), "utf8");
   test("消息路由挂 pending 时钉指纹；deliverToApi 登记附件时用它", () => {
-    expect(src("bridge/api-routes.ts")).toContain("ts: Date.now(), acceptsFiles, fileOwner: await peerFileOwner(principal),\n    };\n    const queue = pendingApiRequests.get(key)");
+    expect(src("bridge/api-messages.ts")).toContain("ts: Date.now(), acceptsFiles, fileOwner: await peerFileOwner(principal),\n  };\n  const queue = pendingApiRequests.get(key)");
     const call = "stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, ";
     expect(src("bridge.ts")).toContain(`${call}receipt: pending, threadId });`); // 整张回执取 acceptsFiles / fileOwner；thread 认不外发附件的标记
     expect(src("bridge/api-reply-files.ts")).toContain("...(o.owner ?? o.receipt?.fileOwner) });");

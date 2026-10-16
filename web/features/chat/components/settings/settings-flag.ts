@@ -1,28 +1,50 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getSettings, putSettings } from "@/lib/api/settings";
+import { machines } from "@/lib/machines";
 
-/**
- * config.json 里整台电脑的布尔开关（bridge GET/PUT /settings），不是本设备的：「推送不带正文」「全部待你处理都推」「Chat 入口」共用。
- * 写要 manage 权限，guest 点了拿到 403 就把错误显示出来；onChanged 在写成功后收到新值。
- */
-export function useSettingsFlag(key: "pushNoContent" | "pushAllAsks" | "talkEnabled", open = true, onChanged?: (on: boolean) => void) {
-  const [on, setOn] = useState<boolean | null>(null);
+type Flag = "pushNoContent" | "pushAllAsks" | "talkEnabled" | "steer.queueWhenBusy";
+const listeners = new Set<(key: Flag, fp: string | null, on: boolean) => void>();
+const subscribeMachine = (notify: () => void) => machines.subscribe(notify);
+const machineFp = () => machines.currentFp();
+const noMachine = () => null;
+
+/** Global settings flags share successful writes so mounted senders follow the rollback toggle immediately. */
+export function useSettingsFlag(key: Flag, open = true, onChanged?: (on: boolean) => void) {
+  const fp = useSyncExternalStore(subscribeMachine, machineFp, noMachine);
+  const [rec, setRec] = useState<{ key: Flag; fp: string | null; on: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const read = useRef(0);
+  const on = rec?.key === key && rec.fp === fp ? rec.on : null;
   useEffect(() => {
     if (!open) return;
-    getSettings()
-      .then((j) => setOn(j[key]))
-      .catch((e: Error) => setErr(e.message));
-  }, [open, key]);
+    let live = true;
+    const refresh = () => {
+      const ticket = ++read.current;
+      getSettings().then((j) => {
+        if (live && ticket === read.current) { setRec({ key, fp, on: j[key] }); setErr(""); }
+      }).catch((e: Error) => { if (live && ticket === read.current) setErr(e.message); });
+    };
+    const changed = (k: Flag, source: string | null, value: boolean) => {
+      if (k !== key || source !== fp) return;
+      ++read.current;
+      setRec({ key, fp, on: value });
+    };
+    refresh();
+    listeners.add(changed);
+    window.addEventListener("focus", refresh);
+    return () => { live = false; listeners.delete(changed); window.removeEventListener("focus", refresh); };
+  }, [open, key, fp]);
   const toggle = async () => {
-    if (on === null) return;
+    if (on === null || busy) return;
     setBusy(true);
     setErr("");
     try {
       const next = (await putSettings({ [key]: !on }))[key];
-      setOn(next);
+      ++read.current;
+      setRec({ key, fp, on: next });
+      for (const changed of listeners) changed(key, fp, next);
       onChanged?.(next);
     } catch (e) {
       setErr((e as Error).message);

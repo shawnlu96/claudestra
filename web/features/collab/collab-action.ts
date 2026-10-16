@@ -165,12 +165,10 @@ export function liveIdle(pending: { thinking?: boolean; compacting?: boolean } |
   return pending !== null && pending.thinking !== true && pending.compacting !== true;
 }
 
-/**
- * 「对它说」能不能发（审查 #144 P0）：web 发的是人类消息，Claude Code 忙时 bridge 会先 C-c 再投递——也就是打断。
- * 第一版只许在它空闲时发；真正的「等这步做完再送达」要 T13a 的投递语义。
- */
-export function sayGate(working: boolean, text: string, sending: boolean): { canSend: boolean; blockedByWork: boolean } {
-  return { canSend: !working && !sending && text.trim().length > 0, blockedByWork: working };
+/** Queue mode lets the bridge decide when to deliver; rollback retains the conservative idle gate. */
+export function sayGate(working: boolean, text: string, sending: boolean, queueWhenBusy = false): { canSend: boolean; blockedByWork: boolean } {
+  const blockedByWork = working && !queueWhenBusy;
+  return { canSend: !blockedByWork && !sending && text.trim().length > 0, blockedByWork };
 }
 
 /** 一条任务此刻的动作（节点、手机卡片、详情「参与者」共用） */

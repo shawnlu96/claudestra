@@ -31,6 +31,7 @@ beforeAll(() => {
     },
     setPushNoContent: async (on) => { cfg = { ...cfg, pushNoContent: on }; },
     setPushAllAsks: async (on) => { cfg = { ...cfg, pushAllAsks: on }; },
+    setSteerQueueWhenBusy: async (on) => { cfg = { ...cfg, steer: { queueWhenBusy: on } }; },
     setTalkEnabled: async (on) => { cfg = { ...cfg, talkEnabled: on }; },
     setJevApiKey: async (key) => {
       cfg = { ...cfg };
@@ -59,7 +60,8 @@ describe("/api/v1/settings", () => {
   test("GET 任何凭据都行；没配 key 时 hint 是 null", async () => {
     const res = await call("GET", "/api/v1/settings", GUEST);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, lang: "zh", groqApiKeyHint: null, jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false });
+    expect(await res.json()).toEqual({ ok: true, lang: "zh", groqApiKeyHint: null, jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false,
+      "steer.queueWhenBusy": true });
   });
   test("PUT 要 manage grant：guest 403，什么都没改", async () => {
     expect((await call("PUT", "/api/v1/settings", GUEST, { lang: "en" })).status).toBe(403);
@@ -76,11 +78,13 @@ describe("/api/v1/settings", () => {
   test("PUT lang + key：回体只带尾四位提示；空串清除 key；lang 可单独提交", async () => {
     const key = "gsk_abcdefghijklmnopqrstuvwxyz1234";
     const res = await call("PUT", "/api/v1/settings", OWNER, { lang: "en", groqApiKey: key });
-    expect(await res.json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: "····1234", jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false });
+    expect(await res.json()).toEqual({ ok: true, lang: "en", groqApiKeyHint: "····1234", jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false,
+      "steer.queueWhenBusy": true });
     expect(cfg.groqApiKey).toBe(key);
     expect(JSON.stringify(await (await call("GET", "/api/v1/settings", GUEST)).json())).not.toContain("gsk_");
     const cleared = await (await call("PUT", "/api/v1/settings", OWNER, { groqApiKey: "" })).json();
-    expect(cleared).toEqual({ ok: true, lang: "en", groqApiKeyHint: null, jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false });
+    expect(cleared).toEqual({ ok: true, lang: "en", groqApiKeyHint: null, jevApiKeyHint: null, pushNoContent: false, pushAllAsks: false, talkEnabled: false,
+      "steer.queueWhenBusy": true });
     expect(cfg.groqApiKey).toBeUndefined();
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { lang: "zh" })).json()).toMatchObject({ lang: "zh" });
   });
@@ -89,7 +93,8 @@ describe("/api/v1/settings", () => {
     expect(cfg.pushNoContent).toBeUndefined();
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushNoContent: true })).json()).toMatchObject({ pushNoContent: true });
     expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ pushNoContent: true });
-    expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushNoContent: false })).json()).toMatchObject({ pushNoContent: false, pushAllAsks: false, talkEnabled: false });
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushNoContent: false })).json()).toMatchObject({ pushNoContent: false, pushAllAsks: false, talkEnabled: false,
+      "steer.queueWhenBusy": true });
   });
   test("全部待你处理都推：缺省关，guest 改不了；owner 打开 / 关上，不动别的开关；不是布尔 400", async () => {
     expect((await call("PUT", "/api/v1/settings", GUEST, { pushAllAsks: true })).status).toBe(403);
@@ -100,13 +105,15 @@ describe("/api/v1/settings", () => {
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { pushAllAsks: false })).json()).toMatchObject({ pushAllAsks: false });
   });
   test("Chat 入口（T50）：缺省关，guest 改不了也读得到；owner 打开 / 关上；不是布尔 400", async () => {
-    expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ talkEnabled: false });
+    expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ talkEnabled: false,
+      "steer.queueWhenBusy": true });
     expect((await call("PUT", "/api/v1/settings", GUEST, { talkEnabled: true })).status).toBe(403);
     expect((await call("PUT", "/api/v1/settings", OWNER, { talkEnabled: "on" })).status).toBe(400);
     expect(cfg.talkEnabled).toBeUndefined();
     expect(await (await call("PUT", "/api/v1/settings", OWNER, { talkEnabled: true })).json()).toMatchObject({ talkEnabled: true });
     expect(await (await call("GET", "/api/v1/settings", GUEST)).json()).toMatchObject({ talkEnabled: true });
-    expect(await (await call("PUT", "/api/v1/settings", OWNER, { talkEnabled: false })).json()).toMatchObject({ talkEnabled: false });
+    expect(await (await call("PUT", "/api/v1/settings", OWNER, { talkEnabled: false })).json()).toMatchObject({ talkEnabled: false,
+      "steer.queueWhenBusy": true });
   });
   test("groqKeyHint", () => {
     expect(groqKeyHint(undefined)).toBeNull();
