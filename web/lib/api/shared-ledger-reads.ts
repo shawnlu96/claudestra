@@ -116,3 +116,49 @@ export class SharedLedgerReads {
   }
 }
 function bad(): never { throw new Error("invalid_task_facts"); }
+
+/** Hand copy of src/lib/shared-ledger-contract-feature-deps.ts (no twin; tests assign both ways). Structural edges only: no note, evidence or lock. */
+const FEATURE_DEP_KINDS = ["split", "declared", "task"] as const;
+const MAX_FEATURE_DEPS = 2000;
+export interface FeatureDep {
+  projectId: string; from: string; to: string; kind: typeof FEATURE_DEP_KINDS[number]; satisfied: boolean; count: number;
+}
+export interface FeatureDeps { schemaVersion: 1; teamId: string; edges: FeatureDep[]; updatedAt: number }
+export interface FeatureDepsTransport { featureDeps(signal: AbortSignal): Promise<FeatureDeps> }
+/** Team-level read (no feature id in the path); the project header picks the bridge binding, which keeps only that project's edges. */
+export function featureDepsTransport(machine?: MachineRef, project?: string): FeatureDepsTransport {
+  const headers = sharedLedgerProjectHeaders(project);
+  return { featureDeps: signal => api("/shared-ledger/feature-deps", { signal, headers }, machine) };
+}
+/** Standalone read like taskFacts, never gated by ext-capabilities. `null` on any failure; not cached, no backoff kept here. */
+export async function readFeatureDeps(identity: { team: string; project: string }, transport: FeatureDepsTransport,
+  signal: AbortSignal): Promise<FeatureDeps | null> {
+  try {
+    return ownDeps(identity, await transport.featureDeps(signal));
+  } catch (error) {
+    if (signal.aborted) throw error;
+    // Harmless to swallow: edges only connect cards on the team project map; without them it looks exactly as before (deps: []).
+    // 403 / 404 are an old center's normal answers (no route), so they are not logged; other failures log the status only.
+    const status = error instanceof ApiError ? error.status : null;
+    if (status !== 403 && status !== 404) console.warn(`shared ledger feature-deps unavailable (${status ?? "no status"})`);
+    return null;
+  }
+}
+/** Rebuilt field by field with the contract's rules; other projects' edges are dropped (the bridge already filters them). */
+function ownDeps(identity: { team: string; project: string }, raw: FeatureDeps): FeatureDeps {
+  const r = (raw && typeof raw === "object" ? raw : badDeps()) as unknown as Record<string, unknown>;
+  const at = r.updatedAt;
+  if (r.schemaVersion !== 1 || r.teamId !== identity.team || !Number.isSafeInteger(at) || (at as number) < 0) badDeps();
+  if (!Array.isArray(r.edges) || r.edges.length > MAX_FEATURE_DEPS) badDeps();
+  const seen = new Set<string>(), ids = (...v: unknown[]) => v.every(x => typeof x === "string" && TASK_ID.test(x));
+  const edges = r.edges.map((row: unknown): FeatureDep => {
+    const e = (row && typeof row === "object" ? row : badDeps()) as Record<string, unknown>, key = JSON.stringify([e.projectId, e.from, e.to, e.kind]);
+    if (!ids(e.projectId, e.from, e.to) || e.from === e.to || !FEATURE_DEP_KINDS.includes(e.kind as FeatureDep["kind"])) badDeps();
+    if (typeof e.satisfied !== "boolean" || !Number.isSafeInteger(e.count) || (e.count as number) < 1 || seen.has(key)) badDeps();
+    seen.add(key);
+    return { projectId: e.projectId as string, from: e.from as string, to: e.to as string, kind: e.kind as FeatureDep["kind"],
+      satisfied: e.satisfied, count: e.count as number };
+  });
+  return { schemaVersion: 1, teamId: identity.team, edges: edges.filter(e => e.projectId === identity.project), updatedAt: at as number };
+}
+function badDeps(): never { throw new Error("invalid_feature_deps"); }
