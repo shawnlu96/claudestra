@@ -29,7 +29,7 @@ const borrow: BorrowEntry[] = [{ peer: "mate", projects: [P], roles: ["review", 
 const deps = (actor: string) => ({
   db, actor, projectIds: [P], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => 1_000_000,
   lend: { borrow: async () => borrow, notifyPm: async () => {}, result: {
-    reportDir: () => dir, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: () => "sig",
+    reportDir: () => dir, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: () => ({ key: "k", sig: "s" }),
     remoteHead: async (_r: string, branch: string): Promise<RemoteHead> => remote[branch] ?? { ok: false, error: "没有这个分支" },
     peerFp: async (peer: string) => (peer === "mate" ? FP : null) } },
 });
