@@ -164,3 +164,21 @@ test("团队视图没有 frontier / links：模块页不渲染对应小节", asy
   expect(all(page, "[data-pd-frontier]")).toHaveLength(0);
   expect(all(page, "[data-pd-open]")).toHaveLength(1);
 });
+
+test("选中 + 过滤叠加：选中的卡不豁免过滤；选中边后端点第一次 Enter 只选中", async () => {
+  const { host, features } = await render();
+  await click(main(host, "f-team"));
+  await click(one(host, '[data-pd-filter="blocked"]'));
+  expect(lit(host)).toEqual([]);
+  expect(card(host, "f-team").getAttribute("data-pd-selected")).toBe("true");
+  await click(one(host, '[data-pd-filter="all"]'));
+  await click(one(host, '[data-pd-hit="dep:f-private>f-team"]'));
+  expect(side(host)?.getAttribute("data-pd-side")).toBe("dep:f-private>f-team");
+  expect(card(host, "f-team").getAttribute("data-pd-selected")).toBe("true");
+  expect(main(host, "f-team").getAttribute("aria-pressed")).toBe("false");
+  await click(main(host, "f-team"), 0);
+  expect(features).toEqual([]);
+  expect(side(host)?.getAttribute("data-pd-side")).toBe("f-team");
+  await click(main(host, "f-team"), 0);
+  expect(features).toEqual(["f-team"]);
+});

@@ -73,7 +73,7 @@ export function ProductCanvas(p: CanvasProps) {
   const toggleCard = (id: string) => setPick(cur => (cur?.kind === 'feature' && cur.id === id ? null : { kind: 'feature', id }));
   const pickFeature = (id: string) => { setPick({ kind: 'feature', id }); setFocus(f => ({ id, seq: (f?.seq ?? 0) + 1 })); };
   const card = (n: ProductNode) => <ProductCard key={n.id} node={n} now={p.now} tr={p.tr} featureMeta={p.featureMeta} activeUnknown={p.activeUnknown}
-    onFeature={p.onFeature} onTask={p.onTask} onPick={toggleCard} selected={hl.selected.has(n.id)} dim={hl.dim.has(n.id)}
+    onFeature={p.onFeature} onTask={p.onTask} onPick={toggleCard} selected={hl.selected.has(n.id)} picked={hl.picked === n.id} dim={hl.dim.has(n.id)}
     cp={cpLive?.ids.includes(n.id) ? cpTag : undefined} />;
   const chip = (c: ProductNode | ProductChip, tag: keyof typeof TAG) => <Chip key={c.id} id={c.id} feature={c.feature} tag={tag} box={c} onFeature={p.onFeature} tr={p.tr} hl={hl} />;
   return <div className={d.wrap}>

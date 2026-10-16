@@ -102,7 +102,8 @@ export function TaskRow({ row: r, top, now, tr, onTask }: { row: ProductFrontier
 export interface CardFocus {
   /** 单击 / 第一次 Enter：选中或取消（PDFOCUS1）；不给就照旧单击进模块 */
   onPick?: (id: string) => void;
-  selected?: boolean; dim?: boolean;
+  /** selected = 描边（含选中边的两端）；picked = 这张卡就是当前选中的模块（aria-pressed、再按 Enter 进入只看它） */
+  selected?: boolean; picked?: boolean; dim?: boolean;
   /** 关键路径小标（已经过词表） */
   cp?: string;
 }
@@ -117,13 +118,13 @@ export function ProductCard(p: CardProps & CardFocus & { node: ProductNode; onFe
   const eta = ['run', 'blocked', 'ready'].includes(n.state) ? productEta(f.eta?.at, p.now, p.tr('今天')) : null;
   const click = (e: React.MouseEvent) => {
     if (!p.onPick) return p.onFeature(n.id);
-    if (e.detail === 0) return p.selected ? p.onFeature(n.id) : p.onPick(n.id);
+    if (e.detail === 0) return p.picked ? p.onFeature(n.id) : p.onPick(n.id);
     if (e.detail === 1) p.onPick(n.id);
   };
   return <div className={`${c.card} ${fx.fade} ${p.selected ? fx.selected : ''} ${p.dim ? fx.dim : ''}`} data-pd-card={n.id} data-pd-state={n.state}
     data-pd-selected={p.selected || undefined} data-pd-dim={p.dim || undefined} style={{ left: n.x, top: n.y, width: n.w, height: n.h }}>
     {p.cp && <span className={fx.cpTag} data-pd-cp>{p.cp}</span>}
-    <button type="button" className={c.main} aria-pressed={p.onPick ? !!p.selected : undefined} onClick={click}
+    <button type="button" className={c.main} aria-pressed={p.onPick ? !!p.picked : undefined} onClick={click}
       onDoubleClick={p.onPick ? () => p.onFeature(n.id) : undefined}>
       <span className={c.header}><span className={c.dot} aria-hidden />
         <strong data-pd-title className={c.title} title={f.title}>{f.title || f.id}</strong><CardBadge node={n} now={p.now} tr={p.tr} /></span>

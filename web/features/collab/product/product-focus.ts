@@ -92,23 +92,24 @@ export function filterMatch(key: MapFilter, state: MapState): boolean {
   return key === 'all' || FILTERS.find(f => f.key === key)!.states.includes(state);
 }
 
-export interface Highlight { selected: Set<string>; dim: Set<string>; strong: Set<string>; dimEdges: Set<string> }
+/** selected = 要描边的卡（选中的模块，或选中边的两端）；picked = 真正被选中的模块，只有它算「已选中、再按 Enter 进入」 */
+export interface Highlight { selected: Set<string>; picked: string | null; dim: Set<string>; strong: Set<string>; dimEdges: Set<string> }
 
 /**
- * 三样叠加：选中的上下游 ∩ 过滤匹配 ∩ 关键路径以外的都变暗；选中的卡自己不变暗。选中边只给两端描边，不变暗。
+ * 三样叠加：选中的上下游 ∩ 过滤匹配 ∩ 关键路径以外的都变暗；选中的卡同样参与过滤 / 关键路径判断（描边照留）。选中边只给两端描边，不变暗。
  * 过滤匹配数为 0 时按「全部」算（存下来的过滤值可能已经没有卡了）。
  */
 export function highlight(layout: Layout, o: { pick: ProductPick | null; filter: MapFilter; summary: MapSummary; cp: CriticalPath | null }): Highlight {
-  const out: Highlight = { selected: new Set(), dim: new Set(), strong: new Set(), dimEdges: new Set() };
+  const out: Highlight = { selected: new Set(), picked: null, dim: new Set(), strong: new Set(), dimEdges: new Set() };
   const edgePick = o.pick?.kind === 'edge' ? layout.edges.find(e => e.id === o.pick!.id) : undefined;
   if (edgePick) { out.selected.add(edgePick.from); out.selected.add(edgePick.to); }
   const picked = o.pick?.kind === 'feature' && layout.nodes.some(n => n.id === o.pick!.id) ? o.pick.id : null;
   const focus = picked === null ? null : focusSet(layout, picked);
-  if (picked !== null) out.selected.add(picked);
+  if (picked !== null) { out.selected.add(picked); out.picked = picked; }
   const filter = filterCount(o.summary, o.filter) > 0 ? o.filter : 'all';
   const cp = o.cp && o.cp.ids.length ? { ids: new Set(o.cp.ids), edges: new Set(o.cp.edges) } : null;
-  const lit = (id: string, state: MapState | null) => id === picked || ((!focus || focus.nodes.has(id))
-    && (filter === 'all' || (state !== null && filterMatch(filter, state))) && (!cp || cp.ids.has(id)));
+  const lit = (id: string, state: MapState | null) => (!focus || focus.nodes.has(id))
+    && (filter === 'all' || (state !== null && filterMatch(filter, state))) && (!cp || cp.ids.has(id));
   for (const n of layout.nodes) if (!lit(n.id, n.chip ? null : n.state)) out.dim.add(n.id);
   for (const c of layout.chips) if (!lit(c.id, null)) out.dim.add(c.id);
   for (const e of layout.edges) {

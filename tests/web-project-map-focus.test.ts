@@ -72,11 +72,15 @@ test("highlight: 过滤『受阻 · 久未动』只剩 3 张卡亮；选中 + �
   expect(lit(both)).toEqual(["f-private", "f-team"]);
   expect(sorted(both.strong)).toEqual(["dep:f-private>f-team"]);
   expect(both.dimEdges.has("lock:f-team>f-roster")).toBe(true);
-  // 选中的卡自己不因过滤变暗；选中边只描两端，不变暗
+  // 选中的卡不豁免过滤：团队项目在跑，它的上下游里没有受阻 · 久未动的，全部变暗；描边照留
   const self = highlight(layout, { pick: { kind: "feature", id: "f-team" }, filter: "blocked", summary: layout.summary, cp: null });
-  expect(lit(self)).toEqual(["f-team"]);
+  expect(lit(self)).toEqual([]);
+  expect(self.selected.has("f-team") && self.picked === "f-team").toBe(true);
+  // 选中边只描两端，不变暗；两端不算选中的模块
+
   const edge = highlight(layout, { pick: { kind: "edge", id: "dep:f-private>f-team" }, filter: "all", summary: layout.summary, cp: null });
   expect(sorted(edge.selected)).toEqual(["f-private", "f-team"]);
+  expect(edge.picked).toBeNull();
   expect(edge.dim.size).toBe(0);
 });
 
