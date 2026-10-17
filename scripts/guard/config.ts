@@ -85,12 +85,13 @@ export const PATTERNS: PatternDef[] = [
     hint: "registry 路径用 REGISTRY_PATH（src/lib/registry.ts）",
   },
   {
-    // 按运行时 id 分支：runtime / rt / *Runtime（可带 .id）与字面量比较（两个方向），或拿字面量 id 查注册表
+    // 按运行时 id 分支：runtime / rt / *Runtime（可带 .id）与字面量比较（两个方向，含模板字面量）、switch 在它上面，或拿字面量 id 查注册表
     id: "runtime-literal",
     re: new RegExp(
-      String.raw`\b(?:\w*[rR]untime|rt)(?:\.id)?\s*[!=]==?\s*["'][a-z][\w-]*["']` +
-        String.raw`|["'][a-z][\w-]*["']\s*[!=]==?\s*[\w$.?]*\b(?:\w*[rR]untime|rt)\b` +
-        String.raw`|\b(?:managedFor|requireManaged|sourceFor|controlFor|transportsOf|acpSpecFor)\(\s*["'][a-z][\w-]*["']`,
+      String.raw`\b(?:\w*[rR]untime|rt)(?:\.id)?\s*[!=]==?\s*["'\x60][a-z][\w-]*["'\x60]` +
+        String.raw`|["'\x60][a-z][\w-]*["'\x60]\s*[!=]==?\s*[\w$.?]*\b(?:\w*[rR]untime|rt)\b` +
+        String.raw`|\bswitch\s*\(\s*[\w$.?]*\b(?:\w*[rR]untime|rt)(?:\.id)?\s*\)` +
+        String.raw`|\b(?:managedFor|requireManaged|sourceFor|controlFor|transportsOf|acpSpecFor)\(\s*["'\x60][a-z][\w-]*["'\x60]`,
       "g",
     ),
     allow: /^src\/lib\/runtimes\//,

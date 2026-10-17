@@ -10,8 +10,11 @@ import { channelInstructions } from "../channel-instructions.js";
 import { shellEscape } from "../claude-launch.js";
 import { codexContextPreamble, codexDeveloperInstructions } from "../codex-launch.js";
 import { encodePreambleEnv } from "../codex-thread.js";
+import { acpLogDir } from "../log-paths.js";
 import { pathOverrideAssignments } from "../paths.js";
 import { REPO_ROOT } from "../repo-root.js";
+import { spawnAdapter } from "../acp/adapter-proc.js";
+import { AcpSession } from "../acp/session.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
 import { ACP_RUNTIME_ENV, type AcpRuntimeSpec } from "./contract.js";
@@ -53,7 +56,37 @@ function genericAcpHostCommand(spec: LaunchSpec, def: GenericAcpDef, o: { bunBin
   return `${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
 }
 
-export function genericAcpRuntime(def: GenericAcpDef): AcpRuntimeSpec {
+const OPEN_TIMEOUT_MS = 120_000;
+
+/**
+ * new / fork 先起一个短命适配器（不挂 claudestra MCP）把会话建出来，返回服务端给的 id；常驻宿主再按这个 id 接上。
+ * 不能沿用 manager 随手生成的 UUID：严格的 ACP 服务端只认自己 session/new 出来的会话，load 一个没建过的 id 直接报不存在。
+ */
+async function openSession(spec: LaunchSpec, def: GenericAcpDef, spawn: typeof spawnAdapter): Promise<string> {
+  if (!spec.cwd) throw new Error(`${def.host.label}（ACP）新建会话需要工作目录（LaunchSpec.cwd）`);
+  const agent = def.host.agentCommand(process.env, process.execPath, false);
+  if ("error" in agent) throw new Error(agent.error);
+  const envSpec = {
+    base: process.env, bunBin: process.execPath, channelServer: join(REPO_ROOT, "src/channel-server.ts"),
+    mcpName: process.env.MCP_NAME || "claudestra", logsDir: acpLogDir("bootstrap"),
+  };
+  const logs: string[] = [];
+  const proc = spawn(agent.cmd, def.host.adapterEnv(envSpec), spec.cwd, (m) => logs.push(m), def.host.logLabel);
+  const s = new AcpSession(proc.wire, { onUpdate: () => {}, onPermission: async () => null, log: (m) => logs.push(m) }, def.host.mcpServers(envSpec));
+  const timer = setTimeout(() => proc.stop(), OPEN_TIMEOUT_MS);
+  try {
+    await s.initialize({ fork: spec.mode === "fork" }); // 缺 fork 能力在这里就抛（lib/acp/protocol.ts）
+    return spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
+  } catch (e) {
+    throw new Error(`${def.host.label}（ACP）没建出会话：${e instanceof Error ? e.message : e}${logs.length ? `（${logs.slice(-3).join(" | ").slice(0, 300)}）` : ""}`);
+  } finally {
+    clearTimeout(timer);
+    proc.stop();
+  }
+}
+
+/** deps.spawn 只给测试注入（内存线路的严格 ACP 服务端） */
+export function genericAcpRuntime(def: GenericAcpDef, deps: { spawn?: typeof spawnAdapter } = {}): AcpRuntimeSpec {
   const managed: ManagedRuntimeAdapter = {
     ...def.source,
     manageable: true,
@@ -67,6 +100,9 @@ export function genericAcpRuntime(def: GenericAcpDef): AcpRuntimeSpec {
     async available() {
       const r = await def.ready(false, {});
       return r.ok ? { ok: true } : { ok: false, hint: r.reason };
+    },
+    async prepareSession(spec) {
+      return { sessionId: spec.mode === "resume" ? spec.sessionId : await openSession(spec, def, deps.spawn ?? spawnAdapter) };
     },
     buildLaunchCommand: (spec) => genericAcpHostCommand(spec, def, { bunBin: process.execPath, repoRoot: REPO_ROOT }), // manager 自己的 bun
     beforeLaunch: (win) => resetReadyOption(win, CODEX_READY_OPTION), // 清不掉就抛：不带着残留的 "1" 往下启动

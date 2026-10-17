@@ -5,7 +5,8 @@
 
 - 契约类型：`src/lib/runtimes/contract.ts`（ACP 段）、`src/lib/runtimes/types.ts`（会话来源、生命周期、`RuntimeEntry`）。
 - 防腐：guard 的 `pattern:runtime-literal` 统计 `src/lib/runtimes/` 以外按运行时 id 字面量分支的写法
-  （`runtime === "x"`、`rt.id !== "x"`、`managedFor("x", …)` 等），全仓总数只许减少。新代码要区分运行时，就往描述里加字段。
+  （`runtime === "x"` / 模板字面量、`rt.id !== "x"`、`switch (runtime)`、`managedFor("x", …)` 等），全仓总数只许减少（和其它 pattern 规则同口径：
+  删一处旧的同时在别处加一处，总数不变就拦不住）。新代码要区分运行时，就往描述里加字段。
 - 证明契约够用的测试：`tests/runtime-contract-fake.test.ts` 只在测试里登记一个假 ACP 运行时，没改 runtimes/ 以外的文件，
   就能起宿主、收发消息、打断，运行时目录也能列出来。
 
@@ -34,7 +35,8 @@
 3. **就绪闸** `ready(autoInstall, deps)`：`transport` 命令、建 agent、doctor 用同一个判据；`autoInstall` 时可以顺手装缺的依赖。
 4. 可选：`agentProblem(info, env)` 按 agent 配置再拦一道；`catalogProbe()` 让运行时目录先跑它，过了就算可用。
 5. **生命周期**：用 `genericAcpRuntime({ source, host, ready, isValidSessionId, launchEnv? })`（`src/lib/runtimes/acp-generic.ts`）
-   拼出 `AcpRuntimeSpec`：窗口里跑 ACP 宿主，就绪标记是 `@claudestra_ready`，退出时给宿主发 SIGTERM，registry 记 `transport=acp`。
+   拼出 `AcpRuntimeSpec`：new / fork 先起一个短命适配器 `session/new`（或 `session/fork`）拿服务端给的会话 id，常驻宿主再按它接上；
+   窗口里跑 ACP 宿主，就绪标记是 `@claudestra_ready`，退出时给宿主发 SIGTERM，registry 记 `transport=acp`。
    启动命令里再要加的环境变量放在 `launchEnv`。有特殊启动流程（Codex 的引导轮、Pi 的能力档）的才自己写 `ManagedRuntimeAdapter`。
 6. **登记**：`RUNTIMES` 加一行 `{ source, acp: <ID>_ACP }`。
 
@@ -73,7 +75,11 @@
 - **版本更新提示**：`lib/update-hints.ts`（CC / Pi / Codex 各自的版本源和升级按钮）。没声明的运行时不出提示。
 - **Claude Code 专属**（TUI 屏幕判据、`/status` 用量、技能注册表、CC 会话文件）：`bridge/preempt.ts`、`lib/turn-cuts.ts`、`bridge/turn-cuts.ts`、
   `lib/skill-library.ts`、`lib/agent-skills.ts`、`lib/launcher-restore-gate.ts`、`lib/session-archive.ts`、`lib/worker-session.ts`、`lib/display-model.ts` 等。
-  它们问的是「是不是 Claude Code」，新运行时一律落在「不是」那一侧。
+  它们问的是「是不是 Claude Code」。
+- **已知缺口：`lib/registry.ts` 的 `agentRuntime()`** 把 pi / codex 以外的 runtime 一律折成 `claude-code`（`AgentRuntime` 是三家的联合类型），
+  经它判断的调用方会把新运行时当成 Claude Code：上下文边界面板（`bridge/ctx-boundary.ts` 的显示部分；自动压缩先看 `transport === "acp"`，不受影响）、
+  额度闸暂停（`bridge.ts` wallPaused）、manager 的花名册、`lib/skill-library.ts`。归档已改成不经它（`lib/session-archive.ts`）。
+  根治要把 `agentRuntime` 改成查注册表，但 `registry.ts` 在 runtimes/ 的 import 图里，直接引注册表会成环，留给接 OpenCode 的卡一起处理。
 - **调度器 / 台账的模型家族**（`claude` / `codex` 审查员族、出借池的 runtime 槽位）：`lib/scheduler-*`、`lib/recovery-*`、`lib/card-role-definitions.ts`、
   `bridge/fleet/` 等。这里的「runtime」是审查族 / 槽位的概念，不是 agent 运行时，不归这份契约管。
 - **web/**：新建 agent 弹窗的运行时下拉和说明文字、运行时徽标、技能设置页都按 id 写死。后端的 `GET /api/v1/runtimes`

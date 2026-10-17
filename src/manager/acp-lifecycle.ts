@@ -63,9 +63,10 @@ export async function chooseCreateTransport(
     console.error(`[acp] ${ready.reason}；本次 Pi agent 用 tmux`);
     return { transport: "tmux", acpPending: true, note: `Pi ACP 探测没过（${ready.reason}），本次用 tmux；条件齐了跑 migrate --pi <agent>` };
   }
-  const ready = await checkAcpReady(true);
+  const spec = acpSpecFor(runtime)!;
+  const ready = await spec.ready(true, {}); // 就绪闸按运行时描述（Codex：可顺手装 / 对账 codex-acp）
   if (ready.ok) return { transport: "acp" };
-  console.error(`[acp] ${ready.reason}；本次 Codex agent 回退 tmux，doctor 会报告`);
+  console.error(`[acp] ${ready.reason}；本次 ${spec.host.label} agent 回退 tmux，doctor 会报告`);
   return { transport: "tmux", acpPending: true };
 }
 

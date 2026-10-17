@@ -3,6 +3,8 @@
  * 注册表 / transport 选择 / 策略 / 运行时目录都认它，启动命令点名它，真的 AcpHost + 本仓 stub 能起、能收发、能打断。
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adapterEnv, spawnAdapter, type AdapterProc } from "../src/lib/acp/adapter-proc.ts";
 import type { BridgeLinkDeps } from "../src/lib/acp/bridge-link.ts";
@@ -16,6 +18,7 @@ import { ACP_RUNTIME_ENV, type AcpHostRuntime } from "../src/lib/runtimes/contra
 import {
   checkAcpReadyFor, controlFor, isManageableRuntime, managedFor, manageableRuntimeIds, registerRuntimeForTest, requireManaged, transportsOf, type SessionSourceAdapter,
 } from "../src/lib/runtimes/index.ts";
+import { archiveAgentSession } from "../src/lib/session-archive.ts";
 import { chooseCreateTransport, transportRefusal } from "../src/manager/acp-lifecycle.ts";
 
 const REPO = join(import.meta.dir, "..");
@@ -148,4 +151,87 @@ describe("假运行时：宿主整条链", () => {
     await until(() => h.stops.length === 1);
     expect(h.stops[0]).toMatchObject({ event: "StopFailure", interrupt: true });
   }, 30_000);
+});
+
+/** 只认自己 session/new 出来的会话的严格 ACP 服务端（内存线路）：load 没建过的 id 报 Session not found */
+function strictServer() {
+  const calls: string[] = [];
+  const sessions = new Set<string>();
+  let n = 0;
+  const spawn = () => {
+    let onData: (s: string) => void = () => {};
+    const answer = (id: unknown, body: Record<string, unknown>) => queueMicrotask(() => onData(`${JSON.stringify({ jsonrpc: "2.0", id, ...body })}\n`));
+    const wire = {
+      onData: (cb: (s: string) => void) => void (onData = cb),
+      onClose: () => {},
+      close: () => {},
+      write(line: string) {
+        const q = JSON.parse(line);
+        calls.push(q.method);
+        if (q.id === undefined) return;
+        if (q.method === "initialize") return answer(q.id, { result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
+        if (q.method === "session/new") {
+          const sid = `srv-${++n}`;
+          sessions.add(sid);
+          return answer(q.id, { result: { sessionId: sid } });
+        }
+        if (q.method === "session/load") {
+          return sessions.has(q.params.sessionId) ? answer(q.id, { result: {} }) : answer(q.id, { error: { code: -32602, message: `Session not found: ${q.params.sessionId}` } });
+        }
+        answer(q.id, { result: {} });
+      },
+    };
+    return { wire, stop: () => {}, exited: new Promise<number>(() => {}) } as unknown as AdapterProc;
+  };
+  return { calls, spawn };
+}
+
+describe("假运行时：新建会话走 session/new（第 2 轮 P1-1 复现）", () => {
+  test("prepareSession 先向服务端建会话、拿它给的 id；常驻宿主按这个 id load 成功并就绪", async () => {
+    const srv = strictServer();
+    const strict = genericAcpRuntime({ source, host, ready: async () => ({ ok: true }), isValidSessionId: () => true }, { spawn: srv.spawn });
+    const launch = { mode: "new" as const, channelId: "c1", bridgeUrl: "", sessionId: crypto.randomUUID(), agentName: "agent-f", cwd: REPO };
+    const { sessionId } = await strict.managed.prepareSession!(launch);
+    expect(sessionId).toBe("srv-1");
+    expect(srv.calls).toEqual(["initialize", "session/new"]);
+    let ready = false;
+    const logs: string[] = [];
+    running = new AcpHost({ channelId: "c1", agentName: "agent-f", sessionId, cwd: REPO, mcpName: "claudestra", agentCmd: ["strict"], runtime: host,
+      env: { base: {}, bunBin: process.execPath, channelServer: join(REPO, "src/channel-server.ts"), mcpName: "claudestra", logsDir: "/tmp" } }, {
+      spawn: srv.spawn,
+      makeLink: (d: any) => ({ connect: () => d.onRegistered(), send: () => true, request: async () => null, close: () => {}, up: true }) as any,
+      startProxy: () => ({ url: "ws://unused.invalid", onBridgeFrame: () => false, failInFlight: () => {}, close: () => {} }) as any,
+      postHook: async () => ({}), markReady: async () => void (ready = true), rotateSession: async () => ({ ok: true }), log: (m) => logs.push(m),
+    });
+    running.start();
+    await until(() => ready, 5_000);
+    expect(srv.calls.slice(2, 4)).toEqual(["initialize", "session/load"]);
+    expect(logs.some((m) => m.includes("Session not found"))).toBe(false);
+  });
+
+  test("resume 照用 registry 里的 id，不另建", async () => {
+    const srv = strictServer();
+    const strict = genericAcpRuntime({ source, host, ready: async () => ({ ok: true }), isValidSessionId: () => true }, { spawn: srv.spawn });
+    expect(await strict.managed.prepareSession!({ mode: "resume", channelId: "c1", bridgeUrl: "", sessionId: "old-1", cwd: REPO })).toEqual({ sessionId: "old-1" });
+    expect(srv.calls).toEqual([]);
+  });
+});
+
+describe("假运行时：归档按它自己的会话来源找文件（第 2 轮 P1-2 复现）", () => {
+  test("archiveAgentSession 不把新运行时折成 Claude Code", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocr2-archive-"));
+    const sid = "fa6e-archive-1";
+    const file = join(dir, `${sid}.jsonl`);
+    writeFileSync(file, `${JSON.stringify({ type: "session", id: sid })}\n`);
+    const src: SessionSourceAdapter = { ...source, id: "fakearch", sessionPath: () => file, findSessionById: () => file, sessionIdFromPath: () => sid };
+    const undo = registerRuntimeForTest({ source: src, acp: genericAcpRuntime({ source: src, host: { ...host, id: "fakearch" }, ready: async () => ({ ok: true }), isValidSessionId: () => true }) });
+    try {
+      const r = await archiveAgentSession("agent-fakearch", { runtime: "fakearch", cwd: dir, sessionId: sid }, sid, { archiveRoot: join(dir, "archive") });
+      expect(r.ok).toBe(true);
+      expect(existsSync(join(dir, "archive", "agent-fakearch", `${sid}.jsonl`))).toBe(true);
+    } finally {
+      undo();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

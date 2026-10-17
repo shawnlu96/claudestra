@@ -12,7 +12,7 @@
  */
 
 import { ARCHIVE_ROOT as STATE_ARCHIVE_ROOT } from "./paths.js";
-import { agentRuntime, readRegistryAgents } from "./registry.js";
+import { readRegistryAgents } from "./registry.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.js";
 import { existsSync, readdirSync, realpathSync } from "fs";
 import { mkdir, readdir, writeFile } from "fs/promises";
@@ -146,7 +146,8 @@ export async function archiveSession(
   if (typeof sessionId !== "string" || !sessionId) {
     return { ok: false, archived: [], note: `无效 sessionId（期望字符串，实得 ${typeof sessionId}）` };
   }
-  const runtime = agentRuntime({ runtime: opts.runtime });
+  // 原样交给会话来源（sourceFor 认不出的 id 回 Claude Code）：别经 agentRuntime 折成三家，注册表新加的运行时也要按自己的来源找文件
+  const runtime = opts.runtime || "claude-code";
   const located = await locateSource(runtime, cwd, sessionId, opts.srcPath);
   if ("error" in located) return { ok: false, archived: [], note: located.error };
   const { path: src, note: pickNote } = located;

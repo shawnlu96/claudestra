@@ -14,8 +14,10 @@ describe("pattern:runtime-literal", () => {
       `const b = "opencode" === agent.runtime;`,
       `const c = activeRuntime === "claude-code";`,
       `managedFor("pi", "acp");`,
+      "if (runtime === `opencode`) x();",
+      `switch (info.runtime) { case "pi": break; }`,
     ].join("\n");
-    expect(count("src/lib/foo.ts", src)).toBe(6);
+    expect(count("src/lib/foo.ts", src)).toBe(8);
   });
 
   test("runtimes/ 里、注释里、不是运行时的比较都不算", () => {
