@@ -34,14 +34,17 @@ import { createRoot } from "react-dom/client";
 import { SettingsPage } from "../../features/chat/components/settings/pages";
 import { SettingsNav, settingsPagesFor } from "../../features/chat/components/settings/nav";
 import { setLang } from "../../lib/i18n";
+import { CenteredModal } from "../../features/chat/components/centered-modal";
 if (location.hash === "#en") setLang("en");
 const modelOptions = [{ value: "claude-opus-5-5", label: "Opus 5.5" }, { value: "claude-sonnet-5-5", label: "Sonnet 5.5" }, { value: "claude-haiku-5-5", label: "Haiku 5.5" }];
 const defaults = { gModel: "claude-opus-5-5", setGModel() {}, gEffort: "high", setGEffort() {}, gLoaded: true, gMsg: "", saveGlobalDefault: async () => {} };
 function App() {
  const [page, setPage] = useState(${JSON.stringify(base ? "claude" : "card-models")});
- return <main className="p-3"><div className="mb-3 text-base font-semibold">${base ? "设置" : "设置"}</div>
- <div className="flex min-w-0 flex-col sm:flex-row"><SettingsNav page={page} pages={settingsPagesFor(true)} onSelect={setPage} />
- <div className="min-w-0 flex-1 space-y-3 p-3"><SettingsPage page={page} s={{ full:true, modelOptions, defaults }} /></div></div></main>;
+ return <CenteredModal onClose={() => {}} wide>
+ <div className="px-5 pb-2 pt-4 text-base font-semibold">设置</div>
+ <div className="flex min-h-0 flex-1 flex-col sm:flex-row"><SettingsNav page={page} pages={settingsPagesFor(true)} onSelect={setPage} />
+ <div data-testid="settings-content" className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-5 pb-5 pt-3">
+ <SettingsPage page={page} s={{ full:true, modelOptions, defaults }} /></div></div></CenteredModal>;
 }
 createRoot(document.getElementById("root")).render(<App />);
 `;
@@ -109,8 +112,32 @@ test.skipIf(!enabled)("1440 / 390：真实设置页前后截图，无手机横�
       expect(await cell(page, "code:reviewer:claude").innerText()).toContain("本页设置");
       expect(await page.getByTestId("card-model-switches").innerText()).toContain("只记录，不改启动参数");
     }
-    if (width === 390) expect(await page.evaluate<boolean>("document.documentElement.scrollWidth <= innerWidth")).toBe(true);
-    await page.screenshot({ path: resolve(out, `${base ? "before" : "after"}-settings-${width}x${width === 390 ? 844 : 900}.png`), fullPage: true });
+    expect(await page.evaluate<boolean>("document.documentElement.scrollWidth <= innerWidth")).toBe(true);
+    if (!base) {
+      const content = page.getByTestId("settings-content");
+      expect(await content.evaluate((el: any) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      expect(await content.locator("div").evaluateAll((els) => els.every((el: any) => el.scrollWidth <= el.clientWidth + 1))).toBe(true);
+      for (const tier of ["security", "code", "ui", "docs", "undeclared"]) {
+        const target = cell(page, `${tier}:author:codex`);
+        await target.scrollIntoViewIfNeeded();
+        expect(await target.evaluate((el: any) => {
+          const r = el.getBoundingClientRect(), box = el.closest('[data-testid="settings-content"]')!.getBoundingClientRect();
+          const panel = el.closest(".panel-pop")!.getBoundingClientRect();
+          return r.left >= box.left && r.right <= box.right && r.right <= panel.right && r.right <= el.ownerDocument.defaultView.innerWidth;
+        })).toBe(true);
+      }
+    }
+    for (const state of ["start", "code", "docs"]) {
+      const content = page.getByTestId("settings-content");
+      if (state === "start") await content.evaluate((el: any) => { el.scrollTop = 0; });
+      else if (base) await content.evaluate((el: any) => { el.scrollTop = el.scrollHeight; });
+      else await cell(page, `${state}:author:claude`).evaluate((el: any) => {
+        const content = el.closest('[data-testid="settings-content"]')!;
+        const table = el.closest("table")!;
+        content.scrollTop += table.getBoundingClientRect().top - content.getBoundingClientRect().top;
+      });
+      await page.screenshot({ path: resolve(out, `${base ? "before" : "after"}-settings-${state}-${width}x${width === 390 ? 844 : 900}.png`) });
+    }
     await page.close();
   }
 }, 30_000);
@@ -146,7 +173,7 @@ test.skipIf(!enabled || base)("全页一次批量保存；失败保留草稿；4
     const current = await view(); current.roles[0].codex = "max"; current.rev = 8;
     const { page } = await pageWith(390, data, () => conflict ? { status: 409, json: { current } } : { status: 400, json: { reason: "security 的作者不得低于 Opus" } });
     await select(page, "security:author:claude").selectOption("claude-haiku-5-5");
-    expect(await page.getByText("安全下限：Claude 至少 Opus；Codex 只能跟随原档。").count()).toBe(1);
+    expect(await cell(page, "security:author:claude").innerText()).toContain("安全下限：Claude 至少 Opus");
     await save(page).click();
     if (conflict) {
       await page.getByTestId("card-model-note").waitFor();
@@ -160,12 +187,13 @@ test.skipIf(!enabled || base)("全页一次批量保存；失败保留草稿；4
   }
 }, 30_000);
 
-test.skipIf(!enabled || base)("off 格置灰禁用；ultra 只显示现存值与警示，不提供选项", async () => {
+test.skipIf(!enabled || base)("off 格置灰可编辑；ultra 只显示现存值与警示，不提供选项", async () => {
   const { page } = await pageWith(390, await view("off", true));
-  expect(await select(page, "docs:author:claude").isDisabled()).toBe(true);
+  expect(await select(page, "docs:author:claude").isDisabled()).toBe(false);
   expect(await cell(page, "docs:author:claude").locator("..").getAttribute("class")).toContain("opacity-50");
-  expect(await select(page, "undeclared:reviewer:codex").isDisabled()).toBe(true);
+  expect(await select(page, "undeclared:reviewer:codex").isDisabled()).toBe(false);
   expect(await page.locator('select option[value="ultra"]').count()).toBe(0);
+  expect(await select(page, "undeclared:author:codex").locator('option[value="minimal"]').innerText()).toBe("最低");
   expect(await cell(page, "undeclared:reviewer:codex").innerText()).toContain("会自动派子 agent");
   await page.close();
 }, 30_000);
@@ -188,3 +216,28 @@ test.skipIf(!enabled || base)("坏配置提示、403 隐藏、加载失败；英
   expect(text).not.toMatch(/\p{Script=Han}/u); expect(text).not.toContain("adversarial-reviewer");
   await en.close();
 }, 30_000);
+
+
+test.skipIf(!enabled || base)("安全格编辑时展示下限，Codex 不提供保存时必拒的选项", async () => {
+  const { page } = await pageWith(1440, await view());
+  const claude = select(page, "security:author:claude");
+  await claude.selectOption("claude-haiku-5-5");
+  expect(await claude.getAttribute("aria-describedby")).toBeTruthy();
+  expect(await cell(page, "security:author:claude").innerText()).toContain("安全下限：Claude 至少 Opus");
+  const values = await select(page, "security:author:codex").locator("option").evaluateAll((els: any[]) => els.map((el) => el.value));
+  expect(values).toEqual(["default", "inherit"]);
+  await page.close();
+});
+
+test.skipIf(!enabled || base)("角色开关关闭仍能编辑类型继承使用的角色格；推理档本地化", async () => {
+  const data = await view(); data.switches.roleModel.mode = "off";
+  const { page, puts } = await pageWith(390, data, () => ({ status: 200, json: { ...data, rev: 3 } }));
+  await select(page, "undeclared:reviewer:codex").selectOption("xhigh");
+  expect(await cell(page, "undeclared:reviewer:codex").locator("option:checked").innerText()).toBe("超高");
+  await save(page).click(); await page.getByTestId("card-model-note").waitFor();
+  expect(puts).toEqual([{ rev: 2, changes: [{ role: "reviewer", codex: "xhigh" }] }]);
+  expect(await page.getByTestId("card-model-switches").innerText()).toContain("类型格的继承仍会读取角色格");
+  expect(await cell(page, "undeclared:reviewer:codex").locator("option:checked").innerText()).toBe("高");
+  expect(await cell(page, "undeclared:reviewer:codex").locator("[data-effective]").innerText()).toBe("高");
+  await page.close();
+});

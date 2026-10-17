@@ -15,6 +15,7 @@ function Switches({ view }: { view: RoleModelView }) {
     <span className="self-center text-base-content/60">{t("开关对应项目")} · {view.switches.project}</span>
     <span className="rounded-lg bg-base-100 px-3 py-2">{t("任务类型")} · {state(view.switches.taskTierModels.mode)}</span>
     <span className="rounded-lg bg-base-100 px-3 py-2">{t("角色格")} · {state(view.switches.roleModel.mode)}</span>
+    <p className="w-full text-base-content/60">{t("关闭或观察仅影响对应启动路径；类型格的继承仍会读取角色格。")}</p>
   </div>;
 }
 
@@ -29,7 +30,7 @@ function ModelTable({ view, tiers, models, draft, saving, change }: {
     const cell = view.effective[tier].find((row) => row.role === role)![family];
     return <td key={key} className={`min-w-0 border-t border-base-300 p-1.5 align-top ${off(tier) ? "bg-base-300/40 opacity-50" : ""}`}>
       <CardModelCell tier={tier} role={role} family={family} cell={cell} value={draft[key] ?? storedValue(view, tier, role, family)}
-        models={models} efforts={view.codexEfforts} disabled={saving || off(tier)} onChange={(value) => change(key, value)} />
+        models={models} efforts={view.codexEfforts} disabled={saving} onChange={(value) => change(key, value)} />
     </td>;
   };
   return <table className="w-full table-fixed border-collapse text-left" data-testid="card-model-table">
@@ -74,7 +75,7 @@ export function CardModelSettingsSection({ modelOptions }: { modelOptions: Claud
   const tiers = view ? [...view.taskTiers, "undeclared"] : [];
   const props = view ? { view, models: modelOptions, draft, saving, change: (key: string, value: string) => setDraft((d) => ({ ...d, [key]: value })) } : null;
   const cfg = view && configErrorText(view.config);
-  return <Section title={t("卡片模型")} desc={t("每格显示服务端解析值；观察或关闭时不会用于启动。")}
+  return <Section title={t("卡片模型")} desc={t("每格显示服务端解析值；开关状态见下方，关闭时仍可编辑。")}
     aside={<button className="btn btn-sm btn-primary" disabled={saving || !batch?.changes.length} onClick={() => void save()}>
       {saving && <span className="loading loading-spinner loading-xs" />}{t("保存")}</button>}>
     <div className="space-y-3" data-testid="card-model-settings" aria-busy={saving}>
@@ -83,9 +84,7 @@ export function CardModelSettingsSection({ modelOptions }: { modelOptions: Claud
       {cfg && <p className="text-xs text-warning" role="alert">{t(cfg)}</p>}
       {view && props && <>
         <Switches view={view} />
-        <p className="text-[11px] text-base-content/60">{t("安全下限：Claude 至少 Opus；Codex 只能跟随原档。")}</p>
-        <div className="hidden overflow-x-auto xl:block"><div className="min-w-[1000px]"><ModelTable {...props} tiers={tiers} /></div></div>
-        <div className="space-y-4 xl:hidden">{tiers.map((tier) => <div key={tier} className="rounded-lg bg-base-100 p-2">
+        <div className="space-y-4">{tiers.map((tier) => <div key={tier} className="rounded-lg bg-base-100 p-2">
           <ModelTable {...props} tiers={[tier]} />
         </div>)}</div>
       </>}
