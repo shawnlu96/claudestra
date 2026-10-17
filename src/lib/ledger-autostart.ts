@@ -12,6 +12,7 @@ import type { Database } from "bun:sqlite";
 import { claimDedup, claimOwnsCard, claimSettled, getClaim, settleDedup, type AutostartClaim } from "./ledger-autostart-grant.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { cardNames } from "./ledger-card-names.js";
+import { centerReplicaCardNames } from "./center-replica-autostart.js";
 import { getFeature, type Feature } from "./ledger-feature.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { getEventByDedup, getItem, getMeta, LedgerError } from "./ledger-store.js";
@@ -55,7 +56,7 @@ export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { cla
     const wipWhy = wipGateHold(db, f.project); // WIPGATE1：选候选后合并队列涨到阈值（on）也在写 claim 前拦，下一轮重判
     if (wipWhy) throw new LedgerError("conflict", wipWhy);
     const node = currentViews(db, f).find((n) => n.key === input.key);
-    const names = cardNames(db, f, input.key);
+    const names = centerReplicaCardNames(db, f, input.key) ?? cardNames(db, f, input.key); // CREPAUTO1: a replica node keeps its center claim's card id
     const version = input.template ? TEMPLATE_VERSION[input.template] : null;
     const data = {
       op: "autostart_claim", key: input.key, taskId: names.taskId, agent: names.agent, pm, branch: names.branch,

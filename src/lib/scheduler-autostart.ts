@@ -3,6 +3,7 @@ import { scanSpecHead } from "./spec-lint-head.js";
 import { activeProjectPm } from "./pm-role.js";
 export { switchOff } from "./shared-ledger-gate-switch.js";
 import { sharedLedgerPlanningReason } from "./shared-ledger-gate.js";
+import { centerClaimTaskId, centerRepairArm, centerReplicaFeatureOpen, centerReplicaNodeStop } from "./center-replica-autostart.js";
 /**
  * 自动开卡（i28-A1）的门：判定都是纯函数或只读台账。调度服务选候选、台账 claim 事务里重核、feature-show 列「卡在哪道门」用的是同一份，
  * 三处口径分不了叉。规格卡的文件门（落盘静置、卡首的开关行与模板行）只在调度侧看，claim 事务只重核台账里的门。
@@ -135,7 +136,7 @@ export interface ServiceFacts {
 }
 
 type GateCode =
-  | "service" | "switch" | "feature" | "proposal" | "frozen" | "node" | "lanes" | "claim" | "capacity" | "no_pm" | "spec" | "armed" | "quota" | "private";
+  | "service" | "switch" | "feature" | "proposal" | "frozen" | "node" | "lanes" | "claim" | "capacity" | "no_pm" | "spec" | "armed" | "quota" | "private" | "center";
 
 export interface GateStop { gate: GateCode; why: string }
 
@@ -143,7 +144,12 @@ const stop = (gate: GateCode, why: string): GateStop => ({ gate, why });
 
 /** feature 级的门（对它的所有节点一样）：服务、开关、状态、提案、冻结、PM、容量 */
 export function featureGate(db: Database, f: Feature, svc: ServiceFacts, key?: string, observe = false): GateStop | null {
-  const shared = sharedLedgerPlanningReason(f.id); if (shared) return stop("feature", shared);
+  const shared = sharedLedgerPlanningReason(f.id); if (shared && !centerReplicaFeatureOpen(f)) return stop("feature", shared);
+  return featureGateRest(db, f, svc, key, observe);
+}
+
+/** featureGate 去掉共享规划那一道：中心副本 observe 轮按「放行后会怎样」算本会开的节点（center-replica-autostart-run.ts） */
+export function featureGateRest(db: Database, f: Feature, svc: ServiceFacts, key?: string, observe = false): GateStop | null {
   if (!svc.autoDispatch || !svc.projects.includes(f.project)) return stop("service", `调度服务没对项目 ${f.project} 开自动派单（scheduler.json enabled + autoDispatch + 列出项目）`);
   const off = priorityNowSwitch(db, f, readSwitch(db, f.project), key, observe);
   if (off) return stop("switch", off);
@@ -223,7 +229,8 @@ export function activeFeatures(db: Database, project: string): Feature[] {
     .map(({ id }) => getFeature(db, id) as Feature);
 }
 
-export interface Candidate { f: Feature; key: string; taskId: string; head: SpecHead; arm: string; fileGlobs: string[] }
+/** specArm：arm 是中心副本断链补建 arm 时，规格本身的 arm（specMoved 拿它核对规格没变） */
+export interface Candidate { f: Feature; key: string; taskId: string; head: SpecHead; arm: string; fileGlobs: string[]; specArm?: string }
 
 /**
  * 一个节点能不能开（台账门之外再加文件门与 arm）：调度服务选候选和 feature-show 都用它。read 按卡号读正式路径下的规格卡（读不到为 null）。
@@ -234,7 +241,7 @@ export function nodeCandidate(db: Database, f: Feature, key: string, lanes: Lane
   const n = nodeGate(db, f, key, lanes, views);
   if (n) return n;
   const node = views.find((v) => v.key === key) as NodeView;
-  const { taskId } = cardNames(db, f, key, node);
+  const taskId = centerClaimTaskId(f.id, key) ?? cardNames(db, f, key, node).taskId;
   const spec = read(taskId);
   const g = specGate(spec, now);
   if ("why" in g) return stop("spec", g.why);
@@ -245,8 +252,10 @@ export function nodeCandidate(db: Database, f: Feature, key: string, lanes: Lane
   if (room) return room;
   const arm = armOf((spec as SpecFile).text, fileGlobs, templateLabel(g.head.template));
   const prior = getEventByDedup(db, claimDedup(f.id, key, arm));
-  if (prior) return stop("armed", `这份规格已经自动开过一次（claim ${prior.seq}）：同一份不重试，改了规格卡或节点范围才重新武装`);
-  return { f, key, taskId, head: g.head, arm, fileGlobs };
+  const again = prior ? centerRepairArm(db, f, key, taskId, arm, prior.seq) : null;
+  if (prior && !again) return stop("armed", `这份规格已经自动开过一次（claim ${prior.seq}）：同一份不重试，改了规格卡或节点范围才重新武装`);
+  const center = centerReplicaNodeStop(db, f, key, again ?? arm, now); if (center) return stop("center", center);
+  return { f, key, taskId, head: g.head, arm: again ?? arm, fileGlobs, ...(again ? { specArm: arm } : {}) };
 }
 
 const PRIVATE_MANUAL = "私仓节点由 PM 用私仓开卡流程手动开";
