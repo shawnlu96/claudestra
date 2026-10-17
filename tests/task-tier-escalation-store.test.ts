@@ -83,13 +83,22 @@ describe("[验收线 1] 计数与授予", () => {
 });
 
 describe("[验收线 2] 只升一次", () => {
-  test("同批两个条件同时满足只升一次，再有两次新失败才再升", () => {
+  test("同批两个条件同时满足只升一次（与批内顺序无关），消费本批证据，再有两次新失败才再升", () => {
+    for (const order of [["f1", "f2", "c1", "c2"], ["c1", "f1", "c2", "f2"], ["c1", "c2", "f1", "f2"]]) {
+      const { db } = store();
+      const r = ingestFacts(db, order.map((id) => fact(id, id[0] === "f" ? "fix" : "ci")), { now: 1 });
+      expect(r.grants).toMatchObject([{ n: 1, kind: "up", cause: "fix+ci", evidence: order }]);
+      expect(cardState(db, "p1", "T1")).toEqual({ fix: 0, ci: 0, steps: 1 });
+      expect(ingestFacts(db, [fact("f3", "fix")], { now: 2 }).grants).toEqual([]);
+      expect(ingestFacts(db, [fact("f4", "fix")], { now: 3 }).grants).toMatchObject([{ n: 2, cause: "fix", evidence: ["f3", "f4"] }]);
+      expect(cardState(db, "p1", "T1")?.steps).toBe(2);
+    }
+  });
+
+  test("一批里四次 fix 也只升一级", () => {
     const { db } = store();
-    const r = ingestFacts(db, [fact("c1", "ci"), fact("f1", "fix"), fact("c2", "ci"), fact("f2", "fix")], { now: 1 });
-    expect(r.grants.length).toBe(1);
-    expect(cardState(db, "p1", "T1")).toEqual({ fix: 1, ci: 0, steps: 1 });
-    expect(ingestFacts(db, [fact("f3", "fix")], { now: 2 }).grants.length).toBe(1);
-    expect(listGrants(db, "p1", "T1").map((g) => g.evidence)).toEqual([["c1", "f1", "c2"], ["f2", "f3"]]);
+    expect(ingestFacts(db, ["f1", "f2", "f3", "f4"].map((id) => fact(id, "fix")), { now: 1 }).grants.length).toBe(1);
+    expect(cardState(db, "p1", "T1")).toEqual({ fix: 0, ci: 0, steps: 1 });
   });
 
   test("重复进库、重开库重放：同一事实只算一次；别的卡互不影响", () => {
@@ -133,13 +142,14 @@ describe("[验收线 2] 只升一次", () => {
     expect(cardState(db, "p1", "T1")).toEqual({ fix: 0, ci: 0, steps: 0 });
   });
 
-  test("实际采用值只记一次；原因同键一条", () => {
+  test("实际采用值：没证实的可被后来的启动替换，证实等于发出值后不翻案；原因同键一条", () => {
     const { db } = store();
     settlePlan(db, { project: "p1", card: "T1", family: "codex", step: 1, value: "xhigh", rank: 4, top: false, baseRank: 3, now: 1 });
     const a = { project: "p1", card: "T1", family: "codex", step: 1, launchId: "L1", sessionId: "s1", actual: "unknown" };
     expect(recordAdoption(db, a)).toBe(true);
-    expect(recordAdoption(db, { ...a, launchId: "L2" })).toBe(false);
-    expect(latestPlan(db, "p1", "T1")).toMatchObject({ launchId: "L1", sessionId: "s1" });
+    expect(recordAdoption(db, { ...a, launchId: "L2", sessionId: "s2", actual: "xhigh" })).toBe(true);
+    expect(recordAdoption(db, { ...a, launchId: "L3", sessionId: "s3" })).toBe(false);
+    expect(latestPlan(db, "p1", "T1")).toMatchObject({ launchId: "L2", sessionId: "s2", actual: "xhigh" });
     expect(recordNote(db, "p1", "T1", "k", "原因", 1)).toBe(true);
     expect(recordNote(db, "p1", "T1", "k", "原因", 2)).toBe(false);
     expect(listNotes(db, "p1", "T1")).toEqual([{ key: "k", text: "原因" }]);

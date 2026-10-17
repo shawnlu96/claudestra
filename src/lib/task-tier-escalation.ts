@@ -6,7 +6,7 @@
  * 不碰当前会话：值经 TIER3 的作者启动覆盖扩展点（registerAuthorTierOverride）在下一次建作者会话时生效；那次启动绑上会话后
  * 核对启动事实（task-tier-launch-events.ts），实际值证实了才算「已升档」，旧档会话（升档前建的 / 没带新档的）不算。
  * 门控与 TIER3 共用 taskTierModels：off 什么都不做（不读不写，不消费新增证据，已有历史原样留着，重新 on 接着算）；
- * observe 只按本会授予的级记 would-use（库不变）；on 才进库授予并应用。接线（installTaskTierEscalation）由调用方装，本模块不改调度热点。
+ * observe 只按本会授予的级记 would-use（库不变）；on 才进库授予并应用。接线：card-role-definitions.ts 引入本模块即装上启动覆盖，建会话前调 escalateBeforeLaunch（observe 记 would-use），本模块不改调度热点。
  * tests/task-tier-escalation.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -41,6 +41,8 @@ function rankOf(family: Family, value: string | null): number {
 const topOf = (family: Family) => (family === "codex" ? CODEX_EFFORT_LEVELS.length : CLAUDE_LADDER.length) - 1;
 const valueAt = (family: Family, rank: number) => family === "codex" ? CODEX_EFFORT_LEVELS[rank] : CLAUDE_IDS[CLAUDE_LADDER[rank]];
 
+const CAUSE_TEXT: Record<Grant["cause"], string> = { fix: "退回 fix", ci: "CI 连红", "fix+ci": "退回 fix 与 CI 连红同时" };
+
 export type TickResult = { mode: "off" } | { mode: "observe" | "on"; added: number; grants: Grant[] };
 
 /**
@@ -64,7 +66,7 @@ function observe(ledger: Database, g: Grant, now: number): void {
   const digest = createHash("sha256").update(JSON.stringify(g.evidence)).digest("hex").slice(0, 16);
   try {
     recordObserved(ledgerWriter(ledger), { project: g.project, mechanism: "taskTierModels", target: g.card, actionKey: `task-tier-escalate:${g.n}:${digest}`,
-      action: `给 ${g.card} 下一轮作者${g.kind === "up" ? "升一级" : "升档（已在最高档，只记触顶）"}（${g.cause === "fix" ? "退回 fix" : "CI 连红"} 满 2 次）`,
+      action: `给 ${g.card} 下一轮作者${g.kind === "up" ? "升一级" : "升档（已在最高档，只记触顶）"}（${CAUSE_TEXT[g.cause]} 满 2 次）`,
       data: { n: g.n, kind: g.kind, cause: g.cause, evidence: g.evidence } }, now);
   } catch (e) { console.error(`[task-tier] 记 ${g.card} 的升档 would-use 失败：${(e as Error).message}`); }
 }
@@ -100,19 +102,25 @@ export function installTaskTierEscalation(): () => void {
   return () => registerAuthorTierOverride(null);
 }
 
-/** 最近一级发出的值有没有被一次绑上会话的作者启动用上：来源 override、值相同、在发出之后启动 */
-function adoptedLaunch(ledger: Database, project: string, card: string, plan: { family: string; value: string; ts: number }) {
-  return taskTierLaunchHistory(ledger, project, card).findLast((f) => f.status === "bound" && f.plan.role === "author" && f.plan.family === plan.family &&
-    f.plan.source === "override" && f.createdAt >= plan.ts && (f.plan.family === "claude" ? f.plan.final.model : f.plan.final.effort) === plan.value);
+type Launch = ReturnType<typeof taskTierLaunchHistory>[number];
+const planned = (f: Launch) => f.plan.family === "claude" ? f.plan.final.model : f.plan.final.effort;
+/** 运行时证实的实际值；没证实（unknown / 空）= null */
+const confirmed = (f: Launch) => f.actual.source === "unknown" ? null : (f.plan.family === "claude" ? f.actual.model : f.actual.effort) ?? null;
+
+/** 最近一级发出的值带进了哪些绑上会话的作者启动：来源 override、计划值相同、在发出之后启动（只是「带了新档 argv」，实际值另核） */
+function carriedLaunches(ledger: Database, project: string, card: string, plan: { family: string; value: string; ts: number }): Launch[] {
+  return taskTierLaunchHistory(ledger, project, card).filter((f) => f.status === "bound" && f.plan.role === "author" && f.plan.family === plan.family &&
+    f.plan.source === "override" && f.createdAt >= plan.ts && planned(f) === plan.value);
 }
 
+/** 记最近一次带新档的启动；已证实采用的那次不翻案，之前记的只是没证实 / 不符的，后来有证实的就换成它 */
 function reconcileAdoption(project: string, card: string, p: EscalationPort): void {
   const store = p.store(), plan = latestPlan(store, project, card);
-  if (!plan || plan.launchId) return;
-  const hit = adoptedLaunch(p.ledger(), project, card, plan);
-  if (!hit) return;
-  const actual = hit.actual.source === "unknown" ? "unknown" : String((plan.family === "claude" ? hit.actual.model : hit.actual.effort) ?? "unknown");
-  recordAdoption(store, { project, card, family: plan.family, step: plan.step, launchId: hit.plan.launchId, sessionId: hit.sessionId ?? "", actual });
+  if (!plan || plan.actual === plan.value) return;
+  const carried = carriedLaunches(p.ledger(), project, card, plan);
+  const hit = carried.findLast((f) => confirmed(f) === plan.value) ?? carried.at(-1);
+  if (!hit || hit.plan.launchId === plan.launchId) return;
+  recordAdoption(store, { project, card, family: plan.family, step: plan.step, launchId: hit.plan.launchId, sessionId: hit.sessionId ?? "", actual: confirmed(hit) ?? "unknown" });
 }
 
 /**
@@ -130,9 +138,25 @@ export function escalationStatus(project: string, card: string, p: EscalationPor
   return { steps, plan: brief, state, sessionId: plan.sessionId };
 }
 
-/** 这个作者会话能不能当作已升档的会话：卡升过级时，只有核实采用了最近一级值的那次启动建的会话才算；否则是旧档会话 */
+/**
+ * 这个作者会话能不能当作已升档的会话：卡升过级时，只有带了最近一级值启动、且运行时证实实际值就等于这一级值的会话才算；
+ * 升档前建的、没带新档的、实际是别的档（比如仍是低档）的、实际值 unknown 的，都是旧档会话。
+ */
 export function isStaleAuthorSession(project: string, card: string, sessionId: string, p: EscalationPort = port): boolean {
   const store = p.store(), plan = latestPlan(store, project, card);
   if (!plan) return false;
-  return adoptedLaunch(p.ledger(), project, card, plan)?.sessionId !== sessionId;
+  return !carriedLaunches(p.ledger(), project, card, plan).some((f) => f.sessionId === sessionId && confirmed(f) === plan.value);
 }
+
+/**
+ * 生产接线（card-role-definitions.ts 在每个 decideTierLaunch 调用点前调一次）：只管作者。off / on 立即返回（off 不开库、不记事件；
+ * on 由模块加载时装上的启动覆盖在 decideTierLaunch 问到时收事实并给值）；observe 下 decideTierLaunch 不问覆盖，这里收事实只记 would-use，
+ * 启动参数不变。重复调用无害：事实按身份去重，would-use 同一批证据一条。
+ */
+export function escalateBeforeLaunch(ctx: { project: string; card: string }, role: string): void {
+  if (role !== "author" || taskTierMode(ctx.project).mode !== "observe") return;
+  try { escalationTick(ctx.project, ctx.card); } catch (e) { console.error(`[task-tier] ${ctx.card} 的升档 observe 失败（建卡照旧）：${(e as Error).message}`); }
+}
+
+// 被 card-role-definitions.ts 引入即装上启动覆盖（只装一次，不在每次建会话时重装、不顶掉别处注册的覆盖）；off / observe 下核心不调它
+installTaskTierEscalation();

@@ -359,6 +359,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "sqlite-migrate.ts": "stmt=2",
     "state-file.ts": "fs=7",
     "sys-memory.ts": "proc=1",
+    "task-tier-escalation-store.ts": "sql=10 stmt=13 fs=1", // TIER3c: escalation store, written only from the author create wrapper (card-role-definitions) under the gated create
     "tmux-helper.ts": "stmt=3 proc=23 fs=1",
     "unmanaged-archive.ts": "fs=4",
     "update-inflight.ts": "proc=2 fs=2",

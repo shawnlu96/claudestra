@@ -7,7 +7,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyCardRole } from "../src/lib/card-role-definitions.js";
+import { testChildEnv } from "./test-env.js";
+import { applyCardRole, cardRoleCreate } from "../src/lib/card-role-definitions.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
@@ -20,7 +21,7 @@ import { authorEscalationOverride, escalationStatus, escalationTick, installTask
 import { cardState, closeEscalationStore, listNotes, openEscalationStore } from "../src/lib/task-tier-escalation-store.js";
 
 const cleanups: (() => void)[] = [];
-afterEach(() => { useTaskTierPort(); useRoleModelPort(); useEscalationPort(); registerAuthorTierOverride(null); for (const c of cleanups.splice(0)) c(); });
+afterEach(() => { useTaskTierPort(); useRoleModelPort(); useEscalationPort(); installTaskTierEscalation(); for (const c of cleanups.splice(0)) c(); });
 
 const table = (tiers?: Record<string, unknown>): RoleModelRead => {
   const t = defaultRoleModels();
@@ -109,7 +110,7 @@ describe("[验收线 2] 只升一次、触顶、不回降", () => {
 });
 
 describe("[验收线 3] 当前会话不动、证实才算升档", () => {
-  test("旧档会话不冒充；带新档启动但实际 unknown 只算 launched；实际值证实才 applied", () => {
+  test("旧档会话不冒充；带新档启动但实际 unknown 只算 launched、也不认作升档会话", () => {
     const t = setup();
     const old = decideTierLaunch(ctx(), "author", "claude", null, "a1");
     if (old.mode !== "on") throw new Error("on");
@@ -127,8 +128,32 @@ describe("[验收线 3] 当前会话不动、证实才算升档", () => {
     bindLaunchSession(t.db, { project: "p1", card: "T1", role: "author", agent: "a2", sessionId: "new" }, 6001);
     escalationTick("p1", "T1");
     expect(escalationStatus("p1", "T1")).toMatchObject({ state: "launched", sessionId: "new" });
-    expect(isStaleAuthorSession("p1", "T1", "new")).toBe(false);
+    expect(isStaleAuthorSession("p1", "T1", "new")).toBe(true); // 实际值没证实：不宣称已升档
     expect(isStaleAuthorSession("p1", "T1", "old")).toBe(true);
+  });
+
+  test("带新档 argv 启动但运行时证实仍是低档 Sonnet：mismatch，仍是旧档会话；之后证实 Opus 的会话才认", () => {
+    const t = setup();
+    installTaskTierEscalation();
+    t.fixReturn(); t.fixReturn();
+    const next = decideTierLaunch(ctx(), "author", "claude", null, "a2");
+    if (next.mode !== "on" || !("value" in next)) throw new Error("on");
+    expect(next.value).toBe("claude-opus-5-5");
+    recordLaunchAttempt(t.db, next.plan, 6000);
+    bindLaunchSession(t.db, { project: "p1", card: "T1", role: "author", agent: "a2", sessionId: "old-model",
+      actual: { model: "claude-sonnet-5-5", effort: null, source: "runtime" } as never }, 6001);
+    escalationTick("p1", "T1");
+    expect(escalationStatus("p1", "T1")).toMatchObject({ state: "mismatch", sessionId: "old-model" });
+    expect(isStaleAuthorSession("p1", "T1", "old-model")).toBe(true);
+    const again = decideTierLaunch(ctx(), "author", "claude", null, "a3");
+    if (again.mode !== "on") throw new Error("on");
+    recordLaunchAttempt(t.db, again.plan, 7000);
+    bindLaunchSession(t.db, { project: "p1", card: "T1", role: "author", agent: "a3", sessionId: "opus",
+      actual: { model: "claude-opus-5-5", effort: null, source: "runtime" } as never }, 7001);
+    escalationTick("p1", "T1");
+    expect(escalationStatus("p1", "T1")).toMatchObject({ state: "applied", sessionId: "opus" });
+    expect(isStaleAuthorSession("p1", "T1", "opus")).toBe(false);
+    expect(isStaleAuthorSession("p1", "T1", "old-model")).toBe(true);
   });
 
   test("运行时证实实际值 = 新档 → applied", () => {
@@ -142,6 +167,7 @@ describe("[验收线 3] 当前会话不动、证实才算升档", () => {
       actual: { model: "claude-opus-5-5", effort: null, source: "runtime" } as never }, 6001);
     escalationTick("p1", "T1");
     expect(escalationStatus("p1", "T1").state).toBe("applied");
+    expect(isStaleAuthorSession("p1", "T1", "new")).toBe(false);
   });
 
   test("基础档不可核实：记原因、不覆盖不猜；安全拒绝的退回不计", () => {
@@ -201,5 +227,75 @@ describe("[验收线 4] taskTierModels 门控", () => {
     expect(cardState(t.store(), "p1", "T1")).toBeNull();
     const notes = listEvents(t.db, { project: "p1", target: "T1" }).filter((e) => String(e.data.actionKey).startsWith("task-tier-escalate:"));
     expect(notes.length).toBe(1);
+  });
+});
+
+describe("[验收线 1、3、4] 经真实建作者入口（cardRoleCreate），不手动装覆盖", () => {
+  test("新进程只引入 card-role-definitions.ts（生产入口）：两次 fix 后建作者实际带 Opus", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tier3c-proc-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const lib = (m: string) => JSON.stringify(join(import.meta.dir, `../src/lib/${m}.ts`));
+    const code = `const { cardRoleCreate } = await import(${lib("card-role-definitions")});
+      const { openLedger } = await import(${lib("ledger-store")}); const { createTask } = await import(${lib("ledger-write")});
+      const { insertEvent } = await import(${lib("ledger-tx")}); const { useTaskTierPort } = await import(${lib("task-tier-models")});
+      const { useRoleModelPort } = await import(${lib("role-model-settings-local")}); const { defaultRoleModels } = await import(${lib("role-model-settings")});
+      const { useEscalationPort } = await import(${lib("task-tier-escalation")}); const { openEscalationStore } = await import(${lib("task-tier-escalation-store")});
+      const db = openLedger(${JSON.stringify(join(dir, "ledger.sqlite"))});
+      createTask(db, { actor: "owner" }, { id: "T1", project: "p1", title: "demo", kind: "code" });
+      const read = { status: "ok", table: defaultRoleModels() }, policy = () => ({ mode: "on", manualAfterMs: null, source: "config" });
+      useTaskTierPort({ policy, read: () => read }); useRoleModelPort({ policy, read: () => read, observe: () => undefined });
+      useEscalationPort({ store: () => openEscalationStore(${JSON.stringify(join(dir, "esc.sqlite"))}), ledger: () => db, read: () => read, now: () => 5000 });
+      for (const ts of [100, 101]) insertEvent(db, { actor: "owner", now: ts }, { project: "p1", target: "T1", kind: "stage", text: "", data: { from: "review", to: "fix" } }, false);
+      let seen; await cardRoleCreate(async (...a) => (seen = a, { ok: true }), { tier: { db, project: "p1", card: "T1", tier: "ui" } })(...${JSON.stringify(author())});
+      console.log(seen[seen.indexOf("--model") + 1]);`;
+    const kid = Bun.spawn([process.execPath, "-e", code], { env: testChildEnv(), stdout: "pipe", stderr: "pipe" });
+    expect(await kid.exited).toBe(0);
+    expect((await new Response(kid.stdout).text()).trim()).toBe("claude-opus-5-5");
+  });
+
+
+  const launch = async (t: ReturnType<typeof setup>, agent: string) => {
+    const seen: string[][] = [];
+    const create = async (...a: string[]) => (seen.push(a), { ok: true });
+    const argv = author(); argv[1] = agent;
+    expect(await cardRoleCreate(create, { tier: { ...ctx(), db: t.db } })(...argv)).toEqual({ ok: true });
+    return seen[0];
+  };
+  const modelOf = (a: string[]) => a[a.indexOf("--model") + 1];
+
+  test("on：两次 fix 后下一次建作者实际带 Opus（来源 override），绑会话证实后 applied", async () => {
+    const t = setup();
+    expect(modelOf(await launch(t, "a1"))).toBe("claude-sonnet-5-5");
+    bindLaunchSession(t.db, { project: "p1", card: "T1", role: "author", agent: "a1", sessionId: "s-old" }, 200);
+    t.fixReturn(); t.fixReturn();
+    expect(modelOf(await launch(t, "a2"))).toBe("claude-opus-5-5");
+    bindLaunchSession(t.db, { project: "p1", card: "T1", role: "author", agent: "a2", sessionId: "s-new",
+      actual: { model: "claude-opus-5-5", effort: null, source: "runtime" } as never }, 6001);
+    escalationTick("p1", "T1");
+    expect(escalationStatus("p1", "T1")).toMatchObject({ steps: 1, state: "applied", sessionId: "s-new" });
+    expect(isStaleAuthorSession("p1", "T1", "s-old")).toBe(true);
+    expect(isStaleAuthorSession("p1", "T1", "s-new")).toBe(false);
+  });
+
+  test("observe：启动参数与没有失败时逐字一致，只多一条升档 would-use，库不变", async () => {
+    const t = setup("observe");
+    const before = await launch(t, "a1");
+    t.fixReturn(); t.fixReturn();
+    const events = listEvents(t.db, { project: "p1" }).length;
+    expect(await launch(t, "a1")).toEqual(before);
+    expect(await launch(t, "a1")).toEqual(before);
+    const added = listEvents(t.db, { project: "p1" }).slice(events);
+    expect(added.map((e) => String(e.data.actionKey).split(":")[0])).toEqual(["task-tier-escalate"]);
+    expect(cardState(t.store(), "p1", "T1")).toBeNull();
+  });
+
+  test("off：建作者不开升档库、不记事件，参数与核心关闭基线逐字一致", async () => {
+    const t = setup("off");
+    const base = await launch(t, "a1");
+    t.fixReturn(); t.fixReturn();
+    const events = listEvents(t.db, { project: "p1" }).length;
+    expect(await launch(t, "a1")).toEqual(base);
+    expect(listEvents(t.db, { project: "p1" }).length).toBe(events);
+    expect(t.s.storeOpens).toBe(0);
   });
 });
