@@ -110,6 +110,7 @@ export const RECOVERY_KEYS = [
   "specObservationHours",
   "staleLeaseHandover",
   "staleReplacement",
+  "startDeliveryConfirm",
   "taskTierModels",
   "teamBody",
   "tmuxSockHeal",

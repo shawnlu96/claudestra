@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { auditNoticeText } from "../lib/ledger-audit.js";
 import { auditResult, readAuditFailureTargets, type AuditFailureKind, type AuditFailureTarget } from "../lib/ledger-audit-failure.js";
 import { ackRefArg, type StoredFinding } from "../lib/ledger-audit-store.js";
+import { executorIdleNote } from "../lib/ledger-audit-snapshot.js";
 import { openLedger } from "../lib/ledger-store.js";
 import { pmNoticeLevel } from "../lib/pm-notice-level.js";
 import { auditTodoPort, type AuditTodoPort } from "../lib/pm-todo-audit.js";
@@ -46,9 +47,27 @@ export interface LedgerAuditDeps {
   failureTargets?: () => AuditFailureTarget[];
   /** 单测注入：pmTodoPull 开关与 pm-todo 写口；不给 = 恢复策略 + 本机台账 */
   pmTodo?: AuditTodoPort;
+  /** 单测注入：executor_idle 补的两个时长 + 开工单投递状态（RESTATEGO1）；不给 = 本机台账 + 会话记录 */
+  idleNote?: (f: StoredFinding) => Promise<string | null>;
 }
 
 type Pending = StoredFinding & { fallback?: string };
+
+/** RESTATEGO1：executor_idle 推送前接上 executorIdleNote；读不到 / 恢复键 off = 原文（推送与 ack 用的 key 不变） */
+async function withIdleNotes(d: LedgerAuditDeps, list: Pending[]): Promise<Pending[]> {
+  if (!list.some((f) => f.rule === "executor_idle")) return list;
+  const opened: { db?: ReturnType<typeof openLedger> } = {};
+  const note = d.idleNote ?? ((f: StoredFinding) => executorIdleNote(opened.db ??= openLedger(), f, Date.now()));
+  try {
+    return await Promise.all(list.map(async (f) => {
+      if (f.rule !== "executor_idle") return f;
+      const extra = await note(f).catch((e) => { console.error(`⚠️ 台账巡检：${f.taskId} 空闲时长没补上，原文照推：${(e as Error).message}`); return null; });
+      return extra ? { ...f, detail: `${f.detail}（${extra}）` } : f;
+    }));
+  } finally {
+    opened.db?.close();
+  }
+}
 type Sent = AuditNoticeReceipt;
 /** 调度助理连着这么多轮推不出去（不在线 / 投递失败），审查类的就改推 PM */
 const FALLBACK_AFTER = 2;
@@ -161,7 +180,7 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
       for (const to of [...misses.keys()]) if (online(d, to)) misses.delete(to); // 调度助理回来了：审查类的推回给它
       const byTo = new Map<string, Pending[]>();
       const add = (f: Pending) => byTo.set(recipientOf(f), [...(byTo.get(recipientOf(f)) ?? []), f]);
-      const pending = ((r.pending ?? []) as Pending[]).filter((f) => f.notify);
+      const pending = await withIdleNotes(d, ((r.pending ?? []) as Pending[]).filter((f) => f.notify));
       const pms = pending.length ? pmsOf() : new Map<string, string>(), modes = new Map<string, string>();
       const pulled: Pending[] = [], watched: Pending[] = [];
       for (const f of pending) {
