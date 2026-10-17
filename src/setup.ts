@@ -7,7 +7,7 @@
  * 依赖检查、Web 前端、手机访问（中继 / Tailscale / 局域网 / 自己的域名）、可选的 Discord bot 都在这里，
  * 每一步点哪里、复制什么、会改到机器上的哪些地方，向导都会先说。
  */
-
+import "./lib/floka-install-config/fresh-root-preload.js"; // 必须是第一个 import：全新机器（只有 ~/.floka）在加载 paths.ts 之前选好状态根（FRESHENTRY1）
 import { DEFAULT_BRIDGE_PORT } from "./lib/bridge-url.js";
 import { readFile, writeFile, access, chmod, mkdir } from "fs/promises";
 import { constants, readSync, openSync } from "fs";
