@@ -33,11 +33,11 @@ beforeEach(() => {
   notices = [];
   openInsertBook(null);
   configureSteerInsert({ now: () => clock });
-  wireInsertNotices({ hold, stoppedAt: () => stopAt, dropRequest: (t, c, id) => calls.dropRequest(t, c, id) });
+  wireInsertNotices({ hold, stoppedAt: () => stopAt, dropRequest: (t, c, id) => calls.dropRequest(t, c, id), invalidate: (t, id) => calls.invalidateInsert(t, id) });
 });
 afterAll(() => {
   openInsertBook(null);
-  configureSteerInsert({ now: () => Date.now(), stoppedAt: () => undefined, removed: () => {} });
+  configureSteerInsert({ now: () => Date.now(), stoppedAt: () => undefined, removed: () => {}, invalid: () => false });
 });
 
 describe("逐条插队催答", () => {

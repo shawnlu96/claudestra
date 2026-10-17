@@ -66,12 +66,12 @@ function world() {
 
 afterAll(() => {
   openInsertBook(null);
-  configureSteerInsert({ now: () => Date.now() });
+  configureSteerInsert({ now: () => Date.now(), invalid: () => false });
   configureInboundRoute({ readMode: () => "off", now: () => Date.now() });
 });
 beforeEach(() => {
   clock += 3 * 86_400_000;
-  configureSteerInsert({ now: () => clock });
+  configureSteerInsert({ now: () => clock, invalid: () => true }); // 这些纯账本例没有独立回程；集成坏回程见 steer-insert-corrupt.test.ts
   openInsertBook(null);
 });
 

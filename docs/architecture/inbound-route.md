@@ -48,7 +48,7 @@ bridge 这一侧 `ws.send` 回 0（连接已断、这条被丢了）就退回押
 
 **独立催答**（`bridge/steer-insert-notices.ts`）：目标正常 Stop 时，对 Stop 到达前已经插入且尚未确认的每条请求，补一次含发送方名字、原文摘要的提醒，请它明确回给发送方。提醒逐条落盘，不因回复别人而清除，也不在后续 Stop 反复催；StopFailure / API 错误不催。若插队后 owner 叫停过目标，只告知请求方「目标被 owner 叫停，你的插话可能没被处理，需要的话请重发」，不唤醒目标，释放对应回程。离线通知和提醒进入押后队列，主动安排补投，重连后再投。提醒投递前再核确认账；若排队期间已明确答复、叫停、作废或过期，旧提醒作废，不再唤醒目标。
 
-确认账每次读取和每分钟扫描都清理过期项，不依赖同一目标再次写入。满 24 小时先释放该条回程，再清确认账并通知请求方「对方 24 小时没明确回复」，不能将过期槽留给 drain 错推。逐条校验 `from` / `to` / `env` / `meta` / `at`，坏记录丢弃并记日志，不丢同文件的好记录。全局最多 1000 条，超量清最老的，释放回程并通知请求方。目标 kill 时整本销。
+确认账每次读取和每分钟扫描都清理过期项，不依赖同一目标再次写入。满 24 小时先释放该条回程，再清确认账并通知请求方「对方 24 小时没明确回复」，不能将过期槽留给 drain 错推。逐条校验 `from` / `to` / `env` / `meta` / `at`，坏记录删除前，按可信外层 target / message_id 在独立回程簿精确撤销对应请求，并从回程簿认发送方、告知确认记录损坏；不借坏 env.from 认人。旧回程缺 message_id 或整目标账损坏、无法精确对应时，回程持久化隔离，继续按「未看到」处理，不被隐式答复、精确视图或 TTL 扫描认领；告知请求方需要重发。好条目、同槽其他已识别请求和其他目标保留。回程处理器不可用或撤销/隔离落盘失败时，保留坏确认记录并临时隔离该目标，避免丢保护。全局最多 1000 条，超量清最老的，释放回程并通知请求方。目标 kill 时整本销。
 
 押后队列中带 `insert` 的旧信封每次重投都会重核目标运行时；已换成 CC、Codex tmux 或查不到运行时，改成 `queue` 并记 `pick: insert / actual: queue / insertVia: none`，不沿用旧 steer 结论。
 
@@ -127,4 +127,4 @@ Jev 判过排队 / 合并的 owner 消息只在**第一次到达**时算 owner �
 
 ## 测试
 
-`tests/inbound-route.test.ts`（纯逻辑）、`tests/inbound-route-runtime.test.ts`（开关 / 回落 / observe / Chat Guard 合并）、`tests/inbound-route-three.test.ts`（三处一致、merge 回复归属）、`tests/inbound-route-replay.test.ts`（旧三选项 agent 例明确跳过、不计四选项覆盖；新增 2 个 CC 判 insert → queue 回放，夹具 `tests/fixtures/inbound-route/cases.json`，重录方法见夹具的 `about`；JRT-3 的 6 例 agent→agent 真 Jev 判对 6/6：插队 0.86–0.94、排队 0.98–0.99）、`tests/inbound-route-insert.test.ts`（insert 判定与权限兜底、三种运行时、observe / off、送出失败退回）、`tests/steer-insert.test.ts`（确认账：回 owner / 之后回合的 drain 不误认答复、别的 agent 开的回合照常、明确回复才销账、落盘 / 24 小时 / kill）、`tests/steer-insert-notices.test.ts`（逐条提醒 / owner 叫停 / 过期释放 / 坏账校验 / 上限 / 回复帧边界）、`tests/steer-cc-probe.test.ts`（CC 实测记录的判定）。
+`tests/inbound-route.test.ts`（纯逻辑）、`tests/inbound-route-runtime.test.ts`（开关 / 回落 / observe / Chat Guard 合并）、`tests/inbound-route-three.test.ts`（三处一致、merge 回复归属）、`tests/inbound-route-replay.test.ts`（旧三选项 agent 例明确跳过、不计四选项覆盖；新增 2 个 CC 判 insert → queue 回放，夹具 `tests/fixtures/inbound-route/cases.json`，重录方法见夹具的 `about`；JRT-3 的 6 例 agent→agent 真 Jev 判对 6/6：插队 0.86–0.94、排队 0.98–0.99）、`tests/inbound-route-insert.test.ts`（insert 判定与权限兜底、三种运行时、observe / off、送出失败退回）、`tests/steer-insert.test.ts`（确认账：回 owner / 之后回合的 drain 不误认答复、别的 agent 开的回合照常、明确回复才销账、落盘 / 24 小时 / kill）、`tests/steer-insert-corrupt.test.ts`（坏确认账与独立落盘回程簿、实际 Stop、重启/无 id 隔离/写失败/旧快照）、`tests/steer-insert-notices.test.ts`（逐条提醒 / owner 叫停 / 过期释放 / 坏账校验 / 上限 / 回复帧边界）、`tests/steer-cc-probe.test.ts`（CC 实测记录的判定）。

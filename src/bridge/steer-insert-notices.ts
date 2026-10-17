@@ -1,11 +1,13 @@
 /** 插队自己的催答不借频道级看门狗：回给别人不清账，owner 叫停后只告知请求方，不唤醒已停的目标。 */
 import { configureSteerInsert, insertSnapshot, sweepInserts, takeInsertReminders } from "./steer-insert.js";
 import { newMessageId, newThreadId, type Envelope, type LocalEndpoint } from "./router.js";
+import type { AgentCallBook } from "./agent-calls.js";
 
 interface Deps {
   /** 押后队列落盘；不在线也保留通知，重连后再投。 */
   hold(env: Envelope): void;
   dropRequest(target: string, caller: string, id: string): void;
+  invalidate?: AgentCallBook["invalidateInsert"];
   stoppedAt(target: string): number | undefined;
   flush?(target: string): Promise<void>;
 }
@@ -31,7 +33,15 @@ export function wireInsertNotices(d: Deps): void {
       setTimeout(() => void d.flush!(target).catch((e: Error) => console.error(`⚠️ 插队通知补投失败（留在押后队列）: ${e.message}`)), 2_000).unref?.();
     }
   };
-  configureSteerInsert({ stoppedAt: d.stoppedAt, removed: (target, id, e, why) => {
+  configureSteerInsert({ stoppedAt: d.stoppedAt, invalid: (target, id) => {
+    if (!d.invalidate) return false;
+    for (const { call, quarantined } of d.invalidate(target, id)) {
+      const to: LocalEndpoint = { kind: "local", channelId: call.callerChannelId, agentName: call.callerName, ws: undefined as never };
+      const ending = quarantined ? "无法精确对应请求，回程已隔离，不会用其他回合的收尾答复；需要的话请重发。" : "该条回程已撤销，需要的话请重发。";
+      holdNotice(notification(to, `[ℹ️ bridge] 发给 ${call.targetName} 的插队确认记录损坏，${ending}`, call.requests?.[0]?.messageId));
+    }
+    return true;
+  }, removed: (target, id, e, why) => {
     const t = e.env.to as LocalEndpoint;
     const ending = why === "stopped" ? "目标被 owner 叫停，你的插话可能没被处理，需要的话请重发。"
       : why === "expired" ? "对方 24 小时没明确回复，需要的话请重发。" : "确认账已达上限，无法继续等待明确回复，需要的话请重发。";

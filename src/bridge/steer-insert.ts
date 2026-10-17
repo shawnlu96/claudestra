@@ -8,16 +8,19 @@ import { PersistedMap } from "./persisted-map.js";
 import type { Envelope, LocalEndpoint } from "./router.js";
 
 interface InsertEntry { env: Envelope & { from: LocalEndpoint }; at: number; reminded?: boolean }
-type Book = Record<string, InsertEntry>;
+type Book = Record<string, unknown>;
 type Removed = "expired" | "overflow" | "stopped";
 export const INSERT_LIMIT = 1_000;
 let now = (): number => Date.now();
 let onRemoved = (_target: string, _id: string, _e: InsertEntry, _why: Removed): void => {};
 let stoppedAt = (_target: string): number | undefined => undefined;
-export function configureSteerInsert(d: { now?: () => number; removed?: typeof onRemoved; stoppedAt?: typeof stoppedAt }): void {
+let onInvalid = (_target: string, _id?: string): boolean => false;
+let blockedTargets = new Set<string>();
+export function configureSteerInsert(d: { now?: () => number; removed?: typeof onRemoved; stoppedAt?: typeof stoppedAt; invalid?: typeof onInvalid }): void {
   if (d.now) now = d.now;
   if (d.removed) onRemoved = d.removed;
   if (d.stoppedAt) stoppedAt = d.stoppedAt;
+  if (d.invalid) onInvalid = d.invalid;
 }
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown): v is string => typeof v === "string" && !!v;
@@ -35,22 +38,45 @@ function valid(v: unknown, id: string, target: string): v is InsertEntry {
 }
 // 外层只验 JSON 表，内部坏条目逐条删，不能因一条损坏丢掉同文件其他请求。
 let book = new PersistedMap<Book>(statePath("insert-pending.json"), "插队待确认", () => true);
-export const openInsertBook = (path: string | null): void => void (book = new PersistedMap<Book>(path, "插队待确认", () => true));
-function put(target: string, entries: [string, InsertEntry][]): void {
+export function openInsertBook(path: string | null): void {
+  book = new PersistedMap<Book>(path, "插队待确认", () => true);
+  blockedTargets.clear();
+}
+function put(target: string, entries: [string, unknown][]): void {
   if (entries.length) book.set(target, Object.fromEntries(entries));
   else book.delete(target);
+}
+function clearInvalid(target: string, id?: string): boolean {
+  console.warn(`⚠️ 插队确认账损坏 ${target}/${id ?? "(整本)"}，先撤销或隔离回程`);
+  try { return onInvalid(target, id); }
+  catch (e) {
+    console.error(`⚠️ 损坏插队的回程处理失败，保留坏账并隔离目标 ${target}:`, e);
+    return false;
+  }
 }
 /** 每次读取及分钟扫描都跑：先释放回程槽再移除保护，不留一个可被 drain 错推的窗口。 */
 export function sweepInserts(): void {
   const all: { target: string; id: string; e: InsertEntry }[] = [];
   const changed = new Set<string>();
+  const retained = new Map<string, [string, unknown][]>(), blocked = new Set<string>();
   for (const [target, raw] of book) {
-    if (!object(raw)) { changed.add(target); console.warn(`⚠️ 插队确认账丢弃坏目标 ${target}`); continue; }
+    if (!object(raw)) {
+      if (clearInvalid(target)) changed.add(target);
+      else blocked.add(target);
+      continue;
+    }
     for (const [id, e] of Object.entries(raw)) {
-      if (!valid(e, id, target)) { changed.add(target); console.warn(`⚠️ 插队确认账丢弃坏条目 ${target}/${id}`); }
+      if (!valid(e, id, target)) {
+        if (clearInvalid(target, id || undefined)) changed.add(target);
+        else {
+          blocked.add(target);
+          retained.set(target, [...(retained.get(target) ?? []), [id, e]]);
+        }
+      }
       else all.push({ target, id, e });
     }
   }
+  blockedTargets = blocked;
   const stopped = (x: { target: string; e: InsertEntry }) => (stoppedAt(x.target) ?? -Infinity) >= x.e.at;
   const live = all.filter((x) => !stopped(x) && now() - x.e.at < HELD_GIVE_UP_MS).sort((a, b) => b.e.at - a.e.at);
   const keep = new Set(live.slice(0, INSERT_LIMIT));
@@ -61,18 +87,26 @@ export function sweepInserts(): void {
   if (!changed.size) return;
   const sets: [string, Book][] = [], deletes: string[] = [];
   for (const target of changed) {
-    const entries = [...keep].filter((x) => x.target === target).map((x) => [x.id, x.e]);
+    const entries = [...(retained.get(target) ?? []), ...[...keep].filter((x) => x.target === target).map((x) => [x.id, x.e])];
     if (entries.length) sets.push([target, Object.fromEntries(entries)]);
     else deletes.push(target);
   }
   book.update(sets, deletes);
 }
-const entries = (target: string): [string, InsertEntry][] => (sweepInserts(), Object.entries(book.get(target) ?? {}));
+function entries(target: string): [string, InsertEntry][] {
+  sweepInserts();
+  const raw = book.get(target);
+  return object(raw) ? Object.entries(raw).filter((pair): pair is [string, InsertEntry] => valid(pair[1], pair[0], target)) : [];
+}
+/** 无可信回程处理器或处理失败：保留坏记录，整目标按未看到处理，不能猜着推 owner 的 drain。 */
+export const insertTargetQuarantined = (target: string): boolean => (sweepInserts(), blockedTargets.has(target));
 /** 仅真正插队送达的请求记账；重投同 id 不重置提醒或失效钟。 */
 export function noteInsert(env: Envelope, target: string): void {
   if (env.meta.inboundRoute?.action !== "insert" || env.from.kind !== "local" || env.intent !== "request" || env.meta.skipInterAgentWatchdog) return;
   const old = entries(target);
-  if (!old.some(([id]) => id === env.meta.messageId)) put(target, [...old, [env.meta.messageId, { env: env as InsertEntry["env"], at: now() }]]);
+  const raw = book.get(target);
+  const previous: [string, unknown][] = object(raw) ? Object.entries(raw) : raw === undefined ? [] : [["", raw]];
+  if (!old.some(([id]) => id === env.meta.messageId)) put(target, [...previous, [env.meta.messageId, { env: env as InsertEntry["env"], at: now() }]]);
   sweepInserts();
 }
 /** 只在明确回给 caller 时忽略它自己的插队保护，投递失败时保护仍在。 */
@@ -87,8 +121,9 @@ export const insertSnapshot = (target: string): Set<string> => new Set(entries(t
 export function settleInsertReply(target: string, ids: readonly string[]): void {
   if (!ids.length) return;
   // Pi 的迟到作废回执已有专用回显：先按 id 销掉，不能先过期/叫停扫描再重复告知一次。
-  const old = Object.entries(book.get(target) ?? {});
-  const keep = old.filter(([id]) => !ids.includes(id));
+  const raw = book.get(target);
+  const old = object(raw) ? Object.entries(raw) : [];
+  const keep = old.filter(([id, e]) => !ids.includes(id) || (!valid(e, id, target) && !clearInvalid(target, id || undefined)));
   if (old.length !== keep.length) put(target, keep);
   sweepInserts();
 }
@@ -96,7 +131,10 @@ export function settleInsertReply(target: string, ids: readonly string[]): void 
 export function takeInsertReminders(target: string, snapshot: ReadonlySet<string>): InsertEntry[] {
   const old = entries(target);
   const picked = old.filter(([id, e]) => snapshot.has(id) && !e.reminded);
-  if (picked.length) put(target, old.map(([id, e]) => [id, snapshot.has(id) ? { ...e, reminded: true } : e]));
+  if (picked.length) {
+    const updates = new Map(picked.map(([id, e]) => [id, { ...e, reminded: true }]));
+    put(target, Object.entries(book.get(target)!).map(([id, e]) => [id, updates.get(id) ?? e]));
+  }
   return picked.map(([, e]) => e);
 }
 export const dropInserts = (target: string): void => void book.delete(target);

@@ -469,10 +469,12 @@ const heldFromOf = (target: string, exceptCaller?: string, at = Infinity) =>
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
-const stillHeldFor = (target: string) => (r: { messageId?: string; callerChannelId: string }) => requestStillHeld(r, heldFromOf(target));
+const stillHeldFor = (target: string) => (r: { messageId?: string; callerChannelId: string }) =>
+  insertTargetQuarantined(target) || requestStillHeld(r, heldFromOf(target));
 const answerablePac = (target: string): PendingAgentCall | undefined => answerableUnmixed(pendingAgentCalls, target, stillHeldFor(target)); // 混了几个请求方的一轮不认
 /** target 明确答给 caller(回发 send_to_agent / reply 到 caller 的频道):精确取那一槽,请求还押着的不算 */
 const exactPac = (target: string, caller: string, at: number) => {
+  if (insertTargetQuarantined(target)) return undefined;
   const unseen = heldFromOf(target, caller, at);
   return pendingAgentCalls.exact(target, caller, (r) => requestStillHeld(r, unseen));
 };
@@ -520,7 +522,7 @@ const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
 wireInsertNotices({ hold: (e) => void heldLocalMsgs.holdEnv(e), dropRequest: (t, c, id) => pendingAgentCalls.dropRequest(t, c, id),
-  stoppedAt: (c) => turnCuts.stoppedAt(c), flush: (c) => flushHeldLocalMsgs(c, "insert-notice") });
+  stoppedAt: (c) => turnCuts.stoppedAt(c), flush: (c) => flushHeldLocalMsgs(c, "insert-notice"), invalidate: (t, id) => pendingAgentCalls.invalidateInsert(t, id) });
 
 // v2.21.2+ 压缩上下文结束(jsonl compact_boundary 主路 / pane 兜底)→ 放行压缩期间
 // 押后的消息。人类消息押的理由只是「别掐压缩」,结束就该到;1.5s 让 CC 收尾。
@@ -590,7 +592,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait } from "./lib/turn-state.js"; import { afterInsertSend, configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
-import { dropInserts, insertIdsFrom, insertSnapshot, insertUnseenFrom, settleInsertReply, sweepInserts } from "./bridge/steer-insert.js";
+import { dropInserts, insertIdsFrom, insertSnapshot, insertTargetQuarantined, insertUnseenFrom, settleInsertReply, sweepInserts } from "./bridge/steer-insert.js";
 import { insertNoticeWanted, settleInsertStop, wireInsertNotices } from "./bridge/steer-insert-notices.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
