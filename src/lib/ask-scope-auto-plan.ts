@@ -1,4 +1,4 @@
-import { ASK_SCOPE_REGISTRY, scopeProtected, scopeWireProtected, type ScopeGrant } from "./ask-scope-registry.js";
+import { ASK_SCOPE_REGISTRY, scopeProtected, scopeRegistryVariant, scopeWireProtected, type ScopeGrant } from "./ask-scope-registry.js";
 
 export interface ScopeContext {
   globs: string[];
@@ -30,7 +30,7 @@ export function planScope(q: ScopeQuestion, ctx: ScopeContext): ScopeGrant[] | n
   const sources = [...new Set(text.match(/src\/[\w./-]+\.ts\b/g) ?? [])].filter((p) => scopePath(p) && scopeMatches(p, ctx.globs));
   const grants: ScopeGrant[] = [];
   for (const path of q.files) {
-    if (!scopePath(path) || scopeProtected(path)) return null;
+    if (!scopePath(path) || scopeProtected(path) || scopeRegistryVariant(path)) return null;
     const entry = ASK_SCOPE_REGISTRY.find((r) => r.path === path);
     if (entry) {
       if (!registryShape(entry.kind, text)) return null;
