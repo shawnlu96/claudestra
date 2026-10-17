@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { ApiError } from "@/lib/api/client";
 import { quota, quotaCodexReset, quotaRetry } from "@/lib/api/system";
+import { reloadQuotaLines, reloadQuotaWall } from "../quota/quota-lines-store";
 import { resetOutcome, type ResetOutcome } from "./quota-reset";
 import { quotaPanelData, type QuotaPanelData } from "./quota-view";
 
@@ -38,7 +39,13 @@ export function useSubscriptionQuota(open: boolean) {
     quotaCodexReset<unknown>(key)
       .then((j) => resetOutcome(200, j))
       .catch((e) => (e instanceof ApiError ? resetOutcome(e.status, e.body) : resetOutcome(0, null)))
-      .then(setResetResult)
+      .then((result) => {
+        if (result.tone === "success") {
+          reloadQuotaLines();
+          reloadQuotaWall();
+        }
+        setResetResult(result);
+      })
       .finally(() => {
         setResetRunning(false);
         void load();

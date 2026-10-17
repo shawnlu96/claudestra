@@ -12,6 +12,7 @@
  * 响应里只有白名单 DTO（百分比、重置时刻、次数、HMAC 过的键）与固定错误码，没有凭据、邮箱、原始账户 id。
  */
 import { canAdministerPairing, canSeeQuota, OWNER_PRINCIPAL_ID } from "../../lib/devices.js";
+import { refreshQuotaFactsAfterReset } from "../../lib/lend-quota-line-facts.js";
 import type { Principal } from "../../lib/principals.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "../api-respond.js";
 import type { QuotaService } from "../quota-service.js";
@@ -23,38 +24,42 @@ const unavailable = () => apiJson(503, { ok: false, error: "quota service not ru
 /** 用重置卡不可逆：与网页确认团队变更（bridge/team-confirm.ts canConfirmTeam）同一道门——owner 本人、全权、设备凭据 */
 const canSpendQuota = (p: Principal): boolean => canAdministerPairing(p) && p.id === OWNER_PRINCIPAL_ID;
 
-export async function handleQuotaApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
-  if (!PATHS.has(path)) return null;
-  if (!canSeeQuota(principal)) return forbidden("subscription quota requires a full-scope owner credential");
-  if (path.startsWith("/quota/wall")) return handleWall(req, path);
-  if (path === CONSUME_PATH && !canSpendQuota(principal)) return forbidden("using a reset credit requires the owner's own device credential");
-  const svc = (await import("../quota-service.js")).quotaService();
-  if (!svc) return unavailable();
-  if (path === CONSUME_PATH) return consume(req, svc);
-  if (path === "/quota") {
-    if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
-    return apiJson(200, { ok: true, ...(await svc.snapshot()) });
-  }
-  if (path === "/quota/retry") {
-    if (req.method !== "POST") return apiJson(405, { ok: false, error: "method not allowed" });
+export function makeQuotaApi(refreshAfterReset: () => Promise<unknown> = refreshQuotaFactsAfterReset) {
+  return async (req: Request, path: string, principal: Principal): Promise<Response | null> => {
+    if (!PATHS.has(path)) return null;
+    if (!canSeeQuota(principal)) return forbidden("subscription quota requires a full-scope owner credential");
+    if (path.startsWith("/quota/wall")) return handleWall(req, path);
+    if (path === CONSUME_PATH && !canSpendQuota(principal)) return forbidden("using a reset credit requires the owner's own device credential");
+    const svc = (await import("../quota-service.js")).quotaService();
+    if (!svc) return unavailable();
+    if (path === CONSUME_PATH) return consume(req, svc, refreshAfterReset);
+    if (path === "/quota") {
+      if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
+      return apiJson(200, { ok: true, ...(await svc.snapshot()) });
+    }
+    if (path === "/quota/retry") {
+      if (req.method !== "POST") return apiJson(405, { ok: false, error: "method not allowed" });
+      const body = await readJsonBody(req);
+      if (body === INVALID_JSON) return invalidJsonBody();
+      const p = (body as { provider?: unknown } | null)?.provider;
+      if (p !== "claude" && p !== "codex") return apiJson(400, { ok: false, error: 'provider must be "claude" or "codex"' });
+      return apiJson(200, { ok: true, result: await svc.retry(p) });
+    }
+    if (req.method === "GET") return apiJson(200, { ok: true, enabled: svc.isEnabled() });
+    if (req.method !== "PUT") return apiJson(405, { ok: false, error: "method not allowed" });
     const body = await readJsonBody(req);
     if (body === INVALID_JSON) return invalidJsonBody();
-    const p = (body as { provider?: unknown } | null)?.provider;
-    if (p !== "claude" && p !== "codex") return apiJson(400, { ok: false, error: 'provider must be "claude" or "codex"' });
-    return apiJson(200, { ok: true, result: await svc.retry(p) });
-  }
-  if (req.method === "GET") return apiJson(200, { ok: true, enabled: svc.isEnabled() });
-  if (req.method !== "PUT") return apiJson(405, { ok: false, error: "method not allowed" });
-  const body = await readJsonBody(req);
-  if (body === INVALID_JSON) return invalidJsonBody();
-  const enabled = (body as { enabled?: unknown } | null)?.enabled;
-  if (typeof enabled !== "boolean") return apiJson(400, { ok: false, error: "enabled must be a boolean" });
-  await svc.setEnabled(enabled);
-  return apiJson(200, { ok: true, enabled: svc.isEnabled() });
+    const enabled = (body as { enabled?: unknown } | null)?.enabled;
+    if (typeof enabled !== "boolean") return apiJson(400, { ok: false, error: "enabled must be a boolean" });
+    await svc.setEnabled(enabled);
+    return apiJson(200, { ok: true, enabled: svc.isEnabled() });
+  };
 }
 
+export const handleQuotaApi = makeQuotaApi();
+
 /** creditKey 是 GET /quota 里那张卡的 HMAC 键（32 位 hex），不给 = 最早到期的那张可用卡 */
-async function consume(req: Request, svc: QuotaService): Promise<Response> {
+async function consume(req: Request, svc: QuotaService, refreshAfterReset: () => Promise<unknown>): Promise<Response> {
   if (req.method !== "POST") return apiJson(405, { ok: false, error: "method not allowed" });
   const body = await readJsonBody(req);
   if (body === INVALID_JSON) return invalidJsonBody();
@@ -62,6 +67,12 @@ async function consume(req: Request, svc: QuotaService): Promise<Response> {
   if (key !== null && (typeof key !== "string" || !/^[0-9a-f]{32}$/.test(key))) return apiJson(400, { ok: false, error: "creditKey must be a key from GET /quota" });
   const result = await svc.consumeCodexReset(key);
   if (result.status === "busy") return apiJson(409, { ok: false, error: "another reset is already in progress", result });
+  if (result.status === "done" && (result.code === "reset" || result.code === "already_redeemed")) {
+    try { await refreshAfterReset(); } catch (e) {
+      // 卡已经用掉：额度线稍晚更新不能把成功回包改成失败，更不能诱导再次扣卡。
+      console.warn(`[quota] 重置后补读额度线失败（${(e as Error)?.name ?? "unknown"}），消费结果照常返回`);
+    }
+  }
   return apiJson(200, { ok: true, result });
 }
 
