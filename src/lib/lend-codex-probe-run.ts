@@ -22,7 +22,7 @@ export interface ProbeRunPorts {
   resolveBin?: () => Promise<string | null>;
   exec: (argv: string[], opts: { cwd: string; timeoutMs: number }) => Promise<BoundedResult>;
 }
-export const workerCodexBin = async (): Promise<string | null> => (await resolveCodexBinary(defaultRunner).catch(() => null))?.real ?? findCodexBin();
+const workerCodexBin = async (): Promise<string | null> => (await resolveCodexBinary(defaultRunner).catch(() => null))?.real ?? findCodexBin();
 
 /** 跑一次最小 Codex 调用；ok=false 含找不到二进制、超时、非零退出 */
 export async function runProbeCall(ports: ProbeRunPorts): Promise<{ ok: boolean; message: string }> {
