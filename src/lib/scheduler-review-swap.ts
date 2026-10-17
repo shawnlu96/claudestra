@@ -387,7 +387,7 @@ function epochFacts(db: Database, task: LedgerTask, planSeq: number, row: Schedu
   const workflow = getWorkflow(db, task.id);
   if (workflow?.mode !== "auto" || workflow.specRev !== task.specRev || task.stage !== "review" || !inWindow(plan!, task)) refuseEpoch("head / specRev / 轮次已变");
   if (openSafetyHold(events)) refuseEpoch("本卡有未处置的安全拒绝留证");
-  if (events.some((e) => (refusalOf(e) || fallbackOf(e)) && inWindow(e, task))) refuseEpoch("本轮已做过豁免 / 降级审查，再被拒转人工，不再开 epoch"); // RVF-1 both ways
+  if (events.some((e) => (refusalOf(e) || fallbackOf(e)) && inWindow(e, task))) refuseEpoch("本轮已做过豁免审查或降级审查，再被拒转人工，不再开 epoch"); // RVF-1 both ways
   const lapse = approvalLapse(db, task, d.approvalId);
   if (lapse) refuseEpoch(lapse);
   const sent = getIntent(db, String(d.intentId));
