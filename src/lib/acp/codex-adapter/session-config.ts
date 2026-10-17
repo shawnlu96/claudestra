@@ -55,6 +55,9 @@ export function parseAdapterEnv(env: Record<string, string | undefined>): { ok: 
  * 只读预设（readOnly 沙箱 + never）：线程打开后读回 app-server 实际生效的策略（thread/start|resume|fork 回包的 sandbox / approvalPolicy），
  * 不是「只读、不联网、never」就返回原因——调用方停掉适配器、拒这次打开，不指望每轮 turn/start 带的策略兜底。其它预设不核，返回 null。
  */
+/** checkPolicy 拒起时错误 data 里的 reason：server.ts sessionError 只让带它的 fatal 原样透出 */
+export const POLICY_MISMATCH_REASON = "readonly_policy_mismatch";
+
 export function readOnlyPolicyMismatch(policy: TurnPolicy, opened: Rec): string | null {
   if (policy.sandboxPolicy.type !== "readOnly" || policy.approvalPolicy !== "never") return null;
   const sb = isRec(opened.sandbox) ? opened.sandbox : {};

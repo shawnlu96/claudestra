@@ -151,8 +151,21 @@ describe("会话建好后读回生效策略（PM 补 ask_mvcaa4ue7b42c6d2e3 (B)�
       const err = await (kind === "new" ? h.session.create("/w") : kind === "resume" ? h.session.attach("th-1", "/w", true) : h.session.fork("th-1", "/w")).catch((e) => e);
       expect(err).toBeInstanceOf(Error);
       expect(err.message).toContain("不是只读 + never");
-      expect(err.data).toMatchObject({ fatal: true });
+      expect(err.data).toMatchObject({ fatal: true, reason: "readonly_policy_mismatch" });
       expect(h.causes).toEqual([{ kind: "protocol", why: expect.stringContaining("dangerFullAccess") }]);
+    }
+  });
+
+  test("预期档位不是只读的会话不读回、不检查：回包报可写也照常接上（行为不变）", async () => {
+    for (const mode of ["agent-full-access", "read-only"]) {
+      const f = fakeApp();
+      f.on("thread/start", () => opened(f.thread, { type: "dangerFullAccess" }, "on-request"));
+      f.on("thread/resume", (p) => opened(p.threadId, { type: "dangerFullAccess" }, "on-request"));
+      const h = harness({ fake: f, env: { INITIAL_AGENT_MODE: mode } });
+      await h.session.initialize();
+      expect(await h.session.create("/w")).toBe("th-1");
+      await h.session.attach("th-1", "/w", true);
+      expect(h.causes).toEqual([]);
     }
   });
 });

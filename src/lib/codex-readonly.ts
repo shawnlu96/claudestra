@@ -60,11 +60,12 @@ export const READ_ONLY_SWITCH_ERROR = "只读 agent 不能换档，要换就删�
  */
 export function resumePermissionMode(flag: string | undefined, prior: { permissionMode?: string } | undefined): { mode: string | undefined } | { error: string } {
   if (!isReadOnlyMode(prior?.permissionMode)) return { mode: flag };
-  if (!flag || !flag.trim() || isReadOnlyMode(flag)) return { mode: READ_ONLY_MODE };
-  return { error: `${READ_ONLY_SWITCH_ERROR}（registry 里是 readOnly，--mode 给的是 ${flag.trim()}）` };
+  if (!flag || !flag.trim()) return { mode: READ_ONLY_MODE };
+  const error = modeSwitchError(prior, flag);
+  return error ? { error } : { mode: READ_ONLY_MODE };
 }
 
-/** `manager mode <agent> <档位>`：旧条目是只读、新档位不是只读就拒（同 resume 的换档规则）；返回 null = 放行 */
+/** 换档拒绝（cmdResume 的 --mode 与 cmdMode 共用）：旧条目是只读、新档位不是只读就拒；返回 null = 放行 */
 export function modeSwitchError(prior: { permissionMode?: string } | undefined, next: string): string | null {
   return isReadOnlyMode(prior?.permissionMode) && !isReadOnlyMode(next) ? `${READ_ONLY_SWITCH_ERROR}（registry 里是 readOnly，要改成 ${next.trim()}）` : null;
 }
