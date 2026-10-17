@@ -398,6 +398,59 @@ describe("[验收线 5] a replaced executor's checkout at the card's path (stale
     expect(await t.aside()).toBeNull();
   });
 
+  /** The old tree tracking sub (an initialized submodule) which itself tracks deep (a nested initialized submodule). */
+  async function subTree() {
+    const t = await oldTree(), dir = join(t.repo, "..");
+    const repoOf = async (name: string, file: string) => {
+      const r = join(dir, name);
+      mkdirSync(r); await t.run(r, "init", "-q", "-b", "main");
+      writeFileSync(join(r, file), "one\n"); await t.run(r, "add", "."); await t.run(r, "commit", "-q", "-m", name);
+      return r;
+    };
+    const deep = await repoOf("deep", "d.ts"), sub = await repoOf("sub", "s.ts");
+    const file = ["-c", "protocol.file.allow=always"];
+    await t.run(sub, ...file, "submodule", "add", "-q", deep, "deep"); await t.run(sub, "commit", "-q", "-m", "deep");
+    await t.run(t.repo, ...file, "submodule", "add", "-q", sub, "sub"); await t.run(t.repo, "commit", "-q", "-m", "sub");
+    await t.run(t.repo, "fetch", "-q", "origin");
+    await t.run(t.worktree, "merge", "-q", "--ff-only", "origin/main");
+    await t.run(t.worktree, ...file, "submodule", "update", "-q", "--init", "--recursive");
+    return t;
+  }
+  /** Same-length edit the checkout's stat cache hides: its status and every enclosing status stay empty, its entries plain H. */
+  async function hiddenEdit(t: { run: (cwd: string, ...a: string[]) => Promise<string>; worktree: string }, checkout: string, name: string) {
+    await t.run(checkout, "config", "core.trustctime", "false"); await t.run(checkout, "config", "core.checkStat", "minimal");
+    const file = join(checkout, name), past = new Date(Date.now() - 3_600_000);
+    utimesSync(file, past, past);
+    await t.run(checkout, "update-index", "--refresh");
+    writeFileSync(file, "two\n");
+    utimesSync(file, past, past);
+    for (const at of [checkout, t.worktree]) expect(await t.run(at, "status", "--porcelain", "--ignore-submodules=none")).toBe("");
+    expect((await t.run(checkout, "ls-files", "-v")).split("\n").every((l) => l.startsWith("H "))).toBe(true);
+  }
+
+  test("[验收线 5] a clean old tree with initialized (nested) submodules: still a new path", async () => {
+    const t = await subTree();
+    expect(await t.aside()).toBe(`${t.worktree}-r2`);
+  });
+
+  test("[验收线 5] a stat-cache-hidden edit inside an initialized submodule keeps the old tree and waits as today", async () => {
+    const t = await subTree();
+    await hiddenEdit(t, join(t.worktree, "sub"), "s.ts");
+    expect(await t.aside()).toBeNull();
+  });
+
+  test("[验收线 5] a stat-cache-hidden edit inside a nested submodule keeps the old tree and waits as today", async () => {
+    const t = await subTree();
+    await hiddenEdit(t, join(t.worktree, "sub", "deep"), "d.ts");
+    expect(await t.aside()).toBeNull();
+  });
+
+  test("[验收线 5] an uninitialized nested submodule is not proof: kept and waits as today", async () => {
+    const t = await subTree();
+    await t.run(join(t.worktree, "sub"), "submodule", "deinit", "-q", "--force", "deep");
+    expect(await t.aside()).toBeNull();
+  });
+
   test("[验收线 5] a new path left by an earlier try never stands in for the old tree's proof: an edit or a commit of its own there waits as today", async () => {
     const edits = await oldTree();
     mkdirSync(`${edits.worktree}-r2`);

@@ -149,16 +149,19 @@ function sameBlob(path: string, file: TreeFile): boolean {
 
 /**
  * LENDBACK1 (lend-return-local.ts staleTreeAside): HEAD's tracked content against disk bytes, past the index stat cache and its
- * flags; submodules by their own proof. Untracked and ignored files are not read (the caller's status covers untracked ones).
- * A missing file, a symlinked parent directory or anything unreadable counts as changed.
+ * flags; submodules by their own proof and then by the same byte comparison of their own HEAD, nested ones included (their
+ * status trusts their own stat cache). Untracked and ignored files are not read (the caller's status covers untracked ones).
+ * A missing file, a symlinked parent directory, an uninitialized submodule or anything unreadable counts as changed.
  */
-export function* trackedEdits(worktree: string): DirtyCheck<boolean> {
+export function* trackedEdits(worktree: string, depth = 0): DirtyCheck<boolean> {
+  if (depth > 16) return true;
   const tree = (yield ["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
   if (tree.code !== 0) return true;
   for (const [path, file] of treeFiles(tree.out)) {
     const parts = path.split("/");
     for (let n = 1; n < parts.length; n++) if (!lstatSync(join(worktree, ...parts.slice(0, n))).isDirectory()) return true;
-    if (file.mode === "160000" ? (yield* submoduleChanged(join(worktree, path), file.oid)) : !sameBlob(join(worktree, path), file)) return true;
+    const at = join(worktree, path);
+    if (file.mode === "160000" ? (yield* submoduleChanged(at, file.oid)) || (yield* trackedEdits(at, depth + 1)) : !sameBlob(at, file)) return true;
   }
   return false;
 }
