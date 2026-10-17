@@ -125,10 +125,10 @@ function installFallbackTestTmpRoot(env: Env = process.env): void {
   const root = mkdtempSync(join(canonical(tmpdir()), `${TEST_RUN_ROOT_PREFIX}${process.pid}-`));
   for (const key of ["TMPDIR", "TMP", "TEMP"]) env[key] = root;
   // Bun 不传 env 起的子进程用启动时的环境，补上当前的（同 tests/test-tmp-root.ts 的 inheritEnv）
-  const inherit = <T extends (...args: any[]) => any>(spawn: T): T => ((command: string[] | { env?: Env }, options?: { env?: Env }) => {
+  const inherit = <T extends (...args: any[]) => any>(launch: T): T => ((command: string[] | { env?: Env }, options?: { env?: Env }) => {
     const config = Array.isArray(command) ? options : command;
     const inherited = { ...config, env: config?.env ?? process.env };
-    return Array.isArray(command) ? spawn(command, inherited) : spawn(inherited);
+    return Array.isArray(command) ? launch(command, inherited) : launch(inherited);
   }) as T;
   Bun.spawn = inherit(Bun.spawn);
   Bun.spawnSync = inherit(Bun.spawnSync);
