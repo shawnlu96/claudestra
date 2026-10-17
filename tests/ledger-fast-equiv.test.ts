@@ -4,10 +4,12 @@
  *   新读法与下面保留的旧读法（改前 src 原样抄来）JSON.stringify 逐字节相同。
  * [验收线 2] 再给窗口外已结束的卡追加 10 万条历史事件：稳态（PM 补 10-17 22:5x）下新读法总览、产品板各自读进 JS 的行数增幅 ≤ 20%，
  *   且执行的 SQL 没有一条整表扫 events（EXPLAIN QUERY PLAN 无 SCAN events，读事件只走索引）；旧读法跟着历史线性涨。用行数断言，不用墙钟。
+ * [验收线 3] 经 BOARDMEM1 的 cachedBoardBuild 走一遍（路由同一个入口）：boardBuildCache off 每次现建、on 首建与命中，输出都与旧读法逐字节相同。
  * 每卡事实表（ledger-read-fast-memo.ts）：冷启动与命中输出逐字节相同，只给一张卡追加事件后下一次只重读这一张。
  */
 import type { Database, Statement } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { BoardBuildCache, cachedBoardBuild } from "../src/lib/board-build-cache.js";
 import { actionCtx, withActionState } from "../src/lib/ledger-action-state.js";
 import { attentionCtx, withAttentionFacts, type AttentionCtx } from "../src/lib/ledger-attention-facts.js";
 import { hasFeatureSchema } from "../src/lib/ledger-dag-board.js";
@@ -30,6 +32,7 @@ import { stepLineInfo } from "../src/lib/ledger-step-line.js";
 import { closeLedger, getMeta, listDeps, listEvents, listItems, listTasks, openLedger, toEvent } from "../src/lib/ledger-store.js";
 import { openFindings } from "../src/lib/ledger-audit-store.js";
 import { projectMapConfig } from "../src/lib/project-map-config.js";
+import type { RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { isSourceAcceptedNode, pageAcceptedBySource } from "../src/lib/ui-page-display.js";
 
 // ── 旧读法：改前 src/lib/ledger-read.ts projectViewSnapshot、ledger-read-done.ts donePage、ledger-product-board.ts productBoard 原样 ──
@@ -300,6 +303,21 @@ describe("LEDGERFAST1 总览 / 产品板收窄读法", () => {
     expect(board.features.some((f) => f.eta?.done)).toBe(true);
     expect(board.features.some((f) => f.frontier.length > 0)).toBe(true);
     expectSame();
+  }, 60_000);
+
+  test("[验收线 3] boardBuildCache off 每次现建、on 首建与命中：总览、产品板输出都与旧读法逐字节相同", async () => {
+    const policy = (mode: RecoveryMode): RecoveryPolicyPort => () => ({ mode, source: "config", manualAfterMs: null });
+    const want = { ledger: json(oldProjectView(db, P, NOW, DAY_START, facts)), product: json(db.transaction(() => oldProductBoard(db, P, NOW)).deferred()) };
+    const builds = { ledger: () => projectView(db, P, NOW, DAY_START, facts), product: () => productBoard(db, P, NOW) };
+    for (const mode of ["off", "on"] as const) {
+      const cache = new BoardBuildCache();
+      for (const endpoint of ["ledger", "product"] as const) {
+        let n = 0;
+        const build = () => (n++, builds[endpoint]());
+        for (let i = 0; i < 3; i++) expect(json(await cachedBoardBuild(db, endpoint, P, {}, build, policy(mode), cache))).toBe(want[endpoint]);
+        expect(n).toBe(mode === "on" ? 1 : 3);
+      }
+    }
   }, 60_000);
 
   test("每卡事实表：冷启动与命中输出逐字节相同；只给一张卡追加事件，下一次只重读这一张", () => {

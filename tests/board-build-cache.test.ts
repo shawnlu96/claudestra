@@ -151,26 +151,29 @@ test("all four HTTP boards reuse one build on and build five times off; overview
     expect(response?.status).toBe(200);
     return response!.json();
   };
-  const builds = () => prepare.mock.calls.filter(([sql]) => sql === "SELECT * FROM events WHERE project = ? ORDER BY seq").length;
+  // ledger / product 不再整项目读事件（agents-LEDGERFAST1），改数每次构建只跑一次的 listTasks；dag / work 照旧数整项目读事件
+  const buildSql = (endpoint: string) => endpoint === "ledger" || endpoint === "product"
+    ? "SELECT * FROM tasks WHERE project = ? ORDER BY id" : "SELECT * FROM events WHERE project = ? ORDER BY seq";
+  const builds = (endpoint: string) => prepare.mock.calls.filter(([sql]) => sql === buildSql(endpoint)).length;
   try {
     for (const mode of ["on", "off"] as const) {
       writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { boardBuildCache: mode } } } }));
       for (const endpoint of ["dag", "ledger", "product", "work"]) {
-        const count = builds(), first = await call(endpoint);
+        const count = builds(endpoint), first = await call(endpoint);
         for (let i = 1; i < 5; i++) {
           const next = await call(endpoint);
           if (mode === "on") expect(next).toEqual(first);
         }
-        expect(builds() - count).toBe(mode === "on" ? 1 : 5);
+        expect(builds(endpoint) - count).toBe(mode === "on" ? 1 : 5);
       }
     }
     writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { boardBuildCache: "on" } } } }));
-    const count = builds(), dayStart = Date.now() - 1000;
+    const count = builds("ledger"), dayStart = Date.now() - 1000;
     await call("ledger", `?dayStart=${dayStart}`);
     await call("ledger", `?dayStart=0${dayStart}`);
-    expect(builds() - count).toBe(1);
+    expect(builds("ledger") - count).toBe(1);
     await call("ledger", `?dayStart=${dayStart - 1000}`);
-    expect(builds() - count).toBe(2);
+    expect(builds("ledger") - count).toBe(2);
   } finally {
     prepare.mockRestore(); setLedgerFeedForTest(undefined); setLedgerApiProjectsForTest(undefined);
     closeLedger(path); rmSync(dir, { recursive: true, force: true });
