@@ -165,7 +165,7 @@
     "name": "scope-403 GET /api/v1/agents/zz/bg-tasks",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 GET /api/v1/history/search?agent=zz&q=xx",
@@ -177,73 +177,73 @@
     "name": "scope-403 GET /api/v1/agents/zz/tasks",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 GET /api/v1/agents/zz/history",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 GET /api/v1/agents/zz/history/abc",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 POST /api/v1/agents/zz/messages",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 GET /api/v1/agents/zz/skills",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 POST /api/v1/agents/zz/interrupt",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 POST /api/v1/agents/zz/clear",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 POST /api/v1/agents/zz/claude-settings",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 POST /api/v1/agents/zz/answer",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 GET /api/v1/agents/zz/pending",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 POST /api/v1/agents/zz/notify-read",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"zz\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "scope-403 pi-settings master",
     "status": 403,
     "contentType": "application/json",
-    "body": "{\"ok\":false,\"error\":\"agent \\\"agent-master\\\" not in token scope\"}"
+    "body": "{\"ok\":false,\"error\":\"agent \\\"agent-master\\\" not in token scope\",\"code\":\"agent_not_in_scope\"}"
   },
   {
     "name": "json-400 peers/redeem",
