@@ -180,7 +180,7 @@ function onFailure(channelId: string, ws: Socket, f: AcpFailure, rawConfig: unkn
 async function showQuotaCard(channelId: string, ws: Socket, agentName: string, f: AcpFailure, rawConfig: unknown, label: string): Promise<void> {
   const retired = (step: string) => extensionSocketOf(channelId) !== ws && (console.log(`⏭ 额度卡作废（${agentName}）：${step}时宿主已换`), true);
   const prev = quotaCards.get(channelId);
-  const tried = prev?.failureKey === f.key && prev.autoTried;
+  const tried = prev?.ws === ws && prev.failureKey === f.key && prev.autoTried;
   if (tried && prev.auto) return; // 同一个失败重报：已经切过了，再切一次只会把卡顶掉
   const opts = parseConfigOptions(rawConfig);
   const config = opts.length ? opts : acpConfigOf(channelId);
@@ -257,9 +257,13 @@ function dropPerm(channelId: string, p: Perm, why: string, answered?: { label: s
   showPerm(channelId);
 }
 
-/** 宿主的连接断了（bridge.ts 的 ws close）：它挂着的权限卡撤掉；宿主重连后会把还在等的补发上来，出新卡 */
+/** 宿主断线（bridge.ts 的 ws close）：撤它的权限 / 额度卡和额度去重状态；新连接补报时出新卡，不能清别的连接的卡。 */
 export function onAcpHostGone(channelId: string, ws: Socket): void {
   clearCapabilities.delete(ws);
+  if (quotaCards.get(channelId)?.ws === ws) {
+    quotaCards.delete(channelId);
+    settleRuntimeAsk("codex", channelId);
+  }
   for (const p of [...(permQueues.get(channelId) ?? [])]) if (p.ws === ws && !p.claimed) dropPerm(channelId, p, "宿主断线");
   for (const [id, c] of calls) {
     if (c.channelId !== channelId || c.ws !== ws) continue;

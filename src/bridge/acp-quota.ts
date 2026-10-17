@@ -91,10 +91,14 @@ export async function planAcpQuota(channelId: string, agentName: string, f: AcpF
   if (confirmed) hits.set(provider, { at: now, resetAt });
   const walled = walledProviders(now, codex).filter((w) => w.provider !== provider);
   const { usable, sameProvider, recommended } = usableModels(current, model?.choices ?? [], walled.map((w) => w.provider));
-  const agent = await port.agentOf(channelId).catch(() => undefined); // 查不到 = 只用全局配置、按普通会话处理
-  const cfg = resolveFallback(port.fallbackConfig(), agent?.projectId);
+  const agent = await port.agentOf(channelId).catch((e) => {
+    console.warn(`⚠️ 额度卡核对身份失败（${agentName}）：${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
+  });
+  // 身份未知时无法核对项目禁切或 reviewer 角色；只有已确认、无项目的身份才能继承全局。
+  const cfg = resolveFallback(agent ? port.fallbackConfig() : undefined, agent?.projectId);
   const target = cfg.mode === "off" ? null : fallbackTarget(cfg.chain, usable);
-  const noAuto = cfg.mode === "on" ? noAutoReason(agentName, agent) : undefined;
+  const noAuto = !agent ? "无法核对项目，未自动切换" : cfg.mode === "on" ? noAutoReason(agentName, agent) : undefined;
   const facts: QuotaCardFacts = {
     label, current: current || "未知", provider: shown, message: f.message, resetAt, now, sameProvider,
     walled: walled.filter((w) => model?.choices.some((c) => c.value !== current && providerOf(c.value) === w.provider)),

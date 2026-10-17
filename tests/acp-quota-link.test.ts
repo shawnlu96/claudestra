@@ -1,12 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { answerAcp, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
 import { useAcpQuotaPort } from "../src/bridge/acp-quota.ts";
-import { onAsk } from "../src/bridge/asks.ts";
+import { onAsk, setAsksForTest } from "../src/bridge/asks.ts";
+import { resetRuntimeAsksForTest } from "../src/bridge/ask-runtime.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
+import { closeLedger, openLedger } from "../src/lib/ledger-store.ts";
+import { tempLedgerPath } from "./ledger-test-helpers.ts";
 
 // 额度卡经 acp-link 的端到端（QWC-1）：卡面前几行、Codex 同账号、重报不换代、备用链 on 的切 / 切回 / 切了没成。基础的代际 / 认领 / 409 在 tests/acp-link.test.ts
 
 const CH = "local-acp-quota-link";
+const ledgerPath = tempLedgerPath("acp-quota-link-");
 const sockets = new Map<string, { sent: any[]; send(d: string): void }>();
 const sock = (ch: string) => {
   const s = { sent: [] as any[], send: (d: string) => void s.sent.push(JSON.parse(d)) };
@@ -21,10 +25,19 @@ const CONFIG = [{ id: "model", name: "Model", type: "select", currentValue: "gpt
 const quota = (key: string, message: string) => ({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key, message }, configOptions: QUOTA_CONFIG });
 
 beforeAll(() => {
+  openLedger(ledgerPath);
+  setAsksForTest({ path: ledgerPath, registry: [], ownerChats: [] });
+  resetRuntimeAsksForTest();
   setExtensionSocket((ch) => sockets.get(ch), {
     deliver: async () => undefined, ownerId: () => "", books: () => ({}) as any,
     hold: () => { throw new Error("ACP quota fixture must not queue a voided-message echo"); },
   });
+});
+
+afterAll(() => {
+  resetRuntimeAsksForTest();
+  setAsksForTest(undefined);
+  closeLedger(ledgerPath);
 });
 
 describe("额度卡（acp-link 端到端）", () => {
@@ -65,9 +78,34 @@ describe("额度卡（acp-link 端到端）", () => {
     }
   });
 
+  test("身份无记录 / 查询抛错：全局 on、项目 off 仍出普通卡，宿主收不到 set_config", async () => {
+    const asks: any[] = [];
+    const unsub = onAsk((a) => void asks.push(a));
+    try {
+      for (const throws of [false, true]) {
+        const s = sock(CH);
+        useAcpQuotaPort({
+          codexQuota: async () => null,
+          fallbackConfig: () => ({ mode: "on", chain: ["ds"], projects: { p: { mode: "off" } } }),
+          agentOf: async () => { if (throws) throw new Error("registry unavailable"); return undefined; },
+        });
+        await onAcpFrame(quota(`quota:unknown-${throws}`, "Go usage limit exceeded: unknown identity"), s, discord);
+        expect(s.sent.filter((f) => f.op === "set_config")).toHaveLength(0);
+        onAcpHostGone(CH, s);
+      }
+      await new Promise((r) => setTimeout(r, 50));
+      const opened = asks.filter((a) => a.state === "open" && a.extra.raw === "Go usage limit exceeded: unknown identity");
+      expect(opened).toHaveLength(2);
+      expect(opened.every((a) => a.extra.quota === true && a.context.split("\n")[2].includes("无法核对项目"))).toBe(true);
+    } finally {
+      unsub();
+      useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined });
+    }
+  });
+
   test("备用链 on 切换没成：出额度卡，第 3 行写没成的原因；同一个失败重报不再试", async () => {
     const s = sock(CH);
-    useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), agentOf: async () => undefined });
+    useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), agentOf: async () => ({ name: "agent-x" }) });
     const asks: any[] = [];
     const unsub = onAsk((a) => void asks.push(a));
     try {
@@ -93,7 +131,7 @@ describe("额度卡（acp-link 端到端）", () => {
 
   test("备用链 on：撞墙直接切过去，通知卡上「切回原模型」经宿主切回；同一个失败重报不再切", async () => {
     const s = sock(CH);
-    useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), agentOf: async () => undefined });
+    useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), agentOf: async () => ({ name: "agent-x" }) });
     try {
       const done = onAcpFrame(quota("air:auto", "Go usage limit exceeded"), s, discord);
       await new Promise((r) => setTimeout(r, 0));
@@ -120,7 +158,7 @@ describe("额度处理途中换了宿主（Shawn PR1701-r1 P1 stale-quota-host-s
   const CH2 = "local-acp-quota-swap";
   const frame = (key: string) => ({ type: "acp_failure", channelId: CH2, failure: { kind: "quota", key, message: "Go usage limit exceeded" }, configOptions: QUOTA_CONFIG });
   const calls = (x: { sent: any[] }) => x.sent.filter((f) => f.type === "acp_call");
-  const on = (codexQuota: () => Promise<null>) => useAcpQuotaPort({ codexQuota, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), agentOf: async () => undefined });
+  const on = (codexQuota: () => Promise<null>) => useAcpQuotaPort({ codexQuota, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), agentOf: async () => ({ name: "agent-x" }) });
   afterAll(() => useAcpQuotaPort());
 
   test("凑卡时（读额度快照）换了宿主：新宿主收到 0 次调用，也不出卡", async () => {
@@ -160,5 +198,54 @@ describe("额度处理途中换了宿主（Shawn PR1701-r1 P1 stale-quota-host-s
     expect(await answerAcp(CH2, luna!, who)).toMatchObject({ status: 409, body: { code: "ask_stale" } });
     expect(calls(fresh)).toHaveLength(0);
     expect(liveAcpButtons(CH2).quota).toEqual([]);
+  });
+});
+
+describe("额度去重按宿主连接隔离", () => {
+  const CH3 = "local-acp-quota-restart";
+  const frame = { ...quota("quota:same-session#1", "Go usage limit exceeded"), channelId: CH3 };
+  const calls = (s: { sent: any[] }) => s.sent.filter((f) => f.type === "acp_call");
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const fail = async (s: ReturnType<typeof sock>, ok: boolean) => {
+    const done = onAcpFrame(frame, s, discord);
+    await tick();
+    const call = calls(s).at(-1);
+    if (call) await onAcpFrame({ type: "acp_call_result", channelId: CH3, id: call.id, ok, error: "refused" }, s, discord);
+    await done;
+  };
+  beforeAll(() => useAcpQuotaPort({
+    codexQuota: async () => null, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), agentOf: async () => ({ name: "agent-x" }),
+  }));
+  afterAll(() => useAcpQuotaPort());
+
+  for (const ok of [true, false]) test(`旧宿主自动切换${ok ? "成功" : "失败"}：新连接同 key 重新切，同连接只切一次`, async () => {
+    const old = sock(CH3);
+    await fail(old, ok);
+    expect(calls(old)).toHaveLength(1);
+    await onAcpFrame(frame, old, discord);
+    expect(calls(old)).toHaveLength(1);
+    const previous = liveAcpButtons(CH3).quota;
+    const fresh = sock(CH3);
+    try {
+      await fail(fresh, true);
+      expect(calls(fresh)).toHaveLength(1);
+      expect(liveAcpButtons(CH3).quota).not.toEqual(previous);
+      onAcpHostGone(CH3, old); // 延迟到达的旧连接 close 不能清新卡
+      expect(liveAcpButtons(CH3).quota).toHaveLength(2);
+    } finally {
+      onAcpHostGone(CH3, fresh);
+    }
+  });
+
+  test("当前宿主断线：清额度按钮、旧卡失效，同连接对象重新报也不继承已尝试", async () => {
+    const s = sock(CH3);
+    await fail(s, false);
+    const old = liveAcpButtons(CH3).quota[0]!;
+    onAcpHostGone(CH3, s);
+    expect(liveAcpButtons(CH3).quota).toEqual([]);
+    expect((await answerAcp(CH3, old, who)).status).toBe(409);
+    await fail(s, true);
+    expect(calls(s)).toHaveLength(2);
+    onAcpHostGone(CH3, s);
   });
 });
