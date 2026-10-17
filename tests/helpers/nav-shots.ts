@@ -39,6 +39,8 @@ export interface NavOptions {
    * 停在 false 会让同进程后面文件的 chat-store 不再请求 /projects（scoped-requests.ts）
    */
   full?: boolean;
+  /** /settings 的 navV2：缺省 false = NAVBAR1 旧布局（这批用例断言的就是它）；true = NAVV2-SHELLA1 新版整页宿主 */
+  navV2?: boolean;
 }
 
 export function navWorld() {
@@ -83,6 +85,7 @@ export async function navRoute(path: string, world = navWorld(), o: NavOptions =
   if (path === "/shared-ledger/context") return json({ identities: team ? [IDENTITY] : [] });
   if (path === "/shared-projects/snapshot") return team ? json(await sharedProjectsSnapshot(ports(), localSnapshot())) : json({ ok: false, error: "forbidden" }, 403);
   if (path === "/version") return json({ version: "9.9.9", commit: "fixture" });
+  if (path === "/settings") return json({ ok: true, lang: "zh", navV2: o.navV2 === true, talkEnabled: false, pushNoContent: false, pushAllAsks: false });
   return todayRoute(path, world);
 }
 

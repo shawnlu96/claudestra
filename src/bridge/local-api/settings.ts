@@ -1,13 +1,13 @@
 /**
  * 全局设置与个人资料（原 web BFF 的 settings / profile 路由）：
- *   GET/PUT /api/v1/settings  { lang, groqApiKeyHint, jevApiKeyHint, pushNoContent, pushAllAsks, talkEnabled, inboundRouteMode }；
- *     PUT 体 { lang?, groqApiKey?, jevApiKey?, pushNoContent?, pushAllAsks?, talkEnabled?, inboundRouteMode? }（key 空串 = 清除；inboundRouteMode = off|observe|on）
+ *   GET/PUT /api/v1/settings  { lang, groqApiKeyHint, jevApiKeyHint, pushNoContent, pushAllAsks, talkEnabled, navV2, inboundRouteMode }；
+ *     PUT 体 { lang?, groqApiKey?, jevApiKey?, pushNoContent?, pushAllAsks?, talkEnabled?, navV2?, inboundRouteMode? }（key 空串 = 清除；inboundRouteMode = off|observe|on）
  *     → ~/.claude-orchestrator/config.json
  *   GET/PUT /api/v1/profile   { user:{nickname, avatar}, claude:{nickname, avatar} }（avatar 是 data:image/* ≤ 256 KB）→ user_profile 表
  * 读任何凭据都行（提示只有尾四位，头像是展示层）；写是全局状态，要 manage grant。
  */
 import {
-  readConfig, setGroqApiKey, setInboundRouteMode, setJevApiKey, setLang, setPushAllAsks, setPushNoContent, setSteerQueueWhenBusy, setTalkEnabled,
+  readConfig, setGroqApiKey, setInboundRouteMode, setJevApiKey, setLang, setNavV2, setPushAllAsks, setPushNoContent, setSteerQueueWhenBusy, setTalkEnabled,
   type AppConfig, type AppLang,
 } from "../../lib/config-store.js";
 import { parseRouteMode, type RouteMode } from "../../lib/inbound-route.js";
@@ -31,6 +31,7 @@ interface Store {
   setPushNoContent: (on: boolean) => Promise<unknown>;
   setPushAllAsks: (on: boolean) => Promise<unknown>;
   setTalkEnabled: (on: boolean) => Promise<unknown>;
+  setNavV2: (on: boolean) => Promise<unknown>;
   setSteerQueueWhenBusy: (on: boolean) => Promise<unknown>;
   setJevApiKey: (key: string) => Promise<unknown>;
   setInboundRouteMode: (mode: RouteMode) => Promise<unknown>;
@@ -42,7 +43,7 @@ const persistLang = async (lang: AppLang) => {
   setLangInMemory(lang);
 };
 const realStore: Store = {
-  read: readConfig, setLang: persistLang, setGroqApiKey, setJevApiKey, setPushNoContent, setPushAllAsks, setTalkEnabled, setSteerQueueWhenBusy, setInboundRouteMode,
+  read: readConfig, setLang: persistLang, setGroqApiKey, setJevApiKey, setPushNoContent, setPushAllAsks, setTalkEnabled, setNavV2, setSteerQueueWhenBusy, setInboundRouteMode,
 };
 let store = realStore;
 /** 单测换成内存实现；生产不调 */
@@ -54,7 +55,7 @@ export const groqKeyHint = (key: string | undefined): string | null => (key ? `�
 const settingsBody = (cfg: AppConfig) => ({
   "steer.queueWhenBusy": steerQueueWhenBusy(cfg),
   ok: true, lang: cfg.lang, groqApiKeyHint: groqKeyHint(cfg.groqApiKey), jevApiKeyHint: groqKeyHint(cfg.jevApiKey),
-  pushNoContent: cfg.pushNoContent === true, pushAllAsks: cfg.pushAllAsks === true, talkEnabled: cfg.talkEnabled === true,
+  pushNoContent: cfg.pushNoContent === true, pushAllAsks: cfg.pushAllAsks === true, talkEnabled: cfg.talkEnabled === true, navV2: cfg.navV2 !== false,
   inboundRouteMode: parseRouteMode(cfg.inboundRoute?.mode),
 });
 
@@ -72,14 +73,14 @@ async function putSettings(req: Request, principal: Principal): Promise<Response
   if (body === INVALID_JSON) return invalidJsonBody();
   const b = (body ?? {}) as {
     lang?: unknown; groqApiKey?: unknown; jevApiKey?: unknown; pushNoContent?: unknown; pushAllAsks?: unknown; talkEnabled?: unknown;
-    "steer.queueWhenBusy"?: unknown; inboundRouteMode?: unknown;
+    "steer.queueWhenBusy"?: unknown; navV2?: unknown; inboundRouteMode?: unknown;
   };
   if (b.inboundRouteMode !== undefined && parseRouteMode(b.inboundRouteMode) !== b.inboundRouteMode) {
     return apiJson(400, { ok: false, error: 'inboundRouteMode must be "off", "observe" or "on"' });
   }
   if (b.lang !== undefined && b.lang !== "zh" && b.lang !== "en") return apiJson(400, { ok: false, error: 'lang must be "zh" or "en"' });
   if (b.groqApiKey !== undefined && typeof b.groqApiKey !== "string") return apiJson(400, { ok: false, error: "groqApiKey must be a string (empty = clear)" });
-  for (const k of ["pushNoContent", "pushAllAsks", "talkEnabled", "steer.queueWhenBusy"] as const) {
+  for (const k of ["pushNoContent", "pushAllAsks", "talkEnabled", "steer.queueWhenBusy", "navV2"] as const) {
     if (b[k] !== undefined && typeof b[k] !== "boolean") return apiJson(400, { ok: false, error: `${k} must be a boolean` });
   }
   const key = typeof b.groqApiKey === "string" ? b.groqApiKey.trim() : undefined;
@@ -93,6 +94,7 @@ async function putSettings(req: Request, principal: Principal): Promise<Response
   if (typeof b.pushNoContent === "boolean") await store.setPushNoContent(b.pushNoContent);
   if (typeof b.pushAllAsks === "boolean") await store.setPushAllAsks(b.pushAllAsks);
   if (typeof b.talkEnabled === "boolean") await store.setTalkEnabled(b.talkEnabled);
+  if (typeof b.navV2 === "boolean") await store.setNavV2(b.navV2);
   if (typeof b["steer.queueWhenBusy"] === "boolean") await store.setSteerQueueWhenBusy(b["steer.queueWhenBusy"]);
   if (b.inboundRouteMode !== undefined) await store.setInboundRouteMode(b.inboundRouteMode as RouteMode);
   return apiJson(200, settingsBody(await store.read()));

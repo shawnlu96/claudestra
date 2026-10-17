@@ -3,11 +3,17 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getSettings, putSettings } from "@/lib/api/settings";
 import { machines } from "@/lib/machines";
 
-type Flag = "pushNoContent" | "pushAllAsks" | "talkEnabled" | "steer.queueWhenBusy";
+type Flag = "pushNoContent" | "pushAllAsks" | "talkEnabled" | "steer.queueWhenBusy" | "navV2";
 const listeners = new Set<(key: Flag, fp: string | null, on: boolean) => void>();
 const subscribeMachine = (notify: () => void) => machines.subscribe(notify);
 const machineFp = () => machines.currentFp();
 const noMachine = () => null;
+
+/** 不经这个 hook 的只读方（nav/nav-v2.ts）也跟上成功的写入：开关一拨，已挂着的外壳当场换 */
+export function onSettingsFlagWrite(cb: (key: Flag, fp: string | null, on: boolean) => void): () => void {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
 
 /** Global settings flags share successful writes so mounted senders follow the rollback toggle immediately. */
 export function useSettingsFlag(key: Flag, open = true, onChanged?: (on: boolean) => void) {

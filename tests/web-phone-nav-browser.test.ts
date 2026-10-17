@@ -3,7 +3,8 @@
  *   NAV_SHOTS_DIR=<目录> [NAV_BASE_REPO=<基线 main 的检出目录>] bun --no-env-file test tests/web-phone-nav-browser.test.ts
  * 入口与外壳沿用 TODAY1 的截图入口（today-shots.ts bundleToday：真的 Sidebar + MessageList + CollabSwitch，窄屏照生产横滑），
  * 接口换成 nav-shots.ts（规格「对照基准」）；时刻钉在 2026-10-14 12:00，真 Chromium，回环 Bun.serve，非回环请求一律拦掉并断言为 0。
- * 390：五个入口各一张（冷开即「今天」；改前没有这些入口，截同一列表页）；1280：冷开「会话」（顶栏 + 竖向图标栏）、「我的」菜单展开、「今天」（改前截原顶栏与列表）。
+ * 390：五个入口各一张（冷开即「今天」；改前没有这些入口，截同一列表页）；1280：冷开「会话」（顶栏 + 竖向图标栏）、「我的」菜单展开、「今天」、「团队」（改前截原顶栏与列表）。
+ * 这组断言的是 NAVBAR1 旧布局（/settings 答 navV2: false）；1280 另在 navV2 开着时拍一次今天 / 团队（after-v2-*，页面画在主区，NAVV2-SHELLA1）。
  */
 import { expect, test } from "bun:test";
 import { chromium, type Page } from "playwright-core";
@@ -95,21 +96,43 @@ async function desktop(page: Page, after: boolean, shot: (v: string) => Promise<
     await page.locator("[data-nav-pages=today] [data-now-blocks]").waitFor();
   }
   await shot("today");
+  if (after) {
+    await page.locator("[data-nav=rail] [data-nav-tab=team]").click();
+    await page.locator("[data-nav-pages=team] section[aria-label=团队项目] button", { hasText: TEAM_NAME }).waitFor();
+    expect(await texts(page, "[data-nav-pages=team] section[aria-label=团队项目] button[aria-label]")).toContain(TEAM_NAME);
+    expect(await texts(page, "[data-nav-pages=team] [data-team-link]")).toEqual(["成员与位子", "规划与提案"]);
+  }
+  await shot("team");
+}
+
+/** 1280 navV2 开着：今天 / 团队画在主区宿主里，侧栏会话列表常在 */
+async function desktopV2(page: Page, shot: (v: string) => Promise<void>) {
+  await page.locator("[data-nav=rail] [data-nav-tab=today]").click();
+  await page.locator("[data-v2-host=main] [data-v2-section=today] [data-now-wait]").first().waitFor();
+  expect(await page.locator("aside input[type=search]").isVisible()).toBe(true);
+  await shot("today");
+  await page.locator("[data-nav=rail] [data-nav-tab=team]").click();
+  const team = "[data-v2-host=main] [data-v2-section=team] section[aria-label=团队项目] button";
+  await page.locator(team, { hasText: TEAM_NAME }).waitFor();
+  expect(await texts(page, `${team}[aria-label]`)).toContain(TEAM_NAME);
+  expect(await texts(page, "[data-v2-section=team] [data-team-link]")).toEqual(["成员与位子", "规划与提案"]);
+  await shot("team");
 }
 
 test.skipIf(!out)("NAVBAR1：五个入口（手机底部栏 / 电脑图标栏 / 我的 / 团队），1280 与 390 改前改后", async () => {
   if (!out) return;
   mkdirSync(out, { recursive: true });
-  const sides = [...(baseRepo ? [{ label: "before", repo: resolve(baseRepo) }] : []), { label: "after", repo: resolve(import.meta.dir, "..") }];
+  const here = resolve(import.meta.dir, "..");
+  const sides = [...(baseRepo ? [{ label: "before", repo: resolve(baseRepo), v2: false }] : []), { label: "after", repo: here, v2: false }, { label: "after-v2", repo: here, v2: true }];
   const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   const issues: Record<string, ShotIssue[]> = {}, requests: Record<string, { external: string[]; errors: string[] }> = {};
   const world = navWorld();
   try {
-    for (const { label, repo } of sides) {
-      const after = label === "after";
-      const server = serveToday(await bundleToday(repo, resolve(out, `nav-bundle-${label}`), FP), await tailwindCss(repo), FP, (path) => navRoute(path, world));
+    for (const { label, repo, v2 } of sides) {
+      const after = label !== "before";
+      const server = serveToday(await bundleToday(repo, resolve(out, `nav-bundle-${label}`), FP), await tailwindCss(repo), FP, (path) => navRoute(path, world, { navV2: v2 }));
       try {
-        for (const width of [1280, 390]) {
+        for (const width of v2 ? [1280] : [1280, 390]) {
           const height = width < 640 ? 844 : 800;
           const g = await guardedPage(browser, String(server.url), { width });
           await g.page.clock.setFixedTime(new Date(NAV_NOW));
@@ -129,7 +152,8 @@ test.skipIf(!out)("NAVBAR1：五个入口（手机底部栏 / 电脑图标栏 / 
             issues[name] = await shotIssues(g.page);
             requests[name] = { external: [...g.external], errors: [...g.errors] };
           };
-          if (width >= 640) await desktop(g.page, after, shot);
+          if (v2) await desktopV2(g.page, shot);
+          else if (width >= 640) await desktop(g.page, after, shot);
           else await phone(g.page, after, shot);
           await g.ctx.close();
         }

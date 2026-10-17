@@ -1,0 +1,37 @@
+/* 新版整页宿主（v2-host.tsx）的局部规则：标题、返回、焦点、安全区、动效只在这一处写。颜色全用 daisyUI 主题 token（--color-*），浅 / 深跟主题走。
+   位置：手机盖在 aside 原列表上（左让 --cstra-rail-w、下让 --cstra-phone-nav-h，底部栏照旧随列表滑走）；电脑盖在主区聊天上、低于协作视图（z 45）。 */
+.host { position: absolute; top: 0; right: 0; display: flex; flex-direction: column; background: var(--color-base-200); }
+.inAside { left: var(--cstra-rail-w, 0px); bottom: var(--cstra-phone-nav-h, 0px); z-index: 5; }
+.inMain { left: 0; bottom: 0; z-index: 44; background: var(--color-base-100); }
+.host[hidden], .page[hidden] { display: none; }
+
+.page { display: flex; min-height: 0; flex: 1; flex-direction: column; animation: v2-in 160ms ease-out; }
+.slideIn { animation-name: v2-slide; animation-duration: 220ms; }
+
+/* 页头：安全区自垫（同侧栏顶栏），长标题单行截断不顶走右侧机器切换 */
+.head { flex-shrink: 0; display: flex; align-items: center; gap: 4px; min-height: 44px; padding: calc(var(--cstra-quota-pane-safe-top, env(safe-area-inset-top)) + 0.5rem) 12px 8px 16px; }
+/* 电脑主区：页头与下面 max-w-3xl 的内容同一列 */
+.inMain .head { width: 100%; max-width: 48rem; margin: 0 auto; padding-top: 1.5rem; }
+.back { margin-left: -8px; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 10px; color: var(--color-base-content); }
+.back:hover { background: color-mix(in srgb, var(--color-base-content) 8%, transparent); }
+.title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; outline: none; }
+.trail { flex-shrink: 0; margin-left: auto; }
+
+.body { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; padding: 0 8px 12px; }
+.ownHead { padding: 0; }
+
+/* 键盘焦点只在键盘操作时出现，用主色描边 */
+.host :focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-radius: 8px; }
+
+.list { display: flex; flex-direction: column; border-radius: 16px; border: 1px solid var(--color-base-300); background: var(--color-base-100); padding: 4px; }
+.row { display: flex; width: 100%; align-items: center; gap: 10px; border-radius: 12px; padding: 12px; text-align: left; font-size: 15px; color: color-mix(in srgb, var(--color-base-content) 85%, transparent); }
+.row:hover { background: var(--color-base-200); }
+.rowIcon { display: flex; width: 20px; flex-shrink: 0; justify-content: center; opacity: 0.7; }
+.rowLabel { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chev { flex-shrink: 0; opacity: 0.4; }
+
+@keyframes v2-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes v2-slide { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .page, .slideIn { animation: none; }
+}
