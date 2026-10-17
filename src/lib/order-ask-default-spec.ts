@@ -13,6 +13,8 @@ import { specPathFor } from "./task-spec.js";
 
 /** i28-ASK4 测试类扩围（order-ask-default.ts isTestScopeAsk）的自动定：一节里写申请的文件和理由，不写默认做法 */
 const REASON_TEXT: Record<string, string> = { superseded_assertion: "被本规格替代的旧断言", new_test: "为本卡新行为补测试" };
+/** ASKSCOPE3 PM 定 4：被规格替代的旧断言批进来之后怎么改（交付另按尺寸核，order-ask-test-scope-size.ts） */
+const SUPERSEDED_RULE = "被规格替代的旧断言：允许最小改动，优先改夹具让旧测试继续保护原意图；交付说明逐条列出改了哪些断言、对应规格哪一条；审查员核";
 export const testScopeFiles = (a: Ask): string[] | null =>
   a.extra.autoScope === true && Array.isArray(a.extra.files) ? a.extra.files.map(String) : null;
 
@@ -41,7 +43,8 @@ export function prepareDefaultSpec(db: Database, a: Ask): void {
   const files = testScopeFiles(a);
   const decided = files
     ? `申请加进范围的测试文件（${REASON_TEXT[String(a.extra.reason)] ?? String(a.extra.reason)}）：\n${files.map((f) => `- \`${f}\``).join("\n")}\n\n`
-      + "结论：测试类扩围自动批准，以上文件已追加进本卡 fileGlobs。PM 若已另行答复，以规格里 PM 定为准。"
+      + `结论：测试类扩围自动批准，以上文件已追加进本卡 fileGlobs。${a.extra.reason === "superseded_assertion" ? `${SUPERSEDED_RULE}。` : ""}`
+      + "PM 若已另行答复，以规格里 PM 定为准。"
     : `默认做法：\n${quote(String(a.extra.default))}\n\n结论：按执行者默认做法定。PM 若已另行答复，以规格里 PM 定为准。`;
   const section = `\n\n${startMarker(a.id)}\n## 自动定（${new Date(Number(a.extra.defaultAt)).toISOString()}）\n\n`
     + `问题原文：\n${quote(a.body)}\n\n${decided}\n<!-- /ask-default:${a.id} -->\n`;
