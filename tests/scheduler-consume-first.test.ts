@@ -160,6 +160,24 @@ describe("AUTOSTARVE1 on a real ledger, 13 merge cards using up the budget", () 
     } finally { s.f.close(); }
   });
 
+  test("pace-stop: a maintenance request arriving during consumption stops the next auto card", async () => {
+    const s = await starved();
+    try {
+      s.f.db.run("UPDATE lend_orders SET status = 'cancelled', reason = '推送超时撤回'");
+      const request = join(s.f.dir, "late-maintenance.request"), prepared: string[] = [];
+      const r = await s.run(undefined, passPace({}, { request }).phase(), {
+        prepareAuthor: async (task: LedgerTask) => {
+          prepared.push(task.id);
+          if (task.id === "T1") writeFileSync(request, "1");
+          return task;
+        },
+      });
+      expect(r.failed).toEqual([]);
+      expect(prepared).toEqual(["T1"]);
+      expect(r.cards.map((c) => [c.taskId, c.step])).toEqual([["T1", "pool_returned"]]);
+    } finally { s.f.close(); }
+  });
+
   test("consume-race: an intent PM settles while the group prepares the card is left to the loop, no new placement in the group", async () => {
     const s = await starved();
     try {

@@ -121,7 +121,15 @@ function gate(pace: TickPace) {
       if (!first) return pace;
       const was = first;
       return { ...pace,
-        yieldNow: () => { if (replay === "next") { replay = "done"; return was.y; } replay = "no"; return pace.yieldNow(); },
+        yieldNow: () => {
+          if (replay === "next") {
+            const y = pace.yieldNow(), ended = pace.budgetEnded?.() ?? false;
+            // Only replay the budget grant: maintenance or an external stop may have arrived while consuming.
+            if (y && !ended) { replay = "no"; return true; }
+            replay = "done"; return was.y;
+          }
+          replay = "no"; return pace.yieldNow();
+        },
         ...(pace.budgetEnded ? { budgetEnded: () => replay === "done" ? was.ended : pace.budgetEnded!() } : {}) };
     },
   };
