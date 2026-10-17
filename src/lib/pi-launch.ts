@@ -46,7 +46,7 @@ const PI_ACTIVATE_TOOLS_EXTENSION = join(
 );
 
 /** owner 定的全局锁：Pi agent 一律用这个模型 + 档位，忽略 registry / create 传入的值；改它要 owner 点头 */
-export const PI_LOCKED_MODEL = "cc-switch-open-code-go/deepseek-v4.1-flash";
+export const PI_LOCKED_MODEL = "cc-switch-kimi-for-coding/k3";
 export const PI_LOCKED_EFFORT = "max";
 
 /** Pi 的 --thinking 合法值（与 claude 的 effort 档位不完全重合，只放行交集） */
