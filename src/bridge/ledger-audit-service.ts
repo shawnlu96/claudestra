@@ -56,17 +56,13 @@ type Pending = StoredFinding & { fallback?: string };
 /** RESTATEGO1：executor_idle 推送前接上 executorIdleNote；读不到 / 恢复键 off = 原文（推送与 ack 用的 key 不变） */
 async function withIdleNotes(d: LedgerAuditDeps, list: Pending[]): Promise<Pending[]> {
   if (!list.some((f) => f.rule === "executor_idle")) return list;
-  const opened: { db?: ReturnType<typeof openLedger> } = {};
-  const note = d.idleNote ?? ((f: StoredFinding) => executorIdleNote(opened.db ??= openLedger(), f, Date.now()));
-  try {
-    return await Promise.all(list.map(async (f) => {
-      if (f.rule !== "executor_idle") return f;
-      const extra = await note(f).catch((e) => { console.error(`⚠️ 台账巡检：${f.taskId} 空闲时长没补上，原文照推：${(e as Error).message}`); return null; });
-      return extra ? { ...f, detail: `${f.detail}（${extra}）` } : f;
-    }));
-  } finally {
-    opened.db?.close();
-  }
+  // openLedger() 返回进程级缓存连接，bridge 里所有台账读写共用：这里不能 close，关了整个 bridge 都报 closed database
+  const note = d.idleNote ?? ((f: StoredFinding) => executorIdleNote(openLedger(), f, Date.now()));
+  return Promise.all(list.map(async (f) => {
+    if (f.rule !== "executor_idle") return f;
+    const extra = await note(f).catch((e) => { console.error(`⚠️ 台账巡检：${f.taskId} 空闲时长没补上，原文照推：${(e as Error).message}`); return null; });
+    return extra ? { ...f, detail: `${f.detail}（${extra}）` } : f;
+  }));
 }
 type Sent = AuditNoticeReceipt;
 /** 调度助理连着这么多轮推不出去（不在线 / 投递失败），审查类的就改推 PM */
