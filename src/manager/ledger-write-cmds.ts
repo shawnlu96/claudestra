@@ -34,6 +34,7 @@ import { grantResume } from "../lib/ledger-autostart-resume.js";
 import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
 import { registryTaskIdError, registryTaskLabel } from "../lib/registry-task-label.js";
 import { deliverNoChangeLocal } from "../lib/ci-no-change-recovery.js";
+import { managerDeliverPrecheck } from "../lib/ci-deliver-precheck.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -241,11 +242,14 @@ async function deliverCmd(c: LedgerCli): Promise<Result> {
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
   const f = c.p.flags;
+  // CIPRECHK1：写交付前跑本机预检（恢复键 ciDeliverPrecheck），不过就带失败清单拒绝；去重重放与 off 都不跑
+  const pre = await managerDeliverPrecheck(c.db, { project: task.project, taskId: task.id, head: f.head, dedup: f.dedup, worktree: process.cwd(), now: c.deps.now() });
+  if (pre.refusal) throw new LedgerError("conflict", pre.refusal);
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes,
     uiEvidence: f["ui-evidence"], ui: uiDeliverPort() }); // UISDEL1：ui 卡截图证据按 uiDelivery 策略在事务里核（lib/ledger-deliver-ui.ts）
   await ensureReviewScope(c.db, task.id); // 规格外文件在交付事务外登记，本机 take_review 只读（i28-ASK2）
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
-  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
+  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null, ...(pre.note ? { precheck: pre.note } : {}) };
 }
 
 /** 一次性「本人交付后自动交回派审」资格：只给真 PM（调度助理 / 调度服务 / 执行者都不行），事务在 lib/ledger-autostart-resume.ts、前置在 lib/order-local-deliver.ts */
