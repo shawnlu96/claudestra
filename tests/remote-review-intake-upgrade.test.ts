@@ -10,6 +10,7 @@ import { appliedKey, lateRemoteMatches, unsentRemoteNotices } from "../src/lib/r
 import { remoteReviewStep } from "../src/lib/remote-review-tick.js";
 import { isLegacyRemoteReview, parseRemoteReview } from "../src/lib/remote-review-parse.js";
 import { renderRedeliveryPush } from "../src/lib/peer-pr-retry.js";
+import { PUSH_MAX_BYTES } from "../src/lib/peer-pr-message.js";
 import { HEAD, PEER, PM, PR, P0_TEXT, pushText, handoffConfig, remoteFixture } from "./helpers/remote-review-fixture.js";
 
 let fx: ReturnType<typeof remoteFixture>;
@@ -117,6 +118,15 @@ test("P2-4 diagnostics recognize only well-formed legacy originals / redeliverie
   expect(isLegacyRemoteReview(old.replace("报告编号：", "编号："))).toBe(false);
   expect(isLegacyRemoteReview(P0_TEXT.replace("head：", "head:"))).toBe(false);
   expect(isLegacyRemoteReview(P0_TEXT)).toBe(false);
+});
+
+test("P2-4 a legacy wire at the 64KiB cap remains recognizable without relaxing the automatic intake cap", () => {
+  const base = pushText({ p0: 1 }, { repo: undefined, report: "" });
+  const old = base + "x".repeat(PUSH_MAX_BYTES - Buffer.byteLength(base));
+  expect(Buffer.byteLength(old)).toBe(PUSH_MAX_BYTES);
+  expect(isLegacyRemoteReview(old)).toBe(true);
+  expect(isLegacyRemoteReview(old + "x")).toBe(false);
+  expect(parseRemoteReview(old)).toBeNull();
 });
 
 test("P2-4 reproduction: a parked legacy inbox explicitly asks for manual handling", async () => {

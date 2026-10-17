@@ -56,7 +56,11 @@ function readConclusion(text: string, round: number): Read | null {
 }
 
 export function parseRemoteReview(text: string): RemoteReview | null {
-  if (typeof text !== "string" || Buffer.byteLength(text) > PUSH_MAX_BYTES) return null;
+  return parseReviewWire(text, PUSH_MAX_BYTES);
+}
+
+function parseReviewWire(text: string, byteCap: number): RemoteReview | null {
+  if (typeof text !== "string" || Buffer.byteLength(text) > byteCap) return null;
   const lines = text.split("\n");
   const { redelivery, marked, hd, at } = offsets(lines);
   const title = lines[0]?.match(TITLE), head = lines[1 + hd]?.match(HEAD), masked = lines[7 + at]?.match(MASKED);
@@ -88,7 +92,8 @@ export function isLegacyRemoteReview(text: string): boolean {
   if (hasRepo && head.length === 40) return false;
   lines[1 + hd] = `head：${head.padEnd(40, "0")}`;
   if (!hasRepo) lines.splice(5 + at, 0, "仓库：legacy/unknown");
-  return parseRemoteReview(lines.join("\n")) !== null;
+  // Only this diagnostic gets room for the synthetic identity (<64 bytes); its original wire was capped above.
+  return parseReviewWire(lines.join("\n"), PUSH_MAX_BYTES + 64) !== null;
 }
 
 /** A P1 redelivered in the format before the cap line (defined with the other lookups in remote-review-current.ts). */
