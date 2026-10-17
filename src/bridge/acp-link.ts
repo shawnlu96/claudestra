@@ -34,7 +34,7 @@ type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
 type Answer = { status: number; body: Record<string, unknown> };
 type Perm = { gen: string; permId: string; ws: Socket; card: PermissionCard; claimed?: true };
-type Quota = { gen: string; failureKey: string; message: string; choices: QuotaChoice[]; claimed?: true; auto?: true; autoTried?: true };
+type Quota = { gen: string; ws: Socket; failureKey: string; message: string; choices: QuotaChoice[]; claimed?: true; auto?: true; autoTried?: true };
 
 const configs = new Map<string, ConfigOption[]>();
 const quotaCards = new Map<string, Quota>();
@@ -97,7 +97,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (authCards.delete(channelId)) settleRuntimeAsk("codex", channelId); // 登好了、接上线程了：登录卡结掉
       return;
     case "acp_failure":
-      return onFailure(channelId, msg.failure as AcpFailure, msg.configOptions, typeof msg.label === "string" && msg.label ? msg.label : "Codex", {
+      return onFailure(channelId, ws, msg.failure as AcpFailure, msg.configOptions, typeof msg.label === "string" && msg.label ? msg.label : "Codex", {
         sessionId: typeof msg.sessionId === "string" && msg.sessionId ? msg.sessionId : undefined,
         failedAt: Number.isFinite(msg.failedAt) ? Number(msg.failedAt) : undefined,
       });
@@ -142,10 +142,10 @@ async function acceptEntries(channelId: string, msg: Record<string, any>, discor
 }
 
 /** label：宿主报的运行时称呼（Codex / Pi，老宿主不带 = Codex），只进卡片标题；at：失败发生在哪个会话、什么时刻（老宿主不带），回合失败卡记进 extra，派单会话据此认归属 */
-function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: string, at: FailureAt = {}): Promise<void> | void {
+function onFailure(channelId: string, ws: Socket, f: AcpFailure, rawConfig: unknown, label: string, at: FailureAt = {}): Promise<void> | void {
   const agentName = agentNameForChannel(channelId) ?? channelId;
   if (f?.kind === "quota") {
-    return showQuotaCard(channelId, agentName, f, rawConfig, label);
+    return showQuotaCard(channelId, ws, agentName, f, rawConfig, label);
   } else if (f?.kind === "auth") {
     authCards.add(channelId);
     const context = label === "Pi"
@@ -167,32 +167,40 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
   }
 }
 
-/** 额度卡：选项 / 正文由 acp-quota.ts 定；备用链 on 档先切，切成了出通知卡（附「切回」），没切成照常出额度卡、同一个失败不再试 */
-async function showQuotaCard(channelId: string, agentName: string, f: AcpFailure, rawConfig: unknown, label: string): Promise<void> {
+/**
+ * 额度卡：选项 / 正文由 acp-quota.ts 定；备用链 on 档先切，切成了出通知卡（附「切回」），没切成照常出额度卡、同一个失败不再试。
+ * ws = 报这次失败的宿主。中间有 await（读额度快照、等宿主回切换结果），期间频道可能换了宿主：每次 await 之后都核一次，
+ * 换了就整件作废——退役会话的额度失败不能把新会话的模型切走，也不能给它出卡（tests/acp-quota-link.test.ts「宿主替换」）
+ */
+async function showQuotaCard(channelId: string, ws: Socket, agentName: string, f: AcpFailure, rawConfig: unknown, label: string): Promise<void> {
+  const retired = (step: string) => extensionSocketOf(channelId) !== ws && (console.log(`⏭ 额度卡作废（${agentName}）：${step}时宿主已换`), true);
   const prev = quotaCards.get(channelId);
   const tried = prev?.failureKey === f.key && prev.autoTried;
   if (tried && prev.auto) return; // 同一个失败重报：已经切过了，再切一次只会把卡顶掉
   const opts = parseConfigOptions(rawConfig);
   const config = opts.length ? opts : acpConfigOf(channelId);
   const plan = await planAcpQuota(channelId, agentName, f, config, label).catch((e) => void console.error(`⚠️ 额度卡凑不齐（照出原文卡）：${(e as Error).message}`));
-  if (!plan) return openQuotaCard(channelId, agentName, f, { title: `${label} 额度用完了`, context: f.message, choices: quotaCardChoices(config), quota: true });
+  if (retired("凑卡")) return;
+  if (!plan) return openQuotaCard(channelId, ws, agentName, f, { title: `${label} 额度用完了`, context: f.message, choices: quotaCardChoices(config), quota: true });
   let context = plan.context;
   if (plan.autoSwitch && plan.switched && !tried) {
+    // 上面刚核过、到这里没有 await：acpSetConfig 同步取到的就是报失败的那个宿主
     const r = await acpSetConfig(channelId, "model", plan.autoSwitch);
-    if (r.ok) return void openQuotaCard(channelId, agentName, f, { ...plan.switched, quota: false });
+    if (retired("切换")) return;
+    if (r.ok) return void openQuotaCard(channelId, ws, agentName, f, { ...plan.switched, quota: false });
     context = quotaCardText({ ...plan.facts, switchError: r.error ?? "宿主没说原因" });
   }
-  openQuotaCard(channelId, agentName, f, { title: `${label} 额度用完了`, context, choices: plan.choices, quota: true }, !!plan.autoSwitch);
+  openQuotaCard(channelId, ws, agentName, f, { title: `${label} 额度用完了`, context, choices: plan.choices, quota: true }, !!plan.autoSwitch);
 }
 
 /** autoTried：这个失败已经按备用链试过切换（成没成都算），重报不再试 */
-function openQuotaCard(channelId: string, agentName: string, f: AcpFailure, card: { title: string; context: string; choices: QuotaChoice[]; quota: boolean }, autoTried = !card.quota): void {
+function openQuotaCard(channelId: string, ws: Socket, agentName: string, f: AcpFailure, card: { title: string; context: string; choices: QuotaChoice[]; quota: boolean }, autoTried = !card.quota): void {
   // 同一个失败又报一次（原文、选项值都没变、卡还没人答）：沿用这张卡和它的代际，否则是新卡、旧卡的按钮作废。
   // 只比选项值：「等重置」按钮上的时刻文字会随时间变（「2 小时后」晚一分钟重报就不一样），按文字比会把还有效的卡换掉
   const values = (cs: QuotaChoice[]) => JSON.stringify(cs.map((c) => c.value));
   const prev = quotaCards.get(channelId);
-  const same = prev && !prev.claimed && prev.failureKey === f.key && prev.message === f.message && values(prev.choices) === values(card.choices);
-  const q: Quota = same ? prev : { gen: newGen(), failureKey: f.key, message: f.message, choices: card.choices, ...(card.quota ? {} : { auto: true as const }) };
+  const same = prev && !prev.claimed && prev.ws === ws && prev.failureKey === f.key && prev.message === f.message && values(prev.choices) === values(card.choices);
+  const q: Quota = same ? prev : { gen: newGen(), ws, failureKey: f.key, message: f.message, choices: card.choices, ...(card.quota ? {} : { auto: true as const }) };
   if (autoTried) q.autoTried = true;
   quotaCards.set(channelId, q);
   const buttons = q.choices.map((c, i) => ({ id: `${QUOTA_PREFIX}${q.gen}_${i}`, label: c.label, style: c.value === null ? "secondary" : "primary" }));
@@ -356,6 +364,12 @@ async function answerQuota(channelId: string, gen: string, idx: number, who: Who
   const q = quotaCards.get(channelId);
   const choice = q?.choices[idx];
   if (!q || q.gen !== gen || q.claimed || !choice) return stale("这张额度卡已经处理过或过期了");
+  // 出卡的宿主已经换了：卡上的模型选择是给退役会话的，不切新会话的模型；「等重置」照常结卡
+  if (choice.value !== null && extensionSocketOf(channelId) !== q.ws) {
+    quotaCards.delete(channelId);
+    settleRuntimeAsk("codex", channelId);
+    return stale("出这张卡的宿主已经换了，新会话没有撞这次额度；要换模型请在设置页里选");
+  }
   q.claimed = true; // 认领在第一个 await 之前：同一张卡的第二下、旧卡都到不了下面
   if (choice.value !== null) {
     const r = await acpSetConfig(channelId, "model", choice.value);

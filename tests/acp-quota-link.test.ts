@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { answerAcp, liveAcpButtons, onAcpFrame } from "../src/bridge/acp-link.ts";
+import { answerAcp, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
 import { useAcpQuotaPort } from "../src/bridge/acp-quota.ts";
 import { onAsk } from "../src/bridge/asks.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
@@ -113,5 +113,52 @@ describe("额度卡（acp-link 端到端）", () => {
     } finally {
       useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined });
     }
+  });
+});
+
+describe("额度处理途中换了宿主（Shawn PR1701-r1 P1 stale-quota-host-switch）", () => {
+  const CH2 = "local-acp-quota-swap";
+  const frame = (key: string) => ({ type: "acp_failure", channelId: CH2, failure: { kind: "quota", key, message: "Go usage limit exceeded" }, configOptions: QUOTA_CONFIG });
+  const calls = (x: { sent: any[] }) => x.sent.filter((f) => f.type === "acp_call");
+  const on = (codexQuota: () => Promise<null>) => useAcpQuotaPort({ codexQuota, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), agentOf: async () => undefined });
+  afterAll(() => useAcpQuotaPort());
+
+  test("凑卡时（读额度快照）换了宿主：新宿主收到 0 次调用，也不出卡", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    on(async () => (await gate, null));
+    const old = sock(CH2);
+    const done = onAcpFrame(frame("air:swap-plan"), old, discord);
+    await new Promise((r) => setTimeout(r, 0));
+    const fresh = sock(CH2);
+    release();
+    await done;
+    expect(calls(old)).toHaveLength(0);
+    expect(calls(fresh)).toHaveLength(0);
+    expect(liveAcpButtons(CH2).quota).toEqual([]);
+  });
+
+  test("等切换结果时换了宿主：只发给了旧宿主，新宿主 0 次调用，不出通知卡", async () => {
+    on(async () => null);
+    const old = sock(CH2);
+    const done = onAcpFrame(frame("air:swap-switch"), old, discord);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls(old)).toHaveLength(1);
+    const fresh = sock(CH2);
+    onAcpHostGone(CH2, old);
+    await done;
+    expect(calls(fresh)).toHaveLength(0);
+    expect(liveAcpButtons(CH2).quota).toEqual([]);
+  });
+
+  test("旧宿主出的额度卡，换了宿主后再点「切到 X」：409，新宿主 0 次调用", async () => {
+    useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined });
+    const old = sock(CH2);
+    await onAcpFrame(frame("air:swap-answer"), old, discord);
+    const [, luna] = liveAcpButtons(CH2).quota;
+    const fresh = sock(CH2);
+    expect(await answerAcp(CH2, luna!, who)).toMatchObject({ status: 409, body: { code: "ask_stale" } });
+    expect(calls(fresh)).toHaveLength(0);
+    expect(liveAcpButtons(CH2).quota).toEqual([]);
   });
 });
