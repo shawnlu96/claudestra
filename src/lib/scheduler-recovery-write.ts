@@ -18,7 +18,7 @@ import { fixDiffOf } from "./review-converge-scope.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { planScheduler } from "./scheduler-plan.js";
 import { currentReviewFacts } from "./scheduler-review.js";
-import { cleanCreateReceipt, createFailStreak } from "./scheduler-create-retry.js";
+import { cleanCreateReceipt, createFailReceipts } from "./scheduler-create-retry.js";
 import { classifyModelOutcome } from "./scheduler-model-outcome.js";
 import { failureText, fallbackAction, fallbackEpochEvent, fallbackFacts, fallbackKey, type FallbackFacts, type FallbackInput } from "./scheduler-review-fallback.js";
 import { openRefusal } from "./scheduler-review-swap.js";
@@ -204,9 +204,12 @@ function fallbackRead(db: Database, input: ReviewFallbackInput): { facts: Fallba
   const create = intent.action === "ensure_session", message = create ? intent.receipt ?? "" : input.failure.message;
   const judged = failureText(message, intent.taskId); // P2-6: quota read in the failure's own text, never in the card id the scheduler wrote
   const c = classifyModelOutcome({ failure: create ? { kind: "error", message: judged } : { ...input.failure, message: judged } });
-  const fi: FallbackInput = { intent, failed: input.failed, authorized: input.authorized, message, cls: c?.cls ?? null, recoverable: c?.recoverable ?? false,
-    row: getSchedulerSession(db, intent.taskId, "reviewer"), ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-    ...(create ? { cleanCreate: cleanCreateReceipt(intent.receipt), createStreak: createFailStreak(db, intent.taskId, "reviewer") } : {}) };
+  // a create streak counts toward a fallback only if none of its failures was a safety refusal (MODEL's recognition, every receipt)
+  const streak = create ? createFailReceipts(db, intent.taskId, "reviewer") : [];
+  const refused = streak.some((r) => classifyModelOutcome({ failure: { kind: "error", message: failureText(r, intent.taskId) } })?.cls === "safety");
+  const fi: FallbackInput = { intent, failed: input.failed, authorized: input.authorized, message, cls: refused ? "safety" : c?.cls ?? null,
+    recoverable: !refused && (c?.recoverable ?? false), row: getSchedulerSession(db, intent.taskId, "reviewer"), ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(create ? { cleanCreate: cleanCreateReceipt(intent.receipt), createStreak: streak.length } : {}) };
   const facts = fallbackFacts(db, fi);
   if (typeof facts === "string") return facts;
   const hold = openRefusal(listEvents(db, { project: facts.task.project, target: facts.task.id }));

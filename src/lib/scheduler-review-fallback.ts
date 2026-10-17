@@ -125,7 +125,8 @@ export interface FallbackFacts { task: LedgerTask; workflow: TaskWorkflow; trigg
 /**
  * Which trigger fires for this failed order, or why none. A review turn falls back only on the host's own quota answer: any other
  * failure (a too-long input, a refusal worded past MODEL's patterns) stays with MODEL / MODELX and PM, never to another family.
- * A create falls back on quota at once, otherwise after CREATE_FAIL_LIMIT clean failures in a row.
+ * A create falls back on quota at once, otherwise after CREATE_FAIL_LIMIT clean failures in a row — never when any failure of that
+ * streak is a safety refusal (PR1685-r1).
  */
 function trigger(i: FallbackInput, authorFamily: AuthorFamily): FallbackTrigger | string {
   const failedHere = (p: Placement) => p.family === i.failed.family && p.machine === i.failed.machine;
@@ -140,6 +141,8 @@ function trigger(i: FallbackInput, authorFamily: AuthorFamily): FallbackTrigger 
   }
   if (i.intent.action !== "ensure_session" || i.intent.status !== "cancelled" || !i.cleanCreate) return "不是干净失败的建审查会话";
   if (i.row?.state === "active") return "本卡已有在用的审查员";
+  // a safety refusal (or anything MODEL calls unrecoverable) stays with MODELX / PM: never a family switch, whatever the streak
+  if (i.cls === "safety" || (i.cls !== null && !i.recoverable)) return "建会话失败含安全拒绝或不可恢复，不降级、不换族";
   if (i.cls === "capacity") return "create_quota";
   return (i.createStreak ?? 0) >= CREATE_FAIL_LIMIT ? "create_streak" : `建会话失败未满 ${CREATE_FAIL_LIMIT} 次且不是额度类`;
 }

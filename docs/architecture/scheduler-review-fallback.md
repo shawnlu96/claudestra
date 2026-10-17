@@ -27,7 +27,9 @@ replacement built by the swap runtime (`createReplacement` goes through `retryCl
 MODELX `-ex` replacements back off on a clean failure instead of stopping as unknown; on a card without one they create exactly
 as before).
 
-Never a fallback: an author's failure (its family is the workflow's, MODEL's own path); a policy refusal (MODELX's exemption);
+Never a fallback: an author's failure (its family is the workflow's, MODEL's own path); a policy refusal (MODELX's exemption) —
+on the create path too: if any receipt of the current clean-failure streak is a safety refusal (MODEL's recognition, even mixed
+with quota wording), the card keeps backing off for PM, with no epoch and no family switch;
 a card with an open safety hold or refusal continuation; a reviewer that is already the author's family.
 
 ## The epoch

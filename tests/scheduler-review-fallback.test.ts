@@ -223,6 +223,23 @@ describe("reviewer create fails (acceptance 1 addendum: the 10-16 NRT-1 path)", 
     expect(epochs()[0].data.fallback).toMatchObject({ trigger: "create_streak" });
   });
 
+  const REFUSED = (n: number, more = "") => `建会话失败，现场已清理（reviewer agent-rv-t1 第 ${n} 次；2 分钟后重试）：创建失败: 引导轮失败：${more}` +
+    "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup).";
+  for (const [what, receipts] of [["three bootstrap receipts that are safety refusals", [REFUSED(1), REFUSED(2), REFUSED(3)]],
+    ["a refusal mixed with quota wording, then plain errors", [REFUSED(1, "429 rate limit exceeded; "), CREATE_ERROR(2), CREATE_ERROR(3)]]] as const) {
+    test(`a safety refusal in the create streak never falls back (PR1685-r1, ${what}): no epoch, no family switch`, async () => {
+      await delivered();
+      failCreates(...receipts);
+      for (let n = 0; n < receipts.length; n++) {
+        expect(await tick()).toMatchObject({ step: "waiting" });
+        f.advance(20 * 60_000); // past retryCleanCreate's backoff
+      }
+      expect(epochs()).toEqual([]);
+      expect(created).toEqual([]);
+      expect(ops("recovery_observe").filter((e) => e.data.mechanism === "reviewFallback")).toEqual([]);
+    });
+  }
+
   test("a card id like CI-429 never reads as quota: only the failure's own text is judged (P2-6)", () => {
     const receipt = "未建：建会话失败，现场已清理（reviewer agent-rv-ci-429 第 1 次；2 分钟后重试）：创建失败: 窗口起不来（rv-ci-429 已清理）";
     expect(classifyModelOutcome({ failure: { kind: "error", message: receipt } })?.cls).toBe("capacity"); // what the whole receipt would say
