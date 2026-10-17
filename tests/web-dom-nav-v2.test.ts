@@ -8,8 +8,7 @@ import { navDom, type NavDomView, type NavOptions, TEAM_NAME } from "./helpers/n
 
 const opts: NavOptions = { navV2: true };
 // 带 react 的 web 模块：运行时加载，不进根 tsc
-const web = <T>(p: string) => require(`../web/features/${p}`) as T;
-const navTab = () => web<{ resetNavTab(): void; setTab(t: string): void }>("nav/nav-tab.ts");
+const navTab = () => require("../web/features/nav/nav-tab.ts") as { resetNavTab(): void; setTab(t: string): void };
 let dom: Awaited<ReturnType<typeof navDom>>;
 beforeAll(async () => { dom = await navDom(opts, () => ({
   sidebar: require("../web/features/chat/components/sidebar.tsx"), store: require("../web/features/chat/chat-store.ts"),
@@ -36,10 +35,11 @@ const section = (v: NavDomView, id: string) => v.host.querySelector(`[data-v2-se
 /** 弹窗 portal 在 host 外：从整个 body 找（根 tsc 没有 DOM 类型，经 v.all 取） */
 const inBody = (v: NavDomView, sel: string) => v.all(sel)[0] ?? null;
 /** 主区协作层；notices 用探针代替真的同步条 / 更新提示（那两个要构建时生成的 build-info） */
-const CollabSwitch = () => web<{ CollabSwitch(p: { notices: unknown }): unknown }>("collab/collab-switch.tsx").CollabSwitch({ notices: dom.React.createElement("i", { "data-notice-probe": "" }) });
+const CollabSwitch = () => (require("../web/features/collab/collab-switch.tsx") as { CollabSwitch(p: { notices: unknown }): unknown })
+  .CollabSwitch({ notices: dom.React.createElement("i", { "data-notice-probe": "" }) });
 
 test("[验收线 2] 读取规则：读到就用、读失败保留上次值、从没读到按缺省开", () => {
-  const { resolveNavV2 } = web<{ resolveNavV2(r: boolean | null, l: boolean | null): boolean }>("nav/nav-v2.ts");
+  const { resolveNavV2 } = require("../web/features/nav/nav-v2.ts") as { resolveNavV2(r: boolean | null, l: boolean | null): boolean };
   expect([resolveNavV2(null, null), resolveNavV2(null, false), resolveNavV2(null, true)]).toEqual([true, false, true]);
   expect([resolveNavV2(false, true), resolveNavV2(true, false)]).toEqual([false, true]);
 });
@@ -108,7 +108,7 @@ test("[验收线 1][验收线 4] 1280 新版：侧栏常驻会话列表，今天
   expect(v.all("[data-v2-host=main] [data-v2-notices] [data-notice-probe]")).toHaveLength(1); // 同步 / 更新提示跟着宿主上来（E02 / E03）
   await v.click(tab(v, "rail", "projects"), "projects");
   await v.until(() => v.all("[data-v2-host=main] [data-v2-section=projects] [data-now-project]").length === 4, "main projects");
-  const { closingCollab } = web<{ closingCollab(fn: () => void): () => void }>("collab/collab-switch.tsx");
+  const { closingCollab } = (require("../web/features/collab/collab-switch.tsx") as { closingCollab(fn: () => void): () => void });
   let opened = 0;
   await dom.React.act(async () => closingCollab(() => { opened++; })());
   expect([opened, current(v, "main"), tab(v, "rail", "sessions")?.getAttribute("aria-current")]).toEqual([1, null, "page"]);
