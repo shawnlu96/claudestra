@@ -146,6 +146,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-train-gh.ts": "fs=1 vcs=1",
     "scheduler-merge-train-tick.ts": "fs=1 notice=2",
     "scheduler-merge-train.ts": "notice=2",
+    "scheduler-post-verify-pull.ts": "ledger=3", // Batch candidates pass schedulerV2SkipTask; per-card observation writes use the guarded manager.
     "session-archive.ts": "fs=1",
     "spec-lint-observation.ts": "fs=2",
   },

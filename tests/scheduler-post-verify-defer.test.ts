@@ -13,6 +13,7 @@ import { createFeature } from "../src/lib/ledger-feature-write.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { importTask, setMeta } from "../src/lib/ledger-write.js";
 import { statePath } from "../src/lib/paths.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { classifyPmPush } from "../src/lib/pm-digest.js";
 import { readSwitch } from "../src/lib/scheduler-autostart.js";
 import { autostartTick, type StartTickEnv } from "../src/lib/scheduler-autostart-run.js";
@@ -72,6 +73,7 @@ const isPostVerify = (text: string) =>
   classifyPmPush({ fromKind: "local", sender: "scheduler", intent: "request", triggerKind: "agent_tool", oneShot: true, body: text });
 
 beforeEach(() => {
+  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { [P]: { keys: { postVerifyPull: "off" } } } }));
   clock = Date.now();
   T = clock;
   seq = 0;
@@ -86,6 +88,7 @@ beforeEach(() => {
   setAutostartSwitch(db, { actor: PM, now: clock + seq++ }, { project: P, on: true, featureId: fid, pm: X, reason: "测试" });
 });
 afterEach(() => {
+  rmSync(RECOVERY_POLICY_PATH, { force: true });
   for (const s of sent) {
     expect(s.text).toStartWith("[上线后待办] ");
     expect(isPostVerify(s.text)).toMatchObject({ send: "digest", kind: "post-verify" });
