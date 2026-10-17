@@ -329,6 +329,43 @@ test("G-1 反转：一串没救回来之后，网络类槽上的等续跑标记�
   });
 });
 
+/** bridge.ts 收到 owner 在 target 频道发的话：等续跑的不算接管，否则清掉这个频道的回程槽（clearInterAgentPendingsForChannel → dropChannel） */
+const ownerSays = (h: ReturnType<typeof harness>) => {
+  if (!h.book.awaitingResume(h.cid, () => false)) h.book.dropChannel(h.cid);
+  noteDelivered(h.cid, { kind: "user", owner: true }, Date.now(), true, false);
+};
+
+test("G-1 反转：清掉标记后 owner 在 X 频道发话算接管，X 和 owner 聊的那一轮不兜底推给 c-pm；这一串没结束时发话照旧不算接管", async () => {
+  await withClock(async (advance) => {
+    const h = harness();
+    h.ask(false);
+    await h.round(false);
+    ownerSays(h); // 退避中：等续跑，不算接管
+    expect(h.book.waiting(h.cid, () => false)).toHaveLength(1);
+    noteActivity(h.states, h.cid, Date.now() + 10_000); // owner 的话让它动了：这一串「停了」，标记清掉
+    await settle();
+    expect(h.of("c-pm")).toContain("STOPPED");
+    advance(60_000);
+    ownerSays(h); // 这时再发话：接管
+    await h.stop("Stop", { text: "（和 owner 聊别的事）" });
+    expect(h.pushed).toEqual([]);
+    expect(h.expired).toEqual([]);
+  });
+});
+
+test("CC 撞 API 错误后的升级不受影响：没有登记「正在重试」的请求方，槽上的等续跑标记照旧留着", async () => {
+  const h = harness();
+  h.ask(false);
+  const turn = (event: string) => settleStopTurn(h.deps,
+    { cid: h.cid, stopChannelId: h.cid, stopWs: 1, candidateWs: 1, event, drain: { text: null, apiError: true, error: { error: "overloaded_error", text: "API Error: 529 Overloaded" } } });
+  await turn("StopFailure"); // Claude Code（runtime 缺省）
+  expect(h.book.awaitingResume(h.cid, () => false)).toBe(true);
+  expect(h.outage(TRANSIENT_BACKOFF_MS.length).r).toBe("escalate");
+  await turn("StopFailure");
+  await settle();
+  expect(h.book.awaitingResume(h.cid, () => false)).toBe(true);
+});
+
 test("P2-1：退避中 bridge 重启，续跑那一轮正常结束、没调 reply() → drain 的答复照撞错那一轮的来源推回请求方，2 小时扫槽不再推「没接着做完」", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nrt2-restart-src-"));
   const path = join(dir, "api-error-resume.json");
