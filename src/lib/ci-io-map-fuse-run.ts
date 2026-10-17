@@ -171,7 +171,7 @@ async function act(port: FusePort, c: FuseCase, e: FuseEvidence): Promise<Outcom
 async function settle(port: FusePort, c: FuseCase, mode: RecoveryMode, first?: FuseRun, own = c): Promise<Outcome> {
   if (mode === "on") { // a write an earlier pass sent and never recorded as done: observe now means it took
     const left = port.ledger.unsettled(own);
-    if (left && await port.gh.ioMapVar(c.repo) === "observe") return lowered(port, c, left.key, left.evidence, "settled");
+    if (left && await port.gh.ioMapVar(c.repo) === "observe") return lowered(port, own, left.key, left.evidence, "settled");
   }
   const got = await gather(port.gh, c, first);
   if (!("evidence" in got)) return got;

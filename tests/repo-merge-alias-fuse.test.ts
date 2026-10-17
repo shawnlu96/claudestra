@@ -84,3 +84,26 @@ describe("[fuse-carry] old-name cases left open before the config moved to the n
     }
   });
 });
+
+describe("[fuse-carry] a write an earlier pass sent for an old-name case, settled after the config moved to the new name", () => {
+  test("on: GitHub is read under the configured name; pending, try, closed and done all keep the case's own name", async () => {
+    setRepoAliasForTest({ mode: "on", sink: () => {} });
+    const db = openLedger(":memory:"), ledger = fuseLedger(db, () => 1_000), reads: string[] = [], writes: string[] = [];
+    const c: FuseCase = { project: "p", repo: OLD, train: "x", car: "c1", branch: "train/x", runId: 1, members: [], attempt: 1 };
+    const e = { repo: OLD, project: "p", train: "x", car: "c1", members: [], run: { id: 1, attempt: 1, head: H1, tested: H1, planDigest: "d".repeat(64) }, files: ["tests/a.test.ts"], omissions: [] };
+    ledger.pend(c);
+    ledger.tryWrite(c, "k1", e); // the process stopped after the write, before the done record
+    const gh = { ioMapVar: async (repo: string) => { reads.push(repo); return "observe"; }, lowerIoMapVar: async (repo: string) => { writes.push(repo); } } as unknown as CiIoMapFuseGh;
+    const port = { mode: () => "on", projectRepo: () => NEW, gh, ledger, now: () => 1_000, pm: async () => {}, skip: () => false } as unknown as FusePort;
+    const orig = console.log;
+    console.log = () => {};
+    try { await ciIoMapFuseHook(port).carry("p"); } finally { console.log = orig; }
+    try {
+      const steps = (db.query("SELECT data FROM events WHERE project = 'p' ORDER BY seq").all() as { data: string }[]).map((r) => JSON.parse(r.data) as { step: string; case?: unknown });
+      const ids = (step: string) => steps.filter((s) => s.step === step).map((s) => (typeof s.case === "string" ? s.case : null));
+      expect({ reads, writes }).toEqual({ reads: [NEW], writes: [] });
+      expect([ids("try"), ids("done"), ids("closed")]).toEqual([[`${OLD}#1#1`], [`${OLD}#1#1`], [`${OLD}#1#1`]]);
+      expect([ledger.openCases("p", 0), ledger.unsettled(c)]).toEqual([[], null]);
+    } finally { closeLedger(":memory:"); }
+  });
+});
