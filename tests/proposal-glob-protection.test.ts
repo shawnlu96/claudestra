@@ -60,6 +60,19 @@ test("PM boundary: star alone does not invent a protected word; tracked matches 
     expect(on(unanchored).map(h => h.reason)).not.toContain("glob_security_surface");
 });
 
+test("char-class-anchor: bounded spelling variants preserve star anchors after expansion", () => {
+  const variants = ["to[k]*", "au[t]*", "[a]ut*", "new-s[e]c*", "new-[s]ec*", "new-se[c]*", "pe[r]m*", "*c[r]et",
+    "to?*", "?ut*", "new-s?c*", "pe?m*", "*c?et", "[t][o][k]*", "new-???*", "*???t",
+    "new-s[eE]c*", "new-s{e,{E,x}}c*"];
+  for (const files of [[], repoFiles()]) for (const variant of variants) {
+    const g = `src/lib/${variant}.ts`;
+    expect(on(g, files).some(h => h.reason === "glob_security_surface")).toBe(true);
+  }
+  for (const g of ["src/lib/plain-*.ts", "src/lib/new-se*.ts", "src/lib/new-[s]e*.ts", "src/lib/new-s?*.ts"])
+    expect(on(g)).toEqual([]);
+  for (const variant of variants) for (const root of ["tests", "docs"]) expect(on(`${root}/${variant}.ts`)).toEqual([]);
+});
+
 test("bounded spellings cover every keyword, preserve ranges, case and nested brace alternatives", () => {
   for (const word of KEYWORDS) {
     for (let i = 0; i < word.length; i++) {

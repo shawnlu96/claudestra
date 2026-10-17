@@ -120,8 +120,9 @@ function spelling(ts: Token[], word: string, b: Budget): string[] {
         queue.push({ ...s, i: s.i + 1, run: 0 });
         queue.push({ ...s, k: s.k + 1, star: true, run: 0, text: s.text + word[s.k] });
       } else if (t.accepts(word[s.k]!)) {
-        const run = t.kind === "literal" ? s.run + 1 : 0;
-        const adjacent = ts[s.i - run]?.kind !== "literal" && s.i - run >= 0 || ts[s.i + 1]?.kind !== "literal" && s.i + 1 < ts.length;
+        // Bounded constructs contribute their matched letter before anchor counting; to[k]* must behave like tok*.
+        const run = s.run + 1;
+        const adjacent = ts[s.i - run]?.kind === "star" || ts[s.i + 1]?.kind === "star";
         queue.push({ i: s.i + 1, k: s.k + 1, star: s.star, anchor: s.anchor || run >= threshold && adjacent,
           run, text: s.text + word[s.k] });
       }
