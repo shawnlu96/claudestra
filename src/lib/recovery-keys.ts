@@ -137,6 +137,7 @@ export const RECOVERY_KEYS = [
   "uiOwnerReask",
   "uiReviewCarry",
   "unifiedMergeQueue",
+  "unionLaneShare",
   "updateGap",
   "verifyAfterResolve",
   "wakeStopped",
