@@ -118,7 +118,8 @@ afterAll(async () => {
     }, null, 2), { mode: 0o600 });
   } finally {
     server?.stop(true);
-    try { await browser?.close(); }
+    // CI saw browser.close() stall past the hook timeout after every test passed; bound it, bun reaps Chromium at exit.
+    try { await Promise.race([browser?.close(), Bun.sleep(10_000)]); }
     finally { rmSync(scratch, { recursive: true, force: true }); }
   }
 }, TEST_TIMEOUT_MS);
