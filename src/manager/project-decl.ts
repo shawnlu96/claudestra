@@ -3,10 +3,11 @@ import { readFileSync } from "node:fs";
 import { PROJECTS_PATH, type ProjectDef } from "../lib/projects.js";
 import { loadProjectDeclaration } from "../lib/project-decl.js";
 import { declarationDiagnostic, parseProjectJson } from "../lib/project-decl-schema.js";
+import { outputSync } from "./core.js";
 
 interface CommandPorts { projectsPath?: string; output?: (value: unknown) => void; exitCode?: (code: number) => void }
 export function cmdProjectDecl(args: string[], ports: CommandPorts = {}): void {
-  const out = ports.output ?? ((value) => console.log(JSON.stringify(value, null, 2)));
+  const out = ports.output ?? ((value) => outputSync(JSON.stringify(value, null, 2)));
   const exit = ports.exitCode ?? ((code) => { process.exitCode = code; });
   const [projectId, action, repoDir, targetBranch] = args;
   if (!projectId || !["show", "validate", "explain"].includes(action) || args.length > 4) {

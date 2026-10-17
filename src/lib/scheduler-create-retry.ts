@@ -12,6 +12,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import type { RegistryRow } from "./scheduler-auto-ports.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
+import { lastFallbackSeq } from "./scheduler-review-fallback.js";
 
 export { addAuthorWorktree, reusableAuthorWorktree } from "./scheduler-create-retry-worktree.js";
 
@@ -30,14 +31,23 @@ export const createCleanedUp = (r: { ok: boolean; steps: string[] }): boolean =>
 
 export const createRetryDelay = (n: number): number => Math.min(CREATE_RETRY_BASE_MS * 2 ** (Math.max(n, 1) - 1), CREATE_RETRY_CAP_MS);
 
-/** Consecutive clean create failures of this card's role, newest first; any other settled ensure_session ends the streak. */
+/** A cancelled ensure_session receipt of a create that failed and left nothing behind (RVF-1 reads it as a fallback trigger). */
+export const cleanCreateReceipt = (receipt: string | null | undefined): boolean => !!receipt?.startsWith(RECEIPT);
+
+/**
+ * Consecutive clean create failures of this card's role, newest first; any other settled ensure_session ends the streak, and so
+ * does a reviewer fallback epoch (RVF-1: the same-family reviewer it plans starts with no backoff of its own).
+ */
 function streak(db: Database, taskId: string, role: SessionRole): { n: number; last: number } {
+  const since = role === "reviewer" ? lastFallbackSeq(db, taskId) : 0;
   const rows = db.query(`SELECT receipt, updatedAt FROM scheduler_intents WHERE taskId = ? AND action = 'ensure_session'
-    AND (node = 'adversarial_review') = ? AND status NOT IN ('pending','submitted') ORDER BY eventSeq DESC LIMIT 100`)
-    .all(taskId, role === "reviewer" ? 1 : 0) as { receipt: string | null; updatedAt: number }[];
+    AND (node = 'adversarial_review') = ? AND status NOT IN ('pending','submitted') AND eventSeq > ? ORDER BY eventSeq DESC LIMIT 100`)
+    .all(taskId, role === "reviewer" ? 1 : 0, since) as { receipt: string | null; updatedAt: number }[];
   const n = rows.findIndex((r) => !r.receipt?.startsWith(RECEIPT));
   return { n: n === -1 ? rows.length : n, last: rows[0]?.updatedAt ?? 0 };
 }
+
+export const createFailStreak = (db: Database, taskId: string, role: SessionRole): number => streak(db, taskId, role).n;
 
 /** Planner gate: while the backoff of the last clean failure runs, the same ensure_session is not planned again. */
 export function createRetryBackoff(db: Database, taskId: string, role: SessionRole, now: number): string | null {

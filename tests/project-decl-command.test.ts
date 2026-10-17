@@ -52,7 +52,9 @@ describe("read-only command surface", () => {
       const r = Bun.spawnSync([process.execPath, "--no-env-file", join(import.meta.dir, "../src/manager.ts"), "project-decl", f.project.id, action],
         { stdout: "pipe", stderr: "pipe", env: { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "runtime"),
           FLOKA_STATE_DIR: state, FLOKA_RUNTIME_DIR: join(state, "runtime") } });
-      expect(r.exitCode).toBe(0); expect(JSON.parse(r.stdout.toString()).source).toBe("target");
+      const stdout = r.stdout.toString(), result = JSON.parse(stdout);
+      expect(r.exitCode).toBe(0); expect(result.source).toBe("target");
+      expect(stdout).toBe(JSON.stringify(result, null, 2) + "\n");
       expect(readdirSync(state).sort()).toEqual(action === "show" ? ["projects.json"] : ["logs", "projects.json"]);
       if (action !== "show") {
         expect(readdirSync(join(state, "logs"))).toEqual(["cron.out"]);

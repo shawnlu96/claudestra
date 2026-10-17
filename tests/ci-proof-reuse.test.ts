@@ -391,7 +391,20 @@ describe("[验收线 4] one verification for every merge path; a hit or a failed
 
   test("only the proof verifier and the two CI scripts import the reuse module: trains, the serial driver, manual queues and PM ops do not", () => {
     const ls = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "src", "scripts"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\n").filter((p) => /\.ts$/.test(p));
-    const users = ls.filter((p) => p !== "src/lib/ci-proof-reuse.ts" && /ci-proof-reuse(-verify)?\.(js|ts)"/.test(readFileSync(join(ROOT, p), "utf8")));
+    const transpiler = new Bun.Transpiler({ loader: "ts" });
+    const modules = new Set(["ci-proof-reuse.ts", "ci-proof-reuse.js", "ci-proof-reuse-verify.ts", "ci-proof-reuse-verify.js"]);
+    const importsReuse = (source: string) => {
+      // Scan dependencies rather than basis data or comments; the scanner expects shebangs to be removed.
+      const code = source.startsWith("#!") ? source.slice(source.indexOf("\n") + 1) : source;
+      return transpiler.scanImports(code).some((i) => modules.has(i.path.split("/").at(-1)!));
+    };
+    expect(importsReuse('export const basis = [{ path: "src/lib/ci-proof-reuse.ts" }];')).toBe(false);
+    expect(importsReuse('import { runCheck } from "./ci-proof-reuse.ts";')).toBe(true);
+    expect(importsReuse("export { runCheck } from './ci-proof-reuse.js';")).toBe(true);
+    expect(importsReuse('const reuse = import("./ci-proof-reuse-verify.ts");')).toBe(true);
+    expect(importsReuse('const reuse = require("./ci-proof-reuse.js");')).toBe(true);
+    expect(importsReuse('#!/usr/bin/env bun\nimport "./ci-proof-reuse-verify.js";')).toBe(true);
+    const users = ls.filter((p) => p !== "src/lib/ci-proof-reuse.ts" && importsReuse(readFileSync(join(ROOT, p), "utf8")));
     expect(users.sort()).toEqual(["scripts/ci-proof-reuse-verify.ts", "scripts/ci-proof-reuse.ts", "src/lib/ci-proof.ts", "src/lib/scheduler-ci-proof-port.ts"]);
     const lib = readFileSync(join(ROOT, "src", "lib", "ci-proof-reuse.ts"), "utf8");
     for (const m of lib.matchAll(/^import [^;]*? from "([^"]+)";/gm)) expect(m[1]!).toMatch(/^(node:[\w/]+|\.\/[\w-]+\.js)$/);
