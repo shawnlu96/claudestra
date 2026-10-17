@@ -98,7 +98,10 @@ describe("channel-server 生命周期（CSO-1）", () => {
     execFileSync("mkfifo", [fifo]);
     const fd = openSync(fifo, "r+");
     const parentSrc = `Bun.spawn([process.execPath, ${JSON.stringify(SERVER)}], { stdin: "inherit", stdout: "inherit", stderr: "ignore" }); setInterval(() => {}, 1e9);`;
-    const parent = Bun.spawn([process.execPath, "-e", parentSrc], { stdin: fd, stdout: "pipe", stderr: "ignore", env: serverEnv("999000502") });
+    // The shell opens the FIFO inside the child, so Bun never owns this test's fd: handing Bun a numeric stdin fd that the test then
+    // closeSync()s can close a reused fd number later in the same bun process (seen as fs.watch EINVAL in tool-display-format on CI).
+    const parent = Bun.spawn(["/bin/sh", "-c", 'exec "$1" -e "$2" < "$3"', "cso1", process.execPath, parentSrc, fifo],
+      { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: serverEnv("999000502") });
     let childPid = 0;
     try {
       const reg = await handshake((s) => { writeSync(fd, s); }, parent.stdout as ReadableStream<Uint8Array>, "999000502");
