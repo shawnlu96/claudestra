@@ -4,16 +4,17 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type BackgroundState, type Inspection, LEND_PRECHECK_PROJECT, type PrecheckReceipt, precheckHooks, type PrecheckPort } from "../src/lib/ci-deliver-precheck.js";
+import { type BackgroundState, type Inspection, LEND_PRECHECK_PROJECT, lendSubmitPrecheck, type PrecheckReceipt, precheckHooks, type PrecheckPort } from "../src/lib/ci-deliver-precheck.js";
 import { advance, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { submitLendWork, type SubmitterDeps } from "../src/lib/lend-submit.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { runLedger } from "../src/manager/ledger.js";
+import { passGraph } from "../scripts/skip-effects.ts";
 
 const H = "a".repeat(40), START = "b".repeat(40);
 const ins = (o: Partial<Inspection> = {}): Inspection => ({
@@ -125,7 +126,8 @@ describe("manager deliver（ledger deliver）", () => {
 describe("worker submitLendWork", () => {
   let jdb: Database;
   const dir = mkdtempSync(join(tmpdir(), "precheck-submit-"));
-  const deps: SubmitterDeps = { cwd: dir, pid: 10, agentSession: () => "s1", panePid: async () => 7, ancestors: async () => [7], headOf: async () => H };
+  const deps: SubmitterDeps = { cwd: dir, pid: 10, agentSession: () => "s1", panePid: async () => 7, ancestors: async () => [7], headOf: async () => H,
+    precheck: lendSubmitPrecheck }; // 与 src/manager/lend-submit.ts realDeps 同一接线
   beforeEach(() => {
     jdb = openLendJournal(join(mkdtempSync(join(tmpdir(), "precheck-journal-")), "j.sqlite"));
     recordAsked(jdb, { orderId: "o1", peer: "a", fp: null, family: "claude", preview: {} });
@@ -158,5 +160,13 @@ describe("worker submitLendWork", () => {
     const r = await submit();
     expect(calls).toEqual({ inspect: 0, run: 0 });
     expect(r).toMatchObject({ ok: true, duplicate: false });
+  });
+});
+
+describe("接线位置", () => {
+  test("真实 lend submit 依赖接上预检；调度遍历的效果图够不到预检模块（它 spawn 的 git / bun test 不进 schedulerPass）", () => {
+    const real = readFileSync(join(import.meta.dir, "..", "src", "manager", "lend-submit.ts"), "utf8");
+    expect(real).toContain("precheck: (dir, head) => lendSubmitPrecheck(dir, head),");
+    expect(passGraph().map((f) => f.name).filter((n) => n.startsWith("ci-deliver-precheck"))).toEqual([]);
   });
 });
