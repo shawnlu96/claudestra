@@ -10,7 +10,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 
 const USAGE = "tier-lend-settings [show] | set on|off --rev <n>（出借方是否在授权内接受借入方的降档建议；只有 owner / master 能改）";
 
-function run(c: LedgerCli) {
+async function run(c: LedgerCli) {
   const [, action = "show", value, ...extra] = c.p.pos;
   if (action === "show") {
     if (value !== undefined) throw new LedgerError("invalid", "show 不带参数");
@@ -22,7 +22,7 @@ function run(c: LedgerCli) {
   const rev = Number(c.need("rev"));
   if (!Number.isInteger(rev) || rev < 0) throw new LedgerError("invalid", "--rev 要是 show 读到的版本号");
   const ctx = c.ctx();
-  const r = saveTierLendSettings({ kind: "actor", actor: ctx.actor }, { rev, acceptDowngrade: value === "on" }, ctx.now ?? Date.now());
+  const r = await saveTierLendSettings({ kind: "actor", actor: ctx.actor }, { rev, acceptDowngrade: value === "on" }, ctx.now ?? Date.now());
   if (!r.ok) throw new LedgerError(r.code === "forbidden" ? "forbidden" : r.code === "conflict" ? "conflict" : "busy", r.error);
   return { ok: true, acceptDowngrade: r.settings.acceptDowngrade, rev: r.settings.rev };
 }
