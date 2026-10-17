@@ -27,8 +27,10 @@ function hostIndex(words: string[]): number | null {
   return i;
 }
 
+/** Remote classification assumes a POSIX/bash-compatible login shell, as isReadOnlyBash does.
+ * csh/tcsh fd syntax is not modeled; this is evidence classification, never an execution grant. */
 export function isReadOnlySentinelSsh(command: string, safeRedirects = false): boolean {
-  if (safeRedirects) {
+  if (safeRedirects && parseShell(command).segments.some((s) => s.redirects.length)) {
     const stripped = sentinelSafeRedirects(command);
     if (stripped === null) return false;
     command = stripped;
@@ -41,7 +43,8 @@ export function isReadOnlySentinelSsh(command: string, safeRedirects = false): b
   if (i === null || !segment.words[i] || segment.words[i].startsWith("-")) return false;
   // ssh 会把远程 argv 用空格连接后交给远端 shell；不能逐个参数判只读。
   const rawRemote = segment.words.slice(i + 1).join(" ");
-  const remote = safeRedirects ? sentinelSafeRedirects(rawRemote, true) : rawRemote;
+  const hasRedirects = parseShell(rawRemote).segments.some((s) => s.redirects.length);
+  const remote = safeRedirects && hasRedirects ? sentinelSafeRedirects(rawRemote, true) : rawRemote;
   if (remote === null) return false;
   const parsed = parseShell(remote);
   if (parsed.segments.some((s) => s.dynamic || s.redirects.some((r) => r.op !== "<"))) return false;

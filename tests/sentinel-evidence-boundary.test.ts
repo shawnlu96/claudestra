@@ -211,6 +211,8 @@ describe("recovery modes", () => {
           assert(text.includes(boundary === "on" ? "越界：无" : "越界：试点只读"), text);
         }
       }
+      assert(samples().some(e => e.data.run?.jobId === "pilot" && e.data.run.agent === "pilot" &&
+        e.data.run.sessionId === "session" && e.data.run.runKey === run.key));
       console.log(JSON.stringify({ combinations: n, observed: samples().length }));
     `;
     try {
@@ -235,5 +237,57 @@ describe("SENTBOUND1 defect reproductions", () => {
   test("ssh-devnull-2: a literal remote null sink and numeric fd copy are read-only evidence", () => {
     const ev = collect([tool(9000, "Bash", { command: "ssh host 'cat /sample 2>/dev/null 1>&2'" })]);
     expect(ev.evidence).toMatchObject({ tools: 1, mutating: 0 });
+  });
+});
+
+describe("r1 review regressions", () => {
+  const codex = (at: number, payload: unknown) => JSON.stringify({ type: "response_item", timestamp: new Date(start + at).toISOString(), payload });
+  const message = (at: number, role: string, text: string) => codex(at, {
+    type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+  });
+  const codexCollect = (middle: string[], mode: RecoveryMode = "on") => collectRunEvidence([
+    message(9000, "assistant", "哨兵结果:异常"), ...middle, message(11_000, "assistant", "哨兵结果:正常"),
+  ], window, { runtime: "codex", boundary: { policy: policy(mode), observe: () => {} } });
+  for (const text of [
+    "plain human prompt",
+    '<channel source="claudestra" is_agent="false">human</channel>',
+    '<channel source="claudestra" is_agent="true">another task</channel>',
+    '<channel source="claudestra" is_agent="false">[button:go]</channel>',
+    '[claudestra:context]\nRole preamble mentioning <channel ...>\n\n<channel source="claudestra">next</channel>',
+  ]) test(`codex-meta-turn-1: actual channel prompt seals the old turn: ${text}`, () => {
+    const middle = [message(10_001, "user", text)];
+    expect(codexCollect(middle).result?.verdict).toBe("异常");
+    for (const mode of ["off", "observe"] as const) expect(codexCollect(middle, mode).result?.verdict).toBe("正常");
+    expect(codexCollect(middle).evidence.humanInterleaved).toBe(false);
+  });
+  test("codex-meta-turn-1: real context, tools and CC metadata still allow late results", () => {
+    for (const middle of [
+      message(10_001, "user", "<environment_context>context</environment_context>"),
+      message(10_001, "user", "[claudestra:context]\nPreamble only mentioning <channel ...>"),
+      message(10_001, "developer", '<channel source="claudestra">instructions</channel>'),
+      codex(10_001, { type: "function_call_output", call_id: "t", output: '<channel source="claudestra">tool data</channel>' }),
+    ]) expect(codexCollect([middle]).result?.verdict).toBe("正常");
+    expect(collect([say(9000, "异常"), line("user", 10_001, '<channel source="claudestra">metadata</channel>', { isMeta: true }), say(11_000)])
+      .result?.verdict).toBe("正常");
+  });
+  test("observe-sample-1: identify the run and keep the dedup key stable as nextDispatchAt changes", () => {
+    const actions: ObservedAction[] = [];
+    const run = { jobId: "pilot", agent: "sentinel", sessionId: "session", runKey: "pilot@1" };
+    const lines = [say(9000, "异常"), line("user", 10_001, "next"), say(11_000)];
+    for (const nextDispatchAt of [undefined, start + 50_000]) collectRunEvidence(lines, { ...window, nextDispatchAt }, {
+      run, boundary: { policy: policy("observe"), observe: (a) => actions.push(a) },
+    });
+    expect(actions).toHaveLength(2);
+    expect(actions[0].target).toBe(""); // Cron jobs are not valid ledger task/item targets.
+    expect(actions[0].data?.run).toEqual(run);
+    expect(actions[0].actionKey).toBe(actions[1].actionKey);
+  });
+  for (const command of [
+    "ssh host 'cat x # note'", "ssh host 'cat x{y}'", "ssh host 'cat x 2>/dev/null # note'",
+  ]) test(`lexer-narrow-1: preserve safe lexical forms: ${command}`, () => {
+    expect(isReadOnlySentinelSsh(command, true)).toBe(true);
+  });
+  test("lexer-narrow-1: comments never hide a later mutating segment", () => {
+    expect(isReadOnlySentinelSsh("ssh host 'cat x 2>/dev/null # note\nrm x'", true)).toBe(false);
   });
 });

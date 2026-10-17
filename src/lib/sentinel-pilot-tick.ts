@@ -73,7 +73,8 @@ async function sessionFor(r: CronRunRecord, job: CronJob, readSession: SentinelT
   if (!r.targetSessionId) return { kind: "no_session_id" };
   const s = await readSession(r.targetSessionId);
   if ("error" in s) return { kind: "unreadable", why: s.error };
-  return { kind: "ok", ev: collectRunEvidence(s.lines, w, { runtime: s.runtime, prompt: job.prompt }) };
+  return { kind: "ok", ev: collectRunEvidence(s.lines, w, { runtime: s.runtime, prompt: job.prompt,
+    run: { jobId: job.id, agent: job.targetAgent ?? "", sessionId: r.targetSessionId, runKey: r.key } }) };
 }
 
 /** 某任务某一天的报告输入（tick 与 `sentinel-pilot report --dry-run` 共用） */

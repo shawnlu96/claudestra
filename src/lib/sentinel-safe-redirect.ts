@@ -4,7 +4,7 @@ import { parseShell } from "./shell-words.js";
 // Keep source tokens: shell-words intentionally drops source fds and expansion metadata on redirect targets.
 // This narrower lexical envelope proves those details before removing any output redirect.
 const TOKEN = new RegExp([
-  String.raw`[ \t]+|\n`, String.raw`(?:\d*)>&\d+(?=[ \t\n]|$|[;&|<>])`,
+  String.raw`[ \t]+|\n|#[^\n]*`, String.raw`(?:\d*)>&\d+(?=[ \t\n]|$|[;&|<>])`,
   String.raw`(?:\d*)(?:&>>|&>|>>|>\||>&|<>|>|<)|&&|\|\||[;|&]`,
   String.raw`(?:[^\s'"\\<>;&|()]+|'[^']*'|"(?:\\[\s\S]|[^"\\])*"|\\[^\n])+`,
 ].join("|"), "y");
@@ -44,7 +44,7 @@ export function sentinelSafeRedirects(command: string, inputReads = false): stri
     at = lexer.lastIndex;
     const copy = /^(\d*)>&(\d+)$/.exec(m[0]);
     if (copy) tokens.push(`${copy[1]}>&`, copy[2]);
-    else if (!/^[ \t]+$/.test(m[0])) tokens.push(m[0]);
+    else if (!/^[ \t]+$/.test(m[0]) && !m[0].startsWith("#")) tokens.push(m[0]);
   }
   const kept: string[] = [];
   let words = 0;

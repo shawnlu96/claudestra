@@ -41,10 +41,12 @@ function userText(rec: AnyRecord): string | null {
   return c.filter((b: AnyRecord) => b?.type === "text" && typeof b.text === "string").map((b: AnyRecord) => b.text).join("\n");
 }
 
-function startsPrompt(rec: AnyRecord): boolean {
+function startsPrompt(rec: AnyRecord, runtime?: string): boolean {
   const text = userText(rec);
-  // An attachment-only user turn still starts work; tool-result records and metadata never do.
-  return rec.isMeta !== true && text !== null && (!!text.trim() || Array.isArray(rec.message?.content) && rec.message.content.length > 0);
+  // Codex marks delivered channels meta for history rendering; they still start real turns.
+  // Other metadata and tool results never do; attachment-only user turns do.
+  if (text === null || rec.isMeta === true && !(runtime === "codex" && /^\s*<channel\s/.test(text))) return false;
+  return !!text.trim() || Array.isArray(rec.message?.content) && rec.message.content.length > 0;
 }
 
 /**
@@ -131,7 +133,7 @@ function collectEvidence(
     if (!rec || !Number.isFinite(ts) || ts < window.from) continue;
     const audit = ts <= window.to;
     const result = !resultClosed && ts <= (window.resultTo ?? window.to) && ts < (window.nextDispatchAt ?? Infinity);
-    if (boundary && !audit && result && rec.type === "user" && startsPrompt(rec)) resultClosed = true;
+    if (boundary && !audit && result && rec.type === "user" && startsPrompt(rec, opts.runtime)) resultClosed = true;
     if (rec.type === "assistant" && (audit || result)) {
       onAssistant(rec, acc, audit, result, boundary);
     } else if (rec.type === "user" && audit) onUser(rec, acc);
@@ -145,22 +147,26 @@ interface BoundaryPorts {
   policy?: RecoveryPolicyPort;
   observe?: (action: ObservedAction) => void;
 }
+interface RunIdentity { jobId: string; agent: string; sessionId: string; runKey: string }
 const BOUNDARY_KEY = "sentinelEvidenceBoundary";
 const PROJECT = "claude-orchestrator";
 
 /** Hot-read the recovery key on every collection; observe returns the baseline and records only classification differences. */
 export function collectRunEvidence(lines: readonly string[], window: RunWindow,
-  opts: { runtime?: string; prompt?: string; boundary?: BoundaryPorts } = {}): RunSessionEvidence {
+  opts: { runtime?: string; prompt?: string; boundary?: BoundaryPorts; run?: RunIdentity } = {}): RunSessionEvidence {
   const mode = (opts.boundary?.policy ?? recoveryPolicy)(PROJECT, BOUNDARY_KEY).mode;
   if (mode === "on") return collectEvidence(lines, window, opts, true);
   const before = collectEvidence(lines, window, opts, false);
   if (mode !== "observe") return before;
   const after = collectEvidence(lines, window, opts, true);
   if (JSON.stringify(before) === JSON.stringify(after)) return before;
-  const digest = createHash("sha256").update(JSON.stringify([window, before, after])).digest("hex");
+  // A later nextDispatchAt or late reply must not multiply samples for the same audited run.
+  const runId = opts.run ? [opts.run.jobId, opts.run.agent, opts.run.sessionId, opts.run.runKey] : null;
+  const digest = createHash("sha256").update(JSON.stringify([runId, opts.runtime ?? null, window.from, window.to])).digest("hex");
+  // Ledger targets must be ledger tasks/items; cron job and session identities belong in data.run.
   const action: ObservedAction = { project: PROJECT, mechanism: BOUNDARY_KEY, target: "", actionKey: `evidence:${digest}`,
     action: "按新回合边界及安全重定向分类（本次仍沿用基线）", data: {
-      window, before: { verdict: before.result?.verdict ?? null, mutating: before.evidence.mutating },
+      window, run: opts.run ?? null, before: { verdict: before.result?.verdict ?? null, mutating: before.evidence.mutating },
       after: { verdict: after.result?.verdict ?? null, mutating: after.evidence.mutating },
     } };
   try {
