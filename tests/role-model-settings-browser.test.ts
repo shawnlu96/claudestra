@@ -139,7 +139,7 @@ test.skipIf(!enabled)("保存失败：原因可见、草稿保留", async () => 
   await p.close();
 }, 30_000);
 
-test.skipIf(!enabled)("409：按回包里的现表刷新并提示", async () => {
+test.skipIf(!enabled)("409：按回包里的现表刷新并提示，改过的格留草稿（TIER3g）", async () => {
   const current = view({ rev: 5 }, { reviewer: { claude: "claude-haiku-5-5" } });
   const p = await pageWith(1280, { status: 200, json: view() },
     () => ({ status: 409, json: { ok: false, code: "conflict", error: "这张表刚被别处改过，已刷新为最新值，请确认后再改", current } }));
@@ -148,7 +148,7 @@ test.skipIf(!enabled)("409：按回包里的现表刷新并提示", async () => 
   await p.getByTestId("role-model-note").waitFor();
   expect(await p.getByTestId("role-model-note").innerText()).toContain("别处改过");
   expect(await p.locator('[data-role="reviewer"] select').nth(0).inputValue()).toBe("claude-haiku-5-5");
-  expect(await p.locator('[data-role="reviewer"] select').nth(1).inputValue()).toBe("");
+  expect(await p.locator('[data-role="reviewer"] select').nth(1).inputValue()).toBe("low"); // 改过的格留草稿，没动的 Claude 列跟现表
   await p.close();
 }, 30_000);
 
