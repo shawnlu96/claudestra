@@ -61,8 +61,10 @@ beforeAll(async () => {
   if (code) throw new Error(error);
   const assets = new Map(readdirSync(out).filter((name) => /\.(js|css)$/.test(name)).map((name) => ["/" + name, Bun.file(resolve(out, name))]));
   let productionCss = "";
-  try { for (const name of readdirSync(resolve("web/.next/static/css"))) if (name.endsWith(".css")) productionCss += await Bun.file(resolve("web/.next/static/css", name)).text(); }
-  catch { /* 没有 Next 构建时只缺样式，功能断言照跑 */ }
+  for (const dir of ["web/.next/static/css", "web/.next/static/chunks"]) { // Next 版本不同，CSS 落在其一
+    try { for (const name of readdirSync(resolve(dir))) if (name.endsWith(".css")) productionCss += await Bun.file(resolve(dir, name)).text(); }
+    catch { /* 没有 Next 构建时只缺样式，功能断言照跑 */ }
+  }
   server = createServer(async (req, res) => {
     if (req.url === "/") {
       const links = [...assets.keys(), "/production.css"].filter((x) => x.endsWith(".css")).map((x) => `<link rel="stylesheet" href="${x}">`).join("");
