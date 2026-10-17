@@ -5,6 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { hitEvidence, type AutoHitEvidence, type AutoReason } from "./center-proposal-auto.js";
+import { summarySuffix, type ProposalSummary } from "./center-proposal-auto-summary.js";
 import type { InboxParams } from "./center-proposal-inbox.js";
 import { getEventByDedup } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
@@ -32,8 +33,8 @@ const attemptKey = (key: string, n: number) => (n === 1 ? key : `${key}#a${n}`);
 const ownerKey = (key: string) => `${key}#owner`;
 const resultKey = (key: string) => `${key}#result`;
 
-/** 写事件用的身份（不含凭据） */
-export interface ExecIdentity extends Partial<AutoHitEvidence> { localProjectId: string; centerProject: string; params: InboxParams }
+/** 写事件用的身份（不含凭据）；summary = 判定前算好的提案摘要（PROPEVID1，只进结果事件） */
+export interface ExecIdentity extends Partial<AutoHitEvidence> { localProjectId: string; centerProject: string; params: InboxParams; summary?: ProposalSummary }
 const identityData = (id: ExecIdentity, key: string) => {
   const evidence = hitEvidence(id.hits ?? []);
   return { key, centerProject: id.centerProject, ...id.params, ...evidence, hitsOmitted: evidence.hitsOmitted + (id.hitsOmitted ?? 0) };
@@ -78,13 +79,13 @@ export function claimExec(db: Database, id: ExecIdentity, lane: ExecLane, now: n
   return put(db, id, ownerKey(key), now, text("自动交还后的人工答复"), { op: EXEC_OP, lane, attempt: 1, ...identityData(id, key) });
 }
 
-/** 结果事件：同一键只写一次（返回这次是否写了） */
+/** 结果事件：同一键只写一次（返回这次是否写了）；带提案摘要时 data.proposal 记标题 / 类型 / 节点与文件范围，正文末尾加标题和节点数 */
 export function recordExecResult(db: Database, id: ExecIdentity, r: ExecResult, now: number): boolean {
   const key = execKey(id.centerProject, id.params);
-  const text = `中心提案自动批准结果：${id.params.proposalId} rev ${id.params.proposalRev} ${r.outcome}${r.centerState ? `（中心 ${r.centerState}）` : ""}`;
+  const text = `中心提案自动批准结果：${id.params.proposalId} rev ${id.params.proposalRev} ${r.outcome}${r.centerState ? `（中心 ${r.centerState}）` : ""}${id.summary ? summarySuffix(id.summary) : ""}`;
   return put(db, id, resultKey(key), now, text, {
     op: RESULT_OP, outcome: r.outcome, reasons: [...r.reasons], ...(r.centerState ? { centerState: r.centerState } : {}), ...(r.code ? { code: r.code } : {}),
-    ...identityData(id, key),
+    ...identityData(id, key), ...(id.summary ? { proposal: id.summary } : {}),
   });
 }
 

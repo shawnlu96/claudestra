@@ -9,7 +9,9 @@ import type { RecoveryMode } from "./recovery-policy.js";
 const KNOWN_ROOTS = ["src/", "tests/", "docs/", "web/", "scripts/"];
 const nameExempt = (g: string) => ["tests/", "docs/"].some(r => g.toLowerCase().startsWith(r));
 const AUTO_FILE_PATTERNS = FILE_PATTERNS.map(([, re]) => new RegExp(re.source, re.flags.includes("i") ? re.flags : `${re.flags}i`));
-const DATA_SCHEMA = /ledger-store|ledger-schema|migrat|\.sql(?:$|[^a-z])|shared-ledger-contract|recovery-key-(?:class|defaults)|(?:^|\/)scripts\/guard\//i;
+/** 任意路径段下的 scripts/guard/ 算安全面（原 DATA_SCHEMA 的匹配范围原样迁来，只换原因） */
+const NESTED_GUARD = /(?:^|\/)scripts\/guard\//i;
+const DATA_SCHEMA = /ledger-store|ledger-schema|migrat|\.sql(?:$|[^a-z])|shared-ledger-contract|recovery-key-(?:class|defaults)/i;
 const PERMISSION_FILES = [
   "src/lib/peer-scope-gate.ts", "src/lib/peer-secret-gate.ts", "src/lib/order-tool-route.ts", "src/lib/caller-identity.ts",
   "src/bridge/api-auth.ts", "src/bridge/terminal-auth.ts", "src/bridge/interrupt-gate.ts", "src/bridge/web-gateway.ts",
@@ -77,6 +79,7 @@ function literalReasons(g: string): AutoReason[] {
   if (folded.split("/").includes(".claude") || AUTO_FILE_PATTERNS.some(re => re.test(g))
     || (!nameExempt(g) && KEYWORDS.some(k => name.includes(k)))) reasons.push("glob_security_surface");
   if (!nameExempt(g) && scopeWireProtected(folded)) reasons.push("glob_permission_gate");
+  if (!nameExempt(g) && NESTED_GUARD.test(g) && !reasons.includes("glob_security_surface")) reasons.push("glob_security_surface");
   if (!nameExempt(g) && DATA_SCHEMA.test(g)) reasons.push("glob_data_schema");
   return reasons;
 }

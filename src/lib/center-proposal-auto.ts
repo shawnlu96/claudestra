@@ -41,10 +41,14 @@ export function reasonText(reasons: readonly AutoReason[], code?: string, hits: 
   return [summary, ...lines, ...(evidence.hitsOmitted ? [`另 ${evidence.hitsOmitted} 条`] : [])].join("\n");
 }
 
-/** 外显明细统一脱敏并限十条，卡片与占位事件使用同一证据。 */
+/** 外显明细统一脱敏，同一 (reason, path) 只留首条（无 path 的按 reason + 来源）后限十条，省略数按去重后计；卡片与占位事件使用同一证据。 */
 export function hitEvidence(hits: readonly AutoHit[]): AutoHitEvidence {
-  const clean = (s: string) => redactForPeer(s).text.slice(0, 500);
-  return { hits: hits.slice(0, 10).map(h => ({ reason: h.reason, source: clean(h.source), path: clean(h.path) })), hitsOmitted: Math.max(0, hits.length - 10) };
+  const clean = (s: string) => redactForPeer(s).text.slice(0, 500), seen = new Set<string>();
+  const unique = hits.filter(h => {
+    const k = `${h.reason}\0${h.path ? `p:${h.path}` : `s:${h.source}`}`;
+    return !seen.has(k) && !!seen.add(k);
+  });
+  return { hits: unique.slice(0, 10).map(h => ({ reason: h.reason, source: clean(h.source), path: clean(h.path) })), hitsOmitted: Math.max(0, unique.length - 10) };
 }
 
 /** 固定词表（大小写不敏感）：只补判 owner */
