@@ -1,14 +1,16 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { intakeWrite } from "../src/lib/peer-pr-ledger.js";
 import type { PeerPrConfig } from "../src/lib/peer-pr-config.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { deliver, moveStage, recordVerify, setMeta } from "../src/lib/ledger-write.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
-import { peerPrVerifyKey, schedulerCanDryRunVerify, schedulerCanVerify } from "../src/lib/scheduler-verify-gate.js";
+import { peerPrVerifyKey, schedulerCanDryRunVerify, schedulerCanVerify, verifyBindModes } from "../src/lib/scheduler-verify-gate.js";
 import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
-import { RECOVERY_POLICY_PATH, type RecoveryMode } from "../src/lib/recovery-policy.js";
+import { observeDedupKey, RECOVERY_POLICY_PATH, recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
 import { highRiskRecoveryKey } from "../src/lib/recovery-key-class.js";
 import { defaultRecoveryMode } from "../src/lib/recovery-key-defaults.js";
 import { RECOVERY_KEYS } from "../src/lib/recovery-keys.js";
@@ -222,6 +224,17 @@ describe("[验收线 4] modes, runtime switch and upstream combinations", () => 
     expect(highRiskRecoveryKey("peerPrVerifyBind")).toBe(true);
     expect(defaultRecoveryMode("peerPrVerifyBind")).toBe("observe");
   });
+  test("the writer's own policy read agrees with recoveryPolicy, and its observe note with recordObserved", () => {
+    for (const files of [undefined, { keys: { peerPrVerifyBind: "on" } }, { mode: "off" }, { mode: "off", keys: { peerPrAutoVerify: "on" } }]) {
+      if (files) writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: files } })); else rmSync(RECOVERY_POLICY_PATH, { force: true });
+      expect(verifyBindModes("p")).toEqual({ bind: recoveryPolicy("p", "peerPrVerifyBind").mode, autoVerify: recoveryPolicy("p", "peerPrAutoVerify").mode });
+    }
+    writeFileSync(RECOVERY_POLICY_PATH, "{"); expect(verifyBindModes("p")).toEqual({ bind: "off", autoVerify: "off" });
+    policy("observe"); recordVerify(db, { actor: "scheduler", now: 10_000 }, { taskId: "PR401", result: "fail", data: {} });
+    const n = bindNotes()[0]!;
+    expect(n.dedupKey).toBe(observeDedupKey({ project: "p", mechanism: "peerPrVerifyBind", target: "PR401", actionKey: n.data.actionKey as string }));
+    expect(n.data.op).toBe("recovery_observe");
+  });
   test("observe keeps the business result of a keyless verify and records the would-be refusal once", async () => {
     policy("observe"); const c = cli();
     expect(await c.verify("--pass-only")).toMatchObject({ ok: true, moved: true });
@@ -254,5 +267,57 @@ describe("[验收线 4] modes, runtime switch and upstream combinations", () => 
       expect(t.calls).toHaveLength(0);
     }
     expect(attempts()).toHaveLength(0); expect(bindNotes()).toHaveLength(0);
+  });
+});
+
+/**
+ * r2 P1 (writer-import-dependent-policy): a fresh process importing only the public writer boundary (no CLI, auto-verifier or
+ * retry module) must honour peerPrVerifyBind itself: off / observe keep the baseline, on binds the key, switching needs no restart.
+ */
+describe("[验收线 4] fresh process: the writer alone is policy-aware", () => {
+  const SRC = new URL("../src/lib/", import.meta.url).pathname;
+  const script = `
+    import { writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { mkdtempSync } from "node:fs";
+    import { tmpdir } from "node:os";
+    import { intakeWrite } from "${SRC}peer-pr-ledger.ts";
+    import { getTask, listEvents, openLedger } from "${SRC}ledger-store.ts";
+    import { moveStage, recordVerify, setMeta } from "${SRC}ledger-write.ts";
+    import { setWorkflow } from "${SRC}ledger-scheduler-write.ts";
+    import { peerPrVerifyKey } from "${SRC}scheduler-verify-gate.ts";
+    import { RECOVERY_POLICY_PATH } from "${SRC}recovery-policy.ts";
+    const cfg = ${JSON.stringify(cfg)}, at = { actor: "owner", now: 1000 };
+    const policy = (bind) => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { peerPrAutoVerify: "on", ...(bind ? { peerPrVerifyBind: bind } : {}) } } } }));
+    function fresh() {
+      const db = openLedger(join(mkdtempSync(join(tmpdir(), "peer-pr-verify-fresh-")), "ledger.sqlite"));
+      setMeta(db, at, { project: "p", key: "pms", value: ["pm"] });
+      intakeWrite(db, { actor: "scheduler", now: 100 }, { project: "p", number: 401, url: "${PR}", head: "${HEAD}",
+        branch: "fix/x", base: "main", login: "he-dev", title: "peer", surface: "plain", reasons: [], spec: "accepted" }, cfg);
+      setWorkflow(db, at, { taskId: "PR401", taskRev: getTask(db, "PR401").rev, workflowRev: 1, template: "security", templateVersion: 2,
+        mode: "manual", reason: "pm_takeover: manual deploy", authorFamily: "codex", fallback: "PM deploys" });
+      moveStage(db, at, { taskId: "PR401", from: "review", to: "merge" });
+      moveStage(db, at, { taskId: "PR401", from: "merge", to: "live" });
+      return db;
+    }
+    function verify(db, key) {
+      try {
+        return recordVerify(db, { actor: "scheduler", now: 10_000, ...(key ? { dedupKey: key } : {}) },
+          { taskId: "PR401", result: "pass", data: { checks: [{ id: "pr-merged", status: "pass" }] } }).row.stage;
+      } catch (e) { return e.code ?? String(e); }
+    }
+    const notes = (db) => listEvents(db, { project: "p", target: "PR401" }).filter((e) => e.data.mechanism === "peerPrVerifyBind").length;
+    const out = {};
+    for (const mode of ["off", "observe", "on", undefined]) { policy(mode); const db = fresh(); out[mode ?? "default"] = [verify(db), notes(db)]; }
+    { policy("on"); const db = fresh(); out.onKey = verify(db, peerPrVerifyKey(db, "PR401")); }
+    { const db = fresh(); policy("on"); const a = verify(db); policy("off"); out.switch = [a, verify(db)]; }
+    console.log(JSON.stringify(out));`;
+  test("off / observe keep the baseline, on binds the exact key, runtime switch without restart", () => {
+    const r = Bun.spawnSync([process.execPath, "-e", script], {
+      env: { ...process.env, NODE_ENV: "test", CLAUDESTRA_STATE_DIR: mkdtempSync(join(tmpdir(), "cstra-test-state-")) }, stderr: "pipe" });
+    expect(r.stderr.toString()).not.toContain("error:");
+    expect(JSON.parse(r.stdout.toString().trim().split("\n").at(-1)!)).toEqual({
+      off: ["verified", 0], observe: ["verified", 1], on: ["forbidden", 0], default: ["verified", 1], onKey: "verified", switch: ["forbidden", "verified"],
+    });
   });
 });

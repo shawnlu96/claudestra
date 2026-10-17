@@ -20,12 +20,11 @@ import { getEventByDedup, LedgerError } from "../lib/ledger-store.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { collectPrStage, collectVerifyFacts, ghPrArg, mainRepoRoot, originRepo, prRepo, realFactsDeps, type FactsDeps } from "../lib/ledger-verify-facts.js";
 import { recordVerify } from "../lib/ledger-write.js";
-import { schedulerVerifyAllowed } from "../lib/peer-pr-verify-retry.js";
 import { dirKey } from "../lib/project-dirs.js";
 import { normalizeDir, resolveProjectForRealDir } from "../lib/projects.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
-import { peerPrVerifyKey, schedulerVerifyRepo } from "../lib/scheduler-verify-gate.js";
+import { peerPrVerifyKey, schedulerVerifyAllowed, schedulerVerifyRepo } from "../lib/scheduler-verify-gate.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
