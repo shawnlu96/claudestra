@@ -29,7 +29,10 @@ as before).
 
 Never a fallback: an author's failure (its family is the workflow's, MODEL's own path); a policy refusal (MODELX's exemption) —
 on the create path too: if any receipt of the current clean-failure streak is a safety refusal (MODEL's recognition, even mixed
-with quota wording), the card keeps backing off for PM, with no epoch and no family switch;
+with quota wording), the card keeps backing off for PM, with no epoch and no family switch. The first such receipt writes MODEL's
+persistent `model_safety_hold` (escalate, once per order, under any `reviewFallback` mode — it is safety evidence): `openRefusal`
+then refuses every fallback of the card, however many ordinary failures follow, until PM / owner lift it through
+`resolveSafetyHold`, exactly as for a refused review turn;
 a card with an open safety hold or refusal continuation; a reviewer that is already the author's family.
 
 ## The epoch

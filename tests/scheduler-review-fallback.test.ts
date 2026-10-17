@@ -16,7 +16,7 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { createRetryBackoff } from "../src/lib/scheduler-create-retry.js";
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
-import { classifyModelOutcome } from "../src/lib/scheduler-model-outcome.js";
+import { classifyModelOutcome, resolveSafetyHold } from "../src/lib/scheduler-model-outcome.js";
 import { CREATE_FAIL_LIMIT, failureText, FALLBACK_EXEMPTION, fallbackHandoff, fallbackNotice, freshFallbackEpoch, setFallbackPolicyFile } from "../src/lib/scheduler-review-fallback.js";
 import { replacementTag } from "../src/lib/scheduler-review-checkout.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
@@ -237,8 +237,36 @@ describe("reviewer create fails (acceptance 1 addendum: the 10-16 NRT-1 path)", 
       expect(epochs()).toEqual([]);
       expect(created).toEqual([]);
       expect(ops("recovery_observe").filter((e) => e.data.mechanism === "reviewFallback")).toEqual([]);
+      expect(ops("model_safety_hold")).toMatchObject([{ kind: "escalate", data: { cls: "safety", role: "reviewer", action: "ensure_session" } }]);
     });
   }
+
+  test("the hold stands until PM resolves it (resolveSafetyHold); only then may an ordinary streak fall back", async () => {
+    await delivered();
+    failCreates(REFUSED(1), CREATE_ERROR(2), CREATE_ERROR(3), CREATE_ERROR(4));
+    for (let n = 0; n < 3; n++) {
+      expect(await tick()).toMatchObject({ step: "waiting" });
+      f.advance(20 * 60_000);
+    }
+    expect(epochs()).toEqual([]);
+    resolveSafetyHold(f.db, f.at("pm"), { taskId: "T1", text: "PM 核过：拒绝来自引导轮误判，可以照常处理" });
+    expect(await tick()).toMatchObject({ step: "review_fallback" });
+    expect(epochs()[0].data.fallback).toMatchObject({ trigger: "create_streak" });
+  });
+
+  test("a refusal never ages out of a long streak (PR1685-r2): 1 refusal then 101 ordinary clean failures, still no epoch", async () => {
+    await delivered();
+    const receipts = [REFUSED(1), ...Array.from({ length: 101 }, (_, n) => CREATE_ERROR(n + 2))];
+    failCreates(...receipts);
+    for (let n = 0; n < receipts.length; n++) {
+      expect(await tick()).toMatchObject({ step: "waiting" });
+      f.advance(20 * 60_000); // past retryCleanCreate's backoff
+    }
+    expect(f.intents().filter((i) => i.action === "ensure_session" && i.node === "adversarial_review" && i.status === "cancelled")).toHaveLength(102);
+    expect(epochs()).toEqual([]);
+    expect(created).toEqual([]);
+    expect(ops("model_safety_hold")).toHaveLength(1); // the persistent hold, written once at the refusal
+  }, 300_000);
 
   test("a card id like CI-429 never reads as quota: only the failure's own text is judged (P2-6)", () => {
     const receipt = "未建：建会话失败，现场已清理（reviewer agent-rv-ci-429 第 1 次；2 分钟后重试）：创建失败: 窗口起不来（rv-ci-429 已清理）";

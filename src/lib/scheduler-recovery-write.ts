@@ -18,10 +18,10 @@ import { fixDiffOf } from "./review-converge-scope.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { planScheduler } from "./scheduler-plan.js";
 import { currentReviewFacts } from "./scheduler-review.js";
-import { cleanCreateReceipt, createFailReceipts } from "./scheduler-create-retry.js";
+import { cleanCreateReceipt, createFailStreak } from "./scheduler-create-retry.js";
 import { classifyModelOutcome } from "./scheduler-model-outcome.js";
 import { failureText, fallbackAction, fallbackEpochEvent, fallbackFacts, fallbackKey, type FallbackFacts, type FallbackInput } from "./scheduler-review-fallback.js";
-import { openRefusal } from "./scheduler-review-swap.js";
+import { HOLD_OP, openRefusal, openSafetyHold } from "./scheduler-review-swap.js";
 import { getSchedulerSession, preserveSessionHistory } from "./scheduler-sessions.js";
 
 export interface RecoveryFence { taskId: string; taskRev: number; workflowRev: number; head: string | null; round: number; specRev: number }
@@ -204,12 +204,9 @@ function fallbackRead(db: Database, input: ReviewFallbackInput): { facts: Fallba
   const create = intent.action === "ensure_session", message = create ? intent.receipt ?? "" : input.failure.message;
   const judged = failureText(message, intent.taskId); // P2-6: quota read in the failure's own text, never in the card id the scheduler wrote
   const c = classifyModelOutcome({ failure: create ? { kind: "error", message: judged } : { ...input.failure, message: judged } });
-  // a create streak counts toward a fallback only if none of its failures was a safety refusal (MODEL's recognition, every receipt)
-  const streak = create ? createFailReceipts(db, intent.taskId, "reviewer") : [];
-  const refused = streak.some((r) => classifyModelOutcome({ failure: { kind: "error", message: failureText(r, intent.taskId) } })?.cls === "safety");
-  const fi: FallbackInput = { intent, failed: input.failed, authorized: input.authorized, message, cls: refused ? "safety" : c?.cls ?? null,
-    recoverable: !refused && (c?.recoverable ?? false), row: getSchedulerSession(db, intent.taskId, "reviewer"), ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-    ...(create ? { cleanCreate: cleanCreateReceipt(intent.receipt), createStreak: streak.length } : {}) };
+  const fi: FallbackInput = { intent, failed: input.failed, authorized: input.authorized, message, cls: c?.cls ?? null, recoverable: c?.recoverable ?? false,
+    row: getSchedulerSession(db, intent.taskId, "reviewer"), ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(create ? { cleanCreate: cleanCreateReceipt(intent.receipt), createStreak: createFailStreak(db, intent.taskId, "reviewer") } : {}) };
   const facts = fallbackFacts(db, fi);
   if (typeof facts === "string") return facts;
   const hold = openRefusal(listEvents(db, { project: facts.task.project, target: facts.task.id }));
@@ -233,6 +230,29 @@ function applyFallback(db: Database, ctx: WriteCtx, input: ReviewFallbackInput):
 }
 
 /**
+ * A reviewer create whose receipt is a safety refusal (MODEL's recognition on the failure's own text) leaves MODEL's persistent
+ * hold, once per order and never next to an open one: openRefusal then refuses every fallback of the card until PM / owner lift
+ * it (resolveSafetyHold), however many ordinary failures follow (PR1685-r2). Safety evidence, so under any reviewFallback mode.
+ */
+function createSafetyHold(db: Database, ctx: WriteCtx, input: ReviewFallbackInput): string | null {
+  const intent = getIntent(db, input.intentId);
+  if (intent?.action !== "ensure_session" || intent.node !== "adversarial_review" || !cleanCreateReceipt(intent.receipt)) return null;
+  const evidence = intent.receipt!;
+  if (classifyModelOutcome({ failure: { kind: "error", message: failureText(evidence, intent.taskId) } })?.cls !== "safety") return null;
+  return tx(db, () => {
+    const task = getTask(db, intent.taskId);
+    if (!task) return "缺卡";
+    const key = `review-fallback-hold:${intent.id}`, open = openSafetyHold(listEvents(db, { project: task.project, target: task.id }));
+    const why = "建审查会话的收据是模型安全策略拒绝；停止自动降级和换模型，交 PM / owner 人工处置";
+    const event = getEventByDedup(db, key) ?? open ?? insertEvent(db, { ...ctx, now: ctx.now ?? Date.now(), dedupKey: key }, { project: task.project,
+      target: task.id, kind: "escalate", text: `模型安全策略拒绝：${why}（处置后用 resolve 解除）`, data: { op: HOLD_OP, cls: "safety", role: "reviewer",
+        action: intent.action, intentId: intent.id, agent: input.failed.agent, family: input.failed.family, machine: input.failed.machine, round: task.round,
+        head: intent.head, specRev: intent.specRev, evidence: evidence.slice(0, 600), plan: { kind: "manual", code: "model_safety_hold", reason: why } } }, true);
+    return `建会话收据是安全拒绝，安全挂起 #${event.seq} 未解除前不降级、不换族`;
+  });
+}
+
+/**
  * RVF-1 · the reviewer fallback's only writer, under recovery key reviewFallback: off = nothing, observe = one note of where the
  * review would go (the card escalates / backs off as before), on = the epoch. Reached through `ledger scheduler-model-outcome`
  * (scheduler-model-wiring.ts), for a failed review turn and for a reviewer create that failed and cleaned up.
@@ -241,6 +261,8 @@ export async function writeReviewFallback(db: Database, ctx: WriteCtx, input: Re
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "审查降级只由调度服务记录");
   const done = getEventByDedup(db, fallbackKey(input.intentId));
   if (done) return { outcome: "acted", event: done, duplicate: true };
+  const held = createSafetyHold(db, ctx, input);
+  if (held) return { outcome: "skipped", reason: held };
   const read = fallbackRead(db, input);
   if (typeof read === "string") return { outcome: "skipped", reason: read };
   const { facts, fi } = read, action = fallbackAction(facts, fi);

@@ -38,18 +38,16 @@ export const cleanCreateReceipt = (receipt: string | null | undefined): boolean 
  * Consecutive clean create failures of this card's role, newest first; any other settled ensure_session ends the streak, and so
  * does a reviewer fallback epoch (RVF-1: the same-family reviewer it plans starts with no backoff of its own).
  */
-function streak(db: Database, taskId: string, role: SessionRole): { n: number; last: number; receipts: string[] } {
+function streak(db: Database, taskId: string, role: SessionRole): { n: number; last: number } {
   const since = role === "reviewer" ? lastFallbackSeq(db, taskId) : 0;
   const rows = db.query(`SELECT receipt, updatedAt FROM scheduler_intents WHERE taskId = ? AND action = 'ensure_session'
     AND (node = 'adversarial_review') = ? AND status NOT IN ('pending','submitted') AND eventSeq > ? ORDER BY eventSeq DESC LIMIT 100`)
     .all(taskId, role === "reviewer" ? 1 : 0, since) as { receipt: string | null; updatedAt: number }[];
   const n = rows.findIndex((r) => !r.receipt?.startsWith(RECEIPT));
-  const k = n === -1 ? rows.length : n;
-  return { n: k, last: rows[0]?.updatedAt ?? 0, receipts: rows.slice(0, k).map((r) => r.receipt!) };
+  return { n: n === -1 ? rows.length : n, last: rows[0]?.updatedAt ?? 0 };
 }
 
-/** The receipts of the current clean-failure streak, newest first (RVF-1 counts them and screens every one for a safety refusal). */
-export const createFailReceipts = (db: Database, taskId: string, role: SessionRole): string[] => streak(db, taskId, role).receipts;
+export const createFailStreak = (db: Database, taskId: string, role: SessionRole): number => streak(db, taskId, role).n;
 
 /** Planner gate: while the backoff of the last clean failure runs, the same ensure_session is not planned again. */
 export function createRetryBackoff(db: Database, taskId: string, role: SessionRole, now: number): string | null {
