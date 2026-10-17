@@ -4,10 +4,12 @@
  * 「重启」= 再起一份 wiring，从同一个状态文件（测试临时目录里的 RESUME_STATES_PATH）读回。
  */
 import { afterAll, beforeEach, expect, spyOn, test } from "bun:test";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import * as rules from "../src/lib/api-error-resume.js";
 import { isModelLimitHit } from "../src/lib/quota-wall-text.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
+import { readRegistryAgentsSync, REGISTRY_PATH } from "../src/lib/registry.js";
 import { countsAsWallActivity, isHumanSender } from "../src/lib/quota-wall.js";
 import { TRANSIENT_BACKOFF_MS } from "../src/lib/transient-error.js";
 
@@ -19,9 +21,17 @@ const MSG = "Pi 回合失败：Connection error.";
 let NOW = Date.parse("2026-10-16T16:36:00+08:00");
 const clock = spyOn(Date, "now").mockImplementation(() => NOW);
 afterAll(() => clock.mockRestore());
-beforeEach(() => rmSync(P, { force: true }));
+/** 测试状态目录里的 registry：agentKept 用真实判定读它 */
+function registry(status: string | null) {
+  mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
+  writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: status ? { "agent-net": { status, channelId: "123456", cwd: "/x" } } : {} }));
+}
+beforeEach(() => {
+  rmSync(P, { force: true });
+  registry("active");
+});
 
-function wiring(connected: () => boolean = () => true, kept = true) {
+function wiring(connected: () => boolean = () => true) {
   let handler!: (e: unknown) => void, tick!: () => void, seq = 0;
   const sends: number[] = [];
   const notices: string[] = [];
@@ -36,7 +46,7 @@ function wiring(connected: () => boolean = () => true, kept = true) {
     subscribeEvents: (_: unknown, f: (e: unknown) => void) => { handler = f; }, recordMetric: () => {}, noteTurnCut: () => {},
     emitEvent: (e: { data?: { notice?: boolean; text?: string } }) => void (e.data?.notice && notices.push(String(e.data.text))),
     setInterval: (f: () => void) => { tick = f; }, newMessageId: () => `m${++seq}`, newThreadId: () => `t${++seq}`, TICK_MS: 15_000,
-    agentKept: () => kept,
+    readRegistryAgentsSync,
   };
   const mod = new Function(...Object.keys(deps), `let bridge, wall; const earlyExitListeners = [];\n${js}\nreturn { startQuotaWall };`)(...Object.values(deps));
   mod.startQuotaWall(b);
@@ -142,8 +152,9 @@ test("stale-resume-after-sleep：同一进程里机器睡了 9 小时醒来，�
   expect(JSON.parse(readFileSync(P, "utf8"))).toEqual({});
 });
 
-test("offline-drop-noise：到点没连着、agent 已被收掉 → 当场丢，不往频道报", async () => {
-  const f = wiring(() => false, false);
+test("offline-drop-noise：到点没连着、agent 已被 remove（registry 没这一行）→ 当场丢，不往频道报", async () => {
+  registry(null);
+  const f = wiring(() => false);
   await f.err();
   await f.run(60 * 60_000);
   expect(f.sends).toEqual([]);
@@ -152,11 +163,48 @@ test("offline-drop-noise：到点没连着、agent 已被收掉 → 当场丢，
   expect(JSON.parse(readFileSync(P, "utf8"))).toEqual({});
 });
 
-test("offline-drop-noise：到点没连着的非网络类错误照旧当场丢，不等半小时、不报", async () => {
+test("offline-drop-noise（W2）：agent 被 kill（registry 条目置 stopped、channelId 留着）→ 不等半小时、不往频道报", async () => {
   const f = wiring(() => false);
-  await f.err("Prompt is too long");
-  await f.run(61_000 + 15_000);
-  expect(JSON.parse(readFileSync(P, "utf8"))).toEqual({});
+  await f.err();
+  registry("stopped");
   await f.run(60 * 60_000);
   expect(f.notices).toEqual([]);
+  expect(f.escalated).toEqual([]);
+  expect(JSON.parse(readFileSync(P, "utf8"))).toEqual({});
+});
+
+test("非网络类到点没连着：静默等几分钟，过了只记日志、不报", async () => {
+  const f = wiring(() => false);
+  await f.err("Prompt is too long");
+  await f.run(2 * 60_000);
+  expect(Object.keys(JSON.parse(readFileSync(P, "utf8")))).toEqual(["123456"]); // 宽限内留着
+  await f.run(60 * 60_000);
+  expect(JSON.parse(readFileSync(P, "utf8"))).toEqual({});
+  expect(f.notices).toEqual([]);
+  expect(f.escalated).toEqual([]);
+});
+
+test("W3：非网络类错误后 50 秒 bridge 重启，agent 20 秒后才连回 → 照样续跑一次", async () => {
+  await wiring().err("API Error: 400 invalid_request_error tool_use ids must be unique");
+  NOW += 50_000;
+  let up = false;
+  const after = wiring(() => up);
+  await after.run(15_000);
+  up = true;
+  await after.run(2 * 60_000);
+  expect(after.sends).toHaveLength(1);
+  expect(after.notices).toEqual([]);
+});
+
+test("W1：bridge 停机 9 小时后开机，agent 第一拍还没连回来 → 陈旧计划只记日志，不报「一直没连上」", async () => {
+  await wiring().err();
+  NOW += 9 * 3600_000;
+  let up = false;
+  const after = wiring(() => up);
+  await after.run(15_000);
+  up = true;
+  await after.run(5 * 60_000);
+  expect(after.sends).toEqual([]);
+  expect(after.notices).toEqual([]);
+  expect(after.escalated).toEqual([]);
 });

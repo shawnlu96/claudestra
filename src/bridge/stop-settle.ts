@@ -21,7 +21,7 @@ import { closeAsk } from "../lib/ledger-asks.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { askDbIfExists, publishAsk } from "./asks.js";
 import { channelTurnOk } from "../lib/api-error-resume.js";
-import { noteCallerAnswered, noteRetryingCaller, spokenBefore, takeTurnFailure, turnFailureNotice, useRetryPort, type RetryPort, type TurnFailure } from "./turn-failure.js";
+import { noteCallerAnswered, noteRetryingCaller, retryingKnown, spokenBefore, takeTurnFailure, turnFailureNotice, useRetryPort, type RetryPort, type TurnFailure } from "./turn-failure.js";
 
 export interface StopTurn {
   /** 要结算的频道（channelsToClear 里的一个） */
@@ -63,7 +63,7 @@ const TRIGGER_BATCH_MS = 3_000;
  * callers = 这一轮是哪几个 agent 的消息开的（扣下的话只挂在唯一的那一个上，markApiError）；
  * askers = 其中发的是请求（send_to_agent 不带 oneShot）的那几个：这一轮失败要告诉它们（notifyFailedTurn），答复 / 转发 / FYI 不算
  */
-interface TriggerRec { who: TurnTrigger; at: number; callers: string[]; askers: string[] }
+interface TriggerRec { who: TurnTrigger; at: number; callers: string[]; askers: string[]; askedAt?: Record<string, number> }
 const turnTrigger = new Map<string, TriggerRec>();
 /** 上一轮（本进程见过它的 Stop）按什么来源结的：没有投递记录的下一轮继承它 */
 const prevTrigger = new Map<string, TriggerRec>();
@@ -90,7 +90,8 @@ export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle 
   const prev = resumeRec(cid);
   // 续跑消息开的一轮继承撞错那一轮；重启后没有记录 = 来源未知，按外人算（不结算，adv3 P2-8）
   const resume = from.kind === "bridge" && RESUME_LABELS.has(from.label ?? "");
-  const fresh = (): TriggerRec => (resume && prev ? { ...prev, at: now } : { who: resume ? "stranger" : who, at: now, callers: caller, askers: asker });
+  const askedAt = Object.fromEntries(asker.map((c) => [c, now])); // 请求送到的时刻：续跑那几轮继承（turn-failure 据此分清属于哪一串）
+  const fresh = (): TriggerRec => (resume && prev ? { ...prev, at: now } : { who: resume ? "stranger" : who, at: now, callers: caller, askers: asker, askedAt });
   if (cutSince.delete(cid)) return void turnTrigger.set(cid, fresh());
   const cur = turnTrigger.get(cid);
   const batch = !!cur && now - cur.at <= TRIGGER_BATCH_MS;
@@ -99,7 +100,7 @@ export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle 
   else if (!cur || (idle && !batch)) turnTrigger.set(cid, fresh());
   else if (batch) {
     turnTrigger.set(cid, { who: RANK[who] > RANK[cur.who] ? who : cur.who, at: cur.at,
-      callers: [...new Set([...cur.callers, ...caller])], askers: [...new Set([...cur.askers, ...asker])] });
+      callers: [...new Set([...cur.callers, ...caller])], askers: [...new Set([...cur.askers, ...asker])], askedAt: { ...askedAt, ...cur.askedAt } });
   }
 }
 /**
@@ -231,12 +232,16 @@ async function failedTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
   const stranger = strangerTurn(t);
   const sole = !stranger && opened?.who === "insider" && opened.callers.length === 1 && askers.length === 1 && !ranIntoApiError(t);
   const said = sole ? spokenBefore(t.drain.text, f) : undefined;
+  // 网络类留下的槽同样记「等续跑」：外人的一轮不结算它、kill / 2 小时扫掉走 onExpired 告诉请求方、owner 发话不算接管
+  if (f.retrying && !ranIntoApiError(t) && waiting.length) d.markApiError(t.cid, null, null);
   for (const caller of askers) {
+    const askedAt = opened?.askedAt?.[caller] ?? opened?.at ?? f.at;
+    if (f.retrying && retryingKnown(t.cid, caller, askedAt, f.at)) continue; // 续跑那几轮 / 升级那一轮：这一串已经告诉过它
     const slot = waiting.find((p) => p.callerChannelId === caller);
     const pac = slot ?? stubCall(caller, t.cid, f);
     // 网络类：这一串的结局补一句说明（在这一条「正在重试」之后登记，结局早到了会当场补发）
-    const later = (): void => void (f.retrying &&
-      noteRetryingCaller(t.cid, { agent: f.agent, at: f.at, caller, callerName: pac.callerName, replyTo: pac.originalReplyChannel, slot: !!slot }));
+    const later = (): void => void (f.retrying && noteRetryingCaller(t.cid,
+      { agent: f.agent, at: f.at, askedAt, caller, callerName: pac.callerName, replyTo: pac.originalReplyChannel, slot: !!slot }));
     if (slot && ranIntoApiError(t)) {
       later();
       continue;

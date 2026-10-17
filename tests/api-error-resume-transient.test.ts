@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -221,6 +221,24 @@ test("save-failure-log-flood：落盘一直失败时同一错误一段时间只�
     expect(errors).toHaveBeenCalledTimes(1);
     saveResumeStates(new Map(), join(blocker, "api-error-resume.json"), T0 + SAVE_ERROR_LOG_GAP_MS + 100_000);
     expect(errors).toHaveBeenCalledTimes(2);
+  } finally {
+    errors.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("save-failure-log-flood（NRT-1 R3-E 原复现）：路径被目录占住（EISDIR，原文带递增的临时文件名）也只记一行", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nrt2-eisdir-"));
+  const path = join(dir, "api-error-resume.json");
+  mkdirSync(path);
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const m = new Map<string, ApiErrorState>();
+    for (let i = 0; i < 100; i++) {
+      m.set("c1", { errorAt: T0 + i, error: "x" });
+      saveResumeStates(m, path, T0 + i * 1_000);
+    }
+    expect(errors).toHaveBeenCalledTimes(1);
   } finally {
     errors.mockRestore();
     rmSync(dir, { recursive: true, force: true });

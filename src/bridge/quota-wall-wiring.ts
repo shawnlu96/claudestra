@@ -213,18 +213,18 @@ export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: st
   return { envelope: env, outcome: { kind: "sent", note: "queued", heldBy: "wall_menu" } };
 }
 
-/** 这个频道的 agent 还在不在（master 不在 registry 里也算在）：已经收掉的，到点没连着就不往它频道报续跑作废 */
+const RESUME_LABEL = "api-error-resume";
+
+/** 这个频道的 agent 还在不在（master 不在 registry 里也算在；kill 只把条目置 stopped、channelId 留着，不算在）：收掉的到点没连着就不往它频道报 */
 function agentKept(cid: string): boolean {
   if (cid === bridge?.controlChannelId) return true;
   try {
-    return readRegistryAgentsSync().some((a) => a.channelId === cid);
+    return readRegistryAgentsSync().some((a) => a.channelId === cid && a.status !== "stopped");
   } catch (e) {
     console.error(`续跑作废前查 registry 失败，按还在算（最多多报一次）: ${(e as Error).message}`);
     return true;
   }
 }
-
-const RESUME_LABEL = "api-error-resume";
 const isResume = (env: Envelope) => env.from.kind === "bridge" && env.from.label === RESUME_LABEL;
 /**
  * 频道 → 当前有效的那份续跑计划（= 续跑信封的 messageId）。只有它能发；撤销 = 删掉。bridge 重启后从押后队列里恢复的
@@ -272,6 +272,8 @@ function cancelResume(b: WallBridgeDeps, states: Map<string, ApiErrorState>, cid
 }
 
 const WALL_END = "撞了额度，续跑交给额度闸（出闸后续跑）";
+/** Codex / Pi 撞额度不进闸（闸只停 Claude Code）：开的是额度卡，等 owner 处理 */
+const ACP_QUOTA_END = "撞了额度，已开额度卡等 owner 处理，bridge 不再自动续跑";
 
 /** 被「它又动了」取消掉的续跑（60 秒续跑 / 闸的续跑名单）：那一轮要是外人触发的、不算接着做，stop-settle 调 rearmResume 放回去 */
 const cancelledResume = new Map<string, { agent: string; error: string }>();
@@ -334,7 +336,7 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       return;
     }
     // Codex 的额度条目不带 isApiErrorMessage、不生成 api_error_turn（lib/codex-session.ts），watcher 标成 rateLimited 的结构化条目：同样撤续跑
-    if (evt.type === "assistant_text" && (evt.data as { rateLimited?: unknown }).rateLimited === true) cancelResume(b, states, evt.chatId, WALL_END);
+    if (evt.type === "assistant_text" && (evt.data as { rateLimited?: unknown }).rateLimited === true) cancelResume(b, states, evt.chatId, ACP_QUOTA_END);
     const gone = countsAsActivity(evt.type, evt.data) ? noteActivity(states, evt.chatId, ts) : undefined;
     if (gone) cancelledResume.set(evt.chatId, { agent: agentOf.get(evt.chatId) ?? evt.agent, error: gone.error });
     const moved = countsAsWallActivity(evt.type, evt.data as Record<string, unknown>);
@@ -379,20 +381,26 @@ export function flushHumanSoon(b: WallBridgeDeps, cid: string, now: number): voi
   b.flush(cid, "wall_activity").catch((e) => console.error(`押着的人发消息补投出错（留在队里，Stop / 扫描再投）: ${(e as Error).message}`));
 }
 
+/** 到点时没连着、本进程一直在等它的（第一次看到没连着的时刻）：它们满半小时是「等不回来」要报，不是开机读回的陈旧计划 */
+const offlineSince = new Map<string, number>();
+
 async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, ApiErrorState>, agentOf: Map<string, string>): Promise<void> {
   const now = Date.now();
+  for (const cid of offlineSince.keys()) if (!states.has(cid)) offlineSince.delete(cid);
   for (const cid of dueForResume(states, now)) {
     const st = states.get(cid);
     const target = b.clients.get(cid);
     if (!st) continue;
+    if (!offlineSince.has(cid) && dropStale(states, cid, now)) continue; // 机器睡了很久醒来 / 停机后开机：不投陈旧的「继续」，也不报
     if (!target) { // 没连着（刚重启还没连回来 / 窗口没了）：网络类且 agent 还在的留着等，撞错满半小时作废、频道报一次
+      if (!offlineSince.has(cid)) offlineSince.set(cid, now);
       const why = dropOffline(states, cid, now, agentKept(cid));
       const agent = agentOf.get(cid) ?? cid;
       if (why) emitEvent({ agent, chatId: cid, type: "chat_message", data: { direction: "out", from: "bridge", text: `⛔ ${agent} ${why}`, notice: true } });
       if (why && /^\d+$/.test(cid)) await b.escalate(cid, `⛔ ${agent} ${why}`).catch((e) => console.error("api-error 续跑作废通知失败:", (e as Error).message));
       continue;
     }
-    if (dropStale(states, cid, now)) continue; // 机器睡了很久醒来：不投陈旧的「继续」
+    offlineSince.delete(cid);
     // 60 秒里闸开了（别的 agent 撞墙）：这一次也交给闸，出闸再续
     if (w.active() && (await w.noteApiError({ channelId: cid, agent: agentOf.get(cid) ?? cid, at: st.errorAt, error: st.error, text: "" }))) {
       endStreak(states, cid, Date.now(), { failed: false, why: WALL_END });

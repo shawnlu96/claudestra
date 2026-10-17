@@ -68,9 +68,9 @@ export function loadResumeStates(path = RESUME_STATES_PATH): Map<string, ApiErro
 }
 
 const savedJson = new Map<string, string>();
-/** 同一个落盘错误这么久只记一行：写不进时每个事件、每 15 秒一拍都会再试一次 */
+/** 同一个落盘错误（按错误码；原文里带递增的临时文件名，每次都不同）这么久只记一行：写不进时每个事件、每 15 秒一拍都会再试一次 */
 export const SAVE_ERROR_LOG_GAP_MS = 10 * 60_000;
-const saveErrorLogged = new Map<string, { message: string; at: number }>();
+const saveErrorLogged = new Map<string, { kind: string; at: number }>();
 /** 和上次落的一样就不写；写失败只记日志（内存里还在，只是重启会丢），同一错误节流 */
 export function saveResumeStates(m: Map<string, ApiErrorState>, path = RESUME_STATES_PATH, now = Date.now()): void {
   const json = JSON.stringify(Object.fromEntries(m));
@@ -81,9 +81,10 @@ export function saveResumeStates(m: Map<string, ApiErrorState>, path = RESUME_ST
     saveErrorLogged.delete(path);
   } catch (e) {
     const message = (e as Error).message;
+    const kind = (e as NodeJS.ErrnoException).code ?? message;
     const last = saveErrorLogged.get(path);
-    if (last?.message === message && now - last.at < SAVE_ERROR_LOG_GAP_MS) return;
-    saveErrorLogged.set(path, { message, at: now });
+    if (last?.kind === kind && now - last.at < SAVE_ERROR_LOG_GAP_MS) return;
+    saveErrorLogged.set(path, { kind, at: now });
     console.error(`🚨 API 错误续跑计划落盘失败（内存里还在，bridge 重启会丢；同一错误 ${SAVE_ERROR_LOG_GAP_MS / 60_000} 分钟内不再记）: ${message}`);
   }
 }
@@ -212,15 +213,24 @@ export function markResumed(m: Map<string, ApiErrorState>, cid: string, now: num
   if (s) m.set(cid, { ...s, resumedAt: now, ...(s.net ? { net: { ...s.net, n: s.net.n + 1 } } : {}) });
 }
 
+/** 非网络类到点没连着：留这么久等它重连（bridge 刚重启时 agent 按 3、6、12 秒退避连回），过了只记日志 */
+export const OFFLINE_GRACE_MS = 3 * 60_000;
+
 /**
  * 到点要续跑而 agent 没连着。网络类、agent 还在 registry 的（kept；master 算在）：留着等它连回来，撞错满 STALE_RESUME_MS 还没连上就作废、
- * 返回频道那句的原因（报一次）。非网络类照旧当场丢；已经收掉的当场丢、不往频道报（频道多半已经没人看）。其余返回 null
+ * 返回频道那句的原因（报一次）。非网络类静默等 OFFLINE_GRACE_MS，过了只记日志；已经收掉的当场丢、不往频道报（频道多半已经没人看）。其余返回 null
  */
 export function dropOffline(m: Map<string, ApiErrorState>, cid: string, now: number, kept = true): string | null {
   const s = m.get(cid);
   if (!s) return null;
-  if (!s.net || !kept) {
+  if (!kept) {
     endStreak(m, cid, now, s.net ? { failed: true, why: "它已经被收掉（不在 agent 名单里），续跑作废" } : null);
+    return null;
+  }
+  if (!s.net) {
+    if (now - s.errorAt < RESUME_DELAY_MS + OFFLINE_GRACE_MS) return null;
+    endStreak(m, cid, now, null);
+    console.log(`🗑 API 错误续跑 ${cid}：到点后 ${OFFLINE_GRACE_MS / 60_000} 分钟它都没连上 bridge，不再续`);
     return null;
   }
   if (now - s.errorAt < STALE_RESUME_MS) return null;
