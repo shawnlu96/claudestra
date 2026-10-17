@@ -6,6 +6,11 @@ import { LOCAL_PLACEMENT, pinnedPeer } from "./scheduler-local-pin.js";
 import { reviewLocalFirst, type ReviewLocalFacts } from "./scheduler-agent-pool-review-local.js";
 import { writeLocalEqual, type WriteLocalFacts } from "./scheduler-agent-pool-write-local.js";
 
+/**
+ * LENDBACK1: the wait note for a pin already tried this round. lend-return-local.ts sets it on load (it reads the recovery policy,
+ * which reaches back here, so it is injected like reviewLocal / writeLocal); unset = today's `固定 X` text.
+ */
+export const pinTriedPort: { note: (project: string | undefined, pin: string, tried: readonly string[]) => string | null } = { note: () => null };
 export interface AgentPoolLoad { running: AgentLimits; totals: AgentLimits }
 export const zeroAgentCounts = (): AgentLimits => ({ claude: 0, codex: 0 });
 const preferred: readonly AuthorFamily[] = ["claude", "codex"];
@@ -47,7 +52,7 @@ export function placeAgentPool(f: ReviewLocalFacts & WriteLocalFacts, role: Plac
   return writeLocalEqual(f, role, placed, (x) => peerRows(f, peers, role, x)[0] ?? null) ?? placed;
 }
 
-function placeByLoad(f: ReviewLocalFacts, role: PlaceRole, family: AuthorFamily): Placement {
+function placeByLoad(f: ReviewLocalFacts & WriteLocalFacts, role: PlaceRole, family: AuthorFamily): Placement {
   if (role !== "review" && !f.locksFree) return { kind: "wait", reason: "文件锁被别的卡占着" };
   // Review placement keeps its own cross-family rules; writing pinned "local" stays here, never a peer named "".
   const local = role !== "review" && f.pin === LOCAL_PLACEMENT;
@@ -66,7 +71,8 @@ function placeByLoad(f: ReviewLocalFacts, role: PlaceRole, family: AuthorFamily)
     if (here) return { kind: "local", family: selected, reason: `${selected} 本机在跑 ${running}，有空位且负载最少` };
   }
   const waiting = role === "write" ? "claude / codex" : family;
-  return { kind: "wait", reason: `等 ${waiting} 空位${pin ? `（固定 ${pin}）` : local ? "（固定本机）" : ""}` };
+  const tried = pin ? pinTriedPort.note(f.writeLocal?.card?.project, pin, f.tried) : null; // LENDBACK1: a pin already tried is no seat shortage
+  return { kind: "wait", reason: `等 ${waiting} 空位${tried ? `（${tried}）` : pin ? `（固定 ${pin}）` : local ? "（固定本机）" : ""}` };
 }
 
 /** Stable within each group, preserving the scheduler's rotation while finishing work before admitting more. */

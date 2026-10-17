@@ -21,6 +21,7 @@ import {
 import type { Registration } from "./peer-pr-head-review-scope.js";
 import { getMergeRun } from "./scheduler-merge.js";
 import { cancelMergeRun } from "./scheduler-merge-conflict.js";
+import { aliasPick, prParts, samePr, sameRepo } from "./repo-alias.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 
 export interface PeerPrMeta {
@@ -62,7 +63,14 @@ export function manualPeerCards(db: Database, project: string): LedgerTask[] {
 /** Any card of the project that already names this PR (a PM's manual card included). */
 export function cardForPr(db: Database, project: string, url: string): LedgerTask | null {
   const n = Number(PR_URL.exec(url)?.[1] ?? NaN);
-  return listTasks(db, project).find((t) => t.pr === url || t.pr?.replace(/\/+$/, "") === url || peerPrOf(t)?.number === n) ?? null;
+  const tasks = listTasks(db, project);
+  const exact = tasks.find((t) => t.pr === url || t.pr?.replace(/\/+$/, "") === url || peerPrOf(t)?.number === n) ?? null;
+  // REPOALIAS1 (repoAlias on): the link is compared by prKey, so an old-name card answers a new-name link; the number fallback
+  // now also needs the same repository, so another repository's PR of the same number is not this card
+  const repo = prParts(url)?.repo;
+  const aliased = tasks.find((t) => t.pr === url || t.pr?.replace(/\/+$/, "") === url || samePr(t.pr, url) ||
+    (peerPrOf(t)?.number === n && sameRepo(prParts(peerPrOf(t)?.url)?.repo, repo))) ?? null;
+  return aliasPick("peer-pr-ledger.cardForPr", exact, aliased, (a, b) => a?.id === b?.id);
 }
 
 /** The current round already has a verdict (structured or not): drift after it re-reviews the new head as a new round. */
@@ -95,7 +103,8 @@ export function intakeWrite(db: Database, ctx: WriteCtx, input: IntakeInput, cfg
     const id = peerTaskId(input.number);
     const existing = cardForPr(db, input.project, input.url) ?? getTask(db, id);
     if (existing) {
-      if (existing.id === id && peerPrOf(existing)?.url === input.url) return { task: existing, duplicate: true };
+      const known = peerPrOf(existing)?.url, exact = existing.id === id && known === input.url;
+      if (aliasPick("peer-pr-ledger.intake", exact, exact || (existing.id === id && samePr(known, input.url)))) return { task: existing, duplicate: true };
       throw new LedgerError("conflict", `台账里已有卡 ${existing.id} 引用这个 PR（或占了 ${id}），不自动收`);
     }
     if (inFlightPeerCards(db, input.project).length >= cfg.maxOpen) throw new LedgerError("conflict", `在途 peer 卡已满 ${cfg.maxOpen} 张`);

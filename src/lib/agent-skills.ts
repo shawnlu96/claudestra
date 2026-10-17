@@ -31,7 +31,8 @@ export type OutsideOverrides = Array<{ source: OutsideSource; overrides: Record<
 export type AgentSkillView =
   | { runtime: "claude-code"; supported: true; rows: AgentSkillRow[] }
   | { runtime: "pi"; supported: boolean; reason?: "inherit"; rows: AgentSkillRow[] }
-  | { runtime: "codex"; supported: false; reason: "codex"; rows: AgentSkillRow[] };
+  | { runtime: "codex"; supported: false; reason: "codex"; rows: AgentSkillRow[] }
+  | { runtime: "opencode"; supported: false; reason: "opencode"; rows: AgentSkillRow[] };
 
 const row = (s: LibrarySkill, state: SkillState): AgentSkillRow => ({
   name: s.name,
@@ -149,6 +150,7 @@ export function agentSkillView(
   ctx: { cwd: string | null; overrides: Record<string, SkillState>; piEnv: PiEnvProfile; outside?: OutsideOverrides },
 ): AgentSkillView {
   if (runtime === "codex") return { runtime, supported: false, reason: "codex", rows: [] };
+  if (runtime === "opencode") return { runtime, supported: false, reason: "opencode", rows: [] }; // 不能落到下面 CC 的视图：开关写进 CC 设置，对它不生效
   if (runtime === "pi") {
     const rows = piSkillRows(skills, ctx.cwd, ctx.piEnv);
     return ctx.piEnv.base === "minimal" ? { runtime, supported: true, rows } : { runtime, supported: false, reason: "inherit", rows };

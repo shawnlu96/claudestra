@@ -14,6 +14,8 @@ Codex agent 默认经 [Agent Client Protocol](https://agentclientprotocol.com) �
 - 进程多一层；
 - owner 不能再 attach 进 TUI 打字（窗口底部有宿主自己的输入行，见下面「窗口输入行」）。
 
+系统强制只读的 Codex agent（`create --mode readOnly`）只用自研适配器的 `read-only-never` 预设，不落到上游：[codex-readonly.md](./codex-readonly.md)。
+
 Codex 的窗口显示会话视图（收到的消息、模型正文、工具调用和结果摘要、回合结束 / 失败原因，`lib/acp/transcript.ts`，脱敏、长结果截断），底部是状态行和输入行；宿主的连接日志只写 `logs/acp/<agent>/host.log`。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
 
 ## 状态

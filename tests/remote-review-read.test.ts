@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { closeLedger, getEventByDedup, getTask, openLedger } from "../src/lib/ledger-store.js";
+import { sameRemotePr, type RemoteIdentity } from "../src/lib/remote-review-identity.js";
 import { TERMINAL_STAGES } from "../src/lib/ledger-stages.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -12,19 +13,18 @@ import { APPLIED_OP, appliedKey, lateRemoteMatches, NOTIFIED_OP, notifiedKey, RE
   from "../src/lib/remote-review-read.js";
 
 const HEAD = "abcdef0123456789abcdef0123456789abcdef01", HEAD2 = "1234567890abcdef1234567890abcdef12345678";
-const H12 = HEAD.slice(0, 12), H12B = HEAD2.slice(0, 12);
 
-/** The functions as they were before SCHEDMEM1 (every row read, filtered in JS): the oracle. */
+/** Pre-SQL filtering with RRL-4 identity checks: the oracle for preserving both cards on merge. */
 const oldRows = (db: Database, project: string) => db.query(`SELECT seq, target, data FROM events WHERE dedupKey >= ? AND dedupKey < ? AND project = ?
   AND kind = 'scheduler' AND actor = 'scheduler' ORDER BY seq`).all(`scheduler:${REMOTE_REVIEW_OP}`, "scheduler:remote_reviex", project) as { seq: number; target: string; data: string }[];
 const oldUnsent = (db: Database, project: string) => oldRows(db, project).map((x) => ({ ...x, notice: (JSON.parse(x.data) as { notice?: unknown }).notice }))
   .filter((x) => typeof x.notice === "string" && !getEventByDedup(db, notifiedKey(x.seq)))
   .map((x) => ({ taskId: x.target, seq: x.seq, text: x.notice as string }));
 const oldLate = (db: Database, project: string) => oldRows(db, project).filter((x) => {
-  const d = JSON.parse(x.data) as { op?: string; matched?: boolean; head12?: unknown };
-  if (d.op !== REMOTE_REVIEW_OP || d.matched !== false || typeof d.head12 !== "string" || getEventByDedup(db, appliedKey(x.seq))) return false;
+  const d = JSON.parse(x.data) as RemoteIdentity & { op?: string; matched?: boolean };
+  if (d.op !== REMOTE_REVIEW_OP || d.matched !== false || typeof d.repo !== "string" || getEventByDedup(db, appliedKey(x.seq))) return false;
   const task = getTask(db, x.target);
-  return !!task && !TERMINAL_STAGES.includes(task.stage) && !!remoteHeadMatch(db, task, d.head12);
+  return !!task && sameRemotePr(task.pr, d) && !TERMINAL_STAGES.includes(task.stage) && !!remoteHeadMatch(db, task, d.fullHead);
 }).map((x) => ({ taskId: x.target, seq: x.seq }));
 
 const dirs: string[] = [];
@@ -36,13 +36,14 @@ function fixture() {
   let now = 1_000, n = 0;
   for (const [project, id] of [["p", "T1"], ["p", "T2"], ["p", "T3"], ["q", "Q1"]] as const)
     createTask(db, { actor: "owner", now: (now += 10) }, { project, id, title: id, kind: "code", agent: "agent-a" });
+  db.query("UPDATE tasks SET pr = 'https://github.com/owner/repo/pull/7'").run();
   db.query("UPDATE tasks SET headSHA = ?, stage = 'review' WHERE id IN ('T1', 'Q1')").run(HEAD);
   db.query("UPDATE tasks SET headSHA = ?, stage = 'done' WHERE id = 'T2'").run(HEAD);
   db.query("UPDATE tasks SET headSHA = ?, stage = 'build' WHERE id = 'T3'").run(HEAD2);
   const ev = (target: string, data: Record<string, unknown>, key: string, o: { project?: string; actor?: string } = {}) =>
     insertEvent(db, { actor: o.actor ?? "scheduler", now: (now += 10), dedupKey: key }, { project: o.project ?? "p", target, kind: "scheduler", text: "", data }, true);
   const book = (target: string, data: Record<string, unknown>, o: { project?: string; actor?: string } = {}) =>
-    ev(target, { op: REMOTE_REVIEW_OP, ...data }, `scheduler:${REMOTE_REVIEW_OP}:${target}:r${++n}:${data.head12 ?? "x"}`, o).seq;
+    ev(target, { op: REMOTE_REVIEW_OP, repo: "owner/repo", number: 7, ...data }, `scheduler:${REMOTE_REVIEW_OP}:${target}:r${++n}:${data.fullHead ?? "x"}`, o).seq;
   const notified = (target: string, seq: number) => ev(target, { op: NOTIFIED_OP, remoteSeq: seq }, notifiedKey(seq));
   const applied = (target: string, seq: number, data: Record<string, unknown> = {}) => ev(target, { op: APPLIED_OP, remoteSeq: seq, ...data }, appliedKey(seq)).seq;
   return { db, path, book, notified, applied };
@@ -63,22 +64,26 @@ function countRows(db: Database): { rows: number } {
 describe("SCHEDMEM1 remote review reads", () => {
   test("[验收线 2] notified / unnotified / applied / unmatched / finished card / other head: new output equals the old, item by item", () => {
     const f = fixture();
-    const a = f.book("T1", { matched: true, head12: H12, notice: "a: notified" }); f.notified("T1", a);
-    f.book("T1", { matched: true, head12: H12, notice: "b: owed" });
-    f.book("T1", { matched: false, head12: H12 }); // late match
-    const d = f.book("T1", { matched: false, head12: H12, notice: "d: owed too" }); // late match with an owed notice
-    const e = f.book("T1", { matched: false, head12: H12 }); const ea = f.applied("T1", e, { notice: "e applied: owed" });
-    const g = f.book("T1", { matched: false, head12: H12 }); const ga = f.applied("T1", g, { notice: "g applied: sent" }); f.notified("T1", ga);
-    f.book("T2", { matched: false, head12: H12, notice: "card done" }); // finished card: no late match, the notice is still owed
-    f.book("T3", { matched: false, head12: H12 }); // the card is at another head
-    f.book("T3", { matched: false, head12: H12B }); // ... and this one is at its head
-    f.book("T1", { matched: 0, head12: H12 }); // not the literal false
-    f.book("T1", { matched: false, head12: 12 }); // head12 not a string
-    f.book("T1", { matched: false }); // no head12
-    f.book("T1", { matched: true, head12: H12, notice: 7 }); // notice not a string
-    f.book("T1", { matched: false, head12: H12, notice: "other actor" }, { actor: "agent-x" });
-    f.book("Q1", { matched: false, head12: H12, notice: "other project" }, { project: "q" });
-    f.book("GONE", { matched: false, head12: H12, notice: "no such card" });
+    const a = f.book("T1", { matched: true, fullHead: HEAD, notice: "a: notified" }); f.notified("T1", a);
+    f.book("T1", { matched: true, fullHead: HEAD, notice: "b: owed" });
+    f.book("T1", { matched: false, fullHead: HEAD }); // late match
+    const d = f.book("T1", { matched: false, fullHead: HEAD.toUpperCase(), notice: "d: owed too" }); // late match with an owed notice
+    const e = f.book("T1", { matched: false, fullHead: HEAD }); const ea = f.applied("T1", e, { notice: "e applied: owed" });
+    const g = f.book("T1", { matched: false, fullHead: HEAD }); const ga = f.applied("T1", g, { notice: "g applied: sent" }); f.notified("T1", ga);
+    f.book("T2", { matched: false, fullHead: HEAD, notice: "card done" }); // finished card: no late match, the notice is still owed
+    f.book("T3", { matched: false, fullHead: HEAD }); // the card is at another head
+    f.book("T3", { matched: false, fullHead: HEAD2 }); // ... and this one is at its head
+    f.book("T1", { matched: 0, fullHead: HEAD }); // not the literal false
+    f.book("T1", { matched: false, fullHead: 12 }); // full head not a string
+    f.book("T1", { matched: false }); // no full head
+    f.book("T1", { matched: false, head12: HEAD.slice(0, 12) }); // legacy booking
+    f.book("T1", { matched: false, fullHead: HEAD, repo: "other/repo" });
+    f.book("T1", { matched: false, fullHead: HEAD, number: 8 });
+    f.book("T1", { matched: false, fullHead: HEAD.slice(0, -1) + "f" }); // same prefix, different full head
+    f.book("T1", { matched: true, fullHead: HEAD, notice: 7 }); // notice not a string
+    f.book("T1", { matched: false, fullHead: HEAD, notice: "other actor" }, { actor: "agent-x" });
+    f.book("Q1", { matched: false, fullHead: HEAD, notice: "other project" }, { project: "q" });
+    f.book("GONE", { matched: false, fullHead: HEAD, notice: "no such card" });
     for (const p of ["p", "q"]) {
       expect(unsentRemoteNotices(f.db, p)).toEqual(oldUnsent(f.db, p));
       expect(lateRemoteMatches(f.db, p)).toEqual(oldLate(f.db, p));
@@ -87,7 +92,7 @@ describe("SCHEDMEM1 remote review reads", () => {
     expect(lateRemoteMatches(f.db, "p").map((x) => x.taskId)).toEqual(["T1", "T1", "T3"]);
     expect(lateRemoteMatches(f.db, "p").map((x) => x.seq)).toContain(d);
     expect(ea).toBeGreaterThan(0);
-    // an old booking whose card reaches its head later still matches: the semantics did not move
+    // A complete booking whose card reaches its full head later still matches.
     f.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T3'").run(HEAD);
     expect(lateRemoteMatches(f.db, "p")).toEqual(oldLate(f.db, "p"));
     expect(lateRemoteMatches(f.db, "p").filter((x) => x.taskId === "T3").length).toBe(1);
@@ -98,7 +103,7 @@ describe("SCHEDMEM1 remote review reads", () => {
     const f = fixture();
     f.db.transaction(() => {
       for (let i = 0; i < 10_000; i++) {
-        const s = f.book("T1", { matched: false, head12: H12, notice: `n${i}` });
+        const s = f.book("T1", { matched: false, fullHead: HEAD, notice: `n${i}` });
         f.notified("T1", s);
         f.applied("T1", s);
       }

@@ -216,3 +216,16 @@ describe("rosterLine（v2.23+ 花名册行：运行时标识）", () => {
     expect(rosterLine("a", long, undefined)).toBe(`a(${"x".repeat(40)})`);
   });
 });
+
+describe("project declaration restrictions whitelist", () => {
+  test("preserves restrictions through old read/edit/write paths, including invalid restrictions for fail-closed loading", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "projects-decl-")); const path = join(dir, "projects.json");
+    for (const restriction of [{ disabled: true, deny: ["ci.testAdapter"], timeoutSec: { "validation.author.check": 10 }, paths: ["tests"], deploy: "none" },
+      { authorization: true }]) {
+      await writeProjects({ projects: [{ ...proj("a", [dir]), projectDecl: restriction }] }, path);
+      const data = await readProjects(path); expect(data.projects[0].projectDecl).toEqual(restriction);
+      data.projects[0].name = "edited"; await writeProjects(data, path);
+      expect((await readProjects(path)).projects[0].projectDecl).toEqual(restriction);
+    }
+  });
+});

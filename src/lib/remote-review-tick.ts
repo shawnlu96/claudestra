@@ -13,6 +13,7 @@ import { notifyProjectPm } from "./pm-notify.js";
 import { quoteExternal } from "./quote-text.js";
 import { listInbox, readInbox, REMOTE_INBOX_DIR } from "./remote-review-inbox.js";
 import { lateRemoteMatches, unsentRemoteNotices } from "./remote-review-read.js";
+import { legacyRemoteNoticeTask } from "./remote-review-legacy.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -28,9 +29,16 @@ export interface RemoteReviewStepDeps {
 }
 
 const NOTICE_RETRY_MS = 60_000;
+export const NOTICE_FAILURE_CAP = 1000;
 const failedAt = new WeakMap<Database, Map<number, number>>();
 /** Tests only. */
 export const remoteNoticeRetrySize = (db: Database): number => failedAt.get(db)?.size ?? 0;
+
+/** Only pending notices retain backoff state; oldest failures yield first when the pending set exceeds the cap. */
+export function pruneRemoteNoticeFailures(memo: Map<number, number>, pending: ReadonlySet<number>): void {
+  for (const seq of memo.keys()) if (!pending.has(seq)) memo.delete(seq);
+  while (memo.size > NOTICE_FAILURE_CAP) memo.delete(memo.keys().next().value!);
+}
 
 function rethrowStop(e: unknown): void {
   if (e instanceof SchedulerStopped) throw e;
@@ -69,23 +77,24 @@ async function sendNotices(db: Database, projects: readonly string[], deps: Remo
   const failed: Failed = [], now = deps.now ?? Date.now;
   const memo = failedAt.get(db) ?? new Map<number, number>();
   failedAt.set(db, memo);
-  const pending = new Set<number>();
-  for (const project of projects) {
-    for (const n of unsentRemoteNotices(db, project)) {
-      pending.add(n.seq);
-      if (now() - (memo.get(n.seq) ?? -Infinity) < NOTICE_RETRY_MS) continue;
-      try { await notify(project, n.text); } catch (e) {
-        rethrowStop(e);
-        memo.set(n.seq, now());
-        failed.push({ taskId: n.taskId, error: `仓库方审查结论通知 PM 没发出（稍后重发）：${(e as Error).message}` });
-        continue;
-      }
+  const pending = projects.flatMap((project) => unsentRemoteNotices(db, project).map((n) => ({ project, ...n })));
+  const seqs = new Set(pending.map((n) => n.seq));
+  pruneRemoteNoticeFailures(memo, seqs);
+  for (const n of pending) {
+    const project = n.project;
+    if (now() - (memo.get(n.seq) ?? -Infinity) < NOTICE_RETRY_MS) continue;
+    try { await notify(project, n.text); } catch (e) {
+      rethrowStop(e);
       memo.delete(n.seq);
-      const r = await deps.manager("ledger", "scheduler-remote-review", n.taskId, "--notified", String(n.seq));
-      if (r.ok !== true && r.held !== true) failed.push({ taskId: n.taskId, error: `通知已发出但送达没记上（可能再发一次）：${String(r.error ?? r.code)}` });
+      memo.set(n.seq, now());
+      if (memo.size > NOTICE_FAILURE_CAP) memo.delete(memo.keys().next().value!);
+      failed.push({ taskId: n.taskId, error: `仓库方审查结论通知 PM 没发出（稍后重发）：${(e as Error).message}` });
+      continue;
     }
+    memo.delete(n.seq);
+    const r = await deps.manager("ledger", "scheduler-remote-review", n.taskId, "--notified", String(n.seq));
+    if (r.ok !== true && r.held !== true) failed.push({ taskId: n.taskId, error: `通知已发出但送达没记上（可能再发一次）：${String(r.error ?? r.code)}` });
   }
-  for (const seq of memo.keys()) if (!pending.has(seq)) memo.delete(seq); // settled elsewhere (MAPSWEEP1): not unsent any more, never retried
   return failed;
 }
 
@@ -101,12 +110,24 @@ async function applyLate(db: Database, projects: readonly string[], deps: Remote
   return failed;
 }
 
+async function captureLegacyNotices(db: Database, projects: readonly string[], deps: RemoteReviewStepDeps): Promise<Failed> {
+  const failed: Failed = [];
+  for (const project of projects) {
+    const taskId = legacyRemoteNoticeTask(db, project);
+    if (!taskId) continue;
+    const r = await deps.manager("ledger", "scheduler-remote-review", taskId, "--legacy");
+    if (r.ok !== true && r.held !== true) failed.push({ taskId, error: `旧格式审查清单没记上（下一轮再试）：${String(r.error ?? r.code)}` });
+  }
+  return failed;
+}
+
 export async function remoteReviewStep(db: Database, config: SchedulerConfig, deps: RemoteReviewStepDeps): Promise<Failed> {
   const projects = Object.entries(config.projects).filter(([, p]) => p.handoffPeer).map(([id]) => id);
-  if (!projects.length) return [];
+  if (!projects.length) { failedAt.delete(db); return []; }
   const alive = () => { try { deps.active(); return true; } catch { return false; /* not provably active: send nothing */ } };
   const notify = deps.notify ?? ((project: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", level: "action", stillActive: alive }));
   const dir = deps.dir ?? REMOTE_INBOX_DIR;
-  const booked = await bookInbox(config, deps, dir, notify), late = await applyLate(db, projects, deps);
-  return [...booked, ...late, ...await sendNotices(db, projects, deps, notify)];
+  const booked = await bookInbox(config, deps, dir, notify), legacy = await captureLegacyNotices(db, projects, deps);
+  const late = await applyLate(db, projects, deps);
+  return [...booked, ...legacy, ...late, ...await sendNotices(db, projects, deps, notify)];
 }

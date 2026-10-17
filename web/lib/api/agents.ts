@@ -46,13 +46,37 @@ export interface RuntimeInfo {
   id: string;
   label: string;
   available: boolean;
+  /** 可选模型清单（OpenCode 给）；没有 = 前端用自由输入 / Claude 目录 */
+  models?: string[];
+  /** true = 不选模型 manager 会拒（OpenCode：不默认走免费模型） */
+  modelRequired?: boolean;
+  /** true = 没有推理强度这一项（OpenCode），弹窗不显示 Effort */
+  noEffort?: boolean;
+}
+
+/** bridge 返回的一项 → RuntimeInfo；字段类型不对就丢掉，不让脏数据进下拉 */
+export function normalizeRuntime(r: Partial<Record<keyof RuntimeInfo, unknown>>): RuntimeInfo {
+  const models = Array.isArray(r.models) ? r.models.filter((m): m is string => typeof m === "string" && m !== "") : undefined;
+  return {
+    id: String(r.id ?? ""),
+    label: String(r.label ?? r.id ?? ""),
+    available: r.available === true,
+    ...(models?.length ? { models } : {}),
+    ...(r.modelRequired === true ? { modelRequired: true } : {}),
+    ...(r.noEffort === true ? { noEffort: true } : {}),
+  };
+}
+
+/** 新建弹窗：选了要求必填模型的运行时却没选模型 → true（提交按钮禁用） */
+export function missingRequiredModel(list: RuntimeInfo[], runtime: string, model: string): boolean {
+  return !model.trim() && list.some((r) => r.id === runtime && r.modelRequired === true);
 }
 
 /** 可建 agent 的运行时；桥接不可达 / 老 bridge → []（安全方向：不显示点了会报错的选项） */
 export async function runtimes(): Promise<RuntimeInfo[]> {
   try {
-    const j = await api<{ runtimes?: RuntimeInfo[] }>("/runtimes", { timeoutMs: 30_000 });
-    return (j.runtimes ?? []).map((r) => ({ id: r.id, label: r.label, available: r.available === true }));
+    const j = await api<{ runtimes?: Partial<Record<keyof RuntimeInfo, unknown>>[] }>("/runtimes", { timeoutMs: 30_000 });
+    return (j.runtimes ?? []).map(normalizeRuntime);
   } catch {
     return []; // 同上：拿不到就当只有默认运行时
   }

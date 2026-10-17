@@ -14,7 +14,7 @@ import type { Transport } from "./runtimes/types.js";
 export const REGISTRY_PATH = statePath("registry.json");
 
 /** v2.23+ agent 运行时。缺失/未知一律当 `claude-code`——宁可走老路，不猜新路 */
-export type AgentRuntime = "claude-code" | "pi" | "codex";
+export type AgentRuntime = "claude-code" | "pi" | "codex" | "opencode";
 
 /** 从 agent 记录判定运行时（registry 字段缺失 = 历史 agent = Claude Code） */
 /**
@@ -103,7 +103,7 @@ export function isReservedAgentName(name: string): boolean {
 
 export function agentRuntime(info: { runtime?: string } | undefined | null): AgentRuntime {
   const r = info?.runtime;
-  return r === "pi" || r === "codex" ? r : "claude-code";
+  return r === "pi" || r === "codex" || r === "opencode" ? r : "claude-code";
 }
 
 export interface RegistryAgent {

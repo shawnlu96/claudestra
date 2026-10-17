@@ -28,6 +28,7 @@ export async function cmdSkillToggle(args: string[]): Promise<void> {
   if (info.pending) return output({ ok: false, error: `${key} 的 ${info.pending.op} 还没做完，等它收尾（或 manager repair）再调技能` });
   const rt = agentRuntime(info);
   if (rt === "codex") return output({ ok: false, error: "Codex agent 暂不支持按 agent 启停技能（它的技能目录是全局的）" });
+  if (rt === "opencode") return output({ ok: false, error: "OpenCode agent 暂不支持按 agent 启停技能" });
   if (rt === "pi") return togglePi(reg, key, skill, state);
   return toggleClaude(key, info.cwd ? expandHome(String(info.cwd)) : null, skill, state);
 }

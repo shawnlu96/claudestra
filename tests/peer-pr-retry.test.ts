@@ -132,7 +132,7 @@ describe("默认路径不变", () => {
     const w = await world();
     expect(await w.pass()).toEqual([`PR401:${w.key} sent`]);
     const red = redactPeerPr(REPORT, IDENTITY, new Set([HEAD]));
-    const expected = renderReviewPush({ number: 401, taskId: "PR401", head: HEAD, counts: { verdict: "changes", p0: 0, p1: 1, p2: 0, round: 1 }, maxRounds: 3,
+    const expected = renderReviewPush({ repo: "o/r", number: 401, taskId: "PR401", head: HEAD, counts: { verdict: "changes", p0: 0, p1: 1, p2: 0, round: 1 }, maxRounds: 3,
       replyTo: "agent-pm@me", report: red.text, masked: red.count });
     expect(w.posts).toEqual([expected]);
     expect(w.frames[0]).toMatchObject({ type: "peer_pr_push", peer: "he", fp: FP, agent: "agent-x", key: `PR401:${w.key}`, text: expected });
@@ -190,8 +190,8 @@ describe("PM 显式补发", () => {
     expect(lines[0]).toBe("[Claudestra 调度器 · PR #401 第 1 轮审查] 不通过（1 个 P1）");
     expect(lines[1]).toContain("投递补发：这是第 1 轮原审查报告的补发");
     expect(lines[1]).toContain("不是新的审查结论");
-    expect(lines.slice(2, 7)).toEqual([`head：${HEAD.slice(0, 12)}`, "报告编号：PR401-r1（若收到重发，同编号按一份处理）",
-      "现状：这条不要求你动作；下一步以调度器之后的消息为准。", "复验轮次（原审查当时）：未到上限", "有异议或问题回：agent-pm@me"]);
+    expect(lines.slice(2, 8)).toEqual([`head：${HEAD}`, "报告编号：PR401-r1（若收到重发，同编号按一份处理）",
+      "现状：这条不要求你动作；下一步以调度器之后的消息为准。", "复验轮次（原审查当时）：未到上限", "有异议或问题回：agent-pm@me", "仓库：o/r"]);
     expect(w.posts[0]).toContain("P1 finding race-1: two ticks claim one intent");
     for (const leak of ["synthetic-private-value", "/private/tmp", statePath(), OUT_TOKEN, REPORT_PATH, "下一步：修在本 PR"]) expect(w.posts[0]).not.toContain(leak);
     expect(w.frames.at(-1)).toMatchObject({ peer: "he", fp: FP, agent: "agent-x", key: `PR401:${key}` });

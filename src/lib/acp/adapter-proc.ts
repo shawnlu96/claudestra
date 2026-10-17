@@ -3,7 +3,8 @@
  * - 起哪个：沙箱里固定是本仓的 stub，外部覆盖一律不认（stub.ts；owner 定的：不碰真 Codex 登录和 ~/.codex）；
  *   沙箱外 CLAUDESTRA_ACP_AGENT（JSON 字符串数组）优先（单测 / 手工排查用），
  *   否则是 `manager acp-install` 装好的 codex-acp 入口，用我们自己的 bun 跑，入口被改过就拒起（install.ts 校验哈希）。
- * - 环境：CODEX_PATH 锁本机的 codex；INITIAL_AGENT_MODE=agent-full-access（= tmux 下的 bypassPermissions）；
+ * - 环境：CODEX_PATH 锁本机的 codex；INITIAL_AGENT_MODE=agent-full-access（= tmux 下的 bypassPermissions），只读 agent 换成
+ *   自研适配器的 read-only-never（codex-readonly.ts；它只许起自研适配器，上游认不出预设会静默退回可写档）；
  *   CODEX_CONFIG 把 claudestra 的 channel-server 以 mcp_servers.<MCP_NAME>.* 深合并进去（同名 server 走 ACP 的 mcpServers
  *   会被适配器静默丢掉，config.toml 里就有 claudestra），它的 BRIDGE_URL 指到宿主的回环工具代理（带 token）。
  *   TMUX / TMUX_PANE 不给：channel-server 拿到它们会自己去标窗口就绪、往窗口里打字，acp 下这两件事都归宿主。
@@ -21,6 +22,7 @@ import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } f
 import { codexAcpInstalled } from "./install.js";
 import type { CodexAdapterId } from "./codex-compat-switch.js";
 import { redactSecrets } from "../redact-secrets.js";
+import { ACP_READONLY_PRESET, isReadOnlyMode, PERMISSION_MODE_ENV, readOnlyMcpToolsConfig } from "../codex-readonly.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
 
@@ -40,6 +42,7 @@ export type AgentCommand = { cmd: string[]; stub: boolean; adapter?: CodexAdapte
  */
 export function acpAgentCommand(env: Record<string, string | undefined>, bunBin: string, root?: string, clean = false, selected: CodexAdapterId = "upstream"): AgentCommand {
   const bun = [bunBin, ...(clean ? BUN_NO_AUTOLOAD : [])];
+  if (isReadOnlyMode(env[PERMISSION_MODE_ENV]) && !isSandbox(env)) return readOnlyAgentCommand(env, bun, clean);
   if (isSandbox(env)) {
     const stub = repoStubPath();
     return stub ? { cmd: [...bun, stub], stub: true } : { error: "沙箱里找不到本仓的 scripts/acp-stub.ts（或它的真实路径不在本仓里），不起 ACP 适配器" };
@@ -61,6 +64,16 @@ export function acpAgentCommand(env: Record<string, string | undefined>, bunBin:
   return installed.ok ? { cmd: upstream!, stub: false, adapter: "upstream" } : { error: installed.hint };
 }
 
+/**
+ * 只读 agent（env 里 CLAUDESTRA_PERMISSION_MODE=readOnly）：只起自研适配器，upstream 给 null（AdapterPick 无处可退，
+ * 自研判不过宿主就拒起）。手工覆盖的 argv 证明不了是谁、出借 worker 不该是只读，一律拒。沙箱照旧是 stub。
+ */
+function readOnlyAgentCommand(env: Record<string, string | undefined>, bun: string[], clean: boolean): AgentCommand {
+  if (clean) return { error: "出借 worker 不支持只读档（readOnly 只给常驻 Codex agent）" };
+  if (env[ACP_AGENT_ENV]?.trim()) return { error: `只读 agent 不认 ${ACP_AGENT_ENV} 手工覆盖：认不出它是不是自研适配器，可能以可写档跑起来` };
+  return { cmd: [...bun, SELF_ADAPTER_MAIN], stub: false, adapter: "self", upstream: null };
+}
+
 export interface AdapterEnvSpec {
   base: Record<string, string | undefined>;
   bunBin: string;
@@ -76,6 +89,8 @@ export interface AdapterEnvSpec {
   clean?: boolean;
   /** clean 必填：worker 专属的临时目录，状态 / 运行目录指到它下面（workerPrivateDirs），由起它的进程负责删 */
   workerRoot?: string;
+  /** agent 的权限档位；不给就看 base 里的 CLAUDESTRA_PERMISSION_MODE（宿主命令带的）。readOnly → 只读预设 */
+  permissionMode?: string;
 }
 
 /** 宿主环境 → 适配器环境的公共底（两家共用）：拷一份，去掉 tmux / 频道 / bridge 变量；干净模式只拿白名单 */
@@ -98,18 +113,23 @@ export function channelServerEnv(c: NonNullable<AdapterEnvSpec["channel"]>, mcpN
 /** Codex：channel-server 以 CODEX_CONFIG 的 mcp_servers 交给 codex-acp，它按 env_vars 白名单从适配器环境里取频道变量 */
 export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
   const env = hostEnvBase(s);
-  const config: Record<string, unknown> = { check_for_update_on_startup: false };
+  const readOnly = isReadOnlyMode(s.permissionMode) || isReadOnlyMode(s.base[PERMISSION_MODE_ENV]);
+  if (readOnly && s.clean) throw new Error("出借 worker 不支持只读档（readOnly 只给常驻 Codex agent）");
+  // 线程级默认也压成只读（每轮 turn/start 还会带预设的策略）：哪条请求漏带策略，落到的也是只读而不是用户全局 config
+  const config: Record<string, unknown> = { check_for_update_on_startup: false, ...(readOnly ? { sandbox_mode: "read-only", approval_policy: "never" } : {}) };
   if (s.developerInstructions) config.developer_instructions = s.developerInstructions;
   if (s.channel) {
     const args = s.clean ? [...BUN_NO_AUTOLOAD, s.channelServer] : [s.channelServer];
-    config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args, env_vars: s.clean ? LEND_MCP_ENV_VARS : ACP_MCP_ENV_VARS } };
+    // 只读档：回复类工具放行审批（codex-readonly.ts READ_ONLY_MCP_TOOLS），其余工具 never 下即拒
+    config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args, env_vars: s.clean ? LEND_MCP_ENV_VARS : ACP_MCP_ENV_VARS, ...(readOnly ? readOnlyMcpToolsConfig() : {}) } };
     Object.assign(env, channelServerEnv(s.channel, s.mcpName, "codex"), s.clean ? { [MCP_PROFILE_ENV]: LEND_PROFILE } : {});
     // 沙箱 clean 带进来的宿主 BRIDGE_PORT 和代理地址的端口对不上，worker 里任何 bun 进程过沙箱总闸都会被拒（lib/sandbox.ts）
     if (s.clean) delete env.BRIDGE_PORT;
   }
   if (s.codexPath) env.CODEX_PATH = s.codexPath;
   if (isSandbox(s.base)) Object.assign(env, sandboxAcpHome(s.base[SANDBOX_ROOT_ENV])); // 沙箱：适配器和它起的 channel-server 碰不到 owner 的家目录
-  env.INITIAL_AGENT_MODE = "agent-full-access";
+  env.INITIAL_AGENT_MODE = readOnly ? ACP_READONLY_PRESET : "agent-full-access";
+  if (readOnly) env[PERMISSION_MODE_ENV] = "readOnly"; // channel-server（env_vars 白名单里有它）的 whoami 据此报档位
   env.APP_SERVER_LOGS = s.logsDir;
   env.CODEX_CONFIG = JSON.stringify(config);
   return env;

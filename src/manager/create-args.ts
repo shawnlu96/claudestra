@@ -4,6 +4,7 @@
  * `{"purpose":"--parent=master"}` / `--external` / `--model=x` 会先被当成 flag 吃掉（core.ts extractPurposeFlag 注释）。
  */
 import { validateDisallowedRules } from "../lib/disallowed-rules.js";
+import { keepEffort, managedFor } from "../lib/runtimes/index.js";
 import {
   extractBoolFlag, extractEffortFlag, extractModeFlag, extractModelFlag, extractPermFlags, extractPurposeFlag, extractStringFlag, rejectFlagLikePositional,
 } from "./core.js";
@@ -11,7 +12,7 @@ import { extractTeamFlags, type TeamFlags } from "./team.js";
 import { extractCardFlags, type CardFlags } from "./create-lifecycle.js";
 
 export const CREATE_USAGE =
-  'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--pi-base inherit|minimal] [--preset <preset>] ' +
+  'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi|codex|opencode] [--pi-base inherit|minimal] [--preset <preset>] ' +
   '[--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external] [--parent <agent|master|none>] [--task "<text>"] ' +
   '[--card <taskId> --card-role author|reviewer|other]';
 
@@ -68,11 +69,14 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
   const flagLike = rejectFlagLikePositional(name, dir);
   if (flagLike) return { error: flagLike };
   if (!name || !dir) return { error: CREATE_USAGE };
+  const adapter = managedFor(runtimeFlag);
+  if (adapter?.modelRequired && !model?.trim()) return { error: adapter.modelRequired }; // 早拒：建频道 / 窗口之前（启动命令另有兜底）
+  const keptEffort = keepEffort(runtimeFlag, effort);
   return {
     name,
     dir,
     purpose: purposeFlag ?? purposeParts.join(" "),
-    perms: { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, transportFlag,
+    perms: { preset, disallowedRaw }, effort: keptEffort, mode, model, external, projectFlag, runtimeFlag, transportFlag,
     piBaseFlag, piPresetFlag, teamFlags, ...(card ? { card } : {}),
   };
 }

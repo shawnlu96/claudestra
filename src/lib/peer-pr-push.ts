@@ -5,6 +5,7 @@
  * retried 30 s → 10 min until 24 h after the first claim. PM hears once at 15 min, once on giving up, once per refusal.
  */
 import { createHash } from "node:crypto";
+import { prCoordinates } from "./card-repo.js";
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents, listTasks } from "./ledger-store.js";
@@ -64,11 +65,13 @@ async function renderReview(c: PeerPrCtx, item: PushItem, same?: (text: string) 
   const report = reportDigest(rep.text);
   if (same && !same(rep.text)) return { refuse: "报告正文在申请补发之后变了", report };
   const head = typeof d.head === "string" && SHA_RE.test(d.head) ? d.head : item.task.headSHA ?? "";
+  const coordinates = prCoordinates(item.meta.url);
+  if (!coordinates || coordinates.pr !== item.meta.number || !SHA_RE.test(head)) return { refuse: "审查推送缺少仓库 / PR / 完整 head", report };
   const commits = await c.deps.commits([...hexCandidates(rep.text), head]);
   if (SHA_RE.test(head)) commits.add(head);
   const red = redactPeerPr(rep.text, c.deps.identity, commits);
   const counts = { verdict: String(d.verdict ?? ""), p0: count(d.p0), p1: count(d.p1), p2: count(d.p2), round: count(d.round) };
-  return { commits, report, text: renderReviewPush({ number: item.meta.number, taskId: item.task.id, head, counts, maxRounds: c.cfg.maxRounds,
+  return { commits, report, text: renderReviewPush({ repo: coordinates.repo, number: item.meta.number, taskId: item.task.id, head, counts, maxRounds: c.cfg.maxRounds,
     replyTo: c.cfg.replyTo, report: red.text, masked: red.count }) };
 }
 

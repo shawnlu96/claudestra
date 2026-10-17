@@ -33,6 +33,17 @@ const CODEX_ACP_SAVE_COMMANDS: ReadonlyArray<{ name: string; description: string
 ];
 
 /**
+ * OpenCode（只走 ACP）认的斜杠命令：它 available_commands_update 报的 init / review，加上它认但不报的 /compact
+ * （docs/runtimes/opencode-acp.md §6）。不在表里的 "/xxx" 发给它会被整条吞掉（不进会话、不回话，OCR-4 第 1 轮 P1-3），
+ * 所以 api-slash.ts 把表外的当普通消息投递；/clear 由宿主换会话，不进表。
+ */
+const OPENCODE_COMMANDS: ReadonlyArray<{ name: string; description: string }> = [
+  { name: "compact", description: "summarize conversation to prevent hitting the context limit" },
+  { name: "init", description: "create or update AGENTS.md for this project" },
+  { name: "review", description: "review changes" },
+];
+
+/**
  * ACP 版 Pi 只列适配器真能执行的：pi 的 rpc prompt 照常跑扩展 / 包的命令，内置命令只有 /compact 被适配器换成 rpc compact
  * （lib/acp/pi-adapter/map.ts compactCommand），其余内置命令是 TUI 面板，会被当普通文字发给模型。
  * 快照是 tmux 版扩展写的（迁过来的 agent 还留着旧的），`claudestra-*` 是那个扩展自己的命令，acp 下没加载。
@@ -49,5 +60,6 @@ export function runtimeCommandsFor(runtime: string | undefined, agent: string, a
     const own = CODEX_BUILTIN_PASSTHROUGH.map((b) => ({ name: b.name, invokeName: b.name, description: b.description, scope: b.turn ? "codex-turn" : "builtin" }));
     return acp ? [...own, ...CODEX_ACP_SAVE_COMMANDS.map((c) => ({ ...c, invokeName: c.name, scope: "codex-turn" }))] : own;
   }
+  if (runtime === "opencode") return OPENCODE_COMMANDS.map((c) => ({ ...c, invokeName: c.name, scope: "opencode" }));
   return null;
 }

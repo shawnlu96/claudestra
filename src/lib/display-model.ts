@@ -6,6 +6,7 @@
  *   档位的实测常扫不到（只在会话头部写一次），靠扩展启动时的快照兜底
  * - codex：会话实测 → registry → config.toml → 模型目录的默认档；实测到「档位 null」就是模型默认档，
  *   同样不能落到 Claude Code 的全局 effort（那是另一套值）
+ * - opencode：会话实测 → registry；没有推理强度，档位恒为 null（不能显示 Claude Code 的全局档）
  */
 import type { SessionTailInfo } from "./session-tail.js";
 import { codexDisplayDefaults, type CodexModel } from "./codex-catalog.js";
@@ -43,6 +44,7 @@ export function displayModelEffort(i: DisplayInput): { model: string | null; eff
       effort: ov.effort ?? tail?.effort ?? i.piSnapThinking ?? reg?.effort ?? null,
     };
   }
+  if (i.runtime === "opencode") return { model: model0 ?? reg?.model ?? tail?.model ?? null, effort: null }; // 没有推理强度，别显示 CC 的全局档
   if (i.runtime === "codex") {
     const model = model0 ?? reg?.model ?? null;
     const d = codexDisplayDefaults(i.codex?.catalog ?? null, i.codex?.config ?? { model: null, effort: null }, model);

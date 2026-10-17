@@ -81,7 +81,7 @@ function modelEvidence(o: CollectOpts, agent: string, sessionId: string | null, 
   const size = statSync(file).size;
   const text = new TextDecoder().decode(readFileSync(file).subarray(Math.max(0, size - SESSION_TAIL)));
   const seen = new Set<string>(), counts = new Map<string, number>();
-  for (const h of EXTRACT[runtime](text.split("\n"))) {
+  for (const h of (EXTRACT[runtime] ?? (() => []))(text.split("\n"))) { // 没有提取器的运行时（OpenCode）：只报没看到模型，不当 CC 行硬套
     if (!(h.ts >= fromMs && h.ts <= toMs) || (h.id && seen.has(h.id))) continue;
     if (h.id) seen.add(h.id);
     counts.set(h.model, (counts.get(h.model) ?? 0) + 1);

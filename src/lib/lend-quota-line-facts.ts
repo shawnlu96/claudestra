@@ -115,6 +115,19 @@ export function refreshQuotaFacts(now = Date.now(), io: FactsIo = DEFAULT_IO): P
   return inflight;
 }
 
+/**
+ * 本机重置已成功、额度服务已补读并落盘：失效清单缓存，再读真实 observedAt（不把读取时刻伪造成观测时刻）。
+ * 先等旧读取结束，避免它稍后回包把旧清单重新塞进缓存；内存与磁盘事实都保留，落盘失败时 memo 可能是唯一的回退。
+ * 外部重置不触发这里：新快照落盘后仍可能等 60 秒缓存，再等网页下一次 60 秒轮询。
+ */
+export async function refreshQuotaFactsAfterReset(now = Date.now(), io: FactsIo = DEFAULT_IO): Promise<QuotaFacts> {
+  while (inflight) {
+    try { await inflight; } catch (e) { console.warn(`⚠️ [lend-quota-line] 重置前的额度补读失败，继续重读：${(e as Error).message}`); }
+  }
+  invCache = null;
+  return refreshQuotaFacts(now, io);
+}
+
 /** 同步拿此刻的事实（claim / hello 用）；内存那份过了 FACT_REFRESH_MS 就在后台补读，本次先用手上的 */
 export function factsNow(now = Date.now(), io: FactsIo = DEFAULT_IO): QuotaFacts {
   if (!isTestProcess() && (!memo || now - memo.at >= FACT_REFRESH_MS || now < memo.at)) {

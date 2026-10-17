@@ -14,7 +14,7 @@ import { pickSwitchOverride, rememberSwitchOverride, setSwitchOverrideRegistryFo
 import { closeAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
-import { remoteNoticeRetrySize, remoteReviewStep } from "../src/lib/remote-review-tick.js";
+import { NOTICE_FAILURE_CAP, remoteNoticeRetrySize, remoteReviewStep } from "../src/lib/remote-review-tick.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { ARCHIVE_CACHE_BYTES, ARCHIVE_MAX_BYTES, ciProofArchiveMemory, ghCiProofPort, resetCiProofPortCache } from "../src/lib/scheduler-ci-proof-port.js";
@@ -136,7 +136,7 @@ describe("remote-review-tick：failedAt", () => {
         notify: async () => { sent++; if (fail) throw new Error("PM 不在"); } };
       await remoteReviewStep(l.db, config, deps);
       expect(sent).toBe(N);
-      expect(remoteNoticeRetrySize(l.db)).toBe(N);
+      expect(remoteNoticeRetrySize(l.db)).toBe(NOTICE_FAILURE_CAP); // RRL-4 caps retry memory even while all 10k notices remain pending.
       // 外部结算：每条都有了 notified 事件
       const done = l.db.prepare(`INSERT INTO events (ts, actor, project, target, kind, data, dedupKey) VALUES (1, 'scheduler', 'p', 'T0', 'scheduler', '{}', ?)`);
       const seqs = (l.db.query("SELECT seq FROM events").all() as { seq: number }[]).map((r) => r.seq);

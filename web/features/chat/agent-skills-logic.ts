@@ -34,7 +34,7 @@ export const OUTSIDE_LABEL: Record<OutsideSource, string> = { user: "全局设�
 export interface AgentSkillView {
   runtime: "claude-code" | "pi" | "codex";
   supported: boolean;
-  reason?: "inherit" | "codex";
+  reason?: "inherit" | "codex" | "opencode";
   rows: AgentSkillRow[];
 }
 

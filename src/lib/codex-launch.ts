@@ -27,6 +27,7 @@ import { shellEscape } from "./claude-launch.js";
 import { assertSandboxRuntime } from "./sandbox.js";
 import { resolveLoginBinary, type LoginBinary, type Runner } from "./login-binary.js";
 import { CONTEXT_PREAMBLE_MARKER, encodePreambleEnv } from "./codex-thread.js";
+import { EXEC_READONLY_FLAGS, isReadOnlyMode, PERMISSION_MODE_ENV, READ_ONLY_MCP_TOOLS, TUI_READONLY_FLAGS } from "./codex-readonly.js";
 
 export { CONTEXT_PREAMBLE_MARKER };
 
@@ -76,13 +77,15 @@ function cfg(kv: string): string[] {
 // ── 权限 / effort / model ─────────────────────────────────────────────────
 
 /**
- * 只放行 bypassPermissions：其余 Claude Code 档位在 Codex 里会弹审批框，而
+ * 只放行 bypassPermissions 和 readOnly：其余 Claude Code 档位在 Codex 里会弹审批框，而
  * permission-watcher 不认 Codex 的 UI，没人去点 → agent 永远卡住。宁可启动前报错。
+ * readOnly = 只读沙箱 + 从不审批（codex-readonly.ts）；exec 没有 -a，审批改走 -c。
  */
-export function codexPermissionFlags(mode: string | undefined): string[] {
+export function codexPermissionFlags(mode: string | undefined, kind: "tui" | "exec" = "tui"): string[] {
   const m = (mode || "").trim() || "bypassPermissions";
   if (m === "bypassPermissions" || m === "auto") return ["--dangerously-bypass-approvals-and-sandbox"];
-  throw new Error(`Codex agent 不支持权限模式「${m}」：只支持 bypassPermissions（其它档位会弹审批框，没人能点）`);
+  if (isReadOnlyMode(m)) return [...(kind === "exec" ? EXEC_READONLY_FLAGS : TUI_READONLY_FLAGS)];
+  throw new Error(`Codex agent 不支持权限模式「${m}」：只支持 bypassPermissions / readOnly（其它档位会弹审批框，没人能点）`);
 }
 
 /** Codex 的推理档位全集（各模型支持其中一段，见 codex-catalog 的 efforts；max / ultra 是 0.15x 新增的） */
@@ -177,6 +180,7 @@ export const CODEX_MCP_ENV_VARS = [
   "CLAUDESTRA_SESSION_ID",
   "CLAUDESTRA_CODEX_BIN",
   "CLAUDESTRA_CODEX_PREAMBLE",
+  PERMISSION_MODE_ENV,
   "MCP_NAME",
   "TMUX",
   "TMUX_PANE",
@@ -207,6 +211,8 @@ export function buildCodexCommand(spec: CodexLaunchSpec, channelRules: string): 
             codexContextPreamble({ agentName: spec.agentName, purpose: spec.purpose, projectContext: spec.projectContext }),
           )}`,
         ]),
+    // channel-server 的 whoami 据此报档位（registry 读不到时的兜底）
+    ...(isReadOnlyMode(spec.permissionMode) ? [`${PERMISSION_MODE_ENV}=readOnly`] : []),
     `MCP_NAME=${shellEscape(mcpName)}`,
   ].join(" ");
 
@@ -225,6 +231,8 @@ export function buildCodexCommand(spec: CodexLaunchSpec, channelRules: string): 
     ...cfg(`mcp_servers.${mcpName}.command=${tomlString(spec.bunBin)}`),
     ...cfg(`mcp_servers.${mcpName}.args=${tomlStringArray([`${spec.claudestraHome}/src/channel-server.ts`])}`),
     ...cfg(`mcp_servers.${mcpName}.env_vars=${tomlStringArray(CODEX_MCP_ENV_VARS)}`),
+    // 只读档：claudestra 的回复类工具放行审批，否则 never 下 reply 被拒（codex-readonly.ts READ_ONLY_MCP_TOOLS）
+    ...(isReadOnlyMode(spec.permissionMode) ? READ_ONLY_MCP_TOOLS.flatMap((t) => cfg(`mcp_servers.${mcpName}.tools.${t}.approval_mode="approve"`)) : []),
     ...cfg(hook("Stop")),
     ...cfg(hook("Interrupt")),
     ...cfg(
@@ -271,7 +279,7 @@ export function bootstrapArgs(spec: {
     "--skip-git-repo-check",
     "-C",
     spec.cwd,
-    ...codexPermissionFlags(spec.permissionMode),
+    ...codexPermissionFlags(spec.permissionMode, "exec"),
     "-c",
     "check_for_update_on_startup=false",
     "-c",

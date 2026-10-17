@@ -19,6 +19,7 @@ import {
 import { getEventByDedup, LedgerError } from "../lib/ledger-store.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { collectPrStage, collectVerifyFacts, ghPrArg, mainRepoRoot, originRepo, prRepo, realFactsDeps, type FactsDeps } from "../lib/ledger-verify-facts.js";
+import { aliasSameRepo } from "../lib/repo-alias.js";
 import { recordVerify } from "../lib/ledger-write.js";
 import { dirKey } from "../lib/project-dirs.js";
 import { normalizeDir, resolveProjectForRealDir } from "../lib/projects.js";
@@ -74,7 +75,7 @@ async function dirOwnership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Prom
 /** 一个项目登记了多个仓库：PR 的仓库是任务所属项目里哪个目录的 origin（本仓库探针核不了那边，只核证据） */
 async function siblingRepoDir(c: LedgerCli, fd: FactsDeps, task: LedgerTask, pr: string): Promise<string | null> {
   for (const d of projectDirs(c, task)) {
-    if (d.startsWith("/") && fd.isDir(d) && (await originRepo(fd, d)) === pr) return d;
+    if (d.startsWith("/") && fd.isDir(d) && aliasSameRepo("ledger-verify.ownership", await originRepo(fd, d), pr)) return d;
   }
   return null;
 }
@@ -121,7 +122,7 @@ async function siblingCounterEvidence(fd: FactsDeps, task: LedgerTask, origin: s
 function siblingOwnership(task: LedgerTask, pr: string, dir: string): Ownership {
   const declared = asInvalid(() => parseExtraRepo(task.extra.repo));
   const params = { project: task.project, prRepo: pr, dir, task: task.id, declared: declared ?? "" };
-  if (declared === pr) return { owns: "no", note: { tpl: "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）", params } };
+  if (aliasSameRepo("ledger-verify.ownership", declared, pr)) return { owns: "no", note: { tpl: "PR 属于项目 {project} 的另一个仓库 {prRepo}（{dir}），本仓库的探针核不了，只核证据文件（--evidence）", params } };
   const cmd = `ledger task-set ${task.id} --rev <rev> --extra '${JSON.stringify({ ...task.extra, repo: pr })}'`;
   return {
     owns: "unknown",
@@ -140,10 +141,10 @@ async function ownership(c: LedgerCli, fd: FactsDeps, task: LedgerTask): Promise
   if (pr && !origin) return { owns: "unknown" };
   // PM 写了声明就必须和 PR 对得上，哪条路都一样（包括 PR 在本仓库、目录明确不含本仓库），对不上不能静默忽略
   const declared = asInvalid(() => parseExtraRepo(task.extra.repo));
-  if (pr && declared && declared !== pr) {
+  if (pr && declared && !aliasSameRepo("ledger-verify.ownership", declared, pr)) {
     return { owns: "unknown", note: { tpl: "PR 指向 {prRepo}，但 PM 声明的仓库是 {declared}：改对 PR 链接或 extra.repo 后重跑", params: { prRepo: pr, declared } } };
   }
-  if (pr && origin === pr) return { owns: "yes" };
+  if (pr && aliasSameRepo("ledger-verify.ownership", origin, pr)) return { owns: "yes" };
   const project = task.project;
   const sib = pr ? await siblingRepoDir(c, fd, task, pr) : null;
   const sibling = pr && sib ? siblingOwnership(task, pr, sib) : null;
