@@ -42,9 +42,15 @@ export const OUTPUT_TAIL = 64 * 1024;
 const DONE_CAP = 500;
 const TERMINAL = new Set(["completed", "failed"]);
 
-/** compact_boundary 认哪种来源（见文件头）；trigger 由宿主按这一轮是不是 /compact 命令给 */
+/** 按运行时不同的翻译选项（运行时描述 AcpHostRuntime.translator 给，runtimes/contract.ts） */
+export interface AcpTranslatorOptions {
+  /** compact_boundary 认哪种来源（见文件头） */
+  compactFrom: "claudestra-meta" | "compaction-update";
+}
+
+/** trigger 由宿主按这一轮是不是 /compact 命令给 */
 export interface CompactSource {
-  from: "claudestra-meta" | "compaction-update";
+  from: AcpTranslatorOptions["compactFrom"];
   trigger?: () => "manual" | "auto";
 }
 

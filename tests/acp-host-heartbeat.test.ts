@@ -161,7 +161,7 @@ describe("宿主回合心跳：steering 另起的一轮", () => {
     let releaseHook!: (v: unknown) => void;
     const firstHook = new Promise((r) => (releaseHook = r));
     let hooks = 0;
-    const host: any = new AcpHost({ agentName: "probe", sessionId: "sid", env: {}, runtime: { id: "probe" } } as any, {
+    const host: any = new AcpHost({ agentName: "probe", sessionId: "sid", env: {}, runtime: { id: "probe", translator: { compactFrom: "compaction-update" } } } as any, {
       startProxy: () => ({ url: "fake" }), makeLink: () => ({}), log: () => {},
       postHook: async () => (++hooks === 1 ? firstHook : {}),
     } as any);

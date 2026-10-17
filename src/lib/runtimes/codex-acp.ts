@@ -21,10 +21,14 @@ import { pathOverrideAssignments } from "../paths.js";
 import { acpLogDir } from "../log-paths.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
+import { codexAcpInstalled } from "../acp/install.js";
+import { checkAcpReady, probeAcpCli } from "../acp/readiness.js";
 import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
 import { AcpSession } from "../acp/session.js";
 import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, makeWorkerRoot } from "./clean-env.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
+import { CODEX_ACP_HOST } from "./codex-acp-host.js";
+import type { AcpRuntimeSpec } from "./contract.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
 import { resetReadyOption } from "./ready-option.js";
@@ -114,7 +118,6 @@ export function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {})
     ...codexSource,
     manageable: true,
     control: ACP_CONTROL,
-    acp: { control: ACP_CONTROL },
     inbound: "acp-host",
     turnEnd: "acp-host",
     exitCommand: "",
@@ -147,3 +150,17 @@ export function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {})
 }
 
 export const codexAcpAdapter = createCodexAcpAdapter();
+
+/** 注册表那一行的 ACP 段（runtimes/index.ts）：就绪闸可顺手装 / 对账 codex-acp；目录里 CLI 有 app-server 就算可用 */
+export const CODEX_ACP: AcpRuntimeSpec = {
+  managed: codexAcpAdapter,
+  host: CODEX_ACP_HOST,
+  ready: (autoInstall, deps) => checkAcpReady(autoInstall, deps),
+  catalogProbe: () => probeAcpCli(),
+  // 沙箱里适配器固定是本仓 stub、手工点名了适配器（CLAUDESTRA_ACP_AGENT）也不用装；其余要先装好 codex-acp
+  agentProblem: (_info, env) => {
+    if (isSandbox(env) || env[ACP_AGENT_ENV]?.trim()) return null;
+    const inst = codexAcpInstalled();
+    return inst.ok ? null : inst.hint;
+  },
+};

@@ -102,7 +102,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   const rt = String(agent.runtime || "");
   const acp = await isConfiguredAcpChannel(agent.channelId);
   const clear = slashM[1] === "clear" || (rt === "pi" && slashM[1] === "new"); // Pi 的 /new 就是换新会话
-  if ((rt === "codex" || rt === "pi") && clear && acp) { // 宿主轮换会话；当 prompt 交过去，pi 只会把它当普通文字
+  if (clear && acp) { // 宿主轮换会话（任何走 ACP 的运行时同一条路）；当 prompt 交过去，pi 只会把它当普通文字
     if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
     if (r.hasAttachments) return apiJson(409, { ok: false, error: "ACP /clear 不接收附件；会话未改动" });
     const cleared = await acpClear(agent.channelId);

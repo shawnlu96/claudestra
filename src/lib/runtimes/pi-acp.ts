@@ -15,13 +15,14 @@ import { normalizePiEnvProfile, piActivateTools, piBinName, piEnvFlags, type PiE
 import { piLock, type PiLock } from "../pi-lock.js";
 import { piAgentDirOf } from "../pi-path.js";
 import { assertSandboxRuntime, isSandbox } from "../sandbox.js";
-import { ACP_RUNTIME_ENV, PI_ARGS_ENV } from "../acp/host-runtime.js";
 import { piMcpClash } from "../acp/pi-adapter/mcp-clash.js";
 import { keepReplyTool } from "../acp/pi-adapter/reply-tool.js";
 import { SANDBOX_PI_FLAGS } from "../acp/pi-adapter/sandbox-policy.js";
 import { probePiAcp } from "../acp/readiness.js";
 import { REPO_ROOT } from "../repo-root.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
+import { ACP_RUNTIME_ENV, type AcpRuntimeSpec } from "./contract.js";
+import { PI_ACP_HOST, PI_ARGS_ENV } from "./pi-acp-host.js";
 import { piAdapter } from "./pi.js";
 import type { LaunchSpec, ManagedRuntimeAdapter } from "./types.js";
 
@@ -111,4 +112,12 @@ export const piAcpAdapter: ManagedRuntimeAdapter = {
   },
   exitPrelude: acpExitPrelude,
   registryFields: (spec) => ({ ...piAdapter.registryFields(spec), transport: "acp" }),
+};
+
+/** 注册表那一行的 ACP 段（runtimes/index.ts）：pi 版本够就能走；同名 MCP / 能力档筛掉 reply 按 agent 再拦 */
+export const PI_ACP: AcpRuntimeSpec = {
+  managed: piAcpAdapter,
+  host: PI_ACP_HOST,
+  ready: (_autoInstall, deps) => probePiAcp(deps.run), // 适配器在仓库里，没东西要装
+  agentProblem: (info, env) => piAcpClash(info.cwd, env, info.piEnv),
 };

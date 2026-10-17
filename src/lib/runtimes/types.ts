@@ -22,6 +22,7 @@
  */
 
 import type { StatsFoldFactory } from "../agent-stats.js";
+import type { AcpRuntimeSpec, RuntimeModel } from "./contract.js";
 
 export type AnyRecord = Record<string, any>;
 
@@ -235,11 +236,6 @@ export function normalizeTransport(v: unknown): Transport {
   return v === "acp" ? "acp" : DEFAULT_TRANSPORT;
 }
 
-/** 运行时的 ACP 段：声明了才能以 transport=acp 起。control 是 acp 模式下 bridge 侧的策略（controlFor(runtime, "acp") 取它） */
-interface AcpTransport {
-  readonly control: RuntimeControl;
-}
-
 /** fork 后探测真实会话 id 的上下文 */
 export interface DiscoverContext {
   windowName: string;
@@ -266,8 +262,6 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
    * 连按 Esc 在别的 TUI 里是手势（Codex：backtrack 回溯）的运行时必须自己实现。
    */
   exitPrelude?(win: WindowOps): Promise<"at-shell" | "continue">;
-  /** ACP 通道（Codex、Pi）。不声明 = 这个运行时只能走 tmux */
-  readonly acp?: AcpTransport;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;
   /** T85 启动凭据文件的路径怎么交：mcp-config = 放进 --mcp-config 里 channel-server 的 env（CC）；env = 宿主命令的环境变量（ACP）。不声明 = 不签 */
@@ -301,3 +295,15 @@ export interface InboundSink {
   deliver(content: string, meta: Record<string, string>): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
+
+/**
+ * 注册表的一行（runtimes/index.ts RUNTIMES）：source 是 tmux 版或只读来源；acp 声明了才能走 transport=acp。
+ * 只有 ACP 版的运行时 source 给只读来源（manageable:false），可启动的那一面全在 acp.managed。契约细节：runtimes/contract.ts，
+ * 加一个运行时照 docs/runtimes/adding-a-runtime.md 做。
+ */
+export interface RuntimeEntry {
+  readonly source: SessionSourceAdapter;
+  readonly acp?: AcpRuntimeSpec;
+  /** 模型列表入口（签名先定，实现在 OCR-3）；不声明 = 没有动态列表 */
+  listModels?(ctx: { agent?: string; cwd?: string }): Promise<RuntimeModel[]>;
+}

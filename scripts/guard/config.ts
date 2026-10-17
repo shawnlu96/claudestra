@@ -85,6 +85,18 @@ export const PATTERNS: PatternDef[] = [
     hint: "registry 路径用 REGISTRY_PATH（src/lib/registry.ts）",
   },
   {
+    // 按运行时 id 分支：runtime / rt / *Runtime（可带 .id）与字面量比较（两个方向），或拿字面量 id 查注册表
+    id: "runtime-literal",
+    re: new RegExp(
+      String.raw`\b(?:\w*[rR]untime|rt)(?:\.id)?\s*[!=]==?\s*["'][a-z][\w-]*["']` +
+        String.raw`|["'][a-z][\w-]*["']\s*[!=]==?\s*[\w$.?]*\b(?:\w*[rR]untime|rt)\b` +
+        String.raw`|\b(?:managedFor|requireManaged|sourceFor|controlFor|transportsOf|acpSpecFor)\(\s*["'][a-z][\w-]*["']`,
+      "g",
+    ),
+    allow: /^src\/lib\/runtimes\//,
+    hint: "运行时差异写进运行时描述（runtimes/contract.ts / RuntimeControl），注册表登记一行；别按 id 判断（docs/runtimes/adding-a-runtime.md）",
+  },
+  {
     id: "web-route-401-boilerplate",
     re: /\{ error: "未登录" \}, \{ status: 401 \}/g,
     allow: /^web\/lib\//,

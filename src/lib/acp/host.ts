@@ -258,10 +258,9 @@ export class AcpHost {
     await this.deps.markReady().catch((e) => this.deps.log(`标窗口就绪失败：${errText(e)}`));
   }
 
-  /** 压缩完成只认本运行时的来源（updates.ts 文件头）：Pi 是 _meta.claudestra.compacted，Codex 是 ACP compaction_update */
+  /** 压缩完成只认本运行时描述里的来源（updates.ts 文件头） */
   private makeTranslator(): AcpTranslator {
-    const from = this.rt.id === "pi" ? "claudestra-meta" : "compaction-update";
-    return createAcpTranslator(undefined, { from, trigger: () => (this.compactCommand ? "manual" : "auto") });
+    return createAcpTranslator(undefined, { from: this.rt.translator.compactFrom, trigger: () => (this.compactCommand ? "manual" : "auto") });
   }
 
   private onUpdate(u: Record<string, unknown>): void {
