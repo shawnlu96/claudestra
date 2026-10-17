@@ -130,7 +130,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "proc=1 fs=3",
     "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3",
-    "center-deploy-checkout.ts": "vcs=2",
+    "center-deploy-checkout.ts": "vcs=3",
     "center-deploy-proof.ts": "vcs=1",
     "center-deploy-run.ts": "proc=1 fs=1",
     "center-deploy-tick.ts": "ledger=2 notice=1",

@@ -14,6 +14,7 @@ function setup() {
   const dir = mkdtempSync(join(tmpdir(), "center-worker-")); roots.push(dir);
   const script = "#!/bin/sh\necho secret-private-address\n", path = join(dir, "request.json"), sha = "a".repeat(40);
   writeFileSync(join(dir, "deploy.sh"), script); chmodSync(join(dir, "deploy.sh"), 0o700);
+  writeFileSync(join(dir, "target.env"), "synthetic\n"); chmodSync(join(dir, "target.env"), 0o600);
   writeJsonAtomicSync(path, { kind: "center", intentId: "i", taskId: "T9", mergeSha: sha, prRef: "center-deploy",
     label: `com.claudestra.scheduler.deploy.${"b".repeat(32)}`, repoDir: dir, relayArgv: null, restartLabels: ["center"],
     timeoutMs: 600_000, createdAt: Date.now(), env: {}, center: { askId: "a", config: { repo: "a/b", script: "deploy.sh", dryRunArgs: ["--dry-run"], timeoutMinutes: 10 },
@@ -22,7 +23,8 @@ function setup() {
     if (a.includes("add")) { mkdirSync(join(dir, "checkout")); writeFileSync(join(dir, "checkout", "deploy.sh"), readFileSync(join(dir, "deploy.sh"))); }
     return ({ code: 0, timedOut: false, stderr: "secret-git-output",
     stdout: a.includes("rev-parse") ? sha : a.includes("ls-tree") ? "100755 blob b\tdeploy.sh" : a.includes("show") ? script : "" }); };
-  return { dir, path, sha, git, result: () => JSON.parse(readFileSync(join(dir, "result.json"), "utf8")) as CenterResult };
+  const target = { centerTarget: () => join(dir, "target.env") };
+  return { dir, path, sha, git, target, result: () => JSON.parse(readFileSync(join(dir, "result.json"), "utf8")) as CenterResult };
 }
 describe("authorized center worker", () => {
   for (const failure of ["none", "dry", "formal", "timeout"] as const) test(`[验收线 5] dry-run precedes deploy (${failure}) and private output stays local`, async () => {
@@ -30,7 +32,7 @@ describe("authorized center worker", () => {
     const run: typeof runBounded = async (a, o) => { calls.push(a); expect(o.timeoutMs).toBe(a.includes("--dry-run") ? 300_000 : 600_000);
       const fail = failure === "dry" || failure === "timeout" || failure === "formal" && !a.includes("--dry-run");
       return { code: fail ? 7 : 0, timedOut: failure === "timeout", stdout: "secret-private-output", stderr: "secret-private-error" }; };
-    await runDeployJob(f.path, { run: f.git, centerRun: run, centerAuthorized: () => true, machine: { path: join(f.dir, "machine.lock") } });
+    await runDeployJob(f.path, { ...f.target, run: f.git, centerRun: run, centerAuthorized: () => true, machine: { path: join(f.dir, "machine.lock") } });
     expect(calls).toHaveLength(["dry", "timeout"].includes(failure) ? 1 : 2); expect(calls[0]).toContain("--dry-run");
     expect(f.result().status).toBe(failure === "none" ? "success" : "failed");
     const raw = readFileSync(join(f.dir, "result.json"), "utf8"); expect(raw).not.toContain("secret"); expect(raw).not.toContain(f.dir);
@@ -39,7 +41,7 @@ describe("authorized center worker", () => {
     for (const revoked of [true, false]) {
       const f = setup(); let executed = false;
       if (!revoked) writeFileSync(join(f.dir, "deploy.sh"), "changed");
-      await runDeployJob(f.path, { run: f.git, centerAuthorized: () => !revoked,
+      await runDeployJob(f.path, { ...f.target, run: f.git, centerAuthorized: () => !revoked,
         centerRun: async () => { executed = true; throw new Error("must not run"); } });
       expect(executed).toBe(false); expect(f.result().status).not.toBe("success");
     }
@@ -56,7 +58,7 @@ test("[验收线 5] main moving during dry-run prevents the formal command after
   const f = setup(); let moved = false, scripts = 0;
   const git: typeof runBounded = async (a, opts) => moved && a.includes("rev-parse") && a.includes("refs/remotes/origin/main")
     ? { code: 0, timedOut: false, stdout: "c".repeat(40), stderr: "" } : f.git(a, opts);
-  await runDeployJob(f.path, { run: git, centerAuthorized: () => true, machine: { path: join(f.dir, "machine.lock") },
+  await runDeployJob(f.path, { ...f.target, run: git, centerAuthorized: () => true, machine: { path: join(f.dir, "machine.lock") },
     centerRun: async () => { scripts++; moved = true; return { code: 0, timedOut: false, stdout: "", stderr: "" }; } });
   expect(scripts).toBe(1); expect(f.result().status).toBe("stale");
 });
@@ -69,7 +71,7 @@ for (const phase of ["dry", "formal"] as const) test(`[验收线 5] SIGTERM duri
     const dir = ${JSON.stringify(f.dir)}, sha = ${JSON.stringify(f.sha)};
     let scripts = 0;
     await runDeployJob(${JSON.stringify(f.path)}, {
-      centerAuthorized: () => true, machine: { path: dir + '/machine.lock' },
+      centerAuthorized: () => true, machine: { path: dir + '/machine.lock' }, centerTarget: () => dir + '/target.env',
       run: async (a) => {
         if (a.includes('add')) { mkdirSync(dir + '/checkout'); writeFileSync(dir + '/checkout/deploy.sh', readFileSync(dir + '/deploy.sh')); }
         if (a.includes('remove')) writeFileSync(dir + '/released', 'yes');
