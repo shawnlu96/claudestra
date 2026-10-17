@@ -171,7 +171,7 @@ describe("recovery modes", () => {
       import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
       import { join } from "node:path";
       import { collectRunEvidence } from ${JSON.stringify(join(lib, "sentinel-pilot-evidence.ts"))};
-      import { sentinelPilotTick, sincePath } from ${JSON.stringify(join(lib, "sentinel-pilot-tick.ts"))};
+      import { sentinelPilotTick, sincePath, buildDayReport } from ${JSON.stringify(join(lib, "sentinel-pilot-tick.ts"))};
       import { localDate, reportFileName } from ${JSON.stringify(join(lib, "sentinel-pilot.ts"))};
       import { recoveryPolicy, RECOVERY_POLICY_PATH } from ${JSON.stringify(join(lib, "recovery-policy.ts"))};
       import { openLedger, listEvents } from ${JSON.stringify(join(lib, "ledger-store.ts"))};
@@ -190,6 +190,12 @@ describe("recovery modes", () => {
       const run = { key: "pilot@" + slot / 60000, jobId: "pilot", jobName: "pilot", epochMinute: slot / 60000,
         historyId: "h", owner: "o", startedAt: iso(slot), dispatchAttemptedAt: iso(slot), finishedAt: iso(slot + 10000),
         deadlineAt: iso(slot + 10000), status: "success", targetSessionId: "session" };
+      const sampleCount = samples().length;
+      const dryReport = await buildDayReport(job, day, [run], async () => ({ lines: fixture }), "observe", slot + 7200000, true);
+      assert.equal(dryReport.dryRun, true);
+      assert.equal(samples().length, sampleCount);
+      await buildDayReport(job, day, [run], async () => ({ lines: fixture }), "observe", slot + 7200000);
+      assert.equal(samples().length, sampleCount + 1);
       let n = 0;
       for (const upstream of ["off", "observe", "on"]) for (const boundary of ["off", "observe", "on"]) {
         writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { "claude-orchestrator": {
@@ -260,14 +266,14 @@ describe("r1 review regressions", () => {
     for (const mode of ["off", "observe"] as const) expect(codexCollect(middle, mode).result?.verdict).toBe("正常");
     expect(codexCollect(middle).evidence.humanInterleaved).toBe(false);
   });
-  test("codex-meta-turn-1: real context, tools and CC metadata still allow late results", () => {
+  test("codex-meta-turn-1: real context and tools still allow late results", () => {
     for (const middle of [
       message(10_001, "user", "<environment_context>context</environment_context>"),
       message(10_001, "user", "[claudestra:context]\nPreamble only mentioning <channel ...>"),
       message(10_001, "developer", '<channel source="claudestra">instructions</channel>'),
       codex(10_001, { type: "function_call_output", call_id: "t", output: '<channel source="claudestra">tool data</channel>' }),
     ]) expect(codexCollect([middle]).result?.verdict).toBe("正常");
-    expect(collect([say(9000, "异常"), line("user", 10_001, '<channel source="claudestra">metadata</channel>', { isMeta: true }), say(11_000)])
+    expect(collect([say(9000, "异常"), line("user", 10_001, '<system-reminder>metadata</system-reminder>', { isMeta: true }), say(11_000)])
       .result?.verdict).toBe("正常");
   });
   test("observe-sample-1: identify the run and keep the dedup key stable as nextDispatchAt changes", () => {
@@ -289,5 +295,30 @@ describe("r1 review regressions", () => {
   });
   test("lexer-narrow-1: comments never hide a later mutating segment", () => {
     expect(isReadOnlySentinelSsh("ssh host 'cat x 2>/dev/null # note\nrm x'", true)).toBe(false);
+  });
+});
+
+ describe("r2 review regressions", () => {
+  for (const runtime of [undefined, "claude"]) for (const body of ["human", "another task", "[button:go]"]) {
+    test(`cc-meta-turn-1: ${runtime ?? "default"} channel ${body} seals result`, () => {
+      const rows = [say(9000, "异常"), line("user", 10_001,
+        `<channel source="claudestra" is_agent="${body === "another task"}">${body}</channel>`, { isMeta: true }), say(11_000)];
+      expect(collectRunEvidence(rows, window, { runtime, boundary: { policy: policy("on") } }).result?.verdict).toBe("异常");
+      for (const mode of ["off", "observe"] as const) {
+        expect(collectRunEvidence(rows, window, { runtime, boundary: { policy: policy(mode), observe: () => {} } }).result?.verdict).toBe("正常");
+      }
+    });
+  }
+  test("fd-read-dup-1: copying to a file-opened input fd is rejected in either order", () => {
+    for (const remote of ["cat x 3<f >&3", "cat x >&3 3<f", "cat x <f >&0", "cat x 03<f >&3"]) {
+      expect(isReadOnlySentinelSsh(`ssh h '${remote}'`, true)).toBe(false);
+    }
+  });
+  test("dryrun-observe-1: dry collection preserves baseline without recording samples", () => {
+    const actions: ObservedAction[] = [];
+    const rows = [say(9000, "异常"), line("user", 10_001, "next"), say(11_000)];
+    expect(collectRunEvidence(rows, window, { dryRun: true,
+      boundary: { policy: policy("observe"), observe: a => actions.push(a) } }).result?.verdict).toBe("正常");
+    expect(actions).toHaveLength(0);
   });
 });

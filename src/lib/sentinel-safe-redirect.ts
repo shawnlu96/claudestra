@@ -46,6 +46,11 @@ export function sentinelSafeRedirects(command: string, inputReads = false): stri
     if (copy) tokens.push(`${copy[1]}>&`, copy[2]);
     else if (!/^[ \t]+$/.test(m[0]) && !m[0].startsWith("#")) tokens.push(m[0]);
   }
+  // Reject copies to any file-opened input fd, including opens later in the command.
+  const inputFds = new Set(tokens.flatMap(token => {
+    const match = /^(\d*)<$/.exec(token);
+    return match ? [Number(match[1] || "0")] : [];
+  }));
   const kept: string[] = [];
   let words = 0;
   for (let i = 0; i < tokens.length; i++) {
@@ -58,7 +63,7 @@ export function sentinelSafeRedirects(command: string, inputReads = false): stri
       const [, fd, op] = r;
       if (fd && op.startsWith("&")) return null;
       if (op === "<" && inputReads) kept.push(token, raw);
-      else if (op === ">&" && /^\d+$/.test(raw) && (!fd || /^\d+$/.test(fd))) continue;
+      else if (op === ">&" && /^\d+$/.test(raw) && !inputFds.has(Number(raw))) continue;
       else if ([">", ">>", ">|", "&>", "&>>"].includes(op) && target === "/dev/null") continue;
       else return null;
     } else if (["&&", "||", ";", "|", "&", "\n"].includes(token)) {
