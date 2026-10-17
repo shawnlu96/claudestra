@@ -28,6 +28,7 @@ import { getMergeRun } from "./scheduler-merge.js";
 import { mergeEntry } from "./scheduler-merge-order.js";
 import { mergeCandidates } from "./scheduler-merge-train-tick.js";
 import { cardRepo, foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
+import { aliasPick, canonicalRepo } from "./repo-alias.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 import { standingHold } from "./pm-handback.js";
 
@@ -163,7 +164,8 @@ const currentReviewSeq = (events: readonly LedgerEvent[], round: number): number
 
 function baseEntry(task: LedgerTask, repo: string | null, template: string | undefined, source: QueueSource): QueueEntry {
   const digest = task.extra.screenshotsDigest;
-  return { repository: cardRepo(task) ?? repo?.toLowerCase() ?? null, project: task.project, taskId: task.id, pr: task.pr, source,
+  const raw = cardRepo(task) ?? repo?.toLowerCase() ?? null;
+  return { repository: aliasPick("merge-queue-facts.repository", raw, canonicalRepo(raw) ?? raw), project: task.project, taskId: task.id, pr: task.pr, source,
     head: task.headSHA, specRev: task.specRev, round: task.round, reviewSeq: null, ui: { template: template === "ui", digest: typeof digest === "string" ? digest : null },
     manualRequestSeq: null, versionSeq: null, state: "blocked", reason: null, phase: null };
 }

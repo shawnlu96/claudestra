@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CiIoMapFuseGh, FuseJob, FuseRun } from "./ci-io-map-fuse.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
+import { aliasPick, sameRepo } from "./repo-alias.js";
 import { repoOfPr, TRAIN_BRANCH, type TrainCheck, type TrainGh } from "./scheduler-merge-train.js";
 import type { TrainJob, TrainRun, TrainRunsGh } from "./train-ci-timeout.js";
 import type { TrainRerunGh } from "./scheduler-train-ci-rerun.js";
@@ -191,6 +192,13 @@ function fuseRun(x: unknown): FuseRun {
   return { id: r.id as number, attempt: r.run_attempt as number, status: r.status, conclusion: text(r.conclusion), branch: text(r.head_branch), head: r.head_sha,
     path: r.path, event: text(r.event), repo: r.repo, headRepo: text(r.head_repo), prs: r.prs.filter((n) => Number.isSafeInteger(n)) as number[] };
 }
+/** REPOMERGE1: a run GitHub reports under the renamed repository's other name (old ↔ new) reads as the repository asked for when
+ *  repoAlias is on, so an old-name train claims its new-name runs; any other repository (a fork's head repo included) stays as read. */
+function asAsked(run: FuseRun, repo: string): FuseRun {
+  const name = (got: string) => aliasPick("scheduler-merge-train-gh.runRepo", got,
+    got.toLowerCase() !== repo.toLowerCase() && sameRepo(got, repo) ? repo : got);
+  return { ...run, repo: name(run.repo), headRepo: name(run.headRepo) };
+}
 /** The only variable this port reads or writes, and the only value it ever writes. */
 const IO_MAP_VAR = "CI_IO_MAP", SAFE_VALUE = "observe", PLAN_ARTIFACT = "ci-related-plan", PLAN_MAX_BYTES = 8 * 1024 * 1024;
 const ownRepo = (repo: string): string => {
@@ -211,13 +219,13 @@ function fuseApi(raw: Raw): Omit<CiIoMapFuseGh, "jobLog"> {
   return {
     async ciRun(repo, run, attempt) {
       const at = attempt === undefined ? "" : `/attempts/${id(attempt, "attempt")}`;
-      return fuseRun(JSON.parse(await gh("api", `repos/${ownRepo(repo)}/actions/runs/${id(run, "run")}${at}`, "--jq", RUN_FIELDS) || "null"));
+      return asAsked(fuseRun(JSON.parse(await gh("api", `repos/${ownRepo(repo)}/actions/runs/${id(run, "run")}${at}`, "--jq", RUN_FIELDS) || "null")), repo);
     },
     async headRuns(repo, head) {
       const list = JSON.parse(await gh("api", `repos/${ownRepo(repo)}/actions/workflows/ci.yml/runs?head_sha=${sha(head, "成员 head")}&event=pull_request&per_page=100`,
         "--jq", `[.workflow_runs[] | ${RUN_FIELDS}]`) || "null") as unknown;
       if (!Array.isArray(list)) throw new Error("run 列表输出无效");
-      return list.map(fuseRun);
+      return list.map((r) => asAsked(fuseRun(r), repo));
     },
     async attemptJobs(repo, run, attempt) {
       const out = JSON.parse(await gh("api", `repos/${ownRepo(repo)}/actions/runs/${id(run, "run")}/attempts/${id(attempt, "attempt")}/jobs?per_page=100`, "--jq",

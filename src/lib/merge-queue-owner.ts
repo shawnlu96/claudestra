@@ -8,6 +8,7 @@ import { mergeQueueFacts, unifiedQueueMode, type QueueEntry } from "./merge-queu
 import { manualQueueMode, requestAt, type ManualRequest } from "./manual-merge-queue-facts.js";
 import { manualTurn, type TrainSignal, type Turn } from "./manual-merge-queue.js";
 import { cardRepo, projectRepo, projectRepoFor } from "./scheduler-foreign-repo.js";
+import { aliasSameRepo } from "./repo-alias.js";
 import { getMergeRun, mergeRunDrift } from "./scheduler-merge.js";
 import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
 import { ridesTrain, trainHolds } from "./scheduler-merge-train-hold.js";
@@ -27,7 +28,7 @@ function ownership(project: string, p: ReturnType<typeof ownerPorts>): { repo: s
   const repo = projectRepo(cfg) ?? projectRepoFor(project);
   if (!repo) return { repo: null, why: "项目 repository 未核实" };
   const owners = Object.entries(p.config.projects).filter(([name, c]) => !c.mergeHandoff &&
-    (projectRepo(c) ?? projectRepoFor(name))?.toLowerCase() === repo.toLowerCase()).map(([name]) => name);
+    aliasSameRepo("merge-queue-owner.ownership", (projectRepo(c) ?? projectRepoFor(name))?.toLowerCase() ?? null, repo.toLowerCase())).map(([name]) => name);
   return { repo: repo.toLowerCase(), why: owners.length > 1 ? `repository ${repo} 多项目出口冲突：${owners.sort().join("、")}` : null };
 }
 const liveIntents = (db: Database, project: string): SchedulerIntent[] => db.query(`SELECT * FROM scheduler_intents WHERE project = ?
@@ -69,7 +70,7 @@ export function pickMergeQueueOwner(db: Database, project: string, now = Date.no
   try { train = (p.trains ?? defaultTrainStore())?.load(project); } catch { return none("列车状态不可读，不能认领"); }
   const repairs = ownerRepairs(db, project, own.repo!);
   const ordered = [...entries].sort((a, b) => Number(repairs.has(b.taskId)) - Number(repairs.has(a.taskId)));
-  const { entry, why } = ownerPriorityPick(db, project, ordered, (e) => e.repository === own.repo &&
+  const { entry, why } = ownerPriorityPick(db, project, ordered, (e) => aliasSameRepo("merge-queue-owner.entry", e.repository, own.repo) &&
     (e.source !== "manual" || manualQueueMode(project, p.policy) === "on") && eligible(db, e, intents.find((i) => i.taskId === e.taskId), now) &&
     (!train || !trainHolds(train, now) || ridesTrain(train, e.taskId, e.head)), (e) => intents.some((i) => i.taskId === e.taskId), repairs, now, priority);
   if (!entry) {
