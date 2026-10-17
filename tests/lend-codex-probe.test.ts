@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { codexProbeMode, pendingCodexProbe, PROBE_EVERY_MS, type CodexPauseProbe } from "../src/lib/lend-codex-probe.js";
+import { codexPauseProbeDeps } from "../src/lib/lend-codex-probe-run.js";
 import { pausedUntil, pauseForQuota, refreshQuotaPause, type QuotaView } from "../src/lib/lend-health.js";
 import { helloBody } from "../src/lib/lend-hello.js";
 import { lendPollCapacity } from "../src/lib/lend-claude-worker-capacity.js";
@@ -30,7 +31,7 @@ function setup(o: { untilMs?: number; mode?: RecoveryMode; after?: () => QuotaVi
   const s = { runs: 0, observed: 0, clock: T0 };
   const probe: CodexPauseProbe = {
     mode: () => ({ mode: o.mode ?? "on", project: "claudestra" }),
-    run: async () => {
+    call: async () => {
       s.runs++;
       const r = o.run ? await o.run() : { ok: true, message: "OK" };
       if (r.ok && o.after) quota = o.after();
@@ -91,7 +92,7 @@ test("[验收线 2] 同一时刻最多一个探测：上一个没跑完，到了
   pauseForQuota(db, "o1", { observedAt: T0, full: true, resetsAt: T0 + 3 * DAY }, T0, (m) => void lines.push(m));
   let runs = 0;
   const probe: CodexPauseProbe = { mode: () => ({ mode: "on", project: null }),
-    run: () => (runs++, new Promise((r) => { release = () => r({ ok: false, message: "超时" }); })) };
+    call: () => (runs++, new Promise((r) => { release = () => r({ ok: false, message: "超时" }); })) };
   const quota = async () => ({ observedAt: T0, full: true, resetsAt: T0 + 3 * DAY });
   for (const m of [30, 60, 90, 120]) await refreshQuotaPause(db, quota, T0 + m * MIN, () => {}, probe);
   expect(runs).toBe(1);
@@ -131,24 +132,27 @@ test("没暂停时不探测", async () => {
   const db = openLendJournal(":memory:");
   dbs.push(db);
   let runs = 0;
-  const probe: CodexPauseProbe = { mode: () => ({ mode: "on", project: null }), run: async () => (runs++, { ok: true, message: "" }) };
+  const probe: CodexPauseProbe = { mode: () => ({ mode: "on", project: null }), call: async () => (runs++, { ok: true, message: "" }) };
   await refreshQuotaPause(db, async () => notFull(T0), T0 + PROBE_EVERY_MS, () => {}, probe);
   expect(runs).toBe(0);
 });
 
-test("档位：显式键优先；没设、项目解析不出、文件坏都是缺省 on", () => {
+test("档位：没设、项目解析不出、文件坏都是缺省 on；显式键要等 codexPauseProbe 登记进 recovery-keys 才读得到", () => {
   const dir = mkdtempSync(join(tmpdir(), "codex-probe-mode-"));
   const repo = mkdtempSync(join(tmpdir(), "codex-probe-repo-"));
   const projectsPath = join(dir, "projects.json"), policyPath = join(dir, "recovery-policy.json");
   writeFileSync(projectsPath, JSON.stringify({ projects: [{ id: "claudestra", name: "c", dirs: [repo] }] }));
-  const mode = (keys?: Record<string, string>) => {
-    writeFileSync(policyPath, JSON.stringify({ projects: keys ? { claudestra: { keys } } : {} }));
-    return codexProbeMode({ policyPath, projectsPath, repoRoot: repo });
-  };
-  expect(mode()).toEqual({ mode: "on", project: "claudestra" });
-  expect(mode({ codexPauseProbe: "off" })).toEqual({ mode: "off", project: "claudestra" });
-  expect(mode({ codexPauseProbe: "observe" })).toEqual({ mode: "observe", project: "claudestra" });
+  writeFileSync(policyPath, JSON.stringify({ projects: {} }));
+  expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo })).toEqual({ mode: "on", project: "claudestra" });
   writeFileSync(policyPath, "{坏");
   expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo }).mode).toBe("on");
-  expect(codexProbeMode({ policyPath, projectsPath, repoRoot: dir }).mode).toBe("on");
+  expect(codexProbeMode({ policyPath, projectsPath, repoRoot: dir })).toEqual({ mode: "on", project: null });
+});
+
+test("生产依赖只组装、不起 Codex：observe 口原样带上", () => {
+  const observe = () => {};
+  const p = codexPauseProbeDeps({ observe });
+  expect(typeof p.call).toBe("function");
+  expect(p.observe).toBe(observe);
+  expect(codexPauseProbeDeps().observe).toBeUndefined();
 });

@@ -4,12 +4,11 @@
  * 跑一次最小的 Codex 调用（只读沙箱、空临时目录、固定短提示、不加载全局 MCP），只为让它写出一条新 rollout；解除照旧由下一轮 refreshPause 判。
  * - 后台跑、不等：journal 在 lendTick 返回后就关，所以这里只在同步段写 meta（本次探测时刻），完成后只读额度、打日志，不碰 db。
  * - 同一进程同一时刻最多一个；探测撞额度 / 超时 / 失败 / 没写出新读数都按「未知」，不改暂停，下一个间隔再试。
- * - 恢复键 codexPauseProbe（缺省 on）：off 与改前一致；observe 只记「本会探测」。tests/lend-codex-probe.test.ts。
+ * - 恢复键 codexPauseProbe（缺省 on）：off 与改前一致；observe 只记「本会探测」。生产调用在 lend-codex-probe-run.ts（调度器不可达）。
+ * tests/lend-codex-probe.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { runCodex } from "./codex.js";
 import { getMeta, setMeta } from "./lend-journal.js";
 import { PROJECTS_PATH, resolveProjectForRealDir, type ProjectDef } from "./projects.js";
 import { isRecoveryMode, readRecoveryFile, RECOVERY_POLICY_PATH, type ObservedAction, type RecoveryKey, type RecoveryMode } from "./recovery-policy.js";
@@ -17,9 +16,6 @@ import { REPO_ROOT } from "./repo-root.js";
 
 const CODEX_PROBE_KEY = "codexPauseProbe" as RecoveryKey;
 export const PROBE_EVERY_MS = 30 * 60_000;
-const PROBE_TIMEOUT_MS = 3 * 60_000;
-/** 不带仓库内容、路径、凭据；不要工具、不派子 agent：只要一条带 rate_limits 的 rollout */
-const PROBE_PROMPT = "Reply with the single word OK. Do not run any commands or tools.";
 const PROBE_KEY = "probe:codex";
 
 type ProbeOutcome = "not_full" | "full" | "unknown";
@@ -31,7 +27,7 @@ export interface CodexPauseProbe {
   /** 档位与本机仓库所属项目（observe 样本记在它名下；解析不出 = null） */
   mode: () => { mode: RecoveryMode; project: string | null };
   /** 跑一次最小 Codex 调用；ok=false（含超时、撞额度）按未知 */
-  run: () => Promise<{ ok: boolean; message: string }>;
+  call: () => Promise<{ ok: boolean; message: string }>;
   /** observe 档的样本口（生产写 ledger recordObserved）；不给只打日志 */
   observe?: (a: ObservedAction) => void;
 }
@@ -81,7 +77,7 @@ export function maybeProbeCodex(db: Database, pause: Pause | null, probe: CodexP
 }
 
 async function probeOnce(probe: CodexPauseProbe, quota: () => Promise<Reading | null>, startedAt: number): Promise<{ outcome: ProbeOutcome; why?: string }> {
-  const r = await probe.run().catch((e) => ({ ok: false, message: String(e) }));
+  const r = await probe.call().catch((e) => ({ ok: false, message: String(e) }));
   if (!r.ok) return { outcome: "unknown", why: `调用没成：${r.message.slice(0, 200)}` };
   const q = await quota().catch(() => null); // 读不到 = 未知，下一轮 refreshPause 自己会再读
   if (!q || q.observedAt === null || q.observedAt < startedAt) return { outcome: "unknown", why: "没读到这次探测后的新读数" };
@@ -101,13 +97,4 @@ export function codexProbeMode(o: { policyPath?: string; projectsPath?: string; 
     const m = f.status === "ok" && Object.hasOwn(f.data.projects, project) ? f.data.projects[project].keys?.[CODEX_PROBE_KEY] : undefined;
     return { mode: isRecoveryMode(m) ? m : "on", project };
   } catch { return { mode: "on", project: null }; /* 读不了按缺省 on，见上 */ }
-}
-
-/** 生产用：经 codex.ts runCodex 起（不手写 spawn），工作目录是系统临时目录，不在任何仓库里 */
-export function codexPauseProbeDeps(o: { observe?: (a: ObservedAction) => void } = {}): CodexPauseProbe {
-  return {
-    mode: () => codexProbeMode(),
-    run: () => runCodex({ prompt: PROBE_PROMPT, sandbox: "read-only", cwd: tmpdir(), isolateMcp: true, timeoutMs: PROBE_TIMEOUT_MS }),
-    ...(o.observe ? { observe: o.observe } : {}),
-  };
 }
