@@ -6,7 +6,7 @@
  * 401 = 凭据无效 / 过期 / 被撤销 → 该机器标「需重新配对」（lib/machines.ts），抛 DeviceInvalidError，调用方不用各自处理。
  */
 import { appConfigSync, loadAppConfig, LOCAL_FP, machineBase } from "@/lib/app-config";
-import { machines, type MachineRef } from "@/lib/machines";
+import { machines, type MachineRef, type MachineStamp } from "@/lib/machines";
 
 export const DEVICE_HEADER = "x-cstra-device";
 /**
@@ -72,6 +72,11 @@ export interface ApiInit {
   timeoutMs?: number;
   /** 页面隐藏 / 卸载时也要发出去的小请求（如协作视图的「看过了」） */
   keepalive?: boolean;
+  /**
+   * 页面数据所属的机器（lib/machine-guard.ts captureMachine）：中继模式下目标取 expect.fp、不读发请求时的当前机器；
+   * 解析完目标、fetch 之前代际或 fp 对不上就抛 machine_switched，一个请求都不发
+   */
+  expect?: MachineStamp;
 }
 
 interface Target {
@@ -135,8 +140,15 @@ export async function parseBody(res: Response, method: string): Promise<Record<s
   }
 }
 
+/** 切机窗口里旧页面的操作：中继模式下代际或 fp 已不是页面那台 */
+function staleExpect(expect: MachineStamp | undefined, target: Target): boolean {
+  return !!expect && target.relay && (machines.generation() !== expect.gen || machines.currentFp() !== target.fp || target.fp !== expect.fp);
+}
+
 async function send(path: string, init: ApiInit, machine: MachineRef | undefined, accept?: string): Promise<{ res: Response; target: Target; method: string }> {
-  const target = await resolveTarget(machine);
+  const { expect } = init;
+  const target = await resolveTarget(machine ?? (expect ? { fp: expect.fp ?? "" } : undefined));
+  if (staleExpect(expect, target)) throw new ApiError("machine switched — request not sent", 0, { notSent: true }, "machine_switched");
   const method = (init.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = { ...(init.headers ?? {}) };
   if (accept) headers.Accept = accept;
@@ -160,7 +172,7 @@ async function send(path: string, init: ApiInit, machine: MachineRef | undefined
     if (timeoutMs > 0) untrack();
   }
   // 中继模式下响应回来时机器已经换了：这份数据属于旧机器，一律不交给调用方
-  if (target.relay && !machine && machines.currentFp() !== target.fp) {
+  if (target.relay && !machine && (expect ? staleExpect(expect, target) : machines.currentFp() !== target.fp)) {
     ctrl.abort();
     throw new ApiError("machine switched while request was in flight", 0, {}, "machine_switched");
   }

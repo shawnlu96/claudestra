@@ -31,6 +31,7 @@ import { decideReconnect } from "./reconnect-policy";
 import { EventGate, resetForAgent, type SyncAnchor } from "./switch-sync";
 import { applySnapshotMissing, bgSweepable, markBgDone, reviveUnknownShell, shellExited } from "./bg-shell-state";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
+import { actionErrorText, PageMachine } from "./chat-store-machine";
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import { getLang, t as tr } from "@/lib/i18n";
@@ -140,6 +141,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   /** openAgent 代际：切走 agent 时自增，令历史加载 / 后续连流的旧回调失效。 */
   private openGen = 0;
   private seq = 0;
+  private pageMachine = new PageMachine((text) => this.produce((s) => pushNotice(s.messages, tr(text), this.nextId(), new Date().toISOString()))); // 页面数据所属的机器代际：切机窗口里旧页面的动作不落到新机器
   /** 流式文本合批：SSE text 事件逐条 produce 会让长回合每秒多次触发整棵消息树
    *  reconcile（2026-07-13「列表滑动卡死」主因之一——移动端列表页与会话页并排
    *  都在 DOM）。缓冲 80ms 合并写入；工具/回复/定稿/发送前强制 flush 保段序；
@@ -559,6 +561,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // v2.21.1+ 打开会话 = 已读:联动清掉其他设备/平台上该 agent 的通知
     // (owner 2026-08-30「一处点完,他处取消」)。fire-and-forget,失败无感。
     if (name !== MASTER_AGENT_NAME) void markRead(name).catch(() => {}); // 失败无感：下次打开 / 收到回复再补
+    this.pageMachine.adoptOnce();
     // 切走前存最新视图快照 + 同步锚（见 cacheLatestView）
     const prev = this.state.activeAgent;
     if (prev) this.cacheLatestView(prev);
@@ -1327,6 +1330,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 从新机器重新拉。API 客户端已在 machines.setCurrent 时中止旧机器的在途请求，迟到的响应也不会落进来（machine_switched）。
    */
   public resetForMachine() {
+    this.pageMachine.adopt(); this.lastInterruptAt = 0; // 之后拉的数据属于新机器；打断冷却也是 per-机器的
     this.detachActiveStream();
     this.openGen++;
     this.messageCache.clear();
@@ -1620,7 +1624,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       // 发送失败（agent 离线 / 超限等）则解锁 + 附错误提示，别让「停止」按钮 + 思考态一直卡死。
       for (let attempt = 0; ; attempt++) {
         try {
-          result = await sendMessage(agent, wire, files, sendTimeout());
+          result = await sendMessage(agent, wire, files, sendTimeout(), {}, this.pageMachine.expect);
           break;
         } catch (e) {
           if (!(e instanceof ApiError && e.retryable) || attempt >= 4) throw e;
@@ -1818,7 +1822,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   public systemNotice(text: string, src?: RecordSrc) {
     if (this.dropIfCovered("notice", src)) return;
     this.flushPendingText();
-    this.produce((s) => pushNotice(s.messages, text, this.nextId(), new Date().toISOString()));
+    this.produce((s) => pushNotice(s.messages, tr(text), this.nextId(), new Date().toISOString()));
   }
 
   public appendAssistantText(text: string, progress?: boolean, src?: RecordSrc) {
@@ -2300,7 +2304,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (json.ok === false) return { ok: false, error: json.error || "操作失败" };
       return { ok: true, sessionId: json.sessionId, previousSessionId: json.previousSessionId };
     } catch (e) {
-      return { ok: false, error: (e as Error).message || "操作失败" };
+      return { ok: false, error: actionErrorText(e) };
     }
   }
 
@@ -2313,13 +2317,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    * 用户气泡可见、回复流式回来——知识注入可见可审计）。
    * 回合进行中 Bridge 返 409（先停止再 clear），错误原样返回给对话框展示。
    */
-  public async clearAgent(
-    name: string,
-    initMessage?: string
-  ): Promise<{ ok: boolean; error?: string }> {
+  public async clearAgent(name: string, initMessage?: string): Promise<{ ok: boolean; error?: string }> {
+    const refused = this.pageMachine.refusal(); if (refused) return refused; // 切机窗口：不在新机器上开会话、不发 clear
     if (this.state.activeAgent !== name) await this.openAgent(name);
     const clearStartedAt = Date.now();
-    const res = await this.postAction(() => clearAgentSession(name));
+    const res = await this.postAction(() => clearAgentSession(name, this.pageMachine.expect));
     if (!res.ok) return res;
     this.produce(settleClearSend(this.messageCache, name, null, this.retiredAcpStreams, res.previousSessionId, clearStartedAt));
     const boot = initMessage?.trim();
@@ -2332,22 +2334,18 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     return { ok: true };
   }
 
-  /** 一键中断：给当前会话的 tmux window 发 Ctrl+C。 */
-  /** 打断请求的本地冷却(防双击双 C-c;服务端另有 3s 冷却兜底)。 */
+  /** 一键中断：给当前会话的 tmux window 发 Ctrl+C。lastInterruptAt = 本地冷却(防双击双 C-c;服务端另有 3s 冷却兜底)。 */
   private lastInterruptAt = 0;
 
   public async interrupt(): Promise<{ ok: boolean; error?: string }> {
     const agent = this.state.activeAgent;
     if (!agent) return { ok: false, error: "无活动会话" };
+    const refused = this.pageMachine.refusal(); if (refused) return refused; // 切机窗口里旧页面的打断：零请求 + 轻提示
     if (Date.now() - this.lastInterruptAt < 3_000) return { ok: true };
     this.lastInterruptAt = Date.now();
-    const res = await this.postAction(() => interruptAgent(agent));
+    const res = await this.postAction(() => interruptAgent(agent, this.pageMachine.expect));
     // done 会经 SSE 回来解锁；这里乐观收敛
-    if (res.ok)
-      this.produce((s) => {
-        s.streaming = false;
-        s.awaitingChunk = false;
-      });
+    if (res.ok) this.produce((s) => { s.streaming = false; s.awaitingChunk = false; });
     return res;
   }
 

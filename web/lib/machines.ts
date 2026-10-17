@@ -23,6 +23,12 @@ export interface MachineRef {
   fp: string;
 }
 
+/** 某一刻的当前机器 + 代际（lib/machine-guard.ts captureMachine）；fp 为 null = 当时还没选机器 */
+export interface MachineStamp {
+  fp: string | null;
+  gen: number;
+}
+
 export interface MachinesBackend {
   getAll(): Promise<MachineRecord[]>;
   put(rec: MachineRecord): Promise<void>;
@@ -72,6 +78,7 @@ export class MachineStore {
   private list: MachineRecord[] = [];
   private cur: MachineRecord | null = null;
   private health = new Map<string, MachineHealth>();
+  private gen = 0;
   private subs = new Set<() => void>();
   private switchSubs = new Set<SwitchListener>();
   private loading: Promise<void> | null = null;
@@ -134,12 +141,22 @@ export class MachineStore {
     else this.emit();
   }
 
-  /** 切机器：先通知（API 客户端中止旧机器的在途请求 / SSE），再换当前，再持久化镜像 */
+  /**
+   * 机器代际（lib/machine-guard.ts）：每次真正换机器同步 +1，只增不复用——A→B→A 后 A 第一次捕获的代际也不再有效。
+   * 页面 / 请求捕获它，发请求前比对，切机持久化还没写完的窗口里旧页面的操作就发不到新机器上。
+   */
+  generation(): number {
+    return this.gen;
+  }
+
+  /** 切机器：先换当前 + 代际 +1（旧代际立即失效），再通知（API 客户端中止旧机器的在途请求 / SSE），再持久化镜像；持久化失败不回滚代际 */
   async setCurrent(fp: string | null): Promise<void> {
     const next = fp ? this.get(fp) ?? null : null;
     const prevFp = this.cur?.fp ?? null;
-    if (prevFp !== (next?.fp ?? null)) for (const f of this.switchSubs) f(prevFp, next?.fp ?? null);
+    const changed = prevFp !== (next?.fp ?? null);
+    if (changed) this.gen++;
     this.cur = next;
+    if (changed) for (const f of this.switchSubs) f(prevFp, next?.fp ?? null);
     if (next) {
       next.lastUsedAt = Date.now();
       this.list = sortMachines(this.list);
