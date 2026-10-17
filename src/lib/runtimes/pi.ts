@@ -36,6 +36,7 @@ export const PI_CONTROL: RuntimeControl = {
   interruptKeys: ["C-c"],
   // 扩展能把回合中到达的消息 steer 进去；C-c 反而把干到一半的回合掐了
   preemptOnHumanMessage: false,
+  insertVia: "steer",
   // Pi 的 TUI 没有 CC 的 ❯ / 横幅，pane 判据恒判「忙」；忙闲只信扩展上报的回合结束
   idleSource: "hook",
   // Pi 的 --model 是启动期权威值，/model 在 Pi 里是另一套 slash 语义

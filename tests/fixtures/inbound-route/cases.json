@@ -1,5 +1,5 @@
 {
- "about": "JRT 调研的 12 + 4 个合成例（不含真实消息）。answers 是录下来的 Jev 答案：前 12 例录自 PM 调研探针（jev-1.13.0，2026-10-16，措辞与 lib/inbound-route.ts 的问题略不同、没带权限规则）；后 4 例录自带权限规则的策略探针，设计稿只记了 interrupt 概率，余量记在 queue。merge 例只有一条排队，route_merge_with 记为 q1（探针没问这一题）。重录：TYPESAFE_API_KEY=… INBOUND_ROUTE_RECORD=1 bun test tests/inbound-route-replay.test.ts。人的两条不合并（只有本机 agent 消息能并进一封合批载体），所以 owner 的两个 merge 例按代码兜底改成排队",
+ "about": "JRT 调研的 12 + 4 个合成例（不含真实消息）。answers 是录下来的 Jev 答案：前 12 例录自 PM 调研探针（jev-1.13.0，2026-10-16，措辞与 lib/inbound-route.ts 的问题略不同、没带权限规则）；后 4 例录自带权限规则的策略探针，设计稿只记了 interrupt 概率，余量记在 queue。merge 例只有一条排队，route_merge_with 记为 q1（探针没问这一题）。重录：TYPESAFE_API_KEY=… INBOUND_ROUTE_RECORD=1 bun test tests/inbound-route-replay.test.ts。人的两条不合并（只有本机 agent 消息能并进一封合批载体），所以 owner 的两个 merge 例按代码兜底改成排队。JRT-3 加的 6 例（agent→agent，3 例该插队、3 例该排队）录自 lib/inbound-route.ts 带 insert 选项的现行问题；只重录没有答案的例：INBOUND_ROUTE_RECORD=1，全部重录：INBOUND_ROUTE_RECORD=all",
  "model": "jev-1.13.0",
  "cases": [
   {
@@ -393,6 +393,144 @@
       "queue": 0
      },
      "confidence": 1
+    }
+   }
+  },
+  {
+   "name": "agent 答复对方正在等的问题",
+   "expect": "insert",
+   "current": "已问 agent-exec PR #12 的 CI 过没过，正在等它的答复再决定合不合并",
+   "queued": [],
+   "incoming": {
+    "from": "agent-exec",
+    "text": "CI 全绿了（12/12 分片），#12 可以合并。"
+   },
+   "answers": {
+    "route_action": {
+     "type": "choice",
+     "choice": "insert",
+     "confidence": 0.81,
+     "probabilities": {
+      "interrupt": 0.09,
+      "insert": 0.86,
+      "merge": 0,
+      "queue": 0.05
+     }
+    }
+   }
+  },
+  {
+   "name": "agent 更正对方手上的事",
+   "expect": "insert",
+   "current": "按 agent-pm 的规格卡把 src/lib/foo.ts 的超时改成 30 秒，正在改第二处调用点",
+   "queued": [],
+   "incoming": {
+    "from": "agent-pm",
+    "text": "更正：超时是 15 秒，不是 30 秒，规格卡已经改了。"
+   },
+   "answers": {
+    "route_action": {
+     "type": "choice",
+     "choice": "insert",
+     "confidence": 0.92,
+     "probabilities": {
+      "interrupt": 0.01,
+      "insert": 0.94,
+      "merge": 0,
+      "queue": 0.05
+     }
+    }
+   }
+  },
+  {
+   "name": "agent 给出对方下一步要的信息",
+   "expect": "insert",
+   "current": "测试跑完了，下一步要把分支推上去，但不确定推 origin 还是 fork，先在整理提交说明",
+   "queued": [],
+   "incoming": {
+    "from": "agent-pm",
+    "text": "推 origin，别推 fork。"
+   },
+   "answers": {
+    "route_action": {
+     "type": "choice",
+     "choice": "insert",
+     "confidence": 0.85,
+     "probabilities": {
+      "interrupt": 0.03,
+      "insert": 0.89,
+      "merge": 0,
+      "queue": 0.08
+     }
+    }
+   }
+  },
+  {
+   "name": "agent 纯进度",
+   "expect": "queue",
+   "current": "正在审查 PR #20 的 diff，看到 src/bridge/inbox.ts",
+   "queued": [],
+   "incoming": {
+    "from": "agent-exec",
+    "text": "进度：第 3 步做完了，开始第 4 步。"
+   },
+   "answers": {
+    "route_action": {
+     "type": "choice",
+     "choice": "queue",
+     "confidence": 0.97,
+     "probabilities": {
+      "interrupt": 0,
+      "insert": 0.02,
+      "merge": 0,
+      "queue": 0.98
+     }
+    }
+   }
+  },
+  {
+   "name": "agent 致谢",
+   "expect": "queue",
+   "current": "正在写 docs/architecture/inbound-route.md 的 CC 实测一节",
+   "queued": [],
+   "incoming": {
+    "from": "agent-exec",
+    "text": "收到，谢谢！"
+   },
+   "answers": {
+    "route_action": {
+     "type": "choice",
+     "choice": "queue",
+     "confidence": 0.97,
+     "probabilities": {
+      "interrupt": 0,
+      "insert": 0.02,
+      "merge": 0,
+      "queue": 0.98
+     }
+    }
+   }
+  },
+  {
+   "name": "agent 无关的新请求",
+   "expect": "queue",
+   "current": "正在修 bridge 押后队列的重复投递 bug，刚复现出来",
+   "queued": [],
+   "incoming": {
+    "from": "agent-web",
+    "text": "有空的时候帮我看一下网页登录页的样式问题？不急。"
+   },
+   "answers": {
+    "route_action": {
+     "type": "choice",
+     "choice": "queue",
+     "confidence": 0.99,
+     "probabilities": {
+      "interrupt": 0,
+      "insert": 0.01,
+      "merge": 0,
+      "queue": 0.99
+     }
     }
    }
   }

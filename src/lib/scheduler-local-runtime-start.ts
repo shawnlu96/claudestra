@@ -12,6 +12,8 @@ import type { EnsureResult } from "./worker-session.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { localAuthorRuntime } from "./scheduler-local-runtime.js";
 import { codexSlotHeld, withCodexSlot, type CodexSlotOptions, type SlotWait } from "./scheduler-local-runtime-slots.js";
+import type { Database } from "bun:sqlite";
+import { bindTierSession, taskTierMode, type TierLaunchCtx } from "./task-tier-models.js";
 
 export { localAuthorRuntime } from "./scheduler-local-runtime.js";
 
@@ -30,9 +32,10 @@ export type { QueuedStart } from "./scheduler-local-runtime-queue.js";
 export async function runLocalStart(io: StepIO, p: StartPlan, run: (io: StepIO, p: StartPlan) => Promise<StartOutcome | QueuedStart>,
   opts: LocalStartOptions = {}): Promise<StartOutcome | QueuedStart> {
   const runtime = selected(p.project, opts.configPath);
-  io = cardRoleIo(io, { family: runtime }); // ROLE1: the card create loads its role definition (card-role-definitions.ts)
+  const tier = startTier(io, p);
+  io = cardRoleIo(io, { family: runtime, ...(tier ? { tier } : {}) }); // ROLE1 + TIER3: role definition and task-tier model (card-role-definitions.ts)
   const slotOpts = { ...opts, project: p.project, family: runtime };
-  if (p.peer || (runtime === "claude" && !configuredAgentLimits(slotOpts))) return run(io, p);
+  if (p.peer || (runtime === "claude" && !configuredAgentLimits(slotOpts))) return bound(tier, p, await run(io, p), opts.registryPath);
   const retry = (beforeStart?: () => Promise<void>) => withCodexSlot(async () => {
     await beforeStart?.();
     return run({ ...io, manager: async (args, timeout) => {
@@ -48,7 +51,25 @@ export async function runLocalStart(io: StepIO, p: StartPlan, run: (io: StepIO, 
   } }, p);
   }, { ...slotOpts, checkQuota: true });
   const result = await retry();
-  return "kind" in result ? queueLocalStart(io, p, opts, result.reason, retry) : result;
+  return "kind" in result ? queueLocalStart(io, p, opts, result.reason, retry) : bound(tier, p, result, opts.registryPath);
+}
+
+/** start_node 的作者：新卡，类型 = 预检定下的流程模板，规格就是这次要写进去的那份；argv 自带的 --effort high 是原档。peer 卡不在本机建，不给 */
+function startTier(io: StepIO, p: StartPlan): TierLaunchCtx | null {
+  // off：新增的上下文、开台账、读规格卡、事实绑定全都不做，cardRoleIo 收到的与旧路径一字不差
+  if (p.peer || taskTierMode(p.project).mode === "off") return null;
+  // 只给了 manager 的精简 io（测试替身、嵌套入口）没有台账 / 读文件：这时不记事实、只认计划里的模板
+  let db: Database | undefined;
+  try { db = typeof io.db === "function" ? io.db() : undefined; } catch (e) { console.error(`[task-tier] ${p.taskId} 开台账失败，启动事实不记：${(e as Error).message}`); }
+  const specText = p.specText ?? (typeof io.read === "function" ? io.read(p.specPath) : null);
+  return { db, project: p.project, card: p.taskId, tier: p.workflow?.template ?? "code", specText, round: 0, baseEffort: "high" };
+}
+
+/** 建成后 registry 里已有 session id 才绑；还没有就留在「已尝试」，读出来实际是 unknown */
+function bound<T>(tier: TierLaunchCtx | null, p: StartPlan, result: T, registryPath?: string): T {
+  const sid = tier?.db ? readRegistryAgentsSync(registryPath).find((r) => r.name === p.agent)?.sessionId : undefined;
+  if (tier?.db && sid) bindTierSession(tier.db, { project: p.project, id: p.taskId }, p.agent, sid, "author");
+  return result;
 }
 
 /** Claim waits before writing anything; nested runStart reuses the same lock instead of racing or deadlocking. */

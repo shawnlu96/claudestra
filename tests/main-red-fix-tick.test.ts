@@ -16,9 +16,11 @@ import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { nodeKey, type MainRedRun } from "../src/lib/main-red-fix.js";
 import { MAIN_RED_FIX_SERVICE, setMainRedFixCliForTest } from "../src/lib/main-red-fix-cmds.js";
-import type { MainRedGh } from "../src/lib/main-red-fix-gh.js";
+import { mainRedGh, type MainRedGh } from "../src/lib/main-red-fix-gh.js";
 import { mainRedFixTick, setMainRedFixTickForTest } from "../src/lib/main-red-fix-tick.js";
 import type { RecoveryKey, RecoveryMode } from "../src/lib/recovery-policy.js";
+import type { BoundedResult } from "../src/lib/run-bounded.js";
+import { LOG_LIMIT } from "../src/lib/scheduler-merge-ci-log-read.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
@@ -34,13 +36,16 @@ const P = "p", REPO = "o/r", CHECK = "typecheck + test + guard", MIN = 60_000;
 const owner = { actor: "owner", now: 100 };
 const sha = (c: string) => c.repeat(40);
 let db: Database, dir: string, now: number, agentsF: string, mergeF: string, modes: Partial<Record<RecoveryKey, RecoveryMode>>;
-let notices: string[], gh: Fake, health: MainCiHealth | null;
+let notices: string[], gh: Fake, health: MainCiHealth | null, tickPorts: Parameters<typeof setMainRedFixTickForTest>[0];
+const currentPorts = () => tickPorts!;
 
-interface Fake extends MainRedGh { state: { runs: Record<string, MainRedRun[]>; log: string; pulls: Record<string, number[]>; reruns: number[]; calls: number } }
+interface FakeState { runs: Record<string, MainRedRun[]>; log: string; pulls: Record<string, number[]>; reruns: number[]; calls: number; jobLog: string | Error }
+interface Fake extends MainRedGh { state: FakeState }
 function fakeGh(): Fake {
-  const state = { runs: {} as Record<string, MainRedRun[]>, log: "", pulls: {} as Record<string, number[]>, reruns: [] as number[], calls: 0 };
+  const state: FakeState = { runs: {}, log: "", pulls: {}, reruns: [], calls: 0, jobLog: new Error("not read") };
   const hit = <T>(v: T) => { state.calls++; return Promise.resolve(v); };
   return { state, runs: (_r, file) => hit(state.runs[file] ?? []), failedJobs: () => hit([CHECK]), failedLog: () => hit(state.log),
+    jobLogs: async () => { state.calls++; if (state.jobLog instanceof Error) throw state.jobLog; return state.jobLog; },
     commitPulls: (_r, s) => hit(state.pulls[s] ?? []), rerunFailed: async (_r, id) => { state.calls++; state.reruns.push(id); } };
 }
 const run = (id: number, conclusion: string | null, attempt = 1, head = sha("b"), status = "completed"): MainRedRun =>
@@ -77,8 +82,9 @@ beforeEach(() => {
   const policy = (_p: string, key: RecoveryKey) => ({ mode: modes[key] ?? "observe", manualAfterMs: null, source: "config" as const });
   setMainRedFixCliForTest({ ledgerDir: join(dir, "ledger"), repo: () => REPO, policy,
     scrub: async () => ({ identity: { username: "mrf-tester-user", hostname: "mrf-tester-host" } }) });
-  setMainRedFixTickForTest({ gh: () => gh, policy, ledgerDir: join(dir, "ledger"), health: async () => health,
-    config: () => ({ projects: { [P]: { remote: { repo: REPO }, requiredChecks: [CHECK] } } }) as unknown as SchedulerConfig });
+  tickPorts = { gh: () => gh, policy, ledgerDir: join(dir, "ledger"), health: async () => health,
+    config: () => ({ projects: { [P]: { remote: { repo: REPO }, requiredChecks: [CHECK] } } }) as unknown as SchedulerConfig };
+  setMainRedFixTickForTest(tickPorts);
   gh.state.log = redLog("tests/a.test.ts");
   gh.state.pulls[sha("b")] = [12];
 });
@@ -174,6 +180,89 @@ describe("[验收线 2] a red with no failed bun test still gets a scoped fix no
     expect(nodesOf(agentsF).find((n) => n.key === "OBSAUTO1R1")?.fileGlobs).toEqual(["src/lib/obs.ts", "tests/a*.test.ts"]);
     expect(nodesOf(mergeF).find((n) => n.key === "NIGHTLY1")?.fileGlobs).toEqual([".github/workflows/nightly.yml"]);
     expect(readFileSync(specPath("merge-arch-NIGHTLY1"), "utf8")).toContain("已知偶发重跑一次仍红");
+  });
+});
+
+/**
+ * MAINREDLOG1: a shard's whole `--log-failed` is thousands of (pass) lines (the 10-17 run was 5772 lines), past LOG_LIMIT. The real
+ * gh port over a fake `gh`: the whole-run read comes back truncated, the per-job read gives the shard's full log.
+ */
+describe("MAINREDLOG1 · a failed log too long to read whole", () => {
+  const SHARD = "test shard 3 of 4", GUARD = "tests/web-md-guard.test.ts", CASE = "imageSrcOf > stays linear on a long input";
+  const shardLog = () => {
+    const passing = Array.from({ length: 400 }, (_, i) => [`##[group]tests/p${i}.test.ts:`,
+      ...Array.from({ length: 30 }, (_, j) => `(pass) passing suite ${i} > keeps case ${j} green [0.12ms]`), "##[endgroup]"]).flat();
+    return [...passing, `##[group]${GUARD}:`, "(pass) imageSrcOf > reads a plain src [0.05ms]", "error: expect(received).toBeLessThan(expected)",
+      "Expected: < 50", "Received: 78.7", `(fail) ${CASE} [80.10ms]`, "##[endgroup]", "", "1 tests failed:", `(fail) ${CASE} [80.10ms]`, "",
+      " 12000 pass", " 1 fail", "##[error]Process completed with exit code 1."].map((l) => `${SHARD}\tUnit tests\t2026-10-17T06:00:00.1234567Z ${l}`).join("\n");
+  };
+  const jobsJson = (attempt = 1) => JSON.stringify({ attempt, jobs: [{ databaseId: 31, name: SHARD, conclusion: "failure", steps: [{ name: "Unit tests", conclusion: "failure" }] }] });
+  /** A fake `gh` behind the real port: argv decides the answer, maxBytes truncates as runBounded does. */
+  const realGh = (job: () => string | null, jobs = jobsJson) => {
+    const command = async (argv: string[], o: { maxBytes?: number }): Promise<BoundedResult> => {
+      const out = (stdout: string): BoundedResult => o.maxBytes && Buffer.byteLength(stdout) > o.maxBytes
+        ? { code: 0, stdout: stdout.slice(0, o.maxBytes), stderr: "", timedOut: false, truncated: true } : { code: 0, stdout, stderr: "", timedOut: false };
+      if (argv.includes("--json")) return out(jobs());
+      if (argv.includes("--job")) { const j = job(); return j === null ? { code: 1, stdout: "", stderr: "HTTP 502", timedOut: false } : out(j); }
+      return out(shardLog()); // the whole run's --log-failed
+    };
+    const port = mainRedGh(command as never);
+    return { ...gh, failedLog: port.failedLog, jobLogs: port.jobLogs };
+  };
+
+  test("[验收线 1] one red shard past LOG_LIMIT: the node's spec names the failed test and its scope has the test file", async () => {
+    expect(Buffer.byteLength(shardLog())).toBeGreaterThan(LOG_LIMIT);
+    const port = realGh(shardLog);
+    expect(await port.failedLog(REPO, 77, 1)).toBeNull(); // the whole read still refuses a truncated log
+    setMainRedFixTickForTest({ ...currentPorts(), gh: () => port });
+    gh.state.runs["ci.yml"] = [run(77, "failure")];
+    expect(await tick()).toEqual([]);
+    const node = nodesOf(agentsF).find((n) => n.key === "OBSAUTO1R1")!;
+    expect(node.fileGlobs).toContain(GUARD);
+    expect(node.fileGlobs).not.toEqual(["src/lib/obs.ts", "tests/a*.test.ts"]); // never the responsible card's scope alone
+    const spec = readFileSync(specPath("agents-OBSAUTO1R1"), "utf8");
+    expect(spec).toContain(`${GUARD} > ${CASE}`);
+    expect(spec).not.toContain("日志里没解析出测试名");
+    expect(spec).toContain(`(fail) ${CASE}`);
+    expect(lintObservation(spec)).toBeNull();
+  });
+
+  describe("[验收线 2] still no failed test after the per-job read: no node, one PM todo per run", () => {
+    const untriaged = () => ops("pm_todo").filter((e) => String(e.data.dedupKey).endsWith(":untriaged"));
+    const expectTodoOnly = async (port: MainRedGh, why: string) => {
+      setMainRedFixTickForTest({ ...currentPorts(), gh: () => port });
+      gh.state.runs["ci.yml"] = [run(77, "failure")];
+      expect(await tick()).toEqual([]);
+      expect(ops("main_red_fix_node")).toHaveLength(0);
+      expect(nodesOf(agentsF).map((n) => n.key)).not.toContain("OBSAUTO1R1");
+      expect(existsSync(specPath("agents-OBSAUTO1R1"))).toBe(false);
+      expect(untriaged().map((e) => e.text)).toEqual([expect.stringContaining(why)]);
+      expect(untriaged()[0]!.text).toContain(`https://github.com/${REPO}/actions/runs/77`);
+      expect(untriaged()[0]!.text).toContain(CHECK);
+      expect(ops("main_red_fix_handled").map((e) => e.data.outcome)).toEqual(["untriaged"]);
+      await tick();
+      gh.state.runs["ci.yml"] = [run(77, "failure", 2)]; // a later red attempt of the same run: still the one todo
+      await tick(); await tick();
+      expect(untriaged()).toHaveLength(1);
+      expect(ops("main_red_fix_node")).toHaveLength(0);
+      expect(notices).toEqual([]);
+    };
+    test("the per-job read fails: read as cannot tell, never as no failure", async () => {
+      await expectTodoOnly(realGh(() => null), "按 job 取日志失败");
+    });
+    test("the per-job log names no failed test (a crashed shard)", async () => {
+      const crashed = [`${SHARD}\tUnit tests\t2026-10-17T06:00:00.1Z error: Cannot find module "zod" from tests/x.test.ts`,
+        `${SHARD}\tUnit tests\t2026-10-17T06:00:00.1Z ##[error]Process completed with exit code 1.`].join("\n");
+      await expectTodoOnly({ ...realGh(() => crashed), failedLog: async () => null }, "按 job 截取后仍解析不出失败测试");
+    });
+    test("observe: one would-be note, no todo", async () => {
+      modes.mainRedFix = "observe";
+      setMainRedFixTickForTest({ ...currentPorts(), gh: () => realGh(() => null) });
+      gh.state.runs["ci.yml"] = [run(77, "failure")];
+      await tick(); await tick();
+      expect(ops("recovery_observe").map((e) => e.text)).toEqual([expect.stringContaining("记待办，不写节点：失败日志太长")]);
+      expect(untriaged()).toHaveLength(0);
+    });
   });
 });
 

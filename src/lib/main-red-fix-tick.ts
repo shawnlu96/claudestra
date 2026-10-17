@@ -3,6 +3,8 @@
  * MAIN_RED_READ_EVERY_MS, whether or not anything wants to merge. Reads (gh, the query_only ledger) and the rerun call happen here;
  * every ledger write goes through `ledger scheduler-main-red-fix` (lease-guarded env.ledger). mainRedFix off = no read at all.
  * A run counts once (handled per run id + attempt); a lost lease stops the tick, any other error only lands in this round's failed.
+ * A failedLog too long to read whole is read per failed job; one that still names no failed test is a PM todo, never a guessed node.
+ * A green run (mainRedGreenRetire) retires this mechanism's fix nodes it covers that nobody started (main-red-fix-retire.ts).
  * tests/main-red-fix-tick.test.ts.
  */
 import { existsSync } from "node:fs";
@@ -15,6 +17,7 @@ import { firstRedSha, greenBefore, handledKey, knownFlakyOnly, latestDecided, lo
   type MainRedFacts, type MainRedRun } from "./main-red-fix.js";
 import { mainRedGh, type MainRedGh } from "./main-red-fix-gh.js";
 import { mainRedNodes, nodeState, placeFix } from "./main-red-fix-place.js";
+import { greenRetirable } from "./main-red-fix-retire.js";
 import { statePath } from "./paths.js";
 import { observeDedupKey, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
@@ -39,7 +42,8 @@ let ports: TickPorts = {};
 const lastRead = new Map<string, number>();
 export function setMainRedFixTickForTest(p: TickPorts | null): void { ports = p ?? {}; lastRead.clear(); }
 
-interface Round { env: SpecWaitEnv; project: string; repo: string; gh: MainRedGh; mode: "on" | "observe"; health: () => Promise<MainCiHealth | null> }
+interface Round { env: SpecWaitEnv; project: string; repo: string; gh: MainRedGh; mode: "on" | "observe"; health: () => Promise<MainCiHealth | null>;
+  policy: RecoveryPolicyPort }
 
 async function cli(r: Round, op: string, facts: Record<string, unknown>): Promise<Record<string, unknown>> {
   const res = await r.env.ledger("ledger", "scheduler-main-red-fix", r.project, "--op", op, "--facts", JSON.stringify(facts));
@@ -70,6 +74,24 @@ async function observeNode(r: Round, w: Workflow, facts: MainRedFacts): Promise<
   await cli(r, "observe", { workflow: w.id, mainSha: facts.mainSha, action: "node", text });
 }
 
+/** The per-job read behind an oversized failedLog; a failed read is a reason, never an empty log. */
+async function jobLogs(r: Round, red: MainRedRun): Promise<string | { error: string }> {
+  try { return await r.gh.jobLogs(r.repo, red.id, red.attempt); }
+  catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    return { error: `按 job 取日志失败：${(e as Error).message}`.replace(/\s+/g, " ").slice(0, 300) };
+  }
+}
+
+/** A truncated log that names no failed test: no node (its scope would only be a guess), one PM todo per run; observe notes it. */
+async function untriaged(r: Round, w: Workflow, red: MainRedRun, checks: readonly string[], why: string): Promise<void> {
+  if (r.mode === "observe") {
+    await cli(r, "observe", { workflow: w.id, mainSha: red.headSha, action: "node", text: `记待办，不写节点：失败日志太长，${why}`.slice(0, 400) });
+    return;
+  }
+  await cli(r, "untriaged", { workflow: w.id, runId: red.id, attempt: red.attempt, mainSha: red.headSha, url: red.url, checks: checks.slice(0, 50), why });
+}
+
 async function judge(r: Round, w: Workflow, runs: readonly MainRedRun[], red: MainRedRun, rerunSpent: boolean): Promise<void> {
   const db = r.env.db;
   // observe has no rerun to wait for: one would-be action per main SHA + workflow, then this red is not read again
@@ -77,12 +99,15 @@ async function judge(r: Round, w: Workflow, runs: readonly MainRedRun[], red: Ma
   const checks = await r.gh.failedJobs(r.repo, red.id, red.attempt);
   const log = await r.gh.failedLog(r.repo, red.id, red.attempt);
   const cls: FailureClass = log === null ? { kind: "unknown", why: "失败日志太长" } : classifyFailedLog(log, new Set());
-  const failures = (log && parseFailedLog(log)) || [];
+  // too long as a whole: the failed jobs one by one, cut; only named failed tests count, never the log's file names (it is partial)
+  const cut = log === null ? await jobLogs(r, red) : null;
+  const read = log ?? (typeof cut === "string" ? cut : null), failures = (read !== null && parseFailedLog(read)) || [];
+  if (log === null && !failures.length) return untriaged(r, w, red, checks, typeof cut === "string" ? "按 job 截取后仍解析不出失败测试" : cut!.error);
   // no bun test failed (a type error, a guard, an install fault): the files the log names, or none (the writer then scopes otherwise)
   const files = failures.length ? [...new Set(failures.map((f) => f.file))].sort().slice(0, 50) : log ? logPaths(log) : [];
   const facts: MainRedFacts = { workflow: w.id, runId: red.id, attempt: red.attempt, mainSha: red.headSha, url: red.url, checks: checks.slice(0, 50),
     cases: [...new Set(failures.map((f) => `${f.file} > ${f.name}`))].slice(0, 50), files,
-    snippet: log ? snippetOf(cutFailedJobLog(log)) : [], responsibleTask: null, faultKey: null, rerun: rerunSpent, greenBefore: greenBefore(runs, red) };
+    snippet: read === null ? [] : snippetOf(log === null ? read : cutFailedJobLog(read)), responsibleTask: null, faultKey: null, rerun: rerunSpent, greenBefore: greenBefore(runs, red) };
   if (!rerunSpent && knownFlakyOnly(cls, new Set(activeKnownFlaky(db, r.project).keys()))) {
     if (r.mode === "observe") {
       await cli(r, "observe", { workflow: w.id, mainSha: red.headSha, action: "rerun", text: `重跑 ${w.label} 失败的 job（run ${red.id}）` });
@@ -113,13 +138,23 @@ async function oneWorkflow(r: Round, w: Workflow): Promise<void> {
     if (claim && r.mode === "on" && latest.attempt > claimedAt && !getEventByDedup(db, todoKey(r.project, latest.id, "rerun-green"))) {
       await cli(r, "rerun-result", { workflow: w.id, runId: latest.id, url: latest.url, green: true });
     }
-    return;
+    return retirePass(r, w, latest);
   }
   if (getEventByDedup(db, handledKey(r.project, latest.id, latest.attempt))) return;
   // the attempt that was re-run: wait for the new attempt, unless the rerun call itself failed (then it is written now)
   const failedRerun = !!getEventByDedup(db, todoKey(r.project, latest.id, "rerun-failed"));
   if (claim && latest.attempt <= claimedAt && !failedRerun) return;
   await judge(r, w, runs, latest, !!claim);
+}
+
+/** mainRedGreenRetire: this mechanism's fix nodes a green run on a newer main SHA covers; the CLI re-reads each and decides on / observe. */
+async function retirePass(r: Round, w: Workflow, green: MainRedRun): Promise<void> {
+  const mode = r.policy(r.project, "mainRedGreenRetire").mode;
+  if (mode === "off") return;
+  for (const n of greenRetirable(r.env.db, r.project, w.id, green, mode === "observe")) {
+    const res = await cli(r, "retire", { ...n });
+    if (typeof res.notify === "string" && res.notify) await r.env.notifyPm(r.project, res.notify, "info");
+  }
 }
 
 /** mainRedRepairBind: this mechanism's cards at merge whose main is still the fault they were written for; the CLI decides on / observe. */
@@ -157,7 +192,7 @@ export async function mainRedFixTick(env: SpecWaitEnv): Promise<Failed> {
       if (!cfg || !repo) continue;
       lastRead.set(project, now);
       let health: Promise<MainCiHealth | null> | undefined;
-      const r: Round = { env, project, repo, mode, gh: (ports.gh ?? ((cwd) => mainRedGh(runBounded, cwd)))(cfg.repoDir),
+      const r: Round = { env, project, repo, mode, policy, gh: (ports.gh ?? ((cwd) => mainRedGh(runBounded, cwd)))(cfg.repoDir),
         health: () => health ??= (ports.health ? ports.health(project, repo, cfg.requiredChecks) : liveHealth(project, repo, cfg.requiredChecks, cfg.repoDir)) };
       for (const w of MAIN_RED_WORKFLOWS) {
         try { await oneWorkflow(r, w); }
