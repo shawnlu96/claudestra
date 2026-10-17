@@ -41,6 +41,7 @@ export const RECOVERY_KEYS = [
   "ciSelectedReplayReceipt",
   "ciTrainFailureClass",
   "ciWebBuild",
+  "configWriteSerialize",
   "convIgnoredBuildArtifacts",
   "convergenceStall",
   "dagWriteScrub",
