@@ -63,6 +63,6 @@ export function hostClearBudget(frame: Record<string, unknown>, channelId: strin
   // Re-read for every new action. An already admitted operation keeps its bound even after a rollback.
   const current = mode();
   if (current === "observe") observeClearBudget(channelId);
-  if (current !== "on") throw new Error("ACP clear 预算档位已改变，请重试");
+  if (current !== "on") return undefined;
   return new ClearBudget(frame.deadline as number);
 }

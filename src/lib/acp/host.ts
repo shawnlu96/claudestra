@@ -293,7 +293,7 @@ export class AcpHost {
   private resync(): void {
     for (const p of this.permits.values()) this.link.send(p.frame);
     if (this.refused && this.lastStartError) this.sendFailure(this.lastStartError, this.lastStartErrorAt); // 拒起时 bridge 可能还没登记上，那一帧就丢了
-    if (this.session) this.publishConfig(this.session);
+    if (this.session) this.sendConfig(this.session);
     void this.pump();
   }
 
@@ -542,8 +542,12 @@ export class AcpHost {
   }
 
   /** 配置变了：给 bridge 存一份（设置页 / 额度卡的选项），再推一条 model_state 条目让顶栏跟上 */
-  private publishConfig(s: AcpSession): void {
+  private sendConfig(s: AcpSession): void {
     this.link.send({ channelId: this.cfg.channelId, type: "acp_config", clearBudgetVersion: CLEAR_BUDGET_VERSION, configOptions: s.configOptions });
+  }
+
+  private publishConfig(s: AcpSession): void {
+    this.sendConfig(s);
     const e = modelStateEntry(s.configOptions, new Date().toISOString());
     if (e) this.pushEntries([e]);
   }

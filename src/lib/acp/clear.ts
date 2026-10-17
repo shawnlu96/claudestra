@@ -62,12 +62,10 @@ export async function rotateAcpHost(o: {
     if (!result.ok) return o.failed(result.changed), { ok: false, error: result.error };
     try {
       await o.committed(result.sessionId, o.session);
-      o.budget?.timeout(1);
     } catch (e) {
-      waitingForRebind = !o.budget;
-      if (o.budget) o.failed(true);
+      waitingForRebind = true;
       return { ok: false, sessionId: result.sessionId,
-        error: `新线程已写入 registry，但 watcher 尚未就绪（${o.budget ? "结果未确认" : "后台重试中"}）：${e instanceof Error ? e.message : e}` };
+        error: `新线程已写入 registry，但 watcher 尚未就绪（后台重试中）：${e instanceof Error ? e.message : e}` };
     }
     if (o.then) o.loop.submitOp(o.then.text, o.then.opId, true);
     return { ok: true, sessionId: result.sessionId };
@@ -79,9 +77,11 @@ export async function rotateAcpHost(o: {
 
 /** watcher 暂时不在时后台重试；条目带 sessionId，旧 watcher 会拒收，不会误确认。 */
 function retryAcpRebind(request: () => Promise<boolean>, ready: () => void, alive: () => boolean): void {
+  if (!alive()) return;
   const retry = async () => {
     if (!alive()) return;
     const ok = await request().catch((e) => (console.warn(`⚠️ ACP watcher 重绑重试失败：${e}`), false));
+    if (!alive()) return;
     if (ok) ready();
     else setTimeout(() => void retry(), 3_000);
   };
@@ -94,12 +94,18 @@ export async function commitAcpClear(o: {
   request(frame: Record<string, unknown>, timeoutMs: number): Promise<boolean>;
 }): Promise<void> {
   o.update();
-  const bind = () => o.request({ type: "acp_rebind", channelId: o.channelId, sessionId: o.sessionId, previousSessionId: o.previousSessionId,
-    ...(o.budget ? { clearBudgetVersion: CLEAR_BUDGET_VERSION, deadline: o.budget.deadline } : {}) }, o.budget?.timeout(30_000) ?? 30_000);
-  if (!(await bind().catch((e) => (console.warn(`⚠️ ACP watcher 重绑失败：${e}`), false)))) {
-    if (!o.budget) retryAcpRebind(bind, o.ready, o.alive);
+  const bind = async (budget?: ClearBudget) => o.request({
+    type: "acp_rebind", channelId: o.channelId, sessionId: o.sessionId, previousSessionId: o.previousSessionId,
+    ...(budget ? { clearBudgetVersion: CLEAR_BUDGET_VERSION, deadline: budget.deadline } : {}),
+  }, budget?.timeout(30_000) ?? 30_000);
+  try {
+    if (!(await bind(o.budget))) throw new Error("bridge 未确认新 watcher");
+    o.budget?.timeout(1);
+    o.ready();
+  } catch (e) {
+    console.warn(`⚠️ ACP watcher 重绑失败：${e}`);
+    // Reconcile the already committed session separately; the expired clear never resumes or submits then.
+    retryAcpRebind(() => bind(), o.ready, o.alive);
     throw new Error("bridge 未确认新 watcher");
   }
-  o.budget?.timeout(1);
-  o.ready();
 }

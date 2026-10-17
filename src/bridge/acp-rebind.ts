@@ -11,7 +11,6 @@ export async function rebindAcpWatcher(channelId: string, sessionId: string, dis
   if (!reg || reg.transport !== "acp" || reg.sessionId !== sessionId || !reg.cwd) return { ok: false, error: "registry 尚未指向这个 ACP 线程" };
   budget?.timeout(30_000);
   await startWatching(reg.name, reg.cwd, sessionId, channelId, discord, { runtime: reg.runtime, transport: "acp", rebind: true });
-  budget?.timeout(1);
   if (previousSessionId) retireAgentSessionEvents(reg.name, previousSessionId);
   return { ok: true };
 }

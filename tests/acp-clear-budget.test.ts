@@ -8,20 +8,21 @@ import type { AcpSession } from "../src/lib/acp/session.js";
 import { AcpTurnLoop } from "../src/lib/acp/turn.js";
 import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
 import { recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const STAGES = ["new", "model", "effort", "bootstrap", "registry", "watcher"] as const;
 type Stage = typeof STAGES[number];
 
-function rig(o: { limit?: number; legacy?: boolean; pi?: boolean; lost?: Stage; expired?: Stage; late?: boolean; sent?: boolean } = {}) {
+function rig(o: { limit?: number; legacy?: boolean; pi?: boolean; lost?: Stage; expired?: Stage; late?: boolean; sent?: boolean; readyAdvance?: number;
+  alive?: () => boolean; rebind?: (frame: Record<string, unknown>, ms: number) => Promise<boolean> } = {}) {
   let now = 1_000;
   const budget = o.legacy ? undefined : new ClearBudget(now + (o.limit ?? 270_000), () => now, () => now);
   const calls: { stage: Stage; ms: number | undefined }[] = [];
   const failed: boolean[] = [], prompts: string[] = [];
   const durations: Record<Stage, number> = { new: 90_000, model: 20_000, effort: 20_000, bootstrap: 60_000, registry: 30_000, watcher: 30_000 };
-  let registryId = "old", currentId = "old", ready = 0;
+  let registryId = "old", currentId = "old", ready = 0, rotating = false;
   const step = async (stage: Stage, ms?: number) => {
     calls.push({ stage, ms });
     if (o.lost === stage) { now += ms ?? 30_000; throw new RpcLostError(`${stage} 丢回包`, o.sent ?? true); }
@@ -39,10 +40,10 @@ function rig(o: { limit?: number; legacy?: boolean; pi?: boolean; lost?: Stage; 
     bootstrap: acpRuntime(o.pi ? "pi" : "codex").clearBootstrap, then: { text: "restore", opId: "restore-once" },
     configure: (s, b) => applyAcpLaunchConfig(s, "model", "effort", true, () => {}, b),
     rotateRegistry: async (_old, fresh, ms) => { await step("registry", ms); registryId = fresh; return { ok: true }; },
-    begin() {}, end() {}, failed: (changed) => void failed.push(changed),
-    committed: (id) => commitAcpClear({ budget, sessionId: id, previousSessionId: "old", channelId: "test", alive: () => false,
-      update: () => { currentId = id; }, ready: () => { ready++; },
-      request: async (_f, ms) => { await step("watcher", ms); if (o.late) now += 30_000; return true; },
+    begin() { rotating = true; }, end() { rotating = false; }, failed: (changed) => void failed.push(changed),
+    committed: (id) => commitAcpClear({ budget, sessionId: id, previousSessionId: "old", channelId: "test", alive: o.alive ?? (() => false),
+      update: () => { currentId = id; }, ready: () => { ready++; now += o.readyAdvance ?? 0; if (!rotating) loop.resume(); },
+      request: o.rebind ?? (async (_f, ms) => { await step("watcher", ms); if (o.late) now += 30_000; return true; }),
     }),
   });
   return { run, calls, failed, prompts, loop, budget, advance: (ms: number) => { now += ms; },
@@ -50,6 +51,13 @@ function rig(o: { limit?: number; legacy?: boolean; pi?: boolean; lost?: Stage; 
 }
 
 describe("ACP clear shared deadline", () => {
+  test("复现 post-ready-check-1：ready 已确认后跨过期限不反判失败、不杀适配器", async () => {
+    const r = rig({ readyAdvance: 20_001 });
+    expect(await r.run()).toEqual({ ok: true, sessionId: "new" });
+    expect(r.failed).toEqual([]);
+    await Bun.sleep(0);
+    expect(r.prompts).toEqual(["restore"]);
+  });
   test("复现：90+40+60+30+30=250s 成功，bridge 不再用 225s 提前判不明", async () => {
     const r = rig();
     const plan = clearCallPlan("test", 1, { mode: () => "on", now: () => 1_000 });
@@ -68,7 +76,7 @@ describe("ACP clear shared deadline", () => {
       expect((await r.run()).ok).toBe(false);
       expect(r.calls.map((c) => c.stage)).toEqual(STAGES.slice(0, STAGES.indexOf(expired) + 1));
       expect(r.loop.slotStatus("restore-once").state).toBe("gone");
-      expect(r.failed).toEqual([true]);
+      expect(r.failed).toEqual(["registry", "watcher"].includes(expired) ? [] : [true]);
     }
   });
 
@@ -77,7 +85,7 @@ describe("ACP clear shared deadline", () => {
       const r = rig({ lost });
       const result = await r.run();
       expect(result.ok).toBe(false);
-      expect(r.failed).toEqual([true]);
+      expect(r.failed).toEqual(lost === "watcher" ? [] : [true]);
       expect(r.calls.map((c) => c.stage)).toEqual(STAGES.slice(0, STAGES.indexOf(lost) + 1));
       expect(r.loop.slotStatus("restore-once").state).toBe("gone");
       if (lost === "watcher") expect(result.sessionId).toBe("new");
@@ -128,6 +136,85 @@ describe("ACP clear shared deadline", () => {
   });
 });
 
+test("复现 watcher-stale-1：重绑真失败与期限耗尽后仍对账真实 watcher，普通消息恢复且不补发 then", async () => {
+  const { startWatching, pushEntries, stopWatching } = await import("../src/bridge/jsonl-watcher.js");
+  const realSet = globalThis.setTimeout;
+  const retries: { fire(): void; clear(): void }[] = [];
+  globalThis.setTimeout = ((fn: () => void, ms: number, ...args: unknown[]) => {
+    const timer = realSet(fn, ms, ...args);
+    if (ms === 3_000) retries.push({ fire: fn, clear: () => clearTimeout(timer) });
+    return timer;
+  }) as typeof setTimeout;
+  try {
+    for (const reason of ["false", "lost", "expired"] as const) {
+      const channelId = `local-clear-recovery-${reason}`, agent = `agent-clear-recovery-${reason}`;
+      const discord = {} as never;
+      await startWatching(agent, "/tmp", "old", channelId, discord, { transport: "acp" });
+      let attempts = 0, alive = true;
+      const frames: Record<string, unknown>[] = [];
+      const r = rig({ alive: () => alive, rebind: async (frame) => {
+        attempts++; frames.push(frame);
+        if (attempts === 1) {
+          if (reason === "expired") r.advance(270_000);
+          if (reason === "lost") throw new Error("重绑帧丢失");
+          return false;
+        }
+        if (attempts === 2) return false;
+        await startWatching(agent, "/tmp", String(frame.sessionId), channelId, discord, { transport: "acp", rebind: true });
+        return true;
+      } });
+      try {
+        expect(await r.run()).toMatchObject({ ok: false, sessionId: "new" });
+        await r.loop.submit("ordinary", `message-${reason}`);
+        expect((await pushEntries(channelId, [], discord, "new")).ok).toBe(false);
+        expect(r.prompts).toEqual([]);
+        for (let i = 0; i < 2; i++) {
+          const retry = retries.shift();
+          expect(retry).toBeDefined();
+          retry!.clear(); retry!.fire();
+          await Bun.sleep(0);
+        }
+        expect((await pushEntries(channelId, [], discord, "new")).ok).toBe(true);
+        expect(r.facts().ready).toBe(1);
+        expect(r.prompts).toEqual(["ordinary"]);
+        expect(r.failed).toEqual([]);
+        expect(r.loop.slotStatus("restore-once").state).toBe("gone");
+        expect(frames[0]).toHaveProperty("deadline");
+        expect(frames.slice(1).every((f) => !("deadline" in f))).toBe(true);
+      } finally { alive = false; stopWatching(agent); }
+    }
+  } finally {
+    for (const r of retries) r.clear();
+    globalThis.setTimeout = realSet;
+  }
+});
+
+test("复现 rebind-expire-1：watcher 已装好后据实回成功并收尾旧事件", async () => {
+  const { REGISTRY_PATH } = await import("../src/lib/registry.js");
+  const { rebindAcpWatcher } = await import("../src/bridge/acp-rebind.js");
+  const { startWatching, pushEntries, stopWatching } = await import("../src/bridge/jsonl-watcher.js");
+  const { emitEvent, replayEventsSince, forgetAgent } = await import("../src/bridge/event-bus.js");
+  const saved = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf8") : undefined;
+  const agent = "agent-clear-installed", channelId = "local-clear-installed", discord = {} as never;
+  let checks = 0;
+  const budget = { timeout() { if (++checks > 2) throw new Error("安装后到期"); return 30_000; } } as unknown as ClearBudget;
+  try {
+    writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: {
+      [agent]: { channelId, sessionId: "new", cwd: "/tmp", status: "active", transport: "acp", runtime: "codex" },
+    } }));
+    await startWatching(agent, "/tmp", "old", channelId, discord, { transport: "acp" });
+    emitEvent({ agent, chatId: channelId, type: "assistant_text", data: { sid: "acp:old", text: "old text" } });
+    expect(await rebindAcpWatcher(channelId, "new", discord, "old", budget)).toEqual({ ok: true });
+    expect((await pushEntries(channelId, [], discord, "new")).ok).toBe(true);
+    expect(checks).toBe(2);
+    expect(replayEventsSince(0).some((e) => e.agent === agent && e.data.sid === "acp:old")).toBe(false);
+  } finally {
+    stopWatching(agent); forgetAgent(agent);
+    if (saved === undefined) rmSync(REGISTRY_PATH, { force: true });
+    else writeFileSync(REGISTRY_PATH, saved);
+  }
+});
+
 describe("ACP clear compatibility and rollback", () => {
   test("默认 on，on/observe/off、未知版本均按契约，observe 不改业务结果", () => {
     expect(recoveryPolicy("test", "acpClearBudget", "/nonexistent/acp-clear-policy").mode).toBe("on");
@@ -152,7 +239,7 @@ describe("ACP clear compatibility and rollback", () => {
     const on = clearCallPlan("test", 1, { mode: source });
     mode = "off";
     expect(clearCallPlan("test", 1, { mode: source }).timeoutMs).toBe(225_000);
-    expect(() => hostClearBudget(on.fields, "test", source)).toThrow("档位已改变");
+    expect(hostClearBudget(on.fields, "test", source)).toBeUndefined();
     const r = rig({ expired: "model" });
     expect((await r.run()).ok).toBe(false);
     expect(r.calls.map((c) => c.stage)).toEqual(["new", "model"]);
