@@ -1,6 +1,7 @@
 /** Borrower source adapter for the official recovery CLI. No network or ledger mutation is performed implicitly. */
 import type { ReborrowFacts } from "./lend-reborrow-facts.js";
 import { LedgerError } from "./ledger-store.js";
+import { carriedTarget } from "./project-branch.js";
 
 export interface ReborrowSource {
   peer: string; fp: string; repo: string; branch: string; remoteHead: string;
@@ -19,11 +20,12 @@ const sha = /^[0-9a-f]{40}$/;
 
 function validateSource(f: ReborrowFacts, s: ReborrowSource): void {
   const { lease, previous, task } = f;
+  const target = carriedTarget(task.project, previous.base); // 续借保持原单合并目标；缺省档位仍只认 main（generality-BRANCH1）
   if (s.peer !== lease.peer || s.fp !== lease.fp || s.repo !== lease.repo || s.branch !== lease.branch || !sha.test(s.remoteHead)) fail("远端身份、仓库、分支或 head 不符");
   if (s.pr) {
     const p = s.pr;
-    if (!Number.isSafeInteger(p.number) || p.number < 1 || p.repo !== s.repo || p.branch !== s.branch || p.head !== s.remoteHead || p.base !== "main" ||
-      p.url !== `https://github.com/${p.repo}/pull/${p.number}`) fail("PR 身份、head 或 main base 不符");
+    if (!Number.isSafeInteger(p.number) || p.number < 1 || p.repo !== s.repo || p.branch !== s.branch || p.head !== s.remoteHead || !target || p.base !== target ||
+      p.url !== `https://github.com/${p.repo}/pull/${p.number}`) fail("PR 身份、head 或合并目标 base 不符");
     if ((task.pr && task.pr !== p.url) || (previous.pr !== null && previous.pr !== p.number)) fail("原 PR 关系发生变化");
   } else if (task.pr || previous.pr !== null) fail("原 PR 失读");
 }

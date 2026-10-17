@@ -117,6 +117,7 @@ export const RECOVERY_KEYS = [
   "privateMergeNarrow",
   "privateRepoMerge",
   "privateStartPlacement",
+  "projectBranchContext",
   "projectDecl",
   "proposalGlobProtection",
   "reclaimLocalFix",

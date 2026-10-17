@@ -9,6 +9,7 @@ import { assertReborrowAuthority, assertReborrowCas } from "./lend-reborrow-fact
 import { assertConvReborrowCas } from "./lend-reborrow-conv.js";
 import { convOrderSpec } from "./lend-reborrow-conv-material.js";
 import { assertReborrowContext, type ReborrowContext } from "./lend-reborrow-context.js";
+import { carriedTarget } from "./project-branch.js";
 import { reborrowEventDraft, reborrowKeyFor, replayReborrow } from "./lend-reborrow-event.js";
 
 /** The next lease is issued only by offerLendCore. If the evidence append fails, its order and holder projection roll back too. */
@@ -16,7 +17,7 @@ export function applyReborrow(db: Database, ctx: WriteCtx, recovery: ReborrowCon
   return busyAsLedgerError("接回写租约", () => db.transaction(() => {
     const f = recovery.facts, s = recovery.source;
     if (input.taskId !== f.task.id || input.peer !== f.lease.peer || input.repo !== f.lease.repo || input.family !== f.family ||
-      input.pr !== (s.pr?.number ?? null) || input.write?.fp !== f.lease.fp || input.write.base !== "main") {
+      input.pr !== (s.pr?.number ?? null) || input.write?.fp !== f.lease.fp || input.write.base !== carriedTarget(f.task.project, f.previous.base)) {
       throw new LedgerError("conflict", "接续输入与已核恢复事实不符");
     }
     const replay = replayReborrow(db, f, s);
