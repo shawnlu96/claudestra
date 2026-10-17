@@ -25,7 +25,7 @@ import { dirKey } from "../lib/project-dirs.js";
 import { normalizeDir, resolveProjectForRealDir } from "../lib/projects.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
-import { peerPrVerifyKey, schedulerCanVerify, schedulerVerifyRepo } from "../lib/scheduler-verify-gate.js";
+import { peerPrVerifyKey, schedulerVerifyAllowed, schedulerVerifyRepo } from "../lib/scheduler-verify-gate.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
@@ -198,7 +198,7 @@ async function verify(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   const dryRun = c.p.bools.has("dry-run");
   if (c.deps.actor === "scheduler") {
-    if (c.p.flags.waive || !schedulerCanVerify(c.db, task.id, c.p.flags.dedup)) throw new LedgerError("forbidden", "调度服务只可核对部署过或导入证据匹配的 peer PR 卡，不可豁免检查");
+    if (c.p.flags.waive || !schedulerVerifyAllowed(c.db, task.id, c.p.flags.dedup, { dryRun, now: c.deps.now() })) throw new LedgerError("forbidden", "调度服务只可核对部署过或导入证据匹配的 peer PR 卡，不可豁免检查");
   } else if (dryRun) c.requireOwnOrManager(task, "看完成检查单");
   else c.requireManager(task.project, "跑完成检查");
   const dup = dryRun ? null : replayed(c, task);
@@ -221,7 +221,7 @@ async function verify(c: LedgerCli): Promise<Result> {
 
   const data = { checks: v.checks, checklistSource: pl.source, incomplete: pl.incomplete, ...(pl.incompleteReason ? { incompleteReason: pl.incompleteReason } : {}), evidence, ...noteOut };
   if (c.p.bools.has("pass-only") && v.result !== "pass") return { ok: false, code: "unverified", recorded: false, ...out }; // PMHAND1 12：结清后自动 verify 只记通过
-  const r = recordVerify(c.db, c.ctx(), { taskId: task.id, result: v.result, data, text: c.p.flags.text });
+  const r = recordVerify(c.db, c.ctx(), { taskId: task.id, result: v.result, data, text: c.p.flags.text }); // the writer rechecks the scheduler gate
   if (r.duplicate) return { ok: r.event.data.result === "pass", task: r.row, event: r.event, duplicate: true }; // 并发重放：结论以当时记下的为准
   if (v.result === "pass") return { ok: true, moved: true, task: r.row, event: r.event, ...out };
   return { ok: false, code: "unverified", error: `检查单没过，任务留在 live：${summary}${note ? `；${fillNote(note)}` : ""}`, moved: false, task: r.row, event: r.event, ...out };

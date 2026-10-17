@@ -2,7 +2,12 @@
  * Peer verification binds the intake, current delivery, review spec and live episode; ledger-write rechecks this gate in its transaction.
  */
 import type { Database } from "bun:sqlite";
-import { getTask, listEvents } from "./ledger-store.js";
+import { createHash } from "node:crypto";
+import { getEventByDedup, getTask, listEvents } from "./ledger-store.js";
+import { insertEvent } from "./ledger-tx.js";
+import { statePath } from "./paths.js";
+import { highRiskRecoveryKey } from "./recovery-key-class.js";
+import { readRecoveryFile, type RecoveryMode } from "./recovery-policy-file.js";
 
 /** Read only: extra.peerPr alone is never authority; require the intake's immutable event and this generation's peer delivery. */
 export function peerPrVerifyKey(db: Database, taskId: string): string | null {
@@ -48,20 +53,88 @@ const canVerify = (deploy: string, mode: string) => `SELECT 1 FROM tasks AS t
       AND EXISTS (SELECT 1 FROM events AS e WHERE e.project=t.project AND e.target=t.id
         AND e.dedupKey=? AND e.kind='verify' AND e.actor='scheduler'))) LIMIT 1`;
 
-export function schedulerCanVerify(db: Database, taskId: string, dedupKey?: string): boolean {
-  const peerKey = peerPrVerifyKey(db, taskId);
-  if (dedupKey?.startsWith("peer-pr-verify:") || (peerKey && dedupKey === undefined)) {
-    if (!peerKey || (dedupKey !== undefined && dedupKey !== peerKey)) return false;
-    return !!db.query(`SELECT 1 FROM tasks WHERE id=? AND (stage='live' OR (stage='verified' AND EXISTS
-      (SELECT 1 FROM events WHERE target=? AND kind='verify' AND actor='scheduler' AND dedupKey=?)))`).get(taskId, taskId, dedupKey ?? "");
-  }
+const peerStageOk = (db: Database, taskId: string, dedupKey?: string) => !!db.query(`SELECT 1 FROM tasks WHERE id=? AND (stage='live'
+  OR (stage='verified' AND EXISTS (SELECT 1 FROM events WHERE target=? AND kind='verify' AND actor='scheduler' AND dedupKey=?)))`)
+  .get(taskId, taskId, dedupKey ?? "");
+
+function deployCanVerify(db: Database, taskId: string, dedupKey?: string): boolean {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) return false;
   const args = [taskId, dedupKey ?? "", dedupKey ?? ""];
   return !!db.query(canVerify("d.phase='deployed'", "AND w.mode='auto'")).get(...args) || !!db.query(canVerify(RESOLVED_DONE_SQL, "")).get(...args);
+}
+
+/** A card carrying peer metadata (or a peer-shaped key) is judged by the peer branch alone under strict binding. */
+const peerShaped = (db: Database, taskId: string, dedupKey?: string) => dedupKey?.startsWith("peer-pr-verify:")
+  || typeof getTask(db, taskId)?.extra.peerPr === "object";
+
+/**
+ * Baseline (peerPrVerifyBind off / observe): an absent key on a peer card also passes. `strict` (peerPrVerifyBind on,
+ * peer-pr-verify-retry.ts): a peer card needs exactly its current key with peerPrAutoVerify on and never falls back to the deploy branch.
+ */
+export function schedulerCanVerify(db: Database, taskId: string, dedupKey?: string, strict?: { autoVerifyOn: boolean }): boolean {
+  const peerKey = peerPrVerifyKey(db, taskId);
+  if (strict && peerShaped(db, taskId, dedupKey)) return !!peerKey && dedupKey === peerKey && strict.autoVerifyOn && peerStageOk(db, taskId, dedupKey);
+  if (dedupKey?.startsWith("peer-pr-verify:") || (peerKey && dedupKey === undefined)) {
+    if (!peerKey || (dedupKey !== undefined && dedupKey !== peerKey)) return false;
+    return peerStageOk(db, taskId, dedupKey);
+  }
+  return deployCanVerify(db, taskId, dedupKey);
+}
+
+/** The explicit read-only branch for `--dry-run`: a live peer card on its current lineage, else the ordinary deploy permission. */
+export function schedulerCanDryRunVerify(db: Database, taskId: string, dedupKey?: string): boolean {
+  if (peerShaped(db, taskId, dedupKey)) return !!peerPrVerifyKey(db, taskId) && getTask(db, taskId)?.stage === "live";
+  return deployCanVerify(db, taskId, dedupKey);
 }
 
 /** Resolve the project tree from scheduler.json; proven peer imports can use it without an automatic deploy entry. */
 export function schedulerVerifyRepo(project: string, read: () => { projects: Record<string, { repoDir: string; deploy?: unknown }> }, peerPr = false): string | null {
   const p = read().projects[project];
   return p && (p.deploy || peerPr) ? p.repoDir : null;
+}
+
+/**
+ * VERIFYBIND1 · the writer's own peerPrVerifyBind read. recordVerify calls this directly, so whoever imports the writer gets the
+ * policy-aware gate (r2: no registration hook). It reads recovery-policy.json like recoveryPolicy (keys[key] → project mode →
+ * default; unreadable = off) without importing recovery-policy.ts, which imports the writer. Both keys are permission keys
+ * outside the frozen legacy list, so their default is the classifier's observe (tests compare with defaultRecoveryMode).
+ */
+export function verifyBindModes(project: string, path = statePath("recovery-policy.json")): { bind: RecoveryMode; autoVerify: RecoveryMode } {
+  const r = readRecoveryFile(path);
+  const cfg = r.status === "ok" && Object.hasOwn(r.data.projects, project) ? r.data.projects[project] : undefined;
+  const mode = (key: "peerPrVerifyBind" | "peerPrAutoVerify"): RecoveryMode => r.status === "corrupt" ? "off"
+    : cfg?.keys?.[key] ?? cfg?.mode ?? (highRiskRecoveryKey(key) ? "observe" : "on");
+  return { bind: mode("peerPrVerifyBind"), autoVerify: mode("peerPrAutoVerify") };
+}
+
+/** recordObserved's note shape (recovery-policy.ts: op, v2 dedup key); written here with the ledger's own insert to keep the writer acyclic. */
+function observeRefusal(db: Database, t: { id: string; project: string; headSHA: string | null }, why: string, actionKey: string, now: number): void {
+  const dedupKey = `recovery-observe-v2:${JSON.stringify([t.project, "peerPrVerifyBind", t.id, actionKey])}`;
+  if (getEventByDedup(db, dedupKey)) return;
+  insertEvent(db, { actor: "scheduler", now, dedupKey }, { project: t.project, target: t.id, kind: "note",
+    text: "恢复观察（peerPrVerifyBind）：本会 拒绝不带当前绑定键（或 peerPrAutoVerify 不是 on）的 peer PR 正式核对",
+    data: { why, head: t.headSHA, op: "recovery_observe", mechanism: "peerPrVerifyBind", actionKey } }, true);
+}
+
+/**
+ * The scheduler's verify permission under peerPrVerifyBind, read right before each use. dryRun never writes. off: the baseline.
+ * on: strict binding with peerPrAutoVerify on. observe: the baseline answer stands; with `record` (only recordVerify's
+ * transactional recheck, so a run that writes nothing stays write-free) a refusal strict binding would make is noted once.
+ */
+export function schedulerVerifyAllowed(db: Database, taskId: string, dedupKey: string | undefined,
+  opts: { dryRun?: boolean; record?: boolean; now: number }): boolean {
+  const t = getTask(db, taskId);
+  const modes = t ? verifyBindModes(t.project) : undefined, mode = modes?.bind ?? "off";
+  if (opts.dryRun) return mode === "on" ? schedulerCanDryRunVerify(db, taskId, dedupKey) : schedulerCanVerify(db, taskId, dedupKey);
+  const baseline = schedulerCanVerify(db, taskId, dedupKey);
+  if (!t || mode === "off") return baseline;
+  const strict = schedulerCanVerify(db, taskId, dedupKey, { autoVerifyOn: modes!.autoVerify === "on" });
+  if (mode === "on") return strict;
+  if (baseline && !strict && opts.record) {
+    const current = peerPrVerifyKey(db, taskId);
+    const why = !current ? "lineage" : dedupKey === undefined ? "no_key" : dedupKey !== current ? "stale_key" : "auto_verify_off";
+    const h = createHash("sha256").update(JSON.stringify([dedupKey ?? null, current])).digest("hex").slice(0, 16);
+    observeRefusal(db, t, why, `refuse:${why}:${h}`, opts.now);
+  }
+  return baseline;
 }

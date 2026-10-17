@@ -1,12 +1,12 @@
 /** Peer imports have no deploy journal: prove their current delivery, then run the ordinary completion checklist. */
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import { busyAsLedgerError, getTask, listTasks } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { ATTEMPT_OP, decideRetry } from "./peer-pr-verify-retry.js";
 import { peerPrVerifyKey } from "./scheduler-verify-gate.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 import type { TickPace } from "./scheduler-yield.js";
@@ -14,10 +14,10 @@ import type { TickPace } from "./scheduler-yield.js";
 interface Deps {
   manager: (...args: string[]) => Promise<Record<string, unknown>>;
   policy?: RecoveryPolicyPort; assertActive: () => void; now: () => number;
+  /** peerPrVerifyBind only; not given = recovery-policy.json */
+  bindPolicy?: RecoveryPolicyPort;
 }
 const KEY = "peerPrAutoVerify";
-const RETRY_MS = 10 * 60_000;
-const ATTEMPT = "peer_pr_verify_attempt";
 
 /** The pass is query_only. Reuse the short-lived writer, rechecking its lease and the card after acquiring the write lock. */
 function claim(db: Database, taskId: string, key: string, d: Deps, pace?: TickPace): boolean {
@@ -32,16 +32,13 @@ function claim(db: Database, taskId: string, key: string, d: Deps, pace?: TickPa
       return false;
     }
     if (mode !== "on") return false;
-    // Attempt timestamps survive a restart; fail/unknown checklist results themselves are never recorded.
-    const last = writer.query(`SELECT MAX(ts) AS at FROM events WHERE project=? AND target=? AND kind='note'
-      AND actor='scheduler' AND json_extract(data,'$.op')=?`).get(t.project, taskId, ATTEMPT) as { at: number | null };
+    // Attempt notes survive a restart (peer-pr-verify-retry.ts backs off per key); fail/unknown results themselves are never recorded.
     const now = d.now();
-    if (last.at !== null && now - last.at < RETRY_MS) return false;
-    const hash = createHash("sha256").update(key).digest("hex");
-    appendEvent(writer, { actor: "scheduler", now, dedupKey: `peer-pr-verify-attempt:${hash}:${now}` }, {
-      project: t.project, target: taskId, kind: "note", text: "开始核对 peer PR 上线检查（只记通过）", data: { op: ATTEMPT, key },
-    });
-    return true;
+    const r = decideRetry(writer, t, key, now, d.bindPolicy);
+    if (!r.go) return false;
+    return !appendEvent(writer, { actor: "scheduler", now, dedupKey: r.dedupKey }, {
+      project: t.project, target: taskId, kind: "note", text: "开始核对 peer PR 上线检查（只记通过）", data: { op: ATTEMPT_OP, key },
+    }).duplicate;
   }).immediate()));
 }
 
