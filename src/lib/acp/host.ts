@@ -5,6 +5,7 @@ import { abortAcpTurn } from "./abort.js";
 import type { AdapterEnvSpec, AdapterProc } from "./adapter-proc.js";
 import { applyAcpLaunchConfig } from "./apply-config.js";
 import type { BridgeLink, BridgeLinkDeps } from "./bridge-link.js";
+import { CLEAR_BUDGET_MS, CLEAR_BUDGET_VERSION, hostClearBudget, clearBudgetMode, type ClearBudget } from "./clear-budget.js";
 import { clearThen, commitAcpClear, rotateAcpHost } from "./clear.js";
 import { modelStateEntry } from "./config.js";
 import { classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "./failures.js";
@@ -50,7 +51,7 @@ export interface HostDeps {
   startProxy(deps: Omit<ToolProxyDeps, "port">): ToolProxy;
   postHook(body: { channelId: string } & StopReport): Promise<{ block?: boolean; reason?: string }>;
   markReady(): Promise<void>;
-  rotateSession(oldId: string, newId: string): Promise<{ ok: boolean; error?: string }>;
+  rotateSession(oldId: string, newId: string, timeoutMs?: number): Promise<{ ok: boolean; error?: string }>;
   log(msg: string): void;
   /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
   show?(item: string): void;
@@ -70,8 +71,8 @@ const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: numb
 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
-/** 终端动作等 bridge 回包多久：/clear 要新建并引导线程（bridge 那边等宿主 225s），其它是普通调用 */
-const TERMINAL_MS = { clear: 240_000, other: 30_000 } as const;
+/** 终端动作等 bridge 回包多久：/clear 要新建并引导线程（新契约 270s，旧契约 225s），其它是普通调用 */
+const TERMINAL_MS = { clear: CLEAR_BUDGET_MS + 30_000, other: 30_000 } as const;
 const INBOUND_HOW = { steer: "插进当前回合", prompt: "开一轮", queued: "排队", unknown: "steer 投递结果不明（没重发，已出卡）" } as const;
 /** 适配器认 /compact 的写法（codex-acp parseCommand：首块去空白后 /名字，名字不分大小写） */
 const COMPACT_COMMAND = /^\s*\/compact(\s|$)/i;
@@ -283,7 +284,7 @@ export class AcpHost {
 
   /** 窗口输入行的动作（tty-input.ts）：全部交给 bridge 走网页同一条路（bridge/acp-terminal.ts），宿主自己不开回合 */
   async terminal(op: TerminalOp): Promise<TerminalResult> {
-    const ms = op.op === "clear" ? TERMINAL_MS.clear : TERMINAL_MS.other;
+    const ms = op.op === "clear" ? (clearBudgetMode(this.cfg.channelId) === "on" ? TERMINAL_MS.clear : 240_000) : TERMINAL_MS.other;
     const r = await this.link.request<TerminalResult | undefined>({ channelId: this.cfg.channelId, type: "host_terminal", ...op }, ms);
     return r && typeof r.ok === "boolean" ? r : { ok: false, error: "bridge 不认终端输入（bridge 版本太旧？）" };
   }
@@ -292,6 +293,7 @@ export class AcpHost {
   private resync(): void {
     for (const p of this.permits.values()) this.link.send(p.frame);
     if (this.refused && this.lastStartError) this.sendFailure(this.lastStartError, this.lastStartErrorAt); // 拒起时 bridge 可能还没登记上，那一帧就丢了
+    if (this.session) this.publishConfig(this.session);
     void this.pump();
   }
 
@@ -493,7 +495,11 @@ export class AcpHost {
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */
   private async call(m: Record<string, any>): Promise<void> {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
-    if (m.op === "clear") return void reply(await this.clearSession(clearThen(m.then)));
+    if (m.op === "clear") {
+      try { reply(await this.clearSession(clearThen(m.then), hostClearBudget(m, this.cfg.channelId))); }
+      catch (e) { reply({ ok: false, error: errText(e) }); }
+      return;
+    }
     if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy || !!this.session?.running }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts），含适配器自发的
     const slot = acpSlotCall(this.loop, m, this.hostId); // slash / op_turn / slot_status / cancel_slot（turn.ts）
     if (slot) return void slot.then(reply);
@@ -509,19 +515,20 @@ export class AcpHost {
     if (r.ok) this.publishConfig(this.session);
   }
 
-  private async clearSession(then?: { text: string; opId: string }): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
+  private async clearSession(then?: { text: string; opId: string }, budget?: ClearBudget): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
     const oldPreamble = this.preamblePending;
     return rotateAcpHost({
-      then,
+      then, budget,
       session: this.session, ready: !!this.proc && this.registered, pending: !!(this.outbox.length || this.pumping || this.permits.size),
       loop: this.loop, oldId: this.cfg.sessionId, cwd: this.cfg.cwd, bootstrap: this.rt.clearBootstrap, rotateRegistry: this.deps.rotateSession,
-      configure: (s) => applyAcpLaunchConfig(s, this.cfg.model, this.cfg.effort, true, this.deps.log),
+      configure: (s, b) => applyAcpLaunchConfig(s, this.cfg.model, this.cfg.effort, true, this.deps.log, b),
       begin: () => ((this.rotating = true), (this.preamblePending = this.cfg.clearPreamble)),
       failed: (changed) => {
         this.preamblePending = oldPreamble;
         if (changed) this.session = null, this.proc?.stop(); // 内存线程已变，重起后从 registry 接回旧线程
       },
-      committed: (id, session) => commitAcpClear({
+      committed: (id) => commitAcpClear({
+        budget,
         sessionId: id, previousSessionId: this.cfg.sessionId, channelId: this.cfg.channelId, request: (f, ms) => this.link.request<boolean>(f, ms),
         update: () => { this.cfg.sessionId = id; this.translator = this.makeTranslator(); },
         ready: () => { if (this.session) this.publishConfig(this.session); if (!this.rotating) this.loop.resume(); },
@@ -536,7 +543,7 @@ export class AcpHost {
 
   /** 配置变了：给 bridge 存一份（设置页 / 额度卡的选项），再推一条 model_state 条目让顶栏跟上 */
   private publishConfig(s: AcpSession): void {
-    this.link.send({ channelId: this.cfg.channelId, type: "acp_config", configOptions: s.configOptions });
+    this.link.send({ channelId: this.cfg.channelId, type: "acp_config", clearBudgetVersion: CLEAR_BUDGET_VERSION, configOptions: s.configOptions });
     const e = modelStateEntry(s.configOptions, new Date().toISOString());
     if (e) this.pushEntries([e]);
   }

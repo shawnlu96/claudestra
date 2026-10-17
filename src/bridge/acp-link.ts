@@ -11,6 +11,7 @@
  * 权限卡、额度卡的按钮都带这张卡的代际（每张新卡新生成，不复用）：作答先按代际原子认领，旧卡、认领过的一律 409、零授权；
  * 权限还要经宿主确认它仍在等才算答上。只认这个频道当前登记的那条连接发来的帧。tests/acp-link.test.ts。
  */
+import { ClearBudget, clearCallPlan } from "../lib/acp/clear-budget.js";
 import { randomBytes } from "node:crypto";
 import type { Client } from "discord.js";
 import { parseConfigOptions, quotaCardChoices, type ConfigOption, type QuotaChoice } from "../lib/acp/config.js";
@@ -35,6 +36,7 @@ type Perm = { gen: string; permId: string; ws: Socket; card: PermissionCard; cla
 type Quota = { gen: string; failureKey: string; message: string; choices: QuotaChoice[]; claimed?: true };
 
 const configs = new Map<string, ConfigOption[]>();
+const clearCapabilities = new WeakMap<Socket, number>();
 const quotaCards = new Map<string, Quota>();
 const authCards = new Set<string>();
 /** 频道 → 排着的权限请求；队首就是卡上显示的那个 */
@@ -85,12 +87,15 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       return;
     }
     case "acp_rebind": {
-      const result = await rebindAcpWatcher(channelId, String(msg.sessionId ?? ""), discord, String(msg.previousSessionId ?? "")).catch((e) => ({ ok: false, error: String(e) }));
+      const result = await Promise.resolve().then(() => rebindAcpWatcher(channelId, String(msg.sessionId ?? ""), discord, String(msg.previousSessionId ?? ""),
+        msg.clearBudgetVersion === 1 ? new ClearBudget(msg.deadline) : undefined)).catch((e) => ({ ok: false, error: String(e) }));
       if (typeof msg.requestId === "string") ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: result.ok }));
       if (!result.ok) console.warn(`⚠️ ACP watcher 换代未就绪：${result.error}`);
       return;
     }
     case "acp_config":
+      if (msg.clearBudgetVersion === 1) clearCapabilities.set(ws, 1);
+      else clearCapabilities.delete(ws);
       configs.set(channelId, parseConfigOptions(msg.configOptions));
       if (authCards.delete(channelId)) settleRuntimeAsk("codex", channelId); // 登好了、接上线程了：登录卡结掉
       return;
@@ -217,6 +222,7 @@ function dropPerm(channelId: string, p: Perm, why: string, answered?: { label: s
 
 /** 宿主的连接断了（bridge.ts 的 ws close）：它挂着的权限卡撤掉；宿主重连后会把还在等的补发上来，出新卡 */
 export function onAcpHostGone(channelId: string, ws: Socket): void {
+  clearCapabilities.delete(ws);
   for (const p of [...(permQueues.get(channelId) ?? [])]) if (p.ws === ws && !p.claimed) dropPerm(channelId, p, "宿主断线");
   for (const [id, c] of calls) {
     if (c.channelId !== channelId || c.ws !== ws) continue;
@@ -253,7 +259,11 @@ function slotResult(msg: Record<string, any>, c: Call): CallResult {
 }
 
 /** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。then = 换代成功后新会话的第一轮（宿主排在恢复入站之前，lib/acp/clear.ts） */
-export const acpClear = (channelId: string, then?: { text: string; opId: string }) => acpCall(channelId, { op: "clear", ...(then ? { then } : {}) }, 225_000);
+export function acpClear(channelId: string, then?: { text: string; opId: string }): Promise<CallResult> {
+  const ws = extensionSocketOf(channelId);
+  const plan = clearCallPlan(channelId, ws && clearCapabilities.get(ws));
+  return acpCall(channelId, { op: "clear", ...(then ? { then } : {}), ...plan.fields }, plan.timeoutMs);
+}
 
 /**
  * 宿主此刻有没有回合在途（AcpTurnLoop.busy，含排着没开的）。不是 ACP 宿主登记的频道、宿主不答、旧宿主不认这个调用 = null（调用方当未知）。

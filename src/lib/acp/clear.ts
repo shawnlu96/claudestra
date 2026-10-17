@@ -1,26 +1,27 @@
 /** ACP /clear：新线程先完成引导（运行时要的话，host-runtime.ts），再原子换 registry；失败时由宿主接回旧线程。 */
+import { CLEAR_BUDGET_VERSION, type ClearBudget } from "./clear-budget.js";
 import { RpcError, RpcLostError } from "./rpc.js";
 import type { AcpSession } from "./session.js";
 import { isValidOpId, type AcpTurnLoop } from "./turn.js";
 
 type ClearResult = { ok: true; sessionId: string } | { ok: false; error: string; changed: boolean };
 
-/** session/new 的等待：Pi 带包多时起一次要一分钟上下；加上引导 60s、registry 30s、重绑 30s 仍在 bridge 的 225s 之内 */
+/** session/new 上限 90s；共享预算还覆盖两次配置、引导、registry 和 watcher（clear-budget.ts） */
 const CREATE_TIMEOUT_MS = 90_000;
 
 async function createClearedSession(
   session: AcpSession, oldSessionId: string, cwd: string,
-  rotateRegistry: (oldId: string, newId: string) => Promise<{ ok: boolean; error?: string }>,
-  configure: (session: AcpSession) => Promise<void>,
-  bootstrap: string | undefined,
+  rotateRegistry: (oldId: string, newId: string, timeoutMs?: number) => Promise<{ ok: boolean; error?: string }>,
+  configure: (session: AcpSession, budget?: ClearBudget) => Promise<void>,
+  bootstrap: string | undefined, budget?: ClearBudget,
 ): Promise<ClearResult> {
   try {
-    const fresh = await session.create(cwd, CREATE_TIMEOUT_MS);
+    const fresh = await session.create(cwd, budget?.timeout(CREATE_TIMEOUT_MS) ?? CREATE_TIMEOUT_MS);
     if (fresh === oldSessionId) throw new Error("session/new 没生成新的线程 id");
-    await configure(session);
-    const outcome = bootstrap ? await session.prompt(bootstrap, 60_000) : { kind: "done" as const };
+    await configure(session, budget);
+    const outcome = bootstrap ? await session.prompt(bootstrap, budget?.timeout(60_000) ?? 60_000) : { kind: "done" as const };
     if (outcome.kind !== "done") throw new Error(`新线程引导未完成：${outcome.kind === "failed" ? outcome.failure.message : "已取消"}`);
-    const committed = await rotateRegistry(oldSessionId, fresh);
+    const committed = await rotateRegistry(oldSessionId, fresh, budget?.timeout(30_000));
     if (!committed.ok) throw new Error(`registry 未换代：${committed.error ?? "未知原因"}`);
     return { ok: true, sessionId: fresh };
   } catch (error) {
@@ -41,11 +42,11 @@ export function clearThen(v: unknown): { text: string; opId: string } | undefine
 /** 宿主的轮换闸：只有空闲才能进；挂起期间入站留在 turn 队列，失败按旧 id 接回。 */
 export async function rotateAcpHost(o: {
   session: AcpSession | null; ready: boolean; pending: boolean; loop: AcpTurnLoop;
-  oldId: string; cwd: string; bootstrap?: string;
+  oldId: string; cwd: string; bootstrap?: string; budget?: ClearBudget;
   /** 换代成功后新会话的第一轮（save-clear 回读交接）：在恢复入站之前排到队首，轮换期间到的入站排它后面；失败 / 不明时不提交 */
   then?: { text: string; opId: string };
-  rotateRegistry: (oldId: string, newId: string) => Promise<{ ok: boolean; error?: string }>;
-  configure: (session: AcpSession) => Promise<void>;
+  rotateRegistry: (oldId: string, newId: string, timeoutMs?: number) => Promise<{ ok: boolean; error?: string }>;
+  configure: (session: AcpSession, budget?: ClearBudget) => Promise<void>;
   begin(): void;
   failed(changed: boolean): void;
   committed(newId: string, session: AcpSession): Promise<void>;
@@ -57,13 +58,16 @@ export async function rotateAcpHost(o: {
   o.begin();
   let waitingForRebind = false;
   try {
-    const result = await createClearedSession(o.session, o.oldId, o.cwd, o.rotateRegistry, o.configure, o.bootstrap);
+    const result = await createClearedSession(o.session, o.oldId, o.cwd, o.rotateRegistry, o.configure, o.bootstrap, o.budget);
     if (!result.ok) return o.failed(result.changed), { ok: false, error: result.error };
     try {
       await o.committed(result.sessionId, o.session);
+      o.budget?.timeout(1);
     } catch (e) {
-      waitingForRebind = true;
-      return { ok: false, sessionId: result.sessionId, error: `新线程已写入 registry，但 watcher 尚未就绪（后台重试中）：${e instanceof Error ? e.message : e}` };
+      waitingForRebind = !o.budget;
+      if (o.budget) o.failed(true);
+      return { ok: false, sessionId: result.sessionId,
+        error: `新线程已写入 registry，但 watcher 尚未就绪（${o.budget ? "结果未确认" : "后台重试中"}）：${e instanceof Error ? e.message : e}` };
     }
     if (o.then) o.loop.submitOp(o.then.text, o.then.opId, true);
     return { ok: true, sessionId: result.sessionId };
@@ -85,14 +89,17 @@ function retryAcpRebind(request: () => Promise<boolean>, ready: () => void, aliv
 }
 
 export async function commitAcpClear(o: {
+  budget?: ClearBudget;
   sessionId: string; previousSessionId: string; channelId: string; update(): void; ready(): void; alive(): boolean;
   request(frame: Record<string, unknown>, timeoutMs: number): Promise<boolean>;
 }): Promise<void> {
   o.update();
-  const bind = () => o.request({ type: "acp_rebind", channelId: o.channelId, sessionId: o.sessionId, previousSessionId: o.previousSessionId }, 30_000);
+  const bind = () => o.request({ type: "acp_rebind", channelId: o.channelId, sessionId: o.sessionId, previousSessionId: o.previousSessionId,
+    ...(o.budget ? { clearBudgetVersion: CLEAR_BUDGET_VERSION, deadline: o.budget.deadline } : {}) }, o.budget?.timeout(30_000) ?? 30_000);
   if (!(await bind().catch((e) => (console.warn(`⚠️ ACP watcher 重绑失败：${e}`), false)))) {
-    retryAcpRebind(bind, o.ready, o.alive);
+    if (!o.budget) retryAcpRebind(bind, o.ready, o.alive);
     throw new Error("bridge 未确认新 watcher");
   }
+  o.budget?.timeout(1);
   o.ready();
 }
