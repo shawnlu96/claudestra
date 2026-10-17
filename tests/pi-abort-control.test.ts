@@ -13,6 +13,7 @@ import type { Envelope } from "../src/bridge/router.js";
 import { turnCuts } from "../src/bridge/turn-cuts.js";
 import { emitEvent, getAgentStatus, subscribeEvents } from "../src/bridge/event-bus.js";
 import { stopHeadline } from "../src/lib/turn-cuts.js";
+import { insertSnapshot, noteInsert, openInsertBook } from "../src/bridge/steer-insert.js";
 
 /** 模拟 Pi：queue = 排队的 steer 消息；tui = 有中止处理（把排队的退回输入框），否则队列留着、中止后会拿它们续跑 */
 function fakePi(opts: { tui: boolean; editor?: string }) {
@@ -178,6 +179,20 @@ describe("bridge 侧（Workflow 复核 wf2）", () => {
     from, to: { kind: "local", channelId: "pi", agentName: "agent-pi" }, intent: "request", content: `请求 ${id}`,
     meta: { messageId: id, triggerKind: "user_discord", ts: "", threadId: "t" },
   } as unknown as Envelope, "pi");
+
+  test("JRT-4：Pi 作废回执同步销插队确认账，无送达记录也按 id 销", async () => {
+    openInsertBook(null);
+    const e = { from: { kind: "local", channelId: "agent-x", agentName: "agent-x" },
+      to: { kind: "local", channelId: "pi" }, intent: "request", content: "待执行",
+      meta: { messageId: "voided-insert", threadId: "voided-thread", ts: "now", triggerKind: "agent_tool", inboundRoute: { action: "insert", p: 0.9 } } } as Envelope;
+    noteInsert(e, "pi");
+    expect(insertSnapshot("pi").has("voided-insert")).toBe(true);
+    const p = extensionAbort("pi");
+    onAbortAck({ id: lastId(), result: "aborted", voided: ["voided-insert"] }, sock);
+    expect(insertSnapshot("pi").has("voided-insert")).toBe(false);
+    await p;
+    openInsertBook(null);
+  });
 
   test("pi-7：回执只认这个频道当前的连接，别的连接对上 id 也不算", async () => {
     const p = extensionAbort("pi");

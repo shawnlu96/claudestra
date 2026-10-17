@@ -42,7 +42,15 @@ Jev 擅长「这句话是不是在改方向、是不是在补充排队里那条�
 
 bridge 这一侧 `ws.send` 回 0（连接已断、这条被丢了）就退回押后队列（`afterInsertSend`），回合结束 / 重连后照常投，不丢。取目标运行时失败也按插不进。
 
-**确认账**（`bridge/steer-insert.ts`）：插队送进去之后，在目标明确回给插队方（`reply` 发回它的频道 / `send_to_agent` 给它）之前算「没确认」，回程簿把它当「目标还没看到」（`bridge.ts heldFromOf` 带上 `insertUnseenFrom`）——目标回 owner 的话、**这一轮和之后任何一轮**收尾文字的 drain 兜底都不会被当成对插队方的答复推回去，也不消化插队方的回程槽、不挡别的 agent 开的回合拿到自己的答复；明确回给插队方时，精确回程槽用显式视图取（只忽略这个插队方自己的插队，不撤保护），**投递成功、消化回程槽的同一刻才销账**，而且只销发起回复那一刻快照里的几条（投递 await 期间插队方又插进来的照旧没确认）；投递失败（not_connected、对方不在等）或投递途中碰上 Stop，保护都还在（`bridge.ts exactPac`、route_to_agent / reply 到对方频道两处）。Stop 时不结账：改动前这条押到目标空闲、由它自己开一轮，那一轮的 drain 才是对它的答复；插队后没有「它自己那一轮」，所以只认明确回复，没回复由 agent 间看门狗照常催。账落盘（`insert-pending.json`，bridge 重启后不会把没确认的放成「已看到」），有效期同押后队列（24 小时）；只在目标被 kill（`/agent/cleanup`）时整本销。
+**确认账**（`bridge/steer-insert.ts`）：真正插队送达的请求逐条落盘到 `insert-pending.json`。在目标明确 `reply` 到插队方频道或 `send_to_agent` 给它之前，回程簿一直把这条当作未确认，自己频道的 reply、给别人的回复和 drain 都不能消化它。插队不并进原回合的请求方名单，原请求方仍能拿到自己的 drain 兜底。`oneShot` 不挂确认账或催答。
+
+明确回复投递成功时，回程槽和确认账一起按 message_id 快照销账。快照的截止点取回复帧到达 bridge 的时刻；之后解析目标、转发或投递 await 期间插进来的请求保持未确认和回程保护，不被旧回复一起销掉。投递失败仍保留账。Pi `settleVoided` 按作废 id 同步销账。
+
+**独立催答**（`bridge/steer-insert-notices.ts`）：目标正常 Stop 时，对 Stop 到达前已经插入且尚未确认的每条请求，补一次含发送方名字、原文摘要的提醒，请它明确回给发送方。提醒逐条落盘，不因回复别人而清除，也不在后续 Stop 反复催；StopFailure / API 错误不催。若插队后 owner 叫停过目标，只告知请求方「目标被 owner 叫停，你的插话可能没被处理，需要的话请重发」，不唤醒目标，释放对应回程。离线通知和提醒进入押后队列，主动安排补投，重连后再投。提醒投递前再核确认账；若排队期间已明确答复、叫停、作废或过期，旧提醒作废，不再唤醒目标。
+
+确认账每次读取和每分钟扫描都清理过期项，不依赖同一目标再次写入。满 24 小时先释放该条回程，再清确认账并通知请求方「对方 24 小时没明确回复」，不能将过期槽留给 drain 错推。逐条校验 `from` / `to` / `env` / `meta` / `at`，坏记录丢弃并记日志，不丢同文件的好记录。全局最多 1000 条，超量清最老的，释放回程并通知请求方。目标 kill 时整本销。
+
+押后队列中带 `insert` 的旧信封每次重投都会重核目标运行时；已换成 CC、Codex tmux 或查不到运行时，改成 `queue` 并记 `pick: insert / actual: queue / insertVia: none`，不沿用旧 steer 结论。
 
 ## CC 实测（Claude Code 2.1.302，2026-10-17）
 
@@ -97,7 +105,7 @@ bun src/manager.ts inbound-route status|off|observe|on
 
 ## 日志
 
-状态目录 `inbound-route.jsonl`（0600，满 32 MB 转 `.1`，只留一代）。一行一条：`mode`、`msg`（message_id）、`agent`、`from` / `role`、`preview`（正文前 80 字）、`queued`（排队条数）、`rule`（现有规则会怎么投：interrupt / queue / deliver）、`pick`（Jev 原本选的）、`jev`（代码兜底之后的结论：interrupt / insert / queue / merge / unsure / error）、`p`、`mergeWith`、`downgraded`（not_owner / not_agent / no_insert / sender_queued / merge_target）、`insertVia`（和插队有关的行才有：目标运行时怎么插 steer / channel / steer(declared)（ACP，bridge 核实不了），none = 插不进）、`actual`（实际怎么投）、`via`（solo / guard）、`ms`。observe 下 `actual` 恒等于 `rule`，对照 `jev` 和 `rule` 不一致的行就是开了 `on` 会变的地方；「Jev 判 vs 实际」报表看 `pick` / `jev` / `actual` 三列，`insertVia: none` 的就是 Jev 想插、运行时插不进的。
+状态目录 `inbound-route.jsonl`（0600，满 32 MB 转 `.1`，只留一代）。一行一条：`mode`、`msg`（message_id）、`agent`、`from` / `role`、`preview`（正文前 80 字）、`queued`（排队条数）、`rule`（现有规则会怎么投：interrupt / queue / deliver）、`pick`（Jev 原本选的）、`jev`（代码兜底之后的结论：interrupt / insert / queue / merge / unsure / error）、`p`、`mergeWith`、`downgraded`（not_owner / not_agent / no_insert / sender_queued / merge_target）、`insertVia`（和插队有关的行才有：目标运行时怎么插 steer / steer(declared)（ACP，bridge 核实不了），none = 插不进）、`actual`（实际怎么投）、`via`（solo / guard / release；release 为旧 insert 放出时运行时降级）、`ms`。observe 下 `actual` 恒等于 `rule`，对照 `jev` 和 `rule` 不一致的行就是开了 `on` 会变的地方；「Jev 判 vs 实际」报表看 `pick` / `jev` / `actual` 三列，`insertVia: none` 的就是 Jev 想插、运行时插不进的。
 
 ## 叫停
 
@@ -111,12 +119,12 @@ Jev 判过排队 / 合并的 owner 消息只在**第一次到达**时算 owner �
 - **Chat Guard 档位**：observe 档目标开着守门时，路由 state 也并进守门那一次请求（不另发、不改投递），但守门看到的上下文多了约 3000 字；守门的 12000 字正文上限没有为此下调。
 - **同频道串行**：同一个目标的投递按到达顺序串行（`bridge.ts deliverLocalInOrder`），on 档每条忙时消息要先探一次忙闲、等 Jev 最多 1.5 秒；连发几条后紧跟的「停」要排在它们后面，Jev 慢时最多多等 N × 1.5 秒。
 - **CC 不插队**：见上文「CC 实测」。CC 目标上 Jev 判 insert 的照旧排到回合结束，「Jev 判 vs 实际」报表里这类行是 `pick: insert` / `insertVia: none`。
-- **确认只认明确回复**：插队方的回程槽要等目标 `reply` 到它的频道或 `send_to_agent` 给它才会推回；目标只在自己频道回、或只写文字不调 reply，答复推不回插队方（看门狗会催一次「用 send_to_agent 回 X」），24 小时后这条不再算没确认。
+- **确认只认明确回复**：目标只在自己频道回或只写文字，插队方收不到；独立催答会逐条提醒一次，24 小时后释放回程并告知请求方。
 - **ACP 插法是声明值**：宿主支不支持 steering bridge 不知道（不改登记协议），日志一律记 `steer(declared)`；不支持时宿主原位改回 prompt、回合结束投，不丢，只是「Jev 判 vs 实际」报表把这种也算成插队。
-- **换档竞态**：`routeHolds` 和 `afterInsertSend` 各读一次档位（缓存 2 秒）；中间几个 await 里 on 切成 off，可能 `ws.send` 回 0 时不押回、或不记确认账（不记账 = 回到第 2 轮之前的隐式答复问题，只影响那一条）。同 mode-flip 一族，罕见，没修。
+- **回复生成的时间边界**：现有工具帧不带模型开始生成这次回复的可信时间，bridge 只能以收到帧的时刻截快照。模型已开始写旧问题的答复、但工具帧尚未到 bridge 时插入的新问题仍可能被这次明确回复一并确认；调用方须核对答复是否答到新问题。与帧到达同一毫秒及之后的新请求保守保留回程和催答兜底，不会被解析或投递 await 吞掉。要精确消除此窗口，需要运行时提供生成时间或逐条 inReplyTo。
 - **押后队列里的 insert**：压缩中押下的、送出失败退回的，回合结束才放（不在回合中重投）。
 - **guest**：on 档 guest 的消息判排队后 check_inbox 领不到（guest 本来就不领），也没有 owner 那样的 2 分钟出口，要等回合结束；off 档它会直接打断。
 
 ## 测试
 
-`tests/inbound-route.test.ts`（纯逻辑）、`tests/inbound-route-runtime.test.ts`（开关 / 回落 / observe / Chat Guard 合并）、`tests/inbound-route-three.test.ts`（三处一致、merge 回复归属）、`tests/inbound-route-replay.test.ts`（12 + 4 + 6 个合成例的录制回放，夹具 `tests/fixtures/inbound-route/cases.json`，重录方法见夹具的 `about`；JRT-3 的 6 例 agent→agent 真 Jev 判对 6/6：插队 0.86–0.94、排队 0.98–0.99）、`tests/inbound-route-insert.test.ts`（insert 判定与权限兜底、三种运行时、observe / off、送出失败退回）、`tests/steer-insert.test.ts`（确认账：回 owner / 之后回合的 drain 不误认答复、别的 agent 开的回合照常、明确回复才销账、落盘 / 24 小时 / kill）、`tests/steer-cc-probe.test.ts`（CC 实测记录的判定）。
+`tests/inbound-route.test.ts`（纯逻辑）、`tests/inbound-route-runtime.test.ts`（开关 / 回落 / observe / Chat Guard 合并）、`tests/inbound-route-three.test.ts`（三处一致、merge 回复归属）、`tests/inbound-route-replay.test.ts`（旧三选项 agent 例明确跳过、不计四选项覆盖；新增 2 个 CC 判 insert → queue 回放，夹具 `tests/fixtures/inbound-route/cases.json`，重录方法见夹具的 `about`；JRT-3 的 6 例 agent→agent 真 Jev 判对 6/6：插队 0.86–0.94、排队 0.98–0.99）、`tests/inbound-route-insert.test.ts`（insert 判定与权限兜底、三种运行时、observe / off、送出失败退回）、`tests/steer-insert.test.ts`（确认账：回 owner / 之后回合的 drain 不误认答复、别的 agent 开的回合照常、明确回复才销账、落盘 / 24 小时 / kill）、`tests/steer-insert-notices.test.ts`（逐条提醒 / owner 叫停 / 过期释放 / 坏账校验 / 上限 / 回复帧边界）、`tests/steer-cc-probe.test.ts`（CC 实测记录的判定）。

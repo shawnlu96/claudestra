@@ -1,5 +1,5 @@
 {
- "about": "JRT 调研的 12 + 4 个合成例（不含真实消息）。answers 是录下来的 Jev 答案：前 12 例录自 PM 调研探针（jev-1.13.0，2026-10-16，措辞与 lib/inbound-route.ts 的问题略不同、没带权限规则）；后 4 例录自带权限规则的策略探针，设计稿只记了 interrupt 概率，余量记在 queue。merge 例只有一条排队，route_merge_with 记为 q1（探针没问这一题）。重录：TYPESAFE_API_KEY=… INBOUND_ROUTE_RECORD=1 bun test tests/inbound-route-replay.test.ts。人的两条不合并（只有本机 agent 消息能并进一封合批载体），所以 owner 的两个 merge 例按代码兜底改成排队。JRT-3 加的 6 例（agent→agent，3 例该插队、3 例该排队）录自 lib/inbound-route.ts 带 insert 选项的现行问题；只重录没有答案的例：INBOUND_ROUTE_RECORD=1，全部重录：INBOUND_ROUTE_RECORD=all",
+ "about": "24 个合成例，CI 只回放、不打外网。前 12+4 例录自旧问题探针：其中 3 个 agent 例没有 insert 选项，逐条标 legacyQuestion，默认跳过且不计当前四选项覆盖；owner/peer 旧例仍用于权限回归。JRT-3 的 6 个 agent 例录自现行四选项真 Jev 问题。JRT-4 新增 2 个 CC 目标例，复用相同 state 的四选项真 Jev insert 答案，代码按运行时退为 queue。重录未录/旧问题例：INBOUND_ROUTE_RECORD=1 bun test tests/inbound-route-replay.test.ts；全量重录：INBOUND_ROUTE_RECORD=all（凭据仅从环境读取）。成功重录会删除 legacyQuestion。",
  "model": "jev-1.13.0",
  "cases": [
   {
@@ -138,7 +138,8 @@
      },
      "confidence": 1
     }
-   }
+   },
+   "legacyQuestion": "旧三选项问题录制；不计入四选项 agent 路由覆盖"
   },
   {
    "name": "peer 要求立刻停",
@@ -182,7 +183,8 @@
      },
      "confidence": 0.98
     }
-   }
+   },
+   "legacyQuestion": "旧三选项问题录制；不计入四选项 agent 路由覆盖"
   },
   {
    "name": "紧急事故",
@@ -372,7 +374,8 @@
      },
      "confidence": 0.99
     }
-   }
+   },
+   "legacyQuestion": "旧三选项问题录制；不计入四选项 agent 路由覆盖"
   },
   {
    "name": "策略：owner 叫停",
@@ -533,6 +536,56 @@
      }
     }
    }
+  },
+  {
+   "name": "CC 目标：agent 答复对方正在等的问题",
+   "expect": "queue",
+   "current": "已问 agent-exec PR #12 的 CI 过没过，正在等它的答复再决定合不合并",
+   "queued": [],
+   "incoming": {
+    "from": "agent-exec",
+    "text": "CI 全绿了（12/12 分片），#12 可以合并。"
+   },
+   "answers": {
+    "route_action": {
+     "type": "choice",
+     "choice": "insert",
+     "confidence": 0.81,
+     "probabilities": {
+      "interrupt": 0.09,
+      "insert": 0.86,
+      "merge": 0,
+      "queue": 0.05
+     }
+    }
+   },
+   "runtime": "claude-code",
+   "recording": "复用同一四选项问题的真 Jev 答案；运行时不在 Jev state 内，由代码判不能插队"
+  },
+  {
+   "name": "CC 目标：agent 更正对方手上的事",
+   "expect": "queue",
+   "current": "按 agent-pm 的规格卡把 src/lib/foo.ts 的超时改成 30 秒，正在改第二处调用点",
+   "queued": [],
+   "incoming": {
+    "from": "agent-pm",
+    "text": "更正：超时是 15 秒，不是 30 秒，规格卡已经改了。"
+   },
+   "answers": {
+    "route_action": {
+     "type": "choice",
+     "choice": "insert",
+     "confidence": 0.92,
+     "probabilities": {
+      "interrupt": 0.01,
+      "insert": 0.94,
+      "merge": 0,
+      "queue": 0.05
+     }
+    }
+   },
+   "runtime": "claude-code",
+   "recording": "复用同一四选项问题的真 Jev 答案；运行时不在 Jev state 内，由代码判不能插队"
   }
  ]
 }

@@ -54,7 +54,7 @@ let deps: Deps = {
   doing: async (agent, ch) => turnBrief(agent, ch, (await resolveTurnWindow(ch, control())).runtime),
   insertDecl: async (ch) => {
     const w = await resolveTurnWindow(ch, control());
-    return { via: controlFor(w.runtime, w.transport).insertVia, declared: w.transport === "acp" };
+    return { via: w.runtime === "claude-code" ? undefined : controlFor(w.runtime, w.transport).insertVia, declared: w.transport === "acp" };
   },
   senderRegistered: async (ch) => (await readRegistryAgents()).some((a) => a.channelId === ch && a.status === "active"),
   readMode: () => parseRouteMode(readConfigSync().inboundRoute?.mode),
@@ -220,8 +220,23 @@ async function askSolo(p: RouteProbe): Promise<void> {
  * 守门那次已经带着判过的直接返回
  */
 export async function routeInbound(env: Envelope, to: LocalEndpoint, agent: string): Promise<void> {
+  await recheckInsert(env, to.channelId, agent);
   const p = await routeProbeFor(env, to, agent);
   if (!p) return;
   if (routeMode() === "on") await askSolo(p);
   else void askSolo(p);
+}
+
+/** 押后 / 断线重投可能已换运行时，不能沿用原来 Pi / ACP 的插法给 CC 插队。 */
+async function recheckInsert(env: Envelope, target: string, agent: string): Promise<void> {
+  const r = env.meta.inboundRoute;
+  if (r?.action !== "insert") return;
+  const decl = await deps.insertDecl(target).catch((e: Error) => {
+    console.warn(`⚠️ 入站路由：放出插队时取运行时失败，按 queue: ${e.message}`);
+    return undefined;
+  });
+  if (decl?.via === "steer") return;
+  env.meta.inboundRoute = { ...r, action: "queue", via: undefined };
+  deps.log({ ts: new Date(deps.now()).toISOString(), mode: routeMode(), agent, msg: env.meta.messageId,
+    pick: "insert", jev: "queue", actual: "queue", insertVia: "none", downgraded: "no_insert", via: "release" });
 }
