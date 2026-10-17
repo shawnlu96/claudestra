@@ -50,6 +50,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   pmRails: { class: "permission", reason: "监督 PM 越权写入并通知 owner" },
   privateMergeNarrow: { class: "permission", reason: "限制私仓合并目标与执行范围" },
   privateStartPlacement: { class: "permission", reason: "私仓任务跨机放置范围" },
+  projectDecl: { class: "schema", reason: "目标提交中项目能力声明的可信加载" },
   proposalGlobProtection: { class: "permission", reason: "拦截通过通配拆词绕过提案名称保护的范围" },
   reclaimLocalFix: { class: "permission", reason: "租约回收后重新指派本机修复执行者" },
   reviewFallback: { class: "safety", reason: "跨族审查员不可用时降级同族对抗审查并豁免跨族" },
