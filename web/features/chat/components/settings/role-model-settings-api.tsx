@@ -15,9 +15,17 @@ export interface RoleModelView {
   families: string[];
   roles: RoleModelRow[];
   codexEfforts: string[];
+  tiers: Record<string, Record<string, { claude?: string; codex?: string | null }>>;
+  taskTiers: string[];
+  effective: Record<string, EffectiveRow[]>;
+  switches: { project: string; taskTierModels: ModelSwitch; roleModel: ModelSwitch };
   warning?: "replaced_invalid";
 }
-export interface RoleModelPatch { rev: number; role: string; claude?: string; codex?: string | null }
+export interface ModelSwitch { mode: "off" | "observe" | "on" }
+export interface EffectiveCell { value: string | null; source: string; note?: string }
+export interface EffectiveRow { role: string; claude: EffectiveCell; codex: EffectiveCell }
+export interface RoleModelPatch { rev: number; role: string; tier?: string; claude?: string; codex?: string | null }
+export interface RoleModelBatch { rev: number; changes: Omit<RoleModelPatch, "rev">[] }
 
 const PATH = "/settings/role-models";
 
@@ -30,7 +38,7 @@ export async function fetchRoleModels(): Promise<RoleModelView | null> {
   }
 }
 
-export function putRoleModels(patch: RoleModelPatch): Promise<RoleModelView> {
+export function putRoleModels(patch: RoleModelPatch | RoleModelBatch): Promise<RoleModelView> {
   return api<RoleModelView>(PATH, { method: "PUT", json: patch, timeoutMs: 8000 });
 }
 
