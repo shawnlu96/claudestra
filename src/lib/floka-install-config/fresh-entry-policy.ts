@@ -16,6 +16,7 @@ import { basename, join } from "node:path";
 import type { ObservedAction, RecoveryMode } from "../recovery-policy.js";
 import { maintenanceBarrierPresent } from "../floka-config/default-root.ts";
 import { RECOVERY_KEYS } from "../recovery-keys.ts";
+import { REPO_ROOT } from "../repo-root.ts";
 import { stateDirIn } from "../state-dir.ts";
 import { maintenanceRoot } from "../state-maintenance/paths.ts";
 import { chooseFreshStateRoot, type FreshRootChoice, type FreshRootResult } from "./fresh-root.ts";
@@ -129,7 +130,7 @@ export function freshEntryMode(home: string): RecoveryMode {
 }
 
 function packageVersion(): string {
-  try { return String(JSON.parse(readFileSync(join(import.meta.dir, "..", "..", "..", "package.json"), "utf8")).version || "unknown"); } catch { return "unknown"; }
+  try { return String(JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).version || "unknown"); } catch { return "unknown"; }
 }
 
 /** 观察样本：入口@版本 + 动作一条，已有就不再写 */
