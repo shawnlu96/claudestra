@@ -192,10 +192,10 @@ export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<
     if (mine) {
       const rec = { at: 0, callers: [], askers: [], ...recOf(t), who: triggerOf(t) };
       if (ranIntoApiError(t)) errTrigger.set(t.cid, rec);
-      if (ranIntoApiError(t) || t.event === "StopFailure") {
+      else if (rec.who !== "stranger") errTrigger.delete(t.cid);
+      if (ranIntoApiError(t) || t.event === "StopFailure") { // 来源跟着续跑计划落盘（重启后 planRec 读回），不动上面的 errTrigger
         noteResumeSource(t.cid, { who: rec.who, callers: rec.callers, askers: rec.askers, ...(rec.askedAt ? { askedAt: rec.askedAt } : {}) });
       }
-      else if (rec.who !== "stranger") errTrigger.delete(t.cid);
       prevTrigger.set(t.cid, rec); // 下一轮的来源从它的第一条消息重新记
       const failAt = retryFailAt.get(t.cid);
       retryFailAt.delete(t.cid);
