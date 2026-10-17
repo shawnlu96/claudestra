@@ -106,6 +106,7 @@ export const RECOVERY_KEYS = [
   "reviewSeatLend",
   "roleModel",
   "selfHealBeforeManual",
+  "serviceCurrentReload",
   "skipEffectsAutoScope",
   "specObservationHours",
   "staleLeaseHandover",
