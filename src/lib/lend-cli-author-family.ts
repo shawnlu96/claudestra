@@ -1,3 +1,4 @@
+import { aliasPick, repoAllowed, aliasSameRepo } from "./repo-alias.js";
 /** Manual family selection never infers an author from the CLI's Codex default. */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
@@ -59,7 +60,8 @@ function assertClaudeWriter(db: Database, task: LedgerTask, input: OfferInput, n
   if (!p.fp || p.fp !== input.write?.fp || (b.fp && b.fp !== p.fp)) {
     throw new LedgerError("forbidden", "peer hello 与本次写单的实例指纹不符");
   }
-  if (!p.grant?.roles.includes("write") || !p.grant.repos.includes(input.repo)) {
+  if (!p.grant?.roles.includes("write") || !aliasPick("lend-cli.grant", p.grant.repos.includes(input.repo),
+    p.grant.repos.includes(input.repo) || repoAllowed(input.repo, p.grant.repos))) {
     throw new LedgerError("forbidden", "peer 已撤销写角色或没有授权本仓库");
   }
   const cap = peerCapacity(db, input.peer, b.maxOpen, now);
@@ -67,7 +69,7 @@ function assertClaudeWriter(db: Database, task: LedgerTask, input: OfferInput, n
     throw new LedgerError("forbidden", `peer 当前无法接 Claude 写单：${cap.why ?? "Claude 无可用额度"}`);
   }
   const lease = heldLease(db, task);
-  if (lease && lease.repo !== input.repo) throw new LedgerError("conflict", "本卡写租约的仓库与挂单不符");
+  if (lease && !aliasSameRepo("lend-cli.lease", lease.repo, input.repo)) throw new LedgerError("conflict", "本卡写租约的仓库与挂单不符");
 }
 
 /** No await between the final family / capability check and the existing refusal-first offer transaction. */
