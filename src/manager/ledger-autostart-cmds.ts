@@ -20,6 +20,7 @@ import { featureLanes } from "../lib/dag-tools-lanes.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { specWaitCli } from "../lib/scheduler-spec-wait-ledger.js";
 import { postVerifyCli } from "../lib/scheduler-post-verify-ledger.js";
+import { postVerifyPullCli } from "../lib/scheduler-post-verify-pull.js";
 import { mergePmCli } from "../lib/scheduler-merge-pm-ledger.js";
 import { reviewPmCli } from "../lib/scheduler-review-pm-ledger.js";
 import { manualMergeAutoCli } from "../lib/scheduler-manual-merge-ledger.js";
@@ -85,6 +86,7 @@ function settle(c: LedgerCli): Result {
 const AUTOSTART_SUBS: Record<string, (c: LedgerCli) => Result> = {
   claim, step, settle, "spec-wait": (c) => specWaitCli(c.db, { ...c.ctx(), dedupKey: undefined }, c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0)) };
 AUTOSTART_SUBS["post-verify"] = (c) => postVerifyCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
+AUTOSTART_SUBS["post-verify-pull"] = (c) => postVerifyPullCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 AUTOSTART_SUBS["merge-pm"] = (c) => mergePmCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 AUTOSTART_SUBS["review-pm"] = (c) => reviewPmCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 AUTOSTART_SUBS["manual-merge"] = (c) => manualMergeAutoCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));

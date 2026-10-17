@@ -18,6 +18,7 @@ import { busyAsLedgerError, getEventByDedup, LedgerError, listEvents } from "./l
 import { appendEvent } from "./ledger-write.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { EXEMPT_OP, HOLD_OP, legacyReplacesPlan, openSafetyHold, RESOLVE_OP, RETRY_OP } from "./scheduler-review-swap.js";
+import { NO_CROSS_PLACE } from "./scheduler-review-fallback.js";
 
 type RecoveryMode = "on" | "observe" | "off";
 type RecoveryKey = "materials" | "localFallback" | "localDelivery" | "modelOutcome" | "askReminder" | "manualStall" | "planGap" | "audit";
@@ -178,7 +179,7 @@ export function planModelRecovery(cls: ModelOutcomeClass, recoverable: boolean, 
   const fits = (p: Placement) => (f.role === "author" ? p.family === f.authorFamily : p.family !== f.authorFamily) &&
     !(p.family === f.failed.family && p.machine === f.failed.machine);
   const to = f.authorized.find(fits);
-  if (!to) return { kind: "manual", code: "model_recovery_manual", reason: "已授权的家族 / 机器里没有符合跨模型要求的去处" };
+  if (!to) return { kind: "manual", code: "model_recovery_manual", reason: NO_CROSS_PLACE }; // a reviewer here may still fall back (RVF-1, after this record)
   return { kind: "redispatch", to, reason: `${cls === "capacity" ? "容量不足" : "宿主或运输故障"}，按已授权配置重派到 ${to.machine}（${to.family}）` };
 }
 

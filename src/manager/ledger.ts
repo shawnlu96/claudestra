@@ -81,8 +81,10 @@ import { PM_RAILS_CMDS, withPmRails } from "./pm-rails-cmds.js";
 import { SECURITY_POOL_CMDS } from "./security-pool-cmds.js";
 import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
+import { CI_SELECTED_REPLAY_CMDS } from "./ledger-ci-selected-replay-cmd.js";
 import { MAIN_CI_CMDS } from "./ledger-main-ci-cmds.js";
 import { LEND_AUTHOR_RETIRE_CMDS } from "../lib/lend-author-retire-cmds.js";
+import { TIER_LEND_SETTINGS_CMDS } from "./ledger-task-tier-lend-settings-cmd.js";
 import { MAIN_RED_FIX_CMDS, MAIN_RED_FIX_SERVICE } from "../lib/main-red-fix-cmds.js";
 import { AUTHOR_REBUILD_CMDS } from "../lib/scheduler-author-rebuild-cmds.js";
 import { PMAUTO_CMDS, PMAUTO_SERVICE } from "./ledger-observation-wiring.js";
@@ -97,7 +99,7 @@ const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
-  ...SCHEDULER_RECOVERY_CMDS,
+  ...SCHEDULER_RECOVERY_CMDS, ...CI_SELECTED_REPLAY_CMDS,
   ...SHARED_EXEC_CMDS,
   ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...SHARED_AUTO_CMDS, ...CENTER_REPLICA_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS, ...PRIORITY_CMDS,
@@ -141,6 +143,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...PMAUTO_CMDS, // 观察期登记与普通 P2 积压（PMAUTO1）
   ...MANUAL_CASE_CMDS, // 人工处置段只读视图（VIEW1）
   ...REMOTE_REVIEW_CMDS, // 仓库方审查结论入账（RRL-1）
+  ...TIER_LEND_SETTINGS_CMDS, // 出借方「接受降档建议」开关（TIER3b）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 export function ledgerUsage(): string {

@@ -14,6 +14,7 @@ import { LedgerReader } from "../src/lib/ledger-read.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, importTask, setMeta } from "../src/lib/ledger-write.js";
 import { statePath } from "../src/lib/paths.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { autostartTick, type StartTickEnv } from "../src/lib/scheduler-autostart-run.js";
 import {
   POST_VERIFY_OVERDUE_MS, POST_VERIFY_REPEAT_MS, postVerifyCli, postVerifySection, postVerifyText, readPostVerifySpec,
@@ -65,6 +66,7 @@ const records = (id = card) => listEvents(db, { target: id }).filter((e) => e.da
 const done = (id = card) => runLedger(["note", id, "已切 on", "--dedup", `post-verify-done:${id}`], ledgerDeps(X));
 
 beforeEach(() => {
+  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { [P]: { keys: { postVerifyPull: "off" } } } }));
   clock = Date.now();
   seq = 0;
   sent = [];
@@ -78,6 +80,7 @@ beforeEach(() => {
   verified(card, clock - 60_000);
 });
 afterEach(() => {
+  rmSync(RECOVERY_POLICY_PATH, { force: true });
   closeLedger(join(dir, "ledger.sqlite"));
   rmSync(dir, { recursive: true, force: true });
   for (const p of specs.splice(0)) rmSync(p, { force: true });

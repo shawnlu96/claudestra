@@ -6,6 +6,8 @@
 import { createHash } from "node:crypto";
 import { CODEX_EFFORT_LEVELS } from "./codex-launch.js";
 import { ACTUAL_SOURCES, SUGGEST_SOURCES, type LendFamily, type ModelActual, type ModelSuggest } from "./lend-wire-types.js";
+import { isCardRoleName } from "./role-model-settings.js";
+import { isTaskTier } from "./task-tier-spec.js";
 
 /** 模型 id 会成为 --model 的参数值：小写字母数字、点、横线，首字符不能是 `-`（同 lend-config.ts CODEX_MODEL_RE） */
 const MODEL_ID = /^[a-z0-9][a-z0-9.-]{0,63}$/;
@@ -15,14 +17,23 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 const sameKeys = (o: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(o).length === keys.length && keys.every((k) => k in o);
 const isCodexLevel = (v: unknown): v is string => (CODEX_EFFORT_LEVELS as readonly unknown[]).includes(v);
 
-/** 返回字符串 = 不合格的原因。只认 {model, source}（Claude 模型 id）或 {effort, source}（Codex 推理档 / null）两种形状，不能两样都带 */
+/**
+ * 返回字符串 = 不合格的原因。只认 {model, source}（Claude 模型 id）或 {effort, source}（Codex 推理档 / null）两种形状，不能两样都带。
+ * TIER3b：双方协商了 caps=tier 时，A 在同一个对象里附上任务类型与卡片角色（tier + role 两个一起带，缺一个就不合格）。
+ */
 export function parseModelSuggest(v: unknown): ModelSuggest | string {
   if (!isObj(v)) return "suggest 要是对象";
   if (!(SUGGEST_SOURCES as readonly unknown[]).includes(v.source)) return `suggest.source 只认 ${SUGGEST_SOURCES.join(" / ")}`;
   const source = v.source as ModelSuggest["source"];
-  if (sameKeys(v, ["model", "source"])) return typeof v.model === "string" && CLAUDE_MODEL.test(v.model) ? { model: v.model, source } : "suggest.model 要是完整的 Claude 模型 id";
-  if (sameKeys(v, ["effort", "source"])) return v.effort === null || isCodexLevel(v.effort) ? { effort: v.effort, source } : `suggest.effort 只认 null 或 ${CODEX_EFFORT_LEVELS.join(" / ")}`;
-  return "suggest 只能是 { model, source } 或 { effort, source }";
+  const tagged = "tier" in v || "role" in v;
+  if (tagged && !(isTaskTier(v.tier) && isCardRoleName(v.role))) return "suggest.tier / suggest.role 要一起带，且是认得的任务类型与卡片角色";
+  const tag = tagged ? { tier: v.tier as string, role: v.role as string } : {};
+  const extra = tagged ? ["tier", "role"] : [];
+  if (sameKeys(v, ["model", "source", ...extra])) return typeof v.model === "string" && CLAUDE_MODEL.test(v.model) ? { model: v.model, source, ...tag } : "suggest.model 要是完整的 Claude 模型 id";
+  if (sameKeys(v, ["effort", "source", ...extra])) {
+    return v.effort === null || isCodexLevel(v.effort) ? { effort: v.effort, source, ...tag } : `suggest.effort 只认 null 或 ${CODEX_EFFORT_LEVELS.join(" / ")}`;
+  }
+  return "suggest 只能是 { model, source } 或 { effort, source }（协商了 tier 时再加 tier、role）";
 }
 
 /** 建议要和订单家族对得上：codex 单只收推理档，claude 单只收模型；null = 对得上 */
@@ -47,7 +58,9 @@ export function actualFamilyProblem(family: LendFamily, a: ModelActual): string 
   return a.effort === null || isCodexLevel(a.effort) ? null : "codex 单的 actual.effort 不是 Codex 的推理档";
 }
 
-const canon = (s: ModelSuggest): string => JSON.stringify("model" in s ? ["model", s.model, s.source] : ["effort", s.effort, s.source]);
+/** 不带类型信息的定序串与改前逐字节相同；带了（TIER3b）就把 tier、role 接在后面，改了它们摘要也对不上 */
+const canon = (s: ModelSuggest): string =>
+  JSON.stringify([...("model" in s ? ["model", s.model, s.source] : ["effort", s.effort, s.source]), ...(s.tier !== undefined ? ["tier", s.tier, s.role] : [])]);
 /** 带建议的领单摘要：派单全文 + 建议的定序串一起算，改了建议（或拿掉它）摘要就对不上；不带建议的摘要仍是全文的 sha256，不经这里 */
 export const suggestDigest = (text: string, s: ModelSuggest): string => createHash("sha256").update(`${text}\nsuggest:${canon(s)}`, "utf8").digest("hex");
 
@@ -76,12 +89,15 @@ export function withinGrant(suggested: string | null, opened: readonly string[] 
 const argAfter = (args: readonly string[], flag: string): string | null => { const i = args.indexOf(flag); return i >= 0 && args[i + 1] ? args[i + 1]! : null; };
 
 /**
- * 起出借 worker 那一刻的实际（B）：args 是这次真正带给 manager create 的 --model / --effort（lend-grant-spawn.ts lendModelArgs，只来自出借授权），
- * 建议不改它——授权里写明的那一档就是对方开放的全部。codex 只报推理档；claude 的授权没有模型项，一律是对方原默认。
+ * 起出借 worker 那一刻的实际（B）：args 是这次真正带给 manager create 的 --model / --effort（lend-grant-spawn.ts lendModelArgs：授权，
+ * 或 TIER3b 在授权内接受的建议）。codex 只报推理档；claude 带了 --model 报它，没带是对方原默认。
  */
 export function launchActual(family: string, suggest: ModelSuggest | null | undefined, args: readonly string[]): { actual: ModelActual; diagnostic?: string } {
   if (family !== "codex") {
     const want = suggest && "model" in suggest ? suggest.model : null;
+    // TIER3b：出借方接受了授权内的建议（task-tier-lend.ts）时 create 带 --model，实际就是它
+    const used = argAfter(args, "--model");
+    if (used) return { actual: { model: used, effort: null, source: used === want ? "suggest" : "grant" } };
     return { actual: { model: null, effort: null, source: "default" }, ...(want ? { diagnostic: `出借授权没有开放 Claude 模型选择，建议的 ${want} 不用，照对方原默认` } : {}) };
   }
   const effort = argAfter(args, "--effort");
