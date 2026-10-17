@@ -13,7 +13,7 @@ import {
   currentPin, expectedPeerFp, frameBearer, inviteTokenVerdict, LEGACY_PEER_DEADLINE, legacyPeerDeadline, loadRelayPeerView, peerAnchorOf, peerSigVerdict, recordPeerFp,
   relayPeerRefusal, type RelayPeerView,
 } from "../src/lib/peer-trust.js";
-import { peerAuthHint, peerSigErrorText, RELAY_SIG_DETAIL, relayRefusalHint } from "../src/lib/peer-auth-hints.js";
+import { peerAuthFallback, peerAuthHint, peerSigErrorText, RELAY_SIG_DETAIL, relayRefusalHint } from "../src/lib/peer-auth-hints.js";
 import { failingPeerChecks, legacyPeerChecks, orphanPeerChecks, persistentlyFailing } from "../src/lib/doctor-peers.js";
 import { authenticateApi } from "../src/bridge/api-auth.js";
 import { peerSignatureState } from "../src/bridge/peer-signature.js";
@@ -120,6 +120,22 @@ describe("截止日覆盖、钉住记录作废、提示文案、doctor、合并�
     expect(peerAuthHint({ code: "peer_signature", reason: "invite_expired" })).toMatch(/过期/);
     expect(peerAuthHint({ code: "peer_signature", reason: "invite_read_only" })).toMatch(/只能读/);
     expect(peerAuthHint({ code: "rate_limited" })).toMatch(/请求太多/);
+  });
+  test("403 agent 不在 scope：认 code 或老 body 的原文（按本机目标名拼），说不是 token 问题；别的文字仍是 token 提示（peer-PEERGONE1）", () => {
+    const t = "agent-lend-abc";
+    const err = `agent "${t}" not in token scope`;
+    for (const body of [{ ok: false, error: err, code: "agent_not_in_scope" }, { ok: false, error: err }]) {
+      expect(peerAuthHint(body, t)).toMatch(/不是 token 问题/);
+      expect(peerAuthHint(body, t)).toContain(t);
+      expect(peerAuthFallback(body, t)).not.toMatch(/token/);
+    }
+    expect(peerAuthHint({ ok: false, error: err, code: "agent_not_in_scope" })).toMatch(/不是 token 问题/);
+    for (const body of [null, {}, { ok: false, error: "invalid token" }, { ok: false, error: `agent "别的" not in token scope` }]) {
+      expect(peerAuthHint(body, t)).toMatch(/token 无效或已被对方 revoke/);
+      expect(peerAuthFallback(body, t)).toBe("token 无效或 agent 不在授权范围");
+    }
+    expect(peerAuthHint({ ok: false, error: err })).toMatch(/重新握手/); // 不知道目标名不按原文猜
+    expect(peerAuthHint({ ok: false, error: `agent "x" not in token scope; 夹带` }, "x")).not.toContain("夹带");
   });
   test("中继入站的拒绝：按 code 与逐字比对的说明挑本机提示；连不上 / 超时类返回 null；远端文字从不进返回值", () => {
     expect(relayRefusalHint("replay", "signature already used")).toMatch(/不要原样重发/);

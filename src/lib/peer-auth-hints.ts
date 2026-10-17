@@ -21,10 +21,30 @@ const SIG_HINTS: Record<string, string> = {
 
 const KEY_HINT = "对方认不出本机的签名钥匙（本机重装过，或对方记下的指纹不是本机）——请对方删掉这个 peer 后重新给你发一张邀请";
 
-/** 对方回 401/403/429 时的提示。body 是对方回的 JSON（可能为空）；code=peer_signature 按 reason 分开说，其余是 token / scope 问题 */
-export function peerAuthHint(raw: unknown): string {
-  const body = (raw && typeof raw === "object" ? raw : {}) as { code?: unknown; reason?: unknown; cause?: unknown };
+/**
+ * 对方没对本机开放这个 agent：新版本带 code=agent_not_in_scope；老版本只有 error，拿本机发出的目标名拼出原文逐字比（不把远端文字放进返回值）。
+ * 没给目标名时只认 code
+ */
+function agentNotInScope(body: { code?: unknown; error?: unknown }, target?: string): boolean {
+  if (body.code === "agent_not_in_scope") return true;
+  return target !== undefined && body.code === undefined && body.error === `agent "${target}" not in token scope`;
+}
+
+const notInScopeHint = (target?: string): string =>
+  `对方没有对本机开放 agent ${target ?? "（目标）"}（出借 worker 单结束后会被移出）——不是 token 问题，不用重新握手`;
+
+/** 401/403 括号里 error 不能展示时的默认说明：认得出是 agent 不在授权范围就只说这个，否则仍是两种可能 */
+export function peerAuthFallback(raw: unknown, target?: string): string {
+  const body = (raw && typeof raw === "object" ? raw : {}) as { code?: unknown; error?: unknown };
+  if (!agentNotInScope(body, target)) return "token 无效或 agent 不在授权范围";
+  return `agent ${target ? `${target} ` : ""}不在对方给本机的授权范围`;
+}
+
+/** 对方回 401/403/429 时的提示。body 是对方回的 JSON（可能为空）；target = 本机发出的目标名；code=peer_signature 按 reason 分开说，其余是 token / scope 问题 */
+export function peerAuthHint(raw: unknown, target?: string): string {
+  const body = (raw && typeof raw === "object" ? raw : {}) as { code?: unknown; reason?: unknown; cause?: unknown; error?: unknown };
   if (body.code === "rate_limited") return "对方限流：一分钟里请求太多——稍后再发";
+  if (agentNotInScope(body, target)) return notInScopeHint(target);
   if (body.code !== "peer_signature") return "token 无效或已被对方 revoke——联系对方确认，或重新握手";
   if (body.reason === "sig_rate_limited") return `一分钟里验签失败太多次，对方暂时限流（最近一次失败原因：${typeof body.cause === "string" && Object.hasOwn(SIG_HINTS, body.cause) ? body.cause : "未知"}）——先按原因修好再发`;
   const reason = String(body.reason);

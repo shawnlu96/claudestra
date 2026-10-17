@@ -14,7 +14,8 @@ import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
 import { isLendWorkerName } from "../lib/lend-workers-view.js";
 import { signedFor } from "../lib/instance-key.js";
-import { peerAuthHint, peerCallFailureText, peerCallIsTimeout, peerErrorText } from "../lib/peer-auth-hints.js";
+import { peerAuthFallback, peerAuthHint, peerCallFailureText, peerCallIsTimeout, peerErrorText } from "../lib/peer-auth-hints.js";
+import { lendOrdersOfWorker, lendTargetRefusal, type LendOrderState } from "../lib/peer-lend-target.js";
 import { readJsonCapped } from "../lib/body-reader.js";
 import { isE2eResponse } from "../lib/peer-e2e-client.js";
 import { peerReplyText } from "../lib/peer-reply-files.js";
@@ -44,6 +45,8 @@ export interface HttpPeerDeps {
   findPeer?: (name: string) => Promise<HttpPeer | null>;
   /** 单测覆盖：peers.json 读不了时恢复的重试间隔 */
   resumeRetryMs?: number;
+  /** 本机台账里这个出借 worker 的订单（单测注入）；缺省只读查 ledger（lib/peer-lend-target.ts），注入 fake fetch 时缺省不查 */
+  lendOrders?: (target: string) => LendOrderState[];
 }
 
 let deps: HttpPeerDeps | null = null;
@@ -104,6 +107,7 @@ export function cancelHttpPeerCallsForChannel(channelId: string): number {
 /**
  * 出站主入口。**同步阶段**只做参数构造——立即给 caller 回 MCP response
  * （ok+pushBack），真正的 HTTP 往返在后台进行，结果一律以合成消息推回。
+ * 目标是单已结束的出借 worker 时不发，直接抛出给调用方的一句话（bridge 的 route_to_agent 把它作为 error 回给调用方，peer-PEERGONE1）。
  */
 export function routeToHttpPeer(
   ws: ServerWebSocket<unknown>,
@@ -117,6 +121,8 @@ export function routeToHttpPeer(
   oneShotOrLevel: boolean | PmNoticeLevel = false,
   onDelivered?: () => void, // 对方 2xx 收下之后才调（PM 带 ask id 的回话记成已答）；POST 失败 / 被拒不调
 ): { ok: true; targetName: string; pushBack: boolean } {
+  const refusal = endedLendTarget(peer, peerAgentName);
+  if (refusal) throw new Error(refusal);
   const level = oneShotOrLevel === "info" || oneShotOrLevel === "action" ? oneShotOrLevel : undefined;
   let oneShot = oneShotOrLevel === true || !!level;
   const caller: CallerRef = { ws, channelId: fromChannelId, name: fromName, onDelivered };
@@ -126,6 +132,17 @@ export function routeToHttpPeer(
   if (!oneShot) void handoffStart(callId, { dir: "out", peer: peer.name, localAgent: fromName, remoteAgent: peerAgentName }, text.length);
   track(callId, fromChannelId, () => runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot, level));
   return { ok: true, targetName: `peer:${peer.name}.${peerAgentName}`, pushBack: !oneShot };
+}
+
+/** 出借 worker 的单都已结束 → 拒绝的话；没有记录 / 查库失败照常发，原因只进日志 */
+function endedLendTarget(peer: HttpPeer, peerAgentName: string): string | null {
+  try {
+    const orders = deps?.lendOrders ?? (deps?.fetchImpl ? () => [] : lendOrdersOfWorker);
+    return lendTargetRefusal(peerAgentName, orders(peerAgentName));
+  } catch (e) {
+    console.warn(`⚠️ [peer] 查 ${peerAgentName}@${peer.name} 的出借订单失败，照常发：${(e as Error).message}`);
+    return null;
+  }
 }
 
 /** 在飞登记（用户接管 / kill 时按 caller 频道取消），无论什么结局都清掉 */
@@ -208,7 +225,8 @@ async function runCall(
   const errText = (fallback: string) => peerErrorText(isE2eResponse(res), body, fallback, peer.name); // 明文的 error 文字不进 agent
 
   if (res.status === 401 || res.status === 403 || res.status === 429) {
-    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 拒绝了请求（${res.status}：${errText("token 无效或 agent 不在授权范围")}）。${peerAuthHint(body)}。`, peer, peerAgentName, false, callId);
+    const why = errText(peerAuthFallback(body, peerAgentName)); // 认得出是 agent 不在 scope 就不说 token（peer-PEERGONE1）
+    await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 拒绝了请求（${res.status}：${why}）。${peerAuthHint(body, peerAgentName)}。`, peer, peerAgentName, false, callId);
     settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth", status: res.status });
     return;
   }
@@ -293,7 +311,7 @@ async function pollThread(callId: string, caller: CallerRef, peer: HttpPeer, rec
         // 鉴权失败不是瞬时故障——对方 revoke/轮换了 token,继续轮只是空转 10 分钟
         // 再误报「超时」(review 2026-07-19 #7)
         if (pr.status === 401 || pr.status === 403) {
-          const why = peerAuthHint(await readJsonCapped(pr)) /* 不是 JSON：按 token 问题提示 */;
+          const why = peerAuthHint(await readJsonCapped(pr), peerAgentName) /* 不是 JSON：按 token 问题提示 */;
           await pushToCaller(caller, `[⚠️ peer 调用失败] ${label} 在等待回复期间拒绝了鉴权（${pr.status}）——${why}。`, peer, peerAgentName, false, callId);
           settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "auth_poll", status: pr.status });
           return;
