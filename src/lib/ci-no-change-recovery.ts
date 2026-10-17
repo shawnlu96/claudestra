@@ -13,7 +13,6 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
 import { defaultNoChangePort, readMainResolved, readOutOfScope, type CiNoChangePort, type Evidence } from "./ci-no-change-evidence.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { stepAtStage, stepsOf } from "./ledger-steps.js";
@@ -28,11 +27,10 @@ import { NO_CHANGE_WRITE_PORTS } from "./ledger-write.js";
 import { mainRedNodes, nodeState } from "./main-red-fix-place.js";
 import { SOURCE, workflowOf } from "./main-red-fix.js";
 import { NO_CHANGE_DELIVER_OP, noChangeDedupKey, noChangeDigest, noChangeHeadRefusal, noChangeReplay, noChangeStepRefusal, parseNoChangeText, runRef, type MainAlreadyResolved, type NoChange,
-  type OutOfScopeCi } from "./order-no-change.js";
+  noChangeMaterialSnapshot, type OutOfScopeCi } from "./order-no-change.js";
 import { noteDefaultOn } from "./recovery-key-defaults.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
-import { specPathFor } from "./task-spec.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
 import { getMergeRun, mergeReviewProof } from "./scheduler-merge.js";
 
@@ -264,20 +262,15 @@ function localOrder(db: Database, taskId: string, actor: string, session: string
 
 const MATERIAL_FIELDS = ["spec", "extra"];
 
-/**
- * 本机单的规格材料与派单时一致：plan 事件之后没有改规格指针 / extra（文件范围）的 task set 事件；规格文件的原字节在派单之后没被写过
- * （内核维护的 ctime / mtime 都不晚于 plan 事件；文件新建、改写、换内容都会推后 ctime）。规格指针在、文件却读不到也拒。只拒不猜。
- */
+/** Compare dispatch-frozen resolved bytes again before admission and inside its write transaction. */
 function localMaterialProblem(db: Database, task: LedgerTask, plan: LedgerEvent): string | null {
   const set = listEvents(db, { project: task.project, target: task.id }).find((e) => e.seq > plan.seq && e.kind === "task" && e.data.op === "set"
     && MATERIAL_FIELDS.some((k) => k in ((e.data.patch as Record<string, unknown> | undefined) ?? {})));
   if (set) return `派单之后 #${set.seq} 改过规格指针 / 文件范围，材料与派单时不一致`;
-  const path = specPathFor(task, getMeta(db, task.project).docsDir);
-  if (!path) return task.spec ? "规格文件读不到，证明不了材料与派单时一致" : null;
-  try {
-    const st = statSync(path);
-    if (Math.max(st.ctimeMs, st.mtimeMs) > plan.ts) return "规格文件在派单之后被写过，材料与派单时不一致";
-  } catch { return "规格文件读不到，证明不了材料与派单时一致"; }
+  const current = noChangeMaterialSnapshot(task, getMeta(db, task.project).docsDir);
+  if (!current || typeof plan.data.materialSnapshot !== "string" || current !== plan.data.materialSnapshot) {
+    return "规格材料与派单时不一致或缺少原始摘要";
+  }
   return null;
 }
 

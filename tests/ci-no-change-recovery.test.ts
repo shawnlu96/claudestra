@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { admitNoChange, deliverNoChangeLocal, orderSnapshotProblem, type NoChangeBinding, type NoChangeDeps } from "../src/lib/ci-no-change-recovery.js";
@@ -13,11 +13,11 @@ import type { CheckRow, CiNoChangePort, RunRead } from "../src/lib/ci-no-change-
 import { ciGreen, dependencyImpact, failureFilesMatch } from "../src/lib/ci-no-change-evidence.js";
 import { deliverOrder } from "../src/lib/order-deliver.js";
 import { listSteps } from "../src/lib/ledger-steps.js";
-import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getMeta, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
 import type { MainRedRun } from "../src/lib/main-red-fix.js";
-import type { NoChange } from "../src/lib/order-no-change.js";
+import { noChangeMaterialSnapshot, type NoChange } from "../src/lib/order-no-change.js";
 import type { RecoveryMode, RecoveryPolicy } from "../src/lib/recovery-policy.js";
 import type { ReviewFacts } from "../src/lib/scheduler-review.js";
 
@@ -83,9 +83,10 @@ function bounce(cause = "ci_fail", intentId = "mi1"): void {
 }
 
 /** 调度派单：意图行 + 同笔的 plan 事件（ledger-scheduler-write.ts 的形状，本机单的原始快照） */
-function dispatch(taskId: string, node: "write" | "fix", id: string, head: string | null, round: number, now = 2_100): void {
+function dispatch(taskId: string, node: "write" | "fix", id: string, head: string | null, round: number, now = 2_100, snapshot = true): void {
   const seq = insertEvent(db, { actor: "scheduler", now, dedupKey: `scheduler:${id}` }, { project: P, target: taskId, kind: "scheduler", text: "派单",
-    data: { op: "plan", id, node, action: "dispatch", recipient: "agent-dev", specRev: 1, round, head } }, true).seq;
+    data: { op: "plan", id, node, action: "dispatch", recipient: "agent-dev", specRev: 1, round, head,
+      ...(snapshot ? { materialSnapshot: noChangeMaterialSnapshot(getTask(db, taskId)!, getMeta(db, P).docsDir) } : {}) } }, true).seq;
   db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,recipient,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
     VALUES (?,?,?,?,'dispatch','agent-dev',1,?,1,1,?,1,'submitted','dispatch',1,1)`).run(id, taskId, P, node, seq, head);
 }
@@ -327,16 +328,46 @@ describe("out_of_scope_ci：同轮恢复", () => {
       setMeta(db, OWNER, { project: P, key: "docsDir", value: dir });
       const spec = join(dir, "tasks", "T1.md");
       writeFileSync(spec, "# 原规格\n");
-      utimesSync(spec, 1, 1); // mtime 改回去也瞒不过 ctime
-      const written = statSync(spec).ctimeMs;
+      const written = Date.now();
       db.run("DELETE FROM scheduler_intents WHERE id = 'fx1'");
-      dispatch("T1", "fix", "fx2", H, 1, written - 1); // 派单在写文件之前：材料在派单后变过
-      await reject(deliverLocal(OOS, { order: "fx2" }), "invalid", /派单之后被写过/);
+      dispatch("T1", "fix", "fx2", H, 1, written - 1); // Snapshot precedes the changed bytes.
+      writeFileSync(spec, "# changed acceptance\n");
+      await reject(deliverLocal(OOS, { order: "fx2" }), "invalid", /材料.*不一致/);
       expect(getTask(db, "T1")).toMatchObject({ stage: "fix" });
       db.run("DELETE FROM scheduler_intents WHERE id = 'fx2'");
       dispatch("T1", "fix", "fx3", H, 1, written + 1); // 派单在写文件之后、之后没动
       expect(await deliverLocal(OOS, { order: "fx3" })).toMatchObject({ ok: true, noChange: { outcome: "recovered" } });
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("r4-P1 local-nochange-unbound-order：切换到派单前已有的不同规格目标 → 拒，零写入（接收前及外部查询中）", async () => {
+    for (const duringRead of [false, true]) {
+      const dir = mkdtempSync(join(tmpdir(), "cinoop1-link-"));
+      try {
+        mkdirSync(join(dir, "tasks"));
+        setMeta(db, OWNER, { project: P, key: "docsDir", value: dir });
+        const spec = join(dir, "tasks", "T1.md"), a = join(dir, "a.md"), b = join(dir, "b.md");
+        writeFileSync(a, "original"); writeFileSync(b, "different acceptance");
+        symlinkSync(a, spec);
+        db.run("DELETE FROM scheduler_intents WHERE id = 'fx1'");
+        dispatch("T1", "fix", `link${duringRead}`, H, 1, Date.now() + 1000);
+        const swap = () => { unlinkSync(spec); symlinkSync(b, spec); };
+        if (duringRead) onRead = swap; else swap();
+        const before = events().length;
+        await reject(deliverLocal(OOS, { order: `link${duringRead}` }), "invalid", /材料.*不一致/);
+        expect(events().length).toBe(before);
+        expect(getTask(db, "T1")!.stage).toBe("fix");
+      } finally { onRead = null; rmSync(dir, { recursive: true, force: true }); }
+      db.query("DELETE FROM scheduler_intents WHERE id = ?").run(`link${duringRead}`);
+    }
+  });
+
+  test("r4-P1：旧派单缺少材料摘要拒收，不用当前材料补造原快照", async () => {
+    db.run("DELETE FROM scheduler_intents WHERE id = 'fx1'");
+    dispatch("T1", "fix", "legacy", H, 1, 2_100, false);
+    const before = events().length;
+    await reject(deliverLocal(OOS, { order: "legacy" }), "invalid", /缺少原始摘要/);
+    expect(events().length).toBe(before);
   });
 
   test("规格材料：订单原文摘要变了、持单期间有规格追加 → 不一致", () => {

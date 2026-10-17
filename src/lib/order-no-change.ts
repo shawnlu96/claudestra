@@ -6,9 +6,11 @@
  * 判定与事务在 ci-no-change-recovery.ts，外部证据在 ci-no-change-evidence.ts。tests/order-no-change.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
+import { specPathFor } from "./task-spec.js";
 import { createHash } from "node:crypto";
 import { getEventByDedup } from "./ledger-store.js";
-import type { LedgerEvent } from "./ledger-stages.js";
+import type { LedgerTask, LedgerEvent } from "./ledger-stages.js";
 
 const NO_CHANGE_KINDS = ["out_of_scope_ci", "main_already_resolved"] as const;
 export interface OutOfScopeCi { kind: "out_of_scope_ci"; reason: string; run: string; files: string[] }
@@ -152,3 +154,13 @@ export const NO_CHANGE_SCHEMA = {
   },
   required: ["kind", "reason"],
 } as const;
+
+/** Freeze resolved specification bytes at dispatch; timestamps cannot prove symlink targets stayed the same. */
+export function noChangeMaterialSnapshot(task: LedgerTask, docsDir: string | null): string | null {
+  const path = specPathFor(task, docsDir);
+  try {
+    if (!path && task.spec) return null;
+    const bytes = path ? readFileSync(path) : Buffer.alloc(0);
+    return createHash("sha256").update(JSON.stringify({ spec: task.spec, extra: task.extra, path })).update(bytes).digest("hex");
+  } catch { return null; /* Unreadable material has no trusted snapshot; noChange admission rejects it. */ }
+}
