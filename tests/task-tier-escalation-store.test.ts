@@ -3,6 +3,7 @@
  * 取消 / 等待 / 无归属不计；同批同时满足、重复进库、重开库、双进程同一批事实都只升一次；最高档只记触顶，已存最高档不回降。
  * 都是临时库，不碰真实状态目录。
  */
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -153,6 +154,33 @@ describe("[验收线 2] 只升一次", () => {
     expect(latestPlan(db, "p1", "T1")).toMatchObject({ value: "claude-opus-5-5", ts: 2 });
     expect(db.query("SELECT value, actual FROM esc_plans ORDER BY gen").all()).toEqual([
       { value: "claude-sonnet-5-5", actual: "claude-sonnet-5-5" }, { value: "claude-opus-5-5", actual: null }]);
+  });
+
+  test("[验收线 4] 上一版无 gen 的 esc_plans 旧库重开：迁成 gen=0、采用记录与其他状态保留，接续升档；反复重开不再迁", () => {
+    const path = join(tmp(), "esc.sqlite");
+    cleanups.push(() => closeEscalationStore(path));
+    const old = new Database(path);
+    old.exec(`CREATE TABLE esc_plans (project TEXT NOT NULL, card TEXT NOT NULL, family TEXT NOT NULL, step INTEGER NOT NULL, value TEXT NOT NULL,
+  ts INTEGER NOT NULL, launchId TEXT, sessionId TEXT, actual TEXT, PRIMARY KEY (project, card, family, step));
+CREATE TABLE esc_cards (project TEXT NOT NULL, card TEXT NOT NULL, fix INTEGER NOT NULL DEFAULT 0, ci INTEGER NOT NULL DEFAULT 0,
+  steps INTEGER NOT NULL DEFAULT 0, updatedAt INTEGER NOT NULL, PRIMARY KEY (project, card));
+INSERT INTO esc_plans VALUES ('p', 'T', 'claude', 1, 'claude-sonnet-5-5', 5, 'L1', 's1', 'claude-sonnet-5-5');
+INSERT INTO esc_cards VALUES ('p', 'T', 1, 0, 1, 5);`);
+    old.close();
+    const db = openEscalationStore(path);
+    expect(latestPlan(db, "p", "T")).toEqual({ family: "claude", step: 1, gen: 0, value: "claude-sonnet-5-5", ts: 5, launchId: "L1", sessionId: "s1",
+      actual: "claude-sonnet-5-5" });
+    expect(cardState(db, "p", "T")).toEqual({ fix: 1, ci: 0, steps: 1 });
+    expect(recordAdoption(db, { project: "p", card: "T", family: "claude", step: 1, gen: 0, launchId: "L2", sessionId: "s2", actual: "x" })).toBe(false);
+    settlePlan(db, { project: "p", card: "T", family: "claude", step: 2, value: "claude-opus-5-5", rank: 2, top: true, baseRank: 0, now: 6 });
+    expect(latestPlan(db, "p", "T")).toMatchObject({ step: 2, gen: 0, value: "claude-opus-5-5" });
+    for (let i = 0; i < 2; i++) {
+      closeEscalationStore(path);
+      const again = openEscalationStore(path);
+      expect(again.query("SELECT step, gen, value, actual FROM esc_plans ORDER BY step").all()).toEqual([
+        { step: 1, gen: 0, value: "claude-sonnet-5-5", actual: "claude-sonnet-5-5" }, { step: 2, gen: 0, value: "claude-opus-5-5", actual: null }]);
+      expect(again.query("SELECT name FROM sqlite_master WHERE name = 'esc_plans_v0'").all()).toEqual([]);
+    }
   });
 
   test("实际采用值：没证实的可被后来的启动替换，证实等于发出值后不翻案；原因同键一条", () => {

@@ -18,6 +18,8 @@ const ESCALATION_DB_PATH = statePath("task-tier-escalation.sqlite");
 /** 再有这么多次新失败（fix 或 CI 连红任一）才授予一级 */
 const ESCALATE_AFTER = 2;
 
+const PLANS_DDL = `CREATE TABLE IF NOT EXISTS esc_plans (project TEXT NOT NULL, card TEXT NOT NULL, family TEXT NOT NULL, step INTEGER NOT NULL, gen INTEGER NOT NULL,
+  value TEXT NOT NULL, ts INTEGER NOT NULL, launchId TEXT, sessionId TEXT, actual TEXT, PRIMARY KEY (project, card, family, step, gen))`;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS esc_facts (project TEXT NOT NULL, card TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, outcome TEXT NOT NULL,
   ts INTEGER NOT NULL, grantN INTEGER, PRIMARY KEY (project, card, id));
@@ -27,8 +29,7 @@ CREATE TABLE IF NOT EXISTS esc_grants (project TEXT NOT NULL, card TEXT NOT NULL
   evidence TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (project, card, n));
 CREATE TABLE IF NOT EXISTS esc_peaks (project TEXT NOT NULL, card TEXT NOT NULL, family TEXT NOT NULL, value TEXT NOT NULL, rank INTEGER NOT NULL,
   top INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY (project, card, family));
-CREATE TABLE IF NOT EXISTS esc_plans (project TEXT NOT NULL, card TEXT NOT NULL, family TEXT NOT NULL, step INTEGER NOT NULL, gen INTEGER NOT NULL,
-  value TEXT NOT NULL, ts INTEGER NOT NULL, launchId TEXT, sessionId TEXT, actual TEXT, PRIMARY KEY (project, card, family, step, gen));
+${PLANS_DDL};
 CREATE TABLE IF NOT EXISTS esc_notes (project TEXT NOT NULL, card TEXT NOT NULL, key TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL,
   PRIMARY KEY (project, card, key));`;
 
@@ -42,8 +43,25 @@ export function openEscalationStore(path: string = ESCALATION_DB_PATH): Database
   db.exec("PRAGMA busy_timeout = 5000");
   if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL");
   db.exec(SCHEMA);
+  migratePlans(db);
   cache.set(path, db);
   return db;
+}
+
+/**
+ * 上一版 esc_plans 没有 gen 列（主键 project, card, family, step）：CREATE TABLE IF NOT EXISTS 不改旧表，重开时在 immediate 事务里换成新表，
+ * 旧记录连同采用记录原样搬过来记作 gen=0；事务内再核一次，已迁过（别的进程先迁了 / 反复重开）的不动。其他表结构没变，状态原样保留。
+ */
+function migratePlans(db: Database): void {
+  const hasGen = () => db.query<{ name: string }, []>("PRAGMA table_info(esc_plans)").all().some((c) => c.name === "gen");
+  if (hasGen()) return;
+  db.transaction(() => {
+    if (hasGen()) return;
+    db.exec(`ALTER TABLE esc_plans RENAME TO esc_plans_v0; ${PLANS_DDL};
+INSERT INTO esc_plans (project, card, family, step, gen, value, ts, launchId, sessionId, actual)
+  SELECT project, card, family, step, 0, value, ts, launchId, sessionId, actual FROM esc_plans_v0;
+DROP TABLE esc_plans_v0;`);
+  }).immediate();
 }
 
 export function closeEscalationStore(path: string = ESCALATION_DB_PATH): void {
