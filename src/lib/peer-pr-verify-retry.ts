@@ -11,6 +11,7 @@
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { getTask } from "./ledger-store.js";
+import { setSchedulerVerifyGate } from "./ledger-write.js";
 import { recordPmTodo } from "./pm-todo-note.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { peerPrVerifyKey, schedulerCanDryRunVerify, schedulerCanVerify } from "./scheduler-verify-gate.js";
@@ -59,6 +60,9 @@ export function schedulerVerifyAllowed(db: Database, taskId: string, dedupKey: s
   }
   return baseline;
 }
+
+// recordVerify's own transactional recheck: the writer enforces the bind mode whoever calls it
+setSchedulerVerifyGate((db, taskId, dedupKey, now) => schedulerVerifyAllowed(db, taskId, dedupKey, { record: true, now }));
 
 type Attempts = { count: number; last: number | null; anyLast: number | null };
 function attempts(db: Database, project: string, taskId: string, key: string): Attempts {

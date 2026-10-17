@@ -138,10 +138,20 @@ describe("[验收线 2] on: only the exact current key with every check green mo
     expect(await c.verify("--dedup", peerPrVerifyKey(db, "PR401")!, "--pass-only")).toMatchObject({ ok: false, recorded: false });
     expect(verifies()).toHaveLength(0);
   });
-  test("the writer refuses a direct call with the strict gate and no key", () => {
-    expect(() => recordVerify(db, { actor: "scheduler" }, { taskId: "PR401", result: "pass", data: { checks: [{ id: "pr-merged", status: "pass" }] },
-      schedulerGate: (d) => schedulerCanVerify(d, "PR401", undefined, { autoVerifyOn: true }) })).toThrow();
-    expect(task().stage).toBe("live");
+  // r1 P1: the exported writer itself enforces the binding; no caller-supplied authorization exists to forget or replace
+  const direct = (dedupKey?: string) => recordVerify(db, { actor: "scheduler", now: 10_000, ...(dedupKey ? { dedupKey } : {}) },
+    { taskId: "PR401", result: "pass", data: { checks: [{ id: "pr-merged", status: "pass" }] } });
+  test("writer boundary must refuse missing dedup when bind is on", () => {
+    expect(() => direct()).toThrow(); expect(() => direct("deploy-verify:x")).toThrow();
+    expect(verifies()).toHaveLength(0); expect(task().stage).toBe("live");
+  });
+  test("writer boundary refuses the current key while peerPrAutoVerify is off, and accepts it when on", () => {
+    policy("on", "off"); expect(() => direct(peerPrVerifyKey(db, "PR401")!)).toThrow(); expect(verifies()).toHaveLength(0);
+    policy("on"); expect(direct(peerPrVerifyKey(db, "PR401")!).row.stage).toBe("verified"); expect(verifies()).toHaveLength(1);
+  });
+  test.each(["observe", "off"] as const)("writer boundary under %s keeps the baseline answer", (mode) => {
+    policy(mode); expect(direct().row.stage).toBe("verified");
+    expect(bindNotes()).toHaveLength(mode === "observe" ? 1 : 0); // observe records the refusal it would make, once
   });
 });
 

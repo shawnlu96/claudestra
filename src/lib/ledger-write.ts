@@ -286,6 +286,14 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
   });
 }
 
+type SchedulerVerifyGate = (db: Database, taskId: string, dedupKey: string | undefined, now: number) => boolean;
+/** Until peer-pr-verify-retry.ts installs the peerPrVerifyBind gate, a peer card fails closed (strict binding, peerPrAutoVerify taken as off). */
+let schedulerVerifyGate: SchedulerVerifyGate = (db, taskId, dedupKey) => schedulerCanVerify(db, taskId, dedupKey, { autoVerifyOn: false });
+/** Wiring only (peer-pr-verify-retry.ts): recordVerify rechecks this in its own transaction; callers cannot pass a gate per call */
+export function setSchedulerVerifyGate(fn: SchedulerVerifyGate): void {
+  schedulerVerifyGate = fn;
+}
+
 /**
  * 完成检查单的结论（ledger-probes.ts 判好的）：记 verify 事件；pass 时同一事务推 live → verified。
  * 角色由这里现算（只有 PM / master / owner），任务必须还在 live——采集事实期间被人推走了就 conflict，不记一条过期的结论；
@@ -294,15 +302,13 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
 export function recordVerify(
   db: Database,
   ctx: WriteCtx,
-  input: { taskId: string; result: "pass" | "fail" | "unknown"; data: Record<string, unknown>; text?: string;
-    /** The scheduler's gate rechecked in this transaction (peer-pr-verify-retry.ts schedulerVerifyAllowed); not given = schedulerCanVerify */
-    schedulerGate?: (db: Database) => boolean },
+  input: { taskId: string; result: "pass" | "fail" | "unknown"; data: Record<string, unknown>; text?: string },
 ): WriteResult<LedgerTask> {
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "verify" }, () => task);
     if (dup) return dup;
-    const may = ctx.actor === "scheduler" ? (input.schedulerGate?.(db) ?? schedulerCanVerify(db, task.id, ctx.dedupKey)) : isManager(db, ctx.actor, task);
+    const may = ctx.actor === "scheduler" ? schedulerVerifyGate(db, task.id, ctx.dedupKey, ctx.now ?? Date.now()) : isManager(db, ctx.actor, task);
     if (!may) throw new LedgerError("forbidden", `记完成检查要项目 ${task.project} 的 PM / master / owner 或部署过本卡的调度服务（你是 ${ctx.actor}）`);
     if (task.stage !== "live") throw new LedgerError("conflict", `任务 ${task.id} 当前阶段是 ${task.stage}，不是 live`, { stage: task.stage, rev: task.rev });
     if (input.result === "pass" && !checksAllClear(input.data.checks, input.data.incomplete)) {

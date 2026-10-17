@@ -4,7 +4,6 @@
  * `stage --to verified` 已经堵死（lib/ledger-write.ts VERIFY_HINT），进 verified 只有这一条路。--dry-run 只看结果不写库，执行者也能跑。
  * 探针（PR / 网页 / daemon）只认得本仓库：明确判定任务不属于本仓库时只核证据文件；判断不了按推断不全处理（不放行）。
  */
-import type { Database } from "bun:sqlite";
 import { daemonsOfFromRepo } from "../lib/ledger-daemon-map.js";
 import {
   blockingSummary,
@@ -222,8 +221,7 @@ async function verify(c: LedgerCli): Promise<Result> {
 
   const data = { checks: v.checks, checklistSource: pl.source, incomplete: pl.incomplete, ...(pl.incompleteReason ? { incompleteReason: pl.incompleteReason } : {}), evidence, ...noteOut };
   if (c.p.bools.has("pass-only") && v.result !== "pass") return { ok: false, code: "unverified", recorded: false, ...out }; // PMHAND1 12：结清后自动 verify 只记通过
-  const schedulerGate = (db: Database) => schedulerVerifyAllowed(db, task.id, c.p.flags.dedup, { record: true, now: c.deps.now() }); // rechecked in the write
-  const r = recordVerify(c.db, c.ctx(), { taskId: task.id, result: v.result, data, text: c.p.flags.text, schedulerGate });
+  const r = recordVerify(c.db, c.ctx(), { taskId: task.id, result: v.result, data, text: c.p.flags.text }); // the writer rechecks the scheduler gate
   if (r.duplicate) return { ok: r.event.data.result === "pass", task: r.row, event: r.event, duplicate: true }; // 并发重放：结论以当时记下的为准
   if (v.result === "pass") return { ok: true, moved: true, task: r.row, event: r.event, ...out };
   return { ok: false, code: "unverified", error: `检查单没过，任务留在 live：${summary}${note ? `；${fillNote(note)}` : ""}`, moved: false, task: r.row, event: r.event, ...out };
