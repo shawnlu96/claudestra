@@ -13,6 +13,7 @@ import { getWorkflow, WORKFLOW_TEMPLATES } from "../src/lib/ledger-scheduler.js"
 import { statePath } from "../src/lib/paths.js";
 import { useRoleModelPort } from "../src/lib/role-model-settings-local.js";
 import { defaultRoleModels, type RoleModelRead } from "../src/lib/role-model-settings.js";
+import { configureSchedulerV2Intents } from "../src/lib/scheduler-v2-intent.js";
 import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { git } from "../src/lib/scheduler-review-worktree.js";
@@ -23,7 +24,7 @@ import { autoFixture } from "./scheduler-auto-helpers.js";
 import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
 
 const cleanups: (() => void)[] = [];
-afterEach(() => { useTaskTierPort(); useRoleModelPort(); for (const c of cleanups.splice(0)) c(); });
+afterEach(() => { configureSchedulerV2Intents(null); useTaskTierPort(); useRoleModelPort(); for (const c of cleanups.splice(0)) c(); });
 const card = (head: string, body = "## 背景\n模板：ui\n") => `前言里的 模板：security 不算\n# 卡\n${head}\n${body}`;
 const mode = (m: "on" | "observe" | "off") => useTaskTierPort({ policy: () => ({ mode: m, manualAfterMs: null, source: "config" }) });
 
@@ -190,6 +191,7 @@ describe("[验收线 1] 审查员启动也核对现在的规格卡首声明（�
 
   /** 临时台账已有 code 流程；task.spec 指向可读的规格卡（卡首声明由参数定）；真实 autoTickDeps.ensure，只替换 create */
   async function setup(head: string, tierMode: "on" | "off") {
+    configureSchedulerV2Intents(null); // This fixture exercises local launches; imported cleanup hooks may belong to another file.
     useTaskTierPort({ policy: () => ({ mode: tierMode, manualAfterMs: null, source: "config" }), read: table });
     useRoleModelPort({ policy: () => ({ mode: "off", manualAfterMs: null, source: "config" }), read: table, observe: () => undefined });
     const root = mkdtempSync(join(sandbox, "tmp", "rv-")), project = join(root, "project");
@@ -210,6 +212,15 @@ describe("[验收线 1] 审查员启动也核对现在的规格卡首声明（�
     const d = autoTickDeps(f.db, { registryPath: f.registryPath, worktreeRoot: join(root, "worktrees"), readConfig: cfg, create });
     return { f, d, calls, close: () => { f.close(); rmSync(root, { recursive: true, force: true }); } };
   }
+
+  test("本机类型启动 fixture 隔离前一文件残留的 V2 skip 端口", async () => {
+    configureSchedulerV2Intents({ route: () => "skip", wrapManager: (m) => m, central: () => null, observe: () => {} });
+    const local = await setup("模板：code", "on");
+    try {
+      await local.d.ensure(getTask(local.f.db, "T1")!, "reviewer", "claude");
+      expect(local.calls).toHaveLength(1);
+    } finally { configureSchedulerV2Intents(null); local.close(); }
+  });
 
   test("on：规格卡首已改成 security（已存 code 流程）= 冲突拒绝，不调 create；重复声明同样拒", async () => {
     for (const head of ["模板：security", "模板：code\n模板：ui"]) {

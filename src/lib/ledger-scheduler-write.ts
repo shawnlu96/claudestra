@@ -1,3 +1,4 @@
+import { noChangeMaterialSnapshot } from "./order-no-change.js";
 import { requireMergeQueueOwner } from "./merge-queue-owner.js";
 /** Scheduler-only ledger writes: every decision and resource claim is one compare-and-swap transaction. */
 import type { Database } from "bun:sqlite";
@@ -243,6 +244,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${id}` }, {
       project: task.project, target: task.id, kind: "scheduler", text: reason,
       data: { op: "plan", id, node, action: input.action, recipient, resources, causalSeq: input.causalSeq,
+        materialSnapshot: input.action === "dispatch" ? noChangeMaterialSnapshot(task, getMeta(db, task.project).docsDir) : null,
         taskRev: task.rev, specRev: task.specRev, round: task.round, head: task.headSHA, template: workflow.template, version: workflow.templateVersion,
         ...(released.length ? { releasedSlots: released } : {}), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);

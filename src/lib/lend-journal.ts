@@ -11,6 +11,7 @@ import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
 import type { TakeFact } from "./pool-review-proof-ticket.js";
 import type { ModelSuggest } from "./lend-wire-types.js";
+import type { NoChange } from "./order-no-change.js";
 import { guardDefaultLendJournal } from "./test-guard.js";
 
 export const LEND_JOURNAL_PATH = statePath("lend", "journal.sqlite");
@@ -69,8 +70,11 @@ export interface LendRow {
   submit: "sending" | "sent" | null;
   payload: Record<string, unknown> | null;
   payloadSha: string | null;
-  /** 写单：worker 交来的 head / 一行摘要 / 自查（lend submit 落的）；推送、开 PR 之后才拼成 payload 发给 A。ui = 交了截图（LENDUI2，升级前的单没有） */
-  work: { head: string; summary: string; selfCheck: string; ui?: WorkUi } | null;
+  /**
+   * 写单：worker 交来的 head / 一行摘要 / 自查（lend submit 落的）；推送、开 PR 之后才拼成 payload 发给 A。ui = 交了截图（LENDUI2，升级前的单没有）；
+   * noChange = 核实无需改码（CINOOP1，order-no-change.ts），这时 head 就是订单起点，不推送、不开 PR（lend-drive.ts）
+   */
+  work: { head: string; summary: string; selfCheck: string; ui?: WorkUi; noChange?: NoChange } | null;
   receipt: Record<string, unknown> | null;
   reason: string | null;
   /** 终态之后还没做完的外部效果（lend-drive.ts settleOrder）：和终态同一次写入，做完清成 null；非 null 的单每轮补做 */
