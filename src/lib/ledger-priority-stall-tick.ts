@@ -7,17 +7,19 @@ import { readPriorityModes } from "./ledger-priority-read.js";
 import { priorityStallBases } from "./ledger-priority-stall-read.js";
 import type { StallCommand } from "./ledger-priority-stall-command.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
+import { cursorKey, keepBudgetTail, keepStoppedTail, takeCursor } from "./priority-stall-cursor.js";
 
 interface Ports {
   manager(...args: string[]): Promise<Record<string, unknown>>;
   active(): void;
   now?(): number;
   budgetMs?: number;
+  /** priorityStallCursor switch (tests inject); absent = recovery-policy.json */
+  recovery?: RecoveryPolicyPort;
 }
 
 const PRIORITY_STALL_BUDGET_MS = 60_000;
-// Keep identities, not stale facts: targets can finish or change mode between rounds.
-const pendingTargets = new WeakMap<Database, string[]>();
 
 /** All business writes go through manager; an off project is never scanned for cards or asks. Nothing is pushed to the PM. */
 export async function priorityStallTick(db: Database, config: SchedulerConfig, ports: Ports): Promise<{ taskId: string; error: string }[]> {
@@ -28,16 +30,14 @@ export async function priorityStallTick(db: Database, config: SchedulerConfig, p
     if (readPriorityModes(db, project).priorityStall.mode === "off") return [];
     const now = ports.now?.() ?? Date.now();
     return priorityStallBases(db, project, undefined, now).filter((b) => priorityStallDue(db, b, now))
-      .map((b) => [JSON.stringify([project, b.key]), b] as const);
+      .map((b) => [cursorKey(project, b.key), b] as const);
   }));
-  const pending = (pendingTargets.get(db) ?? []).filter((key) => due.has(key));
-  const queued = new Set(pending), keys = [...pending, ...[...due.keys()].filter((key) => !queued.has(key))];
-  pendingTargets.delete(db);
+  const keys = takeCursor(db, new Set(due.keys()), ports.recovery);
   let processed = 0;
   for (let index = 0; index < keys.length; index++) {
     // Always finish one target; even a single slow command must not starve the tail forever.
     if (processed > 0 && clock() - started >= budgetMs) {
-      pendingTargets.set(db, keys.slice(index));
+      keepBudgetTail(db, keys.slice(index));
       console.log(`[priority-stall] budget exhausted: processed=${processed} remaining=${keys.length - index}`);
       break;
     }
@@ -71,7 +71,14 @@ export async function priorityStallTick(db: Database, config: SchedulerConfig, p
         break;
       }
     } catch (e) {
-      if (e instanceof SchedulerStopped) throw e;
+      if (e instanceof SchedulerStopped) {
+        // Stopped inside this target: it and the tail are unfinished; targets before it are done and stay behind.
+        keepStoppedTail(db, keys.slice(index).map((key) => {
+          const t = due.get(key)!;
+          return { key, project: t.project, taskId: t.taskId, rev: () => priorityStallRevision(db, t.project, t.key) };
+        }), { policy: ports.recovery, now: ports.now?.() });
+        throw e;
+      }
       failed.push({ taskId: b.taskId ?? b.key, error: String(e) });
     }
   }
