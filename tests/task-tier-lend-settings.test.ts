@@ -13,6 +13,11 @@ import { readTierLendSettings, saveTierLendSettings, TIER_LEND_SETTINGS_PATH } f
 import { tierLendGate } from "../src/lib/task-tier-lend.js";
 import { useTaskTierPort } from "../src/lib/task-tier-models.js";
 import { TIER_LEND_SETTINGS_CMDS } from "../src/manager/ledger-task-tier-lend-settings-cmd.js";
+import { handleLocalApi } from "../src/bridge/local-api/index.js";
+import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
+import type { Registry } from "../src/manager/core.js";
+import type { LedgerDeps } from "../src/manager/ledger-context.js";
+import { runLedger } from "../src/manager/ledger.js";
 
 const at = "2026-10-01T00:00:00Z";
 const cred = (grant: Grant): DeviceCredential => ({ id: "dev_x", v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" });
@@ -104,5 +109,35 @@ describe("[验收线 2] 网页入口与管理入口共用同一模块与权限",
     expect(await cmd.run(cli("master", ["set", "off"], { rev: "0" }))).toEqual({ ok: true, acceptDowngrade: false, rev: 1 });
     expect(() => cmd.run(cli("agent-pm", ["set", "on"], { rev: "1" }))).toThrow("只有本机 owner 或 master");
     expect(await cmd.run(cli("agent-pm", ["show"]))).toMatchObject({ acceptDowngrade: false, rev: 1 });
+  });
+});
+
+describe("[验收线 2] 正式入口：ledger 命令表、local-api FAMILIES、设置页都接上了", () => {
+  test("ledger 正式分发：runLedger tier-lend-settings show / set；agent 改被拒", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tier-lend-cli-"));
+    dirs.push(dir);
+    const path = join(dir, "ledger.sqlite"), db = openLedger(path);
+    try {
+      const deps = (actor: string): LedgerDeps => ({ db, actor, projectIds: ["p"], now: () => 5,
+        loadRegistry: async () => ({ socket: "", agents: {} }) as unknown as Registry, saveRegistry: async () => {} });
+      expect(await runLedger(["tier-lend-settings", "show"], deps("owner"))).toMatchObject({ ok: true, acceptDowngrade: true, rev: 0 });
+      expect(await runLedger(["tier-lend-settings", "set", "off", "--rev", "0"], deps("agent-x"))).toMatchObject({ ok: false });
+      expect(await runLedger(["tier-lend-settings", "set", "off", "--rev", "0"], deps("master"))).toMatchObject({ ok: true, acceptDowngrade: false, rev: 1 });
+      expect(readTierLendSettings().settings).toMatchObject({ acceptDowngrade: false, updatedBy: "master" });
+    } finally { closeLedger(path); }
+  });
+
+  test("local-api 正式分发：handleLocalApi 路由到本卡端口；peer / agent 403，owner 全权设备可读", async () => {
+    const call = (p: Principal, init?: RequestInit) => handleLocalApi(new Request(URL_, init), new URL(URL_), p);
+    expect(await json(await call(OWNER))).toEqual({ status: 200, body: { ok: true, status: "missing", acceptDowngrade: true, rev: 0 } });
+    for (const [, p] of DENIED) expect((await call(p, { method: "PUT", body: JSON.stringify({ rev: 0, acceptDowngrade: false }) }))!.status).toBe(403);
+    expect(readTierLendSettings().status).toBe("missing");
+  });
+
+  test("设置页：出借页渲染独立的 TaskTierLendSettingsSection（不改角色表组件）", () => {
+    const pages = readFileSync(join(import.meta.dir, "../web/features/chat/components/settings/pages.tsx"), "utf8");
+    expect(pages).toContain('import { TaskTierLendSettingsSection } from "./task-tier-lend-settings-section";');
+    const lend = pages.slice(pages.indexOf("<LendPanel />"), pages.indexOf("<BorrowPanel />"));
+    expect(lend).toContain("<TaskTierLendSettingsSection />");
   });
 });

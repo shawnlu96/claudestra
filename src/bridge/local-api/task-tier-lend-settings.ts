@@ -53,3 +53,6 @@ export function makeTierLendSettingsApi(deps: Partial<TierLendSettingsDeps> = {}
     return apiJson(405, { ok: false, error: "method not allowed" });
   };
 }
+
+/** local-api/index.ts FAMILIES 里挂的生产实例 */
+export const handleTierLendSettingsApi = makeTierLendSettingsApi();

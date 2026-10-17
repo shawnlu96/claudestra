@@ -83,6 +83,7 @@ import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
 import { MAIN_CI_CMDS } from "./ledger-main-ci-cmds.js";
 import { LEND_AUTHOR_RETIRE_CMDS } from "../lib/lend-author-retire-cmds.js";
+import { TIER_LEND_SETTINGS_CMDS } from "./ledger-task-tier-lend-settings-cmd.js";
 import { MAIN_RED_FIX_CMDS, MAIN_RED_FIX_SERVICE } from "../lib/main-red-fix-cmds.js";
 import { AUTHOR_REBUILD_CMDS } from "../lib/scheduler-author-rebuild-cmds.js";
 import { PMAUTO_CMDS, PMAUTO_SERVICE } from "./ledger-observation-wiring.js";
@@ -141,6 +142,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...PMAUTO_CMDS, // 观察期登记与普通 P2 积压（PMAUTO1）
   ...MANUAL_CASE_CMDS, // 人工处置段只读视图（VIEW1）
   ...REMOTE_REVIEW_CMDS, // 仓库方审查结论入账（RRL-1）
+  ...TIER_LEND_SETTINGS_CMDS, // 出借方「接受降档建议」开关（TIER3b）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 export function ledgerUsage(): string {

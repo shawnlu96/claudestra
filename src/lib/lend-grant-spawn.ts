@@ -11,7 +11,6 @@ import { Database } from "bun:sqlite";
 import { isCodexEffort, isCodexModel, LEND_PATH, readLendSync } from "./lend-config.js";
 import { existsSync } from "node:fs";
 import { getOrder, LEND_JOURNAL_PATH, LIVE_STATES, type LendRow, type LendState } from "./lend-journal.js";
-import { lendCardRole } from "./role-model-settings-lend.js";
 import { lendLaunchChoice, noteLendChoice, tierLendGate, type LendChoice } from "./task-tier-lend.js";
 import { lendStopReason } from "./lend-watchdog.js";
 import { isLendWorkerName } from "./runtimes/clean-env.js";
@@ -82,15 +81,15 @@ export function lendModelArgs(db: Database, orderId: string, lendPath = LEND_PAT
 }
 
 /**
- * 授权参数之上再看 A 的建议（TIER3b，task-tier-lend.ts）：本机 taskTierModels 不是 on、「接受降档建议」关、或这单没带建议 = 授权原参数，与改前一字不差。
- * 出借服务组参数与 manager create 最终闸口用同一个算法；refuse（security 下限证明不了）由闸口拒起。
+ * 授权参数之上再看 A 的建议（TIER3b，task-tier-lend.ts）：本机 taskTierModels 不是 on、「接受降档建议」关、或这单的建议没带 A 给的类型（旧 A / 没协商）
+ * = 授权原参数，与改前一字不差（连门都不读）。出借服务组参数与 manager create 最终闸口用同一个算法；refuse（security 下限证明不了）由闸口拒起。
  */
 function orderChoice(row: ChoiceRow, lendPath: string): LendChoice {
   const grantArgs = row.family === "codex" ? choiceArgs(row.peer, row.fp, lendPath) : [];
-  if (!row.wire?.suggest) return { args: grantArgs, active: false, accepted: false, tier: null };
+  if (row.wire?.suggest?.tier === undefined) return { args: grantArgs, active: false, accepted: false, tier: null };
   const o = row.wire.order;
-  const role = lendCardRole(String(o.step ?? ""), typeof o.node === "string" ? o.node : null);
-  return lendLaunchChoice({ family: row.family, role, text: row.wire.text, suggest: row.wire.suggest, grantArgs }, tierLendGate());
+  return lendLaunchChoice({ family: row.family, step: String(o.step ?? ""), node: typeof o.node === "string" ? o.node : null, suggest: row.wire.suggest, grantArgs },
+    tierLendGate());
 }
 
 /** 这个 peer 当下授权里的模型 / 推理档参数：出借服务组 create 参数和 manager create 最终闸口用同一个算法 */
