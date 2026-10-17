@@ -13,7 +13,6 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { builtinProjectDeclaration } from "./project-decl-builtin.js";
 import { parseProjectDeclaration, parseProjectJson, remoteIdentity, type DeclProvenance, type ProjectDeclaration } from "./project-decl-schema.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
@@ -80,12 +79,17 @@ type UiIdentityPort = (project: string) => UiRepoIdentity;
 export interface UiInputsDeps { identity?: UiIdentityPort; read?: (project: string) => GitRead }
 
 const configRepo = (project: string): string | null => { try { return readSchedulerConfig().projects[project]?.repoDir ?? null; } catch { return null; } };
-/** Default: the configured repoDir's origin; Floka only through the built-in's own remote + shipped-ancestry check. */
+/**
+ * project-decl-builtin.ts isFlokaDeclRepository's two facts (canonical remote, shipped verification commit in the target's ancestry),
+ * re-read here through gitIn so the scheduler pass gains no new effect file; tests/project-ui-inputs.test.ts pins both to the built-in.
+ */
+export const FLOKA_DECL_REMOTE = "shawnlu96/claudestra", FLOKA_DECL_VERIFIED_HEAD = "21719e92853414b98ba8863691d341967b54116e";
+/** Default: the configured repoDir's origin; Floka only through the built-in's remote + shipped-ancestry check. */
 const defaultUiIdentity: UiIdentityPort = (project) => {
   const root = configRepo(project);
   let remote: string | null = null;
   try { if (root) remote = remoteIdentity(gitIn(root)("remote", "get-url", "origin").toString().trim()); } catch { remote = null; /* no origin: unknown */ }
-  return { remote, isFloka: (targetHead) => !!root && !!remote && builtinProjectDeclaration({ root, remote, targetBranch: "main", targetHead, tree: new Map() }) !== null };
+  return { remote, isFloka: (targetHead) => !!root && remote === FLOKA_DECL_REMOTE && isAncestor(gitIn(root), FLOKA_DECL_VERIFIED_HEAD, targetHead) };
 };
 const defaultUiRead = (project: string): GitRead => {
   const root = configRepo(project);

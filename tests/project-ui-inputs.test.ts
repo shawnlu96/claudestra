@@ -15,7 +15,8 @@ import type { LedgerEvent, LedgerTask } from "../src/lib/ledger-stages.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import type { PmUiGate } from "../src/lib/ledger-ui-approve-verdict.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { FLOKA_UI_INPUTS, judgeUiInputs, projectUiInputsMode, uiGlobMatch, uiInputsGate, type UiRepoIdentity } from "../src/lib/project-ui-inputs.js";
+import { builtinProjectDeclaration } from "../src/lib/project-decl-builtin.js";
+import { FLOKA_DECL_REMOTE, FLOKA_DECL_VERIFIED_HEAD, FLOKA_UI_INPUTS, judgeUiInputs, projectUiInputsMode, uiGlobMatch, uiInputsGate, type UiRepoIdentity } from "../src/lib/project-ui-inputs.js";
 import type { RecoveryMode, RecoveryPolicy, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { ownGlobsCarryPlan } from "../src/lib/scheduler-ui-carry-own-globs.js";
 import { gitIn } from "../src/lib/scheduler-ui-carry-proof.js";
@@ -185,6 +186,12 @@ describe("Floka: the built-in declaration digests this repository's own HEAD exa
       identity: { remote: "shawnlu96/claudestra", isFloka: () => true } });
     expect(v.ok && { inputs: v.summary.inputs, count: v.summary.count }).toEqual({ inputs: old.digest, count: old.count });
     expect(FLOKA_UI_INPUTS.renderInputs).toContain("src/bridge/**");
+  });
+  test("the Floka check is the built-in's own: same remote, same shipped verification head", () => {
+    const head = gitIn(process.cwd())("rev-parse", "HEAD").toString().trim();
+    const d = builtinProjectDeclaration({ root: process.cwd(), remote: FLOKA_DECL_REMOTE, targetBranch: "main", targetHead: head, tree: new Map() });
+    expect(d?.repository.remote).toBe(FLOKA_DECL_REMOTE);
+    expect(d?.validation.author[0]?.provenance.verifiedHead).toBe(FLOKA_DECL_VERIFIED_HEAD);
   });
 });
 
