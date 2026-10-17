@@ -390,6 +390,7 @@ describe("写事件的底座只给写入模块", () => {
       "lib/memory-retrieve-order.ts", "lib/merge-content-review.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts", "lib/private-merge-ledger.ts",
       "lib/recovery-machine-policy.ts", "lib/recovery-peer-lease-handover.ts", "lib/recovery-policy.ts",
       "lib/remote-review-bounce.ts", "lib/remote-review-ledger.ts",
+      "lib/remote-review-legacy.ts",
       "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy-reconcile-write.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts",
       "lib/scheduler-merge-handoff.ts",

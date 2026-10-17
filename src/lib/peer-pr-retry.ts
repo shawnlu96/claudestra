@@ -228,6 +228,7 @@ function capLine(next: string): string[] {
  */
 export function renderRedeliveryPush(reviewPush: string, round: number, task: Pick<LedgerTask, "stage">, legacy = false): string | null {
   const [title, head, id, next, ...rest] = reviewPush.split("\n");
+  // The repo line stays in rest, and head is kept whole: a resend must carry the original repo+PR+full SHA unchanged.
   if (!title || !id?.startsWith("报告编号：") || !next?.startsWith("下一步：")) return null;
   const state = MERGED.has(task.stage) ? "该 PR 已合并，这条不需要你做任何动作。" : "这条不要求你动作；下一步以调度器之后的消息为准。";
   return [title, `投递补发：这是第 ${round} 轮原审查报告的补发（原投递当时没有送达），不是新的审查结论；结论、head 与报告都是原审查当时的。`,

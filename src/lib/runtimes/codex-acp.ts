@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { channelInstructions } from "../channel-instructions.js";
 import { shellEscape } from "../claude-launch.js";
 import { BOOTSTRAP_PROMPT, codexDeveloperInstructions, codexEffort, codexModel } from "../codex-launch.js";
+import { effectiveCodexMode, isReadOnlyMode, PERMISSION_MODE_ENV, registryPermissionMode } from "../codex-readonly.js";
 import { recordCodexRunning } from "../codex-version.js";
 import { acpLogDir } from "../log-paths.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
@@ -37,10 +38,10 @@ const BOOTSTRAP_TIMEOUT_MS = 180_000;
 const mcpName = () => process.env.MCP_NAME || "claudestra";
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
-export function buildAcpHostCommand(
-  spec: LaunchSpec,
-  o: { bunBin: string; repoRoot: string; codexBin?: string; env?: Record<string, string | undefined>; writePayload?: typeof writeLaunchPayload },
-): string {
+export function buildAcpHostCommand(spec: LaunchSpec, o: {
+  bunBin: string; repoRoot: string; codexBin?: string; env?: Record<string, string | undefined>; permissionLookup?: (agent: string) => string | undefined;
+  writePayload?: typeof writeLaunchPayload;
+}): string {
   const agent = spec.agentName || spec.settingsName;
   if (!agent) throw new Error("ACP 宿主需要 agent 名（LaunchSpec.agentName / settingsName）");
   if (!spec.sessionId) throw new Error("ACP 宿主需要 thread id（new 先经 prepareSession 引导）");
@@ -61,6 +62,8 @@ export function buildAcpHostCommand(
     [ACP_AGENT_ENV, sandbox ? undefined : env[ACP_AGENT_ENV]?.trim() || undefined],
     ...(sandbox ? Object.entries(sandboxAcpHome(env[SANDBOX_ROOT_ENV])) : []),
     [CLEAN_ENV_FLAG, clean ? "1" : undefined],
+    // 只读档：宿主据此只起自研适配器、给它只读预设（acp/adapter-proc.ts）；spec 漏了档位就按 registry 兜（codex-readonly.ts）
+    [PERMISSION_MODE_ENV, isReadOnlyMode(effectiveCodexMode(spec, o.permissionLookup)) ? "readOnly" : undefined],
   ];
   // 职责前言 / developer 指令进一次性文件、命令只带路径（acp-launch-payload.ts：命令太长会被 tty 截断）。
   // 重启 / 收编：developer_instructions 只在建线程那一轮生效，首条入站附前言（与 tmux 同一份文字）
@@ -74,7 +77,10 @@ export function buildAcpHostCommand(
 /** create 的引导：起一个短命的适配器，新建线程并跑一轮，返回 thread id（不挂 claudestra MCP，频道相关的环境变量全清掉） */
 async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promise<string> {
   if (!spec.cwd) throw new Error("Codex（ACP）新建会话需要工作目录（LaunchSpec.cwd）");
-  const agent = acpAgentCommand(process.env, deps.bunBin, undefined, isLendWorkerName(spec.agentName));
+  // 引导轮（create / fork）同样只读：只起自研适配器、只读预设
+  const permissionMode = effectiveCodexMode(spec, registryPermissionMode);
+  const base = isReadOnlyMode(permissionMode) ? { ...process.env, [PERMISSION_MODE_ENV]: "readOnly" } : process.env;
+  const agent = acpAgentCommand(base, deps.bunBin, undefined, isLendWorkerName(spec.agentName));
   if ("error" in agent) throw new Error(agent.error);
   const codexPath = agent.stub ? undefined : ((await deps.resolveBin()) ?? undefined);
   const developerInstructions = spec.mode === "fork" ? undefined : codexDeveloperInstructions({
@@ -84,7 +90,7 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   const workerRoot = clean ? makeWorkerRoot() : undefined; // 引导轮的 codex 同样不拿生产状态目录（clean-env.ts workerPrivateDirs），finally 里删
   const env = adapterEnv({
     base: process.env, bunBin: deps.bunBin, channelServer: join(deps.repoRoot, "src/channel-server.ts"), mcpName: mcpName(),
-    codexPath, logsDir: acpLogDir("bootstrap"), developerInstructions, clean, workerRoot,
+    codexPath, logsDir: acpLogDir("bootstrap"), developerInstructions, clean, workerRoot, permissionMode,
   });
   const logs: string[] = [];
   const proc = spawnAdapter(agent.cmd, env, spec.cwd, (m) => logs.push(m));

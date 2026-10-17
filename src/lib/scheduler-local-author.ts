@@ -23,6 +23,7 @@ import type { Rebuild } from "./scheduler-author-rebuild-checkout.js";
 import { lendAuthorCheckout } from "./lend-author-retire-checkout.js";
 import type { EnsureResult } from "./worker-session.js";
 import { bindTierSession, taskTierMode, type TierLaunchCtx } from "./task-tier-models.js";
+import { freshAuthorPlan, lendReturnLocalMode, plannedAuthorFamily } from "./lend-return-local.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface LocalAuthorEnv {
@@ -80,8 +81,12 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
   const intent = claimed(env, task, rebuild?.replaces);
   if (!intent) return { kind: "wait", reason: "作者建会话意图已改变，下一轮重算" };
   const policy = readSchedulerConfig(opts.configPath).projects[task.project], made: { agent?: string } = {}; // made: AREB1 Created
+  const back = !rebuild && lendReturnLocalMode(task.project) === "on"; // LENDBACK1 (lend-return-local.ts)
   const family = rebuild?.family ?? handoverRuntime(env.db, task) // PEERLEASE1: the handover's frozen runtime, on only
+    ?? (back ? plannedAuthorFamily(env.db, task, intent) : null) // the planner's family fixed by the delivered head: wait for its seat
     ?? (policy?.agents ? poolAuthorRuntime(task.project, policy.agents, env.db.filename) : localAuthorRuntime(task.project, opts.configPath));
+  const fresh = back ? await freshAuthorPlan(env.db, task.id, p, family, env.registryRow, env.git) : null; // a stale row's name and checkout
+  if (fresh) p = fresh; // the writer walks the same names (freshAuthorName)
   const guard = () => {
     env.active();
     if (claimed(env, task, rebuild?.replaces)?.id !== intent.id) throw new Error("卡或建会话意图已改变，停止本次创建");

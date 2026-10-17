@@ -25,8 +25,10 @@ let seq: number;
 const ctx = (now = NOW) => ({ actor: "owner", now });
 const rows = () => db.query("SELECT peer, family, until, reason FROM lend_peer_cooldowns ORDER BY peer, family").all() as
   { peer: string; family: string; until: number; reason: string }[];
-const setMode = (mode: "on" | "observe" | "off" | null) => mode === null ? rmSync(RECOVERY_POLICY_PATH, { force: true })
-  : writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { lendRuntimeCooldown: mode } } } }));
+const setMode = (mode: "on" | "observe" | "off" | null, extra: Record<string, string> = {}) => mode === null ? rmSync(RECOVERY_POLICY_PATH, { force: true })
+  : writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { lendRuntimeCooldown: mode, ...extra } } } }));
+/** LENDBACK1 (lend-return-local.ts) drops any pin on a not_started peer; these pins are this mechanism's alone with it off. */
+const OLD_PIN = { lendReturnLocal: "off" };
 
 function hello(peer: string, now = NOW, quota?: HelloRequest["quota"]) {
   return recordHello(db, peer, null, { v: 1, proto: 2, boot: "boot", seq: ++seq, paused: null, ...(quota ? { quota } : {}),
@@ -240,6 +242,7 @@ test("[验收线 2] a second not_started of the same (peer, family) in 30 minute
 });
 
 test("[验收线 3] a write order that cools its peer comes back unpinned with its assignee; no cooldown keeps the pin", () => {
+  setMode("on", OLD_PIN);
   const o = held("T1");
   pin("T1", "peer:sekai");
   const before = card("T1");
@@ -265,7 +268,7 @@ test("[验收线 3] a write order that cools its peer comes back unpinned with i
 });
 
 test("[验收线 4] observe writes no row and keeps the pin, one sample per order across two rounds", () => {
-  setMode("observe");
+  setMode("observe", OLD_PIN);
   const o = held("T1");
   pin("T1", "peer:sekai");
   notStarted(o, NET);

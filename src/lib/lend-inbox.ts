@@ -1,3 +1,4 @@
+import { aliasPick, repoAllowed } from "./repo-alias.js";
 /**
  * 出借方 B 唯一的收单闸（docs/design/remote-capacity.md §2.3 第 1 步）：A 推来的单（manager lend inbox）和兜底轮询拿到的单（lend-loop.ts）都过这里，
  * 各核对项只写这一份。逐单核：生效授权（含暂停、过期、指纹变了、文件无效）、家族与可用凭据、有效阶段（写单开关关着时一律拒）、
@@ -46,7 +47,7 @@ function scopeCode(o: OrderSummary, entry: LendEntry, writeOpen: boolean): Refus
   const role = roleOfStep(o.step);
   if (!role) return "role";
   if (role === "write" && !writeOpen) return "write_closed";
-  return entry.repos.includes(o.repo) ? null : "repo";
+  return aliasPick("lend-inbox.scope", entry.repos.includes(o.repo), entry.repos.includes(o.repo) || repoAllowed(o.repo, entry.repos)) ? null : "repo";
 }
 
 const refuseAll = (orders: OrderSummary[], code: RefuseCode): Admitted => ({ accepted: [], refused: orders.map((o) => ({ orderId: o.orderId, code })) });

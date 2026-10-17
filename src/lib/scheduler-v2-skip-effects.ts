@@ -23,6 +23,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-author-retire-checkout.ts": "vcs=3",
     "lend-fix-reassign-pr.ts": "proc=1 vcs=4",
     "lend-git.ts": "vcs=1",
+    "lend-return-local.ts": "vcs=2",
     "peer-pr-auto-verify.ts": "ledger=1",
     "pm-handback-verify.ts": "ledger=2", // PMHAND1: the deploy tick's resolved-done verify (dry-run + verify), per card under pace.skipTask / schedulerV2SkipTask
     "pool-review-proof-raw.ts": "fs=2",
@@ -81,7 +82,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "pm-todo-p2.ts": "ledger=2", // PULLTODO1: `ledger scheduler-pm-todo` / `scheduler-recovery-observe` for the P2 diff notice, through the pass manager
     "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
     "recovery-peer-lease-tick.ts": "ledger=3", // PEERLEASE1: observe / fix-relay calls through the pass manager
-    "remote-review-tick.ts": "ledger=3 fs=3 notice=3", // RRL-1: files / notices only after `ledger scheduler-remote-review` passed the pass manager
+    "remote-review-tick.ts": "ledger=4 fs=3 notice=3", // RRL-4: the legacy checklist is booked through the pass manager, alongside inbox / apply / notified
     "review-converge-notice.ts": "ledger=4",
     "review-count-carry.ts": "ledger=1", // CARRYCNT1: `ledger scheduler-recovery-observe` for effCountCarry notes, through the pass manager
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes

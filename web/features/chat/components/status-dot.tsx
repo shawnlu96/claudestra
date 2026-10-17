@@ -1,6 +1,7 @@
 import type { AgentSession } from "../type";
 import { RuntimeBadge } from "./runtime-badge";
 import { UsersIcon } from "./external-badge";
+import { ReadOnlyBadge } from "./readonly-badge";
 
 /**
  * 会话行首：运行时图标 + 状态点合一（owner 2026-09-25「把 status dot absolute 在 agent icon 左上角，
@@ -15,6 +16,7 @@ export function RuntimeStatusIcon({ a, busy, compacting }: { a: AgentSession; bu
   return (
     <span className="relative shrink-0">
       <RuntimeBadge runtime={a.runtime ?? ""} className={active ? "" : "opacity-45 grayscale"} />
+      {a.readOnly && <ReadOnlyBadge />}
       {active && (
         <span className="absolute -left-[3px] -top-[3px] flex size-[9px] items-center justify-center">
           <span className={`animate-cstra-breathe absolute inline-flex size-[9px] rounded-full ${tone}`} />

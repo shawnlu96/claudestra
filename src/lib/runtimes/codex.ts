@@ -22,6 +22,7 @@ import {
   probeCodexQueue,
 } from "../codex-launch.js";
 import { recordCodexRunning } from "../codex-version.js";
+import { effectiveCodexMode, registryPermissionMode } from "../codex-readonly.js";
 import { probeClaudeVersion } from "../claude-binary.js";
 import { bridgePortOf, defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { codexExitPrelude, codexOnExitPane } from "./codex-exit.js";
@@ -65,6 +66,8 @@ interface CodexCtx {
   bin: string | null;
   avail: { at: number; result: Availability } | null;
   baselines: Map<string, PaneBaseline>;
+  /** agent 名 → registry 里的 permissionMode（单测注入，生产读 registry.json） */
+  permissionLookup: (agent: string) => string | undefined;
 }
 
 async function ensureBin(ctx: CodexCtx): Promise<string> {
@@ -103,7 +106,8 @@ async function checkAvailable(ctx: CodexCtx): Promise<Availability> {
  * 频道、多报一次 Stop）；职责与频道规则经 developer_instructions 在这一轮写进线程。
  * resume / fork：会话已存在，原样返回。
  */
-async function prepare(ctx: CodexCtx, spec: LaunchSpec): Promise<{ sessionId: string }> {
+async function prepare(ctx: CodexCtx, given: LaunchSpec): Promise<{ sessionId: string }> {
+  const spec = withMode(ctx, given);
   codexPermissionFlags(spec.permissionMode); // 不支持的权限档位在这里就报错，不留半个会话
   if (spec.mode !== "new") return { sessionId: spec.sessionId };
   const cwd = spec.cwd;
@@ -126,7 +130,13 @@ async function prepare(ctx: CodexCtx, spec: LaunchSpec): Promise<{ sessionId: st
   throw new Error(`Codex exec 引导没拿到 thread id（exit ${r.code}）：${tail || "无输出"}`);
 }
 
-function launchCommand(ctx: CodexCtx, spec: LaunchSpec): string {
+/** registry 记的只读压过 spec 里漏掉的档位（codex-readonly.ts effectiveCodexMode）：只收紧不放宽 */
+function withMode(ctx: CodexCtx, spec: LaunchSpec): LaunchSpec {
+  return { ...spec, permissionMode: effectiveCodexMode(spec, ctx.permissionLookup) };
+}
+
+function launchCommand(ctx: CodexCtx, given: LaunchSpec): string {
+  const spec = withMode(ctx, given);
   const codexBin = ctx.bin || process.env.CODEX_TUI_BIN?.trim();
   if (!codexBin) throw new Error("codex 路径尚未解析（应先经 available() / beforeLaunch）");
   const cwd = spec.cwd || ctx.deps.sessionCwd(spec.sessionId);
@@ -191,11 +201,14 @@ export type CodexAdapter = ManagedRuntimeAdapter & {
   readonly binPath: () => string | null;
 };
 
-export function createCodexAdapter(overrides: Partial<CodexAdapterDeps> = {}): CodexAdapter {
+export function createCodexAdapter(
+  overrides: Partial<CodexAdapterDeps> = {},
+  permissionLookup: (agent: string) => string | undefined = (a) => registryPermissionMode(a),
+): CodexAdapter {
   let ctxCache: CodexCtx | null = null;
   // 默认依赖惰性构造：模块加载时不碰 tmux / 登录 shell
   const ctx = (): CodexCtx =>
-    (ctxCache ??= { deps: { ...defaultCodexDeps(), ...overrides }, bin: null, avail: null, baselines: new Map() });
+    (ctxCache ??= { deps: { ...defaultCodexDeps(), ...overrides }, bin: null, avail: null, baselines: new Map(), permissionLookup });
   return {
     ...codexSource,
     manageable: true,

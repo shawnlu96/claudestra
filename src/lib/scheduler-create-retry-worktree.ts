@@ -86,7 +86,7 @@ function treeFiles(out: string): Map<string, TreeFile> {
  * gitlink and so drops that gitlink's flag, which hides the whole nested checkout from status. Initialized nested
  * submodules are read the same way; an empty (uninitialized) one has no index, and anything else is not trusted.
  */
-function* indexHidesEdits(path: string, depth = 0): DirtyCheck<boolean> {
+export function* indexHidesEdits(path: string, depth = 0): DirtyCheck<boolean> {
   const ls = (yield ["-C", path, "ls-files", "-v", "-s", "-z"]);
   if (depth > 16 || ls.code !== 0 || (ls.out && !ls.out.endsWith("\0"))) return true;
   for (const entry of ls.out.split("\0").filter(Boolean)) {
@@ -145,6 +145,25 @@ function sameBlob(path: string, file: TreeFile): boolean {
   const bytes = file.mode === "120000" ? readlinkSync(path, { encoding: "buffer" }) : readFileSync(path);
   const hash = createHash(file.oid.length === 64 ? "sha256" : "sha1");
   return hash.update(`blob ${bytes.length}\0`).update(bytes).digest("hex") === file.oid;
+}
+
+/**
+ * LENDBACK1 (lend-return-local.ts staleTreeAside): HEAD's tracked content against disk bytes, past the index stat cache and its
+ * flags; submodules by their own proof and then by the same byte comparison of their own HEAD, nested ones included (their
+ * status trusts their own stat cache). Untracked and ignored files are not read (the caller's status covers untracked ones).
+ * A missing file, a symlinked parent directory, an uninitialized submodule or anything unreadable counts as changed.
+ */
+export function* trackedEdits(worktree: string, depth = 0): DirtyCheck<boolean> {
+  if (depth > 16) return true;
+  const tree = (yield ["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
+  if (tree.code !== 0) return true;
+  for (const [path, file] of treeFiles(tree.out)) {
+    const parts = path.split("/");
+    for (let n = 1; n < parts.length; n++) if (!lstatSync(join(worktree, ...parts.slice(0, n))).isDirectory()) return true;
+    const at = join(worktree, path);
+    if (file.mode === "160000" ? (yield* submoduleChanged(at, file.oid)) || (yield* trackedEdits(at, depth + 1)) : !sameBlob(at, file)) return true;
+  }
+  return false;
 }
 
 /** Walk disk rather than ignored listings: Git can silently omit unreadable ignored directories. Never follow symlinks. */

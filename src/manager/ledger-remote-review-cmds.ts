@@ -10,7 +10,8 @@ import { LedgerError } from "../lib/ledger-store.js";
 import { readInbox, REMOTE_INBOX_DIR } from "../lib/remote-review-inbox.js";
 import { applyLateRemote, markRemoteNotified, recordRemoteReview } from "../lib/remote-review-ledger.js";
 import { handoffProjects, matchRemoteCard } from "../lib/remote-review-read.js";
-import { parseRemoteReview } from "../lib/remote-review-parse.js";
+import { isLegacyRemoteReview, parseRemoteReview } from "../lib/remote-review-parse.js";
+import { recordLegacyRemoteNotice } from "../lib/remote-review-legacy.js";
 import { readSchedulerConfig, type SchedulerConfig } from "../lib/scheduler-config.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
@@ -25,8 +26,9 @@ function book(c: LedgerCli, taskId: string, file: string, readConfig: () => Sche
   const task = c.task(taskId), projects = handoffProjects(readConfig(), entry.peer);
   if (!projects.includes(task.project)) throw new LedgerError("forbidden", `${entry.peer} 不是项目 ${task.project} 的 handoffPeer`);
   const review = parseRemoteReview(entry.text);
-  if (!review) throw new LedgerError("invalid", "收件正文不是仓库方审查推送的格式");
-  if (matchRemoteCard(c.db, projects, review.number)?.id !== task.id) throw new LedgerError("conflict", `PR #${review.number} 现在对不上唯一的 ${task.id}`);
+  if (!review) throw new LedgerError("invalid", isLegacyRemoteReview(entry.text)
+    ? "旧格式（没有仓库 / 完整 head），请人工处理" : "收件正文不是仓库方审查推送的格式");
+  if (matchRemoteCard(c.db, projects, review)?.id !== task.id) throw new LedgerError("conflict", `${review.repo} PR #${review.number} 现在对不上唯一的 ${task.id}`);
   c.deps.assertLease?.();
   return recordRemoteReview(c.db, c.ctx(), { taskId: task.id, review, peer: entry.peer, reportDir });
 }
@@ -35,15 +37,22 @@ function book(c: LedgerCli, taskId: string, file: string, readConfig: () => Sche
 export function remoteReviewCmds(readConfig: () => SchedulerConfig = readSchedulerConfig, dir = REMOTE_INBOX_DIR, reportDir?: string): Record<string, CommandSpec> {
   return {
     "scheduler-remote-review": {
-      valued: ["inbox", "apply", "notified"], bools: [],
-      usage: "scheduler-remote-review <task> --inbox <收件文件> | --apply <seq> | --notified <seq>" +
+      valued: ["inbox", "apply", "notified"], bools: ["legacy"],
+      usage: "scheduler-remote-review <task> --inbox <收件文件> | --apply <seq> | --notified <seq> | --legacy" +
         "（仓库方审查结论入账 / 到 head 后生效 / 通知已送达；调度服务或项目 PM）",
       run(c) {
         const task = c.task(c.p.pos[1]);
         if (c.deps.actor !== "scheduler") c.requireRealPm(task.project, "仓库方审查结论入账");
         const notified = intFlag(c.p, "notified"), apply = intFlag(c.p, "apply"), inbox = c.p.flags.inbox;
-        if ([notified, apply, inbox].filter((x) => x !== undefined).length !== 1) throw new LedgerError("invalid", "--inbox / --apply / --notified 三选一");
+        const legacy = c.p.bools.has("legacy");
+        if ([notified, apply, inbox, legacy ? true : undefined].filter((x) => x !== undefined).length !== 1) {
+          throw new LedgerError("invalid", "--inbox / --apply / --notified / --legacy 四选一");
+        }
         c.deps.assertLease?.();
+        if (legacy) {
+          if (!readConfig().projects[task.project]?.handoffPeer) throw new LedgerError("conflict", "项目没有 handoffPeer，不登记升级清单");
+          return { ok: true, ...recordLegacyRemoteNotice(c.db, c.ctx(), task.id) };
+        }
         if (notified !== undefined) return { ok: true, ...markRemoteNotified(c.db, c.ctx(), { taskId: task.id, seq: notified }) };
         if (apply !== undefined) return { ok: true, ...applyLateRemote(c.db, c.ctx(), { taskId: task.id, seq: apply }) };
         const r = book(c, task.id, inbox!, readConfig, dir, reportDir);

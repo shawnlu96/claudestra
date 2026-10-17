@@ -16,7 +16,7 @@ export const PR = "https://github.com/example/repo/pull/7";
 export type F = ReturnType<typeof autoFixture>;
 
 export const book = (f: F, head: string) => recordRemoteReview(f.db, f.at("scheduler"), { taskId: "T1",
-  review: parseRemoteReview(pushText({ verdict: "changes", p1: 1 }, { head }))!, peer: "Shawn", reportDir: join(f.dir, "reviews") });
+  review: parseRemoteReview(pushText({ verdict: "changes", p1: 1 }, { head, repo: "example/repo", number: 7, taskId: "PR7" }))!, peer: "Shawn", reportDir: join(f.dir, "reviews") });
 
 export async function toMerge(f: F) {
   await toBuild(f);
