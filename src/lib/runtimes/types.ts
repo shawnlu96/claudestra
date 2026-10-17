@@ -272,6 +272,8 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
   readonly acpOnly?: boolean;
   /** 建 agent 必须显式给模型；值是拒绝时给人看的原因（OpenCode：它自己的缺省是免费模型） */
   readonly modelRequired?: string;
+  /** 没有推理强度这一项（OpenCode 1.19 的 configOptions 只有 model / mode）：--effort 提示后丢弃，网页不显示 Effort */
+  readonly noEffort?: boolean;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;
   /** T85 启动凭据文件的路径怎么交：mcp-config = 放进 --mcp-config 里 channel-server 的 env（CC）；env = 宿主命令的环境变量（ACP）。不声明 = 不签 */

@@ -8,6 +8,7 @@ import { parseOpencodeModels, opencodeModels, resetOpencodeModelsCache } from ".
 import { ACP_CONTROL } from "../src/lib/runtimes/acp-control";
 import { controlFor, managedFor, manageableRuntimeIds, requireManaged, sourceFor, transportsOf } from "../src/lib/runtimes/index";
 import { buildOpencodeAcpHostCommand, OPENCODE_MODEL_REQUIRED, opencodeAcpAdapter } from "../src/lib/runtimes/opencode-acp";
+import { waitOpencodeReady } from "../src/lib/runtimes/opencode-ready";
 import { parseCreateArgs } from "../src/manager/create-args";
 import { chooseCreateTransport, refuseResumeEarly, transportRefusal } from "../src/manager/acp-lifecycle";
 
@@ -42,6 +43,10 @@ describe("模型必填", () => {
     const ok = parseCreateArgs(["a", "/tmp", "--runtime", "opencode", "--model", "opencode/big-pickle"]);
     expect("error" in ok ? ok.error : ok.model).toBe("opencode/big-pickle");
     expect("error" in parseCreateArgs(["a", "/tmp", "--runtime", "pi"])).toBe(false); // 别的运行时不要求
+    const noEff = parseCreateArgs(["a", "/tmp", "--runtime", "opencode", "--model", "opencode/x", "--effort", "high"]);
+    expect("error" in noEff ? noEff.error : noEff.effort).toBeUndefined(); // OpenCode 没有 effort：提示后丢弃
+    const piEff = parseCreateArgs(["a", "/tmp", "--runtime", "pi", "--effort", "high"]);
+    expect("error" in piEff ? piEff.error : piEff.effort).toBe("high");
   });
 
   test("resume / 收编不带 --model 在建频道前就拒；别的运行时不要求", () => {
@@ -149,6 +154,7 @@ describe("模型清单", () => {
     expect(parseOpencodeModels("opencode/big-pickle\nwarn: x\n\nanthropic/claude-x\nopencode/big-pickle\nopenrouter/anthropic/claude-sonnet-4.5\n")).toEqual([
       "opencode/big-pickle", "anthropic/claude-x", "openrouter/anthropic/claude-sonnet-4.5",
     ]);
+    expect(parseOpencodeModels("zz/a+b\nzz/ok\n")).toEqual(["zz/ok"]); // 与 isSafeModelArg 对齐：不收 +
   });
 
   test("成功缓存、失败不缓存", async () => {
@@ -165,26 +171,68 @@ describe("模型清单", () => {
 });
 
 describe("模型必须真的生效（enforceOpencodeModel）", () => {
-  const opts = (current: string) => [{ id: "model", name: "Model", currentValue: current, choices: [{ value: "opencode/big-pickle", name: "bp" }, { value: "opencode/x", name: "x" }] }];
-  const fake = (current: string, setOk: boolean, moves: boolean) => {
+  const CHOICES = ["opencode/big-pickle", "opencode/x", "zz/anthropic/claude-x"];
+  const opts = (current: string) => [{ id: "model", name: "Model", currentValue: current, choices: CHOICES.map((value) => ({ value, name: value })) }];
+  const fake = (current: string, set: { ok: true } | { ok: false; error: string }, moves: boolean) => {
     const s: any = { configOptions: opts(current) };
     s.setConfig = async (_id: string, v: string) => {
       if (moves) s.configOptions = opts(v);
-      return setOk ? { ok: true } : { ok: false, error: "-32602 model not found" };
+      return set;
     };
     return s;
   };
+  const OK = { ok: true } as const;
 
   test("生效：不抛", async () => {
-    await enforceOpencodeModel(fake("opencode/big-pickle", true, true), "opencode/x");
+    await enforceOpencodeModel(fake("opencode/big-pickle", OK, true), "opencode/x");
   });
 
   test("set 说成功但实际还在免费缺省：拒，报给的和实际的", async () => {
-    await expect(enforceOpencodeModel(fake("opencode/big-pickle", true, false), "opencode/x")).rejects.toThrow("给的 opencode/x，实际 opencode/big-pickle");
+    await expect(enforceOpencodeModel(fake("opencode/big-pickle", OK, false), "opencode/x")).rejects.toThrow("给的 opencode/x，实际 opencode/big-pickle");
   });
 
-  test("OpenCode 不认：拒，带上它的原话；没登记模型也拒", async () => {
-    await expect(enforceOpencodeModel(fake("opencode/big-pickle", false, false), "opencode/x")).rejects.toThrow("model not found");
-    await expect(enforceOpencodeModel(fake("opencode/big-pickle", true, true), undefined)).rejects.toThrow(AcpIncompatibleError);
+  test("不在选项里 / 没登记：拒（AcpIncompatibleError）", async () => {
+    await expect(enforceOpencodeModel(fake("opencode/big-pickle", OK, true), "opencode/nope")).rejects.toThrow(AcpIncompatibleError);
+    await expect(enforceOpencodeModel(fake("opencode/big-pickle", OK, true), undefined)).rejects.toThrow(AcpIncompatibleError);
+  });
+
+  test("逐字匹配：只给后半段会被换 provider 的，拒并报出全名", async () => {
+    const e = enforceOpencodeModel(fake("opencode/big-pickle", OK, true), "anthropic/claude-x");
+    await expect(e).rejects.toThrow(AcpIncompatibleError);
+    await expect(enforceOpencodeModel(fake("opencode/big-pickle", OK, true), "anthropic/claude-x")).rejects.toThrow("写全 zz/anthropic/claude-x");
+  });
+
+  test("RPC 出错（超时 / 崩溃）不是模型不被接受：普通 Error，宿主会退避重起", async () => {
+    const e = await enforceOpencodeModel(fake("opencode/big-pickle", { ok: false, error: "请求超时" }, false), "opencode/x").catch((x) => x);
+    expect(e).toBeInstanceOf(Error);
+    expect(e).not.toBeInstanceOf(AcpIncompatibleError);
+    expect(e.message).toContain("会重试");
+  });
+});
+
+describe("就绪等待：宿主拒起就立刻返回（waitOpencodeReady）", () => {
+  const { mkdtempSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir } = require("node:os") as typeof import("node:os");
+  const dir = mkdtempSync(`${tmpdir()}/oc-ready-`);
+  const win = (opt: () => string | null): any => ({
+    name: "agent-oc", target: "t", capture: async () => "", getOption: async () => opt(), childPids: async () => [1], sleep: (ms: number) => Bun.sleep(ms),
+  });
+
+  test("本次启动之后的「不再重起」→ 带原因失败返回，不等满预算", async () => {
+    const log = `${dir}/refused.log`;
+    writeFileSync(log, `${new Date(Date.now() - 3600_000).toISOString()} 适配器接不上线程：旧的（不再重起；…）\n`);
+    const t0 = Date.now();
+    const pending = waitOpencodeReady(win(() => null), { rounds: 2_000, pollMs: 5 }, log); // 预算 10s
+    writeFileSync(log, `${new Date().toISOString()} 适配器接不上线程：OpenCode 模型不被接受：给的 a/b（不再重起；不标就绪…）\n`, { flag: "a" });
+    const r = await pending;
+    expect(r).toEqual({ ready: false, reason: "exited", detail: "宿主拒起：OpenCode 模型不被接受：给的 a/b" });
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+
+  test("只有旧的拒起记录、标记到了：就绪", async () => {
+    const log = `${dir}/old.log`;
+    writeFileSync(log, `${new Date(Date.now() - 3600_000).toISOString()} 适配器接不上线程：旧的（不再重起；…）\n`);
+    let n = 0;
+    expect(await waitOpencodeReady(win(() => (++n > 3 ? "1" : null)), { rounds: 50, pollMs: 5 }, log)).toEqual({ ready: true });
   });
 });

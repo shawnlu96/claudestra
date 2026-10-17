@@ -19,6 +19,8 @@ export interface RuntimeCatalogEntry {
   models?: string[];
   /** 建 agent 必须给模型（ManagedRuntimeAdapter.modelRequired） */
   modelRequired?: boolean;
+  /** 没有推理强度（ManagedRuntimeAdapter.noEffort）：弹窗不显示 Effort */
+  noEffort?: boolean;
 }
 
 /** 按运行时取模型清单：没有这种来源的返回 undefined（弹窗照旧手填 / 用 CC 目录） */
@@ -33,7 +35,7 @@ export async function runtimeCatalog(): Promise<RuntimeCatalogEntry[]> {
       const models = r.ok ? await MODEL_LISTS[id]?.() : undefined;
       return {
         id, label: a.label, manageable: true as const, available: r.ok, ...(r.ok ? {} : { hint: r.hint }),
-        ...(models ? { models } : {}), ...(a.modelRequired ? { modelRequired: true } : {}),
+        ...(models ? { models } : {}), ...(a.modelRequired ? { modelRequired: true } : {}), ...(a.noEffort ? { noEffort: true } : {}),
       };
     }),
   );

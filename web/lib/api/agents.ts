@@ -50,6 +50,8 @@ export interface RuntimeInfo {
   models?: string[];
   /** true = 不选模型 manager 会拒（OpenCode：不默认走免费模型） */
   modelRequired?: boolean;
+  /** true = 没有推理强度这一项（OpenCode），弹窗不显示 Effort */
+  noEffort?: boolean;
 }
 
 /** bridge 返回的一项 → RuntimeInfo；字段类型不对就丢掉，不让脏数据进下拉 */
@@ -61,6 +63,7 @@ export function normalizeRuntime(r: Partial<Record<keyof RuntimeInfo, unknown>>)
     available: r.available === true,
     ...(models?.length ? { models } : {}),
     ...(r.modelRequired === true ? { modelRequired: true } : {}),
+    ...(r.noEffort === true ? { noEffort: true } : {}),
   };
 }
 

@@ -3,6 +3,7 @@
  * 不用 ACP session/new 回包里那份更全的列表：拿它要建一个会话，OpenCode 一建就落库，每次打开弹窗都会留一个空会话。
  * 代价是 CLI 少列几个免费模型（docs/runtimes/opencode-acp.md「已知限制」）。一次要 ~5s，按 5 分钟缓存；失败不缓存。
  */
+import { isSafeModelArg } from "./claude-settings-runtime.js";
 import { defaultRunner, type Runner } from "./codex-thread.js";
 import { opencodeBin, opencodeDirsEnv } from "./acp/opencode-bin.js";
 
@@ -10,8 +11,8 @@ const TTL_MS = 5 * 60_000;
 let cache: { at: number; models: string[] } | null = null;
 
 export function parseOpencodeModels(out: string): string[] {
-  // provider/model，model 段可以再带斜杠（openrouter/anthropic/claude-x）
-  return [...new Set(out.split("\n").map((l) => l.trim()).filter((l) => /^[\w.-]+\/[\w.:@+/-]+$/.test(l)))];
+  // provider/model，model 段可以再带斜杠（openrouter/anthropic/claude-x）；字符集与网页建 agent 的入口校验同一个（isSafeModelArg），候选里不出现填了会被拒的
+  return [...new Set(out.split("\n").map((l) => l.trim()).filter((l) => l.indexOf("/") > 0 && isSafeModelArg(l)))];
 }
 
 export async function opencodeModels(run: Runner = defaultRunner, bin = opencodeBin(), now = Date.now()): Promise<string[]> {

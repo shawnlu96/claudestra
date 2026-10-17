@@ -1,5 +1,5 @@
 /**
- * OpenCode 的启动配置必须生效（AcpRuntime.strictLaunchConfig）：registry 的模型会话不认时拒起、出失败卡、不标就绪——
+ * OpenCode 的启动配置必须生效（AcpRuntime.enforceLaunch）：registry 的模型会话不认时拒起、出失败卡、不标就绪——
  * 不然 OpenCode 会静默回落到它缺省的免费模型（OCR-4 第 1 轮 P1-1）。Codex / Pi 照旧只记日志。
  * 真 AcpHost + 本仓 stub（scripts/acp-stub.ts，模型选项 stub-sol / stub-luna），只有 bridge 连接与 /hook 是假的。
  */

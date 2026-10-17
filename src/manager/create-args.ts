@@ -69,13 +69,15 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
   const flagLike = rejectFlagLikePositional(name, dir);
   if (flagLike) return { error: flagLike };
   if (!name || !dir) return { error: CREATE_USAGE };
-  const needModel = managedFor(runtimeFlag)?.modelRequired; // 早拒：建频道 / 窗口之前（适配器的启动命令另有兜底）
-  if (needModel && !model?.trim()) return { error: needModel };
+  const adapter = managedFor(runtimeFlag);
+  if (adapter?.modelRequired && !model?.trim()) return { error: adapter.modelRequired }; // 早拒：建频道 / 窗口之前（启动命令另有兜底）
+  if (adapter?.noEffort && effort) console.error(`⚠️ ${adapter.label} 不支持 --effort，已忽略（${effort}）`);
+  const keptEffort = adapter?.noEffort ? undefined : effort;
   return {
     name,
     dir,
     purpose: purposeFlag ?? purposeParts.join(" "),
-    perms: { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, transportFlag,
+    perms: { preset, disallowedRaw }, effort: keptEffort, mode, model, external, projectFlag, runtimeFlag, transportFlag,
     piBaseFlag, piPresetFlag, teamFlags, ...(card ? { card } : {}),
   };
 }

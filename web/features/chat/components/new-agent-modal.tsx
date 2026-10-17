@@ -127,7 +127,7 @@ export function NewAgentModal({
     setError("");
     const res = await store.createAgent(n, d, purpose.trim() || undefined, {
       model: model.trim() || undefined,
-      effort: effort || undefined,
+      effort: (!runtimeList.find((r) => r.id === runtime)?.noEffort && effort) || undefined,
       project: project || undefined,
       runtime: runtime || undefined,
       piBase: runtime === "pi" && piBase ? piBase : undefined,
@@ -295,6 +295,7 @@ export function NewAgentModal({
           ) : null}
           <div className="grid grid-cols-2 gap-3">
             <ModelField runtime={runtime} model={model} setModel={setModel} busy={busy} info={runtimeList.find((r) => r.id === runtime)} />
+            {runtimeList.find((r) => r.id === runtime)?.noEffort ? null : (
             <label className="form-control">
               <span className="label-text mb-1 text-sm">Effort</span>
               <select
@@ -310,6 +311,7 @@ export function NewAgentModal({
                 ))}
               </select>
             </label>
+            )}
           </div>
           {runtime === "opencode" ? (
             <p className="-mt-1 text-[11px] leading-snug text-warning">

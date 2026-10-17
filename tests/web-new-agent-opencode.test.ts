@@ -8,6 +8,7 @@ const opencode = normalizeRuntime({
   available: true,
   models: ["opencode/big-pickle", 42, "", "anthropic/claude-sonnet-5"],
   modelRequired: true,
+  noEffort: true,
 });
 
 describe("normalizeRuntime", () => {
@@ -18,6 +19,7 @@ describe("normalizeRuntime", () => {
       available: true,
       models: ["opencode/big-pickle", "anthropic/claude-sonnet-5"],
       modelRequired: true,
+      noEffort: true,
     });
   });
   test("老形状不多出字段，available 非 true 一律 false", () => {

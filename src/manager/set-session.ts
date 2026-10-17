@@ -21,7 +21,11 @@ export async function cmdSetSession(args: string[]): Promise<Record<string, unkn
   const acpConfined = isSandbox() && ["codex", "pi", "opencode"].includes(info.runtime ?? "") && (info as { transport?: string }).transport === "acp";
   if (!acpConfined) assertSandboxSession(newSid);
   if (oldSid === newSid) return { ok: true, name: tmuxName, sessionId: newSid, previousSessionId: oldSid };
-  if (oldSid) await archiveAgentSession(tmuxName, info, oldSid).catch((e) => console.warn(`⚠️ 归档旧会话 ${tmuxName} 失败：${e}`));
+  // 归档失败不挡换代（旧会话源还在，下次 archive 可补），但要留日志：不然旧会话从历史里消失没人知道。tests/opencode-archive.test.ts
+  if (oldSid) {
+    const r = await archiveAgentSession(tmuxName, info, oldSid).catch((e: Error) => ({ ok: false, note: e.message }));
+    if (!r.ok) console.warn(`⚠️ 归档旧会话 ${tmuxName}/${oldSid} 失败（继续换代）：${r.note}`);
+  }
   info.sessionId = newSid;
   await saveRegistry(reg);
   return { ok: true, name: tmuxName, sessionId: newSid, previousSessionId: oldSid };

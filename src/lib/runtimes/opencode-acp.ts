@@ -23,7 +23,8 @@ import { AcpSession } from "../acp/session.js";
 import { enforceOpencodeModel } from "../acp/opencode-model-check.js";
 import { isValidOpencodeSessionId } from "../opencode-session.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
-import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
+import { CODEX_READY_OPTION } from "./codex-ready.js";
+import { waitOpencodeReady } from "./opencode-ready.js";
 import { opencodeSource } from "./opencode-source.js";
 import { resetReadyOption } from "./ready-option.js";
 import type { LaunchSpec, ManagedRuntimeAdapter } from "./types.js";
@@ -75,17 +76,30 @@ async function prepareOpencodeSession(spec: LaunchSpec, bin: string | null): Pro
   const proc = spawnAdapter([bin, "acp", "--cwd", spec.cwd], env, spec.cwd, (m) => logs.push(m), "opencode");
   const s = new AcpSession(proc.wire, { onUpdate: () => {}, onPermission: async () => null, log: (m) => logs.push(m), label: "OpenCode" });
   const timer = setTimeout(() => proc.stop(), SESSION_TIMEOUT_MS);
+  let sid: string | undefined;
   try {
     await s.initialize({ fork: spec.mode === "fork" });
-    const sid = spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
+    sid = spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
     // 手填的模型名在这里按会话自己的 configOptions 校（比 `opencode models` 全）、核对实际生效值：不认就拒建，别留一个起不来的 agent
     await enforceOpencodeModel(s, spec.model);
     return sid;
   } catch (e) {
+    if (sid) await deleteOpencodeSession(bin, sid, env); // 会话一建就落库：拒建了就删掉，不在 OpenCode 库里留空会话
     throw new Error(`OpenCode 没建出会话：${e instanceof Error ? e.message : e}${logs.length ? `（${logs.slice(-3).join(" | ").slice(0, 300)}）` : ""}`);
   } finally {
     clearTimeout(timer);
     proc.stop();
+  }
+}
+
+/** `opencode session delete <id>`；删不掉只记一条（空会话留在库里不影响谁，只是 OpenCode 的会话列表里多一条） */
+async function deleteOpencodeSession(bin: string, sid: string, env: Record<string, string>): Promise<void> {
+  try {
+    const p = Bun.spawn({ cmd: [bin, "session", "delete", sid], env, stdout: "pipe", stderr: "pipe", timeout: 15_000 });
+    const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
+    if (code !== 0) console.error(`[opencode] 删不掉拒建留下的空会话 ${sid}（exit ${code}）：${err.slice(0, 200)}`);
+  } catch (e) {
+    console.error(`[opencode] 删不掉拒建留下的空会话 ${sid}：${String(e)}`);
   }
 }
 
@@ -96,6 +110,7 @@ export const opencodeAcpAdapter: ManagedRuntimeAdapter = {
   acp: { control: ACP_CONTROL },
   acpOnly: true,
   modelRequired: OPENCODE_MODEL_REQUIRED,
+  noEffort: true,
   inbound: "acp-host",
   turnEnd: "acp-host",
   exitCommand: "",
@@ -110,7 +125,7 @@ export const opencodeAcpAdapter: ManagedRuntimeAdapter = {
   },
   buildLaunchCommand: (spec) => buildOpencodeAcpHostCommand(spec, { bunBin: process.execPath, repoRoot: REPO_ROOT, opencodeBin: opencodeBin() }),
   beforeLaunch: (win) => resetReadyOption(win, CODEX_READY_OPTION), // 清不掉就抛：不带着残留的 "1" 往下启动
-  waitReady: (win, budget) => waitCodexReady(win, budget, { occupied: 0, dialog: 0 }),
+  waitReady: (win, budget) => waitOpencodeReady(win, budget),
   exitPrelude: acpExitPrelude,
   registryFields: () => ({ runtime: "opencode", transport: "acp" }),
 };

@@ -126,9 +126,9 @@ export function sourceIdForPath(path: string | undefined | null): string | undef
   let hit: string | undefined;
   try {
     const fd = openSync(path, "r");
-    const buf = Buffer.alloc(512);
+    const buf = Buffer.alloc(256 * 1024); // 首行得整行读到：OpenCode 首条带宿主前言、Codex 的 session_meta 都远超 512 字节，读半截解析失败就被当成 CC
     let n = 0;
-    try { n = readSync(fd, buf, 0, 512, 0); } finally { closeSync(fd); }
+    try { n = readSync(fd, buf, 0, buf.length, 0); } finally { closeSync(fd); }
     const rec = JSON.parse(buf.toString("utf8", 0, n).split("\n")[0]);
     hit = SOURCES.find((s) => s.sniffFirstLine?.(rec))?.id;
   } catch {
