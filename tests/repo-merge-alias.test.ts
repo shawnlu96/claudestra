@@ -4,7 +4,7 @@ import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { isMemberRun, trainRunProblem } from "../src/lib/ci-io-map-fuse.js";
 import { OFFICIAL_REPO, PROPOSED_REPO } from "../src/lib/floka-repo/migrate.js";
-import { privateMergeVerdict, setPrivateMergePortsForTest } from "../src/lib/private-merge-gate.js";
+import { privateMergeVerdict, privateRepoMergeAdmits, setPrivateMergePortsForTest } from "../src/lib/private-merge-gate.js";
 import { setRepoAliasForTest } from "../src/lib/repo-alias.js";
 import { handoffFiles } from "../src/lib/scheduler-merge-handoff-tick.js";
 import { formTrain, trainGate, type TrainDeps, type TrainEvent, type TrainGh, type TrainState, type TrainStore } from "../src/lib/scheduler-merge-train.js";
@@ -124,12 +124,27 @@ describe("[验收线 2/4] the private merge gate", () => {
       expect(privateMergeVerdict(task(OLD, OLD))).toEqual(mode === "on" ? null : { repo: OLD, refused: `本机没有 ${OLD} 的检出` });
     }
   });
-  test("on: a declaration under the other name still binds to its PR", () => {
+  test("a declaration under the other name is refused (the driver binds them word for word): never admitted, PM as before", () => {
     ports("example/project", NEW);
     for (const mode of MODES) {
       alias(mode);
-      expect(privateMergeVerdict(task(OLD, NEW))).toEqual(mode === "on" ? { repo: NEW, dir: "/c" } : { repo: NEW, refused: `PR 不在卡的私仓 ${OLD}` });
+      const refused = mode === "on" ? `私仓声明 ${OLD} 与 PR 的仓库是改名前后的两个名字，私仓自动合并还不支持` : `PR 不在卡的私仓 ${OLD}`;
+      expect(privateMergeVerdict(task(OLD, NEW))).toEqual({ repo: NEW, refused });
+      setPrivateMergePortsForTest({ projectRepo: () => "example/project", handoff: () => false, ledger: () => null,
+        policy: (() => ({ mode: "on" })) as never, repoDirs: { dirs: () => ["/c"], origin: () => NEW, exists: () => true } });
+      expect(privateRepoMergeAdmits({ task: { ...task(OLD, NEW), id: "t", headSHA: H1 } } as never)).toBe(false);
+      ports("example/project", NEW);
     }
+  });
+  test("the project's repository cannot be read: logged, and the card keeps the private path it had before", () => {
+    setPrivateMergePortsForTest({ projectRepo: () => { throw new Error("config gone"); }, handoff: () => false,
+      repoDirs: { dirs: () => ["/c"], origin: () => OLD, exists: () => true } });
+    alias("on");
+    const errors: string[] = [], orig = console.error;
+    console.error = (m: string) => { errors.push(m); };
+    try { expect(privateMergeVerdict(task(OLD, NEW))).toEqual({ repo: NEW, refused: `私仓声明 ${OLD} 与 PR 的仓库是改名前后的两个名字，私仓自动合并还不支持` }); }
+    finally { console.error = orig; }
+    expect(errors.some((m) => m.includes("读不到项目仓库") && m.includes("config gone"))).toBe(true);
   });
   test("a real private card keeps the private path; a fork or another org's floka is never aliased", () => {
     ports(NEW, "owner/secret");

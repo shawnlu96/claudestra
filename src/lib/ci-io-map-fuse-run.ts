@@ -26,6 +26,7 @@ import type { TrainCar, TrainCheck, TrainState } from "./scheduler-merge-train.j
 import { caseId, evidenceKey, failedTestFiles, isMemberRun, judgePlan, loweredText, OWNER_REPO, sameText, scopeDigest, scopeJob, testedCommit, trainRunProblem, unconfirmedText,
   type CiIoMapFuseGh, type FuseCase, type FuseEvidence, type FuseMember, type FuseRef, type FuseRun, type Omission } from "./ci-io-map-fuse.js";
 import type { FuseLedger } from "./ci-io-map-fuse-ledger.js";
+import { aliasPick, sameRepo } from "./repo-alias.js";
 
 export interface FusePort {
   mode(project: string): RecoveryMode;
@@ -62,9 +63,10 @@ const remember = (id: string) => { if (settled.size >= 2000) settled.clear(); se
 const due = (id: string, now: number): boolean => { const seen = tried.get(id); return !seen || now - seen.at >= RETRY_GAP_MS; };
 const mark = (id: string, now: number, n = 1) => { if (tried.size >= 2000) tried.clear(); tried.set(id, { n, at: now }); };
 
+const fuseSameRepo = (site: string, a: string, b: string) => aliasPick(`ci-io-map-fuse-run.${site}`, sameText(a, b), sameText(a, b) || sameRepo(a, b)); // REPOMERGE1
 const prNumber = (m: FuseMember, repo: string): number | null => {
   const hit = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\/?$/.exec(m.prRef);
-  return hit && sameText(hit[1]!, repo) ? Number(hit[2]) : null;
+  return hit && fuseSameRepo("prNumber", hit[1]!, repo) ? Number(hit[2]) : null;
 };
 
 /** One member's frozen plans on its exact head: the ones that left out failing files, and why the others are no evidence. */
@@ -220,7 +222,7 @@ async function reopen(port: FusePort, ref: FuseRef): Promise<string> {
 
 /** on: run references and cases earlier passes left open, then notices that were recorded but never sent. */
 async function carryOn(port: FusePort, project: string, repo: string): Promise<void> {
-  const now = port.now(), since = now - DAY_MS, mine = (r: FuseRef) => sameText(r.repo, repo) && !held(port, r.members);
+  const now = port.now(), since = now - DAY_MS, mine = (r: FuseRef) => fuseSameRepo("carry", r.repo, repo) && !held(port, r.members);
   for (const { id, ref } of port.ledger.openRefs(project, since).filter((r) => mine(r.ref) && due(`ref:${r.id}`, now)).slice(0, CARRY_MAX)) {
     try { port.ledger.closeRef(project, id, await reopen(port, { ...ref, repo })); tried.delete(`ref:${id}`); }
     catch (e) { stopped(e); mark(`ref:${id}`, now); console.log(`🧯 [ci-io-map-fuse] ${project} 列车 ${ref.train} 车厢 ${ref.car} run ${ref.runId}：稍后再读：${errText(e)}`); }
@@ -237,7 +239,7 @@ async function carryOn(port: FusePort, project: string, repo: string): Promise<v
 function failedRuns(repo: string, checks: readonly TrainCheck[]): number[] {
   const ids = checks.filter((c) => c.bucket === "fail" || c.bucket === "cancel").map((c) => {
     const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/(\d+)(?:\/\S*)?$/.exec(c.link ?? "");
-    return m && sameText(m[1]!, repo) && Number.isSafeInteger(Number(m[2])) ? Number(m[2]) : null;
+    return m && fuseSameRepo("failedRuns", m[1]!, repo) && Number.isSafeInteger(Number(m[2])) ? Number(m[2]) : null;
   });
   return [...new Set(ids.filter((id) => id !== null))];
 }
@@ -248,7 +250,7 @@ export function ciIoMapFuseHook(port: FusePort): CiIoMapFuseHook {
     const mode = port.mode(project);
     if (mode === "off") return null;
     const repo = port.projectRepo(project);
-    if (repo && OWNER_REPO.test(repo) && (trainRepo === undefined || sameText(repo, trainRepo))) return { mode, repo };
+    if (repo && OWNER_REPO.test(repo) && (trainRepo === undefined || fuseSameRepo("scope", repo, trainRepo))) return { mode, repo };
     if (trainRepo !== undefined) console.error(`⚠️ [ci-io-map-fuse] ${project}：列车仓库 ${trainRepo} 不是项目配置的仓库，不核`);
     return null;
   };
