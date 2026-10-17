@@ -107,7 +107,7 @@ const planned = (f: Launch) => f.plan.family === "claude" ? f.plan.final.model :
 /** 运行时证实的实际值；没证实（unknown / 空）= null */
 const confirmed = (f: Launch) => f.actual.source === "unknown" ? null : (f.plan.family === "claude" ? f.actual.model : f.actual.effort) ?? null;
 
-/** 最近一级发出的值带进了哪些绑上会话的作者启动：来源 override、计划值相同、在发出之后启动（只是「带了新档 argv」，实际值另核） */
+/** 当前计划（最近一级的最新代次）发出的值带进了哪些绑上会话的作者启动：来源 override、计划值相同、在这一代发出之后启动（只是「带了新档 argv」，实际值另核） */
 function carriedLaunches(ledger: Database, project: string, card: string, plan: { family: string; value: string; ts: number }): Launch[] {
   return taskTierLaunchHistory(ledger, project, card).filter((f) => f.status === "bound" && f.plan.role === "author" && f.plan.family === plan.family &&
     f.plan.source === "override" && f.createdAt >= plan.ts && planned(f) === plan.value);
@@ -120,7 +120,7 @@ function reconcileAdoption(project: string, card: string, p: EscalationPort): vo
   const carried = carriedLaunches(p.ledger(), project, card, plan);
   const hit = carried.findLast((f) => confirmed(f) === plan.value) ?? carried.at(-1);
   if (!hit || hit.plan.launchId === plan.launchId) return;
-  recordAdoption(store, { project, card, family: plan.family, step: plan.step, launchId: hit.plan.launchId, sessionId: hit.sessionId ?? "", actual: confirmed(hit) ?? "unknown" });
+  recordAdoption(store, { project, card, family: plan.family, step: plan.step, gen: plan.gen, launchId: hit.plan.launchId, sessionId: hit.sessionId ?? "", actual: confirmed(hit) ?? "unknown" });
 }
 
 /**

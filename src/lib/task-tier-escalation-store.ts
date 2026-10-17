@@ -4,6 +4,7 @@
  * 每张卡：fix = 未消费的真实退回次数，ci = 未消费的 CI 连红，steps = 已授予的升档级数。整批计完后任一计数到 2 就授予一级、两边计数一起清零、
  * 本批未消费证据记到这一级名下（两个条件同时满足也只升一次，与批内顺序无关，再有两次新失败才再升）。卡上最近用过的家族已在最高档时只记触顶，不加级。
  * peaks = 每家族用过的最高档（只升不降：配置变了也不回降）；plans = 某一级在某家族下发给启动覆盖的值，及后来核实的实际采用值；
+ * 同一级下发值变了（如配置提了基础档）另起一个计划代次 gen，旧代次连同采用记录留作历史，当前计划始终是最新代次、与覆盖返回值一致；
  * notes = 触顶 / 基础档不可核实等原因（同键一条）。dryRun（observe）整批回滚，只返回本会授予什么。
  * tests/task-tier-escalation-store.test.ts。
  */
@@ -26,8 +27,8 @@ CREATE TABLE IF NOT EXISTS esc_grants (project TEXT NOT NULL, card TEXT NOT NULL
   evidence TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (project, card, n));
 CREATE TABLE IF NOT EXISTS esc_peaks (project TEXT NOT NULL, card TEXT NOT NULL, family TEXT NOT NULL, value TEXT NOT NULL, rank INTEGER NOT NULL,
   top INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY (project, card, family));
-CREATE TABLE IF NOT EXISTS esc_plans (project TEXT NOT NULL, card TEXT NOT NULL, family TEXT NOT NULL, step INTEGER NOT NULL, value TEXT NOT NULL,
-  ts INTEGER NOT NULL, launchId TEXT, sessionId TEXT, actual TEXT, PRIMARY KEY (project, card, family, step));
+CREATE TABLE IF NOT EXISTS esc_plans (project TEXT NOT NULL, card TEXT NOT NULL, family TEXT NOT NULL, step INTEGER NOT NULL, gen INTEGER NOT NULL,
+  value TEXT NOT NULL, ts INTEGER NOT NULL, launchId TEXT, sessionId TEXT, actual TEXT, PRIMARY KEY (project, card, family, step, gen));
 CREATE TABLE IF NOT EXISTS esc_notes (project TEXT NOT NULL, card TEXT NOT NULL, key TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL,
   PRIMARY KEY (project, card, key));`;
 
@@ -53,7 +54,7 @@ export function closeEscalationStore(path: string = ESCALATION_DB_PATH): void {
 export interface CardState { fix: number; ci: number; steps: number }
 export interface Grant { project: string; card: string; n: number; kind: "up" | "topped"; cause: "fix" | "ci" | "fix+ci"; evidence: string[]; ts: number }
 export interface Peak { family: string; value: string; rank: number; top: boolean; updatedAt: number }
-export interface Plan { family: string; step: number; value: string; ts: number; launchId: string | null; sessionId: string | null; actual: string | null }
+export interface Plan { family: string; step: number; gen: number; value: string; ts: number; launchId: string | null; sessionId: string | null; actual: string | null }
 
 class Rollback extends Error {}
 
@@ -126,8 +127,8 @@ export function listPeaks(db: Database, project: string, card: string): Peak[] {
 }
 
 /**
- * 启动覆盖拿到的档位：与已存最高档比，只升不降（同一事务里读写，跨进程不回退）；高于基础档（baseRank）才登记这一级在这一家族下发出的值。
- * 返回实际该用的档（已存档更高就是已存档）。
+ * 启动覆盖拿到的档位：与已存最高档比，只升不降（同一事务里读写，跨进程不回退）；高于基础档（baseRank）才登记这一级在这一家族下发出的值：
+ * 没登记过或与最新代次的值不同就另起一代（旧代次的采用记录不带过来），相同则不动。返回实际该用的档（已存档更高就是已存档）。
  */
 export function settlePlan(db: Database, p: { project: string; card: string; family: string; step: number; value: string; rank: number; top: boolean; baseRank: number;
   now: number }): Peak {
@@ -138,21 +139,27 @@ export function settlePlan(db: Database, p: { project: string; card: string; fam
     db.prepare("INSERT OR REPLACE INTO esc_peaks (project, card, family, value, rank, top, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(p.project, p.card, p.family, peak.value, peak.rank, peak.top ? 1 : 0, p.now);
     if (peak.rank > p.baseRank) {
-      db.prepare("INSERT OR IGNORE INTO esc_plans (project, card, family, step, value, ts) VALUES (?, ?, ?, ?, ?, ?)").run(p.project, p.card, p.family, p.step, peak.value, p.now);
+      const last = db.query<{ gen: number; value: string }, [string, string, string, number]>(
+        "SELECT gen, value FROM esc_plans WHERE project = ? AND card = ? AND family = ? AND step = ? ORDER BY gen DESC LIMIT 1").get(p.project, p.card, p.family, p.step);
+      if (last?.value !== peak.value) {
+        db.prepare("INSERT INTO esc_plans (project, card, family, step, gen, value, ts) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .run(p.project, p.card, p.family, p.step, (last?.gen ?? -1) + 1, peak.value, p.now);
+      }
     }
     return peak;
   }).immediate();
 }
 
 export function latestPlan(db: Database, project: string, card: string): Plan | null {
-  return db.query<Plan, [string, string]>("SELECT family, step, value, ts, launchId, sessionId, actual FROM esc_plans WHERE project = ? AND card = ? ORDER BY step DESC, ts DESC LIMIT 1")
+  return db.query<Plan, [string, string]>("SELECT family, step, gen, value, ts, launchId, sessionId, actual FROM esc_plans WHERE project = ? AND card = ? ORDER BY step DESC, ts DESC, gen DESC LIMIT 1")
     .get(project, card) ?? null;
 }
 
-/** 记下某一级带新档的那次启动；已证实实际值等于发出值的不翻案（没证实 / 不符的可被后来的启动替换） */
-export function recordAdoption(db: Database, p: { project: string; card: string; family: string; step: number; launchId: string; sessionId: string; actual: string }): boolean {
-  return db.prepare("UPDATE esc_plans SET launchId = ?, sessionId = ?, actual = ? WHERE project = ? AND card = ? AND family = ? AND step = ? AND (launchId IS NULL OR actual IS NOT value)")
-    .run(p.launchId, p.sessionId, p.actual, p.project, p.card, p.family, p.step).changes > 0;
+/** 记下某一级某代次带新档的那次启动；已证实实际值等于发出值的不翻案（没证实 / 不符的可被后来的启动替换） */
+export function recordAdoption(db: Database, p: { project: string; card: string; family: string; step: number; gen: number; launchId: string; sessionId: string;
+  actual: string }): boolean {
+  return db.prepare(`UPDATE esc_plans SET launchId = ?, sessionId = ?, actual = ? WHERE project = ? AND card = ? AND family = ? AND step = ? AND gen = ?
+    AND (launchId IS NULL OR actual IS NOT value)`).run(p.launchId, p.sessionId, p.actual, p.project, p.card, p.family, p.step, p.gen).changes > 0;
 }
 
 /** 原因留痕（同卡同键一条）；返回这次是否新记 */

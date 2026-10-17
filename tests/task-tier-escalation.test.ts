@@ -156,6 +156,34 @@ describe("[验收线 3] 当前会话不动、证实才算升档", () => {
     expect(isStaleAuthorSession("p1", "T1", "old-model")).toBe(true);
   });
 
+  test("配置把基础档从 Haiku 提到 Sonnet：同一级下发值变 Opus 即新计划代次，旧 Sonnet 会话不再认、证实 Opus 的新会话认", () => {
+    const t = setup();
+    installTaskTierEscalation();
+    t.s.read = table({ ui: { author: { claude: "claude-haiku-5-5" } } });
+    t.fixReturn(); t.fixReturn();
+    const launch = (agent: string, sessionId: string, at: number) => {
+      const d = decideTierLaunch(ctx(), "author", "claude", null, agent);
+      if (d.mode !== "on" || !("value" in d)) throw new Error("on");
+      recordLaunchAttempt(t.db, d.plan, at);
+      bindLaunchSession(t.db, { project: "p1", card: "T1", role: "author", agent, sessionId,
+        actual: { model: d.value, effort: null, source: "runtime" } as never }, at + 1);
+      escalationTick("p1", "T1");
+      return d.value;
+    };
+    expect(launch("a2", "s-sonnet", 6000)).toBe("claude-sonnet-5-5");
+    expect(escalationStatus("p1", "T1")).toMatchObject({ state: "applied", sessionId: "s-sonnet" });
+    t.s.read = table({ ui: { author: { claude: "claude-sonnet-5-5" } } });
+    t.s.now = 6500;
+    expect(pick()).toBe("claude-opus-5-5");
+    expect(escalationStatus("p1", "T1")).toMatchObject({ plan: { step: 1, value: "claude-opus-5-5" }, state: "pending" });
+    expect(isStaleAuthorSession("p1", "T1", "s-sonnet")).toBe(true);
+    t.s.now = 7000;
+    expect(launch("a3", "s-opus", 7000)).toBe("claude-opus-5-5");
+    expect(escalationStatus("p1", "T1")).toMatchObject({ plan: { value: "claude-opus-5-5" }, state: "applied", sessionId: "s-opus" });
+    expect(isStaleAuthorSession("p1", "T1", "s-opus")).toBe(false);
+    expect(isStaleAuthorSession("p1", "T1", "s-sonnet")).toBe(true);
+  });
+
   test("运行时证实实际值 = 新档 → applied", () => {
     const t = setup();
     installTaskTierEscalation();

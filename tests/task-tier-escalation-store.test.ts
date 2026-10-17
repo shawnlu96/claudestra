@@ -142,10 +142,23 @@ describe("[验收线 2] 只升一次", () => {
     expect(cardState(db, "p1", "T1")).toEqual({ fix: 0, ci: 0, steps: 0 });
   });
 
+  test("同一级下发值变了（配置提了基础档）：新计划代次，latestPlan 与返回值一致，旧代次采用记录留作历史、不带到新代次", () => {
+    const { db } = store();
+    const p = { project: "p1", card: "T1", family: "claude", step: 1, top: false };
+    expect(settlePlan(db, { ...p, baseRank: 0, value: "claude-sonnet-5-5", rank: 1, now: 1 }).value).toBe("claude-sonnet-5-5");
+    expect(recordAdoption(db, { project: "p1", card: "T1", family: "claude", step: 1, gen: 0, launchId: "L1", sessionId: "s1", actual: "claude-sonnet-5-5" })).toBe(true);
+    expect(settlePlan(db, { ...p, baseRank: 1, value: "claude-opus-5-5", rank: 2, top: true, now: 2 }).value).toBe("claude-opus-5-5");
+    expect(latestPlan(db, "p1", "T1")).toMatchObject({ step: 1, value: "claude-opus-5-5", ts: 2, launchId: null, actual: null });
+    settlePlan(db, { ...p, baseRank: 1, value: "claude-opus-5-5", rank: 2, top: true, now: 3 }); // 值没变：不另起代次
+    expect(latestPlan(db, "p1", "T1")).toMatchObject({ value: "claude-opus-5-5", ts: 2 });
+    expect(db.query("SELECT value, actual FROM esc_plans ORDER BY gen").all()).toEqual([
+      { value: "claude-sonnet-5-5", actual: "claude-sonnet-5-5" }, { value: "claude-opus-5-5", actual: null }]);
+  });
+
   test("实际采用值：没证实的可被后来的启动替换，证实等于发出值后不翻案；原因同键一条", () => {
     const { db } = store();
     settlePlan(db, { project: "p1", card: "T1", family: "codex", step: 1, value: "xhigh", rank: 4, top: false, baseRank: 3, now: 1 });
-    const a = { project: "p1", card: "T1", family: "codex", step: 1, launchId: "L1", sessionId: "s1", actual: "unknown" };
+    const a = { project: "p1", card: "T1", family: "codex", step: 1, gen: 0, launchId: "L1", sessionId: "s1", actual: "unknown" };
     expect(recordAdoption(db, a)).toBe(true);
     expect(recordAdoption(db, { ...a, launchId: "L2", sessionId: "s2", actual: "xhigh" })).toBe(true);
     expect(recordAdoption(db, { ...a, launchId: "L3", sessionId: "s3" })).toBe(false);
