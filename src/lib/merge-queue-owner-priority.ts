@@ -13,10 +13,10 @@ import type { RecoveryMode } from "./recovery-policy.js";
 import { sortByPriority, type Ranked } from "./scheduler-priority-order.js";
 import { recordPrioritySort } from "./scheduler-priority-order-record.js";
 
-export const MERGE_OWNER_PRIORITY_KEY = "mergeOwnerPriority";
+const MERGE_OWNER_PRIORITY_KEY = "mergeOwnerPriority";
 
 /** Read before every pick, so `ledger scheduler-recovery … --key mergeOwnerPriority` takes effect without a restart. */
-export function ownerPriorityMode(db: Database, project: string): RecoveryMode {
+function ownerPriorityMode(db: Database, project: string): RecoveryMode {
   try { return ownerPorts(db).policy(project, MERGE_OWNER_PRIORITY_KEY).mode; }
   catch (e) { console.error(`[merge-owner] ${project} ${MERGE_OWNER_PRIORITY_KEY} 策略不可读，按 off：${String(e)}`); return "off"; }
 }
