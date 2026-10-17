@@ -3,7 +3,7 @@
  * 交付即通知 PM、N 分钟升级 PM、再 M 分钟进 owner、派审后撤销、自动卡不触发、去重（重跑 / 巡检已推 / 巡检读到已升级）；
  * 第 1 / 2 / 3 轮对抗审查（reviews/RVF-2-r1-adv.md、r2、r3）的回归在「审查回归」几节。
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -489,4 +489,24 @@ describe("验收追加 4（Shawn PR1683-r1 owner-create-crash-gap）", () => {
     await at(T0 + 41 * MIN, tick);
     expect(openAsks()).toHaveLength(1);
   });
+});
+
+
+test("pending delivery histories use the project/target index without changing the notification", async () => {
+  const d = deliveredCard();
+  const original = listEvents(db, { target: ID });
+  expect(listEvents(db, { project: P, target: ID })).toEqual(original);
+  const prepare = spyOn(db, "prepare");
+  try {
+    await at(T0 + MIN, ticker());
+    const queries = prepare.mock.calls.map(([sql]) => sql).filter(sql => /SELECT \* FROM events.*target = \?/.test(sql));
+    expect(queries.length).toBeGreaterThan(0);
+    for (const sql of queries) {
+      expect(sql).toContain("project = ? AND target = ?");
+      const plan = db.query(`EXPLAIN QUERY PLAN ${sql}`).all(P, ID) as { detail: string }[];
+      expect(plan.map(p => p.detail).join(" ")).not.toContain("SCAN events");
+      expect(plan.map(p => p.detail).join(" ")).toContain("events_project_target");
+    }
+    expect(sends).toEqual([expect.objectContaining({ to: PM, id: `mdn-${mdnKey(P, ID, d.seq)}-notify` })]);
+  } finally { prepare.mockRestore(); }
 });

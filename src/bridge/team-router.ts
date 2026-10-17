@@ -145,7 +145,7 @@ export function teamRouterTicker(d: TickerDeps): () => Promise<void> {
           const m = getMeta(db, project);
           return { pms: m.pms, team: m.team };
         },
-        events: (id) => listEvents(db, { target: id }),
+        events: (id) => listEvents(db, { project: getTask(db, id)?.project ?? "", target: id }),
         policy: (t) => specPolicyOf(t, getMeta(db, t.project).docsDir),
         managerCmd: `bun ${MANAGER_PATH}`,
         warn: (m) => d.log(`⚠️ 班子路由：${m}`),
