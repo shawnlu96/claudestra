@@ -73,6 +73,7 @@ export const RECOVERY_KEYS = [
   "memoryDirectInjection",
   "memoryFeedbackPrior",
   "memoryLendInjection",
+  "memoryLendPrepare",
   "memoryPitfallRelevance",
   "mergeContentReview",
   "mergeContentUi",

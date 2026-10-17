@@ -142,8 +142,9 @@ export function nearestMemories(db: Database, model: string, query: Float32Array
  * 语义这一路：查询文本嵌入一次再暴力余弦。没有模型、查询过不了远端闸、嵌入失败 / 超时 → 空数组（这路为空，不是错误）
  */
 export async function semanticSearch(db: Database, embedder: Embedder | null, query: EmbedText,
-  opts: NearestOpts & { timeoutMs?: number } = {}): Promise<VectorHit[]> {
+  opts: NearestOpts & { timeoutMs?: number; throwOnError?: boolean } = {}): Promise<VectorHit[]> {
   if (!embedder) return [];
   const [q] = await embedTexts(embedder, [query], { timeoutMs: opts.timeoutMs });
+  if (!q && opts.throwOnError) throw new Error("语义查询嵌入失败或被拒绝");
   return q ? nearestMemories(db, embedder.model, q, opts) : [];
 }
