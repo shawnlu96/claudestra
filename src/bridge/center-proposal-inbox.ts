@@ -31,6 +31,7 @@ import { classifyProposal, reasonText, type AutoReason, type AutoHit } from "../
 import {
   autoApproveMode, claimExec, execKey, execState, MAX_AUTO_ATTEMPTS, observeAutoApprove, recordExecResult, RETRY_AFTER_MS, type ExecIdentity,
 } from "../lib/center-proposal-auto-exec.js";
+import { proposalSummary, type ProposalSummary } from "../lib/center-proposal-auto-summary.js";
 import {
   canApprove, cardParams, cardHitEvidence, decisionBody, decisionResultText, decisionSettled, handoffText, inboxCard, inboxDedupKey, inboxErrorCode, isDecisionConflict,
   NOT_APPROVER_REASON, paramsOf, pendingApproval, PROPOSAL_INBOX_CREATOR, PROPOSAL_RESULT_CREATOR, proposalTitleOf, resultAnswer, resultCard,
@@ -160,8 +161,9 @@ async function gatedReconcile(project: InboxProject, pending: Pending, d: Propos
   return reconcile(project, pending, d, d.auto && mode !== "off" ? await autoRoute(project, pending, mode, d, d.auto) : undefined);
 }
 
-const identityOf = (project: InboxProject, params: InboxParams): ExecIdentity =>
-  ({ localProjectId: project.localProjectId, centerProject: project.scope.projectId, params });
+/** summary：PROPEVID1 提案摘要，只随结果事件进本机台账 */
+const identityOf = (project: InboxProject, params: InboxParams, summary?: ProposalSummary): ExecIdentity =>
+  ({ localProjectId: project.localProjectId, centerProject: project.scope.projectId, params, ...(summary ? { summary } : {}) });
 const SKIP: Plan = { skip: true };
 
 /** 上一轮自动发出、结果不明的：中心已不是待批 → 补记结果事件（中心当前状态），不再发。失败只记一行 */
@@ -170,7 +172,7 @@ function backfillResults(project: InboxProject, pending: Pending, d: ProposalInb
     const db = a.db();
     for (const r of pending.all) {
       if (r.operation.state === "pending_approval") continue;
-      const ident = identityOf(project, paramsOf(project.localProjectId, r)), s = execState(db, execKey(ident.centerProject, ident.params));
+      const ident = identityOf(project, paramsOf(project.localProjectId, r), proposalSummary(r)), s = execState(db, execKey(ident.centerProject, ident.params));
       if (s.result || !s.claims.some(c => c.lane === "auto")) continue;
       recordExecResult(db, ident, { outcome: "settled", centerState: r.operation.state, reasons: [] }, d.now());
       d.log(`[proposal-inbox] ${project.localProjectId} ${r.proposalId} rev ${r.proposalRev} 自动批准结果补记：中心 ${r.operation.state}`);
@@ -183,14 +185,14 @@ async function autoRoute(project: InboxProject, pending: Pending, mode: Recovery
   const plan = new Map<string, Plan>(), id = project.localProjectId;
   for (const r of pending.records) {
     if (r.proposal.expiresAt <= d.now()) continue;
-    const params = paramsOf(id, r), verdict = classifyProposal(r, a.files?.(), { project: id, db: a.db, now: d.now });
+    const params = paramsOf(id, r), summary = proposalSummary(r), verdict = classifyProposal(r, a.files?.(), { project: id, db: a.db, now: d.now });
     try {
       if (mode === "observe") {
         if (verdict.route === "auto") observeAutoApprove(a.db(), identityOf(project, params), d.now());
         continue;
       }
       if (verdict.route === "owner") plan.set(paramsKey(params), { reason: reasonText(verdict.reasons, undefined, verdict.hits), hits: verdict.hits });
-      else if (!a.hasCard(inboxDedupKey(params))) plan.set(paramsKey(params), await autoApprove(project, r, identityOf(project, params), d, a));
+      else if (!a.hasCard(inboxDedupKey(params))) plan.set(paramsKey(params), await autoApprove(project, r, identityOf(project, params, summary), d, a));
     } catch (e) { d.log(`[proposal-inbox] ${id} 自动批准 ${r.proposalId} rev ${r.proposalRev} 出错：${(e as Error).name}，照旧出卡`); }
   }
   return plan;

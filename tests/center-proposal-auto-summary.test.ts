@@ -1,0 +1,117 @@
+/** PROPEVID1：自动批准结果事件带提案摘要；scripts/guard 不再报 schema 原因；卡上命中按 (reason, path) 去重。中心 / decide 是 fake，台账是临时真库。 */
+import { describe, expect, test } from "bun:test";
+import { listEvents, openLedger } from "../src/lib/ledger-store.js";
+import type { ProposalList, ProposalRecord } from "../src/lib/shared-ledger-feature-proposals.js";
+import { classifyProposal, hitEvidence, reasonText, type AutoHit } from "../src/lib/center-proposal-auto.js";
+import { RESULT_OP } from "../src/lib/center-proposal-auto-exec.js";
+import { proposalSummary, type ProposalSummary } from "../src/lib/center-proposal-auto-summary.js";
+import { pollCenterProposals, type ProposalInboxDeps } from "../src/bridge/center-proposal-inbox.js";
+import { tempLedgerPath } from "./ledger-test-helpers.js";
+
+const NOW = 1_790_000_000_000;
+const SCOPE = { centerId: "c1", teamId: "t1", projectId: "p1" };
+const SELF = "person-owner";
+const LOCAL = "claudestra";
+const REPO = ["web/features/collab/list.tsx", "web/features/collab/board.tsx", "scripts/guard/rules.ts", "src/lib/ledger-schema.ts", "src/bridge.ts"];
+
+type Node = { key: string; oneLine: string; deps: string[]; fileGlobs: string[]; estimate: string };
+const node = (key: string, fileGlobs: string[]): Node => ({ key, oneLine: `节点 ${key}`, deps: [], fileGlobs, estimate: "" });
+function rec(id: string, nodes: Node[], o: { title?: string; kind?: "new" | "revise" } = {}): ProposalRecord {
+  const digest = `${id}-digest`.padEnd(64, "0");
+  const base = { schemaVersion: 1, ...SCOPE, operationId: `op-${id}`, title: o.title ?? `协作页改版 ${id}`, description: "调一下列表样式",
+    ownerWords: null, nodes, homeInstanceId: "inst-a", expiresAt: NOW + 3_600_000 };
+  const proposal = (o.kind === "revise" ? { ...base, kind: "revise", featureId: "F1", baseVersion: 2, expectedRev: 3, baseDigest: "b".repeat(64) }
+    : { ...base, kind: "new" }) as ProposalRecord["proposal"];
+  return { proposal, proposalId: id, proposalRev: 1, proposer: { type: "person", personId: "person-he", instanceId: "inst-b" },
+    operation: { schemaVersion: 1, ...SCOPE, operationId: `op-${id}`, proposalDigest: digest, state: "pending_approval", proposalId: id, featureId: null, version: null, updatedAt: NOW } };
+}
+
+/** 跑一轮自动批准（on 档），返回结果事件 */
+async function autoApproveOnce(r: ProposalRecord) {
+  const db = openLedger(tempLedgerPath("propevid-")), informed: string[] = [];
+  const deps: ProposalInboxDeps = {
+    now: () => NOW,
+    projects: () => [{ localProjectId: LOCAL, scope: SCOPE }],
+    list: async () => ({
+      policy: { schemaVersion: 1, ...SCOPE, approvers: "project_owner", setBy: null, rev: 0, updatedAt: 0 }, proposals: [r], selfPersonId: SELF,
+    }) as ProposalList & { selfPersonId: string },
+    members: async () => [{ personId: SELF, role: "owner", status: "active" }],
+    decide: async () => ({ ...r, operation: { ...r.operation, state: "approved" } }),
+    openAsk: () => { throw new Error("不该开卡"); },
+    openCards: () => [],
+    closeAsk: () => {},
+    inform: async t => { informed.push(t); },
+    handoff: async () => {},
+    log: () => {},
+    auto: { mode: () => "on", db: () => db, files: () => REPO, hasCard: () => false },
+  };
+  await pollCenterProposals(deps);
+  expect(informed).toEqual([]);
+  return listEvents(db, { project: LOCAL }).filter(e => e.kind === "note" && e.data.op === RESULT_OP);
+}
+
+describe("PROPEVID1 结果事件带提案摘要", () => {
+  test("[验收线 1] 自动批准 2 节点提案：data 有标题、类型、节点数和两个节点的 fileGlobs；正文末尾带标题与节点数", async () => {
+    const r = rec("p-two", [node("ui", ["web/features/collab/list.tsx"]), node("ui2", ["web/features/collab/board.tsx"])], { kind: "revise" });
+    const [e, ...rest] = await autoApproveOnce(r);
+    expect(rest).toEqual([]);
+    expect(e!.data.outcome).toBe("approved");
+    const s = e!.data.proposal as ProposalSummary;
+    expect(s).toEqual({ title: "协作页改版 p-two", kind: "revise", featureId: "F1", fromVersion: 2, toVersion: 3, nodeCount: 2, nodesOmitted: 0, globsOmitted: 0,
+      nodes: [{ key: "ui", fileGlobs: ["web/features/collab/list.tsx"], globsOmitted: 0 }, { key: "ui2", fileGlobs: ["web/features/collab/board.tsx"], globsOmitted: 0 }] });
+    expect(e!.text.endsWith(" · 协作页改版 p-two · 2 个节点")).toBe(true);
+  });
+
+  test("[验收线 1] 单节点 15 条 glob 只留 10 条并记省略数；总量 60 封顶", () => {
+    const globs = (n: number, p: string) => Array.from({ length: n }, (_, i) => `docs/${p}-${i}.md`);
+    const one = proposalSummary(rec("p-15", [node("doc", globs(15, "a"))]));
+    expect(one.kind).toBe("new");
+    expect(one.nodes[0]!.fileGlobs).toEqual(globs(10, "a"));
+    expect(one.nodes[0]!.globsOmitted).toBe(5);
+    expect(one.globsOmitted).toBe(5);
+    const many = proposalSummary(rec("p-many", Array.from({ length: 8 }, (_, i) => node(`n${i}`, globs(12, `n${i}`)))));
+    expect(many.nodes.reduce((n, x) => n + x.fileGlobs.length, 0)).toBe(60);
+    expect(many.globsOmitted).toBe(8 * 12 - 60);
+    expect(many.nodes[6]!.fileGlobs).toEqual([]);
+    expect(many.nodes[6]!.globsOmitted).toBe(12);
+  });
+
+  test("摘要过清洗：凭据、URL、本机绝对路径不进事件", () => {
+    const s = proposalSummary(rec("p-dirty", [node("x", ["/Users/he/repos/a.ts", "docs/a.md"])],
+      { title: "看 https://example.com/x?t=1 用 sk-SECRETSECRETSECRETSECRET123" }));
+    const json = JSON.stringify(s);
+    for (const bad of ["https://", "sk-SECRET", "/Users/he"]) expect(json).not.toContain(bad);
+    expect(s.nodes[0]!.fileGlobs[1]).toBe("docs/a.md");
+  });
+});
+
+describe("PROPEVID1 guard 文件不报 schema", () => {
+  test("[验收线 2] 只改 scripts/guard/rules.ts：仍 owner、报安全敏感，不报 schema；ledger-schema 仍报 schema", () => {
+    const g = classifyProposal(rec("p-guard", [node("g", ["scripts/guard/rules.ts"])]), REPO);
+    expect(g.route).toBe("owner");
+    expect(reasonText(g.reasons)).toContain("改动安全敏感目录或文件");
+    expect(reasonText(g.reasons)).not.toContain("涉及删数据、迁移或 schema");
+    const s = classifyProposal(rec("p-schema", [node("s", ["src/lib/ledger-schema.ts"])]), REPO);
+    expect(s.route).toBe("owner");
+    expect(reasonText(s.reasons)).toContain("涉及删数据、迁移或 schema");
+  });
+});
+
+describe("PROPEVID1 卡上命中去重", () => {
+  test("[验收线 3] 同一路径被两个节点命中，卡上只出现一次", () => {
+    const v = classifyProposal(rec("p-dup", [node("a", ["src/bridge.ts"]), node("b", ["src/bridge.ts"])]), REPO);
+    expect(v.hits.filter(h => h.path === "src/bridge.ts").length).toBeGreaterThan(1);
+    const text = reasonText(v.reasons, undefined, v.hits);
+    expect(text.split("改到 src/bridge.ts").length - 1).toBe(1);
+    expect(hitEvidence(v.hits).hitsOmitted).toBe(0);
+  });
+
+  test("[验收线 3] 去重后超过 10 条：截前 10，省略数按去重后计", () => {
+    const hits: AutoHit[] = [];
+    for (let i = 0; i < 13; i++) for (const source of ["n1", "n2", "n3"]) hits.push({ reason: "glob_security_surface", source, path: `scripts/guard/f${i}.ts` });
+    const e = hitEvidence(hits);
+    expect(e.hits.map(h => h.path)).toEqual(Array.from({ length: 10 }, (_, i) => `scripts/guard/f${i}.ts`));
+    expect(e.hitsOmitted).toBe(3);
+    expect(reasonText(["glob_security_surface"], undefined, hits)).toContain("另 3 条");
+  });
+});

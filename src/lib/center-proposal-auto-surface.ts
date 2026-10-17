@@ -9,7 +9,7 @@ import type { RecoveryMode } from "./recovery-policy.js";
 const KNOWN_ROOTS = ["src/", "tests/", "docs/", "web/", "scripts/"];
 const nameExempt = (g: string) => ["tests/", "docs/"].some(r => g.toLowerCase().startsWith(r));
 const AUTO_FILE_PATTERNS = FILE_PATTERNS.map(([, re]) => new RegExp(re.source, re.flags.includes("i") ? re.flags : `${re.flags}i`));
-const DATA_SCHEMA = /ledger-store|ledger-schema|migrat|\.sql(?:$|[^a-z])|shared-ledger-contract|recovery-key-(?:class|defaults)|(?:^|\/)scripts\/guard\//i;
+const DATA_SCHEMA = /ledger-store|ledger-schema|migrat|\.sql(?:$|[^a-z])|shared-ledger-contract|recovery-key-(?:class|defaults)/i;
 const PERMISSION_FILES = [
   "src/lib/peer-scope-gate.ts", "src/lib/peer-secret-gate.ts", "src/lib/order-tool-route.ts", "src/lib/caller-identity.ts",
   "src/bridge/api-auth.ts", "src/bridge/terminal-auth.ts", "src/bridge/interrupt-gate.ts", "src/bridge/web-gateway.ts",
