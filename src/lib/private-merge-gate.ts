@@ -16,6 +16,9 @@ import { getEventByDedup, openLedger } from "./ledger-store.js";
 import { observeDedupKey, recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
+import { aliasPick, sameRepo } from "./repo-alias.js";
+import { projectRepoFor } from "./scheduler-foreign-repo.js";
+import { PROPOSED_REPO } from "./floka-repo/migrate.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
 import { isTestProcess } from "./test-guard.js";
 
@@ -29,12 +32,15 @@ export interface PrivateMergePorts {
   ledger(): Database | null;
   /** The project's merge belongs to the repository owner (mergeHandoff): never merged here. Throws when the config cannot be read. */
   handoff(project: string): boolean;
+  /** The project's own repository (scheduler-foreign-repo.ts projectRepoFor); null = unknown. */
+  projectRepo(project: string): string | null;
   now(): number;
 }
 const LOCAL: PrivateMergePorts = {
   policy: recoveryPolicy, repoDirs: LOCAL_REPO_DIRS, command: runBounded, now: () => Date.now(),
   ledger: () => (isTestProcess() ? null : openLedger()),
   handoff: (project) => readSchedulerConfig().projects[project]?.mergeHandoff === true,
+  projectRepo: (project) => projectRepoFor(project),
 };
 let ports = LOCAL;
 export const privateMergePorts = (): PrivateMergePorts => ports;
@@ -70,13 +76,33 @@ export function privateMergeVerdict(task: Pick<LedgerTask, "project" | "pr" | "e
   if (!declared) return null;
   const repo = prCoordinates(task.pr)?.repo.toLowerCase();
   if (!repo) return { repo: declared, refused: "卡上没有完整的 PR 链接" };
-  if (repo !== declared) return { repo, refused: `PR 不在卡的私仓 ${declared}` };
+  // REPOMERGE1 (repoAlias on): the renamed project repository under its other name is the project's own card, not a private one;
+  // Only that one pair is aliased: a fork or another repository stays as before.
+  if (aliasPick("private-merge-gate.projectRepo", false, isRenamedProjectRepo(task.project, repo))) return null;
+  // The declaration and the PR stay bound word for word: private-merge.ts privateMergeDrive compares them exactly, so admitting an
+  // old / new spelling here would plan a merge its driver then calls foreign. Under on such a card only gets the plainer reason (PM).
+  if (repo !== declared) {
+    return { repo, refused: aliasPick("private-merge-gate.declared", `PR 不在卡的私仓 ${declared}`,
+      sameRepo(repo, declared) ? `私仓声明 ${declared} 与 PR 的仓库是改名前后的两个名字，私仓自动合并还不支持` : `PR 不在卡的私仓 ${declared}`) };
+  }
   try {
     if (ports.handoff(task.project)) return { repo, refused: "项目的合并交仓库方（mergeHandoff）" };
   } catch { return { repo, refused: "读不到调度配置" }; }
   let dir: string | null;
   try { dir = checkoutOf(task.project, repo); } catch { dir = null; }
   return dir ? { repo, dir } : { repo, refused: noCheckoutReason(repo) };
+}
+
+/** The PR repository is the project's own under the renamed repository's other name (never the same spelling: that path is unchanged). */
+function isRenamedProjectRepo(project: string, repo: string): boolean {
+  if (!sameRepo(repo, PROPOSED_REPO)) return false; // not the renamed repository: the project's repository is not even read
+  let own: string | null;
+  try { own = ports.projectRepo(project)?.toLowerCase() ?? null; } catch (e) {
+    // false keeps the card on the private path it took before REPOMERGE1 (refused or PM, never a merge of the project's own card)
+    console.error(`⚠️ [private-merge] ${project} 读不到项目仓库，按私仓旧路径判：${(e as Error).message}`);
+    return false;
+  }
+  return own !== null && own !== repo && sameRepo(own, repo);
 }
 
 /**

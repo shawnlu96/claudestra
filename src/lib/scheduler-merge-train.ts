@@ -14,6 +14,7 @@ import { carTimedOut, carTimeoutStep, ciTimeoutMode, exitCancel, type CarTimeout
   type TrainRunsGh } from "./train-ci-timeout.js";
 import { fitTimeoutLink } from "./train-ci-timeout-diag.js";
 import type { RecoveryMode } from "./recovery-policy.js";
+import { aliasPick, aliasSameRepo, samePr } from "./repo-alias.js";
 import { carFailureClass, type TrainCiClassPort } from "./scheduler-train-ci-rerun.js";
 import { configuredVoidSkip, skipKey, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode, voidSkipNote } from "./scheduler-merge-train-skip.js";
 import { confirmFailed, ensureProof, jointlyProven, provenHeads, settleSet, type SetOps, type TrainProof } from "./scheduler-merge-train-set.js";
@@ -157,7 +158,7 @@ export async function formTrain(project: string, all: readonly TrainCandidate[],
   const repo = repoOfPr(cands[0]!.prRef);
   const listed: TrainMember[] = [];
   for (const c of cands) {
-    if (repoOfPr(c.prRef) !== repo) continue;
+    if (!aliasSameRepo("scheduler-merge-train.formTrain", repoOfPr(c.prRef), repo)) continue; // REPOMERGE1: old / new name one group (repoAlias on)
     const f = await files(c);
     if (f) listed.push({ ...c, files: [...new Set(f)].sort() });
   }
@@ -473,7 +474,8 @@ export async function stepTrain(s: TrainState, deps: TrainDeps): Promise<TrainSt
  */
 export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & Pick<TrainDeps, "gh">): Promise<TrainGate> {
   if (!s || (s.phase !== "testing" && s.phase !== "settling") || trainMode(s.project) !== "on") return null;
-  const m = s.members.find((x) => x.taskId === run.taskId && sameSha(x.head, run.reviewedHead) && x.prRef === run.prRef);
+  const m = s.members.find((x) => x.taskId === run.taskId && sameSha(x.head, run.reviewedHead) &&
+    aliasPick("scheduler-merge-train.trainGate", x.prRef === run.prRef, x.prRef === run.prRef || samePr(x.prRef, run.prRef)));
   if (!m || s.serial.includes(m.taskId) || s.dropped.includes(m.taskId) || s.merged.some((x) => x.taskId === m.taskId)) return releaseOutsider(s, run, deps, voidTrain);
   const bounce = s.bounced.find((b) => b.taskId === m.taskId && sameSha(b.head, m.head));
   if (bounce) return { bounce: bounce.receipt };

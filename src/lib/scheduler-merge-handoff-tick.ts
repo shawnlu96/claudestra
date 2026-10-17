@@ -10,6 +10,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { ghEnv } from "./peer-pr-github.js";
 import { WHOLE_DIFF_ARGS } from "./git-diff-args.js";
 import { runBounded } from "./run-bounded.js";
+import { aliasSameRepo } from "./repo-alias.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
 import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
@@ -189,10 +190,11 @@ function gitRaw(repoDir: string, command: typeof runBounded, timeoutMs = 120_000
   return (...args: string[]) => command(["git", ...args], { cwd: repoDir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs });
 }
 
-/** `owner/repo` of a full PR URL when the clone's origin is that very repository, else null (checked before any fetch). */
+/** `owner/repo` of a full PR URL when the clone's origin is that very repository, else null (checked before any fetch);
+ *  REPOMERGE1: with repoAlias on, the renamed repository's old and new name count as that repository. */
 async function prRepoIn(git: ReturnType<typeof gitIn>, prRef: string): Promise<string | null> {
   const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1]?.toLowerCase();
-  return repo && githubRepoOf((await git("config", "--get", "remote.origin.url")).trim()) === repo ? repo : null;
+  return repo && aliasSameRepo("scheduler-merge-handoff-tick.prRepoIn", githubRepoOf((await git("config", "--get", "remote.origin.url")).trim()), repo) ? repo : null;
 }
 
 export function handoffCarry(repoDir: string, command: typeof runBounded = runBounded): HandoffCarry {
