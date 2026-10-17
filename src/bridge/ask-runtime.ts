@@ -76,6 +76,8 @@ interface RuntimeAskInput {
   options: unknown[];
   /** Codex 额度用完：正文换成几点恢复，原文只留在 extra.raw（指纹仍按原文算） */
   quota?: true;
+  /** 额度卡的卡面正文（ACP 额度卡给：带原文、谁到顶、为什么有的模型没列）；不给 = 只一句几点恢复 */
+  quotaText?: string;
   /** ACP 宿主的卡（bridge/acp-link.ts）：网页按 extra.acp 出按钮，点了走 POST /agents/:name/answer {kind:"acp"} */
   acp?: true;
   /** 卡的代际（ACP 的权限 / 额度卡，按钮 id 里也带着）：进指纹——题面相同的新请求是另一张卡，不沿用旧卡和它的按钮 */
@@ -121,7 +123,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
     const expiresAt = r.source === "codex" && !r.deliveryUnknown ? codexExpiry(r.context, now) : undefined; // 投递不明的正文含用户原文，里面的时间不是重置时间
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: !r.quiet,
-      urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? codexQuotaText(expiresAt, now) : r.context, options: r.options, allowText: false,
+      urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? (r.quotaText ?? codexQuotaText(expiresAt, now)) : r.context, options: r.options, allowText: false,
       chatId: r.channelId, expiresAt, extra: {
         ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}), ...(r.acp ? { acp: true } : {}), ...(r.failure ? { failure: r.failure } : {}),
         ...(r.sessionId ? { sessionId: r.sessionId } : {}), ...(r.failedAt !== undefined ? { failedAt: r.failedAt } : {}),

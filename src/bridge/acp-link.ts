@@ -3,8 +3,8 @@
  * - acp_entries：CC 形状的流式条目 → jsonl-watcher 的推送模式，工具 / 正文 / 状态事件和尾读 rollout 时一样发。每批带 hostId +
  *   条目序号，处理完回 true 宿主才出队；watcher 还没挂好（注册后要查 registry）回 false，宿主退避重送，这里按序号跳过处理过的前缀；
  * - acp_config：会话的 configOptions，存一份给设置页（不重启切模型 / 推理强度）和额度卡用；
- * - acp_failure：额度 → 「待你处理」卡，第一个选项是「等重置」，后面只列 configOptions 里的其它模型，不推荐（owner 的规矩），
- *   点了才经宿主调 set_config_option，绝不自动选；没登录 → 「需要 owner 登录」卡，宿主接上线程后自动结掉；适配器说能重试的失败只有条目，
+ * - acp_failure：额度 → 「待你处理」卡，带原文 / 重置时间，第一个选项是「等重置」，后面只列真能走通的模型（acp-quota.ts）；
+ *   点了才经宿主调 set_config_option，只有配了备用链 on 档才自动切（docs/architecture/acp-quota.md）；没登录 → 「需要 owner 登录」卡，宿主接上线程后自动结掉；适配器说能重试的失败只有条目，
  *   不能重试的（策略拦截、请求被拒等）开「<运行时> 回合失败」卡（extra.failure = error），调度器据此交 PM，
  *   同时记下来，这一轮 Stop 时告诉开这一轮的请求方（turn-failure.ts）；
  * - acp_permission：权限请求按频道排队，一次出一张卡。宿主超时 / 适配器退出发 gone 撤卡，宿主断线（onAcpHostGone）撤它挂着的。
@@ -17,6 +17,7 @@ import { parseConfigOptions, quotaCardChoices, type ConfigOption, type QuotaChoi
 import type { AcpFailure } from "../lib/acp/failures.js";
 import type { PermissionCard } from "../lib/acp/permissions.js";
 import { parseSlotReply, SLOT_OPS, type CancelSlotResult, type HostSlotState } from "../lib/acp/turn.js";
+import { planAcpQuota } from "./acp-quota.js";
 import { apiJson } from "./api-respond.js";
 import { openRuntimeAsk, settleRuntimeAsk } from "./ask-runtime.js";
 import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
@@ -32,7 +33,7 @@ type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
 type Answer = { status: number; body: Record<string, unknown> };
 type Perm = { gen: string; permId: string; ws: Socket; card: PermissionCard; claimed?: true };
-type Quota = { gen: string; failureKey: string; message: string; choices: QuotaChoice[]; claimed?: true };
+type Quota = { gen: string; failureKey: string; message: string; choices: QuotaChoice[]; claimed?: true; auto?: true };
 
 const configs = new Map<string, ConfigOption[]>();
 const quotaCards = new Map<string, Quota>();
@@ -140,21 +141,10 @@ async function acceptEntries(channelId: string, msg: Record<string, any>, discor
 }
 
 /** label：宿主报的运行时称呼（Codex / Pi，老宿主不带 = Codex），只进卡片标题；at：失败发生在哪个会话、什么时刻（老宿主不带），回合失败卡记进 extra，派单会话据此认归属 */
-function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: string, at: FailureAt = {}): void {
+function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: string, at: FailureAt = {}): Promise<void> | void {
   const agentName = agentNameForChannel(channelId) ?? channelId;
   if (f?.kind === "quota") {
-    const opts = parseConfigOptions(rawConfig);
-    const choices = quotaCardChoices(opts.length ? opts : acpConfigOf(channelId));
-    // 同一个失败又报一次（选项、原文都没变、卡还没人答）：沿用这张卡和它的代际；否则是新卡，旧卡的按钮作废
-    const prev = quotaCards.get(channelId);
-    const same = prev && !prev.claimed && prev.failureKey === f.key && prev.message === f.message && JSON.stringify(prev.choices) === JSON.stringify(choices);
-    const q: Quota = same ? prev : { gen: newGen(), failureKey: f.key, message: f.message, choices };
-    quotaCards.set(channelId, q);
-    const buttons = choices.map((c, i) => ({ id: `${QUOTA_PREFIX}${q.gen}_${i}`, label: c.label, style: c.value === null ? "secondary" : "primary" }));
-    void openRuntimeAsk({
-      source: "codex", channelId, agentName, kind: "decide", title: `${label} 额度用完了`, context: f.message, quota: true, acp: true, instance: q.gen,
-      options: [{ type: "buttons", buttons }],
-    });
+    return showQuotaCard(channelId, agentName, f, rawConfig, label);
   } else if (f?.kind === "auth") {
     authCards.add(channelId);
     const context = label === "Pi"
@@ -174,6 +164,37 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
       failure: "error", instance: f.key, ...at, ...(f.deliveryUnknown ? { deliveryUnknown: true as const } : {}), ...(quiet ? { quiet: true as const } : {}) });
   }
+}
+
+/** 额度卡：选项 / 正文由 acp-quota.ts 定；备用链 on 档先切，切成了出通知卡（附「切回」），没切成照常出额度卡 */
+async function showQuotaCard(channelId: string, agentName: string, f: AcpFailure, rawConfig: unknown, label: string): Promise<void> {
+  const prev = quotaCards.get(channelId);
+  if (prev?.auto && prev.failureKey === f.key) return; // 同一个失败重报：已经切过了，再切一次只会把卡顶掉
+  const opts = parseConfigOptions(rawConfig);
+  const config = opts.length ? opts : acpConfigOf(channelId);
+  const plan = await planAcpQuota(channelId, f, config, label).catch((e) => void console.error(`⚠️ 额度卡凑不齐（照出原文卡）：${(e as Error).message}`));
+  if (!plan) return openQuotaCard(channelId, agentName, f, { title: `${label} 额度用完了`, context: f.message, choices: quotaCardChoices(config), quota: true });
+  let context = plan.context;
+  if (plan.autoSwitch && plan.switched) {
+    const r = await acpSetConfig(channelId, "model", plan.autoSwitch);
+    if (r.ok) return void openQuotaCard(channelId, agentName, f, { ...plan.switched, quota: false });
+    context += `\n按备用链切到 ${plan.autoSwitch} 没成：${r.error}`;
+  }
+  openQuotaCard(channelId, agentName, f, { title: `${label} 额度用完了`, context, choices: plan.choices, quota: true });
+}
+
+function openQuotaCard(channelId: string, agentName: string, f: AcpFailure, card: { title: string; context: string; choices: QuotaChoice[]; quota: boolean }): void {
+  // 同一个失败又报一次（选项、原文都没变、卡还没人答）：沿用这张卡和它的代际；否则是新卡，旧卡的按钮作废
+  const prev = quotaCards.get(channelId);
+  const same = prev && !prev.claimed && prev.failureKey === f.key && prev.message === f.message && JSON.stringify(prev.choices) === JSON.stringify(card.choices);
+  const q: Quota = same ? prev : { gen: newGen(), failureKey: f.key, message: f.message, choices: card.choices, ...(card.quota ? {} : { auto: true as const }) };
+  quotaCards.set(channelId, q);
+  const buttons = card.choices.map((c, i) => ({ id: `${QUOTA_PREFIX}${q.gen}_${i}`, label: c.label, style: c.value === null ? "secondary" : "primary" }));
+  // 额度卡：原文进 context（openRuntimeAsk 存进 extra.raw、按它算过期），卡面换成 quotaText；自动切换的通知卡不带 quota，调度器 / 监护不把它当失败（scheduler-auto-ports.ts codexFailure）
+  void openRuntimeAsk({
+    source: "codex", channelId, agentName, kind: "decide", title: card.title, acp: true, instance: q.gen, options: [{ type: "buttons", buttons }],
+    ...(card.quota ? { quota: true as const, context: f.message, quotaText: card.context } : { context: card.context }),
+  });
 }
 
 /** 宿主的权限帧：新请求排队（队首出卡）；同一个 permId 重发 = 宿主重连后补发，卡和按钮不变；gone = 宿主那边不等了，撤卡 */

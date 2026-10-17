@@ -1,5 +1,7 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acpClear, acpConfigOf, acpHostTurnBusy, acpSetConfig, answerAcp, answerAcpDiscord, answerAcpResponse, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
+import { useAcpQuotaPort } from "../src/bridge/acp-quota.ts";
+import { onAsk } from "../src/bridge/asks.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { handleSlashPassthrough } from "../src/bridge/api-slash.ts";
 import { subscribeEvents } from "../src/bridge/event-bus.ts";
@@ -19,6 +21,9 @@ const sock = (ch: string) => {
 const discord = {} as any;
 const CONFIG = [{ id: "model", name: "Model", type: "select", currentValue: "gpt-5.6-sol", options: [{ value: "gpt-5.6-sol", name: "sol" }, { value: "gpt-5.6-luna", name: "luna" }] }];
 const who = { principal: "owner:self" };
+// 额度卡要两家 provider（同一家的模型不列）：当前在 go 上，ds 是别家
+const SOL = "go/deepseek-v4.1-flash", LUNA = "ds/deepseek-v4-flash";
+const QUOTA_CONFIG = [{ id: "model", name: "Model", type: "select", currentValue: SOL, options: [{ value: SOL, name: "sol" }, { value: LUNA, name: "luna" }] }];
 
 beforeAll(() => {
   setExtensionSocket((ch) => sockets.get(ch), {
@@ -330,8 +335,10 @@ describe("推送 watcher 重建：未 flush 的正文不丢、序号不回退（
   });
 });
 
-describe("额度卡：先「等重置」、只列其它模型、owner 点了才经宿主改", () => {
-  const quota = (key: string, message: string) => ({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key, message }, configOptions: CONFIG });
+describe("额度卡：先「等重置」、只列别家能用的模型、owner 点了才经宿主改", () => {
+  beforeAll(() => useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, projectOf: async () => undefined }));
+  afterAll(() => useAcpQuotaPort());
+  const quota = (key: string, message: string) => ({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key, message }, configOptions: QUOTA_CONFIG });
   test("切到某模型 → 宿主收到 set_config_option；等重置 → 什么都不改；答过的按钮 409", async () => {
     const s = sock(CH);
     await onAcpFrame(quota("air:t1", "You've hit your usage limit."), s, discord);
@@ -341,9 +348,9 @@ describe("额度卡：先「等重置」、只列其它模型、owner 点了才�
     const pending = answerAcp(CH, luna!, who);
     await new Promise((r) => setTimeout(r, 0));
     const call = s.sent.find((f) => f.type === "acp_call");
-    expect(call).toMatchObject({ op: "set_config", configId: "model", value: "gpt-5.6-luna" });
-    await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ok: true, configOptions: CONFIG }, s, discord);
-    expect(await pending).toEqual({ status: 200, body: { ok: true, model: "gpt-5.6-luna" } });
+    expect(call).toMatchObject({ op: "set_config", configId: "model", value: LUNA });
+    await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ok: true, configOptions: QUOTA_CONFIG }, s, discord);
+    expect(await pending).toEqual({ status: 200, body: { ok: true, model: LUNA } });
     expect((await answerAcp(CH, luna!, who)).status).toBe(409);
 
     await onAcpFrame(quota("air:t2", "limit"), s, discord);
@@ -394,6 +401,48 @@ describe("额度卡：先「等重置」、只列其它模型、owner 点了才�
     expect(liveAcpButtons(CH).quota[0]).not.toBe(old);
     expect((await answerAcp(CH, old, who)).status).toBe(409);
     await answerAcp(CH, liveAcpButtons(CH).quota[0]!, who);
+  });
+
+  test("卡面带原文和到顶的 provider；Codex 形状（几个模型同一个账号）只给等重置并写明原因", async () => {
+    sock(CH);
+    const asks: any[] = [];
+    const unsub = onAsk((a) => void asks.push(a));
+    try {
+      await onAcpFrame({ ...quota("air:raw", '429 {"type":"GoUsageLimitError","message":"Go usage limit exceeded"}'), label: "Pi" }, sockets.get(CH)!, discord);
+      await onAcpFrame({ ...quota("air:codex", "You've hit your usage limit."), configOptions: CONFIG }, sockets.get(CH)!, discord);
+      expect(liveAcpButtons(CH).quota).toHaveLength(1);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(asks.every((a) => a.extra.quota === true && typeof a.extra.raw === "string")).toBe(true);
+      expect(asks.some((a) => a.context.includes("原文：GoUsageLimitError: Go usage limit exceeded") && a.context.includes("go 的额度到顶了"))).toBe(true);
+      expect(asks.some((a) => a.context.includes("没有别的能用的模型，只能等重置。"))).toBe(true);
+    } finally {
+      unsub();
+      await answerAcp(CH, liveAcpButtons(CH).quota[0]!, who);
+    }
+  });
+
+  test("备用链 on：撞墙直接切过去，通知卡上「切回原模型」经宿主切回；同一个失败重报不再切", async () => {
+    const s = sock(CH);
+    useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => ({ mode: "on", chain: ["ds"] }), projectOf: async () => undefined });
+    try {
+      const done = onAcpFrame(quota("air:auto", "Go usage limit exceeded"), s, discord);
+      await new Promise((r) => setTimeout(r, 0));
+      const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
+      expect(call).toMatchObject({ op: "set_config", configId: "model", value: LUNA });
+      await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ok: true }, s, discord);
+      await done;
+      const n = s.sent.length;
+      await onAcpFrame(quota("air:auto", "Go usage limit exceeded"), s, discord);
+      expect(s.sent.length).toBe(n);
+      const back = answerAcp(CH, liveAcpButtons(CH).quota[0]!, who);
+      await new Promise((r) => setTimeout(r, 0));
+      const undo = s.sent.filter((f) => f.type === "acp_call").at(-1);
+      expect(undo).toMatchObject({ op: "set_config", configId: "model", value: SOL });
+      await onAcpFrame({ type: "acp_call_result", channelId: CH, id: undo.id, ok: true }, s, discord);
+      expect(await back).toEqual({ status: 200, body: { ok: true, model: SOL } });
+    } finally {
+      useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, projectOf: async () => undefined });
+    }
   });
 });
 
