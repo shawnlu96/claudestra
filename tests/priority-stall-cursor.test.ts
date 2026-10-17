@@ -44,10 +44,10 @@ const observed = () => listEvents(db).filter((e) => e.data.op === "recovery_obse
  * claims: [] = one claim command per target, two active() calls around it. stop(n) throws at the n-th active() call of a round
  * (odd = before the manager call, even = after it returned); undefined = no stop.
  */
-function probe(mode: () => RecoveryMode = () => "on") {
+function probe(mode: () => RecoveryMode = () => "on", budgetMs?: number) {
   const seen: string[] = [];
   let calls = 0, stopAt: number | undefined, fail: string | undefined;
-  const ports = { now: () => now, recovery: policy(mode),
+  const ports = { now: () => now, budgetMs, recovery: policy(mode),
     active: () => { if (++calls === stopAt) throw new SchedulerStopped("maintenance"); },
     manager: async (...args: string[]) => { seen.push(args[2]); now += 1; return args[2] === fail ? { ok: false, error: "boom" } : { ok: true, claims: [] }; } };
   const round = async (stop?: number, failId?: string) => {
@@ -180,4 +180,48 @@ test("[验收线 4] switching while running takes effect at the next stop withou
   calls = 1;
   await priorityStallTick(db, config, ports);
   expect(seen3).toEqual([ids[2], ids[3], ids[0], ids[1]]);
+});
+
+for (const rollback of ["off", "observe"] as const) {
+  for (const budgetMs of [undefined, 1]) {
+    test(`[验收线 4] saved-cursor-ignores-rollback: on -> ${rollback}, budget=${budgetMs ?? "full"}`, async () => {
+      const { ids, config } = setup([2, 2]); config0 = config;
+      let mode: RecoveryMode = "on";
+      const initial = probe(() => mode);
+      await initial.round(3); // first target finished; stopped before the second
+      expect(initial.seen).toEqual([ids[0]]);
+      mode = rollback;
+      const { seen, round } = probe(() => mode, budgetMs);
+      const log = spyOn(console, "log").mockImplementation(() => {});
+      try {
+        // Rollback discards the stop cursor, but budget tails created during rollback still advance.
+        for (let r = 0; r < (budgetMs === undefined ? 1 : ids.length); r++) await round();
+        expect(seen).toEqual(ids);
+        expect(observed()).toEqual([]); // a natural/budget end needs no stop observation
+      } finally { log.mockRestore(); }
+    });
+  }
+
+  test(`[验收线 4] budget-origin cursor survives on -> ${rollback}`, async () => {
+    const { ids, config } = setup([2, 2]); config0 = config;
+    let mode: RecoveryMode = "on";
+    const limited = probe(() => mode, 1);
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try { await limited.round(); } finally { log.mockRestore(); }
+    expect(limited.seen).toEqual([ids[0]]);
+    mode = rollback;
+    const { seen, round } = probe(() => mode);
+    await round();
+    expect(seen).toEqual([...ids.slice(1), ids[0]]);
+  });
+}
+
+test("[验收线 4] saved stop cursor rechecks each project's current recovery mode", async () => {
+  const { ids, config } = setup([3, 2]); config0 = config;
+  await probe().round(3);
+  const seen: string[] = [];
+  await priorityStallTick(db, config, { now: () => now, active: () => {},
+    recovery: ((project) => ({ mode: project === "cur-0" ? "off" : "on", manualAfterMs: null, source: "config" })) as RecoveryPolicyPort,
+    manager: async (...args) => { seen.push(args[2]); return { ok: true, claims: [] }; } });
+  expect(seen).toEqual([...ids.slice(3), ...ids.slice(0, 3)]);
 });

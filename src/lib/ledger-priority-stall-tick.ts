@@ -32,7 +32,7 @@ export async function priorityStallTick(db: Database, config: SchedulerConfig, p
     return priorityStallBases(db, project, undefined, now).filter((b) => priorityStallDue(db, b, now))
       .map((b) => [cursorKey(project, b.key), b] as const);
   }));
-  const keys = takeCursor(db, new Set(due.keys()));
+  const keys = takeCursor(db, new Set(due.keys()), ports.recovery);
   let processed = 0;
   for (let index = 0; index < keys.length; index++) {
     // Always finish one target; even a single slow command must not starve the tail forever.
