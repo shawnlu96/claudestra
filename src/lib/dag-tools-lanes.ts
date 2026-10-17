@@ -15,6 +15,7 @@ import { TERMINAL_STAGES, type LedgerTask } from "./ledger-stages.js";
 import { listTasks } from "./ledger-store.js";
 import { isFileResource } from "./ledger-scheduler-lease-sync.js";
 import { laneYielded } from "./dag-lane-lock-yield.js";
+import { sharedOut, unionLaneShareOn } from "./union-lane-share.js";
 
 export interface LaneNode {
   key: string;
@@ -75,13 +76,17 @@ function occupants(nodes: readonly LaneNode[], busy: readonly BusyCard[]): { id:
 /** 一个节点按什么占文件：绑的卡实际拿着锁就按锁，否则按声明的 fileGlobs（startNow / waiting / lanes 同一口径） */
 const occupied = (n: LaneNode): readonly string[] | undefined => (n.held?.length ? n.held : n.fileGlobs);
 
-function groups(nodes: readonly LaneNode[]): string[][] {
+/** share（unionLaneShare on）：只在有序并集文件上重叠不算重叠（union-lane-share.ts） */
+const laneOverlap = (a: readonly string[] | undefined, b: readonly string[] | undefined, share: boolean): boolean =>
+  share ? globsOverlap(a && sharedOut(a, true), b && sharedOut(b, true)) : globsOverlap(a, b);
+
+function groups(nodes: readonly LaneNode[], share: boolean): string[][] {
   const open = nodes.filter((n) => n.phase !== "done" && !n.satisfied);
   const parent = new Map(open.map((n) => [n.key, n.key]));
   const find = (k: string): string => (parent.get(k) === k ? k : find(parent.get(k) as string));
   for (let i = 0; i < open.length; i++) {
     for (let j = i + 1; j < open.length; j++) {
-      if (globsOverlap(occupied(open[i]), occupied(open[j]))) parent.set(find(open[j].key), find(open[i].key));
+      if (laneOverlap(occupied(open[i]), occupied(open[j]), share)) parent.set(find(open[j].key), find(open[i].key));
     }
   }
   const out = new Map<string, string[]>();
@@ -90,7 +95,7 @@ function groups(nodes: readonly LaneNode[]): string[][] {
 }
 
 /** 按节点在图里的顺序贪心挑：先到先占，后面和已挑的重叠的排到它后面 */
-export function computeLanes(nodes: readonly LaneNode[], busy: readonly BusyCard[] = []): Lanes {
+export function computeLanes(nodes: readonly LaneNode[], busy: readonly BusyCard[] = [], share = false): Lanes {
   const held = occupants(nodes, busy);
   const byKey = new Map(nodes.map((n) => [n.key, n]));
   const startNow: string[] = [];
@@ -105,11 +110,11 @@ export function computeLanes(nodes: readonly LaneNode[], busy: readonly BusyCard
       waiting.push({ key: n.key, why: "no_globs", on: [] });
       continue;
     }
-    const clash = [...held, ...startNow.map((k) => ({ id: k, globs: byKey.get(k)?.fileGlobs ?? [] }))].filter((o) => globsOverlap(n.fileGlobs, o.globs)).map((o) => o.id);
+    const clash = [...held, ...startNow.map((k) => ({ id: k, globs: byKey.get(k)?.fileGlobs ?? [] }))].filter((o) => laneOverlap(n.fileGlobs, o.globs, share)).map((o) => o.id);
     if (clash.length) waiting.push({ key: n.key, why: "files", on: clash });
     else startNow.push(n.key);
   }
-  return { startNow, waiting, lanes: groups(nodes) };
+  return { startNow, waiting, lanes: groups(nodes, share) };
 }
 
 /** 投影节点 → 车道输入：阶段按绑的卡现读（NodeView.status），依赖按 satisfied */
@@ -160,7 +165,7 @@ export function featureLanes(db: Database, f: Feature, snapshot?: LaneProjectSna
     const views = projected ?? projectNodes(db, effectiveNodes(db, v));
     const inGraph = new Set(views.map((n) => n.taskId).filter((t): t is string => !!t));
     const { held, tasks, yielded } = snapshot ?? readLaneProject(db, f.project);
-    return computeLanes(laneNodes(views, held, yielded), busyCards(tasks, inGraph, isSatisfied, held, yielded));
+    return computeLanes(laneNodes(views, held, yielded), busyCards(tasks, inGraph, isSatisfied, held, yielded), unionLaneShareOn(f.project));
   }).deferred();
 }
 
