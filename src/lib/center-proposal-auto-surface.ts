@@ -3,6 +3,8 @@ import { scopeWireProtected } from "./ask-scope-registry.js";
 import { FILE_PATTERNS, FILES, KEYWORDS } from "./peer-pr-surface.js";
 import { REPO_ROOT } from "./repo-root.js";
 import type { AutoHit, AutoReason } from "./center-proposal-auto.js";
+import { globSpellingProof } from "./proposal-glob-protection.js";
+import type { RecoveryMode } from "./recovery-policy.js";
 
 const KNOWN_ROOTS = ["src/", "tests/", "docs/", "web/", "scripts/"];
 const nameExempt = (g: string) => ["tests/", "docs/"].some(r => g.toLowerCase().startsWith(r));
@@ -100,7 +102,7 @@ function covers(globs: readonly Bun.Glob[], path: string): boolean {
 }
 
 /** 固定保护路径 + 保护目录 + 已跟踪名字命中；通配本身不算风险。 */
-export function globDetails(raw: string, files: readonly string[] | null = repoFiles()): AutoHit[] {
+function baselineDetails(raw: string, files: readonly string[] | null): AutoHit[] {
   const g = raw.replace(/^\.\//, ""), folded = g.toLowerCase(), hits: AutoHit[] = [];
   const add = (reason: AutoReason, path = "") => {
     if (!hits.some(h => h.reason === reason && h.path === path)) hits.push({ reason, source: raw, path });
@@ -125,6 +127,20 @@ export function globDetails(raw: string, files: readonly string[] | null = repoF
     if (!covers(globs, path)) continue;
     for (const why of literalReasons(path)) covered(path, why);
   }
+  return hits;
+}
+
+/** The recovery switch changes only spelling analysis; off and observe keep the original classifier exactly. */
+export function globDetails(raw: string, files: readonly string[] | null = repoFiles(), mode: RecoveryMode = "off"): AutoHit[] {
+  const g = raw.replace(/^\.\//, "");
+  if (mode !== "on" || !g.trim() || malformed(g)) return baselineDetails(raw, files);
+  const proof = globSpellingProof(g), hits: AutoHit[] = [];
+  const add = (h: AutoHit) => {
+    if (!hits.some(x => x.reason === h.reason && x.path === h.path)) hits.push({ ...h, source: raw });
+  };
+  if (proof.unresolved) return [...baselineDetails(raw, files), { reason: "glob_unresolved", source: raw, path: `[${proof.unresolved}]` }];
+  for (const pattern of proof.patterns) for (const h of baselineDetails(pattern, files)) add(h);
+  for (const path of proof.witnesses) for (const reason of literalReasons(path)) add({ reason, source: raw, path });
   return hits;
 }
 

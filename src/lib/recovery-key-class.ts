@@ -4,6 +4,7 @@ type RecoveryRiskClass = "safety" | "permission" | "delete-data" | "schema";
 const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRiskClass; reason: string }>> = {
   askDefaultAll: { class: "permission", reason: "按默认方案自动批准提问与规格文件扩围" },
   askScopeAuto: { class: "permission", reason: "调度器自动批机械类扩围" },
+  askScopeCaseFold: { class: "permission", reason: "自动扩围保护判定折叠路径大小写变体" },
   askScopeTests: { class: "permission", reason: "测试类扩围（被规格替代的旧断言）不叫醒 PM、下一次扫描自动批准" },
   authorRebuild: { class: "permission", reason: "依据退役证明重建作者并重新指派" },
   cardProcReap: { class: "delete-data", reason: "回收卡片进程及其运行资源" },
@@ -48,7 +49,9 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   pmRails: { class: "permission", reason: "监督 PM 越权写入并通知 owner" },
   privateMergeNarrow: { class: "permission", reason: "限制私仓合并目标与执行范围" },
   privateStartPlacement: { class: "permission", reason: "私仓任务跨机放置范围" },
+  proposalGlobProtection: { class: "permission", reason: "拦截通过通配拆词绕过提案名称保护的范围" },
   reclaimLocalFix: { class: "permission", reason: "租约回收后重新指派本机修复执行者" },
+  reviewFallback: { class: "safety", reason: "跨族审查员不可用时降级同族对抗审查并豁免跨族" },
   sentinelEvidenceBoundary: { class: "safety", reason: "按新回合截断哨兵结果并识别安全重定向证据" },
   skipEffectsAutoScope: { class: "permission", reason: "自动批准副作用清单的范围例外" },
   staleLeaseHandover: { class: "permission", reason: "结束跨机写租约、改由本机原作者修复" },

@@ -15,7 +15,7 @@ import type { AcpSession } from "./session.js";
 const INVALID_PARAMS = -32602;
 
 export async function enforceOpencodeModel(
-  s: Pick<AcpSession, "configOptions" | "setConfig">, model: string | undefined, opts: { allowBare?: boolean } = {},
+  s: Pick<AcpSession, "configOptions" | "setConfig">, model: string | undefined, opts: { allowBare?: boolean; timeoutMs?: number } = {},
 ): Promise<string> {
   const given = model?.trim();
   const actual = () => currentValueOf(s.configOptions, "model") ?? "未知";
@@ -27,7 +27,7 @@ export async function enforceOpencodeModel(
     const hint = full !== given ? `；要用这个模型请写全 ${full}（逐字匹配，免得被换到别的 provider）` : "";
     throw new AcpIncompatibleError(`OpenCode 模型不被接受：给的 ${given}，实际 ${actual()}（${refused}）${hint}`);
   }
-  const r = await s.setConfig("model", want);
+  const r = await s.setConfig("model", want, opts.timeoutMs);
   if (!r.ok && r.code === INVALID_PARAMS) throw new AcpIncompatibleError(`OpenCode 模型不被接受：给的 ${given}，实际 ${actual()}（${r.error}）`);
   if (!r.ok) throw new Error(`OpenCode 设模型 ${want} 时出错（不是模型不被接受，会重试）：${r.error}`);
   if (currentValueOf(s.configOptions, "model") !== want) throw new AcpIncompatibleError(`OpenCode 模型没生效：给的 ${given}，实际 ${actual()}`);

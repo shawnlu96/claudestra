@@ -511,6 +511,7 @@ const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
   takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)), waiting: (cid) => pendingAgentCalls.waiting(cid, stillHeldFor(cid)), rearmResume,
   markApiError: (cid, text, caller) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text, caller), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac),
+  clearApiError: (cid, caller) => pendingAgentCalls.clearApiError(cid, caller),
   unattributed: (cid, _t, n) => void (n.wall || quotaWall()?.active() || notifyMaster(unattributedNotice(agentLabelForChannel(cid), n))), // 闸内静默：出闸通知一次说清
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };

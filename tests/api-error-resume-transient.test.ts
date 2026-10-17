@@ -1,12 +1,10 @@
-import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { describe, expect, spyOn, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cardsToClose } from "../src/lib/agent-supervisor-bridge.js";
 import {
-  ACTIVITY_GRACE_MS, loadResumeStates, STALE_RESUME_MS, STREAK_IDLE_MS, RESUME_DELAY_MS, saveResumeStates, RESUME_WINDOW_MS, dueForResume, giveUpText, markResumed, noteActivity, noteApiError, noteTurnOk, onTurnOk,
-  resumeDelayMs, resumeText, type ApiErrorState,
+  ACTIVITY_GRACE_MS, loadResumeStates, STALE_RESUME_MS, STREAK_IDLE_MS, RESUME_DELAY_MS, saveResumeStates, RESUME_WINDOW_MS, dueForResume, giveUpText, markResumed, noteActivity, noteApiError, noteTurnOk,
+  dropStale, resumeDelayMs, SAVE_ERROR_LOG_GAP_MS, resumeText, type ApiErrorState,
 } from "../src/lib/api-error-resume.js";
 import { TRANSIENT_BACKOFF_MS } from "../src/lib/transient-error.js";
 
@@ -56,15 +54,6 @@ describe("网络类错误：静默退避续跑", () => {
     expect(m.has("c1")).toBe(false);
     expect(noteApiError(m, "c1", NET, r.now + 60_000)).toBe("track");
     expect(m.get("c1")?.net).toMatchObject({ n: 0, since: r.now + 60_000 });
-  });
-
-  test("正常结束回合的出口（stop-settle → cardsToClose）通知到续跑计数：quota-wall-wiring 据此 noteTurnOk", () => {
-    const seen: [string, number][] = [];
-    onTurnOk((agent, at) => void seen.push([agent, at]));
-    const dir = mkdtempSync(join(tmpdir(), "nrt1-"));
-    cardsToClose(new Database(":memory:"), "agent-x", undefined, T0, null, join(dir, "supervise-overload.json"));
-    rmSync(dir, { recursive: true, force: true });
-    expect(seen).toEqual([["agent-x", T0]]);
   });
 
   test("续跑后隔了 10 分钟以上才又撞（黑洞式断网）：仍是同一串，接着数；1 小时既没撞也没正常结束才丢", () => {
@@ -149,13 +138,13 @@ describe("退避中 bridge 重启：计划落盘，读回来到点照续、接�
       const r = outage(before, "c1", 1);
       expect(noteApiError(before, "c1", NET, r.now)).toBe("track"); // 第 2 次撞：进 2 分钟等待，这时重启
       saveResumeStates(before, path);
-      const after = loadResumeStates(path, r.now);
+      const after = loadResumeStates(path);
       expect(after.get("c1")?.net).toMatchObject({ n: 1, since: T0 });
       expect(dueForResume(after, r.now + TRANSIENT_BACKOFF_MS[1] - 1_000)).toEqual([]);
       expect(dueForResume(after, r.now + TRANSIENT_BACKOFF_MS[1])).toEqual(["c1"]);
       markResumed(after, "c1", r.now + TRANSIENT_BACKOFF_MS[1]);
       saveResumeStates(after, path);
-      const rest = outage(loadResumeStates(path, r.now), "c1", 3, r.now + TRANSIENT_BACKOFF_MS[1] + 5_000); // 再重启一次，接着撞
+      const rest = outage(loadResumeStates(path), "c1", 3, r.now + TRANSIENT_BACKOFF_MS[1] + 5_000); // 再重启一次，接着撞
       expect(rest.waits).toEqual(TRANSIENT_BACKOFF_MS.slice(2));
       expect(rest.last).toBe("escalate");
     } finally {
@@ -172,15 +161,19 @@ describe("退避中 bridge 重启：计划落盘，读回来到点照续、接�
       expect(r.last).toBe("track");
       expect(before.get("c1")?.net?.n).toBe(TRANSIENT_BACKOFF_MS.length);
       saveResumeStates(before, path);
-      const after = loadResumeStates(path, r.now);
-      expect(after.get("c1")?.net?.n).toBe(TRANSIENT_BACKOFF_MS.length);
+      const errors = spyOn(console, "error");
+      const after = loadResumeStates(path);
+      expect(errors).not.toHaveBeenCalled(); // 不打「字段坏了」的假报警
+      errors.mockRestore();
+      expect(after.get("c1")?.net).toMatchObject({ n: TRANSIENT_BACKOFF_MS.length, since: T0 }); // 起点没被重置
+      expect(giveUpText(after.get("c1"), NET, "")).toContain(`连续 ${TRANSIENT_BACKOFF_MS.length + 1} 次网络类错误`);
       expect(noteApiError(after, "c1", NET, r.now)).toBe("escalate");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("单条字段坏了（net 空、resumedAt 非数字）：丢掉那条，别的照常读回；撞错过了半小时还没续的也丢", () => {
+  test("单条字段坏了（net 空、resumedAt 非数字）：丢掉那条，别的照常读回；撞错过了半小时还没续的读回来、投之前那道检查丢", () => {
     const dir = mkdtempSync(join(tmpdir(), "nrt1-field-"));
     try {
       const path = join(dir, "api-error-resume.json");
@@ -192,7 +185,11 @@ describe("退避中 bridge 重启：计划落盘，读回来到点照续、接�
         old: { errorAt: T0 - STALE_RESUME_MS, error: "x" },
         ok: { errorAt: T0, error: "x", net: { n: 1, since: T0, last: NET }, agent: "a" },
       }));
-      expect([...loadResumeStates(path, T0).keys()]).toEqual(["ok"]);
+      const m = loadResumeStates(path);
+      expect([...m.keys()]).toEqual(["old", "ok"]);
+      expect(dropStale(m, "old", T0)).toBe(true);
+      expect(dropStale(m, "ok", T0)).toBe(false);
+      expect([...m.keys()]).toEqual(["ok"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -208,4 +205,42 @@ describe("退避中 bridge 重启：计划落盘，读回来到点照续、接�
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+test("save-failure-log-flood：落盘一直失败时同一错误一段时间只记一行，过了间隔再记一行", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nrt2-save-"));
+  const blocker = join(dir, "file");
+  writeFileSync(blocker, "");
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const m = new Map<string, ApiErrorState>();
+    for (let i = 0; i < 100; i++) {
+      m.set("c1", { errorAt: T0 + i, error: "x" }); // 每次内容都变，不会被「和上次一样」挡掉
+      saveResumeStates(m, join(blocker, "api-error-resume.json"), T0 + i * 1_000);
+    }
+    expect(errors).toHaveBeenCalledTimes(1);
+    saveResumeStates(new Map(), join(blocker, "api-error-resume.json"), T0 + SAVE_ERROR_LOG_GAP_MS + 100_000);
+    expect(errors).toHaveBeenCalledTimes(2);
+  } finally {
+    errors.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("save-failure-log-flood（NRT-1 R3-E 原复现）：路径被目录占住（EISDIR，原文带递增的临时文件名）也只记一行", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nrt2-eisdir-"));
+  const path = join(dir, "api-error-resume.json");
+  mkdirSync(path);
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const m = new Map<string, ApiErrorState>();
+    for (let i = 0; i < 100; i++) {
+      m.set("c1", { errorAt: T0 + i, error: "x" });
+      saveResumeStates(m, path, T0 + i * 1_000);
+    }
+    expect(errors).toHaveBeenCalledTimes(1);
+  } finally {
+    errors.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -93,6 +93,9 @@ export interface AppConfig {
   /** floka 改名的分项开关；state = 状态根迁移维护档位（lib/state-maintenance），只认 off / observe / on，缺省和未知值按 off。
    *  其余子键原样保留：set* 是读改写，在这里过滤会把别的分项抹掉 */
   rename?: Record<string, unknown> & { state?: unknown };
+  /** ACP 额度卡的备用链（lib/acp/quota-fallback.ts resolveFallback）：{mode: off|observe|on（缺省 observe）, chain: [provider 或模型],
+   *  projects: {<项目 id>: {mode?, chain?}}}。原样保留、用时再校验：在这里过滤会让 set* 把 owner 写错的条目悄悄抹掉 */
+  quotaFallback?: Record<string, unknown>;
 }
 
 export type RenameStateMode = "off" | "observe" | "on";
@@ -147,6 +150,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
     ...(raw.inboundRoute?.mode === "observe" || raw.inboundRoute?.mode === "on" || raw.inboundRoute?.mode === "off" ? { inboundRoute: { mode: raw.inboundRoute.mode } } : {}),
     ...(raw.rename && typeof raw.rename === "object" && !Array.isArray(raw.rename) ? { rename: { ...raw.rename } } : {}),
+    ...(raw.quotaFallback && typeof raw.quotaFallback === "object" && !Array.isArray(raw.quotaFallback) ? { quotaFallback: { ...raw.quotaFallback } } : {}),
     ...(raw.chatGuard && typeof raw.chatGuard === "object"
       ? {
           chatGuard: {

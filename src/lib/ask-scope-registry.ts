@@ -1,3 +1,5 @@
+import { caseFoldProtected } from "./ask-scope-case-policy.js";
+
 /** Project-level mechanical exceptions. A declaration is provisional until the exact delivery diff satisfies its check. */
 export const ASK_SCOPE_REGISTRY = [
   { path: "src/lib/scheduler-v2-skip-effects.ts", kind: "effects", shapes: ["add", "delete", "count", "sort"],
@@ -13,8 +15,10 @@ type ScopeKind = (typeof ASK_SCOPE_REGISTRY)[number]["kind"] | "wire";
 export interface ScopeGrant { path: string; kind: ScopeKind; check: string; source?: string }
 
 /** These files define the authority boundary, rather than wiring a new implementation into a caller. */
-export const scopeProtected = (path: string): boolean => /(?:^|\/)(?:recovery-key-(?:class|defaults)|ask-scope-[^/]*|order-ask[^/]*|order-deliver-scope[^/]*)\.ts$/.test(path)
+const protectedExact = (path: string): boolean => /(?:^|\/)(?:recovery-key-(?:class|defaults)|ask-scope-[^/]*|order-ask[^/]*|order-deliver-scope[^/]*)\.ts$/.test(path)
   || path.startsWith("scripts/guard/");
+/** Ask and delivery share this verdict; case variants are folded per askScopeCaseFold (ask-scope-case-policy.ts). */
+export const scopeProtected = (path: string): boolean => caseFoldProtected("protected", path, protectedExact);
 
 /** Permission decisions require a human scope answer even when the proposed edit is only wiring. */
 const SCOPE_PERMISSION_FILES = [
@@ -23,6 +27,11 @@ const SCOPE_PERMISSION_FILES = [
   "src/bridge/local-api/control.ts", "src/bridge/local-api/shared-projects-auth.ts",
 ] as const;
 
-export const scopeWireProtected = (path: string): boolean => scopeProtected(path)
+const wireExact = (path: string): boolean => protectedExact(path)
   || (SCOPE_PERMISSION_FILES as readonly string[]).includes(path)
   || /(?:-gate|-auth|auth-)/.test(path.slice(path.lastIndexOf("/") + 1)) || /^src\/lib\/ledger-checks[^/]*\.ts$/.test(path);
+export const scopeWireProtected = (path: string): boolean => caseFoldProtected("wire", path, wireExact);
+
+/** A case variant of a registry table path is another spelling, never that entry's grant (nor a wiring target). */
+export const scopeRegistryVariant = (path: string): boolean => caseFoldProtected("registry", path, () => false,
+  (folded) => ASK_SCOPE_REGISTRY.some((r) => r.path.toLowerCase() === folded));

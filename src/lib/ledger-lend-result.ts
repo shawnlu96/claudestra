@@ -38,6 +38,10 @@ import { actualText, intakeActual, notedSuggest } from "./role-model-settings-le
 import { listEvents } from "./ledger-store.js";
 import type { ModelActual, ModelActualRecord } from "./lend-wire-types.js";
 import { ledgerSigner } from "./floka-ledger/config.js";
+import { noChangeHeadRefusal, noChangeStepRefusal } from "./order-no-change.js";
+import { admitNoChange, orderSnapshotProblem } from "./ci-no-change-recovery.js";
+import { defaultNoChangePort, type CiNoChangePort } from "./ci-no-change-evidence.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
@@ -198,6 +202,9 @@ export interface LendDeliverDeps extends LendResultDeps {
   uiPort?: (p: UiDeliverPeer) => UiDeliverPort;
   /** LENDUI1：出借截图的开关与观察记录（缺省读本机 lendUiShots 策略）；uiDelivery 不是 on 时由它决定登不登记 */
   lendUi?: LendUiPort;
+  /** CINOOP1：noChange 交付的外部 CI 读口与恢复策略（缺省 = 真实 gh / recovery-policy.json）；测试注入 */
+  noChangePort?: CiNoChangePort;
+  noChangePolicy?: RecoveryPolicyPort;
 }
 
 const STAGE_OF = { write: "build", fix: "fix" } as const;
@@ -214,7 +221,8 @@ function check(db: Database, o: LendOrder | null, peer: string, req: DeliverRequ
   if (req.session.family !== o.family) return refuse("invalid", `这一单要 ${o.family} 做，对方报的是 ${req.session.family}`);
   if (req.branch !== o.branch) return refuse("invalid", `只收订单分支 ${o.branch} 上的交付`);
   if (o.pr !== null && req.pr !== o.pr) return refuse("invalid", `这一单的 PR 是 #${o.pr}`);
-  if (req.deliver.head === o.head) return refuse("invalid", "交付的 head 就是这一单的起点，没有新提交");
+  const same = noChangeStepRefusal(o.step, req.deliver.noChange) ?? noChangeHeadRefusal(o.head, req.deliver.head, req.deliver.noChange); // CINOOP1
+  if (same) return refuse("invalid", same);
   const task = mustTask(db, o.taskId);
   if (cardMoved(task, o)) return refuse("invalid", `卡已不在这一单的 ${STAGE_OF[o.step as "write" | "fix"]} 阶段 / 轮次（现在 ${task.stage}），交付不入账`);
   const own = stepsOf(db, task).find((s) => !s.derived && s.step === o.step && s.round === o.round && s.executorKind === "peer" && s.executor === `${o.worker}@${peer}`);
@@ -234,6 +242,7 @@ function deliverReportBody(o: LendOrder, req: DeliverRequest): string {
     "## 摘要", "", quoteLines(sanitizeForeign(d.summary)), "",
     "## 自查", "", quoteLines(sanitizeForeign(d.selfCheck)), "",
     "## 对方标注的证据位置", "", quoteLines(sanitizeForeign(d.evidence)), "",
+    ...(d.noChange ? ["## 无需改码（noChange，对方自述，已由本机按外部证据核过）", "", quoteLines(sanitizeForeign(JSON.stringify(d.noChange, null, 2))), ""] : []),
   ].join("\n");
 }
 
@@ -244,6 +253,7 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
   const o = check(db, first, peer, req, clock());
   const fp = await deps.peerFp(peer);
   if (!deliveryBranchMatches(db, o, fp, clock())) return refuse("invalid", "对方钉住的公钥与这一单的出借分支对不上");
+  if (req.deliver.noChange) return lendNoChange(db, ctx, peer, req, bodySha, deps, { o, fp: fp!, clock });
   const rev = mustTask(db, o.taskId).rev;
   const remote = await deps.remoteHead(o.repo, o.branch as string);
   if (!remote.ok) return refuse("unavailable", `查不到远端分支 ${o.branch} 的 head（${remote.error}），稍后重发`);
@@ -281,4 +291,49 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     closeSettledOrderAsks(db, cur.orderId, now);
     return completeConvergenceDelivery(db, ctx, cur, req, receipt);
   });
+}
+
+/**
+ * CINOOP1：带 noChange 的交付（head = 订单起点）。在普通核对之外再核订单材料快照；out_of_scope_ci 仍要远端分支 head 等于交付 head。
+ * 资格、外部证据与写入在 ci-no-change-recovery.ts admitNoChange；它的事务里先重核这一单的全部绑定（check），再由这里签回执、
+ * 写交付报告、结出借单——任何一步抛错整笔回滚。未恢复回的是拒绝（unavailable = 证据未定，对方下轮原样重发），没有成功回执。
+ */
+async function lendNoChange(db: Database, ctx: WriteCtx, peer: string, req: DeliverRequest, bodySha: string, deps: LendDeliverDeps,
+  at: { o: LendOrder; fp: string; clock: () => number }): Promise<LendReceipt> {
+  const { o, clock } = at, nc = req.deliver.noChange!;
+  if (o.wire.convergence) return refuse("invalid", "收敛单不收 noChange 交付");
+  const snap = orderSnapshotProblem(db, o);
+  if (snap) return refuse("invalid", snap);
+  if (nc.kind === "out_of_scope_ci") {
+    const remote = await deps.remoteHead(o.repo, o.branch as string);
+    if (!remote.ok) return refuse("unavailable", `查不到远端分支 ${o.branch} 的 head（${remote.error}），稍后重发`);
+    if (remote.head !== req.deliver.head) return refuse("invalid", `远端 ${o.branch} 的 head 是 ${remote.head}，不是 ${req.deliver.head}：交付不入账`);
+  }
+  const actual = checkActual(db, o, req.actual);
+  const path = join(deps.reportDir(o), deliverReportName(o));
+  const step = { step: o.step as "write" | "fix", round: o.round, executor: `${o.worker}@${peer}` }; // check() 核过的那一行（own），事务里按它结算
+  const binding = { orderId: o.orderId, taskId: o.taskId, head: req.deliver.head, start: o.head, step, specRev: o.specRev, round: o.round, repo: o.repo, evidence: path,
+    recheck: (d: Database) => {
+      const again = getLendOrder(d, req.orderId);
+      if (again?.resultSha) refuse("conflict", "这一单已用另一份交付入账");
+      const cur = check(d, again, peer, req, clock());
+      const snapNow = orderSnapshotProblem(d, cur);
+      if (snapNow) refuse("invalid", snapNow);
+    } };
+  const actor = `${at.fp.toLowerCase()}/${o.worker}`;
+  const r = await admitNoChange(db, { actor, now: ctx.now }, binding, nc,
+    { port: deps.noChangePort ?? defaultNoChangePort(), policy: deps.noChangePolicy, now: clock }, (eventSeq, duplicate) => {
+      if (duplicate) { const done = getLendOrder(db, o.orderId); return done?.resultSha === bodySha && done.receipt ? done.receipt : refuse("conflict", "这一单已用另一份交付入账"); }
+      const now = ctx.now ?? clock();
+      const signed = ledgerSigner("lend-receipt", peer, deps.sign)([o.orderId, bodySha, String(eventSeq), o.taskId]);
+      if (!signed) return refuse("invalid", "本机读不到实例钥匙，签不了回执；交付不入账");
+      deps.writeReport(path, deliverReportBody(o, req)); // 抛错整单回滚
+      const receipt: LendReceipt = { orderId: o.orderId, sha256: bodySha, eventSeq, taskId: o.taskId, ...signed, ...noteActual(db, { actor: `peer:${peer}`, now }, o, actual) };
+      noteUsage(db, { actor: `peer:${peer}`, now }, o, req.usage);
+      db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
+        .run(bodySha, JSON.stringify(receipt), eventSeq, now, o.orderId);
+      closeSettledOrderAsks(db, o.orderId, now);
+      return receipt;
+    });
+  return r.settled;
 }

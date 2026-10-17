@@ -44,7 +44,7 @@ export interface AcpRuntime {
    * 接上会话后由运行时自己施加并核对启动配置，不过就抛 AcpIncompatibleError（宿主拒起、不重试）。不给 = 通用的 applyAcpLaunchConfig（没生效只记日志）。
    * OpenCode 要它：不认的模型会静默回落到缺省的免费模型（docs/runtimes/opencode-acp.md「失败形状」）
    */
-  enforceLaunch?(s: AcpSession, model: string | undefined): Promise<string | void>;
+  enforceLaunch?(s: AcpSession, model: string | undefined, timeoutMs?: number): Promise<string | void>;
   /** translator 的按运行时差异；不给 = 现行行为 */
   translator?(mcpName: string): TranslatorOptions;
 }
@@ -102,7 +102,8 @@ const RUNTIMES: Record<string, AcpRuntime> = {
     adapterEnv: (s) => sandboxPiEnv(hostEnvBase(s), s.base), mcpServers: stdioMcpServers("pi"),
   },
   opencode: {
-    id: "opencode", label: "OpenCode", logLabel: "opencode", compactFrom: "command-end", enforceLaunch: enforceOpencodeModel, agentCommand: opencodeAgentCommand,
+    id: "opencode", label: "OpenCode", logLabel: "opencode", compactFrom: "command-end", agentCommand: opencodeAgentCommand,
+    enforceLaunch: (s, model, timeoutMs) => enforceOpencodeModel(s, model, { timeoutMs }),
     adapterEnv: (s) => {
       const env = hostEnvBase(s);
       delete env[OPENCODE_BIN_ENV];

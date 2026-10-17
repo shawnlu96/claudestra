@@ -194,7 +194,8 @@ class Card {
     }
     if (got.kind === "wait") {
       await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`);
-      return this.out("waiting", got.reason);
+      const fell = role === "reviewer" ? await (await import("./scheduler-model-wiring.js")).ensureFallbackStep(this, intent, family) : null; // RVF-1
+      return fell ? this.out("review_fallback", fell) : this.out("waiting", got.reason);
     }
     if (got.kind === "unknown") {
       await this.settle(intent.id, "submitted", "unknown", `建 session 结果不明：${got.reason}`);
@@ -295,9 +296,15 @@ class Card {
     return r.code === "conflict" ? this.cancelStale(intent, String(r.error)) : this.out("held", String(r.error));
   }
 
+  /** RVF-1: a replacement reviewer's create that failed and cleaned up (the swap runtime cancelled it) may fall back like Card.ensure. */
+  async swapFallback(intent: SchedulerIntent, r: CardOutcome): Promise<CardOutcome | null> {
+    if (intent.action !== "ensure_session" || r.step !== "waiting") return null;
+    const fell = await (await import("./scheduler-model-wiring.js")).ensureFallbackStep(this, intent);
+    return fell ? this.out("review_fallback", fell) : null;
+  }
   async drive(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
     const convergence = await driveConvergence(this, intent, sendNotice); if (convergence) return convergence;
-    const swap = await driveReviewSwap(this, intent); if (swap) return swap;
+    const swap = await driveReviewSwap(this, intent); if (swap) return (await this.swapFallback(intent, swap)) ?? swap;
     if (isPoolIntent(intent)) {
       const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost, db: this.db,
         recoveryPolicy: this.deps.recoveryPolicy, poolIdleObservation: this.deps.poolIdleObservation }, this.task, intent,
@@ -353,7 +360,7 @@ class Card {
       const legacy = await m.legacyReviewStep(this, sent, ref, failure); // MODELXW：无快照旧拒审单——退休旧绑定，重派带快照的新单
       if (legacy) return this.out("legacy_review", legacy);
       const plan = await m.modelOutcomeStep(this, sent, ref, failure);
-      if (typeof plan !== "string") return this.out("refusal_epoch", plan.epoch); // MODELX：拒审已按豁免开新审查 epoch，不退人工
+      if (typeof plan !== "string") return this.out(plan.fallback ? "review_fallback" : "refusal_epoch", plan.epoch); // MODELX 拒审豁免 / RVF-1 跨族降级：开新审查 epoch，不退人工
       return this.escalate(m.failedReason(`${ref.agent} ${what}`, failure.message, plan), sent.id);
     }
     const resent = await (await import("./worker-submit-confirm.js")).confirmStart(this, sent, ref, w, seen); if (resent) return this.out(...resent); // RESTATEGO1
@@ -452,6 +459,8 @@ class Card {
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
+    const fbHold = plan.action === "merge" ? (await import("./scheduler-review-fallback.js")).fallbackMergeHold(this.db, this.task, !this.handoff && !this.local) : null;
+    if (fbHold) return this.escalate(fbHold); // RVF-1: a same-family verdict never merges without PM / the owner's queue
     if (plan.action === "merge" && this.handoff) return driveHandoff(this); // 交仓库方合并：不计划合并意图、不占合并槽（MHO1）
     if (plan.action === "merge" && this.local) return (await import("./local-merge-tick.js")).driveLocalReady(this); // ONB-2：PM 本地合并
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()

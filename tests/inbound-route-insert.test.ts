@@ -9,6 +9,7 @@ import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { decideRoute, holdsWhileBusy, insertsWhileBusy, insertVia, routeQuestions, type RouteMode } from "../src/lib/inbound-route.js";
 import { jevAsk } from "../src/lib/jev.js";
 import { controlFor } from "../src/lib/runtimes/index.js";
+import { insertUnseenFrom, openInsertBook } from "../src/bridge/steer-insert.js";
 import type { TurnState } from "../src/lib/turn-state.js";
 
 const to = { kind: "local", channelId: "ch1", agentName: "agent-pm", ws: { send() {} } } as unknown as LocalEndpoint;
@@ -94,6 +95,7 @@ let answer: Record<string, unknown> = ans("insert");
 let clock = 0;
 beforeEach(() => {
   mode = "on"; turn = BUSY; decl = "steer"; registered = true; queued = []; asks = []; logs = []; answer = ans("insert"); clock += 10_000;
+  openInsertBook(null); // 插队确认账只在内存
   configureInboundRoute({
     ask: (async (_s: unknown, questions: Record<string, unknown>) => {
       asks.push({ questions });
@@ -239,21 +241,80 @@ describe("回合中送出之后（afterInsertSend）：失败退回押后", () =
   const held: Envelope[] = [];
   const q = { holdEnv: (e: Envelope) => held.push(e) };
   const ins = () => env("答复：用方案 B", AGENT, { inboundRoute: { action: "insert", p: 0.9 } });
+  /** deliverToLocal 的先后：routeHolds 判定（放行 = 不押）→ 中间几个 await → ws.send → afterInsertSend */
+  const admitted = (e: Envelope, t: TurnState = BUSY) => (expect(routeHolds(e, t)).toBe(false), e);
   test("ws 丢了这条（send 回 0）：押回队列", () => {
     held.length = 0;
-    const e = ins();
+    const e = admitted(ins());
     expect(afterInsertSend(e, BUSY, 0, q)).toBe(true);
     expect(held).toEqual([e]);
   });
-  test("送出去了 / 空闲投递 / 不是 insert / 不是 on：不动", () => {
+  test("送出去了 / 空闲投递 / 不是 insert / 判定时不是 on / 没经判定：不动", () => {
     held.length = 0;
-    expect(afterInsertSend(ins(), BUSY, 120, q)).toBe(false);
-    expect(afterInsertSend(ins(), BUSY, -1, q)).toBe(false); // 背压 = 已入队，会送到
-    expect(afterInsertSend(ins(), IDLE, 0, q)).toBe(false);
-    expect(afterInsertSend(env("x"), BUSY, 0, q)).toBe(false);
+    expect(afterInsertSend(admitted(ins()), BUSY, 120, q)).toBe(false);
+    expect(afterInsertSend(admitted(ins()), BUSY, -1, q)).toBe(false); // 背压 = 已入队，会送到
+    expect(afterInsertSend(admitted(ins(), IDLE), IDLE, 0, q)).toBe(false);
+    const plain = env("x");
+    routeHolds(plain, BUSY);
+    expect(afterInsertSend(plain, BUSY, 0, q)).toBe(false);
+    expect(afterInsertSend(ins(), BUSY, 0, q)).toBe(false); // 没经 routeHolds 放行
     mode = "observe";
     clock += 10_000; // 档位缓存 2 秒
-    expect(afterInsertSend(ins(), BUSY, 0, q)).toBe(false);
+    const o = ins();
+    expect(routeHolds(o, BUSY)).toBe(true);
+    expect(afterInsertSend(o, BUSY, 0, q)).toBe(false);
+    expect(held).toHaveLength(0);
+  });
+  test("一次放行只认一次：同一次投递重复调用不再押回", () => {
+    held.length = 0;
+    const e = admitted(ins());
+    expect(afterInsertSend(e, BUSY, 0, q)).toBe(true);
+    expect(afterInsertSend(e, BUSY, 0, q)).toBe(false);
+    expect(held).toEqual([e]);
+  });
+});
+
+describe("插队决定按判定当时冻结（INSERTMODE1）：判定到送出之间热切档不改结论", () => {
+  const held: Envelope[] = [];
+  const q = { holdEnv: (e: Envelope) => held.push(e) };
+  const ins = () => env("答复：用方案 B", AGENT, { inboundRoute: { action: "insert", p: 0.9 } });
+  test("on 判插队放行 → 切 off / observe（跨过 2 秒缓存）→ 送出非 0：仍记插队确认账", () => {
+    for (const later of ["off", "observe"] as RouteMode[]) {
+      const ch = `ch-hot-${later}`;
+      const e = { ...ins(), to: { ...to, channelId: ch } } as Envelope;
+      mode = "on"; clock += 10_000;
+      expect(routeHolds(e, BUSY)).toBe(false);
+      mode = later; clock += 3_000;
+      expect(routeAdmitsWhileBusy(e)).toBe(false); // 档位确实已切过去
+      expect(afterInsertSend(e, BUSY, 64, q)).toBe(false);
+      expect(insertUnseenFrom(ch).map((u) => u.messageId)).toEqual([e.meta.messageId]);
+    }
+  });
+  test("同一场景送出回 0：恰好押回一次、不记确认账，返回 true", () => {
+    for (const later of ["off", "observe"] as RouteMode[]) {
+      held.length = 0;
+      const ch = `ch-hot0-${later}`;
+      const e = { ...ins(), to: { ...to, channelId: ch } } as Envelope;
+      mode = "on"; clock += 10_000;
+      expect(routeHolds(e, BUSY)).toBe(false);
+      mode = later; clock += 3_000;
+      expect(afterInsertSend(e, BUSY, 0, q)).toBe(true);
+      expect(held).toEqual([e]);
+      expect(insertUnseenFrom(ch)).toEqual([]);
+    }
+  });
+  test("先判插队、后被押后，再空闲投递：不记确认账、不触发插队押回", () => {
+    held.length = 0;
+    const ch = "ch-requeue";
+    const e = { ...ins(), to: { ...to, channelId: ch } } as Envelope;
+    expect(routeHolds(e, BUSY)).toBe(false); // 判插队放行，之后某个闸（额度 / 入站账）把它押后了，没走到 ws.send
+    expect(routeHolds(e, IDLE)).toBe(false); // 押后放出：空闲投递重判
+    expect(afterInsertSend(e, IDLE, 0, q)).toBe(false);
+    expect(afterInsertSend(e, IDLE, 64, q)).toBe(false);
+    expect(held).toHaveLength(0);
+    expect(insertUnseenFrom(ch)).toEqual([]);
+    expect(routeHolds(e, COMPACTING)).toBe(true); // 押着的重判（压缩中）同样清掉旧放行
+    expect(afterInsertSend(e, BUSY, 0, q)).toBe(false);
     expect(held).toHaveLength(0);
   });
 });
