@@ -127,7 +127,7 @@ async function authorFixture(fails: number) {
   };
   const ensureIntents = () => db.query("SELECT status, receipt FROM scheduler_intents WHERE action = 'ensure_session' ORDER BY eventSeq")
     .all() as { status: string; receipt: string | null }[];
-  return { tick, hello, creates, notices, ensureIntents, run, repo, worktree: join(worktreeRoot, "ap-a"), branch: pre.plan.branch,
+  return { tick, hello, creates, notices, ensureIntents, run, repo, worktree: join(worktreeRoot, "ap-a"), branch: pre.plan.branch, agents, saveRegistry,
     setHead: (head: string) => db.query("UPDATE tasks SET headSHA = ? WHERE id = 'ap-a'").run(head),
     task: () => getTask(db, "ap-a")!, advance: (ms: number) => { now += ms; } };
 }
@@ -558,11 +558,43 @@ describe("agent-list-recovery-LENDBACK1: a replaced executor's checkout at the c
     expect(await own.aside()).toBeNull();
   });
 
-  test("on the card's branch, another owner's tree, or the new path already taken: unchanged", async () => {
+  test("on the card's branch or another owner's tree: unchanged; the new path already made by an earlier try is kept", async () => {
     const t = await oldTree();
     expect(await staleTreeAside(git, { ...t.plan, branch: "feat/ap-a" }, t.owner, "-r2")).toBeNull();
     expect(await staleTreeAside(git, t.plan, { ...t.owner, cwd: join(t.worktree, "..", "other") }, "-r2")).toBeNull();
-    mkdirSync(`${t.worktree}-r2`);
+    mkdirSync(`${t.worktree}-r2`); // checkout's strict reuse check (reusableAuthorWorktree) decides about it, never the old tree
+    expect(await t.aside()).toBe(`${t.worktree}-r2`);
+  });
+
+  for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
+    test(`[验收线 5] a tracked edit hidden by ${flag} keeps the old tree and waits as today`, async () => {
+      const t = await oldTree();
+      await t.run(t.worktree, "update-index", flag, "a.ts");
+      writeFileSync(join(t.worktree, "a.ts"), "hidden edit\n");
+      expect(await t.run(t.worktree, "status", "--porcelain")).toBe("");
+      expect(await t.aside()).toBeNull();
+    });
+  }
+
+  test("[验收线 5] an unreadable branch (symbolic-ref fails) or a detached HEAD is not proof of another branch", async () => {
+    const t = await oldTree();
+    expect(await staleTreeAside(async (args) => args.includes("symbolic-ref") ? { code: 128, out: "fatal" } : git(args), t.plan, t.owner, "-r2")).toBeNull();
+    await t.run(t.worktree, "checkout", "-q", "--detach");
     expect(await t.aside()).toBeNull();
+  });
+
+  test("[验收线 5] real ensureLocalAuthor + retryCleanCreate: a clean create failure on the new path retries there, the old tree stays", async () => {
+    const f = await authorFixture(1);
+    await f.run(f.repo, "worktree", "add", "-q", "-b", "feat/ap-a-old", f.worktree, "origin/main");
+    f.agents["agent-task-ap-a"] = { cwd: f.worktree, projectId: "p", task: "ap-a", runtime: "claude-code", transport: "tmux", status: "stopped" };
+    f.saveRegistry(); f.hello(true);
+    expect([(await f.tick()).step, (await f.tick()).step]).toEqual(["stage", "waiting"]);
+    expect(f.creates.map((c) => c.slice(1, 3))).toEqual([["task-ap-a-r2", `${f.worktree}-r2`]]);
+    f.advance(createRetryDelay(1));
+    expect((await f.tick()).step).toBe("session");
+    expect(f.creates.map((c) => c.slice(1, 3))).toEqual([["task-ap-a-r2", `${f.worktree}-r2`], ["task-ap-a-r2", `${f.worktree}-r2`]]); // same path again
+    expect([f.task().agent, f.ensureIntents().map((r) => r.status)]).toEqual(["agent-task-ap-a-r2", ["cancelled", "done"]]);
+    expect([await f.run(`${f.worktree}-r2`, "symbolic-ref", "--short", "HEAD"), await f.run(f.worktree, "symbolic-ref", "--short", "HEAD")])
+      .toEqual([f.branch, "feat/ap-a-old"]); // the old tree stays as it was
   });
 });

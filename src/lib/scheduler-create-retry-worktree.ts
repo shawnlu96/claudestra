@@ -86,7 +86,7 @@ function treeFiles(out: string): Map<string, TreeFile> {
  * gitlink and so drops that gitlink's flag, which hides the whole nested checkout from status. Initialized nested
  * submodules are read the same way; an empty (uninitialized) one has no index, and anything else is not trusted.
  */
-function* indexHidesEdits(path: string, depth = 0): DirtyCheck<boolean> {
+export function* indexHidesEdits(path: string, depth = 0): DirtyCheck<boolean> {
   const ls = (yield ["-C", path, "ls-files", "-v", "-s", "-z"]);
   if (depth > 16 || ls.code !== 0 || (ls.out && !ls.out.endsWith("\0"))) return true;
   for (const entry of ls.out.split("\0").filter(Boolean)) {

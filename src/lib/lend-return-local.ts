@@ -20,10 +20,12 @@ import { noteDefaultOn } from "./recovery-key-defaults.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { RegistryAgent } from "./registry.js";
 import { absent, rebuildAgentName } from "./scheduler-author-rebuild-proof.js";
+import { pinTriedPort } from "./scheduler-agent-pool.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { indexHidesEdits } from "./scheduler-create-retry-worktree.js";
 import type { Git } from "./scheduler-review-worktree.js";
 
-export const LEND_RETURN_LOCAL_KEY = "lendReturnLocal" as const;
+const LEND_RETURN_LOCAL_KEY = "lendReturnLocal" as const;
 
 /** Read-only mode (placement and launch): no default-on note, an unknown answer is off. */
 export function lendReturnLocalMode(project: string, policy: RecoveryPolicyPort = recoveryPolicy): RecoveryMode {
@@ -48,15 +50,22 @@ function boundFamilies(db: Database, taskId: string, agent: string): AuthorFamil
     .all(taskId, agent) as { family: AuthorFamily }[]).map((r) => r.family);
 }
 
-/** What the new rule would restore: the pin on `peer` dropped; a local agent kept only when bound here in the card's family. */
+const CLEARED = { assigneeKind: null, assignee: null };
+/**
+ * What the new rule would restore: the pin on `peer` dropped; a local agent kept only when bound here in the card's family. The
+ * local agent is the lease's own: the one restored from the peer's worker, or (first lend, nothing delivered: offer and claim never
+ * swap the assignee) the one the lease recorded that is still on the card. Any other assignee (PM's later pick) is left alone.
+ */
 function returnRestore(db: Database, task: LedgerTask, lease: WriteLease | null, peer: string): LeaseRestore | null {
   const r = leaseRestore(task, lease, peer);
-  const agent = r?.restored?.assigneeKind === "agent" ? r.restored.assignee : null;
-  if (!r || !agent) return r;
+  const kept = !r?.restored && lease?.prevAssigneeKind === "agent" && !!lease.prevAssignee
+    && task.assigneeKind === "agent" && task.assignee === lease.prevAssignee ? lease.prevAssignee : null;
+  const agent = r?.restored?.assigneeKind === "agent" ? r.restored.assignee : kept;
+  if (!agent) return r;
   const want = cardAuthorFamily(db, task);
   if (!want || boundFamilies(db, task.id, agent).includes(want)) return r;
-  const { agent: _dropped, ...rest } = r.patch;
-  return { ...r, patch: { ...rest, assigneeKind: null, assignee: null }, restored: { assigneeKind: null, assignee: null } };
+  const { agent: _dropped, ...rest } = r?.patch ?? {};
+  return { patch: { ...rest, ...CLEARED }, restored: { ...CLEARED }, unpinned: r?.unpinned ?? null };
 }
 
 /**
@@ -87,6 +96,7 @@ export function pinTriedNote(project: string | undefined, pin: string, tried: re
   if (!project || !tried.includes(pin)) return null;
   return lendReturnLocalMode(project, policy) === "on" ? `钉位 ${pin} 本轮已试过` : null;
 }
+pinTriedPort.note = (project, pin, tried) => pinTriedNote(project, pin, tried);
 
 /**
  * The family the planner asked for in this ensure (the claim receipt `claimed; ensure author <family>`), when the planner took
@@ -130,16 +140,30 @@ export function freshAuthorName(db: Database, task: Pick<LedgerTask, "id" | "pro
  * off the card's branch, clean (ignored files do not count) and has no commit of its own against main. null = keep today's path.
  */
 export async function staleTreeAside(git: Git, p: { worktree: string; branch: string; localMerge?: boolean }, owner: RegistryAgent, suffix: string): Promise<string | null> {
-  if (owner.cwd !== p.worktree || absent(p.worktree) !== false) return null;
-  const aside = `${p.worktree}${suffix}`;
-  if (absent(aside) !== true) return null;
+  if (owner.cwd !== p.worktree) return null;
+  const aside = `${p.worktree}${suffix}`, taken = absent(aside);
+  // An earlier try of this card already made the new path (a clean create failure): keep it, so the retry goes through checkout's
+  // strict reuse check (reusableAuthorWorktree) there instead of falling back to the old tree's branch mismatch.
+  if (taken === false) return aside;
+  if (taken !== true || absent(p.worktree) !== false) return null;
   const at = (args: string[]) => git(["-C", p.worktree, ...args]);
   const branch = await at(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  if (branch.code === 0 && branch.out.trim() === p.branch) return null;
-  const st = await at(["status", "--porcelain", "-z", "--untracked-files=all"]);
+  if (branch.code !== 0 || !branch.out.trim() || branch.out.trim() === p.branch) return null; // unreadable / detached: not proven
+  if (await indexHides(git, p.worktree)) return null; // assume-unchanged / skip-worktree would hide tracked edits from status
+  const st = await at(["-c", "core.fsmonitor=false", "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]);
   if (st.code !== 0 || st.out.trim() !== "") return null;
   const own = await at(["rev-list", "--count", `${p.localMerge ? "main" : "origin/main"}..HEAD`]);
   return own.code === 0 && own.out.trim() === "0" ? aside : null;
+}
+
+/** The retry proof's index read (scheduler-create-retry-worktree.ts indexHidesEdits): any non-plain flag, nested ones included. */
+async function indexHides(git: Git, worktree: string): Promise<boolean> {
+  const check = indexHidesEdits(worktree);
+  let step = check.next();
+  try {
+    while (!step.done) step = check.next(await git([...step.value]));
+  } catch { return true; }
+  return step.value;
 }
 
 type NamedPlan = { agent: string; agentName: string; worktree: string; branch: string; promptText: string; localMerge?: true };

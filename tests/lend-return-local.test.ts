@@ -189,6 +189,46 @@ test("[验收线 2] a restored local agent never bound to this card, or bound in
   }
 });
 
+for (const [why, sendBack] of PATHS) {
+  test(`[验收线 2] first lend, ${why}: the lease's never-bound local agent still on the card is cleared and the next ticks create the author`, async () => {
+    const f = await pinned();
+    await f.tick();
+    f.db.query("UPDATE tasks SET agent = 'agent-dev', assigneeKind = 'agent', assignee = 'agent-dev' WHERE id = 'ap-a'").run();
+    const orderId = f.lend({ kind: "agent", who: "agent-dev" }); // offer / claim never swap the assignee
+    sendBack(f, orderId);
+    expect(f.task()).toMatchObject({ agent: null, assigneeKind: null, assignee: null });
+    expect(f.sendBackNote()[0]!.data.lend).toMatchObject({ restored: { assigneeKind: null, assignee: null }, unpinned: "peer:Sekai" });
+    const steps: string[] = [];
+    for (let n = 0; n < 3 && steps.at(-1) !== "session"; n++) steps.push((await f.tick()).step);
+    expect(steps.at(-1)).toBe("session");
+    expect(f.task()).toMatchObject({ agent: "agent-task-ap-a", assigneeKind: "agent" });
+  });
+}
+
+test("[验收线 2] first lend: a same-family bound local agent stays; an agent PM put on the card later is never touched", async () => {
+  const kept = await pinned();
+  await kept.tick();
+  kept.db.query("UPDATE tasks SET agent = 'agent-dev', assigneeKind = 'agent', assignee = 'agent-dev' WHERE id = 'ap-a'").run();
+  bindAuthor(kept, "agent-dev", "codex");
+  notStartedPath(kept, kept.lend({ kind: "agent", who: "agent-dev" }));
+  expect(kept.task()).toMatchObject({ agent: "agent-dev", assigneeKind: "agent", assignee: "agent-dev" });
+  const pm = await pinned();
+  await pm.tick();
+  pm.db.query("UPDATE tasks SET agent = 'agent-dev', assigneeKind = 'agent', assignee = 'agent-dev' WHERE id = 'ap-a'").run();
+  const orderId = pm.lend({ kind: "agent", who: "agent-pm" });
+  notStartedPath(pm, orderId);
+  expect(pm.task()).toMatchObject({ assigneeKind: "agent", assignee: "agent-pm" });
+});
+
+test("[验收线 4] off: first lend keeps the never-bound local agent on the card as before", async () => {
+  setMode("off");
+  const f = await pinned();
+  await f.tick();
+  f.db.query("UPDATE tasks SET agent = 'agent-dev', assigneeKind = 'agent', assignee = 'agent-dev' WHERE id = 'ap-a'").run();
+  notStartedPath(f, f.lend({ kind: "agent", who: "agent-dev" }));
+  expect(f.task()).toMatchObject({ agent: "agent-dev", assigneeKind: "agent", assignee: "agent-dev" });
+});
+
 test("[验收线 2] a restored local agent bound to this card in its author family comes back as before", async () => {
   const f = await pinned();
   await f.tick();
