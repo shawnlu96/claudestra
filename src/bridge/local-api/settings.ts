@@ -12,6 +12,7 @@ import {
 } from "../../lib/config-store.js";
 import { parseRouteMode, type RouteMode } from "../../lib/inbound-route.js";
 import { steerQueueWhenBusy } from "../../lib/steer-queue-policy.js";
+import { observeSteerQueueCapability, steerQueueRecovery } from "../../lib/steer-queue-recovery.js";
 import { canManage } from "../../lib/devices.js";
 import { setLangInMemory } from "../../lib/i18n.js";
 import type { Principal } from "../../lib/principals.js";
@@ -59,6 +60,16 @@ const settingsBody = (cfg: AppConfig) => ({
 });
 
 export async function handleSettings(req: Request, path: string, principal: Principal): Promise<Response | null> {
+  if (path === "/settings/steer-queue-recovery") {
+    return req.method === "GET" ? apiJson(200, steerQueueRecovery()) : apiJson(405, { error: "method not allowed" });
+  }
+  if (path === "/settings/steer-queue-observation" && req.method === "POST") {
+    if (!canManage(principal)) return forbidden(MANAGE_MSG);
+    if (Number(req.headers.get("content-length")) > 2048) return apiJson(413, { ok: false });
+    const body = await readJsonBody(req);
+    const result = body === INVALID_JSON ? { ok: false, recorded: false } : observeSteerQueueCapability(body);
+    return apiJson(result.ok ? 200 : 400, result);
+  }
   if (path === "/settings" && req.method === "GET") return apiJson(200, settingsBody(await store.read()));
   if (path === "/settings" && req.method === "PUT") return putSettings(req, principal);
   if (path === "/profile" && req.method === "GET") return apiJson(200, { ok: true, ...readProfile() });

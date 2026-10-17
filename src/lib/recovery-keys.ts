@@ -133,6 +133,7 @@ export const RECOVERY_KEYS = [
   "staleLeaseHandover",
   "staleReplacement",
   "startDeliveryConfirm",
+  "steerQueueCapability",
   "taskTierModels",
   "teamBody",
   "tmuxSockHeal",
