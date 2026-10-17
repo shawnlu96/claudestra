@@ -402,10 +402,22 @@ describe("tool-display-format 与抽出前基线逐字节等价", () => {
   });
 
   test("真实 watcher 工具事件入口：startWatching 尾读 → tool_start summary / detail", async () => {
+    // 真实 fs.watch 在独立进程里安装，避免整片测试共享的原生 watcher 状态影响格式 oracle；子进程仍跑同一份夹具与基线。
+    if (process.env.TOOL_DISPLAY_WATCHER_CHILD !== "1") {
+      const child = Bun.spawn([process.execPath, "--no-env-file", "test", import.meta.path, "-t", "真实 watcher 工具事件入口"], {
+        cwd: join(import.meta.dir, ".."),
+        env: { ...process.env, TOOL_DISPLAY_WATCHER_CHILD: "1" },
+        stdout: "pipe", stderr: "pipe", timeout: 15_000,
+      });
+      const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+      expect({ code, error: code === 0 ? "" : out + err }).toEqual({ code: 0, error: "" });
+      expect(err).toContain("1 pass");
+      return;
+    }
     // 基线按默认 MCP_NAME 捕获（决定哪些工具被隐藏）；环境不同就是基线对不上，直接红，不 skip
     expect(MCP_TOOL_PREFIX).toBe("mcp__claudestra__");
     expect(await captureWatcher(w, bus, sessionPaths)).toEqual(b.watcher);
-  });
+  }, 20_000);
 
   test("lib 边界：只 import lib/forward，不碰 bridge / env / IO", () => {
     const src = readFileSync(join(import.meta.dir, "../src/lib/tool-display-format.ts"), "utf8");
