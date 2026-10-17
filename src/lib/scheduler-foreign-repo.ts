@@ -18,6 +18,7 @@ import { existsSync } from "node:fs";
 import type { LedgerTask } from "./ledger-stages.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
+import { aliasPick, sameRepo } from "./repo-alias.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
 
 type ProjectPolicy = SchedulerConfig["projects"][string];
@@ -134,7 +135,8 @@ export const projectRepoFor = (project: string): string | null => projectRepoOf(
 export function foreignRepoOf(task: Pick<LedgerTask, "pr" | "extra">, repo: string | null): string | null {
   const own = cardRepo(task);
   if (!own || !repo) return null;
-  return repo.toLowerCase() === own ? null : own;
+  const exact = repo.toLowerCase() === own; // REPOALIAS1: an old-name card of a renamed project repository is not foreign (repoAlias on)
+  return aliasPick("scheduler-foreign-repo.foreignRepoOf", exact, exact || sameRepo(repo, own)) ? null : own;
 }
 
 /** Stages whose planning needs the project's repository: merge (foreign_repo) and every placement (PRIVPLACE1). */

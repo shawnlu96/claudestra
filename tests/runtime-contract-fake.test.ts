@@ -32,7 +32,7 @@ const source: SessionSourceAdapter = {
 };
 // 适配器就是本仓的 ACP stub：像 Codex 一样按 CODEX_CONFIG 起 channel-server，所以环境照 adapterEnv 给、mcpServers 不传
 const host: AcpHostRuntime = {
-  id: ID, label: "Fake", logLabel: "fake-acp", translator: { compactFrom: "compaction-update" },
+  id: ID, label: "Fake", logLabel: "fake-acp", compactFrom: "compaction-update",
   agentCommand: (_env, bunBin) => ({ cmd: [bunBin, join(REPO, "scripts/acp-stub.ts")], stub: true }),
   adapterEnv,
   mcpServers: () => [],

@@ -29,12 +29,13 @@ function CellBox({ cell, now }: { cell: Cell; now: number }) {
     {tip && w && <span role="tooltip" className={s.tooltip}>{detail}</span>}
   </span>;
 }
-export function SlotStrip({ family, slots, now, reason }: { family: string; slots: SlotCells | null; now: number; reason: string }) {
+/** loading = seats not read yet: the strip's own box says so, the same box the cells fill when they land. */
+export function SlotStrip({ family, slots, now, reason, loading = false }: { family: string; slots: SlotCells | null; now: number; reason: string; loading?: boolean }) {
   const t = useRosterT();
   const unknown = !slots || slots.cells.some(c => c.state === "unknown");
   return <div className={s.slotRow}>
     <span className={s.family}>{family}</span>
-    {unknown ? <span className={s.unknownStrip} title={t(reason)}>{t("未知")}</span>
+    {loading ? <span className={s.unknownStrip} aria-busy title={t(reason)}>{t("读取中")}</span> : unknown ? <span className={s.unknownStrip} title={t(reason)}>{t("未知")}</span>
       : <><span className={s.cells}>{slots.cells.map((cell, i) => <CellBox key={i} cell={cell} now={now} />)}</span>
         <span className={s.usage} title={t("在跑/总数")}>{slots.label}</span></>}
   </div>;

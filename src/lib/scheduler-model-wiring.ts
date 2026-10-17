@@ -23,7 +23,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
-import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
+import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { getIntent } from "./ledger-scheduler.js";
 import { appendEvent, type WriteCtx } from "./ledger-write.js";
@@ -125,13 +125,33 @@ async function ledgerWrite(card: ModelWiringCard, args: string[]): Promise<Wrote
 const atomic = <T>(db: Database, fn: () => T): T => db.transaction(fn).immediate();
 
 /** PM notices of an unavailable write that could not be recorded either: once per process, ledger file, card and kind. */
-const toldInMemory = new Set<string>();
+const toldInMemory = new Map<string, { file: string; taskId: string }>();
+/**
+ * MAPSWEEP1: at most once per WIRING_SWEEP_MS per ledger file (at the next unavailable write), a card that is terminal or gone
+ * drops its entries: it gets no more passes, so its notice is never due again. Point reads of the remembered cards only.
+ */
+export const WIRING_SWEEP_MS = 10 * 60_000;
+const sweptAt = new Map<string, number>();
+function sweepTold(card: ModelWiringCard): void {
+  const file = card.db.filename, now = card.deps.now();
+  if (now - (sweptAt.get(file) ?? -Infinity) < WIRING_SWEEP_MS) return;
+  sweptAt.set(file, now);
+  for (const [mem, e] of toldInMemory) {
+    if (e.file !== file) continue;
+    let task: LedgerTask | null;
+    try { task = getTask(card.db, e.taskId); } catch { continue; }
+    if (!task || TERMINAL_STAGES.includes(task.stage)) toldInMemory.delete(mem);
+  }
+}
+/** Tests only: entries held for this ledger file. */
+export const wiringToldSize = (file: string): number => [...toldInMemory.values()].filter((e) => e.file === file).length;
 /**
  * A write failed: one stderr line, then once per card and kind a ledger note (dedup unavailableKey) and a PM notice saying the
  * refusal continuation is unavailable on this card. The note decides "once"; when it cannot be written either, memory does.
  */
 async function unavailable(card: ModelWiringCard, what: WiringWrite, error: string, line = ""): Promise<void> {
   const id = card.task.id, label = WRITE_LABEL[what];
+  sweepTold(card);
   diag(line ? `${id} ${line}：${error}` : `${id} ${label}没记上（拒审接续在本卡不可用）：${error}`);
   const key = unavailableKey(id, what), text = `[调度引擎] ${id} 拒审接续在本卡不可用：${label}没写进台账（${flat(error).slice(0, 200)}）；` +
     "本卡遇到策略拒审会照旧退人工，请查 scheduler.err 与台账写口";
@@ -141,7 +161,7 @@ async function unavailable(card: ModelWiringCard, what: WiringWrite, error: stri
   const first = rec.ok ? rec.r.duplicate !== true && !toldInMemory.has(mem) : !toldInMemory.has(mem);
   if (!rec.ok) diag(`${id} 「拒审接续不可用」也没记进台账（改为直接通知 PM）：${rec.error}`);
   if (!first) return;
-  toldInMemory.add(mem);
+  toldInMemory.set(mem, { file: card.db.filename, taskId: id });
   try { await card.deps.notifyPm(card.task, text, "action"); } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     diag(`${id} 「拒审接续不可用」通知 PM 没发出去（台账${rec.ok ? "已记" : "也没记上"}）：${e instanceof Error ? e.message : String(e)}`);

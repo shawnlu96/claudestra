@@ -89,9 +89,10 @@ export function parseOpenCodeGo(json: unknown): QuotaMeter[] | null {
   return out.length ? out : null;
 }
 
-/** limit / remaining → 已用百分比；limit 不是正数认不出 */
+/** limit / remaining（缺了就用 used）→ 已用百分比；limit 不是正数认不出。Kimi 用满时 detail 不带 remaining（零值字段被省略），只有 used */
 function usedPct(s: Record<string, unknown> | null): number | null {
-  const limit = numOf(s?.limit), remaining = numOf(s?.remaining);
+  const limit = numOf(s?.limit), used = numOf(s?.used);
+  const remaining = numOf(s?.remaining) ?? (limit !== null && used !== null ? limit - used : null);
   return limit !== null && limit > 0 && remaining !== null ? pctOf(Math.max(0, ((limit - remaining) / limit) * 100)) : null;
 }
 

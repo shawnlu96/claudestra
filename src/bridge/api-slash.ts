@@ -98,11 +98,11 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   const owner = isOwnerPrincipal(principal);
   const regName = agent.name === "master" ? null : agent.name;
   // Pi / Codex 的命令表是它们自己的（lib/runtime-commands.ts），命中就交给运行时原生解释（同名命令语义不同）。
-  // Codex 不在表里的 "/xxx" 落回普通消息——CC 的技能注进 Codex 的 TUI 没有意义；tmux 版 Pi 照旧回落到 CC 注册表，ACP 版 Pi 回不支持
+  // Codex / OpenCode 不在表里的 "/xxx" 落回普通消息——CC 的技能注进它们没有意义（OpenCode 还会整条吞掉）；tmux 版 Pi 照旧回落到 CC 注册表，ACP 版 Pi 回不支持
   const rt = String(agent.runtime || "");
   const acp = await isConfiguredAcpChannel(agent.channelId);
   const clear = slashM[1] === "clear" || (rt === "pi" && slashM[1] === "new"); // Pi 的 /new 就是换新会话
-  if (clear && acp) { // 宿主轮换会话（任何走 ACP 的运行时同一条路）；当 prompt 交过去，pi 只会把它当普通文字
+  if (clear && acp) { // ACP 一律宿主轮换会话；当 prompt 交过去，pi 只会把它当普通文字，OpenCode 会整条吞掉
     if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
     if (r.hasAttachments) return apiJson(409, { ok: false, error: "ACP /clear 不接收附件；会话未改动" });
     const cleared = await acpClear(agent.channelId);
@@ -121,7 +121,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   const nativeHit = runtimeCommandsFor(rt, agent.name, acp)?.find((c) => c.name === slashM[1]);
   const resolved = nativeHit
     ? { ok: true as const, ccText: `/${nativeHit.invokeName}${args ? ` ${args}` : ""}`, scope: nativeHit.scope }
-    : rt === "codex" ? { ok: false as const, reason: "not a Codex command" } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
+    : rt === "codex" || (acp && !piAcp) ? { ok: false as const, reason: `not a ${rt} command` } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
   if (piAcp && !nativeHit && (resolved.ok || PI_BUILTIN_PASSTHROUGH.some((b) => b.name === slashM[1]))) {
     return owner ? piAcpUnsupported(slashM[1]) : apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
   }

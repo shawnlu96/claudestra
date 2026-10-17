@@ -3,6 +3,7 @@ import { REQUEST_HEADERS } from "../floka-compat/signature/families.js";
 import { verifyRequestFamilies } from "../floka-compat/signature/request.js";
 import type { SigCheck } from "../instance-signature.js";
 import { observePeer, peerPolicy } from "./policy.js";
+import { applySignatureContract, signatureFamily } from "./signature-contract.js";
 import { peerSigVerdict } from "../peer-trust.js";
 
 type HeaderInput = Headers | Readonly<Record<string, string | undefined>>;
@@ -12,7 +13,8 @@ export function peerHeaders(input: HeaderInput) {
   const old = REQUEST_HEADERS.claudestra, neu = REQUEST_HEADERS.floka;
   const names = Object.values(old).some(k => h.has(k)) ? old : neu;
   const key = h.get(names.key), ts = h.get(names.ts), sig = h.get(names.sig);
-  return { key, ts, sig, newFamily: Object.values(neu).some(k => h.has(k)), present: [...Object.values(old), ...Object.values(neu)].some(k => h.has(k)) };
+  const oldFamily = Object.values(old).some(k => h.has(k)), newFamily = Object.values(neu).some(k => h.has(k));
+  return { key, ts, sig, oldFamily, newFamily, present: oldFamily || newFamily };
 }
 
 export function peerHeader(headers: HeaderInput, canonicalName: string): string {
@@ -24,13 +26,17 @@ export function peerHeader(headers: HeaderInput, canonicalName: string): string 
 export function rejectInvalidPeerSignature(headers: Pick<ReturnType<typeof peerHeaders>, "present" | "newFamily">, config?: unknown): boolean {
   if (!headers.present) return false;
   const mode = peerPolicy(config).signature;
-  if (headers.newFamily || mode === "on") return true;
-  if (mode === "observe") observePeer("signature", "on would reject invalid legacy signature");
-  return false;
+  const reject = headers.newFamily || mode === "on";
+  if (!reject && mode === "observe") observePeer("signature", "on would reject invalid legacy signature");
+  const legacy = { allow: true as const, legacy: true };
+  return !applySignatureContract({ family: signatureFamily(headers), result: "bad", signatureMode: mode, legacy },
+    reject ? { allow: false, reason: "bad" } : legacy).allow;
 }
 
-export function peerSignatureVerdict(result: string, headers: ReturnType<typeof peerHeaders>, anchored: boolean, now: number) {
-  return result !== "ok" && rejectInvalidPeerSignature(headers) ? { allow: false as const, reason: result } : peerSigVerdict(result, anchored, now);
+export function peerSignatureVerdict(result: string, headers: ReturnType<typeof peerHeaders>, anchored: boolean, now: number, config?: unknown) {
+  const legacy = peerSigVerdict(result, anchored, now);
+  const baseline = result !== "ok" && rejectInvalidPeerSignature(headers, config) ? { allow: false as const, reason: result } : legacy;
+  return applySignatureContract({ family: signatureFamily(headers), result, signatureMode: peerPolicy(config).signature, legacy }, baseline);
 }
 
 /** After SIGN1 succeeds, expose the key to the existing contact/token gate only. Never forward these aliases on the wire. */

@@ -6,7 +6,8 @@
  */
 import type { AdapterEnvSpec, AgentCommand } from "../acp/adapter-proc.js";
 import type { AcpReady, AcpReadyDeps } from "../acp/readiness.js";
-import type { AcpTranslatorOptions } from "../acp/updates.js";
+import type { AcpSession } from "../acp/session.js";
+import type { CompactSource, TranslatorOptions } from "../acp/updates.js";
 import type { ManagedRuntimeAdapter } from "./types.js";
 
 /** 宿主命令里点名运行时的环境变量（manager 的启动命令给，src/acp-host.ts 读）；不带 = codex（老命令照旧） */
@@ -29,8 +30,15 @@ export interface AcpHostRuntime {
   readonly logLabel: string;
   /** /clear 的新会话先跑这一轮（Codex：新线程跑完一轮才落盘）；不声明 = 开会话即可 */
   readonly clearBootstrap?: string;
-  /** session/update 的翻译差异（lib/acp/updates.ts） */
-  readonly translator: AcpTranslatorOptions;
+  /** 压缩完成认哪个来源（lib/acp/updates.ts CompactSource）：Pi 是适配器的中性记号，Codex 是 ACP compaction_update，OpenCode 什么都不发（command-end） */
+  readonly compactFrom: CompactSource["from"];
+  /** session/update 的其余翻译差异（工具调用推迟、MCP 工具名映射等）；不给 = 现行行为 */
+  translator?(mcpName: string): TranslatorOptions;
+  /**
+   * 接上会话后由运行时自己施加并核对启动配置，不过就抛 AcpIncompatibleError（宿主拒起、不重试）。不给 = 通用的 applyAcpLaunchConfig（没生效只记日志）。
+   * OpenCode 要它：不认的模型会静默回落到缺省的免费模型（docs/runtimes/opencode-acp.md「失败形状」）
+   */
+  enforceLaunch?(s: AcpSession, model: string | undefined, timeoutMs?: number): Promise<string | void>;
   /** 起哪个适配器；clean = 出借 worker 的干净环境（不支持就返回 error） */
   agentCommand(env: Record<string, string | undefined>, bunBin: string, clean: boolean): AgentCommand;
   adapterEnv(spec: AdapterEnvSpec): Record<string, string>;

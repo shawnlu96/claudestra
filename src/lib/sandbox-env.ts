@@ -187,7 +187,7 @@ export function sandboxManagerRefusal(args: string[], lab = isLab(process.env)):
   if (cmd === "transport" && args[2] === "tmux") return "沙箱 Codex 只许 ACP stub、Pi 只许 ACP，不起真实 TUI";
   const rt = args.indexOf("--runtime");
   const t = args.indexOf("--transport");
-  const acp = (args[rt + 1] === "codex" || args[rt + 1] === "pi") && (t < 0 || args[t + 1] === "acp");
+  const acp = ["codex", "pi", "opencode"].includes(args[rt + 1] ?? "") && (t < 0 || args[t + 1] === "acp");
   if (rt >= 0 && args[rt + 1] !== "claude-code" && !acp) return "沙箱只支持 Claude Code runtime（tmux 版 Pi / Codex 的启动链不经沙箱闸门；Codex / Pi 只许 --transport acp，Codex 的适配器固定是 stub）";
   return null;
 }

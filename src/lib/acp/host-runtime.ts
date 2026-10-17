@@ -7,6 +7,7 @@ import { acpHostFor, acpRuntimeIds } from "../runtimes/index.js";
 
 export { ACP_RUNTIME_ENV };
 export { PI_ARGS_ENV } from "../runtimes/pi-acp-host.js";
+export { opencodeConfigContent } from "../runtimes/opencode-acp-host.js";
 export type AcpRuntime = AcpHostRuntime;
 
 export function acpRuntime(id?: string): AcpRuntime {

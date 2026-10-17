@@ -9,11 +9,13 @@
  *   - ACP 段：`acpSpecFor(runtime)`（就绪闸 / 按 agent 拦 / 目录探测）、`acpHostFor(id)`（宿主描述）、`checkAcpReadyFor`
  */
 import { closeSync, openSync, readSync } from "node:fs";
+import { basename } from "node:path";
 import type { AcpReady, AcpReadyDeps } from "../acp/readiness.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { CODEX_ACP } from "./codex-acp.js";
 import type { AcpHostRuntime, AcpRuntimeSpec } from "./contract.js";
+import { opencodeAcpAdapter, OPENCODE_ACP } from "./opencode-acp.js";
 import { piAdapter } from "./pi.js";
 import { PI_ACP } from "./pi-acp.js";
 import {
@@ -27,14 +29,15 @@ export { claudeCodeAdapter, codexAdapter, piAdapter };
 const RUNTIMES: RuntimeEntry[] = [
   { source: piAdapter, acp: PI_ACP },
   { source: codexAdapter, acp: CODEX_ACP },
+  { source: opencodeAcpAdapter, acp: OPENCODE_ACP },
   { source: claudeCodeAdapter },
 ];
 
 export const DEFAULT_RUNTIME = "claude-code";
 
 const entryOf = (runtime: string | undefined | null): RuntimeEntry | undefined => (runtime ? RUNTIMES.find((e) => e.source.id === runtime) : undefined);
-/** 只有 ACP 版（source 是只读来源）：transport 没得选 */
-const acpOnly = (e: RuntimeEntry | undefined) => !!e?.acp && !isManaged(e.source);
+/** 只有 ACP 版（source 就是 ACP 版适配器，或是只读来源）：transport 没得选 */
+const acpOnly = (e: RuntimeEntry | undefined) => !!e?.acp && (e.source === e.acp.managed || !isManaged(e.source));
 
 /** 只给测试：临时登记一个运行时（假运行时证明契约够用，tests/runtime-contract-fake.test.ts），返回撤销函数 */
 export function registerRuntimeForTest(entry: RuntimeEntry): () => void {
@@ -80,7 +83,8 @@ export function acpHostFor(id: string): AcpHostRuntime | undefined {
  * 可启动的适配器。缺省（undefined / 空串）= Claude Code（历史数据没有 runtime 字段）；
  * 认不出的 id 或只读来源返回 null——**不**像 sourceFor 那样回退，否则拼错的
  * `--runtime` 会被悄悄当成 Claude Code 起。transport=acp 返回 ACP 版，运行时不支持 acp 返回 null。
- * 只有 ACP 版的运行时没点名 transport 时给 ACP 版（建 agent 的 API 校验、运行时目录只问「能不能起」）；点名 tmux 给 null。
+ * 只有 ACP 版的运行时没点名 transport 时给 ACP 版（建 agent 的 API 校验、运行时目录只问「能不能起」）；source 是只读来源的点名 tmux 给 null，
+ * source 就是 ACP 版（OpenCode）的点名 tmux 也给它（清单 / 可用性查询不分 transport）。
  */
 export function managedFor(runtime: string | undefined | null, transport?: string | null): ManagedRuntimeAdapter | null {
   if (normalizeTransport(transport) === "acp") return entryOf(runtime || DEFAULT_RUNTIME)?.acp?.managed ?? null;
@@ -141,6 +145,14 @@ export function claudeCodeWindows(windowNames: string[], agents: { name: string;
   return windowNames.filter((w) => w.startsWith("agent-") && cc.has(w));
 }
 
+/** --effort 交给这个运行时之前过一道：没有推理强度的（noEffort，OpenCode）提示后丢掉、不进 registry；其余原样（create / resume / set-claude 共用） */
+export function keepEffort(runtime: string | undefined | null, effort: string | undefined): string | undefined {
+  const m = managedFor(runtime);
+  if (!effort || !m?.noEffort) return effort;
+  console.error(`⚠️ ${m.label} 不支持 --effort，已忽略（${effort}）`);
+  return undefined;
+}
+
 /** 能以哪些 transport 启动：tmux 除了只有 ACP 版的人人都有，acp 要运行时声明 ACP 段（manager 切 transport 前据此拒绝） */
 export function transportsOf(runtime: string | undefined | null): Transport[] {
   const e = entryOf(runtime || DEFAULT_RUNTIME);
@@ -159,13 +171,15 @@ const headSniffCache = new Map<string, string | undefined>();
 export function sourceIdForPath(path: string | undefined | null): string | undefined {
   if (!path) return undefined;
   for (const s of allSources()) if (s.ownsPath(path)) return s.id === DEFAULT_RUNTIME ? undefined : s.id;
+  const byId = allSources().find((s) => s.ownsSessionId?.(basename(path, ".jsonl"))); // 归档副本 <id>.jsonl：id 形状独一份就不读文件
+  if (byId) return byId.id;
   if (headSniffCache.has(path)) return headSniffCache.get(path);
   let hit: string | undefined;
   try {
     const fd = openSync(path, "r");
-    const buf = Buffer.alloc(512);
+    const buf = Buffer.alloc(256 * 1024); // 首行得整行读到：OpenCode 首条带宿主前言、Codex 的 session_meta 都远超 512 字节，读半截解析失败就被当成 CC
     let n = 0;
-    try { n = readSync(fd, buf, 0, 512, 0); } finally { closeSync(fd); }
+    try { n = readSync(fd, buf, 0, buf.length, 0); } finally { closeSync(fd); }
     const rec = JSON.parse(buf.toString("utf8", 0, n).split("\n")[0]);
     hit = allSources().find((s) => s.sniffFirstLine?.(rec))?.id;
   } catch {

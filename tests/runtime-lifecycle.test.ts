@@ -14,6 +14,7 @@ import { buildPiCommand, PI_LOCKED_EFFORT, PI_LOCKED_MODEL, type PiLaunchOptions
 import { normalizePiEnvProfile, type PiEnvProfile } from "../src/lib/pi-env.ts";
 import {
   allSources,
+  transportsOf,
   claudeCodeAdapter,
   codexAdapter,
   controlFor,
@@ -236,16 +237,19 @@ describe("manageable 适配器契约", () => {
 
   test("manageable=true 的适配器都实现了生命周期（不能只挂个名）", () => {
     for (const s of allSources()) expect(isManaged(s)).toBe(s.manageable);
-    expect(managed.map((m) => m.id).sort()).toEqual(["claude-code", "codex", "pi"]);
+    expect(managed.map((m) => m.id).sort()).toEqual(["claude-code", "codex", "opencode", "pi"]);
   });
 
   test("每个 manageable 适配器都有退出指令、control、就绪判据、registry 字段", () => {
     for (const m of managed) {
-      expect(m.exitCommand).toMatch(/^\/\S+$/);
+      // 只走 ACP 的（OpenCode）没有 TUI：不敲退出指令、不发打断键，退出靠宿主的 exitPrelude（acp-control.ts）
+      const acpOnly = !transportsOf(m.id).includes("tmux");
+      if (acpOnly) expect([m.exitCommand, m.control.interruptKeys.length, typeof m.exitPrelude]).toEqual(["", 0, "function"]);
+      else expect(m.exitCommand).toMatch(/^\/\S+$/);
       expect(m.noteTag.length).toBeGreaterThan(0);
       expect(m.inbound.length).toBeGreaterThan(0);
       expect(m.turnEnd.length).toBeGreaterThan(0);
-      expect(m.control.interruptKeys.length).toBeGreaterThan(0);
+      if (!acpOnly) expect(m.control.interruptKeys.length).toBeGreaterThan(0);
       for (const fn of ["waitReady", "buildLaunchCommand", "isValidSessionId", "available", "registryFields"]) {
         expect(typeof (m as never as Record<string, unknown>)[fn]).toBe("function");
       }
@@ -336,8 +340,8 @@ describe("managedFor / requireManaged", () => {
 
   test("requireManaged 认不出的 runtime 报可用清单（只读来源的分支目前没有实例）", () => {
     expect(requireManaged("codex").id).toBe("codex");
-    expect(() => requireManaged("gpt-9")).toThrow(/未知的 runtime: "gpt-9"。可用: claude-code, pi, codex/);
-    expect(manageableRuntimeIds()).toEqual(["claude-code", "pi", "codex"]);
+    expect(() => requireManaged("gpt-9")).toThrow(/未知的 runtime: "gpt-9"。可用: claude-code, pi, codex, opencode/);
+    expect(manageableRuntimeIds()).toEqual(["claude-code", "pi", "codex", "opencode"]);
   });
 });
 

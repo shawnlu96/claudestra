@@ -67,11 +67,23 @@ export interface SessionSourceAdapter {
   /** 全库兜底查找（cwd 记错 / 路径推断失准时用） */
   findSessionById(sessionId: string): string | null;
 
+  /**
+   * 归档前要一份最新的会话文件（OpenCode：库里导出镜像，异步，不卡 bridge 的事件循环）；给不出返回 null。
+   * 不实现 = 会话文件本身就是最新的，归档按 sessionPath / findSessionById 找
+   */
+  freshArchivePath?(sessionId: string): Promise<string | null>;
+
   /** 某工作目录下的会话文件（fork 前后 diff、归档扫描用） */
   listSessionsForCwd(cwd: string): string[];
 
   /** 这个路径是不是这种运行时的会话文件（按根目录判，零 I/O） */
   ownsPath(path: string, home?: string): boolean;
+
+  /**
+   * 会话 id 的形状独一份、看 id 就能认出是这种运行时（OpenCode 的 `ses_…`）。归档副本按 `<id>.jsonl` 命名，靠它认运行时不用读文件；
+   * 首行可能任意长（首条消息带宿主前言），按首行嗅探会读半截解析失败、被当成 CC。不实现 = 只靠路径 / 首行认
+   */
+  ownsSessionId?(id: string): boolean;
 
   /** 会话文件路径 → sessionId（文件名规则各家不同；认不出返回 null） */
   sessionIdFromPath(path: string): string | null;
@@ -262,6 +274,10 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
    * 连按 Esc 在别的 TUI 里是手势（Codex：backtrack 回溯）的运行时必须自己实现。
    */
   exitPrelude?(win: WindowOps): Promise<"at-shell" | "continue">;
+  /** 建 agent 必须显式给模型；值是拒绝时给人看的原因（OpenCode：它自己的缺省是免费模型） */
+  readonly modelRequired?: string;
+  /** 没有推理强度这一项（OpenCode 1.19 的 configOptions 只有 model / mode）：--effort 提示后丢弃，网页不显示 Effort */
+  readonly noEffort?: boolean;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;
   /** T85 启动凭据文件的路径怎么交：mcp-config = 放进 --mcp-config 里 channel-server 的 env（CC）；env = 宿主命令的环境变量（ACP）。不声明 = 不签 */

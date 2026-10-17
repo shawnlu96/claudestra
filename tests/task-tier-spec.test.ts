@@ -18,13 +18,15 @@ import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { git } from "../src/lib/scheduler-review-worktree.js";
 import { FLOW_TEMPLATES, templateFor } from "../src/lib/scheduler-template.js";
+import { resetDocsTemplate } from "../src/lib/task-tier-docs-template.js";
 import { decideTierLaunch, reviewerTierCtx, useTaskTierPort } from "../src/lib/task-tier-models.js";
 import { parseTaskTier, registerTierChecks, registerTierTemplate, tierAtLaunch, tierLaunchable } from "../src/lib/task-tier-spec.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
 import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
 
 const cleanups: (() => void)[] = [];
-afterEach(() => { configureSchedulerV2Intents(null); useTaskTierPort(); useRoleModelPort(); for (const c of cleanups.splice(0)) c(); });
+// 开卡入口按 on 同步挂上的 docs 注册是进程级的：每条用例后摘掉，不串到别的用例 / 文件
+afterEach(() => { configureSchedulerV2Intents(null); useTaskTierPort(); useRoleModelPort(); resetDocsTemplate(); for (const c of cleanups.splice(0)) c(); });
 const card = (head: string, body = "## 背景\n模板：ui\n") => `前言里的 模板：security 不算\n# 卡\n${head}\n${body}`;
 const mode = (m: "on" | "observe" | "off") => useTaskTierPort({ policy: () => ({ mode: m, manualAfterMs: null, source: "config" }) });
 
@@ -65,9 +67,10 @@ describe("[验收线 1] docs 未注册不可达", () => {
     expect(tierLaunchable("code")).toBe(true);
   });
 
-  test("start_node 预检：template=docs 开不了卡，什么都不建", async () => {
+  test("start_node 预检：template=docs 开不了卡，什么都不建（off：TIER3e 不挂注册，docs 与未注册同一句拒）", async () => {
     const f = integrationFixture();
     try {
+      mode("off");
       const r = await preflightStart(f.startEnv, { featureId: f.id, key: "next", template: "docs", spec: "# scope" });
       expect(r).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("docs 还没有注册流程模板") });
       expect(f.calls).toEqual([]);
@@ -89,7 +92,7 @@ describe("[验收线 1] start_node 预检按卡首声明定类型", () => {
       expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec, template: "security" })).toMatchObject({ ok: true });
       expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec, template: "ui" })).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("冲突") });
       expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：ui\n模板：code") })).toMatchObject({ ok: false, code: "invalid" });
-      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：docs") })).toMatchObject({ ok: false, error: expect.stringContaining("docs 还没有注册") });
+      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：docs") })).toMatchObject({ ok: false, code: "tier_check", error: expect.stringContaining("超出 docs 范围") });
       const none = await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: "# scope" });
       expect(none.ok && "plan" in none && none.plan.workflow?.template).toBe("code");
     } finally { await f.close(); }
@@ -117,14 +120,16 @@ describe("扩展点 2（模板注册）：新模块注册流程后开卡可达",
       cleanups.push(undo);
       expect(templateFor("docs" as never, 3)).toMatchObject({ id: "docs", version: 3 });
       expect(WORKFLOW_TEMPLATES).toContain("docs" as never);
+      // 开卡入口同时挂上 TIER3e 的 docs 范围钩子：夹具节点是 src/**，认了 docs 才会被 docs 钩子拒（不是「没有注册」）
       const r = await preflightStart(f.startEnv, { featureId: f.id, key: "next", template: "docs", spec: "# scope" });
-      expect(r.ok && "plan" in r && r.plan.workflow as unknown).toEqual({ template: "docs", version: 3 });
+      expect(r).toMatchObject({ ok: false, code: "tier_check", error: expect.stringContaining("超出 docs 范围") });
       const byDecl = await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：docs") });
-      expect(byDecl.ok && "plan" in byDecl && byDecl.plan.workflow?.template as unknown).toBe("docs");
+      expect(byDecl).toMatchObject({ ok: false, code: "tier_check" });
       undo();
+      mode("off"); // on 下开卡入口会重新同步注册；off 不挂、开卡按项目拒，核撤销后不可达
+      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", template: "docs", spec: "# scope" })).toMatchObject({ ok: false, code: "invalid" });
       expect(templateFor("docs" as never, 3)).toBeNull();
       expect(WORKFLOW_TEMPLATES).not.toContain("docs" as never);
-      expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", template: "docs", spec: "# scope" })).toMatchObject({ ok: false, code: "invalid" });
     } finally { await f.close(); }
   });
 

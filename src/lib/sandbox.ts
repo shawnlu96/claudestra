@@ -417,10 +417,11 @@ export function assertSandboxRuntime(runtime: string, env: Env = process.env, tr
     if (!env.CLAUDESTRA_ACP_AGENT?.trim()) return;
     throw new SandboxViolation(["沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓的 scripts/acp-stub.ts，把这个变量去掉再试"]);
   }
+  if (runtime === "opencode" && transport === "acp") return; // 家目录 / 库 / 缓存全挪进沙箱根（acp/opencode-bin.ts opencodeDirsEnv），免费模型不用凭据
   if (runtime === "pi" && transport === "acp") {
     const p = sandboxPiAgentDirProblem(env);
     if (!p) return;
     throw new SandboxViolation([p]);
   }
-  throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}${transport ? `、transport=${transport}` : ""}；Codex / Pi 只许 --transport acp，Codex 的适配器固定是 stub）`]);
+  throw new SandboxViolation([`沙箱只支持 Claude Code agent（收到 runtime=${runtime}${transport ? `、transport=${transport}` : ""}；Codex / Pi / OpenCode 只许 --transport acp，Codex 的适配器固定是 stub）`]);
 }

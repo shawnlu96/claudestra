@@ -13,6 +13,8 @@ import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
 import { ridesTrain, trainHolds } from "./scheduler-merge-train-hold.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 import { mainCiLent, ownerMainCiPaused, ownerRepairs } from "./merge-queue-owner-main-ci.js";
+import { ownerPriorityMode, ownerPriorityPick } from "./merge-queue-owner-priority.js";
+import type { RecoveryMode } from "./recovery-policy.js";
 
 import { OWNER_FRESH_NODE, ownerFreshRefusal } from "./scheduler-ui-owner-fresh.js";
 
@@ -43,8 +45,12 @@ function eligible(db: Database, e: QueueEntry, intent: SchedulerIntent | undefin
   return !!run && ["ready", "await_ci"].includes(run.phase) && !mergeRunDrift(db, run, now);
 }
 
-/** Reads only. Existing uncertainty/ownership wins; otherwise QUEUE1's stable version sequence chooses among eligible entries. */
-export function pickMergeQueueOwner(db: Database, project: string, now = Date.now()): OwnerPick {
+/**
+ * Reads only. Existing uncertainty/ownership wins; otherwise QUEUE1's stable version sequence, re-ordered by the owner's band when
+ * mergeOwnerPriority is on (merge-queue-owner-priority.ts), chooses among eligible entries. `priority` overrides that key for the
+ * observe comparison only.
+ */
+export function pickMergeQueueOwner(db: Database, project: string, now = Date.now(), priority?: RecoveryMode): OwnerPick {
   const p = ownerPorts(db), own = ownership(project, p);
   if (own.why) { console.warn(`[merge-owner] ${project} ${own.why}`); return none(own.why); }
   if (unifiedQueueMode(project, p.policy) === "off") return none("unifiedMergeQueue 未就绪");
@@ -63,9 +69,9 @@ export function pickMergeQueueOwner(db: Database, project: string, now = Date.no
   try { train = (p.trains ?? defaultTrainStore())?.load(project); } catch { return none("列车状态不可读，不能认领"); }
   const repairs = ownerRepairs(db, project, own.repo!);
   const ordered = [...entries].sort((a, b) => Number(repairs.has(b.taskId)) - Number(repairs.has(a.taskId)));
-  const entry = ordered.find((e) => e.repository === own.repo && (e.source !== "manual" || manualQueueMode(project, p.policy) === "on") &&
-    eligible(db, e, intents.find((i) => i.taskId === e.taskId), now) &&
-    (!train || !trainHolds(train, now) || ridesTrain(train, e.taskId, e.head)));
+  const { entry, why } = ownerPriorityPick(db, project, ordered, (e) => e.repository === own.repo &&
+    (e.source !== "manual" || manualQueueMode(project, p.policy) === "on") && eligible(db, e, intents.find((i) => i.taskId === e.taskId), now) &&
+    (!train || !trainHolds(train, now) || ridesTrain(train, e.taskId, e.head)), (e) => intents.some((i) => i.taskId === e.taskId), repairs, now, priority);
   if (!entry) {
     const refresh = intents.find((i) => {
       if (i.node !== OWNER_FRESH_NODE) return false;
@@ -74,7 +80,7 @@ export function pickMergeQueueOwner(db: Database, project: string, now = Date.no
     });
     if (refresh) return { entry: null, intentId: refresh.id, reason: "既有只追 main 运行，空闲时恢复" };
   }
-  return entry ? { entry, intentId: intents.find((i) => i.taskId === entry.taskId)?.id ?? null, reason: "最早有效版本（保留 yielded 队位）" }
+  return entry ? { entry, intentId: intents.find((i) => i.taskId === entry.taskId)?.id ?? null, reason: why ?? "最早有效版本（保留 yielded 队位）" }
     : none("没有可认领版本");
 }
 
@@ -93,6 +99,11 @@ export function requireMergeQueueOwner(db: Database, taskId: string, action: str
   if (pick.entry?.taskId !== taskId || (intentId ? pick.intentId !== intentId : pick.intentId !== null)) {
     throw new LedgerError("conflict", `统一合并队列：${pick.reason}${pick.entry ? `（${pick.entry.taskId} 先）` : ""}`);
   }
+}
+
+/** `ledger merge-queue`'s head line: the pick the writers enforce, read without queueing a PRIO2 sample; null = the owner is off. */
+export function ownerQueueHead(db: Database, project: string, now: number): OwnerPick | null {
+  return queueOwnerMode(db, project) === "on" ? pickMergeQueueOwner(db, project, now, ownerPriorityMode(db, project)) : null;
 }
 
 /** Replaces only the claim's decision, never manualTurn's read-only queue view (which QUEUE1 itself uses). */

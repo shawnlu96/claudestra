@@ -1,20 +1,19 @@
 /** Fourth launchd daemon. Missing config is an explicit idle state until projects opt in. */
 import { readSchedulerConfig } from "./lib/scheduler-config.js";
 import { LedgerReader } from "./lib/ledger-read.js";
-import { schedulerProjectView } from "./lib/ledger-scheduler.js";
-import { schedulerPass } from "./lib/scheduler-pass.js";
 import { acquireLock } from "./lib/file-lock.js";
 import { statePath } from "./lib/paths.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { SchedulerStopped } from "./lib/scheduler-maintenance.js";
-import { lendStep, lendWanted } from "./lib/lend-deps.js";
-import { runDeployJobV2, schedulerV2DeployDeps, schedulerV2Pass } from "./lib/scheduler-v2-wiring-pass.js";
+import { lendWanted } from "./lib/lend-deps.js";
+import { runDeployJobV2, schedulerV2DeployDeps } from "./lib/scheduler-v2-wiring-pass.js";
 import { AgentSupervisor } from "./lib/agent-supervisor.js";
 import { superviseStep } from "./lib/agent-supervisor-deps.js";
 import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
 import { pmJobWorkerTick } from "./lib/pm-job-spawn.js";
 import { recoveryPolicy } from "./lib/recovery-policy.js";
+import { schedulerDaemonPass } from "./lib/scheduler-daemon-pass.js";
 armSpecPreflight();
 
 export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Promise<void> = Bun.sleep,
@@ -38,16 +37,9 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
         const config = readSchedulerConfig();
         pollMs = config.pollMs;
         // 两个开关任一开着就跑 pass：scheduler.json 管合并 / 观察 / 自动派单，lend.json（或还没跑完的出借单）管出借这一步
-        const lend = await lendWanted();
-        if (config.enabled || lend) {
-          const db = reader.get();
-          if (config.enabled && !db) throw new Error("scheduler enabled but ledger is unavailable");
-          if (db && config.enabled) for (const project of Object.keys(config.projects)) schedulerProjectView(db, project);
-          const { failed } = await schedulerV2Pass(db, config, { singleton: { path: lockPath, token: lock.token }, cursor, assertOwner: () => {
-            if (signal.aborted || !lock.held()) throw new SchedulerStopped("scheduler stopped or lost singleton lease");
-          }, supervise, takeoverPolicy: (project) => recoveryPolicy(project, "localFallback"), ...(lend ? { lend: lendStep(reader) } : {}) });
-          if (failed.length) throw new Error(`tick failed: ${failed.map((f) => `${f.taskId} ${f.error}`).join("; ").slice(0, 500)}`);
-        }
+        await schedulerDaemonPass(reader, config, await lendWanted(), { singleton: { path: lockPath, token: lock.token }, cursor, assertOwner: () => {
+          if (signal.aborted || !lock.held()) throw new SchedulerStopped("scheduler stopped or lost singleton lease");
+        }, supervise, takeoverPolicy: (project) => recoveryPolicy(project, "localFallback") });
         if (lastError) console.error("scheduler recovered");
         lastError = "";
       } catch (e) {

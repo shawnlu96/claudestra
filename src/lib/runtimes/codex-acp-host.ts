@@ -7,7 +7,7 @@ import type { AcpHostRuntime } from "./contract.js";
 export const CODEX_ACP_HOST: AcpHostRuntime = {
   id: "codex", label: "Codex", logLabel: "codex-acp", clearBootstrap: BOOTSTRAP_PROMPT,
   // 压缩完成认 ACP 的 compaction_update（codex-acp 不发 _meta.claudestra.compacted）
-  translator: { compactFrom: "compaction-update" },
+  compactFrom: "compaction-update",
   // 选择开关按 agent 读（宿主环境里的 CLAUDESTRA_AGENT）：全局一处 + 单个 agent 覆盖（codex-compat-switch.ts）
   agentCommand: (env, bunBin, clean) => acpAgentCommand(env, bunBin, undefined, clean, selectedCodexAdapter(env.CLAUDESTRA_AGENT?.trim() || undefined)),
   adapterEnv,

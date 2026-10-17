@@ -13,9 +13,12 @@ const project = "p";
 const target = { kind: "feature", id: "ab12-old" } as const;
 const evidence = { ownerWords: "先做旧功能", ownerAt: 1000, sourceRef: "web:owner/10" };
 
+/** priority 迁移之前的版本号（之后追加的迁移不影响这个前提） */
+const BEFORE_PRIORITY = LEDGER_MIGRATIONS.indexOf(migratePriority);
+
 function oldDatabase(path: string) {
   const db = new Database(path);
-  for (const step of LEDGER_MIGRATIONS.slice(0, -1)) {
+  for (const step of LEDGER_MIGRATIONS.slice(0, BEFORE_PRIORITY)) {
     if (typeof step === "function") step(db);
     else for (const sql of step) db.query(sql).run();
   }
@@ -24,7 +27,7 @@ function oldDatabase(path: string) {
   db.query(`INSERT INTO dag_versions(featureId,version,reasonKind,reasonText,proposedBy,createdAt,nodes)
     VALUES ('ab12-old',1,'initial','','owner',1,?)`).run(JSON.stringify([{ key: "planned", taskId: null }]));
   db.query(`INSERT INTO items(project,id,title,priority,status,createdAt,updatedAt) VALUES ('p','legacy','legacy','P0','todo',1,1)`).run();
-  db.exec(`PRAGMA user_version=${LEDGER_SCHEMA_VERSION - 1}`);
+  db.exec(`PRAGMA user_version=${BEFORE_PRIORITY}`);
   return db;
 }
 
@@ -35,7 +38,7 @@ test("旧库只读缺省无迁移；写连接自动升级、幂等补表，旧�
   try {
     const ro = reader.get()!;
     expect(readPriority(ro, project, target)).toMatchObject({ effective: "next", source: "system", rev: 0 });
-    expect(ro.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION - 1 });
+    expect(ro.query("PRAGMA user_version").get()).toEqual({ user_version: BEFORE_PRIORITY });
     reader.close();
     const db = openLedger(path);
     expect(db.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION });

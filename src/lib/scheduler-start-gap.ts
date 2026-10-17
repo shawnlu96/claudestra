@@ -10,8 +10,8 @@
  * Recovery key startDeliveryConfirm: off = nothing; observe = notes only (no PM todo). tests/scheduler-start-gap.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import type { LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup } from "./ledger-store.js";
+import { TERMINAL_STAGES, type LedgerTask } from "./ledger-stages.js";
+import { getEventByDedup, getTask } from "./ledger-store.js";
 import type { PmNoticeLevel } from "./pm-notice-level.js";
 import { observeDedupKey, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
@@ -63,19 +63,50 @@ const safeCode = (code: string) => code.replace(/[^\w.:@/-]/g, "_").slice(0, 60)
  * for a central card (v2_unmapped), so the notice is the record there and this set its dedup (a restart repeats it once).
  * Same key as the ledger's (`dedupOf`: project + task + actionKey), so one card's notice never stands in for another's.
  */
-const told = new WeakMap<Database, Set<string>>();
-const toldOf = (db: Database) => told.get(db) ?? told.set(db, new Set()).get(db)!;
-/** Per ledger: `<task>:s<specRev>` → when this process first saw the card in build (buildSince's stand-in on a center replica). */
-const inBuild = new WeakMap<Database, Map<string, number>>();
+const told = new WeakMap<Database, Map<string, Set<string>>>();
+const toldOf = (c: StartGapCard) => {
+  const m = told.get(c.db) ?? told.set(c.db, new Map()).get(c.db)!;
+  return m.get(c.task.id) ?? m.set(c.task.id, new Set()).get(c.task.id)!;
+};
+/** Per ledger: task → specRev and when this process first saw the card in build at it (buildSince's stand-in on a center replica). */
+const inBuild = new WeakMap<Database, Map<string, { specRev: number; at: number }>>();
 function seenInBuild(c: StartGapCard): number | undefined {
   if (c.task.stage !== "build") return undefined;
-  const m = inBuild.get(c.db) ?? inBuild.set(c.db, new Map()).get(c.db)!, k = `${c.task.id}:s${c.task.specRev}`;
-  if (!m.has(k)) m.set(k, c.deps.now());
-  return m.get(k);
+  const m = inBuild.get(c.db) ?? inBuild.set(c.db, new Map()).get(c.db)!, hit = m.get(c.task.id);
+  if (hit?.specRev === c.task.specRev) return hit.at;
+  m.set(c.task.id, { specRev: c.task.specRev, at: c.deps.now() }); // an earlier specRev never comes back
+  return c.deps.now();
 }
+/**
+ * MAPSWEEP1: both maps would keep every card this process ever saw. At most once per SWEEP_MS per ledger (on whatever card the
+ * pass is at) a card that is terminal, or gone and not stepped since the last sweep, drops its entries (it gets no more passes,
+ * so nothing is told twice), and a first-seen time of an older specRev goes. Point reads of the remembered cards only.
+ */
+export const START_GAP_SWEEP_MS = START_GAP_MS;
+const sweptAt = new WeakMap<Database, number>();
+/** Cards passed since the last sweep: a card this ledger does not hold (yet) but the pass still steps is not "gone". */
+const passed = new WeakMap<Database, Set<string>>();
+function sweep(c: StartGapCard): void {
+  const now = c.deps.now(), recent = passed.get(c.db) ?? passed.set(c.db, new Set()).get(c.db)!;
+  if (now - (sweptAt.get(c.db) ?? -Infinity) >= START_GAP_SWEEP_MS) {
+    sweptAt.set(c.db, now);
+    const t = told.get(c.db), b = inBuild.get(c.db);
+    for (const id of new Set([...t?.keys() ?? [], ...b?.keys() ?? []])) {
+      let task: LedgerTask | null;
+      try { task = getTask(c.db, id); } catch { continue; }
+      if (task ? TERMINAL_STAGES.includes(task.stage) : !recent.has(id)) { t?.delete(id); b?.delete(id); }
+      else if (task && b?.get(id) && b.get(id)!.specRev !== task.specRev) b.delete(id);
+    }
+    recent.clear();
+  }
+  recent.add(c.task.id);
+}
+/** Tests only: entries held for this ledger. */
+export const startGapMemory = (db: Database): { told: number; inBuild: number } =>
+  ({ told: [...told.get(db)?.values() ?? []].reduce((n, s) => n + s.size, 0), inBuild: inBuild.get(db)?.size ?? 0 });
 const dedupOf = (c: StartGapCard, actionKey: string) => observeDedupKey({ project: c.task.project, mechanism: START_GAP_KEY, target: c.task.id, actionKey });
-const mark = (c: StartGapCard, actionKey: string) => { toldOf(c.db).add(dedupOf(c, actionKey)); };
-const seen = (c: StartGapCard, actionKey: string) => { const k = dedupOf(c, actionKey); return toldOf(c.db).has(k) || !!getEventByDedup(c.db, k); };
+const mark = (c: StartGapCard, actionKey: string) => { toldOf(c).add(dedupOf(c, actionKey)); };
+const seen = (c: StartGapCard, actionKey: string) => { const k = dedupOf(c, actionKey); return !!told.get(c.db)?.get(c.task.id)?.has(k) || !!getEventByDedup(c.db, k); };
 
 /** Held by S2Q (a central card): the same line goes to PM instead, once per key; false = not delivered, the next pass retries. */
 async function tell(c: StartGapCard, actionKey: string, text: string, level: PmNoticeLevel): Promise<boolean> {
@@ -103,6 +134,7 @@ async function note(c: StartGapCard, actionKey: string, action: string, data: Re
  * says what the card waits for, a replanned note marks the self-heal, and the step goes on to plan / drive as before.
  */
 export async function trackStartGap(c: StartGapCard, s: PlannerSnapshot, plan: PlannerDecision): Promise<void> {
+  sweep(c);
   const mode = (c.deps.recoveryPolicy ?? recoveryPolicy)(c.task.project, START_GAP_KEY).mode;
   if (mode === "off") return;
   const g = startGap(s, plan, c.deps.now(), START_GAP_MS, seenInBuild(c));

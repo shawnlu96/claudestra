@@ -191,3 +191,78 @@ OCR-2 开工前要先定的两件事：OpenCode agent 是否像 Codex 一样放�
 
 复现：`bun scripts/opencode-acp-probe.ts <场景> --home <隔离目录> --cwd <空目录> --out <输出目录>`，场景和参数见脚本文件头。
 夹具合不合规（四类都在、没有本机路径、initialize 过 `checkInitialize`、权限请求能出卡）由 `tests/opencode-acp-probe.test.ts` 守着。
+
+## 接入后（OCR-4）：怎么建 / 怎么换模型 / 已知限制
+
+实现照上面的清单：宿主直连 `opencode acp`（`lib/acp/host-runtime.ts` 的 `RUNTIMES.opencode`），三处差距在 `lib/acp/updates.ts` 的
+`TranslatorOptions` 里补（工具调用等 in_progress 再起头、`<mcp>_<tool>` 改名、压缩来源 `command-end`）；生命周期在
+`lib/runtimes/opencode-acp.ts`，历史在 `lib/runtimes/opencode-source.ts` + `lib/opencode-session.ts`。
+
+### 怎么建
+
+- 先装：`npm i -g opencode-ai`（按 nvm 的 bin 目录找，`OPENCODE_BIN` 可指定；launchd 下不靠 PATH）。
+- 命令行：`bun src/manager.ts create <name> <dir> --runtime opencode --model opencode/big-pickle`。只有 ACP 一条路（`--transport tmux` 拒）。
+- 网页：新建 agent 弹窗的「运行时」选 OpenCode，模型必填：输入框带候选（`opencode models` 的清单，经 `GET /api/v1/runtimes` 的 `models` 字段），也能手填 model id。
+- 手填的值和命令行一样校验：建会话后按**会话自己的 configOptions** `set_config_option` 一次，OpenCode 不认（回包列出可选值）就拒建、清掉频道和窗口，不留起不来的 agent。
+- **模型必填**：不给 `--model`（网页不选）直接拒，原因写在报错里——OpenCode 自己的缺省是免费的 `opencode/big-pickle`，免费期数据可能被拿去训练，
+  交易类项目不能默认用。早拒在建频道 / 窗口之前：create 在 `manager/create-args.ts`，resume / 收编在 `refuseResumeEarly`（`manager/acp-lifecycle.ts`）；启动命令再兜底一次。
+- 模型记进 registry 的 `model`；每次起 `opencode acp` 经 `OPENCODE_CONFIG_CONTENT` 带上，接回会话后宿主再 `set_config_option` 校一次。
+- 新会话：短命的 `opencode acp` 做一次 session/new 拿 `ses_…`，不跑引导轮；职责与频道规则走首条入站前言（OpenCode 没有追加系统提示的入口）。
+- 权限：对齐 Codex 的 agent-full-access，`OPENCODE_CONFIG_CONTENT` 的 `permission` 全放行（含 cwd 外的 `external_directory`、`doom_loop`），
+  `question` 拒（无人值守，问了没人答）。平时不弹授权卡；万一弹了，卡片形状与 `always` 选项照宿主通用逻辑（`permissions.ts` 不改）。
+- 沙箱实例里 OpenCode 的家目录、配置、库、缓存全在沙箱根的 `acp-home/` 下（`opencodeDirsEnv`），不碰 owner 的 `~/.local/share/opencode`。
+
+### 怎么换模型
+
+- `bun src/manager.ts set-claude <agent> --model <provider/model>` 写 registry，再 `restart <agent>`：宿主起来按新模型 `set_config_option`，
+  校验用的是会话自己的 configOptions（不是 `opencode models`），所以清单里少的免费模型照样能选。
+- 值不在会话的模型表里（写错、或付费模型的 provider 没登录）：宿主**拒起**——出失败卡、不标就绪、不重试，`restart` 报启动失败（见下面「失败形状」）。
+  Codex / Pi 仍是记日志照常起；OpenCode 不一样，是因为它不认的模型会静默回落到缺省的免费模型（`AcpRuntime.enforceLaunch` = `enforceOpencodeModel`）。
+  核对是**逐字**的：registry 写的 id 必须就是会话选项里的值、设完 currentValue 也是它；只给后半段（`anthropic/x` 而选项是 `openrouter/anthropic/x`）
+  会被拒并报出全名，免得静默换了 provider。不带 provider 的裸 id（早先 registry 可能存的 `big-pickle`）恰好一家有时，启动 / /clear 换成完整 id 并回写
+  registry（`manager set-claude`）；新建时不放行裸 id（人在场，直接报全名）。OpenCode 回 `-32602`（值不被接受）也算拒起；RPC 超时、中途崩溃不算，
+  宿主照通用路径退避重起。`/clear` 换代后的新会话同样走这道核对。
+  拒起时 manager 不等满就绪预算：就绪等待（`runtimes/opencode-ready.ts`）同时看宿主日志，见到拒起就带原因返回。
+
+### 已知限制
+
+- 新建弹窗的候选来自 `opencode models`，可能比 ACP session/new 回包少几个免费模型：2026-10-16（OCR-1B）实测少 `glm-5.3-flash-free`、`ll-alpha-free`；
+  2026-10-17 复测两份一致（都是 10 个，成员和前一天又不同）。原因没查实【推断】：两边都读 `$XDG_CACHE_HOME/opencode/models.json` 这份目录缓存，
+  它在后台按时刷新，前后两次调用隔着一次刷新就会不一样。拿会话那份全表要建会话，会在 OpenCode 库里留空会话，所以弹窗不这么做；
+  缺的可以手填（按会话 configOptions 校验，见上）。
+- 网页 agent 设置里的「换模型」（`/agents/:name/{pi,codex}-settings`）还没接 OpenCode，先用上面的命令行；由 OCR-3（统一模型接口与通用切换器）一起覆盖。
+- 压缩：只认宿主发的 `/compact`（那一轮结束出边界，摘要不当回复）；OpenCode 自己在上下文快满时的自动压缩没有任何信号，宿主看不到这条边界。
+  `/compact` 那一轮只有流出了摘要正文才记边界；摘要已经流出一部分后才被打断，仍会记一条（flush 拿不到 stopReason）。
+- 没有 steering：忙时到的消息排队等下一轮；没有命令输出增量（长命令跑完才看到输出）。
+- 斜杠：网页 `/clear` 由宿主 session/new 换会话、换 registry（`bridge/api-slash.ts`，同 Codex / Pi 的 ACP 版），不交给 OpenCode；
+  直通给 OpenCode 的只有它认的 `/compact` `/init` `/review`（`lib/runtime-commands.ts`）。表外的 `/xxx` 按普通消息投递——
+  原样交给 OpenCode 会被整条吞掉（不进会话、不回话，实测 `/plan …`）。
+- 出借 worker（干净环境）不起 OpenCode。tmux 版不做。
+- 没有推理强度：OpenCode 1.19 的 configOptions 只有 model / mode。网页选 OpenCode 时不显示 Effort，CLI 给了 `--effort` 提示「不支持，已忽略」并丢弃。
+- 历史：读 `opencode export <id>` 的镜像（`~/.claude-orchestrator/opencode-sessions/<id>.jsonl`）。新旧按整个 OpenCode 库的 mtime 判，
+  任一 OpenCode 写库都会让所有 OpenCode agent 的镜像同时判旧（按会话判要多起一个子进程，没做）。一次导出实测约 1.3s、峰值约 350MB（审查员实测），
+  所以拿路径不等导出：有镜像就给、过期就后台刷，全局排队一次一个，同一会话至少隔 10s——bridge 的 agents 列表和 watcher 会周期性要路径，
+  同步导出会卡住它。代价：历史最多旧十来秒；刚建的会话第一次读可能还没镜像；导出偶尔撞上写库会失败（记一条日志，沿用旧镜像）。
+  归档（/clear 换代、kill）不走这条：当场导出一次（10s 内刚导过就用那份）再拷进 `archive/<agent>/<id>.jsonl`，旧会话以 archive 身份留在 agent 历史清单里；归档失败打日志。
+  归档副本按文件名的 `ses_` 形状认出是 OpenCode（不读首行：首条消息带宿主前言，可能任意长）。
+  镜像的时间戳取**导出前**的库 mtime，只登记这次导出确实覆盖到的版本：导出那 1–2s 里写进来的内容（含快照之后才写的）下次必定重导补上。
+  代价：`opencode export` 自己开关库也会改 mtime（1.19.2 实测），所以只要还有人要这个会话的路径，每过 10s 节流就会再导一遍（全局排队、一次一个）。
+
+### 失败形状（实测，OCR-4 第 1 轮审查后补）
+
+- **模型不认**：`OPENCODE_CONFIG_CONTENT` 里写一个不存在 / 没登录 provider 的模型，session/new 不报错，回包 `currentValue` 是缺省的
+  `opencode/big-pickle`（审查员实测，`opencode export` 里会话模型也是它）；`session/set_config_option` 才回 `-32602`。所以：
+  - 新建：`prepareSession` 在 session/new 之后按会话 configOptions `set_config_option` 一次，不认就拒建（错误里列出可选值），频道 / 窗口清掉；
+  - restart / resume / `set-claude` 后重启：宿主接上会话后同样核对，不认就拒起（`enforceLaunch`），不会静默跑在免费模型上。
+  - 新建被拒时，刚建的空会话用 `opencode session delete` 删掉（删不掉记一条日志）。
+- **`/compact` 失败**：那一轮只有 `usage_update`、没有摘要正文流出，不出压缩边界（只有流出摘要才算压缩了）。
+- **免费模型下线**：免费模型每天轮换（2026-10-17 的清单比 10-16 少了 `cat-jam-free`、`ll-alpha-free`）。用到下线模型的 agent 下次 restart 会被拒起
+  （模型不在会话选项里），失败卡写明给的和可选的；到时用 `set-claude <agent> --model <新模型>` 再 restart。跑着的会话里模型下线、限流的形状没测到，
+  会以 session/prompt 的 JSON-RPC 错误出现，宿主走 `classifyPromptError` 兜底分类。
+
+### 留给 OCR-2 迁契约时收的散点（按运行时名判断的地方）
+
+- `src/bridge/api-slash.ts`：表外斜杠按普通消息投递那一处（`rt === "codex" || rt === "opencode"`）。
+- `src/lib/runtime-commands.ts`：`runtimeCommandsFor` 的 opencode 分支（命令表）。
+- `src/lib/sandbox.ts`（`assertSandboxRuntime`）、`src/lib/sandbox-env.ts`（沙箱脚本的 runtime 白名单）、`src/manager/set-session.ts`（沙箱 ACP 会话不查文件的名单）。
+- `web/features/chat/components/new-agent-modal.tsx`：弹窗说明文字与免费模型警示按 `runtime === "opencode"`（模型栏本身已按 `modelRequired` / `models` 判）。

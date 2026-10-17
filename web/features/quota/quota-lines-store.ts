@@ -151,6 +151,8 @@ export const quotaNow = (...rs: Reading<unknown>[]): number => Math.max(...rs.ma
 
 /** 「已恢复」POST /quota/wall/clear 之后立刻重读一次闸 */
 export const reloadQuotaWall = (): void => wall.reload();
+/** 本机使用重置卡成功后立刻重读额度线，共用这份读数的顶部卡与出借页一起更新 */
+export const reloadQuotaLines = (): void => lines.reload();
 
 /** 测试用：缩短两个轮询周期（只影响之后起的表） */
 export function setQuotaPollForTest(ms: Partial<typeof period>): void {

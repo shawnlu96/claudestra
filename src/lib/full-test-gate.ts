@@ -10,13 +10,14 @@ import type { Writable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { z } from "zod";
 import { classifyTestArgs, FULL_TEST_PERMIT_ENV, isCiEnv } from "./full-test-gate-args.js";
 import { approvalVerifier, permitConfig, readGatePolicy, type GatePolicy } from "./full-test-gate-policy.js";
-import { identify, liveTree, rememberTree, scanProcesses, type LiveTree, type Scan, type TreeRoot } from "./full-test-gate-tree.js";
+import { mergeTreeRecord, readTreeRecord, treePath, writeTreeRecord } from "./full-test-gate-record.js";
+import {
+  bootState, currentBoot, identify, liveTree, rememberTree, scanProcesses, type Boot, type LiveTree, type Scan, type TreeRoot,
+} from "./full-test-gate-tree.js";
 import { observeLendCheckProcess } from "./lend-check-observation.js";
-import { lendCheckPermit, type LendCheckResult } from "./lend-check-permit.js";
-import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
+import { lendCheckPermit, type LendCheckConfig, type LendCheckResult } from "./lend-check-permit.js";
 
 /** 测试没启动（排队超时、闸拒绝、排队中被取消以外的失败）；与测试失败的 1 区分开 */
 export const NOT_STARTED_EXIT = 75;
@@ -53,34 +54,13 @@ export type GateRunOptions = {
   scan?: Scan;
 };
 
-// ── 进程树（src/lib/full-test-gate-tree.ts）：bun test 起在独立进程组，脱组的后代按原始父进程 / 环境标记认，整树没了才算 absent ──
-const memberSchema = z.object({ pid: z.number().int().positive(), start: z.string().nullable(), uniq: z.string().nullable(),
-  ver: z.number().int().nullable() }).strict();
-const treeSchema = z.union([
-  z.object({ state: z.literal("spawning") }).strict(),
-  z.object({ state: z.literal("running"), pgid: z.number().int().positive(), start: z.string().nullable(), uniq: z.string().nullable(),
-    ver: z.number().int().nullable(), uid: z.number().int().nullable(), members: z.array(memberSchema),
-    pgids: z.array(z.number().int().positive()).optional(), sids: z.array(z.number().int().positive()).optional(),
-    quietAt: z.number().optional() }).strict(),
-]);
-
+// ── 进程树（src/lib/full-test-gate-tree.ts）：bun test 起在独立进程组，脱组的后代按原始父进程 / 环境标记认，整树没了才算 absent；
+// 记录的读写在 src/lib/full-test-gate-record.ts ──
 /**
  * bun test 经这层 sh 启动：先从 fd 3 读到监管进程的放行行才 exec，读到 EOF（监管进程在登记完进程树之前就没了）直接退出、
  * 测试不启动。所以「spawning」记录 = 测试从没开始过，也再不会开始。
  */
 const GO_GATE = 'IFS= read -r _ <&3 || exit 125; exec 3<&-; exec "$@"';
-
-function treePath(dir: string, id: string): string {
-  return join(dir, "trees", `${id}.json`);
-}
-
-function readTree(dir: string, id: string): z.infer<typeof treeSchema> | "missing" | null {
-  const read = readJsonStateSync(treePath(dir, id));
-  if (read.status === "missing") return "missing";
-  if (read.status === "corrupt") return null;
-  const tree = treeSchema.safeParse(read.data);
-  return tree.success ? tree.data : null;
-}
 
 /**
  * 某个名额的检查树还在不在。没有记录 = 获准后还没走到起进程就没了；spawning = 放行行还没发出，测试没开始也不会再开始
@@ -88,23 +68,46 @@ function readTree(dir: string, id: string): z.infer<typeof treeSchema> | "missin
  * 认得出的成员都没了、只剩认不出归属的孤儿：它可能是血缘断了的后代，也可能是本机别的程序（两者从进程表上分不出来），
  * 所以只从「成员都没了」那一刻（quietAt，落盘）起再保留 graceMs，之后按 absent——不拿外人当本次测试的永久存活证据。
  */
-export function observeTree(dir: string, id: string, scan: Scan = scanProcesses, graceMs = ORPHAN_GRACE_MS): Tree {
-  const tree = readTree(dir, id);
-  if (tree === "missing") return "absent";
-  if (tree === null) return "unknown";
-  if (tree.state === "spawning") return "absent";
-  const procs = scan();
-  if (!procs) return "unknown";
-  const live = liveTree(tree, procs);
-  const updated = rememberTree(tree, live);
-  try { writeJsonAtomicSync(treePath(dir, id), { state: "running", ...updated }); }
-  catch (e) { console.error(`[full-test-gate] 写进程树记录失败：${String(e)}`); return "unknown"; }
-  if (live.members.length) return "present";
-  if (!live.unclaimed.length) return "absent";
-  const quietAt = updated.quietAt!;
-  if (Date.now() - quietAt < graceMs) return "present";
+export function observeTree(dir: string, id: string, scan: Scan = scanProcesses, graceMs = ORPHAN_GRACE_MS, boot: () => Boot | null = currentBoot): Tree {
+  return judgeTree(dir, id, { scan, graceMs, boot, write: true }).tree;
+}
+
+/**
+ * observeTree 的判定加理由（sweep 列给人看）。write=false 只读：不落盘新成员 / 剪过的键、不记 quietAt（sweep dry-run 前后闸目录逐字节不变）。
+ * 换了一次开机（或旧记录的根早于本次开机）= absent：旧号重启后都是系统进程；要比却读不出开机标识 = unknown
+ */
+function judgeTree(dir: string, id: string, o: { scan?: Scan; graceMs?: number; boot?: () => Boot | null; write?: boolean } = {}):
+  { tree: Tree; why: string } {
+  const graceMs = o.graceMs ?? ORPHAN_GRACE_MS;
+  const tree = readTreeRecord(dir, id);
+  if (tree === "missing") return { tree: "absent", why: "没有进程树记录（获准后没走到起进程）" };
+  if (tree === null) return { tree: "unknown", why: "进程树记录读不出 / 格式不对" };
+  if (tree.state === "spawning") return { tree: "absent", why: "spawning：放行行没发出，测试没开始也不会开始" };
+  const { state: _, ...base } = tree;
+  const boot = bootState(base, o.boot ?? currentBoot);
+  if (boot === "other") return { tree: "absent", why: base.boot ? "登记于另一次开机" : "旧记录：根启动早于本次开机" };
+  if (boot === "unknown") return { tree: "unknown", why: "读不出开机标识" };
+  const procs = (o.scan ?? scanProcesses)();
+  if (!procs) return { tree: "unknown", why: "读不出进程表" };
+  const live = liveTree(base, procs);
+  let updated = rememberTree(base, live);
+  if (o.write) {
+    const w = mergeTreeRecord(dir, id, base, updated);
+    if (w.status === "corrupt") return { tree: "unknown", why: "进程树记录读不出 / 格式不对" };
+    if (w.status === "missing") return { tree: "absent", why: "进程树记录已被持有者释放删除" };
+    if (w.status !== "written") {
+      console.error(`[full-test-gate] 写进程树记录失败：${w.status === "failed" ? w.error : "锁等不到"}`);
+      return { tree: "unknown", why: "写进程树记录失败" };
+    }
+    updated = w.tree;
+  }
+  const keys = `pgid 键 ${live.pgids.length}、sid 键 ${live.sids.length}`;
+  if (live.members.length) return { tree: "present", why: `还有成员 ${live.members.map((p) => p.pid).join(",")}（${keys}）` };
+  if (!live.unclaimed.length) return { tree: "absent", why: `成员都已退出（${keys}）` };
+  const quietAt = updated.quietAt ?? Date.now();
+  if (Date.now() - quietAt < graceMs) return { tree: "present", why: `只剩认不出归属的进程 ${live.unclaimed.map((p) => p.pid).join(",")}，宽限内` };
   console.error(`[full-test-gate] 有无法归属的进程仍在，按宽限释放 id=${id}`);
-  return "absent";
+  return { tree: "absent", why: "只剩认不出归属的进程，已过宽限" };
 }
 
 function signalPid(pid: number, sig: NodeJS.Signals): void {
@@ -114,15 +117,22 @@ function signalPid(pid: number, sig: NodeJS.Signals): void {
 }
 
 /** 只读看一眼 permit 库里的名额（status 命令和登记用的「当时在跑几个」）；读不出返回 null，不影响判定 */
-export function readPermitEntries(dir: string): { id: string; orderId: string; workerId: string; status: string }[] | null {
+export type PermitEntry = { id: string; orderId: string; workerId: string; status: string; owner?: { pid: number; start: string } };
+export function readPermitEntries(dir: string): PermitEntry[] | null {
+  return readPermitStore(dir)?.entries ?? null;
+}
+
+/** 只读读 permit 库里的策略与名额；库不存在 = 空；读不出返回 null */
+function readPermitStore(dir: string): { policy: { mode: string; max: number | null; approval: string | null } | null; entries: PermitEntry[] } | null {
   const path = join(dir, "lend-check-permit.sqlite");
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) return { policy: null, entries: [] };
   let db: Database | undefined;
   try {
     db = new Database(path, { readonly: true });
     db.exec("PRAGMA busy_timeout=200");
     const row = db.query("SELECT body FROM check_permit WHERE id=1").get() as { body: string } | null;
-    return row ? (JSON.parse(row.body).entries ?? []) : [];
+    const body = row ? JSON.parse(row.body) : {};
+    return { policy: body.policy ?? null, entries: body.entries ?? [] };
   } catch (e) {
     console.error(`[full-test-gate] 读 permit 库失败（只影响登记里的并发数）：${String(e)}`);
     return null;
@@ -190,6 +200,11 @@ export async function runFullTestGate(o: GateRunOptions): Promise<number> {
   try { return await ctx.run(); } finally { for (const s of SIGNALS) process.off(s, ctx.onSignal); }
 }
 
+/** 策略引用只在 on 档带 source：observe 一律按库里的 observe 缺省口径，policy.json 里留着的 source 不让在册登记时切档报 policy_conflict */
+function permitPolicy(policy: GatePolicy): GatePolicy {
+  return policy.mode === "on" ? policy : { ...policy, source: null };
+}
+
 type Admission = { kind: "registered"; policy: GatePolicy; waitedMs: number } | { kind: "unregistered"; mode: string };
 
 class GateRun {
@@ -234,8 +249,10 @@ class GateRun {
     if (JSON.stringify(updated) !== JSON.stringify(tree)) {
       this.tree = updated;
       if (this.registered) {
-        try { writeJsonAtomicSync(treePath(this.o.dir, this.id), { state: "running", ...updated }); }
-        catch (e) { this.err(`[full-test-gate] 写进程树记录失败：${String(e)}`); }
+        // 与观察者经同一个写入口合并：它们并进来的成员 / 键不被这里整份覆盖掉，并回内存里下次接着用
+        const w = mergeTreeRecord(this.o.dir, this.id, tree, updated);
+        if (w.status === "written") this.tree = w.tree;
+        else this.err(`[full-test-gate] 写进程树记录失败：${w.status === "failed" ? w.error : w.status}`);
       }
     }
     return live;
@@ -289,7 +306,7 @@ class GateRun {
   private async admit(): Promise<Admission | number> {
     const startedAt = Date.now();
     const noticeMs = this.o.noticeMs ?? 30_000;
-    let policy = readGatePolicy(this.o.dir);
+    let policy = permitPolicy(readGatePolicy(this.o.dir));
     for (const note of policy.notes) this.err(`[full-test-gate] ${note}`);
     let queued = false;
     let lastNotice = -Infinity;
@@ -297,7 +314,7 @@ class GateRun {
     for (;;) {
       if (this.signal) return this.withdraw(queued ? policy : null, `收到 ${this.signal}，已撤销排队`, exitCodeOf(null, this.signal));
       // 排上队之后沿用排队时的策略：中途换策略要等在册的申请都结束（lend-check-permit 的 policy_conflict），自己撤销也得用原策略
-      if (!queued) policy = readGatePolicy(this.o.dir);
+      if (!queued) policy = permitPolicy(readGatePolicy(this.o.dir));
       if (policy.mode === "off") return { kind: "unregistered", mode: "off" };
       const r = this.permit("acquire", policy);
       const waitedMs = Date.now() - startedAt;
@@ -363,7 +380,7 @@ class GateRun {
   private async supervise(registered: boolean): Promise<number> {
     const path = treePath(this.o.dir, this.id);
     this.registered = registered;
-    if (registered) writeJsonAtomicSync(path, { state: "spawning" });
+    if (registered) writeTreeRecord(this.o.dir, this.id, { state: "spawning" });
     const child = spawn("/bin/sh", ["-c", GO_GATE, "full-test-gate", ...this.o.command], {
       stdio: ["inherit", "inherit", "inherit", "pipe"], detached: true, cwd: this.o.cwd,
       env: { ...this.o.env, [FULL_TEST_PERMIT_ENV]: registered ? this.id : "unregistered" },
@@ -378,9 +395,13 @@ class GateRun {
     this.spawnedPgid = child.pid;
     let self = identify(child.pid, this.scan);
     for (let i = 0; !self && i < 100; i++) { await sleep(10); self = identify(child.pid, this.scan); }
+    // detached = setsid：sh 自己就是会话首进程，sid 键的首进程时刻就是它的
+    const sid = self?.sid && self.sid > 1 ? self.sid : null;
     const tree: TreeRoot = { pgid: child.pid, start: self?.start ?? null, uniq: self?.uniq ?? null, ver: self?.ver ?? null,
-      uid: self?.uid ?? process.getuid?.() ?? null, members: [], pgids: [child.pid], sids: self?.sid ? [self.sid] : [] };
-    if (registered) writeJsonAtomicSync(path, { state: "running", ...tree });
+      uid: self?.uid ?? process.getuid?.() ?? null, members: [], boot: currentBoot()?.id ?? null,
+      pgids: [{ id: child.pid, leaderStart: self?.start ?? null }],
+      sids: sid ? [{ id: sid, leaderStart: sid === child.pid ? self!.start : identify(sid, this.scan)?.start ?? null }] : [] };
+    if (registered) writeTreeRecord(this.o.dir, this.id, { state: "running", ...tree });
     this.tree = tree;
     const gate = child.stdio[3] as Writable;
     gate.on("error", () => {}); // sh 已经没了（被信号杀掉）：exited 会报它的退出码
@@ -423,4 +444,61 @@ class GateRun {
     }
     return true;
   }
+}
+
+export type SweepRow = { id: string; status: string; workerId: string; owner: string; tree: Tree | "-"; why: string; reclaimed?: boolean };
+type SweepOptions = { apply?: boolean; scan?: Scan; boot?: () => Boot | null; probe?: Probe; graceMs?: number; workerId?: string };
+
+function ownerState(probe: Probe, owner: PermitEntry["owner"]): string {
+  if (!owner) return "未知";
+  const seen = probe(owner.pid);
+  if (seen.kind === "absent") return `已退出（pid ${owner.pid}）`;
+  if (seen.kind === "unknown") return `读不出（pid ${owner.pid}）`;
+  return seen.process.start === owner.start ? `在跑（pid ${owner.pid}）` : `已退出（pid ${owner.pid} 已被复用）`;
+}
+
+/**
+ * `bun run test:gate sweep [--apply]`：逐条列在册登记的进程树判定。缺省只读，不写任何文件。
+ * --apply 不另写释放逻辑，也不直接改库：用库里现行的策略发一次申请（lend-check-permit 申请时自带的死持有者回收：持有者已退出且
+ * 树判 absent 才回收，present / unknown 不动），随即撤销 / 释放这次申请本身，再在 runs.jsonl 记一条 sweep。
+ */
+export function sweepGate(dir: string, o: SweepOptions = {}): { rows: SweepRow[]; result?: string } {
+  const probe = o.probe ?? observeLendCheckProcess;
+  const store = readPermitStore(dir);
+  if (store === null) throw new Error("读不出 permit 库");
+  const pendingOf = (entries: PermitEntry[]) => entries.filter((e) => e.status === "active" || e.status === "waiting");
+  const rows: SweepRow[] = pendingOf(store.entries).map((e) => {
+    const judged = e.status === "active" ? judgeTree(dir, e.id, { scan: o.scan, graceMs: o.graceMs, boot: o.boot }) : { tree: "-" as const, why: "排队中，没起过进程" };
+    return { id: e.id, status: e.status, workerId: e.workerId, owner: ownerState(probe, e.owner), ...judged };
+  });
+  if (!o.apply || !rows.length || !store.policy) return { rows };
+  // 沿用库里现行的策略（不是 policy.json）：sweep 只回收，不切档，也就不会因为还有 present 的登记撞 policy_conflict 而整笔回滚
+  const stored = store.policy;
+  const config: LendCheckConfig = { mode: stored.mode as "on" | "observe" };
+  let verify: (a: NonNullable<LendCheckConfig["ownerApproval"]>) => boolean = () => false;
+  if (stored.approval && stored.max !== null) {
+    const [approvedBy, reference] = JSON.parse(stored.approval) as [string, string];
+    config.ownerApproval = { maxConcurrentFullChecks: stored.max, approvedBy, reference };
+    verify = (a) => a.approvedBy === approvedBy && a.reference === reference && a.maxConcurrentFullChecks === stored.max;
+  }
+  const deps = { verifyOwnerApproval: verify, observeCheckTree: (e: { id: string }) => observeTree(dir, e.id, o.scan, o.graceMs, o.boot) };
+  const request = { id: `sweep-${randomUUID()}`, cost: "full" as const, orderId: "test:gate sweep", workerId: (o.workerId ?? process.env.USER ?? "unknown").slice(0, 1024) || "unknown" };
+  const call = (action: "acquire" | "release" | "cancel") => {
+    for (let i = 0; ; i++) {
+      const r = lendCheckPermit({ directory: dir, config, action, request }, probe, deps);
+      if (r.status !== "busy" || i >= 50) return r;
+      Bun.sleepSync(20 + Math.random() * 80);
+    }
+  };
+  const acquired = call("acquire");
+  let result = `${acquired.status}${acquired.reasonCode ? `:${acquired.reasonCode}` : ""}`;
+  if (acquired.status === "granted" || acquired.status === "observed" || acquired.status === "queued") {
+    const settled = call(acquired.status === "queued" ? "cancel" : "release");
+    result += ` → ${settled.status}${settled.reasonCode ? `:${settled.reasonCode}` : ""}`;
+  }
+  const after = readPermitEntries(dir);
+  const still = new Set(after === null ? rows.map((r) => r.id) : pendingOf(after).map((e) => e.id));
+  for (const row of rows) row.reclaimed = !still.has(row.id);
+  logRun(dir, { event: "sweep", result, reclaimed: rows.filter((r) => r.reclaimed).map((r) => r.id), kept: rows.filter((r) => !r.reclaimed).map((r) => r.id) });
+  return { rows, result };
 }

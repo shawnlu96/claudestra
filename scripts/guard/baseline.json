@@ -202,7 +202,6 @@
     "pattern:raw-tmux-spawn": 11,
     "pattern:registry-path-literal": 2,
     "pattern:runtime-literal:src/acp-host.ts": 2,
-    "pattern:runtime-literal:src/bridge.ts": 1,
     "pattern:runtime-literal:src/bridge/agents-list-route.ts": 2,
     "pattern:runtime-literal:src/bridge/api-routes.ts": 1,
     "pattern:runtime-literal:src/bridge/api-slash.ts": 4,
@@ -218,7 +217,7 @@
     "pattern:runtime-literal:src/bridge/turn-cuts.ts": 2,
     "pattern:runtime-literal:src/bridge/turn-probe.ts": 1,
     "pattern:runtime-literal:src/lib/acp/migration.ts": 1,
-    "pattern:runtime-literal:src/lib/agent-skills.ts": 2,
+    "pattern:runtime-literal:src/lib/agent-skills.ts": 3,
     "pattern:runtime-literal:src/lib/ai-inventory.ts": 1,
     "pattern:runtime-literal:src/lib/busy-windows.ts": 1,
     "pattern:runtime-literal:src/lib/card-role-definitions.ts": 3,
@@ -231,7 +230,7 @@
     "pattern:runtime-literal:src/lib/fix-strategy-lifecycle.ts": 2,
     "pattern:runtime-literal:src/lib/fleet-plan.ts": 1,
     "pattern:runtime-literal:src/lib/fleet-tool.ts": 2,
-    "pattern:runtime-literal:src/lib/launcher-restore-gate.ts": 5,
+    "pattern:runtime-literal:src/lib/launcher-restore-gate.ts": 4,
     "pattern:runtime-literal:src/lib/ledger-scheduler-lease-worker.ts": 2,
     "pattern:runtime-literal:src/lib/lend-worker-registry-archive.ts": 1,
     "pattern:runtime-literal:src/lib/machine-usage.ts": 2,
@@ -241,9 +240,9 @@
     "pattern:runtime-literal:src/lib/recovery-peer-lease-family.ts": 2,
     "pattern:runtime-literal:src/lib/recovery-peer-lease-handover.ts": 2,
     "pattern:runtime-literal:src/lib/review-arbiter-runtime.ts": 1,
-    "pattern:runtime-literal:src/lib/runtime-commands.ts": 2,
+    "pattern:runtime-literal:src/lib/runtime-commands.ts": 3,
     "pattern:runtime-literal:src/lib/runtime-dialogs.ts": 1,
-    "pattern:runtime-literal:src/lib/sandbox.ts": 3,
+    "pattern:runtime-literal:src/lib/sandbox.ts": 4,
     "pattern:runtime-literal:src/lib/scheduler-auto-review.ts": 2,
     "pattern:runtime-literal:src/lib/scheduler-dispatch-recovery.ts": 1,
     "pattern:runtime-literal:src/lib/scheduler-local-author-write.ts": 1,
@@ -253,10 +252,10 @@
     "pattern:runtime-literal:src/lib/scheduler-local-runtime-start.ts": 4,
     "pattern:runtime-literal:src/lib/scheduler-session-identity.ts": 2,
     "pattern:runtime-literal:src/lib/scheduler-snapshot.ts": 2,
-    "pattern:runtime-literal:src/lib/session-archive.ts": 3,
+    "pattern:runtime-literal:src/lib/session-archive.ts": 4,
     "pattern:runtime-literal:src/lib/session-path-resolve.ts": 1,
     "pattern:runtime-literal:src/lib/shared-ledger-local-project.ts": 1,
-    "pattern:runtime-literal:src/lib/skill-library.ts": 4,
+    "pattern:runtime-literal:src/lib/skill-library.ts": 5,
     "pattern:runtime-literal:src/lib/takeover.ts": 2,
     "pattern:runtime-literal:src/lib/turn-cuts.ts": 4,
     "pattern:runtime-literal:src/lib/turn-state.ts": 1,
@@ -273,11 +272,10 @@
     "pattern:runtime-literal:src/manager/pi-acp-migration.ts": 1,
     "pattern:runtime-literal:src/manager/restart-expect-restore.ts": 2,
     "pattern:runtime-literal:src/manager/restart-idle.ts": 1,
-    "pattern:runtime-literal:src/manager/set-session.ts": 2,
-    "pattern:runtime-literal:src/manager/skills.ts": 2,
+    "pattern:runtime-literal:src/manager/skills.ts": 3,
     "pattern:runtime-literal:web/features/chat/claude-options.ts": 3,
     "pattern:runtime-literal:web/features/chat/components/agent-skills-section.tsx": 1,
-    "pattern:runtime-literal:web/features/chat/components/new-agent-modal.tsx": 7,
+    "pattern:runtime-literal:web/features/chat/components/new-agent-modal.tsx": 9,
     "pattern:runtime-literal:web/features/chat/components/project-pm-model.ts": 2,
     "pattern:runtime-literal:web/features/chat/components/runtime-badge.tsx": 3,
     "pattern:runtime-literal:web/features/chat/components/settings/skills-section.tsx": 3,
@@ -627,12 +625,6 @@
       "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
     },
     {
-      "key": "pattern:runtime-literal:src/bridge.ts",
-      "from": 0,
-      "to": 1,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
-    },
-    {
       "key": "pattern:runtime-literal:src/bridge/agents-list-route.ts",
       "from": 0,
       "to": 2,
@@ -725,8 +717,8 @@
     {
       "key": "pattern:runtime-literal:src/lib/agent-skills.ts",
       "from": 0,
-      "to": 2,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
+      "to": 3,
+      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少（合入 OCR-4 后如实登记 OpenCode 带进来的分支）"
     },
     {
       "key": "pattern:runtime-literal:src/lib/ai-inventory.ts",
@@ -803,7 +795,7 @@
     {
       "key": "pattern:runtime-literal:src/lib/launcher-restore-gate.ts",
       "from": 0,
-      "to": 5,
+      "to": 4,
       "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
     },
     {
@@ -863,8 +855,8 @@
     {
       "key": "pattern:runtime-literal:src/lib/runtime-commands.ts",
       "from": 0,
-      "to": 2,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
+      "to": 3,
+      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少（合入 OCR-4 后如实登记 OpenCode 带进来的分支）"
     },
     {
       "key": "pattern:runtime-literal:src/lib/runtime-dialogs.ts",
@@ -875,8 +867,8 @@
     {
       "key": "pattern:runtime-literal:src/lib/sandbox.ts",
       "from": 0,
-      "to": 3,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
+      "to": 4,
+      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少（合入 OCR-4 后如实登记 OpenCode 带进来的分支）"
     },
     {
       "key": "pattern:runtime-literal:src/lib/scheduler-auto-review.ts",
@@ -935,8 +927,8 @@
     {
       "key": "pattern:runtime-literal:src/lib/session-archive.ts",
       "from": 0,
-      "to": 3,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
+      "to": 4,
+      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少（合入 OCR-4 后如实登记 OpenCode 带进来的分支）"
     },
     {
       "key": "pattern:runtime-literal:src/lib/session-path-resolve.ts",
@@ -953,8 +945,8 @@
     {
       "key": "pattern:runtime-literal:src/lib/skill-library.ts",
       "from": 0,
-      "to": 4,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
+      "to": 5,
+      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少（合入 OCR-4 后如实登记 OpenCode 带进来的分支）"
     },
     {
       "key": "pattern:runtime-literal:src/lib/takeover.ts",
@@ -1053,16 +1045,10 @@
       "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
     },
     {
-      "key": "pattern:runtime-literal:src/manager/set-session.ts",
-      "from": 0,
-      "to": 2,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
-    },
-    {
       "key": "pattern:runtime-literal:src/manager/skills.ts",
       "from": 0,
-      "to": 2,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
+      "to": 3,
+      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少（合入 OCR-4 后如实登记 OpenCode 带进来的分支）"
     },
     {
       "key": "pattern:runtime-literal:web/features/chat/claude-options.ts",
@@ -1079,8 +1065,8 @@
     {
       "key": "pattern:runtime-literal:web/features/chat/components/new-agent-modal.tsx",
       "from": 0,
-      "to": 7,
-      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
+      "to": 9,
+      "why": "OCR-2 验收 4 / 验收追加 3 P2-5：runtime-literal 按文件计数首次登记这个文件现存的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少（合入 OCR-4 后如实登记 OpenCode 带进来的分支）"
     },
     {
       "key": "pattern:runtime-literal:web/features/chat/components/project-pm-model.ts",

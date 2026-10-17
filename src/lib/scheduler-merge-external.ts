@@ -11,6 +11,7 @@ import { withMainCi } from "./scheduler-main-ci-wiring-gate.js";
 import { withCiFullRequest } from "./scheduler-ci-full-request.js";
 import { withCiProofGate } from "./scheduler-ci-proof-gate.js";
 import { recoveryPolicy } from "./recovery-policy.js";
+import { aliasPick, sameRepo } from "./repo-alias.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 
@@ -51,7 +52,10 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       if (!repo) throw new Error("PR URL 不合法");
       const local = parsed(await gh("repo", "view", "--json", "nameWithOwner"), "gh repo view");
       // i28-SECPOOL4: a marked refusal, so the driver ends the run cancelled via foreign_repo instead of unknown + freeze
-      if (String(local.nameWithOwner).toLowerCase() !== repo.toLowerCase()) throw new ForeignRepoError(repo.toLowerCase(), String(local.nameWithOwner));
+      const exact = String(local.nameWithOwner).toLowerCase() === repo.toLowerCase(); // REPOALIAS1: old-name PR, new-name repoDir (repoAlias on)
+      if (!aliasPick("scheduler-merge-external.inspect", exact, exact || sameRepo(String(local.nameWithOwner), repo))) {
+        throw new ForeignRepoError(repo.toLowerCase(), String(local.nameWithOwner));
+      }
       const raw = parsed(await gh("pr", "view", prRef, "--json",
         "state,headRefOid,headRefName,baseRefName,isDraft,isCrossRepository,mergeStateStatus,mergeCommit"), "gh pr view");
       const state = String(raw.state);

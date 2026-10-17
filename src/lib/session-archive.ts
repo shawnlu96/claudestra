@@ -21,6 +21,7 @@ import { projectsSlug } from "./jsonl-cost.js";
 import { copyIfLarger } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
 import { pickCodexRolloutForArchive, type RolloutPick } from "./codex-rollout-pick.js";
+import { sourceFor } from "./runtimes/index.js";
 
 export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
 const WORKER_MARKER = ".worker-kind";
@@ -105,6 +106,7 @@ function listPiSubagentJsonls(mainPath: string): Array<{ id: string; path: strin
 /** 找不到源文件时的说明：写明去哪找过，Pi 不能再报成「被 CC 清理」（Codex 的说明由 pickCodexRolloutForArchive 给） */
 function missingSourceNote(runtime: string, sessionId: string): string {
   if (runtime === "pi") return `Pi 会话文件不存在：~/.pi/agent/sessions 下找不到 ${sessionId}`;
+  if (runtime === "opencode") return `OpenCode 会话没有镜像：opencode export ${sessionId} 失败或没装 opencode（原因见 [opencode-session] 日志）`;
   return "源 jsonl 不存在（可能已被 CC 清理）";
 }
 
@@ -209,10 +211,17 @@ export async function archiveSession(
 /**
  * 会话源文件。Codex 走 pickCodexRolloutForArchive（核对首行 id，同 id 多份再按 cwd 分，分不开就拒）；
  * 其余交给运行时适配器：Claude Code 按 cwd 推算，Pi 文件名带时间戳推不出（返回 null）→ 按 id 全库找。
+ * 来源声明了 freshArchivePath 的（OpenCode：会话在它的库里，适配器只给可能旧几秒的镜像）退役时先等它给一份最新的再拷，否则最后几条丢在
+ * 归档外；给不出就报找不到。tests/opencode-archive.test.ts
  */
 async function locateSource(runtime: string, cwd: string | undefined, sessionId: string, srcPath?: string): Promise<RolloutPick> {
   if (srcPath && existsSync(srcPath)) return { path: srcPath };
   if (runtime === "codex") return pickCodexRolloutForArchive(sessionId, cwd);
+  const fresh = sourceFor(runtime).freshArchivePath;
+  if (fresh) {
+    const path = await fresh(sessionId);
+    return path ? { path } : { error: missingSourceNote(runtime, sessionId) };
+  }
   let src = !srcPath && cwd ? (sessionJsonlPath(runtime, cwd, sessionId) ?? "") : "";
   if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(runtime, sessionId) ?? "";
   if (!src || !existsSync(src)) return { error: missingSourceNote(runtime, sessionId) };

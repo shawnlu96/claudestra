@@ -29,6 +29,7 @@ interface Store { state: { activeAgent: string }; loadAgents(): Promise<void>; l
 let ui: {
   MessageList: () => unknown; Sidebar: (p: { onSelect: () => void }) => unknown; NowStrip: () => unknown; CollabSwitch: () => unknown;
   closingCollab: (fn: () => void) => () => void;
+  CollabSidebarGate: (p: { children: unknown }) => unknown;
   ChatStoreProvider: (p: { children: unknown }) => unknown; useChatStoreApi: () => Store;
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
   asksStore: { refresh(): Promise<void>; closeDrawer(): void; get(): { open: boolean; focus: string | null } };
@@ -52,6 +53,7 @@ const calls: string[] = [];
 const fpCalls: string[] = [];
 const aborted: string[] = [];
 const live = new Set<() => Promise<void>>();
+const eventStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
 const realFetch = globalThis.fetch, realFp = machines.currentFp;
 
 beforeAll(async () => {
@@ -67,6 +69,12 @@ beforeAll(async () => {
     const path = url.pathname.replace(/^\/m\/[^/]+/, "");
     calls.push(`${(init?.method ?? "GET").toUpperCase()} ${path}`);
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
+    // 404 会触发后台重连，污染「打开整页不新增事件流」的计数；保持夹具流连接，卸载后统一关闭。
+    if (path === "/api/v1/events") {
+      let mine: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({ start: (c) => { mine = c; eventStreams.add(c); }, cancel: () => { eventStreams.delete(mine); } });
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    }
     if (path === "/app-config.json") return json({ mode: "direct", fp: FP, machineName: "fixture", version: "" });
     if (path === "/api/v1/shared-ledger/context") return json({ identities: [] });
     const api = path.startsWith("/api/v1/") ? path.slice("/api/v1".length) : null;
@@ -87,6 +95,7 @@ beforeAll(async () => {
     require("../web/features/chat/components/nav-context.tsx"), require("../web/features/asks/asks-store.ts"),
     require("../web/features/collab/collab-nav.ts"), require("../web/features/collab/team-view-entry.tsx"), require("../web/features/collab/collab-switch.tsx")];
   ui = { MessageList: list.MessageList, Sidebar: side.Sidebar, NowStrip: now.NowStrip, CollabSwitch: sw.CollabSwitch, closingCollab: sw.closingCollab,
+    CollabSidebarGate: sw.CollabSidebarGate,
     ChatStoreProvider: store.ChatStoreProvider, useChatStoreApi: store.useChatStoreApi, ChatNavContext: nav.ChatNavContext, asksStore: asks.asksStore,
     useCollabNav: collabNav.useCollabNav, closeCollab: collabNav.closeCollab, unmountOpenViewGuard: viewEntry.unmountOpenViewGuardForTest, TODAY_KEY: now.TODAY_KEY,
     resetLedgers: require("../web/features/now/now-ledgers.ts").resetTodayLedgersForTest };
@@ -107,6 +116,8 @@ beforeAll(async () => {
 
 afterEach(async () => {
   for (const off of [...live]) await off();
+  for (const stream of eventStreams) stream.close();
+  eventStreams.clear();
   await React.act(async () => ui.unmountOpenViewGuard());
   // 台账读取是模块级共用的一份（拒绝访问的记录也在里面）：用例之间清掉
   await React.act(async () => ui.resetLedgers());
@@ -155,7 +166,7 @@ async function mount(part: "main" | "strip" | "shell", width = 1280) {
   live.add(unmount);
   const toContent = () => { seen.toContent++; };
   const body = part === "main" ? h(ui.MessageList) : part === "strip" ? h(ui.NowStrip)
-    : h("div", null, h(ui.Sidebar, { onSelect: ui.closingCollab(toContent) }), h("main", null, h(ui.MessageList), h(ui.CollabSwitch)));
+    : h("div", null, h(ui.CollabSidebarGate, null, h(ui.Sidebar, { onSelect: ui.closingCollab(toContent) })), h("main", null, h(ui.MessageList), h(ui.CollabSwitch)));
   const nav = { showContent: false, toContent, toList: () => {} };
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null, h(ui.ChatNavContext.Provider, { value: nav }, h(Probe), body)) as never));
   await React.act(async () => { await Promise.all([seen.store!.loadAgents(), seen.store!.loadProjects(), ui.asksStore.refresh()]); });
@@ -258,9 +269,9 @@ test("[验收线 4] 点『卡住了』一行：collab-nav 是 {该项目, 该任
   await w.unmount();
 });
 
-test("[验收线 4] 桌面点侧栏条『整页』：主区盖出今天页；再点侧栏一个会话，今天页收起", async () => {
+test("[TODAY2 验收线 1] 桌面点『整页』仍显示侧栏；点另一个会话先收起整页再切过去", async () => {
   win.localStorage.clear();
-  const v = await mount("shell");
+  const v = await mount("shell", 1440);
   await until(() => !!v.host.querySelector("[data-now=strip] [data-now-full]"), "full button");
   // 先选一个会话：主区不再是空状态的今天页
   const master = () => v.all("button").find((b) => (b.textContent ?? "").includes("大总管") && !b.closest?.("[data-now]"));
@@ -272,9 +283,12 @@ test("[验收线 4] 桌面点侧栏条『整页』：主区盖出今天页；再
   expect(v.seen.nav.project).toBe(ui.TODAY_KEY);
   await until(() => !!v.host.querySelector("main [data-now=page]"), "today overlay");
   expect(v.host.querySelector("main [data-now=page] h2")?.textContent).toBe("今天");
-  await v.click(master(), "session row again");
+  expect(v.host.querySelector("[data-collab-sidebar]")?.getAttribute("data-collab-sidebar")).toBe("shown");
+  const other = v.all("button").find((b) => (b.textContent ?? "").includes("同步开发") && !b.closest?.("[data-now]"));
+  await v.click(other, "other session row");
   expect(v.seen.nav.project).toBeNull();
   await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed");
+  await until(() => v.seen.store!.state.activeAgent === "b-dev", "other session selected");
   await v.unmount();
 });
 

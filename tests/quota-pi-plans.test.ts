@@ -65,6 +65,13 @@ describe("三家的解析", () => {
     expect(parseKimi({ limits: [{ detail: { limit: 0, remaining: 0 } }] })).toBeNull();
   });
 
+  test("Kimi：5 小时窗口用满时接口省掉 remaining、只给 used，照样算出 100%（不能把这一格丢掉）", () => {
+    const m = parseKimi({ limits: [{ window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" }, detail: { limit: "100", used: "100", resetTime: RESET } }],
+      usage: { limit: "100", used: "64", remaining: "36", resetTime: RESET } });
+    expect(m!.map((x) => [x.id, x.used])).toEqual([["session", 100], ["weekly", 64]]);
+    expect(parseKimi({ limits: [{ detail: { used: "5" } }] })).toBeNull(); // 没有 limit 认不出
+  });
+
   test("DeepSeek：余额按两位小数，数字串也认；币种不合规不带", () => {
     expect(parseDeepSeekBalance({ is_available: true, balance_infos: [{ currency: "CNY", total_balance: "12.3" }] })).toEqual({ amount: "12.30", currency: "CNY" });
     expect(parseDeepSeekBalance({ balance_infos: [{ currency: "<b>", total_balance: 5 }] })).toEqual({ amount: "5.00", currency: null });

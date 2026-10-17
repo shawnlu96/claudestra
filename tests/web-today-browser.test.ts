@@ -1,6 +1,7 @@
 /**
  * TODAY1「今天」页的截图与 DOM 断言（opt-in，截图不进 git）：
  *   TODAY_SHOTS_DIR=<目录> [TODAY_BASE_REPO=<基线 main 的检出目录>] bun --no-env-file test tests/web-today-browser.test.ts
+ *   加 TODAY_SIDEBAR_CHECK=1 跑 TODAY2：1440×900 真 Gate 下整页、Esc / 返回、点另一会话；390 列表收起 / 展开。
  * 入口与夹具在 tests/helpers/today-shots.ts（改前改后同一个入口、同一份数据）：真的 Sidebar + MessageList + CollabSwitch，外壳照生产 chat.tsx 的窄屏横滑。
  * 时刻钉在 2026-10-14 12:00 Asia/Shanghai（page.clock），真 Chromium，回环 Bun.serve，非回环请求一律拦掉并断言为 0；全程不发 GET /quota。
  * 截图：1280 没选会话的主区（含侧栏条收起）、开着一个会话点「整页」后的主区（改前截同一会话的主区）；390 列表页侧栏条收起、展开。
@@ -25,8 +26,94 @@ async function settle(page: Page) {
   await page.waitForTimeout(400); // 侧栏条 / 块的高度过渡（.2s）、进度条宽度（.3s）走完
 }
 
-test.skipIf(!out)("TODAY1：今天页（桌面主区 / 整页 / 手机侧栏条收起与展开），1280 与 390 改前改后", async () => {
+/** TODAY2: 同一份生产 Gate + Sidebar 外壳，基线只记录不可点击的 B，交付版真实点击 B。 */
+async function sidebarShots(dir: string, base?: string) {
+  mkdirSync(dir, { recursive: true });
+  const sides = [...(base ? [{ phase: "before", repo: resolve(base) }] : []), { phase: "after", repo: resolve(import.meta.dir, "..") }];
+  const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+  const shots: { view: string; size: string; phase: string; file: string }[] = [];
+  try {
+    for (const { phase, repo } of sides) {
+      const server = serveToday(await bundleToday(repo, resolve(dir, `sidebar-bundle-${phase}`), FP), await tailwindCss(repo), FP);
+      try {
+        for (const width of [1440, 390]) {
+          const height = width === 1440 ? 900 : 844, size = `${width}x${height}`;
+          const g = await guardedPage(browser, String(server.url), { width });
+          try {
+            const page = g.page;
+            await page.clock.setFixedTime(new Date(TODAY_NOW));
+            await page.setViewportSize({ width, height });
+            await page.goto(String(server.url));
+            await page.locator("[data-now=strip]").waitFor();
+            const later = page.getByRole("button", { name: "以后再说" });
+            if (await later.isVisible()) await later.click();
+            const shot = async (view: string) => {
+              await settle(page);
+              if (await later.isVisible()) await later.click();
+              await page.mouse.move(width - 5, height - 5);
+              const file = `${phase}-${view}-${size}.png`;
+              await page.screenshot({ path: resolve(dir, file), animations: "disabled" });
+              shots.push({ view, size, phase, file });
+            };
+            if (width === 390) {
+              await page.locator("[data-nav-pages=today] [data-now=page]").waitFor();
+              await shot("today");
+              await page.locator("[data-nav=phone] [data-nav-tab=sessions]").click();
+              expect(await page.locator("[data-now-full]").isVisible()).toBe(false);
+              await shot("list");
+              await page.locator("[data-now=strip] button[aria-expanded]").first().click();
+              await page.waitForFunction(`document.querySelectorAll("[data-now=strip] [data-now-stuck-row]").length === 3`);
+              await shot("list-open");
+            } else {
+              const a = sessionRow(page), b = page.locator("aside button", { hasText: "通知开发" }).first();
+              await a.click();
+              await page.waitForFunction(`!document.querySelector("main [data-now=page]")`);
+              const sameSidebar = await page.locator("aside").elementHandle();
+              const open = async () => {
+                await page.locator("[data-now-full]").click();
+                await page.locator("main [data-now-back]").waitFor();
+                await page.waitForFunction(`document.querySelectorAll("main [data-now-stuck-row]").length === 3`);
+              };
+              const selected = (name: string) => page.waitForFunction(`Array.from(document.querySelectorAll("aside button"))
+                .some(el => el.textContent.includes(${JSON.stringify(name)}) && el.parentElement.classList.contains("bg-base-300"))`);
+              await selected("同步开发");
+              await open();
+              await shot("full-page");
+              const visible = await b.isVisible();
+              expect({ phase, visible }).toEqual({ phase, visible: phase === "after" });
+              if (phase === "after") {
+                await b.click({ trial: true });
+                const main = await page.locator("main").boundingBox(), overlay = await page.locator("main [data-now=page]").boundingBox();
+                expect(main!.x).toBeGreaterThan(0);
+                expect(overlay!.x).toBe(main!.x);
+                expect(await sameSidebar!.evaluate((el: unknown) => (el as { isConnected: boolean }).isConnected)).toBe(true);
+              }
+              // Esc / 返回不换会话；之后重新打开整页，点 B 复现验收线 1。
+              for (const close of [() => page.keyboard.press("Escape"), () => page.locator("main [data-now-back]").click()]) {
+                await close();
+                await page.waitForFunction(`!document.querySelector("main [data-now=page]")`);
+                await selected("同步开发");
+                await open();
+              }
+              if (visible) {
+                await b.click();
+                await page.waitForFunction(`!document.querySelector("main [data-now=page]")`);
+                await selected("通知开发");
+              }
+              await shot("select-session");
+            }
+            expect({ external: g.external, errors: g.errors }).toEqual({ external: [], errors: [] });
+          } finally { await g.ctx.close(); }
+        }
+      } finally { server.stop(true); }
+    }
+    await Bun.write(resolve(dir, "manifest.json"), JSON.stringify({ v: 1, summary: "桌面今天整页保留会话栏并支持切会话；手机列表保持一致", shots }, null, 2));
+  } finally { await browser.close(); }
+}
+
+test.skipIf(!out)("TODAY：今天页与会话栏，桌面整页 / 手机列表改前改后", async () => {
   if (!out) return;
+  if (process.env.TODAY_SIDEBAR_CHECK === "1") return sidebarShots(out, baseRepo);
   mkdirSync(out, { recursive: true });
   const sides = [...(baseRepo ? [{ label: "before", repo: resolve(baseRepo) }] : []), { label: "after", repo: resolve(import.meta.dir, "..") }];
   const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });

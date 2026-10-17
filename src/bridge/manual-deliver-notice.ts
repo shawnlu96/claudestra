@@ -73,7 +73,7 @@ function pendingCards(db: Database): Card[] {
     const task = getTask(db, id);
     if (!task) continue;
     const mode = getWorkflow(db, id)?.mode ?? null;
-    const d = pendingDelivery(task, listEvents(db, { target: id }), mode);
+    const d = pendingDelivery(task, listEvents(db, { project: task.project, target: id }), mode);
     if (d) out.push({ task, d, mode });
   }
   return out;

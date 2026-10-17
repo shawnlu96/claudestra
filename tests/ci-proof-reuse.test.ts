@@ -19,6 +19,14 @@ import { localInputs, lookupOrigins, type OriginDeps, reuseNotice, revokedRuns, 
 import { verifyReceipts, writerRun } from "../scripts/ci-proof-reuse-verify.ts";
 
 const ROOT = join(import.meta.dir, "..");
+const reuseModules = new Set(["ci-proof-reuse.ts", "ci-proof-reuse.js", "ci-proof-reuse-verify.ts", "ci-proof-reuse-verify.js"]);
+const reuseTranspiler = new Bun.Transpiler({ loader: "ts" });
+function importsReuse(source: string, scan = (code: string) => reuseTranspiler.scanImports(code)): boolean {
+  // Escaped literals can spell a dependency without its plain name, so they must reach the parser too.
+  if (!source.includes("ci-proof-reuse") && !source.includes("\\")) return false;
+  const code = source.startsWith("#!") ? source.slice(source.indexOf("\n") + 1) : source;
+  return scan(code).some((i) => reuseModules.has(i.path.split("/").at(-1)!));
+}
 const sha = (c: string) => c.repeat(40);
 const REPO = "shawnlu96/claudestra", LOCK = ciReuseDigest("bun.lock"), ZIP = ciReuseDigest("zip bytes");
 const SELF = { runId: 900, attempt: 2 }, ORIGIN_RUN = 700;
@@ -391,10 +399,28 @@ describe("[验收线 4] one verification for every merge path; a hit or a failed
 
   test("only the proof verifier and the two CI scripts import the reuse module: trains, the serial driver, manual queues and PM ops do not", () => {
     const ls = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "src", "scripts"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\n").filter((p) => /\.ts$/.test(p));
-    const users = ls.filter((p) => p !== "src/lib/ci-proof-reuse.ts" && /ci-proof-reuse(-verify)?\.(js|ts)"/.test(readFileSync(join(ROOT, p), "utf8")));
+    expect(importsReuse('export const basis = [{ path: "src/lib/ci-proof-reuse.ts" }];')).toBe(false);
+    expect(importsReuse('import { runCheck } from "./ci-proof-reuse.ts";')).toBe(true);
+    expect(importsReuse("export { runCheck } from './ci-proof-reuse.js';")).toBe(true);
+    expect(importsReuse('const reuse = import("./ci-proof-reuse-verify.ts");')).toBe(true);
+    expect(importsReuse('const reuse = require("./ci-proof-reuse.js");')).toBe(true);
+    expect(importsReuse('#!/usr/bin/env bun\nimport "./ci-proof-reuse-verify.js";')).toBe(true);
+    const users = ls.filter((p) => p !== "src/lib/ci-proof-reuse.ts" && importsReuse(readFileSync(join(ROOT, p), "utf8")));
     expect(users.sort()).toEqual(["scripts/ci-proof-reuse-verify.ts", "scripts/ci-proof-reuse.ts", "src/lib/ci-proof.ts", "src/lib/scheduler-ci-proof-port.ts"]);
     const lib = readFileSync(join(ROOT, "src", "lib", "ci-proof-reuse.ts"), "utf8");
     for (const m of lib.matchAll(/^import [^;]*? from "([^"]+)";/gm)) expect(m[1]!).toMatch(/^(node:[\w/]+|\.\/[\w-]+\.js)$/);
+  });
+
+  test("module prefilter still scans dynamic imports and escaped dependency names", () => {
+    const scanned: string[] = [];
+    const scan = (code: string) => { scanned.push(code); return reuseTranspiler.scanImports(code); };
+    expect(importsReuse('export const value = "unrelated";', scan)).toBe(false);
+    expect(scanned).toEqual([]);
+    const dynamic = 'const reuse = import("./ci-proof-reuse-verify.ts");';
+    expect(importsReuse(dynamic, scan)).toBe(true);
+    const escaped = 'export { runCheck } from "./ci-proof-\\u0072euse.js";';
+    expect(importsReuse(escaped, scan)).toBe(true);
+    expect(scanned).toEqual([dynamic, escaped]);
   });
 
   test("a failed lookup or download is only a miss: the command runs and its result is the step's, in observe and in on", async () => {

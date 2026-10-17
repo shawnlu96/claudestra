@@ -1,8 +1,9 @@
-/** Pi 的 ACP 宿主描述（runtimes/contract.ts AcpHostRuntime）：起仓库里的 Pi 适配器，channel-server 只经 mcpServers 交过去。 */
-import { channelServerEnv, hostEnvBase, type AdapterEnvSpec, type AgentCommand } from "../acp/adapter-proc.js";
+/** Pi 的 ACP 宿主描述（runtimes/contract.ts AcpHostRuntime）：起仓库里的 Pi 适配器，channel-server 只经 mcpServers 交过去（acp-mcp.ts）。 */
+import { hostEnvBase, type AgentCommand } from "../acp/adapter-proc.js";
 import { PI_ACP_ADAPTER_MAIN } from "../acp/pi-adapter/main.js";
 import { sandboxPiEnv, sandboxPiProblem } from "../acp/pi-adapter/sandbox-policy.js";
-import type { AcpHostRuntime, AcpMcpServer } from "./contract.js";
+import { stdioMcpServers } from "./acp-mcp.js";
+import type { AcpHostRuntime } from "./contract.js";
 
 /** Pi 的能力档等参数（JSON 字符串数组），由 runtimes/pi-acp.ts 的启动命令给，原样排在适配器的 pi 参数前面 */
 export const PI_ARGS_ENV = "CLAUDESTRA_PI_ARGS";
@@ -20,18 +21,11 @@ function piAgentCommand(env: Record<string, string | undefined>, bunBin: string,
   return refused ? { error: refused } : { cmd: [bunBin, PI_ACP_ADAPTER_MAIN, ...args], stub: false };
 }
 
-/** Pi 只认 mcpServers：回环代理的地址和 token 只在这里（适配器转给 pi 的挂载扩展，读完即删），不进适配器的环境 */
-function piMcpServers(s: AdapterEnvSpec): AcpMcpServer[] {
-  if (!s.channel || s.clean) return [];
-  const env = Object.entries(channelServerEnv(s.channel, s.mcpName, "pi")).map(([name, value]) => ({ name, value }));
-  return [{ name: s.mcpName, command: s.bunBin, args: [s.channelServer], env }];
-}
-
 export const PI_ACP_HOST: AcpHostRuntime = {
   id: "pi", label: "Pi", logLabel: "pi-acp",
   // 压缩完成认 Pi 适配器的中性记号 _meta.claudestra.compacted（pi-adapter/map.ts）
-  translator: { compactFrom: "claudestra-meta" },
+  compactFrom: "claudestra-meta",
   agentCommand: piAgentCommand,
   adapterEnv: (s) => sandboxPiEnv(hostEnvBase(s), s.base),
-  mcpServers: piMcpServers,
+  mcpServers: stdioMcpServers("pi"),
 };

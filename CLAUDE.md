@@ -81,14 +81,15 @@ One line each; full descriptions in [docs/architecture/features.md](./docs/archi
 - **Multi-agent orchestration** — create / resume / kill / restart / list / history, each agent a tmux window.
 - **Projects** — every agent belongs to exactly one project (`projects.json`, manager is the sole writer); master is exempt.
 - **Agent-to-agent messaging** — `send_to_agent` injects into another agent's context via the Bridge.
-- **Codex calls** — `ask_codex` runs the local Codex CLI per call (`lib/codex.ts`), read-only sandbox by default.
-- **Cron scheduling** — cron expressions spin up a temporary agent, run a prompt, report, clean up.
+- **Codex calls** — `ask_codex` runs the local Codex CLI (`lib/codex.ts`), read-only.
+- **Cron scheduling** — cron spins up a temp agent, runs a prompt, reports, cleans up.
 - **Discord + web UI** — buttons / selects / multiselect in `reply()`, LLM-free admin buttons, streaming tool output, screenshots, one-click interrupt, slash autocomplete for skills.
 - **Multi-frontend API** — `GET /events` SSE, Bearer-scoped `POST /api/v1/agents/:name/messages`, `ChatAdapter` registry; bridge binds `127.0.0.1` by default.
 - **Claude Code agents-mode integration** — session inventory + doppelganger detection, fork self-heal on restart, adopt/cleanup (`lib/bg-jobs.ts`).
-- **Background-activity threads + session archive** — subagents / bg shells get their own threads; retired sessions are snapshotted to `~/.claude-orchestrator/archive/` (daily sweep too).
+- **Background-activity threads + session archive** — subagents / bg shells get their own threads; retired sessions are snapshotted to `~/.claude-orchestrator/archive/` (daily sweep).
 - **Read-only history API + manual archive category** — `GET /api/v1/agents/:name/history`, archive/restore endpoints, retention prunes only the manual category.
-- **Pi agent sessions** — `runtime: "pi"` agents via the Pi extension, capability profiles (`pi-env`), session records translated to Claude Code shape (`lib/session-source.ts`).
+- **Pi agent sessions** — `runtime: "pi"` agents, capability profiles (`pi-env`), records translated via `lib/session-source.ts`.
+- **OpenCode agents** — ACP-only, `--model` required: [opencode-acp.md](./docs/runtimes/opencode-acp.md).
 - **HTTP peers** — cross-instance collaboration over `/api/v1` with scoped tokens and one-click invites; master is never shareable.
 - **Context boundaries** — per-project / name-pattern compaction lines: [context-boundary.md](./docs/architecture/context-boundary.md).
 - **Sub-DAG tools** — PM MCP tools `plan_feature` / `rewrite_dag` / `start_node` / `show_dag`: [dag-tools.md](./docs/architecture/dag-tools.md).
