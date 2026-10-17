@@ -10,8 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { closeLedger, getTask, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, deliver, moveStage, setMeta } from "../src/lib/ledger-write.js";
-import { gitDiffFiles, useDeliveredFilesPort } from "../src/lib/task-tier-deliver-wiring.js";
-import { resetDocsTemplate } from "../src/lib/task-tier-docs-template.js";
+import { gitDiffFiles, resetDocsTemplate, useDeliveredFilesPort } from "../src/lib/task-tier-docs-template.js";
 import { useTaskTierPort } from "../src/lib/task-tier-models.js";
 import { tierLaunchable } from "../src/lib/task-tier-spec.js";
 
