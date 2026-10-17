@@ -8,6 +8,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InventoryQuota } from "../src/lib/ai-quota.js";
+import { defaultQuotaLines } from "../src/lib/lend-quota-line-config.js";
+import { familyLine, lendQuotaLineCap } from "../src/lib/lend-quota-line.js";
 import {
   factOf, factsNow, liveFact, mergeReport, readFactsFile, refreshQuotaFacts, refreshQuotaFactsAfterReset, resetQuotaFactsForTest, type FactsIo, type QuotaInventory,
 } from "../src/lib/lend-quota-line-facts.js";
@@ -125,6 +127,35 @@ describe("刷新 / 缓存 / 落盘", () => {
 
 
 describe("重置后补读", () => {
+  test("memo-fallback：落盘失败且补读抛错，普通刷新与重置刷新都保留 Claude stop 和容量 0", async () => {
+    const x = io([{ claude: inv(95) }, new Error("fixture inventory unavailable")]);
+    writeFileSync(x.path, "parent is a file");
+    x.path = join(x.path, "facts.json");
+    const lines = { status: "missing" as const, file: defaultQuotaLines() };
+    await refreshQuotaFacts(NOW, x);
+    expect(readFactsFile(x.path)).toEqual({}); // 没有磁盘回退：这份事实只在 memo 中。
+    const ordinary = { lines, facts: await refreshQuotaFacts(NOW + 1, x) };
+    expect(familyLine("claude", ordinary, NOW + 1).state).toBe("stop");
+    expect(lendQuotaLineCap("claude", 8, NOW + 1, ordinary)).toBe(0);
+    const reset = { lines, facts: await refreshQuotaFactsAfterReset(NOW + 2, x) };
+    expect(lendQuotaLineCap("claude", 8, NOW + 2, reset)).toBe(0);
+    expect(familyLine("claude", reset, NOW + 2)).toMatchObject({ state: "stop", weekUsedPct: 95, observedAt: NOW });
+    expect(factsNow(NOW + 2, x).claude?.weekUsedPct).toBe(95);
+  });
+  test("只重置 Codex：无可用磁盘回退且新清单缺 Claude，Codex 恢复而 Claude 仍 stop", async () => {
+    const x = io([{ claude: inv(95), codex: inv(100) }, { codex: inv(0, { observedAt: NOW + 10 }) }]);
+    writeFileSync(x.path, "parent is a file");
+    x.path = join(x.path, "facts.json");
+    const lines = { status: "missing" as const, file: defaultQuotaLines() };
+    await refreshQuotaFacts(NOW, x);
+    expect(readFactsFile(x.path)).toEqual({});
+    const reset = { lines, facts: await refreshQuotaFactsAfterReset(NOW + 10, x) };
+    expect(familyLine("codex", reset, NOW + 10)).toMatchObject({ state: "below", weekUsedPct: 0, observedAt: NOW + 10 });
+    expect(lendQuotaLineCap("codex", 8, NOW + 10, reset)).toBe(8);
+    expect(lendQuotaLineCap("claude", 8, NOW + 10, reset)).toBe(0);
+    expect(familyLine("claude", reset, NOW + 10)).toMatchObject({ state: "stop", weekUsedPct: 95, observedAt: NOW });
+    expect(factsNow(NOW + 10, x).claude?.weekUsedPct).toBe(95);
+  });
   test("等待重置前在途读取后再清缓存，旧回包不能挡住新读数", async () => {
     let release!: (v: QuotaInventory) => void;
     const pending = new Promise<QuotaInventory>((r) => { release = r; });
