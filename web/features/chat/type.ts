@@ -203,6 +203,8 @@ export interface AgentSession {
   projectId?: string | null;
   /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
   external?: boolean;
+  /** 系统强制只读的 Codex（bridge GET agents 的 readOnly）：侧栏运行时图标右下角挂锁 */
+  readOnly?: boolean;
   /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
   label?: string | null;
   /** 全权 token 才有：共享给哪些 peer（顶栏徽章悬停名单）/ 几个（角标数字） */

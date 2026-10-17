@@ -1,6 +1,6 @@
 /**
  * 适配器的启动配置与会话配置项：
- * - 环境（B13、B15、B38）：CODEX_PATH 必填；INITIAL_AGENT_MODE 只认 4 个名字，认不出就拒起（不降级）；CODEX_CONFIG 必须是 JSON 对象。
+ * - 环境（B13、B15、B38）：CODEX_PATH 必填；INITIAL_AGENT_MODE 只认 MODES 里的名字，认不出就拒起（不降级）；CODEX_CONFIG 必须是 JSON 对象。
  *   任何一条不过，initialize 回 -32603 带 data.fatal（宿主固定一张卡、不再重起）。
  * - 线程的 config 覆盖层：和 2.1.0 一样加 projects.<cwd>.trust_level、features.cwd_relative_turn_diffs=false；
  *   另把控制标记写进覆盖层里每个 MCP server 自己的 env（I12：只有 MCP 进程带它，模型跑的命令继承不到）。
@@ -13,12 +13,16 @@ type Rec = Record<string, unknown>;
 type Model = ResultOf<"model/list">["data"][number];
 
 const WORKSPACE = { type: "workspaceWrite" as const, writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
-/** 2.1.0 AgentMode.ts 的四个预设；每次 turn/start 都带上 */
+/**
+ * 2.1.0 AgentMode.ts 的四个预设，加上 Claudestra 自己的 read-only-never（只读 agent：只读沙箱、从不审批，
+ * 上游没有这一档，codex-readonly.ts）；每次 turn/start 都带上。会话里只能改 model / reasoning_effort，改不动这里。
+ */
 const MODES = {
   "read-only": { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: { type: "readOnly", networkAccess: false } },
   "workspace-write": { approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: WORKSPACE },
   agent: { approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandboxPolicy: WORKSPACE },
   "agent-full-access": { approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "dangerFullAccess" } },
+  "read-only-never": { approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "readOnly", networkAccess: false } },
 } as const;
 type TurnPolicy = (typeof MODES)[keyof typeof MODES];
 
@@ -31,7 +35,7 @@ export interface AdapterConfig {
 
 const isRec = (v: unknown): v is Rec => !!v && typeof v === "object" && !Array.isArray(v);
 
-/** 不设 INITIAL_AGENT_MODE 时和 2.1.0 一样用 agent；设了就必须是四个之一 */
+/** 不设 INITIAL_AGENT_MODE 时和 2.1.0 一样用 agent；设了就必须是 MODES 之一 */
 export function parseAdapterEnv(env: Record<string, string | undefined>): { ok: true; cfg: AdapterConfig } | { ok: false; why: string } {
   const codexPath = env.CODEX_PATH?.trim();
   if (!codexPath) return { ok: false, why: "没有设 CODEX_PATH，不知道用哪个 codex" };

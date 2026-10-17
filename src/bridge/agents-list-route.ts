@@ -30,6 +30,7 @@ import { latestSessionIdForCwd } from "./session-ids.js";
 import { MASTER_DIR } from "./config.js";
 import { readSessionTails, type TailIo, type TailTarget } from "./agents-list-tails.js";
 import { peerInstanceBlock, type PeerInstanceInfo } from "../lib/peer-instance-info.js";
+import { readOnlyCodexAgents } from "../lib/codex-readonly.js";
 
 export interface AgentsListIo {
   /** bridge/management.ts 的 runManager（枢纽模块，不在这里 import，由 api-routes 注入） */
@@ -85,6 +86,8 @@ async function listAgentsForPrincipal(url: URL, principal: Principal, io: Agents
   if (url.searchParams.get("include") === "stopped") rows.push(...(await stoppedRows(regs, new Set(rows.map((a) => a.name)), principal, extras, io.tails)));
   // master 入列（token scope 显式含 "master" 才可见，"*" 不含）。web 前端的「大总管」置顶入口靠它
   if (io.controlChannelId && agentInScope(principal, "master")) rows.unshift(await masterRow(io, extras, globals));
+  const readOnly = readOnlyCodexAgents(); // 系统强制只读的 Codex：网页在运行时图标旁画锁（lib/codex-readonly.ts）
+  for (const a of rows) if (readOnly.has(a.name)) a.readOnly = true;
   return rows;
 }
 
