@@ -224,7 +224,7 @@ OCR-2 开工前要先定的两件事：OpenCode agent 是否像 Codex 一样放�
   2026-10-17 复测两份一致（都是 10 个，成员和前一天又不同）。原因没查实【推断】：两边都读 `$XDG_CACHE_HOME/opencode/models.json` 这份目录缓存，
   它在后台按时刷新，前后两次调用隔着一次刷新就会不一样。拿会话那份全表要建会话，会在 OpenCode 库里留空会话，所以弹窗不这么做；
   缺的可以手填（按会话 configOptions 校验，见上）。
-- 网页 agent 设置里的「换模型」（`/agents/:name/{pi,codex}-settings`）还没接 OpenCode，先用上面的命令行。
+- 网页 agent 设置里的「换模型」（`/agents/:name/{pi,codex}-settings`）还没接 OpenCode，先用上面的命令行；由 OCR-3（统一模型接口与通用切换器）一起覆盖。
 - 压缩：只认宿主发的 `/compact`（那一轮结束出边界，摘要不当回复）；OpenCode 自己在上下文快满时的自动压缩没有任何信号，宿主看不到这条边界。
   `/compact` 那一轮被打断也会记一条边界（flush 拿不到 stopReason）。
 - 没有 steering：忙时到的消息排队等下一轮；没有命令输出增量（长命令跑完才看到输出）；没有 `/clear` 命令（宿主照旧 session/new 换会话）。
