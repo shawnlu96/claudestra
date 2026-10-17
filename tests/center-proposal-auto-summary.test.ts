@@ -6,6 +6,9 @@ import { classifyProposal, hitEvidence, reasonText, type AutoHit } from "../src/
 import { RESULT_OP } from "../src/lib/center-proposal-auto-exec.js";
 import { proposalSummary, type ProposalSummary } from "../src/lib/center-proposal-auto-summary.js";
 import { pollCenterProposals, type ProposalInboxDeps } from "../src/bridge/center-proposal-inbox.js";
+import { FeatureProposalRejected } from "../src/lib/shared-ledger-feature-proposals.js";
+import { featureProposalError } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
+import type { Ask } from "../src/lib/ledger-asks.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const NOW = 1_790_000_000_000;
@@ -26,8 +29,8 @@ function rec(id: string, nodes: Node[], o: { title?: string; kind?: "new" | "rev
     operation: { schemaVersion: 1, ...SCOPE, operationId: `op-${id}`, proposalDigest: digest, state: "pending_approval", proposalId: id, featureId: null, version: null, updatedAt: NOW } };
 }
 
-/** 跑一轮自动批准（on 档），返回结果事件 */
-async function autoApproveOnce(r: ProposalRecord) {
+/** 跑一轮自动批准（on 档），返回结果事件；refuse：中心拒批，走交还人工（handover） */
+async function autoApproveOnce(r: ProposalRecord, refuse = false) {
   const db = openLedger(tempLedgerPath("propevid-")), informed: string[] = [];
   const deps: ProposalInboxDeps = {
     now: () => NOW,
@@ -36,8 +39,11 @@ async function autoApproveOnce(r: ProposalRecord) {
       policy: { schemaVersion: 1, ...SCOPE, approvers: "project_owner", setBy: null, rev: 0, updatedAt: 0 }, proposals: [r], selfPersonId: SELF,
     }) as ProposalList & { selfPersonId: string },
     members: async () => [{ personId: SELF, role: "owner", status: "active" }],
-    decide: async () => ({ ...r, operation: { ...r.operation, state: "approved" } }),
-    openAsk: () => { throw new Error("不该开卡"); },
+    decide: async () => {
+      if (refuse) throw new FeatureProposalRejected(403, featureProposalError("forbidden"));
+      return { ...r, operation: { ...r.operation, state: "approved" } };
+    },
+    openAsk: input => { if (!refuse) throw new Error("不该开卡"); return { ...input, id: "ask_x" } as Ask; },
     openCards: () => [],
     closeAsk: () => {},
     inform: async t => { informed.push(t); },
@@ -46,7 +52,7 @@ async function autoApproveOnce(r: ProposalRecord) {
     auto: { mode: () => "on", db: () => db, files: () => REPO, hasCard: () => false },
   };
   await pollCenterProposals(deps);
-  expect(informed).toEqual([]);
+  if (!refuse) expect(informed).toEqual([]);
   return listEvents(db, { project: LOCAL }).filter(e => e.kind === "note" && e.data.op === RESULT_OP);
 }
 
@@ -57,7 +63,7 @@ describe("PROPEVID1 结果事件带提案摘要", () => {
     expect(rest).toEqual([]);
     expect(e!.data.outcome).toBe("approved");
     const s = e!.data.proposal as ProposalSummary;
-    expect(s).toEqual({ title: "协作页改版 p-two", kind: "revise", featureId: "F1", fromVersion: 2, toVersion: 3, nodeCount: 2, nodesOmitted: 0, globsOmitted: 0,
+    expect(s).toEqual({ title: "协作页改版 p-two", kind: "revise", featureId: "F1", fromVersion: 2, toVersion: 3, nodeCount: 2, globsOmitted: 0,
       nodes: [{ key: "ui", fileGlobs: ["web/features/collab/list.tsx"], globsOmitted: 0 }, { key: "ui2", fileGlobs: ["web/features/collab/board.tsx"], globsOmitted: 0 }] });
     expect(e!.text.endsWith(" · 协作页改版 p-two · 2 个节点")).toBe(true);
   });
@@ -74,6 +80,14 @@ describe("PROPEVID1 结果事件带提案摘要", () => {
     expect(many.globsOmitted).toBe(8 * 12 - 60);
     expect(many.nodes[6]!.fileGlobs).toEqual([]);
     expect(many.nodes[6]!.globsOmitted).toBe(12);
+  });
+
+  test("r2 node-summary-cap：61 节点全部留 key，glob 超总量只记省略数", () => {
+    const s = proposalSummary(rec("p-61", Array.from({ length: 61 }, (_, i) => node(`n${i}`, [`web/features/collab/f${i}.tsx`]))));
+    expect(s.nodeCount).toBe(61);
+    expect(s.nodes.map(n => n.key)).toEqual(Array.from({ length: 61 }, (_, i) => `n${i}`));
+    expect(s.nodes[60]!).toEqual({ key: "n60", fileGlobs: [], globsOmitted: 1 });
+    expect(s.globsOmitted).toBe(1);
   });
 
   test("摘要过清洗：凭据、URL、本机绝对路径不进事件", () => {
@@ -112,6 +126,27 @@ describe("PROPEVID1 r1 摘要遮本机绝对路径（中英文标点、等号、
     const blob = JSON.stringify(e!.data) + e!.text;
     for (const bad of ["/tmp/probe-x", "/srv/app"]) expect(blob).not.toContain(bad);
     expect(e!.text).toContain("[本机路径]");
+  });
+
+  const R2 = ["/用户/文档/a.md", "/数据/x", "/foo.db", "/secret.env", "/x"];
+  test("r2 summary-path：中文首段、未列举根目录的单文件也遮", () => {
+    for (const lead of ["", " ", "位置：", "看", "=", "（"]) for (const abs of R2) {
+      const s = proposalSummary(rec("p-abs2", [node("x", ["docs/a.md"])], { title: `标题${lead}${abs} 收尾` }));
+      if (lead === "看" && abs === "/x") continue; // 汉字后单个非点短段与「新建/修订」同形，不遮
+      expect(s.title).toContain("[本机路径]");
+      expect(s.title).not.toContain(abs);
+    }
+    const keep = proposalSummary(rec("p-keep", [node("x", ["web/(group)/page.tsx", "src/a.ts"])], { title: "新建 / 修订 和/或" }));
+    expect(keep.title).toBe("新建 / 修订 和/或");
+    expect(keep.nodes[0]!.fileGlobs).toEqual(["web/(group)/page.tsx", "src/a.ts"]);
+  });
+
+  for (const refuse of [false, true]) test(`r2 summary-path 真实结果事件（${refuse ? "handover" : "approved"}）：data 与 text 不留路径`, async () => {
+    const r = rec(`p-abs-r2-${refuse}`, [node("ui", ["web/features/collab/list.tsx"])], { title: "核对 /用户/文档/a.md 与 /foo.db 和 看/数据/x" });
+    const [e] = await autoApproveOnce(r, refuse);
+    expect(e!.data.outcome).toBe(refuse ? "handover" : "approved");
+    const blob = JSON.stringify(e!.data) + e!.text;
+    for (const bad of ["/用户", "/foo.db", "/数据"]) expect(blob).not.toContain(bad);
   });
 });
 
