@@ -12,7 +12,7 @@ async function bridgeProbe() {
   const { RpcError } = await import("../src/lib/acp/rpc.ts");
   const { onAcpFrame } = await import("../src/bridge/acp-link.ts");
   // 额度卡不读本机的 Codex 额度快照 / config.json（那是 tests/acp-quota-plan.test.ts 的事），这里只验跨 watcher 的链路
-  (await import("../src/bridge/acp-quota.ts")).useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, projectOf: async () => undefined });
+  (await import("../src/bridge/acp-quota.ts")).useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined });
   const { noteAcpChannel } = await import("../src/bridge/acp-state.ts");
   const { startWatching, stopWatching } = await import("../src/bridge/jsonl-watcher.ts");
   const { subscribeEvents, emitEvent } = await import("../src/bridge/event-bus.ts");

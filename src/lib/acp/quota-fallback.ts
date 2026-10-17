@@ -97,20 +97,23 @@ export function resolveFallback(raw: unknown, project: string | undefined): Quot
 }
 
 const MAX_RAW = 500;
+const MAX_SUMMARY = 80;
+const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
-/** provider 回的原文 → 一行人话：认得出 {type, message}（或 error 里套一层）就写「type: message」，否则原样截断 */
+/** provider 回的原文 → 一行人话（≤500 字）：认得出 {type, message}（或 error 里套一层）就写「type: message」，否则原样 */
 export function rawQuotaText(message: string): string {
-  const json = message.slice(message.indexOf("{"));
-  if (message.includes("{")) {
-    try {
-      const o = JSON.parse(json) as Record<string, any>;
-      const e = o.error && typeof o.error === "object" ? o.error : o;
-      const type = typeof e.type === "string" ? e.type : typeof e.code === "string" ? e.code : "";
-      if (typeof e.message === "string" && e.message) return type ? `${type}: ${e.message}` : e.message;
-    } catch { /* 不是完整 JSON：下面按原文截断，人照样看得到原话 */ }
-  }
-  const one = message.trim();
-  return one.length > MAX_RAW ? `${one.slice(0, MAX_RAW)}…` : one;
+  return cut(tidyRaw(message).replace(/\s+/g, " "), MAX_RAW);
+}
+
+function tidyRaw(message: string): string {
+  if (!message.includes("{")) return message.trim();
+  try {
+    const o = JSON.parse(message.slice(message.indexOf("{"))) as Record<string, any>;
+    const e = o.error && typeof o.error === "object" ? o.error : o;
+    const type = typeof e.type === "string" ? e.type : typeof e.code === "string" ? e.code : "";
+    if (typeof e.message === "string" && e.message) return type ? `${type}: ${e.message}` : e.message;
+  } catch { /* 不是完整 JSON：按原文给，人照样看得到原话 */ }
+  return message.trim();
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -127,6 +130,7 @@ export interface QuotaCardFacts {
   /** 运行时称呼（Codex / Pi） */
   label: string;
   current: string;
+  /** 卡上写的「谁到顶」：确认了的 provider 名，或「Codex 当前账号」（模型 id 不带前缀时认不出是哪家） */
   provider: string;
   message: string;
   resetAt: number | null;
@@ -134,35 +138,55 @@ export interface QuotaCardFacts {
   sameProvider: number;
   /** 被当成到顶而没列的 provider（只列确实挡掉了模型的） */
   walled: readonly WalledProvider[];
-  usable: number;
+  /** 能切的模型，已排好；第一个是推荐（recommended 时） */
+  usable: readonly string[];
+  recommended: boolean;
   fallback: FallbackMode;
   chain: readonly string[];
   target: string | null;
+  /** on 档也不自动切的原因（审查 / 出借会话） */
+  noAuto?: string;
+  /** on 档切了没成：宿主给的原因 */
+  switchError?: string;
 }
 
-/** 额度卡正文：谁的额度、原文、几点重置、为什么有的模型没列、备用链会怎么走、怎么切回 */
-export function quotaCardText(f: QuotaCardFacts): string {
-  const lines = [
-    `${f.provider} 的额度到顶了（${f.label}，当前模型 ${f.current}）`,
-    `原文：${rawQuotaText(f.message)}`,
-    `重置时间：${whenText(f.resetAt, f.now)}`,
+/** 第 1 行：谁到顶 + 原文摘要 + 重置时间（网页卡只显示前 3 行，手机上这一行还会折） */
+const headLine = (f: QuotaCardFacts) =>
+  `${f.provider} 额度到顶：${cut(rawQuotaText(f.message), MAX_SUMMARY)}；重置 ${whenText(f.resetAt, f.now)}`;
+
+function waitReason(f: QuotaCardFacts): string {
+  const why = [
+    ...(f.sameProvider ? [`同一个账号的另外 ${f.sameProvider} 个模型也用不了`] : []),
+    ...(f.walled.length ? [`${f.walled.map((w) => w.provider).join("、")} 也到顶了`] : []),
   ];
-  if (f.sameProvider) lines.push(`没列：${f.provider} 的另外 ${f.sameProvider} 个模型（同一个账号 / 套餐，切过去照样撞墙）`);
-  for (const w of f.walled) lines.push(`没列：${w.provider} 也到顶了（${w.source}，重置 ${whenText(w.resetAt, f.now)}）`);
-  if (!f.usable) lines.push("没有别的能用的模型，只能等重置。");
-  if (f.fallback === "observe" && f.chain.length) {
-    lines.push(f.target ? `按备用链会切到 ${f.target}（现在是 observe 档，没有自动切）` : "备用链里没有现在能用的模型");
-  }
-  if (f.usable) lines.push(`切走以后 ${f.provider} 恢复了也不会自动切回：要切回就在设置页的模型下拉里选 ${f.current}。`);
+  return why.length ? why.join("，") : "下拉里没有别家的模型";
+}
+
+function fallbackLine(f: QuotaCardFacts): string | null {
+  if (f.fallback === "off" || !f.chain.length) return null;
+  if (f.switchError) return `按备用链切到 ${f.target} 没成：${f.switchError}`;
+  if (!f.target) return "备用链里没有现在能用的模型";
+  if (f.fallback === "on") return `按备用链该切到 ${f.target}，但${f.noAuto ?? "没有切"}`;
+  return `按备用链会切到 ${f.target}（observe 档，没有自动切）`;
+}
+
+/** 额度卡正文：前 3 行是谁到顶 / 原文 / 重置、推荐切到谁或只能等、备用链；其余（完整原文、为什么没列、怎么切回）在后面 */
+export function quotaCardText(f: QuotaCardFacts): string {
+  const next = f.usable.length ? `${f.recommended ? "推荐" : "可以"}切到 ${f.usable[0]}` : `只能等重置（${waitReason(f)}）`;
+  const lines = [headLine(f), next, fallbackLine(f)].filter((l): l is string => l !== null);
+  lines.push(`当前模型：${f.current}；原文：${rawQuotaText(f.message)}`);
+  if (f.usable.length && f.sameProvider) lines.push(`没列：${f.provider} 的另外 ${f.sameProvider} 个模型（同一个账号 / 套餐，切过去照样撞墙）`);
+  if (f.usable.length) for (const w of f.walled) lines.push(`没列：${w.provider} 也到顶了（${w.source}，重置 ${whenText(w.resetAt, f.now)}）`);
+  if (f.usable.length) lines.push(`切走以后原 provider 恢复了也不会自动切回：要切回就在设置页的模型下拉里选 ${f.current}。`);
   return lines.join("\n");
 }
 
 /** 备用链自动切换后的通知卡正文 */
 export function switchedCardText(f: QuotaCardFacts & { target: string }): string {
   return [
-    `${f.label} 额度到顶，已按备用链从 ${f.current} 切到 ${f.target}`,
-    `原因：${f.provider} 的额度到顶了。原文：${rawQuotaText(f.message)}；重置时间：${whenText(f.resetAt, f.now)}`,
+    `已按备用链从 ${f.current} 切到 ${f.target}`,
+    headLine(f),
     "撞墙的那一轮没跑完：重发消息或说「继续」接着做。",
-    `${f.provider} 恢复后不会自动切回：点「切回 ${f.current}」，或在设置页的模型下拉里手动切。`,
+    `不会自动切回：点「切回 ${f.current}」，或在设置页的模型下拉里手动切。原 provider 重置前切回会再撞一次墙。`,
   ].join("\n");
 }

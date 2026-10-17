@@ -17,7 +17,7 @@ const codexFull: InventoryQuota = {
   windows: [{ id: "weekly", kind: "weekly", usedPct: 100, resetsAtMs: WEEK_RESET, resetPassed: false }],
 };
 const port = (fallback: unknown, codex: InventoryQuota | null = codexFull) => useAcpQuotaPort({
-  now: () => NOW, codexQuota: async () => codex, fallbackConfig: () => fallback, projectOf: async () => "claudestra",
+  now: () => NOW, codexQuota: async () => codex, fallbackConfig: () => fallback, agentOf: async () => ({ name: "agent-x", projectId: "claudestra" }),
 });
 
 afterEach(() => useAcpQuotaPort());
@@ -25,9 +25,10 @@ afterEach(() => useAcpQuotaPort());
 describe("planAcpQuota：卡上的原文、过滤和备用链", () => {
   test("原文进正文；Codex 额度快照到顶 → openai-codex 不列；同系列排第一标推荐", async () => {
     port(undefined);
-    const p = await planAcpQuota("ch", GO_LIMIT, opts(), "Pi");
-    expect(p.context).toContain("原文：GoUsageLimitError: Go usage limit exceeded");
-    expect(p.context).toContain("重置时间：未知");
+    const p = await planAcpQuota("ch", "agent-x", GO_LIMIT, opts(), "Pi");
+    expect(p.context.split("\n").slice(0, 2)).toEqual([
+      `${GO} 额度到顶：GoUsageLimitError: Go usage limit exceeded；重置 未知`, "推荐切到 cc-switch-deep-seek/deepseek-v4-flash",
+    ]);
     expect(p.context).toContain("没列：openai-codex 也到顶了（Codex 额度快照");
     expect(p.choices.map((c) => c.value)).toEqual([null, "cc-switch-deep-seek/deepseek-v4-flash", "zai/glm-5.3"]);
     expect(p.choices[0]!.label).toBe("等重置（时间未知）");
@@ -36,55 +37,74 @@ describe("planAcpQuota：卡上的原文、过滤和备用链", () => {
 
   test("observe（缺省）：卡上写会切到谁，不自动切", async () => {
     port({ chain: ["zai"] });
-    const p = await planAcpQuota("ch", GO_LIMIT, opts(), "Pi");
+    const p = await planAcpQuota("ch", "agent-x", GO_LIMIT, opts(), "Pi");
     expect(p.autoSwitch).toBeNull();
     expect(p.context).toContain("按备用链会切到 zai/glm-5.3");
   });
 
   test("on：给出要切的模型和通知卡（附切回原模型）；off：什么都不提", async () => {
     port({ mode: "on", chain: ["openai-codex", "cc-switch-deep-seek"] });
-    const on = await planAcpQuota("ch", GO_LIMIT, opts(), "Pi");
+    const on = await planAcpQuota("ch", "agent-x", GO_LIMIT, opts(), "Pi");
     expect(on.autoSwitch).toBe("cc-switch-deep-seek/deepseek-v4-flash");
     expect(on.switched?.context).toContain(`从 ${CURRENT} 切到 cc-switch-deep-seek/deepseek-v4-flash`);
     expect(on.switched?.choices[0]).toEqual({ value: CURRENT, label: `切回 ${CURRENT}` });
 
     port({ mode: "on", chain: ["zai"], projects: { claudestra: { mode: "off" } } });
-    const off = await planAcpQuota("ch", GO_LIMIT, opts(), "Pi");
+    const off = await planAcpQuota("ch", "agent-x", GO_LIMIT, opts(), "Pi");
     expect(off.autoSwitch).toBeNull();
     expect(off.context).not.toContain("备用链");
   });
 
   test("本机刚撞过墙的 provider：别的 agent 的卡上也不列，到重置时刻失效；解析不出重置时间按 3 小时", async () => {
     let t = NOW;
-    useAcpQuotaPort({ now: () => t, codexQuota: async () => null, fallbackConfig: () => undefined, projectOf: async () => undefined });
-    const zai = () => planAcpQuota("b", GO_LIMIT, opts(), "Pi").then((p) => p.choices.some((c) => c.value === "zai/glm-5.3"));
-    await planAcpQuota("a", { ...GO_LIMIT, message: "zai: usage limit, try again in 2 hours" }, opts("zai/glm-5.3"), "Pi");
-    const p = await planAcpQuota("b", GO_LIMIT, opts(), "Pi");
+    useAcpQuotaPort({ now: () => t, codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined });
+    const zai = () => planAcpQuota("b", "agent-x", GO_LIMIT, opts(), "Pi").then((p) => p.choices.some((c) => c.value === "zai/glm-5.3"));
+    await planAcpQuota("a", "agent-x", { ...GO_LIMIT, message: "zai: usage limit, try again in 2 hours" }, opts("zai/glm-5.3"), "Pi");
+    const p = await planAcpQuota("b", "agent-x", GO_LIMIT, opts(), "Pi");
     expect(p.context).toContain("没列：zai 也到顶了（本机 09:00 撞墙，重置 11:00）");
     expect(await zai()).toBe(false);
     t = NOW + 2 * 3_600_000;
     expect(await zai()).toBe(true);
 
-    await planAcpQuota("a", GO_LIMIT, opts("zai/glm-5.3"), "Pi"); // 原文里没有重置时间
+    await planAcpQuota("a", "agent-x", GO_LIMIT, opts("zai/glm-5.3"), "Pi"); // 原文里没有重置时间
     t += 3 * 3_600_000 - 1;
     expect(await zai()).toBe(false);
     t += 1;
     expect(await zai()).toBe(true);
   });
 
-  test("Codex：几个模型都是同一个账号 → 只给等重置；重置时间取额度快照", async () => {
+  test("Codex：几个模型都是同一个账号 → 只给等重置并写明原因；id 不带前缀认不出是哪家，不套 Codex 快照的重置时间、不记撞墙", async () => {
     port(undefined);
     const codex = parseConfigOptions([{ id: "model", currentValue: "gpt-5.6-sol", options: [{ value: "gpt-5.6-sol" }, { value: "gpt-5.6-luna" }] }]);
-    const p = await planAcpQuota("ch", { kind: "quota", key: "air:x", message: "You've hit your usage limit." }, codex, "Codex");
-    expect(p.choices).toHaveLength(1);
-    expect(p.choices[0]!.label).toBe("等重置（10月22日 08:00）");
-    expect(p.context).toContain("没列：openai-codex 的另外 1 个模型（同一个账号 / 套餐");
-    expect(p.context).toContain("没有别的能用的模型，只能等重置。");
+    const p = await planAcpQuota("ch", "agent-x", { kind: "quota", key: "air:x", message: "You've hit your usage limit." }, codex, "Codex");
+    expect(p.choices).toEqual([{ value: null, label: "等重置（时间未知）" }]);
+    expect(p.context.split("\n").slice(0, 2)).toEqual([
+      "Codex 当前账号 额度到顶：You've hit your usage limit.；重置 未知", "只能等重置（同一个账号的另外 1 个模型也用不了）",
+    ]);
+    // 没记 openai-codex 的撞墙：快照没说到顶时，Pi 会话照样能列 openai-codex 的模型
+    useAcpQuotaPort({ now: () => NOW, codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined });
+    await planAcpQuota("c", "agent-x", { kind: "quota", key: "air:y", message: "429 GoUsageLimitError" }, codex, "Codex");
+    expect((await planAcpQuota("ch", "agent-x", GO_LIMIT, opts(), "Pi")).choices.map((c) => c.value)).toContain("openai-codex/gpt-5.6-sol");
+  });
+
+  test("Pi 上明写 openai-codex/… 的模型：确认是 Codex 账号，重置时间取额度快照", async () => {
+    port(undefined);
+    const p = await planAcpQuota("ch", "agent-x", { kind: "quota", key: "q", message: "usage limit" }, opts("openai-codex/gpt-5.6-sol"), "Pi");
+    expect(p.context.split("\n")[0]).toBe("openai-codex 额度到顶：usage limit；重置 10月22日 08:00");
+  });
+
+  test("on 档不对审查员 / 出借会话自动切：只出普通额度卡，第 3 行写原因", async () => {
+    for (const [name, role, why] of [["agent-rv-qwc-1", undefined, "审查会话"], ["agent-x", "reviewer", "审查会话"], ["agent-lend-abc", undefined, "出借会话"]] as const) {
+      useAcpQuotaPort({ now: () => NOW, codexQuota: async () => null, fallbackConfig: () => ({ mode: "on", chain: ["zai"] }), agentOf: async () => ({ name, role }) });
+      const p = await planAcpQuota("ch", name, GO_LIMIT, opts(), "Pi");
+      expect(p.autoSwitch).toBeNull();
+      expect(p.context.split("\n")[2]).toBe(`按备用链该切到 zai/glm-5.3，但${why}不自动切`);
+    }
   });
 
   test("额度快照读挂了：当不知道，照样出卡", async () => {
-    useAcpQuotaPort({ now: () => NOW, codexQuota: async () => { throw new Error("boom"); }, fallbackConfig: () => undefined, projectOf: async () => undefined });
-    const p = await planAcpQuota("ch", GO_LIMIT, opts(), "Pi");
+    useAcpQuotaPort({ now: () => NOW, codexQuota: async () => { throw new Error("boom"); }, fallbackConfig: () => undefined, agentOf: async () => undefined });
+    const p = await planAcpQuota("ch", "agent-x", GO_LIMIT, opts(), "Pi");
     expect(p.choices.map((c) => c.value)).toContain("openai-codex/gpt-5.6-sol");
   });
 });
