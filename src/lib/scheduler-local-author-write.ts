@@ -10,6 +10,7 @@ import { readRegistryAgentsSync } from "./registry.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { rebuildAgentName, rebuildAllowed } from "./scheduler-author-rebuild-proof.js";
+import { freshAuthorName } from "./lend-return-local.js";
 
 export function writeLocalAuthor(db: Database, ctx: WriteCtx, input: StepInput, opts: { registryPath?: string; configPath?: string } = {}) {
   const task = mustTask(db, input.pos[0]), intent = getIntent(db, input.pos[1]);
@@ -32,7 +33,9 @@ export function writeLocalAuthor(db: Database, ctx: WriteCtx, input: StepInput, 
     || task.rev !== Number(input.flags.rev) || String(task.extra.placement ?? "").startsWith("peer:")) {
     throw new LedgerError("conflict", "卡或自动调度配置已改变，不再补建本机执行者");
   }
-  const expectedName = rebuildAgentName(task.id, input.flags.replaces);
+  const rows = readRegistryAgentsSync(opts.registryPath), named = (name: string) => rows.find((r) => r.name === name);
+  const expectedName = input.flags.replaces === undefined && (family === "claude" || family === "codex") // LENDBACK1: past a stale same-name row
+    ? freshAuthorName(db, task, String(agent), named, family) : rebuildAgentName(task.id, input.flags.replaces);
   if ((family !== "claude" && family !== "codex") || !row?.sessionId || row.name !== expectedName || row.projectId !== task.project
     || (row.runtime === "codex" ? "codex" : "claude") !== family) {
     throw new LedgerError("invalid", "执行者会话、项目或本机运行时不符");

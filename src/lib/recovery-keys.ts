@@ -60,6 +60,7 @@ export const RECOVERY_KEYS = [
   "lendAuthorRebuild",
   "lendConfigFailure",
   "lendReclaimIntent",
+  "lendReturnLocal",
   "lendRuntimeCooldown",
   "lendUiShots",
   "lendUiUpload",

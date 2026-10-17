@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { answerPush, recordHello } from "../src/lib/ledger-lend-peers.js";
 import { claimLend, leaseLend, listLendOrders } from "../src/lib/ledger-lend.js";
@@ -10,6 +10,7 @@ import { planScheduler } from "../src/lib/scheduler-plan.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { createTask } from "../src/lib/ledger-write.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 async function ready(stage: "build" | "review", pinned = false) {
@@ -126,6 +127,8 @@ for (const stage of ["review", "build"] as const) test(`${stage}: real hello dis
 
 for (const prior of ["timeout", "claimed_return"] as const) {
   for (const newHello of [true, false]) test(`ADV-1/1c: pinned ${prior} then no_slot, new hello=${newHello}`, async () => {
+    // a not_started return keeps the pin only with LENDBACK1's lendReturnLocal off (on, it drops it: tests/lend-return-local.test.ts)
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { lendReturnLocal: "off" } } } }));
     const p = await ready("build", true);
     try {
       expect((await p.tick()).cards[0].step).toBe("pool_pooled");
@@ -165,7 +168,7 @@ for (const prior of ["timeout", "claimed_return"] as const) {
       expect((await p.tick()).cards[0].step).toBe("pool_pooled");
       expect(p.orders()).toHaveLength(3);
       expect(getWriteLease(p.f.db, "T1")?.state).toBe("held");
-    } finally { p.f.close(); }
+    } finally { p.f.close(); rmSync(RECOVERY_POLICY_PATH, { force: true }); }
   });
 }
 
