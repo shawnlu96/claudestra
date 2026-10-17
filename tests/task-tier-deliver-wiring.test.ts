@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { closeLedger, getTask, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, deliver, moveStage, setMeta } from "../src/lib/ledger-write.js";
+import type { WorkflowTemplate } from "../src/lib/ledger-scheduler.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { gitDiffFiles, resetDocsTemplate, useDeliveredFilesPort } from "../src/lib/task-tier-docs-template.js";
 import { useTaskTierPort } from "../src/lib/task-tier-models.js";
 import { tierLaunchable } from "../src/lib/task-tier-spec.js";
@@ -36,14 +38,22 @@ function branch(name: string, change: () => void): string {
   return head;
 }
 
-/** 一张到了 build 的卡；template 写进 task_workflows（docs 写台账要 TIER3 迁移 CHECK，这里临时放开约束模拟） */
+/**
+ * 一张到了 build 的卡。code 卡经正式 setWorkflow 写流程；docs 卡的 task_workflows 行要等台账 CHECK 放开 docs（表迁移待 owner 拍板，
+ * ask_mvbt05km826d6fbe86），这里只为测交付门控本身临时放开约束插一行——不证明 docs 能正式开卡落库。
+ */
 function card(id: string, template: string, globs = GLOBS): string {
   const agent = `agent-${id.toLowerCase()}`;
   createTask(db, PM, { project: P, id, title: id, kind: "code", agent, pm: PM.actor, extra: { fileGlobs: globs } });
-  db.run("PRAGMA ignore_check_constraints = ON");
-  db.prepare(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
-    VALUES (?, ?, ?, 3, 'auto', 'claude', 'manual', 1, 0, 0)`).run(id, P, template);
-  db.run("PRAGMA ignore_check_constraints = OFF");
+  if (template === "docs") {
+    db.run("PRAGMA ignore_check_constraints = ON");
+    db.prepare(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
+      VALUES (?, ?, 'docs', 3, 'auto', 'claude', 'manual', 1, 0, 0)`).run(id, P);
+    db.run("PRAGMA ignore_check_constraints = OFF");
+  } else {
+    setWorkflow(db, PM, { taskId: id, taskRev: getTask(db, id)!.rev, template: template as WorkflowTemplate, templateVersion: 3, mode: "auto",
+      authorFamily: "claude", fallback: "退 PM 人工" });
+  }
   writeFileSync(join(dir, "tasks", `${id}.md`), `# ${id}\n模板：${template}\n\n## 背景\n`);
   moveStage(db, { actor: agent }, { taskId: id, from: "spec", to: "restate" });
   moveStage(db, PM, { taskId: id, from: "restate", to: "build" });
@@ -69,6 +79,7 @@ beforeEach(() => {
   setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: [PM.actor] });
   setMeta(db, { actor: "owner" }, { project: P, key: "docsDir", value: dir });
   diffReads = 0;
+  resetDocsTemplate(); // 同进程先跑的开卡测试可能已按缺省 on 挂上 docs（进程级）
   useDeliveredFilesPort((_db, _task, head) => (diffReads++, gitDiffFiles(repo, head)));
   mode("on");
 });
@@ -161,5 +172,55 @@ describe("[验收线 3] off：docs 卡暂停，原有模板不变；重新 on �
     mode("on");
     expect(send("D5", docsHead).row.stage).toBe("review");
     expect(tierLaunchable("docs")).toBe(true);
+  });
+});
+
+describe("[验收线 1、2、3] 冷启动的生产交付进程：只 import 台账模块、不手动注册，交付门控照样生效", () => {
+  /** 独立 bun 子进程只加载 ledger-store / ledger-write（与 `ledger deliver`、MCP deliver 同一入口），开关与仓库目录走真实状态文件 */
+  type Cold = { ok: boolean; stage?: string; code?: string; message?: string; launchable: boolean };
+  /** entry = 只 import 台账写入口（旁路进程）还是连同开卡入口一起（manager / bridge / scheduler 都静态加载 dag-tools-start.ts） */
+  function coldDeliver(id: string, head: string, policy: "on" | "off", entry: "ledger" | "start" = "start"): Cold {
+    const state = join(dir, "state");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "recovery-policy.json"), JSON.stringify({ projects: { [P]: { keys: { taskTierModels: policy } } } }));
+    writeFileSync(join(state, "scheduler.json"), JSON.stringify({ enabled: false, projects: { [P]: { maxActiveWorkers: 0, repoDir: repo, requiredChecks: ["check"] } } }));
+    const lib = join(import.meta.dir, "..", "src", "lib");
+    const script = join(dir, "cold.ts");
+    writeFileSync(script, `
+import { openLedger, LedgerError } from ${JSON.stringify(join(lib, "ledger-store.ts"))};
+import { deliver } from ${JSON.stringify(join(lib, "ledger-write.ts"))};
+import { tierLaunchable } from ${JSON.stringify(join(lib, "task-tier-spec.ts"))};
+${entry === "start" ? `import ${JSON.stringify(join(lib, "dag-tools-start.ts"))};` : ""}
+const db = openLedger(${JSON.stringify(join(dir, "ledger.sqlite"))});
+let out;
+const input = { taskId: ${JSON.stringify(id)}, headSHA: ${JSON.stringify(head)}, moveFrom: "build" };
+try { out = { ok: true, stage: deliver(db, { actor: ${JSON.stringify(`agent-${id.toLowerCase()}`)} }, input).row.stage }; }
+catch (e) { if (!(e instanceof LedgerError)) throw e; out = { ok: false, code: e.code, message: e.message }; }
+console.log(JSON.stringify({ ...out, launchable: tierLaunchable("docs") }));
+`);
+    closeLedger(join(dir, "ledger.sqlite"));
+    const r = Bun.spawnSync([process.execPath, script], { cwd: dir, stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(dir, "rt") } });
+    db = openLedger(join(dir, "ledger.sqlite"));
+    if (!r.success) throw new Error(`cold deliver crashed: ${r.stderr.toString()}`);
+    return JSON.parse(r.stdout.toString().trim().split("\n").pop()!);
+  }
+
+  test("on：docs 越界在冷进程里被拒（真实 git diff），合规交付推到 review；off：docs 暂停，code 卡照旧；不经开卡入口的旁路进程 docs 交付按无法证明拒", () => {
+    card("D8", "docs");
+    card("C8", "code", ["src/**"]);
+    const bad = branch("d8-bad", () => put("src/b.ts", "x\n"));
+    const good = branch("d8-good", () => put("docs/a.md", "a8\n"));
+    const codeHead = branch("c8", () => put("src/c.ts", "x\n"));
+    const refused = coldDeliver("D8", bad, "on");
+    expect(refused).toMatchObject({ ok: false, code: "invalid", launchable: true });
+    expect(refused.message).toContain("src/b.ts 不在本卡 fileGlobs");
+    expect(delivered("D8")).toEqual([]);
+    expect(coldDeliver("D8", good, "off")).toMatchObject({ ok: false, code: "invalid", message: expect.stringContaining("taskTierModels 是 off"), launchable: false });
+    expect(coldDeliver("C8", codeHead, "off")).toMatchObject({ ok: true, stage: "review" });
+    const side = coldDeliver("D8", good, "on", "ledger");
+    expect(side).toMatchObject({ ok: false, code: "invalid", message: expect.stringContaining("交付门控没装上"), launchable: false });
+    expect(coldDeliver("D8", good, "on")).toMatchObject({ ok: true, stage: "review", launchable: true });
+    expect(delivered("D8")).toHaveLength(1);
   });
 });

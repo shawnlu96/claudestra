@@ -2,10 +2,12 @@
  * docs 流程模板（TIER3e）：经 task-tier-spec.ts registerTierTemplate 注册，流程定义逐版取 code 的（同一份节点、对抗审查、跨家族），
  * 不另写流程；模型有效值完全由 task-tier-models.ts（TIER_DEFAULTS.docs + 表）给，这里不碰。文件范围钩子在 task-tier-docs-scope.ts。
  * 门控 = taskTierModels：syncDocsTemplate 按项目当前档位挂 / 摘——off 摘掉模板与钩子（开卡回到旧模板校验的「docs 还没有注册」拒绝），
- * on / observe 挂上（observe 下钩子只记会拒、放行，由 tierCheckGate 决定）。注册表是进程级的，以最近一次同步为准。
+ * on / observe 挂上（observe 下钩子只记会拒、放行，由 tierCheckGate 决定）。注册表是进程级的，以最近一次同步为准：
+ * 生产里开卡（dag-tools-start.ts preflightStart）与交付（task-tier-deliver-wiring.ts，冷进程懒加载本模块）各自先按本项目同步。
  * 加载即给真实交付入口装上交付门控与 docs 交付的实际 diff 读取（task-tier-deliver-wiring.ts installDeliverTierDeps；直接 import 会成环）。
  * tests/task-tier-docs-template.test.ts。
  */
+import { gitIn } from "./scheduler-ui-carry-proof.js";
 import { templateFor } from "./scheduler-template.js";
 import { installDeliverTierDeps, type DeliveredFiles } from "./task-tier-deliver-wiring.js";
 import { readRegistryAgentsSync } from "./registry.js";
@@ -13,7 +15,7 @@ import { readSchedulerConfig } from "./scheduler-config.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { taskTierMode, tierCheckGate, type TaskTierPort } from "./task-tier-models.js";
 import { docsDeliveryCheck, docsDispatchCheck } from "./task-tier-docs-scope.js";
-import { registerTierChecks, registerTierTemplate, type TierFlow } from "./task-tier-spec.js";
+import { registerTierChecks, registerTierTemplate, tierLaunchable, type TierFlow } from "./task-tier-spec.js";
 
 /** code 现有的每个版本原样借用（v2、v3）；code 以后加版本这里自动跟上 */
 export function docsFlows(): TierFlow[] {
@@ -33,6 +35,7 @@ let undo: (() => void) | null = null;
 export function syncDocsTemplate(project: string, p?: TaskTierPort): boolean {
   const { mode } = p ? taskTierMode(project, p) : taskTierMode(project);
   if (mode === "off") { resetDocsTemplate(); return false; }
+  if (undo && !tierLaunchable("docs")) resetDocsTemplate(); // 注册表被别处撤掉了：本模块的记录作废，重新挂
   if (!undo) {
     const flows = registerTierTemplate("docs", docsFlows());
     const checks = registerTierChecks({ dispatch: docsDispatchCheck, delivery: docsDeliveryCheck });
@@ -48,13 +51,8 @@ export function resetDocsTemplate(): void {
   u?.();
 }
 
-const GIT_TIMEOUT_MS = 15_000;
-
-function git(dir: string, args: string[]): string {
-  const r = Bun.spawnSync(["git", ...args], { cwd: dir, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: GIT_TIMEOUT_MS });
-  if (!r.success) throw new Error(`git ${args[0]} 失败（exit ${r.exitCode}）：${r.stderr.toString().trim().split("\n").pop()?.slice(0, 160) ?? ""}`);
-  return r.stdout.toString();
-}
+/** 经已登记的同步 git 读取口（scheduler-ui-carry-proof.ts gitIn：只读本地对象、非零退出 / 警告即抛），本模块自己不起进程 */
+const git = (dir: string, args: string[]): string => gitIn(dir)(...args).toString();
 
 /** dir 仓库里交付 head 相对基线（origin/main，没有就 main）的变更路径；head 对象不在本机先 fetch 这一个提交 */
 export function gitDiffFiles(dir: string, head: string): string[] {

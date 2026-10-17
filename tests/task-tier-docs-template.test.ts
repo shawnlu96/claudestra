@@ -129,3 +129,20 @@ describe("[验收线 3] off：不挂模板、不加事件，回到旧模板校�
     expect(workflowOf(await f.start("good", card("模板：docs")))).toEqual({ template: "docs", version: 3 });
   });
 });
+
+describe("[验收线 1、3] 生产开卡入口：preflightStart 自己按项目同步 docs，不靠测试手动注册", () => {
+  test("没调过 syncDocsTemplate：on 可开 docs 卡；off 回旧拒绝、摘掉注册；重新 on 可再开", async () => {
+    const f = fixture();
+    resetDocsTemplate();
+    mode("on");
+    expect(tierLaunchable("docs")).toBe(false);
+    const r = await f.start("good", card("模板：docs"));
+    expect(workflowOf(r)).toEqual({ template: "docs", version: 3 });
+    expect(tierLaunchable("docs")).toBe(true);
+    mode("off");
+    expect(await f.start("good", card("模板：docs"), "docs")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("docs 还没有注册流程模板") });
+    expect(tierLaunchable("docs")).toBe(false);
+    mode("on");
+    expect(workflowOf(await f.start("good", card("模板：docs")))).toEqual({ template: "docs", version: 3 });
+  });
+});

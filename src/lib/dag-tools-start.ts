@@ -19,6 +19,7 @@ import { canonicalTwinError } from "./registry.js";
 import { notePrivateStart, parseStartPlacement, PRIVATE_ONLY_PEER, privateStartMode, type StartPlacement } from "./scheduler-placement-start.js";
 import { latestTemplateVersion } from "./scheduler-template.js";
 import { tierCheckGate, tierStartTemplate } from "./task-tier-models.js";
+import { syncDocsTemplate } from "./task-tier-docs-template.js";
 import { isTaskTier, tierLaunchable, type TaskTier } from "./task-tier-spec.js";
 import { uiSpecGate } from "./spec-lint.js";
 import { observationGate } from "./spec-lint-observation.js";
@@ -192,6 +193,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   } catch (e) {
     return no("not_found", (e as Error).message);
   }
+  syncDocsTemplate(f.project); // TIER3e：按本项目 taskTierModels 挂 / 摘 docs 模板，再做模板校验
   try { requireSharedLedgerStart(f.id, args.key, () => args.taskId ?? cardNames(env.db, f, args.key).taskId); } catch (e) { return no("forbidden", (e as Error).message); }
   const want = parseStartPlacement(args.placement);
   if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
