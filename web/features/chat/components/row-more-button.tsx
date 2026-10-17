@@ -3,6 +3,7 @@
  * 会话行 / project 组头行尾的常显 ⋯（agents-ROWMORE1）：长按 / 右键之外看得见的同一个入口。
  * 点它走的就是那个 trigger 的 open（menu-gestures.ts），菜单状态、内容、动作全是原来那一套；
  * 坐标取按钮自身边界（键盘激活没有指针坐标）。事件不往外冒：不进会话、不折叠、不起拖拽 / 左滑。
+ * 注意：从这里按下再拖时 dragstart 落在可拖的行上、到不了本按钮，整行拖拽的拦截在行上（row-drag-origin.ts，agents-MOREDRAG1）。
  */
 import type { MouseEvent, SyntheticEvent } from "react";
 import { useT } from "@/lib/i18n";

@@ -1,4 +1,5 @@
 import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
+import { createSseResponse as handleEventsRequest } from "./bridge/sse-stream.js";
 import { deliverPmLocal, pmClientFor, setPmDeliveryClients } from "./bridge/local-api/project-pm-delivery.js";
 import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 /**
@@ -67,8 +68,8 @@ import * as fs from "fs/promises";
 // master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 // v2.6.0+ 多前端事件总线（设计 docs/design-multi-frontend.md §4）
-import { emitEvent, eventsQueryFilter, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus } from "./bridge/event-bus.js";
-import { markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
+import { emitEvent, forgetAgent, subscribeEvents, getAgentStatus } from "./bridge/event-bus.js";
+import { markChannelExternallyBusy, unmarkChannelExternallyBusy } from "./bridge/event-bus.js";
 // v2.7+ Claude Code agents 模式适配：中性会话清单 + bg job 清理 + 分身对账
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
@@ -462,14 +463,16 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
 }
 
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
-const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target)]; // 守门判定 / 隔离 / 放行中的同押后：target 没看到
+// 守门判定 / 隔离 / 放行中的同押后：target 没看到；没确认的插队也算（bridge/steer-insert.ts：别把 target 别的输出当成对插队方的答复）
+// exceptCaller = 显式视图：target 正在明确回给这个 caller，它自己的插队不挡精确取槽（投递成功才销账，见 exactPac 两处调用）
+const heldFromOf = (target: string, exceptCaller?: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target), ...insertUnseenFrom(target, exceptCaller)];
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
 const stillHeldFor = (target: string) => (r: { messageId?: string; callerChannelId: string }) => requestStillHeld(r, heldFromOf(target));
 const answerablePac = (target: string): PendingAgentCall | undefined => answerableUnmixed(pendingAgentCalls, target, stillHeldFor(target)); // 混了几个请求方的一轮不认
 /** target 明确答给 caller(回发 send_to_agent / reply 到 caller 的频道):精确取那一槽,请求还押着的不算 */
-const exactPac = (target: string, caller: string) => pendingAgentCalls.exact(target, caller, stillHeldFor(target));
+const exactPac = (target: string, caller: string) => pendingAgentCalls.exact(target, caller, (r) => requestStillHeld(r, heldFromOf(target, caller)));
 /** 好几个 caller 同时在等、target 又没指明答给谁:谁都不推,提醒它用 send_to_agent 分别回(同一批只提醒一次) */
 function nudgeAmbiguousCallers(cid: string): void {
   const amb = pendingAgentCalls.takeAmbiguity(cid, stillHeldFor(cid));
@@ -509,6 +512,7 @@ const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   notify: (pac, cid, body) => pushBackToCaller(pac, clients.get(cid)?.ws, pac.originalReplyChannel || cid, body, "agent_apierr", "notification"),
   takeApiErrorNotice: (cid) => pendingAgentCalls.takeApiErrorNotice(cid, stillHeldFor(cid)), waiting: (cid) => pendingAgentCalls.waiting(cid, stillHeldFor(cid)), rearmResume,
   markApiError: (cid, text, caller) => pendingAgentCalls.markApiError(cid, stillHeldFor(cid), text, caller), clearWithheld: (cid, pac) => pendingAgentCalls.clearWithheld(cid, pac),
+  clearApiError: (cid, caller) => pendingAgentCalls.clearApiError(cid, caller),
   unattributed: (cid, _t, n) => void (n.wall || quotaWall()?.active() || notifyMaster(unattributedNotice(agentLabelForChannel(cid), n))), // 闸内静默：出闸通知一次说清
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
@@ -580,7 +584,8 @@ import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
-import { agentMsgMustWait } from "./lib/turn-state.js"; import { configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
+import { agentMsgMustWait } from "./lib/turn-state.js"; import { afterInsertSend, configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
+import { dropInserts, insertIdsFrom, insertUnseenFrom, settleInsertReply } from "./bridge/steer-insert.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
@@ -891,7 +896,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   try {
     const ledgerHold = await inboundLedgerGate(env, clients.get(to.channelId)?.runtime, evAgent, content, meta, heldLocalMsgs); if (ledgerHold) return ledgerHold; // Pi / Codex 入站账
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
-    to.ws.send(JSON.stringify({ type: "message", content, meta }));
+    if (afterInsertSend(env, turn, to.ws.send(JSON.stringify({ type: "message", content, meta })), heldLocalMsgs)) return { envelope: env, outcome: { kind: "sent", note: "queued" } }; // 插队没送到：押回
     noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle", env.intent === "request" && !env.meta.skipInterAgentWatchdog); // 谁开的这一轮（stop-settle）
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inboundEventData(env, meta) }); // 入站镜像给网页（bridge/inbound-event.ts）
@@ -1061,6 +1066,7 @@ async function forwardReplyToAgentClaude(
   // 这条正是 target 在答复等它的 caller(直接 reply 到 caller 的频道,codex 常这么答):按答复送、带上 expecting,
   // 并消化回程——否则回程一直挂着,target 之后在自己频道随便说一句都会被当成答复再推一次
   const answering = exactPac(fromEndpoint.channelId, targetChannelId);
+  const insertSnap = insertIdsFrom(fromEndpoint.channelId, targetChannelId); // 投到了只销这几条插队账（await 期间新插进来的不动）
   const text = content.replace(/<@!?\d+>\s*/g, "").trim();
   const fwdEnv = withLocalAttachments({
     from: { kind: "local", agentName: fromAgentName, channelId: fromEndpoint.channelId, ws: fromEndpoint.ws },
@@ -1077,6 +1083,7 @@ async function forwardReplyToAgentClaude(
   const fwd = await deliver(fwdEnv);
   if (fwd.outcome.kind === "sent") {
     if (answering) pendingAgentCalls.consume(fromEndpoint.channelId, targetChannelId, answering);
+    settleInsertReply(fromEndpoint.channelId, insertSnap); // 明确回给插队方、投到了：插队确认（bridge/steer-insert.ts）
     lastMessageSource.set(targetChannelId, "agent");
     console.log(`📨 reply→别agent频道: ${fromAgentName || "?"} 的消息同时 forward 给 ${targetAgentName || targetChannelId} 的 claude`);
     recordMetric("reply_cross_agent_forward", { channelId: targetChannelId, meta: { from: fromAgentName || "" } });
@@ -2091,7 +2098,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               online: online(r.channelId),
               // v2.23+ 运行时：同 project 里可能既有 Claude Code agent 也有 Pi 会话，
               // 工具集不同（Pi 侧没有 Task/子代理），派活前该看得到
-              runtime: r.runtime === "pi" ? "pi" : "claude-code",
+              runtime: agentRuntime(r),
             }));
         const self = fromChannelId ? regs.find((r) => r.channelId === fromChannelId) : undefined; // 认不出的连接（manager 子进程）别撞上频道号为空的注册项，否则只拿到那一项的项目
         const myProj = self?.projectId ? projects.find((p) => p.id === self.projectId) : null;
@@ -2262,6 +2269,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
 
         // 发的正是在答复一个正在等我的 caller(target 回发 send_to_agent 给问它的人)→ 投出去之后那条回程算答完了
         const answering = fromChannelId ? exactPac(fromChannelId, target.channelId) : undefined;
+        const insertSnap = fromChannelId ? insertIdsFrom(fromChannelId, target.channelId) : []; // 投到了只销这几条插队账（await 期间新插进来的不动）
 
         // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
         // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
@@ -2299,6 +2307,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
 
         if (answering && fromChannelId) pendingAgentCalls.consume(fromChannelId, target.channelId, answering);
+        settleInsertReply(fromChannelId, insertSnap); // 明确回给插队方、投到了：插队确认（bridge/steer-insert.ts）
         recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, targetName, msg.text); // 投出去之后：PM 带 ask id 答了默认做法提问（不抛）
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");
@@ -2877,58 +2886,6 @@ async function handleHookRequest(req: Request): Promise<Response> {
   }
 }
 
-/**
- * v2.6.0+ GET /events —— 结构化事件流（SSE）。设计 §4.3。
- * ?agent=<name> / ?agents=a,b 过滤 agent；?since=<seq> 或 Last-Event-ID 断线补发。
- * 30s 心跳注释防代理超时。本机部署默认免鉴权（服务只绑 127.0.0.1，见下）。
- */
-function handleEventsRequest(req: Request, extraFilter?: EventFilter): Response {
-  const url = new URL(req.url);
-  const sinceParam = url.searchParams.get("since") ?? req.headers.get("Last-Event-ID");
-  const since = sinceParam !== null ? Number(sinceParam) : NaN;
-  const filter = eventsQueryFilter(url.searchParams, extraFilter);
-  let unsub: (() => void) | null = null;
-  let ping: ReturnType<typeof setInterval> | null = null;
-  const cleanup = () => {
-    unsub?.();
-    unsub = null;
-    if (ping) { clearInterval(ping); ping = null; }
-  };
-  const enc = new TextEncoder();
-  const stream = new ReadableStream({
-    start(controller) {
-      const send = (evt: { seq: number }) => {
-        try {
-          controller.enqueue(enc.encode(`id: ${evt.seq}\ndata: ${JSON.stringify(evt)}\n\n`));
-        } catch {
-          cleanup(); // controller 已关（客户端断开），停止推送
-        }
-      };
-      // 立即发首包注释：flush 响应头 + 重置 Bun 的连接空闲计时。
-      // Bun.serve 默认 HTTP idleTimeout ≈10s——不发任何字节的空闲 SSE 连接
-      // 会在 ~10s 被掐（实测 10.7s close），30s ping 根本活不到第一轮。
-      try { controller.enqueue(enc.encode(`: connected\n\n`)); } catch { cleanup(); }
-      if (Number.isFinite(since)) {
-        for (const evt of replayEventsSince(since, filter)) send(evt);
-      }
-      unsub = subscribeEvents(filter, send);
-      // ping 30s→5s：必须小于 Bun.serve 默认 idleTimeout（~10s），
-      // 否则事件间隙超过 10s 的订阅者会被静默断开（web 前端首当其冲）。
-      ping = setInterval(() => {
-        try { controller.enqueue(enc.encode(`: ping\n\n`)); } catch { cleanup(); }
-      }, 5_000);
-    },
-    cancel() { cleanup(); },
-  });
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-    },
-  });
-}
-
 // /api/v1 路由与鉴权：v2.9.2 起整体在 bridge/api-routes.ts。这里注入它需要的
 // bridge 运行时依赖（ws 会话表 / 统一投递 / 镜像 / typing / SSE 处理器）。
 initApiRoutes({
@@ -3054,7 +3011,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           });
         }
         const n = clearInterAgentPendingsForChannel(body.channelId) + dropPendingsForChannel(pendingReplies, pendingThreads, pendingInterAgentMsg, body.channelId);
-        dropHeldOnKill(heldLocalMsgs, body.channelId), turnCuts.forget(body.channelId); // 押给它的消息丢掉(ask 答复放回「待你处理」),打断 / 叫停记录也删
+        dropHeldOnKill(heldLocalMsgs, body.channelId), turnCuts.forget(body.channelId), dropInserts(body.channelId); // 押给它的消息丢掉(ask 答复放回「待你处理」),打断 / 叫停记录、插队确认账也删
         // agent 被永久 kill —— 顺手丢掉它在事件总线里的环形缓冲和回合态。
         // 那 500 条事件（含未截断的 assistant_text）不会再有人订阅，留着只是占内存，
         // 建了又删的 agent 会一路堆积。

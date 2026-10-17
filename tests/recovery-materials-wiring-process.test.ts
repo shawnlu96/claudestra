@@ -41,6 +41,9 @@ const FULL = n("上一轮审查报告原文：\n");
 const FINDINGS = [{ findingId: "race-1", family: "concurrency", severity: "P1", probe: "两进程同时写", description: "并发写丢数据" },
   { findingId: "api-2", family: "api", severity: "P2", probe: "返回值没校验", description: "调用方拿到 undefined", file: "src/lib/x.ts", line: 12 }];
 const LEND_CLI: Record<string, string> = { claim: "lend-claim", result: "lend-write" };
+// Memory preparation rechecks its own gates; material assertions still require an injection read per process/project.
+const materialCalls = (calls: string[]) => calls.filter(call => !call.endsWith(":memoryLendPrepare"))
+  .filter((call, i, all) => !call.endsWith(":memoryLendInjection") || all.indexOf(call) === i);
 
 /** 正式位置的薄包装：真 CFG 的全部导出原样转出；recoveryPolicy 记一行调用后原样交给真函数。`answer` 只给负例改写真结果。 */
 const wrapperSrc = (answer = "r") => `import { appendFileSync } from "node:fs";
@@ -197,7 +200,7 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
     const { out, pid } = await d.run(["ledger", "lend-offer", "T1"]);
     expect(out).toMatchObject({ ok: true, step: "fix" });
     expect(out.materialsDiag).toBeUndefined();
-    expect(d.calls().slice(before)).toEqual([`${pid} ${P}:materials`, `${pid} ${P}:memoryLendInjection`]);
+    expect(materialCalls(d.calls().slice(before))).toEqual([`${pid} ${P}:materials`, `${pid} ${P}:memoryLendInjection`]);
     const got = await claimFix(d, "T1");
     expect(got.text).not.toContain("ghp_");
     expect(got.inputs.some((s) => s.startsWith(FULL))).toBe(false);
@@ -258,7 +261,7 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
       const before = d.calls().length;
       const { out, pid } = await d.run(["ledger", "lend-offer", "T-corrupt"]);
       expect(out).toMatchObject({ ok: true, step: "fix" });
-      expect(d.calls().slice(before)).toEqual([`${pid} ${P}:materials`, `${pid} ${P}:memoryLendInjection`]);
+      expect(materialCalls(d.calls().slice(before))).toEqual([`${pid} ${P}:materials`, `${pid} ${P}:memoryLendInjection`]);
       const got = await claimFix(d, "T-corrupt");
       expect(got.inputs.some((s) => s.startsWith(FULL))).toBe(true);
       expect(got.text).not.toContain(LABEL);
@@ -305,7 +308,7 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
   test("build 单不读 materials 策略，交付只读 uiDelivery", async () => {
     const before = d.calls().length;
     await delivered(d, "T-build", P);
-    expect(d.calls().slice(before).map((call) => call.split(" ")[1])).toEqual([`${P}:memoryLendInjection`, `${P}:uiDelivery`]);
+    expect(materialCalls(d.calls().slice(before)).map((call) => call.split(" ")[1])).toEqual([`${P}:memoryLendInjection`, `${P}:taskTierModels`, `${P}:uiDelivery`]); // TIER3e：交付门控读一次 taskTierModels
   }, 60_000);
 });
 

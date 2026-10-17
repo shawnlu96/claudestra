@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { scopeWireProtected, type ScopeGrant } from "./ask-scope-registry.js";
+import { scopeRegistryVariant, scopeWireProtected, type ScopeGrant } from "./ask-scope-registry.js";
 import { scopeMatches } from "./ask-scope-auto-plan.js";
 import { recoveryKeysOrderProblem } from "./registry-order.js";
 import { inventoryGates, inventoryLines, parseInventory } from "./skip-effects-auto-scope-scan.js";
@@ -8,7 +8,7 @@ import { judgeCommandRegistry } from "./ask-scope-auto-commands.js";
 import { additions, codeLines, escapeRx, ownDefinition, scopeParser as parser, validModule, type ScopeProof } from "./ask-scope-auto-proof.js";
 
 function wireDiff(grant: ScopeGrant, base: string, head: string, proof: ScopeProof): string | null {
-  if (scopeWireProtected(grant.path)) return "权限闸文件不自动接线";
+  if (scopeWireProtected(grant.path) || scopeRegistryVariant(grant.path)) return "权限闸文件不自动接线";
   const added = additions(base, head), code = codeLines(head);
   if (!base || !added || added.length < 2 || added.length > 4 || !added.every((l) => code.has(l.line))) return "不是纯新增 import 一行 + 调用 ≤3 行";
   const imports = added.filter((l) => /^import /.test(l.text));

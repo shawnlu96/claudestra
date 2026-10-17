@@ -11,6 +11,8 @@ async function bridgeProbe() {
   const { classifyPromptError, failureEntry } = await import("../src/lib/acp/failures.ts");
   const { RpcError } = await import("../src/lib/acp/rpc.ts");
   const { onAcpFrame } = await import("../src/bridge/acp-link.ts");
+  // 额度卡不读本机的 Codex 额度快照 / config.json（那是 tests/acp-quota-plan.test.ts 的事），这里只验跨 watcher 的链路
+  (await import("../src/bridge/acp-quota.ts")).useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined });
   const { noteAcpChannel } = await import("../src/bridge/acp-state.ts");
   const { startWatching, stopWatching } = await import("../src/bridge/jsonl-watcher.ts");
   const { subscribeEvents, emitEvent } = await import("../src/bridge/event-bus.ts");
@@ -94,7 +96,8 @@ test("usageLimitExceeded / Quota depleted crosses ACP watcher, cancels old resum
     const ask = quota.storedAsks[0];
     expect(ask).toMatchObject({ state: "open", extra: { quota: true, acp: true, raw: "Quota depleted" } });
     expect(ask.answer).toBeNull();
-    expect(ask.options[0].buttons[0]).toMatchObject({ id: expect.stringMatching(/^acp_quota_[0-9a-f]{12}_0$/), label: "等重置" }); // 按钮带卡的代际（acp-link.ts）
+    expect(ask.options[0].buttons[0]).toMatchObject({ id: expect.stringMatching(/^acp_quota_[0-9a-f]{12}_0$/), label: expect.stringMatching(/^等重置/) }); // 按钮带卡的代际（acp-link.ts）
+    expect(ask.options[0].buttons).toHaveLength(1); // current / other 都是 Codex 一家：同一个账号，不列
     expect(ask.options[0].buttons.every((b: any) => !b.selected && !b.default)).toBe(true);
     expect(result.sent).toEqual([]); // No model switch, answer or automatic choice was sent.
     expect(result.stopFailures).toEqual(["local-tmux-control"]); // ACP failures are settled only by their host.

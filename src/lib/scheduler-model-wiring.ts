@@ -23,7 +23,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
-import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
+import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { getIntent } from "./ledger-scheduler.js";
 import { appendEvent, type WriteCtx } from "./ledger-write.js";
@@ -40,10 +40,14 @@ import { beginRefusalEpoch } from "./scheduler-sessions.js";
 import { classifyModelOutcome, modelOutcomePolicy, type OutcomeInput, type OutcomeRecord, type OutcomeSignal, type RecoveryPolicyPort } from "./scheduler-model-outcome.js";
 import type { SessionRef, WorkerObservation } from "./worker-session.js";
 import { getWorkflow } from "./ledger-scheduler.js";
+import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { preserveSessionHistory } from "./scheduler-sessions.js";
 import { approvalLapse, EXEMPT_OP, openSafetyHold, RETRY_OP, swapKey } from "./scheduler-review-swap.js";
 import { cfgReaderPath } from "./recovery-materials-wiring.js" with { type: "macro" };
 import type { PmNoticeLevel } from "./pm-notice-level.js";
+import type { RecoveryPolicyPort as FullPolicyPort } from "./recovery-policy.js";
+import { cleanCreateReceipt } from "./scheduler-create-retry.js";
+import { writeReviewFallback, type ReviewFallbackResult } from "./scheduler-recovery-write.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /** The slice of the auto tick's Card this step reads; structural so auto-tick keeps Card private. db is read-only in production. */
@@ -121,13 +125,33 @@ async function ledgerWrite(card: ModelWiringCard, args: string[]): Promise<Wrote
 const atomic = <T>(db: Database, fn: () => T): T => db.transaction(fn).immediate();
 
 /** PM notices of an unavailable write that could not be recorded either: once per process, ledger file, card and kind. */
-const toldInMemory = new Set<string>();
+const toldInMemory = new Map<string, { file: string; taskId: string }>();
+/**
+ * MAPSWEEP1: at most once per WIRING_SWEEP_MS per ledger file (at the next unavailable write), a card that is terminal or gone
+ * drops its entries: it gets no more passes, so its notice is never due again. Point reads of the remembered cards only.
+ */
+export const WIRING_SWEEP_MS = 10 * 60_000;
+const sweptAt = new Map<string, number>();
+function sweepTold(card: ModelWiringCard): void {
+  const file = card.db.filename, now = card.deps.now();
+  if (now - (sweptAt.get(file) ?? -Infinity) < WIRING_SWEEP_MS) return;
+  sweptAt.set(file, now);
+  for (const [mem, e] of toldInMemory) {
+    if (e.file !== file) continue;
+    let task: LedgerTask | null;
+    try { task = getTask(card.db, e.taskId); } catch { continue; }
+    if (!task || TERMINAL_STAGES.includes(task.stage)) toldInMemory.delete(mem);
+  }
+}
+/** Tests only: entries held for this ledger file. */
+export const wiringToldSize = (file: string): number => [...toldInMemory.values()].filter((e) => e.file === file).length;
 /**
  * A write failed: one stderr line, then once per card and kind a ledger note (dedup unavailableKey) and a PM notice saying the
  * refusal continuation is unavailable on this card. The note decides "once"; when it cannot be written either, memory does.
  */
 async function unavailable(card: ModelWiringCard, what: WiringWrite, error: string, line = ""): Promise<void> {
   const id = card.task.id, label = WRITE_LABEL[what];
+  sweepTold(card);
   diag(line ? `${id} ${line}：${error}` : `${id} ${label}没记上（拒审接续在本卡不可用）：${error}`);
   const key = unavailableKey(id, what), text = `[调度引擎] ${id} 拒审接续在本卡不可用：${label}没写进台账（${flat(error).slice(0, 200)}）；` +
     "本卡遇到策略拒审会照旧退人工，请查 scheduler.err 与台账写口";
@@ -137,7 +161,7 @@ async function unavailable(card: ModelWiringCard, what: WiringWrite, error: stri
   const first = rec.ok ? rec.r.duplicate !== true && !toldInMemory.has(mem) : !toldInMemory.has(mem);
   if (!rec.ok) diag(`${id} 「拒审接续不可用」也没记进台账（改为直接通知 PM）：${rec.error}`);
   if (!first) return;
-  toldInMemory.add(mem);
+  toldInMemory.set(mem, { file: card.db.filename, taskId: id });
   try { await card.deps.notifyPm(card.task, text, "action"); } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     diag(`${id} 「拒审接续不可用」通知 PM 没发出去（台账${rec.ok ? "已记" : "也没记上"}）：${e instanceof Error ? e.message : String(e)}`);
@@ -151,14 +175,52 @@ export interface OutcomeWrite { intentId: string; failure: Failure; failed: Plac
  * Writer side of `ledger scheduler-model-outcome`: MODEL's record with CFG's policy and REFA's approval port (both read now, in
  * the writer's process), the ticket's frozen-snapshot digest re-read here; recordModelOutcome re-checks inside its transaction.
  */
-export async function writeModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeWrite): Promise<OutcomeRecord> {
+export async function writeModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeWrite): Promise<OutcomeRecord & { fallback?: ReviewFallbackResult }> {
   const sent = getIntent(db, input.intentId), task = sent && getTask(db, sent.taskId);
   const policy = await loadPolicy();
+  if (sent?.action === "ensure_session") return { kind: "none", reason: "建会话意图只判审查降级，不记模型结果", fallback: await fallbackOnce(db, ctx, input, policy) };
   const ports = createRecoveryRuntimePorts({ ...(policy ? { policy } : {}), refusalApproval: createRefusalApprovalPort(db),
     onDiag: (d) => diag(`${sent?.taskId ?? input.intentId} ${d.mechanism}：${d.reason}`) });
   const review = input.review && sent && task ? { sessionId: input.review.sessionId, materialDigest: reviewMaterialDigest(db)(task, sent) } : undefined;
-  return ports.recordModelOutcome(db, ctx, { intentId: input.intentId, signal: { failure: input.failure }, failed: input.failed,
+  // RVF-1 first: a round that fell back goes on, so MODEL's escalation (pushed to PM under on) is never written for it
+  const fallback = await fallbackOnce(db, ctx, input, policy);
+  if (fallback.outcome === "acted") return { kind: "none", reason: "已降级同族对抗审查，卡继续，不记升级", fallback };
+  const record = ports.recordModelOutcome(db, ctx, { intentId: input.intentId, signal: { failure: input.failure }, failed: input.failed,
     authorized: input.authorized, ended: true, ...(review ? { review } : {}) });
+  return { ...record, fallback };
+}
+
+/** RVF-1: the reviewer fallback, under its own switch (reviewFallback); a failure of it falls through to MODEL's record as before. */
+async function fallbackOnce(db: Database, ctx: WriteCtx, input: OutcomeWrite, policy: RecoveryPolicyPort | undefined): Promise<ReviewFallbackResult> {
+  try {
+    return await writeReviewFallback(db, ctx, { intentId: input.intentId, failure: input.failure, failed: input.failed, authorized: input.authorized,
+      ...(input.review ? { sessionId: input.review.sessionId } : {}) }, policy as FullPolicyPort | undefined);
+  } catch (e) {
+    const reason = `审查降级没执行：${e instanceof Error ? e.message : String(e)}`.slice(0, 400);
+    diag(`${input.intentId} ${reason}`);
+    return { outcome: "skipped", reason };
+  }
+}
+
+/** The epoch the fallback wrote (or found), as the tick reports it; null = no fallback ran. */
+const fallbackText = (r: { fallback?: ReviewFallbackResult } | undefined): string | null =>
+  r?.fallback?.outcome === "acted" ? `${r.fallback.event.text}（台账 #${r.fallback.event.seq}${r.fallback.duplicate ? "，已执行过" : ""}）` : null;
+
+/**
+ * RVF-1, from the auto tick: a reviewer ensure_session that failed and cleaned up (already settled cancelled with that receipt).
+ * The writer re-reads the receipt and the streak (quota → at once, otherwise CREATE_FAIL_LIMIT in a row); answers the epoch's text,
+ * or null = no fallback (the card backs off and retries as before).
+ */
+export async function ensureFallbackStep(card: ModelWiringCard, intent: SchedulerIntent, tried?: AuthorFamily): Promise<string | null> {
+  const wrote = remoteHeadFamily(card.db, card.task) ?? getWorkflow(card.db, card.task.id)?.authorFamily; // a swap replacement's family: across from it
+  const family = tried ?? (wrote === "claude" ? "codex" : "claude");
+  const failed = { family, machine: "local" }, receipt = getIntent(card.db, intent.id)?.receipt;
+  if (intent.node !== "adversarial_review" || !cleanCreateReceipt(receipt)) return null;
+  const input: OutcomeWrite = { intentId: intent.id, failure: { kind: "error", message: receipt!.slice(0, 4000) },
+    failed: { ...failed, agent: intent.recipient ?? "（未建）" }, authorized: authorizedFor(card, failed) };
+  const got = await ledgerWrite(card, ["scheduler-model-outcome", intent.id, "--data", JSON.stringify(input)]);
+  if (!got.ok) { diag(`${card.task.id} 建会话失败后的审查降级没记上：${got.error}`); return null; }
+  return fallbackText(got.r.record as { fallback?: ReviewFallbackResult });
 }
 
 /**
@@ -166,7 +228,7 @@ export async function writeModelOutcome(db: Database, ctx: WriteCtx, input: Outc
  * refusal continuation ran and the card goes on without escalating. Under on, a redispatch plan is named as pending; a safety
  * refusal informs the owner once per card and kind. Every write goes through the ledger CLI (the service's handle is read-only).
  */
-export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerIntent, ref: SessionRef, failure: Failure): Promise<string | { epoch: string }> {
+export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerIntent, ref: SessionRef, failure: Failure): Promise<string | { epoch: string; fallback?: true }> {
   const failed = { family: ref.family, machine: machineOf(ref) }, authorized = authorizedFor(card, failed);
   const input: OutcomeWrite = { intentId: sent.id, failure, failed: { ...failed, agent: ref.agent }, authorized,
     ...(ref.role === "reviewer" ? { review: { sessionId: ref.sessionId } } : {}) };
@@ -175,7 +237,9 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
     await unavailable(card, "outcome", got.error, `意图 ${sent.id} 记模型结果失败，照旧退人工`);
     return "";
   }
-  const r = got.r.record as OutcomeRecord;
+  const r = got.r.record as OutcomeRecord & { fallback?: ReviewFallbackResult };
+  const fell = fallbackText(r); // RVF-1: the round went to a same-family adversarial reviewer, the card is not escalated
+  if (fell) return { epoch: fell, fallback: true };
   if (r.kind === "off") { if (r.diag) diag(`${card.task.id} 模型结果按 off：${r.diag}`); return ""; }
   if (r.kind !== "recorded" || r.mode !== "on") return "";
   const p = r.plan;

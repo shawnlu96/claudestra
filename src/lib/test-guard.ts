@@ -7,7 +7,7 @@
  * 与 agent 会话都不带 NODE_ENV（T45 PR 里有实测），没有标记时这里全是空操作。
  * 剩余风险：bun test 不覆盖外部预设的 NODE_ENV——不经 preload、又带着 NODE_ENV=development 之类跑时，两条都认不出，闸不生效。
  */
-import { mkdtempSync } from "fs";
+import { lstatSync, mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { basename, dirname, join } from "path";
 import { REPO_ROOT } from "./repo-root.js";
@@ -107,6 +107,62 @@ export function testSafeRuntimeDir(dir: string, defaultDir: string, env: Env = p
   if (safe(dir) && (!named || safe(named))) return dir;
   return redirectToTemp("RUNTIME_DIR", "rt", dir, env, Boolean(named));
 }
+
+/** 与 tests/test-tmp-root.ts 的 PREFIX 同值：那边的过期清扫按这个前缀 + 属主 pid 认领，兜底建的根也归它清 */
+const TEST_RUN_ROOT_PREFIX = "cstra-test-run-";
+
+/**
+ * 看门子进程：stdin 管道的写端只在 runner 里（CLOEXEC，测试起的子孙进程拿不到），runner 不管正常结束、抛错还是被杀，
+ * 内核都会关掉它，子进程读到 EOF 就删根。删前核对根仍是原父目录下同一个前缀目录（不是软链、dev/ino 没变），
+ * 与 tests/test-tmp-root.ts 的 removeRoot 同一套属主检查；忽略 SIGINT/SIGHUP，免得 Ctrl-C 连它一起杀掉、根留下。
+ * unref：不拖住 runner 退出。删根比 runner 退出晚几毫秒，scripts/test-tmp-leak.ts 查之前会等属主已退出的根消失。
+ */
+const REAPER = `for (const s of ["SIGINT", "SIGHUP"]) process.on(s, () => {});
+const fs = require("fs"), path = require("path");
+const [root, parent, dev, ino] = process.argv.slice(-4);
+await Bun.stdin.text();
+try {
+  const st = fs.lstatSync(root);
+  const owned = path.dirname(root) === parent && path.basename(root).startsWith(${JSON.stringify(TEST_RUN_ROOT_PREFIX)})
+    && st.isDirectory() && !st.isSymbolicLink() && String(st.dev) === dev && String(st.ino) === ino && fs.realpathSync(root) === root;
+  if (owned) fs.rmSync(root, { recursive: true, force: true, maxRetries: 2, retryDelay: 10 });
+  else console.error("[test-guard] 兜底根 " + root + " 已被替换，不删");
+} catch (e) {
+  if (e.code !== "ENOENT") console.error("[test-guard] 兜底根 " + root + " 没删掉：" + e);
+}`;
+
+function reapOnExit(root: string): void {
+  const { dev, ino } = lstatSync(root);
+  const reaper = Bun.spawn([process.execPath, "-e", REAPER, root, dirname(root), String(dev), String(ino)], {
+    stdin: "pipe", stdout: "ignore", stderr: "inherit", cwd: dirname(root), env: { PATH: process.env.PATH },
+  });
+  reaper.unref();
+}
+
+/**
+ * 没加载 tests/preload.ts 的 bun test 进程（仓库外 cwd、绝对路径、--config=/dev/null 跑）也把 TMPDIR 换成运行临时根
+ * （merge-arch-TMPLEAK2）：否则 recovery-* / ledger-* 之类用例自己 mkdtemp(tmpdir()) 的目录和本文件的 cstra-test-state/rt-、
+ * state-maintenance 的 cstra-test-maint- 全落在系统临时目录顶层、没人删（实测一次 68 个文件就留下 650 多个）。
+ * 做法同 tests/test-tmp-root.ts 的 installTestTmpRoot（src 不许依赖 tests/，只抄建根与子进程继承两步）：只管 runner 本身，
+ * preload 先装好根（tmpdir() 已在 cstra-test-run-* 里）、或继承了根的子进程都跳过；子进程显式给的 TMPDIR 照旧。
+ * runner 收尾不发 exit 事件、库里注册的 afterAll 只绑第一个文件，所以删根交给 reapOnExit 的看门子进程。
+ */
+function installFallbackTestTmpRoot(env: Env = process.env): void {
+  const runner = /\.test\.[cm]?[jt]sx?$/.test((globalThis as { Bun?: { main?: string } }).Bun?.main ?? "");
+  if (!runner || !isTestProcess(env) || canonical(tmpdir()).split("/").some((s) => s.startsWith(TEST_RUN_ROOT_PREFIX))) return;
+  const root = mkdtempSync(join(canonical(tmpdir()), `${TEST_RUN_ROOT_PREFIX}${process.pid}-`));
+  reapOnExit(root);
+  for (const key of ["TMPDIR", "TMP", "TEMP"]) env[key] = root;
+  // Bun 不传 env 起的子进程用启动时的环境，补上当前的（同 tests/test-tmp-root.ts 的 inheritEnv）
+  const inherit = <T extends (...args: any[]) => any>(launch: T): T => ((command: string[] | { env?: Env }, options?: { env?: Env }) => {
+    const config = Array.isArray(command) ? options : command;
+    const inherited = { ...config, env: config?.env ?? process.env };
+    return Array.isArray(command) ? launch(command, inherited) : launch(inherited);
+  }) as T;
+  Bun.spawn = inherit(Bun.spawn);
+  Bun.spawnSync = inherit(Bun.spawnSync);
+}
+installFallbackTestTmpRoot();
 
 /** 只由 tests/isolated-state.ts 设在独立状态目录的 bun test 子进程 env 里：必须走默认出借 journal 的用例（路由 / pushWork）在那里跑 */
 export const DEFAULT_LEND_JOURNAL_OK = "CLAUDESTRA_TEST_DEFAULT_LEND_JOURNAL";

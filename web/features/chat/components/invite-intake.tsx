@@ -8,7 +8,7 @@
  * 3. 在任何地方粘贴带邀请的文字 → 不当成普通文字，直接弹加入确认。
  * 加入 peer（/peers/*）要全权凭据：guest、部分 scope 的设备整个不挂，粘贴也不拦。
  */
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
 import { isNativeShell } from "@/lib/native";
@@ -17,6 +17,7 @@ import { JoinConfirm } from "./peers-join-confirm";
 import { decodeInvite, findInviteCode } from "../invite-link";
 import { firstSeen, INVITE_PROTOCOL, setHandlerState, shouldAskHandler } from "../invite-intake";
 import { useFullScope } from "../contacts-data";
+import { PHONE_NAV_H } from "@/features/nav/phone-nav";
 
 const noopSubscribe = () => () => {};
 const handlerSupported = () => "registerProtocolHandler" in navigator && !isNativeShell();
@@ -80,7 +81,10 @@ function Intake() {
   return createPortal(
     <>
       {(ask || found) && (
-        <div className="fixed bottom-[max(env(safe-area-inset-bottom),16px)] left-1/2 z-[60] w-[min(92vw,420px)] -translate-x-1/2 space-y-2">
+        // The body portal cannot inherit the nav height set on aside; use the same safe-area-inclusive constant.
+        <div style={{ "--cstra-phone-nav-h": PHONE_NAV_H } as CSSProperties}
+          className={`pointer-events-none fixed bottom-[calc(var(--cstra-phone-nav-h)+16px)] sm:bottom-[max(env(safe-area-inset-bottom),16px)]
+            left-1/2 z-[60] w-[min(92vw,420px)] -translate-x-1/2 space-y-2`}>
           {found && (
             <Toast text={t("检测到 {name} 的协作邀请", { name: name ?? "" })} primary={t("查看")} onPrimary={() => { setOpen(found); setFound(null); }} onClose={() => setFound(null)} />
           )}
@@ -109,7 +113,7 @@ function Intake() {
 
 function Toast({ text, primary, onPrimary, secondary, onClose }: { text: string; primary: string; onPrimary: () => void; secondary?: string; onClose: () => void }) {
   return (
-    <div className="flex items-center gap-2 rounded-xl border border-base-300 bg-base-100 px-3 py-2.5 text-[12.5px] shadow-lg">
+    <div className="pointer-events-auto flex items-center gap-2 rounded-xl border border-base-300 bg-base-100 px-3 py-2.5 text-[12.5px] shadow-lg">
       <span className="min-w-0 flex-1 leading-snug">{text}</span>
       <button className="btn btn-primary btn-xs" onClick={onPrimary}>{primary}</button>
       <button className="btn btn-ghost btn-xs" onClick={onClose}>{secondary ?? "✕"}</button>

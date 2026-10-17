@@ -2,7 +2,7 @@
 import type { Database } from "bun:sqlite";
 import { configuredAgentLimits, poolAuthorRuntime } from "./scheduler-agent-pool-runtime.js";
 import { cardRoleCreate } from "./card-role-definitions.js";
-import { existsSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -22,6 +22,8 @@ import { handoverRuntime } from "./recovery-peer-lease-runtime.js";
 import type { Rebuild } from "./scheduler-author-rebuild-checkout.js";
 import { lendAuthorCheckout } from "./lend-author-retire-checkout.js";
 import type { EnsureResult } from "./worker-session.js";
+import { bindTierSession, taskTierMode, type TierLaunchCtx } from "./task-tier-models.js";
+import { freshAuthorPlan, lendReturnLocalMode, plannedAuthorFamily } from "./lend-return-local.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface LocalAuthorEnv {
@@ -79,8 +81,12 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
   const intent = claimed(env, task, rebuild?.replaces);
   if (!intent) return { kind: "wait", reason: "作者建会话意图已改变，下一轮重算" };
   const policy = readSchedulerConfig(opts.configPath).projects[task.project], made: { agent?: string } = {}; // made: AREB1 Created
+  const back = !rebuild && lendReturnLocalMode(task.project) === "on"; // LENDBACK1 (lend-return-local.ts)
   const family = rebuild?.family ?? handoverRuntime(env.db, task) // PEERLEASE1: the handover's frozen runtime, on only
+    ?? (back ? plannedAuthorFamily(env.db, task, intent) : null) // the planner's family fixed by the delivered head: wait for its seat
     ?? (policy?.agents ? poolAuthorRuntime(task.project, policy.agents, env.db.filename) : localAuthorRuntime(task.project, opts.configPath));
+  const fresh = back ? await freshAuthorPlan(env.db, task.id, p, family, env.registryRow, env.git) : null; // a stale row's name and checkout
+  if (fresh) p = fresh; // the writer walks the same names (freshAuthorName)
   const guard = () => {
     env.active();
     if (claimed(env, task, rebuild?.replaces)?.id !== intent.id) throw new Error("卡或建会话意图已改变，停止本次创建");
@@ -95,7 +101,7 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
     const failure = (await checkout(env, p, guard, rebuild)) ?? (await rebuild?.ready(p, guard)); // AREB1: swap and PR head again right before create
     if (failure) return typeof failure === "string" ? { kind: "unknown", reason: failure } : failure;
     const flags = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
-    const r = await whileOwned(guard, () => { made.agent = p.agent; return cardRoleCreate(localCreateGuard(env.create))("create", p.agentName, p.worktree,
+    const r = await whileOwned(guard, () => { made.agent = p.agent; return cardRoleCreate(localCreateGuard(env.create), tierOpts(env, task, p))("create", p.agentName, p.worktree,
       "--purpose", p.purpose, "--task", p.taskId, "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project, ...flags); });
     if (r.code === "lease-lost") throw new SchedulerStopped(String(r.error));
     if (r.ok !== true) return { kind: "unknown", reason: `建 ${p.agent} 结果不明：${String(r.error ?? "")}` };
@@ -111,6 +117,7 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
           ...(rebuild?.replaces ? [`--replaces=${rebuild.replaces}`] : [])));
         if (saved.code === "lease-lost") throw new SchedulerStopped(String(saved.error));
         if (saved.ok !== true) return { kind: "unknown", reason: `本机会话已建，写回执行者失败：${String(saved.error)}` };
+        bindTierSession(env.db, task, row.name, row.sessionId, "author");
         return { kind: "ready", created: true, ref: { taskId: task.id, role: "author", agent: row.name, sessionId: row.sessionId,
           family, transport: row.transport === "acp" ? "acp" : "tmux" } };
       }
@@ -120,6 +127,20 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
   };
   const slotOpts = { ...opts, registryPath: env.registryPath ?? opts.registryPath, ledgerPath: env.db.filename, project: task.project, taskId: task.id, family };
   return family === "codex" || configuredAgentLimits(slotOpts) ? withCodexSlot(create, { ...slotOpts, checkQuota: true }) : create();
+}
+
+/**
+ * TIER3：作者的类型上下文——卡上存的流程模板与规格版本、现在的规格卡（启动核对）、argv 自带的 --effort high 是原档。
+ * taskTierModels off：不给上下文、不读规格卡，整段走旧角色路径。
+ */
+function tierOpts(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan): { tier?: TierLaunchCtx } {
+  if (taskTierMode(task.project).mode === "off") return {};
+  const w = getWorkflow(env.db, task.id);
+  let specText: string | null = p.specText;
+  if (specText === null) {
+    try { specText = readFileSync(p.specPath, "utf8"); } catch { specText = null; /* 读不到规格卡就只认已存流程（tierAtLaunch 的约定），不挡建会话 */ }
+  }
+  return { tier: { db: env.db, project: task.project, card: task.id, tier: w?.template ?? "code", specText, specRev: w?.specRev, round: task.round, baseEffort: "high" } };
 }
 
 export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, opts: LocalStartOptions = {}, rebuild?: Rebuild): Promise<EnsureResult> {

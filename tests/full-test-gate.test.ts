@@ -2,15 +2,15 @@
 // 真实并发与信号在 tests/full-test-gate-run.test.ts。一律用临时 HOME / 临时闸目录，不写真实宿主闸。
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyBunArgv, classifyTestArgs, readOwnArgv } from "../src/lib/full-test-gate-args.ts";
 import {
   approvalVerifier, fullTestGateDir, permitConfig, policyPath, readGatePolicy, writeGatePolicy, type GatePolicy,
 } from "../src/lib/full-test-gate-policy.ts";
-import { observeTree, readPermitEntries, runLogPath } from "../src/lib/full-test-gate.ts";
-import { identify, liveTree, scanProcesses, type Proc, type TreeRoot } from "../src/lib/full-test-gate-tree.ts";
+import { observeTree, readPermitEntries, runFullTestGate, runLogPath } from "../src/lib/full-test-gate.ts";
+import { currentBoot, identify, liveTree, scanProcesses, type Proc, type TreeRoot } from "../src/lib/full-test-gate-tree.ts";
 import { lendCheckPermit } from "../src/lib/lend-check-permit.ts";
 
 const ROOT = join(import.meta.dir, "..");
@@ -104,6 +104,8 @@ describe("进程树观察（进程组 + 脱组后代）", () => {
     writeTree("t", running({ pgid: 100, start: "s100", uniq: null, ver: null, uid: null, members: [] }));
     expect(observeTree(root, "t", () => null)).toBe("unknown");
     expect(observeTree(root, "t", () => [proc(7)])).toBe("absent");
+    // 上一次快照里组 100 已空、键被剪掉；组没了不会再回来，下一张独立快照重新登记
+    writeTree("t", running({ pgid: 100, start: "s100", uniq: null, ver: null, uid: null, members: [] }));
     expect(observeTree(root, "t", () => [proc(7), proc(101, { pgid: 100 })])).toBe("present");
   });
 
@@ -162,6 +164,8 @@ describe("进程树观察（进程组 + 脱组后代）", () => {
       pgids: [100, 200], sids: [100, 200], quietAt: Date.now() - 61_000 };
     writeTree("keys", running(tree));
     expect(observeTree(root, "keys", () => [proc(301, { pgid: 200 })])).toBe("present");
+    // 上一张快照里没有会话 200 的进程、sid 键已剪掉（会话没了不会再回来）；sid 一路用独立快照重新登记
+    writeTree("keys", running(tree));
     expect(observeTree(root, "keys", () => [proc(302, { sid: 200 })])).toBe("present");
     // 回收者也要落盘新发现的成员：随后该成员换组、换会话仍按身份追踪，不按宽限过期。
     expect(observeTree(root, "keys", () => [proc(302, { pgid: 999, sid: 999 })])).toBe("present");
@@ -281,12 +285,78 @@ describe("test:gate 命令", () => {
     expect(existsSync(policyPath(fullTestGateDir(home)))).toBe(false);
     expect((await gate("set", "on", "--max", "2", "--source", "ask_1")).code).toBe(0);
     expect(JSON.parse(readFileSync(policyPath(fullTestGateDir(home)), "utf8"))).toEqual({ mode: "on", max: 2, source: "ask_1" });
+    // 切到 observe 不沿用旧 source（显式给 --source 才写）；max 等照旧沿用
     expect((await gate("set", "observe", "--max-wait-min", "30")).code).toBe(0);
-    expect(readGatePolicy(fullTestGateDir(home))).toMatchObject({ mode: "observe", max: 2, maxWaitMin: 30, source: "ask_1" });
+    expect(readGatePolicy(fullTestGateDir(home))).toMatchObject({ mode: "observe", max: 2, maxWaitMin: 30, source: null });
     expect((await gate("set", "on", "--max", "0", "--source", "x")).code).toBe(2);
     const status = await gate("status");
     expect(status.code).toBe(0);
-    expect(status.out).toContain("生效策略：mode=observe max=2 maxWaitMin=30 source=ask_1");
+    expect(status.out).toContain("生效策略：mode=observe max=2 maxWaitMin=30 source=-");
+    expect((await gate("set", "observe", "--source", "ask_2")).code).toBe(0);
+    expect(readGatePolicy(fullTestGateDir(home)).source).toBe("ask_2");
+    expect((await gate("set", "on")).code).toBe(0); // on 沿用原 source
+    expect(readGatePolicy(fullTestGateDir(home))).toMatchObject({ mode: "on", source: "ask_2" });
     expect(existsSync(join(root, "elsewhere"))).toBe(false);
+  }, 30_000);
+
+  test("[验收线 6] 有在册登记时 set observe：status 显示 source=-，紧接着的全量不报 policy_conflict", async () => {
+    const home = join(root, "home");
+    mkdirSync(home);
+    const dir = fullTestGateDir(home);
+    const e = env(home);
+    const gate = (...args: string[]) => run([process.execPath, "scripts/test-gate.ts", ...args], { env: e });
+    // 曾经 set on 过（policy.json 里留着 source），库里装的却是 observe 缺省，且有一条在册登记（本进程持有）
+    writeGatePolicy(dir, { mode: "on", max: 2, source: "ask_1" });
+    const observe = readGatePolicy(join(root, "none"));
+    const deps = { verifyOwnerApproval: approvalVerifier(observe), observeCheckTree: (x: { id: string }) => observeTree(dir, x.id) };
+    const held = { id: "held", cost: "full" as const, orderId: "o", workerId: "w" };
+    expect(lendCheckPermit({ directory: dir, config: permitConfig(observe), action: "acquire", request: held }, undefined, deps).status).toBe("observed");
+    expect((await gate("set", "observe")).code).toBe(0);
+    const status = await gate("status");
+    expect(status.out).toContain("source=-");
+    expect(status.out).toContain("在册名额：运行 1");
+    const lines: string[] = [];
+    const code = await runFullTestGate({ args: [], command: [process.execPath, "-e", "0"], env: e, dir, pollMs: 20, minuteMs: 100, stderr: (l) => lines.push(l) });
+    expect(lines.join("\n")).not.toContain("等策略切换");
+    expect(code).toBe(0);
+    expect(readFileSync(runLogPath(dir), "utf8")).toContain('"event":"start"');
+  }, 30_000);
+
+  test("[验收线 5] sweep：dry-run 前后闸目录逐字节不变；--apply 只回收 absent 的登记，runs.jsonl 有记录", async () => {
+    const home = join(root, "home");
+    mkdirSync(home);
+    const dir = fullTestGateDir(home);
+    const gate = (...args: string[]) => run([process.execPath, "scripts/test-gate.ts", ...args], { env: env(home) });
+    const policy = readGatePolicy(dir);
+    const deps = { verifyOwnerApproval: approvalVerifier(policy), observeCheckTree: (x: { id: string }) => observeTree(dir, x.id) };
+    // 持有者都已不在（登记时的启动时刻与本进程此刻的对不上 = 已退出、PID 被复用）
+    const goneHolder = (pid: number) => ({ kind: "present" as const, process: { pid, start: "gone-holder" } });
+    for (const id of ["stale", "alive"]) {
+      const r = lendCheckPermit({ directory: dir, config: permitConfig(policy), action: "acquire", request: { id, cost: "full", orderId: "o", workerId: "w" } }, goneHolder, deps);
+      expect(r.status).toBe("observed");
+    }
+    // stale：登记于另一次开机（重启前的残留）；alive：树根就是本进程，还在跑
+    const self = identify(process.pid)!;
+    mkdirSync(join(dir, "trees"), { recursive: true });
+    writeFileSync(join(dir, "trees", "stale.json"), JSON.stringify({ state: "running", pgid: 1, start: "darwin:1.000000", uniq: null, ver: null, uid: null,
+      members: [], boot: "another-boot", pgids: [1, 120, 321], sids: [1, 120] }));
+    writeFileSync(join(dir, "trees", "alive.json"), JSON.stringify({ state: "running", pgid: process.pid, start: self.start, uniq: self.uniq, ver: self.ver,
+      uid: self.uid, members: [], boot: currentBoot()?.id ?? null }));
+    const snapshot = () => readdirSync(dir, { recursive: true, withFileTypes: true }).filter((d) => d.isFile())
+      .map((d) => [join(d.parentPath, d.name), readFileSync(join(d.parentPath, d.name)).toString("base64")]).sort();
+    const before = snapshot();
+    const dry = await gate("sweep");
+    expect(dry.code).toBe(0);
+    expect(dry.out).toMatch(/stale .*树 absent：登记于另一次开机/);
+    expect(dry.out).toMatch(/alive .*树 present/);
+    expect(snapshot()).toEqual(before);
+    const applied = await gate("sweep", "--apply");
+    expect(applied.code).toBe(0);
+    expect(applied.out).toMatch(/stale .*→ 已回收/);
+    expect(applied.out).toMatch(/alive .*→ 未回收/);
+    expect(readPermitEntries(dir)!.map((x) => [x.id, x.status])).toEqual([["alive", "active"]]);
+    const sweeps = readFileSync(runLogPath(dir), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.event === "sweep");
+    expect(sweeps).toHaveLength(1);
+    expect(sweeps[0]).toMatchObject({ reclaimed: ["stale"], kept: ["alive"] });
   }, 30_000);
 });

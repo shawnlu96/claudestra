@@ -17,6 +17,7 @@ import { prCoordinates } from "./card-repo.js";
 import { recordObserved, type ObservedAction } from "./recovery-policy.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { mergeReviewProof } from "./scheduler-merge.js";
+import { fallbackHandoff, HANDOFF_NOTE } from "./scheduler-review-fallback.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 /**
@@ -32,7 +33,9 @@ interface HandoffEvidence {
   template: WorkflowTemplate;
   /** Family that wrote the head (a peer's delivery counts as its own family). */
   authorFamily: AuthorFamily;
-  review: { round: number; verdict: "pass" | "changes"; reviewerFamily: AuthorFamily; reportPath: string; p2: number; reviewSeq: number };
+  review: { round: number; verdict: "pass" | "changes"; reviewerFamily: AuthorFamily; reportPath: string; p2: number; reviewSeq: number;
+    /** RVF-1: the verdict came from this machine's same-family fallback reviewer; the cross-family review is the owner queue's. */
+    fallback?: Record<string, unknown> };
 }
 
 const SHA = /^[a-f0-9]{40}$/i;
@@ -87,12 +90,14 @@ export function recordMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId:
     if (ui) throw new LedgerError("conflict", ui);
     const review = mergeReviewProof(db, task, workflow);
     if (review.head !== input.head) throw new LedgerError("conflict", "审查结论不是这个 head 的");
+    const fallback = fallbackHandoff(events, task, review); // RVF-1
     const evidence: HandoffEvidence = { v: 1, pr: input.pr, head: input.head, specRev: task.specRev, template: workflow.template,
       authorFamily: remoteHeadFamily(db, task) ?? workflow.authorFamily,
       review: { round: review.round, verdict: review.verdict as "pass" | "changes", reviewerFamily: review.reviewerFamily, reportPath: review.reportPath,
-        p2: review.findings.filter((f) => f.severity === "P2").length, reviewSeq: review.eventSeq } };
+        p2: review.findings.filter((f) => f.severity === "P2").length, reviewSeq: review.eventSeq,
+        ...(fallback ? { fallback } : {}) } };
     const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler",
-      text: `合并交给仓库方：${input.pr} @ ${input.head.slice(0, 12)}`, data: { op: "merge_handoff", evidence } }, true);
+      text: `合并交给仓库方：${input.pr} @ ${input.head.slice(0, 12)}${fallback ? `；${HANDOFF_NOTE}` : ""}`, data: { op: "merge_handoff", evidence } }, true);
     return { event, duplicate: false };
   });
 }

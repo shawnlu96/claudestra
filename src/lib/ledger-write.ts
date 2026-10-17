@@ -12,6 +12,7 @@ import { requireSharedLedgerTaskStart } from "./shared-ledger-center-claims-gate
 import { updateTask } from "./fix-strategy-task-write.js";
 import { deliverDisputes } from "./review-arbiter-deliver.js";
 import { observeUiDelivery, planUiDelivery, uiReplaySame, type UiDeliverPort } from "./ledger-deliver-ui.js";
+import { deliverTierGate } from "./task-tier-deliver-wiring.js";
 import {
   APPENDABLE_KINDS,
   checkIdFree,
@@ -50,9 +51,16 @@ import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { schedulerCanVerify } from "./scheduler-verify-gate.js";
 import { checkStructuredReview } from "./scheduler-review.js";
 import { refuseAutoReviewMove } from "./scheduler-auto-review.js";
+import { reviewFallbackMark } from "./scheduler-review-fallback.js";
 import { runSpecPreflight } from "./spec-material-preflight.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
+
+/**
+ * CINOOP1：noChange 专用事务（ci-no-change-recovery.ts）的写入底座，由写入模块交出（同 ledger-lend.ts LEND_AUTHOR_PORTS 的做法）：
+ * 那边只在自己核完资格与外部证据后的一个事务里用它记交付 / 受控推阶段，普通 deliver 与阶段机不经过它。
+ */
+export const NO_CHANGE_WRITE_PORTS = { transaction: tx, insert: insertEvent } as const;
 
 // ── 事项 ──
 
@@ -231,8 +239,11 @@ export function deliver(
   db: Database,
   ctx: WriteCtx,
   input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; pr?: string; expect?: { rev?: number; branch?: string }; disputes?: unknown;
-    uiEvidence?: unknown; ui?: UiDeliverPort },
+    uiEvidence?: unknown; ui?: UiDeliverPort; noChange?: unknown },
 ): WriteResult<LedgerTask> {
+  // CINOOP1：noChange 交付走 ci-no-change-recovery.ts 的专用事务（核外部证据、受控 fix→merge）；普通交付带上它就是接错了口，不能静默当普通交付推 review
+  if (input.noChange !== undefined) throw new LedgerError("invalid", "noChange 交付走专用事务（ledger deliver --no-change），不进普通交付");
+  deliverTierGate(db, input.taskId, input.headSHA); // TIER3e：交付阶段类型门控（docs 范围），拒绝即抛、事务前不写
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "deliver" }, () => task, (prev) => uiReplaySame(prev, input.uiEvidence));
@@ -268,7 +279,8 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
     checkStructuredReview(input, task);
     const rc = checkReviewStep(db, task, input.reviewer);
     const { taskId: _t, text, move: _m, ...rest } = input;
-    const data = { round: task.round, ...rest, path: input.path ?? null, ...(rc.explicit ? { author: rc.author, authorCheck: rc.authorCheck } : {}) };
+    const fallback = reviewFallbackMark(db, task, input.reviewerSessionId, input.reviewerFamily); // RVF-1: a same-family fallback verdict says so
+    const data = { round: task.round, ...rest, path: input.path ?? null, ...(rc.explicit ? { author: rc.author, authorCheck: rc.authorCheck } : {}), ...(fallback ? { fallback } : {}) };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "review", text, data }, true);
     noteStepReview(db, ctx, rc, input.verdict, input.model);
     if (input.move) task = applyMove(db, ctx, task, input.move, false).task;

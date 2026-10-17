@@ -13,7 +13,7 @@ import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { MEMORY_CAPS } from "../src/lib/memory-retrieve.js";
-import { prepareLendMemory } from "../src/lib/memory-retrieve-lend.js";
+import { prepareLendOffer, commitLendOffer } from "../src/lib/lend-memory-prepare-wiring.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 
 const P = "demo";
@@ -149,8 +149,10 @@ describe("[验收线 2] 检索失败不挡派单", () => {
     card("build");
     remember(pit("要嵌入的坑"));
     const hang = { model: "m", dims: 3, embed: () => new Promise<never>(() => {}) };
-    await prepareLendMemory(db, getTask(db, "T9")!, "write", BASE, { embedder: hang as never, timeoutMs: 30, headFiles: null });
-    const o = offer();
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { [P]: { keys: { memoryLendInjection: "on", memoryLendPrepare: "on" } } } }));
+    const prepared = await prepareLendOffer(db, getTask(db, "T9")!, BASE, "spec", () => "spec",
+      { embedder: hang as never, timeoutMs: 30, headFiles: null });
+    const o = commitLendOffer(db, prepared, offer);
     expect(o.status).toBe("pooled");
     expect(memorySection(o)).toBeUndefined();
     expect(attempts()[0]!.data).toMatchObject({ result: "error" });
@@ -195,8 +197,10 @@ describe("[验收线 5] 开关", () => {
     card("build"); remember(pit("检索故障"));
     const vectors = new Database(":memory:"); vectors.close();
     const embedder = { model: "m", dims: 3, embed: async () => { throw new Error("embed failed"); } };
-    await prepareLendMemory(db, getTask(db, "T9")!, "write", BASE, { embedder: embedder as never, vectors, headFiles: null });
-    const o = offer();
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { [P]: { keys: { memoryLendInjection: "on", memoryLendPrepare: "on" } } } }));
+    const prepared = await prepareLendOffer(db, getTask(db, "T9")!, BASE, "spec", () => "spec",
+      { embedder: embedder as never, vectors, headFiles: null });
+    const o = commitLendOffer(db, prepared, offer);
     expect(o.status).toBe("pooled");
     expect(memorySection(o)).toBeUndefined();
     expect(attempts()[0]!.data).toMatchObject({ result: "error", count: 0, reason: expect.stringContaining("closed") });

@@ -31,7 +31,7 @@ import { plainUserText } from "./lib/cc-own-records.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { createLineTranslator, findSessionJsonlBySessionId, sessionJsonlPath } from "./lib/session-source.js";
 import { runManagerProcess } from "./lib/run-manager.js";
-import { readRegistryAgents } from "./lib/registry.js";
+import { readRegistryAgents, readRegistryAgentsSync } from "./lib/registry.js";
 import { CLEAN_ENV_FLAG, makeWorkerRoot } from "./lib/runtimes/clean-env.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
@@ -158,14 +158,18 @@ const host = new AcpHost(
       if (pane) await tmuxRaw(["set-option", "-w", "-t", pane, CODEX_READY_OPTION, "1"]);
       log("✅ 就绪（manager 在等的 @claudestra_ready 已写）");
     },
-    rotateSession: async (oldId, newId) => {
+    rotateSession: async (oldId, newId, timeoutMs) => {
       const r = await runManagerProcess(["set-session", agentName, newId, "--expected", oldId], {
-        bunPath: bunBin, managerPath: join(SRC_DIR, "manager.ts"), env: process.env, timeoutMs: 30_000,
+        bunPath: bunBin, managerPath: join(SRC_DIR, "manager.ts"), env: process.env, timeoutMs: timeoutMs ?? 30_000,
       });
       if (r.ok) return { ok: true };
       // manager 可能已经提交 registry 才丢回包；确认持久状态后再决定是否接回旧线程。
-      const current = (await readRegistryAgents()).find((a) => a.name === agentName)?.sessionId;
+      const current = (timeoutMs === undefined ? await readRegistryAgents() : readRegistryAgentsSync()).find((a) => a.name === agentName)?.sessionId;
       return current === newId ? { ok: true } : { ok: false, error: r.error ?? "registry 轮转失败" };
+    },
+    persistModel: async (model) => {
+      const r = await runManagerProcess(["set-claude", agentName, "--model", model], { bunPath: bunBin, managerPath: join(SRC_DIR, "manager.ts"), env: process.env, timeoutMs: 30_000 });
+      if (!r.ok) throw new Error(r.error ?? "manager set-claude 失败");
     },
     log,
     show,

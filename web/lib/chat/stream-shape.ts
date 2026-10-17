@@ -248,11 +248,15 @@ export function frameData(frame: string): string | null {
 }
 
 /** 累积的 SSE 字节缓冲 → 其中完整帧解析出的事件 + 剩下的半帧；心跳 / 注释帧和坏帧都跳过（坏帧丢了流照样继续） */
-export function drainFrames(buffer: string): { events: BridgeEvent[]; rest: string } {
+export function drainFrames(buffer: string): { events: BridgeEvent[]; rest: string; overflow?: boolean } {
   const frames = buffer.split("\n\n");
   const rest = frames.pop() || "";
   const events: BridgeEvent[] = [];
   for (const f of frames) {
+    // Preserve preceding events in this read; overflow is a disconnect, not a BridgeEvent.
+    if (f.split("\n").some((line) => line.startsWith("event:") && line.slice(6).trim() === "overflow")) {
+      return { events, rest: "", overflow: true };
+    }
     const data = frameData(f);
     if (data === null) continue;
     try {

@@ -12,6 +12,7 @@ import { readJsonState, readJsonStateSync, reportCorrupt, type StateRead } from 
 import { readAutoUpdateValue as autoUpdateValue } from "./floka-config/values.js";
 import { configView, writeCompatibleConfig } from "./floka-config/store.js";
 import { retryConfigWrite } from "./floka-config/retry.js";
+import { withConfigWriteLock } from "./floka-config/write-lock.js";
 import type { ConfigConflict } from "./floka-config/values.js";
 const CONFIG_PATH = STATE_CONFIG_PATH;
 
@@ -93,6 +94,9 @@ export interface AppConfig {
   /** floka 改名的分项开关；state = 状态根迁移维护档位（lib/state-maintenance），只认 off / observe / on，缺省和未知值按 off。
    *  其余子键原样保留：set* 是读改写，在这里过滤会把别的分项抹掉 */
   rename?: Record<string, unknown> & { state?: unknown };
+  /** ACP 额度卡的备用链（lib/acp/quota-fallback.ts resolveFallback）：{mode: off|observe|on（缺省 observe）, chain: [provider 或模型],
+   *  projects: {<项目 id>: {mode?, chain?}}}。原样保留、用时再校验：在这里过滤会让 set* 把 owner 写错的条目悄悄抹掉 */
+  quotaFallback?: Record<string, unknown>;
 }
 
 export type RenameStateMode = "off" | "observe" | "on";
@@ -147,6 +151,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
     ...(raw.inboundRoute?.mode === "observe" || raw.inboundRoute?.mode === "on" || raw.inboundRoute?.mode === "off" ? { inboundRoute: { mode: raw.inboundRoute.mode } } : {}),
     ...(raw.rename && typeof raw.rename === "object" && !Array.isArray(raw.rename) ? { rename: { ...raw.rename } } : {}),
+    ...(raw.quotaFallback && typeof raw.quotaFallback === "object" && !Array.isArray(raw.quotaFallback) ? { quotaFallback: { ...raw.quotaFallback } } : {}),
     ...(raw.chatGuard && typeof raw.chatGuard === "object"
       ? {
           chatGuard: {
@@ -208,7 +213,7 @@ function fromRead(r: StateRead): AppConfig {
     lastGoodRaw = r.data;
     return merge(defaults(), r.data);
   }
-  if (r.status === "missing") return defaults();
+  if (r.status === "missing") return configView(undefined, defaults(), false); // the missing file is this read's snapshot
   reportCorrupt(CONFIG_PATH, r.error, "config");
   return lastGoodRaw !== undefined ? merge(defaults(), lastGoodRaw) : safeConfigOnCorrupt();
 }
@@ -239,14 +244,14 @@ export async function writeConfig(cfg: AppConfig): Promise<void> {
   await writeCompatibleConfig(CONFIG_PATH, cfg);
 }
 
-/** Replay only the requested edit, so concurrent unrelated settings survive the single retry. */
+/** Replay only the requested edit, so concurrent unrelated settings survive the single retry. Each attempt's read → write holds the config write lock. */
 function editConfig(edit: (cfg: AppConfig) => void): Promise<AppConfig> {
-  return retryConfigWrite(async () => {
+  return retryConfigWrite(() => withConfigWriteLock(CONFIG_PATH, async () => {
     const cfg = await readConfig();
     edit(cfg);
     await writeConfig(cfg);
     return cfg;
-  });
+  }));
 }
 
 /** 设置归档保留天数（0 = 永不自动清理） */
@@ -341,18 +346,18 @@ export async function setChatGuard(patch: { mode?: "off" | "on"; blockAt?: numbe
  * （lang 有缺省值，所以按磁盘上的原始 JSON 判「设过没有」，不能看合并后的配置）。返回哪几项真的搬了。
  */
 export async function adoptWebSettings(web: { groqApiKey?: unknown; lang?: unknown }): Promise<{ groqApiKey: boolean; lang: boolean }> {
-  return retryConfigWrite(async () => {
+  return retryConfigWrite(() => withConfigWriteLock(CONFIG_PATH, async () => {
     const r = await readJsonState(CONFIG_PATH);
     if (r.status === "corrupt") throw new Error(`${CONFIG_PATH} 已损坏，先修好再迁移: ${r.error}`);
     const raw = (r.status === "ok" && r.data && typeof r.data === "object" ? r.data : {}) as Record<string, unknown>;
-    const cfg = merge(defaults(), raw);
+    const cfg = r.status === "ok" ? merge(defaults(), raw) : configView(undefined, merge(defaults(), raw), false);
     const takeKey = typeof web.groqApiKey === "string" && !!web.groqApiKey && typeof raw.groqApiKey !== "string";
     const takeLang = (web.lang === "zh" || web.lang === "en") && raw.lang !== "zh" && raw.lang !== "en";
     if (takeKey) cfg.groqApiKey = web.groqApiKey as string;
     if (takeLang) cfg.lang = web.lang as AppLang;
     if (takeKey || takeLang) await writeConfig(cfg);
     return { groqApiKey: takeKey, lang: takeLang };
-  });
+  }));
 }
 
 export async function setInboundRouteMode(mode: "off" | "observe" | "on"): Promise<AppConfig> {

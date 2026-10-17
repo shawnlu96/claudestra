@@ -13,6 +13,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { isWriteStep } from "./lend-git.js";
 import { advance, getOrder, JournalConflict, orderOf, type LendRow, type WorkUi } from "./lend-journal.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
+import { noChangeHeadRefusal, noChangeStepRefusal, type NoChange } from "./order-no-change.js";
 import { arbiterSubmit } from "./lend-arbiter-submit.js";
 import { lendVerdictForPeer } from "./memory-tools-wire.js";
 import { issueReviewTicket, logicalSha, parseReviewTicket, type ReviewTicket, type TicketSigner } from "./pool-review-proof-ticket.js";
@@ -32,7 +33,7 @@ export interface SubmitInput {
 }
 
 /** 写单交活：一行摘要与自查（都进 A 的 DeliverWire：摘要 ≤ 500 字节单行，自查 ≤ 4000 字节）；ui = 已核过、已拷贝的截图（LENDUI2 lend-ui-submit.ts） */
-export interface WorkInput { summary: string; selfCheck: string; ui?: WorkUi }
+export interface WorkInput { summary: string; selfCheck: string; ui?: WorkUi; noChange?: NoChange }
 
 /** POST /api/v1/lend/result 的请求体，整份存进 journal：A 按原始字节的 sha256 做幂等，重发必须逐字节一样 */
 interface LendResultPayload {
@@ -61,6 +62,8 @@ export interface SubmitterDeps {
   ancestors: (pid: number) => Promise<number[]>;
   /** 这个目录里 git 的当前 HEAD（写单用）；读不到 = null */
   headOf?: (dir: string) => Promise<string | null>;
+  /** 写单提交前的本机预检（CIPRECHK1 ci-deliver-precheck.ts lendSubmitPrecheck）：null = 放行，否则是失败清单；不给 = 不预检 */
+  precheck?: (dir: string, head: string) => Promise<string | null>;
 }
 
 const realOr = (p: string): string => {
@@ -134,7 +137,10 @@ function workProblem(w: WorkInput): string | null {
   return null;
 }
 
-/** 写单：核调用方 → 读工作副本 HEAD（必须是新提交）→ started 推到 result_pending 带 work；同一份（head + 摘要 + 自查）重交幂等 */
+/**
+ * 写单：核调用方 → 读工作副本 HEAD（必须是新提交；带 noChange 时反过来必须仍是订单起点）→ started 推到 result_pending 带 work；
+ * 同一份（head + 摘要 + 自查 + noChange）重交幂等。noChange 在这里只算「提交端已接收」，卡恢复与否由 A 核验后定。
+ */
 export async function submitLendWork(db: Database, orderId: string, input: WorkInput, d: SubmitterDeps, now = Date.now()): Promise<SubmitOutcome> {
   const row = getOrder(db, orderId);
   if (!row) return { ok: false, error: `本机没有出借单 ${orderId}` };
@@ -146,13 +152,22 @@ export async function submitLendWork(db: Database, orderId: string, input: WorkI
   if (bad) return { ok: false, error: bad };
   const head = await d.headOf?.(row.dir!);
   if (!head || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, error: "读不到工作副本的 HEAD（先 git commit）" };
-  if (head === String(orderOf(row)?.head ?? "")) return { ok: false, error: "HEAD 还在订单起点上：先把改动 git commit 到当前分支" };
-  const work = { head, summary: input.summary.trim(), selfCheck: input.selfCheck, ...(input.ui ? { ui: input.ui } : {}) };
+  const nc = input.noChange;
+  const step = noChangeStepRefusal(String(orderOf(row)?.step ?? ""), nc);
+  if (step) return { ok: false, error: step };
+  if (nc && input.ui) return { ok: false, error: "noChange 交付不带截图" };
+  const start = String(orderOf(row)?.head ?? "");
+  if (head === start && !nc) return { ok: false, error: "HEAD 还在订单起点上：先把改动 git commit 到当前分支（核实无需改码才用 --no-change-file）" };
+  const moved = noChangeHeadRefusal(start, head, nc);
+  if (moved) return { ok: false, error: moved };
+  const work = { head, summary: input.summary.trim(), selfCheck: input.selfCheck, ...(input.ui ? { ui: input.ui } : {}), ...(nc ? { noChange: nc } : {}) };
   const sha = payloadSha(JSON.stringify(work));
   if (row.state === "result_pending") {
     return row.work && payloadSha(JSON.stringify(row.work)) === sha ? { ok: true, duplicate: true, sha }
       : { ok: false, error: `${orderId} 已经交过一份不同的交付（或 HEAD 又动了），不能改` };
   }
+  const pre = nc ? null : await d.precheck?.(row.dir!, head); // CIPRECHK1：提交前本机预检，不过就带失败清单拒交（journal 不动）
+  if (pre) return { ok: false, error: pre };
   advance(db, orderId, "started", "result_pending", { work }, now);
   return { ok: true, duplicate: false, sha };
 }

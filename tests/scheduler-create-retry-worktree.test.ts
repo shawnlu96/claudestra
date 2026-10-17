@@ -126,7 +126,7 @@ async function authorFixture(fails: number) {
   };
   const ensureIntents = () => db.query("SELECT status, receipt FROM scheduler_intents WHERE action = 'ensure_session' ORDER BY eventSeq")
     .all() as { status: string; receipt: string | null }[];
-  return { tick, hello, creates, notices, ensureIntents, run, repo, worktree: join(worktreeRoot, "ap-a"), branch: pre.plan.branch,
+  return { tick, hello, creates, notices, ensureIntents, run, repo, worktree: join(worktreeRoot, "ap-a"), branch: pre.plan.branch, agents, saveRegistry,
     setHead: (head: string) => db.query("UPDATE tasks SET headSHA = ? WHERE id = 'ap-a'").run(head),
     task: () => getTask(db, "ap-a")!, advance: (ms: number) => { now += ms; } };
 }
@@ -520,5 +520,35 @@ describe("SC1H hidden edits cannot authorize clean reuse", () => {
     } finally { chmodSync(file, 0o644); }
     const failure = await retryWorktreeDirty(async () => ({ code: 1, out: "status deliberately unavailable" }), f.worktree, f.repo);
     expect(failure).toContain("读不了工作区状态"); expect(failure).toContain("status deliberately unavailable");
+  });
+});
+
+describe("agent-list-recovery-LENDBACK1: a replaced executor's checkout at the card's path, real create retry (proof units: tests/lend-return-local.test.ts)", () => {
+  test("[验收线 5] real ensureLocalAuthor + retryCleanCreate: a clean create failure on the new path retries there, the old tree stays", async () => {
+    const f = await authorFixture(1);
+    await f.run(f.repo, "worktree", "add", "-q", "-b", "feat/ap-a-old", f.worktree, "origin/main");
+    f.agents["agent-task-ap-a"] = { cwd: f.worktree, projectId: "p", task: "ap-a", runtime: "claude-code", transport: "tmux", status: "stopped" };
+    f.saveRegistry(); f.hello(true);
+    expect([(await f.tick()).step, (await f.tick()).step]).toEqual(["stage", "waiting"]);
+    expect(f.creates.map((c) => c.slice(1, 3))).toEqual([["task-ap-a-r2", `${f.worktree}-r2`]]);
+    f.advance(createRetryDelay(1));
+    expect((await f.tick()).step).toBe("session");
+    expect(f.creates.map((c) => c.slice(1, 3))).toEqual([["task-ap-a-r2", `${f.worktree}-r2`], ["task-ap-a-r2", `${f.worktree}-r2`]]); // same path again
+    expect([f.task().agent, f.ensureIntents().map((r) => r.status)]).toEqual(["agent-task-ap-a-r2", ["cancelled", "done"]]);
+    expect([await f.run(`${f.worktree}-r2`, "symbolic-ref", "--short", "HEAD"), await f.run(f.worktree, "symbolic-ref", "--short", "HEAD")])
+      .toEqual([f.branch, "feat/ap-a-old"]); // the old tree stays as it was
+  });
+
+  test("[验收线 5] real ensureLocalAuthor + retryCleanCreate: the old tree edited after a clean create failure on the new path waits as today", async () => {
+    const f = await authorFixture(1);
+    await f.run(f.repo, "worktree", "add", "-q", "-b", "feat/ap-a-old", f.worktree, "origin/main");
+    f.agents["agent-task-ap-a"] = { cwd: f.worktree, projectId: "p", task: "ap-a", runtime: "claude-code", transport: "tmux", status: "stopped" };
+    f.saveRegistry(); f.hello(true);
+    expect([(await f.tick()).step, (await f.tick()).step]).toEqual(["stage", "waiting"]);
+    writeFileSync(join(f.worktree, "a.ts"), "edited\n");
+    f.advance(createRetryDelay(1));
+    expect((await f.tick()).step).not.toBe("session");
+    expect(f.creates).toHaveLength(1);
+    expect(await f.run(f.worktree, "status", "--porcelain")).toBe("M a.ts");
   });
 });

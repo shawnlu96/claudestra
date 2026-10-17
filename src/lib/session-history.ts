@@ -103,8 +103,8 @@ export async function countNewlinesBefore(filePath: string, cut: number): Promis
   }
 }
 
-// sessionId / subagent 参数会拼进文件路径，白名单校验防穿越
-const SESSION_ID_RE = /^[0-9a-f][0-9a-f-]{7,63}$/i;
+// sessionId / subagent 参数会拼进文件路径，白名单校验防穿越；第二支是 OpenCode 的 `ses_…`（只有字母数字）
+const SESSION_ID_RE = /^(?:[0-9a-f][0-9a-f-]{7,63}|ses_[A-Za-z0-9]{6,60})$/i;
 const SUBAGENT_RE = /^agent-[A-Za-z0-9_-]{1,64}$/;
 
 export function isValidSessionId(s: string): boolean {

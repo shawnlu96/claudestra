@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { parseOriginRepo } from "./order-deliver-pr.js";
 import { statePath } from "./paths.js";
 import { PROJECTS_PATH } from "./projects.js";
+import { aliasPick, canonicalRepo, sameRepo } from "./repo-alias.js";
 import { readProjectMode, setProjectMode, type SecurityPoolMode } from "./security-pool.js";
 import { readJsonStateSync } from "./state-file.js";
 
@@ -41,7 +42,9 @@ export function repoOfGlobs(globs: readonly string[]): string | null {
   const bad = prefixed.find((g) => !PREFIXED.test(g));
   if (bad) throw new Error(`文件范围 ${bad.slice(0, 120)} 不是 repo:<owner>/<name>/<仓库内路径> 的写法`);
   const repos = [...new Set(prefixed.map((g) => (g.match(PREFIXED) as RegExpMatchArray)[1].toLowerCase()))];
-  if (repos.length > 1) throw new Error(`节点文件范围混了 ${repos.length} 个仓库（${repos.join("、")}）：一个节点只能对一个仓库`);
+  // REPOALIAS1 (repoAlias on): a node naming the renamed repository by its old and new name is still one repository
+  const one = repos.length === 1;
+  if (!aliasPick("card-repo.repoOfGlobs", one, one || new Set(repos.map(canonicalRepo)).size === 1)) throw new Error(`节点文件范围混了 ${repos.length} 个仓库（${repos.join("、")}）：一个节点只能对一个仓库`);
   return (prefixed[0].match(PREFIXED) as RegExpMatchArray)[1];
 }
 
@@ -53,7 +56,12 @@ function repoOfGlobsSoft(globs: readonly string[]): string | null {
 /** 去掉本仓库的 `repo:<owner>/<name>/` 前缀（不分大小写），得到仓库内路径；别的条目原样（公共仓的卡没有前缀，逐字不变） */
 export function stripRepoPrefix(globs: readonly string[], ownerName: string): string[] {
   const head = `repo:${ownerName}/`.toLowerCase();
-  return globs.map((g) => (g.toLowerCase().startsWith(head) ? g.slice(head.length) : g));
+  return globs.map((g) => {
+    const exact = g.toLowerCase().startsWith(head), m = PREFIXED.exec(g);
+    // REPOALIAS1 (repoAlias on): the other name of the renamed repository is this repository's prefix too
+    if (!aliasPick("card-repo.stripRepoPrefix", exact, exact || (m !== null && sameRepo(m[1], ownerName)))) return g;
+    return exact ? g.slice(head.length) : (m as RegExpExecArray)[2];
+  });
 }
 
 export interface RepoDirIO {
@@ -84,7 +92,11 @@ export const LOCAL_REPO_DIRS: RepoDirIO = { dirs: projectDirsSync, origin: gitOr
 /** 项目 dirs 里 origin 是 ownerName 的 git 目录（不分大小写，按 dirs 顺序取第一个）；找不到 null */
 export function repoDirFor(project: string, ownerName: string, io: RepoDirIO = LOCAL_REPO_DIRS): string | null {
   const want = ownerName.toLowerCase();
-  return io.dirs(project).find((d) => io.exists(join(d, ".git")) && io.origin(d)?.toLowerCase() === want) ?? null;
+  return io.dirs(project).find((d) => {
+    if (!io.exists(join(d, ".git"))) return false;
+    const origin = io.origin(d), exact = origin?.toLowerCase() === want; // REPOALIAS1: an origin under the other name (repoAlias on)
+    return aliasPick("card-repo.repoDirFor", exact, exact || sameRepo(origin, ownerName));
+  }) ?? null;
 }
 
 export const noCloneReason = (ownerName: string): string => `项目 dirs 里没有 ${ownerName} 的 clone`;

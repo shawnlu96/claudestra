@@ -23,8 +23,12 @@ import { reviewSource } from "./scheduler-review-swap-source.js";
 import { latestReviewerSwap, openRefusal, refusalEpochLapse, swappedSession } from "./scheduler-review-swap.js";
 import { replacementTag, reviewCheckoutDir, type ReplacementTag } from "./scheduler-review-checkout.js";
 import { git, openReviewWorktree } from "./scheduler-review-worktree.js";
+import { retryCleanCreate } from "./scheduler-create-retry.js";
+import { freshFallback, lastFallbackSeq } from "./scheduler-review-fallback.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
+import { tierCreate } from "./card-role-definitions.js";
+import { bindTierSession, reviewerTierCtx } from "./task-tier-models.js";
 
 type Manager = AutoTickDeps["manager"];
 export interface ReviewSwapDeps {
@@ -34,7 +38,7 @@ export interface ReviewSwapDeps {
    * tag names a refusal epoch's reviewer apart from the refused one, which may still be running (MODELX); current is the step's own
    * re-check (lease + assertSwapCurrent), run around every git / create effect inside, not only after ensure returns (RVWT1).
    */
-  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession, tag?: ReplacementTag, current?: () => void): Promise<EnsureResult>;
+  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession | null, tag?: ReplacementTag, current?: () => void): Promise<EnsureResult>;
   active(): void;
   registryPath?: string;
 }
@@ -55,7 +59,12 @@ function productionDeps(db: Database): ReviewSwapDeps {
     assertSchedulerLease();
     return r;
   };
-  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag, current) => createReplacement(db, task, family, old, agent, tag, { current }) };
+  // RVF-1: only on a card with a fallback epoch, a create that failed and cleaned up waits retryCleanCreate's backoff (and may fall
+  // back again) instead of stopping as unknown; every other swap (FAM1a, MODELX) creates exactly as before
+  const registryRow = (name: string) => readRegistryAgentsSync().find((r) => r.name === name);
+  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag, current) => lastFallbackSeq(db, task.id)
+    ? retryCleanCreate({ db, registryRow, create: agent }, task, "reviewer", (create) => createReplacement(db, task, family, old, create, tag, { current }))
+    : createReplacement(db, task, family, old, agent, tag, { current }) };
 }
 
 /**
@@ -63,7 +72,7 @@ function productionDeps(db: Database): ReviewSwapDeps {
  * same rule pinReview checks at dispatch (RVWT1); `root` is the state dir's worktrees, injectable only as autoTickDeps' worktreeRoot is.
  * `current` (the swap step's assertSwapCurrent) also runs before and after each effect: a card that moved stops the next one.
  */
-export async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager,
+export async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession | null, agent: Manager,
   tag: ReplacementTag = "", { root = statePath("worktrees"), current }: { root?: string; current?: () => void } = {}): Promise<EnsureResult> {
   const active = () => {
     assertSchedulerLease();
@@ -72,7 +81,7 @@ export async function createReplacement(db: Database, task: LedgerTask, family: 
     current?.();
   };
   const name = `agent-task-rv-${task.id.toLowerCase()}-r${task.round}${tag}`, rows = readRegistryAgentsSync(), existing = rows.find((r) => r.name === name);
-  if (existing && (existing.sessionId !== old.sessionId || existing.status !== "stopped")) {
+  if (existing && (!old || existing.sessionId !== old.sessionId || existing.status !== "stopped")) {
     return { kind: "unknown", reason: `${name} 被其他会话占用，不能覆盖` };
   }
   const g: typeof git = async (args) => { active(); const result = await git(args); active(); return result; };
@@ -86,12 +95,14 @@ export async function createReplacement(db: Database, task: LedgerTask, family: 
   const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer",
     "--purpose", "作者家族变更后的独立复验"];
   if (family === "codex") args.push("--runtime", "codex", "--transport", "acp");
-  const r = await agent(...args);
+  const tier = reviewerTierCtx(db, task); // TIER3：换会话的审查员同样按卡的类型选模型、核对规格卡首声明（off = null，原样）
+  const r = await (tier ? tierCreate(agent, tier, "reviewer") : agent)(...args);
   if (r.ok !== true) return { kind: "unknown", reason: oneLine(`新审查会话创建未确认：${String(r.error)}`) };
   for (let n = 0; n < 20; n++) {
     active();
     const row = readRegistryAgentsSync().find((a) => a.name === name);
-    if (row?.sessionId && row.sessionId !== old.sessionId) {
+    if (row?.sessionId && row.sessionId !== old?.sessionId) {
+      bindTierSession(db, task, name, row.sessionId, "reviewer");
       return { kind: "ready", created: true,
       ref: { taskId: task.id, role: "reviewer", agent: name, sessionId: row.sessionId, family, transport: row.transport === "acp" ? "acp" : "tmux" } };
     }
@@ -140,8 +151,8 @@ async function stopOld(db: Database, ctx: WriteCtx, intent: SchedulerIntent, dep
 async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, maxWorkers: number, deps: ReviewSwapDeps): Promise<string | { manual: string } | null> {
   const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id);
   const swap = latestReviewerSwap(listEvents(db, { project: task.project, target: task.id }));
-  // A refusal epoch has no review_swap intent: its own event is the completed retirement (scheduler-review-swap.ts).
-  const refusal = !!swap?.data.refusal;
+  // A refusal / fallback epoch has no review_swap intent: its own event is the completed retirement (scheduler-review-swap.ts).
+  const refusal = !!(swap?.data.refusal || swap?.data.fallback);
   if (!swap || typeof swap.data.intentId !== "string" || (!refusal && getIntent(db, swap.data.intentId)?.status !== "done")) {
     throw new LedgerError("conflict", "旧审查尚未完成换人");
   }
@@ -161,12 +172,16 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
   // MODELXW: a legacy refused ticket's reviewer may still be running too, so its successor gets its own name
-  const retired = swappedSession(db, swap.data.intentId), current = () => { deps.active(); assertStillRetired(db, task.id, retired); };
+  const retired = freshFallback(swap) ? null : swappedSession(db, swap.data.intentId), current = () => { deps.active(); assertStillRetired(db, task.id, retired); };
   const got = await deps.ensure(task, family, retired, replacementTag(swap), current);
   current();
   if (got.kind === "manual") { // RVSRC1: create was never called, nothing exists — cancel, and the tick hands the card to PM
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "cancelled", receipt: oneLine(got.reason) });
     return { manual: got.reason };
+  }
+  if (got.kind === "wait") { // retryCleanCreate: nothing was left behind; the planner re-plans after its backoff
+    settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "cancelled", receipt: oneLine(`未建：${got.reason}`) });
+    return got.reason;
   }
   if (got.kind !== "ready") {
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "unknown", receipt: oneLine(got.reason) });
@@ -181,10 +196,10 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
  * RVWT1: a replacement is created only for the binding this swap retired. Once a formal writer has bound a reviewer meanwhile (even
  * under this same ensure intent), the card's binding is no longer the retired one and no further worktree / create effect may follow.
  */
-function assertStillRetired(db: Database, taskId: string, retired: SchedulerSession): void {
+function assertStillRetired(db: Database, taskId: string, retired: SchedulerSession | null): void {
   const b = getSchedulerSession(db, taskId, "reviewer");
-  if (b?.sessionId === retired.sessionId && b.state !== "active") return;
-  throw new LedgerError("conflict", `本卡审查绑定已不是本次退休的 ${retired.agent}（现为 ${b ? `${b.agent}，${b.state}` : "无"}），停止创建新审查会话`);
+  if (retired ? b?.sessionId === retired.sessionId && b.state !== "active" : b?.state !== "active") return; // null: a fresh fallback, no binding yet
+  throw new LedgerError("conflict", `本卡审查绑定已不是本次退休的 ${retired?.agent ?? "（无）"}（现为 ${b ? `${b.agent}，${b.state}` : "无"}），停止创建新审查会话`);
 }
 
 /** A committed retirement survives card drift; replacement creation still needs current CAS and safety authorization. */

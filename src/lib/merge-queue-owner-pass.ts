@@ -10,6 +10,7 @@ import { configuredOwnerMode, ownerFallbackReason, queueOwnerMode } from "./merg
 import { bindOwnerPass } from "./merge-queue-owner-hooks.js";
 import { ownerMainCiDecision } from "./merge-queue-owner-main-ci.js";
 import { pickMergeQueueOwner } from "./merge-queue-owner.js";
+import { observeOwnerPriority } from "./merge-queue-owner-priority.js";
 import { ownerMainCiPaused } from "./merge-queue-owner-main-ci.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
@@ -68,6 +69,7 @@ export async function observeMergeQueueOwner(db: Database, manager: Manager, pro
       const reason = ownerFallbackReason(db, project, id);
       if (reason) await recordOwnerChoice(db, manager, project, id, id, null, reason);
     }
+    if (mode === "on") await observeOwnerPriority(db, manager, project, (m) => pickMergeQueueOwner(db, project, now, m));
     if (mode !== "observe") return;
     const pick = pickMergeQueueOwner(db, project, now), target = pick.entry?.taskId ?? old;
     if (target && pick.entry?.taskId !== old) await recordOwnerChoice(db, manager, project, target, old, pick);

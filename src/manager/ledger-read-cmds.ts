@@ -19,6 +19,8 @@ import { agentKey, intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { propose, type Agents } from "./team-up.js";
 
+import { TASK_TIER_REPORT_CMD } from "./ledger-task-tier-report-cmd.js";
+
 const DEFAULT_EVENTS = 20;
 
 function whoami(c: LedgerCli): Result {
@@ -158,6 +160,7 @@ async function askCheck(c: LedgerCli): Promise<Result> {
 }
 
 export const READ_CMDS: Record<string, CommandSpec> = {
+  "task-tier-report": TASK_TIER_REPORT_CMD,
   whoami: { valued: ["project"], usage: "whoami", run: whoami },
   show: { valued: ["events", "project"], usage: "show [<task|item>] [--events N]", run: show },
   export: { valued: ["out", "sqlite", "project"], usage: "export --out <file.json> | --sqlite <file>", run: exportCmd },

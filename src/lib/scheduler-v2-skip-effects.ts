@@ -12,6 +12,7 @@ export type SkipEffectGate = "pace" | "manager" | "hook" | "s2v" | "featureless"
 export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<string, string>>>> = {
   /** card work run from a candidate loop that asks pace.skipTask (S2D) first */
   pace: {
+    "ci-selected-replay-receipt.ts": "fs=3 vcs=2", // Per-card bounce capture runs after the merge tick asks skipTask.
     "conv-ignored-build-artifacts-quarantine.ts": "proc=1 fs=4 vcs=1",
     "effect-count-refresh-git.ts": "fs=2 vcs=1", // EFFAUTO1: the merge driver's scratch-worktree count refresh + push, under the merge tick's skipTask
     "fix-strategy-lifecycle.ts": "proc=1",
@@ -22,6 +23,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-author-retire-checkout.ts": "vcs=3",
     "lend-fix-reassign-pr.ts": "proc=1 vcs=4",
     "lend-git.ts": "vcs=1",
+    "lend-return-local.ts": "vcs=2",
     "peer-pr-auto-verify.ts": "ledger=1",
     "pm-handback-verify.ts": "ledger=2", // PMHAND1: the deploy tick's resolved-done verify (dry-run + verify), per card under pace.skipTask / schedulerV2SkipTask
     "pool-review-proof-raw.ts": "fs=2",
@@ -73,6 +75,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "merge-deploy-outbox.ts": "ledger=1",
     "merge-queue-candidates.ts": "ledger=1", // CAND1: `ledger scheduler-recovery-observe` for mergeUnifiedCandidates notes, through the pass manager
     "merge-queue-owner-pass.ts": "ledger=1",
+    "merge-queue-owner-priority.ts": "ledger=1", // QUEUEPRIO1: `ledger scheduler-recovery-observe` for mergeOwnerPriority notes, through the pass manager
     "observation-auto-register-tick.ts": "ledger=1", // Spec registration through the leased pass manager
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
@@ -101,7 +104,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1",
     "scheduler-merge-union.ts": "ledger=1", // KEYUNION1: `ledger scheduler-recovery-observe` for mergeUnion notes, through the pass manager
-    "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1",
+    "scheduler-model-wiring.ts": "ledger=9 sql=1 stmt=1",
     "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1",
     "scheduler-post-verify.ts": "ledger=2",
@@ -115,7 +118,9 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-service.ts": "ledger=6 proc=1",
     "scheduler-spec-resume.ts": "ledger=3",
     "scheduler-spec-wait.ts": "ledger=1 stmt=1",
+    "scheduler-start-gap.ts": "ledger=2", // RESTATEGO1: `ledger scheduler-recovery-observe` / `scheduler-pm-todo` for start-gap notes, through the pass manager
     "scheduler-ui-evidence-notice.ts": "ledger=1", // UIEVID2: `ledger scheduler-ui-evidence-redo` through the pass manager, from auto-tick before the PM screenshot notice
+    "worker-submit-confirm.ts": "ledger=2", // RESTATEGO1: resend / escalation notes and the PM todo, through the pass manager
   },
   /** a ≤3-line S2D2 hook (or the module the hooked step drives) skips the card before the effect */
   hook: {
@@ -143,6 +148,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-train-gh.ts": "fs=1 vcs=1",
     "scheduler-merge-train-tick.ts": "fs=1 notice=2",
     "scheduler-merge-train.ts": "notice=2",
+    "scheduler-post-verify-pull.ts": "ledger=3", // Batch candidates pass schedulerV2SkipTask; per-card observation writes use the guarded manager.
     "session-archive.ts": "fs=1",
     "spec-lint-observation.ts": "fs=2",
   },
@@ -232,7 +238,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3",
-    "ledger-scheduler-schema.ts": "sql=6 stmt=13",
+    "ledger-scheduler-resume.ts": "sql=3 stmt=3", // RVF-1: reached through scheduler-recovery-write.ts (writer-process code, never run by the pass)
+    "ledger-scheduler-schema.ts": "sql=10 stmt=19",
     "ledger-scheduler-settle.ts": "sql=2 stmt=2",
     "ledger-scheduler-write.ts": "sql=7 stmt=7",
     "ledger-steps-write.ts": "sql=3 stmt=3",
@@ -263,6 +270,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-handoff.ts": "sql=1 stmt=1",
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3",
     "scheduler-merge.ts": "sql=11 stmt=11",
+    "scheduler-recovery-write.ts": "sql=1 stmt=1", // RVF-1: writeReviewFallback, called only inside `ledger scheduler-model-outcome`
     "scheduler-review-stale.ts": "sql=1 stmt=1",
     "scheduler-review-swap.ts": "sql=3 stmt=3",
     "scheduler-sessions.ts": "sql=7 stmt=10",
@@ -280,11 +288,14 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "memory-vectors.ts": "sql=1 stmt=2 fs=2",
     "order-deliver-pr.ts": "vcs=2",
     "order-deliver-scope-git.ts": "proc=2",
-    "order-deliver.ts": "ledger=1 vcs=2", // ONB-1: vcs = origin ls-remote, or the local branch rev-parse for a localMerge project
+    "order-deliver.ts": "ledger=2 vcs=2", // ONB-1: vcs = origin ls-remote, or the local branch rev-parse for a localMerge project
     "order-ledger-exit.ts": "ledger=2",
     "order-mark.ts": "ledger=1",
     // security-pool fs=3: only setSecurityPoolMode writes (the owner's `security-pool` command); the pass only reads the switch
     "security-pool.ts": "fs=3",
+    "task-tier-lend-settings.ts": "fs=1", // 设置页和 CLI 唯一的显式写入口；调度器只读
+    // test-guard: only a bun test runner without tests/preload.ts spawns the fallback-root reaper (its rmSync is inside the reaper script)
+    "test-guard.ts": "proc=1 fs=1",
   },
   /** process, file, tmux, store and notice plumbing with no card of its own; its callers are the gated paths */
   infra: {
@@ -320,6 +331,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "media-outbound.ts": "sql=2 stmt=4 fs=4",
     "memory-retrieve-head.ts": "proc=1 vcs=1",
     "notify.ts": "notice=1",
+    "opencode-session.ts": "proc=3 fs=2", // OCR-4: `opencode export` / db scan + mirror writes; reached via the runtime registry, run by history / archive callers
     "pm-deploy-lock.ts": "proc=1 fs=8",
     "pm-notice-level.ts": "stmt=1",
     "pm-notify.ts": "notice=2",
@@ -357,6 +369,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "sqlite-migrate.ts": "stmt=2",
     "state-file.ts": "fs=7",
     "sys-memory.ts": "proc=1",
+    "task-tier-escalation-store.ts": "sql=13 stmt=14 fs=1", // TIER3c: escalation store, written only from the author create wrapper (card-role-definitions) under the gated create
     "tmux-helper.ts": "stmt=3 proc=23 fs=1",
     "unmanaged-archive.ts": "fs=4",
     "update-inflight.ts": "proc=2 fs=2",

@@ -57,7 +57,7 @@ afterAll(async () => {
   if (savedRegistry === null) unlinkSync(REGISTRY_PATH);
   else writeFileSync(REGISTRY_PATH, savedRegistry);
   openLedger().prepare("DELETE FROM meta WHERE project = ?").run(P);
-  await writeConfig(savedConfig);
+  await writeConfig({ ...readConfigSync(), fleet: savedConfig.fleet }); // fresh read: a stale snapshot restore is refused (CFGWRITE1)
 });
 
 const mcp = (ws: keyof typeof WS, body: Record<string, unknown>) => handleFleetWs({ via: "mcp", ...body }, WS[ws]);

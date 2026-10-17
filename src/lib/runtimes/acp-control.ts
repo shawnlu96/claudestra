@@ -11,6 +11,7 @@ import type { RuntimeControl, WindowOps } from "./types.js";
 export const ACP_CONTROL: RuntimeControl = {
   interruptKeys: [],
   preemptOnHumanMessage: false,
+  insertVia: "steer",
   idleSource: "acp",
   modelEnforcement: "config-option",
   paneHeuristics: false,

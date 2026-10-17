@@ -3,10 +3,11 @@ import { copyFileSync, existsSync } from "node:fs";
 import { acquireLock } from "./file-lock.js";
 import { ROLE_MODEL_SETTINGS_PATH, readRoleModels, roleModelsProblem, type RoleModelPatch, type RoleModelTable } from "./role-model-settings.js";
 import { writeJsonAtomicSync } from "./state-file.js";
+import { mergeTierPatch } from "./task-tier-model-settings.js";
 
 export type RoleModelSave =
   | { ok: true; table: RoleModelTable; replacedInvalid: string | null }
-  | { ok: false; code: "busy" | "conflict" | "unreadable" | "io"; error: string; current?: RoleModelTable };
+  | { ok: false; code: "busy" | "conflict" | "unreadable" | "invalid" | "io"; error: string; current?: RoleModelTable };
 const LOCK_WAIT_MS = 5_000;
 /** 测试缝：beforeCommit 在 rename 前、核锁前同步调用（模拟写者恰在提交前被暂停） */
 export interface SaveHooks { beforeCommit?: () => void }
@@ -25,10 +26,14 @@ export async function saveRoleModels(p: RoleModelPatch, path = ROLE_MODEL_SETTIN
     if (cur.status === "unreadable") return { ok: false, code: "unreadable", error: cur.error };
     if (cur.table.rev !== p.rev) return { ok: false, code: "conflict", error: `基于第 ${p.rev} 版改，现在已是第 ${cur.table.rev} 版`, current: cur.table };
     const row = cur.table.roles[p.role];
-    const table: RoleModelTable = { v: 1, rev: cur.table.rev + 1,
-      roles: { ...cur.table.roles, [p.role]: { claude: p.claude ?? row.claude, codex: p.codex === undefined ? row.codex : p.codex } } };
+    const { tiers: curTiers, ...base } = cur.table;
+    const tiers = p.tier !== undefined ? mergeTierPatch(curTiers, p.role, p) : curTiers;
+    const roles = p.tier !== undefined ? cur.table.roles
+      : { ...cur.table.roles, [p.role]: { claude: p.claude ?? row.claude, codex: p.codex === undefined ? row.codex : p.codex } };
+    const table: RoleModelTable = { ...base, v: 1, rev: cur.table.rev + 1, roles, ...(tiers && Object.keys(tiers).length ? { tiers } : {}) };
+    // 约束（含 TIER3 security 下限）挡下的是请求本身不合法：invalid（API 400），不是写盘故障
     const bad = roleModelsProblem(table);
-    if (bad) return { ok: false, code: "io", error: `合并后的表不合法：${bad}` };
+    if (bad) return { ok: false, code: "invalid", error: `合并后的表不合法：${bad}` };
     if (cur.status === "invalid" && existsSync(path)) copyFileSync(path, `${path}.invalid-${now}`);
     // 拿锁之后全程同步、没有 await；锁在 rename 前一刻经 commitIf 再核（被暂停超期、锁被别人回收的写者在这里被拦下，不覆盖后来者）
     writeJsonAtomicSync(path, table, { mode: 0o600, trailingNewline: true, commitIf: () => {

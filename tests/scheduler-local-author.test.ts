@@ -16,6 +16,7 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setFrozen, setMeta } from "../src/lib/ledger-write.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { readRegistryAgentsSync } from "../src/lib/registry.js";
 import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
@@ -427,4 +428,163 @@ for (const pool of [false, true]) test(`production autoTickDeps defaults create 
     expect((await f.tick()).step).toBe("session");
     expect(getWorkflow(f.db, "ap-a")?.authorFamily).toBe("codex");
   } finally { singleton.release(); maintenance.release(); }
+});
+
+// ── agent-list-recovery-LENDBACK1 (lend-return-local.ts): a stale same-name row, its checkout and the planner's fixed family ──
+const lendBackOff = () => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { lendReturnLocal: "off" } } } }));
+const lendBackCleanup = () => rmSync(RECOVERY_POLICY_PATH, { force: true });
+type Fx = Awaited<ReturnType<typeof fixture>>;
+/** The replaced executor's registry row under the card's default author name: stopped Claude, never started (no session id). */
+const staleRow = (f: Fx, over: Record<string, unknown> = {}) => {
+  f.agents["agent-task-ap-a"] = { cwd: join(f.dir, "wt", "ap-a"), projectId: "p", task: "ap-a", runtime: "claude-code", transport: "tmux", status: "stopped", ...over };
+  f.saveRegistry();
+};
+const authorIntent = (f: Fx) => f.db.query("SELECT status, receipt FROM scheduler_intents WHERE taskId = 'ap-a' AND action = 'ensure_session' ORDER BY eventSeq DESC LIMIT 1")
+  .get() as { status: string; receipt: string };
+
+test("[验收线 3] a stopped same-name row of another family, bound nowhere here, gives the new author the next name", async () => {
+  const f = await fixture(); staleRow(f); f.hello(true);
+  await f.tick();
+  expect((await f.tick()).step).toBe("session");
+  expect(f.creates).toHaveLength(1);
+  expect(f.creates[0].slice(1, 3)).toEqual(["task-ap-a-r2", join(f.dir, "wt", "ap-a")]);
+  expect(f.task().agent).toBe("agent-task-ap-a-r2");
+  expect(getSchedulerSession(f.db, "ap-a", "author")).toMatchObject({ agent: "agent-task-ap-a-r2", family: "codex" });
+  expect(f.agents["agent-task-ap-a"]).toMatchObject({ status: "stopped" }); // the old row is never removed
+  expect((await f.tick()).step).toBe("sent");
+});
+
+const KEEP: [string, Record<string, unknown>, boolean][] = [
+  ["live", { status: "active" }, false],
+  ["the same family and started", { runtime: "codex", sessionId: "s-old" }, false],
+  ["bound to this card's session", {}, true],
+];
+for (const [why, over, bound] of KEEP) test(`[验收线 3] a same-name row that is ${why} keeps today's unknown`, async () => {
+  const f = await fixture(); staleRow(f, over); f.hello(true);
+  if (bound) {
+    f.db.run("PRAGMA foreign_keys = OFF");
+    f.db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+      VALUES ('ap-a', 'author', 'agent-task-ap-a', 's-bound', 'claude', 'tmux', 'retired', 'i-old', 1, 1)`).run();
+    f.db.run("PRAGMA foreign_keys = ON");
+  }
+  await f.tick(); await f.tick();
+  expect(f.creates).toEqual([]);
+  expect(authorIntent(f)).toMatchObject({ status: "unknown", receipt: expect.stringContaining("agent-task-ap-a 已存在但未绑定") });
+});
+
+test("[验收线 4] off: a stale same-name row keeps today's unknown", async () => {
+  lendBackOff();
+  try {
+    const f = await fixture(); staleRow(f); f.hello(true);
+    await f.tick(); await f.tick();
+    expect(f.creates).toEqual([]);
+    expect(authorIntent(f)).toMatchObject({ status: "unknown", receipt: expect.stringContaining("已存在但未绑定") });
+  } finally { lendBackCleanup(); }
+});
+
+/** The stale row's own checkout at the card's path, on another branch; `state` = what status / rev-list report for it. */
+function oldTree(f: Fx, state: { dirty: string; own: string }) {
+  const old = join(f.dir, "wt", "ap-a");
+  mkdirSync(old, { recursive: true }); writeFileSync(join(old, "keep.txt"), "old");
+  staleRow(f, { cwd: old });
+  const git = f.env.git;
+  f.env.git = async (args) => {
+    if (args[0] === "-C" && args[1] === old) {
+      f.gitCalls.push(args);
+      if (args.includes("symbolic-ref")) return { code: 0, out: "feat/ap-a-old" };
+      if (args.includes("status")) return { code: 0, out: state.dirty };
+      if (args.includes("rev-list")) return { code: 0, out: state.own };
+    }
+    return git(args);
+  };
+  return old;
+}
+
+test("[验收线 5] the renamed executor's clean, off-branch checkout is stepped around with the same suffix and kept", async () => {
+  const f = await fixture(), old = oldTree(f, { dirty: "", own: "0" }); f.hello(true);
+  await f.tick();
+  expect((await f.tick()).step).toBe("session");
+  expect(f.creates[0].slice(1, 3)).toEqual(["task-ap-a-r2", `${old}-r2`]);
+  expect(f.gitCalls.some((a) => a.includes("worktree") && a.includes("add") && a.includes(`${old}-r2`))).toBe(true);
+  expect(readFileSync(join(old, "keep.txt"), "utf8")).toBe("old");
+});
+
+for (const [why, state] of [["edits", { dirty: " M keep.txt", own: "0" }], ["its own commit", { dirty: "", own: "1" }]] as const) {
+  test(`[验收线 5] an old checkout with ${why} is kept and waits as today`, async () => {
+    const f = await fixture(); oldTree(f, state); f.hello(true);
+    await f.tick(); await f.tick();
+    expect(f.creates).toEqual([]);
+    expect(authorIntent(f)).toMatchObject({ status: "unknown", receipt: expect.stringContaining("保留并等待核对") });
+  });
+}
+
+/** The card's newest delivered head came from a done Claude lend order (remoteHeadFamily = claude); the pool has no local Claude seat. */
+function claudeHead(f: Fx) {
+  const head = "2".repeat(40);
+  f.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'ap-a'").run(head);
+  const seq = Number(f.db.query(`INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (1, 'scheduler', 'p', 'ap-a', 'deliver', '', ?)`)
+    .run(JSON.stringify({ headSHA: head })).lastInsertRowid);
+  f.db.query(`INSERT INTO lend_orders (orderId, taskId, project, peer, family, step, specRev, round, head, repo, wire, text, sha256, status, leaseMs,
+    eventSeq, createdBy, createdAt, updatedAt, branch) VALUES ('lo-claude', 'ap-a', 'p', 'Sekai', 'claude', 'write', 1, 0, ?, 'o/r', '{}', 't', 's', 'done', 1, ?, 'pm', 1, 1, 'feat/ap-a')`)
+    .run(head, seq);
+  Object.assign(f.config.projects.p, { agents: { claude: 0, codex: 2 } });
+  writeFileSync(f.configPath, JSON.stringify(f.config));
+  const git = f.env.git; // the card now starts at the delivered head
+  f.env.git = async (args) => args.at(-1) === `${head}^{commit}` ? { code: 0, out: head } : git(args);
+  const create = f.env.create;
+  f.env.create = async (...args) => {
+    const r = await create(...args), codex = args.includes("codex");
+    Object.assign(f.agents[`agent-${args[1]}`]!, { runtime: codex ? "codex" : "claude-code", transport: codex ? "acp" : "tmux" }); f.saveRegistry();
+    return r;
+  };
+}
+
+test("[验收线 6] a head a peer's Claude wrote waits for a local Claude seat instead of creating Codex, then creates Claude", async () => {
+  const f = await fixture(); f.hello(true);
+  await f.tick();
+  claudeHead(f);
+  const waiting = await f.tick();
+  expect(waiting).toMatchObject({ step: "waiting", detail: expect.stringContaining("等 claude 空位") });
+  expect(f.creates).toEqual([]);
+  Object.assign(f.config.projects.p, { agents: { claude: 1, codex: 2 } });
+  writeFileSync(f.configPath, JSON.stringify(f.config));
+  expect((await f.tick()).step).toBe("session");
+  expect(f.creates[0]).not.toContain("codex");
+  expect(getSchedulerSession(f.db, "ap-a", "author")).toMatchObject({ family: "claude" });
+  const next = await f.tick();
+  expect(JSON.stringify(next)).not.toContain("author_family");
+  expect(f.notices.filter((n) => n.includes("退回人工"))).toEqual([]);
+});
+
+test("[验收线 4] off: the same card creates Codex as before", async () => {
+  lendBackOff();
+  try {
+    const f = await fixture(); f.hello(true);
+    await f.tick();
+    claudeHead(f);
+    expect((await f.tick()).step).toBe("session");
+    expect(f.creates[0].slice(-4)).toEqual(["--runtime", "codex", "--transport", "acp"]);
+  } finally { lendBackCleanup(); }
+});
+
+/** The writer re-walks the names itself: a name no stale row made room for is refused, even on its own fresh session. */
+const FORGED: [string, boolean, string, string][] = [
+  ["no stale row, -r2 claimed", false, "agent-task-ap-a", "agent-task-ap-a-r2"],
+  ["a stale row made room for -r2, -r3 claimed", true, "agent-task-ap-a-r2", "agent-task-ap-a-r3"],
+];
+for (const [why, stale, made, forged] of FORGED) test(`[验收线 3] the writer refuses a forged author name (${why})`, async () => {
+  const f = await fixture(); f.hello(true);
+  await f.tick();
+  if (stale) staleRow(f);
+  const ledger = f.env.ledger, refused: string[] = [];
+  f.env.ledger = async (...args) => {
+    if (args[1] !== "scheduler-autostart" || args[4] !== "local-author") return ledger(...args);
+    f.agents[forged] = { ...f.agents[made] as object, sessionId: "s-forged" }; f.saveRegistry();
+    try { return await ledger(...args.map((a) => a === `--agent=${made}` ? `--agent=${forged}` : a)); }
+    catch (e) { refused.push(String((e as Error).message)); return { ok: false, error: (e as Error).message }; }
+  };
+  await f.tick();
+  expect(f.creates.map((c) => c[1])).toEqual([made.slice("agent-".length)]);
+  expect(refused).toEqual([expect.stringContaining("执行者会话、项目或本机运行时不符")]);
+  expect(f.task().agent).toBeNull();
 });

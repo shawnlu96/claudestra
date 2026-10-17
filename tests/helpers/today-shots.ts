@@ -112,7 +112,7 @@ import { ChatStoreProvider, useChatStoreApi } from ${from("web/features/chat/cha
 import { ChatNavContext } from ${from("web/features/chat/components/nav-context.tsx")};
 import { Sidebar } from ${from("web/features/chat/components/sidebar.tsx")};
 import { MessageList } from ${from("web/features/chat/components/message-list.tsx")};
-import { CollabSwitch, closingCollab } from ${from("web/features/collab/collab-switch.tsx")};
+import { CollabSwitch, CollabSidebarGate, closingCollab } from ${from("web/features/collab/collab-switch.tsx")};
 import { asksStore } from ${from("web/features/asks/asks-store.ts")};
 document.documentElement.dataset.theme = "light";
 await machines.add({ fp: "${fp}", name: "fixture" });
@@ -130,7 +130,7 @@ function App() {
   const main = { display: narrow && !content ? "none" : "flex", flex: "1 1 0", minWidth: 0, flexDirection: "column", position: "relative", height: "100%" };
   return h(ChatStoreProvider, null, h(ChatNavContext.Provider, { value: nav }, h(Seed),
     h("div", { className: "flex h-screen w-full overflow-hidden bg-base-100 text-base-content" },
-      h("div", { style: { ...side, height: "100%" } }, h(Sidebar, { onSelect: closingCollab(() => setContent(true)) })),
+      h(CollabSidebarGate, null, h("div", { style: { ...side, height: "100%" } }, h(Sidebar, { onSelect: closingCollab(() => setContent(true)) }))),
       h("main", { style: main }, h(MessageList), h(CollabSwitch)))));
 }
 createRoot(document.getElementById("root")).render(h(App));

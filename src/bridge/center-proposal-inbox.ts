@@ -183,7 +183,7 @@ async function autoRoute(project: InboxProject, pending: Pending, mode: Recovery
   const plan = new Map<string, Plan>(), id = project.localProjectId;
   for (const r of pending.records) {
     if (r.proposal.expiresAt <= d.now()) continue;
-    const params = paramsOf(id, r), verdict = a.files ? classifyProposal(r, a.files()) : classifyProposal(r);
+    const params = paramsOf(id, r), verdict = classifyProposal(r, a.files?.(), { project: id, db: a.db, now: d.now });
     try {
       if (mode === "observe") {
         if (verdict.route === "auto") observeAutoApprove(a.db(), identityOf(project, params), d.now());

@@ -3,10 +3,12 @@ import type { Database } from "bun:sqlite";
 import { blockedBy, depViews } from "./ledger-deps.js";
 import { currentHandler } from "./ledger-handler.js";
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
-import type { LedgerTask } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 
-export const WORKFLOW_TEMPLATES = ["code", "ui", "security"] as const;
-export type WorkflowTemplate = (typeof WORKFLOW_TEMPLATES)[number];
+const BUILTIN_TEMPLATES = ["code", "ui", "security"] as const;
+export type WorkflowTemplate = (typeof BUILTIN_TEMPLATES)[number];
+/** 认得的流程模板；新模板由新模块经 scheduler-template.ts registerFlowTemplate 在运行时追加（TIER3e docs），这里只放内建三种 */
+export const WORKFLOW_TEMPLATES: readonly WorkflowTemplate[] = [...BUILTIN_TEMPLATES];
 export const WORKFLOW_MODES = ["manual", "observe", "auto"] as const;
 export type WorkflowMode = (typeof WORKFLOW_MODES)[number];
 export const AUTHOR_FAMILIES = ["claude", "codex"] as const;
@@ -109,11 +111,11 @@ export interface SchedulerTaskView {
 }
 
 /** One read transaction produces edges, stage, handler and scheduler reason for a consistent v4 DAG snapshot. */
-export function schedulerProjectView(db: Database, project: string): { asOfSeq: number; tasks: SchedulerTaskView[] } {
-  return db.transaction(() => schedulerProjectSnapshot(db, project)).deferred();
+export function schedulerProjectView(db: Database, project: string, eventsByTarget?: ReadonlyMap<string, readonly LedgerEvent[]>): { asOfSeq: number; tasks: SchedulerTaskView[] } {
+  return db.transaction(() => schedulerProjectSnapshot(db, project, eventsByTarget)).deferred();
 }
 
-function schedulerProjectSnapshot(db: Database, project: string): { asOfSeq: number; tasks: SchedulerTaskView[] } {
+function schedulerProjectSnapshot(db: Database, project: string, eventsByTarget?: ReadonlyMap<string, readonly LedgerEvent[]>): { asOfSeq: number; tasks: SchedulerTaskView[] } {
   const tasks = listTasks(db, project);
   const edges = depViews(listDeps(db, project), tasks);
   const meta = getMeta(db, project);
@@ -127,7 +129,7 @@ function schedulerProjectSnapshot(db: Database, project: string): { asOfSeq: num
       const workflow = getWorkflow(db, task.id);
       const intent = taskIntents(db, task.id).at(-1) ?? null;
       const blocked = blockedBy(task.id, edges).map((edge) => edge.from);
-      const events = listEvents(db, { project, target: task.id });
+      const events = eventsByTarget ? eventsByTarget.get(task.id) ?? [] : listEvents(db, { project, target: task.id });
       const baseHandler = currentHandler(task, events, { pms: meta.pms, dispatcher: meta.team?.dispatcher ?? null });
       const assigned = intent?.status === "submitted" && intent.recipient &&
         (intent.action === "review" ? task.stage === "review" : intent.action === "dispatch" && ["restate", "build", "fix"].includes(task.stage));

@@ -72,6 +72,12 @@ export interface SessionSourceAdapter {
   /** 这个路径是不是这种运行时的会话文件（按根目录判，零 I/O） */
   ownsPath(path: string, home?: string): boolean;
 
+  /**
+   * 会话 id 的形状独一份、看 id 就能认出是这种运行时（OpenCode 的 `ses_…`）。归档副本按 `<id>.jsonl` 命名，靠它认运行时不用读文件；
+   * 首行可能任意长（首条消息带宿主前言），按首行嗅探会读半截解析失败、被当成 CC。不实现 = 只靠路径 / 首行认
+   */
+  ownsSessionId?(id: string): boolean;
+
   /** 会话文件路径 → sessionId（文件名规则各家不同；认不出返回 null） */
   sessionIdFromPath(path: string): string | null;
 
@@ -211,6 +217,12 @@ export interface RuntimeControl {
    * 扩展在注册帧里声明 abort:true 才发（老扩展会默默忽略）；接线见 bridge/interrupt-gate.ts。
    */
   abortVia?: "extension";
+  /**
+   * 入站路由判了 insert（本机 agent 的消息插进在跑的回合、不打断）时怎么插：steer = 运行时原生插话（Pi 扩展 deliverAs steer、ACP 宿主
+   * _session/steering，插不进它们自己改成回合结束再投）。不声明 = 插不进，insert 按排队：CC（没有真正的回合中注入接口，实测见
+   * docs/architecture/inbound-route.md「CC 实测」）、Codex tmux
+   */
+  insertVia?: "steer";
   /** 斜杠命令（/compact 等）当普通 prompt 文本投进会话，不敲键（ACP 下由适配器自己认，比如 /compact 转成 thread/compact/start） */
   slashAsPrompt?: boolean;
 }
@@ -262,6 +274,12 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
   exitPrelude?(win: WindowOps): Promise<"at-shell" | "continue">;
   /** ACP 通道（Codex、Pi）。不声明 = 这个运行时只能走 tmux */
   readonly acp?: AcpTransport;
+  /** 只有 ACP 一条路（OpenCode：没有我们能驱动的 TUI）：create / resume 一律 acp，点名 tmux 拒 */
+  readonly acpOnly?: boolean;
+  /** 建 agent 必须显式给模型；值是拒绝时给人看的原因（OpenCode：它自己的缺省是免费模型） */
+  readonly modelRequired?: string;
+  /** 没有推理强度这一项（OpenCode 1.19 的 configOptions 只有 model / mode）：--effort 提示后丢弃，网页不显示 Effort */
+  readonly noEffort?: boolean;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;
   /** T85 启动凭据文件的路径怎么交：mcp-config = 放进 --mcp-config 里 channel-server 的 env（CC）；env = 宿主命令的环境变量（ACP）。不声明 = 不签 */

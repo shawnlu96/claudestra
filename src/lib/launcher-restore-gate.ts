@@ -23,7 +23,7 @@ interface Entry {
   missingAlert: boolean;
   failureAlert: boolean;
   lastFailureAlert?: number;
-  activeRuntime?: "pi" | "codex";
+  activeRuntime?: "pi" | "codex" | "opencode";
   deadAfterStop?: boolean;
 }
 interface State { version: 1; agents: Record<string, Entry> }
@@ -42,7 +42,7 @@ function validState(value: unknown): boolean {
       && Number.isInteger(e.failures) && e.failures >= 0 && e.failures <= 3
       && typeof e.missingAlert === "boolean" && typeof e.failureAlert === "boolean"
       && (e.deadAfterStop === undefined || typeof e.deadAfterStop === "boolean")
-      && (e.activeRuntime === undefined || e.activeRuntime === "pi" || e.activeRuntime === "codex")
+      && (e.activeRuntime === undefined || e.activeRuntime === "pi" || e.activeRuntime === "codex" || e.activeRuntime === "opencode")
       && (e.lastFailureAlert === undefined || (Number.isFinite(e.lastFailureAlert) && e.lastFailureAlert >= 0)));
 }
 
@@ -50,7 +50,7 @@ function observedRecovery(a: Agent, e: Entry): boolean {
   // A stopped hook runtime must become dead before active can indicate a manual recovery;
   // otherwise the third timed-out launch itself could erase the stop. Persist both observations.
   if (e.failureAlert && a.status === "dead") e.deadAfterStop = true;
-  if (e.failureAlert && e.deadAfterStop && e.failures > 0 && a.status === "active" && (a.runtime === "pi" || a.runtime === "codex")) {
+  if (e.failureAlert && e.deadAfterStop && e.failures > 0 && a.status === "active" && (a.runtime === "pi" || a.runtime === "codex" || a.runtime === "opencode")) {
     if (e.activeRuntime !== a.runtime) { e.activeRuntime = a.runtime; return false; }
     delete e.activeRuntime;
     delete e.deadAfterStop;

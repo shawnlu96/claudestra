@@ -33,6 +33,8 @@ import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./re
 import { ownerFreshStep } from "./scheduler-ui-owner-fresh.js";
 import { fixSelfHeal } from "./scheduler-fix-selfheal.js";
 import { handbackReview } from "./pm-handback.js";
+import { docsTierPause } from "./task-tier-docs-template.js";
+import { blockingLock, sharedOut, touchesUnionFile, unionLanePlanMode } from "./union-lane-share.js";
 
 export interface WorkerRef {
   agent: string;
@@ -94,6 +96,8 @@ export interface PlannerSnapshot {
   /** i28-PLANSNAP1: the project's repository, lowercased owner/repo (autoSnapshot fills it for merge-stage cards only); absent / null = unknown, no foreign_repo verdict. */
   projectRepo?: string | null;
   staleReplacement?: StaleReplacement;
+  /** UNIONLANE1: unionLaneShare on / off (union-lane-share.ts); absent = read the policy, only when an ordered union file is involved. */
+  unionLaneShare?: boolean;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -146,18 +150,19 @@ function liveIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["a
   return wait("in_flight", `等待 ${node.id} 的台账结果（${latest.status}）`);
 }
 
+/** Locks to take for the scope; an ordered union file takes none when unionLaneShare is on (scope still counts it). */
 function fileResources(s: PlannerSnapshot): string[] | null {
   const keys = s.fileGlobs.map(resourceKey);
   if (!keys.length || keys.includes(null)) return null;
-  return [...new Set(keys as string[])].sort();
+  const files = [...new Set(keys as string[])].sort();
+  return touchesUnionFile(files) ? [...sharedOut(files, unionLanePlanMode(s) === "on")] : files;
 }
 
 function resourceGate(s: PlannerSnapshot, resources: readonly string[]): PlannerDecision | null {
-  for (const resource of resources) {
-    const held = s.heldResources.find((h) => h.taskId !== s.task.id && resourcesOverlap(resource, resourceKey(h.resource) ?? h.resource.toLowerCase()));
-    if (held) return wait("resource_busy", `资源 ${resource} 与 ${held.resource} 冲突，先等 ${held.taskId}`);
-  }
-  return null;
+  const others = s.heldResources.filter((h) => h.taskId !== s.task.id);
+  const hit = blockingLock(s.task, others, resources, (resource, h) => resourcesOverlap(resource, resourceKey(h.resource) ?? h.resource.toLowerCase()),
+    touchesUnionFile(others.map((h) => h.resource)) ? unionLanePlanMode(s) : "off");
+  return hit && wait("resource_busy", `资源 ${hit.resource} 与 ${hit.held.resource} 冲突，先等 ${hit.held.taskId}`);
 }
 
 function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "reviewer"): PlannerDecision | null {
@@ -375,6 +380,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
 function planSchedulerBase(s: PlannerSnapshot): PlannerDecision {
   const { task, workflow } = s;
   if (!workflow || workflow.mode === "manual") return wait("manual", "任务由 PM 人工推进");
+  const docsOff = docsTierPause(task.project, workflow.template); if (docsOff) return escalate("workflow_drift", docsOff); // TIER3e：docs 按本项目 taskTierModels 同步 / 暂停
   if (task.kind !== "code" || !templateFor(workflow.template, workflow.templateVersion) || workflow.taskId !== task.id || workflow.specRev !== task.specRev) {
     return escalate("workflow_drift", "流程模板、任务类型或规格版本已变，自动推进暂停");
   }

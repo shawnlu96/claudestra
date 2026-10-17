@@ -33,6 +33,8 @@ import { uiDeliverPort } from "../lib/ledger-deliver-ui-port.js";
 import { grantResume } from "../lib/ledger-autostart-resume.js";
 import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
 import { registryTaskIdError, registryTaskLabel } from "../lib/registry-task-label.js";
+import { deliverNoChangeLocal } from "../lib/ci-no-change-recovery.js";
+import { managerDeliverPrecheck } from "../lib/ci-deliver-precheck.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -236,14 +238,19 @@ async function deliverCmd(c: LedgerCli): Promise<Result> {
   // 证据 / 结论只收路径：它们会进 bridge 通知和审查员 prompt（lib/quote-text.ts pathLike）
   if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", PATH_ONLY("--evidence"));
   checkTaskRefs({ head: c.p.flags.head });
+  if (c.p.flags["no-change"] !== undefined) return deliverNoChangeLocal(c.db, c.ctx(), task, c.p.flags, () => c.deps.now()); // CINOOP1：专用事务，不推 review
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
   const f = c.p.flags;
+  // CIPRECHK1：写交付前跑本机预检（恢复键 ciDeliverPrecheck），不过就带失败清单拒绝；去重重放与 off 都不跑
+  const pre = await managerDeliverPrecheck(c.db, { project: task.project, taskId: task.id, head: f.head, dedup: f.dedup, cwd: process.cwd(),
+    agentCwd: async () => (task.agent ? (await c.deps.loadRegistry()).agents[task.agent]?.cwd : undefined), now: c.deps.now() });
+  if (pre.refusal) throw new LedgerError("conflict", pre.refusal);
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes,
     uiEvidence: f["ui-evidence"], ui: uiDeliverPort() }); // UISDEL1：ui 卡截图证据按 uiDelivery 策略在事务里核（lib/ledger-deliver-ui.ts）
   await ensureReviewScope(c.db, task.id); // 规格外文件在交付事务外登记，本机 take_review 只读（i28-ASK2）
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
-  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
+  return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null, ...(pre.note ? { precheck: pre.note } : {}) };
 }
 
 /** 一次性「本人交付后自动交回派审」资格：只给真 PM（调度助理 / 调度服务 / 执行者都不行），事务在 lib/ledger-autostart-resume.ts、前置在 lib/order-local-deliver.ts */
@@ -359,9 +366,10 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
   deliver: {
-    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes", "ui-evidence"],
+    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes", "ui-evidence", "no-change", "order", "session"],
     usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--disputes JSON] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]" +
       " [--ui-evidence JSON：ui 卡前后截图清单，只登记证据不批准]" +
+      " [--no-change JSON --head <当前 head> --order <当前单号> [--session <会话 id>]：核实无需改码，接收端核验、CI 全绿才同轮恢复到 merge / main 已解决的修复卡取消；不和 --from 同用]" +
       " [--pr <完整 PR URL>：卡上空或非完整时同一事务写入，已是另一个完整 URL 就拒]",
     run: deliverCmd,
   },

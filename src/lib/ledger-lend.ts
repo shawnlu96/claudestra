@@ -31,7 +31,7 @@ import { claimConvergenceStep } from "./lend-arbiter-claim.js";
 import { claimAuthorFamily } from "./lend-author-family.js";
 import { fixStartRetry } from "./lend-fix-start.js";
 import { setTask } from "./ledger-write.js";
-import { leaseRestore } from "./lend-send-back-restore.js";
+import { leaseRestore } from "./lend-send-back-restore.js"; import { lendReturnLocal } from "./lend-return-local.js";
 import { settleReclaimIntent, type ReclaimIntentOutcome, type ReclaimIntentPrep } from "./lend-reclaim-intent.js";
 import { getLendPeer } from "./scheduler-placement-reservations.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -54,7 +54,7 @@ import { bounceReviewLine, bounceWork, fixBounce, reviewAfterBounce } from "./sc
 import { claimSuggest, notedSuggest } from "./role-model-settings-lend.js";
 import { withSuggest } from "./role-model-settings-wire.js";
 import type { ModelSuggest } from "./lend-wire-types.js";
-import { lendMemory } from "./memory-retrieve-lend.js";
+import { lendOfferMemory } from "./lend-memory-prepare-wiring.js";
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
   repo: string; pr: number | null; wire: OrderWire; text: string; sha256: string; status: LendOrderStatus; worker: string | null; leaseGen: number;
@@ -218,7 +218,7 @@ function peerRewrite<M extends { wire: OrderWire; whole?: OrderWire }>(db: Datab
  */
 export function renderLendOffer(db: Database, ctx: WriteCtx, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput, opts: { notes?: boolean } = {}) {
   const plain = orderFor(db, task, step, orderId, input);
-  const memory = opts.notes === false ? null : lendMemory(db, task, step, orderId, plain, { now: ctx.now });
+  const memory = opts.notes === false ? null : lendOfferMemory(db, task, step, orderId, plain, { now: ctx.now });
   const raw = memory ? { ...plain, wire: memory.wire, whole: memory.whole } : plain;
   const made = opts.notes === false ? peerRewrite(db, task, raw) : forPeer(db, ctx, task, raw); // card heads shortened, refused finding ids aliased (i28-GATE2)
   const head = made.wire.head as string;
@@ -334,7 +334,7 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
   // 钉位在该 peer 的授权已失效（grant 收回置空 / 到期 / 不再含 write 或本仓库）或它这一家族处于 runtime 冷却（NETCOOL1）时解除；否则保留，照旧再挂给它
   const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") || !g.repos.includes(o.repo))
     || pinnedPeerCooled(db, o, now);
-  const task = mustTask(db, o.taskId), r = leaseRestore(task, endWriteLease(db, o.taskId, why, now), unpin ? o.peer : undefined);
+  const task = mustTask(db, o.taskId), r = lendReturnLocal(db, o, task, endWriteLease(db, o.taskId, why, now), unpin, now); // LENDBACK1：没开工就退回 = 解钉、对不上家族的执行者不恢复
   if (r) setTask(db, ctx, { id: task.id, rev: task.rev, patch: r.patch as never });
   note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status, ...(r ? { restored: r.restored, unpinned: r.unpinned } : {}) });
   retireAfterLeaseEnd(db, ctx, task, !!r, beforeBasis, LEND_AUTHOR_PORTS, sample);

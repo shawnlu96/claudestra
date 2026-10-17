@@ -10,7 +10,8 @@ import { removeClaudeWorkerConfig } from "./lend-claude-worker.js";
 import { Database } from "bun:sqlite";
 import { isCodexEffort, isCodexModel, LEND_PATH, readLendSync } from "./lend-config.js";
 import { existsSync } from "node:fs";
-import { getOrder, LEND_JOURNAL_PATH, LIVE_STATES, type LendState } from "./lend-journal.js";
+import { getOrder, LEND_JOURNAL_PATH, LIVE_STATES, type LendRow, type LendState } from "./lend-journal.js";
+import { lendLaunchChoice, noteLendChoice, tierLendGate, type LendChoice } from "./task-tier-lend.js";
 import { lendStopReason } from "./lend-watchdog.js";
 import { isLendWorkerName } from "./runtimes/clean-env.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
@@ -25,13 +26,19 @@ export interface CreateGateOpts {
 
 export const CHOICE_CHANGED = "出借 worker 不起：授权里的模型或推理档在起之前改了，本次不起，单子退回发起方重派，下次领单按新授权起";
 
-/** 只读查这张单的 peer / 指纹（manager create 子进程里没有出借服务的 journal 连接）；读失败往外抛，由调用方按不起处理 */
-function orderPeer(journal: string, orderId: string): { peer: string; fp: string | null; family: string } | null {
+type ChoiceRow = Pick<LendRow, "peer" | "fp" | "family" | "wire">;
+/** 只读查这张单的 peer / 指纹 / 领单材料（manager create 子进程里没有出借服务的 journal 连接）；读失败往外抛，由调用方按不起处理 */
+function orderPeer(journal: string, orderId: string): ChoiceRow | null {
   const db = new Database(journal, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 2000");
-    return (db.query("SELECT peer, fp, family FROM lend_orders WHERE orderId = ?").get(orderId) as { peer: string; fp: string | null; family: string } | null) ?? null;
+    const r = db.query("SELECT peer, fp, family, wire FROM lend_orders WHERE orderId = ?").get(orderId) as (Omit<ChoiceRow, "wire"> & { wire: string | null }) | null;
+    return r ? { ...r, wire: wireOf(r.wire) } : null;
   } finally { db.close(); }
+}
+/** 领单材料读不回来 = 当没有（没有建议就走授权原参数，与改前一样不因它拒起） */
+function wireOf(raw: string | null): LendRow["wire"] {
+  try { return raw ? JSON.parse(raw) as LendRow["wire"] : null; } catch { return null; }
 }
 
 const argsOf = (model: string | undefined, effort: string | undefined): string[] =>
@@ -53,18 +60,36 @@ export function lendCreateDenied(name: string, o: CreateGateOpts = {}): string |
   let row: ReturnType<typeof orderPeer>;
   try { row = orderPeer(journal, order); } catch (e) { return `出借 worker 不起：读不了出借 journal（${(e as Error).message}）`; }
   if (!row) return `出借 worker 不起：journal 里没有单 ${order}`;
-  return JSON.stringify(argsOf(o.choice?.model, o.choice?.effort)) === JSON.stringify((row.family === "claude" ? [] : choiceArgs(row.peer, row.fp, lendPath))) ? null : CHOICE_CHANGED;
+  const want = orderChoice(row, lendPath);
+  if (want.refuse) return `出借 worker 不起：${want.refuse}`;
+  return JSON.stringify(argsOf(o.choice?.model, o.choice?.effort)) === JSON.stringify(want.args) ? null : CHOICE_CHANGED;
 }
 
 /**
  * 起出借 worker 时给 manager create 追加的 --model / --effort（lend-deps.ts worker.create）：gate 之后、create 之前现读 lend.json，
- * 按 journal 里这张单的 peer / 指纹找授权条目——不用领单时的快照，也不看订单 / hello / beat 里对方说了什么（模型只由出借方在授权里定）。
+ * 按 journal 里这张单的 peer / 指纹找授权条目——不用领单时的快照，也不看订单 / hello / beat 里对方说了什么（上限只由出借方在授权里定；
+ * 授权内是否照 A 的建议降档见下面 orderChoice）。
  * 没授权 / 文件无效 / 指纹对不上 = 不加参数，起不起由 manager create 的 lendCreateDenied 现核；读出的值再核一遍字符集，参数按数组传。
  * tests/lend-grant-model.test.ts。
  */
 export function lendModelArgs(db: Database, orderId: string, lendPath = LEND_PATH): string[] {
   const row = getOrder(db, orderId);
-  return row?.family === "codex" ? choiceArgs(row.peer, row.fp, lendPath) : [];
+  if (!row) return [];
+  const c = orderChoice(row, lendPath);
+  noteLendChoice(db, orderId, c);
+  return c.args;
+}
+
+/**
+ * 授权参数之上再看 A 的建议（TIER3b，task-tier-lend.ts）：本机 taskTierModels 不是 on、「接受降档建议」关、或这单的建议没带 A 给的类型（旧 A / 没协商）
+ * = 授权原参数，与改前一字不差（连门都不读）。出借服务组参数与 manager create 最终闸口用同一个算法；refuse（security 下限证明不了）由闸口拒起。
+ */
+function orderChoice(row: ChoiceRow, lendPath: string): LendChoice {
+  const grantArgs = row.family === "codex" ? choiceArgs(row.peer, row.fp, lendPath) : [];
+  if (row.wire?.suggest?.tier === undefined) return { args: grantArgs, active: false, accepted: false, tier: null };
+  const o = row.wire.order;
+  return lendLaunchChoice({ family: row.family, step: String(o.step ?? ""), node: typeof o.node === "string" ? o.node : null, suggest: row.wire.suggest, grantArgs },
+    tierLendGate());
 }
 
 /** 这个 peer 当下授权里的模型 / 推理档参数：出借服务组 create 参数和 manager create 最终闸口用同一个算法 */

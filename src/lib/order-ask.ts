@@ -13,8 +13,10 @@
  * 仍阻塞、15 分钟没回按 default 定；scope 提问的 files 全在规格精准例外里（spec-exceptions.ts）当场自动答、不通知 PM。
  * 标了 risk、卡首「模板：security」、读不到规格的永远等 PM（结构化判断，不看正文）。observe 照旧，只按提问记一条「本会…」；
  * off 与改前逐字一致。tests/order-ask-default-all.test.ts。
+ * ASKSCOPE3（恢复键 askScopeTests）：被规格替代的旧断言的测试类扩围 on 时不通知 PM、下一次扫描就批（order-ask-test-scope.ts）。
  */
 import { tryScopeAuto } from "./ask-scope-auto.js";
+import { openTestScopeFast, type BaseHas } from "./order-ask-test-scope.js";
 import type { PmNoticeLevel } from "./pm-notice-level.js";
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -48,6 +50,8 @@ export interface AskDeps {
   record(ctx: WriteCtx, input: { project: string; target: string; kind: "note"; text: string; data: Record<string, unknown> }): void;
   /** 恢复策略（askDefaultAll）；不注入 = 读 recovery-policy.json */
   policy?: RecoveryPolicyPort;
+  /** askScopeTests 快路核「文件在卡的 base 版里已存在」；不注入 = 按 repoDir 用 git 读（order-ask-test-scope.ts） */
+  baseHas?: BaseHas;
 }
 
 const TITLE_MAX = 80;
@@ -202,6 +206,8 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
   const askee = ask.assignee ?? pm;
   const scopeAuto = tryScopeAuto(db, deps, src, q, opened);
   if (scopeAuto) return scopeAuto;
+  const fast = await openTestScopeFast(db, deps, src, opened, q.risk);
+  if (fast) return { askId: ask.id, askee, duplicate: opened.existed, notified: false, delivered: fast, ...behavior };
   if (mode === "observe" && plan?.kind && !opened.existed) observeAll(deps, src, ask.id, plan.kind);
   if (plan?.lint?.length && !opened.existed) lintNote(deps, src, plan.lint);
   if (opened.existed && (ask.state !== "open" || ask.extra.notice !== "pending")) {

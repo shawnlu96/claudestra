@@ -9,7 +9,8 @@ import { existsSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { piAvailable, type PiEnvProfile } from "../pi-env.js";
-import { buildPiCommand, PI_LOCKED_EFFORT, PI_LOCKED_MODEL, type PiLaunchOptions } from "../pi-launch.js";
+import { buildPiCommand, type PiLaunchOptions } from "../pi-launch.js";
+import { piLock, type PiLock } from "../pi-lock.js";
 import { isAtShell, PI_READY_OPTION } from "../tmux-helper.js";
 import { resetReadyOption } from "./ready-option.js";
 import {
@@ -36,6 +37,7 @@ export const PI_CONTROL: RuntimeControl = {
   interruptKeys: ["C-c"],
   // 扩展能把回合中到达的消息 steer 进去；C-c 反而把干到一半的回合掐了
   preemptOnHumanMessage: false,
+  insertVia: "steer",
   // Pi 的 TUI 没有 CC 的 ❯ / 横幅，pane 判据恒判「忙」；忙闲只信扩展上报的回合结束
   idleSource: "hook",
   // Pi 的 --model 是启动期权威值，/model 在 Pi 里是另一套 slash 语义
@@ -47,7 +49,7 @@ export const PI_CONTROL: RuntimeControl = {
 };
 
 /** LaunchSpec → buildPiCommand 的选项。Pi 的 --session-id 是 open-or-create，三种 mode 同一条命令 */
-export function piLaunchOptions(spec: LaunchSpec): PiLaunchOptions {
+export function piLaunchOptions(spec: LaunchSpec, lock: PiLock = piLock()): PiLaunchOptions {
   return {
     channelId: spec.channelId,
     bridgeUrl: spec.bridgeUrl,
@@ -55,8 +57,8 @@ export function piLaunchOptions(spec: LaunchSpec): PiLaunchOptions {
     agentName: spec.agentName,
     purpose: spec.purpose,
     projectContext: spec.projectContext,
-    model: PI_LOCKED_MODEL,
-    effort: PI_LOCKED_EFFORT,
+    model: lock.model,
+    effort: lock.effort,
     piEnv: spec.extras?.piEnv as PiEnvProfile | undefined,
   };
 }

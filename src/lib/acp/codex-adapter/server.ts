@@ -13,7 +13,7 @@ import type { AppServer, NotificationEvent } from "./app-server.js";
 import { Approvals } from "./approvals.js";
 import type { HostCaps } from "./events.js";
 import type { ResultOf } from "./protocol.js";
-import { type AdapterConfig, applyConfig, configOptions, type ModelState, modelStateOf, threadConfig } from "./session-config.js";
+import { type AdapterConfig, applyConfig, configOptions, type ModelState, modelStateOf, POLICY_MISMATCH_REASON, readOnlyPolicyMismatch, threadConfig } from "./session-config.js";
 import { SessionState } from "./session-state.js";
 import { type Ctx, type FatalCause, type Reconciler, Turns, type TurnTimings } from "./turns.js";
 
@@ -130,14 +130,14 @@ export class CodexAcpServer {
       const config = threadConfig(this.deps.cfg.overlay, cwd, this.deps.controlMark);
       if (kind === "new") {
         await this.requireAuth();
-        const r = await this.deps.app.call("thread/start", { config, modelProvider: null, cwd });
+        const r = this.checkPolicy(await this.deps.app.call("thread/start", { config, modelProvider: null, cwd }));
         return this.adopt(r.thread.id, await this.modelState(r), true);
       }
       if (kind === "resume") await this.requireAuth();
       const read = await this.deps.app.call("config/read", { includeLayers: false });
       const opened = { threadId: source, cwd, config, excludeTurns: true as const, modelProvider: read.config.model_provider ?? "openai" };
-      if (kind === "resume") return this.adopt(source, await this.modelState(await this.deps.app.call("thread/resume", opened)), false);
-      const r = await this.deps.app.call("thread/fork", opened);
+      if (kind === "resume") return this.adopt(source, await this.modelState(this.checkPolicy(await this.deps.app.call("thread/resume", opened))), false);
+      const r = this.checkPolicy(await this.deps.app.call("thread/fork", opened));
       if (r.thread.id === source) throw new Error("thread/fork 返回的 id 和源线程相同");
       await this.deps.app.call("thread/unsubscribe", { threadId: r.thread.id }).catch((e) => this.deps.log(`fork 出的线程退订失败（宿主会在新进程里 resume 它）：${errText(e)}`));
       return { sessionId: r.thread.id, configOptions: configOptions(await this.modelState(r)) };
@@ -146,6 +146,14 @@ export class CodexAcpServer {
     } finally {
       release();
     }
+  }
+
+  /** 只读预设：读回线程实际生效的沙箱 / 审批，不符就停掉适配器并拒这次打开（session-config.ts readOnlyPolicyMismatch） */
+  private checkPolicy<R extends Rec>(r: R): R {
+    const why = readOnlyPolicyMismatch(this.deps.cfg.policy, r);
+    if (!why) return r;
+    this.deps.fatal({ kind: "protocol", why });
+    throw new RpcError(INTERNAL_ERROR, why, { fatal: true, reason: POLICY_MISMATCH_REASON });
   }
 
   private adopt(id: string, models: ModelState, withId: boolean): Rec {
@@ -174,7 +182,7 @@ export class CodexAcpServer {
   /** 会话类请求的失败：我们自己的 RpcError 原样；app-server 的错误改写成可读的 -32603；旧线程放掉过就带 previousSessionClosed */
   private sessionError(e: unknown): RpcError {
     const extra = this.session.failureData() ?? {};
-    if (e instanceof RpcError && e.code === AUTH_REQUIRED) return e;
+    if (e instanceof RpcError && (e.code === AUTH_REQUIRED || (e.data as { reason?: unknown } | undefined)?.reason === POLICY_MISMATCH_REASON)) return e; // checkPolicy 的 fatal 原样透出
     const msg = errText(e);
     if (/\bthread \S+ already has an active writer\b/.test(msg)) {
       return new RpcError(INTERNAL_ERROR, "这个 Codex 会话正被别的 Codex 客户端（Codex 应用、CLI 或 IDE 插件）占用，先在那边关掉再试（B9）", { reason: "thread_active_writer", ...extra });
