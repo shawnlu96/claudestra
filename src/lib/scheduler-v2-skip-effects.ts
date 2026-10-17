@@ -171,12 +171,13 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** lent orders run for peers: their ledgers and the lend journal, not this ledger's feature cards */
   foreign: {
+    "codex.ts": "proc=1 fs=1", // CODEXPROBE1: lender's Codex pause probe (lend-codex-probe-run.ts), runs from the lend loop
     "lend-claude-worker-capacity.ts": "proc=1",
     "lend-claude-worker.ts": "fs=4",
     "lend-clone.ts": "proc=1 fs=2 vcs=14",
     "lend-config-failure.ts": "notice=2",
     "lend-delivery-amend.ts": "fs=1",
-    "lend-deps.ts": "ledger=3 proc=3 vcs=1",
+    "lend-deps.ts": "ledger=3 proc=4 vcs=1",
     "lend-disk-preserve.ts": "fs=5",
     "lend-drive.ts": "notice=1",
     "lend-evidence.ts": "fs=4",
