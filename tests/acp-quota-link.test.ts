@@ -2,9 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { answerAcp, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
 import { useAcpQuotaPort } from "../src/bridge/acp-quota.ts";
 import { onAsk, setAsksForTest } from "../src/bridge/asks.ts";
-import { resetRuntimeAsksForTest } from "../src/bridge/ask-runtime.ts";
+import { openRuntimeAsk, resetRuntimeAsksForTest, settleRuntimeAsk, settleRuntimeAskInstance } from "../src/bridge/ask-runtime.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.ts";
+import { closeAsk, getAsk, listAsks, type Ask } from "../src/lib/ledger-asks.ts";
 import { tempLedgerPath } from "./ledger-test-helpers.ts";
 
 // 额度卡经 acp-link 的端到端（QWC-1）：卡面前几行、Codex 同账号、重报不换代、备用链 on 的切 / 切回 / 切了没成。基础的代际 / 认领 / 409 在 tests/acp-link.test.ts
@@ -23,6 +24,19 @@ const SOL = "go/deepseek-v4.1-flash", LUNA = "ds/deepseek-v4-flash";
 const QUOTA_CONFIG = [{ id: "model", name: "Model", type: "select", currentValue: SOL, options: [{ value: SOL, name: "sol" }, { value: LUNA, name: "luna" }] }];
 const CONFIG = [{ id: "model", name: "Model", type: "select", currentValue: "gpt-5.6-sol", options: [{ value: "gpt-5.6-sol", name: "sol" }, { value: "gpt-5.6-luna", name: "luna" }] }];
 const quota = (key: string, message: string) => ({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key, message }, configOptions: QUOTA_CONFIG });
+
+async function frameAndAsk(frame: ReturnType<typeof quota>, s: ReturnType<typeof sock>): Promise<Ask> {
+  let unsubscribe = () => {};
+  const next = new Promise<Ask>((resolve) => {
+    unsubscribe = onAsk((a) => { if (a.fromChannelId === frame.channelId && a.source === "codex" && a.state === "open") resolve(a); });
+  });
+  try {
+    await onAcpFrame(frame, s, discord);
+    return await next;
+  } finally {
+    unsubscribe();
+  }
+}
 
 beforeAll(() => {
   openLedger(ledgerPath);
@@ -248,4 +262,83 @@ describe("额度去重按宿主连接隔离", () => {
     expect(calls(s)).toHaveLength(2);
     onAcpHostGone(CH3, s);
   });
+});
+
+describe("宿主断线只撤对应代际的额度卡", () => {
+  beforeAll(() => useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined }));
+  afterAll(() => useAcpQuotaPort());
+
+  for (const kind of ["auth", "error", "tmux-quota"] as const) for (const pending of [false, true]) {
+    test(`额度卡 → ${kind} 卡${pending ? "尚在创建" : "已经打开"} → 断线：后卡保持 open`, async () => {
+      const ch = `local-acp-quota-hostgone-${kind}-${pending}`;
+      const s = sock(ch);
+      const q = await frameAndAsk({ ...quota(`quota:${ch}`, "usage limit"), channelId: ch }, s);
+      const button = liveAcpButtons(ch).quota[0]!;
+      const replacement = { type: "acp_failure", channelId: ch,
+        failure: { kind, key: `${kind}:${ch}`, message: kind === "auth" ? "not logged in" : "cyber policy blocked", retry: false } };
+      let unsubscribe = () => {};
+      let opened = false;
+      const next = new Promise<Ask>((resolve) => {
+        unsubscribe = onAsk((a) => {
+          if (a.fromChannelId === ch && a.source === "codex" && a.state === "open" && a.id !== q.id) opened = true, resolve(a);
+        });
+      });
+      try {
+        const incoming = kind === "tmux-quota" ? openRuntimeAsk({ source: "codex", channelId: ch, agentName: ch,
+          kind: "decide", title: "Codex tmux 额度卡", context: "usage limit from tmux", options: [], quota: true }) : onAcpFrame(replacement, s, discord);
+        if (pending) {
+          expect(opened).toBe(false);
+          onAcpHostGone(ch, s);
+        }
+        await incoming;
+        const card = await next;
+        if (!pending) onAcpHostGone(ch, s);
+        expect(getAsk(openLedger(ledgerPath), q.id)?.state).toBe("cancelled");
+        expect(getAsk(openLedger(ledgerPath), card.id)?.state).toBe("open");
+        expect(card.title).toContain(kind === "auth" ? "需要 owner 登录" : kind === "error" ? "回合失败" : "tmux 额度卡");
+        if (kind === "error") expect(card.extra.failure).toBe("error");
+        if (kind === "tmux-quota") expect(card.extra).toMatchObject({ quota: true, raw: "usage limit from tmux" });
+        expect(liveAcpButtons(ch).quota).toEqual([]);
+        expect((await answerAcp(ch, button, who)).status).toBe(409);
+      } finally {
+        unsubscribe();
+        onAcpHostGone(ch, s);
+      }
+    });
+  }
+
+  test("槽位仍是这张额度卡：断线照常撤卡", async () => {
+    const ch = "local-acp-quota-hostgone-owned";
+    const s = sock(ch);
+    const card = await frameAndAsk({ ...quota(`quota:${ch}`, "usage limit"), channelId: ch }, s);
+    onAcpHostGone(ch, s);
+    expect(getAsk(openLedger(ledgerPath), card.id)?.state).toBe("cancelled");
+    expect(liveAcpButtons(ch).quota).toEqual([]);
+  });
+
+  for (const mode of ["pending", "adopt", "suppressed"] as const) {
+    test(`按 instance 结卡涵盖 ${mode} 槽位，旧入口继续能结后来的无 instance 卡`, async () => {
+      const ch = `local-acp-quota-instance-${mode}`;
+      const input = { source: "codex" as const, channelId: ch, agentName: ch, kind: "decide" as const,
+        title: "Codex 额度卡", context: "usage limit", options: [], quota: true as const, instance: `quota-${mode}` };
+      const db = openLedger(ledgerPath);
+      if (mode !== "pending") {
+        await openRuntimeAsk(input);
+        if (mode === "suppressed") closeAsk(db, listAsks(db, { source: "codex", states: ["open"] }).find((a) => a.fromChannelId === ch)!.id, "expired");
+        resetRuntimeAsksForTest();
+      }
+      const building = openRuntimeAsk(input);
+      settleRuntimeAskInstance("codex", ch, input.instance);
+      await building;
+      expect(listAsks(db, { source: "codex", states: ["open"] }).filter((a) => a.fromChannelId === ch)).toEqual([]);
+      // 清掉已匹配的 suppressed 槽也要记消失：同样的卡再出现应当重新开，而不是一直压住。
+      await openRuntimeAsk(input);
+      expect(listAsks(db, { source: "codex", states: ["open"] }).filter((a) => a.fromChannelId === ch)).toHaveLength(1);
+      await openRuntimeAsk({ ...input, instance: undefined, title: "Codex 登录卡" });
+      settleRuntimeAskInstance("codex", ch, input.instance);
+      expect(listAsks(db, { source: "codex", states: ["open"] }).filter((a) => a.fromChannelId === ch)).toHaveLength(1);
+      settleRuntimeAsk("codex", ch);
+      expect(listAsks(db, { source: "codex", states: ["open"] }).filter((a) => a.fromChannelId === ch)).toEqual([]);
+    });
+  }
 });

@@ -21,7 +21,7 @@ import { parseSlotReply, SLOT_OPS, type CancelSlotResult, type HostSlotState } f
 import { planAcpQuota } from "./acp-quota.js";
 import { quotaCardText } from "../lib/acp/quota-fallback.js";
 import { apiJson } from "./api-respond.js";
-import { openRuntimeAsk, settleRuntimeAsk } from "./ask-runtime.js";
+import { openRuntimeAsk, settleRuntimeAsk, settleRuntimeAskInstance } from "./ask-runtime.js";
 import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
 import { extensionSocketOf } from "./pi-abort.js";
 import { rebindAcpWatcher } from "./acp-rebind.js";
@@ -260,9 +260,10 @@ function dropPerm(channelId: string, p: Perm, why: string, answered?: { label: s
 /** 宿主断线（bridge.ts 的 ws close）：撤它的权限 / 额度卡和额度去重状态；新连接补报时出新卡，不能清别的连接的卡。 */
 export function onAcpHostGone(channelId: string, ws: Socket): void {
   clearCapabilities.delete(ws);
-  if (quotaCards.get(channelId)?.ws === ws) {
+  const q = quotaCards.get(channelId);
+  if (q?.ws === ws) {
     quotaCards.delete(channelId);
-    settleRuntimeAsk("codex", channelId);
+    settleRuntimeAskInstance("codex", channelId, q.gen);
   }
   for (const p of [...(permQueues.get(channelId) ?? [])]) if (p.ws === ws && !p.claimed) dropPerm(channelId, p, "宿主断线");
   for (const [id, c] of calls) {
