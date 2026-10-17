@@ -64,6 +64,7 @@ export async function handleSettings(req: Request, path: string, principal: Prin
     return req.method === "GET" ? apiJson(200, steerQueueRecovery()) : apiJson(405, { error: "method not allowed" });
   }
   if (path === "/settings/steer-queue-observation" && req.method === "POST") {
+    if (!canManage(principal)) return forbidden(MANAGE_MSG);
     if (Number(req.headers.get("content-length")) > 2048) return apiJson(413, { ok: false });
     const body = await readJsonBody(req);
     const result = body === INVALID_JSON ? { ok: false, recorded: false } : observeSteerQueueCapability(body);

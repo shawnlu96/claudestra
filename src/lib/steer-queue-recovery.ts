@@ -5,6 +5,7 @@ import { recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recov
 const PROJECT = "claude-orchestrator";
 const KEY = "steerQueueCapability";
 const CAPABILITIES = ["enabled", "disabled", "missing", "invalid", "failed"];
+const SAMPLE_LIMIT = 256;
 
 export function steerQueueRecovery(policy: RecoveryPolicyPort = recoveryPolicy) {
   return { mode: policy(PROJECT, KEY).mode };
@@ -20,10 +21,17 @@ export function observeSteerQueueCapability(raw: unknown, policy: RecoveryPolicy
     || typeof s.capability !== "string" || !CAPABILITIES.includes(s.capability)) return invalid;
   if (policy(PROJECT, KEY).mode !== "observe") return { ok: true, recorded: false };
   try {
-    recordObserved(db(), { project: PROJECT, mechanism: KEY, target: "",
-      actionKey: `queuecap:${s.target}:${s.version}`, action: "require explicit queue capability before a busy send",
-      data: { targetDigest: s.target, capability: s.capability, differs: s.capability === "missing" || s.capability === "invalid" } }, Date.now());
-    return { ok: true, recorded: true };
+    const ledger = db();
+    return ledger.transaction(() => {
+      // A persistent global budget bounds ledger growth even across restarts or credentials rotating their digests.
+      const samples = ledger.prepare(`SELECT 1 FROM events WHERE project = ? AND kind = 'note'
+        AND json_extract(data, '$.mechanism') = ? LIMIT ?`).all(PROJECT, KEY, SAMPLE_LIMIT);
+      if (samples.length >= SAMPLE_LIMIT) return { ok: true, recorded: false };
+      recordObserved(ledger, { project: PROJECT, mechanism: KEY, target: "",
+        actionKey: `queuecap:${s.target}:${s.version}`, action: "require explicit queue capability before a busy send",
+        data: { targetDigest: s.target, capability: s.capability, differs: s.capability === "missing" || s.capability === "invalid" } }, Date.now());
+      return { ok: true, recorded: true };
+    }).immediate();
   } catch (e) {
     // Observation failure must not change a send's result; the bridge log retains the diagnostic.
     console.warn(`[steer-queue] observation unavailable: ${(e as Error).message}`);

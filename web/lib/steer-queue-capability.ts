@@ -23,7 +23,7 @@ export function queueWhenBusy(raw: unknown, mode: SteerQueueMode, failed = false
 
 export interface QueueRead { fp: string | null; epoch: number; ticket: number }
 export class SteerQueueStaleRead extends Error {
-  constructor() { super("settings target changed or read was superseded"); }
+  constructor() { super("settings target changed"); }
 }
 
 /** Reads from another selection or superseded by a newer read/write cannot publish a cached capability. */
@@ -33,14 +33,16 @@ export class SteerQueueCache {
   private values = new Map<string | null, unknown>();
 
   switchMachine(): void { this.epoch++; }
+  selection(fp: string | null): Pick<QueueRead, "fp" | "epoch"> { return { fp, epoch: this.epoch }; }
   begin(fp: string | null): QueueRead {
     const ticket = (this.tickets.get(fp) ?? 0) + 1;
     this.tickets.set(fp, ticket);
     return { fp, epoch: this.epoch, ticket };
   }
   current(read: QueueRead, fp: string | null): boolean {
-    return read.fp === fp && read.epoch === this.epoch && read.ticket === this.tickets.get(fp);
+    return this.selected(read, fp) && read.ticket === this.tickets.get(fp);
   }
+  selected(read: Pick<QueueRead, "fp" | "epoch">, fp: string | null): boolean { return read.fp === fp && read.epoch === this.epoch; }
   finish(read: QueueRead, fp: string | null, raw: unknown): boolean {
     if (!this.current(read, fp)) return false;
     this.values.set(fp, raw);
@@ -55,6 +57,7 @@ export class SteerQueueCache {
 interface QueueSettings { raw: Record<string, unknown>; mode: SteerQueueMode; read: QueueRead }
 const capabilities = new SteerQueueCache();
 const pendingSettings = new Map<string | null, Promise<QueueSettings>>();
+const pendingWrites = new Map<string | null, Set<Promise<QueueSettings>>>();
 machines.onSwitch(() => { capabilities.switchMachine(); pendingSettings.clear(); });
 let controlRead = 0;
 let controlPending: Promise<SteerQueueMode> | null = null;
@@ -104,13 +107,26 @@ async function readSettings(patch?: unknown): Promise<QueueSettings> {
   const [raw, mode] = await Promise.all([api<Record<string, unknown>>("/settings", {
     ...(patch ? { method: "PUT", json: patch } : {}), timeoutMs: 8000,
   }, fp ? { fp } : undefined), getSteerQueueRecovery()]);
-  if (!capabilities.finish(read, machines.currentFp(), raw["steer.queueWhenBusy"])) {
-    throw new SteerQueueStaleRead();
-  }
+  if (!capabilities.selected(read, machines.currentFp())) throw new SteerQueueStaleRead();
+  // Supersession only prevents publishing capability; successful unrelated settings reads/writes still reach their callers.
+  capabilities.finish(read, machines.currentFp(), raw["steer.queueWhenBusy"]);
   return { raw, mode, read };
 }
 export function readSteerQueueSettings(patch?: unknown): Promise<QueueSettings> {
-  if (patch) { pendingSettings.delete(machines.currentFp()); return readSettings(patch); }
+  if (patch) {
+    const fp = machines.currentFp();
+    pendingSettings.delete(fp);
+    let writes = pendingWrites.get(fp);
+    if (!writes) pendingWrites.set(fp, writes = new Set());
+    const result = readSettings(patch).finally(() => {
+      writes.delete(result);
+      if (!writes.size && pendingWrites.get(fp) === writes) pendingWrites.delete(fp);
+      // A GET launched during the write may have captured the pre-write value; the next send must probe after it settled.
+      pendingSettings.delete(fp);
+    });
+    writes.add(result);
+    return result;
+  }
   const fp = machines.currentFp();
   const pending = pendingSettings.get(fp);
   if (pending) return pending;
@@ -122,17 +138,23 @@ export function readSteerQueueSettings(patch?: unknown): Promise<QueueSettings> 
 }
 /** A failed probe never establishes queue support; an idle target may still accept a normal message. */
 export async function getSteerQueueForSend(): Promise<boolean> {
-  const fp = machines.currentFp();
+  const fp = machines.currentFp(), selection = capabilities.selection(fp);
   try {
-    const { read } = await readSteerQueueSettings();
-    const mode = await getSteerQueueRecovery();
-    if (!capabilities.current(read, machines.currentFp())) throw new SteerQueueStaleRead();
-    if (mode === "observe") void observeCapability(fp, capabilities.capability(fp));
-    return capabilities.enabled(fp, mode);
+    for (;;) {
+      // Let mutations settle before probing; a focus GET must not let a send overtake a pending opt-out PUT.
+      await Promise.allSettled([...(pendingWrites.get(fp) ?? [])]);
+      if (!capabilities.selected(selection, machines.currentFp())) throw new SteerQueueStaleRead();
+      const { read } = await readSteerQueueSettings();
+      const mode = await getSteerQueueRecovery();
+      if (!capabilities.selected(selection, machines.currentFp())) throw new SteerQueueStaleRead();
+      if (pendingWrites.get(fp)?.size || !capabilities.current(read, fp)) continue;
+      if (mode === "observe") void observeCapability(fp, capabilities.capability(fp));
+      return capabilities.enabled(fp, mode);
+    }
   }
   catch (e) {
-    if (e instanceof SteerQueueStaleRead) throw e;
     const mode = await getSteerQueueRecovery();
+    if (!capabilities.selected(selection, machines.currentFp())) throw new SteerQueueStaleRead();
     if (mode === "observe") void observeCapability(fp, "failed");
     if (mode !== "on") throw e;
     return false;

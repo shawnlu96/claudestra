@@ -1,6 +1,10 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { isolatedStateSuite } from "./isolated-state";
+
+// The queued-thread integration uses real authentication state; keep it isolated from other test files.
+const { afterAll, beforeAll, describe, test } = isolatedStateSuite(import.meta.path);
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
@@ -23,6 +27,8 @@ describe("real sender against isolated bridge fixtures", () => {
     raw: true as unknown, fail: false, thinking: false, mode: "on", posts: [] as { url: string; body: Record<string, unknown> }[],
     projectionStatus: 200, version: "fixture-v1", samples: [] as Record<string, unknown>[],
     hold: null as null | Promise<void>, captured: null as null | (() => void),
+    messages: null as null | ((body: Record<string, unknown>) => Promise<Response>),
+    projection: null as null | (() => Promise<Response>),
   };
   const act = (f: () => unknown) => React.act(async () => { await f(); });
   const tick = () => act(() => new Promise(r => setTimeout(r, 0)));
@@ -38,7 +44,9 @@ describe("real sender against isolated bridge fixtures", () => {
     configure({ mode: "direct", fp: "fixture", machineName: "fixture", version: "new" });
     globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: unknown; signal?: AbortSignal }) => {
       const url = String(input);
-      if (url.includes("steer-queue-recovery")) return Response.json({ mode: fixture.mode }, { status: fixture.projectionStatus });
+      if (url.includes("steer-queue-recovery")) {
+        return fixture.projection ? fixture.projection() : Response.json({ mode: fixture.mode }, { status: fixture.projectionStatus });
+      }
       if (url.includes("steer-queue-observation")) {
         fixture.samples.push(JSON.parse(String(init?.body)));
         return Response.json({ ok: true, recorded: true });
@@ -53,7 +61,9 @@ describe("real sender against isolated bridge fixtures", () => {
       if (url.endsWith("/pending")) return Response.json({ thinking: fixture.thinking });
       if (url.includes("/messages")) {
         if (init?.signal?.aborted) throw new Error("aborted fixture send");
-        fixture.posts.push({ url, body: JSON.parse(String(init?.body)) });
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        fixture.posts.push({ url, body });
+        if (fixture.messages) return fixture.messages(body);
         return Response.json({ queued: true, threadId: "original-thread" }, { status: 202 });
       }
       return Response.json({}, { status: 404 });
@@ -121,15 +131,127 @@ describe("real sender against isolated bridge fixtures", () => {
     fixture.fail = false;
   });
 
-  test("new true keeps the compact queued 202 receipt", async () => {
+  test("focus settings refresh during a clicked send cannot turn it into a false failure", async () => {
     fixture.raw = true; fixture.fail = false; fixture.mode = "on"; fixture.thinking = true;
     const v = await mount(true);
-    await act(() => v.button.click());
-    expect(fixture.posts).toHaveLength(1);
-    expect(fixture.posts[0]!.body).toMatchObject({ waitForIdle: true, wait: 0 });
-    expect(v.host.textContent).toContain("排队中");
-    await v.close();
+    let calls = 0, release!: (r: Response) => void, captured!: () => void;
+    const waiting = new Promise<void>(r => { captured = r; });
+    fixture.projection = async () => {
+      if (++calls === 2) return new Promise<Response>(r => { release = r; captured(); });
+      return Response.json({ mode: "on" });
+    };
+    try {
+      await act(() => v.button.click()); await waiting;
+      await require("../web/lib/api/settings").getSettings();
+      await act(() => release(Response.json({ mode: "on" })));
+      await tick();
+      expect(fixture.posts).toHaveLength(1);
+      expect(v.host.textContent).toContain("排队中");
+      expect(v.host.textContent).not.toContain("没发出去");
+    } finally { fixture.projection = null; await v.close(); }
   });
+
+  test("two different settings switches display both successful writes while replies overlap", async () => {
+    const saved = globalThis.fetch;
+    const responses: ((r: Response) => void)[] = [];
+    globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+      if (String(input).endsWith("/settings") && init?.method === "PUT") return new Promise<Response>(r => responses.push(r));
+      if (String(input).endsWith("/settings")) return Response.json({ pushNoContent: false, pushAllAsks: false });
+      return Response.json({ mode: "on" });
+    }) as typeof fetch;
+    const { useSettingsFlag } = require("../web/features/chat/components/settings/settings-flag");
+    const Flag = ({ name }: { name: string }) => {
+      const f = useSettingsFlag(name);
+      return React.createElement("button", { "data-flag": name, disabled: f.busy, onClick: () => void f.toggle() }, f.on ? "on" : "off");
+    };
+    const host = dom().document.createElement("div"); dom().document.body.appendChild(host);
+    const root = createRoot(host as never);
+    try {
+      await act(() => root.render(React.createElement(React.Fragment, null,
+        React.createElement(Flag, { name: "pushNoContent" }), React.createElement(Flag, { name: "pushAllAsks" }))));
+      await tick();
+      const first = host.querySelector('[data-flag="pushNoContent"]')!, second = host.querySelector('[data-flag="pushAllAsks"]')!;
+      await act(() => { first.click(); second.click(); });
+      expect(responses).toHaveLength(2);
+      await act(() => responses[0](Response.json({ pushNoContent: true })));
+      expect(first.textContent).toBe("on");
+      await act(() => responses[1](Response.json({ pushAllAsks: true })));
+      expect(second.textContent).toBe("on");
+    } finally { await act(() => root.unmount()); host.remove(); globalThis.fetch = saved; }
+  });
+
+  test("new true keeps compact queued 202 and the reply is polled on the original thread", async () => {
+    const { handleApiMessages } = await import("../src/bridge/api-messages");
+    const { HeldQueue } = await import("../src/bridge/held-queue");
+    const { clearOpenedBy, flushHeld } = await import("../src/bridge/held-flush");
+    const { isHumanRequest } = await import("../src/bridge/router");
+    const { stopSnapshot, takeApiWaiters } = await import("../src/bridge/stop-settle");
+    const { apiThreadResults, initApiRoutes, serveApiRequest } = await import("../src/bridge/api-routes");
+    const { setRequestContext } = await import("../src/bridge/request-context");
+    const { newTokenPrincipal, tokenIdOf, updatePrincipals } = await import("../src/lib/principals");
+    const { setSteerQueueWhenBusy } = await import("../src/lib/config-store");
+    const { settleApiReply } = await import("../src/lib/api-reply-target");
+    const { claimApiReply } = await import("../src/lib/pending-reply-scope");
+    await setSteerQueueWhenBusy(true);
+    const principal = newTokenPrincipal("queue-fixture", ["*"]); principal.role = "owner";
+    await updatePrincipals(f => { f.principals.push(principal); return { changed: true, result: null }; });
+    const tokenId = tokenIdOf(principal), cid = "queue-fixture", held = new HeldQueue(null);
+    const pending = new Map<string, import("../src/bridge/api-messages").PendingApiRequest[]>();
+    const sent: import("../src/bridge/router").Envelope[] = [];
+    let compacting = true, threadId = "";
+    const deliver = async (envelope: import("../src/bridge/router").Envelope): Promise<import("../src/bridge/router").Delivery> => {
+      if (compacting) { held.holdEnv(envelope); return { envelope, outcome: { kind: "sent", note: "queued" } }; }
+      sent.push(envelope); return { envelope, outcome: { kind: "sent" } };
+    };
+    const deps = {
+      clients: new Map([[cid, { ws: {} }]]), deliver, findApiAgent: async () => ({ name: "agent-worker", channelId: cid }),
+      mirrorApiExchange: async () => {}, startTypingWithSafety: () => {}, lastMessageSource: new Map<string, string>(),
+      pendingApiRequests: pending, apiReqKey: (token: string, channel: string) => `${token}|${channel}`,
+      slash: { sendLine: async () => {}, mirror: async () => {}, scheduleClearRotation: () => {}, markThinking: () => {}, record: () => {},
+        runManager: async () => ({ ok: true }) },
+    };
+    initApiRoutes({ ...deps, handleEventsRequest: () => new Response("events"), scheduleClearRotation: () => {} });
+    fixture.messages = async body => {
+      const req = new Request("http://fixture/api/v1/agents/worker/messages", { method: "POST", body: JSON.stringify(body) });
+      const response = await handleApiMessages(req, new URL(req.url), principal, tokenId, ["", "worker"] as RegExpMatchArray, deps);
+      expect(response.status).toBe(202);
+      const receipt = await response.clone().json() as { threadId: string; queued: boolean };
+      expect(receipt.queued).toBe(true); threadId = receipt.threadId;
+      return response;
+    };
+    const poll = async () => {
+      const req = new Request(`http://fixture/api/v1/threads/${threadId}`, { headers: { Authorization: `Bearer ${principal.secret}` } });
+      setRequestContext(req, { source: "loopback", clientIp: null, https: false });
+      return serveApiRequest(req, new URL(req.url));
+    };
+    fixture.raw = true; fixture.fail = false; fixture.mode = "on"; fixture.thinking = true;
+    const v = await mount(true);
+    try {
+      await act(() => v.button.click());
+      expect(fixture.posts).toHaveLength(1);
+      expect(fixture.posts[0]!.body).toMatchObject({ waitForIdle: true, wait: 0 });
+      expect(v.host.textContent).toContain("排队中");
+      expect(sent).toHaveLength(0);
+      expect(held.get(cid)![0].env.meta.threadId).toBe(threadId);
+      expect((await poll()).status).toBe(404);
+      const snap = stopSnapshot(held.ids(cid), pending);
+      const stop = { cid, stopChannelId: cid, stopWs: 1, candidateWs: 1, event: "Stop", drain: { text: "previous reply" } };
+      expect(takeApiWaiters(pending, stop, true, new Set(), snap.held, snap.waiters)).toEqual([]);
+      compacting = false; clearOpenedBy();
+      await flushHeld({ held, compacting: () => compacting, working: async () => false, deliver, isHumanRequest,
+        client: () => ({ ws: {} as never }), touch: () => {}, settled: async () => true, agentBatch: () => false }, cid, "compact_end");
+      expect(sent).toHaveLength(1);
+      expect(sent[0].meta.threadId).toBe(threadId);
+      const key = deps.apiReqKey(tokenId, cid);
+      const claim = claimApiReply(pending.get(key)!, apiThreadResults, { tokenId, channelId: cid, replyTo: sent[0].meta.messageId });
+      expect(claim.taken?.threadId).toBe(threadId);
+      expect(settleApiReply({ tokenId, threadId: claim.taken!.threadId, pending: claim.taken,
+        result: { threadId, agent: "agent-worker", reply: "answer after compact" }, results: apiThreadResults, queues: pending, key })).toBeNull();
+      const answer = await poll();
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toMatchObject({ threadId, reply: "answer after compact" });
+    } finally { fixture.messages = null; apiThreadResults.delete(threadId); clearOpenedBy(); await v.close(); }
+  }, 30_000);
 
   test("off/observe reproduce old parsing and upstream false still blocks in every mode", async () => {
     fixture.thinking = true;

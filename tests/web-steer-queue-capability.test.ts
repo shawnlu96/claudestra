@@ -8,8 +8,9 @@ import { observeSteerQueueCapability, steerQueueRecovery } from "../src/lib/stee
 import { handleSettings } from "../src/bridge/local-api/settings";
 import type { Principal } from "../src/lib/principals";
 import {
-  getSteerQueueRecovery, queueCapability, queueWhenBusy, readSteerQueueSettings, SteerQueueCache, steerQueueMode, SteerQueueStaleRead,
+  getSteerQueueForSend, getSteerQueueRecovery, queueCapability, queueWhenBusy, readSteerQueueSettings, SteerQueueCache, steerQueueMode,
 } from "../web/lib/steer-queue-capability";
+import { getSettings, putSettings } from "../web/lib/api/settings";
 import { appConfigSync, setAppConfigForTest } from "../web/lib/app-config";
 import { sayGate } from "../web/features/collab/collab-action";
 
@@ -108,7 +109,7 @@ test("an older control projection cannot restore off after a newer on response",
   } finally { globalThis.fetch = saved; }
 });
 
-test("the real settings cache rejects a delayed true GET superseded by a false PUT", async () => {
+test("a delayed settings GET still succeeds when a false PUT supersedes its capability publication", async () => {
   const saved = globalThis.fetch, config = appConfigSync();
   setAppConfigForTest({ mode: "direct", fp: "fixture", machineName: "fixture", version: "new" });
   let release!: (r: Response) => void;
@@ -122,6 +123,108 @@ test("the real settings cache rejects a delayed true GET superseded by a false P
     const updated = await readSteerQueueSettings({ "steer.queueWhenBusy": false });
     expect(updated.raw["steer.queueWhenBusy"]).toBe(false);
     release(Response.json({ "steer.queueWhenBusy": true }));
-    await expect(old).rejects.toBeInstanceOf(SteerQueueStaleRead);
+    expect((await old).raw["steer.queueWhenBusy"]).toBe(true);
   } finally { globalThis.fetch = saved; setAppConfigForTest(config); }
+});
+
+test("parallel flag writes, key saves with focus reads, and talk reads retain successful responses", async () => {
+  const saved = globalThis.fetch, config = appConfigSync();
+  setAppConfigForTest({ mode: "direct", fp: "fixture", machineName: "fixture", version: "new" });
+  const requests: { method: string; resolve: (r: Response) => void }[] = [];
+  globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+    if (String(input).includes("steer-queue-recovery")) return Response.json({ mode: "on" });
+    return new Promise<Response>(resolve => requests.push({ method: init?.method ?? "GET", resolve }));
+  }) as typeof fetch;
+  const tick = () => new Promise(r => setTimeout(r, 0));
+  try {
+    const first = putSettings({ pushNoContent: true }); await tick();
+    const second = putSettings({ pushAllAsks: true }); await tick();
+    requests.shift()!.resolve(Response.json({ pushNoContent: true }));
+    expect((await first).pushNoContent).toBe(true);
+    requests.shift()!.resolve(Response.json({ pushAllAsks: true }));
+    expect((await second).pushAllAsks).toBe(true);
+
+    const key = putSettings({ groqApiKey: "fixture-key" }); await tick();
+    const focus = getSettings(); await tick();
+    requests.shift()!.resolve(Response.json({ groqApiKeyHint: "1234" }));
+    expect((await key).groqApiKeySet).toBe(true);
+    requests.shift()!.resolve(Response.json({ groqApiKeyHint: "1234" })); await focus;
+
+    const talk = getSettings(); await tick();
+    const patch = putSettings({ lang: "en" }); await tick();
+    requests.shift()!.resolve(Response.json({ talkEnabled: true }));
+    expect((await talk).talkEnabled).toBe(true);
+    requests.shift()!.resolve(Response.json({ lang: "en" })); await patch;
+  } finally { globalThis.fetch = saved; setAppConfigForTest(config); }
+});
+
+test("a send survives an unrelated GET during the final recovery read and honors a concurrent false PUT", async () => {
+  const saved = globalThis.fetch, config = appConfigSync();
+  setAppConfigForTest({ mode: "direct", fp: "fixture", machineName: "fixture", version: "new" });
+  try {
+    for (const disable of [false, true]) {
+      let modeCalls = 0, raw = true;
+      let release!: (r: Response) => void, captured!: () => void;
+      const waiting = new Promise<void>(r => { captured = r; });
+      globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+        if (String(input).includes("steer-queue-recovery")) {
+          if (++modeCalls === 2) return new Promise<Response>(r => { release = r; captured(); });
+          return Response.json({ mode: "on" });
+        }
+        if (init?.method === "PUT") raw = false;
+        return Response.json({ "steer.queueWhenBusy": raw });
+      }) as typeof fetch;
+      const sending = getSteerQueueForSend();
+      await waiting;
+      if (disable) await putSettings({ "steer.queueWhenBusy": false });
+      else await getSettings();
+      release(Response.json({ mode: "on" }));
+      expect(await sending).toBe(!disable);
+    }
+  } finally { globalThis.fetch = saved; setAppConfigForTest(config); }
+});
+
+test("observation POST rejects guest, readonly, scoped and peer credentials before reading the body", async () => {
+  const base: Principal = { id: "fixture", role: "external", agents: ["*"], manage: true, createdAt: "t" };
+  for (const principal of [{ ...base, id: "guest:fixture", agents: ["worker"], manage: false },
+    { ...base, manage: false }, { ...base, agents: ["worker"] }, { ...base, peer: "fixture-peer" }]) {
+    const req = new Request("http://fixture/api/v1/settings/steer-queue-observation", { method: "POST", body: "invalid JSON" });
+    expect((await handleSettings(req, "/settings/steer-queue-observation", principal))!.status).toBe(403);
+    expect(req.bodyUsed).toBe(false);
+  }
+});
+
+test("a send cannot reuse a stale focus GET started while an opt-out PUT was still being applied", async () => {
+  const saved = globalThis.fetch, config = appConfigSync();
+  setAppConfigForTest({ mode: "direct", fp: "fixture", machineName: "fixture", version: "new" });
+  let raw = true, reads = 0, releaseWrite!: (r: Response) => void, releaseRead!: (r: Response) => void;
+  globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+    if (String(input).includes("steer-queue-recovery")) return Response.json({ mode: "on" });
+    if (init?.method === "PUT") return new Promise<Response>(r => { releaseWrite = r; });
+    if (++reads === 1) return new Promise<Response>(r => { releaseRead = r; });
+    return Response.json({ "steer.queueWhenBusy": raw });
+  }) as typeof fetch;
+  try {
+    const writing = putSettings({ "steer.queueWhenBusy": false }); await new Promise(r => setTimeout(r, 0));
+    const focus = getSettings(); await new Promise(r => setTimeout(r, 0));
+    const sending = getSteerQueueForSend();
+    raw = false; releaseWrite(Response.json({ "steer.queueWhenBusy": false })); await writing;
+    releaseRead(Response.json({ "steer.queueWhenBusy": true })); await focus;
+    expect(await sending).toBe(false);
+  } finally { globalThis.fetch = saved; setAppConfigForTest(config); }
+});
+
+test("observation samples have a persistent per-mechanism bound even with changing digests", () => {
+  const dir = mkdtempSync(join(tmpdir(), "queuecap-limit-")), path = join(dir, "ledger.sqlite");
+  const policy: typeof recoveryPolicy = () => ({ mode: "observe", manualAfterMs: null, source: "config" });
+  try {
+    let db = openLedger(path);
+    for (let i = 0; i < 300; i++) {
+      observeSteerQueueCapability({ target: i.toString(16).padStart(24, "0"), version: "b".repeat(24), capability: "missing" }, policy, () => db);
+    }
+    expect(listEvents(db, { project: "claude-orchestrator" })).toHaveLength(256);
+    closeLedger(path); db = openLedger(path);
+    expect(observeSteerQueueCapability({ target: "c".repeat(24), version: "d".repeat(24), capability: "missing" }, policy, () => db).recorded).toBe(false);
+    expect(listEvents(db, { project: "claude-orchestrator" })).toHaveLength(256);
+  } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
 });
