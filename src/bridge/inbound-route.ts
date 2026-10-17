@@ -86,18 +86,24 @@ function routeMode(): RouteMode {
 // ── 三处共用的判定，绑好当前档位 ─────────────────────────────────────────────
 type Human = (env: Envelope) => boolean;
 export const routeAdmitsWhileBusy = (env: Envelope, human: Human = isHumanRequest): boolean => admitsWhileBusy(env, routeMode(), human as (e: RouteEnv) => boolean);
+/**
+ * 本次投递尝试已按插队放行（routeHolds 判定那一刻冻结）：afterInsertSend 只认它、不再重读档位——判定到 ws.send 之间有好几个 await，
+ * 中途热切到 off / observe 也不能丢押回、漏记确认账。每次 routeHolds 先清再判：重投 / 押后放出的空闲投递不继承上一次的插队决定
+ */
+const insertAttempt = new WeakSet<Envelope>();
 /** deliverToLocal 的押后判据：原有规则（压缩中 / agent 消息忙时）之外，Jev 判了排队 / 合并的忙时也押；判了 insert 的忙时不押、直接送进回合（压缩中照押） */
 export const routeHolds = (env: Envelope, turn: TurnState): boolean => {
-  if (turn.main === "busy" && insertsWhileBusy(env, routeMode())) return false;
+  insertAttempt.delete(env);
+  if (turn.main === "busy" && insertsWhileBusy(env, routeMode())) return void insertAttempt.add(env), false;
   return holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn) || (turn.main === "busy" && holdsWhileBusy(env, routeMode()));
 };
 /**
  * 回合中插队 ws.send 之后（bridge.ts deliverToLocal 一行）：没送到（回 0 = 连接已断、这条被丢了）→ 退回押后队列，回合结束 / 重连后照常投，
  * 返回 true = 已押回；送到了 → 记一笔「没确认」：目标明确回给插队方之前不把它别的输出当答复（bridge/steer-insert.ts）。
- * 只管 insert 这条路——改动前 agent 消息忙时根本不 ws.send，空闲投递的老行为不动
+ * 只管 insert 这条路——改动前 agent 消息忙时根本不 ws.send，空闲投递的老行为不动。认的是 routeHolds 判定时冻结的放行（insertAttempt），turn 只为签名留着
  */
-export function afterInsertSend(env: Envelope, turn: TurnState, sent: unknown, held: Pick<HeldQueue, "holdEnv">): boolean {
-  if (turn.main !== "busy" || !insertsWhileBusy(env, routeMode())) return false;
+export function afterInsertSend(env: Envelope, _turn: TurnState, sent: unknown, held: Pick<HeldQueue, "holdEnv">): boolean {
+  if (!insertAttempt.delete(env)) return false; // 这次投递没按插队放行（空闲 / 不是 insert / 判定时不是 on）
   if (sent === 0) {
     console.warn(`⚠️ 入站路由：插队送出失败（连接已断），${env.meta.messageId} 退回押后队列，${held.holdEnv(env)} 条`);
     return true;
