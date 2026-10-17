@@ -2,8 +2,8 @@
  * TIER3b「接受降档建议」设置：lib/task-tier-lend-settings.ts（读 / 写 / 权限）、bridge local-api/task-tier-lend-settings.ts（网页门禁）、
  * manager/ledger-task-tier-lend-settings-cmd.ts（管理命令）。缺省开；只有 B 本人（owner）/ B 的 master 能改，peer（远端 A）、agent 一律拒。
  */
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeTierLendSettingsApi } from "../src/bridge/local-api/task-tier-lend-settings.js";
@@ -18,6 +18,8 @@ import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
 import type { Registry } from "../src/manager/core.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
 import { runLedger } from "../src/manager/ledger.js";
+import { testChildEnv } from "./test-env.js";
+import { acquireLock } from "../src/lib/file-lock.js";
 
 const at = "2026-10-01T00:00:00Z";
 const cred = (grant: Grant): DeviceCredential => ({ id: "dev_x", v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" });
@@ -55,18 +57,18 @@ describe("[验收线 2] 设置模块：缺省开，坏文件按关，只有 owne
     expect(readTierLendSettings(path)).toMatchObject({ status: "invalid", settings: { acceptDowngrade: false } });
   });
 
-  test("owner / master 能改（rev CAS）；agent、PM、peer 名都拒，文件不动", () => {
+  test("owner / master 能改（rev CAS）；agent、PM、peer 名都拒，文件不动", async () => {
     const path = tmpPath();
-    expect(saveTierLendSettings({ kind: "actor", actor: "owner" }, { rev: 0, acceptDowngrade: false }, 5, path))
+    expect(await saveTierLendSettings({ kind: "actor", actor: "owner" }, { rev: 0, acceptDowngrade: false }, 5, path))
       .toMatchObject({ ok: true, settings: { acceptDowngrade: false, rev: 1, updatedBy: "owner" } });
-    expect(saveTierLendSettings({ kind: "actor", actor: "master" }, { rev: 1, acceptDowngrade: true }, 6, path)).toMatchObject({ ok: true });
+    expect(await saveTierLendSettings({ kind: "actor", actor: "master" }, { rev: 1, acceptDowngrade: true }, 6, path)).toMatchObject({ ok: true });
     const before = readFileSync(path, "utf8");
     for (const actor of ["agent-pm", "scheduler", "a", "agent-lend-x"]) {
-      expect(saveTierLendSettings({ kind: "actor", actor }, { rev: 2, acceptDowngrade: false }, 7, path)).toMatchObject({ ok: false, code: "forbidden" });
+      expect(await saveTierLendSettings({ kind: "actor", actor }, { rev: 2, acceptDowngrade: false }, 7, path)).toMatchObject({ ok: false, code: "forbidden" });
     }
-    expect(saveTierLendSettings({ kind: "web", ownerFull: false }, { rev: 2, acceptDowngrade: false }, 7, path)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await saveTierLendSettings({ kind: "web", ownerFull: false }, { rev: 2, acceptDowngrade: false }, 7, path)).toMatchObject({ ok: false, code: "forbidden" });
     expect(readFileSync(path, "utf8")).toBe(before);
-    expect(saveTierLendSettings({ kind: "actor", actor: "owner" }, { rev: 1, acceptDowngrade: false }, 8, path)).toMatchObject({ ok: false, code: "conflict" });
+    expect(await saveTierLendSettings({ kind: "actor", actor: "owner" }, { rev: 1, acceptDowngrade: false }, 8, path)).toMatchObject({ ok: false, code: "conflict" });
   });
 
   test("B 的门：本机 taskTierModels 不是 on 时开关开也不生效；坏文件按关", () => {
@@ -107,7 +109,7 @@ describe("[验收线 2] 网页入口与管理入口共用同一模块与权限",
       ({ p: { pos: ["tier-lend-settings", ...pos], flags }, need: (f: string) => flags[f]!, ctx: () => ({ actor, now: 3 }) }) as never;
     expect(await cmd.run(cli("owner", ["show"]))).toMatchObject({ acceptDowngrade: true, rev: 0 });
     expect(await cmd.run(cli("master", ["set", "off"], { rev: "0" }))).toEqual({ ok: true, acceptDowngrade: false, rev: 1 });
-    expect(() => cmd.run(cli("agent-pm", ["set", "on"], { rev: "1" }))).toThrow("只有本机 owner 或 master");
+    await expect(cmd.run(cli("agent-pm", ["set", "on"], { rev: "1" }))).rejects.toThrow("只有本机 owner 或 master");
     expect(await cmd.run(cli("agent-pm", ["show"]))).toMatchObject({ acceptDowngrade: false, rev: 1 });
   });
 });
@@ -139,5 +141,107 @@ describe("[验收线 2] 正式入口：ledger 命令表、local-api FAMILIES、�
     expect(pages).toContain('import { TaskTierLendSettingsSection } from "./task-tier-lend-settings-section";');
     const lend = pages.slice(pages.indexOf("<LendPanel />"), pages.indexOf("<BorrowPanel />"));
     expect(lend).toContain("<TaskTierLendSettingsSection />");
+  });
+});
+
+
+describe("TIER3b2 回归：跨进程保存和运行路径诊断", () => {
+  test("拿不到锁在五秒内停止等待，不落盘；释放后首次保存能建父目录", async () => {
+    const path = tmpPath(), held = await acquireLock(`${path}.lock`, 0);
+    expect(held).not.toBeNull();
+    try {
+      const start = performance.now();
+      expect(await saveTierLendSettings({ kind: "actor", actor: "owner" }, { rev: 0, acceptDowngrade: false }, 5, path))
+        .toMatchObject({ ok: false, code: "io" });
+      // 轮询定时器可能被操作系统延后，留出调度余量。
+      expect(performance.now() - start).toBeLessThan(6000);
+      expect(existsSync(path)).toBe(false);
+    } finally { held?.release(); }
+    const nested = join(path, "..", "new", "settings.json");
+    expect(await saveTierLendSettings({ kind: "actor", actor: "owner" }, { rev: 0, acceptDowngrade: false }, 6, nested))
+      .toMatchObject({ ok: true, settings: { rev: 1, acceptDowngrade: false } });
+  }, 10_000);
+
+  test("两个真实进程同 rev 保存不同值：仅一方成功，另一方 conflict，最终值属于成功方", async () => {
+    const path = tmpPath(), start = `${path}.start`;
+    const modulePath = join(import.meta.dir, "../src/lib/task-tier-lend-settings.ts");
+    const run = (index: number) => Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", "-e", `
+      const fs = require("node:fs");
+      const path = ${JSON.stringify(path)}, index = ${index};
+      const rename = fs.renameSync;
+      // 两个写者都通过 commitIf 后才放行 rename；有锁时第二个进不来，首个到期后独自提交。
+      fs.renameSync = (from, to) => {
+        if (to === path) {
+          fs.writeFileSync(path + ".commit-" + index, "");
+          const deadline = Date.now() + 1000, sleep = new Int32Array(new SharedArrayBuffer(4));
+          while (!fs.existsSync(path + ".commit-" + (1 - index)) && Date.now() < deadline) Atomics.wait(sleep, 0, 0, 5);
+        }
+        return rename(from, to);
+      };
+      const { saveTierLendSettings } = await import(${JSON.stringify(modulePath)});
+      fs.writeFileSync(path + ".ready-" + index, "");
+      while (!fs.existsSync(${JSON.stringify(start)})) await Bun.sleep(5);
+      const value = index === 1;
+      const result = await saveTierLendSettings({ kind: "actor", actor: "owner" }, { rev: 0, acceptDowngrade: value }, 5, path);
+      console.log(JSON.stringify({ ...result, value }));
+    `], { stdout: "pipe", stderr: "pipe", env: testChildEnv({ CLAUDESTRA_STATE_DIR: join(path, "..") }) });
+    const procs = [run(0), run(1)];
+    try {
+      const deadline = Date.now() + 5000;
+      while ((!existsSync(`${path}.ready-0`) || !existsSync(`${path}.ready-1`)) && Date.now() < deadline) await Bun.sleep(5);
+      expect(existsSync(`${path}.ready-0`) && existsSync(`${path}.ready-1`)).toBe(true);
+      writeFileSync(start, "");
+      const results = await Promise.all(procs.map(async (proc) => {
+        const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        expect({ code, err }).toEqual({ code: 0, err: "" });
+        return JSON.parse(out) as { ok: boolean; code?: string; value: boolean };
+      }));
+      expect(results.filter((r) => r.ok)).toHaveLength(1);
+      expect(results.filter((r) => !r.ok)).toMatchObject([{ code: "conflict" }]);
+      expect(readTierLendSettings(path)).toMatchObject({ status: "ok", settings: { rev: 1, acceptDowngrade: results.find((r) => r.ok)!.value } });
+    } finally {
+      for (const proc of procs) proc.kill();
+      await Promise.all(procs.map((proc) => proc.exited));
+    }
+  }, 15_000);
+
+  test("坏 JSON 在运行路径按关，只报一次；mtime 或 size 单独改变才再报", () => {
+    const path = tmpPath(), time = new Date(1_700_000_000_000);
+    const log = spyOn(console, "error").mockImplementation(() => undefined);
+    useTaskTierPort({ policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }) });
+    try {
+      expect(tierLendGate(path)).toEqual({ on: true, acceptDowngrade: true });
+      expect(log).toHaveBeenCalledTimes(0);
+      writeFileSync(path, "{bad");
+      utimesSync(path, time, time);
+      expect(tierLendGate(path)).toEqual({ on: true, acceptDowngrade: false });
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]![0]).toContain("task-tier-lend");
+      expect(log.mock.calls[0]![0]).toContain("不接受降档");
+      for (let n = 0; n < 10; n++) expect(tierLendGate(path).acceptDowngrade).toBe(false);
+      expect(log).toHaveBeenCalledTimes(1);
+      writeFileSync(path, "{still bad");
+      utimesSync(path, time, time);
+      tierLendGate(path);
+      expect(log).toHaveBeenCalledTimes(2);
+      utimesSync(path, new Date(+time + 1000), new Date(+time + 1000));
+      tierLendGate(path);
+      expect(log).toHaveBeenCalledTimes(3);
+    } finally { log.mockRestore(); }
+  });
+
+  test("读不了的设置也只诊断一次；不同路径分别诊断", () => {
+    const path = tmpPath(), other = tmpPath();
+    mkdirSync(path);
+    writeFileSync(other, "[]");
+    const log = spyOn(console, "error").mockImplementation(() => undefined);
+    useTaskTierPort({ policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }) });
+    try {
+      expect(readTierLendSettings(path).status).toBe("unreadable");
+      for (let n = 0; n < 11; n++) expect(tierLendGate(path).acceptDowngrade).toBe(false);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(tierLendGate(other).acceptDowngrade).toBe(false);
+      expect(log).toHaveBeenCalledTimes(2);
+    } finally { log.mockRestore(); }
   });
 });

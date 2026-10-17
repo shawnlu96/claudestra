@@ -3,6 +3,7 @@
  * 人工合并请求（MQ1）另列一段：轮转序、状态、等待原因都出自 manual-merge-queue.ts 的同一个 manualTurn，不显示 session 等认证相关材料。
  */
 import { mergeQueue } from "../lib/ledger-merge-queue-view.js";
+import { ownerQueueHead } from "../lib/merge-queue-owner.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { manualQueueView, trainSignal } from "../lib/manual-merge-queue.js";
 import { defaultTrainStore } from "../lib/scheduler-merge-train-hold-slot.js";
@@ -32,8 +33,11 @@ export function mergeQueueCmds(policy: RecoveryPolicyPort = recoveryPolicy): Rec
         const rows = mergeQueue(c.db, project, now);
         const lines = rows.map((r, i) => `${i + 1}. ${r.task}｜进 merge ${r.enteredAt === null ? "?" : new Date(r.enteredAt).toISOString()}` +
           `｜已等 ${r.waitedMin ?? "?"} 分钟｜${r.phase}${r.blocked ? `｜挡：${r.blocked}` : ""}`);
-        const manual = manualPart(c, project, now, policy);
-        return { ok: true, project, rows, manual: { mode: manual.mode, diag: manual.diag, turn: manual.turn, rows: manual.rows }, lines: [...lines, ...manual.lines] };
+        const manual = manualPart(c, project, now, policy), head = ownerQueueHead(c.db, project, now); // rows keep the WIP gate's auto order
+        const owner = head && { task: head.entry?.taskId ?? null, source: head.entry?.source ?? null, reason: head.reason };
+        const top = owner ? [`统一队列下一位：${owner.task ?? "无"}${owner.source ? `（${owner.source}）` : ""}｜${owner.reason}`] : [];
+        return { ok: true, project, rows, owner, manual: { mode: manual.mode, diag: manual.diag, turn: manual.turn, rows: manual.rows },
+          lines: [...top, ...lines, ...manual.lines] };
       },
     },
   };

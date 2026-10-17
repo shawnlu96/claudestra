@@ -10,7 +10,7 @@ test("wild-name-2: all nine untracked split spellings are protected with empty a
   for (const files of [[], repoFiles()]) for (const g of SPLIT) expect(globDetails(g, files, "on").length).toBeGreaterThan(0);
 });
 
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyProposal } from "../src/lib/center-proposal-auto.js";
@@ -188,5 +188,7 @@ test("polling: protection key and upstream mode combinations keep protected glob
       }
       h.db.close();
     }
-  } finally { writeFileSync(RECOVERY_POLICY_PATH, previous ?? JSON.stringify({ projects: {} })); }
+  } finally { // Restore "absent" too: a leftover file breaks later tests that assert the private state dir is empty.
+    if (previous === undefined) rmSync(RECOVERY_POLICY_PATH, { force: true }); else writeFileSync(RECOVERY_POLICY_PATH, previous);
+  }
 });

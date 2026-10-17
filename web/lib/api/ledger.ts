@@ -92,9 +92,10 @@ export async function followEventStream(path: string, opts: { signal: AbortSigna
     for (;;) {
       const { done, value } = await reader.read();
       if (done) return;
-      const { events, rest } = drainFrames(buffer + dec.decode(value, { stream: true }));
+      const { events, rest, overflow } = drainFrames(buffer + dec.decode(value, { stream: true }));
       buffer = rest;
       for (const evt of events) opts.onEvent(evt);
+      if (overflow) return; // finally cancels upstream; callers use their existing reconnect loop.
     }
   } finally {
     reader.cancel().catch(() => undefined); // 已断开的流再 cancel 会抛，这里只是善后

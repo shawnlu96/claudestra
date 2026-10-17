@@ -5,7 +5,7 @@ import { getTask, listEvents } from "./ledger-store.js";
 import { getAsk } from "./ledger-asks.js";
 import type { ScopeDiff, ScopeFile } from "./order-deliver-scope-git.js";
 import { cardGlobs, privateCardRepo } from "./card-repo.js";
-import type { RecoveryPolicyPort } from "./recovery-policy.js";
+import type { RecoveryMode, RecoveryPolicyPort } from "./recovery-policy.js";
 import { headScan, JUDGE_GLOBS } from "./skip-effects-auto-scope.js";
 import { ASK_SCOPE_RULE } from "./ask-scope-auto.js";
 import { scopeMatches } from "./ask-scope-auto-plan.js";
@@ -75,10 +75,12 @@ async function checkCandidates(diff: ScopeDiff, task: LedgerTask, head: string, 
 
 /** Called beside SKIPAUTO1. Keep the original file list so a later policy rollback cannot hide delivered changes. */
 export async function checkDeliveredScope(db: Database, task: LedgerTask, head: string, diff: ScopeDiff, files: ScopeFile[], policy: RecoveryPolicyPort):
-  Promise<{ askScopeAuto?: { rule: string; head: string; base: string; files: CheckedFile[] }; askScopeTests?: TestScopeEvidence }> {
+  Promise<{ askScopeAuto?: { rule: string; caseFold: RecoveryMode; head: string; base: string; files: CheckedFile[] }; askScopeTests?: TestScopeEvidence }> {
   const tests = await checkTestScopeSize(db, task, head, diff);
   const candidates = grantsFor(db, task).filter((c) => files.some((f) => f.path === c.grant.path));
   if (!candidates.length || policy(task.project, "askScopeAuto").mode !== "on") return tests;
+  // The registry's protection switch belongs to Claudestra, including cards in other local projects.
+  const caseFold = policy("claude-orchestrator", "askScopeCaseFold").mode;
   let checked: CheckedFile[];
   try {
     if (!diff.filesComplete || !diff.objects || privateCardRepo(task)) throw new Error("完整 diff / Git 对象不可用或不是本仓卡");
@@ -89,13 +91,14 @@ export async function checkDeliveredScope(db: Database, task: LedgerTask, head: 
     checked = await checkCandidates(diff, task, head, candidates, files);
     const current = getTask(db, task.id);
     if (!current || current.specRev !== task.specRev || policy(task.project, "askScopeAuto").mode !== "on") throw new Error("核对期间规格或开关已变化");
+    if (policy("claude-orchestrator", "askScopeCaseFold").mode !== caseFold) throw new Error("核对期间折叠口径已变化");
     const active = grantsFor(db, current);
     if (candidates.some((c) => !active.some((a) => a.askId === c.askId && isDeepStrictEqual(a.grant, c.grant)))) throw new Error("核对期间自动答已撤回");
   } catch (e) {
     checked = candidates.map(({ askId, grant }) => ({ ...files.find((f) => f.path === grant.path)!, askId,
       kind: grant.kind, check: grant.check, granted: false, reason: (e as Error).message.slice(0, 300) }));
   }
-  return { ...tests, askScopeAuto: { rule: ASK_SCOPE_RULE, head, base: diff.base, files: checked } };
+  return { ...tests, askScopeAuto: { rule: ASK_SCOPE_RULE, caseFold, head, base: diff.base, files: checked } };
 }
 
 export { describeDeliveredScope } from "./ask-scope-auto-display.js";

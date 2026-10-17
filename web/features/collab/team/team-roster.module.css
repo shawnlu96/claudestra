@@ -7,10 +7,12 @@
 .metrics { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .metrics > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .metrics span { font-size: 11px; color: var(--text-2); overflow-wrap: anywhere; }
-.metrics strong { font-size: 20px; font-variant-numeric: tabular-nums; font-weight: 600; }
-.legend { display: flex; flex-wrap: wrap; gap: 10px 14px; margin: 14px 0 20px; color: var(--text-2); font-size: 11px; }
+.metrics strong { font-size: 20px; line-height: 26px; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 14px; margin: 14px 0 4px; color: var(--text-2); font-size: 11px; }
+/* One line for every loading / directory note: appearing or clearing never moves the cards below. */
+.status { height: 18px; margin: 0 0 14px; color: var(--text-2); font-size: 11px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legend > span { display: flex; align-items: center; gap: 5px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; align-items: start; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 14px; align-items: start; }
 .member { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; animation: rowIn .2s ease-out; }
 .memberHead { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; }
 .memberHead > div { min-width: 0; }
@@ -33,6 +35,8 @@
 .other { background: var(--muted); opacity: .6; }
 .held { border-style: dashed; background: repeating-linear-gradient(135deg, transparent, transparent 3px, var(--line) 3px, var(--line) 5px); }
 .empty { background: transparent; }
+.placeholder { animation: none; }
+.placeholder h3, .placeholder .avatar { color: var(--text-2); font-weight: 500; }
 .unknownStrip { flex: 1; border: 1px dashed var(--line); border-radius: 4px; text-align: center; color: var(--text-2); padding: 4px; font-size: 11px; }
 .usage { margin-left: auto; font-size: 11px; color: var(--text-2); font-variant-numeric: tabular-nums; flex: none; }
 .tooltip { position: absolute; z-index: 3; left: -40px; bottom: 28px; width: 210px; padding: 8px; border-radius: 6px; background: var(--panel); }
@@ -58,5 +62,5 @@
 @keyframes rowIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 @keyframes breathe { 50% { opacity: .4; } }
 @container (max-width: 650px) { .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .roster { padding: 12px; } .metrics strong { font-size: 17px; } .grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 600px) { .roster { padding: 12px; } .metrics strong { font-size: 17px; line-height: 22px; } .grid { grid-template-columns: minmax(0, 1fr); } }
 @media (prefers-reduced-motion: reduce) { .member, .cell, .arrive, .release { animation: none; transition: none; } }

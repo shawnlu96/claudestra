@@ -4,8 +4,9 @@
  *   GET /api/v1/ledger/:project/dag/:featureId[?version=<n>|pending]  版本列表 + 某一版快照
  *   GET /api/v1/ledger/:project/dag/:featureId/diff?from=<n>&to=<n|pending>
  * 门和 /ledger/:project 同一道（canReadLedger），在解析参数、查 projects.json、查库之前判：拿不到门的人探不出项目、feature 在不在。
- * 一个请求一个 deferred 读事务，连接是 ledgerDb() 的 query_only 只读连接；不写库，不发事件。
+ * 每次真实构建一个 deferred 读事务；看板按 boardBuildCache 复用，详情与 diff 现读。连接只读，不写库，不发事件。
  */
+import { cachedBoardBuild } from "../../lib/board-build-cache.js";
 import { canReadLedger } from "../../lib/devices.js";
 import { dagBoard, hasFeatureSchema } from "../../lib/ledger-dag-board.js";
 import { featureDetail, featureDiff, type VersionSel } from "../../lib/ledger-dag-board-history.js";
@@ -76,8 +77,8 @@ export async function handleLedgerDagApi(req: Request, path: string, principal: 
   const now = Date.now();
   if (featureId === undefined) {
     if (!db) return apiJson(200, { ok: true, project, exists: false, now, asOfSeq: 0, features: [], agents: [] });
-    const board = db.transaction(() => dagBoard(db, project, now)).deferred();
-    return apiJson(200, { ok: true, project, exists: true, now, ...board });
+    const result = await cachedBoardBuild(db, "dag", project, {}, () => ({ ok: true, project, exists: true, now, ...dagBoard(db, project, now) }));
+    return apiJson(200, result);
   }
   return db ? featureRoute(db, project, featureId, route, now) : notFound(`feature "${featureId}" not found in "${project}"`);
 }
