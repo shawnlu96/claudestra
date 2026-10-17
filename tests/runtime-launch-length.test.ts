@@ -3,9 +3,10 @@
  * 大段文本（职责前言、developer 指令、Pi 参数）进一次性文件，宿主读回环境（lib/runtimes/acp-launch-payload.ts）。
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { acpRuntime, PI_ARGS_ENV } from "../src/lib/acp/host-runtime.ts";
 import { channelInstructions } from "../src/lib/channel-instructions.ts";
 import { ACP_LAUNCH_FILE_ENV, takeLaunchPayload, writeLaunchPayload } from "../src/lib/runtimes/acp-launch-payload.ts";
 import { buildAcpHostCommand } from "../src/lib/runtimes/codex-acp.ts";
@@ -58,8 +59,9 @@ describe("一次性文件：写 0600、宿主读回环境即删、相同的值�
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(statSync(path).size).toBeLessThan(big.length + 200); // 两份相同的前言只存一份
     const env: Record<string, string | undefined> = { [ACP_LAUNCH_FILE_ENV]: path };
-    takeLaunchPayload(env, dir);
+    expect(takeLaunchPayload(env, dir)).toEqual({ used: true, ok: true });
     expect(env).toEqual({ CLAUDESTRA_CODEX_PREAMBLE: big, CLAUDESTRA_ACP_CLEAR_PREAMBLE: big });
+    expect(takeLaunchPayload({}, dir)).toEqual({ used: false }); // 没走文件协议（老命令）
     expect(existsSync(path)).toBe(false);
   });
 
@@ -67,8 +69,48 @@ describe("一次性文件：写 0600、宿主读回环境即删、相同的值�
     expect(writeLaunchPayload([["CLAUDESTRA_CODEX_PREAMBLE", undefined]], dir)).toBeUndefined();
     expect(() => writeLaunchPayload([["PATH", "/evil"]], dir)).toThrow("不收");
     const env: Record<string, string | undefined> = { [ACP_LAUNCH_FILE_ENV]: "/etc/passwd" };
-    takeLaunchPayload(env, dir);
+    expect(takeLaunchPayload(env, dir)).toMatchObject({ used: true, ok: false, error: expect.stringContaining("拒起") });
     expect(env).toEqual({});
     expect(existsSync("/etc/passwd")).toBe(true);
   });
+});
+
+// 验收追加 7 第 1 条：走了文件协议却读不成 = 拒起，不许回落成空参数 / 默认值
+describe("文件协议失败一律拒起（负路径）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acp-launch-neg-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const pi = acpRuntime("pi");
+
+  test("文件缺失（被清扫或已读过）：失败，Pi 也拿不到参数", () => {
+    const env: Record<string, string | undefined> = { [ACP_LAUNCH_FILE_ENV]: join(dir, "0123456789abcdef.json") };
+    expect(takeLaunchPayload(env, dir)).toMatchObject({ used: true, ok: false, error: expect.stringContaining("不存在") });
+    expect(pi.agentCommand(env, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(PI_ARGS_ENV) });
+  });
+
+  test("文件损坏：不是 JSON、形状不对、有不认的键、下标越界都失败，且文件被删", () => {
+    for (const bad of ["{oops", JSON.stringify({ v: 2, values: [], env: {} }), JSON.stringify({ v: 1, values: ["x"], env: { PATH: 0 } }),
+      JSON.stringify({ v: 1, values: [], env: { [PI_ARGS_ENV]: 3 } })]) {
+      const path = join(dir, "fedcba9876543210.json");
+      writeFileSync(path, bad, { mode: 0o600 });
+      const env: Record<string, string | undefined> = { [ACP_LAUNCH_FILE_ENV]: path };
+      expect(takeLaunchPayload(env, dir), bad).toMatchObject({ used: true, ok: false });
+      expect(env, bad).toEqual({});
+      expect(existsSync(path)).toBe(false);
+    }
+  });
+
+  test("文件里缺 PI_ARGS：载入成功，但 Pi 的 agentCommand 拒起（不按空数组起默认能力）", () => {
+    const path = writeLaunchPayload([["CLAUDESTRA_CODEX_PREAMBLE", "x"]], dir)!;
+    const env: Record<string, string | undefined> = { [ACP_LAUNCH_FILE_ENV]: path };
+    expect(takeLaunchPayload(env, dir)).toEqual({ used: true, ok: true });
+    expect(pi.agentCommand(env, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(`缺 ${PI_ARGS_ENV}`) });
+  });
+
+  test("宿主进程：命令带的启动文件读不成就退出（exit 3），不往下起", () => {
+    const r = Bun.spawnSync([process.execPath, join(REPO, "src/acp-host.ts")], {
+      env: { ...process.env, [ACP_LAUNCH_FILE_ENV]: join(dir, "0011223344556677.json") }, stdout: "pipe", stderr: "pipe",
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.stderr.toString()).toContain("宿主拒起");
+  }, 30_000);
 });

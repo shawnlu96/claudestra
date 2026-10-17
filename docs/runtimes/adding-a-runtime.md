@@ -41,7 +41,9 @@
 5. **生命周期**：用 `genericAcpRuntime({ source, host, ready, isValidSessionId, launchEnv? })`（`src/lib/runtimes/acp-generic.ts`）
    拼出 `AcpRuntimeSpec`：new / fork 先起一个短命适配器 `session/new`（或 `session/fork`）拿服务端给的会话 id，常驻宿主再按它接上；
    窗口里跑 ACP 宿主，就绪标记是 `@claudestra_ready`，退出时给宿主发 SIGTERM，registry 记 `transport=acp`。
-   启动命令里再要加的环境变量放在 `launchEnv`（引导进程和常驻宿主用同一份）。有特殊启动流程（Codex 的引导轮、Pi 的能力档、
+   启动命令里再要加的环境变量放在 `launchEnv`（引导进程和常驻宿主用同一份）。大段文本（前言、长参数）不进命令行：交给
+   `acpHostCommand` 的 `payload`，写进 0600 一次性文件、命令只带路径（`runtimes/acp-launch-payload.ts`，命令太长会被 tty 截断）；
+   宿主读不成这个文件（没了、坏了）一律拒起，运行时的必需参数缺了也在 `agentCommand` 里拒，不许按默认值起。有特殊启动流程（Codex 的引导轮、Pi 的能力档、
    OpenCode 的模型必填 + 拒建删空会话）的才自己写 `ManagedRuntimeAdapter`（参考 `runtimes/opencode-acp.ts`）。
    会话文件不是现成落盘的（OpenCode 在 SQLite 里），来源实现 `freshArchivePath`，归档先要一份最新的。
 6. **登记**：`RUNTIMES` 加一行 `{ source, acp: <ID>_ACP }`。

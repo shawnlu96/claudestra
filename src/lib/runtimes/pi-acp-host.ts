@@ -10,9 +10,12 @@ export const PI_ARGS_ENV = "CLAUDESTRA_PI_ARGS";
 
 function piAgentCommand(env: Record<string, string | undefined>, bunBin: string, clean: boolean): AgentCommand {
   if (clean) return { error: "出借 worker 只支持 Codex，不起 Pi 的 ACP 适配器" };
+  // 必需：能力档（minimal / 工具黑白名单）都在这里，缺了按空数组起就是 pi 的默认发现集 + 默认工具，不能凑合
+  const raw = env[PI_ARGS_ENV];
+  if (!raw) return { error: `缺 ${PI_ARGS_ENV}（pi 参数在启动文件里，没读到就不起）` };
   let args: unknown = null;
   try {
-    args = JSON.parse(env[PI_ARGS_ENV] || "[]");
+    args = JSON.parse(raw);
   } catch {
     /* 不是 JSON：落到下面报错 */
   }

@@ -24,8 +24,11 @@ const LAUNCH_PAYLOAD_KEYS: readonly string[] = [
 const launchDir = () => statePath("run", "acp-launch");
 /** writeLaunchPayload 起的文件名；takeLaunchPayload 只读、只删长这样的文件（路径来自环境变量，不能让它删到别的文件） */
 const NAME = /^[0-9a-f]{16}\.json$/;
-/** 没被宿主读走的文件（启动被打断、窗口被 kill）留多久：每次写之前清一次 */
-const STALE_MS = 10 * 60_000;
+/**
+ * 没被宿主读走的文件（启动被打断、窗口被 kill）留多久：每次写之前清一次。要远长于「命令已送进窗口、宿主还没起来」的最长间隔
+ * （shell 初始化慢、窗口排队），否则清掉一个还会被读的文件，宿主就只能拒起（takeLaunchPayload 找不到文件 = 失败）
+ */
+const STALE_MS = 24 * 3600_000;
 
 /** 两个变量值相同（OpenCode 新建时两份前言是同一份全文）只存一份：values 去重，env 记下标 */
 interface PayloadFile {
@@ -108,26 +111,48 @@ export function rolePayload(
   ];
 }
 
+/** used=false：命令没走文件协议（老命令、单测）；used=true 且 ok=false：走了文件协议但没读成，宿主必须拒起 */
+export type LaunchPayloadResult = { used: false } | { used: true; ok: true } | { used: true; ok: false; error: string };
+
+/** 文件内容 → 要放回环境的键值；形状不对、有不认的键、下标越界都算坏文件（不挑能用的那几项凑合） */
+function parsePayload(text: string): Record<string, string> | string {
+  let file: Partial<PayloadFile>;
+  try {
+    file = JSON.parse(text) as Partial<PayloadFile>;
+  } catch (e) {
+    return `不是 JSON：${(e as Error).message}`;
+  }
+  const values = file?.values;
+  if (file?.v !== 1 || !Array.isArray(values) || !values.every((v) => typeof v === "string") || !file.env || typeof file.env !== "object") return "格式不对";
+  const out: Record<string, string> = {};
+  for (const [k, i] of Object.entries(file.env)) {
+    if (!LAUNCH_PAYLOAD_KEYS.includes(k)) return `有不认的变量 ${k}`;
+    if (typeof i !== "number" || typeof values[i] !== "string") return `${k} 的下标坏了`;
+    out[k] = values[i];
+  }
+  return out;
+}
+
 /**
- * 宿主侧：读走文件、删掉，把值放回 env（只认 LAUNCH_PAYLOAD_KEYS），删掉路径变量。读不了只记一条：
- * 宿主照常起，只是少了前言 / developer 指令（Pi 的参数缺了会在 agentCommand 那里报错拒起）。
+ * 宿主侧：读走文件、删掉，把值放回 env（只认 LAUNCH_PAYLOAD_KEYS），删掉路径变量。命令带了路径（走文件协议）却读不成——
+ * 路径不认、文件没了（被清扫或被删）、读不了、格式坏——一律返回失败，由宿主拒起：前言 / Pi 参数（能力档、工具黑白名单）
+ * 都在文件里，缺了照常起就是换成默认能力在跑。各运行时自己的必需项（Pi 的 PI_ARGS）在 agentCommand 里再查。
  */
-export function takeLaunchPayload(env: Record<string, string | undefined>, dir = launchDir()): void {
+export function takeLaunchPayload(env: Record<string, string | undefined>, dir = launchDir()): LaunchPayloadResult {
   const path = env[ACP_LAUNCH_FILE_ENV]?.trim();
   delete env[ACP_LAUNCH_FILE_ENV];
-  if (!path) return;
-  if (!NAME.test(basename(path)) || resolve(dirname(path)) !== resolve(dir)) {
-    console.error(`⚠ 不认的 ACP 启动文件路径（不在 ${dir} 下或名字不对），不读：${path}`);
-    return;
-  }
+  if (!path) return { used: false };
+  const fail = (why: string): LaunchPayloadResult => ({ used: true, ok: false, error: `ACP 启动文件 ${path} ${why}，宿主拒起` });
+  if (!NAME.test(basename(path)) || resolve(dirname(path)) !== resolve(dir)) return fail(`不在 ${dir} 下或名字不对`);
+  let text: string;
   try {
-    const file = JSON.parse(readFileSync(path, "utf8")) as PayloadFile;
-    for (const [k, i] of Object.entries(file.env ?? {})) {
-      if (LAUNCH_PAYLOAD_KEYS.includes(k) && typeof file.values?.[i] === "string") env[k] = file.values[i];
-    }
+    text = readFileSync(path, "utf8");
   } catch (e) {
-    console.error(`⚠ 读不了 ACP 启动文件 ${path}（本次没有前言 / developer 指令）：${(e as Error).message}`);
-  } finally {
-    rmSync(path, { force: true });
+    return fail((e as NodeJS.ErrnoException).code === "ENOENT" ? "不存在（被清掉了或已被读过）" : `读不了：${(e as Error).message}`);
   }
+  rmSync(path, { force: true });
+  const parsed = parsePayload(text);
+  if (typeof parsed === "string") return fail(parsed);
+  Object.assign(env, parsed);
+  return { used: true, ok: true };
 }

@@ -213,7 +213,9 @@ export async function recoverFailedAcpLaunch(
   launch: (a: ManagedRuntimeAdapter) => Promise<ReadyResult>,
   deps: { exit?: () => Promise<boolean>; patch?: typeof patchRegistryAgent } = {},
 ): Promise<{ adapter: ManagedRuntimeAdapter; started: ReadyResult }> {
-  const runtime = acpSpecFor(info.runtime) ? info.runtime! : null;
+  // 按真实能力判：既有 ACP 段、又真有 tmux 版的（Codex / Pi）才走恢复；只走 ACP 的（OpenCode）起不来就如实报失败，不退宿主、不改写 transport
+  // （managedFor(opencode, "tmux") 为目录查询仍返回它的 ACP 版，不能拿来判有没有 TUI）
+  const runtime = acpSpecFor(info.runtime) && transportsOf(info.runtime).includes("tmux") ? info.runtime! : null;
   const started = await Promise.resolve(first).catch((e: unknown): ReadyResult => {
     if (!runtime || info.transport !== "acp") throw e;
     return { ready: false, reason: "exited", detail: `启动命令没构建出来：${e instanceof Error ? e.message : String(e)}` };
@@ -221,8 +223,7 @@ export async function recoverFailedAcpLaunch(
   if (started.ready && runtime) await markTransportReady(name, info.transport);
   if (started.ready || !runtime || info.transport !== "acp") return { adapter, started };
   if (isSandbox()) return { adapter, started }; // 沙箱不得把 stub 启动失败回退成真实 Codex TUI，也没有 TUI 版 Pi
-  const fallback = managedFor(runtime, "tmux");
-  if (!fallback) return { adapter, started }; // 只有 ACP 版：没有 TUI 可退
+  const fallback = managedFor(runtime, "tmux")!;
   console.error(`[acp] ${name} 接线程失败（${started.reason}）：尝试恢复 tmux`);
   const acp = managedFor(runtime, "acp")!;
   const exited = await (deps.exit ?? (() => gracefulExitWindow(tmuxWindowOps(name), acp)))().catch((e) => (console.error(`[acp] 宿主退出失败：${String(e)}`), false));

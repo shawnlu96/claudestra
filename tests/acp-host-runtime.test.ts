@@ -68,9 +68,10 @@ describe("acpRuntime 表", () => {
     const pi = acpRuntime("pi");
     expect(pi.agentCommand({ [PI_ARGS_ENV]: JSON.stringify(["--approve", "--no-extensions"]) }, "/opt/bun", false))
       .toEqual({ cmd: ["/opt/bun", PI_ACP_ADAPTER_MAIN, "--approve", "--no-extensions"], stub: false });
-    expect(pi.agentCommand({}, "/opt/bun", false)).toEqual({ cmd: ["/opt/bun", PI_ACP_ADAPTER_MAIN], stub: false });
+    // 缺 pi 参数（启动文件没读到）就拒起：能力档 / 工具黑白名单都在里面，不按空数组起默认能力（OCR-2 验收追加 7）
+    expect(pi.agentCommand({}, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(`缺 ${PI_ARGS_ENV}`) });
     expect(pi.agentCommand({}, "/opt/bun", true)).toMatchObject({ error: expect.stringContaining("出借 worker") });
-    expect(pi.agentCommand({ CLAUDESTRA_SANDBOX: "1" }, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining("沙箱") });
+    expect(pi.agentCommand({ CLAUDESTRA_SANDBOX: "1", [PI_ARGS_ENV]: "[]" }, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining("沙箱") });
     expect(pi.agentCommand({ [PI_ARGS_ENV]: "--approve" }, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(PI_ARGS_ENV) });
     expect(pi.agentCommand({ [PI_ARGS_ENV]: "[1]" }, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(PI_ARGS_ENV) });
   });
