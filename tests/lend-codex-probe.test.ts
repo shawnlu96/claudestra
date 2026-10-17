@@ -137,13 +137,17 @@ test("没暂停时不探测", async () => {
   expect(runs).toBe(0);
 });
 
-test("档位：没设、项目解析不出、文件坏都是缺省 on；显式键要等 codexPauseProbe 登记进 recovery-keys 才读得到", () => {
+test("档位：显式键优先；没设、项目解析不出、文件坏都是缺省 on", () => {
   const dir = mkdtempSync(join(tmpdir(), "codex-probe-mode-"));
   const repo = mkdtempSync(join(tmpdir(), "codex-probe-repo-"));
   const projectsPath = join(dir, "projects.json"), policyPath = join(dir, "recovery-policy.json");
   writeFileSync(projectsPath, JSON.stringify({ projects: [{ id: "claudestra", name: "c", dirs: [repo] }] }));
   writeFileSync(policyPath, JSON.stringify({ projects: {} }));
   expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo })).toEqual({ mode: "on", project: "claudestra" });
+  for (const mode of ["off", "observe", "on"] as const) {
+    writeFileSync(policyPath, JSON.stringify({ projects: { claudestra: { keys: { codexPauseProbe: mode } } } }));
+    expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo })).toEqual({ mode, project: "claudestra" });
+  }
   writeFileSync(policyPath, "{坏");
   expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo }).mode).toBe("on");
   expect(codexProbeMode({ policyPath, projectsPath, repoRoot: dir })).toEqual({ mode: "on", project: null });
