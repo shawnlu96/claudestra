@@ -12,7 +12,7 @@ import { shellEscape } from "../claude-launch.js";
 import { codexDeveloperInstructions } from "../codex-launch.js";
 import { pathOverrideAssignments } from "../paths.js";
 import { normalizePiEnvProfile, piActivateTools, piBinName, piEnvFlags, type PiEnvProfile } from "../pi-env.js";
-import { PI_LOCKED_EFFORT, PI_LOCKED_MODEL } from "../pi-launch.js";
+import { piLock, type PiLock } from "../pi-lock.js";
 import { piAgentDirOf } from "../pi-path.js";
 import { assertSandboxRuntime, isSandbox } from "../sandbox.js";
 import { ACP_RUNTIME_ENV, PI_ARGS_ENV } from "../acp/host-runtime.js";
@@ -33,13 +33,12 @@ const mcpName = (env: Record<string, string | undefined>) => env.MCP_NAME || "cl
  * 沙箱里不认 registry 的能力档（它能加 npm 包、指向 owner 的 MCP 配置），固定最小发现集（acp/pi-adapter/sandbox-policy.ts）。
  * 能力档先过 keepReplyTool（reply-tool.ts）：白名单补上 reply 的 pi 工具名，禁了 reply、MCP_NAME 保证不了就抛。
  */
-export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, sandbox = false, mcp = "claudestra"): string[] {
+export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, sandbox = false, mcp = "claudestra", lock: PiLock = piLock()): string[] {
   const piEnv = keepReplyTool(sandbox ? undefined : (spec.extras?.piEnv as PiEnvProfile | undefined), mcp);
   const prompt = codexDeveloperInstructions({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(repoRoot) });
   const flags = sandbox ? SANDBOX_PI_FLAGS : piEnvFlags(piEnv);
   // 全局锁走 Pi 自己的启动参数：宿主 setConfig 是 strict=false，失败不拦启动，光靠环境变量会漏锁
-  const lock = ["--model", PI_LOCKED_MODEL, "--thinking", PI_LOCKED_EFFORT];
-  return [piEnv?.trustProject === false ? "--no-approve" : "--approve", ...flags, ...lock, "--name", agent, "--append-system-prompt", prompt];
+  return [piEnv?.trustProject === false ? "--no-approve" : "--approve", ...flags, "--model", lock.model, "--thinking", lock.effort, "--name", agent, "--append-system-prompt", prompt];
 }
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
@@ -48,6 +47,7 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
   assertSandboxRuntime("pi", env, "acp"); // 沙箱里 PI_CODING_AGENT_DIR 没钉在沙箱根就拒（docs/architecture/pi-acp-sandbox.md）
   const sandbox = isSandbox(env);
   const agent = spec.agentName || spec.settingsName;
+  const lock = piLock(); // config.json 写坏了就在这里抛错，窗口不起
   if (!agent) throw new Error("ACP 宿主需要 agent 名（LaunchSpec.agentName / settingsName）");
   if (!spec.sessionId) throw new Error("ACP 宿主需要会话 id");
   const pairs: [string, string | undefined][] = [
@@ -67,9 +67,9 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
     [ACP_RUNTIME_ENV, "pi"],
     // 与 piAvailable() 的探测同源：窗口不继承 manager 的 env，PI_BIN 不带过去就会预检通过、窗口里找不到 pi
     ["PI_BIN", piBinName()],
-    ["CLAUDESTRA_ACP_MODEL", PI_LOCKED_MODEL],
-    ["CLAUDESTRA_ACP_EFFORT", PI_LOCKED_EFFORT], // 同 tmux 版：全局锁
-    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env)))],
+    ["CLAUDESTRA_ACP_MODEL", lock.model],
+    ["CLAUDESTRA_ACP_EFFORT", lock.effort], // 同 tmux 版：全局锁（pi-lock.ts），环境变量与启动参数同一次读数
+    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env), lock))],
     // 窗口不继承 manager 的 env（继承 tmux server 的）：沙箱里把上面核过的目录显式带过去，宿主起适配器前会再核一遍
     ["PI_CODING_AGENT_DIR", sandbox ? env.PI_CODING_AGENT_DIR : undefined],
   ];
