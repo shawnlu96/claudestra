@@ -36,6 +36,7 @@ export const RECOVERY_KEYS = [
   "ciProofReuse",
   "ciQueueFull",
   "ciSelectedGate",
+  "ciSelectedReplayReceipt",
   "ciTrainFailureClass",
   "ciWebBuild",
   "convIgnoredBuildArtifacts",
