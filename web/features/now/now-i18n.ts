@@ -38,6 +38,8 @@ const EN: Record<string, string> = {
   "{f} 本周 {n}%": "{f} {n}% this week",
   "整页": "Full page",
   "打开今天整页": "Open Today as a full page",
+  "返回": "Back",
+  "返回（Esc）": "Back (Esc)",
   "还有 {n} 件": "{n} more",
   "{n} 件": "{n} item|{n} items",
   "在干活 {n} 个 agent": "{n} agent working|{n} agents working",

@@ -204,9 +204,11 @@ describe("imageSrcKind：图片来源", () => {
     expect(imageSrcOf("  <x y.png> ")).toBe("x y.png");
     expect(imageSrcOf('a"b.png')).toBe('a"b.png'); // 引号前不是空白：不是 title
     expect(imageSrcOf(undefined)).toBe("");
+    // 线性实现本机约 0.2ms；平方级回退（正则 `\s+"…"\s*$`）4 万字符就要 3.5s，这里 38 万字符超过一分钟。
+    // 预算放到 1s：共享 CI 跑机一次 GC / 抢占就能超过 50ms，紧预算只会误报
     const t = performance.now();
     imageSrcOf("x" + " ".repeat(190000) + '"' + " ".repeat(190000) + '"');
-    expect(performance.now() - t).toBeLessThan(50);
+    expect(performance.now() - t).toBeLessThan(1000);
   });
   test("imageHost：占位上显示的域名", () => {
     expect(imageHost("https://tracker.example:8443/p.gif?id=1")).toBe("tracker.example:8443");

@@ -27,8 +27,8 @@ const out = process.env.TEAM_PARITY_SHOTS_DIR;
 const FOCUS = "i28-A5";
 /** 第二轮审查中的卡：轮次真值是 2 */
 const ROUND_CARD = "i28-B2";
-/** 大纲行的阶段词（只需要焦点卡的） */
-const STAGE_WORD: Record<string, string> = { fix: "返工中" };
+/** 节点卡上的阶段词（只需要焦点卡的；模块进度卡写「返工 · 第 N 轮」） */
+const STAGE_WORD: Record<string, string> = { fix: "返工" };
 
 
 // ---- 检测器：只读 DOM，给出 present / absent / home_only / unknown ----
@@ -113,17 +113,27 @@ async function observeProductCard(page: Page, home: HomeFixture, team: TeamFromH
   };
 }
 
-/** 子 DAG 页：大纲行（桌面）看阶段和轮次，画布节点看处理人；都按本机真值判 */
+/**
+ * 模块进度（PROJTABS1 起左大纲删了）：选中模块的节点卡看阶段和轮次（行名沿用「大纲行」），节点处理人照旧按卡上的「· 执行者 / 审查员」判；都按本机真值判。
+ * 卡是 [data-focus-key]，按卡上的任务标题找；轮次卡在另一个模块时从面包屑回模块列表再进
+ */
 async function observeFeaturePage(page: Page, home: HomeFixture, narrow: boolean): Promise<Observed> {
   const lines = (await page.locator("body").innerText()).split("\n");
   const after = (id: string) => lines.flatMap((l, i) => (l === id ? [lines[i + 2] ?? ""] : []));
-  const focus = home.details[FOCUS]!.task, round = home.overview.tasks.find((t) => t.id === ROUND_CARD)!.round;
+  const focus = home.details[FOCUS]!.task, roundTask = home.overview.tasks.find((t) => t.id === ROUND_CARD)!;
   const out: Observed = { "节点处理人/步骤": after(FOCUS).some((l) => /· (执行者|审查员)/.test(l)) ? "present" : "absent" };
   if (narrow) return { ...out, "节点阶段（大纲行）": "not_run", "轮次（大纲行）": "not_run" };
-  const outline = (await page.locator("nav[aria-label='大纲']").first().innerText()).split("\n");
-  const row = (id: string) => outline[outline.indexOf(id) + 2] ?? "";
-  return { ...out, "节点阶段（大纲行）": row(FOCUS).startsWith(STAGE_WORD[focus.stage] ?? "?") ? "present" : "absent",
-    "轮次（大纲行）": row(ROUND_CARD).includes(`第 ${round} 轮`) ? "present" : "absent" };
+  const card = async (title: string) => (await page.locator("[data-focus-key]").filter({ hasText: title }).allInnerTexts()).join("\n");
+  const stage = (await card(focus.title)).includes(STAGE_WORD[focus.stage] ?? "?") ? "present" : "absent";
+  let roundText = await card(roundTask.title);
+  if (!roundText) {
+    const f = home.features.find((x) => x.versions.some((v) => v.nodes.some((n) => n.taskId === ROUND_CARD)))!;
+    await page.locator("[data-project-pane=module] nav button").first().click();
+    await page.locator("[data-module]").filter({ hasText: f.title }).first().click(); // 团队源的模块 id 是中心的，按标题找
+    await page.locator("[data-focus-key]").filter({ hasText: roundTask.title }).first().waitFor({ timeout: 5000 }).catch(() => undefined);
+    roundText = await card(roundTask.title);
+  }
+  return { ...out, "节点阶段（大纲行）": stage, "轮次（大纲行）": roundText.includes(`第 ${roundTask.round} 轮`) ? "present" : "absent" };
 }
 
 /**
@@ -158,28 +168,35 @@ function misCalls(calls: readonly string[], side: "local" | "team", project: str
 const versionMeta = (vrows: readonly string[], noHistory: boolean): TeamState =>
   vrows.length ? (vrows.every((t) => /pm-a/.test(t) && /\d+\/\d+ \d+:\d+/.test(t)) ? "present" : "absent") : noHistory ? "unknown" : "absent";
 
-/** 顶栏一格（只在 [data-metrics] 里找，大纲 / 谁在干活里的同名词不算）：暂无 → unknown；数字开头 → present；整格不出 → absent */
-async function metric(page: Page, label: string): Promise<TeamState> {
-  const el = page.locator("[data-metrics]").getByText(label, { exact: true }).first();
+/** 总览数格（overview-tab.tsx data-cell）：暂无 → unknown；数字 → present；整格不出 → absent（PROJTABS1 起顶栏指标条删了） */
+async function metric(page: Page, cell: string): Promise<TeamState> {
+  const el = page.locator(`[data-cell=${cell}] b`).first();
   if (!(await el.count())) return "absent";
-  const text = (await el.locator("..").innerText()).replace(label, "").trim();
-  return /暂无/.test(text) ? "unknown" : /^\d/.test(text) ? "present" : "absent";
+  const text = (await el.innerText()).trim();
+  return /暂无/.test(text) ? "unknown" : /^\d+$/.test(text) ? "present" : "absent";
 }
 
-/** M2「进行中」= 顶栏「在干活」「在等」两格都有数（UXNUM1 起由这两格代替「进行中」格） */
+/** M2「进行中」= 总览「合并队列」「审查中」两格都有数（count-words.ts 的阶段列） */
 async function activeMetric(page: Page): Promise<TeamState> {
-  const [a, b] = [await metric(page, "在干活"), await metric(page, "在等")];
+  const [a, b] = [await metric(page, "merge"), await metric(page, "review")];
   return a === b ? a : "absent";
 }
 
-/** M6 周额度：按族写的百分比（夹具 Claude 75%） */
+/** M6 周额度：项目页任何地方写了「周额度」+ 百分比就算 present（PROJTABS1 起两边都不该有） */
 async function quotaMetric(page: Page): Promise<TeamState> {
-  const el = page.locator("[data-metrics]").getByText("周额度", { exact: true }).first();
-  if (!(await el.count())) return "absent";
-  return /Claude \d+%/.test(await el.locator("..").innerText()) ? "present" : "absent";
+  return /周额度|Claude \d+%/.test(await page.locator("body").innerText()) ? "present" : "absent";
 }
 
-const METRICS = ["在场 agent", "今日完成", "审查轮次", "P0/P1 修掉", "平均等复核"];
+/** 项目页上已经没有显示位置的指标（矩阵记 limit） */
+const GONE_METRICS = ["在场 agent", "审查轮次", "P0/P1 修掉", "平均等复核"];
+
+/** 冷开落总览：一句话状态出来才算到了 */
+const overview = (page: Page) => page.locator("[data-headline]").first().waitFor({ timeout: 15_000 });
+/** 「项目地图」标签：等第一个产品卡出来 */
+async function toMap(page: Page, home: HomeFixture) {
+  await page.locator("[data-project-tab=map]").first().click();
+  await page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+}
 
 type Shot = { name: string; png: Buffer };
 interface RunResult { observed: Observed; notes: string[]; calls: string[]; external: string[]; errors: string[] }
@@ -189,13 +206,13 @@ async function settle(page: Page) {
   await page.evaluate("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))");
 }
 
-async function openTask(page: Page, home: HomeFixture, narrow: boolean) {
+/** 项目地图点焦点卡所在的模块，进模块进度再点那张卡（PROJTABS1 起桌面没有大纲，和手机同一条路） */
+async function openTask(page: Page, home: HomeFixture, _narrow: boolean) {
   const task = home.details[FOCUS]!.task;
-  if (narrow) {
-    const f = home.features.find((x) => x.id === task.itemId)!;
-    await page.getByRole("button").filter({ has: page.getByText(f.title, { exact: true }) }).first().click();
-    await page.getByText(task.title, { exact: true }).first().click();
-  } else await page.getByText(task.title, { exact: true }).first().click();
+  await toMap(page, home);
+  const f = home.features.find((x) => x.id === task.itemId)!;
+  await page.getByRole("button").filter({ has: page.getByText(f.title, { exact: true }) }).first().click();
+  await page.getByText(task.title, { exact: true }).first().click();
   await page.locator("aside h5", { hasText: "现在" }).first().waitFor();
   // 详情是异步读的：等到「正在读取…」消失再测
   await page.waitForFunction(`![...document.querySelectorAll("aside")].some((a) => a.innerText.includes("正在读取"))`);
@@ -219,47 +236,37 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, team: T
       side === "local" ? page.waitForResponse((r) => r.url().includes("/api/v1/me/last-seen/")) : null]);
     await page.goto(`${url}?side=${side}&theme=${theme}&project=${home.project}&team=${home.team}`);
     const first = home.features[0]!;
-    await page.getByRole("progressbar", { name: first.title, exact: true }).first().waitFor({ timeout: 15_000 });
+    // PROJTABS1：冷开落总览（待办、上次来之后、数格都在这里，桌面手机同一套）；产品卡在「项目地图」
+    await overview(page);
     await ready;
     await settle(page);
-    observed["产品 DAG 卡片"] = "present";
-    if (narrow) {
-      for (const m of [...METRICS, "进行中", "周额度"]) observed[m] = "not_run";
-      notes.push("390：手机布局没有指标条（collab-view.tsx !narrow && MetricsBar），M1–M6 两边都不渲染，记 not_run");
-    } else {
-      // 数字一次出（UXNUM1）：先等骨架退掉再测
-      await page.locator("[data-metric=working] b").filter({ hasText: /^\d+$/ }).first().waitFor({ timeout: 25_000 });
-      for (const m of METRICS) observed[m] = await metric(page, m);
-      observed["进行中"] = await activeMetric(page);
-      observed["周额度"] = await quotaMetric(page);
-    }
-    // 手机顶栏按钮、桌面大纲入口都是「待你处理 <数>」
-    const w = (await page.getByRole("button", { name: /^待你处理/ }).first().innerText()).replace("待你处理", "").trim();
-    observed["待你处理"] = /暂无/.test(w) ? "unknown" : /^\d/.test(w) ? "present" : "absent";
-    observed["上次以来"] = (await page.getByRole("region", { name: "上次来之后" }).count()) ? "present" : narrow ? "not_run" : "absent";
-    if (narrow && observed["上次以来"] === "not_run") notes.push("390：上次以来卡片只在桌面右栏概览里（Overview since=），手机首页不渲染");
-    await page.locator("[data-product-words=working]").filter({ hasText: /\d/ }).first().waitFor({ timeout: 25_000 });
-    Object.assign(observed, await observeProductCard(page, home, team, side));
-    // UXHOME1：新鲜度只在页头那一行「团队版 · …」（collab-page-head.tsx，桌面 / 手机都有）；右栏的「镜像」节去掉了，本机源没有这一行
+    for (const m of GONE_METRICS) observed[m] = "not_run";
+    // 数字一次出（UXNUM1）：先等骨架退掉再测；读不到看板的源两格整格不出，等到超时照实记
+    await page.locator("[data-cell=merge] b").filter({ hasText: /^\d+$/ }).first().waitFor({ timeout: 25_000 }).catch(() => notes.push(`${side}: 总览数格 25s 内没出数`));
+    observed["今日完成"] = await metric(page, "todayDone");
+    observed["进行中"] = await activeMetric(page);
+    observed["周额度"] = await quotaMetric(page);
+    // 总览「要你定的」：读不到（团队键解析不出本机项目）→ unknown；列出或写「没有要你定的」→ present
+    const asks = String(await page.evaluate(`[...document.querySelectorAll("h5")].find((e) => e.textContent === "要你定的")?.parentElement?.innerText ?? ""`));
+    observed["待你处理"] = (await page.locator("[data-waits=unknown]").count()) ? "unknown" : asks ? "present" : "absent";
+    observed["上次以来"] = (await page.getByRole("region", { name: "上次来之后" }).count()) ? "present" : "absent";
+    // 只看焦点卡的要你定的：本机列出 i28-A7 的阻塞提问；团队按投影 asks 应给「阻塞 N」，现在是「没有」
+    observed["阻塞提问"] = /i28-A7|阻塞\s*\d/.test(asks) ? "present" : /暂无/.test(asks) ? "unknown" : "absent";
+    // UXHOME1：新鲜度只在页头那一行「团队版 · …」（collab-page-head.tsx，桌面 / 手机都有）；本机源没有这一行
     const head = page.locator("[data-collab-head]");
     observed["镜像新鲜度"] = (await head.count()) && /^团队版 · .*(同步|不是最新|还没收到)/.test((await head.first().innerText()).trim()) ? "present" : "absent";
-    // Detect either baseline label; the member container keeps the primary entry named Team.
-    const oldTab = page.getByRole(narrow ? "button" : "tab", { name: "规划与提案", exact: true });
-    const teamTab = side === "team" && await oldTab.count() ? "规划与提案" : "团队";
-    if (narrow) {
-      observed["阻塞提问"] = observed["桌面中区标签"] = "not_run";
-      observed["手机顶栏按钮"] = (await page.getByRole("button", { name: teamTab, exact: true }).count()) && (await page.getByRole("button", { name: /^待你处理/ }).count())
-        ? "present" : "absent";
-      notes.push("390：「要你定的」在桌面右栏概览里，手机首页不渲染，阻塞提问记 not_run；中区标签换成顶栏按钮（N3）");
-    } else {
-      // 右栏概览「要你定的」：本机列出 i28-A7 的阻塞提问；团队按投影 asks 应给「阻塞 N」，现在是「没有」
-      const asks = String(await page.evaluate(`[...document.querySelectorAll("*")].find((e) => e.childElementCount === 0 && e.textContent === "要你定的")?.parentElement?.innerText ?? ""`));
-      observed["阻塞提问"] = /i28-A7|阻塞\s*\d/.test(asks) ? "present" : /暂无/.test(asks) ? "unknown" : "absent";
-      observed["桌面中区标签"] = (await page.getByRole("tab", { name: "谁在干活", exact: true }).count()) && (await page.getByRole("tab", { name: teamTab, exact: true }).count())
-        ? "present" : "absent";
-      observed["手机顶栏按钮"] = "not_run";
-    }
+    const tabs = (await page.locator("[data-project-tab]").allInnerTexts()).map((t) => t.trim());
+    const four = ["总览", "项目地图", "模块进度", "团队"].every((t) => tabs.includes(t));
+    // 桌面中区标签（N2）= 四个标签里有模块进度和团队；手机顶栏按钮（N3）被四个标签取代 = 手机上四个都在
+    observed["桌面中区标签"] = narrow ? "not_run" : four ? "present" : "absent";
+    observed["手机顶栏按钮"] = narrow ? (four ? "present" : "absent") : "not_run";
     await shot("home");
+    await toMap(page, home);
+    await settle(page);
+    observed["产品 DAG 卡片"] = "present";
+    await page.locator("[data-product-words=working]").filter({ hasText: /\d/ }).first().waitFor({ timeout: 25_000 });
+    Object.assign(observed, await observeProductCard(page, home, team, side));
+    await shot("map");
 
     await openTask(page, home, narrow);
     Object.assign(observed, await observeTask(page, home));
@@ -270,18 +277,24 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, team: T
 
     // 版本页 / 对比页：进 feature 的子 DAG，点「版本」，再点「对比」（默认上一版 → 当前版）
     await page.goto(`${url}?side=${side}&theme=${theme}&project=${home.project}&team=${home.team}`);
-    await page.getByRole("progressbar", { name: first.title, exact: true }).first().waitFor({ timeout: 15_000 });
+    await overview(page);
+    await toMap(page, home);
     await page.getByRole("button").filter({ has: page.getByText(first.title, { exact: true }) }).first().click();
     await page.getByText(home.details[FOCUS]!.task.title, { exact: true }).first().waitFor();
     observed["子 DAG 节点"] = "present";
     Object.assign(observed, await observeFeaturePage(page, home, narrow));
-    if (narrow) notes.push("390：手机子 DAG 没有大纲栏，G3 / G10 轮次记 not_run（节点处理人照测）");
+    if (narrow) notes.push("390：G3 / G10 轮次在桌面模块进度测，手机记 not_run（节点处理人照测）");
+    // 轮次卡在别的模块时 observeFeaturePage 换过模块：回到焦点卡所在模块再点版本
+    if (!(await page.getByText(home.details[FOCUS]!.task.title, { exact: true }).count())) {
+      await page.locator("[data-project-pane=module] nav button").first().click();
+      await page.locator("[data-module]").filter({ hasText: first.title }).first().click();
+    }
     await page.getByRole("button", { name: /^(版本|v\d+)$/ }).first().click();
     await page.getByRole("button", { name: "对比", exact: true }).first().waitFor();
     await page.waitForFunction(`!document.body.innerText.includes("正在读取")`, undefined, { timeout: 5000 })
       .catch(() => notes.push(`${side}: 版本页 5s 后仍是「正在读取…」`));
     const rows = await page.locator("button[aria-pressed]").filter({ hasText: /^v\d/ }).count();
-    // 只认版本页自己的「暂无历史版本」（P1-F 的文案）：页面别处（指标条）本来就有「暂无」
+    // 只认版本页自己的「暂无历史版本」（P1-F 的文案）：页面别处本来就可能有「暂无」
     const noHistory = /暂无历史版本/.test(await page.locator("body").innerText());
     observed["版本历史"] = rows > 0 ? "present" : noHistory ? "unknown" : "absent";
     observed["版本元数据（提出人/时间）"] = versionMeta(await page.locator("button[aria-pressed]").filter({ hasText: /^v\d/ }).allInnerTexts(), noHistory);
@@ -294,18 +307,19 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, team: T
     } else observed["两版对比"] = noHistory ? "unknown" : "absent"; // 没历史时 P1-F 把「对比」置灰
     await shot("diff");
 
-    // 谁在干活 / 团队：中区标签（手机上团队是顶栏按钮；谁在干活在手机产品 DAG 列表里没有入口）
+    // 谁在干活 = 「模块进度」的「按人」；团队 = 「团队」标签（PROJTABS1：桌面手机同一套）
     await page.goto(`${url}?side=${side}&theme=${theme}&project=${home.project}&team=${home.team}`);
-    await page.getByRole("progressbar", { name: first.title, exact: true }).first().waitFor({ timeout: 15_000 });
-    const workTab = page.getByRole("tab", { name: "谁在干活", exact: true });
+    await overview(page);
+    await page.locator("[data-project-tab=module]").first().click();
+    const workTab = page.getByRole("tab", { name: "按人", exact: true });
     if (await workTab.count()) {
       await workTab.first().click();
       await page.waitForFunction(`/在干活\\s*[1-9]|仅主场|执行操作仍在主场/.test(document.body.innerText)`, undefined, { timeout: 5000 })
         .catch(() => notes.push(`${side}: 谁在干活 5s 内没有在干活的卡，也没有主场占位`));
       observed["谁在干活"] = await observeWork(page);
       await shot("work");
-    } else { observed["谁在干活"] = "not_run"; notes.push(`${width}: 没有「谁在干活」标签入口`); }
-    const teamBtn = narrow ? page.getByRole("button", { name: teamTab, exact: true }) : page.getByRole("tab", { name: teamTab, exact: true });
+    } else { observed["谁在干活"] = "not_run"; notes.push(`${width}: 模块进度里没有「按人」入口`); }
+    const teamBtn = page.locator("[data-project-tab=team]");
     const peers = page.waitForResponse((r) => r.url().includes("/api/v1/peers/contacts"), { timeout: 5000 })
       .catch(() => notes.push(`${side}: 团队标签 5s 内没有请求本机 peers`));
     await teamBtn.first().click();
@@ -375,7 +389,7 @@ test.skipIf(!out)("team-parity-C old-red/new-green: team-model-fed local hides T
       const g = await guardedPage(browser, url);
       pages.push(g);
       await g.page.goto(`${url}?side=${side}&project=${home.project}&team=${home.team}`);
-      await g.page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+      await overview(g.page);
       await openTask(g.page, home, false);
       return { page: g.page, observed: await observeTask(g.page, home) };
     };
@@ -421,19 +435,20 @@ test.skipIf(!out)("team-parity-Cf1: P1-A gaps gone in the real team page; a rest
   try {
     const { page, calls } = g;
     await page.goto(`${url}?side=team&project=${home.project}&team=${home.team}`);
-    await page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+    await overview(page);
     await settle(page);
-    // 真实团队页：没数据的指标整格不出（UXNUM1，absent），按矩阵直接 pass
-    await page.locator("[data-metric=working] b").filter({ hasText: /^\d+$/ }).first().waitFor({ timeout: 25_000 });
-    const metrics: Observed = { "在场 agent": await metric(page, "在场 agent"), "今日完成": await metric(page, "今日完成"), "平均等复核": await metric(page, "平均等复核") };
-    expect(Object.keys(metrics).map((k) => verdict(metrics, k).verdict)).toEqual(["pass", "pass", "pass"]);
-    // 受控变异：在顶栏补回一格假的「今日完成 3」→ present → fail（检测器真的在读顶栏）
-    await page.evaluate(`document.querySelector("[data-metrics]").insertAdjacentHTML("afterbegin", "<span><b>3</b><span>今日完成</span></span>")`);
-    const fake = { ...metrics, "今日完成": await metric(page, "今日完成") };
+    // 真实团队页：没数据的指标整格不出（UXNUM1，absent），按矩阵直接 pass；PROJTABS1 起只剩总览「今天完成」这一格可测
+    await page.locator("[data-cell=merge] b").filter({ hasText: /^\d+$/ }).first().waitFor({ timeout: 25_000 });
+    const metrics: Observed = { "今日完成": await metric(page, "todayDone") };
+    expect(Object.keys(metrics).map((k) => verdict(metrics, k).verdict)).toEqual(["pass"]);
+    // 受控变异：在总览补回一格假的「今天完成 3」→ present → fail（检测器真的在读总览数格）
+    await page.evaluate(`document.querySelector("[data-overview]").insertAdjacentHTML("afterbegin", "<span data-cell=todayDone><b>3</b><span>今天完成</span></span>")`);
+    const fake = { ...metrics, "今日完成": await metric(page, "todayDone") };
     expect(verdict(fake, "今日完成")).toMatchObject({ observed: "present", verdict: "fail" });
 
     // 谁在干活：团队只读列表（N8B5）有在干活的卡 = present → pass；受控变异：删掉团队这一块 → absent → fail
-    await page.getByRole("tab", { name: "谁在干活", exact: true }).first().click();
+    await page.locator("[data-project-tab=module]").first().click();
+    if (await page.getByRole("tab", { name: "按人", exact: true }).count()) await page.getByRole("tab", { name: "按人", exact: true }).first().click();
     await page.locator("[data-work-board=team]").first().waitFor({ timeout: 5000 });
     await page.waitForFunction(`/在干活\\s*[1-9]/.test(document.body.innerText)`, undefined, { timeout: 5000 });
     const work: Observed = { "谁在干活": await observeWork(page) };
@@ -454,7 +469,7 @@ test.skipIf(!out)("team-parity-Cf1: P1-A gaps gone in the real team page; a rest
 
     // 真实详情里「步骤」已有 = pass（gap 已删）；删掉步骤区块 → absent → fail，不再有 known_gap 兜底
     await page.goto(`${url}?side=team&project=${home.project}&team=${home.team}`);
-    await page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+    await overview(page);
     await openTask(page, home, false);
     const task = await observeTask(page, home);
     expect(verdict(task, "步骤线")).toMatchObject({ observed: "present", verdict: "pass" });
@@ -482,7 +497,8 @@ test.skipIf(!out)("team-parity-Cf1 locale negative probe: an en-US context still
       pages.push(g);
       const first = home.features[0]!;
       await g.page.goto(`${url}?side=local&project=${home.project}&team=${home.team}`);
-      await g.page.getByRole("progressbar", { name: first.title, exact: true }).first().waitFor({ timeout: 15_000 });
+      await overview(g.page);
+      await toMap(g.page, home);
       await g.page.getByRole("button").filter({ has: g.page.getByText(first.title, { exact: true }) }).first().click();
       await g.page.getByRole("button", { name: /^(版本|v\d+)$/ }).first().click();
       await g.page.locator("button[aria-pressed]").filter({ hasText: /^v\d/ }).first().waitFor();
@@ -511,7 +527,7 @@ test.skipIf(!out)("team-parity-C egress sentinel: a page in the guarded context 
   const g = await guardedPage(browser, String(server.url));
   try {
     await g.page.goto(`${server.url}?side=team&project=${home.project}&team=${home.team}`);
-    await g.page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+    await overview(g.page);
     const target = String(sentinel.url), ws = target.replace(/^http/, "ws");
     // 每个探针 3s 内没有结论就记 timeout（断言会红），不让页面里的悬挂拖到用例超时
     const probe = await g.page.evaluate(`(() => {

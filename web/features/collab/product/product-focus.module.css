@@ -1,0 +1,51 @@
+/* PDFOCUS1：选中 / 过滤 / 关键路径的描边、变暗与小标，以及右侧模块页。颜色全用 v4 / product 现有变量。 */
+.fade { transition: opacity 160ms ease-out; }
+.dim { opacity: .3; }
+.selected > button:first-of-type { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.chipSelected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.cpTag { position: absolute; z-index: 3; top: -9px; right: 10px; height: 17px; padding: 0 7px; border-radius: 999px; background: var(--text); color: var(--bg);
+  font-size: 10px; line-height: 17px; white-space: nowrap; pointer-events: none; }
+.flowTask.flowTask { position: relative; left: auto; width: 100%; }
+@media (prefers-reduced-motion: reduce) { .fade { transition: none; } }
+
+/* 边：变暗 / 加粗（关键路径和选中的上下游都用深色粗线） */
+.edgeDim { opacity: .3; }
+.edgeStrong.edgeStrong { color: var(--text); }
+.edgeStrong path:first-child { stroke-width: 2.6; }
+
+/* 工具条：过滤胶囊 + 关键路径开关 */
+.left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.filters { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.filter { min-height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text-2);
+  font-size: var(--fs-3); white-space: nowrap; cursor: pointer; }
+.filter[aria-pressed="true"] { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+.filter:disabled { opacity: .45; cursor: default; }
+.cpToggle[aria-pressed="true"] { border-color: var(--text); color: var(--text); }
+.cpToggle:disabled { opacity: .45; cursor: default; }
+.filter:focus-visible, .cpToggle:focus-visible, .relRow:focus-visible, .go:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 右侧模块页 */
+.state { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: var(--fs-3); margin-bottom: 10px; }
+.stateDot { width: 7px; height: 7px; border-radius: 50%; background: var(--state, var(--muted)); flex: none; }
+.state[data-state="run"] { --state: var(--s-run); }
+.state[data-state="blocked"] { --state: var(--err); }
+.state[data-state="stale"] { --state: var(--warn); }
+.state[data-state="ready"], .state[data-state="done"] { --state: var(--ok); }
+.bigNum { font-size: 26px; font-weight: 600; line-height: 1.2; color: var(--text); }
+.bigNum small { margin-left: 6px; font-size: var(--fs-2); font-weight: 400; color: var(--muted); }
+.line { margin-top: 4px; color: var(--muted); font-size: var(--fs-3); line-height: 1.6; }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li + li { border-top: 1px solid var(--line); }
+.relRow { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 34px; padding: 4px 0; text-align: left; color: var(--text); font-size: var(--fs-2); cursor: pointer; }
+.relRow:hover .linkTitle { text-decoration: underline; text-underline-offset: 3px; }
+.linkTitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.linkNote { flex: none; color: var(--muted); font-size: var(--fs-3); }
+.linkLock { color: var(--warn); display: inline-flex; }
+.empty { margin: 0; color: var(--muted); font-size: var(--fs-3); }
+.tasks { display: flex; flex-direction: column; }
+.tasks > * { height: 26px; line-height: 26px; }
+.cpHead { color: var(--text); font-size: var(--fs-2); font-weight: 600; margin-bottom: 8px; }
+.cpChips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cpChip { padding: 0 9px; height: 24px; line-height: 24px; border-radius: 999px; border: 1px solid var(--line-2); font-size: var(--fs-3); color: var(--text-2); }
+.cpChip[data-on="true"] { border-color: var(--text); color: var(--text); }
+.go { width: 100%; min-height: 36px; margin-top: 4px; border-radius: 8px; background: var(--accent); color: var(--bg); font-size: var(--fs-2); font-weight: 600; cursor: pointer; }

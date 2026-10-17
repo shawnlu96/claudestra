@@ -1,9 +1,9 @@
 /**
- * UXNUM1 真 React DOM（happy-dom）：同一份 useCountState + CountContext 挂顶栏、大纲芯片、右栏概览、产品卡、子 DAG 小片（Counts）、谁在干活六处。
- * [验收线 2] 团队列表有 feature 没拿到详情时六处的状态词只有骨架、没有数字；全部到齐后数字一次出现、之后补拉不跳回骨架；20 秒（这里注入 lateMs）仍缺时出数字和提示。
- * CNTGATE1：本轮试过没拉到（last().failed：读失败 / 429 停发）的 feature 不再豁免，和排队（waiting）的一样要等到齐或 20 秒兜底；
- * loading 时顶栏只遮三个状态格，大纲「进行中 / 已完成 / 全部」三枚芯片同一个闸门一起遮，P0 照常。
- * [验收线 3] 团队顶栏没有「暂无」「—」；额度有数时出「周额度 Claude 75%」，null（403 / 404 / 全空）时整格不出；没有「协作消息」。
+ * UXNUM1 真 React DOM（happy-dom）：同一份 useCountState + CountContext 挂总览数格、产品卡、子 DAG 小片（Counts）、谁在干活四处
+ * （PROJTABS1 起顶栏指标条和左大纲已删，总览数格接替它们：合并队列 / 审查中按计数源出，没载完是骨架）。
+ * [验收线 2] 团队列表有 feature 没拿到详情时各处的状态词只有骨架、没有数字；全部到齐后数字一次出现、之后补拉不跳回骨架；20 秒（这里注入 lateMs）仍缺时出数字和提示。
+ * CNTGATE1：本轮试过没拉到（last().failed：读失败 / 429 停发）的 feature 不再豁免，和排队（waiting）的一样要等到齐或 20 秒兜底。
+ * [验收线 3] 总览没有「暂无」「—」「周额度」「协作消息」：额度只在今天页（QUOTA1），项目页不出。
  * [验收线 4] 谁在干活每个数只出现一次（摘要行不报数；栏标题的数带 wideOnly、手机藏；分段控件桌面藏）；子 DAG 小片有文字标签。
  * 不出网：fetch 一律拒绝并记账。happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
  */
@@ -15,7 +15,6 @@ import { homeView, type LedgerOverview } from "../web/features/collab/collab-mod
 import { countBoardOf, type CountBoard, type CountState } from "../web/features/collab/count-words";
 import type { DagBoard } from "../web/features/collab/dag/dag-types";
 import { teamWorkBoard } from "../web/features/collab/team-work-model";
-import { filterCount, metricsOf } from "../web/features/collab/v4/v4-model";
 import type { ProductBoard } from "../web/lib/api/product-board-types";
 import { FEATURES, LATE, NOW, synthTeam } from "./web-collab-count-words-fixture.test";
 
@@ -37,16 +36,14 @@ beforeAll(async () => {
     { preconnect: () => {} });
   React = webRequire("react") as ReactNS;
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
-  const [src, bar, outline, props, product, canvas, work] = await Promise.all([
+  const [src, props, product, canvas, work] = await Promise.all([
     import(new URL("../web/features/collab/use-count-source.ts", import.meta.url).href),
-    import(new URL("../web/features/collab/metrics-bar.tsx", import.meta.url).href),
-    import(new URL("../web/features/collab/v4/v4-outline.tsx", import.meta.url).href),
-    import(new URL("../web/features/collab/v4/v4-props.tsx", import.meta.url).href),
+    import(new URL("../web/features/collab/project-tabs/overview-tab.tsx", import.meta.url).href),
     import(new URL("../web/features/collab/product/product-view.tsx", import.meta.url).href),
     import(new URL("../web/features/collab/dag/dag-canvas.tsx", import.meta.url).href),
     import(new URL("../web/features/collab/work/work-board-content.tsx", import.meta.url).href),
   ]);
-  mods = { src, bar, outline, props, product, canvas, work };
+  mods = { src, props, product, canvas, work };
 });
 afterAll(async () => {
   globalThis.fetch = realFetch;
@@ -71,17 +68,14 @@ function round(have: readonly string[], more: { failed?: readonly string[]; wait
 const product = (dag: DagBoard): ProductBoard => ({ deps: [], features: dag.features.map((f) => ({ id: f.id, title: f.title, status: "active", hasDag: true, version: 1,
   counts: { total: f.counts.total, completed: f.counts.done, active: 0, blocked: 0 }, eta: null })) });
 
-/** 六处一起挂：顶栏、大纲、右栏概览、产品卡、子 DAG 收起小片、谁在干活 */
-function Page(p: { r: ReturnType<typeof round>; lateMs?: number; quota?: { family: string; pct: number }[] | null; onState?: (s: CountState) => void }) {
+/** 四处一起挂：总览、产品卡、子 DAG 收起小片、谁在干活 */
+function Page(p: { r: ReturnType<typeof round>; lateMs?: number; onState?: (s: CountState) => void }) {
   const { useCountState, CountContext } = mods.src as { useCountState: (a: unknown) => CountState; CountContext: { Provider: unknown } };
   const counts = useCountState({ project: "team", ov: p.r.ov, board: p.r.board as CountBoard, boardPending: false, source: p.r.source, lateMs: p.lateMs });
   p.onState?.(counts);
   const ov = p.r.ov as LedgerOverview, view = homeView(ov, NOW);
   return h(CountContext.Provider, { value: counts },
-    h("section", { "data-place": "top" }, h(mods.bar!.MetricsBar, { m: metricsOf(ov, view.todayDone.length, null), counts, waitUnknown: true, quota: p.quota ?? null, connected: true, tr })),
-    h("section", { "data-place": "chips" }, h(mods.outline!.Outline, { project: "team", ov, lines: new Map(), filter: "active", onFilter: noop, waits: [], onWaits: noop,
-      selected: null, onPick: noop, counts, tr })),
-    h("section", { "data-place": "now" }, h(mods.props!.Overview, { ov, view, waits: [], projectName: "团队", onPick: noop, counts, tr })),
+    h("section", { "data-place": "now" }, h(mods.props!.Overview, { project: "team", ov, view, waits: [], projectName: "团队", onPick: noop, counts, tr })),
     h("section", { "data-place": "product" }, h(mods.product!.ProductView, { board: product(p.r.dag), narrow: true, now: NOW, onFeature: noop, tr })),
     h("section", { "data-place": "frame" }, h(mods.canvas!.Shelf, { shelf: p.r.dag.features, evicted: null, onFeature: noop })),
     h("section", { "data-place": "work" }, h(mods.work!.WorkBoardContent, { team: true, board: p.r.team, retrying: false, loading: counts.status === "loading",
@@ -96,33 +90,28 @@ async function mount(el: unknown) {
   return { host, render: (e: unknown) => React.act(async () => root.render(e as never)), unmount: async () => { await React.act(async () => root.unmount()); host.remove(); } };
 }
 const text = (host: El, sel: string) => Array.from(host.querySelectorAll(sel), (e) => e.textContent ?? "").join("\n");
-/** 六处里「数」所在的元素（产品卡只看两个状态词，进度条「完成 / 总数」不变、不在此列） */
-const NUM_SEL = { top: "[data-metrics]", chips: "[role=tablist]", now: "[data-now], [data-stage-counts]", product: "[data-product-words]",
-  frame: "[data-feature-words]", work: "h3, [role=tablist]" } as const;
-/** 「P0」芯片名里的 0 不是数 */
-const numbers = (host: El, place: keyof typeof NUM_SEL) => text(host, `[data-place=${place}] :is(${NUM_SEL[place]})`).replace(/P0/g, "").match(/\d+/g) ?? [];
+/** 各处「数」所在的元素（总览只看按计数源出的合并队列 / 审查中两格；产品卡只看两个状态词，进度条「完成 / 总数」不变、不在此列） */
+const NUM_SEL = { now: "[data-cell=merge], [data-cell=review]", product: "[data-product-words]", frame: "[data-feature-words]", work: "h3, [role=tablist]" } as const;
+const numbers = (host: El, place: keyof typeof NUM_SEL) => text(host, `[data-place=${place}] :is(${NUM_SEL[place]})`).match(/\d+/g) ?? [];
+/** 子 DAG 小片按 feature 各写「在干活 / 在等 / 没开工」：三项各自加起来 = 全站的三个状态词 */
+const frameSum = (host: El) => numbers(host, "frame").map(Number).reduce((acc, n, i) => { acc[i % 3] = (acc[i % 3] ?? 0) + n; return acc; }, [] as number[]);
+const HINT = (k: number) => `另有 ${k} 个模块还没读到，数字不含它们`;
 const skeletons = (host: El, place: keyof typeof NUM_SEL) => host.querySelectorAll(`[data-place=${place}] [aria-hidden]:empty`).length;
 
-test("[验收线 2] 3 个 feature 详情没到：六处只有骨架；到齐后一次出同一组数；之后补拉不再退回骨架", async () => {
+test("[验收线 2] 3 个 feature 详情没到：各处只有骨架；到齐后一次出同一组数；之后补拉不再退回骨架", async () => {
   const states: string[] = [];
   const partial = round(FEATURES.slice(0, 9)), full = round(FEATURES);
   const m = await mount(h(Page, { r: partial, onState: (s: CountState) => states.push(s.status) }));
   for (const place of Object.keys(NUM_SEL) as (keyof typeof NUM_SEL)[]) {
-    // 大纲芯片：P0 从总览出数，进行中 / 已完成 / 全部三枚是骨架（CNTGATE1）
-    if (place !== "chips") expect({ place, numbers: numbers(m.host, place) }).toEqual({ place, numbers: [] });
+    expect({ place, numbers: numbers(m.host, place) }).toEqual({ place, numbers: [] });
     expect({ place, skeleton: skeletons(m.host, place) > 0 }).toEqual({ place, skeleton: true });
   }
-  expect(skeletons(m.host, "chips")).toBe(3);
   expect(text(m.host, "[data-place]")).not.toContain("加载中");
   await m.render(h(Page, { r: full, onState: (s: CountState) => states.push(s.status) }));
   const words = (place: keyof typeof NUM_SEL) => numbers(m.host, place).map(Number);
-  // 顶栏：在干活 8 · 在等 6 · 没开工 12（团队的今日完成等未知指标整格不出）
-  expect(words("top")).toEqual([8, 6, 12]);
-  // 芯片：进行中 14 · 已完成 20 · 全部 64 · P0 0
-  expect(words("chips")).toEqual([14, 20, 64, 0]);
-  expect(text(m.host, "[data-place=now] [data-now]")).toMatch(/^在干活 8 · 在等 6( · 其中 \d+ 条出问题)?$/);
-  // 各阶段各列之和 = 在干活 + 在等
-  expect(text(m.host, "[data-place=now] [data-stage-counts]").match(/\d+/g)!.map(Number).reduce((a, b) => a + b, 0)).toBe(14);
+  // 总览：合并队列 + 审查中两格出数（阶段列，count-words.ts），且不超过在干活 + 在等
+  expect(words("now").length).toBe(2);
+  expect(words("now").reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(14);
   const sum = (place: "product" | "frame", every: number) => words(place).reduce((acc, n, i) => { acc[i % every] = (acc[i % every] ?? 0) + n; return acc; }, [] as number[]);
   expect(sum("product", 2)).toEqual([8, 6]);
   expect(sum("frame", 3)).toEqual([8, 6, 12]);
@@ -132,46 +121,32 @@ test("[验收线 2] 3 个 feature 详情没到：六处只有骨架；到齐后�
   // 补拉：列表里冒出一个还没读到的 feature（或一轮 429）——不退回骨架
   await m.render(h(Page, { r: { ...full, source: { last: () => ({ list: { features: [...FEATURES, "F13"].map((id) => ({ id })) }, details: new Map(FEATURES.map((id) => [id, {}])) }) } },
     onState: (s: CountState) => states.push(s.status) }));
-  expect(words("top")).toEqual([8, 6, 12]);
+  expect(frameSum(m.host)).toEqual([8, 6, 12]);
   expect(states.indexOf("ready")).toBeGreaterThan(0);
   expect(states.slice(states.indexOf("ready"))).not.toContain("loading");
   await m.unmount();
   expect(requests).toEqual([]);
 });
 
-test("[验收线 2] 20 秒（注入 lateMs）仍缺 feature：照常出数，顶栏末尾提示图标 + 右栏「现在」下面同一句", async () => {
+test("[验收线 2] 20 秒（注入 lateMs）仍缺 feature：照常出数，总览数格下面一句提示", async () => {
   const partial = round(FEATURES.slice(0, 9));
   const m = await mount(h(Page, { r: partial, lateMs: 30 }));
-  expect(numbers(m.host, "top")).toEqual([]);
+  expect(numbers(m.host, "now")).toEqual([]);
   await React.act(async () => { await sleep(60); });
-  const hint = `另有 ${LATE.length} 个 feature 还没读到，数字不含它们`;
-  expect(numbers(m.host, "top").length).toBe(3);
-  expect(m.host.querySelector("[data-metrics] [role=img]")?.getAttribute("title")).toBe(hint);
-  expect(text(m.host, "[data-place=now]")).toContain(hint);
+  expect(numbers(m.host, "now").length).toBe(2);
+  expect(text(m.host, "[data-place=now] [data-count-hint]")).toBe(HINT(LATE.length));
   await m.unmount();
 });
 
-test("[验收线 3] 团队顶栏没有「暂无」「—」「协作消息」；额度有数两边都写「周额度 Claude 75%」，null 整格不出", async () => {
+test("[验收线 3] 总览没有「暂无」「—」「周额度」「协作消息」：团队未知的今天完成整格不出，额度只在今天页", async () => {
   const full = round(FEATURES);
-  const m = await mount(h(Page, { r: full, quota: [{ family: "Claude", pct: 75 }] }));
-  const top = text(m.host, "[data-metrics]");
-  expect(top).not.toMatch(/暂无|—|协作消息|进行中/);
-  expect(text(m.host, "[data-metric=quota]")).toBe("Claude 75%周额度");
-  await m.render(h(Page, { r: full, quota: null }));
-  expect(m.host.querySelector("[data-metric=quota]")).toBeNull();
-  expect(text(m.host, "[data-metrics]")).not.toContain("周额度");
+  const m = await mount(h(Page, { r: full }));
+  const now = text(m.host, "[data-place=now]");
+  expect(now).not.toMatch(/暂无|—|周额度|协作消息/);
+  expect(m.host.querySelector("[data-metrics], [data-metric]")).toBeNull();
+  const unknownToday = (full.ov as LedgerOverview).unknownMetrics?.includes("todayDone") ?? false;
+  expect(m.host.querySelector("[data-place=now] [data-cell=todayDone]") === null).toBe(unknownToday);
   await m.unmount();
-  // 本机：已知指标照旧出，没人在等审查是「—」；没载完时只有三个状态格是骨架，额度、今日完成等已知指标照常有值（TEAMCNT1）
-  const { metricCells } = mods.bar as { metricCells: (...a: unknown[]) => { key: string; value: string | null }[] };
-  const m0 = { present: 3, todayDone: 1, reviewRounds: 2, fixed: 0, avgReviewWaitMs: null };
-  const keys = ["working", "waiting", "notStarted", "todayDone", "present", "reviewRounds", "fixed", "reviewWait", "quota"];
-  const loading = metricCells(m0, { status: "loading" }, false, [{ family: "Claude", pct: 75 }], tr);
-  expect(loading.map((c) => c.key)).toEqual(keys);
-  expect(loading.filter((c) => c.value === null).map((c) => c.key)).toEqual(["working", "waiting", "notStarted"]);
-  const snap = { words: { working: 1, waiting: 2, notStarted: 3, done: 0 }, active: new Set(), stages: [], byFeature: new Map() };
-  const ready = metricCells(m0, { status: "ready", snap, missing: 0 }, false, [{ family: "Claude", pct: 75 }], tr);
-  expect(ready.map((c) => [c.key, c.value])).toEqual([["working", "1"], ["waiting", "2"], ["notStarted", "3"], ["todayDone", "1"], ["present", "3"],
-    ["reviewRounds", "2"], ["fixed", "0"], ["reviewWait", "—"], ["quota", "Claude 75%"]]);
 });
 
 test("[验收线 4] 谁在干活每个数只出现一次：摘要行不报数，栏标题的数手机藏、分段控件桌面藏；子 DAG 小片写字", async () => {
@@ -191,20 +166,17 @@ test("[验收线 4] 谁在干活每个数只出现一次：摘要行不报数，
   await m.unmount();
 });
 
-test("[验收线 3] 没载完时额度照常出、顶栏只有三个状态格是骨架；小片完成数、待做分组数、机器数仍是骨架；载完一起出", async () => {
+test("[验收线 3] 没载完时总览两格是骨架；小片完成数、待做分组数、机器数仍是骨架；载完一起出", async () => {
   const partial = round(FEATURES.slice(0, 9)), full = round(FEATURES);
   const twoMachines = (r: ReturnType<typeof round>) => ({ ...r, team: { ...r.team, machines: { local: 5, peer: 3 } } });
-  const quota = [{ family: "Claude", pct: 75 }];
-  const m = await mount(h(Page, { r: twoMachines(partial), quota }));
-  expect(text(m.host, "[data-metric=quota]")).toBe("Claude 75%周额度");
-  for (const k of ["working", "waiting", "notStarted"]) expect(text(m.host, `[data-metric=${k}]`)).not.toMatch(/\d/);
-  expect(skeletons(m.host, "top")).toBe(3);
+  const m = await mount(h(Page, { r: twoMachines(partial) }));
+  expect(skeletons(m.host, "now")).toBe(2);
   // 子 DAG 小片：去掉标题（Feature F01）后不剩数字
   const chips = () => Array.from(m.host.querySelectorAll("[data-place=frame] button"), (b) => (b.textContent ?? "").replace(b.getAttribute("title") ?? "", ""));
   expect(chips().join("|")).not.toMatch(/\d/);
   expect(text(m.host, "[data-place=work]")).not.toMatch(/(可以开工|受阻) · \d|(本机|peer) \d/);
-  await m.render(h(Page, { r: twoMachines(full), quota }));
-  expect(text(m.host, "[data-metric=quota]")).toBe("Claude 75%周额度");
+  await m.render(h(Page, { r: twoMachines(full) }));
+  expect(skeletons(m.host, "now")).toBe(0);
   expect(chips().every((c) => /^\d+在干活/.test(c))).toBe(true);
   expect(text(m.host, "[data-place=work]")).toMatch(/可以开工 · \d+/);
   expect(text(m.host, "[data-place=work]")).toMatch(/peer 3/);
@@ -251,19 +223,17 @@ test("[验收线 1] 本轮 1 个 feature 详情吃到 429（last().failed）：�
   const r = round(FEATURES.slice(0, 11), { failed: FEATURES.slice(11) });
   const m = await mount(h(Page, { r, lateMs: 40, onState: (s: CountState) => states.push(s.status) }));
   expect(states[states.length - 1]).toBe("loading");
-  expect(numbers(m.host, "top")).toEqual([]);
-  expect(skeletons(m.host, "chips")).toBe(3);
+  expect(numbers(m.host, "now")).toEqual([]);
+  expect(skeletons(m.host, "now")).toBe(2);
   await React.act(async () => { await sleep(80); });
   expect(states[states.length - 1]).toBe("ready");
-  expect(numbers(m.host, "top").length).toBe(3);
-  const hint = "另有 1 个 feature 还没读到，数字不含它们";
-  expect(m.host.querySelector("[data-metrics] [role=img]")?.getAttribute("title")).toBe(hint);
-  expect(text(m.host, "[data-place=now]")).toContain(hint);
+  expect(numbers(m.host, "now").length).toBe(2);
+  expect(text(m.host, "[data-place=now] [data-count-hint]")).toBe(HINT(1));
   for (const place of Object.keys(NUM_SEL) as (keyof typeof NUM_SEL)[]) expect({ place, skeleton: skeletons(m.host, place) }).toEqual({ place, skeleton: 0 });
   // 之后补拉到了：只换数字、提示消失，不闪回骨架
   await m.render(h(Page, { r: round(FEATURES), lateMs: 40, onState: (s: CountState) => states.push(s.status) }));
-  expect(numbers(m.host, "top").map(Number)).toEqual([8, 6, 12]);
-  expect(m.host.querySelector("[data-metrics] [role=img]")).toBeNull();
+  expect(frameSum(m.host)).toEqual([8, 6, 12]);
+  expect(m.host.querySelector("[data-count-hint]")).toBeNull();
   expect(states.slice(states.indexOf("ready"))).not.toContain("loading");
   await m.unmount();
 });
@@ -275,26 +245,12 @@ test("[验收线 2] 还在排队（waiting，没发过请求）或还没试过�
     const r = round(FEATURES.slice(0, 11), more);
     const m = await mount(h(Page, { r, lateMs: 40, onState: (s: CountState) => states.push(s.status) }));
     expect({ more, status: states[states.length - 1] }).toEqual({ more, status: "loading" });
-    expect(numbers(m.host, "top")).toEqual([]);
+    expect(numbers(m.host, "now")).toEqual([]);
     await React.act(async () => { await sleep(80); });
     expect({ more, status: states[states.length - 1] }).toEqual({ more, status: "ready" });
-    expect(m.host.querySelector("[data-metrics] [role=img]")?.getAttribute("title")).toBe("另有 1 个 feature 还没读到，数字不含它们");
+    expect(text(m.host, "[data-count-hint]")).toBe(HINT(1));
     await m.unmount();
   }
-});
-
-test("[验收线 4] loading 时左栏「进行中 / 已完成 / 全部」三枚芯片同一个闸门出骨架，只有「P0」照 filterCount 出数", async () => {
-  const partial = round(FEATURES.slice(0, 9));
-  const m = await mount(h(Page, { r: partial }));
-  const chips = Array.from(m.host.querySelectorAll("[data-place=chips] [role=tab]"));
-  const ov = partial.ov as LedgerOverview;
-  expect(chips.map((c) => [c.querySelector("[aria-hidden]") !== null, c.textContent])).toEqual([
-    [true, "进行中 "],
-    [true, "已完成 "],
-    [true, "全部 "],
-    [false, `P0 ${filterCount(ov, "p0", null)}`],
-  ]);
-  await m.unmount();
 });
 
 test("[验收线 5] 本机项目视图（没有 last()）放行照旧：总览 + 看板到了就出数，failed 概念不参与", async () => {
@@ -318,11 +274,9 @@ test("[验收线 5] 本机项目视图（没有 last()）放行照旧：总览 +
  */
 afterEach(() => jest.useRealTimers());
 const at = (have: readonly string[]) => round(have, { failed: FEATURES.filter((f) => !have.includes(f)) });
-/** 顶栏、右栏、产品卡、左侧三枚芯片（P0 不在闸门内）都还没有数 */
+/** 总览两格、产品卡、子 DAG 小片都还没有数 */
 function noNumbersYet(host: El) {
-  for (const place of ["top", "now", "product", "frame"] as const) expect({ place, numbers: numbers(host, place) }).toEqual({ place, numbers: [] });
-  const chips = Array.from(host.querySelectorAll("[data-place=chips] [role=tab]")).slice(0, 3);
-  expect(chips.map((c) => [c.querySelector("[aria-hidden]") !== null, (c.textContent ?? "").match(/\d/) !== null])).toEqual([[true, false], [true, false], [true, false]]);
+  for (const place of ["now", "product", "frame"] as const) expect({ place, numbers: numbers(host, place) }).toEqual({ place, numbers: [] });
 }
 const advance = (ms: number) => React.act(async () => { jest.advanceTimersByTime(ms); });
 
@@ -344,18 +298,14 @@ test("CNTGATE1 [验收线 1] 2 秒缺 3、16 秒缺 1、31 秒补齐：20 秒前
   noNumbersYet(m.host);
   await advance(1);
   expect(states[states.length - 1]).toBe("ready");
-  const hint = "另有 1 个 feature 还没读到，数字不含它们";
-  expect(m.host.querySelector("[data-metrics] [role=img]")?.getAttribute("title")).toBe(hint);
-  expect(text(m.host, "[data-place=now]")).toContain(hint);
-  const early = numbers(m.host, "top").map(Number);
-  expect(early.length).toBe(3);
-  expect(numbers(m.host, "chips").length).toBe(4);
+  expect(text(m.host, "[data-place=now] [data-count-hint]")).toBe(HINT(1));
+  expect(numbers(m.host, "now").length).toBe(2);
+  expect(frameSum(m.host).length).toBe(3);
   await advance(11_000);
   await m.render(h(Page, { r: at(FEATURES), onState }));
-  expect(m.host.querySelector("[data-metrics] [role=img]")).toBeNull();
+  expect(m.host.querySelector("[data-count-hint]")).toBeNull();
   expect(text(m.host, "[data-place=now]")).not.toContain("还没读到");
-  expect(numbers(m.host, "top").map(Number)).toEqual([8, 6, 12]);
-  expect(numbers(m.host, "chips").map(Number)).toEqual([14, 20, 64, 0]);
+  expect(frameSum(m.host)).toEqual([8, 6, 12]);
   expect(states.slice(states.indexOf("ready"))).not.toContain("loading");
   await m.unmount();
 });
@@ -366,14 +316,14 @@ test("CNTGATE1 [验收线 2] 20 秒内全部拿到详情：只出现一次完整
   const states: string[] = [];
   const Probe = (p: { r: ReturnType<typeof round> }) => h(Page, { r: p.r, onState: (s: CountState) => states.push(s.status) });
   const m = await mount(h(Probe, { r: at([]) }));
-  const seen = () => { const n = numbers(m.host, "top").join(","); if (n && tops[tops.length - 1] !== n) tops.push(n); };
+  const seen = () => { const n = frameSum(m.host).join(","); if (n && tops[tops.length - 1] !== n) tops.push(n); };
   for (const [ms, have] of [[2_000, FEATURES.slice(0, 9)], [10_000, FEATURES.slice(0, 11)], [3_000, FEATURES]] as const) {
     await advance(ms);
     await m.render(h(Probe, { r: at(have) }));
     seen();
   }
   expect(tops).toEqual(["8,6,12"]);
-  expect(m.host.querySelector("[data-metrics] [role=img]")).toBeNull();
+  expect(m.host.querySelector("[data-count-hint]")).toBeNull();
   // 补拉：列表冒出一个还没读到的 feature，且它在 failed 里——不退回骨架
   const more = round(FEATURES);
   await m.render(h(Probe, { r: { ...more, source: { last: () => ({ list: { features: [...FEATURES, "F13"].map((id) => ({ id })) }, details: new Map(FEATURES.map((id) => [id, {}])),

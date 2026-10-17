@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { addKnownFlaky, revokeKnownFlaky, setKnownFlakyModeSource } from "../src/lib/ci-known-flaky.js";
 import { knownFlakyBase } from "../src/lib/ci-known-flaky-rerun.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
 import { bindNode } from "../src/lib/ledger-dag-write.js";
 import { getFeature } from "../src/lib/ledger-feature.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
@@ -35,6 +36,7 @@ function card(over: Over = {}) {
   const c = mergedCard();
   c.db.query("UPDATE scheduler_merges SET phase='await_ci', mergeSha=NULL WHERE intentId=?").run(c.intent);
   setKnownFlakyModeSource(() => over.mode ?? "on");
+  setOutOfDiffModeSource(() => "off"); // CIF8 alone; with the out-of-diff rerun: tests/ci-out-of-diff-rerun.test.ts
   const featureId = createFeature(c.db, owner, { project: "p", slug: "rel", title: "rel" }).row.id;
   initDag(c.db, owner, { id: featureId, rev: 1, nodes: [{ key: "UPDFLAKY1", oneLine: "修时序竞态" }] });
   const add = (file = FLAKY) => addKnownFlaky(c.db, owner, { project: "p", file, featureId, node: "UPDFLAKY1", reason: "时序竞态" });
@@ -68,7 +70,7 @@ const withCard = async (over: Over, body: (c: ReturnType<typeof card>) => Promis
   const c = card(over);
   try { await body(c); } finally { c.close(); }
 };
-afterEach(() => setKnownFlakyModeSource(null));
+afterEach(() => { setKnownFlakyModeSource(null); setOutOfDiffModeSource(null); });
 
 describe("CIF8 on: failures only in valid listed files outside the PR → one rerun through CIF1's claim", () => {
   test("re-runs once, does not bounce, the event names the entry and its fixing node; the same head red again → fix, no second rerun", async () => {

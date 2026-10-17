@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect } from "bun:test";
 import { addKnownFlaky, setKnownFlakyModeSource } from "../src/lib/ci-known-flaky.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
@@ -46,6 +47,7 @@ export function isolate(): void {
   });
   afterEach(() => {
     setKnownFlakyModeSource(null);
+    setOutOfDiffModeSource(null);
     setCiEvidenceGh(null);
     if (saved) writeFileSync(RECOVERY_POLICY_PATH, saved);
     else rmSync(RECOVERY_POLICY_PATH, { force: true });
@@ -101,6 +103,7 @@ export async function parked(over: Over = {}) {
   expect(await f.cli("scheduler", "scheduler-merge-begin", id, "--required-checks", "ci")).toMatchObject({ ok: true, run: { phase: "ready" } });
   const claim = over.claim ?? "flaky";
   setKnownFlakyModeSource(() => (claim === "flaky" ? "on" : "off"));
+  if (claim === "none") setOutOfDiffModeSource(() => "off"); // CIRERUN1's out-of-diff re-run would authorize this red
   const featureId = createFeature(f.db, f.at("owner"), { project: "p", slug: "rel", title: "rel" }).row.id;
   initDag(f.db, f.at("owner"), { id: featureId, rev: 1, nodes: [{ key: "FLAKY1", oneLine: "修时序竞态" }] });
   addKnownFlaky(f.db, f.at("owner"), { project: "p", file: FLAKY, featureId, node: "FLAKY1", reason: "时序竞态" });

@@ -22,6 +22,7 @@ import { newMessageId, newThreadId, type Envelope } from "./router.js";
 import { probeTurn } from "./turn-probe.js";
 import { ledgerAuditEscalator } from "./ledger-audit-escalate.js";
 import { ledgerAuditFailures, type AuditNoticeIdentity, type AuditNoticeReceipt } from "./ledger-audit-failure.js";
+import { serialMdn, startManualDeliverNotice } from "./manual-deliver-notice.js";
 
 const INTERVAL_MS = 15 * 60_000;
 /** 启动后多久跑第一轮：给 channel-server 重连留时间，否则收件人都算不在线 */
@@ -161,6 +162,13 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
   return async () => {
     if (running) return;
     running = true;
+    try {
+      await serialMdn(round); // RVF-2：与人工卡交付提醒串行，同一次交付不会两边各推 PM 一次
+    } finally {
+      running = false;
+    }
+  };
+  async function round(): Promise<void> {
     let failureKind: AuditFailureKind = "manager_failed";
     try {
       const raw = await d.runManager("ledger", "audit", "--json");
@@ -213,10 +221,8 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
       if (!failing) console.error(`⚠️ 台账巡检出错（恢复前不再重复报）: ${(e as Error).message}`);
       failing = true;
       await pmNoticeLevel.run("action", () => failures.fail(failureKind)); // 巡检自身失败：action 级，照旧推送
-    } finally {
-      running = false;
     }
-  };
+  }
 }
 
 let started = false;
@@ -226,6 +232,7 @@ export function startLedgerAudit(d: LedgerAuditDeps): void {
   if (started) return;
   started = true;
   const tick = ledgerAuditTicker(d);
+  startManualDeliverNotice(`bun ${join(REPO_ROOT, "src/manager.ts")}`); // RVF-2：人工卡交付提醒，与巡检 manual_deliver_no_review 共用阈值和去重
   setTimeout(() => {
     void tick();
     setInterval(() => void tick(), INTERVAL_MS).unref?.();

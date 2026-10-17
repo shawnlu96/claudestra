@@ -67,7 +67,17 @@ async function open(width: number, extra: Record<string, string> = {}) {
 const shot = (page: Page, name: string) => page.screenshot({ path: join(shotsDir, `${BEFORE ? "before" : "after"}-${name}.png`), animations: "disabled" });
 const entry = (page: Page) => page.locator("nav[aria-label='侧栏'] > ul > li").filter({ has: page.getByRole("button", { name: TARGET, exact: false }) })
   .first().getByRole("button", { name: "协作视图" });
-const viewReady = (page: Page) => page.locator("main").getByText("团队视图 feature 1", { exact: false }).first().waitFor();
+/** PROJTABS1：项目页冷开落「总览」，产品卡在「项目地图」标签里（同一页里同项目会记住标签，再开不用重点）；基线没有标签就不点 */
+async function toMap(page: Page) {
+  const tab = page.locator("main [data-project-tab=map]").first();
+  await tab.waitFor({ timeout: 10_000 }).catch(() => undefined); // 基线（改前对照）没有四标签：照原来的等法
+  // 用 DOM click 切标签：鼠标点会把顺序焦点起点留在标签上，改掉「收起后第一个 Tab 落在窄栏按钮」的起点
+  if (await tab.count()) await tab.evaluate((el: { click(): void }) => el.click());
+}
+const viewReady = async (page: Page) => {
+  await toMap(page);
+  await page.locator("main").getByText("团队视图 feature 1", { exact: false }).first().waitFor();
+};
 const js = (page: Page, expr: string) => page.evaluate(expr) as Promise<unknown>;
 const closeView = async (page: Page) => {
   await page.evaluate("window.__systemBack()");
@@ -159,6 +169,7 @@ test("390：窄屏不出现窄栏，Gate 外层始终是 contents，打开 / 关
   await entry(page).scrollIntoViewIfNeeded();
   await entry(page).click();
   await page.getByRole("button", { name: "返回", exact: true }).waitFor();
+  await toMap(page);
   await page.getByText("i28-A1", { exact: false }).first().waitFor();
   await shot(page, "4-open-390");
   if (!BEFORE) {

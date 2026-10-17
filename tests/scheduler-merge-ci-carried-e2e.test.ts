@@ -6,7 +6,7 @@
  * for the gate, then take the CIF1 split (one rerun for a timeout in a test the PR does not touch, otherwise ci_fail back to fix),
  * never unknown, never a frozen queue. Driver / ledger cases: tests/scheduler-merge-ci-carried.test.ts.
  */
-import { afterAll, afterEach, beforeAll, expect, setSystemTime, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, setSystemTime, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -26,6 +26,12 @@ import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
 import { mergeTick } from "../src/lib/scheduler-service.js";
 import { isUnderTempDir } from "../src/lib/test-guard.js";
 import { testChildEnv } from "./test-env.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const A = "FLK2", B = "FLK2B", M = "b".repeat(40);
 const PRS: Record<string, string> = { [A]: "https://github.com/example/repo/pull/42", [B]: "https://github.com/example/repo/pull/43" };
