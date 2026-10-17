@@ -14,7 +14,7 @@ import { PROJECTS_PATH, resolveProjectForRealDir, type ProjectDef } from "./proj
 import { isRecoveryMode, readRecoveryFile, RECOVERY_POLICY_PATH, type ObservedAction, type RecoveryKey, type RecoveryMode } from "./recovery-policy.js";
 import { REPO_ROOT } from "./repo-root.js";
 
-const CODEX_PROBE_KEY = "codexPauseProbe" as RecoveryKey;
+const CODEX_PROBE_KEY: RecoveryKey = "codexPauseProbe";
 export const PROBE_EVERY_MS = 30 * 60_000;
 const PROBE_KEY = "probe:codex";
 

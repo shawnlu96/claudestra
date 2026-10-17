@@ -22,6 +22,7 @@ import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend
 import type { HttpPeer } from "./peers.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { pausedUntil, refreshQuotaPause } from "./lend-health.js";
+import type { CodexPauseProbe } from "./lend-codex-probe.js";
 import { gapHolds, gapTick, type GapPort } from "./lend-update-gap.js";
 
 export const POLL_MS = 30_000;
@@ -38,6 +39,8 @@ export interface LoopDeps extends LendDeps {
   claudeProbe?: () => Promise<string | null>; // 本机 Claude 就绪探测的桩（测试用）；不设 = 真跑 claude auth status
   /** 出借更新空档（lend-update-gap.ts）；不设 = 这一步不跑，已有的空档行照样挡收单 */
   updateGap?: GapPort;
+  /** Codex 额度暂停期间的定时探测（lend-codex-probe.ts）；不设 = 不探测，同改前 */
+  codexPauseProbe?: CodexPauseProbe;
 }
 
 /** doctor 读的本轮摘要（journal meta "status"） */
@@ -252,7 +255,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
     setMeta(d.db, BOOT_KEY, d.v2!.boot); // 调度服务刚启动：每个 peer 当轮立刻 poll 一次
     for (const e of eff.lend) r.pollNow.add(e.peer);
   }
-  await refreshQuotaPause(d.db, d.codexQuota, d.now(), d.log); // 领单前已满就暂停；到点或观测不满恢复
+  await refreshQuotaPause(d.db, d.codexQuota, d.now(), d.log, d.codexPauseProbe); // 领单前已满就暂停；到点或观测不满恢复
   const gap = d.updateGap ? await gapTick(d.db, d.updateGap, d.now(), d.log) : null; // 不出站；开着的空档从这里起挡本轮 claim / poll / 推送收单
   await loopClaudeReadiness(d.db, eff.lend, d.claudeProbe); // 先和 meta 对齐、必要时探完写回，本轮 hello 与推送收单才是同一份 Claude 结论
   const hello = new Set(r.v2 ? helloTargets(d.db, eff.lend, d.now()) : []);
