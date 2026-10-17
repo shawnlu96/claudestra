@@ -241,7 +241,8 @@ export async function writeReviewFallback(db: Database, ctx: WriteCtx, input: Re
   const read = fallbackRead(db, input);
   if (typeof read === "string") return { outcome: "skipped", reason: read };
   const { facts, fi } = read, action = fallbackAction(facts, fi);
-  const g = await gateRecovery(db, { project: facts.task.project, mechanism: "reviewFallback", target: facts.task.id, actionKey: `fallback:${fi.intent.id}`, action,
+  const actionKey = `fallback:${facts.task.id}:r${facts.task.round}:${input.failed.family}`; // one observe note per card / round / failed family
+  const g = await gateRecovery(db, { project: facts.task.project, mechanism: "reviewFallback", target: facts.task.id, actionKey, action,
     data: { reviewFallback: { intentId: fi.intent.id, trigger: facts.trigger, from: input.failed, to: facts.to, reason: fi.message.slice(0, 600) } } },
     () => applyFallback(db, ctx, input), { now: ctx.now ?? Date.now(), ...(policy ? { policy } : {}) });
   if (g.outcome === "skipped") return { outcome: "skipped", reason: g.reason };

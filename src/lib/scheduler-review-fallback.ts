@@ -11,8 +11,8 @@ import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type AuthorFamily, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getTask, listEvents } from "./ledger-store.js";
-import { readFileSync } from "node:fs";
 import { statePath } from "./paths.js";
+import { readRecoveryFile } from "./recovery-policy-file.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 
 /** planModelRecovery's reason when no authorized placement differs from the author family (the old way to PM). */
@@ -79,17 +79,15 @@ let policyFile = statePath("recovery-policy.json"); // CFG's own file; tests poi
 export const setFallbackPolicyFile = (path?: string): void => { policyFile = path ?? statePath("recovery-policy.json"); };
 
 /**
- * The switch read afresh with CFG's precedence (keys.reviewFallback → project mode → the key's default, which is never off; an
- * unreadable file stops recovery, so it reads as off). Off withdraws an epoch already written: no fallback reviewer is created or
- * sent any more and its verdict passes no gate. Read here, not via recovery-policy.ts, which sits above the ledger writer.
+ * recoveryPolicy(project, "reviewFallback").mode === "off", read afresh through the same strict reader (an invalid or unreadable
+ * file stops recovery: off) and precedence (keys → project mode → the key's default, which is never off). Off withdraws an epoch
+ * already written: no fallback reviewer is created or sent and its verdict passes no gate. Not via recovery-policy.ts itself,
+ * which sits above the ledger writer (guard deps:no-cycle).
  */
 export function fallbackSwitchedOff(project: string): boolean {
-  let cfg: { keys?: Record<string, unknown>; mode?: unknown } | undefined;
-  try {
-    cfg = (JSON.parse(readFileSync(policyFile, "utf8")) as { projects?: Record<string, typeof cfg> }).projects?.[project];
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== "ENOENT"; // no file = every key at its default; an unreadable one = recovery stopped
-  }
+  const r = readRecoveryFile(policyFile);
+  if (r.status === "corrupt") return true;
+  const cfg = r.status === "ok" && Object.hasOwn(r.data.projects, project) ? r.data.projects[project] : undefined;
   return (cfg?.keys?.reviewFallback ?? cfg?.mode) === "off";
 }
 
@@ -179,13 +177,15 @@ export function fallbackEpochEvent(f: FallbackFacts, i: FallbackInput): { text: 
 }
 
 /**
- * The text a create failure is judged by: the error after the receipt's own prefix, with the card id cut out wherever the scheduler
- * spelled it (agent names, checkout dirs), so a card named like CI-429 never reads as quota.
+ * The text a failure is judged by: the error after a create receipt's own prefix, with the card id cut out as whole tokens where
+ * the scheduler spells it — as written, or lower-cased after a hyphen (agent-rv-ci-429, rv-ci-429) — so CI-429 never reads as
+ * quota while a card named LIMIT or A leaves "usage limit" intact.
  */
 export function failureText(message: string, taskId: string): string {
   const cut = message.indexOf("）：");
   const own = message.startsWith("未建：") && cut !== -1 ? message.slice(cut + 2) : message;
-  return own.replace(new RegExp(taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "");
+  const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return own.replace(new RegExp(`(?<![A-Za-z0-9])${esc(taskId)}(?![A-Za-z0-9])|(?<=-)${esc(taskId.toLowerCase())}(?![A-Za-z0-9])`, "g"), "");
 }
 
 /** The verdict facts the handoff evidence carries (ReviewFacts' slice; structural, this module sits below scheduler-review.ts). */
@@ -225,4 +225,16 @@ export function verdictFallback(db: Database, task: LedgerTask): Record<string, 
 export function fallbackNotice(db: Database, task: LedgerTask): string {
   const f = verdictFallback(db, task);
   return f ? `；本机跨族审查降级为同族（${String(f.reason).slice(0, 200)}），没有跨族审查` : "";
+}
+
+/**
+ * Why the merge step hands the card to PM instead of going on, or null. Switched off (or an unreadable policy) after the verdict:
+ * no road takes it any more, on any project. On: a project merging on this machine never merges it by itself (handoff /
+ * localMerge go on — the owner's queue / PM's own local-merge decide).
+ */
+export function fallbackMergeHold(db: Database, task: LedgerTask, mergesHere: boolean): string | null {
+  const note = fallbackNotice(db, task);
+  if (!note) return null;
+  if (fallbackSwitchedOff(task.project)) return `降级已撤销（reviewFallback 已 off 或策略读不出），本轮缺跨族审查，需要 PM 重派跨族审查或决定${note}`;
+  return mergesHere ? `同族降级、无跨族审查：不自动合并，等 PM 确认（同意就用 manual-merge-request 进人工合并队列）${note}` : null;
 }

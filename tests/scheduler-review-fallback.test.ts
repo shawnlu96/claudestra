@@ -54,12 +54,13 @@ beforeEach(() => {
   f = autoFixture();
 });
 afterEach(() => { f.close(); errors.mockRestore(); setModelOutcomeReader(); setFallbackPolicyFile(); delete g.__rvfMode; delete g.__moMode; });
-/** CFG's own file (what the gates read synchronously) says reviewFallback is off for project p. */
-function switchOff() {
+/** CFG's own file (what the gates read synchronously) says reviewFallback is off for project p — or is invalid (CFG: off too). */
+function switchOff(content: object = { projects: { p: { keys: { reviewFallback: "off" } } } }) {
   const file = join(dir, `policy-${Math.random()}.json`);
-  writeFileSync(file, JSON.stringify({ projects: { p: { keys: { reviewFallback: "off" } } } }));
+  writeFileSync(file, JSON.stringify(content));
   setFallbackPolicyFile(file);
 }
+const INVALID = { projects: { p: { keys: { reviewFallback: "on" }, junk: 1 } } }; // adv4 E: CFG's strict reader answers off
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const editRegistry = (fn: (r: { agents: Record<string, Record<string, unknown>> }) => void) => {
@@ -227,6 +228,8 @@ describe("reviewer create fails (acceptance 1 addendum: the 10-16 NRT-1 path)", 
     expect(classifyModelOutcome({ failure: { kind: "error", message: receipt } })?.cls).toBe("capacity"); // what the whole receipt would say
     expect(classifyModelOutcome({ failure: { kind: "error", message: failureText(receipt, "CI-429") } })?.cls).toBe("host");
     expect(failureText(receipt, "CI-429")).toBe("创建失败: 窗口起不来（rv- 已清理）");
+    // whole tokens only (P2-E): a card named like a word never eats the host's quota wording
+    for (const id of ["LIMIT", "A", "USAGE"]) expect(classifyModelOutcome({ failure: { kind: "error", message: failureText(QUOTA_TURN, id) } })?.cls).toBe("capacity");
   });
 
   test("the author's create / turn is never a fallback: an author on quota still goes to PM", async () => {
@@ -253,11 +256,15 @@ describe("switch reviewFallback (acceptance 5)", () => {
     expect(notes[0].data.reviewFallback).toMatchObject({ trigger: "review_capacity", to: { family: "claude", machine: "local" } });
   });
 
-  test("observe on a create failure: noted, the card keeps backing off as before", async () => {
+  test("observe on a create failure: one note per card / round / failed family however often it fails, the card backs off as before", async () => {
     g.__rvfMode = "observe";
     await delivered();
-    failCreates(NRT1_CREATE);
-    expect(await tick()).toMatchObject({ step: "waiting" });
+    failCreates(NRT1_CREATE, NRT1_CREATE, NRT1_CREATE);
+    for (let n = 0; n < 3; n++) {
+      expect(await tick()).toMatchObject({ step: "waiting" });
+      f.advance(20 * 60_000); // past retryCleanCreate's backoff
+    }
+    expect(f.intents().filter((i) => i.action === "ensure_session" && i.node === "adversarial_review" && i.status === "cancelled")).toHaveLength(3);
     expect(epochs()).toEqual([]);
     expect(ops("recovery_observe").filter((e) => e.data.mechanism === "reviewFallback")).toHaveLength(1);
   });
@@ -278,17 +285,19 @@ describe("switch reviewFallback (acceptance 5)", () => {
     expect(await tick()).toMatchObject({ step: "review_fallback" });
   });
 
-  test("switched off with an epoch in flight (S5): no fallback reviewer created or sent, the card goes to PM", async () => {
-    await delivered();
-    failCreates(NRT1_CREATE);
-    expect(await tick()).toMatchObject({ step: "review_fallback" });
-    switchOff();
-    const r = (await tick())!;
-    expect(r.step).toBe("manual");
-    expect(r.detail).toContain("reviewFallback 已切到 off");
-    expect(created).toEqual([]);
-    expect(f.sent.filter((s) => s.agent === FB)).toEqual([]);
-  });
+  for (const [what, content] of [["switched off", undefined], ["an invalid policy file (adv4 E)", INVALID]] as const) {
+    test(`${what} with an epoch in flight (S5): no fallback reviewer created or sent, the card goes to PM`, async () => {
+      await delivered();
+      failCreates(NRT1_CREATE);
+      expect(await tick()).toMatchObject({ step: "review_fallback" });
+      switchOff(content);
+      const r = (await tick())!;
+      expect(r.step).toBe("manual");
+      expect(r.detail).toContain("reviewFallback 已切到 off");
+      expect(created).toEqual([]);
+      expect(f.sent.filter((s) => s.agent === FB)).toEqual([]);
+    });
+  }
 });
 
 describe("the fallback verdict (acceptance 2, 3)", () => {
@@ -313,11 +322,29 @@ describe("the fallback verdict (acceptance 2, 3)", () => {
     expect(f.notices.at(-1)).toContain("本机跨族审查降级为同族");
   });
 
-  test("switched off after the verdict (S5): no merge gate takes the fallback verdict any more", async () => {
-    await fallbackPassed();
-    switchOff();
-    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).toThrow();
-  });
+  for (const [what, content] of [["switched off", undefined], ["an invalid policy file (adv4 E)", INVALID]] as const) {
+    test(`${what} after the verdict (S5): no merge gate takes the fallback verdict any more`, async () => {
+      await fallbackPassed();
+      switchOff(content);
+      expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).toThrow();
+    });
+  }
+
+  for (const [kind, project] of [["a PR project (B3)", {}], ["a localMerge project (adv6 I)", { localMerge: true }], ["a handoff project (adv5 G)", { mergeHandoff: true }]] as const) {
+    test(`switched off after the verdict, ${kind}: the merge step hands the card to PM at once, saying the fallback was withdrawn`, async () => {
+      projects = { p: { maxActiveWorkers: 2, ...project } };
+      await fallbackPassed();
+      switchOff();
+      for (let n = 0; n < 3 && f.task().stage !== "merge"; n++) await tick();
+      const r = (await tick())!;
+      expect(r.step).toBe("manual");
+      expect(getWorkflow(f.db, "T1")!.mode).toBe("manual");
+      expect(f.notices.at(-1)).toContain("降级已撤销");
+      expect(f.notices.at(-1)).toContain("需要 PM 重派跨族审查或决定");
+      expect(f.notices.at(-1)).not.toContain("人工合并队列");
+      expect(f.intents().filter((i) => i.action === "merge")).toEqual([]);
+    });
+  }
 
   test("handoff evidence and PM's notice name the fallback; the cross-family review is left to the owner's queue", async () => {
     await fallbackPassed();
