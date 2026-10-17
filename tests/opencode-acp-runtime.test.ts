@@ -27,7 +27,7 @@ describe("注册表", () => {
   test("老运行时不受影响", () => {
     expect(transportsOf("codex")).toEqual(["tmux", "acp"]);
     expect(transportsOf("claude-code")).toEqual(["tmux"]);
-    expect(managedFor("pi")?.acpOnly).toBeUndefined();
+    expect(transportsOf("pi")).toEqual(["tmux", "acp"]); // 只走 ACP 由注册表那一行定（runtimes/index.ts），不是适配器上的字段
   });
 
   test("transport：opencode 缺省 acp，点名 tmux 拒；切 tmux 被拒", async () => {
@@ -65,7 +65,12 @@ const SPEC = {
   mode: "new" as const, channelId: "c1", bridgeUrl: "ws://127.0.0.1:3847", sessionId: "ses_abc", agentName: "agent-oc",
   purpose: "试", model: "opencode/big-pickle", cwd: "/w",
 };
-const O = { bunBin: "/opt/bun", repoRoot: "/repo", opencodeBin: "/nvm/bin/opencode", env: {} as Record<string, string | undefined> };
+const O = { bunBin: "/opt/bun", repoRoot: "/repo", opencodeBin: "/nvm/bin/opencode", env: {} as Record<string, string | undefined>, writePayload: () => undefined };
+/** 启动命令里的大段文本进一次性文件（acp-launch-payload.ts）：测试注入写入器，拿写进去的键值对 */
+function capture() {
+  let pairs: [string, string | undefined][] = [];
+  return { write: (p: [string, string | undefined][]) => ((pairs = p), "/state/run/acp-launch/0123456789abcdef.json"), get: (k: string) => pairs.find(([x]) => x === k)?.[1] };
+}
 
 describe("启动命令", () => {
   test("带运行时、模型、OpenCode 绝对路径、全文前言；接回只带短前言", () => {
@@ -74,8 +79,14 @@ describe("启动命令", () => {
     expect(cmd).toContain("OPENCODE_BIN=/nvm/bin/opencode");
     expect(cmd).toContain("CLAUDESTRA_ACP_MODEL=opencode/big-pickle");
     expect(cmd).toEndWith("/opt/bun /repo/src/acp-host.ts");
-    const pre = (c: string) => c.match(/CLAUDESTRA_CODEX_PREAMBLE=(\S+)/)?.[1]?.replace(/'/g, "") ?? "";
-    expect(pre(buildOpencodeAcpHostCommand({ ...SPEC, mode: "resume" }, O)).length).toBeLessThan(pre(cmd).length);
+    // 前言进一次性文件、不在命令行（acp-launch-payload.ts）；接回的那份比新建的短
+    expect(cmd).not.toContain("CLAUDESTRA_CODEX_PREAMBLE=");
+    const pre = (mode: "new" | "resume") => {
+      const cap = capture();
+      buildOpencodeAcpHostCommand({ ...SPEC, mode }, { ...O, writePayload: cap.write });
+      return cap.get("CLAUDESTRA_CODEX_PREAMBLE") ?? "";
+    };
+    expect(pre("resume").length).toBeLessThan(pre("new").length);
   });
 
   test("没装 opencode / 缺会话 id 抛", () => {

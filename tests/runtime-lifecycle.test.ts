@@ -14,6 +14,7 @@ import { buildPiCommand, PI_LOCKED_EFFORT, PI_LOCKED_MODEL, type PiLaunchOptions
 import { normalizePiEnvProfile, type PiEnvProfile } from "../src/lib/pi-env.ts";
 import {
   allSources,
+  transportsOf,
   claudeCodeAdapter,
   codexAdapter,
   controlFor,
@@ -242,12 +243,13 @@ describe("manageable 适配器契约", () => {
   test("每个 manageable 适配器都有退出指令、control、就绪判据、registry 字段", () => {
     for (const m of managed) {
       // 只走 ACP 的（OpenCode）没有 TUI：不敲退出指令、不发打断键，退出靠宿主的 exitPrelude（acp-control.ts）
-      if (m.acpOnly) expect([m.exitCommand, m.control.interruptKeys.length, typeof m.exitPrelude]).toEqual(["", 0, "function"]);
+      const acpOnly = !transportsOf(m.id).includes("tmux");
+      if (acpOnly) expect([m.exitCommand, m.control.interruptKeys.length, typeof m.exitPrelude]).toEqual(["", 0, "function"]);
       else expect(m.exitCommand).toMatch(/^\/\S+$/);
       expect(m.noteTag.length).toBeGreaterThan(0);
       expect(m.inbound.length).toBeGreaterThan(0);
       expect(m.turnEnd.length).toBeGreaterThan(0);
-      if (!m.acpOnly) expect(m.control.interruptKeys.length).toBeGreaterThan(0);
+      if (!acpOnly) expect(m.control.interruptKeys.length).toBeGreaterThan(0);
       for (const fn of ["waitReady", "buildLaunchCommand", "isValidSessionId", "available", "registryFields"]) {
         expect(typeof (m as never as Record<string, unknown>)[fn]).toBe("function");
       }

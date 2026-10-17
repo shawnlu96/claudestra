@@ -56,9 +56,11 @@ export interface PatternDef {
   /** 这些文件是规范实现本身，不计数。 */
   allow: RegExp;
   hint: string;
+  /** 按文件计数（key = pattern:<id>:<文件>，每个文件只许减）：搬代码也算新增。不声明 = 全仓总数 */
+  perFile?: true;
 }
 
-/** 绕过规范 helper 的写法（按全仓总数棘轮）。catch 类吞错单独在 rules/patterns.ts 里判注释质量。 */
+/** 绕过规范 helper 的写法（按全仓总数棘轮，perFile 的按文件）。catch 类吞错单独在 rules/patterns.ts 里判注释质量。 */
 export const PATTERNS: PatternDef[] = [
   {
     id: "tmux-target-literal",
@@ -83,6 +85,20 @@ export const PATTERNS: PatternDef[] = [
     re: /["'`,]\s*registry\.json["'`]|\/registry\.json`/g,
     allow: /^src\/lib\/registry\.ts$/,
     hint: "registry 路径用 REGISTRY_PATH（src/lib/registry.ts）",
+  },
+  {
+    // 按运行时 id 分支：runtime / rt / *Runtime（可带 .id）与字面量比较（两个方向，含模板字面量）、switch 在它上面，或拿字面量 id 查注册表
+    id: "runtime-literal",
+    re: new RegExp(
+      String.raw`\b(?:\w*[rR]untime|rt)(?:\.id)?\s*[!=]==?\s*["'\x60][a-z][\w-]*["'\x60]` +
+        String.raw`|["'\x60][a-z][\w-]*["'\x60]\s*[!=]==?\s*[\w$.?]*\b(?:\w*[rR]untime|rt)\b` +
+        String.raw`|\bswitch\s*\(\s*[\w$.?]*\b(?:\w*[rR]untime|rt)(?:\.id)?\s*\)` +
+        String.raw`|\b(?:managedFor|requireManaged|sourceFor|controlFor|transportsOf|acpSpecFor)\(\s*["'\x60][a-z][\w-]*["'\x60]`,
+      "g",
+    ),
+    allow: /^src\/lib\/runtimes\//,
+    perFile: true,
+    hint: "运行时差异写进运行时描述（runtimes/contract.ts / RuntimeControl），注册表登记一行；别按 id 判断（docs/runtimes/adding-a-runtime.md）",
   },
   {
     id: "web-route-401-boilerplate",

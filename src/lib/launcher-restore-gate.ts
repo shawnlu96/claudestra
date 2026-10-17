@@ -23,7 +23,8 @@ interface Entry {
   missingAlert: boolean;
   failureAlert: boolean;
   lastFailureAlert?: number;
-  activeRuntime?: "pi" | "codex" | "opencode";
+  /** 非 Claude Code 的运行时（hook 报回合结束的那几家；注册表新加的也算） */
+  activeRuntime?: string;
   deadAfterStop?: boolean;
 }
 interface State { version: 1; agents: Record<string, Entry> }
@@ -42,7 +43,7 @@ function validState(value: unknown): boolean {
       && Number.isInteger(e.failures) && e.failures >= 0 && e.failures <= 3
       && typeof e.missingAlert === "boolean" && typeof e.failureAlert === "boolean"
       && (e.deadAfterStop === undefined || typeof e.deadAfterStop === "boolean")
-      && (e.activeRuntime === undefined || e.activeRuntime === "pi" || e.activeRuntime === "codex" || e.activeRuntime === "opencode")
+      && (e.activeRuntime === undefined || (typeof e.activeRuntime === "string" && e.activeRuntime !== "claude-code"))
       && (e.lastFailureAlert === undefined || (Number.isFinite(e.lastFailureAlert) && e.lastFailureAlert >= 0)));
 }
 
@@ -50,7 +51,7 @@ function observedRecovery(a: Agent, e: Entry): boolean {
   // A stopped hook runtime must become dead before active can indicate a manual recovery;
   // otherwise the third timed-out launch itself could erase the stop. Persist both observations.
   if (e.failureAlert && a.status === "dead") e.deadAfterStop = true;
-  if (e.failureAlert && e.deadAfterStop && e.failures > 0 && a.status === "active" && (a.runtime === "pi" || a.runtime === "codex" || a.runtime === "opencode")) {
+  if (e.failureAlert && e.deadAfterStop && e.failures > 0 && a.status === "active" && !!a.runtime && a.runtime !== "claude-code") {
     if (e.activeRuntime !== a.runtime) { e.activeRuntime = a.runtime; return false; }
     delete e.activeRuntime;
     delete e.deadAfterStop;

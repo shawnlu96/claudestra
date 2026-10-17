@@ -1,28 +1,26 @@
 /**
- * OpenCode 的适配器：只有 ACP 一条路（acpOnly），宿主直连 `opencode acp`，没有适配器进程（docs/runtimes/opencode-acp.md）。
+ * OpenCode 的适配器：只有 ACP 一条路（注册表那一行的 source 是只读来源，runtimes/index.ts），宿主直连 `opencode acp`，没有适配器进程（docs/runtimes/opencode-acp.md）。
  * - new：起一个短命的 `opencode acp`，session/new 拿 `ses_…`（OpenCode 一建就落库，不需要 Codex 那种引导轮）；
  * - resume / restart：宿主 session/resume 接回，按 registry 的模型 set_config_option 校一次（host.ts applyAcpLaunchConfig）；
  * - 职责与频道规则：OpenCode 没有追加系统提示的入口，走首条入站前言（与 Codex 的 CLAUDESTRA_CODEX_PREAMBLE 同一条路）；
  * - 模型必填（modelRequired）：OpenCode 自己的缺省是免费的 big-pickle，免费期数据可能被拿去训练，不能指望缺省值。
  * 会话来源（历史）在 opencode-source.ts。tests/opencode-acp-runtime.test.ts。
  */
-import { join } from "node:path";
 import { channelInstructions } from "../channel-instructions.js";
-import { shellEscape } from "../claude-launch.js";
-import { acpCallerCredAssignment } from "../caller-cred-launch.js";
 import { codexContextPreamble, codexDeveloperInstructions } from "../codex-launch.js";
 import { encodePreambleEnv } from "../codex-thread.js";
 import { acpLogDir } from "../log-paths.js";
-import { pathOverrideAssignments } from "../paths.js";
 import { REPO_ROOT } from "../repo-root.js";
 import { resolveBunPath } from "../bun-path.js";
 import { hostEnvBase, spawnAdapter } from "../acp/adapter-proc.js";
-import { ACP_RUNTIME_ENV, opencodeConfigContent } from "../acp/host-runtime.js";
 import { OPENCODE_BIN_ENV, OPENCODE_INSTALL_HINT, opencodeBin, opencodeDirsEnv } from "../acp/opencode-bin.js";
 import { AcpSession } from "../acp/session.js";
 import { enforceOpencodeModel } from "../acp/opencode-model-check.js";
 import { isValidOpencodeSessionId } from "../opencode-session.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
+import { ACP_RUNTIME_ENV, type AcpRuntimeSpec } from "./contract.js";
+import { OPENCODE_ACP_HOST, opencodeConfigContent } from "./opencode-acp-host.js";
+import { acpHostCommand, waitReadyAndSettle, type writeLaunchPayload } from "./acp-launch-payload.js";
 import { CODEX_READY_OPTION } from "./codex-ready.js";
 import { waitOpencodeReady } from "./opencode-ready.js";
 import { opencodeSource } from "./opencode-source.js";
@@ -37,7 +35,8 @@ const mcpName = (env: Record<string, string | undefined>) => env.MCP_NAME || "cl
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
 export function buildOpencodeAcpHostCommand(
-  spec: LaunchSpec, o: { bunBin: string; repoRoot: string; opencodeBin: string | null; env?: Record<string, string | undefined> },
+  spec: LaunchSpec,
+  o: { bunBin: string; repoRoot: string; opencodeBin: string | null; env?: Record<string, string | undefined>; writePayload?: typeof writeLaunchPayload },
 ): string {
   const env = o.env ?? process.env;
   const agent = spec.agentName || spec.settingsName;
@@ -56,13 +55,14 @@ export function buildOpencodeAcpHostCommand(
     [ACP_RUNTIME_ENV, "opencode"],
     [OPENCODE_BIN_ENV, o.opencodeBin],
     ["CLAUDESTRA_ACP_MODEL", spec.model.trim()],
+  ];
+  // 前言进一次性文件、命令只带路径（acp-launch-payload.ts：命令太长会被 tty 截断，宿主起不来）；两份相同时文件里只存一份
+  const payload: [string, string][] = [
     // 新会话里还没有职责 / 规则，首条入站带全文；接回的会话历史里已有，只带短前言。/clear 换的新会话同样要全文
     ["CLAUDESTRA_CODEX_PREAMBLE", spec.mode === "new" ? full : encodePreambleEnv(codexContextPreamble(who))],
     ["CLAUDESTRA_ACP_CLEAR_PREAMBLE", full],
   ];
-  const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
-  const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape);
-  return `${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
+  return acpHostCommand({ pairs, payload, agent, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot });
 }
 
 /** new / fork：起短命的 `opencode acp` 建会话（不挂 claudestra MCP），返回 OpenCode 的会话 id */
@@ -107,8 +107,6 @@ export const opencodeAcpAdapter: ManagedRuntimeAdapter = {
   ...opencodeSource,
   manageable: true,
   control: ACP_CONTROL,
-  acp: { control: ACP_CONTROL },
-  acpOnly: true,
   modelRequired: OPENCODE_MODEL_REQUIRED,
   noEffort: true,
   inbound: "acp-host",
@@ -125,7 +123,17 @@ export const opencodeAcpAdapter: ManagedRuntimeAdapter = {
   },
   buildLaunchCommand: (spec) => buildOpencodeAcpHostCommand(spec, { bunBin: process.execPath, repoRoot: REPO_ROOT, opencodeBin: opencodeBin() }),
   beforeLaunch: (win) => resetReadyOption(win, CODEX_READY_OPTION), // 清不掉就抛：不带着残留的 "1" 往下启动
-  waitReady: (win, budget) => waitOpencodeReady(win, budget),
+  waitReady: (win, budget) => waitReadyAndSettle(win, () => waitOpencodeReady(win, budget)),
   exitPrelude: acpExitPrelude,
   registryFields: () => ({ runtime: "opencode", transport: "acp" }),
+};
+
+/** 注册表那一行的 ACP 段（runtimes/index.ts）：opencode 在不在就是就绪闸（没有适配器要装） */
+export const OPENCODE_ACP: AcpRuntimeSpec = {
+  managed: opencodeAcpAdapter,
+  host: OPENCODE_ACP_HOST,
+  ready: async () => {
+    const r = await opencodeAcpAdapter.available();
+    return r.ok ? { ok: true } : { ok: false, reason: r.hint };
+  },
 };

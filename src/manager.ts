@@ -602,8 +602,8 @@ async function cmdCreate(
     };
     if (adapter.prepareSession) spec.sessionId = (await adapter.prepareSession(spec)).sessionId;
     // 按窗口 id 操作，并经 gateOps：信号清理接手后不再往 tmux 发任何东西（按名字发可能落到别的窗口）
-    const go = await (await import("./manager/acp-lifecycle.js")).launchWithPiFallback(adapter, (a) => launchInWindow(tmuxName, a, spec, { target: windowId, gate: (w) => gateOps(w, run) }),
-      gateOps(tmuxWindowOps(tmuxName, windowId), run)); // Pi 的 ACP 起不来：同一窗口回退 tmux
+    const go = await (await import("./manager/acp-lifecycle.js")).launchWithPiFallback(adapter, (a) => launchInWindow(tmuxName, a, spec,
+      { target: windowId, gate: (w) => gateOps(w, run), waitShell: true }), gateOps(tmuxWindowOps(tmuxName, windowId), run)); // Pi 的 ACP 起不来：同一窗口回退 tmux
     const started = go.result; adapter = go.adapter; transportNote = go.note ?? transportNote;
     ready = started.ready;
     if (!started.ready) {

@@ -51,7 +51,7 @@ export interface CompactSource {
   trigger?: () => "manual" | "auto";
 }
 
-/** 按运行时的翻译差异（host-runtime.ts 的 AcpRuntime.translator 给；不给 = Codex / Pi 的现行行为逐字不变） */
+/** 按运行时的翻译差异（运行时描述 AcpHostRuntime.translator 给，runtimes/contract.ts；不给 = Codex / Pi 的现行行为逐字不变） */
 export interface TranslatorOptions {
   /**
    * tool_call（pending）只带工具名、入参是空的或只有 {cwd}（OpenCode），真参数在 in_progress 才来：pending 一律不起头，

@@ -14,21 +14,28 @@ import { isRepoStub, repoStubPath } from "../src/lib/acp/stub.ts";
 import type { LaunchSpec } from "../src/lib/runtimes/types.ts";
 
 const SPEC: LaunchSpec = { mode: "resume", channelId: "123", bridgeUrl: "ws://localhost:3847", sessionId: "019a-sid", agentName: "agent-cx", purpose: "写代码" };
-const O = { bunBin: "/opt/bun", repoRoot: "/repo", codexBin: "/usr/local/bin/codex", env: {} as Record<string, string | undefined> };
+const O = { bunBin: "/opt/bun", repoRoot: "/repo", codexBin: "/usr/local/bin/codex", env: {} as Record<string, string | undefined>, writePayload: () => undefined };
+/** 启动命令里的大段文本进一次性文件（acp-launch-payload.ts）：测试注入写入器，拿写进去的键值对 */
+function capture() {
+  let pairs: [string, string | undefined][] = [];
+  return { write: (p: [string, string | undefined][]) => ((pairs = p), "/state/run/acp-launch/0123456789abcdef.json"), get: (k: string) => pairs.find(([x]) => x === k)?.[1] };
+}
 
 describe("buildAcpHostCommand", () => {
   test("环境变量前缀 + bun acp-host.ts；resume 带职责前言（与 tmux 同一份），new 不带", () => {
-    const cmd = buildAcpHostCommand(SPEC, O);
+    const cap = capture();
+    const cmd = buildAcpHostCommand(SPEC, { ...O, writePayload: cap.write });
     const head = "DISCORD_CHANNEL_ID=123 BRIDGE_URL=ws://localhost:3847 CLAUDESTRA_AGENT=agent-cx CLAUDESTRA_SESSION_ID=019a-sid MCP_NAME=claudestra";
-    expect(cmd).toStartWith(`${head} CLAUDESTRA_CODEX_BIN=/usr/local/bin/codex CLAUDESTRA_ACP_DEVELOPER=`);
+    expect(cmd).toStartWith(`${head} CLAUDESTRA_CODEX_BIN=/usr/local/bin/codex CLAUDESTRA_ACP_LAUNCH_FILE=/state/run/acp-launch/0123456789abcdef.json`);
     expect(cmd).toEndWith(" /opt/bun /repo/src/acp-host.ts");
-    const pre = /CLAUDESTRA_CODEX_PREAMBLE='([^']+)'/.exec(cmd)![1];
-    expect(decodePreambleEnv(pre)).toContain("你的职责: 写代码");
-    const clearPre = /CLAUDESTRA_ACP_CLEAR_PREAMBLE='([^']+)'/.exec(cmd)![1];
-    expect(decodePreambleEnv(clearPre)).toContain("你的职责: 写代码");
-    const developer = /CLAUDESTRA_ACP_DEVELOPER='([^']+)'/.exec(cmd)![1];
-    expect(Buffer.from(developer, "base64").toString("utf8")).toContain("你的职责: 写代码");
-    expect(buildAcpHostCommand({ ...SPEC, mode: "new" }, O)).not.toContain("CLAUDESTRA_CODEX_PREAMBLE");
+    // 前言 / developer 指令进一次性文件，命令行里没有（acp-launch-payload.ts）
+    for (const k of ["CLAUDESTRA_CODEX_PREAMBLE", "CLAUDESTRA_ACP_CLEAR_PREAMBLE", "CLAUDESTRA_ACP_DEVELOPER"]) expect(cmd).not.toContain(`${k}=`);
+    expect(decodePreambleEnv(cap.get("CLAUDESTRA_CODEX_PREAMBLE"))).toContain("你的职责: 写代码");
+    expect(decodePreambleEnv(cap.get("CLAUDESTRA_ACP_CLEAR_PREAMBLE"))).toContain("你的职责: 写代码");
+    expect(Buffer.from(cap.get("CLAUDESTRA_ACP_DEVELOPER")!, "base64").toString("utf8")).toContain("你的职责: 写代码");
+    const fresh = capture();
+    buildAcpHostCommand({ ...SPEC, mode: "new" }, { ...O, writePayload: fresh.write });
+    expect(fresh.get("CLAUDESTRA_CODEX_PREAMBLE")).toBeUndefined();
   });
 
   test("模型 / 推理强度给宿主（接上线程后 set_config_option）；Claude 的模型名早拒", () => {

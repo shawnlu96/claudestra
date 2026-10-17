@@ -5,8 +5,7 @@
  * available() 由各适配器自己缓存（Codex 5 分钟），这里不再加一层。hint 里可能带本机
  * 路径——端点只给全权 token，BFF 只往浏览器转 id / label / available / models / modelRequired。
  */
-import { managedFor, manageableRuntimeIds } from "./index.js";
-import { probeAcpCli } from "../acp/readiness.js";
+import { acpSpecFor, managedFor, manageableRuntimeIds } from "./index.js";
 import { opencodeModels } from "../opencode-models.js";
 
 export interface RuntimeCatalogEntry {
@@ -23,14 +22,17 @@ export interface RuntimeCatalogEntry {
   noEffort?: boolean;
 }
 
-/** 按运行时取模型清单：没有这种来源的返回 undefined（弹窗照旧手填 / 用 CC 目录） */
+/**
+ * 按运行时取模型清单：没有这种来源的返回 undefined（弹窗照旧手填 / 用 CC 目录）。还没挪进注册表那一行的 listModels：
+ * opencode-models 经 claude-settings-runtime 回头 import 注册表，挂上去会成环（OCR-3 接模型列表时一起拆）
+ */
 const MODEL_LISTS: Record<string, () => Promise<string[]>> = { opencode: () => opencodeModels() };
 
 export async function runtimeCatalog(): Promise<RuntimeCatalogEntry[]> {
   return Promise.all(
     manageableRuntimeIds().map(async (id) => {
       const a = managedFor(id)!;
-      const acp = id === "codex" ? await probeAcpCli() : null;
+      const acp = (await acpSpecFor(id)?.catalogProbe?.()) ?? null; // 声明了目录探测的（Codex：CLI 有 app-server）先看它
       const r = acp?.ok ? { ok: true as const } : await a.available().catch((e) => ({ ok: false as const, hint: (e as Error).message }));
       const models = r.ok ? await MODEL_LISTS[id]?.() : undefined;
       return {

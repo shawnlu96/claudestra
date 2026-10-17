@@ -1,4 +1,4 @@
-/** 切 ACP 前的共同闸门：Codex 的迁移、create、restart、doctor 用同一判据；Pi 只看 pi 版本（checkAcpReadyFor）。 */
+/** 切 ACP 前的就绪探测：Codex 的迁移、create、restart、doctor 用同一判据；Pi 只看 pi 版本。按运行时分派在注册表（runtimes/index.ts checkAcpReadyFor）。 */
 import { resolveCodexBinary } from "../codex-launch.js";
 import { defaultRunner, type Runner } from "../codex-thread.js";
 import { isSandbox } from "../sandbox.js";
@@ -88,9 +88,4 @@ export async function probePiAcp(run: Runner = defaultRunner): Promise<AcpReady>
   if (!r.ok) return { ok: false, reason: `找不到 pi 或它起不来（${piBinName()}；可用 PI_BIN 指定路径）` };
   const v = `${r.out}\n${r.err}`.match(/(\d+\.\d+\.\d+)/)?.[1];
   return v && isNewerVersion(PI_ACP_MIN_VERSION, v) ? { ok: false, reason: `pi ${v} 太旧：acp 要 ${PI_ACP_MIN_VERSION} 以上（内置 MCP）` } : { ok: true };
-}
-
-/** 按运行时分派的就绪闸（transport 命令用）：pi 看版本，其余照旧走 Codex 的判据 */
-export function checkAcpReadyFor(runtime: string | undefined, autoInstall = false, deps: AcpReadyDeps = {}): Promise<AcpReady> {
-  return runtime === "pi" ? probePiAcp(deps.run) : checkAcpReady(autoInstall, deps);
 }

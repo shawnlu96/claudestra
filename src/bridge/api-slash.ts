@@ -121,7 +121,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   const nativeHit = runtimeCommandsFor(rt, agent.name, acp)?.find((c) => c.name === slashM[1]);
   const resolved = nativeHit
     ? { ok: true as const, ccText: `/${nativeHit.invokeName}${args ? ` ${args}` : ""}`, scope: nativeHit.scope }
-    : rt === "codex" || rt === "opencode" ? { ok: false as const, reason: `not a ${rt} command` } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
+    : rt === "codex" || (acp && !piAcp) ? { ok: false as const, reason: `not a ${rt} command` } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
   if (piAcp && !nativeHit && (resolved.ok || PI_BUILTIN_PASSTHROUGH.some((b) => b.name === slashM[1]))) {
     return owner ? piAcpUnsupported(slashM[1]) : apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
   }

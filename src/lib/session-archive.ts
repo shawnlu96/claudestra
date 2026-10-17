@@ -12,7 +12,7 @@
  */
 
 import { ARCHIVE_ROOT as STATE_ARCHIVE_ROOT } from "./paths.js";
-import { agentRuntime, readRegistryAgents } from "./registry.js";
+import { readRegistryAgents } from "./registry.js";
 import { findSessionJsonlBySessionId, sessionJsonlPath } from "./session-source.js";
 import { existsSync, readdirSync, realpathSync } from "fs";
 import { mkdir, readdir, writeFile } from "fs/promises";
@@ -21,7 +21,7 @@ import { projectsSlug } from "./jsonl-cost.js";
 import { copyIfLarger } from "./archive-copy.js";
 import { archiveWorkflowDirs } from "./workflow-archive.js";
 import { pickCodexRolloutForArchive, type RolloutPick } from "./codex-rollout-pick.js";
-import { refreshOpencodeMirrorAsync } from "./opencode-session.js";
+import { sourceFor } from "./runtimes/index.js";
 
 export const ARCHIVE_ROOT = STATE_ARCHIVE_ROOT;
 const WORKER_MARKER = ".worker-kind";
@@ -148,7 +148,8 @@ export async function archiveSession(
   if (typeof sessionId !== "string" || !sessionId) {
     return { ok: false, archived: [], note: `无效 sessionId（期望字符串，实得 ${typeof sessionId}）` };
   }
-  const runtime = agentRuntime({ runtime: opts.runtime });
+  // 原样交给会话来源（sourceFor 认不出的 id 回 Claude Code）：别经 agentRuntime 折成三家，注册表新加的运行时也要按自己的来源找文件
+  const runtime = opts.runtime || "claude-code";
   const located = await locateSource(runtime, cwd, sessionId, opts.srcPath);
   if ("error" in located) return { ok: false, archived: [], note: located.error };
   const { path: src, note: pickNote } = located;
@@ -210,15 +211,16 @@ export async function archiveSession(
 /**
  * 会话源文件。Codex 走 pickCodexRolloutForArchive（核对首行 id，同 id 多份再按 cwd 分，分不开就拒）；
  * 其余交给运行时适配器：Claude Code 按 cwd 推算，Pi 文件名带时间戳推不出（返回 null）→ 按 id 全库找。
- * OpenCode 的会话在它的库里，适配器只给现成镜像（可能旧几秒）：退役时先等一次导出再拷，否则最后几条丢在归档外；导不出就用旧镜像。
- * 用异步导出：每日兜底归档跑在 bridge 里，同步导出会卡住事件循环。tests/opencode-archive.test.ts
+ * 来源声明了 freshArchivePath 的（OpenCode：会话在它的库里，适配器只给可能旧几秒的镜像）退役时先等它给一份最新的再拷，否则最后几条丢在
+ * 归档外；给不出就报找不到。tests/opencode-archive.test.ts
  */
 async function locateSource(runtime: string, cwd: string | undefined, sessionId: string, srcPath?: string): Promise<RolloutPick> {
   if (srcPath && existsSync(srcPath)) return { path: srcPath };
   if (runtime === "codex") return pickCodexRolloutForArchive(sessionId, cwd);
-  if (runtime === "opencode") {
-    const mirror = await refreshOpencodeMirrorAsync(sessionId);
-    return mirror ? { path: mirror } : { error: missingSourceNote(runtime, sessionId) };
+  const fresh = sourceFor(runtime).freshArchivePath;
+  if (fresh) {
+    const path = await fresh(sessionId);
+    return path ? { path } : { error: missingSourceNote(runtime, sessionId) };
   }
   let src = !srcPath && cwd ? (sessionJsonlPath(runtime, cwd, sessionId) ?? "") : "";
   if (!src || !existsSync(src)) src = findSessionJsonlBySessionId(runtime, sessionId) ?? "";

@@ -121,7 +121,7 @@ function selfAudit(base: string, baseBaseline: Baseline | null, cur: Baseline, c
 
 function hintFor(key: string): string {
   const p = prefixOf(key);
-  if (p === "pattern") return PATTERNS.find((x) => `pattern:${x.id}` === key)?.hint ?? "";
+  if (p === "pattern") return PATTERNS.find((x) => `pattern:${x.id}` === key || key.startsWith(`pattern:${x.id}:`))?.hint ?? "";
   return HINTS[p] ?? "";
 }
 

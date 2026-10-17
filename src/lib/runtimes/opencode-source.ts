@@ -6,6 +6,7 @@ import {
   opencodeLineToClaudeShape,
   opencodeSessionIdFromPath,
   opencodeMirrorPathNow,
+  refreshOpencodeMirrorAsync,
   scanOpencodeSessions,
 } from "../opencode-session.js";
 import type { AnyRecord, SessionSourceAdapter } from "./types.js";
@@ -17,6 +18,8 @@ export const opencodeSource: Omit<SessionSourceAdapter, "manageable" | "control"
   /** 会话不按 cwd 落文件：cwd 用不上，按 id 拿镜像（不等导出，过期后台刷；bridge 会周期性要路径，不能同步导出卡住它） */
   sessionPath: (_cwd, sessionId) => opencodeMirrorPathNow(sessionId),
   findSessionById: (sessionId) => opencodeMirrorPathNow(sessionId),
+  /** 退役归档时等一次导出：现成镜像可能旧几秒，最后几条会丢在归档外；导不出就用旧镜像 */
+  freshArchivePath: (sessionId) => refreshOpencodeMirrorAsync(sessionId),
   /** 库里的会话不是文件，没有「某目录下的会话文件」这个概念 */
   listSessionsForCwd: () => [],
   ownsPath: (path) => isOpencodeMirrorPath(path),

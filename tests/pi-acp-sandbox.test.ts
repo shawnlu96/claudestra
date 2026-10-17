@@ -182,15 +182,18 @@ describe("适配器：参数与环境", () => {
     extras: { piEnv: { extensions: ["npm:evil-pkg"], mcpConfig: "/Users/x/.pi/agent/mcp.json", trustProject: true } },
   };
   test("启动命令：沙箱里带上钉住的目录、只用最小发现集（registry 的能力档不进来），与宿主的复查对得上；没钉住就拒；生产不带目录", () => {
-    const o = { bunBin: "/opt/bun", repoRoot: "/repo", env: PINNED };
+    // pi 参数进一次性文件（acp-launch-payload.ts）：能力档断言对着写进文件的那份
+    let piArgs = "";
+    const o = { bunBin: "/opt/bun", repoRoot: "/repo", env: PINNED, writePayload: (p: [string, string | undefined][]) => void (piArgs = p.find(([k]) => k === PI_ARGS_ENV)?.[1] ?? "") };
     const cmd = buildPiAcpHostCommand(SPEC, o);
     expect(cmd).toContain(`PI_CODING_AGENT_DIR=${PI_DIR}`);
-    expect(cmd).not.toContain("evil-pkg");
-    expect(cmd).not.toContain("mcp-config");
+    expect(piArgs).not.toContain("evil-pkg");
+    expect(piArgs).not.toContain("mcp-config");
     expect(sandboxPiProblem(PINNED, piAcpArgs(SPEC, "agent-pa", "/repo", true))).toBeNull();
     expect(() => buildPiAcpHostCommand(SPEC, { ...o, env: ON })).toThrow("PI_CODING_AGENT_DIR");
     expect(buildPiAcpHostCommand(SPEC, { ...o, env: {} })).not.toContain("PI_CODING_AGENT_DIR");
-    expect(buildPiAcpHostCommand(SPEC, { ...o, env: {} })).toContain("evil-pkg"); // 生产照旧按能力档
+    buildPiAcpHostCommand(SPEC, { ...o, env: {} });
+    expect(piArgs).toContain("evil-pkg"); // 生产照旧按能力档
   });
 });
 

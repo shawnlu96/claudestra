@@ -22,6 +22,7 @@
  */
 
 import type { StatsFoldFactory } from "../agent-stats.js";
+import type { AcpRuntimeSpec, RuntimeModel } from "./contract.js";
 
 export type AnyRecord = Record<string, any>;
 
@@ -65,6 +66,12 @@ export interface SessionSourceAdapter {
 
   /** 全库兜底查找（cwd 记错 / 路径推断失准时用） */
   findSessionById(sessionId: string): string | null;
+
+  /**
+   * 归档前要一份最新的会话文件（OpenCode：库里导出镜像，异步，不卡 bridge 的事件循环）；给不出返回 null。
+   * 不实现 = 会话文件本身就是最新的，归档按 sessionPath / findSessionById 找
+   */
+  freshArchivePath?(sessionId: string): Promise<string | null>;
 
   /** 某工作目录下的会话文件（fork 前后 diff、归档扫描用） */
   listSessionsForCwd(cwd: string): string[];
@@ -241,11 +248,6 @@ export function normalizeTransport(v: unknown): Transport {
   return v === "acp" ? "acp" : DEFAULT_TRANSPORT;
 }
 
-/** 运行时的 ACP 段：声明了才能以 transport=acp 起。control 是 acp 模式下 bridge 侧的策略（controlFor(runtime, "acp") 取它） */
-interface AcpTransport {
-  readonly control: RuntimeControl;
-}
-
 /** fork 后探测真实会话 id 的上下文 */
 export interface DiscoverContext {
   windowName: string;
@@ -272,10 +274,6 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
    * 连按 Esc 在别的 TUI 里是手势（Codex：backtrack 回溯）的运行时必须自己实现。
    */
   exitPrelude?(win: WindowOps): Promise<"at-shell" | "continue">;
-  /** ACP 通道（Codex、Pi）。不声明 = 这个运行时只能走 tmux */
-  readonly acp?: AcpTransport;
-  /** 只有 ACP 一条路（OpenCode：没有我们能驱动的 TUI）：create / resume 一律 acp，点名 tmux 拒 */
-  readonly acpOnly?: boolean;
   /** 建 agent 必须显式给模型；值是拒绝时给人看的原因（OpenCode：它自己的缺省是免费模型） */
   readonly modelRequired?: string;
   /** 没有推理强度这一项（OpenCode 1.19 的 configOptions 只有 model / mode）：--effort 提示后丢弃，网页不显示 Effort */
@@ -313,3 +311,15 @@ export interface InboundSink {
   deliver(content: string, meta: Record<string, string>): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
+
+/**
+ * 注册表的一行（runtimes/index.ts RUNTIMES）：source 是 tmux 版或只读来源；acp 声明了才能走 transport=acp。
+ * 只有 ACP 版的运行时 source 给只读来源（manageable:false），可启动的那一面全在 acp.managed。契约细节：runtimes/contract.ts，
+ * 加一个运行时照 docs/runtimes/adding-a-runtime.md 做。
+ */
+export interface RuntimeEntry {
+  readonly source: SessionSourceAdapter;
+  readonly acp?: AcpRuntimeSpec;
+  /** 模型列表入口（签名先定，实现在 OCR-3）；不声明 = 没有动态列表 */
+  listModels?(ctx: { agent?: string; cwd?: string }): Promise<RuntimeModel[]>;
+}

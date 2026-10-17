@@ -260,7 +260,7 @@ export class AcpHost {
     await this.deps.markReady().catch((e) => this.deps.log(`标窗口就绪失败：${errText(e)}`));
   }
 
-  /** 压缩来源与翻译差异都按运行时声明（host-runtime.ts AcpRuntime.compactFrom / translator，updates.ts 文件头） */
+  /** 压缩来源与翻译差异都按运行时声明（runtimes/contract.ts AcpHostRuntime.compactFrom / translator，updates.ts 文件头） */
   private makeTranslator(): AcpTranslator {
     const compact = { from: this.rt.compactFrom, trigger: () => (this.compactCommand ? "manual" as const : "auto" as const) };
     return createAcpTranslator(undefined, compact, this.rt.translator?.(this.cfg.mcpName));

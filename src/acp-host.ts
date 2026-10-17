@@ -36,6 +36,14 @@ import { CLEAN_ENV_FLAG, makeWorkerRoot } from "./lib/runtimes/clean-env.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
 import { takeCallerCred } from "./lib/caller-cred.js";
+import { takeLaunchPayload } from "./lib/runtimes/acp-launch-payload.js";
+
+// 启动命令里的大段文本（前言 / developer 指令 / Pi 参数）在一次性文件里：先读回环境、删文件，下面照常按环境变量读（lib/runtimes/acp-launch-payload.ts）
+const launchPayload = takeLaunchPayload(process.env);
+if (launchPayload.used && !launchPayload.ok) {
+  console.error(`❌ ${launchPayload.error}`);
+  process.exit(3);
+}
 
 // T85 启动凭据：环境里只有一次性文件的路径，在起任何子进程之前读进内存、删文件、删变量（适配器环境拷的是 process.env，
 // lib/acp/adapter-proc.ts adapterEnv）。宿主自己在 bridge 登记时出示，bridge 按它认这个 agent 的身份。

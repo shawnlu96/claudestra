@@ -25,7 +25,6 @@ import { recordCodexRunning } from "../codex-version.js";
 import { effectiveCodexMode, registryPermissionMode } from "../codex-readonly.js";
 import { probeClaudeVersion } from "../claude-binary.js";
 import { bridgePortOf, defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
-import { ACP_CONTROL } from "./acp-control.js";
 import { codexExitPrelude, codexOnExitPane } from "./codex-exit.js";
 import { CODEX_READY_OPTION, paneBaseline, waitCodexReady, type PaneBaseline } from "./codex-ready.js";
 import { resetReadyOption } from "./ready-option.js";
@@ -214,7 +213,6 @@ export function createCodexAdapter(
     ...codexSource,
     manageable: true,
     control: CODEX_CONTROL,
-    acp: { control: ACP_CONTROL },
     inbound: "codex-queue",
     turnEnd: "codex-hooks",
     exitCommand: "/quit",

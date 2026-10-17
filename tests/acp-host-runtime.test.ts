@@ -9,7 +9,8 @@ import { classifyAirFailure } from "../src/lib/acp/failures.ts";
 import { ACP_RUNTIME_ENV, acpRuntime, PI_ARGS_ENV } from "../src/lib/acp/host-runtime.ts";
 import { permissionCard } from "../src/lib/acp/permissions.ts";
 import { PI_ACP_ADAPTER_MAIN } from "../src/lib/acp/pi-adapter/main.ts";
-import { checkAcpReadyFor, probePiAcp } from "../src/lib/acp/readiness.ts";
+import { probePiAcp } from "../src/lib/acp/readiness.ts";
+import { checkAcpReadyFor } from "../src/lib/runtimes/index.ts";
 import { threadStatusOf } from "../src/lib/acp/updates.ts";
 import { BOOTSTRAP_PROMPT } from "../src/lib/codex-launch.ts";
 
@@ -67,9 +68,10 @@ describe("acpRuntime 表", () => {
     const pi = acpRuntime("pi");
     expect(pi.agentCommand({ [PI_ARGS_ENV]: JSON.stringify(["--approve", "--no-extensions"]) }, "/opt/bun", false))
       .toEqual({ cmd: ["/opt/bun", PI_ACP_ADAPTER_MAIN, "--approve", "--no-extensions"], stub: false });
-    expect(pi.agentCommand({}, "/opt/bun", false)).toEqual({ cmd: ["/opt/bun", PI_ACP_ADAPTER_MAIN], stub: false });
+    // 缺 pi 参数（启动文件没读到）就拒起：能力档 / 工具黑白名单都在里面，不按空数组起默认能力（OCR-2 验收追加 7）
+    expect(pi.agentCommand({}, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(`缺 ${PI_ARGS_ENV}`) });
     expect(pi.agentCommand({}, "/opt/bun", true)).toMatchObject({ error: expect.stringContaining("出借 worker") });
-    expect(pi.agentCommand({ CLAUDESTRA_SANDBOX: "1" }, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining("沙箱") });
+    expect(pi.agentCommand({ CLAUDESTRA_SANDBOX: "1", [PI_ARGS_ENV]: "[]" }, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining("沙箱") });
     expect(pi.agentCommand({ [PI_ARGS_ENV]: "--approve" }, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(PI_ARGS_ENV) });
     expect(pi.agentCommand({ [PI_ARGS_ENV]: "[1]" }, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(PI_ARGS_ENV) });
   });
@@ -138,6 +140,7 @@ describe("就绪闸：Pi 只看 pi 在不在、版本够不够", () => {
     expect(calls.map((c) => c.at(-1))).toEqual(["--version"]);
     const sandbox = { env: { CLAUDESTRA_SANDBOX: "1" }, stub: () => null };
     expect(await checkAcpReadyFor("codex", true, sandbox)).toMatchObject({ ok: false, reason: expect.stringContaining("stub") });
-    expect(await checkAcpReadyFor(undefined, true, sandbox)).toMatchObject({ ok: false, reason: expect.stringContaining("stub") });
+    // 没有 ACP 段（Claude Code / 缺省）不替它探、不替它装 codex-acp：放行给 transportRefusal 按「不支持 acp」拒
+    expect(await checkAcpReadyFor(undefined, true, sandbox)).toEqual({ ok: true });
   });
 });

@@ -41,7 +41,12 @@ const SPEC: LaunchSpec = {
   mode: "resume", channelId: "123", bridgeUrl: "ws://localhost:3847", sessionId: "019a-pi", agentName: "agent-pa", purpose: "写代码",
   model: "flash", effort: "high", extras: { piEnv: { base: "minimal" } },
 };
-const O = { bunBin: "/opt/bun", repoRoot: "/repo", env: {} as Record<string, string | undefined> };
+const O = { bunBin: "/opt/bun", repoRoot: "/repo", env: {} as Record<string, string | undefined>, writePayload: () => undefined };
+/** 启动命令里的大段文本进一次性文件（acp-launch-payload.ts）：测试注入写入器，拿写进去的键值对 */
+function capture() {
+  let pairs: [string, string | undefined][] = [];
+  return { write: (p: [string, string | undefined][]) => ((pairs = p), "/state/run/acp-launch/0123456789abcdef.json"), get: (k: string) => pairs.find(([x]) => x === k)?.[1] };
+}
 
 describe("tmux 版 Pi 不变（钉住）", () => {
   test("缺省 / tmux 仍选 piAdapter：策略、退出指令、registry 字段、启动命令与改动前逐字相同", () => {
@@ -72,7 +77,7 @@ describe("acp 版的选择与启动命令", () => {
     expect(controlFor("pi", "acp")).toBe(ACP_CONTROL);
     expect(a.scanSessions).toBe(piAdapter.scanSessions);
     expect(a.translateLine).toBe(piAdapter.translateLine);
-    expect(a.waitReady).toBe(piAdapter.waitReady);
+    expect(a.waitReady).not.toBe(piAdapter.waitReady); // 同一个就绪判据，外面包一层启动文件收尾（acp-launch-payload.ts waitReadyAndSettle）
     expect(a.beforeLaunch).toBe(piAdapter.beforeLaunch);
     expect(a.exitPrelude).toBe(acpExitPrelude);
     expect([a.exitCommand, a.inbound, a.turnEnd, a.callerCred, a.prepareSession]).toEqual(["", "acp-host", "acp-host", "env", undefined]);
@@ -80,14 +85,16 @@ describe("acp 版的选择与启动命令", () => {
   });
 
   test("前缀给宿主身份、运行时、模型档位与 pi 参数；能力档与 tmux 版相同，职责和回复规则走 --append-system-prompt", () => {
-    const cmd = buildPiAcpHostCommand(SPEC, O);
+    const cap = capture();
+    const cmd = buildPiAcpHostCommand(SPEC, { ...O, writePayload: cap.write });
     expect(cmd).toStartWith(
       `DISCORD_CHANNEL_ID=123 BRIDGE_URL=ws://localhost:3847 CLAUDESTRA_AGENT=agent-pa CLAUDESTRA_SESSION_ID=019a-pi MCP_NAME=claudestra ${ACP_RUNTIME_ENV}=pi PI_BIN=pi`
-      + ` CLAUDESTRA_ACP_MODEL=cc-switch-kimi-for-coding/k3 CLAUDESTRA_ACP_EFFORT=max ${PI_ARGS_ENV}=`,
+      + " CLAUDESTRA_ACP_MODEL=cc-switch-kimi-for-coding/k3 CLAUDESTRA_ACP_EFFORT=max CLAUDESTRA_ACP_LAUNCH_FILE=/state/run/acp-launch/0123456789abcdef.json",
     );
     expect(cmd).toEndWith(" /opt/bun /repo/src/acp-host.ts");
     const args = piAcpArgs(SPEC, "agent-pa", "/repo");
-    expect(cmd).toContain(` ${PI_ARGS_ENV}=${shellEscape(JSON.stringify(args))} `);
+    expect(cmd).not.toContain(`${PI_ARGS_ENV}=`); // pi 参数（含整段系统提示）进一次性文件（acp-launch-payload.ts）
+    expect(cap.get(PI_ARGS_ENV)).toBe(JSON.stringify(args));
     expect(args.slice(0, 10)).toEqual([
       "--approve", "--no-extensions", "--no-skills", "--no-prompt-templates",
       "--model", "cc-switch-kimi-for-coding/k3", "--thinking", "max", "--name", "agent-pa",
@@ -114,7 +121,9 @@ describe("acp 版的选择与启动命令", () => {
     expect(tools({ ...SPEC, extras: { piEnv: { tools: ["read"] } } }, "cs-dev")).toBe("read,mcp__cs_dev__reply");
     expect(piAcpArgs(SPEC, "agent-pa", "/repo")).not.toContain("--tools");
     expect(piAcpArgs({ ...SPEC, extras: { piEnv: { excludeTools: ["bash"] } } }, "agent-pa", "/repo")).not.toContain("--tools");
-    expect(buildPiAcpHostCommand({ ...SPEC, extras: { piEnv: { tools: ["read"] } } }, { ...O, env: { MCP_NAME: "cs2" } })).toContain("read,mcp__cs2__reply");
+    const cap = capture();
+    buildPiAcpHostCommand({ ...SPEC, extras: { piEnv: { tools: ["read"] } } }, { ...O, env: { MCP_NAME: "cs2" }, writePayload: cap.write });
+    expect(cap.get(PI_ARGS_ENV)).toContain("read,mcp__cs2__reply");
   });
 });
 
