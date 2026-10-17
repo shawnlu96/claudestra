@@ -215,7 +215,7 @@ jobs:
           CI_IO_TRACE: ${{ github.event_name == 'push' && format('{0}/io-trace.jsonl', runner.temp) || '' }}
         run: |
           gate="${{ vars.CI_SELECTED_GATE == 'off' && 'off' || vars.CI_SELECTED_GATE == 'on' && 'on' || 'observe' }}"
-          leak="$(mktemp -d /tmp/test-tmp-leak.XXXXXX)" && echo "TEST_TMP_LEAK_DIR=$leak" >> "$GITHUB_ENV"
+          leak="${TMPDIR:-/tmp}/test-tmp-leak" && mkdir -p "$leak"
           selected() { [ "$gate" != off ] && CI_SELECTED_GATE="$gate" CORE_TYPECHECK="${{ steps.typecheck.outcome }}" bun scripts/ci-selected-verdict.ts shard ${{ matrix.shard }} "$1" "$RUNNER_TEMP/shard.log" "$RUNNER_TEMP/files.txt" "$RUNNER_TEMP/ci-selected-plan/plan.json" "${{ needs.plan.outputs.digest }}" "$RUNNER_TEMP/ci-selected" && return 0; exit "$1"; }
           if [ "${{ needs.plan.outputs.scope }}" = related ] || [ "${{ needs.plan.outputs.scope }}" = light ]; then
             bun scripts/ci-related-plan.ts files "$RUNNER_TEMP/ci-related-plan/plan.json" "${{ needs.plan.outputs.digest }}" ${{ matrix.shard }} > "$RUNNER_TEMP/files.txt"
@@ -231,14 +231,15 @@ jobs:
           printf 'shard=%s/8\nhead=%s\ndiscovered=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
           TMPDIR="$leak" bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log" && touch "$leak.passed" || selected $?
 
-      # 测试临时目录泄漏（merge-arch-TMPLEAK2，scripts/test-tmp-leak.ts）：上一步本片 bun test 以空目录 /tmp/test-tmp-leak.* 当 TMPDIR 跑（不能放
-      # $RUNNER_TEMP：它在 /home/runner 下，建在 tmpdir() 的假 HOME 会被隔离闸当成真实家目录拒跑）。运行临时根跑完自己删，这里只查顶层为空，
-      # 不重跑测试，8 片合起来就是全量。测试 / 子进程往启动时的 TMPDIR 写了没删的目录按前缀列出并判红本片。只查 bun test 全绿的片（.passed）：
-      # 有红用例的片（失败或被责任选集放行）半路退出的用例本来就可能没清理，不让泄漏检查推翻放行判定；分不到文件的片同样不查。
+      # 测试临时目录泄漏（merge-arch-TMPLEAK2，scripts/test-tmp-leak.ts）：上一步本片 bun test 以空目录 /tmp/test-tmp-leak 当 TMPDIR 跑。
+      # 不放 $RUNNER_TEMP：它在 /home/runner 下，建在 tmpdir() 的假 HOME 被隔离闸当成真实家目录拒跑；取 ${TMPDIR:-/tmp} 是让测试执行本步时
+      # 落进运行临时根。运行临时根跑完自己删，这里只查顶层为空，不重跑测试，8 片合起来就是全量；往启动时的 TMPDIR 写了没删的按前缀列出、判红。
+      # 只查 bun test 全绿的片（.passed）：有红用例的片（失败或被责任选集放行）半路退出的用例本来就可能没清理，不让泄漏检查推翻放行判定。
       - name: Test tmp leak check
         shell: bash
         run: |
-          if [ -n "${TEST_TMP_LEAK_DIR:-}" ] && [ -e "$TEST_TMP_LEAK_DIR.passed" ]; then bun scripts/test-tmp-leak.ts --check "$TEST_TMP_LEAK_DIR"; else echo "bun test 未全绿或本片没跑测试，跳过"; fi
+          leak="${TMPDIR:-/tmp}/test-tmp-leak"
+          if [ -e "$leak.passed" ]; then bun scripts/test-tmp-leak.ts --check "$leak"; else echo "bun test 未全绿或本片没跑测试，跳过"; fi
 
       # 红片、被取消的片也上传已有的日志（诊断用）。测试步骤之前就失败 / 被取消、根本没生成日志时只给一条警告、没有工件——
       # 汇总作业照样因为这一片不是 success 而红，缺工件不会被当成通过。
