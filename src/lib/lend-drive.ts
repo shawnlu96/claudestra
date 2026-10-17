@@ -40,7 +40,7 @@ import { settleLendSandboxes, type SandboxRetirePort, type SandboxSettlementPort
 import { runLendWorkRetire } from "./agent-lifecycle-run.js";
 import { sandboxOrderOwnership } from "./sandbox-order-cleanup.js";
 import { readSandboxOwner } from "./sandbox-order-owner.js";
-import { claimCaps, deliveredActual, rememberNoCaps } from "./role-model-settings-lend.js";
+import { claimCaps, deliveredActual, rememberNoCaps, rememberNoTier } from "./role-model-settings-lend.js";
 import { lendUsageFor } from "./lend-usage-report.js";
 import { suggestFamilyProblem } from "./role-model-settings-wire.js";
 import { sendUiShots, type UiShotBudget } from "./lend-ui-send.js";
@@ -161,16 +161,24 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
   return null;
 }
 
-/** A 侧一时回不了话（网络断、回包坏、中心 503 unavailable）：claim 与转发结论共用，下轮原样再发（两处都对同单幂等） */
-const TRANSIENT_CODES: ReadonlySet<string> = new Set(["transport", "bad_response", "unavailable"]);
+/** A 侧一时回不了话（网络断、回包坏、中心 503 unavailable、台账库写锁等超时 503 busy）：claim 与转发结论共用，下轮原样再发（两处都对同单幂等） */
+const TRANSIENT_CODES: ReadonlySet<string> = new Set(["transport", "bad_response", "unavailable", "busy"]);
 export const transientLendCode = (code: string): boolean => TRANSIENT_CODES.has(code);
 
 export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   const body = { orderId: row.orderId, worker: workerName(row.orderId) };
   const caps = claimCaps(d.db, row.peer, d.now()); // TIER1b：告诉 A 本机认得 claim 应答里的 suggest
   let r = await lendRequest(d.call, row.peer, "claim", { ...body, ...caps });
+  // TIER3b：带了 tier 且旧 A 回 invalid：只去掉 tier、按 ["suggest"] 重发一次（与旧版 claim 逐字相同），本进程记住这个 peer 一天内不带 tier；
+  // 重发仍 invalid 就留到下轮（下轮只带 suggest，走下面旧的去掉 caps 回落），这一次不再多发
+  const tiered = caps.caps?.includes("tier") === true;
+  if (!r.ok && r.code === "invalid" && tiered) {
+    rememberNoTier(row.peer, d.now());
+    r = await lendRequest(d.call, row.peer, "claim", { ...body, caps: ["suggest"] });
+    if (!r.ok && r.code === "invalid") return d.log(`claim ${row.orderId} 对方不认 tier，已按 suggest 重发仍被拒，下轮再试`);
+  }
   // 旧 A 严格解析不认 caps：只有它明确回 invalid 才去掉重发一次（claim 同单幂等），并记住这个 peer 一天内不再带
-  if (!r.ok && r.code === "invalid" && caps.caps) {
+  if (!r.ok && r.code === "invalid" && caps.caps && !tiered) {
     rememberNoCaps(d.db, row.peer, d.now());
     r = await lendRequest(d.call, row.peer, "claim", body);
   }

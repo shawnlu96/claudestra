@@ -1,7 +1,10 @@
 // Pi 全局模型锁读 config.json（lib/pi-lock.ts）：配置值生效、agent 传入的模型 / 档位被忽略、写坏了拒绝启动而不是放开锁
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildPiCommand, PI_LOCKED_EFFORT, PI_LOCKED_MODEL } from "../src/lib/pi-launch.ts";
-import { piLock } from "../src/lib/pi-lock.ts";
+import { piLock, readRawConfig } from "../src/lib/pi-lock.ts";
 import { piLaunchOptions } from "../src/lib/runtimes/pi.ts";
 import { piAcpArgs } from "../src/lib/runtimes/pi-acp.ts";
 import type { LaunchSpec } from "../src/lib/runtimes/types.ts";
@@ -50,5 +53,34 @@ describe("pi-lock：agent 传入的 --model / effort 被忽略", () => {
     const args = piAcpArgs(SPEC, "agent-pa", "/repo", false, "claudestra", lock);
     expect([flag(args, "--model"), flag(args, "--thinking")]).toEqual(["prov-a/model-b", "high"]);
     expect(args.join(" ")).not.toContain("agent-picked");
+  });
+});
+
+describe("pi-lock：读 config.json 时分清缺失和损坏", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-lock-"));
+
+  test("缺失：按没配处理，不报错", () => {
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    expect(readRawConfig(join(dir, "none.json"))).toBeUndefined();
+    expect(err).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  test("损坏：报出来，仍用默认锁", () => {
+    const bad = join(dir, "bad.json");
+    writeFileSync(bad, "{ not json");
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    const raw = readRawConfig(bad);
+    expect(raw).toBeUndefined();
+    expect(err).toHaveBeenCalledTimes(1);
+    expect(String(err.mock.calls[0]?.[0])).toContain(bad);
+    expect(piLock(raw).model).toBe(PI_LOCKED_MODEL);
+    err.mockRestore();
+  });
+
+  test("正常：原样读出", () => {
+    const ok = join(dir, "ok.json");
+    writeFileSync(ok, JSON.stringify(CFG));
+    expect(piLock(readRawConfig(ok))).toEqual({ model: "prov-a/model-b", effort: "high" });
   });
 });
