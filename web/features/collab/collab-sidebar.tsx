@@ -9,6 +9,7 @@ import { useEffect, useLayoutEffect, useRef, useSyncExternalStore, type ReactNod
 import { Icon } from "./collab-icons";
 import { useCollabT } from "./collab-i18n";
 import { useCollabNav } from "./collab-nav";
+import { TODAY_KEY } from "../now/today-nav";
 
 /** expanded = 这次打开手动展开了；gates = 挂着几个 CollabSidebarGate（没有会话栏可管的地方不出窄栏） */
 let state = { expanded: false, gates: 0 };
@@ -35,9 +36,11 @@ const subscribeSm = (cb: () => void) => {
 const useSm = () => useSyncExternalStore(subscribeSm, () => window.matchMedia(SM).matches, () => false);
 
 export function CollabSidebarGate({ children }: { children: ReactNode }) {
-  const open = !!useCollabNav().project;
+  const { project } = useCollabNav();
+  const open = !!project;
   const { expanded } = useSidebarState();
-  const collapsed = open && !expanded;
+  // 今天整页只盖主区：保留会话栏，用户才能点会话收起整页。
+  const collapsed = open && project !== TODAY_KEY && !expanded;
   /** 真的 display:none 了（只有桌面端）：这期间不记滚动位置，结束时放回去；手机上永远是 false，位置照常跟着用户走 */
   const concealed = useSm() && collapsed;
   useEffect(() => {

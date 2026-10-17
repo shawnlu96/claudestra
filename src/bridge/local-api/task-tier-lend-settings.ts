@@ -32,7 +32,7 @@ async function put(d: TierLendSettingsDeps, req: Request): Promise<Response> {
   if (Buffer.byteLength(text) > BODY_MAX) return apiJson(413, { ok: false, error: `请求体超过 ${BODY_MAX} 字节` });
   const body = parseBody(text);
   if (typeof body === "string") return apiJson(400, { ok: false, error: body });
-  const r = saveTierLendSettings({ kind: "web", ownerFull: true }, body, d.now(), d.path);
+  const r = await saveTierLendSettings({ kind: "web", ownerFull: true }, body, d.now(), d.path);
   if (r.ok) return apiJson(200, viewOf({ status: "ok", settings: r.settings }));
   d.log(`⚠️ [task-tier-lend] 保存「接受降档建议」失败（${r.code}）：${r.error}`);
   if (r.code === "conflict") return apiJson(409, { ok: false, code: r.code, error: "设置刚被别处改过，已刷新为最新值", current: viewOf({ status: "ok", settings: r.current! }) });

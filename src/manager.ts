@@ -13,6 +13,8 @@
  *   bun src/manager.ts sessions [search]
  */
 
+// 必须是第一个 import：全新机器（只有 ~/.floka）在 install-cli 加载 paths.ts 之前选好状态根（FRESHENTRY1）
+import "./lib/floka-install-config/fresh-root-preload.js";
 import "./manager/project-decl.js";
 import { writeClaudeSettings } from "./lib/session-recall.js";
 import { configuredBridgePort } from "./lib/bridge-url.js";

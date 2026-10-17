@@ -62,6 +62,8 @@ export interface SubmitterDeps {
   ancestors: (pid: number) => Promise<number[]>;
   /** 这个目录里 git 的当前 HEAD（写单用）；读不到 = null */
   headOf?: (dir: string) => Promise<string | null>;
+  /** 写单提交前的本机预检（CIPRECHK1 ci-deliver-precheck.ts lendSubmitPrecheck）：null = 放行，否则是失败清单；不给 = 不预检 */
+  precheck?: (dir: string, head: string) => Promise<string | null>;
 }
 
 const realOr = (p: string): string => {
@@ -164,6 +166,8 @@ export async function submitLendWork(db: Database, orderId: string, input: WorkI
     return row.work && payloadSha(JSON.stringify(row.work)) === sha ? { ok: true, duplicate: true, sha }
       : { ok: false, error: `${orderId} 已经交过一份不同的交付（或 HEAD 又动了），不能改` };
   }
+  const pre = nc ? null : await d.precheck?.(row.dir!, head); // CIPRECHK1：提交前本机预检，不过就带失败清单拒交（journal 不动）
+  if (pre) return { ok: false, error: pre };
   advance(db, orderId, "started", "result_pending", { work }, now);
   return { ok: true, duplicate: false, sha };
 }

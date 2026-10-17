@@ -291,6 +291,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "order-mark.ts": "ledger=1",
     // security-pool fs=3: only setSecurityPoolMode writes (the owner's `security-pool` command); the pass only reads the switch
     "security-pool.ts": "fs=3",
+    "task-tier-lend-settings.ts": "fs=1", // 设置页和 CLI 唯一的显式写入口；调度器只读
     // test-guard: only a bun test runner without tests/preload.ts spawns the fallback-root reaper (its rmSync is inside the reaper script)
     "test-guard.ts": "proc=1 fs=1",
   },
@@ -365,6 +366,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "sqlite-migrate.ts": "stmt=2",
     "state-file.ts": "fs=7",
     "sys-memory.ts": "proc=1",
+    "task-tier-escalation-store.ts": "sql=13 stmt=14 fs=1", // TIER3c: escalation store, written only from the author create wrapper (card-role-definitions) under the gated create
     "tmux-helper.ts": "stmt=3 proc=23 fs=1",
     "unmanaged-archive.ts": "fs=4",
     "update-inflight.ts": "proc=2 fs=2",

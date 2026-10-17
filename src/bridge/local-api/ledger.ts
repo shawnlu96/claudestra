@@ -10,9 +10,10 @@
  */
 import { realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, resolve, sep } from "node:path";
+import { cachedBoardBuild } from "../../lib/board-build-cache.js";
 import { canReadLedger } from "../../lib/devices.js";
 import { PROJECT_EVENTS_LIMIT, projectView, taskDetail } from "../../lib/ledger-read.js";
-import { DONE_PAGE_DEFAULT, DONE_PAGE_MAX, donePage, parseDoneCursor } from "../../lib/ledger-read-done.js";
+import { DONE_PAGE_DEFAULT, DONE_PAGE_MAX, donePage, dayStartOf, parseDoneCursor } from "../../lib/ledger-read-done.js";
 import { LEDGER_SCHEMA_VERSION, getMeta, schemaVersion } from "../../lib/ledger-store.js";
 import type { Principal } from "../../lib/principals.js";
 import { isUmbrellaDir, normalizeDir, PROJECTS_PATH, readProjects } from "../../lib/projects.js";
@@ -73,7 +74,10 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
     return apiJson(200, { ok: true, project, exists: false, schema: LEDGER_SCHEMA_VERSION, meta, items: [], tasks: [], deps: [], projectEvents: [], audit: [], now });
   }
   // schema 报库里实际的版本：CLI 先升级、bridge 还没重启时它会比代码常量新（LedgerReader 打开时已记一次日志）
-  return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now, clientDayStart(req)), now });
+  const dayStart = dayStartOf(now, clientDayStart(req));
+  const result = await cachedBoardBuild(db, "ledger", project, { dayStart }, () => ({ ok: true, project, exists: true,
+    schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now, dayStart), now }));
+  return apiJson(200, result);
 }
 
 /** ?dayStart= 是整数毫秒才用；格式不对当没传（总览不因为这个参数失败，按服务器零点） */
