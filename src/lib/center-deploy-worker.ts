@@ -5,7 +5,8 @@ import { LOG_DIR } from "./log-paths.js";
 import { runBounded } from "./run-bounded.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { acquireDeployLock } from "./pm-deploy-lock.js";
-import { centerCheckout } from "./center-deploy-checkout.js";
+import { CENTER_SUBMODULE_FAILED, centerCheckout } from "./center-deploy-checkout.js";
+import { CENTER_TARGET_MISSING, centerDeployTarget } from "./center-deploy-target.js";
 import { recoveryPolicy } from "./recovery-policy.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { repoDirFor } from "./card-repo.js";
@@ -21,7 +22,10 @@ import { getAsk } from "./ledger-asks.js";
 import { LedgerReader } from "./ledger-read.js";
 
 export interface CenterJobData { proof: CenterProof; config: CenterDeployConfig; askId: string }
-export interface CenterResult { status: "success" | "failed" | "deferred" | "stale"; code: number | null; ms: number; dryRun: boolean; timedOut: boolean }
+export interface CenterResult {
+  status: "success" | "failed" | "deferred" | "stale"; code: number | null; ms: number; dryRun: boolean; timedOut: boolean; reason?: string;
+}
+export interface CenterWorkerDeps extends WorkerDeps { centerTarget?: () => string | null }
 export function validateCenterJob(job: DeployJob): void {
   const c = job.center;
   if (!c || !c.proof || c.proof.sha !== job.mergeSha || !/^[a-f0-9]{64}$/.test(c.proof.scriptDigest)
@@ -41,7 +45,7 @@ export function centerWorkerAuthorized(job: DeployJob, now: number): boolean {
   } finally { reader.close(); }
 }
 
-export async function runCenterDeployJob(request: string, deps: WorkerDeps = {}): Promise<StepsOutcome | null> {
+export async function runCenterDeployJob(request: string, deps: CenterWorkerDeps = {}): Promise<StepsOutcome | null> {
   const raw = readJsonStateSync(request);
   if (raw.status !== "ok") throw new Error("invalid center deployment request");
   const job = raw.data as DeployJob; validateCenterJob(job);
@@ -66,6 +70,8 @@ export async function runCenterDeployJob(request: string, deps: WorkerDeps = {})
     const fresh = await centerProof(c.proof.project, c.config, c.proof.cards, { run: deps.run, repoDir: () => job.repoDir });
     running();
     if (canonicalJson(fresh) !== canonicalJson(c.proof)) { r.status = "stale"; return write(r); }
+    const target = (deps.centerTarget ?? centerDeployTarget)();
+    if (!target) return write({ ...r, reason: CENTER_TARGET_MISSING, ms: now() - start });
     checkout = await centerCheckout(job.repoDir, dir, c.proof.sha, deps.run);
     const check = async () => {
       running();
@@ -82,7 +88,7 @@ export async function runCenterDeployJob(request: string, deps: WorkerDeps = {})
       const log = join(LOG_DIR, "center-deploy", `${job.label}.${dryRun ? "dry" : "deploy"}.${start}.log`);
       const started = now();
       const outcome = await (deps.centerRun ?? centerScriptRunner(log))([`./${c.config.script}`, ...(dryRun ? c.config.dryRunArgs : [])], {
-        cwd: checkout!.dir, env: { ...job.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "" },
+        cwd: checkout!.dir, env: { ...job.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", FLOKA_CENTER_DEPLOY_TARGET: target },
         timeoutMs: dryRun ? 300_000 : c.config.timeoutMinutes * 60_000 });
       running();
       phases.push({ status: outcome.code === 0 && !outcome.timedOut ? "success" : "failed",
@@ -102,7 +108,10 @@ export async function runCenterDeployJob(request: string, deps: WorkerDeps = {})
     result = await exec(false);
     return write({ ...r, status: result.code === 0 && !result.timedOut ? "success" : "failed", code: result.code,
       timedOut: result.timedOut, ms: now() - start });
-  } catch { return write({ ...r, ms: now() - start }); /* All private diagnostics stay out of public results. */ }
+  } catch (e) {
+    // All private diagnostics stay out of public results; only the fixed submodule wording is kept as a reason.
+    return write({ ...r, ...((e as Error)?.message === CENTER_SUBMODULE_FAILED ? { reason: CENTER_SUBMODULE_FAILED } : {}), ms: now() - start });
+  }
   finally {
     try { await checkout?.release(); }
     finally {

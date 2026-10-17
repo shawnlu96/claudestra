@@ -20,6 +20,11 @@ import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import type { PmNoticeLevel } from "./pm-notice-level.js";
 import type { CenterResult } from "./center-deploy-worker.js";
+import { CENTER_TARGET_MISSING } from "./center-deploy-target.js";
+import { CENTER_SUBMODULE_FAILED } from "./center-deploy-checkout.js";
+
+/** Fixed worker wordings the tick may relay; anything else in result.json is dropped. */
+const REASONS = new Set([CENTER_TARGET_MISSING, CENTER_SUBMODULE_FAILED]);
 
 export interface CenterTickPorts {
   config?: () => Record<string, CenterDeployConfig> | null; policy?: RecoveryPolicyPort;
@@ -47,7 +52,8 @@ function diskResult(run: DeployRun): CenterResult | null {
   const v = r.data as CenterResult & { intentId?: string; mergeSha?: string };
   return v.intentId === run.intentId && v.mergeSha === run.mergeSha && ["success", "failed", "deferred", "stale"].includes(v.status)
     && (v.code === null || Number.isInteger(v.code)) && Number.isFinite(v.ms) && typeof v.dryRun === "boolean" ?
-    { status: v.status, code: v.code, ms: v.ms, dryRun: v.dryRun, timedOut: v.timedOut === true } : null;
+    { status: v.status, code: v.code, ms: v.ms, dryRun: v.dryRun, timedOut: v.timedOut === true,
+      ...(typeof v.reason === "string" && REASONS.has(v.reason) ? { reason: v.reason } : {}) } : null;
 }
 function runFor(project: string, proof: CenterProof, attempt: number, now: number): DeployRun {
   return { intentId: `center:${project}:${proof.sha}:${attempt}`, taskId: proof.cards[0], project, mergeSha: proof.sha,
@@ -62,10 +68,12 @@ async function finish(db: Database, d: Deps, project: string, s: CenterState, sa
     for (const [id, key] of Object.entries(s.cardKeys ?? {})) s.successfulCards[id] = [...new Set([...(s.successfulCards[id] ?? []), key])];
   }
   else {
-    await todo(d, proof.cards[0], `center-deploy-failed:${project}:${proof.sha}`, `中心部署失败：${proof.cards.join("、")} ${proof.sha.slice(0, 12)} exit ${r.code ?? "null"}`);
+    const text = r.reason === CENTER_TARGET_MISSING
+      ? `中心部署缺少目标文件：状态目录下 center-deploy-target.env 缺失或不是本用户 0600（${proof.sha.slice(0, 12)}）`
+      : `中心部署失败：${proof.cards.join("、")} ${proof.sha.slice(0, 12)} ${r.reason && REASONS.has(r.reason) ? r.reason : `exit ${r.code ?? "null"}`}`;
+    await todo(d, proof.cards[0], `center-deploy-failed:${project}:${proof.sha}`, text);
     if (!s.noticeClaimed) {
       s.noticeClaimed = true; save(s); d.assertActive();
-      const text = `中心部署失败：${proof.cards.join("、")} ${proof.sha.slice(0, 12)} exit ${r.code ?? "null"}`;
       if (d.notifyPm) await d.notifyPm(project, text, "action");
       else await notifyProjectPm(db, project, text, { fromName: "scheduler", level: "action", stillActive: () => {
         try { d.assertActive(); return true; } catch { return false; /* Lost lease cannot send an action. */ }
@@ -146,7 +154,8 @@ export async function centerDeployTick(db: Database, config: SchedulerConfig, d:
       const own = projectRepo(policy);
       const task = own && listTasks(db, project).find((t) => cardRepo(t) && cardRepo(t) !== own && !schedulerV2SkipTask(db, t.id)
         && (["live", "verified"].includes(t.stage) || !!db.query("SELECT 1 FROM scheduler_merges WHERE taskId=? AND phase='merged' LIMIT 1").get(t.id)));
-      if (task && !getEventByDedup(db, `center-deploy-config:${project}`)) await todo(d, task.id, `center-deploy-config:${project}`, "中心部署缺少配置");
+      if (task && !getEventByDedup(db, `center-deploy-config:${project}`))
+        await todo(d, task.id, `center-deploy-config:${project}`, "中心部署缺少配置：状态目录下没有 center-deploy.json 的本项目段");
     } catch {
       d.assertActive();
       const task = listTasks(db, project).find((t) => !schedulerV2SkipTask(db, t.id));
