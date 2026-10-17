@@ -43,9 +43,9 @@ export function forbidden(error: string): Response {
   return apiJson(403, { ok: false, error });
 }
 
-/** agent 不在 token scope 的统一 403。 */
+/** agent 不在 token scope 的统一 403。code 让发起方分得清「不开放这个 agent」和 token 问题（lib/peer-auth-hints.ts），error 文本保持原样 */
 export function notInScope(agent: string): Response {
-  return apiJson(403, { ok: false, error: `agent "${agent}" not in token scope` });
+  return apiJson(403, { ok: false, error: `agent "${agent}" not in token scope`, code: "agent_not_in_scope" });
 }
 
 /**
