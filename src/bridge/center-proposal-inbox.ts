@@ -13,6 +13,7 @@ import { instanceKeySync } from "../lib/instance-key.js";
 import { closeAsk, getAsk, listAsks, MASTER_PROJECT, patchAsk, type Ask } from "../lib/ledger-asks.js";
 import { isPersonalProject } from "../lib/lend-policy.js";
 import { STATE_DIR } from "../lib/paths.js";
+import { safeErrorLine } from "../lib/safe-error-frames.js";
 import { SharedLedgerClient } from "../lib/shared-ledger-client.js";
 import { SharedLedgerRemoteError, SharedLedgerUnavailable } from "../lib/shared-ledger-client-transport.js";
 import { parseV2ProjectsRequest, parseV2ProjectsResponse } from "../lib/shared-ledger-contract-v2-projects.js";
@@ -116,7 +117,7 @@ function reconcile(project: InboxProject, { records: snapshot, self }: Pending, 
     if (r.proposal.expiresAt <= d.now() || plan.get(key)?.skip) continue;
     // dedupKey：同一 rev 再轮询返回已有那张。
     try { opened.push(d.openAsk(inboxCard(project.localProjectId, r, self, plan.get(key)?.reason, plan.get(key)?.hits) as CreateAskInput)); }
-    catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 为 ${r.proposalId} rev ${r.proposalRev} 开卡失败：${(e as Error).name}`); }
+    catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 为 ${r.proposalId} rev ${r.proposalRev} 开卡失败：${safeErrorLine(e, "开卡")}`); }
   }
   return opened;
 }
@@ -164,18 +165,20 @@ const identityOf = (project: InboxProject, params: InboxParams): ExecIdentity =>
   ({ localProjectId: project.localProjectId, centerProject: project.scope.projectId, params });
 const SKIP: Plan = { skip: true };
 
-/** 上一轮自动发出、结果不明的：中心已不是待批 → 补记结果事件（中心当前状态），不再发。失败只记一行 */
+/** 上一轮自动发出、结果不明的：中心已不是待批 → 补记结果事件（中心当前状态），不再发。逐条做：一条失败只记一行，接着补下一条 */
 function backfillResults(project: InboxProject, pending: Pending, d: ProposalInboxDeps, a: AutoApproveDeps): void {
-  try {
-    const db = a.db();
-    for (const r of pending.all) {
+  let db: Database;
+  try { db = a.db(); }
+  catch (e) { return d.log(`[proposal-inbox] ${project.localProjectId} 补记自动批准结果失败：${safeErrorLine(e, "补记")}`); }
+  for (const r of pending.all) {
+    try {
       if (r.operation.state === "pending_approval") continue;
       const ident = identityOf(project, paramsOf(project.localProjectId, r)), s = execState(db, execKey(ident.centerProject, ident.params));
       if (s.result || !s.claims.some(c => c.lane === "auto")) continue;
       recordExecResult(db, ident, { outcome: "settled", centerState: r.operation.state, reasons: [] }, d.now());
       d.log(`[proposal-inbox] ${project.localProjectId} ${r.proposalId} rev ${r.proposalRev} 自动批准结果补记：中心 ${r.operation.state}`);
-    }
-  } catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 补记自动批准结果失败：${(e as Error).name}`); }
+    } catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} ${r.proposalId} rev ${r.proposalRev} 补记自动批准结果失败：${safeErrorLine(e, "补记")}`); }
+  }
 }
 
 /** 核过审批权后、建卡前：逐条分类。observe 只记「本会自动批」样本；on 档非安全类且这一版本没有人工卡 → autoApprove。出错照旧出卡 */
@@ -191,7 +194,7 @@ async function autoRoute(project: InboxProject, pending: Pending, mode: Recovery
       }
       if (verdict.route === "owner") plan.set(paramsKey(params), { reason: reasonText(verdict.reasons, undefined, verdict.hits), hits: verdict.hits });
       else if (!a.hasCard(inboxDedupKey(params))) plan.set(paramsKey(params), await autoApprove(project, r, identityOf(project, params), d, a));
-    } catch (e) { d.log(`[proposal-inbox] ${id} 自动批准 ${r.proposalId} rev ${r.proposalRev} 出错：${(e as Error).name}，照旧出卡`); }
+    } catch (e) { d.log(`[proposal-inbox] ${id} 自动批准 ${r.proposalId} rev ${r.proposalRev} 出错：${safeErrorLine(e, "分类")}，照旧出卡`); }
   }
   return plan;
 }
@@ -251,12 +254,12 @@ async function pull(project: InboxProject, d: ProposalInboxDeps): Promise<Pendin
 export async function pollCenterProposals(d: ProposalInboxDeps = liveDeps): Promise<void> {
   let projects: InboxProject[];
   try { projects = d.projects(); }
-  catch (e) { return d.log(`[proposal-inbox] 团队项目绑定不可读（${(e as Error).name}），下轮再试`); }
+  catch (e) { return d.log(`[proposal-inbox] 团队项目绑定不可读（${safeErrorLine(e, "读绑定")}），下轮再试`); }
   for (const project of projects) await serial(project.localProjectId, async () => {
     const pending = await pull(project, d);
     if (!pending) return;
     try { await gatedReconcile(project, pending, d); }
-    catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 开 / 撤卡失败：${(e as Error).name}`); }
+    catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 开 / 撤卡失败：${safeErrorLine(e, "开卡 / 撤卡")}`); }
   });
 }
 
@@ -278,7 +281,7 @@ async function resultAnswered(a: Ask, d: ProposalInboxDeps): Promise<void> {
   try {
     await d.handoff(handoffText(a), a.id);
     d.log(`[proposal-inbox] 结果卡 ${a.id} 已交给大总管`);
-  } catch (e) { d.log(`[proposal-inbox] 结果卡 ${a.id} 交给大总管失败：${(e as Error).name}`); }
+  } catch (e) { d.log(`[proposal-inbox] 结果卡 ${a.id} 交给大总管失败：${safeErrorLine(e, "交给大总管")}`); }
 }
 
 async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
@@ -289,14 +292,14 @@ async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
     d.log(`[proposal-inbox] 卡 ${a.id} 的答复未执行（非 owner 本人或参数不符）`);
     if (p) await d.inform(decisionResultText(title, p, { kind: "invalid" }),
       { askId: a.id, title, resultCard: true, meta: { proposalId: p.proposalId, proposalRev: p.proposalRev, code: "not_executed" } })
-      .catch((e: Error) => d.log(`[proposal-inbox] 通知 owner 失败：${e.name}`));
+      .catch((e: unknown) => d.log(`[proposal-inbox] 通知 owner 失败：${safeErrorLine(e, "通知")}`));
     return;
   }
   const { decision, params } = ok;
   // 绑定状态读不出（文件坏 / 解析失败）和真的没绑定分开报：前者记错误名、结果给 binding_state_unreadable
   let project: InboxProject | undefined, unreadable = false;
   try { project = d.projects().find(x => x.localProjectId === params.localProjectId); }
-  catch (e) { unreadable = true; d.log(`[proposal-inbox] 卡 ${a.id} 执行前读团队项目绑定失败：${(e as Error).name}`); }
+  catch (e) { unreadable = true; d.log(`[proposal-inbox] 卡 ${a.id} 执行前读团队项目绑定失败：${safeErrorLine(e, "读绑定")}`); }
   // 只有办成了（done 且中心已是 published / approved / rejected）才不开结果卡；报错、conflict、别的状态都要 owner 再看一眼
   // 日志按真实结果写（PROPRESULT1）：办成「已执行」，报错「执行…失败：<错误码>」，conflict「conflict，已重拉」；code 也记到结果卡上
   let text: string, resultCard = true, code: string, outcome: string;
@@ -320,14 +323,14 @@ async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
   }
   d.log(`[proposal-inbox] 卡 ${a.id}（${params.proposalId} rev ${params.proposalRev}）${outcome!}`);
   const meta = { proposalId: params.proposalId, proposalRev: params.proposalRev, code: code! };
-  await d.inform(text, { askId: a.id, title, resultCard, meta }).catch((e: Error) => d.log(`[proposal-inbox] 通知 owner 失败：${e.name}`));
+  await d.inform(text, { askId: a.id, title, resultCard, meta }).catch((e: unknown) => d.log(`[proposal-inbox] 通知 owner 失败：${safeErrorLine(e, "通知")}`));
 }
 
 /** PROPAUTO1：开关 on 时人工答复发 decide 前也抢同一个执行占位；抢不到 = 已在执行（自动批准或另一次答复），不再发。写不进台账 → error，不发 */
 function claimForOwner(project: InboxProject, params: InboxParams, d: ProposalInboxDeps, card: Ask): "ok" | "held" | "error" {
   if (!d.auto || d.auto.mode(project.localProjectId) !== "on") return "ok";
   try { return claimExec(d.auto.db(), { ...identityOf(project, params), ...cardHitEvidence(card) }, "owner", d.now()) ? "ok" : "held"; }
-  catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} ${params.proposalId} 抢执行占位失败：${(e as Error).name}`); return "error"; }
+  catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} ${params.proposalId} 抢执行占位失败：${safeErrorLine(e, "抢占位")}`); return "error"; }
 }
 
 /** conflict：重拉一次；该提案仍待批就按新 rev 开新卡（同时撤这个项目里过时的卡） */
@@ -343,7 +346,7 @@ async function refetchAfterConflict(project: InboxProject, title: string, params
   if (fresh && paramsKey(paramsOf(project.localProjectId, fresh)) === paramsKey(params)) return decisionResultText(title, params, { kind: "error", code: "conflict" });
   let opened: Ask[] = [];
   try { opened = await gatedReconcile(project, pending, d); }
-  catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 开 / 撤卡失败：${(e as Error).name}`); }
+  catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 开 / 撤卡失败：${safeErrorLine(e, "开卡 / 撤卡")}`); }
   // 按返回卡的真实状态说：dedupKey 可能撞回这一 rev 已答 / 已撤的卡，那就不能说「已开新卡」
   const key = fresh && paramsKey(paramsOf(project.localProjectId, fresh));
   const card = key ? opened.find(a => { const p = cardParams(a); return p && paramsKey(p) === key; }) : undefined;
