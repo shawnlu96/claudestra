@@ -7,6 +7,7 @@
  */
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownQuota } from "../src/lib/ai-quota.js";
@@ -31,7 +32,9 @@ import { runLedger } from "../src/manager/ledger.js";
 
 const FP = "abcd-ef01-2345-6789", WORKER = `${FP}/agent-lend-0123456789`;
 const cleanups: (() => void)[] = [];
-afterEach(() => { clearQueuedLocalStarts(); for (const close of cleanups.splice(0)) close(); });
+afterEach(() => { clearQueuedLocalStarts(); rmSync(RECOVERY_POLICY_PATH, { force: true }); for (const close of cleanups.splice(0)) close(); });
+/** LENDBACK1's lendReturnLocal (on by default) drops the pin and an unbound agent on every not-started return: tests/lend-return-local.test.ts. */
+const lendReturnLocalOff = () => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { lendReturnLocal: "off" } } } }));
 
 async function pinned() {
   const dir = mkdtempSync(join(tmpdir(), "sendback1-")), dbPath = join(dir, "ledger.sqlite"), db = openLedger(dbPath);
@@ -158,6 +161,7 @@ for (const [why, sendBack] of PATHS) for (const [gone, dropGrant] of GRANT_GONE)
 
 for (const [why, sendBack] of PATHS) {
   test(`sent back because ${why} under a live grant: assignee restored, the pin stays for the re-offer`, async () => {
+    lendReturnLocalOff();
     const f = await pinned();
     await f.tick();
     const extra = JSON.stringify(f.task().extra);
@@ -184,6 +188,7 @@ test("a grant that no longer covers write or this repo counts as gone", async ()
 });
 
 test("a local agent recorded before lending comes back as that agent", async () => {
+  lendReturnLocalOff();
   const f = await pinned();
   await f.tick();
   f.db.query("UPDATE tasks SET agent = 'agent-dev', assigneeKind = 'agent', assignee = 'agent-dev' WHERE id = 'ap-a'").run();

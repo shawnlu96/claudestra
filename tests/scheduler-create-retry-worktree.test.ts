@@ -22,6 +22,7 @@ import { readSchedulerConfig, type RemotePolicy } from "../src/lib/scheduler-con
 import { retryWorktreeDirty } from "../src/lib/scheduler-create-retry-worktree.js";
 import { createRetryDelay, retryCleanCreate } from "../src/lib/scheduler-create-retry.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "../src/lib/scheduler-local-author.js";
+import { staleTreeAside } from "../src/lib/lend-return-local.js";
 import { writeLocalAuthor } from "../src/lib/scheduler-local-author-write.js";
 import { clearQueuedLocalStarts } from "../src/lib/scheduler-local-runtime-queue.js";
 import { git } from "../src/lib/scheduler-review-worktree.js";
@@ -520,5 +521,48 @@ describe("SC1H hidden edits cannot authorize clean reuse", () => {
     } finally { chmodSync(file, 0o644); }
     const failure = await retryWorktreeDirty(async () => ({ code: 1, out: "status deliberately unavailable" }), f.worktree, f.repo);
     expect(failure).toContain("读不了工作区状态"); expect(failure).toContain("status deliberately unavailable");
+  });
+});
+
+describe("agent-list-recovery-LENDBACK1: a replaced executor's checkout at the card's path (lend-return-local.ts staleTreeAside)", () => {
+  async function oldTree() {
+    const dir = mkdtempSync(join(tmpdir(), "lendback1-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const { repo, run } = await gitRepo(dir);
+    writeFileSync(join(repo, ".gitignore"), "*.log\n");
+    await run(repo, "add", ".gitignore"); await run(repo, "commit", "-q", "-m", "ignore"); await run(repo, "fetch", "-q", "origin");
+    const worktree = join(dir, "wt", "ap-a");
+    await run(repo, "worktree", "add", "-q", "-b", "feat/ap-a", worktree, "origin/main");
+    const plan = { worktree, branch: "lend/ap-a-9109" }, owner = { name: "agent-task-ap-a", cwd: worktree, status: "stopped" };
+    return { repo, run, worktree, plan, owner, aside: () => staleTreeAside(git, plan, owner, "-r2") };
+  }
+
+  test("[验收线 5] off-branch, clean (ignored files do not count), nothing of its own: a new path with the same suffix; the old tree stays", async () => {
+    const t = await oldTree();
+    writeFileSync(join(t.worktree, "build.log"), "ignored\n");
+    expect(await t.aside()).toBe(`${t.worktree}-r2`);
+    expect(existsSync(join(t.worktree, "a.ts"))).toBe(true);
+    expect(await t.run(t.worktree, "symbolic-ref", "--short", "HEAD")).toBe("feat/ap-a");
+  });
+
+  test("[验收线 5] edits, an untracked file or its own commit: kept and waits as today", async () => {
+    const edits = await oldTree();
+    writeFileSync(join(edits.worktree, "a.ts"), "edited\n");
+    expect(await edits.aside()).toBeNull();
+    const untracked = await oldTree();
+    writeFileSync(join(untracked.worktree, "new.ts"), "x\n");
+    expect(await untracked.aside()).toBeNull();
+    const own = await oldTree();
+    writeFileSync(join(own.worktree, "a.ts"), "mine\n");
+    await own.run(own.worktree, "commit", "-q", "-am", "mine");
+    expect(await own.aside()).toBeNull();
+  });
+
+  test("on the card's branch, another owner's tree, or the new path already taken: unchanged", async () => {
+    const t = await oldTree();
+    expect(await staleTreeAside(git, { ...t.plan, branch: "feat/ap-a" }, t.owner, "-r2")).toBeNull();
+    expect(await staleTreeAside(git, t.plan, { ...t.owner, cwd: join(t.worktree, "..", "other") }, "-r2")).toBeNull();
+    mkdirSync(`${t.worktree}-r2`);
+    expect(await t.aside()).toBeNull();
   });
 });
