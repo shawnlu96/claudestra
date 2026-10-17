@@ -53,6 +53,9 @@ import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
 import { quotaViewOf, type LendWorkerFailure, confirmedTurnFailure } from "./lend-health.js";
 import { codexPauseProbeDeps } from "./lend-codex-probe-run.js";
+import { openLedger } from "./ledger-store.js";
+import { recordObserved } from "./recovery-policy.js";
+import { runBounded } from "./run-bounded.js";
 import { keepLendEvidence } from "./lend-evidence.js";
 import { listAsks } from "./ledger-asks.js";
 import { turnFailureDoubt } from "./lend-turn-failure.js";
@@ -243,7 +246,8 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-close-asks 失败") };
     },
     codexQuota: async () => quotaViewOf((await readInventoryQuota()).codex),
-    codexPauseProbe: codexPauseProbeDeps(), // observe 样本走出借日志：暂停没有本机卡，scheduler-recovery-observe 记不了
+    // observe 样本：暂停没有本机卡（scheduler-recovery-observe 要卡），按 ask-scope-case-policy 同款直接记项目级 recovery_observe
+    codexPauseProbe: codexPauseProbeDeps({ ports: { exec: (argv, o) => runBounded(argv, o) }, observe: (a) => { recordObserved(openLedger(), a, Date.now()); } }),
     clone: (input) => owned(() => prepareClone(input)),
     removeDir: (orderId) => {
       active(); removeClaudeOrderConfig(journal, orderId); removeOrderDir(orderId); removeOrderDir(orderId, LEND_ROOT, "push");

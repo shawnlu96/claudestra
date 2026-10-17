@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { codexProbeMode, pendingCodexProbe, PROBE_EVERY_MS, type CodexPauseProbe } from "../src/lib/lend-codex-probe.js";
-import { codexPauseProbeDeps } from "../src/lib/lend-codex-probe-run.js";
+import { codexPauseProbeDeps, runProbeCall } from "../src/lib/lend-codex-probe-run.js";
+import { setMeta } from "../src/lib/lend-journal.js";
 import { pausedUntil, pauseForQuota, refreshQuotaPause, type QuotaView } from "../src/lib/lend-health.js";
 import { helloBody } from "../src/lib/lend-hello.js";
 import { lendPollCapacity } from "../src/lib/lend-claude-worker-capacity.js";
@@ -20,7 +21,8 @@ const T0 = 1_000_000, MIN = 60_000, DAY = 86_400_000;
 const dbs: Database[] = [];
 afterEach(async () => { await pendingCodexProbe(); for (const db of dbs.splice(0)) db.close(); });
 
-function setup(o: { untilMs?: number; mode?: RecoveryMode; after?: () => QuotaView | null; run?: () => Promise<{ ok: boolean; message: string }> } = {}) {
+function setup(o: { untilMs?: number; mode?: RecoveryMode; after?: () => QuotaView | null; run?: () => Promise<{ ok: boolean; message: string }>;
+  midway?: () => QuotaView } = {}) {
   const db = openLendJournal(":memory:");
   dbs.push(db);
   const lines: string[] = [];
@@ -33,6 +35,7 @@ function setup(o: { untilMs?: number; mode?: RecoveryMode; after?: () => QuotaVi
     mode: () => ({ mode: o.mode ?? "on", project: "claudestra" }),
     call: async () => {
       s.runs++;
+      if (o.midway) quota = o.midway(); // 调用中途就写出读数（先收到 rate_limits，之后才失败 / 超时）
       const r = o.run ? await o.run() : { ok: true, message: "OK" };
       if (r.ok && o.after) quota = o.after();
       return r;
@@ -45,7 +48,8 @@ function setup(o: { untilMs?: number; mode?: RecoveryMode; after?: () => QuotaVi
     await pendingCodexProbe();
     return r;
   };
-  return { db, lines, until, s, at, probeLines: () => lines.filter((l) => l.includes("探测")) };
+  const q = async () => quota;
+  return { db, lines, until, s, at, probe, q, probeLines: () => lines.filter((l) => l.includes("探测")) };
 }
 
 const notFull = (at: number): QuotaView => ({ observedAt: at, full: false, resetsAt: null, limit: false });
@@ -82,6 +86,34 @@ for (const [name, o, label] of keeps) test(`[验收线 2] 探测${name}：暂停
   expect(h.s.runs).toBe(1);
   expect(await h.at(60 * MIN)).toBe(h.until);
   expect(h.s.runs).toBe(2);
+});
+
+test("[验收线 2] 探测失败但中途写出了不满的读数：不拿它解除，截止不变；之后成功的探测照常解除", async () => {
+  let fail = true;
+  const h = setup({ midway: () => notFull(h.s.clock), run: async () => (fail ? { ok: false, message: "Codex 超时(180s)被终止。" } : { ok: true, message: "OK" }) });
+  await h.at(30 * MIN);
+  expect(h.probeLines().at(-1)).toContain("未知");
+  for (const m of [30.5, 45, 59]) expect(await h.at(m * MIN)).toBe(h.until);
+  fail = false;
+  expect(await h.at(60 * MIN)).toBe(h.until); // 这一轮起第二次探测（成功、写出 60 分钟的读数）
+  expect(h.s.runs).toBe(2);
+  expect(await h.at(61 * MIN)).toBeNull();
+});
+
+test("[验收线 2] 探测还在跑时中途写出的读数不拿来解除；结果丢了（进程重启）同样不认", async () => {
+  let release!: () => void;
+  const h = setup({ midway: () => notFull(T0 + 30 * MIN), run: () => new Promise((r) => { release = () => r({ ok: false, message: "超时" }); }) });
+  await refreshQuotaPause(h.db, h.q, T0 + 30 * MIN, () => {}, h.probe);
+  expect(h.s.runs).toBe(1);
+  expect(await refreshQuotaPause(h.db, h.q, T0 + 32 * MIN, () => {}, h.probe)).toBe(h.until); // 还在跑
+  release();
+  await pendingCodexProbe();
+  expect(await refreshQuotaPause(h.db, h.q, T0 + 33 * MIN, () => {}, h.probe)).toBe(h.until); // 跑完失败
+  const lost = setup();
+  setMeta(lost.db, "probe:codex", JSON.stringify({ pauseAt: T0, at: T0 + 30 * MIN }));
+  const probe: CodexPauseProbe = { mode: () => ({ mode: "on", project: null }), call: async () => ({ ok: true, message: "" }) };
+  expect(await refreshQuotaPause(lost.db, async () => notFull(T0 + 31 * MIN), T0 + 32 * MIN, () => {}, probe)).toBe(lost.until);
+  expect(await refreshQuotaPause(lost.db, async () => notFull(T0 + 33 * MIN), T0 + 34 * MIN, () => {}, probe)).toBeNull(); // 之后的新读数照常认
 });
 
 test("[验收线 2] 同一时刻最多一个探测：上一个没跑完，到了下个间隔也不起第二个", async () => {
@@ -137,7 +169,7 @@ test("没暂停时不探测", async () => {
   expect(runs).toBe(0);
 });
 
-test("档位：显式键优先；没设、项目解析不出、文件坏都是缺省 on", () => {
+test("档位：按统一恢复策略——显式键 → 项目 mode → 缺省 on；项目解析不出 = on，文件坏 = off（同 recoveryPolicy）", () => {
   const dir = mkdtempSync(join(tmpdir(), "codex-probe-mode-"));
   const repo = mkdtempSync(join(tmpdir(), "codex-probe-repo-"));
   const projectsPath = join(dir, "projects.json"), policyPath = join(dir, "recovery-policy.json");
@@ -148,15 +180,48 @@ test("档位：显式键优先；没设、项目解析不出、文件坏都是�
     writeFileSync(policyPath, JSON.stringify({ projects: { claudestra: { keys: { codexPauseProbe: mode } } } }));
     expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo })).toEqual({ mode, project: "claudestra" });
   }
-  writeFileSync(policyPath, "{坏");
+  for (const mode of ["off", "observe"] as const) {
+    writeFileSync(policyPath, JSON.stringify({ projects: { claudestra: { mode } } }));
+    expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo })).toEqual({ mode, project: "claudestra" }); // 项目整体 off / observe 继承
+  }
+  writeFileSync(policyPath, JSON.stringify({ projects: { claudestra: { mode: "off", keys: { codexPauseProbe: "on" } } } }));
   expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo }).mode).toBe("on");
+  writeFileSync(policyPath, "{坏");
+  expect(codexProbeMode({ policyPath, projectsPath, repoRoot: repo }).mode).toBe("off");
   expect(codexProbeMode({ policyPath, projectsPath, repoRoot: dir })).toEqual({ mode: "on", project: null });
 });
 
 test("生产依赖只组装、不起 Codex：observe 口原样带上", () => {
   const observe = () => {};
-  const p = codexPauseProbeDeps({ observe });
+  const ports = { exec: async () => ({ code: 0, stdout: "", stderr: "", timedOut: false }) };
+  const p = codexPauseProbeDeps({ ports, observe });
   expect(typeof p.call).toBe("function");
   expect(p.observe).toBe(observe);
-  expect(codexPauseProbeDeps().observe).toBeUndefined();
+  expect(codexPauseProbeDeps({ ports }).observe).toBeUndefined();
+});
+
+test("二进制按出借 worker 口径：只配 CODEX_TUI_BIN、没设 CODEX_BIN 也能起；只读沙箱、不加载全局 MCP、prompt 作位置参数", async () => {
+  const saved = { tui: process.env.CODEX_TUI_BIN, bin: process.env.CODEX_BIN };
+  process.env.CODEX_TUI_BIN = "/opt/npm/codex-native";
+  delete process.env.CODEX_BIN;
+  try {
+    const calls: string[][] = [];
+    const ok = await runProbeCall({ exec: async (argv) => (calls.push(argv), { code: 0, stdout: "", stderr: "", timedOut: false }) });
+    expect(ok).toEqual({ ok: true, message: "OK" });
+    expect(calls).toHaveLength(1);
+    const argv = calls[0];
+    expect(argv[0]).toBe("/opt/npm/codex-native");
+    expect(argv.slice(1, 2)).toEqual(["exec"]);
+    expect(argv.join(" ")).toContain("-s read-only");
+    expect(argv).toContain("mcp_servers={}");
+    expect(argv).not.toContain("-");
+    expect(argv.at(-1)).toContain("OK");
+    const timeout = await runProbeCall({ exec: async () => ({ code: null, stdout: "", stderr: "", timedOut: true }) });
+    expect(timeout.ok).toBe(false);
+    const none = await runProbeCall({ resolveBin: async () => null, exec: async () => { throw new Error("不该起"); } });
+    expect(none.ok).toBe(false);
+  } finally {
+    if (saved.tui === undefined) delete process.env.CODEX_TUI_BIN; else process.env.CODEX_TUI_BIN = saved.tui;
+    if (saved.bin !== undefined) process.env.CODEX_BIN = saved.bin;
+  }
 });

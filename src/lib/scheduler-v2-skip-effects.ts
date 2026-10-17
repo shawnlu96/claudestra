@@ -177,7 +177,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-clone.ts": "proc=1 fs=2 vcs=14",
     "lend-config-failure.ts": "notice=2",
     "lend-delivery-amend.ts": "fs=1",
-    "lend-deps.ts": "ledger=3 proc=3 vcs=1",
+    "lend-deps.ts": "ledger=3 proc=4 vcs=1",
     "lend-disk-preserve.ts": "fs=5",
     "lend-drive.ts": "notice=1",
     "lend-evidence.ts": "fs=4",

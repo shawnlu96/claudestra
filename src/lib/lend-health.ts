@@ -17,7 +17,7 @@ import { classifyAirFailure } from "./acp/failures.js";
 import { lendQuotaResetAt } from "./lend-quota-reset.js";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import { classifyModelOutcome } from "./scheduler-model-outcome.js";
-import { maybeProbeCodex, type CodexPauseProbe } from "./lend-codex-probe.js";
+import { maybeProbeCodex, probeDistrust, type CodexPauseProbe } from "./lend-codex-probe.js";
 
 export type WorkerDown = "no_window" | "no_host";
 export const MISS_GAP_MS = 5_000;
@@ -165,20 +165,24 @@ export async function pauseForStartFailure(db: Database, row: LendRow, error: st
 export async function refreshQuotaPause(db: Database, quota: () => Promise<QuotaView | null>, now: number,
   log: (m: string) => void, probe?: CodexPauseProbe): Promise<number | null> {
   const q = await quota().catch((e) => { log(`领单前读 Codex 额度失败，按未知处理：${String(e)}`); return null; });
-  const until = await refreshPause(db, async () => q, now, log);
+  // 失败 / 没跑完的探测写出的读数不拿来解除（lend-codex-probe.ts probeDistrust）；不给 probe = 不截，同改前
+  const distrust = probe ? probeDistrust(db, readJson<Pause>(db, PAUSE_KEY), now) : null;
+  const until = await refreshPause(db, async () => q, now, log, distrust);
   if (until === null && q?.full === true && (q.resetsAt === null || q.resetsAt > now)) pauseForQuota(db, "quota_observation", q, now, log);
   if (probe) maybeProbeCodex(db, readJson<Pause>(db, PAUSE_KEY), probe, quota, now, log);
   return pausedUntil(db, now);
 }
 
 /** 每轮开头：到点了，或暂停之后又观测到额度不满，就解除暂停 */
-async function refreshPause(db: Database, quota: () => Promise<QuotaView | null>, now: number, log: (m: string) => void): Promise<number | null> {
+async function refreshPause(db: Database, quota: () => Promise<QuotaView | null>, now: number, log: (m: string) => void,
+  distrustThrough: number | null = null): Promise<number | null> {
   const p = readJson<Pause>(db, PAUSE_KEY);
   if (!p) return null;
   if (now >= p.until) return setMeta(db, PAUSE_KEY, ""), log("Codex 额度暂停到点，恢复借单"), null;
   const q = await quota().catch(() => null);
   if (q?.limit === true && !p.limit) setMeta(db, PAUSE_KEY, JSON.stringify({ ...p, limit: true } satisfies Pause));
   const cleared = !p.limit || q?.limit === false;
-  if (q && cleared && q.full === false && q.observedAt !== null && q.observedAt > p.at) return setMeta(db, PAUSE_KEY, ""), log("观测到 Codex 额度已不满，恢复借单"), null;
+  if (q && cleared && q.full === false && q.observedAt !== null && q.observedAt > p.at
+    && (distrustThrough === null || q.observedAt > distrustThrough)) return setMeta(db, PAUSE_KEY, ""), log("观测到 Codex 额度已不满，恢复借单"), null;
   return p.until;
 }
