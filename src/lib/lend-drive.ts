@@ -161,8 +161,8 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
   return null;
 }
 
-/** A 侧一时回不了话（网络断、回包坏、中心 503 unavailable）：claim 与转发结论共用，下轮原样再发（两处都对同单幂等） */
-const TRANSIENT_CODES: ReadonlySet<string> = new Set(["transport", "bad_response", "unavailable"]);
+/** A 侧一时回不了话（网络断、回包坏、中心 503 unavailable、台账库写锁等超时 503 busy）：claim 与转发结论共用，下轮原样再发（两处都对同单幂等） */
+const TRANSIENT_CODES: ReadonlySet<string> = new Set(["transport", "bad_response", "unavailable", "busy"]);
 export const transientLendCode = (code: string): boolean => TRANSIENT_CODES.has(code);
 
 export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
