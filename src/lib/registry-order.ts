@@ -4,6 +4,7 @@
  * whose result puts the PR's line first and is out of order about half the time. The merge queue runs the check for each
  * file here on the union result it would push (scheduler-merge-union-git.ts) and refuses on a problem. Pure functions only.
  */
+import { resourceKey } from "./ledger-scheduler.js";
 
 const RECOVERY_TABLE_HEAD = "export const RECOVERY_KEYS = [";
 const RECOVERY_KEY_LINE = /^ {2}"([^"\n]+)",$/;
@@ -33,3 +34,13 @@ export const ORDERED_UNION_FILES: Readonly<Record<string, (text: string) => stri
 /** The check registered for `file`, if any (own keys only: a path like "constructor" never reaches Object.prototype). */
 export const orderCheckFor = (file: string): ((text: string) => string | null) | undefined =>
   Object.hasOwn(ORDERED_UNION_FILES, file) ? ORDERED_UNION_FILES[file] : undefined;
+
+const UNION_FILE_KEYS: ReadonlySet<string> = new Set(Object.keys(ORDERED_UNION_FILES).map((f) => resourceKey(f) ?? f));
+/**
+ * UNIONLANE1: `resource` (a fileGlobs entry or a held file lock) names a file registered above. Normalized by resourceKey like
+ * every lock: case does not matter, a `./` prefix or other unsafe spelling never matches, a glob is not the file itself.
+ */
+export function isOrderedUnionFile(resource: string): boolean {
+  const key = resourceKey(resource);
+  return key !== null && UNION_FILE_KEYS.has(key);
+}

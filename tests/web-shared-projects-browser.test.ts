@@ -118,10 +118,10 @@ afterAll(async () => {
     }, null, 2), { mode: 0o600 });
   } finally {
     server?.stop(true);
-    try { await browser?.close(); }
+    try { await browser?.close(); } // force-kills Chromium after Playwright's 30s graceful deadline; the hook budget outlasts it.
     finally { rmSync(scratch, { recursive: true, force: true }); }
   }
-}, TEST_TIMEOUT_MS);
+}, 2 * TEST_TIMEOUT_MS);
 async function screenshot(page: Page, name: string) {
   const png = await page.screenshot({ path: join(shots, `${name}.png`), animations: "disabled" });
   chmodSync(join(shots, `${name}.png`), 0o600);
