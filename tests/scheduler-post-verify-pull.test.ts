@@ -12,6 +12,7 @@ import { statePath } from "../src/lib/paths.js";
 import { pmTodos } from "../src/lib/pm-todo.js";
 import { RECOVERY_POLICY_PATH, recoveryPolicy } from "../src/lib/recovery-policy.js";
 import { postVerifyTick } from "../src/lib/scheduler-post-verify.js";
+import { postVerifyPullTick } from "../src/lib/scheduler-post-verify-pull.js";
 import { POST_VERIFY_REPEAT_MS, readPostVerifySpec } from "../src/lib/scheduler-post-verify-ledger.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import type { SpecWaitEnv } from "../src/lib/scheduler-spec-wait.js";
@@ -121,7 +122,7 @@ test("每天只发一次，新到期延至下一批次，已汇总旧卡不重�
   expect(claims()).toHaveLength(2);
 });
 
-test("每日汇总先认领再发送，发送失败 / 重启不重复认领，待办仍能拉取", async () => {
+test("r1 summary-lost：失败当天不重发，重启后次日重试，成功批次不再重复", async () => {
   verified(card);
   await tick(); nextDay();
   failSend = true;
@@ -134,7 +135,12 @@ test("每日汇总先认领再发送，发送失败 / 重启不重复认领，�
   expect(sent).toEqual([]);
   expect(pmTodos(db, P, (id) => readPostVerifySpec(id)?.text, clock)).toContainEqual(expect.objectContaining({ task: card, due: true }));
   nextDay(); await tick();
-  expect(sent).toEqual([]);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toMatchObject({ to: FEATURE_PM, level: "action" });
+  expect(sent[0].text).toContain(card);
+  expect(claims()).toHaveLength(2);
+  nextDay(); await tick();
+  expect(sent).toHaveLength(1);
 });
 
 test("崩溃窗口：领取后、发送前重启，不会再次把当天同一汇总交给发送端", async () => {
@@ -145,6 +151,104 @@ test("崩溃窗口：领取后、发送前重启，不会再次把当天同一�
   expect(await tick()).toEqual([]);
   expect(claims()).toHaveLength(1);
   expect(sent).toEqual([]);
+  nextDay();
+  expect(await tick()).toEqual([]);
+  expect(sent).toHaveLength(1);
+});
+
+test("r1 pull-cli-every-tick：没有可汇总批次的只读 tick 不起汇总 CLI", async () => {
+  const reader = new LedgerReader(join(dir, "ledger.sqlite"));
+  let summaryCalls = 0;
+  const e = { ...env(), db: reader.get() as Database, ledger: async (...args: string[]) => {
+    if (args.includes("post-verify-pull")) summaryCalls++;
+    return ledger(...args);
+  } };
+  try {
+    for (let i = 0; i < 3; i++) expect(await postVerifyTick(e)).toEqual([]);
+    verified(card);
+    expect(await postVerifyTick(e)).toEqual([]);
+    expect(summaryCalls).toBe(0);
+    nextDay();
+    expect(await postVerifyTick(e)).toEqual([]);
+    expect(summaryCalls).toBeGreaterThan(0);
+    expect(sent).toHaveLength(1);
+  } finally { reader.close(); }
+});
+
+test.each(["result", "throw"])("r1 observe-record-drops-window：观察记账 %s 失败仍发旧提醒并报告错误", async (failure) => {
+  policy("observe"); verified(card);
+  const failed = await postVerifyTick({ ...env(), ledger: async (...args) => {
+    if (!args.includes("scheduler-recovery-observe")) return ledger(...args);
+    if (failure === "throw") throw new Error("sample unavailable");
+    return { ok: false, code: "busy", error: "sample unavailable" };
+  } });
+  expect(records()).toHaveLength(1);
+  expect(failed).toEqual([expect.objectContaining({ taskId: card, error: expect.stringContaining("sample unavailable") })]);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toMatchObject({ to: FEATURE_PM, level: "info" });
+});
+
+test("r1 observe 记账失租仍停止发送，不能把租约丢失当成普通观察故障", async () => {
+  policy("observe"); verified(card);
+  await expect(postVerifyTick({ ...env(), ledger: async (...args) => args.includes("scheduler-recovery-observe")
+    ? { ok: false, code: "lease-lost", error: "lost lease" } : ledger(...args) })).rejects.toBeInstanceOf(SchedulerStopped);
+  expect(records()).toHaveLength(1);
+  expect(sent).toEqual([]);
+});
+
+test("r1 只读预筛到写口之间卡被结掉：writer 重算后不认领、不发", async () => {
+  verified(card); await tick(); nextDay();
+  let claimed = 0;
+  const failed = await postVerifyTick({ ...env(), ledger: async (...args) => {
+    if (args.includes("post-verify-pull") && args.includes("claim")) { claimed++; done(card); }
+    return ledger(...args);
+  } });
+  expect(failed).toEqual([]);
+  expect(claimed).toBe(1);
+  expect(claims()).toEqual([]);
+  expect(sent).toEqual([]);
+});
+
+test("r1 汇总候选继承 skip hook：切入 execution 的卡不认领、不发", async () => {
+  verified(card); await tick(); nextDay();
+  writeFileSync(join(dir, "shared-ledger-modes.json"), JSON.stringify({ features: { [fid]: { authorityMode: "execution", sharedPlanning: true } } }));
+  let calls = 0;
+  const failed: { taskId: string; error: string }[] = [];
+  await postVerifyPullTick({ ...env(), ledger: async (...args) => { calls++; return ledger(...args); } }, P, failed);
+  expect(failed).toEqual([]);
+  expect(calls).toBe(0);
+  expect(await ledger("ledger", "scheduler-autostart", "post-verify-pull", P, "claim")).toMatchObject({ ok: true, due: false });
+  expect(claims()).toEqual([]);
+  expect(sent).toEqual([]);
+});
+
+test("r1 送达确认失败：当天不重复，重启次日可恢复，最终 ack 后停止", async () => {
+  verified(card); await tick(); nextDay();
+  const failed = await postVerifyTick({ ...env(), ledger: async (...args) => args.includes("post-verify-pull") && args.includes("sent")
+    ? { ok: false, code: "busy", error: "ack unavailable" } : ledger(...args) });
+  expect(failed[0].error).toContain("ack unavailable");
+  expect(sent).toHaveLength(1);
+  closeLedger(join(dir, "ledger.sqlite")); db = openLedger(join(dir, "ledger.sqlite"));
+  expect(await tick()).toEqual([]);
+  expect(sent).toHaveLength(1);
+  nextDay(); expect(await tick()).toEqual([]);
+  expect(sent).toHaveLength(2);
+  nextDay(); expect(await tick()).toEqual([]);
+  expect(sent).toHaveLength(2);
+  expect(listEvents(db, { project: P }).filter((e) => e.data.op === "post_verify_pull" && e.data.kind === "sent")).toHaveLength(1);
+});
+
+test("r1 ack 绑定原认领：发送时跨日并关开关，仍确认原批次", async () => {
+  verified(card); await tick(); nextDay();
+  const e = env(), send = e.specWaitSend!;
+  e.specWaitSend = async (...args) => { await send(...args); nextDay(); policy("off"); };
+  expect(await postVerifyTick(e)).toEqual([]);
+  const ack = listEvents(db, { project: P }).find((r) => r.data.op === "post_verify_pull" && r.data.kind === "sent");
+  expect(ack?.data.day).toBe("2026-10-18");
+  expect(ack?.data.cards).toEqual(claims()[0].data.cards);
+  policy("on");
+  expect(await tick()).toEqual([]);
+  expect(sent).toHaveLength(1);
 });
 
 test("汇总前已结 / 非 verified / 无规格 / 缺真实小节的卡不再列出", async () => {
@@ -262,6 +366,7 @@ test("汇总 CLI 重核身份、项目、模式；拒自定义正文与非法操
   const cmd = ["ledger", "scheduler-autostart", "post-verify-pull", P];
   expect(await runAs(PM, ...cmd, "claim")).toMatchObject({ ok: false, code: "forbidden" });
   expect(await ledger(...cmd, "sent")).toMatchObject({ ok: false, code: "invalid" });
+  expect(await ledger(...cmd, "sent", "missing-claim")).toMatchObject({ ok: false, code: "conflict" });
   expect(await ledger(...cmd, "claim", "--text", "伪造正文")).toMatchObject({ ok: false, code: "invalid" });
   expect(await ledger(...cmd.slice(0, -1), "other", "claim")).toMatchObject({ ok: false, code: "forbidden" });
   policy("off");

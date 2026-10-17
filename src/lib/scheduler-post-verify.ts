@@ -45,7 +45,8 @@ export async function postVerifyTick(env: SpecWaitEnv): Promise<Failed> {
         }
         if (rec.due !== true || mode !== "on") continue;
         try {
-          await sendPostVerify(env, project, t.id, kind, String(rec.to), String(rec.text));
+          const warning = await sendPostVerify(env, project, t.id, kind, String(rec.to), String(rec.text));
+          if (warning) failed.push({ taskId: t.id, error: warning });
         } catch (e) {
           // overdue 没写终结记录：下个 30 分钟窗口按发送意图重发，直到送达
           if (e instanceof SchedulerStopped) throw e;
