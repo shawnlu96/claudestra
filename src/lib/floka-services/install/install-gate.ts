@@ -5,6 +5,7 @@ import { takeExecutorLock } from "../../state-maintenance/run-store.js";
 import { isTestProcess } from "../../test-guard.js";
 import { object, renameMode } from "../../floka-config/values.js";
 import type { InstallCliResult } from "../../cli-install.js";
+import { productionReloadPorts, reloadCurrentFamily, type ReloadPorts } from "./current-reload.js";
 import { readStored, ServiceStore } from "./store.js";
 import { join } from "node:path";
 
@@ -27,12 +28,15 @@ export function renameInstallGate(configPath = CONFIG_PATH, root = maintenanceRo
 }
 
 /**
+ * A committed new family with cli on reloads only that family (current-reload.ts, key serviceCurrentReload) instead of
+ * the refusal; the old family and every other gated state keep the result above.
  * Even off prepares the maintenance root and takes STATE2's lock so an installer cannot race a switch.
  * Recheck modes after acquiring ownership; a lock conflict leaves installation untouched and requires a retry.
  */
-export async function withRenameInstallGate(install: () => Promise<InstallCliResult>): Promise<InstallCliResult> {
+export async function withRenameInstallGate(install: () => Promise<InstallCliResult>,
+  reload: (root: string) => ReloadPorts = productionReloadPorts): Promise<InstallCliResult> {
   const root = maintenanceRoot(), before = renameInstallGate(CONFIG_PATH, root);
-  if (before) return before;
+  if (before) return reloadCurrentFamily(before, reload(root));
   if (process.platform !== "darwin" || isTestProcess()) return install();
   prepareMaintenanceRoot(root, [STATE_DIR, RUNTIME_DIR]);
   const lock = takeExecutorLock(root);
