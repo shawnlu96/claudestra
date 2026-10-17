@@ -13,6 +13,7 @@ import { closeSync, openSync, readSync } from "node:fs";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { codexAcpAdapter } from "./codex-acp.js";
+import { opencodeAcpAdapter } from "./opencode-acp.js";
 import { piAdapter } from "./pi.js";
 import { piAcpAdapter } from "./pi-acp.js";
 import { DEFAULT_TRANSPORT, isManaged, normalizeTransport, type ManagedRuntimeAdapter, type RuntimeControl, type SessionSourceAdapter, type Transport } from "./types.js";
@@ -21,7 +22,7 @@ export * from "./types.js";
 export { claudeCodeAdapter, codexAdapter, piAdapter };
 
 /** 顺序有意义：sourceForPath 按这个顺序问「这条路径是不是你的」 */
-const SOURCES: SessionSourceAdapter[] = [piAdapter, codexAdapter, claudeCodeAdapter];
+const SOURCES: SessionSourceAdapter[] = [piAdapter, codexAdapter, opencodeAcpAdapter, claudeCodeAdapter];
 
 export const DEFAULT_RUNTIME = "claude-code";
 
@@ -44,12 +45,13 @@ export function isManageableRuntime(runtime: string | undefined | null): boolean
 }
 
 /** transport=acp 时的生命周期适配器（窗口里跑 ACP 宿主）：只有声明了 ACP 段的运行时有 */
-const ACP_ADAPTERS: Record<string, ManagedRuntimeAdapter> = { codex: codexAcpAdapter, pi: piAcpAdapter };
+const ACP_ADAPTERS: Record<string, ManagedRuntimeAdapter> = { codex: codexAcpAdapter, pi: piAcpAdapter, opencode: opencodeAcpAdapter };
 
 /**
  * 可启动的适配器。缺省（undefined / 空串）= Claude Code（历史数据没有 runtime 字段）；
  * 认不出的 id 或只读来源返回 null——**不**像 sourceFor 那样回退，否则拼错的
  * `--runtime` 会被悄悄当成 Claude Code 起。transport=acp 返回 ACP 版，运行时不支持 acp 返回 null。
+ * 只走 ACP 的运行时（acpOnly）tmux 下返回的也是它的 ACP 版（清单 / 可用性查询不带 transport）。
  */
 export function managedFor(runtime: string | undefined | null, transport?: string | null): ManagedRuntimeAdapter | null {
   if (normalizeTransport(transport) === "acp") return ACP_ADAPTERS[runtime || DEFAULT_RUNTIME] ?? null;
@@ -68,7 +70,7 @@ export function manageableRuntimeIds(): string[] {
 export function requireManaged(runtime: string | undefined | null, transport?: string | null): ManagedRuntimeAdapter {
   const m = managedFor(runtime, transport);
   if (m) return m;
-  if (normalizeTransport(transport) === "acp") throw new Error(`runtime "${runtime || DEFAULT_RUNTIME}" 不支持 transport=acp（目前只有 codex / pi）`);
+  if (normalizeTransport(transport) === "acp") throw new Error(`runtime "${runtime || DEFAULT_RUNTIME}" 不支持 transport=acp（目前只有 ${Object.keys(ACP_ADAPTERS).join(" / ")}）`);
   const s = SOURCES.find((x) => x.id === runtime);
   const avail = manageableRuntimeIds().join(", ");
   throw new Error(
@@ -99,10 +101,12 @@ export function claudeCodeWindows(windowNames: string[], agents: { name: string;
   return windowNames.filter((w) => w.startsWith("agent-") && cc.has(w));
 }
 
-/** 能以哪些 transport 启动：tmux 人人都有，acp 要运行时声明 ACP 段（manager 切 transport 前据此拒绝） */
+/** 能以哪些 transport 启动：tmux 人人都有（acpOnly 除外），acp 要运行时声明 ACP 段（manager 切 transport 前据此拒绝） */
 export function transportsOf(runtime: string | undefined | null): Transport[] {
+  const m = managedFor(runtime);
+  if (m?.acpOnly) return ["acp"];
   const out: Transport[] = [DEFAULT_TRANSPORT];
-  if (managedFor(runtime)?.acp) out.push("acp");
+  if (m?.acp) out.push("acp");
   return out;
 }
 

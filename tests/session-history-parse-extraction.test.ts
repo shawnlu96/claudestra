@@ -41,6 +41,8 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 const AMENDED: [string, string, string][] = [
   // NAR1：CC 忙时队列吸收的入站标 midTurn，网页不把它当回合边界（web/features/chat/reply-echo.ts）
   ["parseHistoryLines", "inbox.fresh(mid, msg)) all.push(msg);", "inbox.fresh(mid, msg)) all.push(Object.assign(msg, { midTurn: true }));"],
+  // OCR-4：OpenCode 的会话 id 是 `ses_…`，历史 API 的白名单补一支
+  ["SESSION_ID_RE", "/^[0-9a-f][0-9a-f-]{7,63}$/i", "/^(?:[0-9a-f][0-9a-f-]{7,63}|ses_[A-Za-z0-9]{6,60})$/i"],
   ["HistoryMessage", "  fromId?: string;\n}", "  fromId?: string;\n  /** CC 忙时队列吸收、并进当前回合的入站（attachment queued_command）：不是新回合的开头 */\n  midTurn?: boolean;\n}"],
 ];
 

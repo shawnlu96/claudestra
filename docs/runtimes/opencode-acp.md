@@ -191,3 +191,37 @@ OCR-2 开工前要先定的两件事：OpenCode agent 是否像 Codex 一样放�
 
 复现：`bun scripts/opencode-acp-probe.ts <场景> --home <隔离目录> --cwd <空目录> --out <输出目录>`，场景和参数见脚本文件头。
 夹具合不合规（四类都在、没有本机路径、initialize 过 `checkInitialize`、权限请求能出卡）由 `tests/opencode-acp-probe.test.ts` 守着。
+
+## 接入后（OCR-4）：怎么建 / 怎么换模型 / 已知限制
+
+实现照上面的清单：宿主直连 `opencode acp`（`lib/acp/host-runtime.ts` 的 `RUNTIMES.opencode`），三处差距在 `lib/acp/updates.ts` 的
+`TranslatorOptions` 里补（工具调用等 in_progress 再起头、`<mcp>_<tool>` 改名、压缩来源 `command-end`）；生命周期在
+`lib/runtimes/opencode-acp.ts`，历史在 `lib/runtimes/opencode-source.ts` + `lib/opencode-session.ts`。
+
+### 怎么建
+
+- 先装：`npm i -g opencode-ai`（按 nvm 的 bin 目录找，`OPENCODE_BIN` 可指定；launchd 下不靠 PATH）。
+- 命令行：`bun src/manager.ts create <name> <dir> --runtime opencode --model opencode/big-pickle`。只有 ACP 一条路（`--transport tmux` 拒）。
+- 网页：新建 agent 弹窗的「运行时」选 OpenCode，模型是必选下拉（清单来自 `opencode models`，经 `GET /api/v1/runtimes` 的 `models` 字段）。
+- **模型必填**：不给 `--model`（网页不选）直接拒，原因写在报错里——OpenCode 自己的缺省是免费的 `opencode/big-pickle`，免费期数据可能被拿去训练，
+  交易类项目不能默认用。早拒在 `manager/create-args.ts`（建频道 / 窗口之前），启动命令再兜底一次（resume / restart 没模型也拒）。
+- 模型记进 registry 的 `model`；每次起 `opencode acp` 经 `OPENCODE_CONFIG_CONTENT` 带上，接回会话后宿主再 `set_config_option` 校一次。
+- 新会话：短命的 `opencode acp` 做一次 session/new 拿 `ses_…`，不跑引导轮；职责与频道规则走首条入站前言（OpenCode 没有追加系统提示的入口）。
+- 权限：对齐 Codex 的 agent-full-access，`OPENCODE_CONFIG_CONTENT` 的 `permission` 全放行（含 cwd 外的 `external_directory`、`doom_loop`），
+  `question` 拒（无人值守，问了没人答）。平时不弹授权卡；万一弹了，卡片形状与 `always` 选项照宿主通用逻辑（`permissions.ts` 不改）。
+- 沙箱实例里 OpenCode 的家目录、配置、库、缓存全在沙箱根的 `acp-home/` 下（`opencodeDirsEnv`），不碰 owner 的 `~/.local/share/opencode`。
+
+### 怎么换模型
+
+- `bun src/manager.ts set-claude <agent> --model <provider/model>` 写 registry，再 `restart <agent>`：宿主起来按新模型 `set_config_option`。
+- 值不在 OpenCode 的模型表里时 set_config_option 回 `-32602`（`model not found`），宿主记日志、照常起（与 Codex 的 setConfig 同口径）。
+
+### 已知限制
+
+- 网页模型下拉用 `opencode models`，比 ACP session/new 回包少几个免费模型（实测少 `glm-5.3-flash-free`、`ll-alpha-free`）；拿全表要建会话，会在 OpenCode 库里留空会话，没这么做。
+- 网页 agent 设置里的「换模型」（`/agents/:name/{pi,codex}-settings`）还没接 OpenCode，先用上面的命令行。
+- 压缩：只认宿主发的 `/compact`（那一轮结束出边界，摘要不当回复）；OpenCode 自己在上下文快满时的自动压缩没有任何信号，宿主看不到这条边界。
+  `/compact` 那一轮被打断也会记一条边界（flush 拿不到 stopReason）。
+- 没有 steering：忙时到的消息排队等下一轮；没有命令输出增量（长命令跑完才看到输出）；没有 `/clear` 命令（宿主照旧 session/new 换会话）。
+- 出借 worker（干净环境）不起 OpenCode。tmux 版不做。
+- 历史：读 `opencode export <id>` 的镜像（`~/.claude-orchestrator/opencode-sessions/<id>.jsonl`），按 OpenCode 库文件的 mtime 刷新。

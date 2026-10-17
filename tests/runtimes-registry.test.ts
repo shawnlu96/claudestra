@@ -22,6 +22,7 @@ const EXPECTED = [
   { id: "claude-code", manageable: true },
   { id: "pi", manageable: true },
   { id: "codex", manageable: true },
+  { id: "opencode", manageable: true },
 ];
 
 describe("注册表契约", () => {

@@ -268,6 +268,10 @@ export interface ManagedRuntimeAdapter extends SessionSourceAdapter {
   exitPrelude?(win: WindowOps): Promise<"at-shell" | "continue">;
   /** ACP 通道（Codex、Pi）。不声明 = 这个运行时只能走 tmux */
   readonly acp?: AcpTransport;
+  /** 只有 ACP 一条路（OpenCode：没有我们能驱动的 TUI）：create / resume 一律 acp，点名 tmux 拒 */
+  readonly acpOnly?: boolean;
+  /** 建 agent 必须显式给模型；值是拒绝时给人看的原因（OpenCode：它自己的缺省是免费模型） */
+  readonly modelRequired?: string;
   /** registry notes 里的会话前缀（历史值 "claude" / "pi"，保持不变） */
   readonly noteTag: string;
   /** T85 启动凭据文件的路径怎么交：mcp-config = 放进 --mcp-config 里 channel-server 的 env（CC）；env = 宿主命令的环境变量（ACP）。不声明 = 不签 */

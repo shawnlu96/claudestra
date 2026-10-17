@@ -51,6 +51,10 @@ export async function chooseCreateTransport(
   runtime?: string, requested?: string, ctx: { cwd?: string; piEnv?: unknown } = {}, piCheck: PiAcpCheck = piAcpCheck,
 ): Promise<TransportChoice> {
   if (requested !== undefined && requested !== "tmux" && requested !== "acp") throw new Error(`--transport 只能是 tmux 或 acp（收到 ${requested}）`);
+  if (managedFor(runtime)?.acpOnly) {
+    if (requested === "tmux") throw new Error(`runtime "${runtime}" 只能走 ACP，没有 tmux 版`);
+    return { transport: "acp" };
+  }
   if (runtime === "pi" && isSandbox()) return { transport: requested === "tmux" ? "tmux" : "acp" };
   if (runtime !== "codex" && runtime !== "pi") return { transport: "tmux" };
   if (requested === "tmux") return { transport: "tmux", manualTmux: true };
@@ -251,7 +255,7 @@ export function transportRefusal(
   if (bare === "master") return "大总管不切 transport";
   if (!info) return `agent "${bare}" 不存在`;
   const runtime = info.runtime || "claude-code";
-  if (!transportsOf(runtime).includes(to)) return `runtime "${runtime}" 不支持 transport=${to}（目前只有 codex / pi 能走 acp）`;
+  if (!transportsOf(runtime).includes(to)) return `runtime "${runtime}" 不支持 transport=${to}（${transportsOf(runtime).join(" / ")} 才行）`;
   if (runtime === "codex" && to === "tmux" && isSandbox(env)) return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   if (runtime === "pi" && to === "tmux" && isSandbox(env)) return "沙箱里的 Pi 只走 ACP，不起 TUI 版（docs/architecture/pi-acp-sandbox.md）"; // migrate --pi --to tmux 不经 manager 白名单
   if (to === "acp" && isSandbox(env) && env[ACP_AGENT_ENV]?.trim()) return "沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓 stub";

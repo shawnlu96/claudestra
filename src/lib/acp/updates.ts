@@ -12,7 +12,9 @@
  *   session_info_update 的 _meta.claudestra.compacted → compact_boundary，notice → 进度句。
  * - 压缩完成只认宿主按运行时定的那一个来源（CompactSource.from）：Pi 认上面的 compacted，Codex 认 ACP 的 compaction_update（只有 completed
  *   出边界，同一 compactionId 只出一次；开始 / 失败是进度句）。另一种来源的同类字段一律不认，免得别处带的字段冒充压缩完成。
- * tests/acp-updates.test.ts。
+ * - 按运行时的选项（TranslatorOptions，OpenCode 用，docs/runtimes/opencode-acp.md 结论三处）：工具调用等 in_progress / 终态再起头；
+ *   `<mcp>_<tool>` 改名成 mcp__<mcp>__<tool>；压缩来源 command-end：/compact 那一轮结束出边界、摘要正文不当回复。
+ * tests/acp-updates.test.ts、tests/opencode-acp-translator.test.ts。
  */
 import { codexCommandText, codexTextOf } from "../codex-session.js";
 import { modelStateEntry, parseConfigOptions } from "./config.js";
@@ -44,8 +46,20 @@ const TERMINAL = new Set(["completed", "failed"]);
 
 /** compact_boundary 认哪种来源（见文件头）；trigger 由宿主按这一轮是不是 /compact 命令给 */
 export interface CompactSource {
-  from: "claudestra-meta" | "compaction-update";
+  /** command-end：运行时不发任何压缩信号（OpenCode），宿主发的 /compact 那一轮结束就算压缩完成 */
+  from: "claudestra-meta" | "compaction-update" | "command-end";
   trigger?: () => "manual" | "auto";
+}
+
+/** 按运行时的翻译差异（host-runtime.ts 的 AcpRuntime.translator 给；不给 = Codex / Pi 的现行行为逐字不变） */
+export interface TranslatorOptions {
+  /**
+   * tool_call（pending）只带工具名、入参是空的或只有 {cwd}（OpenCode），真参数在 in_progress 才来：pending 一律不起头，
+   * 等 in_progress 或终态。不能按「入参为空」判——{cwd} 非空，起头就成了 Bash(command="bash")
+   */
+  deferPendingTools?: boolean;
+  /** 这些 MCP server 名的工具以 `<server>_<tool>` 出现、不带 is_mcp_tool_call：改名成 mcp__<server>__<tool>（只认宿主交下去的名字） */
+  mcpUnderscoreServers?: readonly string[];
 }
 
 export interface AcpTranslator {
@@ -72,9 +86,11 @@ export function turnEndOf(update: unknown): { stopReason?: string; failure?: Tur
   return t && typeof t === "object" ? t : null;
 }
 
-function toolUseOf(t: ToolState): { name: string; input: Rec } {
+function toolUseOf(t: ToolState, opts: TranslatorOptions): { name: string; input: Rec } {
   if (t.toolUse) return t.toolUse;
   const raw = t.rawInput ?? {};
+  const server = opts.mcpUnderscoreServers?.find((s) => t.title?.startsWith(`${s}_`) && t.title.length > s.length + 1);
+  if (server && t.kind !== "execute") return { name: `mcp__${server}__${t.title!.slice(server.length + 1)}`, input: raw };
   if (t.mcp || (typeof raw.server === "string" && typeof raw.tool === "string")) {
     const args = raw.arguments && typeof raw.arguments === "object" ? raw.arguments : {};
     return { name: `mcp__${raw.server ?? "mcp"}__${raw.tool ?? "tool"}`, input: args };
@@ -144,8 +160,21 @@ function compactionTracker(compact: CompactSource): (u: Rec) => { boundary: Rec 
   };
 }
 
-export function createAcpTranslator(now: () => string = () => new Date().toISOString(), compact: CompactSource = { from: "claudestra-meta" }): AcpTranslator {
+/** plan → update_plan 工具调用 + 结果（与 rollout 里 Codex 的计划工具同名同参） */
+function planEntries(u: Rec, id: string, now: () => string): Rec[] {
+  const steps = (Array.isArray(u.entries) ? u.entries : []).map((e: Rec) => ({ step: String(e?.content ?? ""), status: String(e?.status ?? "pending") }));
+  return [
+    { type: "assistant", timestamp: now(), message: { content: [{ type: "tool_use", id, name: "update_plan", input: { plan: steps } }] } },
+    { type: "user", timestamp: now(), message: { content: [{ type: "tool_result", tool_use_id: id, content: "Plan updated" }] } },
+  ];
+}
+
+export function createAcpTranslator(
+  now: () => string = () => new Date().toISOString(), compact: CompactSource = { from: "claudestra-meta" }, opts: TranslatorOptions = {},
+): AcpTranslator {
   let text = "";
+  /** command-end：这一轮是宿主发的 /compact（push 时看 trigger；flush 时宿主已复位，所以要自己记） */
+  let compactTurn = false;
   let textId: string | undefined;
   let planSeq = 0;
   const tools = new Map<string, ToolState>();
@@ -160,9 +189,10 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
 
   const toolEntries = (id: string, t: ToolState): Rec[] => {
     const out: Rec[] = [];
+    if (opts.deferPendingTools && !t.started && t.status !== "in_progress" && !TERMINAL.has(t.status ?? "")) return out;
     if (!t.started) {
       t.started = true;
-      out.push(...flushText(), { type: "assistant", timestamp: now(), message: { content: [{ type: "tool_use", id, ...toolUseOf(t) }] } });
+      out.push(...flushText(), { type: "assistant", timestamp: now(), message: { content: [{ type: "tool_use", id, ...toolUseOf(t, opts) }] } });
     }
     if (!t.finished && t.status && TERMINAL.has(t.status)) {
       t.finished = true;
@@ -194,23 +224,14 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
     compact.from === "claudestra-meta" && c.compacted && typeof c.compacted === "object" ? boundary(c.compacted) : progress(c.notice);
   const compaction = compactionTracker(compact);
 
-  const plan = (u: Rec): Rec[] => {
-    const id = `acp-plan-${++planSeq}`;
-    const steps = (Array.isArray(u.entries) ? u.entries : []).map((e: Rec) => ({ step: String(e?.content ?? ""), status: String(e?.status ?? "pending") }));
-    return [
-      ...flushText(),
-      { type: "assistant", timestamp: now(), message: { content: [{ type: "tool_use", id, name: "update_plan", input: { plan: steps } }] } },
-      { type: "user", timestamp: now(), message: { content: [{ type: "tool_result", tool_use_id: id, content: "Plan updated" }] } },
-    ];
-  };
-
   return {
     push(update) {
       const u = update as Rec | null;
       if (!u || typeof u !== "object") return [];
+      if (compact.from === "command-end" && compact.trigger?.() === "manual") compactTurn = true;
       switch (u.sessionUpdate) {
         case "agent_message_chunk":
-          return chunk(u);
+          return compactTurn ? [] : chunk(u); // 摘要正文收进边界，不当回复
         case "agent_thought_chunk":
           return u._meta?.claudestra?.display === true ? progress(u.content?.text) : [];
         case "session_info_update":
@@ -227,7 +248,7 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
           return toolEntries(id, t);
         }
         case "plan":
-          return plan(u);
+          return [...flushText(), ...planEntries(u, `acp-plan-${++planSeq}`, now)];
         case "usage_update":
           return typeof u.used === "number" && u.used > 0
             ? [{ type: "system", subtype: "context_usage", timestamp: now(), tokens: u.used, window: typeof u.size === "number" ? u.size : null }]
@@ -240,6 +261,10 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
           return []; // 历史回放、命令表等：不进流式条目（线程状态见 threadStatusOf）
       }
     },
-    flush: flushText,
+    flush() {
+      if (!compactTurn) return flushText();
+      compactTurn = false;
+      return boundary({ trigger: "manual" });
+    },
   };
 }
