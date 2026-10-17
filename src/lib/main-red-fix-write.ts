@@ -5,6 +5,8 @@
  * - fix: per run id + attempt once (handled event), skip when the PM already bound the same fault or the same workflow has an
  *   unverified fix node of this mechanism with the same failed checks (one note on that card instead); else the node through
  *   composeRewrite / rewriteDag (the review-converge-followup.ts way: feature PM as the writer, dedup per run) and the spec file;
+ * - untriaged: a log too long to read whole that still names no failed test: no node (a scope from it would be a guess), the attempt
+ *   handled and one PM todo per run with the run link and failed checks, for the PM to decide;
  * - bind: mainRedRepairBind, only for a card this mechanism wrote and the same faultKey.
  * Results reach the PM through recordPmTodo (pull); only an unplaceable node or a fault whose fixes failed twice returns a notice.
  */
@@ -16,20 +18,22 @@ import { dagWriteRefused } from "./dag-write-scrub.js";
 import { isManager, type WriteCtx } from "./ledger-checks.js";
 import { nodePhase } from "./ledger-dag-rules.js";
 import { rewriteDag } from "./ledger-dag-write.js";
-import type { DagNode } from "./ledger-feature.js";
+import { effectiveNodes, getDagVersion, getFeature, type DagNode } from "./ledger-feature.js";
 import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { dagKey, faultSet, handledKey, HANDLED_OP, MAIN_RED_FAIL_LIMIT, nodeKey, NODE_OP, rerunKey, RERUN_OP, SOURCE, todoKey, workflowOf,
   type MainRedFacts, type MainRedWorkflow } from "./main-red-fix.js";
 import { mainRedNodes, nodeState, placeFix, type PlaceDeps, type Placement } from "./main-red-fix-place.js";
+import { RETIRE_KEY, retireKey, retireTodoKey, type RetireInput } from "./main-red-fix-retire.js";
 import { recordPmTodo } from "./pm-todo-note.js";
-import { recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { quoteExternal } from "./quote-text.js";
+import { observeDedupKey, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { featurePm } from "./scheduler-autostart.js";
 import { mainCiApprovals, REVOKE_OP } from "./scheduler-main-ci-wiring-store.js";
 import { recordMainRedRepair } from "./scheduler-main-ci-wiring-write.js";
 
 export interface MainRedWriteDeps extends PlaceDeps { repo: string; policy?: RecoveryPolicyPort; now: number }
-export interface MainRedFixResult { outcome: "duplicate" | "node" | "same" | "bound" | "refused" | "unplaced"; text: string; notify: string | null; node?: string }
+export interface MainRedFixResult { outcome: "duplicate" | "node" | "same" | "bound" | "refused" | "unplaced" | "untriaged"; text: string; notify: string | null; node?: string }
 
 const PM_TODO_KIND = "main_red_fix";
 const mustOn = (policy: RecoveryPolicyPort, project: string) => {
@@ -68,6 +72,23 @@ function handled(db: Database, ctx: WriteCtx, project: string, f: MainRedFacts, 
   insertEvent(db, { ...ctx, dedupKey: handledKey(project, f.runId, f.attempt) }, { project, target: "", kind: "scheduler", text,
     data: { op: HANDLED_OP, outcome, workflow: f.workflow, runId: f.runId, attempt: f.attempt, mainSha: f.mainSha, checks: f.checks, ...extra } }, true);
   recordPmTodo(db, ctx, { project, target: "", kind: PM_TODO_KIND, text, dedupKey: todoKey(project, f.runId, `a${f.attempt}`) });
+}
+
+export interface MainRedUntriaged extends Pick<MainRedFacts, "workflow" | "runId" | "attempt" | "mainSha" | "url" | "checks"> { why: string }
+
+/** A truncated log naming no failed test: the attempt handled without a node, one PM todo per run whatever the attempt. */
+export function recordMainRedUntriaged(db: Database, ctx: WriteCtx, project: string, f: MainRedUntriaged, policy: RecoveryPolicyPort = recoveryPolicy): MainRedFixResult {
+  mustOn(policy, project);
+  return tx(db, () => {
+    const prior = getEventByDedup(db, handledKey(project, f.runId, f.attempt));
+    if (prior) return { outcome: "duplicate", text: prior.text, notify: null };
+    const checks = f.checks.map((c) => quoteExternal(c, 120)).join("、") || "（未列出）";
+    const text = `main ${workflowOf(f.workflow).label} 红（run ${f.runId}）认不出失败测试，没写修复节点，请 PM 定：${quoteExternal(f.why, 300)}；失败 check：${checks}；${f.url}`;
+    insertEvent(db, { ...ctx, dedupKey: handledKey(project, f.runId, f.attempt) }, { project, target: "", kind: "scheduler", text,
+      data: { op: HANDLED_OP, outcome: "untriaged", workflow: f.workflow, runId: f.runId, attempt: f.attempt, mainSha: f.mainSha, checks: f.checks } }, true);
+    recordPmTodo(db, ctx, { project, target: "", kind: PM_TODO_KIND, text, dedupKey: todoKey(project, f.runId, "untriaged") });
+    return { outcome: "untriaged", text, notify: null };
+  });
 }
 
 /** The node through the converge follow-up's write path; a refused or failed write is a miss, never a throw. */
@@ -190,5 +211,65 @@ export function bindMainRedRepair(db: Database, ctx: WriteCtx, input: { project:
     recordMainRedRepair(db, ctx, { project: input.project, taskId: task.id, head: input.head, mainSha: input.mainSha, faultKey: input.faultKey, pm, source: SOURCE,
       reason: `mainRedFix 写的修复卡，main 仍是写节点时的同一故障` });
     return "bound";
+  });
+}
+
+// mainRedGreenRetire (main-red-fix-retire.ts lists the candidates): the planned node out of the sub-DAG, a bound card only a todo.
+const RETIRED_OP = "main_red_fix_retired";
+export interface RetireResult { outcome: "retired" | "bound" | "observed" | "off" | "refused" | "gone" | "duplicate"; text: string; notify: string | null }
+
+/** The feature PM's rewrite without the node; null = written, else why not. */
+function removeNode(db: Database, ctx: WriteCtx, project: string, i: RetireInput, why: string): string | null {
+  const f = getFeature(db, i.featureId), pm = featurePm(db, i.featureId);
+  if (!f) return `feature ${i.featureId} 不见了`;
+  if (!pm || !isManager(db, pm, { project, agent: null })) return `feature ${f.id} 没有能代记的 PM`;
+  const v = f.currentVersion ? getDagVersion(db, f.id, f.currentVersion) : null, cur = v ? effectiveNodes(db, v) : [];
+  const phase = (n: DagNode) => nodePhase(n.taskId, n.taskId ? (getTask(db, n.taskId)?.stage ?? null) : null);
+  const next = composeRewrite(cur, { add: [], remove: [i.key], update: [], cancel: {} }, phase);
+  if (!next.ok) return `节点没移出：${next.error}`;
+  try {
+    const r = rewriteDag(db, { ...ctx, actor: pm, dedupKey: retireKey(project, f.id, i.key) }, { id: f.id, rev: f.rev, nodes: next.value,
+      reasonKind: "requirement_change", cancel: new Map(), scopeChange: false, reasonText: why, askFrom: { agent: pm, channelId: null } });
+    return r.row.version ? null : "改版要 owner 批，节点没直接移出";
+  } catch (e) {
+    if (e instanceof LedgerError || dagWriteRefused(e)) return `节点没移出：${(e as Error).message}`;
+    throw e;
+  }
+}
+
+/** One node: re-read in the transaction, then removed / left with a todo / noted, as the key's mode says. */
+export function retireMainRedNode(db: Database, ctx: WriteCtx, project: string, i: RetireInput, policy: RecoveryPolicyPort = recoveryPolicy): RetireResult {
+  const mode = policy(project, RETIRE_KEY).mode;
+  if (mode === "off") return { outcome: "off", text: `${RETIRE_KEY} 是 off`, notify: null };
+  return tx(db, () => {
+    const prior = getEventByDedup(db, retireKey(project, i.featureId, i.key));
+    if (prior) return { outcome: "duplicate", text: prior.text, notify: null };
+    const mine = mainRedNodes(db, project).find((n) => n.featureId === i.featureId && n.key === i.key && n.workflow === i.workflow);
+    if (!mine) throw new LedgerError("forbidden", `${i.featureId}/${i.key} 不是 mainRedFix 写的修复节点，不移出`);
+    if (mine.runId >= i.greenRunId) throw new LedgerError("conflict", `run ${i.greenRunId} 不比写 ${i.key} 的 run ${mine.runId} 新`);
+    const s = nodeState(db, mine), label = workflowOf(i.workflow).label, green = `main 已在 ${i.greenSha} 转绿`;
+    if (s.state !== "open") return { outcome: "gone", text: `${i.featureId}/${i.key} 已不在计划中`, notify: null };
+    if (mode === "observe") {
+      recordObserved(db, { project, mechanism: RETIRE_KEY, target: "", actionKey: `main-red:retire:${i.featureId}:${i.key}`,
+        action: s.node?.taskId ? `记待办：${green}，修复卡 ${s.node.taskId} 已开，不动` : `从子 DAG 移出修复节点 ${i.featureId}/${i.key}（${green}）`,
+        data: { featureId: i.featureId, key: i.key, greenSha: i.greenSha, greenRunId: i.greenRunId } }, ctx.now ?? Date.now());
+      return { outcome: "observed", text: `observe：${i.featureId}/${i.key}`, notify: null };
+    }
+    if (s.node?.taskId) {
+      const text = `main ${label} 修复节点 ${i.featureId}/${i.key} 已开卡 ${s.node.taskId}，${green}（${i.url}），没动它：请 PM 定是否取消`;
+      recordPmTodo(db, ctx, { project, target: s.node.taskId, kind: PM_TODO_KIND, text, dedupKey: retireTodoKey(project, i.featureId, i.key, "bound") });
+      return { outcome: "bound", text, notify: null };
+    }
+    const why = `${green}：撤掉 mainRedFix 没开工的 main ${label} 修复节点 ${i.key}`;
+    const miss = removeNode(db, ctx, project, i, why);
+    if (miss) {
+      const text = `main ${label} 修复节点 ${i.featureId}/${i.key}：${green}，但${miss}（${i.url}）`;
+      recordPmTodo(db, ctx, { project, target: "", kind: PM_TODO_KIND, text, dedupKey: retireTodoKey(project, i.featureId, i.key, "refused") });
+      return { outcome: "refused", text, notify: null };
+    }
+    const text = `[main 转绿] 从 ${i.featureId} 子 DAG 移出没开工的修复节点 ${i.key}：${green}（${i.url}）`;
+    insertEvent(db, { ...ctx, dedupKey: `main-red-fix:retired:${project}:${i.featureId}:${i.key}` }, { project, target: "", kind: "scheduler", text,
+      data: { op: RETIRED_OP, workflow: i.workflow, featureId: i.featureId, key: i.key, greenSha: i.greenSha, greenRunId: i.greenRunId, reason: why } }, true);
+    return { outcome: "retired", text, notify: text };
   });
 }
