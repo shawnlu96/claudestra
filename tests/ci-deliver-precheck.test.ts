@@ -3,7 +3,7 @@
  * 阈值与降级回执、失败清单、绑定变化作废、相同绑定复用；真 git 临时仓库上的选集与 CI 合并提交口径一致；登记检查（ci-impact-registration-check.ts）。
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseSync } from "oxc-parser";
@@ -12,13 +12,14 @@ import { DEFAULT_IMPACT_INPUTS } from "../src/lib/ci-impact-inputs.js";
 import { registrationProblems } from "../src/lib/ci-impact-registration-check.js";
 import { parseNameStatus, selectImpactedTests } from "../src/lib/ci-impact-select.js";
 import { describeReceipt, type Inspection, type PrecheckPort, type PrecheckReceipt } from "../src/lib/ci-deliver-precheck.js";
-import { planRun, PRECHECK_MAX_TESTS, realPrecheckPort, runPrecheck } from "../src/lib/ci-deliver-precheck-run.js";
+import { JOB_LOCK_STALE_MS, planRun, PRECHECK_MAX_TESTS, realPrecheckPort, runJob, runPrecheck } from "../src/lib/ci-deliver-precheck-run.js";
+import { statePath } from "../src/lib/paths.js";
 
 const H = "a".repeat(40);
 const scan = oxcScanner(parseSync as unknown as OxcParseSync);
 const tests = (n: number) => Array.from({ length: n }, (_, i) => `tests/t${String(i).padStart(3, "0")}.test.ts`);
 const ins = (o: Partial<Inspection> = {}, b: Partial<Inspection["binding"]> = {}): Inspection => ({
-  binding: { repo: "r", base: "b".repeat(40), mergeBase: "c".repeat(40), head: H, status: "", selection: "s", ...b },
+  binding: { repo: "r", base: "b".repeat(40), mergeBase: "c".repeat(40), head: H, status: "", untracked: "", selection: "s", ...b },
   run: "selected", tests: ["tests/a.test.ts"], reasons: [], changedTests: ["tests/a.test.ts"], registration: [], ...o,
 });
 
@@ -46,6 +47,12 @@ describe("[验收线 2] 阈值 50：有界选集照跑，超阈值或 all 只跑
     expect(all).toMatchObject({ scope: "degraded", files: [], selected: "all" });
     expect(all.degradeReasons.join("；")).toContain("全量触发：bun.lock");
     expect(all.degradeReasons.join("；")).toContain("不算完整相关测试通过");
+  });
+
+  test("本机对不齐 CI 选集（degrade）：即使选集在阈值内也降级，只跑改动测试并写明原因", () => {
+    const r = planRun(ins({ tests: ["tests/a.test.ts", "tests/m.test.ts"], degrade: ["选集里 1 个测试只在合入 base 后才有"] }));
+    expect(r).toMatchObject({ scope: "degraded", files: ["tests/a.test.ts"], selected: 2 });
+    expect(r.degradeReasons).toEqual(["选集里 1 个测试只在合入 base 后才有", "只跑本次新增 / 修改的测试 + 登记检查，不算完整相关测试通过"]);
   });
 
   test("降级回执写原选集规模与原因，不说成完整通过", async () => {
@@ -92,7 +99,7 @@ describe("[验收线 1] 失败清单：登记遗漏、相关测试失败、无�
 
 describe("[验收线 4] 绑定：跑完再核一次，变了就作废；相同绑定的通过结果复用", () => {
   test("head / base / 工作区 / 选测图摘要任何一项在跑测试期间变了：拒绝使用结果、不记缓存", async () => {
-    for (const [k, v] of [["head", "e".repeat(40)], ["base", "d".repeat(40)], ["status", " M x\0"], ["selection", "s2"], ["repo", "r2"]] as const) {
+    for (const [k, v] of [["head", "e".repeat(40)], ["base", "d".repeat(40)], ["status", " M x\0"], ["untracked", "1:ab"], ["selection", "s2"], ["repo", "r2"]] as const) {
       const f = fakePort([ins(), ins({}, { [k]: v })]);
       const r = await runPrecheck("/w", H, f.port);
       expect([k, r.ok, r.failures.some((x) => x.includes("结果作废"))]).toEqual([k, false, true]);
@@ -159,9 +166,10 @@ describe("[验收线 2] 真实端口：真 git 临时仓库，选集与相同 ba
     put("tests/y.test.ts", `import { y } from "../src/y.js";\n`);
     put("tests/gone.test.ts", `export {};\n`);
     // 假的测试入口：记下收到的参数；PRECHK_MODE=fail 失败、commit 在跑的时候提交一次（模拟执行期间 head 变了）
-    put("scripts/test.ts", `import { appendFileSync } from "node:fs";
+    put("scripts/test.ts", `import { appendFileSync, existsSync, writeFileSync } from "node:fs";
       appendFileSync(${JSON.stringify(join(root, "runs"))}, JSON.stringify(process.argv.slice(2)) + "\\n");
-      if (process.env.PRECHK_MODE === "fail") { console.error("(fail) tests/x.test.ts > boom"); process.exit(1); }
+      if (process.env.PRECHK_MODE === "fail" || existsSync("fail.flag")) { console.error("(fail) tests/x.test.ts > boom"); process.exit(1); }
+      if (process.env.PRECHK_MODE === "untrack") writeFileSync("during.txt", "x");
       if (process.env.PRECHK_MODE === "commit") Bun.spawnSync(["git", "commit", "-q", "--allow-empty", "-m", "during"], { env: process.env });\n`);
     sh(repo, "add", "-A");
     sh(repo, "commit", "-q", "-m", "base");
@@ -187,8 +195,8 @@ describe("[验收线 2] 真实端口：真 git 临时仓库，选集与相同 ba
   const runs = () => { try { return readFileSync(join(root, "runs"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]); } catch { return []; } };
 
   /** CI 的口径（scripts/ci-related-plan.ts prSelect + responsibilityOf）：PR 合并提交，diff HEAD^1..HEAD，base 侧是 HEAD^1 的树 */
-  function ciSelection(): string[] {
-    const ci = join(root, "ci");
+  function ciSelection(name = "ci"): string[] {
+    const ci = join(root, name);
     sh(root, "clone", "-q", repo, ci);
     sh(ci, "checkout", "-q", "main");
     sh(ci, "merge", "-q", "--no-ff", "-m", "merge", "origin/feat");
@@ -254,4 +262,90 @@ describe("[验收线 2] 真实端口：真 git 临时仓库，选集与相同 ba
     expect(runs().length).toBe(n);
     sh(repo, "checkout", "--", "src/x.ts");
   }, 60_000);
+
+  test("[验收线 4][先红后绿] 未跟踪文件进绑定：首次通过后新增会让测试失败的未跟踪文件，不复用旧结果、重跑并拦住；删掉后复用原通过结果", async () => {
+    sh(repo, "commit", "-q", "--allow-empty", "-m", "untracked head");
+    const head = sh(repo, "rev-parse", "HEAD"), n = runs().length;
+    expect(await runPrecheck(repo, head, realPrecheckPort())).toMatchObject({ ok: true, reused: false });
+    writeFileSync(join(repo, "fail.flag"), "1");
+    const r = await runPrecheck(repo, head, realPrecheckPort());
+    expect(r).toMatchObject({ ok: false, reused: false });
+    expect(r.failures.join("\n")).toContain("(fail) tests/x.test.ts > boom");
+    expect(runs().length).toBe(n + 2);
+    rmSync(join(repo, "fail.flag"));
+    expect(await runPrecheck(repo, head, realPrecheckPort())).toMatchObject({ ok: true, reused: true });
+    expect(runs().length).toBe(n + 2);
+  }, 60_000);
+
+  test("[验收线 4] 执行期间新增未跟踪文件：结束复核发现，结果作废", async () => {
+    sh(repo, "commit", "-q", "--allow-empty", "-m", "untracked during");
+    process.env.PRECHK_MODE = "untrack";
+    try {
+      const r = await runPrecheck(repo, sh(repo, "rev-parse", "HEAD"), realPrecheckPort());
+      expect(r.ok).toBe(false);
+      expect(r.failures).toContain("预检期间未跟踪文件变了，结果作废，重新交付");
+    } finally { rmSync(join(repo, "during.txt"), { force: true }); }
+  }, 60_000);
+
+  test("[验收线 1] 出借写单副本只有 refs/remotes/origin/HEAD（没有 origin/main、main）：按它求 diff，不报找不到 main", async () => {
+    const w = join(root, "lendlike");
+    mkdirSync(w);
+    sh(w, "init", "-q", "-b", "unborn");
+    sh(w, "fetch", "-q", "--no-tags", repo, "feat:refs/heads/lend/T1-ab", "main:refs/remotes/origin/HEAD");
+    sh(w, "checkout", "-q", "-f", "lend/T1-ab");
+    expect(Bun.spawnSync(["git", "rev-parse", "--verify", "-q", "origin/main"], { cwd: w }).exitCode).not.toBe(0);
+    const i = await realPrecheckPort().inspect(w);
+    if (!("binding" in i)) throw new Error(JSON.stringify(i));
+    expect(i.binding.base).toBe(sh(repo, "rev-parse", "main"));
+    expect(i.tests).toContain("tests/x.test.ts");
+  }, 60_000);
+
+  test("[验收线 2][先红后绿] main 自分叉后新增依赖改动模块的测试：选集按 CI 合并树算出它；工作副本跑不了 → 降级写明，不报完整通过", async () => {
+    sh(repo, "checkout", "-q", "main");
+    put("tests/new-main.test.ts", `import { x } from "../src/x.js";\n`);
+    sh(repo, "add", "-A");
+    sh(repo, "commit", "-q", "-m", "main adds a test on x");
+    sh(repo, "checkout", "-q", "feat");
+    const i = await realPrecheckPort().inspect(repo);
+    if (!("binding" in i)) throw new Error(JSON.stringify(i));
+    expect(i.tests).toEqual(ciSelection("ci-diverged"));
+    expect(i.tests).toContain("tests/new-main.test.ts");
+    expect(i.degrade?.join("")).toContain("tests/new-main.test.ts");
+    const r = await runPrecheck(repo, i.binding.head, realPrecheckPort());
+    expect(r).toMatchObject({ ok: true, scope: "degraded", ran: i.changedTests });
+    expect(describeReceipt(r, "p")).toContain("工作副本未合入 base");
+  }, 60_000);
+});
+
+describe("[验收线 4] 后台预检的锁（file-lock.ts）：同一份事实只跑一次", () => {
+  const key = () => Bun.hash(String(Math.random())).toString(16).padStart(16, "0").repeat(4).slice(0, 64);
+  const ok: PrecheckReceipt = { ok: true, scope: "selected", selected: 1, ran: ["tests/a.test.ts"], degradeReasons: [], failures: [], key: "k", reused: false };
+
+  test("[先红后绿] 两个后台进程在同一窗口抢同一份事实：预检本体只跑一次；跑完后再来的看到结果不重跑", async () => {
+    const k = key();
+    let started = 0, go!: () => void;
+    const gate = new Promise<void>((r) => { go = r; });
+    const slow = async () => { started++; await gate; return ok; };
+    const first = runJob("/w", "h", k, slow);
+    await Bun.sleep(20);
+    expect(await runJob("/w", "h", k, slow)).toBe(false); // 第一个在持锁跑：抢不到直接退出
+    go();
+    expect(await first).toBe(true);
+    expect(await runJob("/w", "h", k, slow)).toBe(false); // 结果已在：抢到锁也不重跑
+    expect(started).toBe(1);
+    rmSync(statePath("ci-deliver-precheck", "jobs", `${k}.json`), { force: true });
+  });
+
+  test("刚建、还没写 owner 的锁（初始化窗口）不当死锁回收；过期（持有者没续租）才回收", async () => {
+    const k = key(), lock = statePath("ci-deliver-precheck", "jobs", `${k}.lock`);
+    mkdirSync(lock, { recursive: true });
+    let started = 0;
+    expect(await runJob("/w", "h", k, async () => { started++; return ok; })).toBe(false);
+    expect(started).toBe(0);
+    const old = new Date(Date.now() - JOB_LOCK_STALE_MS - 5_000);
+    utimesSync(lock, old, old);
+    expect(await runJob("/w", "h", k, async () => { started++; return ok; })).toBe(true);
+    expect(started).toBe(1);
+    rmSync(statePath("ci-deliver-precheck", "jobs", `${k}.json`), { force: true });
+  });
 });

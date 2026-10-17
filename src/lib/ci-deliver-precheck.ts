@@ -1,6 +1,6 @@
 /**
  * merge-arch-CIPRECHK1 · 交付前本机预检（恢复键 ciDeliverPrecheck，缺省 on）：manager deliver 写入前、worker submitLendWork 提交前共用。
- * 绑定工作副本的 repo / base / head / 工作区 / 选测图摘要 → CI 同一套 ci-impact 选测（≤50 个跑选集，超了或 all 只跑改动测试并写明降级）
+ * 绑定工作副本的 repo / base / head / 工作区（含未跟踪文件内容）/ 选测图摘要 → CI 同一套 ci-impact 选测（≤50 个跑选集，超了或 all 只跑改动测试并写明降级）
  * + 登记检查（ci-impact-registration-check.ts）→ 跑完再绑一次，变了就作废。测试经 scripts/test.ts（全量测试闸 FULLGATE1）起，本卡从不起全量。
  * 不替代 CI；通过只是放行原交付校验。off = 不读工作副本、不起进程，与没有本卡时逐字一致。本文件是两个入口的闸与回执文字；
  * 预检本体与真实端口在 ci-deliver-precheck-run.ts；bridge 入口（30 秒预算）改走后台预检，结果按 git 事实取回。
@@ -17,7 +17,8 @@ const PRECHECK_KEY = "ciDeliverPrecheck";
 export const LEND_PRECHECK_PROJECT = "claude-orchestrator";
 
 /** 一次预检绑定的全部事实；任何一项在跑测试前后不同，结果就作废 */
-export interface PrecheckBinding { repo: string; base: string; mergeBase: string; head: string; status: string; selection: string }
+/** untracked = 未跟踪（不含忽略的）文件路径与内容的摘要，空 = 没有 */
+export interface PrecheckBinding { repo: string; base: string; mergeBase: string; head: string; status: string; untracked: string; selection: string }
 export interface Inspection {
   binding: PrecheckBinding;
   /** CI 同口径（on）的选测：selected = 有界选集；all = 选测兜底全量（reasons 说明） */
@@ -28,6 +29,8 @@ export interface Inspection {
   changedTests: string[];
   /** 登记检查的问题；空 = 登记齐全 */
   registration: string[];
+  /** 本机无法与 CI 选集对齐的原因（合并冲突 / 选集里有工作副本没有的测试）：有就整次降级 */
+  degrade?: string[];
 }
 export interface TestRun { code: number; tail: string }
 export interface PrecheckReceipt {

@@ -110,7 +110,7 @@ describe("[验收线 3] 与全量测试闸混跑：全量最多 2 个，预检�
     const port = realPrecheckPort();
     await expect(port.runTests(repo, [])).rejects.toThrow("不带文件");
     const n = events().length;
-    const ins: Inspection = { binding: { repo: "r", base: "b", mergeBase: "b", head: "a".repeat(40), status: "", selection: "s" }, run: "all", tests: [],
+    const ins: Inspection = { binding: { repo: "r", base: "b", mergeBase: "b", head: "a".repeat(40), status: "", untracked: "", selection: "s" }, run: "all", tests: [],
       reasons: ["全量触发：bun.lock（锁文件）"], changedTests: [], registration: [] };
     const r = await runPrecheck(repo, "a".repeat(40), { ...port, inspect: async () => ins, recall: () => null, remember: () => {} });
     expect(r).toMatchObject({ ok: true, scope: "degraded", ran: [] });

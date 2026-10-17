@@ -4,7 +4,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type BackgroundState, type Inspection, LEND_PRECHECK_PROJECT, lendSubmitPrecheck, type PrecheckReceipt, precheckHooks, type PrecheckPort } from "../src/lib/ci-deliver-precheck.js";
@@ -12,13 +12,16 @@ import { advance, getOrder, openLendJournal, recordAsked } from "../src/lib/lend
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { submitLendWork, type SubmitterDeps } from "../src/lib/lend-submit.js";
+import { prepareClone } from "../src/lib/lend-clone.js";
+import { realPrecheckPort } from "../src/lib/ci-deliver-precheck-run.js";
+import { writeLab, writeResources } from "./lend-write-fixture.ts";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { passGraph } from "../scripts/skip-effects.ts";
 
 const H = "a".repeat(40), START = "b".repeat(40);
 const ins = (o: Partial<Inspection> = {}): Inspection => ({
-  binding: { repo: "r", base: START, mergeBase: START, head: H, status: "", selection: "s" },
+  binding: { repo: "r", base: START, mergeBase: START, head: H, status: "", untracked: "", selection: "s" },
   run: "selected", tests: ["tests/a.test.ts"], reasons: [], changedTests: [], registration: [], ...o,
 });
 let calls = { inspect: 0, run: 0 };
@@ -161,6 +164,36 @@ describe("worker submitLendWork", () => {
     expect(calls).toEqual({ inspect: 0, run: 0 });
     expect(r).toMatchObject({ ok: true, duplicate: false });
   });
+});
+
+describe("[验收线 1] 真实 prepareClone 建的写单副本 → worker 提交前预检", () => {
+  let resources = writeResources();
+  afterEach(async () => { const owned = resources; resources = writeResources(); await owned.dispose(); });
+
+  test("[先红后绿] 副本只有 refs/remotes/origin/HEAD（订单 base dev）：真实端口照样求 diff、选测、跑测试，正确的改动能交", async () => {
+    const L = writeLab(resources);
+    const put = (p: string, text: string) => { mkdirSync(join(L.seed, p, ".."), { recursive: true }); writeFileSync(join(L.seed, p), text); };
+    put("tsconfig.json", "{}");
+    put("scripts/ci-related-plan.ts", "export {};\n");
+    put("src/x.ts", "export const x = 1;\n");
+    put("tests/x.test.ts", `import { x } from "../src/x.js";\n`);
+    L.git(L.seed, "add", "-A");
+    L.git(L.seed, "commit", "-q", "-m", "repo");
+    L.git(L.seed, "push", "-q", L.bare, "main", "main:dev");
+    const head = L.git(L.bare, "rev-parse", "main");
+    const c = await prepareClone({ orderId: "pc1", repo: "o/r", pr: null, head, write: { branch: "lend/T1-abcd", name: "lender", email: "l@x", base: "dev" } },
+      { root: L.lendRoot, env: L.env, run: L.run });
+    if (!c.ok) throw new Error(c.reason);
+    // 订单 base 不是 main 时正式写单副本没有 origin/main、main：基线只有 origin/HEAD
+    for (const r of ["origin/main", "main"]) expect(L.tryGit(c.dir, "rev-parse", "--verify", "-q", r).code).not.toBe(0);
+    writeFileSync(join(c.dir, "src", "x.ts"), "export const x = 2;\n");
+    L.git(c.dir, "commit", "-q", "-am", "work");
+    const ran: string[][] = [];
+    precheckHooks.port = { ...realPrecheckPort(), runTests: async (_w, files) => { ran.push(files); return { code: 0, tail: "" }; } };
+    const on = () => ({ mode: "on", manualAfterMs: null, source: "default" }) as never;
+    expect(await lendSubmitPrecheck(c.dir, L.git(c.dir, "rev-parse", "HEAD"), on)).toBeNull();
+    expect(ran).toEqual([["tests/x.test.ts"]]);
+  }, 60_000);
 });
 
 describe("接线位置", () => {
