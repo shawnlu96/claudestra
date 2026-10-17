@@ -70,4 +70,17 @@ describe("center deployment target file", () => {
     expect(f.gitCalls.some((a) => a.includes("worktree"))).toBe(false);
     expect(f.raw()).not.toContain(SECRET); expect(JSON.stringify(logs)).not.toContain(SECRET);
   });
+
+  for (const when of ["checkout-chmod", "checkout-delete", "after-dry-chmod"] as const) test(`[验收线 2] target invalidated (${when}) is re-checked before the next script start`, async () => {
+    const f = setup(); let scripts = 0;
+    const spoil = () => { if (when.endsWith("delete")) rmSync(f.target); else chmodSync(f.target, 0o644); };
+    const git: typeof runBounded = async (a, o) => { const out = await f.git(a, o); if (when.startsWith("checkout") && a.includes("add")) spoil(); return out; };
+    await runCenterDeployJob(f.path, { run: git, centerAuthorized: () => true, machine: { path: join(f.dir, "machine.lock") },
+      centerTarget: () => centerDeployTarget(f.target, uid),
+      centerRun: async () => { scripts++; if (when === "after-dry-chmod") spoil(); return { code: 0, timedOut: false, stdout: "", stderr: "" }; } });
+    expect(scripts).toBe(when === "after-dry-chmod" ? 1 : 0);
+    expect(JSON.parse(f.raw())).toMatchObject({ status: "failed", reason: CENTER_TARGET_MISSING, dryRun: when !== "after-dry-chmod" });
+    expect(f.gitCalls.some((a) => a.includes("remove"))).toBe(true);
+    expect(f.raw()).not.toContain(SECRET); expect(f.raw()).not.toContain(f.target);
+  });
 });

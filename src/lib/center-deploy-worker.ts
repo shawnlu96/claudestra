@@ -70,7 +70,8 @@ export async function runCenterDeployJob(request: string, deps: CenterWorkerDeps
     const fresh = await centerProof(c.proof.project, c.config, c.proof.cards, { run: deps.run, repoDir: () => job.repoDir });
     running();
     if (canonicalJson(fresh) !== canonicalJson(c.proof)) { r.status = "stale"; return write(r); }
-    const target = (deps.centerTarget ?? centerDeployTarget)();
+    const targetNow = () => (deps.centerTarget ?? centerDeployTarget)();
+    const target = targetNow();
     if (!target) return write({ ...r, reason: CENTER_TARGET_MISSING, ms: now() - start });
     checkout = await centerCheckout(job.repoDir, dir, c.proof.sha, deps.run);
     const check = async () => {
@@ -85,6 +86,8 @@ export async function runCenterDeployJob(request: string, deps: CenterWorkerDeps
     const exec = async (dryRun: boolean) => {
       running();
       r.dryRun = dryRun;
+      // Checkout (submodules) and the dry run can take minutes; re-check file metadata right before each script start.
+      if (targetNow() !== target) { r.code = null; r.timedOut = false; throw new Error(CENTER_TARGET_MISSING); }
       const log = join(LOG_DIR, "center-deploy", `${job.label}.${dryRun ? "dry" : "deploy"}.${start}.log`);
       const started = now();
       const outcome = await (deps.centerRun ?? centerScriptRunner(log))([`./${c.config.script}`, ...(dryRun ? c.config.dryRunArgs : [])], {
@@ -109,8 +112,9 @@ export async function runCenterDeployJob(request: string, deps: CenterWorkerDeps
     return write({ ...r, status: result.code === 0 && !result.timedOut ? "success" : "failed", code: result.code,
       timedOut: result.timedOut, ms: now() - start });
   } catch (e) {
-    // All private diagnostics stay out of public results; only the fixed submodule wording is kept as a reason.
-    return write({ ...r, ...((e as Error)?.message === CENTER_SUBMODULE_FAILED ? { reason: CENTER_SUBMODULE_FAILED } : {}), ms: now() - start });
+    // All private diagnostics stay out of public results; only the fixed submodule / target wording is kept as a reason.
+    const m = (e as Error)?.message;
+    return write({ ...r, ...(m === CENTER_SUBMODULE_FAILED || m === CENTER_TARGET_MISSING ? { reason: m } : {}), ms: now() - start });
   }
   finally {
     try { await checkout?.release(); }
