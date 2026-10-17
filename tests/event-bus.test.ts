@@ -1,7 +1,7 @@
 /**
  * v2.6.0+ event-bus 测试：emit / subscribe / replay / 环形淘汰 / 过滤。
  */
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, spyOn } from "bun:test";
 import {
   emitEvent,
   subscribeEvents,
@@ -275,4 +275,61 @@ describe("isPostTurnActivity:jsonl 记录能否补 thinking", () => {
     forgetAgent("a");
     expect(getAgentDoneAt("a")).toBe(0);
   });
+});
+
+describe("ring byte budget", () => {
+  const bytes = (events: BridgeEvent[]) => events.reduce((n, evt) => n + Buffer.byteLength(JSON.stringify(evt)), 0);
+  const limit = 2 * 1024 * 1024;
+  test("UTF-8 serialized bytes stay within 2 MiB and evict the oldest first", () => {
+    const sent = Array.from({ length: 240 }, () => mk("large", "assistant_text", { text: "汉字😀".repeat(1200) }));
+    const kept = replayEventsSince(0, { agent: "large" });
+    expect(bytes(kept)).toBeLessThanOrEqual(limit);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(sent.length);
+    expect(kept).toEqual(sent.slice(-kept.length));
+    expect(bytes([sent[sent.length - kept.length - 1]!, ...kept])).toBeGreaterThan(limit);
+  });
+  test("one oversized event is live-only, evicts older entries, and does not affect other agents", () => {
+    const other = mk("other");
+    mk("large");
+    const seen: BridgeEvent[] = [];
+    const off = subscribeEvents({ agent: "large" }, (e) => seen.push(e));
+    const big = mk("large", "assistant_text", { text: "x".repeat(limit) });
+    off();
+    expect(seen).toEqual([big]);
+    expect(replayEventsSince(0, { agent: "large" })).toEqual([]);
+    expect(replayEventsSince(0, { agent: "other" })).toEqual([other]);
+    const next = mk("large");
+    expect(replayEventsSince(0, { agent: "large" })).toEqual([next]);
+  });
+});
+
+test("session retirement and forget release byte accounting; transient traffic consumes no ring budget", () => {
+  const text = "x".repeat(700_000);
+  mk("a", "assistant_text", { text, sid: "old" });
+  const retained = mk("a", "assistant_text", { text, sid: "new" });
+  retireAgentSessionEvents("a", "acp:old");
+  const next = mk("a", "assistant_text", { text, sid: "new" });
+  expect(replayEventsSince(0, { agent: "a" })).toEqual([retained, next]);
+  emitEvent({ agent: "a", chatId: "a", type: "thinking_telemetry", data: { text } }, { transient: true });
+  expect(replayEventsSince(0, { agent: "a" })).toEqual([retained, next]);
+  forgetAgent("a");
+  const fresh = mk("a", "assistant_text", { text });
+  expect(replayEventsSince(0, { agent: "a" })).toEqual([fresh]);
+});
+
+
+test("non-JSON event data cannot break the publisher or corrupt retained byte accounting", () => {
+  const log = spyOn(console, "error").mockImplementation(() => {});
+  const off = subscribeEvents({}, () => {});
+  try {
+    const first = mk("a");
+    expect(() => mk("a", "assistant_text", { value: 1n })).not.toThrow();
+    const next = mk("a");
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(replayEventsSince(0)).toEqual([first, next]);
+  } finally {
+    off();
+    log.mockRestore();
+  }
 });

@@ -97,6 +97,8 @@ export function eventsQueryFilter(q: URLSearchParams, extra: EventFilter = {}): 
 
 /** 每个 agent 的环形缓冲上限（补发窗口） */
 export const RING_LIMIT = 500;
+/** UTF-8 serialized event bytes retained per agent, independent of the count limit. */
+const RING_BYTE_LIMIT = 2 * 1024 * 1024;
 
 /**
  * seq 起点用启动时刻的毫秒数，而不是 1。
@@ -112,7 +114,8 @@ export const RING_LIMIT = 500;
 let nextSeq = Date.now();
 const subscribers = new Set<Subscriber>();
 /** agent → 该 agent 最近 RING_LIMIT 条事件（seq 升序） */
-const rings = new Map<string, BridgeEvent[]>();
+type Ring = { entries: { event: BridgeEvent; bytes: number }[]; bytes: number };
+const rings = new Map<string, Ring>();
 /**
  * agent → 最近一次 agent_status（"thinking"=回合进行中 / "done"=已收尾 /
  * "compacting"=正在压缩上下文,v2.21.2+）。
@@ -165,13 +168,22 @@ export function emitEvent(
     data: evt.data,
   };
   if (!opts?.transient) {
-    let ring = rings.get(full.agent);
-    if (!ring) {
-      ring = [];
-      rings.set(full.agent, ring);
+    try {
+      const bytes = Buffer.byteLength(JSON.stringify(full), "utf8");
+      let ring = rings.get(full.agent);
+      if (!ring) {
+        ring = { entries: [], bytes: 0 };
+        rings.set(full.agent, ring);
+      }
+      ring.entries.push({ event: full, bytes });
+      ring.bytes += bytes;
+      while (ring.entries.length > RING_LIMIT || ring.bytes > RING_BYTE_LIMIT) {
+        ring.bytes -= ring.entries.shift()!.bytes;
+      }
+    } catch (error) {
+      // A non-JSON payload cannot be replayed, but this side channel must not break its publisher.
+      console.error("event-bus replay serialization failed:", error);
     }
-    ring.push(full);
-    if (ring.length > RING_LIMIT) ring.splice(0, ring.length - RING_LIMIT);
   }
 
   // 追踪回合进行态（O(1) 查询锚点）。
@@ -217,7 +229,12 @@ export function subscribeEvents(
 export function retireAgentSessionEvents(agent: string, oldSessionId: string): void {
   const old = oldSessionId.replace(/^acp:/, "");
   const ring = rings.get(agent);
-  if (ring) rings.set(agent, ring.filter((e) => !e.data.sid || String(e.data.sid).replace(/^acp:/, "") !== old));
+  if (!ring) return;
+  ring.entries = ring.entries.filter(({ event: e, bytes }) => {
+    if (!e.data.sid || String(e.data.sid).replace(/^acp:/, "") !== old) return true;
+    ring.bytes -= bytes;
+    return false;
+  });
 }
 
 export function forgetAgent(agent: string): void {
@@ -232,7 +249,7 @@ export function replayEventsSince(
 ): BridgeEvent[] {
   const out: BridgeEvent[] = [];
   for (const ring of rings.values()) {
-    for (const evt of ring) {
+    for (const { event: evt } of ring.entries) {
       if (evt.seq > since && matches(evt, filter)) out.push(evt);
     }
   }
@@ -242,7 +259,7 @@ export function replayEventsSince(
 
 /** 打断那一刻本回合还在跑的工具和最后做完的一步（打断记录用，扫这个 agent 的环形缓冲；completedOnly = Codex，见 lib/turn-cuts.ts） */
 export function inflightTools(agent: string, completedOnly = false): ReturnType<typeof inflightFrom> {
-  const ring = rings.get(agent) ?? [];
+  const ring = rings.get(agent)?.entries.map(({ event }) => event) ?? [];
   return completedOnly ? completedOnlyFrom(ring) : inflightFrom(ring);
 }
 
@@ -251,8 +268,11 @@ export function inflightTools(agent: string, completedOnly = false): ReturnType<
  * 会让「主回合其实早停了」永远显得不安静）。没有事件 = 0。turn-probe 判「事件态卡 thinking」用。
  */
 export function lastActivityAt(agent: string): number {
-  const ring = rings.get(agent) ?? [];
-  for (let i = ring.length - 1; i >= 0; i--) if (!ring[i].type.startsWith("bg_task_")) return Date.parse(ring[i].ts) || 0;
+  const entries = rings.get(agent)?.entries ?? [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const evt = entries[i].event;
+    if (!evt.type.startsWith("bg_task_")) return Date.parse(evt.ts) || 0;
+  }
   return 0;
 }
 
