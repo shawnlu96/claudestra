@@ -17,6 +17,7 @@ import { classifyAirFailure } from "./acp/failures.js";
 import { lendQuotaResetAt } from "./lend-quota-reset.js";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import { classifyModelOutcome } from "./scheduler-model-outcome.js";
+import { maybeProbeCodex, type CodexPauseProbe } from "./lend-codex-probe.js";
 
 export type WorkerDown = "no_window" | "no_host";
 export const MISS_GAP_MS = 5_000;
@@ -157,12 +158,16 @@ export async function pauseForStartFailure(db: Database, row: LendRow, error: st
   pauseForQuota(db, row.orderId, reset === null ? q : { observedAt: now, full: true, resetsAt: reset }, now, log);
 }
 
-/** 领单前先处理旧暂停，再看明确已满的读数；保留旧截止，避免未知重置时每轮延长兜底。 */
+/**
+ * 领单前先处理旧暂停，再看明确已满的读数；保留旧截止，避免未知重置时每轮延长兜底。
+ * probe（CODEXPROBE1）：暂停仍在时按间隔起后台探测刷新读数，解除仍由之后某轮的 refreshPause 判；不给 = 不探测，同改前。
+ */
 export async function refreshQuotaPause(db: Database, quota: () => Promise<QuotaView | null>, now: number,
-  log: (m: string) => void): Promise<number | null> {
+  log: (m: string) => void, probe?: CodexPauseProbe): Promise<number | null> {
   const q = await quota().catch((e) => { log(`领单前读 Codex 额度失败，按未知处理：${String(e)}`); return null; });
   const until = await refreshPause(db, async () => q, now, log);
   if (until === null && q?.full === true && (q.resetsAt === null || q.resetsAt > now)) pauseForQuota(db, "quota_observation", q, now, log);
+  if (probe) maybeProbeCodex(db, readJson<Pause>(db, PAUSE_KEY), probe, quota, now, log);
   return pausedUntil(db, now);
 }
 
