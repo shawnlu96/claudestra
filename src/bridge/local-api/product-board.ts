@@ -1,3 +1,4 @@
+import { cachedBoardBuild } from "../../lib/board-build-cache.js";
 import { canReadLedger } from "../../lib/devices.js";
 import { productBoard } from "../../lib/ledger-product-board.js";
 import type { Principal } from "../../lib/principals.js";
@@ -29,7 +30,8 @@ export async function handleProductBoardApi(req: Request, path: string, principa
     return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
   }
   const now = io.now();
-  const board = db ? db.transaction(() => productBoard(db!, project, now)).deferred()
-    : { throughput: { verified12h: 0, perHour: 0.25 }, features: [], deps: [] };
-  return apiJson(200, { ok: true, project, exists: !!db, now, ...board });
+  const build = () => ({ ok: true, project, exists: !!db, now, ...(db ? productBoard(db, project, now)
+    : { throughput: { verified12h: 0, perHour: 0.25 }, features: [], deps: [] }) });
+  const result = db ? await cachedBoardBuild(db, "product", project, {}, build) : build();
+  return apiJson(200, result);
 }

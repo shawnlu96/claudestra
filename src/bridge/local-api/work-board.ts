@@ -1,5 +1,6 @@
 /** Owner-only compact work board; one deferred read transaction, no scheduler effects. */
 import { statSync } from 'node:fs';
+import { cachedBoardBuild } from '../../lib/board-build-cache.js';
 import { autostartSpecPath } from '../../lib/scheduler-autostart-deps.js';
 import { canReadLedger } from '../../lib/devices.js';
 import { workBoard } from '../../lib/ledger-work-board.js';
@@ -30,15 +31,15 @@ export async function handleWorkBoardApi(req: Request, path: string, principal: 
     const db = ledgerDb(), now = Date.now();
     if (!db) return apiJson(200, { ok: true, now, asOfSeq: 0, working: [], waiting: [], todo: { ready: [], blocked: [] },
       machines: {}, completionHours: 0, availableSlots: 0 });
-    const policy = readSchedulerConfig().projects[project];
-    const lend = readLendSync();
-    const borrow = lend.file.borrow.filter(b => b.projects.includes(project) && b.priority !== 'off');
-    const opts = { registry: [], maxWorkers: policy?.maxActiveWorkers ?? 0, now,
-      ...(policy?.remote ? { pool: { remote: policy.remote, borrow } } : {}) };
-    const result = db.transaction(() => {
+    const result = await cachedBoardBuild(db, "work", project, {}, () => {
+      const policy = readSchedulerConfig().projects[project];
+      const lend = readLendSync();
+      const borrow = lend.file.borrow.filter(b => b.projects.includes(project) && b.priority !== 'off');
+      const opts = { registry: [], maxWorkers: policy?.maxActiveWorkers ?? 0, now,
+        ...(policy?.remote ? { pool: { remote: policy.remote, borrow } } : {}) };
       const total = workBoardSlots(db, project, opts.maxWorkers, borrow, policy?.remote, now);
       return workBoard(db, project, now, { ...opts, availableSlots: total, specReady: taskId => workBoardSpecReady(autostartSpecPath(taskId)) });
-    }).deferred();
+    });
     return apiJson(200, { ok: true, ...result });
   } catch (error) {
     console.warn('[work-board] read failed', error);
