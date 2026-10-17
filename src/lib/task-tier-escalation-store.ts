@@ -151,7 +151,8 @@ export function settlePlan(db: Database, p: { project: string; card: string; fam
 }
 
 export function latestPlan(db: Database, project: string, card: string): Plan | null {
-  return db.query<Plan, [string, string]>("SELECT family, step, gen, value, ts, launchId, sessionId, actual FROM esc_plans WHERE project = ? AND card = ? ORDER BY step DESC, ts DESC, gen DESC LIMIT 1")
+  return db.query<Plan, [string, string]>(
+    "SELECT family, step, gen, value, ts, launchId, sessionId, actual FROM esc_plans WHERE project = ? AND card = ? ORDER BY step DESC, ts DESC, gen DESC LIMIT 1")
     .get(project, card) ?? null;
 }
 

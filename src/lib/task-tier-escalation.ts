@@ -107,7 +107,10 @@ const planned = (f: Launch) => f.plan.family === "claude" ? f.plan.final.model :
 /** 运行时证实的实际值；没证实（unknown / 空）= null */
 const confirmed = (f: Launch) => f.actual.source === "unknown" ? null : (f.plan.family === "claude" ? f.actual.model : f.actual.effort) ?? null;
 
-/** 当前计划（最近一级的最新代次）发出的值带进了哪些绑上会话的作者启动：来源 override、计划值相同、在这一代发出之后启动（只是「带了新档 argv」，实际值另核） */
+/**
+ * 当前计划（最近一级的最新代次）发出的值带进了哪些绑上会话的作者启动：来源 override、计划值相同、在这一代发出之后启动
+ * （只是「带了新档 argv」，实际值另核）
+ */
 function carriedLaunches(ledger: Database, project: string, card: string, plan: { family: string; value: string; ts: number }): Launch[] {
   return taskTierLaunchHistory(ledger, project, card).filter((f) => f.status === "bound" && f.plan.role === "author" && f.plan.family === plan.family &&
     f.plan.source === "override" && f.createdAt >= plan.ts && planned(f) === plan.value);
