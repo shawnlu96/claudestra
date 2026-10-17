@@ -34,9 +34,34 @@ export function report(dir: string): number {
   return total;
 }
 
+const RUN_ROOT_OWNER = /^cstra-test-run-(\d+)-/;
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * 没 preload 的 runner 的运行临时根由看门子进程在 runner 退出后删（src/lib/test-guard.ts 的 reapOnExit），比 runner 晚几毫秒：
+ * 属主已退出的根最多等 waitMs 再查，超时还在就照常算残留。属主还活着的根、其他前缀不等。
+ */
+export async function settle(dir: string, waitMs = 5_000): Promise<void> {
+  const deadline = Date.now() + waitMs;
+  const pending = () => readdirSync(dir).some((name) => {
+    const pid = Number(RUN_ROOT_OWNER.exec(name)?.[1]);
+    return pid > 0 && !alive(pid);
+  });
+  while (pending() && Date.now() < deadline) await Bun.sleep(50);
+}
+
 async function main(argv: string[]): Promise<number> {
   if (argv[0] === "--check") {
     if (!argv[1]) throw new Error("用法：--check <dir>");
+    await settle(argv[1]);
     return report(argv[1]) === 0 ? 0 : 1;
   }
   const keep = argv[0] === "--keep";
@@ -49,6 +74,7 @@ async function main(argv: string[]): Promise<number> {
       stdio: ["inherit", "inherit", "inherit"],
     });
     const code = await proc.exited;
+    await settle(dir);
     const leaked = report(dir);
     if (code !== 0) console.error(`[test-tmp-leak] bun test 退出码 ${code}`);
     return leaked > 0 ? 1 : code;
