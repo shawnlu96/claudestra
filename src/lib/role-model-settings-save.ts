@@ -1,13 +1,13 @@
 // 模型档位表的唯一写入口（网页设置 PUT 用）。和读端分文件：调度器经 card-role-definitions 只 import 读端，写端不进调度可达图。
 import { copyFileSync, existsSync } from "node:fs";
 import { acquireLock } from "./file-lock.js";
-import { ROLE_MODEL_SETTINGS_PATH, readRoleModels, roleModelsProblem, type RoleModelPatch, type RoleModelTable } from "./role-model-settings.js";
+import { ROLE_MODEL_SETTINGS_PATH, readRoleModels, roleModelsProblem, type RoleModelBatch, type RoleModelPatch, type RoleModelRead, type RoleModelTable } from "./role-model-settings.js";
 import { writeJsonAtomicSync } from "./state-file.js";
 import { mergeTierPatch } from "./task-tier-model-settings.js";
 
 export type RoleModelSave =
   | { ok: true; table: RoleModelTable; replacedInvalid: string | null }
-  | { ok: false; code: "busy" | "conflict" | "unreadable" | "invalid" | "io"; error: string; current?: RoleModelTable };
+  | { ok: false; code: "busy" | "conflict" | "unreadable" | "invalid" | "io"; error: string; current?: RoleModelTable; currentRead?: RoleModelRead };
 const LOCK_WAIT_MS = 5_000;
 /** 测试缝：beforeCommit 在 rename 前、核锁前同步调用（模拟写者恰在提交前被暂停） */
 export interface SaveHooks { beforeCommit?: () => void }
@@ -16,7 +16,7 @@ export interface SaveHooks { beforeCommit?: () => void }
  * 唯一写入口。rev 不是现在这一版 = conflict（带回现值，网页按它刷新再改），不覆盖别人刚存的；读不了 = 不写。
  * 写失败一律 ok:false，调用方不能报「已保存」。
  */
-export async function saveRoleModels(p: RoleModelPatch, path = ROLE_MODEL_SETTINGS_PATH, now = Date.now(), hooks: SaveHooks = {}): Promise<RoleModelSave> {
+export async function saveRoleModels(p: RoleModelPatch | RoleModelBatch, path = ROLE_MODEL_SETTINGS_PATH, now = Date.now(), hooks: SaveHooks = {}): Promise<RoleModelSave> {
   let lost = false;
   let lock: Awaited<ReturnType<typeof acquireLock>>;
   try { lock = await acquireLock(`${path}.lock`, LOCK_WAIT_MS); } catch (e) { return { ok: false, code: "io", error: `拿模型档位表的锁失败：${(e as Error).message}` }; }
@@ -24,13 +24,11 @@ export async function saveRoleModels(p: RoleModelPatch, path = ROLE_MODEL_SETTIN
   try {
     const cur = readRoleModels(path);
     if (cur.status === "unreadable") return { ok: false, code: "unreadable", error: cur.error };
-    if (cur.table.rev !== p.rev) return { ok: false, code: "conflict", error: `基于第 ${p.rev} 版改，现在已是第 ${cur.table.rev} 版`, current: cur.table };
-    const row = cur.table.roles[p.role];
-    const { tiers: curTiers, ...base } = cur.table;
-    const tiers = p.tier !== undefined ? mergeTierPatch(curTiers, p.role, p) : curTiers;
-    const roles = p.tier !== undefined ? cur.table.roles
-      : { ...cur.table.roles, [p.role]: { claude: p.claude ?? row.claude, codex: p.codex === undefined ? row.codex : p.codex } };
-    const table: RoleModelTable = { ...base, v: 1, rev: cur.table.rev + 1, roles, ...(tiers && Object.keys(tiers).length ? { tiers } : {}) };
+    if (cur.table.rev !== p.rev) return { ok: false, code: "conflict", error: `基于第 ${p.rev} 版改，现在已是第 ${cur.table.rev} 版`, current: cur.table, currentRead: cur };
+    const changes = "changes" in p ? p.changes : [p];
+    let table = cur.table;
+    for (const change of changes) table = mergeChange(table, change);
+    table = { ...table, v: 1, rev: cur.table.rev + 1 };
     // 约束（含 TIER3 security 下限）挡下的是请求本身不合法：invalid（API 400），不是写盘故障
     const bad = roleModelsProblem(table);
     if (bad) return { ok: false, code: "invalid", error: `合并后的表不合法：${bad}` };
@@ -47,4 +45,14 @@ export async function saveRoleModels(p: RoleModelPatch, path = ROLE_MODEL_SETTIN
   } finally {
     lock.release();
   }
+}
+
+/** 合并不写盘；全部补丁合并后再校验，允许同一批里一起调整继承格和角色格。 */
+function mergeChange(cur: RoleModelTable, p: RoleModelPatch): RoleModelTable {
+  const { tiers: curTiers, ...base } = cur;
+  const row = cur.roles[p.role];
+  const tiers = p.tier !== undefined ? mergeTierPatch(curTiers, p.role, p) : curTiers;
+  const roles = p.tier !== undefined ? cur.roles
+    : { ...cur.roles, [p.role]: { claude: p.claude ?? row.claude, codex: p.codex === undefined ? row.codex : p.codex } };
+  return { ...base, roles, ...(tiers && Object.keys(tiers).length ? { tiers } : {}) };
 }

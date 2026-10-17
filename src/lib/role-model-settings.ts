@@ -104,3 +104,27 @@ export function roleModelOf(read: RoleModelRead, role: CardRole, family: RoleMod
   const value = read.table.roles[role][family];
   return { value, source: read.status === "ok" ? "settings" : read.status === "missing" ? "default" : "error" };
 }
+
+/** 全页保存仍走同一写入口：rev 只带一次，每项沿用单格的字段校验。 */
+export interface RoleModelBatch { rev: number; changes: RoleModelPatch[] }
+export function parseRoleModelUpdate(b: unknown): RoleModelPatch | RoleModelBatch | string {
+  if (!isObj(b) || !Object.hasOwn(b, "changes")) return parseRoleModelPatch(b);
+  const x = extra(b, ["rev", "changes"]);
+  if (x !== undefined) return `不认识的字段 ${x}`;
+  if (!Number.isSafeInteger(b.rev) || (b.rev as number) < 0) return "rev 要是非负整数（读到的那一版）";
+  if (!Array.isArray(b.changes) || !b.changes.length || b.changes.length > 40) return "changes 要有 1 到 40 个修改";
+  const changes: RoleModelPatch[] = [];
+  const seen = new Set<string>();
+  for (const [index, change] of b.changes.entries()) {
+    if (!isObj(change) || Object.hasOwn(change, "rev")) return `changes[${index}] 要是对象，rev 只在外层给一次`;
+    const p = parseRoleModelPatch({ ...change, rev: b.rev });
+    if (typeof p === "string") return `changes[${index}]：${p}`;
+    for (const family of ROLE_MODEL_FAMILIES) if (p[family] !== undefined) {
+      const key = `${p.tier ?? "undeclared"}.${p.role}.${family}`;
+      if (seen.has(key)) return `changes[${index}] 重复修改 ${key}`;
+      seen.add(key);
+    }
+    changes.push(p);
+  }
+  return { rev: b.rev as number, changes };
+}

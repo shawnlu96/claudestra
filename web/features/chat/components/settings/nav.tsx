@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, type ReactNode } from "react";
+import { useCardModelT } from "./card-model-i18n";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -7,7 +8,7 @@ import { useT } from "@/lib/i18n";
  * 图标手抄自 lucide(24 viewBox、stroke),与侧栏按钮同源——仓库不引 icon 库。
  * 手机(< sm)上没有左栏的空间：同一份菜单横向滚动排在标题栏下面，图标 + 文字并排。
  */
-export type SettingsPageId = "general" | "sessions" | "appearance" | "notify" | "connect" | "peers" | "security" | "skills" | "labs" | "claude" | "codex";
+export type SettingsPageId = "general" | "sessions" | "appearance" | "notify" | "connect" | "peers" | "security" | "skills" | "labs" | "claude" | "codex" | "card-models";
 
 export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNode }[] = [
   {
@@ -157,6 +158,7 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
       </>
     ),
   },
+  { id: "card-models", label: "卡片模型", icon: <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M9 9v12M15 9v12M3 15h18" /></> },
 ];
 
 /**
@@ -171,6 +173,7 @@ export function settingsPagesFor(full: boolean): SettingsPageId[] {
 /** 左栏(sm+)/顶部横条(手机)二合一：同一组按钮，靠响应式类切方向。pages = settingsPagesFor 的结果 */
 export function SettingsNav({ page, pages, onSelect }: { page: SettingsPageId; pages: SettingsPageId[]; onSelect: (id: SettingsPageId) => void }) {
   const t = useT();
+  const cardT = useCardModelT();
   const navRef = useRef<HTMLElement>(null);
   // 手机横条一屏放不下所有项：从侧栏 Peer 按钮直达时当前项在屏外，看不出在哪一页。打开 / 切页时
   // 把当前项横向滚到中间；只改横条自己的 scrollLeft——scrollIntoView 在 iOS 上会连带滚外层。
@@ -220,7 +223,7 @@ export function SettingsNav({ page, pages, onSelect }: { page: SettingsPageId; p
             >
               {p.icon}
             </svg>
-            <span>{t(p.label)}</span>
+            <span>{p.id === "card-models" ? cardT(p.label) : t(p.label)}</span>
           </button>
         );
       })}

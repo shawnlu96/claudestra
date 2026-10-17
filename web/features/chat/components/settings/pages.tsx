@@ -18,7 +18,7 @@ import { useProfileDraft, ProfileSection } from "./profile-section";
 import { useGroqKey, GroqKeySection } from "./groq-key-section";
 import { useJevKey, JevKeySection } from "./jev-key-section";
 import { useClaudeDefaults, ClaudeDefaultsSection } from "./claude-defaults-section";
-import { RoleModelSettingsSection } from "./role-model-settings-section";
+import { CardModelSettingsSection } from "./card-model-settings-section";
 import { CodexDefaultsSection } from "./codex-defaults-section";
 import { usePushToggle, DevicePushSection, MachinePushSections } from "./push-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section";
@@ -187,9 +187,10 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
       return (
         <>
           <ClaudeDefaultsSection defaults={s.defaults} modelOptions={s.modelOptions} />
-          <RoleModelSettingsSection modelOptions={s.modelOptions} />
         </>
       );
+    case "card-models":
+      return <CardModelSettingsSection modelOptions={s.modelOptions} />;
     case "codex":
       return <CodexDefaultsSection />;
   }

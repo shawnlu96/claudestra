@@ -124,3 +124,102 @@ test("handleLocalApi 登记了 /settings/role-models（guest 进来是 403，不
   const r = await handleLocalApi(get(), new URL("http://x/api/v1/settings/role-models"), DENIED[2]![1]);
   expect(r?.status).toBe(403);
 });
+
+// CARDMODEL1: the view and launch resolvers must have identical values and provenance.
+describe("卡片模型：有效视图与原子批量保存", () => {
+  test("四类型、未声明 × 四职责 × 两家族逐格等于启动解析器", async () => {
+    const { readRoleModels, CARD_ROLES, roleModelOf, defaultRoleModels } = await import("../src/lib/role-model-settings.js");
+    const { resolveTierModel } = await import("../src/lib/task-tier-models.js");
+    const { TASK_TIERS } = await import("../src/lib/task-tier-spec.js");
+    const s = setup();
+    for (const stored of [false, true]) {
+      if (stored) {
+        const table = defaultRoleModels();
+        table.roles.author.codex = "xhigh";
+        table.tiers = { docs: { reviewer: { claude: "inherit", codex: "ultra" } }, ui: { author: { codex: "down1" } } };
+        writeFileSync(s.path, JSON.stringify(table));
+      }
+      const { body } = await json(await s.api(get(), "/settings/role-models", OWNER));
+      const read = readRoleModels(s.path);
+      for (const tier of TASK_TIERS) for (const role of CARD_ROLES) for (const family of ["claude", "codex"] as const) {
+        expect(body.effective[tier].find((r: { role: string }) => r.role === role)[family]).toEqual(resolveTierModel(read, tier, role, family));
+      }
+      for (const role of CARD_ROLES) for (const family of ["claude", "codex"] as const) {
+        expect(body.effective.undeclared.find((r: { role: string }) => r.role === role)[family]).toEqual(roleModelOf(read, role, family));
+      }
+      expect(body.effective.docs[0].claude).toEqual({ value: "claude-haiku-5-5", source: "tier-default" });
+    }
+  });
+
+  test.each(["off", "observe", "on"] as const)("两个恢复开关：%s，使用请求项目", async (mode) => {
+    const s = setup();
+    const seen: string[] = [];
+    const api = makeRoleModelSettingsApi({ path: s.path, policy: (project, key) => {
+      seen.push(`${project}:${key}`);
+      return { mode, source: "config", manualAfterMs: null };
+    } });
+    const r = await json(await api(new Request("http://x/settings/role-models?project=sample"), "/settings/role-models", OWNER));
+    expect(r.body.switches).toEqual({ project: "sample", taskTierModels: { mode }, roleModel: { mode } });
+    expect(seen.sort()).toEqual(["sample:roleModel", "sample:taskTierModels"]);
+  });
+
+  const changes = [
+    { role: "author", tier: "docs", claude: "claude-sonnet-5-5" },
+    { role: "reviewer", codex: "high" },
+    { role: "pm-reviewer", tier: "ui", codex: "down1" },
+  ];
+  test("批量改三格与逐格结果相同；版本只加一次；过期回现表", async () => {
+    const batch = setup(), single = setup();
+    const r = await json(await batch.api(put({ rev: 0, changes }), "/settings/role-models", OWNER));
+    expect(r.status).toBe(200);
+    expect(r.body.rev).toBe(1);
+    for (const [rev, change] of changes.entries()) expect((await single.api(put({ rev, ...change }), "/settings/role-models", OWNER))!.status).toBe(200);
+    const a = JSON.parse(readFileSync(batch.path, "utf8")), b = JSON.parse(readFileSync(single.path, "utf8"));
+    expect({ ...a, rev: 0 }).toEqual({ ...b, rev: 0 });
+    const conflict = await json(await batch.api(put({ rev: 0, changes }), "/settings/role-models", OWNER));
+    expect(conflict).toMatchObject({ status: 409, body: { current: { rev: 1, effective: expect.any(Object), switches: expect.any(Object) } } });
+  });
+
+  test("一格违反 security 下限，整批拒绝、原文件逐字不变，并指出格子", async () => {
+    const s = setup();
+    await s.api(put({ rev: 0, role: "author", codex: "ultra" }), "/settings/role-models", OWNER);
+    const before = readFileSync(s.path, "utf8");
+    const r = await json(await s.api(put({ rev: 1, changes: [...changes,
+      { tier: "security", role: "reviewer", claude: "claude-haiku-5-5" }] }), "/settings/role-models", OWNER));
+    expect(r).toMatchObject({ status: 400, body: { code: "invalid", reason: expect.stringContaining("security 的 reviewer 不得低于 Opus") } });
+    expect(readFileSync(s.path, "utf8")).toBe(before);
+  });
+
+  test("并发单格与批量 CAS 只放行一个；旧 ultra 值仍可读写", async () => {
+    const s = setup();
+    const results = await Promise.all([
+      s.api(put({ rev: 0, changes }), "/settings/role-models", OWNER),
+      s.api(put({ rev: 0, role: "reviewer", codex: "ultra" }), "/settings/role-models", OWNER),
+    ]);
+    expect(results.map((r) => r!.status).sort()).toEqual([200, 409]);
+    expect((await s.api(put({ rev: 1, role: "reviewer", codex: "ultra" }), "/settings/role-models", OWNER))!.status).toBe(200);
+  });
+
+  test("空批、过大批、坏角色、嵌套 rev、多余字段均整批拒绝", async () => {
+    for (const changes of [[], Array(41).fill({ role: "author", codex: "high" }), [{ role: "boss", codex: "low" }],
+      [{ role: "author", codex: "high", rev: 9 }], [{ role: "author", codex: "high", model: "ignored" }],
+      [{ role: "author", codex: "high" }, { role: "author", codex: "low" }]]) {
+      const s = setup();
+      expect((await s.api(put({ rev: 0, changes }), "/settings/role-models", OWNER))!.status).toBe(400);
+      expect(existsSync(s.path)).toBe(false);
+    }
+  });
+});
+
+
+test("卡片模型：未存或坏文件的 CAS 冲突回包保持真实来源，不伪装成已存配置", async () => {
+  const s = setup();
+  for (const status of ["missing", "invalid"]) {
+    if (status === "invalid") writeFileSync(s.path, "bad-json");
+    const current = await json(await s.api(put({ rev: 9, changes: [{ role: "author", codex: "high" }] }), "/settings/role-models", OWNER));
+    const getView = await json(await s.api(get(), "/settings/role-models", OWNER));
+    expect(current.status).toBe(409);
+    expect(current.body.current.config.status).toBe(status);
+    expect(current.body.current.effective).toEqual(getView.body.effective);
+  }
+});
