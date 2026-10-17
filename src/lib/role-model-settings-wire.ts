@@ -30,7 +30,9 @@ export function parseModelSuggest(v: unknown): ModelSuggest | string {
   const tag = tagged ? { tier: v.tier as string, role: v.role as string } : {};
   const extra = tagged ? ["tier", "role"] : [];
   if (sameKeys(v, ["model", "source", ...extra])) return typeof v.model === "string" && CLAUDE_MODEL.test(v.model) ? { model: v.model, source, ...tag } : "suggest.model 要是完整的 Claude 模型 id";
-  if (sameKeys(v, ["effort", "source", ...extra])) return v.effort === null || isCodexLevel(v.effort) ? { effort: v.effort, source, ...tag } : `suggest.effort 只认 null 或 ${CODEX_EFFORT_LEVELS.join(" / ")}`;
+  if (sameKeys(v, ["effort", "source", ...extra])) {
+    return v.effort === null || isCodexLevel(v.effort) ? { effort: v.effort, source, ...tag } : `suggest.effort 只认 null 或 ${CODEX_EFFORT_LEVELS.join(" / ")}`;
+  }
   return "suggest 只能是 { model, source } 或 { effort, source }（协商了 tier 时再加 tier、role）";
 }
 

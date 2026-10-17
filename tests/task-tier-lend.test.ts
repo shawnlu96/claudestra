@@ -72,7 +72,8 @@ describe("[验收线 1] B 授权内选档：只等于或低于授权，不升档
     expect(c.reason).toContain("对不上");
     expect(c.refuse).toBeUndefined();
     // 对抗审查与 PM 审查节点各自对应自己的角色
-    expect(lendLaunchChoice(claude("claude-haiku-5-5", "code", { step: "review", node: "adversarial_review", suggest: { model: "claude-haiku-5-5", source: "default", ...tag("code", "adversarial-reviewer") } }), ON))
+    const adv = { model: "claude-haiku-5-5", source: "default", ...tag("code", "adversarial-reviewer") } as const;
+    expect(lendLaunchChoice(claude("claude-haiku-5-5", "code", { step: "review", node: "adversarial_review", suggest: adv }), ON))
       .toMatchObject({ accepted: true });
     expect(lendLaunchChoice(claude("claude-sonnet-5-5", "code", { step: "review", node: "pm_review", suggest: { model: "claude-sonnet-5-5", source: "default", ...tag("code", "pm-reviewer") } }), ON))
       .toMatchObject({ accepted: true });
@@ -114,7 +115,8 @@ describe("[验收线 3] security 不接受降档；每个最终选择都过安�
   });
 
   test("带了类型却核不清（类型 / 角色不认识、家族对不上）= 分不清是不是 security，refuse", () => {
-    for (const suggest of [{ model: "claude-opus-5-5", source: "default", tier: "weird", role: "author" }, { model: "claude-opus-5-5", source: "default", tier: "code", role: "boss" }] as ModelSuggest[]) {
+    const opus = { model: "claude-opus-5-5", source: "default" } as const;
+    for (const suggest of [{ ...opus, tier: "weird", role: "author" }, { ...opus, tier: "code", role: "boss" }] as ModelSuggest[]) {
       expect(lendLaunchChoice(claude("claude-opus-5-5", "code", { suggest }), ON).refuse).toContain("不启动");
     }
     expect(lendLaunchChoice(codex("low", ["--effort", "high"], "code", { family: "claude" }), ON).refuse).toContain("不启动");
@@ -351,7 +353,8 @@ describe("[验收线 2][验收线 4] 旧 B / B 关 / A 关：领单材料、sugg
       createTask(db, { actor: "owner", now: 1_000_000 }, { project: P, id: "T9", title: "T9", kind: "code", spec });
       db.run(`UPDATE tasks SET stage = 'review', headSHA = '${H}', round = 1 WHERE id = 'T9'`);
       await runLedger(["lend-offer", "T9", "--peer", "mate", "--repo", "shawnlu96/claudestra", "--pr", "12"], deps("agent-pm") as never);
-      const { ok: _ok, notified: _n, ...body } = await runLedger(["lend-claim", "--", "mate", JSON.stringify({ ...CLAIM, ...(caps ? { caps } : {}) })], deps("owner") as never) as Record<string, unknown>;
+      const req = JSON.stringify({ ...CLAIM, ...(caps ? { caps } : {}) });
+      const { ok: _ok, notified: _n, ...body } = await runLedger(["lend-claim", "--", "mate", req], deps("owner") as never) as Record<string, unknown>;
       const claimEvents = listEvents(db, { project: P, target: "T9" }).filter((e) => (e.data.lend as { op?: string } | undefined)?.op === "claim").map((e) => e.data);
       return { body: JSON.stringify(body), events: JSON.stringify(claimEvents) };
     } finally {
