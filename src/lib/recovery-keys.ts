@@ -47,6 +47,7 @@ export const RECOVERY_KEYS = [
   "featureDeps",
   "fixLocalSwap",
   "iaWatchdogScope",
+  "installFreshEntry",
   "lendAuthorRebuild",
   "lendConfigFailure",
   "lendReclaimIntent",
