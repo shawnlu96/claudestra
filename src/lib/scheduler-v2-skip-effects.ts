@@ -328,6 +328,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "media-outbound.ts": "sql=2 stmt=4 fs=4",
     "memory-retrieve-head.ts": "proc=1 vcs=1",
     "notify.ts": "notice=1",
+    "opencode-session.ts": "proc=3 fs=2", // OCR-4: `opencode export` / db scan + mirror writes; reached via the runtime registry, run by history / archive callers
     "pm-deploy-lock.ts": "proc=1 fs=8",
     "pm-notice-level.ts": "stmt=1",
     "pm-notify.ts": "notice=2",
