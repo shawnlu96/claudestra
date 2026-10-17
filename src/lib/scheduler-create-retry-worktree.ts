@@ -147,6 +147,22 @@ function sameBlob(path: string, file: TreeFile): boolean {
   return hash.update(`blob ${bytes.length}\0`).update(bytes).digest("hex") === file.oid;
 }
 
+/**
+ * LENDBACK1 (lend-return-local.ts staleTreeAside): HEAD's tracked content against disk bytes, past the index stat cache and its
+ * flags; submodules by their own proof. Untracked and ignored files are not read (the caller's status covers untracked ones).
+ * A missing file, a symlinked parent directory or anything unreadable counts as changed.
+ */
+export function* trackedEdits(worktree: string): DirtyCheck<boolean> {
+  const tree = (yield ["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
+  if (tree.code !== 0) return true;
+  for (const [path, file] of treeFiles(tree.out)) {
+    const parts = path.split("/");
+    for (let n = 1; n < parts.length; n++) if (!lstatSync(join(worktree, ...parts.slice(0, n))).isDirectory()) return true;
+    if (file.mode === "160000" ? (yield* submoduleChanged(join(worktree, path), file.oid)) : !sameBlob(join(worktree, path), file)) return true;
+  }
+  return false;
+}
+
 /** Walk disk rather than ignored listings: Git can silently omit unreadable ignored directories. Never follow symlinks. */
 function diskChanges(worktree: string, files: Map<string, TreeFile>, allowed: Set<string>): string[] {
   const changed: string[] = [];

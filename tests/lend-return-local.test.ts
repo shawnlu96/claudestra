@@ -4,8 +4,8 @@
  * so in the wait reason, and the recovery key lendReturnLocal off keeps all of it as before.
  * Fixture: tests/lend-send-back-local-author.test.ts's pinned() (start_node pinned to peer:Sekai, live grant).
  */
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownQuota } from "../src/lib/ai-quota.js";
@@ -17,7 +17,7 @@ import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import { pinTriedNote, staleAuthorRow } from "../src/lib/lend-return-local.js";
+import { lendReturnRegistry, pinTriedNote, staleAuthorRow, staleTreeAside } from "../src/lib/lend-return-local.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { readRegistryAgentsSync } from "../src/lib/registry.js";
 import { placeAgentPool } from "../src/lib/scheduler-agent-pool.js";
@@ -29,10 +29,12 @@ import { writeLocalAuthor } from "../src/lib/scheduler-local-author-write.js";
 import { clearQueuedLocalStarts } from "../src/lib/scheduler-local-runtime-queue.js";
 import type { PlacementFacts } from "../src/lib/scheduler-placement.js";
 import { startPlacement } from "../src/lib/scheduler-placement-start.js";
+import { git } from "../src/lib/scheduler-review-worktree.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const FP = "abcd-ef01-2345-6789", WORKER = `${FP}/agent-lend-0123456789`;
 const cleanups: (() => void)[] = [];
+const registryDefault = lendReturnRegistry.row;
 afterEach(() => { clearQueuedLocalStarts(); rmSync(RECOVERY_POLICY_PATH, { force: true }); for (const close of cleanups.splice(0)) close(); });
 const setMode = (mode: "on" | "observe" | "off") =>
   writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { lendReturnLocal: mode } } } }));
@@ -118,7 +120,9 @@ async function pinned() {
   const notStarted = (orderId: string) =>
     leaseLend(db, ctx(), "Sekai", { v: 1, orderId, gen: 1, action: "release", reason: "not_started", detail: "没有推送权限" } as never);
   const sendBackNote = () => listEvents(db, { target: "ap-a" }).filter((e) => (e.data.lend as { op?: string } | undefined)?.op === "send_back");
-  return { db, clock, tick, hello, lend, claim, notStarted, sendBackNote, task: () => getTask(db, "ap-a")! };
+  lendReturnRegistry.row = (name) => readRegistryAgentsSync(registryPath).find((r) => r.name === name);
+  cleanups.push(() => { lendReturnRegistry.row = registryDefault; });
+  return { db, clock, tick, hello, lend, claim, notStarted, sendBackNote, agents, saveRegistry, task: () => getTask(db, "ap-a")! };
 }
 
 
@@ -220,6 +224,32 @@ test("[验收线 2] first lend: a same-family bound local agent stays; an agent 
   expect(pm.task()).toMatchObject({ assigneeKind: "agent", assignee: "agent-pm" });
 });
 
+test("[验收线 2] bound here in the card's family once, but its registry row now runs another family: cleared, and the next tick does not send it to PM over the family", async () => {
+  const f = await pinned();
+  await f.tick();
+  f.db.query("UPDATE tasks SET agent = 'agent-dev', assigneeKind = 'agent', assignee = 'agent-dev' WHERE id = 'ap-a'").run();
+  bindAuthor(f, "agent-dev", "codex"); // retired codex binding of this card
+  f.agents["agent-dev"] = { cwd: "/elsewhere", projectId: "p", sessionId: "s-new", runtime: "claude-code", transport: "tmux", status: "active" };
+  f.saveRegistry();
+  notStartedPath(f, f.lend({ kind: "agent", who: "agent-dev" }));
+  expect(f.task()).toMatchObject({ agent: null, assigneeKind: null, assignee: null });
+  // the next tick no longer sends it to PM over the family (the old retired binding's own rebind rule is unchanged)
+  const next = await f.tick();
+  expect(next.step).not.toBe("manual");
+  expect(next.detail ?? "").not.toContain("家族");
+});
+
+test("[验收线 2] bound here in the card's family and its registry row still runs that family: kept", async () => {
+  const f = await pinned();
+  await f.tick();
+  f.db.query("UPDATE tasks SET agent = 'agent-dev', assigneeKind = 'agent', assignee = 'agent-dev' WHERE id = 'ap-a'").run();
+  bindAuthor(f, "agent-dev", "codex");
+  f.agents["agent-dev"] = { cwd: "/elsewhere", projectId: "p", sessionId: "s-old", runtime: "codex", transport: "tmux", status: "stopped" };
+  f.saveRegistry();
+  notStartedPath(f, f.lend({ kind: "agent", who: "agent-dev" }));
+  expect(f.task()).toMatchObject({ agent: "agent-dev", assigneeKind: "agent", assignee: "agent-dev" });
+});
+
 test("[验收线 4] off: first lend keeps the never-bound local agent on the card as before", async () => {
   setMode("off");
   const f = await pinned();
@@ -285,4 +315,105 @@ test("staleAuthorRow: only a stopped row bound to none of this card's sessions, 
   expect(staleAuthorRow(f.db, "ap-a", { ...row, status: "active" }, "claude")).toBe(false);
   bindAuthor(f, "agent-task-ap-a", "codex");
   expect(staleAuthorRow(f.db, "ap-a", row, "claude")).toBe(false);
+});
+
+/** A real repo with an origin (itself), as tests/scheduler-create-retry-worktree.test.ts's gitRepo. */
+async function gitRepo(dir: string) {
+  const repo = join(dir, "repo");
+  mkdirSync(repo);
+  const run = async (cwd: string, ...args: string[]) => {
+    const r = await git(["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", ...args]);
+    if (r.code !== 0) throw new Error(r.out);
+    return r.out;
+  };
+  await run(repo, "init", "-q", "-b", "main");
+  writeFileSync(join(repo, "a.ts"), "one\n");
+  await run(repo, "add", "."); await run(repo, "commit", "-q", "-m", "one");
+  await run(repo, "remote", "add", "origin", repo); await run(repo, "fetch", "-q", "origin");
+  return { repo, run };
+}
+
+describe("[验收线 5] a replaced executor's checkout at the card's path (staleTreeAside)", () => {
+  async function oldTree() {
+    const dir = mkdtempSync(join(tmpdir(), "lendback1-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const { repo, run } = await gitRepo(dir);
+    writeFileSync(join(repo, ".gitignore"), "*.log\n");
+    await run(repo, "add", ".gitignore"); await run(repo, "commit", "-q", "-m", "ignore"); await run(repo, "fetch", "-q", "origin");
+    const worktree = join(dir, "wt", "ap-a");
+    await run(repo, "worktree", "add", "-q", "-b", "feat/ap-a", worktree, "origin/main");
+    const plan = { worktree, branch: "lend/ap-a-9109" }, owner = { name: "agent-task-ap-a", cwd: worktree, status: "stopped" };
+    return { repo, run, worktree, plan, owner, aside: () => staleTreeAside(git, plan, owner, "-r2") };
+  }
+
+  test("[验收线 5] off-branch, clean (ignored files do not count), nothing of its own: a new path with the same suffix; the old tree stays", async () => {
+    const t = await oldTree();
+    writeFileSync(join(t.worktree, "build.log"), "ignored\n");
+    expect(await t.aside()).toBe(`${t.worktree}-r2`);
+    expect(existsSync(join(t.worktree, "a.ts"))).toBe(true);
+    expect(await t.run(t.worktree, "symbolic-ref", "--short", "HEAD")).toBe("feat/ap-a");
+  });
+
+  test("[验收线 5] edits, an untracked file or its own commit: kept and waits as today", async () => {
+    const edits = await oldTree();
+    writeFileSync(join(edits.worktree, "a.ts"), "edited\n");
+    expect(await edits.aside()).toBeNull();
+    const untracked = await oldTree();
+    writeFileSync(join(untracked.worktree, "new.ts"), "x\n");
+    expect(await untracked.aside()).toBeNull();
+    const own = await oldTree();
+    writeFileSync(join(own.worktree, "a.ts"), "mine\n");
+    await own.run(own.worktree, "commit", "-q", "-am", "mine");
+    expect(await own.aside()).toBeNull();
+  });
+
+  test("on the card's branch or another owner's tree: unchanged; the new path already made by an earlier try is kept", async () => {
+    const t = await oldTree();
+    expect(await staleTreeAside(git, { ...t.plan, branch: "feat/ap-a" }, t.owner, "-r2")).toBeNull();
+    expect(await staleTreeAside(git, t.plan, { ...t.owner, cwd: join(t.worktree, "..", "other") }, "-r2")).toBeNull();
+    mkdirSync(`${t.worktree}-r2`); // the old tree still proven; checkout's strict reuse check (reusableAuthorWorktree) decides about the new path
+    expect(await t.aside()).toBe(`${t.worktree}-r2`);
+  });
+
+  for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
+    test(`[验收线 5] a tracked edit hidden by ${flag} keeps the old tree and waits as today`, async () => {
+      const t = await oldTree();
+      await t.run(t.worktree, "update-index", flag, "a.ts");
+      writeFileSync(join(t.worktree, "a.ts"), "hidden edit\n");
+      expect(await t.run(t.worktree, "status", "--porcelain")).toBe("");
+      expect(await t.aside()).toBeNull();
+    });
+  }
+
+  test("[验收线 5] a tracked edit the index stat cache hides (status empty, every entry plain H) keeps the old tree and waits as today", async () => {
+    const t = await oldTree();
+    await t.run(t.worktree, "config", "core.trustctime", "false"); await t.run(t.worktree, "config", "core.checkStat", "minimal");
+    const file = join(t.worktree, "a.ts"), past = new Date(Date.now() - 3_600_000); // older than the index: no racy-git recheck
+    utimesSync(file, past, past);
+    await t.run(t.worktree, "update-index", "--refresh");
+    writeFileSync(file, readFileSync(file, "utf8").replace(/./, (c) => c === "x" ? "y" : "x")); // same length
+    utimesSync(file, past, past);
+    expect(await t.run(t.worktree, "status", "--porcelain")).toBe("");
+    expect((await t.run(t.worktree, "ls-files", "-v")).split("\n").every((l) => l.startsWith("H "))).toBe(true);
+    expect(await t.aside()).toBeNull();
+  });
+
+  test("[验收线 5] a new path left by an earlier try never stands in for the old tree's proof: an edit or a commit of its own there waits as today", async () => {
+    const edits = await oldTree();
+    mkdirSync(`${edits.worktree}-r2`);
+    writeFileSync(join(edits.worktree, "a.ts"), "edited\n");
+    expect(await edits.aside()).toBeNull();
+    const own = await oldTree();
+    mkdirSync(`${own.worktree}-r2`);
+    writeFileSync(join(own.worktree, "a.ts"), "mine\n");
+    await own.run(own.worktree, "commit", "-q", "-am", "mine");
+    expect(await own.aside()).toBeNull();
+  });
+
+  test("[验收线 5] an unreadable branch (symbolic-ref fails) or a detached HEAD is not proof of another branch", async () => {
+    const t = await oldTree();
+    expect(await staleTreeAside(async (args) => args.includes("symbolic-ref") ? { code: 128, out: "fatal" } : git(args), t.plan, t.owner, "-r2")).toBeNull();
+    await t.run(t.worktree, "checkout", "-q", "--detach");
+    expect(await t.aside()).toBeNull();
+  });
 });

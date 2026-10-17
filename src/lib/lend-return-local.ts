@@ -18,11 +18,11 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { leaseRestore, type LeaseRestore } from "./lend-send-back-restore.js";
 import { noteDefaultOn } from "./recovery-key-defaults.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
-import type { RegistryAgent } from "./registry.js";
+import { agentRuntime, readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { absent, rebuildAgentName } from "./scheduler-author-rebuild-proof.js";
 import { pinTriedPort } from "./scheduler-agent-pool.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
-import { indexHidesEdits } from "./scheduler-create-retry-worktree.js";
+import { indexHidesEdits, trackedEdits } from "./scheduler-create-retry-worktree.js";
 import type { Git } from "./scheduler-review-worktree.js";
 
 const LEND_RETURN_LOCAL_KEY = "lendReturnLocal" as const;
@@ -43,11 +43,24 @@ function cardAuthorFamily(db: Database, task: Pick<LedgerTask, "id" | "project" 
   return remoteHeadFamily(db, task) ?? getWorkflow(db, task.id)?.authorFamily ?? null;
 }
 
-/** Local author bindings of this card for `agent` (any state): the families its sessions ran in. */
-function boundFamilies(db: Database, taskId: string, agent: string): AuthorFamily[] {
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return [];
-  return (db.query("SELECT family FROM scheduler_sessions WHERE taskId = ? AND role = 'author' AND agent = ? AND transport != 'peer'")
-    .all(taskId, agent) as { family: AuthorFamily }[]).map((r) => r.family);
+/** The local agent's current registry row (tests point it at their own registry); unreadable = undefined. */
+export const lendReturnRegistry: { row: (name: string) => RegistryAgent | undefined } = {
+  row: (name) => { try { return readRegistryAgentsSync().find((r) => r.name === name); } catch { return undefined; } },
+};
+const RUNTIME_FAMILY: Record<string, AuthorFamily | undefined> = { codex: "codex", "claude-code": "claude" };
+
+/**
+ * The agent is this card's author in `want` now: its local author binding here is in `want`, and its current registry row (when
+ * there is one) runs `want` too, so an old binding never vouches for a runtime swapped since. No row = AREB1 rebuilds it from
+ * that binding, as before.
+ */
+function authorHere(db: Database, taskId: string, agent: string, want: AuthorFamily): boolean {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return false;
+  const bound = db.query("SELECT family FROM scheduler_sessions WHERE taskId = ? AND role = 'author' AND agent = ? AND transport != 'peer'")
+    .get(taskId, agent) as { family: AuthorFamily } | null;
+  if (bound?.family !== want) return false;
+  const row = lendReturnRegistry.row(agent);
+  return !row || RUNTIME_FAMILY[agentRuntime(row)] === want;
 }
 
 const CLEARED = { assigneeKind: null, assignee: null };
@@ -63,7 +76,7 @@ function returnRestore(db: Database, task: LedgerTask, lease: WriteLease | null,
   const agent = r?.restored?.assigneeKind === "agent" ? r.restored.assignee : kept;
   if (!agent) return r;
   const want = cardAuthorFamily(db, task);
-  if (!want || boundFamilies(db, task.id, agent).includes(want)) return r;
+  if (!want || authorHere(db, task.id, agent, want)) return r;
   const { agent: _dropped, ...rest } = r?.patch ?? {};
   return { patch: { ...rest, ...CLEARED }, restored: { ...CLEARED }, unpinned: r?.unpinned ?? null };
 }
@@ -142,23 +155,22 @@ export function freshAuthorName(db: Database, task: Pick<LedgerTask, "id" | "pro
 export async function staleTreeAside(git: Git, p: { worktree: string; branch: string; localMerge?: boolean }, owner: RegistryAgent, suffix: string): Promise<string | null> {
   if (owner.cwd !== p.worktree) return null;
   const aside = `${p.worktree}${suffix}`, taken = absent(aside);
-  // An earlier try of this card already made the new path (a clean create failure): keep it, so the retry goes through checkout's
-  // strict reuse check (reusableAuthorWorktree) there instead of falling back to the old tree's branch mismatch.
-  if (taken === false) return aside;
-  if (taken !== true || absent(p.worktree) !== false) return null;
+  if (taken === null || absent(p.worktree) !== false) return null;
+  // The old tree is proven on every try, the new path already there (an earlier clean create failure) included: its existence
+  // never stands in for the proof. That new path then goes through checkout's strict reuse check (reusableAuthorWorktree).
   const at = (args: string[]) => git(["-C", p.worktree, ...args]);
   const branch = await at(["symbolic-ref", "--quiet", "--short", "HEAD"]);
   if (branch.code !== 0 || !branch.out.trim() || branch.out.trim() === p.branch) return null; // unreadable / detached: not proven
-  if (await indexHides(git, p.worktree)) return null; // assume-unchanged / skip-worktree would hide tracked edits from status
+  if (await proven(git, indexHidesEdits(p.worktree))) return null; // assume-unchanged / skip-worktree would hide tracked edits from status
   const st = await at(["-c", "core.fsmonitor=false", "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]);
   if (st.code !== 0 || st.out.trim() !== "") return null;
+  if (await proven(git, trackedEdits(p.worktree))) return null; // status trusts the index stat cache: compare HEAD's blobs on disk
   const own = await at(["rev-list", "--count", `${p.localMerge ? "main" : "origin/main"}..HEAD`]);
   return own.code === 0 && own.out.trim() === "0" ? aside : null;
 }
 
-/** The retry proof's index read (scheduler-create-retry-worktree.ts indexHidesEdits): any non-plain flag, nested ones included. */
-async function indexHides(git: Git, worktree: string): Promise<boolean> {
-  const check = indexHidesEdits(worktree);
+/** Drive one of the retry proof's checks (scheduler-create-retry-worktree.ts); a throw anywhere counts as not proven (true). */
+async function proven(git: Git, check: Generator<string[], boolean, { code: number; out: string }>): Promise<boolean> {
   let step = check.next();
   try {
     while (!step.done) step = check.next(await git([...step.value]));
