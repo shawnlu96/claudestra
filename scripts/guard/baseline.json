@@ -225,6 +225,7 @@
     "pattern:runtime-literal:src/lib/cc-session-agents.ts": 1,
     "pattern:runtime-literal:src/lib/claude-settings-runtime.ts": 1,
     "pattern:runtime-literal:src/lib/codex-auto-update.ts": 1,
+    "pattern:runtime-literal:src/lib/codex-readonly.ts": 2,
     "pattern:runtime-literal:src/lib/display-model.ts": 2,
     "pattern:runtime-literal:src/lib/doctor-acp.ts": 4,
     "pattern:runtime-literal:src/lib/fix-strategy-lifecycle.ts": 2,
@@ -232,6 +233,7 @@
     "pattern:runtime-literal:src/lib/fleet-tool.ts": 2,
     "pattern:runtime-literal:src/lib/launcher-restore-gate.ts": 4,
     "pattern:runtime-literal:src/lib/ledger-scheduler-lease-worker.ts": 2,
+    "pattern:runtime-literal:src/lib/lend-return-local.ts": 1,
     "pattern:runtime-literal:src/lib/lend-worker-registry-archive.ts": 1,
     "pattern:runtime-literal:src/lib/machine-usage.ts": 2,
     "pattern:runtime-literal:src/lib/projects.ts": 1,
@@ -1133,6 +1135,18 @@
       "from": 0,
       "to": 0,
       "why": "OCR-2 验收追加 3 P2-5：违规提示按 pattern:<id>:<文件> 也能找到规则的 hint；只改提示查找，不改计数与判定"
+    },
+    {
+      "key": "pattern:runtime-literal:src/lib/codex-readonly.ts",
+      "from": 0,
+      "to": 2,
+      "why": "OCR-2 合入 main（CODEXRO1 Codex 只读档 / 出借归还）后如实登记这个文件带进来的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
+    },
+    {
+      "key": "pattern:runtime-literal:src/lib/lend-return-local.ts",
+      "from": 0,
+      "to": 1,
+      "why": "OCR-2 合入 main（CODEXRO1 Codex 只读档 / 出借归还）后如实登记这个文件带进来的按 runtime 字面量分支（留存清单见 docs/runtimes/adding-a-runtime.md），只许减少"
     }
   ]
 }

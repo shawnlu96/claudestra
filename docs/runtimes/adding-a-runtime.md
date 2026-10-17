@@ -67,12 +67,13 @@
 
 ## 留下来的按 id 分支（迁不进描述，新运行时也不用碰）
 
-基线 179 处（84 个文件，按文件登记；合入 OCR-4 时如实登记了 OpenCode 带进来的分支），guard 只许它减少。按类别分：
+基线 182 处（86 个文件，按文件登记；合入 main 时如实登记了 OpenCode / Codex 只读档带进来的分支），guard 只许它减少。按类别分：
 
 - **Codex / Pi 自己的迁移与回退**：`manager/acp-lifecycle.ts`（Pi 在沙箱里跳过探测、Pi 的 ACP 起不来同窗口回退 tmux、Pi 不支持 `--fork`、
   adopt 时 Pi 选 transport、Codex 重启时缺适配器暂退 tmux、沙箱里不起两家的 TUI）、`manager/acp-migration.ts`、`manager/pi-acp-migration.ts`、
   `manager/acp-adapter.ts`、`manager/acp-retire.ts`、`lib/acp/migration.ts`。这些都是老 agent 从 tmux 迁到 acp 的包袱；只有 ACP 版的运行时
   在入口就分流了（`transportsOf` 没有 tmux），走不到这些分支。
+- **Codex 只读档**（`lib/codex-readonly.ts`，合入 main 时带进来）：只读模式是 Codex 自研适配器的预设，别的运行时没有这一档。
 - **Codex 的适配器选择与版本对账**：`src/acp-host.ts`（起之前按协议判自研 / 上游、每次起适配器前记运行版本）、`lib/codex-auto-update.ts`、
   `bridge/codex-turn-failure.ts`、`lib/doctor-acp.ts`（codex-acp 配套、Pi 版本两组体检）。都绑着 Codex / Pi 的外部可执行文件。
 - **两家的命令表与设置入口**：`lib/runtime-commands.ts`（Pi / Codex 自己的斜杠命令）、`bridge/api-slash.ts`（Pi 的 `/new`、
@@ -93,7 +94,7 @@
   `tests/pi-launch.test.ts` 钉住「未知值走老路」），经它判断的调用方会把新运行时当成 Claude Code：上下文边界面板（`bridge/ctx-boundary.ts` 的显示部分；
   自动压缩先看 `transport === "acp"`，不受影响）、额度闸暂停（`bridge.ts` wallPaused）、manager 的花名册、技能开关。归档已改成不经它（`lib/session-archive.ts`）。
   根治要让它查注册表，但 `registry.ts` 在 runtimes/ 的 import 图里，直接引注册表会成环；下一个运行时接进来时先拆这个环。
-- **调度器 / 台账的模型家族**（`claude` / `codex` 审查员族、出借池的 runtime 槽位）：`lib/scheduler-*`、`lib/recovery-*`、`lib/card-role-definitions.ts`、
+- **调度器 / 台账的模型家族**（`claude` / `codex` 审查员族、出借池的 runtime 槽位）：`lib/scheduler-*`、`lib/recovery-*`、`lib/card-role-definitions.ts`、`lib/lend-return-local.ts`、
   `bridge/fleet/` 等。这里的「runtime」是审查族 / 槽位的概念，不是 agent 运行时，不归这份契约管。
 - **web/**：新建 agent 弹窗的运行时下拉和说明文字、运行时徽标、技能设置页都按 id 写死。后端的 `GET /api/v1/runtimes`
   （`runtimes/catalog.ts`）会列出新运行时，但网页下拉只认 pi / codex / opencode，徽标认不出时什么都不画。要在网页上能选新运行时、显示徽标，
