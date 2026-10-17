@@ -6,11 +6,12 @@
 import type { HandoffCard } from "./scheduler-merge-handoff-tick.js";
 import { localReadyState } from "./local-merge.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { fallbackNotice } from "./scheduler-review-fallback.js";
 
 export async function driveLocalReady<O>(c: HandoffCard<O>): Promise<O> {
   const { task } = c, head = task.headSHA;
   if (!head) return c.escalate("本地合并：卡上没有 head");
-  const wait = `审查通过，等 PM 跑 ledger local-merge ${task.id} --head ${head}`;
+  const wait = `审查通过，等 PM 跑 ledger local-merge ${task.id} --head ${head}${fallbackNotice(c.db, task)}`; // RVF-1: a same-family verdict says so
   const record = (...flag: string[]) => c.deps.manager("ledger", "scheduler-local-merge-ready", task.id, "--head", head, ...flag);
   const state = localReadyState(c.db, task);
   if (state === "notified") return c.out("waiting", wait);

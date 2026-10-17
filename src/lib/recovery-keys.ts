@@ -111,6 +111,7 @@ export const RECOVERY_KEYS = [
   "privateStartPlacement",
   "proposalGlobProtection",
   "reclaimLocalFix",
+  "reviewFallback",
   "reviewLocalFirst",
   "reviewSeatIdle",
   "reviewSeatLend",
