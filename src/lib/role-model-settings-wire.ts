@@ -76,12 +76,15 @@ export function withinGrant(suggested: string | null, opened: readonly string[] 
 const argAfter = (args: readonly string[], flag: string): string | null => { const i = args.indexOf(flag); return i >= 0 && args[i + 1] ? args[i + 1]! : null; };
 
 /**
- * 起出借 worker 那一刻的实际（B）：args 是这次真正带给 manager create 的 --model / --effort（lend-grant-spawn.ts lendModelArgs，只来自出借授权），
- * 建议不改它——授权里写明的那一档就是对方开放的全部。codex 只报推理档；claude 的授权没有模型项，一律是对方原默认。
+ * 起出借 worker 那一刻的实际（B）：args 是这次真正带给 manager create 的 --model / --effort（lend-grant-spawn.ts lendModelArgs：授权，
+ * 或 TIER3b 在授权内接受的建议）。codex 只报推理档；claude 带了 --model 报它，没带是对方原默认。
  */
 export function launchActual(family: string, suggest: ModelSuggest | null | undefined, args: readonly string[]): { actual: ModelActual; diagnostic?: string } {
   if (family !== "codex") {
     const want = suggest && "model" in suggest ? suggest.model : null;
+    // TIER3b：出借方接受了授权内的建议（task-tier-lend.ts）时 create 带 --model，实际就是它
+    const used = argAfter(args, "--model");
+    if (used) return { actual: { model: used, effort: null, source: used === want ? "suggest" : "grant" } };
     return { actual: { model: null, effort: null, source: "default" }, ...(want ? { diagnostic: `出借授权没有开放 Claude 模型选择，建议的 ${want} 不用，照对方原默认` } : {}) };
   }
   const effort = argAfter(args, "--effort");

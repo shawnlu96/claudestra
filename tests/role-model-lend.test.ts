@@ -278,7 +278,8 @@ describe("[验收线 3] 授权上限与家族", () => {
   test("建议按家族给：claude 单是模型 id，codex 单只有推理档（表里是 null 也只是 null，不落到模型名）", () => {
     const order = (family: LendFamily, step = "write", node = "write") => ({ project: P, taskId: "T9", family, step, wire: { node } });
     useRoleModelPort(port("on"));
-    expect(claimSuggest(db, order("claude"), ["suggest"], 1).suggest).toEqual({ model: "claude-opus-5-5", source: "settings" });
+    // TIER3b：taskTierModels 缺省 on，建议取类型 × 角色有效值——code 作者的 Claude 格是产品默认 Opus（source default），不再是角色格
+    expect(claimSuggest(db, order("claude"), ["suggest"], 1).suggest).toEqual({ model: "claude-opus-5-5", source: "default" });
     expect(claimSuggest(db, order("codex"), ["suggest"], 1).suggest).toEqual({ effort: null, source: "settings" });
     expect(claimSuggest(db, order("codex", "review", "adversarial_review"), ["suggest"], 1).suggest).toEqual({ effort: "high", source: "settings" });
     expect(claimSuggest(db, order("codex", "review", "arbitration"), ["suggest"], 1).suggest).toBeNull(); // 档位表里没有的角色不给建议

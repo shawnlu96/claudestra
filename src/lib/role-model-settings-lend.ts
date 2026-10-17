@@ -4,7 +4,7 @@
  * - off：与没有这个功能时一致，不给建议、不记。
  * - observe（缺省）：材料里不带 suggest，只在卡上记一条 would-use（同卡同角色同值一条）。
  * - on：对带了 caps=suggest 的 claim 附 suggest；入账把对方报的 actual 记到卡和回执，给过建议却没报的记 unknown；旧对端没报的不落账，读出来就是 unknown。
- * 建议不当实际：B 只在自己的出借授权内起（lend-grant-spawn.ts lendModelArgs 一字不动），A 只记 B 报来的。表读不了 / 内容坏 = 不给建议并留诊断。
+ * 建议不当实际：B 只在自己的出借授权内起（lend-grant-spawn.ts lendModelArgs；TIER3b 在授权内接受降档见 task-tier-lend.ts），A 只记 B 报来的。表读不了 / 内容坏 = 不给建议并留诊断。
  * tests/role-model-lend.test.ts、tests/role-model-lend-peer.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -15,6 +15,7 @@ import { decideRecovery, recordObserved } from "./recovery-policy.js";
 import { roleModelPort, type RoleModelPort } from "./role-model-settings-local.js";
 import { roleModelOf, type CardRole } from "./role-model-settings.js";
 import { actualFamilyProblem, launchActual, parseModelActual, parseModelSuggest } from "./role-model-settings-wire.js";
+import { lendChoiceFor, tierLendSuggest, type SuggestTierInfo } from "./task-tier-lend.js";
 
 /** 出借单对应的卡片角色：开工 / 修复单是 author，对抗审查单是 adversarial-reviewer；仲裁等别的节点不在档位表里，不给建议 */
 export function lendCardRole(step: string, node: string | null | undefined): CardRole | null {
@@ -24,7 +25,7 @@ export function lendCardRole(step: string, node: string | null | undefined): Car
 
 interface SuggestOrder { project: string; taskId: string; family: LendFamily; step: string; wire: { node?: string | null } }
 /** note = 并进 claim 事件 data.lend 的那一段（建议原样、或没给建议的诊断），重复 claim 按它原样回 */
-export interface ClaimSuggest { suggest: ModelSuggest | null; note: { suggest?: ModelSuggest; suggestDiagnostic?: string } }
+export interface ClaimSuggest { suggest: ModelSuggest | null; note: { suggest?: ModelSuggest; suggestDiagnostic?: string; suggestTier?: SuggestTierInfo } }
 const NONE: ClaimSuggest = { suggest: null, note: {} };
 
 /**
@@ -41,6 +42,9 @@ export function claimSuggest(db: Database, o: SuggestOrder, caps: readonly strin
   const diagnostic = read.status === "invalid" || read.status === "unreadable" ? `模型档位表${read.status === "invalid" ? "内容不合法" : "读不了"}，不给建议` : null;
   if (d.kind === "act") {
     if (diagnostic || cell.source === "error") return { suggest: null, note: { suggestDiagnostic: diagnostic ?? "模型档位表不可用，不给建议" } };
+    // TIER3b：A 的 taskTierModels on 时建议换成类型 × 角色有效值（wire 形状不变），类型信息只记在本机 claim 事件
+    const t = tierLendSuggest(db, { project: o.project, taskId: o.taskId, family: o.family }, role, read);
+    if (t) return "diagnostic" in t ? { suggest: null, note: { suggestDiagnostic: t.diagnostic } } : { suggest: t.suggest, note: { suggest: t.suggest, suggestTier: t.info } };
     const suggest: ModelSuggest = o.family === "claude" ? { model: cell.value as string, source: cell.source } : { effort: cell.value, source: cell.source };
     return { suggest, note: { suggest } };
   }
@@ -101,8 +105,10 @@ export function recordLendLaunch(db: Database, orderId: string, sessionId: strin
   const row = getOrder(db, orderId);
   if (!row) return null;
   const made = launchActual(row.family, row.wire?.suggest, args);
-  setMeta(db, launchKey(orderId), JSON.stringify({ sessionId, actual: made.actual }));
-  return made.diagnostic ?? null;
+  // TIER3b：起之前按建议在授权内选过档（task-tier-lend.ts），偏离原因随同一条启动事实落下，不另记事件
+  const choice = lendChoiceFor(db, orderId, args);
+  setMeta(db, launchKey(orderId), JSON.stringify({ sessionId, actual: made.actual, ...(choice ? { choice } : {}) }));
+  return choice ? choice.reason ?? null : made.diagnostic ?? null;
 }
 
 type ManagerCall = (...args: string[]) => Promise<Record<string, unknown>>;
