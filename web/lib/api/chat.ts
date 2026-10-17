@@ -6,7 +6,9 @@ import { apiAgentName, uiAgentName } from "@/lib/chat/agents";
 import { takeAskHint } from "./asks";
 import { api, ApiError } from "./client";
 import { t } from "@/lib/i18n";
+import type { MachineStamp } from "@/lib/machines";
 import { invalidateHidden } from "./history";
+import { isMachineSwitched, MACHINE_SWITCHED_TEXT } from "@/lib/machine-guard";
 
 const enc = (agent: string) => encodeURIComponent(apiAgentName(agent));
 
@@ -28,31 +30,34 @@ export interface SendResult {
 
 export interface SendOptions { waitForIdle?: boolean }
 
-/** 投递一条用户消息（fire-and-forget，wait=0）。带附件走 multipart（text + files[]，bridge 落 inbox 并注入路径）。 */
-export function sendMessage(agent: string, text: string, files: File[] | undefined, signal: AbortSignal, options: SendOptions = {}): Promise<SendResult> {
+/**
+ * 投递一条用户消息（fire-and-forget，wait=0）。带附件走 multipart（text + files[]，bridge 落 inbox 并注入路径）。
+ * expect = 页面所属机器（lib/machine-guard.ts）：切机窗口里旧页面发的不会落到新机器；本函数下面几个动作同此约定
+ */
+export function sendMessage(agent: string, text: string, files: File[] | undefined, signal: AbortSignal, options: SendOptions = {}, expect?: MachineStamp): Promise<SendResult> {
   if (files?.length) {
     const fd = new FormData();
     fd.append("text", text);
     fd.append("wait", "0");
     if (options.waitForIdle !== undefined) fd.append("waitForIdle", String(options.waitForIdle));
     for (const f of files) fd.append("files", f);
-    return api<SendResult>(`/agents/${enc(agent)}/messages`, { method: "POST", body: fd, signal, timeoutMs: 0 });
+    return api<SendResult>(`/agents/${enc(agent)}/messages`, { method: "POST", body: fd, signal, timeoutMs: 0, expect });
   }
   const ask = takeAskHint(agent, text); // 气泡里点的按钮：告诉 bridge 答的是哪条「待你处理」
-  return api<SendResult>(`/agents/${enc(agent)}/messages${ask ? `?ask=${encodeURIComponent(ask)}` : ""}`, { method: "POST", json: { text, wait: 0, ...options }, signal, timeoutMs: 0 });
+  return api<SendResult>(`/agents/${enc(agent)}/messages${ask ? `?ask=${encodeURIComponent(ask)}` : ""}`, { method: "POST", json: { text, wait: 0, ...options }, signal, timeoutMs: 0, expect });
 }
 
 /**
  * 一键中断。bridge 最坏要等约 16 秒（打断间隔 + Esc 窗口锁 12 秒 + 锁内 1.2 秒）才回结果，等不到锁会如实回失败；
  * 这里要等得比它久、又短于 bridge 的 HTTP 空闲上限 30 秒（src/lib/esc-guard.ts HTTP_IDLE_TIMEOUT_S），不然只能看到超时
  */
-export function interruptAgent(agent: string): Promise<{ ok: boolean; agent?: string }> {
-  return api(`/agents/${enc(agent)}/interrupt`, { method: "POST", json: {}, timeoutMs: 20_000 });
+export function interruptAgent(agent: string, expect?: MachineStamp): Promise<{ ok: boolean; agent?: string }> {
+  return api(`/agents/${enc(agent)}/interrupt`, { method: "POST", json: {}, timeoutMs: 20_000, expect });
 }
 
 /** 清空会话：ACP 先引导新线程再换 registry；回合进行中 409。 */
-export function clearAgentSession(agent: string): Promise<{ ok: boolean; sessionId?: string; previousSessionId?: string }> {
-  return api(`/agents/${enc(agent)}/clear`, { method: "POST", json: {}, timeoutMs: 230_000 });
+export function clearAgentSession(agent: string, expect?: MachineStamp): Promise<{ ok: boolean; sessionId?: string; previousSessionId?: string }> {
+  return api(`/agents/${enc(agent)}/clear`, { method: "POST", json: {}, timeoutMs: 230_000, expect });
 }
 
 const PERM_ACTION: Record<string, string> = { perm_allow: "allow", perm_allow_session: "allow_session", perm_deny: "deny", allow: "allow", allow_session: "allow_session", deny: "deny" };
@@ -121,6 +126,7 @@ const SEND_ERROR_TEXT: Record<string, string> = {
 };
 
 export function sendErrorText(e: unknown): string {
+  if (isMachineSwitched(e)) return t(MACHINE_SWITCHED_TEXT);
   const zh = e instanceof ApiError && e.code ? SEND_ERROR_TEXT[e.code] : undefined;
   return zh ? t(zh) : (e as Error).message;
 }

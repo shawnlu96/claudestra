@@ -4,6 +4,8 @@
  *     预期不写死菜单数组，以 buildAgentMenu 当前规则为准（兼容 APHIDE1 之后的菜单）；
  *   - 点 ⋯ 不进会话、不折叠、不起拖拽 / 左滑；长按 / 右键 / 左滑照旧；多选 / 无菜单项时不渲染 ⋯；
  *   - 顶栏宽窄两态都只有一个可见 ⋮，里面有「立即打断」；点一次 = 真 store.interrupt() 发一次 POST /agents/:name/interrupt。
+ *   - agents-MACHGEN1：中继多机、切机持久化挂起的窗口里，旧页面的打断（菜单 / composer 同一个 store.interrupt()）与协作页叫停零请求，
+ *     B 页面载入后照常只发一次（纯逻辑在 tests/web-interrupt-machine-race.test.ts）。
  * 全权判定（contacts-data）、本机打开方式（host-info）照 web-dom-project-pm 的做法 mock（保留真实模块其余导出）；
  * 接口一律由本文件的 fetch 答，interrupt 之外全 404。
  */
@@ -11,6 +13,8 @@ import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { buildAgentMenu } from "../web/features/chat/agent-menu";
+import { setAppConfigForTest } from "../web/lib/app-config";
+import { machines, type MachinesBackend } from "../web/lib/machines";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
@@ -26,7 +30,7 @@ interface Host extends El { remove(): void }
 interface Doc { createElement(tag: string): Host; body: El & { appendChild(c: Host): void }; activeElement: El | null }
 type Opener = { id: string; label: string; kind: "files" | "terminal" | "ide" };
 
-const state = { full: true as boolean | null, openers: [] as Opener[], posts: [] as string[], fail: "", hold: false, release: [] as (() => void)[] };
+const state = { full: true as boolean | null, openers: [] as Opener[], posts: [] as string[], paths: [] as string[], fail: "", hold: false, release: [] as (() => void)[] };
 const contactsData: Record<string, unknown> = await import(new URL("../web/features/chat/contacts-data.ts", import.meta.url).href);
 mock.module("@/features/chat/contacts-data", () => ({ ...contactsData, useFullScope: () => state.full }));
 const hostInfo: Record<string, unknown> = await import(new URL("../web/features/chat/host-info.ts", import.meta.url).href);
@@ -42,6 +46,7 @@ async function fakeFetch(input: unknown, init?: { method?: string }) {
   const m = url.pathname.match(/\/agents\/([^/]+)\/interrupt$/);
   if (m && init?.method === "POST") {
     state.posts.push(decodeURIComponent(m[1]));
+    state.paths.push(url.pathname);
     if (state.hold) await new Promise<void>((r) => state.release.push(r));
     return state.fail ? Response.json({ ok: false, error: state.fail }, { status: 500 }) : Response.json({ ok: true });
   }
@@ -85,6 +90,7 @@ beforeEach(() => {
   state.full = true;
   state.openers = [];
   state.posts = [];
+  state.paths = [];
   state.fail = "";
   state.hold = false;
   state.release = [];
@@ -377,4 +383,85 @@ test("[验收线 2] 切会话：旧菜单的动作不投给新会话；顶栏换
   await tick();
   expect(state.posts).toEqual(["dev-b"]);
   await u.unmount();
+});
+
+// ─── agents-MACHGEN1：切机窗口（机器持久化挂起）里旧页面的操作不发到新机器 ───
+const MA = "aaaa-1111";
+const MB = "bbbb-2222";
+type FullStore = Store & { resetForMachine(): void; interrupt(): Promise<{ ok: boolean; error?: string }>; state: { messages: { content: string }[] } };
+
+/** 中继两台机器、当前 A；fn 里调 hang() = 之后的机器持久化返回不 resolve 的 Promise。用完复原单例（同进程别的测试文件也用它） */
+async function withRelay(fn: (hang: () => void) => Promise<void>) {
+  const backend = Reflect.get(machines, "backend") as MachinesBackend;
+  const { put, setCurrent } = backend;
+  setAppConfigForTest({ mode: "relay", relayBase: "relay.test", version: "" });
+  await machines.add({ fp: MA, name: "Mac A" });
+  await machines.add({ fp: MB, name: "Mac B" });
+  await machines.setCurrent(MA);
+  try {
+    await fn(() => {
+      backend.put = () => new Promise<void>(() => {});
+      backend.setCurrent = () => new Promise<void>(() => {});
+    });
+  } finally {
+    Object.assign(backend, { put, setCurrent });
+    await machines.remove(MA);
+    await machines.remove(MB);
+    setAppConfigForTest(null);
+  }
+}
+
+/** 页面载入（store 换数据源 = 记下此刻的机器代际）后停在 agent 上 */
+async function loadPage(agent: string) {
+  const s = store as FullStore;
+  await act(() => s.resetForMachine());
+  await act(() => s.produce((st) => { st.activeAgent = agent; }));
+  return s;
+}
+
+test("[验收线 1][验收线 4] 中继切机持久化挂起：A 页面的菜单打断 / composer 打断 A、B 都收不到 POST 并提示；B 页面载入后只发一次、发往 B", async () => {
+  await withRelay(async (hang) => {
+    const u = await mountTop(AGENT);
+    const s = await loadPage(AGENT.name);
+    hang();
+    void machines.setCurrent(MB); // MachineSwitcher.pick：持久化没完，onSwitched（resetForMachine）还没跑
+    const item = topbar(u.host).item()!;
+    await act(() => item.click());
+    await tick();
+    expect(state.posts).toEqual([]);
+    expect(u.host.querySelector('[role="alert"]')?.textContent).toContain("已切换机器，操作未发送");
+    const viaComposer = await s.interrupt(); // composer 的暂停键就是 store.interrupt()
+    expect(viaComposer).toEqual({ ok: false, error: "已切换机器，操作未发送" });
+    expect(state.posts).toEqual([]);
+    expect(s.state.messages.at(-1)?.content).toContain("已切换机器，操作未发送");
+    await loadPage(AGENT.name); // B 的页面载入完成
+    await act(() => topbar(u.host).item()!.click());
+    await tick();
+    expect(state.posts).toEqual([AGENT.name]);
+    expect(state.paths).toEqual([`/m/${MB}/api/v1/agents/${AGENT.name}/interrupt`]);
+    await u.unmount();
+  });
+});
+
+test("[验收线 3] 协作页 detail-now：旧内容上的叫停切机后零请求、按钮写明未发送；新挂载的照常发往当前机器", async () => {
+  const { StopRound } = await import(mod("../collab/detail-now.tsx"));
+  const tr = (x: string) => x;
+  const stop = (host: El) => host.querySelector("[data-stop-round]")!;
+  await withRelay(async (hang) => {
+    const old = await mount(h(StopRound, { agent: "dev-a", tr }));
+    hang();
+    void machines.setCurrent(MB);
+    await act(() => stop(old.host).click()); // 第一次只变「确认叫停」
+    await act(() => stop(old.host).click());
+    await tick();
+    expect(state.posts).toEqual([]);
+    expect(stop(old.host).textContent).toContain("已切换机器，操作未发送");
+    await old.unmount();
+    const fresh = await mount(h(StopRound, { agent: "dev-a", tr }));
+    await act(() => stop(fresh.host).click());
+    await act(() => stop(fresh.host).click());
+    await tick();
+    expect(state.paths).toEqual([`/m/${MB}/api/v1/agents/dev-a/interrupt`]);
+    await fresh.unmount();
+  });
 });
