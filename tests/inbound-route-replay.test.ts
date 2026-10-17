@@ -15,6 +15,7 @@ import { ruleAction } from "../src/lib/inbound-route.js";
 
 interface Case {
   name: string; expect: "interrupt" | "insert" | "queue" | "merge"; current: string;
+  runtime?: "claude-code"; legacyQuestion?: string;
   queued: { from: string; text: string }[]; incoming: { from: string; text: string }; answers: Record<string, unknown>;
 }
 const FIXTURE = join(import.meta.dir, "fixtures/inbound-route/cases.json");
@@ -43,16 +44,18 @@ afterAll(() => {
 
 describe("回放：合成例（调研 12 + 4，JRT-3 加 6 例 agent→agent）", () => {
   for (const c of fixture.cases) {
-    test(`${c.name} → ${c.expect}`, async () => {
+    const run = c.legacyQuestion && !RECORD ? test.skip : test;
+    run(`${c.name} → ${c.expect}${c.legacyQuestion ? "（旧问题，不计覆盖）" : ""}`, async () => {
       const queue: HeldItem[] = c.queued.map((m) => ({ env: envOf(m), to, heldAt: 1 }));
       configureInboundRoute({
         readMode: () => "on", probe: async () => ({ main: "busy", bg: false }), queue: () => queue, doing: async () => c.current, log: () => {}, now: () => 0,
-        insertDecl: async () => ({ via: "steer" }), senderRegistered: async () => true,
+        insertDecl: async () => c.runtime === "claude-code" ? {} : { via: "steer" }, senderRegistered: async () => true,
         ask: (async (state: unknown, questions: Record<string, unknown>, opts: unknown) => {
-          const replay = !RECORD || (!RECORD_ALL && Object.keys(c.answers).length > 0);
+          const replay = !RECORD || (!RECORD_ALL && !c.legacyQuestion && Object.keys(c.answers).length > 0);
           if (replay) return { model: fixture.model, answers: c.answers, usage: { input_tokens: 0, output_tokens: 0 }, latencyMs: 0, costUsd: 0 };
           const r = await jevAsk(state as never, questions as never, { ...(opts as object), timeoutMs: 20_000 });
           c.answers = r.answers as Record<string, unknown>;
+          delete c.legacyQuestion;
           fixture.model = r.model;
           return r;
         }) as unknown as typeof jevAsk,
@@ -62,6 +65,9 @@ describe("回放：合成例（调研 12 + 4，JRT-3 加 6 例 agent→agent）"
       // 没判（停字直接打断 / 拿不准）= 现有规则
       const got = e.meta.inboundRoute?.action ?? ruleAction(isHumanRequest(e), e.from.kind === "local");
       expect(got).toBe(c.expect);
+      if (!c.legacyQuestion && e.from.kind === "local") {
+        expect(Object.keys((c.answers.route_action as { probabilities: object }).probabilities).sort()).toEqual(["insert", "interrupt", "merge", "queue"]);
+      }
       if (c.expect === "merge") expect(e.meta.inboundRoute?.mergeWith).toBe(queue[0].env.meta.messageId);
       if (e.from.kind !== "user") expect(routeAdmitsWhileBusy(e)).toBe(false); // 非 owner 一律不打断
     });

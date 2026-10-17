@@ -4,7 +4,7 @@
  * 只在 kill 时整本销。
  */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
@@ -66,12 +66,12 @@ function world() {
 
 afterAll(() => {
   openInsertBook(null);
-  configureSteerInsert({ now: () => Date.now() });
+  configureSteerInsert({ now: () => Date.now(), invalid: () => false });
   configureInboundRoute({ readMode: () => "off", now: () => Date.now() });
 });
 beforeEach(() => {
   clock += 3 * 86_400_000;
-  configureSteerInsert({ now: () => clock });
+  configureSteerInsert({ now: () => clock, invalid: () => true }); // 这些纯账本例没有独立回程；集成坏回程见 steer-insert-corrupt.test.ts
   openInsertBook(null);
 });
 
@@ -190,6 +190,30 @@ describe("明确回复：投递成功才确认（Shawn PR1689-r1 premature-inser
 });
 
 describe("账本", () => {
+  test("JRT-4：Y 开轮后三秒内 X 插队不吞 Y 的 drain 兜底", async () => {
+    const w = world();
+    w.book.add(w.T, { callerChannelId: w.Y, callerName: "agent-y", targetName: "agent-t", ts: clock }, "original-y");
+    noteDelivered(w.T, { kind: "local", channelId: w.Y }, clock, true, true);
+    w.book.add(w.T, { callerChannelId: w.X, callerName: "agent-x", targetName: "agent-t", ts: clock }, "insert-x");
+    noteInsert(w.steerEnv("insert-x"), w.T);
+    noteDelivered(w.T, { kind: "local", channelId: w.X }, clock + 1, false, true);
+    await w.stop("给 Y 的答复");
+    expect(w.pushed.map((p) => p.to)).toEqual([w.Y]);
+    expect(w.book.slot(w.T, w.X)).toBeDefined();
+  });
+
+  test("JRT-4：逐条丢弃坏 from，保留同本的好记录，读账不抛错", () => {
+    const w = world();
+    const path = join(mkdtempSync(join(tmpdir(), "insert-malformed-")), "book.json");
+    writeFileSync(path, JSON.stringify({ [w.T]: {
+      good: { env: w.steerEnv("good"), at: clock },
+      bad: { env: { ...w.steerEnv("bad"), from: null }, at: clock },
+    } }));
+    openInsertBook(path);
+    expect(() => ids(w.T)).not.toThrow();
+    expect(ids(w.T)).toEqual(["good"]);
+  });
+
   test("同一条记两次只一笔；不是 insert / 不是本机 agent 的不记", () => {
     const w = world();
     noteInsert(w.steerEnv("d"), w.T);

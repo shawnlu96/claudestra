@@ -12,6 +12,7 @@ import { newMessageId, newThreadId, type Endpoint, type Envelope } from "./route
 import { turnCuts } from "./turn-cuts.js";
 import type { TurnTrigger } from "../lib/turn-cuts.js";
 import { dropVoidedPendings, type VoidableBooks } from "../lib/pending-reply-scope.js";
+import { settleInsertReply } from "./steer-insert.js";
 
 type Socket = { send(data: string): void };
 interface EchoDeps {
@@ -166,6 +167,7 @@ const piVoided: Notice = { text: (agent, t, toSender) => voidedNotice(agent, [t]
 
 /** 作废的消息：先销账（找不到发送方的也按 id 销），再逐条告诉发送方。发送方的查找同步做完（调用方随后会清送达记录）；返回真告诉到的条数 */
 function settleVoided(channelId: string, ids: readonly string[], abortAt: number, notice: Notice = piVoided): Promise<number> {
+  settleInsertReply(channelId, ids);
   const found = ids.map((id) => turnCuts.deliveredMessage(channelId, id)).filter((t): t is NonNullable<typeof t> => !!t);
   if (!echo) return Promise.resolve(0);
   const agentOf = new Map(found.filter((t) => t.fromKind === "local" && t.replyTo).map((t) => [t.messageId, t.replyTo]));

@@ -21,6 +21,7 @@ import { closeAsk } from "../lib/ledger-asks.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { askDbIfExists, publishAsk } from "./asks.js";
 import { channelTurnOk, noteResumeSource, resumeSourceOf } from "../lib/api-error-resume.js";
+import { insertTargetQuarantined, insertUnseenFrom } from "./steer-insert.js";
 import {
   noteCallerAnswered, noteRetryingCaller, reclearEnded, retryingKnown, spokenBefore, takeTurnFailure, turnFailureNotice, useRetryPort, type RetryPort, type TurnFailure,
 } from "./turn-failure.js";
@@ -89,7 +90,8 @@ type Sender = { kind: string; owner?: boolean; peer?: string; channelId?: string
 /** 发送方按 principal 分成哪一类（见 TurnTrigger）；出闸判「补投会不会接着做被打断的事」也用它（bridge/quota-wall-wiring.ts） */
 export const senderTrigger = (from: Sender): TurnTrigger =>
   from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
-export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle = false, asks = false): void {
+export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle = false, asks = false, messageId?: string): void {
+  if (!idle && from.kind === "local" && insertUnseenFrom(cid).some((u) => u.fromChannelId === from.channelId && (!messageId || u.messageId === messageId))) return;
   if (asks && from.kind === "local" && from.channelId) noteCallerAnswered(from.channelId, cid, now); // 它给收到过「正在重试」的请求方发了请求（turn-failure.ts）
   const who = senderTrigger(from);
   const caller = from.kind === "local" && from.channelId ? [from.channelId] : [];
@@ -133,6 +135,7 @@ export function answerableUnmixed<P extends { callerChannelId: string }>(
   book: { answerable(target: string, stillHeld: (req: { messageId?: string; callerChannelId: string }) => boolean): P | undefined },
   target: string, stillHeld: (req: { messageId?: string; callerChannelId: string }) => boolean,
 ): P | undefined {
+  if (insertTargetQuarantined(target)) return undefined; // 先清坏账；回程处理器不可用时保守阻止隐式答复
   return unmixed(book.answerable(target, stillHeld), recOfCid(target)?.askers ?? []);
 }
 /** 混了几个请求方的一轮说的话不认给任何一个：本轮的另一位、更早一轮留下的旧槽都不行（审查 mixed-turn-stale-caller） */

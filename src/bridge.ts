@@ -464,14 +464,20 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
 // 守门判定 / 隔离 / 放行中的同押后：target 没看到；没确认的插队也算（bridge/steer-insert.ts：别把 target 别的输出当成对插队方的答复）
 // exceptCaller = 显式视图：target 正在明确回给这个 caller，它自己的插队不挡精确取槽（投递成功才销账，见 exactPac 两处调用）
-const heldFromOf = (target: string, exceptCaller?: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target), ...insertUnseenFrom(target, exceptCaller)];
+const heldFromOf = (target: string, exceptCaller?: string, at = Infinity) =>
+  [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target), ...insertUnseenFrom(target, exceptCaller, at)];
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
-const stillHeldFor = (target: string) => (r: { messageId?: string; callerChannelId: string }) => requestStillHeld(r, heldFromOf(target));
+const stillHeldFor = (target: string) => (r: { messageId?: string; callerChannelId: string }) =>
+  insertTargetQuarantined(target) || requestStillHeld(r, heldFromOf(target));
 const answerablePac = (target: string): PendingAgentCall | undefined => answerableUnmixed(pendingAgentCalls, target, stillHeldFor(target)); // 混了几个请求方的一轮不认
 /** target 明确答给 caller(回发 send_to_agent / reply 到 caller 的频道):精确取那一槽,请求还押着的不算 */
-const exactPac = (target: string, caller: string) => pendingAgentCalls.exact(target, caller, (r) => requestStillHeld(r, heldFromOf(target, caller)));
+const exactPac = (target: string, caller: string, at: number) => {
+  if (insertTargetQuarantined(target)) return undefined;
+  const unseen = heldFromOf(target, caller, at);
+  return pendingAgentCalls.exact(target, caller, (r) => requestStillHeld(r, unseen));
+};
 /** 好几个 caller 同时在等、target 又没指明答给谁:谁都不推,提醒它用 send_to_agent 分别回(同一批只提醒一次) */
 function nudgeAmbiguousCallers(cid: string): void {
   const amb = pendingAgentCalls.takeAmbiguity(cid, stillHeldFor(cid));
@@ -515,6 +521,8 @@ const stopSettleDeps: import("./bridge/stop-settle.js").CallerSettleDeps = {
   unattributed: (cid, _t, n) => void (n.wall || quotaWall()?.active() || notifyMaster(unattributedNotice(agentLabelForChannel(cid), n))), // 闸内静默：出闸通知一次说清
   metric: (name, channelId, meta) => recordMetric(name, { channelId, meta }),
 };
+wireInsertNotices({ hold: (e) => void heldLocalMsgs.holdEnv(e), dropRequest: (t, c, id) => pendingAgentCalls.dropRequest(t, c, id),
+  stoppedAt: (c) => turnCuts.stoppedAt(c), flush: (c) => flushHeldLocalMsgs(c, "insert-notice"), invalidate: (t, id) => pendingAgentCalls.invalidateInsert(t, id) });
 
 // v2.21.2+ 压缩上下文结束(jsonl compact_boundary 主路 / pane 兜底)→ 放行压缩期间
 // 押后的消息。人类消息押的理由只是「别掐压缩」,结束就该到;1.5s 让 CC 收尾。
@@ -584,7 +592,8 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait } from "./lib/turn-state.js"; import { afterInsertSend, configureInboundRoute, routeHolds, routeInbound } from "./bridge/inbound-route.js";
-import { dropInserts, insertIdsFrom, insertUnseenFrom, settleInsertReply } from "./bridge/steer-insert.js";
+import { dropInserts, insertIdsFrom, insertSnapshot, insertTargetQuarantined, insertUnseenFrom, settleInsertReply, sweepInserts } from "./bridge/steer-insert.js";
+import { insertNoticeWanted, settleInsertStop, wireInsertNotices } from "./bridge/steer-insert-notices.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { answerableUnmixed, apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
@@ -894,9 +903,10 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
   }
   try {
     const ledgerHold = await inboundLedgerGate(env, clients.get(to.channelId)?.runtime, evAgent, content, meta, heldLocalMsgs); if (ledgerHold) return ledgerHold; // Pi / Codex 入站账
+    if (!insertNoticeWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "插队已回复、作废或停止等待" } };
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     if (afterInsertSend(env, turn, to.ws.send(JSON.stringify({ type: "message", content, meta })), heldLocalMsgs)) return { envelope: env, outcome: { kind: "sent", note: "queued" } }; // 插队没送到：押回
-    noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle", env.intent === "request" && !env.meta.skipInterAgentWatchdog); // 谁开的这一轮（stop-settle）
+    noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle", env.intent === "request" && !env.meta.skipInterAgentWatchdog, env.meta.messageId);
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inboundEventData(env, meta) }); // 入站镜像给网页（bridge/inbound-event.ts）
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
@@ -947,7 +957,8 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     // reply→别agent forward 都经这里），记看门狗 pending。
     // v2.4.16+: meta.skipInterAgentWatchdog=true 时不挂 watchdog（oneShot 的 fire
     // -and-forget 场景，caller 不期待回应，watchdog 没必要打扰 target）。
-    if (env.from.kind === "local" && hangsInterAgentWatchdog(env.from.ws === to.ws, env.meta.skipInterAgentWatchdog, await channelStillRegistered(env.from.channelId), env, to.channelId)) {
+    if (env.from.kind === "local" && !insertSnapshot(to.channelId).has(env.meta.messageId)
+      && hangsInterAgentWatchdog(env.from.ws === to.ws, env.meta.skipInterAgentWatchdog, await channelStillRegistered(env.from.channelId), env, to.channelId)) {
       pendingInterAgentMsg.set(to.channelId, {
         fromLabel: env.from.agentName || "另一个 agent",
         fromChannelId: env.from.channelId,
@@ -1030,7 +1041,7 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
       if (!isFromMaster && fromLocal.channelId && targetClient && targetClient.ws !== fromLocal.ws) {
         const files = await stageLocalReplyFiles(env.meta.files, agentLabelForChannel(fromLocal.channelId)); // 转发不等，拷不过去要现在写进 reply 结果
         warning = files.warning;
-        forwardReplyToAgentClaude(fromLocal, env.content, to.channelId, targetClient, files.attachments)
+        forwardReplyToAgentClaude(fromLocal, env.content, to.channelId, targetClient, files.attachments, Date.parse(env.meta.ts))
           .catch((e) => console.error("reply→别agent频道 forward 异常:", e));
       }
     }
@@ -1040,22 +1051,18 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
   }
 }
 
-/**
- * v2.0.15+: 把一条 agent reply 到「别的 agent 的频道」的消息，额外 forward 一份给
- * 那个 agent 的 claude ws（除了已经贴了的 Discord）。走 deliverToLocal → 自动加
- * `[🤖 来自 X]` 前缀，跟 send_to_agent 等价。fire-and-forget，best-effort。
- */
+/** reply 到另一个 agent 的频道也要 forward 给它，并只结算回复帧到达前已送到的请求。 */
 async function forwardReplyToAgentClaude(
   fromEndpoint: RouterLocalEndpoint,
   content: string,
   targetChannelId: string,
   targetClient: ClientInfo,
   attachments: readonly string[],
+  replyAt: number,
 ): Promise<void> {
   let fromAgentName = fromEndpoint.agentName;
   let targetAgentName: string | undefined;
-  // reply handler 构造 fromEndpoint 时通常没填 agentName，这里查 registry 补上让
-  // renderContentForLocal 的 "[🤖 来自 X]" 准确；查不到就 fallback "agent"。
+  // 名字只用于展示；查不到也照常转发。
   try {
     const list = await runManager("list");
     const agents = (list.agents || []) as any[]; // 只用于补抬头名字：list 失败 = 抬头退化成「agent」，消息照投，不做任何判定
@@ -1064,8 +1071,8 @@ async function forwardReplyToAgentClaude(
   } catch { /* 抬头名字补不上而已，投递不受影响 */ }
   // 这条正是 target 在答复等它的 caller(直接 reply 到 caller 的频道,codex 常这么答):按答复送、带上 expecting,
   // 并消化回程——否则回程一直挂着,target 之后在自己频道随便说一句都会被当成答复再推一次
-  const answering = exactPac(fromEndpoint.channelId, targetChannelId);
-  const insertSnap = insertIdsFrom(fromEndpoint.channelId, targetChannelId); // 投到了只销这几条插队账（await 期间新插进来的不动）
+  const answering = exactPac(fromEndpoint.channelId, targetChannelId, replyAt);
+  const insertSnap = insertIdsFrom(fromEndpoint.channelId, targetChannelId, replyAt);
   const text = content.replace(/<@!?\d+>\s*/g, "").trim();
   const fwdEnv = withLocalAttachments({
     from: { kind: "local", agentName: fromAgentName, channelId: fromEndpoint.channelId, ws: fromEndpoint.ws },
@@ -1571,6 +1578,7 @@ registerInteractionHandlers(discord, {
 // ============================================================
 
 async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
+  const replyAt = Date.now();
   let msg: any;
   try {
     msg = JSON.parse(raw);
@@ -1704,14 +1712,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
 
     case "reply": {
-      // v1.9.24+: 在任何 await 之前先删 pending。这样即使 Stop hook 在我们还在
-      // 打 Discord API 的时候到达，后面的 cleanup 路径不会误触发。
-      // ⚠ 只销**自己欠这个地址**的那些账（判据见 lib/pending-reply-scope.ts）。
-      //   曾经是 `delete(msg.chatId)`：key 是回信地址，而 Web/API 用户的地址是
-      //   `api:<tokenId>`——同一个 token 跟几个 agent 说话共用这一个 key，于是我在
-      //   自己频道回一句，就把别的 agent 欠这个用户的债一起销了；那个 agent 的 Stop
-      //   不再被 reply-nudge 拦，它「只打字不 reply」无人纠正 ⇒ 用户看到整条回复全是
-      //   灰字旁白、没有正文（2026-09-22 实测：mm-pm 的 1267 字答复就是这么灰的）。
+      // 只销自己欠这个回信地址的补答账；await 期间 Stop 到达也不会误催。
       for (const key of pendingKeysOwedBy(pendingReplies.entries(), ws, msg.chatId)) {
         pendingReplies.delete(key);
       }
@@ -1768,7 +1769,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           meta: {
             messageId: newMessageId("reply"),
             triggerKind: "agent_tool",
-            ts: new Date().toISOString(),
+            ts: new Date(replyAt).toISOString(),
             threadId: newThreadId(),
             replyTo: msg.replyTo,
             components: msg.components,
@@ -2252,23 +2253,14 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined, pmLevel,
           },
         };
-        // v2.24+: 给某个 agent 发消息 = 回了它的消息。它之前发来的那条
-        // （intent=request）在**我这边**挂着一条 pendingReplies[它的频道]，
-        // 只有 `reply` 工具会清 —— 于是 agent 之间用 send_to_agent 互相答复时，
-        // 答了照样被 Stop hook 拦「你没回 chat_id=…」，被迫再往对方频道贴一条
-        // 重复消息（2026-09-19 实测，与 oneShot 那条同族）。在 deliver 之前删，
-        // 与 `reply` 分支同一纪律（await 之前先删，免得 Stop hook 插在中间）。
-        // ⚠ 只能销**自己欠的**：key 是回信地址不是欠账人。B 之前给 C 发过请求时，
-        //   pendingReplies[B 的频道].targetWs 是 C——这时 A 给 B 发消息若无条件
-        //   delete，就把 C 的欠账销了，C 的 Stop 不再被拦、B 永远等不到答复。
-        //   （同 lib/pushback-scope.ts 的纪律，判据见 lib/pending-reply-scope.ts。）
+        // send_to_agent 也是明确答复，但只能销自己欠目标的补答账。
         for (const key of pendingKeysOwedBy(pendingReplies.entries(), ws, target.channelId)) {
           pendingReplies.delete(key);
         }
 
         // 发的正是在答复一个正在等我的 caller(target 回发 send_to_agent 给问它的人)→ 投出去之后那条回程算答完了
-        const answering = fromChannelId ? exactPac(fromChannelId, target.channelId) : undefined;
-        const insertSnap = fromChannelId ? insertIdsFrom(fromChannelId, target.channelId) : []; // 投到了只销这几条插队账（await 期间新插进来的不动）
+        const answering = fromChannelId ? exactPac(fromChannelId, target.channelId, replyAt) : undefined;
+        const insertSnap = fromChannelId ? insertIdsFrom(fromChannelId, target.channelId, replyAt) : [];
 
         // v1.9.21+: 记 pending agent call。当 target agent 下一次 reply 到自己 channel
         // 时，bridge 把那段 text 也 push 回 caller 的 ws（免 fetch_messages 轮询）。
@@ -2546,6 +2538,7 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
 const PAC_STALE_MS = 2 * 3_600_000;
 setInterval(() => {
   const now = Date.now();
+  sweepInserts();
   const IA_WATCHDOG_STALE_MS = 10 * 60_000;
   const wallPaused = (ch?: string) => !!quotaWall()?.active() && agentRuntime(clients.get(ch ?? "")) === "claude-code"; // 闸只停 CC 的，出闸重新起算
   for (const p of pendingAgentCalls.sweepStale(now, PAC_STALE_MS, heldFromOf, wallPaused)) {
@@ -2615,7 +2608,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
     // (done / 停 typing / 完成 ping / drain / 清 pending)之前返回——回合还没完(lib/reply-nudge.ts)。Pi 叫停之后的第一次 Stop
     // 这里和下面的 inter-agent 看门狗都不催:催了等于 bridge 把刚停住的 Pi 又拉起一轮(bridge/pi-abort.ts)
     const afterAbort = event === "Stop" && stopAfterAbort(channelId);
-    const atStop = stopSnapshot(new Set([...heldLocalMsgs.ids(channelId), ...guardUnseenIds(channelId)]), pendingApiRequests); // 只结这一刻就挂着、没押着的（bridge/stop-settle.ts stopSnapshot）
+    const atStop = { ...stopSnapshot(new Set([...heldLocalMsgs.ids(channelId), ...guardUnseenIds(channelId)]), pendingApiRequests), inserts: insertSnapshot(channelId) };
     if (event === "Stop" && !afterAbort) {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
@@ -2768,6 +2761,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
               cid, stopChannelId: channelId, stopWs: thisClientForStatus?.ws, candidateWs: clients.get(cid)?.ws, event, runtime: clients.get(cid)?.runtime, drain: drainResult,
             });
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
+            if (cid === channelId) settleInsertStop(cid, atStop.inserts, ownTurn && event !== "StopFailure" && !afterAbort);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
             const held = new Set([...heldLocalMsgs.ids(cid), ...guardUnseenIds(cid), ...atStop.held]); // 押着 / 被守门隔离的都没送到 cid 手上
             for (const { waiter: p, result } of takeLiveApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {

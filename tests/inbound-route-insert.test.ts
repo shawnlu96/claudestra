@@ -129,6 +129,26 @@ describe("运行时：on 档", () => {
     expect(routeHolds(a, BUSY)).toBe(true);
   });
 
+  test("押后 insert 换成 CC：放出时重核运行时，不重新问 Jev，忙时 queue、闲时投", async () => {
+    const a = env("旧的插队", AGENT, { inboundRoute: { action: "insert", via: "steer", p: 0.9 } });
+    decl = undefined;
+    await routeInbound(a, to, "agent-pm");
+    expect(asks).toHaveLength(0);
+    expect(a.meta.inboundRoute?.action).toBe("queue");
+    expect(routeHolds(a, BUSY)).toBe(true);
+    expect(routeHolds(a, IDLE)).toBe(false);
+    expect(logs[0]).toMatchObject({ pick: "insert", actual: "queue", insertVia: "none", via: "release" });
+  });
+
+  test("押后 insert 仍是 Pi / ACP 则保留；重核运行时失败则 queue", async () => {
+    const a = env("插队重投", AGENT, { inboundRoute: { action: "insert", via: "steer", p: 0.9 } });
+    await routeInbound(a, to, "agent-pm");
+    expect(a.meta.inboundRoute?.action).toBe("insert");
+    configureInboundRoute({ insertDecl: async () => { throw new Error("查不到目标"); } });
+    await routeInbound(a, to, "agent-pm");
+    expect(a.meta.inboundRoute?.action).toBe("queue");
+  });
+
   test("Pi / ACP 的 oneShot 照样插（steer 不靠看门狗兜底）", async () => {
     const b = env("进度：跑到第 3 步", AGENT, { skipInterAgentWatchdog: true });
     await routeInbound(b, to, "agent-pm");

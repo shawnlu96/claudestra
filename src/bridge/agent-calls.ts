@@ -53,6 +53,8 @@ export interface PendingAgentCall {
 }
 
 export interface CallRequest {
+  /** 确认账损坏且无法按 id 精确对应：持久化隔离，不能用隐式或精确视图猜成已看到。 */
+  insertQuarantined?: true;
   messageId?: string;
   expecting?: string;
   originalReplyChannel?: string;
@@ -202,23 +204,51 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     else this.delete(keyOf(target, caller));
   }
 
+  /** 只认本簿的 target/id，不借坏确认账认 caller。无 id 的旧请求隔离，其他请求保留。 */
+  invalidateInsert(target: string, messageId?: string): { call: PendingAgentCall; quarantined: boolean }[] {
+    const affected: { call: PendingAgentCall; quarantined: boolean }[] = [];
+    const originals: [string, PendingAgentCall][] = [], sets: [string, PendingAgentCall][] = [], deletes: string[] = [];
+    for (const [key, c] of this) {
+      if (targetOf(key, c) !== target) continue;
+      const keep: CallRequest[] = [];
+      for (const r of requestsOf(c)) {
+        if (messageId && r.messageId && r.messageId !== messageId) { keep.push(r); continue; }
+        const quarantined = !messageId || !r.messageId || !c.callerChannelId;
+        if (quarantined) keep.push({ ...r, insertQuarantined: true });
+        if (!r.insertQuarantined && c.callerChannelId) affected.push({ call: perRequest(c, r), quarantined });
+      }
+      originals.push([key, c]);
+      if (keep.length) sets.push([key, shaped(target, c, keep)]);
+      else deletes.push(key);
+    }
+    // 盘上回程还在时不能让确认账先丢保护；失败恢复内存，调用方保留坏账并隔离目标。
+    if (!this.update(sets, deletes)) {
+      for (const [key, c] of originals) this.setQuiet(key, c);
+      throw new Error("损坏插队的回程撤销/隔离未落盘，保留确认保护");
+    }
+    return affected;
+  }
+
   private store(target: string, base: PendingAgentCall, reqs: CallRequest[]): void {
     this.set(keyOf(target, base.callerChannelId), shaped(target, base, reqs));
   }
 
   /** 视图：只含已送到 target 手上的请求（expecting 合并、回复频道取最后一条）；一条都没送到 = undefined */
-  private view(c: PendingAgentCall, stillHeld: StillHeld): PendingAgentCall | undefined {
-    const seen = requestsOf(c).filter((r) => !stillHeld({ messageId: r.messageId, callerChannelId: c.callerChannelId }));
+  private view(target: string, c: PendingAgentCall, stillHeld: StillHeld): PendingAgentCall | undefined {
+    const eligible = requestsOf(c).filter((r) => !r.insertQuarantined && !stillHeld({ messageId: r.messageId, callerChannelId: c.callerChannelId }));
+    const live = this.slot(target, c.callerChannelId); // stillHeld 读确认账时可能已撤销/隔离本条，旧快照不能复活它
+    if (!live) return undefined;
+    const seen = requestsOf(live).filter((r) => !r.insertQuarantined && eligible.some((e) => sameReq(e, r)));
     if (!seen.length) return undefined;
     const expecting = seen.map((r) => r.expecting).filter(Boolean).join("；另一个问题：") || undefined;
     // 回复频道只取已送到的那几条自己的；没有就留空走默认，不借槽里还押着的请求的（codex 复核：会串到别的会话）
-    return { ...summarize(c, seen), expecting, originalReplyChannel: seen[seen.length - 1].originalReplyChannel };
+    return { ...summarize(live, seen), expecting, originalReplyChannel: seen[seen.length - 1].originalReplyChannel };
   }
 
   /** target 明确答给 caller（回发 send_to_agent / reply 到 caller 的频道） */
   exact(target: string, caller: string, stillHeld: StillHeld): PendingAgentCall | undefined {
     const c = this.slot(target, caller);
-    return c && this.view(c, stillHeld);
+    return c && this.view(target, c, stillHeld);
   }
 
   forTarget(target: string): PendingAgentCall[] {
@@ -227,7 +257,7 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
 
   /** 在等 target 答复、且请求已经送到 target 手上的（还押在 target 队里的它根本没看到，不算） */
   waiting(target: string, stillHeld: StillHeld): PendingAgentCall[] {
-    return this.forTarget(target).map((c) => this.view(c, stillHeld)).filter((v): v is PendingAgentCall => !!v);
+    return this.forTarget(target).map((c) => this.view(target, c, stillHeld)).filter((v): v is PendingAgentCall => !!v);
   }
 
   /** target 没指明答给谁时的归属：恰好一个在等才算；0 个或多个 → undefined（多个不猜、不广播） */
@@ -337,15 +367,17 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
       const target = targetOf(k, c);
       if (paused?.(target)) continue;
       const held = heldFrom(target);
-      const reqs = requestsOf(c);
-      const gone = reqs.filter((r) => requestExpired(r, c, held, now, staleMs));
+      const live = this.get(k); // heldFrom 可能清坏确认账并改了回程，不能按扫描开始的旧快照写回
+      if (!live) continue;
+      const reqs = requestsOf(live);
+      const gone = reqs.filter((r) => !r.insertQuarantined && requestExpired(r, live, held, now, staleMs));
       if (!gone.length) continue;
       const left = reqs.filter((r) => !gone.includes(r));
       if (!left.length) this.deleteQuiet(k);
-      else this.setQuiet(k, shaped(target, c, left));
-      out.push({ ...summarize(c, gone), targetChannelId: target });
+      else this.setQuiet(k, shaped(target, live, left));
+      out.push({ ...summarize(live, gone), targetChannelId: target });
       // 等续跑 / 扣下的话都在各自的请求上：每条只带走自己那份，留下的请求不继承（T6c1 r2）
-      for (const r of gone.filter(awaitedResume)) this.onExpired?.({ ...perRequest(c, r), targetChannelId: target }, "之后 2 小时没有接着做完");
+      for (const r of gone.filter(awaitedResume)) this.onExpired?.({ ...perRequest(live, r), targetChannelId: target }, "之后 2 小时没有接着做完");
     }
     if (out.length) this.persist();
     return out;
