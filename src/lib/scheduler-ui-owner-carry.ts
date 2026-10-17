@@ -16,7 +16,8 @@ import { getAsk, ownerAnswered, type Ask } from "./ledger-asks.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { GitRead } from "./scheduler-ui-carry-proof.js";
-import { renderInputs, uiReviewCarryKey } from "./scheduler-ui-review-carry.js";
+import { legacyCompare, uiReviewCarryKey } from "./scheduler-ui-review-carry.js";
+import { uiInputsGate, type UiInputsDeps } from "./project-ui-inputs.js";
 import type { CarryEvidence } from "./scheduler-merge.js";
 
 const KEY = "uiOwnerCarry";
@@ -89,7 +90,7 @@ export function ownerCarriedAsk(db: Database, task: LedgerTask, events: readonly
 }
 
 export interface OwnerCarryInput { task: LedgerTask; intentId: string; ev: CarryEvidence; ownerVisual: boolean; events: readonly LedgerEvent[];
-  read: (() => GitRead) | string; now: number }
+  read: (() => GitRead) | string; now: number; uiInputs?: UiInputsDeps }
 /** carried: on and every condition holds (uiCarryPlan then drops the other layers' notes and commits this first, at carrySeq + 2). */
 export interface OwnerCarryPlan { carried: boolean; note: string | null; commit: (carrySeq: number) => void }
 const NONE: OwnerCarryPlan = { carried: false, note: null, commit: () => {} };
@@ -116,19 +117,21 @@ export function uiOwnerCarryPlan(db: Database, x: OwnerCarryInput, write: WriteO
   }
   const globs = task.extra.fileGlobs ?? [];
   if (!Array.isArray(globs) || globs.some((g) => typeof g !== "string")) return refuse("卡上 fileGlobs 不是字符串列表");
-  let inputs: { approved: string; from: string; to: string; count: number };
-  try {
-    if (typeof x.read === "string") throw new Error(x.read);
-    const read = x.read(), at = (h: string) => renderInputs(read, h, globs as string[]);
-    const approved = at(held.head), from = held.head === ev.oldHead ? approved : at(ev.oldHead), to = at(ev.newHead);
-    inputs = { approved: approved.digest, from: from.digest, to: to.digest, count: to.count };
-  } catch (e) { return refuse(`渲染输入核不了（${(e as Error).message.split("\n")[0]!.slice(0, 160)}）`); }
-  if (inputs.approved !== inputs.to || inputs.from !== inputs.to) return refuse("main 改了界面输入（web/、资源、依赖与构建配置或本卡 fileGlobs）", false);
-  const data = { ...base, approvalSeq: null, mechanism: KEY, round: task.round, digest: task.extra.screenshotsDigest, renderInputs: inputs.to,
-    renderCount: inputs.count, mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash };
-  if (mode === "observe") return observe(true, `沿用 owner 截图批准到 ${ev.newHead.slice(0, 12)}（渲染输入 ${inputs.count} 项与批准时一致）`, { ...data, renderSame: true });
-  return { carried: true, note: null, commit: (carrySeq) => write(carrySeq, uiReviewCarryKey(x.intentId, carrySeq),
-    `沿用 owner 截图批准到新 head ${ev.newHead.slice(0, 12)}（渲染输入与批准时一致）`, { op: CARRY_OP, ...data, carrySeq }) };
+  const ui = uiInputsGate({ db, project: task.project, task: task.id, path: "owner", now: x.now, read: x.read, evidenceHeads: [held.head, ev.oldHead],
+    targetHead: ev.newHead, fileGlobs: globs as string[], deps: x.uiInputs, policy,
+    legacy: () => legacyCompare(x.read, [held.head, ev.oldHead], ev.newHead, globs as string[]) });
+  const plan = ((): OwnerCarryPlan => {
+    const o = ui.outcome;
+    if (o.status === "error") return refuse(`渲染输入核不了（${o.why}）`);
+    if (o.status === "changed") return refuse("main 改了界面输入（web/、资源、依赖与构建配置或本卡 fileGlobs）", false);
+    const data = { ...base, approvalSeq: null, mechanism: KEY, round: task.round, digest: task.extra.screenshotsDigest, renderInputs: o.digest,
+      renderCount: o.count, mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash, ...(ui.mode === "on" && o.summary ? { uiInputs: o.summary } : {}) };
+    if (mode === "observe") return observe(true, `沿用 owner 截图批准到 ${ev.newHead.slice(0, 12)}（渲染输入 ${o.count} 项与批准时一致）`, { ...data, renderSame: true });
+    return { carried: true, note: null, commit: (carrySeq) => write(carrySeq, uiReviewCarryKey(x.intentId, carrySeq),
+      `沿用 owner 截图批准到新 head ${ev.newHead.slice(0, 12)}（渲染输入与批准时一致）`, { op: CARRY_OP, ...data, carrySeq }) };
+  })();
+  // projectUiInputs observe: its note goes after this path's own record (which must stay at carrySeq + 2)
+  return { ...plan, commit: (carrySeq) => { plan.commit(carrySeq); ui.observe(); } };
 }
 
 /**
