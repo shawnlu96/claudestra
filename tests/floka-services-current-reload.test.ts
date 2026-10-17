@@ -47,7 +47,7 @@ class FakeManager implements ServiceManager {
   loadedMap = new Map<string, boolean | null>();
   fail = new Set<string>();
   async loaded(label: string) { this.calls.push(`loaded:${label}`); return this.loadedMap.has(label) ? this.loadedMap.get(label)! : false; }
-  async reload(label: string) { this.calls.push(`reload:${label}`); return this.fail.has(label) ? "kickstart 失败" : null; }
+  async reload(label: string): Promise<string | null> { this.calls.push(`reload:${label}`); return this.fail.has(label) ? "kickstart 失败" : null; }
   reloads() { return this.calls.filter(c => c.startsWith("reload:")); }
 }
 
@@ -311,5 +311,33 @@ test("[验收线 3] switching after the first reload stops the rest and reports 
     expect(r.errors.at(-1)).toContain(`已重载 1/${f.plan.services.length} 个`);
     expect(r.warnings).toEqual([`当前族（new）只重载 1/${f.plan.services.length} 个已有服务；未重装 CLI/plist、未迁移`]);
     expect(observed.length).toBe(to === "observe" ? 1 : 0);
+  }
+});
+
+test("[验收线 2][验收线 3] a failed or thrown first reload followed by a switch keeps the attempted result", async () => {
+  for (const how of ["returned", "thrown"] as const) {
+    for (const to of ["off", "observe", "cli-off"] as const) {
+      let mode: RecoveryMode = "on";
+      const f = await committed(), { p, observed } = ports(f, { mode: () => mode });
+      f.manager.reload = async label => {
+        f.manager.calls.push(`reload:${label}`);
+        if (to === "cli-off") writeFileSync(f.configPath, JSON.stringify({ rename: { services: "on", cli: "off" } }));
+        else mode = to;
+        if (how === "thrown") throw new Error("kickstart timeout");
+        return "kickstart timeout";
+      };
+      const [first, ...rest] = f.plan.services;
+      const gate = gateOf(f);
+      const r = await reloadCurrentFamily(gate, p);
+      expect(r).not.toBe(gate);
+      expect(f.manager.reloads()).toEqual([`reload:${first!.newLabel}`]);
+      expect(r.daemons.map(d => [d.label, d.loaded])).toEqual([[first!.newLabel, false], ...rest.map(s => [s.newLabel, false])]);
+      expect(r.daemons[0]).toMatchObject({ warning: "kickstart timeout" });
+      expect(r.errors[0]).toBe(`${first!.newLabel} 重载失败：kickstart timeout`);
+      expect(r.errors.at(-1)).toContain(`已重载 0/${f.plan.services.length} 个（尝试 1 个）`);
+      expect(r.errors.join("\n")).not.toContain("未执行安装或重载");
+      expect(r.warnings).toEqual([`当前族（new）只重载 0/${f.plan.services.length} 个已有服务；未重装 CLI/plist、未迁移`]);
+      expect(observed.length).toBe(to === "observe" ? 1 : 0);
+    }
   }
 });

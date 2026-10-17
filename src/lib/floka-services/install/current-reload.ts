@@ -151,17 +151,18 @@ export async function reloadCurrentFamily(gate: InstallCliResult, p: ReloadPorts
     const unknown = state.filter(x => x.cur === null).map(x => x.s.newLabel);
     if (unknown.length) return refused(gate, `当前族服务状态未知：${unknown.join(", ")}`);
     const daemons: InstallCliResult["daemons"] = [], errors: string[] = [];
-    let reloaded = 0;
+    // attempted counts every manager.reload call (a failed or thrown one may still have touched the job); reloaded only successes.
+    let attempted = 0, reloaded = 0;
     for (const [i, { s, cur }] of state.entries()) {
       const plistPath = join(home, "Library/LaunchAgents", `${s.newLabel}.plist`);
       // The lock does not freeze policy/config edits: reread mode and upstream gates before every mutating reload.
       const stop = cur ? halted(p) : null;
       if (stop) {
         if (stop === "observe") observeSample(p, proof);
-        if (!reloaded) return gate;
+        if (!attempted) return gate;
         for (const r of state.slice(i)) daemons.push({ label: r.s.newLabel, plistPath: join(home, "Library/LaunchAgents", `${r.s.newLabel}.plist`),
           loaded: false, warning: `未重载：${STOP_WHY[stop]}` });
-        return { ...gate, daemons, errors: [...errors, `当前族重载中途停止（${STOP_WHY[stop]}）：已重载 ${reloaded}/${plan.services.length} 个，其余未动；可重试 install-cli/update`],
+        return { ...gate, daemons, errors: [...errors, `当前族重载中途停止（${STOP_WHY[stop]}）：已重载 ${reloaded}/${plan.services.length} 个（尝试 ${attempted} 个），其余未动；可重试 install-cli/update`],
           warnings: [`当前族（new）只重载 ${reloaded}/${plan.services.length} 个已有服务；未重装 CLI/plist、未迁移`] };
       }
       if (!cur) {
@@ -170,6 +171,7 @@ export async function reloadCurrentFamily(gate: InstallCliResult, p: ReloadPorts
         continue;
       }
       let failure: string | null;
+      attempted++;
       try { failure = await manager.reload(s.newLabel); } catch (e) { failure = e instanceof Error ? e.message : String(e); }
       if (failure === null) reloaded++;
       daemons.push({ label: s.newLabel, plistPath, loaded: failure === null, ...(failure === null ? {} : { warning: failure }) });
