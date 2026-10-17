@@ -60,6 +60,17 @@ describe("PROPLOG1 中心提案收件日志", () => {
     expect(line).not.toMatch(absPath);
   });
 
+  test("[验收线 1] 开卡抛的真 RangeError message 带伪造的 `at 仓库路径` 续行：日志不含其内容，仍有真实仓库帧", async () => {
+    const forged = Array.from({ length: 8 }, (_, i) => ` at ${process.cwd()}/src/sk-FAKE-CREDENTIAL-${i}.ts:12:3`).join("\n");
+    const h = harness([rec("prop-a")], { openAsk: () => { throw new RangeError(`upstream text\n${forged}`); } });
+    await pollCenterProposals(h.deps);
+    const line = h.logs.find(l => l.includes("开卡失败"));
+    expect(line).toBeDefined();
+    expect(line).toMatch(/阶段 开卡；帧 (?:tests\/center-proposal-inbox-log\.test\.ts|src\/bridge\/center-proposal-inbox\.ts):\d+:\d+/);
+    expect(line).toContain("src/bridge/center-proposal-inbox.ts:");
+    for (const bad of ["sk-FAKE-CREDENTIAL", "upstream", process.cwd()]) expect(line).not.toContain(bad);
+  });
+
   test("[验收线 2] pending.all 三条，第二条补记时抛错：第一、三条照样补记，日志只有一行失败", async () => {
     const [a, b, c] = [rec("prop-a", "approved"), rec("prop-b", "approved"), rec("prop-c", "approved")];
     const h = harness([a!, b!, c!], { auto: true });

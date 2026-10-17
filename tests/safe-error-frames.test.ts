@@ -29,8 +29,26 @@ describe("safeErrorLine", () => {
     for (const bad of [SECRET, "/repo", "/Users", "example", "inboxCard"]) expect(line).not.toContain(bad);
   });
 
+  test("真 RangeError 的多行 message 里伪造的 `at 仓库路径` 续行不进日志，也不占帧额度（不改写 stack）", () => {
+    const forged = Array.from({ length: MAX_SAFE_FRAMES }, (_, i) => `    at ${process.cwd()}/src/sk-FAKE-CREDENTIAL-${i}.ts:12:3`);
+    let caught: unknown;
+    try { throw new RangeError(`upstream text\n at ${process.cwd()}/src/sk-FAKE-CREDENTIAL.ts:12:3\n${forged.join("\n")}`); } catch (e) { caught = e; }
+    const line = safeErrorLine(caught, "开卡");
+    expect(line).toMatch(/^RangeError（阶段 开卡；帧 tests\/safe-error-frames\.test\.ts:\d+:\d+/);
+    for (const bad of ["sk-FAKE-CREDENTIAL", "upstream", process.cwd()]) expect(line).not.toContain(bad);
+  });
+
+  test("message 在栈里找不到（创建后被改写）→ 不认任何帧；空 message 只跳首行", () => {
+    const e = new RangeError("orig");
+    e.message = `changed\n at /repo/src/sk-x.ts:1:1`;
+    e.stack = `RangeError: other\n    at /repo/src/sk-x.ts:1:1`;
+    expect(safeFrames(e, { root: "/repo" })).toEqual({ frames: [], external: 0 });
+    const empty = Object.assign(new Error(""), { stack: "Error\n    at /repo/src/a.ts:1:2" });
+    expect(safeFrames(empty, { root: "/repo" })).toEqual({ frames: ["src/a.ts:1:2"], external: 0 });
+  });
+
   test("最多 8 帧，多出来的算进计数", () => {
-    const e = fake(["Error: x", ...Array.from({ length: 11 }, (_, i) => `    at f (/repo/src/a.ts:${i + 1}:1)`)].join("\n"), "Error");
+    const e = fake([`Error: ${SECRET}`, ...Array.from({ length: 11 }, (_, i) => `    at f (/repo/src/a.ts:${i + 1}:1)`)].join("\n"), "Error");
     const r = safeFrames(e, { root: "/repo" });
     expect(r.frames.length).toBe(MAX_SAFE_FRAMES);
     expect(r.external).toBe(3);

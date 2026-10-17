@@ -42,13 +42,28 @@ export function safeErrorName(e: unknown): string {
   return SAFE_NAME.test(e.name) ? e.name : "Error";
 }
 
+/**
+ * 栈去掉错误头（`名字: message`，message 可多行、可含形似 `at /repo/x.ts:1:2` 的续行）后的部分。
+ * 按 message 原文整段定位后切掉，不按行猜；栈里找不到 message（创建后被改写过）→ 分不清哪行是原文，返回空（宁可无帧也不泄露）。
+ */
+function stackBody(e: Error, stack: string): string {
+  let message: string;
+  try { message = typeof e.message === "string" ? e.message : ""; } catch { return ""; }
+  if (!message) return stack.slice(stack.indexOf("\n") + 1 || stack.length);
+  let at = stack.indexOf(`: ${message}`);
+  at = at >= 0 ? at + 2 : stack.indexOf(message);
+  if (at < 0) return "";
+  const rest = stack.slice(at + message.length), nl = rest.indexOf("\n");
+  return nl < 0 ? "" : rest.slice(nl + 1);
+}
+
 /** 栈里仓库内的帧（`相对路径:行:列`，至多 max 个，按栈顺序）+ 其余帧的个数（含超出 max 的仓库帧） */
 export function safeFrames(e: unknown, o: { root?: string; max?: number } = {}): { frames: string[]; external: number } {
-  const stack = e instanceof Error && typeof e.stack === "string" ? e.stack : "";
+  const stack = e instanceof Error && typeof e.stack === "string" ? stackBody(e, e.stack) : "";
   const roots = o.root === undefined ? DEFAULT_ROOTS : repoRoots(o.root), max = o.max ?? MAX_SAFE_FRAMES;
   const frames: string[] = [];
   let external = 0;
-  // 只看 `at ` 开头的行：首行（以及多行 message）是错误原文，不碰
+  // 错误头和 message 已由 stackBody 整段剥掉；剩下的也只看 `at ` 开头的行
   for (const raw of stack.split("\n")) {
     const line = raw.trim();
     if (!line.startsWith("at ")) continue;
