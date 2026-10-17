@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useChatStoreApi } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { useMachineFp } from "../talk/use-talk";
@@ -41,11 +41,11 @@ function LocalTeamContainer(props: TeamPanelProps) {
  * and a node that leaves frees its slot. Same ids in, same slots out, so re-rendering is idempotent.
  */
 function useStableSlots(ids: readonly string[]): (string | null)[] {
-  const ref = useRef<(string | null)[]>([]);
-  const slots = ref.current.map((id) => id !== null && ids.includes(id) ? id : null);
+  const [kept, setKept] = useState<(string | null)[]>([]);
+  const slots = kept.map((id) => id !== null && ids.includes(id) ? id : null);
   for (const id of ids) if (!slots.includes(id)) { const free = slots.indexOf(null); if (free < 0) slots.push(id); else slots[free] = id; }
   while (slots.length && slots.at(-1) === null) slots.pop();
-  ref.current = slots;
+  if (slots.length !== kept.length || slots.some((id, i) => id !== kept[i])) setKept(slots);
   return slots;
 }
 
