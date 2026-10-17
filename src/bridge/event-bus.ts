@@ -170,15 +170,18 @@ export function emitEvent(
   if (!opts?.transient) {
     try {
       const bytes = Buffer.byteLength(JSON.stringify(full), "utf8");
-      let ring = rings.get(full.agent);
-      if (!ring) {
-        ring = { entries: [], bytes: 0 };
-        rings.set(full.agent, ring);
-      }
-      ring.entries.push({ event: full, bytes });
-      ring.bytes += bytes;
-      while (ring.entries.length > RING_LIMIT || ring.bytes > RING_BYTE_LIMIT) {
-        ring.bytes -= ring.entries.shift()!.bytes;
+      // An event that cannot fit is live-only; it must not erase replay/activity history.
+      if (bytes <= RING_BYTE_LIMIT) {
+        let ring = rings.get(full.agent);
+        if (!ring) {
+          ring = { entries: [], bytes: 0 };
+          rings.set(full.agent, ring);
+        }
+        ring.entries.push({ event: full, bytes });
+        ring.bytes += bytes;
+        while (ring.entries.length > RING_LIMIT || ring.bytes > RING_BYTE_LIMIT) {
+          ring.bytes -= ring.entries.shift()!.bytes;
+        }
       }
     } catch (error) {
       // A non-JSON payload cannot be replayed, but this side channel must not break its publisher.

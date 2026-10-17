@@ -17,6 +17,8 @@ import {
   isPostTurnActivity,
   forgetAgent,
   retireAgentSessionEvents,
+  inflightTools,
+  lastActivityAt,
   type BridgeEvent,
 } from "../src/bridge/event-bus.js";
 import { agentInScope, type Principal } from "../src/lib/principals.js";
@@ -289,18 +291,22 @@ describe("ring byte budget", () => {
     expect(kept).toEqual(sent.slice(-kept.length));
     expect(bytes([sent[sent.length - kept.length - 1]!, ...kept])).toBeGreaterThan(limit);
   });
-  test("one oversized event is live-only, evicts older entries, and does not affect other agents", () => {
+  test("one oversized event is live-only and preserves existing replay and activity", () => {
     const other = mk("other");
-    mk("large");
+    const prior = mk("large", "tool_start", { toolId: "tool-1", name: "Read", summary: "pending" });
+    const tools = inflightTools("large");
+    expect(tools.inflight).toHaveLength(1);
     const seen: BridgeEvent[] = [];
     const off = subscribeEvents({ agent: "large" }, (e) => seen.push(e));
     const big = mk("large", "assistant_text", { text: "x".repeat(limit) });
     off();
     expect(seen).toEqual([big]);
-    expect(replayEventsSince(0, { agent: "large" })).toEqual([]);
+    expect(lastActivityAt("large")).toBe(Date.parse(prior.ts));
+    expect(inflightTools("large")).toEqual(tools);
+    expect(replayEventsSince(0, { agent: "large" })).toEqual([prior]);
     expect(replayEventsSince(0, { agent: "other" })).toEqual([other]);
     const next = mk("large");
-    expect(replayEventsSince(0, { agent: "large" })).toEqual([next]);
+    expect(replayEventsSince(0, { agent: "large" })).toEqual([prior, next]);
   });
 });
 

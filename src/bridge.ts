@@ -1,5 +1,5 @@
-import { createSseResponse as handleEventsRequest } from "./bridge/sse-stream.js";
 import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
+import { createSseResponse as handleEventsRequest } from "./bridge/sse-stream.js";
 import { deliverPmLocal, pmClientFor, setPmDeliveryClients } from "./bridge/local-api/project-pm-delivery.js";
 import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 /**

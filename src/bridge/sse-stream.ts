@@ -26,17 +26,24 @@ export function createSseResponse(req: Request, extraFilter?: EventFilter): Resp
   const enc = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
+      const closeIfFull = () => {
+        if (stopped || (controller.desiredSize ?? 0) >= 0) return;
+        controller.enqueue(enc.encode(`event: overflow\ndata: ${JSON.stringify({ seq: lastSeq })}\n\n`));
+        controller.close();
+        cleanup();
+        console.log(`[sse] overflow: closed connection at seq=${lastSeq}`);
+      };
       const enqueue = (frame: string, seq?: number) => {
         if (stopped) return;
         try {
-          controller.enqueue(enc.encode(frame));
+          const chunk = enc.encode(frame);
+          const wasWithinBudget = (controller.desiredSize ?? 0) >= 0;
+          controller.enqueue(chunk);
           if (seq !== undefined) lastSeq = seq;
-          if ((controller.desiredSize ?? 0) < 0) {
-            controller.enqueue(enc.encode(`event: overflow\ndata: ${JSON.stringify({ seq: lastSeq })}\n\n`));
-            controller.close();
-            cleanup();
-            console.log(`[sse] overflow: closed connection at seq=${lastSeq}`);
-          }
+          // One oversized frame is not proof of a slow reader. Allow its immediate read;
+          // an unread frame still closes on the next microtask, or on the next enqueue.
+          if (chunk.byteLength > SSE_QUEUE_BYTE_LIMIT && wasWithinBudget) queueMicrotask(closeIfFull);
+          else closeIfFull();
         } catch {
           cleanup(); // A cancelled reader cannot receive more bytes; detach all producers.
         }

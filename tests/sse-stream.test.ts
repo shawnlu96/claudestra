@@ -157,3 +157,35 @@ test("chat and collaboration consume preceding events, cancel overflow streams, 
     setAppConfigForTest(null);
   }
 });
+
+
+test("one oversized live event reaches a reading consumer without disconnecting it", async () => {
+  const reader = createSseResponse(new Request("http://localhost/events")).body!.getReader();
+  try {
+    await reader.read();
+    const evt = publish("汉😀".repeat(1_300_000));
+    expect(decode((await reader.read()).value)).toBe(`id: ${evt.seq}\ndata: ${JSON.stringify(evt)}\n\n`);
+    expect(subscriberCount()).toBe(1);
+    const next = publish("still connected");
+    expect(decode((await reader.read()).value)).toContain(`id: ${next.seq}\n`);
+  } finally { await reader.cancel(); }
+});
+
+
+test("an oversized unread frame still closes and cancellation is safe before its deferred check", async () => {
+  for (const cancelFirst of [false, true]) {
+    const reader = createSseResponse(new Request("http://localhost/events")).body!.getReader();
+    await reader.read();
+    const evt = publish("x".repeat(9 * 1024 * 1024));
+    if (cancelFirst) await reader.cancel();
+    await Promise.resolve();
+    expect(subscriberCount()).toBe(0);
+    if (!cancelFirst) {
+      const wire = decode((await reader.read()).value);
+      expect(wire).toBe(`id: ${evt.seq}\ndata: ${JSON.stringify(evt)}\n\n`);
+      expect(decode((await reader.read()).value)).toBe(`event: overflow\ndata: {"seq":${evt.seq}}\n\n`);
+      expect((await reader.read()).done).toBe(true);
+    }
+    await reader.cancel();
+  }
+});
