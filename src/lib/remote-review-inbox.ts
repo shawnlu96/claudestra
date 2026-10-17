@@ -9,16 +9,17 @@ import { basename, dirname, resolve } from "node:path";
 import { statePath } from "./paths.js";
 import { PUSH_MAX_BYTES } from "./peer-pr-message.js";
 import { writeTextAtomicSync } from "./state-file.js";
+import { remoteIdentityDigest, type RemoteIdentity } from "./remote-review-identity.js";
 
 export const REMOTE_INBOX_DIR = statePath("ledger", "remote-review-inbox");
-/** <receivedAt>-<card>~<report id>~<head12>.json: oldest first by name, and a push still waiting is found by its key. */
-const NAME = /^\d{13}-[\w.-]{1,80}~PR\d{1,9}-r\d{1,4}~[0-9a-f]{12}\.json$/;
+/** Old names remain readable so an upgrade parks legacy inbox files with a PM notice rather than losing them. */
+const NAME = /^\d{13}-[\w.-]{1,80}~PR\d{1,9}-r\d{1,4}~(?:[0-9a-f]{12}|[0-9a-f]{64})\.json$/;
 const FILE_MAX = PUSH_MAX_BYTES + 4096;
 
 export interface InboxEntry { v: 1; peer: string; agent: string; taskId: string; receivedAt: number; text: string }
 
-export interface InboxKey { taskId: string; reportId: string; head12: string }
-const keyOf = (k: InboxKey): string => `${k.taskId}~${k.reportId}~${k.head12}`;
+export interface InboxKey extends RemoteIdentity { taskId: string; reportId: string }
+const keyOf = (k: InboxKey): string => `${k.taskId}~${k.reportId}~${remoteIdentityDigest(k)}`;
 
 export function writeInbox(entry: Omit<InboxEntry, "v">, key: InboxKey, dir = REMOTE_INBOX_DIR): string {
   const name = `${entry.receivedAt}-${keyOf(key)}.json`;

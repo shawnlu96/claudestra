@@ -37,13 +37,13 @@ describe("RRL-1 hook: not ours → null, nothing stashed", () => {
     expect(h.mirrored).toEqual([]);
   });
 
-  test("[验收线 2] no card with that PR number, or two of them", async () => {
+  test("[验收线 2] no card with that repo+PR, or two of them", async () => {
     fx = remoteFixture();
     fx.db.query("UPDATE tasks SET pr = NULL WHERE id = 'T1'").run();
     expect(await harness().call()).toBeNull();
     fx.db.query("UPDATE tasks SET pr = ? WHERE id = 'T1'").run(`https://github.com/owner/repo/pull/${PR}`);
     createTask(fx.db, fx.at("owner"), { project: "p", id: "T2", title: "T2 same PR", kind: "code" });
-    fx.db.query("UPDATE tasks SET pr = ? WHERE id = 'T2'").run(`https://github.com/other/repo/pull/${PR}`);
+    fx.db.query("UPDATE tasks SET pr = ? WHERE id = 'T2'").run(`https://github.com/owner/repo/pull/${PR}`);
     expect(await harness().call()).toBeNull();
     expect(listInbox(fx.inbox)).toEqual([]);
   });
