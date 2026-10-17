@@ -64,6 +64,21 @@ describe("[验收线 8] 树记录不丢并发新增的成员", () => {
     expect(current().pgids).toEqual([{ id: 4000, leaderStart: at(2_000) }]);
   });
 
+  test("旧键补上 leaderStart 不算新键：别人已剪掉的号不复活；补齐与别人没动的键照常写回", () => {
+    const base: TreeRoot = { ...ROOT, pgids: [{ id: 4000, leaderStart: at(2_000) }, { id: 5000, leaderStart: null }, { id: 5100, leaderStart: null }] };
+    write(base);
+    // 观察者剪掉 5000
+    expect(mergeTreeRecord(dir, "t", base, { ...base, pgids: [{ id: 4000, leaderStart: at(2_000) }, { id: 5100, leaderStart: null }] }).status).toBe("written");
+    // 持有者（手里还是 base）给 5000、5100 补上组长时刻
+    const next = { ...base, pgids: [{ id: 4000, leaderStart: at(2_000) }, { id: 5000, leaderStart: at(2_010) }, { id: 5100, leaderStart: at(2_011) }] };
+    expect(mergeTreeRecord(dir, "t", base, next).status).toBe("written");
+    expect(current().pgids).toEqual([{ id: 4000, leaderStart: at(2_000) }, { id: 5100, leaderStart: at(2_011) }]);
+    // 对方补过 leaderStart、自己手里没改：取对方的，不退回 null
+    const before = current();
+    expect(mergeTreeRecord(dir, "t", base, { ...base, pgids: [{ id: 4000, leaderStart: at(2_000) }, { id: 5100, leaderStart: null }] }).status).toBe("written");
+    expect(current().pgids).toEqual(before.pgids);
+  });
+
   test("损坏记录不被覆盖、按 unknown 保槽：读时坏、合并前一刻被写坏都一样", () => {
     mkdirSync(join(dir, "trees"), { recursive: true });
     writeFileSync(treePath(dir, "t"), "{bad");

@@ -137,22 +137,16 @@ function earlier(a: string | null, b: string | null): boolean {
 
 /**
  * 这棵树和本次开机的关系：记录的开机标识不同 → other（整棵 absent）；旧记录没开机标识时，根启动早于本次开机也是 other；
- * 要比却读不出开机标识 → unknown（不释放）；根启动时刻认不出写法、比不了 → same（沿用旧判定）
+ * 读不出开机标识 → unknown（不释放），先于一切兼容分支判：没有开机字段、根启动时刻为 null 或认不出写法的记录也一样；
+ * 开机标识读得出、根启动时刻认不出写法、比不了 → same（沿用旧判定）
  */
 export function bootState(root: TreeRoot, boot: () => Boot | null = currentBoot): "same" | "other" | "unknown" {
-  if (root.boot) {
-    const b = boot();
-    return b === null ? "unknown" : b.id === root.boot ? "same" : "other";
-  }
+  const b = boot();
+  if (b === null) return "unknown";
+  if (root.boot) return b.id === root.boot ? "same" : "other";
   const linux = root.start === null ? null : /^linux:([^:]+):\d+$/.exec(root.start);
-  if (linux) {
-    const b = boot();
-    return b === null ? "unknown" : b.id === linux[1] ? "same" : "other";
-  }
-  if (startAt(root.start)?.era === "darwin") {
-    const at = boot()?.at ?? null;
-    return at === null ? "unknown" : earlier(root.start, at) ? "other" : "same";
-  }
+  if (linux) return b.id === linux[1] ? "same" : "other";
+  if (startAt(root.start)?.era === "darwin") return b.at === null ? "unknown" : earlier(root.start, b.at) ? "other" : "same";
   return "same";
 }
 

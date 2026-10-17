@@ -94,12 +94,23 @@ function merge3<T>(base: T[], next: T[], latest: T[], key: (x: T) => string): T[
   return [...out.values()];
 }
 
+/**
+ * 归属键按号做三方合并（同一个号只有一把键）：任一方从 base 里删掉的号不复活——哪怕另一方给它补上了 leaderStart；
+ * 两边都有时，leaderStart 谁相对 base 改了取谁（都改了以 next 为准：它是按更新的进程表剪过、补过组长时刻的）
+ */
 function mergeKeys(root: TreeRoot, base: TreeRoot, next: TreeRoot, latest: TreeRoot, kind: "pgid" | "sid"): Key[] {
   const field = kind === "pgid" ? "pgids" : "sids";
-  const keys = merge3(normalizeKeys(root, base[field], kind), normalizeKeys(root, next[field], kind), normalizeKeys(root, latest[field], kind),
-    (k) => `${k.id}@${k.leaderStart}`);
-  // 同一个号只留一把（next 的在前：它是按更新的进程表剪过、补过组长时刻的）
-  return keys.filter((k, i) => keys.findIndex((x) => x.id === k.id) === i);
+  const b = new Map(normalizeKeys(root, base[field], kind).map((k) => [k.id, k]));
+  const l = new Map(normalizeKeys(root, latest[field], kind).map((k) => [k.id, k]));
+  const out = new Map<number, Key>();
+  for (const k of normalizeKeys(root, next[field], kind)) {
+    const was = b.get(k.id);
+    const now = l.get(k.id);
+    if (was && !now) continue; // 别人已剪掉
+    out.set(k.id, now && was && k.leaderStart === was.leaderStart ? now : k);
+  }
+  for (const [id, k] of l) if (!b.has(id) && !out.has(id)) out.set(id, k);
+  return [...out.values()];
 }
 
 /**

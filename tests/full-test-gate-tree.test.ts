@@ -77,6 +77,14 @@ describe("[验收线 2] 开机标识", () => {
     expect(observeTree(root, "u", () => [], 60_000, () => null)).toBe("unknown");
     writeTree("u2", legacy);
     expect(observeTree(root, "u2", () => [], 60_000, () => null)).toBe("unknown");
+    // 没开机字段、根启动时刻为 null / 认不出写法：也先认开机标识，读不出就 unknown，空进程表不放行
+    for (const start of [null, "weird:1"]) {
+      const odd: TreeRoot = { ...legacy, boot: null, start };
+      expect(bootState(odd, () => null)).toBe("unknown");
+      expect(bootState(odd, () => boot)).toBe("same");
+      writeTree("u3", odd);
+      expect(observeTree(root, "u3", () => [], 60_000, () => null)).toBe("unknown");
+    }
     expect(readFileSync(join(root, "trees", "u.json"), "utf8")).toBe(body);
   });
 });
