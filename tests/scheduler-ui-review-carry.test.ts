@@ -32,7 +32,8 @@ import { uiCarryPlan } from "../src/lib/scheduler-ui-carry.js";
 import { uiCarriedFrom } from "../src/lib/scheduler-ui-carry-read.js";
 import { gitIn } from "../src/lib/scheduler-ui-carry-proof.js";
 import { uiMergeRefusal } from "../src/lib/scheduler-ui-merge-refusal.js";
-import { renderInputs, uiReviewCarryCalls, uiReviewCarryMode } from "../src/lib/scheduler-ui-review-carry.js";
+import { legacyCompare, renderInputs, uiReviewCarryCalls, uiReviewCarryMode } from "../src/lib/scheduler-ui-review-carry.js";
+import { judgeUiInputs } from "../src/lib/project-ui-inputs.js";
 import { MERGE_NOT_SENT } from "../src/lib/manual-merge-queue-facts.js";
 
 const DIGEST = "d".repeat(64), PR = "https://github.com/example/repo/pull/5", SCHED = { actor: "scheduler" }, OWNER = { actor: "owner" };
@@ -155,6 +156,23 @@ describe("renderInputs: the render-input tree of one commit, by real git", () =>
   });
 });
 
+describe("UIINPUT1: Floka's built-in declaration (same shape as ui.renderInputs) judges every fixture exactly as the fixed rules", () => {
+  test("same / changed and the digest agree for every main kind and the card's fileGlobs; symlink and missing web/ stay unprovable", () => {
+    const read = () => gitIn(work), floka = { remote: "shawnlu96/claudestra", isFloka: () => true };
+    const judge = (from: string, to: string, globs: string[] = []) => judgeUiInputs(read(), { project: "p", evidenceHeads: [from], targetHead: to, fileGlobs: globs, identity: floka });
+    for (const [kind, globs] of [...Object.keys(heads).map((k) => [k, [] as string[]] as const), ["glob", ["src/lib/owned.ts"]] as const]) {
+      let old = "error";
+      try { const o = legacyCompare(read, [reviewed], heads[kind]!.merged, [...globs]); old = o.status === "same" ? `same:${o.digest}` : "changed"; } catch { /* unprovable */ }
+      const v = judge(reviewed, heads[kind]!.merged, [...globs]);
+      expect(`${kind}:${!v.ok ? "error" : v.same ? `same:${v.summary.inputs}` : "changed"}`).toBe(`${kind}:${old}`);
+      if (v.ok) expect(v.summary).toMatchObject({ source: "builtin", basis: "builtin", trust: "verified", evidenceHeads: [reviewed] });
+    }
+    const first = execFileSync("git", ["rev-list", "--max-parents=0", base], { cwd: work }).toString().trim(), noWeb = judge(first, first);
+    expect(noWeb.ok ? "ok" : noWeb.reason).toBe("DEPENDENCY_UNKNOWN");
+    const link = judge(reviewed, heads.link!.merged);
+    expect(link.ok ? "ok" : link.why).toContain("符号链接");
+  });
+});
 describe("write: on", () => {
   test("main only changed src/lib: ui_review_carry right after the carry's merge_phase with the full evidence; the gate opens; probe counts", () => {
     const w = world(), before = { ...uiReviewCarryCalls };

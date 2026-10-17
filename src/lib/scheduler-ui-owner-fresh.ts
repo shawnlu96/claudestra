@@ -29,7 +29,8 @@ import { readSchedulerConfig } from "./scheduler-config.js";
 import { gitIn, type GitRead } from "./scheduler-ui-carry-proof.js";
 import { kickRemoteMain, readRemoteMain, REMOTE_REFRESH_MS, REMOTE_SERVE_MS, type Spawner } from "./scheduler-ui-owner-fresh-remote.js";
 import { ownerVisualOf } from "./scheduler-ui-merge-refusal.js";
-import { renderInputs } from "./scheduler-ui-review-carry.js";
+import { legacyCompare } from "./scheduler-ui-review-carry.js";
+import { uiInputsGate, type UiInputsDeps } from "./project-ui-inputs.js";
 import { bounceReceipt, cancelMergeRun, manualCancel, MAX_MERGE_BOUNCES, parseBounceReceipt } from "./scheduler-merge-conflict.js";
 import { ciBehindClaim } from "./scheduler-merge-ci-behind.js";
 import { ciCancelGate } from "./scheduler-merge-ci-cancel.js";
@@ -212,24 +213,31 @@ function shotHead(events: readonly LedgerEvent[], digest: unknown): string | nul
   return typeof h === "string" && SHA.test(h) ? h : null;
 }
 
-export interface FreshDeps { read?: (project: string) => GitRead }
+export interface FreshDeps { read?: (project: string) => GitRead; uiInputs?: UiInputsDeps; policy?: RecoveryPolicyPort }
 const repoRead = (project: string): GitRead => {
   const repo = readSchedulerConfig().projects[project]?.repoDir;
   if (!repo) throw new Error("调度配置里没有本项目的 repoDir");
   return gitIn(repo);
 };
 
-/** UIOWNCARRY1's render inputs (renderInputs) at the screenshots' head and the new head. Never throws. */
-function renderCompare(task: LedgerTask, events: readonly LedgerEvent[], from: string, deps: FreshDeps) {
+/**
+ * UIOWNCARRY1's render inputs (renderInputs) at the screenshots' head and the new head; under projectUiInputs on, the project's
+ * declared inputs (project-ui-inputs.ts), whose observe note follows the caller's records (cmp.observe). Never throws.
+ */
+function renderCompare(db: Database, task: LedgerTask, events: readonly LedgerEvent[], from: string, deps: FreshDeps, now: number) {
   const shot = shotHead(events, task.extra.screenshotsDigest) ?? from, head = task.headSHA as string;
   const globs = task.extra.fileGlobs ?? [];
-  if (!Array.isArray(globs) || globs.some((g) => typeof g !== "string")) return { shot, renderSame: false, why: "卡上 fileGlobs 不是字符串列表" };
-  try {
-    const read = (deps.read ?? repoRead)(task.project);
-    const a = renderInputs(read, shot, globs as string[]), b = shot === head ? a : renderInputs(read, head, globs as string[]);
-    return { shot, renderSame: a.digest === b.digest, renderInputs: { shot: a.digest, head: b.digest, count: b.count },
-      ...(a.digest === b.digest ? {} : { why: "web/、资源、依赖与构建配置或本卡 fileGlobs 有变" }) };
-  } catch (e) { return { shot, renderSame: false, why: `渲染输入核不了（${(e as Error).message.split("\n")[0]!.slice(0, 160)}）` }; }
+  if (!Array.isArray(globs) || globs.some((g) => typeof g !== "string")) return { shot, renderSame: false, why: "卡上 fileGlobs 不是字符串列表", observe: () => {} };
+  let read: GitRead | string;
+  try { read = (deps.read ?? repoRead)(task.project); } catch (e) { read = (e as Error).message; }
+  const reader = typeof read === "string" ? read : () => read as GitRead;
+  const ui = uiInputsGate({ db, project: task.project, task: task.id, path: "ownerFresh", now, read: reader, evidenceHeads: [shot], targetHead: head,
+    fileGlobs: globs as string[], deps: deps.uiInputs, policy: deps.policy, legacy: () => legacyCompare(reader, [shot], head, globs as string[]) });
+  const o = ui.outcome, observe = ui.observe, extra = ui.mode === "on" && o.summary ? { uiInputs: o.summary } : {};
+  if (o.status === "error") return { shot, renderSame: false, why: `渲染输入核不了（${o.why}）`, ...extra, observe };
+  if (o.status === "same") return { shot, renderSame: true, renderInputs: { shot: o.digest, head: o.digest, count: o.count }, ...extra, observe };
+  return { shot, renderSame: false, ...(o.heads ? { renderInputs: { shot: o.heads[shot], head: o.heads[head], count: o.count } } : {}),
+    why: "web/、资源、依赖与构建配置或本卡 fileGlobs 有变", ...extra, observe };
 }
 
 /**
@@ -245,7 +253,7 @@ export function ownerFreshClose(db: Database, ctx: WriteCtx, row: MergeRun, rawR
     const t = card(), intent = getIntent(db, row.intentId) as SchedulerIntent;
     if (t.stage !== "review" || t.headSHA !== row.reviewedHead) throw new LedgerError("conflict", "只追 main 收尾时任务阶段或 head 已变");
     const events = listEvents(db, { project: t.project, target: t.id });
-    const cmp = renderCompare(t, events, intent.head ?? row.reviewedHead, deps);
+    const { observe, ...cmp } = renderCompare(db, t, events, intent.head ?? row.reviewedHead, deps, now);
     endFresh(db, ctx, row, `fresh: ${OWNER_FRESH_DONE}`, "done", now);
     insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:resolved` }, {
       project: row.project, target: row.taskId, kind: "scheduler", text: `只追 main：结束（${OWNER_FRESH_DONE}）`,
@@ -257,6 +265,7 @@ export function ownerFreshClose(db: Database, ctx: WriteCtx, row: MergeRun, rawR
       data: { op: FRESH_OP, intentId: row.intentId, from: intent.head, to: t.headSHA, specRev: t.specRev, round: t.round,
         digest: t.extra.screenshotsDigest ?? null, ...cmp },
     }, true);
+    observe();
     return;
   }
   const receipt = gateReceipt(rawReceipt);

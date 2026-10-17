@@ -18,6 +18,7 @@ import { getMeta, getTask } from "./ledger-store.js";
 import { insertEvent } from "./ledger-tx.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { uiInputsGate, type UiInputsDeps, type UiInputsOutcome } from "./project-ui-inputs.js";
 import type { GitRead } from "./scheduler-ui-carry-proof.js";
 import type { CarryEvidence, MergeRun } from "./scheduler-merge.js";
 
@@ -63,7 +64,7 @@ export function renderInputs(read: GitRead, commit: string, fileGlobs: readonly 
 
 /** What the carry transaction hands over: the pre-move card, PM's verdict and the temp repo the canonical proof just passed in. */
 export interface ReviewCarryInput { task: LedgerTask; intentId: string; ev: CarryEvidence; pm: PmUiGate; approval: LedgerEvent | undefined;
-  ownerVisual: boolean; heldFrom: boolean; read: (() => GitRead) | string; now: number }
+  ownerVisual: boolean; heldFrom: boolean; read: (() => GitRead) | string; now: number; uiInputs?: UiInputsDeps }
 export interface ReviewCarryPlan { note: string | null; commit: (carrySeq: number) => void }
 const NONE: ReviewCarryPlan = { note: null, commit: () => {} };
 
@@ -87,24 +88,40 @@ export function uiReviewCarryPlan(db: Database, x: ReviewCarryInput, policy?: Re
   }
   if (pm.head !== ev.oldHead && !x.heldFrom) return refuse("PM 截图验收的 head 到原 head 之间不是调度器的可信沿用链");
   if (!Array.isArray(globs) || globs.some((g) => typeof g !== "string")) return refuse("卡上 fileGlobs 不是字符串列表");
-  let inputs: { approved: string; from: string; to: string; count: number };
-  try {
-    if (typeof x.read === "string") throw new Error(x.read);
-    const read = x.read(), at = (h: string) => renderInputs(read, h, globs as string[]);
-    const approved = at(pm.head), from = pm.head === ev.oldHead ? approved : at(ev.oldHead), to = at(ev.newHead);
-    inputs = { approved: approved.digest, from: from.digest, to: to.digest, count: to.count };
-  } catch (e) { return refuse(`渲染输入核不了（${(e as Error).message.split("\n")[0]!.slice(0, 160)}）`); }
-  if (inputs.approved !== inputs.to || inputs.from !== inputs.to) return refuse("新 head 的渲染输入（web/、资源、依赖与构建配置）和批准时不同");
-  const data = { ...base, approvedHead: pm.head, approvalSeq: pm.seq, approvalActor: x.approval!.actor, approvalOp: x.approval!.data.op, ask: null,
-    digest, renderInputs: inputs.to, renderCount: inputs.count, mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash };
-  if (mode === "observe") {
-    return { note: null, commit: () => void recordObserved(db, { project: task.project, mechanism: "uiReviewCarry", target: task.id,
-      actionKey: `ui-review-carry:${ev.newHead}`, action: `继承截图验收到 ${ev.newHead.slice(0, 12)}（渲染输入 ${inputs.count} 项与批准时一致）`,
-      data: { ...data, carried: true } }, x.now) };
-  }
-  return { note: null, commit: (carrySeq) => void insertEvent(db, { actor: "scheduler", now: x.now, dedupKey: uiReviewCarryKey(x.intentId, carrySeq) }, {
-    project: task.project, target: task.id, kind: "scheduler", text: `继承截图验收到新 head ${ev.newHead.slice(0, 12)}（渲染输入与批准时一致）`,
-    data: { op: UI_REVIEW_CARRY_OP, ...data, carrySeq } }, true) };
+  const ui = uiInputsGate({ db, project: task.project, task: task.id, path: "review", now: x.now, read: x.read, evidenceHeads: [pm.head, ev.oldHead],
+    targetHead: ev.newHead, fileGlobs: globs as string[], deps: x.uiInputs, policy, legacy: () => legacyCompare(x.read, [pm.head!, ev.oldHead], ev.newHead, globs as string[]) });
+  const plan = ((): ReviewCarryPlan => {
+    const o = ui.outcome;
+    if (o.status === "error") return refuse(`渲染输入核不了（${o.why}）`);
+    if (o.status === "changed") return refuse("新 head 的渲染输入（web/、资源、依赖与构建配置）和批准时不同");
+    const data = { ...base, approvedHead: pm.head, approvalSeq: pm.seq, approvalActor: x.approval!.actor, approvalOp: x.approval!.data.op, ask: null,
+      digest, renderInputs: o.digest, renderCount: o.count, mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash,
+      ...(ui.mode === "on" && o.summary ? { uiInputs: o.summary } : {}) };
+    if (mode === "observe") {
+      return { note: null, commit: () => void recordObserved(db, { project: task.project, mechanism: "uiReviewCarry", target: task.id,
+        actionKey: `ui-review-carry:${ev.newHead}`, action: `继承截图验收到 ${ev.newHead.slice(0, 12)}（渲染输入 ${o.count} 项与批准时一致）`,
+        data: { ...data, carried: true } }, x.now) };
+    }
+    return { note: null, commit: (carrySeq) => void insertEvent(db, { actor: "scheduler", now: x.now, dedupKey: uiReviewCarryKey(x.intentId, carrySeq) }, {
+      project: task.project, target: task.id, kind: "scheduler", text: `继承截图验收到新 head ${ev.newHead.slice(0, 12)}（渲染输入与批准时一致）`,
+      data: { op: UI_REVIEW_CARRY_OP, ...data, carrySeq } }, true) };
+  })();
+  // projectUiInputs observe: its note goes after this path's own record (which must stay at carrySeq + 2)
+  return { note: plan.note, commit: (carrySeq) => { plan.commit(carrySeq); ui.observe(); } };
+}
+
+/**
+ * The fixed-rule judgment (renderInputs) of the evidence heads against the target, as UIR1 / UIOWNCARRY1 / the owner-fresh compare
+ * read it before UIINPUT1; project-ui-inputs.ts uiInputsGate keeps it for off and observe. Throws when not provable.
+ */
+export function legacyCompare(read: (() => GitRead) | string, evidence: string[], target: string, globs: string[]): UiInputsOutcome {
+  if (typeof read === "string") throw new Error(read);
+  const r = read(), seen = new Map<string, RenderInputs>();
+  const at = (h: string) => { if (!seen.has(h)) seen.set(h, renderInputs(r, h, globs)); return seen.get(h)!; };
+  const before = evidence.map(at), to = at(target); // the old read order: approved, from, then the new head
+  const same = before.every((b) => b.digest === to.digest);
+  return same ? { status: "same", digest: to.digest, count: to.count, summary: null }
+    : { status: "changed", summary: null, heads: Object.fromEntries([...seen].map(([h, d]) => [h, d.digest])), count: to.count };
 }
 
 const own = (e: LedgerEvent | undefined, op: string): e is LedgerEvent => e?.kind === "scheduler" && e.actor === "scheduler" && e.data.op === op;
