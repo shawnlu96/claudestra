@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { addDep } from "../src/lib/ledger-deps-write.js";
+import { mergeQueueCmds } from "../src/manager/ledger-merge-queue-cmds.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { setFrozen, setMeta } from "../src/lib/ledger-write.js";
@@ -158,6 +160,24 @@ test("[验收线 3] gates still apply: a held or frozen now entry never gets the
   expect(w.slot()).toBeNull();
 });
 
+for (const key of ["on", "observe", "off"] as const) {
+  test(`[验收线 3] dependencies: a now child never wins ahead of its later prerequisite (mergeOwnerPriority ${key})`, async () => {
+    world({ mergeOwnerPriority: key }); enqueue("PARENT", "later"); enqueue("CHILD", "now");
+    addDep(w.db, ctx(), { from: "PARENT", to: "CHILD", kind: "blocks", when: "PARENT 合并后" });
+    expect(pick().entry?.taskId).toBe("PARENT");
+    expect(() => plan("CHILD")).toThrow(/前置/);
+    await w.pass();
+    expect(w.slot()).toBe("PARENT");
+  }, 60_000);
+}
+
+test("[验收线 3] dependencies: when every admitted version waits on a prerequisite the legacy pick stands", () => {
+  world(); enqueue("PRE", "later"); enqueue("CHILD", "now"); enqueue("NEXT", "now");
+  insertEvent(w.db, { actor: "owner" }, { project: "p", target: "PRE", kind: "scheduler", data: { op: "workflow", hold: "暂缓" } }, false);
+  for (const id of ["CHILD", "NEXT"]) addDep(w.db, ctx(), { from: "PRE", to: id, kind: "blocks", when: "PRE 合并后" });
+  expect(pick()).toMatchObject({ entry: { taskId: "CHILD" }, reason: "最早有效版本（保留 yielded 队位）" });
+});
+
 for (const key of ["on", "observe", "off"] as const) for (const sort of ["on", "observe", "off"] as const) {
   test(`[验收线 3][验收线 4] mergeOwnerPriority ${key} × prioritySort ${sort}`, async () => {
     world({ mergeOwnerPriority: key }, sort); enqueue("A", "later"); await ask("M", "now");
@@ -173,6 +193,23 @@ for (const key of ["on", "observe", "off"] as const) for (const sort of ["on", "
     expect(w.slot()).toBeNull();
   });
 }
+
+test("[验收线 3] ledger merge-queue shows the owner's next pick and its reason; rows keep the WIP gate's auto order", async () => {
+  world(); enqueue("OLD", "later"); enqueue("NEW", "now");
+  const view = async () => (await mergeQueueCmds()["merge-queue"]!.run({ db: w.db, project: () => "p", deps: { now: Date.now } } as never)) as
+    { rows: { task: string }[]; owner: unknown; lines: string[] };
+  let r = await view();
+  expect(r.owner).toEqual({ task: "NEW", source: "auto", reason: expect.stringContaining("owner 档位 now") });
+  expect(r.lines[0]).toStartWith("统一队列下一位：NEW（auto）｜owner 档位 now");
+  expect(r.rows.map((x) => x.task)).toEqual(["OLD", "NEW"]);
+  keys({ mergeOwnerPriority: "off" });
+  expect((await view()).owner).toEqual({ task: "OLD", source: "auto", reason: "最早有效版本（保留 yielded 队位）" });
+  keys({ mergeQueueOwner: "off" });
+  r = await view();
+  expect(r.owner).toBeNull();
+  expect(r.lines.some((l) => l.startsWith("统一队列下一位"))).toBe(false);
+  expect(notes()).toHaveLength(0);
+});
 
 test("[验收线 4] switching the key while running takes effect on the next pick without a restart", async () => {
   world(); enqueue("A", "later"); await ask("M", "now");

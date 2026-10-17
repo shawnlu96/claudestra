@@ -13,7 +13,7 @@ import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
 import { ridesTrain, trainHolds } from "./scheduler-merge-train-hold.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 import { mainCiLent, ownerMainCiPaused, ownerRepairs } from "./merge-queue-owner-main-ci.js";
-import { ownerPriorityPick } from "./merge-queue-owner-priority.js";
+import { ownerPriorityMode, ownerPriorityPick } from "./merge-queue-owner-priority.js";
 import type { RecoveryMode } from "./recovery-policy.js";
 
 import { OWNER_FRESH_NODE, ownerFreshRefusal } from "./scheduler-ui-owner-fresh.js";
@@ -99,6 +99,11 @@ export function requireMergeQueueOwner(db: Database, taskId: string, action: str
   if (pick.entry?.taskId !== taskId || (intentId ? pick.intentId !== intentId : pick.intentId !== null)) {
     throw new LedgerError("conflict", `统一合并队列：${pick.reason}${pick.entry ? `（${pick.entry.taskId} 先）` : ""}`);
   }
+}
+
+/** `ledger merge-queue`'s head line: the pick the writers enforce, read without queueing a PRIO2 sample; null = the owner is off. */
+export function ownerQueueHead(db: Database, project: string, now: number): OwnerPick | null {
+  return queueOwnerMode(db, project) === "on" ? pickMergeQueueOwner(db, project, now, ownerPriorityMode(db, project)) : null;
 }
 
 /** Replaces only the claim's decision, never manualTurn's read-only queue view (which QUEUE1 itself uses). */

@@ -4,9 +4,13 @@
  * task id). With the recovery key `mergeOwnerPriority` on, PRIO2 (`prioritySort`, entry merge_contest) re-orders the rest by the
  * owner's band and explicit order; same band and place keeps QUEUE1 age. Protected entries (repairs, admitted versions that already
  * own a live merge intent, e.g. a yielded run) never move and are never passed: a higher band only overtakes inside the stretch
- * between two protected entries. Key observe = legacy runs, the would-be pick is recorded; off = legacy, nothing else is read.
+ * between two protected entries. A version whose prerequisite cards are unfinished never wins the reordered pick (the planner
+ * would only wait on it while the slot owner fence refuses its prerequisite: tests/merge-queue-owner-priority.test.ts).
+ * Key observe = legacy runs, the would-be pick is recorded; off = legacy, nothing else is read.
  */
 import type { Database } from "bun:sqlite";
+import { blockedBy, depViews } from "./ledger-deps.js";
+import { listDeps, listTasks } from "./ledger-store.js";
 import { ownerPorts } from "./merge-queue-owner-context.js";
 import type { QueueEntry } from "./merge-queue-facts.js";
 import type { RecoveryMode } from "./recovery-policy.js";
@@ -16,7 +20,7 @@ import { recordPrioritySort } from "./scheduler-priority-order-record.js";
 const MERGE_OWNER_PRIORITY_KEY = "mergeOwnerPriority";
 
 /** Read before every pick, so `ledger scheduler-recovery … --key mergeOwnerPriority` takes effect without a restart. */
-function ownerPriorityMode(db: Database, project: string): RecoveryMode {
+export function ownerPriorityMode(db: Database, project: string): RecoveryMode {
   try { return ownerPorts(db).policy(project, MERGE_OWNER_PRIORITY_KEY).mode; }
   catch (e) { console.error(`[merge-owner] ${project} ${MERGE_OWNER_PRIORITY_KEY} 策略不可读，按 off：${String(e)}`); return "off"; }
 }
@@ -29,6 +33,12 @@ function withinStretches<T>(legacy: readonly T[], order: readonly T[], fixed: (x
   for (const x of legacy) if (fixed(x)) { flush(); out.push(x); } else stretch.push(x);
   flush();
   return out;
+}
+
+/** Same dependency gate as the planner (scheduler-snapshot `blockedBy`), read once per pick. */
+function waitingOnDeps(db: Database, project: string, entries: readonly QueueEntry[]): ReadonlySet<string> {
+  const views = depViews(listDeps(db, project), listTasks(db, project));
+  return new Set(entries.filter((e) => blockedBy(e.taskId, views).length).map((e) => e.taskId));
 }
 
 export interface OwnerPriorityPick { entry: QueueEntry | null; why: string | null }
@@ -46,15 +56,19 @@ export function ownerPriorityPick(db: Database, project: string, legacy: readonl
   const first = (list: readonly QueueEntry[]) => list.find(ok) ?? null;
   if (mode === "off") return { entry: first(legacy), why: null };
   const fixed = (e: QueueEntry) => repairs.has(e.taskId) || (inFlight(e) && ok(e));
+  const waiting = waitingOnDeps(db, project, legacy);
+  // No winner here (every admitted version still waits on a prerequisite) falls back to the legacy pick, never to an empty slot.
+  let fellBack = false;
+  const ranked = (list: readonly QueueEntry[]) => list.find((e) => ok(e) && (fixed(e) || !waiting.has(e.taskId))) ?? ((fellBack = true), first(legacy));
   const sort = sortByPriority(db, "merge_contest", legacy, (e) => ({ project, taskId: e.taskId }), { pinned: fixed, record: false, now });
-  const would = withinStretches(legacy, sort.would, fixed), legacyChosen = first(legacy), wouldChosen = first(would);
-  const chosen = mode === "on" ? first(withinStretches(legacy, sort.applied, fixed)) : legacyChosen;
+  const would = withinStretches(legacy, sort.would, fixed), legacyChosen = first(legacy), wouldChosen = ranked(would);
+  const chosen = mode === "on" ? ranked(withinStretches(legacy, sort.applied, fixed)) : legacyChosen;
   if (mode === "on" && !override) {
     recordPrioritySort("merge_contest", { ranked: sort.ranked, would: would.map((e) => sort.rankOf(e)!) as Ranked<QueueEntry>[],
       opts: {}, now, ledger: db.filename, claim: { legacy: legacyChosen, would: wouldChosen, blocked: [] } });
   }
   const r = chosen ? sort.rankOf(chosen) : undefined;
-  if (mode !== "on" || !r?.rank || r.mode !== "on" || r.pinned) return { entry: chosen, why: null };
+  if (mode !== "on" || fellBack || !r?.rank || r.mode !== "on" || r.pinned) return { entry: chosen, why: null };
   const place = r.rank.order === null ? "" : ` 第 ${r.rank.order + 1} 位`;
   return { entry: chosen, why: `owner 档位 ${r.rank.band}${place}，同档按队龄（保留在途与 yielded 队位）` };
 }
