@@ -7,6 +7,7 @@
  * asks manualRunDrift / manualRunReviewer for intents whose node is MANUAL_MERGE_NODE). docs/design/manual-merge-queue.md.
  */
 import type { Database } from "bun:sqlite";
+import { isReminderOwnerAction } from "./ask-reminder-sources.js";
 import { blockedBy, depViews } from "./ledger-deps.js";
 import { getAsk, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { getFeature } from "./ledger-feature.js";
@@ -201,7 +202,8 @@ const decisionStands = (a: Ask, now: number): boolean => a.kind === "owner_actio
 function authorizationRefusal(db: Database, taskId: string, head: string, now: number): string | null {
   // Creation order: openAskFull inserts one row per transaction, so rowid breaks a same-millisecond tie; the id's suffix is random.
   const rows = db.query("SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') ORDER BY createdAt, rowid").all(taskId) as { id: string }[];
-  const asks = rows.map(({ id }) => getAsk(db, id)).filter((a): a is Ask => !!a);
+  // Filter before replacement lookup: a reminder cannot discharge a superseded owner decision.
+  const asks = rows.map(({ id }) => getAsk(db, id)).filter((a): a is Ask => !!a && !isReminderOwnerAction(a));
   const replaced = new Set(asks.filter((a) => a.state === "superseded" && a.updatedAt < a.expiresAt && handedOn(a, head)).map((a) => a.id));
   const latest = new Map<string, Ask>(); // creation order: the last version seen of each decision is its newest
   for (const a of asks) {
@@ -260,7 +262,8 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
   if (safety) return { kind: "wait", why: `安全留证 #${safety.seq} 未处置` };
   const feature = task.featureId ? getFeature(db, task.featureId) : null;
   if (feature?.status === "paused") return { kind: "wait", why: `feature ${feature.id} 已暂停` };
-  const asks = db.query("SELECT id FROM asks WHERE taskId = ? AND state = 'open'").all(task.id) as { id: string }[];
+  const asks = (db.query("SELECT id, kind, createdBy FROM asks WHERE taskId = ? AND state = 'open'").all(task.id) as
+    Pick<Ask, "id" | "kind" | "createdBy">[]).filter((a) => !isReminderOwnerAction(a));
   if (asks.length) return { kind: "wait", why: `审批未答：${asks.map((a) => a.id).join("、")}` };
   const auth = authorizationRefusal(db, task.id, req.head, now);
   if (auth) return { kind: "wait", why: auth };

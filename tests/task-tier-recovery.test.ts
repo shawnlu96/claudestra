@@ -17,6 +17,7 @@ import { RECOVERY_KEYS, recoveryPolicy, type RecoveryMode } from "../src/lib/rec
 import { useRoleModelPort } from "../src/lib/role-model-settings-local.js";
 import { defaultRoleModels, type RoleModelRead } from "../src/lib/role-model-settings.js";
 import { taskTierLaunchHistory } from "../src/lib/task-tier-launch-events.js";
+import { resetDocsTemplate } from "../src/lib/task-tier-docs-template.js";
 import { registerAuthorTierOverride, taskTierMode, tierCheckGate, useTaskTierPort, type TierLaunchCtx } from "../src/lib/task-tier-models.js";
 import { registerTierChecks } from "../src/lib/task-tier-spec.js";
 import { testChildEnv } from "./test-env.js";
@@ -153,6 +154,7 @@ describe("[验收线 3] observe：只记 would-use", () => {
   });
 
   test("扩展点 2 的交付钩子：observe 记会拒、放行；on 拒绝并记事件", () => {
+    resetDocsTemplate(); // 同进程先跑的开卡测试可能已按缺省 on 挂上 docs 范围钩子（进程级）；本条只测自己挂的钩子
     const db = ledger();
     cleanups.push(registerTierChecks({ delivery: (c) => (c.files?.includes("docs/x.md") ? null : "交付改了 docs 之外的文件") }));
     const at = { project: "p1", taskId: "T1", tier: "docs" as const, fileGlobs: ["docs/**"], files: ["src/a.ts"] };

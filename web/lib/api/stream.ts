@@ -82,7 +82,7 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
         closed = true;
         return controller.close();
       }
-      const { events, rest } = drainFrames(buffer + dec.decode(value, { stream: true }));
+      const { events, rest, overflow } = drainFrames(buffer + dec.decode(value, { stream: true }));
       buffer = rest;
       let emitted = 0;
       for (const evt of events) {
@@ -97,6 +97,13 @@ export async function openAgentEventStream(agent: string, opts: { since?: number
           controller.enqueue(frame({ ...mapped, eid: evt.seq })); // eid = bridge seq：下次重连 ?since=<eid>
           emitted++;
         }
+      }
+      if (overflow) {
+        closed = true;
+        heldBg = null; // Reconnect fetches the current background snapshot.
+        upstream.cancel().catch(() => undefined); // The server may already have closed; cancellation only releases the reader.
+        controller.close();
+        return;
       }
       // 这一块全是心跳 / 注释 / 别的 agent 的帧：补一个 [DONE] 让读端知道流活着
       if (!emitted) controller.enqueue(frame(SSE_DONE));

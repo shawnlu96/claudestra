@@ -144,7 +144,7 @@ export interface QuotaCardFacts {
   fallback: FallbackMode;
   chain: readonly string[];
   target: string | null;
-  /** on 档也不自动切的原因（审查 / 出借会话） */
+  /** 不自动切的原因（身份未知 / 审查 / 出借会话） */
   noAuto?: string;
   /** on 档切了没成：宿主给的原因 */
   switchError?: string;
@@ -163,6 +163,7 @@ function waitReason(f: QuotaCardFacts): string {
 }
 
 function fallbackLine(f: QuotaCardFacts): string | null {
+  if (f.noAuto && !f.target) return f.noAuto;
   if (f.fallback === "off" || !f.chain.length) return null;
   if (f.switchError) return `按备用链切到 ${f.target} 没成：${f.switchError}`;
   if (!f.target) return "备用链里没有现在能用的模型";

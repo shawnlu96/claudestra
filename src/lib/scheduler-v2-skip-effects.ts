@@ -74,6 +74,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "merge-deploy-outbox.ts": "ledger=1",
     "merge-queue-candidates.ts": "ledger=1", // CAND1: `ledger scheduler-recovery-observe` for mergeUnifiedCandidates notes, through the pass manager
     "merge-queue-owner-pass.ts": "ledger=1",
+    "merge-queue-owner-priority.ts": "ledger=1", // QUEUEPRIO1: `ledger scheduler-recovery-observe` for mergeOwnerPriority notes, through the pass manager
     "observation-auto-register-tick.ts": "ledger=1", // Spec registration through the leased pass manager
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
@@ -237,7 +238,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3",
     "ledger-scheduler-resume.ts": "sql=3 stmt=3", // RVF-1: reached through scheduler-recovery-write.ts (writer-process code, never run by the pass)
-    "ledger-scheduler-schema.ts": "sql=6 stmt=13",
+    "ledger-scheduler-schema.ts": "sql=10 stmt=19",
     "ledger-scheduler-settle.ts": "sql=2 stmt=2",
     "ledger-scheduler-write.ts": "sql=7 stmt=7",
     "ledger-steps-write.ts": "sql=3 stmt=3",
@@ -291,6 +292,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "order-mark.ts": "ledger=1",
     // security-pool fs=3: only setSecurityPoolMode writes (the owner's `security-pool` command); the pass only reads the switch
     "security-pool.ts": "fs=3",
+    "task-tier-lend-settings.ts": "fs=1", // 设置页和 CLI 唯一的显式写入口；调度器只读
     // test-guard: only a bun test runner without tests/preload.ts spawns the fallback-root reaper (its rmSync is inside the reaper script)
     "test-guard.ts": "proc=1 fs=1",
   },
@@ -365,6 +367,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "sqlite-migrate.ts": "stmt=2",
     "state-file.ts": "fs=7",
     "sys-memory.ts": "proc=1",
+    "task-tier-escalation-store.ts": "sql=13 stmt=14 fs=1", // TIER3c: escalation store, written only from the author create wrapper (card-role-definitions) under the gated create
     "tmux-helper.ts": "stmt=3 proc=23 fs=1",
     "unmanaged-archive.ts": "fs=4",
     "update-inflight.ts": "proc=2 fs=2",
