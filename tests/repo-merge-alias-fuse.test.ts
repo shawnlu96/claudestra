@@ -1,7 +1,9 @@
 /** rename-floka-REPOMERGE1 · the train's CI_IO_MAP fuse entry (ci-io-map-fuse-run.ts) with the renamed repository's old and new name. */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { CiIoMapFuseGh } from "../src/lib/ci-io-map-fuse.js";
+import type { CiIoMapFuseGh, FuseCase } from "../src/lib/ci-io-map-fuse.js";
+import { fuseLedger } from "../src/lib/ci-io-map-fuse-ledger.js";
 import { ciIoMapFuseHook, resetFuseMemory, type FusePort } from "../src/lib/ci-io-map-fuse-run.js";
+import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { OFFICIAL_REPO, PROPOSED_REPO } from "../src/lib/floka-repo/migrate.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 import { setRepoAliasForTest } from "../src/lib/repo-alias.js";
@@ -45,5 +47,40 @@ describe("[验收线 1/4] the fuse hook reads a run GitHub links under the other
     setRepoAliasForTest({ mode: "on", sink: () => {} });
     expect(await ciRunCalls(OLD, OLD, [check("someone/claudestra", 8), check("someone/floka", 9)])).toEqual([]);
     expect(await ciRunCalls("someone/floka", OLD, [check(OLD, 10)])).toEqual([]);
+  });
+});
+
+/**
+ * The real ledger and carry, the config already on the new name: three old-name pending cases and one new-name one, each read as a
+ * completed green run (so each is settled at once). Returns the runs asked for (and under which name) and the cases still pending.
+ */
+async function carryTwice(config: string): Promise<{ calls: string[]; open: number[] }> {
+  const db = openLedger(":memory:"), ledger = fuseLedger(db, () => 1_000), calls: string[] = [];
+  const pending = (repo: string, runId: number): FuseCase => ({ project: "p", repo, train: "x", car: "c1", branch: "train/x", runId, members: [], attempt: 1 });
+  for (const c of [pending(OLD, 1), pending(OLD, 2), pending(OLD, 3), pending(NEW, 4)]) ledger.pend(c);
+  const gh = {
+    ciRun: async (repo: string, id: number, attempt = 1) => {
+      calls.push(`${repo}#${id}`);
+      return { id, attempt, status: "completed", conclusion: "success", branch: "train/x", head: H1, path: ".github/workflows/ci.yml", event: "pull_request", repo, headRepo: repo, prs: [] };
+    },
+  } as unknown as CiIoMapFuseGh;
+  const port = { mode: () => "on", projectRepo: () => config, gh, ledger, now: () => 1_000, pm: async () => {}, skip: () => false } as unknown as FusePort;
+  const orig = console.log;
+  console.log = () => {};
+  try { const hook = ciIoMapFuseHook(port); await hook.carry("p"); await hook.carry("p"); } finally { console.log = orig; }
+  try { return { calls, open: ledger.openCases("p", 0).map((c) => c.runId) }; } finally { closeLedger(":memory:"); }
+}
+
+describe("[fuse-carry] old-name cases left open before the config moved to the new name", () => {
+  test("on: every case is read under the configured name, closed under its own name, and none keeps the carry slots", async () => {
+    setRepoAliasForTest({ mode: "on", sink: () => {} });
+    expect(await carryTwice(NEW)).toEqual({ calls: [`${NEW}#1`, `${NEW}#2`, `${NEW}#3`, `${NEW}#4`], open: [] });
+  });
+  test("off / observe: the old-name cases stay out of the new-name carry, as before", async () => {
+    for (const mode of ["off", "observe"] as const) {
+      setRepoAliasForTest({ mode, sink: () => {} });
+      resetFuseMemory();
+      expect(await carryTwice(NEW)).toEqual({ calls: [`${NEW}#4`], open: [1, 2, 3] });
+    }
   });
 });

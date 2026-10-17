@@ -149,7 +149,7 @@ async function lowered(port: FusePort, c: FuseCase, key: string, e: FuseEvidence
 async function act(port: FusePort, c: FuseCase, e: FuseEvidence): Promise<Outcome> {
   const { gh, ledger } = port, key = evidenceKey(e);
   if (ledger.isDone(key)) return { end: "这份证据已经处理过" };
-  const before = await gh.ioMapVar(c.repo);
+  const before = await gh.ioMapVar(e.repo);
   if (before !== "on") {
     ledger.done(c, key, e, "already_safe", { before, after: before, at: port.now() });
     return { end: `CI_IO_MAP 已在安全档（${before ?? "未设置"}），不改` };
@@ -158,8 +158,8 @@ async function act(port: FusePort, c: FuseCase, e: FuseEvidence): Promise<Outcom
   if (held(port, c.members)) return { hold: true }; // S2D2: a member turned skip while the evidence was read
   ledger.tryWrite(c, key, e);
   let why = "", after: string | null | undefined;
-  try { await gh.lowerIoMapVar(c.repo); } catch (err) { stopped(err); why = `写变量失败：${errText(err)}`; }
-  try { after = await gh.ioMapVar(c.repo); } catch (err) { stopped(err); why = `${why ? `${why}；` : ""}写后读回失败：${errText(err)}`; }
+  try { await gh.lowerIoMapVar(e.repo); } catch (err) { stopped(err); why = `写变量失败：${errText(err)}`; }
+  try { after = await gh.ioMapVar(e.repo); } catch (err) { stopped(err); why = `${why ? `${why}；` : ""}写后读回失败：${errText(err)}`; }
   if (after === "observe") return lowered(port, c, key, e, "lowered");
   why ||= "写后读回的不是 observe";
   const shown = after === undefined ? "（没读到）" : after ?? "（未设置）", at = port.now(), notice = unconfirmedText(e, at, why, shown);
@@ -168,26 +168,26 @@ async function act(port: FusePort, c: FuseCase, e: FuseEvidence): Promise<Outcom
   return { retry: why };
 }
 
-async function settle(port: FusePort, c: FuseCase, mode: RecoveryMode, first?: FuseRun): Promise<Outcome> {
+async function settle(port: FusePort, c: FuseCase, mode: RecoveryMode, first?: FuseRun, own = c): Promise<Outcome> {
   if (mode === "on") { // a write an earlier pass sent and never recorded as done: observe now means it took
-    const left = port.ledger.unsettled(c);
+    const left = port.ledger.unsettled(own);
     if (left && await port.gh.ioMapVar(c.repo) === "observe") return lowered(port, c, left.key, left.evidence, "settled");
   }
   const got = await gather(port.gh, c, first);
   if (!("evidence" in got)) return got;
-  if (mode === "on") return act(port, c, got.evidence);
+  if (mode === "on") return act(port, own, got.evidence);
   port.ledger.observe(got.evidence, evidenceKey(got.evidence));
   return { end: "observe：记下本可退回 observe" };
 }
 
 /** One case, once: settled cases are skipped, an open one is tried again only after RETRY_GAP_MS and gives up after RETRIES. */
-async function attempt(port: FusePort, c: FuseCase, mode: RecoveryMode, first?: FuseRun): Promise<void> {
+async function attempt(port: FusePort, g: FuseCase, mode: RecoveryMode, first?: FuseRun, c = g): Promise<void> {
   const id = `${mode}:${caseId(c)}`, seen = tried.get(id), now = port.now();
   if (held(port, c.members)) return void (mode === "on" && port.ledger.pend(c)); // S2D2: kept open, untried
   if (settled.has(id)) return void (mode === "on" && port.ledger.close(c, "本进程已核过")); // opened again from a run reference
   if (!due(id, now)) return;
   let out: Outcome;
-  try { out = await settle(port, c, mode, first); } catch (e) { stopped(e); out = { retry: errText(e) }; }
+  try { out = await settle(port, g, mode, first, c); } catch (e) { stopped(e); out = { retry: errText(e) }; }
   if ("hold" in out) return;
   const n = (seen?.n ?? 0) + 1, gaveUp = "retry" in out && n >= RETRIES;
   const text = "end" in out ? out.end : out.retry;
@@ -208,12 +208,12 @@ async function attempt(port: FusePort, c: FuseCase, mode: RecoveryMode, first?: 
  * `carry` then judges like any other; one the hook already judged is deduped by its case id. Throws while the run cannot be read or
  * its latest attempt is still going, so the reference stays open.
  */
-async function reopen(port: FusePort, ref: FuseRef): Promise<string> {
+async function reopen(port: FusePort, ref: FuseRef, own = ref): Promise<string> {
   const latest = await port.gh.ciRun(ref.repo, ref.runId), failed: number[] = [];
   for (let n = latest.attempt; n >= 1 && n > latest.attempt - ATTEMPTS_BACK; n--) {
     const run = n === latest.attempt ? latest : await port.gh.ciRun(ref.repo, ref.runId, n);
     if (run.status !== "completed" || run.conclusion !== "failure") continue;
-    port.ledger.pend({ ...ref, attempt: n });
+    port.ledger.pend({ ...own, attempt: n });
     failed.push(n);
   }
   if (latest.status !== "completed") throw new Error("列车 run 最新一次还没跑完");
@@ -224,11 +224,11 @@ async function reopen(port: FusePort, ref: FuseRef): Promise<string> {
 async function carryOn(port: FusePort, project: string, repo: string): Promise<void> {
   const now = port.now(), since = now - DAY_MS, mine = (r: FuseRef) => fuseSameRepo("carry", r.repo, repo) && !held(port, r.members);
   for (const { id, ref } of port.ledger.openRefs(project, since).filter((r) => mine(r.ref) && due(`ref:${r.id}`, now)).slice(0, CARRY_MAX)) {
-    try { port.ledger.closeRef(project, id, await reopen(port, { ...ref, repo })); tried.delete(`ref:${id}`); }
+    try { port.ledger.closeRef(project, id, await reopen(port, { ...ref, repo }, ref)); tried.delete(`ref:${id}`); }
     catch (e) { stopped(e); mark(`ref:${id}`, now); console.log(`🧯 [ci-io-map-fuse] ${project} 列车 ${ref.train} 车厢 ${ref.car} run ${ref.runId}：稍后再读：${errText(e)}`); }
   }
   const open = port.ledger.openCases(project, since).filter((c) => mine(c) && due(`on:${caseId(c)}`, now));
-  for (const c of open.slice(0, CARRY_MAX)) await attempt(port, { ...c, repo }, "on");
+  for (const c of open.slice(0, CARRY_MAX)) await attempt(port, { ...c, repo }, "on", undefined, c);
   for (const n of port.ledger.owed(project, since, now - NOTICE_SETTLE_MS).filter((n) => !held(port, n.members) && due(`notice:${n.key}`, now))) {
     mark(`notice:${n.key}`, now);
     await tell(port, project, n.members, n.key, n.text);
