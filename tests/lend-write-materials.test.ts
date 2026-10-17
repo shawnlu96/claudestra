@@ -138,9 +138,9 @@ describe("lend, reborrow and local author keep the same start and target", () =>
   test("reborrow: on accepts the carried develop PR base, rejects a drift to main; default still only main", async () => {
     mode("on");
     expect(await prepareReborrowSource(facts("develop"), reader(source("develop")))).toEqual(source("develop"));
-    await expect(prepareReborrowSource(facts("develop"), reader(source("main")))).rejects.toThrow("合并目标 base 不符");
+    await expect(prepareReborrowSource(facts("develop"), reader(source("main")))).rejects.toThrow("base 不符");
     mode(null);
-    await expect(prepareReborrowSource(facts("develop"), reader(source("develop")))).rejects.toThrow("合并目标 base 不符");
+    await expect(prepareReborrowSource(facts("develop"), reader(source("develop")))).rejects.toThrow("base 不符");
     expect(await prepareReborrowSource(facts("main"), reader(source("main")))).toEqual(source("main"));
   });
 

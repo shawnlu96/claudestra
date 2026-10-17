@@ -25,7 +25,7 @@ function validateSource(f: ReborrowFacts, s: ReborrowSource): void {
   if (s.pr) {
     const p = s.pr;
     if (!Number.isSafeInteger(p.number) || p.number < 1 || p.repo !== s.repo || p.branch !== s.branch || p.head !== s.remoteHead || !target || p.base !== target ||
-      p.url !== `https://github.com/${p.repo}/pull/${p.number}`) fail("PR 身份、head 或合并目标 base 不符");
+      p.url !== `https://github.com/${p.repo}/pull/${p.number}`) fail(`PR 身份、head 或 ${target ?? "合并目标"} base 不符`);
     if ((task.pr && task.pr !== p.url) || (previous.pr !== null && previous.pr !== p.number)) fail("原 PR 关系发生变化");
   } else if (task.pr || previous.pr !== null) fail("原 PR 失读");
 }
