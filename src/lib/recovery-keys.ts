@@ -139,5 +139,6 @@ export const RECOVERY_KEYS = [
   "updateGap",
   "verifyAfterResolve",
   "wakeStopped",
+  "webStorageBudget",
   "writeLocalEqual",
 ] as const;
