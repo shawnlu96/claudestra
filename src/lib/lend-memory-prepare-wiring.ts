@@ -12,7 +12,7 @@ const KEY = "memoryLendPrepare";
 const active = new WeakMap<Database, PreparedOffer>();
 interface PreparedOffer {
   task: LedgerTask; head: string | null; step: LendStep; mode: RecoveryMode; injection: RecoveryMode;
-  materialRev: number | null; discarded?: string; spec: string; readSpec: () => string | null; prepared: LendPreparation;
+  discarded?: string; spec: string; readSpec: () => string | null; prepared: LendPreparation;
 }
 const mode = (task: LedgerTask) => recoveryPolicy(task.project, KEY).mode;
 const injection = (task: LedgerTask) => recoveryPolicy(task.project, "memoryLendInjection").mode;
@@ -33,7 +33,7 @@ export async function prepareLendOffer(db: Database, task: LedgerTask, head: str
   if (!step || !spec || m === "off" || upstream === "off") return null;
   if (db.inTransaction) throw new Error("出借记忆准备不能持有台账事务");
   const atStart = getTask(db, task.id);
-  const prepared: PreparedOffer = { task, head, step, mode: m, injection: upstream, spec, readSpec, materialRev: atStart?.rev ?? null,
+  const prepared: PreparedOffer = { task, head, step, mode: m, injection: upstream, spec, readSpec,
     prepared: { inputs: {}, startedAt: Date.now() } };
   const reason = drift(prepared, atStart);
   if (reason && acts(prepared)) throw new LedgerError("conflict", reason);
@@ -48,9 +48,8 @@ export function commitLendOffer<T>(db: Database, prepared: PreparedOffer | null,
   if (reason && acts(prepared)) throw new LedgerError("conflict", reason);
   const previous = active.get(db);
   active.set(db, reason ? { ...prepared, discarded: reason } : prepared);
-  // Only refresh revisions changed during memory I/O; material-I/O drift must still reach the canonical CLI guard.
-  const snapshot = current && prepared.materialRev === prepared.task.rev && basis(current) === basis(prepared.task) ? current : prepared.task;
-  try { return offer(snapshot); } finally {
+  // Preserve the caller snapshot: refreshing its revision would bypass the canonical material-I/O CAS guard.
+  try { return offer(prepared.task); } finally {
     if (previous) active.set(db, previous); else active.delete(db);
   }
 }

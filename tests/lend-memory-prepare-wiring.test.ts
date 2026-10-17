@@ -238,12 +238,24 @@ test.each(["observe", "off"])("observe-drift-reject: upstream %s never adds a dr
   expect(commitLendOffer(p.f.db, prepared, p.syncOffer).status).toBe("pooled");
 });
 
-test.each(["on", "observe"])("observe-drift-reject: real CLI tolerates unrelated rev changes in %s", async mode => {
+test.each(["on", "observe"])("rev-guard-bypass: real CLI rejects memory-I/O revision changes in %s", async mode => {
   policy(mode); const p = fixture();
   p.lend.memoryPrepare.embedder = { model: "rev-drift", remote: false, embed: async texts => {
     p.f.db.run("UPDATE tasks SET rev = rev + 1 WHERE id = 'T1'"); return texts.map(() => [1, 0]);
   } };
-  expect(await p.offer()).toMatchObject({ ok: true });
+  expect(await p.offer()).toMatchObject({ ok: false, code: "conflict" });
+  expect(listLendOrders(p.f.db, "T1")).toEqual([]);
+});
+
+test.each(["off", "observe", "on"])("rev-guard-bypass: refreshCliOffer preserves revision CAS in %s", async mode => {
+  policy(mode); const p = fixture();
+  let calls = 0;
+  p.lend.borrow = async () => {
+    if (++calls === 2) p.f.db.run("UPDATE tasks SET rev = rev + 1, title = 'changed-by-pm' WHERE id = 'T1'");
+    return p.borrow;
+  };
+  expect(await p.offer()).toMatchObject({ ok: false, code: "conflict" });
+  expect(listLendOrders(p.f.db, "T1")).toEqual([]);
 });
 
 test("observe-drift-reject: already drifted observation skips preparation and preserves baseline", async () => {
