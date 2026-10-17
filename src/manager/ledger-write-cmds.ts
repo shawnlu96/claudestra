@@ -243,7 +243,8 @@ async function deliverCmd(c: LedgerCli): Promise<Result> {
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
   const f = c.p.flags;
   // CIPRECHK1：写交付前跑本机预检（恢复键 ciDeliverPrecheck），不过就带失败清单拒绝；去重重放与 off 都不跑
-  const pre = await managerDeliverPrecheck(c.db, { project: task.project, taskId: task.id, head: f.head, dedup: f.dedup, worktree: process.cwd(), now: c.deps.now() });
+  const pre = await managerDeliverPrecheck(c.db, { project: task.project, taskId: task.id, head: f.head, dedup: f.dedup, cwd: process.cwd(),
+    agentCwd: async () => (task.agent ? (await c.deps.loadRegistry()).agents[task.agent]?.cwd : undefined), now: c.deps.now() });
   if (pre.refusal) throw new LedgerError("conflict", pre.refusal);
   const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes,
     uiEvidence: f["ui-evidence"], ui: uiDeliverPort() }); // UISDEL1：ui 卡截图证据按 uiDelivery 策略在事务里核（lib/ledger-deliver-ui.ts）

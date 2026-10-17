@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Inspection, LEND_PRECHECK_PROJECT, precheckHooks, type PrecheckPort } from "../src/lib/ci-deliver-precheck.js";
+import { type BackgroundState, type Inspection, LEND_PRECHECK_PROJECT, type PrecheckReceipt, precheckHooks, type PrecheckPort } from "../src/lib/ci-deliver-precheck.js";
 import { advance, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
@@ -21,6 +21,7 @@ const ins = (o: Partial<Inspection> = {}): Inspection => ({
   run: "selected", tests: ["tests/a.test.ts"], reasons: [], changedTests: [], registration: [], ...o,
 });
 let calls = { inspect: 0, run: 0 };
+let bg: { dirs: string[]; state: BackgroundState } = { dirs: [], state: { state: "running" } };
 /** registration / code 决定这一轮预检的结果；calls 记端口被碰了几次（off 时必须是 0） */
 function usePort(o: Partial<Inspection> = {}, code = 0): void {
   const store = new Map();
@@ -28,15 +29,17 @@ function usePort(o: Partial<Inspection> = {}, code = 0): void {
     inspect: async () => { calls.inspect++; return ins(o); },
     runTests: async () => { calls.run++; return { code, tail: code ? "(fail) tests/a.test.ts > wiring" : "" }; },
     recall: (k) => store.get(k) ?? null, remember: (k, r) => store.set(k, r),
+    background: async (dir) => { bg.dirs.push(dir); return bg.state; },
   };
   precheckHooks.port = port;
 }
-beforeEach(() => { calls = { inspect: 0, run: 0 }; });
+beforeEach(() => { calls = { inspect: 0, run: 0 }; bg = { dirs: [], state: { state: "running" } }; });
 afterEach(() => { delete precheckHooks.port; rmSync(RECOVERY_POLICY_PATH, { force: true }); });
 
 describe("manager deliver（ledger deliver）", () => {
   let db: Database;
-  const deps = (actor: string) => ({ db, actor, projectIds: ["p"], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => 1_000_000 });
+  const agents = { "agent-dev": { cwd: "/wt/agent-dev" } } as never;
+  const deps = (actor: string) => ({ db, actor, projectIds: ["p"], loadRegistry: async () => ({ socket: "", agents }), saveRegistry: async () => {}, now: () => 1_000_000 });
   const run = (args: string[], actor = "agent-dev") => runLedger(args, deps(actor)) as Promise<Record<string, any>>;
   const deliver = (...more: string[]) => run(["deliver", "T1", "--from", "build", "--head", H, ...more]);
   const delivers = () => listEvents(db, { target: "T1" }).filter((e) => e.kind === "deliver").length;
@@ -71,6 +74,23 @@ describe("manager deliver（ledger deliver）", () => {
     const once = { ...calls };
     expect(await deliver("--dedup", "k1")).toMatchObject({ ok: true, duplicate: true });
     expect(calls).toEqual(once);
+  });
+
+  test("bridge 入口（mcp-deliver 去重键）：按执行者 registry 目录走后台预检；还在跑 / 失败都不写交付，通过后同一命令交得上", async () => {
+    usePort();
+    const viaMcp = () => deliver("--dedup", `mcp-deliver:o1:${H}`);
+    const r = await viaMcp();
+    expect(r).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("交付前预检还没跑完，未写交付") });
+    expect([bg.dirs, calls, delivers()]).toEqual([["/wt/agent-dev"], { inspect: 0, run: 0 }, 0]); // 不在 bridge 的 30 秒里同步跑
+    const receipt = (ok: boolean): PrecheckReceipt => ({ ok, scope: "selected", selected: 1, ran: ["tests/a.test.ts"], degradeReasons: [],
+      failures: ok ? [] : ["相关测试失败（退出码 1，1 个文件）"], key: "k", reused: false });
+    bg.state = { state: "done", receipt: receipt(false) };
+    expect(await viaMcp()).toMatchObject({ ok: false, error: expect.stringContaining("- 相关测试失败") });
+    expect(delivers()).toBe(0);
+    bg.state = { state: "done", receipt: receipt(true) };
+    expect(await viaMcp()).toMatchObject({ ok: true, duplicate: false, precheck: expect.stringContaining("交付前预检通过") });
+    expect(await viaMcp()).toMatchObject({ ok: true, duplicate: true });
+    expect(bg.dirs.length).toBe(3);
   });
 
   test("不带 head 的交付没有代码可绑，不预检", async () => {

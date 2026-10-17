@@ -11,8 +11,8 @@ import { buildGraph, oxcScanner, type OxcParseSync } from "../src/lib/ci-impact-
 import { DEFAULT_IMPACT_INPUTS } from "../src/lib/ci-impact-inputs.js";
 import { registrationProblems } from "../src/lib/ci-impact-registration-check.js";
 import { parseNameStatus, selectImpactedTests } from "../src/lib/ci-impact-select.js";
-import { describeReceipt, type Inspection, planRun, PRECHECK_MAX_TESTS, type PrecheckPort, type PrecheckReceipt, runPrecheck } from "../src/lib/ci-deliver-precheck.js";
-import { realPrecheckPort } from "../src/lib/ci-deliver-precheck-run.js";
+import { describeReceipt, type Inspection, type PrecheckPort, type PrecheckReceipt } from "../src/lib/ci-deliver-precheck.js";
+import { planRun, PRECHECK_MAX_TESTS, realPrecheckPort, runPrecheck } from "../src/lib/ci-deliver-precheck-run.js";
 
 const H = "a".repeat(40);
 const scan = oxcScanner(parseSync as unknown as OxcParseSync);
@@ -30,6 +30,7 @@ function fakePort(seq: Awaited<ReturnType<PrecheckPort["inspect"]>>[], code = 0)
     runTests: async (_w, files) => { runs.push(files); return { code, tail: code ? "(fail) tests/a.test.ts > x" : "" }; },
     recall: (k) => store.get(k) ?? null,
     remember: (k, r) => store.set(k, r),
+    background: async () => ({ error: "同步入口不走后台" }),
   };
   return { port, runs, store, reset: () => { i = 0; } };
 }
@@ -217,6 +218,18 @@ describe("[验收线 2] 真实端口：真 git 临时仓库，选集与相同 ba
     const n = runs().length;
     expect(await runPrecheck(repo, i.binding.head, realPrecheckPort())).toMatchObject({ ok: true, reused: true });
     expect(runs().length).toBe(n);
+  }, 60_000);
+
+  test("bridge 入口的后台预检：第一次起后台进程并报「还在跑」，跑完后同一份事实取回通过回执；同时只起一个", async () => {
+    sh(repo, "commit", "-q", "--allow-empty", "-m", "bridge head");
+    const head = sh(repo, "rev-parse", "HEAD"), port = realPrecheckPort(), n = runs().length;
+    expect(await port.background(repo, head)).toEqual({ state: "running" });
+    expect(await port.background(repo, head)).toEqual({ state: "running" });
+    let got = await port.background(repo, head);
+    for (const end = Date.now() + 45_000; "state" in got && got.state === "running" && Date.now() < end; await Bun.sleep(100)) got = await port.background(repo, head);
+    expect(got).toMatchObject({ state: "done", receipt: { ok: true, scope: "selected", ran: ["tests/new.test.ts", "tests/x.test.ts"] } });
+    expect(runs().length).toBe(n + 1);
+    expect(await port.background(repo, head)).toMatchObject({ state: "done", receipt: { ok: true } }); // 通过的结果复用
   }, 60_000);
 
   test("[验收线 1] 相关测试失败：失败清单带输出尾部", async () => {

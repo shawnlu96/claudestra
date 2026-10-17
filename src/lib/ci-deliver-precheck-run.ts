@@ -3,14 +3,62 @@
  * （mode=on，base 侧 = 合并基的树，head 侧 = 工作副本）选测，选测与登记检查都经 ci-impact-registration-check.ts 的 treeImpact；
  * 测试经工作副本的 scripts/test.ts（全量测试闸入口）只带文件起，输出收进管道，不污染 manager 的 JSON 输出。
  * 本机没有 CI 的实测读取图（CI_IO_MAP 工件），按登记表规则选；结果缓存在状态目录 ci-deliver-precheck/<绑定摘要>.json。
+ * bridge 入口的后台预检是本文件自己（`bun ci-deliver-precheck-run.ts job <副本> <head> <事实键>`），结果与锁在 ci-deliver-precheck/jobs/。
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MODULE_FILE, treeImpact, type TreeImpactInput } from "./ci-impact-registration-check.js";
-import type { Inspection, PrecheckPort, PrecheckReceipt, TestRun } from "./ci-deliver-precheck.js";
+import type { BackgroundState, Inspection, PrecheckBinding, PrecheckPort, PrecheckReceipt, TestRun } from "./ci-deliver-precheck.js";
 import { FULL_TEST_PERMIT_ENV } from "./full-test-gate-args.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
+
+/** 选集超过这么多个测试文件（或选测给 all）就降级：只跑改动测试 + 登记检查 */
+export const PRECHECK_MAX_TESTS = 50;
+
+const bindingKey = (b: PrecheckBinding): string =>
+  createHash("sha256").update(JSON.stringify(["v1", PRECHECK_MAX_TESTS, b.repo, b.base, b.mergeBase, b.head, b.status, b.selection])).digest("hex");
+
+/** 跑什么：有界选集照跑；超阈值或 all 降级为改动测试，原规模与原因进回执 */
+export function planRun(ins: Inspection): { scope: PrecheckReceipt["scope"]; files: string[]; selected: number | "all"; degradeReasons: string[] } {
+  if (ins.run === "selected" && ins.tests.length <= PRECHECK_MAX_TESTS) return { scope: "selected", files: ins.tests, selected: ins.tests.length, degradeReasons: [] };
+  const why = ins.run === "all" ? [`选测给出 all：${ins.reasons.slice(0, 5).join("；") || "（无原因）"}`]
+    : [`选集 ${ins.tests.length} 个测试文件，超过阈值 ${PRECHECK_MAX_TESTS}`];
+  return { scope: "degraded", files: ins.changedTests, selected: ins.run === "all" ? "all" : ins.tests.length,
+    degradeReasons: [...why, "只跑本次新增 / 修改的测试 + 登记检查，不算完整相关测试通过"] };
+}
+
+const DRIFT: [keyof PrecheckBinding, string][] = [["repo", "仓库"], ["base", "base"], ["mergeBase", "合并基"], ["head", "head"], ["status", "工作区"],
+  ["selection", "选测图摘要"]];
+
+export const fail = (failures: string[], key = ""): PrecheckReceipt => ({ ok: false, scope: "selected", selected: 0, ran: [], degradeReasons: [], failures, key, reused: false });
+
+/** 预检本体：绑定 → 选测 / 登记 → 跑测试 → 再绑定核对；相同绑定的通过结果直接复用 */
+export async function runPrecheck(worktree: string, head: string, port: PrecheckPort): Promise<PrecheckReceipt> {
+  const ins = await port.inspect(worktree);
+  if ("error" in ins) return fail([`无法执行预检：${ins.error}`]);
+  if ("skip" in ins) return { ...fail([]), ok: true, skipped: ins.skip };
+  if (!ins.binding.head.startsWith(head.toLowerCase()) || head.length < 7) return fail([`工作副本 HEAD ${ins.binding.head.slice(0, 12)} 不是交付 head ${head.slice(0, 12)}（在交付的工作副本里运行）`]);
+  if (ins.binding.status) return fail(["工作副本有未提交的已跟踪改动：先提交干净再交付"]);
+  const key = bindingKey(ins.binding);
+  const prior = port.recall(key);
+  if (prior?.ok && prior.key === key) return { ...prior, reused: true };
+  const plan = planRun(ins);
+  const failures = ins.registration.map((r) => `登记检查：${r}`);
+  if (plan.files.length) {
+    const r = await port.runTests(worktree, plan.files);
+    if (r.code !== 0) failures.push(`相关测试失败（退出码 ${r.code}，${plan.files.length} 个文件）${r.tail ? `：\n${r.tail}` : ""}`);
+  }
+  const after = await port.inspect(worktree);
+  if (!("binding" in after)) failures.push(`跑完后无法重新核对工作副本：${"error" in after ? after.error : after.skip}`);
+  else for (const [k, what] of DRIFT) if (after.binding[k] !== ins.binding[k]) failures.push(`预检期间${what}变了，结果作废，重新交付`);
+  const receipt: PrecheckReceipt = { ok: !failures.length, scope: plan.scope, selected: plan.selected, ran: plan.files, degradeReasons: plan.degradeReasons,
+    failures, key, reused: false };
+  if (receipt.ok) port.remember(key, receipt);
+  return receipt;
+}
 
 const TEST_TIMEOUT_MS = 30 * 60_000;
 const TAIL_LINES = 30;
@@ -94,6 +142,60 @@ async function runTests(worktree: string, files: string[]): Promise<TestRun> {
 }
 
 const cachePath = (key: string) => statePath("ci-deliver-precheck", `${key}.json`);
+const jobPath = (key: string, ext: "json" | "lock") => statePath("ci-deliver-precheck", "jobs", `${key}.${ext}`);
+const factsKey = (f: ReturnType<typeof gitFacts>, head: string) =>
+  createHash("sha256").update(JSON.stringify(["job-v1", f.root, f.head, f.base, f.repo, f.mergeBase, f.status, head])).digest("hex");
+
+function alive(lock: string): boolean {
+  try {
+    const pid = Number(JSON.parse(readFileSync(lock, "utf8")).pid);
+    process.kill(pid, 0);
+    return true;
+  } catch { return false; /* 读不出锁或进程已不在：当作没人在跑，下面接手重起 */ }
+}
+
+/** 锁用 O_EXCL 抢：同一份事实同时只起一个后台预检；持锁进程没了的旧锁回收一次再抢 */
+function claim(lock: string): number | null {
+  for (let i = 0; i < 2; i++) {
+    try { return openSync(lock, "wx", 0o600); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || alive(lock)) return null;
+      try { unlinkSync(lock); } catch { /* 别人刚回收了这把旧锁：再抢一次就知道 */ }
+    }
+  }
+  return null;
+}
+
+async function background(worktree: string, head: string): Promise<BackgroundState> {
+  let key: string;
+  try { key = factsKey(gitFacts(worktree), head); } catch (e) { return { error: (e as Error).message }; }
+  const done = readJsonStateSync(jobPath(key, "json"));
+  if (done.status === "ok") {
+    const receipt = done.data as PrecheckReceipt;
+    if (!receipt.ok) unlinkSync(jobPath(key, "json")); // 失败只报一次：修好之前每次重交都重跑
+    return { state: "done", receipt };
+  }
+  mkdirSync(dirname(jobPath(key, "lock")), { recursive: true, mode: 0o700 });
+  const fd = claim(jobPath(key, "lock"));
+  if (fd === null) return { state: "running" };
+  try {
+    const child = Bun.spawn([process.execPath, "--no-env-file", fileURLToPath(import.meta.url), "job", worktree, head, key],
+      { cwd: worktree, env: process.env, stdio: ["ignore", "ignore", "ignore"], detached: true });
+    child.unref();
+    writeSync(fd, JSON.stringify({ pid: child.pid, at: Date.now() }));
+  } finally { closeSync(fd); }
+  return { state: "running" };
+}
+
+/** 后台预检进程：跑完把回执写到事实键下，再放锁 */
+async function job(worktree: string, head: string, key: string): Promise<void> {
+  try {
+    const receipt = await runPrecheck(worktree, head, realPrecheckPort());
+    writeJsonAtomicSync(jobPath(key, "json"), receipt, { mode: 0o600 });
+  } finally {
+    try { unlinkSync(jobPath(key, "lock")); } catch { /* 锁已被当作旧锁回收：结果照样写好了 */ }
+  }
+}
 
 export function realPrecheckPort(): PrecheckPort {
   const memo = new Map<string, Inspection>();
@@ -110,5 +212,11 @@ export function realPrecheckPort(): PrecheckPort {
       try { writeJsonAtomicSync(cachePath(key), receipt, { mode: 0o600 }); }
       catch (e) { console.error(`[ciDeliverPrecheck] 写预检缓存失败（下次重跑一遍，不影响本次结果）：${String(e)}`); }
     },
+    background,
   };
+}
+
+if (import.meta.main && process.argv[2] === "job") {
+  const [worktree, head, key] = process.argv.slice(3);
+  if (worktree && head && key && /^[0-9a-f]{64}$/.test(key)) await job(worktree, head, key);
 }

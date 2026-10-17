@@ -10,8 +10,8 @@ import { join } from "node:path";
 import { classifyTestArgs } from "../src/lib/full-test-gate-args.js";
 import { writeGatePolicy } from "../src/lib/full-test-gate-policy.js";
 import { readPermitEntries } from "../src/lib/full-test-gate.js";
-import { type Inspection, runPrecheck } from "../src/lib/ci-deliver-precheck.js";
-import { realPrecheckPort } from "../src/lib/ci-deliver-precheck-run.js";
+import type { Inspection } from "../src/lib/ci-deliver-precheck.js";
+import { realPrecheckPort, runPrecheck } from "../src/lib/ci-deliver-precheck-run.js";
 
 const ROOT = join(import.meta.dir, "..");
 let root: string, repo: string, gate: string;
