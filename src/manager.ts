@@ -13,6 +13,7 @@
  *   bun src/manager.ts sessions [search]
  */
 
+import "./manager/project-decl.js";
 import { writeClaudeSettings } from "./lib/session-recall.js";
 import { configuredBridgePort } from "./lib/bridge-url.js";
 import { repoEnvVar } from "./lib/env-file.js";

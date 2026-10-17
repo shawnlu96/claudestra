@@ -1,0 +1,57 @@
+/** Isolated repositories only; all git operations are local and never fetch. */
+import { createHash } from "node:crypto";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterAll } from "bun:test";
+import type { ProjectDef } from "../src/lib/projects.js";
+import type { ProjectDeclaration } from "../src/lib/project-decl-schema.js";
+
+const roots: string[] = [];
+afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
+export const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+export function git(repo: string, ...args: string[]): string {
+  const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+  if (r.exitCode !== 0) throw new Error(`fixture git failed: ${args[0]}`);
+  return r.stdout.toString().trim();
+}
+export function put(repo: string, path: string, body: string): void {
+  mkdirSync(dirname(join(repo, path)), { recursive: true });
+  writeFileSync(join(repo, path), body);
+}
+export function commit(repo: string): string {
+  git(repo, "add", ".");
+  git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "fixture");
+  return git(repo, "rev-parse", "HEAD");
+}
+export function fixture(stack: "python" | "go" = "python") {
+  const repo = mkdtempSync(join(tmpdir(), "project-decl-")); roots.push(repo);
+  const branch = stack === "go" ? "develop" : "main";
+  git(repo, "init", "-q", "-b", branch);
+  git(repo, "remote", "add", "origin", `https://github.com/fixtures/${stack}.git`);
+  put(repo, "README.md", `${stack} fixture\n`);
+  put(repo, stack === "go" ? "Makefile" : "pyproject.toml", stack === "go" ? "test:\n\tgo test ./...\n" : "[tool.pytest.ini_options]\n");
+  put(repo, "tests/sample.txt", "fixture\n"); put(repo, "reports/sample.txt", "fixture\n");
+  put(repo, ".github/workflows/ci.yml", "name: test\n");
+  const basisHead = commit(repo);
+  const provenance = { status: "verified" as const, verifiedHead: basisHead, verifiedAt: "2026-10-17T00:00:00Z" };
+  const argv = stack === "go" ? ["make", "test"] : ["python", "-m", "pytest"];
+  const cmd = { id: "tests", argv, cwd: ".", env: { CI: { from: "CI" } }, timeoutSec: 60, provenance };
+  const declaration: ProjectDeclaration = { version: 1,
+    repository: { remote: `fixtures/${stack}`, defaultBranch: branch, targetBranch: branch },
+    validation: { author: [structuredClone(cmd)], review: [structuredClone(cmd)], build: [structuredClone(cmd)] },
+    tests: { rules: [{ id: "suite", argv, dir: "tests", timeoutSec: 60, provenance, fullWhen: ["**"], classifier: structuredClone(cmd) }], globs: ["tests/**"] },
+    ci: { provider: stack === "go" ? "none" : "github", workflows: stack === "go" ? [] : [".github/workflows/ci.yml"], requiredChecks: ["test"], testAdapter: structuredClone(cmd),
+      reports: ["reports/**"], fullScope: ["**"], proof: [{ path: "README.md", sha256: hash(`${stack} fixture\n`) }] },
+    ui: { renderInputs: [] }, verification: { probes: [structuredClone(cmd)] }, deploy: { adapter: "none", provenance },
+    basis: [{ path: "README.md", sha256: hash(`${stack} fixture\n`) }] };
+  const project: ProjectDef = { id: stack, name: stack, dirs: [repo], createdAt: "" };
+  const publish = () => {
+    put(repo, ".floka/project.json", JSON.stringify(declaration));
+    const head = commit(repo);
+    git(repo, "update-ref", `refs/remotes/origin/${branch}`, head);
+    git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${branch}`);
+    return head;
+  };
+  return { repo, branch, project, declaration, publish, basisHead };
+}
