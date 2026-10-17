@@ -50,6 +50,7 @@ import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { schedulerCanVerify } from "./scheduler-verify-gate.js";
 import { checkStructuredReview } from "./scheduler-review.js";
 import { refuseAutoReviewMove } from "./scheduler-auto-review.js";
+import { reviewFallbackMark } from "./scheduler-review-fallback.js";
 import { runSpecPreflight } from "./spec-material-preflight.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
@@ -276,7 +277,8 @@ export function recordReview(db: Database, ctx: WriteCtx, input: ReviewInput): W
     checkStructuredReview(input, task);
     const rc = checkReviewStep(db, task, input.reviewer);
     const { taskId: _t, text, move: _m, ...rest } = input;
-    const data = { round: task.round, ...rest, path: input.path ?? null, ...(rc.explicit ? { author: rc.author, authorCheck: rc.authorCheck } : {}) };
+    const fallback = reviewFallbackMark(db, task, input.reviewerSessionId, input.reviewerFamily); // RVF-1: a same-family fallback verdict says so
+    const data = { round: task.round, ...rest, path: input.path ?? null, ...(rc.explicit ? { author: rc.author, authorCheck: rc.authorCheck } : {}), ...(fallback ? { fallback } : {}) };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "review", text, data }, true);
     noteStepReview(db, ctx, rc, input.verdict, input.model);
     if (input.move) task = applyMove(db, ctx, task, input.move, false).task;
