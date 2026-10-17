@@ -5,6 +5,9 @@
  *   whole read → snapshot check → merge → atomic write. A missing file is a snapshot too, so a file created, deleted or
  *   edited after the read is a version change. The lock is re-entrant inside one async call chain, so a writer that already
  *   holds it never waits on itself. Timeout = ConfigWriteLockTimeoutError: nothing is written, never retried silently.
+ *   The lock can be reclaimed from a holder paused past staleMs, so being inside the call chain is not ownership: the final
+ *   commit (commitConfigWrite) checks the lease, renewing it, and the disk version in the same synchronous code as the rename.
+ *   Lost lease = ConfigWriteLeaseLostError, nothing written; lost during the rename itself = the same error after it.
  * - observe: the old unlocked path; records once per target + disk version the write that on would have refused and replayed.
  * - off: the old path, nothing recorded.
  * The mode is re-read before every action, through the same strict reader as recovery-policy.ts (unreadable file = off), so
@@ -16,11 +19,13 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { acquireLock } from "../file-lock.js";
+import { acquireLock, type LockHandle } from "../file-lock.js";
+import { assertWritable, writeJsonStateGuarded, writeTextAtomicSync, type WriteOpts } from "../state-file.js";
 import { barrierActive } from "../state-maintenance/barrier.js";
 import { statePath } from "../paths.js";
 import { readRecoveryFile, type RecoveryMode } from "../recovery-policy-file.js";
 import type { ObservedAction } from "../recovery-policy.js";
+import { ConfigChangedError } from "./retry.js";
 
 const CONFIG_WRITE_KEY = "configWriteSerialize";
 const PROJECT = "claude-orchestrator";
@@ -29,6 +34,14 @@ export class ConfigWriteLockTimeoutError extends Error {
   constructor(message = "配置写锁等待超时,本次没有写入,请重试") {
     super(message);
     this.name = "ConfigWriteLockTimeoutError";
+  }
+}
+
+/** The lock was reclaimed from this writer (paused past staleMs): it must not, or did not safely, commit. Never retried silently. */
+export class ConfigWriteLeaseLostError extends Error {
+  constructor(message = "配置写锁已被回收(本进程暂停过久),本次没有写入,请重试") {
+    super(message);
+    this.name = "ConfigWriteLeaseLostError";
   }
 }
 
@@ -62,7 +75,8 @@ export function useConfigWritePort(p?: Partial<ConfigWritePort>): void { port = 
 
 export const configWriteMode = (): RecoveryMode => port.mode();
 
-const held = new AsyncLocalStorage<Set<string>>();
+/** canonical target → the handle this call chain acquired for it */
+const held = new AsyncLocalStorage<Map<string, LockHandle>>();
 
 /**
  * The file a write to path actually replaces: writeJsonAtomic follows a symlinked file to its target, and a directory alias or a
@@ -101,12 +115,45 @@ export async function withConfigWriteLock<T>(path: string, fn: () => Promise<T>)
   const lock = await acquireLock(`${target}.lock`, port.waitMs, port.staleMs);
   if (!lock) throw new ConfigWriteLockTimeoutError();
   try {
-    return await held.run(new Set([...(mine ?? []), target]), fn);
+    return await held.run(new Map([...(mine ?? []), [target, lock]]), fn);
   } finally { lock.release(); }
 }
 
 /** Whether this call chain holds the lock for path, under any spelling (store.ts: snapshot rules apply only to serialized writes). */
 export const holdsConfigWriteLock = (path: string): boolean => held.getStore()?.has(configWriteTarget(path)) ?? false;
+
+/**
+ * The fenced final write of a config read/modify/write. Holding the lock: refuse a corrupt file, write the temp file, then in one
+ * synchronous step renew the lease (held(): token still ours) and run unchanged() (the disk is still the version the output was
+ * built from) right before the rename, with no await in between; after the rename the lease is checked again, so a loss during
+ * the commit still fails loudly instead of reporting success. Not holding it (observe / off): the old guarded write.
+ */
+export async function commitConfigWrite(path: string, data: unknown, opts: Pick<WriteOpts, "mode">, unchanged: () => boolean = () => true): Promise<void> {
+  const lock = held.getStore()?.get(configWriteTarget(path));
+  if (!lock) return writeJsonStateGuarded(path, data, opts);
+  await assertWritable(path);
+  let refused: Error | undefined;
+  try {
+    writeTextAtomicSync(path, JSON.stringify(data, null, 2), { ...opts, commitIf: () => {
+      if (!lock.held()) refused = new ConfigWriteLeaseLostError();
+      else if (!unchanged()) refused = new ConfigChangedError();
+      return !refused;
+    } });
+  } catch (e) { throw refused ?? e; }
+  if (!lock.held()) throw new ConfigWriteLeaseLostError("配置写锁在提交时被回收,本次写入可能覆盖了别处的更新,请核对后重试");
+}
+
+/**
+ * Fencing for a caller-supplied writer (the rename transaction's adapter): lease checked, and renewed, right before handing over
+ * and checked again after it returns, so a reclaimed lock surfaces as ConfigWriteLeaseLostError rather than a silent commit.
+ */
+export async function fencedConfigWrite<T>(path: string, write: () => Promise<T>): Promise<T> {
+  const lock = held.getStore()?.get(configWriteTarget(path));
+  if (lock && !lock.held()) throw new ConfigWriteLeaseLostError();
+  const out = await write();
+  if (lock && !lock.held()) throw new ConfigWriteLeaseLostError("配置写锁在迁移提交时被回收,本次写入可能覆盖了别处的更新,请核对后重试");
+  return out;
+}
 
 const version = (v: unknown): string => createHash("sha256").update(JSON.stringify(v) ?? "missing").digest("hex").slice(0, 12);
 

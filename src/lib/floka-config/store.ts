@@ -1,10 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
-import { readJsonState, writeJsonStateGuarded } from "../state-file.js";
+import { readJsonState, readJsonStateSync } from "../state-file.js";
 import { autoUpdateValue, configConflicts, object } from "./values.js";
 import { ConfigChangedError } from "./retry.js";
 import type { AppConfig } from "../config-store.js";
 import { barrierActive } from "../state-maintenance/barrier.js";
-import { configWriteMode, holdsConfigWriteLock, observeConfigWrite, withConfigWriteLock } from "./write-lock.js";
+import { commitConfigWrite, configWriteMode, holdsConfigWriteLock, observeConfigWrite, withConfigWriteLock } from "./write-lock.js";
 
 // Keep the source document separate from the sanitized public view. A setter must not erase
 // unknown fields or rewrite unrelated values merely because the old schema did not expose them.
@@ -70,5 +70,10 @@ async function writeLocked(path: string, cfg: AppConfig): Promise<void> {
   if (previous.floka !== undefined) au.floka = value;
   if (previous.claudestra !== undefined) au.claudestra = value;
   if (Object.keys(au).length) out.autoUpdate = au;
-  await writeJsonStateGuarded(path, out, { mode: 0o600 });
+  // Serialized: the commit rechecks lease + this disk version synchronously before its rename (a reclaimed lock's new holder may
+  // have committed meanwhile); a changed disk is a version change like the snapshot check above.
+  await commitConfigWrite(path, out, { mode: 0o600 }, () => {
+    const now = readJsonStateSync(path);
+    return now.status === "ok" ? disk.status === "ok" && isDeepStrictEqual(now.data, disk.data) : now.status === disk.status;
+  });
 }

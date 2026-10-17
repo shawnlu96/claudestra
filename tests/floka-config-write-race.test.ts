@@ -1,14 +1,14 @@
 /** CFGWRITE1 · config write lock, missing-file snapshot and the configWriteSerialize switch (src/lib/floka-config/write-lock.ts). */
 import { afterEach, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { AppConfig } from "../src/lib/config-store.ts";
 import { ConfigChangedError, retryConfigWrite } from "../src/lib/floka-config/retry.ts";
 import { configView, writeCompatibleConfig } from "../src/lib/floka-config/store.ts";
-import { configLockPath, configWriteModeAt, configWriteTarget, ConfigWriteLockTimeoutError, holdsConfigWriteLock, useConfigWritePort,
-  withConfigWriteLock } from "../src/lib/floka-config/write-lock.ts";
+import { commitConfigWrite, configLockPath, configWriteModeAt, configWriteTarget, ConfigWriteLeaseLostError, ConfigWriteLockTimeoutError,
+  holdsConfigWriteLock, useConfigWritePort, withConfigWriteLock } from "../src/lib/floka-config/write-lock.ts";
 import type { ObservedAction } from "../src/lib/recovery-policy.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -320,4 +320,79 @@ test("[验收线 3] off via recovery-policy.json is the baseline path: no lock f
   const r = spawnSync(process.execPath, args, { ...opts, encoding: "utf8", timeout: 20_000 });
   expect(r.stderr && r.status !== 0 ? r.stderr : r.status).toBe(0);
   expect(JSON.parse(r.stdout.trim().split("\n").pop()!)).toEqual({ mode: "off", seen: false, cfg: "en" });
+});
+
+/**
+ * Child A computes its output under the lock, then SIGSTOPs itself just before the commit (a Bun loader wraps state-file's
+ * guarded writer / writable check: the first call pauses, every read and write stays the real one). With staleMs 100 the
+ * parent's B reclaims the expired lock through the real acquireLock and commits; A resumes and must not erase B's field.
+ */
+test("[验收线 1] lost lease: A stopped past staleMs before its commit, B reclaims and commits, A resumes and fails loudly", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "floka-config-lease-")); roots.push(dir);
+  const path = join(dir, "config.json");
+  writeFileSync(path, JSON.stringify({ lang: "zh" }));
+  const code = `const {readFileSync,writeSync}=await import('node:fs');
+    Bun.plugin({ name: 'pause-before-commit', setup(b) { b.onLoad({ filter: /state-file\\.ts$/ }, ({ path }) => {
+      let src = readFileSync(path, 'utf8');
+      for (const n of ['writeJsonStateGuarded', 'assertWritable']) src = src.replace('export async function ' + n + '(', 'async function real_' + n + '(')
+        + '\\nexport async function ' + n + '(...a) { globalThis.pauseOnce?.(); return real_' + n + '(...a); }';
+      return { contents: src, loader: 'ts' };
+    }); } });
+    const stop = () => { globalThis.pauseOnce = undefined; writeSync(1, 'paused\\n'); process.kill(process.pid, 'SIGSTOP'); };
+    const w=await import('./src/lib/floka-config/write-lock.ts'); const s=await import('./src/lib/floka-config/store.ts');
+    w.useConfigWritePort({ mode: () => 'on', waitMs: 2000, staleMs: 100 });
+    const raw=JSON.parse(readFileSync(${JSON.stringify(path)},'utf8'));
+    const cfg=s.configView(raw,{autoUpdate:{claudestra:true,claudeCode:true},...raw}); cfg.quotaLive=false;
+    try { await w.withConfigWriteLock(${JSON.stringify(path)}, async()=>{ globalThis.pauseOnce=stop; await s.writeCompatibleConfig(${JSON.stringify(path)}, cfg); });
+      console.log('A:ok'); } catch(e) { console.log('A:'+e.name); }`;
+  const { args, opts } = childArgs(dir, code);
+  const a = spawn(process.execPath, args, opts);
+  let out = "", err = "";
+  a.stderr.on("data", (d) => { err += d; });
+  const exited = new Promise<number | null>((r) => a.on("close", r));
+  await new Promise<void>((r) => a.stdout.on("data", (d) => { out += d; if (out.includes("paused")) r(); }));
+  await Bun.sleep(300); // stopped: no heartbeat, the lock goes stale
+  useConfigWritePort({ mode: () => "on", waitMs: 2000, staleMs: 100 });
+  const b = read(path); b.pushAllAsks = true;
+  await writeCompatibleConfig(path, b);
+  expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ lang: "zh", pushAllAsks: true });
+  a.kill("SIGCONT");
+  expect(await exited).toBe(0);
+  expect(out).not.toContain("A:ok");
+  expect(out).toContain("A:ConfigWriteLeaseLostError");
+  expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ lang: "zh", pushAllAsks: true });
+  expect(err).not.toContain("Error:");
+}, 20_000);
+
+test("[验收线 1] fenced commit: lease taken over before the commit, or disk changed under the lock, writes nothing", async () => {
+  const f = setup("on", { lang: "zh" });
+  const a = read(f.path); a.quotaLive = false;
+  await expect(withConfigWriteLock(f.path, async () => {
+    writeFileSync(join(configLockPath(f.path), "owner"), "successor"); // what a reclaim + re-acquire by another process leaves
+    await writeCompatibleConfig(f.path, a);
+  })).rejects.toBeInstanceOf(ConfigWriteLeaseLostError);
+  expect(f.disk()).toEqual({ lang: "zh" });
+  rmSync(configLockPath(f.path), { recursive: true, force: true });
+  // A writer bypassing the lock (an off-mode process) commits after this writer's read: the synchronous recheck refuses.
+  await expect(withConfigWriteLock(f.path, () => commitConfigWrite(f.path, { lang: "en" }, { mode: 0o600 }, () => false)))
+    .rejects.toBeInstanceOf(ConfigChangedError);
+  expect(f.disk()).toEqual({ lang: "zh" });
+  expect(readdirSync(resolve(f.path, "..")).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+});
+
+test("[验收线 1] rename transaction: a lease lost before the adapter commit fails the step, the adapter never writes", async () => {
+  const { migrateConfig } = await import("../src/lib/floka-config/items.ts");
+  const f = setup("on", { autoUpdate: { claudestra: false } });
+  const journalDir = join(mkdtempSync(join(tmpdir(), "floka-config-journal-")), "j"); roots.push(resolve(journalDir, ".."));
+  let writes = 0;
+  const io = { path: f.path,
+    read: async () => {
+      if (holdsConfigWriteLock(f.path)) writeFileSync(join(configLockPath(f.path), "owner"), "successor");
+      return JSON.parse(readFileSync(f.path, "utf8"));
+    },
+    write: async (v: Record<string, unknown>) => { writes++; writeFileSync(f.path, JSON.stringify(v)); } };
+  const r = await migrateConfig({ config: { rename: { config: "on" } }, txId: "config-lease-1", journalDir, io, authorize: async () => true });
+  expect(r.status).not.toBe("committed");
+  expect(writes).toBe(0);
+  expect(f.disk()).toEqual({ autoUpdate: { claudestra: false } });
 });

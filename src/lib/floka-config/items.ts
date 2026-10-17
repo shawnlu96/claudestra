@@ -4,12 +4,13 @@ import type { RuntimeAliasInput } from "../floka-migration/runtime/types.js";
 import type { Json, TxStep } from "../floka-migration/transaction/types.js";
 import { autoUpdateValue, object, renameMode } from "./values.js";
 import { journalOutside, runItem, type ItemOptions } from "./transaction.js";
-import { withConfigWriteLock } from "./write-lock.js";
+import { fencedConfigWrite, withConfigWriteLock } from "./write-lock.js";
 
 export interface ConfigAdapter {
   path: string;
   read(): Promise<unknown>;
-  /** Must atomically write the entire document. apply / compensate hold the config write lock (write-lock.ts) around read → write. */
+  /** Must atomically write the entire document. apply / compensate hold the config write lock (write-lock.ts) around read → write;
+   *  the write is fenced by the lock's lease (a reclaimed lock fails the step with ConfigWriteLeaseLostError). */
   write(value: Record<string, unknown>): Promise<void>;
 }
 
@@ -30,7 +31,7 @@ function configStep(io: ConfigAdapter): TxStep<unknown> {
     done: changed,
     apply: () => withConfigWriteLock(io.path, async () => {
       const raw = object(await io.read()), before = brandFields(raw);
-      if (before.claudestra !== null) await io.write({ ...raw, autoUpdate: { ...object(raw.autoUpdate), floka: before.claudestra } });
+      if (before.claudestra !== null) await fencedConfigWrite(io.path, () => io.write({ ...raw, autoUpdate: { ...object(raw.autoUpdate), floka: before.claudestra } }));
     }),
     verify: changed,
     compensate: (_adapter, value: Json) => withConfigWriteLock(io.path, async () => {
@@ -41,7 +42,7 @@ function configStep(io: ConfigAdapter): TxStep<unknown> {
       const au = { ...object(raw.autoUpdate) };
       if (before.floka === null) delete au.floka;
       else au.floka = before.floka;
-      await io.write({ ...raw, autoUpdate: au });
+      await fencedConfigWrite(io.path, () => io.write({ ...raw, autoUpdate: au }));
     }),
   };
 }
