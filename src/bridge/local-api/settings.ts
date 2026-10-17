@@ -3,6 +3,8 @@
  *   GET/PUT /api/v1/settings  { lang, groqApiKeyHint, jevApiKeyHint, pushNoContent, pushAllAsks, talkEnabled, inboundRouteMode }；
  *     PUT 体 { lang?, groqApiKey?, jevApiKey?, pushNoContent?, pushAllAsks?, talkEnabled?, inboundRouteMode? }（key 空串 = 清除；inboundRouteMode = off|observe|on）
  *     → ~/.claude-orchestrator/config.json
+ *   GET 另回 webStorageBudget（恢复键档位，只读下发给浏览器存储预算，lib/web-storage-recovery.ts）；
+ *   POST /api/v1/settings/web-storage-observe { target, actionKey }：observe 档浏览器的去重样本（只有键名 / 动作，不带正文）
  *   GET/PUT /api/v1/profile   { user:{nickname, avatar}, claude:{nickname, avatar} }（avatar 是 data:image/* ≤ 256 KB）→ user_profile 表
  * 读任何凭据都行（提示只有尾四位，头像是展示层）；写是全局状态，要 manage grant。
  */
@@ -12,7 +14,8 @@ import {
 } from "../../lib/config-store.js";
 import { parseRouteMode, type RouteMode } from "../../lib/inbound-route.js";
 import { steerQueueWhenBusy } from "../../lib/steer-queue-policy.js";
-import { canManage } from "../../lib/devices.js";
+import { canManage, canReadLedger } from "../../lib/devices.js";
+import { recordWebStorageSample, webStorageBudgetMode } from "../../lib/web-storage-recovery.js";
 import { setLangInMemory } from "../../lib/i18n.js";
 import type { Principal } from "../../lib/principals.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "../api-respond.js";
@@ -56,11 +59,13 @@ const settingsBody = (cfg: AppConfig) => ({
   ok: true, lang: cfg.lang, groqApiKeyHint: groqKeyHint(cfg.groqApiKey), jevApiKeyHint: groqKeyHint(cfg.jevApiKey),
   pushNoContent: cfg.pushNoContent === true, pushAllAsks: cfg.pushAllAsks === true, talkEnabled: cfg.talkEnabled === true,
   inboundRouteMode: parseRouteMode(cfg.inboundRoute?.mode),
+  webStorageBudget: webStorageBudgetMode(),
 });
 
 export async function handleSettings(req: Request, path: string, principal: Principal): Promise<Response | null> {
   if (path === "/settings" && req.method === "GET") return apiJson(200, settingsBody(await store.read()));
   if (path === "/settings" && req.method === "PUT") return putSettings(req, principal);
+  if (path === "/settings/web-storage-observe" && req.method === "POST") return webStorageSample(req, principal);
   if (path === "/profile" && req.method === "GET") return apiJson(200, { ok: true, ...readProfile() });
   if (path === "/profile" && req.method === "PUT") return putProfile(req, principal);
   return null;
@@ -96,6 +101,18 @@ async function putSettings(req: Request, principal: Principal): Promise<Response
   if (typeof b["steer.queueWhenBusy"] === "boolean") await store.setSteerQueueWhenBusy(b["steer.queueWhenBusy"]);
   if (b.inboundRouteMode !== undefined) await store.setInboundRouteMode(b.inboundRouteMode as RouteMode);
   return apiJson(200, settingsBody(await store.read()));
+}
+
+async function webStorageSample(req: Request, principal: Principal): Promise<Response> {
+  if (!canReadLedger(principal)) return forbidden("recording web storage samples requires a ledger-readable credential");
+  const body = await readJsonBody(req);
+  if (body === INVALID_JSON) return invalidJsonBody();
+  try {
+    const r = recordWebStorageSample(body);
+    return r.ok ? apiJson(200, r) : apiJson(r.status, r);
+  } catch {
+    return apiJson(503, { ok: false, error: "ledger busy" }); // 原因可能带本机路径，不回给浏览器
+  }
 }
 
 type ProfileRow = { nickname: string; avatar: string; claude_nickname: string; claude_avatar: string };

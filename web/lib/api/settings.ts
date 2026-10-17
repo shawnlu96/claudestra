@@ -5,6 +5,7 @@
 import { apiAgentName } from "@/lib/chat/agents";
 import { api } from "./client";
 import { talkEnabledOf } from "../talk-gate";
+import { noteBudgetMode, setBudgetModeRefresher, setBudgetSampleSink, type BudgetSample } from "../floka-storage/sync-budget";
 
 // ── 全局设置（语言 / 语音识别 key / 推送不带正文）：GET 只回是否已配 + 尾四位，完整 key 永不回传 ──
 export interface GlobalSettings {
@@ -21,8 +22,10 @@ export interface GlobalSettings {
   talkEnabled: boolean;
   "steer.queueWhenBusy": boolean;
 }
-type RawSettings = { lang?: unknown; groqApiKeyHint?: unknown; jevApiKeyHint?: unknown; pushNoContent?: unknown; pushAllAsks?: unknown; talkEnabled?: unknown; "steer.queueWhenBusy"?: unknown };
+type RawSettings = { lang?: unknown; groqApiKeyHint?: unknown; jevApiKeyHint?: unknown; pushNoContent?: unknown; pushAllAsks?: unknown; talkEnabled?: unknown; "steer.queueWhenBusy"?: unknown;
+  webStorageBudget?: unknown };
 const shapeSettings = (j: RawSettings): GlobalSettings => {
+  noteBudgetMode(j.webStorageBudget); // 浏览器存储预算档位只读下发；老 bridge 没这个字段 → 旧路径
   const hint = typeof j.groqApiKeyHint === "string" ? j.groqApiKeyHint : "";
   const jev = typeof j.jevApiKeyHint === "string" ? j.jevApiKeyHint : "";
   return {
@@ -34,6 +37,14 @@ const shapeSettings = (j: RawSettings): GlobalSettings => {
 };
 export function getSettings(): Promise<GlobalSettings> {
   return api("/settings", { timeoutMs: 8000 }).then(shapeSettings);
+}
+// WEBQUOTA1：档位过期时后台重拉一次（回退不用刷新页面）；observe 样本只带键名 / 动作，不带存储正文
+if (typeof window !== "undefined") {
+  setBudgetModeRefresher(() => void getSettings().catch(() => undefined)); // 拉不到保留旧档位，下次过期再拉
+  setBudgetSampleSink((sample: BudgetSample) => {
+    const post = api("/settings/web-storage-observe", { method: "POST", json: sample, timeoutMs: 8000 });
+    void post.catch(() => undefined); // 样本尽力而为，丢一条不影响存储
+  });
 }
 /** 空串 groqApiKey / jevApiKey = 清除 */
 type SettingsPatch = { lang?: "zh" | "en"; groqApiKey?: string; jevApiKey?: string; pushNoContent?: boolean; pushAllAsks?: boolean; talkEnabled?: boolean; "steer.queueWhenBusy"?: boolean };
