@@ -204,9 +204,8 @@ export class AcpHost {
     try {
       const caps = await session.initialize();
       await session.attach(this.cfg.sessionId, this.cfg.cwd, caps.resume);
-      // 模型必须生效的运行时（OpenCode：不生效就静默跑在它缺省的免费模型上）：拒起、不重试，出失败卡；其余照旧只记日志
-      await applyAcpLaunchConfig(session, this.cfg.model, this.cfg.effort, !!this.rt.strictLaunchConfig, this.deps.log)
-        .catch((e) => { throw this.rt.strictLaunchConfig ? new AcpIncompatibleError(errText(e)) : e; });
+      // 运行时自己核对启动配置（OpenCode：模型不生效就拒起、不重试）；其余照旧，没生效只记日志
+      await (this.rt.enforceLaunch ? this.rt.enforceLaunch(session, this.cfg.model) : applyAcpLaunchConfig(session, this.cfg.model, this.cfg.effort, false, this.deps.log));
       this.session = session;
       this.lastStartError = null;
       const who = session.agentInfo ? `，${session.agentInfo.name} ${session.agentInfo.version}` : "";

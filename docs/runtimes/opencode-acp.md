@@ -234,8 +234,9 @@ OCR-2 开工前要先定的两件事：OpenCode agent 是否像 Codex 一样放�
   原样交给 OpenCode 会被整条吞掉（不进会话、不回话，实测 `/plan …`）。
 - 出借 worker（干净环境）不起 OpenCode。tmux 版不做。
 - 历史：读 `opencode export <id>` 的镜像（`~/.claude-orchestrator/opencode-sessions/<id>.jsonl`）。新旧按整个 OpenCode 库的 mtime 判，
-  拿路径不等导出：有镜像就给、过期就后台刷（全局排队一次一个，同一会话至少隔 10s）——bridge 的 agents 列表和 watcher 会周期性要路径，
-  同步导出（一次 ~1–2s、峰值几百 MB）会卡住它。代价：历史 / 归档快照最多旧十来秒；刚建的会话第一次读可能还没镜像。
+  任一 OpenCode 写库都会让所有 OpenCode agent 的镜像同时判旧（按会话判要多起一个子进程，没做）。一次导出实测约 1.3s、峰值约 350MB（审查员实测），
+  所以拿路径不等导出：有镜像就给、过期就后台刷，全局排队一次一个，同一会话至少隔 10s——bridge 的 agents 列表和 watcher 会周期性要路径，
+  同步导出会卡住它。代价：历史 / 归档快照最多旧十来秒；刚建的会话第一次读可能还没镜像；导出偶尔撞上写库会失败（记一条日志，沿用旧镜像）。
 
 ### 失败形状（实测，OCR-4 第 1 轮审查后补）
 
@@ -245,3 +246,10 @@ OCR-2 开工前要先定的两件事：OpenCode agent 是否像 Codex 一样放�
   - restart / resume / `set-claude` 后重启：宿主接上会话后同样 `set_config_option`，不认就拒起（`strictLaunchConfig`），不会静默跑在免费模型上。
 - **`/compact` 失败**：那一轮只有 `usage_update`、没有摘要正文流出，不出压缩边界（只有流出摘要才算压缩了）。
 - **限流 / 免费模型下线**：本卡没碰到，形状未测；会以 session/prompt 的 JSON-RPC 错误出现，宿主走 `classifyPromptError` 兜底分类。
+
+### 留给 OCR-2 迁契约时收的散点（按运行时名判断的地方）
+
+- `src/bridge/api-slash.ts`：表外斜杠按普通消息投递那一处（`rt === "codex" || rt === "opencode"`）。
+- `src/lib/runtime-commands.ts`：`runtimeCommandsFor` 的 opencode 分支（命令表）。
+- `src/lib/sandbox.ts`（`assertSandboxRuntime`）、`src/lib/sandbox-env.ts`（沙箱脚本的 runtime 白名单）、`src/manager/set-session.ts`（沙箱 ACP 会话不查文件的名单）。
+- `web/features/chat/components/new-agent-modal.tsx`：弹窗说明文字与免费模型警示按 `runtime === "opencode"`（模型栏本身已按 `modelRequired` / `models` 判）。

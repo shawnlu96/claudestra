@@ -20,6 +20,7 @@ import { hostEnvBase, spawnAdapter } from "../acp/adapter-proc.js";
 import { ACP_RUNTIME_ENV, opencodeConfigContent } from "../acp/host-runtime.js";
 import { OPENCODE_BIN_ENV, OPENCODE_INSTALL_HINT, opencodeBin, opencodeDirsEnv } from "../acp/opencode-bin.js";
 import { AcpSession } from "../acp/session.js";
+import { enforceOpencodeModel } from "../acp/opencode-model-check.js";
 import { isValidOpencodeSessionId } from "../opencode-session.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
@@ -77,9 +78,8 @@ async function prepareOpencodeSession(spec: LaunchSpec, bin: string | null): Pro
   try {
     await s.initialize({ fork: spec.mode === "fork" });
     const sid = spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
-    // 手填的模型名在这里按会话自己的 configOptions 校（比 `opencode models` 全）：不认就拒建，别留一个起不来的 agent
-    const set = await s.setConfig("model", spec.model.trim());
-    if (!set.ok) throw new Error(`模型「${spec.model.trim()}」OpenCode 不认：${set.error}`);
+    // 手填的模型名在这里按会话自己的 configOptions 校（比 `opencode models` 全）、核对实际生效值：不认就拒建，别留一个起不来的 agent
+    await enforceOpencodeModel(s, spec.model);
     return sid;
   } catch (e) {
     throw new Error(`OpenCode 没建出会话：${e instanceof Error ? e.message : e}${logs.length ? `（${logs.slice(-3).join(" | ").slice(0, 300)}）` : ""}`);

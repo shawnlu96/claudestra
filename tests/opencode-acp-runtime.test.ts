@@ -2,6 +2,8 @@
 import { describe, expect, test } from "bun:test";
 import { acpRuntime, opencodeConfigContent } from "../src/lib/acp/host-runtime";
 import { opencodeBin, opencodeDirsEnv } from "../src/lib/acp/opencode-bin";
+import { enforceOpencodeModel } from "../src/lib/acp/opencode-model-check";
+import { AcpIncompatibleError } from "../src/lib/acp/protocol";
 import { parseOpencodeModels, opencodeModels, resetOpencodeModelsCache } from "../src/lib/opencode-models";
 import { ACP_CONTROL } from "../src/lib/runtimes/acp-control";
 import { controlFor, managedFor, manageableRuntimeIds, requireManaged, sourceFor, transportsOf } from "../src/lib/runtimes/index";
@@ -159,5 +161,30 @@ describe("模型清单", () => {
     expect(await opencodeModels(fail, "/b", 2)).toEqual(["opencode/a"]);
     expect(calls).toBe(2);
     resetOpencodeModelsCache();
+  });
+});
+
+describe("模型必须真的生效（enforceOpencodeModel）", () => {
+  const opts = (current: string) => [{ id: "model", name: "Model", currentValue: current, choices: [{ value: "opencode/big-pickle", name: "bp" }, { value: "opencode/x", name: "x" }] }];
+  const fake = (current: string, setOk: boolean, moves: boolean) => {
+    const s: any = { configOptions: opts(current) };
+    s.setConfig = async (_id: string, v: string) => {
+      if (moves) s.configOptions = opts(v);
+      return setOk ? { ok: true } : { ok: false, error: "-32602 model not found" };
+    };
+    return s;
+  };
+
+  test("生效：不抛", async () => {
+    await enforceOpencodeModel(fake("opencode/big-pickle", true, true), "opencode/x");
+  });
+
+  test("set 说成功但实际还在免费缺省：拒，报给的和实际的", async () => {
+    await expect(enforceOpencodeModel(fake("opencode/big-pickle", true, false), "opencode/x")).rejects.toThrow("给的 opencode/x，实际 opencode/big-pickle");
+  });
+
+  test("OpenCode 不认：拒，带上它的原话；没登记模型也拒", async () => {
+    await expect(enforceOpencodeModel(fake("opencode/big-pickle", false, false), "opencode/x")).rejects.toThrow("model not found");
+    await expect(enforceOpencodeModel(fake("opencode/big-pickle", true, true), undefined)).rejects.toThrow(AcpIncompatibleError);
   });
 });

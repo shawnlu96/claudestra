@@ -7,7 +7,7 @@ import { loadRegistry, normalizeName, saveRegistry } from "./core.js";
 export async function cmdSetSession(args: string[]): Promise<Record<string, unknown>> {
   const [name, newSid] = args;
   if (!name || !newSid) return { ok: false, error: "usage: set-session <name> <sessionId> [--expected <oldId>]" };
-  if (!/^[0-9a-f-]{8,64}$/i.test(newSid)) return { ok: false, error: `sessionId 形状非法: ${newSid}` };
+  if (!/^(?:[0-9a-f-]{8,64}|ses_[A-Za-z0-9]{6,60})$/i.test(newSid)) return { ok: false, error: `sessionId 形状非法: ${newSid}` };
   const expected = args[2] === "--expected" ? args[3] : undefined;
   if (args.length > 2 && !expected) return { ok: false, error: "--expected 缺旧 sessionId" };
   const tmuxName = normalizeName(name);
@@ -17,8 +17,8 @@ export async function cmdSetSession(args: string[]): Promise<Record<string, unkn
   const oldSid = info.sessionId || null;
   if (expected && oldSid !== expected && oldSid !== newSid) return { ok: false, error: `会话已变化：预期 ${expected}，当前 ${oldSid ?? "无"}` };
   // 沙箱 ACP 的新 id 由关在沙箱里的适配器生成（Codex：隔离 HOME 下的本仓 stub；Pi：目录钉死的 pi，只在沙箱 Pi 目录里开会话，
-  // 且 pi 首条助手消息前不写会话文件，/clear 时还查不到）。其它运行时仍须能找到沙箱内会话文件。
-  const acpConfined = isSandbox() && (info.runtime === "codex" || info.runtime === "pi") && (info as { transport?: string }).transport === "acp";
+  // 且 pi 首条助手消息前不写会话文件，/clear 时还查不到；OpenCode：家目录挪进沙箱根，会话在它的库里、没有文件）。其它运行时仍须能找到沙箱内会话文件。
+  const acpConfined = isSandbox() && ["codex", "pi", "opencode"].includes(info.runtime ?? "") && (info as { transport?: string }).transport === "acp";
   if (!acpConfined) assertSandboxSession(newSid);
   if (oldSid === newSid) return { ok: true, name: tmuxName, sessionId: newSid, previousSessionId: oldSid };
   if (oldSid) await archiveAgentSession(tmuxName, info, oldSid).catch((e) => console.warn(`⚠️ 归档旧会话 ${tmuxName} 失败：${e}`));

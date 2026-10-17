@@ -11,6 +11,8 @@ import { OPENCODE_BIN_ENV, opencodeBin, opencodeDirsEnv, OPENCODE_INSTALL_HINT }
 import { PI_ACP_ADAPTER_MAIN } from "./pi-adapter/main.js";
 import { sandboxPiEnv, sandboxPiProblem } from "./pi-adapter/sandbox-policy.js";
 import type { CompactSource, TranslatorOptions } from "./updates.js";
+import { enforceOpencodeModel } from "./opencode-model-check.js";
+import type { AcpSession } from "./session.js";
 
 export const ACP_RUNTIME_ENV = "CLAUDESTRA_ACP_RUNTIME";
 /** Pi 的能力档等参数（JSON 字符串数组），由 runtimes/pi-acp.ts 的启动命令给，原样排在适配器的 pi 参数前面 */
@@ -38,8 +40,11 @@ export interface AcpRuntime {
   mcpServers(spec: AdapterEnvSpec): AcpMcpServer[];
   /** 压缩完成认哪个来源（updates.ts CompactSource）：Pi 是适配器的中性记号，Codex 是 ACP compaction_update，OpenCode 什么都不发 */
   readonly compactFrom: CompactSource["from"];
-  /** 启动配置（registry 的模型）没生效就拒起：OpenCode 不认的模型会静默回落到它缺省的免费模型（docs/runtimes/opencode-acp.md「失败形状」） */
-  readonly strictLaunchConfig?: boolean;
+  /**
+   * 接上会话后由运行时自己施加并核对启动配置，不过就抛 AcpIncompatibleError（宿主拒起、不重试）。不给 = 通用的 applyAcpLaunchConfig（没生效只记日志）。
+   * OpenCode 要它：不认的模型会静默回落到缺省的免费模型（docs/runtimes/opencode-acp.md「失败形状」）
+   */
+  enforceLaunch?(s: AcpSession, model: string | undefined): Promise<void>;
   /** translator 的按运行时差异；不给 = 现行行为 */
   translator?(mcpName: string): TranslatorOptions;
 }
@@ -97,7 +102,7 @@ const RUNTIMES: Record<string, AcpRuntime> = {
     adapterEnv: (s) => sandboxPiEnv(hostEnvBase(s), s.base), mcpServers: stdioMcpServers("pi"),
   },
   opencode: {
-    id: "opencode", label: "OpenCode", logLabel: "opencode", compactFrom: "command-end", strictLaunchConfig: true, agentCommand: opencodeAgentCommand,
+    id: "opencode", label: "OpenCode", logLabel: "opencode", compactFrom: "command-end", enforceLaunch: enforceOpencodeModel, agentCommand: opencodeAgentCommand,
     adapterEnv: (s) => {
       const env = hostEnvBase(s);
       delete env[OPENCODE_BIN_ENV];
