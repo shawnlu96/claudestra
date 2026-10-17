@@ -8,7 +8,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InventoryQuota } from "../src/lib/ai-quota.js";
-import { factOf, factsNow, liveFact, mergeReport, readFactsFile, refreshQuotaFacts, resetQuotaFactsForTest, type FactsIo, type QuotaInventory } from "../src/lib/lend-quota-line-facts.js";
+import {
+  factOf, factsNow, liveFact, mergeReport, readFactsFile, refreshQuotaFacts, refreshQuotaFactsAfterReset, resetQuotaFactsForTest, type FactsIo, type QuotaInventory,
+} from "../src/lib/lend-quota-line-facts.js";
 
 const NOW = Date.parse("2026-10-06T06:00:00Z");
 const RESET = NOW + 2 * 86_400_000;
@@ -118,5 +120,27 @@ describe("刷新 / 缓存 / 落盘", () => {
     const x = io([{ codex: inv(1) }]);
     await Promise.all([refreshQuotaFacts(NOW, x), refreshQuotaFacts(NOW, x)]);
     expect(x.n()).toBe(1);
+  });
+});
+
+
+describe("重置后补读", () => {
+  test("等待重置前在途读取后再清缓存，旧回包不能挡住新读数", async () => {
+    let release!: (v: QuotaInventory) => void;
+    const pending = new Promise<QuotaInventory>((r) => { release = r; });
+    const x = io([{ codex: inv(100) }, { codex: inv(0, { observedAt: NOW + 60_002 }) }]);
+    await refreshQuotaFacts(NOW, x);
+    const old = refreshQuotaFacts(NOW + 60_000, { ...x, read: () => pending });
+    const fresh = refreshQuotaFactsAfterReset(NOW + 60_002, x);
+    release({ codex: inv(100) });
+    await old;
+    expect((await fresh).codex).toMatchObject({ weekUsedPct: 0, observedAt: NOW + 60_002 });
+    expect(factsNow(NOW + 60_002, x).codex?.weekUsedPct).toBe(0);
+    expect(readFactsFile(x.path).codex?.weekUsedPct).toBe(0);
+  });
+  test("补读失败保留落盘事实与真实观测时刻，不把失败当额度补满", async () => {
+    const x = io([{ codex: inv(100) }, new Error("fixture read failed")]);
+    await refreshQuotaFacts(NOW, x);
+    expect((await refreshQuotaFactsAfterReset(NOW + 10, x)).codex).toMatchObject({ weekUsedPct: 100, observedAt: NOW });
   });
 });
