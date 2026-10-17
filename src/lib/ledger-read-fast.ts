@@ -8,21 +8,18 @@
 import type { Database } from "bun:sqlite";
 import { blockedBy, type DepView } from "./ledger-deps.js";
 import type { DoneFact } from "./ledger-read-done.js";
-import { endStages, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listSteps, type TaskStep } from "./ledger-steps.js";
 import { cardFacts } from "./ledger-read-fast-memo.js";
 import { listEvents } from "./ledger-store.js";
 
 /** 已完成卡的窗口 / 分页 / 聚合只要的几样（ledger-read-done.ts doneWindow）：完成时刻和审查计数来自每卡事实表，不读窗口外卡的事件明细 */
 export function doneFacts(db: Database, project: string, done: readonly LedgerTask[], deps: readonly DepView[]): DoneFact[] {
-  const facts = cardFacts(db, project, done.map((t) => t.id));
-  return done.map((t) => {
-    const { ends, reviews: r } = facts.get(t.id)!;
-    return {
-      id: t.id, stage: t.stage, kind: t.kind, itemId: t.itemId, updatedAt: t.updatedAt, blockedBy: blockedBy(t.id, deps).map((d) => d.from),
-      metrics: { endTs: endStages(t.kind).map((s) => ends.get(s)).find((ts) => ts !== undefined) ?? null, reviewRounds: r.n, p0: r.p0, p1: r.p1 },
-    };
-  });
+  const facts = cardFacts(db, project, done);
+  return done.map((t) => ({
+    id: t.id, stage: t.stage, kind: t.kind, itemId: t.itemId, updatedAt: t.updatedAt, blockedBy: blockedBy(t.id, deps).map((d) => d.from),
+    metrics: facts.get(t.id)!.metrics,
+  }));
 }
 
 /** 这几张卡各自的全部事件（seq 升序），逐卡走 (project, target, seq) 索引 */
@@ -40,7 +37,7 @@ export function stepsOf(db: Database, ids: readonly string[]): Map<string, TaskS
  * rest 里的卡（已结束的）只给时间线上第一次进 build / verified / done / cancelled 的那几条（吞吐、ETA、完成时刻只 find 这几个阶段的第一段），
  * 它们在前沿里是 completed / deferred 行，久未动、成员不进输出。
  */
-export function productEvents(db: Database, project: string, full: readonly string[], rest: readonly string[]): Map<string, LedgerEvent[]> {
+export function productEvents(db: Database, project: string, full: readonly string[], rest: readonly Pick<LedgerTask, "id" | "kind">[]): Map<string, LedgerEvent[]> {
   const out = new Map<string, LedgerEvent[]>();
   for (const [id, { marks }] of cardFacts(db, project, rest)) if (marks.length) out.set(id, [...marks]);
   for (const [id, events] of eventsOf(db, project, full)) if (events.length) out.set(id, events);

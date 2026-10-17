@@ -33,7 +33,7 @@ export function productBoard(db: Database, project: string, now: number) {
   });
   // 不逐条读全部历史（ledger-read-fast.ts）：在跑的卡和读不到的节点卡给全部事件，其余只给时间线上要 find 的几条
   const full = [...tasks.filter((t) => !compactStage(t.stage)).map((t) => t.id), ...entries.flatMap((e) => e.nodes.flatMap((n) => n.taskId && !n.task ? [n.taskId] : []))];
-  const events = productEvents(db, project, [...new Set(full)], tasks.filter((t) => compactStage(t.stage)).map((t) => t.id));
+  const events = productEvents(db, project, [...new Set(full)], tasks.filter((t) => compactStage(t.stage)));
   const all = entries.flatMap((e) => e.nodes), pace = projectPace(all, tasks, events, now);
   const active = all.filter((n) => !deferredNode(n) && phase(n) === "active").length;
   const features = entries.map(({ f, nodes }) => {
