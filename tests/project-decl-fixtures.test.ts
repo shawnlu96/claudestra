@@ -1,14 +1,26 @@
 /** Isolated repositories only; all git operations are local and never fetch. */
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterAll } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import type { ProjectDef } from "../src/lib/projects.js";
 import type { ProjectDeclaration } from "../src/lib/project-decl-schema.js";
 
 const roots: string[] = [];
-afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
+function cleanupRoots(owned: string[]): void {
+  for (const root of owned) rmSync(root, { recursive: true, force: true });
+}
+afterAll(() => cleanupRoots(roots.splice(0)), 30_000);
+test("fixture cleanup removes only owned roots without following dependency symlinks", () => {
+  const parent = mkdtempSync(join(tmpdir(), "project-decl-cleanup-")); roots.push(parent);
+  const owned = join(parent, "owned");
+  put(owned, "file.txt", "owned"); put(parent, "keep/value.txt", "keep");
+  symlinkSync(join(parent, "keep"), join(owned, "dependency"), "dir");
+  cleanupRoots([owned]);
+  expect(existsSync(owned)).toBe(false);
+  expect(readFileSync(join(parent, "keep/value.txt"), "utf8")).toBe("keep");
+});
 export const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 export function git(repo: string, ...args: string[]): string {
   const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -28,6 +40,8 @@ export function commit(repo: string): string {
 export function flokaFixture(root: string, head: string): { repo: string; project: ProjectDef } {
   const repo = mkdtempSync(join(tmpdir(), "project-decl-floka-")); roots.push(repo);
   git(root, "clone", "--quiet", "--shared", "--no-checkout", "--", root, repo);
+  // Git object reads still see the entire pinned tree; only legacy CLI source and the edited CI basis need worktree files.
+  git(repo, "sparse-checkout", "set", "--cone", "src", ".github");
   git(repo, "checkout", "-q", "--detach", head);
   git(repo, "remote", "set-url", "origin", "https://github.com/shawnlu96/claudestra.git");
   git(repo, "update-ref", "--no-deref", "-d", "refs/remotes/origin/HEAD");
