@@ -38,7 +38,7 @@ function branch(name: string, change: () => void): string {
   return head;
 }
 
-/** 一张到了 build 的卡；流程经正式 setWorkflow 落库（docs 先按 on 挂上模板，写完摘掉，交付时由门控自己同步） */
+/** 一张到了 build 的卡；流程经正式 setWorkflow 落库（docs 先按 on 挂上模板，写完摘掉（测试清理），交付时由门控自己同步） */
 function card(id: string, template: string, globs = GLOBS): string {
   const agent = `agent-${id.toLowerCase()}`;
   createTask(db, PM, { project: P, id, title: id, kind: "code", agent, pm: PM.actor, extra: { fileGlobs: globs } });
@@ -140,7 +140,7 @@ describe("[验收线 4] 真实交付入口：glob 与实际 diff 双重校验", 
 });
 
 describe("[验收线 3] off：docs 卡暂停，原有模板不变；重新 on 后重新校验", () => {
-  test("off：docs 交付拒（要求恢复开关或纠正规格），不读 diff、不挂模板、不记事件；code 卡交付与旧路径一致", () => {
+  test("off：docs 交付拒（要求恢复开关或纠正规格），不读 diff、不记事件；code 卡交付与旧路径一致", () => {
     card("D5", "docs");
     card("C2", "code", ["src/**"]);
     const docsHead = branch("d5", () => put("docs/a.md", "a5\n"));
@@ -154,7 +154,7 @@ describe("[验收线 3] off：docs 卡暂停，原有模板不变；重新 on �
     expect(e.message).toContain("taskTierModels 是 off");
     expect(e.message).toContain("纠正规格");
     expect(e.message).not.toContain("类型校验");
-    expect(tierLaunchable("docs")).toBe(false);
+    expect(tierLaunchable("docs")).toBe(true); // 进程级注册留给别的 on 项目；本项目 off 由交付门控按项目拒
     expect(diffReads).toBe(reads);
     expect(listEvents(db, { project: P }).length).toBe(events);
     const r = send("C2", codeHead);

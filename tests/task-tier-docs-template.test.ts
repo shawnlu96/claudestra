@@ -1,6 +1,6 @@
 /**
- * docs 流程模板（src/lib/task-tier-docs-template.ts）：taskTierModels on 才挂，流程逐版借 code 的、模型值全由 TIER3 解析；
- * 类型只认卡首唯一「模板：docs」；开卡前按 fileGlobs 校验；off 摘掉后回到旧模板校验的拒绝路径，原有模板开卡结果不变，重新 on 可再校验。
+ * docs 流程模板（src/lib/task-tier-docs-template.ts）：taskTierModels on / observe 才挂（进程级常驻，off 项目各边界按项目拒），流程逐版借 code 的、模型值全由 TIER3 解析；
+ * 类型只认卡首唯一「模板：docs」；开卡前按 fileGlobs 校验；off 按项目回到旧模板校验的拒绝路径（开卡、调度规划），原有模板开卡 / 规划结果不变，重新 on 可再校验。
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -14,6 +14,8 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { defaultRoleModels, type RoleModelRead } from "../src/lib/role-model-settings.js";
+import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
+import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { templateFor } from "../src/lib/scheduler-template.js";
 import { docsFlows, resetDocsTemplate, syncDocsTemplate } from "../src/lib/task-tier-docs-template.js";
 import { decideTierLaunch, resolveTierModel, reviewerTierCtx, TIER_DEFAULTS, useTaskTierPort } from "../src/lib/task-tier-models.js";
@@ -110,17 +112,19 @@ describe("[验收线 2] 开卡前按 fileGlobs 停派", () => {
 });
 
 describe("[验收线 3] off：不挂模板、不加事件，回到旧模板校验拒绝；重新 on 可再校验", () => {
-  test("off 摘掉模板与钩子；原有模板开卡计划与 docs 未加载时逐字一致；docs 走旧拒绝路径", async () => {
+  test("off 不挂模板与钩子；原有模板开卡计划与 docs 未加载时逐字一致；docs 走旧拒绝路径（on 挂过之后 off 也一样）", async () => {
     const f = fixture();
     mode("off");
     const before = await f.start("good", card("模板：security"));
-    mode("on");
-    syncDocsTemplate(f.project);
-    mode("off");
+    expect(await f.start("good", card("模板：docs"), "docs")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("docs 还没有注册流程模板") });
     expect(syncDocsTemplate(f.project)).toBe(false);
     expect(tierLaunchable("docs")).toBe(false);
     expect(WORKFLOW_TEMPLATES).not.toContain("docs" as never);
     expect(runTierChecks("dispatch", { project: f.project, taskId: "x", tier: "docs", fileGlobs: ["src/**"] })).toBeNull();
+    mode("on");
+    syncDocsTemplate(f.project);
+    mode("off");
+    expect(syncDocsTemplate(f.project)).toBe(false); // 注册是进程级、留给别的 on 项目；本项目由各消费边界按项目拒
     expect(await f.start("good", card("模板：security"))).toEqual(before);
     expect(await f.start("good", card("模板：docs"), "docs")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("docs 还没有注册流程模板") });
     expect(await f.start("wide", card("模板：docs"))).toMatchObject({ ok: true }); // off：卡首声明不读，旧路径缺省 code
@@ -153,7 +157,6 @@ describe("[验收线 1、3] 生产开卡入口：preflightStart 自己按项目�
     expect(decideTierLaunch({ ...ctx!, specText: spec }, "author", "claude", null, null)).toMatchObject({ mode: "on", value: TIER_DEFAULTS.docs.author.claude });
     mode("off");
     expect(await f.start("good", card("模板：docs"), "docs")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("docs 还没有注册流程模板") });
-    expect(tierLaunchable("docs")).toBe(false);
     mode("on");
     expect(workflowOf(await f.start("good", card("模板：docs")))).toEqual({ template: "docs", version: 3 });
   });
@@ -200,5 +203,72 @@ describe("[验收线 1] 台账迁移 migrateWorkflowDocsTemplate：旧库 task_w
     expect((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n).toBe(changes);
     expect([rows(), db.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all()]).toEqual([after, schema]);
     expect(getWorkflow(db, "N1")).toMatchObject({ template: "docs", authorFamily: "codex", specRev: 2, rev: 4 });
+  });
+});
+
+/** 一张已开好的 docs 卡（spec 阶段、auto 流程、建卡事件齐），规划走调度器真实入口 autoSnapshot + planScheduler */
+function docsCard(project: string) {
+  const dir = mkdtempSync(join(tmpdir(), "tier3e-plan-")), path = join(dir, "ledger.sqlite");
+  const db = openLedger(path), actor = "agent-d0-pm";
+  cleanups.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
+  setMeta(db, { actor: "owner" }, { project, key: "pms", value: [actor] });
+  const add = (id: string, template: string) => {
+    createTask(db, { actor }, { project, id, title: id, kind: "code" });
+    db.prepare(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, rev, createdAt, updatedAt)
+      VALUES (?, ?, ?, 3, 'auto', 'claude', '退 PM 人工', ?, 1, 1, 1)`).run(id, project, template, getTask(db, id)!.specRev);
+  };
+  add("D1", "docs"); add("C1", "code");
+  const plan = (id: string) => planScheduler(autoSnapshot(db, getTask(db, id)!, { registry: [], maxWorkers: 2, now: 1 }));
+  return { db, path, plan };
+}
+const brief = (d: ReturnType<typeof planScheduler>) => d.kind === "intent" ? { kind: d.kind, action: d.action } : { kind: d.kind, code: (d as { code?: string }).code };
+
+describe("[验收线 1、3] 调度规划边界：已有 docs 卡按本项目档位推进 / 暂停，不靠开卡或交付先同步", () => {
+  test("冷启动的生产进程（只加载开卡入口）：on 下已有 docs 卡照 code 流程规划，不判 workflow_drift", () => {
+    const f = docsCard("d0-cold");
+    closeLedger(f.path);
+    const lib = (m: string) => JSON.stringify(join(import.meta.dir, "../src/lib", m));
+    const script = `
+      await import(${lib("dag-tools-start.ts")});
+      const { useTaskTierPort } = await import(${lib("task-tier-models.ts")});
+      const { openLedger, getTask } = await import(${lib("ledger-store.ts")});
+      const { autoSnapshot } = await import(${lib("scheduler-auto-snapshot.ts")});
+      const { planScheduler } = await import(${lib("scheduler-plan.ts")});
+      useTaskTierPort({ policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }) });
+      const db = openLedger(${JSON.stringify(f.path)});
+      const out = {};
+      for (const id of ["D1", "C1"]) { const d = planScheduler(autoSnapshot(db, getTask(db, id), { registry: [], maxWorkers: 2, now: 1 }));
+        out[id] = d.kind === "intent" ? { kind: d.kind, action: d.action } : { kind: d.kind, code: d.code }; }
+      console.log(JSON.stringify(out));`;
+    const r = Bun.spawnSync([process.execPath, "-e", script], { cwd: join(import.meta.dir, ".."), env: process.env });
+    expect(r.exitCode).toBe(0);
+    const out = JSON.parse(r.stdout.toString().trim().split("\n").at(-1)!);
+    expect(out.D1).toEqual(out.C1);
+    expect(out.D1.code).not.toBe("workflow_drift");
+  });
+
+  test("on→off 不新开卡：已有 docs 卡暂停（旧模板校验拒绝路径，诊断要求恢复开关或纠正规格），code 卡规划不变；重新 on 照常推进", () => {
+    const f = docsCard("d0-flip");
+    mode("on");
+    const onDocs = brief(f.plan("D1")), onCode = brief(f.plan("C1"));
+    expect(onDocs).toEqual(onCode);
+    expect(onDocs.code).not.toBe("workflow_drift");
+    mode("off");
+    const off = f.plan("D1");
+    expect(off).toMatchObject({ kind: "escalate", code: "workflow_drift", reason: expect.stringContaining("taskTierModels") });
+    expect(brief(f.plan("C1"))).toEqual(onCode);
+    mode("on");
+    expect(brief(f.plan("D1"))).toEqual(onDocs);
+  });
+
+  test("同一进程两个项目：off 项目开卡不摘 on 项目的 docs；on 项目 docs 卡照常规划，off 项目 docs 卡暂停", async () => {
+    const on = docsCard("d0-on"), off = docsCard("d0-off");
+    const f = fixture();
+    useTaskTierPort({ policy: (project: string) => ({ mode: project === "d0-on" ? "on" : "off", manualAfterMs: null, source: "config" }), read: () => TABLE });
+    const want = brief(on.plan("C1"));
+    expect(brief(on.plan("D1"))).toEqual(want);
+    expect(await f.start("good", card("模板：docs"), "docs")).toMatchObject({ ok: false, error: expect.stringContaining("docs 还没有注册流程模板") }); // d0-project 是 off
+    expect(brief(on.plan("D1"))).toEqual(want);
+    expect(off.plan("D1")).toMatchObject({ kind: "escalate", code: "workflow_drift" });
   });
 });

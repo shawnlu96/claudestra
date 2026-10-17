@@ -19,7 +19,7 @@ import { canonicalTwinError } from "./registry.js";
 import { notePrivateStart, parseStartPlacement, PRIVATE_ONLY_PEER, privateStartMode, type StartPlacement } from "./scheduler-placement-start.js";
 import { latestTemplateVersion } from "./scheduler-template.js";
 import { tierCheckGate, tierStartTemplate } from "./task-tier-models.js";
-import { syncDocsTemplate } from "./task-tier-docs-template.js";
+import { docsOffProblem, syncDocsTemplate } from "./task-tier-docs-template.js";
 import { isTaskTier, tierLaunchable, type TaskTier } from "./task-tier-spec.js";
 import { uiSpecGate } from "./spec-lint.js";
 import { observationGate } from "./spec-lint-observation.js";
@@ -193,11 +193,11 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   } catch (e) {
     return no("not_found", (e as Error).message);
   }
-  syncDocsTemplate(f.project); // TIER3e：按本项目 taskTierModels 挂 / 摘 docs 模板，再做模板校验
+  syncDocsTemplate(f.project); // TIER3e：本项目 on / observe 先挂上 docs 模板（off 不挂、不摘别的项目的），再做模板校验
   try { requireSharedLedgerStart(f.id, args.key, () => args.taskId ?? cardNames(env.db, f, args.key).taskId); } catch (e) { return no("forbidden", (e as Error).message); }
   const want = parseStartPlacement(args.placement);
   if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
-  if (args.template !== undefined) { const bad = templateProblem(args.template); if (bad) return no("invalid", bad); }
+  if (args.template !== undefined) { const bad = docsOffProblem(f.project, args.template) ?? templateProblem(args.template); if (bad) return no("invalid", bad); }
   const r = nodeReady(env, f, args.key);
   if ("error" in r) return no("not_found", r.error as string);
   const { node, wait } = r;

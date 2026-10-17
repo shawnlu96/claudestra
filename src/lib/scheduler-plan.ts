@@ -33,6 +33,7 @@ import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./re
 import { ownerFreshStep } from "./scheduler-ui-owner-fresh.js";
 import { fixSelfHeal } from "./scheduler-fix-selfheal.js";
 import { handbackReview } from "./pm-handback.js";
+import { docsTierPause } from "./task-tier-docs-template.js";
 
 export interface WorkerRef {
   agent: string;
@@ -375,6 +376,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
 function planSchedulerBase(s: PlannerSnapshot): PlannerDecision {
   const { task, workflow } = s;
   if (!workflow || workflow.mode === "manual") return wait("manual", "任务由 PM 人工推进");
+  const docsOff = docsTierPause(task.project, workflow.template); if (docsOff) return escalate("workflow_drift", docsOff); // TIER3e：docs 按本项目 taskTierModels 同步 / 暂停
   if (task.kind !== "code" || !templateFor(workflow.template, workflow.templateVersion) || workflow.taskId !== task.id || workflow.specRev !== task.specRev) {
     return escalate("workflow_drift", "流程模板、任务类型或规格版本已变，自动推进暂停");
   }

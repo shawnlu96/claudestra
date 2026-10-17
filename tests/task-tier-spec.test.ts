@@ -66,7 +66,7 @@ describe("[验收线 1] docs 未注册不可达", () => {
     expect(tierLaunchable("code")).toBe(true);
   });
 
-  test("start_node 预检：template=docs 开不了卡，什么都不建（off：TIER3e 的同步摘掉注册，回到未注册）", async () => {
+  test("start_node 预检：template=docs 开不了卡，什么都不建（off：TIER3e 不挂注册，docs 与未注册同一句拒）", async () => {
     const f = integrationFixture();
     try {
       mode("off");
@@ -125,7 +125,7 @@ describe("扩展点 2（模板注册）：新模块注册流程后开卡可达",
       const byDecl = await preflightStart(f.startEnv, { featureId: f.id, key: "next", spec: card("模板：docs") });
       expect(byDecl).toMatchObject({ ok: false, code: "tier_check" });
       undo();
-      mode("off"); // on 下开卡入口会重新同步注册；off 摘掉 TIER3e 的注册，核撤销后不可达
+      mode("off"); // on 下开卡入口会重新同步注册；off 不挂、开卡按项目拒，核撤销后不可达
       expect(await preflightStart(f.startEnv, { featureId: f.id, key: "next", template: "docs", spec: "# scope" })).toMatchObject({ ok: false, code: "invalid" });
       expect(templateFor("docs" as never, 3)).toBeNull();
       expect(WORKFLOW_TEMPLATES).not.toContain("docs" as never);
