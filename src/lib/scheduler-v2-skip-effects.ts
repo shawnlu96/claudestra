@@ -131,6 +131,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "proc=1 fs=3",
     "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3",
+    // CREPAUTO1: observe samples per replica feature after schedulerV2SkipFeature; the refusal note only from openCard (after pickCandidate's hook)
+    "center-replica-autostart-run.ts": "ledger=2",
     "center-deploy-checkout.ts": "vcs=2",
     "center-deploy-proof.ts": "vcs=1",
     "center-deploy-run.ts": "proc=1 fs=1",
@@ -359,6 +361,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-review-worktree.ts": "proc=3 fs=2 vcs=3",
     "scheduler-yield.ts": "fs=2",
     "shared-ledger-center-claims.ts": "fs=1",
+    "shared-ledger-center-replica-state.ts": "fs=3", // CREPAUTO1: replica state read by the center claim path that autostart's openCard drives
+    "shared-ledger-center-start.ts": "fs=1", // CREPAUTO1: claim lock dir; callers are start_node and autostart's openCard, both past the gates
     // N8B8: reachable through dag-write-scrub's read of the mirror state (readSharedLedgerMirrors); their writes belong to `shared-mirror` and the cron mirror loop
     "shared-ledger-client-transport.ts": "fs=2",
     "shared-ledger-contract-v2-transaction.ts": "stmt=2",

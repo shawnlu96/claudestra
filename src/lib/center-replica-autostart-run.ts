@@ -11,6 +11,7 @@ import { activeFeatures, currentViews, featureGateRest, isStop, nodeCandidate, t
 import type { StartTickEnv } from "./scheduler-autostart-run.js";
 import { localAuthorRuntime } from "./scheduler-local-runtime.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 import { CENTER_START_TEXT, centerPreflight } from "./shared-ledger-center-start.js";
 import { pickRepo } from "./shared-ledger-gate-repo.js";
 
@@ -66,6 +67,7 @@ export async function centerReplicaObserveTick(env: StartTickEnv, failed: Failed
   for (const project of [...env.svc.projects].sort()) {
     if (centerReplicaMode(project) !== "observe") continue;
     for (const f of activeFeatures(env.db, project)) {
+      if (schedulerV2SkipFeature(env.db, f.id)) continue; // S2D2: no local card work for a migrating / execution feature
       if (!isCenterReplica(f.id) || !centerReplicaMember(f.id) || featureGateRest(env.db, f, env.svc)) continue;
       const views = currentViews(env.db, f), lanes = featureLanes(env.db, f);
       for (const key of lanes?.startNow ?? []) {
