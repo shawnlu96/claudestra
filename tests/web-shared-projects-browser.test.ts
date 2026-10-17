@@ -118,11 +118,11 @@ afterAll(async () => {
     }, null, 2), { mode: 0o600 });
   } finally {
     server?.stop(true);
-    // CI saw browser.close() stall past the hook timeout after every test passed; bound it, bun reaps Chromium at exit.
-    try { await Promise.race([browser?.close(), Bun.sleep(10_000)]); }
+    // browser.close() force-kills Chromium after Playwright's own 30s graceful-close deadline; the hook budget must outlast it.
+    try { await browser?.close(); }
     finally { rmSync(scratch, { recursive: true, force: true }); }
   }
-}, TEST_TIMEOUT_MS);
+}, 2 * TEST_TIMEOUT_MS);
 async function screenshot(page: Page, name: string) {
   const png = await page.screenshot({ path: join(shots, `${name}.png`), animations: "disabled" });
   chmodSync(join(shots, `${name}.png`), 0o600);
