@@ -3,9 +3,11 @@
  * 没存过 = 缺省开；文件坏 / 读不了 = 按关算（不降档，整段走现有启动路径）并给诊断，不猜。
  * 只有 B 本人（owner：本机 CLI / owner 全权设备）或 B 的 master 能改；peer / agent / 远端 A 一律拒——网页（bridge local-api/task-tier-lend-settings.ts）
  * 和管理命令（manager/ledger-task-tier-lend-settings-cmd.ts）都经这里的 saveTierLendSettings 写、同一个权限判定。
- * 写是 rev 比对 + 原子替换（tmp + rename）。tests/task-tier-lend-settings.test.ts。
+ * 写是跨进程锁内 rev 比对 + 原子替换（tmp + rename）。tests/task-tier-lend-settings.test.ts。
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { writeJsonAtomicSync } from "./state-file.js";
 
@@ -57,19 +59,29 @@ function tierLendEditProblem(by: TierLendEditor): string | null {
 export type TierLendSave = { ok: true; settings: TierLendSettings } | { ok: false; code: "forbidden" | "conflict" | "io"; error: string; current?: TierLendSettings };
 
 /** rev = 改之前读到的版本（CAS）；坏文件也可以用读出来的 rev 0 覆盖 */
-export function saveTierLendSettings(by: TierLendEditor, input: { rev: number; acceptDowngrade: boolean }, now: number,
-  path = TIER_LEND_SETTINGS_PATH): TierLendSave {
+export async function saveTierLendSettings(by: TierLendEditor, input: { rev: number; acceptDowngrade: boolean }, now: number,
+  path = TIER_LEND_SETTINGS_PATH): Promise<TierLendSave> {
   const no = tierLendEditProblem(by);
   if (no) return { ok: false, code: "forbidden", error: no };
-  const cur = readTierLendSettings(path);
-  if (cur.status === "unreadable") return { ok: false, code: "io", error: `读不了设置文件，没有保存：${cur.error}` };
-  if (cur.settings.rev !== input.rev) return { ok: false, code: "conflict", error: "设置刚被别处改过，请刷新后再改", current: cur.settings };
-  const next: TierLendSettings = { v: 1, acceptDowngrade: input.acceptDowngrade, rev: cur.settings.rev + 1, updatedAt: now,
-    updatedBy: by.kind === "web" ? "owner" : by.actor };
+  let lock: Awaited<ReturnType<typeof acquireLock>>;
   try {
-    writeJsonAtomicSync(path, next, { commitIf: () => readTierLendSettings(path).settings.rev === cur.settings.rev });
+    // 首次保存也可能尚无状态目录；锁目录必须建在已有的父目录中。
+    mkdirSync(dirname(path), { recursive: true });
+    lock = await acquireLock(`${path}.lock`, 5_000);
+  } catch (e) { return { ok: false, code: "io", error: `拿设置文件的锁失败：${(e as Error).message}` }; }
+  if (!lock) return { ok: false, code: "io", error: "设置文件正被别处修改，稍后再试" };
+  try {
+    const cur = readTierLendSettings(path);
+    if (cur.status === "unreadable") return { ok: false, code: "io", error: `读不了设置文件，没有保存：${cur.error}` };
+    if (cur.settings.rev !== input.rev) return { ok: false, code: "conflict", error: "设置刚被别处改过，请刷新后再改", current: cur.settings };
+    const next: TierLendSettings = { v: 1, acceptDowngrade: input.acceptDowngrade, rev: cur.settings.rev + 1, updatedAt: now,
+      updatedBy: by.kind === "web" ? "owner" : by.actor };
+    // 锁内读、比版、写全程同步；提交前核租，拒绝被暂停超期后恢复的旧持有者。
+    writeJsonAtomicSync(path, next, { commitIf: () => lock.held() });
+    return { ok: true, settings: next };
   } catch (e) {
     return { ok: false, code: "io", error: `保存失败，没有生效：${(e as Error).message}` };
+  } finally {
+    lock.release();
   }
-  return { ok: true, settings: next };
 }

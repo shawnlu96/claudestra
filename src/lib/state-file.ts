@@ -72,7 +72,7 @@ export function readJsonStateSync(path: string, validate?: StateValidator): Stat
 }
 
 // 同一个坏文件（按 path + mtime 认）只喊一次：读者可能每个请求都读一遍
-const reportedCorrupt = new Map<string, number>();
+const reportedCorrupt = new Map<string, number | string>();
 function mtimeOf(path: string): number {
   try { return statSync(path).mtimeMs; } catch { return 0; }
 }
@@ -82,8 +82,8 @@ function mtimeOf(path: string): number {
  * writersGuarded=false：这个文件的写者没走 writeJsonStateGuarded（registry 的 saveRegistry），
  * 不能宣称「写者拒绝覆盖」——下一次写入会直接覆盖它。
  */
-export function reportCorrupt(path: string, error: string, who = "state", writersGuarded = true): void {
-  const m = mtimeOf(path);
+export function reportCorrupt(path: string, error: string, who = "state", writersGuarded = true, version?: number | string): void {
+  const m = version ?? mtimeOf(path);
   if (reportedCorrupt.get(path) === m) return;
   reportedCorrupt.set(path, m);
   const writers = writersGuarded ? "写者拒绝覆盖" : "注意：写者不拒写，下一次写入会覆盖它";
