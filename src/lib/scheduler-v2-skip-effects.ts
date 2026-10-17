@@ -131,13 +131,13 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "proc=1 fs=3",
     "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3",
-    // CREPAUTO1: observe samples per replica feature after schedulerV2SkipFeature; the refusal note only from openCard (after pickCandidate's hook)
-    "center-replica-autostart-run.ts": "ledger=2",
     "center-deploy-checkout.ts": "vcs=2",
     "center-deploy-proof.ts": "vcs=1",
     "center-deploy-run.ts": "proc=1 fs=1",
     "center-deploy-tick.ts": "ledger=2 notice=1",
     "center-deploy-worker.ts": "fs=1 vcs=1",
+    // CREPAUTO1: observe samples per replica feature after schedulerV2SkipFeature; the refusal note only from openCard (after pickCandidate's hook)
+    "center-replica-autostart-run.ts": "ledger=2",
     "ledger-scheduler-lease-finished.ts": "sql=7 stmt=7",
     "lend-pr-takeover-gh.ts": "vcs=4",
     "lend-pr-takeover.ts": "ledger=1",
