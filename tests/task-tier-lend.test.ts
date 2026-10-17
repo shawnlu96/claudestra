@@ -330,6 +330,75 @@ describe("[验收线 1] 合成 A：suggest 来自类型 × 角色有效值（只
   });
 });
 
+describe("[验收线 3] 合成 A/B：双方都开时 A 证明不了 security 下限 = 不派单（不再编码成缺建议、让 B 走兼容路径）", () => {
+  const BROKEN: RoleModelRead[] = [{ status: "invalid", error: "坏", table: defaultRoleModels() }, { status: "unreadable", error: "读不了", table: defaultRoleModels() }];
+  const lendCode = (f: () => unknown): string | null => {
+    try { f(); return null; } catch (e) { return ((e as { current?: { lend?: string } }).current?.lend) ?? `非出借拒绝：${(e as Error).message}`; }
+  };
+
+  test("复现：security 卡、A 模型表坏 / 读不了、下限过不了 → claim 以 unavailable 拒绝（含 pm-reviewer、Codex）", () => {
+    tierMode("on");
+    for (const read of BROKEN) {
+      for (const o of [{ ...ORDER, family: "claude" as const }, { ...ORDER, family: "codex" as const },
+        { ...ORDER, step: "review", wire: { node: "pm_review" }, family: "claude" as const }]) {
+        expect(lendCode(() => claimSuggest(ledgerA("security"), o, TIER_CAPS, 1, roleModelOn(read)))).toBe("unavailable");
+      }
+    }
+    // 类型核对不过（卡上流程模板不认识）= 分不清是不是 security，同样不派单
+    expect(lendCode(() => claimSuggest(ledgerA("mystery"), { ...ORDER, family: "claude" }, TIER_CAPS, 1, roleModelOn(roleRead({ claude: "claude-opus-5-5", codex: "high" })))))
+      .toBe("unavailable");
+  });
+
+  test("对照：非 security 卡表坏仍只是不给建议并留诊断（与改前一样）；旧 B / A 键 off 的表坏路径不变", () => {
+    tierMode("on");
+    const [invalid] = BROKEN;
+    expect(claimSuggest(ledgerA("ui"), { ...ORDER, family: "claude" }, TIER_CAPS, 1, roleModelOn(invalid!)))
+      .toEqual({ suggest: null, note: { suggestDiagnostic: "模型档位表内容不合法，不给建议" } });
+    expect(claimSuggest(ledgerA("security"), { ...ORDER, family: "claude" }, ["suggest"], 1, roleModelOn(invalid!)))
+      .toEqual({ suggest: null, note: { suggestDiagnostic: "模型档位表内容不合法，不给建议" } });
+    tierMode("off");
+    expect(claimSuggest(ledgerA("security"), { ...ORDER, family: "claude" }, TIER_CAPS, 1, roleModelOn(invalid!)))
+      .toEqual({ suggest: null, note: { suggestDiagnostic: "模型档位表内容不合法，不给建议" } });
+  });
+
+  test("正式领单入口：lend-claim 被拒、单仍在池里、不落 claim 事件；B 收到的是可重试的 unavailable，不会拿到无建议的材料去起", async () => {
+    const P = "claude-orchestrator";
+    const dir = mkdtempSync(join(tmpdir(), "tier-lend-refuse-"));
+    const spec = join(dir, "T8.md");
+    writeFileSync(spec, "规格：只改 src/lib/x.ts\n");
+    const db = openLedger(":memory:");
+    try {
+      tierMode("on");
+      useRoleModelPort({ policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }), read: () => BROKEN[0]!, observe: () => undefined });
+      const deps = (actor: string) => ({ db, actor, projectIds: [P], loadRegistry: async () => ({ socket: "", agents: {} }) as unknown as Registry, saveRegistry: async () => {}, now: () => 1_000_000,
+        lend: { borrow: async () => [{ peer: "mate", projects: [P], roles: ["review" as const], maxOpen: 2 }], notifyPm: async () => {} } });
+      setLedgerMeta(db, { actor: "owner", now: 1_000_000 }, { project: P, key: "pms", value: ["agent-pm"] });
+      createTask(db, { actor: "owner", now: 1_000_000 }, { project: P, id: "T8", title: "T8", kind: "code", spec });
+      db.run(`UPDATE tasks SET stage = 'review', headSHA = '${"b".repeat(40)}', round = 1 WHERE id = 'T8'`);
+      await runLedger(["lend-offer", "T8", "--peer", "mate", "--repo", "shawnlu96/claudestra", "--pr", "12"], deps("agent-pm") as never);
+      const req = JSON.stringify({ v: 1, orderId: "lend:T8:s1:r1:a0", worker: "agent-lend-0123456789", caps: ["suggest", "tier"] });
+      const claim = async () => JSON.parse(JSON.stringify(await runLedger(["lend-claim", "--", "mate", req], deps("owner") as never))) as Record<string, unknown>;
+      // 合成：领单时 A 卡上的流程已是 security（security 的审查单不外借，这里只借它走同一条领单事务；写 / 修复单同路径）
+      db.query(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
+        VALUES ('T8', ?, 'security', 1, 'manual', 'claude', 'none', 1, 1, 1)`).run(P);
+      const r = await claim();
+      expect(r).toMatchObject({ ok: false, current: { lend: "unavailable" } });
+      expect(String(r.error)).toContain("证明不了 security 下限");
+      expect((db.query("SELECT status FROM lend_orders WHERE orderId = 'lend:T8:s1:r1:a0'").get() as { status: string }).status).toBe("pooled");
+      expect(listEvents(db, { project: P, target: "T8" }).some((e) => (e.data.lend as { op?: string } | undefined)?.op === "claim")).toBe(false);
+      // 对照：同一张单换成 code 流程，表坏只是不给建议，照常领到（与改前一样）
+      db.run("UPDATE task_workflows SET template = 'code' WHERE taskId = 'T8'");
+      const ok = await claim();
+      expect(ok.ok).toBe(true);
+      expect(ok.suggest).toBeUndefined();
+    } finally {
+      useRoleModelPort();
+      closeLedger(":memory:");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── 合成 A 的正式领单（ledger lend-offer / lend-claim，本机内存台账，对方是合成 peer「mate」）：三种兼容情形与改前逐字一致 ──
 
 describe("[验收线 2][验收线 4] 旧 B / B 关 / A 关：领单材料、suggestDigest、claim 事件与改前逐字一致", () => {

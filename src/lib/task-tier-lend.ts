@@ -2,7 +2,8 @@
  * 出借协议里的任务类型档位（TIER3b）。新行为只走显式协商的 claim 能力位 caps=tier（LEND_CLAIM_CAPS）：B 只在本机门开时带它，A 只在对方带了且本机门开时用它。
  * 两端各自看自己的 taskTierModels 恢复键（task-tier-models.ts taskTierMode），任一端都不替对端开：
  * - A（借入方）：caps 带 tier 且本机键 on，claim 的建议用「类型 × 角色」有效值（resolveTierModel），并在同一个 suggest 对象里带上 tier、role
- *   （进 suggestDigest，role-model-settings-wire.ts）；过不了 TIER3 security 下限就不给建议。没协商 = 旧 roleModel 路径一字不变（role-model-settings-lend.ts claimSuggest）。
+ *   （进 suggestDigest，role-model-settings-wire.ts）。证明不了 security 下限（类型核不清、security 卡表坏 / 读不了 / 下限不过）= 拒绝这次领单（unavailable，单留在池里），
+ *   不编码成缺建议——否则 B 分不清这是旧 A，会按兼容路径照机器默认起。非 security 卡表坏仍只是不给建议。没协商 = 旧 roleModel 路径一字不变（role-model-settings-lend.ts claimSuggest）。
  * - B（出借方）：本机键 on +「接受降档建议」开（task-tier-lend-settings.ts，缺省开）时 claim 才带 tier（claimCaps）；起 worker 时只有建议带了 A 给的类型才在授权内选档：
  *   只等于或低于授权档，不升档；Claude 授权没写上限时以 Opus 为上限；Codex 用授权 effort 与 CODEX_EFFORT_LEVELS 有序表比，排不出位置不猜。
  *   角色要与 B 自己看到的订单节点对得上；security 不接受降档，且每个最终选择都过 tierFloorProblem——证明不了下限（含授权没写 Codex 档、Claude 不带 Opus 档的 --model、
@@ -45,22 +46,26 @@ export const tierLendActive = (project: string, caps: readonly string[] | undefi
 
 /** 记进 A 的 claim 事件 data.lend.suggestTier 的解析来源（可在 A 的台账上核对建议从哪来） */
 export interface SuggestTierInfo { tier: TaskTier; role: CardRole; source: string }
-export type TierSuggest = { suggest: ModelSuggest; info: SuggestTierInfo } | { diagnostic: string };
+/** unproven = 证明不了 security 下限（类型核不清，或就是 security）：A 不能把它编码成「缺建议」，调用方拒绝这次领单 */
+export type TierSuggest = { suggest: ModelSuggest; info: SuggestTierInfo } | { diagnostic: string; unproven: boolean };
 
 /**
  * 按卡上存的流程模板定类型（tierAtLaunch，不在领单事务里读规格卡），解析有效值并过 security 下限；类型核对不过 / 下限不过 = 不给建议并给诊断。
- * 调用方先用 tierLendActive 分流。
+ * broken = 模型档位表坏 / 读不了的诊断（调用方读表时得出）：先定类型再看它，security 卡表坏也算证明不了。调用方先用 tierLendActive 分流。
  */
-export function tierLendSuggest(db: Database, o: { taskId: string; family: "claude" | "codex" }, role: CardRole, read: RoleModelRead): TierSuggest {
+export function tierLendSuggest(db: Database, o: { taskId: string; family: "claude" | "codex" }, role: CardRole, read: RoleModelRead,
+  broken: string | null = null): TierSuggest {
   const w = getWorkflow(db, o.taskId);
   const at = tierAtLaunch(w ? { template: w.template, specRev: w.specRev ?? 0 } : null, null);
-  if (!at.ok) return { diagnostic: `任务类型核对不过，不给建议：${at.error}` };
+  if (!at.ok) return { diagnostic: `任务类型核对不过，不给建议：${at.error}`, unproven: true };
+  const unproven = at.tier === "security";
+  if (broken) return { diagnostic: broken, unproven };
   const r = resolveTierModel(read, at.tier, role, o.family);
   const base = o.family === "codex" ? roleModelOf(read, role, "codex").value as CodexEffort | null : undefined;
   const floor = tierFloorProblem(at.tier, role, o.family, r.value, base);
-  if (floor) return { diagnostic: `${floor}，不给建议` };
+  if (floor) return { diagnostic: `${floor}，不给建议`, unproven };
   const source = r.source === "tier-settings" || r.source === "role-settings" ? "settings" : "default";
-  if (o.family === "claude" && typeof r.value !== "string") return { diagnostic: "类型解析没有得出 Claude 模型，不给建议" };
+  if (o.family === "claude" && typeof r.value !== "string") return { diagnostic: "类型解析没有得出 Claude 模型，不给建议", unproven };
   const tag = { tier: at.tier, role };
   const suggest: ModelSuggest = o.family === "claude" ? { model: r.value as string, source, ...tag } : { effort: r.value, source, ...tag };
   return { suggest, info: { tier: at.tier, role, source: r.source } };

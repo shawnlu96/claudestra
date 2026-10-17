@@ -10,6 +10,7 @@
 import type { Database } from "bun:sqlite";
 import { getMeta, getOrder, setMeta, type LendRow } from "./lend-journal.js";
 import type { LedgerEvent } from "./ledger-stages.js";
+import { LedgerError } from "./ledger-store.js";
 import type { LendFamily, ModelActual, ModelActualRecord, ModelSuggest } from "./lend-wire-types.js";
 import { decideRecovery, recordObserved } from "./recovery-policy.js";
 import { roleModelPort, type RoleModelPort } from "./role-model-settings-local.js";
@@ -43,12 +44,16 @@ export function claimSuggest(db: Database, o: SuggestOrder, caps: readonly strin
   const cell = roleModelOf(read, role, o.family);
   const diagnostic = read.status === "invalid" || read.status === "unreadable" ? `模型档位表${read.status === "invalid" ? "内容不合法" : "读不了"}，不给建议` : null;
   if (d.kind === "act") {
-    if (diagnostic || cell.source === "error") return { suggest: null, note: { suggestDiagnostic: diagnostic ?? "模型档位表不可用，不给建议" } };
+    const broken = diagnostic || cell.source === "error" ? diagnostic ?? "模型档位表不可用，不给建议" : null;
     if (tiered) {
       // 类型 × 角色有效值，suggest 里带 tier / role 给 B 核（进摘要）；解析来源只记本机 claim 事件
-      const t = tierLendSuggest(db, { taskId: o.taskId, family: o.family }, role, read);
-      return "diagnostic" in t ? { suggest: null, note: { suggestDiagnostic: t.diagnostic } } : { suggest: t.suggest, note: { suggest: t.suggest, suggestTier: t.info } };
+      const t = tierLendSuggest(db, { taskId: o.taskId, family: o.family }, role, read, broken);
+      if (!("diagnostic" in t)) return { suggest: t.suggest, note: { suggest: t.suggest, suggestTier: t.info } };
+      // 协商了 tier 的 B 收到「没建议」会当旧 A 照机器默认起：证明不了 security 下限就不派这一单（事务回滚、单留在池里，B 下轮重领）
+      if (t.unproven) throw new LedgerError("conflict", `${t.diagnostic}；证明不了 security 下限，这次不派单`, { lend: "unavailable" });
+      return { suggest: null, note: { suggestDiagnostic: t.diagnostic } };
     }
+    if (broken || cell.source === "error") return { suggest: null, note: { suggestDiagnostic: broken ?? "模型档位表不可用，不给建议" } };
     const suggest: ModelSuggest = o.family === "claude" ? { model: cell.value as string, source: cell.source } : { effort: cell.value, source: cell.source };
     return { suggest, note: { suggest } };
   }
