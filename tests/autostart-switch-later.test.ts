@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addDep } from "../src/lib/ledger-deps-write.js";
@@ -16,6 +16,7 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, recordVerify, setMeta } from "../src/lib/ledger-write.js";
 import { manualResumeVerdict } from "../src/lib/manual-resume.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { featureGate, type AutostartSwitch, type ServiceFacts } from "../src/lib/scheduler-autostart.js";
 import { serviceBlock } from "../src/lib/scheduler-autostart-resume.js";
 import { switchOff } from "../src/lib/shared-ledger-gate-switch.js";
@@ -105,6 +106,11 @@ describe("台账上的三个调用方", () => {
 });
 
 describe("manual-resume 对 A 同样放行", () => {
+  // f.cli("scheduler-recovery") writes the shard-wide RECOVERY_POLICY_PATH (paths.ts caches STATE_DIR); put it back so later files
+  // in the same bun process (tests/recovery-main-carry-policy.test.ts) do not inherit manualStall=on.
+  let saved: string | null = null;
+  beforeEach(() => { saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null; });
+  afterEach(() => { if (saved === null) rmSync(RECOVERY_POLICY_PATH, { force: true }); else writeFileSync(RECOVERY_POLICY_PATH, saved); });
   const TO_LIVE = [["spec", "restate"], ["restate", "build"], ["build", "review"], ["review", "merge"], ["merge", "live"]] as const;
 
   test("项目关、T1 所在 feature 之后单独打开 → 放行；feature 开在项目关之前 → 拒", async () => {
