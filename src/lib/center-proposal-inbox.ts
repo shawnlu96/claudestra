@@ -48,7 +48,9 @@ const inboxAskKey = (proposalId: string) => `center-proposal:${proposalId}`;
 
 const clean = (s: string) => redactForPeer(s).text;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
-const when = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+/** 卡上的到期时间；非安全整数 / 超出 Date 范围 → 「未知」，不抛错（PROPLOG1 纵深防御） */
+export const when = (ms: number) => Number.isSafeInteger(ms) && Math.abs(ms) <= 8.64e15
+  ? new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "未知";
 
 /** owner 卡的内容（CreateAskInput 同形，createdBy 固定）；selfPersonId = 本机 owner 在中心的 personId，提案人是他本人时换标题和提案人行；
  * ownerReason = 自动批准开着时、需要 owner 批的原因（PROPAUTO1，中文），不给就是原样 */
