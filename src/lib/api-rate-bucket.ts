@@ -7,6 +7,7 @@
  */
 import { tokenIdOf, type Principal } from "./principals.js";
 import { OWNER_PRINCIPAL_ID } from "./devices.js";
+import { ApiRejectCounter, type ApiRejectCounterOptions } from "./api-rate-reject-counter.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
 // 手机 + 电脑 + 侧栏轮询共用一个身份
@@ -45,36 +46,37 @@ export function routeTemplate(pathname: string): string {
 /** 滑动窗口：容量可调，调的时候窗口内已计的次数不动；被拒的次数另记，只用于日志里的 n */
 export class ApiRateBucket {
   private hits: number[] = [];
-  private rejects: number[] = [];
+  private rejects: ApiRejectCounter;
   lastLogAt = Number.NEGATIVE_INFINITY;
-  constructor(public limit: number) {}
+  constructor(public limit: number, options?: ApiRejectCounterOptions) { this.rejects = new ApiRejectCounter(options); }
 
   private prune(now: number): void {
     const cutoff = now - WINDOW_MS;
     while (this.hits.length > 0 && this.hits[0]! <= cutoff) this.hits.shift();
-    while (this.rejects.length > 0 && this.rejects[0]! <= cutoff) this.rejects.shift();
   }
 
   tryAcquire(now: number): boolean {
     this.prune(now);
     if (this.hits.length >= this.limit) {
-      this.rejects.push(now);
+      this.rejects.update(now, true);
       return false;
     }
     this.hits.push(now);
+    this.rejects.update(now);
     return true;
   }
 
   /** 窗口内已放行的次数 */
   used(now: number): number {
     this.prune(now);
+    this.rejects.update(now);
     return this.hits.length;
   }
 
-  /** 本分钟的请求次数（放行 + 被拒） */
+  /** 放行滑窗 + 拒绝诊断；on 的拒绝部分为 60 个一秒桶，可提前不足 1 秒过期，切结构时重新计数 */
   attempts(now: number): number {
     this.prune(now);
-    return this.hits.length + this.rejects.length;
+    return this.hits.length + this.rejects.update(now);
   }
 }
 
@@ -84,14 +86,14 @@ export interface ApiRateLimiter {
   buckets: Map<string, ApiRateBucket>;
 }
 
-export function createApiRateLimiter(log: (line: string) => void = (line) => console.warn(line)): ApiRateLimiter {
+export function createApiRateLimiter(log: (line: string) => void = (line) => console.warn(line), options?: ApiRejectCounterOptions): ApiRateLimiter {
   const buckets = new Map<string, ApiRateBucket>();
   return {
     buckets,
     charge(p, pathname, now = Date.now()) {
       const { key, limit } = apiRateBucket(p);
       let bucket = buckets.get(key);
-      if (!bucket) buckets.set(key, (bucket = new ApiRateBucket(limit)));
+      if (!bucket) buckets.set(key, (bucket = new ApiRateBucket(limit, options)));
       else if (bucket.limit !== limit) bucket.limit = limit; // 旧容量（如被锁在 120 的 owner 桶）就地调整，不清零
       if (bucket.tryAcquire(now)) return null;
       if (now - bucket.lastLogAt >= LOG_EVERY_MS) {

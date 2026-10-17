@@ -6,6 +6,7 @@
  */
 export const RECOVERY_KEYS = [
   "acpClearBudget",
+  "apiRejectCounter",
   "askDefaultAll",
   "askReminder",
   "askScopeAuto",
