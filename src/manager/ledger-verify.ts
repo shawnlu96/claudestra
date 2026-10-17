@@ -4,6 +4,7 @@
  * `stage --to verified` 已经堵死（lib/ledger-write.ts VERIFY_HINT），进 verified 只有这一条路。--dry-run 只看结果不写库，执行者也能跑。
  * 探针（PR / 网页 / daemon）只认得本仓库：明确判定任务不属于本仓库时只核证据文件；判断不了按推断不全处理（不放行）。
  */
+import type { Database } from "bun:sqlite";
 import { daemonsOfFromRepo } from "../lib/ledger-daemon-map.js";
 import {
   blockingSummary,
@@ -20,11 +21,12 @@ import { getEventByDedup, LedgerError } from "../lib/ledger-store.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { collectPrStage, collectVerifyFacts, ghPrArg, mainRepoRoot, originRepo, prRepo, realFactsDeps, type FactsDeps } from "../lib/ledger-verify-facts.js";
 import { recordVerify } from "../lib/ledger-write.js";
+import { schedulerVerifyAllowed } from "../lib/peer-pr-verify-retry.js";
 import { dirKey } from "../lib/project-dirs.js";
 import { normalizeDir, resolveProjectForRealDir } from "../lib/projects.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
-import { peerPrVerifyKey, schedulerCanVerify, schedulerVerifyRepo } from "../lib/scheduler-verify-gate.js";
+import { peerPrVerifyKey, schedulerVerifyRepo } from "../lib/scheduler-verify-gate.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
@@ -197,7 +199,7 @@ async function verify(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   const dryRun = c.p.bools.has("dry-run");
   if (c.deps.actor === "scheduler") {
-    if (c.p.flags.waive || !schedulerCanVerify(c.db, task.id, c.p.flags.dedup)) throw new LedgerError("forbidden", "调度服务只可核对部署过或导入证据匹配的 peer PR 卡，不可豁免检查");
+    if (c.p.flags.waive || !schedulerVerifyAllowed(c.db, task.id, c.p.flags.dedup, { dryRun, now: c.deps.now() })) throw new LedgerError("forbidden", "调度服务只可核对部署过或导入证据匹配的 peer PR 卡，不可豁免检查");
   } else if (dryRun) c.requireOwnOrManager(task, "看完成检查单");
   else c.requireManager(task.project, "跑完成检查");
   const dup = dryRun ? null : replayed(c, task);
@@ -220,7 +222,8 @@ async function verify(c: LedgerCli): Promise<Result> {
 
   const data = { checks: v.checks, checklistSource: pl.source, incomplete: pl.incomplete, ...(pl.incompleteReason ? { incompleteReason: pl.incompleteReason } : {}), evidence, ...noteOut };
   if (c.p.bools.has("pass-only") && v.result !== "pass") return { ok: false, code: "unverified", recorded: false, ...out }; // PMHAND1 12：结清后自动 verify 只记通过
-  const r = recordVerify(c.db, c.ctx(), { taskId: task.id, result: v.result, data, text: c.p.flags.text });
+  const schedulerGate = (db: Database) => schedulerVerifyAllowed(db, task.id, c.p.flags.dedup, { record: true, now: c.deps.now() }); // rechecked in the write
+  const r = recordVerify(c.db, c.ctx(), { taskId: task.id, result: v.result, data, text: c.p.flags.text, schedulerGate });
   if (r.duplicate) return { ok: r.event.data.result === "pass", task: r.row, event: r.event, duplicate: true }; // 并发重放：结论以当时记下的为准
   if (v.result === "pass") return { ok: true, moved: true, task: r.row, event: r.event, ...out };
   return { ok: false, code: "unverified", error: `检查单没过，任务留在 live：${summary}${note ? `；${fillNote(note)}` : ""}`, moved: false, task: r.row, event: r.event, ...out };

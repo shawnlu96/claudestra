@@ -48,16 +48,38 @@ const canVerify = (deploy: string, mode: string) => `SELECT 1 FROM tasks AS t
       AND EXISTS (SELECT 1 FROM events AS e WHERE e.project=t.project AND e.target=t.id
         AND e.dedupKey=? AND e.kind='verify' AND e.actor='scheduler'))) LIMIT 1`;
 
-export function schedulerCanVerify(db: Database, taskId: string, dedupKey?: string): boolean {
-  const peerKey = peerPrVerifyKey(db, taskId);
-  if (dedupKey?.startsWith("peer-pr-verify:") || (peerKey && dedupKey === undefined)) {
-    if (!peerKey || (dedupKey !== undefined && dedupKey !== peerKey)) return false;
-    return !!db.query(`SELECT 1 FROM tasks WHERE id=? AND (stage='live' OR (stage='verified' AND EXISTS
-      (SELECT 1 FROM events WHERE target=? AND kind='verify' AND actor='scheduler' AND dedupKey=?)))`).get(taskId, taskId, dedupKey ?? "");
-  }
+const peerStageOk = (db: Database, taskId: string, dedupKey?: string) => !!db.query(`SELECT 1 FROM tasks WHERE id=? AND (stage='live'
+  OR (stage='verified' AND EXISTS (SELECT 1 FROM events WHERE target=? AND kind='verify' AND actor='scheduler' AND dedupKey=?)))`)
+  .get(taskId, taskId, dedupKey ?? "");
+
+function deployCanVerify(db: Database, taskId: string, dedupKey?: string): boolean {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) return false;
   const args = [taskId, dedupKey ?? "", dedupKey ?? ""];
   return !!db.query(canVerify("d.phase='deployed'", "AND w.mode='auto'")).get(...args) || !!db.query(canVerify(RESOLVED_DONE_SQL, "")).get(...args);
+}
+
+/** A card carrying peer metadata (or a peer-shaped key) is judged by the peer branch alone under strict binding. */
+const peerShaped = (db: Database, taskId: string, dedupKey?: string) => dedupKey?.startsWith("peer-pr-verify:")
+  || typeof getTask(db, taskId)?.extra.peerPr === "object";
+
+/**
+ * Baseline (peerPrVerifyBind off / observe): an absent key on a peer card also passes. `strict` (peerPrVerifyBind on,
+ * peer-pr-verify-retry.ts): a peer card needs exactly its current key with peerPrAutoVerify on and never falls back to the deploy branch.
+ */
+export function schedulerCanVerify(db: Database, taskId: string, dedupKey?: string, strict?: { autoVerifyOn: boolean }): boolean {
+  const peerKey = peerPrVerifyKey(db, taskId);
+  if (strict && peerShaped(db, taskId, dedupKey)) return !!peerKey && dedupKey === peerKey && strict.autoVerifyOn && peerStageOk(db, taskId, dedupKey);
+  if (dedupKey?.startsWith("peer-pr-verify:") || (peerKey && dedupKey === undefined)) {
+    if (!peerKey || (dedupKey !== undefined && dedupKey !== peerKey)) return false;
+    return peerStageOk(db, taskId, dedupKey);
+  }
+  return deployCanVerify(db, taskId, dedupKey);
+}
+
+/** The explicit read-only branch for `--dry-run`: a live peer card on its current lineage, else the ordinary deploy permission. */
+export function schedulerCanDryRunVerify(db: Database, taskId: string, dedupKey?: string): boolean {
+  if (peerShaped(db, taskId, dedupKey)) return !!peerPrVerifyKey(db, taskId) && getTask(db, taskId)?.stage === "live";
+  return deployCanVerify(db, taskId, dedupKey);
 }
 
 /** Resolve the project tree from scheduler.json; proven peer imports can use it without an automatic deploy entry. */
