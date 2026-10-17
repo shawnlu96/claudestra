@@ -81,7 +81,7 @@ async function prepareOpencodeSession(spec: LaunchSpec, bin: string | null): Pro
     await s.initialize({ fork: spec.mode === "fork" });
     sid = spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
     // 手填的模型名在这里按会话自己的 configOptions 校（比 `opencode models` 全）、核对实际生效值：不认就拒建，别留一个起不来的 agent
-    await enforceOpencodeModel(s, spec.model);
+    await enforceOpencodeModel(s, spec.model, { allowBare: false });
     return sid;
   } catch (e) {
     if (sid) await deleteOpencodeSession(bin, sid, env); // 会话一建就落库：拒建了就删掉，不在 OpenCode 库里留空会话

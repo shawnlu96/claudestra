@@ -17,8 +17,9 @@ import { realOpsDeps } from "../src/manager/ops-deps.ts";
 
 const FIXTURE = JSON.parse(readFileSync(join(import.meta.dir, "fixtures/opencode-acp/export.json"), "utf8"));
 const FIXTURE_SID = FIXTURE.info.id as string;
-// 真会话的首条用户消息带宿主前言，远超 512 字节：归档副本靠首行认运行时，首行读不全就会被当成 CC、一条都解析不出
-const PREFACE = "你是 OpenCode agent。".repeat(200);
+// 真会话的首条用户消息带宿主前言，可能任意长：首行嗅探读固定长度会读半截、被当成 CC、一条都解析不出（第 4 轮 P1）。
+// 归档副本改按 `ses_` 的 id 形状认运行时；这里首条消息 270,000 字节，超过嗅探缓冲（256 KiB）
+const PREFACE = "x".repeat(270_000);
 const firstText = FIXTURE.messages[0].parts.find((p: { type: string }) => p.type === "text");
 firstText.text = `${PREFACE}\n\nrun ls with bash`;
 
@@ -68,6 +69,10 @@ async function expectArchivedAndReadable(name: string, sessionId: string, curren
 }
 
 describe("OpenCode 会话归档进历史", () => {
+  test("首条消息确实超过嗅探缓冲", () => {
+    expect(Buffer.byteLength(JSON.stringify({ info: FIXTURE.messages[0].info, parts: FIXTURE.messages[0].parts }))).toBeGreaterThan(256 * 1024);
+  });
+
   test("agentRuntime 认 opencode", () => {
     expect(agentRuntime({ runtime: "opencode" })).toBe("opencode");
     expect(agentRuntime({ runtime: "nope" })).toBe("claude-code");

@@ -51,6 +51,8 @@ export interface HostDeps {
   postHook(body: { channelId: string } & StopReport): Promise<{ block?: boolean; reason?: string }>;
   markReady(): Promise<void>;
   rotateSession(oldId: string, newId: string): Promise<{ ok: boolean; error?: string }>;
+  /** 运行时把 registry 的模型规范成了完整 id（OpenCode 的裸 id）：回写 registry；不给就只在内存里用 */
+  persistModel?(model: string): Promise<void>;
   log(msg: string): void;
   /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
   show?(item: string): void;
@@ -204,8 +206,7 @@ export class AcpHost {
     try {
       const caps = await session.initialize();
       await session.attach(this.cfg.sessionId, this.cfg.cwd, caps.resume);
-      // 运行时自己核对启动配置（OpenCode：模型不生效就拒起、不重试）；其余照旧，没生效只记日志
-      await (this.rt.enforceLaunch ? this.rt.enforceLaunch(session, this.cfg.model) : applyAcpLaunchConfig(session, this.cfg.model, this.cfg.effort, false, this.deps.log));
+      await this.applyLaunch(session, false);
       this.session = session;
       this.lastStartError = null;
       const who = session.agentInfo ? `，${session.agentInfo.name} ${session.agentInfo.version}` : "";
@@ -510,13 +511,26 @@ export class AcpHost {
     if (r.ok) this.publishConfig(this.session);
   }
 
+  /**
+   * 接上会话（启动 / /clear 换代）后施加 registry 的模型与强度。运行时自己核对的（enforceLaunch，OpenCode）两条路都走它：不生效就抛、拒起；
+   * 它把裸 id 规范成完整 id 时回写 registry。其余运行时照旧：启动时没生效只记日志，/clear（strict）没生效就失败
+   */
+  private async applyLaunch(s: AcpSession, strict: boolean): Promise<void> {
+    if (!this.rt.enforceLaunch) return applyAcpLaunchConfig(s, this.cfg.model, this.cfg.effort, strict, this.deps.log);
+    const model = await this.rt.enforceLaunch(s, this.cfg.model);
+    if (!model || model === this.cfg.model) return;
+    this.deps.log(`模型 ${this.cfg.model} 规范成 ${model}，回写 registry`);
+    this.cfg.model = model;
+    await this.deps.persistModel?.(model).catch((e) => this.deps.log(`⚠️ 回写 registry 的模型失败（只在本次进程里用 ${model}）：${errText(e)}`));
+  }
+
   private async clearSession(then?: { text: string; opId: string }): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
     const oldPreamble = this.preamblePending;
     return rotateAcpHost({
       then,
       session: this.session, ready: !!this.proc && this.registered, pending: !!(this.outbox.length || this.pumping || this.permits.size),
       loop: this.loop, oldId: this.cfg.sessionId, cwd: this.cfg.cwd, bootstrap: this.rt.clearBootstrap, rotateRegistry: this.deps.rotateSession,
-      configure: (s) => applyAcpLaunchConfig(s, this.cfg.model, this.cfg.effort, true, this.deps.log),
+      configure: (s) => this.applyLaunch(s, true),
       begin: () => ((this.rotating = true), (this.preamblePending = this.cfg.clearPreamble)),
       failed: (changed) => {
         this.preamblePending = oldPreamble;

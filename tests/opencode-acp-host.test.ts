@@ -28,14 +28,15 @@ afterEach(() => {
   for (const p of procs.splice(0)) p.stop();
 });
 
-function start(runtime: "opencode" | "codex", model: string) {
+function start(runtime: "opencode" | "codex", model: string, rt = acpRuntime(runtime)) {
+  const persisted: string[] = [];
   const logs: string[] = [];
   const sent: any[] = [];
   let ready = false;
   host = new AcpHost(
     {
       channelId: "local-oc-test", agentName: "agent-oc-test", sessionId: "019a0000-0000-7000-8000-00000000c0de", cwd: REPO, mcpName: "claudestra",
-      agentCmd: STUB, runtime: acpRuntime(runtime), model,
+      agentCmd: STUB, runtime: rt, model,
       env: { base: { ...process.env }, bunBin: process.execPath, channelServer: join(REPO, "src/channel-server.ts"), mcpName: "claudestra", logsDir: "/tmp" },
     },
     {
@@ -55,11 +56,12 @@ function start(runtime: "opencode" | "codex", model: string) {
       postHook: async () => ({}),
       markReady: async () => void (ready = true),
       rotateSession: async () => ({ ok: true }),
+      persistModel: async (m) => void persisted.push(m),
       log: (m) => logs.push(m),
     },
   );
   host.start();
-  return { logs, sent, isReady: () => ready };
+  return { logs, sent, persisted, isReady: () => ready };
 }
 
 describe("OpenCode 启动配置必须生效", () => {
@@ -75,6 +77,22 @@ describe("OpenCode 启动配置必须生效", () => {
     const h = start("opencode", "stub-luna");
     await until(h.isReady);
     expect(h.sent.filter((f) => f.type === "acp_failure")).toEqual([]);
+  }, 30_000);
+
+  test("运行时把裸 id 规范成完整 id：宿主回写 registry、之后按完整 id 用", async () => {
+    const rt = { ...acpRuntime("opencode"), enforceLaunch: async () => "stub/luna-full" };
+    const h = start("opencode", "luna", rt);
+    await until(h.isReady);
+    expect(h.persisted).toEqual(["stub/luna-full"]);
+  }, 30_000);
+
+  test("/clear 换代也走逐字核对：新会话里模型不被接受就换代失败，不静默跑在缺省模型上", async () => {
+    const h = start("opencode", "stub-luna");
+    await until(h.isReady);
+    (host as any).cfg.model = "opencode/no-such-model";
+    const r = await (host as any).clearSession();
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toContain("opencode/no-such-model");
   }, 30_000);
 
   test("Codex 不变：不认的模型只记日志、照常就绪", async () => {

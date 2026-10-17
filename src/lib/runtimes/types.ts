@@ -72,6 +72,12 @@ export interface SessionSourceAdapter {
   /** 这个路径是不是这种运行时的会话文件（按根目录判，零 I/O） */
   ownsPath(path: string, home?: string): boolean;
 
+  /**
+   * 会话 id 的形状独一份、看 id 就能认出是这种运行时（OpenCode 的 `ses_…`）。归档副本按 `<id>.jsonl` 命名，靠它认运行时不用读文件；
+   * 首行可能任意长（首条消息带宿主前言），按首行嗅探会读半截解析失败、被当成 CC。不实现 = 只靠路径 / 首行认
+   */
+  ownsSessionId?(id: string): boolean;
+
   /** 会话文件路径 → sessionId（文件名规则各家不同；认不出返回 null） */
   sessionIdFromPath(path: string): string | null;
 

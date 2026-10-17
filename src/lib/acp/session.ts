@@ -206,7 +206,7 @@ export class AcpSession {
   }
 
   /** 改会话配置（模型 / 推理强度…）：先把值对上选项（resolveConfigValue）再本地校验，再调 set_config_option，成功后更新缓存 */
-  async setConfig(configId: string, raw: string, timeoutMs = 30_000): Promise<{ ok: true } | { ok: false; error: string }> {
+  async setConfig(configId: string, raw: string, timeoutMs = 30_000): Promise<{ ok: true } | { ok: false; error: string; code?: number }> {
     const value = resolveConfigValue(this.configOptions, configId, raw);
     const refusal = configRefusal(this.configOptions, configId, value);
     if (refusal) return { ok: false, error: refusal };
@@ -216,7 +216,8 @@ export class AcpSession {
       if (next.length) this.configOptions = next;
       return { ok: true };
     } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      // code：对端回了 JSON-RPC 错误（值不被接受是 -32602）；超时 / 断线没有 code。OpenCode 的模型核对据此分「拒起」和「重试」
+      return { ok: false, error: e instanceof Error ? e.message : String(e), ...(e instanceof RpcError ? { code: e.code } : {}) };
     }
   }
 

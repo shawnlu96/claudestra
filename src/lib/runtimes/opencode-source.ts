@@ -2,6 +2,7 @@
 import {
   isOpencodeMirrorPath,
   isOpencodeMirrorRecord,
+  isValidOpencodeSessionId,
   opencodeLineToClaudeShape,
   opencodeSessionIdFromPath,
   opencodeMirrorPathNow,
@@ -20,6 +21,7 @@ export const opencodeSource: Omit<SessionSourceAdapter, "manageable" | "control"
   listSessionsForCwd: () => [],
   ownsPath: (path) => isOpencodeMirrorPath(path),
   sessionIdFromPath: opencodeSessionIdFromPath,
+  ownsSessionId: isValidOpencodeSessionId,
   sniffFirstLine: (rec) => isOpencodeMirrorRecord(rec),
   translateLine: (line): AnyRecord | null => opencodeLineToClaudeShape(line),
 };

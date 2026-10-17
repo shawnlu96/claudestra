@@ -3,7 +3,7 @@
  * 读文件，所以这里把 `opencode export <id>` 的结果镜像成状态目录下的 JSONL（一行一条消息 `{info, parts}`），再逐行翻成 Claude Code 形状。
  * 只走 OpenCode 自己的 CLI（export / db 查询），从不打开它的库、不往它的目录写：库结构是它内部的，没承诺稳定。
  */
-import { mkdirSync, statSync, utimesSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { opencodeBin, opencodeDirsEnv } from "./acp/opencode-bin.js";
@@ -43,6 +43,10 @@ function opencodeDbMtime(env: Env): number {
   return max;
 }
 
+function readFileOr(path: string): string | null {
+  try { return readFileSync(path, "utf8"); } catch { return null; } // 读不到就当和新导出不同：照常写、不记 settled
+}
+
 function mirrorMtime(path: string): number | null {
   try { return statSync(path).mtimeMs; } catch { return null; } // 镜像还没建：调用方据此去导出
 }
@@ -60,7 +64,9 @@ export interface RefreshOpts {
   now?: () => number;
 }
 
-type ExportPlan = { path: string; have: number | null; bin?: string; env: Env; now: number };
+type ExportPlan = { path: string; have: number | null; bin?: string; env: Env; now: number; dbBefore: number };
+/** 上一次导出与镜像逐字相同时、导出结束那一刻的库 mtime：库停在这个值上 = 那之后没人写过（只有导出自己的 checkpoint），不再重导 */
+const settledAt = new Map<string, number>();
 
 /** 要不要导出：镜像比库新 / 节流内 / 没装 opencode 都不导（bin 为空）；要导就先记一次尝试 */
 function planExport(sessionId: string, opts: RefreshOpts): ExportPlan {
@@ -69,12 +75,13 @@ function planExport(sessionId: string, opts: RefreshOpts): ExportPlan {
   const path = opencodeMirrorPath(sessionId);
   const have = mirrorMtime(path);
   const dbMtime = opencodeDbMtime(env);
-  if (have !== null && dbMtime > 0 && have >= dbMtime) return { path, have, env, now };
-  if (now - (lastAttempt.get(sessionId) ?? -Infinity) < REFRESH_THROTTLE_MS) return { path, have, env, now };
+  const plan = { path, have, env, now, dbBefore: dbMtime };
+  if (have !== null && dbMtime > 0 && (have >= dbMtime || settledAt.get(sessionId) === dbMtime)) return plan;
+  if (now - (lastAttempt.get(sessionId) ?? -Infinity) < REFRESH_THROTTLE_MS) return plan;
   lastAttempt.set(sessionId, now);
   const bin = opencodeBin(env) ?? undefined;
   if (bin) mkdirSync(OPENCODE_MIRROR_DIR, { recursive: true });
-  return { path, have, bin, env, now };
+  return { ...plan, bin };
 }
 
 /** cwd 放镜像目录（不是 git 仓库）：OpenCode 启动时会按 cwd 认项目，放在仓库里会给它的库添一条无关项目 */
@@ -87,11 +94,14 @@ function finishExport(sessionId: string, p: ExportPlan, code: number | null, std
     console.error(`[opencode-session] 导出 ${sessionId} 失败（${code === 0 ? "输出不是这个会话的导出 JSON" : `exit ${code ?? "?"}`}）：${stderr.trim().slice(-300)}`);
     return p.have === null ? null : p.path;
   }
+  const same = p.have !== null && readFileOr(p.path) === body;
   writeTextAtomicSync(p.path, body, { mode: 0o600 });
-  // 库 mtime 要在导出之后量：export 自己开关库会 checkpoint、改 mtime，按导出前的量就永远判旧、每次都重导（实测）。
-  // ponytail: 导出那 ~2s 里别的会话的最后一次写入会被当成已导出，要等库下次变动才补上；要严格就改比 session.time_updated
-  const after = opencodeDbMtime(p.env);
-  if (after > 0) utimesSync(p.path, new Date(p.now), new Date(Math.ceil(after))); // 库 mtime 带亚毫秒，Date 只到毫秒：向上取整，否则永远差一点判旧
+  // 镜像时间戳取导出**前**的库 mtime：导出那 ~1–2s 里写进来的内容可能没导上，按导出后的量会被当成已导出、历史停在旧版（第 4 轮 P2-5）。
+  // 代价：export 自己开关库会 checkpoint、改 mtime，下一次必判旧再导一遍；那一遍导出和镜像逐字相同就记下当时的库 mtime（settledAt），
+  // 库没再变就不导了。库 mtime 带亚毫秒、Date 只到毫秒：向上取整，否则永远差一点判旧
+  if (p.dbBefore > 0) utimesSync(p.path, new Date(p.now), new Date(Math.ceil(p.dbBefore)));
+  if (same) settledAt.set(sessionId, opencodeDbMtime(p.env));
+  else settledAt.delete(sessionId);
   return p.path;
 }
 

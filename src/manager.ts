@@ -69,7 +69,7 @@ import {
   allSources,
   claudeCodeAdapter,
   controlFor, normalizeTransport,
-  managedFor,
+  keepEffort, managedFor,
   requireManaged,
   type DiscoveredSession,
   type LaunchSpec,
@@ -2374,7 +2374,7 @@ switch (cmd) {
       });
       break;
     }
-    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, effort, mode, model, fork, runtimeFlag, transportFlag);
+    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, keepEffort(runtimeFlag, effort), mode, model, fork, runtimeFlag, transportFlag);
     break;
   }
 
@@ -2449,7 +2449,7 @@ switch (cmd) {
       break;
     }
     if (model) (info as any).model = model;
-    if (effort) (info as any).effort = effort;
+    if (keepEffort(info.runtime, effort)) (info as any).effort = effort;
     await saveRegistry(reg);
     output({ ok: true, name: tmuxName, model: (info as any).model ?? null, effort: (info as any).effort ?? null });
     break;

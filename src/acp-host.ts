@@ -167,6 +167,10 @@ const host = new AcpHost(
       const current = (await readRegistryAgents()).find((a) => a.name === agentName)?.sessionId;
       return current === newId ? { ok: true } : { ok: false, error: r.error ?? "registry 轮转失败" };
     },
+    persistModel: async (model) => {
+      const r = await runManagerProcess(["set-claude", agentName, "--model", model], { bunPath: bunBin, managerPath: join(SRC_DIR, "manager.ts"), env: process.env, timeoutMs: 30_000 });
+      if (!r.ok) throw new Error(r.error ?? "manager set-claude 失败");
+    },
     log,
     show,
     showUpdate: tty ? (u) => tty.update(u) : undefined,

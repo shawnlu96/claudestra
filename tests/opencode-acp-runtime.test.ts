@@ -6,7 +6,8 @@ import { enforceOpencodeModel } from "../src/lib/acp/opencode-model-check";
 import { AcpIncompatibleError } from "../src/lib/acp/protocol";
 import { parseOpencodeModels, opencodeModels, resetOpencodeModelsCache } from "../src/lib/opencode-models";
 import { ACP_CONTROL } from "../src/lib/runtimes/acp-control";
-import { controlFor, managedFor, manageableRuntimeIds, requireManaged, sourceFor, transportsOf } from "../src/lib/runtimes/index";
+import { controlFor, keepEffort, managedFor, manageableRuntimeIds, requireManaged, sourceFor, transportsOf } from "../src/lib/runtimes/index";
+import { displayModelEffort } from "../src/lib/display-model";
 import { buildOpencodeAcpHostCommand, OPENCODE_MODEL_REQUIRED, opencodeAcpAdapter } from "../src/lib/runtimes/opencode-acp";
 import { waitOpencodeReady } from "../src/lib/runtimes/opencode-ready";
 import { parseCreateArgs } from "../src/manager/create-args";
@@ -202,6 +203,17 @@ describe("模型必须真的生效（enforceOpencodeModel）", () => {
     await expect(enforceOpencodeModel(fake("opencode/big-pickle", OK, true), "anthropic/claude-x")).rejects.toThrow("写全 zz/anthropic/claude-x");
   });
 
+  test("OpenCode 明确回 -32602（值不被接受）：拒起，不当临时故障", async () => {
+    const e = await enforceOpencodeModel(fake("opencode/big-pickle", { ok: false, error: "Invalid params: model not found", code: -32602 } as never, false), "opencode/x").catch((x) => x);
+    expect(e).toBeInstanceOf(AcpIncompatibleError);
+  });
+
+  test("裸 id（不带 provider）：恰好一家有它就换成完整 id 返回（宿主回写 registry）；新建时不放行", async () => {
+    expect(await enforceOpencodeModel(fake("opencode/big-pickle", OK, true), "x")).toBe("opencode/x");
+    await expect(enforceOpencodeModel(fake("opencode/big-pickle", OK, true), "x", { allowBare: false })).rejects.toThrow("写全 opencode/x");
+    expect(await enforceOpencodeModel(fake("opencode/big-pickle", OK, true), "opencode/x")).toBe("opencode/x");
+  });
+
   test("RPC 出错（超时 / 崩溃）不是模型不被接受：普通 Error，宿主会退避重起", async () => {
     const e = await enforceOpencodeModel(fake("opencode/big-pickle", { ok: false, error: "请求超时" }, false), "opencode/x").catch((x) => x);
     expect(e).toBeInstanceOf(Error);
@@ -234,5 +246,21 @@ describe("就绪等待：宿主拒起就立刻返回（waitOpencodeReady）", ()
     writeFileSync(log, `${new Date(Date.now() - 3600_000).toISOString()} 适配器接不上线程：旧的（不再重起；…）\n`);
     let n = 0;
     expect(await waitOpencodeReady(win(() => (++n > 3 ? "1" : null)), { rounds: 50, pollMs: 5 }, log)).toEqual({ ready: true });
+  });
+});
+
+describe("effort：OpenCode 没有推理强度（第 4 轮 P2-4）", () => {
+  test("keepEffort：opencode 丢掉（resume / set-claude 也走它），别的运行时原样", () => {
+    expect(keepEffort("opencode", "high")).toBeUndefined();
+    expect(keepEffort("pi", "high")).toBe("high");
+    expect(keepEffort(undefined, "high")).toBe("high");
+  });
+
+  test("顶栏不给 OpenCode 显示 Claude Code 的全局 effort", () => {
+    const r = displayModelEffort({
+      runtime: "opencode", override: { model: null, effort: null }, tail: null, reg: { model: "opencode/x", effort: "high" },
+      claudeGlobal: { model: "sonnet", effort: "max" }, resolveAlias: (m) => m,
+    });
+    expect(r).toEqual({ model: "opencode/x", effort: null });
   });
 });

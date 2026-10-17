@@ -10,6 +10,7 @@
  *   - 这个运行时能走哪些 transport：`transportsOf(runtime)`
  */
 import { closeSync, openSync, readSync } from "node:fs";
+import { basename } from "node:path";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { codexAdapter } from "./codex.js";
 import { codexAcpAdapter } from "./codex-acp.js";
@@ -101,6 +102,14 @@ export function claudeCodeWindows(windowNames: string[], agents: { name: string;
   return windowNames.filter((w) => w.startsWith("agent-") && cc.has(w));
 }
 
+/** --effort 交给这个运行时之前过一道：没有推理强度的（noEffort，OpenCode）提示后丢掉、不进 registry；其余原样（create / resume / set-claude 共用） */
+export function keepEffort(runtime: string | undefined | null, effort: string | undefined): string | undefined {
+  const m = managedFor(runtime);
+  if (!effort || !m?.noEffort) return effort;
+  console.error(`⚠️ ${m.label} 不支持 --effort，已忽略（${effort}）`);
+  return undefined;
+}
+
 /** 能以哪些 transport 启动：tmux 人人都有（acpOnly 除外），acp 要运行时声明 ACP 段（manager 切 transport 前据此拒绝） */
 export function transportsOf(runtime: string | undefined | null): Transport[] {
   const m = managedFor(runtime);
@@ -122,6 +131,8 @@ const headSniffCache = new Map<string, string | undefined>();
 export function sourceIdForPath(path: string | undefined | null): string | undefined {
   if (!path) return undefined;
   for (const s of SOURCES) if (s.ownsPath(path)) return s.id === DEFAULT_RUNTIME ? undefined : s.id;
+  const byId = SOURCES.find((s) => s.ownsSessionId?.(basename(path, ".jsonl"))); // 归档副本 <id>.jsonl：id 形状独一份就不读文件
+  if (byId) return byId.id;
   if (headSniffCache.has(path)) return headSniffCache.get(path);
   let hit: string | undefined;
   try {

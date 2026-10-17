@@ -2096,7 +2096,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               online: online(r.channelId),
               // v2.23+ 运行时：同 project 里可能既有 Claude Code agent 也有 Pi 会话，
               // 工具集不同（Pi 侧没有 Task/子代理），派活前该看得到
-              runtime: r.runtime === "pi" ? "pi" : "claude-code",
+              runtime: agentRuntime(r),
             }));
         const self = fromChannelId ? regs.find((r) => r.channelId === fromChannelId) : undefined; // 认不出的连接（manager 子进程）别撞上频道号为空的注册项，否则只拿到那一项的项目
         const myProj = self?.projectId ? projects.find((p) => p.id === self.projectId) : null;

@@ -4,7 +4,7 @@
  * `{"purpose":"--parent=master"}` / `--external` / `--model=x` 会先被当成 flag 吃掉（core.ts extractPurposeFlag 注释）。
  */
 import { validateDisallowedRules } from "../lib/disallowed-rules.js";
-import { managedFor } from "../lib/runtimes/index.js";
+import { keepEffort, managedFor } from "../lib/runtimes/index.js";
 import {
   extractBoolFlag, extractEffortFlag, extractModeFlag, extractModelFlag, extractPermFlags, extractPurposeFlag, extractStringFlag, rejectFlagLikePositional,
 } from "./core.js";
@@ -71,8 +71,7 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
   if (!name || !dir) return { error: CREATE_USAGE };
   const adapter = managedFor(runtimeFlag);
   if (adapter?.modelRequired && !model?.trim()) return { error: adapter.modelRequired }; // 早拒：建频道 / 窗口之前（启动命令另有兜底）
-  if (adapter?.noEffort && effort) console.error(`⚠️ ${adapter.label} 不支持 --effort，已忽略（${effort}）`);
-  const keptEffort = adapter?.noEffort ? undefined : effort;
+  const keptEffort = keepEffort(runtimeFlag, effort);
   return {
     name,
     dir,

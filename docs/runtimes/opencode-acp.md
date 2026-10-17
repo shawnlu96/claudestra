@@ -219,7 +219,9 @@ OCR-2 开工前要先定的两件事：OpenCode agent 是否像 Codex 一样放�
 - 值不在会话的模型表里（写错、或付费模型的 provider 没登录）：宿主**拒起**——出失败卡、不标就绪、不重试，`restart` 报启动失败（见下面「失败形状」）。
   Codex / Pi 仍是记日志照常起；OpenCode 不一样，是因为它不认的模型会静默回落到缺省的免费模型（`AcpRuntime.enforceLaunch` = `enforceOpencodeModel`）。
   核对是**逐字**的：registry 写的 id 必须就是会话选项里的值、设完 currentValue 也是它；只给后半段（`anthropic/x` 而选项是 `openrouter/anthropic/x`）
-  会被拒并报出全名，免得静默换了 provider。RPC 超时、OpenCode 中途崩溃不算「模型不被接受」，宿主照通用路径退避重起。
+  会被拒并报出全名，免得静默换了 provider。不带 provider 的裸 id（早先 registry 可能存的 `big-pickle`）恰好一家有时，启动 / /clear 换成完整 id 并回写
+  registry（`manager set-claude`）；新建时不放行裸 id（人在场，直接报全名）。OpenCode 回 `-32602`（值不被接受）也算拒起；RPC 超时、中途崩溃不算，
+  宿主照通用路径退避重起。`/clear` 换代后的新会话同样走这道核对。
   拒起时 manager 不等满就绪预算：就绪等待（`runtimes/opencode-ready.ts`）同时看宿主日志，见到拒起就带原因返回。
 
 ### 已知限制
@@ -242,6 +244,8 @@ OCR-2 开工前要先定的两件事：OpenCode agent 是否像 Codex 一样放�
   所以拿路径不等导出：有镜像就给、过期就后台刷，全局排队一次一个，同一会话至少隔 10s——bridge 的 agents 列表和 watcher 会周期性要路径，
   同步导出会卡住它。代价：历史最多旧十来秒；刚建的会话第一次读可能还没镜像；导出偶尔撞上写库会失败（记一条日志，沿用旧镜像）。
   归档（/clear 换代、kill）不走这条：当场导出一次（10s 内刚导过就用那份）再拷进 `archive/<agent>/<id>.jsonl`，旧会话以 archive 身份留在 agent 历史清单里；归档失败打日志。
+  归档副本按文件名的 `ses_` 形状认出是 OpenCode（不读首行：首条消息带宿主前言，可能任意长）。
+  镜像的时间戳取**导出前**的库 mtime：导出那 1–2s 里写进来的内容下次必定重导补上；导出自己会改库 mtime，下一遍导出和镜像逐字相同就停。
 
 ### 失败形状（实测，OCR-4 第 1 轮审查后补）
 

@@ -97,6 +97,7 @@ if [ "$1" = db ]; then cat <<'J'
 J
 exit 0; fi
 if [ "$2" = ses_fail ]; then echo boom >&2; exit 1; fi
+if [ "$2" = ses_racyW1 ] && [ ! -f "${dir}/raced" ]; then touch "${dir}/raced"; touch -t 203001010000 "${db}"; fi
 sed "s/${SID}/$2/g" "${FIXTURE}"
 `);
   chmodSync(bin, 0o755);
@@ -136,6 +137,18 @@ describe("refreshOpencodeMirror（假 opencode，隔离数据目录）", () => {
     touchDb(1_000_200);
     expect(refreshOpencodeMirror(id, { env, now: () => 21_000 })).toBe(p);
     expect(calls()).toBe(2); // 2s 节流内
+  });
+
+  test("导出途中库被写入（第 4 轮 P2-5）：镜像时间戳取导出前的，过了节流必重导；之后内容没变就停", () => {
+    const { env, calls, touchDb } = fakeEnv();
+    const id = "ses_racyW1";
+    touchDb(1_500_000);
+    expect(refreshOpencodeMirror(id, { env, now: () => 100_000 })).toBe(opencodeMirrorPath(id)); // 假 opencode 导出时把库 mtime 推到 2030 年
+    expect(calls()).toBe(1);
+    expect(refreshOpencodeMirror(id, { env, now: () => 111_000 })).toBe(opencodeMirrorPath(id));
+    expect(calls()).toBe(2); // 镜像停在导出前的时间：判旧、重导（按导出后的量会判新鲜，写入就丢了）
+    expect(refreshOpencodeMirror(id, { env, now: () => 122_000 })).toBe(opencodeMirrorPath(id));
+    expect(calls()).toBe(2); // 第二遍和镜像逐字相同、库没再变：不再导
   });
 
   test("导出失败：没有旧镜像返回 null；非法 id 不起子进程", () => {
