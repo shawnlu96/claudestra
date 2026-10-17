@@ -15,7 +15,10 @@ ACP 会话（Codex 的 codex-acp、Pi 的 ACP 适配器）回合撞了额度，�
 
 第一个按钮永远是「等重置」。后面只列真能走通的：
 
-1. **同 provider 的不列**：同一个账号 / 套餐，切过去照样撞墙。所以 Codex 会话（几个模型都是同一个 ChatGPT 账号）的卡只有「等重置」。
+1. **同 provider 的不列**：同一个账号 / 套餐，切过去照样撞墙。provider 取模型值 `provider/id` 斜杠前那段。
+   **Codex 的模型 id 不带 provider 前缀**（`gpt-5.6-sol`、`gpt-5.6-luna`）：codex-acp 下拉里的模型全部走本机 `codex login` 的那一个 ChatGPT 账号，
+   所以不带斜杠的值一律认作同一个 provider `openai-codex`（`quota-fallback.ts providerOf`）。Codex 会话撞额度时卡上只有「等重置」，
+   正文写「没列：openai-codex 的另外 N 个模型（同一个账号 / 套餐，切过去照样撞墙）」。Pi 里写成 `openai-codex/…` 的模型也算这一家。
 2. **已知同样到顶的 provider 不列**。判断来源只有两个，都是只读：
    - **Codex 额度快照**：`lib/ai-quota.ts readInventoryQuota().codex`（和网页额度看板同一份：订阅接口实时 / 上次成功快照 / 本机 rollout）。
      提供方明确说已撞限（`limitReached`），或某个窗口用到 100% 且没过重置时刻 → `openai-codex` 到顶，到那个窗口的重置时刻为止。

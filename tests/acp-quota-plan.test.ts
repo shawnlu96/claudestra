@@ -98,3 +98,34 @@ describe("codexWalled", () => {
     expect(codexWalled(null)).toBeNull();
   });
 });
+
+describe("ask-runtime quotaText：只有 ACP 额度卡换卡面，tmux 版 Codex 额度卡逐字照旧", () => {
+  test("不给 quotaText = 改之前的 codexQuotaText；给了只换卡面，extra.raw / 过期时间 / 指纹都按原文", async () => {
+    const { openRuntimeAsk, resetRuntimeAsksForTest } = await import("../src/bridge/ask-runtime.ts");
+    const { setAsksForTest } = await import("../src/bridge/asks.ts");
+    const { codexExpiry, codexQuotaText } = await import("../src/lib/ask-fingerprint.ts");
+    const { listAsks } = await import("../src/lib/ledger-asks.ts");
+    const { closeLedger, openLedger } = await import("../src/lib/ledger-store.ts");
+    const { tempLedgerPath } = await import("./ledger-test-helpers.ts");
+    const path = tempLedgerPath("acp-quota-text-");
+    openLedger(path);
+    const registry = ["tmux", "acp"].map((n) => ({ name: `agent-${n}`, channelId: `ch-${n}`, status: "active", projectId: "p" }));
+    setAsksForTest({ path, registry: registry as never, ownerChats: [] });
+    resetRuntimeAsksForTest();
+    try {
+      const raw = "You've hit your usage limit. Try again at 11:58 PM.";
+      const base = { source: "codex" as const, kind: "decide" as const, title: "Codex 额度用完了", context: raw, options: [], quota: true as const };
+      await openRuntimeAsk({ ...base, channelId: "ch-tmux", agentName: "agent-tmux" });
+      await openRuntimeAsk({ ...base, channelId: "ch-acp", agentName: "agent-acp", acp: true, quotaText: "go 的额度到顶了\n原文：…" });
+      const [tmux, acp] = ["ch-tmux", "ch-acp"].map((ch) => listAsks(openLedger(path), { project: "p" }).find((a) => a.fromChannelId === ch)!);
+      expect(tmux.context).toBe(codexQuotaText(codexExpiry(raw, tmux.createdAt), tmux.createdAt));
+      expect(acp.context).toBe("go 的额度到顶了\n原文：…");
+      for (const a of [tmux, acp]) expect(a.extra).toMatchObject({ quota: true, raw });
+      expect(acp.expiresAt).toBe(tmux.expiresAt);
+      expect(acp.extra.fp).not.toBe(tmux.extra.fp); // 指纹带 agent / 频道，不同；同一张卡的指纹只看原文，见 tests/ask-dismiss.test.ts
+    } finally {
+      setAsksForTest(undefined);
+      closeLedger(path);
+    }
+  });
+});
