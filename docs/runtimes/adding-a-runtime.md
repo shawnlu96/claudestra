@@ -5,8 +5,8 @@
 
 - 契约类型：`src/lib/runtimes/contract.ts`（ACP 段）、`src/lib/runtimes/types.ts`（会话来源、生命周期、`RuntimeEntry`）。
 - 防腐：guard 的 `pattern:runtime-literal` 统计 `src/lib/runtimes/` 以外按运行时 id 字面量分支的写法
-  （`runtime === "x"` / 模板字面量、`rt.id !== "x"`、`switch (runtime)`、`managedFor("x", …)` 等），全仓总数只许减少（和其它 pattern 规则同口径：
-  删一处旧的同时在别处加一处，总数不变就拦不住）。新代码要区分运行时，就往描述里加字段。
+  （`runtime === "x"` / 模板字面量、`rt.id !== "x"`、`switch (runtime)`、`managedFor("x", …)` 等），**按文件计数**（`pattern:runtime-literal:<文件>`），
+  每个文件只许减少，新文件出现即红；搬到别的文件也算新增。新代码要区分运行时，就往描述里加字段。
 - 证明契约够用的测试：`tests/runtime-contract-fake.test.ts` 只在测试里登记一个假 ACP 运行时，没改 runtimes/ 以外的文件，
   就能起宿主、收发消息、打断，运行时目录也能列出来。
 
@@ -61,7 +61,7 @@
 
 ## 留下来的按 id 分支（迁不进描述，新运行时也不用碰）
 
-基线 175 处，guard 只许它减少。按类别分：
+基线 175 处（86 个文件，按文件登记），guard 只许它减少。按类别分：
 
 - **Codex / Pi 自己的迁移与回退**：`manager/acp-lifecycle.ts`（Pi 在沙箱里跳过探测、Pi 的 ACP 起不来同窗口回退 tmux、Pi 不支持 `--fork`、
   adopt 时 Pi 选 transport、Codex 重启时缺适配器暂退 tmux、沙箱里不起两家的 TUI）、`manager/acp-migration.ts`、`manager/pi-acp-migration.ts`、

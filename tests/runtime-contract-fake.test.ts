@@ -16,7 +16,7 @@ import { genericAcpRuntime } from "../src/lib/runtimes/acp-generic.ts";
 import { runtimeCatalog } from "../src/lib/runtimes/catalog.ts";
 import { ACP_RUNTIME_ENV, type AcpHostRuntime } from "../src/lib/runtimes/contract.ts";
 import {
-  checkAcpReadyFor, controlFor, isManageableRuntime, managedFor, manageableRuntimeIds, registerRuntimeForTest, requireManaged, transportsOf, type SessionSourceAdapter,
+  checkAcpReadyFor, claudeCodeAdapter, controlFor, isManageableRuntime, managedFor, manageableRuntimeIds, registerRuntimeForTest, requireManaged, transportsOf, type SessionSourceAdapter,
 } from "../src/lib/runtimes/index.ts";
 import { archiveAgentSession } from "../src/lib/session-archive.ts";
 import { chooseCreateTransport, transportRefusal } from "../src/manager/acp-lifecycle.ts";
@@ -232,6 +232,23 @@ describe("假运行时：归档按它自己的会话来源找文件（第 2 轮 
     } finally {
       undo();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("双 transport 的新运行时（验收追加 3 P2-3）", () => {
+  test("建 agent 缺省 acp 时调它描述里的 ready()，不走 Codex 的探测", async () => {
+    let readyCalls = 0;
+    const tmux = { ...claudeCodeAdapter, id: "dualrt", label: "Dual" };
+    const acp = genericAcpRuntime({ source: tmux, host: { ...host, id: "dualrt" }, ready: async () => (readyCalls++, { ok: true }), isValidSessionId: () => true });
+    const undo = registerRuntimeForTest({ source: tmux, acp });
+    try {
+      expect(transportsOf("dualrt")).toEqual(["tmux", "acp"]);
+      expect(await chooseCreateTransport("dualrt")).toEqual({ transport: "acp" });
+      expect(readyCalls).toBe(1);
+      expect(await chooseCreateTransport("dualrt", "tmux")).toEqual({ transport: "tmux", manualTmux: true });
+    } finally {
+      undo();
     }
   });
 });

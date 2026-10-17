@@ -1,4 +1,4 @@
-// 绕过规范 helper 的写法 + 无声吞错。全部按全仓总数棘轮（搬代码不受影响）。
+// 绕过规范 helper 的写法 + 无声吞错。按全仓总数棘轮（搬代码不受影响）；perFile 的规则按文件计（搬到别的文件也算新增）。
 import { CATCH_COMMENT_MIN, PATTERNS, PLACEHOLDER_CJK, PLACEHOLDER_PREFIXES, PLACEHOLDER_WORDS, type PatternDef } from "../config.ts";
 import type { Counts, Files, RuleResult } from "../types.ts";
 import { maskStrings } from "./lex.ts";
@@ -65,11 +65,16 @@ function countPattern(p: PatternDef, f: string, src: string): number {
 
 export function measurePatterns(files: Files, patterns: PatternDef[] = PATTERNS): RuleResult {
   const counts: Counts = { "catch:empty-block": 0, "catch:silent-promise": 0 };
-  for (const p of patterns) counts[`pattern:${p.id}`] = 0;
+  for (const p of patterns) if (!p.perFile) counts[`pattern:${p.id}`] = 0;
   const perFile = new Map<string, number>();
   for (const [f, src] of files) {
     if (!productionFile(f)) continue;
-    for (const p of patterns) counts[`pattern:${p.id}`] += countPattern(p, f, src);
+    for (const p of patterns) {
+      const n = countPattern(p, f, src);
+      if (p.perFile) {
+        if (n) counts[`pattern:${p.id}:${f}`] = n;
+      } else counts[`pattern:${p.id}`] += n;
+    }
     const masked = maskStrings(src);
     const e = countSilent(masked, EMPTY_CATCH);
     const s = countSilent(masked, PROMISE_CATCH);
