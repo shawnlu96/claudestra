@@ -104,6 +104,7 @@ export const RECOVERY_KEYS = [
   "peerPrAutoVerify",
   "peerPrHeadReview",
   "peerPrRequeue",
+  "peerSignatureContract",
   "placementReservations",
   "planGap",
   "pmQuiet",
