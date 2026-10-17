@@ -20,7 +20,10 @@ import { armGoneCardSweep, cardsToClose, productionView } from "../lib/agent-sup
 import { closeAsk } from "../lib/ledger-asks.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { askDbIfExists, publishAsk } from "./asks.js";
-import { noteRetryingCaller, spokenBefore, takeTurnFailure, turnFailureNotice, type TurnFailure } from "./turn-failure.js";
+import { channelTurnOk, noteResumeSource, resumeSourceOf } from "../lib/api-error-resume.js";
+import {
+  noteCallerAnswered, noteRetryingCaller, reclearEnded, retryingKnown, spokenBefore, takeTurnFailure, turnFailureNotice, useRetryPort, type RetryPort, type TurnFailure,
+} from "./turn-failure.js";
 
 export interface StopTurn {
   /** 要结算的频道（channelsToClear 里的一个） */
@@ -62,7 +65,7 @@ const TRIGGER_BATCH_MS = 3_000;
  * callers = 这一轮是哪几个 agent 的消息开的（扣下的话只挂在唯一的那一个上，markApiError）；
  * askers = 其中发的是请求（send_to_agent 不带 oneShot）的那几个：这一轮失败要告诉它们（notifyFailedTurn），答复 / 转发 / FYI 不算
  */
-interface TriggerRec { who: TurnTrigger; at: number; callers: string[]; askers: string[] }
+interface TriggerRec { who: TurnTrigger; at: number; callers: string[]; askers: string[]; askedAt?: Record<string, number> }
 const turnTrigger = new Map<string, TriggerRec>();
 /** 上一轮（本进程见过它的 Stop）按什么来源结的：没有投递记录的下一轮继承它 */
 const prevTrigger = new Map<string, TriggerRec>();
@@ -76,19 +79,26 @@ const RESUME_LABELS = new Set(["api-error-resume", "quota-wall"]);
  * 自己人的一轮正常结束就清掉（错误那一轮的事已经接着做完 / 回程已结算）。
  */
 const errTrigger = new Map<string, TriggerRec>();
-const resumeRec = (cid: string): TriggerRec | undefined => errTrigger.get(cid) ?? prevTrigger.get(cid);
+/** 续跑计划上落盘的撞错那一轮来源（退避中重启后内存里没有 errTrigger 时用；quota-wall-wiring 存取） */
+const planRec = (cid: string): TriggerRec | undefined => {
+  const s = resumeSourceOf(cid);
+  return s && { who: s.who in RANK ? (s.who as TurnTrigger) : "stranger", at: 0, callers: s.callers, askers: s.askers, ...(s.askedAt ? { askedAt: s.askedAt } : {}) };
+};
+const resumeRec = (cid: string): TriggerRec | undefined => errTrigger.get(cid) ?? planRec(cid) ?? prevTrigger.get(cid);
 type Sender = { kind: string; owner?: boolean; peer?: string; channelId?: string; label?: string };
 /** 发送方按 principal 分成哪一类（见 TurnTrigger）；出闸判「补投会不会接着做被打断的事」也用它（bridge/quota-wall-wiring.ts） */
 export const senderTrigger = (from: Sender): TurnTrigger =>
   from.kind !== "user" && from.kind !== "api" ? "insider" : isOwnerSource(from) ? "owner" : "stranger";
 export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle = false, asks = false): void {
+  if (asks && from.kind === "local" && from.channelId) noteCallerAnswered(from.channelId, cid, now); // 它给收到过「正在重试」的请求方发了请求（turn-failure.ts）
   const who = senderTrigger(from);
   const caller = from.kind === "local" && from.channelId ? [from.channelId] : [];
   const asker = asks ? caller : [];
   const prev = resumeRec(cid);
   // 续跑消息开的一轮继承撞错那一轮；重启后没有记录 = 来源未知，按外人算（不结算，adv3 P2-8）
   const resume = from.kind === "bridge" && RESUME_LABELS.has(from.label ?? "");
-  const fresh = (): TriggerRec => (resume && prev ? { ...prev, at: now } : { who: resume ? "stranger" : who, at: now, callers: caller, askers: asker });
+  const askedAt = Object.fromEntries(asker.map((c) => [c, now])); // 请求送到的时刻：续跑那几轮继承（turn-failure 据此分清属于哪一串）
+  const fresh = (): TriggerRec => (resume && prev ? { ...prev, at: now } : { who: resume ? "stranger" : who, at: now, callers: caller, askers: asker, askedAt });
   if (cutSince.delete(cid)) return void turnTrigger.set(cid, fresh());
   const cur = turnTrigger.get(cid);
   const batch = !!cur && now - cur.at <= TRIGGER_BATCH_MS;
@@ -97,7 +107,7 @@ export function noteDelivered(cid: string, from: Sender, now = Date.now(), idle 
   else if (!cur || (idle && !batch)) turnTrigger.set(cid, fresh());
   else if (batch) {
     turnTrigger.set(cid, { who: RANK[who] > RANK[cur.who] ? who : cur.who, at: cur.at,
-      callers: [...new Set([...cur.callers, ...caller])], askers: [...new Set([...cur.askers, ...asker])] });
+      callers: [...new Set([...cur.callers, ...caller])], askers: [...new Set([...cur.askers, ...asker])], askedAt: { ...askedAt, ...cur.askedAt } });
   }
 }
 /**
@@ -169,17 +179,27 @@ export function markRepeat<T extends StopTurn>(t: T): T {
 
 /** bridge 的 Stop 处理每个频道调一次：判这一轮算不算 cid 答完、算就结算回程簿。返回判定，看门狗照它走 */
 export async function settleStopTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
+  useRetryPort(retryPort(d));
   if (t.repeated) return false;
   const mine = isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
   try {
     return await settleOwn(d, t, mine);
   } finally {
-    if (mine && t.event === "Stop" && !ranIntoApiError(t)) (d.recovered ?? closeRecoveredCards)(t.cid); // 正常结束的一轮 = 恢复了（i28-S1 监护关卡）
+    if (mine && t.event === "Stop" && !ranIntoApiError(t)) {
+      channelTurnOk(t.cid, Date.now()); // 网络类连败清零：按频道，不经关卡（没卡、没 ledger 库、master 不在 registry 都要清）
+      (d.recovered ?? closeRecoveredCards)(t.cid); // 正常结束的一轮 = 恢复了（i28-S1 监护关卡）
+    }
     if (mine) {
       const rec = { at: 0, callers: [], askers: [], ...recOf(t), who: triggerOf(t) };
       if (ranIntoApiError(t)) errTrigger.set(t.cid, rec);
       else if (rec.who !== "stranger") errTrigger.delete(t.cid);
+      if (ranIntoApiError(t) || t.event === "StopFailure") { // 来源跟着续跑计划落盘（重启后 planRec 读回），不动上面的 errTrigger
+        noteResumeSource(t.cid, { who: rec.who, callers: rec.callers, askers: rec.askers, ...(rec.askedAt ? { askedAt: rec.askedAt } : {}) });
+      }
       prevTrigger.set(t.cid, rec); // 下一轮的来源从它的第一条消息重新记
+      const failAt = retryFailAt.get(t.cid);
+      retryFailAt.delete(t.cid);
+      if (failAt !== undefined) reclearEnded(t.cid, failAt);
       turnTrigger.delete(t.cid);
       cutSince.delete(t.cid);
     }
@@ -215,34 +235,57 @@ async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promi
  * 自己续跑的一轮（at = -Infinity，按上一轮建出来的）不算谁开的；owner 有回合失败卡，peer 走 API 请求的兜底结算，都不在 askers 里。
  * 出错前说的话只在这一轮完全是它一个自己人开的时候带上；外人参与开的一轮只推通用说明、不消化槽（留给下面 strangerTurn 那道保护）。
  */
+/** 单测模拟 bridge 重启：本模块内存里的来源 / 回合记录全清（tests/turn-failure-retrying.test.ts） */
+export function resetStopSettleForTest(): void {
+  for (const m of [turnTrigger, prevTrigger, errTrigger, settledMark, retryFailAt]) m.clear();
+  cutSince.clear();
+}
+
+/** 这一轮的网络类失败时刻：收尾时它要是属于刚结束的那串，再清一次等续跑标记（turn-failure reclearEnded） */
+const retryFailAt = new Map<string, number>();
+
 async function failedTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
   const rec = turnTrigger.get(t.cid);
   const opened = rec && rec.at !== -Infinity ? rec : undefined;
   const f = takeTurnFailure(t.cid, opened?.at ?? Infinity);
   if (!f || t.event !== "StopFailure") return false;
+  if (f.retrying) retryFailAt.set(t.cid, f.at);
   const waiting = d.waiting(t.cid);
   const askers = opened?.askers ?? [];
   const stranger = strangerTurn(t);
   const sole = !stranger && opened?.who === "insider" && opened.callers.length === 1 && askers.length === 1 && !ranIntoApiError(t);
   const said = sole ? spokenBefore(t.drain.text, f) : undefined;
+  // 网络类留下的槽同样记「等续跑」：外人的一轮不结算它、kill / 2 小时扫掉走 onExpired 告诉请求方、owner 发话不算接管
+  if (f.retrying && !ranIntoApiError(t) && waiting.length) d.markApiError(t.cid, null, null);
   for (const caller of askers) {
+    const askedAt = opened?.askedAt?.[caller] ?? opened?.at ?? f.at;
+    if (f.retrying && retryingKnown(t.cid, caller, askedAt, f.at)) continue; // 续跑那几轮 / 升级那一轮：这一串已经告诉过它
     const slot = waiting.find((p) => p.callerChannelId === caller);
-    // 网络类：续跑用完补最终说明（在这一条「正在重试」之后登记，结局早到了会当场补发）
-    const later = (): void => void (f.retrying && noteRetryingCaller(t.cid, f.agent, (body) => d.notify(slot ?? stubCall(caller, t.cid, f), t.cid, body)));
+    const pac = slot ?? stubCall(caller, t.cid, f);
+    // 网络类：这一串的结局补一句说明（在这一条「正在重试」之后登记，结局早到了会当场补发）
+    const later = (): void => void (f.retrying && noteRetryingCaller(t.cid,
+      { agent: f.agent, at: f.at, askedAt, caller, callerName: pac.callerName, replyTo: pac.originalReplyChannel, slot: !!slot }));
     if (slot && ranIntoApiError(t)) {
       later();
       continue;
     }
-    const pac = slot ?? stubCall(caller, t.cid, f);
     const r = await d.notify(pac, t.cid, turnFailureNotice(f, !slot, said)).catch((e: Error) => ({ kind: "error", error: e }));
     const kind = (r as { kind?: string } | undefined)?.kind;
     if (kind === "error" || kind === "dropped") console.error(`⚠️ ${f.agent} 回合失败的说明没推到 ${pac.callerName}（${kind}），回程照旧留着`);
-    else if (slot && !stranger) d.consume(t.cid, slot);
+    else if (slot && !stranger && !f.retrying) d.consume(t.cid, slot); // 网络类的槽留着：续跑成功后的答复还要从它推回去
     console.log(`⚠️ ${f.agent} 这一轮以不可重试的错误中止 → 告诉请求方 ${pac.callerName}${slot ? "" : "（回程已被更早的回复消化）"}`);
     later();
   }
   return true;
 }
+
+/** 推「正在重试」请求方结局说明的通道：重启后按落盘的名单现拼推回地址（同 stubCall） */
+const retryPort = (d: CallerSettleDeps): RetryPort => ({
+  notify: (cid, r, body) => d.notify({ callerChannelId: r.caller, callerName: r.callerName, targetName: r.agent, targetChannelId: cid,
+    ...(r.replyTo ? { originalReplyChannel: r.replyTo } : {}), ts: r.at }, cid, body),
+  slotGone: (cid, r) => r.slot && !d.waiting(cid).some((p) => p.callerChannelId === r.caller),
+  clearWaiting: (cid, caller) => d.clearApiError?.(cid, caller),
+});
 
 /** 回程槽已经被这一轮更早的回复消化了：按频道现拼一个推回地址（名字查 registry，查不到就用频道号，只影响显示） */
 function stubCall(caller: string, cid: string, f: TurnFailure): PendingAgentCall {
@@ -404,6 +447,8 @@ export interface CallerSettleDeps {
   unattributed?(cid: string, text: string, n: { callers: number; waiting: number; wall: boolean }): void;
   /** 扣下的话已经推给 caller：清掉这一槽的 withheld（等续跑标记随答复一起消化） */
   clearWithheld(cid: string, pac: PendingAgentCall): void;
+  /** 一串续跑结束了（没救回来 / 停了 / 被收掉）：清掉 caller 那一槽的等续跑标记，owner 之后发话恢复接管语义（回程簿 clearApiError） */
+  clearApiError?(cid: string, caller: string): void;
   /** 在等 cid 的、还没为 API 错误说明过的槽，取出即记下（落盘，回程簿 takeApiErrorNotice） */
   takeApiErrorNotice(cid: string): PendingAgentCall[];
   /** 推给 caller 一条 intent=notification（不带 expecting、不当答复） */

@@ -4,7 +4,9 @@
  * 只认这一轮开始之后记的（宿主起不来时报的失败不在任何一轮里，到 Stop 时按时刻丢掉）；同一个失败重报（同 key）只记一次。
  * tests/turn-failure-notice.test.ts、tests/turn-failure-transient.test.ts
  */
-import { onStreakEnd } from "../lib/api-error-resume.js";
+import { onStreakEnd, type StreakOutcome } from "../lib/api-error-resume.js";
+import { statePath } from "../lib/paths.js";
+import { readJsonStateSync, reportCorrupt, writeJsonAtomicSync } from "../lib/state-file.js";
 import { TRANSIENT_BACKOFF_MS } from "../lib/transient-error.js";
 
 /** retrying = 网络类：bridge 会按退避自动续跑（api-error-resume.ts），先说「正在重试」，用完再补最终说明 */
@@ -47,30 +49,143 @@ export function spokenBefore(text: string | null, f: TurnFailure): string | unde
 }
 
 /**
- * 收到「正在自动重试」的请求方：这一串续跑的结局到了（api-error-resume 的 onStreakEnd）补一条最终说明，恢复了就不打扰。
- * 结局可能先于登记到（acp_failure / api_error_turn / StopFailure 三路先后不定）：刚结束的一串留 LATE_MS，晚到的登记当场补发。
+ * 收到「正在自动重试」的请求方：这一串续跑的结局到了（api-error-resume 的 onStreakEnd，升级 / 作废 / 被取消 / 撞额度撤掉 / 1 小时不再跟踪）
+ * 补一句结局说明，恢复了就不打扰；之后已经答复过它的（回程槽被消化了 / 它给请求方发过请求）不再说「没处理完」。
+ * 名单落盘：退避中 bridge 重启，结局照样补得上（推的通道由 stop-settle 每次结算时交来，重启后第一次 Stop 之前到的结局先排着）。
+ * 结局先于登记到（宿主先写错误条目再报 Stop：升级那一轮的 api_error_turn 总早于 StopFailure）：刚结束的一串留 ENDED_KEEP_MS，
+ * 晚到的登记属于这一串（请求在这一串开始前送到、失败时刻不晚于结局 SKEW_MS）才补发，已经处理过的请求方（handled）不再发；
+ * 请求在这一串开始之后才送到的是新的一串，不拿旧结局串话。
  */
-const LATE_MS = 60_000;
-type Retrying = { agent: string; at: number; send: (body: string) => Promise<unknown> };
-const retrying = new Map<string, Retrying[]>();
-const ended = new Map<string, { text: string; at: number }>();
-
-const finalFailureNotice = (agent: string, why: string): string => `[⛔ ${agent} 网络类错误的自动重试没救回来，你的请求没有被处理完：${why}]`;
-
-const sendFinal = (r: Retrying, why: string, cid: string): void =>
-  void r.send(finalFailureNotice(r.agent, why)).catch((e: Error) => console.error(`⚠️ ${cid} 重试用完的最终说明没推到请求方：${e.message}`));
-
-export function noteRetryingCaller(cid: string, agent: string, send: Retrying["send"], now = Date.now()): void {
-  const r = { agent, at: now, send };
-  const e = ended.get(cid);
-  if (e && now - e.at < LATE_MS) return sendFinal(r, e.text, cid);
-  retrying.set(cid, [...(retrying.get(cid) ?? []), r]);
+export interface RetryingCaller {
+  agent: string;
+  /** 告诉它「正在重试」的那次失败的时刻 */
+  at: number;
+  /** 它这条请求送到 target 的时刻：分清属于哪一串（续跑的几轮继承开头那一轮的） */
+  askedAt: number;
+  caller: string;
+  callerName: string;
+  replyTo?: string;
+  /** 登记时回程槽还在：之后槽没了 = 已经答复过它 */
+  slot: boolean;
+  answered?: boolean;
+}
+/** 推结局说明、查回程槽还在不在（bridge 的依赖，stop-settle 交来） */
+export interface RetryPort {
+  notify(cid: string, r: RetryingCaller, body: string): Promise<unknown>;
+  slotGone(cid: string, r: RetryingCaller): boolean;
+  /** 清掉 caller 那一槽的等续跑标记：这一串结束后 owner 在 target 频道发话恢复算接管 */
+  clearWaiting(cid: string, caller: string): void;
 }
 
-onStreakEnd((cid, text, since, now) => {
-  const list = (retrying.get(cid) ?? []).filter((r) => r.at >= since - LATE_MS); // 更早那串留下的（被人接手 / 撞额度撤掉的）不算这一串
-  retrying.delete(cid);
-  if (text === null) return void ended.delete(cid);
-  ended.set(cid, { text, at: now });
-  for (const r of list) sendFinal(r, text, cid);
+const RETRYING_PATH = statePath("turn-failure-retrying.json");
+const LATE_MS = 60_000;
+const ENDED_KEEP_MS = 3 * 60_000;
+const SKEW_MS = 5_000;
+let retrying: Map<string, RetryingCaller[]> | null = null;
+/** 刚结束的一串：handled = 已经对它们处理过结局的请求方（推过、或判为答复过）；cleared = 清过等续跑标记的请求方 */
+type Ended = { end: StreakOutcome | null; at: number; since: number; seen: number; handled: Set<string>; cleared: Set<string> };
+const ended = new Map<string, Ended>();
+let port: RetryPort | null = null;
+const unsent: (() => void)[] = [];
+
+const isCaller = (v: unknown): boolean => {
+  const r = v as RetryingCaller;
+  return !!r && typeof r === "object" && typeof r.agent === "string" && typeof r.caller === "string" && typeof r.callerName === "string"
+    && Number.isFinite(r.at) && Number.isFinite(r.askedAt) && typeof r.slot === "boolean";
+};
+function book(): Map<string, RetryingCaller[]> {
+  if (retrying) return retrying;
+  const r = readJsonStateSync(RETRYING_PATH, (d) => !!d && typeof d === "object" && !Array.isArray(d));
+  if (r.status === "corrupt") reportCorrupt(RETRYING_PATH, r.error, "turn-failure-retrying", false);
+  const entries = Object.entries(r.status === "ok" ? (r.data as Record<string, unknown>) : {});
+  retrying = new Map(entries.map(([cid, list]) => [cid, Array.isArray(list) ? (list.filter(isCaller) as RetryingCaller[]) : []]));
+  return retrying;
+}
+function save(): void {
+  try {
+    writeJsonAtomicSync(RETRYING_PATH, Object.fromEntries(book()));
+  } catch (e) {
+    console.error(`⚠️ 「正在重试」的请求方名单落盘失败（内存里还在，bridge 重启会丢）：${(e as Error).message}`);
+  }
+}
+
+const finalNotice = (agent: string, end: StreakOutcome): string => end.failed
+  ? `[⛔ ${agent} 网络类错误的自动重试没救回来，你的请求没有被处理完：${end.why}]`
+  : `[ℹ️ ${agent} 的自动重试停了：${end.why}。结果以它之后的答复为准，没等到再重派。]`;
+
+function finish(cid: string, r: RetryingCaller, end: StreakOutcome): void {
+  const go = (p: RetryPort): void => {
+    // 登记时的槽都记了「等续跑」（stop-settle markApiError），槽没了只有两条路：被答复消化，或 onExpired 已经推了结局（kill / 2 小时扫掉）
+    if (r.answered || p.slotGone(cid, r)) return void console.log(`🤫 ${r.agent} 的自动重试结束，${r.callerName} 之后已经收到过答复，不再补结局说明`);
+    if (r.slot) {
+      p.clearWaiting(cid, r.caller);
+      ended.get(cid)?.cleared.add(r.caller);
+    }
+    void p.notify(cid, r, finalNotice(r.agent, end)).catch((e: Error) => console.error(`⚠️ ${cid} 自动重试的结局说明没推到 ${r.callerName}：${e.message}`));
+  };
+  if (port) go(port);
+  else unsent.push(() => go(port!));
+}
+
+/** 单测模拟 bridge 重启：内存里的名单、通道、排队和刚结束的一串全清，名单下次从盘上读回（tests/turn-failure-retrying.test.ts） */
+export function resetRetryingForTest(): void {
+  retrying = null;
+  port = null;
+  unsent.length = 0;
+  ended.clear();
+}
+
+/** stop-settle 每次结算时调：交来推送通道，排着的结局说明顺带推掉 */
+export function useRetryPort(p: RetryPort): void {
+  port = p;
+  for (const f of unsent.splice(0)) f();
+}
+
+/** 刚结束的那一串（这次失败属于它的话）；否则 undefined */
+function endedFor(cid: string, askedAt: number, failedAt: number, now: number) {
+  const e = ended.get(cid);
+  return e && now - e.seen < ENDED_KEEP_MS && askedAt <= e.since && failedAt <= e.at + SKEW_MS ? e : undefined;
+}
+
+/** 这位请求方这条请求已经在这一串里（登记过，或这一串刚结束、已处理过它）：续跑的几轮和升级那一轮不再说「正在重试」 */
+export function retryingKnown(cid: string, caller: string, askedAt: number, failedAt: number, now = Date.now()): boolean {
+  return !!book().get(cid)?.some((r) => r.caller === caller && r.askedAt >= askedAt) || !!endedFor(cid, askedAt, failedAt, now)?.handled.has(caller);
+}
+
+export function noteRetryingCaller(cid: string, r: RetryingCaller, now = Date.now()): void {
+  const e = endedFor(cid, r.askedAt, r.at, now);
+  if (e) {
+    if (e.end && !e.handled.has(r.caller)) finish(cid, r, e.end);
+    e.handled.add(r.caller);
+    return;
+  }
+  const list = book().get(cid) ?? [];
+  if (list.some((x) => x.caller === r.caller && x.askedAt >= r.askedAt)) return; // 同一条请求一串只登记一次
+  book().set(cid, [...list.filter((x) => x.caller !== r.caller), r]); // 同一请求方的更早一条请求：换成这条
+  save();
+}
+
+/**
+ * 升级那一轮的 StopFailure 晚于结局到：stop-settle 收尾又把槽记回「等续跑」（markApiError），这一轮属于刚结束的那串（failedAt）就再清一次。
+ * stop-settle 在这一轮收尾的最后调
+ */
+export function reclearEnded(cid: string, failedAt: number, now = Date.now()): void {
+  const e = ended.get(cid);
+  if (!port || !e?.end || now - e.seen >= ENDED_KEEP_MS || failedAt > e.at + SKEW_MS) return;
+  for (const caller of e.cleared) port.clearWaiting(cid, caller);
+}
+
+/** target 给 caller 发了请求（send_to_agent，不含 bridge 推的说明）：算答复过它，这一串没救回来也不再说「没处理完」 */
+export function noteCallerAnswered(target: string, caller: string, at: number): void {
+  const list = book().get(target);
+  if (!list?.some((r) => r.caller === caller && !r.answered && at > r.at)) return;
+  book().set(target, list.map((r) => (r.caller === caller && at > r.at ? { ...r, answered: true } : r)));
+  save();
+}
+
+onStreakEnd((cid, end, since, now) => {
+  const list = (book().get(cid) ?? []).filter((r) => r.at >= since - LATE_MS); // 更早那串留下的不算这一串
+  if (book().delete(cid)) save();
+  ended.set(cid, { end, at: now, since, seen: Date.now(), handled: new Set(list.map((r) => r.caller)), cleared: new Set() });
+  if (end) for (const r of list) finish(cid, r, end);
 });

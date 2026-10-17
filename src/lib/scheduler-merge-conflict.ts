@@ -4,6 +4,7 @@
  * freezes the project queue. Bounces send the card back to fix (re-reviewed before it can merge again); the 4th goes to the PM.
  * The receipt is the single place the evidence is spelled out; the ledger re-parses it. tests/scheduler-merge-conflict*.test.ts.
  */
+import { replayBounceStep, replayBounceEvent } from "./ci-selected-replay.js";
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow } from "./ledger-scheduler.js";
@@ -123,6 +124,7 @@ export async function bounceStep(run: MergeRun, pr: PrSnapshot, external: MergeE
   const cause = bounceOf(run, pr, only);
   if (!cause) return null;
   if (cause === "ci_fail") { // CICANCEL1 (only cancelled) → i28-CIF1 → CIF2 → CIMAINSRC1 (same red on main: wait, ci-main-source-wait.ts)
+    step = replayBounceStep(run, pr, external, step);
     const checks = failedRequired(run, pr.checks), bounce = bounceReceipt({ cause, prHead: pr.head, mainHead: null, checks });
     const held = sourceWaitHeld(run, pr, external, step, checks, bounce, bounceReceipt); if (held) return held;
     const routed = sourceWaitRoute(run, pr, external, step, checks, bounce, bounceReceipt);
@@ -231,7 +233,7 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
     project: row.project, target: row.taskId, kind: "scheduler",
     text: escalated ? `合并队列：第 ${count} 次退回，${BOUNCE_LIMIT_REASON}` : `合并队列：退回 fix（${b.cause}，第 ${count} 次）`,
     data: { op: "merge_conflict", intentId: row.intentId, from: row.phase, cause: b.cause, prHead: b.prHead, mainHead: b.mainHead,
-      checks: b.checks, count, escalated },
+      checks: b.checks, count, escalated, ...replayBounceEvent(db, row, b.cause) },
   }, true);
 }
 

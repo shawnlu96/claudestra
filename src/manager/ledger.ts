@@ -81,6 +81,7 @@ import { PM_RAILS_CMDS, withPmRails } from "./pm-rails-cmds.js";
 import { SECURITY_POOL_CMDS } from "./security-pool-cmds.js";
 import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
+import { CI_SELECTED_REPLAY_CMDS } from "./ledger-ci-selected-replay-cmd.js";
 import { MAIN_CI_CMDS } from "./ledger-main-ci-cmds.js";
 import { LEND_AUTHOR_RETIRE_CMDS } from "../lib/lend-author-retire-cmds.js";
 import { MAIN_RED_FIX_CMDS, MAIN_RED_FIX_SERVICE } from "../lib/main-red-fix-cmds.js";
@@ -97,7 +98,7 @@ const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
-  ...SCHEDULER_RECOVERY_CMDS,
+  ...SCHEDULER_RECOVERY_CMDS, ...CI_SELECTED_REPLAY_CMDS,
   ...SHARED_EXEC_CMDS,
   ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...SHARED_AUTO_CMDS, ...CENTER_REPLICA_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS, ...PRIORITY_CMDS,

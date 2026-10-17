@@ -41,7 +41,7 @@ describe("parseConfigOptions", () => {
     const once = parseConfigOptions(RAW);
     const again = parseConfigOptions(JSON.parse(JSON.stringify(once)));
     expect(again).toEqual(once);
-    expect(quotaCardChoices(again).map((c) => c.value)).toEqual([null, "gpt-5.6-luna", "gpt-5.5-codex"]);
+    expect(again[1]!.choices.map((c) => c.value)).toEqual(["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5-codex"]);
   });
 
   test("fast-mode 的布尔当前值按字符串收", () => {
@@ -72,15 +72,13 @@ describe("modelStateEntry（顶栏的 model / effort）", () => {
   });
 });
 
-describe("quotaCardChoices（owner 定的规矩：不替他选、不推荐）", () => {
-  test("第一个是等重置，后面只列 configOptions 里的其它模型，没有任何「推荐」字样", () => {
-    const c = quotaCardChoices(parseConfigOptions(RAW), "18:20 重置");
-    expect(c).toEqual([
-      { value: null, label: "等重置（18:20 重置）" },
-      { value: "gpt-5.6-luna", label: "切到 gpt-5.6-luna" },
-      { value: "gpt-5.5-codex", label: "切到 GPT-5.5 Codex（gpt-5.5-codex）" },
-    ]);
-    expect(c.some((x) => /推荐|recommend/i.test(x.label))).toBe(false);
+describe("quotaCardChoices（规则细节在 tests/quota-fallback.test.ts）", () => {
+  test("第一个是等重置；Codex 的模型都是同一个账号，一个都不列", () => {
+    expect(quotaCardChoices(parseConfigOptions(RAW), "18:20 重置")).toEqual([{ value: null, label: "等重置（18:20 重置）" }]);
+  });
+  test("别家的模型照列，名字和值不同时都写上", () => {
+    const opts = parseConfigOptions([{ id: "model", currentValue: "go/m1", options: [{ value: "go/m1" }, { value: "ds/m2", name: "M2" }] }]);
+    expect(quotaCardChoices(opts)).toEqual([{ value: null, label: "等重置" }, { value: "ds/m2", label: "切到 M2（ds/m2）" }]);
   });
   test("没有模型项只给等重置", () => {
     expect(quotaCardChoices([])).toEqual([{ value: null, label: "等重置" }]);
