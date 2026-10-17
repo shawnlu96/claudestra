@@ -1,5 +1,6 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acpClear, acpConfigOf, acpHostTurnBusy, acpSetConfig, answerAcp, answerAcpDiscord, answerAcpResponse, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
+import { useAcpQuotaPort } from "../src/bridge/acp-quota.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { handleSlashPassthrough } from "../src/bridge/api-slash.ts";
 import { subscribeEvents } from "../src/bridge/event-bus.ts";
@@ -19,6 +20,9 @@ const sock = (ch: string) => {
 const discord = {} as any;
 const CONFIG = [{ id: "model", name: "Model", type: "select", currentValue: "gpt-5.6-sol", options: [{ value: "gpt-5.6-sol", name: "sol" }, { value: "gpt-5.6-luna", name: "luna" }] }];
 const who = { principal: "owner:self" };
+// 额度卡要两家 provider（同一家的模型不列）：当前在 go 上，ds 是别家
+const SOL = "go/deepseek-v4.1-flash", LUNA = "ds/deepseek-v4-flash";
+const QUOTA_CONFIG = [{ id: "model", name: "Model", type: "select", currentValue: SOL, options: [{ value: SOL, name: "sol" }, { value: LUNA, name: "luna" }] }];
 
 beforeAll(() => {
   setExtensionSocket((ch) => sockets.get(ch), {
@@ -330,8 +334,10 @@ describe("推送 watcher 重建：未 flush 的正文不丢、序号不回退（
   });
 });
 
-describe("额度卡：先「等重置」、只列其它模型、owner 点了才经宿主改", () => {
-  const quota = (key: string, message: string) => ({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key, message }, configOptions: CONFIG });
+describe("额度卡：先「等重置」、只列别家能用的模型、owner 点了才经宿主改", () => {
+  beforeAll(() => useAcpQuotaPort({ codexQuota: async () => null, fallbackConfig: () => undefined, agentOf: async () => undefined }));
+  afterAll(() => useAcpQuotaPort());
+  const quota = (key: string, message: string) => ({ type: "acp_failure", channelId: CH, failure: { kind: "quota", key, message }, configOptions: QUOTA_CONFIG });
   test("切到某模型 → 宿主收到 set_config_option；等重置 → 什么都不改；答过的按钮 409", async () => {
     const s = sock(CH);
     await onAcpFrame(quota("air:t1", "You've hit your usage limit."), s, discord);
@@ -341,9 +347,9 @@ describe("额度卡：先「等重置」、只列其它模型、owner 点了才�
     const pending = answerAcp(CH, luna!, who);
     await new Promise((r) => setTimeout(r, 0));
     const call = s.sent.find((f) => f.type === "acp_call");
-    expect(call).toMatchObject({ op: "set_config", configId: "model", value: "gpt-5.6-luna" });
-    await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ok: true, configOptions: CONFIG }, s, discord);
-    expect(await pending).toEqual({ status: 200, body: { ok: true, model: "gpt-5.6-luna" } });
+    expect(call).toMatchObject({ op: "set_config", configId: "model", value: LUNA });
+    await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ok: true, configOptions: QUOTA_CONFIG }, s, discord);
+    expect(await pending).toEqual({ status: 200, body: { ok: true, model: LUNA } });
     expect((await answerAcp(CH, luna!, who)).status).toBe(409);
 
     await onAcpFrame(quota("air:t2", "limit"), s, discord);
@@ -395,6 +401,7 @@ describe("额度卡：先「等重置」、只列其它模型、owner 点了才�
     expect((await answerAcp(CH, old, who)).status).toBe(409);
     await answerAcp(CH, liveAcpButtons(CH).quota[0]!, who);
   });
+
 });
 
 const OPTIONS = [{ id: "allow_once", label: "Allow", style: "success" }, { id: "decline", label: "Decline", style: "danger" }];
