@@ -14,13 +14,16 @@ export const STANDARD_ANSWERS_HEAD = "标准答复（系统固定文字，这些
 const ENVIRONMENT = "环境：副本已拉好子模块；依赖照仓库 CI 装，子模块同理（本仓 `bun install --frozen-lockfile`，web/ 同理）；本机 Bun 版本差异的崩溃不算问题；全量以 PR head 的 CI 为准";
 const DUTIES = "职责：CI 由合并闸核对；ui 卡截图由 PM 验收；审查员只审代码";
 const SPEC_FIRST = "规格里的「PM 定」「PM 补」小节都在规格原文里，以规格为准";
-/** 写单 / 修复单才带。CIF8 加 OUT_OF_SCOPE_RED 时压短了字句：author 整段不比之前长（tests/lend-wire-v1-golden.test.ts 钉着字节数），三件事都还在 */
-export const ASK_DEFAULT_GUIDANCE = "拿不准就用 ask，写清 default（默认做法）和 class=design/scope，照默认继续做；"
-  + "只有需要人的事（凭据、owner 拍板、安全）才用 class=blocker 等回复。出借池远端 ask 暂按 blocker 等 PM；"
-  + "例外是测试类扩围：只加 tests/ 下的文件时，ask 里填 files 和 "
-  + "reason=superseded_assertion / new_test，PM 15 分钟没回自动批准、追加进 fileGlobs，结论会发给你，照做继续。";
-/** 写单 / 修复单才带（dispatch-recovery-CIF8）：范围外的偶发红由合并闸重跑或退回，执行者推空提交只会多一轮修复和审查 */
-const OUT_OF_SCOPE_RED = "范围外测试红：不推空提交，交付说明写明并附 run 链接，由合并闸处理";
+/** 写单 / 修复单才带。CIF8、CINOOP1 加长 OUT_OF_SCOPE_RED 时压短了字句：author 整段不比之前长（tests/lend-wire-v1-golden.test.ts 钉着字节数），三件事都还在 */
+export const ASK_DEFAULT_GUIDANCE = "拿不准就 ask，写 default 和 class=design/scope，照默认继续做；"
+  + "要人的事（凭据、owner 拍板、安全）用 class=blocker 等回复。出借池远端 ask 暂按 blocker 等 PM；"
+  + "例外：只加 tests/ 文件时填 files、"
+  + "reason=superseded_assertion / new_test，PM 15 分钟没回自动批准并进 fileGlobs，结论会发给你。";
+/**
+ * 写单 / 修复单才带：推空提交只会多一轮修复和审查。核实无需改码走 noChange 正式交付（lend submit --no-change-file / deliver.noChange /
+ * ledger deliver --no-change，order-no-change.ts），接收端核验、CI 全绿才同轮恢复（ci-no-change-recovery.ts）；不承诺一定恢复
+ */
+const OUT_OF_SCOPE_RED = "范围外测试红：不推空提交；无需改码交 noChange（run 链接、失败文件、理由），核验、CI 全绿才同轮恢复；main 已绿的修复卡交它取消";
 
 export const GRADING_RULE = "分级：违反规格「验收线」某一条（写出编号）或本次 diff 引入的正确性 / 安全 bug → P1；其余（验收线以外、改动之前就有的、风格）→ P2。"
   + "拿不准就写进报告并说明理由，不提问";

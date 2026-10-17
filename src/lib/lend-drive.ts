@@ -40,7 +40,7 @@ import { settleLendSandboxes, type SandboxRetirePort, type SandboxSettlementPort
 import { runLendWorkRetire } from "./agent-lifecycle-run.js";
 import { sandboxOrderOwnership } from "./sandbox-order-cleanup.js";
 import { readSandboxOwner } from "./sandbox-order-owner.js";
-import { claimCaps, deliveredActual, rememberNoCaps } from "./role-model-settings-lend.js";
+import { claimCaps, deliveredActual, rememberNoCaps, rememberNoTier } from "./role-model-settings-lend.js";
 import { lendUsageFor } from "./lend-usage-report.js";
 import { suggestFamilyProblem } from "./role-model-settings-wire.js";
 import { sendUiShots, type UiShotBudget } from "./lend-ui-send.js";
@@ -169,8 +169,16 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   const body = { orderId: row.orderId, worker: workerName(row.orderId) };
   const caps = claimCaps(d.db, row.peer, d.now()); // TIER1b：告诉 A 本机认得 claim 应答里的 suggest
   let r = await lendRequest(d.call, row.peer, "claim", { ...body, ...caps });
+  // TIER3b：带了 tier 且旧 A 回 invalid：只去掉 tier、按 ["suggest"] 重发一次（与旧版 claim 逐字相同），本进程记住这个 peer 一天内不带 tier；
+  // 重发仍 invalid 就留到下轮（下轮只带 suggest，走下面旧的去掉 caps 回落），这一次不再多发
+  const tiered = caps.caps?.includes("tier") === true;
+  if (!r.ok && r.code === "invalid" && tiered) {
+    rememberNoTier(row.peer, d.now());
+    r = await lendRequest(d.call, row.peer, "claim", { ...body, caps: ["suggest"] });
+    if (!r.ok && r.code === "invalid") return d.log(`claim ${row.orderId} 对方不认 tier，已按 suggest 重发仍被拒，下轮再试`);
+  }
   // 旧 A 严格解析不认 caps：只有它明确回 invalid 才去掉重发一次（claim 同单幂等），并记住这个 peer 一天内不再带
-  if (!r.ok && r.code === "invalid" && caps.caps) {
+  if (!r.ok && r.code === "invalid" && caps.caps && !tiered) {
     rememberNoCaps(d.db, row.peer, d.now());
     r = await lendRequest(d.call, row.peer, "claim", body);
   }
@@ -430,6 +438,7 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const t = pushTarget(row);
   const work = row.work!;
   const g = publishGuard(row, d);
+  if (work.noChange) return publishNoChange(row, d, g);
   // 端口失败后的记账 / 停单也只对开始发布时的那张单做：等待期间这一行换了代或被别处改了，旧请求的失败不算在新的一行头上
   const stop = (r: { reason: string; retry: boolean; denied?: PublishDenial }) => {
     const moved = r.denied ? null : g.drifted();
@@ -455,6 +464,25 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
     d.log(`${row.orderId} 截图不随交付：manifest_too_large`);
     payload = build();
   }
+  const raw = JSON.stringify(payload);
+  if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await publishFailed(row, { reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }, d), null);
+  clearPublishFail(d.db, row.orderId);
+  return patchOrder(d.db, row.orderId, ["result_pending"], { payload, payloadSha: payloadSha(raw) }, d.now());
+}
+
+/**
+ * CINOOP1：核实无需改码的交付（work.noChange）。head 就是订单起点：不推送、不开 PR、不带截图，不进要求新提交的普通发布路径；
+ * noChange 原样随交付正文转给 A，由 A 核验后决定恢复 / 取消（A 拒收照常按码收尾，unavailable 下轮原样重发）。
+ */
+async function publishNoChange(row: LendRow, d: LendDeps, g: ReturnType<typeof publishGuard>): Promise<LendRow | null> {
+  const o = orderOf(row), t = pushTarget(row), work = row.work!;
+  const late = await g.check("payload");
+  if (late) return haltPublish(row, late, d);
+  const pr = typeof o?.pr === "number" ? o.pr : null;
+  const payload = { v: 1, orderId: row.orderId, gen: row.leaseGen,
+    deliver: { v: 1, orderId: row.orderId, head: work.head, evidence: pr ? `https://github.com/${t.repo}/pull/${pr}` : t.branch, summary: work.summary,
+      selfCheck: work.selfCheck, noChange: work.noChange },
+    branch: t.branch, pr, session: { id: row.sessionId, family: row.family }, ...deliveredActual(d.db, row), ...lendUsageFor(d.db, row, { now: d.now }) };
   const raw = JSON.stringify(payload);
   if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await publishFailed(row, { reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }, d), null);
   clearPublishFail(d.db, row.orderId);

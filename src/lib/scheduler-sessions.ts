@@ -15,6 +15,7 @@ import {
 } from "./scheduler-review-swap.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { securityPoolMode, securityReviewLocalOnly } from "./security-pool.js";
+import { freshFallbackEpoch } from "./scheduler-review-fallback.js";
 import { unlessHandedOver } from "./recovery-peer-lease-family.js";
 
 export type SessionRole = "author" | "reviewer";
@@ -102,7 +103,8 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
       input.lendAuthorRecovery ?? (() => false), (old) => {
         preserveSessionHistory(db); assignFixStep(db, ctx, task, input, input.intentId, old.agent, ctx.now ?? Date.now());
       });
-    const epoch = prior && input.role === "reviewer" ? refusalRebind(db, prior, input.intentId, input.refusalCheck) : null; // MODELX: once, after a refusal epoch
+    const epoch = input.role !== "reviewer" ? null : (prior ? refusalRebind(db, prior, input.intentId, input.refusalCheck) : null) ??
+      freshFallbackEpoch(db, input.intentId); // MODELX: once, after a refusal epoch; RVF-1: a fallback that retired no binding
     if (prior && !epoch && !mayRebindReviewer(db, prior, input.intentId)) {
       if (prior.agent !== agent || prior.sessionId !== sessionId || prior.family !== input.family || prior.transport !== input.transport ||
         prior.createIntentId !== input.intentId) throw new LedgerError("conflict", "本卡角色已绑定另一个 session；不能换审查上下文");

@@ -5,6 +5,7 @@
  * merge queue sends a union result that is out of order back to fix (KEYSORT1). tests/recovery-keys.test.ts checks the order.
  */
 export const RECOVERY_KEYS = [
+  "acpClearBudget",
   "askDefaultAll",
   "askReminder",
   "askScopeAuto",
@@ -32,6 +33,7 @@ export const RECOVERY_KEYS = [
   "ciMainFixRetry",
   "ciMainSourceWait",
   "ciManualResume",
+  "ciNoChangeRecovery",
   "ciOutOfDiffRerun",
   "ciProofReuse",
   "ciQueueFull",
@@ -104,11 +106,13 @@ export const RECOVERY_KEYS = [
   "pmRails",
   "pmTodoPull",
   "poolIdleSkip",
+  "postVerifyPull",
   "privateMergeNarrow",
   "privateRepoMerge",
   "privateStartPlacement",
   "proposalGlobProtection",
   "reclaimLocalFix",
+  "reviewFallback",
   "reviewLocalFirst",
   "reviewSeatIdle",
   "reviewSeatLend",

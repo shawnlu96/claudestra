@@ -102,7 +102,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1",
     "scheduler-merge-union.ts": "ledger=1", // KEYUNION1: `ledger scheduler-recovery-observe` for mergeUnion notes, through the pass manager
-    "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1",
+    "scheduler-model-wiring.ts": "ledger=9 sql=1 stmt=1",
     "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1",
     "scheduler-post-verify.ts": "ledger=2",
@@ -146,6 +146,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-train-gh.ts": "fs=1 vcs=1",
     "scheduler-merge-train-tick.ts": "fs=1 notice=2",
     "scheduler-merge-train.ts": "notice=2",
+    "scheduler-post-verify-pull.ts": "ledger=3", // Batch candidates pass schedulerV2SkipTask; per-card observation writes use the guarded manager.
     "session-archive.ts": "fs=1",
     "spec-lint-observation.ts": "fs=2",
   },
@@ -235,6 +236,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4",
     "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3",
+    "ledger-scheduler-resume.ts": "sql=3 stmt=3", // RVF-1: reached through scheduler-recovery-write.ts (writer-process code, never run by the pass)
     "ledger-scheduler-schema.ts": "sql=6 stmt=13",
     "ledger-scheduler-settle.ts": "sql=2 stmt=2",
     "ledger-scheduler-write.ts": "sql=7 stmt=7",
@@ -266,6 +268,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-handoff.ts": "sql=1 stmt=1",
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3",
     "scheduler-merge.ts": "sql=11 stmt=11",
+    "scheduler-recovery-write.ts": "sql=1 stmt=1", // RVF-1: writeReviewFallback, called only inside `ledger scheduler-model-outcome`
     "scheduler-review-stale.ts": "sql=1 stmt=1",
     "scheduler-review-swap.ts": "sql=3 stmt=3",
     "scheduler-sessions.ts": "sql=7 stmt=10",
@@ -283,11 +286,13 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "memory-vectors.ts": "sql=1 stmt=2 fs=2",
     "order-deliver-pr.ts": "vcs=2",
     "order-deliver-scope-git.ts": "proc=2",
-    "order-deliver.ts": "ledger=1 vcs=2", // ONB-1: vcs = origin ls-remote, or the local branch rev-parse for a localMerge project
+    "order-deliver.ts": "ledger=2 vcs=2", // ONB-1: vcs = origin ls-remote, or the local branch rev-parse for a localMerge project
     "order-ledger-exit.ts": "ledger=2",
     "order-mark.ts": "ledger=1",
     // security-pool fs=3: only setSecurityPoolMode writes (the owner's `security-pool` command); the pass only reads the switch
     "security-pool.ts": "fs=3",
+    // test-guard: only a bun test runner without tests/preload.ts spawns the fallback-root reaper (its rmSync is inside the reaper script)
+    "test-guard.ts": "proc=1 fs=1",
   },
   /** process, file, tmux, store and notice plumbing with no card of its own; its callers are the gated paths */
   infra: {

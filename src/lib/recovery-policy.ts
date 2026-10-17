@@ -9,7 +9,7 @@
  * Mechanisms take a RecoveryPolicyPort injected at wiring time instead of binding this file. tests/recovery-policy*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { acquireLock, type LockHandle } from "./file-lock.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
@@ -19,19 +19,15 @@ import { appendEvent, type WriteCtx } from "./ledger-write.js";
 import { statePath } from "./paths.js";
 import { defaultRecoveryMode, markDefaultOn, noteDefaultOn } from "./recovery-key-defaults.js";
 import { RECOVERY_KEYS } from "./recovery-keys.js";
+import { isRecoveryKey, isRecoveryMode, MANUAL_STALL_HOURS_MAX, readRecoveryFile, RECOVERY_MODES, validHours, type ProjectRecovery, type RecoveryKey,
+  type RecoveryMode } from "./recovery-policy-file.js";
 import { writeTextAtomicSync } from "./state-file.js";
 
 export const RECOVERY_POLICY_PATH = statePath("recovery-policy.json");
-export type RecoveryMode = "on" | "observe" | "off";
-const RECOVERY_MODES: readonly RecoveryMode[] = ["on", "observe", "off"];
-const isRecoveryMode = (v: unknown): v is RecoveryMode => RECOVERY_MODES.includes(v as RecoveryMode);
+export type { RecoveryKey, RecoveryMode };
 /** The key table lives in its own union-merged file (recovery-keys.ts); callers keep importing it from here. */
-export { RECOVERY_KEYS };
-export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
-const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
-export const MANUAL_STALL_HOURS_MAX = 720;
+export { MANUAL_STALL_HOURS_MAX, RECOVERY_KEYS };
 const HOUR_MS = 3_600_000;
-const validHours = (h: unknown): h is number => Number.isInteger(h) && (h as number) >= 1 && (h as number) <= MANUAL_STALL_HOURS_MAX;
 const RECOVERY_OP = "scheduler_recovery";
 const RECOVERY_OBSERVE_OP = "recovery_observe";
 const RECOVERY_VOID_OP = "scheduler_recovery_void";
@@ -39,36 +35,6 @@ const RECOVERY_PUBLISHED_OP = "scheduler_recovery_published";
 const VOID_PREFIX = "recovery-void:", PUBLISHED_PREFIX = "recovery-published:";
 const voidKey = (seq: number) => `${VOID_PREFIX}${seq}`;
 const publishedKey = (seq: number) => `${PUBLISHED_PREFIX}${seq}`;
-
-/** rev = seq of the audit whose change this entry is; written in the same atomic rename, so it is the proof of publish. */
-interface ProjectRecovery { mode?: RecoveryMode; manualStallHours?: number; keys?: Partial<Record<RecoveryKey, RecoveryMode>>; rev?: number }
-interface RecoveryFile { projects: Record<string, ProjectRecovery>; machine?: Record<string, unknown> }
-const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-
-/** Strict: unknown names and bad values make the whole file invalid, so a typo never silently means "observe". */
-function parseRecoveryFile(data: unknown, parseMachine?: (m: Record<string, unknown>) => unknown): RecoveryFile {
-  if (!isObj(data) || !isObj(data.projects) || Object.keys(data).some((k) => k !== "projects" && k !== "machine")) throw new Error("顶层要是 { projects: {...}, machine?: {...} }");
-  if (data.machine !== undefined) { if (!isObj(data.machine)) throw new Error("machine 要是对象"); parseMachine?.(data.machine); } // LCFG1W: recovery-machine-policy.ts
-  for (const [id, p] of Object.entries(data.projects)) {
-    if (!isObj(p) || Object.keys(p).some((k) => !["mode", "manualStallHours", "keys", "rev"].includes(k))) throw new Error(`项目 ${id} 只能有 mode / manualStallHours / keys / rev`);
-    if (p.rev !== undefined && !(Number.isSafeInteger(p.rev) && (p.rev as number) >= 1)) throw new Error(`项目 ${id} 的 rev 要是正整数`);
-    if (p.mode !== undefined && !isRecoveryMode(p.mode)) throw new Error(`项目 ${id} 的 mode 要是 ${RECOVERY_MODES.join(" / ")}`);
-    if (p.manualStallHours !== undefined && !validHours(p.manualStallHours)) throw new Error(`项目 ${id} 的 manualStallHours 要是 1..${MANUAL_STALL_HOURS_MAX} 的整数`);
-    if (p.keys !== undefined && (!isObj(p.keys) || Object.entries(p.keys).some(([k, m]) => !isRecoveryKey(k) || !isRecoveryMode(m)))) {
-      throw new Error(`项目 ${id} 的 keys 只能是 { ${RECOVERY_KEYS.join(" / ")}: ${RECOVERY_MODES.join(" / ")} }`);
-    }
-  }
-  return data as unknown as RecoveryFile;
-}
-
-type FileRead = { status: "missing" } | { status: "ok"; data: RecoveryFile; raw: string } | { status: "corrupt"; error: string };
-function readRecoveryFile(path: string, parseMachine?: (m: Record<string, unknown>) => unknown): FileRead {
-  let raw: string;
-  try { raw = readFileSync(path, "utf8"); }
-  catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? { status: "missing" } : { status: "corrupt", error: (e as Error).message }; }
-  try { return { status: "ok", data: parseRecoveryFile(JSON.parse(raw), parseMachine), raw }; }
-  catch (e) { return { status: "corrupt", error: (e as Error).message }; }
-}
 
 export interface RecoveryPolicy {
   mode: RecoveryMode;

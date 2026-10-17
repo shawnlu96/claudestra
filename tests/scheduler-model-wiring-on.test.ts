@@ -21,7 +21,8 @@ const CYBER = "This request has been flagged for possible cybersecurity risk";
 const dir = mkdtempSync(join(tmpdir(), "modelw-on-"));
 const g = globalThis as { __modelwOn?: string };
 const CFG = join(dir, "recovery-policy.ts");
-writeFileSync(CFG, "export function recoveryPolicy() { return { mode: globalThis.__modelwOn, manualAfterMs: null }; }\n");
+// reviewFallback off: these cases test MODELW alone (RVF-1's fallback is tests/scheduler-review-fallback.test.ts)
+writeFileSync(CFG, "export function recoveryPolicy(_p, m) { return { mode: m === 'reviewFallback' ? 'off' : globalThis.__modelwOn, manualAfterMs: null }; }\n");
 
 let f: ReturnType<typeof autoFixture>;
 let first: SchedulerIntent;

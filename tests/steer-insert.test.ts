@@ -8,7 +8,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
-import { afterInsertSend, configureInboundRoute } from "../src/bridge/inbound-route.js";
+import { afterInsertSend, configureInboundRoute, routeHolds } from "../src/bridge/inbound-route.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { answerableUnmixed, noteDelivered, settleStopTurn } from "../src/bridge/stop-settle.js";
 import { configureSteerInsert, dropInserts, insertIdsFrom, insertUnseenFrom, noteInsert, openInsertBook, settleInsertReply } from "../src/bridge/steer-insert.js";
@@ -228,9 +228,34 @@ describe("账本", () => {
     configureInboundRoute({ readMode: () => "on", now: () => clock });
     const busy = { main: "busy" as const, bg: false };
     const held: Envelope[] = [];
-    expect(afterInsertSend(w.steerEnv("j"), busy, 50, { holdEnv: () => 0 })).toBe(false);
-    expect(afterInsertSend(w.steerEnv("k"), busy, 0, { holdEnv: (e: Envelope) => held.push(e) })).toBe(true);
+    const j = w.steerEnv("j"), k = w.steerEnv("k");
+    expect(routeHolds(j, busy) || routeHolds(k, busy)).toBe(false);
+    expect(afterInsertSend(j, busy, 50, { holdEnv: () => 0 })).toBe(false);
+    expect(afterInsertSend(k, busy, 0, { holdEnv: (e: Envelope) => held.push(e) })).toBe(true);
     expect(ids(w.T)).toEqual(["j"]);
     expect(held.map((e) => e.meta.messageId)).toEqual(["k"]);
+  });
+
+  test("判插队放行后、送出前热切到 off / observe：照样记账；目标回合 Stop 收尾不推给插队方，明确回复才解除（INSERTMODE1）", async () => {
+    for (const later of ["off", "observe"] as const) {
+      const w = world();
+      let mode: "on" | "off" | "observe" = "on";
+      configureInboundRoute({ readMode: () => mode, now: () => clock });
+      const busy = { main: "busy" as const, bg: false };
+      noteDelivered(w.T, { kind: "user", owner: true, channelId: w.T }, clock, true);
+      const e = w.steerEnv(`hot-${later}`);
+      w.book.add(w.T, { callerChannelId: w.X, callerName: "agent-x", targetName: "agent-t", ts: clock }, e.meta.messageId);
+      expect(routeHolds(e, busy)).toBe(false); // on 档判插队放行
+      mode = later;
+      clock += 3_000; // 跨过档位缓存 2 秒，判定到 ws.send 之间切了档
+      expect(afterInsertSend(e, busy, 80, { holdEnv: () => 0 })).toBe(false);
+      noteDelivered(w.T, { kind: "local", channelId: w.X }, clock + 1, false, true);
+      expect(ids(w.T)).toEqual([e.meta.messageId]);
+      await w.stop("owner 的 A 件事做完了");
+      expect(w.pushed).toHaveLength(0);
+      expect(w.book.slot(w.T, w.X)).toBeDefined();
+      expect((await w.explicitReply("sent"))?.callerChannelId).toBe(w.X);
+      expect(ids(w.T)).toEqual([]);
+    }
   });
 });

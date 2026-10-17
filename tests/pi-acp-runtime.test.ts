@@ -57,7 +57,7 @@ describe("tmux 版 Pi 不变（钉住）", () => {
     expect(cmd).toBe(buildPiCommand(piLaunchOptions(spec)));
     expect(cmd).toBe(
       `DISCORD_CHANNEL_ID=123 BRIDGE_URL=ws://localhost:3847 BRIDGE_PORT=3847 CLAUDESTRA_AGENT=agent-pa${pathOverrideAssignments(shellEscape)} pi --approve`
-      + ` --extension ${PI_EXTENSION_PATH} --session-id 019a-pi --name agent-pa --model cc-switch-open-code-go/deepseek-v4.1-flash --thinking max`
+      + ` --extension ${PI_EXTENSION_PATH} --session-id 019a-pi --name agent-pa --model cc-switch-kimi-for-coding/k3 --thinking max`
       + ` --append-system-prompt ${shellEscape("你是 Claudestra 编排系统中的 agent「agent-pa」。你的职责: 写代码")}`,
     );
   });
@@ -83,14 +83,14 @@ describe("acp 版的选择与启动命令", () => {
     const cmd = buildPiAcpHostCommand(SPEC, O);
     expect(cmd).toStartWith(
       `DISCORD_CHANNEL_ID=123 BRIDGE_URL=ws://localhost:3847 CLAUDESTRA_AGENT=agent-pa CLAUDESTRA_SESSION_ID=019a-pi MCP_NAME=claudestra ${ACP_RUNTIME_ENV}=pi PI_BIN=pi`
-      + ` CLAUDESTRA_ACP_MODEL=cc-switch-open-code-go/deepseek-v4.1-flash CLAUDESTRA_ACP_EFFORT=max ${PI_ARGS_ENV}=`,
+      + ` CLAUDESTRA_ACP_MODEL=cc-switch-kimi-for-coding/k3 CLAUDESTRA_ACP_EFFORT=max ${PI_ARGS_ENV}=`,
     );
     expect(cmd).toEndWith(" /opt/bun /repo/src/acp-host.ts");
     const args = piAcpArgs(SPEC, "agent-pa", "/repo");
     expect(cmd).toContain(` ${PI_ARGS_ENV}=${shellEscape(JSON.stringify(args))} `);
     expect(args.slice(0, 10)).toEqual([
       "--approve", "--no-extensions", "--no-skills", "--no-prompt-templates",
-      "--model", "cc-switch-open-code-go/deepseek-v4.1-flash", "--thinking", "max", "--name", "agent-pa",
+      "--model", "cc-switch-kimi-for-coding/k3", "--thinking", "max", "--name", "agent-pa",
     ]);
     expect(args[10]).toBe("--append-system-prompt");
     expect(args[11]).toContain("你的职责: 写代码");
@@ -200,6 +200,6 @@ describe("pi-settings 分流", () => {
 
 test("Pi 启动锁死模型和档位，忽略传入值", () => {
   const o = piLaunchOptions({ channelId: "c", model: "other/x", effort: "low" } as never);
-  expect(o.model).toBe("cc-switch-open-code-go/deepseek-v4.1-flash");
+  expect(o.model).toBe("cc-switch-kimi-for-coding/k3");
   expect(o.effort).toBe("max");
 });
