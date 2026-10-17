@@ -1,0 +1,667 @@
+{
+  "info": {
+    "id": "ses_eb858437fffekctE4kZ9L5SSC5",
+    "slug": "happy-cabin",
+    "projectID": "global",
+    "directory": "<tmp>/work",
+    "path": "<tmp>/work",
+    "title": "Running ls and reading a.txt",
+    "agent": "build",
+    "model": {
+      "id": "big-pickle",
+      "providerID": "opencode",
+      "variant": "default"
+    },
+    "version": "1.19.2",
+    "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 15522,
+      "output": 631,
+      "reasoning": 37,
+      "cache": {
+        "read": 25408,
+        "write": 0
+      }
+    },
+    "permission": [
+      {
+        "permission": "question",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_enter",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_exit",
+        "pattern": "*",
+        "action": "deny"
+      }
+    ],
+    "time": {
+      "created": 1792203537536,
+      "updated": 1792203620026
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1792203538010
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "opencode",
+          "modelID": "big-pickle"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_147a7be5a001Z6z4wvrAui1zr1",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "\"run ls with bash, then read a.txt, then say hi\"",
+          "id": "prt_147a7be74001oEcTW2jTCVgkZn",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7be5a001Z6z4wvrAui1zr1"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_147a7be5a001Z6z4wvrAui1zr1",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "<tmp>/work",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 7785,
+          "input": 7647,
+          "output": 54,
+          "reasoning": 20,
+          "cache": {
+            "write": 0,
+            "read": 64
+          }
+        },
+        "modelID": "big-pickle",
+        "providerID": "opencode",
+        "time": {
+          "created": 1792203539608,
+          "completed": 1792203545190
+        },
+        "finish": "tool-calls",
+        "id": "msg_147a7c49800128pkTNiuPdWCky",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_147a7d3f2001S3NMY1PYJ2I5U1",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7c49800128pkTNiuPdWCky"
+        },
+        {
+          "type": "reasoning",
+          "text": "Let me run ls and read a.txt in parallel since they're independent, then say hi.",
+          "time": {
+            "start": 1792203543624,
+            "end": 1792203544311
+          },
+          "id": "prt_147a7d4480010bHo6QADxEYa60",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7c49800128pkTNiuPdWCky"
+        },
+        {
+          "type": "tool",
+          "tool": "bash",
+          "callID": "call_0cd1f23b96334a908fc74152",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls"
+            },
+            "output": "a.txt\n",
+            "metadata": {
+              "output": "a.txt\n",
+              "exit": 0,
+              "truncated": false
+            },
+            "title": "ls",
+            "time": {
+              "start": 1792203544438,
+              "end": 1792203544648
+            }
+          },
+          "id": "prt_147a7d6f9001vn6MVQS63XD1lf",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7c49800128pkTNiuPdWCky"
+        },
+        {
+          "type": "tool",
+          "tool": "read",
+          "callID": "call_04aed656c23e4a9e98b2c1a8",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "<tmp>/work/a.txt"
+            },
+            "output": "<path><tmp>/work/a.txt</path>\n<type>file</type>\n<content>\n1: hello\n\n(End of file - total 1 lines)\n</content>",
+            "metadata": {
+              "preview": "hello",
+              "truncated": false,
+              "loaded": [],
+              "display": {
+                "type": "file",
+                "path": "<tmp>/work/a.txt",
+                "text": "hello",
+                "lineStart": 1,
+                "lineEnd": 1,
+                "totalLines": 1,
+                "truncated": false
+              }
+            },
+            "title": "<tmp>/work/a.txt",
+            "time": {
+              "start": 1792203545105,
+              "end": 1792203545173
+            }
+          },
+          "id": "prt_147a7d798001mVBYLRb2SfxHb9",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7c49800128pkTNiuPdWCky"
+        },
+        {
+          "reason": "tool-calls",
+          "type": "step-finish",
+          "tokens": {
+            "total": 7785,
+            "input": 7647,
+            "output": 54,
+            "reasoning": 20,
+            "cache": {
+              "write": 0,
+              "read": 64
+            }
+          },
+          "cost": 0,
+          "id": "prt_147a7da5a001aws24aIi2Ivia6",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7c49800128pkTNiuPdWCky"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_147a7be5a001Z6z4wvrAui1zr1",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "<tmp>/work",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 7878,
+          "input": 171,
+          "output": 10,
+          "reasoning": 17,
+          "cache": {
+            "write": 0,
+            "read": 7680
+          }
+        },
+        "modelID": "big-pickle",
+        "providerID": "opencode",
+        "time": {
+          "created": 1792203545200,
+          "completed": 1792203550202
+        },
+        "finish": "stop",
+        "id": "msg_147a7da70001S1oJwyQ0C17Kj8",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_147a7ea7c001R8O1B7QPLlPwzJ",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7da70001S1oJwyQ0C17Kj8"
+        },
+        {
+          "type": "reasoning",
+          "text": "ls shows a.txt, and a.txt contains \"hello\". Now say hi.",
+          "time": {
+            "start": 1792203549700,
+            "end": 1792203550089
+          },
+          "id": "prt_147a7ec04001kVhNit5ITgGa8J",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7da70001S1oJwyQ0C17Kj8"
+        },
+        {
+          "type": "text",
+          "text": "hi — a.txt contains \"hello\"",
+          "time": {
+            "start": 1792203550091,
+            "end": 1792203550177
+          },
+          "id": "prt_147a7ed8b001JHgZTCkSkLNnAc",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7da70001S1oJwyQ0C17Kj8"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 7878,
+            "input": 171,
+            "output": 10,
+            "reasoning": 17,
+            "cache": {
+              "write": 0,
+              "read": 7680
+            }
+          },
+          "cost": 0,
+          "id": "prt_147a7edec001u6tmyR2vYm1x9r",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a7da70001S1oJwyQ0C17Kj8"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1792203571922
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "opencode",
+          "modelID": "big-pickle"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_147a842d2001Wi6gfA0Jb05TRh",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "\"read the file missing.txt (it does not exist), then say done\"",
+          "id": "prt_147a842d6001e4gW63uChXnxHv",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a842d2001Wi6gfA0Jb05TRh"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_147a842d2001Wi6gfA0Jb05TRh",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "<tmp>/work",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 8133,
+          "input": 6263,
+          "output": 78,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 1792
+          }
+        },
+        "modelID": "big-pickle",
+        "providerID": "opencode",
+        "time": {
+          "created": 1792203573134,
+          "completed": 1792203576685
+        },
+        "finish": "tool-calls",
+        "id": "msg_147a8478d001xjC5GLeXofqegB",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_147a853e1001VltMPl4pWMBwPp",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8478d001xjC5GLeXofqegB"
+        },
+        {
+          "type": "text",
+          "text": "The user wants me to read missing.txt which doesn't exist, then say done. Let me try.</think>",
+          "time": {
+            "start": 1792203576293,
+            "end": 1792203576671
+          },
+          "id": "prt_147a853e500113Ntq9w5c4xV5e",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8478d001xjC5GLeXofqegB"
+        },
+        {
+          "type": "tool",
+          "tool": "read",
+          "callID": "call_2c1cd9c81f2e4948be53c6cc",
+          "state": {
+            "status": "error",
+            "input": {
+              "filePath": "<tmp>/work/missing.txt"
+            },
+            "error": "File not found: <tmp>/work/missing.txt",
+            "time": {
+              "start": 1792203576668,
+              "end": 1792203576676
+            }
+          },
+          "id": "prt_147a85555001pJ3dmnpUNHOKP8",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8478d001xjC5GLeXofqegB"
+        },
+        {
+          "reason": "tool-calls",
+          "type": "step-finish",
+          "tokens": {
+            "total": 8133,
+            "input": 6263,
+            "output": 78,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 1792
+            }
+          },
+          "cost": 0,
+          "id": "prt_147a85568001YWKQ0D11bNV86I",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8478d001xjC5GLeXofqegB"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_147a842d2001Wi6gfA0Jb05TRh",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "<tmp>/work",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 8171,
+          "input": 232,
+          "output": 3,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 7936
+          }
+        },
+        "modelID": "big-pickle",
+        "providerID": "opencode",
+        "time": {
+          "created": 1792203576687,
+          "completed": 1792203577533
+        },
+        "finish": "stop",
+        "id": "msg_147a8556f001EvCAsC1s8ji9vh",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_147a858b3001rfLKOXq8XdTMT2",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8556f001EvCAsC1s8ji9vh"
+        },
+        {
+          "type": "text",
+          "text": "</think>done",
+          "time": {
+            "start": 1792203577526,
+            "end": 1792203577528
+          },
+          "id": "prt_147a858b6001MEMbuPoXGLUV4O",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8556f001EvCAsC1s8ji9vh"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 8171,
+            "input": 232,
+            "output": 3,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 7936
+            }
+          },
+          "cost": 0,
+          "id": "prt_147a858ba001THs3yXucSQNQck",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8556f001EvCAsC1s8ji9vh"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1792203589785
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "opencode",
+          "modelID": "big-pickle"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_147a88899001I006aQPIYESbO5",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "/compact",
+          "id": "prt_147a888a4001WWL2sDC21bB4f7",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a88899001I006aQPIYESbO5"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_147a88899001I006aQPIYESbO5",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "<tmp>/work",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 8406,
+          "input": 241,
+          "output": 229,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 7936
+          }
+        },
+        "modelID": "big-pickle",
+        "providerID": "opencode",
+        "time": {
+          "created": 1792203591149,
+          "completed": 1792203596079
+        },
+        "finish": "stop",
+        "id": "msg_147a88ded001VllxhV0DfgQz9u",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_147a8998f001buPO2DszFjsMdL",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a88ded001VllxhV0DfgQz9u"
+        },
+        {
+          "type": "text",
+          "text": "The user typed \"/compact\". This appears to be a command to compact/summarize the conversation. I should provide a summary of the conversation so far.\n\nWait, /compact is likely a client command. But here I'm being asked to respond. Let me provide a concise summary of the session.</think>## Goal\n-\nRun simple demo commands: list files, read a file, and report results.\n\n## Instructions\n- Run `ls` with bash, read `a.txt`, then say hi.\n- Read `missing.txt` (which does not exist), then say done.\n\n## Discoveries\n- Working dir contains `a.txt`; its content is `hello`.\n- Reading a nonexistent path returns: `File not found: <tmp>/work/missing.txt`\n\n## Accomplished\n- Ran `ls` → output `a.txt`.\n- Read `a.txt` → `hello`.\n- Said hi.\n- Attempted to read `missing.txt` → not found; then said done.\n\n## Next Steps\n- None; both requests completed.",
+          "time": {
+            "start": 1792203594131,
+            "end": 1792203596033
+          },
+          "id": "prt_147a89992001ICbvuGQrKK5RQH",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a88ded001VllxhV0DfgQz9u"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 8406,
+            "input": 241,
+            "output": 229,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 7936
+            }
+          },
+          "cost": 0,
+          "id": "prt_147a8a10b0012J5AYfsenlzbQh",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a88ded001VllxhV0DfgQz9u"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "user",
+        "model": {
+          "providerID": "opencode",
+          "modelID": "big-pickle"
+        },
+        "agent": "build",
+        "time": {
+          "created": 1792203614412
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_147a8e8cc001GhWGbPOZ1p31V5",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "compaction",
+          "auto": false,
+          "id": "prt_147a8e95e001Y6QjGt84uWpyGm",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8e8cc001GhWGbPOZ1p31V5"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "assistant",
+        "parentID": "msg_147a8e8cc001GhWGbPOZ1p31V5",
+        "mode": "compaction",
+        "agent": "compaction",
+        "summary": true,
+        "path": {
+          "cwd": "<tmp>/work",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 1225,
+          "input": 968,
+          "output": 257,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "big-pickle",
+        "providerID": "opencode",
+        "time": {
+          "created": 1792203616917,
+          "completed": 1792203620020
+        },
+        "finish": "stop",
+        "id": "msg_147a8f295001OzPSfKn5nntg2o",
+        "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_147a8f70d0015ZEd48Vkq11P7S",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8f295001OzPSfKn5nntg2o"
+        },
+        {
+          "type": "text",
+          "text": "</think>## Objective\n- Run simple demo commands: list directory contents with bash, read `a.txt`, and report results.\n- Attempt to read `missing.txt` (nonexistent), then report done.\n\n## Important Details\n- Working directory: `<tmp>/work`\n- Nonexistent file error string: `File not found: <tmp>/work/missing.txt`\n\n## Work State\n### Completed\n- Ran `ls` → output: `a.txt`\n- Read `a.txt` → content: `hello`\n- Said hi, noting `a.txt` contains `hello`\n- Attempted to read `missing.txt` → file not found error\n- Said done\n\n### Active\n- (none)\n\n### Blocked\n- (none)\n\n## Next Move\n1. (none)\n2. (none)\n\n## Relevant Files\n- `<tmp>/work/a.txt`: existing file, contains `hello`\n- `<tmp>/work/missing.txt`: nonexistent file, read attempt returned `File not found`",
+          "time": {
+            "start": 1792203618065,
+            "end": 1792203620006
+          },
+          "id": "prt_147a8f711001py9r3J3mKi9QSl",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8f295001OzPSfKn5nntg2o"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 1225,
+            "input": 968,
+            "output": 257,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_147a8feae001GagT13Ys8PDTio",
+          "sessionID": "ses_eb858437fffekctE4kZ9L5SSC5",
+          "messageID": "msg_147a8f295001OzPSfKn5nntg2o"
+        }
+      ]
+    }
+  ]
+}

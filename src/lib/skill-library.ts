@@ -80,7 +80,8 @@ export function skillRoots(env: RootEnv): SkillRoot[] {
   ];
   const seen = new Set<string>();
   for (const a of env.agents) {
-    const dirs = a.runtime === "claude-code" ? [".claude/skills"] : a.runtime === "codex" ? [".agents/skills"] : [".pi/skills", ".agents/skills"];
+    // OpenCode 的技能不归我们管（agent-skills 对它答不支持）：不扫它的项目目录，免得把 .pi/.agents 下的技能记到它名下
+    const dirs = a.runtime === "claude-code" ? [".claude/skills"] : a.runtime === "codex" ? [".agents/skills"] : a.runtime === "pi" ? [".pi/skills", ".agents/skills"] : [];
     for (const d of dirs) {
       const key = `${a.runtime}|${join(a.cwd, d)}`;
       if (seen.has(key) || a.cwd === h) continue; // 家目录的 .claude/skills 就是个人技能，不重复算成项目

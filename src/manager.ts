@@ -72,7 +72,7 @@ import {
   allSources,
   claudeCodeAdapter,
   controlFor, normalizeTransport,
-  managedFor,
+  keepEffort, managedFor,
   requireManaged,
   type DiscoveredSession,
   type LaunchSpec,
@@ -749,7 +749,7 @@ async function cmdResume(
 ) {
   const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)], transportFlag, dir);
   let adapter = requireManaged(runtimeFlag, selected.transport), transportNote = selected.note;
-  (await import("./manager/acp-lifecycle.js")).refusePiAcpFork(adapter, forkSession); const avail = await adapter.available(); // 拒在建频道 / 窗口之前
+  (await import("./manager/acp-lifecycle.js")).refuseResumeEarly(adapter, forkSession, model); const avail = await adapter.available(); // 拒在建频道 / 窗口之前
   if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);
   // 会话 id 格式各家不同（Claude Code 是 UUID，Pi 收任意自造 id）
   if (!adapter.isValidSessionId(sessionId)) {
@@ -2377,7 +2377,7 @@ switch (cmd) {
       });
       break;
     }
-    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, effort, mode, model, fork, runtimeFlag, transportFlag);
+    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, keepEffort(runtimeFlag, effort), mode, model, fork, runtimeFlag, transportFlag);
     break;
   }
 
@@ -2452,7 +2452,7 @@ switch (cmd) {
       break;
     }
     if (model) (info as any).model = model;
-    if (effort) (info as any).effort = effort;
+    if (keepEffort(info.runtime, effort)) (info as any).effort = effort;
     await saveRegistry(reg);
     output({ ok: true, name: tmuxName, model: (info as any).model ?? null, effort: (info as any).effort ?? null });
     break;
