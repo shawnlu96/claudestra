@@ -119,6 +119,7 @@ export const RECOVERY_KEYS = [
   "projectDecl",
   "proposalGlobProtection",
   "reclaimLocalFix",
+  "repoAlias",
   "reviewFallback",
   "reviewLocalFirst",
   "reviewSeatIdle",
