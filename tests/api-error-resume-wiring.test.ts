@@ -20,7 +20,13 @@ const P = rules.RESUME_STATES_PATH;
 const MSG = "Pi 回合失败：Connection error.";
 let NOW = Date.parse("2026-10-16T16:36:00+08:00");
 const clock = spyOn(Date, "now").mockImplementation(() => NOW);
-afterAll(() => clock.mockRestore());
+const REG_BEFORE = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf8") : null;
+afterAll(() => {
+  clock.mockRestore();
+  // registry 在同一 bun 进程的各测试文件间共享：不还原，同分片后跑的 tests/fleet-routes.test.ts 会多出 agent-net
+  if (REG_BEFORE === null) rmSync(REGISTRY_PATH, { force: true });
+  else writeFileSync(REGISTRY_PATH, REG_BEFORE);
+});
 /** 测试状态目录里的 registry：agentKept 用真实判定读它 */
 function registry(status: string | null) {
   mkdirSync(dirname(REGISTRY_PATH), { recursive: true });

@@ -1,11 +1,11 @@
 /**
  * Pi 全局模型锁：Pi agent 一律用这里给的模型 + 档位，忽略 create / registry 传入的值；tmux 与 ACP 两条启动路径都读它。
- * 值来自 config.json 的 piLockedModel / piLockedEffort，只由 owner 改，下次启动 Pi 生效；没写（或文件缺失 / 损坏）用 pi-launch.ts 的默认值。
+ * 值来自 config.json 的 piLockedModel / piLockedEffort，只由 owner 改，下次启动 Pi 生效；没写（或文件缺失 / 损坏，损坏会报错日志）用 pi-launch.ts 的默认值。
  * 写了但不合法就抛错、Pi 不启动：静默回落会让 owner 以为改动生效了，放开锁更不行。测试：tests/pi-lock.test.ts。
  */
 import { CONFIG_PATH } from "./paths.js";
 import { PI_LOCKED_EFFORT, PI_LOCKED_MODEL, PI_THINKING_LEVELS, isPiThinkingLevel } from "./pi-launch.js";
-import { readJsonStateSync } from "./state-file.js";
+import { readJsonStateSync, reportCorrupt } from "./state-file.js";
 
 export interface PiLock { model: string; effort: string }
 
@@ -25,7 +25,9 @@ export function piLock(raw: unknown = readRawConfig()): PiLock {
   return { model: m ?? PI_LOCKED_MODEL, effort: e ?? PI_LOCKED_EFFORT };
 }
 
-function readRawConfig(): unknown {
-  const r = readJsonStateSync(CONFIG_PATH);
-  return r.status === "ok" ? r.data : undefined; // 缺失 / 损坏：用默认锁（仍是锁住的），损坏由 config-store 负责报
+/** 缺失 → 没配；损坏 / 读不了（EACCES 等）→ 报出来再用默认锁（仍是锁住的）：这条路不一定经过 config-store，不能指望它替我们报 */
+export function readRawConfig(path = CONFIG_PATH): unknown {
+  const r = readJsonStateSync(path);
+  if (r.status === "corrupt") reportCorrupt(path, r.error, "pi-lock：按默认锁启动 Pi");
+  return r.status === "ok" ? r.data : undefined;
 }

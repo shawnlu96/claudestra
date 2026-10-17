@@ -22,10 +22,12 @@ export interface LeaseState { gen: number; expiresAt: number; ms: number }
  * 建议只是建议：claude 单给模型 id，codex 单只给推理档（null = 照对方 Codex 自己的配置），绝不给 codex 单带模型名。
  * source：settings = owner 存过的表值，default = 默认表；实际的 suggest = 照建议起，grant = 用了出借授权里开放的一档，default = 出借方原默认。
  */
-export const LEND_CLAIM_CAPS = ["suggest"] as const;
+export const LEND_CLAIM_CAPS = ["suggest", "tier"] as const;
 export type LendClaimCap = (typeof LEND_CLAIM_CAPS)[number];
 export const SUGGEST_SOURCES = ["settings", "default"] as const;
-export type ModelSuggest = { model: string; source: (typeof SUGGEST_SOURCES)[number] } | { effort: string | null; source: (typeof SUGGEST_SOURCES)[number] };
+/** tier / role（TIER3b）：只在协商了 caps=tier 时随建议一起带（任务类型与卡片角色），两个一起出现；旧形状不带 */
+type SuggestTag = { tier?: string; role?: string };
+export type ModelSuggest = ({ model: string; source: (typeof SUGGEST_SOURCES)[number] } | { effort: string | null; source: (typeof SUGGEST_SOURCES)[number] }) & SuggestTag;
 export const ACTUAL_SOURCES = ["suggest", "grant", "default"] as const;
 export interface ModelActual { model: string | null; effort: string | null; source: (typeof ACTUAL_SOURCES)[number] }
 /** 入账时记到卡上的那一份：对方没报（旧对端）= unknown，不拿建议充数 */
