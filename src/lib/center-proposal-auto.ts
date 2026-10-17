@@ -2,6 +2,7 @@
 import { redactForPeer } from "./dispatch-redact.js";
 import { globDetails, repoFiles } from "./center-proposal-auto-surface.js";
 import type { ProposalRecord } from "./shared-ledger-feature-proposals.js";
+import { globProtectionMode, observeGlobProtection, type GlobProtectionContext } from "./proposal-glob-protection.js";
 export { globHits, PATTERN_PROBES } from "./center-proposal-auto-surface.js";
 
 export type AutoReason =
@@ -57,8 +58,8 @@ const ORDER: readonly AutoReason[] = [
 ];
 
 /** 同一提案及文件快照得到同一结论；reasons 按固定顺序去重，hits 保留每条命中来源。 */
-export function classifyProposal(r: ProposalRecord, files: readonly string[] | null = repoFiles()): AutoVerdict {
-  const p = r.proposal, hits: AutoHit[] = [];
+export function classifyProposal(r: ProposalRecord, files: readonly string[] | null = repoFiles(), ctx?: GlobProtectionContext): AutoVerdict {
+  const p = r.proposal, hits: AutoHit[] = [], baseline: AutoHit[] = [], proposed: AutoHit[] = [], mode = globProtectionMode(ctx);
   const add = (reason: AutoReason, source = "", path = "") => hits.push({ reason, source, path });
   const textHits = (s: string | null | undefined) => {
     for (const word of SENSITIVE_WORDS) if (s?.toLowerCase().includes(word)) add("text_sensitive_word", word);
@@ -66,10 +67,14 @@ export function classifyProposal(r: ProposalRecord, files: readonly string[] | n
   if (!p.nodes.length) add("nodes_empty");
   for (const n of p.nodes) {
     if (!n.fileGlobs.length) add("glob_empty", n.key);
-    for (const g of n.fileGlobs) hits.push(...globDetails(g, files));
+    for (const g of n.fileGlobs) {
+      const old = globDetails(g, files), next = mode === "off" ? old : globDetails(g, files, "on");
+      baseline.push(...old); proposed.push(...next); hits.push(...(mode === "on" ? next : old));
+    }
     textHits(n.oneLine);
   }
   for (const s of [p.title, p.description, p.ownerWords]) textHits(s);
+  if (mode === "observe" && ctx) observeGlobProtection(ctx, r, baseline, proposed, hitEvidence);
   const reasons = ORDER.filter(x => hits.some(h => h.reason === x));
   return { route: reasons.length ? "owner" : "auto", reasons, hits };
 }
