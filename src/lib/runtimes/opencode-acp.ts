@@ -76,7 +76,11 @@ async function prepareOpencodeSession(spec: LaunchSpec, bin: string | null): Pro
   const timer = setTimeout(() => proc.stop(), SESSION_TIMEOUT_MS);
   try {
     await s.initialize({ fork: spec.mode === "fork" });
-    return spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
+    const sid = spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
+    // 手填的模型名在这里按会话自己的 configOptions 校（比 `opencode models` 全）：不认就拒建，别留一个起不来的 agent
+    const set = await s.setConfig("model", spec.model.trim());
+    if (!set.ok) throw new Error(`模型「${spec.model.trim()}」OpenCode 不认：${set.error}`);
+    return sid;
   } catch (e) {
     throw new Error(`OpenCode 没建出会话：${e instanceof Error ? e.message : e}${logs.length ? `（${logs.slice(-3).join(" | ").slice(0, 300)}）` : ""}`);
   } finally {

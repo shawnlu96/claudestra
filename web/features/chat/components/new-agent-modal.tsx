@@ -126,7 +126,7 @@ export function NewAgentModal({
     setBusy(true);
     setError("");
     const res = await store.createAgent(n, d, purpose.trim() || undefined, {
-      model: model || undefined,
+      model: model.trim() || undefined,
       effort: effort || undefined,
       project: project || undefined,
       runtime: runtime || undefined,
@@ -344,7 +344,7 @@ export function NewAgentModal({
   );
 }
 
-/** 模型字段：Claude 走目录下拉，Pi / Codex 自由输入，OpenCode 必须在 bridge 给的清单里挑 */
+/** 模型字段：Claude 走目录下拉，Pi / Codex 自由输入，OpenCode 必填（清单候选 + 可手填） */
 function ModelField({ runtime, model, setModel, busy, opencode }: {
   runtime: string;
   model: string;
@@ -358,21 +358,24 @@ function ModelField({ runtime, model, setModel, busy, opencode }: {
     <label className="form-control">
       <span className="label-text mb-1 text-sm">{t("模型")}</span>
       {runtime === "opencode" ? (
-        // OpenCode 不默认任何模型（免费模型会拿数据训练），必须在清单里挑一个
-        <select
-          className="select select-bordered select-sm w-full"
-          value={model}
-          disabled={busy}
-          required
-          onChange={(e) => setModel(e.target.value)}
-        >
-          <option value="">{t("选择模型（必填）")}</option>
-          {(opencode?.models ?? []).map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
+        // OpenCode 不默认任何模型（免费模型会拿数据训练），必填；候选是 `opencode models` 的清单，也能手填（清单比会话里少几个免费模型）
+        <>
+          <input
+            type="text"
+            className="input input-bordered input-sm w-full"
+            list="opencode-models"
+            value={model}
+            disabled={busy}
+            required
+            placeholder={t("选择或填写模型（必填，provider/model）")}
+            onChange={(e) => setModel(e.target.value)}
+          />
+          <datalist id="opencode-models">
+            {(opencode?.models ?? []).map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+        </>
       ) : runtime === "pi" || runtime === "codex" ? (
         // Pi 的 --model 收的是 provider/model-id，Codex 收它自己的模型 id，Claude 别名表
         // 对两者都无意义：选个 sonnet-5 会原样透传 → 起不来（review #10 应修项）

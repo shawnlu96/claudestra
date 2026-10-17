@@ -457,6 +457,7 @@ export const DICT: Record<string, string> = {
   "provider/model-id（留空 = Pi 默认）": "provider/model-id (empty = Pi default)",
   "Codex 模型 id（留空 = Codex 默认）": "Codex model id (empty = Codex default)",
   "选择模型（必填）": "Choose a model (required)",
+  "选择或填写模型（必填，provider/model）": "Pick or type a model (required, provider/model)",
   "在指定目录起一个 OpenCode agent（经 Bridge）。必须选模型。": "Start an OpenCode agent in the given directory (via Bridge). A model is required.",
   "免费模型（*-free / big-pickle）的数据可能被用于训练，交易类项目别选。":
     "Free models (*-free / big-pickle) may use your data for training — don't pick them for trading projects.",
