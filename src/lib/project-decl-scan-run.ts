@@ -76,7 +76,10 @@ export async function createIsolationArea(run: ScanRunner, repoRoot: string, hea
   for (const d of ["home", "tmp", "cache"]) mkdirSync(join(root, d));
   const worktree = join(root, "wt");
   const add = await scanGit(run, repoRoot, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", "--", worktree, head]);
-  if (add.code !== 0 || realpathSync(worktree) !== worktree) throw new Error("ISOLATION_UNAVAILABLE");
+  if (add.code !== 0 || !existsSync(worktree) || realpathSync(worktree) !== worktree) {
+    await removeIsolationArea(run, repoRoot, { root, worktree });
+    throw new Error("ISOLATION_UNAVAILABLE");
+  }
   return { root, worktree };
 }
 

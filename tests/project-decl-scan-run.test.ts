@@ -70,6 +70,7 @@ describe("runtime failure classification", () => {
       [{ exitCode: 127 }, "COMMAND_MISSING", true],
       [{ exitCode: null, errorCode: "ENOENT" }, "COMMAND_MISSING", true],
       [{ exitCode: null, stderr: "spawn go ENOENT" }, "COMMAND_MISSING", true],
+      [{ exitCode: 71, stderr: "sandbox-exec: execvp() of 'cargo' failed: No such file or directory" }, "COMMAND_MISSING", true],
       [{ exitCode: 1, stderr: "npm error Missing script: \"test\"" }, "SCRIPT_MISSING", true],
       [{ exitCode: 2, stderr: "make: *** No rule to make target 'test'.  Stop." }, "SCRIPT_MISSING", true],
       [{ exitCode: 1, stderr: "FAILED tests/test_x.py::test_a - AssertionError" }, "COMMAND_FAILED", false],
@@ -125,8 +126,10 @@ describe.if(darwinBoundary().available)("real isolated runs (darwin sandbox-exec
     const area = await createIsolationArea(runBounded, f.repo, head, "real-escape");
     try {
       const d = discoverProject(resolveDeclRepository(f.project, f.repo)).candidates.filter((c) => c.argv[0] === "make");
+      d.push({ ...d[0], id: "absent", argv: ["floka-scan-absent-command"] });
       const runs = await verifyCandidates(d, area, { run: runBounded, boundary: darwinBoundary() });
-      expect(runs.map((r) => [r.id, r.status, r.reason])).toEqual([["make-check", "inferred", "COMMAND_FAILED"], ["make-lint", "inferred", "COMMAND_FAILED"]]);
+      expect(runs.map((r) => [r.id, r.status, r.reason, r.rescan])).toEqual([["make-check", "inferred", "COMMAND_FAILED", false],
+        ["make-lint", "inferred", "COMMAND_FAILED", false], ["absent", "inferred", "COMMAND_MISSING", true]]);
     } finally { await removeIsolationArea(runBounded, f.repo, area); server.stop(true); }
     expect(existsSync(marker)).toBe(false); expect(connections).toBe(0);
   }, 60_000);

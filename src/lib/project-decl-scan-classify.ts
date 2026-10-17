@@ -23,7 +23,9 @@ export function classifyDeclFailure(f: DeclRuntimeFailure): DeclFailureVerdict {
   if (f.timedOut) return { failureClass: "TIMEOUT", rescan: false };
   if (f.exitCode === 0) return { failureClass: "PASSED", rescan: false };
   const err = (f.stderr ?? "").toLowerCase();
-  if (f.errorCode === "ENOENT" || f.exitCode === 127 || (f.exitCode === null && COMMAND_MISSING_MARKERS.some((m) => err.includes(m)))) {
+  // A wrapper (the execution boundary) that cannot exec the command reports it as an execvp failure with its own exit code.
+  const execFailed = err.includes("execvp") && err.includes("no such file or directory");
+  if (f.errorCode === "ENOENT" || f.exitCode === 127 || execFailed || (f.exitCode === null && COMMAND_MISSING_MARKERS.some((m) => err.includes(m)))) {
     return { failureClass: "COMMAND_MISSING", rescan: true };
   }
   if (SCRIPT_MISSING_MARKERS.some((m) => err.includes(m))) return { failureClass: "SCRIPT_MISSING", rescan: true };
