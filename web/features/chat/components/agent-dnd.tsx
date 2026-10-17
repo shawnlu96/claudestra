@@ -4,6 +4,7 @@ import { useChatStoreApi } from "../chat-store";
 import { assignAgentProject } from "../project-actions";
 import { DND_MIME, beginAgentDrag, currentDrag, dropTarget, endAgentDrag, type DragAgent } from "../sidebar-dnd";
 import { useT } from "@/lib/i18n";
+import { clearDragOrigin, dragBlockedByOrigin, markDragOrigin } from "./row-drag-origin";
 
 /**
  * 侧栏拖拽改 project 的 DOM 接线（判定在 ../sidebar-dnd.ts）。
@@ -18,16 +19,30 @@ export function dragAllowed(): boolean {
   return typeof window !== "undefined" && window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 }
 
-/** 挂在 agent 行上：让它可拖。 */
+/**
+ * 挂在 agent 行上：让它可拖。从行尾 ⋯ 按下起拖不算（起点判定见 row-drag-origin.ts）：
+ * dragstart 的 target 是行本身，所以在这里用 pointerdown capture 记起点，dragstart 据此取消。
+ */
 export function dragHandlers(d: DragAgent) {
   return {
     draggable: true,
+    onPointerDownCapture: (e: React.PointerEvent) => markDragOrigin(e.currentTarget, e.target),
+    onPointerUpCapture: (e: React.PointerEvent) => clearDragOrigin(e.currentTarget),
+    onPointerCancelCapture: (e: React.PointerEvent) => clearDragOrigin(e.currentTarget),
     onDragStart: (e: React.DragEvent) => {
+      if (dragBlockedByOrigin(e.currentTarget, e.target)) {
+        e.preventDefault();
+        clearDragOrigin(e.currentTarget);
+        return;
+      }
       e.dataTransfer.setData(DND_MIME, d.name);
       e.dataTransfer.effectAllowed = "move";
       beginAgentDrag(d);
     },
-    onDragEnd: () => endAgentDrag(),
+    onDragEnd: (e: React.DragEvent) => {
+      clearDragOrigin(e.currentTarget);
+      endAgentDrag();
+    },
   };
 }
 
