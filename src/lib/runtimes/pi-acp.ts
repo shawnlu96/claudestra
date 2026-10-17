@@ -18,7 +18,7 @@ import { probePiAcp } from "../acp/readiness.js";
 import { REPO_ROOT } from "../repo-root.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { ACP_RUNTIME_ENV, type AcpRuntimeSpec } from "./contract.js";
-import { acpHostCommand, type writeLaunchPayload } from "./acp-launch-payload.js";
+import { acpHostCommand, waitReadyAndSettle, type writeLaunchPayload } from "./acp-launch-payload.js";
 import { PI_ACP_HOST, PI_ARGS_ENV } from "./pi-acp-host.js";
 import { piAdapter } from "./pi.js";
 import type { LaunchSpec, ManagedRuntimeAdapter } from "./types.js";
@@ -74,7 +74,7 @@ export function buildPiAcpHostCommand(
   ];
   // pi 参数里有整段 --append-system-prompt：进一次性文件、命令只带路径（acp-launch-payload.ts：命令太长会被 tty 截断）
   const payload: [string, string][] = [[PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env), lock))]];
-  return acpHostCommand({ pairs, payload, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot });
+  return acpHostCommand({ pairs, payload, agent, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot });
 }
 
 /**
@@ -108,6 +108,8 @@ export const piAcpAdapter: ManagedRuntimeAdapter = {
     if (clash) throw new Error(clash);
     return buildPiAcpHostCommand(spec, { bunBin: process.execPath, repoRoot: REPO_ROOT }); // 与 Codex 版同：manager 自己的 bun
   },
+  // 就绪判据与 tmux 版同一个（@claudestra_ready）；外面包一层给启动文件收尾
+  waitReady: (win, budget) => waitReadyAndSettle(win, () => piAdapter.waitReady(win, budget)),
   exitPrelude: acpExitPrelude,
   registryFields: (spec) => ({ ...piAdapter.registryFields(spec), transport: "acp" }),
 };

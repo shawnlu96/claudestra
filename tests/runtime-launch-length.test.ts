@@ -55,7 +55,7 @@ describe("一次性文件：写 0600、宿主读回环境即删、相同的值�
 
   test("写读来回", () => {
     const big = "x".repeat(5000);
-    const path = writeLaunchPayload([["CLAUDESTRA_CODEX_PREAMBLE", big], ["CLAUDESTRA_ACP_CLEAR_PREAMBLE", big], ["CLAUDESTRA_ACP_DEVELOPER", undefined]], dir)!;
+    const path = writeLaunchPayload([["CLAUDESTRA_CODEX_PREAMBLE", big], ["CLAUDESTRA_ACP_CLEAR_PREAMBLE", big], ["CLAUDESTRA_ACP_DEVELOPER", undefined]], { dir })!;
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(statSync(path).size).toBeLessThan(big.length + 200); // 两份相同的前言只存一份
     const env: Record<string, string | undefined> = { [ACP_LAUNCH_FILE_ENV]: path };
@@ -66,8 +66,8 @@ describe("一次性文件：写 0600、宿主读回环境即删、相同的值�
   });
 
   test("没东西可放不写文件；不收的键直接拒；目录外 / 名字不对的路径不读不删", () => {
-    expect(writeLaunchPayload([["CLAUDESTRA_CODEX_PREAMBLE", undefined]], dir)).toBeUndefined();
-    expect(() => writeLaunchPayload([["PATH", "/evil"]], dir)).toThrow("不收");
+    expect(writeLaunchPayload([["CLAUDESTRA_CODEX_PREAMBLE", undefined]], { dir })).toBeUndefined();
+    expect(() => writeLaunchPayload([["PATH", "/evil"]], { dir })).toThrow("不收");
     const env: Record<string, string | undefined> = { [ACP_LAUNCH_FILE_ENV]: "/etc/passwd" };
     expect(takeLaunchPayload(env, dir)).toMatchObject({ used: true, ok: false, error: expect.stringContaining("拒起") });
     expect(env).toEqual({});
@@ -100,7 +100,7 @@ describe("文件协议失败一律拒起（负路径）", () => {
   });
 
   test("文件里缺 PI_ARGS：载入成功，但 Pi 的 agentCommand 拒起（不按空数组起默认能力）", () => {
-    const path = writeLaunchPayload([["CLAUDESTRA_CODEX_PREAMBLE", "x"]], dir)!;
+    const path = writeLaunchPayload([["CLAUDESTRA_CODEX_PREAMBLE", "x"]], { dir })!;
     const env: Record<string, string | undefined> = { [ACP_LAUNCH_FILE_ENV]: path };
     expect(takeLaunchPayload(env, dir)).toEqual({ used: true, ok: true });
     expect(pi.agentCommand(env, "/opt/bun", false)).toMatchObject({ error: expect.stringContaining(`缺 ${PI_ARGS_ENV}`) });

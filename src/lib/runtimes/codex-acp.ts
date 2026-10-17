@@ -26,7 +26,7 @@ import { AcpSession } from "../acp/session.js";
 import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, makeWorkerRoot } from "./clean-env.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { CODEX_ACP_HOST } from "./codex-acp-host.js";
-import { acpHostCommand, rolePayload, type writeLaunchPayload } from "./acp-launch-payload.js";
+import { acpHostCommand, rolePayload, waitReadyAndSettle, type writeLaunchPayload } from "./acp-launch-payload.js";
 import type { AcpRuntimeSpec } from "./contract.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
@@ -69,7 +69,7 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: {
   // 重启 / 收编：developer_instructions 只在建线程那一轮生效，首条入站附前言（与 tmux 同一份文字）
   const payload = rolePayload({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }, o.repoRoot, spec.mode);
   return acpHostCommand({
-    pairs, payload, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot,
+    pairs, payload, agent, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot,
     head: clean ? `${envIPrefix(env, shellEscape)} ` : undefined, bunArgs: clean ? BUN_NO_AUTOLOAD : undefined,
   });
 }
@@ -144,7 +144,7 @@ export function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {})
       // 运行版本由宿主起适配器前记（lib/codex-version.ts noteAcpCodexRunning）；先清掉上一次的，宿主没起来也不会误报「该重启」
       try { recordCodexRunning(win.name, undefined); } catch (e) { console.error(`⚠ 清不掉 ${win.name} 的 codex 运行版本记录:`, e); }
     },
-    waitReady: (win, budget) => waitCodexReady(win, budget, { occupied: 0, dialog: 0 }),
+    waitReady: (win, budget) => waitReadyAndSettle(win, () => waitCodexReady(win, budget, { occupied: 0, dialog: 0 })),
     exitPrelude: acpExitPrelude,
     onExitPane: undefined,
     discoverSessionId: undefined,

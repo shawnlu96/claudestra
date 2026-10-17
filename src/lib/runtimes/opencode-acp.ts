@@ -20,7 +20,7 @@ import { isValidOpencodeSessionId } from "../opencode-session.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { ACP_RUNTIME_ENV, type AcpRuntimeSpec } from "./contract.js";
 import { OPENCODE_ACP_HOST, opencodeConfigContent } from "./opencode-acp-host.js";
-import { acpHostCommand, type writeLaunchPayload } from "./acp-launch-payload.js";
+import { acpHostCommand, waitReadyAndSettle, type writeLaunchPayload } from "./acp-launch-payload.js";
 import { CODEX_READY_OPTION } from "./codex-ready.js";
 import { waitOpencodeReady } from "./opencode-ready.js";
 import { opencodeSource } from "./opencode-source.js";
@@ -62,7 +62,7 @@ export function buildOpencodeAcpHostCommand(
     ["CLAUDESTRA_CODEX_PREAMBLE", spec.mode === "new" ? full : encodePreambleEnv(codexContextPreamble(who))],
     ["CLAUDESTRA_ACP_CLEAR_PREAMBLE", full],
   ];
-  return acpHostCommand({ pairs, payload, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot });
+  return acpHostCommand({ pairs, payload, agent, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot });
 }
 
 /** new / fork：起短命的 `opencode acp` 建会话（不挂 claudestra MCP），返回 OpenCode 的会话 id */
@@ -123,7 +123,7 @@ export const opencodeAcpAdapter: ManagedRuntimeAdapter = {
   },
   buildLaunchCommand: (spec) => buildOpencodeAcpHostCommand(spec, { bunBin: process.execPath, repoRoot: REPO_ROOT, opencodeBin: opencodeBin() }),
   beforeLaunch: (win) => resetReadyOption(win, CODEX_READY_OPTION), // 清不掉就抛：不带着残留的 "1" 往下启动
-  waitReady: (win, budget) => waitOpencodeReady(win, budget),
+  waitReady: (win, budget) => waitReadyAndSettle(win, () => waitOpencodeReady(win, budget)),
   exitPrelude: acpExitPrelude,
   registryFields: () => ({ runtime: "opencode", transport: "acp" }),
 };

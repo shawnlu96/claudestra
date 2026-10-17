@@ -77,7 +77,7 @@ describe("acp 版的选择与启动命令", () => {
     expect(controlFor("pi", "acp")).toBe(ACP_CONTROL);
     expect(a.scanSessions).toBe(piAdapter.scanSessions);
     expect(a.translateLine).toBe(piAdapter.translateLine);
-    expect(a.waitReady).toBe(piAdapter.waitReady);
+    expect(a.waitReady).not.toBe(piAdapter.waitReady); // 同一个就绪判据，外面包一层启动文件收尾（acp-launch-payload.ts waitReadyAndSettle）
     expect(a.beforeLaunch).toBe(piAdapter.beforeLaunch);
     expect(a.exitPrelude).toBe(acpExitPrelude);
     expect([a.exitCommand, a.inbound, a.turnEnd, a.callerCred, a.prepareSession]).toEqual(["", "acp-host", "acp-host", "env", undefined]);

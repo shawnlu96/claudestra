@@ -91,6 +91,7 @@ import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { sockGuard } from "./lib/launcher-sock-guard.js"; // tmux 三态探测 / 新建前查同路径服务 / 冻结 / 大量 dead
 import { healSelfDirty } from "./lib/self-dirty.js";
 import { discardOneShotAfterReady, issueLaunchCred, sweepStaleOneShots, withOneShot } from "./lib/caller-cred-launch.js";
+import { sweepStaleLaunchPayloads } from "./lib/runtimes/acp-launch-file.js";
 import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
 armSpecPreflight();
 await assertPrimaryOrExit("launcher");
@@ -1049,6 +1050,7 @@ async function main() {
   // 持续监控
   while (true) {
     sweepStaleOneShots(); // T85：启动半路被 kill -9 留下的一次性凭据文件，没人再启动也按时清掉
+    sweepStaleLaunchPayloads(); // ACP 启动文件：写它的进程没了、又过了 30 分钟还没被宿主读走的
     await Bun.sleep(CHECK_INTERVAL_MS);
 
     const master = await sockGuard.check(); // 连续 3 次确认 absent 才 start；unknown 本轮不动

@@ -11,7 +11,7 @@ import { spawnAdapter } from "../acp/adapter-proc.js";
 import { AcpSession } from "../acp/session.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
-import { acpHostCommand, rolePayload, type writeLaunchPayload } from "./acp-launch-payload.js";
+import { acpHostCommand, rolePayload, waitReadyAndSettle, type writeLaunchPayload } from "./acp-launch-payload.js";
 import { ACP_RUNTIME_ENV, type AcpRuntimeSpec } from "./contract.js";
 import { resetReadyOption } from "./ready-option.js";
 import type { LaunchSpec, ManagedRuntimeAdapter, SessionSourceAdapter } from "./types.js";
@@ -46,7 +46,7 @@ function genericAcpHostCommand(
   ];
   // 职责与频道规则进一次性文件、命令只带路径（acp-launch-payload.ts：命令太长会被 tty 截断）
   return acpHostCommand({
-    pairs, payload: rolePayload(who, o.repoRoot, spec.mode), writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot,
+    pairs, payload: rolePayload(who, o.repoRoot, spec.mode), agent, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot,
   });
 }
 
@@ -102,7 +102,7 @@ export function genericAcpRuntime(def: GenericAcpDef, deps: { spawn?: typeof spa
     },
     buildLaunchCommand: (spec) => genericAcpHostCommand(spec, def, { bunBin: process.execPath, repoRoot: REPO_ROOT }), // manager 自己的 bun
     beforeLaunch: (win) => resetReadyOption(win, CODEX_READY_OPTION), // 清不掉就抛：不带着残留的 "1" 往下启动
-    waitReady: (win, budget) => waitCodexReady(win, budget, { occupied: 0, dialog: 0 }),
+    waitReady: (win, budget) => waitReadyAndSettle(win, () => waitCodexReady(win, budget, { occupied: 0, dialog: 0 })),
     exitPrelude: acpExitPrelude,
     registryFields: () => ({ runtime: def.source.id, transport: "acp" }),
   };
