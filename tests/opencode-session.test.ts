@@ -139,7 +139,7 @@ describe("refreshOpencodeMirror（假 opencode，隔离数据目录）", () => {
     expect(calls()).toBe(2); // 2s 节流内
   });
 
-  test("导出途中库被写入（第 4 轮 P2-5）：镜像时间戳取导出前的，过了节流必重导；之后内容没变就停", () => {
+  test("导出途中库被写入（第 4 轮 P2-5）：镜像时间戳取导出前的，过了节流必重导；库没再变就不导", () => {
     const { env, calls, touchDb } = fakeEnv();
     const id = "ses_racyW1";
     touchDb(1_500_000);
@@ -148,7 +148,48 @@ describe("refreshOpencodeMirror（假 opencode，隔离数据目录）", () => {
     expect(refreshOpencodeMirror(id, { env, now: () => 111_000 })).toBe(opencodeMirrorPath(id));
     expect(calls()).toBe(2); // 镜像停在导出前的时间：判旧、重导（按导出后的量会判新鲜，写入就丢了）
     expect(refreshOpencodeMirror(id, { env, now: () => 122_000 })).toBe(opencodeMirrorPath(id));
-    expect(calls()).toBe(2); // 第二遍和镜像逐字相同、库没再变：不再导
+    expect(calls()).toBe(2); // 第二遍导出期间库没变：镜像停在它开始前的版本 = 库现在的版本，不再导
+  });
+
+  test("PR1711 r1 P1：第二次导出正文和旧镜像相同、快照之后才写进新消息——之后的刷新必须重导补上（第 32s、600s 各刷一次）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "oc-settle-"));
+    const dataHome = join(dir, "data");
+    mkdirSync(join(dataHome, "opencode"), { recursive: true });
+    const db = join(dataHome, "opencode", "opencode.db");
+    writeFileSync(db, "");
+    const id = "ses_settleR1";
+    const doc = (extra: string[]) => {
+      const d = JSON.parse(readFileSync(FIXTURE, "utf8"));
+      d.info.id = id;
+      for (const t of extra) d.messages.push({ info: { id: `m-${t}`, sessionID: id, role: "user", time: { created: 9 } }, parts: [{ type: "text", text: t }] });
+      return d;
+    };
+    writeFileSync(join(dir, "old.json"), JSON.stringify(doc([])));
+    writeFileSync(join(dir, "new.json"), JSON.stringify(doc(["后来写进来的 MELON-3"])));
+    const count = join(dir, "count");
+    const bin = join(dir, "opencode");
+    // 第 2 次导出：先吐旧快照（和镜像逐字相同），吐完才写进新消息、库 mtime 前进——即「快照之后、进程退出之前」的写入
+    writeFileSync(bin, `#!/bin/sh
+echo x >> "${count}"; n=$(wc -l < "${count}")
+if [ -f "${dir}/written" ]; then cat "${dir}/new.json"; exit 0; fi
+cat "${dir}/old.json"
+if [ "$n" -ge 2 ]; then touch "${dir}/written"; touch -t 203101010000 "${db}"; fi
+`);
+    chmodSync(bin, 0o755);
+    const env = { ...process.env, OPENCODE_BIN: bin, XDG_DATA_HOME: dataHome };
+    const calls = () => readFileSync(count, "utf8").split("\n").filter(Boolean).length;
+    const mirrorHasNew = () => readFileSync(opencodeMirrorPath(id), "utf8").includes("MELON-3");
+    utimesSync(db, 1_600_000, 1_600_000);
+    await refreshOpencodeMirrorAsync(id, { env, now: () => 0 }); // 建旧镜像
+    utimesSync(db, 1_700_000, 1_700_000); // 别处写了库：下一次判旧
+    await refreshOpencodeMirrorAsync(id, { env, now: () => 11_000 }); // 第 2 次：同一份旧快照 + 快照之后的写入
+    expect(calls()).toBe(2);
+    expect(mirrorHasNew()).toBe(false);
+    await refreshOpencodeMirrorAsync(id, { env, now: () => 32_000 });
+    expect(calls()).toBe(3); // 必须重导（旧实现把导出后的库 mtime 记成已覆盖，这里不导、新消息永远补不上）
+    expect(mirrorHasNew()).toBe(true);
+    await refreshOpencodeMirrorAsync(id, { env, now: () => 600_000 });
+    expect(mirrorHasNew()).toBe(true);
   });
 
   test("导出失败：没有旧镜像返回 null；非法 id 不起子进程", () => {
