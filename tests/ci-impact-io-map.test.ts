@@ -11,6 +11,7 @@ import { DEFAULT_IMPACT_INPUTS, globMatch, type ImpactInputs } from "../src/lib/
 import { ciIoMapMode, type IoMap, type IoMapEntry, ioMapEdges, ioMapReaders, type IoMapSource, mainPushRuns, mapTimePaths,
   parseIoMap, resolveIoMap, unionChanges } from "../src/lib/ci-impact-io-map.js";
 import { type ChangedFile, type ImpactSelection, proposeTests, selectImpactedTests } from "../src/lib/ci-impact-select.js";
+import { registrationProblems } from "../src/lib/ci-impact-registration-check.js";
 import { buildPlan, type IoMapSelect, planDigest, planLine, type PlanFacts } from "../scripts/ci-related-plan.ts";
 
 const ROOT = join(import.meta.dir, "..");
@@ -68,6 +69,8 @@ describe("[先红后绿] 读取图代替两条一刀切的 io 规则", () => {
     for (const n of ["editor-contested", "snapshot", "submit-retry", "submit"]) expect(registered.has(`tests/web-shared-audit-${n}.test.ts`)).toBe(true);
     const map = [entry("src/lib/team-roles.ts", { reads: ["roles/pm.md"] }), entry("tests/lp-state.test.ts", { walks: ["tests/fixtures/lp"] })];
     const changed = "src/lib/agent-name.ts";
+    // 登记检查（交付前预检 CIPRECHK1 用的同一实现）：真实仓库里测试走得到的非字面量加载都已登记
+    expect(registrationProblems(real)).toEqual([]);
     const p = proposeTests([M(changed)], real, real, undefined, map);
     expect(p.reasons).toEqual([]);
     const edges = inputs.implicit.map((e) => ({ from: e.module, to: paths.filter((x) => e.deps.some((d) => globMatch(d, x))) }));

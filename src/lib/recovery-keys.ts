@@ -28,6 +28,7 @@ export const RECOVERY_KEYS = [
   "ciCancelRerun",
   "ciClaimUnsent",
   "ciCoverageGate",
+  "ciDeliverPrecheck",
   "ciIoMapFuse",
   "ciKnownFlaky",
   "ciLogPerJob",
