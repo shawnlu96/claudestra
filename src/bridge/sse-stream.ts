@@ -1,6 +1,9 @@
 import { eventsQueryFilter, replayEventsSince, subscribeEvents, type EventFilter } from "./event-bus.js";
 
-/** Per-connection queue budget; one crossing frame and the overflow notice may exceed it. */
+/** JS stream queue budget; one crossing frame and the overflow notice may exceed it.
+ * Bun 1.3.10 drains this queue into its native HTTP buffer even when the socket is blocked;
+ * desiredSize therefore cannot bound network buffering. That needs a runtime/adapter fix.
+ */
 const SSE_QUEUE_BYTE_LIMIT = 8 * 1024 * 1024;
 
 /** GET /events: filtered replay, live events and a 5s heartbeat below Bun's idle timeout. */

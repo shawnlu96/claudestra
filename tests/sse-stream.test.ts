@@ -51,6 +51,59 @@ test("10,000 normally consumed events preserve wire bytes and order; Last-Event-
   } finally { await resumed.cancel(); }
 });
 
+test("HTTP consumption preserves 10,000 events and Last-Event-ID replay without overflow", async () => {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 0, fetch: (req) => createSseResponse(req) });
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 10_000);
+  const readers: { cancel(): Promise<void> }[] = [];
+  const open = async (lastId?: number) => {
+    const response = await fetch(new URL("/events?agent=a", server.url), {
+      signal: abort.signal, headers: lastId === undefined ? {} : { "Last-Event-ID": String(lastId) },
+    });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    readers.push(reader);
+    const decoder = new TextDecoder();
+    let pending = "";
+    const frame = async (): Promise<string> => {
+      while (!pending.includes("\n\n")) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("SSE ended before the expected event");
+        pending += decoder.decode(value, { stream: true });
+      }
+      const end = pending.indexOf("\n\n") + 2;
+      const result = pending.slice(0, end);
+      pending = pending.slice(end);
+      return result;
+    };
+    return { reader, frame };
+  };
+  try {
+    const live = await open();
+    expect(await live.frame()).toBe(": connected\n\n");
+    let cursor = 0;
+    for (let i = 0; i < 10_000; i++) {
+      const evt = publish();
+      expect(await live.frame()).toBe(`id: ${evt.seq}\ndata: ${JSON.stringify(evt)}\n\n`);
+      cursor = evt.seq;
+    }
+    expect(subscriberCount()).toBe(1);
+    await live.reader.cancel();
+    publish("other agent", "b");
+    const missed = publish("missed over HTTP");
+    const resumed = await open(cursor);
+    expect(await resumed.frame()).toBe(": connected\n\n");
+    expect(await resumed.frame()).toBe(`id: ${missed.seq}\ndata: ${JSON.stringify(missed)}\n\n`);
+  } finally {
+    clearTimeout(timer);
+    abort.abort();
+    await Promise.all(readers.map((reader) => reader.cancel().catch(() => {
+      // Aborting HTTP requests can error their readers before cancellation runs.
+    })));
+    await server.stop(true);
+  }
+}, 15_000);
+
 test("replay spanning agents can overflow before subscribe without leaving a producer behind", async () => {
   for (let i = 0; i < 8; i++) publish("x".repeat(1500_000), `agent-${i}`);
   const reader = createSseResponse(new Request("http://localhost/events?since=0")).body!.getReader();
