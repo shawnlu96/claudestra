@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { setRepoAliasForTest } from "../src/lib/repo-alias.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
@@ -18,6 +19,7 @@ afterEach(() => { setRepoAliasForTest({ mode: null, sink: null }); rmSync(RECOVE
 function fixture(repo: string, grant: string) {
   // LENDBACK1's lendReturnLocal (on by default) drops the pin on every not-started return (tests/lend-return-local.test.ts);
   // with it off, send-back keeps the pin exactly when the peer's grant still covers the repo — the alias rule under test here.
+  mkdirSync(dirname(RECOVERY_POLICY_PATH), { recursive: true });
   writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { lendReturnLocal: "off" } } } }));
   const db = openLedger(":memory:");
   setMeta(db, { actor: "owner", now }, { project: "p", key: "pms", value: [pm.actor] });
