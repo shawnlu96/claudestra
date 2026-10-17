@@ -325,7 +325,7 @@ test("real manual start pipeline queues without a card, then the next pass creat
   expect(getTask(f.db, "T-queued")?.agent).toBe("agent-task-t-queued");
   expect(getWorkflow(f.db, "T-queued")?.authorFamily).toBe("codex");
   expect(notices).toEqual(["T-queued 已获得 Codex 空槽并自动开工"]);
-  const notes = f.db.query("SELECT text FROM events WHERE kind = 'note' ORDER BY seq").all() as { text: string }[];
+  const notes = f.db.query("SELECT text FROM events WHERE kind = 'note' AND json_extract(data, '$.op') IS NOT 'task_tier_launch' ORDER BY seq").all() as { text: string }[];
   expect(notes.map((n) => n.text.match(/Codex 排队 (\w+)/)?.[1])).toEqual(["queued", "started"]);
   expect(notes.every((n) => n.text.includes("卡号 T-queued") && n.text.includes("ab12-queued/one")
     && n.text.includes("原调用 PM agent-pm") && n.text.includes("排队时间"))).toBe(true);
