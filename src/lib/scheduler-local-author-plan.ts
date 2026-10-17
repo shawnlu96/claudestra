@@ -14,6 +14,7 @@ import { projectPm } from "./scheduler-autostart.js";
 import { currentLocalProjectDirs } from "./scheduler-local-runtime-projects.js";
 import type { LocalStartOptions } from "./scheduler-local-runtime-start.js";
 import { specPathFor } from "./task-spec.js";
+import { localAuthorStart } from "./project-branch-order.js";
 
 // LC1's queue only uses the feature id/key for identity and notices. A standalone card needs no invented DAG row.
 export type LocalAuthorPlan = Omit<StartPlan, "feature"> & { feature: { id: string } };
@@ -38,7 +39,9 @@ export async function localAuthorPlan(db: Database, task: LedgerTask, worktreeRo
   const worktree = join(worktreeRoot, task.id.toLowerCase()), ledgerDir = statePath("ledger");
   const promptPath = join(ledgerDir, "reviews", `${task.id}-exec-prompt.md`), templatePath = statePath("ledger", "prompts", "exec-template.md");
   const local = policy.localMerge === true; // ONB-1：localMerge 项目没有 origin，起点是本机 main，说明按本地口径
-  const base = task.headSHA ?? (local ? "main" : "origin/main"), pm = task.pm ?? projectPm(db, task.project) ?? "scheduler";
+  const start = localAuthorStart(task, local); // 起点随分支上下文传递（generality-BRANCH1）；缺省档位与原来一样
+  if (typeof start === "string") return start;
+  const base = start.base, pm = task.pm ?? projectPm(db, task.project) ?? "scheduler";
   const promptText = renderExecPrompt({ task: task.id, title: task.title, pm, branch: task.branch,
     base, worktree, spec: specPath, ledgerDir, template: workflow.template,
       ...(local ? { localMerge: true } : policy.mergeHandoff === true ? { mergeHandoff: true } : {}) },

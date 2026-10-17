@@ -5,6 +5,7 @@ import type { ReborrowSource } from "./lend-reborrow-source.js";
 import { getLendOrder, type LendOrder } from "./ledger-lend.js";
 import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { CONV_REBORROW_OP } from "./lend-reborrow-conv-evidence.js";
+import { carriedTarget } from "./project-branch.js";
 
 const REBORROW_OP = "write_reborrow";
 /** CONV-ended sources get their own op (CONV_REBORROW_OP) and key: a v1 PM-reclaim event never acquires a second meaning. */
@@ -15,7 +16,7 @@ export const reborrowKeyFor = (f: ReborrowFacts): string => (f.conv ? convReborr
 function checkOrder(f: ReborrowFacts, s: ReborrowSource, o: LendOrder): void {
   if (o.taskId !== f.task.id || o.project !== f.task.project || o.peer !== f.lease.peer || o.family !== f.family ||
     o.step !== (f.task.stage === "build" ? "write" : "fix") || o.specRev !== f.task.specRev || o.round !== f.task.round ||
-    o.head !== s.remoteHead || o.branch !== f.lease.branch || o.repo !== f.lease.repo || o.base !== "main" ||
+    o.head !== s.remoteHead || o.branch !== f.lease.branch || o.repo !== f.lease.repo || o.base !== carriedTarget(f.task.project, f.previous.base) ||
     o.pr !== (s.pr?.number ?? null) || o.supersedes !== f.previous.orderId || o.orderId === f.previous.orderId ||
     o.wire.orderId !== o.orderId || o.wire.head !== o.head || o.wire.pr !== o.pr || o.wire.repo !== o.repo) {
     throw new LedgerError("conflict", "新写单未绑定原租约、起点、PR 或作者家族");

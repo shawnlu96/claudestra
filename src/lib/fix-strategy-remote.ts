@@ -13,6 +13,7 @@ import { placeFor } from "./scheduler-family-pick.js";
 import { heldLease, writeOrderWire, lastReviewOf } from "./ledger-lend-lease.js";
 import { reclaimForFamilySwap, resumedReclaimGate, retireReclaimedPeerAuthor } from "./lend-reclaim-scheduler.js";
 import { remoteOrder, offerConvergence } from "./fix-strategy-remote-order.js";
+import { fixOrderBase } from "./project-branch-order.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { getLendPeer } from "./ledger-lend-peers.js";
 import { FIX_STRATEGY_RULE } from "./fix-strategy.js";
@@ -107,7 +108,7 @@ export async function remoteFixFallback(db: Database, ctx: WriteCtx, intent: Sch
   if (!fp) return waitForPeer(db, ctx, intent, material.family, `${peer} 缺钉住的实例指纹`, context, deps);
   offerConvergence(db, ctx, intent, context, peer, material.family, (current, orderId) => {
     const history = readFileSync(material.path, "utf8"), previous = lastReviewOf(db, current);
-    const wire = writeOrderWire(current, { orderId, step: "fix", head: current.headSHA!, branch: current.branch!, base: "main",
+    const wire = writeOrderWire(current, { orderId, step: "fix", head: current.headSHA!, branch: current.branch!, base: fixOrderBase(db, current),
       spec: context.spec!, report: null, findings: previous.findings, ui: uiLendLines(db, current), repo: facts.repo!, pr: Number(current.pr?.match(/\/pull\/(\d+)/)?.[1]) || null });
     wire.inputs.push(...chunkInputs([["历轮报告、修复diff摘要、复现probe", shortHistoricalRefs(db, current, history)]]));
     wire.acceptance.push(FIX_STRATEGY_RULE);

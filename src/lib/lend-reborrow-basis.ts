@@ -7,6 +7,7 @@ import { getEventByDedup, listEvents } from "./ledger-store.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { readReborrowBinding } from "./lend-reborrow-marker.js";
 import { CONV_REBORROW_OP, convEvidenceIntact } from "./lend-reborrow-conv-evidence.js";
+import { carriedTarget } from "./project-branch.js";
 
 export interface ReborrowBasis { ledgerHead: string | null; reclaimSeq: number; previousOrderId: string }
 
@@ -45,7 +46,7 @@ export function readReborrowBasis(db: Database, o: LendOrder): ReborrowBasis | n
     f.task.specRev !== o.specRev || f.task.round !== o.round || f.task.headSHA !== l.ledgerHead || f.family !== o.family ||
     f.lease.peer !== o.peer || f.lease.repo !== o.repo || f.lease.branch !== o.branch || f.lease.state !== "ended" ||
     s.peer !== o.peer || s.fp !== f.lease.fp || s.repo !== o.repo || s.branch !== o.branch || s.remoteHead !== o.head || l.head !== o.head ||
-    o.base !== "main" || o.pr !== (s.pr?.number ?? null) || (s.pr && (s.pr.base !== "main" || s.pr.head !== o.head)) ||
+    o.base !== carriedTarget(o.project, old.base as string | null) || o.pr !== (s.pr?.number ?? null) || (s.pr && (s.pr.base !== o.base || s.pr.head !== o.head)) ||
     o.wire.orderId !== o.orderId || o.wire.head !== o.head || o.wire.repo !== o.repo || o.wire.pr !== o.pr ||
     o.step !== (f.task.stage === "build" ? "write" : "fix")) return null;
   return { ledgerHead: l.ledgerHead, reclaimSeq: b.reclaimSeq, previousOrderId: b.orderId };
@@ -68,7 +69,7 @@ function convBasis(db: Database, o: LendOrder, b: NonNullable<ReturnType<typeof 
     f.task.specRev !== o.specRev || f.task.round !== o.round || f.task.headSHA !== l.ledgerHead || f.reclaim.data.head !== l.ledgerHead ||
     f.lease.peer !== o.peer || f.lease.repo !== o.repo || f.lease.branch !== o.branch || f.reclaim.data.peer !== o.peer ||
     s.peer !== o.peer || s.fp !== f.lease.fp || s.repo !== o.repo || s.branch !== o.branch || s.remoteHead !== o.head || l.head !== o.head ||
-    o.base !== "main" || o.pr !== (s.pr?.number ?? null) || (s.pr && (s.pr.base !== "main" || s.pr.head !== o.head)) ||
+    o.base !== carriedTarget(o.project, old.base as string | null) || o.pr !== (s.pr?.number ?? null) || (s.pr && (s.pr.base !== o.base || s.pr.head !== o.head)) ||
     o.wire.orderId !== o.orderId || o.wire.head !== o.head || o.wire.repo !== o.repo || o.wire.pr !== o.pr || o.step !== "fix") return null;
   return { ledgerHead: l.ledgerHead, reclaimSeq: b.reclaimSeq, previousOrderId: b.orderId };
 }

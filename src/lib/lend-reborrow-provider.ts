@@ -5,6 +5,7 @@ import { workerName } from "./lend-worker-name.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { readReborrowBinding, type ReborrowBinding } from "./lend-reborrow-marker.js";
 import { preserveReborrowGit } from "./lend-reborrow-preserve.js";
+import { isBaseBranch } from "./lend-git.js";
 
 export interface ReborrowProviderPort {
   db: Database;
@@ -17,11 +18,12 @@ class ReborrowRefusal extends Error {}
 
 function oldJournal(row: LendRow, next: LendRow, binding: ReborrowBinding): void {
   const a = orderOf(row), b = orderOf(next), gen = binding.gen;
+  // The merge target is the borrower's decision (project-branch.ts); here the old and new journal must carry the same one.
   // v1 keeps one family. A CONV v2 binding names both families; each journal must match its own side exactly.
   const families = binding.conv ? row.family === binding.conv.from && next.family === binding.conv.to : row.family === next.family;
   if (row.orderId === next.orderId || row.peer !== next.peer || !row.fp || row.fp !== next.fp || !families || row.leaseGen !== gen ||
     !a || !b || a.taskId !== b.taskId || a.repo !== b.repo || a.specRev !== b.specRev || !row.wire?.write ||
-    row.wire.write.branch !== next.wire?.write?.branch || row.wire.write.base !== "main" || next.wire?.write?.base !== "main" ||
+    row.wire.write.branch !== next.wire?.write?.branch || !isBaseBranch(row.wire.write.base) || next.wire?.write?.base !== row.wire.write.base ||
     !["write", "fix"].includes(String(a.step)) || !["write", "fix"].includes(String(b.step))) throw new ReborrowRefusal("旧 journal 身份、代数、仓库或分支不符");
   if (!["acked", "cancelled", "released"].includes(row.state)) throw new ReborrowRefusal("旧 journal 仍活、结果未知或因失败停单");
   if (row.settle || row.submit === "sending" || ((row.payload || row.work || row.payloadSha) && (row.state !== "acked" || !row.receipt))) {

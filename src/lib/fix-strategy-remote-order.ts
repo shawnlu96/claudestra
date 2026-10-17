@@ -20,6 +20,7 @@ import { convergencePlacement, type RemoteConvergenceContext } from "./fix-strat
 import { peerRefusal } from "./scheduler-placement.js";
 import { fitOrderWire, orderWireBytes } from "./order-wire-fit.js";
 import { gateRefusalFacts } from "./scheduler-dispatch-block.js";
+import { fixOrderBase } from "./project-branch-order.js";
 
 export const remoteOrder = (db: Database, id: string): LendOrder | null => {
   const orderId = getEventByDedup(db, `scheduler:${id}:remote-order`)?.data.orderId;
@@ -72,7 +73,7 @@ export function offerConvergence(db: Database, ctx: WriteCtx, intent: SchedulerI
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pooled', ?, 'scheduler', ?, ?, ?, ?)`)
       .run(orderId, task.id, task.project, peer, family, raw.step, task.specRev, task.round, task.headSHA!, facts.repo!, raw.pr,
         JSON.stringify(parsed.value), text, createHash("sha256").update(text).digest("hex"), LEASE_MS_DEFAULT, now, now,
-        raw.step === "fix" ? task.branch : null, raw.step === "fix" ? "main" : null);
+        raw.step === "fix" ? task.branch : null, raw.step === "fix" ? fixOrderBase(db, task) : null);
     if (current.status === "pending") settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; remote convergence" });
     insertEvent(db, { ...ctx, dedupKey: `scheduler:${intent.id}:remote-order` }, { project: task.project, target: task.id,
       kind: "scheduler", text: `remote convergence ${peer}`, data: { op: "convergence_effect", intentId: intent.id, orderId, family, peer,
