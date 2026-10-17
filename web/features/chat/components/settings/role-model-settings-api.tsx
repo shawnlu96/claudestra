@@ -117,7 +117,7 @@ const WORDS: Record<string, string> = {
   "保存模型档位表失败，没有生效（详情见本机日志）": "Saving the tier table failed and did not take effect (see local log)",
   "这次修改不符合档位约束，没有保存": "This change violates the tier constraints; nothing saved",
   "这台设备没有改档位表的权限（要 owner 的全权设备）": "This device may not change the tier table (needs the owner's full-access device)",
-  "任务类型": "Task type", "角色格（未声明类型）": "Role cells (no task type)", "模板未注册": "no template",
+  "任务类型": "Task type", "正在保存，存完再换类型": "Saving — switch type when done", "角色格（未声明类型）": "Role cells (no task type)", "模板未注册": "no template",
   "缺省（类型默认）": "Default (task type)", "继承角色格": "Inherit role cell", "已知原档降一档": "One below base",
   "有效": "Effective", "类型格设置": "task type setting", "类型默认": "task type default", "继承角色默认": "inherited role default",
   "角色格设置": "role setting", "默认表": "default table", "档位表坏了，按默认表": "tier file broken, defaults", "覆盖": "override", "显式参数": "explicit",

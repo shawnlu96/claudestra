@@ -1,7 +1,7 @@
 /**
  * TIER_SETTINGS_BROWSER=1 bun test tests/task-tier-settings-browser.test.ts — 设置页模型档位表的任务类型视图（TIER3g），真实浏览器、隔离夹具、
  * 假 bridge（只拦 /api/v1/settings/role-models），浅色。GET 回包由真的 taskTierEffectiveView 算（含继承、类型覆盖、security、docs 模板未注册、
- * 项目读不到），断言每格显示的有效值与来源与回包逐格一致；保存的 403 / 409 / 400 输入保留、提示可读；390 无横向滚动。
+ * 项目读不到），断言每格显示的有效值与来源与回包逐格一致；保存的 403 / 409 / 400 输入保留、提示可读（含回包迟到时类型选择锁住）；390 无横向滚动。
  * 截图：TIER_SETTINGS_SHOTS=<目录> 时只截默认展示（1280 / 390），改前在基线上跑同一条。
  * 直接调 API 被拒（缩权 403、security 低于 Opus 400、旧 rev 409）不需要浏览器，下面隔离测试照常跑。
  */
@@ -86,14 +86,14 @@ beforeAll(async () => {
 afterAll(async () => { await browser?.close(); server?.closeAllConnections(); server?.close(); });
 
 type Reply = { status: number; json: unknown };
-async function pageWith(width: number, get: View, put?: (body: unknown) => Reply): Promise<Page & { puts: unknown[] }> {
+async function pageWith(width: number, get: View, put?: (body: unknown) => Reply | Promise<Reply>): Promise<Page & { puts: unknown[] }> {
   const page = await browser.newPage({ viewport: { width, height: 900 } }) as Page & { puts: unknown[] };
   page.puts = [];
   await page.route("**/api/v1/settings/role-models", async (route) => {
     if (route.request().method() === "GET") return route.fulfill({ status: 200, json: get });
     const body = route.request().postDataJSON();
     page.puts.push(body);
-    return route.fulfill(put ? put(body) : { status: 500, json: { ok: false, error: "x" } });
+    return route.fulfill(put ? await put(body) : { status: 500, json: { ok: false, error: "x" } });
   });
   await page.goto(url);
   await page.getByTestId("role-model-settings").locator("[data-role]").first().waitFor();
@@ -210,6 +210,37 @@ test.skipIf(!enabled)("[验收线 2] 409：按现表刷新、提示可读，正�
   await p.getByTestId("role-model-note").getByText("已保存").waitFor();
   expect(p.puts[1]).toEqual({ rev: 9, role: "reviewer", tier: "code", claude: HAIKU });
   await p.close();
+}, 30_000);
+
+test.skipIf(!enabled)("[验收线 2] 保存中回包迟到：类型选择锁住换不走，400 / 403 / 409 回来后输入与提示都在", async () => {
+  const v = await fixtureView();
+  const current = { ...v, rev: 9 };
+  const cases: [Reply, string][] = [
+    [{ status: 400, json: { ok: false, code: "invalid", error: "这次修改不符合档位约束，没有保存", reason: "security 的 author 不得低于 Opus（写的是 claude-sonnet-5-5）" } }, "不得低于 Opus"],
+    [{ status: 403, json: { ok: false, error: "only the owner's full-access device can view or change role model settings" } }, "没有改档位表的权限"],
+    [{ status: 409, json: { ok: false, code: "conflict", error: "这张表刚被别处改过，已刷新为最新值，请确认后再改", current } }, "别处改过"],
+  ];
+  for (const [reply, expected] of cases) {
+    let release!: () => void;
+    const held = new Promise<void>((done) => { release = done; });
+    const p = await pageWith(1280, v, async () => { await held; return reply; });
+    await pickTier(p, "security");
+    const row = p.locator('[data-role="author"]');
+    await p.getByLabel("author claude", { exact: true }).selectOption(SONNET);
+    await row.getByRole("button", { name: "保存" }).click();
+    await p.getByTestId("role-model-tier-busy").waitFor();
+    const picker = p.getByLabel("task tier", { exact: true });
+    expect(await picker.isDisabled()).toBe(true);
+    await expect(picker.selectOption("code", { timeout: 500 })).rejects.toThrow(); // 存着时换不走
+    release();
+    await p.getByTestId("role-model-tier-busy").waitFor({ state: "detached" });
+    expect(await picker.inputValue()).toBe("security");
+    expect(await picker.isDisabled()).toBe(false);
+    expect(await p.getByLabel("author claude", { exact: true }).inputValue()).toBe(SONNET);
+    const where = reply.status === 409 ? p.getByTestId("role-model-note") : row.getByRole("alert");
+    expect({ status: reply.status, text: await where.innerText() }).toEqual({ status: reply.status, text: expect.stringContaining(expected) });
+    await p.close();
+  }
 }, 30_000);
 
 test.skipIf(!enabled)("[验收线 3] 390：类型选择、锁定提示、项目与有效值都不出横向滚动", async () => {

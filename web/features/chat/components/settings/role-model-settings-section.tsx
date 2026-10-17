@@ -5,6 +5,7 @@
  * 409（别处先改了）按回包里的现表刷新再提示，正在存的那一行草稿保留（rev 已换新，可直接再存）。403 / 404 整块不渲染；文件坏了 / 读不了有提示。
  * TIER3g：顶上选任务类型（或角色格），改的是那一层的格（PUT 带 tier）；每格下面是 bridge 算好的有效值与来源（effective），项目模式按 projects、
  * 模板可用按 templates 显示——不在前端猜默认值、继承或替用户降档。security 的选项限制只是提示，约束以服务端 400 为准。
+ * 有行在存时类型选择锁住：换类型会卸载那一行，迟到的 400 / 403 / 409 就没处保留草稿和原因。
  */
 import { useEffect, useState } from "react";
 import type { ClaudeModelOption } from "../../claude-models";
@@ -29,8 +30,9 @@ function Effective({ cell, family }: { cell: EffectiveCell | undefined; family: 
   );
 }
 
-function RoleRow({ view, tier, role, models, onSaved }: {
+function RoleRow({ view, tier, role, models, onSaved, onBusy }: {
   view: RoleModelView; tier: string; role: string; models: ClaudeModelOption[]; onSaved: (v: RoleModelView, note?: string) => void;
+  onBusy: (delta: 1 | -1) => void;
 }) {
   const t = useRoleModelT();
   const row = baseRowOf(view, tier, role);
@@ -49,6 +51,7 @@ function RoleRow({ view, tier, role, models, onSaved }: {
   const save = async () => {
     if (!patch) return;
     setSaving(true);
+    onBusy(1); // 存着时锁住类型选择：换类型会卸载这一行，失败回包就没处留草稿和原因
     setErr(null);
     try {
       const v = await putRoleModels(patch);
@@ -61,6 +64,7 @@ function RoleRow({ view, tier, role, models, onSaved }: {
       else setErr(saveErrorText(e));
     } finally {
       setSaving(false);
+      onBusy(-1);
     }
   };
   const special = isTier ? [{ value: TIER_DEFAULT, label: t("缺省（类型默认）") }, { value: "inherit", label: t("继承角色格") }] : [];
@@ -101,19 +105,20 @@ function RoleRow({ view, tier, role, models, onSaved }: {
   );
 }
 
-function TierPicker({ view, tier, setTier }: { view: RoleModelView; tier: string; setTier: (t: string) => void }) {
+function TierPicker({ view, tier, setTier, busy }: { view: RoleModelView; tier: string; setTier: (t: string) => void; busy: boolean }) {
   const t = useRoleModelT();
   const projects = Object.entries(view.projects ?? {});
   return (
     <div className="space-y-2 rounded-lg bg-base-100 p-3">
       <label className="form-control min-w-0">
         <span className="label-text mb-1 text-xs text-base-content/60">{t("任务类型")}</span>
-        <select className={SELECT} aria-label="task tier" value={tier} onChange={(e) => setTier(e.target.value)}>
+        <select className={SELECT} aria-label="task tier" value={tier} disabled={busy} onChange={(e) => setTier(e.target.value)}>
           <option value={ROLE_LAYER}>{t("角色格（未声明类型）")}</option>
           {(view.taskTiers ?? []).map((x) => (
             <option key={x} value={x}>{x}{view.templates?.[x] === false ? `（${t("模板未注册")}）` : ""}</option>
           ))}
         </select>
+        {busy && <span className="mt-1 text-[11px] text-base-content/50" data-testid="role-model-tier-busy">{t("正在保存，存完再换类型")}</span>}
       </label>
       {tier === "security" && <p className="break-words text-[11px] text-warning" data-testid="role-model-locked">🔒 {t("security 已锁定：Claude 必须是 Opus 档（继承时看角色格），Codex 只能沿用原档；不合规的保存由服务端拒绝")}</p>}
       {tier !== ROLE_LAYER && view.templates?.[tier] === false && (
@@ -143,12 +148,14 @@ export function RoleModelSettingsSection({ modelOptions }: { modelOptions: Claud
   const [tier, setTier] = useState<string>(ROLE_LAYER);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [note, setNote] = useState<{ text: string; tone: "ok" | "warn" } | null>(null);
+  const [busy, setBusy] = useState(0); // 正在保存的行数
   useEffect(() => {
     let live = true; // 卸载后迟到的回包不落 state
     fetchRoleModels().then((v) => { if (live) setView(v); }, (e) => { if (live) setLoadErr(errText(e)); });
     return () => { live = false; };
   }, []);
   if (view === null) return null;
+  const onBusy = (delta: 1 | -1) => setBusy((n) => n + delta);
   const onSaved = (v: RoleModelView, warn?: string) => {
     setView(v);
     setNote(warn ? { text: warn, tone: "warn" } : { text: v.warning === "replaced_invalid" ? t("原档位表文件损坏，已另存备份后按这次保存的内容重写") : t("已保存"), tone: "ok" });
@@ -163,13 +170,13 @@ export function RoleModelSettingsSection({ modelOptions }: { modelOptions: Claud
         {cfgErr && <p className="text-[11px] text-error" role="alert">{t(cfgErr)}</p>}
         {view && (
           <>
-            {tiered && <TierPicker view={view} tier={tier} setTier={setTier} />}
+            {tiered && <TierPicker view={view} tier={tier} setTier={setTier} busy={busy > 0} />}
             <div className="hidden grid-cols-[11rem_1fr_1fr_auto] gap-x-3 px-3 text-xs text-base-content/60 sm:grid">
               <span>{t("角色")}</span><span>{t("Claude 模型")}</span><span>{t("Codex 推理档")}</span><span className="w-12" />
             </div>
             {view.roles.map((r) => (
-              // key 不带 rev / 值：409 刷新整表时正在存的那一行草稿留着；换类型才重建
-              <RoleRow key={`${tier}:${r.role}`} view={view} tier={tier} role={r.role} models={modelOptions} onSaved={onSaved} />
+              // key 不带 rev / 值：409 刷新整表时正在存的那一行草稿留着；换类型才重建（存着时不让换，见 onBusy）
+              <RoleRow key={`${tier}:${r.role}`} view={view} tier={tier} role={r.role} models={modelOptions} onSaved={onSaved} onBusy={onBusy} />
             ))}
           </>
         )}
