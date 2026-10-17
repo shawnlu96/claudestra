@@ -28,7 +28,7 @@ import { composeView, droppedBlobUrls, revokeBlobUrls, sendCursor } from "./view
 import { claimEcho, findEchoTarget, type HeldState } from "./held-echo";
 import { markHeldSend } from "../quota-wall/held-send";
 import { decideReconnect } from "./reconnect-policy";
-import { healRelock, healTick, healView, noteTurnDone, turnHealOf } from "./turn-heal";
+import { healRelock, healTick, healView, noteListRequest, noteTurnDone, turnHealOf } from "./turn-heal";
 import { EventGate, resetForAgent, type SyncAnchor } from "./switch-sync";
 import { applySnapshotMissing, bgSweepable, markBgDone, reviveUnknownShell, shellExited } from "./bg-shell-state";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
@@ -332,7 +332,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   // ─── agent 列表（状态 / 单 flight / 退避 / 换源清理在 agent-list-loader.ts）──────
 
   private readonly agentList = new AgentListLoader<AgentSession[]>({
-    fetch: (signal, timeoutMs) => apiLoadAgents(signal, timeoutMs),
+    fetch: (signal, timeoutMs) => (noteListRequest(turnHealOf(this)), apiLoadAgents(signal, timeoutMs)), // 记发出时刻:早于 done 的不补锁
     onStatus: (st) => this.produce((s) => void (s.agentList = st)),
     onData: (next, reason) => this.applyAgents(next, reason),
     log: (m) => this.clientLog(m),
@@ -367,7 +367,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 会话态校准(2026-07-14 owner:agent 忙不忙是服务端事实,别只依赖流):
     // 活跃会话在服务端是 busy(hook 真值)而本地没在 streaming → 补锁;迟到的轮询(可能早于 done)不补(turn-heal.ts)。
     const cur = next.find((a) => a.name === this.state.activeAgent);
-    const relock = healRelock(turnHealOf(this), healView(this.state, cur, this.lastEventSeq));
+    const relock = healRelock(turnHealOf(this), healView(this.state, cur));
     if (relock.log) this.clientLog(relock.log); if (relock.kind === "lock") this.produce((s) => void (s.streaming = true));
     if (reason === "poll" || reason === "event") this.checkStreamHealth(cur);
     const explicit = reason === "action" || reason === "manual";
@@ -392,7 +392,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 实锤,强制全量对齐(重拉历史把漏的 reply 补回 + 重连流)。单拍不动——
     // 15s 轮询粒度粗,刚起步的回合会瞬时 busy=false,下一拍即清零计数。
     // 这条自愈只依赖「JS 在跑 + 轮询能通」,不依赖 visibility/focus 事件。补锁上的锁两拍空闲直接解开(turn-heal.ts)。
-    const heal = healTick(turnHealOf(this), healView(this.state, cur, this.lastEventSeq));
+    const heal = healTick(turnHealOf(this), healView(this.state, cur));
     if (heal.log) this.clientLog(heal.log); if (heal.kind === "unlock") this.unlockTurn(); else if (heal.kind === "realign") this.maybeReconnect({ force: true });
     // 流失联哨兵(2026-07-29 owner 报「reply 要切换 agent 才显示」:桌面端流
     // 静默失联 40 分钟,现有自愈全部未命中——看门狗只管已建立的流,反向对齐
@@ -2037,7 +2037,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   public endTurn(interrupted?: boolean, bgPending?: boolean, preempted?: boolean) {
-    noteTurnDone(turnHealOf(this)); // 记 done 时刻:早于它发出的 busy 轮询不再补锁(turn-heal.ts)
+    noteTurnDone(turnHealOf(this), this.state.activeAgent); // 记 done 时刻:早于它发出的 busy 轮询不再补锁(turn-heal.ts)
     this.flushPendingText(); // 定稿前落掉缓冲文本
     this.produce((s) => {
       s.telemetry = null;
