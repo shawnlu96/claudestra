@@ -1,3 +1,4 @@
+import { aliasPick, repoAllowed } from "./repo-alias.js";
 import { retireAfterLeaseEnd } from "./lend-author-retire-write.js"; import { lendAuthorBasis, type LendAuthorSample } from "./lend-author-retire-proof.js";
 import { recoveryPolicy, recordObserved } from "./recovery-policy.js"; import { appendEvent } from "./ledger-write.js";
 import { updateTask } from "./fix-strategy-task-write.js";
@@ -332,7 +333,8 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
   if (LEND_LIVE.includes(o.status)) setStatus(db, o, "cancelled", now, why);
   unbindStep(db, o);
   // 钉位在该 peer 的授权已失效（grant 收回置空 / 到期 / 不再含 write 或本仓库）或它这一家族处于 runtime 冷却（NETCOOL1）时解除；否则保留，照旧再挂给它
-  const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") || !g.repos.includes(o.repo))
+  const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") ||
+    !aliasPick("lend.send-back", g.repos.includes(o.repo), g.repos.includes(o.repo) || repoAllowed(o.repo, g.repos)))
     || pinnedPeerCooled(db, o, now);
   const task = mustTask(db, o.taskId), r = lendReturnLocal(db, o, task, endWriteLease(db, o.taskId, why, now), unpin, now); // LENDBACK1：没开工就退回 = 解钉、对不上家族的执行者不恢复
   if (r) setTask(db, ctx, { id: task.id, rev: task.rev, patch: r.patch as never });
@@ -398,7 +400,8 @@ export function pollLend(db: Database, peer: string, req: PollRequest, borrow: (
     .map(toOrder), legacyLendRoute(db));
   const role = (o: LendOrder) => roleOfStep(o.step) as "review" | "write";
   const orders = c.ordersLeftToday <= 0 ? [] : rows
-    .filter((o) => c.repos.includes(o.repo) && open(o.family) && c.roles.includes(role(o)) && !!unifiedBorrow(o.project, borrow(o.project))?.roles.includes(role(o)))
+    .filter((o) => aliasPick("lend.poll", c.repos.includes(o.repo), c.repos.includes(o.repo) || repoAllowed(o.repo, c.repos)) &&
+      open(o.family) && c.roles.includes(role(o)) && !!unifiedBorrow(o.project, borrow(o.project))?.roles.includes(role(o)))
     .slice(0, pollLimit(rows.length))
     .map((o) => ({ orderId: o.orderId, taskId: o.taskId, step: o.step, family: o.family, repo: o.repo, pr: o.pr, head: o.head, round: o.round,
       specRev: o.specRev, offeredAt: o.createdAt }));

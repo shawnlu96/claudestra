@@ -1,3 +1,4 @@
+import { aliasPick, repoAllowed } from "./repo-alias.js";
 import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow-provider.js";
 /**
  * 出借单逐状态推进（docs/design/remote-capacity.md §2.3、§6）：lend 循环每轮对 journal 里每张活着的单调一次 driveOrder，按状态做下一步。
@@ -149,7 +150,8 @@ const GONE: Record<string, "cancelled" | "stopped"> = { ...CONVERGENCE_GONE, can
 /** 这张还没 claim 的单现在还能不能领：声明仍在、仓库仍在白名单、今日额度与在跑位都还有 */
 export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Database, now: number): string | null {
   if (!entry) return `已不再向 ${row.peer} 出借（lend.json 关了或删了这条）`;
-  if (!entry.repos.includes(str(row.preview.repo))) return `仓库 ${str(row.preview.repo)} 已不在白名单`;
+  if (!aliasPick("lend-drive.claim", entry.repos.includes(str(row.preview.repo)),
+    entry.repos.includes(str(row.preview.repo)) || repoAllowed(str(row.preview.repo), entry.repos))) return `仓库 ${str(row.preview.repo)} 已不在白名单`;
   if (!roleOfStep(str(row.preview.step))) return `不认识的订单阶段 ${str(row.preview.step)}，不领这一单`;
   const slots = lendQuotaLineCap(row.family, row.family === "claude" ? claudeLendSlots(entry) : row.family === "codex" ? entry.families.codex ?? 0 : 0, now);
   const busy = db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)

@@ -1,3 +1,4 @@
+import { aliasPick, repoAllowed } from "./repo-alias.js";
 /**
  * 一次授权此刻算不算数（lend.json v2 的 lend[]，lend-config.ts 只核形状）：暂停、缺指纹 / 到期时间、过期、期限超过 7 天，任一条都整条不生效。
  * 调度服务的每个核对点（收单、claim 前、起 worker 前、首条派单前、每次续租，lend-grant.ts liveGrant）和宿主看门狗（lend-watchdog.ts）用的都是这一个判定，
@@ -39,7 +40,7 @@ export interface OrderScope { repo: string; step: string; family: string }
  * 被拿掉的那部分单一样要停。claim 前、起 worker 前、续租、看门狗都核；tests/lend-revoke.test.ts「范围收窄」。
  */
 export function scopeProblem(e: LendEntry, o: OrderScope): string | null {
-  if (!e.repos.includes(o.repo)) return `仓库 ${o.repo} 已不在授权里`;
+  if (!aliasPick("lend-grant.scope", e.repos.includes(o.repo), e.repos.includes(o.repo) || repoAllowed(o.repo, e.repos))) return `仓库 ${o.repo} 已不在授权里`;
   if (!roleOfStep(o.step)) return `不认识的订单阶段 ${o.step}`;
   return (e.families as Record<string, number | undefined>)[o.family] ? null : `授权里已没有 ${o.family} 位`;
 }
