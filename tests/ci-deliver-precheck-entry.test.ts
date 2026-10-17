@@ -175,6 +175,7 @@ describe("[验收线 1] 真实 prepareClone 建的写单副本 → worker 提交
     const put = (p: string, text: string) => { mkdirSync(join(L.seed, p, ".."), { recursive: true }); writeFileSync(join(L.seed, p), text); };
     put("tsconfig.json", "{}");
     put("scripts/ci-related-plan.ts", "export {};\n");
+    put("src/lib/ci-impact-inputs.ts", readFileSync(join(import.meta.dir, "..", "src", "lib", "ci-impact-inputs.ts"), "utf8"));
     put("src/x.ts", "export const x = 1;\n");
     put("tests/x.test.ts", `import { x } from "../src/x.js";\n`);
     L.git(L.seed, "add", "-A");

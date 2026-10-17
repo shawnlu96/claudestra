@@ -1,7 +1,7 @@
 /**
  * merge-arch-CIPRECHK1 · 交付前本机预检（恢复键 ciDeliverPrecheck，缺省 on）：manager deliver 写入前、worker submitLendWork 提交前共用。
- * 绑定工作副本的 repo / base / head / 工作区（含未跟踪文件内容）/ 选测图摘要 → CI 同一套 ci-impact 选测（≤50 个跑选集，超了或 all 只跑改动测试并写明降级）
- * + 登记检查（ci-impact-registration-check.ts）→ 跑完再绑一次，变了就作废。测试经 scripts/test.ts（全量测试闸 FULLGATE1）起，本卡从不起全量。
+ * 绑定工作副本的 repo / base / head / 工作区（含未跟踪文件内容）/ 选测图摘要 → CI 同一套 ci-impact 选测（≤50 个跑选集，超了或 all 只跑改动测试并写明降级；
+ * head 未合入 base 时在 CI 的合并树里跑，合不出就拒交）+ 登记检查（交付树自己的登记表）→ 跑完再绑一次，变了就作废。测试经 scripts/test.ts（全量测试闸 FULLGATE1）起，本卡从不起全量。
  * 不替代 CI；通过只是放行原交付校验。off = 不读工作副本、不起进程，与没有本卡时逐字一致。本文件是两个入口的闸与回执文字；
  * 预检本体与真实端口在 ci-deliver-precheck-run.ts；bridge 入口（30 秒预算）改走后台预检，结果按 git 事实取回。
  * tests/ci-deliver-precheck.test.ts、tests/ci-deliver-precheck-entry.test.ts、tests/ci-deliver-precheck-concurrency.test.ts。
@@ -29,9 +29,11 @@ export interface Inspection {
   changedTests: string[];
   /** 登记检查的问题；空 = 登记齐全 */
   registration: string[];
-  /** 本机无法与 CI 选集对齐的原因（合并冲突 / 选集里有工作副本没有的测试）：有就整次降级 */
-  degrade?: string[];
+  /** head 未合入 base（CI 测的合并树 ≠ head 的树）：测试在这棵合并树的临时检出里跑，不在工作副本里跑 */
+  merge?: MergeTarget;
 }
+/** CI 的合并提交：第一父 base、第二父 head、树 = 两者合并的树 */
+export interface MergeTarget { tree: string; base: string; head: string }
 export interface TestRun { code: number; tail: string }
 export interface PrecheckReceipt {
   ok: boolean;
@@ -46,13 +48,15 @@ export interface PrecheckReceipt {
   skipped?: string;
   /** 后台还在跑（bridge 入口）：未写交付，稍后用同一 head 重交 */
   pending?: string;
+  /** 这份回执实际绑定的工作副本事实（repo / base / 合并基 / head / 工作区 / 未跟踪文件）的摘要；后台结果按它核对事实键 */
+  facts?: string;
 }
 export type BackgroundState = { state: "done"; receipt: PrecheckReceipt } | { state: "running" } | { error: string };
 export interface PrecheckPort {
   /** skip = 不适用（交付的仓库没有 ci-impact 选测，例如台账里别的项目）：放行，回执写明 */
   inspect(worktree: string): Promise<Inspection | { error: string } | { skip: string }>;
-  /** 只带文件跑（经全量测试闸入口）；files 永远非空 */
-  runTests(worktree: string, files: string[]): Promise<TestRun>;
+  /** 只带文件跑（经全量测试闸入口）；files 永远非空；给了 merge 就在该合并树的临时检出里跑 */
+  runTests(worktree: string, files: string[], merge?: MergeTarget): Promise<TestRun>;
   recall(key: string): PrecheckReceipt | null;
   remember(key: string, receipt: PrecheckReceipt): void;
   /** bridge 入口（manager 子进程 30 秒就被杀）：按 git 事实查后台结果，没有就起一个后台预检；同一份事实同时只跑一个 */
