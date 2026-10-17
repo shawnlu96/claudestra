@@ -4,7 +4,7 @@
  * reaching the ledger writers (remote-review-ledger.ts). tests/remote-review-intake-ledger.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { prCoordinates } from "./card-repo.js";
+import { fullRemoteHead, remoteIdentityKey, sameRemotePr, type RemoteIdentity } from "./remote-review-identity.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
 import type { RemoteReview } from "./remote-review-parse.js";
@@ -21,20 +21,21 @@ export const APPLIED_OP = "remote_review_applied";
 export const handoffProjects = (cfg: SchedulerConfig, peer: string): string[] =>
   Object.entries(cfg.projects).filter(([, p]) => p.handoffPeer === peer).map(([id]) => id);
 
-/** The one card of these projects whose PR has this number; none or several = null (the push then goes to PM as before). */
-export function matchRemoteCard(db: Database, projects: readonly string[], number: number): LedgerTask | null {
-  const hits = projects.flatMap((p) => listTasks(db, p)).filter((t) => prCoordinates(t.pr)?.pr === number);
+/** The one card of these projects for this repo+PR; none or several = ordinary PM delivery. */
+export function matchRemoteCard(db: Database, projects: readonly string[], r: Pick<RemoteIdentity, "repo" | "number">): LedgerTask | null {
+  const hits = projects.flatMap((p) => listTasks(db, p)).filter((t) => sameRemotePr(t.pr, r));
   return hits.length === 1 ? hits[0]! : null;
 }
 
-/** The full head the review is about, if head12 starts it: the card's head, or in merge the PR head the handoff follows now. */
-export function remoteHeadMatch(db: Database, task: LedgerTask, head12: string): string | null {
+/** Exact full SHA only: the card's head, or in merge the PR head the handoff follows now. */
+export function remoteHeadMatch(db: Database, task: LedgerTask, fullHead: unknown): string | null {
+  if (!fullRemoteHead(fullHead)) return null;
   const heads = [task.headSHA, task.stage === "merge" ? handoffOf(db, task)?.head : null];
-  return heads.find((h): h is string => typeof h === "string" && h.toLowerCase().startsWith(head12)) ?? null;
+  return heads.find((h): h is string => h === fullHead) ?? null;
 }
 
-export const remoteReviewKey = (taskId: string, r: Pick<RemoteReview, "reportId" | "head12">): string =>
-  `scheduler:${REMOTE_REVIEW_OP}:${taskId}:${r.reportId}:${r.head12}`;
+export const remoteReviewKey = (taskId: string, r: Pick<RemoteReview, "reportId" | "repo" | "number" | "fullHead">): string =>
+  `scheduler:${REMOTE_REVIEW_OP}:${taskId}:${r.reportId}:${remoteIdentityKey(r)}`;
 export const notifiedKey = (seq: number): string => `scheduler:${NOTIFIED_OP}:${seq}`;
 export const appliedKey = (seq: number): string => `scheduler:${APPLIED_OP}:${seq}`;
 
@@ -54,9 +55,9 @@ export function unsentRemoteNotices(db: Database, project: string): { taskId: st
 /** Bookings that did not match at intake, not applied yet, whose card (not finished) has now reached that head. */
 export function lateRemoteMatches(db: Database, project: string): { taskId: string; seq: number }[] {
   return remoteRows(db, project).filter((x) => {
-    const d = JSON.parse(x.data) as { op?: string; matched?: boolean; head12?: unknown };
-    if (d.op !== REMOTE_REVIEW_OP || d.matched !== false || typeof d.head12 !== "string" || getEventByDedup(db, appliedKey(x.seq))) return false;
+    const d = JSON.parse(x.data) as RemoteIdentity & { op?: string; matched?: boolean };
+    if (d.op !== REMOTE_REVIEW_OP || d.matched !== false || typeof d.repo !== "string" || getEventByDedup(db, appliedKey(x.seq))) return false;
     const task = getTask(db, x.target);
-    return !!task && !TERMINAL_STAGES.includes(task.stage) && !!remoteHeadMatch(db, task, d.head12);
+    return !!task && sameRemotePr(task.pr, d) && !TERMINAL_STAGES.includes(task.stage) && !!remoteHeadMatch(db, task, d.fullHead);
   }).map((x) => ({ taskId: x.target, seq: x.seq }));
 }

@@ -1,12 +1,8 @@
 /**
- * Bridge hook on POST /api/v1/agents/:name/messages (RRL-1): a review push from the repository owner on a handed-over PR is stashed
- * for the scheduler instead of starting a PM turn. It is taken only when all three hold — the sender is a peer token whose peer is
- * the project's scheduler.json `handoffPeer`, the text parses strictly (lib/remote-review-parse.ts), and the read-only ledger has
- * exactly one card with that PR number whose PM is the addressee. Then the raw text goes to the inbox, the PM channel gets one
- * mirror line and the peer gets 202. An old-format redelivered P1 (capUnknown: the cap cannot be read) is never taken: every
- * copy returns null, so a retry after a failed PM delivery reaches PM again; only the first is stashed, to be booked. Anything
- * else — including any error on the way — returns null and the message is delivered to PM exactly as before.
- * tests/remote-review-intake-hook.test.ts.
+ * A handed-over review is stashed only for a trusted handoffPeer, a strict repo+PR+full-SHA wire, and a unique matching card
+ * whose PM is the addressee. Old wires without repo/full SHA always go through ordinary PM delivery, including resends.
+ * An ambiguous P1 with the new identity is booked only and every copy still reaches PM normally. Other accepted wires get
+ * one mirror and HTTP 202; any failed intake check falls through to ordinary delivery. tests/remote-review-intake-hook.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { LedgerReader } from "../lib/ledger-read.js";
@@ -47,9 +43,9 @@ function claim(input: IntakeInput, deps: IntakeDeps): Claim | null {
   const review = parseRemoteReview(input.text);
   const db = review && deps.db();
   if (!review || !db) return null;
-  const task = matchRemoteCard(db, projects, review.number);
+  const task = matchRemoteCard(db, projects, review);
   if (!task || !getMeta(db, task.project).pms.includes(input.agent)) return null;
-  const key = { taskId: task.id, reportId: review.reportId, head12: review.head12 };
+  const key = { taskId: task.id, ...review };
   return { taskId: task.id, peer, review, duplicate: !!getEventByDedup(db, remoteReviewKey(task.id, review)) || deps.waiting(key) };
 }
 
@@ -60,7 +56,7 @@ export async function interceptRemoteReview(input: IntakeInput, mirror: (line: s
     hit = claim(input, deps);
     if (!hit) return null;
     const r = hit.review;
-    const key = { taskId: hit.taskId, reportId: r.reportId, head12: r.head12 };
+    const key = { taskId: hit.taskId, ...r };
     if (!hit.duplicate) deps.stash({ peer: hit.peer, agent: input.agent, taskId: hit.taskId, receivedAt: deps.now(), text: input.text }, key);
     // PM gets every copy the normal way and decides; the inbox only keeps one for the record
     if (capUnknown(r)) return null;

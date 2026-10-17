@@ -26,7 +26,7 @@ function book(c: LedgerCli, taskId: string, file: string, readConfig: () => Sche
   if (!projects.includes(task.project)) throw new LedgerError("forbidden", `${entry.peer} 不是项目 ${task.project} 的 handoffPeer`);
   const review = parseRemoteReview(entry.text);
   if (!review) throw new LedgerError("invalid", "收件正文不是仓库方审查推送的格式");
-  if (matchRemoteCard(c.db, projects, review.number)?.id !== task.id) throw new LedgerError("conflict", `PR #${review.number} 现在对不上唯一的 ${task.id}`);
+  if (matchRemoteCard(c.db, projects, review)?.id !== task.id) throw new LedgerError("conflict", `${review.repo} PR #${review.number} 现在对不上唯一的 ${task.id}`);
   c.deps.assertLease?.();
   return recordRemoteReview(c.db, c.ctx(), { taskId: task.id, review, peer: entry.peer, reportDir });
 }

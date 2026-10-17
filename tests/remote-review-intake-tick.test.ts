@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listInbox } from "../src/lib/remote-review-inbox.js";
 import { unsentRemoteNotices } from "../src/lib/remote-review-read.js";
-import { remoteReviewStep } from "../src/lib/remote-review-tick.js";
+import { NOTICE_FAILURE_CAP, pruneRemoteNoticeFailures, remoteReviewStep } from "../src/lib/remote-review-tick.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { CAP_TEXT, HEAD, HEAD2, handoffConfig, P0_TEXT, P1_TEXT, pushText, remoteFixture } from "./helpers/remote-review-fixture.js";
 import { renderRedeliveryPush } from "../src/lib/peer-pr-retry.js";
@@ -41,7 +41,7 @@ describe("RRL-1 tick", () => {
     expect(getWorkflow(fx.db, "T1")!.mode).toBe("manual");
     expect(h.notices.length).toBe(1);
     expect(h.notices[0]!.project).toBe("p");
-    expect(h.notices[0]!.text).toContain("T1-remote-PR1600-r1.md");
+    expect(h.notices[0]!.text).toMatch(/T1-remote-PR1600-r1-[0-9a-f]{64}\.md/);
     expect(unsentRemoteNotices(fx.db, "p")).toEqual([]);
     expect(await h.step()).toEqual([]);
     expect(h.notices.length).toBe(1);
@@ -71,6 +71,32 @@ describe("RRL-1 tick", () => {
     expect(await h.step()).toEqual([]);
     expect(h.notices.length).toBe(1);
     expect(unsentRemoteNotices(fx.db, "p")).toEqual([]);
+  });
+
+  test("RRL-4: a removed project drops notice backoff even when no projects remain", async () => {
+    fx = remoteFixture();
+    fx.stash(P0_TEXT);
+    const h = harness({ failNotify: 1 });
+    expect(await h.step()).toHaveLength(1);
+    await h.step(handoffConfig(null));
+    expect(await h.step()).toEqual([]);
+    expect(h.notices).toHaveLength(1); // no clock advance: the removed project's backoff was cleared
+  });
+
+  test("RRL-4: external acknowledgement is pruned while other notices are pending", () => {
+    const memo = new Map([[1, 10], [2, 20], [3, 30]]);
+    pruneRemoteNoticeFailures(memo, new Set([2]));
+    expect([...memo]).toEqual([[2, 20]]);
+  });
+
+  test("RRL-4: notice backoff stays capped and evicts the oldest failure first", () => {
+    const memo = new Map(Array.from({ length: NOTICE_FAILURE_CAP + 5 }, (_, seq) => [seq, seq] as const));
+    pruneRemoteNoticeFailures(memo, new Set(memo.keys()));
+    expect(memo.size).toBe(NOTICE_FAILURE_CAP);
+    expect(memo.has(4)).toBe(false);
+    expect(memo.has(5)).toBe(true);
+    pruneRemoteNoticeFailures(memo, new Set());
+    expect(memo.size).toBe(0);
   });
 
   test("[验收线 5/8] a P0 that arrived early acts in the first pass after the card reaches its head", async () => {
