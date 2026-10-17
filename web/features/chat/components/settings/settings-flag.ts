@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getSettings, putSettings } from "@/lib/api/settings";
 import { machines } from "@/lib/machines";
+import { getSteerQueueRecovery, SteerQueueStaleRead } from "@/lib/steer-queue-capability";
 
 type Flag = "pushNoContent" | "pushAllAsks" | "talkEnabled" | "steer.queueWhenBusy";
 const listeners = new Set<(key: Flag, fp: string | null, on: boolean) => void>();
@@ -24,7 +25,13 @@ export function useSettingsFlag(key: Flag, open = true, onChanged?: (on: boolean
       const ticket = ++read.current;
       getSettings().then((j) => {
         if (live && ticket === read.current) { setRec({ key, fp, on: j[key] }); setErr(""); }
-      }).catch((e: Error) => { if (live && ticket === read.current) setErr(e.message); });
+      }).catch(async (e: Error) => {
+        if (!live || ticket !== read.current || e instanceof SteerQueueStaleRead) return;
+        const conservative = key === "steer.queueWhenBusy" && await getSteerQueueRecovery() === "on";
+        if (!live || ticket !== read.current) return;
+        if (conservative) setRec({ key, fp, on: false });
+        setErr(e.message);
+      });
     };
     const changed = (k: Flag, source: string | null, value: boolean) => {
       if (k !== key || source !== fp) return;
@@ -42,12 +49,13 @@ export function useSettingsFlag(key: Flag, open = true, onChanged?: (on: boolean
     setErr("");
     try {
       const next = (await putSettings({ [key]: !on }))[key];
+      if (machines.currentFp() !== fp) return;
       ++read.current;
       setRec({ key, fp, on: next });
       for (const changed of listeners) changed(key, fp, next);
       onChanged?.(next);
     } catch (e) {
-      setErr((e as Error).message);
+      if (machines.currentFp() === fp && !(e instanceof SteerQueueStaleRead)) setErr((e as Error).message);
     } finally {
       setBusy(false);
     }

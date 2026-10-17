@@ -1,10 +1,11 @@
 "use client";
 /** Collab sends request calm delivery explicitly; the bridge owns busy checks and the existing held queue. */
-import { useRef, useState } from "react";
-import { getSettings } from "@/lib/api/settings";
+import { useEffect, useRef, useState } from "react";
+import { getSteerQueueForSend } from "@/lib/steer-queue-capability";
 import { useSettingsFlag } from "@/features/chat/components/settings/settings-flag";
 import { sendMessage } from "@/lib/api/chat";
 import { agentPending } from "@/lib/api/ledger";
+import { machines } from "@/lib/machines";
 import { liveIdle, sayGate } from "./collab-action";
 import { Icon } from "./collab-icons";
 import type { Tr } from "./collab-model";
@@ -21,29 +22,35 @@ export function CollabSay({ agent, working, tr }: { agent: string; working: bool
   const ctrl = useRef<AbortController | null>(null);
   const flag = useSettingsFlag("steer.queueWhenBusy");
   const inFlight = useRef(false);
+  useEffect(() => () => ctrl.current?.abort(), [agent]);
   const gate = sayGate(working, text, sending || flag.on === null, flag.on === true);
 
   const send = async () => {
     if (!gate.canSend || inFlight.current) return;
     inFlight.current = true;
     setSending(true);
-    ctrl.current = new AbortController();
+    const controller = new AbortController();
+    ctrl.current = controller;
+    const unsubscribe = machines.onSwitch(() => controller.abort());
     try {
-      const queueWhenBusy = (await getSettings())["steer.queueWhenBusy"];
+      const queueWhenBusy = await getSteerQueueForSend();
+      controller.signal.throwIfAborted();
       if (!queueWhenBusy) {
         const pending = await agentPending(agent);
-        if (!liveIdle(pending)) {
+        if (!sayGate(!liveIdle(pending), text, false, queueWhenBusy).canSend) {
           setReceipt({ kind: pending === null ? "unknown" : "busy" });
           return;
         }
       }
-      const result = await sendMessage(agent, text.trim(), undefined, ctrl.current.signal, { waitForIdle: queueWhenBusy });
+      controller.signal.throwIfAborted();
+      const result = await sendMessage(agent, text.trim(), undefined, controller.signal, { waitForIdle: queueWhenBusy });
       setText("");
       setReceipt(result.queued || result.heldBy ? { kind: "queued" }
         : result.guarded ? { kind: "error", message: tr("等待放行") } : { kind: "sent", at: Date.now() });
     } catch (e) {
       setReceipt({ kind: "error", message: (e as Error).message });
     } finally {
+      unsubscribe();
       inFlight.current = false;
       setSending(false);
     }

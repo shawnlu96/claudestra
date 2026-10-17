@@ -5,6 +5,7 @@
 import { apiAgentName } from "@/lib/chat/agents";
 import { api } from "./client";
 import { talkEnabledOf } from "../talk-gate";
+import { queueWhenBusy, readSteerQueueSettings, type SteerQueueMode } from "../steer-queue-capability";
 
 // ── 全局设置（语言 / 语音识别 key / 推送不带正文）：GET 只回是否已配 + 尾四位，完整 key 永不回传 ──
 export interface GlobalSettings {
@@ -22,23 +23,25 @@ export interface GlobalSettings {
   "steer.queueWhenBusy": boolean;
 }
 type RawSettings = { lang?: unknown; groqApiKeyHint?: unknown; jevApiKeyHint?: unknown; pushNoContent?: unknown; pushAllAsks?: unknown; talkEnabled?: unknown; "steer.queueWhenBusy"?: unknown };
-const shapeSettings = (j: RawSettings): GlobalSettings => {
+const shapeSettings = (j: RawSettings, mode: SteerQueueMode = "on"): GlobalSettings => {
   const hint = typeof j.groqApiKeyHint === "string" ? j.groqApiKeyHint : "";
   const jev = typeof j.jevApiKeyHint === "string" ? j.jevApiKeyHint : "";
   return {
-    "steer.queueWhenBusy": j["steer.queueWhenBusy"] !== false,
+    "steer.queueWhenBusy": queueWhenBusy(j["steer.queueWhenBusy"], mode),
     groqApiKeySet: !!hint, groqApiKeyHint: hint, jevApiKeySet: !!jev, jevApiKeyHint: jev,
     pushNoContent: j.pushNoContent === true, pushAllAsks: j.pushAllAsks === true, talkEnabled: talkEnabledOf(j),
     ...(j.lang === "en" || j.lang === "zh" ? { lang: j.lang } : {}),
   };
 };
-export function getSettings(): Promise<GlobalSettings> {
-  return api("/settings", { timeoutMs: 8000 }).then(shapeSettings);
+export async function getSettings(): Promise<GlobalSettings> {
+  const { raw, mode } = await readSteerQueueSettings();
+  return shapeSettings(raw, mode);
 }
 /** 空串 groqApiKey / jevApiKey = 清除 */
 type SettingsPatch = { lang?: "zh" | "en"; groqApiKey?: string; jevApiKey?: string; pushNoContent?: boolean; pushAllAsks?: boolean; talkEnabled?: boolean; "steer.queueWhenBusy"?: boolean };
-export function putSettings(patch: SettingsPatch): Promise<GlobalSettings> {
-  return api("/settings", { method: "PUT", json: patch, timeoutMs: 8000 }).then(shapeSettings);
+export async function putSettings(patch: SettingsPatch): Promise<GlobalSettings> {
+  const { raw, mode } = await readSteerQueueSettings(patch);
+  return shapeSettings(raw, mode);
 }
 /** Jev 连通测试（bridge 用固定样例打一次 TypeSafe；失败时 bridge 回 {ok:false, code, error}，api() 会抛） */
 export interface JevTestResult {
