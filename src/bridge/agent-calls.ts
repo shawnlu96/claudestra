@@ -292,6 +292,13 @@ export class AgentCallBook extends PersistedMap<PendingAgentCall> {
     this.set(keyOf(target, pac.callerChannelId), { ...raw, requests: requestsOf(raw).map((r) => (done.some((x) => sameReq(x, r)) ? { ...r, withheld: undefined } : r)) });
   }
 
+  /** target 那一串自动续跑结束了（turn-failure 已推结局）：清掉 caller 那一槽各条请求的等续跑标记，扣下的话留着；落盘 */
+  clearApiError(target: string, caller: string): void {
+    const raw = this.slot(target, caller);
+    if (!raw || !requestsOf(raw).some((r) => r.apiErrorAt)) return;
+    this.set(keyOf(target, caller), { ...raw, requests: requestsOf(raw).map((r) => ({ ...r, apiErrorAt: undefined })) });
+  }
+
   /** 有 caller 在等 target 接着做完（它上一轮以 API 错误结束）：这时 owner 在 Discord 打字不算接管 */
   awaitingResume(target: string, stillHeld: StillHeld): boolean {
     return this.waiting(target, stillHeld).some((c) => c.apiErrorAt);
