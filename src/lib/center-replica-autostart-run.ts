@@ -10,6 +10,7 @@ import { centerClaimAction, centerReplicaMember, centerReplicaMode, coolCenterNo
 import { activeFeatures, currentViews, featureGateRest, isStop, nodeCandidate, type Candidate } from "./scheduler-autostart.js";
 import type { StartTickEnv } from "./scheduler-autostart-run.js";
 import { localAuthorRuntime } from "./scheduler-local-runtime.js";
+import { localAutostart } from "./scheduler-local-runtime-start.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 import { CENTER_START_TEXT, centerPreflight } from "./shared-ledger-center-start.js";
@@ -32,16 +33,26 @@ async function centerRefused(env: Env, cand: Candidate, code: string, error: str
 }
 
 /**
- * openCard 的预检：非中心副本原样 run()。副本先在中心认领（或核对已有认领），过了才跑原预检；centerPreflight 自己处理「认领后卡号被占 → 孤儿」。
- * 返回 null = 中心这一步拒了（已记 note 或冷却），本轮不写台账 claim。
+ * openCard 的预检：非中心副本原样 run()。副本先在中心认领（或核对已有认领，卡号沿用认领的），过了才带那个卡号跑原预检；
+ * centerPreflight 自己处理「认领后卡号被占 → 孤儿」。返回 null = 中心这一步拒了（已记 note 或冷却），本轮不写台账 claim。
  */
-export async function centerReplicaPreflight(env: Env, cand: Candidate, run: () => Promise<Preflight>, failed: Failed): Promise<Preflight | null> {
+export async function centerReplicaPreflight(env: Env, cand: Candidate, run: (taskId?: string) => Promise<Preflight>, failed: Failed): Promise<Preflight | null> {
   if (!isCenterReplica(cand.f.id)) return run();
   let ran = false;
-  const pre = await centerPreflight(env.db, cand.f, cand.key, { featureId: cand.f.id, key: cand.key, taskId: cand.taskId }, () => { ran = true; return run(); });
+  const input = { featureId: cand.f.id, key: cand.key, taskId: cand.taskId };
+  const pre = await centerPreflight(env.db, cand.f, cand.key, input, () => { ran = true; return run(input.taskId); });
   if (ran || pre.ok) return pre;
   await centerRefused(env, cand, pre.code, pre.error, failed);
   return null;
+}
+
+/**
+ * 中心副本放本机时，台账 claim 前先过本机槽位准入（非副本这一道在 localAutostartNode，它的预检对没认领的副本节点必拒，走不到槽位）。
+ * 槽满 = 台账零写、arm 不烧；中心认领留 committed，下一轮按补建核对（GET，不再 POST）。已持槽（嵌套）的直接跑；其余原样 go()。
+ */
+export async function centerReplicaAdmit(env: Env, cand: Candidate, pre: Preflight, go: () => Promise<void>): Promise<void> {
+  if (!isCenterReplica(cand.f.id) || !pre.ok || !("plan" in pre) || pre.plan.peer) return go();
+  await localAutostart(cand.f.project, go, { ledgerPath: env.db.filename });
 }
 
 /** 本会放哪：生产放置函数只读地算一遍（与开卡同一个；私仓 / 预留的观察都只在真开卡或进程日志里留痕） */

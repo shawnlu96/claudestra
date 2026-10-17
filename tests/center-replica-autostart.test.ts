@@ -10,7 +10,11 @@ import type { StepIO } from "../src/lib/dag-tools-steps.js";
 import { instanceIdSync } from "../src/lib/instance-id.js";
 import { getFeature } from "../src/lib/ledger-feature.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
+import { acquireLock } from "../src/lib/file-lock.js";
+import { statePath } from "../src/lib/paths.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
+import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { featureGate } from "../src/lib/scheduler-autostart.js";
 import { autostartTick, type StartTickEnv } from "../src/lib/scheduler-autostart-run.js";
 import { featureProposalError, parseFeatureHomeBind, type FeatureHomeBind } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
@@ -24,6 +28,7 @@ let open: Kit | null = null;
 afterEach(async () => {
   configureCenterStart(undefined);
   rmSync(RECOVERY_POLICY_PATH, { force: true });
+  rmSync(SCHEDULER_CONFIG_PATH, { force: true });
   await open?.close();
   open = null;
 });
@@ -70,7 +75,8 @@ function policy(project: string, mode: "on" | "observe" | "off" | null) {
 }
 
 /** 副本（本实例为主场、本机有 service 凭据）已 sync；规格卡放好并静置；调度 env 的 ledger 是调度身份的进程内 CLI */
-async function setup(opts: { createFails?: boolean } = {}) {
+/** died：台账写完这一笔后进程被杀（之后什么都没做） */
+async function setup(opts: { createFails?: boolean; died?: (args: string[]) => boolean } = {}) {
   const me = instanceIdSync();
   const k = open = await replicaKit({ credentialInstance: me });
   k.center.publish(fakeFeature({ homeInstanceId: me }));
@@ -80,13 +86,21 @@ async function setup(opts: { createFails?: boolean } = {}) {
   const f = k.f, ledgerDir = f.startEnv.ledgerDir, agents = new Set<string>(), notes: string[] = [], calls: string[][] = [];
   const specPath = (id: string) => join(ledgerDir, "docs", "tasks", `${id}.md`);
   mkdirSync(join(ledgerDir, "docs", "tasks"), { recursive: true });
-  writeFileSync(specPath(TASK), "# 副本节点\n模板：code\n");
-  const aged = new Date(Date.now() - 120_000);
-  utimesSync(specPath(TASK), aged, aged);
+  const spec = (id: string) => {
+    writeFileSync(specPath(id), "# 副本节点\n模板：code\n");
+    const aged = new Date(Date.now() - 120_000);
+    utimesSync(specPath(id), aged, aged);
+  };
+  spec(TASK);
   const stepIO = (): Omit<StepIO, "db" | "manager" | "attempt"> => ({ ...f.io, agentExists: (a) => agents.has(a) });
   const env: StartTickEnv = {
     db: f.db, svc: { autoDispatch: true, projects: [f.project], maxWorkers: () => 3 },
-    ledger: async (...args) => { calls.push(args); return f.ledger(args.slice(1), "scheduler"); },
+    ledger: async (...args) => {
+      calls.push(args);
+      const r = await f.ledger(args.slice(1), "scheduler");
+      if (opts.died?.(args)) throw new SchedulerStopped(`进程被杀：${args.slice(1, 4).join(" ")} 之后`);
+      return r;
+    },
     plain: async (args) => {
       calls.push(args);
       if (args[0] === "create" && opts.createFails) return { ok: false, error: "合成失败" };
@@ -99,7 +113,7 @@ async function setup(opts: { createFails?: boolean } = {}) {
   };
   const bound = () => (f.db.query("SELECT taskId FROM dag_bindings WHERE featureId = ? AND nodeKey = 'alpha'").get(LOCAL_ID) as { taskId: string } | null)?.taskId ?? null;
   const events = (op: string) => listEvents(f.db, { project: f.project }).filter((e) => e.data.op === op && (e.data.feature ?? e.target) === LOCAL_ID);
-  return { k, b, f, env, notes, calls, bound, events, tick: () => autostartTick(env) };
+  return { k, b, f, env, notes, calls, bound, events, spec, tick: () => autostartTick(env) };
 }
 
 test("[验收线 1] on：已发布、依赖齐、规格齐、车道空的副本节点一轮内在中心认领、建卡、绑节点", async () => {
@@ -228,4 +242,67 @@ test("开卡失败回滚：认领标孤儿、台账 claim 结为 failed，之后
   const posts = s.b.n.posts;
   await s.tick();
   expect(s.b.n.posts).toBe(posts);
+});
+
+test("[验收线 3] 中心认领后、建卡前进程被杀：下一轮 claim 结 unknown，按补建 arm 补建卡一次，不再认领；补建也断了就不再自动试", async () => {
+  let deaths = 1;
+  const s = await setup({ died: (args) => args[2] === "claim" && deaths-- > 0 });
+  policy(s.f.project, "on");
+  await expect(s.tick()).rejects.toBeInstanceOf(SchedulerStopped);
+  expect(readCenterClaims()).toMatchObject([{ key: "alpha", taskId: TASK, state: "committed" }]);
+  expect(getTask(s.f.db, TASK)).toBeNull();
+  expect(await s.tick()).toEqual([]);
+  expect(s.b.n.posts).toBe(1);
+  expect(getTask(s.f.db, TASK)).not.toBeNull();
+  expect(s.bound()).toBe(TASK);
+  expect(s.events("autostart_settle").map((e) => e.data.outcome)).toEqual(["unknown", "done"]);
+  expect(new Set(s.events("autostart_claim").map((e) => e.data.arm)).size).toBe(2);
+});
+
+test("[验收线 3] 补建只给一次：补建那次也在建卡前断了，之后不再自动开", async () => {
+  const s = await setup({ died: (args) => args[2] === "claim" });
+  policy(s.f.project, "on");
+  await expect(s.tick()).rejects.toBeInstanceOf(SchedulerStopped);
+  await expect(s.tick()).rejects.toBeInstanceOf(SchedulerStopped);
+  await s.tick();
+  await s.tick();
+  expect(s.events("autostart_claim")).toHaveLength(2);
+  expect(s.events("autostart_settle").map((e) => e.data.outcome)).toEqual(["unknown", "unknown"]);
+  expect(s.b.n.posts).toBe(1);
+  expect(getTask(s.f.db, TASK)).toBeNull();
+});
+
+test("[验收线 3] 中心已按自定义卡号认领（PM 的 start_node 带 taskId）、本机没卡：沿用那个卡号补建，不按默认卡号再认领", async () => {
+  const s = await setup();
+  const custom = "roster-custom-alpha";
+  expect(await claimCenterNode(s.f.db, { id: LOCAL_ID }, "alpha", custom)).toEqual({ ok: true, taskId: custom });
+  s.spec(custom);
+  policy(s.f.project, "on");
+  expect(await s.tick()).toEqual([]);
+  expect(s.b.n.posts).toBe(1);
+  expect(getTask(s.f.db, custom)).not.toBeNull();
+  expect(getTask(s.f.db, TASK)).toBeNull();
+  expect(s.bound()).toBe(custom);
+  expect(s.events("autostart_claim").map((e) => e.data.taskId)).toEqual([custom]);
+  expect(readCenterClaims()).toMatchObject([{ key: "alpha", taskId: custom, state: "committed" }]);
+});
+
+test("本机作者 Codex、全机槽锁被占：中心认领后台账零写、arm 不烧；放开槽后下一轮按已有认领补建，不再 POST", async () => {
+  const s = await setup();
+  const runtime = (extra: object) => writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, autoDispatch: true,
+    projects: { [s.f.project]: { maxActiveWorkers: 3, requiredChecks: ["check"], repoDir: s.f.startEnv.ledgerDir, ...extra } } }));
+  runtime({ localAuthorRuntime: "codex" });
+  policy(s.f.project, "on");
+  const held = (await acquireLock(statePath("scheduler-local-codex.lock"), 0))!;
+  try {
+    expect(await s.tick()).toEqual([]);
+  } finally { held.release(); }
+  expect(readCenterClaims()).toMatchObject([{ key: "alpha", taskId: TASK, state: "committed" }]);
+  expect(s.events("autostart_claim")).toEqual([]);
+  expect(getTask(s.f.db, TASK)).toBeNull();
+  runtime({});
+  expect(await s.tick()).toEqual([]);
+  expect(s.b.n.posts).toBe(1);
+  expect(s.bound()).toBe(TASK);
+  expect(s.events("autostart_settle").map((e) => e.data.outcome)).toEqual(["done"]);
 });

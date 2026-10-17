@@ -5,7 +5,11 @@
  * 认领与开卡在 center-replica-autostart-run.ts，台账写口在 center-replica-autostart-ledger.ts；tests/center-replica-autostart.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { instanceIdSync } from "./instance-id.js";
+import { claimDedup, getClaim, settleDedup } from "./ledger-autostart-grant.js";
+import { cardNames } from "./ledger-card-names.js";
+import type { Feature } from "./ledger-feature.js";
 import { getEventByDedup } from "./ledger-store.js";
 import { STATE_DIR } from "./paths.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
@@ -56,11 +60,8 @@ export function coolCenterNode(featureId: string, key: string, now: number): voi
   cooling.set(coolKey(featureId, key), now + TRANSIENT_COOLDOWN_MS);
 }
 
-/**
- * 副本节点门（nodeCandidate 在 arm 算出后调）：非副本 = null。记过中心拒绝、冷却中、认领已成孤儿、已有认领的卡号不是自动开卡的卡号都不开。
- * 卡号对不上交 PM：自动路径的台账 claim 只认默认卡号，按别的卡号开会在 claim 后对不上、白白烧掉这份 arm。
- */
-export function centerReplicaNodeStop(db: Database, f: { id: string; currentVersion: number }, key: string, taskId: string, arm: string, now: number,
+/** 副本节点门（nodeCandidate 在 arm 算出后调）：非副本 = null。记过中心拒绝、冷却中、认领文件不可读、认领已成孤儿都不开 */
+export function centerReplicaNodeStop(db: Database, f: { id: string; currentVersion: number }, key: string, arm: string, now: number,
   dir = STATE_DIR): string | null {
   if (!isCenterReplica(f.id, dir)) return null;
   const noted = getEventByDedup(db, centerSkipDedup(f.id, key, f.currentVersion, arm));
@@ -69,9 +70,42 @@ export function centerReplicaNodeStop(db: Database, f: { id: string; currentVers
   let mine;
   try { mine = readCenterClaims(dir).filter((c) => c.localFeatureId === f.id && c.key === key); }
   catch { return "本机中心认领记录不可读"; } // corrupt claims file: every claim path refuses anyway
-  if (mine.some((c) => c.state === "orphan")) return "这个节点的中心认领已成孤儿（开卡失败回滚过），要先撤销中心绑定";
-  const held = mine.find((c) => c.state === "committed" || c.state === "pending");
-  return held && held.taskId !== taskId ? `中心已按卡号 ${held.taskId} 认领，不是自动开卡的卡号 ${taskId}：交 PM 用 start_node 带 taskId 开` : null;
+  return mine.some((c) => c.state === "orphan") ? "这个节点的中心认领已成孤儿（开卡失败回滚过），要先撤销中心绑定" : null;
+}
+
+/** 本机对这个副本节点已有的中心认领（pending / committed）的卡号：认领沿用它，不按默认卡号重新认领；没有 / 不是副本 / 读不了 = null */
+export function centerClaimTaskId(featureId: string, key: string, dir = STATE_DIR): string | null {
+  if (!isCenterReplica(featureId, dir)) return null;
+  try {
+    return readCenterClaims(dir).find((c) => c.localFeatureId === featureId && c.key === key && (c.state === "committed" || c.state === "pending"))?.taskId ?? null;
+  } catch { return null; } // unreadable: centerReplicaNodeStop stops the node before any claim
+}
+
+/**
+ * 台账 claim（ledger-autostart.ts claimNode）的卡名：副本节点有本机认领时按认领的卡号派生（agent / 分支与 start_node 显式 taskId 同一规则），
+ * 否则 null 走 cardNames。来源是本机认领文件，仍不收调用方给的值。
+ */
+export function centerReplicaCardNames(db: Database, f: Feature, key: string, dir = STATE_DIR): ReturnType<typeof cardNames> | null {
+  const taskId = centerClaimTaskId(f.id, key, dir);
+  if (!taskId) return null;
+  const low = taskId.toLowerCase();
+  return { slug: cardNames(db, f, key).slug, taskId, agent: `agent-${`task-${low.replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48)}`, branch: `feat/${low}` };
+}
+
+/**
+ * 断链补建（[验收线 3]）：同一 arm 的上一次 claim 结成 unknown（进程在建卡前断了）、它的卡号一张卡都没建、中心那份认领仍 committed，
+ * 就再给一次补建，arm 换成由原 arm 派生的补建 arm；补建 arm 也 claim 过就不再给（台账 dedup 兜底，最多一次）。别的情况 null（照旧 armed）。
+ */
+export function centerRepairArm(db: Database, f: { id: string }, key: string, taskId: string, arm: string, priorSeq: number, dir = STATE_DIR): string | null {
+  if (!isCenterReplica(f.id, dir)) return null;
+  const prior = getClaim(db, priorSeq);
+  if (!prior || prior.taskId !== taskId || getEventByDedup(db, settleDedup(priorSeq))?.data.outcome !== "unknown") return null;
+  if (db.query("SELECT id FROM tasks WHERE id = ? COLLATE NOCASE").get(taskId)) return null;
+  let committed = false;
+  try { committed = readCenterClaims(dir).some((c) => c.localFeatureId === f.id && c.key === key && c.state === "committed" && c.taskId === taskId); }
+  catch { return null; } // unreadable: centerReplicaNodeStop stops the node anyway
+  const again = createHash("sha256").update(`center-repair:${arm}`).digest("hex").slice(0, 16);
+  return committed && !getEventByDedup(db, claimDedup(f.id, key, again)) ? again : null;
 }
 
 /** 已有本机 committed 认领（补建卡），否则是要新认领 */

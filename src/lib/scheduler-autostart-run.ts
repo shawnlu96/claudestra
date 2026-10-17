@@ -2,7 +2,7 @@ import { priorityNowAttempted, priorityNowStarts } from "./scheduler-priority-no
 import { autostartSnapshot, type AutostartReads } from "./scheduler-autostart-snapshot.js";
 import { notifyAutostartQuotaWait } from "./scheduler-autostart-quota.js";
 import { localAutostartNode, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
-import { centerReplicaObserveTick, centerReplicaPreflight } from "./center-replica-autostart-run.js";
+import { centerReplicaAdmit, centerReplicaObserveTick, centerReplicaPreflight } from "./center-replica-autostart-run.js";
 import { centerStartFailed } from "./shared-ledger-center-start.js";
 /**
  * 自动开卡（i28-A1 §3）调度侧：每轮在 auto tick 之后最多开一张卡，复用 start_node 的 preflightStart / runStart，不改它们。
@@ -13,7 +13,7 @@ import { centerStartFailed } from "./shared-ledger-center-start.js";
  * tests/scheduler-autostart-run.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { preflightStart, type StartEnv, type StartPlan } from "./dag-tools-start.js";
+import { preflightStart, type Preflight, type StartEnv, type StartPlan } from "./dag-tools-start.js";
 import { runStart, type StepIO } from "./dag-tools-steps.js";
 import type { InventoryQuota } from "./ai-quota.js";
 import { openClaims, type AutostartClaim } from "./ledger-autostart-grant.js";
@@ -153,7 +153,7 @@ function specMoved(env: StartTickEnv, cand: Candidate): string | null {
   if ("why" in g) return g.why;
   const f = getFeature(env.db, cand.f.id);
   const globs = (f ? currentViews(env.db, f) : []).find((n) => n.key === cand.key)?.fileGlobs ?? [];
-  return armOf((spec as SpecFile).text, globs, templateLabel(g.head.template)) === cand.arm ? null : "规格卡或节点范围在开卡途中改了";
+  return armOf((spec as SpecFile).text, globs, templateLabel(g.head.template)) === (cand.specArm ?? cand.arm) ? null : "规格卡或节点范围在开卡途中改了";
 }
 
 /** runStart 的 manager 调用改写：台账写走 claim 的 step，create / kill 只许本 claim 的 agent，其余一律拒 */
@@ -196,10 +196,16 @@ async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<
   const { cand } = pick;
   if (specMoved(env, cand)) return; // 还没写台账：安静放弃，下一轮按新规格重判
   const pm = featurePm(env.db, cand.f.id) ?? "";
-  const pre = await centerReplicaPreflight(env, cand, () => preflightStart({ ...env.startEnv(), db: env.db, caller: pm },
-    { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined }), failed);
+  const pre = await centerReplicaPreflight(env, cand, (taskId) => preflightStart({ ...env.startEnv(), db: env.db, caller: pm },
+    { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined, ...(taskId ? { taskId } : {}) }), failed);
   if (!pre) return; // 中心副本：中心拒绝认领，已记 note 或冷却，不写台账 claim
   if (!pre.ok && pre.code === "placement") return; // Destination has no room: leave the arm unclaimed for the next tick.
+  return centerReplicaAdmit(env, cand, pre, () => claimAndStart(env, pick, pre, pm, failed));
+}
+
+/** openCard 的后半：台账 claim → 建卡 → 结清（预检已过、中心副本已过本机槽位准入） */
+async function claimAndStart(env: StartTickEnv, pick: Pick, pre: Preflight, pm: string, failed: Failed): Promise<void> {
+  const { cand } = pick;
   const selected = pre.ok && "plan" in pre ? pre.plan.peer : null;
   const r = await env.ledger("ledger", "scheduler-autostart", "claim", cand.f.id, cand.key, "--arm", cand.arm, "--template", templateLabel(cand.head.template),
     "--max-workers", String(pick.maxWorkers), "--pm", pm, ...(selected ? ["--peer", JSON.stringify(selected)] : []), ...(cand.head.ownerVisual ? ["--owner-visual"] : []));
