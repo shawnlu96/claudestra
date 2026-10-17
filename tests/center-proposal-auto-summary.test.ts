@@ -85,7 +85,49 @@ describe("PROPEVID1 结果事件带提案摘要", () => {
   });
 });
 
+describe("PROPEVID1 r1 摘要遮本机绝对路径（中英文标点、等号、其他根）", () => {
+  const ABS = ["/tmp/probe-x/a.ts", "/srv/app/data.db", "/Users/someone/repos/x", "/home/u/.env", "/opt/x/y", "~/notes/a.md", "~someone/x/y",
+    "C:\\Users\\x\\a.ts", "\\\\host\\share\\a", "/etc", "/data/x"];
+  const LEADS = ["", " ", "位置:", "位置：", "（", "「", "=", "，", ",", ";", "：\"", "看"];
+
+  test("各种前导 × 各种根：摘要 JSON 不含原路径", () => {
+    for (const lead of LEADS) for (const abs of ABS) {
+      const s = proposalSummary(rec("p-abs", [node("x", ["docs/a.md"])], { title: `标题${lead}${abs} 收尾` }));
+      expect(s.title).toContain("[本机路径]");
+      expect(JSON.stringify(s)).not.toContain(abs.replace(/\\/g, "\\\\"));
+    }
+  });
+
+  test("相对 glob、括号 glob、中文斜杠不误遮", () => {
+    const keep = ["src/lib/a.ts", "web/{a,b}/c/d.tsx", "src/[ab]/c/d.ts", "src/**/x/y.ts", "scripts/guard/rules.ts", "docs/a-/b/c.md"];
+    const s = proposalSummary(rec("p-rel", [node("x", keep)], { title: "新建/修订 3/4 a/b/c" }));
+    expect(s.nodes[0]!.fileGlobs).toEqual(keep);
+    expect(s.title).toBe("新建/修订 3/4 a/b/c");
+  });
+
+  test("真实结果事件：approved 路径的 data.proposal.title 与 text 都不留绝对路径", async () => {
+    const r = rec("p-abs-evt", [node("ui", ["web/features/collab/list.tsx"])], { title: "核对 位置：/tmp/probe-x/a.ts 与 /srv/app/data.db" });
+    const [e] = await autoApproveOnce(r);
+    expect(e!.data.outcome).toBe("approved");
+    const blob = JSON.stringify(e!.data) + e!.text;
+    for (const bad of ["/tmp/probe-x", "/srv/app"]) expect(blob).not.toContain(bad);
+    expect(e!.text).toContain("[本机路径]");
+  });
+});
+
 describe("PROPEVID1 guard 文件不报 schema", () => {
+  test("r1 嵌套 scripts/guard 路径路由仍 owner，原因改报安全敏感；tests/ docs/ 下照旧豁免", () => {
+    for (const g of ["src/scripts/guard/rules.ts", "web/scripts/guard/rules.ts", "scripts/fixture/scripts/guard/rules.ts", "src/x/Scripts/Guard/a.ts"]) {
+      const v = classifyProposal(rec("p-nested", [node("g", [g])]), REPO);
+      expect(v.route).toBe("owner");
+      expect(v.reasons).toContain("glob_security_surface");
+      expect(v.reasons).not.toContain("glob_data_schema");
+    }
+    const t = classifyProposal(rec("p-tests", [node("t", ["tests/scripts/guard/x.test.ts"])]), REPO);
+    expect(t.reasons).not.toContain("glob_data_schema");
+  });
+
+
   test("[验收线 2] 只改 scripts/guard/rules.ts：仍 owner、报安全敏感，不报 schema；ledger-schema 仍报 schema", () => {
     const g = classifyProposal(rec("p-guard", [node("g", ["scripts/guard/rules.ts"])]), REPO);
     expect(g.route).toBe("owner");

@@ -25,7 +25,8 @@ export interface ProposalSummary {
 }
 
 const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi;
-const LOCAL_ABS = /(?:^|(?<=[\s"'`(]))(?:\/(?:Users|home|private|tmp|var|opt|etc|root|Volumes)\/|~\/|[A-Za-z]:[\\/])\S*/g;
+/** 本机绝对路径：前面不是路径字符（含中英文标点、等号、CJK 后紧跟）的 /a/…、单段常见根、~/ 与 ~user/、盘符、UNC；宁可多遮 */
+const LOCAL_ABS = /(?<![A-Za-z0-9._~\-/\\*?\]}!])(?:\/[A-Za-z0-9._@+-]+\/|\/(?:Users|home|private|tmp|var|opt|etc|root|Volumes|srv|mnt|media|data|usr|run|nix|workspace)(?![A-Za-z0-9._-])|~[A-Za-z0-9._-]*\/|[A-Za-z]:[\\/]|\\\\[^\s\\]+\\)\S*/g;
 const clean = (s: string, n: number) => {
   const t = redactForPeer(s).text.replace(URL_RE, "[URL]").replace(LOCAL_ABS, "[本机路径]");
   return t.length > n ? `${t.slice(0, n)}…` : t;
