@@ -50,7 +50,10 @@ export function classifyTestArgs(args: readonly string[]): BunTestRun {
   return worker ? { kind: "worker", args: rest } : { kind: positional ? "focused" : "full", args: rest };
 }
 
-/** 整条命令行（argv[0] 是 bun 本身）：`test` 之前只许出现选项，`test` 之后同 classifyTestArgs；去掉 `test` 后的参数原样保留 */
+/**
+ * 整条命令行（argv[0] 是 bun 本身）：`test` 之前只许出现选项，`test` 之后同 classifyTestArgs；去掉 `test` 后的参数原样保留。
+ * `test` 之前认不出的选项立即报错：不知道它带不带值，继续扫可能把它的值当成脚本名、落到 other 而绕过闸。
+ */
 export function classifyBunArgv(argv: readonly string[]): BunTestRun | { kind: "other" } {
   const tokens = argv.slice(1);
   for (let i = 0; i < tokens.length; i++) {
@@ -63,7 +66,15 @@ export function classifyBunArgv(argv: readonly string[]): BunTestRun | { kind: "
     if (!a.startsWith("-") || ["-e", "--eval", "-p", "--print", "-"].includes(a) || a.startsWith("--eval=") || a.startsWith("--print=")) {
       return { kind: "other" };
     }
-    if (VALUE_OPTIONS.has(a)) i++;
+    const eq = a.indexOf("=");
+    const name = eq > 0 ? a.slice(0, eq) : a;
+    if (VALUE_OPTIONS.has(name)) {
+      if (eq > 0) continue;
+      if (i + 1 >= tokens.length) return { kind: "error", message: `${a} 缺少取值` };
+      i++;
+    } else if (!OPTIONAL_VALUE_OPTIONS.has(name) && !(FLAG_OPTIONS.has(name) && eq < 0)) {
+      return { kind: "error", message: `认不出的 bun 参数 ${JSON.stringify(a)}（不猜它带不带值、后面是不是 test）` };
+    }
   }
   return { kind: "other" };
 }
