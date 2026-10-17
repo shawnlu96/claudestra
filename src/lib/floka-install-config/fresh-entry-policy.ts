@@ -5,7 +5,7 @@
  *   （有日志 = 迁移中断）、~/.floka 的身份要么两份文件都没有、要么两份都在且有效（坏身份不补、不重造）。不满足就不动手，
  *   让 paths.ts 照原样报它自己的错。
  * - 恢复键 installFreshEntry（缺省 on）：在动作前现读 recovery-policy.json（旧根与 ~/.floka 两处都读，取最保守的），
- *   项目 claude-orchestrator 的 keys.installFreshEntry → 项目 mode → on；文件坏 / 值不认识 → off。不经 recovery-policy.ts：
+ *   项目 claude-orchestrator 的 keys.installFreshEntry → 项目 mode → on；文件坏 / 结构不合法（与 recovery-policy.ts 同一严格判据）→ off。不经 recovery-policy.ts：
  *   那里加载期就 import paths.ts。off = 入口什么都不做（与基线一致）；observe = 只记一条「本会选 X」的样本，不动手。
  * - 观察样本落维护根 observe/installFreshEntry.jsonl，按 入口@版本 + 动作去重，只有入口名、版本、动作，没有路径与身份内容。
  * 只依赖 node: 内置与 fresh-root.ts 同一批模块（不经 paths.ts）。tests/floka-fresh-entry.test.ts。
@@ -15,6 +15,7 @@ import { appendFileSync, lstatSync, mkdirSync, readFileSync, readdirSync } from 
 import { basename, join } from "node:path";
 import type { ObservedAction, RecoveryMode } from "../recovery-policy.js";
 import { maintenanceBarrierPresent } from "../floka-config/default-root.ts";
+import { RECOVERY_KEYS } from "../recovery-keys.ts";
 import { stateDirIn } from "../state-dir.ts";
 import { maintenanceRoot } from "../state-maintenance/paths.ts";
 import { chooseFreshStateRoot, type FreshRootChoice, type FreshRootResult } from "./fresh-root.ts";
@@ -22,6 +23,7 @@ import { chooseFreshStateRoot, type FreshRootChoice, type FreshRootResult } from
 const INSTALL_FRESH_ENTRY_KEY = "installFreshEntry";
 const PROJECT = "claude-orchestrator";
 const MODES: readonly RecoveryMode[] = ["on", "observe", "off"];
+const MANUAL_STALL_HOURS_MAX = 720; // 同 recovery-policy.ts
 const RANK: Record<RecoveryMode, number> = { on: 0, observe: 1, off: 2 };
 
 type Env = Record<string, string | undefined>;
@@ -83,18 +85,37 @@ export function checkFreshEntry(home: string, env: Env = process.env): FreshEntr
   return { status: "fresh", choice: id === "valid" ? "floka" : "legacy" };
 }
 
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const isMode = (v: unknown): v is RecoveryMode => MODES.includes(v as RecoveryMode);
+const isPosInt = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 1;
+
+/**
+ * 与 recovery-policy.ts 的 parseRecoveryFile 同一套严格判据（那边加载期 import paths.ts，这里不能引）：顶层只能
+ * { projects: {...}, machine?: {...} }；每个项目只能有 mode / manualStallHours / keys / rev 且取值合法；keys 只认已登记的恢复键。
+ * 任何一处不合法 = 整个文件无效 → 保守 off，绝不把坏文件当「没配」走缺省 on。
+ */
+function validPolicyDocument(data: unknown): data is { projects: Record<string, { mode?: RecoveryMode; keys?: Record<string, RecoveryMode> }> } {
+  if (!isObj(data) || !isObj(data.projects) || Object.keys(data).some(k => k !== "projects" && k !== "machine")) return false;
+  if (data.machine !== undefined && !isObj(data.machine)) return false;
+  return Object.values(data.projects).every(p => isObj(p)
+    && Object.keys(p).every(k => ["mode", "manualStallHours", "keys", "rev"].includes(k))
+    && (p.rev === undefined || isPosInt(p.rev))
+    && (p.mode === undefined || isMode(p.mode))
+    && (p.manualStallHours === undefined || (Number.isInteger(p.manualStallHours) && (p.manualStallHours as number) >= 1 && (p.manualStallHours as number) <= MANUAL_STALL_HOURS_MAX))
+    && (p.keys === undefined || (isObj(p.keys) && Object.entries(p.keys).every(([k, m]) => (RECOVERY_KEYS as readonly string[]).includes(k) && isMode(m)))));
+}
+
 function readMode(path: string): RecoveryMode | null {
   let raw: string;
   try { raw = readFileSync(path, "utf8"); } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
     return "off";
   }
-  try {
-    const p = JSON.parse(raw)?.projects?.[PROJECT];
-    const mode: unknown = p?.keys?.[INSTALL_FRESH_ENTRY_KEY] ?? p?.mode;
-    if (mode === undefined) return null;
-    return MODES.includes(mode as RecoveryMode) ? mode as RecoveryMode : "off";
-  } catch { return "off"; } // 读不了的策略文件 = 保守停手，同 recovery-policy.ts
+  let data: unknown;
+  try { data = JSON.parse(raw); } catch { return "off"; } // 读不了的策略文件 = 保守停手，同 recovery-policy.ts
+  if (!validPolicyDocument(data)) return "off";
+  const p = Object.hasOwn(data.projects, PROJECT) ? data.projects[PROJECT] : undefined;
+  return p?.keys?.[INSTALL_FRESH_ENTRY_KEY] ?? p?.mode ?? null;
 }
 
 /** 每次现读，不缓存：运行中切档对下一次动作立即生效 */

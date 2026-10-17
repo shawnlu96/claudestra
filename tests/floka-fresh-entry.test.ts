@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { checkFreshEntry, freshEntryMode, freshEntryTarget, runFreshEntry } from "../src/lib/floka-install-config/fresh-entry-policy.ts";
 import { defaultStateRoot } from "../src/lib/floka-config/default-root.ts";
 import { defaultRecoveryMode } from "../src/lib/recovery-key-defaults.ts";
-import { RECOVERY_KEYS } from "../src/lib/recovery-policy.ts";
+import { RECOVERY_KEYS, recoveryPolicy } from "../src/lib/recovery-policy.ts";
 import { testChildEnv } from "./test-env.ts";
 
 const REPO = join(import.meta.dir, "..");
@@ -175,6 +175,34 @@ describe("[验收线 3] on / observe / off、运行中切档与上游开关组�
     expect(freshEntryMode(home)).toBe("off");
     setMode(NEW(home), null);
     expect(freshEntryMode(home)).toBe("on");
+  });
+
+  test("结构不合法的策略文件（合法 JSON）与标准读取器一样 → off，不选根、不生成身份", () => {
+    const docs: unknown[] = [
+      null, [], 1, "x", {}, { projects: [] }, { projects: null }, { projects: { "claude-orchestrator": false } },
+      { projects: { "claude-orchestrator": [] } }, { projects: { "claude-orchestrator": { keys: [] } } },
+      { projects: { "claude-orchestrator": { keys: { installFreshEntry: "maybe" } } } },
+      { projects: { "claude-orchestrator": { keys: { noSuchKey: "on" } } } },
+      { projects: { "claude-orchestrator": { bogus: 1 } } }, { projects: { "claude-orchestrator": { rev: 0 } } },
+      { projects: { "claude-orchestrator": { manualStallHours: 0 } } },
+      { projects: { other: { mode: "maybe" } } }, { projects: { other: { keys: { installFreshEntry: "x" } } } }, { projects: { other: 7 } },
+      { projects: {}, extra: 1 }, { projects: {}, machine: [] },
+    ];
+    for (const doc of docs) {
+      const home = freshHome("baddoc");
+      const path = join(NEW(home), "recovery-policy.json");
+      writeFileSync(path, JSON.stringify(doc));
+      expect(recoveryPolicy("claude-orchestrator", "installFreshEntry", path).mode).toBe("off");
+      expect(freshEntryMode(home)).toBe("off");
+      expect(runFreshEntry("setup", home, {}, "probe")).toMatchObject({ mode: "off", action: "none" });
+      expect(existsSync(OLD(home))).toBe(false);
+      expect(readdirSync(NEW(home))).toEqual(["recovery-policy.json"]);
+    }
+    const ok = freshHome("gooddoc");
+    const path = join(NEW(ok), "recovery-policy.json");
+    writeFileSync(path, JSON.stringify({ projects: { other: { mode: "off", manualStallHours: 3, rev: 2 } }, machine: {} }));
+    expect(recoveryPolicy("claude-orchestrator", "installFreshEntry", path).mode).toBe("on");
+    expect(freshEntryMode(ok)).toBe("on");
   });
 
   test("observe 只记样本（按入口@版本去重，无路径 / 身份内容），不改业务结果；运行中切 on 下一次即动手，切 off 即停", () => {
