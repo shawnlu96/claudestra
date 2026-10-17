@@ -4,17 +4,19 @@
  * - off：与没有这个功能时一致，不给建议、不记。
  * - observe（缺省）：材料里不带 suggest，只在卡上记一条 would-use（同卡同角色同值一条）。
  * - on：对带了 caps=suggest 的 claim 附 suggest；入账把对方报的 actual 记到卡和回执，给过建议却没报的记 unknown；旧对端没报的不落账，读出来就是 unknown。
- * 建议不当实际：B 只在自己的出借授权内起（lend-grant-spawn.ts lendModelArgs 一字不动），A 只记 B 报来的。表读不了 / 内容坏 = 不给建议并留诊断。
+ * 建议不当实际：B 只在自己的出借授权内起（lend-grant-spawn.ts lendModelArgs；TIER3b 在授权内接受降档见 task-tier-lend.ts），A 只记 B 报来的。表读不了 / 内容坏 = 不给建议并留诊断。
  * tests/role-model-lend.test.ts、tests/role-model-lend-peer.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { getMeta, getOrder, setMeta, type LendRow } from "./lend-journal.js";
 import type { LedgerEvent } from "./ledger-stages.js";
+import { LedgerError } from "./ledger-store.js";
 import type { LendFamily, ModelActual, ModelActualRecord, ModelSuggest } from "./lend-wire-types.js";
 import { decideRecovery, recordObserved } from "./recovery-policy.js";
 import { roleModelPort, type RoleModelPort } from "./role-model-settings-local.js";
 import { roleModelOf, type CardRole } from "./role-model-settings.js";
 import { actualFamilyProblem, launchActual, parseModelActual, parseModelSuggest } from "./role-model-settings-wire.js";
+import { lendChoiceFor, TIER_CAP, tierLendActive, tierLendGate, tierLendRole, tierLendSuggest, type LendGate, type SuggestTierInfo } from "./task-tier-lend.js";
 
 /** 出借单对应的卡片角色：开工 / 修复单是 author，对抗审查单是 adversarial-reviewer；仲裁等别的节点不在档位表里，不给建议 */
 export function lendCardRole(step: string, node: string | null | undefined): CardRole | null {
@@ -24,7 +26,7 @@ export function lendCardRole(step: string, node: string | null | undefined): Car
 
 interface SuggestOrder { project: string; taskId: string; family: LendFamily; step: string; wire: { node?: string | null } }
 /** note = 并进 claim 事件 data.lend 的那一段（建议原样、或没给建议的诊断），重复 claim 按它原样回 */
-export interface ClaimSuggest { suggest: ModelSuggest | null; note: { suggest?: ModelSuggest; suggestDiagnostic?: string } }
+export interface ClaimSuggest { suggest: ModelSuggest | null; note: { suggest?: ModelSuggest; suggestDiagnostic?: string; suggestTier?: SuggestTierInfo } }
 const NONE: ClaimSuggest = { suggest: null, note: {} };
 
 /**
@@ -32,7 +34,9 @@ const NONE: ClaimSuggest = { suggest: null, note: {} };
  * observe 的 would-use 用同一个 db 记（已在领单事务里）；记不上只少一条观察，不挡领单。
  */
 export function claimSuggest(db: Database, o: SuggestOrder, caps: readonly string[] | undefined, now: number, port: RoleModelPort = roleModelPort()): ClaimSuggest {
-  const role = lendCardRole(o.step, o.wire.node);
+  // TIER3b：只有对方 claim 带了 caps=tier（新 B 且它本机门开）且 A 本机 taskTierModels on 才走类型建议；否则下面是旧路径原样
+  const tiered = tierLendActive(o.project, caps);
+  const role = tiered ? tierLendRole(o.step, o.wire.node) : lendCardRole(o.step, o.wire.node);
   if (!caps?.includes("suggest") || !role) return NONE;
   const d = decideRecovery(port.policy(o.project, "roleModel"));
   if (d.kind === "skip") return NONE;
@@ -40,7 +44,16 @@ export function claimSuggest(db: Database, o: SuggestOrder, caps: readonly strin
   const cell = roleModelOf(read, role, o.family);
   const diagnostic = read.status === "invalid" || read.status === "unreadable" ? `模型档位表${read.status === "invalid" ? "内容不合法" : "读不了"}，不给建议` : null;
   if (d.kind === "act") {
-    if (diagnostic || cell.source === "error") return { suggest: null, note: { suggestDiagnostic: diagnostic ?? "模型档位表不可用，不给建议" } };
+    const broken = diagnostic || cell.source === "error" ? diagnostic ?? "模型档位表不可用，不给建议" : null;
+    if (tiered) {
+      // 类型 × 角色有效值，suggest 里带 tier / role 给 B 核（进摘要）；解析来源只记本机 claim 事件
+      const t = tierLendSuggest(db, { taskId: o.taskId, family: o.family }, role, read, broken);
+      if (!("diagnostic" in t)) return { suggest: t.suggest, note: { suggest: t.suggest, suggestTier: t.info } };
+      // 协商了 tier 的 B 收到「没建议」会当旧 A 照机器默认起：证明不了 security 下限就不派这一单（事务回滚、单留在池里，B 下轮重领）
+      if (t.unproven) throw new LedgerError("conflict", `${t.diagnostic}；证明不了 security 下限，这次不派单`, { lend: "unavailable" });
+      return { suggest: null, note: { suggestDiagnostic: t.diagnostic } };
+    }
+    if (broken || cell.source === "error") return { suggest: null, note: { suggestDiagnostic: broken ?? "模型档位表不可用，不给建议" } };
     const suggest: ModelSuggest = o.family === "claude" ? { model: cell.value as string, source: cell.source } : { effort: cell.value, source: cell.source };
     return { suggest, note: { suggest } };
   }
@@ -101,8 +114,10 @@ export function recordLendLaunch(db: Database, orderId: string, sessionId: strin
   const row = getOrder(db, orderId);
   if (!row) return null;
   const made = launchActual(row.family, row.wire?.suggest, args);
-  setMeta(db, launchKey(orderId), JSON.stringify({ sessionId, actual: made.actual }));
-  return made.diagnostic ?? null;
+  // TIER3b：起之前按建议在授权内选过档（task-tier-lend.ts），偏离原因随同一条启动事实落下，不另记事件
+  const choice = lendChoiceFor(db, orderId, args);
+  setMeta(db, launchKey(orderId), JSON.stringify({ sessionId, actual: made.actual, ...(choice ? { choice } : {}) }));
+  return choice ? choice.reason ?? null : made.diagnostic ?? null;
 }
 
 type ManagerCall = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -141,6 +156,20 @@ export function deliveredActual(db: Database, row: Pick<LendRow, "orderId" | "wi
 
 const NO_CAPS_MS = 24 * 3_600_000;
 const noCapsKey = (peer: string): string => `claim-caps-refused:${peer}`;
-/** 这个 peer 的 claim 带不带 caps：最近 24 小时它拒过带 caps 的 claim（旧版严格解析）就不带，过了再试一次 */
-export const claimCaps = (db: Database, peer: string, now: number): { caps?: string[] } => (Number(getMeta(db, noCapsKey(peer)) ?? 0) > now ? {} : { caps: ["suggest"] });
+/** 不认 tier 的 peer → 到期时间：只在本进程内存里（不落盘、不进 journal），进程重启后再试一次 */
+const noTier = new Map<string, number>();
+/**
+ * 这个 peer 的 claim 带不带 caps：最近 24 小时它拒过带 caps 的 claim（旧版严格解析）就不带，过了再试一次。
+ * TIER3b：本机门开（taskTierModels on +「接受降档建议」开，tierLendGate）且这个 peer 24 小时内没拒过 tier 才多带 tier；门关 = 与改前逐字相同的 ["suggest"]。
+ */
+export function claimCaps(db: Database, peer: string, now: number, gate: () => LendGate = tierLendGate): { caps?: ("suggest" | "tier")[] } {
+  if (Number(getMeta(db, noCapsKey(peer)) ?? 0) > now) return {};
+  if ((noTier.get(peer) ?? 0) > now) return { caps: ["suggest"] };
+  const g = gate();
+  return g.on && g.acceptDowngrade ? { caps: ["suggest", TIER_CAP] } : { caps: ["suggest"] };
+}
 export const rememberNoCaps = (db: Database, peer: string, now: number): void => setMeta(db, noCapsKey(peer), String(now + NO_CAPS_MS));
+/** 旧 A 不认 tier（回 invalid）：一天内只带 suggest，旧 A 仍拿到它认得的 caps，建议照旧给 */
+export const rememberNoTier = (peer: string, now: number): void => { noTier.set(peer, now + NO_CAPS_MS); };
+/** Tests only: forget the in-memory tier refusals. */
+export const resetNoTier = (): void => noTier.clear();
