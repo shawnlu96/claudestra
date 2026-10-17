@@ -23,7 +23,7 @@ export const switchOverrideSize = (): number => switchOverride.size;
  */
 function sweepRetired(): void {
   const names = registryNames();
-  if (!names?.length) return; // 读不出 / 空表（缺文件）不清
+  if (!names) return; // 读不出不清；读出空表（全员退场 / 缺文件即无人登记）照清，只留 master
   const live = new Set(names.map(overrideKey));
   for (const key of switchOverride.keys()) if (key !== "master" && !live.has(key)) switchOverride.delete(key);
 }

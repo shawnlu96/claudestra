@@ -194,6 +194,19 @@ describe("switch-override：已退场 agent 的乐观值", () => {
     rememberSwitchOverride("agent-other", { model: "m" });
     expect(switchOverrideSize()).toBe(2);
   }, 60_000);
+
+  test("[验收线 1] 1 万个 agent 全员退场（登记表读出空表）；master 切换时清到只剩 master", () => {
+    pickSwitchOverride("master", { modelTs: Infinity, effortTs: Infinity } as never);
+    const names = ids().map((i) => `agent-${i}`);
+    setSwitchOverrideRegistryForTest(() => null);
+    for (const n of names) rememberSwitchOverride(n, { model: "m" });
+    expect(switchOverrideSize()).toBeGreaterThanOrEqual(N);
+    setSwitchOverrideRegistryForTest(() => []);
+    rememberSwitchOverride("master", { model: "m" });
+    expect(switchOverrideSize()).toBe(1);
+    expect(pickSwitchOverride(names[0], null)).toEqual({ model: null, effort: null });
+    expect(pickSwitchOverride("master", null)).toEqual({ model: "m", effort: null });
+  }, 60_000);
 });
 
 describe("ledger-feed：结清关问的 seen", () => {
