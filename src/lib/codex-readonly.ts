@@ -25,10 +25,11 @@ export const EXEC_READONLY_FLAGS = ["--sandbox", "read-only", "-c", 'approval_po
 
 /**
  * 只读档下 Codex 把没标 readOnlyHint 的 MCP 工具都当成要审批，approval never 等于直接拒——reply 就发不出去。
- * 只给 claudestra 自己这一个 server 的这几个工具逐个放行审批（不动沙箱：shell 仍只读、无网络）；
- * 其余工具（派单 / 台账 / ask_codex / fleet / 记忆写入…）不放行，never 下即拒。实测见 docs/runtimes/codex-readonly.md。
+ * 只给 claudestra 自己这一个 server（启动时注册 channel-server 用的 MCP_NAME）的这几个工具逐个放行审批，不动沙箱；
+ * 其余工具（ask_codex、派单 / 台账 / 审查、记忆写入、forward_to_agent…）不放行，never 下即拒。PM 定的清单，改它 = 放宽只读档。
+ * 这些工具有对外副作用（发消息，reply 的附件能带出 agent 读得到的文件）：docs/runtimes/codex-readonly.md。
  */
-export const READ_ONLY_MCP_TOOLS = ["reply", "edit_message", "react", "fetch_messages", "send_to_agent", "forward_to_agent", "check_inbox", "whoami"] as const;
+export const READ_ONLY_MCP_TOOLS = ["reply", "send_to_agent", "check_inbox", "fetch_messages", "whoami"] as const;
 
 /** 放行这几个工具审批的 config 片段：{ tools: { <工具>: { approval_mode: "approve" } } }，ACP 深合并进 mcp_servers.<名> */
 export function readOnlyMcpToolsConfig(): { tools: Record<string, { approval_mode: "approve" }> } {
@@ -50,13 +51,22 @@ export function isAllowedMode(mode: string, runtimeId: string, known: (m: string
   return known(mode) || (isReadOnlyMode(mode) && runtimeId === "codex");
 }
 
+/** 只读 agent 被显式换档时的报错 */
+export const READ_ONLY_SWITCH_ERROR = "只读 agent 不能换档，要换就删了重建";
+
 /**
- * resume 的档位：命令行没给 --mode 时，同名旧条目是只读就沿用（定时唤醒、网页收编、额度恢复都不带 --mode；
- * 不沿用的话 resume 结束会把 registry 覆盖成 bypassPermissions，下次 restart 就是 full access）。
+ * resume 的档位。同名旧条目是只读：没给 --mode 就沿用只读（定时唤醒、网页收编、额度恢复都不带 --mode；不沿用的话 resume
+ * 会把 registry 覆盖成 bypassPermissions，下次 restart 就是 full access）；显式给了别的档位就拒。旧条目不是只读：原样返回 flag。
  */
-export function resumePermissionMode(flag: string | undefined, prior: { permissionMode?: string } | undefined): string | undefined {
-  if (flag && flag.trim()) return flag;
-  return isReadOnlyMode(prior?.permissionMode) ? READ_ONLY_MODE : flag;
+export function resumePermissionMode(flag: string | undefined, prior: { permissionMode?: string } | undefined): { mode: string | undefined } | { error: string } {
+  if (!isReadOnlyMode(prior?.permissionMode)) return { mode: flag };
+  if (!flag || !flag.trim() || isReadOnlyMode(flag)) return { mode: READ_ONLY_MODE };
+  return { error: `${READ_ONLY_SWITCH_ERROR}（registry 里是 readOnly，--mode 给的是 ${flag.trim()}）` };
+}
+
+/** `manager mode <agent> <档位>`：旧条目是只读、新档位不是只读就拒（同 resume 的换档规则）；返回 null = 放行 */
+export function modeSwitchError(prior: { permissionMode?: string } | undefined, next: string): string | null {
+  return isReadOnlyMode(prior?.permissionMode) && !isReadOnlyMode(next) ? `${READ_ONLY_SWITCH_ERROR}（registry 里是 readOnly，要改成 ${next.trim()}）` : null;
 }
 
 type RegistryLookup = (agent: string) => string | undefined;

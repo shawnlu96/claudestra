@@ -4,7 +4,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { acpAgentCommand, adapterEnv, type AdapterEnvSpec } from "../src/lib/acp/adapter-proc.js";
-import { parseAdapterEnv } from "../src/lib/acp/codex-adapter/session-config.js";
+import { parseAdapterEnv, readOnlyPolicyMismatch } from "../src/lib/acp/codex-adapter/session-config.js";
+import { fakeApp, harness } from "./helpers/codex-fake-app.ts";
 import { ACP_READONLY_PRESET, PERMISSION_MODE_ENV } from "../src/lib/codex-readonly.js";
 import { ACP_AGENT_ENV } from "../src/lib/acp/stub.js";
 
@@ -14,6 +15,9 @@ const spec = (over: Partial<AdapterEnvSpec> = {}): AdapterEnvSpec => ({
   ...over,
 });
 const config = (env: Record<string, string>) => JSON.parse(env.CODEX_CONFIG!) as Record<string, unknown>;
+/** PM 点名不放行的工具（规格「PM 补」ask_mvcasmjceab61a99dd） */
+const DENIED_TOOLS = ["ask_codex", "start_node", "plan_feature", "rewrite_dag", "record_memory", "mark_memory", "save_handoff",
+  "take_order", "take_review", "submit_verdict", "deliver", "forward_to_agent", "edit_message", "react", "fleet"];
 
 describe("adapterEnv", () => {
   test("[验收线 2] readOnly（显式档位）→ 只读预设；线程级默认也压成只读；channel-server 拿得到档位", () => {
@@ -23,13 +27,18 @@ describe("adapterEnv", () => {
     expect(env[PERMISSION_MODE_ENV]).toBe("readOnly");
   });
 
-  test("只读档：claudestra server 只放行回复类工具的审批，非只读不加", () => {
-    const ro = config(adapterEnv(spec({ permissionMode: "readOnly" }))) as { mcp_servers: Record<string, { tools?: Record<string, unknown> }> };
-    const tools = ro.mcp_servers.claudestra!.tools!;
-    expect(tools.reply).toEqual({ approval_mode: "approve" });
-    expect(Object.keys(tools).sort()).toEqual(["check_inbox", "edit_message", "fetch_messages", "forward_to_agent", "react", "reply", "send_to_agent", "whoami"]);
-    const rw = config(adapterEnv(spec())) as { mcp_servers: Record<string, { tools?: unknown }> };
-    expect(rw.mcp_servers.claudestra!.tools).toBeUndefined();
+  test("只读档：只在 claudestra 这一个 server 上放行白名单工具的审批；点名的工具一个都不放行；非只读不注入任何审批配置", () => {
+    const ro = config(adapterEnv(spec({ permissionMode: "readOnly" }))) as { mcp_servers: Record<string, Record<string, unknown>> };
+    expect(Object.keys(ro.mcp_servers)).toEqual(["claudestra"]);
+    const tools = ro.mcp_servers.claudestra!.tools as Record<string, unknown>;
+    expect(tools).toEqual(Object.fromEntries(["reply", "send_to_agent", "check_inbox", "fetch_messages", "whoami"].map((t) => [t, { approval_mode: "approve" }])));
+    for (const t of DENIED_TOOLS) expect(tools[t]).toBeUndefined();
+    const raw = adapterEnv(spec({ permissionMode: "readOnly" })).CODEX_CONFIG!;
+    expect(raw).not.toContain("default_tools_approval_mode");
+    expect(raw).not.toContain("readOnlyHint");
+    const rw = adapterEnv(spec()).CODEX_CONFIG!;
+    expect(rw).not.toContain("approval_mode");
+    expect(rw).not.toContain('"tools"');
   });
 
   test("[验收线 2] readOnly（宿主命令带进来的环境变量）→ 同样只读预设", () => {
@@ -98,5 +107,52 @@ describe("acpAgentCommand：只读只起自研适配器", () => {
   test("非只读照旧：没装上游时报安装提示，不会偷偷换成自研", () => {
     const r = acpAgentCommand({ PATH: "/usr/bin" }, "/bin/bun", "/nonexistent-root");
     expect("error" in r).toBe(true);
+  });
+});
+
+describe("会话建好后读回生效策略（PM 补 ask_mvcaa4ue7b42c6d2e3 (B)）", () => {
+  const RO = { CODEX_PATH: "/c", INITIAL_AGENT_MODE: ACP_READONLY_PRESET };
+  const policyOf = (env: Record<string, string>) => {
+    const r = parseAdapterEnv(env);
+    if (!r.ok) throw new Error(r.why);
+    return r.cfg.policy;
+  };
+  const opened = (id: string, sandbox: unknown, approvalPolicy: unknown) => ({ thread: { id }, model: "gpt-x", modelProvider: "fake", reasoningEffort: null, sandbox, approvalPolicy });
+  const RO_OK = [{ type: "readOnly", networkAccess: false }, "never"] as const;
+
+  test("纯函数：只读预设下只认「readOnly 沙箱、不联网、never」；其它预设不核", () => {
+    const p = policyOf(RO);
+    expect(readOnlyPolicyMismatch(p, opened("t", ...RO_OK))).toBeNull();
+    expect(readOnlyPolicyMismatch(p, opened("t", { type: "readOnly" }, "never"))).toBeNull(); // networkAccess 缺省 false
+    for (const [sb, ap] of [[{ type: "dangerFullAccess" }, "never"], [{ type: "readOnly", networkAccess: true }, "never"], [{ type: "readOnly" }, "on-request"],
+      [{ type: "workspaceWrite", writableRoots: [] }, "never"], [undefined, undefined]] as const) {
+      expect(readOnlyPolicyMismatch(p, opened("t", sb, ap))).toContain("不是只读 + never");
+    }
+    expect(readOnlyPolicyMismatch(policyOf({ CODEX_PATH: "/c", INITIAL_AGENT_MODE: "agent-full-access" }), opened("t", undefined, undefined))).toBeNull();
+    expect(readOnlyPolicyMismatch(policyOf({ CODEX_PATH: "/c", INITIAL_AGENT_MODE: "read-only" }), opened("t", { type: "readOnly" }, "on-request"))).toBeNull();
+  });
+
+  test("适配器：session/new 读回是只读 + never 才接上", async () => {
+    const f = fakeApp();
+    f.on("thread/start", () => opened(f.thread, ...RO_OK));
+    const h = harness({ fake: f, env: { INITIAL_AGENT_MODE: ACP_READONLY_PRESET } });
+    await h.session.initialize();
+    expect(await h.session.create("/w")).toBe("th-1");
+    expect(h.causes).toEqual([]);
+  });
+
+  test("适配器：new / resume / fork 读回不符 → 拒这次打开、带 fatal、停掉适配器", async () => {
+    for (const kind of ["new", "resume", "fork"] as const) {
+      const f = fakeApp();
+      const bad = () => opened(kind === "fork" ? "fork-1" : f.thread, { type: "dangerFullAccess" }, "never");
+      f.on(`thread/${kind === "new" ? "start" : kind}`, bad);
+      const h = harness({ fake: f, env: { INITIAL_AGENT_MODE: ACP_READONLY_PRESET } });
+      await h.session.initialize();
+      const err = await (kind === "new" ? h.session.create("/w") : kind === "resume" ? h.session.attach("th-1", "/w", true) : h.session.fork("th-1", "/w")).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toContain("不是只读 + never");
+      expect(err.data).toMatchObject({ fatal: true });
+      expect(h.causes).toEqual([{ kind: "protocol", why: expect.stringContaining("dangerFullAccess") }]);
+    }
   });
 });

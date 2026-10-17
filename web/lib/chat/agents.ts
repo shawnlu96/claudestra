@@ -261,5 +261,6 @@ const lpSig = (lp?: LpState | null) => (lp ? `|lp:${lp.lowPriority}:${lp.walled}
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.kind ?? ""}|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + reviewSig(a.ledgerReview) + lpSig(a.lowPriority) + (a.readOnly ? "|ro" : "");
+  const ro = a.readOnly ? "|ro" : "";
+  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.kind ?? ""}|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + reviewSig(a.ledgerReview) + lpSig(a.lowPriority) + ro;
 }

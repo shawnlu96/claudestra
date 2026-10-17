@@ -478,7 +478,8 @@ async function cmdCreate(
   if (!selected.ok) return output({ ok: false, error: selected.error });
   dir = selected.dir;
   let adapter = selected.adapter;
-  const roErr = (await import("./lib/codex-readonly.js")).readOnlyRuntimeError(permissionMode, adapter.id); if (roErr) return output({ ok: false, error: roErr }); // 只读只给 Codex，建频道 / 写 registry 之前就拒
+  const roErr = (await import("./lib/codex-readonly.js")).readOnlyRuntimeError(permissionMode, adapter.id); // 只读只给 Codex
+  if (roErr) return output({ ok: false, error: roErr }); // 建频道 / 写 registry 之前就拒
   // 可执行文件不在就早败：否则会照建频道 + 窗口，卡满就绪预算后才报错
   const avail = await adapter.available();
   if (!avail.ok) {
@@ -776,7 +777,8 @@ async function cmdResume(
 
   // v2.4.11+: resume 也回 bypassPermissions 默认（同 cmdCreate 注释里的理由）。
   // v2.4.13+: "auto" → bypassPermissions 归一，老 registry 里的显式 auto 不再复活。
-  const ro = await import("./lib/codex-readonly.js"); permissionMode = ro.resumePermissionMode(permissionMode, (await loadRegistry()).agents[tmuxName]); // 没给 --mode：同名旧条目的只读沿用
+  const ro = await import("./lib/codex-readonly.js"), rm = ro.resumePermissionMode(permissionMode, (await loadRegistry()).agents[tmuxName]); // 旧条目只读：沿用 / 换档就拒
+  if ("error" in rm) return output({ ok: false, error: rm.error }); else permissionMode = rm.mode;
   let mode = (permissionMode && permissionMode.trim()) || "bypassPermissions";
   if (mode === "auto") mode = "bypassPermissions";
   const roErr = ro.readOnlyRuntimeError(mode, adapter.id); if (roErr) return output({ ok: false, error: roErr }); // 只读只给 Codex

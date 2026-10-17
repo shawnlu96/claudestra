@@ -73,8 +73,9 @@ describe("[验收线 3] tmux", () => {
   });
 
   test("resume（定时唤醒 / 网页收编不带 --mode）：沿用旧条目的只读，spec 只有 displayName 也兜得住", async () => {
-    const mode = resumePermissionMode(undefined, { permissionMode: "readOnly" });
-    expect(mode).toBe("readOnly");
+    const r = resumePermissionMode(undefined, { permissionMode: "readOnly" });
+    expect(r).toEqual({ mode: "readOnly" });
+    const mode = "mode" in r ? r.mode : undefined;
     expect(await tmuxCommand(resumeSpec("agent-ro", mode))).toContain(RO_TUI);
     const missed = await tmuxCommand(resumeSpec("agent-ro", undefined));
     expect(missed).toContain(RO_TUI);
@@ -82,7 +83,8 @@ describe("[验收线 3] tmux", () => {
   });
 
   test("生命周期重建（scheduler-wake-stopped：manager resume … --transport tmux，无 --mode）同上", async () => {
-    const cmd = await tmuxCommand(resumeSpec("agent-ro", resumePermissionMode(undefined, { permissionMode: "readOnly" })));
+    const r = resumePermissionMode(undefined, { permissionMode: "readOnly" });
+    const cmd = await tmuxCommand(resumeSpec("agent-ro", "mode" in r ? r.mode : undefined));
     expect(cmd).toContain(RO_TUI);
   });
 

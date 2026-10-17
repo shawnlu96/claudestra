@@ -49,12 +49,12 @@ describe("档位校验", () => {
     expect(isAllowedMode("nonsense", "codex", isKnownPermissionMode)).toBe(false);
   });
 
-  test("resume 没给 --mode：同名旧条目是只读就沿用；给了就用给的", () => {
-    expect(resumePermissionMode(undefined, { permissionMode: "readOnly" })).toBe("readOnly");
-    expect(resumePermissionMode("", { permissionMode: "readOnly" })).toBe("readOnly");
-    expect(resumePermissionMode(undefined, { permissionMode: "bypassPermissions" })).toBeUndefined();
-    expect(resumePermissionMode(undefined, undefined)).toBeUndefined();
-    expect(resumePermissionMode("bypassPermissions", { permissionMode: "readOnly" })).toBe("bypassPermissions");
+  test("resume：旧条目只读时没给 --mode 就沿用、显式换档就拒；旧条目不是只读照旧用给的", () => {
+    expect(resumePermissionMode(undefined, { permissionMode: "readOnly" })).toEqual({ mode: "readOnly" });
+    expect(resumePermissionMode("", { permissionMode: "readOnly" })).toEqual({ mode: "readOnly" });
+    expect(resumePermissionMode(undefined, { permissionMode: "bypassPermissions" })).toEqual({ mode: undefined });
+    expect(resumePermissionMode(undefined, undefined)).toEqual({ mode: undefined });
+    expect(resumePermissionMode("bypassPermissions", { permissionMode: "readOnly" })).toEqual({ error: expect.stringContaining("只读 agent 不能换档，要换就删了重建") });
   });
 });
 

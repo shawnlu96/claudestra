@@ -22,6 +22,7 @@
   - 自研判不过时宿主拒起。restart 原有的「ACP 起不来就退回 tmux」照常生效，tmux 同样只读。
 - `CLAUDESTRA_ACP_AGENT` 手工覆盖证明不了起的是谁，只读 agent 一律拒。出借 worker 不支持只读。
 - 自研适配器认不出预设名时拒起（`parseAdapterEnv`）。
+- 线程打开后读回实际生效的策略：thread/start、resume、fork 回包里的 `sandbox` 和 `approvalPolicy` 必须是「readOnly、不联网、never」。不符就停掉适配器，并回带 `data.fatal` 的错误（`session-config.ts` 的 `readOnlyPolicyMismatch`），不指望每轮 `turn/start` 带的策略兜底。真 codex 0.159.3 实测：线程默认被改成 `danger-full-access` 时拒起。
 - 不加恢复键，也没有 observe 档。
 
 ### 重启不丢
@@ -30,17 +31,27 @@
 
 - restart、bridge 启动时的 ACP 自动迁移，以及 adopt：它们都走 `manager restart`；
 - fork 自愈：restart 里沿用同一个 spec；
-- resume：没给 `--mode` 时沿用同名旧条目的只读。定时唤醒（`scheduler-wake-stopped`）、网页收编、额度恢复都不带 `--mode`。
+- resume：同名旧条目是只读时，没给 `--mode` 就沿用只读，写回 registry 也是只读；显式给了别的档位就拒。生命周期重建（`scheduler-wake-stopped`）和网页收编（含 `--fork`）都不带 `--mode`。额度恢复只管 Claude Code，而且是往在跑的会话里投消息、不重起进程，所以碰不到这一档。
 
-此外 Codex 适配器在拼启动命令时，会按 agent 名把 spec 和 registry 的档位取并集，任一边是 readOnly 就只读，兜住漏传档位的路径。这一步只会收紧，不会放宽。要改档位，用 `manager mode <agent> <档位>` 改 registry，再 restart。
+此外 Codex 适配器在拼启动命令时，会按 agent 名把 spec 和 registry 的档位取并集，任一边是 readOnly 就只读，兜住漏传档位的路径。这一步只会收紧，不会放宽。
+
+**只读 agent 不能换档**：resume 显式给别的 `--mode`、`manager mode <agent> <别的档位>` 都会被拒，报「只读 agent 不能换档，要换就删了重建」。
 
 ## MCP 工具（reply 等）
 
-只读档下，Codex 把没标 `readOnlyHint` 的 MCP 工具都当成要审批；`approval never` 等于直接拒，于是 reply 发不出去（0.159.3 实测）。所以只读 agent 的启动参数只给 claudestra 这一个 server 的下面几个工具放行审批：
+只读档下，Codex 把没标 `readOnlyHint` 的 MCP 工具都当成要审批；`approval never` 等于直接拒，于是 reply 发不出去（0.159.3 实测）。所以只读 agent 的启动参数，只给 claudestra 这一个 server（启动时注册 channel-server 用的 `MCP_NAME`）的白名单工具放行审批。白名单是 `codex-readonly.ts` 里的常量 `READ_ONLY_MCP_TOOLS`，只有这 5 个：
 
-`reply` `edit_message` `react` `fetch_messages` `send_to_agent` `forward_to_agent` `check_inbox` `whoami`
+`reply` `send_to_agent` `check_inbox` `fetch_messages` `whoami`
 
-配置写法是 `mcp_servers.claudestra.tools.<工具>.approval_mode="approve"`。claudestra 的其余工具在 never 下一律被拒，包括派单、台账、`ask_codex`、fleet、记忆写入。这一步不改沙箱：MCP 进程本来就不在沙箱里，shell 仍然只读、无网络。Stop / Interrupt hook 也不在沙箱里，回合结束照常报给 bridge。
+- 配置写法是 `mcp_servers.<MCP_NAME>.tools.<工具>.approval_mode="approve"`，只给 readOnly agent 注入。
+- 不用 server 级的 `default_tools_approval_mode`，也不给工具标 `readOnlyHint`。
+- 其余工具在 never 下一律被拒，包括 `ask_codex`、`start_node`、`plan_feature`、`rewrite_dag`、`record_memory`、`mark_memory`、`save_handoff`、`take_order`、`take_review`、`submit_verdict`、`deliver`、`forward_to_agent`（真 codex 实测：`MCP tool call requires approval, but approval policy is never`）。
+
+要知道的边界：
+
+- **MCP 进程不在沙箱里。** 只读沙箱管的是模型跑的 shell 命令；channel-server 由 Codex 起，能联网、能写文件（实测探针 MCP 能在 cwd 外写文件、对本机回环发请求）。Stop / Interrupt hook 也不在沙箱里，回合结束照常报给 bridge。
+- **白名单里的工具有对外副作用**：它们会发消息给用户和别的 agent。
+- **reply 的附件能带出 agent 读得到的任何文件。** 这和下面「只读不拦读取」是同一条边界：只读拦的是改动，拦不住把读到的东西发出去。
 
 ## 能看出来
 
