@@ -12,9 +12,16 @@ import type { Database } from "bun:sqlite";
 import { getEventByDedup } from "./ledger-store.js";
 import type { MainRedRun, MainRedWorkflow } from "./main-red-fix.js";
 import { mainRedNodes, nodeState } from "./main-red-fix-place.js";
-import { retireKey, retireObserveKey, retireTodoKey, type RetireInput } from "./main-red-fix-write.js";
+import { observeDedupKey } from "./recovery-policy.js";
 
-export { retireMainRedNode } from "./main-red-fix-write.js";
+// The keys live here (not in main-red-fix-write.ts) so the tick's value imports never reach the ledger writes.
+export const RETIRE_KEY = "mainRedGreenRetire";
+export const retireKey = (project: string, featureId: string, key: string) => `main-red-fix:retire:${project}:${featureId}:${key}`;
+export const retireTodoKey = (project: string, featureId: string, key: string, what: string) => `main-red-fix:retire-${what}:${project}:${featureId}:${key}`;
+const retireObserveKey = (project: string, featureId: string, key: string) =>
+  observeDedupKey({ project, mechanism: RETIRE_KEY, target: "", actionKey: `main-red:retire:${featureId}:${key}` });
+
+export interface RetireInput { workflow: MainRedWorkflow; featureId: string; key: string; greenSha: string; greenRunId: number; url: string }
 
 /**
  * This mechanism's open fix nodes of `workflow` that `green` covers: written for an older run on another main SHA. Ones whose answer

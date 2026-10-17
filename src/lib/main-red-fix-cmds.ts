@@ -2,7 +2,7 @@
  * `ledger scheduler-main-red-fix <project> --op observe|rerun-claim|rerun-result|fix|untriaged|retire|bind --facts <JSON>`: main-red-fix's only write
  * door (manager/ledger.ts spreads MAIN_RED_FIX_CMDS and lets the scheduler identity run MAIN_RED_FIX_SERVICE, as PMAUTO1 does).
  * Scheduler identity with a live lease only, for a project under auto dispatch; every facts field is validated here and the writes
- * re-read the ledger in their own transaction (main-red-fix-write.ts; retire: main-red-fix-retire.ts). tests/main-red-fix-cmds.test.ts.
+ * re-read the ledger in their own transaction (main-red-fix-write.ts). tests/main-red-fix-cmds.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -10,8 +10,8 @@ import { realScrub } from "./dag-write-scrub.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
 import { MAIN_RED_WORKFLOWS, type MainRedFacts } from "./main-red-fix.js";
-import { retireMainRedNode } from "./main-red-fix-retire.js";
-import { bindMainRedRepair, claimMainRedRerun, recordMainRedObserve, recordMainRedRerunResult, recordMainRedUntriaged, writeMainRedFix } from "./main-red-fix-write.js";
+import { bindMainRedRepair, claimMainRedRerun, recordMainRedObserve, recordMainRedRerunResult, recordMainRedUntriaged, retireMainRedNode, writeMainRedFix }
+  from "./main-red-fix-write.js";
 import { statePath } from "./paths.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSchedulerConfig } from "./scheduler-config.js";

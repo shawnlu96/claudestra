@@ -24,6 +24,7 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { dagKey, faultSet, handledKey, HANDLED_OP, MAIN_RED_FAIL_LIMIT, nodeKey, NODE_OP, rerunKey, RERUN_OP, SOURCE, todoKey, workflowOf,
   type MainRedFacts, type MainRedWorkflow } from "./main-red-fix.js";
 import { mainRedNodes, nodeState, placeFix, type PlaceDeps, type Placement } from "./main-red-fix-place.js";
+import { RETIRE_KEY, retireKey, retireTodoKey, type RetireInput } from "./main-red-fix-retire.js";
 import { recordPmTodo } from "./pm-todo-note.js";
 import { quoteExternal } from "./quote-text.js";
 import { observeDedupKey, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
@@ -214,14 +215,7 @@ export function bindMainRedRepair(db: Database, ctx: WriteCtx, input: { project:
 }
 
 // mainRedGreenRetire (main-red-fix-retire.ts lists the candidates): the planned node out of the sub-DAG, a bound card only a todo.
-const RETIRE_KEY = "mainRedGreenRetire";
 const RETIRED_OP = "main_red_fix_retired";
-export const retireKey = (project: string, featureId: string, key: string) => `main-red-fix:retire:${project}:${featureId}:${key}`;
-export const retireTodoKey = (project: string, featureId: string, key: string, what: string) => `main-red-fix:retire-${what}:${project}:${featureId}:${key}`;
-export const retireObserveKey = (project: string, featureId: string, key: string) =>
-  observeDedupKey({ project, mechanism: RETIRE_KEY, target: "", actionKey: `main-red:retire:${featureId}:${key}` });
-
-export interface RetireInput { workflow: MainRedWorkflow; featureId: string; key: string; greenSha: string; greenRunId: number; url: string }
 export interface RetireResult { outcome: "retired" | "bound" | "observed" | "off" | "refused" | "gone" | "duplicate"; text: string; notify: string | null }
 
 /** The feature PM's rewrite without the node; null = written, else why not. */
