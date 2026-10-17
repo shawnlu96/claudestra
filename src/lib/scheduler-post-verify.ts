@@ -1,7 +1,7 @@
 /**
  * 上线后 PM 提醒（team-project-PMWAKE2）：自动开卡 tick 每轮紧跟缺规格提醒调一次。本项目里 stage=verified、正式规格卡有一级小节 `## 上线后 PM`、
  * 台账里还没有 `post-verify-done:<卡>` 的卡 → 给 featurePm（未设 / 卡不属于 feature → 项目当班 PM）发「[上线后待办] …」；
- * verified 后首轮立即发，仍未结每 30 分钟再发；verified 超过 72 小时 → 只给项目当班 PM 发一条超时，确认发出（记 overdue-sent）后停，发送失败下个窗口重发。
+ * 每 30 分钟记提醒；postVerifyPull 默认 on 时改为 pm-todo 拉取及每日汇总，off 保留首轮立即发 / 重发；超时仍送当班 PM，确认后停、失败重试。
  * 节流、去重与正文都在台账 writer（scheduler-post-verify-ledger.ts，经调度身份的 `ledger scheduler-autostart post-verify`），扛得过调度服务重启；
  * 这里只按只读快照预筛，免得每轮对每张卡都起一次 CLI。开关与发送复用缺规格提醒（autostart.specWait：on 发 / observe 只记 / off 不做）。
  * 规格该节第一行写了观察期的按 autostart.postVerifyDefer 推迟或注明（scheduler-post-verify-defer.ts）。
@@ -13,8 +13,8 @@ import {
 } from "./scheduler-post-verify-ledger.js";
 import { deferPlan, postVerifyDeferMode } from "./scheduler-post-verify-defer.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { asInfo } from "./pm-notice-level.js";
-import { sendToPm, specWaitMode, type SpecWaitEnv } from "./scheduler-spec-wait.js";
+import { postVerifyPullTick, sendPostVerify } from "./scheduler-post-verify-pull.js";
+import { specWaitMode, type SpecWaitEnv } from "./scheduler-spec-wait.js";
 
 type Failed = { taskId: string; error: string }[];
 
@@ -45,7 +45,7 @@ export async function postVerifyTick(env: SpecWaitEnv): Promise<Failed> {
         }
         if (rec.due !== true || mode !== "on") continue;
         try {
-          await asInfo(() => sendToPm(env, project, String(rec.to), String(rec.text), "info")); // 上线后待办是常规：卡上有记录，PM 用 pm-todo 拉
+          await sendPostVerify(env, project, t.id, kind, String(rec.to), String(rec.text));
         } catch (e) {
           // overdue 没写终结记录：下个 30 分钟窗口按发送意图重发，直到送达
           if (e instanceof SchedulerStopped) throw e;
@@ -57,6 +57,7 @@ export async function postVerifyTick(env: SpecWaitEnv): Promise<Failed> {
         if (ack.code === "lease-lost") throw new SchedulerStopped(`ledger post-verify: ${String(ack.error)}`);
         if (ack.ok !== true && ack.code !== "conflict") failed.push({ taskId: t.id, error: `超时提醒已发、记已发失败：${String(ack.error ?? ack.code)}` });
       }
+      await postVerifyPullTick(env, project, failed);
     }
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
