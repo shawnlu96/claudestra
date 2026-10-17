@@ -97,6 +97,7 @@ export const RECOVERY_KEYS = [
   "pmRails",
   "pmTodoPull",
   "poolIdleSkip",
+  "priorityStallCursor",
   "privateMergeNarrow",
   "privateRepoMerge",
   "privateStartPlacement",
