@@ -16,7 +16,7 @@ import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import type { reviewPlacement } from "./scheduler-placement-plan.js";
 import type { SchedulerSession } from "./scheduler-sessions.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
-import { fallbackBindMarks, fallbackBound, fallbackLapse, fallbackOf } from "./scheduler-review-fallback.js";
+import { fallbackBindMarks, fallbackBound, fallbackLapse, fallbackOf, fallbackSwitchedOff } from "./scheduler-review-fallback.js";
 
 export const latestReviewerSwap = (events: readonly LedgerEvent[]): LedgerEvent | undefined =>
   events.findLast((e) => e.kind === "scheduler" && e.data.op === "reviewer_swap");
@@ -302,7 +302,7 @@ export function exemptVerdict(db: Database, task: LedgerTask, f: VerdictFacts): 
   if (poolExemptVerdict(db, task, f, approvalLapse)) return true; // MODELXP2：池单拒审豁免（ledger-pool-refusal-gate.ts，与池审查回执同一谓词）；不成立则下面原样
   const events = listEvents(db, { project: task.project, target: task.id });
   if (!exemptFacts(events, task, f)) return false;
-  if (fallbackOf(refusalEpoch(events, task))) return true; // RVF-1: the round's fallback epoch bound this session; nothing to revoke
+  if (fallbackOf(refusalEpoch(events, task))) return !fallbackSwitchedOff(task.project); // RVF-1: bound by the round's fallback epoch; off withdraws it
   const want = exemption(refusalEpoch(events, task)!)!.approvalId;
   try {
     const a = createRefusalApprovalPort(db)(task.project, task.id);
@@ -387,7 +387,7 @@ function epochFacts(db: Database, task: LedgerTask, planSeq: number, row: Schedu
   const workflow = getWorkflow(db, task.id);
   if (workflow?.mode !== "auto" || workflow.specRev !== task.specRev || task.stage !== "review" || !inWindow(plan!, task)) refuseEpoch("head / specRev / 轮次已变");
   if (openSafetyHold(events)) refuseEpoch("本卡有未处置的安全拒绝留证");
-  if (events.some((e) => refusalOf(e) && inWindow(e, task))) refuseEpoch("本轮已做过豁免审查，再被拒转人工，不再开 epoch");
+  if (events.some((e) => (refusalOf(e) || fallbackOf(e)) && inWindow(e, task))) refuseEpoch("本轮已做过豁免 / 降级审查，再被拒转人工，不再开 epoch"); // RVF-1 both ways
   const lapse = approvalLapse(db, task, d.approvalId);
   if (lapse) refuseEpoch(lapse);
   const sent = getIntent(db, String(d.intentId));

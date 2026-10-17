@@ -2,9 +2,9 @@
  * RVF-1 · the cross-family reviewer's family cannot run → the round falls back to a same-family adversarial reviewer instead of PM.
  * The production tick on a temp ledger (autoFixture) with a fake swap runtime, reviewFallback / modelOutcome read from a stand-in CFG
  * module: a review turn on quota and a reviewer create failing (the 10-16 NRT-1 receipt word for word; quota at once, other clean
- * failures after 3) both open one fallback epoch; an author on quota does not; observe only records; off does nothing; the
- * fallback verdict passes the verdict gate and the merge gate; a localMerge card still waits for PM; the next round goes back to
- * the cross family.
+ * failures after 3) both open one fallback epoch; any other turn failure and an author on quota do not; observe only records; off
+ * does nothing and withdraws an epoch in flight; the fallback verdict passes the verdict gate but no merge road takes it without
+ * PM; the next round goes back to the cross family. Round-1 adversarial findings: reviews/RVF-1-r1-adv.md (S2 S3 S5 S6, P2-3 P2-6).
  */
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -16,7 +16,8 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { createRetryBackoff } from "../src/lib/scheduler-create-retry.js";
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
-import { CREATE_FAIL_LIMIT, FALLBACK_EXEMPTION, fallbackHandoff, freshFallbackEpoch } from "../src/lib/scheduler-review-fallback.js";
+import { classifyModelOutcome } from "../src/lib/scheduler-model-outcome.js";
+import { CREATE_FAIL_LIMIT, failureText, FALLBACK_EXEMPTION, fallbackHandoff, fallbackNotice, freshFallbackEpoch, setFallbackPolicyFile } from "../src/lib/scheduler-review-fallback.js";
 import { replacementTag } from "../src/lib/scheduler-review-checkout.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
@@ -52,7 +53,13 @@ beforeEach(() => {
   projects = { p: { maxActiveWorkers: 2 } };
   f = autoFixture();
 });
-afterEach(() => { f.close(); errors.mockRestore(); setModelOutcomeReader(); delete g.__rvfMode; delete g.__moMode; });
+afterEach(() => { f.close(); errors.mockRestore(); setModelOutcomeReader(); setFallbackPolicyFile(); delete g.__rvfMode; delete g.__moMode; });
+/** CFG's own file (what the gates read synchronously) says reviewFallback is off for project p. */
+function switchOff() {
+  const file = join(dir, `policy-${Math.random()}.json`);
+  writeFileSync(file, JSON.stringify({ projects: { p: { keys: { reviewFallback: "off" } } } }));
+  setFallbackPolicyFile(file);
+}
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const editRegistry = (fn: (r: { agents: Record<string, Record<string, unknown>> }) => void) => {
@@ -134,7 +141,7 @@ describe("review turn on quota (acceptance 1, 2)", () => {
     expect(r.step).toBe("review_fallback");
     expect(r.detail).toContain(FALLBACK_EXEMPTION);
     expect(ops("fallback_manual")).toEqual([]);
-    expect(ops("model_outcome")).toMatchObject([{ data: { mode: "observe", plan: { code: "model_recovery_manual" } } }]); // MODEL's own record kept
+    expect(ops("model_outcome")).toEqual([]); // the fallback runs first: MODEL never records an escalation for a round that went on
     expect(epochs()).toMatchObject([{ dedupKey: `review-fallback:${first.id}`, data: { intentId: first.id, fromFamily: "codex", toFamily: "claude",
       agent: "agent-rv-t1", sessionId: "s-rv", round: 1, head: H1,
       fallback: { trigger: "review_capacity", reason: QUOTA_TURN, failedAgent: "agent-rv-t1", exemption: FALLBACK_EXEMPTION, crossModel: false } } }]);
@@ -149,24 +156,27 @@ describe("review turn on quota (acceptance 1, 2)", () => {
     expect(strip(again.text, f.intents().findLast((i) => i.action === "review")!.id, FB)).toBe(strip(orig.text, first.id, "agent-rv-t1"));
   });
 
-  test("a host / transport failure of the turn falls back too (trigger review_host)", async () => {
-    await reviewSent();
-    failTurns("codex", "ECONNRESET: socket hang up", "error");
-    expect(await tick()).toMatchObject({ step: "review_fallback" });
-    expect(epochs()[0].data.fallback).toMatchObject({ trigger: "review_host" });
-  });
+  for (const [what, message] of [["S2 an input too long", "Error: turn failed: context_length_exceeded (input too long)"],
+    ["S6 a refusal worded past MODEL's patterns", "Invalid prompt: your prompt was flagged as potentially violating our usage policy. Please try again."]]) {
+    test(`a turn failure that is not the host's quota never falls back (${what}): MODEL's record, the card to PM, the binding kept`, async () => {
+      await reviewSent();
+      failTurns("codex", message, "error");
+      expect(await tick()).toMatchObject({ step: "manual" });
+      expect(epochs()).toEqual([]);
+      expect(created).toEqual([]);
+      expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
+      expect(ops("model_outcome")).toMatchObject([{ data: { cls: "host", plan: { kind: "manual" } } }]);
+      expect(ops("recovery_observe").filter((e) => e.data.mechanism === "reviewFallback")).toEqual([]);
+    });
+  }
 
-  test("the same host failure under observe: noted only, MODEL's manual record kept, the card goes to PM as before", async () => {
-    g.__rvfMode = "observe";
+  test("modelOutcome on: a round that fell back pushes PM no 容量不足 escalation (P2-3)", async () => {
+    g.__moMode = "on";
     await reviewSent();
-    failTurns("codex", "ECONNRESET: socket hang up", "error");
-    expect(await tick()).toMatchObject({ step: "manual" });
-    expect(epochs()).toEqual([]);
-    expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
-    expect(ops("model_outcome")).toMatchObject([{ data: { cls: "host", plan: { kind: "manual", code: "model_recovery_manual" } } }]);
-    expect(ops("recovery_observe").filter((e) => e.data.mechanism === "reviewFallback").map((e) => e.data.reviewFallback))
-      .toMatchObject([{ trigger: "review_host", to: { family: "claude", machine: "local" } }]);
-    expect(ops("fallback_manual")).toHaveLength(1);
+    failTurns("codex", QUOTA_TURN);
+    expect(await tick()).toMatchObject({ step: "review_fallback" });
+    expect(events().filter((e) => (e.text ?? "").includes("容量不足") || e.data.kind === "escalate")).toEqual([]);
+    expect(f.notices.filter((n) => n.includes("容量不足") || n.includes("退回人工"))).toEqual([]);
   });
 
   test("the fallback reviewer on quota too: no second switch in the round, the card goes to PM as before", async () => {
@@ -193,6 +203,7 @@ describe("reviewer create fails (acceptance 1 addendum: the 10-16 NRT-1 path)", 
     expect(epochs()).toMatchObject([{ data: { intentId: ensure.id, fromFamily: "codex", toFamily: "claude", agent: null, sessionId: null,
       fallback: { trigger: "create_quota", reason: `未建：${NRT1_CREATE}`.slice(0, 600) } } }]);
     expect(createRetryBackoff(f.db, "T1", "reviewer", f.tickDeps.now())).toBeNull();
+    expect(classifyModelOutcome({ failure: { kind: "error", message: failureText(`未建：${NRT1_CREATE}`, "NRT-1") } })?.cls).toBe("capacity");
     await fallbackReviewing();
     expect(created).toEqual([{ family: "claude", tag: "-fb", old: null }]);
     expect(reviewers()).toEqual([{ agent: FB, family: "claude", state: "active" }]);
@@ -209,6 +220,13 @@ describe("reviewer create fails (acceptance 1 addendum: the 10-16 NRT-1 path)", 
     }
     expect(await tick()).toMatchObject({ step: "review_fallback" });
     expect(epochs()[0].data.fallback).toMatchObject({ trigger: "create_streak" });
+  });
+
+  test("a card id like CI-429 never reads as quota: only the failure's own text is judged (P2-6)", () => {
+    const receipt = "未建：建会话失败，现场已清理（reviewer agent-rv-ci-429 第 1 次；2 分钟后重试）：创建失败: 窗口起不来（rv-ci-429 已清理）";
+    expect(classifyModelOutcome({ failure: { kind: "error", message: receipt } })?.cls).toBe("capacity"); // what the whole receipt would say
+    expect(classifyModelOutcome({ failure: { kind: "error", message: failureText(receipt, "CI-429") } })?.cls).toBe("host");
+    expect(failureText(receipt, "CI-429")).toBe("创建失败: 窗口起不来（rv- 已清理）");
   });
 
   test("the author's create / turn is never a fallback: an author on quota still goes to PM", async () => {
@@ -259,6 +277,18 @@ describe("switch reviewFallback (acceptance 5)", () => {
     failTurns("codex", QUOTA_TURN);
     expect(await tick()).toMatchObject({ step: "review_fallback" });
   });
+
+  test("switched off with an epoch in flight (S5): no fallback reviewer created or sent, the card goes to PM", async () => {
+    await delivered();
+    failCreates(NRT1_CREATE);
+    expect(await tick()).toMatchObject({ step: "review_fallback" });
+    switchOff();
+    const r = (await tick())!;
+    expect(r.step).toBe("manual");
+    expect(r.detail).toContain("reviewFallback 已切到 off");
+    expect(created).toEqual([]);
+    expect(f.sent.filter((s) => s.agent === FB)).toEqual([]);
+  });
 });
 
 describe("the fallback verdict (acceptance 2, 3)", () => {
@@ -271,17 +301,30 @@ describe("the fallback verdict (acceptance 2, 3)", () => {
     expect(await verdict(FB, "s-1-fb", "pass")).toMatchObject({ ok: true });
   }
 
-  test("passes the verdict gate and the merge gate as this round's review", async () => {
+  test("passes the verdict gate, the review event carries the mark, but a PR project never merges it by itself (S3): PM is asked", async () => {
     await fallbackPassed();
+    expect(events().findLast((e) => e.kind === "review")!.data.fallback).toMatchObject({ epochSeq: epochs()[0].seq, trigger: "review_capacity",
+      crossModel: false, exemption: FALLBACK_EXEMPTION });
     expect(await tick()).toMatchObject({ step: "stage", detail: "review→merge" });
-    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).not.toThrow();
+    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).not.toThrow(); // PM's manual merge queue takes it
+    expect(await tick()).toMatchObject({ step: "manual" });
+    expect(f.intents().filter((i) => i.action === "merge")).toEqual([]);
+    expect(f.notices.at(-1)).toContain("同族降级、无跨族审查");
+    expect(f.notices.at(-1)).toContain("本机跨族审查降级为同族");
   });
 
-  test("handoff evidence names the fallback and leaves the cross-family review to the owner's queue", async () => {
+  test("switched off after the verdict (S5): no merge gate takes the fallback verdict any more", async () => {
+    await fallbackPassed();
+    switchOff();
+    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).toThrow();
+  });
+
+  test("handoff evidence and PM's notice name the fallback; the cross-family review is left to the owner's queue", async () => {
     await fallbackPassed();
     const review = mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!);
     expect(fallbackHandoff(events(), f.task(), review)).toMatchObject({ epochSeq: epochs()[0].seq, trigger: "review_capacity", crossModel: false,
       note: "本机跨族审查降级，跨族交仓库方队列" });
+    expect(fallbackNotice(f.db, f.task())).toBe(`；本机跨族审查降级为同族（${QUOTA_TURN}），没有跨族审查`);
   });
 
   test("a localMerge project never merges it by itself: the card waits for PM's ledger local-merge", async () => {
@@ -293,6 +336,7 @@ describe("the fallback verdict (acceptance 2, 3)", () => {
     expect(f.intents().filter((i) => i.action === "merge")).toEqual([]);
     expect(f.task().stage).toBe("merge");
     expect(f.notices.at(-1)).toContain("ledger local-merge T1");
+    expect(f.notices.at(-1)).toContain("本机跨族审查降级为同族");
   });
 
   test("a same-family verdict of a session not bound under the epoch is refused", async () => {
@@ -349,6 +393,14 @@ describe("no fallback epoch: unchanged; a fresh epoch never binds the author (re
     expect(r.detail).toContain("session 与本卡作者或跨模型审查规则不符");
     expect(reviewers()).toEqual([]);
     expect(getSchedulerSession(f.db, "T1", "author")).toMatchObject({ agent: "agent-task-one", state: "active" });
+  });
+
+  test("an ordinary cross-family verdict's review event is written exactly as before: no fallback field", async () => {
+    await reviewSent();
+    expect(await f.review("pass", H1, [])).toMatchObject({ ok: true });
+    const data = events().findLast((e) => e.kind === "review")!.data;
+    expect(Object.keys(data)).not.toContain("fallback");
+    expect(data).toMatchObject({ round: 1, reviewer: "agent-rv-t1", reviewerSessionId: "s-rv", reviewerFamily: "codex", verdict: "pass" });
   });
 
   test("an author ensure_session never reads a fallback epoch", async () => {

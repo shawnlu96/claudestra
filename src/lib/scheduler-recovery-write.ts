@@ -20,7 +20,7 @@ import { planScheduler } from "./scheduler-plan.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { cleanCreateReceipt, createFailStreak } from "./scheduler-create-retry.js";
 import { classifyModelOutcome } from "./scheduler-model-outcome.js";
-import { fallbackAction, fallbackEpochEvent, fallbackFacts, fallbackKey, type FallbackFacts, type FallbackInput } from "./scheduler-review-fallback.js";
+import { failureText, fallbackAction, fallbackEpochEvent, fallbackFacts, fallbackKey, type FallbackFacts, type FallbackInput } from "./scheduler-review-fallback.js";
 import { openRefusal } from "./scheduler-review-swap.js";
 import { getSchedulerSession, preserveSessionHistory } from "./scheduler-sessions.js";
 
@@ -202,7 +202,8 @@ function fallbackRead(db: Database, input: ReviewFallbackInput): { facts: Fallba
   const intent = getIntent(db, input.intentId);
   if (!intent) return "缺原调度意图";
   const create = intent.action === "ensure_session", message = create ? intent.receipt ?? "" : input.failure.message;
-  const c = classifyModelOutcome({ failure: create ? { kind: "error", message } : input.failure });
+  const judged = failureText(message, intent.taskId); // P2-6: quota read in the failure's own text, never in the card id the scheduler wrote
+  const c = classifyModelOutcome({ failure: create ? { kind: "error", message: judged } : { ...input.failure, message: judged } });
   const fi: FallbackInput = { intent, failed: input.failed, authorized: input.authorized, message, cls: c?.cls ?? null, recoverable: c?.recoverable ?? false,
     row: getSchedulerSession(db, intent.taskId, "reviewer"), ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(create ? { cleanCreate: cleanCreateReceipt(intent.receipt), createStreak: createFailStreak(db, intent.taskId, "reviewer") } : {}) };

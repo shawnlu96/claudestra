@@ -457,6 +457,8 @@ class Card {
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     if (plan.action === "merge" && this.handoff) return driveHandoff(this); // 交仓库方合并：不计划合并意图、不占合并槽（MHO1）
     if (plan.action === "merge" && this.local) return (await import("./local-merge-tick.js")).driveLocalReady(this); // ONB-2：PM 本地合并
+    const sameFamily = plan.action === "merge" ? (await import("./scheduler-review-fallback.js")).fallbackNotice(this.db, this.task) : ""; // RVF-1
+    if (sameFamily) return this.escalate(`同族降级、无跨族审查：不自动合并，等 PM 确认后走人工合并队列${sameFamily}`);
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
       : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
       : plan.action === "merge" ? mergeSlotHold(this.task) ?? mergePipeHold(this.db, this.task) : null;

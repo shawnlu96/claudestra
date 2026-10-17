@@ -24,7 +24,7 @@ import { latestReviewerSwap, openRefusal, refusalEpochLapse, swappedSession } fr
 import { replacementTag, reviewCheckoutDir, type ReplacementTag } from "./scheduler-review-checkout.js";
 import { git, openReviewWorktree } from "./scheduler-review-worktree.js";
 import { retryCleanCreate } from "./scheduler-create-retry.js";
-import { freshFallback } from "./scheduler-review-fallback.js";
+import { freshFallback, lastFallbackSeq } from "./scheduler-review-fallback.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
 
@@ -57,10 +57,12 @@ function productionDeps(db: Database): ReviewSwapDeps {
     assertSchedulerLease();
     return r;
   };
-  // RVF-1: a create that failed and cleaned up waits retryCleanCreate's backoff (and may fall back) instead of stopping as unknown
+  // RVF-1: only on a card with a fallback epoch, a create that failed and cleaned up waits retryCleanCreate's backoff (and may fall
+  // back again) instead of stopping as unknown; every other swap (FAM1a, MODELX) creates exactly as before
   const registryRow = (name: string) => readRegistryAgentsSync().find((r) => r.name === name);
-  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag, current) =>
-    retryCleanCreate({ db, registryRow, create: agent }, task, "reviewer", (create) => createReplacement(db, task, family, old, create, tag, { current })) };
+  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag, current) => lastFallbackSeq(db, task.id)
+    ? retryCleanCreate({ db, registryRow, create: agent }, task, "reviewer", (create) => createReplacement(db, task, family, old, create, tag, { current }))
+    : createReplacement(db, task, family, old, agent, tag, { current }) };
 }
 
 /**

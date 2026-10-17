@@ -162,12 +162,15 @@ export async function writeModelOutcome(db: Database, ctx: WriteCtx, input: Outc
   const ports = createRecoveryRuntimePorts({ ...(policy ? { policy } : {}), refusalApproval: createRefusalApprovalPort(db),
     onDiag: (d) => diag(`${sent?.taskId ?? input.intentId} ${d.mechanism}：${d.reason}`) });
   const review = input.review && sent && task ? { sessionId: input.review.sessionId, materialDigest: reviewMaterialDigest(db)(task, sent) } : undefined;
+  // RVF-1 first: a round that fell back goes on, so MODEL's escalation (pushed to PM under on) is never written for it
+  const fallback = await fallbackOnce(db, ctx, input, policy);
+  if (fallback.outcome === "acted") return { kind: "none", reason: "已降级同族对抗审查，卡继续，不记升级", fallback };
   const record = ports.recordModelOutcome(db, ctx, { intentId: input.intentId, signal: { failure: input.failure }, failed: input.failed,
     authorized: input.authorized, ended: true, ...(review ? { review } : {}) });
-  return { ...record, fallback: await fallbackOnce(db, ctx, input, policy) };
+  return { ...record, fallback };
 }
 
-/** RVF-1: the reviewer fallback after MODEL's own record (its own switch, reviewFallback); a failure of it never loses MODEL's record. */
+/** RVF-1: the reviewer fallback, under its own switch (reviewFallback); a failure of it falls through to MODEL's record as before. */
 async function fallbackOnce(db: Database, ctx: WriteCtx, input: OutcomeWrite, policy: RecoveryPolicyPort | undefined): Promise<ReviewFallbackResult> {
   try {
     return await writeReviewFallback(db, ctx, { intentId: input.intentId, failure: input.failure, failed: input.failed, authorized: input.authorized,
