@@ -235,6 +235,12 @@ async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promi
  * 自己续跑的一轮（at = -Infinity，按上一轮建出来的）不算谁开的；owner 有回合失败卡，peer 走 API 请求的兜底结算，都不在 askers 里。
  * 出错前说的话只在这一轮完全是它一个自己人开的时候带上；外人参与开的一轮只推通用说明、不消化槽（留给下面 strangerTurn 那道保护）。
  */
+/** 单测模拟 bridge 重启：本模块内存里的来源 / 回合记录全清（tests/turn-failure-retrying.test.ts） */
+export function resetStopSettleForTest(): void {
+  for (const m of [turnTrigger, prevTrigger, errTrigger, settledMark, retryFailAt]) m.clear();
+  cutSince.clear();
+}
+
 /** 这一轮的网络类失败时刻：收尾时它要是属于刚结束的那串，再清一次等续跑标记（turn-failure reclearEnded） */
 const retryFailAt = new Map<string, number>();
 

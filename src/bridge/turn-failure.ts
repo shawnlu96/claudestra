@@ -127,6 +127,14 @@ function finish(cid: string, r: RetryingCaller, end: StreakOutcome): void {
   else unsent.push(() => go(port!));
 }
 
+/** 单测模拟 bridge 重启：内存里的名单、通道、排队和刚结束的一串全清，名单下次从盘上读回（tests/turn-failure-retrying.test.ts） */
+export function resetRetryingForTest(): void {
+  retrying = null;
+  port = null;
+  unsent.length = 0;
+  ended.clear();
+}
+
 /** stop-settle 每次结算时调：交来推送通道，排着的结局说明顺带推掉 */
 export function useRetryPort(p: RetryPort): void {
   port = p;

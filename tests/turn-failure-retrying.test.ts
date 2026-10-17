@@ -7,7 +7,8 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { onAcpFrame } from "../src/bridge/acp-link.ts";
 import { AgentCallBook, type PendingAgentCall } from "../src/bridge/agent-calls.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
-import { noteDelivered, settleStopTurn, type CallerSettleDeps, type StopTurn } from "../src/bridge/stop-settle.ts";
+import { noteDelivered, resetStopSettleForTest, settleStopTurn, type CallerSettleDeps, type StopTurn } from "../src/bridge/stop-settle.ts";
+import { resetRetryingForTest, useRetryPort } from "../src/bridge/turn-failure.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -385,10 +386,10 @@ test("P2-1：退避中 bridge 重启，续跑那一轮正常结束、没调 repl
     // 重启：stop-settle 内存里的来源记录全没了，续跑计划从盘上读回
     const after = loadResumeStates(path);
     hook(after);
-    const fresh = await import(`../src/bridge/stop-settle.ts?restart=${Date.now()}`);
+    resetStopSettleForTest();
     markResumed(after, h.cid, Date.now());
-    fresh.noteDelivered(h.cid, { kind: "bridge", label: "api-error-resume" }, Date.now(), true, false);
-    await fresh.settleStopTurn(h.deps, { cid: h.cid, stopChannelId: h.cid, stopWs: 1, candidateWs: 1, event: "Stop", runtime: "pi", drain: { text: "审完了：结论 X" } });
+    noteDelivered(h.cid, { kind: "bridge", label: "api-error-resume" }, Date.now(), true, false);
+    await settleStopTurn(h.deps, { cid: h.cid, stopChannelId: h.cid, stopWs: 1, candidateWs: 1, event: "Stop", runtime: "pi", drain: { text: "审完了：结论 X" } });
     expect(h.pushed).toHaveLength(1);
     expect(h.pushed[0]).toContain("审完了：结论 X");
     expect(h.book.sweepStale(Date.now() + 3 * 3_600_000, 2 * 3_600_000, () => undefined)).toEqual([]);
@@ -399,17 +400,17 @@ test("P2-1：退避中 bridge 重启，续跑那一轮正常结束、没调 repl
   }
 });
 
-// 放最后：重新加载的 turn-failure 会接管 onStreakEnd（单个回调）
+// 放最后：重置会清掉 turn-failure 的内存名单
 test("退避中 bridge 重启：名单落盘，重启后这一串用完照样补最终说明；第一次 Stop 交来通道之前到的结局先排着", async () => {
   const h = harness();
   h.ask();
   await h.failTurn();
-  const fresh = await import(`../src/bridge/turn-failure.ts?restart=${Date.now()}`);
+  resetRetryingForTest();
   expect(h.outage(TRANSIENT_BACKOFF_MS.length).r).toBe("escalate");
   await settle();
   expect(h.bodies()).toHaveLength(1); // 还没有通道
   const sent: string[] = [];
-  fresh.useRetryPort({ notify: async (_c: string, r: { caller: string }, body: string) => void sent.push(`${r.caller}:${body}`), slotGone: () => false });
+  useRetryPort({ notify: async (_c: string, r: { caller: string }, body: string) => void sent.push(`${r.caller}:${body}`), slotGone: () => false, clearWaiting: () => {} });
   expect(sent).toHaveLength(1);
   expect(sent[0]).toStartWith("c-pm:");
   expect(sent[0]).toContain(FAILED);
