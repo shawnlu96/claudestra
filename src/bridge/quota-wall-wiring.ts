@@ -6,7 +6,7 @@
 import { MASTER_DIR } from "./config.js";
 import { latestSessionIdForCwd } from "./session-ids.js";
 import { existsSync, unlinkSync } from "fs";
-import { countsAsActivity, dropStale, dueForResume, endStreak, giveUpText, loadResumeStates, markResumed, noteActivity, noteApiError, noteOverload, noteTurnOk, onChannelTurnOk,
+import { countsAsActivity, dropStale, dueForResume, endStreak, giveUpText, loadResumeStates, markResumed, noteActivity, noteApiError, noteOverload, noteTurnOk, onChannelTurnOk, onResumeSource,
   resumeDelayMs, resumeText, saveResumeStates, dropOffline, type ApiErrorState } from "../lib/api-error-resume.js";
 import { isModelLimitHit, paneShowsLowPriority } from "../lib/quota-wall-text.js";
 import { windowWallWait } from "../lib/wall-screen.js";
@@ -308,7 +308,8 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       const before = states.get(evt.chatId);
       const r = noteApiError(states, evt.chatId, err, ts, text); // 同步先记：之后几毫秒内的活动事件要能对上它
       const noted = states.get(evt.chatId);
-      const wait = noted && { ...noted, agent: evt.agent };
+      const source = noted?.source ?? before?.source; // 同一串接着撞：来源照旧（stop-settle 收尾时会再记一次）
+      const wait = noted && { ...noted, agent: evt.agent, ...(source ? { source } : {}) };
       if (wait) states.set(evt.chatId, wait);
       saveResumeStates(states);
       void (async () => {
@@ -358,6 +359,15 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
       saveResumeStates(states);
     }
   };
+  onResumeSource({ // 撞错那一轮的来源跟着计划落盘，重启后续跑开的一轮照它继承（stop-settle）
+    save: (cid, source) => {
+      const s = states.get(cid);
+      if (!s) return;
+      states.set(cid, { ...s, source });
+      saveResumeStates(states);
+    },
+    get: (cid) => states.get(cid)?.source,
+  });
   onChannelTurnOk((cid, at) => { // 续跑后正常结束了一轮：网络类连败清零
     noteTurnOk(states, cid, at);
     saveResumeStates(states);
@@ -394,7 +404,7 @@ async function resumeDue(b: WallBridgeDeps, w: QuotaWall, states: Map<string, Ap
     if (!offlineSince.has(cid) && dropStale(states, cid, now)) continue; // 机器睡了很久醒来 / 停机后开机：不投陈旧的「继续」，也不报
     if (!target) { // 没连着（刚重启还没连回来 / 窗口没了）：网络类且 agent 还在的留着等，撞错满半小时作废、频道报一次
       if (!offlineSince.has(cid)) offlineSince.set(cid, now);
-      const why = dropOffline(states, cid, now, agentKept(cid));
+      const why = dropOffline(states, cid, now, agentKept(cid), offlineSince.get(cid));
       const agent = agentOf.get(cid) ?? cid;
       if (why) emitEvent({ agent, chatId: cid, type: "chat_message", data: { direction: "out", from: "bridge", text: `⛔ ${agent} ${why}`, notice: true } });
       if (why && /^\d+$/.test(cid)) await b.escalate(cid, `⛔ ${agent} ${why}`).catch((e) => console.error("api-error 续跑作废通知失败:", (e as Error).message));

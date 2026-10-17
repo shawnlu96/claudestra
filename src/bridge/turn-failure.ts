@@ -73,6 +73,8 @@ export interface RetryingCaller {
 export interface RetryPort {
   notify(cid: string, r: RetryingCaller, body: string): Promise<unknown>;
   slotGone(cid: string, r: RetryingCaller): boolean;
+  /** 清掉 caller 那一槽的等续跑标记：这一串结束后 owner 在 target 频道发话恢复算接管 */
+  clearWaiting(cid: string, caller: string): void;
 }
 
 const RETRYING_PATH = statePath("turn-failure-retrying.json");
@@ -80,8 +82,9 @@ const LATE_MS = 60_000;
 const ENDED_KEEP_MS = 3 * 60_000;
 const SKEW_MS = 5_000;
 let retrying: Map<string, RetryingCaller[]> | null = null;
-/** 刚结束的一串：handled = 已经对它们处理过结局的请求方（推过、或判为答复过） */
-const ended = new Map<string, { end: StreakOutcome | null; at: number; since: number; seen: number; handled: Set<string> }>();
+/** 刚结束的一串：handled = 已经对它们处理过结局的请求方（推过、或判为答复过）；cleared = 清过等续跑标记的请求方 */
+type Ended = { end: StreakOutcome | null; at: number; since: number; seen: number; handled: Set<string>; cleared: Set<string> };
+const ended = new Map<string, Ended>();
 let port: RetryPort | null = null;
 const unsent: (() => void)[] = [];
 
@@ -114,6 +117,10 @@ function finish(cid: string, r: RetryingCaller, end: StreakOutcome): void {
   const go = (p: RetryPort): void => {
     // 登记时的槽都记了「等续跑」（stop-settle markApiError），槽没了只有两条路：被答复消化，或 onExpired 已经推了结局（kill / 2 小时扫掉）
     if (r.answered || p.slotGone(cid, r)) return void console.log(`🤫 ${r.agent} 的自动重试结束，${r.callerName} 之后已经收到过答复，不再补结局说明`);
+    if (r.slot) {
+      p.clearWaiting(cid, r.caller);
+      ended.get(cid)?.cleared.add(r.caller);
+    }
     void p.notify(cid, r, finalNotice(r.agent, end)).catch((e: Error) => console.error(`⚠️ ${cid} 自动重试的结局说明没推到 ${r.callerName}：${e.message}`));
   };
   if (port) go(port);
@@ -150,6 +157,16 @@ export function noteRetryingCaller(cid: string, r: RetryingCaller, now = Date.no
   save();
 }
 
+/**
+ * 升级那一轮的 StopFailure 晚于结局到：stop-settle 收尾又把槽记回「等续跑」（markApiError），这一轮属于刚结束的那串（failedAt）就再清一次。
+ * stop-settle 在这一轮收尾的最后调
+ */
+export function reclearEnded(cid: string, failedAt: number, now = Date.now()): void {
+  const e = ended.get(cid);
+  if (!port || !e?.end || now - e.seen >= ENDED_KEEP_MS || failedAt > e.at + SKEW_MS) return;
+  for (const caller of e.cleared) port.clearWaiting(cid, caller);
+}
+
 /** target 给 caller 发了请求（send_to_agent，不含 bridge 推的说明）：算答复过它，这一串没救回来也不再说「没处理完」 */
 export function noteCallerAnswered(target: string, caller: string, at: number): void {
   const list = book().get(target);
@@ -161,6 +178,6 @@ export function noteCallerAnswered(target: string, caller: string, at: number): 
 onStreakEnd((cid, end, since, now) => {
   const list = (book().get(cid) ?? []).filter((r) => r.at >= since - LATE_MS); // 更早那串留下的不算这一串
   if (book().delete(cid)) save();
-  ended.set(cid, { end, at: now, since, seen: Date.now(), handled: new Set(list.map((r) => r.caller)) });
+  ended.set(cid, { end, at: now, since, seen: Date.now(), handled: new Set(list.map((r) => r.caller)), cleared: new Set() });
   if (end) for (const r of list) finish(cid, r, end);
 });

@@ -8,7 +8,13 @@ import { onAcpFrame } from "../src/bridge/acp-link.ts";
 import { AgentCallBook, type PendingAgentCall } from "../src/bridge/agent-calls.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
 import { noteDelivered, settleStopTurn, type CallerSettleDeps, type StopTurn } from "../src/bridge/stop-settle.ts";
-import { channelTurnOk, dropOffline, dueForResume, endStreak, markResumed, noteActivity, noteApiError, noteTurnOk, type ApiErrorState } from "../src/lib/api-error-resume.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  channelTurnOk, dropOffline, dueForResume, endStreak, loadResumeStates, markResumed, noteActivity, noteApiError, noteTurnOk, onResumeSource, saveResumeStates,
+  type ApiErrorState,
+} from "../src/lib/api-error-resume.ts";
 import { TRANSIENT_BACKOFF_MS } from "../src/lib/transient-error.ts";
 
 const NET = "Pi 回合失败：Connection error.";
@@ -41,6 +47,7 @@ function harness() {
     takeApiErrorNotice: (c) => book.takeApiErrorNotice(c, () => false),
     markApiError: (c, text, caller) => book.markApiError(c, () => false, text, caller),
     clearWithheld: (c, pac) => book.clearWithheld(c, pac),
+    clearApiError: (c, caller) => book.clearApiError(c, caller),
     notify: async (pac, _c, body) => void notes.push({ to: pac.callerChannelId, body }),
     metric: () => {},
     recovered: () => {},
@@ -89,7 +96,7 @@ function harness() {
   };
   const bodies = () => notes.map((n) => n.body);
   const of = (caller: string) => notes.filter((n) => n.to === caller).map((n) => lab(n.body));
-  return { cid, book, deps, notes, pushed, expired, bodies, of, ask, stop, failTurn, round, resume, states, outage, now };
+  return { cid, book, deps, notes, pushed, expired, bodies, of, ask, stop, acpFail, failTurn, round, resume, states, outage, now };
 }
 const RETRYING = "正在自动重试";
 const FAILED = "自动重试没救回来";
@@ -305,6 +312,54 @@ test("B2r：X 的一串刚升级，Y 的请求在那一轮 Stop 时补投、2.5 
     expect(h.of("c-x")).toEqual(["RETRYING", "FAILED"]);
     expect(h.of("c-y")).toEqual(["RETRYING"]);
   });
+});
+
+// ── 第 2 轮对抗审查（reviews/NRT-2-r2-adv.md）──
+
+test("G-1 反转：一串没救回来之后，网络类槽上的等续跑标记清掉（owner 之后在它频道发话恢复算接管）", async () => {
+  await withClock(async (advance) => {
+    const h = harness();
+    h.ask(false);
+    await h.round(false);
+    expect(h.book.awaitingResume(h.cid, () => false)).toBe(true);
+    expect(await outageRounds(h, advance)).toBe("escalate");
+    expect(h.of("c-pm")).toContain("FAILED");
+    expect(h.book.waiting(h.cid, () => false)).toHaveLength(1); // 槽留着：之后有人让它接着做完，答复照样推回
+    expect(h.book.awaitingResume(h.cid, () => false)).toBe(false);
+  });
+});
+
+test("P2-1：退避中 bridge 重启，续跑那一轮正常结束、没调 reply() → drain 的答复照撞错那一轮的来源推回请求方，2 小时扫槽不再推「没接着做完」", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nrt2-restart-src-"));
+  const path = join(dir, "api-error-resume.json");
+  const hook = (m: Map<string, ApiErrorState>) => onResumeSource({
+    save: (c, source) => void (m.has(c) && m.set(c, { ...m.get(c)!, source })),
+    get: (c) => m.get(c)?.source,
+  });
+  try {
+    const h = harness();
+    hook(h.states);
+    h.ask(false);
+    await h.acpFail();
+    noteApiError(h.states, h.cid, NET, Date.now()); // 错误条目先到
+    await h.stop("StopFailure", { text: null }); // 宿主等不到条目确认（T5 路径）
+    expect(h.states.get(h.cid)?.source).toMatchObject({ who: "insider", askers: ["c-pm"] });
+    saveResumeStates(h.states, path);
+    // 重启：stop-settle 内存里的来源记录全没了，续跑计划从盘上读回
+    const after = loadResumeStates(path);
+    hook(after);
+    const fresh = await import(`../src/bridge/stop-settle.ts?restart=${Date.now()}`);
+    markResumed(after, h.cid, Date.now());
+    fresh.noteDelivered(h.cid, { kind: "bridge", label: "api-error-resume" }, Date.now(), true, false);
+    await fresh.settleStopTurn(h.deps, { cid: h.cid, stopChannelId: h.cid, stopWs: 1, candidateWs: 1, event: "Stop", runtime: "pi", drain: { text: "审完了：结论 X" } });
+    expect(h.pushed).toHaveLength(1);
+    expect(h.pushed[0]).toContain("审完了：结论 X");
+    expect(h.book.sweepStale(Date.now() + 3 * 3_600_000, 2 * 3_600_000, () => undefined)).toEqual([]);
+    expect(h.expired).toEqual([]);
+  } finally {
+    onResumeSource({ save: () => {}, get: () => undefined });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // 放最后：重新加载的 turn-failure 会接管 onStreakEnd（单个回调）

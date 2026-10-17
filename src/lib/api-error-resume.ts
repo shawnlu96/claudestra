@@ -31,18 +31,28 @@ export interface ApiErrorState {
   net?: NetStreak;
   /** 哪个 agent（bridge 落盘用：重启后到期续跑、交给闸、按名清零都要它） */
   agent?: string;
+  /** 撞错那一轮是谁开的（stop-settle 的来源记录）：退避中重启后，续跑消息开的一轮照它继承，答复才推得回请求方 */
+  source?: ResumeSource;
 }
+
+export interface ResumeSource { who: string; callers: string[]; askers: string[]; askedAt?: Record<string, number> }
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const isNetStreak = (v: unknown): boolean => {
   const n = v as NetStreak;
   return !!n && typeof n === "object" && Number.isInteger(n.n) && n.n >= 0 && n.n <= TRANSIENT_BACKOFF_MS.length && num(n.since) && typeof n.last === "string";
 };
+const strings = (v: unknown): boolean => Array.isArray(v) && v.every((x) => typeof x === "string");
+const isSource = (v: unknown): boolean => {
+  const s = v as ResumeSource;
+  return !!s && typeof s === "object" && typeof s.who === "string" && strings(s.callers) && strings(s.askers)
+    && (s.askedAt === undefined || (!!s.askedAt && typeof s.askedAt === "object" && Object.values(s.askedAt).every(num)));
+};
 /** 每个字段都核：net / resumedAt 坏了这条就永不到期、之后的网络错误永远静默（第 2 轮 P2-3） */
 const isApiErrorState = (v: unknown): boolean => {
   const s = v as ApiErrorState;
   return !!s && typeof s === "object" && num(s.errorAt) && typeof s.error === "string" && (s.resumedAt === undefined || num(s.resumedAt))
-    && (s.net === undefined || isNetStreak(s.net)) && (s.agent === undefined || typeof s.agent === "string")
+    && (s.net === undefined || isNetStreak(s.net)) && (s.agent === undefined || typeof s.agent === "string") && (s.source === undefined || isSource(s.source))
     && !(s.net?.n === TRANSIENT_BACKOFF_MS.length && s.resumedAt === undefined); // n=4 只会出现在第 4 次续跑之后：没续过却 n=4 = 坏数据（否则退避间隔取不到、永不到期）
 };
 const isStateFile = (d: unknown): boolean => !!d && typeof d === "object" && !Array.isArray(d);
@@ -119,6 +129,13 @@ type TurnOk = (cid: string, at: number) => void;
 let turnOk: TurnOk = () => {};
 export const onChannelTurnOk = (cb: TurnOk): void => void (turnOk = cb);
 export const channelTurnOk = (cid: string, at: number): void => turnOk(cid, at);
+
+/** 撞错那一轮的来源跟着续跑计划落盘：stop-settle 在以 API 错误结束的一轮记下（noteResumeSource），重启后查不到内存记录时读回（resumeSourceOf） */
+type SourceHook = { save(cid: string, src: ResumeSource): void; get(cid: string): ResumeSource | undefined };
+let sourceHook: SourceHook = { save: () => {}, get: () => undefined };
+export const onResumeSource = (h: SourceHook): void => void (sourceHook = h);
+export const noteResumeSource = (cid: string, src: ResumeSource): void => sourceHook.save(cid, src);
+export const resumeSourceOf = (cid: string): ResumeSource | undefined => sourceHook.get(cid);
 
 export type NoteResult = "track" | "escalate";
 
@@ -213,14 +230,14 @@ export function markResumed(m: Map<string, ApiErrorState>, cid: string, now: num
   if (s) m.set(cid, { ...s, resumedAt: now, ...(s.net ? { net: { ...s.net, n: s.net.n + 1 } } : {}) });
 }
 
-/** 非网络类到点没连着：留这么久等它重连（bridge 刚重启时 agent 按 3、6、12 秒退避连回），过了只记日志 */
+/** 非网络类到点没连着：从本进程第一次看到它没连着起留这么久等它重连（bridge 刚重启时 agent 按退避连回，最长约 60 秒一次），过了只记日志 */
 export const OFFLINE_GRACE_MS = 3 * 60_000;
 
 /**
  * 到点要续跑而 agent 没连着。网络类、agent 还在 registry 的（kept；master 算在）：留着等它连回来，撞错满 STALE_RESUME_MS 还没连上就作废、
  * 返回频道那句的原因（报一次）。非网络类静默等 OFFLINE_GRACE_MS，过了只记日志；已经收掉的当场丢、不往频道报（频道多半已经没人看）。其余返回 null
  */
-export function dropOffline(m: Map<string, ApiErrorState>, cid: string, now: number, kept = true): string | null {
+export function dropOffline(m: Map<string, ApiErrorState>, cid: string, now: number, kept = true, offlineAt = now): string | null {
   const s = m.get(cid);
   if (!s) return null;
   if (!kept) {
@@ -228,9 +245,9 @@ export function dropOffline(m: Map<string, ApiErrorState>, cid: string, now: num
     return null;
   }
   if (!s.net) {
-    if (now - s.errorAt < RESUME_DELAY_MS + OFFLINE_GRACE_MS) return null;
+    if (now - offlineAt < OFFLINE_GRACE_MS) return null;
     endStreak(m, cid, now, null);
-    console.log(`🗑 API 错误续跑 ${cid}：到点后 ${OFFLINE_GRACE_MS / 60_000} 分钟它都没连上 bridge，不再续`);
+    console.log(`🗑 API 错误续跑 ${cid}：到点要续时它没连着，又等了 ${OFFLINE_GRACE_MS / 60_000} 分钟仍没连上 bridge，不再续`);
     return null;
   }
   if (now - s.errorAt < STALE_RESUME_MS) return null;

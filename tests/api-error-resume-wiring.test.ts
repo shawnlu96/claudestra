@@ -208,3 +208,18 @@ test("W1：bridge 停机 9 小时后开机，agent 第一拍还没连回来 → 
   expect(after.notices).toEqual([]);
   expect(after.escalated).toEqual([]);
 });
+
+for (const down of [5, 10]) {
+  test(`W4：非网络类错误后 bridge 停 ${down} 分钟，开机后 agent 20 秒才连回 → 宽限从本进程看到它没连着起算，照样续跑`, async () => {
+    await wiring().err("API Error: 400 invalid_request_error tool_use ids must be unique");
+    NOW += down * 60_000;
+    let up = false;
+    const after = wiring(() => up);
+    await after.run(15_000);
+    NOW += 5_000;
+    up = true;
+    await after.run(2 * 60_000);
+    expect(after.sends).toHaveLength(1);
+    expect(after.notices).toEqual([]);
+  });
+}
