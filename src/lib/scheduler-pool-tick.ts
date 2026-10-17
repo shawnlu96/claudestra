@@ -13,6 +13,7 @@ import { centralPoolStep } from "./ledger-lend-central-pool.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { poolIdleCandidate, observePoolIdle, logPoolIdleObservation, type PoolIdleObservation } from "./scheduler-pool-idle.js";
 import { claimSlot } from "./scheduler-priority-order.js";
+import { terminalPoolOrder } from "./scheduler-consume-first.js";
 import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -42,10 +43,13 @@ export async function drivePool(deps: PoolTickDeps, task: LedgerTask, intent: Sc
   // S2F6: a central card's order goes through the center (lend.create), never `ledger scheduler-pool`; null = the path below unchanged.
   const central = await centralPoolStep(task, intent, { maxWorkers, remote: r });
   if (central) return central;
-  const mode = (deps.recoveryPolicy ?? recoveryPolicy)(task.project, "poolIdleSkip").mode;
+  const policy = deps.recoveryPolicy ?? recoveryPolicy, mode = policy(task.project, "poolIdleSkip").mode;
   const idle = mode === "off" ? null : poolIdleCandidate(db, task.id, intent.id);
   if (idle && mode === "on") return { step: idle.step, detail: idle.detail };
-  const reread = claimSlot(db, r.mode === "off" ? "local_slot" : "lend_slot", task, { policy: { maxWorkers, remote } }); if (reread) return reread; // PRIO2 定 3
+  // AUTOSTARVE1: syncing a done / cancelled / released order onto its intent takes no slot, so it never waits behind the slot re-read
+  const settled = policy(task.project, "autoConsumeFirst").mode === "on" && terminalPoolOrder(db, intent.id) !== null;
+  const reread = settled ? null : claimSlot(db, r.mode === "off" ? "local_slot" : "lend_slot", task, { policy: { maxWorkers, remote } });
+  if (reread) return reread; // PRIO2 定 3
   const res = await deps.manager("ledger", "scheduler-pool", intent.id, "--max-workers", String(r.agents ? Math.min(32, maxWorkers) : maxWorkers), "--mode", r.mode,
     "--roles", r.roles.length ? r.roles.join(",") : "none", "--timeout-min", String(r.poolTimeoutMin),
     // The offer re-plans from these flags: a dropped reviewFirst / localPriority would pick another machine and cancel the intent.

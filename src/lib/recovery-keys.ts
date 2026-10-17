@@ -19,6 +19,7 @@ export const RECOVERY_KEYS = [
   "auditStall",
   "auditTrainQueue",
   "authorRebuild",
+  "autoConsumeFirst",
   "cardPause",
   "cardProcReap",
   "centerDeployAuto",

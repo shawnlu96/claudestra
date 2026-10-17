@@ -50,6 +50,7 @@ import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { wipGateCard } from "./scheduler-wip-gate.js";
 import { logPoolIdleObservation, type PoolIdleObservation } from "./scheduler-pool-idle.js";
 import { liftWithinBand, slotOrder } from "./scheduler-priority-order.js";
+import { consumeFirst, logConsumeFirst } from "./scheduler-consume-first.js";
 import type { PmNoticeLevel } from "./pm-notice-level.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
@@ -499,6 +500,13 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   }
   if (!started) pace?.openList?.();
   const turn = paceCards(db, projects, "auto", pace);
+  const cardOf = async ({ policy }: (typeof turn)[number], task: LedgerTask) => { // AUTOSTARVE1: the consume-first group and the loop below
+    const opts = { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool: await poolOf(policy.remote) }, prepared = await deps.prepareAuthor?.(task, authorBudget) ?? task;
+    return "deferred" in prepared ? prepared : new Card(db, prepared, opts, deps, policy.mergeHandoff === true, policy.localMerge === true);
+  };
+  const consumed = await consumeFirst(db, turn, { card: cardOf, recoveryPolicy: deps.recoveryPolicy, pace, failed: out.failed,
+    observe: (a) => deps.manager("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey, "--action", a.action) });
+  out.cards.push(...consumed.outcomes);
   const sorted = slotOrder(db, mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""))), ordered = sorted.applied; // PRIO2
   // cursor.autoBudget is written only when the last pass was really cut off by the budget, and cleared once its owed card (fair)
   // is served. While it is owed, this pass puts fair first once, whatever its budget; with nothing owed the order is
@@ -529,12 +537,10 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
       pace.cursor.auto = `${project}/${taskId}`;
       if (!reportsBudgetEnd(pace) || (project === fair?.project && taskId === fair.taskId)) { served = pace.cursor.auto; pace.cursor.autoBudget = undefined; }
     }
+    if (consumed.taken.has(taskId)) continue; // AUTOSTARVE1: stepped (and served) by the group this pass
     try {
-      const pool = await poolOf(policy.remote);
-      const prepared = await deps.prepareAuthor?.(task, authorBudget) ?? task;
-      if ("deferred" in prepared) { out.cards.push({ taskId, step: "held", detail: prepared.reason }); continue; }
-      out.cards.push(await new Card(db, prepared, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true,
-        policy.localMerge === true).step());
+      const prepared = await cardOf({ project, policy, taskId }, task);
+      out.cards.push("deferred" in prepared ? { taskId, step: "held", detail: prepared.reason } : await prepared.step());
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });
@@ -542,6 +548,6 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   }
   if (!merged) await driveMerges();
   await (await import("./lend-fix-reassign-tick.js")).relayPrSweep(db, Object.keys(projects), deps.manager, deps.now); // i28-RA1：卡跑完后每轮一单
-  logPoolIdleObservation(poolIdleObservation);
+  logPoolIdleObservation(poolIdleObservation); logConsumeFirst(consumed, out.cards.length, pace);
   return out;
 }
