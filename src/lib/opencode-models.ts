@@ -10,7 +10,8 @@ const TTL_MS = 5 * 60_000;
 let cache: { at: number; models: string[] } | null = null;
 
 export function parseOpencodeModels(out: string): string[] {
-  return [...new Set(out.split("\n").map((l) => l.trim()).filter((l) => /^[\w.-]+\/[\w.:@+-]+$/.test(l)))];
+  // provider/model，model 段可以再带斜杠（openrouter/anthropic/claude-x）
+  return [...new Set(out.split("\n").map((l) => l.trim()).filter((l) => /^[\w.-]+\/[\w.:@+/-]+$/.test(l)))];
 }
 
 export async function opencodeModels(run: Runner = defaultRunner, bin = opencodeBin(), now = Date.now()): Promise<string[]> {

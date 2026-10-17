@@ -106,6 +106,15 @@ sed "s/${SID}/$2/g" "${FIXTURE}"
   return { env, calls, touchDb };
 }
 
+describe("（重）启后第一条入站的前言", () => {
+  test("宿主拼的前言切掉，只留 <channel …> 那段并标 isMeta（同 Codex）", () => {
+    const text = "[claudestra:context] 你是 agent-x……用 <channel …> 包着的消息来自频道\n\n<channel source=\"claudestra\" chat_id=\"api:o\">在吗</channel>";
+    const rec = tr(JSON.stringify({ info: { role: "user", sessionID: "ses_a1", time: { created: 1 } }, parts: [{ type: "text", text }] }))!;
+    expect(rec.isMeta).toBe(true);
+    expect(rec.message.content).toBe('<channel source="claudestra" chat_id="api:o">在吗</channel>');
+  });
+});
+
 describe("refreshOpencodeMirror（假 opencode，隔离数据目录）", () => {
   test("导出 → 一行一条消息；库没变就不再导出；库变了且过了节流才重导", () => {
     const { env, calls, touchDb } = fakeEnv();

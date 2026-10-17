@@ -9,7 +9,6 @@ import { codexAcpInstalled, codexPairsWithAdapter, reconcileCodexAcp } from "./i
 import { selectedCodexAdapter, selfAdapterVerdict, type CodexCompat } from "./codex-compat.js";
 import type { CodexAdapterId } from "./codex-compat-switch.js";
 import { repoStubPath } from "./stub.js";
-import { OPENCODE_INSTALL_HINT, opencodeBin } from "./opencode-bin.js";
 
 /**
  * compat：选了自研时本机 codex 的协议判定（含组合身份）；adapter：宿主会起哪一个（选了自研但判不过 = upstream，
@@ -91,13 +90,7 @@ export async function probePiAcp(run: Runner = defaultRunner): Promise<AcpReady>
   return v && isNewerVersion(PI_ACP_MIN_VERSION, v) ? { ok: false, reason: `pi ${v} 太旧：acp 要 ${PI_ACP_MIN_VERSION} 以上（内置 MCP）` } : { ok: true };
 }
 
-/** OpenCode 直连 `opencode acp`、没有适配器要装：只看 CLI 在不在（opencode-bin.ts 按 nvm 的 bin 目录找） */
-async function probeOpencodeAcp(env: Record<string, string | undefined> = process.env): Promise<AcpReady> {
-  return opencodeBin(env) ? { ok: true } : { ok: false, reason: OPENCODE_INSTALL_HINT };
-}
-
-/** 按运行时分派的就绪闸（transport 命令用）：pi 看版本，opencode 看 CLI，其余照旧走 Codex 的判据 */
+/** 按运行时分派的就绪闸（transport 命令用）：pi 看版本，其余照旧走 Codex 的判据 */
 export function checkAcpReadyFor(runtime: string | undefined, autoInstall = false, deps: AcpReadyDeps = {}): Promise<AcpReady> {
-  if (runtime === "opencode") return probeOpencodeAcp(deps.env);
   return runtime === "pi" ? probePiAcp(deps.run) : checkAcpReady(autoInstall, deps);
 }

@@ -7,7 +7,7 @@ import { ACP_CONTROL } from "../src/lib/runtimes/acp-control";
 import { controlFor, managedFor, manageableRuntimeIds, requireManaged, sourceFor, transportsOf } from "../src/lib/runtimes/index";
 import { buildOpencodeAcpHostCommand, OPENCODE_MODEL_REQUIRED, opencodeAcpAdapter } from "../src/lib/runtimes/opencode-acp";
 import { parseCreateArgs } from "../src/manager/create-args";
-import { chooseCreateTransport, transportRefusal } from "../src/manager/acp-lifecycle";
+import { chooseCreateTransport, refuseResumeEarly, transportRefusal } from "../src/manager/acp-lifecycle";
 
 describe("注册表", () => {
   test("sourceFor / managedFor / controlFor / transportsOf 认 opencode，只走 acp", () => {
@@ -40,6 +40,12 @@ describe("模型必填", () => {
     const ok = parseCreateArgs(["a", "/tmp", "--runtime", "opencode", "--model", "opencode/big-pickle"]);
     expect("error" in ok ? ok.error : ok.model).toBe("opencode/big-pickle");
     expect("error" in parseCreateArgs(["a", "/tmp", "--runtime", "pi"])).toBe(false); // 别的运行时不要求
+  });
+
+  test("resume / 收编不带 --model 在建频道前就拒；别的运行时不要求", () => {
+    expect(() => refuseResumeEarly(opencodeAcpAdapter, false, undefined)).toThrow(OPENCODE_MODEL_REQUIRED);
+    expect(() => refuseResumeEarly(opencodeAcpAdapter, false, "opencode/big-pickle")).not.toThrow();
+    expect(() => refuseResumeEarly(managedFor("codex", "acp")!, false, undefined)).not.toThrow();
   });
 
   test("启动命令兜底再拒（resume / restart 走不到 create-args）", () => {
@@ -138,7 +144,9 @@ describe("二进制与沙箱目录", () => {
 
 describe("模型清单", () => {
   test("解析 opencode models 输出，丢掉非 provider/model 的行", () => {
-    expect(parseOpencodeModels("opencode/big-pickle\nwarn: x\n\nanthropic/claude-x\nopencode/big-pickle\n")).toEqual(["opencode/big-pickle", "anthropic/claude-x"]);
+    expect(parseOpencodeModels("opencode/big-pickle\nwarn: x\n\nanthropic/claude-x\nopencode/big-pickle\nopenrouter/anthropic/claude-sonnet-4.5\n")).toEqual([
+      "opencode/big-pickle", "anthropic/claude-x", "openrouter/anthropic/claude-sonnet-4.5",
+    ]);
   });
 
   test("成功缓存、失败不缓存", async () => {

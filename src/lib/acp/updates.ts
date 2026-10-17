@@ -173,7 +173,7 @@ export function createAcpTranslator(
   now: () => string = () => new Date().toISOString(), compact: CompactSource = { from: "claudestra-meta" }, opts: TranslatorOptions = {},
 ): AcpTranslator {
   let text = "";
-  /** command-end：这一轮是宿主发的 /compact（push 时看 trigger；flush 时宿主已复位，所以要自己记） */
+  /** command-end：这一轮是宿主发的 /compact 且流出了摘要（push 时看 trigger；flush 时宿主已复位，所以要自己记） */
   let compactTurn = false;
   let textId: string | undefined;
   let planSeq = 0;
@@ -228,10 +228,11 @@ export function createAcpTranslator(
     push(update) {
       const u = update as Rec | null;
       if (!u || typeof u !== "object") return [];
-      if (compact.from === "command-end" && compact.trigger?.() === "manual") compactTurn = true;
       switch (u.sessionUpdate) {
         case "agent_message_chunk":
-          return compactTurn ? [] : chunk(u); // 摘要正文收进边界，不当回复
+          // /compact 那一轮流出摘要正文 = 真压缩了（失败的回合只有 usage_update，不能光凭「来过更新」就出边界）；摘要收进边界，不当回复
+          if (compact.from === "command-end" && compact.trigger?.() === "manual") compactTurn = true;
+          return compactTurn ? [] : chunk(u);
         case "agent_thought_chunk":
           return u._meta?.claudestra?.display === true ? progress(u.content?.text) : [];
         case "session_info_update":

@@ -25,8 +25,11 @@ export const opencodeMirrorPath = (sessionId: string): string => join(OPENCODE_M
 
 const EXPORT_TIMEOUT_MS = 15_000;
 const SCAN_TIMEOUT_MS = 20_000;
-/** 同一个 id 两次导出至少隔这么久：历史面板轮询 + 宿主回放会连着要同一份，每次都起子进程（~2s）会把 bridge 卡住 */
-const REFRESH_THROTTLE_MS = 2_000;
+/**
+ * 同一个 id 两次导出至少隔这么久。新旧按整个库的 mtime 判（按会话判要再起一个子进程），任何 OpenCode 写库都会让所有镜像判旧；
+ * 一次导出 ~1–2s、峰值几百 MB，所以既节流、后台导出也全局排队一次一个（refreshOpencodeMirrorAsync）。代价：历史最多旧这么久
+ */
+const REFRESH_THROTTLE_MS = 10_000;
 const lastAttempt = new Map<string, number>();
 
 /** OpenCode 库文件（WAL 模式下新写入先落 -wal）最新的 mtime；都不在返回 0 */
@@ -105,6 +108,8 @@ export function refreshOpencodeMirror(sessionId: string, opts: RefreshOpts = {})
 }
 
 const inFlight = new Map<string, Promise<string | null>>();
+/** 后台导出全局排队：多个 agent 同时判旧时不并发起一堆 opencode 进程 */
+let exportQueue: Promise<unknown> = Promise.resolve();
 
 /** 后台导出（同一 id 同时只跑一个）；单测可 await 它 */
 export function refreshOpencodeMirrorAsync(sessionId: string, opts: RefreshOpts = {}): Promise<string | null> {
@@ -113,13 +118,14 @@ export function refreshOpencodeMirrorAsync(sessionId: string, opts: RefreshOpts 
   if (!isValidOpencodeSessionId(sessionId)) return Promise.resolve(null);
   const p = planExport(sessionId, opts);
   if (!p.bin) return Promise.resolve(p.have === null ? null : p.path);
-  const job = (async () => {
+  const job = exportQueue.then(async () => {
     const proc = Bun.spawn({ ...exportCmd(p.bin!, sessionId, p.env), stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     return finishExport(sessionId, p, code, out, err);
-  })().catch((e) => (console.error(`[opencode-session] 导出 ${sessionId} 起不来：${String(e)}`), p.have === null ? null : p.path))
+  }).catch((e) => (console.error(`[opencode-session] 导出 ${sessionId} 起不来：${String(e)}`), p.have === null ? null : p.path))
     .finally(() => inFlight.delete(sessionId));
   inFlight.set(sessionId, job);
+  exportQueue = job;
   return job;
 }
 
@@ -193,7 +199,11 @@ export function opencodeLineToClaudeShape(line: string, mcpServers: readonly str
   if (info.role === "user") {
     const text = textOf(parts);
     if (!text) return null;
-    return { type: "user", ...(/^\s*<channel\s/.test(text) ? { isMeta: true } : {}), timestamp, message: { content: text } };
+    if (/^\s*<channel\s/.test(text)) return { type: "user", isMeta: true, timestamp, message: { content: text } };
+    // 宿主在（重）启后第一条入站前拼了前言（职责 / 规则全文）：前言正文自己也提到「<channel …>」，只认拼接处（空行 + 带 source 的标签头），同 Codex
+    const at = text.indexOf("\n\n<channel source=");
+    if (at >= 0) return { type: "user", isMeta: true, timestamp, message: { content: text.slice(at + 2) } };
+    return { type: "user", timestamp, message: { content: text } };
   }
   if (info.role !== "assistant") return null;
   if (info.summary === true) return { type: "system", subtype: "compact_boundary", timestamp, compactSummary: textOf(parts) || undefined };

@@ -66,6 +66,12 @@ describe("OpenCode translator", () => {
     expect(tr.flush()[0].message.content[0].text).toBe("hi");
   });
 
+  test("/compact 那一轮失败（只来了 usage_update、没流出摘要）：不出「已压缩」边界", () => {
+    const tr = createAcpTranslator(() => "T", { from: "command-end", trigger: () => "manual" }, acpRuntime("opencode").translator!("claudestra"));
+    expect(tr.push({ sessionUpdate: "usage_update", used: 100, size: 200000 })).toHaveLength(1);
+    expect(tr.flush()).toEqual([]);
+  });
+
   test("普通回合不出压缩边界", () => {
     expect(replay("prompt-tool-call.jsonl", auto).some((e) => e.subtype === "compact_boundary")).toBe(false);
   });

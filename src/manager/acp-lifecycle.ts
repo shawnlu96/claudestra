@@ -97,6 +97,15 @@ export function refusePiAcpFork(adapter: ManagedRuntimeAdapter, fork: boolean): 
     + "要接着原会话就去掉 --fork；确实要 tmux 版那种行为，加 --transport tmux");
 }
 
+/**
+ * resume / 收编在建频道 / 窗口之前的拒绝：Pi ACP 不支持 --fork；必须显式给模型的运行时（OpenCode）不带 --model
+ * （create 在 create-args 早拒；不早拒就要等拼启动命令时才抛，频道和窗口白建再清）
+ */
+export function refuseResumeEarly(adapter: ManagedRuntimeAdapter, fork: boolean, model: string | undefined): void {
+  refusePiAcpFork(adapter, fork);
+  if (adapter.modelRequired && !model?.trim()) throw new Error(adapter.modelRequired);
+}
+
 /** 停掉窗口里的 ACP 宿主、回到 shell：先走适配器的退出序列，不行就点名强杀子进程。停不下返回 false */
 async function stopAcpHost(win: WindowOps, adapter: ManagedRuntimeAdapter): Promise<boolean> {
   const exited = await gracefulExitWindow(win, adapter).catch((e) => (console.error(`[acp] 宿主退出失败：${String(e)}`), false));
@@ -284,7 +293,11 @@ export async function switchTransport(name: string, mode: string): Promise<Recor
   const bare = name.replace(/^agent-/, "");
   if (mode === "acp") { // 锁外探就绪（Codex 可能要装适配器）；按运行时分派，先不加锁读一眼它是谁
     const pre = (await loadRegistry()).agents;
-    const ready = await checkAcpReadyFor((pre[`agent-${bare}`] ?? pre[bare])?.runtime, true, { selected: () => selectedCodexAdapter(bare) });
+    const runtime = (pre[`agent-${bare}`] ?? pre[bare])?.runtime;
+    const only = managedFor(runtime, "acp");
+    const ready = only?.acpOnly // 只走 ACP 的（OpenCode）没有适配器要装：问它自己的 available()
+      ? await only.available().then((r): AcpReady => (r.ok ? { ok: true } : { ok: false, reason: r.hint }))
+      : await checkAcpReadyFor(runtime, true, { selected: () => selectedCodexAdapter(bare) });
     if (!ready.ok) return { ok: false, error: ready.reason };
   }
   const lock = await acquireLock(statePath(".manager-write.lock"));
