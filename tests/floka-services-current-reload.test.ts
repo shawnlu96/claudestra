@@ -274,3 +274,42 @@ test("[验收线 3] proof changed while waiting for the lock refuses before any 
   expect(r.errors[0]).toContain("取锁期间提交证明已变化");
   expect(f.manager.calls).toEqual([]);
 });
+
+test("[验收线 3] switching during the loaded-state inventory stops before any reload", async () => {
+  for (const to of ["off", "observe", "cli-off", "services-observe"] as const) {
+    let mode: RecoveryMode = "on";
+    const f = await committed(), { p, observed } = ports(f, { mode: () => mode });
+    const loaded = f.manager.loaded.bind(f.manager);
+    f.manager.loaded = async label => {
+      if (to === "off" || to === "observe") mode = to;
+      else writeFileSync(f.configPath, JSON.stringify({ rename: to === "cli-off" ? { services: "on", cli: "off" } : { services: "observe", cli: "on" } }));
+      return loaded(label);
+    };
+    const gate = gateOf(f);
+    expect(await reloadCurrentFamily(gate, p)).toBe(gate);
+    expect(f.manager.reloads()).toEqual([]);
+    expect(observed.length).toBe(to === "observe" ? 1 : 0);
+  }
+});
+
+test("[验收线 3] switching after the first reload stops the rest and reports the truthful partial result", async () => {
+  for (const to of ["off", "observe", "cli-off"] as const) {
+    let mode: RecoveryMode = "on";
+    const f = await committed(), { p, observed } = ports(f, { mode: () => mode });
+    const reload = f.manager.reload.bind(f.manager);
+    f.manager.reload = async label => {
+      const r = await reload(label);
+      if (to === "cli-off") writeFileSync(f.configPath, JSON.stringify({ rename: { services: "on", cli: "off" } }));
+      else mode = to;
+      return r;
+    };
+    const [first, ...rest] = f.plan.services;
+    const r = await reloadCurrentFamily(gateOf(f), p);
+    expect(f.manager.reloads()).toEqual([`reload:${first!.newLabel}`]);
+    expect(r.daemons.map(d => [d.label, d.loaded])).toEqual([[first!.newLabel, true], ...rest.map(s => [s.newLabel, false])]);
+    expect(r.errors.at(-1)).toContain(`当前族重载中途停止`);
+    expect(r.errors.at(-1)).toContain(`已重载 1/${f.plan.services.length} 个`);
+    expect(r.warnings).toEqual([`当前族（new）只重载 1/${f.plan.services.length} 个已有服务；未重装 CLI/plist、未迁移`]);
+    expect(observed.length).toBe(to === "observe" ? 1 : 0);
+  }
+});

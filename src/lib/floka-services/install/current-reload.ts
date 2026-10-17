@@ -5,8 +5,8 @@
  * live under services/ or exactly one retired-<id>/. A running journal, missing/bad-checksum files, a rollback, a CLI-only
  * snapshot, an id/side mismatch or a still-loaded old label refuse and keep the gate's result.
  * Recovery key serviceCurrentReload (default on): off = the gate's result as before; observe = the same result plus one
- * recovery_observe sample per plan id + code version (labels and counts only). The mode is reread under the lock right
- * before acting. Rollback: `ledger scheduler-recovery claude-orchestrator off --key serviceCurrentReload --reason ...`.
+ * recovery_observe sample per plan id + code version (labels and counts only). The mode and upstream gates are reread under
+ * the lock and again before every reload; a switch midway stops with a truthful partial result. Rollback: `ledger scheduler-recovery claude-orchestrator off --key serviceCurrentReload --reason ...`.
  * tests/floka-services-current-reload.test.ts.
  */
 import { readdirSync, readFileSync } from "node:fs";
@@ -100,6 +100,14 @@ export function readCurrentProof(root: string): CurrentProof {
   }
 }
 
+const STOP_WHY = { off: "serviceCurrentReload 已切 off", observe: "serviceCurrentReload 已切 observe", gate: "rename 开关或当前族已变" } as const;
+/** Null while still on and eligible; otherwise why the reload must stop now. */
+function halted(p: ReloadPorts): keyof typeof STOP_WHY | null {
+  if (!eligible(p.configPath, p.root)) return "gate";
+  const m = p.mode();
+  return m === "on" ? null : m;
+}
+
 const refused = (gate: InstallCliResult, why: string): InstallCliResult =>
   ({ ...gate, errors: [`当前族重载已拒绝：${why}；未重载任何服务`, ...gate.errors] });
 
@@ -143,8 +151,19 @@ export async function reloadCurrentFamily(gate: InstallCliResult, p: ReloadPorts
     const unknown = state.filter(x => x.cur === null).map(x => x.s.newLabel);
     if (unknown.length) return refused(gate, `当前族服务状态未知：${unknown.join(", ")}`);
     const daemons: InstallCliResult["daemons"] = [], errors: string[] = [];
-    for (const { s, cur } of state) {
+    let reloaded = 0;
+    for (const [i, { s, cur }] of state.entries()) {
       const plistPath = join(home, "Library/LaunchAgents", `${s.newLabel}.plist`);
+      // The lock does not freeze policy/config edits: reread mode and upstream gates before every mutating reload.
+      const stop = cur ? halted(p) : null;
+      if (stop) {
+        if (stop === "observe") observeSample(p, proof);
+        if (!reloaded) return gate;
+        for (const r of state.slice(i)) daemons.push({ label: r.s.newLabel, plistPath: join(home, "Library/LaunchAgents", `${r.s.newLabel}.plist`),
+          loaded: false, warning: `未重载：${STOP_WHY[stop]}` });
+        return { ...gate, daemons, errors: [...errors, `当前族重载中途停止（${STOP_WHY[stop]}）：已重载 ${reloaded}/${plan.services.length} 个，其余未动；可重试 install-cli/update`],
+          warnings: [`当前族（new）只重载 ${reloaded}/${plan.services.length} 个已有服务；未重装 CLI/plist、未迁移`] };
+      }
       if (!cur) {
         daemons.push({ label: s.newLabel, plistPath, loaded: false, warning: "未加载：本次只重载已有服务，不新增" });
         errors.push(`${s.newLabel} 未加载，未启动`);
@@ -152,6 +171,7 @@ export async function reloadCurrentFamily(gate: InstallCliResult, p: ReloadPorts
       }
       let failure: string | null;
       try { failure = await manager.reload(s.newLabel); } catch (e) { failure = e instanceof Error ? e.message : String(e); }
+      if (failure === null) reloaded++;
       daemons.push({ label: s.newLabel, plistPath, loaded: failure === null, ...(failure === null ? {} : { warning: failure }) });
       if (failure !== null) errors.push(`${s.newLabel} 重载失败：${failure}`);
     }
