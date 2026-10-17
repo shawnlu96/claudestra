@@ -3,7 +3,7 @@ import { writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { autoFixture, toBuild, H1 } from "./scheduler-auto-helpers.js";
 import { recordMemory } from "../src/lib/ledger-memory.js";
-import { listLendOrders, offerLend, cancelLend } from "../src/lib/ledger-lend.js";
+import { listLendOrders, offerLend, cancelLend, renderLendOffer } from "../src/lib/ledger-lend.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { openVectorStore } from "../src/lib/memory-vectors.js";
@@ -223,4 +223,73 @@ test("observe semantic differences do not seed fallback cache or alter the next 
   cancelLend(p.f.db, { actor: "pm" }, { taskId: "T1", reason: "enable semantic" }); policy("on");
   const semantic = commitLendOffer(p.f.db, await p.prepare(), p.syncOffer);
   expect(semantic.text).toContain(id);
+});
+
+test.each(["on", "observe", "off"])("observe-drift-reject: wrapper drift preserves baseline when current mode is %s", async current => {
+  policy("observe"); const p = fixture(), prepared = await p.prepare();
+  p.f.db.run("UPDATE tasks SET rev = rev + 1, title = 'changed' WHERE id = 'T1'"); policy(current);
+  const o = commitLendOffer(p.f.db, prepared, p.syncOffer);
+  expect(o.status).toBe("pooled"); expect(o.text).toContain(p.memory);
+});
+
+test.each(["observe", "off"])("observe-drift-reject: upstream %s never adds a drift rejection", async upstream => {
+  policy("on", "observe"); const p = fixture(), prepared = await p.prepare();
+  p.f.db.run("UPDATE tasks SET round = round + 1 WHERE id = 'T1'"); policy("on", upstream);
+  expect(commitLendOffer(p.f.db, prepared, p.syncOffer).status).toBe("pooled");
+});
+
+test.each(["on", "observe"])("observe-drift-reject: real CLI tolerates unrelated rev changes in %s", async mode => {
+  policy(mode); const p = fixture();
+  p.lend.memoryPrepare.embedder = { model: "rev-drift", remote: false, embed: async texts => {
+    p.f.db.run("UPDATE tasks SET rev = rev + 1 WHERE id = 'T1'"); return texts.map(() => [1, 0]);
+  } };
+  expect(await p.offer()).toMatchObject({ ok: true });
+});
+
+test("observe-drift-reject: already drifted observation skips preparation and preserves baseline", async () => {
+  policy("observe"); const p = fixture(), task = p.f.task();
+  writeFileSync(p.spec, "spec changed before prepare");
+  const prepared = await prepareLendOffer(p.f.db, task, H1, "old spec", () => readFileSync(p.spec, "utf8"), p.lend.memoryPrepare);
+  expect(p.calls).toEqual([]);
+  expect(commitLendOffer(p.f.db, prepared, p.syncOffer).status).toBe("pooled");
+  expect(p.events().find(e => e.data.mechanism === "memoryLendPrepare")?.data.reason).toContain("漂移");
+});
+
+test("observe-drift-reject: canonical material-I/O revision guard remains intact", async () => {
+  policy("observe"); const p = fixture();
+  p.lend.result.remoteHead = async () => {
+    p.f.db.run("UPDATE tasks SET rev = rev + 1 WHERE id = 'T1'"); return { ok: true as const, head: H1 };
+  };
+  expect(await p.offer()).toMatchObject({ ok: false, code: "conflict" });
+  expect(listLendOrders(p.f.db, "T1")).toEqual([]);
+});
+
+test("observe-drift-reject: observe spec drift is sampled after success and never hard rejected", async () => {
+  policy("observe"); const p = fixture(), prepared = await p.prepare();
+  writeFileSync(p.spec, "规格正文已经改变");
+  const o = commitLendOffer(p.f.db, prepared, p.syncOffer);
+  expect(o.status).toBe("pooled");
+  expect(p.events().find(e => e.data.mechanism === "memoryLendPrepare")?.data.reason).toContain("漂移");
+});
+
+test("observe-drift-reject: in-transaction drift in observe preserves synchronous rendering", async () => {
+  policy("observe"); const p = fixture(), prepared = await p.prepare();
+  const input = { taskId: "T1", peer: "mate", family: "codex" as const, repo: "o/r", pr: null, spec: "new spec", borrow: p.borrow[0]!,
+    write: { fp: "abcd-ef01-2345-6789", base: "main", baseSha: H1, report: null } };
+  const baseline = renderLendOffer(p.f.db, { actor: "pm" }, p.f.task(), "write", "manual-order", input);
+  const actual = commitLendOffer(p.f.db, prepared, () => {
+    writeFileSync(p.spec, "changed during transaction");
+    return renderLendOffer(p.f.db, { actor: "pm" }, p.f.task(), "write", "manual-order", input);
+  });
+  expect(actual.text).toBe(baseline.text);
+});
+
+test("relay-head-discard-no-memory: legitimate head adoption keeps synchronous memory", async () => {
+  policy(); const p = fixture(), prepared = await p.prepare();
+  const o = commitLendOffer(p.f.db, prepared, () => {
+    p.f.db.run("UPDATE tasks SET headSHA = ? WHERE id = 'T1'", ["a".repeat(40)]);
+    return p.syncOffer();
+  });
+  expect(o.text).toContain(p.memory);
+  expect(p.events().find(e => e.data.op === "memory_inject_attempt")?.data.result).toBe("injected");
 });

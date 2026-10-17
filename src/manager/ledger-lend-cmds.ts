@@ -239,7 +239,7 @@ async function offer(c: LedgerCli, again: boolean): Promise<Result> {
   const prepared = await prepareLendOffer(c.db, task, stepOfStage(task.stage) === "write" ? input.write?.baseSha ?? null : task.headSHA,
     input.spec, () => readTextSoft(specPathFor(c.task(task.id), getMeta(c.db, task.project).docsDir)), c.deps.lend?.memoryPrepare);
   const fresh = await refreshCliOffer(input, task.project, lendDeps(c));
-  const o = commitLendOffer(c.db, prepared, () => offerWithAuthorFamily(c.db, c.ctx(), task, fresh, again ? reason : undefined));
+  const o = commitLendOffer(c.db, prepared, (snapshot) => offerWithAuthorFamily(c.db, c.ctx(), snapshot ?? task, fresh, again ? reason : undefined));
   return { ok: true, orderId: o.orderId, step: o.step, peer: o.peer, family: o.family, sha256: o.sha256, supersedes: o.supersedes,
     ...(o.branch ? { branch: o.branch, base: o.base } : {}), ...(materialsDiag ? { materialsDiag } : {}) };
 }
