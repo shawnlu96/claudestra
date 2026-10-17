@@ -17,6 +17,7 @@ import { pickRoleModel } from "./role-model-settings-local.js";
 import { CARD_ROLES, isCardRoleName as isCardRole, type CardRole } from "./role-model-settings.js";
 import { recordLaunchAttempt, recordLaunchFailed, type LaunchPlan } from "./task-tier-launch-events.js";
 import { decideTierLaunch, type TierLaunchCtx } from "./task-tier-models.js";
+import { escalateBeforeLaunch } from "./task-tier-escalation.js";
 
 export { CARD_DEFAULT_MODEL, CARD_ROLES, type CardRole } from "./role-model-settings.js";
 
@@ -211,6 +212,7 @@ export function applyCardRole(args: string[], opts: CardRoleOptions = {}): Appli
   if (model && (purpose?.value === duties || purpose?.value?.endsWith(`\n\n${duties}`))
     && (def.disallowedTools.length ? flagValue(args, "--disallowed")?.value === boundary : true)) {
     if (!opts.tier) return { args };
+    escalateBeforeLaunch(opts.tier, role);
     const again = decideTierLaunch(opts.tier, role, "claude", model.value?.trim() ?? null, args[1] ?? null);
     if (again.mode !== "on") return { args };
     const why = "error" in again ? again.error : repeatedFlag(args);
@@ -222,6 +224,7 @@ export function applyCardRole(args: string[], opts: CardRoleOptions = {}): Appli
   if (typeof text !== "string") return { error: `${def.name}：${text.error}；没有建会话` };
   // 读表放在所有拒绝之后：observe 记的 would-use 只对应真会发出的 create
   const out = [...args];
+  if (opts.tier) escalateBeforeLaunch(opts.tier, role);
   const tier = opts.tier ? decideTierLaunch(opts.tier, role, "claude", model?.value?.trim() ?? null, args[1] ?? null) : null;
   if (tier && "error" in tier) return { error: `${def.name}：${tier.error}；没有建会话`, tierLaunch: tier.plan };
   const tierOn = tier?.mode === "on" ? tier : null;
@@ -264,6 +267,7 @@ function codexRoleModel(args: string[], role: CardRole, opts: CardRoleOptions): 
 function codexTier(args: string[], role: CardRole, ctx: TierLaunchCtx): Applied | null {
   const eff = flagValue(args, "--effort");
   const explicit = eff && eff.value !== ctx.baseEffort ? eff.value ?? "" : null;
+  escalateBeforeLaunch(ctx, role);
   const d = decideTierLaunch(ctx, role, "codex", explicit, args[1] ?? null);
   if ("error" in d) return { error: `${role}（codex）：${d.error}；没有建会话`, tierLaunch: d.plan };
   if (d.mode !== "on") return null;
@@ -318,6 +322,7 @@ function tierOnly(args: string[], ctx: TierLaunchCtx, role: CardRole): Applied {
   if (args[0] !== "create") return { args };
   if (flagValue(args, "--runtime")?.value === "codex") return codexTier(args, role, ctx) ?? { args };
   const model = flagValue(args, "--model")?.value ?? null;
+  escalateBeforeLaunch(ctx, role);
   const d = decideTierLaunch(ctx, role, "claude", model, args[1] ?? null);
   if ("error" in d) return { error: `${role}：${d.error}；没有建会话`, tierLaunch: d.plan };
   if (d.mode !== "on") return { args };
