@@ -28,6 +28,9 @@ const SHA = /^[0-9a-f]{40}$/i;
 const REPO = /^[\w.-]+\/[\w.-]+$/;
 const PER_PAGE = 100;
 const CACHE_MAX = 300;
+/** MAPSWEEP1: archives held in all (least recently used out first) and the most one download may be (more = a failed download, not kept). */
+export const ARCHIVE_CACHE_BYTES = 64 * 1024 * 1024;
+export const ARCHIVE_MAX_BYTES = 16 * 1024 * 1024;
 
 export interface CiProofCommit { sha: string; tree: string; parents: string[] }
 /** `base` is the pulls API's base.sha (what a pull_request manifest records), not the main the test merge sits on. */
@@ -69,8 +72,49 @@ const keep = <V>(cache: Map<string, V>, key: string, value: V): V => {
   cache.set(key, value);
   return value;
 };
+let archiveBytes = 0;
+/** Archives: at most CACHE_MAX and ARCHIVE_CACHE_BYTES in all, a hit moves to the newest end (archiveHit). */
+function keepArchive(key: string, zip: Uint8Array): Uint8Array {
+  const prev = archives.get(key);
+  if (prev) { archives.delete(key); archiveBytes -= prev.byteLength; }
+  archives.set(key, zip);
+  archiveBytes += zip.byteLength;
+  for (const [k, v] of archives) {
+    if (archives.size <= CACHE_MAX && archiveBytes <= ARCHIVE_CACHE_BYTES) break;
+    archives.delete(k);
+    archiveBytes -= v.byteLength;
+  }
+  return zip;
+}
+function archiveHit(key: string): Uint8Array | undefined {
+  const hit = archives.get(key);
+  if (hit) { archives.delete(key); archives.set(key, hit); }
+  return hit;
+}
+/** One response body, refused past ARCHIVE_MAX_BYTES (by its declared length first, then as it streams). */
+async function boundedBody(res: Response, id: number): Promise<Uint8Array> {
+  const tooBig = () => new Error(`工件 ${id} 下载失败：超过 ${ARCHIVE_MAX_BYTES} 字节`);
+  if (Number(res.headers.get("content-length") ?? 0) > ARCHIVE_MAX_BYTES) { await res.body?.cancel().catch(() => { /* 已按超限判失败：取消读流出错不改结论 */ }); throw tooBig(); }
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
+  const parts: Uint8Array[] = [];
+  let n = 0;
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > ARCHIVE_MAX_BYTES) { await reader.cancel().catch(() => { /* 已按超限判失败：取消读流出错不改结论 */ }); throw tooBig(); }
+    parts.push(value);
+  }
+  const out = new Uint8Array(n);
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.byteLength; }
+  return out;
+}
 /** Tests only. */
-export const resetCiProofPortCache = (): void => { commits.clear(); files.clear(); jobLists.clear(); archives.clear(); };
+export const resetCiProofPortCache = (): void => { commits.clear(); files.clear(); jobLists.clear(); archives.clear(); archiveBytes = 0; };
+/** Tests only. */
+export const ciProofArchiveMemory = (): { count: number; bytes: number } => ({ count: archives.size, bytes: archiveBytes });
 
 function slug(repo: string): string {
   if (!REPO.test(repo)) throw new Error(`仓库名不合法：${repo.slice(0, 80)}`);
@@ -109,14 +153,14 @@ function ghReads(command: Command, opts: PortOpts) {
   /** One artifact archive: the token is asked right before the request (a guarded spawn), the signed redirect is followed without it. */
   const download = async (id: number): Promise<Uint8Array> => {
     if (!posInt(id)) throw new Error("工件 id 不合法");
-    const key = `${repoOf(id).toLowerCase()}#${id}`, hit = archives.get(key);
+    const key = `${repoOf(id).toLowerCase()}#${id}`, hit = archiveHit(key);
     if (hit) return hit; // an artifact id never gets other bytes; whether it still exists is the caller's live list
     const token = (await run(["gh", "auth", "token"])).trim(), signal = () => AbortSignal.timeout(60_000);
     const first = await http(`${API_ROOT}/repos/${repoOf(id)}/actions/artifacts/${id}/zip`,
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" }, redirect: "manual", signal: signal() });
     const to = first.headers.get("location"), res = to ? await http(to, { signal: signal() }) : first;
     if (!res.ok) throw new Error(`工件 ${id} 下载失败：HTTP ${res.status}`);
-    return keep(archives, key, new Uint8Array(await res.arrayBuffer()));
+    return keepArchive(key, await boundedBody(res, id));
   };
   const owners = new Map<number, string>(); // artifact id → the repository it was listed under: download never takes a repo from a caller
   const repoOf = (id: number): string => {

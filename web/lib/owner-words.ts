@@ -105,7 +105,182 @@ export const LEND_WORDS = {
   statusObserveWarn: "只观察：仍在接新活，能同时跑的数量没减",
 } as const;
 
+/** 优先级面板：来源、提示与操作共用 owner 叫法。 */
+export const PRIORITY_WORDS = {
+  sourceExplicit: "owner 显式登记",
+  sourceModule: "跟随所属模块",
+  sourceSystem: "系统缺省",
+  moduleTitle: "{title}\n模块：{module}",
+  noModule: "不属于任何模块",
+  unnamedModule: "所属模块名称未知",
+  dependencyDetail: "等待依赖：{refs}",
+  externalUnknown: "外部结果不明，需核实",
+  noReliableState: "数据未知：尚无可靠的执行或等待状态",
+  plannedUnknown: "未绑卡计划：开工及停滞数据未知",
+  externalResult: "外部结果不明",
+  capacityFull: "本机容量已满",
+  setBand: "改为{band}",
+  sessionAction: "本会应用：{action}",
+  moveUp: "同档前移",
+  moveDown: "同档后移",
+  sourceLabel: "档位来源：",
+  sourceTitle: "档位来源：{source} · {module}",
+  now: "现在做",
+  next: "接着做",
+  later: "可以拖",
+  dependency: "等待依赖",
+  capacity: "等容量",
+  owner: "等 owner",
+  uncertain: "结果不明",
+  unknown: "数据未知",
+  working: "执行中",
+  waiting: "等待中",
+  ready: "待开工",
+  durationUnknown: "时长未知",
+  durationDays: "{d} 天 {h} 小时",
+  durationHours: "{h} 小时 {m} 分",
+  durationMinutes: "{m} 分钟",
+  plannedNode: "计划节点 · 未开卡 · 节点 key：{key}",
+  durationTitle: "当前状态已持续；警示阈值 {h} 小时",
+  stalled: "停滞 ",
+  order: "同档顺序：",
+  defaultOrder: "默认",
+  actions: "{title}优先级操作",
+  adjustTitle: "调整：{title}",
+  adjust: "调整",
+  options: "调整选项",
+  record: "记录本会",
+  inherit: "恢复继承",
+  up: "前移",
+  down: "后移",
+  off: "已关闭",
+  observe: "观察中",
+  on: "已启用",
+  versionChanged: "版本已变，请刷新后重试",
+  failed: "操作失败，请刷新核对",
+  readbackFailed: "命令已处理，但当前读回不一致，请刷新核对",
+  recorded: "已记录本会调整，业务档位与顺序未变。",
+  applied: "已应用，服务端读回一致。",
+  heading: "当前现在做",
+  count: "{n} 张",
+  noData: "· 数据未知",
+  switches: "排序：{sort} · 开工：{start} · 升级：尚未启用（配置{stall}）",
+  stale: "旧快照 · 禁止操作",
+  readFailed: "读取失败",
+  expand: "展开",
+  collapse: "收起",
+  mechanism: "登记 now 不代表机制已生效",
+  refresh: "刷新",
+  history: "优先级历史",
+  observeInfo: "观察中：只读展示。owner 可记录「本会调整」，不会应用调档或排序。",
+  expired: "旧快照已过期，操作已停用。",
+  retry: "无法确认 now 工作，请重试。",
+  unbound: "当前团队未绑定本机项目，优先级数据未知。",
+  loading: "正在读取 now 工作…",
+  empty: "当前没有有效 now 工作。已完成卡仍可在原卡与优先级历史查询。",
+  expiredRetry: "旧快照已过期，请刷新后重试",
+  busy: "正在处理请求",
+  unavailable: "操作不可用",
+  confirmRequest: "确认优先级请求",
+  target: "目标：{id} · 版本 {rev}",
+  extra: "补充原话（可选）",
+  confirmRecord: "确认记录",
+  confirmApply: "确认应用",
+  loadingHistory: "正在读取历史…",
+  noHistory: "暂无优先级历史",
+  nodeDialog: "本机计划节点详情",
+  close: "关闭",
+  nodeGone: "原节点已移出当前 DAG，请刷新",
+  loadingNode: "正在读取原节点…",
+} as const;
+
 const words: Record<string, string> = {
+  [PRIORITY_WORDS.sourceExplicit]: "Explicitly set by owner",
+  [PRIORITY_WORDS.sourceModule]: "Follows its module",
+  [PRIORITY_WORDS.sourceSystem]: "System default",
+  [PRIORITY_WORDS.moduleTitle]: "{title}\nModule: {module}",
+  [PRIORITY_WORDS.noModule]: "Not part of any module",
+  [PRIORITY_WORDS.unnamedModule]: "Module name unknown",
+  [PRIORITY_WORDS.dependencyDetail]: "Waiting for dependencies: {refs}",
+  [PRIORITY_WORDS.externalUnknown]: "External result uncertain; verification required",
+  [PRIORITY_WORDS.noReliableState]: "No reliable execution or waiting state yet",
+  [PRIORITY_WORDS.plannedUnknown]: "Planned node without a card: start and stall data unknown",
+  [PRIORITY_WORDS.externalResult]: "External result uncertain",
+  [PRIORITY_WORDS.capacityFull]: "Local capacity is full",
+  [PRIORITY_WORDS.setBand]: "Change to {band}",
+  [PRIORITY_WORDS.sessionAction]: "Record for this session: {action}",
+  [PRIORITY_WORDS.moveUp]: "Move up within band",
+  [PRIORITY_WORDS.moveDown]: "Move down within band",
+  [PRIORITY_WORDS.sourceLabel]: "Priority source:",
+  [PRIORITY_WORDS.sourceTitle]: "Priority source: {source} · {module}",
+  [PRIORITY_WORDS.now]: "Do now",
+  [PRIORITY_WORDS.next]: "Do next",
+  [PRIORITY_WORDS.later]: "Can wait",
+  [PRIORITY_WORDS.dependency]: "Waiting for dependencies",
+  [PRIORITY_WORDS.capacity]: "Waiting for capacity",
+  [PRIORITY_WORDS.owner]: "Waiting for owner",
+  [PRIORITY_WORDS.uncertain]: "Result uncertain",
+  [PRIORITY_WORDS.unknown]: "Data unknown",
+  [PRIORITY_WORDS.working]: "In progress",
+  [PRIORITY_WORDS.waiting]: "Waiting",
+  [PRIORITY_WORDS.ready]: "Ready to start",
+  [PRIORITY_WORDS.durationUnknown]: "Duration unknown",
+  [PRIORITY_WORDS.durationDays]: "{d} d {h} h",
+  [PRIORITY_WORDS.durationHours]: "{h} h {m} min",
+  [PRIORITY_WORDS.durationMinutes]: "{m} min",
+  [PRIORITY_WORDS.plannedNode]: "Planned node · No card yet · Node key: {key}",
+  [PRIORITY_WORDS.durationTitle]: "Time in current state; warning threshold {h} h",
+  [PRIORITY_WORDS.stalled]: "Stalled ",
+  [PRIORITY_WORDS.order]: "Order in band:",
+  [PRIORITY_WORDS.defaultOrder]: "Default",
+  [PRIORITY_WORDS.actions]: "Priority actions for {title}",
+  [PRIORITY_WORDS.adjustTitle]: "Adjust: {title}",
+  [PRIORITY_WORDS.adjust]: "Adjust",
+  [PRIORITY_WORDS.options]: "Adjustment options",
+  [PRIORITY_WORDS.record]: "Record for this session: ",
+  [PRIORITY_WORDS.inherit]: "Restore inheritance",
+  [PRIORITY_WORDS.up]: "Move up",
+  [PRIORITY_WORDS.down]: "Move down",
+  [PRIORITY_WORDS.off]: "Off",
+  [PRIORITY_WORDS.observe]: "Observing",
+  [PRIORITY_WORDS.on]: "On",
+  [PRIORITY_WORDS.versionChanged]: "Version changed; refresh and try again",
+  [PRIORITY_WORDS.failed]: "Operation failed; refresh to verify",
+  [PRIORITY_WORDS.readbackFailed]: "Command processed, but readback differs; refresh to verify",
+  [PRIORITY_WORDS.recorded]: "Session adjustment recorded; work priority and order are unchanged.",
+  [PRIORITY_WORDS.applied]: "Applied; server readback matches.",
+  [PRIORITY_WORDS.heading]: "Current work",
+  [PRIORITY_WORDS.count]: "{n} cards",
+  [PRIORITY_WORDS.noData]: "· Data unknown",
+  [PRIORITY_WORDS.switches]: "Sorting: {sort} · Starting: {start} · Escalation: not enabled (configured {stall})",
+  [PRIORITY_WORDS.stale]: "Old snapshot · Actions disabled",
+  [PRIORITY_WORDS.readFailed]: "Read failed",
+  [PRIORITY_WORDS.expand]: "Expand",
+  [PRIORITY_WORDS.collapse]: "Collapse",
+  [PRIORITY_WORDS.mechanism]: "A now priority does not mean the mechanism is active",
+  [PRIORITY_WORDS.refresh]: "Refresh",
+  [PRIORITY_WORDS.history]: "Priority history",
+  [PRIORITY_WORDS.observeInfo]: "Observing: read-only. Owners can record session adjustments; priority and order will not change.",
+  [PRIORITY_WORDS.expired]: "Snapshot expired; actions disabled.",
+  [PRIORITY_WORDS.retry]: "Cannot confirm current work; try again.",
+  [PRIORITY_WORDS.unbound]: "This team has no local project binding; priority data is unknown.",
+  [PRIORITY_WORDS.loading]: "Loading current work…",
+  [PRIORITY_WORDS.empty]: "No active current work. Completed cards remain available in their original view and priority history.",
+  [PRIORITY_WORDS.expiredRetry]: "Snapshot expired; refresh and try again",
+  [PRIORITY_WORDS.busy]: "Processing request",
+  [PRIORITY_WORDS.unavailable]: "Action unavailable",
+  [PRIORITY_WORDS.confirmRequest]: "Confirm priority request",
+  [PRIORITY_WORDS.target]: "Target: {id} · Version {rev}",
+  [PRIORITY_WORDS.extra]: "Additional words (optional)",
+  [PRIORITY_WORDS.confirmRecord]: "Confirm recording",
+  [PRIORITY_WORDS.confirmApply]: "Confirm application",
+  [PRIORITY_WORDS.loadingHistory]: "Loading history…",
+  [PRIORITY_WORDS.noHistory]: "No priority history yet",
+  [PRIORITY_WORDS.nodeDialog]: "Local planned node details",
+  [PRIORITY_WORDS.close]: "Close",
+  [PRIORITY_WORDS.nodeGone]: "The original node is no longer in the current plan; refresh",
+  [PRIORITY_WORDS.loadingNode]: "Loading original node…",
+
   规格: "Spec", 确认需求: "Confirm", 开发: "Build", 审查: "Review", 返工: "Fix", 合并: "Merge", 上线: "Live", 验证: "Verify",
   完成: "Done", 受阻: "Blocked", 取消: "Cancelled", 终审: "Final review", 部署: "Deploy", 交付中: "Delivering", 看界面: "UI check",
   [OTHER_STAGE_WORD]: "Other", [READY_WORD]: "Ready to start",
@@ -169,6 +344,33 @@ export function ownerWordsTr(language: "zh" | "en") {
     for (const [k, v] of Object.entries(params ?? {})) value = value.replaceAll(`{${k}}`, String(v));
     return value;
   };
+}
+
+/** Server system copy is not owner-authored text; unknown Chinese reasons use a localized state/error fallback. */
+export function prioritySystemText(text: string, fallback: string, language: "zh" | "en"): string {
+  const tr = ownerWordsTr(language);
+  if (text === "本机名额满") return tr(PRIORITY_WORDS.capacityFull);
+  if (language === "zh") return text;
+  const dependency = text.match(/^等待依赖[：:](.*)$/);
+  if (dependency) return tr(PRIORITY_WORDS.dependencyDetail, { refs: dependency[1]!.split("、").join(", ") });
+  const translated = tr(text);
+  return /[\u4e00-\u9fff]/.test(translated) ? tr(fallback) : translated;
+}
+
+/** Translate only the recorded system action label; preserve the owner's appended words verbatim. */
+export function priorityHistoryText(text: string, language: "zh" | "en"): string {
+  if (language === "zh") return text;
+  const tr = ownerWordsTr(language), W = PRIORITY_WORDS;
+  const sessionPrefix = W.sessionAction.replace("{action}", "");
+  const session = text.startsWith(sessionPrefix);
+  const value = session ? text.slice(sessionPrefix.length) : text;
+  const actions: [string, string][] = [W.inherit, W.moveUp, W.moveDown].map(label => [label, tr(label)]);
+  for (const band of [W.now, W.next, W.later]) {
+    actions.push([ownerWordsTr("zh")(W.setBand, { band }), tr(W.setBand, { band: tr(band) })]);
+  }
+  const action = actions.find(([label]) => value === label || value.startsWith(`${label}；`));
+  if (!action) return text;
+  return (session ? tr(W.sessionAction, { action: action[1] }) : action[1]) + value.slice(action[0].length);
 }
 
 /** 不该再给 owner 看到的内部词；只给测试用 */

@@ -17,6 +17,7 @@ import { output } from "./core.js";
 import { parseLedgerArgs } from "./ledger-identity.js";
 import { arbitrateFlags } from "../lib/lend-arbiter-submit.js";
 import { parseNoChangeText, type NoChange } from "../lib/order-no-change.js";
+import { lendSubmitPrecheck } from "../lib/ci-deliver-precheck.js";
 
 const USAGE = "usage: lend submit <orderId> --verdict pass|changes|block (--findings '<json 数组>' | --findings-file <文件>) --report <报告文件>" +
   " | lend submit <orderId> --summary-file <一行摘要> --self-check-file <自查> [--ui-shots-file <截图清单> | --no-change-file <noChange JSON：核实无需改码，HEAD 留在订单起点>]（开工 / 修复单）";
@@ -42,6 +43,7 @@ const realDeps: SubmitterDeps = {
     const out = (await new Response(proc.stdout).text()).trim();
     return (await proc.exited) === 0 ? out : null;
   },
+  precheck: (dir, head) => lendSubmitPrecheck(dir, head),
 };
 
 /** 写单交活：两份文件读成文本（不从命令行收正文），交给 submitLendWork 核 */

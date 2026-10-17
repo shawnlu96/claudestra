@@ -148,7 +148,8 @@ export function scopeInputs(db: Database, task: LedgerTask, head: string | null,
   const key = scopeKey(task, head);
   const prior = getEventByDedup(db, key);
   if (prior) {
-    const text = describeDeliveredScope(scopeText(prior.text, prior.data, task.project, policy), prior.data, policy(task.project, "askScopeAuto").mode);
+    const text = describeDeliveredScope(scopeText(prior.text, prior.data, task.project, policy), prior.data,
+      policy(task.project, "askScopeAuto").mode, policy("claude-orchestrator", "askScopeCaseFold").mode);
     const clipped = clipWire(text, 8000);
     return [clipped === text ? text : `${clipped}\n列表过长，完整逐文件清单见台账事件 ${prior.seq}。`];
   }

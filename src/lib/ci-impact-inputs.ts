@@ -104,6 +104,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   { module: "src/lib/agent-lifecycle-deps.ts", deps: ["src/manager.ts"], why: "子进程跑 src/manager.ts；du 是外部命令" },
   ext("src/lib/caller-witness.ts", "ps 外部命令与 cwd"),
   { module: "src/lib/card-role-definitions.ts", deps: [".claude/agents/**"], why: "读仓库 .claude/agents 角色定义" },
+  { module: "src/lib/ci-deliver-precheck-run.ts", deps: ["scripts/test.ts"], why: "子进程跑被检工作副本（或合并树临时检出）的 scripts/test.ts；交付树的登记表在临时目录子进程里求值；git 与副本内容是运行时输入" },
   { module: "src/lib/codex-auto-update.ts", deps: ["src/manager.ts"], why: "子进程跑 src/manager.ts；读运行时状态" },
   ext("src/lib/dag-write-scrub.ts", "git / gh 查询提交，只读 git 元数据"),
   ext("src/lib/env-file.ts", "读运行时 .env（不入库）"),

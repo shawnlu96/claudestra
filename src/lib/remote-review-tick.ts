@@ -29,6 +29,8 @@ export interface RemoteReviewStepDeps {
 
 const NOTICE_RETRY_MS = 60_000;
 const failedAt = new WeakMap<Database, Map<number, number>>();
+/** Tests only. */
+export const remoteNoticeRetrySize = (db: Database): number => failedAt.get(db)?.size ?? 0;
 
 function rethrowStop(e: unknown): void {
   if (e instanceof SchedulerStopped) throw e;
@@ -67,8 +69,10 @@ async function sendNotices(db: Database, projects: readonly string[], deps: Remo
   const failed: Failed = [], now = deps.now ?? Date.now;
   const memo = failedAt.get(db) ?? new Map<number, number>();
   failedAt.set(db, memo);
+  const pending = new Set<number>();
   for (const project of projects) {
     for (const n of unsentRemoteNotices(db, project)) {
+      pending.add(n.seq);
       if (now() - (memo.get(n.seq) ?? -Infinity) < NOTICE_RETRY_MS) continue;
       try { await notify(project, n.text); } catch (e) {
         rethrowStop(e);
@@ -81,6 +85,7 @@ async function sendNotices(db: Database, projects: readonly string[], deps: Remo
       if (r.ok !== true && r.held !== true) failed.push({ taskId: n.taskId, error: `通知已发出但送达没记上（可能再发一次）：${String(r.error ?? r.code)}` });
     }
   }
+  for (const seq of memo.keys()) if (!pending.has(seq)) memo.delete(seq); // settled elsewhere (MAPSWEEP1): not unsent any more, never retried
   return failed;
 }
 

@@ -12,6 +12,7 @@ import { requireSharedLedgerTaskStart } from "./shared-ledger-center-claims-gate
 import { updateTask } from "./fix-strategy-task-write.js";
 import { deliverDisputes } from "./review-arbiter-deliver.js";
 import { observeUiDelivery, planUiDelivery, uiReplaySame, type UiDeliverPort } from "./ledger-deliver-ui.js";
+import { deliverTierGate } from "./task-tier-deliver-wiring.js";
 import {
   APPENDABLE_KINDS,
   checkIdFree,
@@ -243,6 +244,7 @@ export function deliver(
 ): WriteResult<LedgerTask> {
   // CINOOP1：noChange 交付走 ci-no-change-recovery.ts 的专用事务（核外部证据、受控 fix→merge）；普通交付带上它就是接错了口，不能静默当普通交付推 review
   if (input.noChange !== undefined) throw new LedgerError("invalid", "noChange 交付走专用事务（ledger deliver --no-change），不进普通交付");
+  deliverTierGate(db, input.taskId, input.headSHA); // TIER3e：交付阶段类型门控（docs 范围），拒绝即抛、事务前不写
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "deliver" }, () => task, (prev) => uiReplaySame(prev, input.uiEvidence));

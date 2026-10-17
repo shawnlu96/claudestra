@@ -52,17 +52,26 @@ export async function sendPostVerify(env: SpecWaitEnv, project: string, taskId: 
   return warning;
 }
 
-function unsummarized(db: Database, project: string, now: number): Summary | null {
-  const sent = db.query("SELECT data FROM events WHERE project = ? AND actor = 'scheduler' AND kind = 'note'"
-    + " AND json_extract(data, '$.op') = 'post_verify_pull' AND json_extract(data, '$.kind') = 'sent'")
-    .all(project) as { data: string }[];
-  const seen = new Set(sent.flatMap((r) => (JSON.parse(r.data).cards as Card[]).map(cardKey)));
-  const cards: Card[] = [], targets = new Set<string>();
+/** Sent batches are scanned only for candidate task ids (substring pre-filter, exact cardKey check in JS); no candidate, no scan. */
+function summarizedKeys(db: Database, project: string, cards: Card[]): Set<string> {
+  const want = new Set(cards.map(cardKey)), ids = [...new Set(cards.map((c) => JSON.stringify(c.taskId)))], seen = new Set<string>();
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const rows = db.query("SELECT data FROM events WHERE project = ? AND actor = 'scheduler' AND kind = 'note'"
+      + " AND json_extract(data, '$.op') = 'post_verify_pull' AND json_extract(data, '$.kind') = 'sent'"
+      + ` AND (${chunk.map(() => "instr(data, ?) > 0").join(" OR ")})`).all(project, ...chunk) as { data: string }[];
+    for (const r of rows) for (const c of JSON.parse(r.data).cards as Card[]) if (want.has(cardKey(c))) seen.add(cardKey(c));
+  }
+  return seen;
+}
+
+/** Exported for tests only. */
+export function unsummarized(db: Database, project: string, now: number): Summary | null {
+  const due: (Card & { to: string })[] = [];
   for (const t of listTasks(db, project)) {
     if (schedulerV2SkipTask(db, t.id)) continue;
     if (t.stage !== "verified" || getEventByDedup(db, postVerifyDoneKey(t.id))) continue;
-    const at = verifiedAt(db, t), ref = { taskId: t.id, verifiedTs: at };
-    if (seen.has(cardKey(ref))) continue;
+    const at = verifiedAt(db, t);
     const closed = getEventByDedup(db, `post-verify-overdue:${t.id}:on`);
     if (closed && closed.ts >= at) continue;
     const section = postVerifySection(readPostVerifySpec(t.id)?.text);
@@ -75,6 +84,13 @@ function unsummarized(db: Database, project: string, now: number): Summary | nul
     if (!first || first.ts >= dayStart(now)) continue;
     const to = postVerifyTarget(db, t, "remind");
     if (!to) continue;
+    due.push({ taskId: t.id, verifiedTs: at, to });
+  }
+  if (!due.length) return null;
+  const seen = summarizedKeys(db, project, due);
+  const cards: Card[] = [], targets = new Set<string>();
+  for (const { to, ...ref } of due) {
+    if (seen.has(cardKey(ref))) continue;
     cards.push(ref); targets.add(to);
   }
   cards.sort((a, b) => a.taskId.localeCompare(b.taskId));

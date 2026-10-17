@@ -93,6 +93,8 @@ let reminderPorts: ReminderPorts = DEFAULT_PORTS;
 const observed = new Set<string>();
 /** 通知待办被闸住的日志每条每个理由只记一次（off / observe 时每分钟都会过一遍） */
 const held = new Set<string>();
+/** 单测 */
+export const askReminderLogMemory = (): { observed: number; held: number } => ({ observed: observed.size, held: held.size });
 
 /** 组合接线（CFG 的 recoveryPolicy 等）与单测换 port；undefined 还原默认 */
 export function setAskReminderPorts(p: Partial<ReminderPorts> | undefined): void {
@@ -112,15 +114,23 @@ function remindAfterSweep(db: Parameters<typeof sweepReminders>[0], now: number)
 async function runReminders(db: Parameters<typeof sweepReminders>[0], now: number): Promise<void> {
   // Center expiry is a display update, never permission to create a local replacement or replay a reminder notice.
   const ports: ReminderPorts = { ...reminderPorts, paused: (a) => !!sharedAskMapping(a) || !!reminderPorts.paused?.(a) };
-  const res = await sweepReminders(db, ports, now).catch((e: Error) => (console.error(`⚠️ 过期再提示扫描失败（下一分钟再扫）: ${e.message}`), []));
-  for (const r of res) {
+  const res = await sweepReminders(db, ports, now).catch((e: Error) => (console.error(`⚠️ 过期再提示扫描失败（下一分钟再扫）: ${e.message}`), null));
+  // MAPSWEEP1：只留这一轮仍是 observe、或只是暂时 wait（发起方 / owner 不在）的；skip（已开过 / 有后续 / 过期太久 / 关了开关）和
+  // 不再列出的就清，开关再打开时同一条最多再记一次。扫描整体失败的那轮不清
+  if (res) {
+    const live = new Set(res.filter((r) => r.result === "observe" || r.result === "wait").map((r) => r.id));
+    for (const id of observed) if (!live.has(id)) observed.delete(id);
+  }
+  for (const r of res ?? []) {
     if (r.result === "observe" && !observed.has(r.id)) {
       observed.add(r.id);
       console.log(`[askReminder observe] ${r.id} 满足再提示条件（${r.evidence}），observe 模式不开卡`);
     }
   }
   // 这一轮开出的和以前没发完的一起：台账里的待办才算数，「卡已存在」不等于「通知已发」；补发也过闸，不满足就留着等
-  for (const n of pendingReminderNotices(db)) {
+  const pending = pendingReminderNotices(db), open = new Set(pending.map((n) => n.id));
+  for (const k of held) if (!open.has(k.slice(0, k.indexOf(":")))) held.delete(k); // 待办已发完 / 卡已结：不会再被闸
+  for (const n of pending) {
     try {
       // 异步活跃查询之后、发布之前同步再过一次策略 / 暂停（两者之间不夹 await）
       const why = (await noticeBlocker(n, ports, now)) ?? noticeGateNow(n, ports);

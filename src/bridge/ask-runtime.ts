@@ -21,6 +21,8 @@ interface Held {
   /** askId；"" = 正在建；"~<id>" = 同指纹删过 / 额度卡到期、弹框还在，不开 */
   id: string;
   fp: string;
+  /** ACP 卡的代际：来源 + 频道被后来的卡占用后，旧宿主只能撤自己的那张。 */
+  instance?: string;
   /** 投递结果不明的卡（RuntimeAskInput.deliveryUnknown）：让出这个槽时只从内存里拿掉，库里照样开着 */
   pinned?: true;
 }
@@ -108,14 +110,14 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
   if (held) settleRuntimeAsk(r.source, r.channelId); // 同一频道换成了另一个弹框：上一个结掉（记消失）再看这个
   clearChecked.delete(key);
   const pinned = r.deliveryUnknown ? { pinned: true as const } : {};
-  const slot: Held = { id: "", fp, ...pinned };
+  const slot: Held = { id: "", fp, ...pinned, ...(r.instance ? { instance: r.instance } : {}) };
   runtimeOpen.set(key, slot);
   try {
     // 跨重启认领、删过压住只给 Codex / 权限卡（owner 要的是额度卡别反复冒）；AUQ 重启后一律开新卡，旧的由 supersede / noteAbsent 撤
     const prior = r.source === "auq" ? null : priorByFingerprint(askDb(), r.source, r.channelId, fp);
     const reuse = reuseOf(prior);
     supersede(r.source, r.channelId, reuse === "adopt" ? prior!.id : "");
-    if (reuse !== "new") return void runtimeOpen.set(key, { id: reuse === "adopt" ? prior!.id : `~${prior!.id}`, fp, ...pinned });
+    if (reuse !== "new") return void runtimeOpen.set(key, { ...slot, id: reuse === "adopt" ? prior!.id : `~${prior!.id}` });
     const who = (await whoIs(r.channelId)) ?? { name: r.agentName, project: MASTER_PROJECT, channelId: r.channelId };
     // 卡住的是整个回合；有下游挂在它名下（registry parent）就算急
     const urgent = (await registry()).some((x) => x.parent === who.name && x.status === "active");
@@ -138,7 +140,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
       if (c) publishAsk(c);
       return;
     }
-    runtimeOpen.set(key, { id: a.id, fp, ...pinned });
+    runtimeOpen.set(key, { ...slot, id: a.id });
   } catch (e) {
     if (runtimeOpen.get(key) === slot) runtimeOpen.delete(key);
     console.error(`⚠️ 运行时弹框建 ask 失败: ${(e as Error).message}`);
@@ -167,6 +169,12 @@ export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answe
     console.log(`ask ${id} 结案跳过（已结案或已过期）: ${(e as Error).message}`);
   }
   markCleared(id);
+}
+
+/** 比较和结卡之间不 await：只撤仍属于这个代际的槽位（包括正在创建的占位），不影响后来的登录 / 失败卡。 */
+export function settleRuntimeAskInstance(source: RuntimeSource, channelId: string, instance: string): void {
+  if (runtimeOpen.get(rtKey(source, channelId))?.instance !== instance) return;
+  settleRuntimeAsk(source, channelId);
 }
 
 /**

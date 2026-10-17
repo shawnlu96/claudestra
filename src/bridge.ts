@@ -1,4 +1,5 @@
 import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
+import { createSseResponse as handleEventsRequest } from "./bridge/sse-stream.js";
 import { deliverPmLocal, pmClientFor, setPmDeliveryClients } from "./bridge/local-api/project-pm-delivery.js";
 import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 /**
@@ -67,8 +68,8 @@ import * as fs from "fs/promises";
 // master 历史 probe 用（master 不在 registry，sessionId 从 projects slug 目录取最新）
 import { projectsSlug, projectJsonlPath } from "./lib/jsonl-cost.js";
 // v2.6.0+ 多前端事件总线（设计 docs/design-multi-frontend.md §4）
-import { emitEvent, eventsQueryFilter, forgetAgent, subscribeEvents, replayEventsSince, getAgentStatus } from "./bridge/event-bus.js";
-import { markChannelExternallyBusy, unmarkChannelExternallyBusy, type EventFilter } from "./bridge/event-bus.js";
+import { emitEvent, forgetAgent, subscribeEvents, getAgentStatus } from "./bridge/event-bus.js";
+import { markChannelExternallyBusy, unmarkChannelExternallyBusy } from "./bridge/event-bus.js";
 // v2.7+ Claude Code agents 模式适配：中性会话清单 + bg job 清理 + 分身对账
 import { collectSessions } from "./bridge/sessions-inventory.js";
 import { cleanupBgJob } from "./lib/bg-jobs.js";
@@ -2883,58 +2884,6 @@ async function handleHookRequest(req: Request): Promise<Response> {
   } catch {
     return new Response("Invalid request", { status: 400 });
   }
-}
-
-/**
- * v2.6.0+ GET /events —— 结构化事件流（SSE）。设计 §4.3。
- * ?agent=<name> / ?agents=a,b 过滤 agent；?since=<seq> 或 Last-Event-ID 断线补发。
- * 30s 心跳注释防代理超时。本机部署默认免鉴权（服务只绑 127.0.0.1，见下）。
- */
-function handleEventsRequest(req: Request, extraFilter?: EventFilter): Response {
-  const url = new URL(req.url);
-  const sinceParam = url.searchParams.get("since") ?? req.headers.get("Last-Event-ID");
-  const since = sinceParam !== null ? Number(sinceParam) : NaN;
-  const filter = eventsQueryFilter(url.searchParams, extraFilter);
-  let unsub: (() => void) | null = null;
-  let ping: ReturnType<typeof setInterval> | null = null;
-  const cleanup = () => {
-    unsub?.();
-    unsub = null;
-    if (ping) { clearInterval(ping); ping = null; }
-  };
-  const enc = new TextEncoder();
-  const stream = new ReadableStream({
-    start(controller) {
-      const send = (evt: { seq: number }) => {
-        try {
-          controller.enqueue(enc.encode(`id: ${evt.seq}\ndata: ${JSON.stringify(evt)}\n\n`));
-        } catch {
-          cleanup(); // controller 已关（客户端断开），停止推送
-        }
-      };
-      // 立即发首包注释：flush 响应头 + 重置 Bun 的连接空闲计时。
-      // Bun.serve 默认 HTTP idleTimeout ≈10s——不发任何字节的空闲 SSE 连接
-      // 会在 ~10s 被掐（实测 10.7s close），30s ping 根本活不到第一轮。
-      try { controller.enqueue(enc.encode(`: connected\n\n`)); } catch { cleanup(); }
-      if (Number.isFinite(since)) {
-        for (const evt of replayEventsSince(since, filter)) send(evt);
-      }
-      unsub = subscribeEvents(filter, send);
-      // ping 30s→5s：必须小于 Bun.serve 默认 idleTimeout（~10s），
-      // 否则事件间隙超过 10s 的订阅者会被静默断开（web 前端首当其冲）。
-      ping = setInterval(() => {
-        try { controller.enqueue(enc.encode(`: ping\n\n`)); } catch { cleanup(); }
-      }, 5_000);
-    },
-    cancel() { cleanup(); },
-  });
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-    },
-  });
 }
 
 // /api/v1 路由与鉴权：v2.9.2 起整体在 bridge/api-routes.ts。这里注入它需要的

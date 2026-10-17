@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { codexWalled, planAcpQuota, useAcpQuotaPort } from "../src/bridge/acp-quota.ts";
 import { parseConfigOptions } from "../src/lib/acp/config.ts";
 import type { InventoryQuota } from "../src/lib/ai-quota.ts";
@@ -100,6 +100,37 @@ describe("planAcpQuota：卡上的原文、过滤和备用链", () => {
       expect(p.autoSwitch).toBeNull();
       expect(p.context.split("\n")[2]).toBe(`按备用链该切到 zai/glm-5.3，但${why}不自动切`);
     }
+  });
+
+  test("身份无记录或查询异常：全局 on 不能绕过项目 off / reviewer 禁切，并记录查询异常", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const throws of [false, true]) {
+        useAcpQuotaPort({
+          now: () => NOW, codexQuota: async () => null,
+          fallbackConfig: () => ({ mode: "on", chain: ["zai"], projects: { claudestra: { mode: "off" } } }),
+          agentOf: async () => { if (throws) throw new Error("registry unavailable"); return undefined; },
+        });
+        for (const name of ["agent-x", "agent-rv-qwc-2"]) {
+          const p = await planAcpQuota("ch", name, GO_LIMIT, opts(), "Pi");
+          expect(p.autoSwitch).toBeNull();
+          expect(p.context.split("\n")[2]).toContain("无法核对项目");
+          expect(p.switched).toBeNull();
+        }
+      }
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn.mock.calls[0]![0]).toContain("registry unavailable");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("身份确认但没有项目：仍继承全局 on", async () => {
+    useAcpQuotaPort({
+      now: () => NOW, codexQuota: async () => null,
+      fallbackConfig: () => ({ mode: "on", chain: ["zai"] }), agentOf: async () => ({ name: "agent-x" }),
+    });
+    expect((await planAcpQuota("ch", "agent-x", GO_LIMIT, opts(), "Pi")).autoSwitch).toBe("zai/glm-5.3");
   });
 
   test("额度快照读挂了：当不知道，照样出卡", async () => {

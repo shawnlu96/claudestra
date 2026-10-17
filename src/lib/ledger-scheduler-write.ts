@@ -31,6 +31,7 @@ import { poolReviewRefusal } from "./pool-review-proof.js";
 import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
 import { isManualReasonCode, manualReasonRecord, MANUAL_REASON_CODES } from "./manual-reason.js";
 import { OWNER_FRESH_NODE, requireOwnerFresh } from "./scheduler-ui-owner-fresh.js";
+import { blockingLock, unionLaneShareMode } from "./union-lane-share.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -222,10 +223,9 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
     const slots = new Set([...cardWorkerSlots(held, task.id), ...resources.filter((r) => r?.startsWith("slot:"))]);
     if (slots.size > 1) throw new LedgerError("conflict", "一张卡最多持有一个 worker 槽；后续派单须沿用已持有的槽");
-    for (const resource of resources) {
-      const used = held.find((row) => row.taskId !== task.id && resourcesOverlap(resource as string, row.resource));
-      if (used) throw new LedgerError("conflict", `资源 ${resource} 与 ${used.resource} 重叠（${used.taskId} 占用）`);
-    }
+    const hit = blockingLock(task, held.filter((row) => row.taskId !== task.id), resources as string[],
+      (resource, row) => resourcesOverlap(resource, row.resource), unionLaneShareMode(task.project));
+    if (hit) throw new LedgerError("conflict", `资源 ${hit.resource} 与 ${hit.held.resource} 重叠（${hit.held.taskId} 占用）`);
     const now = ctx.now ?? Date.now();
     // A peer writes the card now: the local worker slot it held since restate would count a remote writer against this
     // machine's cap. Coming back local (a fix without lease, a refused offer) takes a free slot again like any card.
