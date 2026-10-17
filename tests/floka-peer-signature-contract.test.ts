@@ -1,7 +1,19 @@
 /** SIGCOMP1 uses synthetic keys and the test preload's private state only. */
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
+import { openLedger } from "../src/lib/ledger-store.js";
+import * as ledgerStore from "../src/lib/ledger-store.js";
+import { tempLedgerPath } from "./ledger-test-helpers.js";
 import { recoveryPolicy } from "../src/lib/recovery-policy.js";
 import { highRiskRecoveryKey } from "../src/lib/recovery-key-class.js";
+
+// Keep real sample writes out of the shared preload ledger so later suites see their own fixtures only.
+let restoreLedger: () => void;
+beforeAll(() => {
+  const path = tempLedgerPath("signature-contract-"), original = ledgerStore.openLedger, db = original(path);
+  const opener = spyOn(ledgerStore, "openLedger").mockImplementation(p => p ? original(p) : db);
+  restoreLedger = () => { opener.mockRestore(); ledgerStore.closeLedger(path); };
+});
+afterAll(() => restoreLedger?.());
 
 // This runs on the unchanged baseline: an unregistered key is forced off instead of observe.
 test("[验收线 1] signature contract is registered as a high-risk observe-default mechanism", () => {
@@ -281,4 +293,55 @@ test("[验收线 2] mixed conflicts, split headers and empty values remain failu
       }
     }
   });
+});
+
+const contractSamples = () => openLedger().query<{ data: string }, []>(
+  "SELECT data FROM events WHERE kind='note' AND json_extract(data, '$.mechanism')='peerSignatureContract' ORDER BY seq",
+).all().map(row => JSON.parse(row.data));
+
+test("[PM 补] the default sink persists only observe differences, with bounded data and deduplication", () => {
+  const input = { family: "mixed" as const, result: "bad synthetic-secret", signatureMode: "observe" as const,
+    legacy: { allow: true as const, legacy: true } };
+  const before = contractSamples().length;
+  expect(applySignatureContract(input, input.legacy, "off")).toBe(input.legacy);
+  expect(applySignatureContract(input, input.legacy, "on")).toEqual({ allow: false, reason: input.result });
+  const denied = { allow: false as const, reason: "outer gate" };
+  expect(applySignatureContract(input, denied, "observe")).toBe(denied);
+  expect(contractSamples()).toHaveLength(before);
+  for (let n = 0; n < 2; n++) expect(applySignatureContract(input, input.legacy, "observe")).toBe(input.legacy);
+  const samples = contractSamples().slice(before);
+  expect(samples).toHaveLength(1);
+  expect(samples[0]).toMatchObject({ op: "recovery_observe", mechanism: "peerSignatureContract", verdict: "mixed:observe:legacy->reject" });
+  expect(JSON.stringify(samples)).not.toContain("synthetic-secret");
+});
+
+test("[PM 补] a failed real ledger write preserves the exact authentication verdict and emits a safe diagnostic", () => {
+  const db = openLedger(), before = contractSamples().length;
+  const warning = spyOn(console, "warn").mockImplementation(() => {});
+  const input = { family: "floka" as const, result: "bad synthetic-secret", signatureMode: "on" as const,
+    legacy: { allow: true as const, legacy: true } };
+  db.exec("PRAGMA query_only = ON");
+  try {
+    expect(applySignatureContract(input, input.legacy, "observe")).toBe(input.legacy);
+    expect(applySignatureContract(input, input.legacy, "on")).toEqual({ allow: false, reason: input.result });
+    expect(applySignatureContract(input, input.legacy, "off")).toBe(input.legacy);
+    expect(contractSamples()).toHaveLength(before);
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning.mock.calls[0]).toEqual(["[floka-peer] peerSignatureContract sample write failed; authentication unchanged"]);
+  } finally { db.exec("PRAGMA query_only = OFF"); warning.mockRestore(); }
+});
+
+test("[PM 补] the persistent sink and the pre-fix log-only sink produce identical authentication judgments", () => {
+  for (const family of [...families, "none"] as const) for (const result of results) for (const signatureMode of modes) {
+    for (const mode of modes) for (const legacy of [
+      { allow: true as const, legacy: true }, { allow: true as const, legacy: false }, { allow: false as const, reason: "outer gate" },
+    ]) {
+      const input = { family, result, signatureMode, legacy };
+      const persisted = applySignatureContract(input, legacy, mode);
+      const logOnly = applySignatureContract(input, legacy, mode, () => {});
+      expect(persisted).toEqual(logOnly);
+      if (mode !== "on") expect(persisted).toBe(legacy);
+      if (!legacy.allow) expect(persisted).toBe(legacy);
+    }
+  }
 });

@@ -1,5 +1,6 @@
 /** SIGCOMP1: a signature veto never grants entry authority or starts a second send. */
-import { recoveryPolicy, type RecoveryMode } from "../recovery-policy.js";
+import { recordObserved, recoveryPolicy, type RecoveryMode } from "../recovery-policy.js";
+import { openLedger } from "../ledger-store.js";
 import type { PeerSigVerdict } from "../peer-trust.js";
 import { LogThrottle } from "../log-throttle.js";
 import { observePeer, type Mode } from "./policy.js";
@@ -28,10 +29,23 @@ export function signatureContractVerdict(input: ContractInput): PeerSigVerdict {
 const differences = new LogThrottle();
 const outcome = (v: PeerSigVerdict): string => v.allow ? v.legacy ? "legacy" : "verified" : "reject";
 
+/** Persist bounded difference categories for PM review; a missing sample must never change authentication. */
+function observeContract(area: string, verdict: string): void {
+  const now = Date.now();
+  try {
+    recordObserved(openLedger(), { project: "claude-orchestrator", mechanism: "peerSignatureContract", target: "",
+      actionKey: `${verdict.replace("->", ":")}:${Math.floor(now / 60_000)}`, action: verdict, data: { verdict } }, now);
+  } catch {
+    // Ledger failures lose only observation evidence; do not expose paths or credentials from an exception.
+    console.warn("[floka-peer] peerSignatureContract sample write failed; authentication unchanged");
+  }
+  observePeer(area, verdict);
+}
+
 /** Read on every decision: rollback needs no restart. Even on can never widen the baseline permission set. */
 export function applySignatureContract(input: ContractInput, baseline: PeerSigVerdict,
   mode: RecoveryMode = recoveryPolicy("claude-orchestrator", "peerSignatureContract").mode,
-  observe: (area: string, verdict: string) => void = observePeer): PeerSigVerdict {
+  observe: (area: string, verdict: string) => void = observeContract): PeerSigVerdict {
   if (mode === "off") return baseline;
   const proposed = signatureContractVerdict(input);
   const candidate = baseline.allow ? proposed : baseline;

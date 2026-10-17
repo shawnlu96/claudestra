@@ -69,6 +69,12 @@ no headers, keys, bodies, URLs, tokens or caller-controlled error text. Existing
 `rename.signature=observe` protocol logs are independent of contract-difference
 logs and retain their original behavior.
 
+Contract differences also persist through `recordObserved` as `recovery_observe`
+ledger notes for `peerSignatureContract`. Each bounded category has at most one
+sample per minute, including deduplication across processes. A ledger write
+failure emits a fixed diagnostic and preserves the exact authentication verdict;
+off, on and equal observe decisions do not write contract samples.
+
 The recovery key never enables `rename.signature`, `peerRelayInbound`, or E2E
 receive/send. Their existing switches can still reject a request. Nor does it
 change outgoing signing, retry handling, pins, capability lifetimes or encryption.
@@ -111,3 +117,9 @@ observe default, and the explicit matrix module was absent. These are contract
 registration/API failures, not a claim that the baseline already allowed new
 invalid signatures. The established old-off exception and new-family refusal
 are intentionally preserved, not “fixed” by tightening old peers.
+
+The sample-sink follow-up reproduced two runtime failures before the fix
+(44 pass / 2 fail): no ledger sample appeared, and a read-only ledger produced
+no write-failure diagnostic. Both pass with the real sink. The regression also
+compares complete authentication judgments with the previous log-only sink
+across families, results and modes; adding persistence changes none of them.
