@@ -1,13 +1,13 @@
 /** CFGWRITE1 · config write lock, missing-file snapshot and the configWriteSerialize switch (src/lib/floka-config/write-lock.ts). */
 import { afterEach, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { AppConfig } from "../src/lib/config-store.ts";
 import { ConfigChangedError, retryConfigWrite } from "../src/lib/floka-config/retry.ts";
 import { configView, writeCompatibleConfig } from "../src/lib/floka-config/store.ts";
-import { configLockPath, configWriteModeAt, ConfigWriteLockTimeoutError, holdsConfigWriteLock, useConfigWritePort,
+import { configLockPath, configWriteModeAt, configWriteTarget, ConfigWriteLockTimeoutError, holdsConfigWriteLock, useConfigWritePort,
   withConfigWriteLock } from "../src/lib/floka-config/write-lock.ts";
 import type { ObservedAction } from "../src/lib/recovery-policy.ts";
 import { testChildEnv } from "./test-env.ts";
@@ -94,6 +94,55 @@ test("[验收线 1] a writer paused after its check holds the lock: the other wa
   gate.open(); await first; await pending;
   expect(second).toBeInstanceOf(ConfigChangedError);
   expect(f.disk()).toEqual({ lang: "zh", quotaLive: false });
+});
+
+test("[验收线 1] first setter on a fresh state root: on creates the missing parent before locking, like off", async () => {
+  for (const mode of ["on", "off"] as const) {
+    const f = setup(mode);
+    useConfigWritePort({ mode: () => mode, waitMs: 0 });
+    const path = join(f.path, "..", "fresh", "state", "config.json");
+    const cfg = read(path); cfg.lang = "en";
+    await writeCompatibleConfig(path, cfg);
+    expect(JSON.parse(readFileSync(path, "utf8")).lang).toBe("en");
+    expect(existsSync(configLockPath(path))).toBe(false);
+  }
+});
+
+test("[验收线 1] every spelling of one config shares one lock: file alias, directory alias, relative path, missing file", () => {
+  const f = setup("on", { lang: "zh" });
+  const dir = resolve(f.path, "..");
+  symlinkSync(f.path, join(dir, "alias.json"));
+  symlinkSync(dir, join(dir, "dir-alias"));
+  const target = configWriteTarget(f.path);
+  expect(configWriteTarget(join(dir, "alias.json"))).toBe(target);
+  expect(configWriteTarget(join(dir, "dir-alias", "config.json"))).toBe(target);
+  expect(configWriteTarget(relative(process.cwd(), f.path))).toBe(target);
+  expect(configWriteTarget(join(dir, "dir-alias", "new", "x.json"))).toBe(join(resolve(target, ".."), "new", "x.json"));
+  expect(configLockPath(join(dir, "alias.json"))).toBe(`${target}.lock`);
+});
+
+test("[验收线 1] writer A via a symlink alias paused after its check; B via the real path waits and refuses its stale view", async () => {
+  const f = setup("on", { lang: "zh" });
+  const alias = join(resolve(f.path, ".."), "alias.json");
+  symlinkSync(f.path, alias);
+  const gate = deferred(), checked = deferred();
+  const b = read(f.path); b.pushAllAsks = true;
+  const first = withConfigWriteLock(alias, async () => {
+    expect(holdsConfigWriteLock(f.path)).toBe(true);
+    const a = read(alias); a.quotaLive = false;
+    checked.open(); await gate.p;
+    await writeCompatibleConfig(alias, a);
+  });
+  await checked.p;
+  let second: unknown = "pending";
+  const pending = writeCompatibleConfig(f.path, b).then(() => (second = "ok"), (e) => (second = e));
+  await Bun.sleep(100);
+  expect(second).toBe("pending");
+  gate.open(); await first; await pending;
+  expect(second).toBeInstanceOf(ConfigChangedError);
+  expect(f.disk()).toEqual({ lang: "zh", quotaLive: false });
+  await retryConfigWrite(async () => { const c = read(f.path); c.pushAllAsks = true; await writeCompatibleConfig(f.path, c); });
+  expect(f.disk()).toEqual({ lang: "zh", quotaLive: false, pushAllAsks: true });
 });
 
 test("[验收线 2] lock timeout fails loudly and writes nothing; the timeout is not a retried conflict", async () => {

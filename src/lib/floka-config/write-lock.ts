@@ -14,8 +14,10 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { acquireLock } from "../file-lock.js";
+import { barrierActive } from "../state-maintenance/barrier.js";
 import { statePath } from "../paths.js";
 import { readRecoveryFile, type RecoveryMode } from "../recovery-policy-file.js";
 import type { ObservedAction } from "../recovery-policy.js";
@@ -61,7 +63,24 @@ export function useConfigWritePort(p?: Partial<ConfigWritePort>): void { port = 
 export const configWriteMode = (): RecoveryMode => port.mode();
 
 const held = new AsyncLocalStorage<Set<string>>();
-export const configLockPath = (path: string): string => `${path}.lock`;
+
+/**
+ * The file a write to path actually replaces: writeJsonAtomic follows a symlinked file to its target, and a directory alias or a
+ * relative spelling names the same file too. Lock ownership and re-entrancy key on this, so every spelling of one config shares
+ * one lock. A missing file (or a dangling link, which the writer replaces in place) resolves through its nearest existing parent.
+ */
+export function configWriteTarget(path: string): string {
+  const abs = resolve(path);
+  try { return realpathSync(abs); } catch { /* missing / dangling: resolve the parent below */ }
+  const rest: string[] = [];
+  for (let dir = abs; ;) {
+    rest.unshift(basename(dir));
+    const up = dirname(dir);
+    if (up === dir) return abs;
+    try { return join(realpathSync(up), ...rest); } catch { dir = up; }
+  }
+}
+export const configLockPath = (path: string): string => `${configWriteTarget(path)}.lock`;
 
 /**
  * Run one whole read/modify/write under the config write lock (on), or as before (observe / off). Nested calls for the same
@@ -69,17 +88,25 @@ export const configLockPath = (path: string): string => `${path}.lock`;
  */
 export async function withConfigWriteLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   const mine = held.getStore();
-  if (mine?.has(path)) return fn();
+  const target = configWriteTarget(path);
+  if (mine?.has(target)) return fn();
   if (port.mode() !== "on") return fn();
-  const lock = await acquireLock(configLockPath(path), port.waitMs, port.staleMs);
+  // The lock sits beside the file, so its directory must exist first (the atomic writer used to create it). Never create it
+  // during state-root maintenance: refuse the way the writer would instead of timing out on a lock that can't be made.
+  const dir = dirname(target);
+  if (!existsSync(dir)) {
+    if (barrierActive()) throw new Error("state root maintenance in progress; refusing configuration write");
+    mkdirSync(dir, { recursive: true });
+  }
+  const lock = await acquireLock(`${target}.lock`, port.waitMs, port.staleMs);
   if (!lock) throw new ConfigWriteLockTimeoutError();
   try {
-    return await held.run(new Set([...(mine ?? []), path]), fn);
+    return await held.run(new Set([...(mine ?? []), target]), fn);
   } finally { lock.release(); }
 }
 
-/** Whether this call chain holds the lock for path (store.ts: snapshot rules apply only to serialized writes). */
-export const holdsConfigWriteLock = (path: string): boolean => held.getStore()?.has(path) ?? false;
+/** Whether this call chain holds the lock for path, under any spelling (store.ts: snapshot rules apply only to serialized writes). */
+export const holdsConfigWriteLock = (path: string): boolean => held.getStore()?.has(configWriteTarget(path)) ?? false;
 
 const version = (v: unknown): string => createHash("sha256").update(JSON.stringify(v) ?? "missing").digest("hex").slice(0, 12);
 
