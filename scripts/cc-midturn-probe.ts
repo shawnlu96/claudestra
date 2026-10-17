@@ -2,7 +2,7 @@
  * CC 回合中途投递实测（JRT-3）：回合中到达的 channel 通知在「推理流 / 工具执行 / 回合尾」三个窗口丢不丢，
  * 以及 CC 原生「输入框排队」（回合中往输入框提交，Press up to edit queued messages）能不能当插队通道。
  *
- * 隔离：一次性临时目录 + 独立 tmux socket（CLAUDESTRA_RUNTIME_DIR 指过去，tmux-helper 的 TMUX_SOCK 跟着走，不碰线上 master.sock）、
+ * 隔离：一次性临时目录 + 独立 tmux socket（CLAUDESTRA_RUNTIME_DIR 指过去，tmux-helper 的 TMUX_SOCK 跟着落到临时目录，不碰线上的 socket）、
  * --strict-mcp-config 只挂本脚本的假 channel 服务（不拉起线上 channel-server）、disableAllHooks（Stop 等 hook 不打到线上 bridge）。
  * 会真花模型额度（每个场景一两个小回合）。结论与版本号记在 docs/architecture/inbound-route.md。
  *
@@ -217,7 +217,7 @@ function parseArgs(argv: string[]): { model: string; effort: string; only: strin
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const dir = mkdtempSync(join(tmpdir(), "cc-midturn-probe-"));
-  process.env.CLAUDESTRA_RUNTIME_DIR = dir; // 先设再 import：tmux-helper 的 TMUX_SOCK = <dir>/master.sock
+  process.env.CLAUDESTRA_RUNTIME_DIR = dir; // 先设再 import：tmux-helper 的 TMUX_SOCK 落在这个目录下
   const { tmuxRaw } = await import("../src/lib/tmux-helper.ts");
   const { paneMainTurnBusy } = await import("../src/lib/turn-state.ts");
   const { resolveBunPath } = await import("../src/lib/bun-path.ts");
