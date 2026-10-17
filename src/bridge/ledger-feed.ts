@@ -44,12 +44,16 @@ export function ledgerDb(): ReturnType<LedgerReader["get"]> {
  * 两条都不满足 = 读侧从没见过它开着、关闭也写在上次读之前：备份 / 另一台机器的库里的历史，一条不发、只记 seen。
  * 这一代在读通过之前 lastOldAt / lastOpen 不动，中途 emit 抛了下拍按 seen 只补没发的；读通过才认这一代、之后回到 seq 游标
  */
+let askSeenSize = (): number => 0;
+/** 单测：结清关问 ticker 的 seen 条数 */
+export const ledgerFeedAskSeenSize = (): number => askSeenSize();
 function settledAskTicker(): (at: number) => void {
   let seq: number | null = null;
   let gen = -1;
   let lastOldAt = 0;
   let lastOpen = new Set<string>();
-  const seen = new Set<string>();
+  const seen = new Map<string, number>(); // askId → writtenAt
+  askSeenSize = () => seen.size;
   let failing = false;
   return (at) => {
     try {
@@ -57,7 +61,7 @@ function settledAskTicker(): (at: number) => void {
       if (!db) return;
       if (seq === null) {
         const base = settledAskClosuresSince(db, 0);
-        for (const c of base.closures) seen.add(c.askId);
+        for (const c of base.closures) seen.set(c.askId, c.writtenAt);
         seq = base.lastSeq;
         if (base.openAskIds) lastOpen = new Set(base.openAskIds);
         gen = reader.generation;
@@ -66,11 +70,11 @@ function settledAskTicker(): (at: number) => void {
       const r = settledAskClosuresSince(db, swapped ? 0 : seq);
       for (const c of r.closures) {
         if (swapped && (seen.has(c.askId) || (!lastOpen.has(c.askId) && c.writtenAt < lastOldAt))) {
-          seen.add(c.askId);
+          seen.set(c.askId, c.writtenAt);
           continue;
         }
         emitAsk(c);
-        seen.add(c.askId);
+        seen.set(c.askId, c.writtenAt);
         if (!swapped) seq = c.seq;
       }
       seq = r.lastSeq;
@@ -78,6 +82,8 @@ function settledAskTicker(): (at: number) => void {
       if (r.openAskIds) { // 读不到 asks 的那拍什么都没看见：两条边界都不推进
         lastOldAt = at;
         lastOpen = new Set(r.openAskIds);
+        // MAPSWEEP1：不在开放集合、写在 lastOldAt 之前的关闭，换库时第二条判定本来就跳过（lastOldAt 只前进），seen 不必再记
+        for (const [id, w] of seen) if (!lastOpen.has(id) && w < lastOldAt) seen.delete(id);
       }
       if (failing) console.log("📒 出借单结清关问的推送检测恢复");
       failing = false;

@@ -31,6 +31,8 @@ export interface RemoteReviewStepDeps {
 const NOTICE_RETRY_MS = 60_000;
 export const NOTICE_FAILURE_CAP = 1000;
 const failedAt = new WeakMap<Database, Map<number, number>>();
+/** Tests only. */
+export const remoteNoticeRetrySize = (db: Database): number => failedAt.get(db)?.size ?? 0;
 
 /** Only pending notices retain backoff state; oldest failures yield first when the pending set exceeds the cap. */
 export function pruneRemoteNoticeFailures(memo: Map<number, number>, pending: ReadonlySet<number>): void {

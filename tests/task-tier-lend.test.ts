@@ -5,9 +5,9 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { LendEntry } from "../src/lib/lend-config.js";
 import { CHOICE_CHANGED, LEND_ORDER_ENV, lendCreateDenied, lendModelArgs } from "../src/lib/lend-grant-spawn.js";
 import { advance, getMeta, openLendJournal, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
@@ -187,7 +187,10 @@ function peerB(family: "codex" | "claude", suggest: ModelSuggest | undefined, te
 }
 
 describe("[验收线 1][验收线 3] 合成 B：起 worker 的参数、闸口与启动事实", () => {
-  beforeEach(() => rmSync(TIER_LEND_SETTINGS_PATH, { force: true }));
+  beforeEach(() => {
+    mkdirSync(dirname(TIER_LEND_SETTINGS_PATH), { recursive: true });
+    rmSync(TIER_LEND_SETTINGS_PATH, { force: true });
+  });
 
   test("Codex 降档建议：参数用建议、闸口放行、actual 报 suggest 且只记一条启动事实", () => {
     tierMode("on");

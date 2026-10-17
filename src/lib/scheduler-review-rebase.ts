@@ -75,18 +75,23 @@ const gitPrFiles: DiffRunner = (dir, from, to) => {
 };
 /** Seam for tests; local git only (no fetch), the same checkouts the planner's fix-diff reads. */
 export const rebaseDiff: { run: DiffRunner; dirs: (taskId: string) => string[] } = { run: gitPrFiles, dirs: diffDirs };
+/** LRU by entry count: `main parent...new head` pairs only grow with cards and re-reviews; a hit moves to the newest end. */
+export const REBASE_CACHE_MAX = 512;
 const cache = new Map<string, string[]>();
+/** Tests only. */
+export const rebaseCacheSize = (): number => cache.size;
 
 /** The PR's own files against main: `main parent...new head`, i.e. what `gh pr diff --name-only` lists; null if no checkout has both. */
 function prFiles(r: RebaseHead & { taskId: string }): string[] | null {
   const key = `${r.mainParent}...${r.newHead}`;
   const hit = cache.get(key);
-  if (hit) return hit;
+  if (hit) { cache.delete(key); cache.set(key, hit); return hit; }
   for (const dir of rebaseDiff.dirs(r.taskId)) {
     let files: string[] | null = null;
     try { files = rebaseDiff.run(dir, r.mainParent, r.newHead); } catch { continue; }
     if (!files) continue;
     cache.set(key, files);
+    if (cache.size > REBASE_CACHE_MAX) cache.delete(cache.keys().next().value!);
     return files;
   }
   return null;

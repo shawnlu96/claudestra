@@ -11,6 +11,8 @@
  * tests/task-tier-lend.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { statSync } from "node:fs";
+import { reportCorrupt } from "./state-file.js";
 import { CODEX_EFFORT_LEVELS } from "./codex-launch.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { getMeta, setMeta } from "./lend-journal.js";
@@ -164,7 +166,16 @@ export function lendLaunchChoice(i: LendChoiceInput, gate: LendGate): LendChoice
 /** B 本机的门：taskTierModels（项目 lend）是 on 且「接受降档建议」开；设置文件坏按关 */
 export function tierLendGate(settingsPath = TIER_LEND_SETTINGS_PATH): LendGate {
   if (taskTierMode(LEND_LOCAL_PROJECT).mode !== "on") return { on: false, acceptDowngrade: false };
-  return { on: true, acceptDowngrade: readTierLendSettings(settingsPath).settings.acceptDowngrade };
+  const read = readTierLendSettings(settingsPath);
+  if (read.status === "invalid" || read.status === "unreadable") {
+    let version = "unstatable";
+    try {
+      const stat = statSync(settingsPath);
+      version = `${stat.mtimeMs}:${stat.size}`;
+    } catch { /* 连 stat 都被拒或文件刚被移走：稳定标记去重，下一次可读到元数据时再诊断。 */ }
+    reportCorrupt(settingsPath, `设置读取异常，按不接受降档执行：${read.error}`, "task-tier-lend", false, version);
+  }
+  return { on: true, acceptDowngrade: read.settings.acceptDowngrade };
 }
 
 // ── B：选择记录（只 active 才写；启动事实仍由 role-model-settings-lend.ts recordLendLaunch 一处落） ──

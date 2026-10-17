@@ -9,6 +9,7 @@ import { nodeEventFacts, type BoardLastEvent } from "./ledger-dag-board-last-eve
 import { dagSnapshot } from "./ledger-dag-view.js";
 import { nodePhase, type NodePhase } from "./ledger-dag-rules.js";
 import { getPendingProposal, type DagProposal, type DagVersion, type Feature, type NodeView } from "./ledger-feature.js";
+import { eventsByTarget } from "./ledger-read-cards.js";
 import { stageTimeline } from "./ledger-metrics.js";
 import { schedulerProjectView, type SchedulerTaskView } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask, StepName } from "./ledger-stages.js";
@@ -96,13 +97,8 @@ export function hasFeatureSchema(db: Database): boolean {
 }
 
 export function boardContext(db: Database, project: string, now: number): BoardCtx {
-  const view = schedulerProjectView(db, project);
-  const events = new Map<string, LedgerEvent[]>();
-  for (const e of listEvents(db, { project })) {
-    const list = events.get(e.target);
-    if (list) list.push(e);
-    else events.set(e.target, [e]);
-  }
+  const events = eventsByTarget(listEvents(db, { project }));
+  const view = schedulerProjectView(db, project, events);
   return {
     db, project, now, asOfSeq: view.asOfSeq, events, steps: stepsByTask(db), lines: new Map(),
     tasks: new Map(listTasks(db, project).map((t) => [t.id, t])),
