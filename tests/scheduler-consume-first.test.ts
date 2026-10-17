@@ -13,10 +13,11 @@ import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
+import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { saveRawResult } from "../src/lib/pool-review-proof-raw.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
-import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
+import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { consumeFirstOrder, type LiveIntent } from "../src/lib/scheduler-consume-first.js";
 import { passPace } from "../src/lib/scheduler-yield.js";
@@ -55,8 +56,8 @@ async function starved() {
       saveRaw: (text: string) => saveRawResult(join(f.dir, "lend-raw"), text), pinnedKey: async () => b.pinned } };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args) as Promise<Record<string, any>>;
   const policy = { maxActiveWorkers: 0, remote: REMOTE };
-  const run = (key: RecoveryPolicyPort | undefined, pace?: ReturnType<ReturnType<typeof passPace>["phase"]>) => schedulerAutoTick(f.db, { p: policy },
-    { ...f.tickDeps, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)), borrow: async () => borrow, ...(key ? { recoveryPolicy: key } : {}) }, pace);
+  const run = (key: RecoveryPolicyPort | undefined, pace?: ReturnType<ReturnType<typeof passPace>["phase"]>, extra: Partial<AutoTickDeps> = {}) => schedulerAutoTick(f.db, { p: policy },
+    { ...f.tickDeps, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)), borrow: async () => borrow, ...(key ? { recoveryPolicy: key } : {}), ...extra }, pace);
   await toBuild(f);
   await run(undefined); // write order
   await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
@@ -77,7 +78,7 @@ async function starved() {
     expect(claimed.ok).toBe(true);
     return (await b.answer(claimed as never, { verdict: "pass" }, (body) => peer("write", body))).r;
   };
-  return { f, run, spent, order, answer };
+  return { f, run, spent, order, answer, cli };
 }
 
 const keyOff: RecoveryPolicyPort = (project, k) => k === "autoConsumeFirst" ? { mode: "off", manualAfterMs: null, source: "config" } : recoveryPolicy(project, k);
@@ -137,6 +138,48 @@ describe("AUTOSTARVE1 on a real ledger, 13 merge cards using up the budget", () 
       const bare = await s.run(undefined);
       expect(bare.cards.map((c) => c.taskId)).toEqual([...MERGES, "T1"]);
       expect(t1(bare.cards)).toEqual([["pool_done", expect.any(String)]]);
+    } finally { s.f.close(); }
+  });
+
+  test("pace-stop: zero budget or a waiting update stops the group before its first card, observe samples included", async () => {
+    const s = await starved();
+    try {
+      s.f.db.run("UPDATE lend_orders SET status = 'cancelled', reason = '推送超时撤回'");
+      const request = join(s.f.dir, "maintenance.request");
+      writeFileSync(request, "1");
+      const observe: RecoveryPolicyPort = (project, k) => k === "autoConsumeFirst" ? { mode: "observe", manualAfterMs: null, source: "config" } : recoveryPolicy(project, k);
+      for (const pace of [() => passPace({}, { budgetMs: 0 }).phase(), () => passPace({}, { request }).phase()]) {
+        for (const key of [undefined, observe]) {
+          const r = await s.run(key, pace());
+          expect([r.cards, r.failed]).toEqual([[], []]); // the same as key off: the loop stops at once too
+        }
+        expect((await s.run(keyOff, pace())).cards).toEqual([]);
+      }
+      expect(s.f.intents().find((i) => i.recipient === "peer:mate")?.status).toBe("pending");
+      expect(listEvents(s.f.db, { project: "p", target: "T1" }).filter((e) => e.data.mechanism === "autoConsumeFirst")).toEqual([]);
+    } finally { s.f.close(); }
+  });
+
+  test("consume-race: an intent PM settles while the group prepares the card is left to the loop, no new placement in the group", async () => {
+    const s = await starved();
+    try {
+      s.f.db.run("UPDATE lend_orders SET status = 'cancelled', reason = '推送超时撤回'");
+      const id = s.f.intents().find((i) => i.recipient === "peer:mate")!.id;
+      let raced = false;
+      const prepareAuthor = async (task: LedgerTask) => {
+        if (task.id === "T1" && !raced) {
+          raced = true;
+          expect(await s.cli("pm", "scheduler-settle", id, "--from", "pending", "--to", "cancelled", "--receipt", "PM 已结清")).toMatchObject({ ok: true });
+        }
+        return task;
+      };
+      const r = await s.run(undefined, s.spent(), { prepareAuthor });
+      expect(raced).toBe(true);
+      expect(r.failed).toEqual([]);
+      expect(r.cards.map((c) => c.taskId)).toEqual(["M01"]); // T1 waits for the loop's own order (here: next pass), nothing placed for it
+      expect(s.f.db.query("SELECT id FROM scheduler_intents WHERE taskId = 'T1' AND status NOT IN ('cancelled','done')").all()).toEqual([]);
+      const next = await s.run(undefined); // the loop places it as before
+      expect(t1(next.cards)[0]?.[0]).toBe("session");
     } finally { s.f.close(); }
   });
 });

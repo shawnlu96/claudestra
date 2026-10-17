@@ -506,7 +506,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   };
   const consumed = await consumeFirst(db, turn, { card: cardOf, recoveryPolicy: deps.recoveryPolicy, pace, failed: out.failed,
     observe: (a) => deps.manager("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey, "--action", a.action) });
-  out.cards.push(...consumed.outcomes);
+  out.cards.push(...consumed.outcomes); pace = consumed.pace; // the loop goes on with the group's replay of its first check
   const sorted = slotOrder(db, mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""))), ordered = sorted.applied; // PRIO2
   // cursor.autoBudget is written only when the last pass was really cut off by the budget, and cleared once its owed card (fair)
   // is served. While it is owed, this pass puts fair first once, whatever its budget; with nothing owed the order is
