@@ -112,7 +112,7 @@ async function draftInArea(ctx: ScanContext, area: IsolationArea, summary: Summa
     return base;
   }
   const outcome: DeclPrOutcome = await openDeclarationPr(run, { repoRoot: repo.root, repo: repo.remote, base: repo.targetBranch,
-    head: repo.targetHead, branch: base.branch ?? "", content: `${JSON.stringify(draft, null, 2)}\n`, areaRoot: area.root,
+    head: repo.targetHead, branch: base.branch ?? "", content: `${JSON.stringify(draft, null, 2)}\n`, controlDir: area.control,
     title: `${o.rescan ? "Rescan" : "AI draft"}: project declaration (${DECL_FILE})`, body: prBody(draft, runs, base.summary, !!o.rescan) });
   if ("fail" in outcome) return { ...base, status: "failed", reasonCode: "PR_FAILED", manualEntry: `${outcome.fail}. ${MANUAL_ENTRY}` };
   return { ...base, status: outcome.status, pr: outcome.pr };

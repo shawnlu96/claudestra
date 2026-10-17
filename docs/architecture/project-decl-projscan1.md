@@ -40,20 +40,46 @@ import in `src/manager.ts`).
    The operator can choose `--without-ai`: the same pipeline with no model at all.
    Prompt wording is not treated as isolation.
 4. **One run per candidate.** In `<git common dir>/floka-scan/<run>` (inside the
-   target repository, created without links): a detached worktree of the target
-   head, `timeoutSec` (default 600) with process-group kill (`run-bounded.ts`), a
-   minimal environment (PATH plus home, temp and every cache redirected into the
-   area; no inherited token or key), and an execution boundary. On macOS the
-   boundary is `sandbox-exec`: writes only inside the area, network denied.
-   Without a boundary (other platforms) nothing runs and every item stays
-   `inferred` with `EXEC_BOUNDARY_UNAVAILABLE`. A cwd that resolves outside the
-   worktree is `CWD_ESCAPE`. Exit 0 within the timeout is the only path to
-   `verified` (with `verifiedHead` = target head and `verifiedAt`); otherwise the
-   item stays `inferred` and the reason (`COMMAND_FAILED`, `TIMEOUT`,
-   `COMMAND_MISSING`, `SCRIPT_MISSING`, …) is listed in the result and PR body.
-   stderr is classified in memory and discarded. Deploy is always
-   `{adapter: "none", provenance: inferred}`; `requiredChecks` stays empty
-   rather than guessed. The area is removed afterwards.
+   target repository, created without links). Layout: `control/` (draft, commit
+   message, PR body, private index; never inside any command boundary),
+   `pristine/` (the head) and `runs/<n>/` (one per candidate: `wt`, home, temp,
+   caches). No `git worktree add` and no checkout: smudge / process filters and
+   hooks would run outside every boundary with the host environment. The head is
+   materialized from objects (`ls-tree` + `cat-file --batch`, no filters, a
+   minimal Git environment without system / global config), regular files only;
+   symlinks and submodules are not materialized at all (limits: 20 000 files,
+   256 MiB, else `ISOLATION_UNAVAILABLE`). Every candidate gets its **own fresh
+   copy** of the pristine head and its own caches, so an earlier `lint` or
+   `build` that rewrites sources or the Makefile cannot change what a later
+   command verifies; `verifiedHead` is the head that was actually run.
+   Each run has `timeoutSec` (default 600) with process-group kill
+   (`run-bounded.ts`), a minimal environment (PATH plus home, temp and every
+   cache redirected into `runs/<n>`; no inherited token or key), and an
+   execution boundary. On macOS the boundary is `sandbox-exec` with a
+   deny-default profile: reads only in `runs/<n>` and a read-only toolchain
+   whitelist (`/usr`, `/bin`, `/sbin`, `/System`, `/Library/Developer`,
+   `/Library/Frameworks`, `/Library/Apple`, `/private/etc`, `/opt/homebrew`, …;
+   no home directory, user temp or volume), writes only in `runs/<n>`, network
+   denied. PATH is narrowed to whitelisted entries; a tool the operator has only
+   outside the whitelist (for example under a home directory) is not run and
+   stays `inferred` with `TOOLCHAIN_OUTSIDE_BOUNDARY` (never a rescan case).
+   Metadata lookups (stat) and Mach services remain allowed; file contents
+   outside the whitelist are not readable. Host-side control files are created
+   with `O_CREAT|O_EXCL|O_NOFOLLOW` in a directory checked to be link-free; a
+   pre-existing name or link fails the PR step instead of being followed, and
+   `hash-object` runs with `--no-filters`. The scanner's own Git calls disable
+   hooks and fsmonitor.
+   Without a boundary (other platforms) nothing is materialized or run and every
+   item stays `inferred` with `EXEC_BOUNDARY_UNAVAILABLE`. A cwd missing from or
+   resolving outside the tree is `CWD_ESCAPE`. Exit 0 within the timeout is the
+   only path to `verified` (with `verifiedHead` = target head and
+   `verifiedAt`); otherwise the item stays `inferred` and the reason
+   (`COMMAND_FAILED`, `TIMEOUT`, `COMMAND_MISSING`, `SCRIPT_MISSING`, …) is
+   listed in the result and PR body. A command relying on an in-repo link, a
+   filter (e.g. LFS content) or `.git` sees the raw committed blobs and stays
+   `inferred` if that fails. stderr is classified in memory and discarded.
+   Deploy is always `{adapter: "none", provenance: inferred}`; `requiredChecks`
+   stays empty rather than guessed. The area is removed afterwards.
 5. **Draft.** PROJDECL1 shape, validated with `parseProjectDeclaration`.
    `basis` lists only files that produced a candidate or workflow: relative path
    and content SHA-256.
@@ -120,6 +146,15 @@ git and stubbed `gh`, remote git and Codex; nothing fetches or pushes.
   fail; the file never appears and the listener sees no connection. Real
   `go test/vet/build` and `make test/build` run as `verified` inside the
   boundary; Python without pytest stays `inferred` and is not a rescan case.
+- Round-1 review regressions (`tests/project-decl-scan-isolation.test.ts`,
+  all four fail on `cbd5c8cdc363` and pass here): links planted toward the
+  control files (from inside the real sandbox and directly in the control
+  directory) never redirect the host's writes; a configured smudge filter never
+  runs, with or without a boundary, and files are the committed bytes; absolute
+  reads and in-repo links out of the target fail under the real boundary while
+  in-tree reads verify; a `lint` that rewrites the Makefile leaves a failing
+  `test` `inferred` (stub boundary with real processes, and real boundary);
+  toolchain outside the whitelist is `TOOLCHAIN_OUTSIDE_BOUNDARY`.
 - Floka regression: a draft of the Floka fixture keeps the built-in's root
   commands (`bun run check`, `bun run test`, `bun run typecheck` among the
   built-in review commands); the built-in still loads unchanged. Before/after:
