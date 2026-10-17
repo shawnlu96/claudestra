@@ -4,10 +4,9 @@ import { join } from "node:path";
 import { cmdProjectDecl } from "../src/manager/project-decl.js";
 import { loadProjectDeclaration } from "../src/lib/project-decl.js";
 import { builtinProjectDeclaration } from "../src/lib/project-decl-builtin.js";
-import { CI_REUSE_CHECKS } from "../src/lib/ci-proof-reuse.js";
 import { resolveDeclRepository } from "../src/lib/project-decl-git.js";
 import { defaultRecoveryMode } from "../src/lib/recovery-key-defaults.js";
-import { fixture, git, put } from "./project-decl-fixtures.test.js";
+import { commit, fixture, flokaFixture, git, put } from "./project-decl-fixtures.test.js";
 
 function command(f: ReturnType<typeof fixture>, action: string) {
   const projectsPath = join(f.repo, "projects.json");
@@ -68,28 +67,44 @@ describe("Floka compatibility evidence", () => {
   const base = "21719e92853414b98ba8863691d341967b54116e";
   const root = join(import.meta.dir, "..");
   test("built-in declaration has the existing literal commands, never applies to a fixture spoofing origin", () => {
-    const project = { id: "self", name: "self", dirs: [root], createdAt: "" };
-    const branch = git(root, "branch", "--show-current");
-    const repo = resolveDeclRepository(project, root, branch);
+    const pinned = flokaFixture(root, base);
+    expect(git(pinned.repo, "branch", "--show-current")).toBe("");
+    const repo = resolveDeclRepository(pinned.project, pinned.repo, "main");
     const d = builtinProjectDeclaration(repo)!;
     expect(d.validation.author[0].argv).toEqual(["bun", "run", "check"]);
     expect(d.validation.review.map((c) => c.argv)).toEqual([["bun", "run", "typecheck"], ["bun", "run", "guard"]]);
-    expect(d.validation.build.map((c) => c.argv)).toEqual(CI_REUSE_CHECKS.build.commands.map((argv) => [...argv]));
+    expect(d.validation.build.map((c) => c.argv)).toEqual(["bridge", "channel-server", "manager", "launcher", "cron", "setup", "relay", "scheduler"]
+      .map((entry) => ["bun", "build", `src/${entry}.ts`, "--target=bun", "--outdir=/tmp/ci-build"]));
     expect(d.tests.rules[0].argv).toEqual(["bun", "run", "test"]);
     expect(d.ci.requiredChecks).toEqual(["typecheck + test + guard"]);
-    const loaded = loadProjectDeclaration({ project, repoDir: root, targetBranch: branch, mode: "on" });
+    const loaded = loadProjectDeclaration({ project: pinned.project, repoDir: pinned.repo, targetBranch: "main", mode: "on" });
     expect(loaded.source).toBe("builtin"); expect(loaded.valid).toBe(true);
+    expect(loaded.capabilities.every((c) => c.available)).toBe(true);
     const f = fixture(); git(f.repo, "remote", "set-url", "origin", "https://github.com/shawnlu96/claudestra.git");
     expect(builtinProjectDeclaration({ ...repo, root: f.repo, targetHead: f.basisHead })).toBeNull();
   }, 30_000);
-  test("old manager dispatch, command text, exit paths and old project code remain byte-identical", () => {
-    const manager = readFileSync(join(root, "src/manager.ts"), "utf8").split("\n").filter((line) => !line.includes('import "./manager/project-decl.js";')).join("\n");
-    expect(manager === git(root, "show", `${base}:src/manager.ts`) + "\n").toBe(true);
-    const projects = readFileSync(join(root, "src/lib/projects.ts"), "utf8").split("\n")
-      .filter((line) => !line.includes("projectDecl") && !line.includes("Local restrictions only;")).join("\n");
-    expect(projects === git(root, "show", `${base}:src/lib/projects.ts`) + "\n").toBe(true);
-    for (const path of ["src/lib/scheduler-config.ts", "src/lib/ci-proof-reuse.ts", "src/lib/recovery-key-defaults.ts", ".github/workflows/ci.yml"]) {
-      expect(readFileSync(join(root, path), "utf8") === git(root, "show", `${base}:${path}`) + "\n").toBe(true);
+  test("merged CI basis changes degrade the built-in until explicit reconfirmation", () => {
+    const pinned = flokaFixture(root, base);
+    put(pinned.repo, ".github/workflows/ci.yml", git(pinned.repo, "show", `${base}:.github/workflows/ci.yml`) + "\n# merged CI maintenance\n");
+    const head = commit(pinned.repo); git(pinned.repo, "update-ref", "refs/remotes/origin/main", head);
+    const loaded = loadProjectDeclaration({ project: pinned.project, repoDir: pinned.repo, targetBranch: "main", mode: "on" });
+    expect(loaded.source).toBe("builtin"); expect(loaded.targetHead).toBe(head); expect(loaded.valid).toBe(false);
+    expect(loaded.diagnostics).toContainEqual(expect.objectContaining({ reasonCode: "BASIS_CHANGED", field: "basis..github/workflows/ci.yml" }));
+    expect(loaded.capabilities.every((c) => !c.available)).toBe(true);
+  }, 30_000);
+  test("legacy project outputs, standard messages and exit codes match the pinned baseline", () => {
+    const pinned = flokaFixture(root, base), state = join(pinned.repo, "compat-state");
+    put(pinned.repo, "compat-state/projects.json", JSON.stringify({ projects: [{ id: "fixture", name: "fixture", dirs: ["."], createdAt: "" }] }));
+    put(pinned.repo, "compat-state/registry.json", JSON.stringify({ agents: {} }));
+    for (const args of [["project-list"], ["project-edit"], ["project-remove"], ["project-assign"]]) {
+      const outputs = [pinned.repo, root].map((repo) => {
+        const r = Bun.spawnSync([process.execPath, "--no-env-file", join(repo, "src/manager.ts"), ...args],
+          { cwd: repo, stdout: "pipe", stderr: "pipe", env: { ...process.env, CLAUDESTRA_STATE_DIR: state,
+            CLAUDESTRA_RUNTIME_DIR: join(state, "runtime"), FLOKA_STATE_DIR: state, FLOKA_RUNTIME_DIR: join(state, "runtime") } });
+        return { code: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() };
+      });
+      expect(outputs[0].code).toBe(0); expect(JSON.parse(outputs[0].stdout).ok).toBe(args[0] === "project-list");
+      expect(outputs[1]).toEqual(outputs[0]);
     }
   }, 30_000);
 });

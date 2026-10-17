@@ -1,6 +1,6 @@
 /** Isolated repositories only; all git operations are local and never fetch. */
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll } from "bun:test";
@@ -24,16 +24,29 @@ export function commit(repo: string): string {
   git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "fixture");
   return git(repo, "rev-parse", "HEAD");
 }
-export function fixture(stack: "python" | "go" = "python") {
+/** Local object-only clone pins shipped compatibility evidence without consulting the host checkout or remote HEAD. */
+export function flokaFixture(root: string, head: string): { repo: string; project: ProjectDef } {
+  const repo = mkdtempSync(join(tmpdir(), "project-decl-floka-")); roots.push(repo);
+  git(root, "clone", "--quiet", "--shared", "--no-checkout", "--", root, repo);
+  git(repo, "checkout", "-q", "--detach", head);
+  git(repo, "remote", "set-url", "origin", "https://github.com/shawnlu96/claudestra.git");
+  git(repo, "update-ref", "--no-deref", "-d", "refs/remotes/origin/HEAD");
+  git(repo, "update-ref", "refs/remotes/origin/main", head);
+  symlinkSync(join(root, "node_modules"), join(repo, "node_modules"), "dir");
+  return { repo, project: { id: "self", name: "self", dirs: [repo], createdAt: "" } };
+}
+export function fixture(stack: "python" | "go" = "python", objectFormat: "sha1" | "sha256" = "sha1") {
   const repo = mkdtempSync(join(tmpdir(), "project-decl-")); roots.push(repo);
   const branch = stack === "go" ? "develop" : "main";
-  git(repo, "init", "-q", "-b", branch);
+  git(repo, "init", "-q", "-b", branch, `--object-format=${objectFormat}`);
   git(repo, "remote", "add", "origin", `https://github.com/fixtures/${stack}.git`);
   put(repo, "README.md", `${stack} fixture\n`);
   put(repo, stack === "go" ? "Makefile" : "pyproject.toml", stack === "go" ? "test:\n\tgo test ./...\n" : "[tool.pytest.ini_options]\n");
   put(repo, "tests/sample.txt", "fixture\n"); put(repo, "reports/sample.txt", "fixture\n");
   put(repo, ".github/workflows/ci.yml", "name: test\n");
   const basisHead = commit(repo);
+  git(repo, "update-ref", `refs/remotes/origin/${branch}`, basisHead);
+  git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${branch}`);
   const provenance = { status: "verified" as const, verifiedHead: basisHead, verifiedAt: "2026-10-17T00:00:00Z" };
   const argv = stack === "go" ? ["make", "test"] : ["python", "-m", "pytest"];
   const cmd = { id: "tests", argv, cwd: ".", env: { CI: { from: "CI" } }, timeoutSec: 60, provenance };

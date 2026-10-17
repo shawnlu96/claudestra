@@ -35,6 +35,19 @@ describe("closed version 1 schema", () => {
     const collision = structuredClone(d); collision.tests.rules[0].id = "suite.classifier";
     expect(parseProjectDeclaration(collision).declaration).toBeNull();
   });
+  test("commit digests accept full SHA-1 and SHA-256 only; basis hashes remain SHA-256", () => {
+    const d = fixture().declaration;
+    for (const length of [40, 64]) {
+      d.validation.author[0].provenance.verifiedHead = "a".repeat(length);
+      expect(parseProjectDeclaration(d).declaration).not.toBeNull();
+    }
+    for (const head of ["a".repeat(39), "a".repeat(41), "a".repeat(63), "a".repeat(65), "g".repeat(64)]) {
+      d.validation.author[0].provenance.verifiedHead = head;
+      expect(parseProjectDeclaration(d).declaration).toBeNull();
+    }
+    d.validation.author[0].provenance.verifiedHead = "a".repeat(40); d.basis[0].sha256 = "a".repeat(40);
+    expect(parseProjectDeclaration(d).declaration).toBeNull();
+  });
   test("duplicate JSON keys, including escaped names, cannot select policy by parser order", () => {
     expect(() => parseProjectJson('{"version":2,"version":1}')).toThrow("AMBIGUOUS_JSON");
     expect(() => parseProjectJson('{"ci":{"provider":"none","provider":"github"}}')).toThrow("AMBIGUOUS_JSON");

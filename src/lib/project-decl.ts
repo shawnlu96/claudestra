@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import type { ProjectDef } from "./projects.js";
 import { recoveryPolicy, type ObservedAction, type RecoveryMode } from "./recovery-policy.js";
-import { builtinProjectDeclaration } from "./project-decl-builtin.js";
+import { builtinProjectDeclaration, isFlokaDeclRepository } from "./project-decl-builtin.js";
 import { declarationCapabilities, declarationPaths, restrictDeclaration, type DeclCapability } from "./project-decl-capabilities.js";
 import { assertObjectPath, DeclReadError, isDeclAncestor, objectMode, readDeclBlob, readDeclTree, resolveDeclRepository, type DeclRepository } from "./project-decl-git.js";
 import { declarationDiagnostic, parseProjectDeclaration, parseProjectJson, remoteIdentity, type DeclDiagnostic, type ProjectDeclaration,
@@ -14,7 +14,7 @@ export interface ProjectDeclResult {
 }
 export interface ProjectDeclOptions {
   project: ProjectDef; repoDir: string;
-  /** Trusted task branch, never a branch or SHA supplied by a declaration or PR head. Absent uses origin/HEAD. */
+  /** Trusted task branch on origin, never supplied by a declaration or PR head. Absent uses origin/HEAD. */
   targetBranch?: string;
   mode?: RecoveryMode; now?: number;
   /** Optional observation sink. CLI leaves it absent to remain strictly read-only. Receives no argv or environment. */
@@ -54,7 +54,7 @@ function verifyBasis(repo: DeclRepository, d: ProjectDeclaration, now: number, c
   for (const cap of caps) {
     const p = cap.provenance;
     if (p.status === "inferred") { issues.push({ field: cap.field, reason: "INFERRED_CAPABILITY" }); continue; }
-    if (!d.basis.length || !p.verifiedHead || !p.verifiedAt || Date.parse(p.verifiedAt) > now
+    if (!d.basis.length || !p.verifiedHead || p.verifiedHead.length !== repo.targetHead.length || !p.verifiedAt || Date.parse(p.verifiedAt) > now
       || !ancestor(p.verifiedHead)) {
       issues.push({ field: cap.field, reason: "UNTRUSTED_PROVENANCE" }); continue;
     }
@@ -68,7 +68,7 @@ function verifyBasis(repo: DeclRepository, d: ProjectDeclaration, now: number, c
 }
 function finish(result: ProjectDeclResult, o: ProjectDeclOptions): ProjectDeclResult {
   const global = result.diagnostics.some((d) => !["INFERRED_CAPABILITY", "UNTRUSTED_PROVENANCE", "VERIFICATION_BASIS_MISMATCH",
-    "VERIFICATION_BASIS_MISSING", "LOCAL_CAPABILITY_DISABLED", "OBSERVE_ONLY"].includes(d.reasonCode));
+    "VERIFICATION_BASIS_MISSING", "LOCAL_CAPABILITY_DISABLED", "UNSUPPORTED_DEPLOY_ADAPTER", "OBSERVE_ONLY"].includes(d.reasonCode));
   for (const cap of result.capabilities) {
     cap.wouldBeAvailable = !global && !result.diagnostics.some((d) => d.field === cap.field);
     cap.available = result.mode === "on" && cap.wouldBeAvailable;
@@ -105,6 +105,7 @@ export function loadProjectDeclaration(o: ProjectDeclOptions): ProjectDeclResult
     }
     for (const p of declarationPaths(d)) assertObjectPath(repo.root, repo.targetHead, p.path, p.glob, repo.tree);
     result.capabilities = declarationCapabilities(d);
+    if (d.deploy.adapter === "floka" && !isFlokaDeclRepository(repo)) reason("UNSUPPORTED_DEPLOY_ADAPTER", "deploy");
     for (const cap of result.capabilities) {
       const cwd = cap.command?.cwd;
       if (cwd && cwd !== "." && objectMode(repo.root, repo.targetHead, cwd, repo.tree) !== "040000") reason("DIRECTORY_REQUIRED", cap.field);

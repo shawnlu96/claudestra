@@ -28,14 +28,21 @@ export function resolveDeclRepository(project: ProjectDef, repoDir: string, targ
   })) throw new DeclReadError("PROJECT_REPOSITORY_MISMATCH", "project.dirs");
   const remote = remoteIdentity(gitText(root, ["remote", "get-url", "origin"]));
   if (!remote) throw new DeclReadError("UNTRUSTED_REMOTE", "repository.remote");
-  const trustedRef = targetBranch ? `refs/heads/${targetBranch}` : gitText(root, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
-  if (!trustedRef.startsWith("refs/heads/") && !trustedRef.startsWith("refs/remotes/origin/")) {
+  const prefix = "refs/remotes/origin/";
+  const trustedRef = targetBranch ? `${prefix}${targetBranch}` : gitText(root, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
+  if (!trustedRef.startsWith(prefix) || trustedRef === `${prefix}HEAD`) {
     throw new DeclReadError("TARGET_HEAD_UNAVAILABLE", "repository.targetBranch");
   }
   gitDecl(root, ["check-ref-format", trustedRef]);
-  const head = gitText(root, ["rev-parse", "--verify", `${trustedRef}^{commit}`]);
-  if (!new RegExp("^[a-f0-9]{40}$").test(head)) throw new DeclReadError("TARGET_HEAD_UNAVAILABLE", "repository.targetBranch");
-  const prefix = trustedRef.startsWith("refs/heads/") ? "refs/heads/" : "refs/remotes/origin/";
+  // Only a direct tracking ref is evidence; symbolic aliases must not lead back to a local PR branch.
+  // Snapshot the direct ref and its commit together; do not resolve a mutable ref again after checking it.
+  const refs = gitText(root, ["for-each-ref", "--format=%(refname):%(objectname):%(objecttype):%(symref)", trustedRef]);
+  const entry = refs.split("\n").map((line) => line.split(":")).find(([name]) => name === trustedRef);
+  if (!entry || entry[2] !== "commit" || entry[3] !== "") throw new DeclReadError("TARGET_HEAD_UNAVAILABLE", "repository.targetBranch");
+  const head = entry[1];
+  const format = gitText(root, ["rev-parse", "--show-object-format"]);
+  const length = format === "sha1" ? 40 : format === "sha256" ? 64 : 0;
+  if (!length || !new RegExp(`^[a-f0-9]{${length}}$`).test(head)) throw new DeclReadError("TARGET_HEAD_UNAVAILABLE", "repository.targetBranch");
   return { root, remote, targetBranch: trustedRef.slice(prefix.length), targetHead: head, tree: readDeclTree(root, head) };
 }
 export function readDeclTree(repo: string, head: string): Map<string, string> {

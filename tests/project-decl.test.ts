@@ -47,6 +47,58 @@ for (const stack of ["python", "go"] as const) describe(`${stack} independent ta
 });
 
 describe("trust boundary", () => {
+  test("explicit target reads origin even when the local branch has unpublished commits", () => {
+    const f = fixture(); const target = f.publish();
+    f.declaration.validation.author[0].argv = ["untrusted"];
+    put(f.repo, ".floka/project.json", JSON.stringify(f.declaration)); commit(f.repo);
+    const r = load(f, { targetBranch: f.branch });
+    expect(r.targetHead).toBe(target); expect(r.valid).toBe(true);
+    expect(r.capabilities[0].command?.argv).toEqual(["python", "-m", "pytest"]);
+  }, 30_000);
+  test("a local-only PR branch cannot authorize its own declaration", () => {
+    const f = fixture(); f.publish(); git(f.repo, "checkout", "-q", "-b", "untrusted-pr");
+    f.declaration.repository.targetBranch = "untrusted-pr";
+    put(f.repo, ".floka/project.json", JSON.stringify(f.declaration)); commit(f.repo);
+    const r = load(f, { targetBranch: "untrusted-pr" });
+    expect(codes(r)).toContain("TARGET_HEAD_UNAVAILABLE"); expect(r.capabilities).toEqual([]);
+  }, 30_000);
+  test("origin HEAD cannot redirect trust to a local branch", () => {
+    const f = fixture(); f.publish();
+    git(f.repo, "symbolic-ref", "refs/remotes/origin/HEAD", `refs/heads/${f.branch}`);
+    expect(codes(load(f))).toContain("TARGET_HEAD_UNAVAILABLE");
+  }, 30_000);
+  test("an explicit tracking ref cannot be a symbolic alias to a local branch", () => {
+    const f = fixture(); f.publish();
+    git(f.repo, "symbolic-ref", `refs/remotes/origin/${f.branch}`, `refs/heads/${f.branch}`);
+    const r = load(f, { targetBranch: f.branch });
+    expect(codes(r)).toContain("TARGET_HEAD_UNAVAILABLE"); expect(r.capabilities).toEqual([]);
+  }, 30_000);
+  test("SHA-256 Git object repositories preserve verified provenance and target identity", () => {
+    const f = fixture("go", "sha256"); const target = f.publish();
+    const r = load(f, { targetBranch: f.branch });
+    expect(target).toHaveLength(64); expect(r.targetHead).toBe(target); expect(r.diagnostics).toEqual([]);
+    expect(r.declaration).toEqual(f.declaration); expect(r.capabilities.every((c) => c.available)).toBe(true);
+  }, 30_000);
+  test("SHA-256 provenance cannot use a SHA-1-length abbreviated commit", () => {
+    const f = fixture("go", "sha256");
+    f.declaration.validation.author[0].provenance.verifiedHead = f.basisHead.slice(0, 40); f.publish();
+    const r = load(f);
+    expect(codes(r)).toContain("UNTRUSTED_PROVENANCE"); expect(r.capabilities[0].available).toBe(false);
+    expect(r.capabilities[1].available).toBe(true);
+  }, 30_000);
+  test("external projects cannot enable the Floka deployment adapter, including spoofed remotes", () => {
+    for (const spoof of [false, true]) {
+      const f = fixture(); f.declaration.deploy.adapter = "floka";
+      if (spoof) {
+        git(f.repo, "remote", "set-url", "origin", "https://github.com/shawnlu96/claudestra.git");
+        f.declaration.repository.remote = "shawnlu96/claudestra";
+      }
+      f.publish(); const r = load(f);
+      expect(codes(r)).toContain("UNSUPPORTED_DEPLOY_ADAPTER"); expect(r.valid).toBe(false);
+      expect(r.capabilities.find((c) => c.field === "deploy")?.available).toBe(false);
+      expect(r.capabilities[0].available).toBe(true);
+    }
+  }, 30_000);
   test("worktree edits and PR head declarations cannot select or replace target", () => {
     const f = fixture(); const target = f.publish();
     git(f.repo, "checkout", "-q", "-b", "untrusted-pr");

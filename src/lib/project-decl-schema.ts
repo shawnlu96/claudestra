@@ -30,7 +30,7 @@ export const remoteIdentity = (s: string): string | null => {
   return host.toLowerCase() === "github.com" ? path.toLowerCase() : `${host.toLowerCase()}/${path}`;
 };
 const remote = clean.refine((s) => remoteIdentity(s) !== null, "unsupported_remote");
-const provenance = z.strictObject({ status: z.enum(["verified", "inferred"]), verifiedHead: hex(40).optional(),
+const provenance = z.strictObject({ status: z.enum(["verified", "inferred"]), verifiedHead: z.union([hex(40), hex(64)]).optional(),
   verifiedAt: z.iso.datetime({ offset: true }).optional() }).superRefine((p, ctx) => {
   if (p.status === "verified" && (!p.verifiedHead || !p.verifiedAt)) ctx.addIssue({ code: "custom", message: "verification_metadata_required" });
 });

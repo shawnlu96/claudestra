@@ -20,11 +20,14 @@ through their common directory; another clone does not qualify just because its
 remote has the same name. Multi-repository projects require explicit `repoDir`.
 The loader never uses the host application's repository root.
 
-An explicit `targetBranch` is trusted caller input and resolves `refs/heads/…`.
+An explicit `targetBranch` is trusted caller input and resolves
+`refs/remotes/origin/…`, never a local branch.
 When absent, the target is the local `refs/remotes/origin/HEAD` symbolic ref.
 This is a local snapshot: the loader does not fetch or claim remote freshness.
 If no such target commit can be fixed, it reports `TARGET_HEAD_UNAVAILABLE`.
-A declaration or PR head cannot select the target. The branch ref is resolved
+Local-only branches and symbolic tracking aliases are rejected. A local branch
+ahead of origin cannot supply declarations or commands. A declaration or PR head
+cannot select the target. The branch ref is resolved
 once; subsequent content and basis reads use that commit's Git objects.
 Git replacement objects and lazy fetching are disabled. Worktree edits, including
 uncommitted declarations, are never read. Missing paths, symlinks and submodule
@@ -65,7 +68,10 @@ The complete version 1 shape is:
   proof?: Basis[]}`. The provider is an identifier (for example `github`, `gitlab` or `none`);
   it conveys no CI success. Proof entries are content hashes, never authorization.
 - `ui: {renderInputs: string[]}` and `verification: {probes: Command[]}`.
-- `deploy: {adapter: "floka"|"none", provenance}`.
+- `deploy: {adapter: "floka"|"none", provenance}`. The Floka adapter additionally
+  requires the canonical Floka remote and shipped verification ancestry, even
+  for target declarations. Other repositories receive `UNSUPPORTED_DEPLOY_ADAPTER`
+  for `deploy`; their independent verified capabilities remain eligible.
 - `basis: Basis[]`, with each basis entry `{path, sha256}`.
 
 `Command` is `{id, argv, cwd, env?, timeoutSec, provenance}`.
@@ -73,7 +79,10 @@ Environment entries have the form `CI: {from: "CI"}`: both sides must be safe
 variable names. Literal environment values are not accepted or persisted.
 Every executable item, including classifiers, adapters and probes, has
 `provenance: {status: "verified"|"inferred", verifiedHead?, verifiedAt?}`.
-Verified items require a full commit digest and ISO timestamp. Verification must
+Verified items require a full SHA-1 (40 hexadecimal characters) or SHA-256
+(64 hexadecimal characters) commit digest and ISO timestamp. The target digest
+length must match the repository object format. Basis content hashes always use
+SHA-256, independently of the Git object format. Verification must
 refer to an ancestor of the target and must not be dated in the future. There
 is no arbitrary time-to-live: expiration follows changes to the content basis.
 A nonempty basis must match both the target and the verification commit.
@@ -133,48 +142,79 @@ Every failure includes `reasonCode`, `field`, `source`, `targetHead`, and a
 reviewing the content hashes and updating its verification metadata through
 normal review and merge; it does not mean bypassing an existing gate.
 
+## Built-in basis maintenance
+
+The built-in is a shipped snapshot verified at `21719e928534` (2026-10-17).
+Its argv arrays are fixed data, including the eight build entrypoints; they are
+not imported from the host checkout. Basis covers the command definitions in
+`src/lib/ci-proof-reuse.ts`, the scripts in `package.json`, and the workflow and
+required checks in `.github/workflows/ci.yml`. All three files affect the
+claims, so version 1 deliberately retains them rather than ignoring frequent
+changes. A merged CI or package edit can therefore cause `BASIS_CHANGED` and
+make every built-in capability unavailable. This is an expected reconfirmation
+state, not an assertion failure or permission to reuse the previous snapshot.
+
+To refresh, review the commands, scripts, checks and paths at one fixed merged
+target commit. Read every basis blob from that same commit's Git objects and
+compute its content SHA-256. Update the built-in's verification head, timestamp,
+basis digests and literal commands together after review. Update the pinned
+compatibility fixture head and expected commands to that same reviewed snapshot,
+and run the focused declaration tests plus the normal checks. Do not derive new
+hashes from worktree edits, silently refresh during loading, or remove a relevant
+basis file simply to avoid degradation. Alternatively, merge a reviewed target
+`.floka/project.json` with its own corresponding basis and provenance. The
+loader and inspection commands never write either form.
+
 ## Acceptance evidence
 
-Baseline: `21719e92853414b98ba8863691d341967b54116e`.
+Baseline: `21719e928534`. Tests use its existing local Git objects without
+fetching, modifying the host refs, or consulting its current branch. The Floka
+fixture is detached and has no `origin/HEAD`; an explicit `main` tracking ref
+pins the verification snapshot. Missing target refs degrade explicitly.
 
 `tests/project-decl.test.ts` creates independent Python/pytest with GitHub
 Actions and Go/Makefile repositories. Go uses `develop` and has no `web`
 directory. Both cover valid, undeclared, inferred, stale basis and invalid
-paths. Additional cases cover linked worktrees, project mismatch, PR/worktree
-isolation, fixed refs, symlinks, corrupt declarations, verification ancestry,
-future timestamps, timeout restrictions, rejected expansion, and observe/off.
+paths. Additional cases cover linked worktrees, project mismatch, committed PR
+isolation, local branches ahead of origin, symbolic ref rejection, fixed refs,
+symlinks, corrupt declarations, verification ancestry, future timestamps,
+timeout restrictions, rejected expansion, and observe/off. A real SHA-256 Go
+repository round-trips verified provenance and capabilities. External repositories,
+including those spoofing the canonical remote without its ancestry, cannot
+activate the Floka deployment adapter.
 
 `tests/project-decl-command.test.ts` checks all three read-only views, unchanged
 Git index/head/status, argument redaction, uncached damaged local configuration,
-and Floka built-in command arrays. Real manager subprocesses also verify a
-fresh state directory stays unchanged and a large existing daemon log is not
-rotated. The initial switch dispatch failed the fresh-directory assertion due to
-legacy cron import initialization; first-import dispatch passes. Its compatibility test compares baseline and
-current manager source byte for byte after removing the single new dispatch
-import line, and projects source after removing only the new field/whitelist lines.
-The old scheduler config, CI workflow, proof command definitions and default
-recovery module are compared without stripping. This preserves existing standard
-messages, command arguments, exit paths and protected decisions at source level;
-the existing projects behavior tests run unchanged alongside the new assertions.
+and Floka built-in command arrays. Real manager subprocesses verify that a fresh
+state directory stays unchanged and a large existing daemon log is not rotated.
+A merged workflow edit in the pinned fixture explicitly asserts `BASIS_CHANGED`
+and whole-declaration degradation instead of requiring the current main to retain
+old source bytes.
 
-Before/after source fingerprints retained by these comparisons:
+Before/after compatibility evidence compares exact stdout, stderr and exit codes
+from the baseline and current manager using the same isolated project data:
 
-| Source | Baseline SHA256 | After excluding new interface |
-| --- | --- | --- |
-| manager | `00328d41e6eadc42bd4a0f9e7b67b3f87ced91b4f8415529e1734c73d984baa6` | identical |
-| projects | `6a90ea7f77000d10a3c2741bc27aaf34dc69286e4e45cbe74b89976d1e74d7fb` | identical |
+- `project-list`: successful list output, exit 0.
+- `project-edit`, `project-remove`, `project-assign` without operands: existing
+  standard usage errors, exit 0.
 
-The safety schema test for ambiguous capability IDs was first observed failing,
-then passed after rejecting identity separators. The remaining acceptance cases
-are behavioral tests. These are local fixture and static compatibility evidence,
-not FULLGATE deployment state or measured Claude capability. The PM observation
-period remains 24 hours before considering `projectDecl` on.
+Both sides must actually succeed and emit their expected success/error status;
+two failed subprocesses cannot count as matching evidence. No entire manager,
+workflow, scheduler or projects source file is pinned against unrelated changes.
+The existing project behavior tests additionally verify whitelist persistence.
+These are fixture and behavior comparisons, not FULLGATE deployment state or
+measured Claude capability. The PM observation period remains 24 hours before
+considering `projectDecl` on. Scope decision `ask_mvbv5jrmcac1975004` authorizes
+the original three single-line additions outside the ordinary file globs.
 
-Final local validation: 71 focused behavior tests and 14 recovery-key tests pass;
-typecheck, guard and six entrypoint builds pass. `bun run check` reached the
-host full-test queue but remained fifth for about 27 minutes without starting
-tests. Decision `ask_mvbvv4ve8b32ec6cc4` permits delivery with this limitation:
-only this order's waiting runner was gracefully withdrawn (exit 130), without
-changing or bypassing the host gate. Full validation remains the PR head CI's
-responsibility. Scope exception decision `ask_mvbv5jrmcac1975004` authorizes
-the three single-line additions outside the ordinary file globs.
+Revision-1 fix evidence: five added probes were observed failing before the fix
+(local unpublished head, local-only PR declaration, local symbolic redirect,
+SHA-256 target and foreign Floka adapter). After the fix, the focused declaration,
+project and recovery-key run passed 85 tests. The additional abbreviated SHA-256
+provenance case passed, and six final target-trust cases passed after making ref
+metadata and commit identity a single snapshot. Seven recovery-default tests
+also passed. Typecheck, guard and eight entrypoint builds passed. The full
+`bun run check` passed typecheck but remained in the host test queue;
+only this order's waiting runner was gracefully withdrawn (exit 130), as allowed
+by decision `ask_mvbvv4ve8b32ec6cc4`. Full validation remains the PR head CI's
+responsibility; neither a queued run nor this fixture evidence claims a full pass.
