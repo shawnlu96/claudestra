@@ -10,7 +10,7 @@ import type { LedgerEvent } from "./ledger-stages.js";
 import { toEvent } from "./ledger-store.js";
 
 /** 每个库句柄最多记这么多张卡，超了淘汰最久没用的 */
-export const CARD_FACTS_MAX = 20_000;
+const CARD_FACTS_MAX = 20_000;
 
 export interface CardFacts {
   /** 每个结束阶段第一次且不早于开工时刻的进入时刻（ledger-metrics.ts timeMetrics 的 endTs 口径） */
