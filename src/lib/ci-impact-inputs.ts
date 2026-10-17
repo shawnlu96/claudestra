@@ -201,6 +201,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   webLoader("web-stream-replay"),
   webLoader("web-switch-sync"),
   webLoader("web-term-font-fit"),
+  webLoader("web-turn-heal"),
   webLoader("web-unread-race"),
   ext("web/components/domd/prism.ts", "动态 import 的是 prismjs 包内语言"),
   { module: "web/public/boot.js", deps: ["web/public/hang-worker.js"], why: "按站点根路径起 Worker" },
