@@ -192,7 +192,7 @@ describe("ONB-2：本地项目执行者的标准答复不提 run 链接", () => 
     const local = standardAnswers("author", undefined, ["cargo test"]);
     expect(local).toContain("- 范围外测试红：不推空提交，在证据报告里列明失败的检查和复现方法，由 PM 本地合并时核对");
     expect(local).not.toMatch(/run 链接|合并闸处理/);
-    expect(standardAnswers("author")).toContain("- 范围外测试红：不推空提交，交付说明写明并附 run 链接，由合并闸处理");
+    expect(standardAnswers("author")).toContain("- 范围外测试红：不推空提交；无需改码交 noChange（run 链接、失败文件、理由），核验、CI 全绿才同轮恢复；main 已绿的修复卡交它取消");
     expect(standardAnswers("review", undefined, ["cargo test"])).not.toContain("范围外测试红");
   });
 });

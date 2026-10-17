@@ -16,6 +16,7 @@ import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { pendingRemoteBounce, remoteBounceRefusal } from "./remote-review-bounce.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { fallbackNotice } from "./scheduler-review-fallback.js";
 import type { PmNoticeLevel } from "./pm-notice-level.js";
 
 /**
@@ -400,7 +401,8 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
     if (bounced) return bounced;
     const r = await c.deps.manager("ledger", "scheduler-merge-handoff", task.id, "--head", task.headSHA, "--pr", task.pr);
     if (r.ok !== true) return c.out("held", `交接没记上：${String(r.error)}`);
-    if (r.duplicate !== true) await tell(c, `[调度引擎] ${task.id} 审查通过，合并交给仓库方：${task.pr} @ ${short(task.headSHA)}（证据见台账 merge_handoff）`, true);
+    if (r.duplicate !== true) await tell(c, `[调度引擎] ${task.id} 审查通过，合并交给仓库方：${task.pr} @ ${short(task.headSHA)}（证据见台账 merge_handoff）` +
+      fallbackNotice(c.db, task), true); // RVF-1: a same-family verdict says so
     const ready = pr.draft ? await readyNow(c, task.pr, task.headSHA) : "";
     return c.out("handoff", `已交仓库方合并 ${task.pr}${ready}${narrowAfterHandoff(c, pr.files)}`);
   }

@@ -1,6 +1,7 @@
 /** 试点证据专用：只剥开明确的 ssh 调用；不明选项仍按可能修改计，避免放过本地命令或转发。 */
 import { isReadOnlyBash } from "./shell-readonly.js";
 import { parseShell } from "./shell-words.js";
+import { sentinelSafeRedirects } from "./sentinel-safe-redirect.js";
 
 const FLAGS = new Set("46nqTtv");
 const WITH_VALUE = new Set("plio");
@@ -26,7 +27,14 @@ function hostIndex(words: string[]): number | null {
   return i;
 }
 
-export function isReadOnlySentinelSsh(command: string): boolean {
+/** Remote classification assumes a POSIX/bash-compatible login shell, as isReadOnlyBash does.
+ * csh/tcsh fd syntax is not modeled; this is evidence classification, never an execution grant. */
+export function isReadOnlySentinelSsh(command: string, safeRedirects = false): boolean {
+  if (safeRedirects && parseShell(command).segments.some((s) => s.redirects.length)) {
+    const stripped = sentinelSafeRedirects(command);
+    if (stripped === null) return false;
+    command = stripped;
+  }
   const local = parseShell(command);
   if (local.broken || local.substitution || local.structural || local.segments.length !== 1) return false;
   const segment = local.segments[0];
@@ -34,7 +42,10 @@ export function isReadOnlySentinelSsh(command: string): boolean {
   const i = hostIndex(segment.words);
   if (i === null || !segment.words[i] || segment.words[i].startsWith("-")) return false;
   // ssh 会把远程 argv 用空格连接后交给远端 shell；不能逐个参数判只读。
-  const remote = segment.words.slice(i + 1).join(" ");
+  const rawRemote = segment.words.slice(i + 1).join(" ");
+  const hasRedirects = parseShell(rawRemote).segments.some((s) => s.redirects.length);
+  const remote = safeRedirects && hasRedirects ? sentinelSafeRedirects(rawRemote, true) : rawRemote;
+  if (remote === null) return false;
   const parsed = parseShell(remote);
   if (parsed.segments.some((s) => s.dynamic || s.redirects.some((r) => r.op !== "<"))) return false;
   return isReadOnlyBash(remote);

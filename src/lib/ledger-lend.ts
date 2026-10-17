@@ -54,7 +54,7 @@ import { bounceReviewLine, bounceWork, fixBounce, reviewAfterBounce } from "./sc
 import { claimSuggest, notedSuggest } from "./role-model-settings-lend.js";
 import { withSuggest } from "./role-model-settings-wire.js";
 import type { ModelSuggest } from "./lend-wire-types.js";
-import { lendMemory } from "./memory-retrieve-lend.js";
+import { lendOfferMemory } from "./lend-memory-prepare-wiring.js";
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
   repo: string; pr: number | null; wire: OrderWire; text: string; sha256: string; status: LendOrderStatus; worker: string | null; leaseGen: number;
@@ -218,7 +218,7 @@ function peerRewrite<M extends { wire: OrderWire; whole?: OrderWire }>(db: Datab
  */
 export function renderLendOffer(db: Database, ctx: WriteCtx, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput, opts: { notes?: boolean } = {}) {
   const plain = orderFor(db, task, step, orderId, input);
-  const memory = opts.notes === false ? null : lendMemory(db, task, step, orderId, plain, { now: ctx.now });
+  const memory = opts.notes === false ? null : lendOfferMemory(db, task, step, orderId, plain, { now: ctx.now });
   const raw = memory ? { ...plain, wire: memory.wire, whole: memory.whole } : plain;
   const made = opts.notes === false ? peerRewrite(db, task, raw) : forPeer(db, ctx, task, raw); // card heads shortened, refused finding ids aliased (i28-GATE2)
   const head = made.wire.head as string;

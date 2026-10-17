@@ -1,4 +1,6 @@
 import { applyReborrow } from "../lib/lend-reborrow-apply.js";
+import { prepareLendOffer, commitLendOffer } from "../lib/lend-memory-prepare-wiring.js";
+import type { EnsureDeps } from "../lib/memory-retrieve-order.js";
 import { captureReborrowFacts, assertReborrowAuthority, digest, type ReborrowFacts } from "../lib/lend-reborrow-facts.js";
 import { prepareReborrowContext } from "../lib/lend-reborrow-context.js";
 import { convReborrowKey, reborrowKey, replayReborrow } from "../lib/lend-reborrow-event.js";
@@ -61,6 +63,7 @@ import type { PmNoticeLevel } from "../lib/pm-notice-level.js";
 
 /** Tests inject all three; production reads lend.json + peers + projects fresh on every call (a revoked borrow applies at once). */
 export interface LendCliDeps {
+  memoryPrepare?: EnsureDeps;
   reborrowSource?: ReborrowSourceProbe;
   borrow(): Promise<BorrowEntry[]>;
   notifyPm(project: string, text: string, level: PmNoticeLevel): Promise<void>;
@@ -233,8 +236,10 @@ async function offer(c: LedgerCli, again: boolean): Promise<Result> {
   const { input, materialsDiag } = await withWrite(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
   const reason = c.p.flags.reason ?? "";
   if (again && !reason.trim()) throw new LedgerError("invalid", "重挂要写 --reason（核对了什么）");
+  const prepared = await prepareLendOffer(c.db, task, stepOfStage(task.stage) === "write" ? input.write?.baseSha ?? null : task.headSHA,
+    input.spec, () => readTextSoft(specPathFor(c.task(task.id), getMeta(c.db, task.project).docsDir)), c.deps.lend?.memoryPrepare);
   const fresh = await refreshCliOffer(input, task.project, lendDeps(c));
-  const o = offerWithAuthorFamily(c.db, c.ctx(), task, fresh, again ? reason : undefined);
+  const o = commitLendOffer(c.db, prepared, (snapshot) => offerWithAuthorFamily(c.db, c.ctx(), snapshot ?? task, fresh, again ? reason : undefined));
   return { ok: true, orderId: o.orderId, step: o.step, peer: o.peer, family: o.family, sha256: o.sha256, supersedes: o.supersedes,
     ...(o.branch ? { branch: o.branch, base: o.base } : {}), ...(materialsDiag ? { materialsDiag } : {}) };
 }

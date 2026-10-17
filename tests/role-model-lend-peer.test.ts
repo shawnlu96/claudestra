@@ -6,16 +6,22 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { ENTRY, FP, harness, polled, sha, TEXT, toStarted, wire } from "./lend-harness.js";
 import { lendModelArgs } from "../src/lib/lend-grant-spawn.js";
 import { advance, getOrder, localDay, recordAsked } from "../src/lib/lend-journal.js";
 import { commitLendResult } from "../src/lib/lend-submit.js";
 import type { ModelSuggest } from "../src/lib/lend-wire-types.js";
-import { deliveredActual, launchRecording, recordLendLaunch } from "../src/lib/role-model-settings-lend.js";
+import { deliveredActual, launchRecording, recordLendLaunch, resetNoTier } from "../src/lib/role-model-settings-lend.js";
 import { suggestDigest } from "../src/lib/role-model-settings-wire.js";
+import { useTaskTierPort } from "../src/lib/task-tier-models.js";
+import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 
 type H = ReturnType<typeof harness>;
+/** B 本机 taskTierModels 恢复键：TIER1b 的用例钉 off（TIER3b 的门关 = 与改前逐字一致），TIER3b 的协商用例自己开 */
+const tierKey = (mode: RecoveryMode) => useTaskTierPort({ policy: (_p: string, key: string) => ({ mode: key === "taskTierModels" ? mode : "on", manualAfterMs: null, source: "config" as const }) });
+beforeEach(() => { tierKey("off"); resetNoTier(); });
+afterEach(() => { useTaskTierPort(); resetNoTier(); });
 const LEASE = { gen: 1, expiresAt: 0, ms: 600_000 };
 const HIGH: ModelSuggest = { effort: "high", source: "settings" };
 /** 新 A、开关 on：claim 带了 caps 就附建议，摘要把建议算进去 */
@@ -63,6 +69,45 @@ describe("[验收线 1] 旧 A（不认 caps）", () => {
     await h.tick();
     expect(claims(h).every((b) => Array.isArray(b.caps))).toBe(true);
     expect(getOrder(h.db, "o1")!.state).toBe("asked");
+  });
+});
+
+describe("TIER3b 协商 caps=tier（B 本机门开）", () => {
+  test("[验收线 2] 旧 A 不认 tier：先只去掉 tier 按 [suggest] 重发，单照常领到、建议照旧；之后一天内只带 suggest", async () => {
+    tierKey("on");
+    const h = harness();
+    suggesting(h);
+    const plain = h.A.claim;
+    h.A.claim = (b) => (Array.isArray(b.caps) && b.caps.includes("tier") ? { status: 400, body: { ok: false, code: "invalid", error: "caps[1]: 不认识" } } : plain(b));
+    await h.tick(); await h.tick();
+    expect(claims(h)).toEqual([{ v: 1, orderId: "o1", worker: expect.any(String), caps: ["suggest", "tier"] }, { v: 1, orderId: "o1", worker: expect.any(String), caps: ["suggest"] }]);
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "claimed", wire: { text: TEXT, suggest: HIGH } });
+  });
+
+  test("[验收线 1] 新 A 回带类型的建议：B 核过摘要（tier / role 在摘要里）原样进 journal；摘要不含类型的回包不领", async () => {
+    tierKey("on");
+    const tagged: ModelSuggest = { effort: "low", source: "default", tier: "security", role: "author" };
+    const h = harness();
+    suggesting(h, tagged);
+    await h.tick(); await h.tick();
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "claimed", wire: { suggest: tagged } });
+    const h2 = harness();
+    suggesting(h2, tagged, suggestDigest(TEXT, { effort: "low", source: "default" }));
+    await h2.tick(); await h2.tick();
+    expect(getOrder(h2.db, "o1")!.state).not.toBe("claimed");
+  });
+
+  test("[验收线 2] 更旧的 A（caps 都不认）：每次领单最多重发一次；这次只去掉 tier，下轮走旧的去掉 caps 回落，照样领到", async () => {
+    tierKey("on");
+    const h = harness();
+    const plain = h.A.claim;
+    h.A.claim = (b) => ("caps" in b ? { status: 400, body: { ok: false, code: "invalid", error: "$: 不认识的字段 caps" } } : plain(b));
+    await h.tick(); await h.tick();
+    expect(claims(h).map((b) => b.caps ?? null)).toEqual([["suggest", "tier"], ["suggest"]]);
+    expect(getOrder(h.db, "o1")!.state).toBe("asked"); // 没被当成拒单
+    await h.tick();
+    expect(claims(h).map((b) => b.caps ?? null)).toEqual([["suggest", "tier"], ["suggest"], ["suggest"], null]);
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "claimed", wire: { text: TEXT } });
   });
 });
 
