@@ -124,6 +124,8 @@ export interface AgentSession {
   ledgerReview?: LedgerReviewRef | null;
   /** low-priority 状态（bridge/fleet/lp-monitor.ts 的缓存，mapAgent 展开原字段流过来）：侧栏徽章、批量面板 */
   lowPriority?: LpState | null;
+  /** 系统强制只读的 Codex（bridge GET agents 的 readOnly，mapAgent 展开原字段流过来）：侧栏图标挂锁 */
+  readOnly?: boolean;
 }
 
 interface ApiAgent {
@@ -259,5 +261,6 @@ const lpSig = (lp?: LpState | null) => (lp ? `|lp:${lp.lowPriority}:${lp.walled}
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.kind ?? ""}|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + reviewSig(a.ledgerReview) + lpSig(a.lowPriority);
+  const ro = a.readOnly ? "|ro" : "";
+  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.kind ?? ""}|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + reviewSig(a.ledgerReview) + lpSig(a.lowPriority) + ro;
 }
