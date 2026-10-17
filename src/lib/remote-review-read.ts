@@ -6,7 +6,7 @@
 import type { Database } from "bun:sqlite";
 import { prCoordinates } from "./card-repo.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
+import { getTask, listTasks } from "./ledger-store.js";
 import type { RemoteReview } from "./remote-review-parse.js";
 import { REMOTE_REVIEW_OP } from "./remote-review-current.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
@@ -38,25 +38,26 @@ export const remoteReviewKey = (taskId: string, r: Pick<RemoteReview, "reportId"
 export const notifiedKey = (seq: number): string => `scheduler:${NOTIFIED_OP}:${seq}`;
 export const appliedKey = (seq: number): string => `scheduler:${APPLIED_OP}:${seq}`;
 
-/** Every remote_review* event of this project, by a range on the dedupKey index (all three ops share the prefix): no table scan. */
-function remoteRows(db: Database, project: string): { seq: number; target: string; data: string }[] {
-  return db.query(`SELECT seq, target, data FROM events WHERE dedupKey >= ? AND dedupKey < ? AND project = ? AND kind = 'scheduler'
-    AND actor = 'scheduler' ORDER BY seq`).all(`scheduler:${REMOTE_REVIEW_OP}`, "scheduler:remote_reviex", project) as { seq: number; target: string; data: string }[];
+/** remote_review* events of this project, by a range on the dedupKey index (all three ops share the prefix): no table scan. `where`
+ *  narrows them in SQL, so a round with nothing owed reads no rows; `e` is the event, `?3` the key prefix of its follow-up event.
+ *  `+project` keeps the planner off events_project_target, which would walk the project's whole history instead of the range. */
+function remoteRows(db: Database, project: string, where: string, follow: string): { seq: number; target: string; data: string }[] {
+  return db.query(`SELECT seq, target, data FROM events e WHERE dedupKey >= ?1 AND dedupKey < ?2 AND +project = ?4 AND kind = 'scheduler'
+    AND actor = 'scheduler' AND ${where} AND NOT EXISTS (SELECT 1 FROM events f WHERE f.dedupKey = ?3 || e.seq) ORDER BY seq`)
+    .all(`scheduler:${REMOTE_REVIEW_OP}`, "scheduler:remote_reviex", follow, project) as { seq: number; target: string; data: string }[];
 }
 
 /** Notices (on a booking or a late application) PM has not been marked as having received. */
 export function unsentRemoteNotices(db: Database, project: string): { taskId: string; seq: number; text: string }[] {
-  return remoteRows(db, project).map((x) => ({ ...x, notice: (JSON.parse(x.data) as { notice?: unknown }).notice }))
-    .filter((x) => typeof x.notice === "string" && !getEventByDedup(db, notifiedKey(x.seq)))
-    .map((x) => ({ taskId: x.target, seq: x.seq, text: x.notice as string }));
+  return remoteRows(db, project, "json_type(data, '$.notice') = 'text'", `scheduler:${NOTIFIED_OP}:`)
+    .map((x) => ({ taskId: x.target, seq: x.seq, text: (JSON.parse(x.data) as { notice: string }).notice }));
 }
 
 /** Bookings that did not match at intake, not applied yet, whose card (not finished) has now reached that head. */
 export function lateRemoteMatches(db: Database, project: string): { taskId: string; seq: number }[] {
-  return remoteRows(db, project).filter((x) => {
-    const d = JSON.parse(x.data) as { op?: string; matched?: boolean; head12?: unknown };
-    if (d.op !== REMOTE_REVIEW_OP || d.matched !== false || typeof d.head12 !== "string" || getEventByDedup(db, appliedKey(x.seq))) return false;
+  return remoteRows(db, project, `json_extract(data, '$.op') = '${REMOTE_REVIEW_OP}' AND json_type(data, '$.matched') = 'false'
+    AND json_type(data, '$.head12') = 'text'`, `scheduler:${APPLIED_OP}:`).filter((x) => {
     const task = getTask(db, x.target);
-    return !!task && !TERMINAL_STAGES.includes(task.stage) && !!remoteHeadMatch(db, task, d.head12);
+    return !!task && !TERMINAL_STAGES.includes(task.stage) && !!remoteHeadMatch(db, task, (JSON.parse(x.data) as { head12: string }).head12);
   }).map((x) => ({ taskId: x.target, seq: x.seq }));
 }
