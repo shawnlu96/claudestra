@@ -13,11 +13,8 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { channelInstructions } from "../channel-instructions.js";
 import { shellEscape } from "../claude-launch.js";
-import { acpCallerCredAssignment } from "../caller-cred-launch.js";
-import { BOOTSTRAP_PROMPT, codexContextPreamble, codexDeveloperInstructions, codexEffort, codexModel } from "../codex-launch.js";
-import { encodePreambleEnv } from "../codex-thread.js";
+import { BOOTSTRAP_PROMPT, codexDeveloperInstructions, codexEffort, codexModel } from "../codex-launch.js";
 import { recordCodexRunning } from "../codex-version.js";
-import { pathOverrideAssignments } from "../paths.js";
 import { acpLogDir } from "../log-paths.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
@@ -28,6 +25,7 @@ import { AcpSession } from "../acp/session.js";
 import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, makeWorkerRoot } from "./clean-env.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { CODEX_ACP_HOST } from "./codex-acp-host.js";
+import { acpHostCommand, rolePayload, type writeLaunchPayload } from "./acp-launch-payload.js";
 import type { AcpRuntimeSpec } from "./contract.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
@@ -39,7 +37,10 @@ const BOOTSTRAP_TIMEOUT_MS = 180_000;
 const mcpName = () => process.env.MCP_NAME || "claudestra";
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
-export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoRoot: string; codexBin?: string; env?: Record<string, string | undefined> }): string {
+export function buildAcpHostCommand(
+  spec: LaunchSpec,
+  o: { bunBin: string; repoRoot: string; codexBin?: string; env?: Record<string, string | undefined>; writePayload?: typeof writeLaunchPayload },
+): string {
   const agent = spec.agentName || spec.settingsName;
   if (!agent) throw new Error("ACP 宿主需要 agent 名（LaunchSpec.agentName / settingsName）");
   if (!spec.sessionId) throw new Error("ACP 宿主需要 thread id（new 先经 prepareSession 引导）");
@@ -56,22 +57,18 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
     ["CLAUDESTRA_CODEX_BIN", o.codexBin],
     ["CLAUDESTRA_ACP_MODEL", codexModel(spec.model) ?? undefined],
     ["CLAUDESTRA_ACP_EFFORT", codexEffort(spec.effort) ?? undefined],
-    ["CLAUDESTRA_ACP_DEVELOPER", encodePreambleEnv(codexDeveloperInstructions({
-      agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(o.repoRoot),
-    }))],
-    ["CLAUDESTRA_ACP_CLEAR_PREAMBLE", encodePreambleEnv(codexContextPreamble({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }))],
-    // 重启 / 收编：developer_instructions 只在建线程那一轮生效，首条入站附前言（与 tmux 同一份文字）
-    ["CLAUDESTRA_CODEX_PREAMBLE", spec.mode === "new" ? undefined : encodePreambleEnv(codexContextPreamble({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }))],
     // 沙箱外的手工覆盖（单测 / 排查）照带；沙箱里不带：适配器固定是本仓 stub，宿主这条链的 HOME 挪进沙箱根（lib/acp/stub.ts）
     [ACP_AGENT_ENV, sandbox ? undefined : env[ACP_AGENT_ENV]?.trim() || undefined],
     ...(sandbox ? Object.entries(sandboxAcpHome(env[SANDBOX_ROOT_ENV])) : []),
     [CLEAN_ENV_FLAG, clean ? "1" : undefined],
   ];
-  const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
-  const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape); // T85：路径只给宿主这一条命令，宿主起适配器前读走即删
-  const head = clean ? `${envIPrefix(env, shellEscape)} ` : "";
-  const bun = [shellEscape(o.bunBin), ...(clean ? BUN_NO_AUTOLOAD : [])].join(" ");
-  return `${head}${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${bun} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
+  // 职责前言 / developer 指令进一次性文件、命令只带路径（acp-launch-payload.ts：命令太长会被 tty 截断）。
+  // 重启 / 收编：developer_instructions 只在建线程那一轮生效，首条入站附前言（与 tmux 同一份文字）
+  const payload = rolePayload({ agentName: agent, purpose: spec.purpose, projectContext: spec.projectContext }, o.repoRoot, spec.mode);
+  return acpHostCommand({
+    pairs, payload, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot,
+    head: clean ? `${envIPrefix(env, shellEscape)} ` : undefined, bunArgs: clean ? BUN_NO_AUTOLOAD : undefined,
+  });
 }
 
 /** create 的引导：起一个短命的适配器，新建线程并跑一轮，返回 thread id（不挂 claudestra MCP，频道相关的环境变量全清掉） */

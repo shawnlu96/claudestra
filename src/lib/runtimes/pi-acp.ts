@@ -5,12 +5,8 @@
  * new / resume / restart 同一条命令，没有引导轮；/clear 由适配器换新 id 重起 pi；就绪标记、退出序列与 Codex 版相同。
  * tests/pi-acp-runtime.test.ts。
  */
-import { join } from "node:path";
 import { channelInstructions } from "../channel-instructions.js";
-import { acpCallerCredAssignment } from "../caller-cred-launch.js";
-import { shellEscape } from "../claude-launch.js";
 import { codexDeveloperInstructions } from "../codex-launch.js";
-import { pathOverrideAssignments } from "../paths.js";
 import { normalizePiEnvProfile, piActivateTools, piBinName, piEnvFlags, type PiEnvProfile } from "../pi-env.js";
 import { piLock, type PiLock } from "../pi-lock.js";
 import { piAgentDirOf } from "../pi-path.js";
@@ -22,6 +18,7 @@ import { probePiAcp } from "../acp/readiness.js";
 import { REPO_ROOT } from "../repo-root.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { ACP_RUNTIME_ENV, type AcpRuntimeSpec } from "./contract.js";
+import { acpHostCommand, type writeLaunchPayload } from "./acp-launch-payload.js";
 import { PI_ACP_HOST, PI_ARGS_ENV } from "./pi-acp-host.js";
 import { piAdapter } from "./pi.js";
 import type { LaunchSpec, ManagedRuntimeAdapter } from "./types.js";
@@ -43,7 +40,9 @@ export function piAcpArgs(spec: LaunchSpec, agent: string, repoRoot: string, san
 }
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
-export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoRoot: string; env?: Record<string, string | undefined> }): string {
+export function buildPiAcpHostCommand(
+  spec: LaunchSpec, o: { bunBin: string; repoRoot: string; env?: Record<string, string | undefined>; writePayload?: typeof writeLaunchPayload },
+): string {
   const env = o.env ?? process.env;
   assertSandboxRuntime("pi", env, "acp"); // 沙箱里 PI_CODING_AGENT_DIR 没钉在沙箱根就拒（docs/architecture/pi-acp-sandbox.md）
   const sandbox = isSandbox(env);
@@ -70,13 +69,12 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
     ["PI_BIN", piBinName()],
     ["CLAUDESTRA_ACP_MODEL", lock.model],
     ["CLAUDESTRA_ACP_EFFORT", lock.effort], // 同 tmux 版：全局锁（pi-lock.ts），环境变量与启动参数同一次读数
-    [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env), lock))],
     // 窗口不继承 manager 的 env（继承 tmux server 的）：沙箱里把上面核过的目录显式带过去，宿主起适配器前会再核一遍
     ["PI_CODING_AGENT_DIR", sandbox ? env.PI_CODING_AGENT_DIR : undefined],
   ];
-  const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
-  const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape);
-  return `${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
+  // pi 参数里有整段 --append-system-prompt：进一次性文件、命令只带路径（acp-launch-payload.ts：命令太长会被 tty 截断）
+  const payload: [string, string][] = [[PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env), lock))]];
+  return acpHostCommand({ pairs, payload, writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot });
 }
 
 /**

@@ -5,18 +5,13 @@
  * 怎么用见 docs/runtimes/adding-a-runtime.md；tests/runtime-contract-fake.test.ts 用它注册假运行时走整条链。
  */
 import { join } from "node:path";
-import { acpCallerCredAssignment } from "../caller-cred-launch.js";
-import { channelInstructions } from "../channel-instructions.js";
-import { shellEscape } from "../claude-launch.js";
-import { codexContextPreamble, codexDeveloperInstructions } from "../codex-launch.js";
-import { encodePreambleEnv } from "../codex-thread.js";
 import { acpLogDir } from "../log-paths.js";
-import { pathOverrideAssignments } from "../paths.js";
 import { REPO_ROOT } from "../repo-root.js";
 import { spawnAdapter } from "../acp/adapter-proc.js";
 import { AcpSession } from "../acp/session.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
+import { acpHostCommand, rolePayload, type writeLaunchPayload } from "./acp-launch-payload.js";
 import { ACP_RUNTIME_ENV, type AcpRuntimeSpec } from "./contract.js";
 import { resetReadyOption } from "./ready-option.js";
 import type { LaunchSpec, ManagedRuntimeAdapter, SessionSourceAdapter } from "./types.js";
@@ -30,7 +25,9 @@ export interface GenericAcpDef extends Pick<AcpRuntimeSpec, "host" | "ready" | "
 }
 
 /** 宿主启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
-function genericAcpHostCommand(spec: LaunchSpec, def: GenericAcpDef, o: { bunBin: string; repoRoot: string; env?: Record<string, string | undefined> }): string {
+function genericAcpHostCommand(
+  spec: LaunchSpec, def: GenericAcpDef, o: { bunBin: string; repoRoot: string; env?: Record<string, string | undefined>; writePayload?: typeof writeLaunchPayload },
+): string {
   const env = o.env ?? process.env;
   const agent = spec.agentName || spec.settingsName;
   if (!agent) throw new Error("ACP 宿主需要 agent 名（LaunchSpec.agentName / settingsName）");
@@ -45,15 +42,12 @@ function genericAcpHostCommand(spec: LaunchSpec, def: GenericAcpDef, o: { bunBin
     [ACP_RUNTIME_ENV, def.host.id],
     ["CLAUDESTRA_ACP_MODEL", spec.model],
     ["CLAUDESTRA_ACP_EFFORT", spec.effort],
-    // 职责与频道规则：宿主交给适配器（adapterEnv developerInstructions）；重启 / 收编的首条入站、/clear 后的首条再附一次前言
-    ["CLAUDESTRA_ACP_DEVELOPER", encodePreambleEnv(codexDeveloperInstructions({ ...who, channelRules: channelInstructions(o.repoRoot) }))],
-    ["CLAUDESTRA_ACP_CLEAR_PREAMBLE", encodePreambleEnv(codexContextPreamble(who))],
-    ["CLAUDESTRA_CODEX_PREAMBLE", spec.mode === "new" ? undefined : encodePreambleEnv(codexContextPreamble(who))],
     ...(def.launchEnv?.(spec) ?? []),
   ];
-  const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
-  const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape);
-  return `${prefix}${cred}${pathOverrideAssignments(shellEscape, env)} ${shellEscape(o.bunBin)} ${shellEscape(join(o.repoRoot, "src/acp-host.ts"))}`;
+  // 职责与频道规则进一次性文件、命令只带路径（acp-launch-payload.ts：命令太长会被 tty 截断）
+  return acpHostCommand({
+    pairs, payload: rolePayload(who, o.repoRoot, spec.mode), writePayload: o.writePayload, callerCredFile: spec.callerCredFile, env, bunBin: o.bunBin, repoRoot: o.repoRoot,
+  });
 }
 
 const OPEN_TIMEOUT_MS = 120_000;
