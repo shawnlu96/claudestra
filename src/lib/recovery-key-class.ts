@@ -51,6 +51,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   privateMergeNarrow: { class: "permission", reason: "限制私仓合并目标与执行范围" },
   privateStartPlacement: { class: "permission", reason: "私仓任务跨机放置范围" },
   projectDecl: { class: "schema", reason: "目标提交中项目能力声明的可信加载" },
+  projectDeclScan: { class: "permission", reason: "AI 扫描目标仓库、隔离实跑命令并以既有身份推分支开声明 PR" },
   proposalGlobProtection: { class: "permission", reason: "拦截通过通配拆词绕过提案名称保护的范围" },
   reclaimLocalFix: { class: "permission", reason: "租约回收后重新指派本机修复执行者" },
   repoAlias: { class: "permission", reason: "新旧仓库名互认，影响本仓、外仓和 PR 归属判定" },
