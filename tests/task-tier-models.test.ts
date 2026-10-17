@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { applyCardRole, tierCreate } from "../src/lib/card-role-definitions.js";
 import { useRoleModelPort } from "../src/lib/role-model-settings-local.js";
 import { CARD_ROLES, defaultRoleModels, readRoleModels, roleModelsProblem, type CardRole, type RoleModelRead } from "../src/lib/role-model-settings.js";
+import { resetDocsTemplate } from "../src/lib/task-tier-docs-template.js";
 import { registerAuthorTierOverride, resolveTierModel, TIER_DEFAULTS, useTaskTierPort, type TierLaunchCtx } from "../src/lib/task-tier-models.js";
 import type { TierTable } from "../src/lib/task-tier-model-settings.js";
 import { TASK_TIERS, type TaskTier } from "../src/lib/task-tier-spec.js";
@@ -121,6 +122,7 @@ describe("[验收线 1] 本机各角色 argv（on）", () => {
   });
 
   test("docs 卡起不了；卡首声明与已存流程冲突也起不了（拒绝带原因）", () => {
+    resetDocsTemplate(); // 同进程先跑的开卡测试可能已按缺省 on 挂上 docs（进程级）；本条前提是没注册
     port("on");
     expect(applyCardRole(author(), { tier: ctx("docs") })).toMatchObject({ error: expect.stringContaining("docs 还没有注册流程模板") });
     expect(applyCardRole(author(), { tier: ctx("code", { specText: "# x\n模板：ui\n" }) })).toMatchObject({ error: expect.stringContaining("冲突") });

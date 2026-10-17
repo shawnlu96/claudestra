@@ -237,7 +237,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3",
     "ledger-scheduler-resume.ts": "sql=3 stmt=3", // RVF-1: reached through scheduler-recovery-write.ts (writer-process code, never run by the pass)
-    "ledger-scheduler-schema.ts": "sql=6 stmt=13",
+    "ledger-scheduler-schema.ts": "sql=10 stmt=19",
     "ledger-scheduler-settle.ts": "sql=2 stmt=2",
     "ledger-scheduler-write.ts": "sql=7 stmt=7",
     "ledger-steps-write.ts": "sql=3 stmt=3",
