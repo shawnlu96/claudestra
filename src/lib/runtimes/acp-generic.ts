@@ -64,11 +64,13 @@ const OPEN_TIMEOUT_MS = 120_000;
  */
 async function openSession(spec: LaunchSpec, def: GenericAcpDef, spawn: typeof spawnAdapter): Promise<string> {
   if (!spec.cwd) throw new Error(`${def.host.label}（ACP）新建会话需要工作目录（LaunchSpec.cwd）`);
-  const agent = def.host.agentCommand(process.env, process.execPath, false);
+  // 和常驻宿主同一份有效启动环境（宿主拿到的是启动命令里的 launchEnv）：会话目录 / HOME 靠环境指定的运行时，建和载必须在同一个存储
+  const env: Record<string, string | undefined> = { ...process.env, ...Object.fromEntries((def.launchEnv?.(spec) ?? []).filter(([, v]) => v)) };
+  const agent = def.host.agentCommand(env, process.execPath, false);
   if ("error" in agent) throw new Error(agent.error);
   const envSpec = {
-    base: process.env, bunBin: process.execPath, channelServer: join(REPO_ROOT, "src/channel-server.ts"),
-    mcpName: process.env.MCP_NAME || "claudestra", logsDir: acpLogDir("bootstrap"),
+    base: env, bunBin: process.execPath, channelServer: join(REPO_ROOT, "src/channel-server.ts"),
+    mcpName: env.MCP_NAME || "claudestra", logsDir: acpLogDir("bootstrap"),
   };
   const logs: string[] = [];
   const proc = spawn(agent.cmd, def.host.adapterEnv(envSpec), spec.cwd, (m) => logs.push(m), def.host.logLabel);

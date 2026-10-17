@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { adapterEnv, spawnAdapter, type AdapterProc } from "../src/lib/acp/adapter-proc.ts";
 import type { BridgeLinkDeps } from "../src/lib/acp/bridge-link.ts";
 import { AcpHost } from "../src/lib/acp/host.ts";
+import { AcpSession } from "../src/lib/acp/session.ts";
 import { acpRuntime } from "../src/lib/acp/host-runtime.ts";
 import { startToolProxy } from "../src/lib/acp/tool-proxy.ts";
 import { ACP_CONTROL } from "../src/lib/runtimes/acp-control.ts";
@@ -250,5 +251,44 @@ describe("双 transport 的新运行时（验收追加 3 P2-3）", () => {
     } finally {
       undo();
     }
+  });
+});
+
+describe("通用 ACP 段：引导与常驻用同一份启动环境（验收追加 4 P1）", () => {
+  test("launchEnv 指定的会话存储：prepareSession 在里面建，常驻宿主在同一个存储里 load 得到", async () => {
+    const stores = new Map<string, Set<string>>();
+    const seen: string[] = [];
+    const spawn = (_cmd: string[], env: Record<string, string>) => {
+      const store = env.FAKE_SESSION_STORE || "default";
+      seen.push(store);
+      let onData: (s: string) => void = () => {};
+      const answer = (id: unknown, body: Record<string, unknown>) => queueMicrotask(() => onData(`${JSON.stringify({ jsonrpc: "2.0", id, ...body })}\n`));
+      const wire = {
+        onData: (cb: (s: string) => void) => void (onData = cb), onClose: () => {}, close: () => {},
+        write(line: string) {
+          const q = JSON.parse(line);
+          if (q.id === undefined) return;
+          if (q.method === "initialize") return answer(q.id, { result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
+          if (q.method === "session/new") return (stores.set(store, new Set(["srv-1"])), answer(q.id, { result: { sessionId: "srv-1" } }));
+          if (q.method === "session/load" && !stores.get(store)?.has(q.params.sessionId)) return answer(q.id, { error: { code: -32602, message: `Session not found in ${store}` } });
+          answer(q.id, { result: {} });
+        },
+      };
+      return { wire, stop: () => {}, exited: new Promise<number>(() => {}) } as unknown as AdapterProc;
+    };
+    const envHost: AcpHostRuntime = { ...host, adapterEnv: (s) => ({ ...(s.base as Record<string, string>) }) };
+    const rt = genericAcpRuntime(
+      { source, host: envHost, ready: async () => ({ ok: true }), isValidSessionId: () => true, launchEnv: () => [["FAKE_SESSION_STORE", "agent-private"]] },
+      { spawn },
+    );
+    const launch = { mode: "new" as const, cwd: REPO, channelId: "c", bridgeUrl: "", sessionId: "seed", agentName: "agent-f" };
+    const { sessionId } = await rt.managed.prepareSession!(launch);
+    expect(rt.managed.buildLaunchCommand({ ...launch, sessionId })).toContain("FAKE_SESSION_STORE=agent-private");
+    // 常驻宿主的环境 = 启动命令前缀里的变量（窗口 shell 交给 acp-host 的 process.env）
+    const resident = spawn([], envHost.adapterEnv({ base: { ...process.env, FAKE_SESSION_STORE: "agent-private" } } as any));
+    const s = new AcpSession(resident.wire, { onUpdate: () => {}, onPermission: async () => null, log: () => {} });
+    await s.initialize();
+    await s.attach(sessionId, REPO, false);
+    expect(seen).toEqual(["agent-private", "agent-private"]);
   });
 });
