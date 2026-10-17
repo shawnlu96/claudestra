@@ -51,6 +51,10 @@ export async function chooseCreateTransport(
   runtime?: string, requested?: string, ctx: { cwd?: string; piEnv?: unknown } = {}, piCheck: PiAcpCheck = piAcpCheck,
 ): Promise<TransportChoice> {
   if (requested !== undefined && requested !== "tmux" && requested !== "acp") throw new Error(`--transport 只能是 tmux 或 acp（收到 ${requested}）`);
+  if (managedFor(runtime)?.acpOnly) {
+    if (requested === "tmux") throw new Error(`runtime "${runtime}" 只能走 ACP，没有 tmux 版`);
+    return { transport: "acp" };
+  }
   if (runtime === "pi" && isSandbox()) return { transport: requested === "tmux" ? "tmux" : "acp" };
   if (runtime !== "codex" && runtime !== "pi") return { transport: "tmux" };
   if (requested === "tmux") return { transport: "tmux", manualTmux: true };
@@ -91,6 +95,15 @@ export function refusePiAcpFork(adapter: ManagedRuntimeAdapter, fork: boolean): 
   if (!fork || adapter !== managedFor("pi", "acp")) return;
   throw new Error("Pi 没有真正的会话分叉：ACP 版不支持 --fork（tmux 版的 --fork 也只是按原 session id 打开同一个会话）。"
     + "要接着原会话就去掉 --fork；确实要 tmux 版那种行为，加 --transport tmux");
+}
+
+/**
+ * resume / 收编在建频道 / 窗口之前的拒绝：Pi ACP 不支持 --fork；必须显式给模型的运行时（OpenCode）不带 --model
+ * （create 在 create-args 早拒；不早拒就要等拼启动命令时才抛，频道和窗口白建再清）
+ */
+export function refuseResumeEarly(adapter: ManagedRuntimeAdapter, fork: boolean, model: string | undefined): void {
+  refusePiAcpFork(adapter, fork);
+  if (adapter.modelRequired && !model?.trim()) throw new Error(adapter.modelRequired);
 }
 
 /** 停掉窗口里的 ACP 宿主、回到 shell：先走适配器的退出序列，不行就点名强杀子进程。停不下返回 false */
@@ -251,7 +264,7 @@ export function transportRefusal(
   if (bare === "master") return "大总管不切 transport";
   if (!info) return `agent "${bare}" 不存在`;
   const runtime = info.runtime || "claude-code";
-  if (!transportsOf(runtime).includes(to)) return `runtime "${runtime}" 不支持 transport=${to}（目前只有 codex / pi 能走 acp）`;
+  if (!transportsOf(runtime).includes(to)) return `runtime "${runtime}" 不支持 transport=${to}（${transportsOf(runtime).join(" / ")} 才行）`;
   if (runtime === "codex" && to === "tmux" && isSandbox(env)) return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
   if (runtime === "pi" && to === "tmux" && isSandbox(env)) return "沙箱里的 Pi 只走 ACP，不起 TUI 版（docs/architecture/pi-acp-sandbox.md）"; // migrate --pi --to tmux 不经 manager 白名单
   if (to === "acp" && isSandbox(env) && env[ACP_AGENT_ENV]?.trim()) return "沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓 stub";
@@ -280,7 +293,11 @@ export async function switchTransport(name: string, mode: string): Promise<Recor
   const bare = name.replace(/^agent-/, "");
   if (mode === "acp") { // 锁外探就绪（Codex 可能要装适配器）；按运行时分派，先不加锁读一眼它是谁
     const pre = (await loadRegistry()).agents;
-    const ready = await checkAcpReadyFor((pre[`agent-${bare}`] ?? pre[bare])?.runtime, true, { selected: () => selectedCodexAdapter(bare) });
+    const runtime = (pre[`agent-${bare}`] ?? pre[bare])?.runtime;
+    const only = managedFor(runtime, "acp");
+    const ready = only?.acpOnly // 只走 ACP 的（OpenCode）没有适配器要装：问它自己的 available()
+      ? await only.available().then((r): AcpReady => (r.ok ? { ok: true } : { ok: false, reason: r.hint }))
+      : await checkAcpReadyFor(runtime, true, { selected: () => selectedCodexAdapter(bare) });
     if (!ready.ok) return { ok: false, error: ready.reason };
   }
   const lock = await acquireLock(statePath(".manager-write.lock"));

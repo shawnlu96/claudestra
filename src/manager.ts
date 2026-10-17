@@ -72,7 +72,7 @@ import {
   allSources,
   claudeCodeAdapter,
   controlFor, normalizeTransport,
-  managedFor,
+  keepEffort, managedFor,
   requireManaged,
   type DiscoveredSession,
   type LaunchSpec,
@@ -481,6 +481,8 @@ async function cmdCreate(
   if (!selected.ok) return output({ ok: false, error: selected.error });
   dir = selected.dir;
   let adapter = selected.adapter;
+  const roErr = (await import("./lib/codex-readonly.js")).readOnlyRuntimeError(permissionMode, adapter.id); // 只读只给 Codex
+  if (roErr) return output({ ok: false, error: roErr }); // 建频道 / 写 registry 之前就拒
   // 可执行文件不在就早败：否则会照建频道 + 窗口，卡满就绪预算后才报错
   const avail = await adapter.available();
   if (!avail.ok) {
@@ -529,7 +531,7 @@ async function cmdCreate(
   // 里残留的 `permissionMode: "auto"` 显式值也不再让它复活。
   let mode = (permissionMode && permissionMode.trim()) || "bypassPermissions";
   if (mode === "auto") mode = "bypassPermissions";
-  if (!isKnownPermissionMode(mode)) {
+  if (!(await import("./lib/codex-readonly.js")).isAllowedMode(mode, adapter.id, isKnownPermissionMode)) {
     output({
       ok: false,
       error: `未知的权限模式: "${mode}"。可用: ${PERMISSION_MODES.join(", ")}`,
@@ -749,7 +751,7 @@ async function cmdResume(
 ) {
   const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)], transportFlag, dir);
   let adapter = requireManaged(runtimeFlag, selected.transport), transportNote = selected.note;
-  (await import("./manager/acp-lifecycle.js")).refusePiAcpFork(adapter, forkSession); const avail = await adapter.available(); // 拒在建频道 / 窗口之前
+  (await import("./manager/acp-lifecycle.js")).refuseResumeEarly(adapter, forkSession, model); const avail = await adapter.available(); // 拒在建频道 / 窗口之前
   if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);
   // 会话 id 格式各家不同（Claude Code 是 UUID，Pi 收任意自造 id）
   if (!adapter.isValidSessionId(sessionId)) {
@@ -778,9 +780,12 @@ async function cmdResume(
 
   // v2.4.11+: resume 也回 bypassPermissions 默认（同 cmdCreate 注释里的理由）。
   // v2.4.13+: "auto" → bypassPermissions 归一，老 registry 里的显式 auto 不再复活。
+  const ro = await import("./lib/codex-readonly.js"), rm = ro.resumePermissionMode(permissionMode, (await loadRegistry()).agents[tmuxName]); // 旧条目只读：沿用 / 换档就拒
+  if ("error" in rm) return output({ ok: false, error: rm.error }); else permissionMode = rm.mode;
   let mode = (permissionMode && permissionMode.trim()) || "bypassPermissions";
   if (mode === "auto") mode = "bypassPermissions";
-  if (!isKnownPermissionMode(mode)) {
+  const roErr = ro.readOnlyRuntimeError(mode, adapter.id); if (roErr) return output({ ok: false, error: roErr }); // 只读只给 Codex
+  if (!ro.isAllowedMode(mode, adapter.id, isKnownPermissionMode)) {
     output({
       ok: false,
       error: `未知的权限模式: "${mode}"。可用: ${PERMISSION_MODES.join(", ")}`,
@@ -1583,6 +1588,7 @@ async function cmdList() {
     }
   }
 
+  (await import("./lib/codex-readonly.js")).markReadOnlyRows(agents, reg.agents); // 只读 Codex 的行标「只读」
   output({ ok: true, agents });
 }
 
@@ -1804,6 +1810,8 @@ async function cmdMode(sub: string, ...rest: string[]) {
     output({ ok: false, error: `找不到 agent: ${tmuxName}` });
     return;
   }
+  const roSwitch = (await import("./lib/codex-readonly.js")).modeSwitchError(info, modeVal); // 只读 agent 不能换档
+  if (roSwitch) return output({ ok: false, error: roSwitch });
   info.permissionMode = modeVal;
   await saveRegistry(reg);
   output({
@@ -2377,7 +2385,7 @@ switch (cmd) {
       });
       break;
     }
-    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, effort, mode, model, fork, runtimeFlag, transportFlag);
+    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, keepEffort(runtimeFlag, effort), mode, model, fork, runtimeFlag, transportFlag);
     break;
   }
 
@@ -2452,7 +2460,7 @@ switch (cmd) {
       break;
     }
     if (model) (info as any).model = model;
-    if (effort) (info as any).effort = effort;
+    if (keepEffort(info.runtime, effort)) (info as any).effort = effort;
     await saveRegistry(reg);
     output({ ok: true, name: tmuxName, model: (info as any).model ?? null, effort: (info as any).effort ?? null });
     break;

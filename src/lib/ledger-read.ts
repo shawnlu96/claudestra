@@ -11,11 +11,11 @@ import { actionCtx, withActionState } from "./ledger-action-state.js";
 import { attentionCtx, withAttentionFacts, type AttentionCtx } from "./ledger-attention-facts.js";
 import { depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
 import { stageTimeline, type StageEntry } from "./ledger-metrics.js";
-import { compactStage, doneCard, eventsByTarget, liveCard, overviewCard, taskView, type OverviewItem, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
-import { dayStartOf, doneWindow, type DoneRest } from "./ledger-read-done.js";
+import { compactStage, doneCard, liveCard, overviewCard, taskView, type OverviewItem, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
+import { dayStartOf, shownCards, type DoneRest } from "./ledger-read-done.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict, type Stage } from "./ledger-stages.js";
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
-import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
+import { listSteps, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
 import { RETIRE_STAGES, taskSessionLinks } from "./scheduler-sessions.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
@@ -118,7 +118,6 @@ export function projectView(db: Database, project: string, now: number, clientDa
 }
 
 function projectViewSnapshot(db: Database, project: string, now: number, dayStart: number, facts: AttentionCtx): ProjectView {
-  const byTarget = eventsByTarget(listEvents(db, { project }));
   // ask 族事件不进项目级列表（isAskEvent 同一口径）：25 条没挂任务的 ask 就能把这 20 条挤满
   const recent = db
     .query(`SELECT * FROM events WHERE project = ? AND target = '' AND kind NOT IN ('ask', 'ask_expire', 'ask_cancel', 'ask_reopen')
@@ -126,16 +125,15 @@ function projectViewSnapshot(db: Database, project: string, now: number, dayStar
     .all(project, PROJECT_EVENTS_LIMIT) as Record<string, unknown>[];
   const tasks = listTasks(db, project);
   const deps = depViews(listDeps(db, project), tasks);
-  const rows = stepsByTask(db);
+  const { win, shown, byTarget, rows } = shownCards(db, project, tasks, deps, dayStart);
   const act = actionCtx(db, project, now);
-  const views = tasks.map((t) => ((own) => withActionState(withAttentionFacts(taskView(t, own, now, deps), own, facts), own, act))(byTarget.get(t.id) ?? []));
-  const win = doneWindow(views.filter((v) => compactStage(v.stage)), deps, dayStart);
-  const visible = new Set(views.filter((v) => !compactStage(v.stage) || win.keep.has(v.id)).map((v) => v.id));
+  const views = shown.map((t) => ((own) => withActionState(withAttentionFacts(taskView(t, own, now, deps), own, facts), own, act))(byTarget.get(t.id) ?? []));
+  const visible = new Set(shown.map((t) => t.id));
   const line = (v: TaskView) => stepLineInfo(v, rows.get(v.id) ?? [], byTarget.get(v.id) ?? []);
   return {
     meta: getMeta(db, project),
     items: listItems(db, project).map((i) => ({ id: i.id, title: i.title, oneLine: i.oneLine })),
-    tasks: views.flatMap((v) => (!compactStage(v.stage) ? [liveCard(v, line(v))] : win.keep.has(v.id) ? [doneCard(v, win.today.has(v.id) ? line(v) : null)] : [])).map(overviewCard),
+    tasks: views.map((v) => (!compactStage(v.stage) ? liveCard(v, line(v)) : doneCard(v, win.today.has(v.id) ? line(v) : null))).map(overviewCard),
     doneCursor: win.cursor,
     doneRest: win.rest,
     deps: deps.filter((d) => visible.has(d.from) && visible.has(d.to)),

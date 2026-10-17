@@ -26,7 +26,7 @@ export interface PendingRemoteBounce { head: string; remote: RemoteBounce }
 export function pendingRemoteBounce(db: Database, task: LedgerTask): PendingRemoteBounce | null {
   if (task.stage !== "merge" || !task.headSHA) return null;
   const events = listEvents(db, { project: task.project, target: task.id });
-  const head = handoffOf(db, task)?.head ?? task.headSHA, e = remoteP1At(events, head);
+  const head = handoffOf(db, task)?.head ?? task.headSHA, e = remoteP1At(events, head, task.pr);
   return e && !getEventByDedup(db, bounceKey(task.id, e.seq)) ? { head, remote: remoteP1Of(e) } : null;
 }
 

@@ -79,7 +79,7 @@ export function AgentSkillsSection({ name, master = false }: { name: string; mas
       {!view && !err && <span className="loading loading-spinner loading-xs mt-2" />}
       {view && !view.supported && (
         <div className="mt-2 text-[12px] text-base-content/60">
-          {view.reason === "codex" ? t("Codex 暂不支持按会话启停技能（它的技能目录是全局的）。") : t("这个 Pi 会话是「继承全局」档：全部技能都启用。切到最小集（minimal）才能逐个管。")}
+          {view.reason === "codex" ? t("Codex 暂不支持按会话启停技能（它的技能目录是全局的）。") : view.reason === "opencode" ? t("OpenCode 暂不支持按会话启停技能。") : t("这个 Pi 会话是「继承全局」档：全部技能都启用。切到最小集（minimal）才能逐个管。")}
         </div>
       )}
       {view && view.rows.length > 8 && (

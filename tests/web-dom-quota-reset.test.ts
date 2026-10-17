@@ -63,6 +63,12 @@ beforeAll(async () => {
     requests.push({ path, method, body });
     const json = (status: number, b: unknown) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
     if (path === "/api/v1/quota" && method === "GET") return json(200, quotaBody());
+    if (path === "/api/v1/lend/quota-lines") return json(200, { ok: true, at: Date.now(), config: { status: "ok", error: null, mode: "on" }, families: [{
+      family: "codex", warnPct: 80, stopPct: 90, weekUsedPct: bridge.applicable ? 100 : 0, resetAt: EXP_A,
+      observedAt: Date.now(), source: "live", freshness: "fresh", state: bridge.applicable ? "stop" : "below", mode: "on",
+      limit: bridge.applicable ? "zero" : "none", wouldLimit: "none", granted: 8, available: 8, lineCap: 8, slots: bridge.applicable ? 0 : 8,
+    }] });
+    if (path === "/api/v1/quota/wall") return json(200, { ok: true, active: false, wall: null, queued: 0 });
     if (path === "/api/v1/quota/codex/reset-credit" && method === "POST") {
       bridge.applicable = 0;
       return json(bridge.answer.status, bridge.answer.body);
@@ -139,12 +145,17 @@ test("可用：先出二次确认（扣 1 次、到期时间、不可撤销）�
 test("确认后 POST 一次（最早到期那张的键），显示成功，并重拉面板（此刻可用变 0、按钮置灰）", async () => {
   const host = await mount();
   const before = gets();
+  const beforeLines = requests.filter((r) => r.path === "/api/v1/lend/quota-lines").length;
+  const beforeWall = requests.filter((r) => r.path === "/api/v1/quota/wall").length;
   await click(btn(host, "使用一次重置"));
   await click(btn(host, "确认使用"));
   expect(posts()).toEqual([{ path: "/api/v1/quota/codex/reset-credit", method: "POST", body: { creditKey: KEY_A } }]);
   expect(host.querySelector('[role="status"]')?.textContent).toBe("已使用 1 次重置，额度已补满");
   expect(gets()).toBeGreaterThan(before);
+  expect(requests.filter((r) => r.path === "/api/v1/lend/quota-lines")).toHaveLength(beforeLines + 1);
+  expect(requests.filter((r) => r.path === "/api/v1/quota/wall")).toHaveLength(beforeWall + 1);
   expect(host.textContent).toContain("此刻可用 0 次");
+  expect(host.querySelector('[data-quota-summary-family="Codex"]')?.textContent).toContain("本周已用 0%");
   expect(btn(host, "使用一次重置")?.disabled).toBe(true);
   await host.unmount();
 });
@@ -160,11 +171,15 @@ for (const [name, answer, text] of FAILURES) {
     bridge.answer = answer;
     const host = await mount();
     const before = gets();
+    const beforeLines = requests.filter((r) => r.path === "/api/v1/lend/quota-lines").length;
+    const beforeWall = requests.filter((r) => r.path === "/api/v1/quota/wall").length;
     await click(btn(host, "使用一次重置"));
     await click(btn(host, "确认使用"));
     expect(posts()).toHaveLength(1);
     expect(host.querySelector('[role="status"]')?.textContent).toBe(text);
     expect(gets()).toBeGreaterThan(before);
+    expect(requests.filter((r) => r.path === "/api/v1/lend/quota-lines")).toHaveLength(beforeLines);
+    expect(requests.filter((r) => r.path === "/api/v1/quota/wall")).toHaveLength(beforeWall);
     await host.unmount();
   });
 }

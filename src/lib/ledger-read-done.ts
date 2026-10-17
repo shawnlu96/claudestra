@@ -10,10 +10,11 @@ import type { Database } from "bun:sqlite";
 import { depViews, type DepView } from "./ledger-deps.js";
 import { actionCtx, withActionState } from "./ledger-action-state.js";
 import { attentionCtx, withAttentionFacts, type AttentionCtx } from "./ledger-attention-facts.js";
-import { compactStage, doneCard, eventsByTarget, taskView, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
-import type { Stage } from "./ledger-stages.js";
-import { listDeps, listEvents, listTasks } from "./ledger-store.js";
-import { listSteps } from "./ledger-steps.js";
+import type { TaskMetrics } from "./ledger-metrics.js";
+import { compactStage, doneCard, taskView, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
+import { doneFacts, eventsOf, stepsOf } from "./ledger-read-fast.js";
+import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
+import { listDeps, listTasks } from "./ledger-store.js";
 import { stepLineInfo } from "./ledger-step-line.js";
 
 /** 最近窗口和历史依赖窗口各自的上限；今日完成共用最近窗口，不随当天完成量扩张 */
@@ -40,6 +41,8 @@ export interface DoneRest {
   /** 事项 id（没归事项为 ""）→ 各阶段张数：因果画布事项框角的 ✓ N */
   byItem: Record<string, Partial<Record<Stage, number>>>;
 }
+/** 窗口 / 分页 / 聚合读到的几样：TaskView 的子集，完成时刻与审查计数来自每卡事实表（ledger-read-fast.ts doneFacts） */
+export type DoneFact = Pick<TaskView, "id" | "stage" | "kind" | "itemId" | "updatedAt" | "blockedBy"> & { metrics: Pick<TaskMetrics, "endTs" | "reviewRounds" | "p0" | "p1"> };
 export interface DoneWindow {
   keep: Set<string>;
   /** 窗口里今天完成的：带小圆点 */
@@ -57,10 +60,10 @@ interface Cursor {
   id: string;
 }
 
-const doneAt = (v: Pick<TaskView, "metrics" | "updatedAt">): number => v.metrics.endTs ?? v.updatedAt;
-const byDone = (a: TaskView, b: TaskView) => doneAt(b) - doneAt(a) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
-const doneCursor = (v: TaskView): string => `${doneAt(v)}:${v.id}`;
-const older = (v: TaskView, c: Cursor) => doneAt(v) < c.at || (doneAt(v) === c.at && v.id < c.id);
+const doneAt = (v: DoneFact): number => v.metrics.endTs ?? v.updatedAt;
+const byDone = (a: DoneFact, b: DoneFact) => doneAt(b) - doneAt(a) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+const doneCursor = (v: DoneFact): string => `${doneAt(v)}:${v.id}`;
+const older = (v: DoneFact, c: Cursor) => doneAt(v) < c.at || (doneAt(v) === c.at && v.id < c.id);
 
 /** 「时刻:id」；时刻是非负整数毫秒，id 非空。别的写法一律 null（接口回 400） */
 export function parseDoneCursor(raw: string): Cursor | null {
@@ -70,7 +73,7 @@ export function parseDoneCursor(raw: string): Cursor | null {
   return Number.isSafeInteger(at) ? { at, id: m[2]! } : null;
 }
 
-function restOf(views: readonly TaskView[]): DoneRest {
+function restOf(views: readonly DoneFact[]): DoneRest {
   const groups = new Map<string, DoneRestGroup>();
   const byItem: DoneRest["byItem"] = {};
   for (const v of views) {
@@ -96,7 +99,7 @@ export function dayStartOf(now: number, fromClient: number | null): number {
 }
 
 /** done = 项目里所有已完成（verified / done / cancelled）卡的视图；deps = 项目的依赖边；dayStart = dayStartOf 的结果 */
-export function doneWindow(done: readonly TaskView[], deps: readonly DepView[], dayStart: number): DoneWindow {
+export function doneWindow(done: readonly DoneFact[], deps: readonly DepView[], dayStart: number): DoneWindow {
   const sorted = [...done].sort(byDone);
   const k = Math.min(DONE_RECENT, sorted.length);
   const keep = new Set(sorted.slice(0, k).map((v) => v.id));
@@ -112,23 +115,41 @@ export function doneWindow(done: readonly TaskView[], deps: readonly DepView[], 
   return { keep, today, cursor: k < sorted.length ? doneCursor(sorted[k - 1]!) : null, rest: restOf(sorted.filter((v) => !keep.has(v.id))) };
 }
 
-/** before 之后（更早）的一页；before = null 从最新一张起。窗口里的卡也照样出现，网页按 id 去重 */
-function donePageOf(done: readonly TaskView[], before: Cursor | null, limit: number, card: (v: TaskView) => OverviewTask): DonePage {
-  const rest = [...done].filter((v) => !before || older(v, before)).sort(byDone);
-  const page = rest.slice(0, limit);
-  return { tasks: page.map(card), nextCursor: rest.length > limit ? doneCursor(page.at(-1)!) : null };
+/**
+ * 总览要显示的卡：没结束的 + 完成窗口。窗口按每卡事实表的完成时刻定（ledger-read-fast.ts doneFacts），再只取这些卡的事件和步骤，
+ * 不读窗口外已完成卡的事件明细。
+ */
+export function shownCards(db: Database, project: string, tasks: readonly LedgerTask[], deps: readonly DepView[], dayStart: number) {
+  const win = doneWindow(doneFacts(db, project, tasks.filter((t) => compactStage(t.stage)), deps), deps, dayStart);
+  const shown = tasks.filter((t) => !compactStage(t.stage) || win.keep.has(t.id));
+  const ids = shown.map((t) => t.id);
+  return { win, shown, byTarget: eventsOf(db, project, ids), rows: stepsOf(db, ids) };
 }
 
-/** GET /ledger/:project/done：同一个读事务里取任务、依赖、事件，和总览同一口径算视图（含 attentionFacts）；facts 只给测试注入 */
+/** before 之后（更早）的一页；before = null 从最新一张起。窗口里的卡也照样出现，网页按 id 去重 */
+function donePageOf<T extends DoneFact>(done: readonly T[], before: Cursor | null, limit: number): { page: T[]; nextCursor: string | null } {
+  const rest = [...done].filter((v) => !before || older(v, before)).sort(byDone);
+  const page = rest.slice(0, limit);
+  return { page, nextCursor: rest.length > limit ? doneCursor(page.at(-1)!) : null };
+}
+
+/** GET /ledger/:project/done：同一个读事务里先按每卡事实表定出这一页，再只取这一页的事件，和总览同一口径算视图（含 attentionFacts）；facts 只给测试注入 */
 export function donePage(db: Database, project: string, before: Cursor | null, limit: number, now: number, facts?: AttentionCtx): DonePage {
   return db.transaction(() => {
     const tasks = listTasks(db, project);
     const deps = depViews(listDeps(db, project), tasks);
     const done = tasks.filter((t) => compactStage(t.stage));
-    const byTarget = eventsByTarget(listEvents(db, { project }), new Set(done.map((t) => t.id)));
+    const { page, nextCursor } = donePageOf(doneFacts(db, project, done, deps), before, limit);
+    const ids = page.map((v) => v.id);
+    const byTarget = eventsOf(db, project, ids);
+    const steps = stepsOf(db, ids);
+    const byId = new Map(done.map((t) => [t.id, t]));
     const ctx = facts ?? attentionCtx(project);
     const act = actionCtx(db, project, now);
-    const views = done.map((t) => ((own) => withActionState(withAttentionFacts(taskView(t, own, now, deps), own, ctx), own, act))(byTarget.get(t.id) ?? []));
-    return donePageOf(views, before, limit, (v) => doneCard(v, stepLineInfo(v, listSteps(db, v.id), byTarget.get(v.id) ?? [])));
+    const card = (t: (typeof done)[number], own: LedgerEvent[]) => {
+      const v = withActionState(withAttentionFacts(taskView(t, own, now, deps), own, ctx), own, act);
+      return doneCard(v, stepLineInfo(v, steps.get(t.id) ?? [], own));
+    };
+    return { tasks: ids.map((id) => card(byId.get(id)!, byTarget.get(id) ?? [])), nextCursor };
   }).deferred();
 }

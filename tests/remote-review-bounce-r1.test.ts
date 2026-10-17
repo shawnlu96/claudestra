@@ -26,7 +26,7 @@ const call = { agent: "agent-task-one", sessionId: "s-one", family: "claude-code
 type F = ReturnType<typeof autoFixture>;
 
 const book = (f: F, head: string, round = 1) => recordRemoteReview(f.db, f.at("scheduler"), { taskId: "T1",
-  review: parseRemoteReview(pushText({ verdict: "changes", p1: 1, round }, { head }))!, peer: "Shawn", reportDir: join(f.dir, "reviews") });
+  review: parseRemoteReview(pushText({ verdict: "changes", p1: 1, round }, { head, repo: "example/repo", number: 7, taskId: "PR7" }))!, peer: "Shawn", reportDir: join(f.dir, "reviews") });
 
 async function toMerge(f: F) {
   await toBuild(f);

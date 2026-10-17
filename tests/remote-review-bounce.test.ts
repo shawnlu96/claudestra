@@ -27,7 +27,7 @@ type F = ReturnType<typeof autoFixture>;
 
 /** Book the owner's review of `head` the way the intake does (parsed text, report copy under the fixture dir). */
 function book(f: F, head: string, counts: { verdict?: "pass" | "changes" | "block"; p0?: number; p1?: number; round?: number } = {}) {
-  const review = parseRemoteReview(pushText({ verdict: "changes", p1: 2, ...counts }, { head }))!;
+  const review = parseRemoteReview(pushText({ verdict: "changes", p1: 2, ...counts }, { head, repo: "example/repo", number: 7, taskId: "PR7" }))!;
   return recordRemoteReview(f.db, f.at("scheduler"), { taskId: "T1", review, peer: "Shawn", reportDir: join(f.dir, "reviews") });
 }
 
@@ -99,7 +99,7 @@ describe("RRL-2 owner P1 in merge", () => {
         expect(f.task().stage).toBe("fix");
         const moved = h.events().findLast((e) => e.kind === "stage")!;
         expect(moved.data).toMatchObject({ from: "merge", to: "fix", mergeBounce: { cause: "remote_review", prHead: H1,
-          remote: { seq: booked.event.seq, reportId: "PR1600-r1", p1: 2 } } });
+          remote: { seq: booked.event.seq, reportId: "PR7-r1", p1: 2 } } });
         const reportPath = String(booked.event.data.reportPath);
         expect(f.notices.at(-1)).toContain("已退回 fix");
 
@@ -110,7 +110,7 @@ describe("RRL-2 owner P1 in merge", () => {
         expect(fix.agent).toBe("agent-task-one");
         expect(fix.body).toContain(reportPath);
         expect(fix.body).toContain("逐条修报告里的 P1");
-        expect(review.text).toContain("定向复验：核对仓库方 PR1600-r1 的 P1 是否修好");
+        expect(review.text).toContain("定向复验：核对仓库方 PR7-r1 的 P1 是否修好");
         expect(review.text).not.toContain(INJECT);
 
         await passToMerge(f, H2);
@@ -158,7 +158,7 @@ describe("RRL-2 owner P1 in merge", () => {
       expect(f.task().stage).toBe("merge");
       expect(getWorkflow(f.db, "T1")!.mode).toBe("manual");
       expect(f.notices.slice(before)).toHaveLength(1);
-      expect(f.notices.at(-1)).toContain("T1-remote-PR1600-r1");
+      expect(f.notices.at(-1)).toContain("T1-remote-PR7-r1");
     } finally { f.close(); }
   });
 
