@@ -4,8 +4,9 @@
  * task id). With the recovery key `mergeOwnerPriority` on, PRIO2 (`prioritySort`, entry merge_contest) re-orders the rest by the
  * owner's band and explicit order; same band and place keeps QUEUE1 age. Protected entries (repairs, admitted versions that already
  * own a live merge intent, e.g. a yielded run) never move and are never passed: a higher band only overtakes inside the stretch
- * between two protected entries. A version whose prerequisite cards are unfinished never wins the reordered pick (the planner
- * would only wait on it while the slot owner fence refuses its prerequisite: tests/merge-queue-owner-priority.test.ts).
+ * between two protected entries. The owner order never promotes a version whose prerequisite cards are unfinished past the legacy
+ * pick (the planner would only wait on it while the owner fence refuses its prerequisite); the legacy pick itself stays as it was,
+ * so prioritySort observe/off keeps the legacy outcome (tests/merge-queue-owner-priority.test.ts).
  * Key observe = legacy runs, the would-be pick is recorded; off = legacy, nothing else is read.
  */
 import type { Database } from "bun:sqlite";
@@ -56,19 +57,18 @@ export function ownerPriorityPick(db: Database, project: string, legacy: readonl
   const first = (list: readonly QueueEntry[]) => list.find(ok) ?? null;
   if (mode === "off") return { entry: first(legacy), why: null };
   const fixed = (e: QueueEntry) => repairs.has(e.taskId) || (inFlight(e) && ok(e));
-  const waiting = waitingOnDeps(db, project, legacy);
-  // No winner here (every admitted version still waits on a prerequisite) falls back to the legacy pick, never to an empty slot.
-  let fellBack = false;
-  const ranked = (list: readonly QueueEntry[]) => list.find((e) => ok(e) && (fixed(e) || !waiting.has(e.taskId))) ?? ((fellBack = true), first(legacy));
+  const waiting = waitingOnDeps(db, project, legacy), legacyChosen = first(legacy);
+  // The walk ends at the legacy pick at the latest: only a promotion is checked against prerequisites, never the legacy outcome.
+  const ranked = (list: readonly QueueEntry[]) => list.find((e) => ok(e) && (e === legacyChosen || fixed(e) || !waiting.has(e.taskId))) ?? null;
   const sort = sortByPriority(db, "merge_contest", legacy, (e) => ({ project, taskId: e.taskId }), { pinned: fixed, record: false, now });
-  const would = withinStretches(legacy, sort.would, fixed), legacyChosen = first(legacy), wouldChosen = ranked(would);
+  const would = withinStretches(legacy, sort.would, fixed), wouldChosen = ranked(would);
   const chosen = mode === "on" ? ranked(withinStretches(legacy, sort.applied, fixed)) : legacyChosen;
   if (mode === "on" && !override) {
     recordPrioritySort("merge_contest", { ranked: sort.ranked, would: would.map((e) => sort.rankOf(e)!) as Ranked<QueueEntry>[],
       opts: {}, now, ledger: db.filename, claim: { legacy: legacyChosen, would: wouldChosen, blocked: [] } });
   }
   const r = chosen ? sort.rankOf(chosen) : undefined;
-  if (mode !== "on" || fellBack || !r?.rank || r.mode !== "on" || r.pinned) return { entry: chosen, why: null };
+  if (mode !== "on" || chosen === legacyChosen || !r?.rank || r.mode !== "on" || r.pinned) return { entry: chosen, why: null };
   const place = r.rank.order === null ? "" : ` 第 ${r.rank.order + 1} 位`;
   return { entry: chosen, why: `owner 档位 ${r.rank.band}${place}，同档按队龄（保留在途与 yielded 队位）` };
 }

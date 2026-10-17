@@ -171,6 +171,22 @@ for (const key of ["on", "observe", "off"] as const) {
   }, 60_000);
 }
 
+for (const sort of ["on", "observe", "off"] as const) {
+  test(`[验收线 3][验收线 4] dependencies × prioritySort ${sort}: the legacy head waiting on a newer prerequisite only moves when the owner order is on`, async () => {
+    const outcome: Record<string, { pick?: string; reason: string; slot: string | null }> = {};
+    for (const key of ["off", "on"] as const) {
+      w?.close(); world({ mergeOwnerPriority: key }, sort); enqueue("CHILD", "later"); enqueue("PARENT", "now");
+      addDep(w.db, ctx(), { from: "PARENT", to: "CHILD", kind: "blocks", when: "PARENT 合并后" });
+      const p = pick();
+      await w.pass();
+      outcome[key] = { pick: p.entry?.taskId, reason: p.reason, slot: w.slot() };
+    }
+    expect(outcome.off).toMatchObject({ pick: "CHILD", reason: "最早有效版本（保留 yielded 队位）" });
+    if (sort === "on") expect(outcome.on).toMatchObject({ pick: "PARENT", reason: expect.stringContaining("owner 档位 now"), slot: "PARENT" });
+    else expect(outcome.on).toEqual(outcome.off);
+  }, 60_000);
+}
+
 test("[验收线 3] dependencies: when every admitted version waits on a prerequisite the legacy pick stands", () => {
   world(); enqueue("PRE", "later"); enqueue("CHILD", "now"); enqueue("NEXT", "now");
   insertEvent(w.db, { actor: "owner" }, { project: "p", target: "PRE", kind: "scheduler", data: { op: "workflow", hold: "暂缓" } }, false);
