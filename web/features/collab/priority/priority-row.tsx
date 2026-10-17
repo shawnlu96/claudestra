@@ -23,13 +23,13 @@ export function PriorityRow({ row, index, total, now, threshold, owner, writable
   const state = tr(states[row.state] ?? W.unknown);
   const source = tr(row.priority.source === 'explicit' ? W.sourceExplicit : row.priority.source === 'feature' ? W.sourceModule : W.sourceSystem);
   const reason = prioritySystemText(row.reason, states[row.state] ?? W.unknown, language);
-  const module = row.feature ?? row.priority.inheritedFrom ?? (row.featureId || (row.priority.source === 'feature' ? tr(W.unnamedModule) : tr(W.noModule)));
+  const moduleLabel = row.feature ?? row.priority.inheritedFrom ?? (row.featureId || (row.priority.source === 'feature' ? tr(W.unnamedModule) : tr(W.noModule)));
   const note = row.priority.source === 'system' ? prioritySystemText(row.priority.note ?? '', W.sourceSystem, language) : row.priority.note;
-  const sourceDetail = [module, note].filter(Boolean).join(' · ');
+  const sourceDetail = [moduleLabel, note].filter(Boolean).join(' · ');
   const stalled = row.since !== null && now - row.since > threshold;
   const choose = (op: PriorityChange['operation'], band?: PriorityBand) => { setMenu(false); void prepare(row, op, band); };
   return <article className={s.row} data-state={row.state} data-stalled={stalled}>
-    <button type="button" className={s.open} onClick={() => open(row)} title={tr(W.moduleTitle, { title: row.title, module })}>
+    <button type="button" className={s.open} onClick={() => open(row)} title={tr(W.moduleTitle, { title: row.title, module: moduleLabel })}>
       <span className={s.rank}>{index + 1}</span><span><strong>{row.title}</strong>
         <small>{row.taskId ? `${row.taskId} · ${tr(stageWord(row.stage))}` : tr(W.plannedNode, { key: row.nodeKey ?? '' })}</small></span>
     </button>

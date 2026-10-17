@@ -24,6 +24,7 @@ import { localFixOwner } from "./lend-fix-start.js";
 import { explicitLocal, LOCAL_LEASE_WAIT } from "./scheduler-local-pin.js";
 import { securityPoolObserved, securityReviewLocalOnly } from "./security-pool.js";
 import { privateRepoOf, privateReviewWait, privateSecurityConflict, privateWriteEscalation, privateWriteWait } from "./scheduler-foreign-repo.js";
+import { blockingLock, sharedOut, unionLanePlanMode } from "./union-lane-share.js";
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
 
@@ -34,9 +35,9 @@ function cardPin(extra: Record<string, unknown> | undefined): string | null {
 }
 
 function locksFree(s: PlannerSnapshot): boolean {
-  const mine = s.fileGlobs.map(resourceKey);
-  return !mine.includes(null) && !s.heldResources.some((h) => h.taskId !== s.task.id &&
-    mine.some((r) => resourcesOverlap(r as string, resourceKey(h.resource) ?? h.resource.toLowerCase())));
+  const mine = s.fileGlobs.map(resourceKey), mode = unionLanePlanMode(s);
+  return !mine.includes(null) && !blockingLock(s.task, s.heldResources.filter((h) => h.taskId !== s.task.id),
+    sharedOut(mine as string[], mode === "on"), (r, h) => resourcesOverlap(r, resourceKey(h.resource) ?? h.resource.toLowerCase()), mode);
 }
 
 export { peerFacts } from "./scheduler-agent-pool-peer.js";

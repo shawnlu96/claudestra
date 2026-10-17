@@ -2,13 +2,21 @@
  * 批量管理的入口权限：HTTP（bridge/local-api/fleet.ts）只给 owner 本人的全 scope manage 凭据；
  * CLI 的 ws 请求（bridge/fleet/ws.ts）只收升级时判定为直连回环的连接。状态目录由 tests/preload.ts 隔离到临时目录。
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { handleFleetWs } from "../src/bridge/fleet/ws.js";
 import { sseEventAllow } from "../src/bridge/ledger-feed.js";
 import { handleLocalApi, LOCAL_API_FEATURES } from "../src/bridge/local-api/index.js";
 import { effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
 import { NO_GRANT } from "../src/lib/fleet-plan.js";
 import { canRunFleet, type Principal } from "../src/lib/principals.js";
+import { REGISTRY_PATH } from "../src/lib/registry.js";
+
+// 断言按空 registry 写的；同一分片里先跑的文件可能留下 agent，这里自己清空、跑完还原
+const REG_BEFORE = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf8") : null;
+beforeAll(() => (mkdirSync(dirname(REGISTRY_PATH), { recursive: true }), writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: {} }))));
+afterAll(() => (REG_BEFORE === null ? rmSync(REGISTRY_PATH, { force: true }) : writeFileSync(REGISTRY_PATH, REG_BEFORE)));
 
 const at = "2026-09-29T00:00:00Z";
 const cred = (grant: Grant): DeviceCredential => ({ id: "dev_x", v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" });
