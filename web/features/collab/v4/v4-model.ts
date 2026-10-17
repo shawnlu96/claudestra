@@ -1,13 +1,13 @@
 /**
- * 协作视图 v4 除画布外的纯逻辑（docs/team/collab-view-v4.md）：顶部指标条、大纲筛选、手机分组、任务的因果线、项目概览的阶段计数。
+ * 协作视图 v4 除画布外的纯逻辑（docs/team/collab-view-v4.md）：指标、手机分组、任务的因果线、阶段计数。
  * 输入是台账总览（和 homeView 的结果）；在干活 / 在等 / 没开工 / 已完成四个词的数一律来自 count-words.ts（看板口径），这里不按阶段另推。
  * 单测 tests/web-collab-v4-model.test.ts。
  */
 import type { LedgerDepView, LedgerOverview, LedgerTaskView, Stage, Tr } from "../collab-model";
-import { restCount, restSum } from "@/lib/api/ledger-done";
-import { doneCount, type CountSnap } from "../count-words";
+import { restSum } from "@/lib/api/ledger-done";
+import type { CountSnap } from "../count-words";
 
-/** verified 也算完成：「已完成」筛选、大纲绿点、手机分组同一口径 */
+/** verified 也算完成：手机分组同一口径 */
 const TERMINAL: ReadonlySet<Stage> = new Set(["verified", "done", "cancelled"]);
 const PAST_REVIEW: ReadonlySet<Stage> = new Set(["merge", "live", "verified", "done"]);
 const open = (t: LedgerTaskView) => !TERMINAL.has(t.stage) && t.kind !== "ops";
@@ -40,41 +40,6 @@ export function metricsOf(ov: Pick<LedgerOverview, "tasks" | "doneRest" | "unkno
       + restSum(ov, (t) => PAST_REVIEW.has(t.stage), "p0p1"),
     avgReviewWaitMs: !unknown.has("reviewWait") && waits.length ? Math.round(waits.reduce((a, b) => a + b, 0) / waits.length) : null,
   };
-}
-
-export const FILTERS = ["active", "done", "all", "p0"] as const;
-export type Filter = (typeof FILTERS)[number];
-export const FILTER_LABEL: Record<Filter, string> = { active: "进行中", done: "已完成", all: "全部", p0: "P0" };
-/** 计数源没载完时这几枚芯片一起显示骨架、出数时一起出（CNTGATE1）：已完成 / 全部按总览算，团队总览逐轮增长，不能先出半截数；P0 不在闸门内 */
-export const GATED_FILTERS: ReadonlySet<Filter> = new Set<Filter>(["active", "done", "all"]);
-/** 一进来只看进行中（在干活 + 在等）的卡，规格排队和已结案的不挡眼 */
-export const DEFAULT_FILTER: Filter = "active";
-
-/**
- * 筛选芯片上的数：进行中 = 看板的在干活 + 在等（count-words.ts，和顶栏同一个数）；已完成同 doneCount；其余 = 总览里的 + 窗口外的。
- * 进行中在计数源没载完时为 null；大纲在没载完时对 GATED_FILTERS 一律出骨架，不调这里
- */
-export function filterCount(ov: Pick<LedgerOverview, "tasks" | "doneRest">, f: Filter, snap: CountSnap | null): number | null {
-  if (f === "active") return snap ? snap.words.working + snap.words.waiting : null;
-  if (f === "done") return doneCount(ov);
-  return ov.tasks.filter((t) => matchFilter(t, f, null)).length + restCount(ov, (t) => matchFilter(t, f, null));
-}
-
-/** active = 进行中的卡号（CountSnap.active）；还没有时进行中一张也不列 */
-export function matchFilter(t: LedgerTaskView, f: Filter, active: ReadonlySet<string> | null): boolean {
-  if (f === "active") return !!active?.has(t.id);
-  if (f === "all") return t.stage !== "cancelled";
-  if (f === "done") return t.stage === "done" || t.stage === "verified";
-  return (t.metrics?.p0 ?? 0) > 0 || (t.lastReview?.p0 ?? 0) > 0;
-}
-
-/** 大纲：事项 → 任务（按筛选），没归事项的放最后一组；空组不出 */
-export function outlineOf(ov: Pick<LedgerOverview, "tasks" | "items">, f: Filter, active: ReadonlySet<string> | null = null): { id: string | null; title: string; tasks: LedgerTaskView[] }[] {
-  const known = new Set(ov.items.map((i) => i.id));
-  const groups = [...ov.items.map((i) => ({ id: i.id as string | null, title: i.title })), { id: null, title: "" }];
-  return groups
-    .map((g) => ({ ...g, tasks: ov.tasks.filter((t) => matchFilter(t, f, active) && (g.id ? t.itemId === g.id : !t.itemId || !known.has(t.itemId))) }))
-    .filter((g) => g.tasks.length > 0);
 }
 
 /** 手机：可执行 / 在跑 → 在等 → 今日完成 */

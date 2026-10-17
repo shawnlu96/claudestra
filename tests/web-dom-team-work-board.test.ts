@@ -120,7 +120,7 @@ async function until(ok: () => boolean, what: string, read: () => string) {
   throw new Error(`timeout waiting for ${what}: ${read().slice(0, 600)}`);
 }
 
-/** 打开团队视图的「谁在干活」，等到列表出现并多等几轮（让该发 / 不该发的请求都有机会发出） */
+/** 打开团队视图的「谁在干活」（PROJTABS1：「模块进度」里的「按人」），等到列表出现并多等几轮（让该发 / 不该发的请求都有机会发出） */
 async function workTab(identity: Identity) {
   localInstance = identity.homeInstanceId ?? "";
   (globalThis as unknown as { window: Win }).window.happyDOM.setViewport({ width: 1200, height: 900 });
@@ -132,10 +132,12 @@ async function workTab(identity: Identity) {
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null,
     h(ui.TeamSource, { identity }, h(ui.CollabView, { project: ui.sharedCollabProject(identity) }))) as never));
   const text = () => host.textContent ?? "";
-  await until(() => text().includes("开发中的卡") || text().includes("对照事项 parity"), "team view", text);
-  const tab = () => Array.from(host.querySelectorAll("button,[role=tab]")).find((x) => (x.textContent ?? "").trim().startsWith("谁在干活"));
-  await until(() => !!tab(), "work tab", text);
-  await React.act(async () => tab()!.click());
+  // 同一项目会记住上次的标签（project-tabs/tab-request.ts），不一定落在总览：等到标签条出来就点「模块进度」
+  const tab = (label: string) => Array.from(host.querySelectorAll("button,[role=tab]")).find((x) => (x.textContent ?? "").trim() === label);
+  await until(() => !!tab("模块进度"), "team view", text);
+  await React.act(async () => tab("模块进度")!.click());
+  const person = tab("按人");
+  if (person) await React.act(async () => person.click());
   const board = () => host.querySelector("[data-work-board=team]");
   const column = (label: string) => Array.from(board()?.querySelectorAll("section") ?? []).find((s) => (s.querySelector("h3")?.textContent ?? "").startsWith(label));
   await until(() => (column("在等合并")?.textContent ?? "").includes("M1"), "work board", () => board()?.textContent ?? text());

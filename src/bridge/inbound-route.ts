@@ -1,5 +1,5 @@
 /**
- * 入站路由的运行时（判定规则在 lib/inbound-route.ts）：开关、取数（忙闲 / 在做什么 / 排队摘要）、调 Jev、观察日志。
+ * 入站路由的运行时（判定规则在 lib/inbound-route.ts）：开关、取数（忙闲 / 在做什么 / 排队摘要 / 目标运行时插不插得进）、调 Jev、观察日志。
  * deliverToLocal 在抢占之前调 routeInbound 一次：开关 on 且 Jev 判得出来，结论记在信封上（meta.inboundRoute，随押后队列落盘），
  * 之后 deliverToLocal / held-flush / check_inbox 都经下面几个绑好开关的判定读它；observe 只记日志、不等 Jev、不改投递。
  * Chat Guard 开着时路由问题并进守门那一次 Jev 请求（routeProbeFor），不另发。单测 tests/inbound-route-*.test.ts；设计 docs/architecture/inbound-route.md
@@ -11,12 +11,15 @@ import { statePath } from "../lib/paths.js";
 import { ownerStopOf } from "../lib/stop-words.js";
 import { holdsUntilIdle, type TurnState } from "../lib/turn-state.js";
 import {
-  admitsWhileBusy, buildRouteState, decideRoute, holdsWhileBusy, mergeDue, mergeOrder, parseRouteMode, pullable, QUEUE_KEEP, queueEntry, ROUTE_TIMEOUT_MS, routeEligible,
-  routeQuestions, routeRole, ruleAction, senderName, type QueueEntry, type RouteEnv, type RouteMode,
+  admitsWhileBusy, buildRouteState, decideRoute, holdsWhileBusy, insertsWhileBusy, insertVia, mayInsert, mergeDue, mergeOrder, parseRouteMode, pullable, QUEUE_KEEP, queueEntry,
+  ROUTE_TIMEOUT_MS, routeEligible, routeQuestions, routeRole, ruleAction, senderName, type InsertVia, type QueueEntry, type RouteEnv, type RouteMode,
 } from "../lib/inbound-route.js";
+import { controlFor } from "../lib/runtimes/index.js";
+import { readRegistryAgents } from "../lib/registry.js";
+import { noteInsert } from "./steer-insert.js";
 import { isHeldIdleCarrier } from "../lib/held-idle-batch.js";
 import { heldAgentBatchOn, isAgentBatchable } from "../lib/held-agent-batch.js";
-import { leaseActive, type HeldItem } from "./held-queue.js";
+import { leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
 import { isHumanRequest, type Envelope, type LocalEndpoint } from "./router.js";
 import { turnBrief } from "./turn-brief.js";
 import { probeTurn, resolveTurnWindow } from "./turn-probe.js";
@@ -32,6 +35,13 @@ interface Deps {
   /** 这个频道押着的消息（排队摘要）；没接线 = 空 */
   queue: (channelId: string) => readonly HeldItem[] | undefined;
   doing: (agent: string, channelId: string) => Promise<string>;
+  /**
+   * 目标运行时的插法（RuntimeControl.insertVia）。declared = 只是声明值、bridge 核实不了：ACP 宿主支不支持 steering 只有宿主自己知道
+   * （不支持时它原位改回 prompt，不丢），日志记 steer(declared)
+   */
+  insertDecl: (channelId: string) => Promise<{ via?: "steer"; declared?: boolean }>;
+  /** 发送方频道是不是 registry 里登记着的 agent（插队只给它们） */
+  senderRegistered: (channelId: string) => Promise<boolean>;
   readMode: () => RouteMode;
   log: (entry: Record<string, unknown>) => void;
   now: () => number;
@@ -42,6 +52,11 @@ let deps: Deps = {
   probe: (ch, agent) => probeTurn(ch, agent, control()),
   queue: () => undefined,
   doing: async (agent, ch) => turnBrief(agent, ch, (await resolveTurnWindow(ch, control())).runtime),
+  insertDecl: async (ch) => {
+    const w = await resolveTurnWindow(ch, control());
+    return { via: controlFor(w.runtime, w.transport).insertVia, declared: w.transport === "acp" };
+  },
+  senderRegistered: async (ch) => (await readRegistryAgents()).some((a) => a.channelId === ch && a.status === "active"),
   readMode: () => parseRouteMode(readConfigSync().inboundRoute?.mode),
   log: (e) => void appendLogLine(ROUTE_LOG_PATH, JSON.stringify(e)),
   now: () => Date.now(),
@@ -71,9 +86,25 @@ function routeMode(): RouteMode {
 // ── 三处共用的判定，绑好当前档位 ─────────────────────────────────────────────
 type Human = (env: Envelope) => boolean;
 export const routeAdmitsWhileBusy = (env: Envelope, human: Human = isHumanRequest): boolean => admitsWhileBusy(env, routeMode(), human as (e: RouteEnv) => boolean);
-/** deliverToLocal 的押后判据：原有规则（压缩中 / agent 消息忙时）之外，Jev 判了排队 / 合并的忙时也押 */
-export const routeHolds = (env: Envelope, turn: TurnState): boolean =>
-  holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn) || (turn.main === "busy" && holdsWhileBusy(env, routeMode()));
+/** deliverToLocal 的押后判据：原有规则（压缩中 / agent 消息忙时）之外，Jev 判了排队 / 合并的忙时也押；判了 insert 的忙时不押、直接送进回合（压缩中照押） */
+export const routeHolds = (env: Envelope, turn: TurnState): boolean => {
+  if (turn.main === "busy" && insertsWhileBusy(env, routeMode())) return false;
+  return holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn) || (turn.main === "busy" && holdsWhileBusy(env, routeMode()));
+};
+/**
+ * 回合中插队 ws.send 之后（bridge.ts deliverToLocal 一行）：没送到（回 0 = 连接已断、这条被丢了）→ 退回押后队列，回合结束 / 重连后照常投，
+ * 返回 true = 已押回；送到了 → 记一笔「没确认」：目标明确回给插队方之前不把它别的输出当答复（bridge/steer-insert.ts）。
+ * 只管 insert 这条路——改动前 agent 消息忙时根本不 ws.send，空闲投递的老行为不动
+ */
+export function afterInsertSend(env: Envelope, turn: TurnState, sent: unknown, held: Pick<HeldQueue, "holdEnv">): boolean {
+  if (turn.main !== "busy" || !insertsWhileBusy(env, routeMode())) return false;
+  if (sent === 0) {
+    console.warn(`⚠️ 入站路由：插队送出失败（连接已断），${env.meta.messageId} 退回押后队列，${held.holdEnv(env)} 条`);
+    return true;
+  }
+  noteInsert(env, (env.to as LocalEndpoint).channelId);
+  return false;
+}
 export const routeOrder = <T extends HeldItem>(items: readonly T[]): T[] => mergeOrder(items, routeMode());
 /** 押满时限放出：判了排队 / 合并的结论记成「回合中直接送、不抢占」（没有结论的不动，按原规则） */
 export function routeRelease(env: Envelope): void {
@@ -115,35 +146,57 @@ export async function routeProbeFor(env: Envelope, to: LocalEndpoint, agent: str
   const { entries } = queueOf(to.channelId, env);
   const doing = await deps.doing(agent, to.channelId).catch((e: Error) => (console.warn(`⚠️ 入站路由：取「在做什么」失败，按不知道: ${e.message}`), ""));
   const actual = ruleAction(isHumanRequest(env), holdsUntilIdle(env.from.kind, env.meta.waitForIdle, turn));
+  const role = routeRole(env);
+  const ins = await insertCtx(env, to.channelId);
   let settled = false;
-  const base = { msg: env.meta.messageId, agent, from: senderName(env.from), role: routeRole(env), preview: env.content.slice(0, PREVIEW), queued: entries.length, rule: actual };
+  const base = { msg: env.meta.messageId, agent, from: senderName(env.from), role, preview: env.content.slice(0, PREVIEW), queued: entries.length, rule: actual };
   return {
     state: buildRouteState({ env, agent, doing, queue: entries }),
-    questions: routeQuestions(entries.length),
+    questions: routeQuestions(entries.length, ins.agentSender),
     settle: (answers, info) => {
       if (settled) return; // 守门那次拿到答案后自己判定又抛错，会再报一次失败：只认第一次
       settled = true;
-      settle(env, mode, entries, answers, { ...base, via: info.via, ms: info.ms, ...(info.error ? { error: info.error } : {}) });
+      settle(env, mode, { entries, ...ins }, answers, { ...base, via: info.via, ms: info.ms, ...(info.error ? { error: info.error } : {}) });
     },
   };
 }
 
-function settle(env: Envelope, mode: RouteMode, entries: QueueEntry[], answers: Record<string, unknown> | null, base: Record<string, unknown>): void {
+interface InsertCtx { insert: InsertVia; agentSender: boolean; senderQueued: boolean; declared?: boolean }
+/**
+ * 插队的前提：发送方是登记过的本机 agent（才给 Jev 这个选项）、目标运行时插得进（取不到按插不进：insert 退成排队，就是改动前的行为）、
+ * 同一发送方在这个目标的押后队列里没有排着的（不然后发的先到）
+ */
+async function insertCtx(env: Envelope, target: string): Promise<InsertCtx> {
+  const warn = (what: string) => (e: Error) => (console.warn(`⚠️ 入站路由：${what}失败，按不能插队: ${e.message}`), undefined);
+  const ch = env.from.kind === "local" ? env.from.channelId : "";
+  const agentSender = mayInsert(env) && !!(await deps.senderRegistered(ch).catch(warn("查发送方登记")));
+  if (!agentSender) return { insert: null, agentSender, senderQueued: false };
+  const senderQueued = (deps.queue(target) ?? []).some((i) => i.env.from.kind === "local" && i.env.from.channelId === ch);
+  const decl = await deps.insertDecl(target).catch(warn("取目标运行时"));
+  return { insert: insertVia(decl?.via), agentSender, senderQueued, declared: decl?.declared };
+}
+
+function settle(env: Envelope, mode: RouteMode, ctx: { entries: QueueEntry[] } & InsertCtx, answers: Record<string, unknown> | null, base: Record<string, unknown>): void {
   const ts = new Date(deps.now()).toISOString();
   if (!answers) return deps.log({ ts, mode, ...base, jev: "error", actual: base.rule });
   let d: ReturnType<typeof decideRoute>;
   try {
-    d = decideRoute(answers, { env, queue: entries });
+    d = decideRoute(answers, { env, queue: ctx.entries, insert: ctx.insert, agentSender: ctx.agentSender, senderQueued: ctx.senderQueued });
   } catch (e) {
     return deps.log({ ts, mode, ...base, jev: "error", error: (e as Error).message, actual: base.rule });
   }
   if (!d.ok) return deps.log({ ts, mode, ...base, jev: "unsure", actual: base.rule });
   const applied = mode === "on";
   if (applied) env.meta.inboundRoute = d.route;
-  deps.log({ ts, mode, ...base, jev: d.route.action, p: +d.route.p.toFixed(2), ...(d.route.mergeWith ? { mergeWith: d.route.mergeWith } : {}),
-    ...(d.downgraded ? { downgraded: d.downgraded } : {}), actual: applied ? d.route.action : base.rule });
+  // pick = Jev 原本选的、jev = 代码兜底之后的结论；插队相关的行带 insertVia（目标运行时怎么插 / none = 插不进），对照报表用
+  const pick = (answers.route_action as { choice?: string }).choice;
+  const aboutInsert = pick === "insert" || d.route.action === "insert" || (pick === "interrupt" && d.downgraded === "not_owner");
+  deps.log({ ts, mode, ...base, pick, jev: d.route.action, p: +d.route.p.toFixed(2), ...(d.route.mergeWith ? { mergeWith: d.route.mergeWith } : {}),
+    ...(d.downgraded ? { downgraded: d.downgraded } : {}), ...(aboutInsert ? { insertVia: insertLabel(ctx) } : {}), actual: applied ? d.route.action : base.rule });
   if (applied) console.log(`🧭 入站路由：${base.agent} 忙，${base.from} 的消息（${env.meta.messageId}）按 Jev 判 ${d.route.action}${d.downgraded ? `（代码兜底：${d.downgraded}）` : ""}`);
 }
+
+const insertLabel = (c: InsertCtx): string => (!c.insert ? "none" : c.declared ? `${c.insert}(declared)` : c.insert);
 
 async function askSolo(p: RouteProbe): Promise<void> {
   const t0 = deps.now();

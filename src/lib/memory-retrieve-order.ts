@@ -41,6 +41,8 @@ interface RetrievedItem {
 }
 
 export interface RetrieveOpts {
+  /** 本次出借准备隔离于已登记排名，observe 不能给后续领取填缓存。 */
+  isolated?: boolean;
   now?: number;
   /** 仅最终领取入口启用；预检与全文拼单不能冒充已领取。 */
   recordInjection?: boolean;
@@ -142,6 +144,7 @@ function registerRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind
 // ── 异步一半：语义路 ──
 
 export interface EnsureDeps {
+  isolated?: boolean;
   /** 不给 = 按 config.json memory.embed 取第一个可用的；null = 关掉语义路 */
   embedder?: Embedder | null;
   /** 向量库连接；不给 = 打开本机 memory-vectors.sqlite（用完关） */
@@ -191,10 +194,13 @@ async function semanticInputs(db: Database, task: LedgerTask, cands: readonly Ca
     // 全部批次共用截止时间，避免大候选池把每批超时累加成数分钟。
     const deadline = Date.now() + (deps.timeoutMs ?? EMBED_TIMEOUT_MS);
     for (let at = 0; at < sources.length && Date.now() < deadline; at += 16) {
-      await refreshVectors(vdb, embedder, sources.slice(at, at + 16), { now: deps.now, timeoutMs: Math.max(1, deadline - Date.now()) });
+      const result = await refreshVectors(vdb, embedder, sources.slice(at, at + 16), { now: deps.now, timeoutMs: Math.max(1, deadline - Date.now()) });
+      if (deps.throwOnError && result.failed) throw new Error("记忆嵌入失败或超时");
     }
+    if (deps.throwOnError && Date.now() >= deadline) throw new Error("记忆语义准备超时");
     const vector = Date.now() >= deadline ? [] : await semanticSearch(vdb, embedder, { text: queryText(db, task), visibility: "home" }, {
-      candidates: new Map(sources.map((s) => [s.id, s.digest])), threshold: VECTOR_THRESHOLD, limit: VECTOR_LIMIT, timeoutMs: Math.max(1, deadline - Date.now()),
+      candidates: new Map(sources.map((s) => [s.id, s.digest])), threshold: VECTOR_THRESHOLD, limit: VECTOR_LIMIT,
+      timeoutMs: Math.max(1, deadline - Date.now()), throwOnError: deps.throwOnError,
     });
     return { vector, pairCosine: pairCosines(vdb, embedder.model, cands) };
   } finally {
@@ -233,7 +239,7 @@ async function prepareRetrieval(db: Database, task: LedgerTask, kind: MemoryOrde
  */
 export async function retrievalInputs(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, deps: EnsureDeps = {}): Promise<RetrieveOpts> {
   const key = rankKey(task, head, kind, deps.visibility);
-  if (getEventByDedup(db, `${key}:prepared`) ?? getEventByDedup(db, `${key}:fallback`)) return {};
+  if (!deps.isolated && (getEventByDedup(db, `${key}:prepared`) ?? getEventByDedup(db, `${key}:fallback`))) return {};
   const cands = candidatesOf(db, task, deps.visibility);
   if (!cands.length) return {};
   const headFiles = deps.headFiles !== undefined ? deps.headFiles : await memoryHeadFiles(db, task, head, deps.repoDir);
@@ -297,7 +303,7 @@ type RetrievalRanking = Pick<LedgerEvent, "data"> & { seq?: number };
 /** 优先取异步排名；预览 cache miss 只在内存算，不开写连接或事务。 */
 function rankedEvent(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts, persist = false): RetrievalRanking | null {
   const key = rankKey(task, head, kind, opts.visibility);
-  const cached = getEventByDedup(db, `${key}:prepared`) ?? getEventByDedup(db, `${key}:fallback`);
+  const cached = opts.isolated ? null : getEventByDedup(db, `${key}:prepared`) ?? getEventByDedup(db, `${key}:fallback`);
   if (cached) return cached;
   if (persist) return registerRetrieval(db, task, kind, head, opts);
   const data = retrievalData(db, task, kind, head, opts);
@@ -367,11 +373,11 @@ export function fitMemory<W extends { inputs: string[] }>(db: Database, task: Le
 
 /** 单子实际写进 / 发出之后才调：按现有口径记一条推出（同一实际报文去重）。永不抛。 */
 export function recordMemoryInjection<W>(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, fit: MemoryFit<W>,
-  sent: unknown, channel: MemoryChannel, now = Date.now(), visibility?: MemoryVisibility): void {
+  sent: unknown, channel: MemoryChannel, now = Date.now(), visibility?: MemoryVisibility, rankingSuffix = "fallback"): void {
   try {
     // 现算没登记的排名（fitMemory persist = false）：发出去之后才把那份排名原样登记成 fallback，推出事件指向它
     const ranking = fit.ranking && fit.ranking.seq === undefined
-      ? record(db, task, `${rankKey(task, head, kind, visibility)}:fallback`, `项目记忆排名：${fit.ids.length} 条`, fit.ranking.data, now) : fit.ranking;
+      ? record(db, task, `${rankKey(task, head, kind, visibility)}:${rankingSuffix}`, `项目记忆排名：${fit.ids.length} 条`, fit.ranking.data, now) : fit.ranking;
     recordInjection(db, task, kind, head, ranking, fit.ids, sent, now, channel);
   }
   catch (e) { console.error(`⚠️ ${task.id} 项目记忆推出没记上：${(e as Error).message}`); }

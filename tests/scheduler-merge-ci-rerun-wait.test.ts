@@ -7,6 +7,12 @@ import { afterEach, beforeEach, describe, expect, spyOn, test, type Mock } from 
 import { addKnownFlaky, setKnownFlakyModeSource } from "../src/lib/ci-known-flaky.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { assertIn, BOUNCED, BROKEN, HEAD, NOTHING, RUN, SLOW, TIMEOUT_ONLY, WAITING, withWaitCard, type WaitCard } from "./scheduler-merge-ci-rerun-wait-kit.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 let errors: Mock<typeof console.error>;
 beforeEach(() => { errors = spyOn(console, "error").mockImplementation(() => {}); });

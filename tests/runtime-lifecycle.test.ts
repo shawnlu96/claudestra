@@ -300,6 +300,7 @@ describe("control 声明", () => {
     expect(controlFor("pi")).toEqual({
       interruptKeys: ["C-c"],
       preemptOnHumanMessage: false,
+      insertVia: "steer",
       idleSource: "hook",
       modelEnforcement: "launch-flag",
       paneHeuristics: false,

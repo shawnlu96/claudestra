@@ -15,6 +15,7 @@
  * 同样 15 分钟按默认定、追加「自动定」一节；精准例外命中的不等 15 分钟、不通知 PM，下一次扫描就结案。结论转告执行者：远端经 deps.tell，
  * 本机执行者经 deps.notify（blocker 的执行者在等）；每次自动定 / 自动答卡上记一条 note（op ask_default_all）。是否 defaultAll 只在开出时按档位定，
  * 扫描不再看档位；标了 risk 的、开出时记了 extra.held（risk / security 模板）的永远不在这里定——ASK4 测试类扩围同样不批。tests/order-ask-default-all.test.ts。
+ * ASKSCOPE3：开出时定了快路（extra.testScopeFast，order-ask-test-scope.ts）的测试类扩围不补投 PM、不等 15 分钟，下一次扫描就批，卡上记 op ask_scope_tests。
  */
 import type { Database } from "bun:sqlite";
 import type { CallerIdentity } from "./caller-identity.js";
@@ -25,8 +26,10 @@ import { appendDefaultSpec, prepareDefaultSpec, SpecBusy, SpecReplan, testScopeF
 import type { PmNoticeLevel } from "./pm-notice-level.js";
 import { askNoticeText, specExceptionAnswer } from "./order-ask.js";
 import { agentName, isPmParentAsk, pmStandsFor } from "./order-ask-pm-reply.js";
-import { ASK_SCOPE_REASONS, type AskScopeReason } from "./order-wire.js";
+import { isTestScopeAsk, isTestScopeFast, noteTestScopeFast, testScopeWhy } from "./order-ask-test-scope.js";
 import { quoteExternal } from "./quote-text.js";
+
+export { isTestScopeAsk };
 
 export const ASK_DEFAULT_MS = 15 * 60_000;
 /** 追加连续失败这么多次（每分钟一次）就投递给 PM 一次，之后退避重试（翻倍，最长一小时）：任务一直留着，文件恢复了就补上 */
@@ -50,23 +53,6 @@ const TELL_TRIES = 10;
 const isDefaultAsk = (a: Ask): boolean => a.extra.via === "mcp_ask" && a.blocking === false &&
   (a.extra.class === "design" || a.extra.class === "scope") && typeof a.extra.default === "string" && !!a.extra.default.trim();
 
-/** 远端出借写单（本机台账 lend_orders 那一行的 step）；本机的单 = null */
-function lendStepOf(db: Database, orderId: string): string | null {
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_orders'").get()) return null;
-  return (db.query("SELECT step FROM lend_orders WHERE orderId = ?").get(orderId) as { step: string } | null)?.step ?? null;
-}
-
-const isTestFile = (f: unknown): boolean => typeof f === "string" && f.startsWith("tests/") && !f.split("/").some((s) => s === ".." || s === "." || !s);
-
-/** i28-ASK4：远端写单上、files 全在 tests/、reason 合法的提问（ASK2 的本机默认做法提问另走 isDefaultAsk） */
-export function isTestScopeAsk(db: Database, a: Ask): boolean {
-  const files = a.extra.files;
-  if (a.extra.via !== "mcp_ask" || a.blocking === false || a.extra.class === "design" || !a.taskId) return false;
-  if (!Array.isArray(files) || !files.length || !files.every(isTestFile)) return false;
-  if (!ASK_SCOPE_REASONS.includes(a.extra.reason as AskScopeReason)) return false;
-  return ["write", "fix"].includes(lendStepOf(db, String(a.extra.orderId ?? "")) ?? "");
-}
-
 /** ASKDEF1：askDefaultAll=on 时开出的扩围提问；标了 risk 的不算（开出时已不会标 defaultAll，这里再挡一次） */
 const isDefaultAllAsk = (a: Ask): boolean => a.extra.via === "mcp_ask" && a.extra.defaultAll === true && !a.extra.risk &&
   (Array.isArray(a.extra.specException) ? a.extra.specException.length > 0 : typeof a.extra.default === "string" && !!a.extra.default.trim());
@@ -86,7 +72,7 @@ function addTestGlobs(db: Database, a: Ask, now: number): void {
 }
 
 const tellText = (a: Ask): string => testScopeFiles(a)
-  ? `【自动定】${a.taskId} 你的提问（ask ${a.id}）PM 15 分钟没回，测试类扩围已自动批准：`
+  ? `【自动定】${a.taskId} 你的提问（ask ${a.id}）${testScopeWhy(a)}测试类扩围已自动批准：`
     + `${(testScopeFiles(a) ?? []).join("、")} 已追加进本卡范围（fileGlobs），规格末尾追加了「自动定」一节。照常继续，交付报告里写明。`
   : isExceptionAsk(a)
     ? `【自动答】${a.taskId} 你的提问（ask ${a.id}）：${specExceptionAnswer((a.extra.specException as unknown[]).map(String))}。`
@@ -137,9 +123,10 @@ function closeIfDue(db: Database, id: string, now: number): Ask | null {
     const all = isDefaultAllAsk(cur), exception = isExceptionAsk(cur);
     if (!scope && !all && !isDefaultAsk(cur) && cur.extra.autoScope !== true) return null;
     // 精准例外命中：开出时就没通知 PM，不等 15 分钟
-    const due = exception || (cur.extra.notice === "handed" && clockOf(cur) + ASK_DEFAULT_MS <= now);
+    const due = exception || (scope && isTestScopeFast(cur)) || (cur.extra.notice === "handed" && clockOf(cur) + ASK_DEFAULT_MS <= now);
     if (cur.state === "open" && due) {
       if (scope) addTestGlobs(db, cur, now);
+      if (scope) noteTestScopeFast(db, cur, now);
       const files = exception ? (cur.extra.specException as unknown[]).map(String) : [];
       answerAsk(db, id, { choices: [], labels: [], text: scope ? "测试类扩围自动批准（文件全在 tests/）" : exception ? specExceptionAnswer(files) : "按执行者默认做法定",
         principal: "system:ask-default", via: "terminal", at: now, final: true });
@@ -212,7 +199,7 @@ export async function sweepAskDefaults(db: Database, now = Date.now(), deps: Swe
   for (const { id } of rows) {
     try {
       const open = getAsk(db, id);
-      if (deps.notify && open?.state === "open" && autoAsk(db, open) && !isExceptionAsk(open) && open.extra.notice !== "handed") await renotify(db, open, deps.notify, now);
+      if (deps.notify && open?.state === "open" && autoAsk(db, open) && !isExceptionAsk(open) && open.extra.notice !== "handed" && !isTestScopeFast(open)) await renotify(db, open, deps.notify, now);
       const a = closeIfDue(db, id, now);
       await tellIfPending(db, id, deps, now);
       if (!a) {

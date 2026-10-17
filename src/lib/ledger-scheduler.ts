@@ -5,8 +5,10 @@ import { currentHandler } from "./ledger-handler.js";
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 
-export const WORKFLOW_TEMPLATES = ["code", "ui", "security"] as const;
-export type WorkflowTemplate = (typeof WORKFLOW_TEMPLATES)[number];
+const BUILTIN_TEMPLATES = ["code", "ui", "security"] as const;
+export type WorkflowTemplate = (typeof BUILTIN_TEMPLATES)[number];
+/** 认得的流程模板；新模板由新模块经 scheduler-template.ts registerFlowTemplate 在运行时追加（TIER3e docs），这里只放内建三种 */
+export const WORKFLOW_TEMPLATES: readonly WorkflowTemplate[] = [...BUILTIN_TEMPLATES];
 export const WORKFLOW_MODES = ["manual", "observe", "auto"] as const;
 export type WorkflowMode = (typeof WORKFLOW_MODES)[number];
 export const AUTHOR_FAMILIES = ["claude", "codex"] as const;

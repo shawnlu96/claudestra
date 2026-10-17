@@ -22,6 +22,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-author-retire-checkout.ts": "vcs=3",
     "lend-fix-reassign-pr.ts": "proc=1 vcs=4",
     "lend-git.ts": "vcs=1",
+    "peer-pr-auto-verify.ts": "ledger=1",
     "pm-handback-verify.ts": "ledger=2", // PMHAND1: the deploy tick's resolved-done verify (dry-run + verify), per card under pace.skipTask / schedulerV2SkipTask
     "pool-review-proof-raw.ts": "fs=2",
     "private-merge-gh.ts": "vcs=6", // MERGEAUTO1: the merge driver's private-repo gh reads + head-pinned merge, under the merge tick's skipTask
@@ -114,7 +115,9 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-service.ts": "ledger=6 proc=1",
     "scheduler-spec-resume.ts": "ledger=3",
     "scheduler-spec-wait.ts": "ledger=1 stmt=1",
+    "scheduler-start-gap.ts": "ledger=2", // RESTATEGO1: `ledger scheduler-recovery-observe` / `scheduler-pm-todo` for start-gap notes, through the pass manager
     "scheduler-ui-evidence-notice.ts": "ledger=1", // UIEVID2: `ledger scheduler-ui-evidence-redo` through the pass manager, from auto-tick before the PM screenshot notice
+    "worker-submit-confirm.ts": "ledger=2", // RESTATEGO1: resend / escalation notes and the PM todo, through the pass manager
   },
   /** a ≤3-line S2D2 hook (or the module the hooked step drives) skips the card before the effect */
   hook: {

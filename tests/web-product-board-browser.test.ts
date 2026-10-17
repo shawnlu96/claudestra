@@ -11,6 +11,9 @@ const enabled = !!out;
 const snapshot = board(product.features.map(f => dagFeature(f.id, f.hasDag ? [node('A', 'done'), node('B', 'active', ['A'], { since: Date.UTC(2026, 9, 1, 23) }), node('C', 'idle', ['B'])] : [],
   { title: f.title, status: f.status, currentVersion: f.version })));
 
+/** 桌面项目地图单击只选中（PDFOCUS1），双击才进子 DAG；手机列表照旧单击 */
+const enter = (target: ReturnType<Page['locator']>, desktop: boolean) => (desktop ? target.dblclick() : target.click());
+
 async function baseline(path: string) {
   const p = Bun.spawn(['git', 'show', `1307554e:${path}`], { stdout: 'pipe', stderr: 'pipe' });
   const source = await new Response(p.stdout).text();
@@ -123,7 +126,7 @@ test.skipIf(!enabled)('crowded phone cards keep visible titles and desktop card 
       }
       await noOverflow(page);
       await page.screenshot({ path: resolve(out, `pd2b-${theme}-${width}-product.png`) });
-      await page.getByRole('button', { name: /^调度与自动派单/ }).click();
+      await enter(page.getByRole('button', { name: /^调度与自动派单/ }), width > 390);
       await page.getByRole('navigation').getByText('调度与自动派单', { exact: true }).waitFor();
       await page.locator('button[title="做 B"]').waitFor();
       expect(await page.getByText('产品与团队视图', { exact: true }).count()).toBe(0);
@@ -167,13 +170,13 @@ test.skipIf(!enabled)('product and sub-DAG before/after light/dark at 390/1400, 
             if (wide) expect(await page.locator("[data-pd-chip='done:base']").count()).toBe(1);
             await fold.click();
             expect(await page.getByRole('tab', { name: '谁在干活' }).count()).toBe(1);
-            await page.getByRole('button', { name: /调度与自动派单/ }).click();
+            await enter(page.getByRole('button', { name: /调度与自动派单/ }), wide);
             await page.getByRole('navigation').getByRole('button', { name: '产品 DAG' }).waitFor();
             expect(await page.getByText('产品与团队视图', { exact: true }).count()).toBe(0);
             await noOverflow(page);
             await page.screenshot({ path: resolve(out, `after-${theme}-${width}-subdag.png`) });
             await page.getByRole('navigation').getByRole('button').click();
-            await page.getByRole('button', { name: /下一步探索/ }).click();
+            await enter(page.getByRole('button', { name: /下一步探索/ }), wide);
             await page.getByText('还没有子 DAG').waitFor();
             await page.screenshot({ path: resolve(out, `after-${theme}-${width}-cards.png`) });
             await page.getByRole('button', { name: /验证新产品方向/ }).click();
@@ -213,7 +216,7 @@ test.skipIf(!enabled)('DAG read failure falls back, backs off, refreshes on rev 
       await page.evaluate(`document.documentElement.dataset.theme = '${theme}'`);
       await page.getByRole('button', { name: /调度与自动派单/ }).waitFor();
       await waitCalls(() => calls, 1);
-      await page.getByRole('button', { name: /调度与自动派单/ }).click();
+      await enter(page.getByRole('button', { name: /调度与自动派单/ }), width > 390);
       await page.getByTestId('legacy-view').waitFor();
       await page.getByText('推进产品视图', { exact: true }).waitFor();
       await page.clock.runFor(200);

@@ -21,7 +21,7 @@ import type { Principal } from "../src/lib/principals.js";
 import { homeView, type LedgerOverview, type LedgerTaskView } from "../web/features/collab/collab-model";
 import { stepLineView } from "../web/features/collab/collab-step-line-model";
 import { causalCanvas } from "../web/features/collab/v4/causal-model";
-import { filterCount, FILTERS, metricsOf, stageCounts } from "../web/features/collab/v4/v4-model";
+import { metricsOf, stageCounts } from "../web/features/collab/v4/v4-model";
 import { countSnap, type CountBoard } from "../web/features/collab/count-words";
 import { chainLoadMore, chainOnOverview, chainOnPage, newChain, type DoneChain } from "../web/lib/api/ledger-done";
 import { seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
@@ -307,7 +307,7 @@ describe("GET /ledger/:project/done", () => {
 const asWire = (v: object) => JSON.parse(JSON.stringify({ exists: true, now: NOW, ...v })) as LedgerOverview;
 
 describe("网页：窗口 + doneRest 和全量一致", () => {
-  test("筛选芯片、指标条、阶段列、画布框角 ✓ N 和老 bridge 的全量总览算出来一样", () => {
+  test("指标、阶段列、画布框角 ✓ N 和老 bridge 的全量总览算出来一样", () => {
     const db = fixture(300);
     const view = projectView(db, "p", NOW);
     const rest = donePage(db, "p", null, 10_000, NOW).tasks.filter((t) => !view.tasks.some((x) => x.id === t.id));
@@ -318,7 +318,6 @@ describe("网页：窗口 + doneRest 和全量一致", () => {
     // 同一份看板（没结束的卡都在「在干活」）：各阶段 / 进行中 / 已完成按卡阶段与窗口外 doneRest 数，窗口与全量必须一样
     const board: CountBoard = { working: full.tasks.filter((t) => !["done", "verified", "cancelled"].includes(t.stage)).map((t) => ({ taskId: t.id, featureId: null })),
       merging: [], waiting: [], todo: { ready: [], blocked: [] } };
-    for (const f of FILTERS) expect([f, filterCount(slim, f, countSnap(board, slim))]).toEqual([f, filterCount(full, f, countSnap(board, full))]);
     expect(metricsOf(slim, 0, 1)).toEqual(metricsOf(full, 0, 1));
     expect(stageCounts(countSnap(board, slim))).toEqual(stageCounts(countSnap(board, full)));
     expect(countSnap(board, slim).words).toEqual(countSnap(board, full).words);

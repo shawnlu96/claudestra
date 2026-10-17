@@ -15,7 +15,6 @@ import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
-import { SidebarAdminButtons } from "./sidebar-admin-buttons";
 import { MachineSwitcher } from "../../machines/machine-switcher";
 import { useVersionInfo } from "../../machines/use-version";
 import { searchHistory } from "@/lib/api/chat";
@@ -28,10 +27,8 @@ import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
 import { AgentListNotice } from "./agent-list-status";
-import { SidebarMediaButton } from "../../media/media-button";
-import { SidebarShellButton } from "../../terminal/shell-button";
-import { WorkbenchTitle } from "@/features/talk/workspace-switch"; import { ChipLegend } from "./chip-legend"; import { SettingsIcon } from "./line-icons";
-import { SharedProjectsEntry } from "../../collab/shared-projects/projects-entry"; import { NowStrip } from "../../now/now-home";
+import { WorkbenchTitle } from "@/features/talk/workspace-switch"; import { ChipLegend } from "./chip-legend";
+import { NowStrip } from "../../now/now-home"; import { NavShell } from "../../nav/nav-shell"; import { RAIL_W } from "../../nav/nav-rail"; import { memberUnread } from "../sidebar-unread";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。
@@ -68,8 +65,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
     el.setPointerCapture(e.pointerId);
     const onMove = (ev: PointerEvent) => {
       if (!resizingRef.current) return;
-      // aside 起自视口左缘,clientX 即目标宽度
-      setSbWidth(Math.min(560, Math.max(200, Math.round(ev.clientX))));
+      // aside 起自视口左缘,clientX 减去图标栏(nav-rail.tsx)即目标宽度
+      setSbWidth(Math.min(560, Math.max(200, Math.round(ev.clientX - RAIL_W))));
     };
     const onUp = () => {
       resizingRef.current = false;
@@ -207,7 +204,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
 
   return (
     <aside
-      className="relative flex w-full shrink-0 flex-col border-r border-base-300 bg-base-200 sm:w-[var(--sb-w,16rem)]"
+      className={"relative flex w-full shrink-0 flex-col border-r border-base-300 bg-base-200 pb-[var(--cstra-phone-nav-h,0px)] "
+        + "sm:w-[calc(var(--sb-w,16rem)+var(--cstra-rail-w,0px))] sm:pl-[var(--cstra-rail-w,0px)]"}
       style={sbWidth ? ({ "--sb-w": `${sbWidth}px` } as React.CSSProperties) : undefined}
     >
       {/* 桌面拖宽手柄:压住右缘 5px,悬停显色提示可拖 */}
@@ -220,23 +218,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         <div className="relative flex items-center pb-2.5">
           <WorkbenchTitle /><ChipLegend />
           {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
+          {/* 这一行只留标题与机器切换：设置、管理、终端、图片等入口都在「我的」里（nav/me-entries.ts），每条有字 */}
           <span className="ml-auto"><MachineSwitcher onSwitched={() => store.resetForMachine()} /></span>
-          {/* 项目管理 / 多选删除 / Peer / 用量看板：只给全权设备（sidebar-admin-buttons.tsx） */}
-          <SidebarAdminButtons
-            manage={manage}
-            onProjects={() => setShowProjects(true)}
-            onToggleManage={() => (manage ? exitManage() : setManage(true))}
-            onPeers={() => setSettingsPage("peers")}
-            onStats={() => setShowStats(true)}
-          />
-          <SidebarShellButton /><SidebarMediaButton />
-          <button
-            className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title={t("设置")} aria-label={t("设置")}
-            onClick={() => setSettingsPage("general")}
-          >
-            <SettingsIcon />
-          </button>
         </div>
         <label className="flex items-center gap-2 rounded-lg bg-base-300/60 px-2.5 py-1.5">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="shrink-0 opacity-40">
@@ -332,7 +315,6 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         {/* 加载中 / 慢 / 失败重试 / 真空 / 刷新失败保留旧列表（agent-list-state.ts agentListView）；只有拿到过成功的空列表才说「暂无会话」 */}
         <AgentListNotice count={agents.length} />
         <NowStrip />
-        <SharedProjectsEntry entries={activeEntries} />
         {/* 聊天记录搜索结果:跨会话正文命中,点击进对应会话(已删 agent 只读展示) */}
         {chatHits !== null && (
           <div className="mb-2 rounded-xl border border-base-300 bg-base-100 p-1.5">
@@ -474,7 +456,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           {!manage ? <SidebarExtraGroups /> : null}
           {/* 底部安全区：max() 取大不叠加——home 条区高度只算一次，不再「env+间距」双层 */}
           <div
-            className="border-t border-base-300 px-4 pt-2 text-xs opacity-50"
+            className="hidden border-t border-base-300 px-4 pt-2 text-xs opacity-50 sm:block"
             style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }}
           >
             Floka Web
@@ -493,6 +475,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       <AgentMenu />
       <ProjectMenu />
       <InviteIntake />
+      <NavShell me={{ manage, onSettings: () => setSettingsPage("general"), onProjects: () => setShowProjects(true), onToggleManage: () => (manage ? exitManage() : setManage(true)),
+        onPeers: () => setSettingsPage("peers"), onStats: () => setShowStats(true) }} unread={memberUnread(agents)} version={verInfo} />
     </aside>
   );
 }

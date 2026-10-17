@@ -3,7 +3,7 @@
  * main in (update-branch pinned to the reviewed head) once instead of bouncing to fix; every other red (or any doubt) still
  * bounces. Fixture logs, a fake gh argv runner and a temporary git repository; no network.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,12 @@ import { runBounded, type BoundedResult } from "../src/lib/run-bounded.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { ledgerAs, mergedCard } from "./deploy-test-kit.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const HEAD = "c".repeat(40), NEW = "a".repeat(40), PR = "https://github.com/example/repo/pull/7";
 const RUN = "https://github.com/example/repo/actions/runs/77", RUN2 = "https://github.com/example/repo/actions/runs/78";
