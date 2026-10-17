@@ -6,6 +6,7 @@
  */
 export const RECOVERY_KEYS = [
   "acpClearBudget",
+  "apiRejectCounter",
   "askDefaultAll",
   "askReminder",
   "askScopeAuto",
@@ -52,6 +53,7 @@ export const RECOVERY_KEYS = [
   "featureDeps",
   "fixLocalSwap",
   "iaWatchdogScope",
+  "installFreshEntry",
   "lendAuthorRebuild",
   "lendConfigFailure",
   "lendReclaimIntent",
@@ -136,6 +138,7 @@ export const RECOVERY_KEYS = [
   "uiOwnerReask",
   "uiReviewCarry",
   "unifiedMergeQueue",
+  "unionLaneShare",
   "updateGap",
   "verifyAfterResolve",
   "wakeStopped",
