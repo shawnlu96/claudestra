@@ -193,8 +193,10 @@ async function showQuotaCard(channelId: string, ws: Socket, agentName: string, f
   openQuotaCard(channelId, ws, agentName, f, { title: `${label} 额度用完了`, context, choices: plan.choices, quota: true }, !!plan.autoSwitch);
 }
 
+type QuotaCard = { title: string; context: string; choices: QuotaChoice[]; quota: boolean };
+
 /** autoTried：这个失败已经按备用链试过切换（成没成都算），重报不再试 */
-function openQuotaCard(channelId: string, ws: Socket, agentName: string, f: AcpFailure, card: { title: string; context: string; choices: QuotaChoice[]; quota: boolean }, autoTried = !card.quota): void {
+function openQuotaCard(channelId: string, ws: Socket, agentName: string, f: AcpFailure, card: QuotaCard, autoTried = !card.quota): void {
   // 同一个失败又报一次（原文、选项值都没变、卡还没人答）：沿用这张卡和它的代际，否则是新卡、旧卡的按钮作废。
   // 只比选项值：「等重置」按钮上的时刻文字会随时间变（「2 小时后」晚一分钟重报就不一样），按文字比会把还有效的卡换掉
   const values = (cs: QuotaChoice[]) => JSON.stringify(cs.map((c) => c.value));
