@@ -184,3 +184,30 @@ describe("[验收线 4] create --mode readOnly", () => {
     }, 60_000);
   }
 });
+
+describe("manager mode：只读 agent 不能换档", () => {
+  test("子进程真跑 manager mode：只读条目改成 bypassPermissions 被拒、registry 不变；非只读条目照旧能改", () => {
+    const root = mkdtempSync(join(tmpdir(), "codexro-mode-"));
+    try {
+      const state = join(root, "state");
+      mkdirSync(state, { recursive: true });
+      const reg = join(state, "registry.json");
+      writeFileSync(reg, JSON.stringify(REG));
+      const run = (agent: string, mode: string) => {
+        const p = Bun.spawnSync([process.execPath, "--no-env-file", "src/manager.ts", "mode", agent, mode], {
+          cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe",
+          env: testChildEnv({ HOME: join(root, "home"), CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(root, "run"), TMPDIR: root }),
+        });
+        return JSON.parse(p.stdout.toString().trim().split("\n").at(-1)!) as { ok: boolean; error?: string };
+      };
+      const denied = run("agent-ro", "bypassPermissions");
+      expect(denied.ok).toBe(false);
+      expect(denied.error).toContain("只读 agent 不能换档，要换就删了重建");
+      expect(JSON.parse(readFileSync(reg, "utf8")).agents["agent-ro"].permissionMode).toBe("readOnly");
+      expect(run("agent-rw", "plan").ok).toBe(true);
+      expect(JSON.parse(readFileSync(reg, "utf8")).agents["agent-rw"].permissionMode).toBe("plan");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});

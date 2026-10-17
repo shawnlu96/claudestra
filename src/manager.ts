@@ -1807,6 +1807,8 @@ async function cmdMode(sub: string, ...rest: string[]) {
     output({ ok: false, error: `找不到 agent: ${tmuxName}` });
     return;
   }
+  const roSwitch = (await import("./lib/codex-readonly.js")).modeSwitchError(info, modeVal); // 只读 agent 不能换档
+  if (roSwitch) return output({ ok: false, error: roSwitch });
   info.permissionMode = modeVal;
   await saveRegistry(reg);
   output({
