@@ -52,6 +52,7 @@ const HIGH_RISK_RECOVERY_KEYS: Partial<Record<RecoveryKey, { class: RecoveryRisk
   privateStartPlacement: { class: "permission", reason: "私仓任务跨机放置范围" },
   proposalGlobProtection: { class: "permission", reason: "拦截通过通配拆词绕过提案名称保护的范围" },
   reclaimLocalFix: { class: "permission", reason: "租约回收后重新指派本机修复执行者" },
+  repoAlias: { class: "permission", reason: "新旧仓库名互认，影响本仓、外仓和 PR 归属判定" },
   reviewFallback: { class: "safety", reason: "跨族审查员不可用时降级同族对抗审查并豁免跨族" },
   sentinelEvidenceBoundary: { class: "safety", reason: "按新回合截断哨兵结果并识别安全重定向证据" },
   skipEffectsAutoScope: { class: "permission", reason: "自动批准副作用清单的范围例外" },

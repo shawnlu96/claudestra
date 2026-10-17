@@ -7,6 +7,7 @@
  *   lib/ledger-write.ts deliver 在写入的同一事务里再核一次，MCP 侧的预检只为早给原因。tests/order-deliver-pr.test.ts。
  */
 import { LedgerError } from "./ledger-store.js";
+import { aliasPick, prParts, samePr, sameRepo } from "./repo-alias.js";
 import type { BoundedResult } from "./run-bounded.js";
 
 /** 完整 PR URL（owner 名按 GitHub 规则，仓库名不许 . / ..）；末尾斜杠允许，比较前去掉 */
@@ -34,8 +35,10 @@ export function fullPrUrl(s: string | null | undefined): string | null {
 
 /** 卡上已有的 pr 与要写的冲突吗：已有完整 URL 且不同才算；空 / 非完整的旧值（`306`、`#306`）可被替换 */
 export function prConflict(existing: string | null | undefined, found: string): boolean {
-  const cur = fullPrUrl(existing);
-  return cur !== null && cur !== fullPrUrl(found);
+  const cur = fullPrUrl(existing), url = fullPrUrl(found);
+  if (cur === null) return false;
+  // REPOALIAS1: the card's old-name link and gh's new-name link of the same number are one PR (repoAlias on)
+  return !aliasPick("order-deliver-pr.prConflict", cur === url, cur === url || (url !== null && samePr(cur, url)));
 }
 
 /** `ledger deliver --pr` 在事务里的那一步（lib/ledger-write.ts deliver）：不是完整 URL → invalid；卡上已是另一个完整 URL → conflict，不覆盖；
@@ -96,7 +99,9 @@ export function parseOriginRepo(url: string): string | null {
 export function prInRepo(url: string, repo: string): boolean {
   const full = fullPrUrl(url);
   const m = full ? /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+$/.exec(full) : null;
-  return m !== null && m[1].toLowerCase() === repo.toLowerCase();
+  const exact = m !== null && m[1].toLowerCase() === repo.toLowerCase();
+  // REPOALIAS1: an old-name origin still owns gh's new-name PR after the transfer (repoAlias on); no other repository does
+  return aliasPick("order-deliver-pr.prInRepo", exact, exact || (m !== null && sameRepo(prParts(full)?.repo, repo)));
 }
 
 async function originRepo(cwd: string, run: Runner): Promise<{ ok: true; repo: string } | { ok: false; error: string }> {
