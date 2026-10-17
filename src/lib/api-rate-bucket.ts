@@ -7,7 +7,7 @@
  */
 import { tokenIdOf, type Principal } from "./principals.js";
 import { OWNER_PRINCIPAL_ID } from "./devices.js";
-import { ApiRejectCounter, type ApiRejectCounterOptions } from "./api-rate-reject-counter.js";
+import { ApiRejectCounter, cachedRejectPolicy, type ApiRejectCounterOptions } from "./api-rate-reject-counter.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
 // 手机 + 电脑 + 侧栏轮询共用一个身份
@@ -62,14 +62,14 @@ export class ApiRateBucket {
       return false;
     }
     this.hits.push(now);
-    this.rejects.update(now);
+    this.rejects.prune(now);
     return true;
   }
 
   /** 窗口内已放行的次数 */
   used(now: number): number {
     this.prune(now);
-    this.rejects.update(now);
+    this.rejects.prune(now);
     return this.hits.length;
   }
 
@@ -88,12 +88,13 @@ export interface ApiRateLimiter {
 
 export function createApiRateLimiter(log: (line: string) => void = (line) => console.warn(line), options?: ApiRejectCounterOptions): ApiRateLimiter {
   const buckets = new Map<string, ApiRateBucket>();
+  const shared = { ...options, policy: cachedRejectPolicy(options) };
   return {
     buckets,
     charge(p, pathname, now = Date.now()) {
       const { key, limit } = apiRateBucket(p);
       let bucket = buckets.get(key);
-      if (!bucket) buckets.set(key, (bucket = new ApiRateBucket(limit, options)));
+      if (!bucket) buckets.set(key, (bucket = new ApiRateBucket(limit, { ...shared, target: key })));
       else if (bucket.limit !== limit) bucket.limit = limit; // 旧容量（如被锁在 120 的 owner 桶）就地调整，不清零
       if (bucket.tryAcquire(now)) return null;
       if (now - bucket.lastLogAt >= LOG_EVERY_MS) {
