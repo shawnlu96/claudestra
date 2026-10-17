@@ -269,7 +269,7 @@ export function replaySelectedHistory(db: Database, project: string, days: numbe
       + '"outcome":"confirmed_problem|confirmed_recovered","evidence":["<证据链接>"]}',
     totalBounces: rows.length, replayable: rows.filter((r) => r.replayable).length,
     hypotheticalQualification: "假设放行沿用在线 judge 的 skipped 语义；未验证的 guard/build 单列，不能据此认定收益或真实恢复",
-    hypotheticalAllowedWithUnverifiedNonTest: allowed.filter((r) => r.unverifiedNonTest.length > 0).length,
+    allowedWithUnverifiedSteps: allowed.filter((r) => r.unverifiedNonTest.length > 0).length,
     hypotheticalAllowed: allowed.length, hypotheticalDenied: rows.filter((r) => r.hypothetical === "deny").length,
     unreplayable: rows.filter((r) => !r.replayable).length,
     unknownIncludingUnreplayable: rows.filter((r) => !r.replayable || (r.hypothetical === "allow" && r.posterior === "unknown")).length,

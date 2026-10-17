@@ -1,5 +1,5 @@
 /** CLAIMSPENT1: a CI recovery claim the main CI gate stopped before its send is settled unsent, so the same head can send once more. */
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { RecoveryMode } from "../src/lib/recovery-policy.ts";
 import { addKnownFlaky } from "../src/lib/ci-known-flaky.ts";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.ts";
@@ -9,6 +9,12 @@ import { CI_CLAIM_SEND_OP, CI_CLAIM_UNSENT_OP, ciClaimUnsentMark, claimSettledUn
 import { MAIN_CI_PAUSE } from "../src/lib/scheduler-merge-unsent-receipts.ts";
 import { ciRerunSpent, TRAIN_RERUN_OP } from "../src/lib/scheduler-merge-ci-rerun.ts";
 import { useMainCiWorld, writePolicy, type MainCiWorld } from "./scheduler-main-ci-wiring-world.test.ts";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.ts";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const world = useMainCiWorld();
 type Route = "behind" | "timeout" | "flaky";

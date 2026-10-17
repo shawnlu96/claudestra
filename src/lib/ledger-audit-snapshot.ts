@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { AUDIT_THRESHOLDS, RECOVERY_RULES, type AuditAgent, type AuditHeld, type AuditInboxEntry, type AuditRule, type AuditSnapshot,
   type MainTurn, type RecoveryAuditInputs, type RecoveryCandidate, type RecoveryFacts } from "./ledger-audit.js";
 import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js";
-import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
+import { getMeta, getTask, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerEvent, LedgerTask, Stage, TaskKind } from "./ledger-stages.js";
 import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js";
 import { readWaitAuditSnapshot } from "./ledger-deadlock-read.js";
@@ -19,6 +19,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { gateInputs } from "./scheduler-dispatch-block.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
+import { sessionTailInfo } from "./session-tail.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
 import { collectHandoffPr, type HandoffPrFact } from "./ledger-audit-handoff.js";
 import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFact } from "./ledger-audit-lend-grant.js";
@@ -40,6 +41,7 @@ import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
 import { turnState } from "./turn-state.js";
+import { START_DELIVERY_KEY, startDeliveryState } from "./worker-submit-confirm.js";
 
 export interface SnapshotSources {
   registry(): Promise<RegistryAgent[]>;
@@ -59,6 +61,10 @@ export interface SnapshotSources {
   mirrorDir?: string;
   /** AUD：恢复巡检的取数源（readRecoveryAudit）；测试不给 = 不读，规则不跑 */
   recovery?: RecoveryAuditSources;
+  /** RESTATEGO1：会话里最后一条真实对话的时刻（session-tail.ts convTs）；测试不给 = 照旧用文件写入时间 */
+  convTs?(agent: RegistryAgent): Promise<number | null>;
+  /** RESTATEGO1：恢复键 startDeliveryConfirm 的开关；不给 = 文件里的恢复策略 */
+  policy?: RecoveryPolicyPort;
 }
 
 /** 恢复巡检读的生产事实：CFG 策略、scheduler.json、借入名单、正式规格卡、草稿目录——每轮现读，不缓存 */
@@ -97,6 +103,12 @@ async function fileTimes(a: RegistryAgent): Promise<{ lastWriteAt: number | null
   return stat(p).then((st) => ({ lastWriteAt: st.mtimeMs, startedAt: st.birthtimeMs }), () => ({ lastWriteAt: null, startedAt: null }));
 }
 
+/** 只认真实对话：CC 后台每小时 touch 一次会话文件，mtime 会把 8 小时的空等报成「空闲 25–55 分钟」；读不到 = null（阶段时间兜底） */
+async function convTs(a: RegistryAgent): Promise<number | null> {
+  const p = a.cwd && a.sessionId ? sessionJsonlPath(a.runtime, a.cwd, a.sessionId) : null;
+  return p ? (await sessionTailInfo(p))?.convTs ?? null : null;
+}
+
 const realSources: SnapshotSources = {
   registry: () => readRegistryAgents(),
   windows: async () => {
@@ -113,6 +125,7 @@ const realSources: SnapshotSources = {
     return turnState({ pane, runtime: a.runtime }).main;
   },
   fileTimes,
+  convTs,
   reviewers: runningReviewers,
   heldPath: HELD_MESSAGES_PATH,
 };
@@ -190,7 +203,17 @@ export function auditedProjects(db: Database): string[] {
   return rows.map((r) => r.project).filter((p) => getMeta(db, p).pms.length > 0);
 }
 
-async function readAgents(src: SnapshotSources, want: ReadonlySet<string>): Promise<{ list: RegistryAgent[]; agents: AuditAgent[] } | string> {
+/**
+ * RESTATEGO1：build / fix 执行者的「最后活动」改用真实对话时刻（startDeliveryConfirm 不是 off 的项目），
+ * executor_idle 取 max(进入阶段, 它)，所以只 touch 不对话时空闲从最后一次真实对话（或进入阶段）算起，不被重置。off = 原样用 mtime。
+ */
+async function lastActivity(src: SnapshotSources, a: RegistryAgent, times: { lastWriteAt: number | null; startedAt: number | null },
+  conv: ReadonlySet<string>): Promise<{ lastWriteAt: number | null; startedAt: number | null }> {
+  if (!conv.has(a.name) || !src.convTs) return times;
+  return { ...times, lastWriteAt: await src.convTs(a).catch(() => null) }; // 读坏了 = 当没对话过，阶段时间兜底
+}
+
+async function readAgents(src: SnapshotSources, want: ReadonlySet<string>, conv: ReadonlySet<string> = new Set()): Promise<{ list: RegistryAgent[]; agents: AuditAgent[] } | string> {
   let list: RegistryAgent[];
   try {
     list = await src.registry();
@@ -200,7 +223,7 @@ async function readAgents(src: SnapshotSources, want: ReadonlySet<string>): Prom
   const windows = await src.windows().catch(() => null); // tmux 出错：windowAlive 全为 null，只有回收规则不跑
   const agents = await Promise.all(list.map(async (a): Promise<AuditAgent> => {
     // 会话文件时间：空闲 / 押后规则要看的人，加上孤儿规则要看的临时执行者
-    const times = want.has(a.name) || a.name.startsWith("agent-task-") ? await src.fileTimes(a) : { lastWriteAt: null, startedAt: null };
+    const times = want.has(a.name) || a.name.startsWith("agent-task-") ? await lastActivity(src, a, await src.fileTimes(a), conv) : { lastWriteAt: null, startedAt: null };
     return {
       name: a.name,
       projectId: a.projectId,
@@ -479,15 +502,16 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const perProject = readLedgerFacts(db, projects, now).map((p) => ({ ...p, tasks: p.tasks.map((t) => ({ ...t,
     ...(p.meta.team ? { specPolicy: specPathFor(t.task, p.meta.docsDir) ? specPolicyOf(t.task, p.meta.docsDir) : null } : {}) })) }));
   // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）、各项目 PM 名单（押后规则）、review 派给的本机审查员
-  const want = new Set<string>();
+  const want = new Set<string>(), conv = new Set<string>(), policy = src.policy ?? recoveryPolicy;
   for (const p of perProject) {
     p.meta.pms.forEach((x) => want.add(x));
+    const confirm = policy(p.project, "startDeliveryConfirm").mode !== "off";
     for (const { task, reviewStep } of p.tasks) {
-      if (task.agent && (task.stage === "build" || task.stage === "fix")) want.add(task.agent);
+      if (task.agent && (task.stage === "build" || task.stage === "fix")) { want.add(task.agent); if (confirm) conv.add(task.agent); }
       if (reviewStep?.executorKind === "agent") want.add(reviewStep.executor);
     }
   }
-  const got = await readAgents(src, want);
+  const got = await readAgents(src, want, conv);
   const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
@@ -533,4 +557,22 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       unavailable,
     };
   });
+}
+
+const durMin = (ms: number) => `${Math.max(0, Math.floor(ms / 60_000))} 分钟`;
+/**
+ * RESTATEGO1：executor_idle 通知补的一句（bridge/ledger-audit-service.ts 在推送前接上）：距进入阶段多久、距最后一次真实对话多久，
+ * 外加这张卡开工单的投递确认状态（worker-submit-confirm.ts 同一套判定，只读；重投和升级由调度器那一轮做，按投递键去重、限次）。
+ * key = 项目|executor_idle|卡|阶段|进入阶段时刻|空闲起点（ledger-audit.ts executorIdle）；对不上或恢复键 off = null，原文照推。
+ */
+export async function executorIdleNote(db: Database, f: { key: string; project: string; taskId: string | null; rule: string }, now: number,
+  src: Pick<SnapshotSources, "convTs" | "policy" | "registry"> = realSources): Promise<string | null> {
+  if (f.rule !== "executor_idle" || !f.taskId || (src.policy ?? recoveryPolicy)(f.project, START_DELIVERY_KEY).mode === "off") return null;
+  const parts = f.key.split("|"), stage = parts.at(-3), stageSince = Number(parts.at(-2));
+  const task = getTask(db, f.taskId);
+  if (!task?.agent || !Number.isFinite(stageSince)) return null;
+  const row = (await src.registry()).find((a) => a.name === task.agent);
+  const conv = row && src.convTs ? await src.convTs(row).catch(() => null) : null;
+  const delivery = startDeliveryState(db, task, now);
+  return `距进入 ${stage} ${durMin(now - stageSince)}；距最后一次真实对话 ${conv === null ? "（会话里没有）" : durMin(now - conv)}${delivery ? `；${delivery}` : ""}`;
 }

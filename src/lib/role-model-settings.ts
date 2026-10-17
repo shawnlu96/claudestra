@@ -8,8 +8,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { CODEX_EFFORT_LEVELS } from "./codex-launch.js";
-import { isCodexModel } from "./lend-config.js";
 import { statePath } from "./paths.js";
+import { isClaudeModelId, parseTierPatchFields, tierTableProblem, type TierPatchFields, type TierTable } from "./task-tier-model-settings.js";
 
 /** 本机卡片角色（card-role-definitions.ts 原样 re-export）：表的行就是它们，放这里免得两个模块互相 import */
 export const CARD_ROLES = ["author", "reviewer", "adversarial-reviewer", "pm-reviewer"] as const;
@@ -23,7 +23,8 @@ type CodexEffort = (typeof CODEX_EFFORT_LEVELS)[number];
 
 /** 一个角色的一行：claude = 完整模型 id；codex = 推理档，null = 照 Codex 自己的配置 */
 export interface RoleModelCell { claude: string; codex: CodexEffort | null }
-export interface RoleModelTable { v: 1; rev: number; roles: Record<CardRole, RoleModelCell> }
+/** tiers：类型 × 角色那一层（TIER3，task-tier-model-settings.ts），可选；旧表没有它照样有效 */
+export interface RoleModelTable { v: 1; rev: number; roles: Record<CardRole, RoleModelCell>; tiers?: TierTable }
 export type RoleModelRead =
   | { status: "missing" | "ok"; table: RoleModelTable }
   /** error 是本机原因（可能带路径），只进本机日志；table 是这时实际执行的默认表 */
@@ -35,7 +36,6 @@ export const defaultRoleModels = (): RoleModelTable => ({
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const extra = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).find((k) => !keys.includes(k));
-const isClaudeModelId = (v: unknown): v is string => typeof v === "string" && /^claude-[a-z0-9][a-z0-9.-]*$/.test(v) && isCodexModel(v);
 const isCodexEffortLevel = (v: unknown): v is CodexEffort => CODEX_EFFORT_LEVELS.includes(v as CodexEffort);
 export const isCardRoleName = (v: unknown): v is CardRole => CARD_ROLES.includes(v as CardRole);
 
@@ -51,7 +51,7 @@ function cellProblem(v: unknown, where: string): string | null {
 /** 整表校验；缺任何一个角色也算坏：缺的不能静默套默认，否则网页显示的和执行的会分叉 */
 export function roleModelsProblem(v: unknown): string | null {
   if (!isObj(v)) return "不是 JSON 对象";
-  const x = extra(v, ["v", "rev", "roles"]);
+  const x = extra(v, ["v", "rev", "roles", "tiers"]);
   if (x !== undefined) return `不认识的字段 ${x}`;
   if (v.v !== 1) return "v 要是 1";
   if (!Number.isSafeInteger(v.rev) || (v.rev as number) < 0) return "rev 要是非负整数";
@@ -62,7 +62,7 @@ export function roleModelsProblem(v: unknown): string | null {
     const p = v.roles[r] === undefined ? `缺角色 ${r}` : cellProblem(v.roles[r], `roles.${r}`);
     if (p) return p;
   }
-  return null;
+  return v.tiers === undefined ? null : tierTableProblem(v.tiers, CARD_ROLES, v.roles as Record<CardRole, RoleModelCell>);
 }
 
 /** 每次现读，不缓存：网页刚存的值下一次建卡就看得到 */
@@ -78,15 +78,20 @@ export function readRoleModels(path = ROLE_MODEL_SETTINGS_PATH): RoleModelRead {
   return p ? { status: "invalid", error: p, table: defaultRoleModels() } : { status: "ok", table: data as RoleModelTable };
 }
 
-/** 网页的一次修改：基于哪一版（rev，CAS）、哪个角色、改哪一格；整份拒，不部分更新 */
-export interface RoleModelPatch { rev: number; role: CardRole; claude?: string; codex?: CodexEffort | null }
+/** 网页的一次修改：基于哪一版（rev，CAS）、哪个角色、改哪一格；整份拒，不部分更新。带 tier = 改类型 × 角色那一格（字段规则见 TierPatchFields） */
+export type RoleModelPatch = { rev: number; role: CardRole; tier?: undefined; claude?: string; codex?: CodexEffort | null }
+  | ({ rev: number; role: CardRole } & TierPatchFields);
 
 export function parseRoleModelPatch(b: unknown): RoleModelPatch | string {
   if (!isObj(b)) return "请求体要是 JSON 对象";
-  const x = extra(b, ["rev", "role", "claude", "codex"]);
+  const x = extra(b, ["rev", "role", "claude", "codex", "tier"]);
   if (x !== undefined) return `不认识的字段 ${x}`;
   if (!Number.isSafeInteger(b.rev) || (b.rev as number) < 0) return "rev 要是非负整数（读到的那一版）";
   if (!isCardRoleName(b.role)) return `role 只认 ${CARD_ROLES.join(" / ")}`;
+  if (b.tier !== undefined) {
+    const t = parseTierPatchFields(b);
+    return typeof t === "string" ? t : { rev: b.rev as number, role: b.role, ...t };
+  }
   if (b.claude === undefined && b.codex === undefined) return "没有要改的：给 claude 或 codex";
   if (b.claude !== undefined && !isClaudeModelId(b.claude)) return "claude 要是完整的 Claude 模型 id（claude-…）";
   if (b.codex !== undefined && b.codex !== null && !isCodexEffortLevel(b.codex)) return `codex 只认 null（照 Codex 配置）或 ${CODEX_EFFORT_LEVELS.join(" / ")}`;

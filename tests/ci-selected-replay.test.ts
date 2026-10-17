@@ -32,7 +32,7 @@ test("counts each bounce, denies guessing for old events or later changed-head g
     const out = replaySelectedHistory(f.db, "p", 1, 200, f.root);
     expect(out).toMatchObject({ totalBounces: 2, replayable: 1, hypotheticalAllowed: 1, unreplayable: 1,
       posterior: { confirmedProblem: 0, confirmedRecovered: 0, unknown: 1 } });
-    expect(out.hypotheticalAllowedWithUnverifiedNonTest).toBe(1);
+    expect(out.allowedWithUnverifiedSteps).toBe(1);
     expect(out.rows[0]!.unverifiedNonTest).toEqual(["core:guard=skipped", "core:build=skipped"]);
     expect(out.rows[0]!.posterior).toBe("unknown");
     expect(out.rows[0]!.evidence).toHaveLength(1);
