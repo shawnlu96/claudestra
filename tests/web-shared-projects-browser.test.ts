@@ -118,8 +118,7 @@ afterAll(async () => {
     }, null, 2), { mode: 0o600 });
   } finally {
     server?.stop(true);
-    // browser.close() force-kills Chromium after Playwright's own 30s graceful-close deadline; the hook budget must outlast it.
-    try { await browser?.close(); }
+    try { await browser?.close(); } // force-kills Chromium after Playwright's 30s graceful deadline; the hook budget outlasts it.
     finally { rmSync(scratch, { recursive: true, force: true }); }
   }
 }, 2 * TEST_TIMEOUT_MS);
