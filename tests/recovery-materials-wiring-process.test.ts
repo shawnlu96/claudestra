@@ -305,7 +305,7 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
   test("build 单不读 materials 策略，交付只读 uiDelivery", async () => {
     const before = d.calls().length;
     await delivered(d, "T-build", P);
-    expect(d.calls().slice(before).map((call) => call.split(" ")[1])).toEqual([`${P}:memoryLendInjection`, `${P}:uiDelivery`]);
+    expect(d.calls().slice(before).map((call) => call.split(" ")[1])).toEqual([`${P}:memoryLendInjection`, `${P}:taskTierModels`, `${P}:uiDelivery`]); // TIER3e：交付门控读一次 taskTierModels
   }, 60_000);
 });
 

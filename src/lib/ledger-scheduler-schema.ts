@@ -2,20 +2,24 @@
 import { PROJECTION_GUARD_TABLES, PROJECTION_GUARD_COLUMNS } from "./scheduler-v2-retire-guard.js";
 import type { Database } from "bun:sqlite";
 
+/** task_workflows 建表语句；template 收 TIER3e 注册的 docs（是否可开卡仍由 task-tier-spec.ts 注册表决定） */
+const workflowsTable = (name: string): string => `CREATE TABLE IF NOT EXISTS ${name} (
+    taskId TEXT PRIMARY KEY REFERENCES tasks(id), project TEXT NOT NULL,
+    template TEXT NOT NULL CHECK (template IN ('code','ui','security','docs')),
+    templateVersion INTEGER NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('manual','observe','auto')),
+    authorFamily TEXT NOT NULL CHECK (authorFamily IN ('claude','codex')),
+    fallback TEXT NOT NULL, specRev INTEGER NOT NULL,
+    rev INTEGER NOT NULL DEFAULT 1, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL
+  )`;
+const WORKFLOW_COLS = "taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, rev, createdAt, updatedAt";
+
 const SCHEDULER_SQL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS scheduler_meta (
     key TEXT PRIMARY KEY, value TEXT NOT NULL
   )`,
   `INSERT OR IGNORE INTO scheduler_meta (key, value)
    SELECT 'activationSeq', CAST(COALESCE(MAX(seq), 0) AS TEXT) FROM events`,
-  `CREATE TABLE IF NOT EXISTS task_workflows (
-    taskId TEXT PRIMARY KEY REFERENCES tasks(id), project TEXT NOT NULL,
-    template TEXT NOT NULL CHECK (template IN ('code','ui','security')),
-    templateVersion INTEGER NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('manual','observe','auto')),
-    authorFamily TEXT NOT NULL CHECK (authorFamily IN ('claude','codex')),
-    fallback TEXT NOT NULL, specRev INTEGER NOT NULL,
-    rev INTEGER NOT NULL DEFAULT 1, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL
-  )`,
+  workflowsTable("task_workflows"),
   "CREATE INDEX IF NOT EXISTS task_workflows_project ON task_workflows(project, mode)",
   `CREATE TABLE IF NOT EXISTS scheduler_intents (
     id TEXT PRIMARY KEY, taskId TEXT NOT NULL REFERENCES tasks(id), project TEXT NOT NULL,
@@ -48,6 +52,21 @@ export function SCHEDULER_SCHEMA(db: Database): void {
   db.prepare("CREATE INDEX IF NOT EXISTS scheduler_intents_task ON scheduler_intents(taskId, eventSeq)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS scheduler_intents_project_status ON scheduler_intents(project, status)").run();
   db.prepare("CREATE INDEX IF NOT EXISTS scheduler_resources_task ON scheduler_resources(taskId)").run();
+}
+
+/**
+ * TIER3e：旧库的 task_workflows CHECK 只收 code / ui / security，写 docs 流程必失败。CHECK 改不了 ALTER，按建表语句判断后重建表保数据
+ * （新表 → 全列拷贝 → 删旧表 → 改名 → 重建索引）；没有别的表外键引用它，投影守卫每次打开重装。已收 docs / 表还没建 = 什么都不做，可重跑。
+ */
+export function migrateWorkflowDocsTemplate(db: Database): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get() as { sql: string } | null;
+  if (!row || row.sql.includes("'docs'")) return;
+  db.prepare("DROP TABLE IF EXISTS task_workflows_docs_mig").run();
+  db.prepare(workflowsTable("task_workflows_docs_mig")).run();
+  db.prepare(`INSERT INTO task_workflows_docs_mig (${WORKFLOW_COLS}) SELECT ${WORKFLOW_COLS} FROM task_workflows`).run();
+  db.prepare("DROP TABLE task_workflows").run();
+  db.prepare("ALTER TABLE task_workflows_docs_mig RENAME TO task_workflows").run();
+  db.prepare("CREATE INDEX IF NOT EXISTS task_workflows_project ON task_workflows(project, mode)").run();
 }
 
 /** A card owns at most one author and one reviewer session; the reviewer survives every fix round. */

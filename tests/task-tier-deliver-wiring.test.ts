@@ -12,7 +12,7 @@ import { closeLedger, getTask, LedgerError, listEvents, openLedger } from "../sr
 import { createTask, deliver, moveStage, setMeta } from "../src/lib/ledger-write.js";
 import type { WorkflowTemplate } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
-import { gitDiffFiles, resetDocsTemplate, useDeliveredFilesPort } from "../src/lib/task-tier-docs-template.js";
+import { gitDiffFiles, resetDocsTemplate, syncDocsTemplate, useDeliveredFilesPort } from "../src/lib/task-tier-docs-template.js";
 import { useTaskTierPort } from "../src/lib/task-tier-models.js";
 import { tierLaunchable } from "../src/lib/task-tier-spec.js";
 
@@ -38,22 +38,14 @@ function branch(name: string, change: () => void): string {
   return head;
 }
 
-/**
- * 一张到了 build 的卡。code 卡经正式 setWorkflow 写流程；docs 卡的 task_workflows 行要等台账 CHECK 放开 docs（表迁移待 owner 拍板，
- * ask_mvbt05km826d6fbe86），这里只为测交付门控本身临时放开约束插一行——不证明 docs 能正式开卡落库。
- */
+/** 一张到了 build 的卡；流程经正式 setWorkflow 落库（docs 先按 on 挂上模板，写完摘掉，交付时由门控自己同步） */
 function card(id: string, template: string, globs = GLOBS): string {
   const agent = `agent-${id.toLowerCase()}`;
   createTask(db, PM, { project: P, id, title: id, kind: "code", agent, pm: PM.actor, extra: { fileGlobs: globs } });
-  if (template === "docs") {
-    db.run("PRAGMA ignore_check_constraints = ON");
-    db.prepare(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
-      VALUES (?, ?, 'docs', 3, 'auto', 'claude', 'manual', 1, 0, 0)`).run(id, P);
-    db.run("PRAGMA ignore_check_constraints = OFF");
-  } else {
-    setWorkflow(db, PM, { taskId: id, taskRev: getTask(db, id)!.rev, template: template as WorkflowTemplate, templateVersion: 3, mode: "auto",
-      authorFamily: "claude", fallback: "退 PM 人工" });
-  }
+  if (template === "docs") syncDocsTemplate(P);
+  setWorkflow(db, PM, { taskId: id, taskRev: getTask(db, id)!.rev, template: template as WorkflowTemplate, templateVersion: 3, mode: "auto",
+    authorFamily: "claude", fallback: "退 PM 人工" });
+  resetDocsTemplate();
   writeFileSync(join(dir, "tasks", `${id}.md`), `# ${id}\n模板：${template}\n\n## 背景\n`);
   moveStage(db, { actor: agent }, { taskId: id, from: "spec", to: "restate" });
   moveStage(db, PM, { taskId: id, from: "restate", to: "build" });

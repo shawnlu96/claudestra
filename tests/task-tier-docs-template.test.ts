@@ -8,13 +8,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { preflightStart, type StartEnv } from "../src/lib/dag-tools-start.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
-import { WORKFLOW_TEMPLATES } from "../src/lib/ledger-scheduler.js";
-import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { getWorkflow, WORKFLOW_TEMPLATES } from "../src/lib/ledger-scheduler.js";
+import { migrateWorkflowDocsTemplate } from "../src/lib/ledger-scheduler-schema.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { closeLedger, getTask, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { defaultRoleModels, type RoleModelRead } from "../src/lib/role-model-settings.js";
 import { templateFor } from "../src/lib/scheduler-template.js";
 import { docsFlows, resetDocsTemplate, syncDocsTemplate } from "../src/lib/task-tier-docs-template.js";
-import { decideTierLaunch, resolveTierModel, TIER_DEFAULTS, useTaskTierPort } from "../src/lib/task-tier-models.js";
+import { decideTierLaunch, resolveTierModel, reviewerTierCtx, TIER_DEFAULTS, useTaskTierPort } from "../src/lib/task-tier-models.js";
 import { runTierChecks, tierLaunchable } from "../src/lib/task-tier-spec.js";
 
 const cleanups: (() => void)[] = [];
@@ -131,7 +133,7 @@ describe("[验收线 3] off：不挂模板、不加事件，回到旧模板校�
 });
 
 describe("[验收线 1、3] 生产开卡入口：preflightStart 自己按项目同步 docs，不靠测试手动注册", () => {
-  test("没调过 syncDocsTemplate：on 可开 docs 卡；off 回旧拒绝、摘掉注册；重新 on 可再开", async () => {
+  test("没调过 syncDocsTemplate：on 可开 docs 卡、经 setWorkflow 正式落库、启动用 docs 有效值；off 回旧拒绝；重新 on 可再开", async () => {
     const f = fixture();
     resetDocsTemplate();
     mode("on");
@@ -139,10 +141,64 @@ describe("[验收线 1、3] 生产开卡入口：preflightStart 自己按项目�
     const r = await f.start("good", card("模板：docs"));
     expect(workflowOf(r)).toEqual({ template: "docs", version: 3 });
     expect(tierLaunchable("docs")).toBe(true);
+    // 计划的流程经正式 workflow 写入落库（不禁用 CHECK）；之后的审查员上下文从已存流程取 docs，模型走 TIER3 docs 有效值
+    const id = "d0-docs-card", spec = card("模板：docs");
+    createTask(f.db, { actor: "agent-d0-pm" }, { project: f.project, id, title: id, kind: "code" });
+    const w = setWorkflow(f.db, { actor: "agent-d0-pm" }, { taskId: id, taskRev: getTask(f.db, id)!.rev, template: "docs" as never, templateVersion: 3,
+      mode: "auto", authorFamily: "claude", fallback: "退 PM 人工" });
+    expect(w.workflow).toMatchObject({ template: "docs", templateVersion: 3 });
+    expect(getWorkflow(f.db, id)?.template as string).toBe("docs");
+    const ctx = reviewerTierCtx(f.db, getTask(f.db, id)!);
+    expect(ctx?.tier as string).toBe("docs");
+    expect(decideTierLaunch({ ...ctx!, specText: spec }, "author", "claude", null, null)).toMatchObject({ mode: "on", value: TIER_DEFAULTS.docs.author.claude });
     mode("off");
     expect(await f.start("good", card("模板：docs"), "docs")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("docs 还没有注册流程模板") });
     expect(tierLaunchable("docs")).toBe(false);
     mode("on");
     expect(workflowOf(await f.start("good", card("模板：docs")))).toEqual({ template: "docs", version: 3 });
+  });
+});
+
+describe("[验收线 1] 台账迁移 migrateWorkflowDocsTemplate：旧库 task_workflows 的 CHECK 放开 docs", () => {
+  test("旧 CHECK 的库升级后行数与各列逐行一致、docs 可写、非法值照拒、索引在；重复执行什么都不做", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tier3e-mig-")), path = join(dir, "ledger.sqlite");
+    cleanups.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
+    let db = openLedger(path);
+    const insert = (id: string, template: string, mode = "auto") => db.prepare(`INSERT INTO task_workflows
+      (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, rev, createdAt, updatedAt) VALUES (?, 'm', ?, 3, ?, 'codex', ?, 2, 4, 11, 22)`)
+      .run(id, template, mode, `fallback ${id}`);
+    for (const id of ["M1", "M2", "M3", "N1", "N2"]) createTask(db, { actor: "owner" }, { project: "m", id, title: id, kind: "code" });
+    const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE name = 'task_workflows'").get() as { sql: string }).sql;
+    expect(sql).toContain("'docs'");
+    // 造旧库：按旧建表语句（只收三类）重建 task_workflows，版本号退到本迁移之前
+    db.transaction(() => {
+      db.run("ALTER TABLE task_workflows RENAME TO wf_new");
+      db.run(sql.replace(",'docs'", ""));
+      db.run("INSERT INTO task_workflows SELECT * FROM wf_new");
+      db.run("DROP TABLE wf_new");
+      db.run("CREATE INDEX IF NOT EXISTS task_workflows_project ON task_workflows(project, mode)");
+    })();
+    db.run(`PRAGMA user_version = ${LEDGER_SCHEMA_VERSION - 1}`);
+    insert("M1", "code"); insert("M2", "ui", "manual"); insert("M3", "security", "observe");
+    expect(() => insert("N1", "docs")).toThrow("CHECK constraint failed");
+    const rows = () => db.prepare("SELECT * FROM task_workflows ORDER BY taskId").all();
+    const before = rows();
+    expect(before).toHaveLength(3);
+    closeLedger(path);
+    db = openLedger(path);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(LEDGER_SCHEMA_VERSION);
+    expect((db.prepare("SELECT sql FROM sqlite_master WHERE name = 'task_workflows'").get() as { sql: string }).sql).toContain("'docs'");
+    expect(rows()).toEqual(before);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'task_workflows_project'").get()).toBeTruthy();
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'task_workflows_docs_mig'").get()).toBeNull();
+    insert("N1", "docs");
+    expect(() => insert("N2", "bogus")).toThrow("CHECK constraint failed");
+    expect(() => db.prepare("UPDATE task_workflows SET mode = 'nope' WHERE taskId = 'M1'").run()).toThrow("CHECK constraint failed");
+    const after = rows(), schema = db.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
+    const changes = (db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    migrateWorkflowDocsTemplate(db); // 第二次：什么都不做
+    expect((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n).toBe(changes);
+    expect([rows(), db.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all()]).toEqual([after, schema]);
+    expect(getWorkflow(db, "N1")).toMatchObject({ template: "docs", authorFamily: "codex", specRev: 2, rev: 4 });
   });
 });

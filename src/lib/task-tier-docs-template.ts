@@ -80,7 +80,6 @@ export function useDeliveredFilesPort(fn?: DeliveredFiles): void { filesPort = f
 
 installDeliverTierDeps({
   files: (db, task, head) => filesPort(db, task, head),
-  mode: (project) => taskTierMode(project).mode,
   gate: (db, phase, ctx) => tierCheckGate(db, phase, ctx),
   syncDocs: (project) => syncDocsTemplate(project),
 });
