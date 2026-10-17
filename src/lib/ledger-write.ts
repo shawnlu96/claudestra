@@ -12,6 +12,7 @@ import { requireSharedLedgerTaskStart } from "./shared-ledger-center-claims-gate
 import { updateTask } from "./fix-strategy-task-write.js";
 import { deliverDisputes } from "./review-arbiter-deliver.js";
 import { observeUiDelivery, planUiDelivery, uiReplaySame, type UiDeliverPort } from "./ledger-deliver-ui.js";
+import { deliverTierGate } from "./task-tier-deliver-wiring.js";
 import {
   APPENDABLE_KINDS,
   checkIdFree,
@@ -233,6 +234,7 @@ export function deliver(
   input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; pr?: string; expect?: { rev?: number; branch?: string }; disputes?: unknown;
     uiEvidence?: unknown; ui?: UiDeliverPort },
 ): WriteResult<LedgerTask> {
+  deliverTierGate(db, input.taskId, input.headSHA); // TIER3e：交付阶段类型门控（docs 范围），拒绝即抛、事务前不写
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "deliver" }, () => task, (prev) => uiReplaySame(prev, input.uiEvidence));
