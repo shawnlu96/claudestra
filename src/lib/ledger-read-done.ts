@@ -41,7 +41,7 @@ export interface DoneRest {
   /** 事项 id（没归事项为 ""）→ 各阶段张数：因果画布事项框角的 ✓ N */
   byItem: Record<string, Partial<Record<Stage, number>>>;
 }
-/** 窗口 / 分页 / 聚合读到的几样：TaskView 的子集，完成时刻与审查计数由 ledger-read-fast.ts doneFacts 用 SQL 聚合给出 */
+/** 窗口 / 分页 / 聚合读到的几样：TaskView 的子集，完成时刻与审查计数来自每卡事实表（ledger-read-fast.ts doneFacts） */
 export type DoneFact = Pick<TaskView, "id" | "stage" | "kind" | "itemId" | "updatedAt" | "blockedBy"> & { metrics: Pick<TaskMetrics, "endTs" | "reviewRounds" | "p0" | "p1"> };
 export interface DoneWindow {
   keep: Set<string>;
@@ -116,7 +116,7 @@ export function doneWindow(done: readonly DoneFact[], deps: readonly DepView[], 
 }
 
 /**
- * 总览要显示的卡：没结束的 + 完成窗口。窗口按 SQL 聚合的完成时刻定（ledger-read-fast.ts doneFacts），再只取这些卡的事件和步骤，
+ * 总览要显示的卡：没结束的 + 完成窗口。窗口按每卡事实表的完成时刻定（ledger-read-fast.ts doneFacts），再只取这些卡的事件和步骤，
  * 不读窗口外已完成卡的事件明细。
  */
 export function shownCards(db: Database, project: string, tasks: readonly LedgerTask[], deps: readonly DepView[], dayStart: number) {
@@ -133,7 +133,7 @@ function donePageOf<T extends DoneFact>(done: readonly T[], before: Cursor | nul
   return { page, nextCursor: rest.length > limit ? doneCursor(page.at(-1)!) : null };
 }
 
-/** GET /ledger/:project/done：同一个读事务里先按 SQL 聚合定出这一页，再只取这一页的事件，和总览同一口径算视图（含 attentionFacts）；facts 只给测试注入 */
+/** GET /ledger/:project/done：同一个读事务里先按每卡事实表定出这一页，再只取这一页的事件，和总览同一口径算视图（含 attentionFacts）；facts 只给测试注入 */
 export function donePage(db: Database, project: string, before: Cursor | null, limit: number, now: number, facts?: AttentionCtx): DonePage {
   return db.transaction(() => {
     const tasks = listTasks(db, project);

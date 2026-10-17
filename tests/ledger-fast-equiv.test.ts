@@ -2,7 +2,9 @@
  * agents-LEDGERFAST1：总览 / 已完成分页 / 产品板不再逐条读全部历史事件。
  * [验收线 1] 合成台账（330 张卡、各阶段、完成窗口内外、今天和更早完成、依赖边、导入近似时间、残缺事件，3 万+ 条事件）上，
  *   新读法与下面保留的旧读法（改前 src 原样抄来）JSON.stringify 逐字节相同。
- * [验收线 2] 再给窗口外已结束的卡追加 10 万条历史事件：新读法读进 JS 的行数增幅 ≤ 20%，旧读法跟着历史线性涨。用行数断言，不用墙钟。
+ * [验收线 2] 再给窗口外已结束的卡追加 10 万条历史事件：稳态（PM 补 10-17 22:5x）下新读法总览、产品板各自读进 JS 的行数增幅 ≤ 20%，
+ *   且执行的 SQL 没有一条整表扫 events（EXPLAIN QUERY PLAN 无 SCAN events，读事件只走索引）；旧读法跟着历史线性涨。用行数断言，不用墙钟。
+ * 每卡事实表（ledger-read-fast-memo.ts）：冷启动与命中输出逐字节相同，只给一张卡追加事件后下一次只重读这一张。
  */
 import type { Database, Statement } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -218,15 +220,16 @@ function seed(db: Database): void {
   db.run("UPDATE tasks SET featureId = ? WHERE project = ? AND CAST(substr(id, 2) AS INTEGER) % 5 = 1", [g.id, P]);
 }
 
-/** 读进 JS 的行数：包住 query / prepare 出来的语句，数 all / get / values 的返回行 */
-function counting(db: Database): { db: Database; rows: () => number } {
-  let rows = 0;
-  const wrap = (stmt: Statement) => new Proxy(stmt, {
+/** 读进 JS 的行数与执行过的 SQL：包住 query / prepare 出来的语句，数 all / get / values 的返回行，记下 SQL 和参数 */
+function counting(db: Database): { db: Database; rows: () => number; sqls: () => { sql: string; args: unknown[] }[]; reset: () => void } {
+  let rows = 0, sqls: { sql: string; args: unknown[] }[] = [];
+  const wrap = (stmt: Statement, sql: string) => new Proxy(stmt, {
     get(t, k) {
       const v = Reflect.get(t, k, t);
       if (typeof v !== "function") return v;
-      if (k === "all" || k === "values") return (...a: unknown[]) => { const r = v.apply(t, a) as unknown[]; rows += r.length; return r; };
-      if (k === "get") return (...a: unknown[]) => { const r = v.apply(t, a); if (r) rows++; return r; };
+      if (k === "all" || k === "values") return (...a: unknown[]) => { sqls.push({ sql, args: a }); const r = v.apply(t, a) as unknown[]; rows += r.length; return r; };
+      if (k === "get") return (...a: unknown[]) => { sqls.push({ sql, args: a }); const r = v.apply(t, a); if (r) rows++; return r; };
+      if (k === "run") return (...a: unknown[]) => { sqls.push({ sql, args: a }); return v.apply(t, a); };
       return v.bind(t);
     },
   });
@@ -234,12 +237,25 @@ function counting(db: Database): { db: Database; rows: () => number } {
     get(t, k) {
       const v = Reflect.get(t, k, t);
       if (typeof v !== "function") return v;
-      if (k === "query" || k === "prepare") return (...a: unknown[]) => wrap(v.apply(t, a) as Statement);
+      if (k === "query" || k === "prepare") return (sql: string) => wrap(v.call(t, sql) as Statement, sql);
       return v.bind(t);
     },
   });
-  return { db: proxy, rows: () => rows };
+  return { db: proxy, rows: () => rows, sqls: () => sqls, reset: () => { rows = 0; sqls = []; } };
 }
+
+/** 执行过的 SQL 里有没有整表扫 events 的（EXPLAIN QUERY PLAN 出现 SCAN events）：有就返回那条 SQL */
+function eventScans(db: Database, sqls: readonly { sql: string; args: unknown[] }[]): string[] {
+  const out = new Set<string>();
+  for (const { sql, args } of sqls) {
+    if (!/\bevents\b/.test(sql)) continue;
+    const plan = db.query(`EXPLAIN QUERY PLAN ${sql}`).all(...(args as never[])) as { detail: string }[];
+    if (plan.some((p) => /^SCAN events\b/.test(p.detail))) out.add(sql);
+  }
+  return [...out];
+}
+
+const CARD_ROWS = /kind IN \('stage', 'review'\)/;
 
 const json = (v: unknown) => JSON.stringify(v);
 const facts: AttentionCtx = { frozen: new Set(["T205", "T301"]), spec: (id) => (id === "T290" ? "观察期 2 小时" : null) };
@@ -286,16 +302,55 @@ describe("LEDGERFAST1 总览 / 产品板收窄读法", () => {
     expectSame();
   }, 60_000);
 
-  test("[验收线 2] 追加 10 万条已结束卡的历史：新读法读的行数增幅 ≤ 20%，旧读法线性涨", () => {
-    const measure = () => {
-      const fresh = counting(db), old = counting(db);
+  test("每卡事实表：冷启动与命中输出逐字节相同；只给一张卡追加事件，下一次只重读这一张", () => {
+    const warm = counting(db);
+    const build = (d: Database) => json([projectView(d, P, NOW, DAY_START, facts), d.transaction(() => productBoard(d, P, NOW)).deferred()]);
+    const cold = build(warm.db);
+    warm.reset();
+    expect(build(warm.db)).toBe(cold);
+    expect(warm.sqls().filter((q) => CARD_ROWS.test(q.sql)).length).toBe(0); // 全命中
+    expect(build(counting(db).db)).toBe(cold); // 另一个句柄从冷启动起
+    const shown = new Set(projectView(db, P, NOW, DAY_START, facts).tasks.map((t) => t.id));
+    const [a, b] = listTasks(db, P).filter((t) => compactStage(t.stage) && !shown.has(t.id)).map((t) => t.id);
+    const review = (id: string) => db.run("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, 'agent-r', 'p', ?, 'review', '', ?)", [NOW - 20 * DAY, id!, '{"p0":1,"p1":2}']);
+    review(a!);
+    warm.reset();
+    const view = projectView(warm.db, P, NOW, DAY_START, facts);
+    expect(warm.sqls().filter((q) => CARD_ROWS.test(q.sql)).map((q) => q.args[1])).toEqual([a]);
+    expect(json(view)).toBe(json(oldProjectView(db, P, NOW, DAY_START, facts)));
+    expect(json(view)).not.toBe(json(JSON.parse(cold)[0])); // 窗口外的审查计数跟着变了
+    warm.reset();
+    warm.db.transaction(() => productBoard(warm.db, P, NOW)).deferred();
+    expect(warm.sqls().filter((q) => CARD_ROWS.test(q.sql)).length).toBe(0); // 总览那次已经重读过
+    review(b!);
+    warm.reset();
+    const board = warm.db.transaction(() => productBoard(warm.db, P, NOW)).deferred();
+    expect(warm.sqls().filter((q) => CARD_ROWS.test(q.sql)).map((q) => q.args[1])).toEqual([b]);
+    expect(json(board)).toBe(json(db.transaction(() => oldProductBoard(db, P, NOW)).deferred()));
+  }, 60_000);
+
+  test("[验收线 2] 追加 10 万条已结束卡的历史：稳态下总览、产品板各自读的行数增幅 ≤ 20% 且不整表扫 events，旧读法线性涨", () => {
+    // 新读法用同一个句柄（每卡事实表按库句柄记）；稳态 = 冷启动 / 追加后的第一次之后的请求
+    const fresh = counting(db);
+    const steady = () => {
+      fresh.reset();
       projectView(fresh.db, P, NOW, DAY_START, facts);
+      const view = { rows: fresh.rows(), sqls: fresh.sqls() };
+      fresh.reset();
       fresh.db.transaction(() => productBoard(fresh.db, P, NOW)).deferred();
+      const board = { rows: fresh.rows(), sqls: fresh.sqls() };
+      expect(eventScans(db, view.sqls)).toEqual([]);
+      expect(eventScans(db, board.sqls)).toEqual([]);
+      return { view: view.rows, board: board.rows };
+    };
+    const oldRows = () => {
+      const old = counting(db);
       oldProjectView(old.db, P, NOW, DAY_START, facts);
       old.db.transaction(() => oldProductBoard(old.db, P, NOW)).deferred();
-      return { fresh: fresh.rows(), old: old.rows() };
+      return old.rows();
     };
-    const before = measure();
+    steady(); // 冷启动：逐卡读一遍，随历史线性（可接受）
+    const before = { ...steady(), old: oldRows() };
     const shown = new Set(projectView(db, P, NOW, DAY_START, facts).tasks.map((t) => t.id));
     const history = listTasks(db, P).filter((t) => compactStage(t.stage) && !shown.has(t.id)).map((t) => t.id);
     expect(history.length).toBeGreaterThan(100);
@@ -305,9 +360,11 @@ describe("LEDGERFAST1 总览 / 产品板收窄读法", () => {
       const data = (i: number) => JSON.stringify({ op: "assign", executor: "agent-a", executorKind: "agent", p0: i % 2, p1: 1 });
       for (let i = 0; i < 100_000; i++) ev.run(NOW - 20 * DAY + i, history[i % history.length]!, kinds[i % kinds.length]!, data(i));
     })();
-    const after = measure();
-    console.log(`rows read: new ${before.fresh} → ${after.fresh}, old ${before.old} → ${after.old}`);
-    expect(after.fresh).toBeLessThanOrEqual(before.fresh * 1.2);
+    steady(); // 追加后的第一次：只重读来了新事件的卡
+    const after = { ...steady(), old: oldRows() };
+    console.log(`rows read (steady): view ${before.view} → ${after.view}, board ${before.board} → ${after.board}, old ${before.old} → ${after.old}`);
+    expect(after.view).toBeLessThanOrEqual(before.view * 1.2);
+    expect(after.board).toBeLessThanOrEqual(before.board * 1.2);
     expect(after.old).toBeGreaterThan(before.old * 1.2); // 旧读法在同一条线上是红的
     expectSame(); // 历史变长后仍逐字节相同（窗口外的计数跟着变）
   }, 120_000);
