@@ -24,7 +24,7 @@ import { createRoot } from "react-dom/client";
 import { fetchLedger } from "../../lib/api/ledger";
 import { homeView } from "../../features/collab/collab-model";
 import { MobileList } from "../../features/collab/v4/v4-mobile";
-import { Outline } from "../../features/collab/v4/v4-outline";
+import { Overview } from "../../features/collab/project-tabs/overview-tab";
 import s from "../../features/collab/collab.module.css";
 const tr = (s, vars = {}) => s.replace(/\\{(\\w+)\\}/g, (_, key) => String(vars[key] ?? key)), noop = () => {};
 function App() {
@@ -36,7 +36,7 @@ function App() {
   return <div className={s.tokens + " " + s.root}>
     {location.search.includes("mobile")
       ? <MobileList {...common} todayDone={home.todayDone} now={Date.now()} actionText={() => ""} />
-      : <Outline {...common} filter="done" onFilter={noop} waits={[]} onWaits={noop} selected={null} />}
+      : <Overview project="p" ov={ov} view={home} waits={[]} projectName="p" onPick={noop} tr={tr} />}
   </div>;
 }
 createRoot(document.getElementById("root")).render(<App />);
@@ -104,6 +104,8 @@ for (const theme of ["light", "dark"] as const) for (const mobile of [true, fals
     });
     try {
       await page.goto(`http://done.test/${mobile ? "?mobile" : ""}`);
+      // 桌面是总览的「已完成 N」折叠（PROJTABS1 起大纲删了，翻页搬到这里），先展开；手机是「更早完成」折叠，截完首屏再展开
+      if (!mobile) await page.getByRole("button", { name: /^已完成 \d+$/ }).click();
       await page.getByText("done-000", { exact: true }).waitFor();
       const first = page.getByRole("button").filter({ has: page.getByText("done-000", { exact: true }) });
       if (mobile) expect(await first.locator("[data-step-dots]").count()).toBe(1);

@@ -136,6 +136,8 @@ describe("maintenance fairness and the pass budget", () => {
       const maintenance = { path: join(f.dir, "m.lock"), marker: join(f.dir, "u.marker"), request: join(f.dir, "m.req") };
       const cfg = { ...config, autoDispatch: true };
       // 让锁不归这条测：真的 lockYieldStep 读状态目录的 registry.json，同分片前面的测试留下一份就把 T1 判成停滞、多一次调用
+      // 让锁步（RLOCK2）不属本例：它读共享状态目录的 registry、按真实时钟判停滞，对 fixture 的假时钟里持锁的 T1 会记「本可让锁」，
+      // 同进程前面的测试留下可读的 registry.json 时多出一次 scheduler-lock-yield 调用（main CI shard 5 红）
       const lockYield = async () => [];
       for (let i = 0; i < 3; i++) {
         const r = await schedulerPass(f.db, cfg, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: 25, autoDeps: () => f.tickDeps, lockYield });

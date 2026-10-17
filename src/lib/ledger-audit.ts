@@ -5,6 +5,7 @@
  * 这样取数失败不会把上一轮还开着的异常误标成「已解决」。
  */
 import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
+import { mdnAudit, mdnKey, mdnPm, rolledBackAfter } from "./manual-deliver-notice.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
@@ -282,20 +283,22 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
 }
 
 /**
- * 非 auto 卡交付后没有审查结论（MDN 方向 A）：没有调度器 tick 读它，CLI 交付也不叫醒任何人，所以直接推 PM（不进 DISPATCH_RULES）。
+ * 非 auto 卡交付后没有审查结论（MDN 方向 A）：没有调度器 tick 读它，CLI 交付也不叫醒任何人，所以直接推卡的 PM（不进 DISPATCH_RULES）。
+ * 阈值与去重同人工卡交付提醒（RVF-2，lib/manual-deliver-notice.ts）：交付后 N 分钟；bridge 已给 PM 发过升级的不再推（keep 住）。
  * 有人在审（子审查员在跑、显式绑定的本机审查员主回合在跑）或审查员名单取不到时不推，但 keep 住同一 key：
  * 审查员跑一阵停一阵时，已推过的交付不被关掉再重开重推（tests/ledger-audit-audq1.test.ts）。key = 卡 + 交付 seq，一次交付只推一次。
  */
 const AWAITS_REVIEW: readonly LedgerTask["stage"][] = ["build", "review", "fix"];
 type Reviewing = (t: TaskFacts) => boolean;
-function manualDeliver(t: TaskFacts, reviewing: Reviewing, now: number, emit: Emit, keep: Keep): void {
+function manualDeliver(t: TaskFacts, reviewing: Reviewing, pm: string | null, now: number, emit: Emit, keep: Keep): void {
   const { task, events } = t;
   const d = lastOf(events, ["deliver"]);
   // 按 seq 判「交付之后」：同一毫秒里更早写的旧审查不是这次交付的结论
   if (!d || events.some((e) => e.kind === "review" && e.seq > d.seq) || t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return;
-  if (now - d.ts <= AUDIT_THRESHOLDS.deliverNoReviewMs) return;
-  if (reviewing(t)) return keep("manual_deliver_no_review", [task.id, d.seq]);
-  emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq],
+  if (rolledBackAfter(events, d)) return; // PM 不记审查直接退回：执行者在改，同提醒（RVF-2）
+  if (now - d.ts < mdnAudit.config().pmAfterMs) return; // 满 N 分钟（≥）起推，与 bridge 提醒同一比较
+  if (reviewing(t) || mdnAudit.pushedAt(mdnKey(task.project, task.id, d.seq)) !== null) return keep("manual_deliver_no_review", [task.id, d.seq]);
+  emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq], ...(pm ? { notify: pm } : {}),
     detail: `${task.id}（${t.workflowMode ?? "无 workflow"}，${task.stage}）第 ${task.round} 轮交付 #${d.seq} 已 ${mins(now - d.ts)}，还没有审查结论`,
     suggestion: "manual 卡没有调度器接手：派审查员，或 workflow-resume 交回调度器" });
 }
@@ -561,7 +564,10 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   const reviewing: Reviewing = (t) => !s.reviewers
     || s.reviewers.some((r) => r.taskId.toLowerCase() === t.task.id.toLowerCase() && (r.round === null || r.round === t.task.round))
     || (t.reviewStep?.executorKind === "agent" && turnBusy(agents.get(t.reviewStep.executor), now));
-  for (const t of ts) manualDeliver(t, reviewing, now, emit, keep);
+  // 收件人与人工卡提醒同一选法（mdnPm）：卡上的 PM 优先、不落到调度助理，选中的人不在岗（registry 不是 active）换名单里在岗的
+  const alive = s.agents ? (n: string) => { const a = agents.get(n); return !!a && (a.status === undefined || a.status === "active"); } : undefined;
+  const pmTeam = { pms: s.pms, isDispatcher: auditDispatcherTest(s.team?.dispatcher), ...(alive ? { alive } : {}) };
+  for (const t of ts) manualDeliver(t, reviewing, mdnPm(t.task, pmTeam), now, emit, keep);
   evaluated.push("manual_deliver_no_review");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）

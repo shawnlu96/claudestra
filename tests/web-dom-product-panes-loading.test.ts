@@ -1,8 +1,7 @@
 /**
- * PBL-1：协作视图首帧不再闪「因果线」画布。真 ProductPanes + 真 useProductBoard 挂到 happy-dom（React 19），
- * 产品 DAG 读接口经 CollabSourceContext 注入、由测试手动 resolve / reject，不连真 bridge。
- * MutationObserver 盯住每一次 DOM 变动：加载中到 board 到达之间，「因果线」标签和兜底画布一帧都不许出现。
- * 旧红新绿：main 上 board 未到时 ProductPanes 退到 dag 标签、写「因果线」、渲染 fallback，board 到了再换掉。
+ * PBL-1：协作视图首帧不再闪「因果线」画布。真 MapPane（PROJTABS1 起「项目地图」标签的内容，原 ProductPanes 的产品 DAG 一块）+ 真 useProductBoard
+ * 挂到 happy-dom（React 19），产品 DAG 读接口经 CollabSourceContext 注入、由测试手动 resolve / reject，不连真 bridge。
+ * MutationObserver 盯住每一次 DOM 变动：加载中到 board 到达之间，兜底的因果线画布一帧都不许出现。
  * happy-dom 只在本文件注册、afterAll 注销（guard TESTS_WEB_DOM）。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
@@ -28,7 +27,7 @@ const mod = (p: string) => new URL(`../web/features/${p}`, import.meta.url).href
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let ui: {
-  ProductPanes: (p: Record<string, unknown>) => unknown;
+  MapPane: (p: Record<string, unknown>) => unknown;
   useProductBoard: (project: string, rev: number) => unknown;
   CollabSourceContext: { Provider: unknown };
 };
@@ -43,7 +42,7 @@ beforeAll(async () => {
     import(mod("collab/product/use-product-board.ts")),
     import(mod("collab/team-source-context.ts")),
   ]);
-  ui = { ProductPanes: panes.ProductPanes, useProductBoard: hook.useProductBoard, CollabSourceContext: ctx.CollabSourceContext };
+  ui = { MapPane: panes.MapPane, useProductBoard: hook.useProductBoard, CollabSourceContext: ctx.CollabSourceContext };
 });
 afterAll(async () => { await GlobalRegistrator.unregister(); });
 
@@ -53,7 +52,7 @@ const boardOf = (title: string): ProductBoard => ({
 });
 
 type Load = { status: "loading" } | { status: "absent" } | { status: "ok"; board: ProductBoard };
-/** use-dag-panes 里同样的接线：hook 三态 → ProductPanes 的 board + loading */
+/** use-dag-panes 里同样的接线：hook 三态 → MapPane 的 board + loading */
 const asPaneProps = (l: Load) => ({ board: l.status === "ok" ? l.board : null, loading: l.status === "loading" });
 
 /** 每次调用排一个待定的 promise，测试按顺序 resolve / reject */
@@ -63,14 +62,11 @@ function controlledReader() {
   return { read, calls };
 }
 
-const tabs = (el: El) => Array.from(el.querySelectorAll('[role="tab"]')).map(b => b.textContent);
-const causal = (el: El) => !!el.querySelector("[data-causal]") || tabs(el).includes("因果线");
+const causal = (el: El) => !!el.querySelector("[data-causal]");
 
 const h = (...a: unknown[]) => (React.createElement as (...x: unknown[]) => unknown)(...a);
 const paneBase = () => ({
-  dagBoard: null, featureId: null, tab: "product", setTab: () => {}, onFeature: () => {}, onTask: () => {}, subdag: null,
-  fallback: h("svg", { "data-causal": "1" }, h("path", { d: "M0 0L1 1" })), progress: null, team: h("i", null, "team"),
-  graph: false, narrow: false, now: 0, tr: (s: string) => s,
+  onFeature: () => {}, onTask: () => {}, fallback: h("svg", { "data-causal": "1" }, h("path", { d: "M0 0L1 1" })), narrow: false, now: 0, tr: (s: string) => s,
 });
 
 /** 挂一个根，MutationObserver 记下任何一帧出现过的因果线 */
@@ -89,7 +85,7 @@ function watched() {
 function mount(read: Reader) {
   const source = { product: read };
   function Probe({ project, rev }: { project: string; rev: number }) {
-    return h(ui.ProductPanes, { ...paneBase(), ...asPaneProps(ui.useProductBoard(project, rev) as Load) });
+    return h(ui.MapPane, { ...paneBase(), ...asPaneProps(ui.useProductBoard(project, rev) as Load) });
   }
   const w = watched();
   const render = (project: string, rev: number) => w.show(h(ui.CollabSourceContext.Provider, { value: source }, h(Probe, { project, rev })));
@@ -97,13 +93,12 @@ function mount(read: Reader) {
   return { ...w, render, settle };
 }
 
-test("ProductPanes 直接渲染：加载中 → 真 board，每一帧都没有「因果线」标签和兜底画布", async () => {
+test("MapPane 直接渲染：加载中 → 真 board，每一帧都没有兜底的因果线画布", async () => {
   const w = watched();
-  await w.show(h(ui.ProductPanes, { ...paneBase(), board: null, loading: true }));
+  await w.show(h(ui.MapPane, { ...paneBase(), board: null, loading: true }));
   expect(causal(w.el)).toBe(false);
-  expect(tabs(w.el)[0]).toBe("产品 DAG");
   expect(w.el.querySelector('[role="status"]')?.textContent).toBe("加载中…");
-  await w.show(h(ui.ProductPanes, { ...paneBase(), board: boardOf("真看板"), loading: false }));
+  await w.show(h(ui.MapPane, { ...paneBase(), board: boardOf("真看板"), loading: false }));
   expect(w.el.textContent).toContain("真看板");
   expect(w.el.querySelector('[role="status"]')).toBeNull();
   expect(w.flashed()).toBe(false);
@@ -125,12 +120,11 @@ test("首帧 rev=0（有缓存总览）就开始拉；board 到达前后都不�
   await m.done();
 });
 
-test("确定没有产品 DAG（首次读失败）仍走现有兜底：因果线标签 + 画布", async () => {
+test("确定没有产品 DAG（首次读失败）仍走现有兜底：因果线画布", async () => {
   const { read, calls } = controlledReader();
   const m = mount(read);
   await m.render("p1", 1);
   await m.settle(() => calls[0]!.reject(new Error("404")));
-  expect(tabs(m.el)[0]).toBe("因果线");
   expect(m.el.querySelector("[data-causal]")).not.toBeNull();
   await m.done();
 });
@@ -159,6 +153,6 @@ test("切项目不带上一个项目的 board：新项目先占位，失败走�
   expect(causal(m.el)).toBe(false);
   await m.settle(() => calls.at(-1)!.reject(new Error("404")));
   expect(m.el.textContent).not.toContain("甲项目");
-  expect(tabs(m.el)[0]).toBe("因果线");
+  expect(causal(m.el)).toBe(true);
   await m.done();
 });

@@ -1,4 +1,5 @@
 import { FILE_SCOPE_COMMAND } from "./ledger-resource-scope-cmds.js";
+import { prepareLendOffer, commitLendOffer } from "../lib/lend-memory-prepare-wiring.js";
 import { poolRemotePolicy } from "../lib/scheduler-agent-pool-context.js";
 import { convergenceSpec } from "../lib/fix-strategy-order.js";
 import { convergenceCommands } from "../lib/review-arbiter-commands.js";
@@ -176,11 +177,16 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       } catch (e) { throw new LedgerError("invalid", `--mode / --roles / --local-priority / --repo 不认识：${(e as Error).message}`); }
       const project = getIntent(c.db, intent)?.project ?? "";
       remote = poolRemotePolicy(project, remote, c.deps.lend?.schedulerPolicy?.(project));
-      const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
       await ensureReviewScope(c.db, getIntent(c.db, intent)?.taskId); // 规格外文件在挂池事务外先登记（i28-ASK2）
-      return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
-        intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow, remote, spec: specOf(c, intent), write: await poolWrite(c, intent, remote),
-      }) };
+      const planned = getIntent(c.db, intent), task = planned && getTask(c.db, planned.taskId), spec = specOf(c, intent);
+      const write = await poolWrite(c, intent, remote);
+      const head = task?.stage === "build" && write && !("error" in write) ? write.baseSha ?? null : task?.headSHA ?? null;
+      const prepared = task && planned?.status === "pending" && !poolOrderId(c.db, intent)
+        ? await prepareLendOffer(c.db, task, head, spec, () => specOf(c, intent), c.deps.lend?.memoryPrepare) : null;
+      const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
+      return { ok: true, ...commitLendOffer(c.db, prepared, () => schedulerPoolStep(c.db, c.ctx(), {
+        intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow, remote, spec, write,
+      })) };
     },
   },
   "scheduler-session-bind": {

@@ -26,6 +26,7 @@ import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { orderFamily } from "./scheduler-placement-plan.js";
 import { planScheduler } from "./scheduler-plan.js";
+import { seatLendOffer } from "./scheduler-review-seat-lend.js";
 import { poolLinkKey, poolOrderId, POOL_TIMEOUT_REASON, prCoordinates, strayPoolOrders } from "./scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { cardRepo } from "./card-repo.js";
@@ -107,7 +108,7 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   const text = `挂池：${task.id} 第 ${task.round} 轮${LABEL[role]}挂给 ${peer} 的 ${family} worker（单号 ${order.orderId}）`;
   insertEvent(db, { actor: ctx.actor, now, dedupKey: poolLinkKey(intent.id) }, {
     project: task.project, target: task.id, kind: "scheduler", text,
-    data: { op: "pool_offer", id: intent.id, orderId: order.orderId, peer, family, round: task.round, head: task.headSHA, step: order.step },
+    data: { op: "pool_offer", id: intent.id, orderId: order.orderId, peer, family, round: task.round, head: task.headSHA, step: order.step, ...seatLendOffer(snap, intent.recipient) },
   }, true);
   return { outcome: "pooled", orderId: order.orderId, intent, text };
 }

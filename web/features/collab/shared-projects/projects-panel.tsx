@@ -13,6 +13,7 @@ import { LocalProjectSettings, ProjectSettings } from "./project-settings";
 import { useProjects } from "./use-projects";
 import { ProjectCards } from "./project-cards";
 import { TeamSettings } from "./team-settings";
+import { TeamEntry } from "../team/team-entry";
 
 const NONE: ReadonlySet<string> = new Set();
 /** No team projects on this machine at all (403 = no team binding, 404 / 501 = the bridge has no team projects): the section stays out. */
@@ -40,6 +41,7 @@ export function SharedProjectsPanel({ port, openFeatures, Row, grouped = NONE }:
   return <section className="my-2 space-y-1" aria-label={tr("团队项目")}>
     <div className="flex items-center justify-between gap-2 px-2">
       <h2 className="text-xs font-semibold opacity-60">{tr("团队")}</h2>
+      <TeamEntry snapshot={snapshot} />
       <button type="button" className="btn btn-ghost btn-xs" disabled={!snapshot?.teams.length} onClick={() => setOpened(true)}>{tr("项目设置")}</button>
     </div>
     {!snapshot && !error && <PendingRow />}

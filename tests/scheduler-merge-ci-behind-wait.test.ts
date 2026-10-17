@@ -5,6 +5,12 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test, type Mock } from "bun:test";
 import { assertIn, BOUNCED, HEAD, NOTHING, RUN, withWaitCard, type WaitCard } from "./scheduler-merge-ci-rerun-wait-kit.js";
+import { setOutOfDiffModeSource } from "../src/lib/ci-out-of-diff-rerun.js";
+
+// merge-arch-CIRERUN1 · this file tests other layers of a red CI: the out-of-diff rerun (on by default) is pinned off here,
+// its interplay with them is tests/ci-out-of-diff-rerun.test.ts
+beforeEach(() => setOutOfDiffModeSource(() => "off"));
+afterEach(() => setOutOfDiffModeSource(null));
 
 const STALE = "tests/lend-claude-capacity.test.ts";
 let errors: Mock<typeof console.error>;

@@ -10,6 +10,7 @@ import { headScan, JUDGE_GLOBS } from "./skip-effects-auto-scope.js";
 import { ASK_SCOPE_RULE } from "./ask-scope-auto.js";
 import { scopeMatches } from "./ask-scope-auto-plan.js";
 import { judgeScopeFile } from "./ask-scope-auto-diff.js";
+import { checkTestScopeSize, type TestScopeEvidence } from "./order-ask-test-scope-size.js";
 import type { ScopeProof } from "./ask-scope-auto-proof.js";
 import { scopeProtected, type ScopeGrant } from "./ask-scope-registry.js";
 
@@ -74,9 +75,10 @@ async function checkCandidates(diff: ScopeDiff, task: LedgerTask, head: string, 
 
 /** Called beside SKIPAUTO1. Keep the original file list so a later policy rollback cannot hide delivered changes. */
 export async function checkDeliveredScope(db: Database, task: LedgerTask, head: string, diff: ScopeDiff, files: ScopeFile[], policy: RecoveryPolicyPort):
-  Promise<{ askScopeAuto?: { rule: string; head: string; base: string; files: CheckedFile[] } }> {
+  Promise<{ askScopeAuto?: { rule: string; head: string; base: string; files: CheckedFile[] }; askScopeTests?: TestScopeEvidence }> {
+  const tests = await checkTestScopeSize(db, task, head, diff);
   const candidates = grantsFor(db, task).filter((c) => files.some((f) => f.path === c.grant.path));
-  if (!candidates.length || policy(task.project, "askScopeAuto").mode !== "on") return {};
+  if (!candidates.length || policy(task.project, "askScopeAuto").mode !== "on") return tests;
   let checked: CheckedFile[];
   try {
     if (!diff.filesComplete || !diff.objects || privateCardRepo(task)) throw new Error("完整 diff / Git 对象不可用或不是本仓卡");
@@ -93,7 +95,7 @@ export async function checkDeliveredScope(db: Database, task: LedgerTask, head: 
     checked = candidates.map(({ askId, grant }) => ({ ...files.find((f) => f.path === grant.path)!, askId,
       kind: grant.kind, check: grant.check, granted: false, reason: (e as Error).message.slice(0, 300) }));
   }
-  return { askScopeAuto: { rule: ASK_SCOPE_RULE, head, base: diff.base, files: checked } };
+  return { ...tests, askScopeAuto: { rule: ASK_SCOPE_RULE, head, base: diff.base, files: checked } };
 }
 
 export { describeDeliveredScope } from "./ask-scope-auto-display.js";

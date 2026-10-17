@@ -4,7 +4,7 @@
  * which only the tick calls after the ledger claimed the run's single rerun. tests/main-red-fix-gh.test.ts.
  */
 import { runBounded } from "./run-bounded.js";
-import { LOG_LIMIT } from "./scheduler-merge-ci-log-read.js";
+import { LOG_LIMIT, readPerJobLog } from "./scheduler-merge-ci-log-read.js";
 import type { MainRedRun } from "./main-red-fix.js";
 
 type Command = typeof runBounded;
@@ -21,6 +21,11 @@ export interface MainRedGh {
   failedJobs(repo: string, runId: number, attempt: number): Promise<string[]>;
   /** The failed jobs' log; null when it is too long to judge (never re-run on a truncated log). */
   failedLog(repo: string, runId: number, attempt: number): Promise<string | null>;
+  /**
+   * failedLog came back too long: each failed job's log read on its own and cut to what the parser needs (readPerJobLog, the merge
+   * gate's ciLogPerJob reader). Throws when a job cannot be read whole; a throw is "cannot tell", never "no failure".
+   */
+  jobLogs(repo: string, runId: number, attempt: number): Promise<string>;
   /** PR numbers merged into main by this commit. */
   commitPulls(repo: string, sha: string): Promise<number[]>;
   rerunFailed(repo: string, runId: number): Promise<void>;
@@ -59,6 +64,9 @@ export function mainRedGh(command: Command = runBounded, cwd?: string): MainRedG
     async failedLog(repo, runId, attempt) {
       const r = await gh(["run", "view", String(runId), "--repo", repo, "--attempt", String(attempt), "--log-failed"], LOG_LIMIT);
       return r.truncated || Buffer.byteLength(r.stdout) >= LOG_LIMIT ? null : r.stdout;
+    },
+    async jobLogs(repo, runId, attempt) {
+      return (await readPerJobLog((argv, o) => command(argv, { ...o, cwd }), repo, String(runId), attempt)).log;
     },
     async commitPulls(repo, sha) {
       const raw = await json(["api", "-H", "Accept: application/vnd.github+json", `repos/${repo}/commits/${sha}/pulls`]);

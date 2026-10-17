@@ -2,9 +2,10 @@
  * ACP 会话配置项（session/new|load 的 configOptions、set_config_option 的返回、config_option_update）。
  * codex-acp 的 configId：mode / collaboration_mode / model / reasoning_effort（模型支持才有）/ fast-mode（同上）；
  * 都是 select，选项是平铺的 {value, name, description}。值不在选项里适配器回 -32602，所以先在这里挡。
- * 额度卡的选项也从这里来（owner 定的规矩：额度菜单不替他选、也不推荐）：第一个是「等重置」，后面只列 configOptions
- * 里的模型，当前模型不列（切过去等于没切）。tests/acp-config.test.ts。
+ * 额度卡的选项也从这里来（Codex / Pi 共用）：第一个是「等重置」，后面只列真能走通的模型——同 provider、已知同样到顶的不列，
+ * 同系列排前、标推荐（规则在 quota-fallback.ts）。tests/acp-config.test.ts、tests/quota-fallback.test.ts。
  */
+import { usableModels } from "./quota-fallback.js";
 
 interface ConfigChoice {
   value: string;
@@ -78,10 +79,14 @@ export interface QuotaChoice {
   label: string;
 }
 
-export function quotaCardChoices(opts: readonly ConfigOption[], resetHint?: string): QuotaChoice[] {
+/** walled = 已知到顶的 provider（bridge/acp-quota.ts 给）；当前模型自己的 provider 不用传，总是不列 */
+export function quotaCardChoices(opts: readonly ConfigOption[], resetHint?: string, walled: readonly string[] = []): QuotaChoice[] {
   const model = opts.find((o) => o.id === MODEL_CONFIG_ID);
   const wait: QuotaChoice = { value: null, label: resetHint ? `等重置（${resetHint}）` : "等重置" };
   if (!model) return [wait];
-  const others = model.choices.filter((c) => c.value !== model.currentValue);
-  return [wait, ...others.map((c) => ({ value: c.value, label: c.name === c.value ? `切到 ${c.value}` : `切到 ${c.name}（${c.value}）` }))];
+  const { usable, recommended } = usableModels(model.currentValue, model.choices, walled);
+  return [wait, ...usable.map((c, i) => {
+    const tag = recommended && i === 0 ? "（推荐）" : "";
+    return { value: c.value, label: c.name === c.value ? `切到 ${c.value}${tag}` : `切到 ${c.name}（${c.value}）${tag}` };
+  })];
 }

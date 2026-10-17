@@ -27,7 +27,7 @@ export function reviewsAfterSwap(events: readonly LedgerEvent[]): LedgerEvent[] 
   return events.filter((e) => e.kind === "review" && e.seq > after);
 }
 
-function independentReviewer(s: PlannerSnapshot): boolean {
+export function independentReviewer(s: PlannerSnapshot): boolean {
   const r = s.reviewer;
   return !!r && r.taskId === s.task.id && !!r.agent && !!r.sessionId && r.family !== s.workflow?.authorFamily &&
     r.agent !== s.author?.agent && r.agent !== s.task.agent && (!securityReviewLocalOnly(s.workflow, s.securityPool) || r.source === "local");

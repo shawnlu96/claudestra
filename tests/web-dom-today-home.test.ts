@@ -32,7 +32,7 @@ let ui: {
   ChatStoreProvider: (p: { children: unknown }) => unknown; useChatStoreApi: () => Store;
   ChatNavContext: { Provider: (p: { value: unknown; children: unknown }) => unknown };
   asksStore: { refresh(): Promise<void>; closeDrawer(): void; get(): { open: boolean; focus: string | null } };
-  useCollabNav: () => { project: string | null; task: string | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
+  useCollabNav: () => { project: string | null; task: string | null; view: "team" | null }; closeCollab: () => void; unmountOpenViewGuard: () => void;
   TODAY_KEY: string; resetLedgers: () => void;
 };
 
@@ -137,7 +137,7 @@ async function mount(part: "main" | "strip" | "shell", width = 1280) {
   setContextRequestForTest(null);
   await React.act(async () => ui.closeCollab());
   ui.asksStore.closeDrawer();
-  const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null } as { project: string | null; task: string | null } };
+  const seen = { toContent: 0, store: null as Store | null, nav: { project: null, task: null, view: null } as { project: string | null; task: string | null; view: "team" | null } };
   const h = React.createElement as (...a: unknown[]) => unknown;
   function Probe() {
     seen.store = ui.useChatStoreApi();
@@ -244,7 +244,7 @@ test("[验收线 4] 点『卡住了』一行：collab-nav 是 {该项目, 该任
   const v = await mount("main");
   await until(() => v.all("[data-now-stuck-row]").length === 3, "stuck rows");
   await v.click(v.host.querySelector("[data-now-stuck-row='proj-b/B1']"), "stuck row");
-  expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1" });
+  expect(v.seen.nav).toEqual({ project: "proj-b", task: "B1", view: null });
   expect(v.seen.toContent).toBe(1);
   await React.act(async () => ui.closeCollab());
   await tick();
@@ -252,7 +252,7 @@ test("[验收线 4] 点『卡住了』一行：collab-nav 是 {该项目, 该任
   const w = await mount("main");
   await until(() => w.all("[data-now-wait-task]").length === 1, "wait task");
   await w.click(w.host.querySelector("[data-now-wait-task=A1]"), "view task");
-  expect(w.seen.nav).toEqual({ project: "proj-a", task: "A1" });
+  expect(w.seen.nav).toEqual({ project: "proj-a", task: "A1", view: null });
   await React.act(async () => ui.closeCollab());
   await tick();
   await w.unmount();
@@ -275,6 +275,92 @@ test("[验收线 4] 桌面点侧栏条『整页』：主区盖出今天页；再
   await v.click(master(), "session row again");
   expect(v.seen.nav.project).toBeNull();
   await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed");
+  await v.unmount();
+});
+
+/** 在 window 上按一下 Esc；target 给了就从那个元素冒泡上来（输入框里按） */
+type KeyEv = Event & { preventDefault(): void };
+const keyWin = () => globalThis as unknown as { window: EventTarget & { KeyboardEvent: new (t: string, i: object) => KeyEv } };
+const escEvent = () => new (keyWin().window.KeyboardEvent)("keydown", { key: "Escape", bubbles: true, cancelable: true });
+async function pressEsc(target?: El, ev: KeyEv = escEvent()) {
+  await React.act(async () => { (target as unknown as EventTarget | undefined)?.dispatchEvent(ev) ?? keyWin().window.dispatchEvent(ev); });
+  await tick(30);
+}
+
+test("[验收线 1] 整页层有『返回』：点了 project 回 null、原来的会话照旧；Esc 同样关；输入框里的 Esc 不关", async () => {
+  win.localStorage.clear();
+  const v = await mount("shell");
+  await until(() => !!v.host.querySelector("[data-now=strip] [data-now-full]"), "full button");
+  const master = () => v.all("button").find((b) => (b.textContent ?? "").includes("大总管") && !b.closest?.("[data-now]"));
+  await until(() => !!master(), "master row");
+  await v.click(master(), "master row");
+  await until(() => !!v.seen.store!.state.activeAgent, "open master");
+  const picked = v.seen.store!.state.activeAgent;
+  await until(() => !v.host.querySelector("[data-now=page]"), "chat main");
+  const open = async () => {
+    await v.click(v.host.querySelector("[data-now=strip] [data-now-full]"), "full page");
+    await until(() => !!v.host.querySelector("main [data-now=page] [data-now-back]"), "back button");
+  };
+  await open();
+  const back = v.host.querySelector("main [data-now=page] [data-now-back]")!;
+  expect((back.textContent ?? "").trim()).toBe("返回");
+  expect(back.querySelector("svg")).not.toBeNull();
+  await v.click(back, "back");
+  expect(v.seen.nav.project).toBeNull();
+  await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed by back");
+  expect(v.seen.store!.state.activeAgent).toBe(picked);
+  // Esc 关
+  await open();
+  await pressEsc();
+  expect(v.seen.nav.project).toBeNull();
+  await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed by esc");
+  // 输入框里的 Esc、已被别人处理过的 Esc：不关
+  await open();
+  const input = doc.createElement("input");
+  doc.body.appendChild(input);
+  await pressEsc(input);
+  input.remove();
+  const handled = escEvent();
+  handled.preventDefault();
+  await pressEsc(undefined, handled);
+  expect(v.seen.nav.project).toBe(ui.TODAY_KEY);
+  await React.act(async () => ui.closeCollab());
+  await until(() => !v.host.querySelector("main [data-now=page]"), "overlay closed");
+  await v.unmount();
+  // 卸载后不再听：Esc 不动 collab 状态
+  await pressEsc();
+  expect(v.seen.nav.project).toBeNull();
+});
+
+test("[验收线 1] 整页里点『看用量』弹出的用量看板（CenteredModal，.overlay-in）开着时，Esc 不关底下的今天页", async () => {
+  win.localStorage.clear();
+  const v = await mount("shell");
+  await until(() => !!v.host.querySelector("[data-now=strip] [data-now-full]"), "full button");
+  await v.click(v.host.querySelector("[data-now=strip] [data-now-full]"), "full page");
+  await until(() => !!v.host.querySelector("main [data-now=page] [data-now-usage]"), "usage button");
+  await v.click(v.host.querySelector("main [data-now=page] [data-now-usage]"), "usage");
+  const panel = () => doc.body.querySelector(".overlay-in .panel-pop");
+  await until(() => !!panel(), "usage modal");
+  await pressEsc(panel()!);
+  await pressEsc();
+  expect(v.seen.nav.project).toBe(ui.TODAY_KEY);
+  expect(panel()).not.toBeNull();
+  expect(v.host.querySelector("main [data-now=page]")).not.toBeNull();
+  // 弹窗收起后 Esc 照常关整页
+  await React.act(async () => (doc.body.querySelector(".overlay-in") as unknown as { click(): void }).click());
+  await until(() => !panel(), "usage modal closed");
+  await pressEsc();
+  expect(v.seen.nav.project).toBeNull();
+  await v.unmount();
+});
+
+test("[验收线 2] 空状态主区里的今天页没有返回按钮，Esc 也不改 collab 状态", async () => {
+  const v = await mount("main");
+  await until(() => !!v.host.querySelector("[data-now=page] h2"), "empty-state page");
+  expect(v.host.querySelector("[data-now-back]")).toBeNull();
+  await pressEsc();
+  expect(v.seen.nav.project).toBeNull();
+  expect(v.host.querySelector("[data-now=page]")).not.toBeNull();
   await v.unmount();
 });
 

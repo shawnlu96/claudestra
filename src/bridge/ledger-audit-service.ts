@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { auditNoticeText } from "../lib/ledger-audit.js";
 import { auditResult, readAuditFailureTargets, type AuditFailureKind, type AuditFailureTarget } from "../lib/ledger-audit-failure.js";
 import { ackRefArg, type StoredFinding } from "../lib/ledger-audit-store.js";
+import { executorIdleNote } from "../lib/ledger-audit-snapshot.js";
 import { openLedger } from "../lib/ledger-store.js";
 import { pmNoticeLevel } from "../lib/pm-notice-level.js";
 import { auditTodoPort, type AuditTodoPort } from "../lib/pm-todo-audit.js";
@@ -21,6 +22,7 @@ import { newMessageId, newThreadId, type Envelope } from "./router.js";
 import { probeTurn } from "./turn-probe.js";
 import { ledgerAuditEscalator } from "./ledger-audit-escalate.js";
 import { ledgerAuditFailures, type AuditNoticeIdentity, type AuditNoticeReceipt } from "./ledger-audit-failure.js";
+import { serialMdn, startManualDeliverNotice } from "./manual-deliver-notice.js";
 
 const INTERVAL_MS = 15 * 60_000;
 /** 启动后多久跑第一轮：给 channel-server 重连留时间，否则收件人都算不在线 */
@@ -45,9 +47,23 @@ export interface LedgerAuditDeps {
   failureTargets?: () => AuditFailureTarget[];
   /** 单测注入：pmTodoPull 开关与 pm-todo 写口；不给 = 恢复策略 + 本机台账 */
   pmTodo?: AuditTodoPort;
+  /** 单测注入：executor_idle 补的两个时长 + 开工单投递状态（RESTATEGO1）；不给 = 本机台账 + 会话记录 */
+  idleNote?: (f: StoredFinding) => Promise<string | null>;
 }
 
 type Pending = StoredFinding & { fallback?: string };
+
+/** RESTATEGO1：executor_idle 推送前接上 executorIdleNote；读不到 / 恢复键 off = 原文（推送与 ack 用的 key 不变） */
+async function withIdleNotes(d: LedgerAuditDeps, list: Pending[]): Promise<Pending[]> {
+  if (!list.some((f) => f.rule === "executor_idle")) return list;
+  // openLedger() 返回进程级缓存连接，bridge 里所有台账读写共用：这里不能 close，关了整个 bridge 都报 closed database
+  const note = d.idleNote ?? ((f: StoredFinding) => executorIdleNote(openLedger(), f, Date.now()));
+  return Promise.all(list.map(async (f) => {
+    if (f.rule !== "executor_idle") return f;
+    const extra = await note(f).catch((e) => { console.error(`⚠️ 台账巡检：${f.taskId} 空闲时长没补上，原文照推：${(e as Error).message}`); return null; });
+    return extra ? { ...f, detail: `${f.detail}（${extra}）` } : f;
+  }));
+}
 type Sent = AuditNoticeReceipt;
 /** 调度助理连着这么多轮推不出去（不在线 / 投递失败），审查类的就改推 PM */
 const FALLBACK_AFTER = 2;
@@ -142,6 +158,13 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
   return async () => {
     if (running) return;
     running = true;
+    try {
+      await serialMdn(round); // RVF-2：与人工卡交付提醒串行，同一次交付不会两边各推 PM 一次
+    } finally {
+      running = false;
+    }
+  };
+  async function round(): Promise<void> {
     let failureKind: AuditFailureKind = "manager_failed";
     try {
       const raw = await d.runManager("ledger", "audit", "--json");
@@ -153,7 +176,7 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
       for (const to of [...misses.keys()]) if (online(d, to)) misses.delete(to); // 调度助理回来了：审查类的推回给它
       const byTo = new Map<string, Pending[]>();
       const add = (f: Pending) => byTo.set(recipientOf(f), [...(byTo.get(recipientOf(f)) ?? []), f]);
-      const pending = ((r.pending ?? []) as Pending[]).filter((f) => f.notify);
+      const pending = await withIdleNotes(d, ((r.pending ?? []) as Pending[]).filter((f) => f.notify));
       const pms = pending.length ? pmsOf() : new Map<string, string>(), modes = new Map<string, string>();
       const pulled: Pending[] = [], watched: Pending[] = [];
       for (const f of pending) {
@@ -194,10 +217,8 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
       if (!failing) console.error(`⚠️ 台账巡检出错（恢复前不再重复报）: ${(e as Error).message}`);
       failing = true;
       await pmNoticeLevel.run("action", () => failures.fail(failureKind)); // 巡检自身失败：action 级，照旧推送
-    } finally {
-      running = false;
     }
-  };
+  }
 }
 
 let started = false;
@@ -207,6 +228,7 @@ export function startLedgerAudit(d: LedgerAuditDeps): void {
   if (started) return;
   started = true;
   const tick = ledgerAuditTicker(d);
+  startManualDeliverNotice(`bun ${join(REPO_ROOT, "src/manager.ts")}`); // RVF-2：人工卡交付提醒，与巡检 manual_deliver_no_review 共用阈值和去重
   setTimeout(() => {
     void tick();
     setInterval(() => void tick(), INTERVAL_MS).unref?.();

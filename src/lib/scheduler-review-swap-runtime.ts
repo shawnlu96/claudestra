@@ -27,6 +27,8 @@ import { retryCleanCreate } from "./scheduler-create-retry.js";
 import { freshFallback, lastFallbackSeq } from "./scheduler-review-fallback.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
+import { tierCreate } from "./card-role-definitions.js";
+import { bindTierSession, reviewerTierCtx } from "./task-tier-models.js";
 
 type Manager = AutoTickDeps["manager"];
 export interface ReviewSwapDeps {
@@ -93,12 +95,14 @@ export async function createReplacement(db: Database, task: LedgerTask, family: 
   const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer",
     "--purpose", "作者家族变更后的独立复验"];
   if (family === "codex") args.push("--runtime", "codex", "--transport", "acp");
-  const r = await agent(...args);
+  const tier = reviewerTierCtx(db, task); // TIER3：换会话的审查员同样按卡的类型选模型、核对规格卡首声明（off = null，原样）
+  const r = await (tier ? tierCreate(agent, tier, "reviewer") : agent)(...args);
   if (r.ok !== true) return { kind: "unknown", reason: oneLine(`新审查会话创建未确认：${String(r.error)}`) };
   for (let n = 0; n < 20; n++) {
     active();
     const row = readRegistryAgentsSync().find((a) => a.name === name);
     if (row?.sessionId && row.sessionId !== old?.sessionId) {
+      bindTierSession(db, task, name, row.sessionId, "reviewer");
       return { kind: "ready", created: true,
       ref: { taskId: task.id, role: "reviewer", agent: name, sessionId: row.sessionId, family, transport: row.transport === "acp" ? "acp" : "tmux" } };
     }

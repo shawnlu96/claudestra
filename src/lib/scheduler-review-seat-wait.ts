@@ -13,6 +13,7 @@ import { placementHistory } from "./scheduler-placement-tried.js";
 import { privateRepoOf } from "./scheduler-foreign-repo.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
+import { SEAT_LEND_KEY, seatLendNote } from "./scheduler-review-seat-lend.js";
 
 const MECHANISM = "reviewSeatIdle", WAIT_MS = 20 * 60_000;
 interface Ports { manager(...args: string[]): Promise<Record<string, unknown>>; now(): number; recoveryPolicy?: RecoveryPolicyPort }
@@ -20,8 +21,8 @@ interface WaitClock { window: string; since: number }
 const clocks = new WeakMap<Database, Map<string, WaitClock>>();
 const key = (task: LedgerTask, actionKey: string) => observeDedupKey({ project: task.project, mechanism: MECHANISM, target: task.id, actionKey });
 
-async function record(ports: Ports, task: LedgerTask, actionKey: string, action: string, data: Record<string, unknown>): Promise<boolean> {
-  const r = await ports.manager("ledger", "scheduler-recovery-observe", task.id, "--mechanism", MECHANISM,
+async function record(ports: Ports, task: LedgerTask, actionKey: string, action: string, data: Record<string, unknown>, mechanism = MECHANISM): Promise<boolean> {
+  const r = await ports.manager("ledger", "scheduler-recovery-observe", task.id, "--mechanism", mechanism,
     "--action-key", actionKey, "--action", action, "--data", JSON.stringify(data));
   if (r.ok !== true) console.error(`[scheduler-review-seat] ${task.id} 等槽记录失败，下轮重试：${String(r.error)}`);
   return r.ok === true;
@@ -114,6 +115,8 @@ function waitSince(db: Database, task: LedgerTask, s: PlannerSnapshot, family: A
 
 /** Only the threshold diagnostic is durable; below twenty minutes no wait note, creation or dispatch is written. */
 export async function trackReviewSeatWait(db: Database, task: LedgerTask, s: PlannerSnapshot, plan: PlannerDecision, ports: Ports): Promise<void> {
+  const lend = seatLendNote(db, task, s, plan, ports); // REVSEAT1: the lend window's durable clock (scheduler-review-seat-lend.ts)
+  if (lend) await record(ports, task, lend.actionKey, lend.action, lend.data, SEAT_LEND_KEY);
   const family = s.workflow?.authorFamily === "claude" ? "codex" : "claude";
   const inFlight = db.query(`SELECT 1 FROM scheduler_intents WHERE taskId=? AND action='review'
     AND status IN ('pending','submitted','unknown')`).get(task.id);
