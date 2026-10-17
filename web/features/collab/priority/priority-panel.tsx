@@ -4,20 +4,20 @@ import { ApiError } from '@/lib/api/client';
 import { answerAskCard } from '@/lib/api/asks';
 import { fetchPriorityHistory, priorityResult, requestPriority, type PanelRow, type PriorityBand, type PriorityChange,
   type PriorityHistoryEntry, type PrioritySnapshot } from '@/lib/api/priority';
-import { ownerWordsTr, PRIORITY_WORDS as W } from '@/lib/owner-words';
+import { ownerWordsTr, priorityHistoryText, prioritySystemText, PRIORITY_WORDS as W } from '@/lib/owner-words';
 import { useLang } from '@/lib/i18n';
 import { PriorityRow } from './priority-row';
 import s from './priority-panel.module.css';
 
 const modes = { off: W.off, observe: W.observe, on: W.on };
 const expandedPages = new Map<string, boolean>();
-type Prepared = { askId: string; label: string; choice: string; change: PriorityChange };
+type Prepared = { askId: string; choice: string; change: PriorityChange; observe: boolean };
 export interface PriorityPanelProps {
   project: string | null; now: number; data: PrioritySnapshot | null; error: string; stale: boolean; reload: () => Promise<void>;
   onNode: (feature: string, node: string) => void; onTask: (task: string) => void;
 }
 export function PriorityPanel({ project, now, data, error, stale, reload, onNode, onTask }: PriorityPanelProps) {
-  const tr = ownerWordsTr(useLang());
+  const language = useLang(), tr = ownerWordsTr(language);
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -45,7 +45,7 @@ export function PriorityPanel({ project, now, data, error, stale, reload, onNode
     if (!writable || !project || !data) return;
     setBusy(true); setNotice(''); setPrepared(null);
     const change: PriorityChange = { target: row.target, rev: row.priority.rev, operation, band, snapshot: data.version, observedAt: data.now };
-    try { const got = await requestPriority(project, change); setPrepared({ ...got, change }); setWords(''); }
+    try { const got = await requestPriority(project, change); setPrepared({ ...got, change, observe: !!observe }); setWords(''); }
     catch (e) { showError(e); }
     finally { setBusy(false); }
   };
@@ -69,6 +69,9 @@ export function PriorityPanel({ project, now, data, error, stale, reload, onNode
     try { setHistory((await fetchPriorityHistory(project)).history); }
     catch (e) { showError(e); }
   };
+  const action = prepared && (prepared.change.operation === 'set'
+    ? tr(W.setBand, { band: tr(W[prepared.change.band ?? 'now']) })
+    : tr(prepared.change.operation === 'clear' ? W.inherit : prepared.change.operation === 'up' ? W.moveUp : W.moveDown));
   return <section className={s.panel} aria-label={tr(W.heading)} data-priority-panel>
     <details ref={rememberOpen} onToggle={e => {
       const key = `priority-panel:${location.pathname}:${project}`, expanded = e.currentTarget.open;
@@ -90,7 +93,7 @@ export function PriorityPanel({ project, now, data, error, stale, reload, onNode
         <button type="button" onClick={() => void toggleHistory()} aria-expanded={historyOpen}>{tr(W.history)}</button>
       </div>
     {observe && <p className={s.info}>{tr(W.observeInfo)}</p>}
-    {(error || stale) && <p role="alert" className={s.warning}>{data ? tr(W.expired) : tr(W.retry)} {error}</p>}
+    {(error || stale) && <p role="alert" className={s.warning}>{data ? tr(W.expired) : tr(W.retry)} {prioritySystemText(error, W.readFailed, language)}</p>}
     {!project && <p className={s.warning}>{tr(W.unbound)}</p>}
     {project && !data && !error && <div className={s.loading} role="status">{tr(W.loading)}</div>}
     {data && !stale && !error && data.rows.length === 0 && <p className={s.empty}>{tr(W.empty)}</p>}
@@ -98,14 +101,14 @@ export function PriorityPanel({ project, now, data, error, stale, reload, onNode
       now={now} threshold={data.stallThresholdMs}
       disabledReason={stale || error ? tr(W.expiredRetry) : busy ? tr(W.busy) : tr(W.unavailable)}
       owner={data.canWrite} writable={writable} observe={observe} open={open} prepare={prepare} />)}</div>
-    {prepared && <div className={s.confirm} role="group" aria-label={tr(W.confirmRequest)}><strong>{prepared.label}</strong>
+    {prepared && <div className={s.confirm} role="group" aria-label={tr(W.confirmRequest)}><strong>{prepared.observe ? tr(W.sessionAction, { action: action! }) : action}</strong>
       <p>{tr(W.target, { id: prepared.change.target.id + ('nodeKey' in prepared.change.target ? ` / ${prepared.change.target.nodeKey}` : ''), rev: prepared.change.rev })}</p>
       <label>{tr(W.extra)}<input value={words} onChange={e => setWords(e.target.value)} maxLength={600} disabled={busy} /></label>
       <button type="button" disabled={!writable} onClick={() => void confirm()}>{tr(observe ? W.confirmRecord : W.confirmApply)}</button>
       <button type="button" disabled={busy} onClick={() => setPrepared(null)}>{tr(W.collapse)}</button></div>}
-    {notice && <p role="status" className={s.info}>{tr(notice)}</p>}
+    {notice && <p role="status" className={s.info}>{prioritySystemText(notice, W.failed, language)}</p>}
     {historyOpen && <div className={s.history} aria-label={tr(W.history)}>{history === null ? tr(W.loadingHistory) : history.length ? history.slice(-40).reverse().map(e => <p key={e.seq}>
-      <time>{new Date(e.ts).toLocaleString()}</time> · {e.actor} · {e.text || e.data.ownerWords || e.data.op}</p>) : tr(W.noHistory)}</div>}
+      <time>{new Date(e.ts).toLocaleString()}</time> · {e.actor} · {priorityHistoryText(e.text || e.data.ownerWords || e.data.op || '', language)}</p>) : tr(W.noHistory)}</div>}
     </details>
   </section>;
 }

@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 import type { PanelRow, PriorityBand, PriorityChange } from '@/lib/api/priority';
-import { ownerWordsTr, PRIORITY_WORDS as W, stageWord } from '@/lib/owner-words';
+import { ownerWordsTr, prioritySystemText, PRIORITY_WORDS as W, stageWord } from '@/lib/owner-words';
 import { useLang } from '@/lib/i18n';
 import s from './priority-panel.module.css';
 const bands: Record<PriorityBand, string> = { now: W.now, next: W.next, later: W.later };
@@ -18,21 +18,25 @@ interface Props {
   open: (row: PanelRow) => void; prepare: (row: PanelRow, op: PriorityChange['operation'], band?: PriorityBand) => Promise<void>;
 }
 export function PriorityRow({ row, index, total, now, threshold, owner, writable, observe, disabledReason, open, prepare }: Props) {
-  const tr = ownerWordsTr(useLang());
+  const language = useLang(), tr = ownerWordsTr(language);
   const [menu, setMenu] = useState(false);
   const state = tr(states[row.state] ?? W.unknown);
   const source = tr(row.priority.source === 'explicit' ? W.sourceExplicit : row.priority.source === 'feature' ? W.sourceModule : W.sourceSystem);
+  const reason = prioritySystemText(row.reason, states[row.state] ?? W.unknown, language);
+  const module = row.feature ?? row.priority.inheritedFrom ?? (row.featureId || (row.priority.source === 'feature' ? tr(W.unnamedModule) : tr(W.noModule)));
+  const note = row.priority.source === 'system' ? prioritySystemText(row.priority.note ?? '', W.sourceSystem, language) : row.priority.note;
+  const sourceDetail = [module, note].filter(Boolean).join(' · ');
   const stalled = row.since !== null && now - row.since > threshold;
   const choose = (op: PriorityChange['operation'], band?: PriorityBand) => { setMenu(false); void prepare(row, op, band); };
   return <article className={s.row} data-state={row.state} data-stalled={stalled}>
-    <button type="button" className={s.open} onClick={() => open(row)} title={tr(W.moduleTitle, { title: row.title, module: row.feature ?? tr(W.noModule) })}>
+    <button type="button" className={s.open} onClick={() => open(row)} title={tr(W.moduleTitle, { title: row.title, module })}>
       <span className={s.rank}>{index + 1}</span><span><strong>{row.title}</strong>
         <small>{row.taskId ? `${row.taskId} · ${tr(stageWord(row.stage))}` : tr(W.plannedNode, { key: row.nodeKey ?? '' })}</small></span>
     </button>
-    <div className={s.state} title={tr(row.reason)}><span>{state}</span>{tr(row.reason) !== state && <small>{tr(row.reason)}</small>}</div>
+    <div className={s.state} title={reason}><span>{state}</span>{reason !== state && <small>{reason}</small>}</div>
     <span className={s.duration} title={tr(W.durationTitle, { h: threshold / 3600000 })}>
       {stalled ? tr(W.stalled) : ''}{duration(row.since, now, tr)}</span>
-    <span className={s.source} title={tr(W.sourceTitle, { source, module: row.feature ?? tr(W.noModule) })}>
+    <span className={s.source} title={tr(W.sourceTitle, { source, module: sourceDetail })}>
       <small>{tr(W.sourceLabel)}</small>{source}</span>
     <span className={s.order}><small>{tr(W.order)}</small>{row.priority.order === null ? tr(W.defaultOrder) : row.priority.order + 1}</span>
     {owner && <div className={s.actions} aria-label={tr(W.actions, { title: row.title })} title={!writable ? disabledReason : undefined}>

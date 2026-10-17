@@ -112,6 +112,17 @@ export const PRIORITY_WORDS = {
   sourceSystem: "系统缺省",
   moduleTitle: "{title}\n模块：{module}",
   noModule: "不属于任何模块",
+  unnamedModule: "所属模块名称未知",
+  dependencyDetail: "等待依赖：{refs}",
+  externalUnknown: "外部结果不明，需核实",
+  noReliableState: "数据未知：尚无可靠的执行或等待状态",
+  plannedUnknown: "未绑卡计划：开工及停滞数据未知",
+  externalResult: "外部结果不明",
+  capacityFull: "本机容量已满",
+  setBand: "改为{band}",
+  sessionAction: "本会应用：{action}",
+  moveUp: "同档前移",
+  moveDown: "同档后移",
   sourceLabel: "档位来源：",
   sourceTitle: "档位来源：{source} · {module}",
   now: "现在做",
@@ -189,6 +200,17 @@ const words: Record<string, string> = {
   [PRIORITY_WORDS.sourceSystem]: "System default",
   [PRIORITY_WORDS.moduleTitle]: "{title}\nModule: {module}",
   [PRIORITY_WORDS.noModule]: "Not part of any module",
+  [PRIORITY_WORDS.unnamedModule]: "Module name unknown",
+  [PRIORITY_WORDS.dependencyDetail]: "Waiting for dependencies: {refs}",
+  [PRIORITY_WORDS.externalUnknown]: "External result uncertain; verification required",
+  [PRIORITY_WORDS.noReliableState]: "No reliable execution or waiting state yet",
+  [PRIORITY_WORDS.plannedUnknown]: "Planned node without a card: start and stall data unknown",
+  [PRIORITY_WORDS.externalResult]: "External result uncertain",
+  [PRIORITY_WORDS.capacityFull]: "Local capacity is full",
+  [PRIORITY_WORDS.setBand]: "Change to {band}",
+  [PRIORITY_WORDS.sessionAction]: "Record for this session: {action}",
+  [PRIORITY_WORDS.moveUp]: "Move up within band",
+  [PRIORITY_WORDS.moveDown]: "Move down within band",
   [PRIORITY_WORDS.sourceLabel]: "Priority source:",
   [PRIORITY_WORDS.sourceTitle]: "Priority source: {source} · {module}",
   [PRIORITY_WORDS.now]: "Do now",
@@ -322,6 +344,33 @@ export function ownerWordsTr(language: "zh" | "en") {
     for (const [k, v] of Object.entries(params ?? {})) value = value.replaceAll(`{${k}}`, String(v));
     return value;
   };
+}
+
+/** Server system copy is not owner-authored text; unknown Chinese reasons use a localized state/error fallback. */
+export function prioritySystemText(text: string, fallback: string, language: "zh" | "en"): string {
+  const tr = ownerWordsTr(language);
+  if (text === "本机名额满") return tr(PRIORITY_WORDS.capacityFull);
+  if (language === "zh") return text;
+  const dependency = text.match(/^等待依赖[：:](.*)$/);
+  if (dependency) return tr(PRIORITY_WORDS.dependencyDetail, { refs: dependency[1]!.split("、").join(", ") });
+  const translated = tr(text);
+  return /[\u4e00-\u9fff]/.test(translated) ? tr(fallback) : translated;
+}
+
+/** Translate only the recorded system action label; preserve the owner's appended words verbatim. */
+export function priorityHistoryText(text: string, language: "zh" | "en"): string {
+  if (language === "zh") return text;
+  const tr = ownerWordsTr(language), W = PRIORITY_WORDS;
+  const sessionPrefix = W.sessionAction.replace("{action}", "");
+  const session = text.startsWith(sessionPrefix);
+  const value = session ? text.slice(sessionPrefix.length) : text;
+  const actions: [string, string][] = [W.inherit, W.moveUp, W.moveDown].map(label => [label, tr(label)]);
+  for (const band of [W.now, W.next, W.later]) {
+    actions.push([ownerWordsTr("zh")(W.setBand, { band }), tr(W.setBand, { band: tr(band) })]);
+  }
+  const action = actions.find(([label]) => value === label || value.startsWith(`${label}；`));
+  if (!action) return text;
+  return (session ? tr(W.sessionAction, { action: action[1] }) : action[1]) + value.slice(action[0].length);
 }
 
 /** 不该再给 owner 看到的内部词；只给测试用 */

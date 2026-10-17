@@ -65,6 +65,10 @@ test.skipIf(!process.env.PRIORITY_WORDS_SHOTS_DIR)('UXTERM6: project priority pa
   const sides = [...(base ? [{ phase: 'before', repo: resolve(base) }] : []), { phase: 'after', repo: resolve(import.meta.dir, '..') }];
   const shots: { phase: string; view: string; size: string; file: string }[] = [];
   const evidence: Record<string, unknown> = {};
+  const snapshot = { ...prioritySnapshot, rows: priorityRows.map((row, index) => ({ ...row,
+    state: ['dependency', 'uncertain', 'unknown'][index],
+    reason: ['等待依赖：A、B', '外部结果不明，需核实', '未绑卡计划：开工及停滞数据未知'][index],
+  })) };
   mkdirSync(out, { recursive: true });
   const browser = await chromium.launch({ headless: true,
     ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' }) });
@@ -81,7 +85,7 @@ window.__priorityLang = setLang;`);
         '--tsconfig-override', 'web/tsconfig.json'], { cwd: repo, stdout: 'pipe', stderr: 'pipe' });
       if (await build.exited) throw new Error(await new Response(build.stderr).text());
       const server = serveToday(resolve(dir, 'dist'), await tailwindCss(repo), 'local', (path, req) => {
-        if (path === `/ledger/${MAP}/priority`) return Response.json(prioritySnapshot);
+        if (path === `/ledger/${MAP}/priority`) return Response.json(snapshot);
         if (path === `/ledger/${MAP}/priority/history`) return Response.json({ history: [] });
         return ptRoute(path, new URL(req.url).searchParams);
       });
@@ -119,8 +123,12 @@ window.__priorityLang = setLang;`);
             await g.page.screenshot({ path: resolve(out, file), animations: 'disabled' });
             shots.push({ phase, view: 'priority', size, file });
             evidence[`${phase}-${size}`] = { text, errors: g.errors, external: g.external };
+            await g.page.evaluate('window.__priorityLang("en")');
+            await g.page.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+            const enFile = `${phase}-priority-en-${size}.png`;
+            await g.page.screenshot({ path: resolve(out, enFile), animations: 'disabled' });
+            shots.push({ phase, view: 'priority-en', size, file: enFile });
             if (phase === 'after') {
-              await g.page.evaluate('window.__priorityLang("en")');
               await panel.getByRole('heading', { name: 'Current work 3 cards' }).waitFor();
               await panel.getByRole('button', { name: 'Adjust: Export validation', exact: true }).click();
               await panel.getByRole('group', { name: 'Adjustment options' }).waitFor();
