@@ -6,7 +6,7 @@
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
-import { fullRemoteHead, sameRemotePr, validRemoteRepo } from "./remote-review-identity.js";
+import { sameRemoteHead, sameRemotePr, validRemoteRepo } from "./remote-review-identity.js";
 
 export const REMOTE_REVIEW_OP = "remote_review";
 
@@ -19,7 +19,7 @@ export const capUnknown = (r: { ambiguous?: unknown }): boolean => r.ambiguous =
 const isRemote = (e: LedgerEvent): boolean => e.kind === "scheduler" && e.actor === "scheduler" && e.data.op === REMOTE_REVIEW_OP;
 
 const atHead = (e: LedgerEvent, head: string): boolean => typeof e.data.repo === "string" && validRemoteRepo(e.data.repo)
-  && Number.isInteger(e.data.number) && Number(e.data.number) > 0 && fullRemoteHead(e.data.fullHead) && head === e.data.fullHead;
+  && Number.isInteger(e.data.number) && Number(e.data.number) > 0 && sameRemoteHead(head, e.data.fullHead);
 const outranks = (a: LedgerEvent, b: LedgerEvent): boolean => Number(a.data.round) > Number(b.data.round) || (Number(a.data.round) === Number(b.data.round) && a.seq > b.seq);
 
 /**

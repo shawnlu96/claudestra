@@ -13,6 +13,7 @@ import { notifyProjectPm } from "./pm-notify.js";
 import { quoteExternal } from "./quote-text.js";
 import { listInbox, readInbox, REMOTE_INBOX_DIR } from "./remote-review-inbox.js";
 import { lateRemoteMatches, unsentRemoteNotices } from "./remote-review-read.js";
+import { legacyRemoteNoticeTask } from "./remote-review-legacy.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -107,12 +108,24 @@ async function applyLate(db: Database, projects: readonly string[], deps: Remote
   return failed;
 }
 
+async function captureLegacyNotices(db: Database, projects: readonly string[], deps: RemoteReviewStepDeps): Promise<Failed> {
+  const failed: Failed = [];
+  for (const project of projects) {
+    const taskId = legacyRemoteNoticeTask(db, project);
+    if (!taskId) continue;
+    const r = await deps.manager("ledger", "scheduler-remote-review", taskId, "--legacy");
+    if (r.ok !== true && r.held !== true) failed.push({ taskId, error: `旧格式审查清单没记上（下一轮再试）：${String(r.error ?? r.code)}` });
+  }
+  return failed;
+}
+
 export async function remoteReviewStep(db: Database, config: SchedulerConfig, deps: RemoteReviewStepDeps): Promise<Failed> {
   const projects = Object.entries(config.projects).filter(([, p]) => p.handoffPeer).map(([id]) => id);
   if (!projects.length) { failedAt.delete(db); return []; }
   const alive = () => { try { deps.active(); return true; } catch { return false; /* not provably active: send nothing */ } };
   const notify = deps.notify ?? ((project: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", level: "action", stillActive: alive }));
   const dir = deps.dir ?? REMOTE_INBOX_DIR;
-  const booked = await bookInbox(config, deps, dir, notify), late = await applyLate(db, projects, deps);
-  return [...booked, ...late, ...await sendNotices(db, projects, deps, notify)];
+  const booked = await bookInbox(config, deps, dir, notify), legacy = await captureLegacyNotices(db, projects, deps);
+  const late = await applyLate(db, projects, deps);
+  return [...booked, ...legacy, ...late, ...await sendNotices(db, projects, deps, notify)];
 }

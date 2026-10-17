@@ -38,6 +38,12 @@ const REDELIVERY_STAGES = [{ stage: "live" }, { stage: "build" }] as const;
 
 interface Read { counts: VerdictCounts; conclusion: Exclude<RemoteConclusion, "p1_cap"> }
 
+function offsets(lines: string[]) {
+  const redelivery = lines[1]?.startsWith("投递补发：") === true, marked = redelivery && lines[5]?.startsWith(CAP_MARK) === true;
+  const hd = redelivery ? 1 : 0;
+  return { redelivery, marked, hd, at: hd + (marked ? 1 : 0) };
+}
+
 /** Counts that render to exactly this conclusion; block / p0 are one class to the renderer, so p0 stands for both. */
 function readConclusion(text: string, round: number): Read | null {
   const counts = (p0: number, p1: number, p2: number): VerdictCounts => ({ verdict: p0 ? "block" : p1 ? "changes" : "pass", p0, p1, p2, round });
@@ -52,9 +58,7 @@ function readConclusion(text: string, round: number): Read | null {
 export function parseRemoteReview(text: string): RemoteReview | null {
   if (typeof text !== "string" || Buffer.byteLength(text) > PUSH_MAX_BYTES) return null;
   const lines = text.split("\n");
-  const redelivery = lines[1]?.startsWith("投递补发：") === true, marked = redelivery && lines[5]?.startsWith(CAP_MARK) === true;
-  // the redelivery inserts one line after the title, turns 下一步 into 现状 and (a P1) adds the cap line after it
-  const hd = redelivery ? 1 : 0, at = hd + (marked ? 1 : 0);
+  const { redelivery, marked, hd, at } = offsets(lines);
   const title = lines[0]?.match(TITLE), head = lines[1 + hd]?.match(HEAD), masked = lines[7 + at]?.match(MASKED);
   const repo = lines[5 + at]?.startsWith("仓库：") ? lines[5 + at]!.slice("仓库：".length) : "";
   const reply = lines[4 + at];
@@ -72,6 +76,19 @@ export function parseRemoteReview(text: string): RemoteReview | null {
   return { format: redelivery ? "redelivery" : "review", ambiguous: redelivery && !marked && read.conclusion === "p1", repo, fullHead: head[1]!,
     number, round, head12: head[1]!.slice(0, 12), reportId: `PR${number}-r${round}`,
     conclusion: capped ? "p1_cap" : read.conclusion, p1: read.counts.p1, p2: read.counts.p2, masked: Number(masked[1]), report };
+}
+
+/** Synthetic identity only diagnoses an otherwise valid old wire; it is never returned as a review or booked. */
+export function isLegacyRemoteReview(text: string): boolean {
+  if (Buffer.byteLength(text) > PUSH_MAX_BYTES) return false;
+  const lines = text.split("\n"), { hd, at } = offsets(lines);
+  const head = lines[1 + hd]?.match(/^head：([0-9a-f]{12}|[0-9a-f]{40})$/)?.[1];
+  if (!head) return false;
+  const hasRepo = lines[5 + at]?.startsWith("仓库：") === true;
+  if (hasRepo && head.length === 40) return false;
+  lines[1 + hd] = `head：${head.padEnd(40, "0")}`;
+  if (!hasRepo) lines.splice(5 + at, 0, "仓库：legacy/unknown");
+  return parseRemoteReview(lines.join("\n")) !== null;
 }
 
 /** A P1 redelivered in the format before the cap line (defined with the other lookups in remote-review-current.ts). */

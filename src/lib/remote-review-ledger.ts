@@ -20,6 +20,7 @@ import { fallbackToManual } from "./scheduler-fallback.js";
 import { APPLIED_OP, appliedKey, NOTIFIED_OP, notifiedKey, REMOTE_REVIEW_OP, remoteCurrentAt, remoteHeadMatch, remoteReviewKey } from "./remote-review-read.js";
 import { writeTextAtomicSync } from "./state-file.js";
 import { fullRemoteHead, remoteIdentityDigest, sameRemotePr, type RemoteIdentity } from "./remote-review-identity.js";
+import { LEGACY_NOTICE_OP } from "./remote-review-legacy.js";
 
 const LINE_CAP = 4000;
 
@@ -143,7 +144,7 @@ export function markRemoteNotified(db: Database, ctx: WriteCtx, input: { taskId:
     const task = mustTask(db, input.taskId), dedupKey = notifiedKey(input.seq);
     const seen = getEventByDedup(db, dedupKey);
     if (seen) return { event: seen, duplicate: true };
-    remoteSource(db, task, input.seq, [REMOTE_REVIEW_OP, APPLIED_OP]);
+    remoteSource(db, task, input.seq, [REMOTE_REVIEW_OP, APPLIED_OP, LEGACY_NOTICE_OP]);
     const event = insertEvent(db, { ...ctx, dedupKey }, { project: task.project, target: task.id, kind: "scheduler", text: "仓库方审查结论已通知 PM",
       data: { op: NOTIFIED_OP, remoteSeq: input.seq } }, true);
     return { event, duplicate: false };

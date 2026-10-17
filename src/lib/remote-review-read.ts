@@ -4,7 +4,7 @@
  * reaching the ledger writers (remote-review-ledger.ts). tests/remote-review-intake-ledger.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { fullRemoteHead, remoteIdentityKey, sameRemotePr, type RemoteIdentity } from "./remote-review-identity.js";
+import { fullRemoteHead, remoteIdentityKey, sameRemoteHead, sameRemotePr, type RemoteIdentity } from "./remote-review-identity.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
 import type { RemoteReview } from "./remote-review-parse.js";
@@ -31,7 +31,7 @@ export function matchRemoteCard(db: Database, projects: readonly string[], r: Pi
 export function remoteHeadMatch(db: Database, task: LedgerTask, fullHead: unknown): string | null {
   if (!fullRemoteHead(fullHead)) return null;
   const heads = [task.headSHA, task.stage === "merge" ? handoffOf(db, task)?.head : null];
-  return heads.find((h): h is string => h === fullHead) ?? null;
+  return heads.find((h): h is string => typeof h === "string" && sameRemoteHead(h, fullHead)) ?? null;
 }
 
 export const remoteReviewKey = (taskId: string, r: Pick<RemoteReview, "reportId" | "repo" | "number" | "fullHead">): string =>
@@ -39,8 +39,8 @@ export const remoteReviewKey = (taskId: string, r: Pick<RemoteReview, "reportId"
 export const notifiedKey = (seq: number): string => `scheduler:${NOTIFIED_OP}:${seq}`;
 export const appliedKey = (seq: number): string => `scheduler:${APPLIED_OP}:${seq}`;
 
-/** Every remote_review* event of this project, by a range on the dedupKey index (all three ops share the prefix): no table scan. */
-function remoteRows(db: Database, project: string): { seq: number; target: string; data: string }[] {
+/** Every remote_review* event of this project, by their shared prefix on the dedupKey index: no table scan. */
+export function remoteRows(db: Database, project: string): { seq: number; target: string; data: string }[] {
   return db.query(`SELECT seq, target, data FROM events WHERE dedupKey >= ? AND dedupKey < ? AND project = ? AND kind = 'scheduler'
     AND actor = 'scheduler' ORDER BY seq`).all(`scheduler:${REMOTE_REVIEW_OP}`, "scheduler:remote_reviex", project) as { seq: number; target: string; data: string }[];
 }
