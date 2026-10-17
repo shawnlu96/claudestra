@@ -1,4 +1,5 @@
-import { requireLocalSharedLedgerPlanning } from "../lib/shared-ledger-gate.js";
+import { requireSharedLedgerStart } from "../lib/shared-ledger-gate.js";
+import { centerReplicaCli } from "../lib/center-replica-autostart-ledger.js";
 import { liveClaim } from "../lib/ledger-autostart.js";
 /**
  * 自动开卡 / 自动交回（i28-A1，docs/architecture/scheduler-autostart.md）的 ledger 子命令：这里只解析参数，事务与权限在 lib。
@@ -60,7 +61,7 @@ function claim(c: LedgerCli): Result {
 function step(c: LedgerCli): Result {
   const seq = Number(c.p.pos[2]);
   if (!Number.isInteger(seq) || seq <= 0) throw new LedgerError("invalid", "step <claim> <子命令> <目标> …");
-  if (c.p.pos[3] === "task-new") requireLocalSharedLedgerPlanning(liveClaim(c.db, seq).featureId);
+  if (c.p.pos[3] === "task-new") { const l = liveClaim(c.db, seq); requireSharedLedgerStart(l.featureId, l.key, l.taskId); } // 副本只认本 claim 节点 + 卡号的中心认领
   const flags: Record<string, string | undefined> = { ...c.p.flags };
   return autostartStep(c.db, c.ctx(), { claim: seq, sub: c.p.pos[3] ?? "", pos: c.p.pos.slice(4), flags });
 }
@@ -90,6 +91,7 @@ AUTOSTART_SUBS["post-verify-pull"] = (c) => postVerifyPullCli(c.db, c.ctx(), c.p
 AUTOSTART_SUBS["merge-pm"] = (c) => mergePmCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 AUTOSTART_SUBS["review-pm"] = (c) => reviewPmCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 AUTOSTART_SUBS["manual-merge"] = (c) => manualMergeAutoCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
+AUTOSTART_SUBS["center-replica"] = (c) => centerReplicaCli(c.db, { ...c.ctx(), dedupKey: undefined }, c.p.pos.slice(2), c.p.flags);
 
 function autoResumeCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);

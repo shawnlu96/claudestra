@@ -24,6 +24,7 @@ export const RECOVERY_KEYS = [
   "cardProcReap",
   "centerDeployAuto",
   "centerProposalAutoApprove",
+  "centerReplicaAutostart",
   "centerReplicaPull",
   "centerRequestBudget",
   "ciCancelRerun",

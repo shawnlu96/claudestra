@@ -2,6 +2,8 @@ import { priorityNowAttempted, priorityNowStarts } from "./scheduler-priority-no
 import { autostartSnapshot, type AutostartReads } from "./scheduler-autostart-snapshot.js";
 import { notifyAutostartQuotaWait } from "./scheduler-autostart-quota.js";
 import { localAutostartNode, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
+import { centerReplicaObserveTick, centerReplicaPreflight } from "./center-replica-autostart-run.js";
+import { centerStartFailed } from "./shared-ledger-center-start.js";
 /**
  * 自动开卡（i28-A1 §3）调度侧：每轮在 auto tick 之后最多开一张卡，复用 start_node 的 preflightStart / runStart，不改它们。
  * 顺序：先对账断掉留下的 claim（已绑 → done；否则 unknown 并通知 PM 一次，不重开；本进程正在开的跳过）→ 选候选（scheduler-autostart.ts）→
@@ -194,8 +196,9 @@ async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<
   const { cand } = pick;
   if (specMoved(env, cand)) return; // 还没写台账：安静放弃，下一轮按新规格重判
   const pm = featurePm(env.db, cand.f.id) ?? "";
-  const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: pm },
-    { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined });
+  const pre = await centerReplicaPreflight(env, cand, () => preflightStart({ ...env.startEnv(), db: env.db, caller: pm },
+    { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined }), failed);
+  if (!pre) return; // 中心副本：中心拒绝认领，已记 note 或冷却，不写台账 claim
   if (!pre.ok && pre.code === "placement") return; // Destination has no room: leave the arm unclaimed for the next tick.
   const selected = pre.ok && "plan" in pre ? pre.plan.peer : null;
   const r = await env.ledger("ledger", "scheduler-autostart", "claim", cand.f.id, cand.key, "--arm", cand.arm, "--template", templateLabel(cand.head.template),
@@ -218,7 +221,10 @@ async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<
     return fail(env, c, { code: "mismatch", error: `开工计划（${p.taskId} / ${p.agent}）和 claim 对不上`, failedStep: "preflight", rolledBack: [], leftovers: [] }, failed);
   }
   const out = await runStart({ ...env.stepIO(), db: () => env.db, manager: adapter(env, c, p), attempt: env.attempt() }, p);
-  if (!out.ok) return fail(env, c, { code: out.code, error: out.error, failedStep: out.failedStep, rolledBack: out.rolledBack, leftovers: out.leftovers }, failed);
+  if (!out.ok) {
+    await centerStartFailed(c.featureId, c.key); // 中心副本：本机步骤回滚了，中心认领标孤儿（start_node 同样处理）；非副本不读不写
+    return fail(env, c, { code: out.code, error: out.error, failedStep: out.failedStep, rolledBack: out.rolledBack, leftovers: out.leftovers }, failed);
+  }
   if (!(await settle(env, c, "done"))) failed.push({ taskId: c.taskId, error: `开卡成功但结清 claim ${c.seq} 失败：下一轮对账` });
 }
 
@@ -236,6 +242,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
     } };
     for (const wake of pmWakeTicks) failed.push(...await wake(readEnv));
     await priorityNowStarts(readEnv, failed, { openCard, inFlight, quotaBlocked });
+    await centerReplicaObserveTick(env, failed);
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(readEnv, snapshot.reads);
     snapshot.invalidate(); // 选完就丢弃：后续额度等待、claim 和开卡不再持有项目快照。
